@@ -1,0 +1,23 @@
+{
+  "name": "swift",
+  "private": true,
+  "scripts": {
+    "build": "turbo build",
+    "dev": "turbo dev",
+    "lint": "turbo lint",
+    "type-check": "turbo type-check",
+    "clean": "turbo clean",
+    "db:generate": "cd apps/api && npx prisma generate",
+    "db:migrate": "cd apps/api && npx prisma migrate dev",
+    "db:seed": "cd apps/api && npx prisma db seed",
+    "db:studio": "cd apps/api && npx prisma studio"
+  },
+  "devDependencies": {
+    "turbo": "^2.4.0",
+    "typescript": "^5.7.0"
+  },
+  "packageManager": "pnpm@9.15.0",
+  "engines": {
+    "node": ">=20.0.0"
+  }
+}

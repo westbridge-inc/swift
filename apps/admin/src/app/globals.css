@@ -1,0 +1,13 @@
+@import 'tailwindcss';
+
+:root {
+  --swift-orange: #FF6B00;
+  --swift-black: #0A0A0A;
+  --swift-white: #FAFAFA;
+  --swift-charcoal: #1C1C1E;
+  --swift-gray: #8E8E93;
+}
+
+body {
+  font-family: 'Inter', system-ui, -apple-system, sans-serif;
+}

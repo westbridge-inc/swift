@@ -1,0 +1,46 @@
+{
+  "name": "@swift/api",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "tsx watch src/server.ts",
+    "build": "tsc",
+    "start": "node dist/server.js",
+    "type-check": "tsc --noEmit",
+    "lint": "eslint src/",
+    "clean": "rm -rf dist"
+  },
+  "prisma": {
+    "seed": "tsx prisma/seed.ts"
+  },
+  "dependencies": {
+    "@prisma/client": "^6.4.0",
+    "fastify": "^5.2.0",
+    "fastify-plugin": "^5.0.0",
+    "@fastify/cors": "^10.0.0",
+    "@fastify/helmet": "^13.0.0",
+    "@fastify/jwt": "^9.0.0",
+    "@fastify/multipart": "^9.0.0",
+    "@fastify/rate-limit": "^10.2.0",
+    "@fastify/swagger": "^9.4.0",
+    "@fastify/swagger-ui": "^5.2.0",
+    "@fastify/websocket": "^11.0.0",
+    "socket.io": "^4.8.0",
+    "bullmq": "^5.34.0",
+    "ioredis": "^5.4.0",
+    "zod": "^3.24.0",
+    "bcryptjs": "^2.4.3",
+    "nanoid": "^5.0.0",
+    "dayjs": "^1.11.0",
+    "pino": "^9.6.0",
+    "pino-pretty": "^13.0.0",
+    "@swift/types": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "@types/bcryptjs": "^2.4.0",
+    "typescript": "^5.7.0",
+    "tsx": "^4.19.0",
+    "prisma": "^6.4.0"
+  }
+}
