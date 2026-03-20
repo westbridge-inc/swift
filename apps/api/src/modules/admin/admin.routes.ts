@@ -78,12 +78,12 @@ export async function adminRoutes(app: FastifyInstance) {
       // Weekly trend: orders per day for the last 7 days
       app.prisma.$queryRaw<Array<{ date: string; count: bigint; revenue: number }>>`
         SELECT
-          DATE(placed_at) as date,
+          DATE("placedAt") as date,
           COUNT(*)::int as count,
-          COALESCE(SUM(CASE WHEN status IN ('DELIVERED', 'COMPLETED') THEN subtotal_markup ELSE 0 END), 0) as revenue
+          COALESCE(SUM(CASE WHEN status IN ('DELIVERED', 'COMPLETED') THEN "subtotalMarkup" ELSE 0 END), 0) as revenue
         FROM orders
-        WHERE placed_at >= ${weekAgo}
-        GROUP BY DATE(placed_at)
+        WHERE "placedAt" >= ${weekAgo}
+        GROUP BY DATE("placedAt")
         ORDER BY date ASC
       `,
     ]);
@@ -748,15 +748,15 @@ export async function adminRoutes(app: FastifyInstance) {
         Array<{ date: string; markup: number; delivery_fees: number; total: number; order_count: bigint }>
       >`
         SELECT
-          DATE(placed_at) as date,
-          COALESCE(SUM(subtotal_markup), 0) as markup,
-          COALESCE(SUM(delivery_fee), 0) as delivery_fees,
-          COALESCE(SUM(total_amount), 0) as total,
+          DATE("placedAt") as date,
+          COALESCE(SUM("subtotalMarkup"), 0) as markup,
+          COALESCE(SUM("deliveryFee"), 0) as delivery_fees,
+          COALESCE(SUM("totalAmount"), 0) as total,
           COUNT(*)::int as order_count
         FROM orders
-        WHERE placed_at >= ${thirtyDaysAgo}
+        WHERE "placedAt" >= ${thirtyDaysAgo}
           AND status IN ('DELIVERED', 'COMPLETED')
-        GROUP BY DATE(placed_at)
+        GROUP BY DATE("placedAt")
         ORDER BY date ASC
       `,
       // Active subscription revenue
