@@ -17,8 +17,8 @@ declare module '@fastify/jwt' {
 
 export const authPlugin = fp(async (app: FastifyInstance) => {
   await app.register(jwt, {
-    secret: process.env.JWT_SECRET || 'dev-secret-change-me',
-    sign: { expiresIn: '15m' },
+    secret: process.env['JWT_SECRET'] || 'dev-secret-change-me',
+    sign: { expiresIn: '24h' },
   });
 
   app.decorate('authenticate', async (request: FastifyRequest, reply: FastifyReply) => {

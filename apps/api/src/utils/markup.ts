@@ -51,8 +51,8 @@ export function calculateCourierFee(
     rush: 2.0,
   };
 
-  const subtotal = baseFee + distanceKm * perKmRate + sizeSurcharge[packageSize];
-  return Math.ceil(subtotal * speedMultiplier[speed]);
+  const subtotal = baseFee + distanceKm * perKmRate + (sizeSurcharge[packageSize] ?? 0);
+  return Math.ceil(subtotal * (speedMultiplier[speed] ?? 1.0));
 }
 
 /**
