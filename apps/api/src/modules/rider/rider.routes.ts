@@ -470,12 +470,13 @@ export async function riderRoutes(app: FastifyInstance) {
       throw new AppError(400, 'INVALID_STATUS', `Order cannot be accepted in status ${order.status}`);
     }
 
-    // Assign rider + update status via OrderService (handles notifications + socket).
-    const [updatedOrder] = await Promise.all([
-      app.prisma.order.update({
-        where: { id },
-        data: { riderId: rider.id },
-      }),
+    // Assign rider first, then update status (sequential to avoid race).
+    const updatedOrder = await app.prisma.order.update({
+      where: { id },
+      data: { riderId: rider.id },
+    });
+
+    await Promise.all([
       orderService.updateStatus(id, 'RIDER_ASSIGNED', request.user.userId, 'Rider accepted the order'),
       app.prisma.rider.update({
         where: { id: rider.id },
