@@ -7,6 +7,10 @@ settings:
 importers:
 
   .:
+    dependencies:
+      meilisearch:
+        specifier: ^0.56.0
+        version: 0.56.0
     devDependencies:
       turbo:
         specifier: ^2.4.0
@@ -156,6 +160,9 @@ importers:
       ioredis:
         specifier: ^5.4.0
         version: 5.10.1
+      meilisearch:
+        specifier: ^0.56.0
+        version: 0.56.0
       nanoid:
         specifier: ^5.0.0
         version: 5.1.7
@@ -3377,6 +3384,9 @@ packages:
   math-intrinsics@1.1.0:
     resolution: {integrity: sha512-/IXtbwEk5HTPyEwyKX6hGkYXxM9nbj64B+ilVJnC/R6B0pH5G4V3b0pVbL7DBj4tkhBAppbQUlf6F6Xl9LHu1g==}
     engines: {node: '>= 0.4'}
+
+  meilisearch@0.56.0:
+    resolution: {integrity: sha512-kBXba8DcSrLWHYqopCm2JL90oBy97VdIfHkP1ii7/eHufeEEEk9Zu5Vv/IFQpNzmhEpWszVFVlGvZoI6QJeGzA==}
 
   memoize-one@5.2.1:
     resolution: {integrity: sha512-zYiwtZUcYyXKo/np96AGZAckk+FWWsUdJ3cHGGmld7+AhvcWmQyGCYUh1hc4Q/pkOhb65dQR/pqCyK0cOaHz4Q==}
@@ -7839,6 +7849,8 @@ snapshots:
   marky@1.3.0: {}
 
   math-intrinsics@1.1.0: {}
+
+  meilisearch@0.56.0: {}
 
   memoize-one@5.2.1: {}
 

@@ -1,99 +1,744 @@
 import type { FastifyInstance } from 'fastify';
+import { OrderService } from '../order/order.service';
+import { NotificationService } from '../notification/notification.service';
+import { haversineDistance, estimateDeliveryMinutes } from '../../utils/distance';
+import { parsePagination, paginatedResponse } from '../../utils/pagination';
+import { AppError, NotFoundError } from '../../utils/errors';
 
 export async function driverRoutes(app: FastifyInstance) {
+  const orderService = new OrderService(app.prisma, app.io);
+  const notifications = new NotificationService(app.prisma, app.io);
+
+  // Helper: resolve driver record from JWT userId
+  async function getDriver(userId: string) {
+    const driver = await app.prisma.driver.findUnique({
+      where: { userId },
+      include: { user: true, subscription: true },
+    });
+    if (!driver) throw new NotFoundError('Driver');
+    return driver;
+  }
+
+  // Helper: verify the driver owns this ride
+  async function getDriverRide(driverId: string, orderId: string) {
+    const order = await app.prisma.order.findFirst({
+      where: { id: orderId, driverId, orderType: 'TAXI' },
+      include: { customer: { select: { id: true, firstName: true, lastName: true, phone: true, avatar: true } } },
+    });
+    if (!order) throw new NotFoundError('Ride', orderId);
+    return order;
+  }
+
+  // ─── Profile ───────────────────────────────────────────────────────────
+
   app.get('/profile', { preHandler: [app.authenticate] }, async (request) => {
     const driver = await app.prisma.driver.findUnique({
       where: { userId: request.user.userId },
-      include: { user: true, subscription: true },
+      include: {
+        user: { select: { id: true, firstName: true, lastName: true, phone: true, email: true, avatar: true } },
+        subscription: true,
+      },
+    });
+    if (!driver) throw new NotFoundError('Driver');
+    return { success: true, data: driver };
+  });
+
+  app.put('/profile', { preHandler: [app.authenticate] }, async (request) => {
+    const body = request.body as {
+      vehicleMake?: string;
+      vehicleModel?: string;
+      vehicleYear?: number;
+      vehicleColor?: string;
+      licensePlate?: string;
+      vehicleCapacity?: number;
+      profilePhotoUrl?: string;
+      nationalIdUrl?: string;
+      driverLicenseUrl?: string;
+      vehicleInsuranceUrl?: string;
+      vehicleInspectionUrl?: string;
+    };
+
+    const driver = await app.prisma.driver.update({
+      where: { userId: request.user.userId },
+      data: {
+        ...(body.vehicleMake !== undefined && { vehicleMake: body.vehicleMake }),
+        ...(body.vehicleModel !== undefined && { vehicleModel: body.vehicleModel }),
+        ...(body.vehicleYear !== undefined && { vehicleYear: body.vehicleYear }),
+        ...(body.vehicleColor !== undefined && { vehicleColor: body.vehicleColor }),
+        ...(body.licensePlate !== undefined && { licensePlate: body.licensePlate }),
+        ...(body.vehicleCapacity !== undefined && { vehicleCapacity: body.vehicleCapacity }),
+        ...(body.profilePhotoUrl !== undefined && { profilePhotoUrl: body.profilePhotoUrl }),
+        ...(body.nationalIdUrl !== undefined && { nationalIdUrl: body.nationalIdUrl }),
+        ...(body.driverLicenseUrl !== undefined && { driverLicenseUrl: body.driverLicenseUrl }),
+        ...(body.vehicleInsuranceUrl !== undefined && { vehicleInsuranceUrl: body.vehicleInsuranceUrl }),
+        ...(body.vehicleInspectionUrl !== undefined && { vehicleInspectionUrl: body.vehicleInspectionUrl }),
+      },
+      include: { user: { select: { id: true, firstName: true, lastName: true, phone: true, email: true, avatar: true } } },
     });
     return { success: true, data: driver };
   });
 
+  // ─── Online / Offline ──────────────────────────────────────────────────
+
   app.post('/go-online', { preHandler: [app.authenticate] }, async (request) => {
-    const driver = await app.prisma.driver.update({
-      where: { userId: request.user.userId },
-      data: { isOnline: true },
+    const driver = await getDriver(request.user.userId);
+
+    if (!driver.documentsVerified) {
+      throw new AppError(400, 'DOCUMENTS_NOT_VERIFIED', 'Your documents must be verified before going online');
+    }
+
+    if (!driver.subscription || driver.subscription.status !== 'ACTIVE') {
+      throw new AppError(400, 'SUBSCRIPTION_REQUIRED', 'An active subscription is required to go online');
+    }
+
+    const updated = await app.prisma.driver.update({
+      where: { id: driver.id },
+      data: { isOnline: true, isAvailable: true },
     });
-    return { success: true, data: driver };
+
+    // Cache online status in Redis for fast lookups
+    await app.redis.geoadd(
+      'drivers:online',
+      driver.currentLng || 0,
+      driver.currentLat || 0,
+      driver.id,
+    );
+
+    return { success: true, data: updated };
   });
 
   app.post('/go-offline', { preHandler: [app.authenticate] }, async (request) => {
-    const driver = await app.prisma.driver.update({
-      where: { userId: request.user.userId },
-      data: { isOnline: false },
+    const driver = await getDriver(request.user.userId);
+
+    if (driver.currentRideId) {
+      throw new AppError(400, 'ACTIVE_RIDE', 'You cannot go offline while you have an active ride');
+    }
+
+    const updated = await app.prisma.driver.update({
+      where: { id: driver.id },
+      data: { isOnline: false, isAvailable: false },
     });
-    return { success: true, data: driver };
+
+    await app.redis.zrem('drivers:online', driver.id);
+
+    return { success: true, data: updated };
   });
 
+  // ─── Location ──────────────────────────────────────────────────────────
+
   app.put('/location', { preHandler: [app.authenticate] }, async (request) => {
-    const { latitude, longitude } = request.body as { latitude: number; longitude: number };
+    const { latitude, longitude, heading } = request.body as {
+      latitude: number;
+      longitude: number;
+      heading?: number;
+    };
+
+    const driver = await app.prisma.driver.findUnique({ where: { userId: request.user.userId } });
+    if (!driver) throw new NotFoundError('Driver');
+
     await app.prisma.driver.update({
-      where: { userId: request.user.userId },
-      data: { currentLat: latitude, currentLng: longitude, lastLocationUpdate: new Date() },
+      where: { id: driver.id },
+      data: {
+        currentLat: latitude,
+        currentLng: longitude,
+        lastLocationUpdate: new Date(),
+      },
     });
+
+    // Update position in Redis geo set
+    if (driver.isOnline) {
+      await app.redis.geoadd('drivers:online', longitude, latitude, driver.id);
+    }
+
+    // Broadcast location to anyone tracking this ride
+    if (driver.currentRideId) {
+      app.io.to(`order:${driver.currentRideId}`).emit('driver:location', {
+        driverId: driver.id,
+        orderId: driver.currentRideId,
+        latitude,
+        longitude,
+        heading: heading || null,
+        timestamp: new Date().toISOString(),
+      });
+    }
+
     return { success: true };
   });
 
+  // ─── Available Rides ───────────────────────────────────────────────────
+
   app.get('/rides/available', { preHandler: [app.authenticate] }, async (request) => {
+    const driver = await getDriver(request.user.userId);
+
+    if (!driver.isOnline || !driver.isAvailable) {
+      return { success: true, data: [] };
+    }
+
     const orders = await app.prisma.order.findMany({
-      where: { status: 'PENDING', orderType: 'TAXI', riderId: null },
+      where: {
+        orderType: 'TAXI',
+        status: 'PENDING',
+        driverId: null,
+      },
+      include: {
+        customer: { select: { id: true, firstName: true, avatar: true } },
+      },
       orderBy: { createdAt: 'asc' },
-      take: 10,
+      take: 20,
     });
-    return { success: true, data: orders };
+
+    // Enrich with distance from driver to pickup
+    const enriched = orders.map((order) => {
+      const distanceToPickup =
+        driver.currentLat && driver.currentLng && order.pickupLat && order.pickupLng
+          ? haversineDistance(driver.currentLat, driver.currentLng, order.pickupLat, order.pickupLng)
+          : null;
+      const etaMinutes = distanceToPickup !== null ? estimateDeliveryMinutes(distanceToPickup) : null;
+
+      return {
+        id: order.id,
+        orderNumber: order.orderNumber,
+        pickupAddress: order.taxiPickupAddress || order.pickupAddress,
+        dropoffAddress: order.taxiDropoffAddress || order.deliveryAddress,
+        pickupLat: order.pickupLat,
+        pickupLng: order.pickupLng,
+        dropoffLat: order.deliveryLat,
+        dropoffLng: order.deliveryLng,
+        passengerCount: order.taxiPassengerCount || 1,
+        estimatedDistance: order.taxiDistance,
+        estimatedDuration: order.taxiDuration,
+        fareTotal: order.taxiFareTotal,
+        fareSurge: order.taxiFareSurge,
+        distanceToPickup: distanceToPickup !== null ? Math.round(distanceToPickup * 10) / 10 : null,
+        etaToPickup: etaMinutes,
+        customer: order.customer,
+        createdAt: order.createdAt,
+      };
+    });
+
+    // Sort by distance to pickup (nearest first)
+    enriched.sort((a, b) => (a.distanceToPickup ?? 999) - (b.distanceToPickup ?? 999));
+
+    return { success: true, data: enriched };
   });
 
+  // ─── Active Ride ───────────────────────────────────────────────────────
+
+  app.get('/rides/active', { preHandler: [app.authenticate] }, async (request) => {
+    const driver = await getDriver(request.user.userId);
+
+    if (!driver.currentRideId) {
+      return { success: true, data: null };
+    }
+
+    const order = await app.prisma.order.findUnique({
+      where: { id: driver.currentRideId },
+      include: {
+        customer: { select: { id: true, firstName: true, lastName: true, phone: true, avatar: true } },
+        statusHistory: { orderBy: { createdAt: 'desc' }, take: 10 },
+      },
+    });
+
+    return { success: true, data: order };
+  });
+
+  // ─── Ride Lifecycle ────────────────────────────────────────────────────
+
+  // 1. Accept ride
   app.post('/rides/:id/accept', { preHandler: [app.authenticate] }, async (request) => {
     const { id } = request.params as { id: string };
-    const driver = await app.prisma.driver.findUnique({ where: { userId: request.user.userId } });
-    if (!driver) return { success: false, error: { code: 'NOT_FOUND', message: 'Driver not found' } };
+    const driver = await getDriver(request.user.userId);
 
-    const order = await app.prisma.order.update({
-      where: { id },
-      data: { riderId: driver.id, status: 'DRIVER_ASSIGNED' },
+    if (!driver.isOnline) {
+      throw new AppError(400, 'OFFLINE', 'You must be online to accept rides');
+    }
+    if (!driver.isAvailable || driver.currentRideId) {
+      throw new AppError(400, 'UNAVAILABLE', 'You already have an active ride');
+    }
+
+    // Verify the order is still available
+    const order = await app.prisma.order.findUnique({ where: { id } });
+    if (!order) throw new NotFoundError('Ride', id);
+    if (order.orderType !== 'TAXI') throw new AppError(400, 'INVALID_TYPE', 'This is not a taxi ride');
+    if (order.status !== 'PENDING') throw new AppError(400, 'ALREADY_TAKEN', 'This ride is no longer available');
+    if (order.driverId) throw new AppError(400, 'ALREADY_TAKEN', 'This ride has already been accepted by another driver');
+
+    // Assign driver
+    const [updatedOrder] = await Promise.all([
+      app.prisma.order.update({
+        where: { id },
+        data: { driverId: driver.id, status: 'DRIVER_ASSIGNED', acceptedAt: new Date() },
+        include: { customer: { select: { id: true, firstName: true, phone: true, avatar: true } } },
+      }),
+      app.prisma.driver.update({
+        where: { id: driver.id },
+        data: { isAvailable: false, currentRideId: id },
+      }),
+      app.prisma.orderStatusLog.create({
+        data: { orderId: id, status: 'DRIVER_ASSIGNED', changedBy: request.user.userId, note: 'Driver accepted ride' },
+      }),
+    ]);
+
+    // Notify customer
+    app.io.to(`order:${id}`).emit('order:status_changed', {
+      orderId: id,
+      status: 'DRIVER_ASSIGNED',
+      driver: {
+        id: driver.id,
+        firstName: driver.user.firstName,
+        lastName: driver.user.lastName,
+        phone: driver.user.phone,
+        avatar: driver.user.avatar,
+        vehicleMake: driver.vehicleMake,
+        vehicleModel: driver.vehicleModel,
+        vehicleColor: driver.vehicleColor,
+        licensePlate: driver.licensePlate,
+        rating: driver.averageRating,
+        currentLat: driver.currentLat,
+        currentLng: driver.currentLng,
+      },
     });
-    await app.prisma.driver.update({
-      where: { id: driver.id },
-      data: { isAvailable: false, currentRideId: id },
+
+    await notifications.send({
+      userId: order.customerId,
+      type: 'ORDER_UPDATE',
+      title: 'Driver Found!',
+      body: `${driver.user.firstName} is heading to pick you up in a ${driver.vehicleColor} ${driver.vehicleMake} ${driver.vehicleModel} (${driver.licensePlate}).`,
+      data: { orderId: id, status: 'DRIVER_ASSIGNED' },
     });
-    app.io.to(`order:${id}`).emit('order:status_changed', { orderId: id, status: 'DRIVER_ASSIGNED' });
-    return { success: true, data: order };
+
+    // Update acceptance rate
+    const totalOffered = await app.prisma.order.count({
+      where: { orderType: 'TAXI', driverId: driver.id },
+    });
+    if (totalOffered > 0) {
+      await app.prisma.driver.update({
+        where: { id: driver.id },
+        data: { acceptanceRate: Math.min(100, ((totalOffered) / (totalOffered + 1)) * 100 + (1 / (totalOffered + 1)) * 100) },
+      });
+    }
+
+    return { success: true, data: updatedOrder };
   });
 
+  // 2. En route to pickup
+  app.put('/rides/:id/en-route', { preHandler: [app.authenticate] }, async (request) => {
+    const { id } = request.params as { id: string };
+    const driver = await getDriver(request.user.userId);
+    const order = await getDriverRide(driver.id, id);
+
+    if (order.status !== 'DRIVER_ASSIGNED') {
+      throw new AppError(400, 'INVALID_STATUS', `Cannot mark en-route from status ${order.status}`);
+    }
+
+    const [updatedOrder] = await Promise.all([
+      app.prisma.order.update({
+        where: { id },
+        data: { status: 'DRIVER_EN_ROUTE' },
+      }),
+      app.prisma.orderStatusLog.create({
+        data: { orderId: id, status: 'DRIVER_EN_ROUTE', changedBy: request.user.userId },
+      }),
+    ]);
+
+    // Compute ETA to pickup
+    let etaMinutes: number | null = null;
+    if (driver.currentLat && driver.currentLng && order.pickupLat && order.pickupLng) {
+      const dist = haversineDistance(driver.currentLat, driver.currentLng, order.pickupLat, order.pickupLng);
+      etaMinutes = estimateDeliveryMinutes(dist);
+    }
+
+    app.io.to(`order:${id}`).emit('order:status_changed', {
+      orderId: id,
+      status: 'DRIVER_EN_ROUTE',
+      eta: etaMinutes,
+    });
+
+    await notifications.send({
+      userId: order.customerId,
+      type: 'ORDER_UPDATE',
+      title: 'Driver En Route',
+      body: etaMinutes
+        ? `Your driver is on the way. Arriving in ~${etaMinutes} minutes.`
+        : 'Your driver is on the way to pick you up.',
+      data: { orderId: id, status: 'DRIVER_EN_ROUTE', eta: etaMinutes },
+    });
+
+    return { success: true, data: updatedOrder };
+  });
+
+  // 3. Arrived at pickup
+  app.put('/rides/:id/arrived', { preHandler: [app.authenticate] }, async (request) => {
+    const { id } = request.params as { id: string };
+    const driver = await getDriver(request.user.userId);
+    const order = await getDriverRide(driver.id, id);
+
+    if (order.status !== 'DRIVER_EN_ROUTE') {
+      throw new AppError(400, 'INVALID_STATUS', `Cannot mark arrived from status ${order.status}`);
+    }
+
+    const [updatedOrder] = await Promise.all([
+      app.prisma.order.update({
+        where: { id },
+        data: { status: 'DRIVER_ARRIVED' },
+      }),
+      app.prisma.orderStatusLog.create({
+        data: { orderId: id, status: 'DRIVER_ARRIVED', changedBy: request.user.userId },
+      }),
+    ]);
+
+    app.io.to(`order:${id}`).emit('order:status_changed', {
+      orderId: id,
+      status: 'DRIVER_ARRIVED',
+    });
+
+    await notifications.send({
+      userId: order.customerId,
+      type: 'ORDER_UPDATE',
+      title: 'Driver Arrived',
+      body: `Your driver has arrived. Please share your ride PIN to begin the trip.`,
+      data: { orderId: id, status: 'DRIVER_ARRIVED' },
+    });
+
+    return { success: true, data: updatedOrder };
+  });
+
+  // 4. Verify ride PIN
+  app.put('/rides/:id/verify-pin', { preHandler: [app.authenticate] }, async (request) => {
+    const { id } = request.params as { id: string };
+    const { pin } = request.body as { pin: string };
+    const driver = await getDriver(request.user.userId);
+    const order = await getDriverRide(driver.id, id);
+
+    if (order.status !== 'DRIVER_ARRIVED') {
+      throw new AppError(400, 'INVALID_STATUS', 'Driver must be at pickup location to verify PIN');
+    }
+
+    if (order.ridePinVerified) {
+      throw new AppError(400, 'ALREADY_VERIFIED', 'Ride PIN has already been verified');
+    }
+
+    const MAX_PIN_ATTEMPTS = 5;
+    if (order.ridePinAttempts >= MAX_PIN_ATTEMPTS) {
+      throw new AppError(400, 'MAX_ATTEMPTS', 'Maximum PIN verification attempts exceeded. Please contact support.');
+    }
+
+    // Increment attempts
+    await app.prisma.order.update({
+      where: { id },
+      data: { ridePinAttempts: { increment: 1 } },
+    });
+
+    if (order.ridePin !== pin) {
+      const remaining = MAX_PIN_ATTEMPTS - order.ridePinAttempts - 1;
+      throw new AppError(400, 'INVALID_PIN', `Incorrect PIN. ${remaining} attempt(s) remaining.`);
+    }
+
+    // PIN matches
+    const updatedOrder = await app.prisma.order.update({
+      where: { id },
+      data: { ridePinVerified: true, ridePinVerifiedAt: new Date() },
+    });
+
+    app.io.to(`order:${id}`).emit('ride:pin_verified', { orderId: id });
+
+    return { success: true, data: updatedOrder, message: 'PIN verified successfully. You may now start the ride.' };
+  });
+
+  // 5. Start ride
+  app.put('/rides/:id/start', { preHandler: [app.authenticate] }, async (request) => {
+    const { id } = request.params as { id: string };
+    const driver = await getDriver(request.user.userId);
+    const order = await getDriverRide(driver.id, id);
+
+    if (order.status !== 'DRIVER_ARRIVED') {
+      throw new AppError(400, 'INVALID_STATUS', `Cannot start ride from status ${order.status}`);
+    }
+
+    if (!order.ridePinVerified) {
+      throw new AppError(400, 'PIN_REQUIRED', 'Ride PIN must be verified before starting the ride');
+    }
+
+    const [updatedOrder] = await Promise.all([
+      app.prisma.order.update({
+        where: { id },
+        data: { status: 'RIDE_IN_PROGRESS', pickedUpAt: new Date() },
+      }),
+      app.prisma.orderStatusLog.create({
+        data: { orderId: id, status: 'RIDE_IN_PROGRESS', changedBy: request.user.userId, note: 'Ride started' },
+      }),
+    ]);
+
+    app.io.to(`order:${id}`).emit('order:status_changed', {
+      orderId: id,
+      status: 'RIDE_IN_PROGRESS',
+      estimatedDuration: order.taxiDuration,
+    });
+
+    await notifications.send({
+      userId: order.customerId,
+      type: 'ORDER_UPDATE',
+      title: 'Ride Started',
+      body: order.taxiDuration
+        ? `Your ride has started. Estimated arrival in ~${order.taxiDuration} minutes.`
+        : 'Your ride has started. Enjoy the trip!',
+      data: { orderId: id, status: 'RIDE_IN_PROGRESS' },
+    });
+
+    return { success: true, data: updatedOrder };
+  });
+
+  // 6. Complete ride
   app.put('/rides/:id/complete', { preHandler: [app.authenticate] }, async (request) => {
     const { id } = request.params as { id: string };
-    const driver = await app.prisma.driver.findUnique({ where: { userId: request.user.userId } });
-    if (!driver) return { success: false, error: { code: 'NOT_FOUND', message: 'Driver not found' } };
+    const driver = await getDriver(request.user.userId);
+    const order = await getDriverRide(driver.id, id);
 
-    const order = await app.prisma.order.update({
-      where: { id },
-      data: { status: 'DELIVERED', deliveredAt: new Date() },
+    if (order.status !== 'RIDE_IN_PROGRESS') {
+      throw new AppError(400, 'INVALID_STATUS', `Cannot complete ride from status ${order.status}`);
+    }
+
+    // Calculate actual duration
+    const actualDuration = order.pickedUpAt
+      ? Math.round((Date.now() - order.pickedUpAt.getTime()) / 60000)
+      : order.taxiDuration;
+
+    const [updatedOrder] = await Promise.all([
+      app.prisma.order.update({
+        where: { id },
+        data: {
+          status: 'DELIVERED',
+          deliveredAt: new Date(),
+          actualDeliveryTime: actualDuration,
+        },
+        include: { customer: { select: { id: true, firstName: true } } },
+      }),
+      app.prisma.driver.update({
+        where: { id: driver.id },
+        data: {
+          isAvailable: true,
+          currentRideId: null,
+          totalRides: { increment: 1 },
+        },
+      }),
+      app.prisma.orderStatusLog.create({
+        data: { orderId: id, status: 'DELIVERED', changedBy: request.user.userId, note: 'Ride completed' },
+      }),
+    ]);
+
+    // Create earnings
+    await orderService.createEarnings(id);
+
+    app.io.to(`order:${id}`).emit('order:status_changed', {
+      orderId: id,
+      status: 'DELIVERED',
+      fare: {
+        base: order.taxiFareBase,
+        perKm: order.taxiFarePerKm,
+        perMin: order.taxiFarePerMin,
+        surge: order.taxiFareSurge,
+        total: order.taxiFareTotal,
+      },
+      actualDuration,
     });
-    await app.prisma.driver.update({
-      where: { id: driver.id },
-      data: { isAvailable: true, currentRideId: null, totalRides: { increment: 1 } },
+
+    await notifications.send({
+      userId: order.customerId,
+      type: 'ORDER_UPDATE',
+      title: 'Ride Complete',
+      body: `You have arrived at your destination. Total fare: $${Number(order.taxiFareTotal || order.totalAmount).toLocaleString()} GYD.`,
+      data: { orderId: id, status: 'DELIVERED' },
     });
-    app.io.to(`order:${id}`).emit('order:status_changed', { orderId: id, status: 'DELIVERED' });
-    return { success: true, data: order };
+
+    return { success: true, data: updatedOrder };
   });
 
-  // Earnings
+  // ─── Ride History ──────────────────────────────────────────────────────
+
+  app.get('/rides', { preHandler: [app.authenticate] }, async (request) => {
+    const driver = await app.prisma.driver.findUnique({ where: { userId: request.user.userId } });
+    if (!driver) throw new NotFoundError('Driver');
+
+    const { page, limit, skip } = parsePagination(request.query as Record<string, string>);
+    const { status } = request.query as { status?: string };
+
+    const where = {
+      driverId: driver.id,
+      orderType: 'TAXI' as const,
+      ...(status && { status: status as any }),
+    };
+
+    const [rides, total] = await Promise.all([
+      app.prisma.order.findMany({
+        where,
+        select: {
+          id: true,
+          orderNumber: true,
+          status: true,
+          taxiPickupAddress: true,
+          taxiDropoffAddress: true,
+          taxiDistance: true,
+          taxiDuration: true,
+          taxiFareTotal: true,
+          taxiFareSurge: true,
+          tipAmount: true,
+          totalAmount: true,
+          ridePin: false,
+          customer: { select: { id: true, firstName: true, avatar: true } },
+          placedAt: true,
+          deliveredAt: true,
+          createdAt: true,
+        },
+        skip,
+        take: limit,
+        orderBy: { createdAt: 'desc' },
+      }),
+      app.prisma.order.count({ where }),
+    ]);
+
+    return { success: true, ...paginatedResponse(rides, total, { page, limit, skip }) };
+  });
+
+  // ─── Earnings ──────────────────────────────────────────────────────────
+
   app.get('/earnings', { preHandler: [app.authenticate] }, async (request) => {
     const driver = await app.prisma.driver.findUnique({ where: { userId: request.user.userId } });
-    if (!driver) return { success: true, data: { earnings: [], total: 0 } };
-    const earnings = await app.prisma.earning.findMany({
-      where: { driverId: driver.id },
-      orderBy: { createdAt: 'desc' },
-      take: 50,
-    });
-    return { success: true, data: earnings };
+    if (!driver) throw new NotFoundError('Driver');
+
+    const { page, limit, skip } = parsePagination(request.query as Record<string, string>);
+    const { type, status } = request.query as { type?: string; status?: string };
+
+    const where = {
+      driverId: driver.id,
+      ...(type && { type: type as any }),
+      ...(status && { status: status as any }),
+    };
+
+    const [earnings, total, aggregate] = await Promise.all([
+      app.prisma.earning.findMany({
+        where,
+        orderBy: { createdAt: 'desc' },
+        skip,
+        take: limit,
+      }),
+      app.prisma.earning.count({ where }),
+      app.prisma.earning.aggregate({
+        where: { driverId: driver.id },
+        _sum: { amount: true },
+      }),
+    ]);
+
+    return {
+      success: true,
+      ...paginatedResponse(earnings, total, { page, limit, skip }),
+      totalEarnings: aggregate._sum.amount || 0,
+    };
   });
+
+  app.get('/earnings/today', { preHandler: [app.authenticate] }, async (request) => {
+    const driver = await app.prisma.driver.findUnique({ where: { userId: request.user.userId } });
+    if (!driver) throw new NotFoundError('Driver');
+
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+
+    const [earnings, aggregate, ridesCount] = await Promise.all([
+      app.prisma.earning.findMany({
+        where: { driverId: driver.id, createdAt: { gte: today } },
+        orderBy: { createdAt: 'desc' },
+      }),
+      app.prisma.earning.aggregate({
+        where: { driverId: driver.id, createdAt: { gte: today } },
+        _sum: { amount: true },
+      }),
+      app.prisma.order.count({
+        where: { driverId: driver.id, orderType: 'TAXI', status: 'DELIVERED', deliveredAt: { gte: today } },
+      }),
+    ]);
+
+    return {
+      success: true,
+      data: {
+        earnings,
+        total: aggregate._sum.amount || 0,
+        ridesCompleted: ridesCount,
+      },
+    };
+  });
+
+  app.get('/earnings/summary', { preHandler: [app.authenticate] }, async (request) => {
+    const driver = await app.prisma.driver.findUnique({ where: { userId: request.user.userId } });
+    if (!driver) throw new NotFoundError('Driver');
+
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+
+    const weekStart = new Date(today);
+    weekStart.setDate(weekStart.getDate() - weekStart.getDay());
+
+    const monthStart = new Date(today.getFullYear(), today.getMonth(), 1);
+
+    const [todayEarnings, weekEarnings, monthEarnings, allTimeEarnings, pendingPayout, todayRides, totalRides] =
+      await Promise.all([
+        app.prisma.earning.aggregate({
+          where: { driverId: driver.id, createdAt: { gte: today } },
+          _sum: { amount: true },
+        }),
+        app.prisma.earning.aggregate({
+          where: { driverId: driver.id, createdAt: { gte: weekStart } },
+          _sum: { amount: true },
+        }),
+        app.prisma.earning.aggregate({
+          where: { driverId: driver.id, createdAt: { gte: monthStart } },
+          _sum: { amount: true },
+        }),
+        app.prisma.earning.aggregate({
+          where: { driverId: driver.id },
+          _sum: { amount: true },
+        }),
+        app.prisma.earning.aggregate({
+          where: { driverId: driver.id, status: 'AVAILABLE' },
+          _sum: { amount: true },
+        }),
+        app.prisma.order.count({
+          where: { driverId: driver.id, orderType: 'TAXI', status: 'DELIVERED', deliveredAt: { gte: today } },
+        }),
+        app.prisma.order.count({
+          where: { driverId: driver.id, orderType: 'TAXI', status: 'DELIVERED' },
+        }),
+      ]);
+
+    return {
+      success: true,
+      data: {
+        today: todayEarnings._sum.amount || 0,
+        thisWeek: weekEarnings._sum.amount || 0,
+        thisMonth: monthEarnings._sum.amount || 0,
+        allTime: allTimeEarnings._sum.amount || 0,
+        pendingPayout: pendingPayout._sum.amount || 0,
+        todayRides,
+        totalRides,
+        averageRating: driver.averageRating,
+        acceptanceRate: driver.acceptanceRate,
+        cancellationRate: driver.cancellationRate,
+      },
+    };
+  });
+
+  // ─── Subscription ──────────────────────────────────────────────────────
 
   app.get('/subscription', { preHandler: [app.authenticate] }, async (request) => {
     const driver = await app.prisma.driver.findUnique({
       where: { userId: request.user.userId },
-      include: { subscription: true },
+      include: {
+        subscription: {
+          include: {
+            payments: { take: 10, orderBy: { createdAt: 'desc' } },
+          },
+        },
+      },
     });
-    return { success: true, data: driver?.subscription || null };
+    if (!driver) throw new NotFoundError('Driver');
+    return { success: true, data: driver.subscription || null };
   });
 }
