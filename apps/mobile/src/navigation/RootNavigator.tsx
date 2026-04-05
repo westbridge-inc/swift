@@ -37,7 +37,7 @@ export function RootNavigator() {
         ) : (
           <Stack.Screen
             name="Main"
-            component={getRoleStack(user?.role as UserRole)}
+            component={getRoleStack(user?.activeRole as UserRole)}
           />
         )}
       </Stack.Navigator>
