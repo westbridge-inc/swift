@@ -46,7 +46,7 @@ jobs:
         if: github.ref == 'refs/heads/main'
 
       - name: Upload APK
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         if: github.ref == 'refs/heads/main'
         with:
           name: swift-android-apk
