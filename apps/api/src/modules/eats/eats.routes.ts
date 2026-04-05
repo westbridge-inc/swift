@@ -18,7 +18,7 @@ import type { FastifyInstance } from 'fastify';
  *
  * Revenue model: 5% invisible markup on all item prices
  */
-export default async function eatsRoutes(app: FastifyInstance) {
+export default async function eatsRoutes(_app: FastifyInstance) {
   // TODO: Refactor from existing customer.routes.ts
   // The endpoints already exist — this module provides cleaner separation
 }

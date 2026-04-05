@@ -1,6 +1,7 @@
 import { io, Socket } from 'socket.io-client';
 import { useAuthStore } from '../stores/authStore';
 
+// eslint-disable-next-line no-undef
 const SOCKET_URL = __DEV__ ? 'http://localhost:3000' : 'https://api.swift.gy';
 
 let socket: Socket | null = null;

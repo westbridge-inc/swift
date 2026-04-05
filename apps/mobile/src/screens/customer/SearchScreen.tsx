@@ -1,6 +1,6 @@
 import React from 'react';
 import { View, Text, StyleSheet, SafeAreaView, TextInput } from 'react-native';
-import { SWIFT_BLACK, SWIFT_ORANGE } from '../../theme/colors';
+import { SWIFT_BLACK } from '../../theme/colors';
 
 export function SearchScreen() {
   return (

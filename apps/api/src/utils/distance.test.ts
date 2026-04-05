@@ -14,7 +14,6 @@ import {
 // Georgetown (city center) ~ 6.8013, -58.1551
 const GEORGETOWN = { lat: 6.8013, lng: -58.1551 };
 // Oasis Cafe (seed data) ~ 6.8013, -58.1551 — essentially same location
-const OASIS_CAFE = { lat: 6.8013, lng: -58.1551 };
 // Customer home (seed data) ~ 6.8045, -58.1553
 const CUSTOMER_HOME = { lat: 6.8045, lng: -58.1553 };
 // New Amsterdam ~ 6.2434, -57.5180

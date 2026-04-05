@@ -1,7 +1,7 @@
 import type { FastifyInstance } from 'fastify';
 import { OrderService } from '../order/order.service';
 import { parsePagination, paginatedResponse } from '../../utils/pagination';
-import { AppError, NotFoundError, ForbiddenError, ValidationError } from '../../utils/errors';
+import { AppError, NotFoundError, ValidationError } from '../../utils/errors';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -50,15 +50,6 @@ async function resolveVendor(app: FastifyInstance, userId: string) {
   const owner = await resolveOwner(app, userId);
   if (owner.vendors.length === 0) throw new NotFoundError('Vendor');
   return { ownerId: owner.id, vendorId: owner.vendors[0]!.id, vendorIds: owner.vendors.map((v) => v.id) };
-}
-
-/**
- * Verify that the given vendorId belongs to the authenticated user.
- */
-async function assertOwnership(app: FastifyInstance, userId: string, vendorId: string): Promise<void> {
-  const owner = await resolveOwner(app, userId);
-  const ownsVendor = owner.vendors.some((v) => v.id === vendorId);
-  if (!ownsVendor) throw new ForbiddenError('You do not own this vendor');
 }
 
 /**

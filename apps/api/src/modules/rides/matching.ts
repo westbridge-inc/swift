@@ -32,7 +32,6 @@ const WEIGHTS = {
 
 const MAX_RADIUS_KM = 5;
 const MAX_ATTEMPTS = 6;
-const TIMEOUT_SECONDS = 30;
 
 export function scoreDriver(candidate: Omit<MatchCandidate, 'score'>): number {
   const proximityScore = 1 - candidate.distanceKm / MAX_RADIUS_KM;
