@@ -41,12 +41,12 @@
   },
   "devDependencies": {
     "@types/bcryptjs": "^2.4.0",
-    "@types/node": "^22.0.0",
+    "@types/node": "^25.5.2",
     "@types/supertest": "^7.2.0",
     "prisma": "^6.4.0",
     "supertest": "^7.2.2",
     "tsx": "^4.19.0",
-    "typescript": "^5.7.0",
-    "vitest": "^4.1.0"
+    "typescript": "^6.0.2",
+    "vitest": "^4.1.2"
   }
 }
