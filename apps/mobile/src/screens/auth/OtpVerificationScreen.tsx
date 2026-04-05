@@ -18,7 +18,7 @@ export function OtpVerificationScreen({ route, navigation }: any) {
       } else {
         setAuth(data.data.user, data.data.tokens.accessToken, data.data.tokens.refreshToken);
       }
-    } catch (err) {
+    } catch {
       // Handle error
     }
   };

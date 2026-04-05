@@ -17,7 +17,7 @@ export function RegisterScreen({ route }: any) {
     try {
       const { data } = await authApi.register({ phone, firstName, lastName, email: email || undefined });
       setAuth(data.data.user, data.data.tokens.accessToken, data.data.tokens.refreshToken);
-    } catch (err) {
+    } catch {
       // Handle error
     } finally {
       setLoading(false);

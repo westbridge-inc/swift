@@ -7,7 +7,6 @@ import { generateOtp, storeOtp, verifyOtp, checkOtpRateLimit } from './otp';
 
 function createMockRedis() {
   const store = new Map<string, string>();
-  const ttls = new Map<string, number>();
 
   return {
     store,

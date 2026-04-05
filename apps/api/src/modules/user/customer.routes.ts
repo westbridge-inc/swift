@@ -1,6 +1,6 @@
 import type { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
-import { calculateMarkup, calculateCustomerPrice, calculateDeliveryFee, generateOrderNumber } from '../../utils/markup';
-import { haversineDistance, estimateDrivingDistance, estimateDeliveryMinutes, isWithinRadius, sortByDistance } from '../../utils/distance';
+import { calculateMarkup, calculateCustomerPrice, calculateDeliveryFee } from '../../utils/markup';
+import { estimateDrivingDistance, estimateDeliveryMinutes } from '../../utils/distance';
 import { parsePagination, paginatedResponse } from '../../utils/pagination';
 import { AppError, NotFoundError, ValidationError, ForbiddenError } from '../../utils/errors';
 import { OrderService } from '../order/order.service';
@@ -15,11 +15,9 @@ import { NotificationService } from '../notification/notification.service';
 const MARKUP_PCT = 5;
 const MAX_DELIVERY_RADIUS_KM = 25;
 const FREE_CANCEL_WINDOW_MIN = 5;
-const CART_CACHE_TTL = 300; // 5 min
 const HOME_CACHE_TTL = 60; // 1 min
 const MAX_ADDRESSES = 10;
 const MAX_TIP_GYD = 50_000;
-const STALE_CART_HOURS = 72;
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -280,7 +278,7 @@ export async function customerRoutes(app: FastifyInstance) {
     };
   });
 
-  app.put('/profile', async (request: AuthRequest, reply: FastifyReply) => {
+  app.put('/profile', async (request: AuthRequest, _reply: FastifyReply) => {
     const { userId } = request.user;
     const body = request.body as {
       firstName?: string;
@@ -464,7 +462,7 @@ export async function customerRoutes(app: FastifyInstance) {
       return { success: true, data: JSON.parse(cached) };
     }
 
-    const customer = await resolveCustomer(app, userId);
+    await resolveCustomer(app, userId);
 
     // Parallel fetches
     const [

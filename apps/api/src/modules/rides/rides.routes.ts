@@ -14,7 +14,7 @@ import type { FastifyInstance } from 'fastify';
  * Car types: SwiftX, SwiftComfort, SwiftXL, SwiftPremium
  * Features: surge pricing, driver matching, PIN verification, live tracking
  */
-export default async function ridesRoutes(app: FastifyInstance) {
+export default async function ridesRoutes(_app: FastifyInstance) {
   // TODO: Implement ride request flow
   // TODO: Implement fare estimation with surge
   // TODO: Implement driver matching algorithm

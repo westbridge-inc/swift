@@ -12,7 +12,7 @@ export function PhoneEntryScreen({ navigation }: any) {
     try {
       await authApi.sendOtp(`+592${phone}`);
       navigation.navigate('OtpVerification', { phone: `+592${phone}` });
-    } catch (err) {
+    } catch {
       // Handle error
     } finally {
       setLoading(false);

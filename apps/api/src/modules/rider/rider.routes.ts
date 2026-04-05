@@ -1,6 +1,6 @@
 import type { FastifyInstance } from 'fastify';
 import { OrderService } from '../order/order.service';
-import { haversineDistance, sortByDistance } from '../../utils/distance';
+import { haversineDistance } from '../../utils/distance';
 import { parsePagination, paginatedResponse } from '../../utils/pagination';
 import { AppError, NotFoundError, ConflictError, ValidationError } from '../../utils/errors';
 

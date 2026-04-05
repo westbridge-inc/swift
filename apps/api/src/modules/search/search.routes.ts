@@ -46,7 +46,6 @@ export async function searchRoutes(app: FastifyInstance) {
     }
 
     // DB fallback
-    const searchTerm = `%${q.toLowerCase()}%`;
     const userLat = lat ? parseFloat(lat) : null;
     const userLng = lng ? parseFloat(lng) : null;
 
@@ -148,7 +147,7 @@ export async function searchRoutes(app: FastifyInstance) {
   });
 
   // Trending / popular items
-  app.get('/search/trending', { preHandler: [app.authenticate] }, async (request) => {
+  app.get('/search/trending', { preHandler: [app.authenticate] }, async (_request) => {
     const items = await app.prisma.item.findMany({
       where: { isAvailable: true, isPopular: true, vendor: { status: 'ACTIVE', isCurrentlyOpen: true } },
       include: { vendor: { select: { name: true, slug: true } } },
