@@ -7,7 +7,7 @@ export default function DriversPage() {
     queryKey: ['drivers'],
     queryFn: async () => {
       const token = typeof window !== 'undefined' ? localStorage.getItem('swift_admin_token') : null;
-      const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3000'}/api/v1/admin/drivers`, {
+      const res = await fetch(`${process.env['NEXT_PUBLIC_API_URL'] || 'http://localhost:3000'}/api/v1/admin/drivers`, {
         headers: { ...(token && { Authorization: `Bearer ${token}` }) },
       });
       if (!res.ok) throw new Error('Failed to fetch drivers');

@@ -26,7 +26,8 @@ export function calculateSurgeMultiplier(
   rideRequestsLast5Min: number,
   onlineDriversInZone: number
 ): number {
-  if (onlineDriversInZone === 0) return SURGE_TIERS[SURGE_TIERS.length - 1].multiplier;
+  const lastTier = SURGE_TIERS[SURGE_TIERS.length - 1]!;
+  if (onlineDriversInZone === 0) return lastTier.multiplier;
 
   const ratio = rideRequestsLast5Min / onlineDriversInZone;
 
@@ -34,7 +35,7 @@ export function calculateSurgeMultiplier(
     if (ratio < tier.maxRatio) return tier.multiplier;
   }
 
-  return SURGE_TIERS[SURGE_TIERS.length - 1].multiplier;
+  return lastTier.multiplier;
 }
 
 /** Car type multipliers applied on top of surge */
