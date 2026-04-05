@@ -27,8 +27,8 @@ async function buildTestApp() {
 
 beforeAll(async () => {
   process.env['NODE_ENV'] = 'development';
-  process.env['DATABASE_URL'] = 'postgresql://swift:swift@localhost:5434/swift';
-  process.env['REDIS_URL'] = 'redis://localhost:6382';
+  process.env['DATABASE_URL'] = process.env['DATABASE_URL'] || 'postgresql://swift:swift@localhost:5434/swift';
+  process.env['REDIS_URL'] = process.env['REDIS_URL'] || 'redis://localhost:6382';
   app = await buildTestApp();
 
   // Clean up stale sessions from prior test runs so we don't hit unique constraint
