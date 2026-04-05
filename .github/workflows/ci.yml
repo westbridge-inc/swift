@@ -66,6 +66,11 @@ jobs:
         run: cd apps/api && npx prisma db push --skip-generate
         env:
           DATABASE_URL: postgresql://swift:swift@localhost:5432/swift_test
+      - name: Seed database
+        run: cd apps/api && npx prisma db seed
+        env:
+          DATABASE_URL: postgresql://swift:swift@localhost:5432/swift_test
+          REDIS_URL: redis://localhost:6379
       - name: Run tests
         run: pnpm --filter @swift/api test
         env:
