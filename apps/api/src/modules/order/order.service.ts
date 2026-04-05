@@ -1,15 +1,9 @@
 import type { PrismaClient } from '@prisma/client';
 import type { Server } from 'socket.io';
 import { calculateMarkup, calculateDeliveryFee, generateOrderNumber } from '../../utils/markup';
-import { estimateDrivingDistance, estimateDeliveryMinutes, haversineDistance } from '../../utils/distance';
+import { estimateDrivingDistance, estimateDeliveryMinutes } from '../../utils/distance';
 import { NotificationService } from '../notification/notification.service';
 import { AppError } from '../../utils/errors';
-
-interface CartItemForOrder {
-  item: { id: string; name: string; basePrice: { toNumber?: () => number } | number };
-  quantity: number;
-  specialInstructions: string | null;
-}
 
 interface CheckoutInput {
   userId: string;

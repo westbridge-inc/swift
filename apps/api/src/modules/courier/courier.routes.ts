@@ -20,7 +20,7 @@ import type { FastifyInstance } from 'fastify';
  * Revenue: 100% of courier fee goes to rider
  * Platform earns from rider's weekly subscription ($10K GYD)
  */
-export default async function courierRoutes(app: FastifyInstance) {
+export default async function courierRoutes(_app: FastifyInstance) {
   // TODO: Implement courier-specific endpoints
   // Builds on existing rider assignment and order tracking infrastructure
 }

@@ -1,6 +1,7 @@
 import axios from 'axios';
 import { useAuthStore } from '../stores/authStore';
 
+// eslint-disable-next-line no-undef
 const API_URL = __DEV__ ? 'http://localhost:3000' : 'https://api.swift.gy';
 
 export const api = axios.create({

@@ -10,7 +10,7 @@ const SERVICE_CATEGORIES = [
   { key: 'ride', label: 'Ride', icon: '🚗', color: '#AF52DE' },
 ];
 
-export function HomeScreen({ navigation }: any) {
+export function HomeScreen({ _navigation }: any) {
   const { address } = useLocationStore();
 
   return (
