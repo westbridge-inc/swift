@@ -6,39 +6,82 @@ on:
   pull_request:
     branches: [main]
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   lint-and-type-check:
+    name: Lint & Type Check
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
-        with:
-          version: 9
       - uses: actions/setup-node@v4
         with:
           node-version: 20
           cache: pnpm
       - run: pnpm install --frozen-lockfile
+      - run: cd apps/api && npx prisma generate
       - run: pnpm lint
       - run: pnpm type-check
 
-  api-build:
+  api-test:
+    name: API Tests
     runs-on: ubuntu-latest
     needs: lint-and-type-check
     services:
       postgres:
-        image: postgres:16
+        image: postgis/postgis:16-3.4
         env:
           POSTGRES_USER: swift
           POSTGRES_PASSWORD: swift
           POSTGRES_DB: swift_test
         ports:
           - 5432:5432
+        options: >-
+          --health-cmd="pg_isready -U swift"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=5
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd="redis-cli ping"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=5
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
         with:
-          version: 9
+          node-version: 20
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: cd apps/api && npx prisma generate
+      - name: Run database migrations
+        run: cd apps/api && npx prisma db push --skip-generate
+        env:
+          DATABASE_URL: postgresql://swift:swift@localhost:5432/swift_test
+      - name: Run tests
+        run: pnpm --filter @swift/api test
+        env:
+          NODE_ENV: test
+          DATABASE_URL: postgresql://swift:swift@localhost:5432/swift_test
+          REDIS_URL: redis://localhost:6379
+          JWT_SECRET: ci-test-jwt-secret-not-for-production
+          JWT_REFRESH_SECRET: ci-test-refresh-secret-not-for-production
+
+  api-build:
+    name: API Build
+    runs-on: ubuntu-latest
+    needs: lint-and-type-check
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v4
         with:
           node-version: 20
@@ -48,16 +91,32 @@ jobs:
       - run: pnpm --filter @swift/api build
 
   admin-build:
+    name: Admin Build
     runs-on: ubuntu-latest
     needs: lint-and-type-check
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
-        with:
-          version: 9
       - uses: actions/setup-node@v4
         with:
           node-version: 20
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - run: pnpm --filter @swift/admin build
+
+  security:
+    name: Security Scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Audit dependencies
+        run: pnpm audit --audit-level=high || true
+      - name: Check for known vulnerabilities
+        run: npx audit-ci --high
+        continue-on-error: true
