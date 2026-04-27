@@ -13,10 +13,10 @@
     "db:studio": "cd apps/api && npx prisma studio"
   },
   "devDependencies": {
-    "@typescript-eslint/eslint-plugin": "^8.0.0",
-    "@typescript-eslint/parser": "^8.0.0",
+    "@typescript-eslint/eslint-plugin": "^8.59.0",
+    "@typescript-eslint/parser": "^8.59.0",
     "eslint": "^8.57.0",
-    "turbo": "^2.4.0",
+    "turbo": "^2.9.6",
     "typescript": "^5.7.0"
   },
   "packageManager": "pnpm@9.15.0",
@@ -24,6 +24,6 @@
     "node": ">=20.0.0"
   },
   "dependencies": {
-    "meilisearch": "^0.56.0"
+    "meilisearch": "^0.57.0"
   }
 }
