@@ -16,7 +16,7 @@
     "@typescript-eslint/eslint-plugin": "^8.0.0",
     "@typescript-eslint/parser": "^8.0.0",
     "eslint": "^8.57.0",
-    "turbo": "^2.4.0",
+    "turbo": "^2.9.14",
     "typescript": "^5.7.0"
   },
   "packageManager": "pnpm@9.15.0",
