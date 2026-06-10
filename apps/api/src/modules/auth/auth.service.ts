@@ -20,14 +20,13 @@ export class AuthService {
       throw new AppError(429, 'RATE_LIMITED', 'Please wait before requesting another OTP');
     }
 
-    const otp = process.env['NODE_ENV'] === 'development' ? '123456' : generateOtp();
+    const otp = generateOtp();
 
     // Store in Redis with 5-min TTL
     await storeOtp(this.app.redis, phone, otp);
 
-    // In development, log the OTP
     if (process.env['NODE_ENV'] === 'development') {
-      this.app.log.info(`OTP for ${phone}: ${otp}`);
+      this.app.log.info(`[DEV] OTP for ${phone}: ${otp}`);
     }
 
     // TODO: Send via SMS provider (Twilio / GTT API)
@@ -37,16 +36,9 @@ export class AuthService {
   }
 
   async verifyOtp(phone: string, code: string, deviceInfo: DeviceInfo) {
-    // In development, accept fixed OTP and skip Redis check
-    if (process.env['NODE_ENV'] === 'development') {
-      if (code !== '123456') {
-        throw new AppError(400, 'INVALID_OTP', 'Invalid or expired OTP');
-      }
-    } else {
-      const result = await verifyOtp(this.app.redis, phone, code);
-      if (!result.valid) {
-        throw new AppError(400, 'INVALID_OTP', result.reason || 'Invalid or expired OTP');
-      }
+    const result = await verifyOtp(this.app.redis, phone, code);
+    if (!result.valid) {
+      throw new AppError(400, 'INVALID_OTP', result.reason || 'Invalid or expired OTP');
     }
 
     // Find existing user
@@ -128,14 +120,14 @@ export class AuthService {
       data: {
         token: newAccessToken,
         refreshToken: newRefreshToken,
-        expiresAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000),
+        expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
       },
     });
 
     return {
       accessToken: newAccessToken,
       refreshToken: newRefreshToken,
-      expiresIn: 86400,
+      expiresIn: 1800,
     };
   }
 
@@ -160,14 +152,14 @@ export class AuthService {
         deviceType: deviceInfo.deviceType,
         ipAddress: deviceInfo.ipAddress,
         userAgent: deviceInfo.userAgent,
-        expiresAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000),
+        expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
       },
     });
 
     return {
       accessToken,
       refreshToken,
-      expiresIn: 86400, // 24 hours
+      expiresIn: 1800, // 30 minutes
     };
   }
 }

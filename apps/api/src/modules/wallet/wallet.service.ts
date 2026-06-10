@@ -26,56 +26,38 @@ export class WalletService {
   async credit(userId: string, amount: number, type: TransactionType, description: string, reference?: string): Promise<number> {
     if (amount <= 0) throw new AppError(400, 'INVALID_AMOUNT', 'Amount must be positive');
 
-    const user = await this.prisma.user.update({
-      where: { id: userId },
-      data: { walletBalance: { increment: amount } },
+    return this.prisma.$transaction(async (tx) => {
+      const updated = await tx.user.update({
+        where: { id: userId },
+        data: { walletBalance: { increment: amount } },
+      });
+      const newBalance = Number(updated.walletBalance);
+      await tx.transaction.create({
+        data: { userId, type, amount, direction: 'in', description, reference, balanceAfter: newBalance },
+      });
+      return newBalance;
     });
-
-    const newBalance = Number(user.walletBalance);
-
-    await this.prisma.transaction.create({
-      data: {
-        userId,
-        type,
-        amount,
-        direction: 'in',
-        description,
-        reference,
-        balanceAfter: newBalance,
-      },
-    });
-
-    return newBalance;
   }
 
   async debit(userId: string, amount: number, type: TransactionType, description: string, reference?: string): Promise<number> {
     if (amount <= 0) throw new AppError(400, 'INVALID_AMOUNT', 'Amount must be positive');
 
-    const currentBalance = await this.getBalance(userId);
-    if (currentBalance < amount) {
-      throw new AppError(400, 'INSUFFICIENT_BALANCE', `Insufficient wallet balance. Available: $${currentBalance.toLocaleString()} GYD`);
-    }
-
-    const user = await this.prisma.user.update({
-      where: { id: userId },
-      data: { walletBalance: { decrement: amount } },
-    });
-
-    const newBalance = Number(user.walletBalance);
-
-    await this.prisma.transaction.create({
-      data: {
-        userId,
-        type,
-        amount,
-        direction: 'out',
-        description,
-        reference,
-        balanceAfter: newBalance,
-      },
-    });
-
-    return newBalance;
+    return this.prisma.$transaction(async (tx) => {
+      const user = await tx.user.findUnique({ where: { id: userId }, select: { walletBalance: true } });
+      const current = user ? Number(user.walletBalance) : 0;
+      if (current < amount) {
+        throw new AppError(400, 'INSUFFICIENT_BALANCE', `Insufficient wallet balance. Available: ${current.toLocaleString()} GYD`);
+      }
+      const updated = await tx.user.update({
+        where: { id: userId },
+        data: { walletBalance: { decrement: amount } },
+      });
+      const newBalance = Number(updated.walletBalance);
+      await tx.transaction.create({
+        data: { userId, type, amount, direction: 'out', description, reference, balanceAfter: newBalance },
+      });
+      return newBalance;
+    }, { isolationLevel: 'Serializable' });
   }
 
   async topUp(userId: string, amount: number, paymentMethod: string, externalRef?: string): Promise<number> {
