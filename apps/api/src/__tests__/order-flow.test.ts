@@ -10,6 +10,7 @@ import { vendorRoutes } from '../modules/vendor/vendor.routes';
 import { riderRoutes } from '../modules/rider/rider.routes';
 import { searchRoutes } from '../modules/search/search.routes';
 import { registerErrorHandler } from '../middleware/error-handler';
+import { loginWithOtp } from './helpers/otp';
 
 // ---------------------------------------------------------------------------
 // Setup
@@ -101,15 +102,10 @@ afterAll(async () => {
 // ---------------------------------------------------------------------------
 
 async function loginAndGetToken(phone: string): Promise<string> {
-  const res = await app.inject({
-    method: 'POST',
-    url: '/api/v1/auth/verify-otp',
-    payload: { phone, code: '123456' },
-    headers: { 'content-type': 'application/json' },
-  });
+  const res = await loginWithOtp(app, phone);
   const body = res.json();
-  if (!body.data.tokens) {
-    throw new Error(`Login failed for ${phone}: isNewUser=${body.data.isNewUser}`);
+  if (!body.data?.tokens) {
+    throw new Error(`Login failed for ${phone}: status=${res.statusCode} isNewUser=${body.data?.isNewUser}`);
   }
   return body.data.tokens.accessToken;
 }
