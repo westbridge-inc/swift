@@ -1,12 +1,9 @@
 name: Deploy Admin
 
+# Manual-only until VERCEL_TOKEN is configured (playbook Step 15 — deploys
+# come at hardening). Was failing on every push since April with no token.
 on:
-  push:
-    branches: [main]
-    paths:
-      - 'apps/admin/**'
-      - 'packages/**'
-      - 'pnpm-lock.yaml'
+  workflow_dispatch:
 
 concurrency:
   group: deploy-admin

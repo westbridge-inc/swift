@@ -1,16 +1,10 @@
 name: Build Mobile
 
+# Manual-only until the mobile stack decision (RN vs Flutter, before Step 3).
+# The Flutter scaffold is a 7-file stub that does not compile — it was failing
+# every push and masking real CI status.
 on:
-  push:
-    branches: [main]
-    paths:
-      - 'apps/mobile-flutter/**'
-      - 'apps/mobile/**'
-  pull_request:
-    branches: [main]
-    paths:
-      - 'apps/mobile-flutter/**'
-      - 'apps/mobile/**'
+  workflow_dispatch:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
