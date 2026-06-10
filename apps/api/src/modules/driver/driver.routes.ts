@@ -1,9 +1,44 @@
 import type { FastifyInstance } from 'fastify';
+import { z } from 'zod';
+import { OrderStatus, EarningType, EarningStatus } from '@prisma/client';
 import { OrderService } from '../order/order.service';
 import { NotificationService } from '../notification/notification.service';
 import { haversineDistance, estimateDeliveryMinutes } from '../../utils/distance';
 import { parsePagination, paginatedResponse } from '../../utils/pagination';
 import { AppError, NotFoundError } from '../../utils/errors';
+
+const updateDriverProfileSchema = z.object({
+  vehicleMake: z.string().max(50).optional(),
+  vehicleModel: z.string().max(50).optional(),
+  vehicleYear: z.number().int().min(1950).max(2100).optional(),
+  vehicleColor: z.string().max(30).optional(),
+  licensePlate: z.string().max(20).optional(),
+  vehicleCapacity: z.number().int().min(1).max(50).optional(),
+  profilePhotoUrl: z.string().max(2048).optional(),
+  nationalIdUrl: z.string().max(2048).optional(),
+  driverLicenseUrl: z.string().max(2048).optional(),
+  vehicleInsuranceUrl: z.string().max(2048).optional(),
+  vehicleInspectionUrl: z.string().max(2048).optional(),
+});
+
+const driverLocationSchema = z.object({
+  latitude: z.number().min(-90).max(90),
+  longitude: z.number().min(-180).max(180),
+  heading: z.number().optional(),
+});
+
+const verifyPinSchema = z.object({
+  pin: z.string().min(1).max(10),
+});
+
+const ridesQuerySchema = z.object({
+  status: z.nativeEnum(OrderStatus).optional(),
+});
+
+const driverEarningsQuerySchema = z.object({
+  type: z.nativeEnum(EarningType).optional(),
+  status: z.nativeEnum(EarningStatus).optional(),
+});
 
 export async function driverRoutes(app: FastifyInstance) {
   const orderService = new OrderService(app.prisma, app.io);
@@ -44,19 +79,7 @@ export async function driverRoutes(app: FastifyInstance) {
   });
 
   app.put('/profile', { preHandler: [app.authenticate] }, async (request) => {
-    const body = request.body as {
-      vehicleMake?: string;
-      vehicleModel?: string;
-      vehicleYear?: number;
-      vehicleColor?: string;
-      licensePlate?: string;
-      vehicleCapacity?: number;
-      profilePhotoUrl?: string;
-      nationalIdUrl?: string;
-      driverLicenseUrl?: string;
-      vehicleInsuranceUrl?: string;
-      vehicleInspectionUrl?: string;
-    };
+    const body = updateDriverProfileSchema.parse(request.body);
 
     const driver = await app.prisma.driver.update({
       where: { userId: request.user.userId },
@@ -127,11 +150,7 @@ export async function driverRoutes(app: FastifyInstance) {
   // ─── Location ──────────────────────────────────────────────────────────
 
   app.put('/location', { preHandler: [app.authenticate] }, async (request) => {
-    const { latitude, longitude, heading } = request.body as {
-      latitude: number;
-      longitude: number;
-      heading?: number;
-    };
+    const { latitude, longitude, heading } = driverLocationSchema.parse(request.body);
 
     const driver = await app.prisma.driver.findUnique({ where: { userId: request.user.userId } });
     if (!driver) throw new NotFoundError('Driver');
@@ -406,7 +425,7 @@ export async function driverRoutes(app: FastifyInstance) {
   // 4. Verify ride PIN
   app.put('/rides/:id/verify-pin', { preHandler: [app.authenticate] }, async (request) => {
     const { id } = request.params as { id: string };
-    const { pin } = request.body as { pin: string };
+    const { pin } = verifyPinSchema.parse(request.body);
     const driver = await getDriver(request.user.userId);
     const order = await getDriverRide(driver.id, id);
 
@@ -560,12 +579,12 @@ export async function driverRoutes(app: FastifyInstance) {
     if (!driver) throw new NotFoundError('Driver');
 
     const { page, limit, skip } = parsePagination(request.query as Record<string, string>);
-    const { status } = request.query as { status?: string };
+    const { status } = ridesQuerySchema.parse(request.query);
 
     const where = {
       driverId: driver.id,
       orderType: 'TAXI' as const,
-      ...(status && { status: status as any }),
+      ...(status && { status }),
     };
 
     const [rides, total] = await Promise.all([
@@ -606,12 +625,12 @@ export async function driverRoutes(app: FastifyInstance) {
     if (!driver) throw new NotFoundError('Driver');
 
     const { page, limit, skip } = parsePagination(request.query as Record<string, string>);
-    const { type, status } = request.query as { type?: string; status?: string };
+    const { type, status } = driverEarningsQuerySchema.parse(request.query);
 
     const where = {
       driverId: driver.id,
-      ...(type && { type: type as any }),
-      ...(status && { status: status as any }),
+      ...(type && { type }),
+      ...(status && { status }),
     };
 
     const [earnings, total, aggregate] = await Promise.all([

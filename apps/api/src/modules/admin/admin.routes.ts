@@ -1,7 +1,148 @@
 import type { FastifyInstance } from 'fastify';
+import { z } from 'zod';
+import {
+  UserRole,
+  UserStatus,
+  VendorStatus,
+  VendorType,
+  RiderType,
+  OrderStatus,
+  OrderType,
+  SettlementStatus,
+  SubscriptionStatus,
+  SubscriptionType,
+  DiscountType,
+} from '@prisma/client';
 import { NotificationService } from '../notification/notification.service';
 import { parsePagination, paginatedResponse } from '../../utils/pagination';
 import { AppError, NotFoundError, ForbiddenError } from '../../utils/errors';
+
+// ---------------------------------------------------------------------------
+// Input schemas
+// ---------------------------------------------------------------------------
+
+const reasonSchema = z.object({
+  reason: z.string().max(500).optional(),
+});
+
+const featureSchema = z.object({
+  featured: z.boolean().optional(),
+});
+
+const verifyDocsSchema = z.object({
+  verified: z.boolean().optional(),
+  rejectionReason: z.string().max(500).optional(),
+});
+
+const cancelOrderSchema = z.object({
+  reason: z.string().max(500).optional(),
+  refund: z.boolean().optional(),
+});
+
+const processSettlementSchema = z.object({
+  reference: z.string().max(200).optional(),
+});
+
+const configValueSchema = z.object({
+  // Platform config values are free-form JSON; presence is what we validate
+  value: z.any(),
+});
+
+const usersQuerySchema = z.object({
+  role: z.nativeEnum(UserRole).optional(),
+  status: z.nativeEnum(UserStatus).optional(),
+  search: z.string().max(100).optional(),
+});
+
+const vendorsQuerySchema = z.object({
+  status: z.nativeEnum(VendorStatus).optional(),
+  type: z.nativeEnum(VendorType).optional(),
+  search: z.string().max(100).optional(),
+});
+
+// Riders/drivers list filters use UI keywords, not DB enums
+const moverFilterQuerySchema = z.object({
+  status: z.enum(['online', 'offline', 'verified', 'unverified']).optional(),
+  type: z.nativeEnum(RiderType).optional(),
+  search: z.string().max(100).optional(),
+});
+
+const adminOrdersQuerySchema = z.object({
+  status: z.nativeEnum(OrderStatus).optional(),
+  type: z.nativeEnum(OrderType).optional(),
+  dateFrom: z.coerce.date().optional(),
+  dateTo: z.coerce.date().optional(),
+  search: z.string().max(100).optional(),
+});
+
+const settlementsQuerySchema = z.object({
+  status: z.nativeEnum(SettlementStatus).optional(),
+  vendorId: z.string().optional(),
+});
+
+const promosQuerySchema = z.object({
+  active: z.enum(['true', 'false']).optional(),
+});
+
+const createPromoSchema = z.object({
+  code: z.string().trim().min(2).max(40),
+  description: z.string().max(500),
+  discountType: z.nativeEnum(DiscountType),
+  discountValue: z.number().min(0),
+  minOrderAmount: z.number().min(0).optional(),
+  maxDiscount: z.number().min(0).optional(),
+  applicableTo: z.array(z.string().max(50)).max(20).optional(),
+  validFrom: z.coerce.date(),
+  validUntil: z.coerce.date(),
+  maxUses: z.number().int().min(1).optional(),
+  maxUsesPerUser: z.number().int().min(1).optional(),
+});
+
+const updatePromoSchema = z.object({
+  description: z.string().max(500).optional(),
+  discountValue: z.number().min(0).optional(),
+  minOrderAmount: z.number().min(0).optional(),
+  maxDiscount: z.number().min(0).optional(),
+  validFrom: z.coerce.date().optional(),
+  validUntil: z.coerce.date().optional(),
+  maxUses: z.number().int().min(1).optional(),
+  maxUsesPerUser: z.number().int().min(1).optional(),
+  isActive: z.boolean().optional(),
+});
+
+const createZoneSchema = z.object({
+  name: z.string().trim().min(1).max(100),
+  description: z.string().max(500).optional(),
+  // GeoJSON blob — stored as JSON, shape owned by the maps layer
+  boundary: z.any(),
+  deliveryBaseFee: z.number().min(0).optional(),
+  deliveryPerKm: z.number().min(0).optional(),
+  surgeMultiplier: z.number().min(0.5).max(10).optional(),
+});
+
+const updateZoneSchema = createZoneSchema.partial().extend({
+  isActive: z.boolean().optional(),
+});
+
+const subscriptionsQuerySchema = z.object({
+  status: z.nativeEnum(SubscriptionStatus).optional(),
+  type: z.nativeEnum(SubscriptionType).optional(),
+});
+
+const broadcastSchema = z.object({
+  title: z.string().trim().min(1).max(150),
+  body: z.string().trim().min(1).max(1000),
+  role: z.nativeEnum(UserRole).optional(),
+  data: z.record(z.unknown()).optional(),
+});
+
+const auditLogsQuerySchema = z.object({
+  action: z.string().max(100).optional(),
+  entity: z.string().max(100).optional(),
+  userId: z.string().optional(),
+  dateFrom: z.coerce.date().optional(),
+  dateTo: z.coerce.date().optional(),
+});
 
 export async function adminRoutes(app: FastifyInstance) {
   const notifications = new NotificationService(app.prisma, app.io);
@@ -130,7 +271,7 @@ export async function adminRoutes(app: FastifyInstance) {
 
   app.get('/users', { preHandler: [adminGuard] }, async (request) => {
     const { page, limit, skip } = parsePagination(request.query as Record<string, string>);
-    const { role, status, search } = request.query as { role?: string; status?: string; search?: string };
+    const { role, status, search } = usersQuerySchema.parse(request.query);
 
     const where: any = {
       ...(role && { activeRole: role }),
@@ -193,7 +334,7 @@ export async function adminRoutes(app: FastifyInstance) {
 
   app.put('/users/:id/suspend', { preHandler: [adminGuard] }, async (request) => {
     const { id } = request.params as { id: string };
-    const { reason } = request.body as { reason?: string };
+    const { reason } = reasonSchema.parse(request.body ?? {});
 
     const user = await app.prisma.user.findUnique({ where: { id } });
     if (!user) throw new NotFoundError('User', id);
@@ -242,7 +383,7 @@ export async function adminRoutes(app: FastifyInstance) {
 
   app.put('/users/:id/ban', { preHandler: [adminGuard] }, async (request) => {
     const { id } = request.params as { id: string };
-    const { reason } = request.body as { reason?: string };
+    const { reason } = reasonSchema.parse(request.body ?? {});
 
     const user = await app.prisma.user.findUnique({ where: { id } });
     if (!user) throw new NotFoundError('User', id);
@@ -270,7 +411,7 @@ export async function adminRoutes(app: FastifyInstance) {
 
   app.get('/vendors', { preHandler: [adminGuard] }, async (request) => {
     const { page, limit, skip } = parsePagination(request.query as Record<string, string>);
-    const { status, type, search } = request.query as { status?: string; type?: string; search?: string };
+    const { status, type, search } = vendorsQuerySchema.parse(request.query);
 
     const where: any = {
       ...(status && { status }),
@@ -342,7 +483,7 @@ export async function adminRoutes(app: FastifyInstance) {
 
   app.put('/vendors/:id/suspend', { preHandler: [adminGuard] }, async (request) => {
     const { id } = request.params as { id: string };
-    const { reason } = request.body as { reason?: string };
+    const { reason } = reasonSchema.parse(request.body ?? {});
 
     const vendor = await app.prisma.vendor.findUnique({
       where: { id },
@@ -370,7 +511,7 @@ export async function adminRoutes(app: FastifyInstance) {
 
   app.put('/vendors/:id/feature', { preHandler: [adminGuard] }, async (request) => {
     const { id } = request.params as { id: string };
-    const { featured } = request.body as { featured?: boolean };
+    const { featured } = featureSchema.parse(request.body ?? {});
 
     const vendor = await app.prisma.vendor.findUnique({ where: { id } });
     if (!vendor) throw new NotFoundError('Vendor', id);
@@ -391,7 +532,7 @@ export async function adminRoutes(app: FastifyInstance) {
 
   app.get('/riders', { preHandler: [adminGuard] }, async (request) => {
     const { page, limit, skip } = parsePagination(request.query as Record<string, string>);
-    const { status, type, search } = request.query as { status?: string; type?: string; search?: string };
+    const { status, type, search } = moverFilterQuerySchema.parse(request.query);
 
     const where: any = {
       ...(type && { riderType: type }),
@@ -446,7 +587,7 @@ export async function adminRoutes(app: FastifyInstance) {
 
   app.put('/riders/:id/verify-documents', { preHandler: [adminGuard] }, async (request) => {
     const { id } = request.params as { id: string };
-    const { verified, rejectionReason } = request.body as { verified?: boolean; rejectionReason?: string };
+    const { verified, rejectionReason } = verifyDocsSchema.parse(request.body ?? {});
 
     const rider = await app.prisma.rider.findUnique({
       where: { id },
@@ -490,7 +631,7 @@ export async function adminRoutes(app: FastifyInstance) {
 
   app.get('/drivers', { preHandler: [adminGuard] }, async (request) => {
     const { page, limit, skip } = parsePagination(request.query as Record<string, string>);
-    const { status, search } = request.query as { status?: string; search?: string };
+    const { status, search } = moverFilterQuerySchema.parse(request.query);
 
     const where: any = {
       ...(status === 'online' && { isOnline: true }),
@@ -544,7 +685,7 @@ export async function adminRoutes(app: FastifyInstance) {
 
   app.put('/drivers/:id/verify-documents', { preHandler: [adminGuard] }, async (request) => {
     const { id } = request.params as { id: string };
-    const { verified, rejectionReason } = request.body as { verified?: boolean; rejectionReason?: string };
+    const { verified, rejectionReason } = verifyDocsSchema.parse(request.body ?? {});
 
     const driver = await app.prisma.driver.findUnique({
       where: { id },
@@ -588,13 +729,7 @@ export async function adminRoutes(app: FastifyInstance) {
 
   app.get('/orders', { preHandler: [adminGuard] }, async (request) => {
     const { page, limit, skip } = parsePagination(request.query as Record<string, string>);
-    const { status, type, dateFrom, dateTo, search } = request.query as {
-      status?: string;
-      type?: string;
-      dateFrom?: string;
-      dateTo?: string;
-      search?: string;
-    };
+    const { status, type, dateFrom, dateTo, search } = adminOrdersQuerySchema.parse(request.query);
 
     const where: any = {
       ...(status && { status }),
@@ -602,8 +737,8 @@ export async function adminRoutes(app: FastifyInstance) {
       ...(dateFrom || dateTo
         ? {
             placedAt: {
-              ...(dateFrom && { gte: new Date(dateFrom) }),
-              ...(dateTo && { lte: new Date(dateTo) }),
+              ...(dateFrom && { gte: dateFrom }),
+              ...(dateTo && { lte: dateTo }),
             },
           }
         : {}),
@@ -657,7 +792,7 @@ export async function adminRoutes(app: FastifyInstance) {
 
   app.put('/orders/:id/cancel', { preHandler: [adminGuard] }, async (request) => {
     const { id } = request.params as { id: string };
-    const { reason, refund } = request.body as { reason?: string; refund?: boolean };
+    const { reason, refund } = cancelOrderSchema.parse(request.body ?? {});
 
     const order = await app.prisma.order.findUnique({
       where: { id },
@@ -791,7 +926,7 @@ export async function adminRoutes(app: FastifyInstance) {
 
   app.get('/finance/settlements', { preHandler: [adminGuard] }, async (request) => {
     const { page, limit, skip } = parsePagination(request.query as Record<string, string>);
-    const { status, vendorId } = request.query as { status?: string; vendorId?: string };
+    const { status, vendorId } = settlementsQuerySchema.parse(request.query);
 
     const where: any = {
       ...(status && { status }),
@@ -816,7 +951,7 @@ export async function adminRoutes(app: FastifyInstance) {
 
   app.put('/finance/settlements/:id/process', { preHandler: [adminGuard] }, async (request) => {
     const { id } = request.params as { id: string };
-    const { reference } = request.body as { reference?: string };
+    const { reference } = processSettlementSchema.parse(request.body ?? {});
 
     const settlement = await app.prisma.settlement.findUnique({
       where: { id },
@@ -858,7 +993,7 @@ export async function adminRoutes(app: FastifyInstance) {
 
   app.put('/config/:key', { preHandler: [adminGuard] }, async (request) => {
     const { key } = request.params as { key: string };
-    const { value } = request.body as { value: any };
+    const { value } = configValueSchema.parse(request.body);
 
     const config = await app.prisma.platformConfig.upsert({
       where: { key },
@@ -875,7 +1010,7 @@ export async function adminRoutes(app: FastifyInstance) {
 
   app.get('/promos', { preHandler: [adminGuard] }, async (request) => {
     const { page, limit, skip } = parsePagination(request.query as Record<string, string>);
-    const { active } = request.query as { active?: string };
+    const { active } = promosQuerySchema.parse(request.query);
 
     const where: any = {
       ...(active === 'true' && { isActive: true }),
@@ -896,19 +1031,7 @@ export async function adminRoutes(app: FastifyInstance) {
   });
 
   app.post('/promos', { preHandler: [adminGuard] }, async (request) => {
-    const body = request.body as {
-      code: string;
-      description: string;
-      discountType: 'PERCENTAGE' | 'FIXED_AMOUNT' | 'FREE_DELIVERY';
-      discountValue: number;
-      minOrderAmount?: number;
-      maxDiscount?: number;
-      applicableTo?: string[];
-      validFrom: string;
-      validUntil: string;
-      maxUses?: number;
-      maxUsesPerUser?: number;
-    };
+    const body = createPromoSchema.parse(request.body);
 
     // Ensure code is unique and uppercase
     const existingCode = await app.prisma.promoCode.findUnique({ where: { code: body.code.toUpperCase() } });
@@ -937,17 +1060,7 @@ export async function adminRoutes(app: FastifyInstance) {
 
   app.put('/promos/:id', { preHandler: [adminGuard] }, async (request) => {
     const { id } = request.params as { id: string };
-    const body = request.body as {
-      description?: string;
-      discountValue?: number;
-      minOrderAmount?: number;
-      maxDiscount?: number;
-      validFrom?: string;
-      validUntil?: string;
-      maxUses?: number;
-      maxUsesPerUser?: number;
-      isActive?: boolean;
-    };
+    const body = updatePromoSchema.parse(request.body);
 
     const existing = await app.prisma.promoCode.findUnique({ where: { id } });
     if (!existing) throw new NotFoundError('PromoCode', id);
@@ -999,14 +1112,7 @@ export async function adminRoutes(app: FastifyInstance) {
   });
 
   app.post('/zones', { preHandler: [adminGuard] }, async (request) => {
-    const body = request.body as {
-      name: string;
-      description?: string;
-      boundary: any;
-      deliveryBaseFee?: number;
-      deliveryPerKm?: number;
-      surgeMultiplier?: number;
-    };
+    const body = createZoneSchema.parse(request.body);
 
     const zone = await app.prisma.zone.create({
       data: {
@@ -1026,15 +1132,7 @@ export async function adminRoutes(app: FastifyInstance) {
 
   app.put('/zones/:id', { preHandler: [adminGuard] }, async (request) => {
     const { id } = request.params as { id: string };
-    const body = request.body as {
-      name?: string;
-      description?: string;
-      boundary?: any;
-      isActive?: boolean;
-      deliveryBaseFee?: number;
-      deliveryPerKm?: number;
-      surgeMultiplier?: number;
-    };
+    const body = updateZoneSchema.parse(request.body);
 
     const existing = await app.prisma.zone.findUnique({ where: { id } });
     if (!existing) throw new NotFoundError('Zone', id);
@@ -1078,7 +1176,7 @@ export async function adminRoutes(app: FastifyInstance) {
 
   app.get('/subscriptions', { preHandler: [adminGuard] }, async (request) => {
     const { page, limit, skip } = parsePagination(request.query as Record<string, string>);
-    const { status, type } = request.query as { status?: string; type?: string };
+    const { status, type } = subscriptionsQuerySchema.parse(request.query);
 
     const where: any = {
       ...(status && { status }),
@@ -1105,7 +1203,7 @@ export async function adminRoutes(app: FastifyInstance) {
 
   app.put('/subscriptions/:id/waive-fee', { preHandler: [adminGuard] }, async (request) => {
     const { id } = request.params as { id: string };
-    const { reason } = request.body as { reason?: string };
+    const { reason } = reasonSchema.parse(request.body ?? {});
 
     const subscription = await app.prisma.subscription.findUnique({ where: { id } });
     if (!subscription) throw new NotFoundError('Subscription', id);
@@ -1146,16 +1244,7 @@ export async function adminRoutes(app: FastifyInstance) {
   // ─── Notifications / Broadcast ─────────────────────────────────────────
 
   app.post('/notifications/broadcast', { preHandler: [adminGuard] }, async (request) => {
-    const { title, body, role, data } = request.body as {
-      title: string;
-      body: string;
-      role?: string; // Send to specific role, or all if omitted
-      data?: Record<string, unknown>;
-    };
-
-    if (!title || !body) {
-      throw new AppError(400, 'VALIDATION_ERROR', 'Title and body are required');
-    }
+    const { title, body, role, data } = broadcastSchema.parse(request.body);
 
     const where: any = {
       status: 'ACTIVE',
@@ -1213,13 +1302,7 @@ export async function adminRoutes(app: FastifyInstance) {
 
   app.get('/audit-logs', { preHandler: [adminGuard] }, async (request) => {
     const { page, limit, skip } = parsePagination(request.query as Record<string, string>);
-    const { action, entity, userId, dateFrom, dateTo } = request.query as {
-      action?: string;
-      entity?: string;
-      userId?: string;
-      dateFrom?: string;
-      dateTo?: string;
-    };
+    const { action, entity, userId, dateFrom, dateTo } = auditLogsQuerySchema.parse(request.query);
 
     const where: any = {
       ...(action && { action: { contains: action, mode: 'insensitive' } }),
@@ -1228,8 +1311,8 @@ export async function adminRoutes(app: FastifyInstance) {
       ...(dateFrom || dateTo
         ? {
             createdAt: {
-              ...(dateFrom && { gte: new Date(dateFrom) }),
-              ...(dateTo && { lte: new Date(dateTo) }),
+              ...(dateFrom && { gte: dateFrom }),
+              ...(dateTo && { lte: dateTo }),
             },
           }
         : {}),

@@ -1,8 +1,42 @@
 import type { FastifyInstance } from 'fastify';
+import { z } from 'zod';
+import { RiderType, VehicleType, EarningType, EarningStatus } from '@prisma/client';
 import { OrderService } from '../order/order.service';
 import { haversineDistance } from '../../utils/distance';
 import { parsePagination, paginatedResponse } from '../../utils/pagination';
 import { AppError, NotFoundError, ConflictError, ValidationError } from '../../utils/errors';
+
+const updateRiderProfileSchema = z.object({
+  riderType: z.nativeEnum(RiderType).optional(),
+  vehicleType: z.nativeEnum(VehicleType).optional(),
+  vehicleMake: z.string().max(50).optional(),
+  vehicleModel: z.string().max(50).optional(),
+  vehicleYear: z.number().int().min(1950).max(2100).optional(),
+  vehicleColor: z.string().max(30).optional(),
+  licensePlate: z.string().max(20).optional(),
+  profilePhotoUrl: z.string().max(2048).optional(),
+  nationalIdUrl: z.string().max(2048).optional(),
+  driverLicenseUrl: z.string().max(2048).optional(),
+  vehicleInsuranceUrl: z.string().max(2048).optional(),
+});
+
+const riderLocationSchema = z.object({
+  latitude: z.number().min(-90).max(90),
+  longitude: z.number().min(-180).max(180),
+  heading: z.number().optional(),
+  speed: z.number().optional(),
+});
+
+const pickupPinSchema = z.object({
+  ridePin: z.string().min(1).max(10).optional(),
+});
+
+const riderHistoryQuerySchema = z.object({
+  from: z.coerce.date().optional(),
+  to: z.coerce.date().optional(),
+  type: z.nativeEnum(EarningType).optional(),
+  status: z.nativeEnum(EarningStatus).optional(),
+});
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -132,19 +166,7 @@ export async function riderRoutes(app: FastifyInstance) {
   app.put('/profile', { preHandler: [app.authenticate] }, async (request) => {
     const rider = await getRider(app, request.user.userId);
 
-    const body = request.body as {
-      riderType?: 'DELIVERY' | 'COURIER' | 'BOTH';
-      vehicleType?: 'BICYCLE' | 'MOTORCYCLE' | 'CAR';
-      vehicleMake?: string;
-      vehicleModel?: string;
-      vehicleYear?: number;
-      vehicleColor?: string;
-      licensePlate?: string;
-      profilePhotoUrl?: string;
-      nationalIdUrl?: string;
-      driverLicenseUrl?: string;
-      vehicleInsuranceUrl?: string;
-    };
+    const body = updateRiderProfileSchema.parse(request.body);
 
     const allowedFields = [
       'riderType', 'vehicleType', 'vehicleMake', 'vehicleModel',
@@ -237,19 +259,7 @@ export async function riderRoutes(app: FastifyInstance) {
 
   /** PUT /location — Update lat/lng, persist to DB + Redis, broadcast to active order. */
   app.put('/location', { preHandler: [app.authenticate] }, async (request) => {
-    const { latitude, longitude, heading, speed } = request.body as {
-      latitude: number;
-      longitude: number;
-      heading?: number;
-      speed?: number;
-    };
-
-    if (
-      typeof latitude !== 'number' || typeof longitude !== 'number' ||
-      latitude < -90 || latitude > 90 || longitude < -180 || longitude > 180
-    ) {
-      throw new ValidationError('Invalid coordinates');
-    }
+    const { latitude, longitude, heading, speed } = riderLocationSchema.parse(request.body);
 
     const rider = await getRider(app, request.user.userId);
     const now = new Date();
@@ -538,7 +548,7 @@ export async function riderRoutes(app: FastifyInstance) {
   /** PUT /orders/:id/delivered — Final step: complete delivery, create earnings, free rider. */
   app.put('/orders/:id/delivered', { preHandler: [app.authenticate] }, async (request) => {
     const { id } = request.params as { id: string };
-    const { ridePin } = (request.body ?? {}) as { ridePin?: string };
+    const { ridePin } = pickupPinSchema.parse(request.body ?? {});
     const rider = await getRider(app, request.user.userId);
     const order = await getOwnedOrder(app, id, rider.id);
 
@@ -599,6 +609,7 @@ export async function riderRoutes(app: FastifyInstance) {
     const rider = await getRider(app, request.user.userId);
     const query = request.query as Record<string, string | undefined>;
     const pagination = parsePagination(query);
+    const { from, to } = riderHistoryQuerySchema.parse(request.query);
 
     const where: Record<string, unknown> = {
       riderId: rider.id,
@@ -606,11 +617,11 @@ export async function riderRoutes(app: FastifyInstance) {
     };
 
     // Optional date range filters.
-    if (query['from'] || query['to']) {
+    if (from || to) {
       const dateFilter: Record<string, Date> = {};
-      if (query['from']) dateFilter['gte'] = new Date(query['from']);
-      if (query['to']) {
-        const toDate = new Date(query['to']);
+      if (from) dateFilter['gte'] = from;
+      if (to) {
+        const toDate = new Date(to);
         toDate.setHours(23, 59, 59, 999);
         dateFilter['lte'] = toDate;
       }
@@ -659,26 +670,27 @@ export async function riderRoutes(app: FastifyInstance) {
     const rider = await getRider(app, request.user.userId);
     const query = request.query as Record<string, string | undefined>;
     const pagination = parsePagination(query);
+    const { from, to, type, status } = riderHistoryQuerySchema.parse(request.query);
 
     const where: Record<string, unknown> = { riderId: rider.id };
 
-    if (query['from'] || query['to']) {
+    if (from || to) {
       const dateFilter: Record<string, Date> = {};
-      if (query['from']) dateFilter['gte'] = new Date(query['from']);
-      if (query['to']) {
-        const toDate = new Date(query['to']);
+      if (from) dateFilter['gte'] = from;
+      if (to) {
+        const toDate = new Date(to);
         toDate.setHours(23, 59, 59, 999);
         dateFilter['lte'] = toDate;
       }
       where['createdAt'] = dateFilter;
     }
 
-    if (query['type']) {
-      where['type'] = query['type']; // DELIVERY_FEE | COURIER_FEE | TIP
+    if (type) {
+      where['type'] = type;
     }
 
-    if (query['status']) {
-      where['status'] = query['status']; // PENDING | AVAILABLE | PAID_OUT
+    if (status) {
+      where['status'] = status;
     }
 
     const [earnings, total, aggregate] = await Promise.all([
