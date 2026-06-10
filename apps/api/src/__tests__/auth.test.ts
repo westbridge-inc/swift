@@ -6,6 +6,7 @@ import { authPlugin } from '../plugins/auth';
 import { socketPlugin } from '../plugins/socket';
 import { authRoutes } from '../modules/auth/auth.routes';
 import { registerErrorHandler } from '../middleware/error-handler';
+import { requestOtp, loginWithOtp, wrongCode } from './helpers/otp';
 
 // ---------------------------------------------------------------------------
 // Setup
@@ -38,6 +39,12 @@ beforeAll(async () => {
       user: { phone: { in: ['+5926003000', '+5926002000', '+5926004000'] } },
     },
   });
+
+  // Reset OTP state from prior runs so send/verify flows are deterministic
+  const otpPhones = ['+5926003000', '+5926002000', '+5926004000', '+5929999999', '+5928887777'];
+  for (const phone of otpPhones) {
+    await app.redis.del(`otp:${phone}`, `otp_rate:${phone}`, `otp_attempt:${phone}`);
+  }
 });
 
 afterAll(async () => {
@@ -71,6 +78,7 @@ describe('Auth Routes', () => {
 
   describe('POST /api/v1/auth/send-otp', () => {
     it('returns success with expiresIn for valid phone', async () => {
+      await app.redis.del('otp_rate:+5926003000');
       const res = await inject('POST', '/api/v1/auth/send-otp', {
         phone: '+5926003000',
       });
@@ -78,6 +86,15 @@ describe('Auth Routes', () => {
       expect(res.statusCode).toBe(200);
       expect(body.success).toBe(true);
       expect(body.data.expiresIn).toBe(300);
+    });
+
+    it('rejects an immediate resend for the same phone (cooldown)', async () => {
+      // Previous test just sent one — the 60s per-phone cooldown must block this
+      const res = await inject('POST', '/api/v1/auth/send-otp', {
+        phone: '+5926003000',
+      });
+      expect(res.statusCode).toBe(429);
+      expect(res.json().error.code).toBe('RATE_LIMITED');
     });
 
     it('rejects invalid phone (too short)', async () => {
@@ -94,9 +111,10 @@ describe('Auth Routes', () => {
 
   describe('POST /api/v1/auth/verify-otp', () => {
     it('returns tokens for existing user (customer)', async () => {
+      const code = await requestOtp(app, '+5926003000');
       const res = await inject('POST', '/api/v1/auth/verify-otp', {
         phone: '+5926003000',
-        code: '123456',
+        code,
       });
       const body = res.json();
       expect(res.statusCode).toBe(200);
@@ -109,9 +127,10 @@ describe('Auth Routes', () => {
     });
 
     it('returns isNewUser true for unknown phone', async () => {
+      const code = await requestOtp(app, '+5929999999');
       const res = await inject('POST', '/api/v1/auth/verify-otp', {
         phone: '+5929999999',
-        code: '123456',
+        code,
       });
       const body = res.json();
       expect(res.statusCode).toBe(200);
@@ -119,13 +138,30 @@ describe('Auth Routes', () => {
     });
 
     it('rejects invalid OTP code', async () => {
+      const code = await requestOtp(app, '+5926003000');
       const res = await inject('POST', '/api/v1/auth/verify-otp', {
         phone: '+5926003000',
-        code: '000000',
+        code: wrongCode(code),
       });
       expect(res.statusCode).toBe(400);
       const body = res.json();
       expect(body.success).toBe(false);
+    });
+
+    it('locks out after 5 failed attempts even with the correct code (SEC-6)', async () => {
+      const phone = '+5928887777';
+      const code = await requestOtp(app, phone);
+      const bad = wrongCode(code);
+
+      for (let i = 0; i < 5; i++) {
+        const res = await inject('POST', '/api/v1/auth/verify-otp', { phone, code: bad });
+        expect(res.statusCode).toBe(400);
+      }
+
+      // Attempts are exhausted — the real code must be refused too
+      const res = await inject('POST', '/api/v1/auth/verify-otp', { phone, code });
+      expect(res.statusCode).toBe(400);
+      expect(res.json().error.message).toMatch(/too many attempts/i);
     });
   });
 
@@ -182,10 +218,7 @@ describe('Auth Routes', () => {
   describe('POST /api/v1/auth/refresh', () => {
     it('returns new tokens for valid refresh token', async () => {
       // Use a different user (vendor) to avoid token collision with earlier login
-      const loginRes = await inject('POST', '/api/v1/auth/verify-otp', {
-        phone: '+5926002000',
-        code: '123456',
-      });
+      const loginRes = await loginWithOtp(app, '+5926002000');
       const loginBody = loginRes.json();
       expect(loginBody.data.tokens).toBeDefined();
       const { refreshToken } = loginBody.data.tokens;
@@ -196,7 +229,8 @@ describe('Auth Routes', () => {
       expect(body.success).toBe(true);
       expect(body.data.accessToken).toBeDefined();
       expect(body.data.refreshToken).toBeDefined();
-      expect(body.data.expiresIn).toBe(86400);
+      // SEC-3: access tokens are 30 minutes now, not 24h
+      expect(body.data.expiresIn).toBe(1800);
     });
 
     it('rejects invalid refresh token', async () => {
@@ -204,6 +238,11 @@ describe('Auth Routes', () => {
         refreshToken: 'invalid-token-that-does-not-exist',
       });
       expect(res.statusCode).toBe(401);
+    });
+
+    it('rejects malformed body — missing refreshToken (SEC-4)', async () => {
+      const res = await inject('POST', '/api/v1/auth/refresh', {});
+      expect(res.statusCode).toBe(400);
     });
   });
 
@@ -214,10 +253,7 @@ describe('Auth Routes', () => {
   describe('POST /api/v1/auth/logout', () => {
     it('invalidates the token', async () => {
       // Use rider user to avoid token collision with earlier logins
-      const loginRes = await inject('POST', '/api/v1/auth/verify-otp', {
-        phone: '+5926004000',
-        code: '123456',
-      });
+      const loginRes = await loginWithOtp(app, '+5926004000');
       const loginBody = loginRes.json();
       expect(loginBody.data.tokens).toBeDefined();
       const { accessToken } = loginBody.data.tokens;
