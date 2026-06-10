@@ -115,84 +115,82 @@ export class OrderService {
     const orderType = cart.vendor.vendorType === 'SUPERMARKET' ? 'GROCERY_DELIVERY' : 'FOOD_DELIVERY';
     const estimatedDeliveryTime = estimateDeliveryMinutes(distanceKm) + (cart.vendor.estimatedPrepTime || 30);
 
-    const order = await this.prisma.order.create({
-      data: {
-        orderNumber,
-        orderType,
-        customerId: input.userId,
-        vendorId: cart.vendor.id,
-        status: 'PENDING',
-        pickupAddress: `${cart.vendor.addressLine1}, ${cart.vendor.city}`,
-        pickupLat: cart.vendor.latitude,
-        pickupLng: cart.vendor.longitude,
-        deliveryAddress: `${address.addressLine1}, ${address.city}`,
-        deliveryLat: address.latitude,
-        deliveryLng: address.longitude,
-        deliveryInstructions: input.deliveryInstructions,
-        subtotalBase,
-        subtotalMarkup,
-        subtotalCustomer,
-        deliveryFee,
-        tipAmount: tip,
-        discount,
-        totalAmount,
-        paymentMethod: input.paymentMethod as 'CASH' | 'MOBILE_MONEY' | 'BANK_TRANSFER' | 'CARD' | 'WALLET',
-        estimatedPrepTime: cart.vendor.estimatedPrepTime,
-        estimatedDeliveryTime,
-        scheduledFor: input.scheduledFor ? new Date(input.scheduledFor) : undefined,
-        promoCodeId,
-        items: {
-          create: orderItems.map((oi) => ({
-            itemId: oi.itemId,
-            name: oi.name,
-            quantity: oi.quantity,
-            basePrice: oi.basePrice,
-            markedUpPrice: oi.markedUpPrice,
-            markupAmount: oi.markupAmount,
-            totalBase: oi.totalBase,
-            totalMarkup: oi.totalMarkup,
-            totalCustomer: oi.totalCustomer,
-            specialInstructions: oi.specialInstructions,
-          })),
+    // All writes are atomic: order creation, stats, cart deletion all commit or all roll back
+    const order = await this.prisma.$transaction(async (tx) => {
+      const order = await tx.order.create({
+        data: {
+          orderNumber,
+          orderType,
+          customerId: input.userId,
+          vendorId: cart.vendor.id,
+          status: 'PENDING',
+          pickupAddress: `${cart.vendor.addressLine1}, ${cart.vendor.city}`,
+          pickupLat: cart.vendor.latitude,
+          pickupLng: cart.vendor.longitude,
+          deliveryAddress: `${address.addressLine1}, ${address.city}`,
+          deliveryLat: address.latitude,
+          deliveryLng: address.longitude,
+          deliveryInstructions: input.deliveryInstructions,
+          subtotalBase,
+          subtotalMarkup,
+          subtotalCustomer,
+          deliveryFee,
+          tipAmount: tip,
+          discount,
+          totalAmount,
+          paymentMethod: input.paymentMethod as 'CASH' | 'MOBILE_MONEY' | 'BANK_TRANSFER' | 'CARD' | 'WALLET',
+          estimatedPrepTime: cart.vendor.estimatedPrepTime,
+          estimatedDeliveryTime,
+          scheduledFor: input.scheduledFor ? new Date(input.scheduledFor) : undefined,
+          promoCodeId,
+          items: {
+            create: orderItems.map((oi) => ({
+              itemId: oi.itemId,
+              name: oi.name,
+              quantity: oi.quantity,
+              basePrice: oi.basePrice,
+              markedUpPrice: oi.markedUpPrice,
+              markupAmount: oi.markupAmount,
+              totalBase: oi.totalBase,
+              totalMarkup: oi.totalMarkup,
+              totalCustomer: oi.totalCustomer,
+              specialInstructions: oi.specialInstructions,
+            })),
+          },
+          statusHistory: {
+            create: { status: 'PENDING', changedBy: input.userId, note: 'Order placed' },
+          },
         },
-        statusHistory: {
-          create: { status: 'PENDING', changedBy: input.userId, note: 'Order placed' },
-        },
-      },
-      include: { items: true, vendor: { select: { id: true, name: true, ownerId: true } } },
-    });
-
-    // Update promo code usage
-    if (promoCodeId) {
-      await this.prisma.promoCode.update({
-        where: { id: promoCodeId },
-        data: { currentUses: { increment: 1 } },
+        include: { items: true, vendor: { select: { id: true, name: true, ownerId: true } } },
       });
-    }
 
-    // Update stats
-    await Promise.all([
-      this.prisma.customer.update({
+      if (promoCodeId) {
+        await tx.promoCode.update({
+          where: { id: promoCodeId },
+          data: { currentUses: { increment: 1 } },
+        });
+      }
+
+      await tx.customer.update({
         where: { userId: input.userId },
         data: { totalOrders: { increment: 1 }, totalSpent: { increment: totalAmount } },
-      }),
-      this.prisma.vendor.update({
+      });
+      await tx.vendor.update({
         where: { id: cart.vendor.id },
         data: { totalOrders: { increment: 1 } },
-      }),
-      this.prisma.item.updateMany({
+      });
+      await tx.item.updateMany({
         where: { id: { in: orderItems.map((oi) => oi.itemId) } },
         data: { totalOrdered: { increment: 1 } },
-      }),
-    ]);
+      });
+      await tx.cart.delete({ where: { id: cart.id } });
 
-    // Clear cart
-    await this.prisma.cart.delete({ where: { id: cart.id } });
+      return order;
+    });
 
-    // Emit events
+    // Post-transaction: emit events and notify (these are best-effort)
     this.io.emit('order:new', { orderId: order.id, vendorId: cart.vendor.id, orderNumber });
 
-    // Notify vendor
     const vendorOwner = await this.prisma.vendorOwner.findUnique({ where: { id: order.vendor!.ownerId } });
     if (vendorOwner) {
       await this.notifications.newOrderForVendor(
