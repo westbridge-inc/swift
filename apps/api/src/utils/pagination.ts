@@ -17,8 +17,11 @@ export interface PaginatedResult<T> {
 }
 
 export function parsePagination(query: Record<string, string | undefined>): PaginationParams {
-  const page = Math.max(1, parseInt(query['page'] || '1', 10));
-  const limit = Math.min(50, Math.max(1, parseInt(query['limit'] || '20', 10)));
+  const rawPage = parseInt(query['page'] || '1', 10);
+  const rawLimit = parseInt(query['limit'] || '20', 10);
+  // Non-numeric input must not reach Prisma as NaN
+  const page = Math.max(1, Number.isNaN(rawPage) ? 1 : rawPage);
+  const limit = Math.min(50, Math.max(1, Number.isNaN(rawLimit) ? 20 : rawLimit));
   return { page, limit, skip: (page - 1) * limit };
 }
 

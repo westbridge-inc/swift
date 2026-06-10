@@ -1,9 +1,25 @@
 import type { FastifyInstance } from 'fastify';
+import { z } from 'zod';
+
+const createRoomSchema = z.object({
+  orderId: z.string().min(1),
+});
+
+const sendMessageSchema = z.object({
+  message: z.string().min(1).max(2000),
+  messageType: z.string().min(1).max(30).default('text'),
+  mediaUrl: z.string().max(2048).optional(),
+});
+
+const messagesQuerySchema = z.object({
+  before: z.coerce.date().optional(),
+  limit: z.coerce.number().int().min(1).max(100).default(50),
+});
 
 export async function chatRoutes(app: FastifyInstance) {
   // Get or create chat room for an order
   app.post('/rooms', { preHandler: [app.authenticate] }, async (request) => {
-    const { orderId } = request.body as { orderId: string };
+    const { orderId } = createRoomSchema.parse(request.body);
 
     // Verify user is part of this order
     const order = await app.prisma.order.findUnique({
@@ -53,11 +69,7 @@ export async function chatRoutes(app: FastifyInstance) {
   // Send a message
   app.post('/rooms/:roomId/messages', { preHandler: [app.authenticate] }, async (request) => {
     const { roomId } = request.params as { roomId: string };
-    const { message, messageType = 'text', mediaUrl } = request.body as {
-      message: string;
-      messageType?: string;
-      mediaUrl?: string;
-    };
+    const { message, messageType, mediaUrl } = sendMessageSchema.parse(request.body);
 
     // Verify participation
     const participant = await app.prisma.chatRoomParticipant.findFirst({
@@ -116,7 +128,7 @@ export async function chatRoutes(app: FastifyInstance) {
   // Get messages
   app.get('/rooms/:roomId/messages', { preHandler: [app.authenticate] }, async (request) => {
     const { roomId } = request.params as { roomId: string };
-    const { before, limit = '50' } = request.query as Record<string, string>;
+    const { before, limit } = messagesQuerySchema.parse(request.query);
 
     const participant = await app.prisma.chatRoomParticipant.findFirst({
       where: { chatRoomId: roomId, userId: request.user.userId },
@@ -126,10 +138,10 @@ export async function chatRoutes(app: FastifyInstance) {
     const messages = await app.prisma.chatMessage.findMany({
       where: {
         chatRoomId: roomId,
-        ...(before && { createdAt: { lt: new Date(before) } }),
+        ...(before && { createdAt: { lt: before } }),
       },
       orderBy: { createdAt: 'desc' },
-      take: parseInt(limit, 10),
+      take: limit,
     });
 
     // Mark as read
