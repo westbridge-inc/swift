@@ -40,3 +40,6 @@ apps/mobile/android/app/build/
 
 # Coverage
 coverage/
+
+# TypeScript incremental build info
+*.tsbuildinfo
