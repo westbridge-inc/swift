@@ -1,4 +1,6 @@
 import type { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
+import { z } from 'zod';
+import { VendorType, OrderStatus, TransactionType, NotificationType } from '@prisma/client';
 import { calculateMarkup, calculateCustomerPrice, calculateDeliveryFee } from '../../utils/markup';
 import { estimateDrivingDistance, estimateDeliveryMinutes } from '../../utils/distance';
 import { parsePagination, paginatedResponse } from '../../utils/pagination';
@@ -7,6 +9,130 @@ import { OrderService } from '../order/order.service';
 import { RatingService } from '../rating/rating.service';
 import { WalletService } from '../wallet/wallet.service';
 import { NotificationService } from '../notification/notification.service';
+
+// ---------------------------------------------------------------------------
+// Input schemas
+// ---------------------------------------------------------------------------
+
+const updateProfileSchema = z.object({
+  firstName: z.string().trim().min(1).max(50).optional(),
+  lastName: z.string().trim().min(1).max(50).optional(),
+  email: z.string().email().optional(),
+  avatar: z.string().max(2048).optional(),
+});
+
+const createAddressSchema = z.object({
+  label: z.string().trim().min(1).max(50),
+  addressLine1: z.string().trim().min(1).max(200),
+  addressLine2: z.string().max(200).optional(),
+  city: z.string().trim().min(1).max(100),
+  region: z.string().max(100).optional(),
+  latitude: z.number().min(-90).max(90),
+  longitude: z.number().min(-180).max(180),
+  instructions: z.string().max(500).optional(),
+  isDefault: z.boolean().optional(),
+});
+
+const updateAddressSchema = createAddressSchema.omit({ isDefault: true }).partial();
+
+const latLngQuerySchema = z.object({
+  lat: z.coerce.number().min(-90).max(90).optional(),
+  lng: z.coerce.number().min(-180).max(180).optional(),
+});
+
+const vendorsBrowseQuerySchema = latLngQuerySchema.extend({
+  type: z.nativeEnum(VendorType).optional(),
+  cuisine: z.string().max(50).optional(),
+  search: z.string().max(100).optional(),
+  open: z.enum(['true', 'false']).optional(),
+  sort: z.string().max(30).optional(),
+});
+
+const addCartItemSchema = z.object({
+  vendorId: z.string().min(1),
+  itemId: z.string().min(1),
+  quantity: z.number().int().min(1).max(99).optional(),
+  selectedOptions: z.record(z.unknown()).optional(),
+  specialInstructions: z.string().max(500).optional(),
+});
+
+const updateCartItemSchema = z.object({
+  // <= 0 removes the item, so no lower bound here
+  quantity: z.number().int().max(99),
+  selectedOptions: z.record(z.unknown()).optional(),
+  specialInstructions: z.string().max(500).optional(),
+});
+
+const cartAddressSchema = z.object({
+  addressId: z.string().min(1),
+});
+
+const cartTipSchema = z.object({
+  amount: z.number().min(0),
+});
+
+const cartInstructionsSchema = z.object({
+  instructions: z.string().max(500),
+});
+
+const checkoutSchema = z.object({
+  paymentMethod: z.string().max(30).optional(),
+  deliveryInstructions: z.string().max(500).optional(),
+  tipAmount: z.number().min(0).optional(),
+  scheduledFor: z.string().max(40).optional(),
+  promoCode: z.string().max(40).optional(),
+});
+
+const customerOrdersQuerySchema = z.object({
+  status: z.string().max(300).optional(),
+  from: z.coerce.date().optional(),
+  to: z.coerce.date().optional(),
+});
+
+const orderStatusListSchema = z.array(z.nativeEnum(OrderStatus)).min(1);
+
+const cancelOrderSchema = z.object({
+  reason: z.string().max(500).optional(),
+});
+
+const rateOrderSchema = z.object({
+  vendorScore: z.number().int().min(1).max(5).optional(),
+  vendorComment: z.string().max(1000).optional(),
+  vendorTags: z.array(z.string().max(40)).max(20).optional(),
+  riderScore: z.number().int().min(1).max(5).optional(),
+  riderComment: z.string().max(1000).optional(),
+  driverScore: z.number().int().min(1).max(5).optional(),
+  driverComment: z.string().max(1000).optional(),
+});
+
+const walletTopupSchema = z.object({
+  amount: z.number().positive(),
+  paymentMethod: z.string().max(30),
+  externalRef: z.string().max(200).optional(),
+});
+
+const walletWithdrawSchema = z.object({
+  amount: z.number().positive(),
+  method: z.string().max(30),
+  destination: z.record(z.unknown()),
+});
+
+const walletTransactionsQuerySchema = z.object({
+  type: z.nativeEnum(TransactionType).optional(),
+});
+
+const notificationsQuerySchema = z.object({
+  type: z.nativeEnum(NotificationType).optional(),
+  unread: z.enum(['true', 'false']).optional(),
+});
+
+const switchRoleSchema = z.object({
+  role: z.enum(['CUSTOMER', 'VENDOR', 'RIDER', 'DRIVER']),
+});
+
+const promoValidateSchema = z.object({
+  code: z.string().trim().min(1).max(40),
+});
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -280,12 +406,7 @@ export async function customerRoutes(app: FastifyInstance) {
 
   app.put('/profile', async (request: AuthRequest, _reply: FastifyReply) => {
     const { userId } = request.user;
-    const body = request.body as {
-      firstName?: string;
-      lastName?: string;
-      email?: string;
-      avatar?: string;
-    };
+    const body = updateProfileSchema.parse(request.body);
 
     if (body.email) {
       const existing = await app.prisma.user.findFirst({
@@ -327,21 +448,7 @@ export async function customerRoutes(app: FastifyInstance) {
 
   app.post('/addresses', async (request: AuthRequest, reply: FastifyReply) => {
     const { userId } = request.user;
-    const body = request.body as {
-      label: string;
-      addressLine1: string;
-      addressLine2?: string;
-      city: string;
-      region?: string;
-      latitude: number;
-      longitude: number;
-      instructions?: string;
-      isDefault?: boolean;
-    };
-
-    if (!body.label || !body.addressLine1 || !body.city || body.latitude == null || body.longitude == null) {
-      throw new ValidationError('label, addressLine1, city, latitude, and longitude are required');
-    }
+    const body = createAddressSchema.parse(request.body);
 
     // Enforce address limit
     const count = await app.prisma.address.count({ where: { userId } });
@@ -377,16 +484,7 @@ export async function customerRoutes(app: FastifyInstance) {
   app.put('/addresses/:id', async (request: AuthRequest) => {
     const { id } = request.params as { id: string };
     const { userId } = request.user;
-    const body = request.body as {
-      label?: string;
-      addressLine1?: string;
-      addressLine2?: string;
-      city?: string;
-      region?: string;
-      latitude?: number;
-      longitude?: number;
-      instructions?: string;
-    };
+    const body = updateAddressSchema.parse(request.body);
 
     const existing = await app.prisma.address.findFirst({ where: { id, userId } });
     if (!existing) throw new NotFoundError('Address', id);
@@ -451,9 +549,7 @@ export async function customerRoutes(app: FastifyInstance) {
 
   app.get('/home', async (request: AuthRequest) => {
     const { userId } = request.user;
-    const query = request.query as { lat?: string; lng?: string };
-    const lat = query.lat ? parseFloat(query.lat) : undefined;
-    const lng = query.lng ? parseFloat(query.lng) : undefined;
+    const { lat, lng } = latLngQuerySchema.parse(request.query);
 
     // Try Redis cache
     const cacheKey = `home:${userId}:${lat ?? 'x'}:${lng ?? 'x'}`;
@@ -570,7 +666,7 @@ export async function customerRoutes(app: FastifyInstance) {
   app.get('/vendors', async (request: AuthRequest) => {
     const query = request.query as Record<string, string | undefined>;
     const { page, limit, skip } = parsePagination(query);
-    const { type, cuisine, search, lat, lng, open, sort } = query;
+    const { type, cuisine, search, lat, lng, open, sort } = vendorsBrowseQuerySchema.parse(request.query);
 
     const where: Record<string, unknown> = { status: 'ACTIVE' };
     if (type) where['vendorType'] = type;
@@ -602,8 +698,8 @@ export async function customerRoutes(app: FastifyInstance) {
       app.prisma.vendor.count({ where }),
     ]);
 
-    const userLat = lat ? parseFloat(lat) : undefined;
-    const userLng = lng ? parseFloat(lng) : undefined;
+    const userLat = lat;
+    const userLng = lng;
 
     // Favorite lookup
     const favoriteIds = new Set(
@@ -631,9 +727,7 @@ export async function customerRoutes(app: FastifyInstance) {
 
   app.get('/vendors/:id', async (request: AuthRequest) => {
     const { id } = request.params as { id: string };
-    const query = request.query as { lat?: string; lng?: string };
-    const lat = query.lat ? parseFloat(query.lat) : undefined;
-    const lng = query.lng ? parseFloat(query.lng) : undefined;
+    const { lat, lng } = latLngQuerySchema.parse(request.query);
 
     const vendor = await app.prisma.vendor.findUnique({
       where: { id },
@@ -752,9 +846,7 @@ export async function customerRoutes(app: FastifyInstance) {
 
   app.get('/favorites', async (request: AuthRequest) => {
     const { userId } = request.user;
-    const query = request.query as { lat?: string; lng?: string };
-    const lat = query.lat ? parseFloat(query.lat) : undefined;
-    const lng = query.lng ? parseFloat(query.lng) : undefined;
+    const { lat, lng } = latLngQuerySchema.parse(request.query);
 
     const customer = await app.prisma.customer.findUnique({
       where: { userId },
@@ -815,9 +907,7 @@ export async function customerRoutes(app: FastifyInstance) {
   // ========================================================================
 
   app.get('/cart', async (request: AuthRequest) => {
-    const query = request.query as { lat?: string; lng?: string };
-    const lat = query.lat ? parseFloat(query.lat) : undefined;
-    const lng = query.lng ? parseFloat(query.lng) : undefined;
+    const { lat, lng } = latLngQuerySchema.parse(request.query);
 
     const cart = await buildCartResponse(app, request.user.userId, lat, lng);
     return { success: true, data: cart };
@@ -825,17 +915,7 @@ export async function customerRoutes(app: FastifyInstance) {
 
   app.post('/cart/items', async (request: AuthRequest, reply: FastifyReply) => {
     const { userId } = request.user;
-    const body = request.body as {
-      vendorId: string;
-      itemId: string;
-      quantity?: number;
-      selectedOptions?: Record<string, unknown>;
-      specialInstructions?: string;
-    };
-
-    if (!body.vendorId || !body.itemId) {
-      throw new ValidationError('vendorId and itemId are required');
-    }
+    const body = addCartItemSchema.parse(request.body);
 
     const quantity = Math.max(1, Math.min(99, body.quantity ?? 1));
 
@@ -930,9 +1010,7 @@ export async function customerRoutes(app: FastifyInstance) {
   app.put('/cart/items/:id', async (request: AuthRequest) => {
     const { id } = request.params as { id: string };
     const { userId } = request.user;
-    const body = request.body as { quantity: number; selectedOptions?: Record<string, unknown>; specialInstructions?: string };
-
-    if (body.quantity == null) throw new ValidationError('quantity is required');
+    const body = updateCartItemSchema.parse(request.body);
 
     // Verify ownership
     const cartItem = await app.prisma.cartItem.findUnique({
@@ -1008,9 +1086,7 @@ export async function customerRoutes(app: FastifyInstance) {
 
   app.put('/cart/address', async (request: AuthRequest) => {
     const { userId } = request.user;
-    const { addressId } = request.body as { addressId: string };
-
-    if (!addressId) throw new ValidationError('addressId is required');
+    const { addressId } = cartAddressSchema.parse(request.body);
 
     // Verify address belongs to user
     const address = await app.prisma.address.findFirst({
@@ -1046,9 +1122,8 @@ export async function customerRoutes(app: FastifyInstance) {
 
   app.put('/cart/tip', async (request: AuthRequest) => {
     const { userId } = request.user;
-    const { amount } = request.body as { amount: number };
+    const { amount } = cartTipSchema.parse(request.body);
 
-    if (amount == null || amount < 0) throw new ValidationError('Tip amount must be 0 or greater');
     if (amount > MAX_TIP_GYD) throw new ValidationError(`Tip cannot exceed $${MAX_TIP_GYD.toLocaleString()} GYD`);
 
     const cart = await app.prisma.cart.findUnique({ where: { customerId: userId } });
@@ -1063,7 +1138,7 @@ export async function customerRoutes(app: FastifyInstance) {
 
   app.put('/cart/instructions', async (request: AuthRequest) => {
     const { userId } = request.user;
-    const { instructions } = request.body as { instructions: string };
+    const { instructions } = cartInstructionsSchema.parse(request.body);
 
     const cart = await app.prisma.cart.findUnique({ where: { customerId: userId } });
     if (!cart) throw new AppError(400, 'NO_CART', 'No active cart');
@@ -1083,13 +1158,7 @@ export async function customerRoutes(app: FastifyInstance) {
 
   app.post('/checkout', async (request: AuthRequest) => {
     const { userId } = request.user;
-    const body = request.body as {
-      paymentMethod?: string;
-      deliveryInstructions?: string;
-      tipAmount?: number;
-      scheduledFor?: string;
-      promoCode?: string;
-    };
+    const body = checkoutSchema.parse(request.body ?? {});
 
     // Validate payment method
     const validMethods = ['CASH', 'MOBILE_MONEY', 'BANK_TRANSFER', 'CARD', 'WALLET'];
@@ -1170,17 +1239,17 @@ export async function customerRoutes(app: FastifyInstance) {
     const { userId } = request.user;
     const query = request.query as Record<string, string | undefined>;
     const { page, limit, skip } = parsePagination(query);
-    const { status, from, to } = query;
+    const { status, from, to } = customerOrdersQuerySchema.parse(request.query);
 
     const where: Record<string, unknown> = { customerId: userId };
     if (status) {
-      const statuses = status.split(',').map((s) => s.trim().toUpperCase());
+      const statuses = orderStatusListSchema.parse(status.split(',').map((s) => s.trim().toUpperCase()));
       where['status'] = statuses.length === 1 ? statuses[0] : { in: statuses };
     }
     if (from || to) {
       const dateFilter: Record<string, Date> = {};
-      if (from) dateFilter['gte'] = new Date(from);
-      if (to) dateFilter['lte'] = new Date(to);
+      if (from) dateFilter['gte'] = from;
+      if (to) dateFilter['lte'] = to;
       where['placedAt'] = dateFilter;
     }
 
@@ -1338,7 +1407,7 @@ export async function customerRoutes(app: FastifyInstance) {
   app.post('/orders/:id/cancel', async (request: AuthRequest) => {
     const { id } = request.params as { id: string };
     const { userId } = request.user;
-    const { reason } = request.body as { reason?: string };
+    const { reason } = cancelOrderSchema.parse(request.body ?? {});
 
     const result = await orderService.cancelOrder(id, userId, reason);
 
@@ -1379,15 +1448,7 @@ export async function customerRoutes(app: FastifyInstance) {
   app.post('/orders/:id/rate', async (request: AuthRequest) => {
     const { id } = request.params as { id: string };
     const { userId } = request.user;
-    const body = request.body as {
-      vendorScore?: number;
-      vendorComment?: string;
-      vendorTags?: string[];
-      riderScore?: number;
-      riderComment?: string;
-      driverScore?: number;
-      driverComment?: string;
-    };
+    const body = rateOrderSchema.parse(request.body);
 
     if (!body.vendorScore && !body.riderScore && !body.driverScore) {
       throw new ValidationError('At least one rating score is required (vendorScore, riderScore, or driverScore)');
@@ -1439,15 +1500,8 @@ export async function customerRoutes(app: FastifyInstance) {
 
   app.post('/wallet/topup', async (request: AuthRequest, reply: FastifyReply) => {
     const { userId } = request.user;
-    const body = request.body as {
-      amount: number;
-      paymentMethod: string;
-      externalRef?: string;
-    };
+    const body = walletTopupSchema.parse(request.body);
 
-    if (!body.amount || body.amount <= 0) {
-      throw new ValidationError('Amount must be greater than 0');
-    }
     if (body.amount < 500) {
       throw new ValidationError('Minimum top-up amount is $500 GYD');
     }
@@ -1475,22 +1529,12 @@ export async function customerRoutes(app: FastifyInstance) {
 
   app.post('/wallet/withdraw', async (request: AuthRequest) => {
     const { userId } = request.user;
-    const body = request.body as {
-      amount: number;
-      method: string;
-      destination: Record<string, unknown>;
-    };
+    const body = walletWithdrawSchema.parse(request.body);
 
-    if (!body.amount || body.amount <= 0) {
-      throw new ValidationError('Amount must be greater than 0');
-    }
     if (body.amount < 1000) {
       throw new ValidationError('Minimum withdrawal amount is $1,000 GYD');
     }
-    if (!body.method) {
-      throw new ValidationError('Withdrawal method is required');
-    }
-    if (!body.destination || Object.keys(body.destination).length === 0) {
+    if (Object.keys(body.destination).length === 0) {
       throw new ValidationError('Destination details are required');
     }
 
@@ -1511,7 +1555,7 @@ export async function customerRoutes(app: FastifyInstance) {
     const { userId } = request.user;
     const query = request.query as Record<string, string | undefined>;
     const { page, limit, skip } = parsePagination(query);
-    const { type } = query;
+    const { type } = walletTransactionsQuerySchema.parse(request.query);
 
     const { transactions, total } = await walletService.getTransactions(userId, {
       type,
@@ -1541,7 +1585,7 @@ export async function customerRoutes(app: FastifyInstance) {
     const { userId } = request.user;
     const query = request.query as Record<string, string | undefined>;
     const { page, limit, skip } = parsePagination(query);
-    const { type, unread } = query;
+    const { type, unread } = notificationsQuerySchema.parse(request.query);
 
     const where: Record<string, unknown> = { userId };
     if (type) where['type'] = type;
@@ -1591,14 +1635,7 @@ export async function customerRoutes(app: FastifyInstance) {
 
   app.post('/switch-role', async (request: AuthRequest) => {
     const { userId } = request.user;
-    const { role } = request.body as { role: string };
-
-    if (!role) throw new ValidationError('role is required');
-
-    const validRoles = ['CUSTOMER', 'VENDOR', 'RIDER', 'DRIVER'];
-    if (!validRoles.includes(role)) {
-      throw new ValidationError(`Invalid role. Valid options: ${validRoles.join(', ')}`);
-    }
+    const { role } = switchRoleSchema.parse(request.body);
 
     const user = await app.prisma.user.findUnique({
       where: { id: userId },
@@ -1642,11 +1679,7 @@ export async function customerRoutes(app: FastifyInstance) {
 
   app.post('/promo/validate', async (request: AuthRequest) => {
     const { userId } = request.user;
-    const { code } = request.body as { code: string };
-
-    if (!code || typeof code !== 'string') {
-      throw new ValidationError('Promo code is required');
-    }
+    const { code } = promoValidateSchema.parse(request.body);
 
     const promo = await app.prisma.promoCode.findUnique({
       where: { code: code.toUpperCase().trim() },

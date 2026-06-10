@@ -1,7 +1,157 @@
 import type { FastifyInstance } from 'fastify';
+import { z } from 'zod';
+import { OrderStatus, OrderType, SettlementStatus } from '@prisma/client';
 import { OrderService } from '../order/order.service';
 import { parsePagination, paginatedResponse } from '../../utils/pagination';
 import { AppError, NotFoundError, ValidationError } from '../../utils/errors';
+
+// ---------------------------------------------------------------------------
+// Input schemas
+// ---------------------------------------------------------------------------
+
+const updateVendorProfileSchema = z.object({
+  name: z.string().trim().min(1).max(100).optional(),
+  description: z.string().max(2000).optional(),
+  phone: z.string().max(20).optional(),
+  email: z.string().email().optional(),
+  addressLine1: z.string().max(200).optional(),
+  addressLine2: z.string().max(200).optional(),
+  city: z.string().max(100).optional(),
+  region: z.string().max(100).optional(),
+  latitude: z.number().min(-90).max(90).optional(),
+  longitude: z.number().min(-180).max(180).optional(),
+  logoUrl: z.string().max(2048).optional(),
+  coverImageUrl: z.string().max(2048).optional(),
+  cuisineTypes: z.array(z.string().max(50)).max(20).optional(),
+  tags: z.array(z.string().max(50)).max(30).optional(),
+  deliveryRadius: z.number().positive().max(100).optional(),
+  minOrderAmount: z.number().min(0).optional(),
+  estimatedPrepTime: z.number().int().min(0).max(480).optional(),
+});
+
+const acceptOrderSchema = z.object({
+  estimatedPrepTime: z.number().int().min(1).max(480).optional(),
+});
+
+const rejectOrderSchema = z.object({
+  reason: z.string().max(500).optional(),
+});
+
+const createCategorySchema = z.object({
+  name: z.string().trim().min(1).max(100),
+  description: z.string().max(1000).optional(),
+  imageUrl: z.string().max(2048).optional(),
+  sortOrder: z.number().int().min(0).optional(),
+});
+
+const updateCategorySchema = createCategorySchema.partial().extend({
+  isActive: z.boolean().optional(),
+});
+
+const reorderCategoriesSchema = z.object({
+  order: z
+    .array(z.object({ id: z.string().min(1), sortOrder: z.number().int().min(0) }))
+    .min(1)
+    .max(200),
+});
+
+const optionInputSchema = z.object({
+  name: z.string().trim().min(1).max(100),
+  additionalPrice: z.number().min(0).optional(),
+  isDefault: z.boolean().optional(),
+  sortOrder: z.number().int().min(0).optional(),
+});
+
+const optionGroupInputSchema = z.object({
+  name: z.string().trim().min(1).max(100),
+  isRequired: z.boolean().optional(),
+  minSelect: z.number().int().min(0).max(50).optional(),
+  maxSelect: z.number().int().min(1).max(50).optional(),
+  sortOrder: z.number().int().min(0).optional(),
+});
+
+const createItemSchema = z.object({
+  categoryId: z.string().min(1),
+  name: z.string().trim().min(1).max(150),
+  description: z.string().max(2000).optional(),
+  imageUrl: z.string().max(2048).optional(),
+  basePrice: z.number().min(0).max(10_000_000),
+  sku: z.string().max(64).optional(),
+  unit: z.string().max(30).optional(),
+  stockQuantity: z.number().int().min(0).optional(),
+  isAvailable: z.boolean().optional(),
+  isPopular: z.boolean().optional(),
+  dietaryTags: z.array(z.string().max(40)).max(30).optional(),
+  allergens: z.array(z.string().max(40)).max(30).optional(),
+  sortOrder: z.number().int().min(0).optional(),
+  optionGroups: z
+    .array(optionGroupInputSchema.extend({ options: z.array(optionInputSchema).max(100) }))
+    .max(50)
+    .optional(),
+});
+
+const updateItemSchema = createItemSchema.omit({ optionGroups: true }).partial();
+
+const itemAvailabilitySchema = z.object({
+  isAvailable: z.boolean().optional(),
+});
+
+const addOptionGroupSchema = optionGroupInputSchema.extend({
+  options: z.array(optionInputSchema).max(100).optional(),
+});
+
+const updateOptionGroupSchema = optionGroupInputSchema.partial();
+
+const addOptionSchema = optionInputSchema.extend({
+  isAvailable: z.boolean().optional(),
+});
+
+const updateOptionSchema = addOptionSchema.partial();
+
+const operatingHoursSchema = z.object({
+  hours: z
+    .array(
+      z.object({
+        dayOfWeek: z.number().int().min(0).max(6),
+        openTime: z.string().max(10).optional().default(''),
+        closeTime: z.string().max(10).optional().default(''),
+        isClosed: z.boolean(),
+      }),
+    )
+    .min(1)
+    .max(7),
+});
+
+const vendorOrdersQuerySchema = z.object({
+  status: z.nativeEnum(OrderStatus).optional(),
+  orderType: z.nativeEnum(OrderType).optional(),
+  from: z.coerce.date().optional(),
+  to: z.coerce.date().optional(),
+  search: z.string().max(100).optional(),
+});
+
+const vendorItemsQuerySchema = z.object({
+  categoryId: z.string().optional(),
+  isAvailable: z.enum(['true', 'false']).optional(),
+  search: z.string().max(100).optional(),
+});
+
+const revenueQuerySchema = z.object({
+  days: z.coerce.number().int().min(1).max(90).default(30),
+});
+
+const popularItemsQuerySchema = z.object({
+  limit: z.coerce.number().int().min(1).max(50).default(10),
+});
+
+const settlementsQuerySchema = z.object({
+  status: z.nativeEnum(SettlementStatus).optional(),
+});
+
+const reviewsQuerySchema = z.object({
+  minScore: z.coerce.number().int().min(1).max(5).optional(),
+  maxScore: z.coerce.number().int().min(1).max(5).optional(),
+});
 
 // ---------------------------------------------------------------------------
 // Types
@@ -106,25 +256,7 @@ export async function vendorRoutes(app: FastifyInstance) {
   /** PUT /profile — Update vendor profile details */
   app.put('/profile', auth, async (request) => {
     const { vendorId } = await resolveVendor(app, request.user.userId);
-    const body = request.body as {
-      name?: string;
-      description?: string;
-      phone?: string;
-      email?: string;
-      addressLine1?: string;
-      addressLine2?: string;
-      city?: string;
-      region?: string;
-      latitude?: number;
-      longitude?: number;
-      logoUrl?: string;
-      coverImageUrl?: string;
-      cuisineTypes?: string[];
-      tags?: string[];
-      deliveryRadius?: number;
-      minOrderAmount?: number;
-      estimatedPrepTime?: number;
-    };
+    const body = updateVendorProfileSchema.parse(request.body);
 
     const vendor = await app.prisma.vendor.update({
       where: { id: vendorId },
@@ -197,17 +329,18 @@ export async function vendorRoutes(app: FastifyInstance) {
     const { vendorIds } = await resolveVendor(app, request.user.userId);
     const query = request.query as Record<string, string | undefined>;
     const pagination = parsePagination(query);
+    const { status, orderType, from, to, search } = vendorOrdersQuerySchema.parse(request.query);
 
     const where: Record<string, unknown> = { vendorId: { in: vendorIds } };
-    if (query['status']) where['status'] = query['status'];
-    if (query['orderType']) where['orderType'] = query['orderType'];
-    if (query['from']) where['placedAt'] = { ...(where['placedAt'] as object || {}), gte: new Date(query['from']) };
-    if (query['to']) where['placedAt'] = { ...(where['placedAt'] as object || {}), lte: new Date(query['to']) };
-    if (query['search']) {
+    if (status) where['status'] = status;
+    if (orderType) where['orderType'] = orderType;
+    if (from) where['placedAt'] = { ...(where['placedAt'] as object || {}), gte: from };
+    if (to) where['placedAt'] = { ...(where['placedAt'] as object || {}), lte: to };
+    if (search) {
       where['OR'] = [
-        { orderNumber: { contains: query['search'], mode: 'insensitive' } },
-        { customer: { firstName: { contains: query['search'], mode: 'insensitive' } } },
-        { customer: { lastName: { contains: query['search'], mode: 'insensitive' } } },
+        { orderNumber: { contains: search, mode: 'insensitive' } },
+        { customer: { firstName: { contains: search, mode: 'insensitive' } } },
+        { customer: { lastName: { contains: search, mode: 'insensitive' } } },
       ];
     }
 
@@ -241,8 +374,8 @@ export async function vendorRoutes(app: FastifyInstance) {
     if (order.status !== 'PENDING') {
       throw new AppError(400, 'INVALID_STATUS', `Cannot accept order in ${order.status} status`);
     }
-    const body = request.body as { estimatedPrepTime?: number } | undefined;
-    if (body?.estimatedPrepTime) {
+    const body = acceptOrderSchema.parse(request.body ?? {});
+    if (body.estimatedPrepTime) {
       await app.prisma.order.update({
         where: { id: order.id },
         data: { estimatedPrepTime: body.estimatedPrepTime },
@@ -279,8 +412,8 @@ export async function vendorRoutes(app: FastifyInstance) {
     if (!rejectableStatuses.includes(order.status)) {
       throw new AppError(400, 'INVALID_STATUS', `Cannot reject order in ${order.status} status`);
     }
-    const body = request.body as { reason?: string } | undefined;
-    const reason = body?.reason || 'Rejected by vendor';
+    const body = rejectOrderSchema.parse(request.body ?? {});
+    const reason = body.reason || 'Rejected by vendor';
 
     const updated = await app.prisma.order.update({
       where: { id: order.id },
@@ -343,7 +476,7 @@ export async function vendorRoutes(app: FastifyInstance) {
   /** POST /categories — Create a category */
   app.post('/categories', auth, async (request) => {
     const { vendorId } = await resolveVendor(app, request.user.userId);
-    const body = request.body as { name: string; description?: string; imageUrl?: string; sortOrder?: number };
+    const body = createCategorySchema.parse(request.body);
     if (!body.name?.trim()) throw new ValidationError('Category name is required');
 
     // Auto-assign sortOrder to end if not provided
@@ -375,7 +508,7 @@ export async function vendorRoutes(app: FastifyInstance) {
     const existing = await app.prisma.category.findUnique({ where: { id: request.params.id } });
     if (!existing || existing.vendorId !== vendorId) throw new NotFoundError('Category', request.params.id);
 
-    const body = request.body as { name?: string; description?: string; imageUrl?: string; sortOrder?: number; isActive?: boolean };
+    const body = updateCategorySchema.parse(request.body);
     const category = await app.prisma.category.update({
       where: { id: request.params.id },
       data: {
@@ -414,10 +547,7 @@ export async function vendorRoutes(app: FastifyInstance) {
   /** PUT /categories/reorder — Bulk reorder categories */
   app.put('/categories/reorder', auth, async (request) => {
     const { vendorId } = await resolveVendor(app, request.user.userId);
-    const body = request.body as { order: { id: string; sortOrder: number }[] };
-    if (!Array.isArray(body.order) || body.order.length === 0) {
-      throw new ValidationError('order must be a non-empty array of { id, sortOrder }');
-    }
+    const body = reorderCategoriesSchema.parse(request.body);
 
     await app.prisma.$transaction(
       body.order.map((item) =>
@@ -442,13 +572,13 @@ export async function vendorRoutes(app: FastifyInstance) {
   /** GET /items — List all items, optionally filtered by categoryId */
   app.get('/items', auth, async (request) => {
     const { vendorId } = await resolveVendor(app, request.user.userId);
-    const query = request.query as Record<string, string | undefined>;
+    const query = vendorItemsQuerySchema.parse(request.query);
 
     const where: Record<string, unknown> = { vendorId };
-    if (query['categoryId']) where['categoryId'] = query['categoryId'];
-    if (query['isAvailable'] === 'true') where['isAvailable'] = true;
-    if (query['isAvailable'] === 'false') where['isAvailable'] = false;
-    if (query['search']) where['name'] = { contains: query['search'], mode: 'insensitive' };
+    if (query.categoryId) where['categoryId'] = query.categoryId;
+    if (query.isAvailable === 'true') where['isAvailable'] = true;
+    if (query.isAvailable === 'false') where['isAvailable'] = false;
+    if (query.search) where['name'] = { contains: query.search, mode: 'insensitive' };
 
     const items = await app.prisma.item.findMany({
       where,
@@ -467,37 +597,7 @@ export async function vendorRoutes(app: FastifyInstance) {
   /** POST /items — Create an item with optional option groups */
   app.post('/items', auth, async (request) => {
     const { vendorId } = await resolveVendor(app, request.user.userId);
-    const body = request.body as {
-      categoryId: string;
-      name: string;
-      description?: string;
-      imageUrl?: string;
-      basePrice: number;
-      sku?: string;
-      unit?: string;
-      stockQuantity?: number;
-      isAvailable?: boolean;
-      isPopular?: boolean;
-      dietaryTags?: string[];
-      allergens?: string[];
-      sortOrder?: number;
-      optionGroups?: {
-        name: string;
-        isRequired?: boolean;
-        minSelect?: number;
-        maxSelect?: number;
-        sortOrder?: number;
-        options: {
-          name: string;
-          additionalPrice?: number;
-          isDefault?: boolean;
-          sortOrder?: number;
-        }[];
-      }[];
-    };
-
-    if (!body.name?.trim()) throw new ValidationError('Item name is required');
-    if (body.basePrice === undefined || body.basePrice < 0) throw new ValidationError('Valid base price is required');
+    const body = createItemSchema.parse(request.body);
 
     // Verify category belongs to this vendor
     const category = await app.prisma.category.findUnique({ where: { id: body.categoryId } });
@@ -565,21 +665,7 @@ export async function vendorRoutes(app: FastifyInstance) {
     const existing = await app.prisma.item.findUnique({ where: { id: request.params.id } });
     if (!existing || existing.vendorId !== vendorId) throw new NotFoundError('Item', request.params.id);
 
-    const body = request.body as {
-      categoryId?: string;
-      name?: string;
-      description?: string;
-      imageUrl?: string;
-      basePrice?: number;
-      sku?: string;
-      unit?: string;
-      stockQuantity?: number;
-      isAvailable?: boolean;
-      isPopular?: boolean;
-      dietaryTags?: string[];
-      allergens?: string[];
-      sortOrder?: number;
-    };
+    const body = updateItemSchema.parse(request.body);
 
     // If moving to a different category, verify ownership
     if (body.categoryId && body.categoryId !== existing.categoryId) {
@@ -632,8 +718,8 @@ export async function vendorRoutes(app: FastifyInstance) {
     const existing = await app.prisma.item.findUnique({ where: { id: request.params.id } });
     if (!existing || existing.vendorId !== vendorId) throw new NotFoundError('Item', request.params.id);
 
-    const body = request.body as { isAvailable?: boolean } | undefined;
-    const newAvailability = body?.isAvailable !== undefined ? body.isAvailable : !existing.isAvailable;
+    const body = itemAvailabilitySchema.parse(request.body ?? {});
+    const newAvailability = body.isAvailable !== undefined ? body.isAvailable : !existing.isAvailable;
 
     const item = await app.prisma.item.update({
       where: { id: request.params.id },
@@ -654,15 +740,7 @@ export async function vendorRoutes(app: FastifyInstance) {
     const item = await app.prisma.item.findUnique({ where: { id: request.params.itemId } });
     if (!item || item.vendorId !== vendorId) throw new NotFoundError('Item', request.params.itemId);
 
-    const body = request.body as {
-      name: string;
-      isRequired?: boolean;
-      minSelect?: number;
-      maxSelect?: number;
-      sortOrder?: number;
-      options?: { name: string; additionalPrice?: number; isDefault?: boolean; sortOrder?: number }[];
-    };
-    if (!body.name?.trim()) throw new ValidationError('Option group name is required');
+    const body = addOptionGroupSchema.parse(request.body);
 
     let sortOrder = body.sortOrder;
     if (sortOrder === undefined) {
@@ -708,13 +786,7 @@ export async function vendorRoutes(app: FastifyInstance) {
     });
     if (!existing || existing.item.vendorId !== vendorId) throw new NotFoundError('OptionGroup', request.params.id);
 
-    const body = request.body as {
-      name?: string;
-      isRequired?: boolean;
-      minSelect?: number;
-      maxSelect?: number;
-      sortOrder?: number;
-    };
+    const body = updateOptionGroupSchema.parse(request.body);
 
     const group = await app.prisma.optionGroup.update({
       where: { id: request.params.id },
@@ -759,14 +831,7 @@ export async function vendorRoutes(app: FastifyInstance) {
     });
     if (!group || group.item.vendorId !== vendorId) throw new NotFoundError('OptionGroup', request.params.groupId);
 
-    const body = request.body as {
-      name: string;
-      additionalPrice?: number;
-      isDefault?: boolean;
-      isAvailable?: boolean;
-      sortOrder?: number;
-    };
-    if (!body.name?.trim()) throw new ValidationError('Option name is required');
+    const body = addOptionSchema.parse(request.body);
 
     let sortOrder = body.sortOrder;
     if (sortOrder === undefined) {
@@ -801,13 +866,7 @@ export async function vendorRoutes(app: FastifyInstance) {
     });
     if (!existing || existing.optionGroup.item.vendorId !== vendorId) throw new NotFoundError('Option', request.params.id);
 
-    const body = request.body as {
-      name?: string;
-      additionalPrice?: number;
-      isDefault?: boolean;
-      isAvailable?: boolean;
-      sortOrder?: number;
-    };
+    const body = updateOptionSchema.parse(request.body);
 
     const option = await app.prisma.option.update({
       where: { id: request.params.id },
@@ -854,24 +913,12 @@ export async function vendorRoutes(app: FastifyInstance) {
   /** PUT /hours — Bulk upsert operating hours for all 7 days */
   app.put('/hours', auth, async (request) => {
     const { vendorId } = await resolveVendor(app, request.user.userId);
-    const body = request.body as {
-      hours: {
-        dayOfWeek: number; // 0=Sunday ... 6=Saturday
-        openTime: string;  // "08:00"
-        closeTime: string; // "22:00"
-        isClosed: boolean;
-      }[];
-    };
+    const body = operatingHoursSchema.parse(request.body);
 
-    if (!Array.isArray(body.hours) || body.hours.length === 0) {
-      throw new ValidationError('hours must be a non-empty array');
-    }
-
-    // Validate each entry
+    // Open days must carry both times (closed days may omit them)
     for (const h of body.hours) {
-      if (h.dayOfWeek < 0 || h.dayOfWeek > 6) throw new ValidationError(`Invalid dayOfWeek: ${h.dayOfWeek}`);
-      if (!h.isClosed) {
-        if (!h.openTime || !h.closeTime) throw new ValidationError(`openTime and closeTime required for day ${h.dayOfWeek}`);
+      if (!h.isClosed && (!h.openTime || !h.closeTime)) {
+        throw new ValidationError(`openTime and closeTime required for day ${h.dayOfWeek}`);
       }
     }
 
@@ -978,8 +1025,7 @@ export async function vendorRoutes(app: FastifyInstance) {
   /** GET /analytics/revenue — Daily revenue breakdown for the last 30 days */
   app.get('/analytics/revenue', auth, async (request) => {
     const { vendorId } = await resolveVendor(app, request.user.userId);
-    const query = request.query as Record<string, string | undefined>;
-    const days = Math.min(90, Math.max(1, parseInt(query['days'] || '30', 10)));
+    const { days } = revenueQuerySchema.parse(request.query);
 
     const since = new Date();
     since.setDate(since.getDate() - days);
@@ -1044,8 +1090,7 @@ export async function vendorRoutes(app: FastifyInstance) {
   /** GET /analytics/popular-items — Top items by totalOrdered */
   app.get('/analytics/popular-items', auth, async (request) => {
     const { vendorId } = await resolveVendor(app, request.user.userId);
-    const query = request.query as Record<string, string | undefined>;
-    const limit = Math.min(50, Math.max(1, parseInt(query['limit'] || '10', 10)));
+    const { limit } = popularItemsQuerySchema.parse(request.query);
 
     const items = await app.prisma.item.findMany({
       where: { vendorId },
@@ -1097,8 +1142,9 @@ export async function vendorRoutes(app: FastifyInstance) {
     const query = request.query as Record<string, string | undefined>;
     const pagination = parsePagination(query);
 
+    const { status } = settlementsQuerySchema.parse(request.query);
     const where: Record<string, unknown> = { vendorId };
-    if (query['status']) where['status'] = query['status'];
+    if (status) where['status'] = status;
 
     const [settlements, total] = await Promise.all([
       app.prisma.settlement.findMany({
@@ -1156,8 +1202,9 @@ export async function vendorRoutes(app: FastifyInstance) {
       vendorId,
       type: 'CUSTOMER_TO_VENDOR',
     };
-    if (query['minScore']) where['score'] = { ...(where['score'] as object || {}), gte: parseInt(query['minScore'], 10) };
-    if (query['maxScore']) where['score'] = { ...(where['score'] as object || {}), lte: parseInt(query['maxScore'], 10) };
+    const { minScore, maxScore } = reviewsQuerySchema.parse(request.query);
+    if (minScore) where['score'] = { ...(where['score'] as object || {}), gte: minScore };
+    if (maxScore) where['score'] = { ...(where['score'] as object || {}), lte: maxScore };
 
     const [reviews, total, aggregate] = await Promise.all([
       app.prisma.rating.findMany({

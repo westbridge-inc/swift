@@ -46,16 +46,10 @@ describe('parsePagination', () => {
     expect(parsePagination({ page: '5', limit: '10' }).skip).toBe(40);
   });
 
-  it('handles NaN input gracefully', () => {
-    const result = parsePagination({ page: 'abc', limit: 'xyz' });
-    // parseInt('abc') → NaN → max(1, NaN) = NaN... but Math.max(1, NaN) = NaN
-    // Actually: parseInt('abc') = NaN, Math.max(1, NaN) = NaN
-    // The implementation does: Math.max(1, parseInt(query['page'] || '1', 10))
-    // NaN cases: The result depends on Math.max behavior with NaN
-    // Math.max(1, NaN) === NaN — so page will be NaN
-    // In practice the query will have valid strings from HTTP; but let's verify
-    // the function doesn't throw
-    expect(result).toBeDefined();
+  it('falls back to defaults for non-numeric input (NaN must never reach Prisma)', () => {
+    expect(parsePagination({ page: 'abc', limit: 'xyz' })).toEqual({ page: 1, limit: 20, skip: 0 });
+    expect(parsePagination({ page: 'abc', limit: '10' })).toEqual({ page: 1, limit: 10, skip: 0 });
+    expect(parsePagination({ page: '3', limit: 'xyz' })).toEqual({ page: 3, limit: 20, skip: 40 });
   });
 });
 

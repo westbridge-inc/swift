@@ -1,6 +1,27 @@
 import type { FastifyInstance } from 'fastify';
+import { z } from 'zod';
 import { SearchService } from './search.service';
 import { sortByDistance } from '../../utils/distance';
+
+const searchQuerySchema = z.object({
+  q: z.string().trim().max(200).optional(),
+  type: z.enum(['RESTAURANT', 'SUPERMARKET']).optional(),
+  cuisine: z.string().max(50).optional(),
+  lat: z.coerce.number().min(-90).max(90).optional(),
+  lng: z.coerce.number().min(-180).max(180).optional(),
+  limit: z.coerce.number().int().min(1).max(50).default(10),
+});
+
+const suggestionsQuerySchema = z.object({
+  q: z.string().trim().max(200).optional(),
+});
+
+const nearbyQuerySchema = z.object({
+  lat: z.coerce.number().min(-90).max(90),
+  lng: z.coerce.number().min(-180).max(180),
+  radius: z.coerce.number().positive().max(50).default(5),
+  type: z.enum(['RESTAURANT', 'SUPERMARKET']).optional(),
+});
 
 export async function searchRoutes(app: FastifyInstance) {
   let searchService: SearchService | null = null;
@@ -17,13 +38,11 @@ export async function searchRoutes(app: FastifyInstance) {
 
   // Universal search — searches vendors AND items
   app.get('/search', { preHandler: [app.authenticate] }, async (request) => {
-    const { q, type, cuisine, lat, lng, limit = '10' } = request.query as Record<string, string>;
+    const { q, type, cuisine, lat, lng, limit: parsedLimit } = searchQuerySchema.parse(request.query);
 
-    if (!q || q.trim().length < 2) {
+    if (!q || q.length < 2) {
       return { success: true, data: { vendors: [], items: [] } };
     }
-
-    const parsedLimit = parseInt(limit, 10);
 
     if (searchService) {
       const [vendorResults, itemResults] = await Promise.all([
@@ -46,8 +65,8 @@ export async function searchRoutes(app: FastifyInstance) {
     }
 
     // DB fallback
-    const userLat = lat ? parseFloat(lat) : null;
-    const userLng = lng ? parseFloat(lng) : null;
+    const userLat = lat ?? null;
+    const userLng = lng ?? null;
 
     const [vendors, items] = await Promise.all([
       app.prisma.vendor.findMany({
@@ -59,7 +78,7 @@ export async function searchRoutes(app: FastifyInstance) {
             { cuisineTypes: { hasSome: [q] } },
             { tags: { hasSome: [q] } },
           ],
-          ...(type && { vendorType: type as 'RESTAURANT' | 'SUPERMARKET' }),
+          ...(type && { vendorType: type }),
         },
         select: {
           id: true,
@@ -122,7 +141,7 @@ export async function searchRoutes(app: FastifyInstance) {
 
   // Suggestions / autocomplete
   app.get('/search/suggestions', { preHandler: [app.authenticate] }, async (request) => {
-    const { q } = request.query as { q?: string };
+    const { q } = suggestionsQuerySchema.parse(request.query);
     if (!q || q.length < 2) return { success: true, data: [] };
 
     const [vendors, items] = await Promise.all([
@@ -171,18 +190,13 @@ export async function searchRoutes(app: FastifyInstance) {
 
   // Nearby vendors (location-based)
   app.get('/search/nearby', { preHandler: [app.authenticate] }, async (request) => {
-    const { lat, lng, radius = '5', type } = request.query as Record<string, string>;
-    if (!lat || !lng) return { success: false, error: { code: 'MISSING_LOCATION', message: 'lat and lng are required' } };
-
-    const userLat = parseFloat(lat);
-    const userLng = parseFloat(lng);
-    const radiusKm = parseFloat(radius);
+    const { lat: userLat, lng: userLng, radius: radiusKm, type } = nearbyQuerySchema.parse(request.query);
 
     const vendors = await app.prisma.vendor.findMany({
       where: {
         status: 'ACTIVE',
         isCurrentlyOpen: true,
-        ...(type && { vendorType: type as 'RESTAURANT' | 'SUPERMARKET' }),
+        ...(type && { vendorType: type }),
       },
       select: {
         id: true,
