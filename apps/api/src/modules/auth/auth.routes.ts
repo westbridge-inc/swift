@@ -18,16 +18,32 @@ const registerSchema = z.object({
   email: z.string().email().optional(),
 });
 
+const refreshSchema = z.object({
+  refreshToken: z.string().min(1),
+});
+
+const authRateLimit = {
+  config: {
+    rateLimit: { max: 10, timeWindow: '1 minute' },
+  },
+};
+
+const otpRateLimit = {
+  config: {
+    rateLimit: { max: 5, timeWindow: '1 minute' },
+  },
+};
+
 export async function authRoutes(app: FastifyInstance) {
   const authService = new AuthService(app);
 
-  app.post('/send-otp', async (request, reply) => {
+  app.post('/send-otp', otpRateLimit, async (request, reply) => {
     const body = sendOtpSchema.parse(request.body);
     const result = await authService.sendOtp(body.phone);
     return reply.send({ success: true, data: result });
   });
 
-  app.post('/verify-otp', async (request, reply) => {
+  app.post('/verify-otp', otpRateLimit, async (request, reply) => {
     const body = verifyOtpSchema.parse(request.body);
     const result = await authService.verifyOtp(body.phone, body.code, {
       deviceId: (request.headers['x-device-id'] as string) || 'unknown',
@@ -38,15 +54,15 @@ export async function authRoutes(app: FastifyInstance) {
     return reply.send({ success: true, data: result });
   });
 
-  app.post('/register', async (request, reply) => {
+  app.post('/register', authRateLimit, async (request, reply) => {
     const body = registerSchema.parse(request.body);
     const result = await authService.register(body);
     return reply.status(201).send({ success: true, data: result });
   });
 
-  app.post('/refresh', async (request, reply) => {
-    const { refreshToken } = request.body as { refreshToken: string };
-    const result = await authService.refreshTokens(refreshToken);
+  app.post('/refresh', authRateLimit, async (request, reply) => {
+    const body = refreshSchema.parse(request.body);
+    const result = await authService.refreshTokens(body.refreshToken);
     return reply.send({ success: true, data: result });
   });
 

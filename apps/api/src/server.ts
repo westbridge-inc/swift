@@ -37,11 +37,23 @@ async function buildApp() {
   registerErrorHandler(app);
 
   // Core plugins
+  const corsOrigin = process.env['CORS_ORIGIN']
+    ? process.env['CORS_ORIGIN'].split(',')
+    : process.env['NODE_ENV'] === 'development'
+      ? ['http://localhost:3001', 'http://localhost:3000', 'http://127.0.0.1:3001']
+      : false;
   await app.register(cors, {
-    origin: process.env['CORS_ORIGIN'] || '*',
+    origin: corsOrigin,
     credentials: true,
   });
-  await app.register(helmet, { contentSecurityPolicy: false });
+  await app.register(helmet, {
+    contentSecurityPolicy: {
+      directives: {
+        defaultSrc: ["'self'"],
+        connectSrc: ["'self'", 'wss:', 'ws:'],
+      },
+    },
+  });
   await app.register(rateLimit, {
     max: 200,
     timeWindow: '1 minute',
