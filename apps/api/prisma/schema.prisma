@@ -24,11 +24,27 @@ model User {
   isPhoneVerified Boolean    @default(false)
   isEmailVerified Boolean    @default(false)
 
+  /// Locked domain model: L1 phone-verified (mandatory), L2 ID-verified
+  /// (required for orders >= the CountryConfig USD-equivalent gate), L3 earned.
+  trustLevel TrustLevel @default(L1)
+
+  /// ISO-3166 alpha-2; picked at signup from active CountryConfigs.
+  countryCode String @default("GY")
+
+  /// Email+password login lands in Step 3; phone OTP remains primary.
+  passwordHash        String?
+  failedLoginAttempts Int       @default(0)
+  lockedUntil         DateTime?
+
   addresses        Address[]  @relation("userAddresses")
   lastKnownLat     Float?
   lastKnownLng     Float?
 
+  /// V1 dormant — cash-only per master plan §18. Do not build on; Part C wallet rework.
   walletBalance Decimal @default(0) @db.Decimal(12, 2)
+
+  verificationDocuments VerificationDocument[]
+  strikes               Strike[]
 
   deviceTokens DeviceToken[]
   createdAt    DateTime      @default(now())
@@ -59,9 +75,18 @@ enum UserRole {
   CUSTOMER
   RIDER
   DRIVER
+  /// Locked model role: unified rider+driver. Rider/Driver values are legacy;
+  /// Step 3 onboards movers, later steps fold Rider/Driver flows into MOVER.
+  MOVER
   VENDOR_OWNER
   ADMIN
   SUPER_ADMIN
+}
+
+enum TrustLevel {
+  L1
+  L2
+  L3
 }
 
 enum UserStatus {
@@ -118,6 +143,91 @@ model Address {
   updatedAt    DateTime @updatedAt
 
   @@map("addresses")
+}
+
+// ==========================================
+// COUNTRY CONFIG (multi-country from day 1)
+// ==========================================
+
+/// Wraps everything country-specific: currency, ID-gate threshold,
+/// subscription tiers, required-document checklists. Adding a country
+/// must be config, not code.
+model CountryConfig {
+  id             String  @id @default(cuid())
+  /// ISO-3166 alpha-2 ("GY")
+  code           String  @unique
+  name           String
+  currencyCode   String
+  currencySymbol String  @default("$")
+  /// Local currency units per 1 USD — used to evaluate the USD ID-gate locally
+  usdExchangeRate Decimal @db.Decimal(12, 4)
+  /// Orders >= this USD-equivalent require trust level L2 (ID-verified)
+  idGateThresholdUsd Decimal @default(50) @db.Decimal(10, 2)
+  /// Weekly subscription tiers in local currency:
+  /// { mover, smallVendor, largeVendor, franchisePerStore? }
+  subscriptionTiers Json
+  /// Required documents per role, e.g. { MOVER: ["national_id","drivers_licence",...], RESTAURANT: [...] }
+  documentChecklists Json
+  /// Inactive countries show a waitlist at signup
+  isActive  Boolean  @default(false)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@map("country_configs")
+}
+
+// ==========================================
+// TRUST & VERIFICATION (L1/L2/L3 + strikes)
+// ==========================================
+
+model VerificationDocument {
+  id     String   @id @default(cuid())
+  userId String
+  user   User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  /// Which role this document supports (vendor docs, mover docs, customer L2 ID)
+  role   UserRole
+  /// Checklist key from CountryConfig.documentChecklists (e.g. "national_id")
+  docType String
+  /// Storage reference only. Raw documents: encrypted at rest, never logged,
+  /// never sent to any AI service (hard rule 3).
+  fileUrl String
+  status  VerificationDocumentStatus @default(PENDING)
+  /// OCR'd / manually entered expiry; lapse of a critical doc auto-suspends listings
+  expiresAt  DateTime?
+  reviewedBy String?
+  reviewNote String?
+  reviewedAt DateTime?
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@index([status])
+  @@index([userId])
+  @@index([expiresAt])
+  @@map("verification_documents")
+}
+
+enum VerificationDocumentStatus {
+  PENDING
+  APPROVED
+  REJECTED
+  EXPIRED
+}
+
+/// Customer strike for cash no-shows / refusals (master plan §5).
+/// Phone + address fingerprint captured for collusion detection.
+model Strike {
+  id         String   @id @default(cuid())
+  userId     String
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  orderId    String?
+  reason     String
+  phone      String?
+  addressKey String?
+  createdAt  DateTime @default(now())
+
+  @@index([userId])
+  @@index([phone])
+  @@map("strikes")
 }
 
 // ==========================================
@@ -291,6 +401,10 @@ model Vendor {
   status           VendorStatus    @default(PENDING_APPROVAL)
   orders           Order[]
   carts            Cart[]
+
+  /// Stable slug for printed QR deep links: /v/{qrSlug}. Never reuse or rotate.
+  qrSlug String @unique @default(cuid())
+
   createdAt        DateTime        @default(now())
   updatedAt        DateTime        @updatedAt
 
@@ -303,6 +417,8 @@ model Vendor {
 enum VendorType {
   RESTAURANT
   SUPERMARKET
+  STORE
+  SERVICE
 }
 
 enum VendorStatus {
@@ -356,6 +472,8 @@ model Category {
   @@map("categories")
 }
 
+/// The locked model's Listing: one model for goods AND services.
+/// Services carry bookingConfig (duration, slots) and APPOINTMENT fulfillment.
 model Item {
   id            String        @id @default(cuid())
   vendorId      String
@@ -366,6 +484,9 @@ model Item {
   description   String?
   imageUrl      String?
   basePrice     Decimal       @db.Decimal(10, 2)
+  fulfillment   FulfillmentType @default(DELIVERY)
+  /// SERVICE listings only: { durationMinutes: number, slots: [{ dayOfWeek, start, end }] }
+  bookingConfig Json?
   optionGroups  OptionGroup[]
   isAvailable   Boolean       @default(true)
   isPopular     Boolean       @default(false)
@@ -381,6 +502,12 @@ model Item {
   updatedAt     DateTime      @updatedAt
 
   @@map("items")
+}
+
+enum FulfillmentType {
+  DELIVERY
+  APPOINTMENT
+  PICKUP
 }
 
 model OptionGroup {
@@ -450,6 +577,8 @@ model Order {
   taxiDuration       Int?
 
   subtotalBase     Decimal @db.Decimal(12, 2)
+  /// V1 dormant — zero-commission model (master plan §18): markup must stay 0.
+  /// Field removal happens with the Steps 6-7 catalogue/order rebuild.
   subtotalMarkup   Decimal @db.Decimal(12, 2)
   subtotalCustomer Decimal @db.Decimal(12, 2)
   deliveryFee      Decimal @db.Decimal(12, 2)
@@ -557,6 +686,8 @@ enum PaymentStatus {
   PARTIALLY_REFUNDED
 }
 
+/// markedUpPrice/markup* fields are V1 dormant (§18 zero-commission) — kept
+/// equal to base until the Steps 6-7 rebuild removes them.
 model OrderItem {
   id              String            @id @default(cuid())
   orderId         String
@@ -589,6 +720,9 @@ model OrderItemOption {
   @@map("order_item_options")
 }
 
+/// The locked model's immutable OrderEvent log. Append-only by convention:
+/// no update/delete code path may exist for this model (enforced in Step 7's
+/// state machine; rows are evidence for cash disputes and claims).
 model OrderStatusLog {
   id        String      @id @default(cuid())
   orderId   String
@@ -663,12 +797,32 @@ model Subscription {
   feeWaivedBy        String?
   feeWaivedReason    String?
   customRate         Decimal?           @db.Decimal(10, 2)
+
+  /// Locked model: currency from CountryConfig; auto-suspend on non-payment
+  currencyCode       String             @default("GYD")
+  autoSuspendEnabled Boolean            @default(true)
+  prepaidBalance     PrepaidBalance?
+
   createdAt          DateTime           @default(now())
   updatedAt          DateTime           @updatedAt
 
   @@index([status])
   @@index([nextBillingDate])
   @@map("subscriptions")
+}
+
+/// Prepaid path for cash payers: agents/bank-transfer top-ups recorded by
+/// admin; the weekly billing job (Step 5) deducts from here before suspending.
+model PrepaidBalance {
+  id             String       @id @default(cuid())
+  subscriptionId String       @unique
+  subscription   Subscription @relation(fields: [subscriptionId], references: [id], onDelete: Cascade)
+  balance        Decimal      @default(0) @db.Decimal(12, 2)
+  currencyCode   String       @default("GYD")
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+
+  @@map("prepaid_balances")
 }
 
 enum SubscriptionType {
@@ -766,6 +920,9 @@ enum SettlementStatus {
 
 // ==========================================
 // TRANSACTIONS & WALLET
+// V1 dormant — cash-only per master plan §18. Swift never holds order money.
+// Kept ledger-shaped for the Part C wallet rework; do not build V1 features on
+// Transaction / walletBalance / PayoutRequest / PayoutSchedule.
 // ==========================================
 
 model Transaction {
