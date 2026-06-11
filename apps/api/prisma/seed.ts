@@ -98,34 +98,156 @@ async function main() {
       },
     });
 
-    // Popular category + items
-    const popular = await prisma.category.create({
-      data: { vendorId: vendor.id, name: 'Popular', sortOrder: 0 },
-    });
-    await prisma.item.createMany({
-      data: [
-        { vendorId: vendor.id, categoryId: popular.id, name: 'Pepperpot', description: 'Traditional Guyanese stewed meat with cassareep', basePrice: 2500, isPopular: true, sortOrder: 0, dietaryTags: [], allergens: [] },
-        { vendorId: vendor.id, categoryId: popular.id, name: 'Cook-Up Rice', description: 'Rice with black-eye peas, coconut milk, and mixed meats', basePrice: 2000, isPopular: true, sortOrder: 1, dietaryTags: [], allergens: [] },
-        { vendorId: vendor.id, categoryId: popular.id, name: 'Fried Rice', description: 'Wok-fried rice with vegetables and protein', basePrice: 1800, isPopular: true, sortOrder: 2, dietaryTags: [], allergens: [] },
-        { vendorId: vendor.id, categoryId: popular.id, name: 'Chow Mein', description: 'Stir-fried noodles with vegetables', basePrice: 2000, sortOrder: 3, dietaryTags: ['vegetarian'], allergens: ['gluten'] },
-      ],
-    });
+    // Menu + hours are plain creates — guard so re-seeding doesn't duplicate
+    const oasisHasMenu = (await prisma.category.count({ where: { vendorId: vendor.id } })) > 0;
+    if (!oasisHasMenu) {
+      const popular = await prisma.category.create({
+        data: { vendorId: vendor.id, name: 'Popular', sortOrder: 0 },
+      });
+      await prisma.item.createMany({
+        data: [
+          { vendorId: vendor.id, categoryId: popular.id, name: 'Pepperpot', description: 'Traditional Guyanese stewed meat with cassareep', basePrice: 2500, isPopular: true, sortOrder: 0, dietaryTags: [], allergens: [] },
+          { vendorId: vendor.id, categoryId: popular.id, name: 'Cook-Up Rice', description: 'Rice with black-eye peas, coconut milk, and mixed meats', basePrice: 2000, isPopular: true, sortOrder: 1, dietaryTags: [], allergens: [] },
+          { vendorId: vendor.id, categoryId: popular.id, name: 'Fried Rice', description: 'Wok-fried rice with vegetables and protein', basePrice: 1800, isPopular: true, sortOrder: 2, dietaryTags: [], allergens: [] },
+          { vendorId: vendor.id, categoryId: popular.id, name: 'Chow Mein', description: 'Stir-fried noodles with vegetables', basePrice: 2000, sortOrder: 3, dietaryTags: ['vegetarian'], allergens: ['gluten'] },
+        ],
+      });
 
-    // Beverages category
-    const beverages = await prisma.category.create({
-      data: { vendorId: vendor.id, name: 'Beverages', sortOrder: 1 },
-    });
-    await prisma.item.createMany({
-      data: [
-        { vendorId: vendor.id, categoryId: beverages.id, name: 'Fresh Coconut Water', basePrice: 500, sortOrder: 0, dietaryTags: ['vegan'], allergens: [] },
-        { vendorId: vendor.id, categoryId: beverages.id, name: 'Mauby', description: 'Traditional Guyanese bark-brewed drink', basePrice: 400, sortOrder: 1, dietaryTags: ['vegan'], allergens: [] },
-      ],
-    });
+      const beverages = await prisma.category.create({
+        data: { vendorId: vendor.id, name: 'Beverages', sortOrder: 1 },
+      });
+      await prisma.item.createMany({
+        data: [
+          { vendorId: vendor.id, categoryId: beverages.id, name: 'Fresh Coconut Water', basePrice: 500, sortOrder: 0, dietaryTags: ['vegan'], allergens: [] },
+          { vendorId: vendor.id, categoryId: beverages.id, name: 'Mauby', description: 'Traditional Guyanese bark-brewed drink', basePrice: 400, sortOrder: 1, dietaryTags: ['vegan'], allergens: [] },
+        ],
+      });
 
-    // Operating hours (open 8am-10pm every day)
-    for (let day = 0; day < 7; day++) {
-      await prisma.operatingHours.create({
-        data: { vendorId: vendor.id, dayOfWeek: day, openTime: '08:00', closeTime: '22:00' },
+      // Operating hours (open 8am-10pm every day)
+      for (let day = 0; day < 7; day++) {
+        await prisma.operatingHours.create({
+          data: { vendorId: vendor.id, dayOfWeek: day, openTime: '08:00', closeTime: '22:00' },
+        });
+      }
+    }
+
+    // One vendor of each remaining locked type (SUPERMARKET, STORE, SERVICE)
+    // so every fulfillment kind is exercisable end-to-end.
+    const freshMart = await prisma.vendor.upsert({
+      where: { slug: 'fresh-mart' },
+      update: {},
+      create: {
+        ownerId: owner.id,
+        name: 'Fresh Mart',
+        slug: 'fresh-mart',
+        description: 'Groceries and household essentials',
+        vendorType: 'SUPERMARKET',
+        phone: '+5926002002',
+        addressLine1: '15 Sheriff Street',
+        city: 'Georgetown',
+        region: 'Demerara-Mahaica',
+        latitude: 6.8101,
+        longitude: -58.1422,
+        isCurrentlyOpen: true,
+        acceptingOrders: true,
+        isVerified: true,
+        status: 'ACTIVE',
+        cuisineTypes: [],
+        tags: ['Groceries'],
+      },
+    });
+    if ((await prisma.category.count({ where: { vendorId: freshMart.id } })) === 0) {
+      const groceries = await prisma.category.create({
+        data: { vendorId: freshMart.id, name: 'Groceries', sortOrder: 0 },
+      });
+      await prisma.item.createMany({
+        data: [
+          { vendorId: freshMart.id, categoryId: groceries.id, name: 'Basmati Rice 5kg', basePrice: 3500, fulfillment: 'DELIVERY', unit: 'bag', stockQuantity: 40, sortOrder: 0, dietaryTags: [], allergens: [] },
+          { vendorId: freshMart.id, categoryId: groceries.id, name: 'Cooking Oil 1L', basePrice: 1200, fulfillment: 'DELIVERY', unit: 'bottle', stockQuantity: 60, sortOrder: 1, dietaryTags: [], allergens: [] },
+        ],
+      });
+    }
+
+    const hardwareStore = await prisma.vendor.upsert({
+      where: { slug: 'city-hardware' },
+      update: {},
+      create: {
+        ownerId: owner.id,
+        name: 'City Hardware',
+        slug: 'city-hardware',
+        description: 'Tools and building supplies — order ahead, pick up in store',
+        vendorType: 'STORE',
+        phone: '+5926002003',
+        addressLine1: '88 Water Street',
+        city: 'Georgetown',
+        region: 'Demerara-Mahaica',
+        latitude: 6.8167,
+        longitude: -58.1648,
+        isCurrentlyOpen: true,
+        acceptingOrders: true,
+        isVerified: true,
+        status: 'ACTIVE',
+        cuisineTypes: [],
+        tags: ['Hardware'],
+      },
+    });
+    if ((await prisma.category.count({ where: { vendorId: hardwareStore.id } })) === 0) {
+      const tools = await prisma.category.create({
+        data: { vendorId: hardwareStore.id, name: 'Tools', sortOrder: 0 },
+      });
+      await prisma.item.create({
+        data: { vendorId: hardwareStore.id, categoryId: tools.id, name: 'Claw Hammer', basePrice: 2500, fulfillment: 'PICKUP', stockQuantity: 12, sortOrder: 0, dietaryTags: [], allergens: [] },
+      });
+    }
+
+    const barbershop = await prisma.vendor.upsert({
+      where: { slug: 'sharp-cuts' },
+      update: {},
+      create: {
+        ownerId: owner.id,
+        name: 'Sharp Cuts Barbershop',
+        slug: 'sharp-cuts',
+        description: 'Walk-ins welcome, appointments guaranteed',
+        vendorType: 'SERVICE',
+        phone: '+5926002004',
+        addressLine1: '7 Camp Street',
+        city: 'Georgetown',
+        region: 'Demerara-Mahaica',
+        latitude: 6.8089,
+        longitude: -58.1507,
+        isCurrentlyOpen: true,
+        acceptingOrders: true,
+        isVerified: true,
+        status: 'ACTIVE',
+        cuisineTypes: [],
+        tags: ['Barber', 'Grooming'],
+      },
+    });
+    if ((await prisma.category.count({ where: { vendorId: barbershop.id } })) === 0) {
+      const services = await prisma.category.create({
+        data: { vendorId: barbershop.id, name: 'Services', sortOrder: 0 },
+      });
+      await prisma.item.create({
+        data: {
+          vendorId: barbershop.id,
+          categoryId: services.id,
+          name: "Men's Haircut",
+          basePrice: 2000,
+          fulfillment: 'APPOINTMENT',
+          bookingConfig: {
+            durationMinutes: 30,
+            slots: [
+              { dayOfWeek: 2, start: '09:00', end: '17:00' },
+              { dayOfWeek: 3, start: '09:00', end: '17:00' },
+              { dayOfWeek: 4, start: '09:00', end: '17:00' },
+              { dayOfWeek: 5, start: '09:00', end: '18:00' },
+              { dayOfWeek: 6, start: '08:00', end: '18:00' },
+            ],
+          },
+          sortOrder: 0,
+          dietaryTags: [],
+          allergens: [],
+        },
       });
     }
   }
@@ -187,6 +309,40 @@ async function main() {
       boundary: { type: 'Polygon', coordinates: [[[-58.18, 6.78], [-58.13, 6.78], [-58.13, 6.83], [-58.18, 6.83], [-58.18, 6.78]]] },
       deliveryBaseFee: 500,
       deliveryPerKm: 200,
+    },
+  });
+
+  // Guyana CountryConfig — the single source for currency, ID-gate, tiers,
+  // and document checklists. Adding a country = adding a row, not code.
+  const guyanaTiers = { mover: 12000, smallVendor: 20000, largeVendor: 30000 };
+  const guyanaChecklists = {
+    MOVER: ['national_id', 'drivers_licence', 'vehicle_registration', 'vehicle_insurance'],
+    MOVER_TAXI_EXTRA: ['hire_car_permit', 'vehicle_plate_photo'],
+    RESTAURANT: ['owner_national_id', 'business_registration', 'food_handler_cert'],
+    SUPERMARKET: ['owner_national_id', 'business_registration'],
+    STORE: ['owner_national_id', 'business_registration'],
+    SERVICE: ['owner_national_id'],
+    CUSTOMER_L2: ['national_id', 'selfie'],
+  };
+  await prisma.countryConfig.upsert({
+    where: { code: 'GY' },
+    update: {
+      isActive: true,
+      usdExchangeRate: 209.0,
+      idGateThresholdUsd: 50,
+      subscriptionTiers: guyanaTiers,
+      documentChecklists: guyanaChecklists,
+    },
+    create: {
+      code: 'GY',
+      name: 'Guyana',
+      currencyCode: 'GYD',
+      currencySymbol: '$',
+      usdExchangeRate: 209.0,
+      idGateThresholdUsd: 50,
+      subscriptionTiers: guyanaTiers,
+      documentChecklists: guyanaChecklists,
+      isActive: true,
     },
   });
 
