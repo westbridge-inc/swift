@@ -127,7 +127,7 @@ const notificationsQuerySchema = z.object({
 });
 
 const switchRoleSchema = z.object({
-  role: z.enum(['CUSTOMER', 'VENDOR', 'RIDER', 'DRIVER']),
+  role: z.enum(['CUSTOMER', 'VENDOR', 'RIDER', 'DRIVER', 'MOVER']),
 });
 
 const promoValidateSchema = z.object({
@@ -1637,18 +1637,23 @@ export async function customerRoutes(app: FastifyInstance) {
     const { userId } = request.user;
     const { role } = switchRoleSchema.parse(request.body);
 
+    // Public role names map to internal UserRole values: the locked model's
+    // VENDOR is stored as VENDOR_OWNER (the old direct check could never pass).
+    const internalRole: import('@prisma/client').UserRole = role === 'VENDOR' ? 'VENDOR_OWNER' : role;
+
     const user = await app.prisma.user.findUnique({
       where: { id: userId },
       select: { roles: true },
     });
     if (!user) throw new NotFoundError('User');
 
-    // Verify user has this role
-    if (!user.roles.includes(role as import('@prisma/client').UserRole)) {
+    if (!user.roles.includes(internalRole)) {
       throw new ForbiddenError(`You do not have the ${role} role. Available roles: ${user.roles.join(', ')}`);
     }
 
-    // Verify associated entity exists for non-customer roles
+    // Verify associated entity exists for non-customer roles.
+    // MOVER has no entity until Step 4 verification creates one — membership
+    // in roles[] is enough to sit in mover mode (gated from working anyway).
     if (role === 'VENDOR') {
       const owner = await app.prisma.vendorOwner.findUnique({ where: { userId } });
       if (!owner) throw new ForbiddenError('No vendor account associated with your profile');
@@ -1662,7 +1667,7 @@ export async function customerRoutes(app: FastifyInstance) {
       if (!driver) throw new ForbiddenError('No driver account associated with your profile');
     }
 
-    await app.prisma.user.update({ where: { id: userId }, data: { activeRole: role as import('@prisma/client').UserRole } });
+    await app.prisma.user.update({ where: { id: userId }, data: { activeRole: internalRole } });
 
     return {
       success: true,

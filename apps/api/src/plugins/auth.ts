@@ -10,8 +10,10 @@ declare module 'fastify' {
 
 declare module '@fastify/jwt' {
   interface FastifyJWT {
-    payload: { userId: string; role: string };
-    user: { userId: string; role: string };
+    // jti: per-token nonce — same-second logins must not mint identical
+    // HS256 tokens (sessions.token is unique)
+    payload: { userId: string; role: string; jti?: string };
+    user: { userId: string; role: string; jti?: string };
   }
 }
 
@@ -29,6 +31,17 @@ export const authPlugin = fp(async (app: FastifyInstance) => {
   app.decorate('authenticate', async (request: FastifyRequest, reply: FastifyReply) => {
     try {
       await request.jwtVerify();
+
+      // SEC-8: a JWT alone is not enough — the session must still exist.
+      // Logout/reset delete sessions, which kills the access token immediately.
+      const token = request.headers.authorization?.slice('Bearer '.length) ?? '';
+      const session = await app.prisma.session.findUnique({
+        where: { token },
+        select: { expiresAt: true },
+      });
+      if (!session || session.expiresAt < new Date()) {
+        throw new Error('Session revoked or expired');
+      }
     } catch {
       reply.status(401).send({ success: false, error: { code: 'UNAUTHORIZED', message: 'Invalid or expired token' } });
     }
