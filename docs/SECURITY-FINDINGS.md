@@ -61,7 +61,7 @@
 
 | # | Issue | Why Not Fixed Here | Recommended Action |
 |---|---|---|---|
-| SEC-8 | JWT token blacklist on logout | Requires Redis token blacklist or session invalidation table; architectural decision | Implement in Step 3 (auth hardening) |
+| SEC-8 | ~~JWT token blacklist on logout~~ | **CLOSED in Step 3** — `authenticate` is session-backed: logout/password-reset delete sessions and the access token dies immediately (regression-tested in step3-auth.test.ts) | Done |
 | SEC-9 | Missing RBAC ownership checks on address/order endpoints | Requires reading all 1,748 lines of customer.routes.ts carefully | Fix during Step 2 god-file split |
 | SEC-11 | Admin token in `localStorage` | Fixing properly requires httpOnly cookie sessions + login page redesign for admin app | Fix in Step 13 (dashboards) |
 | SEC-13 | No idempotency keys on payments/orders | Requires schema additions + client coordination | Fix in Step 5 (billing engine) |

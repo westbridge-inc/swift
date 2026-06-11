@@ -183,6 +183,8 @@ describe('Auth Routes', () => {
     });
 
     it('creates a new user and returns tokens', async () => {
+      // OTP at signup is mandatory — prove phone ownership first
+      await loginWithOtp(app, testPhone);
       const res = await inject('POST', '/api/v1/auth/register', {
         phone: testPhone,
         firstName: 'Test',

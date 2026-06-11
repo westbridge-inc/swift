@@ -1,6 +1,7 @@
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { AuthService } from './auth.service';
+import { CountryConfigService } from '../country/country-config.service';
 
 const sendOtpSchema = z.object({
   phone: z.string().min(10).max(15),
@@ -16,10 +17,30 @@ const registerSchema = z.object({
   firstName: z.string().min(1).max(50),
   lastName: z.string().min(1).max(50),
   email: z.string().email().optional(),
+  role: z.enum(['CUSTOMER', 'MOVER', 'VENDOR']).default('CUSTOMER'),
+  countryCode: z.string().length(2).default('GY'),
 });
 
 const refreshSchema = z.object({
   refreshToken: z.string().min(1),
+});
+
+const passwordLoginSchema = z
+  .object({
+    phone: z.string().min(10).max(15).optional(),
+    email: z.string().email().optional(),
+    password: z.string().min(8).max(100),
+  })
+  .refine((d) => d.phone || d.email, { message: 'phone or email is required' });
+
+const setPasswordSchema = z.object({
+  password: z.string().min(8).max(100),
+});
+
+const resetPasswordSchema = z.object({
+  phone: z.string().min(10).max(15),
+  code: z.string().length(6),
+  newPassword: z.string().min(8).max(100),
 });
 
 const authRateLimit = {
@@ -70,5 +91,48 @@ export async function authRoutes(app: FastifyInstance) {
     const token = request.headers.authorization?.replace('Bearer ', '') || '';
     await authService.logout(token);
     return reply.send({ success: true });
+  });
+
+  // ── Email + password (secondary to phone OTP) ──────────────────────────
+
+  app.post('/password/login', authRateLimit, async (request, reply) => {
+    const body = passwordLoginSchema.parse(request.body);
+    const result = await authService.loginWithPassword(
+      { phone: body.phone, email: body.email },
+      body.password,
+      {
+        deviceId: (request.headers['x-device-id'] as string) || 'unknown',
+        deviceType: (request.headers['x-device-type'] as string) || 'unknown',
+        ipAddress: request.ip,
+        userAgent: request.headers['user-agent'] || '',
+      },
+    );
+    return reply.send({ success: true, data: result });
+  });
+
+  app.post('/password/set', { preHandler: [app.authenticate] }, async (request, reply) => {
+    const body = setPasswordSchema.parse(request.body);
+    await authService.setPassword(request.user.userId, body.password);
+    return reply.send({ success: true });
+  });
+
+  // Reset request = just the normal OTP send; reset proves ownership again
+  app.post('/password/reset-request', otpRateLimit, async (request, reply) => {
+    const body = sendOtpSchema.parse(request.body);
+    const result = await authService.sendOtp(body.phone);
+    return reply.send({ success: true, data: result });
+  });
+
+  app.post('/password/reset', otpRateLimit, async (request, reply) => {
+    const body = resetPasswordSchema.parse(request.body);
+    await authService.resetPassword(body.phone, body.code, body.newPassword);
+    return reply.send({ success: true, data: { message: 'Password reset. All sessions logged out.' } });
+  });
+
+  // ── Country picker (public — used before signup) ───────────────────────
+
+  app.get('/countries', async (_request, reply) => {
+    const countries = await new CountryConfigService(app.prisma).getActiveCountries();
+    return reply.send({ success: true, data: countries });
   });
 }
