@@ -196,6 +196,7 @@ export async function adminRoutes(app: FastifyInstance) {
       activeVendors,
       totalVendors,
       subscriptionCounts,
+      activeSubRevenue,
       todayNewUsers,
       weeklyOrderCounts,
     ] = await Promise.all([
@@ -215,6 +216,10 @@ export async function adminRoutes(app: FastifyInstance) {
         by: ['type', 'status'],
         _count: true,
       }),
+      app.prisma.subscription.aggregate({
+        where: { status: 'ACTIVE' },
+        _sum: { weeklyRate: true },
+      }),
       app.prisma.user.count({ where: { createdAt: { gte: today } } }),
       // Weekly trend: orders per day for the last 7 days
       app.prisma.$queryRaw<Array<{ date: string; count: bigint; revenue: number }>>`
@@ -229,19 +234,9 @@ export async function adminRoutes(app: FastifyInstance) {
       `,
     ]);
 
-    // Compute subscription revenue
-    const subRates: Record<string, number> = {
-      DELIVERY_RIDER: 10000,
-      COURIER_RIDER: 20000,
-      TAXI_DRIVER: 20000,
-      RESTAURANT: 20000,
-      SUPERMARKET: 20000,
-    };
-    const activeSubs = subscriptionCounts.filter((s) => s.status === 'ACTIVE');
-    const weeklySubscriptionRevenue = activeSubs.reduce(
-      (acc, s) => acc + s._count * (subRates[s.type] || 0),
-      0,
-    );
+    // Real weekly rates from subscriptions (set from CountryConfig tiers),
+    // never a hardcoded rate table.
+    const weeklySubscriptionRevenue = Number(activeSubRevenue._sum.weeklyRate ?? 0);
 
     return {
       success: true,
