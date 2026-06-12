@@ -168,6 +168,10 @@ model CountryConfig {
   subscriptionTiers Json
   /// Required documents per role, e.g. { MOVER: ["national_id","drivers_licence",...], RESTAURANT: [...] }
   documentChecklists Json
+  /// Taxi fare formula fallback (zone table wins when both ends match):
+  /// { base, perKm, perMin, minimum } in local currency
+  taxiRates Json?
+
   /// Inactive countries show a waitlist at signup
   isActive  Boolean  @default(false)
   createdAt DateTime @default(now())
@@ -1116,10 +1120,31 @@ model Zone {
   deliveryPerKm   Decimal? @db.Decimal(10, 2)
   surgeMultiplier Float    @default(1.0)
   riders          Rider[]  @relation("riderZones")
+  faresFrom       ZoneFare[] @relation("zoneFareFrom")
+  faresTo         ZoneFare[] @relation("zoneFareTo")
   createdAt       DateTime @default(now())
   updatedAt       DateTime @updatedAt
 
   @@map("zones")
+}
+
+/// Admin-editable zone-to-zone fixed taxi fares (master plan §4.2). When a
+/// trip's ends both resolve to zones with a row here, this price wins; gaps
+/// fall back to the CountryConfig formula. Directional on purpose (airport
+/// runs can price differently each way).
+model ZoneFare {
+  id         String  @id @default(cuid())
+  fromZoneId String
+  fromZone   Zone    @relation("zoneFareFrom", fields: [fromZoneId], references: [id], onDelete: Cascade)
+  toZoneId   String
+  toZone     Zone    @relation("zoneFareTo", fields: [toZoneId], references: [id], onDelete: Cascade)
+  fare       Decimal @db.Decimal(10, 2)
+  updatedBy  String?
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@unique([fromZoneId, toZoneId])
+  @@map("zone_fares")
 }
 
 // ==========================================

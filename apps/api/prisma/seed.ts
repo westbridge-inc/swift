@@ -382,6 +382,7 @@ async function main() {
     SERVICE: ['owner_national_id'],
     CUSTOMER_L2: ['national_id', 'selfie'],
   };
+  const guyanaTaxiRates = { base: 1000, perKm: 300, perMin: 25, minimum: 1500 };
   await prisma.countryConfig.upsert({
     where: { code: 'GY' },
     update: {
@@ -390,6 +391,7 @@ async function main() {
       idGateThresholdUsd: 50,
       subscriptionTiers: guyanaTiers,
       documentChecklists: guyanaChecklists,
+      taxiRates: guyanaTaxiRates,
     },
     create: {
       code: 'GY',
@@ -400,9 +402,33 @@ async function main() {
       idGateThresholdUsd: 50,
       subscriptionTiers: guyanaTiers,
       documentChecklists: guyanaChecklists,
+      taxiRates: guyanaTaxiRates,
       isActive: true,
     },
   });
+
+  // Second zone + one zone-to-zone fixed fare so the table-hit path is live
+  await prisma.zone.upsert({
+    where: { id: 'georgetown-south' },
+    update: {},
+    create: {
+      id: 'georgetown-south',
+      name: 'Georgetown South',
+      description: 'South Georgetown taxi zone',
+      boundary: { type: 'Polygon', coordinates: [[[-58.18, 6.73], [-58.13, 6.73], [-58.13, 6.78], [-58.18, 6.78], [-58.18, 6.73]]] },
+    },
+  });
+  const zoneFareExists = await prisma.zoneFare.findFirst({
+    where: { fromZoneId: 'georgetown-central', toZoneId: 'georgetown-south' },
+  });
+  if (!zoneFareExists) {
+    await prisma.zoneFare.createMany({
+      data: [
+        { fromZoneId: 'georgetown-central', toZoneId: 'georgetown-south', fare: 2000 },
+        { fromZoneId: 'georgetown-south', toZoneId: 'georgetown-central', fare: 2000 },
+      ],
+    });
+  }
 
   console.warn('Seed complete!');
 }

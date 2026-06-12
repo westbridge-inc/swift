@@ -10,7 +10,8 @@ import { vendorRoutes } from '../modules/vendor/vendor.routes';
 import { riderRoutes } from '../modules/rider/rider.routes';
 import { searchRoutes } from '../modules/search/search.routes';
 import { registerErrorHandler } from '../middleware/error-handler';
-import { loginWithOtp } from './helpers/otp';
+import { nanoid } from 'nanoid';
+import type { UserRole } from '@prisma/client';
 
 // ---------------------------------------------------------------------------
 // Setup
@@ -42,73 +43,145 @@ async function buildTestApp() {
   return server;
 }
 
+// Phone-isolated fixtures: this file owns +59200111xx so parallel test files
+// (auth/step3/...) can never race its sessions or OTP keys.
+const FLOW_CUSTOMER = '+5920011101';
+const FLOW_VENDOR = '+5920011102';
+const FLOW_RIDER = '+5920011103';
+
+let flowVendorId = '';
+
+async function makeUserWithSession(phone: string, roles: UserRole[], activeRole: UserRole) {
+  const user = await app.prisma.user.create({
+    data: {
+      phone,
+      firstName: 'Flow',
+      lastName: activeRole,
+      roles,
+      activeRole,
+      isPhoneVerified: true,
+      ...(roles.includes('CUSTOMER') && { customer: { create: {} } }),
+    },
+  });
+  const token = app.jwt.sign({ userId: user.id, role: activeRole, jti: nanoid(8) });
+  await app.prisma.session.create({
+    data: {
+      userId: user.id,
+      token,
+      refreshToken: nanoid(48),
+      deviceId: 'order-flow',
+      deviceType: 'test',
+      expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000),
+    },
+  });
+  return { userId: user.id, token };
+}
+
+async function purgeFlowFixtures() {
+  const users = await app.prisma.user.findMany({
+    where: { phone: { in: [FLOW_CUSTOMER, FLOW_VENDOR, FLOW_RIDER] } },
+    select: { id: true },
+  });
+  const ids = users.map((u) => u.id);
+  if (ids.length === 0) return;
+  const orders = await app.prisma.order.findMany({
+    where: { OR: [{ customerId: { in: ids } }, { rider: { userId: { in: ids } } }] },
+    select: { id: true },
+  });
+  const orderIds = orders.map((o) => o.id);
+  await app.prisma.rating.deleteMany({ where: { orderId: { in: orderIds } } });
+  await app.prisma.earning.deleteMany({ where: { orderId: { in: orderIds } } });
+  await app.prisma.orderStatusLog.deleteMany({ where: { orderId: { in: orderIds } } });
+  await app.prisma.orderItem.deleteMany({ where: { orderId: { in: orderIds } } });
+  await app.prisma.order.deleteMany({ where: { id: { in: orderIds } } });
+  await app.prisma.notification.deleteMany({ where: { userId: { in: ids } } });
+  await app.prisma.user.deleteMany({ where: { id: { in: ids } } });
+}
+
 beforeAll(async () => {
   process.env['NODE_ENV'] = 'development';
   process.env['DATABASE_URL'] = process.env['DATABASE_URL'] || 'postgresql://swift:swift@localhost:5434/swift';
   process.env['REDIS_URL'] = process.env['REDIS_URL'] || 'redis://localhost:6382';
   app = await buildTestApp();
 
-  // Clean up stale sessions from prior test runs to avoid unique constraint
-  // violations on JWT tokens (deterministic in dev mode for same user+secret).
-  await app.prisma.session.deleteMany({
-    where: {
-      user: { phone: { in: ['+5926003000', '+5926002000', '+5926004000'] } },
+  await purgeFlowFixtures();
+
+  // Customer with a default address (checkout needs one)
+  const customer = await makeUserWithSession(FLOW_CUSTOMER, ['CUSTOMER'], 'CUSTOMER');
+  customerToken = customer.token;
+  await app.prisma.address.create({
+    data: {
+      userId: customer.userId,
+      label: 'Home',
+      addressLine1: '77 Flow Street',
+      city: 'Georgetown',
+      region: 'Demerara-Mahaica',
+      latitude: 6.8045,
+      longitude: -58.1553,
+      isDefault: true,
     },
   });
 
-  // Login all three test accounts
-  customerToken = await loginAndGetToken('+5926003000');
-  vendorToken = await loginAndGetToken('+5926002000');
-  riderToken = await loginAndGetToken('+5926004000');
+  // Vendor owner with an open, verified restaurant and a small menu
+  const vendorUser = await makeUserWithSession(FLOW_VENDOR, ['VENDOR_OWNER', 'CUSTOMER'], 'VENDOR_OWNER');
+  vendorToken = vendorUser.token;
+  const owner = await app.prisma.vendorOwner.create({ data: { userId: vendorUser.userId } });
+  const vendor = await app.prisma.vendor.upsert({
+    where: { slug: 'flow-cafe' },
+    update: { ownerId: owner.id },
+    create: {
+      ownerId: owner.id,
+      name: 'Flow Cafe',
+      slug: 'flow-cafe',
+      vendorType: 'RESTAURANT',
+      phone: FLOW_VENDOR,
+      addressLine1: '42 Lifecycle Road',
+      city: 'Georgetown',
+      region: 'Demerara-Mahaica',
+      latitude: 6.8013,
+      longitude: -58.1551,
+      status: 'ACTIVE',
+      acceptingOrders: true,
+      isCurrentlyOpen: true,
+      isVerified: true,
+    },
+  });
+  flowVendorId = vendor.id;
+  if ((await app.prisma.category.count({ where: { vendorId: vendor.id } })) === 0) {
+    const category = await app.prisma.category.create({
+      data: { vendorId: vendor.id, name: 'Mains', sortOrder: 0 },
+    });
+    await app.prisma.item.createMany({
+      data: [
+        { vendorId: vendor.id, categoryId: category.id, name: 'Flow Pepperpot', basePrice: 2500, isAvailable: true },
+        { vendorId: vendor.id, categoryId: category.id, name: 'Flow Cook-Up', basePrice: 2000, isAvailable: true },
+      ],
+    });
+  }
+
+  // Verified rider, ready to go online
+  const riderUser = await makeUserWithSession(FLOW_RIDER, ['RIDER', 'CUSTOMER'], 'RIDER');
+  riderToken = riderUser.token;
+  await app.prisma.rider.create({
+    data: {
+      userId: riderUser.userId,
+      riderType: 'BOTH',
+      vehicleType: 'MOTORCYCLE',
+      documentsVerified: true,
+      currentLat: 6.8013,
+      currentLng: -58.1551,
+    },
+  });
 });
 
 afterAll(async () => {
-  // Cleanup: delete order-related data created during the test
-  if (createdOrderId) {
-    try {
-      await app.prisma.rating.deleteMany({ where: { orderId: createdOrderId } });
-      await app.prisma.earning.deleteMany({ where: { orderId: createdOrderId } });
-      await app.prisma.orderStatusLog.deleteMany({ where: { orderId: createdOrderId } });
-      await app.prisma.orderItem.deleteMany({ where: { orderId: createdOrderId } });
-      await app.prisma.order.delete({ where: { id: createdOrderId } });
-    } catch {
-      // Order may already be cleaned up
-    }
-  }
-
-  // Clean up any cart left behind by the customer
-  const customerUser = await app.prisma.user.findUnique({ where: { phone: '+5926003000' } });
-  if (customerUser) {
-    await app.prisma.cart.deleteMany({ where: { customerId: customerUser.id } }).catch(() => {});
-  }
-
-  // Reset rider state
-  const riderUser = await app.prisma.user.findUnique({ where: { phone: '+5926004000' } });
-  if (riderUser) {
-    const rider = await app.prisma.rider.findUnique({ where: { userId: riderUser.id } });
-    if (rider) {
-      await app.prisma.rider.update({
-        where: { id: rider.id },
-        data: { isOnline: false, isAvailable: false, currentOrderId: null },
-      }).catch(() => {});
-    }
-  }
-
+  await purgeFlowFixtures();
   await app.close();
 });
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-async function loginAndGetToken(phone: string): Promise<string> {
-  const res = await loginWithOtp(app, phone);
-  const body = res.json();
-  if (!body.data?.tokens) {
-    throw new Error(`Login failed for ${phone}: status=${res.statusCode} isNewUser=${body.data?.isNewUser}`);
-  }
-  return body.data.tokens.accessToken;
-}
 
 function inject(
   method: 'GET' | 'POST' | 'PUT' | 'DELETE',
@@ -149,16 +222,16 @@ describe('Order Flow — Full Lifecycle', () => {
   // -----------------------------------------------------------------------
 
   it('Step 1: Customer browses vendors', async () => {
-    const res = await inject('GET', '/api/v1/customer/vendors', customerToken);
+    const res = await inject('GET', '/api/v1/customer/vendors?limit=50', customerToken);
     const body = res.json();
     expect(res.statusCode).toBe(200);
     expect(body.success).toBe(true);
     expect(body.data.length).toBeGreaterThan(0);
 
-    // Find Oasis Cafe
-    const oasis = body.data.find((v: { slug: string }) => v.slug === 'oasis-cafe');
-    expect(oasis).toBeDefined();
-    vendorId = oasis.id;
+    const flowCafe = body.data.find((v: { slug: string }) => v.slug === 'flow-cafe');
+    expect(flowCafe).toBeDefined();
+    expect(flowCafe.id).toBe(flowVendorId);
+    vendorId = flowCafe.id;
   });
 
   // -----------------------------------------------------------------------
