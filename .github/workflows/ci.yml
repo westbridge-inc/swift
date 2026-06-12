@@ -80,6 +80,24 @@ jobs:
           JWT_SECRET: ci-test-jwt-secret-not-for-production
           JWT_REFRESH_SECRET: ci-test-refresh-secret-not-for-production
 
+      # Step 15: an untested backup does not exist. Dump the post-suite
+      # database and prove it restores into a scratch DB with sane contents.
+      - name: Backup the database (pg_dump)
+        run: pg_dump "postgresql://swift:swift@localhost:5432/swift_test" -Fc -f /tmp/swift-ci.dump
+      - name: Restore into a scratch DB and sanity-check
+        env:
+          PGPASSWORD: swift
+        run: |
+          createdb -h localhost -U swift swift_restore_check
+          pg_restore --no-owner -h localhost -U swift -d swift_restore_check /tmp/swift-ci.dump
+          USERS=$(psql -h localhost -U swift -d swift_restore_check -tAc 'SELECT count(*) FROM users;')
+          CONFIGS=$(psql -h localhost -U swift -d swift_restore_check -tAc 'SELECT count(*) FROM country_configs;')
+          VENDORS=$(psql -h localhost -U swift -d swift_restore_check -tAc 'SELECT count(*) FROM vendors;')
+          echo "restored: users=$USERS country_configs=$CONFIGS vendors=$VENDORS"
+          test "$USERS" -ge 4
+          test "$CONFIGS" -ge 1
+          test "$VENDORS" -ge 4
+
   api-build:
     name: API Build
     runs-on: ubuntu-latest

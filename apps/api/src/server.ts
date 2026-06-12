@@ -20,6 +20,7 @@ import { socketPlugin } from './plugins/socket';
 import { redisPlugin } from './plugins/redis';
 import { registerErrorHandler } from './middleware/error-handler';
 import { createQueues, createWorkers, scheduleRecurringJobs } from './jobs/queue';
+import { loggerRedactConfig } from './utils/logger-config';
 
 const PORT = parseInt(process.env['PORT'] || '3000', 10);
 const HOST = process.env['HOST'] || '0.0.0.0';
@@ -28,6 +29,8 @@ async function buildApp() {
   const app = Fastify({
     logger: {
       level: process.env['LOG_LEVEL'] || 'info',
+      // Step 15: secrets and credentials never reach log output
+      redact: loggerRedactConfig,
       transport:
         process.env['NODE_ENV'] === 'development'
           ? { target: 'pino-pretty', options: { colorize: true } }
