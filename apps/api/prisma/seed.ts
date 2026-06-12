@@ -5,6 +5,13 @@ const prisma = new PrismaClient();
 async function main() {
   console.warn('Seeding database...');
 
+  // Partial unique index Prisma cannot express: one LIVE booking per item per
+  // slot (CANCELLED frees the slot). CI uses `db push`, so it lands here.
+  await prisma.$executeRawUnsafe(
+    `CREATE UNIQUE INDEX IF NOT EXISTS "bookings_item_slot_live_key"
+     ON "bookings"("itemId", "slotStart") WHERE "status" <> 'CANCELLED'`,
+  );
+
   // Platform config defaults
   const configs = [
     { key: 'markup_percentage', value: 5 },

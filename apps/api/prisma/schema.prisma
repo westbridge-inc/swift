@@ -489,6 +489,7 @@ model Item {
   fulfillment   FulfillmentType @default(DELIVERY)
   /// SERVICE listings only: { durationMinutes: number, slots: [{ dayOfWeek, start, end }] }
   bookingConfig Json?
+  bookings      Booking[]
   optionGroups  OptionGroup[]
   isAvailable   Boolean       @default(true)
   isPopular     Boolean       @default(false)
@@ -510,6 +511,34 @@ enum FulfillmentType {
   DELIVERY
   APPOINTMENT
   PICKUP
+}
+
+/// A reserved appointment slot on a SERVICE listing. Double-booking is
+/// impossible at the data layer: a partial unique index on (itemId, slotStart)
+/// WHERE status <> 'CANCELLED' (see the step6 migration — Prisma cannot
+/// express partial uniques, so it lives in SQL).
+model Booking {
+  id         String        @id @default(cuid())
+  itemId     String
+  item       Item          @relation(fields: [itemId], references: [id], onDelete: Cascade)
+  customerId String
+  /// Wired to the order at acceptance (Step 7)
+  orderId    String?
+  slotStart  DateTime
+  slotEnd    DateTime
+  status     BookingStatus @default(RESERVED)
+  createdAt  DateTime      @default(now())
+
+  @@index([itemId, slotStart])
+  @@index([customerId])
+  @@map("bookings")
+}
+
+enum BookingStatus {
+  RESERVED
+  CONFIRMED
+  CANCELLED
+  COMPLETED
 }
 
 model OptionGroup {
