@@ -4,6 +4,7 @@ import { RiderType, VehicleType, EarningType, EarningStatus } from '@prisma/clie
 import { OrderService } from '../order/order.service';
 import { NotificationService } from '../notification/notification.service';
 import { VerificationService } from '../verification/verification.service';
+import { makeDispatchService } from '../dispatch/dispatch.service';
 import { getKycProvider } from '../../providers/kyc/kyc-provider';
 import { haversineDistance } from '../../utils/distance';
 import { parsePagination, paginatedResponse } from '../../utils/pagination';
@@ -39,6 +40,10 @@ const riderHistoryQuerySchema = z.object({
   to: z.coerce.date().optional(),
   type: z.nativeEnum(EarningType).optional(),
   status: z.nativeEnum(EarningStatus).optional(),
+});
+
+const offerActionSchema = z.object({
+  orderId: z.string().min(1),
 });
 
 // ---------------------------------------------------------------------------
@@ -115,6 +120,21 @@ export async function riderRoutes(app: FastifyInstance) {
     new NotificationService(app.prisma, app.io),
     getKycProvider(),
   );
+  const dispatch = makeDispatchService(app);
+
+  /** POST /offers/accept — atomic claim of a live dispatch offer (Step 8). */
+  app.post('/offers/accept', { preHandler: [app.authenticate] }, async (request) => {
+    const { orderId } = offerActionSchema.parse(request.body);
+    const order = await dispatch.acceptOffer(orderId, request.user.userId);
+    return { success: true, data: { orderId: order.id, status: order.status, orderNumber: order.orderNumber } };
+  });
+
+  /** POST /offers/decline — pass; the cascade moves to the next mover. */
+  app.post('/offers/decline', { preHandler: [app.authenticate] }, async (request) => {
+    const { orderId } = offerActionSchema.parse(request.body);
+    await dispatch.declineOffer(orderId, request.user.userId);
+    return { success: true, data: { message: 'Offer declined' } };
+  });
 
   // =========================================================================
   // 1. PROFILE

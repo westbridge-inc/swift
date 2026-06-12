@@ -284,6 +284,8 @@ model Rider {
   averageRating       Float       @default(5.0)
   totalRatings        Int         @default(0)
   completionRate      Float       @default(100.0)
+  /// % of dispatch offers accepted (EMA) — feeds Step 8 candidate scoring
+  acceptanceRate      Float       @default(100.0)
   subscription        Subscription?
   earnings            Earning[]
   orders              Order[]

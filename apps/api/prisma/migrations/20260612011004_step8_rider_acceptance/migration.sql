@@ -1,0 +1,3 @@
+-- AlterTable
+ALTER TABLE "riders" ADD COLUMN     "acceptanceRate" DOUBLE PRECISION NOT NULL DEFAULT 100.0;
+

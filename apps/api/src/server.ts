@@ -130,10 +130,13 @@ async function buildApp() {
       await queues.subscriptionQueue.close();
       await queues.settlementQueue.close();
       await queues.notificationQueue.close();
+      await queues.verificationQueue.close();
+      await queues.dispatchQueue.close();
     });
 
     // Decorate so routes can enqueue jobs
     app.decorate('queues', queues);
+    app.decorate('dispatchQueue', queues.dispatchQueue);
   } catch (err) {
     app.log.warn({ err }, 'Background jobs failed to initialize — running without queues');
   }
