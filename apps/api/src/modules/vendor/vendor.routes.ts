@@ -2,6 +2,9 @@ import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { OrderStatus, OrderType, SettlementStatus } from '@prisma/client';
 import { OrderService } from '../order/order.service';
+import { NotificationService } from '../notification/notification.service';
+import { VerificationService } from '../verification/verification.service';
+import { getKycProvider } from '../../providers/kyc/kyc-provider';
 import { parsePagination, paginatedResponse } from '../../utils/pagination';
 import { AppError, NotFoundError, ValidationError } from '../../utils/errors';
 
@@ -229,6 +232,11 @@ async function resolveOwnedOrder(app: FastifyInstance, userId: string, orderId: 
 export async function vendorRoutes(app: FastifyInstance) {
   const auth = { preHandler: [app.authenticate] };
   const orderService = new OrderService(app.prisma, app.io);
+  const verification = new VerificationService(
+    app.prisma,
+    new NotificationService(app.prisma, app.io),
+    getKycProvider(),
+  );
 
   // =========================================================================
   // 1. PROFILE
@@ -597,6 +605,19 @@ export async function vendorRoutes(app: FastifyInstance) {
   /** POST /items — Create an item with optional option groups */
   app.post('/items', auth, async (request) => {
     const { vendorId } = await resolveVendor(app, request.user.userId);
+
+    // Step 4 gate: no listing until the vendor-type checklist is approved.
+    // Legacy isVerified grandfathers pre-checklist vendors.
+    const vendorRecord = await app.prisma.vendor.findUniqueOrThrow({
+      where: { id: vendorId },
+      select: { isVerified: true, vendorType: true },
+    });
+    const verified = vendorRecord.isVerified
+      || await verification.isRoleVerified(request.user.userId, vendorRecord.vendorType);
+    if (!verified) {
+      throw new AppError(403, 'VERIFICATION_REQUIRED', 'Complete document verification before listing items');
+    }
+
     const body = createItemSchema.parse(request.body);
 
     // Verify category belongs to this vendor

@@ -3,6 +3,8 @@ import { z } from 'zod';
 import { OrderStatus, EarningType, EarningStatus } from '@prisma/client';
 import { OrderService } from '../order/order.service';
 import { NotificationService } from '../notification/notification.service';
+import { VerificationService } from '../verification/verification.service';
+import { getKycProvider } from '../../providers/kyc/kyc-provider';
 import { haversineDistance, estimateDeliveryMinutes } from '../../utils/distance';
 import { parsePagination, paginatedResponse } from '../../utils/pagination';
 import { AppError, NotFoundError } from '../../utils/errors';
@@ -43,6 +45,7 @@ const driverEarningsQuerySchema = z.object({
 export async function driverRoutes(app: FastifyInstance) {
   const orderService = new OrderService(app.prisma, app.io);
   const notifications = new NotificationService(app.prisma, app.io);
+  const verification = new VerificationService(app.prisma, notifications, getKycProvider());
 
   // Helper: resolve driver record from JWT userId
   async function getDriver(userId: string) {
@@ -106,8 +109,11 @@ export async function driverRoutes(app: FastifyInstance) {
   app.post('/go-online', { preHandler: [app.authenticate] }, async (request) => {
     const driver = await getDriver(request.user.userId);
 
-    if (!driver.documentsVerified) {
-      throw new AppError(400, 'DOCUMENTS_NOT_VERIFIED', 'Your documents must be verified before going online');
+    // Step 4 gate: country MOVER checklist (legacy flag grandfathers old accounts)
+    const verified = driver.documentsVerified
+      || await verification.isRoleVerified(request.user.userId, 'MOVER');
+    if (!verified) {
+      throw new AppError(403, 'VERIFICATION_REQUIRED', 'Your documents must be verified before going online');
     }
 
     if (!driver.subscription || driver.subscription.status !== 'ACTIVE') {

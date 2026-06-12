@@ -312,6 +312,49 @@ async function main() {
     },
   });
 
+  // Approved verification documents for the seeded vendor owner and rider so
+  // the Step 4 gates (listing / go-online) pass for the demo accounts.
+  const seededVendorUser = await prisma.user.findUnique({ where: { phone: '+5926002000' } });
+  if (seededVendorUser) {
+    const ownerDocs = ['owner_national_id', 'business_registration', 'food_handler_cert'];
+    const existing = await prisma.verificationDocument.count({
+      where: { userId: seededVendorUser.id, docType: { in: ownerDocs } },
+    });
+    if (existing === 0) {
+      await prisma.verificationDocument.createMany({
+        data: ownerDocs.map((docType) => ({
+          userId: seededVendorUser.id,
+          role: 'VENDOR_OWNER' as const,
+          docType,
+          fileUrl: `storage://seed/${docType}.jpg`,
+          status: 'APPROVED' as const,
+          reviewedBy: 'seed',
+          reviewedAt: new Date(),
+        })),
+      });
+    }
+  }
+  const seededRiderUser = await prisma.user.findUnique({ where: { phone: '+5926004000' } });
+  if (seededRiderUser) {
+    const moverDocs = ['national_id', 'drivers_licence', 'vehicle_registration', 'vehicle_insurance'];
+    const existing = await prisma.verificationDocument.count({
+      where: { userId: seededRiderUser.id, docType: { in: moverDocs } },
+    });
+    if (existing === 0) {
+      await prisma.verificationDocument.createMany({
+        data: moverDocs.map((docType) => ({
+          userId: seededRiderUser.id,
+          role: 'MOVER' as const,
+          docType,
+          fileUrl: `storage://seed/${docType}.jpg`,
+          status: 'APPROVED' as const,
+          reviewedBy: 'seed',
+          reviewedAt: new Date(),
+        })),
+      });
+    }
+  }
+
   // Guyana CountryConfig — the single source for currency, ID-gate, tiers,
   // and document checklists. Adding a country = adding a row, not code.
   const guyanaTiers = { mover: 12000, smallVendor: 20000, largeVendor: 30000 };
