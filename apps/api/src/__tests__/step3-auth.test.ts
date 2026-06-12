@@ -20,13 +20,14 @@ import { requestOtp, loginWithOtp } from './helpers/otp';
 const MOVER_PHONE = '+5920001111';
 const VENDOR_PHONE = '+5920002222';
 const WAITLIST_PHONE = '+5920003333';
+const CROSSING_PHONE = '+5920003334';
 const PASSWORD = 'correct-horse-battery';
 
 let app: FastifyInstance;
 
 async function cleanupUsers() {
   await app.prisma.user.deleteMany({
-    where: { phone: { in: [MOVER_PHONE, VENDOR_PHONE, WAITLIST_PHONE] } },
+    where: { phone: { in: [MOVER_PHONE, VENDOR_PHONE, WAITLIST_PHONE, CROSSING_PHONE] } },
   });
 }
 
@@ -48,7 +49,7 @@ beforeAll(async () => {
   await app.ready();
 
   await cleanupUsers();
-  for (const phone of [MOVER_PHONE, VENDOR_PHONE, WAITLIST_PHONE]) {
+  for (const phone of [MOVER_PHONE, VENDOR_PHONE, WAITLIST_PHONE, CROSSING_PHONE]) {
     await app.redis.del(`otp:${phone}`, `otp_rate:${phone}`, `otp_attempt:${phone}`, `otp_verified:${phone}`);
   }
 });
@@ -258,8 +259,9 @@ describe('Role-crossing authorization', () => {
   let customerToken: string;
 
   beforeAll(async () => {
-    const login = await loginWithOtp(app, '+5926003000'); // seeded customer
-    customerToken = login.json().data.tokens.accessToken;
+    // Own customer — never touch seeded phones from a parallel file
+    const res = await signup(CROSSING_PHONE, 'CUSTOMER');
+    customerToken = res.json().data.tokens.accessToken;
   });
 
   it('a customer cannot call admin endpoints', async () => {

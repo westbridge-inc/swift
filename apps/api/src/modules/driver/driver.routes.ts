@@ -4,6 +4,7 @@ import { OrderStatus, EarningType, EarningStatus } from '@prisma/client';
 import { OrderService } from '../order/order.service';
 import { NotificationService } from '../notification/notification.service';
 import { VerificationService } from '../verification/verification.service';
+import { makeDispatchService } from '../dispatch/dispatch.service';
 import { getKycProvider } from '../../providers/kyc/kyc-provider';
 import { haversineDistance, estimateDeliveryMinutes } from '../../utils/distance';
 import { parsePagination, paginatedResponse } from '../../utils/pagination';
@@ -46,6 +47,7 @@ export async function driverRoutes(app: FastifyInstance) {
   const orderService = new OrderService(app.prisma, app.io);
   const notifications = new NotificationService(app.prisma, app.io);
   const verification = new VerificationService(app.prisma, notifications, getKycProvider());
+  const dispatch = makeDispatchService(app);
 
   // Helper: resolve driver record from JWT userId
   async function getDriver(userId: string) {
@@ -281,28 +283,14 @@ export async function driverRoutes(app: FastifyInstance) {
       throw new AppError(400, 'UNAVAILABLE', 'You already have an active ride');
     }
 
-    // Verify the order is still available
     const order = await app.prisma.order.findUnique({ where: { id } });
     if (!order) throw new NotFoundError('Ride', id);
     if (order.orderType !== 'TAXI') throw new AppError(400, 'INVALID_TYPE', 'This is not a taxi ride');
-    if (order.status !== 'PENDING') throw new AppError(400, 'ALREADY_TAKEN', 'This ride is no longer available');
-    if (order.driverId) throw new AppError(400, 'ALREADY_TAKEN', 'This ride has already been accepted by another driver');
 
-    // Assign driver
-    const [updatedOrder] = await Promise.all([
-      app.prisma.order.update({
-        where: { id },
-        data: { driverId: driver.id, status: 'DRIVER_ASSIGNED', acceptedAt: new Date() },
-        include: { customer: { select: { id: true, firstName: true, phone: true, avatar: true } } },
-      }),
-      app.prisma.driver.update({
-        where: { id: driver.id },
-        data: { isAvailable: false, currentRideId: id },
-      }),
-      app.prisma.orderStatusLog.create({
-        data: { orderId: id, status: 'DRIVER_ASSIGNED', changedBy: request.user.userId, note: 'Driver accepted ride' },
-      }),
-    ]);
+    // Shared Step 8 claim: the DB compare-and-set means two drivers tapping
+    // accept at the same instant resolve to exactly one winner — the old
+    // check-then-update here could double-assign.
+    const updatedOrder = await dispatch.claimOrder(id, driver.id, 'DRIVER');
 
     // Notify customer
     app.io.to(`order:${id}`).emit('order:status_changed', {
@@ -332,18 +320,41 @@ export async function driverRoutes(app: FastifyInstance) {
       data: { orderId: id, status: 'DRIVER_ASSIGNED' },
     });
 
-    // Update acceptance rate
-    const totalOffered = await app.prisma.order.count({
-      where: { orderType: 'TAXI', driverId: driver.id },
-    });
-    if (totalOffered > 0) {
-      await app.prisma.driver.update({
-        where: { id: driver.id },
-        data: { acceptanceRate: Math.min(100, ((totalOffered) / (totalOffered + 1)) * 100 + (1 / (totalOffered + 1)) * 100) },
-      });
-    }
-
     return { success: true, data: updatedOrder };
+  });
+
+  /** POST /rides/:id/rate-customer — post-trip rating goes both ways (§4.2). */
+  app.post('/rides/:id/rate-customer', { preHandler: [app.authenticate] }, async (request) => {
+    const { id } = request.params as { id: string };
+    const body = z.object({
+      score: z.number().int().min(1).max(5),
+      comment: z.string().max(500).optional(),
+    }).parse(request.body);
+
+    const driver = await getDriver(request.user.userId);
+    const order = await app.prisma.order.findFirst({
+      where: { id, driverId: driver.id, orderType: 'TAXI', status: { in: ['DELIVERED', 'COMPLETED'] } },
+      select: { id: true, customerId: true },
+    });
+    if (!order) throw new NotFoundError('Completed ride', id);
+
+    const existing = await app.prisma.rating.findFirst({
+      where: { orderId: id, raterId: request.user.userId, type: 'DRIVER_TO_CUSTOMER' },
+    });
+    if (existing) throw new AppError(409, 'ALREADY_RATED', 'You already rated this passenger');
+
+    const rating = await app.prisma.rating.create({
+      data: {
+        orderId: id,
+        raterId: request.user.userId,
+        rateeId: order.customerId,
+        type: 'DRIVER_TO_CUSTOMER',
+        score: body.score,
+        comment: body.comment,
+        tags: [],
+      },
+    });
+    return { success: true, data: rating };
   });
 
   // 2. En route to pickup

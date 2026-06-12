@@ -32,13 +32,9 @@ beforeAll(async () => {
   process.env['REDIS_URL'] = process.env['REDIS_URL'] || 'redis://localhost:6382';
   app = await buildTestApp();
 
-  // Clean up stale sessions from prior test runs so we don't hit unique constraint
-  // on JWT tokens (deterministic in dev mode for same user).
-  await app.prisma.session.deleteMany({
-    where: {
-      user: { phone: { in: ['+5926003000', '+5926002000', '+5926004000'] } },
-    },
-  });
+  // NOTE: no session wiping here. Tokens carry a jti nonce so they never
+  // collide, and deleting seeded users' sessions kills parallel test files
+  // mid-flight (auth is session-backed since SEC-8).
 
   // Reset OTP state from prior runs so send/verify flows are deterministic
   const otpPhones = ['+5926003000', '+5926002000', '+5926004000', '+5929999999', '+5928887777'];

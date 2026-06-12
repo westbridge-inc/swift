@@ -26,7 +26,8 @@ const MOVER_PHONE = '+5920004444';
 const VENDOR_PHONE = '+5920005555';
 const L2_AUTO_PHONE = '+5920006666';
 const L2_MANUAL_PHONE = '+5920007777';
-const ALL_PHONES = [MOVER_PHONE, VENDOR_PHONE, L2_AUTO_PHONE, L2_MANUAL_PHONE];
+const ADMIN_PHONE = '+5920004445';
+const ALL_PHONES = [MOVER_PHONE, VENDOR_PHONE, L2_AUTO_PHONE, L2_MANUAL_PHONE, ADMIN_PHONE];
 
 const MOVER_DOCS = ['national_id', 'drivers_licence', 'vehicle_registration', 'vehicle_insurance'];
 
@@ -102,8 +103,29 @@ beforeAll(async () => {
     getKycProvider(),
   );
 
-  const adminLogin = await loginWithOtp(app, '+5926001000');
-  adminToken = adminLogin.json().data.tokens.accessToken;
+  // Own admin via direct session — never race the seeded admin phone
+  const adminUser = await app.prisma.user.create({
+    data: {
+      phone: ADMIN_PHONE,
+      firstName: 'Step4',
+      lastName: 'Admin',
+      roles: ['ADMIN'],
+      activeRole: 'ADMIN',
+      isPhoneVerified: true,
+      admin: { create: { permissions: ['*'] } },
+    },
+  });
+  adminToken = app.jwt.sign({ userId: adminUser.id, role: 'ADMIN', jti: `s4-${Date.now()}` });
+  await app.prisma.session.create({
+    data: {
+      userId: adminUser.id,
+      token: adminToken,
+      refreshToken: `s4-refresh-${Date.now()}`,
+      deviceId: 'step4-admin',
+      deviceType: 'test',
+      expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000),
+    },
+  });
 
   // Mover with a rider record (created during later onboarding in real flows)
   const mover = await signup(MOVER_PHONE, 'MOVER');
