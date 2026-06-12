@@ -11,6 +11,13 @@ export interface JobContext {
   log: FastifyBaseLogger;
 }
 
+declare module 'fastify' {
+  interface FastifyInstance {
+    /** Decorated in server.ts when background queues are up */
+    queues?: ReturnType<typeof createQueues>;
+  }
+}
+
 const QUEUE_NAMES = {
   ORDER: 'order-jobs',
   RIDER_ASSIGNMENT: 'rider-assignment',
@@ -255,6 +262,30 @@ export function createWorkers(ctx: JobContext) {
     { connection, concurrency: 1 },
   );
 
+  // NOTIFICATIONS: Step 11 vendor-alert escalation — re-alert, then SMS
+  const notificationWorker = new Worker(
+    QUEUE_NAMES.NOTIFICATION,
+    async (job: Job) => {
+      if (job.name !== 'vendor-alert-escalate') return;
+      const { escalateVendorAlert } = await import('../modules/notification/notification.service');
+      const { getChannels } = await import('../providers/notifications/channels');
+
+      const { orderId, level = 0 } = job.data;
+      const outcome = await escalateVendorAlert(ctx.prisma, ctx.io, getChannels(), orderId, level);
+
+      if (outcome === 'realerted') {
+        const queue = new Queue(QUEUE_NAMES.NOTIFICATION, { connection });
+        await queue.add('vendor-alert-escalate', { orderId, level: 1 }, {
+          delay: 60_000,
+          removeOnComplete: 100,
+          removeOnFail: 50,
+        });
+        await queue.close();
+      }
+    },
+    { connection, concurrency: 5 },
+  );
+
   // DISPATCH: Step 8 offer cascade — start offers and enforce the 20s timeout
   const dispatchWorker = new Worker(
     QUEUE_NAMES.DISPATCH,
@@ -297,6 +328,7 @@ export function createWorkers(ctx: JobContext) {
     settlementWorker,
     verificationWorker,
     dispatchWorker,
+    notificationWorker,
     cleanup: async () => {
       await Promise.all([
         orderWorker.close(),
@@ -305,6 +337,7 @@ export function createWorkers(ctx: JobContext) {
         settlementWorker.close(),
         verificationWorker.close(),
         dispatchWorker.close(),
+        notificationWorker.close(),
       ]);
     },
   };
