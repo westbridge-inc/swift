@@ -13,6 +13,7 @@ import { searchRoutes } from './modules/search/search.routes';
 import { chatRoutes } from './modules/chat/chat.routes';
 import { verificationRoutes } from './modules/verification/verification.routes';
 import { ridesRoutes } from './modules/rides/rides.routes';
+import { aiRoutes } from './modules/ai/ai.routes';
 import { prismaPlugin } from './plugins/prisma';
 import { authPlugin } from './plugins/auth';
 import { socketPlugin } from './plugins/socket';
@@ -112,6 +113,7 @@ async function buildApp() {
   await app.register(chatRoutes, { prefix: '/api/v1/chat' });
   await app.register(verificationRoutes, { prefix: '/api/v1/verification' });
   await app.register(ridesRoutes, { prefix: '/api/v1/rides' });
+  await app.register(aiRoutes, { prefix: '/api/v1/ai' });
 
   // Background job queues
   try {
