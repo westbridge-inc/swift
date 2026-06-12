@@ -1,12 +1,9 @@
 name: Deploy API
 
+# Manual-only until Fly.io credentials exist (playbook Step 15 — deploys
+# come at hardening). It was failing on every API push with no token.
 on:
-  push:
-    branches: [main]
-    paths:
-      - 'apps/api/**'
-      - 'packages/**'
-      - 'pnpm-lock.yaml'
+  workflow_dispatch:
 
 concurrency:
   group: deploy-api

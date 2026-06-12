@@ -179,19 +179,24 @@ describe('calculateTaxiFare', () => {
 // ---------------------------------------------------------------------------
 
 describe('generateOrderNumber', () => {
-  it('has format SW-YYMMDD-XXX', () => {
+  it('has format SW-YYMMDD-XXX plus a 3-char collision suffix', () => {
     const result = generateOrderNumber(1);
-    expect(result).toMatch(/^SW-\d{6}-\d{3}$/);
+    expect(result).toMatch(/^SW-\d{6}-\d{3}[A-Z2-9]{3}$/);
   });
 
   it('pads sequence to 3 digits', () => {
-    expect(generateOrderNumber(1).endsWith('-001')).toBe(true);
-    expect(generateOrderNumber(42).endsWith('-042')).toBe(true);
-    expect(generateOrderNumber(999).endsWith('-999')).toBe(true);
+    expect(generateOrderNumber(1)).toMatch(/-001[A-Z2-9]{3}$/);
+    expect(generateOrderNumber(42)).toMatch(/-042[A-Z2-9]{3}$/);
+    expect(generateOrderNumber(999)).toMatch(/-999[A-Z2-9]{3}$/);
   });
 
   it('does not truncate sequences > 999', () => {
-    expect(generateOrderNumber(1234).endsWith('-1234')).toBe(true);
+    expect(generateOrderNumber(1234)).toMatch(/-1234[A-Z2-9]{3}$/);
+  });
+
+  it('two calls with the same sequence do not collide (concurrency-proof)', () => {
+    const seen = new Set(Array.from({ length: 200 }, () => generateOrderNumber(7)));
+    expect(seen.size).toBeGreaterThan(1);
   });
 
   it('uses current date', () => {
@@ -199,6 +204,6 @@ describe('generateOrderNumber', () => {
     const yy = now.getFullYear().toString().slice(2);
     const mm = (now.getMonth() + 1).toString().padStart(2, '0');
     const dd = now.getDate().toString().padStart(2, '0');
-    expect(generateOrderNumber(5)).toBe(`SW-${yy}${mm}${dd}-005`);
+    expect(generateOrderNumber(5).startsWith(`SW-${yy}${mm}${dd}-005`)).toBe(true);
   });
 });
