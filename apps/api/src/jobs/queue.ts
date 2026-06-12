@@ -153,100 +153,30 @@ export function createWorkers(ctx: JobContext) {
     { connection, concurrency: 3 },
   );
 
-  // SUBSCRIPTION BILLING
+  // SUBSCRIPTION BILLING — Step 5: idempotent BillingService, never wallets
   const subscriptionWorker = new Worker(
     QUEUE_NAMES.SUBSCRIPTION,
     async (job: Job) => {
+      const { BillingService } = await import('../modules/billing/billing.service');
+      const { NotificationService } = await import('../modules/notification/notification.service');
+      const { getPaymentProvider } = await import('../providers/payment/payment-provider');
+
+      const billing = new BillingService(
+        ctx.prisma,
+        new NotificationService(ctx.prisma, ctx.io),
+        getPaymentProvider(),
+      );
+
       switch (job.name) {
         case 'process-billing': {
-          const now = new Date();
-          const dueSubscriptions = await ctx.prisma.subscription.findMany({
-            where: {
-              status: { in: ['ACTIVE', 'PAST_DUE'] },
-              nextBillingDate: { lte: now },
-              autoRenew: true,
-            },
-            include: {
-              rider: { include: { user: { select: { id: true, walletBalance: true } } } },
-              driver: { include: { user: { select: { id: true, walletBalance: true } } } },
-              vendor: { include: { owner: { include: { user: { select: { id: true, walletBalance: true } } } } } },
-            },
-          });
-
-          for (const sub of dueSubscriptions) {
-            const user = sub.rider?.user || sub.driver?.user || sub.vendor?.owner?.user;
-            if (!user) continue;
-
-            const amount = sub.customRate ? Number(sub.customRate) : Number(sub.weeklyRate);
-            const balance = Number(user.walletBalance);
-
-            if (balance >= amount) {
-              // Charge wallet
-              await ctx.prisma.user.update({
-                where: { id: user.id },
-                data: { walletBalance: { decrement: amount } },
-              });
-
-              const newBalance = balance - amount;
-              await ctx.prisma.transaction.create({
-                data: {
-                  userId: user.id,
-                  type: 'SUBSCRIPTION_PAYMENT',
-                  amount,
-                  direction: 'out',
-                  description: `Weekly subscription: ${sub.type}`,
-                  reference: sub.id,
-                  balanceAfter: newBalance,
-                },
-              });
-
-              const periodStart = new Date();
-              const periodEnd = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
-
-              await ctx.prisma.subscription.update({
-                where: { id: sub.id },
-                data: {
-                  status: 'ACTIVE',
-                  currentPeriodStart: periodStart,
-                  currentPeriodEnd: periodEnd,
-                  nextBillingDate: periodEnd,
-                  lastPaymentDate: now,
-                  failedAttempts: 0,
-                  isInGracePeriod: false,
-                },
-              });
-
-              await ctx.prisma.subscriptionPayment.create({
-                data: {
-                  subscriptionId: sub.id,
-                  amount,
-                  status: 'CAPTURED',
-                  paymentMethod: 'WALLET',
-                  periodStart,
-                  periodEnd,
-                  paidAt: now,
-                },
-              });
-
-              ctx.log.info({ subscriptionId: sub.id, userId: user.id }, 'Subscription billed');
-            } else {
-              // Insufficient balance
-              const newAttempts = sub.failedAttempts + 1;
-              const gracePeriodEnd = new Date(Date.now() + 24 * 60 * 60 * 1000);
-
-              await ctx.prisma.subscription.update({
-                where: { id: sub.id },
-                data: {
-                  status: newAttempts >= 3 ? 'SUSPENDED' : 'PAST_DUE',
-                  failedAttempts: newAttempts,
-                  isInGracePeriod: newAttempts < 3,
-                  gracePeriodEnd: newAttempts < 3 ? gracePeriodEnd : undefined,
-                },
-              });
-
-              ctx.log.warn({ subscriptionId: sub.id, userId: user.id, attempts: newAttempts }, 'Subscription payment failed');
-            }
-          }
+          const result = await billing.runBillingCycle();
+          const reminders = await billing.sendUpcomingReminders();
+          ctx.log.info({ ...result, reminders }, 'Billing cycle complete');
+          break;
+        }
+        case 'tier-recalc': {
+          const changed = await billing.recalculateVendorTiers();
+          ctx.log.info({ changed }, 'Vendor tier recalculation complete');
           break;
         }
       }
@@ -361,5 +291,12 @@ export async function scheduleRecurringJobs(queues: ReturnType<typeof createQueu
     repeat: { pattern: '0 6 * * *' },
     removeOnComplete: 30,
     removeOnFail: 30,
+  });
+
+  // Vendor tier recalculation from catalogue size: weekly, Monday 05:00
+  await queues.subscriptionQueue.add('tier-recalc', {}, {
+    repeat: { pattern: '0 5 * * 1' },
+    removeOnComplete: 10,
+    removeOnFail: 10,
   });
 }

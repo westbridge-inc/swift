@@ -16,7 +16,9 @@ import {
 } from '@prisma/client';
 import { NotificationService } from '../notification/notification.service';
 import { VerificationService } from '../verification/verification.service';
+import { BillingService } from '../billing/billing.service';
 import { getKycProvider } from '../../providers/kyc/kyc-provider';
+import { getPaymentProvider } from '../../providers/payment/payment-provider';
 import { parsePagination, paginatedResponse } from '../../utils/pagination';
 import { AppError, NotFoundError, ForbiddenError } from '../../utils/errors';
 
@@ -139,6 +141,11 @@ const broadcastSchema = z.object({
   data: z.record(z.unknown()).optional(),
 });
 
+const topUpSchema = z.object({
+  amount: z.number().positive().max(10_000_000),
+  reference: z.string().max(200).optional(),
+});
+
 const verificationQueueQuerySchema = z.object({
   status: z.nativeEnum(VerificationDocumentStatus).default('PENDING'),
 });
@@ -163,6 +170,7 @@ const auditLogsQuerySchema = z.object({
 export async function adminRoutes(app: FastifyInstance) {
   const notifications = new NotificationService(app.prisma, app.io);
   const verification = new VerificationService(app.prisma, notifications, getKycProvider());
+  const billing = new BillingService(app.prisma, notifications, getPaymentProvider());
 
   // Middleware: verify ADMIN or SUPER_ADMIN role
   const adminGuard = async (request: any, reply: any) => {
@@ -1251,6 +1259,32 @@ export async function adminRoutes(app: FastifyInstance) {
     }
 
     return { success: true, data: updated };
+  });
+
+  /** Record a cash/bank-transfer top-up (Step 5 — manual confirm for now).
+   *  A top-up while PAST_DUE/SUSPENDED bills immediately and reinstates. */
+  app.post('/subscriptions/:id/topup', { preHandler: [adminGuard] }, async (request) => {
+    const { id } = request.params as { id: string };
+    const body = topUpSchema.parse(request.body);
+
+    const balance = await billing.recordTopUp(id, body.amount, request.user.userId, body.reference);
+    await audit(request.user.userId, 'PREPAID_TOPUP', 'Subscription', id, { amount: body.amount, reference: body.reference }, request);
+
+    return { success: true, data: { balance: Number(balance.balance), currencyCode: balance.currencyCode } };
+  });
+
+  /** Billing audit trail for one subscription. */
+  app.get('/subscriptions/:id/billing-events', { preHandler: [adminGuard] }, async (request) => {
+    const { id } = request.params as { id: string };
+    const { page, limit, skip } = parsePagination(request.query as Record<string, string>);
+
+    const where = { subscriptionId: id };
+    const [events, total] = await Promise.all([
+      app.prisma.billingEvent.findMany({ where, orderBy: { createdAt: 'desc' }, skip, take: limit }),
+      app.prisma.billingEvent.count({ where }),
+    ]);
+
+    return { success: true, ...paginatedResponse(events, total, { page, limit, skip }) };
   });
 
   // ─── Notifications / Broadcast ─────────────────────────────────────────
