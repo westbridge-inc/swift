@@ -133,6 +133,12 @@ const notificationsQuerySchema = z.object({
   unread: z.enum(['true', 'false']).optional(),
 });
 
+const notificationPrefsSchema = z.object({
+  push: z.boolean().optional(),
+  sms: z.boolean().optional(),
+  email: z.boolean().optional(),
+});
+
 const switchRoleSchema = z.object({
   role: z.enum(['CUSTOMER', 'VENDOR', 'RIDER', 'DRIVER', 'MOVER']),
 });
@@ -1218,6 +1224,18 @@ export async function customerRoutes(app: FastifyInstance) {
       appointments: body.appointments,
     });
 
+    // Step 11: the vendor order alert escalates while unacknowledged —
+    // re-alert after 60s, SMS fallback 60s after that
+    if (app.queues) {
+      for (const order of result.orders) {
+        await app.queues.notificationQueue.add('vendor-alert-escalate', { orderId: order.id, level: 0 }, {
+          delay: 60_000,
+          removeOnComplete: 100,
+          removeOnFail: 50,
+        });
+      }
+    }
+
     // If wallet payment, debit
     if (paymentMethod === 'WALLET') {
       await walletService.debit(
@@ -1609,6 +1627,25 @@ export async function customerRoutes(app: FastifyInstance) {
     ]);
 
     return { success: true, ...paginatedResponse(notifications, total, { page, limit, skip }) };
+  });
+
+  /** PUT /notifications/prefs — per-user channel switches (Step 11). */
+  app.put('/notifications/prefs', async (request: AuthRequest) => {
+    const body = notificationPrefsSchema.parse(request.body);
+    const user = await app.prisma.user.findUniqueOrThrow({
+      where: { id: request.user.userId },
+      select: { notificationPrefs: true },
+    });
+    const merged = {
+      push: true, sms: true, email: false,
+      ...((user.notificationPrefs as Record<string, boolean> | null) ?? {}),
+      ...body,
+    };
+    await app.prisma.user.update({
+      where: { id: request.user.userId },
+      data: { notificationPrefs: merged },
+    });
+    return { success: true, data: merged };
   });
 
   app.put('/notifications/:id/read', async (request: AuthRequest) => {
