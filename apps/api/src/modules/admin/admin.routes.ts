@@ -12,8 +12,11 @@ import {
   SubscriptionStatus,
   SubscriptionType,
   DiscountType,
+  VerificationDocumentStatus,
 } from '@prisma/client';
 import { NotificationService } from '../notification/notification.service';
+import { VerificationService } from '../verification/verification.service';
+import { getKycProvider } from '../../providers/kyc/kyc-provider';
 import { parsePagination, paginatedResponse } from '../../utils/pagination';
 import { AppError, NotFoundError, ForbiddenError } from '../../utils/errors';
 
@@ -136,6 +139,19 @@ const broadcastSchema = z.object({
   data: z.record(z.unknown()).optional(),
 });
 
+const verificationQueueQuerySchema = z.object({
+  status: z.nativeEnum(VerificationDocumentStatus).default('PENDING'),
+});
+
+const approveDocSchema = z.object({
+  // Optional document expiry (e.g. licence end date entered during review)
+  expiresAt: z.coerce.date().optional(),
+});
+
+const rejectDocSchema = z.object({
+  reason: z.string().min(3).max(500),
+});
+
 const auditLogsQuerySchema = z.object({
   action: z.string().max(100).optional(),
   entity: z.string().max(100).optional(),
@@ -146,6 +162,7 @@ const auditLogsQuerySchema = z.object({
 
 export async function adminRoutes(app: FastifyInstance) {
   const notifications = new NotificationService(app.prisma, app.io);
+  const verification = new VerificationService(app.prisma, notifications, getKycProvider());
 
   // Middleware: verify ADMIN or SUPER_ADMIN role
   const adminGuard = async (request: any, reply: any) => {
@@ -1291,6 +1308,49 @@ export async function adminRoutes(app: FastifyInstance) {
     );
 
     return { success: true, data: { sent: userIds.length, role: role || 'ALL' } };
+  });
+
+  // ─── Verification Review Queue (Step 4) ───────────────────────────────
+
+  app.get('/verification/queue', { preHandler: [adminGuard] }, async (request) => {
+    const { page, limit, skip } = parsePagination(request.query as Record<string, string>);
+    const { status } = verificationQueueQuerySchema.parse(request.query);
+
+    const where = { status };
+    const [documents, total] = await Promise.all([
+      app.prisma.verificationDocument.findMany({
+        where,
+        include: {
+          user: { select: { id: true, firstName: true, lastName: true, phone: true, countryCode: true } },
+        },
+        orderBy: { createdAt: 'asc' }, // oldest first — review in arrival order
+        skip,
+        take: limit,
+      }),
+      app.prisma.verificationDocument.count({ where }),
+    ]);
+
+    return { success: true, ...paginatedResponse(documents, total, { page, limit, skip }) };
+  });
+
+  app.put('/verification/:id/approve', { preHandler: [adminGuard] }, async (request) => {
+    const { id } = request.params as { id: string };
+    const body = approveDocSchema.parse(request.body ?? {});
+
+    const doc = await verification.approveDocument(id, request.user.userId, body.expiresAt);
+    await audit(request.user.userId, 'APPROVE_VERIFICATION_DOC', 'VerificationDocument', id, { docType: doc.docType }, request);
+
+    return { success: true, data: doc };
+  });
+
+  app.put('/verification/:id/reject', { preHandler: [adminGuard] }, async (request) => {
+    const { id } = request.params as { id: string };
+    const body = rejectDocSchema.parse(request.body);
+
+    const doc = await verification.rejectDocument(id, request.user.userId, body.reason);
+    await audit(request.user.userId, 'REJECT_VERIFICATION_DOC', 'VerificationDocument', id, { docType: doc.docType, reason: body.reason }, request);
+
+    return { success: true, data: doc };
   });
 
   // ─── Audit Logs ────────────────────────────────────────────────────────

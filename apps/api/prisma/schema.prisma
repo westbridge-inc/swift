@@ -191,6 +191,8 @@ model VerificationDocument {
   /// Storage reference only. Raw documents: encrypted at rest, never logged,
   /// never sent to any AI service (hard rule 3).
   fileUrl String
+  /// Provider case reference — the only provider-side artifact we keep
+  kycRef  String?
   status  VerificationDocumentStatus @default(PENDING)
   /// OCR'd / manually entered expiry; lapse of a critical doc auto-suspends listings
   expiresAt  DateTime?
