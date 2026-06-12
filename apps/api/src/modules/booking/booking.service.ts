@@ -17,8 +17,8 @@ export interface BookingConfig {
 export class BookingService {
   constructor(private prisma: PrismaClient) {}
 
-  /** Reserve a slot. Throws 409 SLOT_TAKEN when someone else got there first. */
-  async reserveSlot(itemId: string, customerId: string, slotStart: Date) {
+  /** All slot rules except the reservation itself — checkout fails fast here. */
+  async validateSlot(itemId: string, slotStart: Date): Promise<BookingConfig> {
     const item = await this.prisma.item.findUnique({
       where: { id: itemId },
       select: { id: true, fulfillment: true, bookingConfig: true, isAvailable: true },
@@ -36,12 +36,27 @@ export class BookingService {
 
     const config = item.bookingConfig as unknown as BookingConfig;
     this.assertSlotFitsConfig(slotStart, config);
+    return config;
+  }
 
+  /**
+   * Reserve a slot. Throws 409 SLOT_TAKEN when someone else got there first.
+   * With an orderId (vendor acceptance), the booking is CONFIRMED directly.
+   */
+  async reserveSlot(itemId: string, customerId: string, slotStart: Date, orderId?: string) {
+    const config = await this.validateSlot(itemId, slotStart);
     const slotEnd = new Date(slotStart.getTime() + config.durationMinutes * 60_000);
 
     try {
       return await this.prisma.booking.create({
-        data: { itemId, customerId, slotStart, slotEnd },
+        data: {
+          itemId,
+          customerId,
+          slotStart,
+          slotEnd,
+          orderId,
+          status: orderId ? 'CONFIRMED' : 'RESERVED',
+        },
       });
     } catch (error) {
       if ((error as Prisma.PrismaClientKnownRequestError).code === 'P2002') {
