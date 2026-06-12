@@ -12,6 +12,14 @@ async function main() {
      ON "bookings"("itemId", "slotStart") WHERE "status" <> 'CANCELLED'`,
   );
 
+  // PostGIS + the dispatch candidate index (Step 8) — also here for db push
+  await prisma.$executeRawUnsafe('CREATE EXTENSION IF NOT EXISTS postgis');
+  await prisma.$executeRawUnsafe(
+    `CREATE INDEX IF NOT EXISTS "riders_geo_gist"
+     ON "riders" USING GIST (geography(ST_MakePoint("currentLng", "currentLat")))
+     WHERE "isOnline" = true AND "currentLat" IS NOT NULL AND "currentLng" IS NOT NULL`,
+  );
+
   // Platform config defaults
   const configs = [
     { key: 'markup_percentage', value: 5 },

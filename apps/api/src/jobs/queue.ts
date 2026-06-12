@@ -18,6 +18,7 @@ const QUEUE_NAMES = {
   SETTLEMENT: 'settlement-jobs',
   NOTIFICATION: 'notification-jobs',
   VERIFICATION: 'verification-jobs',
+  DISPATCH: 'dispatch-jobs',
 } as const;
 
 export { QUEUE_NAMES };
@@ -32,6 +33,7 @@ export function createQueues(redis: Redis) {
     settlementQueue: new Queue(QUEUE_NAMES.SETTLEMENT, { connection }),
     notificationQueue: new Queue(QUEUE_NAMES.NOTIFICATION, { connection }),
     verificationQueue: new Queue(QUEUE_NAMES.VERIFICATION, { connection }),
+    dispatchQueue: new Queue(QUEUE_NAMES.DISPATCH, { connection }),
   };
 }
 
@@ -253,12 +255,48 @@ export function createWorkers(ctx: JobContext) {
     { connection, concurrency: 1 },
   );
 
+  // DISPATCH: Step 8 offer cascade — start offers and enforce the 20s timeout
+  const dispatchWorker = new Worker(
+    QUEUE_NAMES.DISPATCH,
+    async (job: Job) => {
+      const { DispatchService } = await import('../modules/dispatch/dispatch.service');
+      const { getMapsProvider } = await import('../providers/maps/maps-provider');
+
+      const dispatchQueue = new Queue(QUEUE_NAMES.DISPATCH, { connection });
+      const dispatch = new DispatchService(
+        ctx.prisma,
+        ctx.redis,
+        ctx.io,
+        getMapsProvider(),
+        async (orderId, riderId, delayMs) => {
+          await dispatchQueue.add('offer-timeout', { orderId, riderId }, {
+            delay: delayMs,
+            removeOnComplete: 100,
+            removeOnFail: 50,
+          });
+        },
+      );
+
+      try {
+        if (job.name === 'dispatch-order') {
+          await dispatch.dispatchOrder(job.data.orderId);
+        } else if (job.name === 'offer-timeout') {
+          await dispatch.handleOfferTimeout(job.data.orderId, job.data.riderId);
+        }
+      } finally {
+        await dispatchQueue.close();
+      }
+    },
+    { connection, concurrency: 5 },
+  );
+
   return {
     orderWorker,
     riderAssignmentWorker,
     subscriptionWorker,
     settlementWorker,
     verificationWorker,
+    dispatchWorker,
     cleanup: async () => {
       await Promise.all([
         orderWorker.close(),
@@ -266,6 +304,7 @@ export function createWorkers(ctx: JobContext) {
         subscriptionWorker.close(),
         settlementWorker.close(),
         verificationWorker.close(),
+        dispatchWorker.close(),
       ]);
     },
   };
