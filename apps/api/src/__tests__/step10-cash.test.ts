@@ -1,0 +1,473 @@
+import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import Fastify, { type FastifyInstance } from 'fastify';
+import { nanoid } from 'nanoid';
+import type { UserRole, OrderStatus } from '@prisma/client';
+import type { Server } from 'socket.io';
+import { prismaPlugin } from '../plugins/prisma';
+import { redisPlugin } from '../plugins/redis';
+import { authPlugin } from '../plugins/auth';
+import { socketPlugin } from '../plugins/socket';
+import { riderRoutes } from '../modules/rider/rider.routes';
+import { ridesRoutes } from '../modules/rides/rides.routes';
+import { adminRoutes } from '../modules/admin/admin.routes';
+import { registerErrorHandler } from '../middleware/error-handler';
+import { CashRulesService, orderingRestriction } from '../modules/cash/cash-rules.service';
+import { OrderService } from '../modules/order/order.service';
+import { NotificationService } from '../modules/notification/notification.service';
+
+// ---------------------------------------------------------------------------
+// Step 10 — cash rules. The §5 table as tests: a simulated dishonest rider
+// gets flagged, a prankster customer gets restricted, and an honest rider's
+// clean claim pays. Claims are impossible outside the delivery state or
+// without a GPS stamp.
+// ---------------------------------------------------------------------------
+
+const DAY = 24 * 60 * 60 * 1000;
+// Own geo sandbox, ~50km from step8/step9 fixtures — online riders here must
+// never enter another file's dispatch radius when suites run in parallel.
+const GPS = { lat: 7.2, lng: -58.6 };
+
+let app: FastifyInstance;
+let cash: CashRulesService;
+let orders: OrderService;
+let adminToken: string;
+let vendorId: string;
+
+const createdUserIds: string[] = [];
+
+async function purgeFixtures() {
+  const users = await app.prisma.user.findMany({
+    where: { phone: { startsWith: '+59200133' } },
+    select: { id: true },
+  });
+  const ids = users.map((u) => u.id);
+  if (ids.length === 0) return;
+  const riders = await app.prisma.rider.findMany({ where: { userId: { in: ids } }, select: { id: true } });
+  const riderIds = riders.map((r) => r.id);
+  await app.prisma.reimbursementClaim.deleteMany({
+    where: { OR: [{ customerId: { in: ids } }, { riderId: { in: riderIds } }] },
+  });
+  const ordersToDrop = await app.prisma.order.findMany({
+    where: { OR: [{ customerId: { in: ids } }, { riderId: { in: riderIds } }] },
+    select: { id: true },
+  });
+  const orderIds = ordersToDrop.map((o) => o.id);
+  await app.prisma.earning.deleteMany({ where: { orderId: { in: orderIds } } });
+  await app.prisma.orderStatusLog.deleteMany({ where: { orderId: { in: orderIds } } });
+  await app.prisma.order.deleteMany({ where: { id: { in: orderIds } } });
+  await app.prisma.cart.deleteMany({ where: { customerId: { in: ids } } });
+  await app.prisma.notification.deleteMany({ where: { userId: { in: ids } } });
+  await app.prisma.user.deleteMany({ where: { id: { in: ids } } });
+}
+
+let seq = 0;
+async function makeUser(roles: UserRole[], activeRole: UserRole, opts: { createdDaysAgo?: number; trustLevel?: 'L1' | 'L2' | 'L3' } = {}) {
+  seq += 1;
+  const user = await app.prisma.user.create({
+    data: {
+      phone: `+59200133${String(seq).padStart(2, '0')}`,
+      firstName: 'Cash',
+      lastName: `User${seq}`,
+      roles,
+      activeRole,
+      isPhoneVerified: true,
+      trustLevel: opts.trustLevel ?? 'L1',
+      ...(opts.createdDaysAgo && { createdAt: new Date(Date.now() - opts.createdDaysAgo * DAY) }),
+      ...(roles.includes('CUSTOMER') && { customer: { create: {} } }),
+    },
+  });
+  createdUserIds.push(user.id);
+  const token = app.jwt.sign({ userId: user.id, role: activeRole, jti: nanoid(8) });
+  await app.prisma.session.create({
+    data: {
+      userId: user.id, token, refreshToken: nanoid(48),
+      deviceId: 'step10', deviceType: 'test', expiresAt: new Date(Date.now() + DAY),
+    },
+  });
+  return { userId: user.id, token };
+}
+
+async function makeRider() {
+  const u = await makeUser(['RIDER', 'CUSTOMER'], 'RIDER');
+  const rider = await app.prisma.rider.create({
+    data: {
+      userId: u.userId, riderType: 'DELIVERY', vehicleType: 'MOTORCYCLE',
+      documentsVerified: true, isOnline: true, currentLat: GPS.lat, currentLng: GPS.lng,
+    },
+  });
+  return { ...u, riderId: rider.id };
+}
+
+async function makeAtDoorOrder(customerId: string, riderId: string, amount: number, status: OrderStatus = 'ARRIVED') {
+  return app.prisma.order.create({
+    data: {
+      orderNumber: `S10-${nanoid(10)}`,
+      orderType: 'FOOD_DELIVERY',
+      customerId,
+      vendorId,
+      riderId,
+      status,
+      deliveryAddress: '9 Cash Street, Georgetown',
+      deliveryLat: 6.80451,
+      deliveryLng: -58.15532,
+      pickupLat: GPS.lat,
+      pickupLng: GPS.lng,
+      pickupAddress: 'Vendor corner',
+      subtotalBase: amount, subtotalMarkup: 0, subtotalCustomer: amount,
+      deliveryFee: 500, totalAmount: amount,
+      paymentMethod: 'CASH',
+    },
+  });
+}
+
+/** A prior failed-handover claim, backdated, for synthetic patterns. */
+async function plantClaim(riderId: string, customerId: string, daysAgo: number) {
+  const order = await makeAtDoorOrder(customerId, riderId, 2000, 'FAILED');
+  return app.prisma.reimbursementClaim.create({
+    data: {
+      orderId: order.id,
+      riderId,
+      customerId,
+      amount: 2000,
+      reason: 'no_show',
+      gpsLat: GPS.lat,
+      gpsLng: GPS.lng,
+      status: 'AUTO_APPROVED',
+      flags: [],
+      createdAt: new Date(Date.now() - daysAgo * DAY),
+    },
+  });
+}
+
+function inject(method: 'GET' | 'POST' | 'PUT', url: string, payload?: unknown, token?: string) {
+  return app.inject({
+    method,
+    url,
+    ...(payload !== undefined ? { payload: payload as Record<string, unknown> } : {}),
+    headers: {
+      ...(payload !== undefined ? { 'content-type': 'application/json' } : {}),
+      ...(token ? { authorization: `Bearer ${token}` } : {}),
+    },
+  });
+}
+
+beforeAll(async () => {
+  process.env['NODE_ENV'] = 'development';
+  process.env['DATABASE_URL'] = process.env['DATABASE_URL'] || 'postgresql://swift:swift@localhost:5434/swift';
+  process.env['REDIS_URL'] = process.env['REDIS_URL'] || 'redis://localhost:6382';
+
+  app = Fastify({ logger: false });
+  registerErrorHandler(app);
+  await app.register(prismaPlugin);
+  await app.register(redisPlugin);
+  await app.register(authPlugin);
+  await app.register(socketPlugin);
+  await app.register(riderRoutes, { prefix: '/api/v1/rider' });
+  await app.register(ridesRoutes, { prefix: '/api/v1/rides' });
+  await app.register(adminRoutes, { prefix: '/api/v1/admin' });
+  await app.ready();
+
+  const ioStub = { to: () => ({ emit: () => {} }), emit: () => {} } as unknown as Server;
+  orders = new OrderService(app.prisma, ioStub);
+  cash = new CashRulesService(app.prisma, new NotificationService(app.prisma, ioStub), orders);
+
+  await purgeFixtures();
+
+  const admin = await makeUser(['ADMIN'], 'ADMIN');
+  adminToken = admin.token;
+  await app.prisma.admin.create({ data: { userId: admin.userId, permissions: ['*'] } });
+
+  // One vendor for all the synthetic orders
+  const owner = await makeUser(['VENDOR_OWNER'], 'VENDOR_OWNER');
+  const vendorOwner = await app.prisma.vendorOwner.create({ data: { userId: owner.userId } });
+  const vendor = await app.prisma.vendor.create({
+    data: {
+      ownerId: vendorOwner.id, name: 'Cash Corner', slug: `cash-corner-${nanoid(6)}`,
+      vendorType: 'RESTAURANT', phone: '+5920013399',
+      addressLine1: '1 Cash Corner', city: 'Georgetown', region: 'Demerara-Mahaica',
+      latitude: GPS.lat, longitude: GPS.lng,
+      status: 'ACTIVE', acceptingOrders: true, isCurrentlyOpen: true, isVerified: true,
+    },
+  });
+  vendorId = vendor.id;
+});
+
+afterAll(async () => {
+  await purgeFixtures();
+  await app.close();
+});
+
+describe('Golden rule handover', () => {
+  it('payment collected -> DELIVERED with GPS evidence and earnings', async () => {
+    const customer = await makeUser(['CUSTOMER'], 'CUSTOMER');
+    const rider = await makeRider();
+    const order = await makeAtDoorOrder(customer.userId, rider.riderId, 3000);
+
+    const res = await inject('POST', `/api/v1/rider/orders/${order.id}/handover`, {
+      outcome: 'paid',
+      gps: GPS,
+    }, rider.token);
+    expect(res.statusCode).toBe(200);
+    expect(res.json().data.status).toBe('DELIVERED');
+    expect(res.json().data.claim).toBeNull();
+
+    const db = await app.prisma.order.findUniqueOrThrow({ where: { id: order.id } });
+    expect(db.paymentStatus).toBe('CAPTURED');
+
+    const log = await app.prisma.orderStatusLog.findFirst({
+      where: { orderId: order.id, status: 'DELIVERED' },
+    });
+    expect(log?.note).toContain('gps:');
+
+    const earnings = await app.prisma.earning.count({ where: { orderId: order.id } });
+    expect(earnings).toBeGreaterThan(0);
+  });
+
+  it('handover is impossible away from the door', async () => {
+    const customer = await makeUser(['CUSTOMER'], 'CUSTOMER');
+    const rider = await makeRider();
+    const order = await makeAtDoorOrder(customer.userId, rider.riderId, 3000, 'PICKED_UP');
+
+    const res = await inject('POST', `/api/v1/rider/orders/${order.id}/handover`, {
+      outcome: 'no_show',
+      gps: GPS,
+    }, rider.token);
+    expect(res.statusCode).toBe(409);
+    expect(res.json().error.code).toBe('NOT_AT_DOOR');
+  });
+
+  it('a claim is impossible without a GPS stamp', async () => {
+    const customer = await makeUser(['CUSTOMER'], 'CUSTOMER');
+    const rider = await makeRider();
+    const order = await makeAtDoorOrder(customer.userId, rider.riderId, 3000);
+
+    const res = await inject('POST', `/api/v1/rider/orders/${order.id}/handover`, {
+      outcome: 'no_show',
+    }, rider.token);
+    expect(res.statusCode).toBe(400); // zod refuses before any business logic
+  });
+});
+
+describe('The guarantee — honest claim pays, guardrails catch patterns', () => {
+  it('an honest rider with a clean record: claim auto-approved, customer struck', async () => {
+    const customer = await makeUser(['CUSTOMER'], 'CUSTOMER');
+    const rider = await makeRider();
+    const order = await makeAtDoorOrder(customer.userId, rider.riderId, 3500);
+
+    const res = await inject('POST', `/api/v1/rider/orders/${order.id}/handover`, {
+      outcome: 'refused',
+      gps: GPS,
+      photoUrl: 'storage://t/door.jpg',
+    }, rider.token);
+    expect(res.statusCode).toBe(200);
+    expect(res.json().data.status).toBe('FAILED');
+    expect(res.json().data.claim.status).toBe('AUTO_APPROVED');
+    expect(res.json().data.claim.flags).toEqual([]);
+
+    const strike = await app.prisma.strike.findFirst({ where: { orderId: order.id } });
+    expect(strike).not.toBeNull();
+    expect(strike!.phone).toBeTruthy();
+    expect(strike!.addressKey).toContain('geo:');
+  });
+
+  it('orders at/over the USD gate are not auto-covered (strike still recorded)', async () => {
+    const customer = await makeUser(['CUSTOMER'], 'CUSTOMER', { trustLevel: 'L2' });
+    const rider = await makeRider();
+    const order = await makeAtDoorOrder(customer.userId, rider.riderId, 20000);
+
+    const res = await inject('POST', `/api/v1/rider/orders/${order.id}/handover`, {
+      outcome: 'no_show',
+      gps: GPS,
+    }, rider.token);
+    expect(res.statusCode).toBe(200);
+    expect(res.json().data.claim).toBeNull();
+
+    const strike = await app.prisma.strike.findFirst({ where: { orderId: order.id } });
+    expect(strike).not.toBeNull();
+  });
+
+  it('a rider over the monthly cap goes to review, not auto-payout', async () => {
+    const rider = await makeRider();
+    for (let i = 0; i < 3; i++) {
+      const victim = await makeUser(['CUSTOMER'], 'CUSTOMER');
+      await plantClaim(rider.riderId, victim.userId, 2);
+    }
+
+    const customer = await makeUser(['CUSTOMER'], 'CUSTOMER');
+    const order = await makeAtDoorOrder(customer.userId, rider.riderId, 3000);
+    const result = await cash.handover(order.id, rider.userId, { outcome: 'no_show', gps: GPS });
+
+    expect(result.claim!.status).toBe('PENDING_REVIEW');
+    expect(result.claim!.flags).toContain('over_cap');
+  });
+
+  it('a dishonest rider (steady false claims) gets the outlier flag', async () => {
+    // Peers: two riders with one claim each in the window
+    for (let i = 0; i < 2; i++) {
+      const peer = await makeRider();
+      const victim = await makeUser(['CUSTOMER'], 'CUSTOMER');
+      await plantClaim(peer.riderId, victim.userId, 40 + i); // outside 30d window for cap, inside 90d
+    }
+
+    // Steady stream: enough claims that no realistic peer average excuses it
+    // (the cap-test rider above is also a "peer" here, raising the bar)
+    const dishonest = await makeRider();
+    for (let i = 0; i < 9; i++) {
+      const victim = await makeUser(['CUSTOMER'], 'CUSTOMER');
+      await plantClaim(dishonest.riderId, victim.userId, 1 + i);
+    }
+
+    const customer = await makeUser(['CUSTOMER'], 'CUSTOMER');
+    const order = await makeAtDoorOrder(customer.userId, dishonest.riderId, 2500);
+    const result = await cash.handover(order.id, dishonest.userId, { outcome: 'no_show', gps: GPS });
+
+    expect(result.claim!.status).toBe('PENDING_REVIEW');
+    expect(result.claim!.flags).toContain('outlier');
+  });
+
+  it('the same customer across two riders flags collusion_customer', async () => {
+    const target = await makeUser(['CUSTOMER'], 'CUSTOMER');
+    const riderA = await makeRider();
+    await plantClaim(riderA.riderId, target.userId, 10);
+
+    const riderB = await makeRider();
+    const order = await makeAtDoorOrder(target.userId, riderB.riderId, 2200);
+    const result = await cash.handover(order.id, riderB.userId, { outcome: 'refused', gps: GPS });
+
+    expect(result.claim!.flags).toContain('collusion_customer');
+  });
+
+  it('one rider repeatedly against one customer flags collusion_pair', async () => {
+    const target = await makeUser(['CUSTOMER'], 'CUSTOMER');
+    const rider = await makeRider();
+    await plantClaim(rider.riderId, target.userId, 15);
+
+    const order = await makeAtDoorOrder(target.userId, rider.riderId, 1800);
+    const result = await cash.handover(order.id, rider.userId, { outcome: 'no_show', gps: GPS });
+
+    expect(result.claim!.flags).toContain('collusion_pair');
+  });
+});
+
+describe('Strike consequences — the prankster customer gets restricted', () => {
+  async function strikeTimes(userId: string, n: number) {
+    for (let i = 0; i < n; i++) {
+      await app.prisma.strike.create({
+        data: { userId, reason: 'failed_payment_no_show', phone: 'x', addressKey: `geo:t${i}` },
+      });
+    }
+  }
+
+  it('2 strikes: L1 restricted, L2 still flows; 4 strikes: banned outright', async () => {
+    const prankster = await makeUser(['CUSTOMER'], 'CUSTOMER');
+    await strikeTimes(prankster.userId, 2);
+
+    expect(await orderingRestriction(app.prisma, prankster.userId)).toBe('restricted');
+
+    await app.prisma.user.update({ where: { id: prankster.userId }, data: { trustLevel: 'L2' } });
+    expect(await orderingRestriction(app.prisma, prankster.userId)).toBeNull();
+
+    await strikeTimes(prankster.userId, 2);
+    expect(await orderingRestriction(app.prisma, prankster.userId)).toBe('banned');
+  });
+
+  it('a restricted customer is blocked from requesting rides over HTTP', async () => {
+    const prankster = await makeUser(['CUSTOMER'], 'CUSTOMER');
+    await strikeTimes(prankster.userId, 2);
+
+    const res = await inject('POST', '/api/v1/rides/request', {
+      pickup: { lat: 6.81, lng: -58.155 },
+      dropoff: { lat: 6.755, lng: -58.155 },
+      pickupAddress: 'Strike Street 1',
+      dropoffAddress: 'Strike Street 2',
+    }, prankster.token);
+    expect(res.statusCode).toBe(403);
+    expect(res.json().error.code).toBe('STRIKE_RESTRICTED');
+  });
+
+  it('a banned customer cannot check out at all', async () => {
+    const banned = await makeUser(['CUSTOMER'], 'CUSTOMER', { trustLevel: 'L3' });
+    await strikeTimes(banned.userId, 4);
+
+    await app.prisma.cart.create({
+      data: {
+        customerId: banned.userId,
+        vendorId,
+        items: { create: { itemId: (await app.prisma.item.findFirstOrThrow({ where: { vendorId: { not: vendorId } } })).id, quantity: 1, selectedOptions: {} } },
+      },
+    });
+
+    await expect(
+      orders.checkout({ userId: banned.userId, paymentMethod: 'CASH' }),
+    ).rejects.toMatchObject({ code: 'ACCOUNT_RESTRICTED' });
+  });
+});
+
+describe('L3 — earned trust', () => {
+  it('promotes an L2 veteran with paid history and zero strikes on a paid handover', async () => {
+    const veteran = await makeUser(['CUSTOMER'], 'CUSTOMER', { trustLevel: 'L2', createdDaysAgo: 60 });
+    const rider = await makeRider();
+
+    // 20 prior paid orders
+    for (let i = 0; i < 20; i++) {
+      const prior = await makeAtDoorOrder(veteran.userId, rider.riderId, 1500, 'DELIVERED');
+      await app.prisma.order.update({ where: { id: prior.id }, data: { paymentStatus: 'CAPTURED' } });
+    }
+
+    const order = await makeAtDoorOrder(veteran.userId, rider.riderId, 1500);
+    await cash.handover(order.id, rider.userId, { outcome: 'paid', gps: GPS });
+
+    const user = await app.prisma.user.findUniqueOrThrow({ where: { id: veteran.userId } });
+    expect(user.trustLevel).toBe('L3');
+  });
+
+  it('a single strike blocks the promotion', async () => {
+    const tainted = await makeUser(['CUSTOMER'], 'CUSTOMER', { trustLevel: 'L2', createdDaysAgo: 60 });
+    const rider = await makeRider();
+    await app.prisma.strike.create({
+      data: { userId: tainted.userId, reason: 'failed_payment_no_show', phone: 'x', addressKey: 'geo:z' },
+    });
+    for (let i = 0; i < 20; i++) {
+      const prior = await makeAtDoorOrder(tainted.userId, rider.riderId, 1500, 'DELIVERED');
+      await app.prisma.order.update({ where: { id: prior.id }, data: { paymentStatus: 'CAPTURED' } });
+    }
+
+    const order = await makeAtDoorOrder(tainted.userId, rider.riderId, 1500);
+    await cash.handover(order.id, rider.userId, { outcome: 'paid', gps: GPS });
+
+    const user = await app.prisma.user.findUniqueOrThrow({ where: { id: tainted.userId } });
+    expect(user.trustLevel).toBe('L2');
+  });
+});
+
+describe('Admin review + founder metrics', () => {
+  it('flagged claims queue through review -> approve -> paid', async () => {
+    const queue = await inject('GET', '/api/v1/admin/cash-rules/claims?limit=50', undefined, adminToken);
+    expect(queue.statusCode).toBe(200);
+    const pending = queue.json().data as Array<{ id: string; status: string }>;
+    expect(pending.length).toBeGreaterThan(0);
+
+    const claimId = pending[0]!.id;
+    const approve = await inject('PUT', `/api/v1/admin/cash-rules/claims/${claimId}/approve`, { reason: 'Verified with photos' }, adminToken);
+    expect(approve.statusCode).toBe(200);
+    expect(approve.json().data.status).toBe('APPROVED');
+
+    const paid = await inject('PUT', `/api/v1/admin/cash-rules/claims/${claimId}/paid`, { reference: 'cash-payout-1' }, adminToken);
+    expect(paid.statusCode).toBe(200);
+    expect(paid.json().data.status).toBe('PAID');
+
+    // A paid claim cannot be re-reviewed
+    const again = await inject('PUT', `/api/v1/admin/cash-rules/claims/${claimId}/approve`, {}, adminToken);
+    expect(again.statusCode).toBe(400);
+  });
+
+  it('founder metrics tell the failed-payment story', async () => {
+    const res = await inject('GET', '/api/v1/admin/cash-rules/metrics', undefined, adminToken);
+    expect(res.statusCode).toBe(200);
+    const data = res.json().data;
+    expect(data.failedPaymentPct).toBeGreaterThanOrEqual(0);
+    expect(data.guaranteePayoutsThisWeek.total).toBeGreaterThan(0);
+    expect(Array.isArray(data.claimsByRider)).toBe(true);
+    expect(data.claimsByRider.length).toBeGreaterThan(0);
+  });
+});

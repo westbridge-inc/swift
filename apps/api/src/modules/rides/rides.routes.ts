@@ -4,6 +4,7 @@ import { FareService } from './fare.service';
 import { OrderService } from '../order/order.service';
 import { CountryConfigService } from '../country/country-config.service';
 import { makeDispatchService } from '../dispatch/dispatch.service';
+import { orderingRestriction } from '../cash/cash-rules.service';
 import { generateOrderNumber } from '../../utils/markup';
 import { AppError, NotFoundError } from '../../utils/errors';
 
@@ -71,6 +72,15 @@ export async function ridesRoutes(app: FastifyInstance) {
     });
     if (active) {
       throw new AppError(409, 'RIDE_IN_PROGRESS', 'You already have an active ride');
+    }
+
+    // Strike consequences apply to rides exactly as to deliveries
+    const restriction = await orderingRestriction(app.prisma, user.id);
+    if (restriction === 'banned') {
+      throw new AppError(403, 'ACCOUNT_RESTRICTED', 'Rides are disabled on this account after repeated failed payments. Contact support.');
+    }
+    if (restriction === 'restricted') {
+      throw new AppError(403, 'STRIKE_RESTRICTED', 'After repeated failed payments, rides require ID verification. Verify your identity to continue.');
     }
 
     const estimate = await fareService.estimate(body.pickup, body.dropoff, user.countryCode);

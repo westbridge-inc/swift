@@ -5,6 +5,7 @@ import { estimateDrivingDistance, estimateDeliveryMinutes } from '../../utils/di
 import { NotificationService } from '../notification/notification.service';
 import { CountryConfigService } from '../country/country-config.service';
 import { BookingService } from '../booking/booking.service';
+import { orderingRestriction } from '../cash/cash-rules.service';
 import { AppError } from '../../utils/errors';
 
 interface CheckoutInput {
@@ -52,7 +53,8 @@ export const ORDER_TRANSITIONS: Record<OrderStatus, OrderStatus[]> = {
     'DRIVER_ASSIGNED', 'DRIVER_EN_ROUTE', 'DRIVER_ARRIVED',
   ],
   REFUNDED: ['CANCELLED', 'DELIVERED', 'COMPLETED'],
-  FAILED: ['PENDING'],
+  // Failed cash handover (master plan §5) — only from the door or en route
+  FAILED: ['PENDING', 'PICKED_UP', 'EN_ROUTE_DELIVERY', 'ARRIVED'],
 };
 
 /** States where the order is physically with the mover — no cancellation. */
@@ -91,6 +93,16 @@ export class OrderService {
       where: { id: input.userId },
       select: { trustLevel: true, countryCode: true, createdAt: true },
     });
+
+    // Strike consequences (master plan §5): repeated failed cash handovers
+    // restrict ordering to verified accounts, then ban outright
+    const restriction = await orderingRestriction(this.prisma, input.userId);
+    if (restriction === 'banned') {
+      throw new AppError(403, 'ACCOUNT_RESTRICTED', 'Ordering is disabled on this account after repeated failed deliveries. Contact support.');
+    }
+    if (restriction === 'restricted') {
+      throw new AppError(403, 'STRIKE_RESTRICTED', 'After repeated failed deliveries, ordering requires ID verification. Verify your identity to continue.');
+    }
 
     // Group the cart by vendor — a multi-vendor cart splits into one order each
     const groups = new Map<string, typeof cart.items>();

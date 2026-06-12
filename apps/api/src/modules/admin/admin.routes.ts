@@ -13,10 +13,13 @@ import {
   SubscriptionType,
   DiscountType,
   VerificationDocumentStatus,
+  ClaimStatus,
 } from '@prisma/client';
 import { NotificationService } from '../notification/notification.service';
 import { VerificationService } from '../verification/verification.service';
 import { BillingService } from '../billing/billing.service';
+import { CashRulesService } from '../cash/cash-rules.service';
+import { OrderService } from '../order/order.service';
 import { getKycProvider } from '../../providers/kyc/kyc-provider';
 import { getPaymentProvider } from '../../providers/payment/payment-provider';
 import { parsePagination, paginatedResponse } from '../../utils/pagination';
@@ -150,6 +153,10 @@ const verificationQueueQuerySchema = z.object({
   status: z.nativeEnum(VerificationDocumentStatus).default('PENDING'),
 });
 
+const claimsQueueQuerySchema = z.object({
+  status: z.nativeEnum(ClaimStatus).default('PENDING_REVIEW'),
+});
+
 const approveDocSchema = z.object({
   // Optional document expiry (e.g. licence end date entered during review)
   expiresAt: z.coerce.date().optional(),
@@ -171,6 +178,7 @@ export async function adminRoutes(app: FastifyInstance) {
   const notifications = new NotificationService(app.prisma, app.io);
   const verification = new VerificationService(app.prisma, notifications, getKycProvider());
   const billing = new BillingService(app.prisma, notifications, getPaymentProvider());
+  const cashRules = new CashRulesService(app.prisma, notifications, new OrderService(app.prisma, app.io));
 
   // Middleware: verify ADMIN or SUPER_ADMIN role
   const adminGuard = async (request: any, reply: any) => {
@@ -1385,6 +1393,55 @@ export async function adminRoutes(app: FastifyInstance) {
     await audit(request.user.userId, 'REJECT_VERIFICATION_DOC', 'VerificationDocument', id, { docType: doc.docType, reason: body.reason }, request);
 
     return { success: true, data: doc };
+  });
+
+  // ─── Cash Rules: guarantee claims + founder metrics (Step 10) ──────────
+
+  app.get('/cash-rules/claims', { preHandler: [adminGuard] }, async (request) => {
+    const { page, limit, skip } = parsePagination(request.query as Record<string, string>);
+    const { status } = claimsQueueQuerySchema.parse(request.query);
+
+    const where = { status };
+    const [claims, total] = await Promise.all([
+      app.prisma.reimbursementClaim.findMany({
+        where,
+        orderBy: { createdAt: 'asc' },
+        skip,
+        take: limit,
+      }),
+      app.prisma.reimbursementClaim.count({ where }),
+    ]);
+    return { success: true, ...paginatedResponse(claims, total, { page, limit, skip }) };
+  });
+
+  app.put('/cash-rules/claims/:id/approve', { preHandler: [adminGuard] }, async (request) => {
+    const { id } = request.params as { id: string };
+    const body = reasonSchema.parse(request.body ?? {});
+    const claim = await cashRules.approveClaim(id, request.user.userId, body.reason);
+    await audit(request.user.userId, 'APPROVE_CLAIM', 'ReimbursementClaim', id, { amount: Number(claim.amount) }, request);
+    return { success: true, data: claim };
+  });
+
+  app.put('/cash-rules/claims/:id/reject', { preHandler: [adminGuard] }, async (request) => {
+    const { id } = request.params as { id: string };
+    const body = rejectDocSchema.parse(request.body);
+    const claim = await cashRules.rejectClaim(id, request.user.userId, body.reason);
+    await audit(request.user.userId, 'REJECT_CLAIM', 'ReimbursementClaim', id, { reason: body.reason }, request);
+    return { success: true, data: claim };
+  });
+
+  app.put('/cash-rules/claims/:id/paid', { preHandler: [adminGuard] }, async (request) => {
+    const { id } = request.params as { id: string };
+    const body = processSettlementSchema.parse(request.body ?? {});
+    const claim = await cashRules.markClaimPaid(id, request.user.userId, body.reference);
+    await audit(request.user.userId, 'PAY_CLAIM', 'ReimbursementClaim', id, { reference: body.reference }, request);
+    return { success: true, data: claim };
+  });
+
+  /** Founder cockpit numbers: failed-payment %, payouts/week, claims by rider. */
+  app.get('/cash-rules/metrics', { preHandler: [adminGuard] }, async () => {
+    const metrics = await cashRules.founderMetrics();
+    return { success: true, data: metrics };
   });
 
   // ─── Audit Logs ────────────────────────────────────────────────────────
