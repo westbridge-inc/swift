@@ -652,6 +652,16 @@ model Order {
   ridePinAttempts   Int       @default(0)
   ridePinVerifiedAt DateTime?
 
+  /// How this order is fulfilled (locked model): DELIVERY dispatches a mover,
+  /// PICKUP skips dispatch, APPOINTMENT books the slot at vendor acceptance.
+  fulfillment     FulfillmentType @default(DELIVERY)
+  appointmentSlot DateTime?
+
+  /// Deterministic risk heuristic (new account + high value + odd hours):
+  /// the vendor sees a call-to-confirm prompt. Never an AI decision.
+  riskFlagged Boolean @default(false)
+  riskReason  String?
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 

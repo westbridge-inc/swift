@@ -3,6 +3,7 @@ import { z } from 'zod';
 import { OrderStatus, OrderType, SettlementStatus } from '@prisma/client';
 import { OrderService } from '../order/order.service';
 import { NotificationService } from '../notification/notification.service';
+import { BookingService } from '../booking/booking.service';
 import { VerificationService } from '../verification/verification.service';
 import { getKycProvider } from '../../providers/kyc/kyc-provider';
 import { getStorageProvider } from '../../providers/storage/storage-provider';
@@ -281,6 +282,7 @@ export async function vendorRoutes(app: FastifyInstance) {
     getKycProvider(),
   );
   const storage = getStorageProvider();
+  const bookingService = new BookingService(app.prisma);
 
   // =========================================================================
   // 1. PROFILE
@@ -427,6 +429,17 @@ export async function vendorRoutes(app: FastifyInstance) {
       throw new AppError(400, 'INVALID_STATUS', `Cannot accept order in ${order.status} status`);
     }
     const body = acceptOrderSchema.parse(request.body ?? {});
+
+    // Appointment orders book their slot AT ACCEPTANCE (locked model). If the
+    // slot was taken since checkout, this 409s and the order stays PENDING —
+    // the customer picks a new time instead of holding a phantom booking.
+    if (order.fulfillment === 'APPOINTMENT' && order.appointmentSlot) {
+      const serviceItem = order.items[0];
+      if (serviceItem?.itemId) {
+        await bookingService.reserveSlot(serviceItem.itemId, order.customerId, order.appointmentSlot, order.id);
+      }
+    }
+
     if (body.estimatedPrepTime) {
       await app.prisma.order.update({
         where: { id: order.id },
