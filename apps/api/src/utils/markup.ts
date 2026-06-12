@@ -73,8 +73,12 @@ export function calculateTaxiFare(
   return Math.max(minimumFare, Math.ceil(surgedFare));
 }
 
+const ORDER_SUFFIX_ALPHABET = 'ABCDEFGHJKMNPQRSTVWXYZ23456789'; // no 0/O/1/I/L
+
 /**
- * Generate human-readable order number: SW-YYMMDD-XXX
+ * Human-readable order number: SW-YYMMDD-XXX plus a 3-char random suffix.
+ * The suffix makes the number collision-proof — two simultaneous checkouts
+ * can read the same daily count, and orderNumber is a unique column.
  */
 export function generateOrderNumber(sequence: number): string {
   const now = new Date();
@@ -82,5 +86,9 @@ export function generateOrderNumber(sequence: number): string {
   const mm = (now.getMonth() + 1).toString().padStart(2, '0');
   const dd = now.getDate().toString().padStart(2, '0');
   const seq = sequence.toString().padStart(3, '0');
-  return `SW-${yy}${mm}${dd}-${seq}`;
+  let suffix = '';
+  for (let i = 0; i < 3; i++) {
+    suffix += ORDER_SUFFIX_ALPHABET[Math.floor(Math.random() * ORDER_SUFFIX_ALPHABET.length)];
+  }
+  return `SW-${yy}${mm}${dd}-${seq}${suffix}`;
 }
