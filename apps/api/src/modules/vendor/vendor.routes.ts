@@ -447,6 +447,16 @@ export async function vendorRoutes(app: FastifyInstance) {
       });
     }
     const updated = await orderService.updateStatus(order.id, 'ACCEPTED', request.user.userId, 'Accepted by vendor');
+
+    // Step 8: acceptance of a DELIVERY order starts the dispatch cascade.
+    // PICKUP and APPOINTMENT orders never dispatch.
+    if (order.fulfillment === 'DELIVERY' && app.dispatchQueue) {
+      await app.dispatchQueue.add('dispatch-order', { orderId: order.id }, {
+        removeOnComplete: 100,
+        removeOnFail: 50,
+      });
+    }
+
     return { success: true, data: updated };
   });
 
