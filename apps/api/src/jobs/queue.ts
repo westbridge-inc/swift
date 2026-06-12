@@ -17,6 +17,7 @@ const QUEUE_NAMES = {
   SUBSCRIPTION: 'subscription-jobs',
   SETTLEMENT: 'settlement-jobs',
   NOTIFICATION: 'notification-jobs',
+  VERIFICATION: 'verification-jobs',
 } as const;
 
 export { QUEUE_NAMES };
@@ -30,6 +31,7 @@ export function createQueues(redis: Redis) {
     subscriptionQueue: new Queue(QUEUE_NAMES.SUBSCRIPTION, { connection }),
     settlementQueue: new Queue(QUEUE_NAMES.SETTLEMENT, { connection }),
     notificationQueue: new Queue(QUEUE_NAMES.NOTIFICATION, { connection }),
+    verificationQueue: new Queue(QUEUE_NAMES.VERIFICATION, { connection }),
   };
 }
 
@@ -299,17 +301,41 @@ export function createWorkers(ctx: JobContext) {
     { connection, concurrency: 1 },
   );
 
+  // VERIFICATION: daily expiry sweep + 30-day reminders (Step 4)
+  const verificationWorker = new Worker(
+    QUEUE_NAMES.VERIFICATION,
+    async (job: Job) => {
+      if (job.name === 'expiry-sweep') {
+        const { VerificationService } = await import('../modules/verification/verification.service');
+        const { NotificationService } = await import('../modules/notification/notification.service');
+        const { getKycProvider } = await import('../providers/kyc/kyc-provider');
+
+        const verification = new VerificationService(
+          ctx.prisma,
+          new NotificationService(ctx.prisma, ctx.io),
+          getKycProvider(),
+        );
+        const expired = await verification.expireLapsedDocuments();
+        const reminded = await verification.sendExpiryReminders();
+        ctx.log.info(`Verification sweep: ${expired} expired, ${reminded} reminders sent`);
+      }
+    },
+    { connection, concurrency: 1 },
+  );
+
   return {
     orderWorker,
     riderAssignmentWorker,
     subscriptionWorker,
     settlementWorker,
+    verificationWorker,
     cleanup: async () => {
       await Promise.all([
         orderWorker.close(),
         riderAssignmentWorker.close(),
         subscriptionWorker.close(),
         settlementWorker.close(),
+        verificationWorker.close(),
       ]);
     },
   };
@@ -328,5 +354,12 @@ export async function scheduleRecurringJobs(queues: ReturnType<typeof createQueu
     repeat: { pattern: '0 0 * * 0' }, // Sunday midnight
     removeOnComplete: 10,
     removeOnFail: 10,
+  });
+
+  // Verification document expiry sweep + reminders: daily at 06:00
+  await queues.verificationQueue.add('expiry-sweep', {}, {
+    repeat: { pattern: '0 6 * * *' },
+    removeOnComplete: 30,
+    removeOnFail: 30,
   });
 }

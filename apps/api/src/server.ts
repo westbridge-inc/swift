@@ -10,6 +10,7 @@ import { driverRoutes } from './modules/driver/driver.routes';
 import { adminRoutes } from './modules/admin/admin.routes';
 import { searchRoutes } from './modules/search/search.routes';
 import { chatRoutes } from './modules/chat/chat.routes';
+import { verificationRoutes } from './modules/verification/verification.routes';
 import { prismaPlugin } from './plugins/prisma';
 import { authPlugin } from './plugins/auth';
 import { socketPlugin } from './plugins/socket';
@@ -104,6 +105,7 @@ async function buildApp() {
   await app.register(adminRoutes, { prefix: '/api/v1/admin' });
   await app.register(searchRoutes, { prefix: '/api/v1' });
   await app.register(chatRoutes, { prefix: '/api/v1/chat' });
+  await app.register(verificationRoutes, { prefix: '/api/v1/verification' });
 
   // Background job queues
   try {

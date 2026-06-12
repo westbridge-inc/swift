@@ -2,6 +2,9 @@ import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { RiderType, VehicleType, EarningType, EarningStatus } from '@prisma/client';
 import { OrderService } from '../order/order.service';
+import { NotificationService } from '../notification/notification.service';
+import { VerificationService } from '../verification/verification.service';
+import { getKycProvider } from '../../providers/kyc/kyc-provider';
 import { haversineDistance } from '../../utils/distance';
 import { parsePagination, paginatedResponse } from '../../utils/pagination';
 import { AppError, NotFoundError, ConflictError, ValidationError } from '../../utils/errors';
@@ -107,6 +110,11 @@ function startOfMonth(date: Date = new Date()): Date {
 
 export async function riderRoutes(app: FastifyInstance) {
   const orderService = new OrderService(app.prisma, app.io);
+  const verification = new VerificationService(
+    app.prisma,
+    new NotificationService(app.prisma, app.io),
+    getKycProvider(),
+  );
 
   // =========================================================================
   // 1. PROFILE
@@ -212,8 +220,12 @@ export async function riderRoutes(app: FastifyInstance) {
   app.post('/go-online', { preHandler: [app.authenticate] }, async (request) => {
     const rider = await getRider(app, request.user.userId);
 
-    if (!rider.documentsVerified) {
-      throw new AppError(403, 'DOCUMENTS_NOT_VERIFIED', 'Your documents must be verified before you can go online');
+    // Step 4 gate: the country's MOVER checklist must be fully approved.
+    // Legacy documentsVerified flag grandfathers pre-checklist accounts.
+    const verified = rider.documentsVerified
+      || await verification.isRoleVerified(request.user.userId, 'MOVER');
+    if (!verified) {
+      throw new AppError(403, 'VERIFICATION_REQUIRED', 'Your documents must be verified before you can go online');
     }
 
     const updated = await app.prisma.rider.update({
