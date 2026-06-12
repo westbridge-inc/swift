@@ -5,6 +5,7 @@ import type { UserRole } from '@prisma/client';
 import { AppError } from '../../utils/errors';
 import { generateOtp, storeOtp, verifyOtp, checkOtpRateLimit } from '../../utils/otp';
 import { CountryConfigService } from '../country/country-config.service';
+import { getChannels } from '../../providers/notifications/channels';
 
 interface DeviceInfo {
   deviceId: string;
@@ -24,6 +25,7 @@ const LOCKOUT_MINUTES = 15;
 
 export class AuthService {
   private countryConfig: CountryConfigService;
+  private channels = getChannels();
 
   constructor(private app: FastifyInstance) {
     this.countryConfig = new CountryConfigService(app.prisma);
@@ -45,8 +47,10 @@ export class AuthService {
       this.app.log.info(`[DEV] OTP for ${phone}: ${otp}`);
     }
 
-    // TODO: Send via SMS provider (Twilio / GTT API)
-    // await this.sendSms(phone, `Your Swift verification code is: ${otp}`);
+    // Delivery rides the swappable SMS channel (Twilio-class adapter later)
+    await this.channels.sms
+      .sendSms(phone, `Your Swift verification code is: ${otp}`)
+      .catch(() => {});
 
     return { message: 'OTP sent successfully', expiresIn: 300 };
   }

@@ -249,6 +249,21 @@ async function resolveVendor(app: FastifyInstance, userId: string) {
   return { ownerId: owner.id, vendorId: owner.vendors[0]!.id, vendorIds: owner.vendors.map((v) => v.id) };
 }
 
+/** Acknowledge the persistent order alert — read = acknowledged = silence. */
+async function ackVendorAlert(app: FastifyInstance, userId: string, orderId: string) {
+  await app.prisma.notification.updateMany({
+    where: {
+      userId,
+      isRead: false,
+      AND: [
+        { data: { path: ['kind'], equals: 'vendor_order_alert' } },
+        { data: { path: ['orderId'], equals: orderId } },
+      ],
+    },
+    data: { isRead: true, readAt: new Date() },
+  });
+}
+
 /**
  * Verify that the given order belongs to one of the user's vendors and return it.
  */
@@ -378,6 +393,27 @@ export async function vendorRoutes(app: FastifyInstance) {
   // 3. ORDERS
   // =========================================================================
 
+  /** GET /alerts/pending — unacknowledged order alerts (dashboard banner state). */
+  app.get('/alerts/pending', auth, async (request) => {
+    const alerts = await app.prisma.notification.findMany({
+      where: {
+        userId: request.user.userId,
+        isRead: false,
+        data: { path: ['kind'], equals: 'vendor_order_alert' },
+      },
+      orderBy: { createdAt: 'asc' },
+      select: { id: true, title: true, body: true, data: true, createdAt: true },
+    });
+    return { success: true, data: alerts };
+  });
+
+  /** PUT /orders/:id/ack — explicit acknowledgement without accept/reject. */
+  app.put<{ Params: IdParam }>('/orders/:id/ack', auth, async (request) => {
+    await resolveOwnedOrder(app, request.user.userId, request.params.id);
+    await ackVendorAlert(app, request.user.userId, request.params.id);
+    return { success: true, data: { acknowledged: true } };
+  });
+
   /** GET /orders — Paginated, filterable order list */
   app.get('/orders', auth, async (request) => {
     const { vendorIds } = await resolveVendor(app, request.user.userId);
@@ -447,6 +483,7 @@ export async function vendorRoutes(app: FastifyInstance) {
       });
     }
     const updated = await orderService.updateStatus(order.id, 'ACCEPTED', request.user.userId, 'Accepted by vendor');
+    await ackVendorAlert(app, request.user.userId, order.id); // accepting acknowledges the alert
 
     // Step 8: acceptance of a DELIVERY order starts the dispatch cascade.
     // PICKUP and APPOINTMENT orders never dispatch.
@@ -489,6 +526,7 @@ export async function vendorRoutes(app: FastifyInstance) {
     }
     const body = rejectOrderSchema.parse(request.body ?? {});
     const reason = body.reason || 'Rejected by vendor';
+    await ackVendorAlert(app, request.user.userId, order.id); // rejecting acknowledges too
 
     const updated = await app.prisma.order.update({
       where: { id: order.id },
