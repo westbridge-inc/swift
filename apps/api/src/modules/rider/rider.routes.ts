@@ -4,6 +4,7 @@ import { RiderType, VehicleType, EarningType, EarningStatus } from '@prisma/clie
 import { OrderService } from '../order/order.service';
 import { NotificationService } from '../notification/notification.service';
 import { VerificationService } from '../verification/verification.service';
+import { CashRulesService } from '../cash/cash-rules.service';
 import { makeDispatchService } from '../dispatch/dispatch.service';
 import { getKycProvider } from '../../providers/kyc/kyc-provider';
 import { haversineDistance } from '../../utils/distance';
@@ -44,6 +45,16 @@ const riderHistoryQuerySchema = z.object({
 
 const offerActionSchema = z.object({
   orderId: z.string().min(1),
+});
+
+/** Golden-rule handover: GPS is mandatory — a claim is impossible without it. */
+const handoverSchema = z.object({
+  outcome: z.enum(['paid', 'no_show', 'refused']),
+  gps: z.object({
+    lat: z.number().min(-90).max(90),
+    lng: z.number().min(-180).max(180),
+  }),
+  photoUrl: z.string().max(2048).optional(),
 });
 
 // ---------------------------------------------------------------------------
@@ -121,6 +132,30 @@ export async function riderRoutes(app: FastifyInstance) {
     getKycProvider(),
   );
   const dispatch = makeDispatchService(app);
+  const cashRules = new CashRulesService(
+    app.prisma,
+    new NotificationService(app.prisma, app.io),
+    orderService,
+  );
+
+  /** POST /orders/:id/handover — the golden rule at the door (Step 10).
+   *  'paid' completes the delivery; 'no_show'/'refused' fails it with GPS
+   *  evidence, strikes the customer, and opens the guarantee claim. */
+  app.post('/orders/:id/handover', { preHandler: [app.authenticate] }, async (request) => {
+    const { id } = request.params as { id: string };
+    const body = handoverSchema.parse(request.body);
+    const result = await cashRules.handover(id, request.user.userId, body);
+    return {
+      success: true,
+      data: {
+        orderId: id,
+        status: result.order.status,
+        claim: result.claim
+          ? { id: result.claim.id, status: result.claim.status, amount: Number(result.claim.amount), flags: result.claim.flags }
+          : null,
+      },
+    };
+  });
 
   /** POST /offers/accept — atomic claim of a live dispatch offer (Step 8). */
   app.post('/offers/accept', { preHandler: [app.authenticate] }, async (request) => {

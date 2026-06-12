@@ -172,6 +172,11 @@ model CountryConfig {
   /// { base, perKm, perMin, minimum } in local currency
   taxiRates Json?
 
+  /// Cash guarantee + strike thresholds (master plan §5):
+  /// { maxClaimsPerRiderPerMonth, strikeRestrictThreshold, strikeBanThreshold,
+  ///   l3MinPaidOrders, l3MinAccountAgeDays, outlierMultiplier }
+  cashRules Json?
+
   /// Inactive countries show a waitlist at signup
   isActive  Boolean  @default(false)
   createdAt DateTime @default(now())
@@ -217,6 +222,46 @@ enum VerificationDocumentStatus {
   APPROVED
   REJECTED
   EXPIRED
+}
+
+/// Company guarantee for failed cash handovers under the USD gate
+/// (master plan §5). Status is decided by deterministic guardrails —
+/// caps/outliers/collusion route to manual review, never auto-payout.
+model ReimbursementClaim {
+  id         String      @id @default(cuid())
+  orderId    String      @unique
+  riderId    String
+  customerId String
+  amount     Decimal     @db.Decimal(12, 2)
+  /// no_show | refused
+  reason     String
+  /// Golden-rule evidence — captured at the door, claim impossible without it
+  gpsLat     Float
+  gpsLng     Float
+  photoUrl   String?
+  status     ClaimStatus @default(PENDING_REVIEW)
+  /// Deterministic guardrail flags: over_cap, outlier, collusion_customer, collusion_pair
+  flags      String[]
+  reviewedBy String?
+  reviewNote String?
+  reviewedAt DateTime?
+  paidAt     DateTime?
+  paymentRef String?
+  createdAt  DateTime    @default(now())
+
+  @@index([riderId])
+  @@index([customerId])
+  @@index([status])
+  @@index([createdAt])
+  @@map("reimbursement_claims")
+}
+
+enum ClaimStatus {
+  AUTO_APPROVED
+  PENDING_REVIEW
+  APPROVED
+  REJECTED
+  PAID
 }
 
 /// Customer strike for cash no-shows / refusals (master plan §5).
