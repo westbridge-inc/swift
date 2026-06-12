@@ -81,6 +81,13 @@ const checkoutSchema = z.object({
   tipAmount: z.number().min(0).optional(),
   scheduledFor: z.string().max(40).optional(),
   promoCode: z.string().max(40).optional(),
+  // Per-vendor DELIVERY|PICKUP choice for multi-vendor carts
+  fulfillmentSelections: z.record(z.enum(['DELIVERY', 'PICKUP'])).optional(),
+  // Requested slots for APPOINTMENT listings (booked at vendor acceptance)
+  appointments: z
+    .array(z.object({ itemId: z.string().min(1), slotStart: z.coerce.date() }))
+    .max(10)
+    .optional(),
 });
 
 const customerOrdersQuerySchema = z.object({
@@ -943,17 +950,19 @@ export async function customerRoutes(app: FastifyInstance) {
       }
     }
 
-    // Get or create cart -- clear if switching vendors
+    // Get or create cart. Multi-vendor carts are allowed (Step 7): checkout
+    // splits per vendor; cart.vendorId just tracks the most recent vendor.
     let cart = await app.prisma.cart.findUnique({
       where: { customerId: userId },
       include: { items: true },
     });
 
-    let switchedVendor = false;
     if (cart && cart.vendorId !== body.vendorId) {
-      await app.prisma.cart.delete({ where: { id: cart.id } });
-      cart = null;
-      switchedVendor = true;
+      cart = await app.prisma.cart.update({
+        where: { id: cart.id },
+        data: { vendorId: body.vendorId },
+        include: { items: true },
+      });
     }
 
     if (!cart) {
@@ -998,11 +1007,7 @@ export async function customerRoutes(app: FastifyInstance) {
       success: true,
       data: {
         cart: updatedCart,
-        message: switchedVendor
-          ? `Cart cleared and item added from ${vendor.name}`
-          : existing
-            ? 'Item quantity updated'
-            : 'Item added to cart',
+        message: existing ? 'Item quantity updated' : 'Item added to cart',
       },
     };
   });
@@ -1209,6 +1214,8 @@ export async function customerRoutes(app: FastifyInstance) {
       tipAmount: body.tipAmount,
       scheduledFor: body.scheduledFor,
       promoCode: body.promoCode,
+      fulfillmentSelections: body.fulfillmentSelections,
+      appointments: body.appointments,
     });
 
     // If wallet payment, debit
