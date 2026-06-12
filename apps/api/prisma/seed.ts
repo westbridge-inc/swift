@@ -383,6 +383,14 @@ async function main() {
     CUSTOMER_L2: ['national_id', 'selfie'],
   };
   const guyanaTaxiRates = { base: 1000, perKm: 300, perMin: 25, minimum: 1500 };
+  const guyanaCashRules = {
+    maxClaimsPerRiderPerMonth: 3,
+    strikeRestrictThreshold: 2,
+    strikeBanThreshold: 4,
+    l3MinPaidOrders: 20,
+    l3MinAccountAgeDays: 30,
+    outlierMultiplier: 3,
+  };
   await prisma.countryConfig.upsert({
     where: { code: 'GY' },
     update: {
@@ -392,6 +400,7 @@ async function main() {
       subscriptionTiers: guyanaTiers,
       documentChecklists: guyanaChecklists,
       taxiRates: guyanaTaxiRates,
+      cashRules: guyanaCashRules,
     },
     create: {
       code: 'GY',
@@ -403,6 +412,7 @@ async function main() {
       subscriptionTiers: guyanaTiers,
       documentChecklists: guyanaChecklists,
       taxiRates: guyanaTaxiRates,
+      cashRules: guyanaCashRules,
       isActive: true,
     },
   });
