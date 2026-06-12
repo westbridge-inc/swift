@@ -228,6 +228,15 @@ export async function riderRoutes(app: FastifyInstance) {
       throw new AppError(403, 'VERIFICATION_REQUIRED', 'Your documents must be verified before you can go online');
     }
 
+    // Step 5 gate: an unpaid (suspended) subscription blocks going online
+    const sub = await app.prisma.subscription.findFirst({
+      where: { riderId: rider.id },
+      select: { status: true },
+    });
+    if (sub && sub.status === 'SUSPENDED') {
+      throw new AppError(403, 'SUBSCRIPTION_SUSPENDED', 'Your subscription is unpaid. Top up or pay to go back online.');
+    }
+
     const updated = await app.prisma.rider.update({
       where: { id: rider.id },
       data: { isOnline: true, isAvailable: !rider.currentOrderId },

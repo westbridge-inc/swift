@@ -805,12 +805,53 @@ model Subscription {
   autoSuspendEnabled Boolean            @default(true)
   prepaidBalance     PrepaidBalance?
 
+  /// How this subscription pays: CASH = prepaid balance path; CARD = stored token
+  billingMethod PaymentMethod @default(CASH)
+  /// Tokenized card reference from the PaymentProvider — never raw card data
+  paymentToken  String?
+  /// Failed charges retry on a daily cadence, not every job run
+  nextRetryAt   DateTime?
+
+  billingEvents BillingEvent[]
+
   createdAt          DateTime           @default(now())
   updatedAt          DateTime           @updatedAt
 
   @@index([status])
   @@index([nextBillingDate])
   @@map("subscriptions")
+}
+
+/// Immutable billing audit log — every money event, append-only.
+/// idempotencyKey is the double-charge guard: one CHARGE_ATTEMPT per
+/// subscription per period per retry level, enforced at the database.
+model BillingEvent {
+  id             String           @id @default(cuid())
+  subscriptionId String
+  subscription   Subscription     @relation(fields: [subscriptionId], references: [id], onDelete: Cascade)
+  type           BillingEventType
+  amount         Decimal?         @db.Decimal(12, 2)
+  currencyCode   String           @default("GYD")
+  idempotencyKey String           @unique
+  /// PaymentProvider charge/refund reference when one exists
+  paymentRef     String?
+  note           String?
+  createdAt      DateTime         @default(now())
+
+  @@index([subscriptionId])
+  @@index([type])
+  @@map("billing_events")
+}
+
+enum BillingEventType {
+  CHARGE_ATTEMPT
+  CHARGE_SUCCESS
+  CHARGE_FAILED
+  PREPAID_TOPUP
+  SUSPENDED
+  REINSTATED
+  REMINDER
+  TIER_CHANGE
 }
 
 /// Prepaid path for cash payers: agents/bank-transfer top-ups recorded by
