@@ -5,6 +5,8 @@ import { OrderService } from '../order/order.service';
 import { NotificationService } from '../notification/notification.service';
 import { VerificationService } from '../verification/verification.service';
 import { getKycProvider } from '../../providers/kyc/kyc-provider';
+import { getStorageProvider } from '../../providers/storage/storage-provider';
+import { parseCsvWithHeader } from '../../utils/csv';
 import { parsePagination, paginatedResponse } from '../../utils/pagination';
 import { AppError, NotFoundError, ValidationError } from '../../utils/errors';
 
@@ -125,6 +127,47 @@ const operatingHoursSchema = z.object({
     .max(7),
 });
 
+const importCsvSchema = z.object({
+  csv: z.string().min(1).max(2_000_000),
+});
+
+const MAX_IMPORT_ROWS = 5000;
+
+/** One CSV row of the import template. Coercions keep messy files importable. */
+const csvRowSchema = z.object({
+  category: z.string().trim().min(1).max(100),
+  name: z.string().trim().min(1).max(150),
+  description: z.string().max(2000).optional().default(''),
+  basePrice: z.coerce.number().min(0).max(10_000_000),
+  sku: z.string().max(64).optional().default(''),
+  unit: z.string().max(30).optional().default(''),
+  stockQuantity: z
+    .union([z.literal(''), z.coerce.number().int().min(0)])
+    .optional()
+    .default(''),
+  isAvailable: z.enum(['true', 'false', '']).optional().default(''),
+  fulfillment: z.enum(['DELIVERY', 'PICKUP', 'APPOINTMENT', '']).optional().default(''),
+  imageUrl: z.string().max(2048).optional().default(''),
+});
+
+const CSV_TEMPLATE = [
+  'category,name,description,basePrice,sku,unit,stockQuantity,isAvailable,fulfillment,imageUrl',
+  'Groceries,Basmati Rice 5kg,"Long grain, aged",3500,RICE-5KG,bag,40,true,DELIVERY,',
+  'Services,Haircut,"30 minute appointment",2000,,,,true,APPOINTMENT,',
+].join('\n');
+
+const ALLOWED_IMAGE_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp']);
+
+/** Cheap magic-byte sniff so a spoofed Content-Type cannot smuggle non-images. */
+function looksLikeImage(buffer: Buffer): boolean {
+  if (buffer.length < 12) return false;
+  const jpeg = buffer[0] === 0xff && buffer[1] === 0xd8 && buffer[2] === 0xff;
+  const png = buffer[0] === 0x89 && buffer[1] === 0x50 && buffer[2] === 0x4e && buffer[3] === 0x47;
+  const webp =
+    buffer.toString('ascii', 0, 4) === 'RIFF' && buffer.toString('ascii', 8, 12) === 'WEBP';
+  return jpeg || png || webp;
+}
+
 const vendorOrdersQuerySchema = z.object({
   status: z.nativeEnum(OrderStatus).optional(),
   orderType: z.nativeEnum(OrderType).optional(),
@@ -237,6 +280,7 @@ export async function vendorRoutes(app: FastifyInstance) {
     new NotificationService(app.prisma, app.io),
     getKycProvider(),
   );
+  const storage = getStorageProvider();
 
   // =========================================================================
   // 1. PROFILE
@@ -675,6 +719,136 @@ export async function vendorRoutes(app: FastifyInstance) {
         category: { select: { id: true, name: true } },
         optionGroups: { include: { options: { orderBy: { sortOrder: 'asc' } } }, orderBy: { sortOrder: 'asc' } },
       },
+    });
+
+    return { success: true, data: item };
+  });
+
+  /** GET /items/import/template — CSV template for bulk import */
+  app.get('/items/import/template', auth, async (_request, reply) => {
+    reply.type('text/csv').header('content-disposition', 'attachment; filename="swift-catalogue-template.csv"');
+    return CSV_TEMPLATE;
+  });
+
+  /** POST /items/import — CSV bulk import: bad rows reported, good rows imported */
+  app.post('/items/import', auth, async (request) => {
+    const { vendorId } = await resolveVendor(app, request.user.userId);
+
+    // Same listing gate as single-item creation
+    const vendorRecord = await app.prisma.vendor.findUniqueOrThrow({
+      where: { id: vendorId },
+      select: { isVerified: true, vendorType: true },
+    });
+    const verified = vendorRecord.isVerified
+      || await verification.isRoleVerified(request.user.userId, vendorRecord.vendorType);
+    if (!verified) {
+      throw new AppError(403, 'VERIFICATION_REQUIRED', 'Complete document verification before listing items');
+    }
+
+    const { csv } = importCsvSchema.parse(request.body);
+    const rows = parseCsvWithHeader(csv);
+
+    if (rows.length === 0) {
+      throw new AppError(400, 'EMPTY_CSV', 'No data rows found — download the template to see the format');
+    }
+    if (rows.length > MAX_IMPORT_ROWS) {
+      throw new AppError(400, 'TOO_MANY_ROWS', `Import is limited to ${MAX_IMPORT_ROWS} rows per file (got ${rows.length})`);
+    }
+
+    const failures: Array<{ row: number; errors: string[] }> = [];
+    const valid: Array<{ rowNumber: number; data: z.infer<typeof csvRowSchema> }> = [];
+
+    rows.forEach((raw, index) => {
+      const parsed = csvRowSchema.safeParse(raw);
+      if (parsed.success) {
+        valid.push({ rowNumber: index + 2, data: parsed.data }); // +2: 1-based + header
+      } else {
+        failures.push({
+          row: index + 2,
+          errors: parsed.error.issues.map((issue) => `${issue.path.join('.')}: ${issue.message}`),
+        });
+      }
+    });
+
+    // Categories resolve by name (case-insensitive), created on demand
+    const categories = await app.prisma.category.findMany({ where: { vendorId } });
+    const categoryIds = new Map(categories.map((c) => [c.name.toLowerCase(), c.id]));
+
+    let imported = 0;
+    for (const { rowNumber, data } of valid) {
+      const key = data.category.toLowerCase();
+      let categoryId = categoryIds.get(key);
+      if (!categoryId) {
+        const created = await app.prisma.category.create({
+          data: { vendorId, name: data.category, sortOrder: categoryIds.size },
+        });
+        categoryId = created.id;
+        categoryIds.set(key, categoryId);
+      }
+
+      try {
+        await app.prisma.item.create({
+          data: {
+            vendorId,
+            categoryId,
+            name: data.name,
+            description: data.description || undefined,
+            basePrice: data.basePrice,
+            sku: data.sku || undefined,
+            unit: data.unit || undefined,
+            stockQuantity: data.stockQuantity === '' ? undefined : data.stockQuantity,
+            isAvailable: data.isAvailable === '' ? true : data.isAvailable === 'true',
+            fulfillment: data.fulfillment === '' ? 'DELIVERY' : data.fulfillment,
+            imageUrl: data.imageUrl || undefined,
+            dietaryTags: [],
+            allergens: [],
+          },
+        });
+        imported += 1;
+      } catch {
+        failures.push({ row: rowNumber, errors: ['Database rejected this row'] });
+      }
+    }
+
+    return {
+      success: true,
+      data: {
+        imported,
+        failedCount: failures.length,
+        // Cap the detail list so a fully-broken huge file stays readable
+        failures: failures.slice(0, 100),
+      },
+    };
+  });
+
+  /** POST /items/:id/image — upload behind the StorageProvider interface */
+  app.post<{ Params: IdParam }>('/items/:id/image', auth, async (request) => {
+    const { vendorId } = await resolveVendor(app, request.user.userId);
+    const existing = await app.prisma.item.findUnique({ where: { id: request.params.id } });
+    if (!existing || existing.vendorId !== vendorId) throw new NotFoundError('Item', request.params.id);
+
+    const file = await request.file();
+    if (!file) throw new AppError(400, 'NO_FILE', 'Attach an image file');
+    if (!ALLOWED_IMAGE_TYPES.has(file.mimetype)) {
+      throw new AppError(400, 'BAD_IMAGE_TYPE', 'Only JPEG, PNG, or WebP images are accepted');
+    }
+
+    const buffer = await file.toBuffer();
+    if (!looksLikeImage(buffer)) {
+      throw new AppError(400, 'BAD_IMAGE', 'File content does not match an image format');
+    }
+
+    const { url } = await storage.upload({
+      buffer,
+      filename: file.filename,
+      mimeType: file.mimetype,
+      folder: `items/${vendorId}`,
+    });
+
+    const item = await app.prisma.item.update({
+      where: { id: request.params.id },
+      data: { imageUrl: url },
+      select: { id: true, name: true, imageUrl: true },
     });
 
     return { success: true, data: item };
