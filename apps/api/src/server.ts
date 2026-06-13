@@ -25,8 +25,22 @@ import { loggerRedactConfig } from './utils/logger-config';
 const PORT = parseInt(process.env['PORT'] || '3000', 10);
 const HOST = process.env['HOST'] || '0.0.0.0';
 
+/**
+ * X-Forwarded-For is client-controlled, so it may only be trusted when we sit
+ * behind a known proxy (Fly/Vercel edge). TRUST_PROXY accepts true/false, a hop
+ * count, or a CIDR/IP allow-list; default false uses the raw socket address.
+ */
+function resolveTrustProxy(): boolean | number | string {
+  const raw = process.env['TRUST_PROXY'];
+  if (raw === undefined || raw === 'false') return false;
+  if (raw === 'true') return true;
+  if (/^\d+$/.test(raw)) return Number(raw);
+  return raw;
+}
+
 async function buildApp() {
   const app = Fastify({
+    trustProxy: resolveTrustProxy(),
     logger: {
       level: process.env['LOG_LEVEL'] || 'info',
       // Step 15: secrets and credentials never reach log output
@@ -64,9 +78,8 @@ async function buildApp() {
   await app.register(rateLimit, {
     max: 200,
     timeWindow: '1 minute',
-    keyGenerator: (request) => {
-      return request.headers['x-forwarded-for'] as string || request.ip;
-    },
+    // request.ip is derived from X-Forwarded-For only when trustProxy is set,
+    // so it cannot be spoofed by direct clients to evade the limit.
   });
   await app.register(multipart, {
     limits: { fileSize: 5 * 1024 * 1024, files: 1 },

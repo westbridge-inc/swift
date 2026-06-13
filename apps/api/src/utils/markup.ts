@@ -1,17 +1,6 @@
-/**
- * Calculate the 5% markup on a base price.
- * Markup is calculated per line item, always rounded UP to nearest whole GYD.
- */
-export function calculateMarkup(basePrice: number, markupPercentage: number = 5): number {
-  return Math.ceil(basePrice * (markupPercentage / 100));
-}
-
-/**
- * Calculate the customer-facing price (base + markup).
- */
-export function calculateCustomerPrice(basePrice: number, markupPercentage: number = 5): number {
-  return basePrice + calculateMarkup(basePrice, markupPercentage);
-}
+// Zero-commission model (master plan §18): customers pay exactly the vendor's
+// price. There is intentionally NO markup helper — re-introducing one would
+// silently violate the locked economics. Do not add it back.
 
 /**
  * Calculate delivery fee based on distance.

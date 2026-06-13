@@ -240,7 +240,8 @@ export function createWorkers(ctx: JobContext) {
     { connection, concurrency: 1 },
   );
 
-  // VERIFICATION: daily expiry sweep + 30-day reminders (Step 4)
+  // VERIFICATION: daily expiry sweep + 30-day reminders (Step 4),
+  // plus expired-session reaping so the sessions table stays bounded.
   const verificationWorker = new Worker(
     QUEUE_NAMES.VERIFICATION,
     async (job: Job) => {
@@ -257,6 +258,13 @@ export function createWorkers(ctx: JobContext) {
         const expired = await verification.expireLapsedDocuments();
         const reminded = await verification.sendExpiryReminders();
         ctx.log.info(`Verification sweep: ${expired} expired, ${reminded} reminders sent`);
+      } else if (job.name === 'session-cleanup') {
+        // Expired sessions are already rejected by the auth plugin (it checks
+        // expiresAt); this just stops the row count growing without bound.
+        const { count } = await ctx.prisma.session.deleteMany({
+          where: { expiresAt: { lt: new Date() } },
+        });
+        ctx.log.info({ count }, 'Expired sessions purged');
       }
     },
     { connection, concurrency: 1 },
@@ -361,6 +369,13 @@ export async function scheduleRecurringJobs(queues: ReturnType<typeof createQueu
   // Verification document expiry sweep + reminders: daily at 06:00
   await queues.verificationQueue.add('expiry-sweep', {}, {
     repeat: { pattern: '0 6 * * *' },
+    removeOnComplete: 30,
+    removeOnFail: 30,
+  });
+
+  // Expired-session reaping: daily at 04:00
+  await queues.verificationQueue.add('session-cleanup', {}, {
+    repeat: { pattern: '0 4 * * *' },
     removeOnComplete: 30,
     removeOnFail: 30,
   });

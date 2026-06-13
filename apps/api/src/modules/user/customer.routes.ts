@@ -1,7 +1,7 @@
 import type { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 import { z } from 'zod';
 import { VendorType, OrderStatus, TransactionType, NotificationType } from '@prisma/client';
-import { calculateMarkup, calculateCustomerPrice, calculateDeliveryFee } from '../../utils/markup';
+import { calculateDeliveryFee } from '../../utils/markup';
 import { estimateDrivingDistance, estimateDeliveryMinutes } from '../../utils/distance';
 import { parsePagination, paginatedResponse } from '../../utils/pagination';
 import { AppError, NotFoundError, ValidationError, ForbiddenError } from '../../utils/errors';
@@ -151,7 +151,6 @@ const promoValidateSchema = z.object({
 // Constants
 // ---------------------------------------------------------------------------
 
-const MARKUP_PCT = 5;
 const MAX_DELIVERY_RADIUS_KM = 25;
 const FREE_CANCEL_WINDOW_MIN = 5;
 const HOME_CACHE_TTL = 60; // 1 min
@@ -237,7 +236,7 @@ async function buildCartResponse(
 
   const itemDetails = cart.items.map((ci) => {
     const base = Number(ci.item.basePrice);
-    const markup = calculateMarkup(base, MARKUP_PCT);
+    const markup = 0; // zero-commission (§18): the customer pays exactly the vendor's price
     const customerPrice = base + markup;
     const lineBase = base * ci.quantity;
     const lineMarkup = markup * ci.quantity;
@@ -767,13 +766,13 @@ export async function customerRoutes(app: FastifyInstance) {
       where: { userId: request.user.userId, favoriteVendors: { some: { id } } },
     }) > 0;
 
-    // Mark up item prices for customer display
+    // Zero-commission (§18): customerPrice equals the vendor's base price
     const categories = vendor.categories.map((cat) => ({
       ...cat,
       items: cat.items.map((item) => ({
         ...item,
         basePrice: Number(item.basePrice),
-        customerPrice: calculateCustomerPrice(Number(item.basePrice), MARKUP_PCT),
+        customerPrice: Number(item.basePrice),
       })),
     }));
 
@@ -1188,7 +1187,7 @@ export async function customerRoutes(app: FastifyInstance) {
         let estimate = 0;
         for (const ci of cart.items) {
           const base = Number(ci.item.basePrice);
-          estimate += (base + calculateMarkup(base, MARKUP_PCT)) * ci.quantity;
+          estimate += base * ci.quantity; // zero-commission (§18)
         }
         estimate += calculateDeliveryFee(3) + (body.tipAmount || Number(cart.tipAmount) || 0);
         const balance = await walletService.getBalance(userId);
@@ -1764,7 +1763,7 @@ export async function customerRoutes(app: FastifyInstance) {
       let subtotal = 0;
       for (const ci of cart.items) {
         const base = Number(ci.item.basePrice);
-        subtotal += (base + calculateMarkup(base, MARKUP_PCT)) * ci.quantity;
+        subtotal += base * ci.quantity; // zero-commission (§18)
       }
 
       if (promo.minOrderAmount && subtotal < Number(promo.minOrderAmount)) {
