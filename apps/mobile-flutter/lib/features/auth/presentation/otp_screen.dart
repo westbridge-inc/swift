@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:go_router/go_router.dart';
 import '../../../core/constants/app_colors.dart';
 import '../../../core/constants/app_typography.dart';
 
@@ -25,11 +26,13 @@ class _OtpScreenState extends State<OtpScreen> {
 
     setState(() => _isLoading = true);
 
-    // TODO: Call auth API to verify OTP
-    // On success: store tokens, navigate to home
+    // TODO: Call auth API to verify OTP + store tokens.
     await Future.delayed(const Duration(seconds: 1));
 
+    if (!mounted) return;
     setState(() => _isLoading = false);
+    // On success, enter the 4-tab consumer shell.
+    context.go('/home');
   }
 
   @override
