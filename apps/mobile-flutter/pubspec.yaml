@@ -64,13 +64,6 @@ flutter:
     - assets/icons/
     - assets/animations/
 
-  fonts:
-    - family: SF Pro
-      fonts:
-        - asset: assets/fonts/SFPro-Regular.otf
-        - asset: assets/fonts/SFPro-Medium.otf
-          weight: 500
-        - asset: assets/fonts/SFPro-Semibold.otf
-          weight: 600
-        - asset: assets/fonts/SFPro-Bold.otf
-          weight: 700
+  # No custom fonts bundled — use the platform default (San Francisco on iOS,
+  # Roboto on Android). The SF Pro declaration was removed: the .otf files were
+  # never in the repo, which broke every build (web/iOS/Android).
