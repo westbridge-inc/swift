@@ -188,6 +188,14 @@ export function createWorkers(ctx: JobContext) {
           ctx.log.info({ changed }, 'Vendor tier recalculation complete');
           break;
         }
+        case 'convert-trials': {
+          const { SubscriptionService } = await import('../modules/subscription/subscription.service');
+          const subscriptions = new SubscriptionService(ctx.prisma, new NotificationService(ctx.prisma, ctx.io));
+          const reminded = await subscriptions.sendTrialEndingReminders();
+          const converted = await subscriptions.convertExpiredTrials();
+          ctx.log.info({ converted, reminded }, 'Trial conversion complete');
+          break;
+        }
       }
     },
     { connection, concurrency: 1 },
@@ -370,5 +378,12 @@ export async function scheduleRecurringJobs(queues: ReturnType<typeof createQueu
     repeat: { pattern: '0 5 * * 1' },
     removeOnComplete: 10,
     removeOnFail: 10,
+  });
+
+  // Trial reminders + convert expired 14-day trials to active: daily at 03:00
+  await queues.subscriptionQueue.add('convert-trials', {}, {
+    repeat: { pattern: '0 3 * * *' },
+    removeOnComplete: 30,
+    removeOnFail: 30,
   });
 }

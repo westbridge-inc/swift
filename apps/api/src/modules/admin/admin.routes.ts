@@ -20,6 +20,7 @@ import { VerificationService } from '../verification/verification.service';
 import { BillingService } from '../billing/billing.service';
 import { CashRulesService } from '../cash/cash-rules.service';
 import { OrderService } from '../order/order.service';
+import { SubscriptionService } from '../subscription/subscription.service';
 import { getKycProvider } from '../../providers/kyc/kyc-provider';
 import { getPaymentProvider } from '../../providers/payment/payment-provider';
 import { parsePagination, paginatedResponse } from '../../utils/pagination';
@@ -179,6 +180,7 @@ export async function adminRoutes(app: FastifyInstance) {
   const verification = new VerificationService(app.prisma, notifications, getKycProvider());
   const billing = new BillingService(app.prisma, notifications, getPaymentProvider());
   const cashRules = new CashRulesService(app.prisma, notifications, new OrderService(app.prisma, app.io));
+  const subscriptions = new SubscriptionService(app.prisma, notifications);
 
   // Middleware: verify ADMIN or SUPER_ADMIN role
   const adminGuard = async (request: any, reply: any) => {
@@ -498,6 +500,9 @@ export async function adminRoutes(app: FastifyInstance) {
 
     await audit(request.user.userId, 'APPROVE_VENDOR', 'Vendor', id, { previousStatus: vendor.status }, request);
 
+    // Going live starts the 14-day free trial (idempotent — safe to re-run)
+    await subscriptions.startTrialForVendor(id);
+
     await notifications.send({
       userId: vendor.owner.userId,
       type: 'SYSTEM_ANNOUNCEMENT',
@@ -643,6 +648,9 @@ export async function adminRoutes(app: FastifyInstance) {
       request,
     );
 
+    // Verified documents start the 14-day free trial (idempotent)
+    if (isVerified) await subscriptions.startTrialForRider(id);
+
     await notifications.send({
       userId: rider.userId,
       type: 'SYSTEM_ANNOUNCEMENT',
@@ -740,6 +748,9 @@ export async function adminRoutes(app: FastifyInstance) {
       { verified: isVerified, rejectionReason },
       request,
     );
+
+    // Verified documents start the 14-day free trial (idempotent)
+    if (isVerified) await subscriptions.startTrialForDriver(id);
 
     await notifications.send({
       userId: driver.userId,
