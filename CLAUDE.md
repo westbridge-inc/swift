@@ -3,9 +3,12 @@
 ## What this is
 Swift: Caribbean super app (Guyana launch). Two-sided marketplace.
 Vendors + Movers pay flat WEEKLY SUBSCRIPTIONS and keep 100% of earnings.
-Customers pay nothing to the platform. Revenue = subscriptions + ads.
-V1 is CASH-ONLY: no order payment processing, no wallet, no commission.
-Full spec: docs/swift-master-plan.pdf (Section 18 lists superseded decisions).
+Customers pay nothing to the platform. Revenue = weekly subscriptions only
+(no commission, no customer-facing markup/fees — markup removed from all
+customer-facing surfaces). V1 is CASH-ONLY: no order payment processing,
+no wallet, no commission.
+Source of truth: docs/SWIFT-MASTER-SPEC.md. (swift-master-plan.pdf §18 still
+lists superseded decisions — e.g. the now-dormant order markup columns.)
 
 ## Hard rules (never break)
 1. Money, auth, billing, verification = deterministic code. NEVER an AI call.

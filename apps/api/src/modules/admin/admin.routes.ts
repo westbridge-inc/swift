@@ -238,7 +238,7 @@ export async function adminRoutes(app: FastifyInstance) {
       app.prisma.order.count({ where: { placedAt: { gte: today } } }),
       app.prisma.order.aggregate({
         where: { placedAt: { gte: today }, status: { in: ['DELIVERED', 'COMPLETED'] } },
-        _sum: { subtotalMarkup: true, deliveryFee: true, totalAmount: true },
+        _sum: { deliveryFee: true, totalAmount: true },
         _count: true,
       }),
       app.prisma.rider.count({ where: { isOnline: true } }),
@@ -259,7 +259,7 @@ export async function adminRoutes(app: FastifyInstance) {
         SELECT
           DATE("placedAt") as date,
           COUNT(*)::int as count,
-          COALESCE(SUM(CASE WHEN status IN ('DELIVERED', 'COMPLETED') THEN "subtotalMarkup" ELSE 0 END), 0) as revenue
+          COALESCE(SUM(CASE WHEN status IN ('DELIVERED', 'COMPLETED') THEN "totalAmount" ELSE 0 END), 0) as revenue
         FROM orders
         WHERE "placedAt" >= ${weekAgo}
         GROUP BY DATE("placedAt")
@@ -284,10 +284,11 @@ export async function adminRoutes(app: FastifyInstance) {
         activeVendors,
         totalVendors,
         revenue: {
-          todayMarkup: todayRevenue._sum.subtotalMarkup || 0,
+          // Platform revenue = weekly subscriptions only (no markup, no commission).
+          weeklySubscriptionRevenue,
+          // Context only — mover earnings / GMV, NOT platform revenue:
           todayDeliveryFees: todayRevenue._sum.deliveryFee || 0,
           todayTotal: todayRevenue._sum.totalAmount || 0,
-          weeklySubscriptionRevenue,
         },
         subscriptionBreakdown: subscriptionCounts,
         weeklyTrend: weeklyOrderCounts,

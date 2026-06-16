@@ -1,17 +1,8 @@
 /**
- * Calculate markup on a base price.
- * Always rounds UP to nearest whole GYD.
+ * Pricing helpers. Customer prices carry NO markup — customers pay the vendor
+ * base price; platform revenue is weekly subscriptions only. The fees below are
+ * mover earnings, not platform revenue.
  */
-export function calculateMarkup(basePrice: number, markupPercentage: number = 5): number {
-  return Math.ceil(basePrice * (markupPercentage / 100));
-}
-
-/**
- * Customer price = base price + markup.
- */
-export function getCustomerPrice(basePrice: number, markupPercentage: number = 5): number {
-  return basePrice + calculateMarkup(basePrice, markupPercentage);
-}
 
 /**
  * Delivery fee = base_fee + max(0, distance - included_km) * per_km_rate.
