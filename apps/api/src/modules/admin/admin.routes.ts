@@ -18,6 +18,7 @@ import {
 import { NotificationService } from '../notification/notification.service';
 import { VerificationService } from '../verification/verification.service';
 import { BillingService } from '../billing/billing.service';
+import { SubscriptionService } from '../subscription/subscription.service';
 import { CashRulesService } from '../cash/cash-rules.service';
 import { OrderService } from '../order/order.service';
 import { getKycProvider } from '../../providers/kyc/kyc-provider';
@@ -187,6 +188,7 @@ export async function adminRoutes(app: FastifyInstance) {
   const notifications = new NotificationService(app.prisma, app.io);
   const verification = new VerificationService(app.prisma, notifications, getKycProvider());
   const billing = new BillingService(app.prisma, notifications, getPaymentProvider());
+  const subscriptions = new SubscriptionService(app.prisma);
   const cashRules = new CashRulesService(app.prisma, notifications, new OrderService(app.prisma, app.io));
 
   // Middleware: verify ADMIN or SUPER_ADMIN role
@@ -511,6 +513,9 @@ export async function adminRoutes(app: FastifyInstance) {
 
     await audit(request.user.userId, 'APPROVE_VENDOR', 'Vendor', id, { previousStatus: vendor.status }, request);
 
+    // A subscription is born as a 14-day trial the moment the vendor goes live.
+    await subscriptions.startTrialForVendor(id);
+
     await notifications.send({
       userId: vendor.owner.userId,
       type: 'SYSTEM_ANNOUNCEMENT',
@@ -656,6 +661,9 @@ export async function adminRoutes(app: FastifyInstance) {
       request,
     );
 
+    // Verification is the founder-chosen trigger: start the 14-day trial.
+    if (isVerified) await subscriptions.startTrialForRider(id);
+
     await notifications.send({
       userId: rider.userId,
       type: 'SYSTEM_ANNOUNCEMENT',
@@ -753,6 +761,9 @@ export async function adminRoutes(app: FastifyInstance) {
       { verified: isVerified, rejectionReason },
       request,
     );
+
+    // Verification is the founder-chosen trigger: start the 14-day trial.
+    if (isVerified) await subscriptions.startTrialForDriver(id);
 
     await notifications.send({
       userId: driver.userId,

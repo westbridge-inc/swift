@@ -11,6 +11,7 @@ import { riderRoutes } from '../modules/rider/rider.routes';
 import { adminRoutes } from '../modules/admin/admin.routes';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { BillingService } from '../modules/billing/billing.service';
+import { SubscriptionService } from '../modules/subscription/subscription.service';
 import { NotificationService } from '../modules/notification/notification.service';
 import { getPaymentProvider } from '../providers/payment/payment-provider';
 
@@ -425,5 +426,80 @@ describe('Waivers, reminders, tier recalculation', () => {
     await billing.recalculateVendorTiers();
     sub = await app.prisma.subscription.findUniqueOrThrow({ where: { id: fixture.subId } });
     expect(Number(sub.weeklyRate)).toBe(20000);
+  });
+});
+
+describe('Phase 5 — subscription trial lifecycle', () => {
+  async function makeBareVendor(vendorType: 'RESTAURANT' | 'STORE' | 'SERVICE' = 'RESTAURANT') {
+    const { userId } = await makeUserWithSession(['VENDOR_OWNER', 'CUSTOMER'], 'VENDOR_OWNER');
+    const owner = await app.prisma.vendorOwner.create({ data: { userId } });
+    const vendor = await app.prisma.vendor.create({
+      data: {
+        ownerId: owner.id,
+        name: `Trial Vendor ${phoneSeq}`,
+        slug: `trial-vendor-${phoneSeq}-${nanoid(4)}`,
+        vendorType,
+        phone: `+5920077${String(phoneSeq).padStart(3, '0')}`,
+        addressLine1: '1 Trial Street',
+        city: 'Georgetown',
+        region: 'Demerara-Mahaica',
+        latitude: 6.8,
+        longitude: -58.15,
+        status: 'PENDING_APPROVAL',
+      },
+    });
+    return vendor.id;
+  }
+
+  it('starts a 14-day trial at the small-vendor rate on vendor activation', async () => {
+    const subscriptions = new SubscriptionService(app.prisma);
+    const sub = await subscriptions.startTrialForVendor(await makeBareVendor('RESTAURANT'));
+    createdSubIds.push(sub.id);
+
+    expect(sub.status).toBe('TRIAL');
+    expect(sub.isTrialActive).toBe(true);
+    expect(sub.type).toBe('RESTAURANT');
+    expect(Number(sub.weeklyRate)).toBe(20000); // smallVendor tier (seeded GY)
+    expect(sub.billingMethod).toBe('CASH');
+    const days = (sub.trialEndDate!.getTime() - Date.now()) / DAY;
+    expect(days).toBeGreaterThan(13);
+    expect(days).toBeLessThan(15);
+  });
+
+  it('maps STORE and SERVICE vendors to the new subscription types', async () => {
+    const subscriptions = new SubscriptionService(app.prisma);
+    const store = await subscriptions.startTrialForVendor(await makeBareVendor('STORE'));
+    const service = await subscriptions.startTrialForVendor(await makeBareVendor('SERVICE'));
+    createdSubIds.push(store.id, service.id);
+    expect(store.type).toBe('RETAIL_STORE');
+    expect(service.type).toBe('SERVICE_PROVIDER');
+  });
+
+  it('is idempotent — re-activating returns the same subscription', async () => {
+    const subscriptions = new SubscriptionService(app.prisma);
+    const vendorId = await makeBareVendor('RESTAURANT');
+    const first = await subscriptions.startTrialForVendor(vendorId);
+    const second = await subscriptions.startTrialForVendor(vendorId);
+    createdSubIds.push(first.id);
+    expect(second.id).toBe(first.id);
+    expect(await app.prisma.subscription.count({ where: { vendorId } })).toBe(1);
+  });
+
+  it('converts an expired trial to ACTIVE and due for billing', async () => {
+    const subscriptions = new SubscriptionService(app.prisma);
+    const sub = await subscriptions.startTrialForVendor(await makeBareVendor('RESTAURANT'));
+    createdSubIds.push(sub.id);
+    await app.prisma.subscription.update({
+      where: { id: sub.id },
+      data: { trialEndDate: new Date(Date.now() - 1000) },
+    });
+
+    const converted = await subscriptions.convertExpiredTrials();
+    expect(converted).toBeGreaterThanOrEqual(1);
+
+    const after = await app.prisma.subscription.findUniqueOrThrow({ where: { id: sub.id } });
+    expect(after.status).toBe('ACTIVE');
+    expect(after.isTrialActive).toBe(false);
+    expect(after.nextBillingDate.getTime()).toBeLessThanOrEqual(Date.now());
   });
 });
