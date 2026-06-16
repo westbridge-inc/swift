@@ -14,6 +14,7 @@ import {
   DiscountType,
   VerificationDocumentStatus,
   ClaimStatus,
+  ReturnStatus,
 } from '@prisma/client';
 import { NotificationService } from '../notification/notification.service';
 import { VerificationService } from '../verification/verification.service';
@@ -157,6 +158,14 @@ const verificationQueueQuerySchema = z.object({
 
 const claimsQueueQuerySchema = z.object({
   status: z.nativeEnum(ClaimStatus).default('PENDING_REVIEW'),
+});
+
+const returnsQuerySchema = z.object({
+  status: z.nativeEnum(ReturnStatus).optional(),
+});
+const resolveReturnSchema = z.object({
+  status: z.enum(['APPROVED', 'REJECTED', 'REFUNDED']),
+  note: z.string().max(1000).optional(),
 });
 
 const approveDocSchema = z.object({
@@ -1447,6 +1456,35 @@ export async function adminRoutes(app: FastifyInstance) {
     await audit(request.user.userId, 'VIEW_VERIFICATION_DOC', 'VerificationDocument', id, { docType: doc.docType, ttlSeconds }, request);
 
     return { success: true, data: { url, expiresInSeconds: ttlSeconds } };
+  });
+
+  // ─── Retail returns (Phase 8) ──────────────────────────────────────────
+
+  app.get('/returns', { preHandler: [adminGuard] }, async (request) => {
+    const { page, limit, skip } = parsePagination(request.query as Record<string, string>);
+    const { status } = returnsQuerySchema.parse(request.query);
+    const where = status ? { status } : {};
+    const [items, total] = await Promise.all([
+      app.prisma.returnRequest.findMany({ where, orderBy: { createdAt: 'desc' }, skip, take: limit }),
+      app.prisma.returnRequest.count({ where }),
+    ]);
+    return { success: true, ...paginatedResponse(items, total, { page, limit, skip }) };
+  });
+
+  app.put('/returns/:id/resolve', { preHandler: [adminGuard] }, async (request) => {
+    const { id } = request.params as { id: string };
+    const body = resolveReturnSchema.parse(request.body);
+    const existing = await app.prisma.returnRequest.findUnique({ where: { id } });
+    if (!existing) throw new NotFoundError('ReturnRequest', id);
+    if (existing.status !== 'REQUESTED') {
+      throw new AppError(400, 'ALREADY_RESOLVED', `This return is already ${existing.status.toLowerCase()}`);
+    }
+    const updated = await app.prisma.returnRequest.update({
+      where: { id },
+      data: { status: body.status, resolutionNote: body.note, reviewedBy: request.user.userId, reviewedAt: new Date() },
+    });
+    await audit(request.user.userId, 'RESOLVE_RETURN', 'ReturnRequest', id, { status: body.status }, request);
+    return { success: true, data: updated };
   });
 
   // ─── Cash Rules: guarantee claims + founder metrics (Step 10) ──────────

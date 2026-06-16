@@ -1490,6 +1490,34 @@ export async function customerRoutes(app: FastifyInstance) {
     return { success: true, data: result };
   });
 
+  /** POST /orders/:id/return — request a return on a delivered retail order (§4.5). */
+  app.post('/orders/:id/return', async (request: AuthRequest, reply: FastifyReply) => {
+    const { id } = request.params as { id: string };
+    const { userId } = request.user;
+    const { reason } = z.object({ reason: z.string().trim().min(5).max(1000) }).parse(request.body);
+
+    const order = await app.prisma.order.findFirst({
+      where: { id, customerId: userId },
+      select: { id: true, status: true, vendor: { select: { vendorType: true } } },
+    });
+    if (!order) throw new NotFoundError('Order', id);
+    if (!['DELIVERED', 'COMPLETED'].includes(order.status)) {
+      throw new AppError(400, 'NOT_RETURNABLE', 'Only delivered orders can be returned');
+    }
+    if (order.vendor?.vendorType !== 'STORE') {
+      throw new AppError(400, 'NOT_RETAIL', 'Returns are only available for retail orders');
+    }
+    const existing = await app.prisma.returnRequest.findFirst({ where: { orderId: id } });
+    if (existing) {
+      throw new AppError(409, 'RETURN_EXISTS', 'A return has already been requested for this order');
+    }
+    const created = await app.prisma.returnRequest.create({
+      data: { orderId: id, customerId: userId, reason },
+    });
+    reply.code(201);
+    return { success: true, data: created };
+  });
+
   // ========================================================================
   // 10. WALLET
   // ========================================================================
