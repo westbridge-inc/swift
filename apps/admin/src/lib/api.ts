@@ -29,3 +29,21 @@ export const approveVendor = (id: string) => apiFetch(`/api/v1/admin/vendors/${i
 export const verifyRiderDocuments = (id: string) => apiFetch(`/api/v1/admin/riders/${id}/verify-documents`, { method: 'PUT' });
 export const updateConfig = (key: string, value: unknown) =>
   apiFetch(`/api/v1/admin/config/${key}`, { method: 'PUT', body: JSON.stringify({ value }) });
+
+// ─── Verification Center (Phase 4) ─────────────────────────────────────────
+export interface InsuranceCheck {
+  insurerName: string;
+  policyNumber: string;
+  coverageClass: 'HIRE' | 'PRIVATE';
+  hireClassConfirmed: boolean;
+  plateCrossChecked: boolean;
+}
+
+export const fetchVerificationQueue = (status = 'PENDING') =>
+  apiFetch(`/api/v1/admin/verification/queue?status=${status}&limit=100`);
+export const getDocSignedUrl = (id: string) =>
+  apiFetch(`/api/v1/admin/verification/${id}/document-url`);
+export const approveDoc = (id: string, body?: { expiresAt?: string; insurance?: InsuranceCheck }) =>
+  apiFetch(`/api/v1/admin/verification/${id}/approve`, { method: 'PUT', body: JSON.stringify(body ?? {}) });
+export const rejectDoc = (id: string, reason: string) =>
+  apiFetch(`/api/v1/admin/verification/${id}/reject`, { method: 'PUT', body: JSON.stringify({ reason }) });
