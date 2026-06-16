@@ -905,6 +905,31 @@ model Rating {
   @@map("ratings")
 }
 
+/// Retail returns/disputes (spec §4.5) — retail has returns, food doesn't.
+model ReturnRequest {
+  id             String       @id @default(cuid())
+  orderId        String
+  customerId     String
+  reason         String
+  status         ReturnStatus @default(REQUESTED)
+  resolutionNote String?
+  reviewedBy     String?
+  reviewedAt     DateTime?
+  createdAt      DateTime     @default(now())
+
+  @@index([orderId])
+  @@index([customerId])
+  @@index([status])
+  @@map("return_requests")
+}
+
+enum ReturnStatus {
+  REQUESTED
+  APPROVED
+  REJECTED
+  REFUNDED
+}
+
 enum RatingType {
   CUSTOMER_TO_VENDOR
   CUSTOMER_TO_RIDER
