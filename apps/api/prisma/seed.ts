@@ -393,6 +393,13 @@ async function main() {
     l3MinAccountAgeDays: 30,
     outlierMultiplier: 3,
   };
+  const guyanaRegion = {
+    taxiCredentialName: 'Hire Car Licence',
+    insuranceClassName: 'Hire',
+    verificationSources: ['ID Analyzer', 'GESW', 'GEI registry', 'Police Clearance'],
+    regulatoryNotes: 'Data Protection Act 2023 in force; the Nevis entity requires a Guyana local representative.',
+    locale: 'en-GY',
+  };
   await prisma.countryConfig.upsert({
     where: { code: 'GY' },
     update: {
@@ -403,6 +410,7 @@ async function main() {
       documentChecklists: guyanaChecklists,
       taxiRates: guyanaTaxiRates,
       cashRules: guyanaCashRules,
+      ...guyanaRegion,
     },
     create: {
       code: 'GY',
@@ -415,6 +423,7 @@ async function main() {
       documentChecklists: guyanaChecklists,
       taxiRates: guyanaTaxiRates,
       cashRules: guyanaCashRules,
+      ...guyanaRegion,
       isActive: true,
     },
   });

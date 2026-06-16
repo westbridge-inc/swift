@@ -12,6 +12,7 @@ import { vendorRoutes } from '../modules/vendor/vendor.routes';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { OrderService, ORDER_TRANSITIONS } from '../modules/order/order.service';
 import { BookingService } from '../modules/booking/booking.service';
+import { RatingService } from '../modules/rating/rating.service';
 
 // ---------------------------------------------------------------------------
 // Step 7 — the locked order lifecycle. Hardest paths per playbook: the state
@@ -182,6 +183,9 @@ afterAll(async () => {
     const ids = orders.map((o) => o.id);
     await app.prisma.orderStatusLog.deleteMany({ where: { orderId: { in: ids } } });
     await app.prisma.booking.deleteMany({ where: { customerId: { in: createdUserIds } } });
+    await app.prisma.rating.deleteMany({
+      where: { OR: [{ raterId: { in: createdUserIds } }, { rateeId: { in: createdUserIds } }] },
+    });
     await app.prisma.order.deleteMany({ where: { id: { in: ids } } });
     await app.prisma.user.deleteMany({ where: { id: { in: createdUserIds } } });
   }
@@ -480,5 +484,58 @@ describe('Appointments — booked at acceptance, never double-held', () => {
     expect(res.json().error.code).toBe('MIXED_FULFILLMENT');
 
     await app.prisma.cart.deleteMany({ where: { customerId: customer.userId } });
+  });
+});
+
+describe('Phase 6 — trust completeness', () => {
+  it('only a transaction participant can rate (verified-transaction)', async () => {
+    const vendor = await makeVendor({ type: 'RESTAURANT' });
+    const order = await makeBareOrder(customer.userId, vendor.vendorId, 'DELIVERED');
+    const ratings = new RatingService(app.prisma);
+
+    const stranger = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
+    await expect(
+      ratings.rate({ orderId: order.id, raterId: stranger.userId, vendorId: vendor.vendorId, type: 'CUSTOMER_TO_VENDOR', score: 5 }),
+    ).rejects.toThrow(/participant/i);
+
+    const ok = await ratings.rate({ orderId: order.id, raterId: customer.userId, vendorId: vendor.vendorId, type: 'CUSTOMER_TO_VENDOR', score: 5 });
+    expect(ok.score).toBe(5);
+  });
+
+  it('flags rating-bombing (3+ low scores from one rater against one target)', async () => {
+    const vendor = await makeVendor({ type: 'RESTAURANT' });
+    const ratings = new RatingService(app.prisma);
+    for (let i = 0; i < 3; i++) {
+      await app.prisma.rating.create({
+        data: {
+          orderId: `bomb-${nanoid(8)}`,
+          raterId: customer.userId,
+          vendorId: vendor.vendorId,
+          type: 'CUSTOMER_TO_VENDOR',
+          score: 1,
+        },
+      });
+    }
+
+    const flagged = await ratings.flagSuspiciousRatings();
+    expect(flagged).toBeGreaterThanOrEqual(3);
+    const count = await app.prisma.rating.count({ where: { vendorId: vendor.vendorId, flagged: true } });
+    expect(count).toBeGreaterThanOrEqual(3);
+  });
+
+  it('issues a printable QR deep-link for a vendor', async () => {
+    const vendor = await makeVendor({ type: 'RESTAURANT' });
+    const res = await inject('GET', '/api/v1/vendor/qr', undefined, vendor.token);
+    expect(res.statusCode).toBe(200);
+    const data = res.json().data;
+    expect(data.deepLink).toContain('/v/');
+    expect(data.svg).toContain('svg');
+  });
+
+  it('exposes region-specific CountryConfig fields (no hardcoding)', async () => {
+    const gy = await app.prisma.countryConfig.findUniqueOrThrow({ where: { code: 'GY' } });
+    expect(gy.taxiCredentialName).toBe('Hire Car Licence');
+    expect(gy.insuranceClassName).toBe('Hire');
+    expect(gy.locale).toBe('en-GY');
   });
 });

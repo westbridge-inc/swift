@@ -185,6 +185,16 @@ model CountryConfig {
   /// Days to retain verification documents after a participant leaves
   dataRetentionDays Int @default(365)
 
+  /// Region-specific labels/sources (spec §2.2) — never hardcode in features.
+  /// Guyana: "Hire Car Licence" / "Hire"; Trinidad: "H-Taxi Badge" / "H".
+  taxiCredentialName  String?
+  insuranceClassName  String?
+  /// Verification registries/APIs available, e.g. ["ID Analyzer","GESW","GEI"]
+  verificationSources Json?
+  regulatoryNotes     String?
+  /// BCP-47 locale, e.g. "en-GY"
+  locale              String @default("en")
+
   /// Inactive countries show a waitlist at signup
   isActive  Boolean  @default(false)
   createdAt DateTime @default(now())
@@ -875,8 +885,15 @@ model Rating {
   comment  String?
   tags     String[]
   isPublic Boolean    @default(true)
+  /// Anti-manipulation (spec §5.2): flagged for review by the daily sweep
+  flagged    Boolean  @default(false)
+  flagReason String?
   createdAt DateTime  @default(now())
 
+  @@index([raterId])
+  @@index([vendorId])
+  @@index([rateeId])
+  @@index([flagged])
   @@map("ratings")
 }
 

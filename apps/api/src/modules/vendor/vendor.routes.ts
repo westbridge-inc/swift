@@ -7,6 +7,7 @@ import { BookingService } from '../booking/booking.service';
 import { VerificationService } from '../verification/verification.service';
 import { getKycProvider } from '../../providers/kyc/kyc-provider';
 import { getStorageProvider } from '../../providers/storage/storage-provider';
+import QRCode from 'qrcode';
 import { parseCsvWithHeader } from '../../utils/csv';
 import { parsePagination, paginatedResponse } from '../../utils/pagination';
 import { AppError, NotFoundError, ValidationError } from '../../utils/errors';
@@ -298,6 +299,24 @@ export async function vendorRoutes(app: FastifyInstance) {
   );
   const storage = getStorageProvider();
   const bookingService = new BookingService(app.prisma);
+
+  // =========================================================================
+  // 0. QR CODE (acquisition + catalogue — spec §5.4)
+  // =========================================================================
+
+  /** GET /qr — printable/shareable QR linking to this vendor's public catalogue.
+   *  Doubles as the acquisition tool (pulls a vendor's customers onto Swift). */
+  app.get('/qr', auth, async (request) => {
+    const { vendorId } = await resolveVendor(app, request.user.userId);
+    const vendor = await app.prisma.vendor.findUniqueOrThrow({
+      where: { id: vendorId },
+      select: { slug: true, name: true },
+    });
+    const base = process.env['APP_PUBLIC_URL'] ?? 'https://swift.gy';
+    const deepLink = `${base}/v/${vendor.slug}`;
+    const svg = await QRCode.toString(deepLink, { type: 'svg', margin: 1, width: 320 });
+    return { success: true, data: { deepLink, svg, vendorName: vendor.name } };
+  });
 
   // =========================================================================
   // 1. PROFILE

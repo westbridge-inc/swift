@@ -27,16 +27,36 @@ export class RatingService {
       throw new AppError(400, 'INVALID_SCORE', 'Rating must be between 1 and 5');
     }
 
-    // Verify order exists and rater is a participant
+    // Verify the order exists and the rater actually participated in it.
     const order = await this.prisma.order.findUnique({
       where: { id: input.orderId },
-      select: { customerId: true, riderId: true, driverId: true, vendorId: true, status: true },
+      select: {
+        customerId: true,
+        riderId: true,
+        driverId: true,
+        vendorId: true,
+        status: true,
+        rider: { select: { userId: true } },
+        driver: { select: { userId: true } },
+        vendor: { select: { owner: { select: { userId: true } } } },
+      },
     });
 
     if (!order) throw new AppError(404, 'NOT_FOUND', 'Order not found');
 
     if (!['DELIVERED', 'COMPLETED'].includes(order.status)) {
       throw new AppError(400, 'ORDER_NOT_COMPLETE', 'You can only rate completed orders');
+    }
+
+    // Verified-transaction (spec §5.2): only a participant in this order may rate.
+    const participantIds = [
+      order.customerId,
+      order.rider?.userId,
+      order.driver?.userId,
+      order.vendor?.owner?.userId,
+    ].filter((id): id is string => Boolean(id));
+    if (!participantIds.includes(input.raterId)) {
+      throw new AppError(403, 'NOT_A_PARTICIPANT', 'Only a participant in this transaction can rate it');
     }
 
     // Prevent duplicate ratings
@@ -214,5 +234,40 @@ export class RatingService {
         totalRatings: agg._count,
       },
     });
+  }
+
+  /**
+   * Anti-manipulation sweep (spec §5.2): flag rating-bombing — the same rater
+   * leaving 3+ low scores (<=2) against the same target within 24h. Verified-
+   * transaction already blocks non-buyers; this catches sabotage patterns for
+   * human review. Returns the number of ratings flagged.
+   */
+  async flagSuspiciousRatings(now = new Date()): Promise<number> {
+    const since = new Date(now.getTime() - 24 * 60 * 60 * 1000);
+    const recent = await this.prisma.rating.findMany({
+      where: { createdAt: { gte: since }, score: { lte: 2 }, flagged: false },
+      select: { id: true, raterId: true, vendorId: true, rateeId: true },
+    });
+
+    const groups = new Map<string, string[]>();
+    for (const r of recent) {
+      const target = r.vendorId ?? r.rateeId ?? 'none';
+      const key = `${r.raterId}:${target}`;
+      const ids = groups.get(key) ?? [];
+      ids.push(r.id);
+      groups.set(key, ids);
+    }
+
+    const toFlag: string[] = [];
+    for (const ids of groups.values()) {
+      if (ids.length >= 3) toFlag.push(...ids);
+    }
+    if (toFlag.length === 0) return 0;
+
+    await this.prisma.rating.updateMany({
+      where: { id: { in: toFlag } },
+      data: { flagged: true, flagReason: 'rating_bombing_suspected' },
+    });
+    return toFlag.length;
   }
 }
