@@ -9,6 +9,8 @@ import { getKycProvider } from '../../providers/kyc/kyc-provider';
 import { getStorageProvider } from '../../providers/storage/storage-provider';
 import QRCode from 'qrcode';
 import { parseCsvWithHeader } from '../../utils/csv';
+import { AiService } from '../ai/ai.service';
+import { guessColumnMapping, applyMapping, toImportCsv, REQUIRED_FIELDS, type ColumnMapping } from '../../utils/catalogue-map';
 import { parsePagination, paginatedResponse } from '../../utils/pagination';
 import { AppError, NotFoundError, ValidationError } from '../../utils/errors';
 
@@ -808,6 +810,45 @@ export async function vendorRoutes(app: FastifyInstance) {
   app.get('/items/import/template', auth, async (_request, reply) => {
     reply.type('text/csv').header('content-disposition', 'attachment; filename="swift-catalogue-template.csv"');
     return CSV_TEMPLATE;
+  });
+
+  /** POST /items/import/automap — map a messy store CSV's columns to Swift
+   *  fields (deterministic synonyms + AI assist). Returns a preview + a canonical
+   *  CSV to confirm via POST /items/import. Never imports here; only relabels
+   *  columns, never invents prices or stock (spec §4.5). */
+  app.post('/items/import/automap', auth, async (request) => {
+    await resolveVendor(app, request.user.userId);
+    const { csv } = importCsvSchema.parse(request.body);
+    const rows = parseCsvWithHeader(csv);
+    if (rows.length === 0) {
+      throw new AppError(400, 'EMPTY_CSV', 'No data rows found');
+    }
+    const headers = Object.keys(rows[0]!);
+
+    let mapping: ColumnMapping = guessColumnMapping(headers);
+    if (REQUIRED_FIELDS.some((f) => !mapping[f])) {
+      // Best-effort AI assist for columns the synonyms missed (off the critical path).
+      const ai = await new AiService().mapCatalogueColumns(headers);
+      if (ai) mapping = { ...(ai as ColumnMapping), ...mapping }; // heuristic wins ties
+    }
+
+    const missing = REQUIRED_FIELDS.filter((f) => !mapping[f]);
+    if (missing.length > 0) {
+      throw new AppError(422, 'UNMAPPED_COLUMNS',
+        `Could not map required columns (${missing.join(', ')}). Rename them or use the template.`,
+        { mapping, headers });
+    }
+
+    const normalized = applyMapping(rows, mapping);
+    return {
+      success: true,
+      data: {
+        mapping,
+        rowCount: normalized.length,
+        preview: normalized.slice(0, 10),
+        normalizedCsv: toImportCsv(normalized),
+      },
+    };
   });
 
   /** POST /items/import — CSV bulk import: bad rows reported, good rows imported */
