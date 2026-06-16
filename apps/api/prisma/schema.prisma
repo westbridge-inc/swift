@@ -217,6 +217,13 @@ model VerificationDocument {
   reviewedBy String?
   reviewNote String?
   reviewedAt DateTime?
+  /// Insurance 5-point manual check (spec §3.4) — captured when an admin reviews
+  /// a hire-insurance document. The taxi go-live gate requires HIRE + confirmed.
+  insurerName        String?
+  policyNumber       String?
+  coverageClass      CoverageClass?
+  hireClassConfirmed Boolean        @default(false)
+  plateCrossChecked  Boolean        @default(false)
   /// DPA §3.5 consent captured at upload (privacy notice acknowledged)
   consentAt            DateTime?
   privacyNoticeVersion String?
@@ -239,6 +246,13 @@ enum VerificationDocumentStatus {
   APPROVED
   REJECTED
   EXPIRED
+}
+
+/// Motor-insurance class for taxi drivers (spec §3.4). HIRE = fare-paying
+/// passengers (required to carry passengers); PRIVATE never qualifies.
+enum CoverageClass {
+  HIRE
+  PRIVATE
 }
 
 /// Company guarantee for failed cash handovers under the USD gate

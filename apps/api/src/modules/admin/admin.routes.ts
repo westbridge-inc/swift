@@ -161,6 +161,14 @@ const claimsQueueQuerySchema = z.object({
 const approveDocSchema = z.object({
   // Optional document expiry (e.g. licence end date entered during review)
   expiresAt: z.coerce.date().optional(),
+  // Insurance 5-point manual check (spec §3.4) — supplied for hire-insurance docs
+  insurance: z.object({
+    insurerName: z.string().min(1).max(120),
+    policyNumber: z.string().min(1).max(60),
+    coverageClass: z.enum(['HIRE', 'PRIVATE']),
+    hireClassConfirmed: z.boolean(),
+    plateCrossChecked: z.boolean(),
+  }).optional(),
 });
 
 const rejectDocSchema = z.object({
@@ -1384,8 +1392,15 @@ export async function adminRoutes(app: FastifyInstance) {
     const { id } = request.params as { id: string };
     const body = approveDocSchema.parse(request.body ?? {});
 
-    const doc = await verification.approveDocument(id, request.user.userId, body.expiresAt);
-    await audit(request.user.userId, 'APPROVE_VERIFICATION_DOC', 'VerificationDocument', id, { docType: doc.docType }, request);
+    const doc = await verification.approveDocument(id, request.user.userId, body.expiresAt, body.insurance);
+    await audit(
+      request.user.userId,
+      'APPROVE_VERIFICATION_DOC',
+      'VerificationDocument',
+      id,
+      { docType: doc.docType, ...(body.insurance ? { insurance: body.insurance } : {}) },
+      request,
+    );
 
     return { success: true, data: doc };
   });
