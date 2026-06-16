@@ -167,6 +167,7 @@ export function createWorkers(ctx: JobContext) {
     QUEUE_NAMES.SUBSCRIPTION,
     async (job: Job) => {
       const { BillingService } = await import('../modules/billing/billing.service');
+      const { SubscriptionService } = await import('../modules/subscription/subscription.service');
       const { NotificationService } = await import('../modules/notification/notification.service');
       const { getPaymentProvider } = await import('../providers/payment/payment-provider');
 
@@ -175,6 +176,7 @@ export function createWorkers(ctx: JobContext) {
         new NotificationService(ctx.prisma, ctx.io),
         getPaymentProvider(),
       );
+      const subscriptions = new SubscriptionService(ctx.prisma);
 
       switch (job.name) {
         case 'process-billing': {
@@ -186,6 +188,11 @@ export function createWorkers(ctx: JobContext) {
         case 'tier-recalc': {
           const changed = await billing.recalculateVendorTiers();
           ctx.log.info({ changed }, 'Vendor tier recalculation complete');
+          break;
+        }
+        case 'convert-trials': {
+          const converted = await subscriptions.convertExpiredTrials();
+          ctx.log.info({ converted }, 'Expired trials converted to active');
           break;
         }
       }
@@ -371,5 +378,12 @@ export async function scheduleRecurringJobs(queues: ReturnType<typeof createQueu
     repeat: { pattern: '0 5 * * 1' },
     removeOnComplete: 10,
     removeOnFail: 10,
+  });
+
+  // Convert expired trials → active (the hourly cycle then bills them): daily 03:00
+  await queues.subscriptionQueue.add('convert-trials', {}, {
+    repeat: { pattern: '0 3 * * *' },
+    removeOnComplete: 30,
+    removeOnFail: 30,
   });
 }
