@@ -183,6 +183,8 @@ describe('Checklists drive from config', () => {
       role: 'MOVER',
       docType: 'boat_licence',
       fileUrl: 'storage://t/boat.jpg',
+      consent: true,
+      privacyNoticeVersion: 'v1',
     }, moverToken);
     expect(res.statusCode).toBe(400);
     expect(res.json().error.code).toBe('INVALID_DOC_TYPE');
@@ -216,6 +218,8 @@ describe('Manual review queue — submit, reject, resubmit, approve', () => {
         role: 'MOVER',
         docType,
         fileUrl: `storage://t/${docType}.jpg`,
+        consent: true,
+        privacyNoticeVersion: 'v1',
       }, moverToken);
       expect(res.statusCode).toBe(201);
       expect(res.json().data.status).toBe('PENDING');
@@ -258,6 +262,8 @@ describe('Manual review queue — submit, reject, resubmit, approve', () => {
       role: 'MOVER',
       docType: 'national_id',
       fileUrl: 'storage://t/national_id_v2.jpg',
+      consent: true,
+      privacyNoticeVersion: 'v1',
     }, moverToken);
     expect(res.statusCode).toBe(201);
     expect(res.json().data.status).toBe('PENDING');
@@ -286,6 +292,8 @@ describe('Manual review queue — submit, reject, resubmit, approve', () => {
       role: 'MOVER',
       docType: 'national_id',
       fileUrl: 'storage://t/dupe.jpg',
+      consent: true,
+      privacyNoticeVersion: 'v1',
     }, moverToken);
     expect(res.statusCode).toBe(409);
     expect(res.json().error.code).toBe('ALREADY_APPROVED');
@@ -298,6 +306,8 @@ describe('Provider auto-decisions (swappable interface)', () => {
       role: 'SERVICE',
       docType: 'owner_national_id',
       fileUrl: 'storage://t/auto-approve/owner_id.jpg',
+      consent: true,
+      privacyNoticeVersion: 'v1',
     }, vendorToken);
     expect(res.statusCode).toBe(201);
     expect(res.json().data.status).toBe('APPROVED');
@@ -323,6 +333,8 @@ describe('L2 identity — permanent customer verification', () => {
     const res = await inject('POST', '/api/v1/verification/identity', {
       idDocumentUrl: 'storage://t/auto-approve/id.jpg',
       selfieUrl: 'storage://t/selfie.jpg',
+      consent: true,
+      privacyNoticeVersion: 'v1',
     }, customer.tokens.accessToken);
     expect(res.statusCode).toBe(201);
     expect(res.json().data.status).toBe('APPROVED');
@@ -334,6 +346,8 @@ describe('L2 identity — permanent customer verification', () => {
     const again = await inject('POST', '/api/v1/verification/identity', {
       idDocumentUrl: 'storage://t/id2.jpg',
       selfieUrl: 'storage://t/selfie2.jpg',
+      consent: true,
+      privacyNoticeVersion: 'v1',
     }, customer.tokens.accessToken);
     expect(again.statusCode).toBe(409);
   });
@@ -343,6 +357,8 @@ describe('L2 identity — permanent customer verification', () => {
     const res = await inject('POST', '/api/v1/verification/identity', {
       idDocumentUrl: 'storage://t/id.jpg',
       selfieUrl: 'storage://t/selfie.jpg',
+      consent: true,
+      privacyNoticeVersion: 'v1',
     }, customer.tokens.accessToken);
     expect(res.json().data.status).toBe('PENDING');
 
@@ -409,5 +425,90 @@ describe('Expiry automation', () => {
 
     const second = await sweepService.sendExpiryReminders();
     expect(second).toBe(0);
+  });
+});
+
+describe('Phase 2 — document storage & DPA compliance', () => {
+  it('rejects a document upload without consent (DPA §3.5)', async () => {
+    const res = await inject('POST', '/api/v1/verification/documents', {
+      role: 'MOVER',
+      docType: 'national_id',
+      fileUrl: 'storage://t/no-consent.jpg',
+      // consent + privacyNoticeVersion intentionally omitted
+    }, moverToken);
+    expect(res.statusCode).toBe(400);
+  });
+
+  it('issues a short-lived signed URL and audit-logs the access', async () => {
+    const doc = await app.prisma.verificationDocument.create({
+      data: {
+        userId: moverUserId,
+        role: 'MOVER',
+        docType: 'national_id',
+        fileUrl: '/uploads/verification/signed-me.jpg',
+        status: 'PENDING',
+        consentAt: new Date(),
+        privacyNoticeVersion: 'v1',
+      },
+    });
+
+    const res = await inject('GET', `/api/v1/admin/verification/${doc.id}/document-url`, undefined, adminToken);
+    expect(res.statusCode).toBe(200);
+    const { url, expiresInSeconds } = res.json().data;
+    expect(expiresInSeconds).toBeGreaterThan(0);
+    // Signed + time-limited — never a raw public link
+    expect(url).toContain('expires=');
+    expect(url).toContain('signed-me.jpg');
+
+    const access = await app.prisma.auditLog.findFirst({
+      where: { action: 'VIEW_VERIFICATION_DOC', entityId: doc.id },
+    });
+    expect(access).not.toBeNull();
+  });
+
+  it('retention purge deletes the object, clears the key, and blocks viewing (410)', async () => {
+    const doc = await app.prisma.verificationDocument.create({
+      data: {
+        userId: moverUserId,
+        role: 'MOVER',
+        docType: 'national_id',
+        fileUrl: '/uploads/verification/purge-me.jpg',
+        status: 'APPROVED',
+        consentAt: new Date(),
+        privacyNoticeVersion: 'v1',
+        retentionExpiresAt: new Date(Date.now() - 1000),
+      },
+    });
+
+    const purged = await sweepService.purgeExpiredDocuments();
+    expect(purged).toBeGreaterThanOrEqual(1);
+
+    const after = await app.prisma.verificationDocument.findUniqueOrThrow({ where: { id: doc.id } });
+    expect(after.purgedAt).not.toBeNull();
+    expect(after.fileUrl).toBe('');
+
+    const view = await inject('GET', `/api/v1/admin/verification/${doc.id}/document-url`, undefined, adminToken);
+    expect(view.statusCode).toBe(410);
+  });
+
+  it('scheduleDocumentRetention sets a future deletion date from CountryConfig', async () => {
+    const doc = await app.prisma.verificationDocument.create({
+      data: {
+        userId: moverUserId,
+        role: 'MOVER',
+        docType: 'national_id',
+        fileUrl: '/uploads/verification/retain-me.jpg',
+        status: 'APPROVED',
+        consentAt: new Date(),
+        privacyNoticeVersion: 'v1',
+      },
+    });
+
+    const count = await sweepService.scheduleDocumentRetention(moverUserId);
+    expect(count).toBeGreaterThanOrEqual(1);
+
+    const after = await app.prisma.verificationDocument.findUniqueOrThrow({ where: { id: doc.id } });
+    expect(after.retentionExpiresAt).not.toBeNull();
+    expect(after.retentionExpiresAt!.getTime()).toBeGreaterThan(Date.now());
   });
 });

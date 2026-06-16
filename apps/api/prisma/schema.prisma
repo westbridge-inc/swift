@@ -180,6 +180,11 @@ model CountryConfig {
   ///   l3MinPaidOrders, l3MinAccountAgeDays, outlierMultiplier }
   cashRules Json?
 
+  /// DPA §3.5 — region documents are stored in (cross-border transfer rule)
+  storageRegion String?
+  /// Days to retain verification documents after a participant leaves
+  dataRetentionDays Int @default(365)
+
   /// Inactive countries show a waitlist at signup
   isActive  Boolean  @default(false)
   createdAt DateTime @default(now())
@@ -200,8 +205,9 @@ model VerificationDocument {
   role   UserRole
   /// Checklist key from CountryConfig.documentChecklists (e.g. "national_id")
   docType String
-  /// Storage reference only. Raw documents: encrypted at rest, never logged,
-  /// never sent to any AI service (hard rule 3).
+  /// Storage fileKey only (never a public URL). Raw documents: private +
+  /// encrypted at rest, viewed via short-lived signed URLs, never logged,
+  /// never sent to any AI service (hard rule 3 / DPA §3.5).
   fileUrl String
   /// Provider case reference — the only provider-side artifact we keep
   kycRef  String?
@@ -211,12 +217,20 @@ model VerificationDocument {
   reviewedBy String?
   reviewNote String?
   reviewedAt DateTime?
+  /// DPA §3.5 consent captured at upload (privacy notice acknowledged)
+  consentAt            DateTime?
+  privacyNoticeVersion String?
+  /// Retention (DPA §3.5): the purge job deletes the stored object after this
+  /// time and records purgedAt. Set when a participant leaves / is deactivated.
+  retentionExpiresAt   DateTime?
+  purgedAt             DateTime?
   createdAt  DateTime @default(now())
   updatedAt  DateTime @updatedAt
 
   @@index([status])
   @@index([userId])
   @@index([expiresAt])
+  @@index([retentionExpiresAt])
   @@map("verification_documents")
 }
 
