@@ -290,6 +290,24 @@ describe('Checkout — ID gate, multi-vendor split, fulfillment', () => {
     }
   });
 
+  it('cart preview shows base price with zero markup (display matches checkout)', async () => {
+    await addToCart(customer.token, restaurant.vendorId, burgerId, 2); // base 1000 each
+
+    const res = await inject('GET', '/api/v1/customer/cart', undefined, customer.token);
+    expect(res.statusCode).toBe(200);
+    const cart = res.json().data;
+
+    // Customers see the vendor base price — no 5% markup on any surface
+    for (const item of cart.items) {
+      expect(item.customerPrice).toBe(item.basePrice);
+    }
+    expect(cart.subtotalMarkup).toBe(0);
+    expect(cart.subtotalCustomer).toBe(cart.subtotalBase);
+    expect(cart.subtotalCustomer).toBe(2000); // 2 x 1000, no markup
+
+    await app.prisma.cart.deleteMany({ where: { customerId: customer.userId } });
+  });
+
   it('PICKUP orders carry zero delivery fee and the vendor address', async () => {
     await addToCart(customer.token, supermarket.vendorId, riceId, 1);
     const res = await inject('POST', '/api/v1/customer/checkout', {

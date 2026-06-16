@@ -1,74 +1,15 @@
 import { describe, it, expect } from 'vitest';
 import {
-  calculateMarkup,
-  calculateCustomerPrice,
   calculateDeliveryFee,
   calculateCourierFee,
   calculateTaxiFare,
   generateOrderNumber,
 } from './markup';
 
-// ---------------------------------------------------------------------------
-// calculateMarkup
-// ---------------------------------------------------------------------------
-
-describe('calculateMarkup', () => {
-  it('calculates 5% markup with default percentage', () => {
-    expect(calculateMarkup(2000)).toBe(100);
-  });
-
-  it('rounds UP to nearest whole GYD', () => {
-    // 5% of 2100 = 105  (exact)
-    expect(calculateMarkup(2100)).toBe(105);
-    // 5% of 2001 = 100.05 → ceil → 101
-    expect(calculateMarkup(2001)).toBe(101);
-    // 5% of 999 = 49.95 → ceil → 50
-    expect(calculateMarkup(999)).toBe(50);
-  });
-
-  it('returns 0 for price of 0', () => {
-    expect(calculateMarkup(0)).toBe(0);
-  });
-
-  it('handles large numbers', () => {
-    // 5% of 1,000,000 = 50,000
-    expect(calculateMarkup(1_000_000)).toBe(50_000);
-  });
-
-  it('accepts a custom markup percentage', () => {
-    // 10% of 2000 = 200
-    expect(calculateMarkup(2000, 10)).toBe(200);
-    // 1% of 500 = 5
-    expect(calculateMarkup(500, 1)).toBe(5);
-  });
-
-  it('handles fractional percentages with ceil', () => {
-    // 7% of 1000 = 70  (exact)
-    expect(calculateMarkup(1000, 7)).toBe(70);
-    // 3% of 1111 = 33.33 → ceil → 34
-    expect(calculateMarkup(1111, 3)).toBe(34);
-  });
-});
-
-// ---------------------------------------------------------------------------
-// calculateCustomerPrice
-// ---------------------------------------------------------------------------
-
-describe('calculateCustomerPrice', () => {
-  it('returns base + markup', () => {
-    // base=2000, markup=100
-    expect(calculateCustomerPrice(2000)).toBe(2100);
-  });
-
-  it('returns base + markup with custom percentage', () => {
-    // base=1000, 10% markup=100 → customer=1100
-    expect(calculateCustomerPrice(1000, 10)).toBe(1100);
-  });
-
-  it('returns 0 for zero base price', () => {
-    expect(calculateCustomerPrice(0)).toBe(0);
-  });
-});
+// NOTE: customer markup has been removed (zero-commission model — customers pay
+// the vendor base price). The calculateMarkup/calculateCustomerPrice helpers and
+// their tests are intentionally gone. The fees below are mover earnings, not
+// platform revenue.
 
 // ---------------------------------------------------------------------------
 // calculateDeliveryFee
