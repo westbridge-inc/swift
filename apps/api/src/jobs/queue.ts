@@ -266,6 +266,12 @@ export function createWorkers(ctx: JobContext) {
         const purged = await verification.purgeExpiredDocuments();
         ctx.log.info(`Verification sweep: ${expired} expired, ${reminded} reminders sent, ${purged} purged`);
       }
+
+      if (job.name === 'flag-ratings') {
+        const { RatingService } = await import('../modules/rating/rating.service');
+        const flagged = await new RatingService(ctx.prisma).flagSuspiciousRatings();
+        ctx.log.info(`Rating anti-manipulation sweep: ${flagged} flagged`);
+      }
     },
     { connection, concurrency: 1 },
   );
@@ -369,6 +375,13 @@ export async function scheduleRecurringJobs(queues: ReturnType<typeof createQueu
   // Verification document expiry sweep + reminders: daily at 06:00
   await queues.verificationQueue.add('expiry-sweep', {}, {
     repeat: { pattern: '0 6 * * *' },
+    removeOnComplete: 30,
+    removeOnFail: 30,
+  });
+
+  // Rating anti-manipulation sweep: daily at 04:00
+  await queues.verificationQueue.add('flag-ratings', {}, {
+    repeat: { pattern: '0 4 * * *' },
     removeOnComplete: 30,
     removeOnFail: 30,
   });
