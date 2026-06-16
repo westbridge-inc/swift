@@ -49,4 +49,16 @@ export class CountryConfigService {
     const lists = config.documentChecklists as Record<string, string[]>;
     return lists[roleKey] ?? [];
   }
+
+  /**
+   * Mover checklist. Riders need only the MOVER base; taxi drivers also need the
+   * MOVER_TAXI_EXTRA docs (hire permit, plate photo, police clearance, fitness).
+   * Used both to validate submissions and to gate live operation.
+   */
+  async getMoverChecklist(code: string, taxi: boolean): Promise<string[]> {
+    const config = await this.getByCode(code);
+    const lists = config.documentChecklists as Record<string, string[]>;
+    const base = lists['MOVER'] ?? [];
+    return taxi ? [...base, ...(lists['MOVER_TAXI_EXTRA'] ?? [])] : base;
+  }
 }

@@ -11,6 +11,15 @@ export type ChecklistRole = 'MOVER' | 'RESTAURANT' | 'SUPERMARKET' | 'STORE' | '
 /** L2 identity rows use this synthetic docType (not part of any checklist). */
 export const IDENTITY_DOC_TYPE = 'identity_l2';
 
+/** Insurance 5-point manual check captured during admin review (spec §3.4). */
+export interface InsuranceReview {
+  insurerName: string;
+  policyNumber: string;
+  coverageClass: 'HIRE' | 'PRIVATE';
+  hireClassConfirmed: boolean;
+  plateCrossChecked: boolean;
+}
+
 const REMINDER_WINDOW_DAYS = 30;
 
 export class VerificationService {
@@ -41,7 +50,11 @@ export class VerificationService {
     });
     if (!user) throw new NotFoundError('User', userId);
 
-    const checklist = await this.countryConfig.getDocumentChecklist(user.countryCode, roleKey);
+    // Movers (riders + taxi drivers) may submit any base or taxi-extra doc;
+    // other roles validate against their named checklist.
+    const checklist = roleKey === 'MOVER'
+      ? await this.countryConfig.getMoverChecklist(user.countryCode, true)
+      : await this.countryConfig.getDocumentChecklist(user.countryCode, roleKey);
     if (!checklist.includes(docType)) {
       throw new AppError(400, 'INVALID_DOC_TYPE', `${docType} is not required for ${roleKey} in your country`);
     }
@@ -77,6 +90,8 @@ export class VerificationService {
         ...(result.status === 'rejected' && { reviewedBy: 'kyc:auto', reviewedAt: new Date(), reviewNote: result.reason }),
       },
     });
+
+    await this.recordDecision(userId, doc.id, docType, doc.status, result.reason);
 
     if (doc.status === 'APPROVED') await this.afterApproval(userId);
     if (doc.status === 'REJECTED') await this.notifyRejection(userId, docType, result.reason);
@@ -117,6 +132,8 @@ export class VerificationService {
       },
     });
 
+    await this.recordDecision(userId, doc.id, IDENTITY_DOC_TYPE, doc.status, result.reason);
+
     if (doc.status === 'APPROVED') await this.promoteToL2(userId);
     if (doc.status === 'REJECTED') await this.notifyRejection(userId, 'identity', result.reason);
 
@@ -127,12 +144,24 @@ export class VerificationService {
   // Manual review queue (admin)
   // -------------------------------------------------------------------------
 
-  async approveDocument(docId: string, adminId: string, expiresAt?: Date) {
+  async approveDocument(docId: string, adminId: string, expiresAt?: Date, insurance?: InsuranceReview) {
     const doc = await this.requirePending(docId);
 
     const updated = await this.prisma.verificationDocument.update({
       where: { id: docId },
-      data: { status: 'APPROVED', reviewedBy: adminId, reviewedAt: new Date(), expiresAt: expiresAt ?? null },
+      data: {
+        status: 'APPROVED',
+        reviewedBy: adminId,
+        reviewedAt: new Date(),
+        expiresAt: expiresAt ?? null,
+        ...(insurance && {
+          insurerName: insurance.insurerName,
+          policyNumber: insurance.policyNumber,
+          coverageClass: insurance.coverageClass,
+          hireClassConfirmed: insurance.hireClassConfirmed,
+          plateCrossChecked: insurance.plateCrossChecked,
+        }),
+      },
     });
 
     if (doc.docType === IDENTITY_DOC_TYPE) {
@@ -226,6 +255,64 @@ export class VerificationService {
     });
     const approved = new Set(approvedDocs.map((d) => d.docType));
     return checklist.every((docType) => approved.has(docType));
+  }
+
+  /**
+   * Live-operation gate (provisional access ≠ live). A mover may set up a
+   * profile while documents are pending, but cannot operate live until the
+   * required documents are approved — and a taxi driver also needs current,
+   * hire-class motor insurance (spec §3.4, load-bearing rules #5 + #6).
+   */
+  async getLiveOperationStatus(
+    userId: string,
+    opts: { taxi: boolean; legacyVerified?: boolean },
+  ): Promise<{ allowed: boolean; reason: 'ok' | 'docs' | 'insurance' }> {
+    const user = await this.prisma.user.findUnique({
+      where: { id: userId },
+      select: { countryCode: true },
+    });
+    if (!user) return { allowed: false, reason: 'docs' };
+
+    let baseOk = opts.legacyVerified ?? false;
+    if (!baseOk) {
+      const required = await this.countryConfig.getMoverChecklist(user.countryCode, opts.taxi);
+      if (required.length === 0) {
+        baseOk = true;
+      } else {
+        const approvedDocs = await this.prisma.verificationDocument.findMany({
+          where: {
+            userId,
+            docType: { in: required },
+            status: 'APPROVED',
+            OR: [{ expiresAt: null }, { expiresAt: { gt: new Date() } }],
+          },
+          select: { docType: true },
+        });
+        const approved = new Set(approvedDocs.map((d) => d.docType));
+        baseOk = required.every((docType) => approved.has(docType));
+      }
+    }
+    if (!baseOk) return { allowed: false, reason: 'docs' };
+
+    // Taxi: a current, manually-confirmed HIRE-class policy is mandatory before
+    // carrying passengers. PRIVATE insurance never qualifies.
+    if (opts.taxi) {
+      const insurance = await this.prisma.verificationDocument.findFirst({
+        where: {
+          userId,
+          docType: 'vehicle_insurance',
+          status: 'APPROVED',
+          OR: [{ expiresAt: null }, { expiresAt: { gt: new Date() } }],
+        },
+        select: { coverageClass: true, hireClassConfirmed: true },
+        orderBy: { reviewedAt: 'desc' },
+      });
+      if (!insurance || insurance.coverageClass !== 'HIRE' || !insurance.hireClassConfirmed) {
+        return { allowed: false, reason: 'insurance' };
+      }
+    }
+
+    return { allowed: true, reason: 'ok' };
   }
 
   // -------------------------------------------------------------------------
@@ -397,6 +484,29 @@ export class VerificationService {
       title: 'Document rejected',
       body: `Your ${docType.replace(/_/g, ' ')} was rejected${reason ? `: ${reason}` : ''}. Please fix it and resubmit.`,
       data: { kind: 'verification_rejected' },
+    });
+  }
+
+  /** Append an immutable audit entry for an automated KYC decision (§3.6). */
+  private async recordDecision(
+    userId: string,
+    docId: string,
+    docType: string,
+    status: VerificationDocument['status'],
+    reason?: string,
+  ) {
+    const action =
+      status === 'APPROVED' ? 'KYC_AUTO_APPROVE'
+      : status === 'REJECTED' ? 'KYC_AUTO_REJECT'
+      : 'VERIFICATION_SUBMIT';
+    await this.prisma.auditLog.create({
+      data: {
+        userId,
+        action,
+        entity: 'VerificationDocument',
+        entityId: docId,
+        changes: { docType, status, ...(reason && { reason }) },
+      },
     });
   }
 

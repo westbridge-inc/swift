@@ -111,10 +111,17 @@ export async function driverRoutes(app: FastifyInstance) {
   app.post('/go-online', { preHandler: [app.authenticate] }, async (request) => {
     const driver = await getDriver(request.user.userId);
 
-    // Step 4 gate: country MOVER checklist (legacy flag grandfathers old accounts)
-    const verified = driver.documentsVerified
-      || await verification.isRoleVerified(request.user.userId, 'MOVER');
-    if (!verified) {
+    // Live-operation gate (spec §3.4): the taxi checklist must be approved AND a
+    // current, hire-class motor insurance confirmed before carrying passengers.
+    // The legacy documentsVerified flag only grandfathers the base documents.
+    const live = await verification.getLiveOperationStatus(request.user.userId, {
+      taxi: true,
+      legacyVerified: driver.documentsVerified,
+    });
+    if (!live.allowed) {
+      if (live.reason === 'insurance') {
+        throw new AppError(403, 'INSURANCE_HIRE_CLASS_REQUIRED', 'A current hire-class motor insurance must be verified before you can carry passengers');
+      }
       throw new AppError(403, 'VERIFICATION_REQUIRED', 'Your documents must be verified before going online');
     }
 
