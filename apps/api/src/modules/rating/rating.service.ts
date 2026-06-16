@@ -6,7 +6,9 @@ type RatingType =
   | 'CUSTOMER_TO_RIDER'
   | 'CUSTOMER_TO_DRIVER'
   | 'RIDER_TO_CUSTOMER'
-  | 'DRIVER_TO_CUSTOMER';
+  | 'DRIVER_TO_CUSTOMER'
+  | 'CUSTOMER_TO_PROVIDER'
+  | 'PROVIDER_TO_CUSTOMER';
 
 interface RateInput {
   orderId: string;
@@ -229,6 +231,53 @@ export class RatingService {
     });
     await this.prisma.driver.update({
       where: { id: driverId },
+      data: {
+        averageRating: Math.round((agg._avg.score || 5) * 10) / 10,
+        totalRatings: agg._count,
+      },
+    });
+  }
+
+  /** Two-way service rating on a completed ServiceJob (verified participant). */
+  async rateServiceJob(jobId: string, raterId: string, score: number, comment?: string) {
+    if (score < 1 || score > 5) {
+      throw new AppError(400, 'INVALID_SCORE', 'Rating must be between 1 and 5');
+    }
+    const job = await this.prisma.serviceJob.findUnique({
+      where: { id: jobId },
+      select: { status: true, customerId: true, provider: { select: { id: true, userId: true } } },
+    });
+    if (!job) throw new AppError(404, 'NOT_FOUND', 'Service job not found');
+    if (job.status !== 'COMPLETED') {
+      throw new AppError(400, 'JOB_NOT_COMPLETE', 'You can only rate completed jobs');
+    }
+
+    const isCustomer = raterId === job.customerId;
+    const isProvider = raterId === job.provider.userId;
+    if (!isCustomer && !isProvider) {
+      throw new AppError(403, 'NOT_A_PARTICIPANT', 'Only a participant in this job can rate it');
+    }
+    const type: RatingType = isCustomer ? 'CUSTOMER_TO_PROVIDER' : 'PROVIDER_TO_CUSTOMER';
+    const rateeId = isCustomer ? job.provider.userId : job.customerId;
+
+    const existing = await this.prisma.rating.findFirst({ where: { orderId: jobId, raterId, type } });
+    if (existing) throw new AppError(409, 'ALREADY_RATED', 'You have already rated this job');
+
+    const rating = await this.prisma.rating.create({
+      data: { orderId: jobId, raterId, rateeId, type, score, comment },
+    });
+    if (isCustomer) await this.updateProviderRating(job.provider.id, job.provider.userId);
+    return rating;
+  }
+
+  private async updateProviderRating(providerId: string, providerUserId: string) {
+    const agg = await this.prisma.rating.aggregate({
+      where: { rateeId: providerUserId, type: 'CUSTOMER_TO_PROVIDER' },
+      _avg: { score: true },
+      _count: true,
+    });
+    await this.prisma.serviceProvider.update({
+      where: { id: providerId },
       data: {
         averageRating: Math.round((agg._avg.score || 5) * 10) / 10,
         totalRatings: agg._count,
