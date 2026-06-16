@@ -58,10 +58,12 @@ model User {
   rider           Rider?
   driver          Driver?
   vendorOwner     VendorOwner?
+  serviceProvider ServiceProvider?
   admin           Admin?
   orders          Order[]        @relation("customerOrders")
   ratings         Rating[]       @relation("raterRatings")
   ratingsReceived Rating[]       @relation("rateeRatings")
+  serviceJobs     ServiceJob[]   @relation("customerServiceJobs")
   notifications    Notification[]
   transactions     Transaction[]
   sessions         Session[]
@@ -930,12 +932,100 @@ enum ReturnStatus {
   REFUNDED
 }
 
+// ==========================================
+// SERVICES (hire verified professionals — spec §4.6)
+// ==========================================
+
+model ServiceProvider {
+  id              String                 @id @default(cuid())
+  userId          String                 @unique
+  user            User                   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  trade           String
+  bio             String?
+  portfolioPhotos String[]
+  /// Transparency (§4.6): true until a qualification is added — shown to customers.
+  selfSkilled     Boolean                @default(true)
+  /// Listable + can accept jobs only when ID + police clearance are approved.
+  isVerified      Boolean                @default(false)
+  averageRating   Float                  @default(5)
+  totalRatings    Int                    @default(0)
+  qualifications  ServiceQualification[]
+  jobs            ServiceJob[]
+  createdAt       DateTime               @default(now())
+  updatedAt       DateTime               @updatedAt
+
+  @@index([trade])
+  @@map("service_providers")
+}
+
+model ServiceQualification {
+  id              String              @id @default(cuid())
+  providerId      String
+  provider        ServiceProvider     @relation(fields: [providerId], references: [id], onDelete: Cascade)
+  type            QualificationType
+  referenceNumber String?
+  status          QualificationStatus @default(PENDING)
+  verifiedAt      DateTime?
+  createdAt       DateTime            @default(now())
+
+  @@index([providerId])
+  @@map("service_qualifications")
+}
+
+model ServiceJob {
+  id           String           @id @default(cuid())
+  customerId   String
+  customer     User             @relation("customerServiceJobs", fields: [customerId], references: [id])
+  providerId   String
+  provider     ServiceProvider  @relation(fields: [providerId], references: [id])
+  description  String
+  photos       String[]
+  status       ServiceJobStatus @default(REQUESTED)
+  quoteAmount  Decimal?         @db.Decimal(12, 2)
+  scheduledFor DateTime?
+  chatRoomId   String?
+  completedAt  DateTime?
+  cancelledAt  DateTime?
+  createdAt    DateTime         @default(now())
+  updatedAt    DateTime         @updatedAt
+
+  @@index([customerId])
+  @@index([providerId])
+  @@index([status])
+  @@map("service_jobs")
+}
+
+enum ServiceJobStatus {
+  REQUESTED
+  QUOTED
+  SCHEDULED
+  IN_PROGRESS
+  COMPLETED
+  CANCELLED
+}
+
+enum QualificationType {
+  GEI_LICENCE
+  CVQ
+  GTEE
+  CITY_AND_GUILDS
+  OTHER
+}
+
+enum QualificationStatus {
+  PENDING
+  VERIFIED
+  REJECTED
+}
+
 enum RatingType {
   CUSTOMER_TO_VENDOR
   CUSTOMER_TO_RIDER
   CUSTOMER_TO_DRIVER
   RIDER_TO_CUSTOMER
   DRIVER_TO_CUSTOMER
+  CUSTOMER_TO_PROVIDER
+  PROVIDER_TO_CUSTOMER
 }
 
 // ==========================================
@@ -1281,7 +1371,9 @@ model ZoneFare {
 
 model ChatRoom {
   id           String                @id @default(cuid())
-  orderId      String
+  /// A chat is scoped to a transaction: an order OR a service job (spec §5.1).
+  orderId      String?
+  serviceJobId String?
   participants ChatRoomParticipant[]
   messages     ChatMessage[]
   isActive     Boolean               @default(true)
