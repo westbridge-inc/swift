@@ -512,3 +512,23 @@ describe('Phase 2 — document storage & DPA compliance', () => {
     expect(after.retentionExpiresAt!.getTime()).toBeGreaterThan(Date.now());
   });
 });
+
+describe('Phase 3 — taxi checklist merge + auto-KYC audit', () => {
+  it('a mover can submit a taxi-only document and the auto-approval is audited', async () => {
+    // hire_car_permit lives in MOVER_TAXI_EXTRA — only submittable via the merge
+    const res = await inject('POST', '/api/v1/verification/documents', {
+      role: 'MOVER',
+      docType: 'hire_car_permit',
+      fileUrl: 'storage://t/auto-approve/hire_permit.jpg',
+      consent: true,
+      privacyNoticeVersion: 'v1',
+    }, moverToken);
+    expect(res.statusCode).toBe(201);
+    expect(res.json().data.status).toBe('APPROVED');
+
+    const audit = await app.prisma.auditLog.findFirst({
+      where: { action: 'KYC_AUTO_APPROVE', entityId: res.json().data.id },
+    });
+    expect(audit).not.toBeNull();
+  });
+});
