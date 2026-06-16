@@ -14,6 +14,7 @@ import {
   Map,
   Settings,
   FileText,
+  ShieldCheck,
 } from 'lucide-react';
 
 const navItems = [
@@ -22,6 +23,7 @@ const navItems = [
   { label: 'Vendors', href: '/vendors', icon: Store },
   { label: 'Riders', href: '/riders', icon: Bike },
   { label: 'Drivers', href: '/drivers', icon: Car },
+  { label: 'Verification', href: '/verification', icon: ShieldCheck },
   { label: 'Users', href: '/users', icon: Users },
   { label: 'Finance', href: '/finance', icon: DollarSign },
   { label: 'Promos', href: '/promos', icon: Tag },
