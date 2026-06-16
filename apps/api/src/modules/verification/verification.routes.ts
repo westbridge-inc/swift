@@ -10,16 +10,25 @@ const statusQuerySchema = z.object({
   role: checklistRoleSchema.default('MOVER'),
 });
 
+// DPA §3.5: a document upload is only accepted with explicit consent and the
+// version of the privacy notice the applicant acknowledged.
+const consentFields = {
+  consent: z.literal(true),
+  privacyNoticeVersion: z.string().min(1).max(20),
+};
+
 const submitDocumentSchema = z.object({
   role: checklistRoleSchema,
   docType: z.string().min(2).max(60),
   // Storage reference from the upload service — never raw document content
   fileUrl: z.string().min(5).max(2048),
+  ...consentFields,
 });
 
 const submitIdentitySchema = z.object({
   idDocumentUrl: z.string().min(5).max(2048),
   selfieUrl: z.string().min(5).max(2048),
+  ...consentFields,
 });
 
 export async function verificationRoutes(app: FastifyInstance) {
@@ -42,6 +51,7 @@ export async function verificationRoutes(app: FastifyInstance) {
       body.role,
       body.docType,
       body.fileUrl,
+      body.privacyNoticeVersion,
     );
     reply.code(201);
     return { success: true, data: doc };
@@ -54,6 +64,7 @@ export async function verificationRoutes(app: FastifyInstance) {
       request.user.userId,
       body.idDocumentUrl,
       body.selfieUrl,
+      body.privacyNoticeVersion,
     );
     reply.code(201);
     return { success: true, data: doc };
