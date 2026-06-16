@@ -1298,21 +1298,20 @@ export async function vendorRoutes(app: FastifyInstance) {
       select: {
         placedAt: true,
         subtotalBase: true,
-        subtotalMarkup: true,
         totalAmount: true,
       },
       orderBy: { placedAt: 'asc' },
     });
 
     // Aggregate by day
-    const dailyMap = new Map<string, { date: string; orders: number; revenue: number; markup: number; total: number }>();
+    const dailyMap = new Map<string, { date: string; orders: number; revenue: number; total: number }>();
 
     // Pre-fill all days so gaps show as zero
     for (let d = 0; d < days; d++) {
       const date = new Date(since);
       date.setDate(date.getDate() + d);
       const key = date.toISOString().slice(0, 10);
-      dailyMap.set(key, { date: key, orders: 0, revenue: 0, markup: 0, total: 0 });
+      dailyMap.set(key, { date: key, orders: 0, revenue: 0, total: 0 });
     }
 
     for (const o of orders) {
@@ -1321,7 +1320,6 @@ export async function vendorRoutes(app: FastifyInstance) {
       if (entry) {
         entry.orders += 1;
         entry.revenue += Number(o.subtotalBase);
-        entry.markup += Number(o.subtotalMarkup);
         entry.total += Number(o.totalAmount);
       }
     }
@@ -1336,7 +1334,6 @@ export async function vendorRoutes(app: FastifyInstance) {
         totals: {
           orders: orders.length,
           revenue: daily.reduce((s, d) => s + d.revenue, 0),
-          markup: daily.reduce((s, d) => s + d.markup, 0),
           total: daily.reduce((s, d) => s + d.total, 0),
         },
       },
