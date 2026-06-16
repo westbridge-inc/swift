@@ -995,6 +995,8 @@ enum SubscriptionType {
   TAXI_DRIVER
   RESTAURANT
   SUPERMARKET
+  RETAIL_STORE
+  SERVICE_PROVIDER
 }
 
 enum SubscriptionStatus {
