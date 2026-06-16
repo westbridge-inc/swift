@@ -22,6 +22,7 @@ import { CashRulesService } from '../cash/cash-rules.service';
 import { OrderService } from '../order/order.service';
 import { getKycProvider } from '../../providers/kyc/kyc-provider';
 import { getPaymentProvider } from '../../providers/payment/payment-provider';
+import { getStorageProvider } from '../../providers/storage/storage-provider';
 import { parsePagination, paginatedResponse } from '../../utils/pagination';
 import { AppError, NotFoundError, ForbiddenError } from '../../utils/errors';
 
@@ -432,6 +433,9 @@ export async function adminRoutes(app: FastifyInstance) {
     await app.prisma.session.deleteMany({ where: { userId: id } });
 
     await audit(request.user.userId, 'BAN_USER', 'User', id, { reason, previousStatus: user.status }, request);
+
+    // DPA §3.5 — a banned participant has left: schedule document deletion
+    await verification.scheduleDocumentRetention(id);
 
     return { success: true, data: updated };
   });
@@ -1394,6 +1398,29 @@ export async function adminRoutes(app: FastifyInstance) {
     await audit(request.user.userId, 'REJECT_VERIFICATION_DOC', 'VerificationDocument', id, { docType: doc.docType, reason: body.reason }, request);
 
     return { success: true, data: doc };
+  });
+
+  /**
+   * Short-lived signed URL to view a verification document. Never a public link
+   * (DPA §3.5); every issuance is audit-logged as the document access trail
+   * (§3.6). Returns 410 once a document has been purged under retention.
+   */
+  app.get('/verification/:id/document-url', { preHandler: [adminGuard] }, async (request) => {
+    const { id } = request.params as { id: string };
+    const doc = await app.prisma.verificationDocument.findUnique({
+      where: { id },
+      select: { id: true, fileUrl: true, purgedAt: true, docType: true },
+    });
+    if (!doc) throw new NotFoundError('VerificationDocument', id);
+    if (doc.purgedAt || !doc.fileUrl) {
+      throw new AppError(410, 'DOCUMENT_PURGED', 'This document has been deleted under the retention policy');
+    }
+
+    const ttlSeconds = 300;
+    const url = await getStorageProvider().getSignedUrl(doc.fileUrl, ttlSeconds);
+    await audit(request.user.userId, 'VIEW_VERIFICATION_DOC', 'VerificationDocument', id, { docType: doc.docType, ttlSeconds }, request);
+
+    return { success: true, data: { url, expiresInSeconds: ttlSeconds } };
   });
 
   // ─── Cash Rules: guarantee claims + founder metrics (Step 10) ──────────

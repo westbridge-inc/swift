@@ -256,7 +256,8 @@ export function createWorkers(ctx: JobContext) {
         );
         const expired = await verification.expireLapsedDocuments();
         const reminded = await verification.sendExpiryReminders();
-        ctx.log.info(`Verification sweep: ${expired} expired, ${reminded} reminders sent`);
+        const purged = await verification.purgeExpiredDocuments();
+        ctx.log.info(`Verification sweep: ${expired} expired, ${reminded} reminders sent, ${purged} purged`);
       }
     },
     { connection, concurrency: 1 },
