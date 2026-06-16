@@ -382,6 +382,8 @@ async function main() {
     SUPERMARKET: ['owner_national_id', 'business_registration'],
     STORE: ['owner_national_id', 'business_registration'],
     SERVICE: ['owner_national_id'],
+    // Hire-a-professional providers (§4.6): ID + police clearance are mandatory.
+    SERVICE_PROVIDER: ['national_id', 'police_clearance'],
     CUSTOMER_L2: ['national_id', 'selfie'],
   };
   const guyanaTaxiRates = { base: 1000, perKm: 300, perMin: 25, minimum: 1500 };
