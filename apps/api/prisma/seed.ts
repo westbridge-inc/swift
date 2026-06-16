@@ -375,7 +375,9 @@ async function main() {
   const guyanaTiers = { mover: 12000, smallVendor: 20000, largeVendor: 30000 };
   const guyanaChecklists = {
     MOVER: ['national_id', 'drivers_licence', 'vehicle_registration', 'vehicle_insurance'],
-    MOVER_TAXI_EXTRA: ['hire_car_permit', 'vehicle_plate_photo'],
+    // Taxi drivers carry passengers — heaviest checklist: occupational permit,
+    // H-plate photo, police clearance, and an annual fitness certificate (§3.4).
+    MOVER_TAXI_EXTRA: ['hire_car_permit', 'vehicle_plate_photo', 'police_clearance', 'fitness_cert'],
     RESTAURANT: ['owner_national_id', 'business_registration', 'food_handler_cert'],
     SUPERMARKET: ['owner_national_id', 'business_registration'],
     STORE: ['owner_national_id', 'business_registration'],

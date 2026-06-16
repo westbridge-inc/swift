@@ -275,3 +275,60 @@ describe('Ride request — fare shown first, dispatch shared, PIN issued', () =>
     expect(second.json().error.code).toBe('RIDE_IN_PROGRESS');
   });
 });
+
+describe('Phase 3 — taxi live-operation gate (hire-class insurance)', () => {
+  async function setInsurance(userId: string, coverageClass: 'HIRE' | 'PRIVATE', hireClassConfirmed: boolean) {
+    await app.prisma.verificationDocument.create({
+      data: {
+        userId,
+        role: 'MOVER',
+        docType: 'vehicle_insurance',
+        fileUrl: 'storage://t/ins.jpg',
+        status: 'APPROVED',
+        coverageClass,
+        hireClassConfirmed,
+        consentAt: new Date(),
+        privacyNoticeVersion: 'v1',
+      },
+    });
+  }
+
+  async function offlineDriver() {
+    const d = await makeDriver();
+    await app.prisma.driver.update({ where: { id: d.driverId }, data: { isOnline: false } });
+    return d;
+  }
+
+  it('blocks go-online with no hire-class insurance on file', async () => {
+    const d = await offlineDriver();
+    const res = await inject('POST', '/api/v1/driver/go-online', {}, d.token);
+    expect(res.statusCode).toBe(403);
+    expect(res.json().error.code).toBe('INSURANCE_HIRE_CLASS_REQUIRED');
+  });
+
+  it('blocks go-online when the policy is PRIVATE class', async () => {
+    const d = await offlineDriver();
+    await setInsurance(d.userId, 'PRIVATE', false);
+    const res = await inject('POST', '/api/v1/driver/go-online', {}, d.token);
+    expect(res.statusCode).toBe(403);
+    expect(res.json().error.code).toBe('INSURANCE_HIRE_CLASS_REQUIRED');
+  });
+
+  it('allows go-online with a confirmed HIRE-class policy + active subscription', async () => {
+    const d = await offlineDriver();
+    await setInsurance(d.userId, 'HIRE', true);
+    await app.prisma.subscription.create({
+      data: {
+        driverId: d.driverId,
+        type: 'TAXI_DRIVER',
+        status: 'ACTIVE',
+        weeklyRate: 12000,
+        currentPeriodStart: new Date(),
+        currentPeriodEnd: new Date(Date.now() + 7 * DAY),
+        nextBillingDate: new Date(Date.now() + 7 * DAY),
+      },
+    });
+    const res = await inject('POST', '/api/v1/driver/go-online', {}, d.token);
+    expect(res.statusCode).toBe(200);
+  });
+});
