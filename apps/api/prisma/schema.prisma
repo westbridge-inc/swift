@@ -692,6 +692,14 @@ model Order {
   courierPackageSize        PackageSize?
   courierPackageWeight      Float?
   courierPackagePhotoUrl    String?
+  /// Courier (spec §4.3): third-party recipient, speed, who pays, proof-of-delivery,
+  /// and a public tracking token for the recipient's link.
+  courierRecipientName  String?
+  courierRecipientPhone String?
+  courierSpeed          String?
+  courierPayer          String?
+  courierProofPhotoUrl  String?
+  courierTrackingToken  String? @unique
 
   taxiPickupAddress  String?
   taxiDropoffAddress String?
