@@ -3,6 +3,7 @@ import { AppError, NotFoundError } from '../../utils/errors';
 import { CountryConfigService } from '../country/country-config.service';
 import { NotificationService } from '../notification/notification.service';
 import type { KycProvider } from '../../providers/kyc/kyc-provider';
+import { getStorageProvider } from '../../providers/storage/storage-provider';
 
 /** Checklist keys come from CountryConfig.documentChecklists. */
 export type ChecklistRole = 'MOVER' | 'RESTAURANT' | 'SUPERMARKET' | 'STORE' | 'SERVICE';
@@ -27,7 +28,13 @@ export class VerificationService {
   // Submission
   // -------------------------------------------------------------------------
 
-  async submitDocument(userId: string, roleKey: ChecklistRole, docType: string, fileUrl: string) {
+  async submitDocument(
+    userId: string,
+    roleKey: ChecklistRole,
+    docType: string,
+    fileUrl: string,
+    privacyNoticeVersion: string,
+  ) {
     const user = await this.prisma.user.findUnique({
       where: { id: userId },
       select: { id: true, countryCode: true },
@@ -60,6 +67,8 @@ export class VerificationService {
         docType,
         fileUrl,
         kycRef: result.referenceToken,
+        consentAt: new Date(),
+        privacyNoticeVersion,
         status:
           result.status === 'approved' ? 'APPROVED'
           : result.status === 'rejected' ? 'REJECTED'
@@ -76,7 +85,12 @@ export class VerificationService {
   }
 
   /** L2 customer verification: ID + selfie. Approval is permanent. */
-  async submitIdentity(userId: string, idDocumentUrl: string, selfieUrl: string) {
+  async submitIdentity(
+    userId: string,
+    idDocumentUrl: string,
+    selfieUrl: string,
+    privacyNoticeVersion: string,
+  ) {
     const user = await this.prisma.user.findUnique({ where: { id: userId }, select: { id: true, trustLevel: true } });
     if (!user) throw new NotFoundError('User', userId);
     if (user.trustLevel !== 'L1') {
@@ -92,6 +106,8 @@ export class VerificationService {
         docType: IDENTITY_DOC_TYPE,
         fileUrl: idDocumentUrl,
         kycRef: result.referenceToken,
+        consentAt: new Date(),
+        privacyNoticeVersion,
         status:
           result.status === 'approved' ? 'APPROVED'
           : result.status === 'rejected' ? 'REJECTED'
@@ -275,6 +291,49 @@ export class VerificationService {
     }
 
     return sent;
+  }
+
+  // -------------------------------------------------------------------------
+  // Retention (DPA §3.5 — delete documents after a participant leaves)
+  // -------------------------------------------------------------------------
+
+  /** Schedule a leaving participant's documents for deletion after the
+   *  country's retention window. Idempotent; skips already-purged rows. */
+  async scheduleDocumentRetention(userId: string): Promise<number> {
+    const user = await this.prisma.user.findUnique({
+      where: { id: userId },
+      select: { countryCode: true },
+    });
+    if (!user) return 0;
+
+    const config = await this.countryConfig.getByCode(user.countryCode);
+    const deleteAt = new Date(Date.now() + config.dataRetentionDays * 24 * 60 * 60 * 1000);
+
+    const res = await this.prisma.verificationDocument.updateMany({
+      where: { userId, purgedAt: null },
+      data: { retentionExpiresAt: deleteAt },
+    });
+    return res.count;
+  }
+
+  /** Purge documents whose retention window elapsed: delete the stored object,
+   *  clear the fileKey, and leave an auditable purgedAt marker. Daily job. */
+  async purgeExpiredDocuments(): Promise<number> {
+    const due = await this.prisma.verificationDocument.findMany({
+      where: { retentionExpiresAt: { lt: new Date() }, purgedAt: null },
+      select: { id: true, fileUrl: true },
+    });
+    if (due.length === 0) return 0;
+
+    const storage = getStorageProvider();
+    for (const doc of due) {
+      if (doc.fileUrl) await storage.delete(doc.fileUrl).catch(() => undefined);
+      await this.prisma.verificationDocument.update({
+        where: { id: doc.id },
+        data: { purgedAt: new Date(), fileUrl: '' },
+      });
+    }
+    return due.length;
   }
 
   // -------------------------------------------------------------------------
