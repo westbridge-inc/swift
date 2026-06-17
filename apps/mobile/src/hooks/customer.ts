@@ -51,11 +51,12 @@ export function useOrders<T = any>() {
   return useQuery<T>({ queryKey: customerKeys.orders, queryFn: () => unwrap<T>(customerApi.getOrders()) });
 }
 
-export function useOrder<T = any>(id: string) {
+export function useOrder<T = any>(id: string, refetchInterval?: number) {
   return useQuery<T>({
     queryKey: customerKeys.order(id),
     queryFn: () => unwrap<T>(customerApi.getOrder(id)),
     enabled: !!id,
+    refetchInterval,
   });
 }
 
