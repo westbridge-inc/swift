@@ -12,7 +12,7 @@ const AnimatedPressable = Animated.createAnimatedComponent(Pressable);
 const VERTICALS: Array<{ key: string; label: string; emoji: string; route?: string }> = [
   { key: 'food', label: 'Food', emoji: '🍛', route: 'Search' },
   { key: 'grocery', label: 'Groceries', emoji: '🛒', route: 'Search' },
-  { key: 'taxi', label: 'Taxi', emoji: '🚖' },
+  { key: 'taxi', label: 'Taxi', emoji: '🚖', route: 'Taxi' },
   { key: 'courier', label: 'Courier', emoji: '📦', route: 'Courier' },
   { key: 'shops', label: 'Shops', emoji: '🛍️', route: 'Search' },
   { key: 'services', label: 'Services', emoji: '🛠️' },
