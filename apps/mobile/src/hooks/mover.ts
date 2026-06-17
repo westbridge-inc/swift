@@ -1,5 +1,7 @@
+import { useEffect, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { riderApi, driverApi } from '../services/api';
+import { connectSocket, getSocket } from '../services/socket';
 
 async function unwrap<T = any>(p: Promise<any>): Promise<T> {
   const r = await p;
@@ -88,4 +90,49 @@ export function useRiderAction() {
       action === 'handover' ? unwrap(riderApi.handover(id)) : unwrap(riderApi.delivered(id)),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['mover'] }),
   });
+}
+
+export interface DispatchOffer {
+  orderId: string;
+  orderNumber?: string;
+  vendorName?: string;
+  expiresInSeconds?: number;
+  etaMinutes?: number;
+}
+
+/**
+ * Real-time dispatch offers. The backend emits `dispatch:offer` to the mover's
+ * user room the moment they're the top candidate; we surface it instantly and
+ * refresh the available list. Polling (useAvailableJobs) stays as a fallback,
+ * so a missed socket event still resolves within the poll interval.
+ */
+export function useDispatchOffers(kind: MoverKind | null, online: boolean) {
+  const qc = useQueryClient();
+  const [offer, setOffer] = useState<DispatchOffer | null>(null);
+
+  useEffect(() => {
+    if (!kind || !online) {
+      setOffer(null);
+      return;
+    }
+    connectSocket();
+    const s = getSocket();
+    const onOffer = (data: DispatchOffer) => {
+      setOffer(data);
+      qc.invalidateQueries({ queryKey: ['mover', 'available', kind] });
+    };
+    s.on('dispatch:offer', onOffer);
+    return () => {
+      s.off('dispatch:offer', onOffer);
+    };
+  }, [kind, online, qc]);
+
+  // Auto-dismiss once the offer window lapses (the backend reassigns it).
+  useEffect(() => {
+    if (!offer?.expiresInSeconds) return;
+    const t = setTimeout(() => setOffer(null), offer.expiresInSeconds * 1000);
+    return () => clearTimeout(t);
+  }, [offer]);
+
+  return { offer, dismiss: () => setOffer(null) };
 }
