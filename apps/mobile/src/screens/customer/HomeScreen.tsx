@@ -15,7 +15,7 @@ const VERTICALS: Array<{ key: string; label: string; emoji: string; route?: stri
   { key: 'taxi', label: 'Taxi', emoji: '🚖', route: 'Taxi' },
   { key: 'courier', label: 'Courier', emoji: '📦', route: 'Courier' },
   { key: 'shops', label: 'Shops', emoji: '🛍️', route: 'Search' },
-  { key: 'services', label: 'Services', emoji: '🛠️' },
+  { key: 'services', label: 'Services', emoji: '🛠️', route: 'Services' },
 ];
 
 function VerticalCard({ label, emoji, onPress }: { label: string; emoji: string; onPress?: () => void }) {
