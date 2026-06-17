@@ -19,6 +19,7 @@ export const customerKeys = {
   vendor: (id: string) => ['customer', 'vendor', id] as const,
   orders: ['customer', 'orders'] as const,
   order: (id: string) => ['customer', 'order', id] as const,
+  cart: (lat?: number, lng?: number) => ['customer', 'cart', lat ?? null, lng ?? null] as const,
   notifications: ['customer', 'notifications'] as const,
 };
 
@@ -71,6 +72,72 @@ export function usePlaceOrder<T = any>() {
     mutationFn: (payload: any) => unwrap<T>(customerApi.placeOrder(payload)),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: customerKeys.orders });
+      qc.invalidateQueries({ queryKey: ['customer', 'cart'] });
     },
+  });
+}
+
+// --- Cart ---------------------------------------------------------------------
+
+export function useCart<T = any>(lat?: number, lng?: number) {
+  return useQuery<T>({ queryKey: customerKeys.cart(lat, lng), queryFn: () => unwrap<T>(customerApi.getCart(lat, lng)) });
+}
+
+function invalidateCart(qc: ReturnType<typeof useQueryClient>) {
+  qc.invalidateQueries({ queryKey: ['customer', 'cart'] });
+}
+
+export function useAddToCart() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (data: {
+      vendorId: string;
+      itemId: string;
+      quantity?: number;
+      selectedOptions?: Record<string, unknown>;
+      specialInstructions?: string;
+    }) => unwrap(customerApi.addToCart(data)),
+    onSuccess: () => invalidateCart(qc),
+  });
+}
+
+export function useUpdateCartItem() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, quantity }: { id: string; quantity: number }) =>
+      unwrap(customerApi.updateCartItem(id, { quantity })),
+    onSuccess: () => invalidateCart(qc),
+  });
+}
+
+export function useRemoveCartItem() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (id: string) => unwrap(customerApi.removeCartItem(id)),
+    onSuccess: () => invalidateCart(qc),
+  });
+}
+
+export function useClearCart() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: () => unwrap(customerApi.clearCart()),
+    onSuccess: () => invalidateCart(qc),
+  });
+}
+
+export function useSetCartAddress() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (addressId: string) => unwrap(customerApi.setCartAddress(addressId)),
+    onSuccess: () => invalidateCart(qc),
+  });
+}
+
+export function useSetCartTip() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (amount: number) => unwrap(customerApi.setCartTip(amount)),
+    onSuccess: () => invalidateCart(qc),
   });
 }
