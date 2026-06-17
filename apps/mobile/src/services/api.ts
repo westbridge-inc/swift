@@ -134,3 +134,12 @@ export const courierApi = {
   get: (id: string) => api.get(`/courier/order/${id}`),
   cancel: (id: string, reason?: string) => api.post(`/courier/order/${id}/cancel`, { reason }),
 };
+
+// Services (mounted at /api/v1/services)
+export const servicesApi = {
+  providers: (trade: string) => api.get('/services/providers', { params: { trade } }),
+  requestJob: (data: { providerId: string; description: string; photos?: string[] }) =>
+    api.post('/services/jobs', data),
+  jobs: () => api.get('/services/jobs'),
+  job: (id: string) => api.get(`/services/jobs/${id}`),
+};
