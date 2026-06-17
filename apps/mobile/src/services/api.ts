@@ -95,3 +95,19 @@ export const customerApi = {
   setCartAddress: (addressId: string) => api.put('/customer/cart/address', { addressId }),
   setCartTip: (amount: number) => api.put('/customer/cart/tip', { amount }),
 };
+
+// Taxi / rides (mounted at /api/v1/rides)
+type Point = { lat: number; lng: number };
+export const rideApi = {
+  estimate: (pickup: Point, dropoff: Point) => api.post('/rides/estimate', { pickup, dropoff }),
+  request: (data: {
+    pickup: Point;
+    dropoff: Point;
+    pickupAddress: string;
+    dropoffAddress: string;
+    passengerCount?: number;
+  }) => api.post('/rides/request', data),
+  active: () => api.get('/rides/active'),
+  get: (id: string) => api.get(`/rides/${id}`),
+  cancel: (id: string, reason?: string) => api.post(`/rides/${id}/cancel`, { reason }),
+};
