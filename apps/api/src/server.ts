@@ -15,6 +15,7 @@ import { verificationRoutes } from './modules/verification/verification.routes';
 import { ridesRoutes } from './modules/rides/rides.routes';
 import courierRoutes from './modules/courier/courier.routes';
 import { servicesRoutes } from './modules/services/services.routes';
+import { partnerRoutes } from './modules/partner/partner.routes';
 import { aiRoutes } from './modules/ai/ai.routes';
 import { prismaPlugin } from './plugins/prisma';
 import { authPlugin } from './plugins/auth';
@@ -120,6 +121,7 @@ async function buildApp() {
   await app.register(ridesRoutes, { prefix: '/api/v1/rides' });
   await app.register(courierRoutes, { prefix: '/api/v1/courier' });
   await app.register(servicesRoutes, { prefix: '/api/v1/services' });
+  await app.register(partnerRoutes, { prefix: '/api/v1/partner' });
   await app.register(aiRoutes, { prefix: '/api/v1/ai' });
 
   // Background job queues
