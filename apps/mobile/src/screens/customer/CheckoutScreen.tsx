@@ -154,7 +154,16 @@ export function CheckoutScreen({ navigation }: any) {
 
       <View className="absolute inset-x-0 bottom-0 border-t border-border-subtle bg-surface-base px-lg pb-2xl pt-md">
         {placeOrder.isError ? (
-          <Text className="mb-sm text-center text-sm text-error">Couldn&apos;t place order. Please try again.</Text>
+          (placeOrder.error as any)?.response?.data?.code === 'ID_VERIFICATION_REQUIRED' ? (
+            <View className="mb-sm">
+              <Text className="mb-sm text-center text-sm text-text-secondary">
+                {(placeOrder.error as any)?.response?.data?.message ?? 'This order needs ID verification.'}
+              </Text>
+              <Button label="Verify your ID" variant="outline" onPress={() => navigation?.navigate?.('IdentityVerification')} />
+            </View>
+          ) : (
+            <Text className="mb-sm text-center text-sm text-error">Couldn&apos;t place order. Please try again.</Text>
+          )
         ) : null}
         <Button disabled={placeOrder.isPending || list.length === 0 || !effectiveAddressId} onPress={onPlace}>
           <Text className="font-body font-semibold text-white">
