@@ -1,4 +1,5 @@
 import type { PrismaClient, UserRole } from '@prisma/client';
+import { nanoid } from 'nanoid';
 import { AppError, ValidationError } from '../../utils/errors';
 
 // ---------------------------------------------------------------------------
@@ -6,17 +7,36 @@ import { AppError, ValidationError } from '../../utils/errors';
 // the role to User.roles[] but creates no operational entity; the rider/driver/
 // vendor routes 404 until one exists. This module creates that entity self-serve
 // at onboarding-submit, feeding the existing admin-approve → startTrial →
-// go-online pipeline. Rider provisions minimally; a Driver needs vehicle details
-// (licence/insurance URLs arrive during onboarding — documentsVerified, not URL
-// presence, gates go-online).
+// go-online pipeline. Rider provisions minimally; Driver needs vehicle details;
+// Vendor needs business details (all collected during onboarding).
 // ---------------------------------------------------------------------------
 
 export type Vehicle = { make: string; model: string; year: number; color: string; licensePlate: string };
+export type VendorType = 'RESTAURANT' | 'SUPERMARKET' | 'STORE' | 'SERVICE';
+export type Business = {
+  name: string;
+  vendorType: VendorType;
+  phone: string;
+  addressLine1: string;
+  city: string;
+  region?: string;
+  latitude: number;
+  longitude: number;
+};
 
 export interface BecomePartnerInput {
-  role: 'MOVER';
-  vehicleType: 'BICYCLE' | 'MOTORCYCLE' | 'CAR';
+  role: 'MOVER' | 'VENDOR';
+  vehicleType?: 'BICYCLE' | 'MOTORCYCLE' | 'CAR';
   vehicle?: Vehicle;
+  business?: Business;
+}
+
+function slugify(name: string): string {
+  return name
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 40);
 }
 
 export class PartnerService {
@@ -26,6 +46,10 @@ export class PartnerService {
     const user = await this.prisma.user.findUnique({ where: { id: userId }, select: { id: true, roles: true } });
     if (!user) throw new AppError(404, 'USER_NOT_FOUND', 'User not found');
 
+    if (input.role === 'VENDOR') {
+      return this.provisionVendor(user.id, user.roles, input.business);
+    }
+    if (!input.vehicleType) throw new ValidationError('Vehicle type is required to move with Swift');
     return input.vehicleType === 'CAR'
       ? this.provisionDriver(user.id, user.roles, input.vehicle)
       : this.provisionRider(user.id, user.roles, input.vehicleType);
@@ -69,5 +93,35 @@ export class PartnerService {
       }));
     const updatedRoles = await this.ensureRoles(userId, roles, ['MOVER', 'DRIVER']);
     return { kind: 'DRIVER' as const, id: driver.id, created: !existing, roles: updatedRoles };
+  }
+
+  private async provisionVendor(userId: string, roles: UserRole[], business?: Business) {
+    if (!business) throw new ValidationError('Business details are required to sell on Swift');
+    const owner = await this.prisma.vendorOwner.upsert({ where: { userId }, create: { userId }, update: {} });
+
+    // One store per owner at onboarding (idempotent).
+    const existing = await this.prisma.vendor.findFirst({ where: { ownerId: owner.id } });
+    if (existing) {
+      const updatedRoles = await this.ensureRoles(userId, roles, ['VENDOR_OWNER']);
+      return { kind: 'VENDOR' as const, id: existing.id, created: false, roles: updatedRoles };
+    }
+
+    const vendor = await this.prisma.vendor.create({
+      data: {
+        ownerId: owner.id,
+        name: business.name,
+        slug: `${slugify(business.name) || 'store'}-${nanoid(6)}`,
+        vendorType: business.vendorType,
+        phone: business.phone,
+        addressLine1: business.addressLine1,
+        city: business.city,
+        region: business.region ?? '',
+        latitude: business.latitude,
+        longitude: business.longitude,
+        status: 'PENDING_APPROVAL',
+      },
+    });
+    const updatedRoles = await this.ensureRoles(userId, roles, ['VENDOR_OWNER']);
+    return { kind: 'VENDOR' as const, id: vendor.id, created: true, roles: updatedRoles };
   }
 }

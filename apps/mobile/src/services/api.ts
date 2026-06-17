@@ -170,9 +170,19 @@ export const verificationApi = {
 // Partner provisioning (mounted at /api/v1/partner)
 export const partnerApi = {
   become: (data: {
-    role: 'MOVER';
-    vehicleType: 'BICYCLE' | 'MOTORCYCLE' | 'CAR';
+    role: 'MOVER' | 'VENDOR';
+    vehicleType?: 'BICYCLE' | 'MOTORCYCLE' | 'CAR';
     vehicle?: { make: string; model: string; year: number; color: string; licensePlate: string };
+    business?: {
+      name: string;
+      vendorType: 'RESTAURANT' | 'SUPERMARKET' | 'STORE' | 'SERVICE';
+      phone: string;
+      addressLine1: string;
+      city: string;
+      region?: string;
+      latitude: number;
+      longitude: number;
+    };
   }) => api.post('/partner/become', data),
 };
 
@@ -205,4 +215,18 @@ export const driverApi = {
   start: (id: string) => api.put(`/driver/rides/${id}/start`),
   complete: (id: string) => api.put(`/driver/rides/${id}/complete`),
   earningsToday: () => api.get('/driver/earnings/today'),
+};
+
+// Vendor ops (mounted at /api/v1/vendor)
+export const vendorApi = {
+  profile: () => api.get('/vendor/profile'),
+  toggleOpen: () => api.put('/vendor/vendor/toggle-open'),
+  toggleOrders: () => api.put('/vendor/vendor/toggle-orders'),
+  orders: () => api.get('/vendor/orders'),
+  acceptOrder: (id: string) => api.put(`/vendor/orders/${id}/accept`),
+  preparing: (id: string) => api.put(`/vendor/orders/${id}/preparing`),
+  ready: (id: string) => api.put(`/vendor/orders/${id}/ready`),
+  reject: (id: string) => api.put(`/vendor/orders/${id}/reject`),
+  items: () => api.get('/vendor/items'),
+  subscription: () => api.get('/vendor/subscription'),
 };
