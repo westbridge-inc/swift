@@ -60,3 +60,45 @@ export function useOrderAction() {
     onSuccess: () => qc.invalidateQueries({ queryKey: ['vendor', 'orders'] }),
   });
 }
+
+// ─── Menu ────────────────────────────────────────────────────────────────────
+
+/** Categories with their nested items (the menu, grouped by section). */
+export function useVendorMenu() {
+  return useQuery({ queryKey: ['vendor', 'menu'], queryFn: () => unwrap<any[]>(vendorApi.categories()) });
+}
+
+export function useCreateCategory() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (data: { name: string }) => unwrap(vendorApi.createCategory(data)),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['vendor', 'menu'] }),
+  });
+}
+
+/** Create (no id) or update (id present) an item. */
+export function useSaveItem() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, data }: { id?: string; data: any }) =>
+      id ? unwrap(vendorApi.updateItem(id, data)) : unwrap(vendorApi.createItem(data)),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['vendor', 'menu'] }),
+  });
+}
+
+export function useDeleteItem() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (id: string) => unwrap(vendorApi.deleteItem(id)),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['vendor', 'menu'] }),
+  });
+}
+
+export function useSetItemAvailability() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, isAvailable }: { id: string; isAvailable: boolean }) =>
+      unwrap(vendorApi.setItemAvailability(id, isAvailable)),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['vendor', 'menu'] }),
+  });
+}

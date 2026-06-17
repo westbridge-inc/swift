@@ -1,12 +1,23 @@
 import React, { useState } from 'react';
-import { View, ScrollView, Pressable, TextInput } from 'react-native';
+import { View, ScrollView, Pressable, TextInput, Alert } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
 import { color } from '@swift/ui';
 import { Text, Heading, Card, Button, Spinner, Badge } from '../components/ui';
 import { DocumentChecklist } from '../components/onboarding/DocumentChecklist';
 import { useBecomePartner, useVerificationStatus } from '../hooks/verification';
-import { useVendorProfile, useVendorOrders, useToggleOpen, useToggleOrders, useOrderAction } from '../hooks/vendorops';
+import {
+  useVendorProfile,
+  useVendorOrders,
+  useToggleOpen,
+  useToggleOrders,
+  useOrderAction,
+  useVendorMenu,
+  useCreateCategory,
+  useSaveItem,
+  useDeleteItem,
+  useSetItemAvailability,
+} from '../hooks/vendorops';
 import { useAuthStore } from '../stores/authStore';
 import { useLocationStore } from '../stores/locationStore';
 import { money } from '../lib/money';
@@ -119,7 +130,7 @@ function orderActions(status: string): { label: string; action: 'accept' | 'prep
   return [];
 }
 
-function VendorOps({ store }: { store: any }) {
+function VendorOps({ store, navigation }: any) {
   const toggleOpen = useToggleOpen();
   const toggleOrders = useToggleOrders();
   const orderAction = useOrderAction();
@@ -146,6 +157,13 @@ function VendorOps({ store }: { store: any }) {
             <Button label={accepting ? 'Pause orders' : 'Resume orders'} variant="outline" className="flex-1" disabled={toggleOrders.isPending} onPress={() => toggleOrders.mutate()} />
           </View>
         </Card>
+
+        <Button
+          label="Manage menu"
+          variant="outline"
+          className="mb-md"
+          onPress={() => navigation.navigate('VendorMenu')}
+        />
 
         <Heading size="lg" className="mb-sm mt-md">
           Incoming orders
@@ -187,7 +205,7 @@ function VendorOps({ store }: { store: any }) {
   );
 }
 
-function VendorRoot() {
+function VendorRoot({ navigation }: any) {
   const { store, isLoading } = useVendorProfile();
 
   if (isLoading) {
@@ -201,13 +219,275 @@ function VendorRoot() {
   }
   if (!store) return <BusinessSetup />;
   if (store.status !== 'ACTIVE') return <VendorOnboarding store={store} />;
-  return <VendorOps store={store} />;
+  return <VendorOps store={store} navigation={navigation} />;
+}
+
+// ─── Menu management ─────────────────────────────────────────────────────────
+
+function SubHeader({
+  title,
+  navigation,
+  action,
+}: {
+  title: string;
+  navigation: any;
+  action?: { label: string; onPress: () => void; disabled?: boolean };
+}) {
+  return (
+    <View className="flex-row items-center justify-between px-lg py-sm">
+      <Pressable onPress={() => navigation.goBack()} hitSlop={8}>
+        <Text className="text-base font-semibold text-brand-600">‹ Back</Text>
+      </Pressable>
+      <Heading size="lg" className="flex-1 px-md text-center" numberOfLines={1}>
+        {title}
+      </Heading>
+      {action ? (
+        <Pressable onPress={action.onPress} disabled={action.disabled} hitSlop={8}>
+          <Text className={action.disabled ? 'text-base text-text-muted' : 'text-base font-semibold text-brand-600'}>
+            {action.label}
+          </Text>
+        </Pressable>
+      ) : (
+        <View style={{ width: 48 }} />
+      )}
+    </View>
+  );
+}
+
+function MenuItemRow({
+  item,
+  navigation,
+  categories,
+}: {
+  item: any;
+  navigation: any;
+  categories: { id: string; name: string }[];
+}) {
+  const setAvail = useSetItemAvailability();
+  const del = useDeleteItem();
+  const available = item.isAvailable !== false;
+
+  const confirmDelete = () =>
+    Alert.alert('Delete item', `Remove "${item.name}" from your menu?`, [
+      { text: 'Cancel', style: 'cancel' },
+      { text: 'Delete', style: 'destructive', onPress: () => del.mutate(item.id) },
+    ]);
+
+  return (
+    <Card className="mb-sm">
+      <View className="flex-row items-center justify-between">
+        <View className="flex-1 pr-md">
+          <Text className="text-base font-semibold" numberOfLines={1}>
+            {item.name}
+          </Text>
+          <Text className="mt-xs text-sm text-text-secondary">{money(item.basePrice)}</Text>
+        </View>
+        <Pressable
+          onPress={() => setAvail.mutate({ id: item.id, isAvailable: !available })}
+          disabled={setAvail.isPending}
+          hitSlop={6}
+          className={
+            available
+              ? 'rounded-full bg-success/10 px-3 py-1'
+              : 'rounded-full border border-border-subtle bg-surface-base px-3 py-1'
+          }
+        >
+          <Text className={available ? 'text-xs font-semibold text-success' : 'text-xs font-semibold text-text-muted'}>
+            {available ? 'Available' : 'Sold out'}
+          </Text>
+        </Pressable>
+      </View>
+      <View className="mt-sm flex-row" style={{ gap: 8 }}>
+        <Button
+          label="Edit"
+          variant="outline"
+          className="flex-1"
+          onPress={() => navigation.navigate('VendorItemEditor', { item, categories })}
+        />
+        <Button
+          label={del.isPending ? 'Removing…' : 'Delete'}
+          variant="outline"
+          className="flex-1"
+          disabled={del.isPending}
+          onPress={confirmDelete}
+        />
+      </View>
+    </Card>
+  );
+}
+
+function VendorMenuScreen({ navigation }: any) {
+  const menuQ = useVendorMenu();
+  const createCategory = useCreateCategory();
+  const [newCat, setNewCat] = useState('');
+  const categories: any[] = menuQ.data ?? [];
+  const catOptions = categories.map((c) => ({ id: c.id, name: c.name }));
+
+  const addCategory = () => {
+    const name = newCat.trim();
+    if (name.length < 1) return;
+    createCategory.mutate({ name }, { onSuccess: () => setNewCat('') });
+  };
+
+  return (
+    <SafeAreaView style={{ flex: 1 }} edges={['top']} className="bg-surface-base">
+      <SubHeader
+        title="Menu"
+        navigation={navigation}
+        action={
+          catOptions.length > 0
+            ? { label: '+ Item', onPress: () => navigation.navigate('VendorItemEditor', { categories: catOptions }) }
+            : undefined
+        }
+      />
+      {menuQ.isLoading ? (
+        <View className="flex-1 items-center justify-center">
+          <Spinner size="large" />
+        </View>
+      ) : (
+        <ScrollView className="flex-1" contentContainerStyle={{ paddingHorizontal: 16, paddingBottom: 32 }} showsVerticalScrollIndicator={false}>
+          <Card className="mb-md">
+            <Text className="mb-xs text-sm font-semibold text-text-secondary">New category</Text>
+            <View className="flex-row items-center" style={{ gap: 8 }}>
+              <TextInput
+                value={newCat}
+                onChangeText={setNewCat}
+                placeholder="e.g. Mains, Drinks"
+                placeholderTextColor={color.text.muted}
+                className="flex-1 rounded-lg border border-border-subtle bg-surface-base px-lg py-md font-body text-base text-text-primary"
+              />
+              <Button label="Add" disabled={newCat.trim().length < 1 || createCategory.isPending} onPress={addCategory} />
+            </View>
+          </Card>
+
+          {categories.length === 0 ? (
+            <Text className="mt-lg text-center text-text-secondary">Add a category to start building your menu.</Text>
+          ) : (
+            categories.map((cat) => (
+              <View key={cat.id} className="mb-md">
+                <Heading size="lg" className="mb-sm">
+                  {cat.name}
+                </Heading>
+                {(cat.items ?? []).length === 0 ? (
+                  <Text className="mb-sm text-sm text-text-muted">No items yet.</Text>
+                ) : (
+                  cat.items.map((it: any) => (
+                    <MenuItemRow key={it.id} item={it} navigation={navigation} categories={catOptions} />
+                  ))
+                )}
+              </View>
+            ))
+          )}
+        </ScrollView>
+      )}
+    </SafeAreaView>
+  );
+}
+
+function VendorItemEditorScreen({ navigation, route }: any) {
+  const existing = route.params?.item;
+  const categories: { id: string; name: string }[] = route.params?.categories ?? [];
+  const save = useSaveItem();
+  const [name, setName] = useState<string>(existing?.name ?? '');
+  const [price, setPrice] = useState<string>(existing ? String(existing.basePrice ?? '') : '');
+  const [description, setDescription] = useState<string>(existing?.description ?? '');
+  const [categoryId, setCategoryId] = useState<string>(existing?.categoryId ?? categories[0]?.id ?? '');
+  const [available, setAvailable] = useState<boolean>(existing ? existing.isAvailable !== false : true);
+  const [popular, setPopular] = useState<boolean>(!!existing?.isPopular);
+
+  const priceNum = Number(price);
+  const valid = name.trim().length >= 1 && Number.isFinite(priceNum) && priceNum >= 0 && !!categoryId;
+
+  const submit = () => {
+    if (!valid) return;
+    save.mutate(
+      {
+        id: existing?.id,
+        data: {
+          categoryId,
+          name: name.trim(),
+          description: description.trim() || undefined,
+          basePrice: priceNum,
+          isAvailable: available,
+          isPopular: popular,
+        },
+      },
+      { onSuccess: () => navigation.goBack() },
+    );
+  };
+
+  return (
+    <SafeAreaView style={{ flex: 1 }} edges={['top']} className="bg-surface-base">
+      <SubHeader title={existing ? 'Edit item' : 'New item'} navigation={navigation} />
+      <ScrollView className="flex-1" contentContainerStyle={{ paddingHorizontal: 16, paddingBottom: 32 }} showsVerticalScrollIndicator={false}>
+        <TextInput value={name} onChangeText={setName} placeholder="Item name" placeholderTextColor={color.text.muted} className={FIELD} />
+        <TextInput
+          value={price}
+          onChangeText={setPrice}
+          placeholder="Price (GYD)"
+          placeholderTextColor={color.text.muted}
+          keyboardType="decimal-pad"
+          className={FIELD}
+        />
+        <TextInput
+          value={description}
+          onChangeText={setDescription}
+          placeholder="Description (optional)"
+          placeholderTextColor={color.text.muted}
+          multiline
+          className={FIELD}
+        />
+
+        <Text className="mb-xs mt-sm text-sm font-semibold text-text-secondary">Category</Text>
+        <View className="mb-md flex-row flex-wrap" style={{ gap: 8 }}>
+          {categories.map((c) => {
+            const active = c.id === categoryId;
+            return (
+              <Pressable
+                key={c.id}
+                onPress={() => setCategoryId(c.id)}
+                className={active ? 'rounded-lg border border-brand-500 bg-brand-50 px-lg py-sm' : 'rounded-lg border border-border-subtle px-lg py-sm'}
+              >
+                <Text className={active ? 'text-sm font-semibold text-brand-600' : 'text-sm text-text-secondary'}>{c.name}</Text>
+              </Pressable>
+            );
+          })}
+        </View>
+
+        <View className="mb-md flex-row" style={{ gap: 8 }}>
+          <Pressable
+            onPress={() => setAvailable((v) => !v)}
+            className={available ? 'rounded-lg border border-brand-500 bg-brand-50 px-lg py-sm' : 'rounded-lg border border-border-subtle px-lg py-sm'}
+          >
+            <Text className={available ? 'text-sm font-semibold text-brand-600' : 'text-sm text-text-secondary'}>
+              {available ? 'Available' : 'Sold out'}
+            </Text>
+          </Pressable>
+          <Pressable
+            onPress={() => setPopular((v) => !v)}
+            className={popular ? 'rounded-lg border border-brand-500 bg-brand-50 px-lg py-sm' : 'rounded-lg border border-border-subtle px-lg py-sm'}
+          >
+            <Text className={popular ? 'text-sm font-semibold text-brand-600' : 'text-sm text-text-secondary'}>★ Popular</Text>
+          </Pressable>
+        </View>
+
+        {save.isError ? <Text className="mb-sm text-sm text-error">Couldn&apos;t save. Check the details and try again.</Text> : null}
+        <Button
+          label={save.isPending ? 'Saving…' : existing ? 'Save changes' : 'Add item'}
+          disabled={!valid || save.isPending}
+          onPress={submit}
+        />
+      </ScrollView>
+    </SafeAreaView>
+  );
 }
 
 export function VendorStack() {
   return (
     <Stack.Navigator screenOptions={{ headerShown: false }}>
       <Stack.Screen name="VendorRoot" component={VendorRoot} />
+      <Stack.Screen name="VendorMenu" component={VendorMenuScreen} />
+      <Stack.Screen name="VendorItemEditor" component={VendorItemEditorScreen} />
     </Stack.Navigator>
   );
 }
