@@ -3,6 +3,8 @@ import { z } from 'zod';
 import { VerificationService } from './verification.service';
 import { NotificationService } from '../notification/notification.service';
 import { getKycProvider } from '../../providers/kyc/kyc-provider';
+import { getStorageProvider } from '../../providers/storage/storage-provider';
+import { AppError } from '../../utils/errors';
 
 const checklistRoleSchema = z.enum(['MOVER', 'RESTAURANT', 'SUPERMARKET', 'STORE', 'SERVICE']);
 
@@ -55,6 +57,25 @@ export async function verificationRoutes(app: FastifyInstance) {
     );
     reply.code(201);
     return { success: true, data: doc };
+  });
+
+  /** POST /upload — store one document file behind the StorageProvider; returns the fileUrl. */
+  app.post('/upload', auth, async (request) => {
+    const file = await request.file();
+    if (!file) throw new AppError(400, 'NO_FILE', 'Attach a document file');
+    const allowed = new Set(['image/jpeg', 'image/png', 'image/webp', 'application/pdf']);
+    if (!allowed.has(file.mimetype)) {
+      throw new AppError(400, 'BAD_TYPE', 'Only JPEG, PNG, WebP or PDF files are accepted');
+    }
+    const buffer = await file.toBuffer();
+    const storage = getStorageProvider();
+    const { url } = await storage.upload({
+      buffer,
+      filename: file.filename,
+      mimeType: file.mimetype,
+      folder: `verification/${request.user.userId}`,
+    });
+    return { success: true, data: { url } };
   });
 
   /** POST /identity — L2 flow: government ID + selfie. Permanent once approved. */
