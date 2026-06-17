@@ -50,8 +50,15 @@ api.interceptors.response.use(
 export const authApi = {
   sendOtp: (phone: string) => api.post('/auth/send-otp', { phone }),
   verifyOtp: (phone: string, code: string) => api.post('/auth/verify-otp', { phone, code }),
-  register: (data: { phone: string; firstName: string; lastName: string; email?: string }) =>
-    api.post('/auth/register', data),
+  countries: () => api.get('/auth/countries'),
+  register: (data: {
+    phone: string;
+    firstName: string;
+    lastName: string;
+    email?: string;
+    role?: 'CUSTOMER' | 'MOVER' | 'VENDOR';
+    countryCode?: string;
+  }) => api.post('/auth/register', data),
   refresh: (refreshToken: string) => api.post('/auth/refresh', { refreshToken }),
   logout: () => api.post('/auth/logout'),
 };
@@ -60,6 +67,7 @@ export const authApi = {
 export const customerApi = {
   getProfile: () => api.get('/customer/profile'),
   updateProfile: (data: { firstName?: string; lastName?: string }) => api.put('/customer/profile', data),
+  switchRole: (role: string) => api.post('/customer/switch-role', { role }),
   getAddresses: () => api.get('/customer/addresses'),
   addAddress: (data: any) => api.post('/customer/addresses', data),
   getHome: (lat?: number, lng?: number) => api.get('/customer/home', { params: { lat, lng } }),

@@ -1,67 +1,59 @@
-import React, { useState } from 'react';
-import { View, Text, TextInput, TouchableOpacity, StyleSheet, SafeAreaView } from 'react-native';
+import { useState } from 'react';
+import { View, TextInput } from 'react-native';
+import { SafeAreaView } from 'react-native-safe-area-context';
+import { color } from '@swift/ui';
 import { authApi } from '../../services/api';
-import { SWIFT_ORANGE, SWIFT_BLACK } from '../../theme/colors';
+import { Text, Heading, Button } from '../../components/ui';
 
 export function PhoneEntryScreen({ navigation }: any) {
   const [phone, setPhone] = useState('');
   const [loading, setLoading] = useState(false);
+  const [error, setError] = useState(false);
 
   const handleSendOtp = async () => {
     setLoading(true);
+    setError(false);
     try {
-      await authApi.sendOtp(`+592${phone}`);
-      navigation.navigate('OtpVerification', { phone: `+592${phone}` });
+      const full = `+592${phone}`;
+      await authApi.sendOtp(full);
+      navigation.navigate('OtpVerification', { phone: full });
     } catch {
-      // Handle error
+      setError(true);
     } finally {
       setLoading(false);
     }
   };
 
   return (
-    <SafeAreaView style={styles.container}>
-      <View style={styles.content}>
-        <Text style={styles.logo}>swift</Text>
-        <Text style={styles.title}>Enter your phone number</Text>
-        <Text style={styles.subtitle}>We'll send you a verification code</Text>
-        <View style={styles.inputRow}>
-          <View style={styles.countryCode}>
-            <Text style={styles.countryCodeText}>+592</Text>
+    <SafeAreaView style={{ flex: 1 }} edges={['top', 'bottom']} className="bg-surface-base">
+      <View className="flex-1 justify-center px-lg">
+        <Heading size="3xl" className="text-center text-brand-500">
+          swift
+        </Heading>
+        <Heading size="xl" className="mt-2xl text-center">
+          Enter your phone number
+        </Heading>
+        <Text className="mt-xs text-center text-text-secondary">We&apos;ll text you a verification code.</Text>
+        <View className="mt-xl flex-row" style={{ gap: 12 }}>
+          <View className="items-center justify-center rounded-lg border border-border-subtle bg-surface-subtle px-lg">
+            <Text className="text-base font-semibold">+592</Text>
           </View>
           <TextInput
-            style={styles.input}
-            placeholder="Phone number"
-            placeholderTextColor="#8E8E93"
-            keyboardType="phone-pad"
             value={phone}
-            onChangeText={setPhone}
+            onChangeText={(t) => {
+              setPhone(t);
+              setError(false);
+            }}
+            placeholder="Phone number"
+            placeholderTextColor={color.text.muted}
+            keyboardType="phone-pad"
             autoFocus
+            className="flex-1 rounded-lg border border-border-subtle bg-surface-base px-lg py-md font-body text-lg text-text-primary"
           />
         </View>
-        <TouchableOpacity
-          style={[styles.button, !phone && styles.buttonDisabled]}
-          onPress={handleSendOtp}
-          disabled={!phone || loading}
-        >
-          <Text style={styles.buttonText}>{loading ? 'Sending...' : 'Continue'}</Text>
-        </TouchableOpacity>
+        {error ? <Text className="mt-sm text-center text-sm text-error">Couldn&apos;t send the code. Try again.</Text> : null}
+        <Button label={loading ? 'Sending…' : 'Continue'} className="mt-xl" disabled={!phone || loading} onPress={handleSendOtp} />
       </View>
     </SafeAreaView>
   );
 }
-
-const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: SWIFT_BLACK },
-  content: { flex: 1, padding: 24, justifyContent: 'center' },
-  logo: { fontSize: 48, fontWeight: '700', color: SWIFT_ORANGE, textAlign: 'center', marginBottom: 40 },
-  title: { fontSize: 24, fontWeight: '700', color: '#FFF', textAlign: 'center' },
-  subtitle: { fontSize: 16, color: '#8E8E93', textAlign: 'center', marginTop: 8, marginBottom: 32 },
-  inputRow: { flexDirection: 'row', gap: 12, marginBottom: 24 },
-  countryCode: { backgroundColor: '#1C1C1E', borderRadius: 12, padding: 16, justifyContent: 'center' },
-  countryCodeText: { color: '#FFF', fontSize: 16 },
-  input: { flex: 1, backgroundColor: '#1C1C1E', borderRadius: 12, padding: 16, color: '#FFF', fontSize: 18 },
-  button: { backgroundColor: SWIFT_ORANGE, borderRadius: 12, padding: 18, alignItems: 'center' },
-  buttonDisabled: { opacity: 0.5 },
-  buttonText: { color: '#FFF', fontSize: 16, fontWeight: '600' },
-});
