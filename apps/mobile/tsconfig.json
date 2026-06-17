@@ -5,10 +5,23 @@
     "module": "ESNext",
     "moduleResolution": "bundler",
     "jsx": "react-jsx",
-    "lib": ["ES2022"],
-    "types": ["react-native"],
-    "paths": { "@/*": ["./src/*"] }
+    "lib": [
+      "ES2022"
+    ],
+    "types": [
+      "react-native"
+    ],
+    "paths": {
+      "@/*": [
+        "./src/*"
+      ]
+    }
   },
-  "include": ["src"],
-  "exclude": ["node_modules"]
+  "include": [
+    "src",
+    "nativewind-env.d.ts"
+  ],
+  "exclude": [
+    "node_modules"
+  ]
 }
