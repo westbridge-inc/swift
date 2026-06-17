@@ -152,3 +152,26 @@ export const servicesApi = {
   jobs: () => api.get('/services/jobs'),
   job: (id: string) => api.get(`/services/jobs/${id}`),
 };
+
+// Verification (mounted at /api/v1/verification)
+export const verificationApi = {
+  status: (role: string) => api.get('/verification/status', { params: { role } }),
+  upload: (form: FormData) =>
+    api.post('/verification/upload', form, { headers: { 'Content-Type': 'multipart/form-data' } }),
+  submitDocument: (data: {
+    role: string;
+    docType: string;
+    fileUrl: string;
+    consent: true;
+    privacyNoticeVersion: string;
+  }) => api.post('/verification/documents', data),
+};
+
+// Partner provisioning (mounted at /api/v1/partner)
+export const partnerApi = {
+  become: (data: {
+    role: 'MOVER';
+    vehicleType: 'BICYCLE' | 'MOTORCYCLE' | 'CAR';
+    vehicle?: { make: string; model: string; year: number; color: string; licensePlate: string };
+  }) => api.post('/partner/become', data),
+};
