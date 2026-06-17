@@ -10,6 +10,7 @@ import { VendorDetailScreen } from '../screens/customer/VendorDetailScreen';
 import { CartScreen } from '../screens/customer/CartScreen';
 import { CheckoutScreen } from '../screens/customer/CheckoutScreen';
 import { OrderTrackingScreen } from '../screens/customer/OrderTrackingScreen';
+import { TaxiScreen } from '../screens/customer/TaxiScreen';
 import { color } from '@swift/ui';
 
 const Tab = createBottomTabNavigator();
@@ -42,6 +43,7 @@ export function CustomerStack() {
       <Stack.Screen name="Cart" component={CartScreen} />
       <Stack.Screen name="Checkout" component={CheckoutScreen} />
       <Stack.Screen name="OrderTracking" component={OrderTrackingScreen} />
+      <Stack.Screen name="Taxi" component={TaxiScreen} />
     </Stack.Navigator>
   );
 }
