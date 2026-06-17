@@ -8,12 +8,23 @@
     "userInterfaceStyle": "light",
     "newArchEnabled": true,
     "backgroundColor": "#FFFFFF",
-    "splash": { "backgroundColor": "#FFFFFF", "resizeMode": "contain" },
-    "ios": { "bundleIdentifier": "gy.swift.app", "supportsTablet": true },
+    "splash": {
+      "backgroundColor": "#FFFFFF",
+      "resizeMode": "contain"
+    },
+    "ios": {
+      "bundleIdentifier": "gy.swift.app",
+      "supportsTablet": true
+    },
     "android": {
       "package": "gy.swift.app",
-      "adaptiveIcon": { "backgroundColor": "#FFFFFF" }
+      "adaptiveIcon": {
+        "backgroundColor": "#FFFFFF"
+      }
     },
-    "plugins": ["expo-font"]
+    "plugins": [
+      "expo-font",
+      "expo-splash-screen"
+    ]
   }
 }

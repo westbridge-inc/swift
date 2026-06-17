@@ -1,0 +1,76 @@
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { customerApi } from '../services/api';
+
+/**
+ * Thin React Query wrappers over `customerApi`. Every consumer screen reads data
+ * through these so loading / error / refetch / caching behave consistently.
+ * The API envelopes payloads as `{ success, data }`; hooks unwrap to inner `data`.
+ */
+async function unwrap<T = any>(p: Promise<any>): Promise<T> {
+  const res = await p;
+  return res?.data?.data as T;
+}
+
+export const customerKeys = {
+  profile: ['customer', 'profile'] as const,
+  addresses: ['customer', 'addresses'] as const,
+  home: (lat?: number, lng?: number) => ['customer', 'home', lat ?? null, lng ?? null] as const,
+  vendors: (params?: Record<string, string>) => ['customer', 'vendors', params ?? {}] as const,
+  vendor: (id: string) => ['customer', 'vendor', id] as const,
+  orders: ['customer', 'orders'] as const,
+  order: (id: string) => ['customer', 'order', id] as const,
+  notifications: ['customer', 'notifications'] as const,
+};
+
+export function useProfile<T = any>() {
+  return useQuery<T>({ queryKey: customerKeys.profile, queryFn: () => unwrap<T>(customerApi.getProfile()) });
+}
+
+export function useAddresses<T = any>() {
+  return useQuery<T>({ queryKey: customerKeys.addresses, queryFn: () => unwrap<T>(customerApi.getAddresses()) });
+}
+
+export function useHome<T = any>(lat?: number, lng?: number) {
+  return useQuery<T>({ queryKey: customerKeys.home(lat, lng), queryFn: () => unwrap<T>(customerApi.getHome(lat, lng)) });
+}
+
+export function useVendors<T = any>(params?: Record<string, string>) {
+  return useQuery<T>({ queryKey: customerKeys.vendors(params), queryFn: () => unwrap<T>(customerApi.getVendors(params)) });
+}
+
+export function useVendor<T = any>(id: string) {
+  return useQuery<T>({
+    queryKey: customerKeys.vendor(id),
+    queryFn: () => unwrap<T>(customerApi.getVendor(id)),
+    enabled: !!id,
+  });
+}
+
+export function useOrders<T = any>() {
+  return useQuery<T>({ queryKey: customerKeys.orders, queryFn: () => unwrap<T>(customerApi.getOrders()) });
+}
+
+export function useOrder<T = any>(id: string) {
+  return useQuery<T>({
+    queryKey: customerKeys.order(id),
+    queryFn: () => unwrap<T>(customerApi.getOrder(id)),
+    enabled: !!id,
+  });
+}
+
+export function useNotifications<T = any>() {
+  return useQuery<T>({
+    queryKey: customerKeys.notifications,
+    queryFn: () => unwrap<T>(customerApi.getNotifications()),
+  });
+}
+
+export function usePlaceOrder<T = any>() {
+  const qc = useQueryClient();
+  return useMutation<T, unknown, any>({
+    mutationFn: (payload: any) => unwrap<T>(customerApi.placeOrder(payload)),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: customerKeys.orders });
+    },
+  });
+}
