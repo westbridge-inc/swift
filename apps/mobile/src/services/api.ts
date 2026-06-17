@@ -175,3 +175,34 @@ export const partnerApi = {
     vehicle?: { make: string; model: string; year: number; color: string; licensePlate: string };
   }) => api.post('/partner/become', data),
 };
+
+// Mover ops — Rider (delivery/courier), mounted at /api/v1/rider
+export const riderApi = {
+  profile: () => api.get('/rider/profile'),
+  goOnline: () => api.post('/rider/go-online'),
+  goOffline: () => api.post('/rider/go-offline'),
+  location: (latitude: number, longitude: number) => api.put('/rider/location', { latitude, longitude }),
+  available: () => api.get('/rider/orders/available'),
+  active: () => api.get('/rider/orders/active'),
+  accept: (id: string) => api.post(`/rider/orders/${id}/accept`),
+  handover: (id: string) => api.post(`/rider/orders/${id}/handover`),
+  delivered: (id: string) => api.put(`/rider/orders/${id}/delivered`),
+  earningsToday: () => api.get('/rider/earnings/today'),
+};
+
+// Mover ops — Driver (taxi), mounted at /api/v1/driver
+export const driverApi = {
+  profile: () => api.get('/driver/profile'),
+  goOnline: () => api.post('/driver/go-online'),
+  goOffline: () => api.post('/driver/go-offline'),
+  location: (latitude: number, longitude: number) => api.put('/driver/location', { latitude, longitude }),
+  available: () => api.get('/driver/rides/available'),
+  active: () => api.get('/driver/rides/active'),
+  accept: (id: string) => api.post(`/driver/rides/${id}/accept`),
+  enRoute: (id: string) => api.put(`/driver/rides/${id}/en-route`),
+  arrived: (id: string) => api.put(`/driver/rides/${id}/arrived`),
+  verifyPin: (id: string, pin: string) => api.put(`/driver/rides/${id}/verify-pin`, { pin }),
+  start: (id: string) => api.put(`/driver/rides/${id}/start`),
+  complete: (id: string) => api.put(`/driver/rides/${id}/complete`),
+  earningsToday: () => api.get('/driver/earnings/today'),
+};
