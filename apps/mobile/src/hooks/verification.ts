@@ -19,11 +19,25 @@ export function useBecomePartner() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: (data: {
-      role: 'MOVER';
-      vehicleType: 'BICYCLE' | 'MOTORCYCLE' | 'CAR';
+      role: 'MOVER' | 'VENDOR';
+      vehicleType?: 'BICYCLE' | 'MOTORCYCLE' | 'CAR';
       vehicle?: { make: string; model: string; year: number; color: string; licensePlate: string };
+      business?: {
+        name: string;
+        vendorType: 'RESTAURANT' | 'SUPERMARKET' | 'STORE' | 'SERVICE';
+        phone: string;
+        addressLine1: string;
+        city: string;
+        region?: string;
+        latitude: number;
+        longitude: number;
+      };
     }) => unwrap(partnerApi.become(data)),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['verification'] }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['verification'] });
+      qc.invalidateQueries({ queryKey: ['vendor'] });
+      qc.invalidateQueries({ queryKey: ['mover'] });
+    },
   });
 }
 
