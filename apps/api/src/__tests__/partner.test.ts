@@ -14,13 +14,15 @@ import { requestOtp } from './helpers/otp';
 // Unique phone prefix per file (parallel-test gotcha).
 const BIKE_PHONE = '+59200199001';
 const CAR_PHONE = '+59200199002';
+const VENDOR_PHONE = '+59200199003';
 
 let app: FastifyInstance;
 let bikeToken = '';
 let carToken = '';
+let vendorToken = '';
 
 async function cleanup() {
-  await app.prisma.user.deleteMany({ where: { phone: { in: [BIKE_PHONE, CAR_PHONE] } } });
+  await app.prisma.user.deleteMany({ where: { phone: { in: [BIKE_PHONE, CAR_PHONE, VENDOR_PHONE] } } });
 }
 
 async function signupCustomer(phone: string): Promise<string> {
@@ -70,11 +72,12 @@ beforeAll(async () => {
   await app.ready();
 
   await cleanup();
-  for (const p of [BIKE_PHONE, CAR_PHONE]) {
+  for (const p of [BIKE_PHONE, CAR_PHONE, VENDOR_PHONE]) {
     await app.redis.del(`otp:${p}`, `otp_rate:${p}`, `otp_attempt:${p}`, `otp_verified:${p}`);
   }
   bikeToken = await signupCustomer(BIKE_PHONE);
   carToken = await signupCustomer(CAR_PHONE);
+  vendorToken = await signupCustomer(VENDOR_PHONE);
 });
 
 afterAll(async () => {
@@ -137,5 +140,40 @@ describe('partner provisioning — happy paths', () => {
     const user = await app.prisma.user.findUnique({ where: { phone: BIKE_PHONE }, select: { roles: true } });
     expect(user?.roles.filter((r) => r === 'MOVER')).toHaveLength(1);
     expect(user?.roles).toContain('RIDER');
+  });
+});
+
+describe('vendor provisioning', () => {
+  const business = {
+    name: 'Test Roti Shop',
+    vendorType: 'RESTAURANT',
+    phone: '+5926009999',
+    addressLine1: '1 Main St',
+    city: 'Georgetown',
+    latitude: 6.8,
+    longitude: -58.16,
+  };
+
+  it('rejects a vendor with no business details', async () => {
+    const res = await post('/api/v1/partner/become', { role: 'VENDOR' }, vendorToken);
+    expect(res.statusCode).toBe(400);
+  });
+
+  it('provisions a Vendor store (PENDING_APPROVAL) + VENDOR_OWNER role', async () => {
+    const res = await post('/api/v1/partner/become', { role: 'VENDOR', business }, vendorToken);
+    expect(res.statusCode).toBe(201);
+    expect(JSON.parse(res.body).data.kind).toBe('VENDOR');
+    const vendor = await app.prisma.vendor.findFirst({ where: { owner: { user: { phone: VENDOR_PHONE } } } });
+    expect(vendor?.status).toBe('PENDING_APPROVAL');
+    const user = await app.prisma.user.findUnique({ where: { phone: VENDOR_PHONE }, select: { roles: true } });
+    expect(user?.roles).toContain('VENDOR_OWNER');
+  });
+
+  it('is idempotent — one store per owner', async () => {
+    const res = await post('/api/v1/partner/become', { role: 'VENDOR', business }, vendorToken);
+    expect(res.statusCode).toBe(200);
+    expect(JSON.parse(res.body).data.created).toBe(false);
+    const count = await app.prisma.vendor.count({ where: { owner: { user: { phone: VENDOR_PHONE } } } });
+    expect(count).toBe(1);
   });
 });

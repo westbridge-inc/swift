@@ -4,3 +4,4 @@ export * from './courier';
 export * from './services';
 export * from './verification';
 export * from './mover';
+export * from './vendorops';
