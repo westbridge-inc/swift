@@ -12,6 +12,7 @@ import {
   useMoverKind,
   useEarningsToday,
   useAvailableJobs,
+  useDispatchOffers,
   useActiveJob,
   useGoOnline,
   useGoOffline,
@@ -143,6 +144,7 @@ function MoverOps({ navigation }: any) {
   const active = useActiveJob(kind);
   const online = !!profile?.isOnline;
   const available = useAvailableJobs(kind, online);
+  const { offer, dismiss } = useDispatchOffers(kind, online);
 
   if (loading || !kind) {
     return (
@@ -185,6 +187,29 @@ function MoverOps({ navigation }: any) {
           disabled={goOnline.isPending || goOffline.isPending}
           onPress={() => (online ? goOffline.mutate() : goOnline.mutate())}
         />
+
+        {offer && online && !activeJob ? (
+          <Card className="mb-md border-brand-500 bg-brand-50">
+            <Text className="text-xs font-semibold text-brand-600">
+              New {kind === 'DRIVER' ? 'ride' : 'delivery'} offer
+            </Text>
+            <Text className="mt-xs text-base font-semibold" numberOfLines={1}>
+              {offer.vendorName ?? offer.orderNumber ?? 'Job nearby'}
+            </Text>
+            {offer.etaMinutes != null ? (
+              <Text className="mt-xs text-sm text-text-secondary">~{offer.etaMinutes} min to pickup</Text>
+            ) : null}
+            <View className="mt-sm flex-row" style={{ gap: 8 }}>
+              <Button
+                label={accept.isPending ? 'Accepting…' : 'Accept'}
+                className="flex-1"
+                disabled={accept.isPending}
+                onPress={() => accept.mutate(offer.orderId, { onSuccess: dismiss })}
+              />
+              <Button label="Dismiss" variant="outline" className="flex-1" onPress={dismiss} />
+            </View>
+          </Card>
+        ) : null}
 
         {activeJob ? (
           <Pressable onPress={() => navigation?.navigate?.('ActiveJob')}>
