@@ -77,6 +77,7 @@ export const customerApi = {
     promoCode?: string;
   }) => api.post('/customer/checkout', data),
   getNotifications: () => api.get('/customer/notifications'),
+  reorder: (id: string) => api.post(`/customer/orders/${id}/reorder`, {}),
   // Cart
   getCart: (lat?: number, lng?: number) => api.get('/customer/cart', { params: { lat, lng } }),
   addToCart: (data: {
