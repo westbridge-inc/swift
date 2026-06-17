@@ -220,6 +220,15 @@ export const driverApi = {
 };
 
 // Vendor ops (mounted at /api/v1/vendor)
+export interface VendorItemInput {
+  categoryId: string;
+  name: string;
+  description?: string;
+  basePrice: number;
+  isAvailable?: boolean;
+  isPopular?: boolean;
+}
+
 export const vendorApi = {
   profile: () => api.get('/vendor/profile'),
   toggleOpen: () => api.put('/vendor/vendor/toggle-open'),
@@ -231,4 +240,12 @@ export const vendorApi = {
   reject: (id: string) => api.put(`/vendor/orders/${id}/reject`),
   items: () => api.get('/vendor/items'),
   subscription: () => api.get('/vendor/subscription'),
+  // Menu management
+  categories: () => api.get('/vendor/categories'),
+  createCategory: (data: { name: string; description?: string }) => api.post('/vendor/categories', data),
+  createItem: (data: VendorItemInput) => api.post('/vendor/items', data),
+  updateItem: (id: string, data: Partial<VendorItemInput>) => api.put(`/vendor/items/${id}`, data),
+  deleteItem: (id: string) => api.delete(`/vendor/items/${id}`),
+  setItemAvailability: (id: string, isAvailable: boolean) =>
+    api.put(`/vendor/items/${id}/availability`, { isAvailable }),
 };
