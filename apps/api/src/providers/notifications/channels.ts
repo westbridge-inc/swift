@@ -70,12 +70,46 @@ const devChannels: NotificationChannels = {
   email: new DevEmail(),
 };
 
+/**
+ * Twilio SMS adapter (OTP + alerts). Dependency-free: posts to Twilio's REST API
+ * with Node's global fetch. Credentials are env-only (hard rule: no secrets in code).
+ */
+class TwilioSmsProvider implements SmsProvider {
+  private sid = process.env['TWILIO_ACCOUNT_SID'] ?? '';
+  private token = process.env['TWILIO_AUTH_TOKEN'] ?? '';
+  private from = process.env['TWILIO_FROM'] ?? '';
+
+  constructor() {
+    if (!this.sid || !this.token || !this.from) {
+      throw new Error('TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN and TWILIO_FROM are required for the twilio provider');
+    }
+  }
+
+  async sendSms(to: string, body: string): Promise<{ ref: string }> {
+    const auth = Buffer.from(`${this.sid}:${this.token}`).toString('base64');
+    const res = await fetch(`https://api.twilio.com/2010-04-01/Accounts/${this.sid}/Messages.json`, {
+      method: 'POST',
+      headers: { Authorization: `Basic ${auth}`, 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({ To: to, From: this.from, Body: body }).toString(),
+    });
+    if (!res.ok) {
+      const detail = await res.text().catch(() => '');
+      throw new Error(`Twilio SMS failed (${res.status}): ${detail.slice(0, 200)}`);
+    }
+    const data = (await res.json()) as { sid?: string };
+    return { ref: data.sid ?? 'twilio_unknown' };
+  }
+}
+
 /** Provider selection is config, not code. */
 export function getChannels(): NotificationChannels {
   const provider = process.env['NOTIFICATION_PROVIDER'] ?? 'dev';
   switch (provider) {
     case 'dev':
       return devChannels;
+    case 'twilio':
+      // SMS via Twilio (OTP/alerts); push + email stay on dev until FCM/SES adapters land.
+      return { sms: new TwilioSmsProvider(), push: new DevPush(), email: new DevEmail() };
     default:
       throw new Error(`Unknown NOTIFICATION_PROVIDER: ${provider}`);
   }
