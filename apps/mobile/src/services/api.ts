@@ -111,3 +111,26 @@ export const rideApi = {
   get: (id: string) => api.get(`/rides/${id}`),
   cancel: (id: string, reason?: string) => api.post(`/rides/${id}/cancel`, { reason }),
 };
+
+// Courier (mounted at /api/v1/courier)
+type CourierSize = 'SMALL' | 'MEDIUM' | 'LARGE' | 'EXTRA_LARGE';
+type CourierSpeed = 'STANDARD' | 'EXPRESS' | 'RUSH';
+export const courierApi = {
+  estimate: (data: { pickup: Point; dropoff: Point; packageSize: CourierSize; speed: CourierSpeed }) =>
+    api.post('/courier/estimate', data),
+  order: (data: {
+    pickup: Point;
+    dropoff: Point;
+    pickupAddress: string;
+    dropoffAddress: string;
+    packageSize: CourierSize;
+    packageDescription?: string;
+    speed: CourierSpeed;
+    recipientName: string;
+    recipientPhone: string;
+    payer?: 'SENDER' | 'RECIPIENT';
+  }) => api.post('/courier/order', data),
+  orders: () => api.get('/courier/orders'),
+  get: (id: string) => api.get(`/courier/order/${id}`),
+  cancel: (id: string, reason?: string) => api.post(`/courier/order/${id}/cancel`, { reason }),
+};
