@@ -41,6 +41,28 @@ export function useBecomePartner() {
   });
 }
 
+/** Upload a single picked file to storage; resolves to its fileUrl. */
+export function useUploadFile() {
+  return useMutation({
+    mutationFn: async (file: { uri: string; name: string; type: string }) => {
+      const form = new FormData();
+      form.append('file', { uri: file.uri, name: file.name, type: file.type } as any);
+      const up = await unwrap<{ url: string }>(verificationApi.upload(form));
+      return up.url;
+    },
+  });
+}
+
+/** Consumer L2: submit a government ID + selfie (manual KYC review). */
+export function useSubmitIdentity() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (data: { idDocumentUrl: string; selfieUrl: string }) =>
+      unwrap(verificationApi.submitIdentity({ ...data, consent: true, privacyNoticeVersion: PRIVACY_NOTICE_VERSION })),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['verification'] }),
+  });
+}
+
 /** Upload a picked file to storage, then submit it as a checklist document. */
 export function useUploadDocument(role: string) {
   const qc = useQueryClient();

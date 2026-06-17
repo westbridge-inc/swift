@@ -165,6 +165,8 @@ export const verificationApi = {
     consent: true;
     privacyNoticeVersion: string;
   }) => api.post('/verification/documents', data),
+  submitIdentity: (data: { idDocumentUrl: string; selfieUrl: string; consent: true; privacyNoticeVersion: string }) =>
+    api.post('/verification/identity', data),
 };
 
 // Partner provisioning (mounted at /api/v1/partner)
