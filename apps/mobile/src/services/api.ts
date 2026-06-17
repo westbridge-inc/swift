@@ -67,6 +67,31 @@ export const customerApi = {
   getVendor: (id: string) => api.get(`/customer/vendors/${id}`),
   getOrders: () => api.get('/customer/orders'),
   getOrder: (id: string) => api.get(`/customer/orders/${id}`),
-  placeOrder: (data: any) => api.post('/customer/orders', data),
+  // Order placement = checkout; it reads the server-side cart. (The old POST
+  // /customer/orders had no backend route.)
+  placeOrder: (data: {
+    paymentMethod?: string;
+    deliveryInstructions?: string;
+    tipAmount?: number;
+    scheduledFor?: string;
+    promoCode?: string;
+  }) => api.post('/customer/checkout', data),
   getNotifications: () => api.get('/customer/notifications'),
+  // Cart
+  getCart: (lat?: number, lng?: number) => api.get('/customer/cart', { params: { lat, lng } }),
+  addToCart: (data: {
+    vendorId: string;
+    itemId: string;
+    quantity?: number;
+    selectedOptions?: Record<string, unknown>;
+    specialInstructions?: string;
+  }) => api.post('/customer/cart/items', data),
+  updateCartItem: (
+    id: string,
+    data: { quantity: number; selectedOptions?: Record<string, unknown>; specialInstructions?: string },
+  ) => api.put(`/customer/cart/items/${id}`, data),
+  removeCartItem: (id: string) => api.delete(`/customer/cart/items/${id}`),
+  clearCart: () => api.delete('/customer/cart'),
+  setCartAddress: (addressId: string) => api.put('/customer/cart/address', { addressId }),
+  setCartTip: (amount: number) => api.put('/customer/cart/tip', { amount }),
 };

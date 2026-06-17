@@ -8,6 +8,7 @@ import { CourierScreen } from '../screens/customer/CourierScreen';
 import { AccountScreen } from '../screens/shared/AccountScreen';
 import { VendorDetailScreen } from '../screens/customer/VendorDetailScreen';
 import { CartScreen } from '../screens/customer/CartScreen';
+import { CheckoutScreen } from '../screens/customer/CheckoutScreen';
 import { OrderTrackingScreen } from '../screens/customer/OrderTrackingScreen';
 import { color } from '@swift/ui';
 
@@ -39,6 +40,7 @@ export function CustomerStack() {
       <Stack.Screen name="Tabs" component={HomeTabs} />
       <Stack.Screen name="VendorDetail" component={VendorDetailScreen} />
       <Stack.Screen name="Cart" component={CartScreen} />
+      <Stack.Screen name="Checkout" component={CheckoutScreen} />
       <Stack.Screen name="OrderTracking" component={OrderTrackingScreen} />
     </Stack.Navigator>
   );
