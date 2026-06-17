@@ -817,7 +817,7 @@ enum PaymentMethod {
   MOBILE_MONEY
   BANK_TRANSFER
   CARD
-  WALLET
+  WALLET // V1 dormant — wallet surface removed; reserved for Part C BaaS. No customer path emits this.
 }
 
 enum PaymentStatus {

@@ -4,30 +4,12 @@ import { createNativeStackNavigator } from '@react-navigation/native-stack';
 import { useAuthStore } from '../stores/authStore';
 import { AuthStack } from './AuthStack';
 import { CustomerStack } from './CustomerStack';
-import { RiderStack } from './RiderStack';
-import { DriverStack } from './DriverStack';
-import { VendorStack } from './VendorStack';
-import { UserRole } from '@swift/types';
 
 const Stack = createNativeStackNavigator();
 
-function getRoleStack(role: UserRole) {
-  switch (role) {
-    case UserRole.CUSTOMER:
-      return CustomerStack;
-    case UserRole.RIDER:
-      return RiderStack;
-    case UserRole.DRIVER:
-      return DriverStack;
-    case UserRole.VENDOR_OWNER:
-      return VendorStack;
-    default:
-      return CustomerStack;
-  }
-}
-
+// Swift consumer app: customers only. Mover/vendor apps are separate surfaces.
 export function RootNavigator() {
-  const { isAuthenticated, user } = useAuthStore();
+  const { isAuthenticated } = useAuthStore();
 
   return (
     <NavigationContainer>
@@ -35,10 +17,7 @@ export function RootNavigator() {
         {!isAuthenticated ? (
           <Stack.Screen name="Auth" component={AuthStack} />
         ) : (
-          <Stack.Screen
-            name="Main"
-            component={getRoleStack(user?.activeRole as UserRole)}
-          />
+          <Stack.Screen name="Main" component={CustomerStack} />
         )}
       </Stack.Navigator>
     </NavigationContainer>

@@ -9,7 +9,7 @@ import { AccountScreen } from '../screens/shared/AccountScreen';
 import { VendorDetailScreen } from '../screens/customer/VendorDetailScreen';
 import { CartScreen } from '../screens/customer/CartScreen';
 import { OrderTrackingScreen } from '../screens/customer/OrderTrackingScreen';
-import { SWIFT_ORANGE } from '../theme/colors';
+import { SWIFT_ORANGE, colors } from '../theme/colors';
 
 const Tab = createBottomTabNavigator();
 const Stack = createNativeStackNavigator();
@@ -20,8 +20,8 @@ function HomeTabs() {
       screenOptions={{
         headerShown: false,
         tabBarActiveTintColor: SWIFT_ORANGE,
-        tabBarInactiveTintColor: '#8E8E93',
-        tabBarStyle: { backgroundColor: '#1C1C1E', borderTopColor: '#38383A' },
+        tabBarInactiveTintColor: colors.light.text.tertiary,
+        tabBarStyle: { backgroundColor: colors.light.background.primary, borderTopColor: colors.light.border.default },
       }}
     >
       <Tab.Screen name="Home" component={HomeScreen} options={{ tabBarLabel: 'Home' }} />

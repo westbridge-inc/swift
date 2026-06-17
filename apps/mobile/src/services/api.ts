@@ -69,45 +69,4 @@ export const customerApi = {
   getOrder: (id: string) => api.get(`/customer/orders/${id}`),
   placeOrder: (data: any) => api.post('/customer/orders', data),
   getNotifications: () => api.get('/customer/notifications'),
-  getWallet: () => api.get('/customer/wallet'),
-};
-
-// Rider
-export const riderApi = {
-  getProfile: () => api.get('/rider/profile'),
-  goOnline: () => api.post('/rider/go-online'),
-  goOffline: () => api.post('/rider/go-offline'),
-  updateLocation: (lat: number, lng: number) => api.put('/rider/location', { latitude: lat, longitude: lng }),
-  getAvailableOrders: () => api.get('/rider/orders/available'),
-  acceptOrder: (id: string) => api.post(`/rider/orders/${id}/accept`),
-  markDelivered: (id: string) => api.put(`/rider/orders/${id}/delivered`),
-  getEarnings: () => api.get('/rider/earnings'),
-  getTodayEarnings: () => api.get('/rider/earnings/today'),
-  getSubscription: () => api.get('/rider/subscription'),
-};
-
-// Driver
-export const driverApi = {
-  getProfile: () => api.get('/driver/profile'),
-  goOnline: () => api.post('/driver/go-online'),
-  goOffline: () => api.post('/driver/go-offline'),
-  updateLocation: (lat: number, lng: number) => api.put('/driver/location', { latitude: lat, longitude: lng }),
-  getAvailableRides: () => api.get('/driver/rides/available'),
-  acceptRide: (id: string) => api.post(`/driver/rides/${id}/accept`),
-  completeRide: (id: string) => api.put(`/driver/rides/${id}/complete`),
-  getEarnings: () => api.get('/driver/earnings'),
-  getSubscription: () => api.get('/driver/subscription'),
-};
-
-// Vendor
-export const vendorApi = {
-  getProfile: () => api.get('/vendor/profile'),
-  getOrders: () => api.get('/vendor/orders'),
-  acceptOrder: (id: string) => api.put(`/vendor/orders/${id}/accept`),
-  markPreparing: (id: string) => api.put(`/vendor/orders/${id}/preparing`),
-  markReady: (id: string) => api.put(`/vendor/orders/${id}/ready`),
-  getCategories: () => api.get('/vendor/categories'),
-  addItem: (data: any) => api.post('/vendor/items', data),
-  getAnalytics: () => api.get('/vendor/analytics/overview'),
-  getSubscription: () => api.get('/vendor/subscription'),
 };

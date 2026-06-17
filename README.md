@@ -20,7 +20,7 @@ Swift is **B2B SaaS, not a commission marketplace**:
   Failed cash handovers under the gate are company-guaranteed with a
   GPS/photo claim flow and a customer strike system.
 
-Full spec: `docs/swift-master-plan.pdf` · Build operations: `docs/swift-execution-playbook.pdf` · Session rules: `CLAUDE.md`
+Full spec: `docs/SWIFT-MASTER-SPEC.md` · Operations: `docs/RUNBOOK.md` · System design: `docs/SYSTEM_DESIGN.md` · Session rules: `CLAUDE.md`
 
 ## Monorepo
 

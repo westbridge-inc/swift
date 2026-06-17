@@ -1,13 +1,12 @@
 import type { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 import { z } from 'zod';
-import { VendorType, OrderStatus, TransactionType, NotificationType } from '@prisma/client';
+import { VendorType, OrderStatus, NotificationType } from '@prisma/client';
 import { calculateDeliveryFee } from '../../utils/markup';
 import { estimateDrivingDistance, estimateDeliveryMinutes } from '../../utils/distance';
 import { parsePagination, paginatedResponse } from '../../utils/pagination';
 import { AppError, NotFoundError, ValidationError, ForbiddenError } from '../../utils/errors';
 import { OrderService } from '../order/order.service';
 import { RatingService } from '../rating/rating.service';
-import { WalletService } from '../wallet/wallet.service';
 import { NotificationService } from '../notification/notification.service';
 
 // ---------------------------------------------------------------------------
@@ -110,22 +109,6 @@ const rateOrderSchema = z.object({
   riderComment: z.string().max(1000).optional(),
   driverScore: z.number().int().min(1).max(5).optional(),
   driverComment: z.string().max(1000).optional(),
-});
-
-const walletTopupSchema = z.object({
-  amount: z.number().positive(),
-  paymentMethod: z.string().max(30),
-  externalRef: z.string().max(200).optional(),
-});
-
-const walletWithdrawSchema = z.object({
-  amount: z.number().positive(),
-  method: z.string().max(30),
-  destination: z.record(z.unknown()),
-});
-
-const walletTransactionsQuerySchema = z.object({
-  type: z.nativeEnum(TransactionType).optional(),
 });
 
 const notificationsQuerySchema = z.object({
@@ -363,7 +346,6 @@ export async function customerRoutes(app: FastifyInstance) {
   // Service singletons
   const orderService = new OrderService(app.prisma, app.io);
   const ratingService = new RatingService(app.prisma);
-  const walletService = new WalletService(app.prisma);
   const notificationService = new NotificationService(app.prisma, app.io);
 
   // All routes require auth
@@ -387,7 +369,6 @@ export async function customerRoutes(app: FastifyInstance) {
 
     const customer = await resolveCustomer(app, userId);
     const unreadNotifs = await app.prisma.notification.count({ where: { userId, isRead: false } });
-    const balance = await walletService.getBalance(userId);
 
     return {
       success: true,
@@ -407,7 +388,6 @@ export async function customerRoutes(app: FastifyInstance) {
           referralCode: customer.referralCode,
         },
         addresses: user.addresses,
-        walletBalance: balance,
         unreadNotifications: unreadNotifs,
         createdAt: user.createdAt,
       },
@@ -1169,31 +1149,10 @@ export async function customerRoutes(app: FastifyInstance) {
     const body = checkoutSchema.parse(request.body ?? {});
 
     // Validate payment method
-    const validMethods = ['CASH', 'MOBILE_MONEY', 'BANK_TRANSFER', 'CARD', 'WALLET'];
+    const validMethods = ['CASH', 'MOBILE_MONEY', 'BANK_TRANSFER', 'CARD'];
     const paymentMethod = body.paymentMethod || 'CASH';
     if (!validMethods.includes(paymentMethod)) {
       throw new ValidationError(`Invalid payment method. Valid options: ${validMethods.join(', ')}`);
-    }
-
-    // If paying with wallet, verify sufficient balance
-    if (paymentMethod === 'WALLET') {
-      const cart = await app.prisma.cart.findUnique({
-        where: { customerId: userId },
-        include: { items: { include: { item: true } }, vendor: true },
-      });
-      if (cart && cart.items.length > 0) {
-        let estimate = 0;
-        for (const ci of cart.items) {
-          const base = Number(ci.item.basePrice);
-          estimate += base * ci.quantity;
-        }
-        estimate += calculateDeliveryFee(3) + (body.tipAmount || Number(cart.tipAmount) || 0);
-        const balance = await walletService.getBalance(userId);
-        if (balance < estimate) {
-          throw new AppError(400, 'INSUFFICIENT_BALANCE',
-            `Insufficient wallet balance. Available: $${balance.toLocaleString()} GYD, estimated total: $${estimate.toLocaleString()} GYD`);
-        }
-      }
     }
 
     // Validate scheduled time
@@ -1231,17 +1190,6 @@ export async function customerRoutes(app: FastifyInstance) {
           removeOnFail: 50,
         });
       }
-    }
-
-    // If wallet payment, debit
-    if (paymentMethod === 'WALLET') {
-      await walletService.debit(
-        userId,
-        result.order.total,
-        'ORDER_PAYMENT',
-        `Payment for order ${result.order.orderNumber}`,
-        result.order.id,
-      );
     }
 
     // Invalidate caches
@@ -1433,21 +1381,6 @@ export async function customerRoutes(app: FastifyInstance) {
 
     const result = await orderService.cancelOrder(id, userId, reason);
 
-    // Refund wallet payment if applicable
-    const order = await app.prisma.order.findUnique({
-      where: { id },
-      select: { paymentMethod: true, totalAmount: true, orderNumber: true },
-    });
-    if (order && order.paymentMethod === 'WALLET' && result.cancellationFee === 0) {
-      await walletService.credit(
-        userId,
-        Number(order.totalAmount),
-        'ORDER_REFUND',
-        `Refund for cancelled order ${order.orderNumber}`,
-        id,
-      );
-    }
-
     return { success: true, data: result };
   });
 
@@ -1516,115 +1449,6 @@ export async function customerRoutes(app: FastifyInstance) {
     });
     reply.code(201);
     return { success: true, data: created };
-  });
-
-  // ========================================================================
-  // 10. WALLET
-  // ========================================================================
-
-  app.get('/wallet', async (request: AuthRequest) => {
-    const { userId } = request.user;
-    const balance = await walletService.getBalance(userId);
-
-    // Recent transactions summary
-    const { transactions, total } = await walletService.getTransactions(userId, { limit: 5 });
-
-    return {
-      success: true,
-      data: {
-        balance,
-        currency: 'GYD',
-        recentTransactions: transactions.map((t) => ({
-          id: t.id,
-          type: t.type,
-          direction: t.direction,
-          amount: Number(t.amount),
-          description: t.description,
-          balanceAfter: Number(t.balanceAfter),
-          createdAt: t.createdAt,
-        })),
-        totalTransactions: total,
-      },
-    };
-  });
-
-  app.post('/wallet/topup', async (request: AuthRequest, reply: FastifyReply) => {
-    const { userId } = request.user;
-    const body = walletTopupSchema.parse(request.body);
-
-    if (body.amount < 500) {
-      throw new ValidationError('Minimum top-up amount is $500 GYD');
-    }
-    if (body.amount > 500_000) {
-      throw new ValidationError('Maximum top-up amount is $500,000 GYD');
-    }
-
-    const validMethods = ['MOBILE_MONEY', 'BANK_TRANSFER', 'CARD', 'CASH'];
-    if (!validMethods.includes(body.paymentMethod)) {
-      throw new ValidationError(`Invalid payment method. Valid options: ${validMethods.join(', ')}`);
-    }
-
-    const newBalance = await walletService.topUp(userId, body.amount, body.paymentMethod, body.externalRef);
-
-    reply.code(201);
-    return {
-      success: true,
-      data: {
-        balance: newBalance,
-        currency: 'GYD',
-        message: `$${body.amount.toLocaleString()} GYD added to wallet`,
-      },
-    };
-  });
-
-  app.post('/wallet/withdraw', async (request: AuthRequest) => {
-    const { userId } = request.user;
-    const body = walletWithdrawSchema.parse(request.body);
-
-    if (body.amount < 1000) {
-      throw new ValidationError('Minimum withdrawal amount is $1,000 GYD');
-    }
-    if (Object.keys(body.destination).length === 0) {
-      throw new ValidationError('Destination details are required');
-    }
-
-    const result = await walletService.withdraw(userId, body.amount, body.method, body.destination);
-
-    return {
-      success: true,
-      data: {
-        requestId: result.requestId,
-        balance: result.newBalance,
-        currency: 'GYD',
-        message: 'Withdrawal request submitted. Funds will arrive within 1-3 business days.',
-      },
-    };
-  });
-
-  app.get('/wallet/transactions', async (request: AuthRequest) => {
-    const { userId } = request.user;
-    const query = request.query as Record<string, string | undefined>;
-    const { page, limit, skip } = parsePagination(query);
-    const { type } = walletTransactionsQuerySchema.parse(request.query);
-
-    const { transactions, total } = await walletService.getTransactions(userId, {
-      type,
-      limit,
-      offset: skip,
-    });
-
-    const enriched = transactions.map((t) => ({
-      id: t.id,
-      type: t.type,
-      direction: t.direction,
-      amount: Number(t.amount),
-      description: t.description,
-      reference: t.reference,
-      balanceAfter: Number(t.balanceAfter),
-      createdAt: t.createdAt,
-    }));
-
-    return { success: true, ...paginatedResponse(enriched, total, { page, limit, skip }) };
   });
 
   // ========================================================================

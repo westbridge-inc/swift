@@ -1,0 +1,19 @@
+{
+  "expo": {
+    "name": "Swift",
+    "slug": "swift",
+    "scheme": "swift",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "light",
+    "newArchEnabled": true,
+    "backgroundColor": "#FFFFFF",
+    "splash": { "backgroundColor": "#FFFFFF", "resizeMode": "contain" },
+    "ios": { "bundleIdentifier": "gy.swift.app", "supportsTablet": true },
+    "android": {
+      "package": "gy.swift.app",
+      "adaptiveIcon": { "backgroundColor": "#FFFFFF" }
+    },
+    "plugins": ["expo-font"]
+  }
+}
