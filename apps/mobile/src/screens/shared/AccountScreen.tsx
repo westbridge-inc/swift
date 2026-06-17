@@ -1,10 +1,10 @@
-import { View, ScrollView } from 'react-native';
+import { View, ScrollView, Pressable } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Text, Heading, Card, Button, Badge } from '../../components/ui';
 import { useAuthStore } from '../../stores/authStore';
 import { useProfile, useAddresses } from '../../hooks';
 
-export function AccountScreen() {
+export function AccountScreen({ navigation }: any) {
   const { user, logout } = useAuthStore();
   const { data: profile } = useProfile<any>();
   const { data: addresses } = useAddresses<any[]>();
@@ -71,7 +71,17 @@ export function AccountScreen() {
             ))
           )}
 
-          <View className="mt-xl flex-row items-start rounded-lg bg-brand-50 px-lg py-md">
+          <Pressable onPress={() => navigation?.navigate?.('IdentityVerification')}>
+            <Card className="mt-xl flex-row items-center justify-between">
+              <View className="flex-1 pr-md">
+                <Text className="text-base font-semibold">Verify your identity</Text>
+                <Text className="mt-xs text-xs text-text-secondary">Lifts the limit on larger orders &amp; rides.</Text>
+              </View>
+              <Text className="text-xl text-brand-500">›</Text>
+            </Card>
+          </Pressable>
+
+          <View className="mt-md flex-row items-start rounded-lg bg-brand-50 px-lg py-md">
             <Text className="text-base">💵</Text>
             <Text className="ml-sm flex-1 text-sm text-brand-700">
               Swift is cash-only for now — pay on delivery or completion. No cards, no platform fees.
