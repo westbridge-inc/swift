@@ -142,3 +142,11 @@ export function useSetCartTip() {
     onSuccess: () => invalidateCart(qc),
   });
 }
+
+export function useReorder() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (id: string) => unwrap(customerApi.reorder(id)),
+    onSuccess: () => invalidateCart(qc),
+  });
+}

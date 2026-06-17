@@ -1,64 +1,87 @@
-import React from 'react';
-import { View, Text, StyleSheet, SafeAreaView, TouchableOpacity } from 'react-native';
+import { View, ScrollView } from 'react-native';
+import { SafeAreaView } from 'react-native-safe-area-context';
+import { Text, Heading, Card, Button, Badge } from '../../components/ui';
 import { useAuthStore } from '../../stores/authStore';
-import { SWIFT_BLACK, SWIFT_ORANGE } from '../../theme/colors';
+import { useProfile, useAddresses } from '../../hooks';
 
 export function AccountScreen() {
   const { user, logout } = useAuthStore();
+  const { data: profile } = useProfile<any>();
+  const { data: addresses } = useAddresses<any[]>();
+
+  const firstName = profile?.firstName ?? user?.firstName ?? '';
+  const lastName = profile?.lastName ?? user?.lastName ?? '';
+  const phone = profile?.phone ?? user?.phone ?? '';
+  const initials = `${(firstName[0] || '').toUpperCase()}${(lastName[0] || '').toUpperCase()}` || '?';
+  const list = addresses ?? [];
 
   return (
-    <SafeAreaView style={styles.container}>
-      <View style={styles.content}>
-        <Text style={styles.title}>Account</Text>
+    <SafeAreaView style={{ flex: 1 }} edges={['top']} className="bg-surface-base">
+      <View className="px-lg pb-sm pt-md">
+        <Heading size="2xl">Account</Heading>
+      </View>
+      <ScrollView className="flex-1" contentContainerStyle={{ paddingBottom: 32 }} showsVerticalScrollIndicator={false}>
+        <View className="px-lg">
+          <Card className="flex-row items-center">
+            <View className="h-14 w-14 items-center justify-center rounded-full bg-brand-500">
+              <Text className="text-lg font-semibold text-white">{initials}</Text>
+            </View>
+            <View className="ml-md flex-1">
+              <Text className="text-lg font-semibold">
+                {firstName || 'Your account'} {lastName}
+              </Text>
+              {phone ? <Text className="mt-xs text-sm text-text-secondary">{phone}</Text> : null}
+            </View>
+          </Card>
 
-        <View style={styles.profileCard}>
-          <View style={styles.avatar}>
-            <Text style={styles.avatarText}>
-              {user?.firstName?.[0] || '?'}{user?.lastName?.[0] || ''}
+          {profile?.customer ? (
+            <View className="mt-md flex-row" style={{ gap: 12 }}>
+              <Card className="flex-1 items-center">
+                <Text className="text-xl font-semibold">{profile.customer.totalOrders ?? 0}</Text>
+                <Text className="mt-xs text-xs text-text-secondary">Orders</Text>
+              </Card>
+              <Card className="flex-1 items-center">
+                <Text className="text-base font-semibold">{profile.customer.referralCode ?? '—'}</Text>
+                <Text className="mt-xs text-xs text-text-secondary">Referral code</Text>
+              </Card>
+            </View>
+          ) : null}
+
+          <Heading size="lg" className="mb-sm mt-xl">
+            Saved addresses
+          </Heading>
+          {list.length === 0 ? (
+            <Card>
+              <Text className="text-text-secondary">No saved addresses yet.</Text>
+            </Card>
+          ) : (
+            list.map((a) => (
+              <Card key={a.id} className="mb-sm">
+                <View className="flex-row items-center justify-between">
+                  <View className="flex-1 pr-md">
+                    <Text className="text-base font-semibold">{a.label || a.addressLine1}</Text>
+                    <Text className="mt-xs text-sm text-text-secondary" numberOfLines={1}>
+                      {a.addressLine1}
+                      {a.city ? `, ${a.city}` : ''}
+                    </Text>
+                  </View>
+                  {a.isDefault ? <Badge label="Default" tone="success" /> : null}
+                </View>
+              </Card>
+            ))
+          )}
+
+          <View className="mt-xl flex-row items-start rounded-lg bg-brand-50 px-lg py-md">
+            <Text className="text-base">💵</Text>
+            <Text className="ml-sm flex-1 text-sm text-brand-700">
+              Swift is cash-only for now — pay on delivery or completion. No cards, no platform fees.
             </Text>
           </View>
-          <View style={styles.profileInfo}>
-            <Text style={styles.name}>{user?.firstName} {user?.lastName}</Text>
-            <Text style={styles.phone}>{user?.phone}</Text>
-          </View>
+
+          <Button label="Log out" variant="outline" className="mt-xl" onPress={logout} />
+          <Text className="mt-md text-center text-xs text-text-muted">Swift · Guyana</Text>
         </View>
-
-        <TouchableOpacity style={styles.menuItem}>
-          <Text style={styles.menuText}>Edit Profile</Text>
-        </TouchableOpacity>
-        <TouchableOpacity style={styles.menuItem}>
-          <Text style={styles.menuText}>Saved Addresses</Text>
-        </TouchableOpacity>
-        <TouchableOpacity style={styles.menuItem}>
-          <Text style={styles.menuText}>Payment Methods</Text>
-        </TouchableOpacity>
-        <TouchableOpacity style={styles.menuItem}>
-          <Text style={styles.menuText}>Notifications</Text>
-        </TouchableOpacity>
-        <TouchableOpacity style={styles.menuItem}>
-          <Text style={styles.menuText}>Help & Support</Text>
-        </TouchableOpacity>
-
-        <TouchableOpacity style={styles.logoutButton} onPress={logout}>
-          <Text style={styles.logoutText}>Log Out</Text>
-        </TouchableOpacity>
-      </View>
+      </ScrollView>
     </SafeAreaView>
   );
 }
-
-const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: SWIFT_BLACK },
-  content: { flex: 1, padding: 16 },
-  title: { fontSize: 24, fontWeight: '700', color: '#FFF', marginBottom: 24 },
-  profileCard: { flexDirection: 'row', alignItems: 'center', backgroundColor: '#1C1C1E', borderRadius: 16, padding: 16, marginBottom: 24 },
-  avatar: { width: 56, height: 56, borderRadius: 28, backgroundColor: SWIFT_ORANGE, justifyContent: 'center', alignItems: 'center' },
-  avatarText: { color: '#FFF', fontSize: 20, fontWeight: '700' },
-  profileInfo: { marginLeft: 16 },
-  name: { color: '#FFF', fontSize: 18, fontWeight: '600' },
-  phone: { color: '#8E8E93', fontSize: 14, marginTop: 4 },
-  menuItem: { backgroundColor: '#1C1C1E', borderRadius: 12, padding: 16, marginBottom: 8 },
-  menuText: { color: '#FFF', fontSize: 16 },
-  logoutButton: { backgroundColor: '#1C1C1E', borderRadius: 12, padding: 16, marginTop: 16, alignItems: 'center' },
-  logoutText: { color: '#FF453A', fontSize: 16, fontWeight: '600' },
-});
