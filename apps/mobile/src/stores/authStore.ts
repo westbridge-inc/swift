@@ -1,5 +1,7 @@
 import { create } from 'zustand';
+import { persist, createJSONStorage } from 'zustand/middleware';
 import type { User } from '@swift/types';
+import { zustandStorage } from '../lib/storage';
 
 interface AuthState {
   user: User | null;
@@ -15,18 +17,39 @@ interface AuthState {
   setLoading: (loading: boolean) => void;
 }
 
-export const useAuthStore = create<AuthState>((set) => ({
-  user: null,
-  accessToken: null,
-  refreshToken: null,
-  isAuthenticated: false,
-  isLoading: true,
-  countryCode: null,
-  setAuth: (user, accessToken, refreshToken) =>
-    set({ user, accessToken, refreshToken, isAuthenticated: true, isLoading: false }),
-  setUser: (user) => set({ user }),
-  setCountry: (countryCode) => set({ countryCode }),
-  // Keep countryCode through logout so we don't re-prompt for country on sign-out.
-  logout: () => set({ user: null, accessToken: null, refreshToken: null, isAuthenticated: false }),
-  setLoading: (isLoading) => set({ isLoading }),
-}));
+// Persisted to MMKV so a cold start restores the session (token + active role +
+// country) instead of re-prompting for country/login. The API + socket layers
+// read accessToken/refreshToken via getState(), so a restored token is used
+// immediately; a stale one is handled by the 401 -> refresh -> logout flow.
+export const useAuthStore = create<AuthState>()(
+  persist(
+    (set) => ({
+      user: null,
+      accessToken: null,
+      refreshToken: null,
+      isAuthenticated: false,
+      isLoading: true,
+      countryCode: null,
+      setAuth: (user, accessToken, refreshToken) =>
+        set({ user, accessToken, refreshToken, isAuthenticated: true, isLoading: false }),
+      setUser: (user) => set({ user }),
+      setCountry: (countryCode) => set({ countryCode }),
+      // Keep countryCode through logout so we don't re-prompt for country on sign-out.
+      logout: () => set({ user: null, accessToken: null, refreshToken: null, isAuthenticated: false }),
+      setLoading: (isLoading) => set({ isLoading }),
+    }),
+    {
+      name: 'swift-auth',
+      storage: createJSONStorage(() => zustandStorage),
+      version: 1,
+      // Only durable identity is persisted; isLoading is transient UI state.
+      partialize: (state) => ({
+        user: state.user,
+        accessToken: state.accessToken,
+        refreshToken: state.refreshToken,
+        isAuthenticated: state.isAuthenticated,
+        countryCode: state.countryCode,
+      }),
+    },
+  ),
+);
