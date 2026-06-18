@@ -28,10 +28,10 @@ device-verified before the next. The data layer (`src/hooks/*`, `src/services/ap
 - [x] **6. OrderTracking** — react-native-maps preview + icon status timeline; rider call (phone icon); cash note. Gated.
 - [x] **7. Orders** — `FlatList` → `List`; type icons per order, reorder (refresh icon); icon empty/error. Gated.
 - [x] **8. Account** — icons (address pin, shield, cash, chevrons); avatar + stats + addresses + ID-verify + logout. Gated.
-- [ ] **9. Taxi**
-- [ ] **10. Courier**
-- [ ] **11. Services**
-- [ ] **12. Auth** — Country / Phone / OTP / Role / Register
+- [x] **9. Taxi** — icon back/radios; active-ride map + driver call (phone icon) + PIN; fare estimate. Gated.
+- [x] **10. Courier** — icon radios; size/speed pickers; recipient form; estimate; recent sends. Gated.
+- [x] **11. Services** — icon back + shield; trade chips; provider cards; job request. Gated.
+- [x] **12. Auth + IdentityVerification** — RolePicker icon tiles + chevrons; Identity icon swaps (check-circle/back/chevron). Country/Phone/OTP/Register already on @swift/ui. Gated.
 - [ ] **13. Mover app** — `MoverStack` / `ActiveJobScreen`
 - [ ] **14. Vendor app** — `VendorStack` / `VendorMenuScreen` / `VendorItemEditorScreen`
 - [ ] **Shared cards** — `components/{customer,shared}/VendorCard` (memoize, expo-image, stable keys)
