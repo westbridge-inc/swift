@@ -26,8 +26,8 @@ device-verified before the next. The data layer (`src/hooks/*`, `src/services/ap
 - [x] **4. Cart** — `ScrollView` → `List` (items + summary footer); item thumbnails (expo-image); icon back/empty/qty/remove. Gated.
 - [x] **5. Checkout** — address/tip pickers + cash; icon radios + cash icon; ID-gate handling intact. Gated.
 - [x] **6. OrderTracking** — react-native-maps preview + icon status timeline; rider call (phone icon); cash note. Gated.
-- [ ] **7. Orders** — `FlatList` → `List`
-- [ ] **8. Account**
+- [x] **7. Orders** — `FlatList` → `List`; type icons per order, reorder (refresh icon); icon empty/error. Gated.
+- [x] **8. Account** — icons (address pin, shield, cash, chevrons); avatar + stats + addresses + ID-verify + logout. Gated.
 - [ ] **9. Taxi**
 - [ ] **10. Courier**
 - [ ] **11. Services**
