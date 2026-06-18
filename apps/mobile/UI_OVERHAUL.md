@@ -32,9 +32,9 @@ device-verified before the next. The data layer (`src/hooks/*`, `src/services/ap
 - [x] **10. Courier** — icon radios; size/speed pickers; recipient form; estimate; recent sends. Gated.
 - [x] **11. Services** — icon back + shield; trade chips; provider cards; job request. Gated.
 - [x] **12. Auth + IdentityVerification** — RolePicker icon tiles + chevrons; Identity icon swaps (check-circle/back/chevron). Country/Phone/OTP/Register already on @swift/ui. Gated.
-- [ ] **13. Mover app** — `MoverStack` / `ActiveJobScreen`
-- [ ] **14. Vendor app** — `VendorStack` / `VendorMenuScreen` / `VendorItemEditorScreen`
-- [ ] **Shared cards** — `components/{customer,shared}/VendorCard` (memoize, expo-image, stable keys)
+- [x] **13. Mover app** — icon polish (shield, vehicle-saved check, back chevron) across onboarding/ops/ActiveJob; real-time offer banner intact. Gated.
+- [x] **14. Vendor app** — icon polish (shield, back chevron) across setup/onboarding/ops/menu/editor. Gated.
+- [x] **Shared cards** — `customer/VendorCard` rebuilt image-led + memoized (stage 2). `shared/VendorCard` is unused/dead (safe to delete later).
 
 ## Per-stage gate
 `pnpm -C apps/mobile type-check && lint` + `expo export --platform ios` green → simulator
