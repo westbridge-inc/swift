@@ -14,6 +14,7 @@ import { TaxiScreen } from '../screens/customer/TaxiScreen';
 import { ServicesScreen } from '../screens/customer/ServicesScreen';
 import { IdentityVerificationScreen } from '../screens/customer/IdentityVerificationScreen';
 import { color } from '@swift/ui';
+import { Feather } from '@expo/vector-icons';
 
 const Tab = createBottomTabNavigator();
 const Stack = createNativeStackNavigator();
@@ -28,11 +29,31 @@ function HomeTabs() {
         tabBarStyle: { backgroundColor: color.surface.base, borderTopColor: color.border.subtle },
       }}
     >
-      <Tab.Screen name="Home" component={HomeScreen} options={{ tabBarLabel: 'Home' }} />
-      <Tab.Screen name="Search" component={SearchScreen} options={{ tabBarLabel: 'Search' }} />
-      <Tab.Screen name="Orders" component={OrdersScreen} options={{ tabBarLabel: 'Orders' }} />
-      <Tab.Screen name="Courier" component={CourierScreen} options={{ tabBarLabel: 'Send' }} />
-      <Tab.Screen name="Account" component={AccountScreen} options={{ tabBarLabel: 'Account' }} />
+      <Tab.Screen
+        name="Home"
+        component={HomeScreen}
+        options={{ tabBarLabel: 'Home', tabBarIcon: ({ color: c, size }) => <Feather name="home" size={size} color={c} /> }}
+      />
+      <Tab.Screen
+        name="Search"
+        component={SearchScreen}
+        options={{ tabBarLabel: 'Search', tabBarIcon: ({ color: c, size }) => <Feather name="search" size={size} color={c} /> }}
+      />
+      <Tab.Screen
+        name="Orders"
+        component={OrdersScreen}
+        options={{ tabBarLabel: 'Orders', tabBarIcon: ({ color: c, size }) => <Feather name="clipboard" size={size} color={c} /> }}
+      />
+      <Tab.Screen
+        name="Courier"
+        component={CourierScreen}
+        options={{ tabBarLabel: 'Send', tabBarIcon: ({ color: c, size }) => <Feather name="send" size={size} color={c} /> }}
+      />
+      <Tab.Screen
+        name="Account"
+        component={AccountScreen}
+        options={{ tabBarLabel: 'Account', tabBarIcon: ({ color: c, size }) => <Feather name="user" size={size} color={c} /> }}
+      />
     </Tab.Navigator>
   );
 }

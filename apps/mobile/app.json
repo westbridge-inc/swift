@@ -1,6 +1,6 @@
 {
   "expo": {
-    "name": "Swift",
+    "name": "SwiftGY",
     "slug": "swift",
     "scheme": "swift",
     "version": "1.0.0",
@@ -14,7 +14,10 @@
     },
     "ios": {
       "bundleIdentifier": "gy.swift.app",
-      "supportsTablet": true
+      "supportsTablet": true,
+      "infoPlist": {
+        "CFBundleDisplayName": "Swift"
+      }
     },
     "android": {
       "package": "gy.swift.app",
