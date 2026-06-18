@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { View, ScrollView, Pressable, TextInput } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { color } from '@swift/ui';
+import { Feather } from '@expo/vector-icons';
 import { Text, Heading, Card, Button, Spinner, Badge } from '../../components/ui';
 import { useAddresses, useCourierEstimate, useCourierOrders, useSendCourier } from '../../hooks';
 import { useLocationStore } from '../../stores/locationStore';
@@ -120,7 +121,7 @@ export function CourierScreen({ navigation }: any) {
                           {a.city ? `, ${a.city}` : ''}
                         </Text>
                       </View>
-                      <Text className={active ? 'text-brand-500' : 'text-text-muted'}>{active ? '●' : '○'}</Text>
+                      <Feather name={active ? 'check-circle' : 'circle'} size={20} color={active ? color.brand[500] : color.text.muted} />
                     </View>
                   </Card>
                 </Pressable>

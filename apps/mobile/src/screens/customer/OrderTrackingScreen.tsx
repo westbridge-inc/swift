@@ -1,6 +1,7 @@
 import { View, ScrollView, Pressable, Linking } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import MapView, { Marker, PROVIDER_DEFAULT } from 'react-native-maps';
+import { Feather, MaterialCommunityIcons } from '@expo/vector-icons';
 import { color } from '@swift/ui';
 import { Text, Heading, Card, Spinner, Button } from '../../components/ui';
 import { useOrder } from '../../hooks';
@@ -45,7 +46,7 @@ export function OrderTrackingScreen({ navigation, route }: any) {
     return (
       <SafeAreaView style={{ flex: 1 }} edges={['top']} className="bg-surface-base">
         <View className="flex-1 items-center justify-center px-2xl">
-          <Text className="text-3xl">⚠️</Text>
+          <Feather name="alert-triangle" size={32} color={color.text.muted} />
           <Text className="mt-sm text-center text-text-secondary">Couldn&apos;t load this order.</Text>
           <Button label="Retry" className="mt-md" onPress={() => refetch()} />
         </View>
@@ -78,15 +79,15 @@ export function OrderTrackingScreen({ navigation, route }: any) {
   return (
     <SafeAreaView style={{ flex: 1 }} edges={['top']} className="bg-surface-base">
       <View className="flex-row items-center px-lg py-sm">
-        <Pressable onPress={() => navigation?.goBack?.()} hitSlop={8}>
-          <Text className="text-2xl">‹ Back</Text>
+        <Pressable onPress={() => navigation?.goBack?.()} hitSlop={10}>
+          <Feather name="chevron-left" size={24} color={color.text.primary} />
         </Pressable>
-        <Text className="ml-md text-base font-semibold">Order{order.orderNumber ? ` #${order.orderNumber}` : ''}</Text>
+        <Text className="ml-md text-base font-bold">Order{order.orderNumber ? ` #${order.orderNumber}` : ''}</Text>
       </View>
 
       <ScrollView className="flex-1" contentContainerStyle={{ paddingBottom: 32 }} showsVerticalScrollIndicator={false}>
         {showMap && region ? (
-          <View className="mx-lg mb-md overflow-hidden rounded-xl border border-border-subtle" style={{ height: 200 }}>
+          <View className="mx-lg mb-md overflow-hidden rounded-2xl border border-border-subtle" style={{ height: 200 }}>
             <MapView provider={PROVIDER_DEFAULT} style={{ flex: 1 }} initialRegion={region} pointerEvents="none">
               <Marker coordinate={pickup!} title={order.vendor?.name ?? 'Pickup'} />
               <Marker coordinate={dropoff!} title="Delivery" pinColor={color.brand[500]} />
@@ -98,17 +99,14 @@ export function OrderTrackingScreen({ navigation, route }: any) {
         <View className="px-lg">
           {cancelled ? (
             <Card className="bg-brand-50">
-              <Heading size="lg" className="text-brand-700">
-                Order cancelled
-              </Heading>
+              <Heading size="lg" className="text-brand-700">Order cancelled</Heading>
               <Text className="mt-xs text-sm text-text-secondary">This order was cancelled.</Text>
             </Card>
           ) : (
             <Card>
               <Heading size="lg">{STEPS[step]?.label ?? 'In progress'}</Heading>
               <Text className="mt-xs text-sm text-text-secondary">
-                {order.vendor?.name ?? ''}
-                {order.estimatedPrepTime ? ` · ~${order.estimatedPrepTime} min` : ''}
+                {order.vendor?.name ?? ''}{order.estimatedPrepTime ? ` · ~${order.estimatedPrepTime} min` : ''}
               </Text>
             </Card>
           )}
@@ -128,7 +126,11 @@ export function OrderTrackingScreen({ navigation, route }: any) {
                         : 'h-6 w-6 items-center justify-center rounded-full border border-border-strong bg-surface-base'
                     }
                   >
-                    <Text className={done ? 'text-xs text-white' : 'text-xs text-text-muted'}>{done ? '✓' : `${i + 1}`}</Text>
+                    {done ? (
+                      <Feather name="check" size={14} color="#fff" />
+                    ) : (
+                      <Text className="text-xs text-text-muted">{i + 1}</Text>
+                    )}
                   </View>
                   <Text className={done ? 'ml-md text-base font-semibold text-text-primary' : 'ml-md text-base text-text-muted'}>
                     {s.label}
@@ -148,14 +150,12 @@ export function OrderTrackingScreen({ navigation, route }: any) {
                 <Text className="text-base font-semibold">{order.rider.firstName ?? 'Assigned'}</Text>
               </View>
               {order.rider.phone ? (
-                <Button
-                  label="Call"
-                  variant="outline"
-                  className="px-lg"
-                  onPress={() => {
-                    Linking.openURL(`tel:${order.rider.phone}`).catch(() => {});
-                  }}
-                />
+                <Button variant="outline" className="px-lg" onPress={() => { Linking.openURL(`tel:${order.rider.phone}`).catch(() => {}); }}>
+                  <View className="flex-row items-center">
+                    <Feather name="phone" size={15} color={color.brand[500]} />
+                    <Text className="ml-sm font-body font-semibold text-brand-500">Call</Text>
+                  </View>
+                </Button>
               ) : null}
             </Card>
           </View>
@@ -163,15 +163,11 @@ export function OrderTrackingScreen({ navigation, route }: any) {
 
         {/* Summary */}
         <View className="px-lg pt-md">
-          <Heading size="lg" className="mb-sm">
-            Order summary
-          </Heading>
+          <Heading size="lg" className="mb-sm">Order summary</Heading>
           <Card>
             {(order.items ?? []).map((it: any) => (
               <View key={it.id} className="flex-row items-center justify-between py-1">
-                <Text className="flex-1 pr-md text-sm" numberOfLines={1}>
-                  {it.quantity}× {it.name}
-                </Text>
+                <Text className="flex-1 pr-md text-sm" numberOfLines={1}>{it.quantity}× {it.name}</Text>
                 <Text className="text-sm">{money(it.lineTotal)}</Text>
               </View>
             ))}
@@ -181,7 +177,10 @@ export function OrderTrackingScreen({ navigation, route }: any) {
                 <Text className="text-base font-semibold">{money(order.totalAmount)}</Text>
               </View>
             </View>
-            <Text className="mt-sm text-xs text-text-muted">💵 Pay {money(order.totalAmount)} in cash on delivery.</Text>
+            <View className="mt-sm flex-row items-center">
+              <MaterialCommunityIcons name="cash" size={16} color={color.success} />
+              <Text className="ml-sm text-xs text-text-muted">Pay {money(order.totalAmount)} in cash on delivery.</Text>
+            </View>
           </Card>
         </View>
       </ScrollView>

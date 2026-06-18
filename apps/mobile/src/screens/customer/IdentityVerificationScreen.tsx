@@ -2,6 +2,8 @@ import { useState } from 'react';
 import { View, ScrollView, Pressable, ActivityIndicator } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import * as ImagePicker from 'expo-image-picker';
+import { Feather } from '@expo/vector-icons';
+import { color } from '@swift/ui';
 import { Text, Heading, Card, Button, Badge } from '../../components/ui';
 import { useUploadFile, useSubmitIdentity } from '../../hooks/verification';
 
@@ -24,7 +26,7 @@ function UploadRow({
             <Text className="text-xs text-text-secondary">{done ? 'Uploaded' : 'Get started'}</Text>
             <Text className="text-base font-semibold">{title}</Text>
           </View>
-          {busy ? <ActivityIndicator /> : done ? <Badge label="Done" tone="success" /> : <Text className="text-xl text-brand-500">›</Text>}
+          {busy ? <ActivityIndicator /> : done ? <Badge label="Done" tone="success" /> : <Feather name="chevron-right" size={20} color={color.text.muted} />}
         </View>
       </Card>
     </Pressable>
@@ -61,7 +63,7 @@ export function IdentityVerificationScreen({ navigation }: any) {
     return (
       <SafeAreaView style={{ flex: 1 }} edges={['top']} className="bg-surface-base">
         <View className="flex-1 items-center justify-center px-2xl">
-          <Text className="text-5xl">🪪</Text>
+          <Feather name="check-circle" size={48} color={color.success} />
           <Heading size="lg" className="mt-md text-center">
             ID submitted for review
           </Heading>
@@ -77,10 +79,10 @@ export function IdentityVerificationScreen({ navigation }: any) {
   return (
     <SafeAreaView style={{ flex: 1 }} edges={['top']} className="bg-surface-base">
       <View className="flex-row items-center px-lg py-sm">
-        <Pressable onPress={() => navigation?.goBack?.()} hitSlop={8}>
-          <Text className="text-2xl">‹ Back</Text>
+        <Pressable onPress={() => navigation?.goBack?.()} hitSlop={10}>
+          <Feather name="chevron-left" size={24} color={color.text.primary} />
         </Pressable>
-        <Text className="ml-md text-base font-semibold">Verify your identity</Text>
+        <Text className="ml-md text-base font-bold">Verify your identity</Text>
       </View>
       <ScrollView className="flex-1" contentContainerStyle={{ paddingHorizontal: 16, paddingBottom: 32 }} showsVerticalScrollIndicator={false}>
         <Text className="mb-md text-sm text-text-secondary">

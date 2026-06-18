@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { View, ScrollView, Pressable, TextInput } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { color } from '@swift/ui';
+import { Feather, MaterialCommunityIcons } from '@expo/vector-icons';
 import { Text, Heading, Card, Button, Badge, Skeleton } from '../../components/ui';
 import { useServiceProviders, useRequestJob } from '../../hooks';
 
@@ -21,10 +22,10 @@ const TRADES = [
 function Header({ navigation }: any) {
   return (
     <View className="flex-row items-center px-lg py-sm">
-      <Pressable onPress={() => navigation?.goBack?.()} hitSlop={8}>
-        <Text className="text-2xl">‹ Back</Text>
+      <Pressable onPress={() => navigation?.goBack?.()} hitSlop={10}>
+        <Feather name="chevron-left" size={24} color={color.text.primary} />
       </Pressable>
-      <Text className="ml-md text-base font-semibold">Services</Text>
+      <Text className="ml-md text-base font-bold">Services</Text>
     </View>
   );
 }
@@ -100,7 +101,10 @@ export function ServicesScreen({ navigation }: any) {
 
           {sent ? (
             <Card className="mt-lg bg-brand-50">
-              <Text className="font-semibold text-brand-700">Request sent ✓</Text>
+              <View className="flex-row items-center">
+                <Feather name="check-circle" size={16} color={color.success} />
+                <Text className="ml-sm font-semibold text-brand-700">Request sent</Text>
+              </View>
               <Text className="mt-xs text-sm text-text-secondary">
                 The provider will send a quote in chat. Pay cash on completion.
               </Text>
@@ -108,8 +112,8 @@ export function ServicesScreen({ navigation }: any) {
           ) : null}
 
           {trade && data?.guidance ? (
-            <View className="mt-lg flex-row items-start rounded-lg bg-brand-50 px-lg py-md">
-              <Text className="text-base">🛡️</Text>
+            <View className="mt-lg flex-row items-start rounded-2xl bg-brand-50 px-lg py-md">
+              <MaterialCommunityIcons name="shield-check" size={20} color={color.brand[600]} />
               <Text className="ml-sm flex-1 text-sm text-brand-700">{data.guidance}</Text>
             </View>
           ) : null}
