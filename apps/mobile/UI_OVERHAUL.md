@@ -7,7 +7,7 @@ device-verified before the next. The data layer (`src/hooks/*`, `src/services/ap
 `src/stores/*`) is reused untouched.
 
 ## Smooth-scroll rules (every list screen)
-- `components/ui/List` (FlashList) for all data lists — never `ScrollView` + `.map`; set `estimatedItemSize`.
+- `components/ui/List` (FlashList v2) for all data lists — never `ScrollView` + `.map` (v2 auto-sizes rows; no `estimatedItemSize`).
 - `components/ui/Image` (expo-image) for every remote image — cache + blurhash; no scroll re-decode.
 - `React.memo` rows, stable keys, no inline closures/objects in hot rows.
 - Press/scroll animation via reanimated on the UI thread.
@@ -19,8 +19,8 @@ device-verified before the next. The data layer (`src/hooks/*`, `src/services/ap
 
 ## Stages (tick each when gated + device-verified)
 - [x] **0a. Kickoff** — real icons (`@expo/vector-icons`), Home photo pass, `SwiftGY` native rename (fixes reserved-module build), gitignore generated native dirs
-- [ ] **0b. Foundation** — install FlashList + expo-image + react-native-svg + Gluestack v3; real `GluestackUIProvider` mapped to tokens; re-implement the 8 primitives on Gluestack (same export names); add `Input`/`Actionsheet`/`Modal`/`Toast`; add `List` + `Image` wrappers; one native rebuild
-- [ ] **1. Home** — popular list → `List`; RN `Image` → `Image`; featured carousel
+- [x] **0b. Foundation** — installed FlashList + expo-image + react-native-svg (one native rebuild; on-device verified). Components are **owned Gluestack-v3-style NativeWind components on `@swift/ui` tokens** — the gluestack CLI can't run headless (TTY-only), so they're hand-authored (the same owned/copy-paste paradigm v3 uses). Added `List` (FlashList) + `Image` (expo-image) + `Input`. (`Actionsheet`/`Modal`/`Toast` added per-stage as needed.)
+- [x] **1. Home** — popular list → `List` (FlashList); RN `Image` → `Image` (expo-image); featured carousel. Gated + on-device verified.
 - [ ] **2. Search** — Gluestack `Input`, debounce, filter chips, `List` results, empty/loading/error
 - [ ] **3. VendorDetail** — expo-image hero, sticky header, sectioned menu `List`, option `Actionsheet`, add-to-cart
 - [ ] **4. Cart** — `ScrollView` → `List`
