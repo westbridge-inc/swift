@@ -4,6 +4,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
 import MapView, { Marker, PROVIDER_DEFAULT } from 'react-native-maps';
 import { color } from '@swift/ui';
+import { Feather, MaterialCommunityIcons } from '@expo/vector-icons';
 import { Text, Heading, Card, Button, Spinner, Badge } from '../components/ui';
 import { DocumentChecklist } from '../components/onboarding/DocumentChecklist';
 import {
@@ -114,14 +115,14 @@ function MoverOnboarding({ status }: { status: any }) {
       </View>
       <ScrollView className="flex-1" contentContainerStyle={{ paddingHorizontal: 16, paddingBottom: 32 }} showsVerticalScrollIndicator={false}>
         <View className="mb-md flex-row items-start rounded-lg bg-brand-50 px-lg py-md">
-          <Text className="text-base">🛡️</Text>
+          <MaterialCommunityIcons name="shield-check" size={20} color={color.brand[600]} />
           <Text className="ml-sm flex-1 text-sm text-brand-700">
             Set up your vehicle and upload your documents. We verify within 24 hours, then you can go online.
           </Text>
         </View>
         {!vehicleSaved ? <VehicleSetup onDone={() => setVehicleSaved(true)} /> : (
           <Card className="mb-lg flex-row items-center">
-            <Text className="text-base">✓</Text>
+            <Feather name="check-circle" size={18} color={color.success} />
             <Text className="ml-sm flex-1 text-sm font-semibold text-text-primary">Vehicle saved</Text>
           </Card>
         )}
@@ -284,7 +285,7 @@ function ActiveJobScreen({ navigation }: any) {
     <SafeAreaView style={{ flex: 1 }} edges={['top']} className="bg-surface-base">
       <View className="flex-row items-center px-lg py-sm">
         <Pressable onPress={() => navigation?.goBack?.()} hitSlop={8}>
-          <Text className="text-2xl">‹ Back</Text>
+          <Feather name="chevron-left" size={24} color={color.text.primary} />
         </Pressable>
         <Text className="ml-md text-base font-semibold">Active job</Text>
       </View>

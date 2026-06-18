@@ -1,6 +1,9 @@
+import { memo } from 'react';
 import { Pressable, View } from 'react-native';
 import Animated, { useSharedValue, useAnimatedStyle, withTiming } from 'react-native-reanimated';
-import { Text, Card, Badge } from '../ui';
+import { Feather, MaterialCommunityIcons } from '@expo/vector-icons';
+import { color } from '@swift/ui';
+import { Text, Image } from '../ui';
 
 const AnimatedPressable = Animated.createAnimatedComponent(Pressable);
 
@@ -14,49 +17,81 @@ export type Vendor = {
   cuisineTypes?: string[];
   isCurrentlyOpen?: boolean;
   distanceKm?: number | null;
+  coverImageUrl?: string | null;
+  logoUrl?: string | null;
 };
 
-/** Standard vendor row — reused across Explore, Home and favourites. */
-export function VendorCard({ vendor, onPress }: { vendor: Vendor; onPress?: () => void }) {
+const FALLBACK_IMAGES = [
+  'https://images.unsplash.com/photo-1546069901-ba9599a7e63c?w=600&q=80',
+  'https://images.unsplash.com/photo-1565299624946-b28f40a0ae38?w=600&q=80',
+  'https://images.unsplash.com/photo-1504674900247-0877df9cc836?w=600&q=80',
+  'https://images.unsplash.com/photo-1567620905732-2d1ec7ab7445?w=600&q=80',
+  'https://images.unsplash.com/photo-1565958011703-44f9829ba187?w=600&q=80',
+  'https://images.unsplash.com/photo-1432139555190-58524dae6a55?w=600&q=80',
+];
+function imageFor(vendor: Vendor): string {
+  if (vendor.coverImageUrl) return vendor.coverImageUrl;
+  if (vendor.logoUrl) return vendor.logoUrl;
+  let h = 0;
+  const id = vendor.id ?? '';
+  for (let i = 0; i < id.length; i++) h = (h * 31 + id.charCodeAt(i)) >>> 0;
+  return FALLBACK_IMAGES[h % FALLBACK_IMAGES.length]!;
+}
+
+/** Image-led vendor card (Explore / Home / favourites) — expo-image, memoized. */
+export const VendorCard = memo(function VendorCard({ vendor, onPress }: { vendor: Vendor; onPress?: () => void }) {
   const scale = useSharedValue(1);
   const animStyle = useAnimatedStyle(() => ({ transform: [{ scale: scale.value }] }));
-
   const rating =
-    vendor.averageRating != null && vendor.averageRating > 0 ? vendor.averageRating.toFixed(1) : 'New';
+    vendor.averageRating != null && vendor.averageRating > 0 ? Number(vendor.averageRating).toFixed(1) : 'New';
   const eta = vendor.estimatedPrepTime ?? 25;
   const meta = [
-    vendor.cuisineTypes?.[0],
+    vendor.cuisineTypes?.[0] ?? vendor.vendorType,
     vendor.distanceKm != null ? `${vendor.distanceKm} km` : null,
   ]
     .filter(Boolean)
     .join(' · ');
+  const closed = vendor.isCurrentlyOpen === false;
 
   return (
     <AnimatedPressable
-      onPressIn={() => {
-        scale.value = withTiming(0.97, { duration: 80 });
-      }}
-      onPressOut={() => {
-        scale.value = withTiming(1, { duration: 120 });
-      }}
+      onPressIn={() => { scale.value = withTiming(0.98, { duration: 80 }); }}
+      onPressOut={() => { scale.value = withTiming(1, { duration: 120 }); }}
       onPress={onPress}
-      style={animStyle}
+      style={[{ marginBottom: 18 }, animStyle]}
     >
-      <Card className="mb-md flex-row items-start justify-between">
-        <View className="flex-1 pr-md">
-          <Text className="text-base font-semibold" numberOfLines={1}>
-            {vendor.name}
-          </Text>
-          <Text className="mt-xs text-sm text-text-secondary" numberOfLines={1}>
-            {rating} ★ · {eta} min{meta ? ` · ${meta}` : ''}
-          </Text>
+      <View
+        className="overflow-hidden rounded-2xl bg-surface-base"
+        style={{ shadowColor: '#000', shadowOpacity: 0.08, shadowRadius: 12, shadowOffset: { width: 0, height: 4 }, elevation: 3 }}
+      >
+        <View>
+          <Image source={{ uri: imageFor(vendor) }} style={{ width: '100%', height: 150 }} />
+          {closed ? (
+            <View className="absolute inset-0 items-center justify-center" style={{ backgroundColor: 'rgba(0,0,0,0.45)' }}>
+              <Text className="text-sm font-bold text-white">Closed</Text>
+            </View>
+          ) : null}
         </View>
-        {vendor.isCurrentlyOpen === false ? (
-          <Badge label="Closed" tone="brand" />
-        ) : (
-          <Badge label="Open" tone="success" />
-        )}
-      </Card>
+        <View className="p-md">
+          <View className="flex-row items-center justify-between">
+            <Text className="flex-1 pr-sm text-base font-bold text-text-primary" numberOfLines={1}>{vendor.name}</Text>
+            <View className="flex-row items-center rounded-full bg-surface-subtle px-2 py-1">
+              <MaterialCommunityIcons name="star" size={13} color={color.brand[500]} />
+              <Text className="ml-1 text-xs font-semibold text-text-primary">{rating}</Text>
+            </View>
+          </View>
+          <View className="mt-xs flex-row items-center">
+            <Feather name="clock" size={13} color={color.text.muted} />
+            <Text className="ml-1 text-xs text-text-muted">{eta} min</Text>
+            {meta ? (
+              <>
+                <Text className="mx-2 text-xs text-text-muted">·</Text>
+                <Text className="flex-1 text-xs text-text-muted" numberOfLines={1}>{meta}</Text>
+              </>
+            ) : null}
+          </View>
+        </View>
+      </View>
     </AnimatedPressable>
   );
-}
+});

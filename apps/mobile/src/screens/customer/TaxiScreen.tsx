@@ -3,6 +3,7 @@ import { View, ScrollView, Pressable, Linking } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import MapView, { Marker, PROVIDER_DEFAULT } from 'react-native-maps';
 import { color } from '@swift/ui';
+import { Feather } from '@expo/vector-icons';
 import { Text, Heading, Card, Button, Spinner } from '../../components/ui';
 import { useAddresses, useActiveRide, useRideEstimate, useRequestRide, useCancelRide } from '../../hooks';
 import { useLocationStore } from '../../stores/locationStore';
@@ -36,10 +37,10 @@ function regionFor(pts: LatLng[]) {
 function Header({ navigation, title }: any) {
   return (
     <View className="flex-row items-center px-lg py-sm">
-      <Pressable onPress={() => navigation?.goBack?.()} hitSlop={8}>
-        <Text className="text-2xl">‹ Back</Text>
+      <Pressable onPress={() => navigation?.goBack?.()} hitSlop={10}>
+        <Feather name="chevron-left" size={24} color={color.text.primary} />
       </Pressable>
-      <Text className="ml-md text-base font-semibold">{title}</Text>
+      <Text className="ml-md text-base font-bold">{title}</Text>
     </View>
   );
 }
@@ -129,13 +130,17 @@ export function TaxiScreen({ navigation }: any) {
                 </View>
                 {d.user?.phone ? (
                   <Button
-                    label="Call"
                     variant="outline"
                     className="px-lg"
                     onPress={() => {
                       Linking.openURL(`tel:${d.user.phone}`).catch(() => {});
                     }}
-                  />
+                  >
+                    <View className="flex-row items-center">
+                      <Feather name="phone" size={15} color={color.brand[500]} />
+                      <Text className="ml-sm font-body font-semibold text-brand-500">Call</Text>
+                    </View>
+                  </Button>
                 ) : null}
               </Card>
             ) : (
@@ -210,7 +215,7 @@ export function TaxiScreen({ navigation }: any) {
                           {a.city ? `, ${a.city}` : ''}
                         </Text>
                       </View>
-                      <Text className={active ? 'text-brand-500' : 'text-text-muted'}>{active ? '●' : '○'}</Text>
+                      <Feather name={active ? 'check-circle' : 'circle'} size={20} color={active ? color.brand[500] : color.text.muted} />
                     </View>
                   </Card>
                 </Pressable>

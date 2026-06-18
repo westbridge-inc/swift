@@ -3,6 +3,7 @@ import { View, ScrollView, Pressable, TextInput, Alert } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
 import { color } from '@swift/ui';
+import { Feather, MaterialCommunityIcons } from '@expo/vector-icons';
 import { Text, Heading, Card, Button, Spinner, Badge } from '../components/ui';
 import { DocumentChecklist } from '../components/onboarding/DocumentChecklist';
 import { useBecomePartner, useVerificationStatus } from '../hooks/verification';
@@ -111,7 +112,7 @@ function VendorOnboarding({ store }: { store: any }) {
       <Header title={store.name} />
       <ScrollView className="flex-1" contentContainerStyle={{ paddingHorizontal: 16, paddingBottom: 32 }} showsVerticalScrollIndicator={false}>
         <View className="mb-md flex-row items-start rounded-lg bg-brand-50 px-lg py-md">
-          <Text className="text-base">🛡️</Text>
+          <MaterialCommunityIcons name="shield-check" size={20} color={color.brand[600]} />
           <Text className="ml-sm flex-1 text-sm text-brand-700">
             Your store is under review. Upload your business documents — we approve within 24 hours, then you can take orders.
           </Text>
@@ -236,7 +237,7 @@ function SubHeader({
   return (
     <View className="flex-row items-center justify-between px-lg py-sm">
       <Pressable onPress={() => navigation.goBack()} hitSlop={8}>
-        <Text className="text-base font-semibold text-brand-600">‹ Back</Text>
+        <Feather name="chevron-left" size={22} color={color.brand[600]} />
       </Pressable>
       <Heading size="lg" className="flex-1 px-md text-center" numberOfLines={1}>
         {title}
