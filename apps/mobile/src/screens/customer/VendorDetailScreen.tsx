@@ -1,15 +1,87 @@
-import { View, ScrollView, Pressable } from 'react-native';
+import { memo } from 'react';
+import { View, Pressable } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { Text, Heading, Badge, Skeleton, Button } from '../../components/ui';
+import { Feather, MaterialCommunityIcons } from '@expo/vector-icons';
+import { color } from '@swift/ui';
+import { Text, Heading, Badge, Skeleton, Button, List, Image } from '../../components/ui';
 import { useVendor, useCart, useAddToCart } from '../../hooks';
 import { money } from '../../lib/money';
+import { fallbackImage } from '../../lib/images';
 
-const COVER_EMOJI: Record<string, string> = {
-  RESTAURANT: '🍽️',
-  SUPERMARKET: '🛒',
-  STORE: '🛍️',
-  SERVICE: '🛠️',
-};
+type Row = { type: 'header'; key: string; name: string } | { type: 'item'; key: string; item: any };
+
+const SHADOW = { shadowColor: '#000', shadowOpacity: 0.12, shadowRadius: 6, shadowOffset: { width: 0, height: 2 }, elevation: 4 } as const;
+
+function BackButton({ onPress }: { onPress?: () => void }) {
+  return (
+    <Pressable
+      onPress={onPress}
+      hitSlop={10}
+      style={[{ position: 'absolute', top: 12, left: 16, zIndex: 10, width: 38, height: 38, borderRadius: 19, alignItems: 'center', justifyContent: 'center', backgroundColor: color.surface.base }, SHADOW]}
+    >
+      <Feather name="chevron-left" size={24} color={color.text.primary} />
+    </Pressable>
+  );
+}
+
+const MenuItemRow = memo(function MenuItemRow({ item, onAdd, adding }: { item: any; onAdd: () => void; adding: boolean }) {
+  const unavailable = item.isAvailable === false;
+  return (
+    <View className="mx-lg flex-row items-start border-b border-border-subtle py-md">
+      <View className="flex-1 pr-md">
+        <Text className="text-base font-semibold text-text-primary">{item.name}</Text>
+        {item.description ? (
+          <Text className="mt-xs text-sm text-text-secondary" numberOfLines={2}>{item.description}</Text>
+        ) : null}
+        <Text className="mt-sm text-sm font-bold text-text-primary">{money(item.customerPrice ?? item.basePrice)}</Text>
+      </View>
+      <View style={{ width: 96, height: 96 }}>
+        <Image source={{ uri: item.imageUrl || fallbackImage(item.id) }} style={{ width: 96, height: 96, borderRadius: 14 }} />
+        <Pressable
+          onPress={onAdd}
+          disabled={unavailable || adding}
+          hitSlop={8}
+          style={[{ position: 'absolute', bottom: -10, right: -6, width: 34, height: 34, borderRadius: 17, alignItems: 'center', justifyContent: 'center', backgroundColor: color.surface.base }, SHADOW]}
+        >
+          <Feather name={unavailable ? 'slash' : 'plus'} size={18} color={unavailable ? color.text.muted : color.brand[500]} />
+        </Pressable>
+      </View>
+    </View>
+  );
+});
+
+function VendorHeader({ vendor }: { vendor: any }) {
+  const rating = vendor.averageRating && vendor.averageRating > 0 ? Number(vendor.averageRating).toFixed(1) : 'New';
+  return (
+    <View className="mb-sm">
+      <Image source={{ uri: vendor.coverImageUrl || fallbackImage(vendor.id) }} style={{ width: '100%', height: 210 }} />
+      <View className="px-lg pt-md">
+        <View className="flex-row items-start justify-between">
+          <Heading size="2xl" className="flex-1 pr-md">{vendor.name}</Heading>
+          {vendor.isCurrentlyOpen === false ? <Badge label="Closed" tone="brand" /> : <Badge label="Open" tone="success" />}
+        </View>
+        <View className="mt-sm flex-row items-center">
+          <MaterialCommunityIcons name="star" size={15} color={color.brand[500]} />
+          <Text className="ml-1 text-sm font-semibold text-text-primary">{rating}</Text>
+          {vendor.totalRatings ? <Text className="ml-1 text-sm text-text-muted">({vendor.totalRatings})</Text> : null}
+          <Text className="mx-2 text-text-muted">·</Text>
+          <Feather name="clock" size={14} color={color.text.muted} />
+          <Text className="ml-1 text-sm text-text-secondary">{vendor.estimatedPrepTime ?? 25} min</Text>
+          {vendor.distanceKm != null ? (
+            <>
+              <Text className="mx-2 text-text-muted">·</Text>
+              <Text className="text-sm text-text-secondary">{vendor.distanceKm} km</Text>
+            </>
+          ) : null}
+        </View>
+        {vendor.description ? <Text className="mt-sm text-sm text-text-secondary">{vendor.description}</Text> : null}
+        {vendor.minOrderAmount ? (
+          <Text className="mt-xs text-xs text-text-muted">Minimum order {money(vendor.minOrderAmount)}</Text>
+        ) : null}
+      </View>
+    </View>
+  );
+}
 
 export function VendorDetailScreen({ navigation, route }: any) {
   const id: string = route?.params?.id ?? '';
@@ -24,12 +96,10 @@ export function VendorDetailScreen({ navigation, route }: any) {
     return (
       <SafeAreaView style={{ flex: 1 }} edges={['top']} className="bg-surface-base">
         <View className="p-lg">
-          <Skeleton className="mb-md h-36 w-full" />
+          <Skeleton className="mb-md h-52 w-full rounded-2xl" />
           <Skeleton className="mb-sm h-6 w-2/3" />
           <Skeleton className="mb-lg h-4 w-1/2" />
-          {[0, 1, 2, 3].map((i) => (
-            <Skeleton key={i} className="mb-md h-16 w-full" />
-          ))}
+          {[0, 1, 2, 3].map((i) => <Skeleton key={i} className="mb-md h-20 w-full rounded-xl" />)}
         </View>
       </SafeAreaView>
     );
@@ -38,8 +108,9 @@ export function VendorDetailScreen({ navigation, route }: any) {
   if (isError || !vendor) {
     return (
       <SafeAreaView style={{ flex: 1 }} edges={['top']} className="bg-surface-base">
+        <BackButton onPress={() => navigation?.goBack?.()} />
         <View className="flex-1 items-center justify-center px-2xl">
-          <Text className="text-3xl">⚠️</Text>
+          <Feather name="alert-triangle" size={32} color={color.text.muted} />
           <Text className="mt-sm text-center text-text-secondary">Couldn&apos;t load this place.</Text>
           <Button label="Retry" className="mt-md" onPress={() => refetch()} />
         </View>
@@ -48,98 +119,35 @@ export function VendorDetailScreen({ navigation, route }: any) {
   }
 
   const categories: any[] = vendor.categories ?? [];
-  const rating = vendor.averageRating && vendor.averageRating > 0 ? vendor.averageRating.toFixed(1) : 'New';
+  const rows: Row[] = [];
+  for (const cat of categories) {
+    rows.push({ type: 'header', key: `h_${cat.id}`, name: cat.name });
+    for (const it of cat.items ?? []) rows.push({ type: 'item', key: String(it.id), item: it });
+  }
 
   return (
     <SafeAreaView style={{ flex: 1 }} edges={['top']} className="bg-surface-base">
-      {/* Back */}
-      <View className="flex-row items-center px-lg py-sm">
-        <Pressable onPress={() => navigation?.goBack?.()} hitSlop={8}>
-          <Text className="text-2xl">‹ Back</Text>
-        </Pressable>
-      </View>
+      <BackButton onPress={() => navigation?.goBack?.()} />
+      <List
+        data={rows}
+        keyExtractor={(r: Row) => r.key}
+        getItemType={(r: Row) => r.type}
+        ListHeaderComponent={<VendorHeader vendor={vendor} />}
+        renderItem={({ item: row }: { item: Row }) =>
+          row.type === 'header' ? (
+            <Heading size="lg" className="px-lg pb-sm pt-lg">{row.name}</Heading>
+          ) : (
+            <MenuItemRow
+              item={row.item}
+              adding={addToCart.isPending}
+              onAdd={() => addToCart.mutate({ vendorId: id, itemId: row.item.id, quantity: 1 })}
+            />
+          )
+        }
+        ListEmptyComponent={<Text className="px-lg pt-xl text-text-secondary">No items listed yet.</Text>}
+        contentContainerStyle={{ paddingBottom: 120 }}
+      />
 
-      <ScrollView className="flex-1" showsVerticalScrollIndicator={false} contentContainerStyle={{ paddingBottom: 120 }}>
-        {/* Cover */}
-        <View className="mx-lg mb-md h-36 items-center justify-center rounded-xl bg-brand-50">
-          <Text className="text-5xl">{COVER_EMOJI[vendor.vendorType] ?? '🏬'}</Text>
-        </View>
-
-        {/* Header */}
-        <View className="px-lg">
-          <View className="flex-row items-start justify-between">
-            <Heading size="2xl" className="flex-1 pr-md">
-              {vendor.name}
-            </Heading>
-            {vendor.isCurrentlyOpen === false ? (
-              <Badge label="Closed" tone="brand" />
-            ) : (
-              <Badge label="Open" tone="success" />
-            )}
-          </View>
-          <Text className="mt-xs text-sm text-text-secondary">
-            {rating} ★{vendor.totalRatings ? ` (${vendor.totalRatings})` : ''} · {vendor.estimatedPrepTime ?? 25} min
-            {vendor.distanceKm != null ? ` · ${vendor.distanceKm} km` : ''}
-          </Text>
-          {vendor.description ? (
-            <Text className="mt-sm text-sm text-text-secondary">{vendor.description}</Text>
-          ) : null}
-          {vendor.minOrderAmount ? (
-            <Text className="mt-xs text-xs text-text-muted">Minimum order {money(vendor.minOrderAmount)}</Text>
-          ) : null}
-        </View>
-
-        {/* Menu */}
-        {categories.length === 0 ? (
-          <Text className="px-lg pt-xl text-text-secondary">No items listed yet.</Text>
-        ) : (
-          categories.map((cat) => (
-            <View key={cat.id} className="mt-lg">
-              <Heading size="lg" className="px-lg pb-sm">
-                {cat.name}
-              </Heading>
-              {(cat.items ?? []).map((item: any) => {
-                const unavailable = item.isAvailable === false;
-                return (
-                  <View
-                    key={item.id}
-                    className="mx-lg mb-sm flex-row items-start justify-between border-b border-border-subtle pb-sm"
-                  >
-                    <View className="flex-1 pr-md">
-                      <Text className="text-base font-semibold">{item.name}</Text>
-                      {item.description ? (
-                        <Text className="mt-xs text-sm text-text-secondary" numberOfLines={2}>
-                          {item.description}
-                        </Text>
-                      ) : null}
-                      <Text className="mt-xs text-sm font-semibold text-text-primary">
-                        {money(item.customerPrice ?? item.basePrice)}
-                      </Text>
-                    </View>
-                    <Pressable
-                      onPress={() => addToCart.mutate({ vendorId: id, itemId: item.id, quantity: 1 })}
-                      disabled={unavailable || addToCart.isPending}
-                      className={
-                        unavailable
-                          ? 'rounded-full border border-border-subtle px-lg py-sm'
-                          : 'rounded-full border border-brand-500 px-lg py-sm active:bg-brand-50'
-                      }
-                    >
-                      <Text
-                        className={unavailable ? 'text-sm font-semibold text-text-muted' : 'text-sm font-semibold text-brand-500'}
-                      >
-                        {unavailable ? 'Sold out' : 'Add'}
-                      </Text>
-                    </Pressable>
-                  </View>
-                );
-              })}
-            </View>
-          ))
-        )}
-      </ScrollView>
-
-      {/* Live cart bar */}
       {cartCount > 0 ? (
         <View className="absolute inset-x-0 bottom-0 border-t border-border-subtle bg-surface-base px-lg pb-2xl pt-md">
           <Button onPress={() => navigation?.navigate?.('Cart')}>
