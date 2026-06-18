@@ -6,3 +6,6 @@ export { Badge } from './badge';
 export { Button } from './button';
 export { Spinner, Skeleton } from './feedback';
 export { GluestackUIProvider } from './provider';
+export { List } from './list';
+export { Image } from './image';
+export { Input } from './input';

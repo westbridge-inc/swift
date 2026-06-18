@@ -1,6 +1,8 @@
 import { useState } from 'react';
 import { View, ScrollView, Pressable } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
+import { Feather, MaterialCommunityIcons } from '@expo/vector-icons';
+import { color } from '@swift/ui';
 import { Text, Heading, Card, Button, Spinner } from '../../components/ui';
 import { useCart, useAddresses, useSetCartAddress, useSetCartTip, usePlaceOrder } from '../../hooks';
 import { money } from '../../lib/money';
@@ -55,18 +57,16 @@ export function CheckoutScreen({ navigation }: any) {
   return (
     <SafeAreaView style={{ flex: 1 }} edges={['top']} className="bg-surface-base">
       <View className="flex-row items-center px-lg py-sm">
-        <Pressable onPress={() => navigation?.goBack?.()} hitSlop={8}>
-          <Text className="text-2xl">‹ Back</Text>
+        <Pressable onPress={() => navigation?.goBack?.()} hitSlop={10}>
+          <Feather name="chevron-left" size={24} color={color.text.primary} />
         </Pressable>
-        <Text className="ml-md text-base font-semibold">Checkout</Text>
+        <Text className="ml-md text-base font-bold">Checkout</Text>
       </View>
 
       <ScrollView className="flex-1" contentContainerStyle={{ paddingBottom: 170 }} showsVerticalScrollIndicator={false}>
         <View className="px-lg pt-sm">
           {/* Address */}
-          <Heading size="lg" className="mb-sm">
-            Deliver to
-          </Heading>
+          <Heading size="lg" className="mb-sm">Deliver to</Heading>
           {list.length === 0 ? (
             <Card>
               <Text className="text-text-secondary">No saved address yet. Add one from your Account first.</Text>
@@ -75,23 +75,16 @@ export function CheckoutScreen({ navigation }: any) {
             list.map((a) => {
               const active = a.id === effectiveAddressId;
               return (
-                <Pressable
-                  key={a.id}
-                  onPress={() => {
-                    setSelectedId(a.id);
-                    setAddress.mutate(a.id);
-                  }}
-                >
+                <Pressable key={a.id} onPress={() => { setSelectedId(a.id); setAddress.mutate(a.id); }}>
                   <Card className={active ? 'mb-sm border-brand-500' : 'mb-sm'}>
                     <View className="flex-row items-center justify-between">
                       <View className="flex-1 pr-md">
                         <Text className="text-base font-semibold">{a.label || a.addressLine1}</Text>
                         <Text className="mt-xs text-sm text-text-secondary" numberOfLines={1}>
-                          {a.addressLine1}
-                          {a.city ? `, ${a.city}` : ''}
+                          {a.addressLine1}{a.city ? `, ${a.city}` : ''}
                         </Text>
                       </View>
-                      <Text className={active ? 'text-brand-500' : 'text-text-muted'}>{active ? '●' : '○'}</Text>
+                      <Feather name={active ? 'check-circle' : 'circle'} size={20} color={active ? color.brand[500] : color.text.muted} />
                     </View>
                   </Card>
                 </Pressable>
@@ -100,40 +93,30 @@ export function CheckoutScreen({ navigation }: any) {
           )}
 
           {/* Payment */}
-          <Heading size="lg" className="mb-sm mt-lg">
-            Payment
-          </Heading>
-          <Card>
+          <Heading size="lg" className="mb-sm mt-lg">Payment</Heading>
+          <Card className="border-brand-500">
             <View className="flex-row items-center justify-between">
-              <Text className="text-base font-semibold">💵  Cash on delivery</Text>
-              <Text className="text-brand-500">●</Text>
+              <View className="flex-row items-center">
+                <MaterialCommunityIcons name="cash" size={22} color={color.success} />
+                <Text className="ml-sm text-base font-semibold">Cash on delivery</Text>
+              </View>
+              <Feather name="check-circle" size={20} color={color.brand[500]} />
             </View>
             <Text className="mt-xs text-xs text-text-muted">Pay the rider in cash. No card needed, no platform fees.</Text>
           </Card>
 
           {/* Tip */}
-          <Heading size="lg" className="mb-sm mt-lg">
-            Tip your rider
-          </Heading>
+          <Heading size="lg" className="mb-sm mt-lg">Tip your rider</Heading>
           <View className="flex-row" style={{ gap: 8 }}>
             {TIPS.map((t) => {
               const active = t === selectedTip;
               return (
                 <Pressable
                   key={t}
-                  onPress={() => {
-                    setSelectedTip(t);
-                    setTip.mutate(t);
-                  }}
-                  className={
-                    active
-                      ? 'flex-1 items-center rounded-lg border border-brand-500 bg-brand-50 py-sm'
-                      : 'flex-1 items-center rounded-lg border border-border-subtle py-sm'
-                  }
+                  onPress={() => { setSelectedTip(t); setTip.mutate(t); }}
+                  className={active ? 'flex-1 items-center rounded-lg border border-brand-500 bg-brand-50 py-sm' : 'flex-1 items-center rounded-lg border border-border-subtle py-sm'}
                 >
-                  <Text className={active ? 'font-semibold text-brand-600' : 'text-text-secondary'}>
-                    {t === 0 ? 'None' : money(t)}
-                  </Text>
+                  <Text className={active ? 'font-semibold text-brand-600' : 'text-text-secondary'}>{t === 0 ? 'None' : money(t)}</Text>
                 </Pressable>
               );
             })}

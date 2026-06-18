@@ -1,5 +1,7 @@
 import { View, ScrollView, Pressable } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
+import { Feather, MaterialCommunityIcons } from '@expo/vector-icons';
+import { color } from '@swift/ui';
 import { Text, Heading, Card, Button, Badge } from '../../components/ui';
 import { useAuthStore } from '../../stores/authStore';
 import { useProfile, useAddresses } from '../../hooks';
@@ -24,12 +26,10 @@ export function AccountScreen({ navigation }: any) {
         <View className="px-lg">
           <Card className="flex-row items-center">
             <View className="h-14 w-14 items-center justify-center rounded-full bg-brand-500">
-              <Text className="text-lg font-semibold text-white">{initials}</Text>
+              <Text className="text-lg font-bold text-white">{initials}</Text>
             </View>
             <View className="ml-md flex-1">
-              <Text className="text-lg font-semibold">
-                {firstName || 'Your account'} {lastName}
-              </Text>
+              <Text className="text-lg font-bold">{firstName || 'Your account'} {lastName}</Text>
               {phone ? <Text className="mt-xs text-sm text-text-secondary">{phone}</Text> : null}
             </View>
           </Card>
@@ -37,52 +37,49 @@ export function AccountScreen({ navigation }: any) {
           {profile?.customer ? (
             <View className="mt-md flex-row" style={{ gap: 12 }}>
               <Card className="flex-1 items-center">
-                <Text className="text-xl font-semibold">{profile.customer.totalOrders ?? 0}</Text>
+                <Text className="text-xl font-bold">{profile.customer.totalOrders ?? 0}</Text>
                 <Text className="mt-xs text-xs text-text-secondary">Orders</Text>
               </Card>
               <Card className="flex-1 items-center">
-                <Text className="text-base font-semibold">{profile.customer.referralCode ?? '—'}</Text>
+                <Text className="text-base font-bold">{profile.customer.referralCode ?? '—'}</Text>
                 <Text className="mt-xs text-xs text-text-secondary">Referral code</Text>
               </Card>
             </View>
           ) : null}
 
-          <Heading size="lg" className="mb-sm mt-xl">
-            Saved addresses
-          </Heading>
+          <Heading size="lg" className="mb-sm mt-xl">Saved addresses</Heading>
           {list.length === 0 ? (
             <Card>
               <Text className="text-text-secondary">No saved addresses yet.</Text>
             </Card>
           ) : (
             list.map((a) => (
-              <Card key={a.id} className="mb-sm">
-                <View className="flex-row items-center justify-between">
-                  <View className="flex-1 pr-md">
-                    <Text className="text-base font-semibold">{a.label || a.addressLine1}</Text>
-                    <Text className="mt-xs text-sm text-text-secondary" numberOfLines={1}>
-                      {a.addressLine1}
-                      {a.city ? `, ${a.city}` : ''}
-                    </Text>
-                  </View>
-                  {a.isDefault ? <Badge label="Default" tone="success" /> : null}
+              <Card key={a.id} className="mb-sm flex-row items-center">
+                <MaterialCommunityIcons name="map-marker-outline" size={20} color={color.text.muted} />
+                <View className="ml-sm flex-1">
+                  <Text className="text-base font-semibold">{a.label || a.addressLine1}</Text>
+                  <Text className="mt-xs text-sm text-text-secondary" numberOfLines={1}>
+                    {a.addressLine1}{a.city ? `, ${a.city}` : ''}
+                  </Text>
                 </View>
+                {a.isDefault ? <Badge label="Default" tone="success" /> : null}
               </Card>
             ))
           )}
 
           <Pressable onPress={() => navigation?.navigate?.('IdentityVerification')}>
-            <Card className="mt-xl flex-row items-center justify-between">
-              <View className="flex-1 pr-md">
+            <Card className="mt-xl flex-row items-center">
+              <MaterialCommunityIcons name="shield-check-outline" size={22} color={color.brand[500]} />
+              <View className="ml-md flex-1">
                 <Text className="text-base font-semibold">Verify your identity</Text>
                 <Text className="mt-xs text-xs text-text-secondary">Lifts the limit on larger orders &amp; rides.</Text>
               </View>
-              <Text className="text-xl text-brand-500">›</Text>
+              <Feather name="chevron-right" size={20} color={color.text.muted} />
             </Card>
           </Pressable>
 
-          <View className="mt-md flex-row items-start rounded-lg bg-brand-50 px-lg py-md">
-            <Text className="text-base">💵</Text>
+          <View className="mt-md flex-row items-center rounded-2xl bg-brand-50 px-lg py-md">
+            <MaterialCommunityIcons name="cash" size={20} color={color.success} />
             <Text className="ml-sm flex-1 text-sm text-brand-700">
               Swift is cash-only for now — pay on delivery or completion. No cards, no platform fees.
             </Text>
