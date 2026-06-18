@@ -21,7 +21,7 @@ device-verified before the next. The data layer (`src/hooks/*`, `src/services/ap
 - [x] **0a. Kickoff** — real icons (`@expo/vector-icons`), Home photo pass, `SwiftGY` native rename (fixes reserved-module build), gitignore generated native dirs
 - [x] **0b. Foundation** — installed FlashList + expo-image + react-native-svg (one native rebuild; on-device verified). Components are **owned Gluestack-v3-style NativeWind components on `@swift/ui` tokens** — the gluestack CLI can't run headless (TTY-only), so they're hand-authored (the same owned/copy-paste paradigm v3 uses). Added `List` (FlashList) + `Image` (expo-image) + `Input`. (`Actionsheet`/`Modal`/`Toast` added per-stage as needed.)
 - [x] **1. Home** — popular list → `List` (FlashList); RN `Image` → `Image` (expo-image); featured carousel. Gated + on-device verified.
-- [ ] **2. Search** — Gluestack `Input`, debounce, filter chips, `List` results, empty/loading/error
+- [x] **2. Search** — owned `Input` + Feather icons, debounce, filter chips, `List` (FlashList) results with image-led `VendorCard` (expo-image), empty/loading/error. Gated (type-check/lint/export); on-device visual pending a tap on the Search tab.
 - [ ] **3. VendorDetail** — expo-image hero, sticky header, sectioned menu `List`, option `Actionsheet`, add-to-cart
 - [ ] **4. Cart** — `ScrollView` → `List`
 - [ ] **5. Checkout** — Gluestack pickers; cash place-order
