@@ -102,3 +102,16 @@ export function useSetItemAvailability() {
     onSuccess: () => qc.invalidateQueries({ queryKey: ['vendor', 'menu'] }),
   });
 }
+
+/** Upload (or replace) an item's photo — multipart to the StorageProvider. */
+export function useUploadItemImage() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, file }: { id: string; file: { uri: string; name: string; type: string } }) => {
+      const form = new FormData();
+      form.append('file', { uri: file.uri, name: file.name, type: file.type } as unknown as Blob);
+      return unwrap(vendorApi.uploadItemImage(id, form));
+    },
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['vendor', 'menu'] }),
+  });
+}

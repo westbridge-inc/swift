@@ -2,7 +2,7 @@ import axios from 'axios';
 import { useAuthStore } from '../stores/authStore';
 
 // eslint-disable-next-line no-undef
-const API_URL = __DEV__ ? 'http://localhost:3000' : 'https://api.swift.gy';
+export const API_URL = __DEV__ ? 'http://localhost:3000' : 'https://api.swift.gy';
 
 export const api = axios.create({
   baseURL: `${API_URL}/api/v1`,
@@ -239,6 +239,10 @@ export interface VendorItemInput {
   basePrice: number;
   isAvailable?: boolean;
   isPopular?: boolean;
+  sku?: string;
+  unit?: string;
+  stockQuantity?: number;
+  imageUrl?: string;
 }
 
 export const vendorApi = {
@@ -260,4 +264,6 @@ export const vendorApi = {
   deleteItem: (id: string) => api.delete(`/vendor/items/${id}`),
   setItemAvailability: (id: string, isAvailable: boolean) =>
     api.put(`/vendor/items/${id}/availability`, { isAvailable }),
+  uploadItemImage: (id: string, form: FormData) =>
+    api.post(`/vendor/items/${id}/image`, form, { headers: { 'Content-Type': 'multipart/form-data' } }),
 };

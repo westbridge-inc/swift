@@ -1,3 +1,5 @@
+import { API_URL } from '../services/api';
+
 // Shared imagery for cards/heroes when a vendor/item has no photo yet.
 // Photo-led UI; a deterministic fallback keeps the same entity on the same image
 // (no flicker between renders) and is type-aware (no food photos on a hardware store).
@@ -68,4 +70,12 @@ export function vendorImage(v: {
   vendorType?: string | null;
 }): string {
   return v.coverImageUrl || v.logoUrl || fallbackImage(v.id, kindForVendor(v));
+}
+
+/** Absolute URL for a stored media path. A relative "/uploads/..." key (local
+ *  storage provider) gets the API origin prefixed; absolute URLs pass through. */
+export function mediaUrl(url?: string | null): string | null {
+  if (!url) return null;
+  if (/^https?:\/\//.test(url)) return url;
+  return `${API_URL}${url.startsWith('/') ? '' : '/'}${url}`;
 }
