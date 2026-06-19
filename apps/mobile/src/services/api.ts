@@ -266,4 +266,12 @@ export const vendorApi = {
     api.put(`/vendor/items/${id}/availability`, { isAvailable }),
   uploadItemImage: (id: string, form: FormData) =>
     api.post(`/vendor/items/${id}/image`, form, { headers: { 'Content-Type': 'multipart/form-data' } }),
+  // Insights / settings
+  analytics: () => api.get('/vendor/analytics/overview'),
+  hours: () => api.get('/vendor/hours'),
+  setHours: (hours: { dayOfWeek: number; openTime: string; closeTime: string; isClosed: boolean }[]) =>
+    api.put('/vendor/hours', { hours }),
+  updateProfile: (data: { name?: string; phone?: string; description?: string }) =>
+    api.put('/vendor/profile', data),
+  importItems: (csv: string) => api.post('/vendor/items/import', { csv }),
 };

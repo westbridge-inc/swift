@@ -1,10 +1,11 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { View, ScrollView, Pressable, TextInput, Alert, Switch, RefreshControl } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
+import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
 import { color } from '@swift/ui';
 import { Feather, MaterialCommunityIcons } from '@expo/vector-icons';
-import { Text, Heading, Card, Button, Spinner, Skeleton, Image } from '../components/ui';
+import { Text, Heading, Card, Button, Spinner, Skeleton, Image, Badge } from '../components/ui';
 import { DocumentChecklist } from '../components/onboarding/DocumentChecklist';
 import { useBecomePartner, useVerificationStatus } from '../hooks/verification';
 import {
@@ -19,6 +20,11 @@ import {
   useDeleteItem,
   useSetItemAvailability,
   useUploadItemImage,
+  useVendorSubscription,
+  useVendorAnalytics,
+  useVendorHours,
+  useSetHours,
+  type DayHours,
 } from '../hooks/vendorops';
 import { useAuthStore } from '../stores/authStore';
 import { useLocationStore } from '../stores/locationStore';
@@ -278,7 +284,7 @@ function VendorOps({ store, navigation }: any) {
           <KpiTile icon="timer-outline" value={`${store.estimatedPrepTime ?? 30}m`} label="Prep time" />
         </View>
 
-        <Button label="Manage menu & inventory" variant="outline" className="mb-lg" onPress={() => navigation.navigate('VendorMenu')} />
+        <Button label="Manage menu & inventory" variant="outline" className="mb-lg" onPress={() => navigation.navigate('Menu')} />
 
         {/* New orders */}
         <Heading size="lg" className="mb-sm">{newOrders.length ? `New orders · ${newOrders.length}` : 'New orders'}</Heading>
@@ -312,7 +318,7 @@ function VendorOps({ store, navigation }: any) {
   );
 }
 
-function VendorRoot({ navigation }: any) {
+function VendorRoot() {
   const { store, isLoading } = useVendorProfile();
 
   if (isLoading) {
@@ -326,7 +332,7 @@ function VendorRoot({ navigation }: any) {
   }
   if (!store) return <BusinessSetup />;
   if (store.status !== 'ACTIVE') return <VendorOnboarding store={store} />;
-  return <VendorOps store={store} navigation={navigation} />;
+  return <VendorTabs />;
 }
 
 // ─── Menu management ─────────────────────────────────────────────────────────
@@ -335,16 +341,22 @@ function SubHeader({
   title,
   navigation,
   action,
+  hideBack,
 }: {
   title: string;
   navigation: any;
   action?: { label: string; onPress: () => void; disabled?: boolean };
+  hideBack?: boolean;
 }) {
   return (
     <View className="flex-row items-center justify-between px-lg py-sm">
-      <Pressable onPress={() => navigation.goBack()} hitSlop={8}>
-        <Feather name="chevron-left" size={22} color={color.brand[600]} />
-      </Pressable>
+      {hideBack ? (
+        <View style={{ width: 22 }} />
+      ) : (
+        <Pressable onPress={() => navigation.goBack()} hitSlop={8}>
+          <Feather name="chevron-left" size={22} color={color.brand[600]} />
+        </Pressable>
+      )}
       <Heading size="lg" className="flex-1 px-md text-center" numberOfLines={1}>
         {title}
       </Heading>
@@ -449,8 +461,9 @@ function VendorMenuScreen({ navigation }: any) {
   return (
     <SafeAreaView style={{ flex: 1 }} edges={['top']} className="bg-surface-base">
       <SubHeader
-        title="Menu"
+        title="Menu & inventory"
         navigation={navigation}
+        hideBack
         action={
           catOptions.length > 0
             ? { label: '+ Item', onPress: () => navigation.navigate('VendorItemEditor', { categories: catOptions }) }
@@ -647,12 +660,227 @@ function VendorItemEditorScreen({ navigation, route }: any) {
   );
 }
 
+function prettyVendorType(t?: string) {
+  return t === 'SUPERMARKET' ? 'Grocery' : t === 'STORE' ? 'Shop' : t === 'SERVICE' ? 'Services' : 'Restaurant';
+}
+
+const DAY_LABELS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+
+// Orders tab — the (cached) store, then the live order board.
+function VendorOrdersTab({ navigation }: any) {
+  const { store } = useVendorProfile();
+  if (!store) {
+    return (
+      <SafeAreaView style={{ flex: 1 }} edges={['top']} className="bg-surface-base">
+        <View className="flex-1 items-center justify-center">
+          <Spinner size="large" />
+        </View>
+      </SafeAreaView>
+    );
+  }
+  return <VendorOps store={store} navigation={navigation} />;
+}
+
+function VendorInsightsScreen() {
+  const q = useVendorAnalytics();
+  const a: any = q.data ?? {};
+  const v: any = a.vendor ?? {};
+  return (
+    <SafeAreaView style={{ flex: 1 }} edges={['top']} className="bg-surface-base">
+      <Header title="Insights" />
+      <ScrollView
+        className="flex-1"
+        contentContainerStyle={{ paddingHorizontal: 16, paddingBottom: 32 }}
+        showsVerticalScrollIndicator={false}
+        refreshControl={<RefreshControl refreshing={q.isRefetching} onRefresh={() => q.refetch()} tintColor={color.brand[500]} />}
+      >
+        {q.isLoading ? (
+          <>
+            <Skeleton className="mb-md h-24 w-full rounded-2xl" />
+            <Skeleton className="mb-md h-24 w-full rounded-2xl" />
+          </>
+        ) : (
+          <>
+            <View className="mb-md flex-row" style={{ gap: 8 }}>
+              <KpiTile icon="receipt" value={String(a.today?.orders ?? 0)} label="Orders today" />
+              <KpiTile icon="cash" value={money(a.today?.revenue ?? 0)} label="Revenue today" />
+            </View>
+            <View className="mb-md flex-row" style={{ gap: 8 }}>
+              <KpiTile icon="calendar-week" value={String(a.week?.orders ?? 0)} label="Orders / week" />
+              <KpiTile icon="calendar-month" value={String(a.month?.orders ?? 0)} label="Orders / month" />
+            </View>
+            <Card className="mb-md">
+              <View className="flex-row items-center justify-between">
+                <View className="flex-row items-center">
+                  <MaterialCommunityIcons name="star" size={18} color={color.brand[500]} />
+                  <Text className="ml-2 text-base font-semibold">{Number(v.averageRating ?? 0).toFixed(1)}</Text>
+                  <Text className="ml-1 text-sm text-text-muted">({v.totalRatings ?? 0})</Text>
+                </View>
+                <Text className="text-sm text-text-secondary">{v.totalOrders ?? 0} lifetime orders</Text>
+              </View>
+            </Card>
+            <View className="flex-row" style={{ gap: 8 }}>
+              <KpiTile icon="silverware-fork-knife" value={String(a.activeMenuItems ?? 0)} label="Active items" />
+              <KpiTile icon="bell-ring" value={String(a.pendingOrders ?? 0)} label="Pending now" />
+            </View>
+          </>
+        )}
+      </ScrollView>
+    </SafeAreaView>
+  );
+}
+
+function VendorAccountScreen() {
+  const { store } = useVendorProfile();
+  const sub = useVendorSubscription();
+  const hoursQ = useVendorHours();
+  const setHours = useSetHours();
+
+  const [days, setDays] = useState<DayHours[]>([]);
+  useEffect(() => {
+    const byDay = new Map<number, DayHours>();
+    for (const h of hoursQ.data ?? []) {
+      if (!byDay.has(h.dayOfWeek)) {
+        byDay.set(h.dayOfWeek, {
+          dayOfWeek: h.dayOfWeek,
+          openTime: h.openTime || '08:00',
+          closeTime: h.closeTime || '22:00',
+          isClosed: !!h.isClosed,
+        });
+      }
+    }
+    setDays(Array.from({ length: 7 }, (_, d) => byDay.get(d) ?? { dayOfWeek: d, openTime: '08:00', closeTime: '22:00', isClosed: false }));
+  }, [hoursQ.data]);
+
+  const setDay = (d: number, patch: Partial<DayHours>) =>
+    setDays((prev) => prev.map((x) => (x.dayOfWeek === d ? { ...x, ...patch } : x)));
+
+  return (
+    <SafeAreaView style={{ flex: 1 }} edges={['top']} className="bg-surface-base">
+      <Header title="Account" />
+      <ScrollView className="flex-1" contentContainerStyle={{ paddingHorizontal: 16, paddingBottom: 32 }} showsVerticalScrollIndicator={false}>
+        <Card className="mb-md">
+          <Text className="text-base font-bold text-text-primary">{store?.name ?? 'Your store'}</Text>
+          <Text className="mt-xs text-sm text-text-secondary">
+            {prettyVendorType(store?.vendorType)}
+            {store?.city ? ` · ${store.city}` : ''}
+          </Text>
+          {store?.phone ? <Text className="mt-xs text-xs text-text-muted">{store.phone}</Text> : null}
+        </Card>
+
+        <Card className="mb-md">
+          <View className="flex-row items-center justify-between">
+            <View className="flex-1 pr-md">
+              <Text className="text-base font-semibold">Subscription</Text>
+              <Text className="mt-xs text-xs text-text-muted">
+                {sub.data ? 'Active weekly plan' : 'No active plan — set up weekly billing'}
+              </Text>
+            </View>
+            <Badge label={sub.data ? 'Active' : 'Inactive'} tone={sub.data ? 'success' : 'brand'} />
+          </View>
+        </Card>
+
+        <Heading size="lg" className="mb-sm mt-sm">
+          Business hours
+        </Heading>
+        {hoursQ.isLoading ? (
+          <Skeleton className="mb-md h-48 w-full rounded-2xl" />
+        ) : (
+          <Card className="mb-md">
+            {days.map((d) => (
+              <View key={d.dayOfWeek} className="mb-sm flex-row items-center">
+                <Text className="w-10 text-sm font-semibold text-text-primary">{DAY_LABELS[d.dayOfWeek]}</Text>
+                {d.isClosed ? (
+                  <Text className="flex-1 px-sm text-sm text-text-muted">Closed</Text>
+                ) : (
+                  <View className="flex-1 flex-row items-center px-sm" style={{ gap: 6 }}>
+                    <TextInput
+                      value={d.openTime}
+                      onChangeText={(t) => setDay(d.dayOfWeek, { openTime: t })}
+                      placeholder="08:00"
+                      placeholderTextColor={color.text.muted}
+                      className="flex-1 rounded-lg border border-border-subtle bg-surface-base px-sm py-sm text-center font-body text-sm text-text-primary"
+                    />
+                    <Text className="text-text-muted">–</Text>
+                    <TextInput
+                      value={d.closeTime}
+                      onChangeText={(t) => setDay(d.dayOfWeek, { closeTime: t })}
+                      placeholder="22:00"
+                      placeholderTextColor={color.text.muted}
+                      className="flex-1 rounded-lg border border-border-subtle bg-surface-base px-sm py-sm text-center font-body text-sm text-text-primary"
+                    />
+                  </View>
+                )}
+                <Switch
+                  value={!d.isClosed}
+                  onValueChange={(val) => setDay(d.dayOfWeek, { isClosed: !val })}
+                  trackColor={{ true: color.brand[500], false: color.border.subtle }}
+                />
+              </View>
+            ))}
+            <Button
+              label={setHours.isPending ? 'Saving…' : 'Save hours'}
+              className="mt-sm"
+              disabled={setHours.isPending || days.length === 0}
+              onPress={() => setHours.mutate(days)}
+            />
+            {setHours.isSuccess ? <Text className="mt-sm text-center text-xs text-success">Hours updated</Text> : null}
+          </Card>
+        )}
+      </ScrollView>
+    </SafeAreaView>
+  );
+}
+
+function MenuStackNav() {
+  return (
+    <Stack.Navigator screenOptions={{ headerShown: false }}>
+      <Stack.Screen name="VendorMenu" component={VendorMenuScreen} />
+      <Stack.Screen name="VendorItemEditor" component={VendorItemEditorScreen} />
+    </Stack.Navigator>
+  );
+}
+
+const VTab = createBottomTabNavigator();
+
+function VendorTabs() {
+  return (
+    <VTab.Navigator
+      screenOptions={{
+        headerShown: false,
+        tabBarActiveTintColor: color.brand[500],
+        tabBarInactiveTintColor: color.text.muted,
+        tabBarStyle: { backgroundColor: color.surface.base, borderTopColor: color.border.subtle },
+      }}
+    >
+      <VTab.Screen
+        name="Orders"
+        component={VendorOrdersTab}
+        options={{ tabBarLabel: 'Orders', tabBarIcon: ({ color: c, size }) => <Feather name="clipboard" size={size} color={c} /> }}
+      />
+      <VTab.Screen
+        name="Menu"
+        component={MenuStackNav}
+        options={{ tabBarLabel: 'Menu', tabBarIcon: ({ color: c, size }) => <Feather name="book-open" size={size} color={c} /> }}
+      />
+      <VTab.Screen
+        name="Insights"
+        component={VendorInsightsScreen}
+        options={{ tabBarLabel: 'Insights', tabBarIcon: ({ color: c, size }) => <Feather name="bar-chart-2" size={size} color={c} /> }}
+      />
+      <VTab.Screen
+        name="Account"
+        component={VendorAccountScreen}
+        options={{ tabBarLabel: 'Account', tabBarIcon: ({ color: c, size }) => <Feather name="user" size={size} color={c} /> }}
+      />
+    </VTab.Navigator>
+  );
+}
+
 export function VendorStack() {
   return (
     <Stack.Navigator screenOptions={{ headerShown: false }}>
       <Stack.Screen name="VendorRoot" component={VendorRoot} />
-      <Stack.Screen name="VendorMenu" component={VendorMenuScreen} />
-      <Stack.Screen name="VendorItemEditor" component={VendorItemEditorScreen} />
     </Stack.Navigator>
   );
 }
