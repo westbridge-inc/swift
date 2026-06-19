@@ -1,11 +1,11 @@
 import { useEffect, useState } from 'react';
-import { View, TextInput, Pressable } from 'react-native';
+import { View, TextInput } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Feather } from '@expo/vector-icons';
 import { color } from '@swift/ui';
 import { authApi } from '../../services/api';
 import { useAuthStore } from '../../stores/authStore';
-import { Text, Heading } from '../../components/ui';
+import { Text, Heading, PressableScale, StepProgress } from '../../components/ui';
 
 export function OtpVerificationScreen({ route, navigation }: any) {
   const { phone } = route.params;
@@ -49,18 +49,21 @@ export function OtpVerificationScreen({ route, navigation }: any) {
   return (
     <SafeAreaView style={{ flex: 1 }} edges={['top', 'bottom']} className="bg-surface-base">
       <View className="flex-row items-center px-lg py-sm">
-        <Pressable onPress={() => navigation?.goBack?.()} hitSlop={12}>
+        <PressableScale onPress={() => navigation?.goBack?.()} hitSlop={12}>
           <Feather name="chevron-left" size={26} color={color.text.primary} />
-        </Pressable>
+        </PressableScale>
+      </View>
+      <View className="px-lg">
+        <StepProgress step={2} total={4} />
       </View>
       <View className="flex-1 justify-center px-lg">
         <Heading size="xl" className="text-center">
           Enter the code
         </Heading>
         <Text className="mt-xs text-center text-text-secondary">Sent to {phone}</Text>
-        <Pressable onPress={() => navigation?.goBack?.()} hitSlop={6}>
+        <PressableScale onPress={() => navigation?.goBack?.()} hitSlop={6}>
           <Text className="mt-xs text-center text-sm font-semibold text-brand-600">Wrong number? Change it</Text>
-        </Pressable>
+        </PressableScale>
         <TextInput
           value={otp}
           onChangeText={(t) => {
@@ -80,9 +83,9 @@ export function OtpVerificationScreen({ route, navigation }: any) {
         {seconds > 0 ? (
           <Text className="mt-lg text-center text-sm text-text-muted">Resend code in {seconds}s</Text>
         ) : (
-          <Pressable onPress={resend} hitSlop={8}>
+          <PressableScale onPress={resend} hitSlop={8}>
             <Text className="mt-lg text-center text-sm font-semibold text-brand-600">Resend code</Text>
-          </Pressable>
+          </PressableScale>
         )}
       </View>
     </SafeAreaView>
