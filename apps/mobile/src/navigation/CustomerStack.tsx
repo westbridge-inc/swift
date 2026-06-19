@@ -13,6 +13,7 @@ import { OrderTrackingScreen } from '../screens/customer/OrderTrackingScreen';
 import { TaxiScreen } from '../screens/customer/TaxiScreen';
 import { ServicesScreen } from '../screens/customer/ServicesScreen';
 import { IdentityVerificationScreen } from '../screens/customer/IdentityVerificationScreen';
+import { AddAddressScreen } from '../screens/customer/AddAddressScreen';
 import { color } from '@swift/ui';
 import { Feather } from '@expo/vector-icons';
 
@@ -69,6 +70,7 @@ export function CustomerStack() {
       <Stack.Screen name="Taxi" component={TaxiScreen} />
       <Stack.Screen name="Services" component={ServicesScreen} />
       <Stack.Screen name="IdentityVerification" component={IdentityVerificationScreen} />
+      <Stack.Screen name="AddAddress" component={AddAddressScreen} />
     </Stack.Navigator>
   );
 }

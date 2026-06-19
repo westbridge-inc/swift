@@ -64,12 +64,24 @@ export const authApi = {
 };
 
 // Customer
+export interface AddressInput {
+  label: string;
+  addressLine1: string;
+  addressLine2?: string;
+  city: string;
+  region?: string;
+  latitude: number;
+  longitude: number;
+  instructions?: string;
+  isDefault?: boolean;
+}
+
 export const customerApi = {
   getProfile: () => api.get('/customer/profile'),
   updateProfile: (data: { firstName?: string; lastName?: string }) => api.put('/customer/profile', data),
   switchRole: (role: string) => api.post('/customer/switch-role', { role }),
   getAddresses: () => api.get('/customer/addresses'),
-  addAddress: (data: any) => api.post('/customer/addresses', data),
+  addAddress: (data: AddressInput) => api.post('/customer/addresses', data),
   getHome: (lat?: number, lng?: number) => api.get('/customer/home', { params: { lat, lng } }),
   getVendors: (params?: Record<string, string>) => api.get('/customer/vendors', { params }),
   getVendor: (id: string) => api.get(`/customer/vendors/${id}`),

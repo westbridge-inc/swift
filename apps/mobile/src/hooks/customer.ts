@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { customerApi } from '../services/api';
+import { customerApi, type AddressInput } from '../services/api';
 
 /**
  * Thin React Query wrappers over `customerApi`. Every consumer screen reads data
@@ -29,6 +29,14 @@ export function useProfile<T = any>() {
 
 export function useAddresses<T = any>() {
   return useQuery<T>({ queryKey: customerKeys.addresses, queryFn: () => unwrap<T>(customerApi.getAddresses()) });
+}
+
+export function useAddAddress() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (data: AddressInput) => unwrap(customerApi.addAddress(data)),
+    onSuccess: () => qc.invalidateQueries({ queryKey: customerKeys.addresses }),
+  });
 }
 
 export function useHome<T = any>(lat?: number, lng?: number) {
