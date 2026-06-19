@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { View, ScrollView, Pressable, TextInput, Switch, RefreshControl } from 'react-native';
+import { View, ScrollView, TextInput, Switch, RefreshControl } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
 import MapView, { Marker, PROVIDER_DEFAULT } from 'react-native-maps';
@@ -75,7 +75,7 @@ function VehicleSetup({ onDone }: { onDone: () => void }) {
         {VTYPES.map((v) => {
           const active = v.key === vt;
           return (
-            <Pressable
+            <PressableScale
               key={v.key}
               onPress={() => setVt(v.key)}
               className={
@@ -85,7 +85,7 @@ function VehicleSetup({ onDone }: { onDone: () => void }) {
               }
             >
               <Text className={active ? 'text-sm font-semibold text-brand-600' : 'text-sm text-text-secondary'}>{v.label}</Text>
-            </Pressable>
+            </PressableScale>
           );
         })}
       </View>
@@ -99,7 +99,7 @@ function VehicleSetup({ onDone }: { onDone: () => void }) {
         </>
       ) : null}
       {become.isError ? <Text className="mb-sm text-sm text-error">Couldn&apos;t save. Try again.</Text> : null}
-      <Button label={become.isPending ? 'Saving…' : 'Save vehicle'} disabled={!valid || become.isPending} onPress={submit} />
+      <Button label="Save vehicle" loading={become.isPending} disabled={!valid} onPress={submit} />
     </Card>
   );
 }
