@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { View, ScrollView, Pressable, TextInput, Alert, Switch, RefreshControl } from 'react-native';
+import { View, ScrollView, TextInput, Alert, Switch, RefreshControl } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
@@ -50,9 +50,9 @@ function Header({ title }: { title: string }) {
       <Heading size="2xl" className="flex-1 pr-md" numberOfLines={1}>
         {title}
       </Heading>
-      <Pressable onPress={logout} hitSlop={8}>
+      <PressableScale onPress={logout} hitSlop={8}>
         <Text className="text-sm text-text-muted">Log out</Text>
-      </Pressable>
+      </PressableScale>
     </View>
   );
 }
@@ -94,13 +94,13 @@ function BusinessSetup() {
           {TYPES.map((t) => {
             const active = t.key === type;
             return (
-              <Pressable
+              <PressableScale
                 key={t.key}
                 onPress={() => setType(t.key)}
                 className={active ? 'rounded-lg border border-brand-500 bg-brand-50 px-lg py-sm' : 'rounded-lg border border-border-subtle px-lg py-sm'}
               >
                 <Text className={active ? 'text-sm font-semibold text-brand-600' : 'text-sm text-text-secondary'}>{t.label}</Text>
-              </Pressable>
+              </PressableScale>
             );
           })}
         </View>
@@ -109,7 +109,7 @@ function BusinessSetup() {
         <TextInput value={addr} onChangeText={setAddr} placeholder="Street address" placeholderTextColor={color.text.muted} className={FIELD} />
         <TextInput value={city} onChangeText={setCity} placeholder="City" placeholderTextColor={color.text.muted} className={FIELD} />
         {become.isError ? <Text className="mb-sm text-sm text-error">Couldn&apos;t create your store. Try again.</Text> : null}
-        <Button label={become.isPending ? 'Creating…' : 'Create store'} disabled={!valid || become.isPending} onPress={submit} />
+        <Button label="Create store" loading={become.isPending} disabled={!valid} onPress={submit} />
       </ScrollView>
     </SafeAreaView>
   );
@@ -358,19 +358,19 @@ function SubHeader({
       {hideBack ? (
         <View style={{ width: 22 }} />
       ) : (
-        <Pressable onPress={() => navigation.goBack()} hitSlop={8}>
+        <PressableScale onPress={() => navigation.goBack()} hitSlop={8}>
           <Feather name="chevron-left" size={22} color={color.brand[600]} />
-        </Pressable>
+        </PressableScale>
       )}
       <Heading size="lg" className="flex-1 px-md text-center" numberOfLines={1}>
         {title}
       </Heading>
       {action ? (
-        <Pressable onPress={action.onPress} disabled={action.disabled} hitSlop={8}>
+        <PressableScale onPress={action.onPress} disabled={action.disabled} hitSlop={8}>
           <Text className={action.disabled ? 'text-base text-text-muted' : 'text-base font-semibold text-brand-600'}>
             {action.label}
           </Text>
-        </Pressable>
+        </PressableScale>
       ) : (
         <View style={{ width: 48 }} />
       )}
