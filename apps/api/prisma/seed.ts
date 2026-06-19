@@ -576,6 +576,21 @@ async function main() {
     });
   }
 
+  // D.3 — backfill every rider's float limit from their trust level + country,
+  // so existing riders pick up limits after the float-gate migration.
+  const allRiders = await prisma.rider.findMany({
+    select: { id: true, user: { select: { trustLevel: true, countryCode: true } } },
+  });
+  for (const r of allRiders) {
+    const cc = await prisma.countryConfig.findUnique({
+      where: { code: r.user.countryCode },
+      select: { floatL1: true, floatL2: true, floatL3: true },
+    });
+    if (!cc) continue;
+    const limit = r.user.trustLevel === 'L3' ? cc.floatL3 : r.user.trustLevel === 'L2' ? cc.floatL2 : cc.floatL1;
+    await prisma.rider.update({ where: { id: r.id }, data: { floatLimit: limit } });
+  }
+
   console.warn('Seed complete!');
 }
 
