@@ -275,3 +275,10 @@ export const vendorApi = {
     api.put('/vendor/profile', data),
   importItems: (csv: string) => api.post('/vendor/items/import', { csv }),
 };
+
+// Chat (mounted at /api/v1/chat) — order-scoped rider/customer messaging
+export const chatApi = {
+  room: (orderId: string) => api.post('/chat/rooms', { orderId }),
+  messages: (roomId: string) => api.get(`/chat/rooms/${roomId}/messages`),
+  send: (roomId: string, message: string) => api.post(`/chat/rooms/${roomId}/messages`, { message }),
+};

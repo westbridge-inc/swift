@@ -149,14 +149,24 @@ export function OrderTrackingScreen({ navigation, route }: any) {
                 <Text className="text-xs text-text-secondary">Your rider</Text>
                 <Text className="text-base font-semibold">{order.rider.firstName ?? 'Assigned'}</Text>
               </View>
-              {order.rider.phone ? (
-                <Button variant="outline" className="px-lg" onPress={() => { Linking.openURL(`tel:${order.rider.phone}`).catch(() => {}); }}>
-                  <View className="flex-row items-center">
-                    <Feather name="phone" size={15} color={color.brand[500]} />
-                    <Text className="ml-sm font-body font-semibold text-brand-500">Call</Text>
-                  </View>
-                </Button>
-              ) : null}
+              <View className="flex-row items-center" style={{ gap: 8 }}>
+                <Pressable
+                  onPress={() => navigation.navigate('Chat', { orderId: order.id ?? id, title: order.rider.firstName ?? 'Your rider' })}
+                  className="h-10 w-10 items-center justify-center rounded-full bg-brand-50"
+                >
+                  <Feather name="message-circle" size={18} color={color.brand[500]} />
+                </Pressable>
+                {order.rider.phone ? (
+                  <Pressable
+                    onPress={() => {
+                      Linking.openURL(`tel:${order.rider.phone}`).catch(() => {});
+                    }}
+                    className="h-10 w-10 items-center justify-center rounded-full bg-brand-50"
+                  >
+                    <Feather name="phone" size={18} color={color.brand[500]} />
+                  </Pressable>
+                ) : null}
+              </View>
             </Card>
           </View>
         ) : null}

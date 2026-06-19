@@ -7,6 +7,7 @@ import { color } from '@swift/ui';
 import { Feather, MaterialCommunityIcons } from '@expo/vector-icons';
 import { Text, Heading, Card, Button, Spinner } from '../components/ui';
 import { DocumentChecklist } from '../components/onboarding/DocumentChecklist';
+import { ChatScreen } from '../screens/shared/ChatScreen';
 import {
   useVerificationStatus,
   useBecomePartner,
@@ -371,6 +372,13 @@ function ActiveJobScreen({ navigation }: any) {
             <Text className="mt-xs text-xs text-text-muted">Status: {String(job.status ?? '').replace(/_/g, ' ').toLowerCase()}</Text>
           </Card>
 
+          <Button
+            label="Message customer"
+            variant="outline"
+            className="mb-md"
+            onPress={() => navigation.navigate('Chat', { orderId: job.id, title: 'Customer' })}
+          />
+
           {kind === 'DRIVER' ? (
             <>
               <View className="flex-row flex-wrap" style={{ gap: 8 }}>
@@ -419,6 +427,7 @@ export function MoverStack() {
     <Stack.Navigator screenOptions={{ headerShown: false }}>
       <Stack.Screen name="MoverRoot" component={MoverRoot} />
       <Stack.Screen name="ActiveJob" component={ActiveJobScreen} />
+      <Stack.Screen name="Chat" component={ChatScreen} />
     </Stack.Navigator>
   );
 }
