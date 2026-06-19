@@ -5,7 +5,7 @@ import { createNativeStackNavigator } from '@react-navigation/native-stack';
 import MapView, { Marker, PROVIDER_DEFAULT } from 'react-native-maps';
 import { color } from '@swift/ui';
 import { Feather, MaterialCommunityIcons } from '@expo/vector-icons';
-import { Text, Heading, Card, Button, Spinner, elevation } from '../components/ui';
+import { Text, Heading, Card, Button, Spinner, elevation, PressableScale } from '../components/ui';
 import { DocumentChecklist } from '../components/onboarding/DocumentChecklist';
 import { ChatScreen } from '../screens/shared/ChatScreen';
 import {
@@ -112,9 +112,9 @@ function MoverOnboarding({ status }: { status: any }) {
     <SafeAreaView style={{ flex: 1 }} edges={['top']} className="bg-surface-base">
       <View className="flex-row items-center justify-between px-lg py-sm">
         <Heading size="2xl">Become a mover</Heading>
-        <Pressable onPress={logout} hitSlop={8}>
+        <PressableScale onPress={logout} hitSlop={8}>
           <Text className="text-sm text-text-muted">Log out</Text>
-        </Pressable>
+        </PressableScale>
       </View>
       <ScrollView className="flex-1" contentContainerStyle={{ paddingHorizontal: 16, paddingBottom: 32 }} showsVerticalScrollIndicator={false}>
         <View className="mb-md flex-row items-start rounded-lg bg-brand-50 px-lg py-md">
@@ -172,9 +172,9 @@ function MoverOps({ navigation }: any) {
     <SafeAreaView style={{ flex: 1 }} edges={['top']} className="bg-surface-base">
       <View className="flex-row items-center justify-between px-lg py-sm">
         <Heading size="2xl">{kind === 'DRIVER' ? 'Driver' : 'Rider'}</Heading>
-        <Pressable onPress={logout} hitSlop={8}>
+        <PressableScale onPress={logout} hitSlop={8}>
           <Text className="text-sm text-text-muted">Log out</Text>
-        </Pressable>
+        </PressableScale>
       </View>
       <ScrollView
         className="flex-1"
@@ -243,16 +243,16 @@ function MoverOps({ navigation }: any) {
                 <Text className="mt-xs text-sm text-white" style={{ opacity: 0.9 }}>~{offer.etaMinutes} min to pickup</Text>
               ) : null}
               <View className="mt-md flex-row" style={{ gap: 8 }}>
-                <Pressable
+                <PressableScale
                   className="flex-1 items-center rounded-lg bg-white py-md"
                   disabled={accept.isPending}
                   onPress={() => accept.mutate(offer.orderId, { onSuccess: dismiss })}
                 >
                   <Text className="font-body font-bold text-brand-600">{accept.isPending ? 'Accepting…' : 'Accept'}</Text>
-                </Pressable>
-                <Pressable className="items-center justify-center rounded-lg border border-white px-xl" onPress={dismiss}>
+                </PressableScale>
+                <PressableScale className="items-center justify-center rounded-lg border border-white px-xl" onPress={dismiss}>
                   <Text className="font-body font-semibold text-white">Dismiss</Text>
-                </Pressable>
+                </PressableScale>
               </View>
             </View>
           </View>
@@ -260,7 +260,7 @@ function MoverOps({ navigation }: any) {
 
         {/* Active job */}
         {activeJob ? (
-          <Pressable onPress={() => navigation?.navigate?.('ActiveJob')}>
+          <PressableScale onPress={() => navigation?.navigate?.('ActiveJob')}>
             <View className="mb-md rounded-2xl bg-surface-base p-lg" style={CARD_SHADOW}>
               <View className="flex-row items-center justify-between">
                 <Text className="text-xs font-bold text-brand-600">ACTIVE JOB</Text>
@@ -271,7 +271,7 @@ function MoverOps({ navigation }: any) {
               </Text>
               <Text className="mt-xs text-sm text-text-secondary">{jobAmount(activeJob)} · tap to manage</Text>
             </View>
-          </Pressable>
+          </PressableScale>
         ) : online ? (
           jobs.length === 0 ? (
             <View className="mt-lg items-center rounded-2xl bg-surface-subtle py-2xl">
@@ -296,7 +296,7 @@ function MoverOps({ navigation }: any) {
                   </View>
                   <View className="mt-sm flex-row items-center justify-between">
                     <Text className="text-lg font-bold text-text-primary">{jobAmount(j)}</Text>
-                    <Button label={accept.isPending ? '…' : 'Accept'} className="px-2xl" disabled={accept.isPending} onPress={() => accept.mutate(j.id)} />
+                    <Button label="Accept" className="px-2xl" loading={accept.isPending} onPress={() => accept.mutate(j.id)} />
                   </View>
                 </View>
               ))}
