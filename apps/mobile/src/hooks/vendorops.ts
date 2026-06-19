@@ -1,5 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { vendorApi } from '../services/api';
+import { useStoreSwitcher } from '../stores/storeSwitcher';
 
 async function unwrap<T = any>(p: Promise<any>): Promise<T> {
   const r = await p;
@@ -21,9 +22,11 @@ export function useVendorProfile() {
     retry: false,
     refetchInterval: 20000,
   });
+  const selectedStoreId = useStoreSwitcher((s) => s.selectedStoreId);
   const owner: any = q.data ?? null;
-  const store: any = owner?.vendors?.[0] ?? null;
-  return { owner, store, isLoading: q.isLoading };
+  const stores: any[] = owner?.vendors ?? [];
+  const store: any = stores.find((v) => v.id === selectedStoreId) ?? stores[0] ?? null;
+  return { owner, store, stores, isLoading: q.isLoading };
 }
 
 export function useVendorOrders(enabled: boolean) {
