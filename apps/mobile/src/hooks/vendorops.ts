@@ -115,3 +115,30 @@ export function useUploadItemImage() {
     onSuccess: () => qc.invalidateQueries({ queryKey: ['vendor', 'menu'] }),
   });
 }
+
+// ─── Insights / settings ──────────────────────────────────────────────────────
+
+export function useVendorAnalytics() {
+  return useQuery({
+    queryKey: ['vendor', 'analytics'],
+    queryFn: () => unwrap<any>(vendorApi.analytics()),
+    refetchInterval: 30000,
+  });
+}
+
+export type DayHours = { dayOfWeek: number; openTime: string; closeTime: string; isClosed: boolean };
+
+export function useVendorHours() {
+  return useQuery({ queryKey: ['vendor', 'hours'], queryFn: () => unwrap<DayHours[]>(vendorApi.hours()) });
+}
+
+export function useSetHours() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (hours: DayHours[]) => unwrap(vendorApi.setHours(hours)),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['vendor', 'hours'] });
+      qc.invalidateQueries({ queryKey: ['vendor', 'profile'] });
+    },
+  });
+}
