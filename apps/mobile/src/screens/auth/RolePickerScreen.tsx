@@ -3,6 +3,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { Feather, MaterialCommunityIcons } from '@expo/vector-icons';
 import { color } from '@swift/ui';
 import { Text, Heading, Card } from '../../components/ui';
+import { SwiftMark } from '../../components/SwiftLogo';
 
 const ROLES: { key: string; icon: keyof typeof MaterialCommunityIcons.glyphMap; title: string; sub: string }[] = [
   { key: 'CUSTOMER', icon: 'shopping-outline', title: 'Order on Swift', sub: 'Food, groceries, rides, courier & services' },
@@ -15,7 +16,8 @@ export function RolePickerScreen({ route, navigation }: any) {
   return (
     <SafeAreaView style={{ flex: 1 }} edges={['top', 'bottom']} className="bg-surface-base">
       <View className="flex-1 px-lg pt-2xl">
-        <Heading size="xl">How will you use Swift?</Heading>
+        <SwiftMark size={44} />
+        <Heading size="xl" className="mt-md">How will you use Swift?</Heading>
         <Text className="mt-xs text-text-secondary">You can add another role later from your account.</Text>
         <View className="mt-xl">
           {ROLES.map((r) => (
