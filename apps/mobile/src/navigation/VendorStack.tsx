@@ -592,7 +592,7 @@ function VendorItemEditorScreen({ navigation, route }: any) {
       <SubHeader title={existing ? 'Edit item' : 'New item'} navigation={navigation} />
       <ScrollView className="flex-1" contentContainerStyle={{ paddingHorizontal: 16, paddingBottom: 32 }} showsVerticalScrollIndicator={false}>
         {/* Photo */}
-        <Pressable onPress={pickPhoto} className="mb-sm items-center justify-center overflow-hidden rounded-2xl bg-surface-subtle" style={{ height: 160 }}>
+        <PressableScale onPress={pickPhoto} className="mb-sm items-center justify-center overflow-hidden rounded-2xl bg-surface-subtle" style={{ height: 160 }}>
           {previewUri ? (
             <Image source={{ uri: previewUri }} style={{ width: '100%', height: 160 }} />
           ) : (
@@ -601,11 +601,11 @@ function VendorItemEditorScreen({ navigation, route }: any) {
               <Text className="mt-xs text-sm text-text-muted">Add a photo</Text>
             </View>
           )}
-        </Pressable>
+        </PressableScale>
         {previewUri ? (
-          <Pressable onPress={pickPhoto} className="mb-md items-center" hitSlop={6} disabled={uploadImage.isPending}>
+          <PressableScale onPress={pickPhoto} className="mb-md items-center" hitSlop={6} disabled={uploadImage.isPending}>
             <Text className="text-sm font-semibold text-brand-600">{uploadImage.isPending ? 'Uploading…' : 'Change photo'}</Text>
-          </Pressable>
+          </PressableScale>
         ) : null}
 
         <TextInput value={name} onChangeText={setName} placeholder="Item name" placeholderTextColor={color.text.muted} className={FIELD} />
@@ -639,38 +639,39 @@ function VendorItemEditorScreen({ navigation, route }: any) {
           {categories.map((c) => {
             const active = c.id === categoryId;
             return (
-              <Pressable
+              <PressableScale
                 key={c.id}
                 onPress={() => setCategoryId(c.id)}
                 className={active ? 'rounded-lg border border-brand-500 bg-brand-50 px-lg py-sm' : 'rounded-lg border border-border-subtle px-lg py-sm'}
               >
                 <Text className={active ? 'text-sm font-semibold text-brand-600' : 'text-sm text-text-secondary'}>{c.name}</Text>
-              </Pressable>
+              </PressableScale>
             );
           })}
         </View>
 
         <View className="mb-md flex-row" style={{ gap: 8 }}>
-          <Pressable
+          <PressableScale
             onPress={() => setAvailable((v) => !v)}
             className={available ? 'rounded-lg border border-brand-500 bg-brand-50 px-lg py-sm' : 'rounded-lg border border-border-subtle px-lg py-sm'}
           >
             <Text className={available ? 'text-sm font-semibold text-brand-600' : 'text-sm text-text-secondary'}>
               {available ? 'Available' : 'Sold out'}
             </Text>
-          </Pressable>
-          <Pressable
+          </PressableScale>
+          <PressableScale
             onPress={() => setPopular((v) => !v)}
             className={popular ? 'rounded-lg border border-brand-500 bg-brand-50 px-lg py-sm' : 'rounded-lg border border-border-subtle px-lg py-sm'}
           >
             <Text className={popular ? 'text-sm font-semibold text-brand-600' : 'text-sm text-text-secondary'}>★ Popular</Text>
-          </Pressable>
+          </PressableScale>
         </View>
 
         {save.isError ? <Text className="mb-sm text-sm text-error">Couldn&apos;t save. Check the details and try again.</Text> : null}
         <Button
-          label={busy ? 'Saving…' : existing ? 'Save changes' : 'Add item'}
-          disabled={!valid || busy}
+          label={existing ? 'Save changes' : 'Add item'}
+          loading={busy}
+          disabled={!valid}
           onPress={submit}
         />
       </ScrollView>
