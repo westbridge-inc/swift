@@ -1,10 +1,10 @@
 import { useState } from 'react';
-import { View, ScrollView, Pressable } from 'react-native';
+import { View, ScrollView } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import MapView, { Marker, PROVIDER_DEFAULT } from 'react-native-maps';
 import { Feather } from '@expo/vector-icons';
 import { color } from '@swift/ui';
-import { Text, Button, Input } from '../../components/ui';
+import { Text, Button, Input, PressableScale } from '../../components/ui';
 import { useAddAddress } from '../../hooks';
 
 const GEORGETOWN = { latitude: 6.8013, longitude: -58.1551 };
@@ -41,9 +41,9 @@ export function AddAddressScreen({ navigation }: any) {
   return (
     <SafeAreaView style={{ flex: 1 }} edges={['top']} className="bg-surface-base">
       <View className="flex-row items-center px-lg py-sm">
-        <Pressable onPress={() => navigation?.goBack?.()} hitSlop={10}>
+        <PressableScale onPress={() => navigation?.goBack?.()} hitSlop={10}>
           <Feather name="chevron-left" size={24} color={color.text.primary} />
-        </Pressable>
+        </PressableScale>
         <Text className="ml-md text-base font-bold">Add address</Text>
       </View>
 
@@ -83,8 +83,9 @@ export function AddAddressScreen({ navigation }: any) {
             <Text className="mb-sm text-sm text-error">Couldn&apos;t save the address. Try again.</Text>
           ) : null}
           <Button
-            label={addAddress.isPending ? 'Saving…' : 'Save address'}
-            disabled={!valid || addAddress.isPending}
+            label="Save address"
+            loading={addAddress.isPending}
+            disabled={!valid}
             onPress={submit}
             className="mt-sm"
           />
