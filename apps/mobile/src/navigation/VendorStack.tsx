@@ -416,7 +416,7 @@ function MenuItemRow({
             {item.stockQuantity != null ? ` · ${item.stockQuantity} in stock` : ''}
           </Text>
         </View>
-        <Pressable
+        <PressableScale
           onPress={() => setAvail.mutate({ id: item.id, isAvailable: !available })}
           disabled={setAvail.isPending}
           hitSlop={6}
@@ -429,7 +429,7 @@ function MenuItemRow({
           <Text className={available ? 'text-xs font-semibold text-success' : 'text-xs font-semibold text-text-muted'}>
             {available ? 'Available' : 'Sold out'}
           </Text>
-        </Pressable>
+        </PressableScale>
       </View>
       <View className="mt-sm flex-row" style={{ gap: 8 }}>
         <Button
@@ -439,10 +439,10 @@ function MenuItemRow({
           onPress={() => navigation.navigate('VendorItemEditor', { item, categories })}
         />
         <Button
-          label={del.isPending ? 'Removing…' : 'Delete'}
+          label="Delete"
           variant="outline"
           className="flex-1"
-          disabled={del.isPending}
+          loading={del.isPending}
           onPress={confirmDelete}
         />
       </View>
@@ -838,9 +838,10 @@ function VendorAccountScreen() {
               </View>
             ))}
             <Button
-              label={setHours.isPending ? 'Saving…' : 'Save hours'}
+              label="Save hours"
+              loading={setHours.isPending}
               className="mt-sm"
-              disabled={setHours.isPending || days.length === 0}
+              disabled={days.length === 0}
               onPress={() => setHours.mutate(days)}
             />
             {setHours.isSuccess ? <Text className="mt-sm text-center text-xs text-success">Hours updated</Text> : null}
