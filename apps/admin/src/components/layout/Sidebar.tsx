@@ -39,7 +39,7 @@ export function Sidebar() {
     <aside className="w-64 bg-[#1C1C1E] border-r border-[#38383A] flex flex-col">
       <div className="p-6 border-b border-[#38383A]">
         <h1 className="text-xl font-bold">
-          <span className="text-[#FF6B00]">Swift</span> Admin
+          <span className="text-[#E8192C]">Swift</span> Admin
         </h1>
       </div>
       <nav className="flex-1 p-4 space-y-1">
@@ -51,7 +51,7 @@ export function Sidebar() {
               href={item.href}
               className={`flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm transition-colors ${
                 isActive
-                  ? 'bg-[#FF6B00]/10 text-[#FF6B00]'
+                  ? 'bg-[#E8192C]/10 text-[#E8192C]'
                   : 'text-[#8E8E93] hover:text-white hover:bg-white/5'
               }`}
             >
