@@ -2,11 +2,12 @@ import { memo, useMemo, useState } from 'react';
 import { View, Pressable, ScrollView, RefreshControl } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Feather, MaterialCommunityIcons } from '@expo/vector-icons';
+import Animated from 'react-native-reanimated';
 import { useQuery } from '@tanstack/react-query';
 import { customerApi } from '../../services/api';
 import { useLocationStore } from '../../stores/locationStore';
 import { color } from '@swift/ui';
-import { Text, Heading, Skeleton, List, Image, PressableScale } from '../../components/ui';
+import { Text, Heading, Skeleton, List, Image, PressableScale, EmptyState, enter, staggerDelay, elevation } from '../../components/ui';
 import { vendorImage } from '../../lib/images';
 
 type Vertical = { key: string; label: string; icon: keyof typeof MaterialCommunityIcons.glyphMap; route?: string };
@@ -27,7 +28,7 @@ const prettyType = (t?: string) =>
 
 function VerticalTile({ v, onPress }: { v: Vertical; onPress?: () => void }) {
   return (
-    <PressableScale strong onPress={onPress} style={{ width: '31%', marginBottom: 16 }}>
+    <PressableScale strong onPress={onPress}>
       <View className="items-center">
         <View className="mb-xs h-16 w-16 items-center justify-center rounded-2xl bg-brand-50">
           <MaterialCommunityIcons name={v.icon} size={28} color={color.brand[500]} />
@@ -72,10 +73,7 @@ const VendorCard = memo(function VendorCard({ vendor, onPress }: { vendor: any; 
   const closed = vendor.isCurrentlyOpen === false;
   return (
     <PressableScale onPress={onPress} style={{ marginBottom: 18 }}>
-      <View
-        className="overflow-hidden rounded-2xl bg-surface-base"
-        style={{ shadowColor: '#000', shadowOpacity: 0.08, shadowRadius: 12, shadowOffset: { width: 0, height: 4 }, elevation: 3 }}
-      >
+      <View className="overflow-hidden rounded-2xl bg-surface-base" style={elevation.raised}>
         <View>
           <Image source={{ uri: vendorImage(vendor) }} style={{ width: '100%', height: 150 }} />
           {closed ? (
@@ -100,7 +98,7 @@ const VendorCard = memo(function VendorCard({ vendor, onPress }: { vendor: any; 
 const FeaturedCard = memo(function FeaturedCard({ vendor, onPress }: { vendor: any; onPress?: () => void }) {
   return (
     <Pressable onPress={onPress} style={{ width: 248, marginRight: 14 }}>
-      <View className="overflow-hidden rounded-2xl bg-surface-base" style={{ shadowColor: '#000', shadowOpacity: 0.08, shadowRadius: 10, shadowOffset: { width: 0, height: 3 }, elevation: 3 }}>
+      <View className="overflow-hidden rounded-2xl bg-surface-base" style={elevation.raised}>
         <Image source={{ uri: vendorImage(vendor) }} style={{ width: '100%', height: 130 }} />
         <View className="p-sm">
           <View className="flex-row items-center justify-between">
@@ -203,8 +201,10 @@ function HomeHeader({ navigation, address, activeOrder, topRated, cuisines, sele
 
       <View className="mb-sm px-lg"><Heading size="lg">What do you need?</Heading></View>
       <View className="flex-row flex-wrap justify-between px-lg">
-        {VERTICALS.map((v) => (
-          <VerticalTile key={v.key} v={v} onPress={() => v.route && navigation?.navigate?.(v.route)} />
+        {VERTICALS.map((v, i) => (
+          <Animated.View key={v.key} entering={enter.fadeUp.delay(staggerDelay(i))} style={{ width: '31%', marginBottom: 16 }}>
+            <VerticalTile v={v} onPress={() => v.route && navigation?.navigate?.(v.route)} />
+          </Animated.View>
         ))}
       </View>
 
@@ -292,7 +292,11 @@ export function HomeScreen({ navigation }: any) {
                 <Skeleton className="mb-md h-48 w-full rounded-2xl" />
               </View>
             ) : (
-              <Text className="px-lg text-text-secondary">Nothing nearby yet — check back soon.</Text>
+              <EmptyState
+                icon="storefront-outline"
+                title="Nothing nearby yet"
+                body="We’re adding vendors in your area — check back soon."
+              />
             )
           }
           contentContainerStyle={{ paddingBottom: 32 }}
