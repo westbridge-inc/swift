@@ -119,7 +119,7 @@ function HomeHeader({ navigation, address, featured }: { navigation: any; addres
     <View>
       {/* Location + notifications */}
       <View className="flex-row items-center justify-between px-lg pt-md pb-sm">
-        <Pressable className="flex-1 flex-row items-center">
+        <Pressable className="flex-1 flex-row items-center" onPress={() => navigation?.navigate?.('LocationPicker')}>
           <MaterialCommunityIcons name="map-marker" size={20} color={color.brand[500]} />
           <View className="ml-xs flex-1">
             <Text className="text-xs text-text-muted">Deliver to</Text>
@@ -129,9 +129,12 @@ function HomeHeader({ navigation, address, featured }: { navigation: any; addres
             </View>
           </View>
         </Pressable>
-        <View className="h-10 w-10 items-center justify-center rounded-full bg-surface-subtle">
+        <Pressable
+          onPress={() => navigation?.navigate?.('Notifications')}
+          className="h-10 w-10 items-center justify-center rounded-full bg-surface-subtle"
+        >
           <Feather name="bell" size={18} color={color.text.primary} />
-        </View>
+        </Pressable>
       </View>
 
       {/* Search */}
