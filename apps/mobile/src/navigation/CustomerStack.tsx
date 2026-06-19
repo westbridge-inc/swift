@@ -16,6 +16,7 @@ import { IdentityVerificationScreen } from '../screens/customer/IdentityVerifica
 import { AddAddressScreen } from '../screens/customer/AddAddressScreen';
 import { LocationPickerScreen } from '../screens/customer/LocationPickerScreen';
 import { NotificationsScreen } from '../screens/customer/NotificationsScreen';
+import { ChatScreen } from '../screens/shared/ChatScreen';
 import { color } from '@swift/ui';
 import { Feather } from '@expo/vector-icons';
 
@@ -75,6 +76,7 @@ export function CustomerStack() {
       <Stack.Screen name="AddAddress" component={AddAddressScreen} />
       <Stack.Screen name="LocationPicker" component={LocationPickerScreen} />
       <Stack.Screen name="Notifications" component={NotificationsScreen} />
+      <Stack.Screen name="Chat" component={ChatScreen} />
     </Stack.Navigator>
   );
 }

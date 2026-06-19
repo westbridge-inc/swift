@@ -236,7 +236,7 @@ interface GroupIdParam {
 async function resolveOwner(app: FastifyInstance, userId: string): Promise<VendorOwnerWithVendors> {
   const owner = await app.prisma.vendorOwner.findUnique({
     where: { userId },
-    include: { vendors: { select: { id: true } } },
+    include: { vendors: { select: { id: true }, orderBy: { createdAt: 'asc' } } },
   });
   if (!owner) throw new NotFoundError('VendorOwner');
   return owner;
@@ -330,6 +330,7 @@ export async function vendorRoutes(app: FastifyInstance) {
       where: { userId: request.user.userId },
       include: {
         vendors: {
+          orderBy: { createdAt: 'asc' },
           include: {
             operatingHours: { orderBy: { dayOfWeek: 'asc' } },
             subscription: true,
