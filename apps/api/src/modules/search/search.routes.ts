@@ -26,15 +26,21 @@ const nearbyQuerySchema = z.object({
 export async function searchRoutes(app: FastifyInstance) {
   let searchService: SearchService | null = null;
 
-  try {
-    searchService = new SearchService(app.prisma);
-    await searchService.initialize();
-    await searchService.syncAllVendors();
-    await searchService.syncAllItems();
-    app.log.info('Meilisearch initialized and synced');
-  } catch (err) {
-    app.log.warn({ err }, 'Meilisearch unavailable — falling back to DB search');
-  }
+  // Warm Meilisearch in the BACKGROUND — server startup must never block on it. avvio's
+  // ~10s plugin timeout plus a full re-sync can otherwise take the whole API down on
+  // restart. Until the index is ready, the routes below fall back to DB search.
+  void (async () => {
+    try {
+      const svc = new SearchService(app.prisma);
+      await svc.initialize();
+      await svc.syncAllVendors();
+      await svc.syncAllItems();
+      searchService = svc;
+      app.log.info('Meilisearch initialized and synced');
+    } catch (err) {
+      app.log.warn({ err }, 'Meilisearch unavailable — falling back to DB search');
+    }
+  })();
 
   // Universal search — searches vendors AND items
   app.get('/search', { preHandler: [app.authenticate] }, async (request) => {
