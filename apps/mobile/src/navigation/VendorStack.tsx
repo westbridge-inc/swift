@@ -257,10 +257,14 @@ function VendorOps({ store, navigation }: any) {
           <View className="flex-row items-center justify-between">
             <View className="flex-1 pr-md">
               <View className="flex-row items-center">
-                <View style={{ width: 10, height: 10, borderRadius: 5, backgroundColor: open ? color.success : color.text.muted }} />
-                <Text className="ml-2 text-base font-bold text-text-primary">{open ? 'Open for orders' : 'Store closed'}</Text>
+                <View style={{ width: 10, height: 10, borderRadius: 5, backgroundColor: open && accepting ? color.success : color.text.muted }} />
+                <Text className="ml-2 text-base font-bold text-text-primary">
+                  {!open ? 'Store closed' : accepting ? 'Open for orders' : 'Orders paused'}
+                </Text>
               </View>
-              <Text className="mt-xs text-xs text-text-muted">{accepting ? 'Accepting new orders' : 'Orders paused'}</Text>
+              <Text className="mt-xs text-xs text-text-muted">
+                {!open ? 'Outside business hours' : accepting ? 'Accepting new orders' : 'You’re open but not taking new orders'}
+              </Text>
             </View>
             <Switch
               value={open}
@@ -273,7 +277,7 @@ function VendorOps({ store, navigation }: any) {
             label={accepting ? 'Pause new orders' : 'Resume orders'}
             variant="outline"
             className="mt-md"
-            disabled={toggleOrders.isPending}
+            loading={toggleOrders.isPending}
             onPress={() => toggleOrders.mutate()}
           />
         </Card>
