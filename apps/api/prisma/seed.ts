@@ -486,6 +486,62 @@ async function main() {
     },
   });
 
+  // ── Additional CARIBBEAN markets (multi-country foundation) ──────────────────
+  // FACTUAL (Jun 2026): code/name/currency/symbol/usdExchangeRate are real; BBD/BSD/
+  // BZD/XCD are hard USD pegs. DEFAULTS to refine per market with local business/legal
+  // input: subscription tiers + taxi rates are USD-pegged off Guyana's; documentChecklists
+  // and cashRules reuse Guyana's as a template. (Dial codes live in the /auth/countries map.)
+  const USD = { mover: 12000 / 209, smallVendor: 20000 / 209, largeVendor: 30000 / 209 };
+  const USD_TAXI = { base: 1000 / 209, perKm: 300 / 209, perMin: 25 / 209, minimum: 1500 / 209 };
+  const niceRound = (n: number) => {
+    if (n >= 1000) return Math.round(n / 100) * 100;
+    if (n >= 100) return Math.round(n / 10) * 10;
+    if (n >= 10) return Math.round(n);
+    return Math.round(n * 100) / 100;
+  };
+  const CARIBBEAN: { code: string; name: string; currencyCode: string; currencySymbol: string; rate: number; locale: string }[] = [
+    { code: 'TT', name: 'Trinidad & Tobago', currencyCode: 'TTD', currencySymbol: 'TT$', rate: 6.77, locale: 'en-TT' },
+    { code: 'JM', name: 'Jamaica', currencyCode: 'JMD', currencySymbol: 'J$', rate: 158, locale: 'en-JM' },
+    { code: 'BB', name: 'Barbados', currencyCode: 'BBD', currencySymbol: 'Bds$', rate: 2.0, locale: 'en-BB' },
+    { code: 'BS', name: 'Bahamas', currencyCode: 'BSD', currencySymbol: 'B$', rate: 1.0, locale: 'en-BS' },
+    { code: 'SR', name: 'Suriname', currencyCode: 'SRD', currencySymbol: 'SRD', rate: 38, locale: 'nl-SR' },
+    { code: 'BZ', name: 'Belize', currencyCode: 'BZD', currencySymbol: 'BZ$', rate: 2.0, locale: 'en-BZ' },
+    { code: 'GD', name: 'Grenada', currencyCode: 'XCD', currencySymbol: 'EC$', rate: 2.7, locale: 'en-GD' },
+    { code: 'LC', name: 'Saint Lucia', currencyCode: 'XCD', currencySymbol: 'EC$', rate: 2.7, locale: 'en-LC' },
+    { code: 'AG', name: 'Antigua & Barbuda', currencyCode: 'XCD', currencySymbol: 'EC$', rate: 2.7, locale: 'en-AG' },
+    { code: 'VC', name: 'Saint Vincent & the Grenadines', currencyCode: 'XCD', currencySymbol: 'EC$', rate: 2.7, locale: 'en-VC' },
+    { code: 'KN', name: 'Saint Kitts & Nevis', currencyCode: 'XCD', currencySymbol: 'EC$', rate: 2.7, locale: 'en-KN' },
+    { code: 'DM', name: 'Dominica', currencyCode: 'XCD', currencySymbol: 'EC$', rate: 2.7, locale: 'en-DM' },
+  ];
+  for (const c of CARIBBEAN) {
+    const data = {
+      name: c.name,
+      currencyCode: c.currencyCode,
+      currencySymbol: c.currencySymbol,
+      usdExchangeRate: c.rate,
+      idGateThresholdUsd: 50,
+      subscriptionTiers: {
+        mover: niceRound(USD.mover * c.rate),
+        smallVendor: niceRound(USD.smallVendor * c.rate),
+        largeVendor: niceRound(USD.largeVendor * c.rate),
+      },
+      documentChecklists: guyanaChecklists,
+      taxiRates: {
+        base: niceRound(USD_TAXI.base * c.rate),
+        perKm: niceRound(USD_TAXI.perKm * c.rate),
+        perMin: niceRound(USD_TAXI.perMin * c.rate),
+        minimum: niceRound(USD_TAXI.minimum * c.rate),
+      },
+      cashRules: guyanaCashRules,
+      verificationSources: ['ID Analyzer'],
+      regulatoryNotes:
+        'Tiers and taxi rates are USD-pegged defaults; document checklist mirrors Guyana. Refine with local business/legal input before launch.',
+      locale: c.locale,
+      isActive: false, // launch market = Guyana; others appear as "coming soon" until ops go live
+    };
+    await prisma.countryConfig.upsert({ where: { code: c.code }, update: data, create: { code: c.code, ...data } });
+  }
+
   // Second zone + one zone-to-zone fixed fare so the table-hit path is live
   await prisma.zone.upsert({
     where: { id: 'georgetown-south' },
