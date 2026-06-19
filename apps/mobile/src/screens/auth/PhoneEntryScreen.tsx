@@ -4,18 +4,20 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { Feather } from '@expo/vector-icons';
 import { color } from '@swift/ui';
 import { authApi } from '../../services/api';
+import { useAuthStore } from '../../stores/authStore';
 import { Text, Heading, Button } from '../../components/ui';
 
 export function PhoneEntryScreen({ navigation }: any) {
   const [phone, setPhone] = useState('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(false);
+  const dialCode = useAuthStore((s) => s.dialCode) ?? '+592';
 
   const handleSendOtp = async () => {
     setLoading(true);
     setError(false);
     try {
-      const full = `+592${phone}`;
+      const full = `${dialCode}${phone}`;
       await authApi.sendOtp(full);
       navigation.navigate('OtpVerification', { phone: full });
     } catch {
@@ -37,10 +39,10 @@ export function PhoneEntryScreen({ navigation }: any) {
         <Text className="mt-xs text-center text-text-secondary">We&apos;ll text you a verification code.</Text>
         <View className="mt-xl flex-row" style={{ gap: 12 }}>
           <Pressable
-            onPress={() => Alert.alert('Country', 'Swift is launching in Guyana 🇬🇾.\nMore countries coming soon.')}
+            onPress={() => Alert.alert('Country', `Calling code ${dialCode}. Your country is chosen during onboarding.`)}
             className="flex-row items-center justify-center rounded-lg border border-border-subtle bg-surface-subtle px-md"
           >
-            <Text className="text-base font-semibold">🇬🇾 +592</Text>
+            <Text className="text-base font-semibold">{dialCode}</Text>
             <Feather name="chevron-down" size={15} color={color.text.muted} style={{ marginLeft: 4 }} />
           </Pressable>
           <TextInput
