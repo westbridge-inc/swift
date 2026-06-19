@@ -1,7 +1,6 @@
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { AuthService } from './auth.service';
-import { CountryConfigService } from '../country/country-config.service';
 
 const sendOtpSchema = z.object({
   phone: z.string().min(10).max(15),
@@ -132,7 +131,21 @@ export async function authRoutes(app: FastifyInstance) {
   // ── Country picker (public — used before signup) ───────────────────────
 
   app.get('/countries', async (_request, reply) => {
-    const countries = await new CountryConfigService(app.prisma).getActiveCountries();
-    return reply.send({ success: true, data: countries });
+    // Public picker: list ALL Caribbean markets, live ones first. Live (isActive) →
+    // full signup; others show "coming soon"/waitlist. Only picker-safe fields are
+    // exposed (no tiers/checklists/cash-rules — OWASP API3). Dial codes are static
+    // reference data kept here rather than as a DB column (no migration).
+    const DIAL_CODES: Record<string, string> = {
+      GY: '+592', TT: '+1868', JM: '+1876', BB: '+1246', BS: '+1242', SR: '+597',
+      BZ: '+501', GD: '+1473', LC: '+1758', AG: '+1268', VC: '+1784', KN: '+1869', DM: '+1767',
+    };
+    const countries = await app.prisma.countryConfig.findMany({
+      orderBy: [{ isActive: 'desc' }, { name: 'asc' }],
+      select: { code: true, name: true, currencyCode: true, currencySymbol: true, isActive: true },
+    });
+    return reply.send({
+      success: true,
+      data: countries.map((c) => ({ ...c, dialCode: DIAL_CODES[c.code] ?? null })),
+    });
   });
 }
