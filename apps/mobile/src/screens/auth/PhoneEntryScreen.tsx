@@ -1,6 +1,7 @@
 import { useState } from 'react';
-import { View, TextInput } from 'react-native';
+import { View, TextInput, Pressable, Alert } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
+import { Feather } from '@expo/vector-icons';
 import { color } from '@swift/ui';
 import { authApi } from '../../services/api';
 import { Text, Heading, Button } from '../../components/ui';
@@ -35,9 +36,13 @@ export function PhoneEntryScreen({ navigation }: any) {
         </Heading>
         <Text className="mt-xs text-center text-text-secondary">We&apos;ll text you a verification code.</Text>
         <View className="mt-xl flex-row" style={{ gap: 12 }}>
-          <View className="items-center justify-center rounded-lg border border-border-subtle bg-surface-subtle px-lg">
-            <Text className="text-base font-semibold">+592</Text>
-          </View>
+          <Pressable
+            onPress={() => Alert.alert('Country', 'Swift is launching in Guyana 🇬🇾.\nMore countries coming soon.')}
+            className="flex-row items-center justify-center rounded-lg border border-border-subtle bg-surface-subtle px-md"
+          >
+            <Text className="text-base font-semibold">🇬🇾 +592</Text>
+            <Feather name="chevron-down" size={15} color={color.text.muted} style={{ marginLeft: 4 }} />
+          </Pressable>
           <TextInput
             value={phone}
             onChangeText={(t) => {

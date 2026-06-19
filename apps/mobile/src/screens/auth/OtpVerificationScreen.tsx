@@ -1,6 +1,7 @@
-import { useState } from 'react';
-import { View, TextInput } from 'react-native';
+import { useEffect, useState } from 'react';
+import { View, TextInput, Pressable } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
+import { Feather } from '@expo/vector-icons';
 import { color } from '@swift/ui';
 import { authApi } from '../../services/api';
 import { useAuthStore } from '../../stores/authStore';
@@ -10,7 +11,14 @@ export function OtpVerificationScreen({ route, navigation }: any) {
   const { phone } = route.params;
   const [otp, setOtp] = useState('');
   const [error, setError] = useState(false);
+  const [seconds, setSeconds] = useState(60);
   const { setAuth } = useAuthStore();
+
+  useEffect(() => {
+    if (seconds <= 0) return;
+    const t = setInterval(() => setSeconds((s) => (s <= 1 ? 0 : s - 1)), 1000);
+    return () => clearInterval(t);
+  }, [seconds]);
 
   const handleVerify = async (code: string) => {
     if (code.length !== 6) return;
@@ -26,13 +34,33 @@ export function OtpVerificationScreen({ route, navigation }: any) {
     }
   };
 
+  const resend = async () => {
+    if (seconds > 0) return;
+    try {
+      await authApi.sendOtp(phone);
+      setSeconds(60);
+      setOtp('');
+      setError(false);
+    } catch {
+      setError(true);
+    }
+  };
+
   return (
     <SafeAreaView style={{ flex: 1 }} edges={['top', 'bottom']} className="bg-surface-base">
+      <View className="flex-row items-center px-lg py-sm">
+        <Pressable onPress={() => navigation?.goBack?.()} hitSlop={12}>
+          <Feather name="chevron-left" size={26} color={color.text.primary} />
+        </Pressable>
+      </View>
       <View className="flex-1 justify-center px-lg">
         <Heading size="xl" className="text-center">
           Enter the code
         </Heading>
         <Text className="mt-xs text-center text-text-secondary">Sent to {phone}</Text>
+        <Pressable onPress={() => navigation?.goBack?.()} hitSlop={6}>
+          <Text className="mt-xs text-center text-sm font-semibold text-brand-600">Wrong number? Change it</Text>
+        </Pressable>
         <TextInput
           value={otp}
           onChangeText={(t) => {
@@ -49,7 +77,13 @@ export function OtpVerificationScreen({ route, navigation }: any) {
           className="mt-xl rounded-lg border border-border-subtle bg-surface-subtle py-lg font-display text-3xl font-bold text-text-primary"
         />
         {error ? <Text className="mt-sm text-center text-sm text-error">Invalid or expired code. Try again.</Text> : null}
-        <Text className="mt-lg text-center text-sm text-text-muted">Resend code in 60s</Text>
+        {seconds > 0 ? (
+          <Text className="mt-lg text-center text-sm text-text-muted">Resend code in {seconds}s</Text>
+        ) : (
+          <Pressable onPress={resend} hitSlop={8}>
+            <Text className="mt-lg text-center text-sm font-semibold text-brand-600">Resend code</Text>
+          </Pressable>
+        )}
       </View>
     </SafeAreaView>
   );
