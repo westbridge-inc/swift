@@ -537,7 +537,7 @@ async function main() {
       regulatoryNotes:
         'Tiers and taxi rates are USD-pegged defaults; document checklist mirrors Guyana. Refine with local business/legal input before launch.',
       locale: c.locale,
-      isActive: true,
+      isActive: false, // launch market = Guyana; others appear as "coming soon" until ops go live
     };
     await prisma.countryConfig.upsert({ where: { code: c.code }, update: data, create: { code: c.code, ...data } });
   }
