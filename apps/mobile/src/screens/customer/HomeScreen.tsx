@@ -1,5 +1,5 @@
-import { memo } from 'react';
-import { View, Pressable, ScrollView } from 'react-native';
+import { memo, useMemo, useState } from 'react';
+import { View, Pressable, ScrollView, RefreshControl } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import Animated, { useSharedValue, useAnimatedStyle, withTiming } from 'react-native-reanimated';
 import { Feather, MaterialCommunityIcons } from '@expo/vector-icons';
@@ -8,6 +8,7 @@ import { customerApi } from '../../services/api';
 import { useLocationStore } from '../../stores/locationStore';
 import { color } from '@swift/ui';
 import { Text, Heading, Skeleton, List, Image } from '../../components/ui';
+import { vendorImage } from '../../lib/images';
 
 const AnimatedPressable = Animated.createAnimatedComponent(Pressable);
 
@@ -21,18 +22,11 @@ const VERTICALS: Vertical[] = [
   { key: 'services', label: 'Services', icon: 'tools', route: 'Services' },
 ];
 
-const FOOD_IMAGES = [
-  'https://images.unsplash.com/photo-1546069901-ba9599a7e63c?w=600&q=80',
-  'https://images.unsplash.com/photo-1565299624946-b28f40a0ae38?w=600&q=80',
-  'https://images.unsplash.com/photo-1504674900247-0877df9cc836?w=600&q=80',
-  'https://images.unsplash.com/photo-1567620905732-2d1ec7ab7445?w=600&q=80',
-  'https://images.unsplash.com/photo-1565958011703-44f9829ba187?w=600&q=80',
-  'https://images.unsplash.com/photo-1432139555190-58524dae6a55?w=600&q=80',
-];
-const imageFor = (v: any, i: number) => v.coverImageUrl || v.logoUrl || FOOD_IMAGES[i % FOOD_IMAGES.length];
-const ratingOf = (v: any) => Number(v.averageRating ?? v.rating ?? 4.7);
-const etaOf = (v: any) => v.estimatedPrepTime ?? v.eta ?? '20–30';
-const cuisineOf = (v: any) => (v.cuisineTypes && v.cuisineTypes[0]) || v.vendorType || 'Restaurant';
+const ratingOf = (v: any) => Number(v.averageRating ?? v.rating ?? 0);
+const etaOf = (v: any) => v.etaMin ?? v.estimatedPrepTime ?? v.eta ?? '20–30';
+const cuisineOf = (v: any) => (v.cuisineTypes && v.cuisineTypes[0]) || prettyType(v.vendorType);
+const prettyType = (t?: string) =>
+  t === 'SUPERMARKET' ? 'Groceries' : t === 'STORE' ? 'Shop' : t === 'SERVICE' ? 'Services' : 'Restaurant';
 
 function VerticalTile({ v, onPress }: { v: Vertical; onPress?: () => void }) {
   const scale = useSharedValue(1);
@@ -55,6 +49,13 @@ function VerticalTile({ v, onPress }: { v: Vertical; onPress?: () => void }) {
 }
 
 function RatingPill({ value }: { value: number }) {
+  if (!value) {
+    return (
+      <View className="rounded-full bg-surface-subtle px-2 py-1">
+        <Text className="text-xs font-semibold text-text-secondary">New</Text>
+      </View>
+    );
+  }
   return (
     <View className="flex-row items-center rounded-full bg-surface-subtle px-2 py-1">
       <MaterialCommunityIcons name="star" size={13} color={color.brand[500]} />
@@ -63,9 +64,24 @@ function RatingPill({ value }: { value: number }) {
   );
 }
 
-const VendorCard = memo(function VendorCard({ vendor, index, onPress }: { vendor: any; index: number; onPress?: () => void }) {
+function MetaLine({ vendor }: { vendor: any }) {
+  const fee = vendor.deliveryFee;
+  return (
+    <View className="mt-xs flex-row items-center">
+      <Feather name="clock" size={13} color={color.text.muted} />
+      <Text className="ml-1 text-xs text-text-muted">{etaOf(vendor)} min</Text>
+      <Text className="mx-2 text-xs text-text-muted">·</Text>
+      <Text className="text-xs text-text-muted" numberOfLines={1}>
+        {fee != null && Number(fee) > 0 ? `$${Number(fee)} delivery` : 'Free delivery'}
+      </Text>
+    </View>
+  );
+}
+
+const VendorCard = memo(function VendorCard({ vendor, onPress }: { vendor: any; onPress?: () => void }) {
   const scale = useSharedValue(1);
   const animStyle = useAnimatedStyle(() => ({ transform: [{ scale: scale.value }] }));
+  const closed = vendor.isCurrentlyOpen === false;
   return (
     <AnimatedPressable
       onPressIn={() => { scale.value = withTiming(0.98, { duration: 80 }); }}
@@ -77,31 +93,32 @@ const VendorCard = memo(function VendorCard({ vendor, index, onPress }: { vendor
         className="overflow-hidden rounded-2xl bg-surface-base"
         style={{ shadowColor: '#000', shadowOpacity: 0.08, shadowRadius: 12, shadowOffset: { width: 0, height: 4 }, elevation: 3 }}
       >
-        <Image source={{ uri: imageFor(vendor, index) }} style={{ width: '100%', height: 150 }} />
+        <View>
+          <Image source={{ uri: vendorImage(vendor) }} style={{ width: '100%', height: 150 }} />
+          {closed ? (
+            <View className="absolute inset-0 items-center justify-center" style={{ backgroundColor: 'rgba(0,0,0,0.45)' }}>
+              <Text className="text-sm font-bold text-white">Closed</Text>
+            </View>
+          ) : null}
+        </View>
         <View className="p-md">
           <View className="flex-row items-center justify-between">
             <Text className="flex-1 pr-sm text-base font-bold text-text-primary" numberOfLines={1}>{vendor.name}</Text>
             <RatingPill value={ratingOf(vendor)} />
           </View>
           <Text className="mt-1 text-sm text-text-secondary" numberOfLines={1}>{cuisineOf(vendor)}</Text>
-          <View className="mt-xs flex-row items-center">
-            <Feather name="clock" size={13} color={color.text.muted} />
-            <Text className="ml-1 text-xs text-text-muted">{etaOf(vendor)} min</Text>
-            <Text className="mx-2 text-xs text-text-muted">·</Text>
-            <MaterialCommunityIcons name="shield-check" size={13} color={color.success} />
-            <Text className="ml-1 text-xs text-text-muted">ID-verified</Text>
-          </View>
+          <MetaLine vendor={vendor} />
         </View>
       </View>
     </AnimatedPressable>
   );
 });
 
-const FeaturedCard = memo(function FeaturedCard({ vendor, index, onPress }: { vendor: any; index: number; onPress?: () => void }) {
+const FeaturedCard = memo(function FeaturedCard({ vendor, onPress }: { vendor: any; onPress?: () => void }) {
   return (
     <Pressable onPress={onPress} style={{ width: 248, marginRight: 14 }}>
       <View className="overflow-hidden rounded-2xl bg-surface-base" style={{ shadowColor: '#000', shadowOpacity: 0.08, shadowRadius: 10, shadowOffset: { width: 0, height: 3 }, elevation: 3 }}>
-        <Image source={{ uri: imageFor(vendor, index) }} style={{ width: '100%', height: 130 }} />
+        <Image source={{ uri: vendorImage(vendor) }} style={{ width: '100%', height: 130 }} />
         <View className="p-sm">
           <View className="flex-row items-center justify-between">
             <Text className="flex-1 pr-sm text-sm font-bold text-text-primary" numberOfLines={1}>{vendor.name}</Text>
@@ -114,12 +131,57 @@ const FeaturedCard = memo(function FeaturedCard({ vendor, index, onPress }: { ve
   );
 });
 
-function HomeHeader({ navigation, address, featured }: { navigation: any; address: string | null; featured: any[] }) {
+function CuisineChips({ cuisines, selected, onSelect }: { cuisines: string[]; selected?: string; onSelect: (c?: string) => void }) {
+  const all = ['All', ...cuisines];
+  return (
+    <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ paddingHorizontal: 16 }} className="mb-sm">
+      {all.map((c) => {
+        const active = (c === 'All' && !selected) || c === selected;
+        return (
+          <Pressable
+            key={c}
+            onPress={() => onSelect(c === 'All' ? undefined : c)}
+            className={active ? 'mr-sm rounded-full bg-brand-500 px-md py-sm' : 'mr-sm rounded-full bg-surface-subtle px-md py-sm'}
+          >
+            <Text className={active ? 'text-sm font-semibold text-white' : 'text-sm font-medium text-text-secondary'}>{c}</Text>
+          </Pressable>
+        );
+      })}
+    </ScrollView>
+  );
+}
+
+function ActiveOrderBanner({ order, onPress }: { order: any; onPress?: () => void }) {
+  return (
+    <Pressable onPress={onPress} className="mx-lg mb-md flex-row items-center rounded-2xl px-lg py-md" style={{ backgroundColor: color.brand[500] }}>
+      <MaterialCommunityIcons name="bike-fast" size={24} color="#fff" />
+      <View className="ml-sm flex-1">
+        <Text className="text-sm font-bold text-white">Order in progress</Text>
+        <Text className="text-xs text-white" style={{ opacity: 0.9 }} numberOfLines={1}>{order.orderNumber} · tap to track</Text>
+      </View>
+      <Feather name="chevron-right" size={20} color="#fff" />
+    </Pressable>
+  );
+}
+
+function SectionHeader({ title, action, onAction }: { title: string; action?: string; onAction?: () => void }) {
+  return (
+    <View className="mb-sm mt-md flex-row items-center justify-between px-lg">
+      <Heading size="lg">{title}</Heading>
+      {action ? (
+        <Pressable onPress={onAction} hitSlop={8}>
+          <Text className="text-sm font-semibold text-brand-600">{action}</Text>
+        </Pressable>
+      ) : null}
+    </View>
+  );
+}
+
+function HomeHeader({ navigation, address, activeOrder, topRated, cuisines, selectedCuisine, onSelectCuisine }: any) {
   return (
     <View>
-      {/* Location + notifications */}
       <View className="flex-row items-center justify-between px-lg pt-md pb-sm">
-        <Pressable className="flex-1 flex-row items-center">
+        <Pressable className="flex-1 flex-row items-center" onPress={() => navigation?.navigate?.('LocationPicker')}>
           <MaterialCommunityIcons name="map-marker" size={20} color={color.brand[500]} />
           <View className="ml-xs flex-1">
             <Text className="text-xs text-text-muted">Deliver to</Text>
@@ -129,12 +191,14 @@ function HomeHeader({ navigation, address, featured }: { navigation: any; addres
             </View>
           </View>
         </Pressable>
-        <View className="h-10 w-10 items-center justify-center rounded-full bg-surface-subtle">
+        <Pressable
+          onPress={() => navigation?.navigate?.('Notifications')}
+          className="h-10 w-10 items-center justify-center rounded-full bg-surface-subtle"
+        >
           <Feather name="bell" size={18} color={color.text.primary} />
-        </View>
+        </Pressable>
       </View>
 
-      {/* Search */}
       <Pressable
         onPress={() => navigation?.navigate?.('Search')}
         className="mx-lg mb-md flex-row items-center rounded-2xl bg-surface-subtle px-lg py-md"
@@ -143,7 +207,6 @@ function HomeHeader({ navigation, address, featured }: { navigation: any; addres
         <Text className="ml-sm text-text-muted">Search food, shops, services…</Text>
       </Pressable>
 
-      {/* Trust strip */}
       <View className="mx-lg mb-lg flex-row items-center rounded-2xl bg-brand-50 px-lg py-md">
         <MaterialCommunityIcons name="shield-check" size={20} color={color.brand[600]} />
         <Text className="ml-sm flex-1 text-sm font-medium text-brand-700">
@@ -151,7 +214,10 @@ function HomeHeader({ navigation, address, featured }: { navigation: any; addres
         </Text>
       </View>
 
-      {/* Verticals */}
+      {activeOrder ? (
+        <ActiveOrderBanner order={activeOrder} onPress={() => navigation?.navigate?.('OrderTracking', { id: activeOrder.id })} />
+      ) : null}
+
       <View className="mb-sm px-lg"><Heading size="lg">What do you need?</Heading></View>
       <View className="flex-row flex-wrap justify-between px-lg">
         {VERTICALS.map((v) => (
@@ -159,19 +225,17 @@ function HomeHeader({ navigation, address, featured }: { navigation: any; addres
         ))}
       </View>
 
-      {/* Featured carousel */}
-      {featured.length > 0 ? (
-        <View className="mb-md">
-          <View className="mb-sm px-lg"><Heading size="lg">Featured</Heading></View>
+      {topRated.length > 0 ? (
+        <View className="mb-sm">
+          <SectionHeader title="Top rated" />
           <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ paddingHorizontal: 16 }}>
-            {featured.map((v, i) => (
-              <FeaturedCard key={v.id} vendor={v} index={i} onPress={() => navigation?.navigate?.('VendorDetail', { id: v.id })} />
+            {topRated.map((v: any) => (
+              <FeaturedCard key={v.id} vendor={v} onPress={() => navigation?.navigate?.('VendorDetail', { id: v.id })} />
             ))}
           </ScrollView>
         </View>
       ) : null}
 
-      {/* Promo */}
       <View className="mx-lg my-md overflow-hidden rounded-2xl" style={{ backgroundColor: color.brand[500] }}>
         <View className="flex-row items-center p-lg">
           <View className="flex-1 pr-md">
@@ -182,44 +246,75 @@ function HomeHeader({ navigation, address, featured }: { navigation: any; addres
         </View>
       </View>
 
-      <View className="mb-sm mt-md px-lg"><Heading size="lg">Popular near you</Heading></View>
+      <SectionHeader title="Near you" />
+      <CuisineChips cuisines={cuisines} selected={selectedCuisine} onSelect={onSelectCuisine} />
     </View>
   );
 }
 
 export function HomeScreen({ navigation }: any) {
   const { latitude, longitude, address } = useLocationStore();
+  const [selectedCuisine, setSelectedCuisine] = useState<string | undefined>(undefined);
 
-  const { data, isLoading } = useQuery({
+  const { data, isLoading, refetch, isRefetching } = useQuery({
     queryKey: ['home', latitude, longitude],
     queryFn: async () => (await customerApi.getHome(latitude ?? undefined, longitude ?? undefined)).data,
   });
   const home = data?.data ?? {};
-  const popular: any[] = home.vendors ?? home.popular ?? home.featured ?? [];
+  const allVendors: any[] = home.nearby ?? home.openVendors ?? home.featured ?? [];
+
+  const cuisines = useMemo(() => {
+    const set = new Set<string>();
+    for (const v of allVendors) for (const c of v.cuisineTypes ?? []) set.add(c);
+    return Array.from(set).slice(0, 12);
+  }, [allVendors]);
+
+  const topRated = useMemo(
+    () => [...allVendors].filter((v) => ratingOf(v) > 0).sort((a, b) => ratingOf(b) - ratingOf(a)).slice(0, 6),
+    [allVendors],
+  );
+
+  const vendors = useMemo(
+    () => (selectedCuisine ? allVendors.filter((v) => (v.cuisineTypes ?? []).includes(selectedCuisine)) : allVendors),
+    [allVendors, selectedCuisine],
+  );
 
   return (
     <SafeAreaView style={{ flex: 1 }} edges={['top']} className="bg-surface-base">
-      <List
-        data={popular}
-        keyExtractor={(v: any) => String(v.id)}
-        renderItem={({ item, index }: { item: any; index: number }) => (
-          <View className="px-lg">
-            <VendorCard vendor={item} index={index} onPress={() => navigation?.navigate?.('VendorDetail', { id: item.id })} />
-          </View>
-        )}
-        ListHeaderComponent={<HomeHeader navigation={navigation} address={address} featured={popular.slice(0, 6)} />}
-        ListEmptyComponent={
-          isLoading ? (
+      <View style={{ flex: 1 }}>
+        <List
+          data={vendors}
+          keyExtractor={(v: any) => String(v.id)}
+          renderItem={({ item }: { item: any }) => (
             <View className="px-lg">
-              <Skeleton className="mb-md h-48 w-full rounded-2xl" />
-              <Skeleton className="mb-md h-48 w-full rounded-2xl" />
+              <VendorCard vendor={item} onPress={() => navigation?.navigate?.('VendorDetail', { id: item.id })} />
             </View>
-          ) : (
-            <Text className="px-lg text-text-secondary">Nothing nearby yet — check back soon.</Text>
-          )
-        }
-        contentContainerStyle={{ paddingBottom: 32 }}
-      />
+          )}
+          refreshControl={<RefreshControl refreshing={isRefetching} onRefresh={() => refetch()} tintColor={color.brand[500]} />}
+          ListHeaderComponent={
+            <HomeHeader
+              navigation={navigation}
+              address={address}
+              activeOrder={home.activeOrder}
+              topRated={topRated}
+              cuisines={cuisines}
+              selectedCuisine={selectedCuisine}
+              onSelectCuisine={setSelectedCuisine}
+            />
+          }
+          ListEmptyComponent={
+            isLoading ? (
+              <View className="px-lg">
+                <Skeleton className="mb-md h-48 w-full rounded-2xl" />
+                <Skeleton className="mb-md h-48 w-full rounded-2xl" />
+              </View>
+            ) : (
+              <Text className="px-lg text-text-secondary">Nothing nearby yet — check back soon.</Text>
+            )
+          }
+          contentContainerStyle={{ paddingBottom: 32 }}
+        />
+      </View>
     </SafeAreaView>
   );
 }

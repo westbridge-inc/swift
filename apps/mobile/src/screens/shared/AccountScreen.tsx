@@ -47,11 +47,20 @@ export function AccountScreen({ navigation }: any) {
             </View>
           ) : null}
 
-          <Heading size="lg" className="mb-sm mt-xl">Saved addresses</Heading>
+          <View className="mb-sm mt-xl flex-row items-center justify-between">
+            <Heading size="lg">Saved addresses</Heading>
+            <Pressable onPress={() => navigation?.navigate?.('AddAddress')} hitSlop={8} className="flex-row items-center">
+              <Feather name="plus" size={16} color={color.brand[500]} />
+              <Text className="ml-1 text-sm font-semibold text-brand-600">Add</Text>
+            </Pressable>
+          </View>
           {list.length === 0 ? (
-            <Card>
-              <Text className="text-text-secondary">No saved addresses yet.</Text>
-            </Card>
+            <Pressable onPress={() => navigation?.navigate?.('AddAddress')}>
+              <Card className="flex-row items-center">
+                <MaterialCommunityIcons name="map-marker-plus-outline" size={20} color={color.brand[500]} />
+                <Text className="ml-sm text-text-secondary">Add your first address</Text>
+              </Card>
+            </Pressable>
           ) : (
             list.map((a) => (
               <Card key={a.id} className="mb-sm flex-row items-center">

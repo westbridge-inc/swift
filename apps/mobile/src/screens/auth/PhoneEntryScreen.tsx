@@ -28,7 +28,7 @@ export function PhoneEntryScreen({ navigation }: any) {
     <SafeAreaView style={{ flex: 1 }} edges={['top', 'bottom']} className="bg-surface-base">
       <View className="flex-1 justify-center px-lg">
         <Heading size="3xl" className="text-center text-brand-500">
-          swift
+          Swift
         </Heading>
         <Heading size="xl" className="mt-2xl text-center">
           Enter your phone number
