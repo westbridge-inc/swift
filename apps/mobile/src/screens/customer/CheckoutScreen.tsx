@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { View, ScrollView, Pressable } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Feather, MaterialCommunityIcons } from '@expo/vector-icons';
@@ -29,7 +29,22 @@ export function CheckoutScreen({ navigation }: any) {
   const [selectedTip, setSelectedTip] = useState(0);
 
   const list = addresses ?? [];
-  const effectiveAddressId = selectedId ?? cart?.deliveryAddressId;
+  const defaultAddressId = list.find((a: any) => a.isDefault)?.id ?? list[0]?.id;
+  // Mirror the backend's default-address fallback (order.service: findFirst
+  // isDefault) so a returning customer can check out immediately. Without this
+  // the button stays disabled whenever the cart has no deliveryAddressId — e.g.
+  // after "reorder" — even though the customer has a saved address.
+  const effectiveAddressId = selectedId ?? cart?.deliveryAddressId ?? defaultAddressId;
+
+  useEffect(() => {
+    // Persist the auto-selected default into the server cart so checkout uses
+    // exactly the address shown as selected (the API only auto-falls-back to the
+    // isDefault address, not to an arbitrary first one).
+    if (!cart?.deliveryAddressId && !selectedId && defaultAddressId) {
+      setAddress.mutate(defaultAddressId);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [defaultAddressId, cart?.deliveryAddressId]);
 
   if (isLoading || !cart) {
     return (
