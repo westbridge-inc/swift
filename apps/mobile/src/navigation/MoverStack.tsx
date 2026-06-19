@@ -1,12 +1,13 @@
 import React, { useState } from 'react';
-import { View, ScrollView, Pressable, TextInput } from 'react-native';
+import { View, ScrollView, Pressable, TextInput, Switch, RefreshControl } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
 import MapView, { Marker, PROVIDER_DEFAULT } from 'react-native-maps';
 import { color } from '@swift/ui';
 import { Feather, MaterialCommunityIcons } from '@expo/vector-icons';
-import { Text, Heading, Card, Button, Spinner, Badge } from '../components/ui';
+import { Text, Heading, Card, Button, Spinner } from '../components/ui';
 import { DocumentChecklist } from '../components/onboarding/DocumentChecklist';
+import { ChatScreen } from '../screens/shared/ChatScreen';
 import {
   useVerificationStatus,
   useBecomePartner,
@@ -34,6 +35,8 @@ const VTYPES = [
 ] as const;
 
 const FIELD = 'mb-sm rounded-lg border border-border-subtle bg-surface-base px-lg py-md font-body text-base text-text-primary';
+
+const CARD_SHADOW = { shadowColor: '#000', shadowOpacity: 0.08, shadowRadius: 12, shadowOffset: { width: 0, height: 4 }, elevation: 3 } as const;
 
 function jobAmount(j: any) {
   return money(j?.totalAmount ?? j?.taxiFareTotal ?? j?.fare ?? 0);
@@ -162,6 +165,9 @@ function MoverOps({ navigation }: any) {
   const errMsg = (goOnline.error as any)?.response?.data?.message;
   const todayTotal = (earnings.data as any)?.total ?? (earnings.data as any)?.todayEarnings ?? 0;
 
+  const tripsToday = (earnings.data as any)?.todayDeliveries ?? (earnings.data as any)?.trips ?? 0;
+  const busyToggle = goOnline.isPending || goOffline.isPending;
+
   return (
     <SafeAreaView style={{ flex: 1 }} edges={['top']} className="bg-surface-base">
       <View className="flex-row items-center justify-between px-lg py-sm">
@@ -170,79 +176,137 @@ function MoverOps({ navigation }: any) {
           <Text className="text-sm text-text-muted">Log out</Text>
         </Pressable>
       </View>
-      <ScrollView className="flex-1" contentContainerStyle={{ paddingHorizontal: 16, paddingBottom: 32 }} showsVerticalScrollIndicator={false}>
-        <Card className="mb-md flex-row items-center justify-between">
-          <View>
-            <Text className="text-xs text-text-secondary">Today&apos;s earnings</Text>
-            <Heading size="xl">{money(todayTotal)}</Heading>
+      <ScrollView
+        className="flex-1"
+        contentContainerStyle={{ paddingHorizontal: 16, paddingBottom: 32 }}
+        showsVerticalScrollIndicator={false}
+        refreshControl={
+          <RefreshControl
+            refreshing={available.isRefetching || earnings.isRefetching}
+            onRefresh={() => {
+              available.refetch();
+              earnings.refetch();
+            }}
+            tintColor={color.brand[500]}
+          />
+        }
+      >
+        {/* Online status + earnings hero */}
+        <View className="mb-md overflow-hidden rounded-2xl bg-surface-base" style={CARD_SHADOW}>
+          <View className="p-lg">
+            <View className="flex-row items-center justify-between">
+              <View className="flex-1 pr-md">
+                <View className="flex-row items-center">
+                  <View style={{ width: 10, height: 10, borderRadius: 5, backgroundColor: online ? color.success : color.text.muted }} />
+                  <Text className="ml-2 text-lg font-bold text-text-primary">{online ? 'You’re online' : 'You’re offline'}</Text>
+                </View>
+                <Text className="mt-xs text-xs text-text-muted">{online ? 'Receiving jobs nearby' : 'Go online to receive jobs'}</Text>
+              </View>
+              <Switch
+                value={online}
+                disabled={busyToggle}
+                onValueChange={() => (online ? goOffline.mutate() : goOnline.mutate())}
+                trackColor={{ true: color.brand[500], false: color.border.subtle }}
+              />
+            </View>
+            <View className="mt-md flex-row" style={{ gap: 8 }}>
+              <View className="flex-1 rounded-xl bg-surface-subtle p-md">
+                <MaterialCommunityIcons name="cash" size={18} color={color.brand[500]} />
+                <Text className="mt-xs text-lg font-bold text-text-primary">{money(todayTotal)}</Text>
+                <Text className="text-xs text-text-muted">Earned today</Text>
+              </View>
+              <View className="flex-1 rounded-xl bg-surface-subtle p-md">
+                <MaterialCommunityIcons name={kind === 'DRIVER' ? 'car' : 'bike-fast'} size={18} color={color.brand[500]} />
+                <Text className="mt-xs text-lg font-bold text-text-primary">{tripsToday}</Text>
+                <Text className="text-xs text-text-muted">{kind === 'DRIVER' ? 'Trips today' : 'Jobs today'}</Text>
+              </View>
+            </View>
           </View>
-          <Badge label={online ? 'Online' : 'Offline'} tone={online ? 'success' : 'brand'} />
-        </Card>
+        </View>
 
         {errMsg ? <Text className="mb-sm text-center text-sm text-error">{errMsg}</Text> : null}
 
-        <Button
-          label={online ? (goOffline.isPending ? 'Going offline…' : 'Go offline') : goOnline.isPending ? 'Going online…' : 'Go online'}
-          variant={online ? 'outline' : 'solid'}
-          className="mb-lg"
-          disabled={goOnline.isPending || goOffline.isPending}
-          onPress={() => (online ? goOffline.mutate() : goOnline.mutate())}
-        />
-
+        {/* Incoming dispatch request — Uber-driver style */}
         {offer && online && !activeJob ? (
-          <Card className="mb-md border-brand-500 bg-brand-50">
-            <Text className="text-xs font-semibold text-brand-600">
-              New {kind === 'DRIVER' ? 'ride' : 'delivery'} offer
-            </Text>
-            <Text className="mt-xs text-base font-semibold" numberOfLines={1}>
-              {offer.vendorName ?? offer.orderNumber ?? 'Job nearby'}
-            </Text>
-            {offer.etaMinutes != null ? (
-              <Text className="mt-xs text-sm text-text-secondary">~{offer.etaMinutes} min to pickup</Text>
-            ) : null}
-            <View className="mt-sm flex-row" style={{ gap: 8 }}>
-              <Button
-                label={accept.isPending ? 'Accepting…' : 'Accept'}
-                className="flex-1"
-                disabled={accept.isPending}
-                onPress={() => accept.mutate(offer.orderId, { onSuccess: dismiss })}
-              />
-              <Button label="Dismiss" variant="outline" className="flex-1" onPress={dismiss} />
+          <View className="mb-md overflow-hidden rounded-2xl" style={[CARD_SHADOW, { backgroundColor: color.brand[500] }]}>
+            <View className="p-lg">
+              <View className="flex-row items-center">
+                <MaterialCommunityIcons name={kind === 'DRIVER' ? 'car' : 'package-variant'} size={20} color="#fff" />
+                <Text className="ml-sm text-xs font-bold text-white" style={{ letterSpacing: 1 }}>
+                  NEW {kind === 'DRIVER' ? 'RIDE' : 'DELIVERY'} REQUEST
+                </Text>
+              </View>
+              <Text className="mt-sm text-lg font-bold text-white" numberOfLines={1}>
+                {offer.vendorName ?? offer.orderNumber ?? 'Job nearby'}
+              </Text>
+              {offer.etaMinutes != null ? (
+                <Text className="mt-xs text-sm text-white" style={{ opacity: 0.9 }}>~{offer.etaMinutes} min to pickup</Text>
+              ) : null}
+              <View className="mt-md flex-row" style={{ gap: 8 }}>
+                <Pressable
+                  className="flex-1 items-center rounded-lg bg-white py-md"
+                  disabled={accept.isPending}
+                  onPress={() => accept.mutate(offer.orderId, { onSuccess: dismiss })}
+                >
+                  <Text className="font-body font-bold text-brand-600">{accept.isPending ? 'Accepting…' : 'Accept'}</Text>
+                </Pressable>
+                <Pressable className="items-center justify-center rounded-lg border border-white px-xl" onPress={dismiss}>
+                  <Text className="font-body font-semibold text-white">Dismiss</Text>
+                </Pressable>
+              </View>
             </View>
-          </Card>
+          </View>
         ) : null}
 
+        {/* Active job */}
         {activeJob ? (
           <Pressable onPress={() => navigation?.navigate?.('ActiveJob')}>
-            <Card className="mb-md border-brand-500">
-              <Text className="text-xs text-brand-600">Active job</Text>
-              <Text className="mt-xs text-base font-semibold" numberOfLines={1}>
+            <View className="mb-md rounded-2xl bg-surface-base p-lg" style={CARD_SHADOW}>
+              <View className="flex-row items-center justify-between">
+                <Text className="text-xs font-bold text-brand-600">ACTIVE JOB</Text>
+                <Feather name="chevron-right" size={18} color={color.text.muted} />
+              </View>
+              <Text className="mt-xs text-base font-bold text-text-primary" numberOfLines={1}>
                 {activeJob.deliveryAddress ?? activeJob.dropoffAddress ?? activeJob.orderNumber ?? 'In progress'}
               </Text>
-              <Text className="mt-xs text-sm text-text-secondary">{jobAmount(activeJob)} · tap to manage ›</Text>
-            </Card>
+              <Text className="mt-xs text-sm text-text-secondary">{jobAmount(activeJob)} · tap to manage</Text>
+            </View>
           </Pressable>
         ) : online ? (
           jobs.length === 0 ? (
-            <Text className="mt-xl text-center text-text-secondary">Waiting for nearby jobs…</Text>
+            <View className="mt-lg items-center rounded-2xl bg-surface-subtle py-2xl">
+              <MaterialCommunityIcons name="radar" size={28} color={color.text.muted} />
+              <Text className="mt-sm text-sm text-text-secondary">Waiting for nearby jobs…</Text>
+            </View>
           ) : (
-            jobs.map((j) => (
-              <Card key={j.id} className="mb-md">
-                <Text className="text-base font-semibold" numberOfLines={1}>
-                  {j.vendor?.name ?? j.pickupAddress ?? 'New job'}
-                </Text>
-                <Text className="mt-xs text-sm text-text-secondary" numberOfLines={1}>
-                  {j.deliveryAddress ?? j.dropoffAddress ?? ''}
-                </Text>
-                <View className="mt-sm flex-row items-center justify-between">
-                  <Text className="text-base font-semibold">{jobAmount(j)}</Text>
-                  <Button label={accept.isPending ? '…' : 'Accept'} className="px-xl" disabled={accept.isPending} onPress={() => accept.mutate(j.id)} />
+            <>
+              <Heading size="lg" className="mb-sm">
+                Available jobs
+              </Heading>
+              {jobs.map((j) => (
+                <View key={j.id} className="mb-md rounded-2xl bg-surface-base p-lg" style={CARD_SHADOW}>
+                  <Text className="text-base font-bold text-text-primary" numberOfLines={1}>
+                    {j.vendor?.name ?? j.pickupAddress ?? 'New job'}
+                  </Text>
+                  <View className="mt-xs flex-row items-center">
+                    <Feather name="map-pin" size={13} color={color.text.muted} />
+                    <Text className="ml-1 flex-1 text-sm text-text-secondary" numberOfLines={1}>
+                      {j.deliveryAddress ?? j.dropoffAddress ?? ''}
+                    </Text>
+                  </View>
+                  <View className="mt-sm flex-row items-center justify-between">
+                    <Text className="text-lg font-bold text-text-primary">{jobAmount(j)}</Text>
+                    <Button label={accept.isPending ? '…' : 'Accept'} className="px-2xl" disabled={accept.isPending} onPress={() => accept.mutate(j.id)} />
+                  </View>
                 </View>
-              </Card>
-            ))
+              ))}
+            </>
           )
         ) : (
-          <Text className="mt-xl text-center text-text-secondary">You&apos;re offline. Go online to receive jobs.</Text>
+          <View className="mt-lg items-center rounded-2xl bg-surface-subtle py-2xl">
+            <MaterialCommunityIcons name="power-sleep" size={28} color={color.text.muted} />
+            <Text className="mt-sm text-center text-sm text-text-secondary">You&apos;re offline. Flip the switch to start earning.</Text>
+          </View>
         )}
       </ScrollView>
     </SafeAreaView>
@@ -308,6 +372,13 @@ function ActiveJobScreen({ navigation }: any) {
             <Text className="mt-xs text-xs text-text-muted">Status: {String(job.status ?? '').replace(/_/g, ' ').toLowerCase()}</Text>
           </Card>
 
+          <Button
+            label="Message customer"
+            variant="outline"
+            className="mb-md"
+            onPress={() => navigation.navigate('Chat', { orderId: job.id, title: 'Customer' })}
+          />
+
           {kind === 'DRIVER' ? (
             <>
               <View className="flex-row flex-wrap" style={{ gap: 8 }}>
@@ -356,6 +427,7 @@ export function MoverStack() {
     <Stack.Navigator screenOptions={{ headerShown: false }}>
       <Stack.Screen name="MoverRoot" component={MoverRoot} />
       <Stack.Screen name="ActiveJob" component={ActiveJobScreen} />
+      <Stack.Screen name="Chat" component={ChatScreen} />
     </Stack.Navigator>
   );
 }
