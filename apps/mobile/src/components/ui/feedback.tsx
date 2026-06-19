@@ -1,6 +1,6 @@
-import { useEffect } from 'react';
-import { ActivityIndicator, View, type ViewProps } from 'react-native';
-import Animated, { useSharedValue, useAnimatedStyle, withRepeat, withSequence, withTiming } from 'react-native-reanimated';
+import { useEffect, useState } from 'react';
+import { ActivityIndicator, View, StyleSheet, type ViewProps, type LayoutChangeEvent } from 'react-native';
+import Animated, { useSharedValue, useAnimatedStyle, withRepeat, withTiming, Easing } from 'react-native-reanimated';
 import { color } from '@swift/ui';
 import { cn } from './cn';
 
@@ -8,16 +8,32 @@ export function Spinner({ size = 'small' }: { size?: 'small' | 'large' }) {
   return <ActivityIndicator size={size} color={color.brand[500]} />;
 }
 
-/** Shimmering placeholder block for loading states (pulsing opacity loop). */
+/**
+ * Loading placeholder with a real **shimmer sweep** — a soft highlight travels
+ * across the block (vs the old static opacity pulse). Same API: pass `className`
+ * for size (e.g. `h-48 w-full rounded-2xl`), so every existing call-site upgrades
+ * for free.
+ */
 export function Skeleton({ className, ...props }: ViewProps & { className?: string }) {
-  const opacity = useSharedValue(0.4);
+  const [w, setW] = useState(0);
+  const x = useSharedValue(0);
+
   useEffect(() => {
-    opacity.value = withRepeat(withSequence(withTiming(0.85, { duration: 650 }), withTiming(0.4, { duration: 650 })), -1, false);
-  }, [opacity]);
-  const animStyle = useAnimatedStyle(() => ({ opacity: opacity.value }));
+    if (w === 0) return;
+    x.value = 0;
+    x.value = withRepeat(withTiming(1, { duration: 1200, easing: Easing.inOut(Easing.ease) }), -1, false);
+  }, [w, x]);
+
+  const sweep = useAnimatedStyle(() => ({ transform: [{ translateX: -w + x.value * 2 * w }] }));
+  const onLayout = (e: LayoutChangeEvent) => setW(e.nativeEvent.layout.width);
+
   return (
-    <Animated.View style={animStyle}>
-      <View className={cn('bg-surface-subtle rounded-md', className)} {...props} />
-    </Animated.View>
+    <View onLayout={onLayout} className={cn('bg-surface-subtle overflow-hidden rounded-md', className)} {...props}>
+      {w > 0 ? (
+        <Animated.View style={[StyleSheet.absoluteFill, sweep]}>
+          <View style={{ height: '100%', width: w * 0.5, backgroundColor: 'rgba(255,255,255,0.6)' }} />
+        </Animated.View>
+      ) : null}
+    </View>
   );
 }
