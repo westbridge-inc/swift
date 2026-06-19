@@ -133,6 +133,15 @@ export async function authRoutes(app: FastifyInstance) {
 
   app.get('/countries', async (_request, reply) => {
     const countries = await new CountryConfigService(app.prisma).getActiveCountries();
-    return reply.send({ success: true, data: countries });
+    // Dial codes are static reference data (ISO country → calling code); kept here
+    // rather than as a DB column to avoid a migration.
+    const DIAL_CODES: Record<string, string> = {
+      GY: '+592', TT: '+1868', JM: '+1876', BB: '+1246', BS: '+1242', SR: '+597',
+      BZ: '+501', GD: '+1473', LC: '+1758', AG: '+1268', VC: '+1784', KN: '+1869', DM: '+1767',
+    };
+    return reply.send({
+      success: true,
+      data: countries.map((c) => ({ ...c, dialCode: DIAL_CODES[c.code] ?? null })),
+    });
   });
 }
