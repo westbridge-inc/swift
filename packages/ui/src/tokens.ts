@@ -111,3 +111,15 @@ export const shadow = {
   card: '0px 1px 3px rgba(0,0,0,0.08)',
   raised: '0px 6px 16px rgba(0,0,0,0.12)',
 } as const;
+
+/** §Motion — durations (ms) + spring presets + press-scale values, so animation
+ *  timing is a token (never a magic number scattered across screens). Consumed
+ *  by PressableScale, entrance animations, and screen transitions. */
+export const motion = {
+  duration: { instant: 90, fast: 140, base: 240, slow: 380 },
+  scale: { press: 0.97, pressStrong: 0.94 },
+  spring: {
+    press: { damping: 20, stiffness: 350, mass: 0.6 },
+    entrance: { damping: 18, stiffness: 170, mass: 0.9 },
+  },
+} as const;
