@@ -12,4 +12,6 @@ export { PressableScale } from './pressable-scale';
 export { elevation } from './elevation';
 export { EmptyState } from './empty-state';
 export { enter, staggerDelay, screenTransition } from './transitions';
+export { Field } from './field';
+export { StepProgress } from './step-progress';
 export { Input } from './input';
