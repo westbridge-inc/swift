@@ -6,6 +6,7 @@ import { color } from '@swift/ui';
 import { authApi } from '../../services/api';
 import { useAuthStore } from '../../stores/authStore';
 import { Text, Heading, Button } from '../../components/ui';
+import { SwiftMark } from '../../components/SwiftLogo';
 
 export function PhoneEntryScreen({ navigation }: any) {
   const [phone, setPhone] = useState('');
@@ -30,9 +31,12 @@ export function PhoneEntryScreen({ navigation }: any) {
   return (
     <SafeAreaView style={{ flex: 1 }} edges={['top', 'bottom']} className="bg-surface-base">
       <View className="flex-1 justify-center px-lg">
-        <Heading size="3xl" className="text-center text-brand-500">
-          Swift
-        </Heading>
+        <View className="items-center">
+          <SwiftMark size={56} />
+          <Heading size="3xl" className="mt-sm text-center text-text-primary">
+            Swift
+          </Heading>
+        </View>
         <Heading size="xl" className="mt-2xl text-center">
           Enter your phone number
         </Heading>

@@ -1,10 +1,11 @@
-import React, { useState } from 'react';
-import { View, ScrollView, Pressable, TextInput, Alert } from 'react-native';
+import React, { useState, useEffect } from 'react';
+import { View, ScrollView, Pressable, TextInput, Alert, Switch, RefreshControl } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
+import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
 import { color } from '@swift/ui';
 import { Feather, MaterialCommunityIcons } from '@expo/vector-icons';
-import { Text, Heading, Card, Button, Spinner, Badge } from '../components/ui';
+import { Text, Heading, Card, Button, Spinner, Skeleton, Image, Badge } from '../components/ui';
 import { DocumentChecklist } from '../components/onboarding/DocumentChecklist';
 import { useBecomePartner, useVerificationStatus } from '../hooks/verification';
 import {
@@ -18,10 +19,19 @@ import {
   useSaveItem,
   useDeleteItem,
   useSetItemAvailability,
+  useUploadItemImage,
+  useVendorSubscription,
+  useVendorAnalytics,
+  useVendorHours,
+  useSetHours,
+  type DayHours,
 } from '../hooks/vendorops';
 import { useAuthStore } from '../stores/authStore';
 import { useLocationStore } from '../stores/locationStore';
 import { money } from '../lib/money';
+import { mediaUrl } from '../lib/images';
+import * as ImagePicker from 'expo-image-picker';
+import { VendorBulkImportScreen } from '../screens/vendor/VendorBulkImportScreen';
 
 const Stack = createNativeStackNavigator();
 const FIELD = 'mb-sm rounded-lg border border-border-subtle bg-surface-base px-lg py-md font-body text-base text-text-primary';
@@ -131,6 +141,93 @@ function orderActions(status: string): { label: string; action: 'accept' | 'prep
   return [];
 }
 
+const CARD_SHADOW = { shadowColor: '#000', shadowOpacity: 0.08, shadowRadius: 12, shadowOffset: { width: 0, height: 4 }, elevation: 3 } as const;
+
+function timeAgo(iso?: string) {
+  if (!iso) return '';
+  const mins = Math.max(0, Math.floor((Date.now() - new Date(iso).getTime()) / 60000));
+  if (mins < 1) return 'just now';
+  if (mins < 60) return `${mins}m ago`;
+  return `${Math.floor(mins / 60)}h ${mins % 60}m ago`;
+}
+
+const ORDER_PILL: Record<string, { label: string; bg: string; fg: string }> = {
+  PENDING: { label: 'New', bg: 'bg-brand-500', fg: 'text-white' },
+  PLACED: { label: 'New', bg: 'bg-brand-500', fg: 'text-white' },
+  ACCEPTED: { label: 'Accepted', bg: 'bg-brand-50', fg: 'text-brand-600' },
+  CONFIRMED: { label: 'Accepted', bg: 'bg-brand-50', fg: 'text-brand-600' },
+  PREPARING: { label: 'Preparing', bg: 'bg-surface-subtle', fg: 'text-text-secondary' },
+  READY: { label: 'Ready', bg: 'bg-success/10', fg: 'text-success' },
+};
+
+function StatusPill({ status }: { status: string }) {
+  const s = (status || '').toUpperCase();
+  const cfg = ORDER_PILL[s] ?? { label: s.replace(/_/g, ' ').toLowerCase(), bg: 'bg-surface-subtle', fg: 'text-text-secondary' };
+  return (
+    <View className={`self-start rounded-full px-3 py-1 ${cfg.bg}`}>
+      <Text className={`text-xs font-semibold ${cfg.fg}`}>{cfg.label}</Text>
+    </View>
+  );
+}
+
+function KpiTile({ icon, value, label }: { icon: keyof typeof MaterialCommunityIcons.glyphMap; value: string; label: string }) {
+  return (
+    <View className="flex-1 rounded-2xl bg-surface-base p-md" style={CARD_SHADOW}>
+      <MaterialCommunityIcons name={icon} size={18} color={color.brand[500]} />
+      <Text className="mt-xs text-lg font-bold text-text-primary" numberOfLines={1}>{value}</Text>
+      <Text className="text-xs text-text-muted" numberOfLines={1}>{label}</Text>
+    </View>
+  );
+}
+
+function VendorOrderCard({
+  order,
+  onAction,
+  busy,
+}: {
+  order: any;
+  onAction: (action: 'accept' | 'preparing' | 'ready' | 'reject') => void;
+  busy: boolean;
+}) {
+  const actions = orderActions(order.status);
+  const items = order.itemCount ?? order.items?.length ?? 0;
+  return (
+    <View className="mb-md rounded-2xl bg-surface-base p-lg" style={CARD_SHADOW}>
+      <View className="flex-row items-center justify-between">
+        <Text className="text-base font-bold text-text-primary">{order.orderNumber ? `#${order.orderNumber}` : 'Order'}</Text>
+        <StatusPill status={order.status} />
+      </View>
+      <View className="mt-xs flex-row items-center">
+        <Feather name="clock" size={13} color={color.text.muted} />
+        <Text className="ml-1 text-xs text-text-muted">{timeAgo(order.placedAt)}</Text>
+        {items ? <Text className="ml-2 text-xs text-text-muted">{`· ${items} item${items === 1 ? '' : 's'}`}</Text> : null}
+        <Text className="ml-2 text-xs text-text-muted">{`· ${order.paymentMethod === 'CASH' ? 'Cash' : order.paymentMethod ?? ''}`}</Text>
+      </View>
+      {order.deliveryAddress ? (
+        <View className="mt-sm flex-row items-center">
+          <Feather name="map-pin" size={13} color={color.text.muted} />
+          <Text className="ml-1 flex-1 text-sm text-text-secondary" numberOfLines={1}>{order.deliveryAddress}</Text>
+        </View>
+      ) : null}
+      <Text className="mt-sm text-lg font-bold text-text-primary">{money(order.totalAmount ?? order.total)}</Text>
+      {actions.length > 0 ? (
+        <View className="mt-md flex-row" style={{ gap: 8 }}>
+          {actions.map((a) => (
+            <Button
+              key={a.action}
+              label={a.label}
+              variant={a.action === 'reject' ? 'outline' : 'solid'}
+              className="flex-1"
+              disabled={busy}
+              onPress={() => onAction(a.action)}
+            />
+          ))}
+        </View>
+      ) : null}
+    </View>
+  );
+}
+
 function VendorOps({ store, navigation }: any) {
   const toggleOpen = useToggleOpen();
   const toggleOrders = useToggleOrders();
@@ -141,72 +238,88 @@ function VendorOps({ store, navigation }: any) {
   const accepting = !!store.acceptingOrders;
   const busy = orderAction.isPending;
 
+  const isNew = (s: string) => ['PENDING', 'PLACED'].includes((s || '').toUpperCase());
+  const newOrders = orders.filter((o) => isNew(o.status));
+  const inProgress = orders.filter((o) => !isNew(o.status));
+  const queueValue = orders.reduce((sum, o) => sum + Number(o.totalAmount ?? o.total ?? 0), 0);
+
   return (
     <SafeAreaView style={{ flex: 1 }} edges={['top']} className="bg-surface-base">
       <Header title={store.name} />
-      <ScrollView className="flex-1" contentContainerStyle={{ paddingHorizontal: 16, paddingBottom: 32 }} showsVerticalScrollIndicator={false}>
+      <ScrollView
+        className="flex-1"
+        contentContainerStyle={{ paddingHorizontal: 16, paddingBottom: 32 }}
+        showsVerticalScrollIndicator={false}
+        refreshControl={<RefreshControl refreshing={ordersQ.isRefetching} onRefresh={() => ordersQ.refetch()} tintColor={color.brand[500]} />}
+      >
+        {/* Store status */}
         <Card className="mb-md">
           <View className="flex-row items-center justify-between">
-            <View>
-              <Text className="text-base font-semibold">Store {open ? 'open' : 'closed'}</Text>
-              <Text className="mt-xs text-xs text-text-muted">{accepting ? 'Accepting orders' : 'Not accepting orders'}</Text>
+            <View className="flex-1 pr-md">
+              <View className="flex-row items-center">
+                <View style={{ width: 10, height: 10, borderRadius: 5, backgroundColor: open ? color.success : color.text.muted }} />
+                <Text className="ml-2 text-base font-bold text-text-primary">{open ? 'Open for orders' : 'Store closed'}</Text>
+              </View>
+              <Text className="mt-xs text-xs text-text-muted">{accepting ? 'Accepting new orders' : 'Orders paused'}</Text>
             </View>
-            <Badge label={open ? 'Open' : 'Closed'} tone={open ? 'success' : 'brand'} />
+            <Switch
+              value={open}
+              onValueChange={() => toggleOpen.mutate()}
+              disabled={toggleOpen.isPending}
+              trackColor={{ true: color.brand[500], false: color.border.subtle }}
+            />
           </View>
-          <View className="mt-md flex-row" style={{ gap: 8 }}>
-            <Button label={open ? 'Close store' : 'Open store'} variant="outline" className="flex-1" disabled={toggleOpen.isPending} onPress={() => toggleOpen.mutate()} />
-            <Button label={accepting ? 'Pause orders' : 'Resume orders'} variant="outline" className="flex-1" disabled={toggleOrders.isPending} onPress={() => toggleOrders.mutate()} />
-          </View>
+          <Button
+            label={accepting ? 'Pause new orders' : 'Resume orders'}
+            variant="outline"
+            className="mt-md"
+            disabled={toggleOrders.isPending}
+            onPress={() => toggleOrders.mutate()}
+          />
         </Card>
 
-        <Button
-          label="Manage menu"
-          variant="outline"
-          className="mb-md"
-          onPress={() => navigation.navigate('VendorMenu')}
-        />
+        {/* KPIs */}
+        <View className="mb-md flex-row" style={{ gap: 8 }}>
+          <KpiTile icon="receipt" value={String(orders.length)} label="Active orders" />
+          <KpiTile icon="cash" value={money(queueValue)} label="In queue" />
+          <KpiTile icon="timer-outline" value={`${store.estimatedPrepTime ?? 30}m`} label="Prep time" />
+        </View>
 
-        <Heading size="lg" className="mb-sm mt-md">
-          Incoming orders
-        </Heading>
-        {orders.length === 0 ? (
-          <Text className="mt-md text-center text-text-secondary">No active orders right now.</Text>
+        <Button label="Manage menu & inventory" variant="outline" className="mb-lg" onPress={() => navigation.navigate('Menu')} />
+
+        {/* New orders */}
+        <Heading size="lg" className="mb-sm">{newOrders.length ? `New orders · ${newOrders.length}` : 'New orders'}</Heading>
+        {ordersQ.isLoading ? (
+          <>
+            <Skeleton className="mb-md h-28 w-full rounded-2xl" />
+            <Skeleton className="mb-md h-28 w-full rounded-2xl" />
+          </>
+        ) : newOrders.length === 0 ? (
+          <View className="mb-lg items-center rounded-2xl bg-surface-subtle py-xl">
+            <MaterialCommunityIcons name="check-circle-outline" size={28} color={color.text.muted} />
+            <Text className="mt-sm text-sm text-text-secondary">You are all caught up</Text>
+          </View>
         ) : (
-          orders.map((o) => {
-            const actions = orderActions(o.status);
-            return (
-              <Card key={o.id} className="mb-md">
-                <View className="flex-row items-center justify-between">
-                  <Text className="text-base font-semibold">{o.orderNumber ? `#${o.orderNumber}` : 'Order'}</Text>
-                  <Badge label={String(o.status ?? '').replace(/_/g, ' ').toLowerCase()} tone="brand" />
-                </View>
-                <Text className="mt-xs text-sm text-text-secondary">
-                  {(o.itemCount ?? o.items?.length ?? 0)} item{(o.itemCount ?? o.items?.length ?? 0) === 1 ? '' : 's'} · {money(o.totalAmount ?? o.total)}
-                </Text>
-                {actions.length > 0 ? (
-                  <View className="mt-sm flex-row" style={{ gap: 8 }}>
-                    {actions.map((a) => (
-                      <Button
-                        key={a.action}
-                        label={a.label}
-                        variant={a.action === 'reject' ? 'outline' : 'solid'}
-                        className="flex-1"
-                        disabled={busy}
-                        onPress={() => orderAction.mutate({ id: o.id, action: a.action })}
-                      />
-                    ))}
-                  </View>
-                ) : null}
-              </Card>
-            );
-          })
+          newOrders.map((o) => (
+            <VendorOrderCard key={o.id} order={o} busy={busy} onAction={(action) => orderAction.mutate({ id: o.id, action })} />
+          ))
         )}
+
+        {/* In progress */}
+        {inProgress.length > 0 ? (
+          <>
+            <Heading size="lg" className="mb-sm mt-md">In progress</Heading>
+            {inProgress.map((o) => (
+              <VendorOrderCard key={o.id} order={o} busy={busy} onAction={(action) => orderAction.mutate({ id: o.id, action })} />
+            ))}
+          </>
+        ) : null}
       </ScrollView>
     </SafeAreaView>
   );
 }
 
-function VendorRoot({ navigation }: any) {
+function VendorRoot() {
   const { store, isLoading } = useVendorProfile();
 
   if (isLoading) {
@@ -220,7 +333,7 @@ function VendorRoot({ navigation }: any) {
   }
   if (!store) return <BusinessSetup />;
   if (store.status !== 'ACTIVE') return <VendorOnboarding store={store} />;
-  return <VendorOps store={store} navigation={navigation} />;
+  return <VendorTabs />;
 }
 
 // ─── Menu management ─────────────────────────────────────────────────────────
@@ -229,16 +342,22 @@ function SubHeader({
   title,
   navigation,
   action,
+  hideBack,
 }: {
   title: string;
   navigation: any;
   action?: { label: string; onPress: () => void; disabled?: boolean };
+  hideBack?: boolean;
 }) {
   return (
     <View className="flex-row items-center justify-between px-lg py-sm">
-      <Pressable onPress={() => navigation.goBack()} hitSlop={8}>
-        <Feather name="chevron-left" size={22} color={color.brand[600]} />
-      </Pressable>
+      {hideBack ? (
+        <View style={{ width: 22 }} />
+      ) : (
+        <Pressable onPress={() => navigation.goBack()} hitSlop={8}>
+          <Feather name="chevron-left" size={22} color={color.brand[600]} />
+        </Pressable>
+      )}
       <Heading size="lg" className="flex-1 px-md text-center" numberOfLines={1}>
         {title}
       </Heading>
@@ -276,12 +395,22 @@ function MenuItemRow({
 
   return (
     <Card className="mb-sm">
-      <View className="flex-row items-center justify-between">
-        <View className="flex-1 pr-md">
+      <View className="flex-row items-center">
+        {item.imageUrl ? (
+          <Image source={{ uri: mediaUrl(item.imageUrl)! }} style={{ width: 52, height: 52, borderRadius: 10 }} />
+        ) : (
+          <View style={{ width: 52, height: 52, borderRadius: 10 }} className="items-center justify-center bg-surface-subtle">
+            <Feather name="image" size={18} color={color.text.muted} />
+          </View>
+        )}
+        <View className="ml-md flex-1">
           <Text className="text-base font-semibold" numberOfLines={1}>
             {item.name}
           </Text>
-          <Text className="mt-xs text-sm text-text-secondary">{money(item.basePrice)}</Text>
+          <Text className="mt-xs text-sm text-text-secondary">
+            {money(item.basePrice)}
+            {item.stockQuantity != null ? ` · ${item.stockQuantity} in stock` : ''}
+          </Text>
         </View>
         <Pressable
           onPress={() => setAvail.mutate({ id: item.id, isAvailable: !available })}
@@ -333,8 +462,9 @@ function VendorMenuScreen({ navigation }: any) {
   return (
     <SafeAreaView style={{ flex: 1 }} edges={['top']} className="bg-surface-base">
       <SubHeader
-        title="Menu"
+        title="Menu & inventory"
         navigation={navigation}
+        hideBack
         action={
           catOptions.length > 0
             ? { label: '+ Item', onPress: () => navigation.navigate('VendorItemEditor', { categories: catOptions }) }
@@ -360,6 +490,17 @@ function VendorMenuScreen({ navigation }: any) {
               <Button label="Add" disabled={newCat.trim().length < 1 || createCategory.isPending} onPress={addCategory} />
             </View>
           </Card>
+
+          <Pressable onPress={() => navigation.navigate('VendorBulkImport')}>
+            <Card className="mb-md flex-row items-center">
+              <Feather name="upload-cloud" size={18} color={color.brand[500]} />
+              <View className="ml-md flex-1">
+                <Text className="text-base font-semibold">Bulk import catalogue</Text>
+                <Text className="text-xs text-text-muted">Paste a CSV — we map the columns for you</Text>
+              </View>
+              <Feather name="chevron-right" size={18} color={color.text.muted} />
+            </Card>
+          </Pressable>
 
           {categories.length === 0 ? (
             <Text className="mt-lg text-center text-text-secondary">Add a category to start building your menu.</Text>
@@ -389,38 +530,78 @@ function VendorItemEditorScreen({ navigation, route }: any) {
   const existing = route.params?.item;
   const categories: { id: string; name: string }[] = route.params?.categories ?? [];
   const save = useSaveItem();
+  const uploadImage = useUploadItemImage();
   const [name, setName] = useState<string>(existing?.name ?? '');
   const [price, setPrice] = useState<string>(existing ? String(existing.basePrice ?? '') : '');
   const [description, setDescription] = useState<string>(existing?.description ?? '');
   const [categoryId, setCategoryId] = useState<string>(existing?.categoryId ?? categories[0]?.id ?? '');
   const [available, setAvailable] = useState<boolean>(existing ? existing.isAvailable !== false : true);
   const [popular, setPopular] = useState<boolean>(!!existing?.isPopular);
+  const [sku, setSku] = useState<string>(existing?.sku ?? '');
+  const [unit, setUnit] = useState<string>(existing?.unit ?? '');
+  const [stock, setStock] = useState<string>(existing?.stockQuantity != null ? String(existing.stockQuantity) : '');
+  const [localPhoto, setLocalPhoto] = useState<{ uri: string; name: string; type: string } | null>(null);
 
   const priceNum = Number(price);
   const valid = name.trim().length >= 1 && Number.isFinite(priceNum) && priceNum >= 0 && !!categoryId;
+  const busy = save.isPending || uploadImage.isPending;
+  const previewUri = localPhoto?.uri ?? mediaUrl(existing?.imageUrl) ?? undefined;
 
-  const submit = () => {
-    if (!valid) return;
-    save.mutate(
-      {
-        id: existing?.id,
-        data: {
-          categoryId,
-          name: name.trim(),
-          description: description.trim() || undefined,
-          basePrice: priceNum,
-          isAvailable: available,
-          isPopular: popular,
-        },
+  const pickPhoto = async () => {
+    const perm = await ImagePicker.requestMediaLibraryPermissionsAsync();
+    if (!perm.granted) return;
+    const res = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ImagePicker.MediaTypeOptions.Images, quality: 0.8 });
+    if (res.canceled || !res.assets?.[0]) return;
+    const a = res.assets[0];
+    setLocalPhoto({ uri: a.uri, name: a.fileName ?? 'item.jpg', type: a.mimeType ?? 'image/jpeg' });
+  };
+
+  const submit = async () => {
+    if (!valid || busy) return;
+    const stockNum = stock.trim() === '' ? undefined : Number(stock);
+    const saved: any = await save.mutateAsync({
+      id: existing?.id,
+      data: {
+        categoryId,
+        name: name.trim(),
+        description: description.trim() || undefined,
+        basePrice: priceNum,
+        isAvailable: available,
+        isPopular: popular,
+        sku: sku.trim() || undefined,
+        unit: unit.trim() || undefined,
+        stockQuantity: Number.isFinite(stockNum as number) ? stockNum : undefined,
       },
-      { onSuccess: () => navigation.goBack() },
-    );
+    });
+    const itemId = existing?.id ?? saved?.id;
+    if (localPhoto && itemId) {
+      // Item is already saved; a failed photo upload shouldn't block the flow.
+      await uploadImage.mutateAsync({ id: itemId, file: localPhoto }).catch(() => undefined);
+    }
+    navigation.goBack();
   };
 
   return (
     <SafeAreaView style={{ flex: 1 }} edges={['top']} className="bg-surface-base">
       <SubHeader title={existing ? 'Edit item' : 'New item'} navigation={navigation} />
       <ScrollView className="flex-1" contentContainerStyle={{ paddingHorizontal: 16, paddingBottom: 32 }} showsVerticalScrollIndicator={false}>
+        {/* Photo */}
+        <Pressable onPress={pickPhoto} className="mb-sm items-center justify-center overflow-hidden rounded-2xl bg-surface-subtle" style={{ height: 160 }}>
+          {previewUri ? (
+            <Image source={{ uri: previewUri }} style={{ width: '100%', height: 160 }} />
+          ) : (
+            <View className="items-center">
+              <Feather name="camera" size={24} color={color.text.muted} />
+              <Text className="mt-xs text-sm text-text-muted">Add a photo</Text>
+            </View>
+          )}
+        </Pressable>
+        {previewUri ? (
+          <Pressable onPress={pickPhoto} className="mb-md items-center" hitSlop={6} disabled={uploadImage.isPending}>
+            <Text className="text-sm font-semibold text-brand-600">{uploadImage.isPending ? 'Uploading…' : 'Change photo'}</Text>
+          </Pressable>
+        ) : null}
+
         <TextInput value={name} onChangeText={setName} placeholder="Item name" placeholderTextColor={color.text.muted} className={FIELD} />
         <TextInput
           value={price}
@@ -438,6 +619,14 @@ function VendorItemEditorScreen({ navigation, route }: any) {
           multiline
           className={FIELD}
         />
+
+        {/* Inventory — used by groceries/shops; optional for restaurants */}
+        <Text className="mb-xs mt-sm text-sm font-semibold text-text-secondary">Inventory (optional)</Text>
+        <View className="flex-row" style={{ gap: 8 }}>
+          <TextInput value={stock} onChangeText={setStock} placeholder="Stock qty" placeholderTextColor={color.text.muted} keyboardType="number-pad" className={`${FIELD} flex-1`} />
+          <TextInput value={unit} onChangeText={setUnit} placeholder="Unit (kg, ea)" placeholderTextColor={color.text.muted} className={`${FIELD} flex-1`} />
+        </View>
+        <TextInput value={sku} onChangeText={setSku} placeholder="SKU / barcode (optional)" placeholderTextColor={color.text.muted} className={FIELD} />
 
         <Text className="mb-xs mt-sm text-sm font-semibold text-text-secondary">Category</Text>
         <View className="mb-md flex-row flex-wrap" style={{ gap: 8 }}>
@@ -474,8 +663,8 @@ function VendorItemEditorScreen({ navigation, route }: any) {
 
         {save.isError ? <Text className="mb-sm text-sm text-error">Couldn&apos;t save. Check the details and try again.</Text> : null}
         <Button
-          label={save.isPending ? 'Saving…' : existing ? 'Save changes' : 'Add item'}
-          disabled={!valid || save.isPending}
+          label={busy ? 'Saving…' : existing ? 'Save changes' : 'Add item'}
+          disabled={!valid || busy}
           onPress={submit}
         />
       </ScrollView>
@@ -483,12 +672,228 @@ function VendorItemEditorScreen({ navigation, route }: any) {
   );
 }
 
+function prettyVendorType(t?: string) {
+  return t === 'SUPERMARKET' ? 'Grocery' : t === 'STORE' ? 'Shop' : t === 'SERVICE' ? 'Services' : 'Restaurant';
+}
+
+const DAY_LABELS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+
+// Orders tab — the (cached) store, then the live order board.
+function VendorOrdersTab({ navigation }: any) {
+  const { store } = useVendorProfile();
+  if (!store) {
+    return (
+      <SafeAreaView style={{ flex: 1 }} edges={['top']} className="bg-surface-base">
+        <View className="flex-1 items-center justify-center">
+          <Spinner size="large" />
+        </View>
+      </SafeAreaView>
+    );
+  }
+  return <VendorOps store={store} navigation={navigation} />;
+}
+
+function VendorInsightsScreen() {
+  const q = useVendorAnalytics();
+  const a: any = q.data ?? {};
+  const v: any = a.vendor ?? {};
+  return (
+    <SafeAreaView style={{ flex: 1 }} edges={['top']} className="bg-surface-base">
+      <Header title="Insights" />
+      <ScrollView
+        className="flex-1"
+        contentContainerStyle={{ paddingHorizontal: 16, paddingBottom: 32 }}
+        showsVerticalScrollIndicator={false}
+        refreshControl={<RefreshControl refreshing={q.isRefetching} onRefresh={() => q.refetch()} tintColor={color.brand[500]} />}
+      >
+        {q.isLoading ? (
+          <>
+            <Skeleton className="mb-md h-24 w-full rounded-2xl" />
+            <Skeleton className="mb-md h-24 w-full rounded-2xl" />
+          </>
+        ) : (
+          <>
+            <View className="mb-md flex-row" style={{ gap: 8 }}>
+              <KpiTile icon="receipt" value={String(a.today?.orders ?? 0)} label="Orders today" />
+              <KpiTile icon="cash" value={money(a.today?.revenue ?? 0)} label="Revenue today" />
+            </View>
+            <View className="mb-md flex-row" style={{ gap: 8 }}>
+              <KpiTile icon="calendar-week" value={String(a.week?.orders ?? 0)} label="Orders / week" />
+              <KpiTile icon="calendar-month" value={String(a.month?.orders ?? 0)} label="Orders / month" />
+            </View>
+            <Card className="mb-md">
+              <View className="flex-row items-center justify-between">
+                <View className="flex-row items-center">
+                  <MaterialCommunityIcons name="star" size={18} color={color.brand[500]} />
+                  <Text className="ml-2 text-base font-semibold">{Number(v.averageRating ?? 0).toFixed(1)}</Text>
+                  <Text className="ml-1 text-sm text-text-muted">({v.totalRatings ?? 0})</Text>
+                </View>
+                <Text className="text-sm text-text-secondary">{v.totalOrders ?? 0} lifetime orders</Text>
+              </View>
+            </Card>
+            <View className="flex-row" style={{ gap: 8 }}>
+              <KpiTile icon="silverware-fork-knife" value={String(a.activeMenuItems ?? 0)} label="Active items" />
+              <KpiTile icon="bell-ring" value={String(a.pendingOrders ?? 0)} label="Pending now" />
+            </View>
+          </>
+        )}
+      </ScrollView>
+    </SafeAreaView>
+  );
+}
+
+function VendorAccountScreen() {
+  const { store } = useVendorProfile();
+  const sub = useVendorSubscription();
+  const hoursQ = useVendorHours();
+  const setHours = useSetHours();
+
+  const [days, setDays] = useState<DayHours[]>([]);
+  useEffect(() => {
+    const byDay = new Map<number, DayHours>();
+    for (const h of hoursQ.data ?? []) {
+      if (!byDay.has(h.dayOfWeek)) {
+        byDay.set(h.dayOfWeek, {
+          dayOfWeek: h.dayOfWeek,
+          openTime: h.openTime || '08:00',
+          closeTime: h.closeTime || '22:00',
+          isClosed: !!h.isClosed,
+        });
+      }
+    }
+    setDays(Array.from({ length: 7 }, (_, d) => byDay.get(d) ?? { dayOfWeek: d, openTime: '08:00', closeTime: '22:00', isClosed: false }));
+  }, [hoursQ.data]);
+
+  const setDay = (d: number, patch: Partial<DayHours>) =>
+    setDays((prev) => prev.map((x) => (x.dayOfWeek === d ? { ...x, ...patch } : x)));
+
+  return (
+    <SafeAreaView style={{ flex: 1 }} edges={['top']} className="bg-surface-base">
+      <Header title="Account" />
+      <ScrollView className="flex-1" contentContainerStyle={{ paddingHorizontal: 16, paddingBottom: 32 }} showsVerticalScrollIndicator={false}>
+        <Card className="mb-md">
+          <Text className="text-base font-bold text-text-primary">{store?.name ?? 'Your store'}</Text>
+          <Text className="mt-xs text-sm text-text-secondary">
+            {prettyVendorType(store?.vendorType)}
+            {store?.city ? ` · ${store.city}` : ''}
+          </Text>
+          {store?.phone ? <Text className="mt-xs text-xs text-text-muted">{store.phone}</Text> : null}
+        </Card>
+
+        <Card className="mb-md">
+          <View className="flex-row items-center justify-between">
+            <View className="flex-1 pr-md">
+              <Text className="text-base font-semibold">Subscription</Text>
+              <Text className="mt-xs text-xs text-text-muted">
+                {sub.data ? 'Active weekly plan' : 'No active plan — set up weekly billing'}
+              </Text>
+            </View>
+            <Badge label={sub.data ? 'Active' : 'Inactive'} tone={sub.data ? 'success' : 'brand'} />
+          </View>
+        </Card>
+
+        <Heading size="lg" className="mb-sm mt-sm">
+          Business hours
+        </Heading>
+        {hoursQ.isLoading ? (
+          <Skeleton className="mb-md h-48 w-full rounded-2xl" />
+        ) : (
+          <Card className="mb-md">
+            {days.map((d) => (
+              <View key={d.dayOfWeek} className="mb-sm flex-row items-center">
+                <Text className="w-10 text-sm font-semibold text-text-primary">{DAY_LABELS[d.dayOfWeek]}</Text>
+                {d.isClosed ? (
+                  <Text className="flex-1 px-sm text-sm text-text-muted">Closed</Text>
+                ) : (
+                  <View className="flex-1 flex-row items-center px-sm" style={{ gap: 6 }}>
+                    <TextInput
+                      value={d.openTime}
+                      onChangeText={(t) => setDay(d.dayOfWeek, { openTime: t })}
+                      placeholder="08:00"
+                      placeholderTextColor={color.text.muted}
+                      className="flex-1 rounded-lg border border-border-subtle bg-surface-base px-sm py-sm text-center font-body text-sm text-text-primary"
+                    />
+                    <Text className="text-text-muted">–</Text>
+                    <TextInput
+                      value={d.closeTime}
+                      onChangeText={(t) => setDay(d.dayOfWeek, { closeTime: t })}
+                      placeholder="22:00"
+                      placeholderTextColor={color.text.muted}
+                      className="flex-1 rounded-lg border border-border-subtle bg-surface-base px-sm py-sm text-center font-body text-sm text-text-primary"
+                    />
+                  </View>
+                )}
+                <Switch
+                  value={!d.isClosed}
+                  onValueChange={(val) => setDay(d.dayOfWeek, { isClosed: !val })}
+                  trackColor={{ true: color.brand[500], false: color.border.subtle }}
+                />
+              </View>
+            ))}
+            <Button
+              label={setHours.isPending ? 'Saving…' : 'Save hours'}
+              className="mt-sm"
+              disabled={setHours.isPending || days.length === 0}
+              onPress={() => setHours.mutate(days)}
+            />
+            {setHours.isSuccess ? <Text className="mt-sm text-center text-xs text-success">Hours updated</Text> : null}
+          </Card>
+        )}
+      </ScrollView>
+    </SafeAreaView>
+  );
+}
+
+function MenuStackNav() {
+  return (
+    <Stack.Navigator screenOptions={{ headerShown: false }}>
+      <Stack.Screen name="VendorMenu" component={VendorMenuScreen} />
+      <Stack.Screen name="VendorItemEditor" component={VendorItemEditorScreen} />
+      <Stack.Screen name="VendorBulkImport" component={VendorBulkImportScreen} />
+    </Stack.Navigator>
+  );
+}
+
+const VTab = createBottomTabNavigator();
+
+function VendorTabs() {
+  return (
+    <VTab.Navigator
+      screenOptions={{
+        headerShown: false,
+        tabBarActiveTintColor: color.brand[500],
+        tabBarInactiveTintColor: color.text.muted,
+        tabBarStyle: { backgroundColor: color.surface.base, borderTopColor: color.border.subtle },
+      }}
+    >
+      <VTab.Screen
+        name="Orders"
+        component={VendorOrdersTab}
+        options={{ tabBarLabel: 'Orders', tabBarIcon: ({ color: c, size }) => <Feather name="clipboard" size={size} color={c} /> }}
+      />
+      <VTab.Screen
+        name="Menu"
+        component={MenuStackNav}
+        options={{ tabBarLabel: 'Menu', tabBarIcon: ({ color: c, size }) => <Feather name="book-open" size={size} color={c} /> }}
+      />
+      <VTab.Screen
+        name="Insights"
+        component={VendorInsightsScreen}
+        options={{ tabBarLabel: 'Insights', tabBarIcon: ({ color: c, size }) => <Feather name="bar-chart-2" size={size} color={c} /> }}
+      />
+      <VTab.Screen
+        name="Account"
+        component={VendorAccountScreen}
+        options={{ tabBarLabel: 'Account', tabBarIcon: ({ color: c, size }) => <Feather name="user" size={size} color={c} /> }}
+      />
+    </VTab.Navigator>
+  );
+}
+
 export function VendorStack() {
   return (
     <Stack.Navigator screenOptions={{ headerShown: false }}>
       <Stack.Screen name="VendorRoot" component={VendorRoot} />
-      <Stack.Screen name="VendorMenu" component={VendorMenuScreen} />
-      <Stack.Screen name="VendorItemEditor" component={VendorItemEditorScreen} />
     </Stack.Navigator>
   );
 }

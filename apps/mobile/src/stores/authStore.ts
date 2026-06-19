@@ -54,6 +54,10 @@ export const useAuthStore = create<AuthState>()(
       name: 'swift-auth',
       storage: createJSONStorage(() => zustandStorage),
       version: 1,
+      // The encryption key is read from the Keychain asynchronously, so MMKV
+      // isn't ready at module load. App boots the key then calls
+      // useAuthStore.persist.rehydrate() before the first render.
+      skipHydration: true,
       // Only durable identity is persisted; isLoading is transient UI state.
       partialize: (state) => ({
         user: state.user,
