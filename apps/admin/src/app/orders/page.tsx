@@ -2,14 +2,7 @@
 
 import { useQuery } from '@tanstack/react-query';
 import { fetchOrders } from '@/lib/api';
-
-function statusClass(s: string) {
-  const x = (s || '').toUpperCase();
-  if (['DELIVERED', 'COMPLETED'].includes(x)) return 'bg-green-500/15 text-green-400';
-  if (['CANCELLED', 'REFUNDED', 'FAILED'].includes(x)) return 'bg-red-500/15 text-red-400';
-  if (['PENDING', 'PLACED'].includes(x)) return 'bg-[#E8192C]/15 text-[#E8192C]';
-  return 'bg-white/10 text-[#8E8E93]';
-}
+import { statusClass } from '@/lib/status';
 
 export default function OrdersPage() {
   const { data, isLoading } = useQuery({ queryKey: ['orders'], queryFn: () => fetchOrders() });
