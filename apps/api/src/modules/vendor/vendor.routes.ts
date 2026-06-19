@@ -246,14 +246,19 @@ async function resolveOwner(app: FastifyInstance, userId: string): Promise<Vendo
  * Resolve the owner and return the *first* vendor (most vendors have one).
  * Throws 404 if the vendor doesn't exist.
  */
+/**
+ * IDOR-safe store selection: honour the requested store only when the owner
+ * owns it, otherwise fall back to the default (first) store.
+ */
+export function pickVendorId(ownedVendorIds: string[], requested?: string): string {
+  return requested && ownedVendorIds.includes(requested) ? requested : ownedVendorIds[0]!;
+}
+
 async function resolveVendor(app: FastifyInstance, userId: string, requestedVendorId?: string) {
   const owner = await resolveOwner(app, userId);
   if (owner.vendors.length === 0) throw new NotFoundError('Vendor');
   const vendorIds = owner.vendors.map((v) => v.id);
-  // Multi-store: honour the requested store only when the owner actually owns it
-  // (IDOR-safe — a foreign or unknown vendorId silently falls back to the default).
-  const vendorId = requestedVendorId && vendorIds.includes(requestedVendorId) ? requestedVendorId : owner.vendors[0]!.id;
-  return { ownerId: owner.id, vendorId, vendorIds };
+  return { ownerId: owner.id, vendorId: pickVendorId(vendorIds, requestedVendorId), vendorIds };
 }
 
 /** The selected store from the `x-vendor-id` header (multi-store switch). */
