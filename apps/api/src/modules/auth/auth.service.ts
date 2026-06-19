@@ -56,9 +56,13 @@ export class AuthService {
   }
 
   async verifyOtp(phone: string, code: string, deviceInfo: DeviceInfo) {
-    // Dev-only master code: there is no SMS locally, so 000000 always verifies in
-    // development. Strictly gated on NODE_ENV — never active in production.
-    const devBypass = process.env['NODE_ENV'] === 'development' && code === '000000';
+    // Dev-only master code: there is no SMS locally. Requires an EXPLICIT opt-in
+    // (DEV_OTP_BYPASS=1) AND non-production NODE_ENV, so it is inert in tests, CI,
+    // staging and prod — only active when a developer deliberately enables it locally.
+    const devBypass =
+      process.env['NODE_ENV'] !== 'production' &&
+      process.env['DEV_OTP_BYPASS'] === '1' &&
+      code === '000000';
     if (!devBypass) {
       const result = await verifyOtp(this.app.redis, phone, code);
       if (!result.valid) {
