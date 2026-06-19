@@ -16,7 +16,7 @@ export function PressableScale({
   strong,
   style,
   ...props
-}: PressableProps & { children?: ReactNode; strong?: boolean; style?: StyleProp<ViewStyle> }) {
+}: PressableProps & { children?: ReactNode; strong?: boolean; style?: StyleProp<ViewStyle>; className?: string }) {
   const scale = useSharedValue(1);
   const target = strong ? motion.scale.pressStrong : motion.scale.press;
   const animStyle = useAnimatedStyle(() => ({ transform: [{ scale: scale.value }] }));
