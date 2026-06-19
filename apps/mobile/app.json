@@ -29,7 +29,8 @@
       "expo-font",
       "expo-splash-screen",
       "react-native-maps",
-      "expo-image"
+      "expo-image",
+      "expo-secure-store"
     ]
   }
 }
