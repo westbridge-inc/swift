@@ -93,6 +93,7 @@ export function OrdersScreen({ navigation }: any) {
           <Button label="Retry" className="mt-md" onPress={() => refetch()} />
         </View>
       ) : (
+        <View style={{ flex: 1 }}>
         <List
           data={orders}
           keyExtractor={(o: any) => String(o.id)}
@@ -116,6 +117,7 @@ export function OrdersScreen({ navigation }: any) {
             </View>
           }
         />
+        </View>
       )}
     </SafeAreaView>
   );

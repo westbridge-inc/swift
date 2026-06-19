@@ -6,7 +6,7 @@ import { color } from '@swift/ui';
 import { Text, Heading, Badge, Skeleton, Button, List, Image } from '../../components/ui';
 import { useVendor, useCart, useAddToCart } from '../../hooks';
 import { money } from '../../lib/money';
-import { fallbackImage } from '../../lib/images';
+import { fallbackImage, kindForVendor, vendorImage, type ImageKind } from '../../lib/images';
 
 type Row = { type: 'header'; key: string; name: string } | { type: 'item'; key: string; item: any };
 
@@ -24,7 +24,7 @@ function BackButton({ onPress }: { onPress?: () => void }) {
   );
 }
 
-const MenuItemRow = memo(function MenuItemRow({ item, onAdd, adding }: { item: any; onAdd: () => void; adding: boolean }) {
+const MenuItemRow = memo(function MenuItemRow({ item, onAdd, adding, kind }: { item: any; onAdd: () => void; adding: boolean; kind?: ImageKind }) {
   const unavailable = item.isAvailable === false;
   return (
     <View className="mx-lg flex-row items-start border-b border-border-subtle py-md">
@@ -36,7 +36,7 @@ const MenuItemRow = memo(function MenuItemRow({ item, onAdd, adding }: { item: a
         <Text className="mt-sm text-sm font-bold text-text-primary">{money(item.customerPrice ?? item.basePrice)}</Text>
       </View>
       <View style={{ width: 96, height: 96 }}>
-        <Image source={{ uri: item.imageUrl || fallbackImage(item.id) }} style={{ width: 96, height: 96, borderRadius: 14 }} />
+        <Image source={{ uri: item.imageUrl || fallbackImage(item.id, kind) }} style={{ width: 96, height: 96, borderRadius: 14 }} />
         <Pressable
           onPress={onAdd}
           disabled={unavailable || adding}
@@ -54,7 +54,7 @@ function VendorHeader({ vendor }: { vendor: any }) {
   const rating = vendor.averageRating && vendor.averageRating > 0 ? Number(vendor.averageRating).toFixed(1) : 'New';
   return (
     <View className="mb-sm">
-      <Image source={{ uri: vendor.coverImageUrl || fallbackImage(vendor.id) }} style={{ width: '100%', height: 210 }} />
+      <Image source={{ uri: vendorImage(vendor) }} style={{ width: '100%', height: 210 }} />
       <View className="px-lg pt-md">
         <View className="flex-row items-start justify-between">
           <Heading size="2xl" className="flex-1 pr-md">{vendor.name}</Heading>
@@ -128,6 +128,7 @@ export function VendorDetailScreen({ navigation, route }: any) {
   return (
     <SafeAreaView style={{ flex: 1 }} edges={['top']} className="bg-surface-base">
       <BackButton onPress={() => navigation?.goBack?.()} />
+      <View style={{ flex: 1 }}>
       <List
         data={rows}
         keyExtractor={(r: Row) => r.key}
@@ -139,6 +140,7 @@ export function VendorDetailScreen({ navigation, route }: any) {
           ) : (
             <MenuItemRow
               item={row.item}
+              kind={kindForVendor(vendor)}
               adding={addToCart.isPending}
               onAdd={() => addToCart.mutate({ vendorId: id, itemId: row.item.id, quantity: 1 })}
             />
@@ -147,6 +149,7 @@ export function VendorDetailScreen({ navigation, route }: any) {
         ListEmptyComponent={<Text className="px-lg pt-xl text-text-secondary">No items listed yet.</Text>}
         contentContainerStyle={{ paddingBottom: 120 }}
       />
+      </View>
 
       {cartCount > 0 ? (
         <View className="absolute inset-x-0 bottom-0 border-t border-border-subtle bg-surface-base px-lg pb-2xl pt-md">

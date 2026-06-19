@@ -68,9 +68,12 @@ export function CheckoutScreen({ navigation }: any) {
           {/* Address */}
           <Heading size="lg" className="mb-sm">Deliver to</Heading>
           {list.length === 0 ? (
-            <Card>
-              <Text className="text-text-secondary">No saved address yet. Add one from your Account first.</Text>
-            </Card>
+            <Pressable onPress={() => navigation?.navigate?.('AddAddress')}>
+              <Card className="flex-row items-center">
+                <Feather name="plus-circle" size={18} color={color.brand[500]} />
+                <Text className="ml-sm font-semibold text-brand-600">Add a delivery address</Text>
+              </Card>
+            </Pressable>
           ) : (
             list.map((a) => {
               const active = a.id === effectiveAddressId;

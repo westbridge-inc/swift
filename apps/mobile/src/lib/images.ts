@@ -1,6 +1,7 @@
-// Shared food imagery for cards/heroes when a vendor/item has no photo yet.
-// Uber-style UIs are photo-led; a deterministic fallback keeps the same entity
-// on the same image instead of flickering between renders.
+// Shared imagery for cards/heroes when a vendor/item has no photo yet.
+// Photo-led UI; a deterministic fallback keeps the same entity on the same image
+// (no flicker between renders) and is type-aware (no food photos on a hardware store).
+
 export const FOOD_IMAGES = [
   'https://images.unsplash.com/photo-1546069901-ba9599a7e63c?w=600&q=80',
   'https://images.unsplash.com/photo-1565299624946-b28f40a0ae38?w=600&q=80',
@@ -10,9 +11,61 @@ export const FOOD_IMAGES = [
   'https://images.unsplash.com/photo-1432139555190-58524dae6a55?w=600&q=80',
 ];
 
-export function fallbackImage(seed?: string | null): string {
-  const s = seed ?? '';
+export const GROCERY_IMAGES = [
+  'https://images.unsplash.com/photo-1542838132-92c53300491e?w=600&q=80',
+  'https://images.unsplash.com/photo-1488459716781-31db52582fe9?w=600&q=80',
+  'https://images.unsplash.com/photo-1604719312566-8912e9227c6a?w=600&q=80',
+  'https://images.unsplash.com/photo-1578916171728-46686eac8d58?w=600&q=80',
+];
+
+// Generic storefront / service imagery (no food).
+export const NEUTRAL_IMAGES = [
+  'https://images.unsplash.com/photo-1441986300917-64674bd600d8?w=600&q=80',
+  'https://images.unsplash.com/photo-1530124566582-a618bc2615dc?w=600&q=80',
+  'https://images.unsplash.com/photo-1581244277943-fe4a9c777189?w=600&q=80',
+  'https://images.unsplash.com/photo-1521791136064-7986c2920216?w=600&q=80',
+];
+
+export type ImageKind = 'food' | 'grocery' | 'store' | 'service';
+
+const POOLS: Record<ImageKind, string[]> = {
+  food: FOOD_IMAGES,
+  grocery: GROCERY_IMAGES,
+  store: NEUTRAL_IMAGES,
+  service: NEUTRAL_IMAGES,
+};
+
+function hash(s: string): number {
   let h = 0;
   for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) >>> 0;
-  return FOOD_IMAGES[h % FOOD_IMAGES.length]!;
+  return h;
+}
+
+export function fallbackImage(seed?: string | null, kind: ImageKind = 'food'): string {
+  const pool = POOLS[kind] ?? FOOD_IMAGES;
+  return pool[hash(seed ?? '') % pool.length]!;
+}
+
+/** Map a vendor's type to the right fallback image pool. */
+export function kindForVendor(v?: { vendorType?: string | null } | null): ImageKind {
+  switch (v?.vendorType) {
+    case 'SUPERMARKET':
+      return 'grocery';
+    case 'STORE':
+      return 'store';
+    case 'SERVICE':
+      return 'service';
+    default:
+      return 'food';
+  }
+}
+
+/** A vendor's display image: real cover/logo, else a type-aware fallback. */
+export function vendorImage(v: {
+  coverImageUrl?: string | null;
+  logoUrl?: string | null;
+  id?: string;
+  vendorType?: string | null;
+}): string {
+  return v.coverImageUrl || v.logoUrl || fallbackImage(v.id, kindForVendor(v));
 }

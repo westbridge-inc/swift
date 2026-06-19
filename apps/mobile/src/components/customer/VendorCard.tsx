@@ -4,6 +4,7 @@ import Animated, { useSharedValue, useAnimatedStyle, withTiming } from 'react-na
 import { Feather, MaterialCommunityIcons } from '@expo/vector-icons';
 import { color } from '@swift/ui';
 import { Text, Image } from '../ui';
+import { vendorImage } from '../../lib/images';
 
 const AnimatedPressable = Animated.createAnimatedComponent(Pressable);
 
@@ -20,23 +21,6 @@ export type Vendor = {
   coverImageUrl?: string | null;
   logoUrl?: string | null;
 };
-
-const FALLBACK_IMAGES = [
-  'https://images.unsplash.com/photo-1546069901-ba9599a7e63c?w=600&q=80',
-  'https://images.unsplash.com/photo-1565299624946-b28f40a0ae38?w=600&q=80',
-  'https://images.unsplash.com/photo-1504674900247-0877df9cc836?w=600&q=80',
-  'https://images.unsplash.com/photo-1567620905732-2d1ec7ab7445?w=600&q=80',
-  'https://images.unsplash.com/photo-1565958011703-44f9829ba187?w=600&q=80',
-  'https://images.unsplash.com/photo-1432139555190-58524dae6a55?w=600&q=80',
-];
-function imageFor(vendor: Vendor): string {
-  if (vendor.coverImageUrl) return vendor.coverImageUrl;
-  if (vendor.logoUrl) return vendor.logoUrl;
-  let h = 0;
-  const id = vendor.id ?? '';
-  for (let i = 0; i < id.length; i++) h = (h * 31 + id.charCodeAt(i)) >>> 0;
-  return FALLBACK_IMAGES[h % FALLBACK_IMAGES.length]!;
-}
 
 /** Image-led vendor card (Explore / Home / favourites) — expo-image, memoized. */
 export const VendorCard = memo(function VendorCard({ vendor, onPress }: { vendor: Vendor; onPress?: () => void }) {
@@ -65,7 +49,7 @@ export const VendorCard = memo(function VendorCard({ vendor, onPress }: { vendor
         style={{ shadowColor: '#000', shadowOpacity: 0.08, shadowRadius: 12, shadowOffset: { width: 0, height: 4 }, elevation: 3 }}
       >
         <View>
-          <Image source={{ uri: imageFor(vendor) }} style={{ width: '100%', height: 150 }} />
+          <Image source={{ uri: vendorImage(vendor) }} style={{ width: '100%', height: 150 }} />
           {closed ? (
             <View className="absolute inset-0 items-center justify-center" style={{ backgroundColor: 'rgba(0,0,0,0.45)' }}>
               <Text className="text-sm font-bold text-white">Closed</Text>
