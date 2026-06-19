@@ -3,6 +3,8 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { useQuery } from '@tanstack/react-query';
 import { authApi } from '../../services/api';
 import { useAuthStore } from '../../stores/authStore';
+import { Feather } from '@expo/vector-icons';
+import { color } from '@swift/ui';
 import { Text, Heading, Card, Spinner } from '../../components/ui';
 
 export function CountryPickerScreen() {
@@ -34,16 +36,38 @@ export function CountryPickerScreen() {
             data={countries}
             keyExtractor={(c) => c.code}
             showsVerticalScrollIndicator={false}
-            renderItem={({ item }) => (
-              <Pressable onPress={() => setCountry(item.code)}>
-                <Card className="mb-sm flex-row items-center justify-between">
-                  <Text className="text-base font-semibold">{item.name}</Text>
-                  <Text className="text-text-muted">
-                    {item.currencySymbol} {item.currencyCode}
-                  </Text>
-                </Card>
-              </Pressable>
-            )}
+            renderItem={({ item }) => {
+              const live = item.isActive !== false;
+              return (
+                <Pressable
+                  disabled={!live}
+                  onPress={() =>
+                    setCountry({
+                      code: item.code,
+                      dialCode: item.dialCode,
+                      currencyCode: item.currencyCode,
+                      currencySymbol: item.currencySymbol,
+                    })
+                  }
+                >
+                  <Card className={live ? 'mb-sm flex-row items-center justify-between' : 'mb-sm flex-row items-center justify-between opacity-50'}>
+                    <View className="flex-1 pr-md">
+                      <Text className="text-base font-semibold">{item.name}</Text>
+                      <Text className="mt-xs text-xs text-text-muted">
+                        {item.dialCode} · {item.currencySymbol} {item.currencyCode}
+                      </Text>
+                    </View>
+                    {live ? (
+                      <Feather name="chevron-right" size={18} color={color.text.muted} />
+                    ) : (
+                      <View className="rounded-full bg-surface-subtle px-2 py-1">
+                        <Text className="text-xs font-semibold text-text-secondary">Coming soon</Text>
+                      </View>
+                    )}
+                  </Card>
+                </Pressable>
+              );
+            }}
             ListEmptyComponent={
               <Text className="mt-2xl text-center text-text-secondary">No countries available yet.</Text>
             }
