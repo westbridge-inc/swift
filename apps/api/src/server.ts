@@ -28,8 +28,19 @@ import { loggerRedactConfig } from './utils/logger-config';
 const PORT = parseInt(process.env['PORT'] || '3000', 10);
 const HOST = process.env['HOST'] || '0.0.0.0';
 
+// SEC (OWASP API4): only trust X-Forwarded-For when explicitly behind a known proxy.
+// TRUST_PROXY = hop count ("1" for Fly), an IP/CIDR list, or "true". Default false so
+// a client cannot spoof its source IP to bypass rate limiting.
+function parseTrustProxy(v?: string): boolean | number | string {
+  if (!v || v === 'false') return false;
+  if (v === 'true') return true;
+  const n = Number(v);
+  return Number.isNaN(n) ? v : n;
+}
+
 async function buildApp() {
   const app = Fastify({
+    trustProxy: parseTrustProxy(process.env['TRUST_PROXY']),
     logger: {
       level: process.env['LOG_LEVEL'] || 'info',
       // Step 15: secrets and credentials never reach log output
@@ -67,9 +78,8 @@ async function buildApp() {
   await app.register(rateLimit, {
     max: 200,
     timeWindow: '1 minute',
-    keyGenerator: (request) => {
-      return request.headers['x-forwarded-for'] as string || request.ip;
-    },
+    // Keys off request.ip (resolved via trustProxy above) — never the raw,
+    // client-spoofable X-Forwarded-For header.
   });
   await app.register(multipart, {
     limits: { fileSize: 5 * 1024 * 1024, files: 1 },
