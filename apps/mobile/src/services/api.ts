@@ -274,6 +274,8 @@ export const vendorApi = {
   updateProfile: (data: { name?: string; phone?: string; description?: string }) =>
     api.put('/vendor/profile', data),
   importItems: (csv: string) => api.post('/vendor/items/import', { csv }),
+  importTemplate: () => api.get('/vendor/items/import/template'),
+  importAutomap: (csv: string) => api.post('/vendor/items/import/automap', { csv }),
 };
 
 // Chat (mounted at /api/v1/chat) — order-scoped rider/customer messaging

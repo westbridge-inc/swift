@@ -142,3 +142,17 @@ export function useSetHours() {
     },
   });
 }
+
+/** Map a pasted store CSV's columns to Swift fields (preview only, no import). */
+export function useImportAutomap() {
+  return useMutation({ mutationFn: (csv: string) => unwrap<any>(vendorApi.importAutomap(csv)) });
+}
+
+/** Bulk-import the (mapped) CSV — good rows imported, bad rows reported. */
+export function useImportItems() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (csv: string) => unwrap<any>(vendorApi.importItems(csv)),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['vendor', 'menu'] }),
+  });
+}
