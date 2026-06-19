@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import { useQueryClient } from '@tanstack/react-query';
 import { View, ScrollView, TextInput, Alert, Switch, RefreshControl } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
@@ -28,6 +29,7 @@ import {
 } from '../hooks/vendorops';
 import { useAuthStore } from '../stores/authStore';
 import { useLocationStore } from '../stores/locationStore';
+import { useStoreSwitcher } from '../stores/storeSwitcher';
 import { money } from '../lib/money';
 import { mediaUrl } from '../lib/images';
 import * as ImagePicker from 'expo-image-picker';
@@ -233,6 +235,13 @@ function VendorOps({ store, navigation }: any) {
   const toggleOrders = useToggleOrders();
   const orderAction = useOrderAction();
   const ordersQ = useVendorOrders(true);
+  const { stores } = useVendorProfile();
+  const setSelectedStore = useStoreSwitcher((s) => s.setSelectedStore);
+  const qc = useQueryClient();
+  const switchStore = (id: string) => {
+    setSelectedStore(id);
+    qc.invalidateQueries({ queryKey: ['vendor'] });
+  };
   const orders: any[] = ordersQ.data ?? [];
   const open = !!store.isCurrentlyOpen;
   const accepting = !!store.acceptingOrders;
@@ -252,6 +261,26 @@ function VendorOps({ store, navigation }: any) {
         showsVerticalScrollIndicator={false}
         refreshControl={<RefreshControl refreshing={ordersQ.isRefetching} onRefresh={() => ordersQ.refetch()} tintColor={color.brand[500]} />}
       >
+        {/* Multi-store switcher — only when the owner has more than one store. */}
+        {stores.length > 1 ? (
+          <ScrollView horizontal showsHorizontalScrollIndicator={false} className="mb-md" contentContainerStyle={{ gap: 8 }}>
+            {stores.map((s: any) => {
+              const active = s.id === store.id;
+              return (
+                <PressableScale
+                  key={s.id}
+                  onPress={() => switchStore(s.id)}
+                  className={active ? 'rounded-full bg-brand-500 px-lg py-sm' : 'rounded-full border border-border-subtle bg-surface-base px-lg py-sm'}
+                >
+                  <Text className={active ? 'text-sm font-semibold text-white' : 'text-sm font-semibold text-text-secondary'} numberOfLines={1}>
+                    {s.name}
+                  </Text>
+                </PressableScale>
+              );
+            })}
+          </ScrollView>
+        ) : null}
+
         {/* Store status */}
         <Card className="mb-md">
           <View className="flex-row items-center justify-between">
