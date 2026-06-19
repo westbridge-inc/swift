@@ -1,6 +1,6 @@
 import 'react-native-gesture-handler';
 import '../global.css';
-import { useCallback } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
@@ -15,6 +15,8 @@ import {
 } from '@expo-google-fonts/inter';
 import { GluestackUIProvider } from './components/ui';
 import { RootNavigator } from './navigation/RootNavigator';
+import { initSecureStorage } from './lib/storage';
+import { useAuthStore } from './stores/authStore';
 
 // Hold the native splash until the brand fonts are ready (avoids a System-font flash).
 SplashScreen.preventAutoHideAsync().catch(() => {});
@@ -35,13 +37,26 @@ export default function App() {
     InterBold: Inter_700Bold,
   });
 
+  const [storageReady, setStorageReady] = useState(false);
+
+  useEffect(() => {
+    // Open the encrypted store (Keychain-backed key) and rehydrate the persisted
+    // auth session before the first render — keeps the no-flash cold start.
+    initSecureStorage()
+      .then(() => useAuthStore.persist.rehydrate())
+      .catch((e) => console.warn('[secure-storage] init failed', e))
+      .finally(() => setStorageReady(true));
+  }, []);
+
+  const ready = fontsLoaded && storageReady;
+
   const onLayoutRootView = useCallback(() => {
-    if (fontsLoaded) {
+    if (ready) {
       SplashScreen.hideAsync().catch(() => {});
     }
-  }, [fontsLoaded]);
+  }, [ready]);
 
-  if (!fontsLoaded) return null;
+  if (!ready) return null;
 
   return (
     <GestureHandlerRootView style={{ flex: 1 }} onLayout={onLayoutRootView}>

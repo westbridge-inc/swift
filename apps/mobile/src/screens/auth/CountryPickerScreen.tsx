@@ -6,6 +6,7 @@ import { useAuthStore } from '../../stores/authStore';
 import { Feather } from '@expo/vector-icons';
 import { color } from '@swift/ui';
 import { Text, Heading, Card, Spinner } from '../../components/ui';
+import { SwiftMark } from '../../components/SwiftLogo';
 
 export function CountryPickerScreen() {
   const setCountry = useAuthStore((s) => s.setCountry);
@@ -18,9 +19,12 @@ export function CountryPickerScreen() {
   return (
     <SafeAreaView style={{ flex: 1 }} edges={['top', 'bottom']} className="bg-surface-base">
       <View className="flex-1 px-lg pt-2xl">
-        <Heading size="3xl" className="text-brand-500">
-          Swift
-        </Heading>
+        <View className="flex-row items-center">
+          <SwiftMark size={42} />
+          <Heading size="3xl" className="ml-sm text-text-primary">
+            Swift
+          </Heading>
+        </View>
         <Heading size="xl" className="mt-xl">
           Where are you?
         </Heading>
