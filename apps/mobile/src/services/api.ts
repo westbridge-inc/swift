@@ -2,7 +2,7 @@ import axios from 'axios';
 import { useAuthStore } from '../stores/authStore';
 
 // eslint-disable-next-line no-undef
-const API_URL = __DEV__ ? 'http://localhost:3000' : 'https://api.swift.gy';
+export const API_URL = __DEV__ ? 'http://localhost:3000' : 'https://api.swift.gy';
 
 export const api = axios.create({
   baseURL: `${API_URL}/api/v1`,
@@ -239,6 +239,10 @@ export interface VendorItemInput {
   basePrice: number;
   isAvailable?: boolean;
   isPopular?: boolean;
+  sku?: string;
+  unit?: string;
+  stockQuantity?: number;
+  imageUrl?: string;
 }
 
 export const vendorApi = {
@@ -260,4 +264,23 @@ export const vendorApi = {
   deleteItem: (id: string) => api.delete(`/vendor/items/${id}`),
   setItemAvailability: (id: string, isAvailable: boolean) =>
     api.put(`/vendor/items/${id}/availability`, { isAvailable }),
+  uploadItemImage: (id: string, form: FormData) =>
+    api.post(`/vendor/items/${id}/image`, form, { headers: { 'Content-Type': 'multipart/form-data' } }),
+  // Insights / settings
+  analytics: () => api.get('/vendor/analytics/overview'),
+  hours: () => api.get('/vendor/hours'),
+  setHours: (hours: { dayOfWeek: number; openTime: string; closeTime: string; isClosed: boolean }[]) =>
+    api.put('/vendor/hours', { hours }),
+  updateProfile: (data: { name?: string; phone?: string; description?: string }) =>
+    api.put('/vendor/profile', data),
+  importItems: (csv: string) => api.post('/vendor/items/import', { csv }),
+  importTemplate: () => api.get('/vendor/items/import/template'),
+  importAutomap: (csv: string) => api.post('/vendor/items/import/automap', { csv }),
+};
+
+// Chat (mounted at /api/v1/chat) — order-scoped rider/customer messaging
+export const chatApi = {
+  room: (orderId: string) => api.post('/chat/rooms', { orderId }),
+  messages: (roomId: string) => api.get(`/chat/rooms/${roomId}/messages`),
+  send: (roomId: string, message: string) => api.post(`/chat/rooms/${roomId}/messages`, { message }),
 };

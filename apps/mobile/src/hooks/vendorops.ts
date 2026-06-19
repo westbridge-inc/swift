@@ -102,3 +102,57 @@ export function useSetItemAvailability() {
     onSuccess: () => qc.invalidateQueries({ queryKey: ['vendor', 'menu'] }),
   });
 }
+
+/** Upload (or replace) an item's photo — multipart to the StorageProvider. */
+export function useUploadItemImage() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, file }: { id: string; file: { uri: string; name: string; type: string } }) => {
+      const form = new FormData();
+      form.append('file', { uri: file.uri, name: file.name, type: file.type } as unknown as Blob);
+      return unwrap(vendorApi.uploadItemImage(id, form));
+    },
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['vendor', 'menu'] }),
+  });
+}
+
+// ─── Insights / settings ──────────────────────────────────────────────────────
+
+export function useVendorAnalytics() {
+  return useQuery({
+    queryKey: ['vendor', 'analytics'],
+    queryFn: () => unwrap<any>(vendorApi.analytics()),
+    refetchInterval: 30000,
+  });
+}
+
+export type DayHours = { dayOfWeek: number; openTime: string; closeTime: string; isClosed: boolean };
+
+export function useVendorHours() {
+  return useQuery({ queryKey: ['vendor', 'hours'], queryFn: () => unwrap<DayHours[]>(vendorApi.hours()) });
+}
+
+export function useSetHours() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (hours: DayHours[]) => unwrap(vendorApi.setHours(hours)),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['vendor', 'hours'] });
+      qc.invalidateQueries({ queryKey: ['vendor', 'profile'] });
+    },
+  });
+}
+
+/** Map a pasted store CSV's columns to Swift fields (preview only, no import). */
+export function useImportAutomap() {
+  return useMutation({ mutationFn: (csv: string) => unwrap<any>(vendorApi.importAutomap(csv)) });
+}
+
+/** Bulk-import the (mapped) CSV — good rows imported, bad rows reported. */
+export function useImportItems() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (csv: string) => unwrap<any>(vendorApi.importItems(csv)),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['vendor', 'menu'] }),
+  });
+}
