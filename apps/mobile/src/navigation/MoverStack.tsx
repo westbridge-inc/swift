@@ -5,7 +5,7 @@ import { createNativeStackNavigator } from '@react-navigation/native-stack';
 import MapView, { Marker, PROVIDER_DEFAULT } from 'react-native-maps';
 import { color } from '@swift/ui';
 import { Feather, MaterialCommunityIcons } from '@expo/vector-icons';
-import { Text, Heading, Card, Button, Spinner, elevation, PressableScale } from '../components/ui';
+import { Text, Heading, Card, Button, Spinner, elevation, PressableScale, EmptyState } from '../components/ui';
 import { DocumentChecklist } from '../components/onboarding/DocumentChecklist';
 import { ChatScreen } from '../screens/shared/ChatScreen';
 import {
@@ -324,10 +324,14 @@ function ActiveJobScreen({ navigation }: any) {
   if (!job) {
     return (
       <SafeAreaView style={{ flex: 1 }} edges={['top']} className="bg-surface-base">
-        <View className="flex-1 items-center justify-center px-2xl">
-          <Text className="text-3xl">📭</Text>
-          <Text className="mt-sm text-center text-text-secondary">No active job right now.</Text>
-          <Button label="Back" variant="outline" className="mt-md" onPress={() => navigation?.goBack?.()} />
+        <View className="flex-1 items-center justify-center">
+          <EmptyState
+            icon="map-marker-radius-outline"
+            title="No active job"
+            body="When you accept a job it'll show up here."
+            actionLabel="Back"
+            onAction={() => navigation?.goBack?.()}
+          />
         </View>
       </SafeAreaView>
     );
@@ -348,9 +352,9 @@ function ActiveJobScreen({ navigation }: any) {
   return (
     <SafeAreaView style={{ flex: 1 }} edges={['top']} className="bg-surface-base">
       <View className="flex-row items-center px-lg py-sm">
-        <Pressable onPress={() => navigation?.goBack?.()} hitSlop={8}>
+        <PressableScale onPress={() => navigation?.goBack?.()} hitSlop={8}>
           <Feather name="chevron-left" size={24} color={color.text.primary} />
-        </Pressable>
+        </PressableScale>
         <Text className="ml-md text-base font-semibold">Active job</Text>
       </View>
       <ScrollView className="flex-1" contentContainerStyle={{ paddingBottom: 32 }} showsVerticalScrollIndicator={false}>
@@ -390,12 +394,12 @@ function ActiveJobScreen({ navigation }: any) {
                 <Button label="Verify" disabled={busy || pin.length < 4} onPress={() => driverAct.mutate({ id: job.id, action: 'verify-pin', pin })} />
               </View>
               <Button label="Start trip" variant="outline" className="mt-sm" disabled={busy} onPress={() => driverAct.mutate({ id: job.id, action: 'start' })} />
-              <Button label={driverAct.isPending ? 'Completing…' : 'Complete trip'} className="mt-sm" disabled={busy} onPress={() => driverAct.mutate({ id: job.id, action: 'complete' })} />
+              <Button label="Complete trip" className="mt-sm" loading={driverAct.isPending} disabled={busy} onPress={() => driverAct.mutate({ id: job.id, action: 'complete' })} />
             </>
           ) : (
             <>
               <Button label="Picked up (handover)" variant="outline" disabled={busy} onPress={() => riderAct.mutate({ id: job.id, action: 'handover' })} />
-              <Button label={riderAct.isPending ? 'Completing…' : 'Mark delivered'} className="mt-sm" disabled={busy} onPress={() => riderAct.mutate({ id: job.id, action: 'delivered' })} />
+              <Button label="Mark delivered" className="mt-sm" loading={riderAct.isPending} disabled={busy} onPress={() => riderAct.mutate({ id: job.id, action: 'delivered' })} />
             </>
           )}
         </View>
