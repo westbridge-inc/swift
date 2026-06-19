@@ -202,6 +202,7 @@ export function HomeScreen({ navigation }: any) {
 
   return (
     <SafeAreaView style={{ flex: 1 }} edges={['top']} className="bg-surface-base">
+      <View style={{ flex: 1 }}>
       <List
         data={popular}
         keyExtractor={(v: any) => String(v.id)}
@@ -224,6 +225,7 @@ export function HomeScreen({ navigation }: any) {
         }
         contentContainerStyle={{ paddingBottom: 32 }}
       />
+      </View>
     </SafeAreaView>
   );
 }

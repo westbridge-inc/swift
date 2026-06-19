@@ -128,6 +128,7 @@ export function VendorDetailScreen({ navigation, route }: any) {
   return (
     <SafeAreaView style={{ flex: 1 }} edges={['top']} className="bg-surface-base">
       <BackButton onPress={() => navigation?.goBack?.()} />
+      <View style={{ flex: 1 }}>
       <List
         data={rows}
         keyExtractor={(r: Row) => r.key}
@@ -147,6 +148,7 @@ export function VendorDetailScreen({ navigation, route }: any) {
         ListEmptyComponent={<Text className="px-lg pt-xl text-text-secondary">No items listed yet.</Text>}
         contentContainerStyle={{ paddingBottom: 120 }}
       />
+      </View>
 
       {cartCount > 0 ? (
         <View className="absolute inset-x-0 bottom-0 border-t border-border-subtle bg-surface-base px-lg pb-2xl pt-md">
