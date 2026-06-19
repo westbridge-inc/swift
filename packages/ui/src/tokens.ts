@@ -5,7 +5,7 @@
  * shadow in the product. Rebrand = edit THIS file only. If a raw hex / size
  * ever appears inside a component, that is a bug — use the token.
  *
- * Identity: Swift **red (#CE1126) on white**. No gold, no orange. Neutral grays
+ * Identity: Swift **red (#E8192C) on white**. No gold, no orange. Neutral grays
  * for everything structural; functional colours carry reserved meanings only.
  *
  * Consumers:
@@ -19,16 +19,16 @@ export const BRAND_REGION = 'GY' as const;
 /** §Colour — red identity + neutral surfaces. Red is an ACCENT, never flooded. */
 export const color = {
   brand: {
-    50: '#FDECEE',
-    100: '#FAD0D5',
-    200: '#F2A1AB',
-    300: '#E96F7E',
-    400: '#DE4356',
-    500: '#CE1126', // Swift red — identity + primary CTA
-    600: '#B00E20', // hover
-    700: '#8E0B1A', // pressed
-    800: '#6B0813',
-    900: '#48050D',
+    50: '#FFF2F3', // red tint — bg-brand-50 surfaces
+    100: '#FBD7DB',
+    200: '#F4A6AD',
+    300: '#ED7480',
+    400: '#EA4555',
+    500: '#E8192C', // Swift Red — identity + primary CTA
+    600: '#BC1320', // Deep Red — hover/accent
+    700: '#930F1A', // pressed
+    800: '#6B0B13',
+    900: '#45070C',
   },
   white: '#FFFFFF',
   surface: {
@@ -37,7 +37,7 @@ export const color = {
     elevated: '#FFFFFF', // elevate with shadow, not colour
   },
   text: {
-    primary: '#0A0A0A',
+    primary: '#16171C', // Ink
     secondary: '#6B6B6B',
     muted: '#8E8E93',
     onBrand: '#FFFFFF',
