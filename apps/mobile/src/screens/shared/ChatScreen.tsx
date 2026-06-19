@@ -1,11 +1,19 @@
 import { useState } from 'react';
-import { View, FlatList, TextInput, Pressable, KeyboardAvoidingView, Platform } from 'react-native';
+import { View, FlatList, TextInput, KeyboardAvoidingView, Platform } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Feather } from '@expo/vector-icons';
 import { color } from '@swift/ui';
-import { Text, Spinner } from '../../components/ui';
+import { Text, Spinner, PressableScale } from '../../components/ui';
 import { useAuthStore } from '../../stores/authStore';
 import { useChatRoom, useChatMessages, useSendMessage } from '../../hooks/chat';
+
+function fmtTime(iso: string) {
+  try {
+    return new Date(iso).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+  } catch {
+    return '';
+  }
+}
 
 export function ChatScreen({ route, navigation }: any) {
   const orderId: string | undefined = route?.params?.orderId;
@@ -32,9 +40,9 @@ export function ChatScreen({ route, navigation }: any) {
   return (
     <SafeAreaView style={{ flex: 1 }} edges={['top']} className="bg-surface-base">
       <View className="flex-row items-center border-b border-border-subtle px-lg py-sm">
-        <Pressable onPress={() => navigation?.goBack?.()} hitSlop={8}>
+        <PressableScale onPress={() => navigation?.goBack?.()} hitSlop={8}>
           <Feather name="chevron-left" size={24} color={color.text.primary} />
-        </Pressable>
+        </PressableScale>
         <Text className="ml-md text-base font-bold text-text-primary" numberOfLines={1}>
           {title}
         </Text>
@@ -66,6 +74,7 @@ export function ChatScreen({ route, navigation }: any) {
                   >
                     <Text className={mine ? 'text-sm text-white' : 'text-sm text-text-primary'}>{item.message}</Text>
                   </View>
+                  <Text className="mt-1 text-xs text-text-muted">{fmtTime(item.createdAt)}</Text>
                 </View>
               );
             }}
@@ -83,14 +92,14 @@ export function ChatScreen({ route, navigation }: any) {
             onSubmitEditing={submit}
             returnKeyType="send"
           />
-          <Pressable
+          <PressableScale
             onPress={submit}
             disabled={send.isPending || text.trim().length === 0}
             className="h-10 w-10 items-center justify-center rounded-full"
             style={{ backgroundColor: text.trim().length === 0 ? color.border.subtle : color.brand[500] }}
           >
             <Feather name="send" size={18} color="#fff" />
-          </Pressable>
+          </PressableScale>
         </View>
       </KeyboardAvoidingView>
     </SafeAreaView>
