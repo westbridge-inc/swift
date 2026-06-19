@@ -56,9 +56,14 @@ export class AuthService {
   }
 
   async verifyOtp(phone: string, code: string, deviceInfo: DeviceInfo) {
-    const result = await verifyOtp(this.app.redis, phone, code);
-    if (!result.valid) {
-      throw new AppError(400, 'INVALID_OTP', result.reason || 'Invalid or expired OTP');
+    // Dev-only master code: there is no SMS locally, so 000000 always verifies in
+    // development. Strictly gated on NODE_ENV — never active in production.
+    const devBypass = process.env['NODE_ENV'] === 'development' && code === '000000';
+    if (!devBypass) {
+      const result = await verifyOtp(this.app.redis, phone, code);
+      if (!result.valid) {
+        throw new AppError(400, 'INVALID_OTP', result.reason || 'Invalid or expired OTP');
+      }
     }
 
     // Find existing user
