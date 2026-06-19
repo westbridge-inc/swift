@@ -31,6 +31,7 @@ import { useLocationStore } from '../stores/locationStore';
 import { money } from '../lib/money';
 import { mediaUrl } from '../lib/images';
 import * as ImagePicker from 'expo-image-picker';
+import { VendorBulkImportScreen } from '../screens/vendor/VendorBulkImportScreen';
 
 const Stack = createNativeStackNavigator();
 const FIELD = 'mb-sm rounded-lg border border-border-subtle bg-surface-base px-lg py-md font-body text-base text-text-primary';
@@ -490,6 +491,17 @@ function VendorMenuScreen({ navigation }: any) {
             </View>
           </Card>
 
+          <Pressable onPress={() => navigation.navigate('VendorBulkImport')}>
+            <Card className="mb-md flex-row items-center">
+              <Feather name="upload-cloud" size={18} color={color.brand[500]} />
+              <View className="ml-md flex-1">
+                <Text className="text-base font-semibold">Bulk import catalogue</Text>
+                <Text className="text-xs text-text-muted">Paste a CSV — we map the columns for you</Text>
+              </View>
+              <Feather name="chevron-right" size={18} color={color.text.muted} />
+            </Card>
+          </Pressable>
+
           {categories.length === 0 ? (
             <Text className="mt-lg text-center text-text-secondary">Add a category to start building your menu.</Text>
           ) : (
@@ -837,6 +849,7 @@ function MenuStackNav() {
     <Stack.Navigator screenOptions={{ headerShown: false }}>
       <Stack.Screen name="VendorMenu" component={VendorMenuScreen} />
       <Stack.Screen name="VendorItemEditor" component={VendorItemEditorScreen} />
+      <Stack.Screen name="VendorBulkImport" component={VendorBulkImportScreen} />
     </Stack.Navigator>
   );
 }
