@@ -5,7 +5,7 @@ import { createNativeStackNavigator } from '@react-navigation/native-stack';
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
 import { color } from '@swift/ui';
 import { Feather, MaterialCommunityIcons } from '@expo/vector-icons';
-import { Text, Heading, Card, Button, Spinner, Skeleton, Image, Badge, elevation } from '../components/ui';
+import { Text, Heading, Card, Button, Spinner, Skeleton, Image, Badge, elevation, PressableScale, EmptyState } from '../components/ui';
 import { DocumentChecklist } from '../components/onboarding/DocumentChecklist';
 import { useBecomePartner, useVerificationStatus } from '../hooks/verification';
 import {
@@ -476,8 +476,10 @@ function VendorMenuScreen({ navigation }: any) {
         }
       />
       {menuQ.isLoading ? (
-        <View className="flex-1 items-center justify-center">
-          <Spinner size="large" />
+        <View className="px-lg pt-md">
+          {[0, 1, 2, 3].map((i) => (
+            <Skeleton key={i} className="mb-md h-16 w-full rounded-2xl" />
+          ))}
         </View>
       ) : (
         <ScrollView className="flex-1" contentContainerStyle={{ paddingHorizontal: 16, paddingBottom: 32 }} showsVerticalScrollIndicator={false}>
@@ -491,11 +493,11 @@ function VendorMenuScreen({ navigation }: any) {
                 placeholderTextColor={color.text.muted}
                 className="flex-1 rounded-lg border border-border-subtle bg-surface-base px-lg py-md font-body text-base text-text-primary"
               />
-              <Button label="Add" disabled={newCat.trim().length < 1 || createCategory.isPending} onPress={addCategory} />
+              <Button label="Add" loading={createCategory.isPending} disabled={newCat.trim().length < 1} onPress={addCategory} />
             </View>
           </Card>
 
-          <Pressable onPress={() => navigation.navigate('VendorBulkImport')}>
+          <PressableScale onPress={() => navigation.navigate('VendorBulkImport')}>
             <Card className="mb-md flex-row items-center">
               <Feather name="upload-cloud" size={18} color={color.brand[500]} />
               <View className="ml-md flex-1">
@@ -504,10 +506,10 @@ function VendorMenuScreen({ navigation }: any) {
               </View>
               <Feather name="chevron-right" size={18} color={color.text.muted} />
             </Card>
-          </Pressable>
+          </PressableScale>
 
           {categories.length === 0 ? (
-            <Text className="mt-lg text-center text-text-secondary">Add a category to start building your menu.</Text>
+            <EmptyState icon="silverware-variant" title="Build your menu" body="Add a category above, then start adding items." />
           ) : (
             categories.map((cat) => (
               <View key={cat.id} className="mb-md">
