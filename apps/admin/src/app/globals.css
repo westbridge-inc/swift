@@ -1,11 +1,25 @@
 @import 'tailwindcss';
 
 :root {
-  --swift-orange: #FF6B00;
+  /* Swift brand — aligned to the mobile app's red identity (#E8192C).
+     --swift-orange is kept as a legacy alias (now red) so existing
+     var(--swift-orange) usages across the admin rebrand instantly. */
+  --swift-red: #E8192C;
+  --swift-red-600: #BC1320;
+  --swift-red-50: #FFF2F3;
+  --swift-orange: #E8192C;
   --swift-black: #0A0A0A;
   --swift-white: #FAFAFA;
   --swift-charcoal: #1C1C1E;
   --swift-gray: #8E8E93;
+
+  /* Web foundation — elevation + motion, mirroring @swift/ui tokens so the
+     admin sweep (5.1+) can lean on the same two-tier depth + timing. */
+  --swift-shadow-card: 0px 1px 3px rgba(0, 0, 0, 0.08);
+  --swift-shadow-raised: 0px 6px 16px rgba(0, 0, 0, 0.12);
+  --swift-motion-fast: 140ms;
+  --swift-motion-base: 240ms;
+  --swift-ease: cubic-bezier(0.2, 0.8, 0.2, 1);
 }
 
 body {
