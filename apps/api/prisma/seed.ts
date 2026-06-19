@@ -146,6 +146,62 @@ async function main() {
       }
     }
 
+    // Extra restaurants so the food home/search reads like a populated marketplace
+    // (varied cuisines, ratings, ETAs, cover photos). Idempotent via slug upsert.
+    const MORE_RESTAURANTS: {
+      slug: string; name: string; cuisines: string[]; rating: number; ratings: number; eta: number; cover: string;
+      items: { name: string; description: string; price: number }[];
+    }[] = [
+      { slug: 'royal-roti-hut', name: 'Royal Roti Hut', cuisines: ['Indian', 'Guyanese'], rating: 4.8, ratings: 312, eta: 25, cover: 'https://images.unsplash.com/photo-1565557623262-b51c2513a641?w=600&q=80', items: [{ name: 'Chicken Curry & Roti', description: 'Boneless curry with a soft dhal puri', price: 1800 }, { name: 'Dhal Puri (2)', description: 'Split-pea flatbread', price: 600 }, { name: 'Channa & Aloo', description: 'Spiced chickpeas and potato', price: 1200 }] },
+      { slug: 'demerara-grill', name: 'Demerara Grill House', cuisines: ['BBQ', 'Caribbean'], rating: 4.6, ratings: 188, eta: 35, cover: 'https://images.unsplash.com/photo-1529193591184-b1d58069ecdd?w=600&q=80', items: [{ name: 'BBQ Chicken Plate', description: 'Grilled chicken, rice & salad', price: 2200 }, { name: 'Pork Chops', description: 'Char-grilled, garlic butter', price: 2800 }, { name: 'Grilled Snapper', description: 'Whole fish, Creole spice', price: 3200 }] },
+      { slug: 'georgetown-pizza-co', name: 'Georgetown Pizza Co.', cuisines: ['Pizza', 'Italian'], rating: 4.5, ratings: 421, eta: 30, cover: 'https://images.unsplash.com/photo-1513104890138-7c749659a591?w=600&q=80', items: [{ name: 'Margherita', description: 'Tomato, mozzarella, basil', price: 2600 }, { name: 'Pepperoni', description: 'Loaded pepperoni & cheese', price: 3000 }, { name: 'Garlic Knots (6)', description: 'Buttery, herby', price: 1000 }] },
+      { slug: 'spice-route', name: 'Spice Route', cuisines: ['Chinese', 'Asian'], rating: 4.7, ratings: 256, eta: 28, cover: 'https://images.unsplash.com/photo-1455619452474-d2be8b1e70cd?w=600&q=80', items: [{ name: 'Sweet & Sour Chicken', description: 'Crispy, peppers & pineapple', price: 2100 }, { name: 'Beef Lo Mein', description: 'Stir-fried noodles', price: 2300 }, { name: 'Veg Spring Rolls (4)', description: 'Crisp & golden', price: 900 }] },
+      { slug: 'sea-breeze-seafood', name: 'Sea Breeze Seafood', cuisines: ['Seafood', 'Caribbean'], rating: 4.9, ratings: 143, eta: 40, cover: 'https://images.unsplash.com/photo-1559737558-2f5a35f4523b?w=600&q=80', items: [{ name: 'Garlic Butter Shrimp', description: 'Sautéed with herbs', price: 3400 }, { name: 'Fish & Bakes', description: 'Fried fish, festival bakes', price: 2400 }, { name: 'Crab Curry', description: 'Rich coconut curry', price: 3600 }] },
+      { slug: 'sweet-tooth-bakery', name: 'Sweet Tooth Bakery', cuisines: ['Bakery', 'Desserts'], rating: 4.6, ratings: 209, eta: 20, cover: 'https://images.unsplash.com/photo-1486427944299-d1955d23e34d?w=600&q=80', items: [{ name: 'Pine Tart (3)', description: 'Flaky pastry, pineapple', price: 700 }, { name: 'Black Cake Slice', description: 'Rum-soaked Guyanese classic', price: 1200 }, { name: 'Cheese Roll', description: 'Buttery, savoury', price: 500 }] },
+      { slug: 'green-bowl', name: 'Green Bowl', cuisines: ['Healthy', 'Vegetarian'], rating: 4.4, ratings: 97, eta: 22, cover: 'https://images.unsplash.com/photo-1512621776951-a57141f2eefd?w=600&q=80', items: [{ name: 'Buddha Bowl', description: 'Greens, chickpeas, tahini', price: 2000 }, { name: 'Avocado Toast', description: 'Sourdough, chili flakes', price: 1500 }, { name: 'Fresh Juice', description: 'Cold-pressed daily', price: 800 }] },
+    ];
+    for (let i = 0; i < MORE_RESTAURANTS.length; i++) {
+      const r = MORE_RESTAURANTS[i]!;
+      const rv = await prisma.vendor.upsert({
+        where: { slug: r.slug },
+        update: {},
+        create: {
+          ownerId: owner.id,
+          name: r.name,
+          slug: r.slug,
+          description: `${r.cuisines.join(' · ')} — Georgetown`,
+          vendorType: 'RESTAURANT',
+          phone: `+59266030${i + 10}`,
+          addressLine1: `${10 + i} Main Street`,
+          city: 'Georgetown',
+          region: 'Demerara-Mahaica',
+          latitude: 6.8013,
+          longitude: -58.1551,
+          isCurrentlyOpen: true,
+          acceptingOrders: true,
+          isVerified: true,
+          isFeatured: i < 3,
+          status: 'ACTIVE',
+          averageRating: r.rating,
+          totalRatings: r.ratings,
+          estimatedPrepTime: r.eta,
+          coverImageUrl: r.cover,
+          cuisineTypes: r.cuisines,
+          tags: [],
+        },
+      });
+      const hasMenu = (await prisma.category.count({ where: { vendorId: rv.id } })) > 0;
+      if (!hasMenu) {
+        const cat = await prisma.category.create({ data: { vendorId: rv.id, name: 'Popular', sortOrder: 0 } });
+        await prisma.item.createMany({
+          data: r.items.map((it, idx) => ({
+            vendorId: rv.id, categoryId: cat.id, name: it.name, description: it.description,
+            basePrice: it.price, isPopular: idx === 0, sortOrder: idx, dietaryTags: [], allergens: [],
+          })),
+        });
+      }
+    }
+
     // One vendor of each remaining locked type (SUPERMARKET, STORE, SERVICE)
     // so every fulfillment kind is exercisable end-to-end.
     const freshMart = await prisma.vendor.upsert({

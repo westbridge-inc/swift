@@ -1,5 +1,5 @@
 import { memo } from 'react';
-import { View, Pressable, ScrollView } from 'react-native';
+import { View, Pressable, ScrollView, RefreshControl } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import Animated, { useSharedValue, useAnimatedStyle, withTiming } from 'react-native-reanimated';
 import { Feather, MaterialCommunityIcons } from '@expo/vector-icons';
@@ -190,7 +190,7 @@ function HomeHeader({ navigation, address, featured }: { navigation: any; addres
 export function HomeScreen({ navigation }: any) {
   const { latitude, longitude, address } = useLocationStore();
 
-  const { data, isLoading } = useQuery({
+  const { data, isLoading, refetch, isRefetching } = useQuery({
     queryKey: ['home', latitude, longitude],
     queryFn: async () => (await customerApi.getHome(latitude ?? undefined, longitude ?? undefined)).data,
   });
@@ -207,6 +207,7 @@ export function HomeScreen({ navigation }: any) {
             <VendorCard vendor={item} index={index} onPress={() => navigation?.navigate?.('VendorDetail', { id: item.id })} />
           </View>
         )}
+        refreshControl={<RefreshControl refreshing={isRefetching} onRefresh={() => refetch()} tintColor={color.brand[500]} />}
         ListHeaderComponent={<HomeHeader navigation={navigation} address={address} featured={popular.slice(0, 6)} />}
         ListEmptyComponent={
           isLoading ? (
