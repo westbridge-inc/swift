@@ -8,4 +8,5 @@ export { Spinner, Skeleton } from './feedback';
 export { GluestackUIProvider } from './provider';
 export { List } from './list';
 export { Image } from './image';
+export { PressableScale } from './pressable-scale';
 export { Input } from './input';
