@@ -17,7 +17,7 @@ export function CountryPickerScreen() {
     <SafeAreaView style={{ flex: 1 }} edges={['top', 'bottom']} className="bg-surface-base">
       <View className="flex-1 px-lg pt-2xl">
         <Heading size="3xl" className="text-brand-500">
-          swift
+          Swift
         </Heading>
         <Heading size="xl" className="mt-xl">
           Where are you?

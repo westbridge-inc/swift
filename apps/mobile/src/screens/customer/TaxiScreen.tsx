@@ -198,9 +198,12 @@ export function TaxiScreen({ navigation }: any) {
             Where to?
           </Heading>
           {list.length === 0 ? (
-            <Card>
-              <Text className="text-text-secondary">Add a saved address from your Account to set a destination.</Text>
-            </Card>
+            <Pressable onPress={() => navigation?.navigate?.('AddAddress')}>
+              <Card className="flex-row items-center">
+                <Feather name="plus-circle" size={18} color={color.brand[500]} />
+                <Text className="ml-sm font-semibold text-brand-600">Add a destination address</Text>
+              </Card>
+            </Pressable>
           ) : (
             list.map((a) => {
               const active = a.id === dropoffId;
