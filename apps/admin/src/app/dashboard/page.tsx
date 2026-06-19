@@ -34,9 +34,9 @@ export default function DashboardPage() {
 
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
         <MetricCard
-          title="Revenue Today"
-          value={stats ? `$${Number(stats.todayMarkupRevenue).toLocaleString()}` : '—'}
-          subtitle="GYD (markup)"
+          title="Weekly Revenue"
+          value={stats ? `$${Number(stats.weeklySubscriptionRevenue ?? 0).toLocaleString()}` : '—'}
+          subtitle="GYD · subscriptions"
           loading={isLoading}
         />
         <MetricCard
