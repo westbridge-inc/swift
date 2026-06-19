@@ -10,4 +10,5 @@ export { List } from './list';
 export { Image } from './image';
 export { PressableScale } from './pressable-scale';
 export { elevation } from './elevation';
+export { EmptyState } from './empty-state';
 export { Input } from './input';
