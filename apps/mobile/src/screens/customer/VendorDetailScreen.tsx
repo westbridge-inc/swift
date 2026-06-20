@@ -1,9 +1,9 @@
 import { memo } from 'react';
-import { View, Pressable } from 'react-native';
+import { View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Feather, MaterialCommunityIcons } from '@expo/vector-icons';
 import { color } from '@swift/ui';
-import { Text, Heading, Badge, Skeleton, Button, List, Image } from '../../components/ui';
+import { Text, Heading, Badge, Skeleton, Button, List, Image, PressableScale, EmptyState } from '../../components/ui';
 import { useVendor, useCart, useAddToCart } from '../../hooks';
 import { money } from '../../lib/money';
 import { fallbackImage, kindForVendor, vendorImage, type ImageKind } from '../../lib/images';
@@ -14,13 +14,13 @@ const SHADOW = { shadowColor: '#000', shadowOpacity: 0.12, shadowRadius: 6, shad
 
 function BackButton({ onPress }: { onPress?: () => void }) {
   return (
-    <Pressable
+    <PressableScale
       onPress={onPress}
       hitSlop={10}
       style={[{ position: 'absolute', top: 12, left: 16, zIndex: 10, width: 38, height: 38, borderRadius: 19, alignItems: 'center', justifyContent: 'center', backgroundColor: color.surface.base }, SHADOW]}
     >
       <Feather name="chevron-left" size={24} color={color.text.primary} />
-    </Pressable>
+    </PressableScale>
   );
 }
 
@@ -37,14 +37,14 @@ const MenuItemRow = memo(function MenuItemRow({ item, onAdd, adding, kind }: { i
       </View>
       <View style={{ width: 96, height: 96 }}>
         <Image source={{ uri: item.imageUrl || fallbackImage(item.id, kind) }} style={{ width: 96, height: 96, borderRadius: 14 }} />
-        <Pressable
+        <PressableScale
           onPress={onAdd}
           disabled={unavailable || adding}
           hitSlop={8}
           style={[{ position: 'absolute', bottom: -10, right: -6, width: 34, height: 34, borderRadius: 17, alignItems: 'center', justifyContent: 'center', backgroundColor: color.surface.base }, SHADOW]}
         >
           <Feather name={unavailable ? 'slash' : 'plus'} size={18} color={unavailable ? color.text.muted : color.brand[500]} />
-        </Pressable>
+        </PressableScale>
       </View>
     </View>
   );
@@ -109,10 +109,14 @@ export function VendorDetailScreen({ navigation, route }: any) {
     return (
       <SafeAreaView style={{ flex: 1 }} edges={['top']} className="bg-surface-base">
         <BackButton onPress={() => navigation?.goBack?.()} />
-        <View className="flex-1 items-center justify-center px-2xl">
-          <Feather name="alert-triangle" size={32} color={color.text.muted} />
-          <Text className="mt-sm text-center text-text-secondary">Couldn&apos;t load this place.</Text>
-          <Button label="Retry" className="mt-md" onPress={() => refetch()} />
+        <View className="flex-1 items-center justify-center">
+          <EmptyState
+            icon="alert-circle-outline"
+            title="Couldn’t load this place"
+            body="Something went wrong on our end."
+            actionLabel="Retry"
+            onAction={() => refetch()}
+          />
         </View>
       </SafeAreaView>
     );
@@ -146,7 +150,7 @@ export function VendorDetailScreen({ navigation, route }: any) {
             />
           )
         }
-        ListEmptyComponent={<Text className="px-lg pt-xl text-text-secondary">No items listed yet.</Text>}
+        ListEmptyComponent={<EmptyState icon="silverware-fork-knife" title="No items yet" body="This place hasn’t added its menu — check back soon." />}
         contentContainerStyle={{ paddingBottom: 120 }}
       />
       </View>

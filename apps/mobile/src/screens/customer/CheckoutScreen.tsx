@@ -1,9 +1,9 @@
 import { useEffect, useState } from 'react';
-import { View, ScrollView, Pressable } from 'react-native';
+import { View, ScrollView } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Feather, MaterialCommunityIcons } from '@expo/vector-icons';
 import { color } from '@swift/ui';
-import { Text, Heading, Card, Button, Spinner } from '../../components/ui';
+import { Text, Heading, Card, Button, Spinner, PressableScale } from '../../components/ui';
 import { useCart, useAddresses, useSetCartAddress, useSetCartTip, usePlaceOrder } from '../../hooks';
 import { money } from '../../lib/money';
 
@@ -43,7 +43,6 @@ export function CheckoutScreen({ navigation }: any) {
     if (!cart?.deliveryAddressId && !selectedId && defaultAddressId) {
       setAddress.mutate(defaultAddressId);
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [defaultAddressId, cart?.deliveryAddressId]);
 
   if (isLoading || !cart) {
@@ -72,9 +71,9 @@ export function CheckoutScreen({ navigation }: any) {
   return (
     <SafeAreaView style={{ flex: 1 }} edges={['top']} className="bg-surface-base">
       <View className="flex-row items-center px-lg py-sm">
-        <Pressable onPress={() => navigation?.goBack?.()} hitSlop={10}>
+        <PressableScale onPress={() => navigation?.goBack?.()} hitSlop={10}>
           <Feather name="chevron-left" size={24} color={color.text.primary} />
-        </Pressable>
+        </PressableScale>
         <Text className="ml-md text-base font-bold">Checkout</Text>
       </View>
 
@@ -83,17 +82,17 @@ export function CheckoutScreen({ navigation }: any) {
           {/* Address */}
           <Heading size="lg" className="mb-sm">Deliver to</Heading>
           {list.length === 0 ? (
-            <Pressable onPress={() => navigation?.navigate?.('AddAddress')}>
+            <PressableScale onPress={() => navigation?.navigate?.('AddAddress')}>
               <Card className="flex-row items-center">
                 <Feather name="plus-circle" size={18} color={color.brand[500]} />
                 <Text className="ml-sm font-semibold text-brand-600">Add a delivery address</Text>
               </Card>
-            </Pressable>
+            </PressableScale>
           ) : (
             list.map((a) => {
               const active = a.id === effectiveAddressId;
               return (
-                <Pressable key={a.id} onPress={() => { setSelectedId(a.id); setAddress.mutate(a.id); }}>
+                <PressableScale key={a.id} onPress={() => { setSelectedId(a.id); setAddress.mutate(a.id); }}>
                   <Card className={active ? 'mb-sm border-brand-500' : 'mb-sm'}>
                     <View className="flex-row items-center justify-between">
                       <View className="flex-1 pr-md">
@@ -105,7 +104,7 @@ export function CheckoutScreen({ navigation }: any) {
                       <Feather name={active ? 'check-circle' : 'circle'} size={20} color={active ? color.brand[500] : color.text.muted} />
                     </View>
                   </Card>
-                </Pressable>
+                </PressableScale>
               );
             })
           )}
@@ -129,13 +128,13 @@ export function CheckoutScreen({ navigation }: any) {
             {TIPS.map((t) => {
               const active = t === selectedTip;
               return (
-                <Pressable
+                <PressableScale
                   key={t}
                   onPress={() => { setSelectedTip(t); setTip.mutate(t); }}
                   className={active ? 'flex-1 items-center rounded-lg border border-brand-500 bg-brand-50 py-sm' : 'flex-1 items-center rounded-lg border border-border-subtle py-sm'}
                 >
                   <Text className={active ? 'font-semibold text-brand-600' : 'text-text-secondary'}>{t === 0 ? 'None' : money(t)}</Text>
-                </Pressable>
+                </PressableScale>
               );
             })}
           </View>
@@ -166,10 +165,8 @@ export function CheckoutScreen({ navigation }: any) {
             <Text className="mb-sm text-center text-sm text-error">Couldn&apos;t place order. Please try again.</Text>
           )
         ) : null}
-        <Button disabled={placeOrder.isPending || list.length === 0 || !effectiveAddressId} onPress={onPlace}>
-          <Text className="font-body font-semibold text-white">
-            {placeOrder.isPending ? 'Placing…' : `Place order · ${money(cart.totalAmount)}`}
-          </Text>
+        <Button loading={placeOrder.isPending} disabled={list.length === 0 || !effectiveAddressId} onPress={onPlace}>
+          <Text className="font-body font-semibold text-white">Place order · {money(cart.totalAmount)}</Text>
         </Button>
       </View>
     </SafeAreaView>

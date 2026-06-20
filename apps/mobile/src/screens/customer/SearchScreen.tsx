@@ -1,9 +1,9 @@
 import { useEffect, useMemo, useState } from 'react';
-import { View, ScrollView, Pressable, RefreshControl } from 'react-native';
+import { View, ScrollView, RefreshControl } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Feather } from '@expo/vector-icons';
 import { color } from '@swift/ui';
-import { Text, Heading, Skeleton, List, Input } from '../../components/ui';
+import { Text, Heading, Skeleton, List, Input, PressableScale, EmptyState } from '../../components/ui';
 import { VendorCard, type Vendor } from '../../components/customer/VendorCard';
 import { useVendors } from '../../hooks';
 import { useLocationStore } from '../../stores/locationStore';
@@ -59,9 +59,9 @@ export function SearchScreen({ navigation }: any) {
           left={<Feather name="search" size={18} color={color.text.muted} />}
           right={
             text ? (
-              <Pressable onPress={() => setText('')} hitSlop={8}>
+              <PressableScale onPress={() => setText('')} hitSlop={8}>
                 <Feather name="x" size={18} color={color.text.muted} />
-              </Pressable>
+              </PressableScale>
             ) : null
           }
         />
@@ -73,7 +73,7 @@ export function SearchScreen({ navigation }: any) {
           {FILTERS.map((item) => {
             const active = item.key === filter;
             return (
-              <Pressable
+              <PressableScale
                 key={item.key}
                 onPress={() => setFilter(item.key)}
                 className={
@@ -85,7 +85,7 @@ export function SearchScreen({ navigation }: any) {
                 <Text className={active ? 'text-sm font-semibold text-white' : 'text-sm font-semibold text-text-secondary'}>
                   {item.label}
                 </Text>
-              </Pressable>
+              </PressableScale>
             );
           })}
         </ScrollView>
@@ -100,12 +100,14 @@ export function SearchScreen({ navigation }: any) {
             ))}
           </View>
         ) : isError ? (
-          <View className="flex-1 items-center justify-center px-2xl">
-            <Feather name="alert-triangle" size={32} color={color.text.muted} />
-            <Text className="mt-sm text-center text-text-secondary">Couldn&apos;t load places.</Text>
-            <Pressable onPress={() => refetch()} className="mt-md rounded-full bg-brand-500 px-xl py-sm">
-              <Text className="font-semibold text-white">Retry</Text>
-            </Pressable>
+          <View className="flex-1 items-center justify-center">
+            <EmptyState
+              icon="alert-circle-outline"
+              title="Couldn’t load places"
+              body="Something went wrong — give it another go."
+              actionLabel="Retry"
+              onAction={() => refetch()}
+            />
           </View>
         ) : (
           <List
@@ -118,11 +120,16 @@ export function SearchScreen({ navigation }: any) {
               <VendorCard vendor={item} onPress={() => navigation?.navigate?.('VendorDetail', { id: item.id })} />
             )}
             ListEmptyComponent={
-              <View className="items-center justify-center px-2xl pt-5xl">
-                <Feather name="search" size={32} color={color.text.muted} />
-                <Text className="mt-sm text-center text-text-secondary">
-                  {debounced ? `No results for “${debounced}”.` : 'Nothing here yet — check back soon.'}
-                </Text>
+              <View className="pt-2xl">
+                <EmptyState
+                  icon="magnify"
+                  title={debounced ? 'No matches' : 'Search Swift'}
+                  body={
+                    debounced
+                      ? `Nothing for “${debounced}” — try another term.`
+                      : 'Find food, groceries, shops and services near you.'
+                  }
+                />
               </View>
             }
           />
