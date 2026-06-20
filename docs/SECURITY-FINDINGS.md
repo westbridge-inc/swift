@@ -62,7 +62,7 @@
 | # | Issue | Why Not Fixed Here | Recommended Action |
 |---|---|---|---|
 | SEC-8 | ~~JWT token blacklist on logout~~ | **CLOSED in Step 3** — `authenticate` is session-backed: logout/password-reset delete sessions and the access token dies immediately (regression-tested in step3-auth.test.ts) | Done |
-| SEC-9 | Missing RBAC ownership checks on address/order endpoints | Requires reading all 1,748 lines of customer.routes.ts carefully | Fix during Step 2 god-file split |
+| SEC-9 | ~~Missing RBAC ownership checks on address/order endpoints~~ | **VERIFIED CLOSED (2026-06-20)** — every address/order mutation guards `findFirst({ id, userId })` + 404; order reads scoped to `customerId`. See review below. | Done |
 | SEC-11 | Admin token in `localStorage` | Fixing properly requires httpOnly cookie sessions + login page redesign for admin app | Fix in Step 13 (dashboards) |
 | SEC-13 | No idempotency keys on payments/orders | Requires schema additions + client coordination | Fix in Step 5 (billing engine) |
 | SEC-14 | No fraud detection on payments | V1 is cash-only; relevant when card payments added | Part C |
@@ -75,3 +75,21 @@
 1. **Auth & billing paths** — A focused freelance security review (~$1.5–5k per playbook) should cover `auth.routes.ts`, `auth.service.ts`, and the subscription billing job before public launch.
 2. **Document storage** — KYC documents (Step 4) involve PII. Storage path, encryption at rest, and access controls need legal + security sign-off.
 3. **Cash guarantee flow** — The GPS/photo claim flow (Step 10) is a financial decision path. Ensure no AI call can influence outcomes.
+
+---
+
+## Pre-launch security review (2026-06-20)
+
+A focused pass over auth/session, the cash-guarantee flow, and the still-open tickets above. **No new vulnerabilities found; the code is secure on the audited axes.**
+
+- **SEC-9 (IDOR / ownership) — VERIFIED CLOSED.** Re-read the address + order endpoints in `customer.routes.ts`: every mutation guards ownership with `findFirst({ where: { id, userId } })` + a 404 before acting (e.g. `DELETE /addresses/:id` L503–507), and order reads are scoped to `customerId` (`GET /orders/:id` L1273: `where: { id, customerId: userId }`). A customer cannot read or mutate another customer's address/order.
+- **SEC-13 (idempotency) — billing CLOSED; order placement low-risk.** Subscription billing has full idempotency (append-only `BillingEvent`, DB-unique keys per period/attempt). Order placement has no idempotency key, but V1 is cash-only, so a double-submit is at worst a duplicate *cash* order (UX/ops) — never a double-charge (Swift processes no order money). Proper order idempotency belongs with the fintech phase.
+- **SEC-11 (admin token in `localStorage`) — open, accepted V1 risk.** XSS-exfil risk, mitigated for V1 by a small internal operator set; durable fix is httpOnly-cookie sessions + admin login redesign. Keep admin network-restricted + short token TTL until then.
+- **SEC-14 (payment fraud) — parked.** Cash-only V1; relevant when cards land (Part C). The cash-guarantee flow has its own anti-fraud guardrails (below).
+- **SEC-17 (Socket.IO CORS) — ops task.** Verify `CORS_ORIGIN` is set in the production env at deploy.
+
+**Auth / session:** session-backed JWT — logout + password-reset delete the session and the access token dies immediately (SEC-8, regression-tested). OTP verify is rate-limited with the IP-spoof fix (#69); the dev master OTP is opt-in + non-production only.
+
+**Cash-guarantee flow:** the golden rule (payment before handover) is enforced — handover is impossible away from the door (409), a claim is impossible without a GPS stamp (400). Sub-gate no-shows auto-approve the rider guarantee + strike the customer; over-gate ones are withheld for review; a rider over the monthly cap routes to manual review (not auto-payout) and steady false claims get an outlier flag. No AI call touches any of it (boundary-tested). Covered by step10 + acceptance §I #3/#4.
+
+**Bottom line:** the open tickets are either verified-closed (SEC-9) or appropriately parked for a cash-only V1 (SEC-11/13/14). The recommended external review (auth/billing, KYC storage, cash-guarantee) still stands as good pre-launch practice.
