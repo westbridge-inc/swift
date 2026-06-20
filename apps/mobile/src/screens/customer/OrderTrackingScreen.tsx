@@ -1,9 +1,9 @@
-import { View, ScrollView, Pressable, Linking } from 'react-native';
+import { View, ScrollView, Linking } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import MapView, { Marker, PROVIDER_DEFAULT } from 'react-native-maps';
 import { Feather, MaterialCommunityIcons } from '@expo/vector-icons';
 import { color } from '@swift/ui';
-import { Text, Heading, Card, Spinner, Button } from '../../components/ui';
+import { Text, Heading, Card, Spinner, PressableScale, EmptyState } from '../../components/ui';
 import { useOrder } from '../../hooks';
 import { money } from '../../lib/money';
 
@@ -45,10 +45,14 @@ export function OrderTrackingScreen({ navigation, route }: any) {
   if (isError || !order) {
     return (
       <SafeAreaView style={{ flex: 1 }} edges={['top']} className="bg-surface-base">
-        <View className="flex-1 items-center justify-center px-2xl">
-          <Feather name="alert-triangle" size={32} color={color.text.muted} />
-          <Text className="mt-sm text-center text-text-secondary">Couldn&apos;t load this order.</Text>
-          <Button label="Retry" className="mt-md" onPress={() => refetch()} />
+        <View className="flex-1 items-center justify-center">
+          <EmptyState
+            icon="alert-circle-outline"
+            title="Couldn’t load this order"
+            body="Something went wrong on our end."
+            actionLabel="Retry"
+            onAction={() => refetch()}
+          />
         </View>
       </SafeAreaView>
     );
@@ -79,9 +83,9 @@ export function OrderTrackingScreen({ navigation, route }: any) {
   return (
     <SafeAreaView style={{ flex: 1 }} edges={['top']} className="bg-surface-base">
       <View className="flex-row items-center px-lg py-sm">
-        <Pressable onPress={() => navigation?.goBack?.()} hitSlop={10}>
+        <PressableScale onPress={() => navigation?.goBack?.()} hitSlop={10}>
           <Feather name="chevron-left" size={24} color={color.text.primary} />
-        </Pressable>
+        </PressableScale>
         <Text className="ml-md text-base font-bold">Order{order.orderNumber ? ` #${order.orderNumber}` : ''}</Text>
       </View>
 
@@ -150,21 +154,21 @@ export function OrderTrackingScreen({ navigation, route }: any) {
                 <Text className="text-base font-semibold">{order.rider.firstName ?? 'Assigned'}</Text>
               </View>
               <View className="flex-row items-center" style={{ gap: 8 }}>
-                <Pressable
+                <PressableScale
                   onPress={() => navigation.navigate('Chat', { orderId: order.id ?? id, title: order.rider.firstName ?? 'Your rider' })}
                   className="h-10 w-10 items-center justify-center rounded-full bg-brand-50"
                 >
                   <Feather name="message-circle" size={18} color={color.brand[500]} />
-                </Pressable>
+                </PressableScale>
                 {order.rider.phone ? (
-                  <Pressable
+                  <PressableScale
                     onPress={() => {
                       Linking.openURL(`tel:${order.rider.phone}`).catch(() => {});
                     }}
                     className="h-10 w-10 items-center justify-center rounded-full bg-brand-50"
                   >
                     <Feather name="phone" size={18} color={color.brand[500]} />
-                  </Pressable>
+                  </PressableScale>
                 ) : null}
               </View>
             </Card>

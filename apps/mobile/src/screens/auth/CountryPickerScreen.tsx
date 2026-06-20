@@ -1,11 +1,11 @@
-import { View, FlatList, Pressable } from 'react-native';
+import { View, FlatList } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useQuery } from '@tanstack/react-query';
 import { authApi } from '../../services/api';
 import { useAuthStore } from '../../stores/authStore';
 import { Feather } from '@expo/vector-icons';
 import { color } from '@swift/ui';
-import { Text, Heading, Card, Spinner } from '../../components/ui';
+import { Text, Heading, Card, PressableScale, StepProgress, Skeleton, EmptyState } from '../../components/ui';
 import { SwiftMark } from '../../components/SwiftLogo';
 
 export function CountryPickerScreen() {
@@ -29,10 +29,15 @@ export function CountryPickerScreen() {
           Where are you?
         </Heading>
         <Text className="mt-xs text-text-secondary">Choose your country to get started.</Text>
+        <View className="mt-lg">
+          <StepProgress step={0} total={4} />
+        </View>
 
         {isLoading ? (
-          <View className="mt-2xl items-center">
-            <Spinner size="large" />
+          <View className="mt-lg">
+            {[0, 1, 2, 3, 4].map((i) => (
+              <Skeleton key={i} className="mb-sm h-16 w-full rounded-2xl" />
+            ))}
           </View>
         ) : (
           <FlatList
@@ -43,7 +48,7 @@ export function CountryPickerScreen() {
             renderItem={({ item }) => {
               const live = item.isActive !== false;
               return (
-                <Pressable
+                <PressableScale
                   disabled={!live}
                   onPress={() =>
                     setCountry({
@@ -69,11 +74,11 @@ export function CountryPickerScreen() {
                       </View>
                     )}
                   </Card>
-                </Pressable>
+                </PressableScale>
               );
             }}
             ListEmptyComponent={
-              <Text className="mt-2xl text-center text-text-secondary">No countries available yet.</Text>
+              <EmptyState icon="map-search-outline" title="No countries yet" body="We’re expanding across the Caribbean — check back soon." />
             }
           />
         )}

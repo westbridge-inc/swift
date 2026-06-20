@@ -6,6 +6,7 @@ import { NotificationService } from '../notification/notification.service';
 import { CountryConfigService } from '../country/country-config.service';
 import { BookingService } from '../booking/booking.service';
 import { orderingRestriction } from '../cash/cash-rules.service';
+import { FloatService } from '../dispatch/float.service';
 import { AppError } from '../../utils/errors';
 
 interface CheckoutInput {
@@ -471,6 +472,11 @@ export class OrderService {
         rider: { include: { user: { select: { firstName: true } } } },
       },
     });
+
+    // D.3 — release the rider's committed float on a terminal CASH transition.
+    if ((status === 'DELIVERED' || status === 'CANCELLED') && order.riderId && order.paymentMethod === 'CASH') {
+      await new FloatService(this.prisma).release(this.prisma, order.riderId, Number(order.subtotalBase));
+    }
 
     // Append-only event log — every transition leaves evidence
     await this.prisma.orderStatusLog.create({
