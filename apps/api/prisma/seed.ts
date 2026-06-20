@@ -464,6 +464,9 @@ async function main() {
       isActive: true,
       usdExchangeRate: 209.0,
       idGateThresholdUsd: 50,
+      floatL1: 8000,
+      floatL2: 20000,
+      floatL3: 40000,
       subscriptionTiers: guyanaTiers,
       documentChecklists: guyanaChecklists,
       taxiRates: guyanaTaxiRates,
@@ -477,6 +480,9 @@ async function main() {
       currencySymbol: '$',
       usdExchangeRate: 209.0,
       idGateThresholdUsd: 50,
+      floatL1: 8000,
+      floatL2: 20000,
+      floatL3: 40000,
       subscriptionTiers: guyanaTiers,
       documentChecklists: guyanaChecklists,
       taxiRates: guyanaTaxiRates,
@@ -493,6 +499,8 @@ async function main() {
   // and cashRules reuse Guyana's as a template. (Dial codes live in the /auth/countries map.)
   const USD = { mover: 12000 / 209, smallVendor: 20000 / 209, largeVendor: 30000 / 209 };
   const USD_TAXI = { base: 1000 / 209, perKm: 300 / 209, perMin: 25 / 209, minimum: 1500 / 209 };
+  // D.3 float limits, USD-pegged off Guyana's (L1 8000 / L2 20000 / L3 40000 GYD).
+  const USD_FLOAT = { l1: 8000 / 209, l2: 20000 / 209, l3: 40000 / 209 };
   const niceRound = (n: number) => {
     if (n >= 1000) return Math.round(n / 100) * 100;
     if (n >= 100) return Math.round(n / 10) * 10;
@@ -520,6 +528,9 @@ async function main() {
       currencySymbol: c.currencySymbol,
       usdExchangeRate: c.rate,
       idGateThresholdUsd: 50,
+      floatL1: niceRound(USD_FLOAT.l1 * c.rate),
+      floatL2: niceRound(USD_FLOAT.l2 * c.rate),
+      floatL3: niceRound(USD_FLOAT.l3 * c.rate),
       subscriptionTiers: {
         mover: niceRound(USD.mover * c.rate),
         smallVendor: niceRound(USD.smallVendor * c.rate),
@@ -563,6 +574,21 @@ async function main() {
         { fromZoneId: 'georgetown-south', toZoneId: 'georgetown-central', fare: 2000 },
       ],
     });
+  }
+
+  // D.3 — backfill every rider's float limit from their trust level + country,
+  // so existing riders pick up limits after the float-gate migration.
+  const allRiders = await prisma.rider.findMany({
+    select: { id: true, user: { select: { trustLevel: true, countryCode: true } } },
+  });
+  for (const r of allRiders) {
+    const cc = await prisma.countryConfig.findUnique({
+      where: { code: r.user.countryCode },
+      select: { floatL1: true, floatL2: true, floatL3: true },
+    });
+    if (!cc) continue;
+    const limit = r.user.trustLevel === 'L3' ? cc.floatL3 : r.user.trustLevel === 'L2' ? cc.floatL2 : cc.floatL1;
+    await prisma.rider.update({ where: { id: r.id }, data: { floatLimit: limit } });
   }
 
   console.warn('Seed complete!');
