@@ -1,8 +1,8 @@
-import { View, Pressable } from 'react-native';
+import { View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Feather, MaterialCommunityIcons } from '@expo/vector-icons';
 import { color } from '@swift/ui';
-import { Text, Heading, Card } from '../../components/ui';
+import { Text, Heading, Card, PressableScale, StepProgress } from '../../components/ui';
 import { SwiftMark } from '../../components/SwiftLogo';
 
 const ROLES: { key: string; icon: keyof typeof MaterialCommunityIcons.glyphMap; title: string; sub: string }[] = [
@@ -19,9 +19,12 @@ export function RolePickerScreen({ route, navigation }: any) {
         <SwiftMark size={44} />
         <Heading size="xl" className="mt-md">How will you use Swift?</Heading>
         <Text className="mt-xs text-text-secondary">You can add another role later from your account.</Text>
+        <View className="mt-lg">
+          <StepProgress step={3} total={4} />
+        </View>
         <View className="mt-xl">
           {ROLES.map((r) => (
-            <Pressable key={r.key} onPress={() => navigation?.navigate?.('Register', { phone, role: r.key })}>
+            <PressableScale key={r.key} onPress={() => navigation?.navigate?.('Register', { phone, role: r.key })}>
               <Card className="mb-md flex-row items-center">
                 <View className="h-12 w-12 items-center justify-center rounded-2xl bg-brand-50">
                   <MaterialCommunityIcons name={r.icon} size={24} color={color.brand[500]} />
@@ -32,7 +35,7 @@ export function RolePickerScreen({ route, navigation }: any) {
                 </View>
                 <Feather name="chevron-right" size={20} color={color.text.muted} />
               </Card>
-            </Pressable>
+            </PressableScale>
           ))}
         </View>
       </View>
