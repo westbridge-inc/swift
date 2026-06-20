@@ -34,17 +34,38 @@ Full spec: `docs/SWIFT-MASTER-SPEC.md` · Operations: `docs/RUNBOOK.md` · Syste
 
 ## Quickstart
 
+Prereqs: **Node 20+**, **pnpm 9**, **Docker**.
+
 ```bash
-docker compose -f infrastructure/docker/docker-compose.yml up -d   # PG 5434, Redis 6382
+# 1. Infra — Postgres/PostGIS :5434, Redis :6382, Meilisearch :7700
+docker compose -f infrastructure/docker/docker-compose.yml up -d
+
+# 2. Env — every provider defaults to a dev adapter; only JWT_SECRET is required
+cp apps/api/.env.example apps/api/.env          # then set JWT_SECRET + JWT_REFRESH_SECRET
+
+# 3. Install + database (migrate is clean on a fresh DB; db seed creates demo data)
 pnpm install
 cd apps/api
 npx prisma migrate deploy && npx prisma generate && npx prisma db seed
-npx tsx src/server.ts                # API on :3000
-npx vitest run                       # test suite (requires the seed)
+
+# 4. Run the API (:3000) and prove it
+npx tsx src/server.ts
+npx vitest run                                  # full suite — needs the seed; NODE_ENV=test, no DEV_OTP_BYPASS
 ```
 
-Copy `apps/api/.env.example` to `apps/api/.env` first — the server refuses to
-start without `JWT_SECRET`.
+Then, from the repo root, run the other surfaces:
+
+```bash
+pnpm --filter @swift/admin dev                  # admin cockpit → :3001 (Next.js)
+pnpm --filter @swift/mobile start               # mobile app → Expo
+```
+
+**Going live is a config change, not a code change.** Flip the providers in
+`apps/api/.env` and supply their credentials — `NOTIFICATION_PROVIDER=twilio`
+(OTP), `MAPS_PROVIDER=osrm|google`, `STORAGE_PROVIDER=s3`,
+`PAYMENT_PROVIDER=powertranz` (weekly subscriptions only). Every variable is
+documented in `apps/api/.env.example`. Launching a new **country** is a
+`CountryConfig` row (currency, ID-gate, subscription tiers, document checklists).
 
 ## Engineering rules (never break)
 
