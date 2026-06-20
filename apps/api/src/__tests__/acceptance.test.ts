@@ -20,11 +20,11 @@ import { getKycProvider } from '../providers/kyc/kyc-provider';
 // Spec §I — acceptance conformance baseline. One file maps the 8 given/when/then
 // scenarios to the LIVE engine, so a regression in any core rule fails CI.
 //
-//   #2 (float gate) is the known gap — D.3 / Phase 1 — marked `todo` until wired.
-//   The verification-driven rules (#5/#6/#8) are asserted here against the real
-//   VerificationService. The threshold (#1), ghost (#3/#4) and subscription (#7)
-//   scenarios drive heavier cart/order/billing fixtures and land as their own
-//   micro-commits within step 0.1 (reusing the step7 / step10 / step5 patterns).
+//   All 8 scenarios are now LIVE assertions against the real engine: threshold
+//   gate (#1), float gate (#2, D.3), ghost/no-show guarantee (#3/#4), verification
+//   eligibility + insurance hard-fail + doc-expiry (#5/#6/#8), and dunning→suspend
+//   (#7). They drive real cart/order/cash/billing fixtures (step7/step10/step5
+//   patterns); a regression in any core rule fails this file in CI.
 // ---------------------------------------------------------------------------
 
 const DAY = 24 * 60 * 60 * 1000;
