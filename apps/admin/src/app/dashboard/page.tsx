@@ -63,7 +63,7 @@ export default function DashboardPage() {
         <LiveOrderFeed />
       </div>
 
-      <AlertsPanel />
+      <AlertsPanel alerts={stats?.alerts} />
     </div>
   );
 }
