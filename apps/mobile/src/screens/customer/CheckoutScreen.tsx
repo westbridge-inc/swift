@@ -43,7 +43,6 @@ export function CheckoutScreen({ navigation }: any) {
     if (!cart?.deliveryAddressId && !selectedId && defaultAddressId) {
       setAddress.mutate(defaultAddressId);
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [defaultAddressId, cart?.deliveryAddressId]);
 
   if (isLoading || !cart) {
