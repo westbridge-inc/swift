@@ -25,6 +25,8 @@ jobs:
       - run: cd apps/api && npx prisma generate
       - run: pnpm lint
       - run: pnpm type-check
+      - name: Mobile unit tests
+        run: pnpm --filter @swift/mobile test
 
   api-test:
     name: API Tests
