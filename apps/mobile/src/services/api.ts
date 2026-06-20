@@ -1,5 +1,6 @@
 import axios from 'axios';
 import { useAuthStore } from '../stores/authStore';
+import { useStoreSwitcher } from '../stores/storeSwitcher';
 
 // eslint-disable-next-line no-undef
 export const API_URL = __DEV__ ? 'http://localhost:3000' : 'https://api.swift.gy';
@@ -15,6 +16,11 @@ api.interceptors.request.use((config) => {
   const token = useAuthStore.getState().accessToken;
   if (token) {
     config.headers.Authorization = `Bearer ${token}`;
+  }
+  // Multi-store switch — scope vendor requests to the selected store.
+  const storeId = useStoreSwitcher.getState().selectedStoreId;
+  if (storeId) {
+    config.headers['x-vendor-id'] = storeId;
   }
   return config;
 });
