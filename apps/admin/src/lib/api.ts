@@ -24,6 +24,7 @@ export const fetchOrders = (params?: string) => apiFetch(`/api/v1/admin/orders?$
 export const fetchRevenue = () => apiFetch('/api/v1/admin/finance/revenue');
 export const fetchPromos = () => apiFetch('/api/v1/admin/promos');
 export const fetchConfig = () => apiFetch('/api/v1/admin/config');
+export const fetchAuditLogs = (params?: string) => apiFetch(`/api/v1/admin/audit-logs?${params || 'limit=50'}`);
 
 export const approveVendor = (id: string) => apiFetch(`/api/v1/admin/vendors/${id}/approve`, { method: 'PUT' });
 export const verifyRiderDocuments = (id: string) => apiFetch(`/api/v1/admin/riders/${id}/verify-documents`, { method: 'PUT' });
