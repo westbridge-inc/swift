@@ -910,10 +910,11 @@ export async function adminRoutes(app: FastifyInstance) {
       });
     }
 
-    // V1 is cash-only: Swift never holds order money, so there is nothing to refund
-    // to a platform balance (walletBalance is dormant — reserved for the Part C wallet
-    // rework, no customer path emits it). A requested refund is a cash matter settled
-    // directly with the customer; the intent is captured in the audit log below.
+    // V1 is cash-only: the platform never holds order money, so there is no wallet
+    // to credit. A cancellation before handover means no cash changed hands; if cash
+    // was already collected, the refund is settled in cash and tracked via the audit
+    // log + customer notification below. (Wallet credit is a Part C / fintech-phase
+    // concern — see the dormant walletBalance/Transaction schema notes.)
 
     app.io.to(`order:${id}`).emit('order:status_changed', { orderId: id, status: newStatus });
 
@@ -924,8 +925,8 @@ export async function adminRoutes(app: FastifyInstance) {
       type: 'ORDER_UPDATE',
       title: 'Order Cancelled',
       body: refund
-        ? `Your order ${order.orderNumber} has been cancelled. Any cash you already paid will be refunded to you directly.`
-        : `Your order ${order.orderNumber} has been cancelled by the system. ${reason || ''}`.trim(),
+        ? `Your order ${order.orderNumber} has been cancelled. Any cash you paid will be refunded — our team will follow up.`
+        : `Your order ${order.orderNumber} has been cancelled. ${reason || ''}`.trim(),
       data: { orderId: id, status: newStatus },
     });
 
