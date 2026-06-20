@@ -1,6 +1,7 @@
 import type { PrismaClient, UserRole } from '@prisma/client';
 import { nanoid } from 'nanoid';
 import { AppError, ValidationError } from '../../utils/errors';
+import { FloatService } from '../dispatch/float.service';
 
 // ---------------------------------------------------------------------------
 // Partner provisioning (deterministic code — hard rule #1). `register` appends
@@ -67,6 +68,8 @@ export class PartnerService {
   private async provisionRider(userId: string, roles: UserRole[], vehicleType: 'BICYCLE' | 'MOTORCYCLE') {
     const existing = await this.prisma.rider.findUnique({ where: { userId } });
     const rider = existing ?? (await this.prisma.rider.create({ data: { userId, riderType: 'BOTH', vehicleType } }));
+    // D.3 — seed the new rider's float limit from their trust level + country.
+    if (!existing) await new FloatService(this.prisma).recomputeForUser(userId);
     const updatedRoles = await this.ensureRoles(userId, roles, ['MOVER', 'RIDER']);
     return { kind: 'RIDER' as const, id: rider.id, created: !existing, roles: updatedRoles };
   }
