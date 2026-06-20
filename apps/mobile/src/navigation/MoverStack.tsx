@@ -5,7 +5,7 @@ import { createNativeStackNavigator } from '@react-navigation/native-stack';
 import MapView, { Marker, PROVIDER_DEFAULT } from 'react-native-maps';
 import { color } from '@swift/ui';
 import { Feather, MaterialCommunityIcons } from '@expo/vector-icons';
-import { Text, Heading, Card, Button, Spinner } from '../components/ui';
+import { Text, Heading, Card, Button, Spinner, elevation } from '../components/ui';
 import { DocumentChecklist } from '../components/onboarding/DocumentChecklist';
 import { ChatScreen } from '../screens/shared/ChatScreen';
 import {
@@ -36,7 +36,7 @@ const VTYPES = [
 
 const FIELD = 'mb-sm rounded-lg border border-border-subtle bg-surface-base px-lg py-md font-body text-base text-text-primary';
 
-const CARD_SHADOW = { shadowColor: '#000', shadowOpacity: 0.08, shadowRadius: 12, shadowOffset: { width: 0, height: 4 }, elevation: 3 } as const;
+const CARD_SHADOW = elevation.raised;
 
 function jobAmount(j: any) {
   return money(j?.totalAmount ?? j?.taxiFareTotal ?? j?.fare ?? 0);
