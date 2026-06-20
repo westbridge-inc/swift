@@ -1,9 +1,9 @@
 import { useState } from 'react';
-import { View, ScrollView, Pressable, TextInput } from 'react-native';
+import { View, ScrollView, TextInput } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { color } from '@swift/ui';
 import { Feather, MaterialCommunityIcons } from '@expo/vector-icons';
-import { Text, Heading, Card, Button, Badge, Skeleton } from '../../components/ui';
+import { Text, Heading, Card, Button, Badge, Skeleton, PressableScale, EmptyState } from '../../components/ui';
 import { useServiceProviders, useRequestJob } from '../../hooks';
 
 const TRADES = [
@@ -22,9 +22,9 @@ const TRADES = [
 function Header({ navigation }: any) {
   return (
     <View className="flex-row items-center px-lg py-sm">
-      <Pressable onPress={() => navigation?.goBack?.()} hitSlop={10}>
+      <PressableScale onPress={() => navigation?.goBack?.()} hitSlop={10}>
         <Feather name="chevron-left" size={24} color={color.text.primary} />
-      </Pressable>
+      </PressableScale>
       <Text className="ml-md text-base font-bold">Services</Text>
     </View>
   );
@@ -78,7 +78,7 @@ export function ServicesScreen({ navigation }: any) {
             {TRADES.map((t) => {
               const active = t === trade;
               return (
-                <Pressable
+                <PressableScale
                   key={t}
                   onPress={() => {
                     setTrade(t);
@@ -94,7 +94,7 @@ export function ServicesScreen({ navigation }: any) {
                   <Text className={active ? 'text-sm font-semibold text-white' : 'text-sm font-semibold text-text-secondary'}>
                     {t}
                   </Text>
-                </Pressable>
+                </PressableScale>
               );
             })}
           </View>
@@ -119,7 +119,7 @@ export function ServicesScreen({ navigation }: any) {
           ) : null}
 
           {!trade ? (
-            <Text className="mt-2xl text-center text-text-secondary">Pick a service to see verified pros near you.</Text>
+            <EmptyState icon="toolbox-outline" title="What needs doing?" body="Pick a service to see verified pros near you." />
           ) : isFetching ? (
             <View className="mt-lg">
               {[0, 1, 2].map((i) => (
@@ -127,11 +127,13 @@ export function ServicesScreen({ navigation }: any) {
               ))}
             </View>
           ) : isError ? (
-            <Text className="mt-lg text-text-secondary">Couldn&apos;t load providers. Try again.</Text>
+            <EmptyState icon="alert-circle-outline" title="Couldn’t load providers" body="Give it another go in a moment." />
           ) : providers.length === 0 ? (
-            <Text className="mt-2xl text-center text-text-secondary">
-              No {trade.toLowerCase()}s available yet — check back soon.
-            </Text>
+            <EmptyState
+              icon="account-search-outline"
+              title="None available yet"
+              body={`No ${trade.toLowerCase()}s near you yet — check back soon.`}
+            />
           ) : (
             <View className="mt-lg">
               {providers.map((p) => {
@@ -154,7 +156,7 @@ export function ServicesScreen({ navigation }: any) {
                           </Text>
                         ) : null}
                       </View>
-                      <Pressable
+                      <PressableScale
                         onPress={() => setSelectedProviderId(selected ? undefined : p.id)}
                         className={
                           selected ? 'rounded-full bg-brand-500 px-lg py-sm' : 'rounded-full border border-brand-500 px-lg py-sm'
@@ -163,7 +165,7 @@ export function ServicesScreen({ navigation }: any) {
                         <Text className={selected ? 'text-sm font-semibold text-white' : 'text-sm font-semibold text-brand-500'}>
                           {selected ? 'Selected' : 'Request'}
                         </Text>
-                      </Pressable>
+                      </PressableScale>
                     </View>
                   </Card>
                 );
@@ -185,8 +187,8 @@ export function ServicesScreen({ navigation }: any) {
             style={{ minHeight: 64 }}
           />
           {errMsg ? <Text className="mb-sm text-center text-sm text-error">{errMsg}</Text> : null}
-          <Button disabled={!canSend || requestJob.isPending} onPress={onSend}>
-            <Text className="font-body font-semibold text-white">{requestJob.isPending ? 'Sending…' : 'Send request'}</Text>
+          <Button loading={requestJob.isPending} disabled={!canSend} onPress={onSend}>
+            <Text className="font-body font-semibold text-white">Send request</Text>
           </Button>
         </View>
       ) : null}
