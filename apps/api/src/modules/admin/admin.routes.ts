@@ -252,6 +252,9 @@ export async function adminRoutes(app: FastifyInstance) {
       activeSubRevenue,
       todayNewUsers,
       weeklyOrderCounts,
+      pendingVendors,
+      pastDueSubs,
+      unassignedOrders,
     ] = await Promise.all([
       app.prisma.user.count(),
       app.prisma.order.count(),
@@ -285,6 +288,16 @@ export async function adminRoutes(app: FastifyInstance) {
         GROUP BY DATE("placedAt")
         ORDER BY date ASC
       `,
+      // Operational alerts — real counts for the dashboard AlertsPanel.
+      app.prisma.vendor.count({ where: { status: 'PENDING_APPROVAL' } }),
+      app.prisma.subscription.count({ where: { status: 'PAST_DUE' } }),
+      app.prisma.order.count({
+        where: {
+          riderId: null,
+          status: { in: ['PENDING', 'ACCEPTED', 'PREPARING', 'READY_FOR_PICKUP'] },
+          placedAt: { lt: new Date(Date.now() - 10 * 60 * 1000) },
+        },
+      }),
     ]);
 
     // Real weekly rates from subscriptions (set from CountryConfig tiers),
@@ -312,6 +325,7 @@ export async function adminRoutes(app: FastifyInstance) {
         },
         subscriptionBreakdown: subscriptionCounts,
         weeklyTrend: weeklyOrderCounts,
+        alerts: { pendingVendors, pastDueSubs, unassignedOrders },
       },
     };
   });
