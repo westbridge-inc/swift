@@ -1,16 +1,13 @@
 import { memo, useMemo, useState } from 'react';
 import { View, Pressable, ScrollView, RefreshControl } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import Animated, { useSharedValue, useAnimatedStyle, withTiming } from 'react-native-reanimated';
 import { Feather, MaterialCommunityIcons } from '@expo/vector-icons';
 import { useQuery } from '@tanstack/react-query';
 import { customerApi } from '../../services/api';
 import { useLocationStore } from '../../stores/locationStore';
 import { color } from '@swift/ui';
-import { Text, Heading, Skeleton, List, Image } from '../../components/ui';
+import { Text, Heading, Skeleton, List, Image, PressableScale } from '../../components/ui';
 import { vendorImage } from '../../lib/images';
-
-const AnimatedPressable = Animated.createAnimatedComponent(Pressable);
 
 type Vertical = { key: string; label: string; icon: keyof typeof MaterialCommunityIcons.glyphMap; route?: string };
 const VERTICALS: Vertical[] = [
@@ -29,22 +26,15 @@ const prettyType = (t?: string) =>
   t === 'SUPERMARKET' ? 'Groceries' : t === 'STORE' ? 'Shop' : t === 'SERVICE' ? 'Services' : 'Restaurant';
 
 function VerticalTile({ v, onPress }: { v: Vertical; onPress?: () => void }) {
-  const scale = useSharedValue(1);
-  const animStyle = useAnimatedStyle(() => ({ transform: [{ scale: scale.value }] }));
   return (
-    <AnimatedPressable
-      onPressIn={() => { scale.value = withTiming(0.94, { duration: 80 }); }}
-      onPressOut={() => { scale.value = withTiming(1, { duration: 120 }); }}
-      onPress={onPress}
-      style={[{ width: '31%', marginBottom: 16 }, animStyle]}
-    >
+    <PressableScale strong onPress={onPress} style={{ width: '31%', marginBottom: 16 }}>
       <View className="items-center">
         <View className="mb-xs h-16 w-16 items-center justify-center rounded-2xl bg-brand-50">
           <MaterialCommunityIcons name={v.icon} size={28} color={color.brand[500]} />
         </View>
         <Text className="text-sm font-semibold text-text-primary">{v.label}</Text>
       </View>
-    </AnimatedPressable>
+    </PressableScale>
   );
 }
 
@@ -79,16 +69,9 @@ function MetaLine({ vendor }: { vendor: any }) {
 }
 
 const VendorCard = memo(function VendorCard({ vendor, onPress }: { vendor: any; onPress?: () => void }) {
-  const scale = useSharedValue(1);
-  const animStyle = useAnimatedStyle(() => ({ transform: [{ scale: scale.value }] }));
   const closed = vendor.isCurrentlyOpen === false;
   return (
-    <AnimatedPressable
-      onPressIn={() => { scale.value = withTiming(0.98, { duration: 80 }); }}
-      onPressOut={() => { scale.value = withTiming(1, { duration: 120 }); }}
-      onPress={onPress}
-      style={[{ marginBottom: 18 }, animStyle]}
-    >
+    <PressableScale onPress={onPress} style={{ marginBottom: 18 }}>
       <View
         className="overflow-hidden rounded-2xl bg-surface-base"
         style={{ shadowColor: '#000', shadowOpacity: 0.08, shadowRadius: 12, shadowOffset: { width: 0, height: 4 }, elevation: 3 }}
@@ -110,7 +93,7 @@ const VendorCard = memo(function VendorCard({ vendor, onPress }: { vendor: any; 
           <MetaLine vendor={vendor} />
         </View>
       </View>
-    </AnimatedPressable>
+    </PressableScale>
   );
 });
 
