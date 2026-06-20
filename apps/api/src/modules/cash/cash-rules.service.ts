@@ -3,6 +3,7 @@ import { AppError, NotFoundError } from '../../utils/errors';
 import { NotificationService } from '../notification/notification.service';
 import { CountryConfigService } from '../country/country-config.service';
 import { OrderService } from '../order/order.service';
+import { FloatService } from '../dispatch/float.service';
 
 // ---------------------------------------------------------------------------
 // Cash rules engine (master plan §5) — the golden rule as code. Payment
@@ -356,6 +357,8 @@ export class CashRulesService {
     if (paidOrders < rules.l3MinPaidOrders) return false;
 
     await this.prisma.user.update({ where: { id: userId }, data: { trustLevel: 'L3' } });
+    // D.3 — L3 raises the rider's float limit (no-op for non-riders).
+    await new FloatService(this.prisma).recomputeForUser(userId);
     await this.notifications.send({
       userId,
       type: 'SYSTEM_ANNOUNCEMENT',
