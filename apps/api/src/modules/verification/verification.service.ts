@@ -4,6 +4,7 @@ import { CountryConfigService } from '../country/country-config.service';
 import { NotificationService } from '../notification/notification.service';
 import type { KycProvider } from '../../providers/kyc/kyc-provider';
 import { getStorageProvider } from '../../providers/storage/storage-provider';
+import { FloatService } from '../dispatch/float.service';
 
 /** Checklist keys come from CountryConfig.documentChecklists. */
 export type ChecklistRole = 'MOVER' | 'RESTAURANT' | 'SUPERMARKET' | 'STORE' | 'SERVICE';
@@ -429,6 +430,8 @@ export class VerificationService {
 
   private async promoteToL2(userId: string) {
     await this.prisma.user.update({ where: { id: userId }, data: { trustLevel: 'L2' } });
+    // D.3 — a higher trust level means a higher float limit (no-op for non-riders).
+    await new FloatService(this.prisma).recomputeForUser(userId);
     await this.notifications.send({
       userId,
       type: 'SYSTEM_ANNOUNCEMENT',
