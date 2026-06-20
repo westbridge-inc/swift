@@ -246,10 +246,25 @@ async function resolveOwner(app: FastifyInstance, userId: string): Promise<Vendo
  * Resolve the owner and return the *first* vendor (most vendors have one).
  * Throws 404 if the vendor doesn't exist.
  */
-async function resolveVendor(app: FastifyInstance, userId: string) {
+/**
+ * IDOR-safe store selection: honour the requested store only when the owner
+ * owns it, otherwise fall back to the default (first) store.
+ */
+export function pickVendorId(ownedVendorIds: string[], requested?: string): string {
+  return requested && ownedVendorIds.includes(requested) ? requested : ownedVendorIds[0]!;
+}
+
+async function resolveVendor(app: FastifyInstance, userId: string, requestedVendorId?: string) {
   const owner = await resolveOwner(app, userId);
   if (owner.vendors.length === 0) throw new NotFoundError('Vendor');
-  return { ownerId: owner.id, vendorId: owner.vendors[0]!.id, vendorIds: owner.vendors.map((v) => v.id) };
+  const vendorIds = owner.vendors.map((v) => v.id);
+  return { ownerId: owner.id, vendorId: pickVendorId(vendorIds, requestedVendorId), vendorIds };
+}
+
+/** The selected store from the `x-vendor-id` header (multi-store switch). */
+function selectedVendorId(request: { headers: Record<string, string | string[] | undefined> }): string | undefined {
+  const h = request.headers['x-vendor-id'];
+  return typeof h === 'string' ? h : undefined;
 }
 
 /** Acknowledge the persistent order alert — read = acknowledged = silence. */
@@ -303,13 +318,28 @@ export async function vendorRoutes(app: FastifyInstance) {
   const bookingService = new BookingService(app.prisma);
 
   // =========================================================================
+  // Multi-store — list the owner's stores so the app can switch between them.
+  // =========================================================================
+
+  /** GET /stores — every store this owner has (for the store switcher). */
+  app.get('/stores', auth, async (request) => {
+    const owner = await resolveOwner(app, request.user.userId);
+    const stores = await app.prisma.vendor.findMany({
+      where: { ownerId: owner.id },
+      orderBy: { createdAt: 'asc' },
+      select: { id: true, name: true, vendorType: true, isCurrentlyOpen: true, acceptingOrders: true, city: true },
+    });
+    return { success: true, data: { stores, selectedId: selectedVendorId(request) ?? stores[0]?.id ?? null } };
+  });
+
+  // =========================================================================
   // 0. QR CODE (acquisition + catalogue — spec §5.4)
   // =========================================================================
 
   /** GET /qr — printable/shareable QR linking to this vendor's public catalogue.
    *  Doubles as the acquisition tool (pulls a vendor's customers onto Swift). */
   app.get('/qr', auth, async (request) => {
-    const { vendorId } = await resolveVendor(app, request.user.userId);
+    const { vendorId } = await resolveVendor(app, request.user.userId, selectedVendorId(request));
     const vendor = await app.prisma.vendor.findUniqueOrThrow({
       where: { id: vendorId },
       select: { slug: true, name: true },
@@ -346,7 +376,7 @@ export async function vendorRoutes(app: FastifyInstance) {
 
   /** PUT /profile — Update vendor profile details */
   app.put('/profile', auth, async (request) => {
-    const { vendorId } = await resolveVendor(app, request.user.userId);
+    const { vendorId } = await resolveVendor(app, request.user.userId, selectedVendorId(request));
     const body = updateVendorProfileSchema.parse(request.body);
 
     const vendor = await app.prisma.vendor.update({
@@ -382,7 +412,7 @@ export async function vendorRoutes(app: FastifyInstance) {
 
   /** PUT /vendor/toggle-open — Toggle isCurrentlyOpen */
   app.put('/vendor/toggle-open', auth, async (request) => {
-    const { vendorId } = await resolveVendor(app, request.user.userId);
+    const { vendorId } = await resolveVendor(app, request.user.userId, selectedVendorId(request));
     const vendor = await app.prisma.vendor.findUniqueOrThrow({ where: { id: vendorId } });
 
     const updated = await app.prisma.vendor.update({
@@ -398,7 +428,7 @@ export async function vendorRoutes(app: FastifyInstance) {
 
   /** PUT /vendor/toggle-orders — Toggle acceptingOrders */
   app.put('/vendor/toggle-orders', auth, async (request) => {
-    const { vendorId } = await resolveVendor(app, request.user.userId);
+    const { vendorId } = await resolveVendor(app, request.user.userId, selectedVendorId(request));
     const vendor = await app.prisma.vendor.findUniqueOrThrow({ where: { id: vendorId } });
 
     const updated = await app.prisma.vendor.update({
@@ -438,7 +468,7 @@ export async function vendorRoutes(app: FastifyInstance) {
 
   /** GET /orders — Paginated, filterable order list */
   app.get('/orders', auth, async (request) => {
-    const { vendorIds } = await resolveVendor(app, request.user.userId);
+    const { vendorIds } = await resolveVendor(app, request.user.userId, selectedVendorId(request));
     const query = request.query as Record<string, string | undefined>;
     const pagination = parsePagination(query);
     const { status, orderType, from, to, search } = vendorOrdersQuerySchema.parse(request.query);
@@ -594,7 +624,7 @@ export async function vendorRoutes(app: FastifyInstance) {
 
   /** GET /categories — List all categories for the vendor */
   app.get('/categories', auth, async (request) => {
-    const { vendorId } = await resolveVendor(app, request.user.userId);
+    const { vendorId } = await resolveVendor(app, request.user.userId, selectedVendorId(request));
     const categories = await app.prisma.category.findMany({
       where: { vendorId },
       include: {
@@ -610,7 +640,7 @@ export async function vendorRoutes(app: FastifyInstance) {
 
   /** POST /categories — Create a category */
   app.post('/categories', auth, async (request) => {
-    const { vendorId } = await resolveVendor(app, request.user.userId);
+    const { vendorId } = await resolveVendor(app, request.user.userId, selectedVendorId(request));
     const body = createCategorySchema.parse(request.body);
     if (!body.name?.trim()) throw new ValidationError('Category name is required');
 
@@ -639,7 +669,7 @@ export async function vendorRoutes(app: FastifyInstance) {
 
   /** PUT /categories/:id — Update a category */
   app.put<{ Params: IdParam }>('/categories/:id', auth, async (request) => {
-    const { vendorId } = await resolveVendor(app, request.user.userId);
+    const { vendorId } = await resolveVendor(app, request.user.userId, selectedVendorId(request));
     const existing = await app.prisma.category.findUnique({ where: { id: request.params.id } });
     if (!existing || existing.vendorId !== vendorId) throw new NotFoundError('Category', request.params.id);
 
@@ -659,7 +689,7 @@ export async function vendorRoutes(app: FastifyInstance) {
 
   /** DELETE /categories/:id — Delete a category (and its items) */
   app.delete<{ Params: IdParam }>('/categories/:id', auth, async (request) => {
-    const { vendorId } = await resolveVendor(app, request.user.userId);
+    const { vendorId } = await resolveVendor(app, request.user.userId, selectedVendorId(request));
     const existing = await app.prisma.category.findUnique({
       where: { id: request.params.id },
       include: { _count: { select: { items: true } } },
@@ -681,7 +711,7 @@ export async function vendorRoutes(app: FastifyInstance) {
 
   /** PUT /categories/reorder — Bulk reorder categories */
   app.put('/categories/reorder', auth, async (request) => {
-    const { vendorId } = await resolveVendor(app, request.user.userId);
+    const { vendorId } = await resolveVendor(app, request.user.userId, selectedVendorId(request));
     const body = reorderCategoriesSchema.parse(request.body);
 
     await app.prisma.$transaction(
@@ -706,7 +736,7 @@ export async function vendorRoutes(app: FastifyInstance) {
 
   /** GET /items — List all items, optionally filtered by categoryId */
   app.get('/items', auth, async (request) => {
-    const { vendorId } = await resolveVendor(app, request.user.userId);
+    const { vendorId } = await resolveVendor(app, request.user.userId, selectedVendorId(request));
     const query = vendorItemsQuerySchema.parse(request.query);
 
     const where: Record<string, unknown> = { vendorId };
@@ -731,7 +761,7 @@ export async function vendorRoutes(app: FastifyInstance) {
 
   /** POST /items — Create an item with optional option groups */
   app.post('/items', auth, async (request) => {
-    const { vendorId } = await resolveVendor(app, request.user.userId);
+    const { vendorId } = await resolveVendor(app, request.user.userId, selectedVendorId(request));
 
     // Step 4 gate: no listing until the vendor-type checklist is approved.
     // Legacy isVerified grandfathers pre-checklist vendors.
@@ -818,7 +848,7 @@ export async function vendorRoutes(app: FastifyInstance) {
    *  CSV to confirm via POST /items/import. Never imports here; only relabels
    *  columns, never invents prices or stock (spec §4.5). */
   app.post('/items/import/automap', auth, async (request) => {
-    await resolveVendor(app, request.user.userId);
+    await resolveVendor(app, request.user.userId, selectedVendorId(request));
     const { csv } = importCsvSchema.parse(request.body);
     const rows = parseCsvWithHeader(csv);
     if (rows.length === 0) {
@@ -854,7 +884,7 @@ export async function vendorRoutes(app: FastifyInstance) {
 
   /** POST /items/import — CSV bulk import: bad rows reported, good rows imported */
   app.post('/items/import', auth, async (request) => {
-    const { vendorId } = await resolveVendor(app, request.user.userId);
+    const { vendorId } = await resolveVendor(app, request.user.userId, selectedVendorId(request));
 
     // Same listing gate as single-item creation
     const vendorRecord = await app.prisma.vendor.findUniqueOrThrow({
@@ -945,7 +975,7 @@ export async function vendorRoutes(app: FastifyInstance) {
 
   /** POST /items/:id/image — upload behind the StorageProvider interface */
   app.post<{ Params: IdParam }>('/items/:id/image', auth, async (request) => {
-    const { vendorId } = await resolveVendor(app, request.user.userId);
+    const { vendorId } = await resolveVendor(app, request.user.userId, selectedVendorId(request));
     const existing = await app.prisma.item.findUnique({ where: { id: request.params.id } });
     if (!existing || existing.vendorId !== vendorId) throw new NotFoundError('Item', request.params.id);
 
@@ -978,7 +1008,7 @@ export async function vendorRoutes(app: FastifyInstance) {
 
   /** PUT /items/:id — Update an item */
   app.put<{ Params: IdParam }>('/items/:id', auth, async (request) => {
-    const { vendorId } = await resolveVendor(app, request.user.userId);
+    const { vendorId } = await resolveVendor(app, request.user.userId, selectedVendorId(request));
     const existing = await app.prisma.item.findUnique({ where: { id: request.params.id } });
     if (!existing || existing.vendorId !== vendorId) throw new NotFoundError('Item', request.params.id);
 
@@ -1018,7 +1048,7 @@ export async function vendorRoutes(app: FastifyInstance) {
 
   /** DELETE /items/:id — Delete an item and its option groups/options */
   app.delete<{ Params: IdParam }>('/items/:id', auth, async (request) => {
-    const { vendorId } = await resolveVendor(app, request.user.userId);
+    const { vendorId } = await resolveVendor(app, request.user.userId, selectedVendorId(request));
     const existing = await app.prisma.item.findUnique({ where: { id: request.params.id } });
     if (!existing || existing.vendorId !== vendorId) throw new NotFoundError('Item', request.params.id);
 
@@ -1031,7 +1061,7 @@ export async function vendorRoutes(app: FastifyInstance) {
 
   /** PUT /items/:id/availability — Quick toggle availability */
   app.put<{ Params: IdParam }>('/items/:id/availability', auth, async (request) => {
-    const { vendorId } = await resolveVendor(app, request.user.userId);
+    const { vendorId } = await resolveVendor(app, request.user.userId, selectedVendorId(request));
     const existing = await app.prisma.item.findUnique({ where: { id: request.params.id } });
     if (!existing || existing.vendorId !== vendorId) throw new NotFoundError('Item', request.params.id);
 
@@ -1053,7 +1083,7 @@ export async function vendorRoutes(app: FastifyInstance) {
 
   /** POST /items/:itemId/option-groups — Add an option group to an item */
   app.post<{ Params: ItemIdParam }>('/items/:itemId/option-groups', auth, async (request) => {
-    const { vendorId } = await resolveVendor(app, request.user.userId);
+    const { vendorId } = await resolveVendor(app, request.user.userId, selectedVendorId(request));
     const item = await app.prisma.item.findUnique({ where: { id: request.params.itemId } });
     if (!item || item.vendorId !== vendorId) throw new NotFoundError('Item', request.params.itemId);
 
@@ -1096,7 +1126,7 @@ export async function vendorRoutes(app: FastifyInstance) {
 
   /** PUT /option-groups/:id — Update an option group */
   app.put<{ Params: IdParam }>('/option-groups/:id', auth, async (request) => {
-    const { vendorId } = await resolveVendor(app, request.user.userId);
+    const { vendorId } = await resolveVendor(app, request.user.userId, selectedVendorId(request));
     const existing = await app.prisma.optionGroup.findUnique({
       where: { id: request.params.id },
       include: { item: { select: { vendorId: true } } },
@@ -1122,7 +1152,7 @@ export async function vendorRoutes(app: FastifyInstance) {
 
   /** DELETE /option-groups/:id — Delete an option group and its options */
   app.delete<{ Params: IdParam }>('/option-groups/:id', auth, async (request) => {
-    const { vendorId } = await resolveVendor(app, request.user.userId);
+    const { vendorId } = await resolveVendor(app, request.user.userId, selectedVendorId(request));
     const existing = await app.prisma.optionGroup.findUnique({
       where: { id: request.params.id },
       include: { item: { select: { vendorId: true } } },
@@ -1141,7 +1171,7 @@ export async function vendorRoutes(app: FastifyInstance) {
 
   /** POST /option-groups/:groupId/options — Add an option to a group */
   app.post<{ Params: GroupIdParam }>('/option-groups/:groupId/options', auth, async (request) => {
-    const { vendorId } = await resolveVendor(app, request.user.userId);
+    const { vendorId } = await resolveVendor(app, request.user.userId, selectedVendorId(request));
     const group = await app.prisma.optionGroup.findUnique({
       where: { id: request.params.groupId },
       include: { item: { select: { vendorId: true } } },
@@ -1176,7 +1206,7 @@ export async function vendorRoutes(app: FastifyInstance) {
 
   /** PUT /options/:id — Update an option */
   app.put<{ Params: IdParam }>('/options/:id', auth, async (request) => {
-    const { vendorId } = await resolveVendor(app, request.user.userId);
+    const { vendorId } = await resolveVendor(app, request.user.userId, selectedVendorId(request));
     const existing = await app.prisma.option.findUnique({
       where: { id: request.params.id },
       include: { optionGroup: { include: { item: { select: { vendorId: true } } } } },
@@ -1201,7 +1231,7 @@ export async function vendorRoutes(app: FastifyInstance) {
 
   /** DELETE /options/:id — Delete an option */
   app.delete<{ Params: IdParam }>('/options/:id', auth, async (request) => {
-    const { vendorId } = await resolveVendor(app, request.user.userId);
+    const { vendorId } = await resolveVendor(app, request.user.userId, selectedVendorId(request));
     const existing = await app.prisma.option.findUnique({
       where: { id: request.params.id },
       include: { optionGroup: { include: { item: { select: { vendorId: true } } } } },
@@ -1219,7 +1249,7 @@ export async function vendorRoutes(app: FastifyInstance) {
 
   /** GET /hours — Get operating hours for all 7 days */
   app.get('/hours', auth, async (request) => {
-    const { vendorId } = await resolveVendor(app, request.user.userId);
+    const { vendorId } = await resolveVendor(app, request.user.userId, selectedVendorId(request));
     const hours = await app.prisma.operatingHours.findMany({
       where: { vendorId },
       orderBy: { dayOfWeek: 'asc' },
@@ -1229,7 +1259,7 @@ export async function vendorRoutes(app: FastifyInstance) {
 
   /** PUT /hours — Bulk upsert operating hours for all 7 days */
   app.put('/hours', auth, async (request) => {
-    const { vendorId } = await resolveVendor(app, request.user.userId);
+    const { vendorId } = await resolveVendor(app, request.user.userId, selectedVendorId(request));
     const body = operatingHoursSchema.parse(request.body);
 
     // Open days must carry both times (closed days may omit them)
@@ -1266,7 +1296,7 @@ export async function vendorRoutes(app: FastifyInstance) {
 
   /** GET /analytics/overview — Dashboard summary cards */
   app.get('/analytics/overview', auth, async (request) => {
-    const { vendorId } = await resolveVendor(app, request.user.userId);
+    const { vendorId } = await resolveVendor(app, request.user.userId, selectedVendorId(request));
 
     const now = new Date();
     const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate());
@@ -1341,7 +1371,7 @@ export async function vendorRoutes(app: FastifyInstance) {
 
   /** GET /analytics/revenue — Daily revenue breakdown for the last 30 days */
   app.get('/analytics/revenue', auth, async (request) => {
-    const { vendorId } = await resolveVendor(app, request.user.userId);
+    const { vendorId } = await resolveVendor(app, request.user.userId, selectedVendorId(request));
     const { days } = revenueQuerySchema.parse(request.query);
 
     const since = new Date();
@@ -1403,7 +1433,7 @@ export async function vendorRoutes(app: FastifyInstance) {
 
   /** GET /analytics/popular-items — Top items by totalOrdered */
   app.get('/analytics/popular-items', auth, async (request) => {
-    const { vendorId } = await resolveVendor(app, request.user.userId);
+    const { vendorId } = await resolveVendor(app, request.user.userId, selectedVendorId(request));
     const { limit } = popularItemsQuerySchema.parse(request.query);
 
     const items = await app.prisma.item.findMany({
@@ -1452,7 +1482,7 @@ export async function vendorRoutes(app: FastifyInstance) {
 
   /** GET /settlements — Paginated settlement history */
   app.get('/settlements', auth, async (request) => {
-    const { vendorId } = await resolveVendor(app, request.user.userId);
+    const { vendorId } = await resolveVendor(app, request.user.userId, selectedVendorId(request));
     const query = request.query as Record<string, string | undefined>;
     const pagination = parsePagination(query);
 
@@ -1486,7 +1516,7 @@ export async function vendorRoutes(app: FastifyInstance) {
 
   /** GET /subscription — Current subscription details */
   app.get('/subscription', auth, async (request) => {
-    const { vendorId } = await resolveVendor(app, request.user.userId);
+    const { vendorId } = await resolveVendor(app, request.user.userId, selectedVendorId(request));
     const subscription = await app.prisma.subscription.findFirst({
       where: { vendorId },
     });
@@ -1508,7 +1538,7 @@ export async function vendorRoutes(app: FastifyInstance) {
 
   /** GET /reviews — Paginated customer reviews for the vendor */
   app.get('/reviews', auth, async (request) => {
-    const { vendorId } = await resolveVendor(app, request.user.userId);
+    const { vendorId } = await resolveVendor(app, request.user.userId, selectedVendorId(request));
     const query = request.query as Record<string, string | undefined>;
     const pagination = parsePagination(query);
 
