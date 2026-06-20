@@ -18,6 +18,7 @@ import { LocationPickerScreen } from '../screens/customer/LocationPickerScreen';
 import { NotificationsScreen } from '../screens/customer/NotificationsScreen';
 import { ChatScreen } from '../screens/shared/ChatScreen';
 import { color } from '@swift/ui';
+import { screenTransition } from '../components/ui';
 import { Feather } from '@expo/vector-icons';
 
 const Tab = createBottomTabNavigator();
@@ -64,7 +65,7 @@ function HomeTabs() {
 
 export function CustomerStack() {
   return (
-    <Stack.Navigator screenOptions={{ headerShown: false }}>
+    <Stack.Navigator screenOptions={{ headerShown: false, ...screenTransition }}>
       <Stack.Screen name="Tabs" component={HomeTabs} />
       <Stack.Screen name="VendorDetail" component={VendorDetailScreen} />
       <Stack.Screen name="Cart" component={CartScreen} />

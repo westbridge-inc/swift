@@ -5,7 +5,7 @@ import { createNativeStackNavigator } from '@react-navigation/native-stack';
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
 import { color } from '@swift/ui';
 import { Feather, MaterialCommunityIcons } from '@expo/vector-icons';
-import { Text, Heading, Card, Button, Spinner, Skeleton, Image, Badge } from '../components/ui';
+import { Text, Heading, Card, Button, Spinner, Skeleton, Image, Badge, elevation } from '../components/ui';
 import { DocumentChecklist } from '../components/onboarding/DocumentChecklist';
 import { useBecomePartner, useVerificationStatus } from '../hooks/verification';
 import {
@@ -141,7 +141,7 @@ function orderActions(status: string): { label: string; action: 'accept' | 'prep
   return [];
 }
 
-const CARD_SHADOW = { shadowColor: '#000', shadowOpacity: 0.08, shadowRadius: 12, shadowOffset: { width: 0, height: 4 }, elevation: 3 } as const;
+const CARD_SHADOW = elevation.raised;
 
 function timeAgo(iso?: string) {
   if (!iso) return '';
