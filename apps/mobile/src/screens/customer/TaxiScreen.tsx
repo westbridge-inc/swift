@@ -1,10 +1,10 @@
 import { useState } from 'react';
-import { View, ScrollView, Pressable, Linking } from 'react-native';
+import { View, ScrollView, Linking } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import MapView, { Marker, PROVIDER_DEFAULT } from 'react-native-maps';
 import { color } from '@swift/ui';
 import { Feather } from '@expo/vector-icons';
-import { Text, Heading, Card, Button, Spinner } from '../../components/ui';
+import { Text, Heading, Card, Button, Spinner, PressableScale } from '../../components/ui';
 import { useAddresses, useActiveRide, useRideEstimate, useRequestRide, useCancelRide } from '../../hooks';
 import { useLocationStore } from '../../stores/locationStore';
 import { money } from '../../lib/money';
@@ -37,9 +37,9 @@ function regionFor(pts: LatLng[]) {
 function Header({ navigation, title }: any) {
   return (
     <View className="flex-row items-center px-lg py-sm">
-      <Pressable onPress={() => navigation?.goBack?.()} hitSlop={10}>
+      <PressableScale onPress={() => navigation?.goBack?.()} hitSlop={10}>
         <Feather name="chevron-left" size={24} color={color.text.primary} />
-      </Pressable>
+      </PressableScale>
       <Text className="ml-md text-base font-bold">{title}</Text>
     </View>
   );
@@ -150,10 +150,10 @@ export function TaxiScreen({ navigation }: any) {
             )}
 
             <Button
-              label={cancelRide.isPending ? 'Cancelling…' : 'Cancel ride'}
+              label="Cancel ride"
               variant="outline"
               className="mt-lg"
-              disabled={cancelRide.isPending}
+              loading={cancelRide.isPending}
               onPress={() => cancelRide.mutate({ id: activeRide.id })}
             />
           </View>
@@ -198,17 +198,17 @@ export function TaxiScreen({ navigation }: any) {
             Where to?
           </Heading>
           {list.length === 0 ? (
-            <Pressable onPress={() => navigation?.navigate?.('AddAddress')}>
+            <PressableScale onPress={() => navigation?.navigate?.('AddAddress')}>
               <Card className="flex-row items-center">
                 <Feather name="plus-circle" size={18} color={color.brand[500]} />
                 <Text className="ml-sm font-semibold text-brand-600">Add a destination address</Text>
               </Card>
-            </Pressable>
+            </PressableScale>
           ) : (
             list.map((a) => {
               const active = a.id === dropoffId;
               return (
-                <Pressable key={a.id} onPress={() => setDropoffId(a.id)}>
+                <PressableScale key={a.id} onPress={() => setDropoffId(a.id)}>
                   <Card className={active ? 'mb-sm border-brand-500' : 'mb-sm'}>
                     <View className="flex-row items-center justify-between">
                       <View className="flex-1 pr-md">
@@ -221,7 +221,7 @@ export function TaxiScreen({ navigation }: any) {
                       <Feather name={active ? 'check-circle' : 'circle'} size={20} color={active ? color.brand[500] : color.text.muted} />
                     </View>
                   </Card>
-                </Pressable>
+                </PressableScale>
               );
             })
           )}
@@ -254,9 +254,9 @@ export function TaxiScreen({ navigation }: any) {
 
       <View className="absolute inset-x-0 bottom-0 border-t border-border-subtle bg-surface-base px-lg pb-2xl pt-md">
         {errMsg ? <Text className="mb-sm text-center text-sm text-error">{errMsg}</Text> : null}
-        <Button disabled={!canRequest || requestRide.isPending} onPress={onRequest}>
+        <Button loading={requestRide.isPending} disabled={!canRequest} onPress={onRequest}>
           <Text className="font-body font-semibold text-white">
-            {requestRide.isPending ? 'Requesting…' : estimate ? `Request ride · ${money(estimate.fare)}` : 'Request ride'}
+            {estimate ? `Request ride · ${money(estimate.fare)}` : 'Request ride'}
           </Text>
         </Button>
       </View>

@@ -1,9 +1,9 @@
 import { memo } from 'react';
-import { View, Pressable, RefreshControl } from 'react-native';
+import { View, RefreshControl } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Feather, MaterialCommunityIcons } from '@expo/vector-icons';
 import { color } from '@swift/ui';
-import { Text, Heading, Card, Badge, Skeleton, Button, List } from '../../components/ui';
+import { Text, Heading, Card, Badge, Skeleton, List, PressableScale, EmptyState } from '../../components/ui';
 import { useOrders, useReorder } from '../../hooks';
 import { money } from '../../lib/money';
 
@@ -34,7 +34,7 @@ const OrderRow = memo(function OrderRow({ order, onTrack, onReorder, reordering 
   const title = order.vendor?.name ?? TYPE_LABEL[order.orderType] ?? 'Order';
   const reorderable = !!order.vendor && (order.status === 'DELIVERED' || order.status === 'COMPLETED');
   return (
-    <Pressable onPress={onTrack}>
+    <PressableScale onPress={onTrack}>
       <Card className="mb-md">
         <View className="flex-row items-center">
           <View className="h-11 w-11 items-center justify-center rounded-full bg-brand-50">
@@ -51,17 +51,17 @@ const OrderRow = memo(function OrderRow({ order, onTrack, onReorder, reordering 
           <Badge label={prettyStatus(order.status)} tone={statusTone(order.status)} />
         </View>
         {reorderable ? (
-          <Pressable
+          <PressableScale
             onPress={onReorder}
             disabled={reordering}
             className="mt-sm flex-row items-center self-start rounded-full border border-brand-500 px-lg py-sm"
           >
             <Feather name="refresh-cw" size={13} color={color.brand[500]} />
             <Text className="ml-sm text-sm font-semibold text-brand-500">Reorder</Text>
-          </Pressable>
+          </PressableScale>
         ) : null}
       </Card>
-    </Pressable>
+    </PressableScale>
   );
 });
 
@@ -87,10 +87,14 @@ export function OrdersScreen({ navigation }: any) {
         <Heading size="2xl">Orders</Heading>
       </View>
       {isError ? (
-        <View className="flex-1 items-center justify-center px-2xl">
-          <Feather name="alert-triangle" size={32} color={color.text.muted} />
-          <Text className="mt-sm text-center text-text-secondary">Couldn&apos;t load your orders.</Text>
-          <Button label="Retry" className="mt-md" onPress={() => refetch()} />
+        <View className="flex-1 items-center justify-center">
+          <EmptyState
+            icon="alert-circle-outline"
+            title="Couldn’t load your orders"
+            body="Pull to refresh or try again."
+            actionLabel="Retry"
+            onAction={() => refetch()}
+          />
         </View>
       ) : (
         <View style={{ flex: 1 }}>
@@ -108,12 +112,12 @@ export function OrdersScreen({ navigation }: any) {
             />
           )}
           ListEmptyComponent={
-            <View className="items-center justify-center px-2xl pt-5xl">
-              <MaterialCommunityIcons name="receipt-text-outline" size={40} color={color.text.muted} />
-              <Heading size="lg" className="mt-md">No orders yet</Heading>
-              <Text className="mt-xs text-center text-text-secondary">
-                Your orders across food, taxi, courier and services show up here.
-              </Text>
+            <View className="pt-2xl">
+              <EmptyState
+                icon="receipt-text-outline"
+                title="No orders yet"
+                body="Your orders across food, taxi, courier and services show up here."
+              />
             </View>
           }
         />
