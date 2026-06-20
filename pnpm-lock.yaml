@@ -35,6 +35,9 @@ importers:
       eslint:
         specifier: ^8.57.0
         version: 8.57.1
+      eslint-plugin-react-hooks:
+        specifier: 5.2.0
+        version: 5.2.0(eslint@8.57.1)
       turbo:
         specifier: ^2.9.17
         version: 2.9.17
