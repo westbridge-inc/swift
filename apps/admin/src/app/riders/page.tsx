@@ -53,7 +53,7 @@ export default function RidersPage() {
                     {!rider.documentsVerified && (
                       <button
                         onClick={() => verifyMutation.mutate(rider.id)}
-                        className="px-3 py-1 bg-[#FF6B00] text-white rounded-lg text-xs hover:bg-[#FF6B00]/80"
+                        className="px-3 py-1 bg-[#E8192C] text-white rounded-lg text-xs hover:bg-[#E8192C]/80"
                       >
                         Verify Docs
                       </button>

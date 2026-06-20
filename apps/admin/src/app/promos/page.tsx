@@ -10,7 +10,7 @@ export default function PromosPage() {
     <div>
       <div className="flex items-center justify-between mb-6">
         <h1 className="text-2xl font-bold">Promo Codes</h1>
-        <button className="px-4 py-2 bg-[#FF6B00] text-white rounded-lg text-sm hover:bg-[#FF6B00]/80">
+        <button className="px-4 py-2 bg-[#E8192C] text-white rounded-lg text-sm hover:bg-[#E8192C]/80">
           Create Promo
         </button>
       </div>
