@@ -92,6 +92,53 @@ export class GoogleMapsProvider implements MapsProvider {
   }
 }
 
+// OSRM `table` service: self-hostable routing, no per-call cost (the spec's engine).
+const OSRM_TIMEOUT_MS = 4000;
+
+interface OsrmTableResponse {
+  code?: string;
+  durations?: Array<Array<number | null>>;
+}
+
+/**
+ * Real driving ETAs via an OSRM `table` service — self-hostable and free per call
+ * (the routing engine the business spec calls for). Same hot-path discipline as
+ * Google: never throws; overlays OSRM durations on the haversine baseline only
+ * where they return cleanly. NOTE: OSRM takes lng,lat coordinates.
+ */
+export class OsrmMapsProvider implements MapsProvider {
+  private fallback = new HaversineMapsProvider();
+
+  constructor(private baseUrl: string) {}
+
+  async etaMinutes(origin: LatLng, destinations: LatLng[]): Promise<number[]> {
+    if (destinations.length === 0) return [];
+    const fallback = await this.fallback.etaMinutes(origin, destinations);
+
+    const coords = [origin, ...destinations].map((p) => `${p.lng},${p.lat}`).join(';');
+    const url = `${this.baseUrl.replace(/\/$/, '')}/table/v1/driving/${coords}?sources=0&annotations=duration`;
+
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), OSRM_TIMEOUT_MS);
+    try {
+      const res = await fetch(url, { signal: controller.signal });
+      if (!res.ok) return fallback;
+      const data = (await res.json()) as OsrmTableResponse;
+      // durations is a 1×N row: [origin->origin (self), origin->dest1, ...] in seconds.
+      const row = data.code === 'Ok' ? data.durations?.[0] : undefined;
+      if (!row) return fallback;
+      return destinations.map((_, i) => {
+        const seconds = row[i + 1]; // skip the self entry
+        return seconds != null ? seconds / 60 : fallback[i]!;
+      });
+    } catch {
+      return fallback; // down, slow, or blocked — dispatch carries on
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+}
+
 /** Provider selection is config, not code. */
 export function getMapsProvider(): MapsProvider {
   const provider = process.env['MAPS_PROVIDER'] ?? 'haversine';
@@ -102,6 +149,11 @@ export function getMapsProvider(): MapsProvider {
       const key = process.env['GOOGLE_MAPS_API_KEY_BACKEND'];
       if (!key) throw new Error('GOOGLE_MAPS_API_KEY_BACKEND is required when MAPS_PROVIDER=google');
       return new GoogleMapsProvider(key);
+    }
+    case 'osrm': {
+      const baseUrl = process.env['OSRM_URL'];
+      if (!baseUrl) throw new Error('OSRM_URL is required when MAPS_PROVIDER=osrm');
+      return new OsrmMapsProvider(baseUrl);
     }
     default:
       throw new Error(`Unknown MAPS_PROVIDER: ${provider}`);
