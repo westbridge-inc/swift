@@ -224,6 +224,27 @@ function MoverOps({ navigation }: any) {
           </View>
         </View>
 
+        {/* D.3 — cash float headroom (explains "no offers" when the limit is reached). */}
+        {profile?.float ? (
+          <View className="mb-md rounded-2xl bg-surface-base p-lg" style={CARD_SHADOW}>
+            <View className="flex-row items-center justify-between">
+              <View className="flex-1 pr-md">
+                <Text className="text-xs font-semibold text-text-muted">CASH FLOAT</Text>
+                <Text className="mt-xs text-base font-bold text-text-primary">
+                  {money(profile.float.available)}{' '}
+                  <Text className="text-sm font-normal text-text-muted">of {money(profile.float.limit)} free</Text>
+                </Text>
+              </View>
+              <MaterialCommunityIcons name="cash-multiple" size={22} color={color.brand[500]} />
+            </View>
+            {online && profile.float.available <= 0 ? (
+              <Text className="mt-sm text-xs text-text-secondary">
+                Float limit reached — finish a delivery to free it up and receive new cash offers.
+              </Text>
+            ) : null}
+          </View>
+        ) : null}
+
         {errMsg ? <Text className="mb-sm text-center text-sm text-error">{errMsg}</Text> : null}
 
         {/* Incoming dispatch request — Uber-driver style */}
