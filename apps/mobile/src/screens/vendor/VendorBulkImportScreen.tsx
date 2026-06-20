@@ -1,9 +1,9 @@
 import { useState } from 'react';
-import { View, ScrollView, Pressable, TextInput } from 'react-native';
+import { View, ScrollView, TextInput } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Feather } from '@expo/vector-icons';
 import { color } from '@swift/ui';
-import { Text, Card, Button } from '../../components/ui';
+import { Text, Card, Button, PressableScale } from '../../components/ui';
 import { useImportAutomap, useImportItems } from '../../hooks/vendorops';
 
 const RECOMMENDED = 'category, name, basePrice, sku, unit, stockQuantity, description';
@@ -30,9 +30,9 @@ export function VendorBulkImportScreen({ navigation }: any) {
   return (
     <SafeAreaView style={{ flex: 1 }} edges={['top']} className="bg-surface-base">
       <View className="flex-row items-center px-lg py-sm">
-        <Pressable onPress={() => navigation?.goBack?.()} hitSlop={8}>
+        <PressableScale onPress={() => navigation?.goBack?.()} hitSlop={8}>
           <Feather name="chevron-left" size={24} color={color.text.primary} />
-        </Pressable>
+        </PressableScale>
         <Text className="ml-md text-base font-bold text-text-primary">Bulk import</Text>
       </View>
       <ScrollView
@@ -56,9 +56,10 @@ export function VendorBulkImportScreen({ navigation }: any) {
           className="mb-md rounded-lg border border-border-subtle bg-surface-base px-lg py-md font-body text-sm text-text-primary"
         />
         <Button
-          label={automap.isPending ? 'Analyzing…' : 'Analyze CSV'}
+          label="Analyze CSV"
           variant="outline"
-          disabled={automap.isPending || csv.trim().length === 0}
+          loading={automap.isPending}
+          disabled={csv.trim().length === 0}
           onPress={analyze}
         />
 
@@ -88,9 +89,9 @@ export function VendorBulkImportScreen({ navigation }: any) {
               </View>
             ))}
             <Button
-              label={importItems.isPending ? 'Importing…' : `Import ${mapped.rowCount} items`}
+              label={`Import ${mapped.rowCount} items`}
               className="mt-md"
-              disabled={importItems.isPending}
+              loading={importItems.isPending}
               onPress={runImport}
             />
           </Card>
