@@ -8,6 +8,7 @@ import { authPlugin } from '../plugins/auth';
 import { socketPlugin } from '../plugins/socket';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { VerificationService } from '../modules/verification/verification.service';
+import { DispatchService } from '../modules/dispatch/dispatch.service';
 import { NotificationService } from '../modules/notification/notification.service';
 import { getKycProvider } from '../providers/kyc/kyc-provider';
 
@@ -23,7 +24,7 @@ import { getKycProvider } from '../providers/kyc/kyc-provider';
 // ---------------------------------------------------------------------------
 
 const DAY = 24 * 60 * 60 * 1000;
-const PHONES = ['+5920009811', '+5920009812', '+5920009813'];
+const PHONES = ['+5920009811', '+5920009812', '+5920009813', '+5920009814', '+5920009815'];
 const GY_MOVER_DOCS = ['national_id', 'drivers_licence', 'vehicle_registration', 'vehicle_insurance'];
 
 let app: FastifyInstance;
@@ -92,8 +93,44 @@ describe('Spec §I — acceptance conformance baseline', () => {
   // 1. Threshold gate
   it.todo('1. L1 over the ID threshold → checkout throws ID_VERIFICATION_REQUIRED (OrderService.checkout; cart fixture, step7 pattern)');
 
-  // 2. Float gate — KNOWN GAP (spec D.3 / Phase 1). Expected-fail until step 1.3 wires it.
-  it.todo('2. a rider whose availableFloat < cashToRestaurant is NOT offered the order — float gate (D.3, not built yet)');
+  // 2. Float gate — D.3, now LIVE. A rider without enough free float to front the
+  //    order's vendor-cash must not be a dispatch candidate; a funded rider must be.
+  it('2. a rider whose availableFloat < the order cash is excluded from dispatch; a funded rider is included', async () => {
+    const pickup = { lat: 6.8013, lng: -58.1551 };
+    const mkRider = async (phone: string, floatLimit: number, committedFloat: number) => {
+      const u = await makeUser(phone);
+      return app.prisma.rider.create({
+        data: {
+          userId: u.id,
+          riderType: 'BOTH',
+          vehicleType: 'MOTORCYCLE',
+          isOnline: true,
+          isAvailable: true,
+          currentLat: pickup.lat,
+          currentLng: pickup.lng,
+          floatLimit,
+          committedFloat,
+        },
+      });
+    };
+    const low = await mkRider(PHONES[3]!, 8000, 7000); // availableFloat = 1000
+    const funded = await mkRider(PHONES[4]!, 8000, 0); // availableFloat = 8000
+
+    // findCandidates only calls maps.etaMinutes — a tiny stub suffices.
+    const maps = { etaMinutes: async (_p: unknown, pts: unknown[]) => pts.map(() => 5) };
+    const dispatch = new DispatchService(
+      app.prisma,
+      app.redis,
+      app.io,
+      maps as unknown as ConstructorParameters<typeof DispatchService>[3],
+    );
+
+    // CASH order needs 5000 fronted: low rider (1000 free) excluded, funded rider (8000) in.
+    const candidates = await dispatch.findCandidates(`acc-${nanoid(6)}`, pickup, 10, 'RIDER', 5000);
+    const ids = candidates.map((c) => c.riderId);
+    expect(ids).toContain(funded.id);
+    expect(ids).not.toContain(low.id);
+  });
 
   // 3 & 4. Ghost / no-show
   it.todo('3. sub-threshold no-show → strike + auto-approved guarantee (cashRules.handover, order in ARRIVED — step10 pattern)');
