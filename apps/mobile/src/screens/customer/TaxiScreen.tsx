@@ -45,6 +45,14 @@ function Header({ navigation, title }: any) {
   );
 }
 
+type RideClassId = 'STANDARD' | 'COMFORT' | 'XL';
+const CLASS_LABEL: Record<RideClassId, string> = { STANDARD: 'Standard', COMFORT: 'Comfort', XL: 'XL' };
+const CLASS_SUB: Record<RideClassId, string> = {
+  STANDARD: 'Everyday cars',
+  COMFORT: 'Newer, roomier cars',
+  XL: 'More seats for groups',
+};
+
 export function TaxiScreen({ navigation }: any) {
   const { latitude, longitude, address } = useLocationStore();
   const { data: addresses } = useAddresses<any[]>();
@@ -53,6 +61,7 @@ export function TaxiScreen({ navigation }: any) {
   const cancelRide = useCancelRide();
 
   const [dropoffId, setDropoffId] = useState<string | undefined>(undefined);
+  const [rideClass, setRideClass] = useState<RideClassId>('STANDARD');
 
   const list = addresses ?? [];
   const pickupPoint = latitude != null && longitude != null ? { lat: latitude, lng: longitude } : undefined;
@@ -165,6 +174,8 @@ export function TaxiScreen({ navigation }: any) {
   // ===== Request a ride =====
   const canRequest = !!pickupPoint && !!dropoffPoint && !!estimate;
   const errMsg = (requestRide.error as any)?.response?.data?.message;
+  const selectedFare =
+    estimate?.classes?.find((c: any) => c.rideClass === rideClass)?.fare ?? estimate?.fare;
 
   const onRequest = () => {
     if (!pickupPoint || !dropoffPoint || !dropoff) return;
@@ -174,6 +185,7 @@ export function TaxiScreen({ navigation }: any) {
       pickupAddress: address || 'Current location',
       dropoffAddress: dropoff.addressLine1 || dropoff.label || 'Drop-off',
       passengerCount: 1,
+      rideClass,
     });
   };
 
@@ -227,27 +239,49 @@ export function TaxiScreen({ navigation }: any) {
           )}
 
           {dropoffPoint ? (
-            <Card className="mt-lg">
-              {estimating ? (
+            estimating ? (
+              <Card className="mt-lg">
                 <View className="flex-row items-center">
                   <Spinner />
-                  <Text className="ml-sm text-text-secondary">Calculating fare…</Text>
+                  <Text className="ml-sm text-text-secondary">Calculating fares…</Text>
                 </View>
-              ) : estimate ? (
-                <>
-                  <View className="flex-row items-center justify-between">
-                    <Text className="text-base font-semibold">Fixed fare</Text>
-                    <Text className="text-xl font-semibold text-brand-600">{money(estimate.fare)}</Text>
-                  </View>
-                  <Text className="mt-xs text-sm text-text-secondary">
-                    {estimate.distanceKm} km · ~{estimate.durationMin} min · cash
-                  </Text>
-                  <Text className="mt-xs text-xs text-text-muted">Price locked before you book — no surge.</Text>
-                </>
-              ) : (
+              </Card>
+            ) : estimate ? (
+              <View className="mt-lg">
+                <Heading size="lg" className="mb-sm">Choose a ride</Heading>
+                {(estimate.classes ?? [{ rideClass: 'STANDARD', fare: estimate.fare }]).map((c: any) => {
+                  const active = c.rideClass === rideClass;
+                  return (
+                    <PressableScale key={c.rideClass} onPress={() => setRideClass(c.rideClass)}>
+                      <Card className={active ? 'mb-sm border-brand-500' : 'mb-sm'}>
+                        <View className="flex-row items-center justify-between">
+                          <View className="flex-1 pr-md">
+                            <Text className="text-base font-semibold">{CLASS_LABEL[c.rideClass as RideClassId] ?? c.rideClass}</Text>
+                            <Text className="mt-xs text-xs text-text-muted">{CLASS_SUB[c.rideClass as RideClassId] ?? ''}</Text>
+                          </View>
+                          <View className="flex-row items-center">
+                            <Text className="text-lg font-semibold text-brand-600">{money(c.fare)}</Text>
+                            <Feather
+                              name={active ? 'check-circle' : 'circle'}
+                              size={20}
+                              color={active ? color.brand[500] : color.text.muted}
+                              style={{ marginLeft: 8 }}
+                            />
+                          </View>
+                        </View>
+                      </Card>
+                    </PressableScale>
+                  );
+                })}
+                <Text className="mt-xs px-xs text-xs text-text-muted">
+                  {estimate.distanceKm} km · ~{estimate.durationMin} min · cash · price locked, no surge
+                </Text>
+              </View>
+            ) : (
+              <Card className="mt-lg">
                 <Text className="text-text-secondary">Couldn&apos;t get a fare. Try another address.</Text>
-              )}
-            </Card>
+              </Card>
+            )
           ) : null}
         </View>
       </ScrollView>
@@ -256,7 +290,7 @@ export function TaxiScreen({ navigation }: any) {
         {errMsg ? <Text className="mb-sm text-center text-sm text-error">{errMsg}</Text> : null}
         <Button loading={requestRide.isPending} disabled={!canRequest} onPress={onRequest}>
           <Text className="font-body font-semibold text-white">
-            {estimate ? `Request ride · ${money(estimate.fare)}` : 'Request ride'}
+            {estimate ? `Request ${CLASS_LABEL[rideClass]} · ${money(selectedFare)}` : 'Request ride'}
           </Text>
         </Button>
       </View>

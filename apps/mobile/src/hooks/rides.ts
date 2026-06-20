@@ -33,6 +33,7 @@ export function useRequestRide() {
       pickupAddress: string;
       dropoffAddress: string;
       passengerCount?: number;
+      rideClass?: 'STANDARD' | 'COMFORT' | 'XL';
     }) => unwrap(rideApi.request(data)),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['rides', 'active'] }),
   });
