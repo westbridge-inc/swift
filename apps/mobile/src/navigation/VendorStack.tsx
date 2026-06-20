@@ -1,11 +1,11 @@
 import React, { useState, useEffect } from 'react';
-import { View, ScrollView, Pressable, TextInput, Alert, Switch, RefreshControl } from 'react-native';
+import { View, ScrollView, TextInput, Alert, Switch, RefreshControl } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
 import { color } from '@swift/ui';
 import { Feather, MaterialCommunityIcons } from '@expo/vector-icons';
-import { Text, Heading, Card, Button, Spinner, Skeleton, Image, Badge, elevation } from '../components/ui';
+import { Text, Heading, Card, Button, Spinner, Skeleton, Image, Badge, elevation, PressableScale, EmptyState } from '../components/ui';
 import { DocumentChecklist } from '../components/onboarding/DocumentChecklist';
 import { useBecomePartner, useVerificationStatus } from '../hooks/verification';
 import {
@@ -50,9 +50,9 @@ function Header({ title }: { title: string }) {
       <Heading size="2xl" className="flex-1 pr-md" numberOfLines={1}>
         {title}
       </Heading>
-      <Pressable onPress={logout} hitSlop={8}>
+      <PressableScale onPress={logout} hitSlop={8}>
         <Text className="text-sm text-text-muted">Log out</Text>
-      </Pressable>
+      </PressableScale>
     </View>
   );
 }
@@ -94,13 +94,13 @@ function BusinessSetup() {
           {TYPES.map((t) => {
             const active = t.key === type;
             return (
-              <Pressable
+              <PressableScale
                 key={t.key}
                 onPress={() => setType(t.key)}
                 className={active ? 'rounded-lg border border-brand-500 bg-brand-50 px-lg py-sm' : 'rounded-lg border border-border-subtle px-lg py-sm'}
               >
                 <Text className={active ? 'text-sm font-semibold text-brand-600' : 'text-sm text-text-secondary'}>{t.label}</Text>
-              </Pressable>
+              </PressableScale>
             );
           })}
         </View>
@@ -109,7 +109,7 @@ function BusinessSetup() {
         <TextInput value={addr} onChangeText={setAddr} placeholder="Street address" placeholderTextColor={color.text.muted} className={FIELD} />
         <TextInput value={city} onChangeText={setCity} placeholder="City" placeholderTextColor={color.text.muted} className={FIELD} />
         {become.isError ? <Text className="mb-sm text-sm text-error">Couldn&apos;t create your store. Try again.</Text> : null}
-        <Button label={become.isPending ? 'Creating…' : 'Create store'} disabled={!valid || become.isPending} onPress={submit} />
+        <Button label="Create store" loading={become.isPending} disabled={!valid} onPress={submit} />
       </ScrollView>
     </SafeAreaView>
   );
@@ -257,10 +257,14 @@ function VendorOps({ store, navigation }: any) {
           <View className="flex-row items-center justify-between">
             <View className="flex-1 pr-md">
               <View className="flex-row items-center">
-                <View style={{ width: 10, height: 10, borderRadius: 5, backgroundColor: open ? color.success : color.text.muted }} />
-                <Text className="ml-2 text-base font-bold text-text-primary">{open ? 'Open for orders' : 'Store closed'}</Text>
+                <View style={{ width: 10, height: 10, borderRadius: 5, backgroundColor: open && accepting ? color.success : color.text.muted }} />
+                <Text className="ml-2 text-base font-bold text-text-primary">
+                  {!open ? 'Store closed' : accepting ? 'Open for orders' : 'Orders paused'}
+                </Text>
               </View>
-              <Text className="mt-xs text-xs text-text-muted">{accepting ? 'Accepting new orders' : 'Orders paused'}</Text>
+              <Text className="mt-xs text-xs text-text-muted">
+                {!open ? 'Outside business hours' : accepting ? 'Accepting new orders' : 'You’re open but not taking new orders'}
+              </Text>
             </View>
             <Switch
               value={open}
@@ -273,7 +277,7 @@ function VendorOps({ store, navigation }: any) {
             label={accepting ? 'Pause new orders' : 'Resume orders'}
             variant="outline"
             className="mt-md"
-            disabled={toggleOrders.isPending}
+            loading={toggleOrders.isPending}
             onPress={() => toggleOrders.mutate()}
           />
         </Card>
@@ -354,19 +358,19 @@ function SubHeader({
       {hideBack ? (
         <View style={{ width: 22 }} />
       ) : (
-        <Pressable onPress={() => navigation.goBack()} hitSlop={8}>
+        <PressableScale onPress={() => navigation.goBack()} hitSlop={8}>
           <Feather name="chevron-left" size={22} color={color.brand[600]} />
-        </Pressable>
+        </PressableScale>
       )}
       <Heading size="lg" className="flex-1 px-md text-center" numberOfLines={1}>
         {title}
       </Heading>
       {action ? (
-        <Pressable onPress={action.onPress} disabled={action.disabled} hitSlop={8}>
+        <PressableScale onPress={action.onPress} disabled={action.disabled} hitSlop={8}>
           <Text className={action.disabled ? 'text-base text-text-muted' : 'text-base font-semibold text-brand-600'}>
             {action.label}
           </Text>
-        </Pressable>
+        </PressableScale>
       ) : (
         <View style={{ width: 48 }} />
       )}
@@ -412,7 +416,7 @@ function MenuItemRow({
             {item.stockQuantity != null ? ` · ${item.stockQuantity} in stock` : ''}
           </Text>
         </View>
-        <Pressable
+        <PressableScale
           onPress={() => setAvail.mutate({ id: item.id, isAvailable: !available })}
           disabled={setAvail.isPending}
           hitSlop={6}
@@ -425,7 +429,7 @@ function MenuItemRow({
           <Text className={available ? 'text-xs font-semibold text-success' : 'text-xs font-semibold text-text-muted'}>
             {available ? 'Available' : 'Sold out'}
           </Text>
-        </Pressable>
+        </PressableScale>
       </View>
       <View className="mt-sm flex-row" style={{ gap: 8 }}>
         <Button
@@ -435,10 +439,10 @@ function MenuItemRow({
           onPress={() => navigation.navigate('VendorItemEditor', { item, categories })}
         />
         <Button
-          label={del.isPending ? 'Removing…' : 'Delete'}
+          label="Delete"
           variant="outline"
           className="flex-1"
-          disabled={del.isPending}
+          loading={del.isPending}
           onPress={confirmDelete}
         />
       </View>
@@ -472,8 +476,10 @@ function VendorMenuScreen({ navigation }: any) {
         }
       />
       {menuQ.isLoading ? (
-        <View className="flex-1 items-center justify-center">
-          <Spinner size="large" />
+        <View className="px-lg pt-md">
+          {[0, 1, 2, 3].map((i) => (
+            <Skeleton key={i} className="mb-md h-16 w-full rounded-2xl" />
+          ))}
         </View>
       ) : (
         <ScrollView className="flex-1" contentContainerStyle={{ paddingHorizontal: 16, paddingBottom: 32 }} showsVerticalScrollIndicator={false}>
@@ -487,11 +493,11 @@ function VendorMenuScreen({ navigation }: any) {
                 placeholderTextColor={color.text.muted}
                 className="flex-1 rounded-lg border border-border-subtle bg-surface-base px-lg py-md font-body text-base text-text-primary"
               />
-              <Button label="Add" disabled={newCat.trim().length < 1 || createCategory.isPending} onPress={addCategory} />
+              <Button label="Add" loading={createCategory.isPending} disabled={newCat.trim().length < 1} onPress={addCategory} />
             </View>
           </Card>
 
-          <Pressable onPress={() => navigation.navigate('VendorBulkImport')}>
+          <PressableScale onPress={() => navigation.navigate('VendorBulkImport')}>
             <Card className="mb-md flex-row items-center">
               <Feather name="upload-cloud" size={18} color={color.brand[500]} />
               <View className="ml-md flex-1">
@@ -500,10 +506,10 @@ function VendorMenuScreen({ navigation }: any) {
               </View>
               <Feather name="chevron-right" size={18} color={color.text.muted} />
             </Card>
-          </Pressable>
+          </PressableScale>
 
           {categories.length === 0 ? (
-            <Text className="mt-lg text-center text-text-secondary">Add a category to start building your menu.</Text>
+            <EmptyState icon="silverware-variant" title="Build your menu" body="Add a category above, then start adding items." />
           ) : (
             categories.map((cat) => (
               <View key={cat.id} className="mb-md">
@@ -586,7 +592,7 @@ function VendorItemEditorScreen({ navigation, route }: any) {
       <SubHeader title={existing ? 'Edit item' : 'New item'} navigation={navigation} />
       <ScrollView className="flex-1" contentContainerStyle={{ paddingHorizontal: 16, paddingBottom: 32 }} showsVerticalScrollIndicator={false}>
         {/* Photo */}
-        <Pressable onPress={pickPhoto} className="mb-sm items-center justify-center overflow-hidden rounded-2xl bg-surface-subtle" style={{ height: 160 }}>
+        <PressableScale onPress={pickPhoto} className="mb-sm items-center justify-center overflow-hidden rounded-2xl bg-surface-subtle" style={{ height: 160 }}>
           {previewUri ? (
             <Image source={{ uri: previewUri }} style={{ width: '100%', height: 160 }} />
           ) : (
@@ -595,11 +601,11 @@ function VendorItemEditorScreen({ navigation, route }: any) {
               <Text className="mt-xs text-sm text-text-muted">Add a photo</Text>
             </View>
           )}
-        </Pressable>
+        </PressableScale>
         {previewUri ? (
-          <Pressable onPress={pickPhoto} className="mb-md items-center" hitSlop={6} disabled={uploadImage.isPending}>
+          <PressableScale onPress={pickPhoto} className="mb-md items-center" hitSlop={6} disabled={uploadImage.isPending}>
             <Text className="text-sm font-semibold text-brand-600">{uploadImage.isPending ? 'Uploading…' : 'Change photo'}</Text>
-          </Pressable>
+          </PressableScale>
         ) : null}
 
         <TextInput value={name} onChangeText={setName} placeholder="Item name" placeholderTextColor={color.text.muted} className={FIELD} />
@@ -633,38 +639,39 @@ function VendorItemEditorScreen({ navigation, route }: any) {
           {categories.map((c) => {
             const active = c.id === categoryId;
             return (
-              <Pressable
+              <PressableScale
                 key={c.id}
                 onPress={() => setCategoryId(c.id)}
                 className={active ? 'rounded-lg border border-brand-500 bg-brand-50 px-lg py-sm' : 'rounded-lg border border-border-subtle px-lg py-sm'}
               >
                 <Text className={active ? 'text-sm font-semibold text-brand-600' : 'text-sm text-text-secondary'}>{c.name}</Text>
-              </Pressable>
+              </PressableScale>
             );
           })}
         </View>
 
         <View className="mb-md flex-row" style={{ gap: 8 }}>
-          <Pressable
+          <PressableScale
             onPress={() => setAvailable((v) => !v)}
             className={available ? 'rounded-lg border border-brand-500 bg-brand-50 px-lg py-sm' : 'rounded-lg border border-border-subtle px-lg py-sm'}
           >
             <Text className={available ? 'text-sm font-semibold text-brand-600' : 'text-sm text-text-secondary'}>
               {available ? 'Available' : 'Sold out'}
             </Text>
-          </Pressable>
-          <Pressable
+          </PressableScale>
+          <PressableScale
             onPress={() => setPopular((v) => !v)}
             className={popular ? 'rounded-lg border border-brand-500 bg-brand-50 px-lg py-sm' : 'rounded-lg border border-border-subtle px-lg py-sm'}
           >
             <Text className={popular ? 'text-sm font-semibold text-brand-600' : 'text-sm text-text-secondary'}>★ Popular</Text>
-          </Pressable>
+          </PressableScale>
         </View>
 
         {save.isError ? <Text className="mb-sm text-sm text-error">Couldn&apos;t save. Check the details and try again.</Text> : null}
         <Button
-          label={busy ? 'Saving…' : existing ? 'Save changes' : 'Add item'}
-          disabled={!valid || busy}
+          label={existing ? 'Save changes' : 'Add item'}
+          loading={busy}
+          disabled={!valid}
           onPress={submit}
         />
       </ScrollView>
@@ -831,9 +838,10 @@ function VendorAccountScreen() {
               </View>
             ))}
             <Button
-              label={setHours.isPending ? 'Saving…' : 'Save hours'}
+              label="Save hours"
+              loading={setHours.isPending}
               className="mt-sm"
-              disabled={setHours.isPending || days.length === 0}
+              disabled={days.length === 0}
               onPress={() => setHours.mutate(days)}
             />
             {setHours.isSuccess ? <Text className="mt-sm text-center text-xs text-success">Hours updated</Text> : null}
