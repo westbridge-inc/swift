@@ -1,12 +1,9 @@
 import { useState } from 'react';
-import { View, TextInput } from 'react-native';
+import { View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { color } from '@swift/ui';
 import { authApi } from '../../services/api';
 import { useAuthStore } from '../../stores/authStore';
-import { Text, Heading, Button } from '../../components/ui';
-
-const FIELD = 'mb-md rounded-lg border border-border-subtle bg-surface-base px-lg py-md font-body text-base text-text-primary';
+import { Text, Heading, Button, Field } from '../../components/ui';
 
 export function RegisterScreen({ route }: any) {
   const phone = route?.params?.phone;
@@ -44,34 +41,20 @@ export function RegisterScreen({ route }: any) {
           Create your account
         </Heading>
         <Text className="mb-xl mt-xs text-center text-text-secondary">Almost there — tell us your name.</Text>
-        <TextInput
-          value={firstName}
-          onChangeText={setFirstName}
-          placeholder="First name"
-          placeholderTextColor={color.text.muted}
-          autoFocus
-          className={FIELD}
-        />
-        <TextInput
-          value={lastName}
-          onChangeText={setLastName}
-          placeholder="Last name"
-          placeholderTextColor={color.text.muted}
-          className={FIELD}
-        />
-        <TextInput
+        <Field label="First name" value={firstName} onChangeText={setFirstName} autoFocus />
+        <Field label="Last name" value={lastName} onChangeText={setLastName} />
+        <Field
+          label="Email (optional)"
           value={email}
           onChangeText={setEmail}
-          placeholder="Email (optional)"
-          placeholderTextColor={color.text.muted}
           keyboardType="email-address"
           autoCapitalize="none"
-          className={FIELD}
         />
         {error ? <Text className="mb-sm text-center text-sm text-error">Couldn&apos;t create your account. Try again.</Text> : null}
         <Button
-          label={loading ? 'Creating…' : 'Create account'}
-          disabled={!firstName || !lastName || loading}
+          label="Create account"
+          loading={loading}
+          disabled={!firstName || !lastName}
           onPress={handleRegister}
         />
       </View>
