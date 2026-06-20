@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
-import { HaversineMapsProvider, GoogleMapsProvider, getMapsProvider } from '../providers/maps/maps-provider';
+import { HaversineMapsProvider, GoogleMapsProvider, OsrmMapsProvider, getMapsProvider } from '../providers/maps/maps-provider';
 
 const ORIGIN = { lat: 6.8013, lng: -58.1551 };
 const DESTS = [
@@ -20,6 +20,7 @@ describe('getMapsProvider', () => {
   afterEach(() => {
     delete process.env['MAPS_PROVIDER'];
     delete process.env['GOOGLE_MAPS_API_KEY_BACKEND'];
+    delete process.env['OSRM_URL'];
     vi.unstubAllGlobals();
   });
 
@@ -41,6 +42,17 @@ describe('getMapsProvider', () => {
     process.env['MAPS_PROVIDER'] = 'google';
     process.env['GOOGLE_MAPS_API_KEY_BACKEND'] = 'test-key';
     expect(getMapsProvider()).toBeInstanceOf(GoogleMapsProvider);
+  });
+
+  it('requires OSRM_URL when MAPS_PROVIDER=osrm', () => {
+    process.env['MAPS_PROVIDER'] = 'osrm';
+    expect(() => getMapsProvider()).toThrow(/OSRM_URL/);
+  });
+
+  it('builds an OsrmMapsProvider when configured', () => {
+    process.env['MAPS_PROVIDER'] = 'osrm';
+    process.env['OSRM_URL'] = 'http://osrm.test';
+    expect(getMapsProvider()).toBeInstanceOf(OsrmMapsProvider);
   });
 });
 
@@ -108,5 +120,32 @@ describe('GoogleMapsProvider', () => {
     vi.stubGlobal('fetch', f);
     expect(await new GoogleMapsProvider('k').etaMinutes(ORIGIN, [])).toEqual([]);
     expect(f).not.toHaveBeenCalled();
+  });
+});
+
+describe('OsrmMapsProvider', () => {
+  const haversine = new HaversineMapsProvider();
+  afterEach(() => vi.unstubAllGlobals());
+
+  it('parses OSRM table durations into minutes (skipping the self entry)', async () => {
+    // durations[0] = [origin->self, origin->dest1=600s, origin->dest2=1200s]
+    vi.stubGlobal('fetch', mockFetch(200, { code: 'Ok', durations: [[0, 600, 1200]] }));
+    expect(await new OsrmMapsProvider('http://osrm.test').etaMinutes(ORIGIN, DESTS)).toEqual([10, 20]);
+  });
+
+  it('falls back to haversine on a non-OK HTTP status', async () => {
+    vi.stubGlobal('fetch', mockFetch(500, {}));
+    const etas = await new OsrmMapsProvider('http://osrm.test').etaMinutes(ORIGIN, DESTS);
+    expect(etas).toEqual(await haversine.etaMinutes(ORIGIN, DESTS));
+  });
+
+  it('falls back to haversine when the OSRM code is not Ok', async () => {
+    vi.stubGlobal('fetch', mockFetch(200, { code: 'NoRoute', durations: null }));
+    const etas = await new OsrmMapsProvider('http://osrm.test').etaMinutes(ORIGIN, DESTS);
+    expect(etas).toEqual(await haversine.etaMinutes(ORIGIN, DESTS));
+  });
+
+  it('returns [] for no destinations', async () => {
+    expect(await new OsrmMapsProvider('http://osrm.test').etaMinutes(ORIGIN, [])).toEqual([]);
   });
 });
