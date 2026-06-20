@@ -1,8 +1,8 @@
-import { View, Pressable } from 'react-native';
+import { View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { Feather, MaterialCommunityIcons } from '@expo/vector-icons';
+import { Feather } from '@expo/vector-icons';
 import { color } from '@swift/ui';
-import { Text, Card, List } from '../../components/ui';
+import { Text, Card, List, PressableScale, EmptyState, Skeleton } from '../../components/ui';
 import { useNotifications } from '../../hooks';
 
 function timeAgo(iso: string) {
@@ -20,9 +20,9 @@ export function NotificationsScreen({ navigation }: any) {
   return (
     <SafeAreaView style={{ flex: 1 }} edges={['top']} className="bg-surface-base">
       <View className="flex-row items-center px-lg py-sm">
-        <Pressable onPress={() => navigation?.goBack?.()} hitSlop={10}>
+        <PressableScale onPress={() => navigation?.goBack?.()} hitSlop={10}>
           <Feather name="chevron-left" size={24} color={color.text.primary} />
-        </Pressable>
+        </PressableScale>
         <Text className="ml-md text-base font-bold">Notifications</Text>
       </View>
 
@@ -43,11 +43,14 @@ export function NotificationsScreen({ navigation }: any) {
           )}
           contentContainerStyle={{ paddingBottom: 32 }}
           ListEmptyComponent={
-            isLoading ? null : (
-              <View className="items-center px-2xl pt-3xl">
-                <MaterialCommunityIcons name="bell-outline" size={48} color={color.text.muted} />
-                <Text className="mt-md text-center text-text-secondary">No notifications yet.</Text>
+            isLoading ? (
+              <View className="px-lg pt-sm">
+                {[0, 1, 2, 3].map((i) => (
+                  <Skeleton key={i} className="mb-sm h-20 w-full rounded-2xl" />
+                ))}
               </View>
+            ) : (
+              <EmptyState icon="bell-outline" title="No notifications yet" body="Order updates and offers will show up here." />
             )
           }
         />
