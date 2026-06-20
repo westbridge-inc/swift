@@ -29,7 +29,6 @@ Full spec: `docs/SWIFT-MASTER-SPEC.md` · Operations: `docs/RUNBOOK.md` · Syste
 | `apps/api` | Fastify 5 + Prisma + PostgreSQL/PostGIS + Redis + Socket.IO |
 | `apps/admin` | Next.js 15 admin (founder cockpit) |
 | `apps/mobile` | React Native app (role-based: customer / mover / vendor) |
-| `apps/mobile-flutter` | Flutter scaffold (stack decision pending) |
 | `packages/` | `@swift/types`, `@swift/utils`, `@swift/config` |
 
 ## Quickstart
