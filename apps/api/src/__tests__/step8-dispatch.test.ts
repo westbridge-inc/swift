@@ -75,6 +75,11 @@ async function makeRider(opts: {
       riderType: 'DELIVERY',
       vehicleType: 'MOTORCYCLE',
       documentsVerified: true,
+      // D.3 float gate: a verified, dispatch-eligible rider has float headroom.
+      // Production sets this via FloatService.recomputeForUser on rider creation/
+      // verification; this helper writes the rider row directly, so set it high
+      // enough that CASH offers aren't filtered out by the dispatch float gate.
+      floatLimit: 1_000_000,
       isOnline: opts.online ?? true,
       isAvailable: opts.available ?? true,
       currentLat: opts.lat ?? PICKUP.lat,

@@ -75,6 +75,7 @@ export class DispatchService {
     pickup: { lat: number; lng: number },
     radiusKm: number,
     pool: DispatchPool = 'RIDER',
+    floatRequired = 0,
   ): Promise<DispatchCandidate[]> {
     const declined = await this.redis.smembers(declinedKey(orderId));
 
@@ -100,6 +101,7 @@ export class DispatchService {
           FROM "riders" r
           WHERE r."isOnline" = true
             AND r."isAvailable" = true
+            AND (r."floatLimit" - r."committedFloat") >= ${floatRequired}
             AND r."currentLat" IS NOT NULL
             AND r."currentLng" IS NOT NULL
             AND ST_DWithin(
@@ -142,6 +144,7 @@ export class DispatchService {
         id: true, status: true, riderId: true, driverId: true, orderType: true,
         fulfillment: true, orderNumber: true,
         customerId: true, pickupLat: true, pickupLng: true,
+        subtotalBase: true, paymentMethod: true,
         vendor: { select: { name: true, owner: { select: { userId: true } } } },
       },
     });
@@ -163,7 +166,9 @@ export class DispatchService {
 
     const round = Number((await this.redis.get(roundKey(orderId))) ?? 0);
     const radius = BASE_RADIUS_KM + round * RADIUS_STEP_KM;
-    const candidates = await this.findCandidates(orderId, { lat: order.pickupLat, lng: order.pickupLng }, radius, pool);
+    // D.3 — a rider must have enough free float to front this order's vendor-cash (CASH deliveries only).
+    const floatRequired = pool === 'RIDER' && order.paymentMethod === 'CASH' ? Number(order.subtotalBase) : 0;
+    const candidates = await this.findCandidates(orderId, { lat: order.pickupLat, lng: order.pickupLng }, radius, pool, floatRequired);
 
     if (candidates.length === 0) {
       if (round + 1 < MAX_ROUNDS) {
@@ -281,9 +286,15 @@ export class DispatchService {
         data: { isAvailable: false, currentRideId: orderId },
       });
     } else {
+      // D.3 — commit the rider's float for a CASH order (released on delivery/cancel/fail).
+      const floatAmt = order.paymentMethod === 'CASH' ? Number(order.subtotalBase) : 0;
       await this.prisma.rider.update({
         where: { id: moverId },
-        data: { isAvailable: false, currentOrderId: orderId },
+        data: {
+          isAvailable: false,
+          currentOrderId: orderId,
+          ...(floatAmt > 0 ? { committedFloat: { increment: floatAmt } } : {}),
+        },
       });
     }
     await this.recordOfferOutcome(moverId, true, pool);
