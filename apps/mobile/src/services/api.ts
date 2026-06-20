@@ -133,6 +133,7 @@ export const rideApi = {
     pickupAddress: string;
     dropoffAddress: string;
     passengerCount?: number;
+    rideClass?: 'STANDARD' | 'COMFORT' | 'XL';
   }) => api.post('/rides/request', data),
   active: () => api.get('/rides/active'),
   get: (id: string) => api.get(`/rides/${id}`),
