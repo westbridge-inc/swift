@@ -89,7 +89,7 @@ export default function VerificationPage() {
             key={s}
             onClick={() => { setStatus(s); setSelected(null); }}
             className={`px-3 py-1.5 rounded-lg text-xs ${
-              status === s ? 'bg-[#FF6B00] text-white' : 'bg-[#1C1C1E] text-[#8E8E93] border border-[#38383A]'
+              status === s ? 'bg-[#E8192C] text-white' : 'bg-[#1C1C1E] text-[#8E8E93] border border-[#38383A]'
             }`}
           >
             {s}
@@ -218,7 +218,7 @@ export default function VerificationPage() {
                   <button
                     disabled={approveMutation.isPending || (isInsurance && !insuranceReady)}
                     onClick={() => approveMutation.mutate({ id: selected.id, body: isInsurance ? { insurance } : undefined })}
-                    className="w-full px-3 py-2 bg-[#FF6B00] text-white rounded-lg text-sm hover:bg-[#FF6B00]/80 disabled:opacity-40"
+                    className="w-full px-3 py-2 bg-[#E8192C] text-white rounded-lg text-sm hover:bg-[#E8192C]/80 disabled:opacity-40"
                   >
                     Approve
                   </button>

@@ -1,9 +1,9 @@
 import { memo } from 'react';
-import { View, Pressable } from 'react-native';
+import { View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Feather } from '@expo/vector-icons';
 import { color } from '@swift/ui';
-import { Text, Heading, Card, Button, Spinner, List, Image } from '../../components/ui';
+import { Text, Card, Button, Spinner, List, Image, PressableScale, EmptyState, elevation } from '../../components/ui';
 import { useCart, useUpdateCartItem, useRemoveCartItem, useClearCart } from '../../hooks';
 import { money } from '../../lib/money';
 import { fallbackImage } from '../../lib/images';
@@ -11,14 +11,14 @@ import { fallbackImage } from '../../lib/images';
 function CartHeader({ navigation, title, onClear }: any) {
   return (
     <View className="flex-row items-center justify-between px-lg py-sm">
-      <Pressable onPress={() => navigation?.goBack?.()} hitSlop={10}>
+      <PressableScale onPress={() => navigation?.goBack?.()} hitSlop={10}>
         <Feather name="chevron-left" size={24} color={color.text.primary} />
-      </Pressable>
+      </PressableScale>
       <Text className="flex-1 px-md text-base font-bold" numberOfLines={1}>{title}</Text>
       {onClear ? (
-        <Pressable onPress={onClear} hitSlop={8}>
+        <PressableScale onPress={onClear} hitSlop={8}>
           <Text className="text-sm font-semibold text-brand-500">Clear</Text>
-        </Pressable>
+        </PressableScale>
       ) : (
         <View style={{ width: 24 }} />
       )}
@@ -28,14 +28,14 @@ function CartHeader({ navigation, title, onClear }: any) {
 
 function QtyBtn({ icon, onPress, disabled }: { icon: 'minus' | 'plus'; onPress: () => void; disabled?: boolean }) {
   return (
-    <Pressable
+    <PressableScale
       onPress={onPress}
       disabled={disabled}
       hitSlop={6}
       className="h-8 w-8 items-center justify-center rounded-full border border-border-strong"
     >
       <Feather name={icon} size={16} color={color.text.primary} />
-    </Pressable>
+    </PressableScale>
   );
 }
 
@@ -53,7 +53,7 @@ const CartItemRow = memo(function CartItemRow({ item, busy, onDec, onInc, onRemo
   return (
     <View
       className="mb-md flex-row items-center rounded-2xl bg-surface-base p-md"
-      style={{ shadowColor: '#000', shadowOpacity: 0.06, shadowRadius: 8, shadowOffset: { width: 0, height: 2 }, elevation: 2 }}
+      style={elevation.card}
     >
       <Image source={{ uri: item.imageUrl || fallbackImage(item.itemId ?? item.id) }} style={{ width: 64, height: 64, borderRadius: 12 }} />
       <View className="flex-1 px-md">
@@ -68,9 +68,9 @@ const CartItemRow = memo(function CartItemRow({ item, busy, onDec, onInc, onRemo
       </View>
       <View className="items-end">
         <Text className="text-base font-bold text-text-primary">{money(item.lineTotal)}</Text>
-        <Pressable disabled={busy} onPress={onRemove} hitSlop={8} className="mt-md">
+        <PressableScale disabled={busy} onPress={onRemove} hitSlop={8} className="mt-md">
           <Feather name="trash-2" size={18} color={color.text.muted} />
-        </Pressable>
+        </PressableScale>
       </View>
     </View>
   );
@@ -98,11 +98,14 @@ export function CartScreen({ navigation }: any) {
     return (
       <SafeAreaView style={{ flex: 1 }} edges={['top']} className="bg-surface-base">
         <CartHeader navigation={navigation} title="Your cart" />
-        <View className="flex-1 items-center justify-center px-2xl">
-          <Feather name="shopping-bag" size={40} color={color.text.muted} />
-          <Heading size="lg" className="mt-md">Your cart is empty</Heading>
-          <Text className="mt-xs text-center text-text-secondary">Find something tasty or handy nearby.</Text>
-          <Button label="Explore" className="mt-lg px-2xl" onPress={() => navigation?.navigate?.('Tabs')} />
+        <View className="flex-1 items-center justify-center">
+          <EmptyState
+            icon="cart-outline"
+            title="Your cart is empty"
+            body="Find something tasty or handy nearby."
+            actionLabel="Explore"
+            onAction={() => navigation?.navigate?.('Tabs')}
+          />
         </View>
       </SafeAreaView>
     );

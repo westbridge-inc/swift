@@ -1,10 +1,10 @@
 import { useState } from 'react';
-import { View, ScrollView, Pressable, ActivityIndicator } from 'react-native';
+import { View, ScrollView, ActivityIndicator } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import * as ImagePicker from 'expo-image-picker';
 import { Feather } from '@expo/vector-icons';
 import { color } from '@swift/ui';
-import { Text, Heading, Card, Button, Badge } from '../../components/ui';
+import { Text, Heading, Card, Button, Badge, PressableScale } from '../../components/ui';
 import { useUploadFile, useSubmitIdentity } from '../../hooks/verification';
 
 function UploadRow({
@@ -19,7 +19,7 @@ function UploadRow({
   onPress: () => void;
 }) {
   return (
-    <Pressable disabled={busy} onPress={onPress}>
+    <PressableScale disabled={busy} onPress={onPress}>
       <Card className={done ? 'mb-sm border-brand-500' : 'mb-sm'}>
         <View className="flex-row items-center justify-between">
           <View className="flex-1 pr-md">
@@ -29,7 +29,7 @@ function UploadRow({
           {busy ? <ActivityIndicator /> : done ? <Badge label="Done" tone="success" /> : <Feather name="chevron-right" size={20} color={color.text.muted} />}
         </View>
       </Card>
-    </Pressable>
+    </PressableScale>
   );
 }
 
@@ -79,9 +79,9 @@ export function IdentityVerificationScreen({ navigation }: any) {
   return (
     <SafeAreaView style={{ flex: 1 }} edges={['top']} className="bg-surface-base">
       <View className="flex-row items-center px-lg py-sm">
-        <Pressable onPress={() => navigation?.goBack?.()} hitSlop={10}>
+        <PressableScale onPress={() => navigation?.goBack?.()} hitSlop={10}>
           <Feather name="chevron-left" size={24} color={color.text.primary} />
-        </Pressable>
+        </PressableScale>
         <Text className="ml-md text-base font-bold">Verify your identity</Text>
       </View>
       <ScrollView className="flex-1" contentContainerStyle={{ paddingHorizontal: 16, paddingBottom: 32 }} showsVerticalScrollIndicator={false}>
@@ -94,9 +94,10 @@ export function IdentityVerificationScreen({ navigation }: any) {
         {submit.isError ? <Text className="mt-sm text-center text-sm text-error">Couldn&apos;t submit. Please try again.</Text> : null}
 
         <Button
-          label={submit.isPending ? 'Submitting…' : 'Submit for verification'}
+          label="Submit for verification"
+          loading={submit.isPending}
           className="mt-lg"
-          disabled={!idUrl || !selfieUrl || submit.isPending}
+          disabled={!idUrl || !selfieUrl}
           onPress={() =>
             submit.mutate({ idDocumentUrl: idUrl as string, selfieUrl: selfieUrl as string }, { onSuccess: () => setSubmitted(true) })
           }
