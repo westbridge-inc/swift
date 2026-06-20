@@ -32,7 +32,7 @@ const PHONES = ['+5920009811', '+5920009812', '+5920009813', '+5920009814', '+59
 const GY_MOVER_DOCS = ['national_id', 'drivers_licence', 'vehicle_registration', 'vehicle_insurance'];
 // Heavier cart/cash/billing fixtures (#1/#3/#4/#7) get their own phone block so
 // purge() can sweep them without colliding with the verification PHONES above.
-const HEAVY_PREFIX = '+59200099';
+const HEAVY_PREFIX = '+59200097'; // distinct from step8-dispatch (+59200088 / +5920009901-02)
 const GPS = { lat: 7.2, lng: -58.6 };
 let heavySeq = 0;
 const nextHeavyPhone = () => `${HEAVY_PREFIX}${String(++heavySeq).padStart(2, '0')}`;
