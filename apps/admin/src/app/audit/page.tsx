@@ -24,7 +24,7 @@ export default function AuditPage() {
               { action: 'Order refunded', user: 'admin@swift.gy', time: '5 hours ago', detail: 'Order #SW-1042 - $3,500 GYD' },
             ].map((entry, i) => (
               <div key={i} className="flex items-center gap-4 p-3 rounded-lg bg-white/5 text-left">
-                <div className="w-2 h-2 rounded-full bg-[#FF6B00] shrink-0" />
+                <div className="w-2 h-2 rounded-full bg-[#E8192C] shrink-0" />
                 <div className="flex-1 min-w-0">
                   <p className="text-sm font-medium">{entry.action}</p>
                   <p className="text-xs text-[#8E8E93]">{entry.detail}</p>

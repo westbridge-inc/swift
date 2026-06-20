@@ -168,6 +168,11 @@ model CountryConfig {
   usdExchangeRate Decimal @db.Decimal(12, 4)
   /// Orders >= this USD-equivalent require trust level L2 (ID-verified)
   idGateThresholdUsd Decimal @default(50) @db.Decimal(10, 2)
+  /// D.3 rider float gate — max vendor-cash a rider may front at once, by trust
+  /// level (local currency). L1 lowest → L3 highest.
+  floatL1 Decimal @default(0) @db.Decimal(12, 2)
+  floatL2 Decimal @default(0) @db.Decimal(12, 2)
+  floatL3 Decimal @default(0) @db.Decimal(12, 2)
   /// Weekly subscription tiers in local currency:
   /// { mover, smallVendor, largeVendor, franchisePerStore? }
   subscriptionTiers Json
@@ -378,6 +383,11 @@ model Rider {
   completionRate      Float       @default(100.0)
   /// % of dispatch offers accepted (EMA) — feeds Step 8 candidate scoring
   acceptanceRate      Float       @default(100.0)
+  /// D.3 float gate — max vendor-cash this rider may front at once (derived from
+  /// User.trustLevel via CountryConfig.floatL1/L2/L3); committedFloat = currently
+  /// outstanding across live CASH orders. availableFloat = floatLimit - committedFloat.
+  floatLimit          Decimal     @default(0) @db.Decimal(12, 2)
+  committedFloat      Decimal     @default(0) @db.Decimal(12, 2)
   subscription        Subscription?
   earnings            Earning[]
   orders              Order[]

@@ -55,7 +55,7 @@ export default function ConfigPage() {
                     <input
                       type={item.type}
                       defaultValue={data?.data?.[item.key] ?? ''}
-                      className="bg-[#2C2C2E] text-white px-3 py-1.5 rounded-lg text-sm border border-[#38383A] focus:border-[#FF6B00] focus:outline-none w-32 text-right"
+                      className="bg-[#2C2C2E] text-white px-3 py-1.5 rounded-lg text-sm border border-[#38383A] focus:border-[#E8192C] focus:outline-none w-32 text-right"
                     />
                   </div>
                 ))}
@@ -64,7 +64,7 @@ export default function ConfigPage() {
           ))}
 
           <div className="flex justify-end">
-            <button className="px-6 py-2.5 bg-[#FF6B00] text-white rounded-lg text-sm font-medium hover:bg-[#FF6B00]/80">
+            <button className="px-6 py-2.5 bg-[#E8192C] text-white rounded-lg text-sm font-medium hover:bg-[#E8192C]/80">
               Save Configuration
             </button>
           </div>

@@ -1,11 +1,11 @@
 import { useState } from 'react';
-import { View, TextInput, Pressable, Alert } from 'react-native';
+import { View, TextInput, Alert } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Feather } from '@expo/vector-icons';
 import { color } from '@swift/ui';
 import { authApi } from '../../services/api';
 import { useAuthStore } from '../../stores/authStore';
-import { Text, Heading, Button } from '../../components/ui';
+import { Text, Heading, Button, PressableScale, StepProgress } from '../../components/ui';
 import { SwiftMark } from '../../components/SwiftLogo';
 
 export function PhoneEntryScreen({ navigation }: any) {
@@ -30,6 +30,9 @@ export function PhoneEntryScreen({ navigation }: any) {
 
   return (
     <SafeAreaView style={{ flex: 1 }} edges={['top', 'bottom']} className="bg-surface-base">
+      <View className="px-lg pt-md">
+        <StepProgress step={1} total={4} />
+      </View>
       <View className="flex-1 justify-center px-lg">
         <View className="items-center">
           <SwiftMark size={56} />
@@ -42,13 +45,13 @@ export function PhoneEntryScreen({ navigation }: any) {
         </Heading>
         <Text className="mt-xs text-center text-text-secondary">We&apos;ll text you a verification code.</Text>
         <View className="mt-xl flex-row" style={{ gap: 12 }}>
-          <Pressable
+          <PressableScale
             onPress={() => Alert.alert('Country', `Calling code ${dialCode}. Your country is chosen during onboarding.`)}
             className="flex-row items-center justify-center rounded-lg border border-border-subtle bg-surface-subtle px-md"
           >
             <Text className="text-base font-semibold">{dialCode}</Text>
             <Feather name="chevron-down" size={15} color={color.text.muted} style={{ marginLeft: 4 }} />
-          </Pressable>
+          </PressableScale>
           <TextInput
             value={phone}
             onChangeText={(t) => {
@@ -63,7 +66,7 @@ export function PhoneEntryScreen({ navigation }: any) {
           />
         </View>
         {error ? <Text className="mt-sm text-center text-sm text-error">Couldn&apos;t send the code. Try again.</Text> : null}
-        <Button label={loading ? 'Sending…' : 'Continue'} className="mt-xl" disabled={!phone || loading} onPress={handleSendOtp} />
+        <Button label="Continue" className="mt-xl" loading={loading} disabled={!phone} onPress={handleSendOtp} />
       </View>
     </SafeAreaView>
   );
