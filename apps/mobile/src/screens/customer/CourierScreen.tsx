@@ -1,9 +1,9 @@
 import { useState } from 'react';
-import { View, ScrollView, Pressable, TextInput } from 'react-native';
+import { View, ScrollView, TextInput } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { color } from '@swift/ui';
 import { Feather } from '@expo/vector-icons';
-import { Text, Heading, Card, Button, Spinner, Badge } from '../../components/ui';
+import { Text, Heading, Card, Button, Spinner, Badge, PressableScale } from '../../components/ui';
 import { useAddresses, useCourierEstimate, useCourierOrders, useSendCourier } from '../../hooks';
 import { useLocationStore } from '../../stores/locationStore';
 import { money } from '../../lib/money';
@@ -104,17 +104,17 @@ export function CourierScreen({ navigation }: any) {
 
           <Text className="mb-xs mt-lg text-sm font-semibold text-text-secondary">To</Text>
           {list.length === 0 ? (
-            <Pressable onPress={() => navigation?.navigate?.('AddAddress')}>
+            <PressableScale onPress={() => navigation?.navigate?.('AddAddress')}>
               <Card className="flex-row items-center">
                 <Feather name="plus-circle" size={18} color={color.brand[500]} />
                 <Text className="ml-sm font-semibold text-brand-600">Add a destination address</Text>
               </Card>
-            </Pressable>
+            </PressableScale>
           ) : (
             list.map((a) => {
               const active = a.id === dropoffId;
               return (
-                <Pressable key={a.id} onPress={() => setDropoffId(a.id)}>
+                <PressableScale key={a.id} onPress={() => setDropoffId(a.id)}>
                   <Card className={active ? 'mb-sm border-brand-500' : 'mb-sm'}>
                     <View className="flex-row items-center justify-between">
                       <View className="flex-1 pr-md">
@@ -127,7 +127,7 @@ export function CourierScreen({ navigation }: any) {
                       <Feather name={active ? 'check-circle' : 'circle'} size={20} color={active ? color.brand[500] : color.text.muted} />
                     </View>
                   </Card>
-                </Pressable>
+                </PressableScale>
               );
             })
           )}
@@ -137,7 +137,7 @@ export function CourierScreen({ navigation }: any) {
             {SIZES.map((s) => {
               const active = s.key === size;
               return (
-                <Pressable
+                <PressableScale
                   key={s.key}
                   onPress={() => setSize(s.key as any)}
                   className={
@@ -147,7 +147,7 @@ export function CourierScreen({ navigation }: any) {
                   }
                 >
                   <Text className={active ? 'font-semibold text-brand-600' : 'text-text-secondary'}>{s.label}</Text>
-                </Pressable>
+                </PressableScale>
               );
             })}
           </View>
@@ -157,7 +157,7 @@ export function CourierScreen({ navigation }: any) {
             {SPEEDS.map((s) => {
               const active = s.key === speed;
               return (
-                <Pressable
+                <PressableScale
                   key={s.key}
                   onPress={() => setSpeed(s.key as any)}
                   className={
@@ -167,7 +167,7 @@ export function CourierScreen({ navigation }: any) {
                   }
                 >
                   <Text className={active ? 'font-semibold text-brand-600' : 'text-text-secondary'}>{s.label}</Text>
-                </Pressable>
+                </PressableScale>
               );
             })}
           </View>
@@ -225,7 +225,7 @@ export function CourierScreen({ navigation }: any) {
                 Recent sends
               </Heading>
               {recent.slice(0, 5).map((o: any) => (
-                <Pressable key={o.id} onPress={() => navigation?.navigate?.('OrderTracking', { id: o.id })}>
+                <PressableScale key={o.id} onPress={() => navigation?.navigate?.('OrderTracking', { id: o.id })}>
                   <Card className="mb-sm flex-row items-center justify-between">
                     <View className="flex-1 pr-md">
                       <Text className="text-sm font-semibold" numberOfLines={1}>
@@ -240,7 +240,7 @@ export function CourierScreen({ navigation }: any) {
                       tone={o.status === 'DELIVERED' || o.status === 'COMPLETED' ? 'success' : 'brand'}
                     />
                   </Card>
-                </Pressable>
+                </PressableScale>
               ))}
             </View>
           ) : null}
@@ -249,9 +249,9 @@ export function CourierScreen({ navigation }: any) {
 
       <View className="absolute inset-x-0 bottom-0 border-t border-border-subtle bg-surface-base px-lg pb-2xl pt-md">
         {errMsg ? <Text className="mb-sm text-center text-sm text-error">{errMsg}</Text> : null}
-        <Button disabled={!valid || send.isPending} onPress={onSend}>
+        <Button loading={send.isPending} disabled={!valid} onPress={onSend}>
           <Text className="font-body font-semibold text-white">
-            {send.isPending ? 'Sending…' : estimate ? `Send parcel · ${money(estimate.totalFee)}` : 'Send parcel'}
+            {estimate ? `Send parcel · ${money(estimate.totalFee)}` : 'Send parcel'}
           </Text>
         </Button>
       </View>

@@ -46,7 +46,7 @@ export function RevenueBreakdown({ data, weeklyTotal }: RevenueBreakdownProps) {
       <div className="mt-4 pt-4 border-t border-[#38383A]">
         <div className="flex justify-between">
           <span className="font-semibold">Weekly Total</span>
-          <span className="text-[#FF6B00] font-bold text-lg">
+          <span className="text-[#E8192C] font-bold text-lg">
             ${weeklyTotal?.toLocaleString() || '0'} GYD
           </span>
         </div>
