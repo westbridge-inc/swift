@@ -30,6 +30,7 @@ const requestRideSchema = z.object({
   pickupAddress: z.string().trim().min(3).max(200),
   dropoffAddress: z.string().trim().min(3).max(200),
   passengerCount: z.number().int().min(1).max(6).default(1),
+  rideClass: z.enum(['STANDARD', 'COMFORT', 'XL']).default('STANDARD'),
 });
 
 const cancelSchema = z.object({
@@ -50,7 +51,8 @@ export async function ridesRoutes(app: FastifyInstance) {
       where: { id: request.user.userId },
       select: { countryCode: true },
     });
-    const estimate = await fareService.estimate(body.pickup, body.dropoff, user.countryCode);
+    // Every ride class priced for the trip — the customer's selection screen.
+    const estimate = await fareService.estimateAll(body.pickup, body.dropoff, user.countryCode);
     return { success: true, data: estimate };
   });
 
@@ -83,7 +85,7 @@ export async function ridesRoutes(app: FastifyInstance) {
       throw new AppError(403, 'STRIKE_RESTRICTED', 'After repeated failed payments, rides require ID verification. Verify your identity to continue.');
     }
 
-    const estimate = await fareService.estimate(body.pickup, body.dropoff, user.countryCode);
+    const estimate = await fareService.estimate(body.pickup, body.dropoff, user.countryCode, body.rideClass);
 
     // Same ID-gate as checkout: big cash rides need an ID-verified account
     const gateLocal = await countryConfig.getIdGateThresholdLocal(user.countryCode);
@@ -118,6 +120,7 @@ export async function ridesRoutes(app: FastifyInstance) {
         taxiDistance: estimate.distanceKm,
         taxiDuration: estimate.durationMin,
         taxiFareTotal: estimate.fare,
+        rideClass: body.rideClass,
         subtotalBase: estimate.fare,
         subtotalMarkup: 0,
         subtotalCustomer: estimate.fare,

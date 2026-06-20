@@ -411,6 +411,14 @@ enum VehicleType {
   CAR
 }
 
+/// Taxi ride classes (Uber-style car tiers). Fare = base fare × class multiplier;
+/// dispatch offers a ride only to drivers whose vehicleClass matches the request.
+enum RideClass {
+  STANDARD
+  COMFORT
+  XL
+}
+
 // ==========================================
 // DRIVERS (Taxi)
 // ==========================================
@@ -425,6 +433,9 @@ model Driver {
   vehicleColor         String
   licensePlate         String
   vehicleCapacity      Int          @default(4)
+  /// The ride class this driver's vehicle serves (STANDARD by default; admin
+  /// upgrades premium/larger vehicles). Dispatch matches ride.rideClass to this.
+  vehicleClass         RideClass    @default(STANDARD)
   nationalIdUrl        String?
   driverLicenseUrl     String
   vehicleInsuranceUrl  String
@@ -736,6 +747,7 @@ model Order {
   taxiFarePerMin Decimal? @db.Decimal(10, 2)
   taxiFareTotal  Decimal? @db.Decimal(10, 2)
   taxiFareSurge  Float?
+  rideClass      RideClass? // taxi only — the ride class the customer requested
 
   paymentMethod PaymentMethod
   paymentStatus PaymentStatus @default(PENDING)
