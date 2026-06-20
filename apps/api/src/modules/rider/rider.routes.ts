@@ -212,6 +212,12 @@ export async function riderRoutes(app: FastifyInstance) {
       success: true,
       data: {
         ...rider,
+        // D.3 float exposure — surfaced so the app can explain "why no offers".
+        float: {
+          limit: Number(rider.floatLimit),
+          committed: Number(rider.committedFloat),
+          available: Number(rider.floatLimit) - Number(rider.committedFloat),
+        },
         stats: {
           totalDeliveries: rider.totalDeliveries,
           totalCourierJobs: rider.totalCourierJobs,
