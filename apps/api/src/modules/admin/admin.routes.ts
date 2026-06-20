@@ -910,24 +910,10 @@ export async function adminRoutes(app: FastifyInstance) {
       });
     }
 
-    // Refund to wallet if requested
-    if (refund) {
-      await app.prisma.user.update({
-        where: { id: order.customerId },
-        data: { walletBalance: { increment: Number(order.totalAmount) } },
-      });
-      await app.prisma.transaction.create({
-        data: {
-          userId: order.customerId,
-          type: 'ORDER_REFUND',
-          amount: order.totalAmount,
-          direction: 'CREDIT',
-          description: `Refund for order ${order.orderNumber}`,
-          reference: order.orderNumber,
-          balanceAfter: 0, // Will be corrected by actual balance lookup in production
-        },
-      });
-    }
+    // V1 is cash-only: Swift never holds order money, so there is nothing to refund
+    // to a platform balance (walletBalance is dormant — reserved for the Part C wallet
+    // rework, no customer path emits it). A requested refund is a cash matter settled
+    // directly with the customer; the intent is captured in the audit log below.
 
     app.io.to(`order:${id}`).emit('order:status_changed', { orderId: id, status: newStatus });
 
@@ -936,9 +922,9 @@ export async function adminRoutes(app: FastifyInstance) {
     await notifications.send({
       userId: order.customerId,
       type: 'ORDER_UPDATE',
-      title: refund ? 'Order Refunded' : 'Order Cancelled',
+      title: 'Order Cancelled',
       body: refund
-        ? `Your order ${order.orderNumber} has been cancelled and refunded to your wallet.`
+        ? `Your order ${order.orderNumber} has been cancelled. Any cash you already paid will be refunded to you directly.`
         : `Your order ${order.orderNumber} has been cancelled by the system. ${reason || ''}`.trim(),
       data: { orderId: id, status: newStatus },
     });

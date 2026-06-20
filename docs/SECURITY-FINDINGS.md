@@ -15,7 +15,7 @@
 - **Fix:** `WalletService.debit()` and `WalletService.credit()` now wrap balance check + update + transaction record inside a single Prisma `$transaction` with `Serializable` isolation. Concurrent debits on the same account are serialized at the database level.
 - **File:** `apps/api/src/modules/wallet/wallet.service.ts`
 - **Regression test:** `apps/api/src/__tests__/wallet-concurrency.test.ts` — 5 concurrent debits against a balance that covers one: at most one commits, balance never negative, ledger count matches.
-- **Note:** WalletService itself is slated for removal in V1 (cash-only). Fix still applied so the code is safe while it exists.
+- **Note (2026-06-20): CLOSED for V1.** WalletService has since been **removed** (cash-only) — the `wallet/` module, service, and concurrency test are gone, and the last live writer of `walletBalance`/`Transaction` (an admin order-cancel "refund to wallet") was removed too. The `walletBalance`/`Transaction` schema fields remain dormant, reserved for the Part C wallet rework; **no live code path emits them.**
 
 ### SEC-3: Hardcoded JWT Fallback Secret
 - **Fix:** `auth.ts` now throws at startup if `JWT_SECRET` is not set. No fallback value. Access token expiry reduced from 24h → 30min. Refresh token session expiry reduced from 30 days → 7 days.
