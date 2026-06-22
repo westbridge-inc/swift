@@ -43,6 +43,7 @@ export function CheckoutScreen({ navigation }: any) {
     if (!cart?.deliveryAddressId && !selectedId && defaultAddressId) {
       setAddress.mutate(defaultAddressId);
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- intentional: only re-run when the resolved default / cart address changes
   }, [defaultAddressId, cart?.deliveryAddressId]);
 
   useEffect(() => {
