@@ -106,6 +106,10 @@ export const customerApi = {
   }) => api.post('/customer/checkout', data),
   getNotifications: () => api.get('/customer/notifications'),
   reorder: (id: string) => api.post(`/customer/orders/${id}/reorder`, {}),
+  rateOrder: (
+    id: string,
+    body: { vendorScore?: number; vendorComment?: string; riderScore?: number; riderComment?: string },
+  ) => api.post(`/customer/orders/${id}/rate`, body),
   // Cart
   getCart: (lat?: number, lng?: number) => api.get('/customer/cart', { params: { lat, lng } }),
   addToCart: (data: {

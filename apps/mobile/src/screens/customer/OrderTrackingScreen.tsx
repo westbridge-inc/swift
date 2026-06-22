@@ -1,10 +1,11 @@
-import { View, ScrollView, Linking } from 'react-native';
+import { useState } from 'react';
+import { View, ScrollView, Linking, TextInput } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import MapView, { Marker, PROVIDER_DEFAULT } from 'react-native-maps';
 import { Feather, MaterialCommunityIcons } from '@expo/vector-icons';
 import { color } from '@swift/ui';
-import { Text, Heading, Card, Spinner, PressableScale, EmptyState } from '../../components/ui';
-import { useOrder } from '../../hooks';
+import { Text, Heading, Card, Button, Spinner, PressableScale, EmptyState } from '../../components/ui';
+import { useOrder, useRateOrder } from '../../hooks';
 import { money } from '../../lib/money';
 
 const STEPS = [
@@ -26,6 +27,69 @@ const STATUS_STEP: Record<string, number> = {
   DELIVERED: 4,
   COMPLETED: 4,
 };
+
+function StarRow({ value, onChange }: { value: number; onChange: (v: number) => void }) {
+  return (
+    <View className="mt-xs flex-row" style={{ gap: 8 }}>
+      {[1, 2, 3, 4, 5].map((n) => (
+        <PressableScale key={n} onPress={() => onChange(n)} hitSlop={6}>
+          <MaterialCommunityIcons
+            name={n <= value ? 'star' : 'star-outline'}
+            size={34}
+            color={n <= value ? color.brand[500] : color.text.muted}
+          />
+        </PressableScale>
+      ))}
+    </View>
+  );
+}
+
+function RatingCard({ orderId, vendorName, hasRider, riderName }: { orderId: string; vendorName: string; hasRider: boolean; riderName: string }) {
+  const rate = useRateOrder(orderId);
+  const [vendorScore, setVendorScore] = useState(0);
+  const [riderScore, setRiderScore] = useState(0);
+  const [comment, setComment] = useState('');
+  const canSubmit = vendorScore > 0 || riderScore > 0;
+
+  const submit = () => {
+    const body: { vendorScore?: number; vendorComment?: string; riderScore?: number } = {};
+    if (vendorScore > 0) {
+      body.vendorScore = vendorScore;
+      if (comment.trim()) body.vendorComment = comment.trim();
+    }
+    if (riderScore > 0) body.riderScore = riderScore;
+    rate.mutate(body);
+  };
+
+  return (
+    <Card>
+      <Heading size="lg">Rate your order</Heading>
+      <Text className="mt-sm text-sm font-semibold text-text-primary">How was {vendorName}?</Text>
+      <StarRow value={vendorScore} onChange={setVendorScore} />
+      {hasRider ? (
+        <>
+          <Text className="mt-md text-sm font-semibold text-text-primary">How was {riderName}?</Text>
+          <StarRow value={riderScore} onChange={setRiderScore} />
+        </>
+      ) : null}
+      <TextInput
+        value={comment}
+        onChangeText={setComment}
+        placeholder="Add a comment (optional)"
+        placeholderTextColor={color.text.muted}
+        multiline
+        className="mt-md rounded-lg border border-border-subtle bg-surface-base px-lg py-md font-body text-base text-text-primary"
+        style={{ minHeight: 56 }}
+      />
+      {rate.isError ? <Text className="mt-sm text-center text-sm text-error">Couldn&apos;t submit. Please try again.</Text> : null}
+      <View className="mt-md">
+        <Button loading={rate.isPending} disabled={!canSubmit} onPress={submit}>
+          <Text className="font-body font-semibold text-white">Submit rating</Text>
+        </Button>
+      </View>
+    </Card>
+  );
+}
 
 export function OrderTrackingScreen({ navigation, route }: any) {
   const id: string = route?.params?.id ?? '';
@@ -115,6 +179,25 @@ export function OrderTrackingScreen({ navigation, route }: any) {
             </Card>
           )}
         </View>
+
+        {/* Rate the order once it's delivered/completed */}
+        {step >= 4 && !cancelled ? (
+          <View className="px-lg pt-md">
+            {order.hasBeenRated ? (
+              <Card className="flex-row items-center">
+                <MaterialCommunityIcons name="star" size={18} color={color.brand[500]} />
+                <Text className="ml-sm text-sm font-semibold text-text-primary">Thanks for rating this order</Text>
+              </Card>
+            ) : (
+              <RatingCard
+                orderId={order.id ?? id}
+                vendorName={order.vendor?.name ?? 'the vendor'}
+                hasRider={!!order.rider}
+                riderName={order.rider?.firstName ?? 'your rider'}
+              />
+            )}
+          </View>
+        ) : null}
 
         {/* Timeline */}
         {!cancelled ? (
