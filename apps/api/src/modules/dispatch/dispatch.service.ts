@@ -1,4 +1,4 @@
-import type { PrismaClient, RideClass } from '@prisma/client';
+import type { PrismaClient } from '@prisma/client';
 import type { Server } from 'socket.io';
 import type Redis from 'ioredis';
 import type { FastifyInstance } from 'fastify';
@@ -76,7 +76,6 @@ export class DispatchService {
     radiusKm: number,
     pool: DispatchPool = 'RIDER',
     floatRequired = 0,
-    rideClass: RideClass = 'STANDARD',
   ): Promise<DispatchCandidate[]> {
     const declined = await this.redis.smembers(declinedKey(orderId));
 
@@ -87,7 +86,6 @@ export class DispatchService {
           FROM "drivers" d
           WHERE d."isOnline" = true
             AND d."isAvailable" = true
-            AND d."vehicleClass"::text = ${rideClass}
             AND d."currentLat" IS NOT NULL
             AND d."currentLng" IS NOT NULL
             AND ST_DWithin(
@@ -144,7 +142,7 @@ export class DispatchService {
       where: { id: orderId },
       select: {
         id: true, status: true, riderId: true, driverId: true, orderType: true,
-        fulfillment: true, orderNumber: true, rideClass: true,
+        fulfillment: true, orderNumber: true,
         customerId: true, pickupLat: true, pickupLng: true,
         subtotalBase: true, paymentMethod: true,
         vendor: { select: { name: true, owner: { select: { userId: true } } } },
@@ -170,7 +168,7 @@ export class DispatchService {
     const radius = BASE_RADIUS_KM + round * RADIUS_STEP_KM;
     // D.3 — a rider must have enough free float to front this order's vendor-cash (CASH deliveries only).
     const floatRequired = pool === 'RIDER' && order.paymentMethod === 'CASH' ? Number(order.subtotalBase) : 0;
-    const candidates = await this.findCandidates(orderId, { lat: order.pickupLat, lng: order.pickupLng }, radius, pool, floatRequired, order.rideClass ?? 'STANDARD');
+    const candidates = await this.findCandidates(orderId, { lat: order.pickupLat, lng: order.pickupLng }, radius, pool, floatRequired);
 
     if (candidates.length === 0) {
       if (round + 1 < MAX_ROUNDS) {
