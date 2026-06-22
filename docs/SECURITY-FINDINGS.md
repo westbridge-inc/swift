@@ -52,8 +52,8 @@
 - **Fix:** Zod schemas on every body and every filter/query input across chat, search, rider, driver, vendor, admin, and customer routes. Enum filters use `z.nativeEnum` from `@prisma/client` so they stay in sync with the schema. Numeric query params use `z.coerce.number()` with bounds. `parsePagination()` is NaN-safe with unit tests. Route params (`:id`) remain plain strings by design — the router guarantees the type, and lookups 404.
 - **Files:** all `apps/api/src/modules/*/**.routes.ts`, `apps/api/src/utils/pagination.ts`
 
-### Known issue deferred to Step 2 (role model rework)
-- `POST /customer/switch-role` accepts `VENDOR`, but the `UserRole` enum stores `VENDOR_OWNER`, so `user.roles.includes('VENDOR')` can never be true — switching to vendor mode always 403s. Pre-existing behavior, preserved for now; Step 2 replaces roles with CUSTOMER/MOVER/VENDOR anyway.
+### ~~Known issue deferred to Step 2 (role model rework)~~ — FIXED (2026-06-22)
+- `POST /customer/switch-role` now maps the public `VENDOR` name to the internal `VENDOR_OWNER` enum value (`customer.routes.ts:1535`), so switching to vendor mode works. The original mismatch is resolved.
 
 ---
 
@@ -62,7 +62,7 @@
 | # | Issue | Why Not Fixed Here | Recommended Action |
 |---|---|---|---|
 | SEC-8 | ~~JWT token blacklist on logout~~ | **CLOSED in Step 3** — `authenticate` is session-backed: logout/password-reset delete sessions and the access token dies immediately (regression-tested in step3-auth.test.ts) | Done |
-| SEC-9 | Missing RBAC ownership checks on address/order endpoints | Requires reading all 1,748 lines of customer.routes.ts carefully | Fix during Step 2 god-file split |
+| SEC-9 | ~~Missing RBAC ownership checks on address/order endpoints~~ | **CLOSED (2026-06-22)** — verified: address + order `:id` routes use `findFirst({ id, userId/customerId })` and 404 on another user's resource | Done |
 | SEC-11 | Admin token in `localStorage` | Fixing properly requires httpOnly cookie sessions + login page redesign for admin app | Fix in Step 13 (dashboards) |
 | SEC-13 | No idempotency keys on payments/orders | Requires schema additions + client coordination | Fix in Step 5 (billing engine) |
 | SEC-14 | No fraud detection on payments | V1 is cash-only; relevant when card payments added | Part C |
