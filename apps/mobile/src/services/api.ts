@@ -173,7 +173,8 @@ export const servicesApi = {
 
 // Verification (mounted at /api/v1/verification)
 export const verificationApi = {
-  status: (role: string) => api.get('/verification/status', { params: { role } }),
+  status: (role: string, vehicleType?: string) =>
+    api.get('/verification/status', { params: { role, ...(vehicleType ? { vehicleType } : {}) } }),
   upload: (form: FormData) =>
     api.post('/verification/upload', form, { headers: { 'Content-Type': 'multipart/form-data' } }),
   submitDocument: (data: {

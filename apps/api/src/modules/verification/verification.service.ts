@@ -1,4 +1,4 @@
-import type { PrismaClient, VerificationDocument, UserRole } from '@prisma/client';
+import type { PrismaClient, VerificationDocument, UserRole, VehicleType } from '@prisma/client';
 import { AppError, NotFoundError } from '../../utils/errors';
 import { CountryConfigService } from '../country/country-config.service';
 import { NotificationService } from '../notification/notification.service';
@@ -54,7 +54,7 @@ export class VerificationService {
     // Movers (riders + taxi drivers) may submit any base or taxi-extra doc;
     // other roles validate against their named checklist.
     const checklist = roleKey === 'MOVER'
-      ? await this.countryConfig.getMoverChecklist(user.countryCode, true)
+      ? await this.countryConfig.getMoverChecklist(user.countryCode, 'CAR') // permissive: any mover may submit any base/motor/taxi doc
       : await this.countryConfig.getDocumentChecklist(user.countryCode, roleKey);
     if (!checklist.includes(docType)) {
       throw new AppError(400, 'INVALID_DOC_TYPE', `${docType} is not required for ${roleKey} in your country`);
@@ -208,37 +208,45 @@ export class VerificationService {
   // -------------------------------------------------------------------------
 
   /**
-   * A mover carries passengers (is a "taxi") when they have a Driver entity;
-   * bike/moto couriers have only a Rider entity. Taxi movers must satisfy the
-   * heavier MOVER_TAXI_EXTRA checklist (hire permit, plate photo, police
-   * clearance, fitness cert — spec §3.4).
+   * The mover's saved vehicle, or null if no Driver/Rider entity exists yet: a
+   * Driver is a taxi (CAR); a Rider carries its own vehicleType. Callers that
+   * gate apply a stricter MOTORCYCLE default for the null case.
    */
-  private async isTaxiMover(userId: string): Promise<boolean> {
+  private async getMoverVehicleType(userId: string): Promise<VehicleType | null> {
     const driver = await this.prisma.driver.findUnique({ where: { userId }, select: { id: true } });
-    return driver !== null;
+    if (driver) return 'CAR';
+    const rider = await this.prisma.rider.findUnique({ where: { userId }, select: { vehicleType: true } });
+    return rider?.vehicleType ?? null;
   }
 
   /**
-   * The document checklist a role must satisfy. Movers expand to the taxi-extra
-   * docs when the user is a taxi driver, so what onboarding SHOWS is exactly
-   * what the go-online gate REQUIRES — no dead-ends where an apparently-verified
-   * driver is silently blocked on a document they were never asked for.
+   * The document checklist a role must satisfy. Movers scale to their vehicle so
+   * onboarding never asks for documents a vehicle can't have (a bicycle has no
+   * licence/insurance) AND what's SHOWN equals what the go-online gate REQUIRES.
+   * `vehicleHint` lets the onboarding screen preview a selection before the
+   * vehicle is saved; gates pass no hint, so they always use the real entity.
    */
-  private async checklistFor(userId: string, countryCode: string, roleKey: ChecklistRole): Promise<string[]> {
+  private async checklistFor(
+    userId: string,
+    countryCode: string,
+    roleKey: ChecklistRole,
+    vehicleHint?: VehicleType,
+  ): Promise<string[]> {
     if (roleKey === 'MOVER') {
-      return this.countryConfig.getMoverChecklist(countryCode, await this.isTaxiMover(userId));
+      const vehicleType = vehicleHint ?? (await this.getMoverVehicleType(userId)) ?? 'MOTORCYCLE';
+      return this.countryConfig.getMoverChecklist(countryCode, vehicleType);
     }
     return this.countryConfig.getDocumentChecklist(countryCode, roleKey);
   }
 
-  async getStatus(userId: string, roleKey: ChecklistRole) {
+  async getStatus(userId: string, roleKey: ChecklistRole, vehicleHint?: VehicleType) {
     const user = await this.prisma.user.findUnique({
       where: { id: userId },
       select: { countryCode: true, trustLevel: true },
     });
     if (!user) throw new NotFoundError('User', userId);
 
-    const checklist = await this.checklistFor(userId, user.countryCode, roleKey);
+    const checklist = await this.checklistFor(userId, user.countryCode, roleKey, vehicleHint);
     const documents = await this.prisma.verificationDocument.findMany({
       where: { userId, docType: { in: [...checklist, IDENTITY_DOC_TYPE] } },
       orderBy: { createdAt: 'desc' },
@@ -251,12 +259,17 @@ export class VerificationService {
     );
     const missing = checklist.filter((docType) => !approved.has(docType));
 
+    // The mover's saved vehicle (null until they provision one) — lets the
+    // onboarding screen initialise its selector and know whether to re-prompt.
+    const vehicleType = roleKey === 'MOVER' ? await this.getMoverVehicleType(userId) : null;
+
     return {
       roleKey,
       trustLevel: user.trustLevel,
       checklist,
       documents,
       missing,
+      vehicleType,
       roleVerified: missing.length === 0,
     };
   }
@@ -290,7 +303,7 @@ export class VerificationService {
    */
   async getLiveOperationStatus(
     userId: string,
-    opts: { taxi: boolean; legacyVerified?: boolean },
+    opts: { vehicleType: VehicleType; legacyVerified?: boolean },
   ): Promise<{ allowed: boolean; reason: 'ok' | 'docs' | 'insurance' }> {
     const user = await this.prisma.user.findUnique({
       where: { id: userId },
@@ -300,7 +313,7 @@ export class VerificationService {
 
     let baseOk = opts.legacyVerified ?? false;
     if (!baseOk) {
-      const required = await this.countryConfig.getMoverChecklist(user.countryCode, opts.taxi);
+      const required = await this.countryConfig.getMoverChecklist(user.countryCode, opts.vehicleType);
       if (required.length === 0) {
         baseOk = true;
       } else {
@@ -319,9 +332,9 @@ export class VerificationService {
     }
     if (!baseOk) return { allowed: false, reason: 'docs' };
 
-    // Taxi: a current, manually-confirmed HIRE-class policy is mandatory before
-    // carrying passengers. PRIVATE insurance never qualifies.
-    if (opts.taxi) {
+    // Taxi (CAR): a current, manually-confirmed HIRE-class policy is mandatory
+    // before carrying passengers. PRIVATE insurance never qualifies.
+    if (opts.vehicleType === 'CAR') {
       const insurance = await this.prisma.verificationDocument.findFirst({
         where: {
           userId,

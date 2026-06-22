@@ -85,9 +85,26 @@ describe('CountryConfig — Guyana seeded, everything reads from config', () => 
   it('serves role document checklists from config', async () => {
     const moverDocs = await countryConfig.getDocumentChecklist('GY', 'MOVER');
     expect(moverDocs).toContain('national_id');
-    expect(moverDocs).toContain('drivers_licence');
     const restaurantDocs = await countryConfig.getDocumentChecklist('GY', 'RESTAURANT');
     expect(restaurantDocs).toContain('food_handler_cert');
+  });
+
+  it('scales the mover checklist to the vehicle (no docs a vehicle can\'t have)', async () => {
+    // A bicycle has no licence/registration/insurance; a motorcycle does; a
+    // car/taxi adds the §3.4 extras (hire permit, plate photo, police clearance).
+    const bicycle = await countryConfig.getMoverChecklist('GY', 'BICYCLE');
+    expect(bicycle).toContain('national_id');
+    expect(bicycle).not.toContain('drivers_licence');
+
+    const motorcycle = await countryConfig.getMoverChecklist('GY', 'MOTORCYCLE');
+    expect(motorcycle).toContain('drivers_licence');
+    expect(motorcycle).toContain('vehicle_insurance');
+    expect(motorcycle).not.toContain('police_clearance');
+
+    const car = await countryConfig.getMoverChecklist('GY', 'CAR');
+    expect(car).toContain('drivers_licence');
+    expect(car).toContain('police_clearance');
+    expect(car).toContain('fitness_cert');
   });
 
   it('lists Guyana among active countries for the signup picker', async () => {
