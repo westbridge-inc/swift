@@ -2,8 +2,10 @@ import axios from 'axios';
 import { useAuthStore } from '../stores/authStore';
 import { useStoreSwitcher } from '../stores/storeSwitcher';
 
+// Build-time override (set per EAS build profile, e.g. preview→staging,
+// production→prod). Falls back to localhost in dev and the prod domain otherwise.
 // eslint-disable-next-line no-undef
-export const API_URL = __DEV__ ? 'http://localhost:3000' : 'https://api.swift.gy';
+export const API_URL = process.env['EXPO_PUBLIC_API_URL'] ?? (__DEV__ ? 'http://localhost:3000' : 'https://api.swift.gy');
 
 export const api = axios.create({
   baseURL: `${API_URL}/api/v1`,
