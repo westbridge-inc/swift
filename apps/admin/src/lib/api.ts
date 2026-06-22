@@ -20,6 +20,7 @@ export const fetchUsers = (params?: string) => apiFetch(`/api/v1/admin/users?${p
 export const fetchVendors = (status?: string) => apiFetch(`/api/v1/admin/vendors${status ? `?status=${status}` : ''}`);
 export const fetchPendingVendors = () => apiFetch('/api/v1/admin/vendors/pending');
 export const fetchRiders = () => apiFetch('/api/v1/admin/riders');
+export const fetchDrivers = () => apiFetch('/api/v1/admin/drivers');
 export const fetchOrders = (params?: string) => apiFetch(`/api/v1/admin/orders?${params || ''}`);
 export const fetchRevenue = () => apiFetch('/api/v1/admin/finance/revenue');
 export const fetchPromos = () => apiFetch('/api/v1/admin/promos');
@@ -28,6 +29,7 @@ export const fetchAuditLogs = (params?: string) => apiFetch(`/api/v1/admin/audit
 
 export const approveVendor = (id: string) => apiFetch(`/api/v1/admin/vendors/${id}/approve`, { method: 'PUT' });
 export const verifyRiderDocuments = (id: string) => apiFetch(`/api/v1/admin/riders/${id}/verify-documents`, { method: 'PUT' });
+export const verifyDriverDocuments = (id: string) => apiFetch(`/api/v1/admin/drivers/${id}/verify-documents`, { method: 'PUT' });
 export const updateConfig = (key: string, value: unknown) =>
   apiFetch(`/api/v1/admin/config/${key}`, { method: 'PUT', body: JSON.stringify({ value }) });
 
