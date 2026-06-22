@@ -207,6 +207,30 @@ export class VerificationService {
   // Status & gating
   // -------------------------------------------------------------------------
 
+  /**
+   * A mover carries passengers (is a "taxi") when they have a Driver entity;
+   * bike/moto couriers have only a Rider entity. Taxi movers must satisfy the
+   * heavier MOVER_TAXI_EXTRA checklist (hire permit, plate photo, police
+   * clearance, fitness cert — spec §3.4).
+   */
+  private async isTaxiMover(userId: string): Promise<boolean> {
+    const driver = await this.prisma.driver.findUnique({ where: { userId }, select: { id: true } });
+    return driver !== null;
+  }
+
+  /**
+   * The document checklist a role must satisfy. Movers expand to the taxi-extra
+   * docs when the user is a taxi driver, so what onboarding SHOWS is exactly
+   * what the go-online gate REQUIRES — no dead-ends where an apparently-verified
+   * driver is silently blocked on a document they were never asked for.
+   */
+  private async checklistFor(userId: string, countryCode: string, roleKey: ChecklistRole): Promise<string[]> {
+    if (roleKey === 'MOVER') {
+      return this.countryConfig.getMoverChecklist(countryCode, await this.isTaxiMover(userId));
+    }
+    return this.countryConfig.getDocumentChecklist(countryCode, roleKey);
+  }
+
   async getStatus(userId: string, roleKey: ChecklistRole) {
     const user = await this.prisma.user.findUnique({
       where: { id: userId },
@@ -214,7 +238,7 @@ export class VerificationService {
     });
     if (!user) throw new NotFoundError('User', userId);
 
-    const checklist = await this.countryConfig.getDocumentChecklist(user.countryCode, roleKey);
+    const checklist = await this.checklistFor(userId, user.countryCode, roleKey);
     const documents = await this.prisma.verificationDocument.findMany({
       where: { userId, docType: { in: [...checklist, IDENTITY_DOC_TYPE] } },
       orderBy: { createdAt: 'desc' },
@@ -242,7 +266,7 @@ export class VerificationService {
     const user = await this.prisma.user.findUnique({ where: { id: userId }, select: { countryCode: true } });
     if (!user) return false;
 
-    const checklist = await this.countryConfig.getDocumentChecklist(user.countryCode, roleKey);
+    const checklist = await this.checklistFor(userId, user.countryCode, roleKey);
     if (checklist.length === 0) return true;
 
     const approvedDocs = await this.prisma.verificationDocument.findMany({
