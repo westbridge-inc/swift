@@ -28,7 +28,9 @@ const L2_AUTO_PHONE = '+5920006666';
 const L2_MANUAL_PHONE = '+5920007777';
 const ADMIN_PHONE = '+5920004445';
 const TAXI_MOVER_PHONE = '+5920004446';
-const ALL_PHONES = [MOVER_PHONE, VENDOR_PHONE, L2_AUTO_PHONE, L2_MANUAL_PHONE, ADMIN_PHONE, TAXI_MOVER_PHONE];
+const BICYCLE_MOVER_PHONE = '+5920004447';
+const PREVIEW_MOVER_PHONE = '+5920004448';
+const ALL_PHONES = [MOVER_PHONE, VENDOR_PHONE, L2_AUTO_PHONE, L2_MANUAL_PHONE, ADMIN_PHONE, TAXI_MOVER_PHONE, BICYCLE_MOVER_PHONE, PREVIEW_MOVER_PHONE];
 
 const MOVER_DOCS = ['national_id', 'drivers_licence', 'vehicle_registration', 'vehicle_insurance'];
 
@@ -541,6 +543,7 @@ describe('Taxi movers are shown — and gated on — the taxi-extra checklist', 
   // clearance / fitness cert. What onboarding shows must equal what gates.
   const TAXI_DOCS = [...MOVER_DOCS, 'hire_car_permit', 'vehicle_plate_photo', 'police_clearance', 'fitness_cert'];
   let taxiToken: string;
+  let bicycleToken: string;
 
   beforeAll(async () => {
     const taxi = await signup(TAXI_MOVER_PHONE, 'MOVER');
@@ -554,6 +557,11 @@ describe('Taxi movers are shown — and gated on — the taxi-extra checklist', 
         driverLicenseUrl: 'storage://t/dl.jpg', vehicleInsuranceUrl: 'storage://t/ins.jpg',
       },
     });
+    const cyclist = await signup(BICYCLE_MOVER_PHONE, 'MOVER');
+    bicycleToken = cyclist.tokens.accessToken;
+    await app.prisma.rider.create({
+      data: { userId: cyclist.user.id, riderType: 'DELIVERY', vehicleType: 'BICYCLE' },
+    });
   });
 
   it('surfaces police clearance + the taxi extras in the onboarding checklist', async () => {
@@ -565,10 +573,28 @@ describe('Taxi movers are shown — and gated on — the taxi-extra checklist', 
     expect(data.roleVerified).toBe(false);
   });
 
-  it('does not over-ask a courier (rider, no Driver entity) for taxi docs', async () => {
+  it('does not over-ask a motorcycle courier for taxi docs', async () => {
     const res = await inject('GET', '/api/v1/verification/status?role=MOVER', undefined, moverToken);
     const data = res.json().data;
     expect(data.checklist).toEqual(MOVER_DOCS);
     expect(data.checklist).not.toContain('police_clearance');
+  });
+
+  it('asks a bicycle courier for identity only — no licence/registration/insurance', async () => {
+    const res = await inject('GET', '/api/v1/verification/status?role=MOVER', undefined, bicycleToken);
+    const data = res.json().data;
+    expect(data.checklist).toEqual(['national_id']);
+    expect(data.checklist).not.toContain('drivers_licence');
+    expect(data.checklist).not.toContain('vehicle_insurance');
+    expect(data.vehicleType).toBe('BICYCLE');
+  });
+
+  it('previews a vehicle selection before it is saved (display hint, gates ignore it)', async () => {
+    // A fresh mover (no entity) selecting CAR should see the taxi docs as a preview.
+    const fresh = await signup(PREVIEW_MOVER_PHONE, 'MOVER');
+    const res = await inject('GET', '/api/v1/verification/status?role=MOVER&vehicleType=CAR', undefined, fresh.tokens.accessToken);
+    const data = res.json().data;
+    expect(data.checklist).toEqual(TAXI_DOCS);
+    expect(data.vehicleType).toBeNull(); // nothing saved yet — gate would use the entity
   });
 });

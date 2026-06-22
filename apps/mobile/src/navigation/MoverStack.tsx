@@ -44,9 +44,10 @@ function jobAmount(j: any) {
 
 // ─── Onboarding ──────────────────────────────────────────────────────────────
 
-function VehicleSetup({ onDone }: { onDone: () => void }) {
+type VehicleKind = 'BICYCLE' | 'MOTORCYCLE' | 'CAR';
+
+function VehicleSetup({ vt, setVt, onDone }: { vt: VehicleKind; setVt: (v: VehicleKind) => void; onDone: () => void }) {
   const become = useBecomePartner();
-  const [vt, setVt] = useState<'BICYCLE' | 'MOTORCYCLE' | 'CAR'>('MOTORCYCLE');
   const [make, setMake] = useState('');
   const [model, setModel] = useState('');
   const [year, setYear] = useState('');
@@ -106,7 +107,13 @@ function VehicleSetup({ onDone }: { onDone: () => void }) {
 
 function MoverOnboarding({ status }: { status: any }) {
   const { logout } = useAuthStore();
-  const [vehicleSaved, setVehicleSaved] = useState(false);
+  const savedVehicle: VehicleKind | null = status?.vehicleType ?? null;
+  const [vt, setVt] = useState<VehicleKind>(savedVehicle ?? 'MOTORCYCLE');
+  const [vehicleSaved, setVehicleSaved] = useState(!!savedVehicle);
+  // Preview the checklist for the selected vehicle (display hint). The saved
+  // Driver/Rider entity is what actually gates going online, server-side.
+  const { data: preview } = useVerificationStatus<any>('MOVER', vt);
+  const checklistStatus = preview ?? status;
 
   return (
     <SafeAreaView style={{ flex: 1 }} edges={['top']} className="bg-surface-base">
@@ -123,13 +130,13 @@ function MoverOnboarding({ status }: { status: any }) {
             Set up your vehicle and upload your documents. We verify within 24 hours, then you can go online.
           </Text>
         </View>
-        {!vehicleSaved ? <VehicleSetup onDone={() => setVehicleSaved(true)} /> : (
+        {!vehicleSaved ? <VehicleSetup vt={vt} setVt={setVt} onDone={() => setVehicleSaved(true)} /> : (
           <Card className="mb-lg flex-row items-center">
             <Feather name="check-circle" size={18} color={color.success} />
             <Text className="ml-sm flex-1 text-sm font-semibold text-text-primary">Vehicle saved</Text>
           </Card>
         )}
-        <DocumentChecklist role="MOVER" status={status} />
+        <DocumentChecklist role="MOVER" status={checklistStatus} />
       </ScrollView>
     </SafeAreaView>
   );

@@ -10,6 +10,9 @@ const checklistRoleSchema = z.enum(['MOVER', 'RESTAURANT', 'SUPERMARKET', 'STORE
 
 const statusQuerySchema = z.object({
   role: checklistRoleSchema.default('MOVER'),
+  // Preview the checklist for a vehicle the mover is selecting but hasn't saved
+  // yet. Display-only — gates always use the saved Driver/Rider entity.
+  vehicleType: z.enum(['BICYCLE', 'MOTORCYCLE', 'CAR']).optional(),
 });
 
 // DPA §3.5: a document upload is only accepted with explicit consent and the
@@ -40,8 +43,8 @@ export async function verificationRoutes(app: FastifyInstance) {
 
   /** GET /status?role= — checklist, submitted docs, what's missing. */
   app.get('/status', auth, async (request) => {
-    const { role } = statusQuerySchema.parse(request.query);
-    const status = await verification.getStatus(request.user.userId, role);
+    const { role, vehicleType } = statusQuerySchema.parse(request.query);
+    const status = await verification.getStatus(request.user.userId, role, vehicleType);
     return { success: true, data: status };
   });
 

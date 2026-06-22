@@ -281,7 +281,7 @@ describe('Spec §I — acceptance conformance baseline', () => {
   it('5. a mover with the full approved checklist is allowed to operate', async () => {
     const u = await makeUser(PHONES[0]!);
     for (const docType of GY_MOVER_DOCS) await approveDoc(u.id, docType);
-    const status = await verification.getLiveOperationStatus(u.id, { taxi: false });
+    const status = await verification.getLiveOperationStatus(u.id, { vehicleType: 'MOTORCYCLE' });
     expect(status.allowed).toBe(true);
     expect(status.reason).toBe('ok');
   });
@@ -292,7 +292,7 @@ describe('Spec §I — acceptance conformance baseline', () => {
     // legacyVerified bypasses the base checklist so we isolate the taxi insurance gate;
     // an APPROVED vehicle_insurance with no confirmed HIRE class must still hard-fail.
     await approveDoc(u.id, 'vehicle_insurance');
-    const status = await verification.getLiveOperationStatus(u.id, { taxi: true, legacyVerified: true });
+    const status = await verification.getLiveOperationStatus(u.id, { vehicleType: 'CAR', legacyVerified: true });
     expect(status.allowed).toBe(false);
     expect(status.reason).toBe('insurance');
   });
