@@ -112,6 +112,7 @@ export function CartScreen({ navigation }: any) {
   }
 
   const meetsMin = cart.meetsMinimum !== false;
+  const hasUnavailable = items.some((it: any) => it.isAvailable === false);
   const shortfall = Math.max(0, Number(cart.vendor?.minOrderAmount ?? 0) - Number(cart.subtotalCustomer ?? 0));
 
   const Summary = (
@@ -151,10 +152,12 @@ export function CartScreen({ navigation }: any) {
       </View>
 
       <View className="absolute inset-x-0 bottom-0 border-t border-border-subtle bg-surface-base px-lg pb-2xl pt-md">
-        {!meetsMin ? (
+        {hasUnavailable ? (
+          <Text className="mb-sm text-center text-sm text-error">Remove unavailable items to continue.</Text>
+        ) : !meetsMin ? (
           <Text className="mb-sm text-center text-sm text-text-secondary">Add {money(shortfall)} more to reach the minimum.</Text>
         ) : null}
-        <Button disabled={!meetsMin || busy} onPress={() => navigation?.navigate?.('Checkout')}>
+        <Button disabled={!meetsMin || busy || hasUnavailable} onPress={() => navigation?.navigate?.('Checkout')}>
           <View className="w-full flex-row items-center justify-between">
             <Text className="font-body font-semibold text-white">Go to checkout</Text>
             <Text className="font-body font-semibold text-white">{money(cart.totalAmount)}</Text>
