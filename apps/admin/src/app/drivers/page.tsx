@@ -1,18 +1,14 @@
 'use client';
 
-import { useQuery } from '@tanstack/react-query';
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import { fetchDrivers, verifyDriverDocuments } from '@/lib/api';
 
 export default function DriversPage() {
-  const { data, isLoading } = useQuery({
-    queryKey: ['drivers'],
-    queryFn: async () => {
-      const token = typeof window !== 'undefined' ? localStorage.getItem('swift_admin_token') : null;
-      const res = await fetch(`${process.env['NEXT_PUBLIC_API_URL'] || 'http://localhost:3000'}/api/v1/admin/drivers`, {
-        headers: { ...(token && { Authorization: `Bearer ${token}` }) },
-      });
-      if (!res.ok) throw new Error('Failed to fetch drivers');
-      return res.json();
-    },
+  const queryClient = useQueryClient();
+  const { data, isLoading } = useQuery({ queryKey: ['drivers'], queryFn: fetchDrivers });
+  const verifyMutation = useMutation({
+    mutationFn: verifyDriverDocuments,
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['drivers'] }),
   });
 
   return (
@@ -28,19 +24,20 @@ export default function DriversPage() {
               <th className="text-left p-4 text-[#8E8E93] font-medium">Status</th>
               <th className="text-left p-4 text-[#8E8E93] font-medium">Documents</th>
               <th className="text-left p-4 text-[#8E8E93] font-medium">Rating</th>
-              <th className="text-right p-4 text-[#8E8E93] font-medium">Total Trips</th>
+              <th className="text-left p-4 text-[#8E8E93] font-medium">Total Trips</th>
+              <th className="text-right p-4 text-[#8E8E93] font-medium">Actions</th>
             </tr>
           </thead>
           <tbody>
             {isLoading ? (
-              <tr><td colSpan={7} className="p-8 text-center text-[#8E8E93]">Loading...</td></tr>
+              <tr><td colSpan={8} className="p-8 text-center text-[#8E8E93]">Loading...</td></tr>
             ) : data?.data?.length === 0 ? (
-              <tr><td colSpan={7} className="p-8 text-center text-[#8E8E93]">No drivers found</td></tr>
+              <tr><td colSpan={8} className="p-8 text-center text-[#8E8E93]">No drivers found</td></tr>
             ) : (
               data?.data?.map((driver: any) => (
                 <tr key={driver.id} className="border-b border-[#38383A] hover:bg-white/5">
                   <td className="p-4 font-medium">{driver.user?.firstName} {driver.user?.lastName}</td>
-                  <td className="p-4">{driver.user?.phone || '\u2014'}</td>
+                  <td className="p-4">{driver.user?.phone || '—'}</td>
                   <td className="p-4">{driver.vehicleMake} {driver.vehicleModel}</td>
                   <td className="p-4">
                     <span className={`px-2 py-1 rounded-full text-xs ${
@@ -52,8 +49,19 @@ export default function DriversPage() {
                       driver.documentsVerified ? 'bg-green-500/20 text-green-400' : 'bg-yellow-500/20 text-yellow-400'
                     }`}>{driver.documentsVerified ? 'Verified' : 'Pending'}</span>
                   </td>
-                  <td className="p-4">{driver.averageRating?.toFixed(1) || '\u2014'}</td>
-                  <td className="p-4 text-right">{driver.totalTrips || 0}</td>
+                  <td className="p-4">{driver.averageRating?.toFixed(1) || '—'}</td>
+                  <td className="p-4">{driver.totalTrips || 0}</td>
+                  <td className="p-4 text-right">
+                    {!driver.documentsVerified && (
+                      <button
+                        onClick={() => verifyMutation.mutate(driver.id)}
+                        disabled={verifyMutation.isPending}
+                        className="px-3 py-1 bg-[#E8192C] text-white rounded-lg text-xs hover:bg-[#E8192C]/80 disabled:opacity-50"
+                      >
+                        Verify Docs
+                      </button>
+                    )}
+                  </td>
                 </tr>
               ))
             )}
