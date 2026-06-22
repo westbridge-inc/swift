@@ -68,6 +68,15 @@ export function useOrder<T = any>(id: string, refetchInterval?: number) {
   });
 }
 
+export function useRateOrder(id: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (body: { vendorScore?: number; vendorComment?: string; riderScore?: number; riderComment?: string }) =>
+      unwrap(customerApi.rateOrder(id, body)),
+    onSuccess: () => qc.invalidateQueries({ queryKey: customerKeys.order(id) }),
+  });
+}
+
 export function useNotifications<T = any>() {
   return useQuery<T>({
     queryKey: customerKeys.notifications,
