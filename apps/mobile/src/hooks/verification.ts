@@ -8,10 +8,10 @@ async function unwrap<T = any>(p: Promise<any>): Promise<T> {
   return r?.data?.data as T;
 }
 
-export function useVerificationStatus<T = any>(role: string) {
+export function useVerificationStatus<T = any>(role: string, vehicleType?: string) {
   return useQuery<T>({
-    queryKey: ['verification', role],
-    queryFn: () => unwrap<T>(verificationApi.status(role)),
+    queryKey: ['verification', role, vehicleType],
+    queryFn: () => unwrap<T>(verificationApi.status(role, vehicleType)),
   });
 }
 
