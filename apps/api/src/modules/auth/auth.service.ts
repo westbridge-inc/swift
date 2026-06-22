@@ -4,6 +4,7 @@ import bcrypt from 'bcryptjs';
 import type { UserRole } from '@prisma/client';
 import { AppError } from '../../utils/errors';
 import { generateOtp, storeOtp, verifyOtp, checkOtpRateLimit } from '../../utils/otp';
+import { checkOtpDailyBudget } from '../../utils/sms-budget';
 import { CountryConfigService } from '../country/country-config.service';
 import { getChannels } from '../../providers/notifications/channels';
 
@@ -36,6 +37,16 @@ export class AuthService {
     const allowed = await checkOtpRateLimit(this.app.redis, phone);
     if (!allowed) {
       throw new AppError(429, 'RATE_LIMITED', 'Please wait before requesting another OTP');
+    }
+
+    // Hard daily cost ceilings (per-phone + global circuit breaker) so an abuse
+    // spike can't run up the SMS bill. Checked before any SMS is generated/sent.
+    const budget = await checkOtpDailyBudget(this.app.redis, phone);
+    if (!budget.allowed) {
+      if (budget.reason === 'global_daily') {
+        this.app.log.error('[sms-budget] global daily OTP cap reached — refusing further sends until reset');
+      }
+      throw new AppError(429, 'RATE_LIMITED', 'Too many verification requests right now. Please try again later.');
     }
 
     const otp = generateOtp();
