@@ -36,6 +36,16 @@ defaults to Haversine ETAs. The *only* place a Google Maps key is effectively
 required is **rendering the map inside the Android app** (`react-native-maps`);
 iOS uses Apple Maps for free. (A planned MapLibre swap would remove even that.)
 
+### Cost controls (so the bill can't blow up)
+- **SMS (the main abusable cost)** — OTP has per-minute (1/phone), per-IP (5/min)
+  *and* **hard daily ceilings**: `OTP_PHONE_DAILY_CAP` (default 8/phone/day) and
+  `OTP_GLOBAL_DAILY_CAP` (default 5000/day — a **circuit breaker** that refuses
+  further sends and logs an alert). Tune to your real volume.
+- **Also set a Twilio account spending limit + geo-permissions** (restrict to
+  `+592`) — the absolute ceiling for *all* SMS, including notifications.
+- **Maps** default to free Haversine (no per-request cost). **AI** is optional and
+  only runs on explicit, authenticated actions — never per request.
+
 ---
 
 ## 1. Provision infrastructure

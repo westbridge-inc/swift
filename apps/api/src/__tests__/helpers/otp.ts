@@ -7,8 +7,15 @@ import type { LightMyRequestResponse } from 'fastify';
  * send-otp -> code stored in Redis -> verify-otp with that code.
  */
 export async function requestOtp(app: FastifyInstance, phone: string): Promise<string> {
-  // Reset the per-phone resend cooldown so repeated test runs are deterministic
-  await app.redis.del(`otp_rate:${phone}`, `otp_attempt:${phone}`);
+  // Reset the per-phone cooldown AND the daily SMS-budget counters so repeated
+  // test runs stay deterministic (these caps are cost guardrails, not test gates).
+  const day = new Date().toISOString().slice(0, 10);
+  await app.redis.del(
+    `otp_rate:${phone}`,
+    `otp_attempt:${phone}`,
+    `otp_phone_day:${day}:${phone}`,
+    `sms_global_day:${day}`,
+  );
 
   const res = await app.inject({
     method: 'POST',
