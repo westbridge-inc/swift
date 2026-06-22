@@ -244,7 +244,10 @@ export function HomeScreen({ navigation }: any) {
     queryFn: async () => (await customerApi.getHome(latitude ?? undefined, longitude ?? undefined)).data,
   });
   const home = data?.data ?? {};
-  const allVendors: any[] = home.nearby ?? home.openVendors ?? home.featured ?? [];
+  const allVendors: any[] = useMemo(
+    () => home.nearby ?? home.openVendors ?? home.featured ?? [],
+    [home.nearby, home.openVendors, home.featured],
+  );
 
   const cuisines = useMemo(() => {
     const set = new Set<string>();
