@@ -430,7 +430,10 @@ async function main() {
   // and document checklists. Adding a country = adding a row, not code.
   const guyanaTiers = { mover: 12000, smallVendor: 20000, largeVendor: 30000 };
   const guyanaChecklists = {
-    MOVER: ['national_id', 'drivers_licence', 'vehicle_registration', 'vehicle_insurance'],
+    // Every mover (incl. bicycle couriers) proves identity.
+    MOVER: ['national_id'],
+    // Motor vehicles (motorcycle + car) add licence, registration, insurance.
+    MOVER_MOTOR: ['drivers_licence', 'vehicle_registration', 'vehicle_insurance'],
     // Taxi drivers carry passengers — heaviest checklist: occupational permit,
     // H-plate photo, police clearance, and an annual fitness certificate (§3.4).
     MOVER_TAXI_EXTRA: ['hire_car_permit', 'vehicle_plate_photo', 'police_clearance', 'fitness_cert'],

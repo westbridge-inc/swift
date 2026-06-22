@@ -115,7 +115,7 @@ export async function driverRoutes(app: FastifyInstance) {
     // current, hire-class motor insurance confirmed before carrying passengers.
     // The legacy documentsVerified flag only grandfathers the base documents.
     const live = await verification.getLiveOperationStatus(request.user.userId, {
-      taxi: true,
+      vehicleType: 'CAR',
       legacyVerified: driver.documentsVerified,
     });
     if (!live.allowed) {

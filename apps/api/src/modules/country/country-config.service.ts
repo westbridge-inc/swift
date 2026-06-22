@@ -1,4 +1,4 @@
-import type { PrismaClient, CountryConfig } from '@prisma/client';
+import type { PrismaClient, CountryConfig, VehicleType } from '@prisma/client';
 import { NotFoundError } from '../../utils/errors';
 
 /** Weekly subscription tiers in local currency. */
@@ -51,14 +51,20 @@ export class CountryConfigService {
   }
 
   /**
-   * Mover checklist. Riders need only the MOVER base; taxi drivers also need the
-   * MOVER_TAXI_EXTRA docs (hire permit, plate photo, police clearance, fitness).
-   * Used both to validate submissions and to gate live operation.
+   * Mover checklist, scaled to the vehicle so we never ask for documents a
+   * vehicle can't have (a bicycle has no driver's licence or insurance):
+   *   BICYCLE    → MOVER base (identity)
+   *   MOTORCYCLE → base + MOVER_MOTOR (licence, registration, insurance)
+   *   CAR (taxi) → the above + MOVER_TAXI_EXTRA (hire permit, plate photo,
+   *                police clearance, fitness — spec §3.4)
+   * Used both to display the checklist and to gate live operation.
    */
-  async getMoverChecklist(code: string, taxi: boolean): Promise<string[]> {
+  async getMoverChecklist(code: string, vehicleType: VehicleType): Promise<string[]> {
     const config = await this.getByCode(code);
     const lists = config.documentChecklists as Record<string, string[]>;
     const base = lists['MOVER'] ?? [];
-    return taxi ? [...base, ...(lists['MOVER_TAXI_EXTRA'] ?? [])] : base;
+    if (vehicleType === 'BICYCLE') return base;
+    const motor = [...base, ...(lists['MOVER_MOTOR'] ?? [])];
+    return vehicleType === 'CAR' ? [...motor, ...(lists['MOVER_TAXI_EXTRA'] ?? [])] : motor;
   }
 }
