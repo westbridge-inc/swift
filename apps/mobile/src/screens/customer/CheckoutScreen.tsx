@@ -45,6 +45,12 @@ export function CheckoutScreen({ navigation }: any) {
     }
   }, [defaultAddressId, cart?.deliveryAddressId]);
 
+  useEffect(() => {
+    // Reflect a tip already on the cart so the selected pill matches the summary
+    // and isn't silently reset to 0 when the order is placed.
+    if (cart?.tipAmount != null) setSelectedTip(Number(cart.tipAmount));
+  }, [cart?.tipAmount]);
+
   if (isLoading || !cart) {
     return (
       <SafeAreaView style={{ flex: 1 }} edges={['top']} className="bg-surface-base">
