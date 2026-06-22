@@ -7,6 +7,23 @@ function humanize(docType: string) {
   return docType.replace(/[_-]/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
 }
 
+// Friendly names for known checklist docs; unknown slugs fall back to humanize().
+const DOC_LABELS: Record<string, string> = {
+  national_id: 'National ID',
+  drivers_licence: "Driver's Licence",
+  vehicle_registration: 'Vehicle Registration',
+  vehicle_insurance: 'Vehicle Insurance',
+  hire_car_permit: 'Hire-Car Permit',
+  vehicle_plate_photo: 'Vehicle Plate Photo',
+  police_clearance: 'Police Clearance Certificate',
+  fitness_cert: 'Fitness Certificate',
+  owner_national_id: 'Owner National ID',
+  business_registration: 'Business Registration',
+  food_handler_cert: "Food Handler's Certificate",
+  selfie: 'Selfie',
+};
+const label = (docType: string) => DOC_LABELS[docType] ?? humanize(docType);
+
 type DocStatus = 'APPROVED' | 'PENDING' | 'REJECTED' | undefined;
 
 export function DocumentUploadCard({
@@ -56,7 +73,7 @@ export function DocumentUploadCard({
         <View className="flex-row items-center justify-between">
           <View className="flex-1 pr-md">
             <Text className="text-xs text-text-secondary">{caption}</Text>
-            <Text className="text-base font-semibold">{humanize(docType)}</Text>
+            <Text className="text-base font-semibold">{label(docType)}</Text>
           </View>
           {upload.isPending ? (
             <ActivityIndicator />

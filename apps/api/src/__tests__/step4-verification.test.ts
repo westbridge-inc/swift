@@ -27,7 +27,8 @@ const VENDOR_PHONE = '+5920005555';
 const L2_AUTO_PHONE = '+5920006666';
 const L2_MANUAL_PHONE = '+5920007777';
 const ADMIN_PHONE = '+5920004445';
-const ALL_PHONES = [MOVER_PHONE, VENDOR_PHONE, L2_AUTO_PHONE, L2_MANUAL_PHONE, ADMIN_PHONE];
+const TAXI_MOVER_PHONE = '+5920004446';
+const ALL_PHONES = [MOVER_PHONE, VENDOR_PHONE, L2_AUTO_PHONE, L2_MANUAL_PHONE, ADMIN_PHONE, TAXI_MOVER_PHONE];
 
 const MOVER_DOCS = ['national_id', 'drivers_licence', 'vehicle_registration', 'vehicle_insurance'];
 
@@ -530,5 +531,44 @@ describe('Phase 3 — taxi checklist merge + auto-KYC audit', () => {
       where: { action: 'KYC_AUTO_APPROVE', entityId: res.json().data.id },
     });
     expect(audit).not.toBeNull();
+  });
+});
+
+describe('Taxi movers are shown — and gated on — the taxi-extra checklist', () => {
+  // The dead-end this prevents: a taxi driver was only ever shown the 4 base
+  // mover docs, uploaded them, saw "verified" — then go-online silently failed
+  // because the live gate ALSO requires hire permit / plate photo / police
+  // clearance / fitness cert. What onboarding shows must equal what gates.
+  const TAXI_DOCS = [...MOVER_DOCS, 'hire_car_permit', 'vehicle_plate_photo', 'police_clearance', 'fitness_cert'];
+  let taxiToken: string;
+
+  beforeAll(async () => {
+    const taxi = await signup(TAXI_MOVER_PHONE, 'MOVER');
+    taxiToken = taxi.tokens.accessToken;
+    // A car-for-hire mover has a Driver entity; bike/moto couriers have a Rider.
+    await app.prisma.driver.create({
+      data: {
+        userId: taxi.user.id,
+        vehicleMake: 'Toyota', vehicleModel: 'Allion', vehicleYear: 2020,
+        vehicleColor: 'Silver', licensePlate: 'HC-S4TAXI',
+        driverLicenseUrl: 'storage://t/dl.jpg', vehicleInsuranceUrl: 'storage://t/ins.jpg',
+      },
+    });
+  });
+
+  it('surfaces police clearance + the taxi extras in the onboarding checklist', async () => {
+    const res = await inject('GET', '/api/v1/verification/status?role=MOVER', undefined, taxiToken);
+    expect(res.statusCode).toBe(200);
+    const data = res.json().data;
+    expect(data.checklist).toEqual(TAXI_DOCS);
+    expect(data.missing).toContain('police_clearance');
+    expect(data.roleVerified).toBe(false);
+  });
+
+  it('does not over-ask a courier (rider, no Driver entity) for taxi docs', async () => {
+    const res = await inject('GET', '/api/v1/verification/status?role=MOVER', undefined, moverToken);
+    const data = res.json().data;
+    expect(data.checklist).toEqual(MOVER_DOCS);
+    expect(data.checklist).not.toContain('police_clearance');
   });
 });
