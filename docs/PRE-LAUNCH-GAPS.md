@@ -4,7 +4,7 @@ _Last updated: 2026-06-20. An honest, current picture for anyone who lands on th
 
 Swift is **substantially built and on `main`** — the six verticals, the trust engine, cash-float
 dispatch (proximity offer cascade + accept/decline), billing + 14-day trials, full spec §I
-conformance (8/8, CI-enforced), taxi **ride classes** (Standard/Comfort/XL), the app-store-grade
+conformance (8/8, CI-enforced), the app-store-grade
 mobile UI, and the admin console. CI is green, and the API boots to a healthy `/health` from the
 documented quickstart. **What remains is integration, QA, and deploy — not feature invention.**
 
@@ -25,7 +25,7 @@ set these in `apps/api/.env` (all documented in `apps/api/.env.example`):
 
 The mobile app is built and type/lint-clean, but the iOS-simulator bridge (idb) is unavailable in
 the build environment, so several flows have **not had on-device tap-through QA**: the customer app
-sweep, the new **taxi ride-class selector**, and the vendor/mover dashboards. Run the app on a
+sweep and the vendor/mover dashboards. Run the app on a
 device/simulator and walk the core flows before launch.
 
 ## 3. Deploy
@@ -48,9 +48,10 @@ HIRE-class insurance gate, append-only audit log). It needs **ops staff** to wor
   "priority/express" fee would charge for the default behaviour. It becomes meaningful only with
   batching / multi-order routing (V2). The **courier** vertical already has speed tiers
   (`STANDARD/EXPRESS/RUSH`).
-- **Ride-class premium-driver enforcement** — `Driver.vehicleClass` already gates dispatch by class;
-  an admin UI / onboarding step to mark drivers as `COMFORT`/`XL` is the follow-up (all default to
-  `STANDARD`, so those tiers match no driver until a premium fleet is onboarded).
+- **Taxi ride classes (Comfort/XL)** — removed for V1: every driver was `STANDARD` with no way to
+  mark a vehicle premium, so Comfort/XL could never dispatch (the selector was dead UI). Reintroduce
+  alongside a premium-fleet onboarding step that sets the driver's class — migration
+  `20260620034716_add_ride_classes` is the template.
 - **Mobile MapLibre rendering** — the backend OSRM provider has landed; swapping the mobile map
   component (`react-native-maps` → MapLibre) is a native-module change needing on-device work.
 - **Wallet / fintech** — dormant by design (cash-only V1). `walletBalance`/`Transaction` schema is
