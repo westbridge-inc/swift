@@ -11,7 +11,7 @@ import { CartScreen } from '../screens/customer/CartScreen';
 import { CheckoutScreen } from '../screens/customer/CheckoutScreen';
 import { OrderTrackingScreen } from '../screens/customer/OrderTrackingScreen';
 import { TaxiScreen } from '../modules/movement/screens/TaxiScreen';
-import { ServicesScreen } from '../screens/customer/ServicesScreen';
+import { ServicesScreen } from '../modules/services/screens/ServicesScreen';
 import { IdentityVerificationScreen } from '../screens/customer/IdentityVerificationScreen';
 import { AddAddressScreen } from '../screens/customer/AddAddressScreen';
 import { LocationPickerScreen } from '../screens/customer/LocationPickerScreen';
