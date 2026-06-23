@@ -110,18 +110,18 @@ function BusinessSetup() {
 }
 
 function VendorOnboarding({ store }: { store: any }) {
-  const { data: status } = useVerificationStatus<any>(store.vendorType);
+  const { data: status, isLoading, isError, refetch } = useVerificationStatus<any>(store.vendorType);
   return (
     <SafeAreaView style={{ flex: 1 }} edges={['top']} className="bg-surface-base">
       <Header title={store.name} />
       <ScrollView className="flex-1" contentContainerStyle={{ paddingHorizontal: 16, paddingBottom: 32 }} showsVerticalScrollIndicator={false}>
-        <View className="mb-md flex-row items-start rounded-xl bg-surface-subtle px-lg py-md">
-          <MaterialCommunityIcons name="shield-check" size={20} color={color.brand[500]} />
-          <Text className="ml-sm flex-1 text-sm text-text-secondary">
-            Your store is under review. Upload your business documents — we approve within 24 hours, then you can take orders.
-          </Text>
-        </View>
-        <DocumentChecklist role={store.vendorType} status={status} />
+        <DocumentChecklist
+          role={store.vendorType}
+          status={status}
+          isLoading={isLoading}
+          isError={isError}
+          onRetry={refetch}
+        />
       </ScrollView>
     </SafeAreaView>
   );
