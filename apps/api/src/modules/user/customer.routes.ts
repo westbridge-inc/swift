@@ -243,8 +243,10 @@ async function buildCartResponse(
 
   const subtotalCustomer = subtotalBase;
 
-  // Delivery fee
-  const deliveryFee = calculateDeliveryFee(distanceKm);
+  // Delivery fee — services are appointments (you go to them / they come to you),
+  // not deliveries, so they never carry a delivery fee.
+  const isService = cart.vendor?.vendorType === 'SERVICE';
+  const deliveryFee = isService ? 0 : calculateDeliveryFee(distanceKm);
 
   // Promo discount
   let discount = 0;
