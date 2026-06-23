@@ -145,6 +145,25 @@ export const rideApi = {
   cancel: (id: string, reason?: string) => api.post(`/rides/${id}/cancel`, { reason }),
 };
 
+// Places (mounted at /api/v1/places) — "Where to?" search behind the server-side
+// provider seam; the Google key never reaches the client.
+export interface PlaceSuggestion {
+  placeId: string;
+  primary: string;
+  secondary?: string;
+}
+export interface PlaceDetail {
+  placeId: string;
+  label: string;
+  lat: number;
+  lng: number;
+}
+export const placesApi = {
+  autocomplete: (q: string, near?: Point) =>
+    api.get('/places/autocomplete', { params: { q, ...(near ? { lat: near.lat, lng: near.lng } : {}) } }),
+  details: (placeId: string) => api.get('/places/details', { params: { placeId } }),
+};
+
 // Courier (mounted at /api/v1/courier)
 type CourierSize = 'SMALL' | 'MEDIUM' | 'LARGE' | 'EXTRA_LARGE';
 type CourierSpeed = 'STANDARD' | 'EXPRESS' | 'RUSH';
