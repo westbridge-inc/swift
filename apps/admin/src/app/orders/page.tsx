@@ -1,11 +1,20 @@
 'use client';
 
-import { useQuery } from '@tanstack/react-query';
-import { fetchOrders } from '@/lib/api';
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import { fetchOrders, cancelOrder } from '@/lib/api';
 import { statusClass } from '@/lib/status';
 
+// Orders past these states can't be cancelled/refunded by an operator.
+const TERMINAL = ['DELIVERED', 'COMPLETED', 'CANCELLED', 'REFUNDED', 'FAILED'];
+
 export default function OrdersPage() {
+  const queryClient = useQueryClient();
   const { data, isLoading } = useQuery({ queryKey: ['orders'], queryFn: () => fetchOrders() });
+  const cancelMutation = useMutation({
+    mutationFn: ({ id, refund }: { id: string; refund: boolean }) =>
+      cancelOrder(id, { reason: 'Cancelled by admin', refund }),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['orders'] }),
+  });
 
   return (
     <div>
@@ -20,19 +29,20 @@ export default function OrdersPage() {
               <th className="text-left p-4 text-[#8E8E93] font-medium">Status</th>
               <th className="text-left p-4 text-[#8E8E93] font-medium">Vendor</th>
               <th className="text-right p-4 text-[#8E8E93] font-medium">Total</th>
+              <th className="text-right p-4 text-[#8E8E93] font-medium">Actions</th>
             </tr>
           </thead>
           <tbody>
             {isLoading ? (
               [0, 1, 2, 3, 4].map((i) => (
                 <tr key={i} className="border-b border-[#38383A]">
-                  <td colSpan={6} className="p-4">
+                  <td colSpan={7} className="p-4">
                     <div className="h-5 w-full rounded bg-[#2C2C2E] animate-pulse" />
                   </td>
                 </tr>
               ))
             ) : data?.data?.length === 0 ? (
-              <tr><td colSpan={6} className="p-8 text-center text-[#8E8E93]">No orders yet</td></tr>
+              <tr><td colSpan={7} className="p-8 text-center text-[#8E8E93]">No orders yet</td></tr>
             ) : (
               data?.data?.map((order: any) => (
                 <tr key={order.id} className="border-b border-[#38383A] hover:bg-white/5">
@@ -54,6 +64,28 @@ export default function OrdersPage() {
                   </td>
                   <td className="p-4">{order.vendor?.name || '\u2014'}</td>
                   <td className="p-4 text-right">${Number(order.totalAmount).toLocaleString()}</td>
+                  <td className="p-4 text-right">
+                    {TERMINAL.includes(order.status) ? (
+                      <span className="text-[#8E8E93]">—</span>
+                    ) : (
+                      <div className="flex gap-2 justify-end">
+                        <button
+                          onClick={() => { if (window.confirm(`Cancel order ${order.orderNumber}?`)) cancelMutation.mutate({ id: order.id, refund: false }); }}
+                          disabled={cancelMutation.isPending}
+                          className="px-3 py-1 rounded-lg text-xs border border-[#38383A] text-white hover:bg-white/10 disabled:opacity-50"
+                        >
+                          Cancel
+                        </button>
+                        <button
+                          onClick={() => { if (window.confirm(`Cancel order ${order.orderNumber} AND refund cash paid?`)) cancelMutation.mutate({ id: order.id, refund: true }); }}
+                          disabled={cancelMutation.isPending}
+                          className="px-3 py-1 rounded-lg text-xs bg-[#E8192C] text-white hover:bg-[#E8192C]/80 disabled:opacity-50"
+                        >
+                          Refund
+                        </button>
+                      </div>
+                    )}
+                  </td>
                 </tr>
               ))
             )}
