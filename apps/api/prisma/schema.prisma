@@ -776,6 +776,9 @@ model Order {
   /// PICKUP skips dispatch, APPOINTMENT books the slot at vendor acceptance.
   fulfillment     FulfillmentType @default(DELIVERY)
   appointmentSlot DateTime?
+  /// Takeaway: 4-digit code the customer shows to collect a PICKUP order; the
+  /// vendor verifies it to close the order (no rider involved). Null otherwise.
+  pickupCode      String?
 
   /// Deterministic risk heuristic (new account + high value + odd hours):
   /// the vendor sees a call-to-confirm prompt. Never an AI decision.

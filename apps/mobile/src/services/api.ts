@@ -300,6 +300,7 @@ export const vendorApi = {
   acceptOrder: (id: string) => api.put(`/vendor/orders/${id}/accept`),
   preparing: (id: string) => api.put(`/vendor/orders/${id}/preparing`),
   ready: (id: string) => api.put(`/vendor/orders/${id}/ready`),
+  completePickup: (id: string, code?: string) => api.put(`/vendor/orders/${id}/complete-pickup`, { code }),
   reject: (id: string) => api.put(`/vendor/orders/${id}/reject`),
   items: () => api.get('/vendor/items'),
   subscription: () => api.get('/vendor/subscription'),
