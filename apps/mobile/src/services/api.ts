@@ -88,6 +88,10 @@ export const customerApi = {
   getProfile: () => api.get('/customer/profile'),
   updateProfile: (data: { firstName?: string; lastName?: string }) => api.put('/customer/profile', data),
   switchRole: (role: string) => api.post('/customer/switch-role', { role }),
+  // Redeem a referral code (writes referredBy). `token` lets a just-registered
+  // user redeem before the auth store has propagated.
+  redeemReferral: (code: string, token?: string) =>
+    api.post('/customer/referral/redeem', { code }, token ? { headers: { Authorization: `Bearer ${token}` } } : undefined),
   getAddresses: () => api.get('/customer/addresses'),
   addAddress: (data: AddressInput) => api.post('/customer/addresses', data),
   getHome: (lat?: number, lng?: number) => api.get('/customer/home', { params: { lat, lng } }),

@@ -1,7 +1,7 @@
 import { useState } from 'react';
-import { View } from 'react-native';
+import { View, Alert } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { authApi } from '../../services/api';
+import { authApi, customerApi } from '../../services/api';
 import { useAuthStore } from '../../stores/authStore';
 import { Text, Heading, Button, Field } from '../../components/ui';
 
@@ -11,6 +11,7 @@ export function RegisterScreen({ route }: any) {
   const [firstName, setFirstName] = useState('');
   const [lastName, setLastName] = useState('');
   const [email, setEmail] = useState('');
+  const [referral, setReferral] = useState('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(false);
   const { setAuth, countryCode } = useAuthStore();
@@ -27,7 +28,15 @@ export function RegisterScreen({ route }: any) {
         role,
         countryCode: countryCode ?? 'GY',
       });
-      setAuth(data.data.user, data.data.tokens.accessToken, data.data.tokens.refreshToken);
+      const access = data.data.tokens.accessToken;
+      setAuth(data.data.user, access, data.data.tokens.refreshToken);
+      if (role === 'CUSTOMER' && referral.trim()) {
+        try {
+          await customerApi.redeemReferral(referral.trim(), access);
+        } catch {
+          Alert.alert('Account created', 'We couldn’t apply that referral code, but your account is ready.');
+        }
+      }
     } catch {
       setError(true);
       setLoading(false);
@@ -50,6 +59,15 @@ export function RegisterScreen({ route }: any) {
           keyboardType="email-address"
           autoCapitalize="none"
         />
+        {role === 'CUSTOMER' ? (
+          <Field
+            label="Referral code (optional)"
+            value={referral}
+            onChangeText={setReferral}
+            autoCapitalize="characters"
+            autoCorrect={false}
+          />
+        ) : null}
         {error ? <Text className="mb-sm text-center text-sm text-error">Couldn&apos;t create your account. Try again.</Text> : null}
         <Button
           label="Create account"

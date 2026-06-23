@@ -1,8 +1,7 @@
-import { View, ScrollView, Pressable } from 'react-native';
+import { View, ScrollView, Share } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { Feather, MaterialCommunityIcons } from '@expo/vector-icons';
 import { color } from '@swift/ui';
-import { Text, Heading, Card, Button, Badge, elevation } from '../../components/ui';
+import { Text, Heading, Badge, SettingsGroup, SettingsRow } from '../../components/ui';
 import { useAuthStore } from '../../stores/authStore';
 import { useProfile, useAddresses } from '../../hooks';
 
@@ -15,88 +14,92 @@ export function AccountScreen({ navigation }: any) {
   const lastName = profile?.lastName ?? user?.lastName ?? '';
   const phone = profile?.phone ?? user?.phone ?? '';
   const initials = `${(firstName[0] || '').toUpperCase()}${(lastName[0] || '').toUpperCase()}` || '?';
+  const fullName = `${firstName} ${lastName}`.trim() || 'Your account';
   const list = addresses ?? [];
+  const orders = profile?.customer?.totalOrders ?? 0;
+  const referralCode: string | undefined = profile?.customer?.referralCode;
+  const referredCount: number = profile?.customer?.referredCount ?? 0;
+
+  const invite = () => {
+    if (!referralCode) return;
+    Share.share({
+      message: `Join me on Swift — Guyana's everyday app for food, groceries, rides and more. Use my code ${referralCode} when you sign up.`,
+    }).catch(() => {});
+  };
 
   return (
-    <SafeAreaView style={{ flex: 1 }} edges={['top']} className="bg-surface-base">
+    <SafeAreaView style={{ flex: 1 }} edges={['top']} className="bg-surface-subtle">
       <View className="px-lg pb-sm pt-md">
         <Heading size="2xl">Account</Heading>
       </View>
-      <ScrollView className="flex-1" contentContainerStyle={{ paddingBottom: 32 }} showsVerticalScrollIndicator={false}>
-        <View className="px-lg">
-          <View className="flex-row items-center rounded-2xl bg-brand-500 p-lg" style={elevation.floating}>
-            <View className="h-16 w-16 items-center justify-center rounded-full bg-surface-base">
-              <Text className="text-xl font-bold text-brand-600">{initials}</Text>
+      <ScrollView className="flex-1" contentContainerStyle={{ paddingHorizontal: 16, paddingBottom: 40 }} showsVerticalScrollIndicator={false}>
+        {/* Profile */}
+        <SettingsGroup>
+          <View className="flex-row items-center px-md py-md">
+            <View className="h-14 w-14 items-center justify-center rounded-full bg-brand-500">
+              <Text className="text-lg font-bold text-white">{initials}</Text>
             </View>
             <View className="ml-md flex-1">
-              <Text className="text-xl font-bold text-white" numberOfLines={1}>{firstName || 'Your account'} {lastName}</Text>
-              {phone ? <Text className="mt-xs text-sm text-white" style={{ opacity: 0.85 }}>{phone}</Text> : null}
+              <Text className="text-lg font-bold text-text-primary" numberOfLines={1}>{fullName}</Text>
+              {phone ? <Text className="mt-0.5 text-sm text-text-secondary">{phone}</Text> : null}
             </View>
           </View>
+        </SettingsGroup>
 
-          {profile?.customer ? (
-            <View className="mt-md flex-row" style={{ gap: 12 }}>
-              <Card className="flex-1 items-center">
-                <Text className="text-xl font-bold">{profile.customer.totalOrders ?? 0}</Text>
-                <Text className="mt-xs text-xs text-text-secondary">Orders</Text>
-              </Card>
-              <Card className="flex-1 items-center">
-                <Text className="text-base font-bold">{profile.customer.referralCode ?? '—'}</Text>
-                <Text className="mt-xs text-xs text-text-secondary">Referral code</Text>
-              </Card>
-            </View>
+        {/* Activity */}
+        <SettingsGroup header="Activity">
+          <SettingsRow
+            icon="clipboard-text-outline"
+            label="Your orders"
+            value={String(orders)}
+            onPress={() => navigation?.navigate?.('Orders')}
+          />
+          {referralCode ? (
+            <SettingsRow
+              icon="gift-outline"
+              label="Invite friends"
+              sublabel={
+                referredCount > 0
+                  ? `${referredCount} ${referredCount === 1 ? 'friend has' : 'friends have'} joined with your code`
+                  : 'Share your referral code'
+              }
+              onPress={invite}
+            />
           ) : null}
+        </SettingsGroup>
 
-          <View className="mb-sm mt-xl flex-row items-center justify-between">
-            <Heading size="lg">Saved addresses</Heading>
-            <Pressable onPress={() => navigation?.navigate?.('AddAddress')} hitSlop={8} className="flex-row items-center">
-              <Feather name="plus" size={16} color={color.brand[500]} />
-              <Text className="ml-1 text-sm font-semibold text-brand-600">Add</Text>
-            </Pressable>
-          </View>
-          {list.length === 0 ? (
-            <Pressable onPress={() => navigation?.navigate?.('AddAddress')}>
-              <Card className="flex-row items-center">
-                <MaterialCommunityIcons name="map-marker-plus-outline" size={20} color={color.brand[500]} />
-                <Text className="ml-sm text-text-secondary">Add your first address</Text>
-              </Card>
-            </Pressable>
-          ) : (
-            list.map((a) => (
-              <Card key={a.id} className="mb-sm flex-row items-center">
-                <MaterialCommunityIcons name="map-marker-outline" size={20} color={color.text.muted} />
-                <View className="ml-sm flex-1">
-                  <Text className="text-base font-semibold">{a.label || a.addressLine1}</Text>
-                  <Text className="mt-xs text-sm text-text-secondary" numberOfLines={1}>
-                    {a.addressLine1}{a.city ? `, ${a.city}` : ''}
-                  </Text>
-                </View>
-                {a.isDefault ? <Badge label="Default" tone="success" /> : null}
-              </Card>
-            ))
-          )}
+        {/* Saved addresses */}
+        <SettingsGroup header="Saved addresses">
+          {list.map((a) => (
+            <SettingsRow
+              key={a.id}
+              icon="map-marker-outline"
+              label={a.label || a.addressLine1}
+              sublabel={`${a.addressLine1}${a.city ? `, ${a.city}` : ''}`}
+              right={a.isDefault ? <Badge label="Default" tone="success" /> : undefined}
+            />
+          ))}
+          <SettingsRow icon="plus" iconColor={color.brand[500]} label="Add address" onPress={() => navigation?.navigate?.('AddAddress')} />
+        </SettingsGroup>
 
-          <Pressable onPress={() => navigation?.navigate?.('IdentityVerification')}>
-            <Card className="mt-xl flex-row items-center">
-              <MaterialCommunityIcons name="shield-check-outline" size={22} color={color.brand[500]} />
-              <View className="ml-md flex-1">
-                <Text className="text-base font-semibold">Verify your identity</Text>
-                <Text className="mt-xs text-xs text-text-secondary">Lifts the limit on larger orders &amp; rides.</Text>
-              </View>
-              <Feather name="chevron-right" size={20} color={color.text.muted} />
-            </Card>
-          </Pressable>
+        {/* Account */}
+        <SettingsGroup header="Account">
+          <SettingsRow
+            icon="shield-check-outline"
+            label="Verify your identity"
+            sublabel="Lifts the limit on larger orders & rides"
+            onPress={() => navigation?.navigate?.('IdentityVerification')}
+          />
+          <SettingsRow icon="bell-outline" label="Notifications" onPress={() => navigation?.navigate?.('Notifications')} />
+          <SettingsRow icon="cash" label="Payment" sublabel="Cash only — pay on delivery or completion" />
+        </SettingsGroup>
 
-          <View className="mt-md flex-row items-center rounded-2xl bg-brand-50 px-lg py-md">
-            <MaterialCommunityIcons name="cash" size={20} color={color.success} />
-            <Text className="ml-sm flex-1 text-sm text-brand-700">
-              Swift is cash-only for now — pay on delivery or completion. No cards, no platform fees.
-            </Text>
-          </View>
+        {/* Log out */}
+        <SettingsGroup>
+          <SettingsRow icon="logout" label="Log out" danger onPress={logout} />
+        </SettingsGroup>
 
-          <Button label="Log out" variant="outline" className="mt-xl" onPress={logout} />
-          <Text className="mt-md text-center text-xs text-text-muted">Swift · Guyana</Text>
-        </View>
+        <Text className="mb-md mt-xs text-center text-xs text-text-muted">Swift · Guyana · v1.0</Text>
       </ScrollView>
     </SafeAreaView>
   );
