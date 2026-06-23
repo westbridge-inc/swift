@@ -6,7 +6,7 @@ import { color } from '@swift/ui';
 import { Text, Card, Button, Spinner, List, Image, PressableScale, EmptyState, elevation } from '../../components/ui';
 import { useCart, useUpdateCartItem, useRemoveCartItem, useClearCart } from '../../hooks';
 import { money } from '../../lib/money';
-import { fallbackImage } from '../../lib/images';
+import { fallbackImage, kindForVendor } from '../../lib/images';
 
 function CartHeader({ navigation, title, onClear }: any) {
   return (
@@ -48,14 +48,14 @@ function SummaryRow({ label, value, bold }: { label: string; value: string; bold
   );
 }
 
-const CartItemRow = memo(function CartItemRow({ item, busy, onDec, onInc, onRemove }: any) {
+const CartItemRow = memo(function CartItemRow({ item, busy, onDec, onInc, onRemove, kind }: any) {
   const unavailable = item.isAvailable === false;
   return (
     <View
       className="mb-md flex-row items-center rounded-2xl bg-surface-base p-md"
       style={elevation.card}
     >
-      <Image source={{ uri: item.imageUrl || fallbackImage(item.itemId ?? item.id) }} style={{ width: 64, height: 64, borderRadius: 12 }} />
+      <Image source={{ uri: item.imageUrl || fallbackImage(item.itemId ?? item.id, kind) }} style={{ width: 64, height: 64, borderRadius: 12 }} />
       <View className="flex-1 px-md">
         <Text className="text-base font-semibold text-text-primary" numberOfLines={1}>{item.name}</Text>
         <Text className="mt-xs text-sm text-text-secondary">{money(item.customerPrice ?? item.basePrice)}</Text>
@@ -114,19 +114,21 @@ export function CartScreen({ navigation }: any) {
   const meetsMin = cart.meetsMinimum !== false;
   const hasUnavailable = items.some((it: any) => it.isAvailable === false);
   const shortfall = Math.max(0, Number(cart.vendor?.minOrderAmount ?? 0) - Number(cart.subtotalCustomer ?? 0));
+  const isService = cart.vendor?.vendorType === 'SERVICE';
+  const kind = kindForVendor(cart.vendor);
 
   const Summary = (
     <View>
       <Card className="mt-sm">
         <SummaryRow label="Subtotal" value={money(cart.subtotalCustomer)} />
-        <SummaryRow label="Delivery" value={money(cart.deliveryFee)} />
+        {cart.deliveryFee ? <SummaryRow label="Delivery" value={money(cart.deliveryFee)} /> : null}
         {cart.tipAmount ? <SummaryRow label="Tip" value={money(cart.tipAmount)} /> : null}
         {cart.discount ? <SummaryRow label="Discount" value={`− ${money(cart.discount)}`} /> : null}
         <View className="mt-sm border-t border-border-subtle pt-sm">
           <SummaryRow label="Total" value={money(cart.totalAmount)} bold />
         </View>
       </Card>
-      <Text className="mt-sm px-xs text-xs text-text-muted">Cash on delivery · No platform fees.</Text>
+      <Text className="mt-sm px-xs text-xs text-text-muted">Cash on {isService ? 'completion' : 'delivery'} · No platform fees.</Text>
     </View>
   );
 
@@ -143,6 +145,7 @@ export function CartScreen({ navigation }: any) {
             <CartItemRow
               item={it}
               busy={busy}
+              kind={kind}
               onDec={() => (it.quantity > 1 ? updateItem.mutate({ id: it.id, quantity: it.quantity - 1 }) : removeItem.mutate(it.id))}
               onInc={() => updateItem.mutate({ id: it.id, quantity: it.quantity + 1 })}
               onRemove={() => removeItem.mutate(it.id)}
@@ -159,7 +162,7 @@ export function CartScreen({ navigation }: any) {
         ) : null}
         <Button disabled={!meetsMin || busy || hasUnavailable} onPress={() => navigation?.navigate?.('Checkout')}>
           <View className="w-full flex-row items-center justify-between">
-            <Text className="font-body font-semibold text-white">Go to checkout</Text>
+            <Text className="font-body font-semibold text-white">{isService ? 'Continue' : 'Go to checkout'}</Text>
             <Text className="font-body font-semibold text-white">{money(cart.totalAmount)}</Text>
           </View>
         </Button>
