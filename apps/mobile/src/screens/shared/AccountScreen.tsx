@@ -1,4 +1,4 @@
-import { View, ScrollView, Share } from 'react-native';
+import { View, ScrollView } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { color } from '@swift/ui';
 import { Text, Heading, Badge, SettingsGroup, SettingsRow } from '../../components/ui';
@@ -17,14 +17,6 @@ export function AccountScreen({ navigation }: any) {
   const fullName = `${firstName} ${lastName}`.trim() || 'Your account';
   const list = addresses ?? [];
   const orders = profile?.customer?.totalOrders ?? 0;
-  const referralCode: string | undefined = profile?.customer?.referralCode;
-
-  const invite = () => {
-    if (!referralCode) return;
-    Share.share({
-      message: `Join me on Swift — Guyana's everyday app for food, groceries, rides and more. Use my code ${referralCode} when you sign up.`,
-    }).catch(() => {});
-  };
 
   return (
     <SafeAreaView style={{ flex: 1 }} edges={['top']} className="bg-surface-subtle">
@@ -53,9 +45,6 @@ export function AccountScreen({ navigation }: any) {
             value={String(orders)}
             onPress={() => navigation?.navigate?.('Orders')}
           />
-          {referralCode ? (
-            <SettingsRow icon="gift-outline" label="Invite friends" sublabel="Share your referral code" onPress={invite} />
-          ) : null}
         </SettingsGroup>
 
         {/* Saved addresses */}

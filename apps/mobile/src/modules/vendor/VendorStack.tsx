@@ -800,7 +800,7 @@ function VendorAccountScreen() {
           <SettingsRow
             icon="cash-multiple"
             label="Subscription"
-            sublabel={sub.data ? 'Active weekly plan' : 'No active plan — set up weekly billing'}
+            sublabel={sub.data ? 'Active weekly plan' : 'Not active yet'}
             right={<Badge label={sub.data ? 'Active' : 'Inactive'} tone={sub.data ? 'success' : 'brand'} />}
           />
           {store?.phone ? <SettingsRow icon="phone-outline" label="Phone" value={store.phone} /> : null}
