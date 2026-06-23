@@ -130,6 +130,10 @@ const promoValidateSchema = z.object({
   code: z.string().trim().min(1).max(40),
 });
 
+const referralRedeemSchema = z.object({
+  code: z.string().trim().min(3).max(64),
+});
+
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
@@ -354,6 +358,38 @@ export async function customerRoutes(app: FastifyInstance) {
   app.addHook('onRequest', app.authenticate);
 
   // ========================================================================
+  // 0. REFERRAL — real attribution: redeeming a code writes Customer.referredBy
+  // ========================================================================
+
+  app.post('/referral/redeem', async (request: AuthRequest) => {
+    const { userId } = request.user;
+    const { code } = referralRedeemSchema.parse(request.body);
+
+    const customer = await resolveCustomer(app, userId);
+    if (customer.referredBy) {
+      throw new AppError(409, 'ALREADY_REFERRED', 'You’ve already used a referral code');
+    }
+
+    const referrer = await app.prisma.customer.findFirst({
+      where: { referralCode: { equals: code, mode: 'insensitive' } },
+      include: { user: { select: { firstName: true } } },
+    });
+    if (!referrer) {
+      throw new AppError(404, 'INVALID_REFERRAL', 'That referral code wasn’t found');
+    }
+    if (referrer.id === customer.id) {
+      throw new AppError(400, 'SELF_REFERRAL', 'You can’t use your own referral code');
+    }
+
+    await app.prisma.customer.update({
+      where: { id: customer.id },
+      data: { referredBy: referrer.id },
+    });
+
+    return { success: true, data: { referrerName: referrer.user?.firstName ?? null } };
+  });
+
+  // ========================================================================
   // 1. PROFILE
   // ========================================================================
 
@@ -371,6 +407,7 @@ export async function customerRoutes(app: FastifyInstance) {
 
     const customer = await resolveCustomer(app, userId);
     const unreadNotifs = await app.prisma.notification.count({ where: { userId, isRead: false } });
+    const referredCount = await app.prisma.customer.count({ where: { referredBy: customer.id } });
 
     return {
       success: true,
@@ -388,6 +425,8 @@ export async function customerRoutes(app: FastifyInstance) {
           totalOrders: customer.totalOrders,
           totalSpent: Number(customer.totalSpent),
           referralCode: customer.referralCode,
+          referredBy: customer.referredBy,
+          referredCount,
         },
         addresses: user.addresses,
         unreadNotifications: unreadNotifs,
