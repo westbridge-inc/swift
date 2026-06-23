@@ -1,6 +1,6 @@
 import { memo } from 'react';
 import { View } from 'react-native';
-import { SafeAreaView } from 'react-native-safe-area-context';
+import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Feather, MaterialCommunityIcons } from '@expo/vector-icons';
 import { color } from '@swift/ui';
 import { Text, Heading, Badge, Skeleton, Button, List, Image, PressableScale, EmptyState } from '../../components/ui';
@@ -13,11 +13,12 @@ type Row = { type: 'header'; key: string; name: string } | { type: 'item'; key: 
 const SHADOW = { shadowColor: '#000', shadowOpacity: 0.12, shadowRadius: 6, shadowOffset: { width: 0, height: 2 }, elevation: 4 } as const;
 
 function BackButton({ onPress }: { onPress?: () => void }) {
+  const insets = useSafeAreaInsets();
   return (
     <PressableScale
       onPress={onPress}
       hitSlop={10}
-      style={[{ position: 'absolute', top: 12, left: 16, zIndex: 10, width: 38, height: 38, borderRadius: 19, alignItems: 'center', justifyContent: 'center', backgroundColor: color.surface.base }, SHADOW]}
+      style={[{ position: 'absolute', top: insets.top + 8, left: 16, zIndex: 10, width: 38, height: 38, borderRadius: 19, alignItems: 'center', justifyContent: 'center', backgroundColor: color.surface.base }, SHADOW]}
     >
       <Feather name="chevron-left" size={24} color={color.text.primary} />
     </PressableScale>
