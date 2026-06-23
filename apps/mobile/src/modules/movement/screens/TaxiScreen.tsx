@@ -5,12 +5,12 @@ import MapView, { Marker, PROVIDER_DEFAULT, Polyline } from 'react-native-maps';
 import BottomSheet, { BottomSheetView, BottomSheetScrollView } from '@gorhom/bottom-sheet';
 import { color } from '@swift/ui';
 import { Feather, MaterialCommunityIcons } from '@expo/vector-icons';
-import { Text, Heading, Card, Button, Spinner, PressableScale, choiceSurface } from '../../components/ui';
-import { useActiveRide, useRideEstimate, useRequestRide, useCancelRide } from '../../hooks';
-import { useLocationStore } from '../../stores/locationStore';
-import { GEORGETOWN } from '../../hooks/useDeviceLocation';
-import { money } from '../../lib/money';
-import type { RideClass, TierEstimate } from '../../services/api';
+import { Text, Heading, Card, Button, Spinner, PressableScale, choiceSurface } from '../../../components/ui';
+import { useActiveRide, useRideEstimate, useRequestRide, useCancelRide } from '../../../hooks';
+import { useLocationStore } from '../../../stores/locationStore';
+import { GEORGETOWN } from '../../../hooks/useDeviceLocation';
+import { money } from '../../../lib/money';
+import type { RideClass, TierEstimate } from '../../../services/api';
 import type { PickedPlace } from './DestinationSearchScreen';
 
 const STATUS_LABEL: Record<string, string> = {

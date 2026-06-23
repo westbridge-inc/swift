@@ -3,11 +3,11 @@ import { View, FlatList } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Feather, MaterialCommunityIcons } from '@expo/vector-icons';
 import { color } from '@swift/ui';
-import { Text, Card, Spinner, PressableScale, Input, EmptyState } from '../../components/ui';
-import { useAddresses } from '../../hooks';
-import { usePlacesAutocomplete, usePlaceDetails } from '../../hooks/usePlacesAutocomplete';
-import { useLocationStore } from '../../stores/locationStore';
-import type { PlaceSuggestion } from '../../services/api';
+import { Text, Card, Spinner, PressableScale, Input, EmptyState } from '../../../components/ui';
+import { useAddresses } from '../../../hooks';
+import { usePlacesAutocomplete, usePlaceDetails } from '../../../hooks/usePlacesAutocomplete';
+import { useLocationStore } from '../../../stores/locationStore';
+import type { PlaceSuggestion } from '../../../services/api';
 
 // What every place picker hands back to its caller.
 export type PickedPlace = { lat: number; lng: number; label: string; placeId?: string };
