@@ -369,6 +369,51 @@ async function main() {
     },
   });
 
+  // Taxi drivers spread across tiers so Economy/Comfort/XL is demoable (verified,
+  // tier-tagged, in Georgetown Central). Seeded OFFLINE — they go online from the
+  // driver app; this also keeps dispatch tests deterministic (an always-online
+  // seed fleet would compete with each test's own freshly-created driver).
+  const demoDrivers = [
+    { phone: '+5926005001', firstName: 'Anil', rideClass: 'ECONOMY' as const, make: 'Toyota', model: 'Allion', color: 'Silver', plate: 'HC-5001', capacity: 4 },
+    { phone: '+5926005002', firstName: 'Marcus', rideClass: 'COMFORT' as const, make: 'Toyota', model: 'Premio', color: 'Black', plate: 'HC-5002', capacity: 4 },
+    { phone: '+5926005003', firstName: 'Deon', rideClass: 'XL' as const, make: 'Toyota', model: 'Noah', color: 'Pearl White', plate: 'HC-5003', capacity: 6 },
+  ];
+  for (const d of demoDrivers) {
+    await prisma.user.upsert({
+      where: { phone: d.phone },
+      update: { driver: { update: { rideClass: d.rideClass, isOnline: false, isAvailable: true } } },
+      create: {
+        phone: d.phone,
+        firstName: d.firstName,
+        lastName: 'Driver',
+        roles: ['DRIVER', 'CUSTOMER'],
+        activeRole: 'DRIVER',
+        status: 'ACTIVE',
+        isPhoneVerified: true,
+        driver: {
+          create: {
+            vehicleMake: d.make,
+            vehicleModel: d.model,
+            vehicleYear: 2021,
+            vehicleColor: d.color,
+            licensePlate: d.plate,
+            vehicleCapacity: d.capacity,
+            rideClass: d.rideClass,
+            driverLicenseUrl: 'storage://seed/dl.jpg',
+            vehicleInsuranceUrl: 'storage://seed/ins.jpg',
+            documentsVerified: true,
+            documentsVerifiedAt: new Date(),
+            isOnline: false,
+            isAvailable: true,
+            currentLat: 6.81,
+            currentLng: -58.155,
+            lastLocationUpdate: new Date(),
+          },
+        },
+      },
+    });
+  }
+
   // Georgetown zone
   await prisma.zone.upsert({
     where: { id: 'georgetown-central' },
@@ -446,6 +491,8 @@ async function main() {
     CUSTOMER_L2: ['national_id', 'selfie'],
   };
   const guyanaTaxiRates = { base: 1000, perKm: 300, perMin: 25, minimum: 1500 };
+  // Per-tier multipliers on the base (Economy) fare — country-independent.
+  const taxiClassRates = { ECONOMY: 1.0, COMFORT: 1.35, XL: 1.8 };
   const guyanaCashRules = {
     maxClaimsPerRiderPerMonth: 3,
     strikeRestrictThreshold: 2,
@@ -473,6 +520,7 @@ async function main() {
       subscriptionTiers: guyanaTiers,
       documentChecklists: guyanaChecklists,
       taxiRates: guyanaTaxiRates,
+      taxiClassRates,
       cashRules: guyanaCashRules,
       ...guyanaRegion,
     },
@@ -489,6 +537,7 @@ async function main() {
       subscriptionTiers: guyanaTiers,
       documentChecklists: guyanaChecklists,
       taxiRates: guyanaTaxiRates,
+      taxiClassRates,
       cashRules: guyanaCashRules,
       ...guyanaRegion,
       isActive: true,
@@ -546,6 +595,7 @@ async function main() {
         perMin: niceRound(USD_TAXI.perMin * c.rate),
         minimum: niceRound(USD_TAXI.minimum * c.rate),
       },
+      taxiClassRates,
       cashRules: guyanaCashRules,
       verificationSources: ['ID Analyzer'],
       regulatoryNotes:

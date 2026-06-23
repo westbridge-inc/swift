@@ -17,6 +17,8 @@ import { GluestackUIProvider } from './components/ui';
 import { RootNavigator } from './navigation/RootNavigator';
 import { initSecureStorage } from './lib/storage';
 import { useAuthStore } from './stores/authStore';
+import { useLocationStore } from './stores/locationStore';
+import { useDeviceLocation } from './hooks/useDeviceLocation';
 
 // Hold the native splash until the brand fonts are ready (avoids a System-font flash).
 SplashScreen.preventAutoHideAsync().catch(() => {});
@@ -24,6 +26,14 @@ SplashScreen.preventAutoHideAsync().catch(() => {});
 const queryClient = new QueryClient({
   defaultOptions: { queries: { staleTime: 30_000, retry: 2 } },
 });
+
+// Resolves device GPS into locationStore on launch. Rendered only after the
+// encrypted store is open (see App `ready` gate) so the persisted write inside
+// setLocation never runs before initSecureStorage().
+function LocationBootstrap() {
+  useDeviceLocation();
+  return null;
+}
 
 export default function App() {
   // Register under the exact names @swift/ui tokens reference (font.display / font.body)
@@ -43,7 +53,7 @@ export default function App() {
     // Open the encrypted store (Keychain-backed key) and rehydrate the persisted
     // auth session before the first render — keeps the no-flash cold start.
     initSecureStorage()
-      .then(() => useAuthStore.persist.rehydrate())
+      .then(() => Promise.all([useAuthStore.persist.rehydrate(), useLocationStore.persist.rehydrate()]))
       .catch((e) => console.warn('[secure-storage] init failed', e))
       .finally(() => setStorageReady(true));
   }, []);
@@ -63,6 +73,7 @@ export default function App() {
       <SafeAreaProvider>
         <GluestackUIProvider>
           <QueryClientProvider client={queryClient}>
+            <LocationBootstrap />
             <RootNavigator />
           </QueryClientProvider>
         </GluestackUIProvider>

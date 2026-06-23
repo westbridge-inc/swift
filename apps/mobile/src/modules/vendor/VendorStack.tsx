@@ -6,9 +6,9 @@ import { createNativeStackNavigator } from '@react-navigation/native-stack';
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
 import { color } from '@swift/ui';
 import { Feather, MaterialCommunityIcons } from '@expo/vector-icons';
-import { Text, Heading, Card, Button, Spinner, Skeleton, Image, Badge, elevation, PressableScale, EmptyState } from '../components/ui';
-import { DocumentChecklist } from '../components/onboarding/DocumentChecklist';
-import { useBecomePartner, useVerificationStatus } from '../hooks/verification';
+import { Text, Heading, Card, Button, Spinner, Skeleton, Image, Badge, elevation, PressableScale, EmptyState, ChoiceChip, Input } from '../../components/ui';
+import { DocumentChecklist } from '../../components/onboarding/DocumentChecklist';
+import { useBecomePartner, useVerificationStatus } from '../../hooks/verification';
 import {
   useVendorProfile,
   useVendorOrders,
@@ -26,14 +26,14 @@ import {
   useVendorHours,
   useSetHours,
   type DayHours,
-} from '../hooks/vendorops';
-import { useAuthStore } from '../stores/authStore';
-import { useLocationStore } from '../stores/locationStore';
-import { useStoreSwitcher } from '../stores/storeSwitcher';
-import { money } from '../lib/money';
-import { mediaUrl } from '../lib/images';
+} from '../../hooks/vendorops';
+import { useAuthStore } from '../../stores/authStore';
+import { useLocationStore } from '../../stores/locationStore';
+import { useStoreSwitcher } from '../../stores/storeSwitcher';
+import { money } from '../../lib/money';
+import { mediaUrl } from '../../lib/images';
 import * as ImagePicker from 'expo-image-picker';
-import { VendorBulkImportScreen } from '../screens/vendor/VendorBulkImportScreen';
+import { VendorBulkImportScreen } from '../../screens/vendor/VendorBulkImportScreen';
 
 const Stack = createNativeStackNavigator();
 const FIELD = 'mb-sm rounded-lg border border-border-subtle bg-surface-base px-lg py-md font-body text-base text-text-primary';
@@ -93,24 +93,17 @@ function BusinessSetup() {
         </Text>
         <Text className="mb-xs text-sm font-semibold text-text-secondary">Business type</Text>
         <View className="mb-md flex-row flex-wrap" style={{ gap: 8 }}>
-          {TYPES.map((t) => {
-            const active = t.key === type;
-            return (
-              <PressableScale
-                key={t.key}
-                onPress={() => setType(t.key)}
-                className={active ? 'rounded-lg border border-brand-500 bg-brand-50 px-lg py-sm' : 'rounded-lg border border-border-subtle px-lg py-sm'}
-              >
-                <Text className={active ? 'text-sm font-semibold text-brand-600' : 'text-sm text-text-secondary'}>{t.label}</Text>
-              </PressableScale>
-            );
-          })}
+          {TYPES.map((t) => (
+            <ChoiceChip key={t.key} label={t.label} active={t.key === type} onPress={() => setType(t.key)} />
+          ))}
         </View>
-        <TextInput value={name} onChangeText={setName} placeholder="Business name" placeholderTextColor={color.text.muted} className={FIELD} />
-        <TextInput value={phone} onChangeText={setPhone} placeholder="Business phone" placeholderTextColor={color.text.muted} keyboardType="phone-pad" className={FIELD} />
-        <TextInput value={addr} onChangeText={setAddr} placeholder="Street address" placeholderTextColor={color.text.muted} className={FIELD} />
-        <TextInput value={city} onChangeText={setCity} placeholder="City" placeholderTextColor={color.text.muted} className={FIELD} />
-        {become.isError ? <Text className="mb-sm text-sm text-error">Couldn&apos;t create your store. Try again.</Text> : null}
+        <View className="gap-sm">
+          <Input value={name} onChangeText={setName} placeholder="Business name" />
+          <Input value={phone} onChangeText={setPhone} placeholder="Business phone" keyboardType="phone-pad" />
+          <Input value={addr} onChangeText={setAddr} placeholder="Street address" />
+          <Input value={city} onChangeText={setCity} placeholder="City" />
+        </View>
+        {become.isError ? <Text className="mb-sm mt-sm text-sm text-error">Couldn&apos;t create your store. Try again.</Text> : null}
         <Button label="Create store" loading={become.isPending} disabled={!valid} onPress={submit} />
       </ScrollView>
     </SafeAreaView>
@@ -123,9 +116,9 @@ function VendorOnboarding({ store }: { store: any }) {
     <SafeAreaView style={{ flex: 1 }} edges={['top']} className="bg-surface-base">
       <Header title={store.name} />
       <ScrollView className="flex-1" contentContainerStyle={{ paddingHorizontal: 16, paddingBottom: 32 }} showsVerticalScrollIndicator={false}>
-        <View className="mb-md flex-row items-start rounded-lg bg-brand-50 px-lg py-md">
-          <MaterialCommunityIcons name="shield-check" size={20} color={color.brand[600]} />
-          <Text className="ml-sm flex-1 text-sm text-brand-700">
+        <View className="mb-md flex-row items-start rounded-xl bg-surface-subtle px-lg py-md">
+          <MaterialCommunityIcons name="shield-check" size={20} color={color.brand[500]} />
+          <Text className="ml-sm flex-1 text-sm text-text-secondary">
             Your store is under review. Upload your business documents — we approve within 24 hours, then you can take orders.
           </Text>
         </View>
@@ -135,11 +128,16 @@ function VendorOnboarding({ store }: { store: any }) {
   );
 }
 
-function orderActions(status: string): { label: string; action: 'accept' | 'preparing' | 'ready' | 'reject' }[] {
-  const s = (status || '').toUpperCase();
+type VendorOrderActionKind = 'accept' | 'preparing' | 'ready' | 'reject' | 'complete-pickup';
+
+function orderActions(order: any): { label: string; action: VendorOrderActionKind }[] {
+  const s = (order?.status || '').toUpperCase();
+  const isPickup = order?.fulfillment === 'PICKUP';
   if (s === 'PENDING' || s === 'PLACED') return [{ label: 'Accept', action: 'accept' }, { label: 'Reject', action: 'reject' }];
   if (s === 'ACCEPTED' || s === 'CONFIRMED') return [{ label: 'Start preparing', action: 'preparing' }];
-  if (s === 'PREPARING') return [{ label: 'Mark ready', action: 'ready' }];
+  if (s === 'PREPARING') return [{ label: isPickup ? 'Ready for pickup' : 'Mark ready', action: 'ready' }];
+  // Takeaway: the vendor closes the order when the customer collects it (no rider).
+  if ((s === 'READY' || s === 'READY_FOR_PICKUP') && isPickup) return [{ label: 'Mark picked up', action: 'complete-pickup' }];
   return [];
 }
 
@@ -188,15 +186,24 @@ function VendorOrderCard({
   busy,
 }: {
   order: any;
-  onAction: (action: 'accept' | 'preparing' | 'ready' | 'reject') => void;
+  onAction: (action: VendorOrderActionKind) => void;
   busy: boolean;
 }) {
-  const actions = orderActions(order.status);
+  const actions = orderActions(order);
   const items = order.itemCount ?? order.items?.length ?? 0;
+  const isPickup = order.fulfillment === 'PICKUP';
   return (
     <View className="mb-md rounded-2xl bg-surface-base p-lg" style={CARD_SHADOW}>
       <View className="flex-row items-center justify-between">
-        <Text className="text-base font-bold text-text-primary">{order.orderNumber ? `#${order.orderNumber}` : 'Order'}</Text>
+        <View className="flex-row items-center" style={{ gap: 8 }}>
+          <Text className="text-base font-bold text-text-primary">{order.orderNumber ? `#${order.orderNumber}` : 'Order'}</Text>
+          {isPickup ? (
+            <View className="flex-row items-center rounded-full bg-surface-subtle px-2 py-0.5">
+              <MaterialCommunityIcons name="bag-personal-outline" size={12} color={color.brand[500]} />
+              <Text className="ml-1 text-xs font-semibold text-brand-600">Takeaway</Text>
+            </View>
+          ) : null}
+        </View>
         <StatusPill status={order.status} />
       </View>
       <View className="mt-xs flex-row items-center">
@@ -205,7 +212,13 @@ function VendorOrderCard({
         {items ? <Text className="ml-2 text-xs text-text-muted">{`· ${items} item${items === 1 ? '' : 's'}`}</Text> : null}
         <Text className="ml-2 text-xs text-text-muted">{`· ${order.paymentMethod === 'CASH' ? 'Cash' : order.paymentMethod ?? ''}`}</Text>
       </View>
-      {order.deliveryAddress ? (
+      {isPickup && order.pickupCode ? (
+        <View className="mt-sm flex-row items-center">
+          <MaterialCommunityIcons name="form-textbox-password" size={13} color={color.text.muted} />
+          <Text className="ml-1 text-sm text-text-secondary">Pickup code </Text>
+          <Text className="text-sm font-bold text-brand-600">{order.pickupCode}</Text>
+        </View>
+      ) : !isPickup && order.deliveryAddress ? (
         <View className="mt-sm flex-row items-center">
           <Feather name="map-pin" size={13} color={color.text.muted} />
           <Text className="ml-1 flex-1 text-sm text-text-secondary" numberOfLines={1}>{order.deliveryAddress}</Text>
@@ -665,35 +678,14 @@ function VendorItemEditorScreen({ navigation, route }: any) {
 
         <Text className="mb-xs mt-sm text-sm font-semibold text-text-secondary">Category</Text>
         <View className="mb-md flex-row flex-wrap" style={{ gap: 8 }}>
-          {categories.map((c) => {
-            const active = c.id === categoryId;
-            return (
-              <PressableScale
-                key={c.id}
-                onPress={() => setCategoryId(c.id)}
-                className={active ? 'rounded-lg border border-brand-500 bg-brand-50 px-lg py-sm' : 'rounded-lg border border-border-subtle px-lg py-sm'}
-              >
-                <Text className={active ? 'text-sm font-semibold text-brand-600' : 'text-sm text-text-secondary'}>{c.name}</Text>
-              </PressableScale>
-            );
-          })}
+          {categories.map((c) => (
+            <ChoiceChip key={c.id} label={c.name} active={c.id === categoryId} onPress={() => setCategoryId(c.id)} />
+          ))}
         </View>
 
         <View className="mb-md flex-row" style={{ gap: 8 }}>
-          <PressableScale
-            onPress={() => setAvailable((v) => !v)}
-            className={available ? 'rounded-lg border border-brand-500 bg-brand-50 px-lg py-sm' : 'rounded-lg border border-border-subtle px-lg py-sm'}
-          >
-            <Text className={available ? 'text-sm font-semibold text-brand-600' : 'text-sm text-text-secondary'}>
-              {available ? 'Available' : 'Sold out'}
-            </Text>
-          </PressableScale>
-          <PressableScale
-            onPress={() => setPopular((v) => !v)}
-            className={popular ? 'rounded-lg border border-brand-500 bg-brand-50 px-lg py-sm' : 'rounded-lg border border-border-subtle px-lg py-sm'}
-          >
-            <Text className={popular ? 'text-sm font-semibold text-brand-600' : 'text-sm text-text-secondary'}>★ Popular</Text>
-          </PressableScale>
+          <ChoiceChip label={available ? 'Available' : 'Sold out'} active={available} onPress={() => setAvailable((v) => !v)} />
+          <ChoiceChip label="★ Popular" active={popular} onPress={() => setPopular((v) => !v)} />
         </View>
 
         {save.isError ? <Text className="mb-sm text-sm text-error">Couldn&apos;t save. Check the details and try again.</Text> : null}

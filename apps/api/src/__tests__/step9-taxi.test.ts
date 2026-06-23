@@ -175,7 +175,8 @@ describe('Ride request — fare shown first, dispatch shared, PIN issued', () =>
 
     const est = await inject('POST', '/api/v1/rides/estimate', { pickup: CENTRAL, dropoff: SOUTH }, customer.token);
     expect(est.statusCode).toBe(200);
-    const quotedFare = est.json().data.fare;
+    // /estimate now returns tiered fares; a default request books Economy (×1.0).
+    const quotedFare = est.json().data.tiers.find((t: any) => t.rideClass === 'ECONOMY').fare;
 
     const res = await inject('POST', '/api/v1/rides/request', {
       pickup: CENTRAL,

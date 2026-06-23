@@ -103,6 +103,7 @@ export const customerApi = {
     tipAmount?: number;
     scheduledFor?: string;
     promoCode?: string;
+    fulfillmentSelections?: Record<string, 'DELIVERY' | 'PICKUP'>;
   }) => api.post('/customer/checkout', data),
   getNotifications: () => api.get('/customer/notifications'),
   reorder: (id: string) => api.post(`/customer/orders/${id}/reorder`, {}),
@@ -131,6 +132,20 @@ export const customerApi = {
 
 // Taxi / rides (mounted at /api/v1/rides)
 type Point = { lat: number; lng: number };
+export type RideClass = 'ECONOMY' | 'COMFORT' | 'XL';
+export interface TierEstimate {
+  rideClass: RideClass;
+  fare: number;
+  multiplier: number;
+  capacity: number;
+  source: 'zone_table' | 'formula';
+}
+export interface TieredEstimate {
+  tiers: TierEstimate[];
+  currencyCode: string;
+  distanceKm: number;
+  durationMin: number;
+}
 export const rideApi = {
   estimate: (pickup: Point, dropoff: Point) => api.post('/rides/estimate', { pickup, dropoff }),
   request: (data: {
@@ -139,10 +154,30 @@ export const rideApi = {
     pickupAddress: string;
     dropoffAddress: string;
     passengerCount?: number;
+    rideClass?: RideClass;
   }) => api.post('/rides/request', data),
   active: () => api.get('/rides/active'),
   get: (id: string) => api.get(`/rides/${id}`),
   cancel: (id: string, reason?: string) => api.post(`/rides/${id}/cancel`, { reason }),
+};
+
+// Places (mounted at /api/v1/places) — "Where to?" search behind the server-side
+// provider seam; the Google key never reaches the client.
+export interface PlaceSuggestion {
+  placeId: string;
+  primary: string;
+  secondary?: string;
+}
+export interface PlaceDetail {
+  placeId: string;
+  label: string;
+  lat: number;
+  lng: number;
+}
+export const placesApi = {
+  autocomplete: (q: string, near?: Point) =>
+    api.get('/places/autocomplete', { params: { q, ...(near ? { lat: near.lat, lng: near.lng } : {}) } }),
+  details: (placeId: string) => api.get('/places/details', { params: { placeId } }),
 };
 
 // Courier (mounted at /api/v1/courier)
@@ -266,6 +301,7 @@ export const vendorApi = {
   acceptOrder: (id: string) => api.put(`/vendor/orders/${id}/accept`),
   preparing: (id: string) => api.put(`/vendor/orders/${id}/preparing`),
   ready: (id: string) => api.put(`/vendor/orders/${id}/ready`),
+  completePickup: (id: string, code?: string) => api.put(`/vendor/orders/${id}/complete-pickup`, { code }),
   reject: (id: string) => api.put(`/vendor/orders/${id}/reject`),
   items: () => api.get('/vendor/items'),
   subscription: () => api.get('/vendor/subscription'),
