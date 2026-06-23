@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { rideApi } from '../services/api';
+import { rideApi, type RideClass, type TieredEstimate } from '../services/api';
 
 type Point = { lat: number; lng: number };
 
@@ -16,10 +16,11 @@ export function useActiveRide<T = any>(poll = false) {
   });
 }
 
-export function useRideEstimate<T = any>(pickup?: Point, dropoff?: Point) {
-  return useQuery<T>({
+/** Tiered fares (Economy/Comfort/XL) for the request screen. */
+export function useRideEstimate(pickup?: Point, dropoff?: Point) {
+  return useQuery<TieredEstimate>({
     queryKey: ['rides', 'estimate', pickup, dropoff],
-    queryFn: () => unwrap<T>(rideApi.estimate(pickup as Point, dropoff as Point)),
+    queryFn: () => unwrap<TieredEstimate>(rideApi.estimate(pickup as Point, dropoff as Point)),
     enabled: !!pickup && !!dropoff,
   });
 }
@@ -33,6 +34,7 @@ export function useRequestRide() {
       pickupAddress: string;
       dropoffAddress: string;
       passengerCount?: number;
+      rideClass?: RideClass;
     }) => unwrap(rideApi.request(data)),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['rides', 'active'] }),
   });

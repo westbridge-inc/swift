@@ -47,7 +47,8 @@ export const ORDER_TRANSITIONS: Record<OrderStatus, OrderStatus[]> = {
   DRIVER_ARRIVED: ['DRIVER_EN_ROUTE'],
   RIDE_IN_PROGRESS: ['DRIVER_ARRIVED'],
   DELIVERED: ['PICKED_UP', 'EN_ROUTE_DELIVERY', 'ARRIVED', 'RIDE_IN_PROGRESS'],
-  COMPLETED: ['DELIVERED'],
+  // DELIVERED for delivery; READY_FOR_PICKUP for takeaway (vendor hands it over).
+  COMPLETED: ['DELIVERED', 'READY_FOR_PICKUP'],
   CANCELLED: [
     'PENDING', 'ACCEPTED', 'PREPARING', 'READY_FOR_PICKUP', 'RIDER_ASSIGNED',
     'RIDER_EN_ROUTE_PICKUP', 'RIDER_ARRIVED_PICKUP',
@@ -279,6 +280,8 @@ export class OrderService {
               ? estimateDeliveryMinutes(plan.distanceKm) + (plan.vendor.estimatedPrepTime || 30)
               : null,
             scheduledFor: input.scheduledFor ? new Date(input.scheduledFor) : undefined,
+            // Takeaway: a collection code the customer shows the vendor at pickup.
+            pickupCode: plan.fulfillment === 'PICKUP' ? String(Math.floor(1000 + Math.random() * 9000)) : null,
             promoCodeId: isFirst ? promoCodeId : null,
             items: {
               create: plan.orderItems.map((oi) => ({
@@ -346,6 +349,7 @@ export class OrderService {
       status: order.status,
       fulfillment: order.fulfillment,
       appointmentSlot: order.appointmentSlot,
+      pickupCode: order.pickupCode,
       riskFlagged: order.riskFlagged,
       vendorName: order.vendor?.name,
       items: order.items.map((i) => ({ name: i.name, quantity: i.quantity, price: Number(i.totalCustomer) })),

@@ -17,21 +17,29 @@
       "bundleIdentifier": "gy.swift.app",
       "supportsTablet": true,
       "infoPlist": {
-        "CFBundleDisplayName": "Swift"
+        "CFBundleDisplayName": "Swift",
+        "NSLocationWhenInUseUsageDescription": "Swift uses your location to set your pickup and find nearby drivers and couriers."
       }
     },
     "android": {
       "package": "gy.swift.app",
       "adaptiveIcon": {
         "backgroundColor": "#FFFFFF"
-      }
+      },
+      "permissions": ["ACCESS_FINE_LOCATION", "ACCESS_COARSE_LOCATION"]
     },
     "plugins": [
       "expo-font",
       "expo-splash-screen",
       "react-native-maps",
       "expo-image",
-      "expo-secure-store"
+      "expo-secure-store",
+      [
+        "expo-location",
+        {
+          "locationWhenInUsePermission": "Swift uses your location to set your pickup and find nearby drivers and couriers."
+        }
+      ]
     ]
   }
 }

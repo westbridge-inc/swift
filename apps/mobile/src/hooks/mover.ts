@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import * as Location from 'expo-location';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { riderApi, driverApi } from '../services/api';
 import { connectSocket, getSocket } from '../services/socket';
@@ -90,6 +91,42 @@ export function useRiderAction() {
       action === 'handover' ? unwrap(riderApi.handover(id)) : unwrap(riderApi.delivered(id)),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['mover'] }),
   });
+}
+
+/**
+ * Streams the mover's device GPS to the backend while they're online. Each PUT
+ * persists the position AND (server-side) broadcasts `driver:location` /
+ * `rider:location` to the active order's room — this is what makes the
+ * customer's live driver marker actually move. Watches by distance + time so a
+ * parked mover doesn't spam writes; never throws (failed sends are ignored).
+ */
+export function useBroadcastLocation(kind: MoverKind | null, enabled: boolean) {
+  useEffect(() => {
+    if (!kind || !enabled) return;
+    let cancelled = false;
+    let sub: Location.LocationSubscription | undefined;
+
+    (async () => {
+      try {
+        const { status } = await Location.requestForegroundPermissionsAsync();
+        if (status !== 'granted' || cancelled) return;
+        sub = await Location.watchPositionAsync(
+          { accuracy: Location.Accuracy.Balanced, distanceInterval: 25, timeInterval: 8000 },
+          (pos) => {
+            void svc(kind).location(pos.coords.latitude, pos.coords.longitude).catch(() => {});
+          },
+        );
+      } catch {
+        // Location unavailable / permission denied — go-online still works; the
+        // customer just won't see a moving marker. Non-fatal.
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+      sub?.remove();
+    };
+  }, [kind, enabled]);
 }
 
 export interface DispatchOffer {

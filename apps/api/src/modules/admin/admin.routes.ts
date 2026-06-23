@@ -15,6 +15,7 @@ import {
   VerificationDocumentStatus,
   ClaimStatus,
   ReturnStatus,
+  RideClass,
 } from '@prisma/client';
 import { NotificationService } from '../notification/notification.service';
 import { VerificationService } from '../verification/verification.service';
@@ -43,6 +44,10 @@ const featureSchema = z.object({
 const verifyDocsSchema = z.object({
   verified: z.boolean().optional(),
   rejectionReason: z.string().max(500).optional(),
+});
+
+const rideClassSchema = z.object({
+  rideClass: z.nativeEnum(RideClass),
 });
 
 const cancelOrderSchema = z.object({
@@ -796,6 +801,21 @@ export async function adminRoutes(app: FastifyInstance) {
         ? 'Your documents have been verified. You can now go online and start accepting rides!'
         : `Your documents need attention: ${rejectionReason || 'Please resubmit your documents.'}`,
     });
+
+    return { success: true, data: updated };
+  });
+
+  // Premium-fleet onboarding: set the top taxi tier a vehicle serves. This is the
+  // assignment surface that makes Comfort/XL dispatchable (the #112 gap).
+  app.put('/drivers/:id/ride-class', { preHandler: [adminGuard] }, async (request) => {
+    const { id } = request.params as { id: string };
+    const { rideClass } = rideClassSchema.parse(request.body ?? {});
+
+    const driver = await app.prisma.driver.findUnique({ where: { id }, select: { id: true } });
+    if (!driver) throw new NotFoundError('Driver', id);
+
+    const updated = await app.prisma.driver.update({ where: { id }, data: { rideClass } });
+    await audit(request.user.userId, 'SET_DRIVER_RIDE_CLASS', 'Driver', id, { rideClass }, request);
 
     return { success: true, data: updated };
   });

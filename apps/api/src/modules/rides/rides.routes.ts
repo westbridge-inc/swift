@@ -1,4 +1,5 @@
 import type { FastifyInstance } from 'fastify';
+import { RideClass } from '@prisma/client';
 import { z } from 'zod';
 import { FareService } from './fare.service';
 import { OrderService } from '../order/order.service';
@@ -30,6 +31,7 @@ const requestRideSchema = z.object({
   pickupAddress: z.string().trim().min(3).max(200),
   dropoffAddress: z.string().trim().min(3).max(200),
   passengerCount: z.number().int().min(1).max(6).default(1),
+  rideClass: z.nativeEnum(RideClass).default(RideClass.ECONOMY),
 });
 
 const cancelSchema = z.object({
@@ -43,14 +45,15 @@ export async function ridesRoutes(app: FastifyInstance) {
   const countryConfig = new CountryConfigService(app.prisma);
   const dispatch = makeDispatchService(app);
 
-  /** POST /estimate — the exact fare, before anything is requested. */
+  /** POST /estimate — exact per-tier fares (Economy/Comfort/XL), before anything
+   *  is requested. */
   app.post('/estimate', auth, async (request) => {
     const body = estimateSchema.parse(request.body);
     const user = await app.prisma.user.findUniqueOrThrow({
       where: { id: request.user.userId },
       select: { countryCode: true },
     });
-    const estimate = await fareService.estimate(body.pickup, body.dropoff, user.countryCode);
+    const estimate = await fareService.estimateTiers(body.pickup, body.dropoff, user.countryCode);
     return { success: true, data: estimate };
   });
 
@@ -83,7 +86,26 @@ export async function ridesRoutes(app: FastifyInstance) {
       throw new AppError(403, 'STRIKE_RESTRICTED', 'After repeated failed payments, rides require ID verification. Verify your identity to continue.');
     }
 
-    const estimate = await fareService.estimate(body.pickup, body.dropoff, user.countryCode);
+    const tiered = await fareService.estimateTiers(body.pickup, body.dropoff, user.countryCode);
+    const tier = tiered.tiers.find((t) => t.rideClass === body.rideClass);
+    if (!tier) {
+      throw new AppError(400, 'INVALID_RIDE_CLASS', 'That ride tier is not available.');
+    }
+
+    // A tier can't seat more passengers than its vehicles hold (XL = 6, others = 4)
+    if (body.passengerCount > tier.capacity) {
+      throw new AppError(400, 'TOO_MANY_PASSENGERS',
+        `${body.rideClass} seats up to ${tier.capacity}. Choose a larger ride for ${body.passengerCount}.`,
+        { capacity: tier.capacity, passengerCount: body.passengerCount });
+    }
+
+    const estimate = {
+      fare: tier.fare,
+      currencyCode: tiered.currencyCode,
+      distanceKm: tiered.distanceKm,
+      durationMin: tiered.durationMin,
+      source: tier.source,
+    };
 
     // Same ID-gate as checkout: big cash rides need an ID-verified account
     const gateLocal = await countryConfig.getIdGateThresholdLocal(user.countryCode);
@@ -115,6 +137,7 @@ export async function ridesRoutes(app: FastifyInstance) {
         taxiPickupAddress: body.pickupAddress,
         taxiDropoffAddress: body.dropoffAddress,
         taxiPassengerCount: body.passengerCount,
+        rideClass: body.rideClass,
         taxiDistance: estimate.distanceKm,
         taxiDuration: estimate.durationMin,
         taxiFareTotal: estimate.fare,
@@ -143,6 +166,7 @@ export async function ridesRoutes(app: FastifyInstance) {
           orderNumber: order.orderNumber,
           status: order.status,
           fare: estimate.fare,
+          rideClass: body.rideClass,
           currencyCode: estimate.currencyCode,
           fareSource: estimate.source,
           distanceKm: estimate.distanceKm,

@@ -5,8 +5,8 @@ import { useAuthStore } from '../stores/authStore';
 import { CountryPickerScreen } from '../screens/auth/CountryPickerScreen';
 import { AuthStack } from './AuthStack';
 import { CustomerStack } from './CustomerStack';
-import { MoverStack } from './MoverStack';
-import { VendorStack } from './VendorStack';
+import { MoverStack } from '../modules/mover/MoverStack';
+import { VendorStack } from '../modules/vendor/VendorStack';
 
 const Stack = createNativeStackNavigator();
 
