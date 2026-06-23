@@ -5,3 +5,4 @@ export * from './services';
 export * from './verification';
 export * from './mover';
 export * from './vendorops';
+export * from './useDeviceLocation';
