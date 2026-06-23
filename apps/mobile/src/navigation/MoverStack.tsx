@@ -21,6 +21,7 @@ import {
   useAcceptJob,
   useDriverAction,
   useRiderAction,
+  useBroadcastLocation,
   type MoverKind,
 } from '../hooks';
 import { useAuthStore } from '../stores/authStore';
@@ -156,6 +157,8 @@ function MoverOps({ navigation }: any) {
   const online = !!profile?.isOnline;
   const available = useAvailableJobs(kind, online);
   const { offer, dismiss } = useDispatchOffers(kind, online);
+  // Stream GPS while online so the customer sees a live, moving driver marker.
+  useBroadcastLocation(kind, online);
 
   if (loading || !kind) {
     return (
