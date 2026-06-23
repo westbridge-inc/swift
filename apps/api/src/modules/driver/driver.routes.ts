@@ -1,6 +1,6 @@
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
-import { OrderStatus, EarningType, EarningStatus } from '@prisma/client';
+import { OrderStatus, EarningType, EarningStatus, RideClass } from '@prisma/client';
 import { OrderService } from '../order/order.service';
 import { NotificationService } from '../notification/notification.service';
 import { VerificationService } from '../verification/verification.service';
@@ -17,6 +17,7 @@ const updateDriverProfileSchema = z.object({
   vehicleColor: z.string().max(30).optional(),
   licensePlate: z.string().max(20).optional(),
   vehicleCapacity: z.number().int().min(1).max(50).optional(),
+  rideClass: z.nativeEnum(RideClass).optional(),
   profilePhotoUrl: z.string().max(2048).optional(),
   nationalIdUrl: z.string().max(2048).optional(),
   driverLicenseUrl: z.string().max(2048).optional(),
@@ -95,6 +96,7 @@ export async function driverRoutes(app: FastifyInstance) {
         ...(body.vehicleColor !== undefined && { vehicleColor: body.vehicleColor }),
         ...(body.licensePlate !== undefined && { licensePlate: body.licensePlate }),
         ...(body.vehicleCapacity !== undefined && { vehicleCapacity: body.vehicleCapacity }),
+        ...(body.rideClass !== undefined && { rideClass: body.rideClass }),
         ...(body.profilePhotoUrl !== undefined && { profilePhotoUrl: body.profilePhotoUrl }),
         ...(body.nationalIdUrl !== undefined && { nationalIdUrl: body.nationalIdUrl }),
         ...(body.driverLicenseUrl !== undefined && { driverLicenseUrl: body.driverLicenseUrl }),

@@ -46,6 +46,10 @@ const rejectOrderSchema = z.object({
   reason: z.string().max(500).optional(),
 });
 
+const completePickupSchema = z.object({
+  code: z.string().trim().max(10).optional(),
+});
+
 const createCategorySchema = z.object({
   name: z.string().trim().min(1).max(100),
   description: z.string().max(1000).optional(),
@@ -566,6 +570,24 @@ export async function vendorRoutes(app: FastifyInstance) {
       throw new AppError(400, 'INVALID_STATUS', `Cannot mark as ready from ${order.status} status`);
     }
     const updated = await orderService.updateStatus(order.id, 'READY_FOR_PICKUP', request.user.userId, 'Order ready for pickup');
+    return { success: true, data: updated };
+  });
+
+  /** PUT /orders/:id/complete-pickup — Takeaway: customer collected the order.
+   *  Vendor verifies the pickup code (if set) and closes it; no rider involved. */
+  app.put<{ Params: IdParam }>('/orders/:id/complete-pickup', auth, async (request) => {
+    const order = await resolveOwnedOrder(app, request.user.userId, request.params.id);
+    if (order.fulfillment !== 'PICKUP') {
+      throw new AppError(400, 'NOT_A_PICKUP', 'This order is not a pickup order.');
+    }
+    if (order.status !== 'READY_FOR_PICKUP') {
+      throw new AppError(400, 'INVALID_STATUS', `Cannot complete pickup from ${order.status} status`);
+    }
+    const { code } = completePickupSchema.parse(request.body ?? {});
+    if (order.pickupCode && code != null && code !== order.pickupCode) {
+      throw new AppError(400, 'WRONG_PICKUP_CODE', 'That pickup code does not match.');
+    }
+    const updated = await orderService.updateStatus(order.id, 'COMPLETED', request.user.userId, 'Picked up by customer');
     return { success: true, data: updated };
   });
 

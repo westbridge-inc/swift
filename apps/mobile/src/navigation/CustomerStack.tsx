@@ -15,6 +15,8 @@ import { ServicesScreen } from '../screens/customer/ServicesScreen';
 import { IdentityVerificationScreen } from '../screens/customer/IdentityVerificationScreen';
 import { AddAddressScreen } from '../screens/customer/AddAddressScreen';
 import { LocationPickerScreen } from '../screens/customer/LocationPickerScreen';
+import { DestinationSearchScreen } from '../screens/customer/DestinationSearchScreen';
+import { PinConfirmScreen } from '../screens/customer/PinConfirmScreen';
 import { NotificationsScreen } from '../screens/customer/NotificationsScreen';
 import { ChatScreen } from '../screens/shared/ChatScreen';
 import { color } from '@swift/ui';
@@ -76,6 +78,8 @@ export function CustomerStack() {
       <Stack.Screen name="IdentityVerification" component={IdentityVerificationScreen} />
       <Stack.Screen name="AddAddress" component={AddAddressScreen} />
       <Stack.Screen name="LocationPicker" component={LocationPickerScreen} />
+      <Stack.Screen name="DestinationSearch" component={DestinationSearchScreen} />
+      <Stack.Screen name="PinConfirm" component={PinConfirmScreen} />
       <Stack.Screen name="Notifications" component={NotificationsScreen} />
       <Stack.Screen name="Chat" component={ChatScreen} />
     </Stack.Navigator>

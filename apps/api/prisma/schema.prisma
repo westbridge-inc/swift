@@ -181,6 +181,9 @@ model CountryConfig {
   /// Taxi fare formula fallback (zone table wins when both ends match):
   /// { base, perKm, perMin, minimum } in local currency
   taxiRates Json?
+  /// Per-tier fare multipliers applied to the base (Economy) fare:
+  /// { ECONOMY: 1.0, COMFORT: 1.35, XL: 1.8 }. Code default when null.
+  taxiClassRates Json?
 
   /// Cash guarantee + strike thresholds (master plan §5):
   /// { maxClaimsPerRiderPerMonth, strikeRestrictThreshold, strikeBanThreshold,
@@ -425,6 +428,9 @@ model Driver {
   vehicleColor         String
   licensePlate         String
   vehicleCapacity      Int          @default(4)
+  /// Top taxi tier this vehicle serves (serves all classes <= it). Set via the
+  /// driver-profile API and the admin drivers page (premium-fleet onboarding).
+  rideClass            RideClass    @default(ECONOMY)
   nationalIdUrl        String?
   driverLicenseUrl     String
   vehicleInsuranceUrl  String
@@ -736,6 +742,8 @@ model Order {
   taxiFarePerMin Decimal? @db.Decimal(10, 2)
   taxiFareTotal  Decimal? @db.Decimal(10, 2)
   taxiFareSurge  Float?
+  /// Chosen taxi tier (Economy/Comfort/XL). Null for non-taxi orders.
+  rideClass      RideClass?
 
   paymentMethod PaymentMethod
   paymentStatus PaymentStatus @default(PENDING)
@@ -768,6 +776,9 @@ model Order {
   /// PICKUP skips dispatch, APPOINTMENT books the slot at vendor acceptance.
   fulfillment     FulfillmentType @default(DELIVERY)
   appointmentSlot DateTime?
+  /// Takeaway: 4-digit code the customer shows to collect a PICKUP order; the
+  /// vendor verifies it to close the order (no rider involved). Null otherwise.
+  pickupCode      String?
 
   /// Deterministic risk heuristic (new account + high value + odd hours):
   /// the vendor sees a call-to-confirm prompt. Never an AI decision.
@@ -791,6 +802,16 @@ enum OrderType {
   GROCERY_DELIVERY
   COURIER
   TAXI
+}
+
+/// Taxi vehicle tier. A driver's rideClass is the TOP class their vehicle
+/// serves (serves all classes <= it). Seat capacity is a code rule:
+/// ECONOMY/COMFORT = 4, XL = 6. Per-class fare multipliers live in
+/// CountryConfig.taxiClassRates (code default when null).
+enum RideClass {
+  ECONOMY
+  COMFORT
+  XL
 }
 
 enum OrderStatus {

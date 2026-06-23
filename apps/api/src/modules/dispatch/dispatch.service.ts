@@ -1,4 +1,4 @@
-import type { PrismaClient } from '@prisma/client';
+import type { PrismaClient, RideClass } from '@prisma/client';
 import type { Server } from 'socket.io';
 import type Redis from 'ioredis';
 import type { FastifyInstance } from 'fastify';
@@ -6,6 +6,7 @@ import type { Queue } from 'bullmq';
 import { AppError, NotFoundError } from '../../utils/errors';
 import { NotificationService } from '../notification/notification.service';
 import { getMapsProvider, type MapsProvider } from '../../providers/maps/maps-provider';
+import { classesAtOrAbove } from '../rides/fare.service';
 import { rankCandidates, type DispatchCandidate } from './scoring';
 
 declare module 'fastify' {
@@ -76,8 +77,14 @@ export class DispatchService {
     radiusKm: number,
     pool: DispatchPool = 'RIDER',
     floatRequired = 0,
+    rideClass?: RideClass | null,
   ): Promise<DispatchCandidate[]> {
     const declined = await this.redis.smembers(declinedKey(orderId));
+
+    // A driver's rideClass is the TOP tier their vehicle serves, so only drivers
+    // at or above the order's tier are eligible (an XL request never offers to a
+    // 4-seat Economy car). Legacy/untagged orders fall back to ECONOMY = all.
+    const eligibleClasses = classesAtOrAbove(rideClass ?? 'ECONOMY');
 
     const rows = pool === 'DRIVER'
       ? await this.prisma.$queryRaw<GeoCandidateRow[]>`
@@ -86,6 +93,7 @@ export class DispatchService {
           FROM "drivers" d
           WHERE d."isOnline" = true
             AND d."isAvailable" = true
+            AND d."rideClass"::text = ANY(${eligibleClasses})
             AND d."currentLat" IS NOT NULL
             AND d."currentLng" IS NOT NULL
             AND ST_DWithin(
@@ -142,7 +150,7 @@ export class DispatchService {
       where: { id: orderId },
       select: {
         id: true, status: true, riderId: true, driverId: true, orderType: true,
-        fulfillment: true, orderNumber: true,
+        fulfillment: true, orderNumber: true, rideClass: true,
         customerId: true, pickupLat: true, pickupLng: true,
         subtotalBase: true, paymentMethod: true,
         vendor: { select: { name: true, owner: { select: { userId: true } } } },
@@ -168,7 +176,7 @@ export class DispatchService {
     const radius = BASE_RADIUS_KM + round * RADIUS_STEP_KM;
     // D.3 — a rider must have enough free float to front this order's vendor-cash (CASH deliveries only).
     const floatRequired = pool === 'RIDER' && order.paymentMethod === 'CASH' ? Number(order.subtotalBase) : 0;
-    const candidates = await this.findCandidates(orderId, { lat: order.pickupLat, lng: order.pickupLng }, radius, pool, floatRequired);
+    const candidates = await this.findCandidates(orderId, { lat: order.pickupLat, lng: order.pickupLng }, radius, pool, floatRequired, order.rideClass);
 
     if (candidates.length === 0) {
       if (round + 1 < MAX_ROUNDS) {

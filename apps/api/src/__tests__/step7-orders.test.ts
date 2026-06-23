@@ -325,6 +325,64 @@ describe('Checkout — ID gate, multi-vendor split, fulfillment', () => {
     expect(order.fulfillment).toBe('PICKUP');
     expect(order.deliveryFee).toBe(0);
     expect(order.deliveryAddress).toContain('Lifecycle Lane');
+    // Takeaway: the customer gets a 4-digit collection code.
+    expect(order.pickupCode).toMatch(/^\d{4}$/);
+  });
+
+  describe('Takeaway — pickup completion (no rider)', () => {
+    async function makePickupOrder(status: OrderStatus, pickupCode: string | null) {
+      const order = await app.prisma.order.create({
+        data: {
+          orderNumber: `S7P-${nanoid(10)}`,
+          orderType: 'FOOD_DELIVERY',
+          customerId: customer.userId,
+          vendorId: supermarket.vendorId,
+          status,
+          fulfillment: 'PICKUP',
+          pickupCode,
+          deliveryAddress: 'vendor counter',
+          deliveryLat: 6.8,
+          deliveryLng: -58.15,
+          subtotalBase: 1000,
+          subtotalMarkup: 0,
+          subtotalCustomer: 1000,
+          deliveryFee: 0,
+          totalAmount: 1000,
+          paymentMethod: 'CASH',
+        },
+      });
+      createdOrderIds.push(order.id);
+      return order;
+    }
+
+    it('rejects completing a non-pickup (delivery) order', async () => {
+      const o = await makeBareOrder(customer.userId, supermarket.vendorId, 'READY_FOR_PICKUP'); // fulfillment defaults DELIVERY
+      const res = await inject('PUT', `/api/v1/vendor/orders/${o.id}/complete-pickup`, {}, supermarket.token);
+      expect(res.statusCode).toBe(400);
+      expect(res.json().error.code).toBe('NOT_A_PICKUP');
+    });
+
+    it('rejects a wrong pickup code', async () => {
+      const o = await makePickupOrder('READY_FOR_PICKUP', '1234');
+      const res = await inject('PUT', `/api/v1/vendor/orders/${o.id}/complete-pickup`, { code: '9999' }, supermarket.token);
+      expect(res.statusCode).toBe(400);
+      expect(res.json().error.code).toBe('WRONG_PICKUP_CODE');
+    });
+
+    it('rejects completing before the order is ready', async () => {
+      const o = await makePickupOrder('PREPARING', '1234');
+      const res = await inject('PUT', `/api/v1/vendor/orders/${o.id}/complete-pickup`, { code: '1234' }, supermarket.token);
+      expect(res.statusCode).toBe(400);
+      expect(res.json().error.code).toBe('INVALID_STATUS');
+    });
+
+    it('completes a ready pickup with the right code → COMPLETED', async () => {
+      const o = await makePickupOrder('READY_FOR_PICKUP', '4242');
+      const res = await inject('PUT', `/api/v1/vendor/orders/${o.id}/complete-pickup`, { code: '4242' }, supermarket.token);
+      expect(res.statusCode).toBe(200);
+      const db = await app.prisma.order.findUniqueOrThrow({ where: { id: o.id } });
+      expect(db.status).toBe('COMPLETED');
+    });
   });
 
   it('blocks an L1 account exactly at the ID-gate threshold, with the boundary just below passing', async () => {
