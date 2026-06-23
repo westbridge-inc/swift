@@ -5,9 +5,9 @@ import MapView, { PROVIDER_DEFAULT, type Region } from 'react-native-maps';
 import * as Location from 'expo-location';
 import { Feather, MaterialCommunityIcons } from '@expo/vector-icons';
 import { color } from '@swift/ui';
-import { Text, Button, PressableScale } from '../../components/ui';
-import { useLocationStore } from '../../stores/locationStore';
-import { GEORGETOWN } from '../../hooks/useDeviceLocation';
+import { Text, Button, PressableScale } from '../../../components/ui';
+import { useLocationStore } from '../../../stores/locationStore';
+import { GEORGETOWN } from '../../../hooks/useDeviceLocation';
 import type { PickedPlace } from './DestinationSearchScreen';
 
 /**

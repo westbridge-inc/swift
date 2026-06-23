@@ -5,11 +5,11 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import BottomSheet, { BottomSheetScrollView } from '@gorhom/bottom-sheet';
 import { color } from '@swift/ui';
 import { Feather, MaterialCommunityIcons } from '@expo/vector-icons';
-import { Text, Heading, Card, Button, Spinner, Badge, PressableScale, Input, ChoiceChip } from '../../components/ui';
-import { useCourierEstimate, useCourierOrders, useSendCourier } from '../../hooks';
-import { useLocationStore } from '../../stores/locationStore';
-import { GEORGETOWN } from '../../hooks/useDeviceLocation';
-import { money } from '../../lib/money';
+import { Text, Heading, Card, Button, Spinner, Badge, PressableScale, Input, ChoiceChip } from '../../../components/ui';
+import { useCourierEstimate, useCourierOrders, useSendCourier } from '../../../hooks';
+import { useLocationStore } from '../../../stores/locationStore';
+import { GEORGETOWN } from '../../../hooks/useDeviceLocation';
+import { money } from '../../../lib/money';
 import type { PickedPlace } from './DestinationSearchScreen';
 
 type Size = 'SMALL' | 'MEDIUM' | 'LARGE' | 'EXTRA_LARGE';
