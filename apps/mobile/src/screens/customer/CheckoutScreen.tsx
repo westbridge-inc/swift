@@ -35,6 +35,7 @@ export function CheckoutScreen({ navigation }: any) {
   // the button stays disabled whenever the cart has no deliveryAddressId — e.g.
   // after "reorder" — even though the customer has a saved address.
   const effectiveAddressId = selectedId ?? cart?.deliveryAddressId ?? defaultAddressId;
+  const isService = cart?.vendor?.vendorType === 'SERVICE';
 
   useEffect(() => {
     // Persist the auto-selected default into the server cart so checkout uses
@@ -87,12 +88,12 @@ export function CheckoutScreen({ navigation }: any) {
       <ScrollView className="flex-1" contentContainerStyle={{ paddingBottom: 170 }} showsVerticalScrollIndicator={false}>
         <View className="px-lg pt-sm">
           {/* Address */}
-          <Heading size="lg" className="mb-sm">Deliver to</Heading>
+          <Heading size="lg" className="mb-sm">{isService ? 'Service location' : 'Deliver to'}</Heading>
           {list.length === 0 ? (
             <PressableScale onPress={() => navigation?.navigate?.('AddAddress')}>
               <Card className="flex-row items-center">
                 <Feather name="plus-circle" size={18} color={color.brand[500]} />
-                <Text className="ml-sm font-semibold text-brand-600">Add a delivery address</Text>
+                <Text className="ml-sm font-semibold text-brand-600">{isService ? 'Add an address' : 'Add a delivery address'}</Text>
               </Card>
             </PressableScale>
           ) : (
@@ -122,15 +123,17 @@ export function CheckoutScreen({ navigation }: any) {
             <View className="flex-row items-center justify-between">
               <View className="flex-row items-center">
                 <MaterialCommunityIcons name="cash" size={22} color={color.success} />
-                <Text className="ml-sm text-base font-semibold">Cash on delivery</Text>
+                <Text className="ml-sm text-base font-semibold">{isService ? 'Cash on completion' : 'Cash on delivery'}</Text>
               </View>
               <Feather name="check-circle" size={20} color={color.brand[500]} />
             </View>
-            <Text className="mt-xs text-xs text-text-muted">Pay the rider in cash. No card needed, no platform fees.</Text>
+            <Text className="mt-xs text-xs text-text-muted">
+              {isService ? 'Pay in cash when the service is done. No platform fees.' : 'Pay the rider in cash. No card needed, no platform fees.'}
+            </Text>
           </Card>
 
           {/* Tip */}
-          <Heading size="lg" className="mb-sm mt-lg">Tip your rider</Heading>
+          <Heading size="lg" className="mb-sm mt-lg">{isService ? 'Add a tip' : 'Tip your rider'}</Heading>
           <View className="flex-row" style={{ gap: 8 }}>
             {TIPS.map((t) => {
               const active = t === selectedTip;
@@ -149,7 +152,7 @@ export function CheckoutScreen({ navigation }: any) {
           {/* Summary */}
           <Card className="mt-lg">
             <SummaryRow label="Subtotal" value={money(cart.subtotalCustomer)} />
-            <SummaryRow label="Delivery" value={money(cart.deliveryFee)} />
+            {cart.deliveryFee ? <SummaryRow label="Delivery" value={money(cart.deliveryFee)} /> : null}
             {cart.tipAmount ? <SummaryRow label="Tip" value={money(cart.tipAmount)} /> : null}
             {cart.discount ? <SummaryRow label="Discount" value={`− ${money(cart.discount)}`} /> : null}
             <View className="mt-sm border-t border-border-subtle pt-sm">
