@@ -182,18 +182,15 @@ export function CheckoutScreen({ navigation }: any) {
           {/* Tip */}
           <Heading size="lg" className="mb-sm mt-lg">{isService ? 'Add a tip' : 'Tip your rider'}</Heading>
           <View className="flex-row" style={{ gap: 8 }}>
-            {TIPS.map((t) => {
-              const active = t === selectedTip;
-              return (
-                <PressableScale
-                  key={t}
-                  onPress={() => { setSelectedTip(t); setTip.mutate(t); }}
-                  className={active ? 'flex-1 items-center rounded-lg border border-brand-500 bg-brand-50 py-sm' : 'flex-1 items-center rounded-lg border border-border-subtle py-sm'}
-                >
-                  <Text className={active ? 'font-semibold text-brand-600' : 'text-text-secondary'}>{t === 0 ? 'None' : money(t)}</Text>
-                </PressableScale>
-              );
-            })}
+            {TIPS.map((t) => (
+              <ChoiceChip
+                key={t}
+                label={t === 0 ? 'None' : money(t)}
+                active={t === selectedTip}
+                onPress={() => { setSelectedTip(t); setTip.mutate(t); }}
+                full
+              />
+            ))}
           </View>
 
           {/* Summary */}

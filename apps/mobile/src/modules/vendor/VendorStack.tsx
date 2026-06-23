@@ -6,7 +6,7 @@ import { createNativeStackNavigator } from '@react-navigation/native-stack';
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
 import { color } from '@swift/ui';
 import { Feather, MaterialCommunityIcons } from '@expo/vector-icons';
-import { Text, Heading, Card, Button, Spinner, Skeleton, Image, Badge, elevation, PressableScale, EmptyState } from '../../components/ui';
+import { Text, Heading, Card, Button, Spinner, Skeleton, Image, Badge, elevation, PressableScale, EmptyState, ChoiceChip, Input } from '../../components/ui';
 import { DocumentChecklist } from '../../components/onboarding/DocumentChecklist';
 import { useBecomePartner, useVerificationStatus } from '../../hooks/verification';
 import {
@@ -93,24 +93,17 @@ function BusinessSetup() {
         </Text>
         <Text className="mb-xs text-sm font-semibold text-text-secondary">Business type</Text>
         <View className="mb-md flex-row flex-wrap" style={{ gap: 8 }}>
-          {TYPES.map((t) => {
-            const active = t.key === type;
-            return (
-              <PressableScale
-                key={t.key}
-                onPress={() => setType(t.key)}
-                className={active ? 'rounded-lg border border-brand-500 bg-brand-50 px-lg py-sm' : 'rounded-lg border border-border-subtle px-lg py-sm'}
-              >
-                <Text className={active ? 'text-sm font-semibold text-brand-600' : 'text-sm text-text-secondary'}>{t.label}</Text>
-              </PressableScale>
-            );
-          })}
+          {TYPES.map((t) => (
+            <ChoiceChip key={t.key} label={t.label} active={t.key === type} onPress={() => setType(t.key)} />
+          ))}
         </View>
-        <TextInput value={name} onChangeText={setName} placeholder="Business name" placeholderTextColor={color.text.muted} className={FIELD} />
-        <TextInput value={phone} onChangeText={setPhone} placeholder="Business phone" placeholderTextColor={color.text.muted} keyboardType="phone-pad" className={FIELD} />
-        <TextInput value={addr} onChangeText={setAddr} placeholder="Street address" placeholderTextColor={color.text.muted} className={FIELD} />
-        <TextInput value={city} onChangeText={setCity} placeholder="City" placeholderTextColor={color.text.muted} className={FIELD} />
-        {become.isError ? <Text className="mb-sm text-sm text-error">Couldn&apos;t create your store. Try again.</Text> : null}
+        <View className="gap-sm">
+          <Input value={name} onChangeText={setName} placeholder="Business name" />
+          <Input value={phone} onChangeText={setPhone} placeholder="Business phone" keyboardType="phone-pad" />
+          <Input value={addr} onChangeText={setAddr} placeholder="Street address" />
+          <Input value={city} onChangeText={setCity} placeholder="City" />
+        </View>
+        {become.isError ? <Text className="mb-sm mt-sm text-sm text-error">Couldn&apos;t create your store. Try again.</Text> : null}
         <Button label="Create store" loading={become.isPending} disabled={!valid} onPress={submit} />
       </ScrollView>
     </SafeAreaView>
@@ -123,9 +116,9 @@ function VendorOnboarding({ store }: { store: any }) {
     <SafeAreaView style={{ flex: 1 }} edges={['top']} className="bg-surface-base">
       <Header title={store.name} />
       <ScrollView className="flex-1" contentContainerStyle={{ paddingHorizontal: 16, paddingBottom: 32 }} showsVerticalScrollIndicator={false}>
-        <View className="mb-md flex-row items-start rounded-lg bg-brand-50 px-lg py-md">
-          <MaterialCommunityIcons name="shield-check" size={20} color={color.brand[600]} />
-          <Text className="ml-sm flex-1 text-sm text-brand-700">
+        <View className="mb-md flex-row items-start rounded-xl bg-surface-subtle px-lg py-md">
+          <MaterialCommunityIcons name="shield-check" size={20} color={color.brand[500]} />
+          <Text className="ml-sm flex-1 text-sm text-text-secondary">
             Your store is under review. Upload your business documents — we approve within 24 hours, then you can take orders.
           </Text>
         </View>
@@ -685,35 +678,14 @@ function VendorItemEditorScreen({ navigation, route }: any) {
 
         <Text className="mb-xs mt-sm text-sm font-semibold text-text-secondary">Category</Text>
         <View className="mb-md flex-row flex-wrap" style={{ gap: 8 }}>
-          {categories.map((c) => {
-            const active = c.id === categoryId;
-            return (
-              <PressableScale
-                key={c.id}
-                onPress={() => setCategoryId(c.id)}
-                className={active ? 'rounded-lg border border-brand-500 bg-brand-50 px-lg py-sm' : 'rounded-lg border border-border-subtle px-lg py-sm'}
-              >
-                <Text className={active ? 'text-sm font-semibold text-brand-600' : 'text-sm text-text-secondary'}>{c.name}</Text>
-              </PressableScale>
-            );
-          })}
+          {categories.map((c) => (
+            <ChoiceChip key={c.id} label={c.name} active={c.id === categoryId} onPress={() => setCategoryId(c.id)} />
+          ))}
         </View>
 
         <View className="mb-md flex-row" style={{ gap: 8 }}>
-          <PressableScale
-            onPress={() => setAvailable((v) => !v)}
-            className={available ? 'rounded-lg border border-brand-500 bg-brand-50 px-lg py-sm' : 'rounded-lg border border-border-subtle px-lg py-sm'}
-          >
-            <Text className={available ? 'text-sm font-semibold text-brand-600' : 'text-sm text-text-secondary'}>
-              {available ? 'Available' : 'Sold out'}
-            </Text>
-          </PressableScale>
-          <PressableScale
-            onPress={() => setPopular((v) => !v)}
-            className={popular ? 'rounded-lg border border-brand-500 bg-brand-50 px-lg py-sm' : 'rounded-lg border border-border-subtle px-lg py-sm'}
-          >
-            <Text className={popular ? 'text-sm font-semibold text-brand-600' : 'text-sm text-text-secondary'}>★ Popular</Text>
-          </PressableScale>
+          <ChoiceChip label={available ? 'Available' : 'Sold out'} active={available} onPress={() => setAvailable((v) => !v)} />
+          <ChoiceChip label="★ Popular" active={popular} onPress={() => setPopular((v) => !v)} />
         </View>
 
         {save.isError ? <Text className="mb-sm text-sm text-error">Couldn&apos;t save. Check the details and try again.</Text> : null}
