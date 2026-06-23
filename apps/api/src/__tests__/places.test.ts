@@ -18,7 +18,6 @@ import { LocalPlacesProvider } from '../providers/places/places-provider';
 const DAY = 24 * 60 * 60 * 1000;
 let app: FastifyInstance;
 let token: string;
-let userId: string;
 
 async function purgeFixtures() {
   const users = await app.prisma.user.findMany({
@@ -62,7 +61,6 @@ beforeAll(async () => {
       customer: { create: {} },
     },
   });
-  userId = user.id;
   token = app.jwt.sign({ userId: user.id, role: 'CUSTOMER', jti: nanoid(8) });
   await app.prisma.session.create({
     data: {
