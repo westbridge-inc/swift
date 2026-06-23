@@ -7,8 +7,9 @@ import { useQuery } from '@tanstack/react-query';
 import { customerApi } from '../../services/api';
 import { useLocationStore } from '../../stores/locationStore';
 import { color } from '@swift/ui';
-import { Text, Heading, Skeleton, List, Image, PressableScale, EmptyState, enter, staggerDelay, elevation } from '../../components/ui';
-import { vendorImage } from '../../lib/images';
+import { Text, Heading, Skeleton, List, Image, PressableScale, EmptyState, Scrim, enter, staggerDelay, elevation } from '../../components/ui';
+import { VendorCard } from '../../components/customer/VendorCard';
+import { categoryImage, vendorImage, DARK_BLURHASH } from '../../lib/images';
 
 type Vertical = { key: string; label: string; icon: keyof typeof MaterialCommunityIcons.glyphMap; route?: string };
 const VERTICALS: Vertical[] = [
@@ -26,89 +27,63 @@ const cuisineOf = (v: any) => (v.cuisineTypes && v.cuisineTypes[0]) || prettyTyp
 const prettyType = (t?: string) =>
   t === 'SUPERMARKET' ? 'Groceries' : t === 'STORE' ? 'Shop' : t === 'SERVICE' ? 'Services' : 'Restaurant';
 
+function greeting(): string {
+  const h = new Date().getHours();
+  if (h < 12) return 'Good morning';
+  if (h < 17) return 'Good afternoon';
+  return 'Good evening';
+}
+
+// Photo-led category tile — real imagery + dark scrim + label, so the grid reads
+// rich instead of flat-white. The glyph + label always render, so a slow photo
+// (dark blurhash) still communicates the category.
 function VerticalTile({ v, onPress }: { v: Vertical; onPress?: () => void }) {
   return (
     <PressableScale strong onPress={onPress}>
-      <View className="items-center">
-        <View
-          className="mb-2 h-[66px] w-[66px] items-center justify-center rounded-3xl border border-border-subtle bg-surface-base"
-          style={elevation.card}
-        >
-          <MaterialCommunityIcons name={v.icon} size={29} color={color.brand[500]} />
+      <View className="h-[92px] overflow-hidden rounded-2xl bg-surface-subtle" style={elevation.card}>
+        <Image
+          source={{ uri: categoryImage(v.key) }}
+          placeholder={{ blurhash: DARK_BLURHASH }}
+          style={{ width: '100%', height: '100%' }}
+        />
+        <Scrim cover from="rgba(0,0,0,0.10)" to="rgba(0,0,0,0.62)" />
+        <View className="absolute left-2.5 top-2.5">
+          <MaterialCommunityIcons name={v.icon} size={18} color="#fff" />
         </View>
-        <Text className="text-[13px] font-semibold text-text-primary">{v.label}</Text>
+        <Text className="absolute bottom-2.5 left-2.5 right-2 text-[13px] font-bold text-white" numberOfLines={1}>
+          {v.label}
+        </Text>
       </View>
     </PressableScale>
   );
 }
 
-function RatingPill({ value }: { value: number }) {
-  if (!value) {
-    return (
-      <View className="rounded-full bg-surface-subtle px-2 py-1">
-        <Text className="text-xs font-semibold text-text-secondary">New</Text>
-      </View>
-    );
-  }
+function RatingPill({ value, onDark }: { value: number; onDark?: boolean }) {
+  const label = value > 0 ? value.toFixed(1) : 'New';
   return (
-    <View className="flex-row items-center rounded-full bg-surface-subtle px-2 py-1">
+    <View className="flex-row items-center rounded-full bg-surface-base px-2.5 py-1" style={onDark ? elevation.card : undefined}>
       <MaterialCommunityIcons name="star" size={13} color={color.brand[500]} />
-      <Text className="ml-1 text-xs font-semibold text-text-primary">{value.toFixed(1)}</Text>
+      <Text className="ml-1 text-xs font-bold text-text-primary">{label}</Text>
     </View>
   );
 }
 
-function MetaLine({ vendor }: { vendor: any }) {
-  const fee = vendor.deliveryFee;
-  return (
-    <View className="mt-xs flex-row items-center">
-      <Feather name="clock" size={13} color={color.text.muted} />
-      <Text className="ml-1 text-xs text-text-muted">{etaOf(vendor)} min</Text>
-      <Text className="mx-2 text-xs text-text-muted">·</Text>
-      <Text className="text-xs text-text-muted" numberOfLines={1}>
-        {fee != null && Number(fee) > 0 ? `$${Number(fee)} delivery` : 'Free delivery'}
-      </Text>
-    </View>
-  );
-}
-
-const VendorCard = memo(function VendorCard({ vendor, onPress }: { vendor: any; onPress?: () => void }) {
-  const closed = vendor.isCurrentlyOpen === false;
-  return (
-    <PressableScale onPress={onPress} style={{ marginBottom: 18 }}>
-      <View className="overflow-hidden rounded-2xl bg-surface-base" style={elevation.raised}>
-        <View>
-          <Image source={{ uri: vendorImage(vendor) }} style={{ width: '100%', height: 150 }} />
-          {closed ? (
-            <View className="absolute inset-0 items-center justify-center" style={{ backgroundColor: 'rgba(0,0,0,0.45)' }}>
-              <Text className="text-sm font-bold text-white">Closed</Text>
-            </View>
-          ) : null}
-        </View>
-        <View className="p-md">
-          <View className="flex-row items-center justify-between">
-            <Text className="flex-1 pr-sm text-base font-bold text-text-primary" numberOfLines={1}>{vendor.name}</Text>
-            <RatingPill value={ratingOf(vendor)} />
-          </View>
-          <Text className="mt-1 text-sm text-text-secondary" numberOfLines={1}>{cuisineOf(vendor)}</Text>
-          <MetaLine vendor={vendor} />
-        </View>
-      </View>
-    </PressableScale>
-  );
-});
-
+// Featured rail card — title sits ON the photo over a scrim (the premium
+// "editorial" treatment), distinct from the list cards below.
 const FeaturedCard = memo(function FeaturedCard({ vendor, onPress }: { vendor: any; onPress?: () => void }) {
   return (
-    <Pressable onPress={onPress} style={{ width: 248, marginRight: 14 }}>
-      <View className="overflow-hidden rounded-2xl bg-surface-base" style={elevation.raised}>
-        <Image source={{ uri: vendorImage(vendor) }} style={{ width: '100%', height: 130 }} />
-        <View className="p-sm">
-          <View className="flex-row items-center justify-between">
-            <Text className="flex-1 pr-sm text-sm font-bold text-text-primary" numberOfLines={1}>{vendor.name}</Text>
-            <RatingPill value={ratingOf(vendor)} />
+    <Pressable onPress={onPress} style={{ width: 264, marginRight: 14 }}>
+      <View className="overflow-hidden rounded-2xl bg-surface-base" style={elevation.floating}>
+        <View>
+          <Image source={{ uri: vendorImage(vendor) }} style={{ width: '100%', height: 156 }} />
+          <Scrim height={116} to="rgba(0,0,0,0.78)" />
+          <View className="absolute right-3 top-3">
+            <RatingPill value={ratingOf(vendor)} onDark />
           </View>
-          <Text className="mt-1 text-xs text-text-muted" numberOfLines={1}>{cuisineOf(vendor)} · {etaOf(vendor)} min</Text>
+          <View className="absolute bottom-3 left-3 right-3">
+            <Text className="font-display text-base font-bold text-white" numberOfLines={1}>{vendor.name}</Text>
+            <Text className="mt-0.5 text-xs text-white" style={{ opacity: 0.9 }} numberOfLines={1}>{cuisineOf(vendor)} · {etaOf(vendor)} min</Text>
+          </View>
         </View>
       </View>
     </Pressable>
@@ -137,7 +112,7 @@ function CuisineChips({ cuisines, selected, onSelect }: { cuisines: string[]; se
 
 function ActiveOrderBanner({ order, onPress }: { order: any; onPress?: () => void }) {
   return (
-    <Pressable onPress={onPress} className="mx-lg mb-md flex-row items-center rounded-2xl px-lg py-md" style={{ backgroundColor: color.brand[500] }}>
+    <Pressable onPress={onPress} className="mx-lg mb-md flex-row items-center rounded-2xl px-lg py-md" style={[{ backgroundColor: color.brand[500] }, elevation.floating]}>
       <MaterialCommunityIcons name="bike-fast" size={24} color="#fff" />
       <View className="ml-sm flex-1">
         <Text className="text-sm font-bold text-white">Order in progress</Text>
@@ -164,7 +139,7 @@ function SectionHeader({ title, action, onAction }: { title: string; action?: st
 function HomeHeader({ navigation, address, activeOrder, topRated, cuisines, selectedCuisine, onSelectCuisine }: any) {
   return (
     <View>
-      <View className="flex-row items-center justify-between px-lg pt-md pb-sm">
+      <View className="flex-row items-center justify-between px-lg pt-md">
         <Pressable className="flex-1 flex-row items-center" onPress={() => navigation?.navigate?.('LocationPicker')}>
           <MaterialCommunityIcons name="map-marker" size={20} color={color.brand[500]} />
           <View className="ml-xs flex-1">
@@ -183,15 +158,29 @@ function HomeHeader({ navigation, address, activeOrder, topRated, cuisines, sele
         </Pressable>
       </View>
 
+      <View className="px-lg pt-md">
+        <Heading size="3xl">{greeting()}</Heading>
+        <Text className="mt-0.5 text-base text-text-secondary">What can we get you today?</Text>
+      </View>
+
       <Pressable
         onPress={() => navigation?.navigate?.('Search')}
-        className="mx-lg mb-md flex-row items-center rounded-2xl bg-surface-subtle px-lg py-md"
+        className="mx-lg mb-md mt-md flex-row items-center rounded-2xl border border-border-subtle bg-surface-base px-lg py-md"
+        style={elevation.card}
       >
-        <Feather name="search" size={18} color={color.text.muted} />
+        <Feather name="search" size={18} color={color.brand[500]} />
         <Text className="ml-sm text-text-muted">Search food, shops, services…</Text>
       </Pressable>
 
-      <View className="mx-lg mb-lg flex-row items-center rounded-2xl bg-brand-50 px-lg py-md">
+      <View className="flex-row flex-wrap justify-between px-lg pt-xs">
+        {VERTICALS.map((v, i) => (
+          <Animated.View key={v.key} entering={enter.fadeUp.delay(staggerDelay(i))} style={{ width: '31%', marginBottom: 14 }}>
+            <VerticalTile v={v} onPress={() => v.route && navigation?.navigate?.(v.route)} />
+          </Animated.View>
+        ))}
+      </View>
+
+      <View className="mx-lg mb-md flex-row items-center rounded-2xl bg-brand-50 px-lg py-md">
         <MaterialCommunityIcons name="shield-check" size={20} color={color.brand[600]} />
         <Text className="ml-sm flex-1 text-sm font-medium text-brand-700">
           Every Swift driver & rider is ID-verified and police-cleared.
@@ -202,18 +191,9 @@ function HomeHeader({ navigation, address, activeOrder, topRated, cuisines, sele
         <ActiveOrderBanner order={activeOrder} onPress={() => navigation?.navigate?.('OrderTracking', { id: activeOrder.id })} />
       ) : null}
 
-      <View className="mb-sm px-lg"><Heading size="lg">What do you need?</Heading></View>
-      <View className="flex-row flex-wrap justify-between px-lg">
-        {VERTICALS.map((v, i) => (
-          <Animated.View key={v.key} entering={enter.fadeUp.delay(staggerDelay(i))} style={{ width: '31%', marginBottom: 16 }}>
-            <VerticalTile v={v} onPress={() => v.route && navigation?.navigate?.(v.route)} />
-          </Animated.View>
-        ))}
-      </View>
-
       {topRated.length > 0 ? (
         <View className="mb-sm">
-          <SectionHeader title="Top rated" />
+          <SectionHeader title="Top rated near you" />
           <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ paddingHorizontal: 16 }}>
             {topRated.map((v: any) => (
               <FeaturedCard key={v.id} vendor={v} onPress={() => navigation?.navigate?.('VendorDetail', { id: v.id })} />
@@ -222,15 +202,19 @@ function HomeHeader({ navigation, address, activeOrder, topRated, cuisines, sele
         </View>
       ) : null}
 
-      <View className="mx-lg my-md overflow-hidden rounded-2xl" style={{ backgroundColor: color.brand[500] }}>
+      <Pressable
+        onPress={() => navigation?.navigate?.('Courier')}
+        className="mx-lg my-md overflow-hidden rounded-2xl"
+        style={[{ backgroundColor: color.brand[500] }, elevation.floating]}
+      >
         <View className="flex-row items-center p-lg">
           <View className="flex-1 pr-md">
             <Text className="text-lg font-bold text-white">Send a parcel across town</Text>
             <Text className="mt-1 text-sm text-white" style={{ opacity: 0.92 }}>Cash on delivery. No platform fees, ever.</Text>
           </View>
-          <MaterialCommunityIcons name="moped" size={44} color="#fff" style={{ opacity: 0.9 }} />
+          <MaterialCommunityIcons name="moped" size={44} color="#fff" style={{ opacity: 0.95 }} />
         </View>
-      </View>
+      </Pressable>
 
       <SectionHeader title="Near you" />
       <CuisineChips cuisines={cuisines} selected={selectedCuisine} onSelect={onSelectCuisine} />
