@@ -5,7 +5,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import BottomSheet, { BottomSheetScrollView } from '@gorhom/bottom-sheet';
 import { color } from '@swift/ui';
 import { Feather, MaterialCommunityIcons } from '@expo/vector-icons';
-import { Text, Heading, Card, Button, Spinner, Badge, PressableScale, Input } from '../../components/ui';
+import { Text, Heading, Card, Button, Spinner, Badge, PressableScale, Input, ChoiceChip } from '../../components/ui';
 import { useCourierEstimate, useCourierOrders, useSendCourier } from '../../hooks';
 import { useLocationStore } from '../../stores/locationStore';
 import { GEORGETOWN } from '../../hooks/useDeviceLocation';
@@ -29,19 +29,6 @@ const SPEEDS: { key: Speed; label: string }[] = [
 
 function prettyStatus(s: string) {
   return (s || '').toLowerCase().replace(/_/g, ' ').replace(/^\w/, (c) => c.toUpperCase());
-}
-
-function Chip({ label, active, onPress, full }: { label: string; active: boolean; onPress: () => void; full?: boolean }) {
-  return (
-    <PressableScale
-      onPress={onPress}
-      className={`${full ? 'flex-1 items-center' : ''} rounded-lg border px-lg py-sm ${
-        active ? 'border-brand-500 bg-brand-500' : 'border-border-subtle bg-surface-base'
-      }`}
-    >
-      <Text className={active ? 'font-semibold text-white' : 'text-text-secondary'}>{label}</Text>
-    </PressableScale>
-  );
 }
 
 function BackButton({ navigation }: any) {
@@ -179,7 +166,7 @@ export function CourierScreen({ navigation }: any) {
           <Text className="mb-xs mt-lg text-sm font-semibold text-text-secondary">Package size</Text>
           <View className="flex-row flex-wrap" style={{ gap: 8 }}>
             {SIZES.map((s) => (
-              <Chip key={s.key} label={s.label} active={s.key === size} onPress={() => setSize(s.key)} />
+              <ChoiceChip key={s.key} label={s.label} active={s.key === size} onPress={() => setSize(s.key)} />
             ))}
           </View>
 
@@ -187,7 +174,7 @@ export function CourierScreen({ navigation }: any) {
           <Text className="mb-xs mt-lg text-sm font-semibold text-text-secondary">Speed</Text>
           <View className="flex-row" style={{ gap: 8 }}>
             {SPEEDS.map((s) => (
-              <Chip key={s.key} label={s.label} active={s.key === speed} onPress={() => setSpeed(s.key)} full />
+              <ChoiceChip key={s.key} label={s.label} active={s.key === speed} onPress={() => setSpeed(s.key)} full />
             ))}
           </View>
 

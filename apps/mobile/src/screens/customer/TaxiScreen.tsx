@@ -5,7 +5,7 @@ import MapView, { Marker, PROVIDER_DEFAULT, Polyline } from 'react-native-maps';
 import BottomSheet, { BottomSheetView, BottomSheetScrollView } from '@gorhom/bottom-sheet';
 import { color } from '@swift/ui';
 import { Feather, MaterialCommunityIcons } from '@expo/vector-icons';
-import { Text, Heading, Card, Button, Spinner, PressableScale } from '../../components/ui';
+import { Text, Heading, Card, Button, Spinner, PressableScale, choiceSurface } from '../../components/ui';
 import { useActiveRide, useRideEstimate, useRequestRide, useCancelRide } from '../../hooks';
 import { useLocationStore } from '../../stores/locationStore';
 import { GEORGETOWN } from '../../hooks/useDeviceLocation';
@@ -232,11 +232,7 @@ function TierRow({
   const meta = TIER_META[tier.rideClass];
   return (
     <PressableScale onPress={onPress}>
-      <View
-        className={`mb-sm flex-row items-center rounded-xl border px-lg py-md ${
-          selected ? 'border-brand-500 bg-brand-500' : 'border-border-subtle bg-surface-base'
-        }`}
-      >
+      <View className={`mb-sm flex-row items-center rounded-xl border px-lg py-md ${choiceSurface(selected)}`}>
         <MaterialCommunityIcons name={meta.icon} size={26} color={selected ? '#fff' : color.text.primary} />
         <View className="ml-md flex-1">
           <Text className={`text-base font-bold ${selected ? 'text-white' : 'text-text-primary'}`}>
