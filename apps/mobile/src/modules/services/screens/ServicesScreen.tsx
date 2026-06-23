@@ -3,8 +3,8 @@ import { View, ScrollView, TextInput } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { color } from '@swift/ui';
 import { Feather, MaterialCommunityIcons } from '@expo/vector-icons';
-import { Text, Heading, Card, Button, Badge, Skeleton, PressableScale, EmptyState } from '../../components/ui';
-import { useServiceProviders, useRequestJob } from '../../hooks';
+import { Text, Heading, Card, Button, Badge, Skeleton, PressableScale, EmptyState } from '../../../components/ui';
+import { useServiceProviders, useRequestJob } from '../../../hooks';
 
 const TRADES = [
   'Electrician',
