@@ -6,7 +6,7 @@ import { createNativeStackNavigator } from '@react-navigation/native-stack';
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
 import { color } from '@swift/ui';
 import { Feather, MaterialCommunityIcons } from '@expo/vector-icons';
-import { Text, Heading, Card, Button, Spinner, Skeleton, Image, Badge, elevation, PressableScale, EmptyState, ChoiceChip, Input } from '../../components/ui';
+import { Text, Heading, Card, Button, Spinner, Skeleton, Image, Badge, elevation, PressableScale, EmptyState, ChoiceChip, Input, SettingsGroup, SettingsRow } from '../../components/ui';
 import { DocumentChecklist } from '../../components/onboarding/DocumentChecklist';
 import { useBecomePartner, useVerificationStatus } from '../../hooks/verification';
 import {
@@ -779,29 +779,32 @@ function VendorAccountScreen() {
     setDays((prev) => prev.map((x) => (x.dayOfWeek === d ? { ...x, ...patch } : x)));
 
   return (
-    <SafeAreaView style={{ flex: 1 }} edges={['top']} className="bg-surface-base">
+    <SafeAreaView style={{ flex: 1 }} edges={['top']} className="bg-surface-subtle">
       <Header title="Account" />
       <ScrollView className="flex-1" contentContainerStyle={{ paddingHorizontal: 16, paddingBottom: 32 }} showsVerticalScrollIndicator={false}>
-        <Card className="mb-md">
-          <Text className="text-base font-bold text-text-primary">{store?.name ?? 'Your store'}</Text>
-          <Text className="mt-xs text-sm text-text-secondary">
-            {prettyVendorType(store?.vendorType)}
-            {store?.city ? ` · ${store.city}` : ''}
-          </Text>
-          {store?.phone ? <Text className="mt-xs text-xs text-text-muted">{store.phone}</Text> : null}
-        </Card>
-
-        <Card className="mb-md">
-          <View className="flex-row items-center justify-between">
-            <View className="flex-1 pr-md">
-              <Text className="text-base font-semibold">Subscription</Text>
-              <Text className="mt-xs text-xs text-text-muted">
-                {sub.data ? 'Active weekly plan' : 'No active plan — set up weekly billing'}
+        <SettingsGroup>
+          <View className="flex-row items-center px-md py-md">
+            <View className="h-14 w-14 items-center justify-center rounded-full bg-brand-500">
+              <MaterialCommunityIcons name="storefront" size={26} color="#fff" />
+            </View>
+            <View className="ml-md flex-1">
+              <Text className="text-lg font-bold text-text-primary" numberOfLines={1}>{store?.name ?? 'Your store'}</Text>
+              <Text className="mt-0.5 text-sm text-text-secondary" numberOfLines={1}>
+                {prettyVendorType(store?.vendorType)}{store?.city ? ` · ${store.city}` : ''}
               </Text>
             </View>
-            <Badge label={sub.data ? 'Active' : 'Inactive'} tone={sub.data ? 'success' : 'brand'} />
           </View>
-        </Card>
+        </SettingsGroup>
+
+        <SettingsGroup header="Plan">
+          <SettingsRow
+            icon="cash-multiple"
+            label="Subscription"
+            sublabel={sub.data ? 'Active weekly plan' : 'No active plan — set up weekly billing'}
+            right={<Badge label={sub.data ? 'Active' : 'Inactive'} tone={sub.data ? 'success' : 'brand'} />}
+          />
+          {store?.phone ? <SettingsRow icon="phone-outline" label="Phone" value={store.phone} /> : null}
+        </SettingsGroup>
 
         <Heading size="lg" className="mb-sm mt-sm">
           Business hours
