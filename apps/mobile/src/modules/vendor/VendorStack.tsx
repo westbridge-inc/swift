@@ -36,7 +36,6 @@ import * as ImagePicker from 'expo-image-picker';
 import { VendorBulkImportScreen } from '../../screens/vendor/VendorBulkImportScreen';
 
 const Stack = createNativeStackNavigator();
-const FIELD = 'mb-sm rounded-lg border border-border-subtle bg-surface-base px-lg py-md font-body text-base text-text-primary';
 
 const TYPES = [
   { key: 'RESTAURANT', label: 'Restaurant' },
@@ -528,13 +527,7 @@ function VendorMenuScreen({ navigation }: any) {
           <Card className="mb-md">
             <Text className="mb-xs text-sm font-semibold text-text-secondary">New category</Text>
             <View className="flex-row items-center" style={{ gap: 8 }}>
-              <TextInput
-                value={newCat}
-                onChangeText={setNewCat}
-                placeholder="e.g. Mains, Drinks"
-                placeholderTextColor={color.text.muted}
-                className="flex-1 rounded-lg border border-border-subtle bg-surface-base px-lg py-md font-body text-base text-text-primary"
-              />
+              <Input containerClassName="flex-1" value={newCat} onChangeText={setNewCat} placeholder="e.g. Mains, Drinks" />
               <Button label="Add" loading={createCategory.isPending} disabled={newCat.trim().length < 1} onPress={addCategory} />
             </View>
           </Card>
@@ -650,31 +643,21 @@ function VendorItemEditorScreen({ navigation, route }: any) {
           </PressableScale>
         ) : null}
 
-        <TextInput value={name} onChangeText={setName} placeholder="Item name" placeholderTextColor={color.text.muted} className={FIELD} />
-        <TextInput
-          value={price}
-          onChangeText={setPrice}
-          placeholder="Price (GYD)"
-          placeholderTextColor={color.text.muted}
-          keyboardType="decimal-pad"
-          className={FIELD}
-        />
-        <TextInput
-          value={description}
-          onChangeText={setDescription}
-          placeholder="Description (optional)"
-          placeholderTextColor={color.text.muted}
-          multiline
-          className={FIELD}
-        />
+        <View className="gap-sm">
+          <Input value={name} onChangeText={setName} placeholder="Item name" />
+          <Input value={price} onChangeText={setPrice} placeholder="Price (GYD)" keyboardType="decimal-pad" />
+          <Input value={description} onChangeText={setDescription} placeholder="Description (optional)" multiline />
+        </View>
 
         {/* Inventory — used by groceries/shops; optional for restaurants */}
         <Text className="mb-xs mt-sm text-sm font-semibold text-text-secondary">Inventory (optional)</Text>
-        <View className="flex-row" style={{ gap: 8 }}>
-          <TextInput value={stock} onChangeText={setStock} placeholder="Stock qty" placeholderTextColor={color.text.muted} keyboardType="number-pad" className={`${FIELD} flex-1`} />
-          <TextInput value={unit} onChangeText={setUnit} placeholder="Unit (kg, ea)" placeholderTextColor={color.text.muted} className={`${FIELD} flex-1`} />
+        <View className="gap-sm">
+          <View className="flex-row" style={{ gap: 8 }}>
+            <Input containerClassName="flex-1" value={stock} onChangeText={setStock} placeholder="Stock qty" keyboardType="number-pad" />
+            <Input containerClassName="flex-1" value={unit} onChangeText={setUnit} placeholder="Unit (kg, ea)" />
+          </View>
+          <Input value={sku} onChangeText={setSku} placeholder="SKU / barcode (optional)" />
         </View>
-        <TextInput value={sku} onChangeText={setSku} placeholder="SKU / barcode (optional)" placeholderTextColor={color.text.muted} className={FIELD} />
 
         <Text className="mb-xs mt-sm text-sm font-semibold text-text-secondary">Category</Text>
         <View className="mb-md flex-row flex-wrap" style={{ gap: 8 }}>
