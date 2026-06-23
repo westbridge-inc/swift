@@ -23,6 +23,7 @@ import { authPlugin } from './plugins/auth';
 import { socketPlugin } from './plugins/socket';
 import { redisPlugin } from './plugins/redis';
 import { registerErrorHandler } from './middleware/error-handler';
+import { registerEmptyJsonBodyParser } from './plugins/empty-json';
 import { createQueues, createWorkers, scheduleRecurringJobs } from './jobs/queue';
 import { loggerRedactConfig } from './utils/logger-config';
 import { createReadStream } from 'node:fs';
@@ -71,6 +72,11 @@ async function buildApp() {
 
   // Global error handler
   registerErrorHandler(app);
+
+  // Action POSTs (go-online, accept, …) legitimately carry no body; the axios
+  // clients still send Content-Type: application/json, so tolerate an empty body
+  // instead of rejecting it with EMPTY_JSON_BODY (400).
+  registerEmptyJsonBodyParser(app);
 
   // Core plugins
   const corsOrigin = process.env['CORS_ORIGIN']
