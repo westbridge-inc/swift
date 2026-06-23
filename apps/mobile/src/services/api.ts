@@ -131,6 +131,20 @@ export const customerApi = {
 
 // Taxi / rides (mounted at /api/v1/rides)
 type Point = { lat: number; lng: number };
+export type RideClass = 'ECONOMY' | 'COMFORT' | 'XL';
+export interface TierEstimate {
+  rideClass: RideClass;
+  fare: number;
+  multiplier: number;
+  capacity: number;
+  source: 'zone_table' | 'formula';
+}
+export interface TieredEstimate {
+  tiers: TierEstimate[];
+  currencyCode: string;
+  distanceKm: number;
+  durationMin: number;
+}
 export const rideApi = {
   estimate: (pickup: Point, dropoff: Point) => api.post('/rides/estimate', { pickup, dropoff }),
   request: (data: {
@@ -139,6 +153,7 @@ export const rideApi = {
     pickupAddress: string;
     dropoffAddress: string;
     passengerCount?: number;
+    rideClass?: RideClass;
   }) => api.post('/rides/request', data),
   active: () => api.get('/rides/active'),
   get: (id: string) => api.get(`/rides/${id}`),
