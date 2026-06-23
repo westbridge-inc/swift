@@ -10,6 +10,7 @@ export { List } from './list';
 export { Image } from './image';
 export { PressableScale } from './pressable-scale';
 export { elevation } from './elevation';
+export { Scrim } from './scrim';
 export { EmptyState } from './empty-state';
 export { enter, staggerDelay, screenTransition } from './transitions';
 export { Field } from './field';

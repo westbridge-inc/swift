@@ -2,7 +2,7 @@ import { View, ScrollView, Pressable } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Feather, MaterialCommunityIcons } from '@expo/vector-icons';
 import { color } from '@swift/ui';
-import { Text, Heading, Card, Button, Badge } from '../../components/ui';
+import { Text, Heading, Card, Button, Badge, elevation } from '../../components/ui';
 import { useAuthStore } from '../../stores/authStore';
 import { useProfile, useAddresses } from '../../hooks';
 
@@ -24,15 +24,15 @@ export function AccountScreen({ navigation }: any) {
       </View>
       <ScrollView className="flex-1" contentContainerStyle={{ paddingBottom: 32 }} showsVerticalScrollIndicator={false}>
         <View className="px-lg">
-          <Card className="flex-row items-center">
-            <View className="h-14 w-14 items-center justify-center rounded-full bg-brand-500">
-              <Text className="text-lg font-bold text-white">{initials}</Text>
+          <View className="flex-row items-center rounded-2xl bg-brand-500 p-lg" style={elevation.floating}>
+            <View className="h-16 w-16 items-center justify-center rounded-full bg-surface-base">
+              <Text className="text-xl font-bold text-brand-600">{initials}</Text>
             </View>
             <View className="ml-md flex-1">
-              <Text className="text-lg font-bold">{firstName || 'Your account'} {lastName}</Text>
-              {phone ? <Text className="mt-xs text-sm text-text-secondary">{phone}</Text> : null}
+              <Text className="text-xl font-bold text-white" numberOfLines={1}>{firstName || 'Your account'} {lastName}</Text>
+              {phone ? <Text className="mt-xs text-sm text-white" style={{ opacity: 0.85 }}>{phone}</Text> : null}
             </View>
-          </Card>
+          </View>
 
           {profile?.customer ? (
             <View className="mt-md flex-row" style={{ gap: 12 }}>
