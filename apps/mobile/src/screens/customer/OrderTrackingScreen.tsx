@@ -178,6 +178,17 @@ export function OrderTrackingScreen({ navigation, route }: any) {
               </Text>
             </Card>
           )}
+
+          {/* Takeaway: the collection code to show at the counter. */}
+          {order.fulfillment === 'PICKUP' && order.pickupCode && !cancelled && step < 4 ? (
+            <Card className="mt-md items-center bg-surface-subtle">
+              <Text className="text-xs font-semibold uppercase text-text-muted">Pickup code</Text>
+              <Text className="mt-xs text-3xl font-bold tracking-widest text-brand-600">{order.pickupCode}</Text>
+              <Text className="mt-xs text-center text-xs text-text-secondary">
+                Show this at {order.vendor?.name ?? 'the store'} to collect your order.
+              </Text>
+            </Card>
+          ) : null}
         </View>
 
         {/* Rate the order once it's delivered/completed */}

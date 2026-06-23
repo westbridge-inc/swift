@@ -103,6 +103,7 @@ export const customerApi = {
     tipAmount?: number;
     scheduledFor?: string;
     promoCode?: string;
+    fulfillmentSelections?: Record<string, 'DELIVERY' | 'PICKUP'>;
   }) => api.post('/customer/checkout', data),
   getNotifications: () => api.get('/customer/notifications'),
   reorder: (id: string) => api.post(`/customer/orders/${id}/reorder`, {}),
