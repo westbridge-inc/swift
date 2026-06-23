@@ -30,10 +30,13 @@ function VerticalTile({ v, onPress }: { v: Vertical; onPress?: () => void }) {
   return (
     <PressableScale strong onPress={onPress}>
       <View className="items-center">
-        <View className="mb-xs h-16 w-16 items-center justify-center rounded-2xl bg-brand-50">
-          <MaterialCommunityIcons name={v.icon} size={28} color={color.brand[500]} />
+        <View
+          className="mb-2 h-[66px] w-[66px] items-center justify-center rounded-3xl border border-border-subtle bg-surface-base"
+          style={elevation.card}
+        >
+          <MaterialCommunityIcons name={v.icon} size={29} color={color.brand[500]} />
         </View>
-        <Text className="text-sm font-semibold text-text-primary">{v.label}</Text>
+        <Text className="text-[13px] font-semibold text-text-primary">{v.label}</Text>
       </View>
     </PressableScale>
   );
