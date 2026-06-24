@@ -46,6 +46,7 @@ const vendorsBrowseQuerySchema = latLngQuerySchema.extend({
   search: z.string().max(100).optional(),
   open: z.enum(['true', 'false']).optional(),
   sort: z.string().max(30).optional(),
+  minRating: z.coerce.number().min(0).max(5).optional(),
 });
 
 const addCartItemSchema = z.object({
@@ -704,12 +705,13 @@ export async function customerRoutes(app: FastifyInstance) {
   app.get('/vendors', async (request: AuthRequest) => {
     const query = request.query as Record<string, string | undefined>;
     const { page, limit, skip } = parsePagination(query);
-    const { type, cuisine, search, lat, lng, open, sort } = vendorsBrowseQuerySchema.parse(request.query);
+    const { type, cuisine, search, lat, lng, open, sort, minRating } = vendorsBrowseQuerySchema.parse(request.query);
 
     const where: Record<string, unknown> = { status: 'ACTIVE' };
     if (type) where['vendorType'] = type;
     if (cuisine) where['cuisineTypes'] = { has: cuisine };
     if (open === 'true') where['isCurrentlyOpen'] = true;
+    if (minRating != null) where['averageRating'] = { gte: minRating };
     if (search) {
       where['OR'] = [
         { name: { contains: search, mode: 'insensitive' } },

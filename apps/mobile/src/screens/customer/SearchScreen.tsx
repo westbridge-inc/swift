@@ -16,11 +16,31 @@ const FILTERS: { key: string; label: string; type?: string }[] = [
   { key: 'services', label: 'Services', type: 'SERVICE' },
 ];
 
+const SORTS: { key: 'recommended' | 'popular' | 'name'; label: string }[] = [
+  { key: 'recommended', label: 'Recommended' },
+  { key: 'popular', label: 'Popular' },
+  { key: 'name', label: 'A–Z' },
+];
+
+function Pill({ label, active, onPress }: { label: string; active: boolean; onPress: () => void }) {
+  return (
+    <PressableScale
+      onPress={onPress}
+      className={active ? 'rounded-full border border-brand-500 bg-brand-500 px-lg py-sm' : 'rounded-full border border-border-subtle bg-surface-base px-lg py-sm'}
+    >
+      <Text className={active ? 'text-sm font-semibold text-white' : 'text-sm font-semibold text-text-secondary'}>{label}</Text>
+    </PressableScale>
+  );
+}
+
 export function SearchScreen({ navigation }: any) {
   const { latitude, longitude } = useLocationStore();
   const [text, setText] = useState('');
   const [debounced, setDebounced] = useState('');
   const [filter, setFilter] = useState('all');
+  const [sort, setSort] = useState<'recommended' | 'popular' | 'name'>('recommended');
+  const [openNow, setOpenNow] = useState(false);
+  const [topRated, setTopRated] = useState(false);
 
   // Debounce keystrokes → one query when typing settles.
   useEffect(() => {
@@ -29,16 +49,19 @@ export function SearchScreen({ navigation }: any) {
   }, [text]);
 
   const params = useMemo(() => {
-    const p: Record<string, string> = { sort: 'rating' };
+    const sortParam = sort === 'popular' ? 'popular' : sort === 'name' ? 'name' : 'rating';
+    const p: Record<string, string> = { sort: sortParam };
     if (debounced) p['search'] = debounced;
     const type = FILTERS.find((f) => f.key === filter)?.type;
     if (type) p['type'] = type;
+    if (openNow) p['open'] = 'true';
+    if (topRated) p['minRating'] = '4.5';
     if (latitude != null && longitude != null) {
       p['lat'] = String(latitude);
       p['lng'] = String(longitude);
     }
     return p;
-  }, [debounced, filter, latitude, longitude]);
+  }, [debounced, filter, sort, openNow, topRated, latitude, longitude]);
 
   const { data, isLoading, isError, refetch, isRefetching } = useVendors<Vendor[]>(params);
   const vendors = data ?? [];
@@ -88,6 +111,18 @@ export function SearchScreen({ navigation }: any) {
               </PressableScale>
             );
           })}
+        </ScrollView>
+      </View>
+
+      {/* Filters + sort (all wired to real backend params) */}
+      <View className="mb-sm">
+        <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ paddingHorizontal: 16, gap: 8, alignItems: 'center' }}>
+          <Pill label="Open now" active={openNow} onPress={() => setOpenNow((v) => !v)} />
+          <Pill label="Top rated" active={topRated} onPress={() => setTopRated((v) => !v)} />
+          <View style={{ width: 1, height: 20, backgroundColor: color.border.subtle, marginHorizontal: 4 }} />
+          {SORTS.map((s) => (
+            <Pill key={s.key} label={s.label} active={sort === s.key} onPress={() => setSort(s.key)} />
+          ))}
         </ScrollView>
       </View>
 
