@@ -54,6 +54,11 @@ export function AccountScreen({ navigation }: any) {
             value={String(orders)}
             onPress={() => navigation?.navigate?.('Orders')}
           />
+          <SettingsRow
+            icon="heart-outline"
+            label="Saved places"
+            onPress={() => navigation?.navigate?.('Favorites')}
+          />
           {referralCode ? (
             <SettingsRow
               icon="gift-outline"

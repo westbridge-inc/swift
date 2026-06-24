@@ -6,6 +6,7 @@ import { NotificationService } from '../notification/notification.service';
 import { CountryConfigService } from '../country/country-config.service';
 import { BookingService } from '../booking/booking.service';
 import { orderingRestriction } from '../cash/cash-rules.service';
+import { resolveSelectedOptions, optionsUnitPrice, type ResolvedOption } from './options';
 import { FloatService } from '../dispatch/float.service';
 import { AppError } from '../../utils/errors';
 
@@ -85,7 +86,7 @@ export class OrderService {
 
     const cart = await this.prisma.cart.findUnique({
       where: { customerId: input.userId },
-      include: { items: { include: { item: { include: { vendor: true } } } } },
+      include: { items: { include: { item: { include: { vendor: true, optionGroups: { include: { options: true } } } } } } },
     });
     if (!cart || cart.items.length === 0) {
       throw new AppError(400, 'EMPTY_CART', 'Your cart is empty');
@@ -134,7 +135,8 @@ export class OrderService {
       subtotal: number;
       orderItems: Array<{
         itemId: string; name: string; quantity: number; basePrice: number;
-        totalBase: number; specialInstructions?: string | null;
+        unitPrice: number; totalBase: number; specialInstructions?: string | null;
+        options: ResolvedOption[];
       }>;
     }> = [];
 
@@ -180,13 +182,17 @@ export class OrderService {
       // Zero-commission model: the customer pays exactly the vendor's price
       const orderItems = items.map((ci) => {
         const basePrice = Number(ci.item.basePrice);
+        const options = resolveSelectedOptions(ci.item, ci.selectedOptions);
+        const unitPrice = basePrice + optionsUnitPrice(options);
         return {
           itemId: ci.item.id,
           name: ci.item.name,
           quantity: ci.quantity,
           basePrice,
-          totalBase: basePrice * ci.quantity,
+          unitPrice,
+          totalBase: unitPrice * ci.quantity,
           specialInstructions: ci.specialInstructions,
+          options,
         };
       });
       const subtotal = orderItems.reduce((s, i) => s + i.totalBase, 0);
@@ -295,6 +301,17 @@ export class OrderService {
                 totalMarkup: 0,
                 totalCustomer: oi.totalBase,
                 specialInstructions: oi.specialInstructions,
+                ...(oi.options.length > 0 && {
+                  selectedOptions: {
+                    create: oi.options.map((o) => ({
+                      optionGroupName: o.optionGroupName,
+                      optionName: o.optionName,
+                      basePrice: o.additionalPrice,
+                      markedUpPrice: o.additionalPrice,
+                      markupAmount: 0,
+                    })),
+                  },
+                }),
               })),
             },
             statusHistory: {
