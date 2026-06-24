@@ -10,7 +10,9 @@
     "db:generate": "cd apps/api && npx prisma generate",
     "db:migrate": "cd apps/api && npx prisma migrate dev",
     "db:seed": "cd apps/api && npx prisma db seed",
-    "db:studio": "cd apps/api && npx prisma studio"
+    "db:sync": "cd apps/api && npx prisma db push --skip-generate",
+    "db:studio": "cd apps/api && npx prisma studio",
+    "fix:env": "cd apps/api && npx prisma db push --skip-generate && npx prisma db seed && echo '\\n✅ DB synced + seeded. Restart the API (pnpm -C apps/api dev) and reload the app.'"
   },
   "devDependencies": {
     "@typescript-eslint/eslint-plugin": "^8.0.0",
