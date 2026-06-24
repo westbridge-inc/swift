@@ -10,6 +10,7 @@ import { VendorDetailScreen } from '../screens/customer/VendorDetailScreen';
 import { ItemDetailScreen } from '../screens/customer/ItemDetailScreen';
 import { VendorReviewsScreen } from '../screens/customer/VendorReviewsScreen';
 import { RateOrderScreen } from '../screens/customer/RateOrderScreen';
+import { FavoritesScreen } from '../screens/customer/FavoritesScreen';
 import { CartScreen } from '../screens/customer/CartScreen';
 import { CheckoutScreen } from '../screens/customer/CheckoutScreen';
 import { OrderTrackingScreen } from '../screens/customer/OrderTrackingScreen';
@@ -76,6 +77,7 @@ export function CustomerStack() {
       <Stack.Screen name="ItemDetail" component={ItemDetailScreen} />
       <Stack.Screen name="VendorReviews" component={VendorReviewsScreen} />
       <Stack.Screen name="RateOrder" component={RateOrderScreen} />
+      <Stack.Screen name="Favorites" component={FavoritesScreen} />
       <Stack.Screen name="Cart" component={CartScreen} />
       <Stack.Screen name="Checkout" component={CheckoutScreen} />
       <Stack.Screen name="OrderTracking" component={OrderTrackingScreen} />

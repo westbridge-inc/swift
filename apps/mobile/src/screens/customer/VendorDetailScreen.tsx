@@ -1,10 +1,10 @@
-import { memo } from 'react';
+import { memo, useState } from 'react';
 import { View } from 'react-native';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Feather, MaterialCommunityIcons } from '@expo/vector-icons';
 import { color } from '@swift/ui';
 import { Text, Heading, Skeleton, Button, List, Image, PressableScale, EmptyState, Scrim } from '../../components/ui';
-import { useVendor, useCart } from '../../hooks';
+import { useVendor, useCart, useToggleFavorite } from '../../hooks';
 import { money } from '../../lib/money';
 import { fallbackImage, kindForVendor, vendorImage, type ImageKind } from '../../lib/images';
 
@@ -21,6 +21,21 @@ function BackButton({ onPress }: { onPress?: () => void }) {
       style={[{ position: 'absolute', top: insets.top + 8, left: 16, zIndex: 10, width: 38, height: 38, borderRadius: 19, alignItems: 'center', justifyContent: 'center', backgroundColor: color.surface.base }, SHADOW]}
     >
       <Feather name="chevron-left" size={24} color={color.text.primary} />
+    </PressableScale>
+  );
+}
+
+function FavoriteButton({ vendorId, initial }: { vendorId: string; initial?: boolean }) {
+  const insets = useSafeAreaInsets();
+  const [fav, setFav] = useState(!!initial);
+  const toggle = useToggleFavorite();
+  return (
+    <PressableScale
+      onPress={() => { setFav((f) => !f); toggle.mutate({ vendorId, isFavorite: fav }); }}
+      hitSlop={10}
+      style={[{ position: 'absolute', top: insets.top + 8, right: 16, zIndex: 10, width: 38, height: 38, borderRadius: 19, alignItems: 'center', justifyContent: 'center', backgroundColor: color.surface.base }, SHADOW]}
+    >
+      <MaterialCommunityIcons name={fav ? 'heart' : 'heart-outline'} size={20} color={fav ? color.brand[500] : color.text.primary} />
     </PressableScale>
   );
 }
@@ -173,6 +188,7 @@ export function VendorDetailScreen({ navigation, route }: any) {
   return (
     <SafeAreaView style={{ flex: 1 }} edges={['top']} className="bg-surface-base">
       <BackButton onPress={() => navigation?.goBack?.()} />
+      <FavoriteButton vendorId={id} initial={vendor.isFavorite} />
       <View style={{ flex: 1 }}>
       <List
         data={rows}
