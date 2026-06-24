@@ -4,7 +4,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { Feather, MaterialCommunityIcons } from '@expo/vector-icons';
 import { color } from '@swift/ui';
 import { Text, Heading, Card, Button, Spinner, PressableScale, ChoiceChip } from '../../components/ui';
-import { useCart, useAddresses, useSetCartAddress, useSetCartTip, usePlaceOrder } from '../../hooks';
+import { useCart, useAddresses, useSetCartAddress, useSetCartTip, usePlaceOrder, useItemSlots } from '../../hooks';
 import { money } from '../../lib/money';
 
 const TIPS = [0, 200, 500, 1000];
@@ -28,6 +28,14 @@ export function CheckoutScreen({ navigation }: any) {
   const [selectedId, setSelectedId] = useState<string | undefined>(undefined);
   const [selectedTip, setSelectedTip] = useState(0);
   const [mode, setMode] = useState<'DELIVERY' | 'PICKUP'>('DELIVERY');
+  const [selectedDate, setSelectedDate] = useState(() => new Date().toISOString().slice(0, 10));
+  const [selectedSlot, setSelectedSlot] = useState<string | undefined>(undefined);
+
+  // Appointment carts (a SERVICE listing) book a time slot instead of delivering.
+  const apptItem = cart?.items?.find((i: any) => i.fulfillment === 'APPOINTMENT');
+  const isAppointment = !!apptItem;
+  const { data: slotData, isLoading: slotsLoading } = useItemSlots<any>(apptItem?.itemId ?? '', isAppointment ? selectedDate : '');
+  const slots: string[] = slotData?.slots ?? [];
 
   const list = addresses ?? [];
   const defaultAddressId = list.find((a: any) => a.isDefault)?.id ?? list[0]?.id;
@@ -78,6 +86,7 @@ export function CheckoutScreen({ navigation }: any) {
         paymentMethod: 'CASH',
         tipAmount: selectedTip,
         ...(isPickup && vendorId ? { fulfillmentSelections: { [vendorId]: 'PICKUP' as const } } : {}),
+        ...(isAppointment && apptItem && selectedSlot ? { appointments: [{ itemId: apptItem.itemId, slotStart: selectedSlot }] } : {}),
       },
       {
         onSuccess: (res: any) => {
@@ -88,6 +97,16 @@ export function CheckoutScreen({ navigation }: any) {
       },
     );
   };
+
+  const dateOptions = Array.from({ length: 7 }, (_, i) => {
+    const now = new Date();
+    const d = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + i));
+    return {
+      value: d.toISOString().slice(0, 10),
+      dow: d.toLocaleDateString(undefined, { weekday: 'short', timeZone: 'UTC' }),
+      day: String(d.getUTCDate()),
+    };
+  });
 
   return (
     <SafeAreaView style={{ flex: 1 }} edges={['top']} className="bg-surface-base">
@@ -108,8 +127,48 @@ export function CheckoutScreen({ navigation }: any) {
             </View>
           ) : null}
 
-          {/* Address (delivery) or pickup location (takeaway) */}
-          {isPickup ? (
+          {/* Appointment slot picker, takeaway pickup, or delivery address */}
+          {isAppointment ? (
+            <>
+              <Heading size="lg" className="mb-sm">Choose a date</Heading>
+              <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ gap: 8 }} className="mb-md">
+                {dateOptions.map((d) => {
+                  const on = d.value === selectedDate;
+                  return (
+                    <PressableScale
+                      key={d.value}
+                      onPress={() => { setSelectedDate(d.value); setSelectedSlot(undefined); }}
+                      className={on ? 'items-center rounded-2xl bg-brand-500 px-lg py-md' : 'items-center rounded-2xl border border-border-subtle bg-surface-base px-lg py-md'}
+                    >
+                      <Text className={on ? 'text-xs font-semibold text-white' : 'text-xs font-semibold text-text-secondary'}>{d.dow}</Text>
+                      <Text className={on ? 'mt-0.5 text-lg font-bold text-white' : 'mt-0.5 text-lg font-bold text-text-primary'}>{d.day}</Text>
+                    </PressableScale>
+                  );
+                })}
+              </ScrollView>
+              <Heading size="lg" className="mb-sm">Choose a time</Heading>
+              {slotsLoading ? (
+                <View className="py-md"><Spinner /></View>
+              ) : slots.length === 0 ? (
+                <Text className="text-sm text-text-muted">No times available this day — try another date.</Text>
+              ) : (
+                <View className="flex-row flex-wrap" style={{ gap: 8 }}>
+                  {slots.map((sISO) => {
+                    const on = sISO === selectedSlot;
+                    return (
+                      <PressableScale
+                        key={sISO}
+                        onPress={() => setSelectedSlot(sISO)}
+                        className={on ? 'rounded-full bg-brand-500 px-lg py-sm' : 'rounded-full border border-border-subtle bg-surface-base px-lg py-sm'}
+                      >
+                        <Text className={on ? 'text-sm font-semibold text-white' : 'text-sm font-semibold text-text-secondary'}>{sISO.slice(11, 16)}</Text>
+                      </PressableScale>
+                    );
+                  })}
+                </View>
+              )}
+            </>
+          ) : isPickup ? (
             <>
               <Heading size="lg" className="mb-sm">Pick up from</Heading>
               <Card className="flex-row items-center">
@@ -221,10 +280,12 @@ export function CheckoutScreen({ navigation }: any) {
         ) : null}
         <Button
           loading={placeOrder.isPending}
-          disabled={!isPickup && (list.length === 0 || !effectiveAddressId)}
+          disabled={isAppointment ? !selectedSlot : !isPickup && (list.length === 0 || !effectiveAddressId)}
           onPress={onPlace}
         >
-          <Text className="font-body font-semibold text-white">Place order · {money(displayTotal)}</Text>
+          <Text className="font-body font-semibold text-white">
+            {isAppointment && !selectedSlot ? 'Pick a time' : `Place order · ${money(displayTotal)}`}
+          </Text>
         </Button>
       </View>
     </SafeAreaView>

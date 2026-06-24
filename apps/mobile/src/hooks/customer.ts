@@ -63,6 +63,14 @@ export function useVendorReviews<T = any>(id: string) {
   });
 }
 
+export function useItemSlots<T = any>(itemId: string, date: string) {
+  return useQuery<T>({
+    queryKey: ['customer', 'slots', itemId, date],
+    queryFn: () => unwrap<T>(customerApi.getItemSlots(itemId, date)),
+    enabled: !!itemId && !!date,
+  });
+}
+
 export function useFavorites<T = any>() {
   return useQuery<T>({ queryKey: ['customer', 'favorites'], queryFn: () => unwrap<T>(customerApi.getFavorites()) });
 }
