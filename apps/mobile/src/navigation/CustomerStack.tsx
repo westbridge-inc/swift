@@ -7,6 +7,7 @@ import { OrdersScreen } from '../screens/customer/OrdersScreen';
 import { CourierScreen } from '../modules/movement/screens/CourierScreen';
 import { AccountScreen } from '../screens/shared/AccountScreen';
 import { VendorDetailScreen } from '../screens/customer/VendorDetailScreen';
+import { ItemDetailScreen } from '../screens/customer/ItemDetailScreen';
 import { CartScreen } from '../screens/customer/CartScreen';
 import { CheckoutScreen } from '../screens/customer/CheckoutScreen';
 import { OrderTrackingScreen } from '../screens/customer/OrderTrackingScreen';
@@ -70,6 +71,7 @@ export function CustomerStack() {
     <Stack.Navigator screenOptions={{ headerShown: false, ...screenTransition }}>
       <Stack.Screen name="Tabs" component={HomeTabs} />
       <Stack.Screen name="VendorDetail" component={VendorDetailScreen} />
+      <Stack.Screen name="ItemDetail" component={ItemDetailScreen} />
       <Stack.Screen name="Cart" component={CartScreen} />
       <Stack.Screen name="Checkout" component={CheckoutScreen} />
       <Stack.Screen name="OrderTracking" component={OrderTrackingScreen} />

@@ -4,7 +4,7 @@ import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context'
 import { Feather, MaterialCommunityIcons } from '@expo/vector-icons';
 import { color } from '@swift/ui';
 import { Text, Heading, Skeleton, Button, List, Image, PressableScale, EmptyState, Scrim } from '../../components/ui';
-import { useVendor, useCart, useAddToCart } from '../../hooks';
+import { useVendor, useCart } from '../../hooks';
 import { money } from '../../lib/money';
 import { fallbackImage, kindForVendor, vendorImage, type ImageKind } from '../../lib/images';
 
@@ -25,29 +25,33 @@ function BackButton({ onPress }: { onPress?: () => void }) {
   );
 }
 
-const MenuItemRow = memo(function MenuItemRow({ item, onAdd, adding, kind }: { item: any; onAdd: () => void; adding: boolean; kind?: ImageKind }) {
+const MenuItemRow = memo(function MenuItemRow({ item, onOpen, kind }: { item: any; onOpen: () => void; kind?: ImageKind }) {
   const unavailable = item.isAvailable === false;
+  const customizable = (item.optionGroups?.length ?? 0) > 0;
   return (
-    <View className="mx-lg flex-row items-start border-b border-border-subtle py-md">
-      <View className="flex-1 pr-md">
-        <Text className="text-base font-semibold text-text-primary">{item.name}</Text>
-        {item.description ? (
-          <Text className="mt-xs text-sm text-text-secondary" numberOfLines={2}>{item.description}</Text>
-        ) : null}
-        <Text className="mt-sm text-sm font-bold text-text-primary">{money(item.customerPrice ?? item.basePrice)}</Text>
+    <PressableScale onPress={onOpen} disabled={unavailable}>
+      <View className="mx-lg flex-row items-start border-b border-border-subtle py-md">
+        <View className="flex-1 pr-md">
+          <Text className="text-base font-semibold text-text-primary">{item.name}</Text>
+          {item.description ? (
+            <Text className="mt-xs text-sm text-text-secondary" numberOfLines={2}>{item.description}</Text>
+          ) : null}
+          <Text className="mt-sm text-sm font-bold text-text-primary">{money(item.customerPrice ?? item.basePrice)}</Text>
+          {customizable && !unavailable ? (
+            <Text className="mt-xs text-xs font-medium text-brand-600">Customizable</Text>
+          ) : null}
+        </View>
+        <View style={{ width: 96, height: 96 }}>
+          <Image source={{ uri: item.imageUrl || fallbackImage(item.id, kind) }} style={{ width: 96, height: 96, borderRadius: 14 }} />
+          <View
+            pointerEvents="none"
+            style={[{ position: 'absolute', bottom: -10, right: -6, width: 36, height: 36, borderRadius: 18, alignItems: 'center', justifyContent: 'center', backgroundColor: unavailable ? color.surface.base : color.brand[500] }, SHADOW]}
+          >
+            <Feather name={unavailable ? 'slash' : 'plus'} size={18} color={unavailable ? color.text.muted : '#fff'} />
+          </View>
+        </View>
       </View>
-      <View style={{ width: 96, height: 96 }}>
-        <Image source={{ uri: item.imageUrl || fallbackImage(item.id, kind) }} style={{ width: 96, height: 96, borderRadius: 14 }} />
-        <PressableScale
-          onPress={onAdd}
-          disabled={unavailable || adding}
-          hitSlop={8}
-          style={[{ position: 'absolute', bottom: -10, right: -6, width: 36, height: 36, borderRadius: 18, alignItems: 'center', justifyContent: 'center', backgroundColor: unavailable ? color.surface.base : color.brand[500] }, SHADOW]}
-        >
-          <Feather name={unavailable ? 'slash' : 'plus'} size={18} color={unavailable ? color.text.muted : '#fff'} />
-        </PressableScale>
-      </View>
-    </View>
+    </PressableScale>
   );
 });
 
@@ -112,7 +116,6 @@ export function VendorDetailScreen({ navigation, route }: any) {
   const id: string = route?.params?.id ?? '';
   const { data: vendor, isLoading, isError, refetch } = useVendor<any>(id);
   const { data: cart } = useCart<any>();
-  const addToCart = useAddToCart();
 
   const cartCount = cart?.itemCount ?? 0;
   const cartSubtotal = cart?.subtotalCustomer ?? 0;
@@ -170,8 +173,7 @@ export function VendorDetailScreen({ navigation, route }: any) {
             <MenuItemRow
               item={row.item}
               kind={kindForVendor(vendor)}
-              adding={addToCart.isPending}
-              onAdd={() => addToCart.mutate({ vendorId: id, itemId: row.item.id, quantity: 1 })}
+              onOpen={() => navigation?.navigate?.('ItemDetail', { vendorId: id, item: row.item, vendorKind: kindForVendor(vendor) })}
             />
           )
         }
