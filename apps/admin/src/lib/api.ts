@@ -34,6 +34,10 @@ export const setDriverRideClass = (id: string, rideClass: string) =>
   apiFetch(`/api/v1/admin/drivers/${id}/ride-class`, { method: 'PUT', body: JSON.stringify({ rideClass }) });
 export const cancelOrder = (id: string, body: { reason: string; refund?: boolean }) =>
   apiFetch(`/api/v1/admin/orders/${id}/cancel`, { method: 'PUT', body: JSON.stringify(body) });
+export const suspendUser = (id: string, reason: string) =>
+  apiFetch(`/api/v1/admin/users/${id}/suspend`, { method: 'PUT', body: JSON.stringify({ reason }) });
+export const unsuspendUser = (id: string) =>
+  apiFetch(`/api/v1/admin/users/${id}/unsuspend`, { method: 'PUT', body: JSON.stringify({}) });
 export const updateConfig = (key: string, value: unknown) =>
   apiFetch(`/api/v1/admin/config/${key}`, { method: 'PUT', body: JSON.stringify({ value }) });
 
