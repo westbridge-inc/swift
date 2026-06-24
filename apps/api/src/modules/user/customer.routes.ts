@@ -6,6 +6,7 @@ import { estimateDrivingDistance, estimateDeliveryMinutes } from '../../utils/di
 import { parsePagination, paginatedResponse } from '../../utils/pagination';
 import { AppError, NotFoundError, ValidationError, ForbiddenError } from '../../utils/errors';
 import { OrderService } from '../order/order.service';
+import { resolveSelectedOptions, optionsUnitPrice } from '../order/options';
 import { RatingService } from '../rating/rating.service';
 import { NotificationService } from '../notification/notification.service';
 
@@ -186,6 +187,9 @@ async function buildCartResponse(
             select: {
               id: true, name: true, basePrice: true, imageUrl: true,
               isAvailable: true, vendorId: true,
+              optionGroups: {
+                select: { name: true, options: { select: { id: true, name: true, additionalPrice: true } } },
+              },
             },
           },
         },
@@ -225,7 +229,9 @@ async function buildCartResponse(
 
   const itemDetails = cart.items.map((ci) => {
     const base = Number(ci.item.basePrice);
-    const lineBase = base * ci.quantity;
+    const options = resolveSelectedOptions(ci.item, ci.selectedOptions);
+    const unitPrice = base + optionsUnitPrice(options);
+    const lineBase = unitPrice * ci.quantity;
     subtotalBase += lineBase;
 
     if (!ci.item.isAvailable) unavailableItemIds.push(ci.id);
@@ -236,9 +242,10 @@ async function buildCartResponse(
       name: ci.item.name,
       imageUrl: ci.item.imageUrl,
       basePrice: base,
-      customerPrice: base,
+      customerPrice: unitPrice,
       quantity: ci.quantity,
       selectedOptions: ci.selectedOptions,
+      selectedOptionNames: options.map((o) => o.optionName),
       specialInstructions: ci.specialInstructions,
       lineTotal: lineBase,
       isAvailable: ci.item.isAvailable,
@@ -969,8 +976,19 @@ export async function customerRoutes(app: FastifyInstance) {
     // Validate selected options against option groups
     const selectedOptions = body.selectedOptions ?? {};
     for (const group of item.optionGroups) {
-      if (group.isRequired && !selectedOptions[group.id]) {
-        throw new ValidationError(`Please select an option for "${group.name}"`);
+      const raw = (selectedOptions as Record<string, unknown>)[group.id];
+      const chosen = Array.isArray(raw) ? raw : raw != null ? [raw] : [];
+      const validIds = new Set(group.options.map((o) => o.id));
+      for (const id of chosen) {
+        if (typeof id !== 'string' || !validIds.has(id)) {
+          throw new ValidationError(`That option isn't available for "${group.name}"`);
+        }
+      }
+      if (group.isRequired && chosen.length < Math.max(1, group.minSelect)) {
+        throw new ValidationError(`Please choose an option for "${group.name}"`);
+      }
+      if (chosen.length > group.maxSelect) {
+        throw new ValidationError(`Choose at most ${group.maxSelect} for "${group.name}"`);
       }
     }
 

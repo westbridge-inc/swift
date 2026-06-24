@@ -30,9 +30,10 @@ function fmtDate(d?: string) {
   }
 }
 
-const OrderRow = memo(function OrderRow({ order, onTrack, onReorder, reordering }: any) {
+const OrderRow = memo(function OrderRow({ order, onTrack, onReorder, onRate, reordering }: any) {
   const title = order.vendor?.name ?? TYPE_LABEL[order.orderType] ?? 'Order';
-  const reorderable = !!order.vendor && (order.status === 'DELIVERED' || order.status === 'COMPLETED');
+  const completed = order.status === 'DELIVERED' || order.status === 'COMPLETED';
+  const reorderable = !!order.vendor && completed;
   return (
     <PressableScale onPress={onTrack}>
       <Card className="mb-md">
@@ -50,15 +51,26 @@ const OrderRow = memo(function OrderRow({ order, onTrack, onReorder, reordering 
           </View>
           <Badge label={prettyStatus(order.status)} tone={statusTone(order.status)} />
         </View>
-        {reorderable ? (
-          <PressableScale
-            onPress={onReorder}
-            disabled={reordering}
-            className="mt-sm flex-row items-center self-start rounded-full border border-brand-500 px-lg py-sm"
-          >
-            <Feather name="refresh-cw" size={13} color={color.brand[500]} />
-            <Text className="ml-sm text-sm font-semibold text-brand-500">Reorder</Text>
-          </PressableScale>
+        {completed ? (
+          <View className="mt-sm flex-row items-center" style={{ gap: 8 }}>
+            <PressableScale
+              onPress={onRate}
+              className="flex-row items-center rounded-full border border-brand-500 px-lg py-sm"
+            >
+              <MaterialCommunityIcons name="star-outline" size={14} color={color.brand[500]} />
+              <Text className="ml-sm text-sm font-semibold text-brand-500">Rate</Text>
+            </PressableScale>
+            {reorderable ? (
+              <PressableScale
+                onPress={onReorder}
+                disabled={reordering}
+                className="flex-row items-center rounded-full border border-brand-500 px-lg py-sm"
+              >
+                <Feather name="refresh-cw" size={13} color={color.brand[500]} />
+                <Text className="ml-sm text-sm font-semibold text-brand-500">Reorder</Text>
+              </PressableScale>
+            ) : null}
+          </View>
         ) : null}
       </Card>
     </PressableScale>
@@ -109,6 +121,7 @@ export function OrdersScreen({ navigation }: any) {
               reordering={reorder.isPending}
               onTrack={() => navigation?.navigate?.('OrderTracking', { id: item.id })}
               onReorder={() => reorder.mutate(item.id, { onSuccess: () => navigation?.navigate?.('Cart') })}
+              onRate={() => navigation?.navigate?.('RateOrder', { orderId: item.id, vendorName: item.vendor?.name, hasRider: item.fulfillment === 'DELIVERY' || !!item.riderId })}
             />
           )}
           ListEmptyComponent={

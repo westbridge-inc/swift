@@ -58,6 +58,12 @@ const CartItemRow = memo(function CartItemRow({ item, busy, onDec, onInc, onRemo
       <Image source={{ uri: item.imageUrl || fallbackImage(item.itemId ?? item.id, kind) }} style={{ width: 64, height: 64, borderRadius: 12 }} />
       <View className="flex-1 px-md">
         <Text className="text-base font-semibold text-text-primary" numberOfLines={1}>{item.name}</Text>
+        {item.selectedOptionNames?.length ? (
+          <Text className="mt-xs text-xs text-text-muted" numberOfLines={2}>{item.selectedOptionNames.join(' · ')}</Text>
+        ) : null}
+        {item.specialInstructions ? (
+          <Text className="mt-xs text-xs italic text-text-muted" numberOfLines={1}>“{item.specialInstructions}”</Text>
+        ) : null}
         <Text className="mt-xs text-sm text-text-secondary">{money(item.customerPrice ?? item.basePrice)}</Text>
         {unavailable ? <Text className="mt-xs text-xs text-error">Unavailable — remove to checkout</Text> : null}
         <View className="mt-sm flex-row items-center">

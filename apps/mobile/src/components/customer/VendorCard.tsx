@@ -1,10 +1,11 @@
-import { memo, type ReactNode } from 'react';
+import { memo, useState, type ReactNode } from 'react';
 import { Pressable, View } from 'react-native';
 import Animated, { useSharedValue, useAnimatedStyle, withTiming } from 'react-native-reanimated';
 import { Feather, MaterialCommunityIcons } from '@expo/vector-icons';
 import { color } from '@swift/ui';
-import { Text, Image, Scrim, elevation } from '../ui';
+import { Text, Image, Scrim, elevation, PressableScale } from '../ui';
 import { vendorImage } from '../../lib/images';
+import { useToggleFavorite } from '../../hooks';
 
 const AnimatedPressable = Animated.createAnimatedComponent(Pressable);
 
@@ -23,7 +24,24 @@ export type Vendor = {
   deliveryFee?: number | string | null;
   coverImageUrl?: string | null;
   logoUrl?: string | null;
+  isFavorite?: boolean;
 };
+
+/** Heart toggle over the photo — optimistic, syncs via the favorites endpoint. */
+function FavoriteHeart({ vendorId, initial }: { vendorId: string; initial?: boolean }) {
+  const [fav, setFav] = useState(!!initial);
+  const toggle = useToggleFavorite();
+  return (
+    <PressableScale
+      onPress={() => { setFav((f) => !f); toggle.mutate({ vendorId, isFavorite: fav }); }}
+      hitSlop={8}
+      className="h-9 w-9 items-center justify-center rounded-full bg-surface-base"
+      style={elevation.card}
+    >
+      <MaterialCommunityIcons name={fav ? 'heart' : 'heart-outline'} size={18} color={fav ? color.brand[500] : color.text.secondary} />
+    </PressableScale>
+  );
+}
 
 /** A white pill that sits over photography — for ratings / ETA badges. */
 function OverlayPill({ children }: { children: ReactNode }) {
@@ -69,6 +87,9 @@ export const VendorCard = memo(function VendorCard({ vendor, onPress }: { vendor
             style={{ width: '100%', height: 172, opacity: closed ? 0.6 : 1 }}
           />
           <Scrim height={84} />
+          <View className="absolute left-3 top-3">
+            <FavoriteHeart vendorId={vendor.id} initial={vendor.isFavorite} />
+          </View>
           <View className="absolute right-3 top-3">
             <OverlayPill>
               <MaterialCommunityIcons name="star" size={13} color={color.brand[500]} />
