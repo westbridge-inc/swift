@@ -1,11 +1,43 @@
 import { View, ScrollView, Share } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
+import { MaterialCommunityIcons } from '@expo/vector-icons';
 import { color } from '@swift/ui';
-import { Text, Heading, Badge, SettingsGroup, SettingsRow } from '../../components/ui';
+import { Text, Heading, Badge, Button, SettingsGroup, SettingsRow } from '../../components/ui';
 import { useAuthStore } from '../../stores/authStore';
 import { useProfile, useAddresses } from '../../hooks';
 
 export function AccountScreen({ navigation }: any) {
+  const isAuthenticated = useAuthStore((s) => s.isAuthenticated);
+  if (!isAuthenticated) return <GuestAccount />;
+  return <SignedInAccount navigation={navigation} />;
+}
+
+/** Guests can browse everything; the Account tab is their door to signing in. */
+function GuestAccount() {
+  const promptLogin = useAuthStore((s) => s.promptLogin);
+  return (
+    <SafeAreaView style={{ flex: 1 }} edges={['top']} className="bg-surface-base">
+      <View className="px-lg pb-sm pt-md">
+        <Heading size="2xl">Account</Heading>
+      </View>
+      <View className="flex-1 items-center justify-center px-2xl">
+        <View className="h-16 w-16 items-center justify-center rounded-full bg-brand-50">
+          <MaterialCommunityIcons name="account-circle-outline" size={34} color={color.brand[500]} />
+        </View>
+        <Heading size="xl" className="mt-lg text-center">Sign in to Swift</Heading>
+        <Text className="mt-xs text-center text-text-secondary">
+          Browse freely — create an account to order, save places, and track deliveries.
+        </Text>
+        <View className="mt-xl w-full">
+          <Button label="Sign in or create account" onPress={promptLogin} />
+        </View>
+        <Text className="mt-md text-center text-xs text-text-muted">No platform fees, ever. Cash on delivery.</Text>
+      </View>
+    </SafeAreaView>
+  );
+}
+
+function SignedInAccount({ navigation }: any) {
   const { user, logout } = useAuthStore();
   const { data: profile } = useProfile<any>();
   const { data: addresses } = useAddresses<any[]>();

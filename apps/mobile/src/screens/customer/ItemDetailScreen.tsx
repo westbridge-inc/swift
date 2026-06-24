@@ -5,6 +5,7 @@ import { Feather, MaterialCommunityIcons } from '@expo/vector-icons';
 import { color } from '@swift/ui';
 import { Text, Heading, Button, Image, PressableScale, Scrim } from '../../components/ui';
 import { useAddToCart } from '../../hooks';
+import { useAuthStore } from '../../stores/authStore';
 import { money } from '../../lib/money';
 import { fallbackImage, type ImageKind } from '../../lib/images';
 
@@ -65,6 +66,11 @@ export function ItemDetailScreen({ navigation, route }: any) {
 
   const onAdd = () => {
     if (!canAdd) return;
+    // Browsing is open; ordering needs an account.
+    if (!useAuthStore.getState().isAuthenticated) {
+      useAuthStore.getState().promptLogin();
+      return;
+    }
     addToCart.mutate(
       {
         vendorId,

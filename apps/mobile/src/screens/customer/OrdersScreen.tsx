@@ -5,6 +5,7 @@ import { Feather, MaterialCommunityIcons } from '@expo/vector-icons';
 import { color } from '@swift/ui';
 import { Text, Heading, Card, Badge, Skeleton, List, PressableScale, EmptyState } from '../../components/ui';
 import { useOrders, useReorder } from '../../hooks';
+import { useAuthStore } from '../../stores/authStore';
 import { money } from '../../lib/money';
 
 const TYPE_LABEL: Record<string, string> = {
@@ -78,6 +79,28 @@ const OrderRow = memo(function OrderRow({ order, onTrack, onReorder, onRate, reo
 });
 
 export function OrdersScreen({ navigation }: any) {
+  const isAuthenticated = useAuthStore((s) => s.isAuthenticated);
+  const promptLogin = useAuthStore((s) => s.promptLogin);
+  if (!isAuthenticated) {
+    return (
+      <SafeAreaView style={{ flex: 1 }} edges={['top']} className="bg-surface-base">
+        <View className="px-lg pb-sm pt-md"><Heading size="2xl">Orders</Heading></View>
+        <View className="flex-1 items-center justify-center">
+          <EmptyState
+            icon="receipt-text-outline"
+            title="Sign in to see your orders"
+            body="Your food, taxi, courier and service orders live here once you have an account."
+            actionLabel="Sign in"
+            onAction={promptLogin}
+          />
+        </View>
+      </SafeAreaView>
+    );
+  }
+  return <SignedInOrders navigation={navigation} />;
+}
+
+function SignedInOrders({ navigation }: any) {
   const { data, isLoading, isError, refetch, isRefetching } = useOrders<any[]>();
   const reorder = useReorder();
   const orders = data ?? [];
