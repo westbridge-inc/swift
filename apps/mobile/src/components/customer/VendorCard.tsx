@@ -6,6 +6,7 @@ import { color } from '@swift/ui';
 import { Text, Image, Scrim, elevation, PressableScale } from '../ui';
 import { vendorImage } from '../../lib/images';
 import { useToggleFavorite } from '../../hooks';
+import { useAuthStore } from '../../stores/authStore';
 
 const AnimatedPressable = Animated.createAnimatedComponent(Pressable);
 
@@ -33,7 +34,11 @@ function FavoriteHeart({ vendorId, initial }: { vendorId: string; initial?: bool
   const toggle = useToggleFavorite();
   return (
     <PressableScale
-      onPress={() => { setFav((f) => !f); toggle.mutate({ vendorId, isFavorite: fav }); }}
+      onPress={() => {
+        if (!useAuthStore.getState().isAuthenticated) { useAuthStore.getState().promptLogin(); return; }
+        setFav((f) => !f);
+        toggle.mutate({ vendorId, isFavorite: fav });
+      }}
       hitSlop={8}
       className="h-9 w-9 items-center justify-center rounded-full bg-surface-base"
       style={elevation.card}

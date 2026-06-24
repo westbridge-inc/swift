@@ -5,6 +5,7 @@ import { Feather, MaterialCommunityIcons } from '@expo/vector-icons';
 import { color } from '@swift/ui';
 import { Text, Heading, Skeleton, Button, List, Image, PressableScale, EmptyState, Scrim } from '../../components/ui';
 import { useVendor, useCart, useToggleFavorite } from '../../hooks';
+import { useAuthStore } from '../../stores/authStore';
 import { money } from '../../lib/money';
 import { fallbackImage, kindForVendor, vendorImage, type ImageKind } from '../../lib/images';
 
@@ -31,7 +32,11 @@ function FavoriteButton({ vendorId, initial }: { vendorId: string; initial?: boo
   const toggle = useToggleFavorite();
   return (
     <PressableScale
-      onPress={() => { setFav((f) => !f); toggle.mutate({ vendorId, isFavorite: fav }); }}
+      onPress={() => {
+        if (!useAuthStore.getState().isAuthenticated) { useAuthStore.getState().promptLogin(); return; }
+        setFav((f) => !f);
+        toggle.mutate({ vendorId, isFavorite: fav });
+      }}
       hitSlop={10}
       style={[{ position: 'absolute', top: insets.top + 8, right: 16, zIndex: 10, width: 38, height: 38, borderRadius: 19, alignItems: 'center', justifyContent: 'center', backgroundColor: color.surface.base }, SHADOW]}
     >

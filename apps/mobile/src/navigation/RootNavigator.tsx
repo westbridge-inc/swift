@@ -25,7 +25,7 @@ function stackForRole(activeRole?: string) {
 }
 
 export function RootNavigator() {
-  const { isAuthenticated, user, countryCode } = useAuthStore();
+  const { isAuthenticated, wantsAuth, user, countryCode } = useAuthStore();
   const Main = stackForRole(user?.activeRole as string | undefined);
 
   return (
@@ -33,7 +33,9 @@ export function RootNavigator() {
       <Stack.Navigator screenOptions={{ headerShown: false }}>
         {!countryCode ? (
           <Stack.Screen name="Country" component={CountryPickerScreen} />
-        ) : !isAuthenticated ? (
+        ) : !isAuthenticated && wantsAuth ? (
+          // Guests browse in Main; the auth flow shows only when an action asks
+          // for it (promptLogin), then returns to browsing or the role stack.
           <Stack.Screen name="Auth" component={AuthStack} />
         ) : (
           <Stack.Screen name="Main" component={Main} />

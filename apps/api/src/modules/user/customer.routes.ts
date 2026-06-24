@@ -362,8 +362,22 @@ export async function customerRoutes(app: FastifyInstance) {
   const ratingService = new RatingService(app.prisma);
   const notificationService = new NotificationService(app.prisma, app.io);
 
-  // All routes require auth
-  app.addHook('onRequest', app.authenticate);
+  // Auth required by default (safe); browsing is public so guests can look
+  // around. Only these GET routes use OPTIONAL auth — everything else (cart,
+  // checkout, favourites, orders, profile, …) needs a real account.
+  const PUBLIC_BROWSE = new Set([
+    '/api/v1/customer/home',
+    '/api/v1/customer/vendors',
+    '/api/v1/customer/vendors/:id',
+    '/api/v1/customer/vendors/:id/reviews',
+  ]);
+  app.addHook('onRequest', async (request, reply) => {
+    if (request.method === 'GET' && PUBLIC_BROWSE.has(request.routeOptions?.url ?? '')) {
+      await app.authenticateOptional(request);
+      return;
+    }
+    await app.authenticate(request, reply);
+  });
 
   // ========================================================================
   // 0. REFERRAL — real attribution: redeeming a code writes Customer.referredBy
@@ -587,17 +601,19 @@ export async function customerRoutes(app: FastifyInstance) {
   // ========================================================================
 
   app.get('/home', async (request: AuthRequest) => {
-    const { userId } = request.user;
+    // Browsing is open to guests; personalization (favourites, active order,
+    // order-again) only applies when signed in.
+    const userId = request.user?.userId;
     const { lat, lng } = latLngQuerySchema.parse(request.query);
 
     // Try Redis cache
-    const cacheKey = `home:${userId}:${lat ?? 'x'}:${lng ?? 'x'}`;
+    const cacheKey = `home:${userId ?? 'guest'}:${lat ?? 'x'}:${lng ?? 'x'}`;
     const cached = await app.redis.get(cacheKey).catch(() => null);
     if (cached) {
       return { success: true, data: JSON.parse(cached) };
     }
 
-    await resolveCustomer(app, userId);
+    if (userId) await resolveCustomer(app, userId);
 
     // Parallel fetches
     const [
@@ -615,34 +631,40 @@ export async function customerRoutes(app: FastifyInstance) {
         orderBy: { averageRating: 'desc' },
       }),
 
-      // Customer's favorite vendor IDs
-      app.prisma.vendor.findMany({
-        where: { favoritedBy: { some: { userId } } },
-        select: { id: true },
-      }).then((vs) => new Set(vs.map((v) => v.id))),
+      // Customer's favorite vendor IDs (guests have none)
+      userId
+        ? app.prisma.vendor.findMany({
+            where: { favoritedBy: { some: { userId } } },
+            select: { id: true },
+          }).then((vs) => new Set(vs.map((v) => v.id)))
+        : Promise.resolve(new Set<string>()),
 
-      // Active order (if any)
-      app.prisma.order.findFirst({
-        where: {
-          customerId: userId,
-          status: { notIn: ['DELIVERED', 'COMPLETED', 'CANCELLED', 'REFUNDED'] },
-        },
-        select: {
-          id: true, orderNumber: true, status: true,
-          vendor: { select: { id: true, name: true, logoUrl: true } },
-          estimatedDeliveryTime: true, placedAt: true,
-        },
-        orderBy: { placedAt: 'desc' },
-      }),
+      // Active order (guests have none)
+      userId
+        ? app.prisma.order.findFirst({
+            where: {
+              customerId: userId,
+              status: { notIn: ['DELIVERED', 'COMPLETED', 'CANCELLED', 'REFUNDED'] },
+            },
+            select: {
+              id: true, orderNumber: true, status: true,
+              vendor: { select: { id: true, name: true, logoUrl: true } },
+              estimatedDeliveryTime: true, placedAt: true,
+            },
+            orderBy: { placedAt: 'desc' },
+          })
+        : Promise.resolve(null),
 
-      // Recently ordered vendors (for "Order Again")
-      app.prisma.order.findMany({
-        where: { customerId: userId, status: { in: ['DELIVERED', 'COMPLETED'] } },
-        select: { vendorId: true },
-        orderBy: { placedAt: 'desc' },
-        take: 20,
-        distinct: ['vendorId'],
-      }),
+      // Recently ordered vendors (guests have none)
+      userId
+        ? app.prisma.order.findMany({
+            where: { customerId: userId, status: { in: ['DELIVERED', 'COMPLETED'] } },
+            select: { vendorId: true },
+            orderBy: { placedAt: 'desc' },
+            take: 20,
+            distinct: ['vendorId'],
+          })
+        : Promise.resolve([] as { vendorId: string }[]),
     ]);
 
     // Enrich vendors
@@ -741,13 +763,16 @@ export async function customerRoutes(app: FastifyInstance) {
     const userLat = lat;
     const userLng = lng;
 
-    // Favorite lookup
-    const favoriteIds = new Set(
-      (await app.prisma.vendor.findMany({
-        where: { id: { in: vendors.map((v) => v.id) }, favoritedBy: { some: { userId: request.user.userId } } },
-        select: { id: true },
-      })).map((v) => v.id),
-    );
+    // Favorite lookup (guests have none)
+    const browserId = request.user?.userId;
+    const favoriteIds = browserId
+      ? new Set(
+          (await app.prisma.vendor.findMany({
+            where: { id: { in: vendors.map((v) => v.id) }, favoritedBy: { some: { userId: browserId } } },
+            select: { id: true },
+          })).map((v) => v.id),
+        )
+      : new Set<string>();
 
     let enriched = vendors.map((v) => ({
       ...enrichVendor(v, userLat, userLng),
@@ -789,10 +814,12 @@ export async function customerRoutes(app: FastifyInstance) {
 
     if (!vendor) throw new NotFoundError('Vendor', id);
 
-    // Check if favorited
-    const isFavorite = await app.prisma.customer.count({
-      where: { userId: request.user.userId, favoriteVendors: { some: { id } } },
-    }) > 0;
+    // Check if favorited (guests have none)
+    const isFavorite = request.user?.userId
+      ? (await app.prisma.customer.count({
+          where: { userId: request.user.userId, favoriteVendors: { some: { id } } },
+        })) > 0
+      : false;
 
     // Zero markup — customers pay the vendor base price (revenue = subscriptions).
     const categories = vendor.categories.map((cat) => ({
