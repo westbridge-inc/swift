@@ -1,21 +1,34 @@
-MIT License
+Copyright (c) 2026 Westbridge Inc. All rights reserved.
 
-Copyright (c) 2026 Westbridge Inc
+This repository and all of its contents — including the source code,
+documentation, designs, and assets (collectively, the "Software") — are the
+exclusive property of Westbridge Inc. (the "Owner"). The Software is the
+Owner's confidential and proprietary work product. It is made publicly
+viewable solely for the Owner's own development and continuous-integration
+convenience, and not as an offer of any license.
 
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
+NO LICENSE OR RIGHT IS GRANTED. No person or entity may use, copy, reproduce,
+modify, adapt, translate, merge, publish, distribute, transmit, sublicense,
+sell, rent, lease, host, or create derivative works of the Software, in whole
+or in part, by any means, without the Owner's prior express written permission.
 
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
+No person or entity may represent, claim, or hold out — directly or by
+implication — that they are the author, owner, or originator of the Software or
+any part of it, nor may they remove, alter, or obscure this notice or any
+proprietary marking. All authorship and ownership rights are reserved
+exclusively to the Owner.
+
+Viewing the Software does not transfer any intellectual-property right, and no
+such right is granted by implication, estoppel, or otherwise. Unauthorized use,
+reproduction, distribution, or any false claim of authorship or ownership is
+strictly prohibited and may give rise to liability under copyright, trademark,
+trade-secret, unfair-competition, and other applicable laws.
 
 THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
 IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
+FITNESS FOR A PARTICULAR PURPOSE, TITLE, AND NON-INFRINGEMENT. IN NO EVENT
+SHALL THE OWNER BE LIABLE FOR ANY CLAIM, DAMAGES, OR OTHER LIABILITY, WHETHER
+IN AN ACTION OF CONTRACT, TORT, OR OTHERWISE, ARISING FROM, OUT OF, OR IN
+CONNECTION WITH THE SOFTWARE OR ITS USE OR OTHER DEALINGS.
+
+To request permission for any use, contact the Owner.
