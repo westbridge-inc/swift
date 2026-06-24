@@ -55,6 +55,14 @@ export function useVendor<T = any>(id: string) {
   });
 }
 
+export function useVendorReviews<T = any>(id: string) {
+  return useQuery<T>({
+    queryKey: [...customerKeys.vendor(id), 'reviews'],
+    queryFn: () => unwrap<T>(customerApi.getVendorReviews(id)),
+    enabled: !!id,
+  });
+}
+
 export function useOrders<T = any>() {
   return useQuery<T>({ queryKey: customerKeys.orders, queryFn: () => unwrap<T>(customerApi.getOrders()) });
 }

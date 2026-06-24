@@ -97,6 +97,7 @@ export const customerApi = {
   getHome: (lat?: number, lng?: number) => api.get('/customer/home', { params: { lat, lng } }),
   getVendors: (params?: Record<string, string>) => api.get('/customer/vendors', { params }),
   getVendor: (id: string) => api.get(`/customer/vendors/${id}`),
+  getVendorReviews: (id: string) => api.get(`/customer/vendors/${id}/reviews`),
   getOrders: () => api.get('/customer/orders'),
   getOrder: (id: string) => api.get(`/customer/orders/${id}`),
   // Order placement = checkout; it reads the server-side cart. (The old POST

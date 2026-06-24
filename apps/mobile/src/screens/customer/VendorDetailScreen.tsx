@@ -73,7 +73,7 @@ function StatusPill({ closed }: { closed: boolean }) {
 
 // Immersive hero — the vendor identity sits ON the photo over a gradient scrim
 // (premium restaurant-detail treatment), with description/min-order below.
-function VendorHeader({ vendor }: { vendor: any }) {
+function VendorHeader({ vendor, onReviews }: { vendor: any; onReviews?: () => void }) {
   const rating = vendor.averageRating && vendor.averageRating > 0 ? Number(vendor.averageRating).toFixed(1) : 'New';
   const closed = vendor.isCurrentlyOpen === false;
   return (
@@ -108,6 +108,19 @@ function VendorHeader({ vendor }: { vendor: any }) {
           ) : null}
         </View>
       ) : null}
+      <PressableScale onPress={onReviews}>
+        <View className="mt-sm flex-row items-center justify-between border-y border-border-subtle px-lg py-md">
+          <View className="flex-row items-center">
+            <MaterialCommunityIcons name="star" size={16} color={color.brand[500]} />
+            <Text className="ml-1 text-sm font-bold text-text-primary">{rating}</Text>
+            <Text className="ml-1 text-sm text-text-muted">· {vendor.totalRatings ? `${vendor.totalRatings} reviews` : 'No reviews yet'}</Text>
+          </View>
+          <View className="flex-row items-center">
+            <Text className="text-sm font-semibold text-brand-600">See all</Text>
+            <Feather name="chevron-right" size={16} color={color.brand[600]} />
+          </View>
+        </View>
+      </PressableScale>
     </View>
   );
 }
@@ -165,7 +178,7 @@ export function VendorDetailScreen({ navigation, route }: any) {
         data={rows}
         keyExtractor={(r: Row) => r.key}
         getItemType={(r: Row) => r.type}
-        ListHeaderComponent={<VendorHeader vendor={vendor} />}
+        ListHeaderComponent={<VendorHeader vendor={vendor} onReviews={() => navigation?.navigate?.('VendorReviews', { id, vendorName: vendor.name, averageRating: vendor.averageRating })} />}
         renderItem={({ item: row }: { item: Row }) =>
           row.type === 'header' ? (
             <Heading size="lg" className="px-lg pb-sm pt-lg">{row.name}</Heading>
