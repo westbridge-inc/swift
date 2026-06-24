@@ -1,10 +1,10 @@
-import { memo } from 'react';
+import { memo, useState } from 'react';
 import { View } from 'react-native';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Feather, MaterialCommunityIcons } from '@expo/vector-icons';
 import { color } from '@swift/ui';
 import { Text, Heading, Skeleton, Button, List, Image, PressableScale, EmptyState, Scrim } from '../../components/ui';
-import { useVendor, useCart, useAddToCart } from '../../hooks';
+import { useVendor, useCart, useToggleFavorite } from '../../hooks';
 import { money } from '../../lib/money';
 import { fallbackImage, kindForVendor, vendorImage, type ImageKind } from '../../lib/images';
 
@@ -25,29 +25,48 @@ function BackButton({ onPress }: { onPress?: () => void }) {
   );
 }
 
-const MenuItemRow = memo(function MenuItemRow({ item, onAdd, adding, kind }: { item: any; onAdd: () => void; adding: boolean; kind?: ImageKind }) {
-  const unavailable = item.isAvailable === false;
+function FavoriteButton({ vendorId, initial }: { vendorId: string; initial?: boolean }) {
+  const insets = useSafeAreaInsets();
+  const [fav, setFav] = useState(!!initial);
+  const toggle = useToggleFavorite();
   return (
-    <View className="mx-lg flex-row items-start border-b border-border-subtle py-md">
-      <View className="flex-1 pr-md">
-        <Text className="text-base font-semibold text-text-primary">{item.name}</Text>
-        {item.description ? (
-          <Text className="mt-xs text-sm text-text-secondary" numberOfLines={2}>{item.description}</Text>
-        ) : null}
-        <Text className="mt-sm text-sm font-bold text-text-primary">{money(item.customerPrice ?? item.basePrice)}</Text>
+    <PressableScale
+      onPress={() => { setFav((f) => !f); toggle.mutate({ vendorId, isFavorite: fav }); }}
+      hitSlop={10}
+      style={[{ position: 'absolute', top: insets.top + 8, right: 16, zIndex: 10, width: 38, height: 38, borderRadius: 19, alignItems: 'center', justifyContent: 'center', backgroundColor: color.surface.base }, SHADOW]}
+    >
+      <MaterialCommunityIcons name={fav ? 'heart' : 'heart-outline'} size={20} color={fav ? color.brand[500] : color.text.primary} />
+    </PressableScale>
+  );
+}
+
+const MenuItemRow = memo(function MenuItemRow({ item, onOpen, kind }: { item: any; onOpen: () => void; kind?: ImageKind }) {
+  const unavailable = item.isAvailable === false;
+  const customizable = (item.optionGroups?.length ?? 0) > 0;
+  return (
+    <PressableScale onPress={onOpen} disabled={unavailable}>
+      <View className="mx-lg flex-row items-start border-b border-border-subtle py-md">
+        <View className="flex-1 pr-md">
+          <Text className="text-base font-semibold text-text-primary">{item.name}</Text>
+          {item.description ? (
+            <Text className="mt-xs text-sm text-text-secondary" numberOfLines={2}>{item.description}</Text>
+          ) : null}
+          <Text className="mt-sm text-sm font-bold text-text-primary">{money(item.customerPrice ?? item.basePrice)}</Text>
+          {customizable && !unavailable ? (
+            <Text className="mt-xs text-xs font-medium text-brand-600">Customizable</Text>
+          ) : null}
+        </View>
+        <View style={{ width: 96, height: 96 }}>
+          <Image source={{ uri: item.imageUrl || fallbackImage(item.id, kind) }} style={{ width: 96, height: 96, borderRadius: 14 }} />
+          <View
+            pointerEvents="none"
+            style={[{ position: 'absolute', bottom: -10, right: -6, width: 36, height: 36, borderRadius: 18, alignItems: 'center', justifyContent: 'center', backgroundColor: unavailable ? color.surface.base : color.brand[500] }, SHADOW]}
+          >
+            <Feather name={unavailable ? 'slash' : 'plus'} size={18} color={unavailable ? color.text.muted : '#fff'} />
+          </View>
+        </View>
       </View>
-      <View style={{ width: 96, height: 96 }}>
-        <Image source={{ uri: item.imageUrl || fallbackImage(item.id, kind) }} style={{ width: 96, height: 96, borderRadius: 14 }} />
-        <PressableScale
-          onPress={onAdd}
-          disabled={unavailable || adding}
-          hitSlop={8}
-          style={[{ position: 'absolute', bottom: -10, right: -6, width: 36, height: 36, borderRadius: 18, alignItems: 'center', justifyContent: 'center', backgroundColor: unavailable ? color.surface.base : color.brand[500] }, SHADOW]}
-        >
-          <Feather name={unavailable ? 'slash' : 'plus'} size={18} color={unavailable ? color.text.muted : '#fff'} />
-        </PressableScale>
-      </View>
-    </View>
+    </PressableScale>
   );
 });
 
@@ -69,7 +88,7 @@ function StatusPill({ closed }: { closed: boolean }) {
 
 // Immersive hero — the vendor identity sits ON the photo over a gradient scrim
 // (premium restaurant-detail treatment), with description/min-order below.
-function VendorHeader({ vendor }: { vendor: any }) {
+function VendorHeader({ vendor, onReviews }: { vendor: any; onReviews?: () => void }) {
   const rating = vendor.averageRating && vendor.averageRating > 0 ? Number(vendor.averageRating).toFixed(1) : 'New';
   const closed = vendor.isCurrentlyOpen === false;
   return (
@@ -104,6 +123,19 @@ function VendorHeader({ vendor }: { vendor: any }) {
           ) : null}
         </View>
       ) : null}
+      <PressableScale onPress={onReviews}>
+        <View className="mt-sm flex-row items-center justify-between border-y border-border-subtle px-lg py-md">
+          <View className="flex-row items-center">
+            <MaterialCommunityIcons name="star" size={16} color={color.brand[500]} />
+            <Text className="ml-1 text-sm font-bold text-text-primary">{rating}</Text>
+            <Text className="ml-1 text-sm text-text-muted">· {vendor.totalRatings ? `${vendor.totalRatings} reviews` : 'No reviews yet'}</Text>
+          </View>
+          <View className="flex-row items-center">
+            <Text className="text-sm font-semibold text-brand-600">See all</Text>
+            <Feather name="chevron-right" size={16} color={color.brand[600]} />
+          </View>
+        </View>
+      </PressableScale>
     </View>
   );
 }
@@ -112,7 +144,6 @@ export function VendorDetailScreen({ navigation, route }: any) {
   const id: string = route?.params?.id ?? '';
   const { data: vendor, isLoading, isError, refetch } = useVendor<any>(id);
   const { data: cart } = useCart<any>();
-  const addToCart = useAddToCart();
 
   const cartCount = cart?.itemCount ?? 0;
   const cartSubtotal = cart?.subtotalCustomer ?? 0;
@@ -157,12 +188,13 @@ export function VendorDetailScreen({ navigation, route }: any) {
   return (
     <SafeAreaView style={{ flex: 1 }} edges={['top']} className="bg-surface-base">
       <BackButton onPress={() => navigation?.goBack?.()} />
+      <FavoriteButton vendorId={id} initial={vendor.isFavorite} />
       <View style={{ flex: 1 }}>
       <List
         data={rows}
         keyExtractor={(r: Row) => r.key}
         getItemType={(r: Row) => r.type}
-        ListHeaderComponent={<VendorHeader vendor={vendor} />}
+        ListHeaderComponent={<VendorHeader vendor={vendor} onReviews={() => navigation?.navigate?.('VendorReviews', { id, vendorName: vendor.name, averageRating: vendor.averageRating })} />}
         renderItem={({ item: row }: { item: Row }) =>
           row.type === 'header' ? (
             <Heading size="lg" className="px-lg pb-sm pt-lg">{row.name}</Heading>
@@ -170,8 +202,7 @@ export function VendorDetailScreen({ navigation, route }: any) {
             <MenuItemRow
               item={row.item}
               kind={kindForVendor(vendor)}
-              adding={addToCart.isPending}
-              onAdd={() => addToCart.mutate({ vendorId: id, itemId: row.item.id, quantity: 1 })}
+              onOpen={() => navigation?.navigate?.('ItemDetail', { vendorId: id, item: row.item, vendorKind: kindForVendor(vendor) })}
             />
           )
         }

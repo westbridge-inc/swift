@@ -55,6 +55,32 @@ export function useVendor<T = any>(id: string) {
   });
 }
 
+export function useVendorReviews<T = any>(id: string) {
+  return useQuery<T>({
+    queryKey: [...customerKeys.vendor(id), 'reviews'],
+    queryFn: () => unwrap<T>(customerApi.getVendorReviews(id)),
+    enabled: !!id,
+  });
+}
+
+export function useFavorites<T = any>() {
+  return useQuery<T>({ queryKey: ['customer', 'favorites'], queryFn: () => unwrap<T>(customerApi.getFavorites()) });
+}
+
+export function useToggleFavorite() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ vendorId, isFavorite }: { vendorId: string; isFavorite: boolean }) =>
+      unwrap(isFavorite ? customerApi.removeFavorite(vendorId) : customerApi.addFavorite(vendorId)),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['customer', 'favorites'] });
+      qc.invalidateQueries({ queryKey: ['customer', 'home'] });
+      qc.invalidateQueries({ queryKey: ['customer', 'vendors'] });
+      qc.invalidateQueries({ queryKey: ['customer', 'vendor'] });
+    },
+  });
+}
+
 export function useOrders<T = any>() {
   return useQuery<T>({ queryKey: customerKeys.orders, queryFn: () => unwrap<T>(customerApi.getOrders()) });
 }

@@ -138,6 +138,31 @@ async function main() {
         ],
       });
 
+      // Item customization (Uber Eats-style options) so the ItemDetail screen has
+      // a real example: a required size + optional extras on Pepperpot.
+      const pepperpot = await prisma.item.findFirst({ where: { vendorId: vendor.id, name: 'Pepperpot' } });
+      if (pepperpot) {
+        const size = await prisma.optionGroup.create({
+          data: { itemId: pepperpot.id, name: 'Portion size', isRequired: true, minSelect: 1, maxSelect: 1, sortOrder: 0 },
+        });
+        await prisma.option.createMany({
+          data: [
+            { optionGroupId: size.id, name: 'Regular', additionalPrice: 0, isDefault: true, sortOrder: 0 },
+            { optionGroupId: size.id, name: 'Large', additionalPrice: 800, sortOrder: 1 },
+          ],
+        });
+        const extras = await prisma.optionGroup.create({
+          data: { itemId: pepperpot.id, name: 'Add extras', isRequired: false, minSelect: 0, maxSelect: 3, sortOrder: 1 },
+        });
+        await prisma.option.createMany({
+          data: [
+            { optionGroupId: extras.id, name: 'Extra cassava', additionalPrice: 400, sortOrder: 0 },
+            { optionGroupId: extras.id, name: 'Fried plantain', additionalPrice: 300, sortOrder: 1 },
+            { optionGroupId: extras.id, name: 'Extra pepper sauce', additionalPrice: 0, sortOrder: 2 },
+          ],
+        });
+      }
+
       // Operating hours (open 8am-10pm every day)
       for (let day = 0; day < 7; day++) {
         await prisma.operatingHours.create({
