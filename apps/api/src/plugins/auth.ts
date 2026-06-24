@@ -5,6 +5,7 @@ import type { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 declare module 'fastify' {
   interface FastifyInstance {
     authenticate: (request: FastifyRequest, reply: FastifyReply) => Promise<void>;
+    authenticateOptional: (request: FastifyRequest) => Promise<void>;
   }
 }
 
@@ -44,6 +45,25 @@ export const authPlugin = fp(async (app: FastifyInstance) => {
       }
     } catch {
       reply.status(401).send({ success: false, error: { code: 'UNAUTHORIZED', message: 'Invalid or expired token' } });
+    }
+  });
+
+  // Optional auth for public-but-personalizable routes (browsing). Attaches the
+  // user when a valid token + live session is present, otherwise proceeds as a
+  // guest — never 401s. Action routes keep using `authenticate`.
+  app.decorate('authenticateOptional', async (request: FastifyRequest) => {
+    try {
+      await request.jwtVerify();
+      const token = request.headers.authorization?.slice('Bearer '.length) ?? '';
+      const session = await app.prisma.session.findUnique({
+        where: { token },
+        select: { expiresAt: true },
+      });
+      if (!session || session.expiresAt < new Date()) {
+        (request as { user?: unknown }).user = undefined;
+      }
+    } catch {
+      (request as { user?: unknown }).user = undefined;
     }
   });
 });

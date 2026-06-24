@@ -30,8 +30,13 @@ export function PhoneEntryScreen({ navigation }: any) {
 
   return (
     <SafeAreaView style={{ flex: 1 }} edges={['top', 'bottom']} className="bg-surface-base">
-      <View className="px-lg pt-md">
-        <StepProgress step={1} total={4} />
+      <View className="flex-row items-center px-lg pt-md">
+        <PressableScale onPress={() => useAuthStore.getState().cancelAuth()} hitSlop={10} className="mr-md">
+          <Feather name="x" size={24} color={color.text.primary} />
+        </PressableScale>
+        <View className="flex-1">
+          <StepProgress step={1} total={4} />
+        </View>
       </View>
       <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
         <View className="flex-1 px-lg pt-3xl">
