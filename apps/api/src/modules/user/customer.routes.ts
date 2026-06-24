@@ -49,6 +49,10 @@ const vendorsBrowseQuerySchema = latLngQuerySchema.extend({
   minRating: z.coerce.number().min(0).max(5).optional(),
 });
 
+const itemSlotsQuerySchema = z.object({
+  date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'date must be YYYY-MM-DD'),
+});
+
 const addCartItemSchema = z.object({
   vendorId: z.string().min(1),
   itemId: z.string().min(1),
@@ -187,7 +191,7 @@ async function buildCartResponse(
           item: {
             select: {
               id: true, name: true, basePrice: true, imageUrl: true,
-              isAvailable: true, vendorId: true,
+              isAvailable: true, vendorId: true, fulfillment: true,
               optionGroups: {
                 select: { name: true, options: { select: { id: true, name: true, additionalPrice: true } } },
               },
@@ -250,6 +254,7 @@ async function buildCartResponse(
       specialInstructions: ci.specialInstructions,
       lineTotal: lineBase,
       isAvailable: ci.item.isAvailable,
+      fulfillment: ci.item.fulfillment,
     };
   });
 
@@ -967,6 +972,66 @@ export async function customerRoutes(app: FastifyInstance) {
     if (keys.length > 0) await app.redis.del(...keys).catch(() => {});
 
     return { success: true, data: { message: 'Removed from favorites' } };
+  });
+
+  // ========================================================================
+  // APPOINTMENTS — bookable time slots for a SERVICE listing, generated from
+  // Item.bookingConfig to match BookingService rules (aligned to duration,
+  // inside a day-window, in the future, not already booked).
+  // ========================================================================
+
+  app.get('/items/:id/slots', async (request: AuthRequest) => {
+    const { id } = request.params as { id: string };
+    const { date } = itemSlotsQuerySchema.parse(request.query);
+
+    const item = await app.prisma.item.findUnique({
+      where: { id },
+      select: { id: true, fulfillment: true, bookingConfig: true, isAvailable: true },
+    });
+    if (!item) throw new NotFoundError('Listing', id);
+    if (item.fulfillment !== 'APPOINTMENT' || !item.bookingConfig) {
+      throw new AppError(400, 'NOT_BOOKABLE', 'This listing does not take appointments');
+    }
+
+    const config = item.bookingConfig as unknown as {
+      durationMinutes: number;
+      slots: Array<{ dayOfWeek: number; start: string; end: string }>;
+    };
+    const duration = config.durationMinutes;
+    const [y, m, d] = date.split('-').map(Number);
+    const dayOfWeek = new Date(Date.UTC(y!, m! - 1, d!)).getUTCDay();
+    const now = new Date();
+    const toMin = (hhmm: string) => {
+      const [h, mm] = hhmm.split(':').map(Number);
+      return (h ?? 0) * 60 + (mm ?? 0);
+    };
+
+    // Aligned candidate starts (UTC) inside the day's windows, in the future.
+    const candidates: Date[] = [];
+    if (item.isAvailable && duration > 0 && Array.isArray(config.slots)) {
+      for (const w of config.slots) {
+        if (w.dayOfWeek !== dayOfWeek) continue;
+        const start = toMin(w.start);
+        const end = toMin(w.end);
+        for (let t = start; t + duration <= end; t += duration) {
+          const slot = new Date(Date.UTC(y!, m! - 1, d!, Math.floor(t / 60), t % 60));
+          if (slot > now) candidates.push(slot);
+        }
+      }
+    }
+
+    // Drop slots a non-cancelled booking already holds.
+    const taken = candidates.length
+      ? new Set(
+          (await app.prisma.booking.findMany({
+            where: { itemId: id, status: { not: 'CANCELLED' }, slotStart: { in: candidates } },
+            select: { slotStart: true },
+          })).map((b) => b.slotStart.toISOString()),
+        )
+      : new Set<string>();
+
+    const slots = candidates.filter((c) => !taken.has(c.toISOString())).map((c) => c.toISOString());
+    return { success: true, data: { date, durationMinutes: duration, slots } };
   });
 
   // ========================================================================
