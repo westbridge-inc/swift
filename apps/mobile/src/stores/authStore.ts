@@ -9,12 +9,17 @@ interface AuthState {
   refreshToken: string | null;
   isAuthenticated: boolean;
   isLoading: boolean;
+  // Guests browse freely; an action needing an account flips this to swap the
+  // root navigator into the auth flow (and back to browsing on cancel).
+  wantsAuth: boolean;
   countryCode: string | null;
   dialCode: string | null;
   currencyCode: string | null;
   currencySymbol: string | null;
   setAuth: (user: User, accessToken: string, refreshToken: string) => void;
   setUser: (user: User) => void;
+  promptLogin: () => void;
+  cancelAuth: () => void;
   setCountry: (c: { code: string; dialCode?: string | null; currencyCode?: string | null; currencySymbol?: string | null }) => void;
   logout: () => void;
   setLoading: (loading: boolean) => void;
@@ -32,13 +37,16 @@ export const useAuthStore = create<AuthState>()(
       refreshToken: null,
       isAuthenticated: false,
       isLoading: true,
+      wantsAuth: false,
       countryCode: null,
       dialCode: null,
       currencyCode: null,
       currencySymbol: null,
       setAuth: (user, accessToken, refreshToken) =>
-        set({ user, accessToken, refreshToken, isAuthenticated: true, isLoading: false }),
+        set({ user, accessToken, refreshToken, isAuthenticated: true, isLoading: false, wantsAuth: false }),
       setUser: (user) => set({ user }),
+      promptLogin: () => set({ wantsAuth: true }),
+      cancelAuth: () => set({ wantsAuth: false }),
       setCountry: (c) =>
         set({
           countryCode: c.code,
