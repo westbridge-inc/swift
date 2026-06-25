@@ -4,12 +4,12 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { Feather, MaterialCommunityIcons } from '@expo/vector-icons';
 import Animated from 'react-native-reanimated';
 import { useQuery } from '@tanstack/react-query';
-import { customerApi } from '../../services/api';
-import { useLocationStore } from '../../stores/locationStore';
+import { customerApi } from '../../../services/api';
+import { useLocationStore } from '../../../stores/locationStore';
 import { color } from '@swift/ui';
-import { Text, Heading, Skeleton, List, Image, PressableScale, EmptyState, Scrim, enter, staggerDelay, elevation } from '../../components/ui';
-import { VendorCard } from '../../components/customer/VendorCard';
-import { categoryImage, vendorImage, DARK_BLURHASH } from '../../lib/images';
+import { Text, Heading, Skeleton, List, Image, PressableScale, EmptyState, Scrim, enter, staggerDelay, elevation } from '../../../components/ui';
+import { VendorCard } from '../../../components/customer/VendorCard';
+import { categoryImage, vendorImage, DARK_BLURHASH } from '../../../lib/images';
 
 type Vertical = { key: string; label: string; icon: keyof typeof MaterialCommunityIcons.glyphMap; route?: string };
 const VERTICALS: Vertical[] = [

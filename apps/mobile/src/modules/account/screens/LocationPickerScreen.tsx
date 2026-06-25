@@ -2,9 +2,9 @@ import { View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Feather, MaterialCommunityIcons } from '@expo/vector-icons';
 import { color } from '@swift/ui';
-import { Text, Card, PressableScale } from '../../components/ui';
-import { useAddresses } from '../../hooks';
-import { useLocationStore } from '../../stores/locationStore';
+import { Text, Card, PressableScale } from '../../../components/ui';
+import { useAddresses } from '../../../hooks';
+import { useLocationStore } from '../../../stores/locationStore';
 
 const GEORGETOWN = { latitude: 6.8013, longitude: -58.1551, label: 'Georgetown' };
 

@@ -4,9 +4,9 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import MapView, { Marker, PROVIDER_DEFAULT } from 'react-native-maps';
 import { Feather, MaterialCommunityIcons } from '@expo/vector-icons';
 import { color } from '@swift/ui';
-import { Text, Heading, Card, Button, Spinner, PressableScale, EmptyState } from '../../components/ui';
-import { useOrder, useRateOrder } from '../../hooks';
-import { money } from '../../lib/money';
+import { Text, Heading, Card, Button, Spinner, PressableScale, EmptyState } from '../../../components/ui';
+import { useOrder, useRateOrder } from '../../../hooks';
+import { money } from '../../../lib/money';
 
 const STEPS = [
   { key: 'placed', label: 'Order placed' },

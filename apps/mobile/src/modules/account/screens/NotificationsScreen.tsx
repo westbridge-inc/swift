@@ -2,8 +2,8 @@ import { View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Feather } from '@expo/vector-icons';
 import { color } from '@swift/ui';
-import { Text, Card, List, PressableScale, EmptyState, Skeleton } from '../../components/ui';
-import { useNotifications } from '../../hooks';
+import { Text, Card, List, PressableScale, EmptyState, Skeleton } from '../../../components/ui';
+import { useNotifications } from '../../../hooks';
 
 function timeAgo(iso: string) {
   const ms = Date.now() - new Date(iso).getTime();

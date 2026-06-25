@@ -2,8 +2,8 @@ import { View, ScrollView } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Feather, MaterialCommunityIcons } from '@expo/vector-icons';
 import { color } from '@swift/ui';
-import { Text, PressableScale, Skeleton, EmptyState } from '../../components/ui';
-import { useVendorReviews } from '../../hooks';
+import { Text, PressableScale, Skeleton, EmptyState } from '../../../components/ui';
+import { useVendorReviews } from '../../../hooks';
 
 function Stars({ value, size = 14 }: { value: number; size?: number }) {
   const rounded = Math.round(value);

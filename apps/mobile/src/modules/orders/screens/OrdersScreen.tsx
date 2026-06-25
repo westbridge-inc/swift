@@ -3,10 +3,10 @@ import { View, RefreshControl } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Feather, MaterialCommunityIcons } from '@expo/vector-icons';
 import { color } from '@swift/ui';
-import { Text, Heading, Card, Badge, Skeleton, List, PressableScale, EmptyState } from '../../components/ui';
-import { useOrders, useReorder } from '../../hooks';
-import { useAuthStore } from '../../stores/authStore';
-import { money } from '../../lib/money';
+import { Text, Heading, Card, Badge, Skeleton, List, PressableScale, EmptyState } from '../../../components/ui';
+import { useOrders, useReorder } from '../../../hooks';
+import { useAuthStore } from '../../../stores/authStore';
+import { money } from '../../../lib/money';
 
 const TYPE_LABEL: Record<string, string> = {
   TAXI: 'Taxi ride',

@@ -4,8 +4,8 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import * as ImagePicker from 'expo-image-picker';
 import { Feather } from '@expo/vector-icons';
 import { color } from '@swift/ui';
-import { Text, Heading, Card, Button, Badge, PressableScale } from '../../components/ui';
-import { useUploadFile, useSubmitIdentity } from '../../hooks/verification';
+import { Text, Heading, Card, Button, Badge, PressableScale } from '../../../components/ui';
+import { useUploadFile, useSubmitIdentity } from '../../../hooks/verification';
 
 function UploadRow({
   title,

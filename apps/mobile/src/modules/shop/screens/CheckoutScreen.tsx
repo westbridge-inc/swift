@@ -3,9 +3,9 @@ import { View, ScrollView } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Feather, MaterialCommunityIcons } from '@expo/vector-icons';
 import { color } from '@swift/ui';
-import { Text, Heading, Card, Button, Spinner, PressableScale, ChoiceChip } from '../../components/ui';
-import { useCart, useAddresses, useSetCartAddress, useSetCartTip, usePlaceOrder, useItemSlots } from '../../hooks';
-import { money } from '../../lib/money';
+import { Text, Heading, Card, Button, Spinner, PressableScale, ChoiceChip } from '../../../components/ui';
+import { useCart, useAddresses, useSetCartAddress, useSetCartTip, usePlaceOrder, useItemSlots } from '../../../hooks';
+import { money } from '../../../lib/money';
 
 const TIPS = [0, 200, 500, 1000];
 
