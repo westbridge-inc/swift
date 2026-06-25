@@ -7,8 +7,9 @@ import { useQuery } from '@tanstack/react-query';
 import { customerApi } from '../../../services/api';
 import { useLocationStore } from '../../../stores/locationStore';
 import { color } from '@swift/ui';
-import { Text, Heading, Skeleton, List, Image, PressableScale, EmptyState, Scrim, enter, staggerDelay, elevation } from '../../../components/ui';
+import { Text, Heading, Skeleton, List, Image, PressableScale, EmptyState, Scrim, PromoBanner, enter, staggerDelay, elevation } from '../../../components/ui';
 import { VendorCard } from '../../../components/customer/VendorCard';
+import { FoodItemCard } from '../../../components/customer/FoodItemCard';
 import { categoryImage, vendorImage, DARK_BLURHASH } from '../../../lib/images';
 
 type Vertical = { key: string; label: string; icon: keyof typeof MaterialCommunityIcons.glyphMap; route?: string };
@@ -136,7 +137,7 @@ function SectionHeader({ title, action, onAction }: { title: string; action?: st
   );
 }
 
-function HomeHeader({ navigation, address, activeOrder, topRated, cuisines, selectedCuisine, onSelectCuisine }: any) {
+function HomeHeader({ navigation, address, activeOrder, popularItems, topRated, cuisines, selectedCuisine, onSelectCuisine }: any) {
   return (
     <View>
       <View className="flex-row items-center justify-between px-lg pt-md">
@@ -180,7 +181,30 @@ function HomeHeader({ navigation, address, activeOrder, topRated, cuisines, sele
         ))}
       </View>
 
-      <View className="mx-lg mb-md flex-row items-center rounded-2xl bg-brand-50 px-lg py-md">
+      <View className="mt-xs">
+        <PromoBanner
+          title="No platform fees — ever"
+          subtitle="You pay the vendor's price. Swift never adds a cent on top."
+          icon="cash"
+        />
+      </View>
+
+      {popularItems?.length ? (
+        <View className="mb-sm mt-lg">
+          <SectionHeader title="Popular right now" action="See all" onAction={() => navigation?.navigate?.('Search')} />
+          <View className="px-lg">
+            {popularItems.slice(0, 6).map((it: any) => (
+              <FoodItemCard
+                key={it.id}
+                item={it}
+                onPress={() => navigation?.navigate?.('VendorDetail', { id: it.vendorId })}
+              />
+            ))}
+          </View>
+        </View>
+      ) : null}
+
+      <View className="mx-lg mb-md mt-md flex-row items-center rounded-2xl bg-brand-50 px-lg py-md">
         <MaterialCommunityIcons name="shield-check" size={20} color={color.brand[600]} />
         <Text className="ml-sm flex-1 text-sm font-medium text-brand-700">
           Every Swift driver & rider is ID-verified and police-cleared.
@@ -269,6 +293,7 @@ export function HomeScreen({ navigation }: any) {
               navigation={navigation}
               address={address}
               activeOrder={home.activeOrder}
+              popularItems={home.popularItems ?? []}
               topRated={topRated}
               cuisines={cuisines}
               selectedCuisine={selectedCuisine}
