@@ -6,6 +6,7 @@ import { color } from '@swift/ui';
 import { authApi } from '../../services/api';
 import { useAuthStore } from '../../stores/authStore';
 import { Text, Heading, PressableScale, StepProgress } from '../../components/ui';
+import { getAppVariant } from '../../lib/appVariant';
 
 export function OtpVerificationScreen({ route, navigation }: any) {
   const { phone } = route.params;
@@ -25,7 +26,13 @@ export function OtpVerificationScreen({ route, navigation }: any) {
     try {
       const { data } = await authApi.verifyOtp(phone, code);
       if (data.data.isNewUser) {
-        navigation.navigate('RolePicker', { phone });
+        // Partner app → choose an earner role; Customer app → a new user is just a
+        // customer, so skip the earner role picker and go straight to sign-up.
+        if (getAppVariant() === 'partner') {
+          navigation.navigate('RolePicker', { phone });
+        } else {
+          navigation.navigate('Register', { phone, role: 'CUSTOMER' });
+        }
       } else {
         setAuth(data.data.user, data.data.tokens.accessToken, data.data.tokens.refreshToken);
       }
