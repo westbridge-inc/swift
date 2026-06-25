@@ -4,8 +4,8 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import MapView, { Marker, PROVIDER_DEFAULT } from 'react-native-maps';
 import { Feather } from '@expo/vector-icons';
 import { color } from '@swift/ui';
-import { Text, Button, Input, PressableScale } from '../../components/ui';
-import { useAddAddress } from '../../hooks';
+import { Text, Button, Input, PressableScale } from '../../../components/ui';
+import { useAddAddress } from '../../../hooks';
 
 const GEORGETOWN = { latitude: 6.8013, longitude: -58.1551 };
 

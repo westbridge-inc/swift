@@ -3,10 +3,10 @@ import { View, ScrollView, RefreshControl } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Feather } from '@expo/vector-icons';
 import { color } from '@swift/ui';
-import { Text, Heading, Skeleton, List, Input, PressableScale, EmptyState } from '../../components/ui';
-import { VendorCard, type Vendor } from '../../components/customer/VendorCard';
-import { useVendors } from '../../hooks';
-import { useLocationStore } from '../../stores/locationStore';
+import { Text, Heading, Skeleton, List, Input, PressableScale, EmptyState } from '../../../components/ui';
+import { VendorCard, type Vendor } from '../../../components/customer/VendorCard';
+import { useVendors } from '../../../hooks';
+import { useLocationStore } from '../../../stores/locationStore';
 
 const FILTERS: { key: string; label: string; type?: string }[] = [
   { key: 'all', label: 'All' },

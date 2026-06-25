@@ -3,10 +3,10 @@ import { View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Feather } from '@expo/vector-icons';
 import { color } from '@swift/ui';
-import { Text, Card, Button, Spinner, List, Image, PressableScale, EmptyState, elevation } from '../../components/ui';
-import { useCart, useUpdateCartItem, useRemoveCartItem, useClearCart } from '../../hooks';
-import { money } from '../../lib/money';
-import { fallbackImage, kindForVendor } from '../../lib/images';
+import { Text, Card, Button, Spinner, List, Image, PressableScale, EmptyState, elevation } from '../../../components/ui';
+import { useCart, useUpdateCartItem, useRemoveCartItem, useClearCart } from '../../../hooks';
+import { money } from '../../../lib/money';
+import { fallbackImage, kindForVendor } from '../../../lib/images';
 
 function CartHeader({ navigation, title, onClear }: any) {
   return (
