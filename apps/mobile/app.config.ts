@@ -8,6 +8,10 @@ const isPartner = VARIANT === 'partner';
 
 const BUNDLE_ID = isPartner ? 'gy.swift.partner' : 'gy.swift.app';
 const APP_NAME = isPartner ? 'Swift Partner' : 'Swift';
+// Native Xcode project/module name — must NOT be exactly "Swift" (reserved by the
+// Swift standard library → iOS build error TS "Module name 'Swift' is reserved").
+// The user-visible name stays APP_NAME via ios.infoPlist.CFBundleDisplayName.
+const PROJECT_NAME = isPartner ? 'Swift Partner' : 'SwiftGY';
 
 const locationWhenInUse =
   'Swift uses your location to set your pickup and find nearby drivers and couriers.';
@@ -15,7 +19,7 @@ const locationAlways =
   'Swift Partner keeps your live position on the map in the background while you are online for jobs.';
 
 const config: ExpoConfig = {
-  name: APP_NAME,
+  name: PROJECT_NAME,
   slug: isPartner ? 'swift-partner' : 'swift',
   scheme: isPartner ? 'swiftpartner' : 'swift',
   version: '1.0.0',
