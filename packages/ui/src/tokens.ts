@@ -16,20 +16,49 @@
 export const APP_NAME = 'Swift' as const;
 export const BRAND_REGION = 'GY' as const;
 
-/** §Colour — red identity + neutral surfaces. Red is an ACCENT, never flooded. */
+/**
+ * §Colour — two brand identities, one system.
+ *   • CONSUMER app  → Swift **red** (#E8192C)
+ *   • PARTNER app   → **Ink** black (#16171C) — vendors / drivers / movers, i.e.
+ *     the people who pay the subscription.
+ * The ramp is chosen at BUILD time from EXPO_PUBLIC_APP_VARIANT, so every brand
+ * token — NativeWind `bg-brand-*` / `text-brand-*` classes AND `color.brand[…]`
+ * read in JS — re-skins per app with zero per-screen edits. Brand is an ACCENT,
+ * never flooded.
+ */
+type BrandRamp = Record<50 | 100 | 200 | 300 | 400 | 500 | 600 | 700 | 800 | 900, string>;
+
+const BRAND_RED: BrandRamp = {
+  50: '#FFF2F3', // red tint — bg-brand-50 surfaces
+  100: '#FBD7DB',
+  200: '#F4A6AD',
+  300: '#ED7480',
+  400: '#EA4555',
+  500: '#E8192C', // Swift Red — consumer identity + primary CTA
+  600: '#BC1320', // Deep Red
+  700: '#930F1A',
+  800: '#6B0B13',
+  900: '#45070C',
+};
+
+const BRAND_INK: BrandRamp = {
+  50: '#F4F4F6', // neutral tint — bg-brand-50 surfaces
+  100: '#E6E6EA',
+  200: '#C9C9D0',
+  300: '#9A9AA4',
+  400: '#5B5C66',
+  500: '#16171C', // Ink — partner identity + primary CTA
+  600: '#0E0F13',
+  700: '#08090C',
+  800: '#050609',
+  900: '#000000',
+};
+
+export const APP_VARIANT: 'customer' | 'partner' =
+  process.env['EXPO_PUBLIC_APP_VARIANT'] === 'partner' ? 'partner' : 'customer';
+
 export const color = {
-  brand: {
-    50: '#FFF2F3', // red tint — bg-brand-50 surfaces
-    100: '#FBD7DB',
-    200: '#F4A6AD',
-    300: '#ED7480',
-    400: '#EA4555',
-    500: '#E8192C', // Swift Red — identity + primary CTA
-    600: '#BC1320', // Deep Red — hover/accent
-    700: '#930F1A', // pressed
-    800: '#6B0B13',
-    900: '#45070C',
-  },
+  brand: APP_VARIANT === 'partner' ? BRAND_INK : BRAND_RED,
   white: '#FFFFFF',
   surface: {
     base: '#FFFFFF',
@@ -50,7 +79,7 @@ export const color = {
   success: '#1DA851',
   error: '#E5342B',
   warning: '#F59E0B',
-} as const;
+};
 
 /** §Type — Space Grotesk (display) + Inter (body). */
 export const font = {
