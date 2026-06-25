@@ -2,9 +2,9 @@ import { View, RefreshControl } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Feather } from '@expo/vector-icons';
 import { color } from '@swift/ui';
-import { Text, List, Skeleton, EmptyState, PressableScale } from '../../components/ui';
-import { VendorCard, type Vendor } from '../../components/customer/VendorCard';
-import { useFavorites } from '../../hooks';
+import { Text, List, Skeleton, EmptyState, PressableScale } from '../../../components/ui';
+import { VendorCard, type Vendor } from '../../../components/customer/VendorCard';
+import { useFavorites } from '../../../hooks';
 
 export function FavoritesScreen({ navigation }: any) {
   const { data, isLoading, refetch, isRefetching } = useFavorites<Vendor[]>();

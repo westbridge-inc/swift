@@ -3,11 +3,11 @@ import { View, ScrollView, TextInput, Pressable } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Feather, MaterialCommunityIcons } from '@expo/vector-icons';
 import { color } from '@swift/ui';
-import { Text, Heading, Button, Image, PressableScale, Scrim } from '../../components/ui';
-import { useAddToCart } from '../../hooks';
-import { useAuthStore } from '../../stores/authStore';
-import { money } from '../../lib/money';
-import { fallbackImage, type ImageKind } from '../../lib/images';
+import { Text, Heading, Button, Image, PressableScale, Scrim } from '../../../components/ui';
+import { useAddToCart } from '../../../hooks';
+import { useAuthStore } from '../../../stores/authStore';
+import { money } from '../../../lib/money';
+import { fallbackImage, type ImageKind } from '../../../lib/images';
 
 type Option = { id: string; name: string; additionalPrice?: number | string; isDefault?: boolean; isAvailable?: boolean };
 type Group = { id: string; name: string; isRequired?: boolean; minSelect?: number; maxSelect?: number; options: Option[] };

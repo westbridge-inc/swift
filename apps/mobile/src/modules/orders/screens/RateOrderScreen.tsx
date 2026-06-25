@@ -3,8 +3,8 @@ import { View, ScrollView, TextInput } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Feather, MaterialCommunityIcons } from '@expo/vector-icons';
 import { color } from '@swift/ui';
-import { Text, Heading, Button, PressableScale } from '../../components/ui';
-import { useRateOrder } from '../../hooks';
+import { Text, Heading, Button, PressableScale } from '../../../components/ui';
+import { useRateOrder } from '../../../hooks';
 
 function StarPicker({ value, onChange }: { value: number; onChange: (n: number) => void }) {
   return (

@@ -3,11 +3,11 @@ import { View } from 'react-native';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Feather, MaterialCommunityIcons } from '@expo/vector-icons';
 import { color } from '@swift/ui';
-import { Text, Heading, Skeleton, Button, List, Image, PressableScale, EmptyState, Scrim } from '../../components/ui';
-import { useVendor, useCart, useToggleFavorite } from '../../hooks';
-import { useAuthStore } from '../../stores/authStore';
-import { money } from '../../lib/money';
-import { fallbackImage, kindForVendor, vendorImage, type ImageKind } from '../../lib/images';
+import { Text, Heading, Skeleton, Button, List, Image, PressableScale, EmptyState, Scrim } from '../../../components/ui';
+import { useVendor, useCart, useToggleFavorite } from '../../../hooks';
+import { useAuthStore } from '../../../stores/authStore';
+import { money } from '../../../lib/money';
+import { fallbackImage, kindForVendor, vendorImage, type ImageKind } from '../../../lib/images';
 
 type Row = { type: 'header'; key: string; name: string } | { type: 'item'; key: string; item: any };
 
