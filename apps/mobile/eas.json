@@ -4,25 +4,52 @@
     "appVersionSource": "remote"
   },
   "build": {
+    "_customer": {
+      "env": { "EXPO_PUBLIC_APP_VARIANT": "customer" }
+    },
+    "_partner": {
+      "env": { "EXPO_PUBLIC_APP_VARIANT": "partner" }
+    },
+
     "development": {
+      "extends": "_customer",
       "developmentClient": true,
       "distribution": "internal",
       "ios": { "simulator": true }
     },
+    "development-partner": {
+      "extends": "_partner",
+      "developmentClient": true,
+      "distribution": "internal",
+      "ios": { "simulator": true }
+    },
+
     "preview": {
+      "extends": "_customer",
       "distribution": "internal",
       "channel": "preview",
       "android": { "buildType": "apk" },
-      "env": {
-        "EXPO_PUBLIC_API_URL": "https://api-staging.swift.gy"
-      }
+      "env": { "EXPO_PUBLIC_API_URL": "https://api-staging.swift.gy" }
     },
+    "preview-partner": {
+      "extends": "_partner",
+      "distribution": "internal",
+      "channel": "preview",
+      "android": { "buildType": "apk" },
+      "env": { "EXPO_PUBLIC_API_URL": "https://api-staging.swift.gy" }
+    },
+
     "production": {
+      "extends": "_customer",
       "channel": "production",
       "autoIncrement": true,
-      "env": {
-        "EXPO_PUBLIC_API_URL": "https://api.swift.gy"
-      }
+      "env": { "EXPO_PUBLIC_API_URL": "https://api.swift.gy" }
+    },
+    "production-partner": {
+      "extends": "_partner",
+      "channel": "production",
+      "autoIncrement": true,
+      "env": { "EXPO_PUBLIC_API_URL": "https://api.swift.gy" }
     }
   },
   "submit": {

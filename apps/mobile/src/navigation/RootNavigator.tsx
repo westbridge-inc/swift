@@ -3,30 +3,34 @@ import { NavigationContainer } from '@react-navigation/native';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
 import { useAuthStore } from '../stores/authStore';
 import { CountryPickerScreen } from '../screens/auth/CountryPickerScreen';
+import { RolePickerScreen } from '../screens/auth/RolePickerScreen';
 import { AuthStack } from './AuthStack';
 import { CustomerStack } from './CustomerStack';
 import { MoverStack } from '../modules/mover/MoverStack';
 import { VendorStack } from '../modules/vendor/VendorStack';
+import { getAppVariant, partnerStackKey } from '../lib/appVariant';
 
 const Stack = createNativeStackNavigator();
 
-// One app, role-routed. Entry: pick country → sign up → land in the active role's stack.
-function stackForRole(activeRole?: string) {
-  switch (activeRole) {
-    case 'MOVER':
-    case 'RIDER':
-    case 'DRIVER':
+// Two store apps are built from this one codebase (see lib/appVariant):
+//   customer ("Swift")          → the consumer super-app
+//   partner  ("Swift Partner")  → movers + vendors, role-routed by activeRole
+// The variant is fixed at build time; activeRole only routes *within* the partner app.
+function mainForVariant(activeRole?: string) {
+  if (getAppVariant() === 'customer') return CustomerStack;
+  switch (partnerStackKey(activeRole)) {
+    case 'mover':
       return MoverStack;
-    case 'VENDOR_OWNER':
+    case 'vendor':
       return VendorStack;
     default:
-      return CustomerStack;
+      return RolePickerScreen; // signed in but not yet a mover/vendor → become one
   }
 }
 
 export function RootNavigator() {
   const { isAuthenticated, wantsAuth, user, countryCode } = useAuthStore();
-  const Main = stackForRole(user?.activeRole as string | undefined);
+  const Main = mainForVariant(user?.activeRole as string | undefined);
 
   return (
     <NavigationContainer>
