@@ -12,7 +12,7 @@ export function FavoritesScreen({ navigation }: any) {
   const favorites = (data ?? []).map((v) => ({ ...v, isFavorite: true }));
 
   return (
-    <SafeAreaView style={{ flex: 1 }} edges={['top']} className="bg-surface-base">
+    <SafeAreaView style={{ flex: 1 }} edges={['top']} className="bg-surface-subtle">
       <View className="flex-row items-center px-lg py-sm">
         <PressableScale onPress={() => navigation?.goBack?.()} hitSlop={10}>
           <Feather name="chevron-left" size={24} color={color.text.primary} />

@@ -58,7 +58,7 @@ export function ServicesScreen({ navigation }: any) {
   };
 
   return (
-    <SafeAreaView style={{ flex: 1 }} edges={['top']} className="bg-surface-base">
+    <SafeAreaView style={{ flex: 1 }} edges={['top']} className="bg-surface-subtle">
       <Header navigation={navigation} />
       <ScrollView
         className="flex-1"

@@ -67,7 +67,7 @@ export function SearchScreen({ navigation }: any) {
   const vendors = data ?? [];
 
   return (
-    <SafeAreaView style={{ flex: 1 }} edges={['top']} className="bg-surface-base">
+    <SafeAreaView style={{ flex: 1 }} edges={['top']} className="bg-surface-subtle">
       <View className="px-lg pb-sm pt-md">
         <Heading size="2xl">Explore</Heading>
       </View>
