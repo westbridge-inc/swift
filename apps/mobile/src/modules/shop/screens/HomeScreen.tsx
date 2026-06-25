@@ -10,7 +10,7 @@ import { color } from '@swift/ui';
 import { Text, Heading, Skeleton, List, Image, PressableScale, EmptyState, Scrim, PromoBanner, enter, staggerDelay, elevation } from '../../../components/ui';
 import { VendorCard } from '../../../components/customer/VendorCard';
 import { FoodItemCard } from '../../../components/customer/FoodItemCard';
-import { categoryImage, vendorImage, DARK_BLURHASH } from '../../../lib/images';
+import { vendorImage } from '../../../lib/images';
 
 type Vertical = { key: string; label: string; icon: keyof typeof MaterialCommunityIcons.glyphMap; route?: string };
 const VERTICALS: Vertical[] = [
@@ -35,23 +35,30 @@ function greeting(): string {
   return 'Good evening';
 }
 
-// Photo-led category tile — real imagery + dark scrim + label, so the grid reads
-// rich instead of flat-white. The glyph + label always render, so a slow photo
-// (dark blurhash) still communicates the category.
+// Super-app launcher tile — a light card with depth + a bright per-service colour
+// (Grab/Gojek pattern). Each vertical is instantly recognisable by its colour; far
+// friendlier than dark photo tiles.
+const VERTICAL_TINT: Record<string, { bg: string; fg: string }> = {
+  food: { bg: '#FFECEE', fg: '#E8192C' },
+  grocery: { bg: '#E7F7EE', fg: '#12A150' },
+  taxi: { bg: '#FFF4E0', fg: '#F08C00' },
+  courier: { bg: '#E8F0FF', fg: '#2563EB' },
+  shops: { bg: '#F1EAFE', fg: '#7C3AED' },
+  services: { bg: '#E3F7F6', fg: '#0D9488' },
+};
+
 function VerticalTile({ v, onPress }: { v: Vertical; onPress?: () => void }) {
+  const tint = VERTICAL_TINT[v.key] ?? { bg: '#F7F7F8', fg: color.brand[500] };
   return (
     <PressableScale strong onPress={onPress}>
-      <View className="h-[92px] overflow-hidden rounded-2xl bg-surface-subtle" style={elevation.card}>
-        <Image
-          source={{ uri: categoryImage(v.key) }}
-          placeholder={{ blurhash: DARK_BLURHASH }}
-          style={{ width: '100%', height: '100%' }}
-        />
-        <Scrim cover from="rgba(0,0,0,0.10)" to="rgba(0,0,0,0.62)" />
-        <View className="absolute left-2.5 top-2.5">
-          <MaterialCommunityIcons name={v.icon} size={18} color="#fff" />
+      <View className="items-center rounded-3xl bg-surface-base py-4" style={elevation.card}>
+        <View
+          className="mb-2 h-[54px] w-[54px] items-center justify-center rounded-2xl"
+          style={{ backgroundColor: tint.bg }}
+        >
+          <MaterialCommunityIcons name={v.icon} size={28} color={tint.fg} />
         </View>
-        <Text className="absolute bottom-2.5 left-2.5 right-2 text-[13px] font-bold text-white" numberOfLines={1}>
+        <Text className="text-[13px] font-bold text-text-primary" numberOfLines={1}>
           {v.label}
         </Text>
       </View>
@@ -159,23 +166,27 @@ function HomeHeader({ navigation, address, activeOrder, popularItems, topRated, 
         </Pressable>
       </View>
 
-      <View className="px-lg pt-md">
-        <Heading size="3xl">{greeting()}</Heading>
-        <Text className="mt-0.5 text-base text-text-secondary">What can we get you today?</Text>
+      <View className="px-lg pb-xs pt-sm">
+        <Heading size="xl">{greeting()}</Heading>
       </View>
 
       <Pressable
         onPress={() => navigation?.navigate?.('Search')}
-        className="mx-lg mb-md mt-md flex-row items-center rounded-2xl border border-border-subtle bg-surface-base px-lg py-md"
+        className="mx-lg mb-sm mt-sm flex-row items-center rounded-2xl bg-surface-base px-lg py-md"
         style={elevation.card}
       >
         <Feather name="search" size={18} color={color.brand[500]} />
         <Text className="ml-sm text-text-muted">Search food, shops, services…</Text>
       </Pressable>
 
+      {activeOrder ? (
+        <ActiveOrderBanner order={activeOrder} onPress={() => navigation?.navigate?.('OrderTracking', { id: activeOrder.id })} />
+      ) : null}
+
+      {/* Service grid — the launcher hero */}
       <View className="flex-row flex-wrap justify-between px-lg pt-xs">
         {VERTICALS.map((v, i) => (
-          <Animated.View key={v.key} entering={enter.fadeUp.delay(staggerDelay(i))} style={{ width: '31%', marginBottom: 14 }}>
+          <Animated.View key={v.key} entering={enter.fadeUp.delay(staggerDelay(i))} style={{ width: '31%', marginBottom: 12 }}>
             <VerticalTile v={v} onPress={() => v.route && navigation?.navigate?.(v.route)} />
           </Animated.View>
         ))}
@@ -189,11 +200,23 @@ function HomeHeader({ navigation, address, activeOrder, popularItems, topRated, 
         />
       </View>
 
+      {/* Lead with food imagery */}
+      {topRated.length > 0 ? (
+        <View className="mt-md">
+          <SectionHeader title="Top picks near you" action="See all" onAction={() => navigation?.navigate?.('Search')} />
+          <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ paddingHorizontal: 16 }}>
+            {topRated.map((v: any) => (
+              <FeaturedCard key={v.id} vendor={v} onPress={() => navigation?.navigate?.('VendorDetail', { id: v.id })} />
+            ))}
+          </ScrollView>
+        </View>
+      ) : null}
+
       {popularItems?.length ? (
-        <View className="mb-sm mt-lg">
+        <View className="mt-md">
           <SectionHeader title="Popular right now" action="See all" onAction={() => navigation?.navigate?.('Search')} />
           <View className="px-lg">
-            {popularItems.slice(0, 6).map((it: any) => (
+            {popularItems.slice(0, 5).map((it: any) => (
               <FoodItemCard
                 key={it.id}
                 item={it}
@@ -204,43 +227,29 @@ function HomeHeader({ navigation, address, activeOrder, popularItems, topRated, 
         </View>
       ) : null}
 
-      <View className="mx-lg mb-md mt-md flex-row items-center rounded-2xl bg-brand-50 px-lg py-md">
-        <MaterialCommunityIcons name="shield-check" size={20} color={color.brand[600]} />
-        <Text className="ml-sm flex-1 text-sm font-medium text-brand-700">
-          Every Swift driver & rider is ID-verified and police-cleared.
-        </Text>
-      </View>
-
-      {activeOrder ? (
-        <ActiveOrderBanner order={activeOrder} onPress={() => navigation?.navigate?.('OrderTracking', { id: activeOrder.id })} />
-      ) : null}
-
-      {topRated.length > 0 ? (
-        <View className="mb-sm">
-          <SectionHeader title="Top rated near you" />
-          <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ paddingHorizontal: 16 }}>
-            {topRated.map((v: any) => (
-              <FeaturedCard key={v.id} vendor={v} onPress={() => navigation?.navigate?.('VendorDetail', { id: v.id })} />
-            ))}
-          </ScrollView>
-        </View>
-      ) : null}
-
       <Pressable
         onPress={() => navigation?.navigate?.('Courier')}
-        className="mx-lg my-md overflow-hidden rounded-2xl"
+        className="mx-lg my-md overflow-hidden rounded-3xl"
         style={[{ backgroundColor: color.brand[500] }, elevation.floating]}
       >
         <View className="flex-row items-center p-lg">
           <View className="flex-1 pr-md">
-            <Text className="text-lg font-bold text-white">Send a parcel across town</Text>
+            <Text className="font-display text-lg font-extrabold text-white">Send a parcel across town</Text>
             <Text className="mt-1 text-sm text-white" style={{ opacity: 0.92 }}>Cash on delivery. No platform fees, ever.</Text>
           </View>
           <MaterialCommunityIcons name="moped" size={44} color="#fff" style={{ opacity: 0.95 }} />
         </View>
       </Pressable>
 
-      <SectionHeader title="Near you" />
+      {/* Trust — compact, lower */}
+      <View className="mx-lg mb-sm flex-row items-center rounded-2xl bg-brand-50 px-lg py-sm">
+        <MaterialCommunityIcons name="shield-check" size={18} color={color.brand[600]} />
+        <Text className="ml-sm flex-1 text-[13px] font-medium text-brand-700">
+          Every Swift driver & rider is ID-verified and police-cleared.
+        </Text>
+      </View>
+
+      <SectionHeader title="Places near you" />
       <CuisineChips cuisines={cuisines} selected={selectedCuisine} onSelect={onSelectCuisine} />
     </View>
   );
@@ -255,10 +264,12 @@ export function HomeScreen({ navigation }: any) {
     queryFn: async () => (await customerApi.getHome(latitude ?? undefined, longitude ?? undefined)).data,
   });
   const home = data?.data ?? {};
-  const allVendors: any[] = useMemo(
-    () => home.nearby ?? home.openVendors ?? home.featured ?? [],
-    [home.nearby, home.openVendors, home.featured],
-  );
+  // Pick the first NON-EMPTY list — `??` won't fall through an empty `nearby: []`
+  // (which the API returns when there's no GPS), which was leaving Home vendor-less.
+  const allVendors: any[] = useMemo(() => {
+    const lists: any[][] = [home.nearby, home.openVendors, home.featured].filter(Array.isArray);
+    return lists.find((a) => a.length) ?? [];
+  }, [home.nearby, home.openVendors, home.featured]);
 
   const cuisines = useMemo(() => {
     const set = new Set<string>();
@@ -267,7 +278,7 @@ export function HomeScreen({ navigation }: any) {
   }, [allVendors]);
 
   const topRated = useMemo(
-    () => [...allVendors].filter((v) => ratingOf(v) > 0).sort((a, b) => ratingOf(b) - ratingOf(a)).slice(0, 6),
+    () => [...allVendors].sort((a, b) => ratingOf(b) - ratingOf(a)).slice(0, 8),
     [allVendors],
   );
 
@@ -277,7 +288,7 @@ export function HomeScreen({ navigation }: any) {
   );
 
   return (
-    <SafeAreaView style={{ flex: 1 }} edges={['top']} className="bg-surface-base">
+    <SafeAreaView style={{ flex: 1 }} edges={['top']} className="bg-surface-subtle">
       <View style={{ flex: 1 }}>
         <List
           data={vendors}
