@@ -1,8 +1,9 @@
 name: Build Mobile
 
-# Manual-only until the mobile stack decision (RN vs Flutter, before Step 3).
-# The Flutter scaffold is a 7-file stub that does not compile — it was failing
-# every push and masking real CI status.
+# Mobile stack is React Native (Expo). The old Flutter scaffold (apps/mobile-flutter)
+# was removed; its CI jobs were deleted with it. The mobile type-check / lint / test
+# gate runs in the main CI workflow (ci.yml). This manual job is a standalone build
+# check for the RN app.
 on:
   workflow_dispatch:
 
@@ -11,63 +12,6 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  flutter-build-android:
-    name: Flutter Android Build
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: apps/mobile-flutter
-    steps:
-      - uses: actions/checkout@v7
-
-      - uses: subosito/flutter-action@v2
-        with:
-          flutter-version: '3.27.0'
-          channel: stable
-          cache: true
-
-      - name: Install dependencies
-        run: flutter pub get
-
-      - name: Analyze code
-        run: flutter analyze --no-fatal-infos
-
-      - name: Run tests
-        run: flutter test
-
-      - name: Build APK
-        run: flutter build apk --release
-        if: github.ref == 'refs/heads/main'
-
-      - name: Upload APK
-        uses: actions/upload-artifact@v7
-        if: github.ref == 'refs/heads/main'
-        with:
-          name: swift-android-apk
-          path: apps/mobile-flutter/build/app/outputs/flutter-apk/app-release.apk
-
-  flutter-build-ios:
-    name: Flutter iOS Build
-    runs-on: macos-latest
-    if: github.ref == 'refs/heads/main'
-    defaults:
-      run:
-        working-directory: apps/mobile-flutter
-    steps:
-      - uses: actions/checkout@v7
-
-      - uses: subosito/flutter-action@v2
-        with:
-          flutter-version: '3.27.0'
-          channel: stable
-          cache: true
-
-      - name: Install dependencies
-        run: flutter pub get
-
-      - name: Build iOS (no codesign)
-        run: flutter build ios --release --no-codesign
-
   react-native-build:
     name: React Native Build Check
     runs-on: ubuntu-latest

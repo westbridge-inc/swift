@@ -33,6 +33,22 @@ suite against PostGIS + Redis services, API/admin builds, dependency audit.
    and by migrations: the bookings partial unique index and the PostGIS
    extension + riders geo index.
 
+> **Clean-DB deploy is validated (2026-06-26).** Dev uses `prisma db push`, so
+> the local `_prisma_migrations` table drifts from the migration files — but a
+> fresh `migrate deploy` is what production actually runs, so verify it directly
+> rather than trusting dev state. Reproduce against a scratch DB:
+>
+> ```sh
+> createdb swift_migcheck
+> DATABASE_URL=…/swift_migcheck npx prisma migrate deploy        # all 24 apply, incl. the
+>                                                                # ride_classes add/remove/re-add churn
+> DATABASE_URL=…/swift_migcheck npx prisma migrate diff \
+>   --from-url …/swift_migcheck --to-schema-datamodel prisma/schema.prisma --script   # → empty = no drift
+> DATABASE_URL=…/swift_migcheck npx prisma db seed              # succeeds
+> ```
+>
+> Last run: 24/24 migrations applied, **no drift**, seed OK.
+
 ## Rollback
 
 - App: redeploy the previous image/release from the platform dashboard
