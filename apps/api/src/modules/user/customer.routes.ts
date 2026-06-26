@@ -683,9 +683,14 @@ export async function customerRoutes(app: FastifyInstance) {
       enriched.sort((a, b) => (a.distanceKm ?? 999) - (b.distanceKm ?? 999));
     }
 
-    // Sections
-    const openVendors = enriched.filter((v) => v.isCurrentlyOpen);
-    const closedVendors = enriched.filter((v) => !v.isCurrentlyOpen);
+    // Sections. "Orderable" must match the checkout gate exactly
+    // (order.service.ts: isCurrentlyOpen && acceptingOrders && status ACTIVE —
+    // status is already filtered above), otherwise a vendor that's open-by-hours
+    // but not accepting orders surfaces in featured/nearby and dead-ends at
+    // checkout with VENDOR_CLOSED.
+    const isOrderable = (v: (typeof enriched)[number]) => v.isCurrentlyOpen && v.acceptingOrders;
+    const openVendors = enriched.filter(isOrderable);
+    const closedVendors = enriched.filter((v) => !isOrderable(v));
 
     // Featured: top-rated open vendors
     const featured = openVendors

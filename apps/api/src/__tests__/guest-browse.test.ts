@@ -39,6 +39,29 @@ describe('guest browsing (no account)', () => {
   it('lets guests see Home', async () => {
     expect((await get('/api/v1/customer/home')).statusCode).toBe(200);
   });
+  it('keeps not-accepting vendors out of orderable feeds (no checkout dead-end)', async () => {
+    // A vendor that's open-by-hours but paused (acceptingOrders=false) must not
+    // surface where it can be ordered, else it dead-ends at checkout (VENDOR_CLOSED).
+    const v = await app.prisma.vendor.findFirst({
+      where: { status: 'ACTIVE', isCurrentlyOpen: true },
+      select: { id: true },
+    });
+    if (!v) return;
+    try {
+      await app.prisma.vendor.update({ where: { id: v.id }, data: { acceptingOrders: false } });
+      await app.redis.del('home:guest:x:x');
+      const res = await get('/api/v1/customer/home');
+      expect(res.statusCode).toBe(200);
+      const d = res.json().data;
+      const has = (list: { id: string }[]) => (list ?? []).some((x) => x.id === v.id);
+      expect(has(d.openVendors)).toBe(false);
+      expect(has(d.featured)).toBe(false);
+      expect(has(d.nearby)).toBe(false);
+    } finally {
+      await app.prisma.vendor.update({ where: { id: v.id }, data: { acceptingOrders: true } });
+      await app.redis.del('home:guest:x:x');
+    }
+  });
   it('lets guests see the vendor list', async () => {
     expect((await get('/api/v1/customer/vendors')).statusCode).toBe(200);
   });
