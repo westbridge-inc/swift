@@ -1,8 +1,17 @@
 'use client';
 
-import { Bell, Search } from 'lucide-react';
+import { Bell, Search, LogOut } from 'lucide-react';
+import { useRouter } from 'next/navigation';
+import { clearTokens } from '@/lib/api';
 
 export function Header() {
+  const router = useRouter();
+
+  function handleLogout() {
+    clearTokens();
+    router.replace('/login');
+  }
+
   return (
     <header className="h-16 bg-[#1C1C1E] border-b border-[#38383A] flex items-center justify-between px-6">
       <div className="relative w-96">
@@ -24,6 +33,13 @@ export function Header() {
           </div>
           <span className="text-sm">Swift Admin</span>
         </div>
+        <button
+          onClick={handleLogout}
+          title="Sign out"
+          className="p-2 text-[#8E8E93] hover:text-white transition-colors"
+        >
+          <LogOut size={18} />
+        </button>
       </div>
     </header>
   );
