@@ -189,7 +189,7 @@ describe('Ride request — fare shown first, dispatch shared, PIN issued', () =>
 
     expect(ride.fare).toBe(quotedFare);
     expect(ride.fareSource).toBe('zone_table');
-    expect(ride.ridePin).toMatch(/^\d{4}$/);
+    expect(ride.ridePin).toMatch(/^\d{6}$/);
 
     const db = await app.prisma.order.findUniqueOrThrow({ where: { id: ride.id } });
     expect(Number(db.totalAmount)).toBe(quotedFare);

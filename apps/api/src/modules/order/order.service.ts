@@ -9,6 +9,7 @@ import { orderingRestriction } from '../cash/cash-rules.service';
 import { resolveSelectedOptions, optionsUnitPrice, type ResolvedOption } from './options';
 import { FloatService } from '../dispatch/float.service';
 import { AppError } from '../../utils/errors';
+import { randomInt } from 'node:crypto';
 
 interface CheckoutInput {
   userId: string;
@@ -287,7 +288,8 @@ export class OrderService {
               : null,
             scheduledFor: input.scheduledFor ? new Date(input.scheduledFor) : undefined,
             // Takeaway: a collection code the customer shows the vendor at pickup.
-            pickupCode: plan.fulfillment === 'PICKUP' ? String(Math.floor(1000 + Math.random() * 9000)) : null,
+            // 6-digit, CSPRNG (not Math.random); handover is vendor-mediated in person.
+            pickupCode: plan.fulfillment === 'PICKUP' ? String(randomInt(100000, 1000000)) : null,
             promoCodeId: isFirst ? promoCodeId : null,
             items: {
               create: plan.orderItems.map((oi) => ({
