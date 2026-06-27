@@ -1,6 +1,7 @@
 import type { FastifyInstance } from 'fastify';
 import { RideClass } from '@prisma/client';
 import { z } from 'zod';
+import { randomInt } from 'node:crypto';
 import { FareService } from './fare.service';
 import { OrderService } from '../order/order.service';
 import { CountryConfigService } from '../country/country-config.service';
@@ -120,7 +121,9 @@ export async function ridesRoutes(app: FastifyInstance) {
     const todayCount = await app.prisma.order.count({ where: { placedAt: { gte: today } } });
 
     // PIN is verified by the driver at pickup (mandatory for taxi)
-    const ridePin = String(Math.floor(1000 + Math.random() * 9000));
+    // 6-digit identity PIN from a CSPRNG (not Math.random) — verified by the
+    // driver and attempt-capped (driver.routes MAX_PIN_ATTEMPTS).
+    const ridePin = String(randomInt(100000, 1000000));
 
     const order = await app.prisma.order.create({
       data: {

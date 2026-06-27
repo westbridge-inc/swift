@@ -130,6 +130,13 @@ describe('Prompt scrubber — hard rule 3 proven', () => {
     expect(clean).toContain('[redacted-document]');
   });
 
+  it('redacts street addresses (defence-in-depth)', () => {
+    const clean = scrubPrompt('Deliver to 42 Regent Road and 7 Camp Street, Georgetown.');
+    expect(clean).not.toContain('Regent Road');
+    expect(clean).not.toContain('Camp Street');
+    expect(clean).toContain('[redacted-address]');
+  });
+
   it('leaves harmless text alone', () => {
     const text = 'cheap lunch near me, open now, under 2 thousand';
     expect(scrubPrompt(text)).toBe(text);
