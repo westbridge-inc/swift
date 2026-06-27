@@ -199,7 +199,7 @@ export class AuthService {
   // -------------------------------------------------------------------------
 
   async setPassword(userId: string, password: string) {
-    const passwordHash = await bcrypt.hash(password, 10);
+    const passwordHash = await bcrypt.hash(password, 12);
     await this.app.prisma.user.update({
       where: { id: userId },
       data: { passwordHash, failedLoginAttempts: 0, lockedUntil: null },
@@ -262,7 +262,7 @@ export class AuthService {
       throw new AppError(404, 'USER_NOT_FOUND', 'No account with this phone');
     }
 
-    const passwordHash = await bcrypt.hash(newPassword, 10);
+    const passwordHash = await bcrypt.hash(newPassword, 12);
     await this.app.prisma.user.update({
       where: { id: user.id },
       data: { passwordHash, failedLoginAttempts: 0, lockedUntil: null },

@@ -16,6 +16,12 @@ const PATTERNS: Array<{ re: RegExp; label: string }> = [
   // Document storage references — raw documents never leave (hard rule 3)
   { re: /storage:\/\/\S+/g, label: '[redacted-document]' },
   { re: /\/uploads\/\S+/g, label: '[redacted-document]' },
+  // Street addresses (house number + words + street-type) — defence-in-depth for
+  // any free text. Requires a street suffix so menu text ("2 Spring Rolls") is safe.
+  {
+    re: /\b\d{1,5}\s+[A-Za-z][A-Za-z.'-]*(?:\s+[A-Za-z][A-Za-z.'-]*){0,3}\s+(?:Street|St|Road|Rd|Avenue|Ave|Drive|Dr|Lane|Ln|Highway|Hwy|Boulevard|Blvd|Court|Ct|Place|Pl|Crescent|Cres|Terrace|Walk)\b\.?/gi,
+    label: '[redacted-address]',
+  },
   // Long opaque ids (cuid-ish) — nothing useful for language tasks anyway
   { re: /\bc[a-z0-9]{20,30}\b/g, label: '[redacted-id]' },
 ];

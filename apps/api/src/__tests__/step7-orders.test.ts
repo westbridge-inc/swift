@@ -325,8 +325,8 @@ describe('Checkout — ID gate, multi-vendor split, fulfillment', () => {
     expect(order.fulfillment).toBe('PICKUP');
     expect(order.deliveryFee).toBe(0);
     expect(order.deliveryAddress).toContain('Lifecycle Lane');
-    // Takeaway: the customer gets a 4-digit collection code.
-    expect(order.pickupCode).toMatch(/^\d{4}$/);
+    // Takeaway: the customer gets a 6-digit (CSPRNG) collection code.
+    expect(order.pickupCode).toMatch(/^\d{6}$/);
   });
 
   describe('Takeaway — pickup completion (no rider)', () => {
