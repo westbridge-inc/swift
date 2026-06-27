@@ -1,7 +1,7 @@
 'use client';
 
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { fetchUsers, suspendUser, unsuspendUser } from '@/lib/api';
+import { fetchUsers, suspendUser, unsuspendUser, type AdminUser } from '@/lib/api';
 
 const STATUS_CLASS: Record<string, string> = {
   ACTIVE: 'bg-green-500/20 text-green-400',
@@ -39,13 +39,13 @@ export default function UsersPage() {
             ) : data?.data?.length === 0 ? (
               <tr><td colSpan={7} className="p-8 text-center text-[#8E8E93]">No users found</td></tr>
             ) : (
-              data?.data?.map((user: any) => (
+              data?.data?.map((user: AdminUser) => (
                 <tr key={user.id} className="border-b border-[#38383A] hover:bg-white/5">
                   <td className="p-4 font-medium">{user.firstName} {user.lastName}</td>
                   <td className="p-4">{user.email}</td>
                   <td className="p-4">{user.phone || '\u2014'}</td>
                   <td className="p-4">
-                    <span className="px-2 py-1 rounded-full text-xs bg-white/10">{user.role}</span>
+                    <span className="px-2 py-1 rounded-full text-xs bg-white/10">{(user.activeRole ?? '—').toLowerCase().replace(/_/g, ' ')}</span>
                   </td>
                   <td className="p-4">
                     <span className={`px-2 py-1 rounded-full text-xs ${STATUS_CLASS[user.status] ?? 'bg-white/10 text-[#8E8E93]'}`}>

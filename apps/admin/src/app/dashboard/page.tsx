@@ -35,7 +35,7 @@ export default function DashboardPage() {
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
         <MetricCard
           title="Weekly Revenue"
-          value={stats ? `$${Number(stats.weeklySubscriptionRevenue ?? 0).toLocaleString()}` : '—'}
+          value={stats ? `$${Number(stats.revenue?.weeklySubscriptionRevenue ?? 0).toLocaleString()}` : '—'}
           subtitle="GYD · subscriptions"
           loading={isLoading}
         />
@@ -59,7 +59,7 @@ export default function DashboardPage() {
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-        <RevenueBreakdown data={stats?.subscriptionBreakdown} weeklyTotal={stats?.weeklySubscriptionRevenue} />
+        <RevenueBreakdown data={stats?.subscriptionBreakdown} weeklyTotal={stats?.revenue?.weeklySubscriptionRevenue} />
         <LiveOrderFeed />
       </div>
 
