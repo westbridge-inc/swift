@@ -1,8 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import pino from 'pino';
 import { Writable } from 'node:stream';
-import { existsSync, readFileSync } from 'node:fs';
-import path from 'node:path';
 import { loggerRedactConfig } from '../utils/logger-config';
 
 // ---------------------------------------------------------------------------
@@ -53,13 +51,5 @@ describe('Log redaction — the production config, not a copy', () => {
   });
 });
 
-describe('Operational artifacts', () => {
-  it('the runbook exists and covers deploy, rollback, restore, on-call', () => {
-    const runbookPath = path.resolve(__dirname, '../../../../docs/RUNBOOK.md');
-    expect(existsSync(runbookPath)).toBe(true);
-    const content = readFileSync(runbookPath, 'utf8');
-    for (const section of ['Deploy', 'Rollback', 'restore', 'On-call']) {
-      expect(content).toContain(section);
-    }
-  });
-});
+// The runbook-exists check was removed with the internal docs (now maintained
+// outside the public repo). The CI restore drill in ci.yml still proves backups.
