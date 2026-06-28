@@ -11,7 +11,7 @@ import { generateOrderNumber } from '../../utils/markup';
 import { AppError, NotFoundError } from '../../utils/errors';
 
 // ---------------------------------------------------------------------------
-// Taxi (master plan §4.2): the fare is computed and SHOWN before any driver
+// Taxi: the fare is computed and SHOWN before any driver
 // sees the request, drivers come from the shared dispatch engine, and the
 // ride PIN guards pickup. Cash, recorded only.
 // ---------------------------------------------------------------------------

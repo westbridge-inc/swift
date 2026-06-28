@@ -15,7 +15,7 @@ import { registerErrorHandler } from '../middleware/error-handler';
 import { BookingService } from '../modules/booking/booking.service';
 
 // ---------------------------------------------------------------------------
-// Step 6 — catalogue: CSV import with row-level errors, instant availability
+// catalogue: CSV import with row-level errors, instant availability
 // in customer-facing paths, double-booking impossible under concurrency,
 // malformed images rejected, one code path for goods AND services.
 // ---------------------------------------------------------------------------

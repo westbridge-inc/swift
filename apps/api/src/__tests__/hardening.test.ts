@@ -4,7 +4,7 @@ import { Writable } from 'node:stream';
 import { loggerRedactConfig } from '../utils/logger-config';
 
 // ---------------------------------------------------------------------------
-// Step 15 (automatable slice) — secrets never reach log output, and the
+// secrets never reach log output, and the
 // operational artifacts exist. The CI restore drill lives in ci.yml (a
 // backup that has not been restored does not exist).
 // ---------------------------------------------------------------------------

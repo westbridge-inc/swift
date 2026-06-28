@@ -1,5 +1,5 @@
 // ---------------------------------------------------------------------------
-// Dispatch candidate scoring — a pure function (master plan §8): proximity
+// Dispatch candidate scoring — a pure function: proximity
 // dominates, then track record. Lower score = offered first. No I/O, no
 // randomness, no AI — unit-testable in isolation.
 // ---------------------------------------------------------------------------

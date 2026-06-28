@@ -4,7 +4,7 @@ import { pointInPolygon, type GeoPoint } from '../../utils/geo';
 import { CountryConfigService } from '../country/country-config.service';
 
 // ---------------------------------------------------------------------------
-// Fare engine (master plan §4.2) — deterministic, computed and shown BEFORE
+// Fare engine — deterministic, computed and shown BEFORE
 // any driver sees the request. Zone-to-zone table wins; gaps fall back to
 // the CountryConfig formula. Never an AI call, never a post-hoc surprise.
 // ---------------------------------------------------------------------------

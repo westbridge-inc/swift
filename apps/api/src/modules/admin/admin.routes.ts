@@ -1323,7 +1323,7 @@ export async function adminRoutes(app: FastifyInstance) {
     return { success: true, data: updated };
   });
 
-  /** Record a cash/bank-transfer top-up (Step 5 — manual confirm for now).
+  /** Record a cash/bank-transfer top-up (manual confirm for now).
    *  A top-up while PAST_DUE/SUSPENDED bills immediately and reinstates. */
   app.post('/subscriptions/:id/topup', { preHandler: [adminGuard] }, async (request) => {
     const { id } = request.params as { id: string };
@@ -1406,7 +1406,7 @@ export async function adminRoutes(app: FastifyInstance) {
     return { success: true, data: { sent: userIds.length, role: role || 'ALL' } };
   });
 
-  // ─── Verification Review Queue (Step 4) ───────────────────────────────
+  // ─── Verification Review Queue ───────────────────────────────
 
   app.get('/verification/queue', { preHandler: [adminGuard] }, async (request) => {
     const { page, limit, skip } = parsePagination(request.query as Record<string, string>);
@@ -1479,7 +1479,7 @@ export async function adminRoutes(app: FastifyInstance) {
     return { success: true, data: { url, expiresInSeconds: ttlSeconds } };
   });
 
-  // ─── Retail returns (Phase 8) ──────────────────────────────────────────
+  // ─── Retail returns ──────────────────────────────────────────
 
   app.get('/returns', { preHandler: [adminGuard] }, async (request) => {
     const { page, limit, skip } = parsePagination(request.query as Record<string, string>);
@@ -1508,7 +1508,7 @@ export async function adminRoutes(app: FastifyInstance) {
     return { success: true, data: updated };
   });
 
-  // ─── Cash Rules: guarantee claims + founder metrics (Step 10) ──────────
+  // ─── Cash Rules: guarantee claims + founder metrics ──────────
 
   app.get('/cash-rules/claims', { preHandler: [adminGuard] }, async (request) => {
     const { page, limit, skip } = parsePagination(request.query as Record<string, string>);

@@ -59,7 +59,7 @@ async function buildApp() {
     trustProxy: parseTrustProxy(process.env['TRUST_PROXY']),
     logger: {
       level: process.env['LOG_LEVEL'] || 'info',
-      // Step 15: secrets and credentials never reach log output
+      // secrets and credentials never reach log output
       redact: loggerRedactConfig,
       transport:
         process.env['NODE_ENV'] === 'development'

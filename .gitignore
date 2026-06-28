@@ -47,3 +47,8 @@ coverage/
 
 # Local storage provider output
 uploads/
+
+# Local working docs (not part of the published source)
+/CLAUDE.md
+/apps/mobile/UI_OVERHAUL.md
+/apps/mobile/TWO-APP-VARIANTS.md

@@ -13,7 +13,7 @@ import { AiService } from '../modules/ai/ai.service';
 import { scrubPrompt } from '../modules/ai/scrubber';
 
 // ---------------------------------------------------------------------------
-// Step 12 — AI strictly on top. The import boundary fails the suite if any
+// AI strictly on top. The import boundary fails the suite if any
 // money/auth/state module ever touches the AI layer; the scrubber keeps
 // PII/documents/payment data out of prompts; and with no API key the app
 // degrades gracefully (deterministic paths only — no live API in tests).

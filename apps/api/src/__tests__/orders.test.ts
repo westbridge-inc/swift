@@ -15,7 +15,7 @@ import { BookingService } from '../modules/booking/booking.service';
 import { RatingService } from '../modules/rating/rating.service';
 
 // ---------------------------------------------------------------------------
-// Step 7 — the locked order lifecycle. Hardest paths per playbook: the state
+// the locked order lifecycle. Hardest paths: the state
 // machine under concurrency, ID-gate threshold boundaries, multi-vendor
 // splits, and appointment slots booked at acceptance.
 // ---------------------------------------------------------------------------
@@ -545,7 +545,7 @@ describe('Appointments — booked at acceptance, never double-held', () => {
   });
 });
 
-describe('Phase 6 — trust completeness', () => {
+describe('Trust completeness', () => {
   it('only a transaction participant can rate (verified-transaction)', async () => {
     const vendor = await makeVendor({ type: 'RESTAURANT' });
     const order = await makeBareOrder(customer.userId, vendor.vendorId, 'DELIVERED');

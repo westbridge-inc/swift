@@ -60,7 +60,7 @@ export class SandboxPaymentProvider implements PaymentProvider {
 }
 
 // PowerTranz / First Atlantic Commerce — the spec's primary subscription
-// billing rail (docs/SWIFT-MASTER-SPEC.md §billing). Caribbean acquirer.
+// billing rail. Caribbean acquirer.
 const POWERTRANZ_TIMEOUT_MS = 15000;
 // ISO 4217 numeric codes PowerTranz expects (alpha -> numeric). Guyana first,
 // then the Caribbean expansion set.

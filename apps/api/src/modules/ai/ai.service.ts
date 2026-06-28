@@ -1,7 +1,7 @@
 import { scrubPrompt } from './scrubber';
 
 // ---------------------------------------------------------------------------
-// AiService — the ONE wrapper around the Claude API (master plan §12).
+// AiService — the ONE wrapper around the Claude API.
 // Language convenience only: search intent, support phrasing, menu polish,
 // dispute summaries. Hard rules enforced here and by the boundary test:
 //   1. Money, auth, billing, verification, dispatch NEVER import this module.

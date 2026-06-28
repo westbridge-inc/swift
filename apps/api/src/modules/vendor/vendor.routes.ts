@@ -541,7 +541,7 @@ export async function vendorRoutes(app: FastifyInstance) {
     const updated = await orderService.updateStatus(order.id, 'ACCEPTED', request.user.userId, 'Accepted by vendor');
     await ackVendorAlert(app, request.user.userId, order.id); // accepting acknowledges the alert
 
-    // Step 8: acceptance of a DELIVERY order starts the dispatch cascade.
+    // acceptance of a DELIVERY order starts the dispatch cascade.
     // PICKUP and APPOINTMENT orders never dispatch.
     if (order.fulfillment === 'DELIVERY' && app.dispatchQueue) {
       await app.dispatchQueue.add('dispatch-order', { orderId: order.id }, {
@@ -785,7 +785,7 @@ export async function vendorRoutes(app: FastifyInstance) {
   app.post('/items', auth, async (request) => {
     const { vendorId } = await resolveVendor(app, request.user.userId, selectedVendorId(request));
 
-    // Step 4 gate: no listing until the vendor-type checklist is approved.
+    // Verification gate: no listing until the vendor-type checklist is approved.
     // Legacy isVerified grandfathers pre-checklist vendors.
     const vendorRecord = await app.prisma.vendor.findUniqueOrThrow({
       where: { id: vendorId },

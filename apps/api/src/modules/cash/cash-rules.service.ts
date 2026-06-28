@@ -6,7 +6,7 @@ import { OrderService } from '../order/order.service';
 import { FloatService } from '../dispatch/float.service';
 
 // ---------------------------------------------------------------------------
-// Cash rules engine (master plan §5) — the golden rule as code. Payment
+// Cash rules engine — the golden rule as code. Payment
 // happens before handover; a failed handover under the USD gate becomes a
 // company-guaranteed claim with GPS evidence, the customer takes a strike,
 // and deterministic guardrails (caps, outliers, collusion patterns) route

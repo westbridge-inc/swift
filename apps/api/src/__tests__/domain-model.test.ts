@@ -5,7 +5,7 @@ import { OrderService } from '../modules/order/order.service';
 import { CountryConfigService } from '../modules/country/country-config.service';
 
 // ---------------------------------------------------------------------------
-// Step 2 smoke test — the locked domain model exists and works end-to-end:
+// the locked domain model exists and works end-to-end:
 // Guyana CountryConfig, 4 vendor types, every fulfillment kind, qrSlug,
 // trust levels, verification document lifecycle, strikes, and an order
 // walked through every state with the append-only log as evidence.

@@ -13,7 +13,7 @@ import { registerErrorHandler } from '../middleware/error-handler';
 import { guessColumnMapping, applyMapping, toImportCsv } from '../utils/catalogue-map';
 
 // ---------------------------------------------------------------------------
-// Phase 8 — Retail (spec §4.5): AI/heuristic CSV column-mapping import and the
+// Retail (spec §4.5): AI/heuristic CSV column-mapping import and the
 // returns/dispute flow. (Cross-store search already exists via the search module.)
 // ---------------------------------------------------------------------------
 

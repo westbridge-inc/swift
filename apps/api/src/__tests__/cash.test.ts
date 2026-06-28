@@ -16,7 +16,7 @@ import { OrderService } from '../modules/order/order.service';
 import { NotificationService } from '../modules/notification/notification.service';
 
 // ---------------------------------------------------------------------------
-// Step 10 — cash rules. The §5 table as tests: a simulated dishonest rider
+// cash rules. The cash-rules table as tests: a simulated dishonest rider
 // gets flagged, a prankster customer gets restricted, and an honest rider's
 // clean claim pays. Claims are impossible outside the delivery state or
 // without a GPS stamp.

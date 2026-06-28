@@ -138,7 +138,7 @@ export async function riderRoutes(app: FastifyInstance) {
     orderService,
   );
 
-  /** POST /orders/:id/handover — the golden rule at the door (Step 10).
+  /** POST /orders/:id/handover — the golden rule at the door.
    *  'paid' completes the delivery; 'no_show'/'refused' fails it with GPS
    *  evidence, strikes the customer, and opens the guarantee claim. */
   app.post('/orders/:id/handover', { preHandler: [app.authenticate] }, async (request) => {
@@ -157,7 +157,7 @@ export async function riderRoutes(app: FastifyInstance) {
     };
   });
 
-  /** POST /offers/accept — atomic claim of a live dispatch offer (Step 8). */
+  /** POST /offers/accept — atomic claim of a live dispatch offer. */
   app.post('/offers/accept', { preHandler: [app.authenticate] }, async (request) => {
     const { orderId } = offerActionSchema.parse(request.body);
     const order = await dispatch.acceptOffer(orderId, request.user.userId);
@@ -281,7 +281,7 @@ export async function riderRoutes(app: FastifyInstance) {
   app.post('/go-online', { preHandler: [app.authenticate] }, async (request) => {
     const rider = await getRider(app, request.user.userId);
 
-    // Step 4 gate: the country's MOVER checklist must be fully approved.
+    // Verification gate: the country's MOVER checklist must be fully approved.
     // Legacy documentsVerified flag grandfathers pre-checklist accounts.
     const verified = rider.documentsVerified
       || await verification.isRoleVerified(request.user.userId, 'MOVER');
@@ -289,7 +289,7 @@ export async function riderRoutes(app: FastifyInstance) {
       throw new AppError(403, 'VERIFICATION_REQUIRED', 'Your documents must be verified before you can go online');
     }
 
-    // Step 5 gate: an unpaid (suspended) subscription blocks going online
+    // Subscription gate: an unpaid (suspended) subscription blocks going online
     const sub = await app.prisma.subscription.findFirst({
       where: { riderId: rider.id },
       select: { status: true },

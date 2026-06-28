@@ -10,7 +10,7 @@ import courierRoutes from '../modules/courier/courier.routes';
 import { registerErrorHandler } from '../middleware/error-handler';
 
 // ---------------------------------------------------------------------------
-// Phase 7 — Courier (spec §4.3). Send a parcel person-to-person: pickup != dropoff,
+// Courier (spec §4.3). Send a parcel person-to-person: pickup != dropoff,
 // third-party recipient, size-based fee, dispatched to the rider pool, proof of
 // delivery. No vendor, no cart.
 // ---------------------------------------------------------------------------

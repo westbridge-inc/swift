@@ -10,7 +10,7 @@ import { servicesRoutes } from '../modules/services/services.routes';
 import { registerErrorHandler } from '../middleware/error-handler';
 
 // ---------------------------------------------------------------------------
-// Phase 9 — Services (spec §4.6). Provider profile + qualification badge +
+// Services (spec §4.6). Provider profile + qualification badge +
 // "self-skilled" transparency; risk-tiered browse; the job lifecycle
 // (request -> quote -> schedule -> complete) with two-way ratings; and the
 // ID + police-clearance gate before a provider can take jobs.
