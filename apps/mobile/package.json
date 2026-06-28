@@ -7,10 +7,6 @@
     "android": "expo run:android",
     "ios": "expo run:ios",
     "export": "expo export",
-    "start:partner": "EXPO_PUBLIC_APP_VARIANT=partner expo start",
-    "ios:partner": "EXPO_PUBLIC_APP_VARIANT=partner expo run:ios",
-    "android:partner": "EXPO_PUBLIC_APP_VARIANT=partner expo run:android",
-    "export:partner": "EXPO_PUBLIC_APP_VARIANT=partner expo export",
     "lint": "eslint 'src/**/*.{ts,tsx}'",
     "type-check": "tsc --noEmit",
     "test": "vitest run"

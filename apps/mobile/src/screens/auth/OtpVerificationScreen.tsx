@@ -25,7 +25,9 @@ export function OtpVerificationScreen({ route, navigation }: any) {
     try {
       const { data } = await authApi.verifyOtp(phone, code);
       if (data.data.isNewUser) {
-        navigation.navigate('RolePicker', { phone });
+        // Role is already chosen on the entry screen (intent); go straight to
+        // the name step. Defaults to a customer account if somehow unset.
+        navigation.navigate('Register', { phone });
       } else {
         setAuth(data.data.user, data.data.tokens.accessToken, data.data.tokens.refreshToken);
       }

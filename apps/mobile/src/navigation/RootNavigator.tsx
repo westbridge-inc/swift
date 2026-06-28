@@ -8,38 +8,43 @@ import { AuthStack } from './AuthStack';
 import { CustomerStack } from './CustomerStack';
 import { MoverStack } from '../modules/mover/MoverStack';
 import { VendorStack } from '../modules/vendor/VendorStack';
-import { getAppVariant, partnerStackKey } from '../lib/appVariant';
 
 const Stack = createNativeStackNavigator();
 
-// Two store apps are built from this one codebase (see lib/appVariant):
-//   customer ("Swift")          → the consumer super-app
-//   partner  ("Swift Partner")  → movers + vendors, role-routed by activeRole
-// The variant is fixed at build time; activeRole only routes *within* the partner app.
-function mainForVariant(activeRole?: string) {
-  if (getAppVariant() === 'customer') return CustomerStack;
-  switch (partnerStackKey(activeRole)) {
+// One "Swift" app. The entry "How will you use Swift?" screen sets `intent`,
+// which picks the experience:
+//   customer → consumer super-app (browse as a guest; sign in at checkout)
+//   mover    → driver/rider earner app (must sign in + onboard)
+//   vendor   → store/restaurant dashboard (must sign in + onboard)
+function mainForIntent(intent?: string | null) {
+  switch (intent) {
     case 'mover':
       return MoverStack;
     case 'vendor':
       return VendorStack;
     default:
-      return RolePickerScreen; // signed in but not yet a mover/vendor → become one
+      return CustomerStack;
   }
 }
 
 export function RootNavigator() {
-  const { isAuthenticated, wantsAuth, user, countryCode } = useAuthStore();
-  const Main = mainForVariant(user?.activeRole as string | undefined);
+  const { isAuthenticated, wantsAuth, intent, countryCode } = useAuthStore();
+
+  // Earners (mover/vendor) must be signed in before their stack. Customers
+  // browse freely and only authenticate when an action (checkout) asks via
+  // promptLogin() → wantsAuth.
+  const earner = intent === 'mover' || intent === 'vendor';
+  const needsAuth = earner ? !isAuthenticated : wantsAuth && !isAuthenticated;
+  const Main = mainForIntent(intent);
 
   return (
     <NavigationContainer>
       <Stack.Navigator screenOptions={{ headerShown: false }}>
         {!countryCode ? (
           <Stack.Screen name="Country" component={CountryPickerScreen} />
-        ) : !isAuthenticated && wantsAuth ? (
-          // Guests browse in Main; the auth flow shows only when an action asks
-          // for it (promptLogin), then returns to browsing or the role stack.
+        ) : !intent ? (
+          <Stack.Screen name="RolePicker" component={RolePickerScreen} />
+        ) : needsAuth ? (
           <Stack.Screen name="Auth" component={AuthStack} />
         ) : (
           <Stack.Screen name="Main" component={Main} />

@@ -7,7 +7,11 @@ import { Text, Heading, Button, Field } from '../../components/ui';
 
 export function RegisterScreen({ route }: any) {
   const phone = route?.params?.phone;
-  const role = (route?.params?.role ?? 'CUSTOMER') as 'CUSTOMER' | 'MOVER' | 'VENDOR';
+  const intent = useAuthStore((s) => s.intent);
+  const role = (intent === 'mover' ? 'MOVER' : intent === 'vendor' ? 'VENDOR' : 'CUSTOMER') as
+    | 'CUSTOMER'
+    | 'MOVER'
+    | 'VENDOR';
   const [firstName, setFirstName] = useState('');
   const [lastName, setLastName] = useState('');
   const [email, setEmail] = useState('');
