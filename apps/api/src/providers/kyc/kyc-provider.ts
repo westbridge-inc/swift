@@ -1,4 +1,5 @@
 import { nanoid } from 'nanoid';
+import { IdAnalyzerKycProvider } from './id-analyzer-provider';
 
 // ---------------------------------------------------------------------------
 // KycProvider — hard rule 4: every external service sits behind a swappable
@@ -64,6 +65,8 @@ export function getKycProvider(): KycProvider {
   switch (provider) {
     case 'sandbox':
       return new SandboxKycProvider();
+    case 'idanalyzer':
+      return new IdAnalyzerKycProvider();
     default:
       throw new Error(`Unknown KYC_PROVIDER: ${provider}`);
   }
