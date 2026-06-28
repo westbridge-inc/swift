@@ -17,7 +17,7 @@ import { getChannels, devChannelLog } from '../providers/notifications/channels'
 import { requestOtp } from './helpers/otp';
 
 // ---------------------------------------------------------------------------
-// Step 11 — every event through one interface. The vendor order alert is the
+// every event through one interface. The vendor order alert is the
 // loud one: cannot be swiped away (unread row = banner state), re-alerts,
 // then the SMS fallback fires — and the dev adapter logs all of it locally.
 // ---------------------------------------------------------------------------

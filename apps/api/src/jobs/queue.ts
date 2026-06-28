@@ -162,7 +162,7 @@ export function createWorkers(ctx: JobContext) {
     { connection, concurrency: 3 },
   );
 
-  // SUBSCRIPTION BILLING — Step 5: idempotent BillingService, never wallets
+  // SUBSCRIPTION BILLING — idempotent BillingService, never wallets
   const subscriptionWorker = new Worker(
     QUEUE_NAMES.SUBSCRIPTION,
     async (job: Job) => {
@@ -247,7 +247,7 @@ export function createWorkers(ctx: JobContext) {
     { connection, concurrency: 1 },
   );
 
-  // VERIFICATION: daily expiry sweep + 30-day reminders (Step 4)
+  // VERIFICATION: daily expiry sweep + 30-day reminders
   const verificationWorker = new Worker(
     QUEUE_NAMES.VERIFICATION,
     async (job: Job) => {
@@ -276,7 +276,7 @@ export function createWorkers(ctx: JobContext) {
     { connection, concurrency: 1 },
   );
 
-  // NOTIFICATIONS: Step 11 vendor-alert escalation — re-alert, then SMS
+  // NOTIFICATIONS: vendor-alert escalation — re-alert, then SMS
   const notificationWorker = new Worker(
     QUEUE_NAMES.NOTIFICATION,
     async (job: Job) => {
@@ -300,7 +300,7 @@ export function createWorkers(ctx: JobContext) {
     { connection, concurrency: 5 },
   );
 
-  // DISPATCH: Step 8 offer cascade — start offers and enforce the 20s timeout
+  // DISPATCH: offer cascade — start offers and enforce the 20s timeout
   const dispatchWorker = new Worker(
     QUEUE_NAMES.DISPATCH,
     async (job: Job) => {

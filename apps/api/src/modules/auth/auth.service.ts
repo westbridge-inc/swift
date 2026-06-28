@@ -174,13 +174,13 @@ export class AuthService {
       userAgent: '',
     });
 
-    // Role-specific onboarding stub — verification itself lands in Step 4.
+    // Role-specific onboarding stub — verification itself comes later.
     const onboarding = await this.buildOnboarding(signupRole, countryCode);
 
     return { user, tokens, onboarding };
   }
 
-  /** What the client should do next after signup (stub until Step 4). */
+  /** What the client should do next after signup (stub until verification). */
   private async buildOnboarding(role: SignupRole, countryCode: string) {
     if (role === 'MOVER') {
       return {

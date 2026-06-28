@@ -17,7 +17,7 @@ declare module 'fastify' {
 }
 
 // ---------------------------------------------------------------------------
-// Dispatch engine (master plan §8) — the most failure-sensitive module.
+// Dispatch engine — the most failure-sensitive module.
 // Offer -> 20s timeout -> next candidate -> widen radius -> after the last
 // round, an HONEST "no movers available" to customer AND vendor. Never a
 // silent hang. Acceptance is atomic at the database: ten simultaneous

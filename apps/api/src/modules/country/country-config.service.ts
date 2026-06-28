@@ -43,7 +43,7 @@ export class CountryConfigService {
     return Number(config.idGateThresholdUsd) * Number(config.usdExchangeRate);
   }
 
-  /** Required-document checklist for a role key (drives Step 4 verification). */
+  /** Required-document checklist for a role key (drives verification). */
   async getDocumentChecklist(code: string, roleKey: string): Promise<string[]> {
     const config = await this.getByCode(code);
     const lists = config.documentChecklists as Record<string, string[]>;

@@ -15,7 +15,7 @@ import { HaversineMapsProvider } from '../providers/maps/maps-provider';
 import { pointInPolygon } from '../utils/geo';
 
 // ---------------------------------------------------------------------------
-// Step 9 — taxi on the same mover pool and dispatch engine. Hardest paths:
+// taxi on the same mover pool and dispatch engine. Hardest paths:
 // zone-boundary addresses and fare-table gaps falling back to the formula.
 // The fare is deterministic and shown BEFORE any driver sees the request.
 // ---------------------------------------------------------------------------
@@ -277,7 +277,7 @@ describe('Ride request — fare shown first, dispatch shared, PIN issued', () =>
   });
 });
 
-describe('Phase 3 — taxi live-operation gate (hire-class insurance)', () => {
+describe('Taxi live-operation gate (hire-class insurance)', () => {
   async function setInsurance(userId: string, coverageClass: 'HIRE' | 'PRIVATE', hireClassConfirmed: boolean) {
     await app.prisma.verificationDocument.create({
       data: {

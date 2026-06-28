@@ -13,7 +13,7 @@ import { scoreCandidate, rankCandidates } from '../modules/dispatch/scoring';
 import { HaversineMapsProvider } from '../providers/maps/maps-provider';
 
 // ---------------------------------------------------------------------------
-// Step 8 — dispatch. Hardest paths per playbook: the no-acceptance path
+// dispatch. Hardest paths: the no-acceptance path
 // (food cooked, nobody coming — must end in an honest message), riders
 // vanishing mid-offer, and duplicate acceptance. The DB compare-and-set is
 // the real lock: ten simultaneous accepts produce exactly one winner.

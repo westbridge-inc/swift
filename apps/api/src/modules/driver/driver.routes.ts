@@ -296,7 +296,7 @@ export async function driverRoutes(app: FastifyInstance) {
     if (!order) throw new NotFoundError('Ride', id);
     if (order.orderType !== 'TAXI') throw new AppError(400, 'INVALID_TYPE', 'This is not a taxi ride');
 
-    // Shared Step 8 claim: the DB compare-and-set means two drivers tapping
+    // Shared claim: the DB compare-and-set means two drivers tapping
     // accept at the same instant resolve to exactly one winner — the old
     // check-then-update here could double-assign.
     const updatedOrder = await dispatch.claimOrder(id, driver.id, 'DRIVER');

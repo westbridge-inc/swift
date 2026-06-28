@@ -16,7 +16,7 @@ import { NotificationService } from '../modules/notification/notification.servic
 import { getPaymentProvider } from '../providers/payment/payment-provider';
 
 // ---------------------------------------------------------------------------
-// Step 5 — the revenue engine. Hardest paths per playbook: idempotency under
+// the revenue engine. Hardest paths: idempotency under
 // concurrent runs, clock-edge due dates, retries across days ending in
 // suspension, and the full top-up -> instant reinstatement story with the
 // audit log as evidence.
@@ -429,7 +429,7 @@ describe('Waivers, reminders, tier recalculation', () => {
   });
 });
 
-describe('Phase 5 — subscription trial lifecycle', () => {
+describe('Subscription trial lifecycle', () => {
   async function makeBareVendor(vendorType: 'RESTAURANT' | 'STORE' | 'SERVICE' = 'RESTAURANT') {
     const { userId } = await makeUserWithSession(['VENDOR_OWNER', 'CUSTOMER'], 'VENDOR_OWNER');
     const owner = await app.prisma.vendorOwner.create({ data: { userId } });

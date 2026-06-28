@@ -1091,7 +1091,7 @@ export async function customerRoutes(app: FastifyInstance) {
       }
     }
 
-    // Get or create cart. Multi-vendor carts are allowed (Step 7): checkout
+    // Get or create cart. Multi-vendor carts are allowed: checkout
     // splits per vendor; cart.vendorId just tracks the most recent vendor.
     let cart = await app.prisma.cart.findUnique({
       where: { customerId: userId },
@@ -1338,7 +1338,7 @@ export async function customerRoutes(app: FastifyInstance) {
       appointments: body.appointments,
     });
 
-    // Step 11: the vendor order alert escalates while unacknowledged —
+    // the vendor order alert escalates while unacknowledged —
     // re-alert after 60s, SMS fallback 60s after that
     if (app.queues) {
       for (const order of result.orders) {
@@ -1636,7 +1636,7 @@ export async function customerRoutes(app: FastifyInstance) {
     return { success: true, ...paginatedResponse(notifications, total, { page, limit, skip }) };
   });
 
-  /** PUT /notifications/prefs — per-user channel switches (Step 11). */
+  /** PUT /notifications/prefs — per-user channel switches. */
   app.put('/notifications/prefs', async (request: AuthRequest) => {
     const body = notificationPrefsSchema.parse(request.body);
     const user = await app.prisma.user.findUniqueOrThrow({
@@ -1703,7 +1703,7 @@ export async function customerRoutes(app: FastifyInstance) {
     }
 
     // Verify associated entity exists for non-customer roles.
-    // MOVER has no entity until Step 4 verification creates one — membership
+    // MOVER has no entity until verification creates one — membership
     // in roles[] is enough to sit in mover mode (gated from working anyway).
     if (role === 'VENDOR') {
       const owner = await app.prisma.vendorOwner.findUnique({ where: { userId } });

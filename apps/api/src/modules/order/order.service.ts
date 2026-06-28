@@ -57,7 +57,7 @@ export const ORDER_TRANSITIONS: Record<OrderStatus, OrderStatus[]> = {
     'DRIVER_ASSIGNED', 'DRIVER_EN_ROUTE', 'DRIVER_ARRIVED',
   ],
   REFUNDED: ['CANCELLED', 'DELIVERED', 'COMPLETED'],
-  // Failed cash handover (master plan §5) — only from the door or en route
+  // Failed cash handover — only from the door or en route
   FAILED: ['PENDING', 'PICKED_UP', 'EN_ROUTE_DELIVERY', 'ARRIVED'],
 };
 
@@ -98,7 +98,7 @@ export class OrderService {
       select: { trustLevel: true, countryCode: true, createdAt: true },
     });
 
-    // Strike consequences (master plan §5): repeated failed cash handovers
+    // Strike consequences: repeated failed cash handovers
     // restrict ordering to verified accounts, then ban outright
     const restriction = await orderingRestriction(this.prisma, input.userId);
     if (restriction === 'banned') {

@@ -31,7 +31,7 @@ model User {
   /// ISO-3166 alpha-2; picked at signup from active CountryConfigs.
   countryCode String @default("GY")
 
-  /// Email+password login lands in Step 3; phone OTP remains primary.
+  /// Email+password login lands later; phone OTP remains primary.
   passwordHash        String?
   failedLoginAttempts Int       @default(0)
   lockedUntil         DateTime?
@@ -43,7 +43,7 @@ model User {
   lastKnownLat     Float?
   lastKnownLng     Float?
 
-  /// V1 dormant — cash-only per master plan §18. Do not build on; Part C wallet rework.
+  /// V1 dormant — cash-only. Do not build on; Part C wallet rework.
   walletBalance Decimal @default(0) @db.Decimal(12, 2)
 
   verificationDocuments VerificationDocument[]
@@ -81,7 +81,7 @@ enum UserRole {
   RIDER
   DRIVER
   /// Locked model role: unified rider+driver. Rider/Driver values are legacy;
-  /// Step 3 onboards movers, later steps fold Rider/Driver flows into MOVER.
+  /// Onboarding creates MOVER accounts; Rider/Driver flows fold into MOVER.
   MOVER
   VENDOR_OWNER
   ADMIN
@@ -185,7 +185,7 @@ model CountryConfig {
   /// { ECONOMY: 1.0, COMFORT: 1.35, XL: 1.8 }. Code default when null.
   taxiClassRates Json?
 
-  /// Cash guarantee + strike thresholds (master plan §5):
+  /// Cash guarantee + strike thresholds:
   /// { maxClaimsPerRiderPerMonth, strikeRestrictThreshold, strikeBanThreshold,
   ///   l3MinPaidOrders, l3MinAccountAgeDays, outlierMultiplier }
   cashRules Json?
@@ -276,7 +276,7 @@ enum CoverageClass {
 }
 
 /// Company guarantee for failed cash handovers under the USD gate
-/// (master plan §5). Status is decided by deterministic guardrails —
+/// Status is decided by deterministic guardrails —
 /// caps/outliers/collusion route to manual review, never auto-payout.
 model ReimbursementClaim {
   id         String      @id @default(cuid())
@@ -315,7 +315,7 @@ enum ClaimStatus {
   PAID
 }
 
-/// Customer strike for cash no-shows / refusals (master plan §5).
+/// Customer strike for cash no-shows / refusals.
 /// Phone + address fingerprint captured for collusion detection.
 model Strike {
   id         String   @id @default(cuid())
@@ -384,7 +384,7 @@ model Rider {
   averageRating       Float       @default(5.0)
   totalRatings        Int         @default(0)
   completionRate      Float       @default(100.0)
-  /// % of dispatch offers accepted (EMA) — feeds Step 8 candidate scoring
+  /// % of dispatch offers accepted (EMA) — feeds candidate scoring
   acceptanceRate      Float       @default(100.0)
   /// D.3 float gate — max vendor-cash this rider may front at once (derived from
   /// User.trustLevel via CountryConfig.floatL1/L2/L3); committedFloat = currently
@@ -632,7 +632,7 @@ model Booking {
   itemId     String
   item       Item          @relation(fields: [itemId], references: [id], onDelete: Cascade)
   customerId String
-  /// Wired to the order at acceptance (Step 7)
+  /// Wired to the order at acceptance
   orderId    String?
   slotStart  DateTime
   slotEnd    DateTime
@@ -726,7 +726,7 @@ model Order {
   taxiDuration       Int?
 
   subtotalBase     Decimal @db.Decimal(12, 2)
-  /// V1 dormant — zero-commission model (master plan §18): markup must stay 0.
+  /// V1 dormant — zero-commission model: markup must stay 0.
   /// Field removal happens with the Steps 6-7 catalogue/order rebuild.
   subtotalMarkup   Decimal @db.Decimal(12, 2)
   subtotalCustomer Decimal @db.Decimal(12, 2)
@@ -860,7 +860,7 @@ enum PaymentStatus {
   PARTIALLY_REFUNDED
 }
 
-/// markedUpPrice/markup* fields are V1 dormant (§18 zero-commission) — kept
+/// markedUpPrice/markup* fields are V1 dormant (zero-commission) — kept
 /// equal to base until the Steps 6-7 rebuild removes them.
 model OrderItem {
   id              String            @id @default(cuid())
@@ -895,7 +895,7 @@ model OrderItemOption {
 }
 
 /// The locked model's immutable OrderEvent log. Append-only by convention:
-/// no update/delete code path may exist for this model (enforced in Step 7's
+/// no update/delete code path may exist for this model (enforced in the order's
 /// state machine; rows are evidence for cash disputes and claims).
 model OrderStatusLog {
   id        String      @id @default(cuid())
@@ -1147,7 +1147,7 @@ enum BillingEventType {
 }
 
 /// Prepaid path for cash payers: agents/bank-transfer top-ups recorded by
-/// admin; the weekly billing job (Step 5) deducts from here before suspending.
+/// admin; the weekly billing job deducts from here before suspending.
 model PrepaidBalance {
   id             String       @id @default(cuid())
   subscriptionId String       @unique
@@ -1257,7 +1257,7 @@ enum SettlementStatus {
 
 // ==========================================
 // TRANSACTIONS & WALLET
-// V1 dormant — cash-only per master plan §18. Swift never holds order money.
+// V1 dormant — cash-only. Swift never holds order money.
 // Kept ledger-shaped for the Part C wallet rework; do not build V1 features on
 // Transaction / walletBalance / PayoutRequest / PayoutSchedule.
 // ==========================================
@@ -1377,7 +1377,7 @@ model Zone {
   @@map("zones")
 }
 
-/// Admin-editable zone-to-zone fixed taxi fares (master plan §4.2). When a
+/// Admin-editable zone-to-zone fixed taxi fares. When a
 /// trip's ends both resolve to zones with a row here, this price wins; gaps
 /// fall back to the CountryConfig formula. Directional on purpose (airport
 /// runs can price differently each way).

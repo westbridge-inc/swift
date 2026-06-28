@@ -31,7 +31,7 @@ interface NotificationPayload {
 }
 
 /**
- * Vendor-alert escalation step (Step 11). The unread alert row is the state:
+ * Vendor-alert escalation step. The unread alert row is the state:
  * read = acknowledged = stop. Level 0 re-alerts (socket + push); level 1
  * falls back to SMS so the phone makes noise even with the app dead.
  * Exported standalone so the queue worker and tests drive the same code.
@@ -228,7 +228,7 @@ export class NotificationService {
   }
 
   /**
-   * THE vendor order alert (master plan §7): a persistent, unmissable event.
+   * THE vendor order alert: a persistent, unmissable event.
    * The unread notification row IS the alert state — the dashboard shows a
    * full-screen banner until it is acknowledged (accept/reject/ack), and the
    * escalation job re-alerts then falls back to SMS while it stays unread.

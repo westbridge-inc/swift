@@ -12,7 +12,7 @@ import { registerErrorHandler } from '../middleware/error-handler';
 import { requestOtp, loginWithOtp } from './helpers/otp';
 
 // ---------------------------------------------------------------------------
-// Step 3 — auth & accounts: role+country signup (OTP-mandatory), password
+// auth & accounts: role+country signup (OTP-mandatory), password
 // login with lockout, reset that kills sessions, real logout (SEC-8), and
 // role-crossing denial. The failure paths come first wherever possible.
 // ---------------------------------------------------------------------------

@@ -212,7 +212,7 @@ export const unsuspendUser = (id: string) =>
 export const updateConfig = (key: string, value: unknown) =>
   apiFetch(`/api/v1/admin/config/${key}`, { method: 'PUT', body: JSON.stringify({ value }) });
 
-// ─── Verification Center (Phase 4) ─────────────────────────────────────────
+// ─── Verification Center ─────────────────────────────────────────
 export interface InsuranceCheck {
   insurerName: string;
   policyNumber: string;

@@ -12,7 +12,7 @@ async function main() {
      ON "bookings"("itemId", "slotStart") WHERE "status" <> 'CANCELLED'`,
   );
 
-  // PostGIS + the dispatch candidate index (Step 8) — also here for db push
+  // PostGIS + the dispatch candidate index — also here for db push
   await prisma.$executeRawUnsafe('CREATE EXTENSION IF NOT EXISTS postgis');
   await prisma.$executeRawUnsafe(
     `CREATE INDEX IF NOT EXISTS "riders_geo_gist"
@@ -454,7 +454,7 @@ async function main() {
   });
 
   // Approved verification documents for the seeded vendor owner and rider so
-  // the Step 4 gates (listing / go-online) pass for the demo accounts.
+  // the gates (listing / go-online) pass for the demo accounts.
   const seededVendorUser = await prisma.user.findUnique({ where: { phone: '+5926002000' } });
   if (seededVendorUser) {
     const ownerDocs = ['owner_national_id', 'business_registration', 'food_handler_cert'];

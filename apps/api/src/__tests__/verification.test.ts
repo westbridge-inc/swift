@@ -16,7 +16,7 @@ import { getKycProvider } from '../providers/kyc/kyc-provider';
 import { loginWithOtp } from './helpers/otp';
 
 // ---------------------------------------------------------------------------
-// Step 4 — verification behind KycProvider: checklists from config, the
+// verification behind KycProvider: checklists from config, the
 // manual review queue, the L2 identity flow, listing/online gates, and the
 // expiry automation. Hardest paths: resubmission after rejection, expiry
 // during pending review, lapse auto-suspending live listings.
@@ -431,7 +431,7 @@ describe('Expiry automation', () => {
   });
 });
 
-describe('Phase 2 — document storage & DPA compliance', () => {
+describe('Document storage & DPA compliance', () => {
   it('rejects a document upload without consent (DPA §3.5)', async () => {
     const res = await inject('POST', '/api/v1/verification/documents', {
       role: 'MOVER',
@@ -516,7 +516,7 @@ describe('Phase 2 — document storage & DPA compliance', () => {
   });
 });
 
-describe('Phase 3 — taxi checklist merge + auto-KYC audit', () => {
+describe('Taxi checklist merge + auto-KYC audit', () => {
   it('a mover can submit a taxi-only document and the auto-approval is audited', async () => {
     // hire_car_permit lives in MOVER_TAXI_EXTRA — only submittable via the merge
     const res = await inject('POST', '/api/v1/verification/documents', {
