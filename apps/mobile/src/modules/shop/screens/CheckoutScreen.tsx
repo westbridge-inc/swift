@@ -6,6 +6,7 @@ import { color } from '@swift/ui';
 import { Text, Heading, Card, Button, Spinner, PressableScale, ChoiceChip } from '../../../components/ui';
 import { useCart, useAddresses, useSetCartAddress, useSetCartTip, usePlaceOrder, useItemSlots } from '../../../hooks';
 import { money } from '../../../lib/money';
+import { pickOrderId } from '../../../lib/order';
 
 const TIPS = [0, 200, 500, 1000];
 
@@ -13,7 +14,7 @@ function SummaryRow({ label, value, bold }: { label: string; value: string; bold
   return (
     <View className="flex-row items-center justify-between py-1">
       <Text className={bold ? 'text-base font-semibold' : 'text-sm text-text-secondary'}>{label}</Text>
-      <Text className={bold ? 'text-base font-semibold' : 'text-sm text-text-primary'}>{value}</Text>
+      <Text className={bold ? 'text-base font-extrabold text-brand-600' : 'text-sm text-text-primary'}>{value}</Text>
     </View>
   );
 }
@@ -72,7 +73,7 @@ export function CheckoutScreen({ navigation }: any) {
 
   if (isLoading || !cart) {
     return (
-      <SafeAreaView style={{ flex: 1 }} edges={['top']} className="bg-surface-base">
+      <SafeAreaView style={{ flex: 1 }} edges={['top']} className="bg-surface-subtle">
         <View className="flex-1 items-center justify-center">
           <Spinner size="large" />
         </View>
@@ -90,7 +91,7 @@ export function CheckoutScreen({ navigation }: any) {
       },
       {
         onSuccess: (res: any) => {
-          const orderId = res?.orders?.[0]?.id ?? res?.order?.id;
+          const orderId = pickOrderId(res);
           if (orderId) (navigation?.replace ?? navigation?.navigate)?.('OrderTracking', { id: orderId });
           else navigation?.navigate?.('Tabs');
         },
@@ -109,7 +110,7 @@ export function CheckoutScreen({ navigation }: any) {
   });
 
   return (
-    <SafeAreaView style={{ flex: 1 }} edges={['top']} className="bg-surface-base">
+    <SafeAreaView style={{ flex: 1 }} edges={['top']} className="bg-surface-subtle">
       <View className="flex-row items-center px-lg py-sm">
         <PressableScale onPress={() => navigation?.goBack?.()} hitSlop={10}>
           <Feather name="chevron-left" size={24} color={color.text.primary} />

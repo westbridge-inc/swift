@@ -78,7 +78,7 @@ function RatingCard({ orderId, vendorName, hasRider, riderName }: { orderId: str
         placeholder="Add a comment (optional)"
         placeholderTextColor={color.text.muted}
         multiline
-        className="mt-md rounded-lg border border-border-subtle bg-surface-base px-lg py-md font-body text-base text-text-primary"
+        className="mt-md rounded-2xl border border-border-subtle bg-surface-base px-lg py-md font-body text-base text-text-primary"
         style={{ minHeight: 56 }}
       />
       {rate.isError ? <Text className="mt-sm text-center text-sm text-error">Couldn&apos;t submit. Please try again.</Text> : null}
@@ -98,7 +98,7 @@ export function OrderTrackingScreen({ navigation, route }: any) {
 
   if (isLoading) {
     return (
-      <SafeAreaView style={{ flex: 1 }} edges={['top']} className="bg-surface-base">
+      <SafeAreaView style={{ flex: 1 }} edges={['top']} className="bg-surface-subtle">
         <View className="flex-1 items-center justify-center">
           <Spinner size="large" />
         </View>
@@ -108,7 +108,7 @@ export function OrderTrackingScreen({ navigation, route }: any) {
 
   if (isError || !order) {
     return (
-      <SafeAreaView style={{ flex: 1 }} edges={['top']} className="bg-surface-base">
+      <SafeAreaView style={{ flex: 1 }} edges={['top']} className="bg-surface-subtle">
         <View className="flex-1 items-center justify-center">
           <EmptyState
             icon="alert-circle-outline"
@@ -145,7 +145,7 @@ export function OrderTrackingScreen({ navigation, route }: any) {
       : undefined;
 
   return (
-    <SafeAreaView style={{ flex: 1 }} edges={['top']} className="bg-surface-base">
+    <SafeAreaView style={{ flex: 1 }} edges={['top']} className="bg-surface-subtle">
       <View className="flex-row items-center px-lg py-sm">
         <PressableScale onPress={() => navigation?.goBack?.()} hitSlop={10}>
           <Feather name="chevron-left" size={24} color={color.text.primary} />
@@ -282,7 +282,7 @@ export function OrderTrackingScreen({ navigation, route }: any) {
             <View className="mt-sm border-t border-border-subtle pt-sm">
               <View className="flex-row items-center justify-between py-1">
                 <Text className="text-base font-semibold">Total</Text>
-                <Text className="text-base font-semibold">{money(order.totalAmount)}</Text>
+                <Text className="text-base font-extrabold text-brand-600">{money(order.totalAmount)}</Text>
               </View>
             </View>
             <View className="mt-sm flex-row items-center">

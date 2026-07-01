@@ -6,6 +6,8 @@ import { ChatScreen } from '../../screens/shared/ChatScreen';
 import { useVerificationStatus } from '../../hooks';
 import { MoverHomeScreen } from './screens/MoverHomeScreen';
 import { ActiveJobScreen } from './screens/ActiveJobScreen';
+import { EarningsScreen } from './screens/EarningsScreen';
+import { MoverAccountScreen } from './screens/MoverAccountScreen';
 import { MoverOnboardingScreen } from './screens/MoverOnboardingScreen';
 
 const Stack = createNativeStackNavigator();
@@ -32,6 +34,8 @@ export function MoverStack() {
     <Stack.Navigator screenOptions={{ headerShown: false }}>
       <Stack.Screen name="MoverRoot" component={MoverRoot} />
       <Stack.Screen name="ActiveJob" component={ActiveJobScreen} />
+      <Stack.Screen name="Earnings" component={EarningsScreen} />
+      <Stack.Screen name="Account" component={MoverAccountScreen} />
       <Stack.Screen name="Chat" component={ChatScreen} />
     </Stack.Navigator>
   );

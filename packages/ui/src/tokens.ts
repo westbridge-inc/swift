@@ -16,20 +16,30 @@
 export const APP_NAME = 'Swift' as const;
 export const BRAND_REGION = 'GY' as const;
 
-/** §Colour — red identity + neutral surfaces. Red is an ACCENT, never flooded. */
+/**
+ * §Colour — one Swift identity: **red** (#E8192C) on white.
+ * Every brand token — NativeWind `bg-brand-*` / `text-brand-*` classes AND
+ * `color.brand[…]` read in JS — draws from this single ramp. Brand is an ACCENT,
+ * never flooded. (Swift is one app; the earlier per-variant ink partner skin was
+ * retired when the two apps collapsed into one.)
+ */
+type BrandRamp = Record<50 | 100 | 200 | 300 | 400 | 500 | 600 | 700 | 800 | 900, string>;
+
+const BRAND_RED: BrandRamp = {
+  50: '#FFF2F3', // red tint — bg-brand-50 surfaces
+  100: '#FBD7DB',
+  200: '#F4A6AD',
+  300: '#ED7480',
+  400: '#EA4555',
+  500: '#E8192C', // Swift Red — consumer identity + primary CTA
+  600: '#BC1320', // Deep Red
+  700: '#930F1A',
+  800: '#6B0B13',
+  900: '#45070C',
+};
+
 export const color = {
-  brand: {
-    50: '#FFF2F3', // red tint — bg-brand-50 surfaces
-    100: '#FBD7DB',
-    200: '#F4A6AD',
-    300: '#ED7480',
-    400: '#EA4555',
-    500: '#E8192C', // Swift Red — identity + primary CTA
-    600: '#BC1320', // Deep Red — hover/accent
-    700: '#930F1A', // pressed
-    800: '#6B0B13',
-    900: '#45070C',
-  },
+  brand: BRAND_RED,
   white: '#FFFFFF',
   surface: {
     base: '#FFFFFF',
@@ -50,7 +60,7 @@ export const color = {
   success: '#1DA851',
   error: '#E5342B',
   warning: '#F59E0B',
-} as const;
+};
 
 /** §Type — Space Grotesk (display) + Inter (body). */
 export const font = {

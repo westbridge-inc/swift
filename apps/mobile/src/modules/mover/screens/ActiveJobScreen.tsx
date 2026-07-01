@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { View } from 'react-native';
+import { View, Linking } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import MapView, { Marker, PROVIDER_DEFAULT, Polyline } from 'react-native-maps';
 import BottomSheet, { BottomSheetScrollView } from '@gorhom/bottom-sheet';
@@ -11,6 +11,19 @@ import { money } from '../../../lib/money';
 
 function jobAmount(j: any) {
   return money(j?.totalAmount ?? j?.taxiFareTotal ?? j?.fare ?? 0);
+}
+
+type DriverAction = 'en-route' | 'arrived' | 'verify-pin' | 'start' | 'complete';
+
+// The ONE next step a driver takes, driven by the real backend status:
+// DRIVER_ASSIGNED → EN_ROUTE → ARRIVED → [verify PIN] → start → RIDE_IN_PROGRESS → complete.
+function driverStep(job: any): { label: string; action: DriverAction; pin?: boolean } | null {
+  const s = String(job?.status ?? '').toUpperCase();
+  if (s === 'DRIVER_ASSIGNED') return { label: "I'm on the way", action: 'en-route' };
+  if (s === 'DRIVER_EN_ROUTE') return { label: "I've arrived", action: 'arrived' };
+  if (s === 'DRIVER_ARRIVED') return job.ridePinVerified ? { label: 'Start trip', action: 'start' } : { label: 'Verify rider PIN', action: 'verify-pin', pin: true };
+  if (s === 'RIDE_IN_PROGRESS') return { label: 'Complete trip', action: 'complete' };
+  return null;
 }
 
 export function ActiveJobScreen({ navigation }: any) {
@@ -50,7 +63,19 @@ export function ActiveJobScreen({ navigation }: any) {
       : pickup
         ? { ...pickup, latitudeDelta: 0.02, longitudeDelta: 0.02 }
         : undefined;
+
   const busy = driverAct.isPending || riderAct.isPending;
+  const isDriver = kind === 'DRIVER';
+  const cust: any = job.customer ?? job.user ?? null;
+  const custName = cust ? [cust.firstName, cust.lastName].filter(Boolean).join(' ') : null;
+  const inProgress = String(job.status ?? '').toUpperCase() === 'RIDE_IN_PROGRESS';
+  const navTarget = inProgress ? drop : pickup;
+  const openNav = () => {
+    if (!navTarget) return;
+    const q = `${navTarget.latitude},${navTarget.longitude}`;
+    Linking.openURL(`maps://?daddr=${q}`).catch(() => Linking.openURL(`https://maps.google.com/?daddr=${q}`));
+  };
+  const step = isDriver ? driverStep(job) : null;
 
   return (
     <View style={{ flex: 1 }} className="bg-surface-base">
@@ -68,47 +93,114 @@ export function ActiveJobScreen({ navigation }: any) {
         </PressableScale>
       </SafeAreaView>
 
-      <BottomSheet index={0} snapPoints={['42%', '85%']} enableDynamicSizing={false}>
+      <BottomSheet index={0} snapPoints={['48%', '88%']} enableDynamicSizing={false} backgroundStyle={{ backgroundColor: color.surface.subtle }}>
         <BottomSheetScrollView contentContainerStyle={{ paddingHorizontal: 16, paddingBottom: 32 }}>
+          {/* Route + fare */}
           <Card className="mb-md">
-            <Text className="text-base font-semibold">{job.orderNumber ? `#${job.orderNumber}` : 'Current job'}</Text>
-            <Text className="mt-xs text-sm text-text-secondary">Pickup: {job.pickupAddress ?? '—'}</Text>
-            <Text className="mt-xs text-sm text-text-secondary">Drop-off: {job.deliveryAddress ?? job.dropoffAddress ?? '—'}</Text>
-            <Text className="mt-sm text-base font-semibold">{jobAmount(job)} · cash</Text>
-            <Text className="mt-xs text-xs text-text-muted">Status: {String(job.status ?? '').replace(/_/g, ' ').toLowerCase()}</Text>
+            <View className="flex-row items-center justify-between">
+              <Text className="text-xs font-bold uppercase tracking-wider text-text-muted">
+                {job.orderNumber ? `Order #${job.orderNumber}` : 'Current job'}
+              </Text>
+              <Text className="text-xs font-semibold capitalize text-text-secondary">
+                {String(job.status ?? '').replace(/_/g, ' ').toLowerCase()}
+              </Text>
+            </View>
+            <Text className="mt-sm font-display text-2xl font-extrabold text-text-primary">
+              {jobAmount(job)} <Text className="text-sm font-semibold text-text-muted">· cash</Text>
+            </Text>
+            <View className="mt-md">
+              <View className="flex-row items-center">
+                <View style={{ width: 14, alignItems: 'center' }}>
+                  <View style={{ width: 11, height: 11, borderRadius: 6, borderWidth: 2.5, borderColor: color.text.muted }} />
+                </View>
+                <Text className="ml-sm flex-1 text-sm font-semibold text-text-primary" numberOfLines={1}>{job.pickupAddress ?? 'Pickup'}</Text>
+              </View>
+              <View style={{ marginLeft: 6, height: 14, width: 2, backgroundColor: color.border.subtle, marginVertical: 2 }} />
+              <View className="flex-row items-center">
+                <View style={{ width: 14, alignItems: 'center' }}>
+                  <Feather name="map-pin" size={15} color={color.brand[500]} />
+                </View>
+                <Text className="ml-sm flex-1 text-sm font-semibold text-text-primary" numberOfLines={1}>{job.deliveryAddress ?? job.dropoffAddress ?? 'Drop-off'}</Text>
+              </View>
+            </View>
           </Card>
 
-          <Button
-            label="Message customer"
-            variant="outline"
-            className="mb-md"
-            onPress={() => navigation.navigate('Chat', { orderId: job.id, title: 'Customer' })}
-          />
+          {/* Passenger / customer */}
+          {cust ? (
+            <Card className="mb-md flex-row items-center">
+              <View className="h-11 w-11 items-center justify-center rounded-full" style={{ backgroundColor: color.brand[500] }}>
+                <Text className="font-display text-base font-extrabold text-white">{(cust.firstName ?? 'C').charAt(0).toUpperCase()}</Text>
+              </View>
+              <View className="ml-md flex-1">
+                <Text className="text-xs text-text-muted">{isDriver ? 'Passenger' : 'Customer'}</Text>
+                <Text className="text-base font-bold text-text-primary" numberOfLines={1}>{custName ?? 'Customer'}</Text>
+              </View>
+              {cust.phone ? (
+                <PressableScale
+                  onPress={() => Linking.openURL(`tel:${cust.phone}`)}
+                  className="mr-sm h-10 w-10 items-center justify-center rounded-full bg-surface-subtle"
+                >
+                  <Feather name="phone" size={17} color={color.success} />
+                </PressableScale>
+              ) : null}
+              <PressableScale
+                onPress={() => navigation.navigate('Chat', { orderId: job.id, title: custName ?? 'Customer' })}
+                className="h-10 w-10 items-center justify-center rounded-full bg-surface-subtle"
+              >
+                <Feather name="message-circle" size={17} color={color.brand[500]} />
+              </PressableScale>
+            </Card>
+          ) : null}
 
-          {kind === 'DRIVER' ? (
-            <>
-              <View className="flex-row flex-wrap" style={{ gap: 8 }}>
-                <Button label="On the way" variant="outline" className="flex-1" disabled={busy} onPress={() => driverAct.mutate({ id: job.id, action: 'en-route' })} />
-                <Button label="Arrived" variant="outline" className="flex-1" disabled={busy} onPress={() => driverAct.mutate({ id: job.id, action: 'arrived' })} />
-              </View>
-              <View className="mt-sm flex-row items-center" style={{ gap: 8 }}>
-                <Input
-                  containerClassName="flex-1"
-                  value={pin}
-                  onChangeText={setPin}
-                  placeholder="Rider PIN"
-                  keyboardType="number-pad"
-                  maxLength={4}
+          {/* Navigate */}
+          {navTarget ? (
+            <Button
+              label={`Navigate to ${inProgress ? 'drop-off' : 'pickup'}`}
+              variant="outline"
+              className="mb-md"
+              onPress={openNav}
+            />
+          ) : null}
+
+          {/* The single next step (driver) or handover/deliver (rider) */}
+          {isDriver ? (
+            step ? (
+              <>
+                {step.pin ? (
+                  <Input
+                    containerClassName="mb-sm"
+                    value={pin}
+                    onChangeText={setPin}
+                    placeholder="Enter rider's PIN"
+                    keyboardType="number-pad"
+                    maxLength={6}
+                  />
+                ) : null}
+                <Button
+                  label={busy ? 'Working…' : step.label}
+                  loading={busy}
+                  disabled={busy || (!!step.pin && pin.length < 4)}
+                  onPress={() => driverAct.mutate({ id: job.id, action: step.action, ...(step.pin ? { pin } : {}) })}
                 />
-                <Button label="Verify" disabled={busy || pin.length < 4} onPress={() => driverAct.mutate({ id: job.id, action: 'verify-pin', pin })} />
-              </View>
-              <Button label="Start trip" variant="outline" className="mt-sm" disabled={busy} onPress={() => driverAct.mutate({ id: job.id, action: 'start' })} />
-              <Button label="Complete trip" className="mt-sm" loading={driverAct.isPending} disabled={busy} onPress={() => driverAct.mutate({ id: job.id, action: 'complete' })} />
-            </>
+              </>
+            ) : (
+              <Text className="py-md text-center text-sm text-text-muted">Trip complete.</Text>
+            )
           ) : (
             <>
-              <Button label="Picked up (handover)" variant="outline" disabled={busy} onPress={() => riderAct.mutate({ id: job.id, action: 'handover' })} />
-              <Button label="Mark delivered" className="mt-sm" loading={riderAct.isPending} disabled={busy} onPress={() => riderAct.mutate({ id: job.id, action: 'delivered' })} />
+              <Button
+                label="Confirm payment & hand over"
+                variant="outline"
+                disabled={busy}
+                onPress={() => riderAct.mutate({ id: job.id, action: 'handover' })}
+              />
+              <Button
+                label="Mark delivered"
+                className="mt-sm"
+                loading={riderAct.isPending}
+                disabled={busy}
+                onPress={() => riderAct.mutate({ id: job.id, action: 'delivered' })}
+              />
             </>
           )}
         </BottomSheetScrollView>

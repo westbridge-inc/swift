@@ -1,20 +1,53 @@
 import { useState } from 'react';
 import { View, ScrollView } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { Feather, MaterialCommunityIcons } from '@expo/vector-icons';
+import { MaterialCommunityIcons } from '@expo/vector-icons';
 import { color } from '@swift/ui';
-import { Text, Heading, Card, Button, PressableScale, Input, ChoiceChip } from '../../../components/ui';
+import { Text, Heading, Button, PressableScale, Input, elevation } from '../../../components/ui';
+import { SwiftMark } from '../../../components/SwiftLogo';
 import { DocumentChecklist } from '../../../components/onboarding/DocumentChecklist';
 import { useVerificationStatus, useBecomePartner } from '../../../hooks';
 import { useAuthStore } from '../../../stores/authStore';
 
 type VehicleKind = 'BICYCLE' | 'MOTORCYCLE' | 'CAR';
 
-const VTYPES: { key: VehicleKind; label: string }[] = [
-  { key: 'BICYCLE', label: 'Bicycle' },
-  { key: 'MOTORCYCLE', label: 'Motorcycle' },
-  { key: 'CAR', label: 'Car (taxi)' },
+const VTYPES: { key: VehicleKind; label: string; icon: keyof typeof MaterialCommunityIcons.glyphMap; hint: string }[] = [
+  { key: 'BICYCLE', label: 'Bicycle', icon: 'bike', hint: 'Deliveries' },
+  { key: 'MOTORCYCLE', label: 'Motorcycle', icon: 'moped', hint: 'Deliveries' },
+  { key: 'CAR', label: 'Car', icon: 'car', hint: 'Taxi + rides' },
 ];
+
+function ValuePill({ icon, label }: { icon: keyof typeof MaterialCommunityIcons.glyphMap; label: string }) {
+  return (
+    <View className="flex-row items-center rounded-full bg-brand-50 px-3 py-1.5">
+      <MaterialCommunityIcons name={icon} size={14} color={color.brand[600]} />
+      <Text className="ml-1.5 text-xs font-bold text-brand-700">{label}</Text>
+    </View>
+  );
+}
+
+function VehicleTile({ v, active, onPress }: { v: (typeof VTYPES)[number]; active: boolean; onPress: () => void }) {
+  return (
+    <PressableScale onPress={onPress} style={{ flex: 1 }}>
+      <View
+        className={
+          active
+            ? 'items-center rounded-2xl border-2 border-brand-500 bg-brand-50 py-md'
+            : 'items-center rounded-2xl border border-border-subtle bg-surface-base py-md'
+        }
+      >
+        <View
+          className="mb-1 h-11 w-11 items-center justify-center rounded-full"
+          style={{ backgroundColor: active ? color.brand[500] : color.surface.subtle }}
+        >
+          <MaterialCommunityIcons name={v.icon} size={22} color={active ? '#fff' : color.text.secondary} />
+        </View>
+        <Text className={active ? 'text-sm font-bold text-brand-700' : 'text-sm font-bold text-text-primary'}>{v.label}</Text>
+        <Text className="text-[10px] text-text-muted">{v.hint}</Text>
+      </View>
+    </PressableScale>
+  );
+}
 
 function VehicleSetup({ vt, setVt, onDone }: { vt: VehicleKind; setVt: (v: VehicleKind) => void; onDone: () => void }) {
   const become = useBecomePartner();
@@ -38,25 +71,28 @@ function VehicleSetup({ vt, setVt, onDone }: { vt: VehicleKind; setVt: (v: Vehic
   };
 
   return (
-    <Card className="mb-lg gap-sm">
-      <Heading size="lg" className="mb-xs">Your vehicle</Heading>
-      <View className="mb-xs flex-row" style={{ gap: 8 }}>
+    <View className="rounded-3xl bg-surface-base p-lg" style={elevation.card}>
+      <Heading size="lg">Your vehicle</Heading>
+      <Text className="mt-xs text-sm text-text-secondary">How will you earn?</Text>
+      <View className="mt-md flex-row" style={{ gap: 8 }}>
         {VTYPES.map((v) => (
-          <ChoiceChip key={v.key} label={v.label} active={v.key === vt} onPress={() => setVt(v.key)} full />
+          <VehicleTile key={v.key} v={v} active={v.key === vt} onPress={() => setVt(v.key)} />
         ))}
       </View>
       {isCar ? (
-        <>
+        <View className="mt-md" style={{ gap: 8 }}>
           <Input value={make} onChangeText={setMake} placeholder="Make (e.g. Toyota)" />
           <Input value={model} onChangeText={setModel} placeholder="Model (e.g. Allion)" />
-          <Input value={year} onChangeText={setYear} placeholder="Year" keyboardType="number-pad" />
-          <Input value={colr} onChangeText={setColr} placeholder="Colour" />
+          <View className="flex-row" style={{ gap: 8 }}>
+            <Input containerClassName="flex-1" value={year} onChangeText={setYear} placeholder="Year" keyboardType="number-pad" />
+            <Input containerClassName="flex-1" value={colr} onChangeText={setColr} placeholder="Colour" />
+          </View>
           <Input value={plate} onChangeText={setPlate} placeholder="Licence plate" autoCapitalize="characters" />
-        </>
+        </View>
       ) : null}
-      {become.isError ? <Text className="text-sm text-error">Couldn&apos;t save. Try again.</Text> : null}
-      <Button label="Save vehicle" loading={become.isPending} disabled={!valid} onPress={submit} />
-    </Card>
+      {become.isError ? <Text className="mt-sm text-sm text-error">Couldn&apos;t save. Try again.</Text> : null}
+      <Button label="Save vehicle" loading={become.isPending} disabled={!valid} className="mt-md" onPress={submit} />
+    </View>
   );
 }
 
@@ -69,29 +105,40 @@ export function MoverOnboardingScreen({ status }: { status: any }) {
   const checklistStatus = preview ?? status;
 
   return (
-    <SafeAreaView style={{ flex: 1 }} edges={['top']} className="bg-surface-base">
+    <SafeAreaView style={{ flex: 1 }} edges={['top']} className="bg-surface-subtle">
       <View className="flex-row items-center justify-between px-lg py-sm">
-        <Heading size="2xl">Become a mover</Heading>
+        <SwiftMark size={28} />
         <PressableScale onPress={logout} hitSlop={8}>
           <Text className="text-sm text-text-muted">Log out</Text>
         </PressableScale>
       </View>
       <ScrollView className="flex-1" contentContainerStyle={{ paddingHorizontal: 16, paddingBottom: 32 }} showsVerticalScrollIndicator={false}>
-        <View className="mb-md flex-row items-start rounded-xl bg-surface-subtle px-lg py-md">
-          <MaterialCommunityIcons name="shield-check" size={20} color={color.brand[500]} />
-          <Text className="ml-sm flex-1 text-sm text-text-secondary">
-            Set up your vehicle and upload your documents. We verify within 24 hours, then you can go online and start earning.
-          </Text>
+        <Heading size="2xl" className="mt-sm">Start earning with Swift</Heading>
+        <Text className="mt-xs text-[15px] leading-5 text-text-secondary">
+          Set up your vehicle and documents — we verify within 24 hours, then you go online and start earning.
+        </Text>
+        <View className="mt-md flex-row flex-wrap" style={{ gap: 8 }}>
+          <ValuePill icon="check-decagram" label="Keep 100%" />
+          <ValuePill icon="cash" label="Cash payouts" />
+          <ValuePill icon="calendar-check" label="Flat weekly fee" />
         </View>
-        {!vehicleSaved ? (
-          <VehicleSetup vt={vt} setVt={setVt} onDone={() => setVehicleSaved(true)} />
-        ) : (
-          <Card className="mb-lg flex-row items-center">
-            <Feather name="check-circle" size={18} color={color.success} />
-            <Text className="ml-sm flex-1 text-sm font-semibold text-text-primary">Vehicle saved</Text>
-          </Card>
-        )}
-        <DocumentChecklist role="MOVER" status={checklistStatus} />
+
+        <View className="mt-lg">
+          {!vehicleSaved ? (
+            <VehicleSetup vt={vt} setVt={setVt} onDone={() => setVehicleSaved(true)} />
+          ) : (
+            <View className="flex-row items-center rounded-3xl bg-surface-base p-lg" style={elevation.card}>
+              <View className="h-10 w-10 items-center justify-center rounded-full bg-success/10">
+                <MaterialCommunityIcons name="check" size={20} color={color.success} />
+              </View>
+              <Text className="ml-md flex-1 text-base font-bold text-text-primary">Vehicle saved</Text>
+            </View>
+          )}
+        </View>
+
+        <View className="mt-lg">
+          <DocumentChecklist role="MOVER" status={checklistStatus} />
+        </View>
       </ScrollView>
     </SafeAreaView>
   );

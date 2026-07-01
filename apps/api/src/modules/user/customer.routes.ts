@@ -626,6 +626,7 @@ export async function customerRoutes(app: FastifyInstance) {
       favoriteIds,
       activeOrder,
       recentOrders,
+      popularItemRows,
     ] = await Promise.all([
       // All active vendors
       app.prisma.vendor.findMany({
@@ -670,6 +671,21 @@ export async function customerRoutes(app: FastifyInstance) {
             distinct: ['vendorId'],
           })
         : Promise.resolve([] as { vendorId: string }[]),
+
+      // Popular dishes — top items by lifetime orders (Home "Popular right now" rail)
+      app.prisma.item.findMany({
+        where: { isAvailable: true, vendor: { status: 'ACTIVE' } },
+        orderBy: { totalOrdered: 'desc' },
+        take: 10,
+        select: {
+          id: true,
+          name: true,
+          imageUrl: true,
+          basePrice: true,
+          vendorId: true,
+          vendor: { select: { id: true, name: true, vendorType: true } },
+        },
+      }),
     ]);
 
     // Enrich vendors
@@ -714,8 +730,19 @@ export async function customerRoutes(app: FastifyInstance) {
       }
     }
 
+    const popularItems = popularItemRows.map((it) => ({
+      id: it.id,
+      name: it.name,
+      imageUrl: it.imageUrl,
+      price: Number(it.basePrice),
+      vendorId: it.vendorId,
+      vendorName: it.vendor?.name ?? '',
+      vendorType: it.vendor?.vendorType ?? null,
+    }));
+
     const feed = {
       activeOrder,
+      popularItems,
       featured,
       nearby,
       orderAgain,

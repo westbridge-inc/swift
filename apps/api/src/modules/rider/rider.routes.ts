@@ -10,6 +10,7 @@ import { getKycProvider } from '../../providers/kyc/kyc-provider';
 import { haversineDistance } from '../../utils/distance';
 import { parsePagination, paginatedResponse } from '../../utils/pagination';
 import { AppError, NotFoundError, ConflictError, ValidationError } from '../../utils/errors';
+import { clampDriverFare } from '../../utils/markup';
 
 const updateRiderProfileSchema = z.object({
   riderType: z.nativeEnum(RiderType).optional(),
@@ -534,6 +535,7 @@ export async function riderRoutes(app: FastifyInstance) {
   /** POST /orders/:id/accept — Claim an available order. */
   app.post('/orders/:id/accept', { preHandler: [app.authenticate] }, async (request) => {
     const { id } = request.params as { id: string };
+    const { fare } = z.object({ fare: z.number().min(0).optional() }).parse(request.body ?? {});
     const rider = await getRider(app, request.user.userId);
 
     // Must be online.
@@ -562,10 +564,21 @@ export async function riderRoutes(app: FastifyInstance) {
       throw new AppError(400, 'INVALID_STATUS', `Order cannot be accepted in status ${order.status}`);
     }
 
+    // Rider-set delivery fee, capped at the market rate (deliveryFee). The rider
+    // charges UP TO market and no more; lowering it lowers the customer's total by
+    // the same delta. Swift never sets the final price.
+    const marketFee = Number(order.deliveryFee);
+    const chosenFee = fare != null ? clampDriverFare(fare, marketFee) : marketFee;
+
     // Assign rider first, then update status (sequential to avoid race).
     const updatedOrder = await app.prisma.order.update({
       where: { id },
-      data: { riderId: rider.id },
+      data: {
+        riderId: rider.id,
+        ...(chosenFee !== marketFee
+          ? { deliveryFee: chosenFee, totalAmount: Number(order.totalAmount) - (marketFee - chosenFee) }
+          : {}),
+      },
     });
 
     await Promise.all([

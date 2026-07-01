@@ -38,11 +38,44 @@ import { VendorBulkImportScreen } from '../../screens/vendor/VendorBulkImportScr
 const Stack = createNativeStackNavigator();
 
 const TYPES = [
-  { key: 'RESTAURANT', label: 'Restaurant' },
-  { key: 'SUPERMARKET', label: 'Grocery' },
-  { key: 'STORE', label: 'Shop' },
-  { key: 'SERVICE', label: 'Services' },
+  { key: 'RESTAURANT', label: 'Restaurant', icon: 'silverware-fork-knife' },
+  { key: 'SUPERMARKET', label: 'Grocery', icon: 'basket-outline' },
+  { key: 'STORE', label: 'Shop', icon: 'storefront-outline' },
+  { key: 'SERVICE', label: 'Services', icon: 'tools' },
 ] as const;
+
+function BizValuePill({ icon, label }: { icon: keyof typeof MaterialCommunityIcons.glyphMap; label: string }) {
+  return (
+    <View className="flex-row items-center rounded-full bg-brand-50 px-3 py-1.5">
+      <MaterialCommunityIcons name={icon} size={14} color={color.brand[600]} />
+      <Text className="ml-1.5 text-xs font-bold text-brand-700">{label}</Text>
+    </View>
+  );
+}
+
+function BizTypeTile({ t, active, onPress }: { t: (typeof TYPES)[number]; active: boolean; onPress: () => void }) {
+  return (
+    <PressableScale onPress={onPress} style={{ flex: 1 }}>
+      <View
+        className={
+          active
+            ? 'items-center rounded-2xl border-2 border-brand-500 bg-brand-50 py-md'
+            : 'items-center rounded-2xl border border-border-subtle bg-surface-base py-md'
+        }
+      >
+        <View
+          className="mb-1 h-10 w-10 items-center justify-center rounded-full"
+          style={{ backgroundColor: active ? color.brand[500] : color.surface.subtle }}
+        >
+          <MaterialCommunityIcons name={t.icon} size={20} color={active ? '#fff' : color.text.secondary} />
+        </View>
+        <Text className={active ? 'text-xs font-bold text-brand-700' : 'text-xs font-bold text-text-primary'} numberOfLines={1}>
+          {t.label}
+        </Text>
+      </View>
+    </PressableScale>
+  );
+}
 
 function Header({ title }: { title: string }) {
   const { logout } = useAuthStore();
@@ -84,26 +117,38 @@ function BusinessSetup() {
   };
 
   return (
-    <SafeAreaView style={{ flex: 1 }} edges={['top']} className="bg-surface-base">
+    <SafeAreaView style={{ flex: 1 }} edges={['top']} className="bg-surface-subtle">
       <Header title="Sell on Swift" />
       <ScrollView className="flex-1" contentContainerStyle={{ paddingHorizontal: 16, paddingBottom: 32 }} showsVerticalScrollIndicator={false}>
-        <Text className="mb-md text-sm text-text-secondary">
-          Tell us about your business. We&apos;ll use your current location as the store address.
+        <Heading size="2xl">List your business</Heading>
+        <Text className="mt-xs text-[15px] leading-5 text-text-secondary">
+          Reach customers across town and keep 100% of every sale — Swift charges a flat weekly fee, never commission.
         </Text>
-        <Text className="mb-xs text-sm font-semibold text-text-secondary">Business type</Text>
-        <View className="mb-md flex-row flex-wrap" style={{ gap: 8 }}>
+        <View className="mb-md mt-md flex-row flex-wrap" style={{ gap: 8 }}>
+          <BizValuePill icon="check-decagram" label="Keep 100%" />
+          <BizValuePill icon="cash-remove" label="No commission" />
+          <BizValuePill icon="calendar-check" label="Flat weekly fee" />
+        </View>
+
+        <Text className="mb-sm mt-sm text-sm font-bold text-text-primary">Business type</Text>
+        <View className="flex-row" style={{ gap: 8 }}>
           {TYPES.map((t) => (
-            <ChoiceChip key={t.key} label={t.label} active={t.key === type} onPress={() => setType(t.key)} />
+            <BizTypeTile key={t.key} t={t} active={t.key === type} onPress={() => setType(t.key)} />
           ))}
         </View>
-        <View className="gap-sm">
-          <Input value={name} onChangeText={setName} placeholder="Business name" />
-          <Input value={phone} onChangeText={setPhone} placeholder="Business phone" keyboardType="phone-pad" />
-          <Input value={addr} onChangeText={setAddr} placeholder="Street address" />
-          <Input value={city} onChangeText={setCity} placeholder="City" />
+
+        <View className="mt-lg rounded-3xl bg-surface-base p-lg" style={elevation.card}>
+          <View className="gap-sm">
+            <Input value={name} onChangeText={setName} placeholder="Business name" />
+            <Input value={phone} onChangeText={setPhone} placeholder="Business phone" keyboardType="phone-pad" />
+            <Input value={addr} onChangeText={setAddr} placeholder="Street address" />
+            <Input value={city} onChangeText={setCity} placeholder="City" />
+          </View>
+          <Text className="mt-sm text-xs text-text-muted">We&apos;ll use your current location as the store pin.</Text>
         </View>
+
         {become.isError ? <Text className="mb-sm mt-sm text-sm text-error">Couldn&apos;t create your store. Try again.</Text> : null}
-        <Button label="Create store" loading={become.isPending} disabled={!valid} onPress={submit} />
+        <Button label="Create store" loading={become.isPending} disabled={!valid} className="mt-md" onPress={submit} />
       </ScrollView>
     </SafeAreaView>
   );
@@ -112,7 +157,7 @@ function BusinessSetup() {
 function VendorOnboarding({ store }: { store: any }) {
   const { data: status, isLoading, isError, refetch } = useVerificationStatus<any>(store.vendorType);
   return (
-    <SafeAreaView style={{ flex: 1 }} edges={['top']} className="bg-surface-base">
+    <SafeAreaView style={{ flex: 1 }} edges={['top']} className="bg-surface-subtle">
       <Header title={store.name} />
       <ScrollView className="flex-1" contentContainerStyle={{ paddingHorizontal: 16, paddingBottom: 32 }} showsVerticalScrollIndicator={false}>
         <DocumentChecklist
@@ -127,12 +172,16 @@ function VendorOnboarding({ store }: { store: any }) {
   );
 }
 
-type VendorOrderActionKind = 'accept' | 'preparing' | 'ready' | 'reject' | 'complete-pickup';
+type VendorOrderActionKind = 'accept' | 'preparing' | 'ready' | 'reject' | 'complete-pickup' | 'complete-appointment';
 
 function orderActions(order: any): { label: string; action: VendorOrderActionKind }[] {
   const s = (order?.status || '').toUpperCase();
   const isPickup = order?.fulfillment === 'PICKUP';
-  if (s === 'PENDING' || s === 'PLACED') return [{ label: 'Accept', action: 'accept' }, { label: 'Reject', action: 'reject' }];
+  const isAppt = order?.fulfillment === 'APPOINTMENT';
+  if (s === 'PENDING' || s === 'PLACED')
+    return [{ label: 'Accept', action: 'accept' }, { label: isAppt ? 'Decline' : 'Reject', action: 'reject' }];
+  // Appointments skip prepare/ready — accepting books the slot, then the vendor marks it done.
+  if (isAppt && (s === 'ACCEPTED' || s === 'CONFIRMED')) return [{ label: 'Mark complete', action: 'complete-appointment' }];
   if (s === 'ACCEPTED' || s === 'CONFIRMED') return [{ label: 'Start preparing', action: 'preparing' }];
   if (s === 'PREPARING') return [{ label: isPickup ? 'Ready for pickup' : 'Mark ready', action: 'ready' }];
   // Takeaway: the vendor closes the order when the customer collects it (no rider).
@@ -148,6 +197,19 @@ function timeAgo(iso?: string) {
   if (mins < 1) return 'just now';
   if (mins < 60) return `${mins}m ago`;
   return `${Math.floor(mins / 60)}h ${mins % 60}m ago`;
+}
+
+// Appointment slot → "Mon 14 Jul · 2:30 PM" (manual format; Hermes Intl is limited).
+function formatSlot(iso?: string) {
+  if (!iso) return 'Time to be confirmed';
+  const d = new Date(iso);
+  const days = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+  const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+  let h = d.getHours();
+  const m = d.getMinutes();
+  const ampm = h >= 12 ? 'PM' : 'AM';
+  h = h % 12 || 12;
+  return `${days[d.getDay()]} ${d.getDate()} ${months[d.getMonth()]} · ${h}:${String(m).padStart(2, '0')} ${ampm}`;
 }
 
 const ORDER_PILL: Record<string, { label: string; bg: string; fg: string }> = {
@@ -183,14 +245,19 @@ function VendorOrderCard({
   order,
   onAction,
   busy,
+  showStore,
 }: {
   order: any;
   onAction: (action: VendorOrderActionKind) => void;
   busy: boolean;
+  showStore?: boolean;
 }) {
   const actions = orderActions(order);
   const items = order.itemCount ?? order.items?.length ?? 0;
   const isPickup = order.fulfillment === 'PICKUP';
+  const isAppt = order.fulfillment === 'APPOINTMENT';
+  // A mobile service stores the customer's address (≠ the store's pickup address).
+  const apptMobile = isAppt && !!order.deliveryAddress && order.deliveryAddress !== order.pickupAddress;
   return (
     <View className="mb-md rounded-2xl bg-surface-base p-lg" style={CARD_SHADOW}>
       <View className="flex-row items-center justify-between">
@@ -201,17 +268,41 @@ function VendorOrderCard({
               <MaterialCommunityIcons name="bag-personal-outline" size={12} color={color.brand[500]} />
               <Text className="ml-1 text-xs font-semibold text-brand-600">Takeaway</Text>
             </View>
+          ) : isAppt ? (
+            <View className="flex-row items-center rounded-full bg-surface-subtle px-2 py-0.5">
+              <MaterialCommunityIcons name="calendar-clock" size={12} color={color.brand[500]} />
+              <Text className="ml-1 text-xs font-semibold text-brand-600">Appointment</Text>
+            </View>
           ) : null}
         </View>
         <StatusPill status={order.status} />
       </View>
+      {showStore && order.vendor?.name ? (
+        <View className="mt-xs flex-row items-center">
+          <MaterialCommunityIcons name="storefront-outline" size={12} color={color.brand[500]} />
+          <Text className="ml-1 text-xs font-bold text-brand-600" numberOfLines={1}>{order.vendor.name}</Text>
+        </View>
+      ) : null}
       <View className="mt-xs flex-row items-center">
         <Feather name="clock" size={13} color={color.text.muted} />
         <Text className="ml-1 text-xs text-text-muted">{timeAgo(order.placedAt)}</Text>
         {items ? <Text className="ml-2 text-xs text-text-muted">{`· ${items} item${items === 1 ? '' : 's'}`}</Text> : null}
         <Text className="ml-2 text-xs text-text-muted">{`· ${order.paymentMethod === 'CASH' ? 'Cash' : order.paymentMethod ?? ''}`}</Text>
       </View>
-      {isPickup && order.pickupCode ? (
+      {isAppt ? (
+        <View className="mt-sm">
+          <View className="flex-row items-center">
+            <MaterialCommunityIcons name="calendar-clock" size={14} color={color.brand[500]} />
+            <Text className="ml-1 text-sm font-bold text-text-primary">{formatSlot(order.appointmentSlot)}</Text>
+          </View>
+          <View className="mt-xs flex-row items-center">
+            <Feather name={apptMobile ? 'navigation' : 'home'} size={12} color={color.text.muted} />
+            <Text className="ml-1 flex-1 text-xs text-text-secondary" numberOfLines={1}>
+              {apptMobile ? `You travel to: ${order.deliveryAddress}` : 'At your store'}
+            </Text>
+          </View>
+        </View>
+      ) : isPickup && order.pickupCode ? (
         <View className="mt-sm flex-row items-center">
           <MaterialCommunityIcons name="form-textbox-password" size={13} color={color.text.muted} />
           <Text className="ml-1 text-sm text-text-secondary">Pickup code </Text>
@@ -247,6 +338,7 @@ function VendorOps({ store, navigation }: any) {
   const toggleOrders = useToggleOrders();
   const orderAction = useOrderAction();
   const ordersQ = useVendorOrders(true);
+  const analyticsQ = useVendorAnalytics();
   const { stores } = useVendorProfile();
   const setSelectedStore = useStoreSwitcher((s) => s.setSelectedStore);
   const qc = useQueryClient();
@@ -263,9 +355,10 @@ function VendorOps({ store, navigation }: any) {
   const newOrders = orders.filter((o) => isNew(o.status));
   const inProgress = orders.filter((o) => !isNew(o.status));
   const queueValue = orders.reduce((sum, o) => sum + Number(o.totalAmount ?? o.total ?? 0), 0);
+  const today: any = (analyticsQ.data as any)?.today ?? {};
 
   return (
-    <SafeAreaView style={{ flex: 1 }} edges={['top']} className="bg-surface-base">
+    <SafeAreaView style={{ flex: 1 }} edges={['top']} className="bg-surface-subtle">
       <Header title={store.name} />
       <ScrollView
         className="flex-1"
@@ -292,6 +385,18 @@ function VendorOps({ store, navigation }: any) {
             })}
           </ScrollView>
         ) : null}
+
+        {/* Today's sales — Eats-Manager hero */}
+        <View className="mb-md rounded-3xl bg-surface-base p-lg" style={CARD_SHADOW}>
+          <Text className="text-[11px] font-bold uppercase tracking-[1.5px] text-text-muted">Today&apos;s sales</Text>
+          <Text className="mt-0.5 font-display text-3xl font-extrabold text-text-primary">{money(today.revenue ?? 0)}</Text>
+          <View className="mt-1 flex-row items-center">
+            <MaterialCommunityIcons name="check-decagram" size={14} color={color.success} />
+            <Text className="ml-1 text-xs font-semibold text-text-secondary">
+              100% yours · {today.orders ?? 0} order{(today.orders ?? 0) === 1 ? '' : 's'} today
+            </Text>
+          </View>
+        </View>
 
         {/* Store status */}
         <Card className="mb-md">
@@ -330,6 +435,14 @@ function VendorOps({ store, navigation }: any) {
           <KpiTile icon="timer-outline" value={`${store.estimatedPrepTime ?? 30}m`} label="Prep time" />
         </View>
 
+        {/* The Swift model — you keep everything */}
+        <View className="mb-md flex-row items-center rounded-2xl bg-surface-subtle px-md py-sm">
+          <MaterialCommunityIcons name="check-decagram" size={15} color={color.success} />
+          <Text className="ml-2 flex-1 text-xs font-semibold text-text-secondary">
+            You keep 100% of every sale — Swift charges a flat weekly fee, never commission.
+          </Text>
+        </View>
+
         <Button label="Manage menu & inventory" variant="outline" className="mb-lg" onPress={() => navigation.navigate('Menu')} />
 
         {/* New orders */}
@@ -346,7 +459,7 @@ function VendorOps({ store, navigation }: any) {
           </View>
         ) : (
           newOrders.map((o) => (
-            <VendorOrderCard key={o.id} order={o} busy={busy} onAction={(action) => orderAction.mutate({ id: o.id, action })} />
+            <VendorOrderCard key={o.id} order={o} busy={busy} showStore={stores.length > 1} onAction={(action) => orderAction.mutate({ id: o.id, action })} />
           ))
         )}
 
@@ -355,7 +468,7 @@ function VendorOps({ store, navigation }: any) {
           <>
             <Heading size="lg" className="mb-sm mt-md">In progress</Heading>
             {inProgress.map((o) => (
-              <VendorOrderCard key={o.id} order={o} busy={busy} onAction={(action) => orderAction.mutate({ id: o.id, action })} />
+              <VendorOrderCard key={o.id} order={o} busy={busy} showStore={stores.length > 1} onAction={(action) => orderAction.mutate({ id: o.id, action })} />
             ))}
           </>
         ) : null}
@@ -369,7 +482,7 @@ function VendorRoot() {
 
   if (isLoading) {
     return (
-      <SafeAreaView style={{ flex: 1 }} edges={['top']} className="bg-surface-base">
+      <SafeAreaView style={{ flex: 1 }} edges={['top']} className="bg-surface-subtle">
         <View className="flex-1 items-center justify-center">
           <Spinner size="large" />
         </View>
@@ -505,7 +618,7 @@ function VendorMenuScreen({ navigation }: any) {
   };
 
   return (
-    <SafeAreaView style={{ flex: 1 }} edges={['top']} className="bg-surface-base">
+    <SafeAreaView style={{ flex: 1 }} edges={['top']} className="bg-surface-subtle">
       <SubHeader
         title="Menu & inventory"
         navigation={navigation}
@@ -583,8 +696,23 @@ function VendorItemEditorScreen({ navigation, route }: any) {
   const [stock, setStock] = useState<string>(existing?.stockQuantity != null ? String(existing.stockQuantity) : '');
   const [localPhoto, setLocalPhoto] = useState<{ uri: string; name: string; type: string } | null>(null);
 
+  // Service businesses configure a bookable appointment instead of stock.
+  const { store } = useVendorProfile();
+  const isService = store?.vendorType === 'SERVICE';
+  const existingBooking = (existing?.bookingConfig ?? {}) as any;
+  const [duration, setDuration] = useState<number>(existingBooking.durationMinutes ?? 30);
+  const [days, setDays] = useState<number[]>(() => {
+    const ds: number[] = (existingBooking.slots ?? []).map((s: any) => s.dayOfWeek);
+    return ds.length ? Array.from(new Set(ds)) : [1, 2, 3, 4, 5];
+  });
+  const [startTime, setStartTime] = useState<string>(existingBooking.slots?.[0]?.start ?? '09:00');
+  const [endTime, setEndTime] = useState<string>(existingBooking.slots?.[0]?.end ?? '17:00');
+  const [mode, setMode] = useState<'AT_BUSINESS' | 'MOBILE' | 'BOTH'>(existingBooking.serviceMode ?? 'AT_BUSINESS');
+  const [radius, setRadius] = useState<string>(existingBooking.serviceRadiusKm != null ? String(existingBooking.serviceRadiusKm) : '5');
+
   const priceNum = Number(price);
-  const valid = name.trim().length >= 1 && Number.isFinite(priceNum) && priceNum >= 0 && !!categoryId;
+  const valid =
+    name.trim().length >= 1 && Number.isFinite(priceNum) && priceNum >= 0 && !!categoryId && (!isService || days.length > 0);
   const busy = save.isPending || uploadImage.isPending;
   const previewUri = localPhoto?.uri ?? mediaUrl(existing?.imageUrl) ?? undefined;
 
@@ -600,6 +728,14 @@ function VendorItemEditorScreen({ navigation, route }: any) {
   const submit = async () => {
     if (!valid || busy) return;
     const stockNum = stock.trim() === '' ? undefined : Number(stock);
+    const bookingConfig = isService
+      ? {
+          durationMinutes: duration,
+          slots: days.map((d) => ({ dayOfWeek: d, start: startTime, end: endTime })),
+          serviceMode: mode,
+          ...(mode !== 'AT_BUSINESS' ? { serviceRadiusKm: Number(radius) || 0 } : {}),
+        }
+      : undefined;
     const saved: any = await save.mutateAsync({
       id: existing?.id,
       data: {
@@ -609,9 +745,13 @@ function VendorItemEditorScreen({ navigation, route }: any) {
         basePrice: priceNum,
         isAvailable: available,
         isPopular: popular,
-        sku: sku.trim() || undefined,
-        unit: unit.trim() || undefined,
-        stockQuantity: Number.isFinite(stockNum as number) ? stockNum : undefined,
+        ...(isService
+          ? { fulfillment: 'APPOINTMENT' as const, bookingConfig }
+          : {
+              sku: sku.trim() || undefined,
+              unit: unit.trim() || undefined,
+              stockQuantity: Number.isFinite(stockNum as number) ? stockNum : undefined,
+            }),
       },
     });
     const itemId = existing?.id ?? saved?.id;
@@ -623,7 +763,7 @@ function VendorItemEditorScreen({ navigation, route }: any) {
   };
 
   return (
-    <SafeAreaView style={{ flex: 1 }} edges={['top']} className="bg-surface-base">
+    <SafeAreaView style={{ flex: 1 }} edges={['top']} className="bg-surface-subtle">
       <SubHeader title={existing ? 'Edit item' : 'New item'} navigation={navigation} />
       <ScrollView className="flex-1" contentContainerStyle={{ paddingHorizontal: 16, paddingBottom: 32 }} showsVerticalScrollIndicator={false}>
         {/* Photo */}
@@ -649,15 +789,67 @@ function VendorItemEditorScreen({ navigation, route }: any) {
           <Input value={description} onChangeText={setDescription} placeholder="Description (optional)" multiline />
         </View>
 
-        {/* Inventory — used by groceries/shops; optional for restaurants */}
-        <Text className="mb-xs mt-sm text-sm font-semibold text-text-secondary">Inventory (optional)</Text>
-        <View className="gap-sm">
-          <View className="flex-row" style={{ gap: 8 }}>
-            <Input containerClassName="flex-1" value={stock} onChangeText={setStock} placeholder="Stock qty" keyboardType="number-pad" />
-            <Input containerClassName="flex-1" value={unit} onChangeText={setUnit} placeholder="Unit (kg, ea)" />
+        {isService ? (
+          <View className="mt-md rounded-3xl bg-surface-base p-lg" style={CARD_SHADOW}>
+            <Heading size="lg" className="mb-sm">Appointment booking</Heading>
+
+            <Text className="mb-xs text-xs font-semibold text-text-muted">Appointment length</Text>
+            <View className="mb-md flex-row flex-wrap" style={{ gap: 8 }}>
+              {[15, 30, 45, 60, 90, 120].map((m) => (
+                <ChoiceChip key={m} label={`${m} min`} active={duration === m} onPress={() => setDuration(m)} />
+              ))}
+            </View>
+
+            <Text className="mb-xs text-xs font-semibold text-text-muted">Available days</Text>
+            <View className="mb-md flex-row flex-wrap" style={{ gap: 6 }}>
+              {DAY_LABELS.map((d, i) => {
+                const on = days.includes(i);
+                return (
+                  <PressableScale
+                    key={i}
+                    onPress={() => setDays((p) => (on ? p.filter((x) => x !== i) : [...p, i]))}
+                    className={on ? 'rounded-full bg-brand-500 px-md py-sm' : 'rounded-full border border-border-subtle bg-surface-subtle px-md py-sm'}
+                  >
+                    <Text className={on ? 'text-xs font-bold text-white' : 'text-xs font-bold text-text-secondary'}>{d}</Text>
+                  </PressableScale>
+                );
+              })}
+            </View>
+
+            <Text className="mb-xs text-xs font-semibold text-text-muted">Hours</Text>
+            <View className="mb-md flex-row items-center" style={{ gap: 8 }}>
+              <Input containerClassName="flex-1" value={startTime} onChangeText={setStartTime} placeholder="09:00" />
+              <Text className="text-text-muted">to</Text>
+              <Input containerClassName="flex-1" value={endTime} onChangeText={setEndTime} placeholder="17:00" />
+            </View>
+
+            <Text className="mb-xs text-xs font-semibold text-text-muted">Where does it happen?</Text>
+            <View className="mb-md flex-row flex-wrap" style={{ gap: 8 }}>
+              <ChoiceChip label="At my place" active={mode === 'AT_BUSINESS'} onPress={() => setMode('AT_BUSINESS')} />
+              <ChoiceChip label="I travel to them" active={mode === 'MOBILE'} onPress={() => setMode('MOBILE')} />
+              <ChoiceChip label="Both" active={mode === 'BOTH'} onPress={() => setMode('BOTH')} />
+            </View>
+
+            {mode !== 'AT_BUSINESS' ? (
+              <View>
+                <Text className="mb-xs text-xs font-semibold text-text-muted">How far will you travel from your store? (km)</Text>
+                <Input value={radius} onChangeText={setRadius} placeholder="5" keyboardType="number-pad" />
+              </View>
+            ) : null}
           </View>
-          <Input value={sku} onChangeText={setSku} placeholder="SKU / barcode (optional)" />
-        </View>
+        ) : (
+          <>
+            {/* Inventory — used by groceries/shops; optional for restaurants */}
+            <Text className="mb-xs mt-sm text-sm font-semibold text-text-secondary">Inventory (optional)</Text>
+            <View className="gap-sm">
+              <View className="flex-row" style={{ gap: 8 }}>
+                <Input containerClassName="flex-1" value={stock} onChangeText={setStock} placeholder="Stock qty" keyboardType="number-pad" />
+                <Input containerClassName="flex-1" value={unit} onChangeText={setUnit} placeholder="Unit (kg, ea)" />
+              </View>
+              <Input value={sku} onChangeText={setSku} placeholder="SKU / barcode (optional)" />
+            </View>
+          </>
+        )}
 
         <Text className="mb-xs mt-sm text-sm font-semibold text-text-secondary">Category</Text>
         <View className="mb-md flex-row flex-wrap" style={{ gap: 8 }}>
@@ -694,7 +886,7 @@ function VendorOrdersTab({ navigation }: any) {
   const { store } = useVendorProfile();
   if (!store) {
     return (
-      <SafeAreaView style={{ flex: 1 }} edges={['top']} className="bg-surface-base">
+      <SafeAreaView style={{ flex: 1 }} edges={['top']} className="bg-surface-subtle">
         <View className="flex-1 items-center justify-center">
           <Spinner size="large" />
         </View>
@@ -709,7 +901,7 @@ function VendorInsightsScreen() {
   const a: any = q.data ?? {};
   const v: any = a.vendor ?? {};
   return (
-    <SafeAreaView style={{ flex: 1 }} edges={['top']} className="bg-surface-base">
+    <SafeAreaView style={{ flex: 1 }} edges={['top']} className="bg-surface-subtle">
       <Header title="Insights" />
       <ScrollView
         className="flex-1"

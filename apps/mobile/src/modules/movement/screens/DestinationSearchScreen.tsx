@@ -54,7 +54,7 @@ export function DestinationSearchScreen({ navigation, route }: any) {
   };
 
   return (
-    <SafeAreaView style={{ flex: 1 }} edges={['top']} className="bg-surface-base">
+    <SafeAreaView style={{ flex: 1 }} edges={['top']} className="bg-surface-subtle">
       <View className="flex-row items-center px-lg py-sm">
         <PressableScale onPress={() => navigation?.goBack?.()} hitSlop={10}>
           <Feather name="chevron-left" size={24} color={color.text.primary} />
@@ -82,8 +82,10 @@ export function DestinationSearchScreen({ navigation, route }: any) {
       </View>
 
       <PressableScale onPress={openPin}>
-        <View className="mx-lg mb-sm flex-row items-center rounded-xl border border-border-subtle bg-surface-subtle px-lg py-md">
-          <MaterialCommunityIcons name="map-marker-radius-outline" size={20} color={color.brand[500]} />
+        <View className="mx-lg mb-sm flex-row items-center rounded-2xl border border-border-subtle bg-surface-base px-lg py-md">
+          <View className="h-9 w-9 items-center justify-center rounded-full bg-brand-50">
+            <MaterialCommunityIcons name="map-marker-radius-outline" size={18} color={color.brand[500]} />
+          </View>
           <Text className="ml-sm font-semibold text-brand-600">Set location on map</Text>
         </View>
       </PressableScale>

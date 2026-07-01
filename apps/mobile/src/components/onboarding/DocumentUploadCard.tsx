@@ -1,5 +1,7 @@
 import { Pressable, View, ActivityIndicator } from 'react-native';
 import * as ImagePicker from 'expo-image-picker';
+import { Feather, MaterialCommunityIcons } from '@expo/vector-icons';
+import { color } from '@swift/ui';
 import { Text, Card, Badge } from '../ui';
 import { useUploadDocument } from '../../hooks/verification';
 
@@ -23,6 +25,11 @@ const DOC_LABELS: Record<string, string> = {
   selfie: 'Selfie',
 };
 const label = (docType: string) => DOC_LABELS[docType] ?? humanize(docType);
+// Safe, always-present icons only.
+const docIcon = (docType: string): keyof typeof MaterialCommunityIcons.glyphMap =>
+  docType.includes('national_id') || docType.includes('licence') || docType === 'selfie'
+    ? 'card-account-details-outline'
+    : 'file-document-outline';
 
 type DocStatus = 'APPROVED' | 'PENDING' | 'REJECTED' | undefined;
 
@@ -69,22 +76,27 @@ export function DocumentUploadCard({
 
   return (
     <Pressable disabled={approved || upload.isPending} onPress={pick}>
-      <Card className={isNext && !status ? 'mb-sm border-brand-500' : 'mb-sm'}>
-        <View className="flex-row items-center justify-between">
-          <View className="flex-1 pr-md">
-            <Text className="text-xs text-text-secondary">{caption}</Text>
-            <Text className="text-base font-semibold">{label(docType)}</Text>
-          </View>
-          {upload.isPending ? (
-            <ActivityIndicator />
-          ) : approved ? (
-            <Badge label="Approved" tone="success" />
-          ) : pending ? (
-            <Badge label="In review" tone="brand" />
-          ) : (
-            <Text className="text-xl text-brand-500">›</Text>
-          )}
+      <Card className={isNext && !status ? 'mb-sm flex-row items-center border-brand-500' : 'mb-sm flex-row items-center'}>
+        <View className="h-11 w-11 items-center justify-center rounded-full" style={{ backgroundColor: color.surface.subtle }}>
+          <MaterialCommunityIcons
+            name={approved ? 'check-decagram' : docIcon(docType)}
+            size={20}
+            color={approved ? color.success : color.brand[500]}
+          />
         </View>
+        <View className="ml-md flex-1">
+          <Text className="text-xs text-text-secondary">{caption}</Text>
+          <Text className="text-base font-semibold">{label(docType)}</Text>
+        </View>
+        {upload.isPending ? (
+          <ActivityIndicator />
+        ) : approved ? (
+          <Badge label="Approved" tone="success" />
+        ) : pending ? (
+          <Badge label="In review" tone="brand" />
+        ) : (
+          <Feather name="chevron-right" size={20} color={color.text.muted} />
+        )}
       </Card>
     </Pressable>
   );

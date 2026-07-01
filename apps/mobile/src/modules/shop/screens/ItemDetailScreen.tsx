@@ -101,7 +101,7 @@ export function ItemDetailScreen({ navigation, route }: any) {
         <View className="px-lg pt-lg">
           <Heading size="2xl">{item.name}</Heading>
           {item.description ? <Text className="mt-xs text-base text-text-secondary">{item.description}</Text> : null}
-          <Text className="mt-sm text-lg font-bold text-text-primary">{money(basePrice)}</Text>
+          <Text className="mt-sm text-xl font-extrabold text-brand-600">{money(basePrice)}</Text>
         </View>
 
         {groups.map((g) => {

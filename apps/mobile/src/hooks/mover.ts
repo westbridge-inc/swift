@@ -43,6 +43,20 @@ export function useEarningsToday(kind: MoverKind | null) {
     enabled: !!kind,
   });
 }
+export function useEarningsSummary<T = any>(kind: MoverKind | null) {
+  return useQuery<T>({
+    queryKey: ['mover', 'earnings-summary', kind],
+    queryFn: () => unwrap<T>(svc(kind as MoverKind).earningsSummary()),
+    enabled: !!kind,
+  });
+}
+export function useEarnings<T = any>(kind: MoverKind | null) {
+  return useQuery<T>({
+    queryKey: ['mover', 'earnings-history', kind],
+    queryFn: () => unwrap<T>(svc(kind as MoverKind).earnings()),
+    enabled: !!kind,
+  });
+}
 export function useAvailableJobs(kind: MoverKind | null, online: boolean) {
   return useQuery({
     queryKey: ['mover', 'available', kind],
@@ -69,7 +83,7 @@ export function useGoOffline(kind: MoverKind) {
 }
 export function useAcceptJob(kind: MoverKind) {
   const qc = useQueryClient();
-  return useMutation({ mutationFn: (id: string) => unwrap(svc(kind).accept(id)), onSuccess: () => qc.invalidateQueries({ queryKey: ['mover'] }) });
+  return useMutation({ mutationFn: ({ id, fare }: { id: string; fare?: number }) => unwrap(svc(kind).accept(id, fare)), onSuccess: () => qc.invalidateQueries({ queryKey: ['mover'] }) });
 }
 export function useDriverAction() {
   const qc = useQueryClient();

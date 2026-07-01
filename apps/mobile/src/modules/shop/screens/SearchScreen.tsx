@@ -4,7 +4,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { Feather } from '@expo/vector-icons';
 import { color } from '@swift/ui';
 import { Text, Heading, Skeleton, List, Input, PressableScale, EmptyState } from '../../../components/ui';
-import { VendorCard, type Vendor } from '../../../components/customer/VendorCard';
+import { VendorRow } from '../../../components/customer/VendorCards';
 import { useVendors } from '../../../hooks';
 import { useLocationStore } from '../../../stores/locationStore';
 
@@ -63,11 +63,11 @@ export function SearchScreen({ navigation }: any) {
     return p;
   }, [debounced, filter, sort, openNow, topRated, latitude, longitude]);
 
-  const { data, isLoading, isError, refetch, isRefetching } = useVendors<Vendor[]>(params);
+  const { data, isLoading, isError, refetch, isRefetching } = useVendors<any[]>(params);
   const vendors = data ?? [];
 
   return (
-    <SafeAreaView style={{ flex: 1 }} edges={['top']} className="bg-surface-base">
+    <SafeAreaView style={{ flex: 1 }} edges={['top']} className="bg-surface-subtle">
       <View className="px-lg pb-sm pt-md">
         <Heading size="2xl">Explore</Heading>
       </View>
@@ -131,7 +131,7 @@ export function SearchScreen({ navigation }: any) {
         {isLoading ? (
           <View className="px-lg pt-sm">
             {[0, 1, 2].map((i) => (
-              <Skeleton key={i} className="mb-md h-48 w-full rounded-2xl" />
+              <Skeleton key={i} className="mb-md h-28 w-full rounded-3xl" />
             ))}
           </View>
         ) : isError ? (
@@ -147,12 +147,12 @@ export function SearchScreen({ navigation }: any) {
         ) : (
           <List
             data={vendors}
-            keyExtractor={(v: Vendor) => v.id}
+            keyExtractor={(v: any) => String(v.id)}
             contentContainerStyle={{ paddingHorizontal: 16, paddingBottom: 32, paddingTop: 4 }}
             keyboardShouldPersistTaps="handled"
             refreshControl={<RefreshControl refreshing={isRefetching} onRefresh={() => refetch()} tintColor={color.brand[500]} />}
-            renderItem={({ item }: { item: Vendor }) => (
-              <VendorCard vendor={item} onPress={() => navigation?.navigate?.('VendorDetail', { id: item.id })} />
+            renderItem={({ item }: { item: any }) => (
+              <VendorRow vendor={item} onPress={() => navigation?.navigate?.('VendorDetail', { id: item.id })} />
             )}
             ListEmptyComponent={
               <View className="pt-2xl">

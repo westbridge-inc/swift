@@ -4,6 +4,8 @@ import {
   calculateCourierFee,
   calculateTaxiFare,
   generateOrderNumber,
+  clampDriverFare,
+  DRIVER_FARE_FLOOR_PCT,
 } from './markup';
 
 // NOTE: customer markup has been removed (zero-commission model — customers pay
@@ -146,5 +148,44 @@ describe('generateOrderNumber', () => {
     const mm = (now.getMonth() + 1).toString().padStart(2, '0');
     const dd = now.getDate().toString().padStart(2, '0');
     expect(generateOrderNumber(5).startsWith(`SW-${yy}${mm}${dd}-005`)).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// clampDriverFare — movers set their own price, capped at the market rate
+// ---------------------------------------------------------------------------
+
+describe('clampDriverFare', () => {
+  const market = 3000;
+  const floor = Math.ceil(market * DRIVER_FARE_FLOOR_PCT); // 1800
+
+  // The whole legal point: a driver can never charge above the market rate.
+  it('never exceeds the market max (no overcharging the customer)', () => {
+    expect(clampDriverFare(5000, market)).toBe(market);
+    expect(clampDriverFare(market + 1, market)).toBe(market);
+  });
+
+  it('allows charging exactly the market rate', () => {
+    expect(clampDriverFare(market, market)).toBe(market);
+  });
+
+  it('allows discounting down to the floor (compete on price)', () => {
+    expect(clampDriverFare(2000, market)).toBe(2000);
+    expect(clampDriverFare(floor, market)).toBe(floor);
+  });
+
+  it('clamps an under-floor request up to the floor', () => {
+    expect(clampDriverFare(100, market)).toBe(floor);
+    expect(clampDriverFare(0, market)).toBe(floor);
+  });
+
+  it('falls back to the market rate on invalid input (never trust the client)', () => {
+    expect(clampDriverFare(Number.NaN, market)).toBe(market);
+    expect(clampDriverFare(2000, 0)).toBe(0);
+  });
+
+  it('rounds fractional requests', () => {
+    expect(clampDriverFare(2000.4, market)).toBe(2000);
+    expect(clampDriverFare(2000.6, market)).toBe(2001);
   });
 });
