@@ -12,6 +12,9 @@ interface AuthState {
   // Guests browse freely; an action needing an account flips this to swap the
   // root navigator into the auth flow (and back to browsing on cancel).
   wantsAuth: boolean;
+  // One-app routing: what the user picked on the entry "How will you use Swift?"
+  // screen. 'customer' browses as a guest; 'mover'/'vendor' must sign in + onboard.
+  intent: 'customer' | 'mover' | 'vendor' | null;
   countryCode: string | null;
   dialCode: string | null;
   currencyCode: string | null;
@@ -20,6 +23,7 @@ interface AuthState {
   setUser: (user: User) => void;
   promptLogin: () => void;
   cancelAuth: () => void;
+  setIntent: (intent: 'customer' | 'mover' | 'vendor' | null) => void;
   setCountry: (c: { code: string; dialCode?: string | null; currencyCode?: string | null; currencySymbol?: string | null }) => void;
   logout: () => void;
   setLoading: (loading: boolean) => void;
@@ -38,6 +42,7 @@ export const useAuthStore = create<AuthState>()(
       isAuthenticated: false,
       isLoading: true,
       wantsAuth: false,
+      intent: null,
       countryCode: null,
       dialCode: null,
       currencyCode: null,
@@ -47,6 +52,7 @@ export const useAuthStore = create<AuthState>()(
       setUser: (user) => set({ user }),
       promptLogin: () => set({ wantsAuth: true }),
       cancelAuth: () => set({ wantsAuth: false }),
+      setIntent: (intent) => set({ intent }),
       setCountry: (c) =>
         set({
           countryCode: c.code,
@@ -72,6 +78,7 @@ export const useAuthStore = create<AuthState>()(
         accessToken: state.accessToken,
         refreshToken: state.refreshToken,
         isAuthenticated: state.isAuthenticated,
+        intent: state.intent,
         countryCode: state.countryCode,
         dialCode: state.dialCode,
         currencyCode: state.currencyCode,

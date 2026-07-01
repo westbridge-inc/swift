@@ -2,29 +2,33 @@ import { View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Feather, MaterialCommunityIcons } from '@expo/vector-icons';
 import { color } from '@swift/ui';
-import { Text, Heading, Card, PressableScale, StepProgress } from '../../components/ui';
+import { Text, Heading, Card, PressableScale } from '../../components/ui';
 import { SwiftMark } from '../../components/SwiftLogo';
+import { useAuthStore } from '../../stores/authStore';
 
-const ROLES: { key: string; icon: keyof typeof MaterialCommunityIcons.glyphMap; title: string; sub: string }[] = [
-  { key: 'CUSTOMER', icon: 'shopping-outline', title: 'Order on Swift', sub: 'Food, groceries, rides, courier & services' },
-  { key: 'MOVER', icon: 'moped', title: 'Drive & deliver', sub: 'Earn delivering parcels & driving riders' },
-  { key: 'VENDOR', icon: 'storefront-outline', title: 'Sell on Swift', sub: 'List your restaurant, shop or services' },
+type Intent = 'customer' | 'mover' | 'vendor';
+
+const ROLES: { intent: Intent; icon: keyof typeof MaterialCommunityIcons.glyphMap; title: string; sub: string }[] = [
+  { intent: 'customer', icon: 'shopping-outline', title: 'Order on Swift', sub: 'Food, groceries, rides, courier & services' },
+  { intent: 'mover', icon: 'moped', title: 'Drive & deliver', sub: 'Earn delivering parcels & driving riders' },
+  { intent: 'vendor', icon: 'storefront-outline', title: 'Sell on Swift', sub: 'List your restaurant, shop or services' },
 ];
 
-export function RolePickerScreen({ route, navigation }: any) {
-  const phone = route?.params?.phone;
+// The single app's entry screen. Picking an option only sets `intent`;
+// RootNavigator reacts — customers go straight to browsing as a guest, earners
+// are routed into the sign-in + onboarding flow. No navigation here, so there's
+// no route to "not handle".
+export function RolePickerScreen() {
+  const setIntent = useAuthStore((s) => s.setIntent);
   return (
     <SafeAreaView style={{ flex: 1 }} edges={['top', 'bottom']} className="bg-surface-base">
       <View className="flex-1 px-lg pt-2xl">
         <SwiftMark size={44} />
         <Heading size="xl" className="mt-md">How will you use Swift?</Heading>
-        <Text className="mt-xs text-text-secondary">You can add another role later from your account.</Text>
-        <View className="mt-lg">
-          <StepProgress step={3} total={4} />
-        </View>
-        <View className="mt-xl">
+        <Text className="mt-xs text-text-secondary">You can switch anytime from your account.</Text>
+        <View className="mt-2xl">
           {ROLES.map((r) => (
-            <PressableScale key={r.key} onPress={() => navigation?.navigate?.('Register', { phone, role: r.key })}>
+            <PressableScale key={r.intent} onPress={() => setIntent(r.intent)}>
               <Card className="mb-md flex-row items-center">
                 <View className="h-12 w-12 items-center justify-center rounded-2xl bg-brand-50">
                   <MaterialCommunityIcons name={r.icon} size={24} color={color.brand[500]} />
