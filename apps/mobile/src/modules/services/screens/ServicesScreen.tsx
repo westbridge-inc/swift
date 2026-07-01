@@ -58,7 +58,7 @@ export function ServicesScreen({ navigation }: any) {
   };
 
   return (
-    <SafeAreaView style={{ flex: 1 }} edges={['top']} className="bg-surface-base">
+    <SafeAreaView style={{ flex: 1 }} edges={['top']} className="bg-surface-subtle">
       <Header navigation={navigation} />
       <ScrollView
         className="flex-1"
@@ -88,7 +88,7 @@ export function ServicesScreen({ navigation }: any) {
                   className={
                     active
                       ? 'rounded-full border border-brand-500 bg-brand-500 px-lg py-sm'
-                      : 'rounded-full border border-border-subtle px-lg py-sm'
+                      : 'rounded-full border border-border-subtle bg-surface-base px-lg py-sm'
                   }
                 >
                   <Text className={active ? 'text-sm font-semibold text-white' : 'text-sm font-semibold text-text-secondary'}>
@@ -183,7 +183,7 @@ export function ServicesScreen({ navigation }: any) {
             placeholder="Describe the job (at least 10 characters)…"
             placeholderTextColor={color.text.muted}
             multiline
-            className="mb-sm rounded-lg border border-border-subtle bg-surface-base px-lg py-md font-body text-base text-text-primary"
+            className="mb-sm rounded-2xl border border-border-subtle bg-surface-base px-lg py-md font-body text-base text-text-primary"
             style={{ minHeight: 64 }}
           />
           {errMsg ? <Text className="mb-sm text-center text-sm text-error">{errMsg}</Text> : null}

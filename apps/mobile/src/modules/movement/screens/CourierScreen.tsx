@@ -5,7 +5,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import BottomSheet, { BottomSheetScrollView } from '@gorhom/bottom-sheet';
 import { color } from '@swift/ui';
 import { Feather, MaterialCommunityIcons } from '@expo/vector-icons';
-import { Text, Heading, Card, Button, Spinner, Badge, PressableScale, Input, ChoiceChip } from '../../../components/ui';
+import { Text, Heading, Button, Spinner, Badge, PressableScale, Input, elevation } from '../../../components/ui';
 import { useCourierEstimate, useCourierOrders, useSendCourier } from '../../../hooks';
 import { useLocationStore } from '../../../stores/locationStore';
 import { GEORGETOWN } from '../../../hooks/useDeviceLocation';
@@ -15,16 +15,16 @@ import type { PickedPlace } from './DestinationSearchScreen';
 type Size = 'SMALL' | 'MEDIUM' | 'LARGE' | 'EXTRA_LARGE';
 type Speed = 'STANDARD' | 'EXPRESS' | 'RUSH';
 
-const SIZES: { key: Size; label: string }[] = [
-  { key: 'SMALL', label: 'Small' },
-  { key: 'MEDIUM', label: 'Medium' },
-  { key: 'LARGE', label: 'Large' },
-  { key: 'EXTRA_LARGE', label: 'XL' },
+const SIZES: { key: Size; label: string; icon: keyof typeof MaterialCommunityIcons.glyphMap; hint: string }[] = [
+  { key: 'SMALL', label: 'Small', icon: 'email-outline', hint: 'Documents' },
+  { key: 'MEDIUM', label: 'Medium', icon: 'package-variant', hint: 'Shoebox' },
+  { key: 'LARGE', label: 'Large', icon: 'package-variant-closed', hint: 'Backpack' },
+  { key: 'EXTRA_LARGE', label: 'XL', icon: 'dolly', hint: 'Bulky' },
 ];
-const SPEEDS: { key: Speed; label: string }[] = [
-  { key: 'STANDARD', label: 'Standard' },
-  { key: 'EXPRESS', label: 'Express' },
-  { key: 'RUSH', label: 'Rush' },
+const SPEEDS: { key: Speed; label: string; icon: keyof typeof MaterialCommunityIcons.glyphMap; hint: string }[] = [
+  { key: 'STANDARD', label: 'Standard', icon: 'clock-outline', hint: 'Lowest price' },
+  { key: 'EXPRESS', label: 'Express', icon: 'clock-fast', hint: 'Faster' },
+  { key: 'RUSH', label: 'Rush', icon: 'lightning-bolt', hint: 'Fastest' },
 ];
 
 function prettyStatus(s: string) {
@@ -35,7 +35,7 @@ function BackButton({ navigation }: any) {
   return (
     <SafeAreaView edges={['top']} style={{ position: 'absolute', top: 0, left: 0, zIndex: 10 }}>
       <PressableScale onPress={() => navigation?.goBack?.()} hitSlop={10} className="m-lg">
-        <View className="h-10 w-10 items-center justify-center rounded-full bg-surface-base" style={{ elevation: 4 }}>
+        <View className="h-10 w-10 items-center justify-center rounded-full bg-surface-base" style={elevation.raised}>
           <Feather name="chevron-left" size={22} color={color.text.primary} />
         </View>
       </PressableScale>
@@ -53,6 +53,45 @@ function regionFor(pts: LatLng[]) {
     latitudeDelta: Math.max(0.02, (Math.max(...lats) - Math.min(...lats)) * 2.2),
     longitudeDelta: Math.max(0.02, (Math.max(...lngs) - Math.min(...lngs)) * 2.2),
   };
+}
+
+/** Selectable tile used for size + speed — icon in a tinted chip, label, hint. */
+function OptionTile({
+  icon,
+  label,
+  hint,
+  active,
+  onPress,
+}: {
+  icon: keyof typeof MaterialCommunityIcons.glyphMap;
+  label: string;
+  hint: string;
+  active: boolean;
+  onPress: () => void;
+}) {
+  return (
+    <PressableScale onPress={onPress} style={{ flex: 1 }}>
+      <View
+        className={
+          active
+            ? 'items-center rounded-2xl border-2 border-brand-500 bg-brand-50 px-1 py-md'
+            : 'items-center rounded-2xl border border-border-subtle bg-surface-base px-1 py-md'
+        }
+        style={active ? undefined : elevation.card}
+      >
+        <View
+          className="mb-1 h-9 w-9 items-center justify-center rounded-full"
+          style={{ backgroundColor: active ? color.brand[500] : color.surface.subtle }}
+        >
+          <MaterialCommunityIcons name={icon} size={18} color={active ? '#fff' : color.text.secondary} />
+        </View>
+        <Text className={active ? 'text-xs font-bold text-brand-700' : 'text-xs font-bold text-text-primary'} numberOfLines={1}>
+          {label}
+        </Text>
+        <Text className="text-[10px] text-text-muted" numberOfLines={1}>{hint}</Text>
+      </View>
+    </PressableScale>
+  );
 }
 
 export function CourierScreen({ navigation }: any) {
@@ -121,7 +160,7 @@ export function CourierScreen({ navigation }: any) {
   };
 
   return (
-    <View style={{ flex: 1 }} className="bg-surface-base">
+    <View style={{ flex: 1 }} className="bg-surface-subtle">
       <MapView provider={PROVIDER_DEFAULT} style={{ flex: 1 }} region={region} showsUserLocation>
         {pickupLL ? <Marker coordinate={pickupLL} title="From" /> : null}
         {dropoffLL ? <Marker coordinate={dropoffLL} title="To" pinColor={color.brand[500]} /> : null}
@@ -132,92 +171,96 @@ export function CourierScreen({ navigation }: any) {
 
       <BackButton navigation={navigation} />
 
-      <BottomSheet index={0} snapPoints={['45%', '90%']} enableDynamicSizing={false}>
+      <BottomSheet index={0} snapPoints={['50%', '92%']} enableDynamicSizing={false} backgroundStyle={{ backgroundColor: color.surface.subtle }}>
         <BottomSheetScrollView
           contentContainerStyle={{ paddingHorizontal: 16, paddingBottom: 32 }}
           keyboardShouldPersistTaps="handled"
         >
-          <Heading size="xl" className="mb-md">
-            Send a package
-          </Heading>
+          <Heading size="xl" className="mb-md">Send a package</Heading>
 
-          {/* From / To */}
-          <PressableScale onPress={() => openSearch((p) => setPickupOverride(p), 'Pickup')}>
-            <View className="flex-row items-center rounded-xl border border-border-subtle bg-surface-subtle px-lg py-md">
-              <MaterialCommunityIcons name="circle-slice-8" size={16} color={color.text.muted} />
-              <View className="ml-sm flex-1">
-                <Text className="text-xs text-text-muted">From</Text>
-                <Text className="text-base font-semibold" numberOfLines={1}>{pickup?.label ?? 'Set pickup'}</Text>
+          {/* Route — From → To, connected */}
+          <View className="rounded-3xl bg-surface-base p-lg" style={elevation.card}>
+            <PressableScale onPress={() => openSearch((p) => setPickupOverride(p), 'Pickup')}>
+              <View className="flex-row items-center">
+                <View style={{ width: 22, alignItems: 'center' }}>
+                  <View style={{ width: 11, height: 11, borderRadius: 6, borderWidth: 2.5, borderColor: color.text.muted }} />
+                </View>
+                <View className="ml-sm flex-1">
+                  <Text className="text-xs text-text-muted">From</Text>
+                  <Text className="text-base font-semibold text-text-primary" numberOfLines={1}>{pickup?.label ?? 'Set pickup'}</Text>
+                </View>
               </View>
-            </View>
-          </PressableScale>
-          <PressableScale onPress={() => openSearch((p) => setDropoff(p), 'Deliver to?')}>
-            <View className="mt-sm flex-row items-center rounded-xl border border-border-subtle bg-surface-subtle px-lg py-md">
-              <MaterialCommunityIcons name="map-marker" size={18} color={color.brand[500]} />
-              <View className="ml-sm flex-1">
-                <Text className="text-xs text-text-muted">To</Text>
-                <Text className="text-base font-semibold" numberOfLines={1}>{dropoff?.label ?? 'Choose destination'}</Text>
+            </PressableScale>
+            <View style={{ marginLeft: 10, height: 16, width: 2, backgroundColor: color.border.subtle, marginVertical: 3 }} />
+            <PressableScale onPress={() => openSearch((p) => setDropoff(p), 'Deliver to?')}>
+              <View className="flex-row items-center">
+                <View style={{ width: 22, alignItems: 'center' }}>
+                  <MaterialCommunityIcons name="map-marker" size={18} color={color.brand[500]} />
+                </View>
+                <View className="ml-sm flex-1">
+                  <Text className="text-xs text-text-muted">To</Text>
+                  <Text className="text-base font-semibold text-text-primary" numberOfLines={1}>{dropoff?.label ?? 'Choose destination'}</Text>
+                </View>
+                <Feather name="search" size={18} color={color.text.muted} />
               </View>
-              <Feather name="search" size={18} color={color.text.muted} />
-            </View>
-          </PressableScale>
+            </PressableScale>
+          </View>
 
-          {/* Size */}
-          <Text className="mb-xs mt-lg text-sm font-semibold text-text-secondary">Package size</Text>
-          <View className="flex-row flex-wrap" style={{ gap: 8 }}>
+          {/* Package size */}
+          <Text className="mb-sm mt-lg text-sm font-bold text-text-primary">Package size</Text>
+          <View className="flex-row" style={{ gap: 8 }}>
             {SIZES.map((s) => (
-              <ChoiceChip key={s.key} label={s.label} active={s.key === size} onPress={() => setSize(s.key)} />
+              <OptionTile key={s.key} icon={s.icon} label={s.label} hint={s.hint} active={s.key === size} onPress={() => setSize(s.key)} />
             ))}
           </View>
 
           {/* Speed */}
-          <Text className="mb-xs mt-lg text-sm font-semibold text-text-secondary">Speed</Text>
+          <Text className="mb-sm mt-lg text-sm font-bold text-text-primary">How fast?</Text>
           <View className="flex-row" style={{ gap: 8 }}>
             {SPEEDS.map((s) => (
-              <ChoiceChip key={s.key} label={s.label} active={s.key === speed} onPress={() => setSpeed(s.key)} full />
+              <OptionTile key={s.key} icon={s.icon} label={s.label} hint={s.hint} active={s.key === speed} onPress={() => setSpeed(s.key)} />
             ))}
           </View>
 
           {/* Recipient */}
-          <Text className="mb-xs mt-lg text-sm font-semibold text-text-secondary">Recipient</Text>
-          <Card className="gap-sm">
-            <Input value={recipientName} onChangeText={setRecipientName} placeholder="Recipient name" />
-            <Input
-              value={recipientPhone}
-              onChangeText={setRecipientPhone}
-              placeholder="Recipient phone"
-              keyboardType="phone-pad"
-            />
-            <Input value={description} onChangeText={setDescription} placeholder="What's inside? (optional)" />
-          </Card>
+          <Text className="mb-sm mt-lg text-sm font-bold text-text-primary">Recipient</Text>
+          <View style={{ gap: 8 }}>
+            <Input value={recipientName} onChangeText={setRecipientName} placeholder="Recipient name" left={<MaterialCommunityIcons name="account-outline" size={18} color={color.text.muted} />} />
+            <Input value={recipientPhone} onChangeText={setRecipientPhone} placeholder="Recipient phone" keyboardType="phone-pad" left={<MaterialCommunityIcons name="phone-outline" size={18} color={color.text.muted} />} />
+            <Input value={description} onChangeText={setDescription} placeholder="What's inside? (optional)" left={<MaterialCommunityIcons name="cube-outline" size={18} color={color.text.muted} />} />
+          </View>
 
           {/* Price */}
           {dropoffPoint ? (
-            <Card className="mt-md">
+            <View className="mt-lg rounded-3xl bg-surface-base p-lg" style={elevation.card}>
               {estimating && !estimate ? (
                 <View className="flex-row items-center">
                   <Spinner />
-                  <Text className="ml-sm text-text-secondary">Calculating…</Text>
+                  <Text className="ml-sm text-text-secondary">Calculating fare…</Text>
                 </View>
               ) : estimate ? (
                 <View className="flex-row items-center justify-between">
-                  <View className="flex-1 pr-md">
-                    <Text className="text-base font-semibold">Delivery fee</Text>
-                    <Text className="mt-xs text-xs text-text-muted">
-                      {estimate.distanceKm} km · ~{estimate.estimatedMinutes} min · cash
-                    </Text>
+                  <View>
+                    <Text className="text-xs font-semibold uppercase tracking-wider text-text-muted">Delivery fee</Text>
+                    <Text className="mt-0.5 font-display text-3xl font-extrabold text-brand-600">{money(estimate.totalFee)}</Text>
                   </View>
-                  <Text className="text-xl font-semibold text-brand-600">{money(estimate.totalFee)}</Text>
+                  <View className="items-end">
+                    <Text className="text-sm font-semibold text-text-secondary">{estimate.distanceKm} km · ~{estimate.estimatedMinutes} min</Text>
+                    <View className="mt-1 flex-row items-center">
+                      <MaterialCommunityIcons name="cash" size={13} color={color.success} />
+                      <Text className="ml-1 text-xs font-semibold text-text-muted">No fees · pay cash</Text>
+                    </View>
+                  </View>
                 </View>
               ) : (
                 <Text className="text-text-secondary">Couldn&apos;t get a price. Try another destination.</Text>
               )}
-            </Card>
+            </View>
           ) : null}
 
           {errMsg ? <Text className="mt-md text-center text-sm text-error">{errMsg}</Text> : null}
 
-          <Button className="mt-md" loading={send.isPending} disabled={!valid} onPress={onSend}>
+          <Button className="mt-lg" loading={send.isPending} disabled={!valid} onPress={onSend}>
             <Text className="font-body font-semibold text-white">
               {estimate ? `Send parcel · ${money(estimate.totalFee)}` : 'Send parcel'}
             </Text>
@@ -229,21 +272,19 @@ export function CourierScreen({ navigation }: any) {
           {/* Recent sends */}
           {recent && recent.length > 0 ? (
             <View className="mt-xl">
-              <Heading size="lg" className="mb-sm">Recent sends</Heading>
+              <Text className="mb-sm text-sm font-bold text-text-primary">Recent sends</Text>
               {recent.slice(0, 5).map((o: any) => (
                 <PressableScale key={o.id} onPress={() => navigation?.navigate?.('OrderTracking', { id: o.id })}>
-                  <Card className="mb-sm flex-row items-center justify-between">
-                    <View className="flex-1 pr-md">
-                      <Text className="text-sm font-semibold" numberOfLines={1}>
-                        To {o.courierRecipientName ?? o.deliveryAddress ?? 'recipient'}
-                      </Text>
+                  <View className="mb-sm flex-row items-center rounded-2xl bg-surface-base p-md" style={elevation.card}>
+                    <View className="h-9 w-9 items-center justify-center rounded-full bg-brand-50">
+                      <MaterialCommunityIcons name="package-variant-closed" size={16} color={color.brand[500]} />
+                    </View>
+                    <View className="ml-sm flex-1">
+                      <Text className="text-sm font-semibold" numberOfLines={1}>To {o.courierRecipientName ?? o.deliveryAddress ?? 'recipient'}</Text>
                       <Text className="mt-xs text-xs text-text-muted">#{o.orderNumber} · {money(o.totalAmount)}</Text>
                     </View>
-                    <Badge
-                      label={prettyStatus(o.status)}
-                      tone={o.status === 'DELIVERED' || o.status === 'COMPLETED' ? 'success' : 'brand'}
-                    />
-                  </Card>
+                    <Badge label={prettyStatus(o.status)} tone={o.status === 'DELIVERED' || o.status === 'COMPLETED' ? 'success' : 'brand'} />
+                  </View>
                 </PressableScale>
               ))}
             </View>

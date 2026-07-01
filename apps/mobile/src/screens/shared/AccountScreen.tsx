@@ -16,7 +16,7 @@ export function AccountScreen({ navigation }: any) {
 function GuestAccount() {
   const promptLogin = useAuthStore((s) => s.promptLogin);
   return (
-    <SafeAreaView style={{ flex: 1 }} edges={['top']} className="bg-surface-base">
+    <SafeAreaView style={{ flex: 1 }} edges={['top']} className="bg-surface-subtle">
       <View className="px-lg pb-sm pt-md">
         <Heading size="2xl">Account</Heading>
       </View>

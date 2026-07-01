@@ -1,4 +1,6 @@
 import { View } from 'react-native';
+import { MaterialCommunityIcons } from '@expo/vector-icons';
+import { color } from '@swift/ui';
 import { Text, Heading, Spinner, EmptyState } from '../ui';
 import { DocumentUploadCard } from './DocumentUploadCard';
 
@@ -81,6 +83,13 @@ export function DocumentChecklist({
           isNext={docType === nextDoc}
         />
       ))}
+      <View className="mt-sm flex-row items-start rounded-2xl bg-surface-subtle p-md">
+        <MaterialCommunityIcons name="shield-check-outline" size={16} color={color.text.muted} style={{ marginTop: 1 }} />
+        <Text className="ml-2 flex-1 text-xs leading-4 text-text-muted">
+          We confirm your documents are genuine and that they&apos;re yours, and re‑check expiry every day — we&apos;ll
+          remind you before anything lapses so you stay verified.
+        </Text>
+      </View>
     </View>
   );
 }

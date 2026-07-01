@@ -12,7 +12,7 @@ export function Card({
 }: ViewProps & { className?: string; elevation?: 'card' | 'raised'; style?: StyleProp<ViewStyle> }) {
   return (
     <View
-      className={cn('bg-surface-base rounded-lg border border-border-subtle p-lg', className)}
+      className={cn('bg-surface-base rounded-2xl border border-border-subtle p-lg', className)}
       style={[elevationStyles[elevation], style]}
       {...props}
     />

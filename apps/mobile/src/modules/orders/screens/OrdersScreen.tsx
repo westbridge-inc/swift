@@ -83,7 +83,7 @@ export function OrdersScreen({ navigation }: any) {
   const promptLogin = useAuthStore((s) => s.promptLogin);
   if (!isAuthenticated) {
     return (
-      <SafeAreaView style={{ flex: 1 }} edges={['top']} className="bg-surface-base">
+      <SafeAreaView style={{ flex: 1 }} edges={['top']} className="bg-surface-subtle">
         <View className="px-lg pb-sm pt-md"><Heading size="2xl">Orders</Heading></View>
         <View className="flex-1 items-center justify-center">
           <EmptyState
@@ -107,7 +107,7 @@ function SignedInOrders({ navigation }: any) {
 
   if (isLoading) {
     return (
-      <SafeAreaView style={{ flex: 1 }} edges={['top']} className="bg-surface-base">
+      <SafeAreaView style={{ flex: 1 }} edges={['top']} className="bg-surface-subtle">
         <View className="px-lg pt-md">
           <Heading size="2xl" className="mb-md">Orders</Heading>
           {[0, 1, 2, 3].map((i) => <Skeleton key={i} className="mb-md h-24 w-full rounded-2xl" />)}
@@ -117,7 +117,7 @@ function SignedInOrders({ navigation }: any) {
   }
 
   return (
-    <SafeAreaView style={{ flex: 1 }} edges={['top']} className="bg-surface-base">
+    <SafeAreaView style={{ flex: 1 }} edges={['top']} className="bg-surface-subtle">
       <View className="px-lg pb-sm pt-md">
         <Heading size="2xl">Orders</Heading>
       </View>

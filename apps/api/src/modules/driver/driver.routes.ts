@@ -9,6 +9,7 @@ import { getKycProvider } from '../../providers/kyc/kyc-provider';
 import { haversineDistance, estimateDeliveryMinutes } from '../../utils/distance';
 import { parsePagination, paginatedResponse } from '../../utils/pagination';
 import { AppError, NotFoundError } from '../../utils/errors';
+import { clampDriverFare } from '../../utils/markup';
 
 const updateDriverProfileSchema = z.object({
   vehicleMake: z.string().max(50).optional(),
@@ -283,6 +284,7 @@ export async function driverRoutes(app: FastifyInstance) {
   // 1. Accept ride
   app.post('/rides/:id/accept', { preHandler: [app.authenticate] }, async (request) => {
     const { id } = request.params as { id: string };
+    const { fare } = z.object({ fare: z.number().min(0).optional() }).parse(request.body ?? {});
     const driver = await getDriver(request.user.userId);
 
     if (!driver.isOnline) {
@@ -300,6 +302,20 @@ export async function driverRoutes(app: FastifyInstance) {
     // accept at the same instant resolve to exactly one winner — the old
     // check-then-update here could double-assign.
     const updatedOrder = await dispatch.claimOrder(id, driver.id, 'DRIVER');
+
+    // Driver-set price, capped at the market rate Swift computed (taxiFareTotal).
+    // The driver charges UP TO market and no more — Swift never sets the final price.
+    let responseOrder: any = updatedOrder;
+    if (fare != null) {
+      const chosen = clampDriverFare(fare, Number(order.taxiFareTotal));
+      if (chosen !== Number(order.taxiFareTotal)) {
+        await app.prisma.order.update({
+          where: { id },
+          data: { taxiFareTotal: chosen, totalAmount: chosen },
+        });
+        responseOrder = { ...updatedOrder, taxiFareTotal: chosen, totalAmount: chosen };
+      }
+    }
 
     // Notify customer
     app.io.to(`order:${id}`).emit('order:status_changed', {
@@ -329,7 +345,7 @@ export async function driverRoutes(app: FastifyInstance) {
       data: { orderId: id, status: 'DRIVER_ASSIGNED' },
     });
 
-    return { success: true, data: updatedOrder };
+    return { success: true, data: responseOrder };
   });
 
   /** POST /rides/:id/rate-customer — post-trip rating goes both ways (§4.2). */

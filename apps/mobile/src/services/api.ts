@@ -265,10 +265,12 @@ export const riderApi = {
   location: (latitude: number, longitude: number) => api.put('/rider/location', { latitude, longitude }),
   available: () => api.get('/rider/orders/available'),
   active: () => api.get('/rider/orders/active'),
-  accept: (id: string) => api.post(`/rider/orders/${id}/accept`),
+  accept: (id: string, fare?: number) => api.post(`/rider/orders/${id}/accept`, { fare }),
   handover: (id: string) => api.post(`/rider/orders/${id}/handover`),
   delivered: (id: string) => api.put(`/rider/orders/${id}/delivered`),
   earningsToday: () => api.get('/rider/earnings/today'),
+  earningsSummary: () => api.get('/rider/earnings/summary'),
+  earnings: () => api.get('/rider/earnings'),
 };
 
 // Mover ops — Driver (taxi), mounted at /api/v1/driver
@@ -279,13 +281,15 @@ export const driverApi = {
   location: (latitude: number, longitude: number) => api.put('/driver/location', { latitude, longitude }),
   available: () => api.get('/driver/rides/available'),
   active: () => api.get('/driver/rides/active'),
-  accept: (id: string) => api.post(`/driver/rides/${id}/accept`),
+  accept: (id: string, fare?: number) => api.post(`/driver/rides/${id}/accept`, { fare }),
   enRoute: (id: string) => api.put(`/driver/rides/${id}/en-route`),
   arrived: (id: string) => api.put(`/driver/rides/${id}/arrived`),
   verifyPin: (id: string, pin: string) => api.put(`/driver/rides/${id}/verify-pin`, { pin }),
   start: (id: string) => api.put(`/driver/rides/${id}/start`),
   complete: (id: string) => api.put(`/driver/rides/${id}/complete`),
   earningsToday: () => api.get('/driver/earnings/today'),
+  earningsSummary: () => api.get('/driver/earnings/summary'),
+  earnings: () => api.get('/driver/earnings'),
 };
 
 // Vendor ops (mounted at /api/v1/vendor)
@@ -311,6 +315,7 @@ export const vendorApi = {
   preparing: (id: string) => api.put(`/vendor/orders/${id}/preparing`),
   ready: (id: string) => api.put(`/vendor/orders/${id}/ready`),
   completePickup: (id: string, code?: string) => api.put(`/vendor/orders/${id}/complete-pickup`, { code }),
+  completeAppointment: (id: string) => api.put(`/vendor/orders/${id}/complete-appointment`),
   reject: (id: string) => api.put(`/vendor/orders/${id}/reject`),
   items: () => api.get('/vendor/items'),
   subscription: () => api.get('/vendor/subscription'),

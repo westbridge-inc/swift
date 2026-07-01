@@ -3,7 +3,7 @@ import { View } from 'react-native';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Feather, MaterialCommunityIcons } from '@expo/vector-icons';
 import { color } from '@swift/ui';
-import { Text, Heading, Skeleton, Button, List, Image, PressableScale, EmptyState, Scrim } from '../../../components/ui';
+import { Text, Heading, Skeleton, Button, List, Image, PressableScale, EmptyState } from '../../../components/ui';
 import { useVendor, useCart, useToggleFavorite } from '../../../hooks';
 import { useAuthStore } from '../../../stores/authStore';
 import { money } from '../../../lib/money';
@@ -56,7 +56,7 @@ const MenuItemRow = memo(function MenuItemRow({ item, onOpen, kind }: { item: an
           {item.description ? (
             <Text className="mt-xs text-sm text-text-secondary" numberOfLines={2}>{item.description}</Text>
           ) : null}
-          <Text className="mt-sm text-sm font-bold text-text-primary">{money(item.customerPrice ?? item.basePrice)}</Text>
+          <Text className="mt-sm text-sm font-extrabold text-brand-600">{money(item.customerPrice ?? item.basePrice)}</Text>
           {customizable && !unavailable ? (
             <Text className="mt-xs text-xs font-medium text-brand-600">Customizable</Text>
           ) : null}
@@ -78,15 +78,15 @@ const MenuItemRow = memo(function MenuItemRow({ item, onOpen, kind }: { item: an
 function StatusPill({ closed }: { closed: boolean }) {
   if (closed) {
     return (
-      <View className="self-start rounded-full px-2.5 py-1" style={{ backgroundColor: 'rgba(0,0,0,0.55)' }}>
-        <Text className="text-xs font-bold text-white">Closed</Text>
+      <View className="self-start rounded-full bg-surface-subtle px-2.5 py-1">
+        <Text className="text-xs font-bold text-text-secondary">Closed now</Text>
       </View>
     );
   }
   return (
-    <View className="flex-row items-center self-start rounded-full bg-surface-base px-2.5 py-1">
+    <View className="flex-row items-center self-start rounded-full bg-success/10 px-2.5 py-1">
       <View className="mr-1 h-2 w-2 rounded-full" style={{ backgroundColor: color.success }} />
-      <Text className="text-xs font-bold text-text-primary">Open now</Text>
+      <Text className="text-xs font-bold text-success">Open now</Text>
     </View>
   );
 }
@@ -95,39 +95,34 @@ function StatusPill({ closed }: { closed: boolean }) {
 // (premium restaurant-detail treatment), with description/min-order below.
 function VendorHeader({ vendor, onReviews }: { vendor: any; onReviews?: () => void }) {
   const rating = vendor.averageRating && vendor.averageRating > 0 ? Number(vendor.averageRating).toFixed(1) : 'New';
-  const closed = vendor.isCurrentlyOpen === false;
+  // Mirror the checkout gate (isCurrentlyOpen && acceptingOrders) so a vendor
+  // that's open-by-hours but paused still reads as "Closed now".
+  const closed = vendor.isCurrentlyOpen === false || vendor.acceptingOrders === false;
   return (
-    <View className="mb-sm">
-      <View>
-        <Image source={{ uri: vendorImage(vendor) }} style={{ width: '100%', height: 240 }} />
-        <Scrim height={168} to="rgba(0,0,0,0.82)" />
-        <View className="absolute inset-x-0 bottom-0 px-lg pb-lg">
-          <StatusPill closed={closed} />
-          <Heading size="3xl" className="mt-sm text-white">{vendor.name}</Heading>
-          <View className="mt-xs flex-row items-center">
-            <MaterialCommunityIcons name="star" size={15} color="#fff" />
-            <Text className="ml-1 text-sm font-bold text-white">{rating}</Text>
-            {vendor.totalRatings ? <Text className="ml-1 text-sm text-white" style={{ opacity: 0.8 }}>({vendor.totalRatings})</Text> : null}
-            <Text className="mx-2 text-white" style={{ opacity: 0.6 }}>·</Text>
-            <Feather name="clock" size={14} color="#fff" />
-            <Text className="ml-1 text-sm text-white" style={{ opacity: 0.9 }}>{vendor.estimatedPrepTime ?? 25} min</Text>
-            {vendor.distanceKm != null ? (
-              <>
-                <Text className="mx-2 text-white" style={{ opacity: 0.6 }}>·</Text>
-                <Text className="text-sm text-white" style={{ opacity: 0.9 }}>{vendor.distanceKm} km</Text>
-              </>
-            ) : null}
-          </View>
-        </View>
-      </View>
-      {vendor.description || vendor.minOrderAmount ? (
-        <View className="px-lg pt-md">
-          {vendor.description ? <Text className="text-sm text-text-secondary">{vendor.description}</Text> : null}
-          {vendor.minOrderAmount ? (
-            <Text className="mt-xs text-xs text-text-muted">Minimum order {money(vendor.minOrderAmount)}</Text>
+    <View className="mb-sm bg-surface-base">
+      <Image source={{ uri: vendorImage(vendor) }} style={{ width: '100%', height: 210 }} />
+      <View className="px-lg pt-md">
+        <StatusPill closed={closed} />
+        <Heading size="3xl" className="mt-sm text-text-primary">{vendor.name}</Heading>
+        <View className="mt-xs flex-row items-center">
+          <MaterialCommunityIcons name="star" size={15} color={color.brand[500]} />
+          <Text className="ml-1 text-sm font-bold text-text-primary">{rating}</Text>
+          {vendor.totalRatings ? <Text className="ml-1 text-sm text-text-muted">({vendor.totalRatings})</Text> : null}
+          <Text className="mx-2 text-text-muted">·</Text>
+          <Feather name="clock" size={14} color={color.text.secondary} />
+          <Text className="ml-1 text-sm text-text-secondary">{vendor.estimatedPrepTime ?? 25} min</Text>
+          {vendor.distanceKm != null ? (
+            <>
+              <Text className="mx-2 text-text-muted">·</Text>
+              <Text className="text-sm text-text-secondary">{vendor.distanceKm} km</Text>
+            </>
           ) : null}
         </View>
-      ) : null}
+        {vendor.description ? <Text className="mt-sm text-sm text-text-secondary">{vendor.description}</Text> : null}
+        {vendor.minOrderAmount ? (
+          <Text className="mt-xs text-xs text-text-muted">Minimum order {money(vendor.minOrderAmount)}</Text>
+        ) : null}
+      </View>
       <PressableScale onPress={onReviews}>
         <View className="mt-sm flex-row items-center justify-between border-y border-border-subtle px-lg py-md">
           <View className="flex-row items-center">
@@ -141,6 +136,13 @@ function VendorHeader({ vendor, onReviews }: { vendor: any; onReviews?: () => vo
           </View>
         </View>
       </PressableScale>
+      {/* The model — these are the real prices */}
+      <View className="mx-lg mt-md flex-row items-center rounded-2xl bg-surface-subtle px-lg py-sm">
+        <MaterialCommunityIcons name="cash-check" size={16} color={color.success} />
+        <Text className="ml-sm flex-1 text-xs font-semibold text-text-secondary">
+          The vendor’s real prices — no fees, no markup. Pay cash.
+        </Text>
+      </View>
     </View>
   );
 }

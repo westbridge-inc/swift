@@ -98,3 +98,8 @@ export function mediaUrl(url?: string | null): string | null {
   if (/^https?:\/\//.test(url)) return url;
   return `${API_URL}${url.startsWith('/') ? '' : '/'}${url}`;
 }
+
+/** A menu item's display image: its own photo, else a deterministic food fallback. */
+export function itemImage(item: { imageUrl?: string | null; id?: string }): string {
+  return mediaUrl(item.imageUrl) || fallbackImage(item.id, 'food');
+}

@@ -290,7 +290,11 @@ describe('The guarantee — honest claim pays, guardrails catch patterns', () =>
     const rider = await makeRider();
     for (let i = 0; i < 3; i++) {
       const victim = await makeUser(['CUSTOMER'], 'CUSTOMER');
-      await plantClaim(rider.riderId, victim.userId, 2);
+      // daysAgo=0: the cap counts the CURRENT calendar month (cash-rules `monthStart`
+      // = setDate(1)). Dating claims 2 days ago straddles the month boundary on the
+      // 1st–2nd (claims land in the prior month, excluded from the cap) — which flaked
+      // this test in CI on Jul 1 UTC while it passed locally on Jun 30. Plant in-month.
+      await plantClaim(rider.riderId, victim.userId, 0);
     }
 
     const customer = await makeUser(['CUSTOMER'], 'CUSTOMER');

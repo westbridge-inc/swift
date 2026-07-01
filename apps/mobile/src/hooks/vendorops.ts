@@ -54,11 +54,20 @@ export function useToggleOrders() {
 export function useOrderAction() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: ({ id, action, code }: { id: string; action: 'accept' | 'preparing' | 'ready' | 'reject' | 'complete-pickup'; code?: string }) => {
+    mutationFn: ({
+      id,
+      action,
+      code,
+    }: {
+      id: string;
+      action: 'accept' | 'preparing' | 'ready' | 'reject' | 'complete-pickup' | 'complete-appointment';
+      code?: string;
+    }) => {
       if (action === 'accept') return unwrap(vendorApi.acceptOrder(id));
       if (action === 'preparing') return unwrap(vendorApi.preparing(id));
       if (action === 'ready') return unwrap(vendorApi.ready(id));
       if (action === 'complete-pickup') return unwrap(vendorApi.completePickup(id, code));
+      if (action === 'complete-appointment') return unwrap(vendorApi.completeAppointment(id));
       return unwrap(vendorApi.reject(id));
     },
     onSuccess: () => qc.invalidateQueries({ queryKey: ['vendor', 'orders'] }),

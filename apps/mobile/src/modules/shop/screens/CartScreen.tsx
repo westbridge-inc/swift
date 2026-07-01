@@ -43,7 +43,7 @@ function SummaryRow({ label, value, bold }: { label: string; value: string; bold
   return (
     <View className="flex-row items-center justify-between py-1">
       <Text className={bold ? 'text-base font-semibold' : 'text-sm text-text-secondary'}>{label}</Text>
-      <Text className={bold ? 'text-base font-semibold' : 'text-sm text-text-primary'}>{value}</Text>
+      <Text className={bold ? 'text-base font-extrabold text-brand-600' : 'text-sm text-text-primary'}>{value}</Text>
     </View>
   );
 }
@@ -52,10 +52,10 @@ const CartItemRow = memo(function CartItemRow({ item, busy, onDec, onInc, onRemo
   const unavailable = item.isAvailable === false;
   return (
     <View
-      className="mb-md flex-row items-center rounded-2xl bg-surface-base p-md"
+      className="mb-md flex-row items-center rounded-3xl bg-surface-base p-md"
       style={elevation.card}
     >
-      <Image source={{ uri: item.imageUrl || fallbackImage(item.itemId ?? item.id, kind) }} style={{ width: 64, height: 64, borderRadius: 12 }} />
+      <Image source={{ uri: item.imageUrl || fallbackImage(item.itemId ?? item.id, kind) }} style={{ width: 76, height: 76, borderRadius: 16 }} />
       <View className="flex-1 px-md">
         <Text className="text-base font-semibold text-text-primary" numberOfLines={1}>{item.name}</Text>
         {item.selectedOptionNames?.length ? (
@@ -73,7 +73,7 @@ const CartItemRow = memo(function CartItemRow({ item, busy, onDec, onInc, onRemo
         </View>
       </View>
       <View className="items-end">
-        <Text className="text-base font-bold text-text-primary">{money(item.lineTotal)}</Text>
+        <Text className="text-base font-extrabold text-brand-600">{money(item.lineTotal)}</Text>
         <PressableScale disabled={busy} onPress={onRemove} hitSlop={8} className="mt-md">
           <Feather name="trash-2" size={18} color={color.text.muted} />
         </PressableScale>
@@ -91,7 +91,7 @@ export function CartScreen({ navigation }: any) {
 
   if (isLoading) {
     return (
-      <SafeAreaView style={{ flex: 1 }} edges={['top']} className="bg-surface-base">
+      <SafeAreaView style={{ flex: 1 }} edges={['top']} className="bg-surface-subtle">
         <View className="flex-1 items-center justify-center">
           <Spinner size="large" />
         </View>
@@ -102,7 +102,7 @@ export function CartScreen({ navigation }: any) {
   const items: any[] = cart?.items ?? [];
   if (!cart || items.length === 0) {
     return (
-      <SafeAreaView style={{ flex: 1 }} edges={['top']} className="bg-surface-base">
+      <SafeAreaView style={{ flex: 1 }} edges={['top']} className="bg-surface-subtle">
         <CartHeader navigation={navigation} title="Your cart" />
         <View className="flex-1 items-center justify-center">
           <EmptyState
@@ -139,13 +139,21 @@ export function CartScreen({ navigation }: any) {
   );
 
   return (
-    <SafeAreaView style={{ flex: 1 }} edges={['top']} className="bg-surface-base">
+    <SafeAreaView style={{ flex: 1 }} edges={['top']} className="bg-surface-subtle">
       <CartHeader navigation={navigation} title={cart.vendor?.name ?? 'Your cart'} onClear={() => clearCart.mutate()} />
       <View style={{ flex: 1 }}>
         <List
           data={items}
           keyExtractor={(it: any) => String(it.id)}
           contentContainerStyle={{ paddingHorizontal: 16, paddingTop: 8, paddingBottom: 170 }}
+          ListHeaderComponent={
+            <View className="mb-md flex-row items-center rounded-2xl bg-surface-base px-lg py-sm" style={elevation.card}>
+              <Feather name="check-circle" size={15} color={color.success} />
+              <Text className="ml-sm flex-1 text-xs font-semibold text-text-secondary">
+                $0 platform fees — you pay the vendor’s price, cash on delivery.
+              </Text>
+            </View>
+          }
           ListFooterComponent={Summary}
           renderItem={({ item: it }: { item: any }) => (
             <CartItemRow

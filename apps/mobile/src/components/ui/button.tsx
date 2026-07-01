@@ -28,7 +28,7 @@ export function Button({ className, textClassName, variant = 'solid', label, chi
   return (
     <PressableScale
       disabled={isDisabled}
-      className={cn('flex-row items-center justify-center rounded-lg px-4 py-3', variantClass, className)}
+      className={cn('flex-row items-center justify-center rounded-full px-5 py-3.5', variantClass, className)}
       {...props}
     >
       {loading ? (

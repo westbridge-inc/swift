@@ -5,7 +5,7 @@ import MapView, { Marker, PROVIDER_DEFAULT, Polyline } from 'react-native-maps';
 import BottomSheet, { BottomSheetView, BottomSheetScrollView } from '@gorhom/bottom-sheet';
 import { color } from '@swift/ui';
 import { Feather, MaterialCommunityIcons } from '@expo/vector-icons';
-import { Text, Heading, Card, Button, Spinner, PressableScale, choiceSurface } from '../../../components/ui';
+import { Text, Heading, Card, Button, Spinner, PressableScale, choiceSurface, elevation } from '../../../components/ui';
 import { useActiveRide, useRideEstimate, useRequestRide, useCancelRide } from '../../../hooks';
 import { useLocationStore } from '../../../stores/locationStore';
 import { GEORGETOWN } from '../../../hooks/useDeviceLocation';
@@ -134,33 +134,35 @@ export function TaxiScreen({ navigation }: any) {
 
       <BackButton navigation={navigation} />
 
-      <BottomSheet index={0} snapPoints={['42%', '85%']} enableDynamicSizing={false}>
+      <BottomSheet index={0} snapPoints={['42%', '85%']} enableDynamicSizing={false} backgroundStyle={{ backgroundColor: color.surface.subtle }}>
         <BottomSheetScrollView contentContainerStyle={{ paddingHorizontal: 16, paddingBottom: 32 }}>
-          {/* Pickup + destination rows */}
-          <PressableScale onPress={() => openSearch((p) => setPickupOverride(p), 'Pickup')}>
-            <View className="flex-row items-center rounded-xl border border-border-subtle bg-surface-subtle px-lg py-md">
-              <MaterialCommunityIcons name="circle-slice-8" size={16} color={color.text.muted} />
-              <View className="ml-sm flex-1">
-                <Text className="text-xs text-text-muted">Pickup</Text>
-                <Text className="text-base font-semibold" numberOfLines={1}>
-                  {pickup?.label ?? 'Set pickup location'}
-                </Text>
+          {/* Route — pickup → destination, connected */}
+          <View className="rounded-3xl bg-surface-base p-lg" style={elevation.card}>
+            <PressableScale onPress={() => openSearch((p) => setPickupOverride(p), 'Pickup')}>
+              <View className="flex-row items-center">
+                <View style={{ width: 22, alignItems: 'center' }}>
+                  <View style={{ width: 11, height: 11, borderRadius: 6, borderWidth: 2.5, borderColor: color.text.muted }} />
+                </View>
+                <View className="ml-sm flex-1">
+                  <Text className="text-xs text-text-muted">Pickup</Text>
+                  <Text className="text-base font-semibold text-text-primary" numberOfLines={1}>{pickup?.label ?? 'Set pickup location'}</Text>
+                </View>
               </View>
-            </View>
-          </PressableScale>
-
-          <PressableScale onPress={() => openSearch((p) => setDropoff(p), 'Where to?')}>
-            <View className="mt-sm flex-row items-center rounded-xl border border-border-subtle bg-surface-subtle px-lg py-md">
-              <MaterialCommunityIcons name="map-marker" size={18} color={color.brand[500]} />
-              <View className="ml-sm flex-1">
-                <Text className="text-xs text-text-muted">Where to?</Text>
-                <Text className="text-base font-semibold" numberOfLines={1}>
-                  {dropoff?.label ?? 'Choose your destination'}
-                </Text>
+            </PressableScale>
+            <View style={{ marginLeft: 10, height: 16, width: 2, backgroundColor: color.border.subtle, marginVertical: 3 }} />
+            <PressableScale onPress={() => openSearch((p) => setDropoff(p), 'Where to?')}>
+              <View className="flex-row items-center">
+                <View style={{ width: 22, alignItems: 'center' }}>
+                  <MaterialCommunityIcons name="map-marker" size={18} color={color.brand[500]} />
+                </View>
+                <View className="ml-sm flex-1">
+                  <Text className="text-xs text-text-muted">Where to?</Text>
+                  <Text className="text-base font-semibold text-text-primary" numberOfLines={1}>{dropoff?.label ?? 'Choose your destination'}</Text>
+                </View>
+                <Feather name="search" size={18} color={color.text.muted} />
               </View>
-              <Feather name="search" size={18} color={color.text.muted} />
-            </View>
-          </PressableScale>
+            </PressableScale>
+          </View>
 
           {/* Tiers */}
           {dropoffPoint ? (
@@ -185,7 +187,7 @@ export function TaxiScreen({ navigation }: any) {
                     />
                   ))}
                   <Text className="mt-sm text-center text-xs text-text-muted">
-                    Price locked before you book — no surge.
+                    Fixed fare, locked before you book — no surge, pay cash.
                   </Text>
                 </>
               ) : (
@@ -232,7 +234,7 @@ function TierRow({
   const meta = TIER_META[tier.rideClass];
   return (
     <PressableScale onPress={onPress}>
-      <View className={`mb-sm flex-row items-center rounded-xl border px-lg py-md ${choiceSurface(selected)}`}>
+      <View className={`mb-sm flex-row items-center rounded-2xl border px-lg py-md ${choiceSurface(selected)}`}>
         <MaterialCommunityIcons name={meta.icon} size={26} color={selected ? '#fff' : color.text.primary} />
         <View className="ml-md flex-1">
           <Text className={`text-base font-bold ${selected ? 'text-white' : 'text-text-primary'}`}>
@@ -277,7 +279,7 @@ function ActiveRide({ navigation, ride, cancelRide }: any) {
 
       <BackButton navigation={navigation} />
 
-      <BottomSheet ref={sheetRef} index={0} snapPoints={['38%', '70%']} enableDynamicSizing={false}>
+      <BottomSheet ref={sheetRef} index={0} snapPoints={['38%', '70%']} enableDynamicSizing={false} backgroundStyle={{ backgroundColor: color.surface.subtle }}>
         <BottomSheetView style={{ paddingHorizontal: 16, paddingBottom: 24 }}>
           <Heading size="lg">{STATUS_LABEL[ride.status] ?? 'On the way'}</Heading>
           <Text className="mt-xs text-sm text-text-secondary">

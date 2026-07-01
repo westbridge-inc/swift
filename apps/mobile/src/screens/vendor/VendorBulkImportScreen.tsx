@@ -53,7 +53,7 @@ export function VendorBulkImportScreen({ navigation }: any) {
           multiline
           textAlignVertical="top"
           style={{ minHeight: 160 }}
-          className="mb-md rounded-lg border border-border-subtle bg-surface-base px-lg py-md font-body text-sm text-text-primary"
+          className="mb-md rounded-2xl border border-border-subtle bg-surface-base px-lg py-md font-body text-sm text-text-primary"
         />
         <Button
           label="Analyze CSV"

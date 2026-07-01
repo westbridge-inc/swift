@@ -1,11 +1,14 @@
 import { useState } from 'react';
-import { View, Alert } from 'react-native';
+import { View, Alert, ScrollView } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
+import { Feather } from '@expo/vector-icons';
+import { color } from '@swift/ui';
 import { authApi, customerApi } from '../../services/api';
 import { useAuthStore } from '../../stores/authStore';
-import { Text, Heading, Button, Field } from '../../components/ui';
+import { Text, Heading, Button, Field, PressableScale, StepProgress } from '../../components/ui';
+import { SwiftMark } from '../../components/SwiftLogo';
 
-export function RegisterScreen({ route }: any) {
+export function RegisterScreen({ navigation, route }: any) {
   const phone = route?.params?.phone;
   const intent = useAuthStore((s) => s.intent);
   const role = (intent === 'mover' ? 'MOVER' : intent === 'vendor' ? 'VENDOR' : 'CUSTOMER') as
@@ -49,37 +52,49 @@ export function RegisterScreen({ route }: any) {
 
   return (
     <SafeAreaView style={{ flex: 1 }} edges={['top', 'bottom']} className="bg-surface-base">
-      <View className="flex-1 justify-center px-lg">
-        <Heading size="xl" className="text-center">
-          Create your account
-        </Heading>
-        <Text className="mb-xl mt-xs text-center text-text-secondary">Almost there — tell us your name.</Text>
-        <Field label="First name" value={firstName} onChangeText={setFirstName} autoFocus />
-        <Field label="Last name" value={lastName} onChangeText={setLastName} />
-        <Field
-          label="Email (optional)"
-          value={email}
-          onChangeText={setEmail}
-          keyboardType="email-address"
-          autoCapitalize="none"
-        />
-        {role === 'CUSTOMER' ? (
-          <Field
-            label="Referral code (optional)"
-            value={referral}
-            onChangeText={setReferral}
-            autoCapitalize="characters"
-            autoCorrect={false}
-          />
-        ) : null}
-        {error ? <Text className="mb-sm text-center text-sm text-error">Couldn&apos;t create your account. Try again.</Text> : null}
-        <Button
-          label="Create account"
-          loading={loading}
-          disabled={!firstName || !lastName}
-          onPress={handleRegister}
-        />
+      <View className="flex-row items-center px-lg pt-md">
+        <PressableScale onPress={() => navigation?.goBack?.()} hitSlop={12} className="mr-md">
+          <Feather name="chevron-left" size={24} color={color.text.primary} />
+        </PressableScale>
+        <View className="flex-1">
+          <StepProgress step={3} total={4} />
+        </View>
       </View>
+      <ScrollView
+        className="flex-1"
+        contentContainerStyle={{ paddingHorizontal: 16, paddingTop: 40, paddingBottom: 24 }}
+        keyboardShouldPersistTaps="handled"
+        showsVerticalScrollIndicator={false}
+      >
+        <View className="items-center">
+          <SwiftMark size={48} />
+          <Heading size="xl" className="mt-md text-center">Create your account</Heading>
+          <Text className="mt-xs text-center text-text-secondary">Almost there — tell us your name.</Text>
+        </View>
+        <View className="mt-xl">
+          <Field label="First name" value={firstName} onChangeText={setFirstName} autoFocus />
+          <Field label="Last name" value={lastName} onChangeText={setLastName} />
+          <Field
+            label="Email (optional)"
+            value={email}
+            onChangeText={setEmail}
+            keyboardType="email-address"
+            autoCapitalize="none"
+          />
+          {role === 'CUSTOMER' ? (
+            <Field
+              label="Referral code (optional)"
+              value={referral}
+              onChangeText={setReferral}
+              autoCapitalize="characters"
+              autoCorrect={false}
+            />
+          ) : null}
+        </View>
+        {error ? <Text className="mb-sm text-center text-sm text-error">Couldn&apos;t create your account. Try again.</Text> : null}
+        <Button label="Create account" loading={loading} disabled={!firstName || !lastName} onPress={handleRegister} />
+        <Text className="mt-md text-center text-xs text-text-muted">No platform fees, ever. Pay cash on delivery.</Text>
+      </ScrollView>
     </SafeAreaView>
   );
 }

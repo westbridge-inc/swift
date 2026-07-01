@@ -83,6 +83,24 @@ const optionGroupInputSchema = z.object({
   sortOrder: z.number().int().min(0).optional(),
 });
 
+// SERVICE listings carry a bookingConfig: how long an appointment is, the weekly
+// availability windows, and WHERE it happens — AT_BUSINESS (customer comes in),
+// MOBILE (provider travels to the customer), or BOTH. serviceRadiusKm caps travel.
+const bookingConfigSchema = z.object({
+  durationMinutes: z.number().int().min(5).max(600),
+  slots: z
+    .array(
+      z.object({
+        dayOfWeek: z.number().int().min(0).max(6),
+        start: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/),
+        end: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/),
+      }),
+    )
+    .max(50),
+  serviceMode: z.enum(['AT_BUSINESS', 'MOBILE', 'BOTH']).optional(),
+  serviceRadiusKm: z.number().min(0).max(100).optional(),
+});
+
 const createItemSchema = z.object({
   categoryId: z.string().min(1),
   name: z.string().trim().min(1).max(150),
@@ -97,6 +115,8 @@ const createItemSchema = z.object({
   dietaryTags: z.array(z.string().max(40)).max(30).optional(),
   allergens: z.array(z.string().max(40)).max(30).optional(),
   sortOrder: z.number().int().min(0).optional(),
+  fulfillment: z.enum(['DELIVERY', 'PICKUP', 'APPOINTMENT']).optional(),
+  bookingConfig: bookingConfigSchema.optional(),
   optionGroups: z
     .array(optionGroupInputSchema.extend({ options: z.array(optionInputSchema).max(100) }))
     .max(50)
@@ -497,6 +517,9 @@ export async function vendorRoutes(app: FastifyInstance) {
           items: true,
           customer: { select: { id: true, firstName: true, lastName: true, avatar: true } },
           rider: { include: { user: { select: { firstName: true, lastName: true, phone: true } } } },
+          // Franchise roll-up: the board aggregates every store the owner has, so each
+          // order needs to say which store it belongs to.
+          vendor: { select: { id: true, name: true } },
         },
         orderBy: { placedAt: 'desc' },
         skip: pagination.skip,
@@ -588,6 +611,20 @@ export async function vendorRoutes(app: FastifyInstance) {
       throw new AppError(400, 'WRONG_PICKUP_CODE', 'That pickup code does not match.');
     }
     const updated = await orderService.updateStatus(order.id, 'COMPLETED', request.user.userId, 'Picked up by customer');
+    return { success: true, data: updated };
+  });
+
+  /** PUT /orders/:id/complete-appointment — Service: vendor marks the appointment done.
+   *  APPOINTMENT orders skip prepare/ready/dispatch; they go ACCEPTED -> COMPLETED. */
+  app.put<{ Params: IdParam }>('/orders/:id/complete-appointment', auth, async (request) => {
+    const order = await resolveOwnedOrder(app, request.user.userId, request.params.id);
+    if (order.fulfillment !== 'APPOINTMENT') {
+      throw new AppError(400, 'NOT_AN_APPOINTMENT', 'This order is not an appointment.');
+    }
+    if (order.status !== 'ACCEPTED') {
+      throw new AppError(400, 'INVALID_STATUS', `Cannot complete appointment from ${order.status} status`);
+    }
+    const updated = await orderService.updateStatus(order.id, 'COMPLETED', request.user.userId, 'Appointment completed by vendor');
     return { success: true, data: updated };
   });
 
@@ -830,6 +867,8 @@ export async function vendorRoutes(app: FastifyInstance) {
         dietaryTags: body.dietaryTags || [],
         allergens: body.allergens || [],
         sortOrder,
+        ...(body.fulfillment ? { fulfillment: body.fulfillment } : {}),
+        ...(body.bookingConfig ? { bookingConfig: body.bookingConfig as object } : {}),
         optionGroups: body.optionGroups?.length
           ? {
               create: body.optionGroups.map((group, gi) => ({
@@ -1058,6 +1097,8 @@ export async function vendorRoutes(app: FastifyInstance) {
         ...(body.dietaryTags !== undefined && { dietaryTags: body.dietaryTags }),
         ...(body.allergens !== undefined && { allergens: body.allergens }),
         ...(body.sortOrder !== undefined && { sortOrder: body.sortOrder }),
+        ...(body.fulfillment !== undefined && { fulfillment: body.fulfillment }),
+        ...(body.bookingConfig !== undefined && { bookingConfig: body.bookingConfig as object }),
       },
       include: {
         category: { select: { id: true, name: true } },

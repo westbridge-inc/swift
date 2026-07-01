@@ -178,6 +178,19 @@ export class OrderService {
           throw new AppError(400, 'OUT_OF_RANGE', `${vendor.name} only delivers within ${vendor.deliveryRadius} km. You are ${distanceKm.toFixed(1)} km away.`);
         }
         deliveryFee = calculateDeliveryFee(distanceKm);
+      } else if (fulfillment === 'APPOINTMENT') {
+        // MOBILE / BOTH services travel to the customer — require their address and
+        // enforce the provider's service radius (mirrors the DELIVERY gate above).
+        const bcfg = (appointmentItems[0]!.item.bookingConfig ?? {}) as { serviceMode?: string; serviceRadiusKm?: number };
+        if (bcfg.serviceMode === 'MOBILE' || bcfg.serviceMode === 'BOTH') {
+          if (!address) throw new AppError(400, 'NO_ADDRESS', `Add your address — ${vendor.name} travels to you`);
+          const travelKm = estimateDrivingDistance(vendor.latitude, vendor.longitude, address.latitude, address.longitude);
+          const radius = Number(bcfg.serviceRadiusKm ?? 0);
+          if (radius > 0 && travelKm > radius) {
+            throw new AppError(400, 'OUT_OF_SERVICE_AREA', `${vendor.name} travels within ${radius} km. You are ${travelKm.toFixed(1)} km away.`);
+          }
+          distanceKm = travelKm;
+        }
       }
 
       // Zero-commission model: the customer pays exactly the vendor's price
@@ -253,6 +266,9 @@ export class OrderService {
         const planTip = isFirst ? tip : 0;
         const planDiscount = isFirst ? discount : 0;
         const totalAmount = Math.max(0, plan.subtotal + plan.deliveryFee + planTip - planDiscount);
+        // DELIVERY and MOBILE appointments go to the customer's address; PICKUP and
+        // AT_BUSINESS appointments use the store (distanceKm>0 marks a mobile service).
+        const toCustomer = plan.fulfillment === 'DELIVERY' || (plan.fulfillment === 'APPOINTMENT' && plan.distanceKm > 0);
 
         const order = await tx.order.create({
           data: {
@@ -268,11 +284,11 @@ export class OrderService {
             pickupAddress: `${plan.vendor.addressLine1}, ${plan.vendor.city}`,
             pickupLat: plan.vendor.latitude,
             pickupLng: plan.vendor.longitude,
-            deliveryAddress: plan.fulfillment === 'DELIVERY'
+            deliveryAddress: toCustomer
               ? `${address!.addressLine1}, ${address!.city}`
               : `${plan.vendor.addressLine1}, ${plan.vendor.city}`,
-            deliveryLat: plan.fulfillment === 'DELIVERY' ? address!.latitude : plan.vendor.latitude,
-            deliveryLng: plan.fulfillment === 'DELIVERY' ? address!.longitude : plan.vendor.longitude,
+            deliveryLat: toCustomer ? address!.latitude : plan.vendor.latitude,
+            deliveryLng: toCustomer ? address!.longitude : plan.vendor.longitude,
             deliveryInstructions: input.deliveryInstructions,
             subtotalBase: plan.subtotal,
             subtotalMarkup: 0,

@@ -16,7 +16,7 @@ export function Input({ className, containerClassName, left, right, ...props }: 
   return (
     <View
       className={cn(
-        'flex-row items-center rounded-xl border border-border-subtle bg-surface-subtle px-lg',
+        'flex-row items-center rounded-2xl border border-border-subtle bg-surface-subtle px-lg',
         containerClassName,
       )}
     >
