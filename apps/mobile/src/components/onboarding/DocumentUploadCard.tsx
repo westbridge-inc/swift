@@ -93,6 +93,11 @@ export function DocumentUploadCard({
         <View className="ml-md flex-1">
           <Text className="text-xs text-text-secondary">{caption}</Text>
           <Text className="text-base font-semibold">{label(docType)}</Text>
+          {docType === 'national_id' || docType === 'owner_national_id' ? (
+            <Text className="mt-0.5 text-xs text-text-muted">
+              Face-matched against your profile selfie
+            </Text>
+          ) : null}
         </View>
         {upload.isPending ? (
           <ActivityIndicator />
