@@ -89,20 +89,23 @@ describe('CountryConfig — Guyana seeded, everything reads from config', () => 
   });
 
   it('scales the mover checklist to the vehicle (no docs a vehicle can\'t have)', async () => {
-    // A bicycle has no licence/registration/insurance; a motorcycle does; a
-    // car/taxi adds the §3.4 extras (hire permit, plate photo, police clearance).
+    // Police clearance is base (every courier — cash + home visits, master
+    // plan §3.2); only VEHICLE documents scale away. A car/taxi adds the
+    // occupational extras (hire permit, plate + exterior photos, fitness).
     const bicycle = await countryConfig.getMoverChecklist('GY', 'BICYCLE');
     expect(bicycle).toContain('national_id');
+    expect(bicycle).toContain('police_clearance');
     expect(bicycle).not.toContain('drivers_licence');
 
     const motorcycle = await countryConfig.getMoverChecklist('GY', 'MOTORCYCLE');
     expect(motorcycle).toContain('drivers_licence');
     expect(motorcycle).toContain('vehicle_insurance');
-    expect(motorcycle).not.toContain('police_clearance');
+    expect(motorcycle).not.toContain('hire_car_permit');
 
     const car = await countryConfig.getMoverChecklist('GY', 'CAR');
     expect(car).toContain('drivers_licence');
     expect(car).toContain('police_clearance');
+    expect(car).toContain('vehicle_exterior_photo');
     expect(car).toContain('fitness_cert');
   });
 

@@ -29,7 +29,7 @@ import { getKycProvider } from '../providers/kyc/kyc-provider';
 
 const DAY = 24 * 60 * 60 * 1000;
 const PHONES = ['+5920009811', '+5920009812', '+5920009813', '+5920009814', '+5920009815'];
-const GY_MOVER_DOCS = ['national_id', 'drivers_licence', 'vehicle_registration', 'vehicle_insurance'];
+const GY_MOVER_DOCS = ['national_id', 'police_clearance', 'drivers_licence', 'vehicle_registration', 'vehicle_insurance'];
 // Heavier cart/cash/billing fixtures (#1/#3/#4/#7) get their own phone block so
 // purge() can sweep them without colliding with the verification PHONES above.
 const HEAVY_PREFIX = '+59200099';

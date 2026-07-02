@@ -19,17 +19,23 @@ const DOC_LABELS: Record<string, string> = {
   vehicle_plate_photo: 'Vehicle Plate Photo',
   police_clearance: 'Police Clearance Certificate',
   fitness_cert: 'Fitness Certificate',
+  vehicle_exterior_photo: 'Car Exterior Photo (H plate + yellow visible)',
   owner_national_id: 'Owner National ID',
   business_registration: 'Business Registration',
+  tin_certificate: 'TIN Certificate',
+  gra_restaurant_licence: 'GRA Restaurant Licence',
   food_handler_cert: "Food Handler's Certificate",
+  storefront_photo: 'Storefront Photo',
   selfie: 'Selfie',
 };
 const label = (docType: string) => DOC_LABELS[docType] ?? humanize(docType);
 // Safe, always-present icons only.
 const docIcon = (docType: string): keyof typeof MaterialCommunityIcons.glyphMap =>
-  docType.includes('national_id') || docType.includes('licence') || docType === 'selfie'
-    ? 'card-account-details-outline'
-    : 'file-document-outline';
+  docType.includes('photo') || docType === 'selfie'
+    ? 'camera-outline'
+    : docType.includes('national_id') || docType.includes('licence')
+      ? 'card-account-details-outline'
+      : 'file-document-outline';
 
 type DocStatus = 'APPROVED' | 'PENDING' | 'REJECTED' | undefined;
 
