@@ -62,6 +62,8 @@ async function makeUserWithSession(roles: UserRole[], activeRole: UserRole) {
       roles,
       activeRole,
       isPhoneVerified: true, selfieCapturedAt: new Date(),
+      // Rides require L2 (master plan §5, L2-before-first-ride)
+      trustLevel: 'L2',
       ...(roles.includes('CUSTOMER') && { customer: { create: {} } }),
     },
   });

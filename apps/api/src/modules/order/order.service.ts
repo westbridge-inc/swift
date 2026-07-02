@@ -5,7 +5,7 @@ import { estimateDrivingDistance, estimateDeliveryMinutes } from '../../utils/di
 import { NotificationService } from '../notification/notification.service';
 import { CountryConfigService } from '../country/country-config.service';
 import { BookingService } from '../booking/booking.service';
-import { orderingRestriction } from '../cash/cash-rules.service';
+import { orderingRestriction, CashRulesService } from '../cash/cash-rules.service';
 import { resolveSelectedOptions, optionsUnitPrice, type ResolvedOption } from './options';
 import { FloatService } from '../dispatch/float.service';
 import { AppError } from '../../utils/errors';
@@ -668,6 +668,20 @@ export class OrderService {
       case 'DELIVERED':
         await this.notifications.orderDelivered(order.customerId, order.orderNumber, orderId);
         break;
+    }
+
+    // L3 — earned trust (master plan §5): completed history may promote the
+    // customer. Cheap no-op unless they're L2 with a clean record; best-effort.
+    if (status === 'DELIVERED' || status === 'COMPLETED') {
+      const account = await this.prisma.user.findUnique({
+        where: { id: order.customerId },
+        select: { countryCode: true },
+      });
+      if (account) {
+        await new CashRulesService(this.prisma, this.notifications, this)
+          .maybePromoteToL3(order.customerId, account.countryCode)
+          .catch(() => undefined);
+      }
     }
 
     return order;

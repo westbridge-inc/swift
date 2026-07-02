@@ -189,6 +189,8 @@ describe('POST /auth/selfie — the only writer of the public photo', () => {
 describe('Transact gates refuse a selfie-less account', () => {
   it('ride request → 403 SELFIE_REQUIRED; passes once the selfie exists', async () => {
     const u = await makeUser(['CUSTOMER'], 'CUSTOMER');
+    // Rides also demand L2 (own coverage in trust-tiers.test.ts) — isolate the selfie gate here.
+    await app.prisma.user.update({ where: { id: u.userId }, data: { trustLevel: 'L2' } });
     const body = {
       pickup: CENTRAL, dropoff: SOUTH,
       pickupAddress: 'Selfie Street 1', dropoffAddress: 'Selfie Street 2',
