@@ -14,7 +14,8 @@ async function tryUnwrap<T = any>(p: Promise<any>): Promise<T | null> {
   }
 }
 
-/** Vendor owner profile; `store` is the first vendor (one store per owner at onboarding). */
+/** The stores this account works in; `store` is the selected one and
+ *  `myRole` is OWNER / MANAGER / STAFF (drives which tools the UI shows). */
 export function useVendorProfile() {
   const q = useQuery({
     queryKey: ['vendor', 'profile'],
@@ -26,7 +27,42 @@ export function useVendorProfile() {
   const owner: any = q.data ?? null;
   const stores: any[] = owner?.vendors ?? [];
   const store: any = stores.find((v) => v.id === selectedStoreId) ?? stores[0] ?? null;
-  return { owner, store, stores, isLoading: q.isLoading };
+  const myRole: 'OWNER' | 'MANAGER' | 'STAFF' = owner?.myRole ?? 'OWNER';
+  return { owner, store, stores, myRole, isLoading: q.isLoading };
+}
+
+// ─── Staff & roles (owner-only) ──────────────────────────────────────────────
+
+export function useVendorStaff(enabled = true) {
+  return useQuery({
+    queryKey: ['vendor', 'staff'],
+    queryFn: () => unwrap<any[]>(vendorApi.staff()),
+    enabled,
+  });
+}
+
+export function useAddStaff() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (data: { phone: string; role: 'MANAGER' | 'STAFF' }) => unwrap(vendorApi.addStaff(data)),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['vendor', 'staff'] }),
+  });
+}
+
+export function useRemoveStaff() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (id: string) => unwrap(vendorApi.removeStaff(id)),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['vendor', 'staff'] }),
+  });
+}
+
+export function useUpdateStaffRole() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, role }: { id: string; role: 'MANAGER' | 'STAFF' }) => unwrap(vendorApi.updateStaff(id, role)),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['vendor', 'staff'] }),
+  });
 }
 
 export function useVendorOrders(enabled: boolean) {
@@ -38,8 +74,9 @@ export function useVendorOrders(enabled: boolean) {
   });
 }
 
-export function useVendorSubscription() {
-  return useQuery({ queryKey: ['vendor', 'subscription'], queryFn: () => unwrap(vendorApi.subscription()) });
+export function useVendorSubscription(enabled = true) {
+  // Billing is owner-only (staff & roles §4.1) — staff sessions skip the call.
+  return useQuery({ queryKey: ['vendor', 'subscription'], queryFn: () => unwrap(vendorApi.subscription()), enabled });
 }
 
 export function useToggleOpen() {

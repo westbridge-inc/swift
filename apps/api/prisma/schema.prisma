@@ -62,6 +62,7 @@ model User {
   rider           Rider?
   driver          Driver?
   vendorOwner     VendorOwner?
+  vendorStaffMemberships VendorStaff[] @relation("vendorStaffMemberships")
   serviceProvider ServiceProvider?
   admin           Admin?
   orders          Order[]        @relation("customerOrders")
@@ -484,6 +485,31 @@ model VendorOwner {
   @@map("vendor_owners")
 }
 
+/// Staff & roles (master plan §4.1): extra logins on a store. The OWNER
+/// (VendorOwner) invites existing Swift accounts by phone; access flows
+/// through resolveVendor exactly like ownership does.
+///   MANAGER — runs the store: orders, menu, hours, insights
+///   STAFF   — floor work: order queue + sold-out toggles
+enum VendorStaffRole {
+  MANAGER
+  STAFF
+}
+
+model VendorStaff {
+  id        String          @id @default(cuid())
+  vendorId  String
+  vendor    Vendor          @relation(fields: [vendorId], references: [id], onDelete: Cascade)
+  userId    String
+  user      User            @relation("vendorStaffMemberships", fields: [userId], references: [id], onDelete: Cascade)
+  role      VendorStaffRole @default(STAFF)
+  /// userId of the owner who added them (audit trail)
+  invitedBy String
+  createdAt DateTime        @default(now())
+
+  @@unique([vendorId, userId])
+  @@map("vendor_staff")
+}
+
 model Vendor {
   id               String          @id @default(cuid())
   ownerId          String
@@ -495,6 +521,7 @@ model Vendor {
   logoUrl          String?
   coverImageUrl    String?
   images           VendorImage[]
+  staff            VendorStaff[]
   phone            String
   email            String?
   addressLine1     String
