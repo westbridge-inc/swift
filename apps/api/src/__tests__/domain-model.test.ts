@@ -33,7 +33,6 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
-  await prisma.orderStatusLog.deleteMany({ where: { orderId: { in: createdOrderIds } } });
   await prisma.order.deleteMany({ where: { id: { in: createdOrderIds } } });
   await prisma.notification.deleteMany({ where: { userId: customerId, createdAt: { gte: testStart } } });
   await prisma.verificationDocument.deleteMany({ where: { userId: customerId } });

@@ -97,7 +97,6 @@ async function purgeFixtures() {
   const orders = await app.prisma.order.findMany({ where: { customerId: { in: userIds } }, select: { id: true } });
   const orderIds = orders.map((o) => o.id);
   await app.prisma.returnRequest.deleteMany({ where: { OR: [{ customerId: { in: userIds } }, { orderId: { in: orderIds } }] } });
-  await app.prisma.orderStatusLog.deleteMany({ where: { orderId: { in: orderIds } } });
   await app.prisma.order.deleteMany({ where: { id: { in: orderIds } } });
   await app.prisma.user.deleteMany({ where: { id: { in: userIds } } });
 }

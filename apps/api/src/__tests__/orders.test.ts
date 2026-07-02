@@ -175,13 +175,11 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
-  await app.prisma.orderStatusLog.deleteMany({ where: { orderId: { in: createdOrderIds } } });
   await app.prisma.order.deleteMany({ where: { id: { in: createdOrderIds } } });
   if (createdUserIds.length) {
     await app.prisma.notification.deleteMany({ where: { userId: { in: createdUserIds } } });
     const orders = await app.prisma.order.findMany({ where: { customerId: { in: createdUserIds } }, select: { id: true } });
     const ids = orders.map((o) => o.id);
-    await app.prisma.orderStatusLog.deleteMany({ where: { orderId: { in: ids } } });
     await app.prisma.booking.deleteMany({ where: { customerId: { in: createdUserIds } } });
     await app.prisma.rating.deleteMany({
       where: { OR: [{ raterId: { in: createdUserIds } }, { rateeId: { in: createdUserIds } }] },
