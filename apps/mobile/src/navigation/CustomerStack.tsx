@@ -16,6 +16,7 @@ import { CheckoutScreen } from '../modules/shop/screens/CheckoutScreen';
 import { OrderTrackingScreen } from '../modules/orders/screens/OrderTrackingScreen';
 import { TaxiScreen } from '../modules/movement/screens/TaxiScreen';
 import { ServicesScreen } from '../modules/services/screens/ServicesScreen';
+import { ServiceJobsScreen } from '../modules/services/screens/ServiceJobsScreen';
 import { IdentityVerificationScreen } from '../modules/account/screens/IdentityVerificationScreen';
 import { AddAddressScreen } from '../modules/account/screens/AddAddressScreen';
 import { LocationPickerScreen } from '../modules/account/screens/LocationPickerScreen';
@@ -83,6 +84,7 @@ export function CustomerStack() {
       <Stack.Screen name="OrderTracking" component={OrderTrackingScreen} />
       <Stack.Screen name="Taxi" component={TaxiScreen} />
       <Stack.Screen name="Services" component={ServicesScreen} />
+      <Stack.Screen name="ServiceJobs" component={ServiceJobsScreen} />
       <Stack.Screen name="IdentityVerification" component={IdentityVerificationScreen} />
       <Stack.Screen name="AddAddress" component={AddAddressScreen} />
       <Stack.Screen name="LocationPicker" component={LocationPickerScreen} />

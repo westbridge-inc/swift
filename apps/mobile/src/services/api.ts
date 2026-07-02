@@ -222,6 +222,10 @@ export const servicesApi = {
     api.post('/services/jobs', data),
   jobs: () => api.get('/services/jobs'),
   job: (id: string) => api.get(`/services/jobs/${id}`),
+  // Customer accepts the provider's quote by scheduling the job.
+  scheduleJob: (id: string, scheduledFor: string) => api.post(`/services/jobs/${id}/schedule`, { scheduledFor }),
+  cancelJob: (id: string) => api.post(`/services/jobs/${id}/cancel`, {}),
+  rateJob: (id: string, score: number, comment?: string) => api.post(`/services/jobs/${id}/rate`, { score, comment }),
 };
 
 // Verification (mounted at /api/v1/verification)

@@ -17,11 +17,14 @@ function fmtTime(iso: string) {
 
 export function ChatScreen({ route, navigation }: any) {
   const orderId: string | undefined = route?.params?.orderId;
+  // Service-job chats already carry their room id (created with the job) —
+  // pass roomId directly and skip the order-room resolution.
+  const paramRoomId: string | undefined = route?.params?.roomId;
   const title: string = route?.params?.title ?? 'Chat';
   const myId = useAuthStore((s) => s.user?.id);
 
-  const roomQ = useChatRoom(orderId);
-  const roomId: string | undefined = (roomQ.data as any)?.id;
+  const roomQ = useChatRoom(paramRoomId ? undefined : orderId);
+  const roomId: string | undefined = paramRoomId ?? (roomQ.data as any)?.id;
   const msgsQ = useChatMessages(roomId);
   const send = useSendMessage(roomId);
   const [text, setText] = useState('');

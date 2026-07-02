@@ -26,3 +26,30 @@ export function useRequestJob() {
     onSuccess: () => qc.invalidateQueries({ queryKey: ['services', 'jobs'] }),
   });
 }
+
+/** Accepting a quote = scheduling it (QUOTED → SCHEDULED, customer-only). */
+export function useScheduleJob() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, scheduledFor }: { id: string; scheduledFor: string }) =>
+      unwrap(servicesApi.scheduleJob(id, scheduledFor)),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['services', 'jobs'] }),
+  });
+}
+
+export function useCancelJob() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (id: string) => unwrap(servicesApi.cancelJob(id)),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['services', 'jobs'] }),
+  });
+}
+
+export function useRateJob() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, score, comment }: { id: string; score: number; comment?: string }) =>
+      unwrap(servicesApi.rateJob(id, score, comment)),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['services', 'jobs'] }),
+  });
+}
