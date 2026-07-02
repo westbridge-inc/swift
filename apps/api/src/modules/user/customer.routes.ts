@@ -14,11 +14,12 @@ import { NotificationService } from '../notification/notification.service';
 // Input schemas
 // ---------------------------------------------------------------------------
 
+// avatar is deliberately NOT settable here — the public photo only ever comes
+// from the camera-captured signup selfie (POST /auth/selfie, master plan §3).
 const updateProfileSchema = z.object({
   firstName: z.string().trim().min(1).max(50).optional(),
   lastName: z.string().trim().min(1).max(50).optional(),
   email: z.string().email().optional(),
-  avatar: z.string().max(2048).optional(),
 });
 
 const createAddressSchema = z.object({
@@ -445,6 +446,7 @@ export async function customerRoutes(app: FastifyInstance) {
         lastName: user.lastName,
         email: user.email,
         avatar: user.avatar,
+        selfieCapturedAt: user.selfieCapturedAt,
         role: user.activeRole,
         roles: user.roles,
         customer: {
@@ -481,7 +483,6 @@ export async function customerRoutes(app: FastifyInstance) {
         ...(body.firstName !== undefined && { firstName: body.firstName }),
         ...(body.lastName !== undefined && { lastName: body.lastName }),
         ...(body.email !== undefined && { email: body.email }),
-        ...(body.avatar !== undefined && { avatar: body.avatar }),
       },
       select: {
         id: true, phone: true, firstName: true, lastName: true,

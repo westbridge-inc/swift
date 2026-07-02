@@ -50,7 +50,7 @@ beforeAll(async () => {
   regularItemId = reg!.id;
 
   const user = await app.prisma.user.create({
-    data: { phone: `+592002990${Math.floor(Math.random() * 90 + 10)}`, firstName: 'Slot', lastName: 'Tester', roles: ['CUSTOMER'], activeRole: 'CUSTOMER', isPhoneVerified: true, customer: { create: {} } },
+    data: { phone: `+592002990${Math.floor(Math.random() * 90 + 10)}`, firstName: 'Slot', lastName: 'Tester', roles: ['CUSTOMER'], activeRole: 'CUSTOMER', isPhoneVerified: true, selfieCapturedAt: new Date(), customer: { create: {} } },
   });
   userId = user.id;
   token = app.jwt.sign({ userId: user.id, role: 'CUSTOMER', jti: nanoid(8) });

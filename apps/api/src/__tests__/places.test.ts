@@ -57,7 +57,7 @@ beforeAll(async () => {
       lastName: 'Tester',
       roles: ['CUSTOMER'],
       activeRole: 'CUSTOMER',
-      isPhoneVerified: true,
+      isPhoneVerified: true, selfieCapturedAt: new Date(),
       customer: { create: {} },
     },
   });

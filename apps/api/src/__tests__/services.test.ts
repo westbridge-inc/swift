@@ -26,7 +26,7 @@ async function makeUserWithSession(roles: UserRole[], activeRole: UserRole) {
   const user = await app.prisma.user.create({
     data: {
       phone: `+59200188${String(seq).padStart(2, '0')}`,
-      firstName: 'Svc', lastName: `User${seq}`, roles, activeRole, isPhoneVerified: true,
+      firstName: 'Svc', lastName: `User${seq}`, roles, activeRole, isPhoneVerified: true, selfieCapturedAt: new Date(),
       ...(roles.includes('CUSTOMER') && { customer: { create: {} } }),
     },
   });

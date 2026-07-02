@@ -43,7 +43,7 @@ beforeAll(async () => {
   const user = await app.prisma.user.create({
     data: {
       phone: PHONE, firstName: 'Ai', lastName: 'Tester',
-      roles: ['CUSTOMER'], activeRole: 'CUSTOMER', isPhoneVerified: true,
+      roles: ['CUSTOMER'], activeRole: 'CUSTOMER', isPhoneVerified: true, selfieCapturedAt: new Date(),
       customer: { create: {} },
     },
   });

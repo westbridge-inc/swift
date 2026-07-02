@@ -26,23 +26,16 @@ import { registerErrorHandler } from './middleware/error-handler';
 import { registerEmptyJsonBodyParser } from './plugins/empty-json';
 import { createQueues, createWorkers, scheduleRecurringJobs } from './jobs/queue';
 import { loggerRedactConfig } from './utils/logger-config';
-import { createReadStream } from 'node:fs';
-import { stat } from 'node:fs/promises';
+import { registerPublicUploads } from './utils/public-uploads';
 import path from 'node:path';
 
 const PORT = parseInt(process.env['PORT'] || '3000', 10);
 const HOST = process.env['HOST'] || '0.0.0.0';
 
-// Only public menu/item images (the `items/` tree) are served statically. KYC /
-// verification documents live under other /uploads folders and stay private —
-// they are only ever reachable through short-lived signed URLs.
+// Public upload trees (items/, avatars/) are served via registerPublicUploads.
+// KYC / verification documents live under other /uploads folders and stay
+// private — they are only ever reachable through short-lived signed URLs.
 const UPLOAD_BASE = process.env['UPLOAD_DIR'] ?? path.join(process.cwd(), 'uploads');
-const IMAGE_MIME: Record<string, string> = {
-  '.jpg': 'image/jpeg',
-  '.jpeg': 'image/jpeg',
-  '.png': 'image/png',
-  '.webp': 'image/webp',
-};
 
 // SEC (OWASP API4): only trust X-Forwarded-For when explicitly behind a known proxy.
 // TRUST_PROXY = hop count ("1" for Fly), an IP/CIDR list, or "true". Default false so
@@ -139,26 +132,9 @@ async function buildApp() {
     };
   });
 
-  // Public menu/item images only (the items/ tree). Path-traversal-guarded;
+  // Public upload trees only (items/, avatars/). Path-traversal-guarded;
   // KYC docs in other /uploads folders are never exposed here.
-  app.get<{ Params: { '*': string } }>('/uploads/items/*', async (request, reply) => {
-    const rel = request.params['*'];
-    if (!rel || rel.includes('..') || path.isAbsolute(rel)) {
-      return reply.code(400).send({ error: 'bad path' });
-    }
-    const abs = path.join(UPLOAD_BASE, 'items', rel);
-    try {
-      const s = await stat(abs);
-      if (!s.isFile()) return reply.code(404).send();
-    } catch {
-      return reply.code(404).send();
-    }
-    const ext = path.extname(abs).toLowerCase();
-    return reply
-      .header('Content-Type', IMAGE_MIME[ext] ?? 'application/octet-stream')
-      .header('Cache-Control', 'public, max-age=86400')
-      .send(createReadStream(abs));
-  });
+  registerPublicUploads(app, UPLOAD_BASE);
 
   // API routes
   await app.register(authRoutes, { prefix: '/api/v1/auth' });

@@ -64,7 +64,7 @@ async function makeRider(opts: {
       lastName: `Rider${seq}`,
       roles: ['RIDER' as UserRole, 'CUSTOMER' as UserRole],
       activeRole: 'RIDER' as UserRole,
-      isPhoneVerified: true,
+      isPhoneVerified: true, selfieCapturedAt: new Date(),
     },
   });
   createdUserIds.push(user.id);
@@ -151,7 +151,7 @@ beforeAll(async () => {
   const customer = await app.prisma.user.create({
     data: {
       phone: '+5920009901', firstName: 'Dispatch', lastName: 'Customer',
-      roles: ['CUSTOMER'], activeRole: 'CUSTOMER', isPhoneVerified: true,
+      roles: ['CUSTOMER'], activeRole: 'CUSTOMER', isPhoneVerified: true, selfieCapturedAt: new Date(),
       customer: { create: {} },
     },
   });
@@ -161,7 +161,7 @@ beforeAll(async () => {
   const ownerUser = await app.prisma.user.create({
     data: {
       phone: '+5920009902', firstName: 'Dispatch', lastName: 'Vendor',
-      roles: ['VENDOR_OWNER'], activeRole: 'VENDOR_OWNER', isPhoneVerified: true,
+      roles: ['VENDOR_OWNER'], activeRole: 'VENDOR_OWNER', isPhoneVerified: true, selfieCapturedAt: new Date(),
     },
   });
   createdUserIds.push(ownerUser.id);

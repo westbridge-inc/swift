@@ -8,6 +8,8 @@ const locationWhenInUse =
   'Swift uses your location to set your pickup and find nearby stores, drivers and couriers.';
 const locationAlways =
   'Swift keeps your live position on the map while you are online for deliveries or rides.';
+const cameraPermission =
+  'Swift uses the camera for your profile selfie and to photograph documents and deliveries.';
 
 const config: ExpoConfig = {
   name: 'Swift',
@@ -58,6 +60,12 @@ const config: ExpoConfig = {
         locationAlwaysAndWhenInUsePermission: locationAlways,
         isAndroidBackgroundLocationEnabled: true,
         isAndroidForegroundServiceEnabled: true,
+      },
+    ],
+    [
+      'expo-camera',
+      {
+        cameraPermission,
       },
     ],
   ],

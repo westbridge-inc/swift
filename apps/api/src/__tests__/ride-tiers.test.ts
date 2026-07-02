@@ -59,7 +59,7 @@ async function makeCustomer() {
       lastName: `Cust${seq}`,
       roles: ['CUSTOMER'] as UserRole[],
       activeRole: 'CUSTOMER',
-      isPhoneVerified: true,
+      isPhoneVerified: true, selfieCapturedAt: new Date(),
       trustLevel: 'L2', // clear the ID-gate so big XL fares don't 403
       customer: { create: {} },
     },
@@ -81,7 +81,7 @@ async function makeDriver(rideClass: RideClass) {
       lastName: `Drv${seq}`,
       roles: ['DRIVER', 'CUSTOMER'] as UserRole[],
       activeRole: 'DRIVER',
-      isPhoneVerified: true,
+      isPhoneVerified: true, selfieCapturedAt: new Date(),
     },
   });
   createdUserIds.push(u.id);

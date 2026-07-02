@@ -31,7 +31,7 @@ async function makeUserWithSession(roles: UserRole[], activeRole: UserRole) {
       lastName: `User${seq}`,
       roles,
       activeRole,
-      isPhoneVerified: true,
+      isPhoneVerified: true, selfieCapturedAt: new Date(),
       ...(activeRole === 'ADMIN' && { admin: { create: { permissions: ['*'] } } }),
       ...(roles.includes('CUSTOMER') && { customer: { create: {} } }),
     },

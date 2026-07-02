@@ -69,6 +69,9 @@ export const authApi = {
   }) => api.post('/auth/register', data),
   refresh: (refreshToken: string) => api.post('/auth/refresh', { refreshToken }),
   logout: () => api.post('/auth/logout'),
+  // Mandatory signup selfie — multipart camera capture; becomes the public photo.
+  uploadSelfie: (form: FormData) =>
+    api.post('/auth/selfie', form, { headers: { 'Content-Type': 'multipart/form-data' } }),
 };
 
 // Customer

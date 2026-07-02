@@ -95,7 +95,7 @@ export class OrderService {
 
     const user = await this.prisma.user.findUniqueOrThrow({
       where: { id: input.userId },
-      select: { trustLevel: true, countryCode: true, createdAt: true },
+      select: { trustLevel: true, countryCode: true, createdAt: true, selfieCapturedAt: true },
     });
 
     // Strike consequences: repeated failed cash handovers
@@ -106,6 +106,12 @@ export class OrderService {
     }
     if (restriction === 'restricted') {
       throw new AppError(403, 'STRIKE_RESTRICTED', 'After repeated failed deliveries, ordering requires ID verification. Verify your identity to continue.');
+    }
+
+    // Universal signup selfie (master plan §3): every account carries a live
+    // profile photo before transacting — the vendor/mover sees who is ordering.
+    if (!user.selfieCapturedAt) {
+      throw new AppError(403, 'SELFIE_REQUIRED', 'Add your profile photo before placing orders — it takes a few seconds in the app.');
     }
 
     // Group the cart by vendor — a multi-vendor cart splits into one order each

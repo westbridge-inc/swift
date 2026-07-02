@@ -1,6 +1,9 @@
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { AuthService } from './auth.service';
+import { AppError } from '../../utils/errors';
+import { ALLOWED_IMAGE_TYPES, looksLikeImage } from '../../utils/images';
+import { getStorageProvider } from '../../providers/storage/storage-provider';
 
 const sendOtpSchema = z.object({
   phone: z.string().min(10).max(15),
@@ -90,6 +93,43 @@ export async function authRoutes(app: FastifyInstance) {
     const token = request.headers.authorization?.replace('Bearer ', '') || '';
     await authService.logout(token);
     return reply.send({ success: true });
+  });
+
+  // ── Mandatory signup selfie (master plan §3) ───────────────────────────
+  // Camera capture only on the client; the stored image becomes the user's
+  // public profile photo (avatar) and unlocks the transact gates (orders,
+  // rides, go-online). This is the ONLY writer of avatar/selfieCapturedAt.
+  app.post('/selfie', { preHandler: [app.authenticate], ...authRateLimit }, async (request, reply) => {
+    const file = await request.file();
+    if (!file) throw new AppError(400, 'NO_FILE', 'Attach a selfie image');
+    if (!ALLOWED_IMAGE_TYPES.has(file.mimetype)) {
+      throw new AppError(400, 'BAD_IMAGE_TYPE', 'Only JPEG, PNG, or WebP images are accepted');
+    }
+
+    const buffer = await file.toBuffer();
+    if (!looksLikeImage(buffer)) {
+      throw new AppError(400, 'BAD_IMAGE', 'File content does not match an image format');
+    }
+
+    const { url } = await getStorageProvider().upload({
+      buffer,
+      filename: file.filename,
+      mimeType: file.mimetype,
+      folder: `avatars/${request.user.userId}`,
+    });
+
+    const user = await app.prisma.user.update({
+      where: { id: request.user.userId },
+      data: { avatar: url, selfieCapturedAt: new Date() },
+      select: {
+        id: true, phone: true, email: true, firstName: true, lastName: true,
+        avatar: true, selfieCapturedAt: true, roles: true, activeRole: true,
+        status: true, isPhoneVerified: true, isEmailVerified: true,
+        trustLevel: true, createdAt: true, updatedAt: true,
+      },
+    });
+
+    return reply.send({ success: true, data: { user } });
   });
 
   // ── Email + password (secondary to phone OTP) ──────────────────────────

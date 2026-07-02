@@ -13,6 +13,7 @@ import { AiService } from '../ai/ai.service';
 import { guessColumnMapping, applyMapping, toImportCsv, REQUIRED_FIELDS, type ColumnMapping } from '../../utils/catalogue-map';
 import { parsePagination, paginatedResponse } from '../../utils/pagination';
 import { AppError, NotFoundError, ValidationError } from '../../utils/errors';
+import { ALLOWED_IMAGE_TYPES, looksLikeImage } from '../../utils/images';
 
 // ---------------------------------------------------------------------------
 // Input schemas
@@ -184,17 +185,6 @@ const CSV_TEMPLATE = [
   'Services,Haircut,"30 minute appointment",2000,,,,true,APPOINTMENT,',
 ].join('\n');
 
-const ALLOWED_IMAGE_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp']);
-
-/** Cheap magic-byte sniff so a spoofed Content-Type cannot smuggle non-images. */
-function looksLikeImage(buffer: Buffer): boolean {
-  if (buffer.length < 12) return false;
-  const jpeg = buffer[0] === 0xff && buffer[1] === 0xd8 && buffer[2] === 0xff;
-  const png = buffer[0] === 0x89 && buffer[1] === 0x50 && buffer[2] === 0x4e && buffer[3] === 0x47;
-  const webp =
-    buffer.toString('ascii', 0, 4) === 'RIFF' && buffer.toString('ascii', 8, 12) === 'WEBP';
-  return jpeg || png || webp;
-}
 
 const vendorOrdersQuerySchema = z.object({
   status: z.nativeEnum(OrderStatus).optional(),

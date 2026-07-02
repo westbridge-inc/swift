@@ -63,7 +63,7 @@ export async function ridesRoutes(app: FastifyInstance) {
     const body = requestRideSchema.parse(request.body);
     const user = await app.prisma.user.findUniqueOrThrow({
       where: { id: request.user.userId },
-      select: { id: true, countryCode: true, trustLevel: true },
+      select: { id: true, countryCode: true, trustLevel: true, selfieCapturedAt: true },
     });
 
     const active = await app.prisma.order.findFirst({
@@ -85,6 +85,12 @@ export async function ridesRoutes(app: FastifyInstance) {
     }
     if (restriction === 'restricted') {
       throw new AppError(403, 'STRIKE_RESTRICTED', 'After repeated failed payments, rides require ID verification. Verify your identity to continue.');
+    }
+
+    // Universal signup selfie (master plan §3): the driver sees who they are
+    // picking up, so a live profile photo is required before booking rides.
+    if (!user.selfieCapturedAt) {
+      throw new AppError(403, 'SELFIE_REQUIRED', 'Add your profile photo before booking rides — your driver sees it when they accept.');
     }
 
     const tiered = await fareService.estimateTiers(body.pickup, body.dropoff, user.countryCode);
