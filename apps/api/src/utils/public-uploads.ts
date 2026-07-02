@@ -8,7 +8,8 @@ import type { FastifyInstance } from 'fastify';
 // they are only reachable through short-lived signed URLs.
 //   items/    — menu & catalogue photos
 //   avatars/  — the mandatory signup selfie, each user's public profile photo
-export const PUBLIC_UPLOAD_FOLDERS = ['items', 'avatars'] as const;
+//   vehicles/ — the driver's exterior car photo, shown on ride acceptance
+export const PUBLIC_UPLOAD_FOLDERS = ['items', 'avatars', 'vehicles'] as const;
 
 const IMAGE_MIME: Record<string, string> = {
   '.jpg': 'image/jpeg',

@@ -10,6 +10,8 @@ import { haversineDistance, estimateDeliveryMinutes } from '../../utils/distance
 import { parsePagination, paginatedResponse } from '../../utils/pagination';
 import { AppError, NotFoundError } from '../../utils/errors';
 import { clampDriverFare } from '../../utils/markup';
+import { ALLOWED_IMAGE_TYPES, looksLikeImage } from '../../utils/images';
+import { getStorageProvider } from '../../providers/storage/storage-provider';
 
 const updateDriverProfileSchema = z.object({
   vehicleMake: z.string().max(50).optional(),
@@ -107,6 +109,37 @@ export async function driverRoutes(app: FastifyInstance) {
       include: { user: { select: { id: true, firstName: true, lastName: true, phone: true, email: true, avatar: true } } },
     });
     return { success: true, data: driver };
+  });
+
+  /** POST /vehicle-photo — the PUBLIC exterior car photo riders see on
+   *  acceptance (master plan §5). Stored in the public vehicles/ tree —
+   *  distinct from the private vehicle_exterior_photo KYC document. */
+  app.post('/vehicle-photo', { preHandler: [app.authenticate] }, async (request) => {
+    const driver = await getDriver(request.user.userId);
+
+    const file = await request.file();
+    if (!file) throw new AppError(400, 'NO_FILE', 'Attach a photo of your car');
+    if (!ALLOWED_IMAGE_TYPES.has(file.mimetype)) {
+      throw new AppError(400, 'BAD_IMAGE_TYPE', 'Only JPEG, PNG, or WebP images are accepted');
+    }
+    const buffer = await file.toBuffer();
+    if (!looksLikeImage(buffer)) {
+      throw new AppError(400, 'BAD_IMAGE', 'File content does not match an image format');
+    }
+
+    const { url } = await getStorageProvider().upload({
+      buffer,
+      filename: file.filename,
+      mimeType: file.mimetype,
+      folder: `vehicles/${driver.id}`,
+    });
+
+    const updated = await app.prisma.driver.update({
+      where: { id: driver.id },
+      data: { vehiclePhotoUrl: url },
+      select: { id: true, vehiclePhotoUrl: true },
+    });
+    return { success: true, data: updated };
   });
 
   // ─── Online / Offline ──────────────────────────────────────────────────
@@ -337,6 +370,7 @@ export async function driverRoutes(app: FastifyInstance) {
         vehicleModel: driver.vehicleModel,
         vehicleColor: driver.vehicleColor,
         licensePlate: driver.licensePlate,
+        vehiclePhotoUrl: driver.vehiclePhotoUrl,
         rating: driver.averageRating,
         currentLat: driver.currentLat,
         currentLng: driver.currentLng,

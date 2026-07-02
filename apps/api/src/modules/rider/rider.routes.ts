@@ -11,6 +11,8 @@ import { haversineDistance } from '../../utils/distance';
 import { parsePagination, paginatedResponse } from '../../utils/pagination';
 import { AppError, NotFoundError, ConflictError, ValidationError } from '../../utils/errors';
 import { clampDriverFare } from '../../utils/markup';
+import { ALLOWED_IMAGE_TYPES, looksLikeImage } from '../../utils/images';
+import { getStorageProvider } from '../../providers/storage/storage-provider';
 
 const updateRiderProfileSchema = z.object({
   riderType: z.nativeEnum(RiderType).optional(),
@@ -230,6 +232,36 @@ export async function riderRoutes(app: FastifyInstance) {
         },
       },
     };
+  });
+
+  /** POST /vehicle-photo — the PUBLIC delivery-vehicle photo customers see on
+   *  acceptance (master plan §3.3). Stored in the public vehicles/ tree. */
+  app.post('/vehicle-photo', { preHandler: [app.authenticate] }, async (request) => {
+    const rider = await getRider(app, request.user.userId);
+
+    const file = await request.file();
+    if (!file) throw new AppError(400, 'NO_FILE', 'Attach a photo of your vehicle');
+    if (!ALLOWED_IMAGE_TYPES.has(file.mimetype)) {
+      throw new AppError(400, 'BAD_IMAGE_TYPE', 'Only JPEG, PNG, or WebP images are accepted');
+    }
+    const buffer = await file.toBuffer();
+    if (!looksLikeImage(buffer)) {
+      throw new AppError(400, 'BAD_IMAGE', 'File content does not match an image format');
+    }
+
+    const { url } = await getStorageProvider().upload({
+      buffer,
+      filename: file.filename,
+      mimeType: file.mimetype,
+      folder: `vehicles/${rider.id}`,
+    });
+
+    const updated = await app.prisma.rider.update({
+      where: { id: rider.id },
+      data: { vehiclePhotoUrl: url },
+      select: { id: true, vehiclePhotoUrl: true },
+    });
+    return { success: true, data: updated };
   });
 
   /** PUT /profile — Update vehicle info, profile photo, rider type. */
