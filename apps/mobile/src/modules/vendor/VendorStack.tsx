@@ -27,6 +27,8 @@ import {
   useDeleteOption,
   useVendorSubscription,
   useVendorAnalytics,
+  useVendorRevenue,
+  usePopularItems,
   useVendorHours,
   useSetHours,
   type DayHours,
@@ -1064,8 +1066,86 @@ function VendorOrdersTab({ navigation }: any) {
   return <VendorOps store={store} navigation={navigation} />;
 }
 
+/**
+ * Owned bar chart (no chart dependency): daily revenue, bars scaled to the
+ * period max. Endpoint pre-fills gap days with zero so the series is dense.
+ */
+function RevenueChart({ daily, totals }: { daily: Array<{ date: string; revenue: number }>; totals: { revenue: number; orders: number } }) {
+  const CHART_HEIGHT = 96;
+  const max = Math.max(...daily.map((d) => d.revenue), 1);
+  const dayLabel = (iso: string) => {
+    const d = new Date(`${iso}T12:00:00Z`);
+    return `${d.getUTCDate()}/${d.getUTCMonth() + 1}`;
+  };
+  return (
+    <Card className="mb-md">
+      <View className="flex-row items-baseline justify-between">
+        <Text className="text-base font-semibold">Last {daily.length} days</Text>
+        <Text className="text-sm text-text-secondary">
+          {money(totals.revenue)} · {totals.orders} orders
+        </Text>
+      </View>
+      {totals.orders === 0 ? (
+        <Text className="mt-md text-sm text-text-muted">No completed orders yet — sales will chart here.</Text>
+      ) : (
+        <>
+          <View className="mt-md flex-row items-end" style={{ height: CHART_HEIGHT, gap: 3 }}>
+            {daily.map((d) => (
+              <View
+                key={d.date}
+                className={d.revenue > 0 ? 'flex-1 rounded-t-sm bg-brand-500' : 'flex-1 rounded-t-sm bg-surface-subtle'}
+                style={{ height: Math.max(3, Math.round((d.revenue / max) * CHART_HEIGHT)) }}
+              />
+            ))}
+          </View>
+          <View className="mt-xs flex-row justify-between">
+            <Text className="text-xs text-text-muted">{dayLabel(daily[0]!.date)}</Text>
+            <Text className="text-xs text-text-muted">peak {money(max)}</Text>
+            <Text className="text-xs text-text-muted">{dayLabel(daily[daily.length - 1]!.date)}</Text>
+          </View>
+        </>
+      )}
+    </Card>
+  );
+}
+
+function TopItemsCard({ items }: { items: any[] }) {
+  const ranked = items.filter((i) => i.totalOrdered > 0 || i.recentOrders > 0);
+  return (
+    <Card className="mb-md">
+      <Text className="text-base font-semibold">Top items</Text>
+      {ranked.length === 0 ? (
+        <Text className="mt-sm text-sm text-text-muted">Your best sellers will rank here once orders come in.</Text>
+      ) : (
+        ranked.map((item, i) => (
+          <View key={item.id} className="mt-sm flex-row items-center">
+            <Text className="w-6 text-sm font-bold text-text-muted">{i + 1}</Text>
+            {item.imageUrl ? (
+              <Image source={{ uri: mediaUrl(item.imageUrl)! }} style={{ width: 34, height: 34, borderRadius: 8 }} />
+            ) : (
+              <View style={{ width: 34, height: 34, borderRadius: 8 }} className="items-center justify-center bg-surface-subtle">
+                <Feather name="image" size={14} color={color.text.muted} />
+              </View>
+            )}
+            <View className="ml-sm flex-1">
+              <Text className="text-sm font-semibold" numberOfLines={1}>{item.name}</Text>
+              <Text className="text-xs text-text-muted">{item.category?.name ?? ''}</Text>
+            </View>
+            <View className="items-end">
+              <Text className="text-sm font-semibold">{item.recentOrders} this month</Text>
+              <Text className="text-xs text-text-muted">{item.totalOrdered} all time</Text>
+            </View>
+          </View>
+        ))
+      )}
+    </Card>
+  );
+}
+
 function VendorInsightsScreen() {
   const q = useVendorAnalytics();
+  const revenueQ = useVendorRevenue(14);
+  const popularQ = usePopularItems(8);
   const a: any = q.data ?? {};
   const v: any = a.vendor ?? {};
   return (
@@ -1075,7 +1155,7 @@ function VendorInsightsScreen() {
         className="flex-1"
         contentContainerStyle={{ paddingHorizontal: 16, paddingBottom: 32 }}
         showsVerticalScrollIndicator={false}
-        refreshControl={<RefreshControl refreshing={q.isRefetching} onRefresh={() => q.refetch()} tintColor={color.brand[500]} />}
+        refreshControl={<RefreshControl refreshing={q.isRefetching} onRefresh={() => { q.refetch(); revenueQ.refetch(); popularQ.refetch(); }} tintColor={color.brand[500]} />}
       >
         {q.isLoading ? (
           <>
@@ -1092,6 +1172,16 @@ function VendorInsightsScreen() {
               <KpiTile icon="calendar-week" value={String(a.week?.orders ?? 0)} label="Orders / week" />
               <KpiTile icon="calendar-month" value={String(a.month?.orders ?? 0)} label="Orders / month" />
             </View>
+            {revenueQ.isLoading ? (
+              <Skeleton className="mb-md h-40 w-full rounded-2xl" />
+            ) : revenueQ.data?.daily?.length ? (
+              <RevenueChart daily={revenueQ.data.daily} totals={revenueQ.data.totals} />
+            ) : null}
+            {popularQ.isLoading ? (
+              <Skeleton className="mb-md h-32 w-full rounded-2xl" />
+            ) : popularQ.data ? (
+              <TopItemsCard items={popularQ.data} />
+            ) : null}
             <Card className="mb-md">
               <View className="flex-row items-center justify-between">
                 <View className="flex-row items-center">

@@ -177,6 +177,22 @@ export function useVendorAnalytics() {
   });
 }
 
+/** Daily revenue series for the chart (endpoint pre-fills gap days with 0). */
+export function useVendorRevenue(days = 14) {
+  return useQuery({
+    queryKey: ['vendor', 'analytics', 'revenue', days],
+    queryFn: () => unwrap<any>(vendorApi.analyticsRevenue(days)),
+  });
+}
+
+/** Top items by lifetime + last-30-days order counts. */
+export function usePopularItems(limit = 8) {
+  return useQuery({
+    queryKey: ['vendor', 'analytics', 'popular', limit],
+    queryFn: () => unwrap<any>(vendorApi.analyticsPopularItems(limit)),
+  });
+}
+
 export type DayHours = { dayOfWeek: number; openTime: string; closeTime: string; isClosed: boolean };
 
 export function useVendorHours() {
