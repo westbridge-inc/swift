@@ -25,6 +25,10 @@ import {
   useDeleteOptionGroup,
   useAddOption,
   useDeleteOption,
+  useVendorStaff,
+  useAddStaff,
+  useRemoveStaff,
+  useUpdateStaffRole,
   useVendorSubscription,
   useVendorAnalytics,
   useVendorRevenue,
@@ -1204,8 +1208,10 @@ function VendorInsightsScreen() {
 }
 
 function VendorAccountScreen() {
-  const { store } = useVendorProfile();
-  const sub = useVendorSubscription();
+  const { store, myRole } = useVendorProfile();
+  const isOwner = myRole === 'OWNER';
+  const isManager = myRole !== 'STAFF';
+  const sub = useVendorSubscription(isOwner);
   const hoursQ = useVendorHours();
   const setHours = useSetHours();
 
@@ -1246,16 +1252,32 @@ function VendorAccountScreen() {
           </View>
         </SettingsGroup>
 
-        <SettingsGroup header="Plan">
-          <SettingsRow
-            icon="cash-multiple"
-            label="Subscription"
-            sublabel={sub.data ? 'Active weekly plan' : 'Not active yet'}
-            right={<Badge label={sub.data ? 'Active' : 'Inactive'} tone={sub.data ? 'success' : 'brand'} />}
-          />
-          {store?.phone ? <SettingsRow icon="phone-outline" label="Phone" value={store.phone} /> : null}
-        </SettingsGroup>
+        {isOwner ? (
+          <SettingsGroup header="Plan">
+            <SettingsRow
+              icon="cash-multiple"
+              label="Subscription"
+              sublabel={sub.data ? 'Active weekly plan' : 'Not active yet'}
+              right={<Badge label={sub.data ? 'Active' : 'Inactive'} tone={sub.data ? 'success' : 'brand'} />}
+            />
+            {store?.phone ? <SettingsRow icon="phone-outline" label="Phone" value={store.phone} /> : null}
+          </SettingsGroup>
+        ) : null}
 
+        {isOwner ? <StaffSection /> : null}
+
+        {!isManager ? (
+          <Card className="mb-md mt-sm">
+            <Text className="text-sm font-semibold text-text-primary">Staff account</Text>
+            <Text className="mt-xs text-xs text-text-secondary">
+              You work the order queue and can mark items sold out. Menus, hours and
+              billing stay with the manager and owner.
+            </Text>
+          </Card>
+        ) : null}
+
+        {isManager ? (
+          <>
         <Heading size="lg" className="mb-sm mt-sm">
           Business hours
         </Heading>
@@ -1304,8 +1326,99 @@ function VendorAccountScreen() {
             {setHours.isSuccess ? <Text className="mt-sm text-center text-xs text-success">Hours updated</Text> : null}
           </Card>
         )}
+          </>
+        ) : null}
       </ScrollView>
     </SafeAreaView>
+  );
+}
+
+/**
+ * Staff & roles (master plan §4.1) — the owner's team panel: add an existing
+ * Swift account by phone as MANAGER or STAFF, flip roles, remove access.
+ */
+function StaffSection() {
+  const staffQ = useVendorStaff();
+  const addStaff = useAddStaff();
+  const removeStaff = useRemoveStaff();
+  const updateRole = useUpdateStaffRole();
+  const [phone, setPhone] = useState('');
+  const [role, setRole] = useState<'MANAGER' | 'STAFF'>('STAFF');
+
+  const members: any[] = staffQ.data ?? [];
+  const errMsg = (addStaff.error as any)?.response?.data?.error?.message
+    ?? (addStaff.error as any)?.response?.data?.message;
+
+  const submit = () => {
+    const p = phone.trim();
+    if (p.length < 10) return;
+    addStaff.mutate({ phone: p, role }, { onSuccess: () => setPhone('') });
+  };
+
+  const confirmRemove = (m: any) =>
+    Alert.alert('Remove team member', `${m.user?.firstName ?? 'This person'} will lose store access immediately.`, [
+      { text: 'Cancel', style: 'cancel' },
+      { text: 'Remove', style: 'destructive', onPress: () => removeStaff.mutate(m.id) },
+    ]);
+
+  return (
+    <>
+      <Heading size="lg" className="mb-sm mt-sm">Team</Heading>
+      <Card className="mb-md">
+        {members.map((m) => (
+          <View key={m.id} className="mb-sm flex-row items-center">
+            {m.user?.avatar ? (
+              <Image source={{ uri: mediaUrl(m.user.avatar) ?? undefined }} style={{ width: 36, height: 36, borderRadius: 18 }} />
+            ) : (
+              <View className="h-9 w-9 items-center justify-center rounded-full bg-surface-subtle">
+                <Feather name="user" size={16} color={color.text.muted} />
+              </View>
+            )}
+            <View className="ml-sm flex-1">
+              <Text className="text-sm font-semibold">
+                {[m.user?.firstName, m.user?.lastName].filter(Boolean).join(' ')}
+              </Text>
+              <Text className="text-xs text-text-muted">{m.user?.phone}</Text>
+            </View>
+            <PressableScale
+              onPress={() => updateRole.mutate({ id: m.id, role: m.role === 'MANAGER' ? 'STAFF' : 'MANAGER' })}
+              disabled={updateRole.isPending}
+              className="mr-sm rounded-full bg-surface-subtle px-md py-xs"
+            >
+              <Text className="text-xs font-semibold text-text-secondary">
+                {m.role === 'MANAGER' ? 'Manager' : 'Staff'}
+              </Text>
+            </PressableScale>
+            <PressableScale onPress={() => confirmRemove(m)} hitSlop={8}>
+              <Feather name="x" size={16} color={color.text.muted} />
+            </PressableScale>
+          </View>
+        ))}
+        {members.length === 0 && !staffQ.isLoading ? (
+          <Text className="mb-sm text-sm text-text-muted">
+            No team members yet — add your manager or floor staff by phone.
+          </Text>
+        ) : null}
+
+        <Input value={phone} onChangeText={setPhone} placeholder="+592 phone of an existing Swift account" keyboardType="phone-pad" />
+        <View className="mt-sm flex-row" style={{ gap: 8 }}>
+          <ChoiceChip label="Staff (orders only)" active={role === 'STAFF'} onPress={() => setRole('STAFF')} />
+          <ChoiceChip label="Manager" active={role === 'MANAGER'} onPress={() => setRole('MANAGER')} />
+        </View>
+        {errMsg ? <Text className="mt-sm text-sm text-error">{errMsg}</Text> : null}
+        <Button
+          label="Add to team"
+          variant="outline"
+          className="mt-sm"
+          loading={addStaff.isPending}
+          disabled={phone.trim().length < 10}
+          onPress={submit}
+        />
+        <Text className="mt-xs text-center text-xs text-text-muted">
+          Tap a role pill to switch Manager ↔ Staff.
+        </Text>
+      </Card>
+    </>
   );
 }
 
@@ -1322,6 +1435,10 @@ function MenuStackNav() {
 const VTab = createBottomTabNavigator();
 
 function VendorTabs() {
+  // Staff & roles (§4.1): floor STAFF work the order queue — menu tools and
+  // business insights are manager/owner surfaces (the API enforces the same).
+  const { myRole } = useVendorProfile();
+  const manager = myRole !== 'STAFF';
   return (
     <VTab.Navigator
       screenOptions={{
@@ -1336,16 +1453,20 @@ function VendorTabs() {
         component={VendorOrdersTab}
         options={{ tabBarLabel: 'Orders', tabBarIcon: ({ color: c, size }) => <Feather name="clipboard" size={size} color={c} /> }}
       />
-      <VTab.Screen
-        name="Menu"
-        component={MenuStackNav}
-        options={{ tabBarLabel: 'Menu', tabBarIcon: ({ color: c, size }) => <Feather name="book-open" size={size} color={c} /> }}
-      />
-      <VTab.Screen
-        name="Insights"
-        component={VendorInsightsScreen}
-        options={{ tabBarLabel: 'Insights', tabBarIcon: ({ color: c, size }) => <Feather name="bar-chart-2" size={size} color={c} /> }}
-      />
+      {manager ? (
+        <VTab.Screen
+          name="Menu"
+          component={MenuStackNav}
+          options={{ tabBarLabel: 'Menu', tabBarIcon: ({ color: c, size }) => <Feather name="book-open" size={size} color={c} /> }}
+        />
+      ) : null}
+      {manager ? (
+        <VTab.Screen
+          name="Insights"
+          component={VendorInsightsScreen}
+          options={{ tabBarLabel: 'Insights', tabBarIcon: ({ color: c, size }) => <Feather name="bar-chart-2" size={size} color={c} /> }}
+        />
+      ) : null}
       <VTab.Screen
         name="Account"
         component={VendorAccountScreen}

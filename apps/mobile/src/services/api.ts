@@ -363,6 +363,11 @@ export const vendorApi = {
   importItems: (csv: string) => api.post('/vendor/items/import', { csv }),
   importTemplate: () => api.get('/vendor/items/import/template'),
   importAutomap: (csv: string) => api.post('/vendor/items/import/automap', { csv }),
+  // Staff & roles (owner-only)
+  staff: () => api.get('/vendor/staff'),
+  addStaff: (data: { phone: string; role: 'MANAGER' | 'STAFF' }) => api.post('/vendor/staff', data),
+  updateStaff: (id: string, role: 'MANAGER' | 'STAFF') => api.put(`/vendor/staff/${id}`, { role }),
+  removeStaff: (id: string) => api.delete(`/vendor/staff/${id}`),
 };
 
 // Chat (mounted at /api/v1/chat) — order-scoped rider/customer messaging

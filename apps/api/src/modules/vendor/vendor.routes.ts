@@ -127,6 +127,15 @@ const createItemSchema = z.object({
 
 const updateItemSchema = createItemSchema.omit({ optionGroups: true }).partial();
 
+// Staff & roles (master plan §4.1)
+const addStaffSchema = z.object({
+  phone: z.string().min(10).max(15),
+  role: z.enum(['MANAGER', 'STAFF']).default('STAFF'),
+});
+const updateStaffSchema = z.object({
+  role: z.enum(['MANAGER', 'STAFF']),
+});
+
 const itemAvailabilitySchema = z.object({
   isAvailable: z.boolean().optional(),
 });
@@ -222,12 +231,6 @@ const reviewsQuerySchema = z.object({
 // Types
 // ---------------------------------------------------------------------------
 
-interface VendorOwnerWithVendors {
-  id: string;
-  userId: string;
-  vendors: { id: string }[];
-}
-
 interface IdParam {
   id: string;
 }
@@ -245,19 +248,6 @@ interface GroupIdParam {
 // ---------------------------------------------------------------------------
 
 /**
- * Resolve the authenticated user to a VendorOwner and their vendor IDs.
- * Throws 404 if the user is not a vendor owner.
- */
-async function resolveOwner(app: FastifyInstance, userId: string): Promise<VendorOwnerWithVendors> {
-  const owner = await app.prisma.vendorOwner.findUnique({
-    where: { userId },
-    include: { vendors: { select: { id: true }, orderBy: { createdAt: 'asc' } } },
-  });
-  if (!owner) throw new NotFoundError('VendorOwner');
-  return owner;
-}
-
-/**
  * Resolve the owner and return the *first* vendor (most vendors have one).
  * Throws 404 if the vendor doesn't exist.
  */
@@ -269,17 +259,80 @@ export function pickVendorId(ownedVendorIds: string[], requested?: string): stri
   return requested && ownedVendorIds.includes(requested) ? requested : ownedVendorIds[0]!;
 }
 
-async function resolveVendor(app: FastifyInstance, userId: string, requestedVendorId?: string) {
-  const owner = await resolveOwner(app, userId);
-  if (owner.vendors.length === 0) throw new NotFoundError('Vendor');
-  const vendorIds = owner.vendors.map((v) => v.id);
-  return { ownerId: owner.id, vendorId: pickVendorId(vendorIds, requestedVendorId), vendorIds };
+/** OWNER > MANAGER > STAFF — every vendor route resolves one of these. */
+export type VendorAccessRole = 'OWNER' | 'MANAGER' | 'STAFF';
+const ROLE_RANK: Record<VendorAccessRole, number> = { STAFF: 0, MANAGER: 1, OWNER: 2 };
+
+interface VendorAccess {
+  /** VendorOwner.id when the caller owns the store; null for staff. */
+  ownerId: string | null;
+  vendorId: string;
+  vendorIds: string[];
+  role: VendorAccessRole;
+}
+
+/**
+ * Access resolution for every vendor route (staff & roles, master plan §4.1):
+ * owners see all their stores; staff see exactly the stores they were added
+ * to, with the role the owner gave them. IDOR-safe store selection either way.
+ */
+async function resolveVendor(app: FastifyInstance, userId: string, requestedVendorId?: string): Promise<VendorAccess> {
+  const owner = await app.prisma.vendorOwner.findUnique({
+    where: { userId },
+    include: { vendors: { select: { id: true }, orderBy: { createdAt: 'asc' } } },
+  });
+  if (owner && owner.vendors.length > 0) {
+    const vendorIds = owner.vendors.map((v) => v.id);
+    return { ownerId: owner.id, vendorId: pickVendorId(vendorIds, requestedVendorId), vendorIds, role: 'OWNER' };
+  }
+
+  const memberships = await app.prisma.vendorStaff.findMany({
+    where: { userId },
+    select: { vendorId: true, role: true },
+    orderBy: { createdAt: 'asc' },
+  });
+  if (memberships.length === 0) throw new NotFoundError('Vendor');
+  const vendorIds = memberships.map((m) => m.vendorId);
+  const vendorId = pickVendorId(vendorIds, requestedVendorId);
+  const role = memberships.find((m) => m.vendorId === vendorId)!.role as VendorAccessRole;
+  return { ownerId: null, vendorId, vendorIds, role };
+}
+
+/** Gate an action on the caller's store role. */
+function requireRole(access: VendorAccess, min: 'MANAGER' | 'OWNER') {
+  if (ROLE_RANK[access.role] < ROLE_RANK[min]) {
+    throw new AppError(403, 'STAFF_FORBIDDEN',
+      min === 'OWNER'
+        ? 'Only the store owner can do this'
+        : 'This needs a manager — ask the store owner to upgrade your role');
+  }
+}
+
+/** The verification gate belongs to the BUSINESS (its owner), not to whoever
+ *  is logged in — a verified store stays verified when staff work in it. */
+async function vendorOwnerUserId(app: FastifyInstance, vendorId: string): Promise<string> {
+  const vendor = await app.prisma.vendor.findUniqueOrThrow({
+    where: { id: vendorId },
+    select: { owner: { select: { userId: true } } },
+  });
+  return vendor.owner.userId;
 }
 
 /** The selected store from the `x-vendor-id` header (multi-store switch). */
 function selectedVendorId(request: { headers: Record<string, string | string[] | undefined> }): string | undefined {
   const h = request.headers['x-vendor-id'];
   return typeof h === 'string' ? h : undefined;
+}
+
+/** resolveVendor + role gate in one call — for MANAGER/OWNER-only routes. */
+async function requireVendor(
+  app: FastifyInstance,
+  request: { user: { userId: string }; headers: Record<string, string | string[] | undefined> },
+  min: 'MANAGER' | 'OWNER',
+): Promise<VendorAccess> {
+  const access = await resolveVendor(app, request.user.userId, selectedVendorId(request));
+  requireRole(access, min);
+  return access;
 }
 
 /** Acknowledge the persistent order alert — read = acknowledged = silence. */
@@ -324,6 +377,7 @@ async function resolveOwnedOrder(app: FastifyInstance, userId: string, orderId: 
 export async function vendorRoutes(app: FastifyInstance) {
   const auth = { preHandler: [app.authenticate] };
   const orderService = new OrderService(app.prisma, app.io);
+  const notifications = new NotificationService(app.prisma, app.io);
   const verification = new VerificationService(
     app.prisma,
     new NotificationService(app.prisma, app.io),
@@ -336,15 +390,94 @@ export async function vendorRoutes(app: FastifyInstance) {
   // Multi-store — list the owner's stores so the app can switch between them.
   // =========================================================================
 
-  /** GET /stores — every store this owner has (for the store switcher). */
+  /** GET /stores — every store this account works in (owner or staff). */
   app.get('/stores', auth, async (request) => {
-    const owner = await resolveOwner(app, request.user.userId);
+    const access = await resolveVendor(app, request.user.userId, selectedVendorId(request));
     const stores = await app.prisma.vendor.findMany({
-      where: { ownerId: owner.id },
+      where: { id: { in: access.vendorIds } },
       orderBy: { createdAt: 'asc' },
       select: { id: true, name: true, vendorType: true, isCurrentlyOpen: true, acceptingOrders: true, city: true },
     });
-    return { success: true, data: { stores, selectedId: selectedVendorId(request) ?? stores[0]?.id ?? null } };
+    return { success: true, data: { stores, selectedId: access.vendorId, myRole: access.role } };
+  });
+
+  // =========================================================================
+  // Staff & roles (master plan §4.1) — owner-only management of extra logins.
+  // =========================================================================
+
+  /** GET /staff — members of the selected store, with their user identity. */
+  app.get('/staff', auth, async (request) => {
+    const { vendorId } = await requireVendor(app, request, 'OWNER');
+    const staff = await app.prisma.vendorStaff.findMany({
+      where: { vendorId },
+      orderBy: { createdAt: 'asc' },
+      include: { user: { select: { id: true, firstName: true, lastName: true, phone: true, avatar: true } } },
+    });
+    return { success: true, data: staff };
+  });
+
+  /** POST /staff — add an EXISTING Swift account by phone (no ghost invites:
+   *  they must have signed up + done the selfie like everyone else). */
+  app.post('/staff', auth, async (request) => {
+    const { vendorId } = await requireVendor(app, request, 'OWNER');
+    const body = addStaffSchema.parse(request.body);
+
+    const target = await app.prisma.user.findUnique({
+      where: { phone: body.phone },
+      select: { id: true, firstName: true, lastName: true },
+    });
+    if (!target) {
+      throw new AppError(404, 'USER_NOT_FOUND', 'No Swift account with that phone — ask them to download Swift and sign up first');
+    }
+    if (target.id === request.user.userId) {
+      throw new AppError(400, 'SELF_STAFF', 'You already own this store');
+    }
+    const existing = await app.prisma.vendorStaff.findUnique({
+      where: { vendorId_userId: { vendorId, userId: target.id } },
+    });
+    if (existing) {
+      throw new AppError(409, 'ALREADY_STAFF', `${target.firstName} is already on this store's team`);
+    }
+
+    const member = await app.prisma.vendorStaff.create({
+      data: { vendorId, userId: target.id, role: body.role, invitedBy: request.user.userId },
+      include: { user: { select: { id: true, firstName: true, lastName: true, phone: true, avatar: true } } },
+    });
+
+    await notifications.send({
+      userId: target.id,
+      type: 'SYSTEM_ANNOUNCEMENT',
+      title: 'You joined a store team',
+      body: `You've been added as ${body.role === 'MANAGER' ? 'a manager' : 'staff'} — open Swift and choose "Business" to start.`,
+      data: { kind: 'staff_added', vendorId },
+    });
+
+    return { success: true, data: member };
+  });
+
+  /** PUT /staff/:id — change a member's role. */
+  app.put<{ Params: IdParam }>('/staff/:id', auth, async (request) => {
+    const { vendorId } = await requireVendor(app, request, 'OWNER');
+    const body = updateStaffSchema.parse(request.body);
+    const existing = await app.prisma.vendorStaff.findUnique({ where: { id: request.params.id } });
+    if (!existing || existing.vendorId !== vendorId) throw new NotFoundError('StaffMember', request.params.id);
+
+    const member = await app.prisma.vendorStaff.update({
+      where: { id: request.params.id },
+      data: { role: body.role },
+      include: { user: { select: { id: true, firstName: true, lastName: true, phone: true, avatar: true } } },
+    });
+    return { success: true, data: member };
+  });
+
+  /** DELETE /staff/:id — remove a member (their access ends immediately). */
+  app.delete<{ Params: IdParam }>('/staff/:id', auth, async (request) => {
+    const { vendorId } = await requireVendor(app, request, 'OWNER');
+    const existing = await app.prisma.vendorStaff.findUnique({ where: { id: request.params.id } });
+    if (!existing || existing.vendorId !== vendorId) throw new NotFoundError('StaffMember', request.params.id);
+
+    await app.prisma.vendorStaff.delete({ where: { id: request.params.id } });
+    return { success: true, data: { deleted: true } };
   });
 
   // =========================================================================
@@ -354,7 +487,7 @@ export async function vendorRoutes(app: FastifyInstance) {
   /** GET /qr — printable/shareable QR linking to this vendor's public catalogue.
    *  Doubles as the acquisition tool (pulls a vendor's customers onto Swift). */
   app.get('/qr', auth, async (request) => {
-    const { vendorId } = await resolveVendor(app, request.user.userId, selectedVendorId(request));
+    const { vendorId } = await requireVendor(app, request, 'MANAGER');
     const vendor = await app.prisma.vendor.findUniqueOrThrow({
       where: { id: vendorId },
       select: { slug: true, name: true },
@@ -369,29 +502,33 @@ export async function vendorRoutes(app: FastifyInstance) {
   // 1. PROFILE
   // =========================================================================
 
-  /** GET /profile — Vendor owner profile with all vendor details */
+  /** GET /profile — the stores this account works in, with the caller's role.
+   *  Owners see every owned store (incl. billing); staff see exactly their
+   *  member stores with the subscription stripped (billing is owner-only). */
   app.get('/profile', auth, async (request) => {
-    const owner = await app.prisma.vendorOwner.findUnique({
-      where: { userId: request.user.userId },
+    const access = await resolveVendor(app, request.user.userId, selectedVendorId(request));
+    const vendors = await app.prisma.vendor.findMany({
+      where: { id: { in: access.vendorIds } },
+      orderBy: { createdAt: 'asc' },
       include: {
-        vendors: {
-          orderBy: { createdAt: 'asc' },
-          include: {
-            operatingHours: { orderBy: { dayOfWeek: 'asc' } },
-            subscription: true,
-            categories: { orderBy: { sortOrder: 'asc' }, include: { _count: { select: { items: true } } } },
-            _count: { select: { orders: true, items: true } },
-          },
-        },
+        operatingHours: { orderBy: { dayOfWeek: 'asc' } },
+        subscription: true,
+        categories: { orderBy: { sortOrder: 'asc' }, include: { _count: { select: { items: true } } } },
+        _count: { select: { orders: true, items: true } },
       },
     });
-    if (!owner) throw new NotFoundError('VendorOwner');
-    return { success: true, data: owner };
+    const visible = access.role === 'OWNER'
+      ? vendors
+      : vendors.map((v) => ({ ...v, subscription: undefined }));
+    return {
+      success: true,
+      data: { id: access.ownerId, userId: request.user.userId, vendors: visible, myRole: access.role },
+    };
   });
 
   /** PUT /profile — Update vendor profile details */
   app.put('/profile', auth, async (request) => {
-    const { vendorId } = await resolveVendor(app, request.user.userId, selectedVendorId(request));
+    const { vendorId } = await requireVendor(app, request, 'MANAGER');
     const body = updateVendorProfileSchema.parse(request.body);
 
     const vendor = await app.prisma.vendor.update({
@@ -427,7 +564,7 @@ export async function vendorRoutes(app: FastifyInstance) {
 
   /** PUT /vendor/toggle-open — Toggle isCurrentlyOpen */
   app.put('/vendor/toggle-open', auth, async (request) => {
-    const { vendorId } = await resolveVendor(app, request.user.userId, selectedVendorId(request));
+    const { vendorId } = await requireVendor(app, request, 'MANAGER');
     const vendor = await app.prisma.vendor.findUniqueOrThrow({ where: { id: vendorId } });
 
     const updated = await app.prisma.vendor.update({
@@ -690,7 +827,7 @@ export async function vendorRoutes(app: FastifyInstance) {
 
   /** POST /categories — Create a category */
   app.post('/categories', auth, async (request) => {
-    const { vendorId } = await resolveVendor(app, request.user.userId, selectedVendorId(request));
+    const { vendorId } = await requireVendor(app, request, 'MANAGER');
     const body = createCategorySchema.parse(request.body);
     if (!body.name?.trim()) throw new ValidationError('Category name is required');
 
@@ -719,7 +856,7 @@ export async function vendorRoutes(app: FastifyInstance) {
 
   /** PUT /categories/:id — Update a category */
   app.put<{ Params: IdParam }>('/categories/:id', auth, async (request) => {
-    const { vendorId } = await resolveVendor(app, request.user.userId, selectedVendorId(request));
+    const { vendorId } = await requireVendor(app, request, 'MANAGER');
     const existing = await app.prisma.category.findUnique({ where: { id: request.params.id } });
     if (!existing || existing.vendorId !== vendorId) throw new NotFoundError('Category', request.params.id);
 
@@ -739,7 +876,7 @@ export async function vendorRoutes(app: FastifyInstance) {
 
   /** DELETE /categories/:id — Delete a category (and its items) */
   app.delete<{ Params: IdParam }>('/categories/:id', auth, async (request) => {
-    const { vendorId } = await resolveVendor(app, request.user.userId, selectedVendorId(request));
+    const { vendorId } = await requireVendor(app, request, 'MANAGER');
     const existing = await app.prisma.category.findUnique({
       where: { id: request.params.id },
       include: { _count: { select: { items: true } } },
@@ -761,7 +898,7 @@ export async function vendorRoutes(app: FastifyInstance) {
 
   /** PUT /categories/reorder — Bulk reorder categories */
   app.put('/categories/reorder', auth, async (request) => {
-    const { vendorId } = await resolveVendor(app, request.user.userId, selectedVendorId(request));
+    const { vendorId } = await requireVendor(app, request, 'MANAGER');
     const body = reorderCategoriesSchema.parse(request.body);
 
     await app.prisma.$transaction(
@@ -811,16 +948,17 @@ export async function vendorRoutes(app: FastifyInstance) {
 
   /** POST /items — Create an item with optional option groups */
   app.post('/items', auth, async (request) => {
-    const { vendorId } = await resolveVendor(app, request.user.userId, selectedVendorId(request));
+    const { vendorId } = await requireVendor(app, request, 'MANAGER');
 
     // Verification gate: no listing until the vendor-type checklist is approved.
-    // Legacy isVerified grandfathers pre-checklist vendors.
+    // The checklist belongs to the BUSINESS (its owner) — a verified store stays
+    // verified when staff manage it. Legacy isVerified grandfathers.
     const vendorRecord = await app.prisma.vendor.findUniqueOrThrow({
       where: { id: vendorId },
       select: { isVerified: true, vendorType: true },
     });
     const verified = vendorRecord.isVerified
-      || await verification.isRoleVerified(request.user.userId, vendorRecord.vendorType);
+      || await verification.isRoleVerified(await vendorOwnerUserId(app, vendorId), vendorRecord.vendorType);
     if (!verified) {
       throw new AppError(403, 'VERIFICATION_REQUIRED', 'Complete document verification before listing items');
     }
@@ -901,7 +1039,7 @@ export async function vendorRoutes(app: FastifyInstance) {
    *  CSV to confirm via POST /items/import. Never imports here; only relabels
    *  columns, never invents prices or stock (spec §4.5). */
   app.post('/items/import/automap', auth, async (request) => {
-    await resolveVendor(app, request.user.userId, selectedVendorId(request));
+    await requireVendor(app, request, 'MANAGER');
     const { csv } = importCsvSchema.parse(request.body);
     const rows = parseCsvWithHeader(csv);
     if (rows.length === 0) {
@@ -937,15 +1075,15 @@ export async function vendorRoutes(app: FastifyInstance) {
 
   /** POST /items/import — CSV bulk import: bad rows reported, good rows imported */
   app.post('/items/import', auth, async (request) => {
-    const { vendorId } = await resolveVendor(app, request.user.userId, selectedVendorId(request));
+    const { vendorId } = await requireVendor(app, request, 'MANAGER');
 
-    // Same listing gate as single-item creation
+    // Same listing gate as single-item creation (owner-based)
     const vendorRecord = await app.prisma.vendor.findUniqueOrThrow({
       where: { id: vendorId },
       select: { isVerified: true, vendorType: true },
     });
     const verified = vendorRecord.isVerified
-      || await verification.isRoleVerified(request.user.userId, vendorRecord.vendorType);
+      || await verification.isRoleVerified(await vendorOwnerUserId(app, vendorId), vendorRecord.vendorType);
     if (!verified) {
       throw new AppError(403, 'VERIFICATION_REQUIRED', 'Complete document verification before listing items');
     }
@@ -1028,7 +1166,7 @@ export async function vendorRoutes(app: FastifyInstance) {
 
   /** POST /items/:id/image — upload behind the StorageProvider interface */
   app.post<{ Params: IdParam }>('/items/:id/image', auth, async (request) => {
-    const { vendorId } = await resolveVendor(app, request.user.userId, selectedVendorId(request));
+    const { vendorId } = await requireVendor(app, request, 'MANAGER');
     const existing = await app.prisma.item.findUnique({ where: { id: request.params.id } });
     if (!existing || existing.vendorId !== vendorId) throw new NotFoundError('Item', request.params.id);
 
@@ -1061,7 +1199,7 @@ export async function vendorRoutes(app: FastifyInstance) {
 
   /** PUT /items/:id — Update an item */
   app.put<{ Params: IdParam }>('/items/:id', auth, async (request) => {
-    const { vendorId } = await resolveVendor(app, request.user.userId, selectedVendorId(request));
+    const { vendorId } = await requireVendor(app, request, 'MANAGER');
     const existing = await app.prisma.item.findUnique({ where: { id: request.params.id } });
     if (!existing || existing.vendorId !== vendorId) throw new NotFoundError('Item', request.params.id);
 
@@ -1111,7 +1249,7 @@ export async function vendorRoutes(app: FastifyInstance) {
 
   /** DELETE /items/:id — Delete an item and its option groups/options */
   app.delete<{ Params: IdParam }>('/items/:id', auth, async (request) => {
-    const { vendorId } = await resolveVendor(app, request.user.userId, selectedVendorId(request));
+    const { vendorId } = await requireVendor(app, request, 'MANAGER');
     const existing = await app.prisma.item.findUnique({ where: { id: request.params.id } });
     if (!existing || existing.vendorId !== vendorId) throw new NotFoundError('Item', request.params.id);
 
@@ -1146,7 +1284,7 @@ export async function vendorRoutes(app: FastifyInstance) {
 
   /** POST /items/:itemId/option-groups — Add an option group to an item */
   app.post<{ Params: ItemIdParam }>('/items/:itemId/option-groups', auth, async (request) => {
-    const { vendorId } = await resolveVendor(app, request.user.userId, selectedVendorId(request));
+    const { vendorId } = await requireVendor(app, request, 'MANAGER');
     const item = await app.prisma.item.findUnique({ where: { id: request.params.itemId } });
     if (!item || item.vendorId !== vendorId) throw new NotFoundError('Item', request.params.itemId);
 
@@ -1189,7 +1327,7 @@ export async function vendorRoutes(app: FastifyInstance) {
 
   /** PUT /option-groups/:id — Update an option group */
   app.put<{ Params: IdParam }>('/option-groups/:id', auth, async (request) => {
-    const { vendorId } = await resolveVendor(app, request.user.userId, selectedVendorId(request));
+    const { vendorId } = await requireVendor(app, request, 'MANAGER');
     const existing = await app.prisma.optionGroup.findUnique({
       where: { id: request.params.id },
       include: { item: { select: { vendorId: true } } },
@@ -1215,7 +1353,7 @@ export async function vendorRoutes(app: FastifyInstance) {
 
   /** DELETE /option-groups/:id — Delete an option group and its options */
   app.delete<{ Params: IdParam }>('/option-groups/:id', auth, async (request) => {
-    const { vendorId } = await resolveVendor(app, request.user.userId, selectedVendorId(request));
+    const { vendorId } = await requireVendor(app, request, 'MANAGER');
     const existing = await app.prisma.optionGroup.findUnique({
       where: { id: request.params.id },
       include: { item: { select: { vendorId: true } } },
@@ -1234,7 +1372,7 @@ export async function vendorRoutes(app: FastifyInstance) {
 
   /** POST /option-groups/:groupId/options — Add an option to a group */
   app.post<{ Params: GroupIdParam }>('/option-groups/:groupId/options', auth, async (request) => {
-    const { vendorId } = await resolveVendor(app, request.user.userId, selectedVendorId(request));
+    const { vendorId } = await requireVendor(app, request, 'MANAGER');
     const group = await app.prisma.optionGroup.findUnique({
       where: { id: request.params.groupId },
       include: { item: { select: { vendorId: true } } },
@@ -1269,7 +1407,7 @@ export async function vendorRoutes(app: FastifyInstance) {
 
   /** PUT /options/:id — Update an option */
   app.put<{ Params: IdParam }>('/options/:id', auth, async (request) => {
-    const { vendorId } = await resolveVendor(app, request.user.userId, selectedVendorId(request));
+    const { vendorId } = await requireVendor(app, request, 'MANAGER');
     const existing = await app.prisma.option.findUnique({
       where: { id: request.params.id },
       include: { optionGroup: { include: { item: { select: { vendorId: true } } } } },
@@ -1294,7 +1432,7 @@ export async function vendorRoutes(app: FastifyInstance) {
 
   /** DELETE /options/:id — Delete an option */
   app.delete<{ Params: IdParam }>('/options/:id', auth, async (request) => {
-    const { vendorId } = await resolveVendor(app, request.user.userId, selectedVendorId(request));
+    const { vendorId } = await requireVendor(app, request, 'MANAGER');
     const existing = await app.prisma.option.findUnique({
       where: { id: request.params.id },
       include: { optionGroup: { include: { item: { select: { vendorId: true } } } } },
@@ -1322,7 +1460,7 @@ export async function vendorRoutes(app: FastifyInstance) {
 
   /** PUT /hours — Bulk upsert operating hours for all 7 days */
   app.put('/hours', auth, async (request) => {
-    const { vendorId } = await resolveVendor(app, request.user.userId, selectedVendorId(request));
+    const { vendorId } = await requireVendor(app, request, 'MANAGER');
     const body = operatingHoursSchema.parse(request.body);
 
     // Open days must carry both times (closed days may omit them)
@@ -1359,7 +1497,7 @@ export async function vendorRoutes(app: FastifyInstance) {
 
   /** GET /analytics/overview — Dashboard summary cards */
   app.get('/analytics/overview', auth, async (request) => {
-    const { vendorId } = await resolveVendor(app, request.user.userId, selectedVendorId(request));
+    const { vendorId } = await requireVendor(app, request, 'MANAGER');
 
     const now = new Date();
     const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate());
@@ -1434,7 +1572,7 @@ export async function vendorRoutes(app: FastifyInstance) {
 
   /** GET /analytics/revenue — Daily revenue breakdown for the last 30 days */
   app.get('/analytics/revenue', auth, async (request) => {
-    const { vendorId } = await resolveVendor(app, request.user.userId, selectedVendorId(request));
+    const { vendorId } = await requireVendor(app, request, 'MANAGER');
     const { days } = revenueQuerySchema.parse(request.query);
 
     const since = new Date();
@@ -1496,7 +1634,7 @@ export async function vendorRoutes(app: FastifyInstance) {
 
   /** GET /analytics/popular-items — Top items by totalOrdered */
   app.get('/analytics/popular-items', auth, async (request) => {
-    const { vendorId } = await resolveVendor(app, request.user.userId, selectedVendorId(request));
+    const { vendorId } = await requireVendor(app, request, 'MANAGER');
     const { limit } = popularItemsQuerySchema.parse(request.query);
 
     const items = await app.prisma.item.findMany({
@@ -1545,7 +1683,7 @@ export async function vendorRoutes(app: FastifyInstance) {
 
   /** GET /settlements — Paginated settlement history */
   app.get('/settlements', auth, async (request) => {
-    const { vendorId } = await resolveVendor(app, request.user.userId, selectedVendorId(request));
+    const { vendorId } = await requireVendor(app, request, 'MANAGER');
     const query = request.query as Record<string, string | undefined>;
     const pagination = parsePagination(query);
 
@@ -1579,7 +1717,7 @@ export async function vendorRoutes(app: FastifyInstance) {
 
   /** GET /subscription — Current subscription details */
   app.get('/subscription', auth, async (request) => {
-    const { vendorId } = await resolveVendor(app, request.user.userId, selectedVendorId(request));
+    const { vendorId } = await requireVendor(app, request, 'OWNER');
     const subscription = await app.prisma.subscription.findFirst({
       where: { vendorId },
     });
