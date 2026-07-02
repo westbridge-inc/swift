@@ -4,7 +4,6 @@ import { z } from 'zod';
 import { randomInt } from 'node:crypto';
 import { FareService } from './fare.service';
 import { OrderService } from '../order/order.service';
-import { CountryConfigService } from '../country/country-config.service';
 import { makeDispatchService } from '../dispatch/dispatch.service';
 import { orderingRestriction } from '../cash/cash-rules.service';
 import { generateOrderNumber } from '../../utils/markup';
@@ -43,7 +42,6 @@ export async function ridesRoutes(app: FastifyInstance) {
   const auth = { preHandler: [app.authenticate] };
   const fareService = new FareService(app.prisma);
   const orderService = new OrderService(app.prisma, app.io);
-  const countryConfig = new CountryConfigService(app.prisma);
   const dispatch = makeDispatchService(app);
 
   /** POST /estimate — exact per-tier fares (Economy/Comfort/XL), before anything
@@ -114,12 +112,13 @@ export async function ridesRoutes(app: FastifyInstance) {
       source: tier.source,
     };
 
-    // Same ID-gate as checkout: big cash rides need an ID-verified account
-    const gateLocal = await countryConfig.getIdGateThresholdLocal(user.countryCode);
-    if (user.trustLevel === 'L1' && estimate.fare >= gateLocal) {
+    // Master plan §5: a rider reaches Level 2 BEFORE their first taxi ride —
+    // getting into a stranger's car is the highest-trust action on Swift.
+    // This supersedes the old fare-threshold gate (every ride now needs L2).
+    if (user.trustLevel === 'L1') {
       throw new AppError(403, 'ID_VERIFICATION_REQUIRED',
-        `Rides of $${Math.round(gateLocal).toLocaleString()} ${estimate.currencyCode} or more need ID verification.`,
-        { threshold: gateLocal, fare: estimate.fare });
+        'Rides need a one-time ID verification first — it takes a minute in the app and covers every future ride.',
+        { reason: 'first_ride_l2' });
     }
 
     const today = new Date();

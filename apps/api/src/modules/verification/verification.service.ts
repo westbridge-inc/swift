@@ -18,6 +18,21 @@ export const IDENTITY_DOC_TYPE = 'identity_l2';
  *  photo"), through the same KycProvider.verifyIdentity seam the L2 flow uses. */
 const IDENTITY_FACE_MATCH_DOCS = new Set(['national_id', 'owner_national_id']);
 
+/** Auto-approved documents must still LAPSE (the "verified ≠ valid now" rule).
+ *  A human reviewer keys the real printed expiry; the automatic path applies a
+ *  conservative default so the daily sweep + reminders always have a date.
+ *  Days by docType; absent = non-expiring (e.g. business registration). */
+const AUTO_APPROVE_EXPIRY_DAYS: Record<string, number> = {
+  police_clearance: 365,   // Certificate of Character — commonly re-issued yearly
+  fitness_cert: 365,       // annual fitness
+  vehicle_insurance: 365,  // annual policy
+  hire_car_permit: 365,    // annual occupational permit
+  food_handler_cert: 365,  // annual health cert
+  gra_restaurant_licence: 365,
+  drivers_licence: 3 * 365,
+  vehicle_registration: 3 * 365,
+};
+
 /** Insurance 5-point manual check captured during admin review (spec §3.4). */
 export interface InsuranceReview {
   insurerName: string;
@@ -90,6 +105,7 @@ export class VerificationService {
       result = await this.kyc.verifyDocument({ userId, docType, fileUrl });
     }
 
+    const autoExpiryDays = AUTO_APPROVE_EXPIRY_DAYS[docType];
     const doc = await this.prisma.verificationDocument.create({
       data: {
         userId,
@@ -103,7 +119,13 @@ export class VerificationService {
           result.status === 'approved' ? 'APPROVED'
           : result.status === 'rejected' ? 'REJECTED'
           : 'PENDING',
-        ...(result.status === 'approved' && { reviewedBy: 'kyc:auto', reviewedAt: new Date() }),
+        ...(result.status === 'approved' && {
+          reviewedBy: 'kyc:auto',
+          reviewedAt: new Date(),
+          // Auto-approvals lapse on a conservative default so the expiry
+          // sweep + 30-day reminders always fire; humans key the real date.
+          ...(autoExpiryDays && { expiresAt: new Date(Date.now() + autoExpiryDays * 24 * 60 * 60 * 1000) }),
+        }),
         ...(result.status === 'rejected' && { reviewedBy: 'kyc:auto', reviewedAt: new Date(), reviewNote: result.reason }),
       },
     });
