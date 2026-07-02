@@ -30,7 +30,8 @@ const ADMIN_PHONE = '+5920004445';
 const TAXI_MOVER_PHONE = '+5920004446';
 const BICYCLE_MOVER_PHONE = '+5920004447';
 const PREVIEW_MOVER_PHONE = '+5920004448';
-const ALL_PHONES = [MOVER_PHONE, VENDOR_PHONE, L2_AUTO_PHONE, L2_MANUAL_PHONE, ADMIN_PHONE, TAXI_MOVER_PHONE, BICYCLE_MOVER_PHONE, PREVIEW_MOVER_PHONE];
+const FACE_MATCH_PHONE = '+5920004449';
+const ALL_PHONES = [MOVER_PHONE, VENDOR_PHONE, L2_AUTO_PHONE, L2_MANUAL_PHONE, ADMIN_PHONE, TAXI_MOVER_PHONE, BICYCLE_MOVER_PHONE, PREVIEW_MOVER_PHONE, FACE_MATCH_PHONE];
 
 // Base (incl. police clearance — required of every courier) + motor docs.
 const MOVER_DOCS = ['national_id', 'police_clearance', 'drivers_licence', 'vehicle_registration', 'vehicle_insurance'];
@@ -76,8 +77,12 @@ async function signup(phone: string, role: 'CUSTOMER' | 'MOVER' | 'VENDOR') {
   });
   expect(res.statusCode).toBe(201);
   // These fixtures model accounts past the signup selfie (its gate has its
-  // own coverage in selfie.test.ts) — go-online etc. must not trip on it here.
-  await app.prisma.user.update({ where: { phone }, data: { selfieCapturedAt: new Date() } });
+  // own coverage in selfie.test.ts) — go-online and the ID face-match must
+  // not trip on a missing profile photo here.
+  await app.prisma.user.update({
+    where: { phone },
+    data: { selfieCapturedAt: new Date(), avatar: 'storage://seed/profile-selfie.jpg' },
+  });
   return res.json().data;
 }
 
@@ -644,5 +649,83 @@ describe('Taxi movers are shown — and gated on — the taxi-extra checklist', 
     const data = res.json().data;
     expect(data.checklist).toEqual(TAXI_DOCS);
     expect(data.vehicleType).toBeNull(); // nothing saved yet — gate would use the entity
+  });
+});
+
+describe('Operator identity docs are face-matched against the signup selfie', () => {
+  let faceToken: string;
+  let faceUserId: string;
+
+  beforeAll(async () => {
+    const u = await signup(FACE_MATCH_PHONE, 'MOVER');
+    faceToken = u.tokens.accessToken;
+    faceUserId = u.user.id;
+  });
+
+  it('refuses an ID submission when no profile selfie exists', async () => {
+    // Models a pre-selfie account — strip what the fixture helper added.
+    await app.prisma.user.update({
+      where: { id: faceUserId },
+      data: { selfieCapturedAt: null, avatar: null },
+    });
+
+    const res = await inject('POST', '/api/v1/verification/documents', {
+      role: 'MOVER',
+      docType: 'national_id',
+      fileUrl: 'storage://t/auto-approve/face-id.jpg',
+      consent: true,
+      privacyNoticeVersion: 'v1',
+    }, faceToken);
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error.code).toBe('SELFIE_REQUIRED');
+
+    // A NON-identity document is unaffected by the missing selfie.
+    const plain = await inject('POST', '/api/v1/verification/documents', {
+      role: 'MOVER',
+      docType: 'vehicle_registration',
+      fileUrl: 'storage://t/face-reg.jpg',
+      consent: true,
+      privacyNoticeVersion: 'v1',
+    }, faceToken);
+    expect(plain.statusCode).toBe(201);
+  });
+
+  it('routes ID docs through verifyIdentity with the selfie; other docs through verifyDocument', async () => {
+    await app.prisma.user.update({
+      where: { id: faceUserId },
+      data: { selfieCapturedAt: new Date(), avatar: 'storage://seed/face-selfie.jpg' },
+    });
+
+    const calls: Array<{ path: string; input: Record<string, unknown> }> = [];
+    const recorder = {
+      verifyIdentity: async (input: { userId: string; idDocumentUrl: string; selfieUrl: string }) => {
+        calls.push({ path: 'identity', input });
+        return { status: 'approved' as const, referenceToken: 'stub_identity' };
+      },
+      verifyDocument: async (input: { userId: string; docType: string; fileUrl: string }) => {
+        calls.push({ path: 'document', input });
+        return { status: 'approved' as const, referenceToken: 'stub_document' };
+      },
+      getStatus: async () => 'pending_manual' as const,
+    };
+    const svc = new VerificationService(
+      app.prisma,
+      new NotificationService(app.prisma, app.io),
+      recorder,
+    );
+
+    await svc.submitDocument(faceUserId, 'MOVER', 'national_id', 'storage://t/face-id2.jpg', 'v1');
+    await svc.submitDocument(faceUserId, 'MOVER', 'drivers_licence', 'storage://t/face-dl.jpg', 'v1');
+
+    expect(calls).toHaveLength(2);
+    expect(calls[0]).toEqual({
+      path: 'identity',
+      input: {
+        userId: faceUserId,
+        idDocumentUrl: 'storage://t/face-id2.jpg',
+        selfieUrl: 'storage://seed/face-selfie.jpg', // the signup selfie IS the match target
+      },
+    });
+    expect(calls[1]?.path).toBe('document');
   });
 });

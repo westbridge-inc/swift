@@ -12,6 +12,12 @@ export type ChecklistRole = 'MOVER' | 'RESTAURANT' | 'SUPERMARKET' | 'STORE' | '
 /** L2 identity rows use this synthetic docType (not part of any checklist). */
 export const IDENTITY_DOC_TYPE = 'identity_l2';
 
+/** Checklist docTypes that ARE a government identity document. These are not
+ *  merely OCR-checked: the portrait is face-matched against the operator's
+ *  camera-captured signup selfie (master plan §3 — "face-matched to profile
+ *  photo"), through the same KycProvider.verifyIdentity seam the L2 flow uses. */
+const IDENTITY_FACE_MATCH_DOCS = new Set(['national_id', 'owner_national_id']);
+
 /** Insurance 5-point manual check captured during admin review (spec §3.4). */
 export interface InsuranceReview {
   insurerName: string;
@@ -47,7 +53,7 @@ export class VerificationService {
   ) {
     const user = await this.prisma.user.findUnique({
       where: { id: userId },
-      select: { id: true, countryCode: true },
+      select: { id: true, countryCode: true, avatar: true, selfieCapturedAt: true },
     });
     if (!user) throw new NotFoundError('User', userId);
 
@@ -72,7 +78,17 @@ export class VerificationService {
       throw new AppError(409, 'ALREADY_APPROVED', `Your ${docType} is already verified`);
     }
 
-    const result = await this.kyc.verifyDocument({ userId, docType, fileUrl });
+    // Identity documents get the full ID + face-match check against the
+    // operator's signup selfie; every other document is a plain doc check.
+    let result;
+    if (IDENTITY_FACE_MATCH_DOCS.has(docType)) {
+      if (!user.avatar || !user.selfieCapturedAt) {
+        throw new AppError(400, 'SELFIE_REQUIRED', 'Take your profile selfie before submitting your ID — we match the two faces.');
+      }
+      result = await this.kyc.verifyIdentity({ userId, idDocumentUrl: fileUrl, selfieUrl: user.avatar });
+    } else {
+      result = await this.kyc.verifyDocument({ userId, docType, fileUrl });
+    }
 
     const doc = await this.prisma.verificationDocument.create({
       data: {
