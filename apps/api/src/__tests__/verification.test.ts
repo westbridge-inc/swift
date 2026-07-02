@@ -32,7 +32,8 @@ const BICYCLE_MOVER_PHONE = '+5920004447';
 const PREVIEW_MOVER_PHONE = '+5920004448';
 const ALL_PHONES = [MOVER_PHONE, VENDOR_PHONE, L2_AUTO_PHONE, L2_MANUAL_PHONE, ADMIN_PHONE, TAXI_MOVER_PHONE, BICYCLE_MOVER_PHONE, PREVIEW_MOVER_PHONE];
 
-const MOVER_DOCS = ['national_id', 'drivers_licence', 'vehicle_registration', 'vehicle_insurance'];
+// Base (incl. police clearance — required of every courier) + motor docs.
+const MOVER_DOCS = ['national_id', 'police_clearance', 'drivers_licence', 'vehicle_registration', 'vehicle_insurance'];
 
 let app: FastifyInstance;
 let sweepService: VerificationService;
@@ -195,6 +196,27 @@ describe('Checklists drive from config', () => {
     expect(res.statusCode).toBe(400);
     expect(res.json().error.code).toBe('INVALID_DOC_TYPE');
   });
+
+  it('commerce checklists carry the Guyana-real docs (TIN, GRA licence, storefront)', async () => {
+    const restaurant = await inject('GET', '/api/v1/verification/status?role=RESTAURANT', undefined, vendorToken);
+    expect(restaurant.json().data.checklist).toEqual([
+      'owner_national_id', 'business_registration', 'tin_certificate',
+      'gra_restaurant_licence', 'food_handler_cert', 'storefront_photo',
+    ]);
+
+    const supermarket = await inject('GET', '/api/v1/verification/status?role=SUPERMARKET', undefined, vendorToken);
+    expect(supermarket.json().data.checklist).toEqual([
+      'owner_national_id', 'business_registration', 'tin_certificate', 'storefront_photo',
+    ]);
+
+    const store = await inject('GET', '/api/v1/verification/status?role=STORE', undefined, vendorToken);
+    expect(store.json().data.checklist).toEqual([
+      'owner_national_id', 'business_registration', 'tin_certificate', 'storefront_photo',
+    ]);
+
+    const service = await inject('GET', '/api/v1/verification/status?role=SERVICE', undefined, vendorToken);
+    expect(service.json().data.checklist).toEqual(['owner_national_id', 'police_clearance']);
+  });
 });
 
 describe('Gating — no work until verified', () => {
@@ -318,6 +340,26 @@ describe('Provider auto-decisions (swappable interface)', () => {
     expect(res.statusCode).toBe(201);
     expect(res.json().data.status).toBe('APPROVED');
     expect(res.json().data.kycRef).toMatch(/^sbx_/);
+
+    // ID alone is not the SERVICE bar — police clearance is still missing
+    // (service people enter customers' homes), so listing stays gated.
+    const early = await inject('POST', '/api/v1/vendor/items', {
+      categoryId: serviceCategoryId,
+      name: 'Hot Stone Massage',
+      basePrice: 8000,
+    }, vendorToken);
+    expect(early.statusCode).toBe(403);
+    expect(early.json().error.code).toBe('VERIFICATION_REQUIRED');
+
+    const clearance = await inject('POST', '/api/v1/verification/documents', {
+      role: 'SERVICE',
+      docType: 'police_clearance',
+      fileUrl: 'storage://t/auto-approve/clearance.jpg',
+      consent: true,
+      privacyNoticeVersion: 'v1',
+    }, vendorToken);
+    expect(clearance.statusCode).toBe(201);
+    expect(clearance.json().data.status).toBe('APPROVED');
 
     const listing = await inject('POST', '/api/v1/vendor/items', {
       categoryId: serviceCategoryId,
@@ -540,11 +582,11 @@ describe('Taxi checklist merge + auto-KYC audit', () => {
 });
 
 describe('Taxi movers are shown — and gated on — the taxi-extra checklist', () => {
-  // The dead-end this prevents: a taxi driver was only ever shown the 4 base
+  // The dead-end this prevents: a taxi driver was only ever shown the base
   // mover docs, uploaded them, saw "verified" — then go-online silently failed
-  // because the live gate ALSO requires hire permit / plate photo / police
-  // clearance / fitness cert. What onboarding shows must equal what gates.
-  const TAXI_DOCS = [...MOVER_DOCS, 'hire_car_permit', 'vehicle_plate_photo', 'police_clearance', 'fitness_cert'];
+  // because the live gate ALSO requires hire permit / plate photo / exterior
+  // photo / fitness cert. What onboarding shows must equal what gates.
+  const TAXI_DOCS = [...MOVER_DOCS, 'hire_car_permit', 'vehicle_plate_photo', 'vehicle_exterior_photo', 'fitness_cert'];
   let taxiToken: string;
   let bicycleToken: string;
 
@@ -580,13 +622,16 @@ describe('Taxi movers are shown — and gated on — the taxi-extra checklist', 
     const res = await inject('GET', '/api/v1/verification/status?role=MOVER', undefined, moverToken);
     const data = res.json().data;
     expect(data.checklist).toEqual(MOVER_DOCS);
-    expect(data.checklist).not.toContain('police_clearance');
+    expect(data.checklist).not.toContain('hire_car_permit');
+    expect(data.checklist).not.toContain('vehicle_exterior_photo');
   });
 
-  it('asks a bicycle courier for identity only — no licence/registration/insurance', async () => {
+  it('asks a bicycle courier for identity + character only — no vehicle docs', async () => {
     const res = await inject('GET', '/api/v1/verification/status?role=MOVER', undefined, bicycleToken);
     const data = res.json().data;
-    expect(data.checklist).toEqual(['national_id']);
+    // Police clearance applies to EVERY courier (cash + home visits) — only
+    // the vehicle documents scale away for a bicycle (master plan §3.2).
+    expect(data.checklist).toEqual(['national_id', 'police_clearance']);
     expect(data.checklist).not.toContain('drivers_licence');
     expect(data.checklist).not.toContain('vehicle_insurance');
     expect(data.vehicleType).toBe('BICYCLE');

@@ -470,64 +470,95 @@ async function main() {
     },
   });
 
-  // Approved verification documents for the seeded vendor owner and rider so
-  // the gates (listing / go-online) pass for the demo accounts.
+  // Approved verification documents for the seeded demo accounts so every
+  // gate (listing / go-online / hire-class insurance) passes out of the box.
+  // Idempotent per docType: reseeding after a checklist grows tops up ONLY the
+  // missing documents instead of skipping the whole account.
+  async function ensureApprovedDocs(
+    userId: string,
+    role: 'VENDOR_OWNER' | 'MOVER',
+    docTypes: string[],
+    extraByDocType: Record<string, object> = {},
+  ) {
+    const have = await prisma.verificationDocument.findMany({
+      where: { userId, docType: { in: docTypes }, status: 'APPROVED' },
+      select: { docType: true },
+    });
+    const haveSet = new Set(have.map((d) => d.docType));
+    const missing = docTypes.filter((d) => !haveSet.has(d));
+    if (missing.length === 0) return;
+    await prisma.verificationDocument.createMany({
+      data: missing.map((docType) => ({
+        userId,
+        role,
+        docType,
+        fileUrl: `storage://seed/${docType}.jpg`,
+        status: 'APPROVED' as const,
+        reviewedBy: 'seed',
+        reviewedAt: new Date(),
+        ...(extraByDocType[docType] ?? {}),
+      })),
+    });
+  }
+
+  // The demo owner runs every vendor type — union of all four checklists.
   const seededVendorUser = await prisma.user.findUnique({ where: { phone: '+5926002000' } });
   if (seededVendorUser) {
-    const ownerDocs = ['owner_national_id', 'business_registration', 'food_handler_cert'];
-    const existing = await prisma.verificationDocument.count({
-      where: { userId: seededVendorUser.id, docType: { in: ownerDocs } },
-    });
-    if (existing === 0) {
-      await prisma.verificationDocument.createMany({
-        data: ownerDocs.map((docType) => ({
-          userId: seededVendorUser.id,
-          role: 'VENDOR_OWNER' as const,
-          docType,
-          fileUrl: `storage://seed/${docType}.jpg`,
-          status: 'APPROVED' as const,
-          reviewedBy: 'seed',
-          reviewedAt: new Date(),
-        })),
-      });
-    }
+    await ensureApprovedDocs(seededVendorUser.id, 'VENDOR_OWNER', [
+      'owner_national_id', 'business_registration', 'tin_certificate',
+      'gra_restaurant_licence', 'food_handler_cert', 'storefront_photo', 'police_clearance',
+    ]);
   }
   const seededRiderUser = await prisma.user.findUnique({ where: { phone: '+5926004000' } });
   if (seededRiderUser) {
-    const moverDocs = ['national_id', 'drivers_licence', 'vehicle_registration', 'vehicle_insurance'];
-    const existing = await prisma.verificationDocument.count({
-      where: { userId: seededRiderUser.id, docType: { in: moverDocs } },
-    });
-    if (existing === 0) {
-      await prisma.verificationDocument.createMany({
-        data: moverDocs.map((docType) => ({
-          userId: seededRiderUser.id,
-          role: 'MOVER' as const,
-          docType,
-          fileUrl: `storage://seed/${docType}.jpg`,
-          status: 'APPROVED' as const,
-          reviewedBy: 'seed',
-          reviewedAt: new Date(),
-        })),
-      });
-    }
+    await ensureApprovedDocs(seededRiderUser.id, 'MOVER', [
+      'national_id', 'police_clearance', 'drivers_licence', 'vehicle_registration', 'vehicle_insurance',
+    ]);
+  }
+  // Demo taxi drivers: the full CAR checklist, with the insurance row carrying
+  // the manually-confirmed HIRE class the live-operation gate demands.
+  const hireInsurance = {
+    vehicle_insurance: {
+      insurerName: 'Demerara Mutual (demo)',
+      policyNumber: 'HC-DEMO',
+      coverageClass: 'HIRE' as const,
+      hireClassConfirmed: true,
+      plateCrossChecked: true,
+    },
+  };
+  for (const d of demoDrivers) {
+    const drv = await prisma.user.findUnique({ where: { phone: d.phone } });
+    if (!drv) continue;
+    await ensureApprovedDocs(drv.id, 'MOVER', [
+      'national_id', 'police_clearance', 'drivers_licence', 'vehicle_registration',
+      'vehicle_insurance', 'hire_car_permit', 'vehicle_plate_photo', 'vehicle_exterior_photo', 'fitness_cert',
+    ], hireInsurance);
   }
 
   // Guyana CountryConfig — the single source for currency, ID-gate, tiers,
   // and document checklists. Adding a country = adding a row, not code.
   const guyanaTiers = { mover: 12000, smallVendor: 20000, largeVendor: 30000 };
   const guyanaChecklists = {
-    // Every mover (incl. bicycle couriers) proves identity.
-    MOVER: ['national_id'],
+    // Every mover (incl. bicycle couriers) proves identity AND character —
+    // couriers handle cash and walk up to homes, so the Police Clearance
+    // (Certificate of Character) applies to ALL of them (master plan §3.2:
+    // only licence/registration/insurance are motorized-only).
+    MOVER: ['national_id', 'police_clearance'],
     // Motor vehicles (motorcycle + car) add licence, registration, insurance.
     MOVER_MOTOR: ['drivers_licence', 'vehicle_registration', 'vehicle_insurance'],
     // Taxi drivers carry passengers — heaviest checklist: occupational permit,
-    // H-plate photo, police clearance, and an annual fitness certificate (§3.4).
-    MOVER_TAXI_EXTRA: ['hire_car_permit', 'vehicle_plate_photo', 'police_clearance', 'fitness_cert'],
-    RESTAURANT: ['owner_national_id', 'business_registration', 'food_handler_cert'],
-    SUPERMARKET: ['owner_national_id', 'business_registration'],
-    STORE: ['owner_national_id', 'business_registration'],
-    SERVICE: ['owner_national_id'],
+    // H-plate photo, exterior car photo with the H plate + corporate-yellow
+    // paint visible (master plan §3.1), and an annual fitness certificate.
+    MOVER_TAXI_EXTRA: ['hire_car_permit', 'vehicle_plate_photo', 'vehicle_exterior_photo', 'fitness_cert'],
+    // Commerce operators (master plan §3.3–3.5): registration + TIN for every
+    // business; restaurants add the GRA eating-house licence + food handler
+    // cert; every storefront photographs its premises (shown to customers).
+    RESTAURANT: ['owner_national_id', 'business_registration', 'tin_certificate', 'gra_restaurant_licence', 'food_handler_cert', 'storefront_photo'],
+    SUPERMARKET: ['owner_national_id', 'business_registration', 'tin_certificate', 'storefront_photo'],
+    STORE: ['owner_national_id', 'business_registration', 'tin_certificate', 'storefront_photo'],
+    // SERVICE-type vendor owners meet the same bar as individual providers
+    // (§3.6): identity + police clearance (they enter customers' homes).
+    SERVICE: ['owner_national_id', 'police_clearance'],
     // Hire-a-professional providers (§4.6): ID + police clearance are mandatory.
     SERVICE_PROVIDER: ['national_id', 'police_clearance'],
     CUSTOMER_L2: ['national_id', 'selfie'],

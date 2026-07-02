@@ -53,10 +53,11 @@ export class CountryConfigService {
   /**
    * Mover checklist, scaled to the vehicle so we never ask for documents a
    * vehicle can't have (a bicycle has no driver's licence or insurance):
-   *   BICYCLE    → MOVER base (identity)
+   *   BICYCLE    → MOVER base (identity + police clearance — master plan §3.2:
+   *                every courier handles cash and enters homes)
    *   MOTORCYCLE → base + MOVER_MOTOR (licence, registration, insurance)
    *   CAR (taxi) → the above + MOVER_TAXI_EXTRA (hire permit, plate photo,
-   *                police clearance, fitness — spec §3.4)
+   *                exterior car photo, fitness — master plan §3.1)
    * Used both to display the checklist and to gate live operation.
    */
   async getMoverChecklist(code: string, vehicleType: VehicleType): Promise<string[]> {
