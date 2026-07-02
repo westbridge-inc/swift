@@ -39,6 +39,7 @@ import {
   useVendorAnalytics,
   useVendorRevenue,
   usePopularItems,
+  useBusyHours,
   useVendorHours,
   useSetHours,
   type DayHours,
@@ -1152,6 +1153,49 @@ function TopItemsCard({ items }: { items: any[] }) {
   );
 }
 
+/** Busy-hours mini chart (§4.1): when the orders actually come in. */
+function BusyHoursCard() {
+  const q = useBusyHours();
+  if (q.isLoading) return <Skeleton className="mb-md h-28 w-full rounded-2xl" />;
+  const data = q.data;
+  if (!data) return null;
+  const hours: Array<{ hour: number; orders: number }> = data.hours ?? [];
+  const max = Math.max(...hours.map((h) => h.orders), 1);
+  const fmtHour = (h: number) => (h === 0 ? '12am' : h < 12 ? `${h}am` : h === 12 ? '12pm' : `${h - 12}pm`);
+  return (
+    <Card className="mb-md">
+      <View className="flex-row items-baseline justify-between">
+        <Text className="text-base font-semibold">Busy hours</Text>
+        {data.peak ? (
+          <Text className="text-sm text-text-secondary">peak {fmtHour(data.peak.hour)}</Text>
+        ) : null}
+      </View>
+      {data.total === 0 ? (
+        <Text className="mt-sm text-sm text-text-muted">Order times will map out here — staff up for the rush.</Text>
+      ) : (
+        <>
+          <View className="mt-md flex-row items-end" style={{ height: 64, gap: 2 }}>
+            {hours.map((h) => (
+              <View
+                key={h.hour}
+                className={h.orders > 0 ? 'flex-1 rounded-t-sm bg-brand-500' : 'flex-1 rounded-t-sm bg-surface-subtle'}
+                style={{ height: Math.max(3, Math.round((h.orders / max) * 64)) }}
+              />
+            ))}
+          </View>
+          <View className="mt-xs flex-row justify-between">
+            <Text className="text-xs text-text-muted">12am</Text>
+            <Text className="text-xs text-text-muted">6am</Text>
+            <Text className="text-xs text-text-muted">12pm</Text>
+            <Text className="text-xs text-text-muted">6pm</Text>
+            <Text className="text-xs text-text-muted">11pm</Text>
+          </View>
+        </>
+      )}
+    </Card>
+  );
+}
+
 /** Reviews with the operator reply box (§4.1 "see ratings, respond"). */
 function ReviewsCard() {
   const reviewsQ = useMyStoreReviews();
@@ -1263,6 +1307,7 @@ function VendorInsightsScreen() {
             ) : popularQ.data ? (
               <TopItemsCard items={popularQ.data} />
             ) : null}
+            <BusyHoursCard />
             <ReviewsCard />
             <Card className="mb-md">
               <View className="flex-row items-center justify-between">
