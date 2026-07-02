@@ -59,7 +59,6 @@ async function purge() {
   await app.prisma.reimbursementClaim.deleteMany({ where: { orderId: { in: orderIds } } });
   await app.prisma.strike.deleteMany({ where: { orderId: { in: orderIds } } });
   await app.prisma.earning.deleteMany({ where: { orderId: { in: orderIds } } });
-  await app.prisma.orderStatusLog.deleteMany({ where: { orderId: { in: orderIds } } });
   await app.prisma.order.deleteMany({ where: { id: { in: orderIds } } });
   // carts (+ their items) for these customers
   const carts = await app.prisma.cart.findMany({ where: { customerId: { in: ids } }, select: { id: true } });
