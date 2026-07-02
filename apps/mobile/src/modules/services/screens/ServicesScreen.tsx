@@ -25,7 +25,10 @@ function Header({ navigation }: any) {
       <PressableScale onPress={() => navigation?.goBack?.()} hitSlop={10}>
         <Feather name="chevron-left" size={24} color={color.text.primary} />
       </PressableScale>
-      <Text className="ml-md text-base font-bold">Services</Text>
+      <Text className="ml-md flex-1 text-base font-bold">Services</Text>
+      <PressableScale onPress={() => navigation?.navigate?.('ServiceJobs')} hitSlop={10}>
+        <Text className="text-sm font-semibold text-brand-600">My jobs</Text>
+      </PressableScale>
     </View>
   );
 }
@@ -106,8 +109,9 @@ export function ServicesScreen({ navigation }: any) {
                 <Text className="ml-sm font-semibold text-brand-700">Request sent</Text>
               </View>
               <Text className="mt-xs text-sm text-text-secondary">
-                The provider will send a quote in chat. Pay cash on completion.
+                The quote lands in My jobs — accept it there and pick a time. Pay cash on completion.
               </Text>
+              <Button label="View my jobs" variant="outline" className="mt-sm" onPress={() => navigation?.navigate?.('ServiceJobs')} />
             </Card>
           ) : null}
 
