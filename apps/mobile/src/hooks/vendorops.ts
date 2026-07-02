@@ -307,6 +307,17 @@ export function useSetHours() {
 }
 
 /** Map a pasted store CSV's columns to Swift fields (preview only, no import). */
+/** Pick-a-file imports: xlsx and PDF menus land in the same automap preview. */
+export function useImportFile() {
+  return useMutation({
+    mutationFn: ({ kind, file }: { kind: 'xlsx' | 'menu-pdf'; file: { uri: string; name: string; type: string } }) => {
+      const form = new FormData();
+      form.append('file', file as unknown as Blob);
+      return unwrap<any>(kind === 'xlsx' ? vendorApi.importXlsx(form) : vendorApi.importMenuPdf(form));
+    },
+  });
+}
+
 export function useImportAutomap() {
   return useMutation({ mutationFn: (csv: string) => unwrap<any>(vendorApi.importAutomap(csv)) });
 }
