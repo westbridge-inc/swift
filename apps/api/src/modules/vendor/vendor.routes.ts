@@ -110,7 +110,8 @@ const createItemSchema = z.object({
   basePrice: z.number().min(0).max(10_000_000),
   sku: z.string().max(64).optional(),
   unit: z.string().max(30).optional(),
-  stockQuantity: z.number().int().min(0).optional(),
+  stockQuantity: z.number().int().min(0).nullable().optional(),
+  lowStockThreshold: z.number().int().min(0).nullable().optional(),
   isAvailable: z.boolean().optional(),
   isPopular: z.boolean().optional(),
   dietaryTags: z.array(z.string().max(40)).max(30).optional(),
@@ -852,6 +853,7 @@ export async function vendorRoutes(app: FastifyInstance) {
         sku: body.sku,
         unit: body.unit,
         stockQuantity: body.stockQuantity,
+        lowStockThreshold: body.lowStockThreshold,
         isAvailable: body.isAvailable ?? true,
         isPopular: body.isPopular ?? false,
         dietaryTags: body.dietaryTags || [],
@@ -1071,6 +1073,12 @@ export async function vendorRoutes(app: FastifyInstance) {
       if (!cat || cat.vendorId !== vendorId) throw new NotFoundError('Category', body.categoryId);
     }
 
+    // Inventory: restocking above zero undoes an AUTO-hide (the engine hid it
+    // when stock ran out) — the owner's own availability toggle always wins,
+    // and any explicit isAvailable in this request clears the auto-hide marker.
+    const restocksAboveZero = body.stockQuantity !== undefined && (body.stockQuantity ?? 0) > 0;
+    const unhide = restocksAboveZero && existing.autoHiddenAt !== null && body.isAvailable === undefined;
+
     const item = await app.prisma.item.update({
       where: { id: request.params.id },
       data: {
@@ -1082,7 +1090,9 @@ export async function vendorRoutes(app: FastifyInstance) {
         ...(body.sku !== undefined && { sku: body.sku }),
         ...(body.unit !== undefined && { unit: body.unit }),
         ...(body.stockQuantity !== undefined && { stockQuantity: body.stockQuantity }),
-        ...(body.isAvailable !== undefined && { isAvailable: body.isAvailable }),
+        ...(body.lowStockThreshold !== undefined && { lowStockThreshold: body.lowStockThreshold }),
+        ...(unhide && { isAvailable: true, autoHiddenAt: null }),
+        ...(body.isAvailable !== undefined && { isAvailable: body.isAvailable, autoHiddenAt: null }),
         ...(body.isPopular !== undefined && { isPopular: body.isPopular }),
         ...(body.dietaryTags !== undefined && { dietaryTags: body.dietaryTags }),
         ...(body.allergens !== undefined && { allergens: body.allergens }),

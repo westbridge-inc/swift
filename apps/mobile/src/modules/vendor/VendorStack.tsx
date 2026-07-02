@@ -569,6 +569,11 @@ function MenuItemRow({
             {money(item.basePrice)}
             {item.stockQuantity != null ? ` · ${item.stockQuantity} in stock` : ''}
           </Text>
+          {item.stockQuantity != null && item.stockQuantity <= 0 ? (
+            <Text className="mt-0.5 text-xs font-semibold text-error">Out of stock — hidden from customers</Text>
+          ) : item.stockQuantity != null && item.lowStockThreshold != null && item.stockQuantity <= item.lowStockThreshold ? (
+            <Text className="mt-0.5 text-xs font-semibold text-warning">Low stock — restock soon</Text>
+          ) : null}
         </View>
         <PressableScale
           onPress={() => setAvail.mutate({ id: item.id, isAvailable: !available })}
@@ -694,6 +699,7 @@ function VendorItemEditorScreen({ navigation, route }: any) {
   const [sku, setSku] = useState<string>(existing?.sku ?? '');
   const [unit, setUnit] = useState<string>(existing?.unit ?? '');
   const [stock, setStock] = useState<string>(existing?.stockQuantity != null ? String(existing.stockQuantity) : '');
+  const [lowStock, setLowStock] = useState<string>(existing?.lowStockThreshold != null ? String(existing.lowStockThreshold) : '');
   const [localPhoto, setLocalPhoto] = useState<{ uri: string; name: string; type: string } | null>(null);
 
   // Service businesses configure a bookable appointment instead of stock.
@@ -750,7 +756,9 @@ function VendorItemEditorScreen({ navigation, route }: any) {
           : {
               sku: sku.trim() || undefined,
               unit: unit.trim() || undefined,
-              stockQuantity: Number.isFinite(stockNum as number) ? stockNum : undefined,
+              // '' clears tracking (null) so a vendor can stop tracking stock.
+              stockQuantity: stock.trim() === '' ? null : Number.isFinite(stockNum as number) ? stockNum : undefined,
+              lowStockThreshold: lowStock.trim() === '' ? null : Number(lowStock) >= 0 ? Number(lowStock) : undefined,
             }),
       },
     });
@@ -847,6 +855,12 @@ function VendorItemEditorScreen({ navigation, route }: any) {
                 <Input containerClassName="flex-1" value={unit} onChangeText={setUnit} placeholder="Unit (kg, ea)" />
               </View>
               <Input value={sku} onChangeText={setSku} placeholder="SKU / barcode (optional)" />
+              <Input value={lowStock} onChangeText={setLowStock} placeholder="Low-stock alert at (e.g. 5)" keyboardType="number-pad" />
+              {stock.trim() !== '' ? (
+                <Text className="text-xs text-text-muted">
+                  Tracked items sell down automatically and hide at 0. You’ll get an alert at your low-stock level.
+                </Text>
+              ) : null}
             </View>
           </>
         )}

@@ -609,7 +609,14 @@ model Item {
   isPopular     Boolean       @default(false)
   sku           String?
   unit          String?
+  /// null = untracked (always in stock). Tracked items decrement atomically at
+  /// checkout, auto-hide at 0, and restock on pre-pickup cancellation.
   stockQuantity Int?
+  /// At/under this level a LOW_STOCK alert goes to the owner (crossing-edge only).
+  lowStockThreshold Int?
+  /// Set when the inventory engine hid the item (stock hit 0) — distinguishes
+  /// auto-hides (undone automatically on restock) from the owner's own toggle.
+  autoHiddenAt  DateTime?
   dietaryTags   String[]
   allergens     String[]
   totalOrdered  Int           @default(0)
@@ -1357,6 +1364,7 @@ enum NotificationType {
   RATING_RECEIVED
   SYSTEM_ANNOUNCEMENT
   CHAT_MESSAGE
+  LOW_STOCK
 }
 
 // ==========================================

@@ -20,7 +20,8 @@ type NotificationType =
   | 'EARNING_AVAILABLE'
   | 'RATING_RECEIVED'
   | 'SYSTEM_ANNOUNCEMENT'
-  | 'CHAT_MESSAGE';
+  | 'CHAT_MESSAGE'
+  | 'LOW_STOCK';
 
 interface NotificationPayload {
   userId: string;
@@ -292,6 +293,22 @@ export class NotificationService {
       title: 'Subscription Due Soon',
       body: `Your weekly subscription of $${amount.toLocaleString()} GYD is due on ${dueDate}.`,
       data: { dueDate, amount },
+    });
+  }
+
+  /** Inventory engine (§4.2): stock crossed the owner's threshold or hit zero. */
+  async lowStock(
+    userId: string,
+    ev: { itemId: string; name: string; remaining: number; kind: 'low' | 'out' },
+  ): Promise<void> {
+    await this.send({
+      userId,
+      type: 'LOW_STOCK',
+      title: ev.kind === 'out' ? 'Item sold out' : 'Low stock',
+      body: ev.kind === 'out'
+        ? `${ev.name} sold out and was hidden from your menu. Restock to bring it back.`
+        : `${ev.name} is down to ${ev.remaining} in stock.`,
+      data: { kind: 'low_stock', itemId: ev.itemId, remaining: ev.remaining },
     });
   }
 }
