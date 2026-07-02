@@ -21,6 +21,10 @@ import {
   useDeleteItem,
   useSetItemAvailability,
   useUploadItemImage,
+  useAddOptionGroup,
+  useDeleteOptionGroup,
+  useAddOption,
+  useDeleteOption,
   useVendorSubscription,
   useVendorAnalytics,
   useVendorHours,
@@ -609,6 +613,148 @@ function MenuItemRow({
   );
 }
 
+/**
+ * Modifiers editor (master plan §4.2): size / add-ons / toppings on an item.
+ * The OptionGroup CRUD already exists server-side — this is its operator UI.
+ * Mutations resolve to the created row, so the list updates from the response
+ * instead of waiting on the menu query.
+ */
+function ModifiersSection({ item }: { item: any }) {
+  const [groups, setGroups] = useState<any[]>(item.optionGroups ?? []);
+  const addGroup = useAddOptionGroup();
+  const delGroup = useDeleteOptionGroup();
+  const addOption = useAddOption();
+  const delOption = useDeleteOption();
+
+  const [groupName, setGroupName] = useState('');
+  const [groupRequired, setGroupRequired] = useState(false);
+  const [groupMulti, setGroupMulti] = useState(false);
+  const [drafts, setDrafts] = useState<Record<string, { name: string; price: string }>>({});
+  const draft = (gid: string) => drafts[gid] ?? { name: '', price: '' };
+
+  const submitGroup = async () => {
+    const name = groupName.trim();
+    if (!name || addGroup.isPending) return;
+    const g = await addGroup.mutateAsync({
+      itemId: item.id,
+      data: { name, isRequired: groupRequired, minSelect: groupRequired ? 1 : 0, maxSelect: groupMulti ? 10 : 1 },
+    });
+    setGroups((gs) => [...gs, { options: [], ...g }]);
+    setGroupName('');
+    setGroupRequired(false);
+    setGroupMulti(false);
+  };
+
+  const submitOption = async (groupId: string) => {
+    const d = draft(groupId);
+    const name = d.name.trim();
+    if (!name || addOption.isPending) return;
+    const opt = await addOption.mutateAsync({
+      groupId,
+      data: { name, additionalPrice: Number(d.price) || 0 },
+    });
+    setGroups((gs) => gs.map((g) => (g.id === groupId ? { ...g, options: [...(g.options ?? []), opt] } : g)));
+    setDrafts((s) => ({ ...s, [groupId]: { name: '', price: '' } }));
+  };
+
+  const removeGroup = (groupId: string) => {
+    Alert.alert('Remove group', 'Delete this option group and all its choices?', [
+      { text: 'Cancel', style: 'cancel' },
+      {
+        text: 'Delete',
+        style: 'destructive',
+        onPress: () =>
+          delGroup.mutate(groupId, { onSuccess: () => setGroups((gs) => gs.filter((g) => g.id !== groupId)) }),
+      },
+    ]);
+  };
+
+  const removeOption = (groupId: string, optionId: string) => {
+    delOption.mutate(optionId, {
+      onSuccess: () =>
+        setGroups((gs) =>
+          gs.map((g) => (g.id === groupId ? { ...g, options: (g.options ?? []).filter((o: any) => o.id !== optionId) } : g)),
+        ),
+    });
+  };
+
+  return (
+    <View className="mt-md rounded-3xl bg-surface-base p-lg" style={CARD_SHADOW}>
+      <Heading size="lg">Options &amp; add-ons</Heading>
+      <Text className="mt-xs text-sm text-text-secondary">
+        Sizes, toppings, extras — customers pick these when ordering.
+      </Text>
+
+      {groups.map((g) => (
+        <View key={g.id} className="mt-md rounded-2xl bg-surface-subtle p-md">
+          <View className="flex-row items-center">
+            <View className="flex-1">
+              <Text className="text-base font-semibold">{g.name}</Text>
+              <Text className="mt-0.5 text-xs text-text-muted">
+                {g.isRequired ? 'Required' : 'Optional'} · {g.maxSelect > 1 ? `up to ${g.maxSelect}` : 'pick one'}
+              </Text>
+            </View>
+            <PressableScale onPress={() => removeGroup(g.id)} hitSlop={8}>
+              <Feather name="trash-2" size={18} color={color.text.muted} />
+            </PressableScale>
+          </View>
+
+          {(g.options ?? []).map((o: any) => (
+            <View key={o.id} className="mt-sm flex-row items-center">
+              <Text className="flex-1 text-sm text-text-primary">{o.name}</Text>
+              <Text className="mr-md text-sm text-text-secondary">
+                {Number(o.additionalPrice) > 0 ? `+${money(o.additionalPrice)}` : 'Free'}
+              </Text>
+              <PressableScale onPress={() => removeOption(g.id, o.id)} hitSlop={8}>
+                <Feather name="x" size={16} color={color.text.muted} />
+              </PressableScale>
+            </View>
+          ))}
+
+          <View className="mt-sm flex-row items-center" style={{ gap: 8 }}>
+            <Input
+              containerClassName="flex-1"
+              value={draft(g.id).name}
+              onChangeText={(t: string) => setDrafts((s) => ({ ...s, [g.id]: { ...draft(g.id), name: t } }))}
+              placeholder="Choice (e.g. Large)"
+            />
+            <Input
+              containerClassName="w-24"
+              value={draft(g.id).price}
+              onChangeText={(t: string) => setDrafts((s) => ({ ...s, [g.id]: { ...draft(g.id), price: t } }))}
+              placeholder="+GYD"
+              keyboardType="number-pad"
+            />
+            <PressableScale
+              onPress={() => submitOption(g.id)}
+              disabled={addOption.isPending}
+              className="h-10 w-10 items-center justify-center rounded-full bg-brand-500"
+            >
+              <Feather name="plus" size={18} color="#fff" />
+            </PressableScale>
+          </View>
+        </View>
+      ))}
+
+      <View className="mt-md">
+        <Input value={groupName} onChangeText={setGroupName} placeholder="New group (e.g. Size, Toppings)" />
+        <View className="mt-sm flex-row" style={{ gap: 8 }}>
+          <ChoiceChip label="Required" active={groupRequired} onPress={() => setGroupRequired((v) => !v)} />
+          <ChoiceChip label="Multiple picks" active={groupMulti} onPress={() => setGroupMulti((v) => !v)} />
+        </View>
+        <Button
+          label="Add option group"
+          variant="outline"
+          className="mt-sm"
+          loading={addGroup.isPending}
+          disabled={!groupName.trim()}
+          onPress={submitGroup}
+        />
+      </View>
+    </View>
+  );
+}
+
 function VendorMenuScreen({ navigation }: any) {
   const menuQ = useVendorMenu();
   const createCategory = useCreateCategory();
@@ -864,6 +1010,14 @@ function VendorItemEditorScreen({ navigation, route }: any) {
             </View>
           </>
         )}
+
+        {existing && !isService ? (
+          <ModifiersSection item={existing} />
+        ) : !isService ? (
+          <Text className="mt-sm text-xs text-text-muted">
+            Save the item first to add options &amp; add-ons (sizes, toppings, extras).
+          </Text>
+        ) : null}
 
         <Text className="mb-xs mt-sm text-sm font-semibold text-text-secondary">Category</Text>
         <View className="mb-md flex-row flex-wrap" style={{ gap: 8 }}>

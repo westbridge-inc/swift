@@ -332,6 +332,17 @@ export const vendorApi = {
     api.put(`/vendor/items/${id}/availability`, { isAvailable }),
   uploadItemImage: (id: string, form: FormData) =>
     api.post(`/vendor/items/${id}/image`, form, { headers: { 'Content-Type': 'multipart/form-data' } }),
+  // Modifiers (option groups + options on an item)
+  addOptionGroup: (itemId: string, data: { name: string; isRequired?: boolean; minSelect?: number; maxSelect?: number }) =>
+    api.post(`/vendor/items/${itemId}/option-groups`, data),
+  updateOptionGroup: (id: string, data: { name?: string; isRequired?: boolean; minSelect?: number; maxSelect?: number }) =>
+    api.put(`/vendor/option-groups/${id}`, data),
+  deleteOptionGroup: (id: string) => api.delete(`/vendor/option-groups/${id}`),
+  addOption: (groupId: string, data: { name: string; additionalPrice?: number; isDefault?: boolean }) =>
+    api.post(`/vendor/option-groups/${groupId}/options`, data),
+  updateOption: (id: string, data: { name?: string; additionalPrice?: number; isDefault?: boolean }) =>
+    api.put(`/vendor/options/${id}`, data),
+  deleteOption: (id: string) => api.delete(`/vendor/options/${id}`),
   // Insights / settings
   analytics: () => api.get('/vendor/analytics/overview'),
   hours: () => api.get('/vendor/hours'),

@@ -116,6 +116,44 @@ export function useSetItemAvailability() {
   });
 }
 
+// ─── Modifiers (option groups + options) ─────────────────────────────────────
+// Each mutation resolves to the updated group (with options) so the editor can
+// refresh its local list without waiting for the menu query.
+
+export function useAddOptionGroup() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ itemId, data }: { itemId: string; data: { name: string; isRequired?: boolean; minSelect?: number; maxSelect?: number } }) =>
+      unwrap<any>(vendorApi.addOptionGroup(itemId, data)),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['vendor', 'menu'] }),
+  });
+}
+
+export function useDeleteOptionGroup() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (id: string) => unwrap(vendorApi.deleteOptionGroup(id)),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['vendor', 'menu'] }),
+  });
+}
+
+export function useAddOption() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ groupId, data }: { groupId: string; data: { name: string; additionalPrice?: number } }) =>
+      unwrap<any>(vendorApi.addOption(groupId, data)),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['vendor', 'menu'] }),
+  });
+}
+
+export function useDeleteOption() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (id: string) => unwrap(vendorApi.deleteOption(id)),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['vendor', 'menu'] }),
+  });
+}
+
 /** Upload (or replace) an item's photo — multipart to the StorageProvider. */
 export function useUploadItemImage() {
   const qc = useQueryClient();
