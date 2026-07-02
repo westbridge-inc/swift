@@ -201,7 +201,8 @@ export async function ridesRoutes(app: FastifyInstance) {
         driver: {
           select: {
             id: true, vehicleMake: true, vehicleModel: true, vehicleColor: true,
-            licensePlate: true, averageRating: true, currentLat: true, currentLng: true,
+            licensePlate: true, vehiclePhotoUrl: true, averageRating: true,
+            currentLat: true, currentLng: true,
             user: { select: { firstName: true, avatar: true, phone: true } },
           },
         },
@@ -219,7 +220,8 @@ export async function ridesRoutes(app: FastifyInstance) {
         driver: {
           select: {
             vehicleMake: true, vehicleModel: true, vehicleColor: true, licensePlate: true,
-            averageRating: true, user: { select: { firstName: true, avatar: true } },
+            vehiclePhotoUrl: true, averageRating: true,
+            user: { select: { firstName: true, avatar: true } },
           },
         },
         statusHistory: { orderBy: { createdAt: 'asc' } },

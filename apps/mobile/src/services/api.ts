@@ -278,6 +278,8 @@ export const riderApi = {
   earningsToday: () => api.get('/rider/earnings/today'),
   earningsSummary: () => api.get('/rider/earnings/summary'),
   earnings: () => api.get('/rider/earnings'),
+  uploadVehiclePhoto: (form: FormData) =>
+    api.post('/rider/vehicle-photo', form, { headers: { 'Content-Type': 'multipart/form-data' } }),
 };
 
 // Mover ops — Driver (taxi), mounted at /api/v1/driver
@@ -297,6 +299,8 @@ export const driverApi = {
   earningsToday: () => api.get('/driver/earnings/today'),
   earningsSummary: () => api.get('/driver/earnings/summary'),
   earnings: () => api.get('/driver/earnings'),
+  uploadVehiclePhoto: (form: FormData) =>
+    api.post('/driver/vehicle-photo', form, { headers: { 'Content-Type': 'multipart/form-data' } }),
 };
 
 // Vendor ops (mounted at /api/v1/vendor)

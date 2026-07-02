@@ -7,6 +7,8 @@ import { color } from '@swift/ui';
 import { Text, Heading, Card, Button, Spinner, PressableScale, EmptyState } from '../../../components/ui';
 import { useOrder, useRateOrder } from '../../../hooks';
 import { money } from '../../../lib/money';
+import { Image } from 'expo-image';
+import { mediaUrl } from '../../../lib/images';
 
 const STEPS = [
   { key: 'placed', label: 'Order placed' },
@@ -239,32 +241,62 @@ export function OrderTrackingScreen({ navigation, route }: any) {
           </View>
         ) : null}
 
-        {/* Rider */}
+        {/* Rider — trust visibility (master plan §5): photo, vehicle, plate */}
         {order.rider ? (
           <View className="px-lg pt-md">
-            <Card className="flex-row items-center justify-between">
-              <View className="flex-1 pr-md">
-                <Text className="text-xs text-text-secondary">Your rider</Text>
-                <Text className="text-base font-semibold">{order.rider.firstName ?? 'Assigned'}</Text>
-              </View>
-              <View className="flex-row items-center" style={{ gap: 8 }}>
-                <PressableScale
-                  onPress={() => navigation.navigate('Chat', { orderId: order.id ?? id, title: order.rider.firstName ?? 'Your rider' })}
-                  className="h-10 w-10 items-center justify-center rounded-full bg-brand-50"
-                >
-                  <Feather name="message-circle" size={18} color={color.brand[500]} />
-                </PressableScale>
-                {order.rider.phone ? (
+            <Card>
+              <View className="flex-row items-center justify-between">
+                <View className="flex-row flex-1 items-center pr-md">
+                  {order.rider.avatar ? (
+                    <Image
+                      source={{ uri: mediaUrl(order.rider.avatar) ?? undefined }}
+                      style={{ width: 44, height: 44, borderRadius: 22 }}
+                      contentFit="cover"
+                    />
+                  ) : (
+                    <View className="h-11 w-11 items-center justify-center rounded-full bg-surface-subtle">
+                      <Feather name="user" size={18} color={color.text.muted} />
+                    </View>
+                  )}
+                  <View className="ml-md flex-1">
+                    <Text className="text-xs text-text-secondary">Your rider</Text>
+                    <Text className="text-base font-semibold">{order.rider.firstName ?? 'Assigned'}</Text>
+                    {order.rider.vehicleMake || order.rider.licensePlate ? (
+                      <Text className="mt-0.5 text-xs text-text-muted" numberOfLines={1}>
+                        {[order.rider.vehicleColor, order.rider.vehicleMake, order.rider.vehicleModel]
+                          .filter(Boolean)
+                          .join(' ') || order.rider.vehicleType}
+                        {order.rider.licensePlate ? ` · ${order.rider.licensePlate}` : ''}
+                      </Text>
+                    ) : null}
+                  </View>
+                </View>
+                <View className="flex-row items-center" style={{ gap: 8 }}>
                   <PressableScale
-                    onPress={() => {
-                      Linking.openURL(`tel:${order.rider.phone}`).catch(() => {});
-                    }}
+                    onPress={() => navigation.navigate('Chat', { orderId: order.id ?? id, title: order.rider.firstName ?? 'Your rider' })}
                     className="h-10 w-10 items-center justify-center rounded-full bg-brand-50"
                   >
-                    <Feather name="phone" size={18} color={color.brand[500]} />
+                    <Feather name="message-circle" size={18} color={color.brand[500]} />
                   </PressableScale>
-                ) : null}
+                  {order.rider.phone ? (
+                    <PressableScale
+                      onPress={() => {
+                        Linking.openURL(`tel:${order.rider.phone}`).catch(() => {});
+                      }}
+                      className="h-10 w-10 items-center justify-center rounded-full bg-brand-50"
+                    >
+                      <Feather name="phone" size={18} color={color.brand[500]} />
+                    </PressableScale>
+                  ) : null}
+                </View>
               </View>
+              {order.rider.vehiclePhotoUrl ? (
+                <Image
+                  source={{ uri: mediaUrl(order.rider.vehiclePhotoUrl) ?? undefined }}
+                  style={{ width: 88, height: 56, borderRadius: 10, marginTop: 8 }}
+                  contentFit="cover"
+                />
+              ) : null}
             </Card>
           </View>
         ) : null}

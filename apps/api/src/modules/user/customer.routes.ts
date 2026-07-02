@@ -1549,6 +1549,14 @@ export async function customerRoutes(app: FastifyInstance) {
           lastName: order.rider.user?.lastName,
           phone: order.rider.user?.phone,
           avatar: order.rider.user?.avatar,
+          // Trust visibility (master plan §5): the customer sees who and what
+          // is coming — vehicle, plate, and its photo.
+          vehicleType: order.rider.vehicleType,
+          vehicleMake: order.rider.vehicleMake,
+          vehicleModel: order.rider.vehicleModel,
+          vehicleColor: order.rider.vehicleColor,
+          licensePlate: order.rider.licensePlate,
+          vehiclePhotoUrl: order.rider.vehiclePhotoUrl,
         } : null,
         timeline,
         placedAt: order.placedAt,

@@ -36,6 +36,22 @@ export function useMoverKind() {
   return { kind, profile, loading };
 }
 
+/** Upload the PUBLIC vehicle photo customers see on acceptance (§5). */
+export function useUploadVehiclePhoto(kind: MoverKind | null) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (file: { uri: string; name: string; type: string }) => {
+      const form = new FormData();
+      form.append('file', file as unknown as Blob);
+      return unwrap(svc(kind as MoverKind).uploadVehiclePhoto(form));
+    },
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['mover', 'driverProfile'] });
+      qc.invalidateQueries({ queryKey: ['mover', 'riderProfile'] });
+    },
+  });
+}
+
 export function useEarningsToday(kind: MoverKind | null) {
   return useQuery({
     queryKey: ['mover', 'earnings', kind],

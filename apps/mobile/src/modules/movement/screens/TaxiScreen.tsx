@@ -10,6 +10,8 @@ import { useActiveRide, useRideEstimate, useRequestRide, useCancelRide } from '.
 import { useLocationStore } from '../../../stores/locationStore';
 import { GEORGETOWN } from '../../../hooks/useDeviceLocation';
 import { money } from '../../../lib/money';
+import { Image } from 'expo-image';
+import { mediaUrl } from '../../../lib/images';
 import type { RideClass, TierEstimate } from '../../../services/api';
 import type { PickedPlace } from './DestinationSearchScreen';
 
@@ -295,25 +297,55 @@ function ActiveRide({ navigation, ride, cancelRide }: any) {
           ) : null}
 
           {d ? (
-            <Card className="mt-md flex-row items-center justify-between">
-              <View className="flex-1 pr-md">
-                <Text className="text-base font-semibold">{d.user?.firstName ?? 'Your driver'}</Text>
-                <Text className="mt-xs text-sm text-text-secondary">
-                  {[d.vehicleColor, d.vehicleMake, d.vehicleModel].filter(Boolean).join(' ')}
-                  {d.licensePlate ? ` · ${d.licensePlate}` : ''}
-                </Text>
-                {d.averageRating ? (
-                  <Text className="mt-xs text-xs text-text-muted">{Number(d.averageRating).toFixed(1)} ★</Text>
+            <Card className="mt-md">
+              <View className="flex-row items-center justify-between">
+                <View className="flex-row flex-1 items-center pr-md">
+                  {/* Trust visibility (master plan §5): see WHO is coming */}
+                  {d.user?.avatar ? (
+                    <Image
+                      source={{ uri: mediaUrl(d.user.avatar) ?? undefined }}
+                      style={{ width: 48, height: 48, borderRadius: 24 }}
+                      contentFit="cover"
+                    />
+                  ) : (
+                    <View className="h-12 w-12 items-center justify-center rounded-full bg-surface-subtle">
+                      <Feather name="user" size={20} color={color.text.muted} />
+                    </View>
+                  )}
+                  <View className="ml-md flex-1">
+                    <Text className="text-base font-semibold">{d.user?.firstName ?? 'Your driver'}</Text>
+                    <Text className="mt-xs text-sm text-text-secondary">
+                      {[d.vehicleColor, d.vehicleMake, d.vehicleModel].filter(Boolean).join(' ')}
+                    </Text>
+                    {d.averageRating ? (
+                      <Text className="mt-xs text-xs text-text-muted">{Number(d.averageRating).toFixed(1)} ★</Text>
+                    ) : null}
+                  </View>
+                </View>
+                {d.user?.phone ? (
+                  <Button variant="outline" className="px-lg" onPress={() => Linking.openURL(`tel:${d.user.phone}`).catch(() => {})}>
+                    <View className="flex-row items-center">
+                      <Feather name="phone" size={15} color={color.brand[500]} />
+                      <Text className="ml-sm font-body font-semibold text-brand-500">Call</Text>
+                    </View>
+                  </Button>
                 ) : null}
               </View>
-              {d.user?.phone ? (
-                <Button variant="outline" className="px-lg" onPress={() => Linking.openURL(`tel:${d.user.phone}`).catch(() => {})}>
-                  <View className="flex-row items-center">
-                    <Feather name="phone" size={15} color={color.brand[500]} />
-                    <Text className="ml-sm font-body font-semibold text-brand-500">Call</Text>
+              {/* …and WHAT is coming: the car photo + plate, big enough to match at the kerb */}
+              <View className="mt-sm flex-row items-center">
+                {d.vehiclePhotoUrl ? (
+                  <Image
+                    source={{ uri: mediaUrl(d.vehiclePhotoUrl) ?? undefined }}
+                    style={{ width: 88, height: 56, borderRadius: 10 }}
+                    contentFit="cover"
+                  />
+                ) : null}
+                {d.licensePlate ? (
+                  <View className={d.vehiclePhotoUrl ? 'ml-md rounded-lg border border-border-subtle px-md py-xs' : 'rounded-lg border border-border-subtle px-md py-xs'}>
+                    <Text className="text-base font-bold tracking-widest text-text-primary">{d.licensePlate}</Text>
                   </View>
-                </Button>
-              ) : null}
+                ) : null}
+              </View>
             </Card>
           ) : (
             <Text className="mt-md text-sm text-text-secondary">Hang tight — we&apos;re matching you with a nearby driver.</Text>

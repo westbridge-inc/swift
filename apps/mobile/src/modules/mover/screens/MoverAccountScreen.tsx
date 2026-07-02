@@ -1,11 +1,14 @@
 import { View, ScrollView } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Feather, MaterialCommunityIcons } from '@expo/vector-icons';
+import * as ImagePicker from 'expo-image-picker';
+import { Image } from 'expo-image';
 import { color } from '@swift/ui';
 import { Text, Heading, Button, PressableScale, elevation } from '../../../components/ui';
-import { useMoverKind, useVerificationStatus, useEarningsSummary } from '../../../hooks';
+import { useMoverKind, useVerificationStatus, useEarningsSummary, useUploadVehiclePhoto } from '../../../hooks';
 import { useAuthStore } from '../../../stores/authStore';
 import { money } from '../../../lib/money';
+import { mediaUrl } from '../../../lib/images';
 
 export function MoverAccountScreen({ navigation }: any) {
   const { user, logout } = useAuthStore();
@@ -13,12 +16,25 @@ export function MoverAccountScreen({ navigation }: any) {
   const verified = (useVerificationStatus<any>('MOVER').data as any)?.roleVerified;
   const summaryQ = useEarningsSummary<any>(kind);
   const allTime = (summaryQ.data as any)?.allTime?.total ?? 0;
+  const uploadVehiclePhoto = useUploadVehiclePhoto(kind);
 
   const name = [user?.firstName, user?.lastName].filter(Boolean).join(' ') || 'Your account';
   const initial = (user?.firstName ?? 'S').charAt(0).toUpperCase();
   const rating = profile?.averageRating;
   const isDriver = kind === 'DRIVER';
-  const vehicle = isDriver && profile ? [profile.vehicleColor, profile.vehicleMake, profile.vehicleModel].filter(Boolean).join(' ') : null;
+  const vehicle = profile
+    ? [profile.vehicleColor, profile.vehicleMake, profile.vehicleModel].filter(Boolean).join(' ') ||
+      (profile.vehicleType ? String(profile.vehicleType).toLowerCase() : '')
+    : null;
+
+  const pickVehiclePhoto = async () => {
+    const perm = await ImagePicker.requestMediaLibraryPermissionsAsync();
+    if (!perm.granted) return;
+    const res = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ImagePicker.MediaTypeOptions.Images, quality: 0.8 });
+    if (res.canceled || !res.assets?.[0]) return;
+    const a = res.assets[0];
+    uploadVehiclePhoto.mutate({ uri: a.uri, name: a.fileName ?? 'vehicle.jpg', type: a.mimeType ?? 'image/jpeg' });
+  };
 
   return (
     <SafeAreaView style={{ flex: 1 }} edges={['top']} className="bg-surface-subtle">
@@ -59,16 +75,39 @@ export function MoverAccountScreen({ navigation }: any) {
           </View>
         </View>
 
-        {/* Vehicle (driver) */}
-        {vehicle ? (
-          <View className="mt-md flex-row items-center rounded-2xl bg-surface-base p-md" style={elevation.card}>
-            <View className="h-9 w-9 items-center justify-center rounded-full bg-surface-subtle">
-              <MaterialCommunityIcons name="car-side" size={18} color={color.brand[500]} />
+        {/* Vehicle — customers see this photo when you accept (§5) */}
+        {vehicle || profile ? (
+          <View className="mt-md rounded-2xl bg-surface-base p-md" style={elevation.card}>
+            <View className="flex-row items-center">
+              {profile?.vehiclePhotoUrl ? (
+                <Image
+                  source={{ uri: mediaUrl(profile.vehiclePhotoUrl) ?? undefined }}
+                  style={{ width: 64, height: 44, borderRadius: 8 }}
+                  contentFit="cover"
+                />
+              ) : (
+                <View className="h-9 w-9 items-center justify-center rounded-full bg-surface-subtle">
+                  <MaterialCommunityIcons name={isDriver ? 'car-side' : 'bike-fast'} size={18} color={color.brand[500]} />
+                </View>
+              )}
+              <View className="ml-md flex-1">
+                <Text className="text-sm font-bold text-text-primary">{vehicle || 'Your vehicle'}</Text>
+                <Text className="text-xs text-text-muted">{profile?.licensePlate ?? ''}</Text>
+              </View>
+              <PressableScale onPress={pickVehiclePhoto} disabled={uploadVehiclePhoto.isPending} hitSlop={8}>
+                <Text className="text-sm font-semibold text-brand-600">
+                  {uploadVehiclePhoto.isPending ? 'Uploading…' : profile?.vehiclePhotoUrl ? 'Change photo' : 'Add photo'}
+                </Text>
+              </PressableScale>
             </View>
-            <View className="ml-md flex-1">
-              <Text className="text-sm font-bold text-text-primary">{vehicle}</Text>
-              <Text className="text-xs text-text-muted">{profile?.licensePlate ?? 'Your vehicle'}</Text>
-            </View>
+            {!profile?.vehiclePhotoUrl ? (
+              <Text className="mt-xs text-xs text-text-muted">
+                Add a clear photo of your vehicle — customers see it the moment you accept.
+              </Text>
+            ) : null}
+            {uploadVehiclePhoto.isError ? (
+              <Text className="mt-xs text-xs text-error">Upload failed — try a different photo.</Text>
+            ) : null}
           </View>
         ) : null}
 

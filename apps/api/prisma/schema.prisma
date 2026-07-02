@@ -373,6 +373,9 @@ model Rider {
   driverLicenseUrl    String?
   vehicleInsuranceUrl String?
   profilePhotoUrl     String?
+  /// PUBLIC delivery-vehicle photo shown to the customer on acceptance
+  /// (master plan §3.3) — uploaded via POST /rider/vehicle-photo.
+  vehiclePhotoUrl     String?
   documentsVerified   Boolean     @default(false)
   documentsVerifiedAt DateTime?
   documentsVerifiedBy String?
@@ -440,6 +443,10 @@ model Driver {
   vehicleInsuranceUrl  String
   vehicleInspectionUrl String?
   profilePhotoUrl      String?
+  /// PUBLIC exterior car photo shown to the rider on acceptance (master plan
+  /// §5) — uploaded via POST /driver/vehicle-photo into the public vehicles/
+  /// tree. Distinct from the private vehicle_exterior_photo KYC document.
+  vehiclePhotoUrl      String?
   documentsVerified    Boolean      @default(false)
   documentsVerifiedAt  DateTime?
   documentsVerifiedBy  String?
