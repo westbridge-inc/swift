@@ -122,6 +122,19 @@ function VendorHeader({ vendor, onReviews }: { vendor: any; onReviews?: () => vo
         {vendor.minOrderAmount ? (
           <Text className="mt-xs text-xs text-text-muted">Minimum order {money(vendor.minOrderAmount)}</Text>
         ) : null}
+        {/* Live promotions (§4.2) — use the code at checkout */}
+        {(vendor.promos ?? []).map((p: any) => (
+          <View key={p.code} className="mt-sm flex-row items-center rounded-2xl bg-brand-50 px-md py-sm">
+            <MaterialCommunityIcons name="tag" size={16} color={color.brand[600]} />
+            <View className="ml-sm flex-1">
+              <Text className="text-sm font-semibold text-brand-700">
+                {p.code} — {p.discountType === 'PERCENTAGE' ? `${p.discountValue}% off` : `${money(p.discountValue)} off`}
+                {p.minOrderAmount ? ` over ${money(p.minOrderAmount)}` : ''}
+              </Text>
+              <Text className="text-xs text-text-secondary" numberOfLines={1}>{p.description} · enter it at checkout</Text>
+            </View>
+          </View>
+        ))}
       </View>
       <PressableScale onPress={onReviews}>
         <View className="mt-sm flex-row items-center justify-between border-y border-border-subtle px-lg py-md">

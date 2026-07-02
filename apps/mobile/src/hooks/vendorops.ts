@@ -31,6 +31,37 @@ export function useVendorProfile() {
   return { owner, store, stores, myRole, isLoading: q.isLoading };
 }
 
+// ─── Promotions (manager+) ───────────────────────────────────────────────────
+
+export function useVendorPromos(enabled = true) {
+  return useQuery({ queryKey: ['vendor', 'promos'], queryFn: () => unwrap<any[]>(vendorApi.promos()), enabled });
+}
+
+export function useCreatePromo() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (data: Parameters<typeof vendorApi.createPromo>[0]) => unwrap(vendorApi.createPromo(data)),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['vendor', 'promos'] }),
+  });
+}
+
+export function useUpdatePromo() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, data }: { id: string; data: { isActive?: boolean; validUntil?: string } }) =>
+      unwrap(vendorApi.updatePromo(id, data)),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['vendor', 'promos'] }),
+  });
+}
+
+export function useDeletePromo() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (id: string) => unwrap(vendorApi.deletePromo(id)),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['vendor', 'promos'] }),
+  });
+}
+
 // ─── Staff & roles (owner-only) ──────────────────────────────────────────────
 
 export function useVendorStaff(enabled = true) {
