@@ -273,6 +273,14 @@ export function useVendorRevenue(days = 14) {
   });
 }
 
+/** Orders by local hour (last 30 days) — the §4.1 busy-hours view. */
+export function useBusyHours() {
+  return useQuery({
+    queryKey: ['vendor', 'analytics', 'busy-hours'],
+    queryFn: () => unwrap<any>(vendorApi.analyticsBusyHours()),
+  });
+}
+
 /** Top items by lifetime + last-30-days order counts. */
 export function usePopularItems(limit = 8) {
   return useQuery({

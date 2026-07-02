@@ -359,6 +359,7 @@ export const vendorApi = {
   analytics: () => api.get('/vendor/analytics/overview'),
   analyticsRevenue: (days = 14) => api.get('/vendor/analytics/revenue', { params: { days } }),
   analyticsPopularItems: (limit = 8) => api.get('/vendor/analytics/popular-items', { params: { limit } }),
+  analyticsBusyHours: () => api.get('/vendor/analytics/busy-hours'),
   hours: () => api.get('/vendor/hours'),
   setHours: (hours: { dayOfWeek: number; openTime: string; closeTime: string; isClosed: boolean }[]) =>
     api.put('/vendor/hours', { hours }),

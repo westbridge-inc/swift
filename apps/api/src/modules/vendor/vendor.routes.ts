@@ -1736,6 +1736,32 @@ export async function vendorRoutes(app: FastifyInstance) {
     };
   });
 
+  /** GET /analytics/busy-hours — orders by local hour of day, last 30 days
+   *  (master plan §4.1 "busy hours"). Guyana is UTC-4 year-round. */
+  app.get('/analytics/busy-hours', auth, async (request) => {
+    const { vendorId } = await requireVendor(app, request, 'MANAGER');
+    const since = new Date();
+    since.setDate(since.getDate() - 30);
+
+    const orders = await app.prisma.order.findMany({
+      where: { vendorId, placedAt: { gte: since }, status: { notIn: ['CANCELLED', 'REFUNDED'] } },
+      select: { placedAt: true },
+    });
+
+    const GUYANA_OFFSET_HOURS = -4;
+    const hours = Array.from({ length: 24 }, (_, hour) => ({ hour, orders: 0 }));
+    for (const o of orders) {
+      const local = ((o.placedAt.getUTCHours() + GUYANA_OFFSET_HOURS) + 24) % 24;
+      hours[local]!.orders += 1;
+    }
+    const peak = hours.reduce((best, h) => (h.orders > best.orders ? h : best), hours[0]!);
+
+    return {
+      success: true,
+      data: { days: 30, hours, peak: peak.orders > 0 ? peak : null, total: orders.length },
+    };
+  });
+
   /** GET /analytics/popular-items — Top items by totalOrdered */
   app.get('/analytics/popular-items', auth, async (request) => {
     const { vendorId } = await requireVendor(app, request, 'MANAGER');
