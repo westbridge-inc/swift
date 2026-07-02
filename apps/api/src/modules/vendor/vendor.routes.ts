@@ -1138,14 +1138,9 @@ export async function vendorRoutes(app: FastifyInstance) {
     return CSV_TEMPLATE;
   });
 
-  /** POST /items/import/automap — map a messy store CSV's columns to Swift
-   *  fields (deterministic synonyms + AI assist). Returns a preview + a canonical
-   *  CSV to confirm via POST /items/import. Never imports here; only relabels
-   *  columns, never invents prices or stock (spec §4.5). */
-  app.post('/items/import/automap', auth, async (request) => {
-    await requireVendor(app, request, 'MANAGER');
-    const { csv } = importCsvSchema.parse(request.body);
-    const rows = parseCsvWithHeader(csv);
+  /** Shared automap core: raw header->value rows in, confirm-ready preview out.
+   *  Never imports; only relabels columns, never invents prices (spec §4.5). */
+  async function automapRows(rows: Record<string, string>[]) {
     if (rows.length === 0) {
       throw new AppError(400, 'EMPTY_CSV', 'No data rows found');
     }
@@ -1167,12 +1162,137 @@ export async function vendorRoutes(app: FastifyInstance) {
 
     const normalized = applyMapping(rows, mapping);
     return {
+      mapping,
+      rowCount: normalized.length,
+      preview: normalized.slice(0, 10),
+      normalizedCsv: toImportCsv(normalized),
+    };
+  }
+
+  /** POST /items/import/automap — map a messy store CSV's columns to Swift
+   *  fields (deterministic synonyms + AI assist). Returns a preview + a canonical
+   *  CSV to confirm via POST /items/import. */
+  app.post('/items/import/automap', auth, async (request) => {
+    await requireVendor(app, request, 'MANAGER');
+    const { csv } = importCsvSchema.parse(request.body);
+    const rows = parseCsvWithHeader(csv);
+    return { success: true, data: await automapRows(rows) };
+  });
+
+  /** POST /items/import/xlsx — Excel upload (master plan §3.1 "CSV/Excel").
+   *  First worksheet, first row = headers; funnels into the same automap →
+   *  confirm flow as CSV. */
+  app.post('/items/import/xlsx', auth, async (request) => {
+    await requireVendor(app, request, 'MANAGER');
+    const file = await request.file();
+    if (!file) throw new AppError(400, 'NO_FILE', 'Attach an .xlsx file');
+
+    const buffer = await file.toBuffer();
+    const ExcelJS = (await import('exceljs')).default;
+    const workbook = new ExcelJS.Workbook();
+    try {
+      await workbook.xlsx.load(buffer as unknown as ArrayBuffer);
+    } catch {
+      throw new AppError(400, 'BAD_XLSX', 'That file is not a readable Excel workbook (.xlsx)');
+    }
+    const sheet = workbook.worksheets[0];
+    if (!sheet || sheet.rowCount < 2) {
+      throw new AppError(400, 'EMPTY_CSV', 'No data rows found in the first worksheet');
+    }
+
+    const cellText = (v: unknown): string => {
+      if (v === null || v === undefined) return '';
+      if (typeof v === 'object') {
+        const rich = v as { richText?: Array<{ text: string }>; text?: string; result?: unknown };
+        if (rich.richText) return rich.richText.map((t) => t.text).join('');
+        if (rich.text) return rich.text;
+        if (rich.result !== undefined) return String(rich.result);
+        return '';
+      }
+      return String(v);
+    };
+
+    const headerRow = sheet.getRow(1);
+    const headers: string[] = [];
+    headerRow.eachCell({ includeEmpty: false }, (cell, col) => { headers[col - 1] = cellText(cell.value).trim(); });
+
+    const rows: Record<string, string>[] = [];
+    sheet.eachRow({ includeEmpty: false }, (row, rowNumber) => {
+      if (rowNumber === 1) return;
+      const record: Record<string, string> = {};
+      let hasValue = false;
+      headers.forEach((h, i) => {
+        if (!h) return;
+        const value = cellText(row.getCell(i + 1).value).trim();
+        record[h] = value;
+        if (value) hasValue = true;
+      });
+      if (hasValue) rows.push(record);
+    });
+
+    return { success: true, data: await automapRows(rows) };
+  });
+
+  /** POST /items/import/menu-parse — a restaurant's PDF menu becomes draft
+   *  items to CONFIRM (master plan §3.1). Deterministic guard rails: the AI
+   *  only restructures the extracted text; rows without a parseable price are
+   *  dropped, never invented, and nothing imports until the vendor confirms. */
+  app.post('/items/import/menu-parse', auth, async (request) => {
+    await requireVendor(app, request, 'MANAGER');
+    const file = await request.file();
+    if (!file) throw new AppError(400, 'NO_FILE', 'Attach a PDF menu');
+    if (file.mimetype !== 'application/pdf') {
+      throw new AppError(400, 'BAD_MENU_FILE', 'Only PDF menus are supported for now — export your menu as PDF, or use CSV/Excel');
+    }
+
+    const buffer = await file.toBuffer();
+    let text = '';
+    try {
+      const { PDFParse } = await import('pdf-parse');
+      const parser = new PDFParse({ data: new Uint8Array(buffer) });
+      try {
+        const parsed = await parser.getText();
+        text = (parsed.text ?? '').trim();
+      } finally {
+        await parser.destroy().catch(() => undefined);
+      }
+    } catch {
+      throw new AppError(400, 'BAD_MENU_FILE', 'Could not read that PDF');
+    }
+    if (text.length < 20) {
+      throw new AppError(422, 'MENU_NO_TEXT', 'That PDF has no readable text (a photo scan?) — use CSV/Excel or type items in');
+    }
+
+    const ai = new AiService();
+    if (!ai.enabled) {
+      throw new AppError(503, 'AI_UNAVAILABLE', 'Menu parsing is offline right now — use CSV/Excel or add items manually');
+    }
+    const drafts = await ai.parseMenuItems(text.slice(0, 12_000));
+    if (!drafts || drafts.length === 0) {
+      throw new AppError(422, 'MENU_UNPARSEABLE', 'Couldn’t find priced items in that menu — use CSV/Excel or add items manually');
+    }
+
+    // Deterministic validation — the AI restructures, it never decides.
+    const normalized = drafts
+      .map((d) => ({
+        category: String(d.category ?? 'Menu').slice(0, 80) || 'Menu',
+        name: String(d.name ?? '').trim().slice(0, 150),
+        description: String(d.description ?? '').trim().slice(0, 500),
+        basePrice: Number(d.basePrice),
+        sku: '', unit: '', stockQuantity: '', isAvailable: 'true', fulfillment: '', imageUrl: '',
+      }))
+      .filter((d) => d.name.length > 0 && Number.isFinite(d.basePrice) && d.basePrice > 0 && d.basePrice <= 10_000_000);
+    if (normalized.length === 0) {
+      throw new AppError(422, 'MENU_UNPARSEABLE', 'Couldn’t find priced items in that menu — use CSV/Excel or add items manually');
+    }
+
+    return {
       success: true,
       data: {
-        mapping,
         rowCount: normalized.length,
         preview: normalized.slice(0, 10),
-        normalizedCsv: toImportCsv(normalized),
+        normalizedCsv: toImportCsv(normalized as never),
+        source: 'menu-pdf',
       },
     };
   });

@@ -368,6 +368,10 @@ export const vendorApi = {
   importItems: (csv: string) => api.post('/vendor/items/import', { csv }),
   importTemplate: () => api.get('/vendor/items/import/template'),
   importAutomap: (csv: string) => api.post('/vendor/items/import/automap', { csv }),
+  importXlsx: (form: FormData) =>
+    api.post('/vendor/items/import/xlsx', form, { headers: { 'Content-Type': 'multipart/form-data' } }),
+  importMenuPdf: (form: FormData) =>
+    api.post('/vendor/items/import/menu-parse', form, { headers: { 'Content-Type': 'multipart/form-data' } }),
   // Reviews (manager+ can respond)
   reviews: () => api.get('/vendor/reviews'),
   respondReview: (id: string, response: string) => api.post(`/vendor/reviews/${id}/respond`, { response }),

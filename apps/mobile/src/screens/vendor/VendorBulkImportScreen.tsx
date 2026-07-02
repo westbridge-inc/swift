@@ -1,28 +1,71 @@
 import { useState } from 'react';
 import { View, ScrollView, TextInput } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
+import * as DocumentPicker from 'expo-document-picker';
 import { Feather } from '@expo/vector-icons';
 import { color } from '@swift/ui';
 import { Text, Card, Button, PressableScale } from '../../components/ui';
-import { useImportAutomap, useImportItems } from '../../hooks/vendorops';
+import { useImportAutomap, useImportItems, useImportFile } from '../../hooks/vendorops';
 
 const RECOMMENDED = 'category, name, basePrice, sku, unit, stockQuantity, description';
 
 export function VendorBulkImportScreen({ navigation }: any) {
   const automap = useImportAutomap();
+  const importFile = useImportFile();
   const importItems = useImportItems();
   const [csv, setCsv] = useState('');
-  const mapped: any = automap.data;
+  // CSV-paste and file uploads land in the SAME confirm-ready preview shape.
+  const mapped: any = importFile.data ?? automap.data;
   const result: any = importItems.data;
 
   const analyze = () => {
     if (csv.trim().length === 0) return;
     importItems.reset();
+    importFile.reset();
     automap.mutate(csv.trim());
   };
+
+  const pickFile = async () => {
+    const picked = await DocumentPicker.getDocumentAsync({
+      type: [
+        'text/csv',
+        'text/comma-separated-values',
+        'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        'application/pdf',
+      ],
+      copyToCacheDirectory: true,
+    });
+    if (picked.canceled || !picked.assets?.[0]) return;
+    const a = picked.assets[0];
+    const name = a.name ?? 'catalogue';
+    importItems.reset();
+    automap.reset();
+
+    if (/\.xlsx$/i.test(name)) {
+      importFile.mutate({ kind: 'xlsx', file: { uri: a.uri, name, type: a.mimeType ?? 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' } });
+    } else if (/\.pdf$/i.test(name)) {
+      importFile.mutate({ kind: 'menu-pdf', file: { uri: a.uri, name, type: 'application/pdf' } });
+    } else {
+      // CSV: read the text and reuse the paste path
+      importFile.reset();
+      try {
+        const text = await (await fetch(a.uri)).text();
+        setCsv(text);
+        automap.mutate(text.trim());
+      } catch {
+        // fall through — the paste box still works
+      }
+    }
+  };
+
   const runImport = () => {
     importItems.mutate(mapped?.normalizedCsv ?? csv.trim());
   };
+
+  const busy = automap.isPending || importFile.isPending;
+  const errMsg =
+    (importFile.error as any)?.response?.data?.error?.message ??
+    (automap.error as any)?.response?.data?.error?.message;
 
   const importedCount = result?.imported ?? result?.created ?? result?.successCount ?? null;
   const failedCount = result?.failed ?? result?.errors?.length ?? result?.failedCount ?? 0;
@@ -42,9 +85,14 @@ export function VendorBulkImportScreen({ navigation }: any) {
         keyboardShouldPersistTaps="handled"
       >
         <Text className="mb-sm text-sm text-text-secondary">
-          Paste your catalogue from a spreadsheet (CSV). We&apos;ll match your columns automatically — no need to
-          rename anything. Recommended columns: {RECOMMENDED}.
+          Bring your whole catalogue at once: a CSV or Excel export from your spreadsheet, or a
+          PDF menu we turn into draft items for you to confirm. Recommended columns: {RECOMMENDED}.
         </Text>
+
+        <Button label="Pick a file (CSV, Excel, or PDF menu)" loading={importFile.isPending} onPress={pickFile} />
+
+        <Text className="my-md text-center text-xs text-text-muted">— or paste CSV —</Text>
+
         <TextInput
           value={csv}
           onChangeText={setCsv}
@@ -52,31 +100,34 @@ export function VendorBulkImportScreen({ navigation }: any) {
           placeholderTextColor={color.text.muted}
           multiline
           textAlignVertical="top"
-          style={{ minHeight: 160 }}
+          style={{ minHeight: 140 }}
           className="mb-md rounded-2xl border border-border-subtle bg-surface-base px-lg py-md font-body text-sm text-text-primary"
         />
         <Button
           label="Analyze CSV"
           variant="outline"
           loading={automap.isPending}
-          disabled={csv.trim().length === 0}
+          disabled={csv.trim().length === 0 || busy}
           onPress={analyze}
         />
 
-        {automap.isError ? (
-          <Text className="mt-sm text-sm text-error">
-            {(automap.error as any)?.response?.data?.error?.message ?? 'Couldn’t read that CSV. Check the columns and try again.'}
-          </Text>
-        ) : null}
+        {errMsg ? <Text className="mt-sm text-sm text-error">{errMsg}</Text> : null}
 
         {mapped ? (
           <Card className="mt-md">
             <Text className="text-base font-semibold">
               {mapped.rowCount} item{mapped.rowCount === 1 ? '' : 's'} found
+              {mapped.source === 'menu-pdf' ? ' in your menu' : ''}
             </Text>
-            <Text className="mt-xs text-xs text-text-muted">
-              Mapped: {Object.entries(mapped.mapping ?? {}).map(([k, v]) => `${v}→${k}`).join(', ')}
-            </Text>
+            {mapped.mapping ? (
+              <Text className="mt-xs text-xs text-text-muted">
+                Mapped: {Object.entries(mapped.mapping ?? {}).map(([k, v]) => `${v}→${k}`).join(', ')}
+              </Text>
+            ) : (
+              <Text className="mt-xs text-xs text-text-muted">
+                Check the names and prices below — nothing imports until you confirm.
+              </Text>
+            )}
             {(mapped.preview ?? []).slice(0, 5).map((r: any, i: number) => (
               <View key={i} className="mt-sm flex-row items-center justify-between border-t border-border-subtle pt-sm">
                 <Text className="flex-1 pr-md text-sm" numberOfLines={1}>
