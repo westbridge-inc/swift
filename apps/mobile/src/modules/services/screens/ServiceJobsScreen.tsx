@@ -3,8 +3,9 @@ import { View, ScrollView, RefreshControl, Alert } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Feather } from '@expo/vector-icons';
 import { color } from '@swift/ui';
-import { Text, Heading, Card, Button, Badge, Skeleton, PressableScale, EmptyState, ChoiceChip } from '../../../components/ui';
-import { useServiceJobs, useScheduleJob, useCancelJob, useRateJob } from '../../../hooks';
+import { Text, Heading, Card, Button, Badge, Skeleton, PressableScale, EmptyState, ChoiceChip, Input } from '../../../components/ui';
+import { useServiceJobs, useScheduleJob, useCancelJob, useRateJob, useQuoteJob, useConfirmJob, useDeclineSlot } from '../../../hooks';
+import { useAuthStore } from '../../../stores/authStore';
 
 const money = (n: number | string) => `$${Number(n).toLocaleString()} GYD`;
 
@@ -111,7 +112,46 @@ function RateRow({ job }: { job: any }) {
   );
 }
 
+/** Provider-side controls: quote a REQUESTED job; confirm/decline a slot (§4.3). */
+function ProviderActions({ job }: { job: any }) {
+  const quote = useQuoteJob();
+  const confirm = useConfirmJob();
+  const decline = useDeclineSlot();
+  const [amount, setAmount] = useState('');
+
+  if (job.status === 'REQUESTED') {
+    return (
+      <View className="mt-sm flex-row items-center" style={{ gap: 8 }}>
+        <Input
+          containerClassName="flex-1"
+          value={amount}
+          onChangeText={setAmount}
+          placeholder="Quote (GYD)"
+          keyboardType="number-pad"
+        />
+        <Button
+          label="Send quote"
+          loading={quote.isPending}
+          disabled={!(Number(amount) > 0)}
+          onPress={() => quote.mutate({ id: job.id, amount: Number(amount) })}
+        />
+      </View>
+    );
+  }
+  if (job.status === 'SCHEDULED' && !job.providerConfirmedAt) {
+    return (
+      <View className="mt-sm flex-row" style={{ gap: 8 }}>
+        <Button label="Confirm time" className="flex-1" loading={confirm.isPending} onPress={() => confirm.mutate(job.id)} />
+        <Button label="Can’t make it" variant="outline" className="flex-1" loading={decline.isPending} onPress={() => decline.mutate(job.id)} />
+      </View>
+    );
+  }
+  return null;
+}
+
 function JobCard({ job, navigation }: { job: any; navigation: any }) {
+  const myId = useAuthStore((s) => s.user?.id);
+  const isCustomer = job.customerId === myId;
   const cancel = useCancelJob();
   const [scheduling, setScheduling] = useState(false);
   const status = STATUS_LABEL[job.status] ?? { label: job.status, tone: 'neutral' as const };
@@ -143,15 +183,23 @@ function JobCard({ job, navigation }: { job: any; navigation: any }) {
       ) : null}
 
       {job.status === 'SCHEDULED' && job.quoteAmount != null ? (
-        <Text className="mt-sm text-sm text-text-secondary">Agreed price: {money(job.quoteAmount)} · cash on completion</Text>
+        <View className="mt-sm flex-row items-center">
+          <Text className="flex-1 text-sm text-text-secondary">Agreed price: {money(job.quoteAmount)} · cash on completion</Text>
+          <Badge
+            label={job.providerConfirmedAt ? 'Time confirmed' : 'Awaiting confirmation'}
+            tone={job.providerConfirmedAt ? 'success' : 'neutral'}
+          />
+        </View>
       ) : null}
 
-      {scheduling && job.status === 'QUOTED' ? (
+      {isCustomer && scheduling && job.status === 'QUOTED' ? (
         <ScheduleSheet job={job} onDone={() => setScheduling(false)} />
       ) : null}
 
+      {!isCustomer ? <ProviderActions job={job} /> : null}
+
       <View className="mt-sm flex-row" style={{ gap: 8 }}>
-        {job.status === 'QUOTED' && !scheduling ? (
+        {isCustomer && job.status === 'QUOTED' && !scheduling ? (
           <Button label="Accept & book" className="flex-1" onPress={() => setScheduling(true)} />
         ) : null}
         {job.chatRoomId && !['COMPLETED', 'CANCELLED'].includes(job.status) ? (
@@ -162,12 +210,12 @@ function JobCard({ job, navigation }: { job: any; navigation: any }) {
             onPress={() => navigation.navigate('Chat', { roomId: job.chatRoomId, title: 'Job chat' })}
           />
         ) : null}
-        {['REQUESTED', 'QUOTED'].includes(job.status) ? (
+        {isCustomer && ['REQUESTED', 'QUOTED'].includes(job.status) ? (
           <Button label="Cancel" variant="outline" className="flex-1" loading={cancel.isPending} onPress={confirmCancel} />
         ) : null}
       </View>
 
-      {job.status === 'COMPLETED' ? <RateRow job={job} /> : null}
+      {isCustomer && job.status === 'COMPLETED' ? <RateRow job={job} /> : null}
     </Card>
   );
 }

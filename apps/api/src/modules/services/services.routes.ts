@@ -1,6 +1,7 @@
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { RatingService } from '../rating/rating.service';
+import { NotificationService } from '../notification/notification.service';
 import { tradeRiskTier, riskGuidance, geiRegistryCheck, isProviderVerified } from './services.service';
 import { AppError, NotFoundError } from '../../utils/errors';
 
@@ -33,6 +34,7 @@ const rateSchema = z.object({ score: z.number().int().min(1).max(5), comment: z.
 export async function servicesRoutes(app: FastifyInstance) {
   const auth = { preHandler: [app.authenticate] };
   const ratingService = new RatingService(app.prisma);
+  const notifications = new NotificationService(app.prisma, app.io);
 
   async function jobForUser(jobId: string, userId: string) {
     const job = await app.prisma.serviceJob.findUnique({
@@ -184,7 +186,59 @@ export async function servicesRoutes(app: FastifyInstance) {
     const job = await jobForUser(id, request.user.userId);
     if (job.customerId !== request.user.userId) throw new AppError(403, 'CUSTOMER_ONLY', 'Only the customer can schedule');
     if (job.status !== 'QUOTED') throw new AppError(400, 'BAD_STATE', 'Agree a quote before scheduling');
-    const updated = await app.prisma.serviceJob.update({ where: { id }, data: { scheduledFor, status: 'SCHEDULED' } });
+    // The provider still ACCEPTS the slot (§4.3) — providerConfirmedAt starts null.
+    const updated = await app.prisma.serviceJob.update({
+      where: { id },
+      data: { scheduledFor, status: 'SCHEDULED', providerConfirmedAt: null },
+    });
+    await notifications.send({
+      userId: job.provider.userId,
+      type: 'ORDER_UPDATE',
+      title: 'Booking to confirm',
+      body: `Your quote was accepted for ${scheduledFor.toLocaleString('en-GY', { weekday: 'short', hour: 'numeric', minute: '2-digit', day: 'numeric', month: 'short' })} — confirm or suggest another time.`,
+      data: { kind: 'booking_to_confirm', jobId: id },
+    });
+    return { success: true, data: updated };
+  });
+
+  /** POST /jobs/:id/confirm — the provider accepts the customer's slot (§4.3). */
+  app.post('/jobs/:id/confirm', auth, async (request) => {
+    const { id } = request.params as { id: string };
+    const job = await jobForUser(id, request.user.userId);
+    if (job.provider.userId !== request.user.userId) throw new AppError(403, 'PROVIDER_ONLY', 'Only the provider can confirm');
+    if (job.status !== 'SCHEDULED') throw new AppError(400, 'BAD_STATE', 'There is no scheduled slot to confirm');
+    const updated = await app.prisma.serviceJob.update({
+      where: { id },
+      data: { providerConfirmedAt: new Date() },
+    });
+    await notifications.send({
+      userId: job.customerId,
+      type: 'ORDER_UPDATE',
+      title: 'Booking confirmed',
+      body: 'Your provider confirmed the time — see you then. Pay cash on completion.',
+      data: { kind: 'booking_confirmed', jobId: id },
+    });
+    return { success: true, data: updated };
+  });
+
+  /** POST /jobs/:id/decline-slot — the provider can't make that time; the job
+   *  returns to QUOTED so the customer picks another slot (never a dead end). */
+  app.post('/jobs/:id/decline-slot', auth, async (request) => {
+    const { id } = request.params as { id: string };
+    const job = await jobForUser(id, request.user.userId);
+    if (job.provider.userId !== request.user.userId) throw new AppError(403, 'PROVIDER_ONLY', 'Only the provider can decline');
+    if (job.status !== 'SCHEDULED') throw new AppError(400, 'BAD_STATE', 'There is no scheduled slot to decline');
+    const updated = await app.prisma.serviceJob.update({
+      where: { id },
+      data: { status: 'QUOTED', scheduledFor: null, providerConfirmedAt: null },
+    });
+    await notifications.send({
+      userId: job.customerId,
+      type: 'ORDER_UPDATE',
+      title: 'Time didn’t work',
+      body: 'The provider can’t make that slot — pick another time for your job.',
+      data: { kind: 'booking_slot_declined', jobId: id },
+    });
     return { success: true, data: updated };
   });
 

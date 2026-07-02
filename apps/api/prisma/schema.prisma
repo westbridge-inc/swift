@@ -1065,6 +1065,9 @@ model ServiceJob {
   status       ServiceJobStatus @default(REQUESTED)
   quoteAmount  Decimal?         @db.Decimal(12, 2)
   scheduledFor DateTime?
+  /// Booking accept/decline (master plan §4.3): the provider confirms the
+  /// customer's slot. Null on a SCHEDULED job = awaiting confirmation.
+  providerConfirmedAt DateTime?
   chatRoomId   String?
   completedAt  DateTime?
   cancelledAt  DateTime?
