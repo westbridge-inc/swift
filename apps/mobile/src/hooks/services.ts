@@ -53,3 +53,28 @@ export function useRateJob() {
     onSuccess: () => qc.invalidateQueries({ queryKey: ['services', 'jobs'] }),
   });
 }
+
+// Provider side (§4.3): quote, then accept/decline the customer's slot.
+export function useQuoteJob() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, amount }: { id: string; amount: number }) => unwrap(servicesApi.quoteJob(id, amount)),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['services', 'jobs'] }),
+  });
+}
+
+export function useConfirmJob() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (id: string) => unwrap(servicesApi.confirmJob(id)),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['services', 'jobs'] }),
+  });
+}
+
+export function useDeclineSlot() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (id: string) => unwrap(servicesApi.declineSlot(id)),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['services', 'jobs'] }),
+  });
+}

@@ -272,6 +272,16 @@ export function createWorkers(ctx: JobContext) {
         const flagged = await new RatingService(ctx.prisma).flagSuspiciousRatings();
         ctx.log.info(`Rating anti-manipulation sweep: ${flagged} flagged`);
       }
+
+      if (job.name === 'booking-reminders') {
+        const { sendBookingReminders } = await import('../modules/services/services.service');
+        const { NotificationService } = await import('../modules/notification/notification.service');
+        const notifications = new NotificationService(ctx.prisma, ctx.io);
+        const sent = await sendBookingReminders(ctx.prisma, async (n) => {
+          await notifications.send({ ...n, type: 'ORDER_UPDATE' });
+        });
+        ctx.log.info(`Booking reminders: ${sent} sent`);
+      }
     },
     { connection, concurrency: 1 },
   );
@@ -383,6 +393,14 @@ export async function scheduleRecurringJobs(queues: ReturnType<typeof createQueu
   await queues.verificationQueue.add('flag-ratings', {}, {
     repeat: { pattern: '0 4 * * *' },
     removeOnComplete: 30,
+    removeOnFail: 30,
+  });
+
+  // Booking reminders (§4.3): hourly — each confirmed slot nudges both sides
+  // once inside the 24h window (dedupe rides on the notification log).
+  await queues.verificationQueue.add('booking-reminders', {}, {
+    repeat: { pattern: '30 * * * *' },
+    removeOnComplete: 50,
     removeOnFail: 30,
   });
 
