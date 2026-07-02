@@ -955,6 +955,9 @@ export async function customerRoutes(app: FastifyInstance) {
           tags: r.tags,
           reviewer: r.rater,
           createdAt: r.createdAt,
+          // The store's public reply (§4.1)
+          response: r.response,
+          respondedAt: r.respondedAt,
         })),
         distribution: result.distribution,
         ...paginatedResponse([], result.total, { page, limit, skip }).meta,

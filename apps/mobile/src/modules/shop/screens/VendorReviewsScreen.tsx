@@ -97,6 +97,12 @@ export function VendorReviewsScreen({ navigation, route }: any) {
                   <Stars value={Number(r.score ?? 0)} size={13} />
                 </View>
                 {r.comment ? <Text className="mt-sm text-sm text-text-secondary">{r.comment}</Text> : null}
+                {r.response ? (
+                  <View className="ml-lg mt-sm rounded-2xl bg-surface-subtle px-md py-sm">
+                    <Text className="text-xs font-semibold text-text-primary">Response from the store</Text>
+                    <Text className="mt-0.5 text-sm text-text-secondary">{r.response}</Text>
+                  </View>
+                ) : null}
               </View>
             );
           })

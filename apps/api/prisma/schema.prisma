@@ -972,6 +972,11 @@ model Rating {
   comment  String?
   tags     String[]
   isPublic Boolean    @default(true)
+  /// Operator's public reply (master plan §4.1 "see ratings, respond") —
+  /// written once per review by MANAGER+, editable, shown on the storefront.
+  response    String?
+  respondedAt DateTime?
+  respondedBy String?
   /// Anti-manipulation (spec §5.2): flagged for review by the daily sweep
   flagged    Boolean  @default(false)
   flagReason String?

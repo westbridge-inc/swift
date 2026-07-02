@@ -363,6 +363,9 @@ export const vendorApi = {
   importItems: (csv: string) => api.post('/vendor/items/import', { csv }),
   importTemplate: () => api.get('/vendor/items/import/template'),
   importAutomap: (csv: string) => api.post('/vendor/items/import/automap', { csv }),
+  // Reviews (manager+ can respond)
+  reviews: () => api.get('/vendor/reviews'),
+  respondReview: (id: string, response: string) => api.post(`/vendor/reviews/${id}/respond`, { response }),
   // Promotions (manager+)
   promos: () => api.get('/vendor/promos'),
   createPromo: (data: {
