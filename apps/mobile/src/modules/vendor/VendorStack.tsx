@@ -29,6 +29,10 @@ import {
   useAddStaff,
   useRemoveStaff,
   useUpdateStaffRole,
+  useVendorPromos,
+  useCreatePromo,
+  useUpdatePromo,
+  useDeletePromo,
   useVendorSubscription,
   useVendorAnalytics,
   useVendorRevenue,
@@ -1264,6 +1268,8 @@ function VendorAccountScreen() {
           </SettingsGroup>
         ) : null}
 
+        {isManager ? <PromosSection /> : null}
+
         {isOwner ? <StaffSection /> : null}
 
         {!isManager ? (
@@ -1330,6 +1336,124 @@ function VendorAccountScreen() {
         ) : null}
       </ScrollView>
     </SafeAreaView>
+  );
+}
+
+/**
+ * Operator promotions (master plan §4.2): the store's own promo codes.
+ * Create %/$ codes with an end date, pause/resume, delete. Customers see
+ * live codes on the storefront and apply them at checkout.
+ */
+function PromosSection() {
+  const promosQ = useVendorPromos();
+  const createPromo = useCreatePromo();
+  const updatePromo = useUpdatePromo();
+  const deletePromo = useDeletePromo();
+
+  const [showForm, setShowForm] = useState(false);
+  const [code, setCode] = useState('');
+  const [desc, setDesc] = useState('');
+  const [kind, setKind] = useState<'PERCENTAGE' | 'FIXED_AMOUNT'>('PERCENTAGE');
+  const [value, setValue] = useState('');
+  const [minOrder, setMinOrder] = useState('');
+  const [days, setDays] = useState(7);
+
+  const promos: any[] = promosQ.data ?? [];
+  const errMsg = (createPromo.error as any)?.response?.data?.error?.message
+    ?? (createPromo.error as any)?.response?.data?.message;
+
+  const submit = () => {
+    const v = Number(value);
+    if (!code.trim() || !desc.trim() || !Number.isFinite(v) || v <= 0) return;
+    const validUntil = new Date(Date.now() + days * 24 * 60 * 60 * 1000).toISOString();
+    createPromo.mutate(
+      {
+        code: code.trim().toUpperCase(),
+        description: desc.trim(),
+        discountType: kind,
+        discountValue: v,
+        ...(Number(minOrder) > 0 ? { minOrderAmount: Number(minOrder) } : {}),
+        validUntil,
+      },
+      { onSuccess: () => { setShowForm(false); setCode(''); setDesc(''); setValue(''); setMinOrder(''); } },
+    );
+  };
+
+  return (
+    <>
+      <Heading size="lg" className="mb-sm mt-sm">Promotions</Heading>
+      <Card className="mb-md">
+        {promos.map((p) => {
+          const expired = new Date(p.validUntil).getTime() < Date.now();
+          return (
+            <View key={p.id} className="mb-sm flex-row items-center">
+              <View className="flex-1">
+                <View className="flex-row items-center">
+                  <Text className="text-sm font-bold tracking-wider">{p.code}</Text>
+                  <Badge
+                    className="ml-sm"
+                    label={expired ? 'Expired' : p.isActive ? 'Live' : 'Paused'}
+                    tone={expired ? 'neutral' : p.isActive ? 'success' : 'neutral'}
+                  />
+                </View>
+                <Text className="text-xs text-text-muted" numberOfLines={1}>
+                  {p.discountType === 'PERCENTAGE' ? `${Number(p.discountValue)}% off` : `${money(p.discountValue)} off`}
+                  {p.minOrderAmount ? ` over ${money(p.minOrderAmount)}` : ''} · used {p.currentUses}×
+                </Text>
+              </View>
+              {!expired ? (
+                <PressableScale
+                  onPress={() => updatePromo.mutate({ id: p.id, data: { isActive: !p.isActive } })}
+                  disabled={updatePromo.isPending}
+                  className="mr-sm rounded-full bg-surface-subtle px-md py-xs"
+                >
+                  <Text className="text-xs font-semibold text-text-secondary">{p.isActive ? 'Pause' : 'Resume'}</Text>
+                </PressableScale>
+              ) : null}
+              <PressableScale onPress={() => deletePromo.mutate(p.id)} hitSlop={8}>
+                <Feather name="trash-2" size={16} color={color.text.muted} />
+              </PressableScale>
+            </View>
+          );
+        })}
+        {promos.length === 0 && !promosQ.isLoading ? (
+          <Text className="mb-sm text-sm text-text-muted">
+            No codes yet — run your first promotion and it shows on your storefront.
+          </Text>
+        ) : null}
+
+        {showForm ? (
+          <View className="mt-sm">
+            <Input value={code} onChangeText={setCode} placeholder="Code (e.g. SAVE20)" autoCapitalize="characters" />
+            <Input containerClassName="mt-sm" value={desc} onChangeText={setDesc} placeholder="What customers see (e.g. 20% off this week)" />
+            <View className="mt-sm flex-row" style={{ gap: 8 }}>
+              <ChoiceChip label="% off" active={kind === 'PERCENTAGE'} onPress={() => setKind('PERCENTAGE')} />
+              <ChoiceChip label="GYD off" active={kind === 'FIXED_AMOUNT'} onPress={() => setKind('FIXED_AMOUNT')} />
+            </View>
+            <View className="mt-sm flex-row" style={{ gap: 8 }}>
+              <Input containerClassName="flex-1" value={value} onChangeText={setValue} placeholder={kind === 'PERCENTAGE' ? '% (e.g. 20)' : 'GYD (e.g. 500)'} keyboardType="number-pad" />
+              <Input containerClassName="flex-1" value={minOrder} onChangeText={setMinOrder} placeholder="Min order (opt.)" keyboardType="number-pad" />
+            </View>
+            <Text className="mb-xs mt-sm text-xs font-semibold text-text-muted">Runs for</Text>
+            <View className="flex-row" style={{ gap: 8 }}>
+              {[3, 7, 14, 30].map((d) => (
+                <ChoiceChip key={d} label={`${d} days`} active={days === d} onPress={() => setDays(d)} />
+              ))}
+            </View>
+            {errMsg ? <Text className="mt-sm text-sm text-error">{errMsg}</Text> : null}
+            <Button
+              label="Launch promotion"
+              className="mt-sm"
+              loading={createPromo.isPending}
+              disabled={!code.trim() || !desc.trim() || !(Number(value) > 0)}
+              onPress={submit}
+            />
+          </View>
+        ) : (
+          <Button label="New promotion" variant="outline" onPress={() => setShowForm(true)} />
+        )}
+      </Card>
+    </>
   );
 }
 

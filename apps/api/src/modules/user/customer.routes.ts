@@ -852,6 +852,22 @@ export async function customerRoutes(app: FastifyInstance) {
 
     if (!vendor) throw new NotFoundError('Vendor', id);
 
+    // Live promotions the store is running (§4.2) — shown on the storefront.
+    const activePromos = await app.prisma.promoCode.findMany({
+      where: {
+        vendorId: id,
+        isActive: true,
+        validFrom: { lte: new Date() },
+        validUntil: { gt: new Date() },
+      },
+      select: {
+        code: true, description: true, discountType: true,
+        discountValue: true, minOrderAmount: true, validUntil: true,
+      },
+      orderBy: { createdAt: 'desc' },
+      take: 5,
+    });
+
     // Check if favorited (guests have none)
     const isFavorite = request.user?.userId
       ? (await app.prisma.customer.count({
@@ -910,6 +926,7 @@ export async function customerRoutes(app: FastifyInstance) {
         distanceKm,
         deliveryFee,
         etaMin,
+        promos: activePromos.map((p) => ({ ...p, discountValue: Number(p.discountValue), minOrderAmount: p.minOrderAmount ? Number(p.minOrderAmount) : null })),
       },
     };
   });
@@ -1814,8 +1831,15 @@ export async function customerRoutes(app: FastifyInstance) {
     });
 
     if (cart && cart.items.length > 0) {
+      // A vendor's own code (§4.2) only counts that vendor's items.
+      const counted = promo.vendorId
+        ? cart.items.filter((ci) => ci.item.vendorId === promo.vendorId)
+        : cart.items;
+      if (promo.vendorId && counted.length === 0) {
+        throw new AppError(400, 'PROMO_WRONG_VENDOR', 'This code belongs to a different store — add their items to use it');
+      }
       let subtotal = 0;
-      for (const ci of cart.items) {
+      for (const ci of counted) {
         const base = Number(ci.item.basePrice);
         subtotal += base * ci.quantity;
       }

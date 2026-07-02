@@ -522,6 +522,7 @@ model Vendor {
   coverImageUrl    String?
   images           VendorImage[]
   staff            VendorStaff[]
+  promoCodes       PromoCode[]
   phone            String
   email            String?
   addressLine1     String
@@ -1345,6 +1346,11 @@ model PromoCode {
   id             String       @id @default(cuid())
   code           String       @unique
   description    String
+  /// null = platform-wide (admin-issued). Set = the vendor's own promotion
+  /// (master plan §4.2): validated against and discounted from that vendor's
+  /// plan only at checkout.
+  vendorId       String?
+  vendor         Vendor?      @relation(fields: [vendorId], references: [id], onDelete: Cascade)
   discountType   DiscountType
   discountValue  Decimal      @db.Decimal(10, 2)
   minOrderAmount Decimal?     @db.Decimal(10, 2)
@@ -1359,6 +1365,7 @@ model PromoCode {
   orders         Order[]
   createdAt      DateTime     @default(now())
 
+  @@index([vendorId])
   @@map("promo_codes")
 }
 

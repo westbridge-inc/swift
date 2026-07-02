@@ -242,11 +242,16 @@ export class OrderService {
 
     let discount = 0;
     let promoCodeId: string | null = null;
-    const grandSubtotal = plans.reduce((s, p) => s + p.subtotal, 0);
+    let promoVendorId: string | null = null;
     if (input.promoCode) {
-      const promo = await this.validatePromoCode(input.promoCode, input.userId, grandSubtotal);
+      const promo = await this.validatePromoCode(
+        input.promoCode,
+        input.userId,
+        plans.map((p) => ({ vendorId: p.vendor.id, subtotal: p.subtotal })),
+      );
       discount = promo.discount;
       promoCodeId = promo.id;
+      promoVendorId = promo.vendorId;
     }
 
     const grandTotal = plans.reduce((s, p) => s + p.subtotal + p.deliveryFee, 0) + tip - discount;
@@ -284,11 +289,17 @@ export class OrderService {
       const created = [];
       let sequence = todayCount;
 
+      // A vendor promotion discounts (and records against) THAT vendor's order;
+      // platform-wide codes keep landing on the first order of the batch.
+      const promoPlanIndex = promoVendorId
+        ? plans.findIndex((p) => p.vendor.id === promoVendorId)
+        : 0;
+
       for (const [index, plan] of plans.entries()) {
         sequence += 1;
         const isFirst = index === 0;
         const planTip = isFirst ? tip : 0;
-        const planDiscount = isFirst ? discount : 0;
+        const planDiscount = index === promoPlanIndex ? discount : 0;
         const totalAmount = Math.max(0, plan.subtotal + plan.deliveryFee + planTip - planDiscount);
         // DELIVERY and MOBILE appointments go to the customer's address; PICKUP and
         // AT_BUSINESS appointments use the store (distanceKm>0 marks a mobile service).
@@ -330,7 +341,7 @@ export class OrderService {
             // Takeaway: a collection code the customer shows the vendor at pickup.
             // 6-digit, CSPRNG (not Math.random); handover is vendor-mediated in person.
             pickupCode: plan.fulfillment === 'PICKUP' ? String(randomInt(100000, 1000000)) : null,
-            promoCodeId: isFirst ? promoCodeId : null,
+            promoCodeId: index === promoPlanIndex ? promoCodeId : null,
             items: {
               create: plan.orderItems.map((oi) => ({
                 itemId: oi.itemId,
@@ -792,7 +803,17 @@ export class OrderService {
     };
   }
 
-  private async validatePromoCode(code: string, userId: string, subtotal: number) {
+  /**
+   * Validate a code against the checkout's per-vendor plans. Platform-wide
+   * codes (vendorId null) discount the whole basket; a VENDOR's code
+   * (master plan §4.2) is valid only when that vendor is in the cart and
+   * discounts only their subtotal.
+   */
+  private async validatePromoCode(
+    code: string,
+    userId: string,
+    plans: Array<{ vendorId: string; subtotal: number }>,
+  ) {
     const promo = await this.prisma.promoCode.findUnique({ where: { code: code.toUpperCase() } });
     if (!promo) throw new AppError(404, 'INVALID_PROMO', 'Promo code not found');
     if (!promo.isActive) throw new AppError(400, 'INVALID_PROMO', 'This promo code is no longer active');
@@ -812,6 +833,18 @@ export class OrderService {
     });
     if (userUsage >= promo.maxUsesPerUser) {
       throw new AppError(400, 'USED_PROMO', 'You have already used this promo code');
+    }
+
+    // The discount basis: the promo vendor's plan, or the whole basket.
+    let subtotal: number;
+    if (promo.vendorId) {
+      const plan = plans.find((p) => p.vendorId === promo.vendorId);
+      if (!plan) {
+        throw new AppError(400, 'PROMO_WRONG_VENDOR', 'This code belongs to a different store — add their items to use it');
+      }
+      subtotal = plan.subtotal;
+    } else {
+      subtotal = plans.reduce((s, p) => s + p.subtotal, 0);
     }
 
     if (promo.minOrderAmount && subtotal < Number(promo.minOrderAmount)) {
@@ -835,6 +868,6 @@ export class OrderService {
       discount = Math.min(discount, Number(promo.maxDiscount));
     }
 
-    return { id: promo.id, discount, discountType: promo.discountType };
+    return { id: promo.id, discount, discountType: promo.discountType, vendorId: promo.vendorId };
   }
 }

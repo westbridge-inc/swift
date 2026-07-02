@@ -363,6 +363,15 @@ export const vendorApi = {
   importItems: (csv: string) => api.post('/vendor/items/import', { csv }),
   importTemplate: () => api.get('/vendor/items/import/template'),
   importAutomap: (csv: string) => api.post('/vendor/items/import/automap', { csv }),
+  // Promotions (manager+)
+  promos: () => api.get('/vendor/promos'),
+  createPromo: (data: {
+    code: string; description: string; discountType: 'PERCENTAGE' | 'FIXED_AMOUNT';
+    discountValue: number; minOrderAmount?: number; validUntil: string; maxUses?: number;
+  }) => api.post('/vendor/promos', data),
+  updatePromo: (id: string, data: { isActive?: boolean; validUntil?: string }) =>
+    api.put(`/vendor/promos/${id}`, data),
+  deletePromo: (id: string) => api.delete(`/vendor/promos/${id}`),
   // Staff & roles (owner-only)
   staff: () => api.get('/vendor/staff'),
   addStaff: (data: { phone: string; role: 'MANAGER' | 'STAFF' }) => api.post('/vendor/staff', data),

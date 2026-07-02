@@ -127,6 +127,28 @@ const createItemSchema = z.object({
 
 const updateItemSchema = createItemSchema.omit({ optionGroups: true }).partial();
 
+// Operator promotions (master plan §4.2). Vendor codes never touch delivery
+// fees (not vendor revenue) — PERCENTAGE or FIXED_AMOUNT only.
+const createPromoSchema = z.object({
+  code: z.string().trim().min(3).max(24).regex(/^[A-Za-z0-9-]+$/, 'Letters, numbers and dashes only'),
+  description: z.string().trim().min(1).max(200),
+  discountType: z.enum(['PERCENTAGE', 'FIXED_AMOUNT']),
+  discountValue: z.number().positive().max(10_000_000),
+  minOrderAmount: z.number().min(0).max(10_000_000).optional(),
+  maxDiscount: z.number().positive().max(10_000_000).optional(),
+  validUntil: z.coerce.date(),
+  maxUses: z.number().int().positive().max(1_000_000).optional(),
+  maxUsesPerUser: z.number().int().positive().max(100).default(1),
+}).refine((d) => d.discountType !== 'PERCENTAGE' || d.discountValue <= 100, {
+  message: 'A percentage discount cannot exceed 100',
+});
+const updatePromoSchema = z.object({
+  description: z.string().trim().min(1).max(200).optional(),
+  isActive: z.boolean().optional(),
+  validUntil: z.coerce.date().optional(),
+  maxUses: z.number().int().positive().max(1_000_000).nullable().optional(),
+});
+
 // Staff & roles (master plan §4.1)
 const addStaffSchema = z.object({
   phone: z.string().min(10).max(15),
@@ -524,6 +546,85 @@ export async function vendorRoutes(app: FastifyInstance) {
       success: true,
       data: { id: access.ownerId, userId: request.user.userId, vendors: visible, myRole: access.role },
     };
+  });
+
+  // =========================================================================
+  // Operator promotions (master plan §4.2) — the vendor's own promo codes.
+  // =========================================================================
+
+  /** GET /promos — this store's codes with usage. */
+  app.get('/promos', auth, async (request) => {
+    const { vendorId } = await requireVendor(app, request, 'MANAGER');
+    const promos = await app.prisma.promoCode.findMany({
+      where: { vendorId },
+      orderBy: { createdAt: 'desc' },
+    });
+    return { success: true, data: promos };
+  });
+
+  /** POST /promos — create a code for the selected store. */
+  app.post('/promos', auth, async (request) => {
+    const { vendorId } = await requireVendor(app, request, 'MANAGER');
+    const body = createPromoSchema.parse(request.body);
+
+    const code = body.code.toUpperCase();
+    const taken = await app.prisma.promoCode.findUnique({ where: { code } });
+    if (taken) throw new AppError(409, 'CODE_TAKEN', 'That code is already in use — pick another');
+    if (body.validUntil.getTime() <= Date.now()) {
+      throw new AppError(400, 'INVALID_DATES', 'The end date must be in the future');
+    }
+
+    const promo = await app.prisma.promoCode.create({
+      data: {
+        code,
+        description: body.description,
+        vendorId,
+        discountType: body.discountType,
+        discountValue: body.discountValue,
+        minOrderAmount: body.minOrderAmount,
+        maxDiscount: body.maxDiscount,
+        applicableTo: [],
+        validFrom: new Date(),
+        validUntil: body.validUntil,
+        maxUses: body.maxUses,
+        maxUsesPerUser: body.maxUsesPerUser,
+      },
+    });
+    return { success: true, data: promo };
+  });
+
+  /** PUT /promos/:id — pause/resume, extend, or reword an own code. */
+  app.put<{ Params: IdParam }>('/promos/:id', auth, async (request) => {
+    const { vendorId } = await requireVendor(app, request, 'MANAGER');
+    const existing = await app.prisma.promoCode.findUnique({ where: { id: request.params.id } });
+    if (!existing || existing.vendorId !== vendorId) throw new NotFoundError('PromoCode', request.params.id);
+
+    const body = updatePromoSchema.parse(request.body);
+    const promo = await app.prisma.promoCode.update({
+      where: { id: request.params.id },
+      data: {
+        ...(body.description !== undefined && { description: body.description }),
+        ...(body.isActive !== undefined && { isActive: body.isActive }),
+        ...(body.validUntil !== undefined && { validUntil: body.validUntil }),
+        ...(body.maxUses !== undefined && { maxUses: body.maxUses }),
+      },
+    });
+    return { success: true, data: promo };
+  });
+
+  /** DELETE /promos/:id — unused codes delete outright; used ones deactivate
+   *  (orders reference them — the history must stay intact). */
+  app.delete<{ Params: IdParam }>('/promos/:id', auth, async (request) => {
+    const { vendorId } = await requireVendor(app, request, 'MANAGER');
+    const existing = await app.prisma.promoCode.findUnique({ where: { id: request.params.id } });
+    if (!existing || existing.vendorId !== vendorId) throw new NotFoundError('PromoCode', request.params.id);
+
+    if (existing.currentUses === 0) {
+      await app.prisma.promoCode.delete({ where: { id: request.params.id } });
+      return { success: true, data: { deleted: true } };
+    }
+    await app.prisma.promoCode.update({ where: { id: request.params.id }, data: { isActive: false } });
+    return { success: true, data: { deleted: false, deactivated: true } };
   });
 
   /** PUT /profile — Update vendor profile details */
