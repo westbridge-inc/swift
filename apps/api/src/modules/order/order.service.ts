@@ -143,7 +143,7 @@ export class OrderService {
       orderItems: Array<{
         itemId: string; name: string; quantity: number; basePrice: number;
         unitPrice: number; totalBase: number; specialInstructions?: string | null;
-        options: ResolvedOption[];
+        options: ResolvedOption[]; tracksStock: boolean;
       }>;
     }> = [];
 
@@ -151,6 +151,19 @@ export class OrderService {
       const vendor = items[0]!.item.vendor;
       if (!vendor.isCurrentlyOpen || !vendor.acceptingOrders || vendor.status !== 'ACTIVE') {
         throw new AppError(400, 'VENDOR_CLOSED', `${vendor.name} is currently not accepting orders`);
+      }
+
+      // Inventory (§4.2): a tracked item can't be ordered beyond the shelf.
+      // The race-proof guard is the conditional decrement in the transaction
+      // below — this is the friendly early error for the common case.
+      for (const ci of items) {
+        if (ci.item.stockQuantity !== null && ci.quantity > ci.item.stockQuantity) {
+          throw new AppError(409, 'INSUFFICIENT_STOCK',
+            ci.item.stockQuantity <= 0
+              ? `${ci.item.name} is sold out`
+              : `Only ${ci.item.stockQuantity} of ${ci.item.name} left — reduce the quantity`,
+            { itemId: ci.item.id, available: ci.item.stockQuantity });
+        }
       }
 
       const appointmentItems = items.filter((ci) => ci.item.fulfillment === 'APPOINTMENT');
@@ -213,6 +226,7 @@ export class OrderService {
           totalBase: unitPrice * ci.quantity,
           specialInstructions: ci.specialInstructions,
           options,
+          tracksStock: ci.item.stockQuantity !== null,
         };
       });
       const subtotal = orderItems.reduce((s, i) => s + i.totalBase, 0);
@@ -261,7 +275,11 @@ export class OrderService {
     today.setHours(0, 0, 0, 0);
     const todayCount = await this.prisma.order.count({ where: { placedAt: { gte: today } } });
 
-    // Atomic: all orders, stats, and the cart deletion commit together
+    // Inventory alerts collected inside the transaction, delivered after it
+    // commits (notifications are best-effort and never roll an order back).
+    const stockEventsByVendor = new Map<string, Array<{ itemId: string; name: string; remaining: number; kind: 'low' | 'out' }>>();
+
+    // Atomic: all orders, stock movements, stats, and the cart deletion commit together
     const orders = await this.prisma.$transaction(async (tx) => {
       const created = [];
       let sequence = todayCount;
@@ -354,6 +372,44 @@ export class OrderService {
           data: { totalOrdered: { increment: 1 } },
         });
 
+        // Inventory (§4.2): conditional decrement — the WHERE guard makes
+        // overselling impossible under concurrency; the losing checkout's
+        // whole transaction rolls back. Items at zero auto-hide from browse.
+        for (const oi of plan.orderItems) {
+          if (!oi.tracksStock) continue;
+          const hit = await tx.item.updateMany({
+            where: { id: oi.itemId, stockQuantity: { gte: oi.quantity } },
+            data: { stockQuantity: { decrement: oi.quantity } },
+          });
+          if (hit.count === 0) {
+            throw new AppError(409, 'INSUFFICIENT_STOCK', `${oi.name} just sold out — remove it from your cart and try again`, { itemId: oi.itemId });
+          }
+          const after = await tx.item.findUniqueOrThrow({
+            where: { id: oi.itemId },
+            select: { stockQuantity: true, lowStockThreshold: true, isAvailable: true },
+          });
+          const remaining = after.stockQuantity ?? 0;
+          if (remaining <= 0 && after.isAvailable) {
+            await tx.item.update({
+              where: { id: oi.itemId },
+              data: { isAvailable: false, autoHiddenAt: new Date() },
+            });
+          }
+          const events = stockEventsByVendor.get(plan.vendor.id) ?? [];
+          if (remaining <= 0) {
+            events.push({ itemId: oi.itemId, name: oi.name, remaining: 0, kind: 'out' });
+          } else if (
+            after.lowStockThreshold !== null &&
+            remaining <= after.lowStockThreshold &&
+            remaining + oi.quantity > after.lowStockThreshold
+          ) {
+            // Crossing edge only — the owner is alerted once, not on every
+            // subsequent order below the threshold.
+            events.push({ itemId: oi.itemId, name: oi.name, remaining, kind: 'low' });
+          }
+          if (events.length > 0) stockEventsByVendor.set(plan.vendor.id, events);
+        }
+
         created.push(order);
       }
 
@@ -381,6 +437,12 @@ export class OrderService {
           Number(order.totalAmount),
           order.id,
         );
+        if (order.vendorId) {
+          for (const ev of stockEventsByVendor.get(order.vendorId) ?? []) {
+            await this.notifications.lowStock(vendorOwner.userId, ev);
+          }
+          stockEventsByVendor.delete(order.vendorId);
+        }
       }
     }
 
@@ -418,6 +480,35 @@ export class OrderService {
           ? `Order scheduled! ${orders[0]!.vendor?.name} will prepare it at the right time.`
           : `Order placed! ${orders[0]!.vendor?.name} will confirm shortly.`,
     };
+  }
+
+  /**
+   * Put a cancelled order's tracked stock back on the shelf. Every state an
+   * order may be CANCELLED from precedes physical handover (see
+   * ORDER_TRANSITIONS), so the goods never left the store. FAILED handovers
+   * deliberately do NOT restock — returned food is the vendor's manual call.
+   * Pure auto-hides (stock hit 0) un-hide once stock is back above zero.
+   */
+  private async restockCancelledOrder(orderId: string) {
+    const items = await this.prisma.orderItem.findMany({
+      where: { orderId },
+      select: { itemId: true, quantity: true },
+    });
+    for (const oi of items) {
+      if (!oi.itemId) continue;
+      const restocked = await this.prisma.item.updateMany({
+        // Only items still tracking stock — a vendor may have stopped tracking
+        // since the order was placed, and null must stay null.
+        where: { id: oi.itemId, stockQuantity: { not: null } },
+        data: { stockQuantity: { increment: oi.quantity } },
+      });
+      if (restocked.count > 0) {
+        await this.prisma.item.updateMany({
+          where: { id: oi.itemId, autoHiddenAt: { not: null }, stockQuantity: { gt: 0 } },
+          data: { isAvailable: true, autoHiddenAt: null },
+        });
+      }
+    }
   }
 
   async cancelOrder(orderId: string, userId: string, reason?: string) {
@@ -458,6 +549,9 @@ export class OrderService {
       where: { orderId, status: { not: 'CANCELLED' } },
       data: { status: 'CANCELLED' },
     });
+
+    // The goods never left the store — tracked stock goes back on the shelf
+    await this.restockCancelledOrder(orderId);
 
     await this.prisma.orderStatusLog.create({
       data: { orderId, status: 'CANCELLED', changedBy: userId, note: reason || 'Cancelled by customer' },
@@ -521,6 +615,12 @@ export class OrderService {
     // D.3 — release the rider's committed float on a terminal CASH transition.
     if ((status === 'DELIVERED' || status === 'CANCELLED') && order.riderId && order.paymentMethod === 'CASH') {
       await new FloatService(this.prisma).release(this.prisma, order.riderId, Number(order.subtotalBase));
+    }
+
+    // Every CANCELLED source state precedes handover — restock tracked items.
+    // Exactly-once: only the CAS winner above reaches this line.
+    if (status === 'CANCELLED') {
+      await this.restockCancelledOrder(orderId);
     }
 
     // Append-only event log — every transition leaves evidence

@@ -1091,6 +1091,16 @@ export async function customerRoutes(app: FastifyInstance) {
     });
     if (!item) throw new AppError(404, 'ITEM_NOT_FOUND', 'Item not found or unavailable');
 
+    // Inventory (§4.2): don't let the cart promise more than the shelf holds.
+    // Checkout re-checks atomically; this is the early, friendly stop.
+    if (item.stockQuantity !== null && quantity > item.stockQuantity) {
+      throw new AppError(409, 'INSUFFICIENT_STOCK',
+        item.stockQuantity <= 0
+          ? `${item.name} is sold out`
+          : `Only ${item.stockQuantity} of ${item.name} left`,
+        { itemId: item.id, available: item.stockQuantity });
+    }
+
     // Validate vendor is active
     const vendor = await app.prisma.vendor.findUnique({
       where: { id: body.vendorId },
