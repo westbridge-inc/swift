@@ -1,10 +1,12 @@
 import { View, ScrollView, Share } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
+import { Image } from 'expo-image';
 import { color } from '@swift/ui';
 import { Text, Heading, Badge, Button, SettingsGroup, SettingsRow } from '../../components/ui';
 import { useAuthStore } from '../../stores/authStore';
 import { useProfile, useAddresses } from '../../hooks';
+import { mediaUrl } from '../../lib/images';
 
 export function AccountScreen({ navigation }: any) {
   const isAuthenticated = useAuthStore((s) => s.isAuthenticated);
@@ -45,6 +47,7 @@ function SignedInAccount({ navigation }: any) {
   const firstName = profile?.firstName ?? user?.firstName ?? '';
   const lastName = profile?.lastName ?? user?.lastName ?? '';
   const phone = profile?.phone ?? user?.phone ?? '';
+  const avatar = profile?.avatar ?? user?.avatar ?? null;
   const initials = `${(firstName[0] || '').toUpperCase()}${(lastName[0] || '').toUpperCase()}` || '?';
   const fullName = `${firstName} ${lastName}`.trim() || 'Your account';
   const list = addresses ?? [];
@@ -68,9 +71,17 @@ function SignedInAccount({ navigation }: any) {
         {/* Profile */}
         <SettingsGroup>
           <View className="flex-row items-center px-md py-md">
-            <View className="h-14 w-14 items-center justify-center rounded-full bg-brand-500">
-              <Text className="text-lg font-bold text-white">{initials}</Text>
-            </View>
+            {avatar ? (
+              <Image
+                source={{ uri: mediaUrl(avatar) ?? undefined }}
+                style={{ width: 56, height: 56, borderRadius: 28 }}
+                contentFit="cover"
+              />
+            ) : (
+              <View className="h-14 w-14 items-center justify-center rounded-full bg-brand-500">
+                <Text className="text-lg font-bold text-white">{initials}</Text>
+              </View>
+            )}
             <View className="ml-md flex-1">
               <Text className="text-lg font-bold text-text-primary" numberOfLines={1}>{fullName}</Text>
               {phone ? <Text className="mt-0.5 text-sm text-text-secondary">{phone}</Text> : null}

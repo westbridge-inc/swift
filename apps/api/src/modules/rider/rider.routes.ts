@@ -282,6 +282,16 @@ export async function riderRoutes(app: FastifyInstance) {
   app.post('/go-online', { preHandler: [app.authenticate] }, async (request) => {
     const rider = await getRider(app, request.user.userId);
 
+    // Universal signup selfie (master plan §3): customers see the courier's
+    // photo on acceptance, so a live profile photo must exist before going online.
+    const account = await app.prisma.user.findUniqueOrThrow({
+      where: { id: request.user.userId },
+      select: { selfieCapturedAt: true },
+    });
+    if (!account.selfieCapturedAt) {
+      throw new AppError(403, 'SELFIE_REQUIRED', 'Add your profile photo before going online — customers see it when you accept.');
+    }
+
     // Verification gate: the country's MOVER checklist must be fully approved.
     // Legacy documentsVerified flag grandfathers pre-checklist accounts.
     const verified = rider.documentsVerified

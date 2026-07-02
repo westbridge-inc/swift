@@ -92,7 +92,7 @@ async function makeCustomerUser(trustLevel: 'L1' | 'L2' | 'L3' = 'L1') {
     data: {
       phone: nextHeavyPhone(), firstName: 'Acc', lastName: 'Cust',
       roles: ['CUSTOMER' as UserRole], activeRole: 'CUSTOMER' as UserRole,
-      isPhoneVerified: true, countryCode: 'GY', trustLevel,
+      isPhoneVerified: true, selfieCapturedAt: new Date(), countryCode: 'GY', trustLevel,
       customer: { create: {} },
     },
   });
@@ -103,7 +103,7 @@ async function makeRiderUser() {
     data: {
       phone: nextHeavyPhone(), firstName: 'Acc', lastName: 'Rider',
       roles: ['RIDER' as UserRole, 'CUSTOMER' as UserRole], activeRole: 'RIDER' as UserRole,
-      isPhoneVerified: true, countryCode: 'GY',
+      isPhoneVerified: true, selfieCapturedAt: new Date(), countryCode: 'GY',
     },
   });
   const rider = await app.prisma.rider.create({
@@ -136,7 +136,7 @@ async function makeUser(phone: string) {
       lastName: 'Test',
       roles: ['RIDER' as UserRole, 'CUSTOMER' as UserRole],
       activeRole: 'RIDER' as UserRole,
-      isPhoneVerified: true,
+      isPhoneVerified: true, selfieCapturedAt: new Date(),
       countryCode: 'GY',
     },
   });
@@ -178,7 +178,7 @@ beforeAll(async () => {
     data: {
       phone: nextHeavyPhone(), firstName: 'Acc', lastName: 'Owner',
       roles: ['VENDOR_OWNER' as UserRole], activeRole: 'VENDOR_OWNER' as UserRole,
-      isPhoneVerified: true, countryCode: 'GY',
+      isPhoneVerified: true, selfieCapturedAt: new Date(), countryCode: 'GY',
     },
   });
   const vo = await app.prisma.vendorOwner.create({ data: { userId: ownerUser.id } });
@@ -303,7 +303,7 @@ describe('Spec §I — acceptance conformance baseline', () => {
       data: {
         phone: nextHeavyPhone(), firstName: 'Acc', lastName: 'Dun',
         roles: ['VENDOR_OWNER' as UserRole], activeRole: 'VENDOR_OWNER' as UserRole,
-        isPhoneVerified: true, countryCode: 'GY',
+        isPhoneVerified: true, selfieCapturedAt: new Date(), countryCode: 'GY',
       },
     });
     const vo = await app.prisma.vendorOwner.create({ data: { userId: ownerUser.id } });

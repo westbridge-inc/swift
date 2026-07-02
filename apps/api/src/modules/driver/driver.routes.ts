@@ -114,6 +114,12 @@ export async function driverRoutes(app: FastifyInstance) {
   app.post('/go-online', { preHandler: [app.authenticate] }, async (request) => {
     const driver = await getDriver(request.user.userId);
 
+    // Universal signup selfie (master plan §3): riders see the driver's photo
+    // on acceptance, so a live profile photo is required before going online.
+    if (!driver.user.selfieCapturedAt) {
+      throw new AppError(403, 'SELFIE_REQUIRED', 'Add your profile photo before going online — riders see it when you accept.');
+    }
+
     // Live-operation gate (spec §3.4): the taxi checklist must be approved AND a
     // current, hire-class motor insurance confirmed before carrying passengers.
     // The legacy documentsVerified flag only grandfathers the base documents.

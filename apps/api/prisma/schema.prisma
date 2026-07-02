@@ -18,6 +18,10 @@ model User {
   firstName       String
   lastName        String
   avatar          String?
+  /// Set only by POST /auth/selfie (camera capture in-app). The mandatory
+  /// signup selfie (master plan §3) — null means the account has not completed
+  /// it and the transact gates (orders / rides / go-online) stay closed.
+  selfieCapturedAt DateTime?
   roles           UserRole[]
   activeRole      UserRole
   status          UserStatus @default(ACTIVE)

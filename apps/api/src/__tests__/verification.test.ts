@@ -74,6 +74,9 @@ async function signup(phone: string, role: 'CUSTOMER' | 'MOVER' | 'VENDOR') {
     role,
   });
   expect(res.statusCode).toBe(201);
+  // These fixtures model accounts past the signup selfie (its gate has its
+  // own coverage in selfie.test.ts) — go-online etc. must not trip on it here.
+  await app.prisma.user.update({ where: { phone }, data: { selfieCapturedAt: new Date() } });
   return res.json().data;
 }
 
@@ -114,7 +117,7 @@ beforeAll(async () => {
       lastName: 'Admin',
       roles: ['ADMIN'],
       activeRole: 'ADMIN',
-      isPhoneVerified: true,
+      isPhoneVerified: true, selfieCapturedAt: new Date(),
       admin: { create: { permissions: ['*'] } },
     },
   });

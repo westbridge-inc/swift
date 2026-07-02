@@ -43,7 +43,7 @@ async function makeCustomer(phone: string, referralCode?: string) {
       lastName: 'Tester',
       roles: ['CUSTOMER'],
       activeRole: 'CUSTOMER',
-      isPhoneVerified: true,
+      isPhoneVerified: true, selfieCapturedAt: new Date(),
       customer: { create: referralCode ? { referralCode } : {} },
     },
     include: { customer: true },

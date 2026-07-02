@@ -4,6 +4,7 @@ import { createNativeStackNavigator } from '@react-navigation/native-stack';
 import { useAuthStore } from '../stores/authStore';
 import { CountryPickerScreen } from '../screens/auth/CountryPickerScreen';
 import { RolePickerScreen } from '../screens/auth/RolePickerScreen';
+import { SelfieCaptureScreen } from '../screens/auth/SelfieCaptureScreen';
 import { AuthStack } from './AuthStack';
 import { CustomerStack } from './CustomerStack';
 import { MoverStack } from '../modules/mover/MoverStack';
@@ -28,13 +29,17 @@ function mainForIntent(intent?: string | null) {
 }
 
 export function RootNavigator() {
-  const { isAuthenticated, wantsAuth, intent, countryCode } = useAuthStore();
+  const { isAuthenticated, wantsAuth, intent, countryCode, user } = useAuthStore();
 
   // Earners (mover/vendor) must be signed in before their stack. Customers
   // browse freely and only authenticate when an action (checkout) asks via
   // promptLogin() → wantsAuth.
   const earner = intent === 'mover' || intent === 'vendor';
   const needsAuth = earner ? !isAuthenticated : wantsAuth && !isAuthenticated;
+  // Mandatory signup selfie (master plan §3): every signed-in account must
+  // carry a camera-captured profile photo before using the app. Guests browse
+  // untouched; the API enforces the same rule on orders/rides/go-online.
+  const needsSelfie = isAuthenticated && !!user && !user.selfieCapturedAt;
   const Main = mainForIntent(intent);
 
   return (
@@ -46,6 +51,8 @@ export function RootNavigator() {
           <Stack.Screen name="RolePicker" component={RolePickerScreen} />
         ) : needsAuth ? (
           <Stack.Screen name="Auth" component={AuthStack} />
+        ) : needsSelfie ? (
+          <Stack.Screen name="Selfie" component={SelfieCaptureScreen} />
         ) : (
           <Stack.Screen name="Main" component={Main} />
         )}

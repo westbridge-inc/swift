@@ -439,6 +439,23 @@ async function main() {
     });
   }
 
+  // Universal signup selfie (master plan §3): seeded QA accounts get a profile
+  // photo so demo flows don't dead-end at the selfie gate. Real signups capture
+  // theirs in-app with the camera. Deterministic per-phone portrait for dev.
+  const selfieless = await prisma.user.findMany({
+    where: { phone: { startsWith: '+592600' }, selfieCapturedAt: null },
+    select: { id: true, phone: true },
+  });
+  for (const u of selfieless) {
+    await prisma.user.update({
+      where: { id: u.id },
+      data: {
+        avatar: `https://i.pravatar.cc/300?u=${encodeURIComponent(u.phone)}`,
+        selfieCapturedAt: new Date(),
+      },
+    });
+  }
+
   // Georgetown zone
   await prisma.zone.upsert({
     where: { id: 'georgetown-central' },

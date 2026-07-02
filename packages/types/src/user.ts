@@ -22,6 +22,9 @@ export interface User {
   firstName: string;
   lastName: string;
   avatar?: string | null;
+  /** Set when the mandatory camera selfie has been captured (master plan §3).
+   *  Null/absent → the app shows the selfie gate before anything else. */
+  selfieCapturedAt?: string | null;
   roles: UserRole[];      // Changed from single role
   activeRole: UserRole;   // Currently active role
   status: UserStatus;

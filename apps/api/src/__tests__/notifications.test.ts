@@ -55,7 +55,7 @@ async function makeUser(roles: UserRole[], activeRole: UserRole) {
       lastName: `User${seq}`,
       roles,
       activeRole,
-      isPhoneVerified: true,
+      isPhoneVerified: true, selfieCapturedAt: new Date(),
       ...(roles.includes('CUSTOMER') && { customer: { create: {} } }),
     },
   });

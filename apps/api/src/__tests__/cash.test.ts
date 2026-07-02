@@ -69,7 +69,7 @@ async function makeUser(roles: UserRole[], activeRole: UserRole, opts: { created
       lastName: `User${seq}`,
       roles,
       activeRole,
-      isPhoneVerified: true,
+      isPhoneVerified: true, selfieCapturedAt: new Date(),
       trustLevel: opts.trustLevel ?? 'L1',
       ...(opts.createdDaysAgo && { createdAt: new Date(Date.now() - opts.createdDaysAgo * DAY) }),
       ...(roles.includes('CUSTOMER') && { customer: { create: {} } }),
