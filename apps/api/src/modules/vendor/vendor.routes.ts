@@ -157,6 +157,9 @@ const addStaffSchema = z.object({
 const updateStaffSchema = z.object({
   role: z.enum(['MANAGER', 'STAFF']),
 });
+const respondReviewSchema = z.object({
+  response: z.string().trim().min(1).max(1000),
+});
 
 const itemAvailabilitySchema = z.object({
   isAvailable: z.boolean().optional(),
@@ -1892,5 +1895,36 @@ export async function vendorRoutes(app: FastifyInstance) {
         distribution: scoreDistribution,
       },
     };
+  });
+
+  /** POST /reviews/:id/respond — the operator's public reply (§4.1). One reply
+   *  per review, editable; the reviewer is notified. */
+  app.post<{ Params: IdParam }>('/reviews/:id/respond', auth, async (request) => {
+    const { vendorId } = await requireVendor(app, request, 'MANAGER');
+    const { response } = respondReviewSchema.parse(request.body);
+
+    const rating = await app.prisma.rating.findUnique({ where: { id: request.params.id } });
+    if (!rating || rating.vendorId !== vendorId || rating.type !== 'CUSTOMER_TO_VENDOR') {
+      throw new NotFoundError('Review', request.params.id);
+    }
+
+    const isEdit = rating.response !== null;
+    const updated = await app.prisma.rating.update({
+      where: { id: request.params.id },
+      data: { response, respondedAt: new Date(), respondedBy: request.user.userId },
+    });
+
+    if (!isEdit) {
+      const vendor = await app.prisma.vendor.findUniqueOrThrow({ where: { id: vendorId }, select: { name: true } });
+      await notifications.send({
+        userId: rating.raterId,
+        type: 'RATING_RECEIVED',
+        title: `${vendor.name} replied to your review`,
+        body: response.length > 120 ? `${response.slice(0, 117)}…` : response,
+        data: { kind: 'review_response', ratingId: rating.id, vendorId },
+      });
+    }
+
+    return { success: true, data: updated };
   });
 }

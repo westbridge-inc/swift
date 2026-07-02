@@ -33,6 +33,8 @@ import {
   useCreatePromo,
   useUpdatePromo,
   useDeletePromo,
+  useMyStoreReviews,
+  useRespondReview,
   useVendorSubscription,
   useVendorAnalytics,
   useVendorRevenue,
@@ -1150,6 +1152,77 @@ function TopItemsCard({ items }: { items: any[] }) {
   );
 }
 
+/** Reviews with the operator reply box (§4.1 "see ratings, respond"). */
+function ReviewsCard() {
+  const reviewsQ = useMyStoreReviews();
+  const respond = useRespondReview();
+  const [drafts, setDrafts] = useState<Record<string, string>>({});
+  const [openId, setOpenId] = useState<string | null>(null);
+
+  const reviews: any[] = (reviewsQ.data?.data ?? []).slice(0, 10);
+  if (reviewsQ.isLoading) return <Skeleton className="mb-md h-32 w-full rounded-2xl" />;
+
+  return (
+    <Card className="mb-md">
+      <Text className="text-base font-semibold">Recent reviews</Text>
+      {reviews.length === 0 ? (
+        <Text className="mt-sm text-sm text-text-muted">Reviews land here after customers rate their orders.</Text>
+      ) : (
+        reviews.map((r) => (
+          <View key={r.id} className="mt-sm border-t border-border-subtle pt-sm">
+            <View className="flex-row items-center">
+              <Text className="flex-1 text-sm font-semibold">
+                {r.rater?.firstName ?? 'Customer'} · {'★'.repeat(Number(r.score) || 0)}
+              </Text>
+              <Text className="text-xs text-text-muted">
+                {new Date(r.createdAt).toLocaleDateString([], { month: 'short', day: 'numeric' })}
+              </Text>
+            </View>
+            {r.comment ? <Text className="mt-xs text-sm text-text-secondary">{r.comment}</Text> : null}
+
+            {r.response && openId !== r.id ? (
+              <View className="ml-md mt-xs rounded-xl bg-surface-subtle px-sm py-xs">
+                <Text className="text-xs text-text-secondary">You replied: {r.response}</Text>
+                <PressableScale onPress={() => { setOpenId(r.id); setDrafts((s) => ({ ...s, [r.id]: r.response })); }} hitSlop={6}>
+                  <Text className="mt-0.5 text-xs font-semibold text-brand-600">Edit reply</Text>
+                </PressableScale>
+              </View>
+            ) : openId === r.id ? (
+              <View className="mt-xs">
+                <Input
+                  value={drafts[r.id] ?? ''}
+                  onChangeText={(t: string) => setDrafts((s) => ({ ...s, [r.id]: t }))}
+                  placeholder="Write a public reply…"
+                  multiline
+                />
+                <View className="mt-xs flex-row" style={{ gap: 8 }}>
+                  <Button
+                    label="Post reply"
+                    className="flex-1"
+                    loading={respond.isPending}
+                    disabled={!(drafts[r.id] ?? '').trim()}
+                    onPress={() =>
+                      respond.mutate(
+                        { id: r.id, response: (drafts[r.id] ?? '').trim() },
+                        { onSuccess: () => setOpenId(null) },
+                      )
+                    }
+                  />
+                  <Button label="Cancel" variant="outline" className="flex-1" onPress={() => setOpenId(null)} />
+                </View>
+              </View>
+            ) : (
+              <PressableScale onPress={() => setOpenId(r.id)} hitSlop={6}>
+                <Text className="mt-xs text-xs font-semibold text-brand-600">Reply</Text>
+              </PressableScale>
+            )}
+          </View>
+        ))
+      )}
+    </Card>
+  );
+}
+
 function VendorInsightsScreen() {
   const q = useVendorAnalytics();
   const revenueQ = useVendorRevenue(14);
@@ -1190,6 +1263,7 @@ function VendorInsightsScreen() {
             ) : popularQ.data ? (
               <TopItemsCard items={popularQ.data} />
             ) : null}
+            <ReviewsCard />
             <Card className="mb-md">
               <View className="flex-row items-center justify-between">
                 <View className="flex-row items-center">

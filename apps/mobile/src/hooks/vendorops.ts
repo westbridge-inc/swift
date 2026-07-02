@@ -31,6 +31,26 @@ export function useVendorProfile() {
   return { owner, store, stores, myRole, isLoading: q.isLoading };
 }
 
+// ─── Reviews (manager+ replies) ──────────────────────────────────────────────
+
+export function useMyStoreReviews() {
+  return useQuery({
+    queryKey: ['vendor', 'reviews'],
+    queryFn: async () => {
+      const r = await vendorApi.reviews();
+      return r?.data as { data: any[]; summary: { averageRating: number; totalReviews: number } };
+    },
+  });
+}
+
+export function useRespondReview() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, response }: { id: string; response: string }) => unwrap(vendorApi.respondReview(id, response)),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['vendor', 'reviews'] }),
+  });
+}
+
 // ─── Promotions (manager+) ───────────────────────────────────────────────────
 
 export function useVendorPromos(enabled = true) {
