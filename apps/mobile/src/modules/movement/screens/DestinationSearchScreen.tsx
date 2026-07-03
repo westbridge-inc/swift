@@ -83,10 +83,10 @@ export function DestinationSearchScreen({ navigation, route }: any) {
 
       <PressableScale onPress={openPin}>
         <View className="mx-lg mb-sm flex-row items-center rounded-2xl border border-border-subtle bg-surface-base px-lg py-md">
-          <View className="h-9 w-9 items-center justify-center rounded-full bg-brand-50">
+          <View className="h-9 w-9 items-center justify-center rounded-full" style={{ backgroundColor: color.brand[50] }}>
             <MaterialCommunityIcons name="map-marker-radius-outline" size={18} color={color.brand[500]} />
           </View>
-          <Text className="ml-sm font-semibold text-brand-600">Set location on map</Text>
+          <Text className="ml-sm font-semibold" style={{ color: color.brand[600] }}>Set location on map</Text>
         </View>
       </PressableScale>
 

@@ -82,7 +82,7 @@ export function DocumentUploadCard({
 
   return (
     <Pressable disabled={approved || upload.isPending} onPress={pick}>
-      <Card className={isNext && !status ? 'mb-sm flex-row items-center border-brand-500' : 'mb-sm flex-row items-center'}>
+      <Card style={isNext && !status ? { borderColor: color.brand[500] } : undefined} className={isNext && !status ? 'mb-sm flex-row items-center' : 'mb-sm flex-row items-center'}>
         <View className="h-11 w-11 items-center justify-center rounded-full" style={{ backgroundColor: color.surface.subtle }}>
           <MaterialCommunityIcons
             name={approved ? 'check-decagram' : docIcon(docType)}

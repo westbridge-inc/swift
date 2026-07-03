@@ -176,8 +176,8 @@ function JobCard({ job, navigation }: { job: any; navigation: any }) {
       </View>
 
       {job.status === 'QUOTED' && job.quoteAmount != null ? (
-        <View className="mt-sm rounded-2xl bg-brand-50 px-md py-sm">
-          <Text className="text-base font-bold text-brand-700">Quote: {money(job.quoteAmount)}</Text>
+        <View className="mt-sm rounded-2xl px-md py-sm" style={{ backgroundColor: color.brand[50] }}>
+          <Text className="text-base font-bold" style={{ color: color.brand[700] }}>Quote: {money(job.quoteAmount)}</Text>
           <Text className="text-xs text-text-secondary">Cash on completion — accept by booking a time.</Text>
         </View>
       ) : null}

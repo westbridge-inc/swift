@@ -53,7 +53,7 @@ export function LocationPickerScreen({ navigation }: any) {
         <PressableScale onPress={() => navigation?.navigate?.('AddAddress')}>
           <Card className="flex-row items-center">
             <Feather name="plus-circle" size={20} color={color.brand[500]} />
-            <Text className="ml-sm flex-1 text-base font-semibold text-brand-600">Add a new address</Text>
+            <Text className="ml-sm flex-1 text-base font-semibold" style={{ color: color.brand[600] }}>Add a new address</Text>
           </Card>
         </PressableScale>
       </View>

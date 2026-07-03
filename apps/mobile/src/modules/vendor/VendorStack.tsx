@@ -64,9 +64,9 @@ const TYPES = [
 
 function BizValuePill({ icon, label }: { icon: keyof typeof MaterialCommunityIcons.glyphMap; label: string }) {
   return (
-    <View className="flex-row items-center rounded-full bg-brand-50 px-3 py-1.5">
+    <View className="flex-row items-center rounded-full px-3 py-1.5" style={{ backgroundColor: color.brand[50] }}>
       <MaterialCommunityIcons name={icon} size={14} color={color.brand[600]} />
-      <Text className="ml-1.5 text-xs font-bold text-brand-700">{label}</Text>
+      <Text className="ml-1.5 text-xs font-bold" style={{ color: color.brand[700] }}>{label}</Text>
     </View>
   );
 }
@@ -77,9 +77,10 @@ function BizTypeTile({ t, active, onPress }: { t: (typeof TYPES)[number]; active
       <View
         className={
           active
-            ? 'items-center rounded-2xl border-2 border-brand-500 bg-brand-50 py-md'
+            ? 'items-center rounded-2xl border-2 py-md'
             : 'items-center rounded-2xl border border-border-subtle bg-surface-base py-md'
         }
+        style={active ? { borderColor: color.brand[500], backgroundColor: color.brand[50] } : undefined}
       >
         <View
           className="mb-1 h-10 w-10 items-center justify-center rounded-full"
@@ -87,7 +88,7 @@ function BizTypeTile({ t, active, onPress }: { t: (typeof TYPES)[number]; active
         >
           <MaterialCommunityIcons name={t.icon} size={20} color={active ? '#fff' : color.text.secondary} />
         </View>
-        <Text className={active ? 'text-xs font-bold text-brand-700' : 'text-xs font-bold text-text-primary'} numberOfLines={1}>
+        <Text style={active ? { color: color.brand[700] } : undefined} className={active ? 'text-xs font-bold' : 'text-xs font-bold text-text-primary'} numberOfLines={1}>
           {t.label}
         </Text>
       </View>
@@ -230,21 +231,21 @@ function formatSlot(iso?: string) {
   return `${days[d.getDay()]} ${d.getDate()} ${months[d.getMonth()]} · ${h}:${String(m).padStart(2, '0')} ${ampm}`;
 }
 
-const ORDER_PILL: Record<string, { label: string; bg: string; fg: string }> = {
-  PENDING: { label: 'New', bg: 'bg-brand-500', fg: 'text-white' },
-  PLACED: { label: 'New', bg: 'bg-brand-500', fg: 'text-white' },
-  ACCEPTED: { label: 'Accepted', bg: 'bg-brand-50', fg: 'text-brand-600' },
-  CONFIRMED: { label: 'Accepted', bg: 'bg-brand-50', fg: 'text-brand-600' },
-  PREPARING: { label: 'Preparing', bg: 'bg-surface-subtle', fg: 'text-text-secondary' },
-  READY: { label: 'Ready', bg: 'bg-success/10', fg: 'text-success' },
+const ORDER_PILL: Record<string, { label: string; bg?: object; fg?: object; bgClass?: string; fgClass?: string }> = {
+  PENDING: { label: 'New', bg: { backgroundColor: color.brand[500] }, fg: { color: '#fff' } },
+  PLACED: { label: 'New', bg: { backgroundColor: color.brand[500] }, fg: { color: '#fff' } },
+  ACCEPTED: { label: 'Accepted', bg: { backgroundColor: color.brand[50] }, fg: { color: color.brand[600] } },
+  CONFIRMED: { label: 'Accepted', bg: { backgroundColor: color.brand[50] }, fg: { color: color.brand[600] } },
+  PREPARING: { label: 'Preparing', bgClass: 'bg-surface-subtle', fgClass: 'text-text-secondary' },
+  READY: { label: 'Ready', bgClass: 'bg-success/10', fgClass: 'text-success' },
 };
 
 function StatusPill({ status }: { status: string }) {
   const s = (status || '').toUpperCase();
-  const cfg = ORDER_PILL[s] ?? { label: s.replace(/_/g, ' ').toLowerCase(), bg: 'bg-surface-subtle', fg: 'text-text-secondary' };
+  const cfg = ORDER_PILL[s] ?? { label: s.replace(/_/g, ' ').toLowerCase(), bgClass: 'bg-surface-subtle', fgClass: 'text-text-secondary' };
   return (
-    <View className={`self-start rounded-full px-3 py-1 ${cfg.bg}`}>
-      <Text className={`text-xs font-semibold ${cfg.fg}`}>{cfg.label}</Text>
+    <View className={`self-start rounded-full px-3 py-1 ${cfg.bgClass ?? ''}`} style={cfg.bg}>
+      <Text className={`text-xs font-semibold ${cfg.fgClass ?? ''}`} style={cfg.fg}>{cfg.label}</Text>
     </View>
   );
 }
@@ -284,12 +285,12 @@ function VendorOrderCard({
           {isPickup ? (
             <View className="flex-row items-center rounded-full bg-surface-subtle px-2 py-0.5">
               <MaterialCommunityIcons name="bag-personal-outline" size={12} color={color.brand[500]} />
-              <Text className="ml-1 text-xs font-semibold text-brand-600">Takeaway</Text>
+              <Text className="ml-1 text-xs font-semibold" style={{ color: color.brand[600] }}>Takeaway</Text>
             </View>
           ) : isAppt ? (
             <View className="flex-row items-center rounded-full bg-surface-subtle px-2 py-0.5">
               <MaterialCommunityIcons name="calendar-clock" size={12} color={color.brand[500]} />
-              <Text className="ml-1 text-xs font-semibold text-brand-600">Appointment</Text>
+              <Text className="ml-1 text-xs font-semibold" style={{ color: color.brand[600] }}>Appointment</Text>
             </View>
           ) : null}
         </View>
@@ -298,7 +299,7 @@ function VendorOrderCard({
       {showStore && order.vendor?.name ? (
         <View className="mt-xs flex-row items-center">
           <MaterialCommunityIcons name="storefront-outline" size={12} color={color.brand[500]} />
-          <Text className="ml-1 text-xs font-bold text-brand-600" numberOfLines={1}>{order.vendor.name}</Text>
+          <Text className="ml-1 text-xs font-bold" style={{ color: color.brand[600] }} numberOfLines={1}>{order.vendor.name}</Text>
         </View>
       ) : null}
       <View className="mt-xs flex-row items-center">
@@ -324,7 +325,7 @@ function VendorOrderCard({
         <View className="mt-sm flex-row items-center">
           <MaterialCommunityIcons name="form-textbox-password" size={13} color={color.text.muted} />
           <Text className="ml-1 text-sm text-text-secondary">Pickup code </Text>
-          <Text className="text-sm font-bold text-brand-600">{order.pickupCode}</Text>
+          <Text className="text-sm font-bold" style={{ color: color.brand[600] }}>{order.pickupCode}</Text>
         </View>
       ) : !isPickup && order.deliveryAddress ? (
         <View className="mt-sm flex-row items-center">
@@ -393,7 +394,7 @@ function VendorOps({ store, navigation }: any) {
                 <PressableScale
                   key={s.id}
                   onPress={() => switchStore(s.id)}
-                  className={active ? 'rounded-full bg-brand-500 px-lg py-sm' : 'rounded-full border border-border-subtle bg-surface-base px-lg py-sm'}
+                  style={active ? { backgroundColor: color.brand[500] } : undefined} className={active ? 'rounded-full px-lg py-sm' : 'rounded-full border border-border-subtle bg-surface-base px-lg py-sm'}
                 >
                   <Text className={active ? 'text-sm font-semibold text-white' : 'text-sm font-semibold text-text-secondary'} numberOfLines={1}>
                     {s.name}
@@ -543,7 +544,7 @@ function SubHeader({
       </Heading>
       {action ? (
         <PressableScale onPress={action.onPress} disabled={action.disabled} hitSlop={8}>
-          <Text className={action.disabled ? 'text-base text-text-muted' : 'text-base font-semibold text-brand-600'}>
+          <Text style={action.disabled ? undefined : { color: color.brand[600] }} className={action.disabled ? 'text-base text-text-muted' : 'text-base font-semibold'}>
             {action.label}
           </Text>
         </PressableScale>
@@ -746,7 +747,7 @@ function ModifiersSection({ item }: { item: any }) {
             <PressableScale
               onPress={() => submitOption(g.id)}
               disabled={addOption.isPending}
-              className="h-10 w-10 items-center justify-center rounded-full bg-brand-500"
+              className="h-10 w-10 items-center justify-center rounded-full" style={{ backgroundColor: color.brand[500] }}
             >
               <Feather name="plus" size={18} color="#fff" />
             </PressableScale>
@@ -951,7 +952,7 @@ function VendorItemEditorScreen({ navigation, route }: any) {
         </PressableScale>
         {previewUri ? (
           <PressableScale onPress={pickPhoto} className="mb-md items-center" hitSlop={6} disabled={uploadImage.isPending}>
-            <Text className="text-sm font-semibold text-brand-600">{uploadImage.isPending ? 'Uploading…' : 'Change photo'}</Text>
+            <Text className="text-sm font-semibold" style={{ color: color.brand[600] }}>{uploadImage.isPending ? 'Uploading…' : 'Change photo'}</Text>
           </PressableScale>
         ) : null}
 
@@ -980,7 +981,7 @@ function VendorItemEditorScreen({ navigation, route }: any) {
                   <PressableScale
                     key={i}
                     onPress={() => setDays((p) => (on ? p.filter((x) => x !== i) : [...p, i]))}
-                    className={on ? 'rounded-full bg-brand-500 px-md py-sm' : 'rounded-full border border-border-subtle bg-surface-subtle px-md py-sm'}
+                    style={on ? { backgroundColor: color.brand[500] } : undefined} className={on ? 'rounded-full px-md py-sm' : 'rounded-full border border-border-subtle bg-surface-subtle px-md py-sm'}
                   >
                     <Text className={on ? 'text-xs font-bold text-white' : 'text-xs font-bold text-text-secondary'}>{d}</Text>
                   </PressableScale>
@@ -1109,8 +1110,8 @@ function RevenueChart({ daily, totals }: { daily: Array<{ date: string; revenue:
             {daily.map((d) => (
               <View
                 key={d.date}
-                className={d.revenue > 0 ? 'flex-1 rounded-t-sm bg-brand-500' : 'flex-1 rounded-t-sm bg-surface-subtle'}
-                style={{ height: Math.max(3, Math.round((d.revenue / max) * CHART_HEIGHT)) }}
+                className={d.revenue > 0 ? 'flex-1 rounded-t-sm' : 'flex-1 rounded-t-sm bg-surface-subtle'}
+                style={[{ height: Math.max(3, Math.round((d.revenue / max) * CHART_HEIGHT)) }, d.revenue > 0 ? { backgroundColor: color.brand[500] } : null]}
               />
             ))}
           </View>
@@ -1183,8 +1184,8 @@ function BusyHoursCard() {
             {hours.map((h) => (
               <View
                 key={h.hour}
-                className={h.orders > 0 ? 'flex-1 rounded-t-sm bg-brand-500' : 'flex-1 rounded-t-sm bg-surface-subtle'}
-                style={{ height: Math.max(3, Math.round((h.orders / max) * 64)) }}
+                className={h.orders > 0 ? 'flex-1 rounded-t-sm' : 'flex-1 rounded-t-sm bg-surface-subtle'}
+                style={[{ height: Math.max(3, Math.round((h.orders / max) * 64)) }, h.orders > 0 ? { backgroundColor: color.brand[500] } : null]}
               />
             ))}
           </View>
@@ -1233,7 +1234,7 @@ function ReviewsCard() {
               <View className="ml-md mt-xs rounded-xl bg-surface-subtle px-sm py-xs">
                 <Text className="text-xs text-text-secondary">You replied: {r.response}</Text>
                 <PressableScale onPress={() => { setOpenId(r.id); setDrafts((s) => ({ ...s, [r.id]: r.response })); }} hitSlop={6}>
-                  <Text className="mt-0.5 text-xs font-semibold text-brand-600">Edit reply</Text>
+                  <Text className="mt-0.5 text-xs font-semibold" style={{ color: color.brand[600] }}>Edit reply</Text>
                 </PressableScale>
               </View>
             ) : openId === r.id ? (
@@ -1262,7 +1263,7 @@ function ReviewsCard() {
               </View>
             ) : (
               <PressableScale onPress={() => setOpenId(r.id)} hitSlop={6}>
-                <Text className="mt-xs text-xs font-semibold text-brand-600">Reply</Text>
+                <Text className="mt-xs text-xs font-semibold" style={{ color: color.brand[600] }}>Reply</Text>
               </PressableScale>
             )}
           </View>
@@ -1368,7 +1369,7 @@ function VendorAccountScreen() {
       <ScrollView className="flex-1" contentContainerStyle={{ paddingHorizontal: 16, paddingBottom: 32 }} showsVerticalScrollIndicator={false}>
         <SettingsGroup>
           <View className="flex-row items-center px-md py-md">
-            <View className="h-14 w-14 items-center justify-center rounded-full bg-brand-500">
+            <View className="h-14 w-14 items-center justify-center rounded-full 0" style={{ backgroundColor: color.brand[50] }}>
               <MaterialCommunityIcons name="storefront" size={26} color="#fff" />
             </View>
             <View className="ml-md flex-1">

@@ -23,7 +23,7 @@ function GuestAccount() {
         <Heading size="2xl">Account</Heading>
       </View>
       <View className="flex-1 items-center justify-center px-2xl">
-        <View className="h-16 w-16 items-center justify-center rounded-full bg-brand-50">
+        <View className="h-16 w-16 items-center justify-center rounded-full" style={{ backgroundColor: color.brand[50] }}>
           <MaterialCommunityIcons name="account-circle-outline" size={34} color={color.brand[500]} />
         </View>
         <Heading size="xl" className="mt-lg text-center">Sign in to Swift</Heading>
@@ -78,7 +78,7 @@ function SignedInAccount({ navigation }: any) {
                 contentFit="cover"
               />
             ) : (
-              <View className="h-14 w-14 items-center justify-center rounded-full bg-brand-500">
+              <View className="h-14 w-14 items-center justify-center rounded-full 0" style={{ backgroundColor: color.brand[50] }}>
                 <Text className="text-lg font-bold text-white">{initials}</Text>
               </View>
             )}

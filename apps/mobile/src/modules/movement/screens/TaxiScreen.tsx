@@ -5,7 +5,7 @@ import MapView, { Marker, PROVIDER_DEFAULT, Polyline } from 'react-native-maps';
 import BottomSheet, { BottomSheetView, BottomSheetScrollView } from '@gorhom/bottom-sheet';
 import { color } from '@swift/ui';
 import { Feather, MaterialCommunityIcons } from '@expo/vector-icons';
-import { Text, Heading, Card, Button, Spinner, PressableScale, choiceSurface, elevation } from '../../../components/ui';
+import { Text, Heading, Card, Button, Spinner, PressableScale, choiceSurface, choiceSurfaceStyle, elevation } from '../../../components/ui';
 import { useActiveRide, useRideEstimate, useRequestRide, useCancelRide } from '../../../hooks';
 import { useLocationStore } from '../../../stores/locationStore';
 import { GEORGETOWN } from '../../../hooks/useDeviceLocation';
@@ -247,7 +247,7 @@ function TierRow({
   const meta = TIER_META[tier.rideClass];
   return (
     <PressableScale onPress={onPress}>
-      <View className={`mb-sm flex-row items-center rounded-2xl border px-lg py-md ${choiceSurface(selected)}`}>
+      <View className={`mb-sm flex-row items-center rounded-2xl border px-lg py-md ${choiceSurface(selected)}`} style={choiceSurfaceStyle(selected)}>
         <MaterialCommunityIcons name={meta.icon} size={26} color={selected ? '#fff' : color.text.primary} />
         <View className="ml-md flex-1">
           <Text className={`text-base font-bold ${selected ? 'text-white' : 'text-text-primary'}`}>
@@ -302,7 +302,7 @@ function ActiveRide({ navigation, ride, cancelRide }: any) {
           {ride.ridePin ? (
             <View className="mt-sm flex-row items-center">
               <Text className="text-sm text-text-secondary">PIN </Text>
-              <Text className="text-lg font-semibold text-brand-600">{ride.ridePin}</Text>
+              <Text className="text-lg font-semibold" style={{ color: color.brand[600] }}>{ride.ridePin}</Text>
               <Text className="ml-sm text-xs text-text-muted">show to your driver</Text>
             </View>
           ) : null}
@@ -337,7 +337,7 @@ function ActiveRide({ navigation, ride, cancelRide }: any) {
                   <Button variant="outline" className="px-lg" onPress={() => Linking.openURL(`tel:${d.user.phone}`).catch(() => {})}>
                     <View className="flex-row items-center">
                       <Feather name="phone" size={15} color={color.brand[500]} />
-                      <Text className="ml-sm font-body font-semibold text-brand-500">Call</Text>
+                      <Text className="ml-sm font-body font-semibold" style={{ color: color.brand[500] }}>Call</Text>
                     </View>
                   </Button>
                 ) : null}

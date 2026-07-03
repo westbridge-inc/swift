@@ -27,7 +27,7 @@ function Header({ navigation }: any) {
       </PressableScale>
       <Text className="ml-md flex-1 text-base font-bold">Services</Text>
       <PressableScale onPress={() => navigation?.navigate?.('ServiceJobs')} hitSlop={10}>
-        <Text className="text-sm font-semibold text-brand-600">My jobs</Text>
+        <Text className="text-sm font-semibold" style={{ color: color.brand[600] }}>My jobs</Text>
       </PressableScale>
     </View>
   );
@@ -90,9 +90,10 @@ export function ServicesScreen({ navigation }: any) {
                   }}
                   className={
                     active
-                      ? 'rounded-full border border-brand-500 bg-brand-500 px-lg py-sm'
+                      ? 'rounded-full border px-lg py-sm'
                       : 'rounded-full border border-border-subtle bg-surface-base px-lg py-sm'
                   }
+                  style={active ? { backgroundColor: color.brand[500], borderColor: color.brand[500] } : undefined}
                 >
                   <Text className={active ? 'text-sm font-semibold text-white' : 'text-sm font-semibold text-text-secondary'}>
                     {t}
@@ -103,10 +104,10 @@ export function ServicesScreen({ navigation }: any) {
           </View>
 
           {sent ? (
-            <Card className="mt-lg bg-brand-50">
+            <Card className="mt-lg" style={{ backgroundColor: color.brand[50] }}>
               <View className="flex-row items-center">
                 <Feather name="check-circle" size={16} color={color.success} />
-                <Text className="ml-sm font-semibold text-brand-700">Request sent</Text>
+                <Text className="ml-sm font-semibold" style={{ color: color.brand[700] }}>Request sent</Text>
               </View>
               <Text className="mt-xs text-sm text-text-secondary">
                 The quote lands in My jobs — accept it there and pick a time. Pay cash on completion.
@@ -116,9 +117,9 @@ export function ServicesScreen({ navigation }: any) {
           ) : null}
 
           {trade && data?.guidance ? (
-            <View className="mt-lg flex-row items-start rounded-2xl bg-brand-50 px-lg py-md">
+            <View className="mt-lg flex-row items-start rounded-2xl px-lg py-md" style={{ backgroundColor: color.brand[50] }}>
               <MaterialCommunityIcons name="shield-check" size={20} color={color.brand[600]} />
-              <Text className="ml-sm flex-1 text-sm text-brand-700">{data.guidance}</Text>
+              <Text className="ml-sm flex-1 text-sm" style={{ color: color.brand[700] }}>{data.guidance}</Text>
             </View>
           ) : null}
 
@@ -143,7 +144,7 @@ export function ServicesScreen({ navigation }: any) {
               {providers.map((p) => {
                 const selected = p.id === selectedProviderId;
                 return (
-                  <Card key={p.id} className={selected ? 'mb-md border-brand-500' : 'mb-md'}>
+                  <Card key={p.id} style={selected ? { borderColor: color.brand[500] } : undefined} className="mb-md">
                     <View className="flex-row items-start justify-between">
                       <View className="flex-1 pr-md">
                         <View className="flex-row items-center">
@@ -163,10 +164,11 @@ export function ServicesScreen({ navigation }: any) {
                       <PressableScale
                         onPress={() => setSelectedProviderId(selected ? undefined : p.id)}
                         className={
-                          selected ? 'rounded-full bg-brand-500 px-lg py-sm' : 'rounded-full border border-brand-500 px-lg py-sm'
+                          selected ? 'rounded-full px-lg py-sm' : 'rounded-full border px-lg py-sm'
                         }
+                        style={selected ? { backgroundColor: color.brand[500] } : { borderColor: color.brand[500] }}
                       >
-                        <Text className={selected ? 'text-sm font-semibold text-white' : 'text-sm font-semibold text-brand-500'}>
+                        <Text style={selected ? undefined : { color: color.brand[500] }} className={selected ? 'text-sm font-semibold text-white' : 'text-sm font-semibold'}>
                           {selected ? 'Selected' : 'Request'}
                         </Text>
                       </PressableScale>

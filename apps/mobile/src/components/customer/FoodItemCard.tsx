@@ -1,3 +1,4 @@
+import { color } from '@swift/ui';
 import { memo } from 'react';
 import { View } from 'react-native';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
@@ -40,9 +41,9 @@ export const FoodItemCard = memo(function FoodItemCard({
               {item.vendorName}
             </Text>
           ) : null}
-          <Text className="mt-1.5 text-[15px] font-extrabold text-brand-600">{money(item.price)}</Text>
+          <Text className="mt-1.5 text-[15px] font-extrabold" style={{ color: color.brand[600] }}>{money(item.price)}</Text>
         </View>
-        <View className="h-9 w-9 items-center justify-center rounded-full bg-brand-500" style={elevation.card}>
+        <View className="h-9 w-9 items-center justify-center rounded-full" style={[elevation.card, { backgroundColor: color.brand[500] }]}>
           <MaterialCommunityIcons name="plus" size={20} color="#fff" />
         </View>
       </View>

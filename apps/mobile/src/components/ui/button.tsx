@@ -21,20 +21,28 @@ export function Button({ className, textClassName, variant = 'solid', label, chi
   // disabled button goes neutral grey (never a washed-out tint of the brand red).
   const inactive = disabled && !loading;
   const solid = variant === 'solid';
+  // Brand fills are inline style: class-based brand colors silently render
+  // BLACK at runtime (NativeWind class materialization — sim-verified), and a
+  // CTA is too load-bearing to risk.
   const variantClass = solid
-    ? (inactive ? 'bg-border-strong' : 'bg-brand-500 active:bg-brand-600')
-    : (inactive ? 'border border-border-subtle bg-white' : 'border border-brand-500 bg-white active:bg-brand-50');
-  const textColor = solid ? 'text-white' : (inactive ? 'text-text-muted' : 'text-brand-500');
+    ? (inactive ? 'bg-border-strong' : '')
+    : (inactive ? 'border border-border-subtle bg-white' : 'border bg-white');
+  const variantStyle = solid
+    ? (inactive ? undefined : { backgroundColor: color.brand[500] })
+    : (inactive ? undefined : { borderColor: color.brand[500] });
+  const textColor = solid ? 'text-white' : (inactive ? 'text-text-muted' : '');
+  const textStyle = !solid && !inactive ? { color: color.brand[500] } : undefined;
   return (
     <PressableScale
       disabled={isDisabled}
       className={cn('flex-row items-center justify-center rounded-full px-5 py-3.5', variantClass, className)}
+      style={variantStyle}
       {...props}
     >
       {loading ? (
         <ActivityIndicator color={variant === 'solid' ? '#fff' : color.brand[500]} />
       ) : label ? (
-        <RNText className={cn('font-body text-base font-semibold', textColor, textClassName)}>{label}</RNText>
+        <RNText className={cn('font-body text-base font-semibold', textColor, textClassName)} style={textStyle}>{label}</RNText>
       ) : (
         children
       )}

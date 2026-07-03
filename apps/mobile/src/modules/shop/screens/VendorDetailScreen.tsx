@@ -56,9 +56,9 @@ const MenuItemRow = memo(function MenuItemRow({ item, onOpen, kind }: { item: an
           {item.description ? (
             <Text className="mt-xs text-sm text-text-secondary" numberOfLines={2}>{item.description}</Text>
           ) : null}
-          <Text className="mt-sm text-sm font-extrabold text-brand-600">{money(item.customerPrice ?? item.basePrice)}</Text>
+          <Text className="mt-sm text-sm font-extrabold" style={{ color: color.brand[600] }}>{money(item.customerPrice ?? item.basePrice)}</Text>
           {customizable && !unavailable ? (
-            <Text className="mt-xs text-xs font-medium text-brand-600">Customizable</Text>
+            <Text className="mt-xs text-xs font-medium" style={{ color: color.brand[600] }}>Customizable</Text>
           ) : null}
         </View>
         <View style={{ width: 96, height: 96 }}>
@@ -124,10 +124,10 @@ function VendorHeader({ vendor, onReviews }: { vendor: any; onReviews?: () => vo
         ) : null}
         {/* Live promotions (§4.2) — use the code at checkout */}
         {(vendor.promos ?? []).map((p: any) => (
-          <View key={p.code} className="mt-sm flex-row items-center rounded-2xl bg-brand-50 px-md py-sm">
+          <View key={p.code} className="mt-sm flex-row items-center rounded-2xl px-md py-sm" style={{ backgroundColor: color.brand[50] }}>
             <MaterialCommunityIcons name="tag" size={16} color={color.brand[600]} />
             <View className="ml-sm flex-1">
-              <Text className="text-sm font-semibold text-brand-700">
+              <Text className="text-sm font-semibold" style={{ color: color.brand[700] }}>
                 {p.code} — {p.discountType === 'PERCENTAGE' ? `${p.discountValue}% off` : `${money(p.discountValue)} off`}
                 {p.minOrderAmount ? ` over ${money(p.minOrderAmount)}` : ''}
               </Text>
@@ -144,7 +144,7 @@ function VendorHeader({ vendor, onReviews }: { vendor: any; onReviews?: () => vo
             <Text className="ml-1 text-sm text-text-muted">· {vendor.totalRatings ? `${vendor.totalRatings} reviews` : 'No reviews yet'}</Text>
           </View>
           <View className="flex-row items-center">
-            <Text className="text-sm font-semibold text-brand-600">See all</Text>
+            <Text className="text-sm font-semibold" style={{ color: color.brand[600] }}>See all</Text>
             <Feather name="chevron-right" size={16} color={color.brand[600]} />
           </View>
         </View>

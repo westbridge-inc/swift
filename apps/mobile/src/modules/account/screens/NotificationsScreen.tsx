@@ -32,7 +32,7 @@ export function NotificationsScreen({ navigation }: any) {
           keyExtractor={(n: any) => String(n.id)}
           renderItem={({ item }: { item: any }) => (
             <View className="px-lg">
-              <Card className={item.isRead ? 'mb-sm' : 'mb-sm border-brand-500'}>
+              <Card style={item.isRead ? undefined : { borderColor: color.brand[500] }} className="mb-sm">
                 <View className="flex-row items-center">
                   <Text className="flex-1 pr-sm text-base font-semibold" numberOfLines={1}>{item.title}</Text>
                   <Text className="text-xs text-text-muted">{timeAgo(item.createdAt)}</Text>

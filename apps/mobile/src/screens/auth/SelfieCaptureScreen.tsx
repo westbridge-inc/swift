@@ -61,10 +61,11 @@ export function SelfieCaptureScreen() {
 
   const frame = (
     <View
-      className="self-center overflow-hidden rounded-full border-4 border-brand-500"
+      className="self-center overflow-hidden rounded-full border-4"
       style={{
         width: FRAME,
         height: FRAME,
+        borderColor: color.brand[500],
         // the ring glows brand-red — this is a Swift moment, not a form field
         shadowColor: color.brand[500],
         shadowOpacity: 0.35,

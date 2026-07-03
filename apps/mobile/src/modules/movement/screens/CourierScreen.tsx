@@ -74,10 +74,10 @@ function OptionTile({
       <View
         className={
           active
-            ? 'items-center rounded-2xl border-2 border-brand-500 bg-brand-50 px-1 py-md'
+            ? 'items-center rounded-2xl border-2 px-1 py-md'
             : 'items-center rounded-2xl border border-border-subtle bg-surface-base px-1 py-md'
         }
-        style={active ? undefined : elevation.card}
+        style={active ? { borderColor: color.brand[500], backgroundColor: color.brand[50] } : elevation.card}
       >
         <View
           className="mb-1 h-9 w-9 items-center justify-center rounded-full"
@@ -85,7 +85,7 @@ function OptionTile({
         >
           <MaterialCommunityIcons name={icon} size={18} color={active ? '#fff' : color.text.secondary} />
         </View>
-        <Text className={active ? 'text-xs font-bold text-brand-700' : 'text-xs font-bold text-text-primary'} numberOfLines={1}>
+        <Text style={active ? { color: color.brand[700] } : undefined} className={active ? 'text-xs font-bold' : 'text-xs font-bold text-text-primary'} numberOfLines={1}>
           {label}
         </Text>
         <Text className="text-[10px] text-text-muted" numberOfLines={1}>{hint}</Text>
@@ -242,7 +242,7 @@ export function CourierScreen({ navigation }: any) {
                 <View className="flex-row items-center justify-between">
                   <View>
                     <Text className="text-xs font-semibold uppercase tracking-wider text-text-muted">Delivery fee</Text>
-                    <Text className="mt-0.5 font-display text-3xl font-extrabold text-brand-600">{money(estimate.totalFee)}</Text>
+                    <Text className="mt-0.5 font-display text-3xl font-extrabold" style={{ color: color.brand[600] }}>{money(estimate.totalFee)}</Text>
                   </View>
                   <View className="items-end">
                     <Text className="text-sm font-semibold text-text-secondary">{estimate.distanceKm} km · ~{estimate.estimatedMinutes} min</Text>
@@ -276,7 +276,7 @@ export function CourierScreen({ navigation }: any) {
               {recent.slice(0, 5).map((o: any) => (
                 <PressableScale key={o.id} onPress={() => navigation?.navigate?.('OrderTracking', { id: o.id })}>
                   <View className="mb-sm flex-row items-center rounded-2xl bg-surface-base p-md" style={elevation.card}>
-                    <View className="h-9 w-9 items-center justify-center rounded-full bg-brand-50">
+                    <View className="h-9 w-9 items-center justify-center rounded-full" style={{ backgroundColor: color.brand[50] }}>
                       <MaterialCommunityIcons name="package-variant-closed" size={16} color={color.brand[500]} />
                     </View>
                     <View className="ml-sm flex-1">

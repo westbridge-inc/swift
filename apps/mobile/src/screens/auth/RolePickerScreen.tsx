@@ -50,8 +50,8 @@ export function RolePickerScreen() {
                   <View className="flex-row items-center" style={{ gap: 8 }}>
                     <Text className="text-base font-bold text-text-primary">{r.title}</Text>
                     {r.tag ? (
-                      <View className="rounded-full bg-brand-50 px-2 py-0.5">
-                        <Text className="text-[10px] font-bold text-brand-700">{r.tag}</Text>
+                      <View className="rounded-full px-2 py-0.5" style={{ backgroundColor: color.brand[50] }}>
+                        <Text className="text-[10px] font-bold" style={{ color: color.brand[700] }}>{r.tag}</Text>
                       </View>
                     ) : null}
                   </View>
