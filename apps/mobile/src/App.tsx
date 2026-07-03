@@ -16,6 +16,7 @@ import {
 import { GluestackUIProvider } from './components/ui';
 import { RootNavigator } from './navigation/RootNavigator';
 import { initSecureStorage } from './lib/storage';
+import { track } from './lib/analytics';
 import { useAuthStore } from './stores/authStore';
 import { useLocationStore } from './stores/locationStore';
 import { useDeviceLocation } from './hooks/useDeviceLocation';
@@ -55,7 +56,10 @@ export default function App() {
     initSecureStorage()
       .then(() => Promise.all([useAuthStore.persist.rehydrate(), useLocationStore.persist.rehydrate()]))
       .catch((e) => console.warn('[secure-storage] init failed', e))
-      .finally(() => setStorageReady(true));
+      .finally(() => {
+        setStorageReady(true);
+        track('app_opened', {});
+      });
   }, []);
 
   const ready = fontsLoaded && storageReady;

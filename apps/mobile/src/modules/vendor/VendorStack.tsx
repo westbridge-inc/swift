@@ -45,6 +45,7 @@ import {
   type DayHours,
 } from '../../hooks/vendorops';
 import { useAuthStore } from '../../stores/authStore';
+import { track } from '../../lib/analytics';
 import { useLocationStore } from '../../stores/locationStore';
 import { useStoreSwitcher } from '../../stores/storeSwitcher';
 import { money } from '../../lib/money';
@@ -496,6 +497,10 @@ function VendorOps({ store, navigation }: any) {
 
 function VendorRoot() {
   const { store, isLoading } = useVendorProfile();
+
+  useEffect(() => {
+    if (store) track('vendor_suite_opened', { vendorType: String(store.vendorType ?? '') });
+  }, [store?.id]); // eslint-disable-line react-hooks/exhaustive-deps
 
   if (isLoading) {
     return (

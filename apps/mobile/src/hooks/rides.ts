@@ -1,3 +1,4 @@
+import { track } from '../lib/analytics';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { rideApi, type RideClass, type TieredEstimate } from '../services/api';
 
@@ -36,7 +37,10 @@ export function useRequestRide() {
       passengerCount?: number;
       rideClass?: RideClass;
     }) => unwrap(rideApi.request(data)),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['rides', 'active'] }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['rides', 'active'] });
+      track('ride_requested', {});
+    },
   });
 }
 

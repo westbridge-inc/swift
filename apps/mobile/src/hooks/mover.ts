@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import * as Location from 'expo-location';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { riderApi, driverApi } from '../services/api';
+import { track } from '../lib/analytics';
 import { connectSocket, getSocket } from '../services/socket';
 
 async function unwrap<T = any>(p: Promise<any>): Promise<T> {
@@ -91,7 +92,13 @@ export function useActiveJob(kind: MoverKind | null) {
 }
 export function useGoOnline(kind: MoverKind) {
   const qc = useQueryClient();
-  return useMutation({ mutationFn: () => unwrap(svc(kind).goOnline()), onSuccess: () => qc.invalidateQueries({ queryKey: ['mover'] }) });
+  return useMutation({
+    mutationFn: () => unwrap(svc(kind).goOnline()),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['mover'] });
+      track('go_online', { kind });
+    },
+  });
 }
 export function useGoOffline(kind: MoverKind) {
   const qc = useQueryClient();
