@@ -37,9 +37,9 @@ export const CATEGORY_IMAGES: Record<string, string> = {
   food: 'https://images.unsplash.com/photo-1504674900247-0877df9cc836?w=400&q=80',
   grocery: 'https://images.unsplash.com/photo-1542838132-92c53300491e?w=400&q=80',
   taxi: 'https://images.unsplash.com/photo-1502877338535-766e1452684a?w=400&q=80',
-  courier: 'https://images.unsplash.com/photo-1604335399105-a0c585fd81a1?w=400&q=80',
+  courier: 'https://images.unsplash.com/photo-1526367790999-0150786686a2?w=400&q=80',
   shops: 'https://images.unsplash.com/photo-1441986300917-64674bd600d8?w=400&q=80',
-  services: 'https://images.unsplash.com/photo-1581244277943-fe4a9c777189?w=400&q=80',
+  services: 'https://images.unsplash.com/photo-1621905251189-08b45d6a269e?w=400&q=80',
 };
 
 /** Imagery for a Home category tile; falls back to a food photo if unmapped. */

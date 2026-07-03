@@ -4,6 +4,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { CameraView, useCameraPermissions } from 'expo-camera';
 import { Feather } from '@expo/vector-icons';
 import { color } from '@swift/ui';
+import { SwiftMark } from '../../components/SwiftLogo';
 import { authApi } from '../../services/api';
 import { useAuthStore } from '../../stores/authStore';
 import { Text, Heading, Button, PressableScale } from '../../components/ui';
@@ -61,7 +62,16 @@ export function SelfieCaptureScreen() {
   const frame = (
     <View
       className="self-center overflow-hidden rounded-full border-4 border-brand-500"
-      style={{ width: FRAME, height: FRAME }}
+      style={{
+        width: FRAME,
+        height: FRAME,
+        // the ring glows brand-red — this is a Swift moment, not a form field
+        shadowColor: color.brand[500],
+        shadowOpacity: 0.35,
+        shadowRadius: 24,
+        shadowOffset: { width: 0, height: 8 },
+        elevation: 8,
+      }}
     >
       {photoUri ? (
         <Image source={{ uri: photoUri }} style={{ width: FRAME, height: FRAME }} />
@@ -84,6 +94,7 @@ export function SelfieCaptureScreen() {
       </View>
 
       <View className="flex-1 justify-center px-lg">
+        <View className="mb-sm items-center"><SwiftMark size={34} /></View>
         <Heading size="xl" className="text-center">Add your photo</Heading>
         <Text className="mt-xs mb-xl text-center text-text-secondary">
           Take a quick selfie — it becomes your profile photo so people know

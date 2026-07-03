@@ -3,8 +3,9 @@ import { View, ScrollView } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Feather, MaterialCommunityIcons } from '@expo/vector-icons';
 import { color } from '@swift/ui';
-import { Text, Heading, Card, Button, Spinner, PressableScale, ChoiceChip } from '../../../components/ui';
+import { Text, Heading, Card, Button, Spinner, PressableScale, ChoiceChip, Input, Badge } from '../../../components/ui';
 import { useCart, useAddresses, useSetCartAddress, useSetCartTip, usePlaceOrder, useItemSlots } from '../../../hooks';
+import { customerApi } from '../../../services/api';
 import { money } from '../../../lib/money';
 import { pickOrderId } from '../../../lib/order';
 
@@ -28,6 +29,30 @@ export function CheckoutScreen({ navigation }: any) {
 
   const [selectedId, setSelectedId] = useState<string | undefined>(undefined);
   const [selectedTip, setSelectedTip] = useState(0);
+  // Promo codes (vendor + platform) — validated before ordering; the server
+  // recomputes the authoritative discount at checkout.
+  const [promoInput, setPromoInput] = useState('');
+  const [promo, setPromo] = useState<{ code: string; discount: number; description?: string } | null>(null);
+  const [promoBusy, setPromoBusy] = useState(false);
+  const [promoError, setPromoError] = useState<string | null>(null);
+
+  const applyPromo = async () => {
+    const code = promoInput.trim().toUpperCase();
+    if (!code || promoBusy) return;
+    setPromoBusy(true);
+    setPromoError(null);
+    try {
+      const res = await customerApi.validatePromo(code);
+      const data = res.data?.data ?? {};
+      setPromo({ code, discount: Number(data.estimatedDiscount ?? 0), description: data.description });
+      setPromoInput('');
+    } catch (e: any) {
+      setPromo(null);
+      setPromoError(e?.response?.data?.error?.message ?? e?.response?.data?.message ?? 'That code didn’t work');
+    } finally {
+      setPromoBusy(false);
+    }
+  };
   const [mode, setMode] = useState<'DELIVERY' | 'PICKUP'>('DELIVERY');
   const [selectedDate, setSelectedDate] = useState(() => new Date().toISOString().slice(0, 10));
   const [selectedSlot, setSelectedSlot] = useState<string | undefined>(undefined);
@@ -51,9 +76,10 @@ export function CheckoutScreen({ navigation }: any) {
   const canPickup = !isService && !!vendorId;
   const isPickup = mode === 'PICKUP' && canPickup;
   // Pickup carries no delivery fee, so the preview total drops it client-side too.
+  const promoDiscount = promo?.discount ?? 0;
   const displayTotal = isPickup
-    ? Number(cart?.subtotalCustomer ?? 0) + selectedTip - Number(cart?.discount ?? 0)
-    : Number(cart?.totalAmount ?? 0);
+    ? Number(cart?.subtotalCustomer ?? 0) + selectedTip - Number(cart?.discount ?? 0) - promoDiscount
+    : Number(cart?.totalAmount ?? 0) - promoDiscount;
 
   useEffect(() => {
     // Persist the auto-selected default into the server cart so checkout uses
@@ -86,6 +112,7 @@ export function CheckoutScreen({ navigation }: any) {
       {
         paymentMethod: 'CASH',
         tipAmount: selectedTip,
+        ...(promo ? { promoCode: promo.code } : {}),
         ...(isPickup && vendorId ? { fulfillmentSelections: { [vendorId]: 'PICKUP' as const } } : {}),
         ...(isAppointment && apptItem && selectedSlot ? { appointments: [{ itemId: apptItem.itemId, slotStart: selectedSlot }] } : {}),
       },
@@ -253,12 +280,42 @@ export function CheckoutScreen({ navigation }: any) {
             ))}
           </View>
 
+          {/* Promo code */}
+          <Heading size="lg" className="mb-sm mt-lg">Promo code</Heading>
+          <Card>
+            {promo ? (
+              <View className="flex-row items-center">
+                <Badge label={promo.code} tone="success" />
+                <Text className="ml-sm flex-1 text-sm text-text-secondary" numberOfLines={1}>
+                  {promo.description ?? 'Applied'} · saves {money(promo.discount)}
+                </Text>
+                <PressableScale onPress={() => setPromo(null)} hitSlop={8}>
+                  <Feather name="x" size={16} color={color.text.muted} />
+                </PressableScale>
+              </View>
+            ) : (
+              <View className="flex-row items-center" style={{ gap: 8 }}>
+                <Input
+                  containerClassName="flex-1"
+                  value={promoInput}
+                  onChangeText={setPromoInput}
+                  placeholder="Have a code? (e.g. SAVE20)"
+                  autoCapitalize="characters"
+                  autoCorrect={false}
+                />
+                <Button label="Apply" variant="outline" loading={promoBusy} disabled={!promoInput.trim()} onPress={applyPromo} />
+              </View>
+            )}
+            {promoError ? <Text className="mt-sm text-sm text-error">{promoError}</Text> : null}
+          </Card>
+
           {/* Summary */}
           <Card className="mt-lg">
             <SummaryRow label="Subtotal" value={money(cart.subtotalCustomer)} />
             {!isPickup && cart.deliveryFee ? <SummaryRow label="Delivery" value={money(cart.deliveryFee)} /> : null}
             {cart.tipAmount ? <SummaryRow label="Tip" value={money(cart.tipAmount)} /> : null}
             {cart.discount ? <SummaryRow label="Discount" value={`− ${money(cart.discount)}`} /> : null}
+            {promo ? <SummaryRow label={`Promo ${promo.code}`} value={`− ${money(promo.discount)}`} /> : null}
             <View className="mt-sm border-t border-border-subtle pt-sm">
               <SummaryRow label="Total" value={money(displayTotal)} bold />
             </View>

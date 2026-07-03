@@ -106,6 +106,7 @@ export const customerApi = {
   addFavorite: (vendorId: string) => api.post(`/customer/favorites/${vendorId}`, {}),
   removeFavorite: (vendorId: string) => api.delete(`/customer/favorites/${vendorId}`),
   getOrders: () => api.get('/customer/orders'),
+  validatePromo: (code: string) => api.post('/customer/promo/validate', { code }),
   getOrder: (id: string) => api.get(`/customer/orders/${id}`),
   // Order placement = checkout; it reads the server-side cart. (The old POST
   // /customer/orders had no backend route.)
