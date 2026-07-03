@@ -1,5 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { servicesApi } from '../services/api';
+import { track } from '../lib/analytics';
 
 async function unwrap<T = any>(p: Promise<any>): Promise<T> {
   const r = await p;
@@ -23,7 +24,10 @@ export function useRequestJob() {
   return useMutation({
     mutationFn: (data: { providerId: string; description: string; photos?: string[] }) =>
       unwrap(servicesApi.requestJob(data)),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['services', 'jobs'] }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['services', 'jobs'] });
+      track('service_job_requested', {});
+    },
   });
 }
 

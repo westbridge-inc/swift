@@ -1,4 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { track } from '../lib/analytics';
 import { customerApi, type AddressInput } from '../services/api';
 
 /**
@@ -122,9 +123,10 @@ export function usePlaceOrder<T = any>() {
   const qc = useQueryClient();
   return useMutation<T, unknown, any>({
     mutationFn: (payload: any) => unwrap<T>(customerApi.placeOrder(payload)),
-    onSuccess: () => {
+    onSuccess: (data: any) => {
       qc.invalidateQueries({ queryKey: customerKeys.orders });
       qc.invalidateQueries({ queryKey: ['customer', 'cart'] });
+      track('order_placed', { orders: data?.orders?.length ?? 1 });
     },
   });
 }
