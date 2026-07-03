@@ -1,4 +1,4 @@
-import { haversineDistance } from '../../utils/distance';
+import { haversineDistance, estimateDrivingDistance } from '../../utils/distance';
 
 // ---------------------------------------------------------------------------
 // MapsProvider — hard rule 4: swappable interface. Dispatch only ever asks for
@@ -10,9 +10,19 @@ export interface LatLng {
   lng: number;
 }
 
+export interface RouteEstimate {
+  /** Driving distance in km. */
+  km: number;
+  /** Real driving minutes when the engine knows them; null = caller applies
+   *  its own deterministic speed model (keeps haversine mode bit-identical). */
+  minutes: number | null;
+}
+
 export interface MapsProvider {
   /** Estimated riding minutes from origin to each destination, same order. */
   etaMinutes(origin: LatLng, destinations: LatLng[]): Promise<number[]>;
+  /** Point-to-point driving route — feeds fares, courier fees, delivery fees. */
+  routeKm(origin: LatLng, dest: LatLng): Promise<RouteEstimate>;
 }
 
 /** Straight-line estimate at urban moped speed — deterministic for tests. */
@@ -25,6 +35,11 @@ export class HaversineMapsProvider implements MapsProvider {
       const km = haversineDistance(origin.lat, origin.lng, dest.lat, dest.lng) * HaversineMapsProvider.ROAD_WIGGLE;
       return (km / HaversineMapsProvider.SPEED_KMH) * 60;
     });
+  }
+
+  async routeKm(origin: LatLng, dest: LatLng): Promise<RouteEstimate> {
+    // Exactly the historical estimate — callers keep their own speed models.
+    return { km: estimateDrivingDistance(origin.lat, origin.lng, dest.lat, dest.lng), minutes: null };
   }
 }
 
@@ -59,6 +74,13 @@ export class GoogleMapsProvider implements MapsProvider {
       out.push(...(await this.etaChunk(origin, destinations.slice(i, i + MAX_DESTINATIONS))));
     }
     return out;
+  }
+
+  /** Routes fall back to the deterministic estimate: Distance Matrix is paid
+   *  per call, and fares/fees must stay cheap + predictable. OSRM is the
+   *  self-hosted engine for real-road routing. */
+  async routeKm(origin: LatLng, dest: LatLng): Promise<RouteEstimate> {
+    return this.fallback.routeKm(origin, dest);
   }
 
   private async etaChunk(origin: LatLng, chunk: LatLng[]): Promise<number[]> {
@@ -100,6 +122,11 @@ interface OsrmTableResponse {
   durations?: Array<Array<number | null>>;
 }
 
+interface OsrmRouteResponse {
+  code?: string;
+  routes?: Array<{ distance?: number; duration?: number }>;
+}
+
 /**
  * Real driving ETAs via an OSRM `table` service — self-hostable and free per call
  * (the routing engine the business spec calls for). Same hot-path discipline as
@@ -133,6 +160,30 @@ export class OsrmMapsProvider implements MapsProvider {
       });
     } catch {
       return fallback; // down, slow, or blocked — dispatch carries on
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  /** Real road distance + duration via the OSRM `route` service. Falls back to
+   *  the deterministic estimate on any failure — fares are never blocked. */
+  async routeKm(origin: LatLng, dest: LatLng): Promise<RouteEstimate> {
+    const url = `${this.baseUrl.replace(/\/$/, '')}/route/v1/driving/${origin.lng},${origin.lat};${dest.lng},${dest.lat}?overview=false`;
+
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), OSRM_TIMEOUT_MS);
+    try {
+      const res = await fetch(url, { signal: controller.signal });
+      if (!res.ok) return this.fallback.routeKm(origin, dest);
+      const data = (await res.json()) as OsrmRouteResponse;
+      const route = data.code === 'Ok' ? data.routes?.[0] : undefined;
+      if (!route || route.distance == null) return this.fallback.routeKm(origin, dest);
+      return {
+        km: route.distance / 1000,
+        minutes: route.duration != null ? route.duration / 60 : null,
+      };
+    } catch {
+      return this.fallback.routeKm(origin, dest);
     } finally {
       clearTimeout(timer);
     }
