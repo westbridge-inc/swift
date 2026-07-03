@@ -7,10 +7,10 @@ import { useQuery } from '@tanstack/react-query';
 import { customerApi } from '../../../services/api';
 import { useLocationStore } from '../../../stores/locationStore';
 import { color } from '@swift/ui';
-import { Text, Heading, Skeleton, List, Image, PressableScale, EmptyState, enter, staggerDelay, elevation } from '../../../components/ui';
+import { Text, Heading, Skeleton, List, Image, PressableScale, EmptyState, Scrim, enter, staggerDelay, elevation } from '../../../components/ui';
 import { FoodItemCard } from '../../../components/customer/FoodItemCard';
 import { SwiftMark } from '../../../components/SwiftLogo';
-import { vendorImage } from '../../../lib/images';
+import { vendorImage, categoryImage, DARK_BLURHASH } from '../../../lib/images';
 
 // Swift is the *honest local marketplace* — no commission, no markup, no customer
 // fees. Vendors & riders keep 100% and pay a flat weekly fee; customers pay the
@@ -25,13 +25,15 @@ const VERTICALS: Vertical[] = [
   { key: 'shops', label: 'Shops', icon: 'shopping-outline', route: 'Search' },
   { key: 'services', label: 'Services', icon: 'tools', route: 'Services' },
 ];
-const VERTICAL_TINT: Record<string, { bg: string; fg: string }> = {
-  food: { bg: '#FFE9EB', fg: '#E8192C' },
-  grocery: { bg: '#E7F7EE', fg: '#12A150' },
-  taxi: { bg: '#FFF3DC', fg: '#E8842B' },
-  courier: { bg: '#E7EEFF', fg: '#3B66E0' },
-  shops: { bg: '#F1EAFE', fg: '#7C3AED' },
-  services: { bg: '#E1F5F4', fg: '#0D9488' },
+// Photo-led tiles: the six doors of the app, each on real imagery (richer >
+// cleaner). Hero pair = the daily drivers; the rest run compact underneath.
+const TILE_SUB: Record<string, string> = {
+  food: 'Hot & local',
+  grocery: 'Market fresh',
+  taxi: 'Rides',
+  courier: 'Send it',
+  shops: 'Retail',
+  services: 'Pros',
 };
 
 const ratingOf = (v: any) => Number(v.averageRating ?? v.rating ?? 0);
@@ -58,50 +60,32 @@ function StarPill({ value }: { value: string }) {
   );
 }
 
-// ── Vertical launcher tile ───────────────────────────────────────────────────
-function VerticalTile({ v, onPress }: { v: Vertical; onPress?: () => void }) {
-  const tint = VERTICAL_TINT[v.key] ?? { bg: '#F2F2F4', fg: color.brand[500] };
+// ── Photo category tiles ─────────────────────────────────────────────────────
+function PhotoTile({ v, hero, onPress }: { v: Vertical; hero?: boolean; onPress?: () => void }) {
+  const height = hero ? 116 : 86;
   return (
     <PressableScale strong onPress={onPress}>
-      <View className="items-center rounded-3xl bg-surface-base py-4" style={elevation.card}>
-        <View className="mb-2 h-[52px] w-[52px] items-center justify-center rounded-2xl" style={{ backgroundColor: tint.bg }}>
-          <MaterialCommunityIcons name={v.icon} size={26} color={tint.fg} />
+      <View className="overflow-hidden rounded-3xl" style={elevation.raised}>
+        <Image
+          source={{ uri: categoryImage(v.key) }}
+          placeholder={{ blurhash: DARK_BLURHASH }}
+          style={{ width: '100%', height }}
+          contentFit="cover"
+          transition={200}
+        />
+        <Scrim height={hero ? 76 : 60} from="rgba(10,11,15,0)" to="rgba(10,11,15,0.82)" />
+        <View className="absolute inset-x-0 bottom-0 px-2.5 pb-2.5">
+          <Text className={hero ? 'font-display text-lg font-extrabold text-white' : 'font-display text-[12px] font-bold text-white'} style={hero ? undefined : { letterSpacing: -0.3 }} numberOfLines={1}>
+            {v.label}
+          </Text>
+          {hero ? (
+            <Text className="text-xs font-semibold text-white" style={{ opacity: 0.85 }} numberOfLines={1}>
+              {TILE_SUB[v.key]}
+            </Text>
+          ) : null}
         </View>
-        <Text className="text-[13px] font-bold text-text-primary" numberOfLines={1}>{v.label}</Text>
       </View>
     </PressableScale>
-  );
-}
-
-// ── The Swift promise — the business model AS the signature, not a discount ───
-function PromisePill({ icon, label }: { icon: keyof typeof MaterialCommunityIcons.glyphMap; label: string }) {
-  return (
-    <View className="flex-row items-center rounded-full bg-brand-50 px-3 py-1.5">
-      <MaterialCommunityIcons name={icon} size={14} color={color.brand[600]} />
-      <Text className="ml-1.5 text-xs font-bold text-brand-700">{label}</Text>
-    </View>
-  );
-}
-function PromiseBlock() {
-  return (
-    <View className="mx-lg mt-md overflow-hidden rounded-3xl bg-surface-base" style={elevation.card}>
-      {/* a faint swift in flight behind the promise */}
-      <View pointerEvents="none" style={{ position: 'absolute', right: -18, top: -14, opacity: 0.05, transform: [{ rotate: '-8deg' }] }}>
-        <SwiftMark size={132} tint={color.text.primary} accent={color.text.primary} />
-      </View>
-      <View className="flex-row items-center px-lg pt-lg">
-        <SwiftMark size={18} />
-        <Text className="ml-2 text-[11px] font-bold uppercase tracking-[2px] text-brand-600">Why Swift</Text>
-      </View>
-      <Text className="px-lg pt-sm font-display text-[22px] font-extrabold leading-7 text-text-primary">
-        You pay the vendor’s price.{'\n'}Nothing added — ever.
-      </Text>
-      <View className="flex-row flex-wrap px-lg pb-lg pt-md" style={{ gap: 8 }}>
-        <PromisePill icon="cash-remove" label="$0 platform fees" />
-        <PromisePill icon="hand-heart-outline" label="100% to the vendor" />
-        <PromisePill icon="cash" label="Cash on delivery" />
-      </View>
-    </View>
   );
 }
 
@@ -202,34 +186,41 @@ function SectionHeader({ title, action, onAction }: { title: string; action?: st
 }
 
 function HomeHeader({ navigation, address, activeOrder, popularItems, topRated, cuisines, selectedCuisine, onSelectCuisine }: any) {
+  const heroes = VERTICALS.slice(0, 2);
+  const rest = VERTICALS.slice(2);
   return (
     <View>
-      {/* Brand header */}
-      <View className="flex-row items-center px-lg pt-md">
-        <SwiftMark size={26} />
-        <Pressable className="ml-sm flex-1 flex-row items-center" onPress={() => navigation?.navigate?.('LocationPicker')}>
-          <MaterialCommunityIcons name="map-marker" size={16} color={color.brand[500]} />
-          <Text className="ml-0.5 text-sm font-bold text-text-primary" numberOfLines={1}>{address || 'Set location'}</Text>
-          <Feather name="chevron-down" size={15} color={color.text.secondary} />
-        </Pressable>
-        <Pressable onPress={() => navigation?.navigate?.('Notifications')} className="h-10 w-10 items-center justify-center rounded-full bg-surface-base" style={elevation.card}>
-          <Feather name="bell" size={18} color={color.text.primary} />
-        </Pressable>
-      </View>
+      {/* ── The Red Canopy — Swift's one sanctioned brand flood. The market-
+           stall awning over the white sheet: identity, greeting and the
+           no-fees promise live up here; everything below stays disciplined. */}
+      <View className="px-lg pt-md" style={[{ backgroundColor: color.brand[700], paddingBottom: 40, borderBottomLeftRadius: 28, borderBottomRightRadius: 28 }, elevation.raised]}>
+        <View className="flex-row items-center">
+          <SwiftMark size={26} tint="#FFFFFF" accent="#FFFFFF" />
+          <Pressable className="ml-sm flex-1 flex-row items-center" onPress={() => navigation?.navigate?.('LocationPicker')}>
+            <MaterialCommunityIcons name="map-marker" size={15} color="#fff" />
+            <Text className="ml-0.5 text-sm font-bold text-white" numberOfLines={1}>{address || 'Set location'}</Text>
+            <Feather name="chevron-down" size={15} color="rgba(255,255,255,0.8)" />
+          </Pressable>
+          <Pressable
+            onPress={() => navigation?.navigate?.('Notifications')}
+            className="h-10 w-10 items-center justify-center rounded-full"
+            style={{ backgroundColor: 'rgba(255,255,255,0.14)' }}
+          >
+            <Feather name="bell" size={18} color="#fff" />
+          </Pressable>
+        </View>
 
-      {/* Greeting + brand voice — the model, up front */}
-      <View className="px-lg pt-md">
-        <Heading size="2xl">{greeting()}</Heading>
-        <Text className="mt-1 text-[15px] leading-5 text-text-secondary">
-          Order anything in town. You pay the real price — <Text className="font-bold text-brand-600">never a fee</Text>.
+        <Text className="font-display font-extrabold text-white" style={{ marginTop: 12, fontSize: 26, lineHeight: 32 }}>{greeting()}</Text>
+        <Text className="text-white" style={{ marginTop: 4, fontSize: 14, lineHeight: 20, opacity: 0.85 }}>
+          Order anything in town — real prices, zero fees.
         </Text>
       </View>
 
-      {/* Search */}
+      {/* Search — a white pill breaking the canopy edge */}
       <Pressable
         onPress={() => navigation?.navigate?.('Search')}
-        className="mx-lg mb-xs mt-md flex-row items-center rounded-2xl bg-surface-base px-lg py-md"
-        style={elevation.card}
+        className="mx-lg flex-row items-center rounded-2xl bg-surface-base px-lg py-md"
+        style={[elevation.floating, { marginTop: -26 }]}
       >
         <Feather name="search" size={18} color={color.brand[500]} />
         <Text className="ml-sm text-text-muted">Search food, shops, services…</Text>
@@ -241,17 +232,21 @@ function HomeHeader({ navigation, address, activeOrder, popularItems, topRated, 
         </View>
       ) : null}
 
-      {/* Verticals */}
-      <View className="flex-row flex-wrap justify-between px-lg pt-md">
-        {VERTICALS.map((v, i) => (
-          <Animated.View key={v.key} entering={enter.fadeUp.delay(staggerDelay(i))} style={{ width: '31%', marginBottom: 12 }}>
-            <VerticalTile v={v} onPress={() => v.route && navigation?.navigate?.(v.route)} />
+      {/* Six doors — real imagery, hero pair first */}
+      <View className="flex-row px-lg pt-md" style={{ gap: 12 }}>
+        {heroes.map((v, i) => (
+          <Animated.View key={v.key} entering={enter.fadeUp.delay(staggerDelay(i))} style={{ flex: 1 }}>
+            <PhotoTile v={v} hero onPress={() => v.route && navigation?.navigate?.(v.route)} />
           </Animated.View>
         ))}
       </View>
-
-      {/* The promise — business model as signature */}
-      <PromiseBlock />
+      <View className="flex-row px-lg pt-3" style={{ gap: 10 }}>
+        {rest.map((v, i) => (
+          <Animated.View key={v.key} entering={enter.fadeUp.delay(staggerDelay(i + 2))} style={{ flex: 1 }}>
+            <PhotoTile v={v} onPress={() => v.route && navigation?.navigate?.(v.route)} />
+          </Animated.View>
+        ))}
+      </View>
 
       {/* Open near you — clean white photo cards */}
       {topRated.length > 0 ? (
@@ -319,8 +314,11 @@ export function HomeScreen({ navigation }: any) {
   );
 
   return (
-    <SafeAreaView style={{ flex: 1 }} edges={['top']} className="bg-surface-subtle">
-      <View style={{ flex: 1 }}>
+    <SafeAreaView style={{ flex: 1, backgroundColor: color.brand[700] }} edges={['top']}>
+      <View style={{ flex: 1 }} className="bg-surface-subtle">
+        {/* only visible through top overscroll: the opaque content container
+            covers it at rest, the gray wrapper covers the bottom */}
+        <View pointerEvents="none" className="absolute left-0 right-0 top-0 h-60" style={{ backgroundColor: color.brand[700] }} />
         <List
           data={vendors}
           keyExtractor={(v: any) => String(v.id)}
@@ -353,7 +351,7 @@ export function HomeScreen({ navigation }: any) {
               <EmptyState icon="storefront-outline" title="Nothing nearby yet" body="We’re adding vendors in your area — check back soon." />
             )
           }
-          contentContainerStyle={{ paddingBottom: 32 }}
+          contentContainerStyle={{ paddingBottom: 32, backgroundColor: color.surface.subtle }}
         />
       </View>
     </SafeAreaView>

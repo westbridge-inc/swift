@@ -1,13 +1,20 @@
-import { useId } from 'react';
 import { View, type ViewStyle } from 'react-native';
-import Svg, { Defs, LinearGradient, Stop, Rect } from 'react-native-svg';
 
 /**
  * A dark gradient scrim for photo cards — keeps white text/badges legible over
- * imagery without banding. True gradient (react-native-svg, already in the
- * native build), so no new native module / rebuild. Anchored to an edge of its
- * parent; size it with `height` (bottom) or pass `cover` for a full overlay.
+ * imagery. Implemented as stacked opacity slices (NO svg): react-native-svg
+ * LinearGradient url(#) refs render SOLID BLACK on the new architecture, which
+ * silently turned every scrim into a block. 12 slices with eased alpha read as
+ * a smooth gradient at card sizes. Anchored to the bottom edge; size with
+ * `height`, or pass `cover` for a full overlay.
  */
+const SLICES = 12;
+
+function alphaOf(rgba: string): number {
+  const m = rgba.match(/rgba?\([^,]+,[^,]+,[^,]+,?\s*([0-9.]+)?\)/);
+  return m?.[1] != null ? Number(m[1]) : 1;
+}
+
 export function Scrim({
   height = 96,
   from = 'rgba(0,0,0,0)',
@@ -21,23 +28,24 @@ export function Scrim({
   cover?: boolean;
   style?: ViewStyle;
 }) {
-  // Unique per instance — ids are scoped per <Svg> on native, but useId keeps it
-  // clean and future-proof.
-  const id = useId();
+  const a0 = alphaOf(from);
+  const a1 = alphaOf(to);
   const pos: ViewStyle = cover
     ? { position: 'absolute', left: 0, right: 0, top: 0, bottom: 0 }
     : { position: 'absolute', left: 0, right: 0, bottom: 0, height };
   return (
     <View pointerEvents="none" style={[pos, style]}>
-      <Svg width="100%" height="100%">
-        <Defs>
-          <LinearGradient id={id} x1="0" y1="0" x2="0" y2="1">
-            <Stop offset="0" stopColor={from} />
-            <Stop offset="1" stopColor={to} />
-          </LinearGradient>
-        </Defs>
-        <Rect x="0" y="0" width="100%" height="100%" fill={`url(#${id})`} />
-      </Svg>
+      {Array.from({ length: SLICES }, (_, i) => {
+        const t = (i + 1) / SLICES; // 0→1 top→bottom
+        const eased = t * t; // ease-in reads closer to a real photo scrim
+        const alpha = a0 + (a1 - a0) * eased;
+        return (
+          <View
+            key={i}
+            style={{ flex: 1, backgroundColor: `rgba(10,11,15,${alpha.toFixed(3)})` }}
+          />
+        );
+      })}
     </View>
   );
 }

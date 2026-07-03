@@ -110,7 +110,10 @@ export function TaxiScreen({ navigation }: any) {
 
   const selectedTier = estimate?.tiers.find((t) => t.rideClass === selectedClass);
   const canRequest = !!pickupPoint && !!dropoffPoint && !!selectedTier;
-  const errMsg = (requestRide.error as any)?.response?.data?.error?.message;
+  const errBody = (requestRide.error as any)?.response?.data;
+  const errMsg = errBody?.error?.message ?? errBody?.message;
+  // L2-before-first-ride (§5): the gate must open a door, never dead-end.
+  const needsL2 = (errBody?.error?.code ?? errBody?.code) === 'ID_VERIFICATION_REQUIRED';
 
   const onRequest = () => {
     if (!pickupPoint || !dropoffPoint || !dropoff || !pickup) return;
@@ -205,6 +208,14 @@ export function TaxiScreen({ navigation }: any) {
           )}
 
           {errMsg ? <Text className="mt-md text-center text-sm text-error">{errMsg}</Text> : null}
+          {needsL2 ? (
+            <Button
+              label="Verify your ID — takes a minute"
+              variant="outline"
+              className="mt-sm"
+              onPress={() => navigation?.navigate?.('IdentityVerification')}
+            />
+          ) : null}
 
           <Button className="mt-md" loading={requestRide.isPending} disabled={!canRequest} onPress={onRequest}>
             <Text className="font-body font-semibold text-white">

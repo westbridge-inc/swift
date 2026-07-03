@@ -12,7 +12,10 @@ const cameraPermission =
   'Swift uses the camera for your profile selfie and to photograph documents and deliveries.';
 
 const config: ExpoConfig = {
-  name: 'Swift',
+  // Native project/module name — 'Swift' itself is reserved by Apple's
+  // standard library, so the Xcode target needs a distinct name. What users
+  // see is CFBundleDisplayName below: 'Swift'.
+  name: 'SwiftGY',
   slug: 'swift',
   scheme: 'swift',
   version: '1.0.0',

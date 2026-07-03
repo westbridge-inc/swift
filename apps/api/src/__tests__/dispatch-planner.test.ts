@@ -83,6 +83,9 @@ describe('VroomDispatchPlanner', () => {
   });
 
   it('selection is config: greedy default, vroom needs VROOM_URL', () => {
+    // The dev .env may point at live local engines — pin a clean env here.
+    delete process.env['DISPATCH_PLANNER'];
+    delete process.env['VROOM_URL'];
     expect(getDispatchPlanner()).toBeInstanceOf(GreedyDispatchPlanner);
     process.env['DISPATCH_PLANNER'] = 'vroom';
     expect(() => getDispatchPlanner()).toThrow(/VROOM_URL/);

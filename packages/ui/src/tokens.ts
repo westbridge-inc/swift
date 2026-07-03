@@ -20,7 +20,8 @@ export const BRAND_REGION = 'GY' as const;
  * §Colour — one Swift identity: **red** (#E8192C) on white.
  * Every brand token — NativeWind `bg-brand-*` / `text-brand-*` classes AND
  * `color.brand[…]` read in JS — draws from this single ramp. Brand is an ACCENT,
- * never flooded. (Swift is one app; the earlier per-variant ink partner skin was
+ * never flooded — with ONE sanctioned exception: the Home masthead (the "Red
+ * Canopy") paints brand-500 as the app's signature moment. (Swift is one app; the earlier per-variant ink partner skin was
  * retired when the two apps collapsed into one.)
  */
 type BrandRamp = Record<50 | 100 | 200 | 300 | 400 | 500 | 600 | 700 | 800 | 900, string>;
