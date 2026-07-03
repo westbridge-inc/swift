@@ -250,6 +250,113 @@ export class GooglePlacesProvider implements PlacesProvider {
   }
 }
 
+
+// --- OSM stack: Photon (autocomplete) + Nominatim (reverse) -----------------
+// Self-hosted, no per-call cost (the build kit's discovery engines). Guyana's
+// OSM coverage is thin, so failures and empty results fall back to the
+// LocalPlacesProvider (zones + the user's saved addresses) — never a dead end;
+// the app additionally keeps its map-pin-drop path.
+const OSM_TIMEOUT_MS = 4000;
+
+interface PhotonResponse {
+  features?: Array<{
+    properties?: { name?: string; street?: string; housenumber?: string; city?: string; district?: string; state?: string };
+    geometry?: { coordinates?: [number, number] };
+  }>;
+}
+
+interface NominatimReverseResponse {
+  display_name?: string;
+}
+
+export class OsmPlacesProvider implements PlacesProvider {
+  private fallback: LocalPlacesProvider;
+
+  constructor(
+    prisma: PrismaClient,
+    private photonUrl: string,
+    private nominatimUrl?: string,
+  ) {
+    this.fallback = new LocalPlacesProvider(prisma);
+  }
+
+  private async getJson<T>(url: URL, headers?: Record<string, string>): Promise<T | null> {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), OSM_TIMEOUT_MS);
+    try {
+      const res = await fetch(url, { signal: controller.signal, headers });
+      if (!res.ok) return null;
+      return (await res.json()) as T;
+    } catch {
+      return null;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  async autocomplete(query: string, ctx?: PlacesQueryContext): Promise<PlaceSuggestion[]> {
+    if (query.trim().length === 0) return [];
+    const url = new URL(`${this.photonUrl.replace(/\/$/, '')}/api`);
+    url.searchParams.set('q', query);
+    url.searchParams.set('limit', String(MAX_SUGGESTIONS));
+    if (ctx?.near) {
+      url.searchParams.set('lat', String(ctx.near.lat));
+      url.searchParams.set('lon', String(ctx.near.lng));
+    }
+    const data = await this.getJson<PhotonResponse>(url);
+    const features = data?.features ?? [];
+    const suggestions: PlaceSuggestion[] = [];
+    for (const f of features) {
+      const [lng, lat] = f.geometry?.coordinates ?? [];
+      const p = f.properties ?? {};
+      const primary = p.name ?? [p.housenumber, p.street].filter(Boolean).join(' ');
+      if (lat == null || lng == null || !primary) continue;
+      const secondary = [p.district, p.city, p.state].filter(Boolean).join(', ') || undefined;
+      // The coordinate + label travel INSIDE the placeId, so details() needs
+      // no second round-trip (Photon has no details endpoint).
+      const label = [primary, secondary].filter(Boolean).join(', ');
+      suggestions.push({
+        placeId: `osm:${lat},${lng}:${Buffer.from(label).toString('base64url')}`,
+        primary,
+        secondary,
+      });
+    }
+    // Thin OSM coverage → fold in the local suggestions when OSM finds little.
+    if (suggestions.length < 3) {
+      const local = await this.fallback.autocomplete(query, ctx);
+      for (const l of local) {
+        if (suggestions.length >= MAX_SUGGESTIONS) break;
+        suggestions.push(l);
+      }
+    }
+    return suggestions.slice(0, MAX_SUGGESTIONS);
+  }
+
+  async details(placeId: string): Promise<PlaceDetail | null> {
+    if (!placeId.startsWith('osm:')) return this.fallback.details(placeId);
+    const [, coords, encoded] = placeId.split(':');
+    const [lat, lng] = (coords ?? '').split(',').map(Number);
+    if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null;
+    let label = 'Selected place';
+    try {
+      label = Buffer.from(encoded ?? '', 'base64url').toString('utf8') || label;
+    } catch {
+      // keep the default label
+    }
+    return { placeId, label, lat: lat!, lng: lng! };
+  }
+
+  async reverseGeocode(point: PlacePoint): Promise<string | null> {
+    if (!this.nominatimUrl) return this.fallback.reverseGeocode(point);
+    const url = new URL(`${this.nominatimUrl.replace(/\/$/, '')}/reverse`);
+    url.searchParams.set('lat', String(point.lat));
+    url.searchParams.set('lon', String(point.lng));
+    url.searchParams.set('format', 'jsonv2');
+    const data = await this.getJson<NominatimReverseResponse>(url, { 'user-agent': 'swift-gy/1.0' });
+    return data?.display_name ?? this.fallback.reverseGeocode(point);
+  }
+}
+
 /** Provider selection is config, not code. Defaults to local so CI needs no key. */
 export function getPlacesProvider(prisma: PrismaClient): PlacesProvider {
   const provider = process.env['PLACES_PROVIDER'] ?? 'local';
@@ -260,6 +367,11 @@ export function getPlacesProvider(prisma: PrismaClient): PlacesProvider {
       const key = process.env['GOOGLE_MAPS_API_KEY_BACKEND'];
       if (!key) throw new Error('GOOGLE_MAPS_API_KEY_BACKEND is required when PLACES_PROVIDER=google');
       return new GooglePlacesProvider(key);
+    }
+    case 'osm': {
+      const photonUrl = process.env['PHOTON_URL'];
+      if (!photonUrl) throw new Error('PHOTON_URL is required when PLACES_PROVIDER=osm');
+      return new OsmPlacesProvider(prisma, photonUrl, process.env['NOMINATIM_URL']);
     }
     default:
       throw new Error(`Unknown PLACES_PROVIDER: ${provider}`);

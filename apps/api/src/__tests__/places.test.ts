@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, vi, afterEach } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { nanoid } from 'nanoid';
 import { prismaPlugin } from '../plugins/prisma';
@@ -6,7 +6,7 @@ import { redisPlugin } from '../plugins/redis';
 import { authPlugin } from '../plugins/auth';
 import { placesRoutes } from '../modules/places/places.routes';
 import { registerErrorHandler } from '../middleware/error-handler';
-import { LocalPlacesProvider } from '../providers/places/places-provider';
+import { LocalPlacesProvider, OsmPlacesProvider } from '../providers/places/places-provider';
 
 // ---------------------------------------------------------------------------
 // Places — the "Where to?" search behind the PlacesProvider seam. Exercises the
@@ -145,5 +145,53 @@ describe('LocalPlacesProvider — reverse geocode', () => {
     const provider = new LocalPlacesProvider(app.prisma);
     const label = await provider.reverseGeocode({ lat: 6.81, lng: -58.155 });
     expect(label).toBe('Georgetown Central');
+  });
+});
+
+describe('OsmPlacesProvider — Photon search + Nominatim reverse (build-kit M)', () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  function mockFetch(status: number, body: unknown) {
+    return vi.fn(async () => ({ ok: status >= 200 && status < 300, status, json: async () => body }));
+  }
+
+  it('parses Photon features; the placeId round-trips through details with no second call', async () => {
+    const f = mockFetch(200, {
+      features: [
+        {
+          properties: { name: 'Giftland Mall', city: 'Georgetown', state: 'Demerara-Mahaica' },
+          geometry: { coordinates: [-58.1188, 6.8232] },
+        },
+      ],
+    });
+    vi.stubGlobal('fetch', f);
+    const provider = new OsmPlacesProvider(app.prisma, 'http://photon.test');
+    const suggestions = await provider.autocomplete('giftland', { near: { lat: 6.81, lng: -58.15 } });
+    expect(suggestions[0]!.primary).toBe('Giftland Mall');
+    expect(suggestions[0]!.secondary).toContain('Georgetown');
+
+    vi.unstubAllGlobals(); // details must NOT fetch
+    const detail = await provider.details(suggestions[0]!.placeId);
+    expect(detail).not.toBeNull();
+    expect(detail!.lat).toBeCloseTo(6.8232, 4);
+    expect(detail!.lng).toBeCloseTo(-58.1188, 4);
+    expect(detail!.label).toContain('Giftland Mall');
+  });
+
+  it('falls back to local zone/address suggestions when Photon is down (thin OSM coverage)', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => { throw new Error('ECONNREFUSED'); }));
+    const provider = new OsmPlacesProvider(app.prisma, 'http://photon.test');
+    const suggestions = await provider.autocomplete('georgetown');
+    const local = await new LocalPlacesProvider(app.prisma).autocomplete('georgetown');
+    expect(suggestions.map((s) => s.placeId)).toEqual(local.map((s) => s.placeId));
+  });
+
+  it('reverse geocodes via Nominatim and falls back to the zone label without it', async () => {
+    vi.stubGlobal('fetch', mockFetch(200, { display_name: 'Regent Road, Georgetown, Guyana' }));
+    const withNominatim = new OsmPlacesProvider(app.prisma, 'http://photon.test', 'http://nominatim.test');
+    expect(await withNominatim.reverseGeocode({ lat: 6.81, lng: -58.155 })).toBe('Regent Road, Georgetown, Guyana');
+
+    const withoutNominatim = new OsmPlacesProvider(app.prisma, 'http://photon.test');
+    expect(await withoutNominatim.reverseGeocode({ lat: 6.81, lng: -58.155 })).toBe('Georgetown Central');
   });
 });
