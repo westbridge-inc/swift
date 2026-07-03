@@ -88,78 +88,30 @@ export function createWorkers(ctx: JobContext) {
     { connection, concurrency: 5 },
   );
 
-  // RIDER ASSIGNMENT: find nearest available rider
+  // RIDER ASSIGNMENT: plan the whole outstanding batch per trigger — greedy by
+  // default; with DISPATCH_PLANNER=vroom the batch is solved globally (the
+  // build kit's dispatch brain), so simultaneous orders never race for the
+  // same nearest rider. Concurrency 1: one sweep at a time; CAS keeps any
+  // stragglers safe anyway.
   const riderAssignmentWorker = new Worker(
     QUEUE_NAMES.RIDER_ASSIGNMENT,
     async (job: Job) => {
       const { orderId, vendorLat, vendorLng, attempt = 1 } = job.data;
-      const order = await ctx.prisma.order.findUnique({ where: { id: orderId } });
-      if (!order || order.status !== 'READY_FOR_PICKUP' || order.riderId) return;
+      const { assignReadyRiders } = await import('./assign-riders');
 
-      // Find online, available, verified riders sorted by proximity
-      const riders = await ctx.prisma.rider.findMany({
-        where: {
-          isOnline: true,
-          isAvailable: true,
-          documentsVerified: true,
-          currentLat: { not: null },
-          currentLng: { not: null },
-        },
-        include: { user: { select: { id: true, firstName: true } } },
-      });
-
-      if (riders.length === 0) {
-        if (attempt < 6) {
-          // Retry in 30 seconds
-          const queue = new Queue(QUEUE_NAMES.RIDER_ASSIGNMENT, { connection });
-          await queue.add('assign-rider', { orderId, vendorLat, vendorLng, attempt: attempt + 1 }, { delay: 30000 });
-          await queue.close();
-        }
-        return;
+      const result = await assignReadyRiders({ prisma: ctx.prisma, io: ctx.io }, orderId);
+      if (result.assigned > 0) {
+        ctx.log.info({ trigger: orderId, assigned: result.assigned }, 'Rider auto-assignment sweep');
       }
 
-      // Sort by distance to vendor
-      const sorted = riders
-        .map((r) => {
-          const dLat = (r.currentLat! - vendorLat) * Math.PI / 180;
-          const dLng = (r.currentLng! - vendorLng) * Math.PI / 180;
-          const a = Math.sin(dLat / 2) ** 2 + Math.cos(r.currentLat! * Math.PI / 180) * Math.cos(vendorLat * Math.PI / 180) * Math.sin(dLng / 2) ** 2;
-          const dist = 6371 * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-          return { ...r, distance: dist };
-        })
-        .sort((a, b) => a.distance - b.distance);
-
-      const nearest = sorted[0];
-      if (!nearest || nearest.distance > 10) {
-        // No rider within 10km, retry
-        if (attempt < 6) {
-          const queue = new Queue(QUEUE_NAMES.RIDER_ASSIGNMENT, { connection });
-          await queue.add('assign-rider', { orderId, vendorLat, vendorLng, attempt: attempt + 1 }, { delay: 30000 });
-          await queue.close();
-        }
-        return;
+      if (!result.triggerAssigned && attempt < 6) {
+        // Nobody suitable yet — retry this order in 30 seconds, as before.
+        const queue = new Queue(QUEUE_NAMES.RIDER_ASSIGNMENT, { connection });
+        await queue.add('assign-rider', { orderId, vendorLat, vendorLng, attempt: attempt + 1 }, { delay: 30000 });
+        await queue.close();
       }
-
-      // Assign rider
-      await ctx.prisma.order.update({
-        where: { id: orderId },
-        data: { riderId: nearest.id, status: 'RIDER_ASSIGNED' },
-      });
-      await ctx.prisma.rider.update({
-        where: { id: nearest.id },
-        data: { isAvailable: false, currentOrderId: orderId },
-      });
-      await ctx.prisma.orderStatusLog.create({
-        data: { orderId, status: 'RIDER_ASSIGNED', changedBy: nearest.user.id, note: `Auto-assigned to ${nearest.user.firstName}` },
-      });
-
-      ctx.io.to(`order:${orderId}`).emit('order:status_changed', { orderId, status: 'RIDER_ASSIGNED', riderId: nearest.id });
-      // Notify rider
-      ctx.io.to(`user:${nearest.user.id}`).emit('delivery:assigned', { orderId, orderNumber: order.orderNumber });
-
-      ctx.log.info({ orderId, riderId: nearest.id, distance: nearest.distance.toFixed(1) }, 'Rider auto-assigned');
     },
-    { connection, concurrency: 3 },
+    { connection, concurrency: 1 },
   );
 
   // SUBSCRIPTION BILLING — idempotent BillingService, never wallets
