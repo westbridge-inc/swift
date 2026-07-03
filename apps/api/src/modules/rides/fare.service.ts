@@ -1,5 +1,5 @@
 import type { PrismaClient, RideClass } from '@prisma/client';
-import { estimateDrivingDistance } from '../../utils/distance';
+import { getMapsProvider, type MapsProvider } from '../../providers/maps/maps-provider';
 import { pointInPolygon, type GeoPoint } from '../../utils/geo';
 import { CountryConfigService } from '../country/country-config.service';
 
@@ -82,13 +82,19 @@ export interface FareEstimate {
 export class FareService {
   private countryConfig: CountryConfigService;
 
-  constructor(private prisma: PrismaClient) {
+  constructor(
+    private prisma: PrismaClient,
+    private maps: MapsProvider = getMapsProvider(),
+  ) {
     this.countryConfig = new CountryConfigService(prisma);
   }
 
   async estimate(pickup: GeoPoint, dropoff: GeoPoint, countryCode: string): Promise<FareEstimate> {
-    const distanceKm = estimateDrivingDistance(pickup.lat, pickup.lng, dropoff.lat, dropoff.lng);
-    const durationMin = Math.ceil((distanceKm / AVG_SPEED_KMH) * 60);
+    // Real road route when a routing engine (OSRM) is configured; the
+    // deterministic estimate otherwise — identical to the historical numbers.
+    const route = await this.maps.routeKm(pickup, dropoff);
+    const distanceKm = route.km;
+    const durationMin = Math.ceil(route.minutes ?? (distanceKm / AVG_SPEED_KMH) * 60);
 
     const config = await this.countryConfig.getByCode(countryCode);
 

@@ -2,7 +2,7 @@ import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { nanoid } from 'nanoid';
 import { estimateCourierFee, type PackageSize, type DeliverySpeed } from './courier.service';
-import { estimateDrivingDistance } from '../../utils/distance';
+import { getMapsProvider } from '../../providers/maps/maps-provider';
 import { makeDispatchService } from '../dispatch/dispatch.service';
 import { orderingRestriction } from '../cash/cash-rules.service';
 import { generateOrderNumber } from '../../utils/markup';
@@ -46,13 +46,16 @@ const orderSchema = z.object({
 const cancelSchema = z.object({ reason: z.string().max(500).optional() });
 const proofSchema = z.object({ proofPhotoUrl: z.string().min(5).max(2048) });
 
-function quote(
+const courierMaps = getMapsProvider();
+
+async function quote(
   pickup: { lat: number; lng: number },
   dropoff: { lat: number; lng: number },
   size: PackageSize,
   speed: DeliverySpeed,
 ) {
-  const distanceKm = estimateDrivingDistance(pickup.lat, pickup.lng, dropoff.lat, dropoff.lng);
+  // Real road km when OSRM is configured; deterministic estimate otherwise.
+  const { km: distanceKm } = await courierMaps.routeKm(pickup, dropoff);
   return { distanceKm, estimate: estimateCourierFee(distanceKm, size, speed) };
 }
 
@@ -63,7 +66,7 @@ export default async function courierRoutes(app: FastifyInstance) {
   /** POST /estimate — price quote (size + distance + speed) before requesting. */
   app.post('/estimate', auth, async (request) => {
     const body = estimateSchema.parse(request.body);
-    const { distanceKm, estimate } = quote(body.pickup, body.dropoff, body.packageSize, body.speed);
+    const { distanceKm, estimate } = await quote(body.pickup, body.dropoff, body.packageSize, body.speed);
     return { success: true, data: { ...estimate, distanceKm: Math.round(distanceKm * 10) / 10 } };
   });
 
@@ -77,7 +80,7 @@ export default async function courierRoutes(app: FastifyInstance) {
       throw new AppError(403, 'ACCOUNT_RESTRICTED', 'Courier is disabled on this account after repeated failed payments. Contact support.');
     }
 
-    const { distanceKm, estimate } = quote(body.pickup, body.dropoff, body.packageSize, body.speed);
+    const { distanceKm, estimate } = await quote(body.pickup, body.dropoff, body.packageSize, body.speed);
 
     const today = new Date();
     today.setHours(0, 0, 0, 0);

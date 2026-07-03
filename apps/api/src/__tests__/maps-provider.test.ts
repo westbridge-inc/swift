@@ -149,3 +149,39 @@ describe('OsrmMapsProvider', () => {
     expect(await new OsrmMapsProvider('http://osrm.test').etaMinutes(ORIGIN, [])).toEqual([]);
   });
 });
+
+describe('routeKm — point-to-point routing for fares/fees', () => {
+  const haversine = new HaversineMapsProvider();
+  afterEach(() => vi.unstubAllGlobals());
+
+  it('haversine returns the historical deterministic estimate with null minutes', async () => {
+    const r = await haversine.routeKm(ORIGIN, DESTS[0]!);
+    expect(r.km).toBeGreaterThan(0);
+    expect(r.minutes).toBeNull();
+  });
+
+  it('OSRM parses the route service (lng,lat order; metres/seconds → km/min)', async () => {
+    const f = mockFetch(200, { code: 'Ok', routes: [{ distance: 5200, duration: 780 }] });
+    vi.stubGlobal('fetch', f);
+    const r = await new OsrmMapsProvider('http://osrm.test').routeKm(ORIGIN, DESTS[0]!);
+    expect(r.km).toBeCloseTo(5.2, 5);
+    expect(r.minutes).toBeCloseTo(13, 5);
+    const url = String((f.mock.calls[0] as unknown as [string])[0]);
+    expect(url).toContain('/route/v1/driving/');
+    expect(url).toContain(`${ORIGIN.lng},${ORIGIN.lat}`); // OSRM wants lng,lat
+  });
+
+  it('OSRM falls back to the deterministic estimate on failure — fares never block', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => { throw new Error('ECONNREFUSED'); }));
+    const r = await new OsrmMapsProvider('http://osrm.test').routeKm(ORIGIN, DESTS[0]!);
+    expect(r).toEqual(await haversine.routeKm(ORIGIN, DESTS[0]!));
+  });
+
+  it('Google routes stay deterministic (paid API is dispatch-only)', async () => {
+    const f = vi.fn();
+    vi.stubGlobal('fetch', f);
+    const r = await new GoogleMapsProvider('key').routeKm(ORIGIN, DESTS[0]!);
+    expect(r).toEqual(await haversine.routeKm(ORIGIN, DESTS[0]!));
+    expect(f).not.toHaveBeenCalled();
+  });
+});

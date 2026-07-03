@@ -1,7 +1,8 @@
 import type { PrismaClient, OrderStatus, FulfillmentType } from '@prisma/client';
 import type { Server } from 'socket.io';
 import { calculateDeliveryFee, generateOrderNumber } from '../../utils/markup';
-import { estimateDrivingDistance, estimateDeliveryMinutes } from '../../utils/distance';
+import { estimateDeliveryMinutes } from '../../utils/distance';
+import { getMapsProvider, type MapsProvider } from '../../providers/maps/maps-provider';
 import { NotificationService } from '../notification/notification.service';
 import { CountryConfigService } from '../country/country-config.service';
 import { BookingService } from '../booking/booking.service';
@@ -76,6 +77,7 @@ export class OrderService {
   constructor(
     private prisma: PrismaClient,
     private io: Server,
+    private maps: MapsProvider = getMapsProvider(),
   ) {
     this.notifications = new NotificationService(prisma, io);
     this.countryConfig = new CountryConfigService(prisma);
@@ -192,7 +194,11 @@ export class OrderService {
       let deliveryFee = 0;
       if (fulfillment === 'DELIVERY') {
         if (!address) throw new AppError(400, 'NO_ADDRESS', 'Please set a delivery address');
-        distanceKm = estimateDrivingDistance(vendor.latitude, vendor.longitude, address.latitude, address.longitude);
+        // Real road km when OSRM is configured; deterministic estimate otherwise.
+        distanceKm = (await this.maps.routeKm(
+          { lat: vendor.latitude, lng: vendor.longitude },
+          { lat: address.latitude, lng: address.longitude },
+        )).km;
         if (distanceKm > vendor.deliveryRadius) {
           throw new AppError(400, 'OUT_OF_RANGE', `${vendor.name} only delivers within ${vendor.deliveryRadius} km. You are ${distanceKm.toFixed(1)} km away.`);
         }
@@ -203,7 +209,10 @@ export class OrderService {
         const bcfg = (appointmentItems[0]!.item.bookingConfig ?? {}) as { serviceMode?: string; serviceRadiusKm?: number };
         if (bcfg.serviceMode === 'MOBILE' || bcfg.serviceMode === 'BOTH') {
           if (!address) throw new AppError(400, 'NO_ADDRESS', `Add your address — ${vendor.name} travels to you`);
-          const travelKm = estimateDrivingDistance(vendor.latitude, vendor.longitude, address.latitude, address.longitude);
+          const travelKm = (await this.maps.routeKm(
+            { lat: vendor.latitude, lng: vendor.longitude },
+            { lat: address.latitude, lng: address.longitude },
+          )).km;
           const radius = Number(bcfg.serviceRadiusKm ?? 0);
           if (radius > 0 && travelKm > radius) {
             throw new AppError(400, 'OUT_OF_SERVICE_AREA', `${vendor.name} travels within ${radius} km. You are ${travelKm.toFixed(1)} km away.`);
