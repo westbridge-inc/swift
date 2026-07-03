@@ -20,7 +20,7 @@ function UploadRow({
 }) {
   return (
     <PressableScale disabled={busy} onPress={onPress}>
-      <Card className={done ? 'mb-sm border-brand-500' : 'mb-sm'}>
+      <Card style={done ? { borderColor: color.brand[500] } : undefined} className="mb-sm">
         <View className="flex-row items-center justify-between">
           <View className="flex-1 pr-md">
             <Text className="text-xs text-text-secondary">{done ? 'Uploaded' : 'Get started'}</Text>

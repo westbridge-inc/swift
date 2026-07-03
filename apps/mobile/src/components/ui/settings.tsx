@@ -72,7 +72,8 @@ export function SettingsRow({
       ) : null}
       <View className="flex-1">
         <Text
-          className={danger ? 'text-base font-semibold text-brand-600' : 'text-base font-medium text-text-primary'}
+          className={danger ? 'text-base font-semibold' : 'text-base font-medium text-text-primary'}
+          style={danger ? { color: color.brand[600] } : undefined}
           numberOfLines={1}
         >
           {label}

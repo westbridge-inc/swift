@@ -17,7 +17,7 @@ function CartHeader({ navigation, title, onClear }: any) {
       <Text className="flex-1 px-md text-base font-bold" numberOfLines={1}>{title}</Text>
       {onClear ? (
         <PressableScale onPress={onClear} hitSlop={8}>
-          <Text className="text-sm font-semibold text-brand-500">Clear</Text>
+          <Text className="text-sm font-semibold" style={{ color: color.brand[500] }}>Clear</Text>
         </PressableScale>
       ) : (
         <View style={{ width: 24 }} />
@@ -43,7 +43,7 @@ function SummaryRow({ label, value, bold }: { label: string; value: string; bold
   return (
     <View className="flex-row items-center justify-between py-1">
       <Text className={bold ? 'text-base font-semibold' : 'text-sm text-text-secondary'}>{label}</Text>
-      <Text className={bold ? 'text-base font-extrabold text-brand-600' : 'text-sm text-text-primary'}>{value}</Text>
+      <Text style={bold ? { color: color.brand[600] } : undefined} className={bold ? 'text-base font-extrabold' : 'text-sm text-text-primary'}>{value}</Text>
     </View>
   );
 }
@@ -73,7 +73,7 @@ const CartItemRow = memo(function CartItemRow({ item, busy, onDec, onInc, onRemo
         </View>
       </View>
       <View className="items-end">
-        <Text className="text-base font-extrabold text-brand-600">{money(item.lineTotal)}</Text>
+        <Text className="text-base font-extrabold" style={{ color: color.brand[600] }}>{money(item.lineTotal)}</Text>
         <PressableScale disabled={busy} onPress={onRemove} hitSlop={8} className="mt-md">
           <Feather name="trash-2" size={18} color={color.text.muted} />
         </PressableScale>

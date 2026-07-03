@@ -256,7 +256,7 @@ export function MoverHomeScreen({ navigation }: any) {
             <View className="flex-row items-center justify-between">
               <Text className="text-[11px] font-bold uppercase tracking-[1.5px] text-text-muted">Earned today</Text>
               <View className="flex-row items-center">
-                <Text className="text-[11px] font-semibold text-brand-600">All earnings</Text>
+                <Text className="text-[11px] font-semibold" style={{ color: color.brand[600] }}>All earnings</Text>
                 <Feather name="chevron-right" size={14} color={color.brand[500]} />
               </View>
             </View>
@@ -307,7 +307,7 @@ export function MoverHomeScreen({ navigation }: any) {
             <PressableScale className="mt-md" onPress={() => navigation?.navigate?.('ActiveJob')}>
               <View className="rounded-2xl bg-surface-base p-lg" style={CARD_SHADOW}>
                 <View className="flex-row items-center justify-between">
-                  <Text className="text-xs font-bold text-brand-600">ACTIVE JOB</Text>
+                  <Text className="text-xs font-bold" style={{ color: color.brand[600] }}>ACTIVE JOB</Text>
                   <Feather name="chevron-right" size={18} color={color.text.muted} />
                 </View>
                 <Text className="mt-xs text-base font-bold text-text-primary" numberOfLines={1}>

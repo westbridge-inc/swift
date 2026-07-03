@@ -168,8 +168,8 @@ export function OrderTrackingScreen({ navigation, route }: any) {
         {/* Status banner */}
         <View className="px-lg">
           {cancelled ? (
-            <Card className="bg-brand-50">
-              <Heading size="lg" className="text-brand-700">Order cancelled</Heading>
+            <Card className="" style={{ backgroundColor: color.brand[50] }}>
+              <Heading size="lg" className="" style={{ color: color.brand[700] }}>Order cancelled</Heading>
               <Text className="mt-xs text-sm text-text-secondary">This order was cancelled.</Text>
             </Card>
           ) : (
@@ -185,7 +185,7 @@ export function OrderTrackingScreen({ navigation, route }: any) {
           {order.fulfillment === 'PICKUP' && order.pickupCode && !cancelled && step < 4 ? (
             <Card className="mt-md items-center bg-surface-subtle">
               <Text className="text-xs font-semibold uppercase text-text-muted">Pickup code</Text>
-              <Text className="mt-xs text-3xl font-bold tracking-widest text-brand-600">{order.pickupCode}</Text>
+              <Text className="mt-xs text-3xl font-bold tracking-widest" style={{ color: color.brand[600] }}>{order.pickupCode}</Text>
               <Text className="mt-xs text-center text-xs text-text-secondary">
                 Show this at {order.vendor?.name ?? 'the store'} to collect your order.
               </Text>
@@ -222,7 +222,7 @@ export function OrderTrackingScreen({ navigation, route }: any) {
                   <View
                     className={
                       done
-                        ? 'h-6 w-6 items-center justify-center rounded-full bg-brand-500'
+                        ? 'h-6 w-6 items-center justify-center rounded-full'
                         : 'h-6 w-6 items-center justify-center rounded-full border border-border-strong bg-surface-base'
                     }
                   >
@@ -274,7 +274,7 @@ export function OrderTrackingScreen({ navigation, route }: any) {
                 <View className="flex-row items-center" style={{ gap: 8 }}>
                   <PressableScale
                     onPress={() => navigation.navigate('Chat', { orderId: order.id ?? id, title: order.rider.firstName ?? 'Your rider' })}
-                    className="h-10 w-10 items-center justify-center rounded-full bg-brand-50"
+                    className="h-10 w-10 items-center justify-center rounded-full" style={{ backgroundColor: color.brand[50] }}
                   >
                     <Feather name="message-circle" size={18} color={color.brand[500]} />
                   </PressableScale>
@@ -283,7 +283,7 @@ export function OrderTrackingScreen({ navigation, route }: any) {
                       onPress={() => {
                         Linking.openURL(`tel:${order.rider.phone}`).catch(() => {});
                       }}
-                      className="h-10 w-10 items-center justify-center rounded-full bg-brand-50"
+                      className="h-10 w-10 items-center justify-center rounded-full" style={{ backgroundColor: color.brand[50] }}
                     >
                       <Feather name="phone" size={18} color={color.brand[500]} />
                     </PressableScale>
@@ -314,7 +314,7 @@ export function OrderTrackingScreen({ navigation, route }: any) {
             <View className="mt-sm border-t border-border-subtle pt-sm">
               <View className="flex-row items-center justify-between py-1">
                 <Text className="text-base font-semibold">Total</Text>
-                <Text className="text-base font-extrabold text-brand-600">{money(order.totalAmount)}</Text>
+                <Text className="text-base font-extrabold" style={{ color: color.brand[600] }}>{money(order.totalAmount)}</Text>
               </View>
             </View>
             <View className="mt-sm flex-row items-center">

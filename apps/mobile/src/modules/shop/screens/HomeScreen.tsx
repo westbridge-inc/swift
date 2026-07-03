@@ -150,8 +150,8 @@ function CuisineChips({ cuisines, selected, onSelect }: { cuisines: string[]; se
           <Pressable
             key={c}
             onPress={() => onSelect(c === 'All' ? undefined : c)}
-            className={active ? 'mr-sm rounded-full bg-brand-500 px-md py-sm' : 'mr-sm rounded-full bg-surface-base px-md py-sm'}
-            style={active ? undefined : elevation.card}
+            className={active ? 'mr-sm rounded-full px-md py-sm' : 'mr-sm rounded-full bg-surface-base px-md py-sm'}
+            style={active ? { backgroundColor: color.brand[500] } : elevation.card}
           >
             <Text className={active ? 'text-sm font-bold text-white' : 'text-sm font-semibold text-text-secondary'}>{c}</Text>
           </Pressable>
@@ -179,7 +179,7 @@ function SectionHeader({ title, action, onAction }: { title: string; action?: st
     <View className="mb-sm mt-lg flex-row items-end justify-between px-lg">
       <Heading size="lg">{title}</Heading>
       {action ? (
-        <Pressable onPress={onAction} hitSlop={8}><Text className="text-sm font-bold text-brand-600">{action}</Text></Pressable>
+        <Pressable onPress={onAction} hitSlop={8}><Text className="text-sm font-bold" style={{ color: color.brand[600] }}>{action}</Text></Pressable>
       ) : null}
     </View>
   );

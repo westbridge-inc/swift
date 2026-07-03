@@ -17,5 +17,6 @@ export { enter, staggerDelay, screenTransition } from './transitions';
 export { Field } from './field';
 export { StepProgress } from './step-progress';
 export { Input } from './input';
-export { ChoiceChip, choiceSurface } from './choice-chip';
+export { ChoiceChip, choiceSurface, choiceSurfaceStyle } from './choice-chip';
 export { PromoBanner } from './promo-banner';
+export * from './canopy';

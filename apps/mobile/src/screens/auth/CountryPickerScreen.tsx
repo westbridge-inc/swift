@@ -78,7 +78,7 @@ export function CountryPickerScreen({ navigation }: any) {
                       </Text>
                     </View>
                     {live ? (
-                      <View className="h-9 w-9 items-center justify-center rounded-full bg-brand-50">
+                      <View className="h-9 w-9 items-center justify-center rounded-full" style={{ backgroundColor: color.brand[50] }}>
                         <Feather name="chevron-right" size={18} color={color.brand[500]} />
                       </View>
                     ) : (

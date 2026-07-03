@@ -39,7 +39,7 @@ const OrderRow = memo(function OrderRow({ order, onTrack, onReorder, onRate, reo
     <PressableScale onPress={onTrack}>
       <Card className="mb-md">
         <View className="flex-row items-center">
-          <View className="h-11 w-11 items-center justify-center rounded-full bg-brand-50">
+          <View className="h-11 w-11 items-center justify-center rounded-full" style={{ backgroundColor: color.brand[50] }}>
             <MaterialCommunityIcons name={iconFor(order.orderType)} size={20} color={color.brand[500]} />
           </View>
           <View className="flex-1 px-md">
@@ -56,19 +56,19 @@ const OrderRow = memo(function OrderRow({ order, onTrack, onReorder, onRate, reo
           <View className="mt-sm flex-row items-center" style={{ gap: 8 }}>
             <PressableScale
               onPress={onRate}
-              className="flex-row items-center rounded-full border border-brand-500 px-lg py-sm"
+              className="flex-row items-center rounded-full border px-lg py-sm" style={{ borderColor: color.brand[500] }}
             >
               <MaterialCommunityIcons name="star-outline" size={14} color={color.brand[500]} />
-              <Text className="ml-sm text-sm font-semibold text-brand-500">Rate</Text>
+              <Text className="ml-sm text-sm font-semibold" style={{ color: color.brand[500] }}>Rate</Text>
             </PressableScale>
             {reorderable ? (
               <PressableScale
                 onPress={onReorder}
                 disabled={reordering}
-                className="flex-row items-center rounded-full border border-brand-500 px-lg py-sm"
+                className="flex-row items-center rounded-full border px-lg py-sm" style={{ borderColor: color.brand[500] }}
               >
                 <Feather name="refresh-cw" size={13} color={color.brand[500]} />
-                <Text className="ml-sm text-sm font-semibold text-brand-500">Reorder</Text>
+                <Text className="ml-sm text-sm font-semibold" style={{ color: color.brand[500] }}>Reorder</Text>
               </PressableScale>
             ) : null}
           </View>

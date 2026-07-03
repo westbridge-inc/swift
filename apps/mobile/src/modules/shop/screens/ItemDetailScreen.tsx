@@ -101,7 +101,7 @@ export function ItemDetailScreen({ navigation, route }: any) {
         <View className="px-lg pt-lg">
           <Heading size="2xl">{item.name}</Heading>
           {item.description ? <Text className="mt-xs text-base text-text-secondary">{item.description}</Text> : null}
-          <Text className="mt-sm text-xl font-extrabold text-brand-600">{money(basePrice)}</Text>
+          <Text className="mt-sm text-xl font-extrabold" style={{ color: color.brand[600] }}>{money(basePrice)}</Text>
         </View>
 
         {groups.map((g) => {
@@ -154,9 +154,9 @@ export function ItemDetailScreen({ navigation, route }: any) {
           />
         </View>
 
-        <View className="mx-lg mt-lg flex-row items-center rounded-2xl bg-brand-50 px-lg py-md">
+        <View className="mx-lg mt-lg flex-row items-center rounded-2xl px-lg py-md" style={{ backgroundColor: color.brand[50] }}>
           <MaterialCommunityIcons name="tag-heart-outline" size={18} color={color.brand[600]} />
-          <Text className="ml-sm flex-1 text-sm font-medium text-brand-700">
+          <Text className="ml-sm flex-1 text-sm font-medium" style={{ color: color.brand[700] }}>
             No platform fees — this is the vendor’s price, end to end.
           </Text>
         </View>

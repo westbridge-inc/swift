@@ -77,7 +77,7 @@ export function OtpVerificationScreen({ route, navigation }: any) {
             <Text className="font-semibold text-text-primary">{phone}</Text>
           </Text>
           <PressableScale onPress={() => navigation?.goBack?.()} hitSlop={6}>
-            <Text className="mt-sm text-center text-sm font-semibold text-brand-600">Wrong number? Change it</Text>
+            <Text className="mt-sm text-center text-sm font-semibold" style={{ color: color.brand[600] }}>Wrong number? Change it</Text>
           </PressableScale>
         </View>
 
@@ -90,9 +90,10 @@ export function OtpVerificationScreen({ route, navigation }: any) {
               return (
                 <View
                   key={i}
+                  style={active ? { borderColor: color.brand[500] } : undefined}
                   className={
                     active
-                      ? 'h-14 w-12 items-center justify-center rounded-2xl border-2 border-brand-500 bg-surface-base'
+                      ? 'h-14 w-12 items-center justify-center rounded-2xl border-2 bg-surface-base'
                       : filled
                         ? 'h-14 w-12 items-center justify-center rounded-2xl border border-border-subtle bg-surface-base'
                         : 'h-14 w-12 items-center justify-center rounded-2xl border border-border-subtle bg-surface-subtle'
@@ -120,7 +121,7 @@ export function OtpVerificationScreen({ route, navigation }: any) {
           <Text className="mt-xl text-center text-sm text-text-muted">Resend code in {seconds}s</Text>
         ) : (
           <PressableScale onPress={resend} hitSlop={8}>
-            <Text className="mt-xl text-center text-sm font-semibold text-brand-600">Resend code</Text>
+            <Text className="mt-xl text-center text-sm font-semibold" style={{ color: color.brand[600] }}>Resend code</Text>
           </PressableScale>
         )}
       </View>

@@ -19,9 +19,9 @@ const VTYPES: { key: VehicleKind; label: string; icon: keyof typeof MaterialComm
 
 function ValuePill({ icon, label }: { icon: keyof typeof MaterialCommunityIcons.glyphMap; label: string }) {
   return (
-    <View className="flex-row items-center rounded-full bg-brand-50 px-3 py-1.5">
+    <View className="flex-row items-center rounded-full px-3 py-1.5" style={{ backgroundColor: color.brand[50] }}>
       <MaterialCommunityIcons name={icon} size={14} color={color.brand[600]} />
-      <Text className="ml-1.5 text-xs font-bold text-brand-700">{label}</Text>
+      <Text className="ml-1.5 text-xs font-bold" style={{ color: color.brand[700] }}>{label}</Text>
     </View>
   );
 }
@@ -32,9 +32,10 @@ function VehicleTile({ v, active, onPress }: { v: (typeof VTYPES)[number]; activ
       <View
         className={
           active
-            ? 'items-center rounded-2xl border-2 border-brand-500 bg-brand-50 py-md'
+            ? 'items-center rounded-2xl border-2 py-md'
             : 'items-center rounded-2xl border border-border-subtle bg-surface-base py-md'
         }
+        style={active ? { borderColor: color.brand[500], backgroundColor: color.brand[50] } : undefined}
       >
         <View
           className="mb-1 h-11 w-11 items-center justify-center rounded-full"
@@ -42,7 +43,7 @@ function VehicleTile({ v, active, onPress }: { v: (typeof VTYPES)[number]; activ
         >
           <MaterialCommunityIcons name={v.icon} size={22} color={active ? '#fff' : color.text.secondary} />
         </View>
-        <Text className={active ? 'text-sm font-bold text-brand-700' : 'text-sm font-bold text-text-primary'}>{v.label}</Text>
+        <Text style={active ? { color: color.brand[700] } : undefined} className={active ? 'text-sm font-bold' : 'text-sm font-bold text-text-primary'}>{v.label}</Text>
         <Text className="text-[10px] text-text-muted">{v.hint}</Text>
       </View>
     </PressableScale>

@@ -95,7 +95,7 @@ export function MoverAccountScreen({ navigation }: any) {
                 <Text className="text-xs text-text-muted">{profile?.licensePlate ?? ''}</Text>
               </View>
               <PressableScale onPress={pickVehiclePhoto} disabled={uploadVehiclePhoto.isPending} hitSlop={8}>
-                <Text className="text-sm font-semibold text-brand-600">
+                <Text className="text-sm font-semibold" style={{ color: color.brand[600] }}>
                   {uploadVehiclePhoto.isPending ? 'Uploading…' : profile?.vehiclePhotoUrl ? 'Change photo' : 'Add photo'}
                 </Text>
               </PressableScale>

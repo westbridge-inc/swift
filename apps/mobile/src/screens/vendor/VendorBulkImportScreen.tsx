@@ -149,7 +149,7 @@ export function VendorBulkImportScreen({ navigation }: any) {
         ) : null}
 
         {result ? (
-          <Card className="mt-md border-brand-500">
+          <Card className="mt-md" style={{ borderColor: color.brand[500] }}>
             <View className="flex-row items-center">
               <Feather name="check-circle" size={18} color={color.success} />
               <Text className="ml-sm text-base font-semibold">Import complete</Text>

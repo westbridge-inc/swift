@@ -3,7 +3,7 @@ import { View, ScrollView, RefreshControl } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Feather } from '@expo/vector-icons';
 import { color } from '@swift/ui';
-import { Text, Heading, Skeleton, List, Input, PressableScale, EmptyState } from '../../../components/ui';
+import { Text, Skeleton, List, Input, PressableScale, EmptyState, Canopy } from '../../../components/ui';
 import { VendorRow } from '../../../components/customer/VendorCards';
 import { useVendors } from '../../../hooks';
 import { useLocationStore } from '../../../stores/locationStore';
@@ -26,7 +26,8 @@ function Pill({ label, active, onPress }: { label: string; active: boolean; onPr
   return (
     <PressableScale
       onPress={onPress}
-      className={active ? 'rounded-full border border-brand-500 bg-brand-500 px-lg py-sm' : 'rounded-full border border-border-subtle bg-surface-base px-lg py-sm'}
+      className={active ? 'rounded-full border px-lg py-sm' : 'rounded-full border border-border-subtle bg-surface-base px-lg py-sm'}
+      style={active ? { backgroundColor: color.brand[500], borderColor: color.brand[500] } : undefined}
     >
       <Text className={active ? 'text-sm font-semibold text-white' : 'text-sm font-semibold text-text-secondary'}>{label}</Text>
     </PressableScale>
@@ -67,28 +68,30 @@ export function SearchScreen({ navigation }: any) {
   const vendors = data ?? [];
 
   return (
-    <SafeAreaView style={{ flex: 1 }} edges={['top']} className="bg-surface-subtle">
-      <View className="px-lg pb-sm pt-md">
-        <Heading size="2xl">Explore</Heading>
-      </View>
+    <SafeAreaView style={{ flex: 1, backgroundColor: color.brand[700] }} edges={['top']}>
+      <Canopy>
+        <Text className="font-display font-extrabold text-white" style={{ fontSize: 26, lineHeight: 32 }}>
+          Explore
+        </Text>
+        <View style={{ marginTop: 12 }}>
+          <Input
+            value={text}
+            onChangeText={setText}
+            placeholder="Search food, shops, services…"
+            returnKeyType="search"
+            left={<Feather name="search" size={18} color={color.brand[500]} />}
+            right={
+              text ? (
+                <PressableScale onPress={() => setText('')} hitSlop={8}>
+                  <Feather name="x" size={18} color={color.text.muted} />
+                </PressableScale>
+              ) : null
+            }
+          />
+        </View>
+      </Canopy>
 
-      {/* Search field */}
-      <View className="mx-lg mb-md">
-        <Input
-          value={text}
-          onChangeText={setText}
-          placeholder="Search food, shops, services…"
-          returnKeyType="search"
-          left={<Feather name="search" size={18} color={color.text.muted} />}
-          right={
-            text ? (
-              <PressableScale onPress={() => setText('')} hitSlop={8}>
-                <Feather name="x" size={18} color={color.text.muted} />
-              </PressableScale>
-            ) : null
-          }
-        />
-      </View>
+      <View className="bg-surface-subtle" style={{ flex: 1, marginTop: -28, paddingTop: 28 }}>
 
       {/* Category chips */}
       <View className="mb-sm">
@@ -101,9 +104,10 @@ export function SearchScreen({ navigation }: any) {
                 onPress={() => setFilter(item.key)}
                 className={
                   active
-                    ? 'rounded-full border border-brand-500 bg-brand-500 px-lg py-sm'
+                    ? 'rounded-full border px-lg py-sm'
                     : 'rounded-full border border-border-subtle bg-surface-base px-lg py-sm'
                 }
+                style={active ? { backgroundColor: color.brand[500], borderColor: color.brand[500] } : undefined}
               >
                 <Text className={active ? 'text-sm font-semibold text-white' : 'text-sm font-semibold text-text-secondary'}>
                   {item.label}
@@ -169,6 +173,7 @@ export function SearchScreen({ navigation }: any) {
             }
           />
         )}
+      </View>
       </View>
     </SafeAreaView>
   );

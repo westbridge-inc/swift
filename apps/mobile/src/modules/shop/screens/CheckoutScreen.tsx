@@ -15,7 +15,7 @@ function SummaryRow({ label, value, bold }: { label: string; value: string; bold
   return (
     <View className="flex-row items-center justify-between py-1">
       <Text className={bold ? 'text-base font-semibold' : 'text-sm text-text-secondary'}>{label}</Text>
-      <Text className={bold ? 'text-base font-extrabold text-brand-600' : 'text-sm text-text-primary'}>{value}</Text>
+      <Text style={bold ? { color: color.brand[600] } : undefined} className={bold ? 'text-base font-extrabold' : 'text-sm text-text-primary'}>{value}</Text>
     </View>
   );
 }
@@ -166,7 +166,8 @@ export function CheckoutScreen({ navigation }: any) {
                     <PressableScale
                       key={d.value}
                       onPress={() => { setSelectedDate(d.value); setSelectedSlot(undefined); }}
-                      className={on ? 'items-center rounded-2xl bg-brand-500 px-lg py-md' : 'items-center rounded-2xl border border-border-subtle bg-surface-base px-lg py-md'}
+                      style={on ? { backgroundColor: color.brand[500] } : undefined}
+              className={on ? 'items-center rounded-2xl px-lg py-md' : 'items-center rounded-2xl border border-border-subtle bg-surface-base px-lg py-md'}
                     >
                       <Text className={on ? 'text-xs font-semibold text-white' : 'text-xs font-semibold text-text-secondary'}>{d.dow}</Text>
                       <Text className={on ? 'mt-0.5 text-lg font-bold text-white' : 'mt-0.5 text-lg font-bold text-text-primary'}>{d.day}</Text>
@@ -187,7 +188,8 @@ export function CheckoutScreen({ navigation }: any) {
                       <PressableScale
                         key={sISO}
                         onPress={() => setSelectedSlot(sISO)}
-                        className={on ? 'rounded-full bg-brand-500 px-lg py-sm' : 'rounded-full border border-border-subtle bg-surface-base px-lg py-sm'}
+                        style={on ? { backgroundColor: color.brand[500] } : undefined}
+                className={on ? 'rounded-full px-lg py-sm' : 'rounded-full border border-border-subtle bg-surface-base px-lg py-sm'}
                       >
                         <Text className={on ? 'text-sm font-semibold text-white' : 'text-sm font-semibold text-text-secondary'}>{sISO.slice(11, 16)}</Text>
                       </PressableScale>
@@ -219,7 +221,7 @@ export function CheckoutScreen({ navigation }: any) {
             <PressableScale onPress={() => navigation?.navigate?.('AddAddress')}>
               <Card className="flex-row items-center">
                 <Feather name="plus-circle" size={18} color={color.brand[500]} />
-                <Text className="ml-sm font-semibold text-brand-600">{isService ? 'Add an address' : 'Add a delivery address'}</Text>
+                <Text className="ml-sm font-semibold" style={{ color: color.brand[600] }}>{isService ? 'Add an address' : 'Add a delivery address'}</Text>
               </Card>
             </PressableScale>
           ) : (
@@ -227,7 +229,7 @@ export function CheckoutScreen({ navigation }: any) {
               const active = a.id === effectiveAddressId;
               return (
                 <PressableScale key={a.id} onPress={() => { setSelectedId(a.id); setAddress.mutate(a.id); }}>
-                  <Card className={active ? 'mb-sm border-brand-500' : 'mb-sm'}>
+                  <Card style={active ? { borderColor: color.brand[500] } : undefined} className="mb-sm">
                     <View className="flex-row items-center justify-between">
                       <View className="flex-1 pr-md">
                         <Text className="text-base font-semibold">{a.label || a.addressLine1}</Text>
@@ -247,7 +249,7 @@ export function CheckoutScreen({ navigation }: any) {
 
           {/* Payment */}
           <Heading size="lg" className="mb-sm mt-lg">Payment</Heading>
-          <Card className="border-brand-500">
+          <Card className="" style={{ borderColor: color.brand[500] }}>
             <View className="flex-row items-center justify-between">
               <View className="flex-row items-center">
                 <MaterialCommunityIcons name="cash" size={22} color={color.success} />
