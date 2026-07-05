@@ -1,4 +1,4 @@
-import { ActivityIndicator, Text as RNText, type PressableProps } from 'react-native';
+import { ActivityIndicator, Text as RNText, type PressableProps, type StyleProp, type ViewStyle } from 'react-native';
 import type { ReactNode } from 'react';
 import { color } from '@swift/ui';
 import { cn } from './cn';
@@ -11,11 +11,12 @@ type Props = PressableProps & {
   label?: string;
   children?: ReactNode;
   loading?: boolean;
+  style?: StyleProp<ViewStyle>;
 };
 
 /** Primary action — solid Swift red or outline. Press-scales (motion tokens) and
  *  shows a spinner while `loading` (which also disables it). */
-export function Button({ className, textClassName, variant = 'solid', label, children, disabled, loading, ...props }: Props) {
+export function Button({ className, textClassName, variant = 'solid', label, children, disabled, loading, style, ...props }: Props) {
   const isDisabled = disabled || loading;
   // Loading keeps the active (brand) look — it's working, not disabled. A truly
   // disabled button goes neutral grey (never a washed-out tint of the brand red).
@@ -36,7 +37,7 @@ export function Button({ className, textClassName, variant = 'solid', label, chi
     <PressableScale
       disabled={isDisabled}
       className={cn('flex-row items-center justify-center rounded-full px-5 py-3.5', variantClass, className)}
-      style={variantStyle}
+      style={[variantStyle, style]}
       {...props}
     >
       {loading ? (

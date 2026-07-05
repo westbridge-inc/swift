@@ -20,3 +20,8 @@ export { Input } from './input';
 export { ChoiceChip, choiceSurface, choiceSurfaceStyle } from './choice-chip';
 export { PromoBanner } from './promo-banner';
 export * from './canopy';
+export { toast, ToastHost } from './toast';
+export { ActionSheet, type SheetAction } from './action-sheet';
+export { ConfirmDialog } from './confirm-dialog';
+export { Switch } from './switch';
+export { Avatar } from './avatar';

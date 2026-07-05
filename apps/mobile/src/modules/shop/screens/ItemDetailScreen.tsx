@@ -3,7 +3,7 @@ import { View, ScrollView, TextInput, Pressable } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Feather, MaterialCommunityIcons } from '@expo/vector-icons';
 import { color } from '@swift/ui';
-import { Text, Heading, Button, Image, PressableScale, Scrim } from '../../../components/ui';
+import { Text, Heading, Button, Image, PressableScale, Scrim, toast } from '../../../components/ui';
 import { useAddToCart } from '../../../hooks';
 import { useAuthStore } from '../../../stores/authStore';
 import { money } from '../../../lib/money';
@@ -79,7 +79,12 @@ export function ItemDetailScreen({ navigation, route }: any) {
         selectedOptions: selected,
         specialInstructions: notes.trim() || undefined,
       },
-      { onSuccess: () => navigation?.goBack?.() },
+      {
+        onSuccess: () => {
+          toast.success('Added to cart', qty > 1 ? `${qty} × ${item.name}` : item.name);
+          navigation?.goBack?.();
+        },
+      },
     );
   };
 
@@ -87,8 +92,8 @@ export function ItemDetailScreen({ navigation, route }: any) {
     <View style={{ flex: 1 }} className="bg-surface-base">
       <ScrollView contentContainerStyle={{ paddingBottom: 168 }} showsVerticalScrollIndicator={false}>
         <View>
-          <Image source={{ uri: item.imageUrl || fallbackImage(item.id, kind) }} style={{ width: '100%', height: 240 }} />
-          <Scrim height={96} />
+          <Image source={{ uri: item.imageUrl || fallbackImage(item.id, kind) }} style={{ width: '100%', height: 256 }} />
+          <Scrim anchor="top" height={104} to="rgba(0,0,0,0.40)" />
           <PressableScale
             onPress={() => navigation?.goBack?.()}
             hitSlop={10}
@@ -98,6 +103,17 @@ export function ItemDetailScreen({ navigation, route }: any) {
           </PressableScale>
         </View>
 
+        {/* Content sheet tucks over the hero — the same rounded-seam move as
+            VendorDetail and the Home canopy. */}
+        <View
+          style={{
+            marginTop: -24,
+            borderTopLeftRadius: 24,
+            borderTopRightRadius: 24,
+            backgroundColor: color.surface.base,
+            paddingTop: 4,
+          }}
+        >
         <View className="px-lg pt-lg">
           <Heading size="2xl">{item.name}</Heading>
           {item.description ? <Text className="mt-xs text-base text-text-secondary">{item.description}</Text> : null}
@@ -160,11 +176,20 @@ export function ItemDetailScreen({ navigation, route }: any) {
             No platform fees — this is the vendor’s price, end to end.
           </Text>
         </View>
+        </View>
       </ScrollView>
 
       <View
-        className="absolute inset-x-0 bottom-0 flex-row items-center border-t border-border-subtle bg-surface-base px-lg pt-md"
-        style={{ paddingBottom: insets.bottom + 12, gap: 12 }}
+        className="absolute inset-x-0 bottom-0 flex-row items-center bg-surface-base px-lg pt-md"
+        style={{
+          paddingBottom: insets.bottom + 12,
+          gap: 12,
+          shadowColor: '#000',
+          shadowOpacity: 0.1,
+          shadowRadius: 18,
+          shadowOffset: { width: 0, height: -6 },
+          elevation: 14,
+        }}
       >
         <View className="flex-row items-center rounded-full border border-border-strong">
           <PressableScale onPress={() => setQty((q) => Math.max(1, q - 1))} className="h-11 w-11 items-center justify-center">

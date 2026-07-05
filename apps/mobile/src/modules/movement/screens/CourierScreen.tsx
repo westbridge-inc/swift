@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { View } from 'react-native';
+import { View, useWindowDimensions } from 'react-native';
 import MapView, { Marker, PROVIDER_DEFAULT, Polyline } from 'react-native-maps';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import BottomSheet, { BottomSheetScrollView } from '@gorhom/bottom-sheet';
@@ -16,10 +16,10 @@ type Size = 'SMALL' | 'MEDIUM' | 'LARGE' | 'EXTRA_LARGE';
 type Speed = 'STANDARD' | 'EXPRESS' | 'RUSH';
 
 const SIZES: { key: Size; label: string; icon: keyof typeof MaterialCommunityIcons.glyphMap; hint: string }[] = [
-  { key: 'SMALL', label: 'Small', icon: 'email-outline', hint: 'Documents' },
-  { key: 'MEDIUM', label: 'Medium', icon: 'package-variant', hint: 'Shoebox' },
-  { key: 'LARGE', label: 'Large', icon: 'package-variant-closed', hint: 'Backpack' },
-  { key: 'EXTRA_LARGE', label: 'XL', icon: 'dolly', hint: 'Bulky' },
+  { key: 'SMALL', label: 'Small', icon: 'email-outline', hint: 'Documents, keys' },
+  { key: 'MEDIUM', label: 'Medium', icon: 'package-variant', hint: 'Fits a shoebox' },
+  { key: 'LARGE', label: 'Large', icon: 'package-variant-closed', hint: 'Fits a backpack' },
+  { key: 'EXTRA_LARGE', label: 'Extra large', icon: 'dolly', hint: 'Bulky or heavy' },
 ];
 const SPEEDS: { key: Speed; label: string; icon: keyof typeof MaterialCommunityIcons.glyphMap; hint: string }[] = [
   { key: 'STANDARD', label: 'Standard', icon: 'clock-outline', hint: 'Lowest price' },
@@ -55,46 +55,65 @@ function regionFor(pts: LatLng[]) {
   };
 }
 
-/** Selectable tile used for size + speed — icon in a tinted chip, label, hint. */
-function OptionTile({
+/** Selectable option card — icon chip beside name + example. Text sizes are
+ *  inline on purpose: rare utility classes (text-[10px]) can come out of
+ *  Metro's NativeWind cache unmaterialized, which once rendered the hint
+ *  BIGGER than its own label. `wide` = half-width row card (2×2 grid);
+ *  default = equal column (3-across). */
+function OptionCard({
   icon,
   label,
   hint,
   active,
   onPress,
+  wide,
 }: {
   icon: keyof typeof MaterialCommunityIcons.glyphMap;
   label: string;
   hint: string;
   active: boolean;
   onPress: () => void;
+  wide?: boolean;
 }) {
   return (
-    <PressableScale onPress={onPress} style={{ flex: 1 }}>
+    <PressableScale onPress={onPress} style={wide ? { flexBasis: '47%', flexGrow: 1 } : { flex: 1 }}>
       <View
-        className={
+        style={[
+          { borderRadius: 16, borderWidth: 1, paddingVertical: 12, paddingHorizontal: 10 },
           active
-            ? 'items-center rounded-2xl border-2 px-1 py-md'
-            : 'items-center rounded-2xl border border-border-subtle bg-surface-base px-1 py-md'
-        }
-        style={active ? { borderColor: color.brand[500], backgroundColor: color.brand[50] } : elevation.card}
+            ? { borderColor: color.brand[500], backgroundColor: color.brand[50] }
+            : { borderColor: color.border.subtle, backgroundColor: color.surface.base },
+          !active ? elevation.card : null,
+          wide ? { flexDirection: 'row', alignItems: 'center' } : { alignItems: 'center' },
+        ]}
       >
         <View
-          className="mb-1 h-9 w-9 items-center justify-center rounded-full"
-          style={{ backgroundColor: active ? color.brand[500] : color.surface.subtle }}
+          style={{
+            width: 34,
+            height: 34,
+            borderRadius: 17,
+            alignItems: 'center',
+            justifyContent: 'center',
+            backgroundColor: active ? color.brand[500] : color.surface.subtle,
+          }}
         >
-          <MaterialCommunityIcons name={icon} size={18} color={active ? '#fff' : color.text.secondary} />
+          <MaterialCommunityIcons name={icon} size={17} color={active ? '#fff' : color.text.secondary} />
         </View>
-        <Text style={active ? { color: color.brand[700] } : undefined} className={active ? 'text-xs font-bold' : 'text-xs font-bold text-text-primary'} numberOfLines={1}>
-          {label}
-        </Text>
-        <Text className="text-[10px] text-text-muted" numberOfLines={1}>{hint}</Text>
+        <View style={wide ? { flex: 1, marginLeft: 10 } : { alignItems: 'center', marginTop: 6 }}>
+          <Text style={{ fontSize: 13, fontWeight: '700', color: active ? color.brand[700] : color.text.primary }} numberOfLines={1}>
+            {label}
+          </Text>
+          <Text style={{ fontSize: 11, marginTop: 1, color: color.text.muted }} numberOfLines={1}>
+            {hint}
+          </Text>
+        </View>
       </View>
     </PressableScale>
   );
 }
 
 export function CourierScreen({ navigation }: any) {
+  const { height: winH } = useWindowDimensions();
   const { latitude, longitude, address } = useLocationStore();
   const { data: recent } = useCourierOrders<any[]>();
   const send = useSendCourier();
@@ -161,9 +180,34 @@ export function CourierScreen({ navigation }: any) {
 
   return (
     <View style={{ flex: 1 }} className="bg-surface-subtle">
-      <MapView provider={PROVIDER_DEFAULT} style={{ flex: 1 }} region={region} showsUserLocation>
-        {pickupLL ? <Marker coordinate={pickupLL} title="From" /> : null}
-        {dropoffLL ? <Marker coordinate={dropoffLL} title="To" pinColor={color.brand[500]} /> : null}
+      <MapView
+        provider={PROVIDER_DEFAULT}
+        style={{ flex: 1 }}
+        region={region}
+        showsUserLocation
+        // The sheet covers the lower half — keep pins framed in the visible top.
+        mapPadding={{ top: 0, right: 0, bottom: Math.round(winH * 0.46), left: 0 }}
+      >
+        {pickupLL ? (
+          <Marker coordinate={pickupLL} anchor={{ x: 0.5, y: 0.5 }} title="From">
+            <View
+              style={{
+                width: 16,
+                height: 16,
+                borderRadius: 8,
+                backgroundColor: color.text.primary,
+                borderWidth: 3,
+                borderColor: '#fff',
+                ...elevation.card,
+              }}
+            />
+          </Marker>
+        ) : null}
+        {dropoffLL ? (
+          <Marker coordinate={dropoffLL} title="To">
+            <MaterialCommunityIcons name="map-marker" size={36} color={color.brand[600]} />
+          </Marker>
+        ) : null}
         {pickupLL && dropoffLL ? (
           <Polyline coordinates={[pickupLL, dropoffLL]} strokeColor={color.brand[500]} strokeWidth={4} />
         ) : null}
@@ -171,7 +215,13 @@ export function CourierScreen({ navigation }: any) {
 
       <BackButton navigation={navigation} />
 
-      <BottomSheet index={0} snapPoints={['50%', '92%']} enableDynamicSizing={false} backgroundStyle={{ backgroundColor: color.surface.subtle }}>
+      <BottomSheet
+        index={0}
+        snapPoints={['52%', '92%']}
+        enableDynamicSizing={false}
+        backgroundStyle={{ backgroundColor: color.surface.subtle, borderTopLeftRadius: 24, borderTopRightRadius: 24 }}
+        handleIndicatorStyle={{ backgroundColor: color.border.strong, width: 44 }}
+      >
         <BottomSheetScrollView
           contentContainerStyle={{ paddingHorizontal: 16, paddingBottom: 32 }}
           keyboardShouldPersistTaps="handled"
@@ -206,11 +256,11 @@ export function CourierScreen({ navigation }: any) {
             </PressableScale>
           </View>
 
-          {/* Package size */}
+          {/* Package size — 2×2 so "Documents, keys" never truncates */}
           <Text className="mb-sm mt-lg text-sm font-bold text-text-primary">Package size</Text>
-          <View className="flex-row" style={{ gap: 8 }}>
+          <View className="flex-row flex-wrap" style={{ columnGap: 8, rowGap: 8 }}>
             {SIZES.map((s) => (
-              <OptionTile key={s.key} icon={s.icon} label={s.label} hint={s.hint} active={s.key === size} onPress={() => setSize(s.key)} />
+              <OptionCard key={s.key} wide icon={s.icon} label={s.label} hint={s.hint} active={s.key === size} onPress={() => setSize(s.key)} />
             ))}
           </View>
 
@@ -218,7 +268,7 @@ export function CourierScreen({ navigation }: any) {
           <Text className="mb-sm mt-lg text-sm font-bold text-text-primary">How fast?</Text>
           <View className="flex-row" style={{ gap: 8 }}>
             {SPEEDS.map((s) => (
-              <OptionTile key={s.key} icon={s.icon} label={s.label} hint={s.hint} active={s.key === speed} onPress={() => setSpeed(s.key)} />
+              <OptionCard key={s.key} icon={s.icon} label={s.label} hint={s.hint} active={s.key === speed} onPress={() => setSpeed(s.key)} />
             ))}
           </View>
 
