@@ -42,7 +42,7 @@ export function ConfirmDialog({
           <Heading size="lg">{title}</Heading>
           {body ? <Text className="mt-2 text-sm text-text-secondary">{body}</Text> : null}
           <View className="mt-6 flex-row" style={{ gap: 10 }}>
-            <Button variant="outline" className="flex-1" label={cancelLabel} onPress={onClose} disabled={loading} />
+            <Button variant="neutral" className="flex-1" label={cancelLabel} onPress={onClose} disabled={loading} />
             <Button
               className="flex-1"
               label={confirmLabel}

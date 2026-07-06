@@ -7,21 +7,23 @@ import { PressableScale } from './pressable-scale';
 type Props = PressableProps & {
   className?: string;
   textClassName?: string;
-  variant?: 'solid' | 'outline';
+  variant?: 'solid' | 'outline' | 'neutral';
   label?: string;
   children?: ReactNode;
   loading?: boolean;
   style?: StyleProp<ViewStyle>;
 };
 
-/** Primary action — solid Swift red or outline. Press-scales (motion tokens) and
- *  shows a spinner while `loading` (which also disables it). */
+/** Primary action — solid Swift red, brand outline, or neutral (quiet secondary:
+ *  cancels and back-outs that must not compete with the main action). Press-scales
+ *  (motion tokens) and shows a spinner while `loading` (which also disables it). */
 export function Button({ className, textClassName, variant = 'solid', label, children, disabled, loading, style, ...props }: Props) {
   const isDisabled = disabled || loading;
   // Loading keeps the active (brand) look — it's working, not disabled. A truly
   // disabled button goes neutral grey (never a washed-out tint of the brand red).
   const inactive = disabled && !loading;
   const solid = variant === 'solid';
+  const neutral = variant === 'neutral';
   // Brand fills are inline style: class-based brand colors silently render
   // BLACK at runtime (NativeWind class materialization — sim-verified), and a
   // CTA is too load-bearing to risk.
@@ -30,9 +32,11 @@ export function Button({ className, textClassName, variant = 'solid', label, chi
     : (inactive ? 'border border-border-subtle bg-white' : 'border bg-white');
   const variantStyle = solid
     ? (inactive ? undefined : { backgroundColor: color.brand[500] })
-    : (inactive ? undefined : { borderColor: color.brand[500] });
+    : (inactive ? undefined : { borderColor: neutral ? color.border.strong : color.brand[500] });
   const textColor = solid ? 'text-white' : (inactive ? 'text-text-muted' : '');
-  const textStyle = !solid && !inactive ? { color: color.brand[500] } : undefined;
+  const textStyle = !solid && !inactive
+    ? { color: neutral ? color.text.primary : color.brand[500] }
+    : undefined;
   return (
     <PressableScale
       disabled={isDisabled}
@@ -41,7 +45,7 @@ export function Button({ className, textClassName, variant = 'solid', label, chi
       {...props}
     >
       {loading ? (
-        <ActivityIndicator color={variant === 'solid' ? '#fff' : color.brand[500]} />
+        <ActivityIndicator color={solid ? '#fff' : neutral ? color.text.secondary : color.brand[500]} />
       ) : label ? (
         <RNText className={cn('font-body text-base font-semibold', textColor, textClassName)} style={textStyle}>{label}</RNText>
       ) : (

@@ -1,9 +1,10 @@
+import { useState } from 'react';
 import { View, ScrollView, Share } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 import { Image } from 'expo-image';
 import { color } from '@swift/ui';
-import { Text, Heading, Badge, Button, SettingsGroup, SettingsRow } from '../../components/ui';
+import { Text, Heading, Badge, Button, ConfirmDialog, SettingsGroup, SettingsRow } from '../../components/ui';
 import { useAuthStore } from '../../stores/authStore';
 import { useProfile, useAddresses } from '../../hooks';
 import { mediaUrl } from '../../lib/images';
@@ -41,6 +42,7 @@ function GuestAccount() {
 
 function SignedInAccount({ navigation }: any) {
   const { user, logout } = useAuthStore();
+  const [confirmLogout, setConfirmLogout] = useState(false);
   const { data: profile } = useProfile<any>();
   const { data: addresses } = useAddresses<any[]>();
 
@@ -144,11 +146,23 @@ function SignedInAccount({ navigation }: any) {
 
         {/* Log out */}
         <SettingsGroup>
-          <SettingsRow icon="logout" label="Log out" danger onPress={logout} />
+          <SettingsRow icon="logout" label="Log out" danger onPress={() => setConfirmLogout(true)} />
         </SettingsGroup>
 
         <Text className="mb-md mt-xs text-center text-xs text-text-muted">Swift · Guyana · v1.0</Text>
       </ScrollView>
+      <ConfirmDialog
+        open={confirmLogout}
+        title="Log out?"
+        body="You'll sign back in with your phone number."
+        confirmLabel="Log out"
+        destructive
+        onConfirm={() => {
+          setConfirmLogout(false);
+          logout();
+        }}
+        onClose={() => setConfirmLogout(false)}
+      />
     </SafeAreaView>
   );
 }
