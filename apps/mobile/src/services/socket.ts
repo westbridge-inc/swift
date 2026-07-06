@@ -31,12 +31,11 @@ export function disconnectSocket() {
   }
 }
 
+// Joins the order's socket room (server verifies the order belongs to this
+// user) — the entry point for live `rider:location` / `driver:location` events
+// on the tracking screens. GPS UPLOAD stays on the REST PUT /location routes,
+// which check entity ownership; there is intentionally no socket upload path.
 export function subscribeToOrder(orderId: string) {
   const s = getSocket();
   s.emit('order:subscribe', { orderId });
-}
-
-export function sendLocationUpdate(latitude: number, longitude: number, heading?: number) {
-  const s = getSocket();
-  s.emit('location:update', { latitude, longitude, heading, timestamp: Date.now() });
 }
