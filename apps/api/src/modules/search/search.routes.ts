@@ -1,6 +1,7 @@
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { SearchService } from './search.service';
+import { AppError, ForbiddenError } from '../../utils/errors';
 import { sortByDistance } from '../../utils/distance';
 
 const searchQuerySchema = z.object({
@@ -233,14 +234,15 @@ export async function searchRoutes(app: FastifyInstance) {
     return { success: true, data: nearby };
   });
 
-  // Re-sync search index (admin)
+  // Re-sync search index (admin). Thrown errors get the standard envelope +
+  // real status codes from the global handler (a 200-with-error body doesn't).
   app.post('/search/sync', { preHandler: [app.authenticate] }, async (request) => {
     if (request.user.role !== 'SUPER_ADMIN' && request.user.role !== 'ADMIN') {
-      return { success: false, error: { code: 'FORBIDDEN', message: 'Admin only' } };
+      throw new ForbiddenError('Admin only');
     }
 
     if (!searchService) {
-      return { success: false, error: { code: 'UNAVAILABLE', message: 'Search service not available' } };
+      throw new AppError(503, 'UNAVAILABLE', 'Search service not available');
     }
 
     const [vendorCount, itemCount] = await Promise.all([

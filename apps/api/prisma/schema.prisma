@@ -468,6 +468,10 @@ model Driver {
   createdAt            DateTime     @default(now())
   updatedAt            DateTime     @updatedAt
 
+  // Taxi dispatch filters online+available candidates before the PostGIS
+  // ST_DWithin distance check (the GIST expression index lives in the
+  // migration — mirrors riders_geo_gist).
+  @@index([isOnline, isAvailable])
   @@map("drivers")
 }
 
@@ -660,6 +664,12 @@ model Item {
   createdAt     DateTime      @default(now())
   updatedAt     DateTime      @updatedAt
 
+  // Menu load (vendor detail, vendor console, reorder) is the hottest read in
+  // the app; browse/trending filter on availability + popularity. Postgres
+  // does not auto-index FK columns.
+  @@index([vendorId])
+  @@index([vendorId, isAvailable])
+  @@index([isAvailable, totalOrdered])
   @@map("items")
 }
 
@@ -837,9 +847,12 @@ model Order {
   @@index([customerId])
   @@index([vendorId])
   @@index([riderId])
+  @@index([driverId])
   @@index([status])
   @@index([placedAt])
   @@index([customerId, status])
+  // The vendor order board reads "my orders in these states" constantly.
+  @@index([vendorId, status])
   @@map("orders")
 }
 

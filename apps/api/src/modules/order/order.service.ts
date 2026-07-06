@@ -295,6 +295,10 @@ export class OrderService {
 
     // Atomic: all orders, stock movements, stats, and the cart deletion commit together
     const orders = await this.prisma.$transaction(async (tx) => {
+      // Serialize concurrent checkouts of one cart: the row lock makes a rapid
+      // double-submit deterministic (the loser waits, then rolls back on the
+      // now-deleted cart) instead of leaning on the delete's P2025 by accident.
+      await tx.$queryRaw`SELECT id FROM "carts" WHERE id = ${cart.id} FOR UPDATE`;
       const created = [];
       let sequence = todayCount;
 
@@ -445,9 +449,13 @@ export class OrderService {
       return created;
     });
 
-    // Post-transaction: emit and notify per vendor (best-effort)
+    // Post-transaction: emit and notify per vendor (best-effort). The socket
+    // event goes to that vendor's room only — a global emit would fan out to
+    // every connected client and leak order metadata platform-wide.
     for (const order of orders) {
-      this.io.emit('order:new', { orderId: order.id, vendorId: order.vendorId, orderNumber: order.orderNumber });
+      this.io
+        .to(`vendor:${order.vendorId}`)
+        .emit('order:new', { orderId: order.id, vendorId: order.vendorId, orderNumber: order.orderNumber });
       const vendorOwner = await this.prisma.vendorOwner.findUnique({ where: { id: order.vendor!.ownerId } });
       if (vendorOwner) {
         await this.notifications.newOrderForVendor(

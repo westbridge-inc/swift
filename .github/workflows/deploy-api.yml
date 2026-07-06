@@ -17,7 +17,11 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - uses: superfly/flyctl-actions/setup-flyctl@master
+      # Pinned tag, not @master — a mutable branch ref on a deploy job is a
+      # supply-chain hole.
+      - uses: superfly/flyctl-actions/setup-flyctl@v1
+        with:
+          version: 0.3.199
 
       - name: Deploy to Fly.io
         run: flyctl deploy --remote-only --config apps/api/fly.toml
