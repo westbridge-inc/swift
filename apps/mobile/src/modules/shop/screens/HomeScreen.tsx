@@ -3,8 +3,7 @@ import { View, Pressable, ScrollView, RefreshControl } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Feather, MaterialCommunityIcons } from '@expo/vector-icons';
 import Animated from 'react-native-reanimated';
-import { useQuery } from '@tanstack/react-query';
-import { customerApi } from '../../../services/api';
+import { useHome } from '../../../hooks';
 import { useLocationStore } from '../../../stores/locationStore';
 import { color } from '@swift/ui';
 import { Text, Heading, Skeleton, List, Image, PressableScale, EmptyState, Scrim, enter, staggerDelay, elevation } from '../../../components/ui';
@@ -290,11 +289,10 @@ export function HomeScreen({ navigation }: any) {
   const { latitude, longitude, address } = useLocationStore();
   const [selectedCuisine, setSelectedCuisine] = useState<string | undefined>(undefined);
 
-  const { data, isLoading, refetch, isRefetching } = useQuery({
-    queryKey: ['home', latitude, longitude],
-    queryFn: async () => (await customerApi.getHome(latitude ?? undefined, longitude ?? undefined)).data,
-  });
-  const home = data?.data ?? {};
+  // Shared hook = shared key namespace: favorites/order mutations invalidate
+  // ['customer','home'], so a locally-keyed query would never refresh.
+  const { data, isLoading, isError, refetch, isRefetching } = useHome<any>(latitude ?? undefined, longitude ?? undefined);
+  const home = data ?? {};
   // First non-empty list — `??` won't fall through an empty `nearby: []`.
   const allVendors: any[] = useMemo(() => {
     const lists: any[][] = [home.nearby, home.openVendors, home.featured].filter(Array.isArray);
@@ -347,6 +345,14 @@ export function HomeScreen({ navigation }: any) {
                 <Skeleton className="mb-md h-28 w-full rounded-3xl" />
                 <Skeleton className="mb-md h-28 w-full rounded-3xl" />
               </View>
+            ) : isError ? (
+              <EmptyState
+                icon="wifi-off"
+                title="Couldn’t load Home"
+                body="Check your connection and try again."
+                actionLabel="Retry"
+                onAction={() => refetch()}
+              />
             ) : (
               <EmptyState icon="storefront-outline" title="Nothing nearby yet" body="We’re adding vendors in your area — check back soon." />
             )

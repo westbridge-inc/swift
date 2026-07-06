@@ -17,10 +17,12 @@ export function OtpVerificationScreen({ route, navigation }: any) {
   const inputRef = useRef<TextInput>(null);
 
   useEffect(() => {
-    if (seconds <= 0) return;
+    // One interval for the screen's lifetime — the functional update carries the
+    // countdown, parking at 0 is a no-op tick, and a resend's setSeconds(60)
+    // simply resumes it. (Previously deps [seconds] rebuilt it every tick.)
     const t = setInterval(() => setSeconds((s) => (s <= 1 ? 0 : s - 1)), 1000);
     return () => clearInterval(t);
-  }, [seconds]);
+  }, []);
 
   const handleVerify = async (code: string) => {
     if (code.length !== 6) return;

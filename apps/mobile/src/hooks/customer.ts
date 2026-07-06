@@ -108,7 +108,11 @@ export function useRateOrder(id: string) {
   return useMutation({
     mutationFn: (body: { vendorScore?: number; vendorComment?: string; riderScore?: number; riderComment?: string }) =>
       unwrap(customerApi.rateOrder(id, body)),
-    onSuccess: () => qc.invalidateQueries({ queryKey: customerKeys.order(id) }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: customerKeys.order(id) });
+      // The list rows carry the "Rate" affordance — refresh them too.
+      qc.invalidateQueries({ queryKey: customerKeys.orders });
+    },
   });
 }
 

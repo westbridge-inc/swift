@@ -358,7 +358,7 @@ function VendorOps({ store, navigation }: any) {
   const orderAction = useOrderAction();
   const ordersQ = useVendorOrders(true);
   const analyticsQ = useVendorAnalytics();
-  const { stores } = useVendorProfile();
+  const { stores, myRole } = useVendorProfile();
   const setSelectedStore = useStoreSwitcher((s) => s.setSelectedStore);
   const qc = useQueryClient();
   const switchStore = (id: string) => {
@@ -462,7 +462,10 @@ function VendorOps({ store, navigation }: any) {
           </Text>
         </View>
 
-        <Button label="Manage menu & inventory" variant="outline" className="mb-lg" onPress={() => navigation.navigate('Menu')} />
+        {/* The Menu tab isn't registered for STAFF — don't show a door that goes nowhere. */}
+        {myRole !== 'STAFF' ? (
+          <Button label="Manage menu & inventory" variant="outline" className="mb-lg" onPress={() => navigation.navigate('Menu')} />
+        ) : null}
 
         {/* New orders */}
         <Heading size="lg" className="mb-sm">{newOrders.length ? `New orders · ${newOrders.length}` : 'New orders'}</Heading>
