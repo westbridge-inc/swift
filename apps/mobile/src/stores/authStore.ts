@@ -2,7 +2,6 @@ import { create } from 'zustand';
 import { persist, createJSONStorage } from 'zustand/middleware';
 import type { User } from '@swift/types';
 import { queryClient } from '../lib/queryClient';
-import { disconnectSocket } from '../services/socket';
 import { zustandStorage } from '../lib/storage';
 
 interface AuthState {
@@ -69,7 +68,9 @@ export const useAuthStore = create<AuthState>()(
       logout: () => {
         set({ user: null, accessToken: null, refreshToken: null, isAuthenticated: false });
         queryClient.clear();
-        disconnectSocket();
+        // Lazy import: socket.ts reads this store, so a static import here
+        // would be a require cycle (Metro warning + fragile init order).
+        void import('../services/socket').then((m) => m.disconnectSocket());
       },
       setLoading: (isLoading) => set({ isLoading }),
     }),

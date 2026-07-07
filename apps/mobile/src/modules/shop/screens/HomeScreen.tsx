@@ -259,15 +259,19 @@ function HomeHeader({ navigation, address, activeOrder, popularItems, topRated, 
         </View>
       ) : null}
 
-      {/* Popular dishes — honest accent prices */}
+      {/* Popular dishes — one compact photo rail, not a wall of rows */}
       {popularItems?.length ? (
         <View>
           <SectionHeader title="Popular in town" action="See all" onAction={() => navigation?.navigate?.('Search')} />
-          <View className="px-lg">
-            {popularItems.slice(0, 5).map((it: any) => (
+          <ScrollView
+            horizontal
+            showsHorizontalScrollIndicator={false}
+            contentContainerStyle={{ paddingHorizontal: 16, gap: 10, paddingBottom: 4 }}
+          >
+            {popularItems.slice(0, 8).map((it: any) => (
               <FoodItemCard key={it.id} item={it} onPress={() => navigation?.navigate?.('VendorDetail', { id: it.vendorId })} />
             ))}
-          </View>
+          </ScrollView>
         </View>
       ) : null}
 
