@@ -1,0 +1,11 @@
+# Gitleaks config — picked up automatically by the CI secret-scan job.
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Known test fixtures that look like secrets but are not"
+regexes = [
+  # The canonical jwt.io example token ({"sub":"1234"}, dummy HMAC) used by the
+  # PII-scrubber test to prove tokens are stripped before any AI prompt.
+  '''eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9\.eyJzdWIiOiIxMjM0In0\.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJVadQssw5c''',
+]

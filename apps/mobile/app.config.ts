@@ -41,6 +41,13 @@ const config: ExpoConfig = {
   android: {
     package: 'gy.swift.app',
     adaptiveIcon: { backgroundColor: '#FFFFFF' },
+    // iOS uses Apple Maps (PROVIDER_DEFAULT, no key). Android's react-native-maps
+    // is always Google-backed and renders a BLANK map without a key — set
+    // ANDROID_GOOGLE_MAPS_API_KEY in the build env (EAS secret / prebuild env,
+    // never committed). Restrict the key to this package name + SHA-1.
+    ...(process.env['ANDROID_GOOGLE_MAPS_API_KEY']
+      ? { config: { googleMaps: { apiKey: process.env['ANDROID_GOOGLE_MAPS_API_KEY'] } } }
+      : {}),
     permissions: [
       'ACCESS_FINE_LOCATION',
       'ACCESS_COARSE_LOCATION',

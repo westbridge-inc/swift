@@ -80,7 +80,6 @@ jobs:
           DATABASE_URL: postgresql://swift:swift@localhost:5432/swift_test
           REDIS_URL: redis://localhost:6379
           JWT_SECRET: ci-test-jwt-secret-not-for-production
-          JWT_REFRESH_SECRET: ci-test-refresh-secret-not-for-production
 
       # Step 15: an untested backup does not exist. Dump the post-suite
       # database and prove it restores into a scratch DB with sane contents.
@@ -129,6 +128,61 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm --filter @swift/admin build
 
+  # Broken or drifted migrations must fail CI, not the deploy: replay every
+  # committed migration on a clean DB, then prove the result matches
+  # schema.prisma exactly (validated locally: expression GIST indexes that live
+  # only in migrations do not false-positive the diff).
+  migration-check:
+    name: Migration Replay
+    runs-on: ubuntu-latest
+    needs: lint-and-type-check
+    services:
+      postgres:
+        image: postgis/postgis:16-3.4
+        env:
+          POSTGRES_USER: swift
+          POSTGRES_PASSWORD: swift
+          POSTGRES_DB: swift_migrate
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd="pg_isready -U swift"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=5
+    steps:
+      - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 20
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Replay all migrations on a clean database
+        run: cd apps/api && npx prisma migrate deploy
+        env:
+          DATABASE_URL: postgresql://swift:swift@localhost:5432/swift_migrate
+      - name: Schema matches migration state
+        run: >
+          cd apps/api && npx prisma migrate diff
+          --from-url postgresql://swift:swift@localhost:5432/swift_migrate
+          --to-schema-datamodel prisma/schema.prisma
+          --exit-code
+
+  # The repo is public — scan the full history for leaked credentials on every
+  # push/PR. Blocking by design.
+  secret-scan:
+    name: Secret Scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: Run gitleaks over full history
+        run: |
+          curl -sSfL https://github.com/gitleaks/gitleaks/releases/download/v8.24.3/gitleaks_8.24.3_linux_x64.tar.gz | tar -xz gitleaks
+          ./gitleaks detect --source . --redact --exit-code 1
+
   security:
     name: Security Scan
     runs-on: ubuntu-latest
@@ -140,8 +194,8 @@ jobs:
           node-version: 20
           cache: pnpm
       - run: pnpm install --frozen-lockfile
+      # Blocking: a HIGH CVE should red the build (verified clean 2026-07-06).
       - name: Audit dependencies
-        run: pnpm audit --audit-level=high || true
+        run: pnpm audit --audit-level=high
       - name: Check for known vulnerabilities
         run: npx audit-ci --high
-        continue-on-error: true

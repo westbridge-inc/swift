@@ -11,6 +11,15 @@ interface NotificationPrefs {
 
 const DEFAULT_PREFS: NotificationPrefs = { push: true, sms: true, email: false };
 
+/** Providers report dead tokens (app uninstalled) — flip them off so future
+ *  sends stop paying for ghosts. Best-effort by design. */
+async function deactivateDeadTokens(prisma: PrismaClient, invalidTokens?: string[]): Promise<void> {
+  if (!invalidTokens?.length) return;
+  await prisma.deviceToken
+    .updateMany({ where: { token: { in: invalidTokens } }, data: { isActive: false } })
+    .catch(() => {});
+}
+
 type NotificationType =
   | 'ORDER_UPDATE'
   | 'PROMOTION'
@@ -73,6 +82,7 @@ export async function escalateVendorAlert(
     if (tokens.length > 0) {
       await channels.push
         .sendPush(tokens.map((t) => t.token), 'Order still waiting!', alert.body, { orderId })
+        .then((r) => deactivateDeadTokens(prisma, r.invalidTokens))
         .catch(() => {});
     }
     return 'realerted';
@@ -129,6 +139,7 @@ export class NotificationService {
         // Channel failures must never break the request path
         await this.channels.push
           .sendPush(tokens.map((t) => t.token), payload.title, payload.body, payload.data)
+          .then((r) => deactivateDeadTokens(this.prisma, r.invalidTokens))
           .catch(() => {});
       }
     }

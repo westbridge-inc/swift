@@ -212,14 +212,21 @@ export async function driverRoutes(app: FastifyInstance) {
     const driver = await app.prisma.driver.findUnique({ where: { userId: request.user.userId } });
     if (!driver) throw new NotFoundError('Driver');
 
-    await app.prisma.driver.update({
-      where: { id: driver.id },
-      data: {
-        currentLat: latitude,
-        currentLng: longitude,
-        lastLocationUpdate: new Date(),
-      },
-    });
+    // DB write debounced to ≥10 s (same policy as the rider route): dispatch
+    // reads the persisted fix, and a <10 s-stale point is noise at ride speeds —
+    // this keeps a busy fleet from hitting PG on every ping.
+    const lastDbWrite = await app.redis.get(`driver:location_db_ts:${driver.id}`);
+    if (!lastDbWrite || Date.now() - parseInt(lastDbWrite, 10) > 10_000) {
+      await app.prisma.driver.update({
+        where: { id: driver.id },
+        data: {
+          currentLat: latitude,
+          currentLng: longitude,
+          lastLocationUpdate: new Date(),
+        },
+      });
+      await app.redis.set(`driver:location_db_ts:${driver.id}`, Date.now().toString());
+    }
 
     // Update position in Redis geo set
     if (driver.isOnline) {

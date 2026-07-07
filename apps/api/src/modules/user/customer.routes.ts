@@ -129,6 +129,11 @@ const notificationPrefsSchema = z.object({
   email: z.boolean().optional(),
 });
 
+const deviceTokenSchema = z.object({
+  token: z.string().min(8).max(512),
+  platform: z.enum(['ios', 'android']),
+});
+
 const switchRoleSchema = z.object({
   role: z.enum(['CUSTOMER', 'VENDOR', 'RIDER', 'DRIVER', 'MOVER']),
 });
@@ -1719,6 +1724,29 @@ export async function customerRoutes(app: FastifyInstance) {
       data: { notificationPrefs: merged },
     });
     return { success: true, data: merged };
+  });
+
+  /** POST /notifications/devices — register this device for push. Upsert on
+   *  the token: re-registering reassigns it to the CURRENT user (one phone,
+   *  new login) and reactivates it. */
+  app.post('/notifications/devices', async (request: AuthRequest) => {
+    const { token, platform } = deviceTokenSchema.parse(request.body);
+    await app.prisma.deviceToken.upsert({
+      where: { token },
+      create: { userId: request.user.userId, token, platform, isActive: true },
+      update: { userId: request.user.userId, platform, isActive: true },
+    });
+    return { success: true, data: { message: 'Device registered' } };
+  });
+
+  /** DELETE /notifications/devices — deactivate on logout (own tokens only). */
+  app.delete('/notifications/devices', async (request: AuthRequest) => {
+    const { token } = deviceTokenSchema.pick({ token: true }).parse(request.body);
+    await app.prisma.deviceToken.updateMany({
+      where: { token, userId: request.user.userId },
+      data: { isActive: false },
+    });
+    return { success: true, data: { message: 'Device deactivated' } };
   });
 
   app.put('/notifications/:id/read', async (request: AuthRequest) => {

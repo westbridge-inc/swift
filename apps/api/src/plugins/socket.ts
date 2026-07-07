@@ -1,6 +1,13 @@
 import fp from 'fastify-plugin';
 import { Server } from 'socket.io';
+import { z } from 'zod';
 import type { FastifyInstance } from 'fastify';
+
+// Socket payloads come straight off the wire from any authenticated client —
+// validate them like request bodies. cuid ids are 25 chars; 64 is headroom.
+const orderEvent = z.object({ orderId: z.string().min(1).max(64) });
+const chatEvent = z.object({ roomId: z.string().min(1).max(64) });
+const vendorEvent = z.object({ vendorId: z.string().min(1).max(64) });
 
 declare module 'fastify' {
   interface FastifyInstance {
@@ -52,11 +59,13 @@ export const socketPlugin = fp(async (app: FastifyInstance) => {
     app.log.info(`Socket connected: ${socket.id} (user: ${userId})`);
 
     // Subscribe to order updates — only if the order belongs to the user
-    socket.on('order:subscribe', async (data: { orderId: string }) => {
+    socket.on('order:subscribe', async (raw: unknown) => {
+      const parsed = orderEvent.safeParse(raw);
+      if (!parsed.success) return;
       try {
         const order = await app.prisma.order.findFirst({
           where: {
-            id: data.orderId,
+            id: parsed.data.orderId,
             OR: [
               { customerId: userId },
               { rider: { userId } },
@@ -67,75 +76,71 @@ export const socketPlugin = fp(async (app: FastifyInstance) => {
           select: { id: true },
         });
         if (order) {
-          socket.join(`order:${data.orderId}`);
+          socket.join(`order:${parsed.data.orderId}`);
         }
       } catch {
         // Non-fatal — socket stays connected
       }
     });
 
-    socket.on('order:unsubscribe', (data: { orderId: string }) => {
-      socket.leave(`order:${data.orderId}`);
+    socket.on('order:unsubscribe', (raw: unknown) => {
+      const parsed = orderEvent.safeParse(raw);
+      if (parsed.success) socket.leave(`order:${parsed.data.orderId}`);
     });
 
     // Chat rooms — only participants can join
-    socket.on('chat:join', async (data: { roomId: string }) => {
+    socket.on('chat:join', async (raw: unknown) => {
+      const parsed = chatEvent.safeParse(raw);
+      if (!parsed.success) return;
       try {
         const participant = await app.prisma.chatRoomParticipant.findUnique({
-          where: { chatRoomId_userId: { chatRoomId: data.roomId, userId } },
+          where: { chatRoomId_userId: { chatRoomId: parsed.data.roomId, userId } },
           select: { id: true },
         });
         if (participant) {
-          socket.join(`chat:${data.roomId}`);
+          socket.join(`chat:${parsed.data.roomId}`);
         }
       } catch {
         // Non-fatal
       }
     });
 
-    socket.on('chat:leave', (data: { roomId: string }) => {
-      socket.leave(`chat:${data.roomId}`);
+    socket.on('chat:leave', (raw: unknown) => {
+      const parsed = chatEvent.safeParse(raw);
+      if (parsed.success) socket.leave(`chat:${parsed.data.roomId}`);
     });
 
-    // Location updates — userId always from verified token, never from data
-    socket.on('location:update', async (data: { lat: number; lng: number; orderId?: string }) => {
-      try {
-        await app.redis.set(
-          `location:${userId}`,
-          JSON.stringify({ lat: data.lat, lng: data.lng, ts: Date.now() }),
-          'EX',
-          300,
-        );
-      } catch {
-        // Redis write failure is non-fatal
-      }
+    // NOTE: there is deliberately no socket `location:update` handler. GPS goes
+    // through the REST routes (rider/driver PUT /location), which verify the
+    // sender owns the entity before persisting or broadcasting — a socket
+    // handler keyed only on orderId would let any signed-in user broadcast fake
+    // positions into someone else's order room.
 
-      if (data.orderId) {
-        io.to(`order:${data.orderId}`).emit('rider:location', {
-          lat: data.lat,
-          lng: data.lng,
-          timestamp: Date.now(),
-        });
-      }
+    // Typing indicators relay only from sockets that were admitted to the room
+    // (`to(room)` itself doesn't require sender membership — socket.rooms does).
+    socket.on('chat:typing', (raw: unknown) => {
+      const parsed = chatEvent.safeParse(raw);
+      if (!parsed.success || !socket.rooms.has(`chat:${parsed.data.roomId}`)) return;
+      socket.to(`chat:${parsed.data.roomId}`).emit('chat:typing', { userId });
     });
 
-    socket.on('chat:typing', (data: { roomId: string }) => {
-      socket.to(`chat:${data.roomId}`).emit('chat:typing', { userId });
-    });
-
-    socket.on('chat:stop-typing', (data: { roomId: string }) => {
-      socket.to(`chat:${data.roomId}`).emit('chat:stop-typing', { userId });
+    socket.on('chat:stop-typing', (raw: unknown) => {
+      const parsed = chatEvent.safeParse(raw);
+      if (!parsed.success || !socket.rooms.has(`chat:${parsed.data.roomId}`)) return;
+      socket.to(`chat:${parsed.data.roomId}`).emit('chat:stop-typing', { userId });
     });
 
     // Vendor order feed — only if the authenticated user owns the vendor
-    socket.on('vendor:subscribe', async (data: { vendorId: string }) => {
+    socket.on('vendor:subscribe', async (raw: unknown) => {
+      const parsed = vendorEvent.safeParse(raw);
+      if (!parsed.success) return;
       try {
         const vendor = await app.prisma.vendor.findFirst({
-          where: { id: data.vendorId, owner: { userId } },
+          where: { id: parsed.data.vendorId, owner: { userId } },
           select: { id: true },
         });
         if (vendor) {
-          socket.join(`vendor:${data.vendorId}`);
+          socket.join(`vendor:${parsed.data.vendorId}`);
         }
       } catch {
         // Non-fatal
