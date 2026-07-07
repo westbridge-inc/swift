@@ -348,6 +348,51 @@ async function main() {
     }
   }
 
+  // ── Item imagery ──────────────────────────────────────────────────────────
+  // Every seeded listing gets a photo that actually matches it (URLs verified
+  // 200 on 2026-07-06) — without one the app falls back to a generic pool and
+  // "Pepperpot" renders as cake. updateMany by name heals existing dev DBs on
+  // re-run; the imageUrl:null guard never stomps a vendor-uploaded photo.
+  const itemImages: Record<string, string> = {
+    Pepperpot: '1544025162-d76694265947',
+    'Cook-Up Rice': '1516684732162-798a0062be99',
+    'Fried Rice': '1603133872878-684f208fb84b',
+    'Chow Mein': '1585032226651-759b368d7246',
+    'Fresh Coconut Water': '1600271886742-f049cd451bba',
+    Mauby: '1541544537156-7627a7a4aa1c',
+    'Chicken Curry & Roti': '1565557623262-b51c2513a641',
+    'Dhal Puri (2)': '1567620905732-2d1ec7ab7445',
+    'Channa & Aloo': '1546069901-ba9599a7e63c',
+    'BBQ Chicken Plate': '1504674900247-0877df9cc836',
+    'Pork Chops': '1608198093002-ad4e005484ec',
+    'Grilled Snapper': '1535140728325-a4d3707eee61',
+    Margherita: '1565299624946-b28f40a0ae38',
+    Pepperoni: '1513104890138-7c749659a591',
+    'Garlic Knots (6)': '1482049016688-2d3e1b311543',
+    'Sweet & Sour Chicken': '1512058564366-18510be2db19',
+    'Beef Lo Mein': '1585032226651-759b368d7246',
+    'Veg Spring Rolls (4)': '1546069901-ba9599a7e63c',
+    'Garlic Butter Shrimp': '1563379926898-05f4575a45d8',
+    'Fish & Bakes': '1535140728325-a4d3707eee61',
+    'Crab Curry': '1565557623262-b51c2513a641',
+    'Pine Tart (3)': '1565958011703-44f9829ba187',
+    'Black Cake Slice': '1486427944299-d1955d23e34d',
+    'Cheese Roll': '1567620905732-2d1ec7ab7445',
+    'Buddha Bowl': '1512621776951-a57141f2eefd',
+    'Avocado Toast': '1482049016688-2d3e1b311543',
+    'Fresh Juice': '1613478223719-2ab802602423',
+    'Basmati Rice 5kg': '1626074353765-517a681e40be',
+    'Cooking Oil 1L': '1620706857370-e1b9770e8bb1',
+    'Claw Hammer': '1426927308491-6380b6a9936f',
+    "Men's Haircut": '1503951914875-452162b0f3f1',
+  };
+  for (const [name, photo] of Object.entries(itemImages)) {
+    await prisma.item.updateMany({
+      where: { name, imageUrl: null },
+      data: { imageUrl: `https://images.unsplash.com/photo-${photo}?w=600&q=80` },
+    });
+  }
+
   // Customer
   await prisma.user.upsert({
     where: { phone: '+5926003000' },
