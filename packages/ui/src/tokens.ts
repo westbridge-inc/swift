@@ -5,8 +5,14 @@
  * shadow in the product. Rebrand = edit THIS file only. If a raw hex / size
  * ever appears inside a component, that is a bug — use the token.
  *
- * Identity: Swift **red (#E8192C) on white**. No gold, no orange. Neutral grays
- * for everything structural; functional colours carry reserved meanings only.
+ * Identity: Swift **Indian Red (#803B3B) on off-white paper**. Brand is Michael
+ * Harding Indian Red No. 123 (pigment PR101 — deep cool iron-oxide red, purplish
+ * undertone), NOT the light CSS `indianred`. Warm neutrals for everything
+ * structural; functional colours carry reserved meanings only.
+ *
+ * Red discipline (brand is red, so): `error` is ONLY for genuine error/failed
+ * states, always paired with an icon or label — never decoration. Brand never
+ * signals an error.
  *
  * Consumers:
  *   - apps/mobile (React Native / NativeWind) -> via tailwind.ts (theme map)
@@ -17,49 +23,51 @@ export const APP_NAME = 'Swift' as const;
 export const BRAND_REGION = 'GY' as const;
 
 /**
- * §Colour — one Swift identity: **red** (#E8192C) on white.
+ * §Colour — one Swift identity: **Indian Red** (#803B3B) on off-white paper.
  * Every brand token — NativeWind `bg-brand-*` / `text-brand-*` classes AND
  * `color.brand[…]` read in JS — draws from this single ramp. Brand is an ACCENT,
- * never flooded — with ONE sanctioned exception: the Home masthead (the "Red
- * Canopy") paints brand-500 as the app's signature moment. (Swift is one app; the earlier per-variant ink partner skin was
- * retired when the two apps collapsed into one.)
+ * never flooded. Ramp anchors: 50 = brandSoft (tints/selected rows), 500 = brand
+ * (buttons/active tabs/links/the mark), 700 = brandDeep (pressed states,
+ * emphasis text on light); in-between stops are interpolated to keep the ramp.
  */
 type BrandRamp = Record<50 | 100 | 200 | 300 | 400 | 500 | 600 | 700 | 800 | 900, string>;
 
-const BRAND_RED: BrandRamp = {
-  50: '#FFF2F3', // red tint — bg-brand-50 surfaces
-  100: '#FBD7DB',
-  200: '#F4A6AD',
-  300: '#ED7480',
-  400: '#EA4555',
-  500: '#E8192C', // Swift Red — consumer identity + primary CTA
-  600: '#BC1320', // Deep Red
-  700: '#930F1A',
-  800: '#6B0B13',
-  900: '#45070C',
+const BRAND_INDIAN_RED: BrandRamp = {
+  50: '#F5EBEC', // brandSoft — tints, selected rows, secondary buttons
+  100: '#E0CBCC',
+  200: '#C6A5A5',
+  300: '#AC7E7E',
+  400: '#955B5B',
+  500: '#803B3B', // brand — Indian Red No. 123 (PR101): primary CTA, active tabs, links, the Swift mark
+  600: '#6E3234',
+  700: '#5C2A2C', // brandDeep — pressed states, emphasis text on light
+  800: '#4A2225',
+  900: '#391A1E',
 };
 
 export const color = {
-  brand: BRAND_RED,
+  brand: BRAND_INDIAN_RED,
   white: '#FFFFFF',
   surface: {
-    base: '#FFFFFF',
-    subtle: '#F7F7F8',
+    base: '#FFFFFF', // cards
+    subtle: '#FBFBF9', // paper — the app background tone
     elevated: '#FFFFFF', // elevate with shadow, not colour
   },
   text: {
-    primary: '#16171C', // Ink
-    secondary: '#6B6B6B',
-    muted: '#8E8E93',
+    primary: '#211A1A', // ink
+    secondary: '#786C6C', // muted
+    muted: '#9C9090', // captions/placeholders — lighter step of `muted`, same warm cast
     onBrand: '#FFFFFF',
   },
   border: {
-    subtle: '#E5E5EA',
-    strong: '#C7C7CC',
+    subtle: '#EAE2E1', // line
+    strong: '#D9CECD', // darker step of `line`, same warm cast
   },
-  /** Functional — RESERVED meanings; never reused for branding/decoration. */
-  success: '#1DA851',
-  error: '#E5342B',
+  /** Functional — RESERVED meanings; never reused for branding/decoration.
+   *  `error` = the Part-3 `danger`: genuine error/failed states ONLY, always
+   *  with an icon or label. */
+  success: '#16A34A',
+  error: '#DC2626',
   warning: '#F59E0B',
 };
 
