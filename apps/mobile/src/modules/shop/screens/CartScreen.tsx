@@ -54,10 +54,10 @@ const CartItemRow = memo(function CartItemRow({ item, busy, onDec, onInc, kind }
   const unavailable = item.isAvailable === false;
   return (
     <View
-      className="mb-md flex-row rounded-3xl bg-surface-base p-md"
-      style={[elevation.card, unavailable ? { opacity: 0.65 } : null]}
+      className="mb-md flex-row border border-border-subtle bg-surface-base p-md"
+      style={[elevation.card, { borderRadius: 12 }, unavailable ? { opacity: 0.65 } : null]}
     >
-      <Image source={{ uri: item.imageUrl || fallbackImage(item.itemId ?? item.id, kind) }} style={{ width: 64, height: 64, borderRadius: 14 }} />
+      <Image source={{ uri: item.imageUrl || fallbackImage(item.itemId ?? item.id, kind) }} style={{ width: 64, height: 64, borderRadius: 8 }} />
       <View className="flex-1 px-md">
         <Text className="font-semibold text-text-primary" style={{ fontSize: 15 }} numberOfLines={1}>{item.name}</Text>
         {item.selectedOptionNames?.length ? (
@@ -70,7 +70,7 @@ const CartItemRow = memo(function CartItemRow({ item, busy, onDec, onInc, kind }
         {unavailable ? <Text className="mt-xs text-xs text-error">Unavailable — remove to checkout</Text> : null}
       </View>
       <View className="items-end justify-between">
-        <Text className="font-extrabold" style={{ fontSize: 15, color: color.brand[600] }}>{money(item.lineTotal)}</Text>
+        <Text className="font-bold" style={{ fontSize: 15, color: color.brand[500] }}>{money(item.lineTotal)}</Text>
         <QtyStepper qty={item.quantity} busy={busy} onDec={onDec} onInc={onInc} />
       </View>
     </View>
@@ -125,10 +125,11 @@ export function CartScreen({ navigation }: any) {
       {vendorId ? (
         <PressableScale
           onPress={() => navigation?.navigate?.('VendorDetail', { id: vendorId })}
-          className="flex-row items-center justify-center rounded-2xl border border-border-subtle bg-surface-base py-md"
+          className="flex-row items-center justify-center border border-border-subtle bg-surface-base py-md"
+          style={{ borderRadius: 12 }}
         >
-          <Feather name="plus" size={15} color={color.brand[600]} />
-          <Text className="ml-sm text-sm font-semibold" style={{ color: color.brand[600] }}>Add more items</Text>
+          <Feather name="plus" size={15} color={color.brand[500]} />
+          <Text className="ml-sm text-sm font-semibold" style={{ color: color.brand[500] }}>Add more items</Text>
         </PressableScale>
       ) : null}
       <Card className="mt-md">
