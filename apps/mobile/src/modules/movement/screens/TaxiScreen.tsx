@@ -1,11 +1,11 @@
 import { useMemo, useRef, useState } from 'react';
-import { View, Linking } from 'react-native';
+import { View, Linking, useWindowDimensions } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import MapView, { Marker, PROVIDER_DEFAULT, Polyline } from 'react-native-maps';
 import BottomSheet, { BottomSheetView, BottomSheetScrollView } from '@gorhom/bottom-sheet';
 import { color } from '@swift/ui';
 import { Feather, MaterialCommunityIcons } from '@expo/vector-icons';
-import { Text, Heading, Card, Button, Spinner, PressableScale, choiceSurface, choiceSurfaceStyle, elevation } from '../../../components/ui';
+import { Text, Heading, Card, Button, Spinner, PressableScale, ConfirmDialog, choiceSurface, choiceSurfaceStyle, elevation } from '../../../components/ui';
 import { useActiveRide, useRideEstimate, useRequestRide, useCancelRide } from '../../../hooks';
 import { useLocationStore } from '../../../stores/locationStore';
 import { GEORGETOWN } from '../../../hooks/useDeviceLocation';
@@ -58,7 +58,27 @@ function BackButton({ navigation }: any) {
   );
 }
 
+// Same marker language as the courier map: pickup = ink dot in a white ring,
+// drop-off = the brand map pin.
+function PickupDot() {
+  return (
+    <View
+      style={[
+        { width: 16, height: 16, borderRadius: 8, backgroundColor: color.text.primary, borderWidth: 3, borderColor: '#fff' },
+        elevation.card,
+      ]}
+    />
+  );
+}
+function DropPin() {
+  return <MaterialCommunityIcons name="map-marker" size={36} color={color.brand[600]} />;
+}
+
+const SHEET_STYLE = { backgroundColor: color.surface.subtle, borderTopLeftRadius: 24, borderTopRightRadius: 24 };
+const HANDLE_STYLE = { width: 44, backgroundColor: color.border.strong };
+
 export function TaxiScreen({ navigation }: any) {
+  const { height: winH } = useWindowDimensions();
   const { latitude, longitude, address } = useLocationStore();
   const { data: activeRide, isLoading: loadingActive } = useActiveRide<any>(true);
   const requestRide = useRequestRide();
@@ -129,9 +149,23 @@ export function TaxiScreen({ navigation }: any) {
 
   return (
     <View style={{ flex: 1 }} className="bg-surface-base">
-      <MapView provider={PROVIDER_DEFAULT} style={{ flex: 1 }} region={routeRegion} showsUserLocation>
-        {pickupLL ? <Marker coordinate={pickupLL} title="Pickup" /> : null}
-        {dropoffLL ? <Marker coordinate={dropoffLL} title="Drop-off" pinColor={color.brand[500]} /> : null}
+      <MapView
+        provider={PROVIDER_DEFAULT}
+        style={{ flex: 1 }}
+        region={routeRegion}
+        showsUserLocation
+        mapPadding={{ top: 0, left: 0, right: 0, bottom: Math.round(winH * 0.38) }}
+      >
+        {pickupLL ? (
+          <Marker coordinate={pickupLL} title="Pickup" anchor={{ x: 0.5, y: 0.5 }}>
+            <PickupDot />
+          </Marker>
+        ) : null}
+        {dropoffLL ? (
+          <Marker coordinate={dropoffLL} title="Drop-off" anchor={{ x: 0.5, y: 1 }}>
+            <DropPin />
+          </Marker>
+        ) : null}
         {pickupLL && dropoffLL ? (
           <Polyline coordinates={[pickupLL, dropoffLL]} strokeColor={color.brand[500]} strokeWidth={4} />
         ) : null}
@@ -139,7 +173,13 @@ export function TaxiScreen({ navigation }: any) {
 
       <BackButton navigation={navigation} />
 
-      <BottomSheet index={0} snapPoints={['42%', '85%']} enableDynamicSizing={false} backgroundStyle={{ backgroundColor: color.surface.subtle }}>
+      <BottomSheet
+        index={0}
+        snapPoints={['42%', '85%']}
+        enableDynamicSizing={false}
+        backgroundStyle={SHEET_STYLE}
+        handleIndicatorStyle={HANDLE_STYLE}
+      >
         <BottomSheetScrollView contentContainerStyle={{ paddingHorizontal: 16, paddingBottom: 32 }}>
           {/* Route — pickup → destination, connected */}
           <View className="rounded-3xl bg-surface-base p-lg" style={elevation.card}>
@@ -267,7 +307,9 @@ function TierRow({
 }
 
 function ActiveRide({ navigation, ride, cancelRide }: any) {
+  const { height: winH } = useWindowDimensions();
   const sheetRef = useRef<BottomSheet>(null);
+  const [confirmCancel, setConfirmCancel] = useState(false);
   const d = ride.driver;
   const pickup = ride.pickupLat != null ? { latitude: Number(ride.pickupLat), longitude: Number(ride.pickupLng) } : null;
   const drop =
@@ -278,12 +320,28 @@ function ActiveRide({ navigation, ride, cancelRide }: any) {
 
   return (
     <View style={{ flex: 1 }} className="bg-surface-base">
-      <MapView provider={PROVIDER_DEFAULT} style={{ flex: 1 }} region={region}>
-        {pickup ? <Marker coordinate={pickup} title="Pickup" /> : null}
-        {drop ? <Marker coordinate={drop} title="Drop-off" pinColor={color.brand[500]} /> : null}
+      <MapView
+        provider={PROVIDER_DEFAULT}
+        style={{ flex: 1 }}
+        region={region}
+        mapPadding={{ top: 0, left: 0, right: 0, bottom: Math.round(winH * 0.34) }}
+      >
+        {pickup ? (
+          <Marker coordinate={pickup} title="Pickup" anchor={{ x: 0.5, y: 0.5 }}>
+            <PickupDot />
+          </Marker>
+        ) : null}
+        {drop ? (
+          <Marker coordinate={drop} title="Drop-off" anchor={{ x: 0.5, y: 1 }}>
+            <DropPin />
+          </Marker>
+        ) : null}
         {driverLoc ? (
-          <Marker coordinate={driverLoc} title="Driver" pinColor={color.text.primary}>
-            <View className="h-9 w-9 items-center justify-center rounded-full bg-text-primary" style={{ elevation: 4 }}>
+          <Marker coordinate={driverLoc} title="Driver" anchor={{ x: 0.5, y: 0.5 }}>
+            <View
+              className="h-9 w-9 items-center justify-center rounded-full"
+              style={[{ backgroundColor: color.text.primary }, elevation.card]}
+            >
               <MaterialCommunityIcons name="car" size={18} color="#fff" />
             </View>
           </Marker>
@@ -292,7 +350,14 @@ function ActiveRide({ navigation, ride, cancelRide }: any) {
 
       <BackButton navigation={navigation} />
 
-      <BottomSheet ref={sheetRef} index={0} snapPoints={['38%', '70%']} enableDynamicSizing={false} backgroundStyle={{ backgroundColor: color.surface.subtle }}>
+      <BottomSheet
+        ref={sheetRef}
+        index={0}
+        snapPoints={['38%', '70%']}
+        enableDynamicSizing={false}
+        backgroundStyle={SHEET_STYLE}
+        handleIndicatorStyle={HANDLE_STYLE}
+      >
         <BottomSheetView style={{ paddingHorizontal: 16, paddingBottom: 24 }}>
           <Heading size="lg">{STATUS_LABEL[ride.status] ?? 'On the way'}</Heading>
           <Text className="mt-xs text-sm text-text-secondary">
@@ -364,13 +429,28 @@ function ActiveRide({ navigation, ride, cancelRide }: any) {
 
           <Button
             label="Cancel ride"
-            variant="outline"
+            variant="neutral"
             className="mt-lg"
             loading={cancelRide.isPending}
-            onPress={() => cancelRide.mutate({ id: ride.id })}
+            onPress={() => setConfirmCancel(true)}
           />
         </BottomSheetView>
       </BottomSheet>
+
+      <ConfirmDialog
+        open={confirmCancel}
+        title="Cancel this ride?"
+        body={d ? 'Your driver is already on the way.' : 'We’ll stop looking for a driver.'}
+        confirmLabel="Cancel ride"
+        cancelLabel="Keep ride"
+        destructive
+        loading={cancelRide.isPending}
+        onConfirm={() => {
+          setConfirmCancel(false);
+          cancelRide.mutate({ id: ride.id });
+        }}
+        onClose={() => setConfirmCancel(false)}
+      />
     </View>
   );
 }
