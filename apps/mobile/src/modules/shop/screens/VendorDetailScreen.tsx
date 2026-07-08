@@ -14,7 +14,7 @@ type Row = { type: 'header'; key: string; name: string } | { type: 'item'; key: 
 type Section = { name: string; row: number };
 
 const HERO_H = 264;
-const SHEET_R = 24;
+const SHEET_R = 16; // kit sheet radius
 const SHADOW = { shadowColor: '#000', shadowOpacity: 0.12, shadowRadius: 6, shadowOffset: { width: 0, height: 2 }, elevation: 4 } as const;
 
 function BackButton({ onPress }: { onPress?: () => void }) {
@@ -51,29 +51,36 @@ function FavoriteButton({ vendorId, initial }: { vendorId: string; initial?: boo
   );
 }
 
+// Kit "Card Food – Landscape": white r12 card, photo left (r8), name /
+// description / brand-bold price, + chip on the photo.
 const MenuItemRow = memo(function MenuItemRow({ item, onOpen, kind }: { item: any; onOpen: () => void; kind?: ImageKind }) {
   const unavailable = item.isAvailable === false;
   const customizable = (item.optionGroups?.length ?? 0) > 0;
   return (
     <PressableScale onPress={onOpen} disabled={unavailable}>
-      <View className="mx-lg flex-row items-start border-b border-border-subtle py-md" style={unavailable ? { opacity: 0.55 } : undefined}>
-        <View className="flex-1 pr-md">
-          <Text className="text-base font-semibold text-text-primary">{item.name}</Text>
-          {item.description ? (
-            <Text className="mt-xs text-sm text-text-secondary" numberOfLines={2}>{item.description}</Text>
-          ) : null}
-          <Text className="mt-sm text-sm font-extrabold" style={{ color: color.brand[600] }}>{money(item.customerPrice ?? item.basePrice)}</Text>
-          {customizable && !unavailable ? (
-            <Text className="mt-xs text-xs font-medium text-text-muted">Customizable</Text>
-          ) : null}
-        </View>
-        <View style={{ width: 96, height: 96 }}>
-          <Image source={{ uri: item.imageUrl || fallbackImage(item.id, kind) }} style={{ width: 96, height: 96, borderRadius: 16 }} />
+      <View
+        className="mx-lg mb-sm flex-row border border-border-subtle bg-surface-base"
+        style={[elevation.card, { borderRadius: 12, padding: 12 }, unavailable ? { opacity: 0.55 } : null]}
+      >
+        <View style={{ width: 100, height: 100 }}>
+          <Image source={{ uri: item.imageUrl || fallbackImage(item.id, kind) }} style={{ width: 100, height: 100, borderRadius: 8 }} />
           <View
             pointerEvents="none"
-            style={[{ position: 'absolute', bottom: 6, right: 6, width: 30, height: 30, borderRadius: 15, alignItems: 'center', justifyContent: 'center', backgroundColor: color.surface.base }, SHADOW]}
+            style={[{ position: 'absolute', bottom: 6, right: 6, width: 28, height: 28, borderRadius: 14, alignItems: 'center', justifyContent: 'center', backgroundColor: color.surface.base }, SHADOW]}
           >
-            <Feather name={unavailable ? 'slash' : 'plus'} size={16} color={unavailable ? color.text.muted : color.text.primary} />
+            <Feather name={unavailable ? 'slash' : 'plus'} size={15} color={unavailable ? color.text.muted : color.text.primary} />
+          </View>
+        </View>
+        <View className="ml-md flex-1">
+          <Text className="font-medium text-text-primary" style={{ fontSize: 16 }} numberOfLines={1}>{item.name}</Text>
+          {item.description ? (
+            <Text className="mt-0.5 text-text-secondary" style={{ fontSize: 12 }} numberOfLines={2}>{item.description}</Text>
+          ) : null}
+          <View className="mt-auto flex-row items-center justify-between pt-xs">
+            <Text className="font-bold" style={{ fontSize: 16, color: color.brand[500] }}>{money(item.customerPrice ?? item.basePrice)}</Text>
+            {customizable && !unavailable ? (
+              <Text className="font-medium text-text-muted" style={{ fontSize: 12 }}>Customizable</Text>
+            ) : null}
           </View>
         </View>
       </View>
@@ -164,38 +171,60 @@ function VendorHeader({ vendor, onReviews }: { vendor: any; onReviews?: () => vo
           paddingHorizontal: 16,
         }}
       >
-        <StatusPill closed={closed} />
-        <Heading size="3xl" className="mt-sm text-text-primary">{vendor.name}</Heading>
+        {/* Kit headline: name with the open/closed chip on the same row */}
+        <View className="flex-row items-center justify-between">
+          <Heading size="2xl" className="flex-1 pr-sm text-text-primary" numberOfLines={1}>{vendor.name}</Heading>
+          <StatusPill closed={closed} />
+        </View>
         {vendor.description ? <Text className="mt-xs text-sm text-text-secondary" numberOfLines={2}>{vendor.description}</Text> : null}
-        <PressableScale onPress={onReviews}>
-          <View className="mt-sm flex-row items-center">
-            <MaterialCommunityIcons name="star" size={15} color={color.brand[500]} />
-            <Text className="ml-1 text-sm font-bold text-text-primary">{rating}</Text>
-            <Text className="ml-1 text-sm text-text-muted">{vendor.totalRatings ? `(${vendor.totalRatings} ratings)` : '(no reviews yet)'}</Text>
-            <Text className="mx-2 text-text-muted">·</Text>
-            <Feather name="clock" size={14} color={color.text.secondary} />
-            <Text className="ml-1 text-sm text-text-secondary">{vendor.estimatedPrepTime ?? 25} min</Text>
-            {vendor.distanceKm != null ? (
-              <>
-                <Text className="mx-2 text-text-muted">·</Text>
-                <Text className="text-sm text-text-secondary">{vendor.distanceKm} km</Text>
-              </>
-            ) : null}
-            <Feather name="chevron-right" size={16} color={color.text.muted} style={{ marginLeft: 4 }} />
+
+        {/* Kit info strip: value row over a tiny label, one column per fact;
+            the rating column doubles as the reviews entry. */}
+        <View className="mt-md flex-row">
+          <PressableScale onPress={onReviews} className="mr-2xl">
+            <View className="flex-row items-center">
+              <MaterialCommunityIcons name="star" size={16} color={color.warning} />
+              <Text className="ml-1 font-semibold text-text-primary" style={{ fontSize: 14 }}>{rating}</Text>
+              <Text className="ml-0.5 text-text-secondary" style={{ fontSize: 14 }}>
+                {vendor.totalRatings ? ` (${vendor.totalRatings})` : ''}
+              </Text>
+            </View>
+            <View className="mt-0.5 flex-row items-center">
+              <Text className="font-medium text-text-muted" style={{ fontSize: 10 }}>See reviews</Text>
+              <Feather name="chevron-right" size={10} color={color.text.muted} />
+            </View>
+          </PressableScale>
+          {vendor.distanceKm != null ? (
+            <View className="mr-2xl">
+              <View className="flex-row items-center">
+                <MaterialCommunityIcons name="map-marker-outline" size={16} color={color.brand[500]} />
+                <Text className="ml-1 font-semibold text-text-primary" style={{ fontSize: 14 }}>{vendor.distanceKm} km</Text>
+              </View>
+              <Text className="mt-0.5 font-medium text-text-muted" style={{ fontSize: 10 }}>Distance</Text>
+            </View>
+          ) : null}
+          <View>
+            <View className="flex-row items-center">
+              <Feather name="clock" size={15} color={color.brand[500]} />
+              <Text className="ml-1 font-semibold text-text-primary" style={{ fontSize: 14 }}>{vendor.estimatedPrepTime ?? 25} min</Text>
+            </View>
+            <Text className="mt-0.5 font-medium text-text-muted" style={{ fontSize: 10 }}>Arrive</Text>
           </View>
-        </PressableScale>
+        </View>
         {/* The model — these are the real prices */}
-        <View className="mt-md flex-row items-center rounded-2xl bg-surface-subtle px-md py-sm">
+        <View className="mt-md flex-row items-center bg-surface-subtle px-md py-sm" style={{ borderRadius: 8 }}>
           <MaterialCommunityIcons name="cash-check" size={16} color={color.success} />
           <Text className="ml-sm flex-1 text-xs font-semibold text-text-secondary">
             The vendor’s real prices — no fees, no markup. Pay cash.
             {vendor.minOrderAmount ? ` Minimum order ${money(vendor.minOrderAmount)}.` : ''}
           </Text>
         </View>
-        {/* Live promotions (§4.2) — use the code at checkout */}
+        {/* Live promotions (§4.2) — kit promo row: icon in a tint circle */}
         {(vendor.promos ?? []).map((p: any) => (
-          <View key={p.code} className="mt-sm flex-row items-center rounded-2xl px-md py-sm" style={{ backgroundColor: color.brand[50] }}>
-            <MaterialCommunityIcons name="tag" size={16} color={color.brand[600]} />
+          <View key={p.code} className="mt-sm flex-row items-center px-md py-sm" style={{ backgroundColor: color.brand[50], borderRadius: 8 }}>
+            <View className="items-center justify-center" style={{ width: 32, height: 32, borderRadius: 100, backgroundColor: color.surface.base }}>
+              <MaterialCommunityIcons name="tag" size={16} color={color.brand[500]} />
+            </View>
             <View className="ml-sm flex-1">
               <Text className="text-sm font-semibold" style={{ color: color.brand[700] }}>
                 {p.code} — {p.discountType === 'PERCENTAGE' ? `${p.discountValue}% off` : `${money(p.discountValue)} off`}
@@ -330,7 +359,7 @@ export function VendorDetailScreen({ navigation, route }: any) {
         }
         renderItem={({ item: row }: { item: Row }) =>
           row.type === 'header' ? (
-            <Heading size="lg" className="px-lg pb-sm pt-lg">{row.name}</Heading>
+            <Text className="px-lg pb-sm pt-lg font-semibold text-text-primary" style={{ fontSize: 16 }}>{row.name}</Text>
           ) : (
             <MenuItemRow
               item={row.item}
