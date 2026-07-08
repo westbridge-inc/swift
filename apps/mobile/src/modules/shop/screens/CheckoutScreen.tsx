@@ -231,7 +231,8 @@ export function CheckoutScreen({ navigation }: any) {
               const active = a.id === effectiveAddressId;
               return (
                 <PressableScale key={a.id} onPress={() => { setSelectedId(a.id); setAddress.mutate(a.id); }}>
-                  <Card style={active ? { borderColor: color.brand[500] } : undefined} className="mb-sm">
+                  {/* Kit selected-row language: soft brand tint, no border */}
+                  <Card style={active ? { backgroundColor: color.brand[50] } : undefined} className="mb-sm">
                     <View className="flex-row items-center justify-between">
                       <View className="flex-1 pr-md">
                         <Text className="text-base font-semibold">{a.label || a.addressLine1}</Text>

@@ -43,7 +43,7 @@ export const VendorPhotoCard = memo(function VendorPhotoCard({
 }) {
   return (
     <PressableScale onPress={onPress} style={{ width, marginRight: 12 }}>
-      <View className="border border-border-subtle bg-surface-base" style={[elevation.card, { borderRadius: 12, padding: 10 }]}>
+      <View className="bg-surface-base" style={[elevation.card, { borderRadius: 12, padding: 10 }]}>
         <View>
           <Image source={{ uri: vendorImage(vendor) }} style={{ width: '100%', height: 104, borderRadius: 8 }} />
           <View style={{ position: 'absolute', top: 7, right: 7 }}>
@@ -74,7 +74,7 @@ export const VendorCardGrid = memo(function VendorCardGrid({
   const closed = vendor.isCurrentlyOpen === false;
   return (
     <PressableScale onPress={onPress} style={{ flex: 1 }}>
-      <View className="border border-border-subtle bg-surface-base" style={[elevation.card, { borderRadius: 12, padding: 10 }]}>
+      <View className="bg-surface-base" style={[elevation.card, { borderRadius: 12, padding: 10 }]}>
         <View>
           <Image source={{ uri: vendorImage(vendor) }} style={{ width: '100%', height: 104, borderRadius: 8 }} />
           <View style={{ position: 'absolute', top: 7, right: 7 }}>
@@ -110,7 +110,7 @@ export const VendorRow = memo(function VendorRow({ vendor, onPress }: { vendor: 
   return (
     <PressableScale onPress={onPress} className="mb-md">
       <View
-        className="flex-row border border-border-subtle bg-surface-base"
+        className="flex-row bg-surface-base"
         style={[elevation.card, { borderRadius: 12, padding: 12 }]}
       >
         <Image source={{ uri: vendorImage(vendor) }} style={{ width: 100, height: 100, borderRadius: 8 }} />

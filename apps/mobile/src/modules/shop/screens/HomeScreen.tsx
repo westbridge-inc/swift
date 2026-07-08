@@ -6,7 +6,7 @@ import { useHome } from '../../../hooks';
 import { useLocationStore } from '../../../stores/locationStore';
 import { useAuthStore } from '../../../stores/authStore';
 import { color } from '@swift/ui';
-import { Text, Skeleton, List, EmptyState, Avatar, SectionHeader, elevation } from '../../../components/ui';
+import { Text, Skeleton, List, EmptyState, Avatar, SectionHeader, BrandGradient, elevation } from '../../../components/ui';
 import { FoodItemCard } from '../../../components/customer/FoodItemCard';
 import { VendorPhotoCard, VendorCardGrid, ratingOf } from '../../../components/customer/VendorCards';
 import { CategoryCard } from '../../../components/customer/CategoryCard';
@@ -44,8 +44,8 @@ function CuisineChips({ cuisines, selected, onSelect }: { cuisines: string[]; se
           <Pressable
             key={c}
             onPress={() => onSelect(c === 'All' ? undefined : c)}
-            className={active ? 'mr-sm rounded-full px-lg py-sm' : 'mr-sm rounded-full border border-border-subtle bg-surface-base px-lg py-sm'}
-            style={active ? { backgroundColor: color.brand[500] } : undefined}
+            className={active ? 'mr-sm rounded-full px-lg py-sm' : 'mr-sm rounded-full bg-surface-base px-lg py-sm'}
+            style={active ? { backgroundColor: color.brand[500] } : elevation.card}
           >
             <Text className={active ? 'font-semibold text-white' : 'font-medium text-text-secondary'} style={{ fontSize: 14 }}>{c}</Text>
           </Pressable>
@@ -76,8 +76,8 @@ function HomeHeader({ navigation, address, user, activeOrder, popularItems, topR
   const firstName = user?.name?.trim()?.split(/\s+/)[0];
   return (
     <View>
-      {/* ── The canopy — kit Home V1's brand masthead with the V3 header row
-           (avatar · location · bell), greeting and the display line. */}
+      {/* ── The canopy — kit Home V1's brand masthead (warm gradient) with the
+           V3 header row (avatar · location · bell), greeting and display line. */}
       <View
         className="px-lg pt-md"
         style={{
@@ -85,8 +85,10 @@ function HomeHeader({ navigation, address, user, activeOrder, popularItems, topR
           paddingBottom: 46,
           borderBottomLeftRadius: 28,
           borderBottomRightRadius: 28,
+          overflow: 'hidden',
         }}
       >
+        <BrandGradient />
         <View className="flex-row items-center">
           <Pressable onPress={() => navigation?.navigate?.('Account')}>
             <Avatar name={user?.name} uri={mediaUrl(user?.avatar)} size={40} />
@@ -110,7 +112,7 @@ function HomeHeader({ navigation, address, user, activeOrder, popularItems, topR
         <Text className="mt-lg font-semibold text-white" style={{ fontSize: 20 }}>
           {firstName ? `Hi ${firstName}, ${greeting()}! 👋` : `Hi, ${greeting()}! 👋`}
         </Text>
-        <Text className="mt-xs font-display font-extrabold text-white" style={{ fontSize: 30, lineHeight: 36 }}>
+        <Text className="mt-xs font-display font-extrabold text-white" style={{ fontSize: 32, lineHeight: 38 }}>
           Order anything in town
         </Text>
         <Text className="mt-xs text-white" style={{ fontSize: 14, opacity: 0.85 }}>
@@ -172,7 +174,7 @@ function HomeHeader({ navigation, address, user, activeOrder, popularItems, topR
 
       {/* Trust — local + safe */}
       <View
-        className="mx-lg mt-xl flex-row items-center border border-border-subtle bg-surface-base px-lg py-md"
+        className="mx-lg mt-xl flex-row items-center bg-surface-base px-lg py-md"
         style={[elevation.card, { borderRadius: 12 }]}
       >
         <View className="items-center justify-center" style={{ width: 36, height: 36, borderRadius: 100, backgroundColor: color.brand[50] }}>

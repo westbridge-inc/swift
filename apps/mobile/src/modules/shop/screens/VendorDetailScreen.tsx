@@ -59,7 +59,7 @@ const MenuItemRow = memo(function MenuItemRow({ item, onOpen, kind }: { item: an
   return (
     <PressableScale onPress={onOpen} disabled={unavailable}>
       <View
-        className="mx-lg mb-sm flex-row border border-border-subtle bg-surface-base"
+        className="mx-lg mb-sm flex-row bg-surface-base"
         style={[elevation.card, { borderRadius: 12, padding: 12 }, unavailable ? { opacity: 0.55 } : null]}
       >
         <View style={{ width: 100, height: 100 }}>

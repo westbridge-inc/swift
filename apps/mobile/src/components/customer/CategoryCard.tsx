@@ -19,7 +19,7 @@ export function CategoryCard({
   return (
     <PressableScale onPress={onPress} style={{ flex: 1 }}>
       <View
-        className="items-center border border-border-subtle bg-surface-base py-md"
+        className="items-center bg-surface-base py-md"
         style={[elevation.card, { borderRadius: 12 }]}
       >
         <View

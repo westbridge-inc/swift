@@ -29,7 +29,7 @@ function CartHeader({ navigation, title, onClear }: any) {
 /** One pill for quantity: minus becomes a trash glyph at qty 1 (tap = remove). */
 function QtyStepper({ qty, busy, onDec, onInc }: { qty: number; busy?: boolean; onDec: () => void; onInc: () => void }) {
   return (
-    <View className="flex-row items-center rounded-full border border-border-strong bg-surface-base" style={{ height: 34 }}>
+    <View className="flex-row items-center rounded-full bg-surface-subtle" style={{ height: 34 }}>
       <PressableScale onPress={onDec} disabled={busy} hitSlop={8} className="h-full items-center justify-center pl-md pr-sm">
         <Feather name={qty <= 1 ? 'trash-2' : 'minus'} size={14} color={color.text.primary} />
       </PressableScale>
@@ -54,7 +54,7 @@ const CartItemRow = memo(function CartItemRow({ item, busy, onDec, onInc, kind }
   const unavailable = item.isAvailable === false;
   return (
     <View
-      className="mb-md flex-row border border-border-subtle bg-surface-base p-md"
+      className="mb-md flex-row bg-surface-base p-md"
       style={[elevation.card, { borderRadius: 12 }, unavailable ? { opacity: 0.65 } : null]}
     >
       <Image source={{ uri: item.imageUrl || fallbackImage(item.itemId ?? item.id, kind) }} style={{ width: 64, height: 64, borderRadius: 8 }} />
@@ -125,7 +125,7 @@ export function CartScreen({ navigation }: any) {
       {vendorId ? (
         <PressableScale
           onPress={() => navigation?.navigate?.('VendorDetail', { id: vendorId })}
-          className="flex-row items-center justify-center border border-border-subtle bg-surface-base py-md"
+          className="flex-row items-center justify-center bg-surface-base py-md"
           style={{ borderRadius: 12 }}
         >
           <Feather name="plus" size={15} color={color.brand[500]} />

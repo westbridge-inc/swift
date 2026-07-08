@@ -35,7 +35,7 @@ export const FoodItemCard = memo(function FoodItemCard({
   const rating = Number(item.averageRating ?? 0);
   return (
     <PressableScale onPress={onPress} style={{ width }}>
-      <View className="border border-border-subtle bg-surface-base p-sm" style={[elevation.card, { borderRadius: 12 }]}>
+      <View className="bg-surface-base p-sm" style={[elevation.card, { borderRadius: 12 }]}>
         <View>
           <Image source={{ uri: itemImage(item) }} style={{ width: '100%', height: 118, borderRadius: 8 }} />
           <View
