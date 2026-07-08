@@ -1,12 +1,14 @@
 import { memo } from 'react';
 import { View, RefreshControl } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { Feather, MaterialCommunityIcons } from '@expo/vector-icons';
+import { Image } from 'expo-image';
+import { MaterialCommunityIcons } from '@expo/vector-icons';
 import { color } from '@swift/ui';
-import { Text, Heading, Card, Badge, Skeleton, List, PressableScale, EmptyState } from '../../../components/ui';
+import { Text, Card, Badge, Skeleton, List, PressableScale, EmptyState } from '../../../components/ui';
 import { useOrders, useReorder } from '../../../hooks';
 import { useAuthStore } from '../../../stores/authStore';
 import { money } from '../../../lib/money';
+import { vendorImage } from '../../../lib/images';
 
 const TYPE_LABEL: Record<string, string> = {
   TAXI: 'Taxi ride',
@@ -20,7 +22,8 @@ const TYPE_ICON: Record<string, keyof typeof MaterialCommunityIcons.glyphMap> = 
 };
 const iconFor = (t?: string) => TYPE_ICON[t ?? ''] ?? 'silverware-fork-knife';
 
-const statusTone = (s: string): 'brand' | 'success' => (s === 'DELIVERED' || s === 'COMPLETED' ? 'success' : 'brand');
+const statusTone = (s: string): 'brand' | 'success' | 'error' =>
+  s === 'DELIVERED' || s === 'COMPLETED' ? 'success' : s === 'CANCELLED' || s === 'REFUNDED' ? 'error' : 'brand';
 const prettyStatus = (s: string) => (s || '').toLowerCase().replace(/_/g, ' ').replace(/^\w/, (c) => c.toUpperCase());
 function fmtDate(d?: string) {
   if (!d) return '';
@@ -31,44 +34,61 @@ function fmtDate(d?: string) {
   }
 }
 
+/** Kit "Card Recent Order": landscape thumb r8 + info column, borderless card. */
 const OrderRow = memo(function OrderRow({ order, onTrack, onReorder, onRate, reordering }: any) {
   const title = order.vendor?.name ?? TYPE_LABEL[order.orderType] ?? 'Order';
   const completed = order.status === 'DELIVERED' || order.status === 'COMPLETED';
   const reorderable = !!order.vendor && completed;
+  // Same identity Home/Search show for this vendor (cover → logo → type-aware photo).
+  const logo = order.vendor ? vendorImage(order.vendor) : null;
+  const meta = [
+    order.itemCount ? `${order.itemCount} item${order.itemCount > 1 ? 's' : ''}` : '',
+    fmtDate(order.placedAt),
+  ]
+    .filter(Boolean)
+    .join(' · ');
   return (
     <PressableScale onPress={onTrack}>
       <Card className="mb-md">
         <View className="flex-row items-center">
-          <View className="h-11 w-11 items-center justify-center rounded-full" style={{ backgroundColor: color.brand[50] }}>
-            <MaterialCommunityIcons name={iconFor(order.orderType)} size={20} color={color.brand[500]} />
+          {logo ? (
+            <Image source={{ uri: logo }} style={{ width: 96, height: 60, borderRadius: 8 }} contentFit="cover" transition={150} />
+          ) : (
+            <View
+              className="items-center justify-center"
+              style={{ width: 96, height: 60, borderRadius: 8, backgroundColor: color.brand[50] }}
+            >
+              <MaterialCommunityIcons name={iconFor(order.orderType)} size={24} color={color.brand[500]} />
+            </View>
+          )}
+          <View className="ml-md flex-1">
+            <View className="flex-row items-center">
+              <Text className="flex-1 text-base font-semibold text-text-primary" numberOfLines={1}>{title}</Text>
+              <Badge label={prettyStatus(order.status)} tone={statusTone(order.status)} />
+            </View>
+            {meta ? <Text className="mt-xs text-xs text-text-secondary">{meta}</Text> : null}
+            <Text className="mt-xs text-sm font-bold" style={{ color: color.brand[500] }}>{money(order.totalAmount)}</Text>
           </View>
-          <View className="flex-1 px-md">
-            <Text className="text-base font-semibold" numberOfLines={1}>{title}</Text>
-            <Text className="mt-xs text-sm text-text-secondary">
-              {order.itemCount ? `${order.itemCount} item${order.itemCount > 1 ? 's' : ''} · ` : ''}
-              {money(order.totalAmount)}
-              {fmtDate(order.placedAt) ? ` · ${fmtDate(order.placedAt)}` : ''}
-            </Text>
-          </View>
-          <Badge label={prettyStatus(order.status)} tone={statusTone(order.status)} />
         </View>
         {completed ? (
-          <View className="mt-sm flex-row items-center" style={{ gap: 8 }}>
+          <View className="mt-md flex-row" style={{ gap: 8 }}>
             <PressableScale
               onPress={onRate}
-              className="flex-row items-center rounded-full border px-lg py-sm" style={{ borderColor: color.brand[500] }}
+              className="flex-1 flex-row items-center justify-center rounded-full bg-surface-subtle"
+              style={{ height: 40 }}
             >
-              <MaterialCommunityIcons name="star-outline" size={14} color={color.brand[500]} />
-              <Text className="ml-sm text-sm font-semibold" style={{ color: color.brand[500] }}>Rate</Text>
+              <MaterialCommunityIcons name="star-outline" size={15} color={color.text.primary} />
+              <Text className="ml-sm text-sm font-semibold text-text-primary">Rate</Text>
             </PressableScale>
             {reorderable ? (
               <PressableScale
                 onPress={onReorder}
                 disabled={reordering}
-                className="flex-row items-center rounded-full border px-lg py-sm" style={{ borderColor: color.brand[500] }}
+                className="flex-1 flex-row items-center justify-center rounded-full"
+                style={{ height: 40, backgroundColor: color.brand[500] }}
               >
-                <Feather name="refresh-cw" size={13} color={color.brand[500]} />
-                <Text className="ml-sm text-sm font-semibold" style={{ color: color.brand[500] }}>Reorder</Text>
+                <MaterialCommunityIcons name="refresh" size={15} color={color.white} />
+                <Text className="ml-sm text-sm font-semibold text-white">Re-Order</Text>
               </PressableScale>
             ) : null}
           </View>
@@ -78,13 +98,24 @@ const OrderRow = memo(function OrderRow({ order, onTrack, onReorder, onRate, reo
   );
 });
 
+function Header() {
+  return (
+    <View className="px-lg pb-md pt-md">
+      <Text className="font-display font-extrabold text-text-primary" style={{ fontSize: 26, lineHeight: 32 }}>
+        Orders
+      </Text>
+      <Text className="mt-xs text-sm text-text-secondary">Food, groceries, rides and more</Text>
+    </View>
+  );
+}
+
 export function OrdersScreen({ navigation }: any) {
   const isAuthenticated = useAuthStore((s) => s.isAuthenticated);
   const promptLogin = useAuthStore((s) => s.promptLogin);
   if (!isAuthenticated) {
     return (
-      <SafeAreaView style={{ flex: 1 }} edges={['top']} className="bg-surface-subtle">
-        <View className="px-lg pb-sm pt-md"><Heading size="2xl">Orders</Heading></View>
+      <SafeAreaView style={{ flex: 1, backgroundColor: color.surface.subtle }} edges={['top']}>
+        <Header />
         <View className="flex-1 items-center justify-center">
           <EmptyState
             icon="receipt-text-outline"
@@ -107,9 +138,9 @@ function SignedInOrders({ navigation }: any) {
 
   if (isLoading) {
     return (
-      <SafeAreaView style={{ flex: 1 }} edges={['top']} className="bg-surface-subtle">
-        <View className="px-lg pt-md">
-          <Heading size="2xl" className="mb-md">Orders</Heading>
+      <SafeAreaView style={{ flex: 1, backgroundColor: color.surface.subtle }} edges={['top']}>
+        <Header />
+        <View className="px-lg">
           {[0, 1, 2, 3].map((i) => <Skeleton key={i} className="mb-md h-24 w-full rounded-2xl" />)}
         </View>
       </SafeAreaView>
@@ -117,10 +148,8 @@ function SignedInOrders({ navigation }: any) {
   }
 
   return (
-    <SafeAreaView style={{ flex: 1 }} edges={['top']} className="bg-surface-subtle">
-      <View className="px-lg pb-sm pt-md">
-        <Heading size="2xl">Orders</Heading>
-      </View>
+    <SafeAreaView style={{ flex: 1, backgroundColor: color.surface.subtle }} edges={['top']}>
+      <Header />
       {isError ? (
         <View className="flex-1 items-center justify-center">
           <EmptyState

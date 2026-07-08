@@ -3,7 +3,7 @@ import { View, ScrollView, RefreshControl } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Feather } from '@expo/vector-icons';
 import { color } from '@swift/ui';
-import { Text, Skeleton, List, Input, PressableScale, EmptyState, Canopy } from '../../../components/ui';
+import { Text, Skeleton, List, Input, PressableScale, EmptyState, elevation } from '../../../components/ui';
 import { VendorRow } from '../../../components/customer/VendorCards';
 import { useVendors } from '../../../hooks';
 import { useLocationStore } from '../../../stores/locationStore';
@@ -26,8 +26,8 @@ function Pill({ label, active, onPress }: { label: string; active: boolean; onPr
   return (
     <PressableScale
       onPress={onPress}
-      className={active ? 'rounded-full border px-lg py-sm' : 'rounded-full border border-border-subtle bg-surface-base px-lg py-sm'}
-      style={active ? { backgroundColor: color.brand[500], borderColor: color.brand[500] } : undefined}
+      className={active ? 'rounded-full px-lg py-sm' : 'rounded-full bg-surface-base px-lg py-sm'}
+      style={active ? { backgroundColor: color.brand[500] } : elevation.card}
     >
       <Text className={active ? 'text-sm font-semibold text-white' : 'text-sm font-semibold text-text-secondary'}>{label}</Text>
     </PressableScale>
@@ -68,10 +68,14 @@ export function SearchScreen({ navigation }: any) {
   const vendors = data ?? [];
 
   return (
-    <SafeAreaView style={{ flex: 1, backgroundColor: color.brand[700] }} edges={['top']}>
-      <Canopy>
-        <Text className="font-display font-extrabold text-white" style={{ fontSize: 26, lineHeight: 32 }}>
-          Explore
+    // Kit search screens are light-first: title + field on paper, no canopy.
+    <SafeAreaView style={{ flex: 1, backgroundColor: color.surface.subtle }} edges={['top']}>
+      <View className="px-lg pb-md pt-md">
+        <Text className="font-display font-extrabold text-text-primary" style={{ fontSize: 26, lineHeight: 32 }}>
+          Search
+        </Text>
+        <Text className="mt-xs text-text-secondary" style={{ fontSize: 14 }}>
+          Discover food, groceries, shops and services
         </Text>
         <View style={{ marginTop: 12 }}>
           <Input
@@ -79,7 +83,7 @@ export function SearchScreen({ navigation }: any) {
             onChangeText={setText}
             placeholder="Search food, shops, services…"
             returnKeyType="search"
-            left={<Feather name="search" size={18} color={color.brand[500]} />}
+            left={<Feather name="search" size={18} color={color.brand[500]} style={{ marginRight: 8 }} />}
             right={
               text ? (
                 <PressableScale onPress={() => setText('')} hitSlop={8}>
@@ -89,9 +93,9 @@ export function SearchScreen({ navigation }: any) {
             }
           />
         </View>
-      </Canopy>
+      </View>
 
-      <View className="bg-surface-subtle" style={{ flex: 1, marginTop: -28, paddingTop: 28 }}>
+      <View className="bg-surface-subtle" style={{ flex: 1 }}>
 
       {/* Category chips */}
       <View className="mb-sm">
@@ -104,10 +108,10 @@ export function SearchScreen({ navigation }: any) {
                 onPress={() => setFilter(item.key)}
                 className={
                   active
-                    ? 'rounded-full border px-lg py-sm'
-                    : 'rounded-full border border-border-subtle bg-surface-base px-lg py-sm'
+                    ? 'rounded-full px-lg py-sm'
+                    : 'rounded-full bg-surface-base px-lg py-sm'
                 }
-                style={active ? { backgroundColor: color.brand[500], borderColor: color.brand[500] } : undefined}
+                style={active ? { backgroundColor: color.brand[500] } : elevation.card}
               >
                 <Text className={active ? 'text-sm font-semibold text-white' : 'text-sm font-semibold text-text-secondary'}>
                   {item.label}
@@ -135,7 +139,7 @@ export function SearchScreen({ navigation }: any) {
         {isLoading ? (
           <View className="px-lg pt-sm">
             {[0, 1, 2].map((i) => (
-              <Skeleton key={i} className="mb-md h-28 w-full rounded-3xl" />
+              <Skeleton key={i} className="mb-md h-28 w-full" style={{ borderRadius: 12 }} />
             ))}
           </View>
         ) : isError ? (

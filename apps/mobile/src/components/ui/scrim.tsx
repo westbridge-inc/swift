@@ -5,8 +5,10 @@ import { View, type ViewStyle } from 'react-native';
  * imagery. Implemented as stacked opacity slices (NO svg): react-native-svg
  * LinearGradient url(#) refs render SOLID BLACK on the new architecture, which
  * silently turned every scrim into a block. 12 slices with eased alpha read as
- * a smooth gradient at card sizes. Anchored to the bottom edge; size with
- * `height`, or pass `cover` for a full overlay.
+ * a smooth gradient at card sizes. Anchored to the bottom edge by default
+ * (`anchor="top"` flips it — dark at the top, for status-bar/back-button
+ * legibility over hero photos); size with `height`, or pass `cover` for a
+ * full overlay.
  */
 const SLICES = 12;
 
@@ -20,23 +22,29 @@ export function Scrim({
   from = 'rgba(0,0,0,0)',
   to = 'rgba(0,0,0,0.72)',
   cover = false,
+  anchor = 'bottom',
   style,
 }: {
   height?: number;
   from?: string;
   to?: string;
   cover?: boolean;
+  anchor?: 'bottom' | 'top';
   style?: ViewStyle;
 }) {
   const a0 = alphaOf(from);
   const a1 = alphaOf(to);
+  const top = anchor === 'top';
   const pos: ViewStyle = cover
     ? { position: 'absolute', left: 0, right: 0, top: 0, bottom: 0 }
-    : { position: 'absolute', left: 0, right: 0, bottom: 0, height };
+    : top
+      ? { position: 'absolute', left: 0, right: 0, top: 0, height }
+      : { position: 'absolute', left: 0, right: 0, bottom: 0, height };
   return (
     <View pointerEvents="none" style={[pos, style]}>
       {Array.from({ length: SLICES }, (_, i) => {
-        const t = (i + 1) / SLICES; // 0→1 top→bottom
+        // `to` is always the dark end, at the anchored edge.
+        const t = top ? 1 - i / SLICES : (i + 1) / SLICES;
         const eased = t * t; // ease-in reads closer to a real photo scrim
         const alpha = a0 + (a1 - a0) * eased;
         return (

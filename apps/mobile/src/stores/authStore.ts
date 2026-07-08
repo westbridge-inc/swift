@@ -1,6 +1,7 @@
 import { create } from 'zustand';
 import { persist, createJSONStorage } from 'zustand/middleware';
 import type { User } from '@swift/types';
+import { queryClient } from '../lib/queryClient';
 import { zustandStorage } from '../lib/storage';
 
 interface AuthState {
@@ -61,7 +62,16 @@ export const useAuthStore = create<AuthState>()(
           currencySymbol: c.currencySymbol ?? null,
         }),
       // Keep countryCode through logout so we don't re-prompt for country on sign-out.
-      logout: () => set({ user: null, accessToken: null, refreshToken: null, isAuthenticated: false }),
+      // Everything session-scoped goes with the session: the query cache (a shared
+      // device must not show the next user this user's orders/addresses) and the
+      // socket (authed with the old token; the next session reconnects fresh).
+      logout: () => {
+        set({ user: null, accessToken: null, refreshToken: null, isAuthenticated: false });
+        queryClient.clear();
+        // Lazy import: socket.ts reads this store, so a static import here
+        // would be a require cycle (Metro warning + fragile init order).
+        void import('../services/socket').then((m) => m.disconnectSocket());
+      },
       setLoading: (isLoading) => set({ isLoading }),
     }),
     {

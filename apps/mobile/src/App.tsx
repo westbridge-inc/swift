@@ -3,7 +3,7 @@ import '../global.css';
 import { useCallback, useEffect, useState } from 'react';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
-import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import { QueryClientProvider } from '@tanstack/react-query';
 import { useFonts } from 'expo-font';
 import * as SplashScreen from 'expo-splash-screen';
 import { SpaceGrotesk_500Medium, SpaceGrotesk_700Bold } from '@expo-google-fonts/space-grotesk';
@@ -13,8 +13,9 @@ import {
   Inter_600SemiBold,
   Inter_700Bold,
 } from '@expo-google-fonts/inter';
-import { GluestackUIProvider } from './components/ui';
+import { GluestackUIProvider, ToastHost } from './components/ui';
 import { RootNavigator } from './navigation/RootNavigator';
+import { queryClient } from './lib/queryClient';
 import { initSecureStorage } from './lib/storage';
 import { track } from './lib/analytics';
 import { useAuthStore } from './stores/authStore';
@@ -23,10 +24,6 @@ import { useDeviceLocation } from './hooks/useDeviceLocation';
 
 // Hold the native splash until the brand fonts are ready (avoids a System-font flash).
 SplashScreen.preventAutoHideAsync().catch(() => {});
-
-const queryClient = new QueryClient({
-  defaultOptions: { queries: { staleTime: 30_000, retry: 2 } },
-});
 
 // Resolves device GPS into locationStore on launch. Rendered only after the
 // encrypted store is open (see App `ready` gate) so the persisted write inside
@@ -79,6 +76,7 @@ export default function App() {
           <QueryClientProvider client={queryClient}>
             <LocationBootstrap />
             <RootNavigator />
+            <ToastHost />
           </QueryClientProvider>
         </GluestackUIProvider>
       </SafeAreaProvider>

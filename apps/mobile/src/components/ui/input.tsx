@@ -11,19 +11,22 @@ type Props = TextInputProps & {
   right?: ReactNode;
 };
 
-/** Owned text field (Gluestack-v3 style) on @swift/ui tokens, with icon slots. */
+/** Owned text field on @swift/ui tokens, with icon slots. Kit field spec:
+ *  white surface, hairline border, r8, 52px tall. */
 export function Input({ className, containerClassName, left, right, ...props }: Props) {
   return (
     <View
       className={cn(
-        'flex-row items-center rounded-2xl border border-border-subtle bg-surface-subtle px-lg',
+        'flex-row items-center border border-border-subtle bg-surface-base px-lg',
         containerClassName,
       )}
+      style={{ borderRadius: 8 }}
     >
       {left}
       <TextInput
         placeholderTextColor={color.text.muted}
-        className={cn('flex-1 py-md font-body text-base text-text-primary', className)}
+        className={cn('flex-1 font-body text-base text-text-primary', className)}
+        style={{ paddingVertical: 14 }}
         {...props}
       />
       {right}

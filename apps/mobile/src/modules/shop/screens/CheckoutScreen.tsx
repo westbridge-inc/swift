@@ -3,7 +3,7 @@ import { View, ScrollView } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Feather, MaterialCommunityIcons } from '@expo/vector-icons';
 import { color } from '@swift/ui';
-import { Text, Heading, Card, Button, Spinner, PressableScale, ChoiceChip, Input, Badge } from '../../../components/ui';
+import { Text, Heading, Card, Button, Spinner, PressableScale, ChoiceChip, Input, Badge, toast } from '../../../components/ui';
 import { useCart, useAddresses, useSetCartAddress, useSetCartTip, usePlaceOrder, useItemSlots } from '../../../hooks';
 import { customerApi } from '../../../services/api';
 import { money } from '../../../lib/money';
@@ -44,8 +44,10 @@ export function CheckoutScreen({ navigation }: any) {
     try {
       const res = await customerApi.validatePromo(code);
       const data = res.data?.data ?? {};
-      setPromo({ code, discount: Number(data.estimatedDiscount ?? 0), description: data.description });
+      const discount = Number(data.estimatedDiscount ?? 0);
+      setPromo({ code, discount, description: data.description });
       setPromoInput('');
+      toast.success(`${code} applied`, discount > 0 ? `Saves ${money(discount)}` : data.description);
     } catch (e: any) {
       setPromo(null);
       setPromoError(e?.response?.data?.error?.message ?? e?.response?.data?.message ?? 'That code didn’t work');
@@ -229,7 +231,8 @@ export function CheckoutScreen({ navigation }: any) {
               const active = a.id === effectiveAddressId;
               return (
                 <PressableScale key={a.id} onPress={() => { setSelectedId(a.id); setAddress.mutate(a.id); }}>
-                  <Card style={active ? { borderColor: color.brand[500] } : undefined} className="mb-sm">
+                  {/* Kit selected-row language: soft brand tint, no border */}
+                  <Card style={active ? { backgroundColor: color.brand[50] } : undefined} className="mb-sm">
                     <View className="flex-row items-center justify-between">
                       <View className="flex-1 pr-md">
                         <Text className="text-base font-semibold">{a.label || a.addressLine1}</Text>
@@ -247,25 +250,27 @@ export function CheckoutScreen({ navigation }: any) {
           </>
           )}
 
-          {/* Payment */}
+          {/* Payment — informational, not a choice (V1 is cash-only), so it stays
+              quiet: no selected border, no check. */}
           <Heading size="lg" className="mb-sm mt-lg">Payment</Heading>
-          <Card className="" style={{ borderColor: color.brand[500] }}>
-            <View className="flex-row items-center justify-between">
-              <View className="flex-row items-center">
-                <MaterialCommunityIcons name="cash" size={22} color={color.success} />
-                <Text className="ml-sm text-base font-semibold">
+          <Card>
+            <View className="flex-row items-center">
+              <View className="h-9 w-9 items-center justify-center rounded-full bg-surface-subtle">
+                <MaterialCommunityIcons name="cash" size={20} color={color.success} />
+              </View>
+              <View className="ml-md flex-1">
+                <Text className="text-base font-semibold">
                   {isService ? 'Cash on completion' : isPickup ? 'Cash on pickup' : 'Cash on delivery'}
                 </Text>
+                <Text className="mt-0.5 text-xs text-text-muted">
+                  {isService
+                    ? 'Pay in cash when the service is done. No platform fees.'
+                    : isPickup
+                      ? 'Pay in cash when you collect. No platform fees.'
+                      : 'Pay the rider in cash. No card needed, no platform fees.'}
+                </Text>
               </View>
-              <Feather name="check-circle" size={20} color={color.brand[500]} />
             </View>
-            <Text className="mt-xs text-xs text-text-muted">
-              {isService
-                ? 'Pay in cash when the service is done. No platform fees.'
-                : isPickup
-                  ? 'Pay in cash when you collect. No platform fees.'
-                  : 'Pay the rider in cash. No card needed, no platform fees.'}
-            </Text>
           </Card>
 
           {/* Tip */}
@@ -325,7 +330,10 @@ export function CheckoutScreen({ navigation }: any) {
         </View>
       </ScrollView>
 
-      <View className="absolute inset-x-0 bottom-0 border-t border-border-subtle bg-surface-base px-lg pb-2xl pt-md">
+      <View
+        className="absolute inset-x-0 bottom-0 bg-surface-base px-lg pb-2xl pt-md"
+        style={{ shadowColor: '#000', shadowOffset: { width: 0, height: -6 }, shadowOpacity: 0.1, shadowRadius: 18, elevation: 14 }}
+      >
         {placeOrder.isError ? (
           (placeOrder.error as any)?.response?.data?.code === 'ID_VERIFICATION_REQUIRED' ? (
             <View className="mb-sm">

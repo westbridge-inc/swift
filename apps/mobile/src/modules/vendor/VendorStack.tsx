@@ -6,7 +6,7 @@ import { createNativeStackNavigator } from '@react-navigation/native-stack';
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
 import { color } from '@swift/ui';
 import { Feather, MaterialCommunityIcons } from '@expo/vector-icons';
-import { Text, Heading, Card, Button, Spinner, Skeleton, Image, Badge, elevation, PressableScale, EmptyState, ChoiceChip, Input, SettingsGroup, SettingsRow } from '../../components/ui';
+import { Text, Heading, Card, Button, Spinner, Skeleton, Image, Badge, elevation, PressableScale, EmptyState, ChoiceChip, Input, SettingsGroup, SettingsRow, ActionSheet, toast } from '../../components/ui';
 import { DocumentChecklist } from '../../components/onboarding/DocumentChecklist';
 import { useBecomePartner, useVerificationStatus } from '../../hooks/verification';
 import {
@@ -358,7 +358,7 @@ function VendorOps({ store, navigation }: any) {
   const orderAction = useOrderAction();
   const ordersQ = useVendorOrders(true);
   const analyticsQ = useVendorAnalytics();
-  const { stores } = useVendorProfile();
+  const { stores, myRole } = useVendorProfile();
   const setSelectedStore = useStoreSwitcher((s) => s.setSelectedStore);
   const qc = useQueryClient();
   const switchStore = (id: string) => {
@@ -462,7 +462,10 @@ function VendorOps({ store, navigation }: any) {
           </Text>
         </View>
 
-        <Button label="Manage menu & inventory" variant="outline" className="mb-lg" onPress={() => navigation.navigate('Menu')} />
+        {/* The Menu tab isn't registered for STAFF — don't show a door that goes nowhere. */}
+        {myRole !== 'STAFF' ? (
+          <Button label="Manage menu & inventory" variant="outline" className="mb-lg" onPress={() => navigation.navigate('Menu')} />
+        ) : null}
 
         {/* New orders */}
         <Heading size="lg" className="mb-sm">{newOrders.length ? `New orders · ${newOrders.length}` : 'New orders'}</Heading>
@@ -887,13 +890,27 @@ function VendorItemEditorScreen({ navigation, route }: any) {
   const busy = save.isPending || uploadImage.isPending;
   const previewUri = localPhoto?.uri ?? mediaUrl(existing?.imageUrl) ?? undefined;
 
-  const pickPhoto = async () => {
-    const perm = await ImagePicker.requestMediaLibraryPermissionsAsync();
-    if (!perm.granted) return;
-    const res = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ImagePicker.MediaTypeOptions.Images, quality: 0.8 });
+  const [photoMenu, setPhotoMenu] = useState(false);
+
+  const applyAsset = (res: ImagePicker.ImagePickerResult) => {
     if (res.canceled || !res.assets?.[0]) return;
     const a = res.assets[0];
     setLocalPhoto({ uri: a.uri, name: a.fileName ?? 'item.jpg', type: a.mimeType ?? 'image/jpeg' });
+  };
+
+  const pickFromLibrary = async () => {
+    const perm = await ImagePicker.requestMediaLibraryPermissionsAsync();
+    if (!perm.granted) return;
+    applyAsset(await ImagePicker.launchImageLibraryAsync({ mediaTypes: ImagePicker.MediaTypeOptions.Images, quality: 0.8 }));
+  };
+
+  const takePhoto = async () => {
+    const perm = await ImagePicker.requestCameraPermissionsAsync();
+    if (!perm.granted) {
+      toast.error('Camera access needed', 'Allow camera access in Settings to take photos.');
+      return;
+    }
+    applyAsset(await ImagePicker.launchCameraAsync({ quality: 0.8 }));
   };
 
   const submit = async () => {
@@ -940,7 +957,7 @@ function VendorItemEditorScreen({ navigation, route }: any) {
       <SubHeader title={existing ? 'Edit item' : 'New item'} navigation={navigation} />
       <ScrollView className="flex-1" contentContainerStyle={{ paddingHorizontal: 16, paddingBottom: 32 }} showsVerticalScrollIndicator={false}>
         {/* Photo */}
-        <PressableScale onPress={pickPhoto} className="mb-sm items-center justify-center overflow-hidden rounded-2xl bg-surface-subtle" style={{ height: 160 }}>
+        <PressableScale onPress={() => setPhotoMenu(true)} className="mb-sm items-center justify-center overflow-hidden rounded-2xl bg-surface-subtle" style={{ height: 160 }}>
           {previewUri ? (
             <Image source={{ uri: previewUri }} style={{ width: '100%', height: 160 }} />
           ) : (
@@ -951,7 +968,7 @@ function VendorItemEditorScreen({ navigation, route }: any) {
           )}
         </PressableScale>
         {previewUri ? (
-          <PressableScale onPress={pickPhoto} className="mb-md items-center" hitSlop={6} disabled={uploadImage.isPending}>
+          <PressableScale onPress={() => setPhotoMenu(true)} className="mb-md items-center" hitSlop={6} disabled={uploadImage.isPending}>
             <Text className="text-sm font-semibold" style={{ color: color.brand[600] }}>{uploadImage.isPending ? 'Uploading…' : 'Change photo'}</Text>
           </PressableScale>
         ) : null}
@@ -1058,6 +1075,18 @@ function VendorItemEditorScreen({ navigation, route }: any) {
           onPress={submit}
         />
       </ScrollView>
+      <ActionSheet
+        open={photoMenu}
+        onClose={() => setPhotoMenu(false)}
+        title="Item photo"
+        actions={[
+          { label: 'Take photo', icon: 'camera-outline', onPress: takePhoto },
+          { label: 'Choose from library', icon: 'image-outline', onPress: pickFromLibrary },
+          ...(localPhoto
+            ? [{ label: 'Remove selected photo', icon: 'trash-can-outline' as const, destructive: true, onPress: () => setLocalPhoto(null) }]
+            : []),
+        ]}
+      />
     </SafeAreaView>
   );
 }

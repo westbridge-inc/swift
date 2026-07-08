@@ -10,7 +10,7 @@ function Stars({ value, size = 14 }: { value: number; size?: number }) {
   return (
     <View className="flex-row">
       {[1, 2, 3, 4, 5].map((i) => (
-        <MaterialCommunityIcons key={i} name={i <= rounded ? 'star' : 'star-outline'} size={size} color={color.brand[500]} />
+        <MaterialCommunityIcons key={i} name={i <= rounded ? 'star' : 'star-outline'} size={size} color={color.warning} />
       ))}
     </View>
   );
@@ -59,9 +59,9 @@ export function VendorReviewsScreen({ navigation, route }: any) {
               return (
                 <View key={s} className="mb-1 flex-row items-center">
                   <Text className="w-3 text-xs text-text-secondary">{s}</Text>
-                  <MaterialCommunityIcons name="star" size={12} color={color.brand[500]} />
+                  <MaterialCommunityIcons name="star" size={12} color={color.warning} />
                   <View className="mx-sm h-2 flex-1 overflow-hidden rounded-full bg-surface-subtle">
-                    <View style={{ width: `${(n / maxDist) * 100}%`, height: '100%', backgroundColor: color.brand[500] }} />
+                    <View style={{ width: `${(n / maxDist) * 100}%`, height: '100%', backgroundColor: color.warning }} />
                   </View>
                   <Text className="w-7 text-right text-xs text-text-muted">{n}</Text>
                 </View>

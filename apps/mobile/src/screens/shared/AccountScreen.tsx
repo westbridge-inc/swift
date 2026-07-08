@@ -1,9 +1,10 @@
+import { useState } from 'react';
 import { View, ScrollView, Share } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 import { Image } from 'expo-image';
 import { color } from '@swift/ui';
-import { Text, Heading, Badge, Button, SettingsGroup, SettingsRow } from '../../components/ui';
+import { Text, Heading, Badge, Button, ConfirmDialog, SettingsGroup, SettingsRow } from '../../components/ui';
 import { useAuthStore } from '../../stores/authStore';
 import { useProfile, useAddresses } from '../../hooks';
 import { mediaUrl } from '../../lib/images';
@@ -18,9 +19,11 @@ export function AccountScreen({ navigation }: any) {
 function GuestAccount() {
   const promptLogin = useAuthStore((s) => s.promptLogin);
   return (
-    <SafeAreaView style={{ flex: 1 }} edges={['top']} className="bg-surface-subtle">
+    <SafeAreaView style={{ flex: 1, backgroundColor: color.surface.subtle }} edges={['top']}>
       <View className="px-lg pb-sm pt-md">
-        <Heading size="2xl">Account</Heading>
+        <Text className="font-display font-extrabold text-text-primary" style={{ fontSize: 26, lineHeight: 32 }}>
+          Account
+        </Text>
       </View>
       <View className="flex-1 items-center justify-center px-2xl">
         <View className="h-16 w-16 items-center justify-center rounded-full" style={{ backgroundColor: color.brand[50] }}>
@@ -41,6 +44,7 @@ function GuestAccount() {
 
 function SignedInAccount({ navigation }: any) {
   const { user, logout } = useAuthStore();
+  const [confirmLogout, setConfirmLogout] = useState(false);
   const { data: profile } = useProfile<any>();
   const { data: addresses } = useAddresses<any[]>();
 
@@ -63,31 +67,25 @@ function SignedInAccount({ navigation }: any) {
   };
 
   return (
-    <SafeAreaView style={{ flex: 1 }} edges={['top']} className="bg-surface-subtle">
-      <View className="px-lg pb-sm pt-md">
-        <Heading size="2xl">Account</Heading>
-      </View>
+    <SafeAreaView style={{ flex: 1, backgroundColor: color.surface.subtle }} edges={['top']}>
       <ScrollView className="flex-1" contentContainerStyle={{ paddingHorizontal: 16, paddingBottom: 40 }} showsVerticalScrollIndicator={false}>
-        {/* Profile */}
-        <SettingsGroup>
-          <View className="flex-row items-center px-md py-md">
-            {avatar ? (
-              <Image
-                source={{ uri: mediaUrl(avatar) ?? undefined }}
-                style={{ width: 56, height: 56, borderRadius: 28 }}
-                contentFit="cover"
-              />
-            ) : (
-              <View className="h-14 w-14 items-center justify-center rounded-full 0" style={{ backgroundColor: color.brand[50] }}>
-                <Text className="text-lg font-bold text-white">{initials}</Text>
-              </View>
-            )}
-            <View className="ml-md flex-1">
-              <Text className="text-lg font-bold text-text-primary" numberOfLines={1}>{fullName}</Text>
-              {phone ? <Text className="mt-0.5 text-sm text-text-secondary">{phone}</Text> : null}
+        {/* Kit profile header — identity centered on the screen, not boxed */}
+        <View className="items-center pb-xl pt-lg">
+          {avatar ? (
+            <Image
+              source={{ uri: mediaUrl(avatar) ?? undefined }}
+              style={{ width: 84, height: 84, borderRadius: 42 }}
+              contentFit="cover"
+              transition={150}
+            />
+          ) : (
+            <View className="items-center justify-center" style={{ width: 84, height: 84, borderRadius: 42, backgroundColor: color.brand[50] }}>
+              <Text className="text-xl font-bold" style={{ color: color.brand[600] }}>{initials}</Text>
             </View>
-          </View>
-        </SettingsGroup>
+          )}
+          <Text className="mt-md text-xl font-semibold text-text-primary" numberOfLines={1}>{fullName}</Text>
+          {phone ? <Text className="mt-xs text-sm text-text-secondary">{phone}</Text> : null}
+        </View>
 
         {/* Activity */}
         <SettingsGroup header="Activity">
@@ -127,7 +125,7 @@ function SignedInAccount({ navigation }: any) {
               right={a.isDefault ? <Badge label="Default" tone="success" /> : undefined}
             />
           ))}
-          <SettingsRow icon="plus" iconColor={color.brand[500]} label="Add address" onPress={() => navigation?.navigate?.('AddAddress')} />
+          <SettingsRow icon="plus" label="Add address" onPress={() => navigation?.navigate?.('AddAddress')} />
         </SettingsGroup>
 
         {/* Account */}
@@ -144,11 +142,23 @@ function SignedInAccount({ navigation }: any) {
 
         {/* Log out */}
         <SettingsGroup>
-          <SettingsRow icon="logout" label="Log out" danger onPress={logout} />
+          <SettingsRow icon="logout" label="Log out" danger onPress={() => setConfirmLogout(true)} />
         </SettingsGroup>
 
         <Text className="mb-md mt-xs text-center text-xs text-text-muted">Swift · Guyana · v1.0</Text>
       </ScrollView>
+      <ConfirmDialog
+        open={confirmLogout}
+        title="Log out?"
+        body="You'll sign back in with your phone number."
+        confirmLabel="Log out"
+        destructive
+        onConfirm={() => {
+          setConfirmLogout(false);
+          logout();
+        }}
+        onClose={() => setConfirmLogout(false)}
+      />
     </SafeAreaView>
   );
 }

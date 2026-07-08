@@ -19,4 +19,10 @@ export { StepProgress } from './step-progress';
 export { Input } from './input';
 export { ChoiceChip, choiceSurface, choiceSurfaceStyle } from './choice-chip';
 export { PromoBanner } from './promo-banner';
-export * from './canopy';
+export * from './canopy'; // Canopy + BrandGradient
+export { toast, ToastHost } from './toast';
+export { ActionSheet, type SheetAction } from './action-sheet';
+export { ConfirmDialog } from './confirm-dialog';
+export { Switch } from './switch';
+export { Avatar } from './avatar';
+export { SectionHeader } from './section-header';

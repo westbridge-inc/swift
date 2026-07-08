@@ -22,7 +22,7 @@ export function FavoritesScreen({ navigation }: any) {
 
       {isLoading ? (
         <View className="px-lg pt-sm">
-          {[0, 1, 2].map((i) => <Skeleton key={i} className="mb-md h-28 w-full rounded-3xl" />)}
+          {[0, 1, 2].map((i) => <Skeleton key={i} className="mb-md h-28 w-full rounded-2xl" />)}
         </View>
       ) : (
         <List

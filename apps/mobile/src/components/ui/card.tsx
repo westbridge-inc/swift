@@ -2,8 +2,9 @@ import { View, type ViewProps, type StyleProp, type ViewStyle } from 'react-nati
 import { cn } from './cn';
 import { elevation as elevationStyles } from './elevation';
 
-/** White, rounded, elevated surface (shadow not colour). `elevation` picks the
- *  resting `card` tier (default) or the lifted `raised` tier. */
+/** White, rounded, elevated surface — kit treatment: borderless, shadow not
+ *  colour. `elevation` picks the resting `card` tier (default) or the lifted
+ *  `raised` tier. */
 export function Card({
   className,
   elevation = 'card',
@@ -12,7 +13,7 @@ export function Card({
 }: ViewProps & { className?: string; elevation?: 'card' | 'raised'; style?: StyleProp<ViewStyle> }) {
   return (
     <View
-      className={cn('bg-surface-base rounded-2xl border border-border-subtle p-lg', className)}
+      className={cn('bg-surface-base rounded-2xl p-lg', className)}
       style={[elevationStyles[elevation], style]}
       {...props}
     />
