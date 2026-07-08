@@ -1448,7 +1448,7 @@ export async function customerRoutes(app: FastifyInstance) {
       app.prisma.order.findMany({
         where,
         include: {
-          vendor: { select: { id: true, name: true, slug: true, logoUrl: true, vendorType: true } },
+          vendor: { select: { id: true, name: true, slug: true, logoUrl: true, coverImageUrl: true, vendorType: true } },
           items: { select: { id: true, name: true, quantity: true, totalCustomer: true } },
           rider: { include: { user: { select: { firstName: true, avatar: true } } } },
         },
@@ -1496,7 +1496,7 @@ export async function customerRoutes(app: FastifyInstance) {
       include: {
         vendor: {
           select: {
-            id: true, name: true, slug: true, logoUrl: true,
+            id: true, name: true, slug: true, logoUrl: true, coverImageUrl: true,
             vendorType: true, phone: true, latitude: true, longitude: true,
           },
         },

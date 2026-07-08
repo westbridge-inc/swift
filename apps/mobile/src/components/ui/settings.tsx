@@ -66,14 +66,18 @@ export function SettingsRow({
   const body = (
     <View className="flex-row items-center px-md" style={{ minHeight: 54, paddingVertical: 12 }}>
       {icon ? (
-        <View style={{ width: 28, alignItems: 'center' }} className="mr-md">
-          <MaterialCommunityIcons name={icon} size={20} color={danger ? color.brand[600] : (iconColor ?? color.text.secondary)} />
+        // Kit menu rows carry a small tinted icon chip, not a bare glyph.
+        <View
+          className="mr-md items-center justify-center"
+          style={{ width: 28, height: 28, borderRadius: 8, backgroundColor: danger ? `${color.error}1A` : color.brand[50] }}
+        >
+          <MaterialCommunityIcons name={icon} size={17} color={danger ? color.error : (iconColor ?? color.brand[500])} />
         </View>
       ) : null}
       <View className="flex-1">
         <Text
           className={danger ? 'text-base font-semibold' : 'text-base font-medium text-text-primary'}
-          style={danger ? { color: color.brand[600] } : undefined}
+          style={danger ? { color: color.error } : undefined}
           numberOfLines={1}
         >
           {label}
