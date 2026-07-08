@@ -38,7 +38,17 @@ function HomeTabs() {
         headerShown: false,
         tabBarActiveTintColor: color.brand[500],
         tabBarInactiveTintColor: color.text.muted,
-        tabBarStyle: { backgroundColor: color.surface.base, borderTopColor: color.border.subtle },
+        // Kit nav bar: white, hairline-free, floating on an upward shadow.
+        tabBarStyle: {
+          backgroundColor: color.surface.base,
+          borderTopWidth: 0,
+          shadowColor: '#0B0B0F',
+          shadowOpacity: 0.08,
+          shadowRadius: 12,
+          shadowOffset: { width: 0, height: -4 },
+          elevation: 10,
+        },
+        tabBarLabelStyle: { fontSize: 12, fontWeight: '500' },
       }}
     >
       <Tab.Screen

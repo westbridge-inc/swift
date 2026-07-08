@@ -13,47 +13,56 @@ export type PopularItem = {
   price: number;
   vendorId: string;
   vendorName?: string;
+  averageRating?: number;
 };
 
 /**
- * Compact rail card for popular dishes — photo-led, price in the red accent,
- * white + chip on the photo (same add language as the vendor menu). Tapping
- * anywhere opens the vendor/item so modifiers & quantity are chosen there —
- * never a blind add that could mis-price a customisable item.
- * Load-bearing type sizes are inline (reused-card rule: arbitrary text-[N]
- * utilities have burned us in the Metro cache).
+ * Kit "Card Food – Portrait": white r12 card, padded photo (r8), name,
+ * rating · vendor row, price in brand bold. Tapping anywhere opens the
+ * vendor/item so modifiers & quantity are chosen there — never a blind add
+ * that could mis-price a customisable item. Load-bearing type sizes are
+ * inline (reused-card rule: arbitrary text-[N] utilities have burned us).
  */
 export const FoodItemCard = memo(function FoodItemCard({
   item,
   onPress,
+  width = 157,
 }: {
   item: PopularItem;
   onPress?: () => void;
+  width?: number;
 }) {
+  const rating = Number(item.averageRating ?? 0);
   return (
-    <PressableScale onPress={onPress} style={{ width: 148 }}>
-      <View className="overflow-hidden rounded-2xl bg-surface-base" style={elevation.card}>
+    <PressableScale onPress={onPress} style={{ width }}>
+      <View className="border border-border-subtle bg-surface-base p-sm" style={[elevation.card, { borderRadius: 12 }]}>
         <View>
-          <Image source={{ uri: itemImage(item) }} style={{ width: '100%', height: 106 }} />
-          {/* Inline position: fresh spacing utilities are Metro-cache-fragile
-              and a mis-anchored + reads as broken. */}
+          <Image source={{ uri: itemImage(item) }} style={{ width: '100%', height: 118, borderRadius: 8 }} />
           <View
-            className="items-center justify-center rounded-full bg-white"
-            style={[elevation.card, { position: 'absolute', bottom: 6, right: 6, width: 28, height: 28 }]}
+            className="items-center justify-center bg-white"
+            style={[elevation.card, { position: 'absolute', bottom: 6, right: 6, width: 30, height: 30, borderRadius: 100 }]}
           >
             <MaterialCommunityIcons name="plus" size={16} color={color.text.primary} />
           </View>
         </View>
-        <View className="px-2.5 pb-2.5 pt-2">
-          <Text className="font-extrabold" style={{ fontSize: 13, color: color.brand[600] }}>{money(item.price)}</Text>
-          <Text className="mt-0.5 font-semibold text-text-primary" style={{ fontSize: 13 }} numberOfLines={1}>
+        <View className="pt-sm">
+          <Text className="font-medium text-text-primary" style={{ fontSize: 16 }} numberOfLines={1}>
             {item.name}
           </Text>
-          {item.vendorName ? (
-            <Text className="text-text-muted" style={{ fontSize: 11 }} numberOfLines={1}>
-              {item.vendorName}
-            </Text>
-          ) : null}
+          <View className="mt-xs flex-row items-center">
+            {rating > 0 ? (
+              <>
+                <MaterialCommunityIcons name="star" size={14} color={color.warning} />
+                <Text className="ml-0.5 mr-md font-medium text-text-primary" style={{ fontSize: 12 }}>{rating.toFixed(1)}</Text>
+              </>
+            ) : null}
+            {item.vendorName ? (
+              <Text className="flex-1 font-medium text-text-secondary" style={{ fontSize: 12 }} numberOfLines={1}>
+                {item.vendorName}
+              </Text>
+            ) : null}
+          </View>
+          <Text className="mt-xs font-bold" style={{ fontSize: 16, color: color.brand[500] }}>{money(item.price)}</Text>
         </View>
       </View>
     </PressableScale>

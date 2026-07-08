@@ -25,3 +25,4 @@ export { ActionSheet, type SheetAction } from './action-sheet';
 export { ConfirmDialog } from './confirm-dialog';
 export { Switch } from './switch';
 export { Avatar } from './avatar';
+export { SectionHeader } from './section-header';
