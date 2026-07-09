@@ -1,4 +1,44 @@
-import { makePlaceholder } from '../../../kit';
+import React from 'react';
+import { Linking, ScrollView, View } from 'react-native';
+import { useNavigation } from '@react-navigation/native';
+import { space } from '@swift/ui';
+import { Header, Screen, SettingsRow, T } from '../../../kit';
 
-// TODO(ui-rebuild): placeholder — replaced by the real kit screen in its task.
-export const ContactUsScreen = makePlaceholder('Contact Us');
+// Kit Contact Us (55). Channels below are the launch support set —
+// TODO(ui-rebuild): Mayur to confirm the final support phone/handles before release.
+const SUPPORT_EMAIL = 'support@swift.gy';
+
+export function ContactUsScreen() {
+  const navigation = useNavigation<any>();
+
+  return (
+    <Screen>
+      <Header title="Contact Us" />
+      <ScrollView contentContainerStyle={{ padding: space['2xl'] }}>
+        <T variant="body" tone="muted">
+          Something off with an order, a store, or the app? Reach us — a human answers.
+        </T>
+        <View style={{ marginTop: space.xl }}>
+          <SettingsRow
+            icon="message-circle"
+            label="Message about an active order"
+            sub="Fastest — chat with your rider directly"
+            onPress={() => navigation.navigate('Tabs', { screen: 'ChatTab' })}
+          />
+          <SettingsRow
+            icon="mail"
+            label="Email support"
+            sub={SUPPORT_EMAIL}
+            onPress={() => Linking.openURL(`mailto:${SUPPORT_EMAIL}`)}
+          />
+          <SettingsRow
+            icon="help-circle"
+            label="Browse the FAQ"
+            sub="Payments, delivery areas, verification"
+            onPress={() => navigation.navigate('Faq')}
+          />
+        </View>
+      </ScrollView>
+    </Screen>
+  );
+}

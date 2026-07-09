@@ -89,7 +89,8 @@ export interface AddressInput {
 
 export const customerApi = {
   getProfile: () => api.get('/customer/profile'),
-  updateProfile: (data: { firstName?: string; lastName?: string }) => api.put('/customer/profile', data),
+  updateProfile: (data: { firstName?: string; lastName?: string; email?: string }) =>
+    api.put('/customer/profile', data),
   switchRole: (role: string) => api.post('/customer/switch-role', { role }),
   // Redeem a referral code (writes referredBy). `token` lets a just-registered
   // user redeem before the auth store has propagated.
