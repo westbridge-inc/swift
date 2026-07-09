@@ -25,7 +25,8 @@ const config: ExpoConfig = {
   newArchEnabled: true,
   backgroundColor: '#FFFFFF',
   splash: {
-    backgroundColor: '#FFFFFF',
+    // Kit splash = a full brand wash (Indian Red) while the app boots.
+    backgroundColor: '#803B3B',
     resizeMode: 'contain',
   },
   ios: {
