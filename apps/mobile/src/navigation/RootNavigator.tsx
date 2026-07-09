@@ -2,6 +2,8 @@ import React from 'react';
 import { NavigationContainer } from '@react-navigation/native';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
 import { useAuthStore } from '../stores/authStore';
+import { useAppStore } from '../stores/appStore';
+import { OnboardingScreen } from '../modules/onboarding/OnboardingScreen';
 import { CountryPickerScreen } from '../screens/auth/CountryPickerScreen';
 import { RolePickerScreen } from '../screens/auth/RolePickerScreen';
 import { SelfieCaptureScreen } from '../screens/auth/SelfieCaptureScreen';
@@ -30,6 +32,7 @@ function mainForIntent(intent?: string | null) {
 
 export function RootNavigator() {
   const { isAuthenticated, wantsAuth, intent, countryCode, user } = useAuthStore();
+  const hasOnboarded = useAppStore((s) => s.hasOnboarded);
 
   // Earners (mover/vendor) must be signed in before their stack. Customers
   // browse freely and only authenticate when an action (checkout) asks via
@@ -45,7 +48,10 @@ export function RootNavigator() {
   return (
     <NavigationContainer>
       <Stack.Navigator screenOptions={{ headerShown: false }}>
-        {!countryCode ? (
+        {!hasOnboarded ? (
+          // First run only: kit onboarding slides, then never again.
+          <Stack.Screen name="Onboarding" component={OnboardingScreen} />
+        ) : !countryCode ? (
           <Stack.Screen name="Country" component={CountryPickerScreen} />
         ) : !intent ? (
           <Stack.Screen name="RolePicker" component={RolePickerScreen} />

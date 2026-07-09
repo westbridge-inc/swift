@@ -7,14 +7,16 @@ import { RegisterScreen } from '../screens/auth/RegisterScreen';
 
 const Stack = createNativeStackNavigator();
 
-// Onboarding starts at the country picker (step 0): country → phone → OTP → role/register.
+// Sign-in flow: phone → OTP → (new account) register. Country change re-enters
+// the picker. Layouts follow kit Login/Register; auth stays phone-OTP (no
+// passwords / social — the backend has neither).
 export function AuthStack() {
   return (
     <Stack.Navigator screenOptions={{ headerShown: false }}>
-      <Stack.Screen name="CountryPicker" component={CountryPickerScreen} />
       <Stack.Screen name="PhoneEntry" component={PhoneEntryScreen} />
       <Stack.Screen name="OtpVerification" component={OtpVerificationScreen} />
       <Stack.Screen name="Register" component={RegisterScreen} />
+      <Stack.Screen name="CountryPicker" component={CountryPickerScreen} />
     </Stack.Navigator>
   );
 }

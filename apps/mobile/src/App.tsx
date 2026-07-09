@@ -20,6 +20,7 @@ import { initSecureStorage } from './lib/storage';
 import { track } from './lib/analytics';
 import { useAuthStore } from './stores/authStore';
 import { useLocationStore } from './stores/locationStore';
+import { useAppStore } from './stores/appStore';
 import { useDeviceLocation } from './hooks/useDeviceLocation';
 
 // Hold the native splash until the brand fonts are ready (avoids a System-font flash).
@@ -51,7 +52,13 @@ export default function App() {
     // Open the encrypted store (Keychain-backed key) and rehydrate the persisted
     // auth session before the first render — keeps the no-flash cold start.
     initSecureStorage()
-      .then(() => Promise.all([useAuthStore.persist.rehydrate(), useLocationStore.persist.rehydrate()]))
+      .then(() =>
+        Promise.all([
+          useAuthStore.persist.rehydrate(),
+          useLocationStore.persist.rehydrate(),
+          useAppStore.persist.rehydrate(),
+        ]),
+      )
       .catch((e) => console.warn('[secure-storage] init failed', e))
       .finally(() => {
         setStorageReady(true);

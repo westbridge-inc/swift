@@ -1,4 +1,4 @@
 import { makePlaceholder } from '../../../kit';
 
 // TODO(ui-rebuild): placeholder — replaced by the real kit screen in its task.
-export const VendorReviewsScreen = makePlaceholder('Reviews');
+export const CartScreen = makePlaceholder('My Cart');

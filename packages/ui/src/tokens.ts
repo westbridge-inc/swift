@@ -5,16 +5,16 @@
  * shadow in the product. Rebrand = edit THIS file only. If a raw hex / size
  * ever appears inside a component, that is a bug — use the token.
  *
- * Identity: the **Super Food kit palette, verbatim** — vivid orange (#FE8C00)
- * primary, warm golden-orange gradient mastheads (#F0B41A → #E47916), gold
- * (#FFC228) for stars/ratings, near-black ink (#101010) on white and #F5F5F7.
- * These are the exact values decoded from the purchased kit file, so the app
- * reads like the kit's preview. (Prior identities — Swift red #E8192C, Indian
- * Red #803B3B — are one values-swap away in THIS file if direction changes.)
+ * Identity: **Indian Red** — Michael Harding Indian Red No. 123 (pigment PR101,
+ * a deep cool iron-oxide red with a purplish undertone) translated for screens:
+ * brand #803B3B on warm off-white paper (#FBFBF9), white cards, soft tint
+ * #F5EBEC. NOT the light CSS `indianred` (#CD5C5C). Layout/structure follows
+ * the Super Food kit; every kit colour is swapped for this set.
  *
- * Colour discipline: `error` is ONLY for genuine error/failed states, always
- * paired with an icon or label — never decoration. Brand never signals an
- * error; gold is ratings/highlights, not warnings copy.
+ * Colour discipline (brand is red, so): `error` (#DC2626) is ONLY for genuine
+ * error/failed states, always paired with an icon or label — never decoration,
+ * and brand NEVER signals an error. `warning` amber doubles as the star/rating
+ * hue. `success` = paid/delivered/in-stock.
  *
  * Consumers:
  *   - apps/mobile (React Native / NativeWind) -> via tailwind.ts (theme map)
@@ -25,53 +25,53 @@ export const APP_NAME = 'Swift' as const;
 export const BRAND_REGION = 'GY' as const;
 
 /**
- * §Colour — the kit's palette: **vivid orange** (#FE8C00) on white/#F5F5F7.
+ * §Colour — **Indian Red** (#803B3B) on warm paper (#FBFBF9) with white cards.
  * Every brand token — NativeWind `bg-brand-*` / `text-brand-*` classes AND
- * `color.brand[…]` read in JS — draws from this single ramp. 500 = the kit
- * primary; 600/700 follow the kit's masthead-gradient deep end; 50–100 are the
- * kit's warm tints.
+ * `color.brand[…]` read in JS — draws from this single ramp. 500 = primary;
+ * 600 = the locked deep (#5C2A2C) for pressed/emphasis; 50 = the locked soft
+ * tint (#F5EBEC) for chips, selected rows and icon circles.
  */
 type BrandRamp = Record<50 | 100 | 200 | 300 | 400 | 500 | 600 | 700 | 800 | 900, string>;
 
-const BRAND_KIT_ORANGE: BrandRamp = {
-  50: '#FFF5EA', // warm tint — chips, selected rows, icon circles
-  100: '#FFE8CC',
-  200: '#FFD199',
-  300: '#FEB966',
-  400: '#FEA133',
-  500: '#FE8C00', // kit primary — CTAs, active tabs, prices, the mark
-  600: '#E47916', // kit masthead-gradient deep end — pressed, emphasis
-  700: '#B96200',
-  800: '#8F4C00',
-  900: '#663600',
+const BRAND_INDIAN_RED: BrandRamp = {
+  50: '#F5EBEC', // brandSoft — tints, selected rows, secondary buttons, icon chips
+  100: '#EAD8D8',
+  200: '#D8B2B3',
+  300: '#C08A8B',
+  400: '#A05F60',
+  500: '#803B3B', // brand primary — CTAs, active tabs, prices, links, the mark
+  600: '#5C2A2C', // brandDeep — pressed states, emphasis text on light
+  700: '#482123',
+  800: '#351819',
+  900: '#231010',
 };
 
 export const color = {
-  brand: BRAND_KIT_ORANGE,
+  brand: BRAND_INDIAN_RED,
   white: '#FFFFFF',
-  /** Kit masthead gradient — decoded verbatim from the Home V1 canopy. */
-  masthead: { from: '#F0B41A', to: '#E47916' },
+  /** Masthead wash — brand 500 → 600, replacing the kit's golden gradient. */
+  masthead: { from: '#803B3B', to: '#5C2A2C' },
   surface: {
-    base: '#FFFFFF', // cards + light screens
-    subtle: '#F5F5F7', // the kit's cool-gray app background
+    base: '#FFFFFF', // cards
+    subtle: '#FBFBF9', // paper — the app background
     elevated: '#FFFFFF', // elevate with shadow, not colour
   },
   text: {
-    primary: '#101010', // kit ink
-    secondary: '#878787', // kit muted
-    muted: '#C2C2C2', // captions/placeholders/inactive (kit nav inactive)
+    primary: '#211A1A', // ink
+    secondary: '#786C6C', // muted
+    muted: '#B3A8A8', // captions/placeholders/inactive (nav inactive)
     onBrand: '#FFFFFF',
   },
   border: {
-    subtle: '#EDEDED', // kit hairline
-    strong: '#D9D9D9',
+    subtle: '#EAE2E1', // line — borders, dividers
+    strong: '#D9CDCC',
   },
-  /** Functional — kit set. RESERVED meanings; `error` is genuine error/failed
-   *  states ONLY, always with an icon or label. `warning` is the kit gold —
-   *  stars/ratings/highlights. */
-  success: '#50CD89',
-  error: '#F14141',
-  warning: '#FFC228',
+  /** Functional — RESERVED meanings; `error` is genuine error/failed states
+   *  ONLY, always with an icon or label; brand never signals an error.
+   *  `warning` amber doubles as the star/rating hue. */
+  success: '#16A34A',
+  error: '#DC2626',
+  warning: '#F59E0B',
 };
 
 /** §Type — Space Grotesk (display) + Inter (body). */
