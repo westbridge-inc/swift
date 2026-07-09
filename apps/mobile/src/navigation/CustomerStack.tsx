@@ -6,6 +6,8 @@ import { color } from '@swift/ui';
 
 // Rebuilt customer screens (Super Food layouts, Indian Red brand)
 import { HomeScreen } from '../modules/shop/screens/HomeScreen';
+import { RecommendedScreen } from '../modules/shop/screens/RecommendedScreen';
+import { NearbyScreen } from '../modules/shop/screens/NearbyScreen';
 import { SearchScreen } from '../modules/shop/screens/SearchScreen';
 import { RestaurantScreen } from '../modules/shop/screens/RestaurantScreen';
 import { MenuItemScreen } from '../modules/shop/screens/MenuItemScreen';
@@ -86,6 +88,8 @@ export function CustomerStack() {
     <Stack.Navigator screenOptions={{ headerShown: false }}>
       <Stack.Screen name="Tabs" component={HomeTabs} />
       {/* Shop */}
+      <Stack.Screen name="Recommended" component={RecommendedScreen} />
+      <Stack.Screen name="Nearby" component={NearbyScreen} />
       <Stack.Screen name="Search" component={SearchScreen} />
       <Stack.Screen name="Restaurant" component={RestaurantScreen} />
       <Stack.Screen name="MenuItem" component={MenuItemScreen} />
