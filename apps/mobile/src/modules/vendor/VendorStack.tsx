@@ -1,12 +1,30 @@
+/** @jsxImportSource react */
 import React, { useState, useEffect } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
-import { View, ScrollView, TextInput, Alert, Switch, RefreshControl } from 'react-native';
-import { SafeAreaView } from 'react-native-safe-area-context';
+import { Pressable, RefreshControl, ScrollView, TextInput, View } from 'react-native';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
-import { color } from '@swift/ui';
+import { Image } from 'expo-image';
+import { color, radius, space } from '@swift/ui';
 import { Feather, MaterialCommunityIcons } from '@expo/vector-icons';
-import { Text, Heading, Card, Button, Spinner, Skeleton, Image, Badge, elevation, PressableScale, EmptyState, ChoiceChip, Input, SettingsGroup, SettingsRow, ActionSheet, toast } from '../../components/ui';
+import * as ImagePicker from 'expo-image-picker';
+import {
+  Card,
+  Chip,
+  EmptyState,
+  IconChip,
+  LabeledInput,
+  LinkText,
+  LoadingBlock,
+  PillButton,
+  PopupCard,
+  Screen,
+  SettingsRow,
+  T,
+  TonePill,
+  cardShadow,
+} from '../../kit';
+import { BrandSwitch } from '../../kit/controls';
 import { DocumentChecklist } from '../../components/onboarding/DocumentChecklist';
 import { useBecomePartner, useVerificationStatus } from '../../hooks/verification';
 import {
@@ -50,10 +68,11 @@ import { useLocationStore } from '../../stores/locationStore';
 import { useStoreSwitcher } from '../../stores/storeSwitcher';
 import { money } from '../../lib/money';
 import { mediaUrl } from '../../lib/images';
-import * as ImagePicker from 'expo-image-picker';
 import { VendorBulkImportScreen } from '../../screens/vendor/VendorBulkImportScreen';
 
 const Stack = createNativeStackNavigator();
+
+const GUTTER = space['2xl'];
 
 const TYPES = [
   { key: 'RESTAURANT', label: 'Restaurant', icon: 'silverware-fork-knife' },
@@ -62,50 +81,139 @@ const TYPES = [
   { key: 'SERVICE', label: 'Services', icon: 'tools' },
 ] as const;
 
+/** Compact inline text field (pill outline) for dense operator forms. */
+function InlineInput({
+  value,
+  onChangeText,
+  placeholder,
+  keyboardType,
+  autoCapitalize,
+  multiline,
+  style,
+  center,
+}: {
+  value: string;
+  onChangeText: (t: string) => void;
+  placeholder?: string;
+  keyboardType?: 'default' | 'phone-pad' | 'number-pad' | 'decimal-pad';
+  autoCapitalize?: 'none' | 'sentences' | 'words' | 'characters';
+  multiline?: boolean;
+  style?: object;
+  center?: boolean;
+}) {
+  return (
+    <View
+      style={[
+        {
+          borderRadius: multiline ? radius.lg : 9999,
+          borderWidth: 1,
+          borderColor: color.border.subtle,
+          backgroundColor: color.surface.base,
+          paddingHorizontal: space.lg,
+          paddingVertical: multiline ? space.md : 0,
+          height: multiline ? undefined : 48,
+          minHeight: multiline ? 64 : undefined,
+          justifyContent: multiline ? undefined : 'center',
+        },
+        style,
+      ]}
+    >
+      <TextInput
+        value={value}
+        onChangeText={onChangeText}
+        placeholder={placeholder}
+        placeholderTextColor={color.text.muted}
+        keyboardType={keyboardType}
+        autoCapitalize={autoCapitalize}
+        multiline={multiline}
+        style={{
+          fontFamily: 'Inter',
+          fontSize: 15,
+          color: color.text.primary,
+          paddingVertical: 0,
+          textAlign: center ? 'center' : undefined,
+          minHeight: multiline ? 48 : undefined,
+        }}
+      />
+    </View>
+  );
+}
+
 function BizValuePill({ icon, label }: { icon: keyof typeof MaterialCommunityIcons.glyphMap; label: string }) {
   return (
-    <View className="flex-row items-center rounded-full px-3 py-1.5" style={{ backgroundColor: color.brand[50] }}>
+    <View
+      style={{
+        flexDirection: 'row',
+        alignItems: 'center',
+        gap: 6,
+        borderRadius: 9999,
+        paddingHorizontal: space.md,
+        paddingVertical: 6,
+        backgroundColor: color.brand[50],
+      }}
+    >
       <MaterialCommunityIcons name={icon} size={14} color={color.brand[600]} />
-      <Text className="ml-1.5 text-xs font-bold" style={{ color: color.brand[700] }}>{label}</Text>
+      <T variant="caption" weight="bold" tone="deep">
+        {label}
+      </T>
     </View>
   );
 }
 
 function BizTypeTile({ t, active, onPress }: { t: (typeof TYPES)[number]; active: boolean; onPress: () => void }) {
   return (
-    <PressableScale onPress={onPress} style={{ flex: 1 }}>
-      <View
-        className={
-          active
-            ? 'items-center rounded-2xl border-2 py-md'
-            : 'items-center rounded-2xl border border-border-subtle bg-surface-base py-md'
-        }
-        style={active ? { borderColor: color.brand[500], backgroundColor: color.brand[50] } : undefined}
-      >
+    <Pressable onPress={onPress} style={{ flex: 1 }}>
+      {({ pressed }) => (
         <View
-          className="mb-1 h-10 w-10 items-center justify-center rounded-full"
-          style={{ backgroundColor: active ? color.brand[500] : color.surface.subtle }}
+          style={{
+            alignItems: 'center',
+            borderRadius: radius.lg,
+            borderWidth: 1,
+            paddingVertical: space.md,
+            borderColor: active ? color.brand[500] : color.border.subtle,
+            backgroundColor: active ? color.brand[50] : color.surface.base,
+            opacity: pressed ? 0.85 : 1,
+          }}
         >
-          <MaterialCommunityIcons name={t.icon} size={20} color={active ? '#fff' : color.text.secondary} />
+          <View
+            style={{
+              width: 40,
+              height: 40,
+              borderRadius: 20,
+              alignItems: 'center',
+              justifyContent: 'center',
+              marginBottom: 4,
+              backgroundColor: active ? color.brand[500] : color.brand[50],
+            }}
+          >
+            <MaterialCommunityIcons name={t.icon} size={20} color={active ? color.white : color.brand[600]} />
+          </View>
+          <T variant="caption" weight="bold" tone={active ? 'deep' : 'ink'} numberOfLines={1}>
+            {t.label}
+          </T>
         </View>
-        <Text style={active ? { color: color.brand[700] } : undefined} className={active ? 'text-xs font-bold' : 'text-xs font-bold text-text-primary'} numberOfLines={1}>
-          {t.label}
-        </Text>
-      </View>
-    </PressableScale>
+      )}
+    </Pressable>
   );
 }
 
-function Header({ title }: { title: string }) {
+/** Tab-root header: title left, Log out link right (kit language). */
+function TabHeader({ title }: { title: string }) {
   const { logout } = useAuthStore();
   return (
-    <View className="flex-row items-center justify-between px-lg py-sm">
-      <Heading size="2xl" className="flex-1 pr-md" numberOfLines={1}>
+    <View
+      style={{
+        flexDirection: 'row',
+        alignItems: 'center',
+        justifyContent: 'space-between',
+        paddingHorizontal: GUTTER,
+        height: 56,
+      }}
+    >
+      <T variant="title" numberOfLines={1} style={{ flex: 1, paddingRight: space.md }}>
         {title}
-      </Heading>
-      <PressableScale onPress={logout} hitSlop={8}>
-        <Text className="text-sm text-text-muted">Log out</Text>
-      </PressableScale>
+      </T>
+      <LinkText label="Log out" tone="muted" onPress={logout} />
     </View>
   );
 }
@@ -136,58 +244,58 @@ function BusinessSetup() {
   };
 
   return (
-    <SafeAreaView style={{ flex: 1 }} edges={['top']} className="bg-surface-subtle">
-      <Header title="Sell on Swift" />
-      <ScrollView className="flex-1" contentContainerStyle={{ paddingHorizontal: 16, paddingBottom: 32 }} showsVerticalScrollIndicator={false}>
-        <Heading size="2xl">List your business</Heading>
-        <Text className="mt-xs text-[15px] leading-5 text-text-secondary">
+    <Screen>
+      <TabHeader title="Sell on Swift" />
+      <ScrollView contentContainerStyle={{ paddingHorizontal: GUTTER, paddingBottom: space['3xl'] }} showsVerticalScrollIndicator={false}>
+        <T variant="title">List your business</T>
+        <T variant="body" tone="muted" style={{ marginTop: space.sm }}>
           Reach customers across town and keep 100% of every sale — Swift charges a flat weekly fee, never commission.
-        </Text>
-        <View className="mb-md mt-md flex-row flex-wrap" style={{ gap: 8 }}>
+        </T>
+        <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: space.md, marginTop: space.lg, marginBottom: space.lg }}>
           <BizValuePill icon="check-decagram" label="Keep 100%" />
           <BizValuePill icon="cash-remove" label="No commission" />
           <BizValuePill icon="calendar-check" label="Flat weekly fee" />
         </View>
 
-        <Text className="mb-sm mt-sm text-sm font-bold text-text-primary">Business type</Text>
-        <View className="flex-row" style={{ gap: 8 }}>
+        <T variant="heading" style={{ marginBottom: space.md }}>
+          Business type
+        </T>
+        <View style={{ flexDirection: 'row', gap: space.md }}>
           {TYPES.map((t) => (
             <BizTypeTile key={t.key} t={t} active={t.key === type} onPress={() => setType(t.key)} />
           ))}
         </View>
 
-        <View className="mt-lg rounded-3xl bg-surface-base p-lg" style={elevation.card}>
-          <View className="gap-sm">
-            <Input value={name} onChangeText={setName} placeholder="Business name" />
-            <Input value={phone} onChangeText={setPhone} placeholder="Business phone" keyboardType="phone-pad" />
-            <Input value={addr} onChangeText={setAddr} placeholder="Street address" />
-            <Input value={city} onChangeText={setCity} placeholder="City" />
-          </View>
-          <Text className="mt-sm text-xs text-text-muted">We&apos;ll use your current location as the store pin.</Text>
-        </View>
+        <Card style={{ marginTop: space.xl, gap: space.md }}>
+          <LabeledInput value={name} onChangeText={setName} placeholder="Business name" />
+          <LabeledInput value={phone} onChangeText={setPhone} placeholder="Business phone" keyboardType="phone-pad" />
+          <LabeledInput value={addr} onChangeText={setAddr} placeholder="Street address" />
+          <LabeledInput value={city} onChangeText={setCity} placeholder="City" />
+          <T variant="caption" tone="muted">
+            We&apos;ll use your current location as the store pin.
+          </T>
+        </Card>
 
-        {become.isError ? <Text className="mb-sm mt-sm text-sm text-error">Couldn&apos;t create your store. Try again.</Text> : null}
-        <Button label="Create store" loading={become.isPending} disabled={!valid} className="mt-md" onPress={submit} />
+        {become.isError ? (
+          <T variant="label" tone="error" style={{ marginTop: space.md }}>
+            Couldn&apos;t create your store. Try again.
+          </T>
+        ) : null}
+        <PillButton label="Create store" loading={become.isPending} disabled={!valid} style={{ marginTop: space.lg }} onPress={submit} />
       </ScrollView>
-    </SafeAreaView>
+    </Screen>
   );
 }
 
 function VendorOnboarding({ store }: { store: any }) {
   const { data: status, isLoading, isError, refetch } = useVerificationStatus<any>(store.vendorType);
   return (
-    <SafeAreaView style={{ flex: 1 }} edges={['top']} className="bg-surface-subtle">
-      <Header title={store.name} />
-      <ScrollView className="flex-1" contentContainerStyle={{ paddingHorizontal: 16, paddingBottom: 32 }} showsVerticalScrollIndicator={false}>
-        <DocumentChecklist
-          role={store.vendorType}
-          status={status}
-          isLoading={isLoading}
-          isError={isError}
-          onRetry={refetch}
-        />
+    <Screen>
+      <TabHeader title={store.name} />
+      <ScrollView contentContainerStyle={{ paddingHorizontal: GUTTER, paddingBottom: space['3xl'] }} showsVerticalScrollIndicator={false}>
+        <DocumentChecklist role={store.vendorType} status={status} isLoading={isLoading} isError={isError} onRetry={refetch} />
       </ScrollView>
-    </SafeAreaView>
+    </Screen>
   );
 }
 
@@ -207,8 +315,6 @@ function orderActions(order: any): { label: string; action: VendorOrderActionKin
   if ((s === 'READY' || s === 'READY_FOR_PICKUP') && isPickup) return [{ label: 'Mark picked up', action: 'complete-pickup' }];
   return [];
 }
-
-const CARD_SHADOW = elevation.raised;
 
 function timeAgo(iso?: string) {
   if (!iso) return '';
@@ -231,31 +337,56 @@ function formatSlot(iso?: string) {
   return `${days[d.getDay()]} ${d.getDate()} ${months[d.getMonth()]} · ${h}:${String(m).padStart(2, '0')} ${ampm}`;
 }
 
-const ORDER_PILL: Record<string, { label: string; bg?: object; fg?: object; bgClass?: string; fgClass?: string }> = {
-  PENDING: { label: 'New', bg: { backgroundColor: color.brand[500] }, fg: { color: '#fff' } },
-  PLACED: { label: 'New', bg: { backgroundColor: color.brand[500] }, fg: { color: '#fff' } },
-  ACCEPTED: { label: 'Accepted', bg: { backgroundColor: color.brand[50] }, fg: { color: color.brand[600] } },
-  CONFIRMED: { label: 'Accepted', bg: { backgroundColor: color.brand[50] }, fg: { color: color.brand[600] } },
-  PREPARING: { label: 'Preparing', bgClass: 'bg-surface-subtle', fgClass: 'text-text-secondary' },
-  READY: { label: 'Ready', bgClass: 'bg-success/10', fgClass: 'text-success' },
-};
-
-function StatusPill({ status }: { status: string }) {
+/** Order status pill — "New" pops in solid brand; the rest are soft tints. */
+function OrderStatusPill({ status }: { status: string }) {
   const s = (status || '').toUpperCase();
-  const cfg = ORDER_PILL[s] ?? { label: s.replace(/_/g, ' ').toLowerCase(), bgClass: 'bg-surface-subtle', fgClass: 'text-text-secondary' };
-  return (
-    <View className={`self-start rounded-full px-3 py-1 ${cfg.bgClass ?? ''}`} style={cfg.bg}>
-      <Text className={`text-xs font-semibold ${cfg.fgClass ?? ''}`} style={cfg.fg}>{cfg.label}</Text>
-    </View>
-  );
+  if (s === 'PENDING' || s === 'PLACED') {
+    return (
+      <View style={{ borderRadius: 9999, paddingHorizontal: space.md, paddingVertical: 5, backgroundColor: color.brand[500] }}>
+        <T variant="caption" weight="semibold" tone="onBrand">
+          New
+        </T>
+      </View>
+    );
+  }
+  if (s === 'ACCEPTED' || s === 'CONFIRMED') return <TonePill label="Accepted" tone="brand" />;
+  if (s === 'PREPARING') return <TonePill label="Preparing" tone="neutral" />;
+  if (s === 'READY' || s === 'READY_FOR_PICKUP') return <TonePill label="Ready" tone="success" />;
+  return <TonePill label={s.replace(/_/g, ' ').toLowerCase()} tone="neutral" />;
 }
 
 function KpiTile({ icon, value, label }: { icon: keyof typeof MaterialCommunityIcons.glyphMap; value: string; label: string }) {
   return (
-    <View className="flex-1 rounded-2xl bg-surface-base p-md" style={CARD_SHADOW}>
+    <View style={[{ flex: 1, borderRadius: radius.lg, backgroundColor: color.surface.base, padding: space.md }, cardShadow]}>
       <MaterialCommunityIcons name={icon} size={18} color={color.brand[500]} />
-      <Text className="mt-xs text-lg font-bold text-text-primary" numberOfLines={1}>{value}</Text>
-      <Text className="text-xs text-text-muted" numberOfLines={1}>{label}</Text>
+      <T variant="body" weight="bold" numberOfLines={1} style={{ marginTop: 4 }}>
+        {value}
+      </T>
+      <T variant="caption" tone="muted" numberOfLines={1}>
+        {label}
+      </T>
+    </View>
+  );
+}
+
+/** Small soft tag beside the order number (Takeaway / Appointment). */
+function FulfillmentTag({ icon, label }: { icon: keyof typeof MaterialCommunityIcons.glyphMap; label: string }) {
+  return (
+    <View
+      style={{
+        flexDirection: 'row',
+        alignItems: 'center',
+        gap: 4,
+        borderRadius: 9999,
+        backgroundColor: color.brand[50],
+        paddingHorizontal: space.sm,
+        paddingVertical: 2,
+      }}
+    >
+      <MaterialCommunityIcons name={icon} size={12} color={color.brand[500]} />
+      <T variant="caption" weight="semibold" tone="deep">
+        {label}
+      </T>
     </View>
   );
 }
@@ -278,77 +409,88 @@ function VendorOrderCard({
   // A mobile service stores the customer's address (≠ the store's pickup address).
   const apptMobile = isAppt && !!order.deliveryAddress && order.deliveryAddress !== order.pickupAddress;
   return (
-    <View className="mb-md rounded-2xl bg-surface-base p-lg" style={CARD_SHADOW}>
-      <View className="flex-row items-center justify-between">
-        <View className="flex-row items-center" style={{ gap: 8 }}>
-          <Text className="text-base font-bold text-text-primary">{order.orderNumber ? `#${order.orderNumber}` : 'Order'}</Text>
+    <Card style={{ marginBottom: space.md }}>
+      <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
+        <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.md }}>
+          <T variant="body" weight="bold">
+            {order.orderNumber ? `#${order.orderNumber}` : 'Order'}
+          </T>
           {isPickup ? (
-            <View className="flex-row items-center rounded-full bg-surface-subtle px-2 py-0.5">
-              <MaterialCommunityIcons name="bag-personal-outline" size={12} color={color.brand[500]} />
-              <Text className="ml-1 text-xs font-semibold" style={{ color: color.brand[600] }}>Takeaway</Text>
-            </View>
+            <FulfillmentTag icon="bag-personal-outline" label="Takeaway" />
           ) : isAppt ? (
-            <View className="flex-row items-center rounded-full bg-surface-subtle px-2 py-0.5">
-              <MaterialCommunityIcons name="calendar-clock" size={12} color={color.brand[500]} />
-              <Text className="ml-1 text-xs font-semibold" style={{ color: color.brand[600] }}>Appointment</Text>
-            </View>
+            <FulfillmentTag icon="calendar-clock" label="Appointment" />
           ) : null}
         </View>
-        <StatusPill status={order.status} />
+        <OrderStatusPill status={order.status} />
       </View>
       {showStore && order.vendor?.name ? (
-        <View className="mt-xs flex-row items-center">
+        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4, marginTop: 4 }}>
           <MaterialCommunityIcons name="storefront-outline" size={12} color={color.brand[500]} />
-          <Text className="ml-1 text-xs font-bold" style={{ color: color.brand[600] }} numberOfLines={1}>{order.vendor.name}</Text>
+          <T variant="caption" weight="bold" tone="brand" numberOfLines={1}>
+            {order.vendor.name}
+          </T>
         </View>
       ) : null}
-      <View className="mt-xs flex-row items-center">
+      <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.sm, marginTop: 4 }}>
         <Feather name="clock" size={13} color={color.text.muted} />
-        <Text className="ml-1 text-xs text-text-muted">{timeAgo(order.placedAt)}</Text>
-        {items ? <Text className="ml-2 text-xs text-text-muted">{`· ${items} item${items === 1 ? '' : 's'}`}</Text> : null}
-        <Text className="ml-2 text-xs text-text-muted">{`· ${order.paymentMethod === 'CASH' ? 'Cash' : order.paymentMethod ?? ''}`}</Text>
+        <T variant="caption" tone="muted">
+          {timeAgo(order.placedAt)}
+          {items ? ` · ${items} item${items === 1 ? '' : 's'}` : ''}
+          {` · ${order.paymentMethod === 'CASH' ? 'Cash' : order.paymentMethod ?? ''}`}
+        </T>
       </View>
       {isAppt ? (
-        <View className="mt-sm">
-          <View className="flex-row items-center">
+        <View style={{ marginTop: space.sm }}>
+          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4 }}>
             <MaterialCommunityIcons name="calendar-clock" size={14} color={color.brand[500]} />
-            <Text className="ml-1 text-sm font-bold text-text-primary">{formatSlot(order.appointmentSlot)}</Text>
+            <T variant="label" weight="bold">
+              {formatSlot(order.appointmentSlot)}
+            </T>
           </View>
-          <View className="mt-xs flex-row items-center">
+          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4, marginTop: 4 }}>
             <Feather name={apptMobile ? 'navigation' : 'home'} size={12} color={color.text.muted} />
-            <Text className="ml-1 flex-1 text-xs text-text-secondary" numberOfLines={1}>
+            <T variant="caption" tone="muted" numberOfLines={1} style={{ flex: 1 }}>
               {apptMobile ? `You travel to: ${order.deliveryAddress}` : 'At your store'}
-            </Text>
+            </T>
           </View>
         </View>
       ) : isPickup && order.pickupCode ? (
-        <View className="mt-sm flex-row items-center">
+        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4, marginTop: space.sm }}>
           <MaterialCommunityIcons name="form-textbox-password" size={13} color={color.text.muted} />
-          <Text className="ml-1 text-sm text-text-secondary">Pickup code </Text>
-          <Text className="text-sm font-bold" style={{ color: color.brand[600] }}>{order.pickupCode}</Text>
+          <T variant="label" tone="muted">
+            Pickup code{' '}
+          </T>
+          <T variant="label" weight="bold" tone="brand">
+            {order.pickupCode}
+          </T>
         </View>
       ) : !isPickup && order.deliveryAddress ? (
-        <View className="mt-sm flex-row items-center">
+        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4, marginTop: space.sm }}>
           <Feather name="map-pin" size={13} color={color.text.muted} />
-          <Text className="ml-1 flex-1 text-sm text-text-secondary" numberOfLines={1}>{order.deliveryAddress}</Text>
+          <T variant="label" tone="muted" numberOfLines={1} style={{ flex: 1 }}>
+            {order.deliveryAddress}
+          </T>
         </View>
       ) : null}
-      <Text className="mt-sm text-lg font-bold text-text-primary">{money(order.totalAmount ?? order.total)}</Text>
+      <T variant="heading" style={{ marginTop: space.sm }}>
+        {money(order.totalAmount ?? order.total)}
+      </T>
       {actions.length > 0 ? (
-        <View className="mt-md flex-row" style={{ gap: 8 }}>
+        <View style={{ flexDirection: 'row', gap: space.md, marginTop: space.md }}>
           {actions.map((a) => (
-            <Button
+            <PillButton
               key={a.action}
               label={a.label}
-              variant={a.action === 'reject' ? 'outline' : 'solid'}
-              className="flex-1"
+              variant={a.action === 'reject' ? 'outline' : 'primary'}
+              size="md"
+              style={{ flex: 1 }}
               disabled={busy}
               onPress={() => onAction(a.action)}
             />
           ))}
         </View>
       ) : null}
-    </View>
+    </Card>
   );
 }
 
@@ -377,107 +519,107 @@ function VendorOps({ store, navigation }: any) {
   const today: any = (analyticsQ.data as any)?.today ?? {};
 
   return (
-    <SafeAreaView style={{ flex: 1 }} edges={['top']} className="bg-surface-subtle">
-      <Header title={store.name} />
+    <Screen>
+      <TabHeader title={store.name} />
       <ScrollView
-        className="flex-1"
-        contentContainerStyle={{ paddingHorizontal: 16, paddingBottom: 32 }}
+        contentContainerStyle={{ paddingHorizontal: GUTTER, paddingBottom: space['3xl'] }}
         showsVerticalScrollIndicator={false}
         refreshControl={<RefreshControl refreshing={ordersQ.isRefetching} onRefresh={() => ordersQ.refetch()} tintColor={color.brand[500]} />}
       >
         {/* Multi-store switcher — only when the owner has more than one store. */}
         {stores.length > 1 ? (
-          <ScrollView horizontal showsHorizontalScrollIndicator={false} className="mb-md" contentContainerStyle={{ gap: 8 }}>
-            {stores.map((s: any) => {
-              const active = s.id === store.id;
-              return (
-                <PressableScale
-                  key={s.id}
-                  onPress={() => switchStore(s.id)}
-                  style={active ? { backgroundColor: color.brand[500] } : undefined} className={active ? 'rounded-full px-lg py-sm' : 'rounded-full border border-border-subtle bg-surface-base px-lg py-sm'}
-                >
-                  <Text className={active ? 'text-sm font-semibold text-white' : 'text-sm font-semibold text-text-secondary'} numberOfLines={1}>
-                    {s.name}
-                  </Text>
-                </PressableScale>
-              );
-            })}
+          <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{ marginBottom: space.lg }} contentContainerStyle={{ gap: space.md }}>
+            {stores.map((s: any) => (
+              <Chip key={s.id} label={s.name} selected={s.id === store.id} onPress={() => switchStore(s.id)} style={{ height: 40, paddingHorizontal: space.lg }} />
+            ))}
           </ScrollView>
         ) : null}
 
         {/* Today's sales — Eats-Manager hero */}
-        <View className="mb-md rounded-3xl bg-surface-base p-lg" style={CARD_SHADOW}>
-          <Text className="text-[11px] font-bold uppercase tracking-[1.5px] text-text-muted">Today&apos;s sales</Text>
-          <Text className="mt-0.5 font-display text-3xl font-extrabold text-text-primary">{money(today.revenue ?? 0)}</Text>
-          <View className="mt-1 flex-row items-center">
+        <Card style={{ marginBottom: space.lg }}>
+          <T variant="caption" weight="bold" tone="muted">
+            TODAY&apos;S SALES
+          </T>
+          <T variant="display" style={{ marginTop: 2 }}>
+            {money(today.revenue ?? 0)}
+          </T>
+          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4, marginTop: 4 }}>
             <MaterialCommunityIcons name="check-decagram" size={14} color={color.success} />
-            <Text className="ml-1 text-xs font-semibold text-text-secondary">
+            <T variant="caption" weight="semibold" tone="muted">
               100% yours · {today.orders ?? 0} order{(today.orders ?? 0) === 1 ? '' : 's'} today
-            </Text>
+            </T>
           </View>
-        </View>
+        </Card>
 
         {/* Store status */}
-        <Card className="mb-md">
-          <View className="flex-row items-center justify-between">
-            <View className="flex-1 pr-md">
-              <View className="flex-row items-center">
+        <Card style={{ marginBottom: space.lg }}>
+          <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
+            <View style={{ flex: 1, paddingRight: space.md }}>
+              <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.sm }}>
                 <View style={{ width: 10, height: 10, borderRadius: 5, backgroundColor: open && accepting ? color.success : color.text.muted }} />
-                <Text className="ml-2 text-base font-bold text-text-primary">
+                <T variant="body" weight="bold">
                   {!open ? 'Store closed' : accepting ? 'Open for orders' : 'Orders paused'}
-                </Text>
+                </T>
               </View>
-              <Text className="mt-xs text-xs text-text-muted">
+              <T variant="caption" tone="muted" style={{ marginTop: 4 }}>
                 {!open ? 'Outside business hours' : accepting ? 'Accepting new orders' : 'You’re open but not taking new orders'}
-              </Text>
+              </T>
             </View>
-            <Switch
-              value={open}
-              onValueChange={() => toggleOpen.mutate()}
-              disabled={toggleOpen.isPending}
-              trackColor={{ true: color.brand[500], false: color.border.subtle }}
-            />
+            <BrandSwitch value={open} onChange={() => (toggleOpen.isPending ? undefined : toggleOpen.mutate())} />
           </View>
-          <Button
+          <PillButton
             label={accepting ? 'Pause new orders' : 'Resume orders'}
-            variant="outline"
-            className="mt-md"
+            variant="soft"
+            size="md"
+            style={{ marginTop: space.md }}
             loading={toggleOrders.isPending}
             onPress={() => toggleOrders.mutate()}
           />
         </Card>
 
         {/* KPIs */}
-        <View className="mb-md flex-row" style={{ gap: 8 }}>
+        <View style={{ flexDirection: 'row', gap: space.md, marginBottom: space.lg }}>
           <KpiTile icon="receipt" value={String(orders.length)} label="Active orders" />
           <KpiTile icon="cash" value={money(queueValue)} label="In queue" />
           <KpiTile icon="timer-outline" value={`${store.estimatedPrepTime ?? 30}m`} label="Prep time" />
         </View>
 
         {/* The Swift model — you keep everything */}
-        <View className="mb-md flex-row items-center rounded-2xl bg-surface-subtle px-md py-sm">
+        <View
+          style={{
+            flexDirection: 'row',
+            alignItems: 'center',
+            gap: space.sm,
+            borderRadius: radius.lg,
+            backgroundColor: color.brand[50],
+            paddingHorizontal: space.md,
+            paddingVertical: space.sm,
+            marginBottom: space.lg,
+          }}
+        >
           <MaterialCommunityIcons name="check-decagram" size={15} color={color.success} />
-          <Text className="ml-2 flex-1 text-xs font-semibold text-text-secondary">
+          <T variant="caption" weight="semibold" tone="deep" style={{ flex: 1 }}>
             You keep 100% of every sale — Swift charges a flat weekly fee, never commission.
-          </Text>
+          </T>
         </View>
 
         {/* The Menu tab isn't registered for STAFF — don't show a door that goes nowhere. */}
         {myRole !== 'STAFF' ? (
-          <Button label="Manage menu & inventory" variant="outline" className="mb-lg" onPress={() => navigation.navigate('Menu')} />
+          <PillButton label="Manage menu & inventory" variant="outline" size="md" style={{ marginBottom: space.xl }} onPress={() => navigation.navigate('Menu')} />
         ) : null}
 
         {/* New orders */}
-        <Heading size="lg" className="mb-sm">{newOrders.length ? `New orders · ${newOrders.length}` : 'New orders'}</Heading>
+        <T variant="heading" style={{ marginBottom: space.md }}>
+          {newOrders.length ? `New orders · ${newOrders.length}` : 'New orders'}
+        </T>
         {ordersQ.isLoading ? (
-          <>
-            <Skeleton className="mb-md h-28 w-full rounded-2xl" />
-            <Skeleton className="mb-md h-28 w-full rounded-2xl" />
-          </>
+          <LoadingBlock />
         ) : newOrders.length === 0 ? (
-          <View className="mb-lg items-center rounded-2xl bg-surface-subtle py-xl">
+          <View style={{ alignItems: 'center', borderRadius: radius.lg, backgroundColor: color.brand[50], paddingVertical: space.xl, marginBottom: space.xl }}>
             <MaterialCommunityIcons name="check-circle-outline" size={28} color={color.text.muted} />
-            <Text className="mt-sm text-sm text-text-secondary">You are all caught up</Text>
+            <T variant="label" tone="muted" style={{ marginTop: space.sm }}>
+              You are all caught up
+            </T>
           </View>
         ) : (
           newOrders.map((o) => (
@@ -488,14 +630,16 @@ function VendorOps({ store, navigation }: any) {
         {/* In progress */}
         {inProgress.length > 0 ? (
           <>
-            <Heading size="lg" className="mb-sm mt-md">In progress</Heading>
+            <T variant="heading" style={{ marginTop: space.lg, marginBottom: space.md }}>
+              In progress
+            </T>
             {inProgress.map((o) => (
               <VendorOrderCard key={o.id} order={o} busy={busy} showStore={stores.length > 1} onAction={(action) => orderAction.mutate({ id: o.id, action })} />
             ))}
           </>
         ) : null}
       </ScrollView>
-    </SafeAreaView>
+    </Screen>
   );
 }
 
@@ -508,11 +652,9 @@ function VendorRoot() {
 
   if (isLoading) {
     return (
-      <SafeAreaView style={{ flex: 1 }} edges={['top']} className="bg-surface-subtle">
-        <View className="flex-1 items-center justify-center">
-          <Spinner size="large" />
-        </View>
-      </SafeAreaView>
+      <Screen>
+        <LoadingBlock />
+      </Screen>
     );
   }
   if (!store) return <BusinessSetup />;
@@ -534,25 +676,41 @@ function SubHeader({
   hideBack?: boolean;
 }) {
   return (
-    <View className="flex-row items-center justify-between px-lg py-sm">
+    <View
+      style={{
+        flexDirection: 'row',
+        alignItems: 'center',
+        justifyContent: 'space-between',
+        paddingHorizontal: GUTTER,
+        height: 56,
+      }}
+    >
       {hideBack ? (
-        <View style={{ width: 22 }} />
+        <View style={{ width: 44 }} />
       ) : (
-        <PressableScale onPress={() => navigation.goBack()} hitSlop={8}>
-          <Feather name="chevron-left" size={22} color={color.brand[600]} />
-        </PressableScale>
+        <Pressable onPress={() => navigation.goBack()} hitSlop={8}>
+          {({ pressed }) => (
+            <View style={{ width: 44, height: 44, alignItems: 'flex-start', justifyContent: 'center', opacity: pressed ? 0.6 : 1 }}>
+              <Feather name="chevron-left" size={24} color={color.text.primary} />
+            </View>
+          )}
+        </Pressable>
       )}
-      <Heading size="lg" className="flex-1 px-md text-center" numberOfLines={1}>
+      <T variant="heading" numberOfLines={1} style={{ flex: 1, textAlign: 'center', paddingHorizontal: space.md }}>
         {title}
-      </Heading>
+      </T>
       {action ? (
-        <PressableScale onPress={action.onPress} disabled={action.disabled} hitSlop={8}>
-          <Text style={action.disabled ? undefined : { color: color.brand[600] }} className={action.disabled ? 'text-base text-text-muted' : 'text-base font-semibold'}>
-            {action.label}
-          </Text>
-        </PressableScale>
+        <Pressable onPress={action.onPress} disabled={action.disabled} hitSlop={8}>
+          {({ pressed }) => (
+            <View style={{ minWidth: 44, height: 44, alignItems: 'flex-end', justifyContent: 'center', opacity: pressed ? 0.6 : 1 }}>
+              <T variant="body" weight="semibold" tone={action.disabled ? 'muted' : 'brand'}>
+                {action.label}
+              </T>
+            </View>
+          )}
+        </Pressable>
       ) : (
-        <View style={{ width: 48 }} />
+        <View style={{ width: 44 }} />
       )}
     </View>
   );
@@ -570,67 +728,79 @@ function MenuItemRow({
   const setAvail = useSetItemAvailability();
   const del = useDeleteItem();
   const available = item.isAvailable !== false;
-
-  const confirmDelete = () =>
-    Alert.alert('Delete item', `Remove "${item.name}" from your menu?`, [
-      { text: 'Cancel', style: 'cancel' },
-      { text: 'Delete', style: 'destructive', onPress: () => del.mutate(item.id) },
-    ]);
+  const [confirmDelete, setConfirmDelete] = useState(false);
 
   return (
-    <Card className="mb-sm">
-      <View className="flex-row items-center">
+    <Card style={{ marginBottom: space.md }}>
+      <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.md }}>
         {item.imageUrl ? (
-          <Image source={{ uri: mediaUrl(item.imageUrl)! }} style={{ width: 52, height: 52, borderRadius: 10 }} />
+          <Image source={{ uri: mediaUrl(item.imageUrl)! }} style={{ width: 52, height: 52, borderRadius: radius.md }} contentFit="cover" />
         ) : (
-          <View style={{ width: 52, height: 52, borderRadius: 10 }} className="items-center justify-center bg-surface-subtle">
+          <View style={{ width: 52, height: 52, borderRadius: radius.md, alignItems: 'center', justifyContent: 'center', backgroundColor: color.brand[50] }}>
             <Feather name="image" size={18} color={color.text.muted} />
           </View>
         )}
-        <View className="ml-md flex-1">
-          <Text className="text-base font-semibold" numberOfLines={1}>
+        <View style={{ flex: 1 }}>
+          <T variant="body" weight="semibold" numberOfLines={1}>
             {item.name}
-          </Text>
-          <Text className="mt-xs text-sm text-text-secondary">
+          </T>
+          <T variant="label" tone="muted" style={{ marginTop: 2 }}>
             {money(item.basePrice)}
             {item.stockQuantity != null ? ` · ${item.stockQuantity} in stock` : ''}
-          </Text>
+          </T>
           {item.stockQuantity != null && item.stockQuantity <= 0 ? (
-            <Text className="mt-0.5 text-xs font-semibold text-error">Out of stock — hidden from customers</Text>
+            <T variant="caption" weight="semibold" tone="error" style={{ marginTop: 2 }}>
+              Out of stock — hidden from customers
+            </T>
           ) : item.stockQuantity != null && item.lowStockThreshold != null && item.stockQuantity <= item.lowStockThreshold ? (
-            <Text className="mt-0.5 text-xs font-semibold text-warning">Low stock — restock soon</Text>
+            <T variant="caption" weight="semibold" style={{ marginTop: 2, color: color.warning }}>
+              Low stock — restock soon
+            </T>
           ) : null}
         </View>
-        <PressableScale
-          onPress={() => setAvail.mutate({ id: item.id, isAvailable: !available })}
-          disabled={setAvail.isPending}
-          hitSlop={6}
-          className={
-            available
-              ? 'rounded-full bg-success/10 px-3 py-1'
-              : 'rounded-full border border-border-subtle bg-surface-base px-3 py-1'
-          }
-        >
-          <Text className={available ? 'text-xs font-semibold text-success' : 'text-xs font-semibold text-text-muted'}>
-            {available ? 'Available' : 'Sold out'}
-          </Text>
-        </PressableScale>
+        <Pressable onPress={() => (setAvail.isPending ? undefined : setAvail.mutate({ id: item.id, isAvailable: !available }))} hitSlop={6}>
+          {({ pressed }) => (
+            <View
+              style={{
+                borderRadius: 9999,
+                paddingHorizontal: space.md,
+                paddingVertical: 5,
+                backgroundColor: available ? '#E8F6EE' : color.surface.base,
+                borderWidth: available ? 0 : 1,
+                borderColor: color.border.subtle,
+                opacity: pressed ? 0.7 : 1,
+              }}
+            >
+              <T variant="caption" weight="semibold" style={{ color: available ? color.success : color.text.muted }}>
+                {available ? 'Available' : 'Sold out'}
+              </T>
+            </View>
+          )}
+        </Pressable>
       </View>
-      <View className="mt-sm flex-row" style={{ gap: 8 }}>
-        <Button
-          label="Edit"
-          variant="outline"
-          className="flex-1"
-          onPress={() => navigation.navigate('VendorItemEditor', { item, categories })}
-        />
-        <Button
+      <View style={{ flexDirection: 'row', gap: space.md, marginTop: space.md }}>
+        <PillButton label="Edit" variant="soft" size="sm" style={{ flex: 1 }} onPress={() => navigation.navigate('VendorItemEditor', { item, categories })} />
+        <PillButton label="Delete" variant="outline" size="sm" style={{ flex: 1 }} loading={del.isPending} onPress={() => setConfirmDelete(true)} />
+      </View>
+
+      <PopupCard visible={confirmDelete} onClose={() => setConfirmDelete(false)}>
+        <IconChip icon="trash-2" size={56} tone="error" />
+        <T variant="title" center style={{ marginTop: space.lg }}>
+          Delete item?
+        </T>
+        <T variant="body" tone="muted" center style={{ marginTop: space.sm }}>
+          Remove &quot;{item.name}&quot; from your menu.
+        </T>
+        <PillButton
           label="Delete"
-          variant="outline"
-          className="flex-1"
-          loading={del.isPending}
-          onPress={confirmDelete}
+          style={{ alignSelf: 'stretch', marginTop: space['2xl'] }}
+          onPress={() => {
+            setConfirmDelete(false);
+            del.mutate(item.id);
+          }}
         />
-      </View>
+        <PillButton label="Cancel" variant="soft" style={{ alignSelf: 'stretch', marginTop: space.md }} onPress={() => setConfirmDelete(false)} />
+      </PopupCard>
     </Card>
   );
 }
@@ -652,6 +822,7 @@ function ModifiersSection({ item }: { item: any }) {
   const [groupRequired, setGroupRequired] = useState(false);
   const [groupMulti, setGroupMulti] = useState(false);
   const [drafts, setDrafts] = useState<Record<string, { name: string; price: string }>>({});
+  const [removeGroupId, setRemoveGroupId] = useState<string | null>(null);
   const draft = (gid: string) => drafts[gid] ?? { name: '', price: '' };
 
   const submitGroup = async () => {
@@ -679,18 +850,6 @@ function ModifiersSection({ item }: { item: any }) {
     setDrafts((s) => ({ ...s, [groupId]: { name: '', price: '' } }));
   };
 
-  const removeGroup = (groupId: string) => {
-    Alert.alert('Remove group', 'Delete this option group and all its choices?', [
-      { text: 'Cancel', style: 'cancel' },
-      {
-        text: 'Delete',
-        style: 'destructive',
-        onPress: () =>
-          delGroup.mutate(groupId, { onSuccess: () => setGroups((gs) => gs.filter((g) => g.id !== groupId)) }),
-      },
-    ]);
-  };
-
   const removeOption = (groupId: string, optionId: string) => {
     delOption.mutate(optionId, {
       onSuccess: () =>
@@ -701,79 +860,117 @@ function ModifiersSection({ item }: { item: any }) {
   };
 
   return (
-    <View className="mt-md rounded-3xl bg-surface-base p-lg" style={CARD_SHADOW}>
-      <Heading size="lg">Options &amp; add-ons</Heading>
-      <Text className="mt-xs text-sm text-text-secondary">
+    <Card style={{ marginTop: space.lg }}>
+      <T variant="heading">Options &amp; add-ons</T>
+      <T variant="label" tone="muted" style={{ marginTop: 4 }}>
         Sizes, toppings, extras — customers pick these when ordering.
-      </Text>
+      </T>
 
       {groups.map((g) => (
-        <View key={g.id} className="mt-md rounded-2xl bg-surface-subtle p-md">
-          <View className="flex-row items-center">
-            <View className="flex-1">
-              <Text className="text-base font-semibold">{g.name}</Text>
-              <Text className="mt-0.5 text-xs text-text-muted">
+        <View key={g.id} style={{ marginTop: space.md, borderRadius: radius.lg, backgroundColor: color.surface.subtle, padding: space.md }}>
+          <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+            <View style={{ flex: 1 }}>
+              <T variant="body" weight="semibold">
+                {g.name}
+              </T>
+              <T variant="caption" tone="muted" style={{ marginTop: 2 }}>
                 {g.isRequired ? 'Required' : 'Optional'} · {g.maxSelect > 1 ? `up to ${g.maxSelect}` : 'pick one'}
-              </Text>
+              </T>
             </View>
-            <PressableScale onPress={() => removeGroup(g.id)} hitSlop={8}>
-              <Feather name="trash-2" size={18} color={color.text.muted} />
-            </PressableScale>
+            <Pressable onPress={() => setRemoveGroupId(g.id)} hitSlop={8}>
+              <View style={{ width: 36, height: 36, alignItems: 'center', justifyContent: 'center' }}>
+                <Feather name="trash-2" size={18} color={color.text.muted} />
+              </View>
+            </Pressable>
           </View>
 
           {(g.options ?? []).map((o: any) => (
-            <View key={o.id} className="mt-sm flex-row items-center">
-              <Text className="flex-1 text-sm text-text-primary">{o.name}</Text>
-              <Text className="mr-md text-sm text-text-secondary">
+            <View key={o.id} style={{ flexDirection: 'row', alignItems: 'center', marginTop: space.sm }}>
+              <T variant="label" style={{ flex: 1 }}>
+                {o.name}
+              </T>
+              <T variant="label" tone="muted" style={{ marginRight: space.md }}>
                 {Number(o.additionalPrice) > 0 ? `+${money(o.additionalPrice)}` : 'Free'}
-              </Text>
-              <PressableScale onPress={() => removeOption(g.id, o.id)} hitSlop={8}>
-                <Feather name="x" size={16} color={color.text.muted} />
-              </PressableScale>
+              </T>
+              <Pressable onPress={() => removeOption(g.id, o.id)} hitSlop={8}>
+                <View style={{ width: 32, height: 32, alignItems: 'center', justifyContent: 'center' }}>
+                  <Feather name="x" size={16} color={color.text.muted} />
+                </View>
+              </Pressable>
             </View>
           ))}
 
-          <View className="mt-sm flex-row items-center" style={{ gap: 8 }}>
-            <Input
-              containerClassName="flex-1"
+          <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.md, marginTop: space.sm }}>
+            <InlineInput
+              style={{ flex: 1 }}
               value={draft(g.id).name}
               onChangeText={(t: string) => setDrafts((s) => ({ ...s, [g.id]: { ...draft(g.id), name: t } }))}
               placeholder="Choice (e.g. Large)"
             />
-            <Input
-              containerClassName="w-24"
+            <InlineInput
+              style={{ width: 96 }}
               value={draft(g.id).price}
               onChangeText={(t: string) => setDrafts((s) => ({ ...s, [g.id]: { ...draft(g.id), price: t } }))}
               placeholder="+GYD"
               keyboardType="number-pad"
             />
-            <PressableScale
-              onPress={() => submitOption(g.id)}
-              disabled={addOption.isPending}
-              className="h-10 w-10 items-center justify-center rounded-full" style={{ backgroundColor: color.brand[500] }}
-            >
-              <Feather name="plus" size={18} color="#fff" />
-            </PressableScale>
+            <Pressable onPress={() => submitOption(g.id)} disabled={addOption.isPending}>
+              {({ pressed }) => (
+                <View
+                  style={{
+                    width: 40,
+                    height: 40,
+                    borderRadius: 20,
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    backgroundColor: pressed ? color.brand[600] : color.brand[500],
+                  }}
+                >
+                  <Feather name="plus" size={18} color={color.white} />
+                </View>
+              )}
+            </Pressable>
           </View>
         </View>
       ))}
 
-      <View className="mt-md">
-        <Input value={groupName} onChangeText={setGroupName} placeholder="New group (e.g. Size, Toppings)" />
-        <View className="mt-sm flex-row" style={{ gap: 8 }}>
-          <ChoiceChip label="Required" active={groupRequired} onPress={() => setGroupRequired((v) => !v)} />
-          <ChoiceChip label="Multiple picks" active={groupMulti} onPress={() => setGroupMulti((v) => !v)} />
+      <View style={{ marginTop: space.md }}>
+        <InlineInput value={groupName} onChangeText={setGroupName} placeholder="New group (e.g. Size, Toppings)" />
+        <View style={{ flexDirection: 'row', gap: space.md, marginTop: space.md }}>
+          <Chip label="Required" selected={groupRequired} onPress={() => setGroupRequired((v) => !v)} style={{ height: 38, paddingHorizontal: space.lg }} />
+          <Chip label="Multiple picks" selected={groupMulti} onPress={() => setGroupMulti((v) => !v)} style={{ height: 38, paddingHorizontal: space.lg }} />
         </View>
-        <Button
+        <PillButton
           label="Add option group"
-          variant="outline"
-          className="mt-sm"
+          variant="soft"
+          size="md"
+          style={{ marginTop: space.md }}
           loading={addGroup.isPending}
           disabled={!groupName.trim()}
           onPress={submitGroup}
         />
       </View>
-    </View>
+
+      <PopupCard visible={!!removeGroupId} onClose={() => setRemoveGroupId(null)}>
+        <IconChip icon="trash-2" size={56} tone="error" />
+        <T variant="title" center style={{ marginTop: space.lg }}>
+          Remove group?
+        </T>
+        <T variant="body" tone="muted" center style={{ marginTop: space.sm }}>
+          Delete this option group and all its choices.
+        </T>
+        <PillButton
+          label="Delete"
+          style={{ alignSelf: 'stretch', marginTop: space['2xl'] }}
+          onPress={() => {
+            const gid = removeGroupId!;
+            setRemoveGroupId(null);
+            delGroup.mutate(gid, { onSuccess: () => setGroups((gs) => gs.filter((g) => g.id !== gid)) });
+          }}
+        />
+        <PillButton label="Cancel" variant="soft" style={{ alignSelf: 'stretch', marginTop: space.md }} onPress={() => setRemoveGroupId(null)} />
+      </PopupCard>
+    </Card>
   );
 }
 
@@ -791,9 +988,9 @@ function VendorMenuScreen({ navigation }: any) {
   };
 
   return (
-    <SafeAreaView style={{ flex: 1 }} edges={['top']} className="bg-surface-subtle">
+    <Screen>
       <SubHeader
-        title="Menu & inventory"
+        title="Menu & Inventory"
         navigation={navigation}
         hideBack
         action={
@@ -803,53 +1000,57 @@ function VendorMenuScreen({ navigation }: any) {
         }
       />
       {menuQ.isLoading ? (
-        <View className="px-lg pt-md">
-          {[0, 1, 2, 3].map((i) => (
-            <Skeleton key={i} className="mb-md h-16 w-full rounded-2xl" />
-          ))}
-        </View>
+        <LoadingBlock />
       ) : (
-        <ScrollView className="flex-1" contentContainerStyle={{ paddingHorizontal: 16, paddingBottom: 32 }} showsVerticalScrollIndicator={false}>
-          <Card className="mb-md">
-            <Text className="mb-xs text-sm font-semibold text-text-secondary">New category</Text>
-            <View className="flex-row items-center" style={{ gap: 8 }}>
-              <Input containerClassName="flex-1" value={newCat} onChangeText={setNewCat} placeholder="e.g. Mains, Drinks" />
-              <Button label="Add" loading={createCategory.isPending} disabled={newCat.trim().length < 1} onPress={addCategory} />
+        <ScrollView contentContainerStyle={{ paddingHorizontal: GUTTER, paddingBottom: space['3xl'] }} showsVerticalScrollIndicator={false}>
+          <Card style={{ marginBottom: space.md }}>
+            <T variant="label" weight="semibold" tone="muted" style={{ marginBottom: space.sm }}>
+              New category
+            </T>
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.md }}>
+              <InlineInput style={{ flex: 1 }} value={newCat} onChangeText={setNewCat} placeholder="e.g. Mains, Drinks" />
+              <PillButton label="Add" size="md" loading={createCategory.isPending} disabled={newCat.trim().length < 1} onPress={addCategory} />
             </View>
           </Card>
 
-          <PressableScale onPress={() => navigation.navigate('VendorBulkImport')}>
-            <Card className="mb-md flex-row items-center">
-              <Feather name="upload-cloud" size={18} color={color.brand[500]} />
-              <View className="ml-md flex-1">
-                <Text className="text-base font-semibold">Bulk import catalogue</Text>
-                <Text className="text-xs text-text-muted">Paste a CSV — we map the columns for you</Text>
-              </View>
-              <Feather name="chevron-right" size={18} color={color.text.muted} />
-            </Card>
-          </PressableScale>
+          <Pressable onPress={() => navigation.navigate('VendorBulkImport')}>
+            {({ pressed }) => (
+              <Card style={{ flexDirection: 'row', alignItems: 'center', gap: space.md, marginBottom: space.lg, opacity: pressed ? 0.8 : 1 }}>
+                <IconChip icon="upload-cloud" />
+                <View style={{ flex: 1 }}>
+                  <T variant="body" weight="semibold">
+                    Bulk import catalogue
+                  </T>
+                  <T variant="caption" tone="muted">
+                    Paste a CSV — we map the columns for you
+                  </T>
+                </View>
+                <Feather name="chevron-right" size={18} color={color.text.muted} />
+              </Card>
+            )}
+          </Pressable>
 
           {categories.length === 0 ? (
-            <EmptyState icon="silverware-variant" title="Build your menu" body="Add a category above, then start adding items." />
+            <EmptyState icon="book-open" title="Build your menu" body="Add a category above, then start adding items." />
           ) : (
             categories.map((cat) => (
-              <View key={cat.id} className="mb-md">
-                <Heading size="lg" className="mb-sm">
+              <View key={cat.id} style={{ marginBottom: space.lg }}>
+                <T variant="heading" style={{ marginBottom: space.md }}>
                   {cat.name}
-                </Heading>
+                </T>
                 {(cat.items ?? []).length === 0 ? (
-                  <Text className="mb-sm text-sm text-text-muted">No items yet.</Text>
+                  <T variant="label" tone="muted" style={{ marginBottom: space.md }}>
+                    No items yet.
+                  </T>
                 ) : (
-                  cat.items.map((it: any) => (
-                    <MenuItemRow key={it.id} item={it} navigation={navigation} categories={catOptions} />
-                  ))
+                  cat.items.map((it: any) => <MenuItemRow key={it.id} item={it} navigation={navigation} categories={catOptions} />)
                 )}
               </View>
             ))
           )}
         </ScrollView>
       )}
-    </SafeAreaView>
+    </Screen>
   );
 }
 
@@ -869,6 +1070,7 @@ function VendorItemEditorScreen({ navigation, route }: any) {
   const [stock, setStock] = useState<string>(existing?.stockQuantity != null ? String(existing.stockQuantity) : '');
   const [lowStock, setLowStock] = useState<string>(existing?.lowStockThreshold != null ? String(existing.lowStockThreshold) : '');
   const [localPhoto, setLocalPhoto] = useState<{ uri: string; name: string; type: string } | null>(null);
+  const [photoErr, setPhotoErr] = useState<string | null>(null);
 
   // Service businesses configure a bookable appointment instead of stock.
   const { store } = useVendorProfile();
@@ -882,7 +1084,7 @@ function VendorItemEditorScreen({ navigation, route }: any) {
   const [startTime, setStartTime] = useState<string>(existingBooking.slots?.[0]?.start ?? '09:00');
   const [endTime, setEndTime] = useState<string>(existingBooking.slots?.[0]?.end ?? '17:00');
   const [mode, setMode] = useState<'AT_BUSINESS' | 'MOBILE' | 'BOTH'>(existingBooking.serviceMode ?? 'AT_BUSINESS');
-  const [radius, setRadius] = useState<string>(existingBooking.serviceRadiusKm != null ? String(existingBooking.serviceRadiusKm) : '5');
+  const [radiusKm, setRadiusKm] = useState<string>(existingBooking.serviceRadiusKm != null ? String(existingBooking.serviceRadiusKm) : '5');
 
   const priceNum = Number(price);
   const valid =
@@ -899,17 +1101,20 @@ function VendorItemEditorScreen({ navigation, route }: any) {
   };
 
   const pickFromLibrary = async () => {
+    setPhotoMenu(false);
     const perm = await ImagePicker.requestMediaLibraryPermissionsAsync();
     if (!perm.granted) return;
     applyAsset(await ImagePicker.launchImageLibraryAsync({ mediaTypes: ImagePicker.MediaTypeOptions.Images, quality: 0.8 }));
   };
 
   const takePhoto = async () => {
+    setPhotoMenu(false);
     const perm = await ImagePicker.requestCameraPermissionsAsync();
     if (!perm.granted) {
-      toast.error('Camera access needed', 'Allow camera access in Settings to take photos.');
+      setPhotoErr('Camera access needed — allow it in Settings to take photos.');
       return;
     }
+    setPhotoErr(null);
     applyAsset(await ImagePicker.launchCameraAsync({ quality: 0.8 }));
   };
 
@@ -921,7 +1126,7 @@ function VendorItemEditorScreen({ navigation, route }: any) {
           durationMinutes: duration,
           slots: days.map((d) => ({ dayOfWeek: d, start: startTime, end: endTime })),
           serviceMode: mode,
-          ...(mode !== 'AT_BUSINESS' ? { serviceRadiusKm: Number(radius) || 0 } : {}),
+          ...(mode !== 'AT_BUSINESS' ? { serviceRadiusKm: Number(radiusKm) || 0 } : {}),
         }
       : undefined;
     const saved: any = await save.mutateAsync({
@@ -953,95 +1158,130 @@ function VendorItemEditorScreen({ navigation, route }: any) {
   };
 
   return (
-    <SafeAreaView style={{ flex: 1 }} edges={['top']} className="bg-surface-subtle">
-      <SubHeader title={existing ? 'Edit item' : 'New item'} navigation={navigation} />
-      <ScrollView className="flex-1" contentContainerStyle={{ paddingHorizontal: 16, paddingBottom: 32 }} showsVerticalScrollIndicator={false}>
+    <Screen>
+      <SubHeader title={existing ? 'Edit Item' : 'New Item'} navigation={navigation} />
+      <ScrollView contentContainerStyle={{ paddingHorizontal: GUTTER, paddingBottom: space['3xl'] }} showsVerticalScrollIndicator={false}>
         {/* Photo */}
-        <PressableScale onPress={() => setPhotoMenu(true)} className="mb-sm items-center justify-center overflow-hidden rounded-2xl bg-surface-subtle" style={{ height: 160 }}>
-          {previewUri ? (
-            <Image source={{ uri: previewUri }} style={{ width: '100%', height: 160 }} />
-          ) : (
-            <View className="items-center">
-              <Feather name="camera" size={24} color={color.text.muted} />
-              <Text className="mt-xs text-sm text-text-muted">Add a photo</Text>
+        <Pressable onPress={() => setPhotoMenu(true)}>
+          {({ pressed }) => (
+            <View
+              style={{
+                height: 160,
+                borderRadius: radius.lg,
+                overflow: 'hidden',
+                alignItems: 'center',
+                justifyContent: 'center',
+                backgroundColor: color.brand[50],
+                marginBottom: space.sm,
+                opacity: pressed ? 0.85 : 1,
+              }}
+            >
+              {previewUri ? (
+                <Image source={{ uri: previewUri }} style={{ width: '100%', height: 160 }} contentFit="cover" />
+              ) : (
+                <View style={{ alignItems: 'center' }}>
+                  <Feather name="camera" size={24} color={color.brand[500]} />
+                  <T variant="label" tone="muted" style={{ marginTop: space.sm }}>
+                    Add a photo
+                  </T>
+                </View>
+              )}
             </View>
           )}
-        </PressableScale>
+        </Pressable>
         {previewUri ? (
-          <PressableScale onPress={() => setPhotoMenu(true)} className="mb-md items-center" hitSlop={6} disabled={uploadImage.isPending}>
-            <Text className="text-sm font-semibold" style={{ color: color.brand[600] }}>{uploadImage.isPending ? 'Uploading…' : 'Change photo'}</Text>
-          </PressableScale>
+          <View style={{ alignItems: 'center', marginBottom: space.lg }}>
+            <LinkText label={uploadImage.isPending ? 'Uploading…' : 'Change photo'} onPress={() => setPhotoMenu(true)} />
+          </View>
+        ) : null}
+        {photoErr ? (
+          <T variant="caption" tone="error" center style={{ marginBottom: space.md }}>
+            {photoErr}
+          </T>
         ) : null}
 
-        <View className="gap-sm">
-          <Input value={name} onChangeText={setName} placeholder="Item name" />
-          <Input value={price} onChangeText={setPrice} placeholder="Price (GYD)" keyboardType="decimal-pad" />
-          <Input value={description} onChangeText={setDescription} placeholder="Description (optional)" multiline />
+        <View style={{ gap: space.md }}>
+          <LabeledInput value={name} onChangeText={setName} placeholder="Item name" />
+          <LabeledInput value={price} onChangeText={setPrice} placeholder="Price (GYD)" keyboardType="decimal-pad" />
+          <InlineInput value={description} onChangeText={setDescription} placeholder="Description (optional)" multiline />
         </View>
 
         {isService ? (
-          <View className="mt-md rounded-3xl bg-surface-base p-lg" style={CARD_SHADOW}>
-            <Heading size="lg" className="mb-sm">Appointment booking</Heading>
+          <Card style={{ marginTop: space.lg }}>
+            <T variant="heading" style={{ marginBottom: space.md }}>
+              Appointment booking
+            </T>
 
-            <Text className="mb-xs text-xs font-semibold text-text-muted">Appointment length</Text>
-            <View className="mb-md flex-row flex-wrap" style={{ gap: 8 }}>
+            <T variant="caption" weight="semibold" tone="muted" style={{ marginBottom: space.sm }}>
+              Appointment length
+            </T>
+            <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: space.sm, marginBottom: space.lg }}>
               {[15, 30, 45, 60, 90, 120].map((m) => (
-                <ChoiceChip key={m} label={`${m} min`} active={duration === m} onPress={() => setDuration(m)} />
+                <Chip key={m} label={`${m} min`} selected={duration === m} onPress={() => setDuration(m)} style={{ height: 36, paddingHorizontal: space.md }} />
               ))}
             </View>
 
-            <Text className="mb-xs text-xs font-semibold text-text-muted">Available days</Text>
-            <View className="mb-md flex-row flex-wrap" style={{ gap: 6 }}>
-              {DAY_LABELS.map((d, i) => {
-                const on = days.includes(i);
-                return (
-                  <PressableScale
-                    key={i}
-                    onPress={() => setDays((p) => (on ? p.filter((x) => x !== i) : [...p, i]))}
-                    style={on ? { backgroundColor: color.brand[500] } : undefined} className={on ? 'rounded-full px-md py-sm' : 'rounded-full border border-border-subtle bg-surface-subtle px-md py-sm'}
-                  >
-                    <Text className={on ? 'text-xs font-bold text-white' : 'text-xs font-bold text-text-secondary'}>{d}</Text>
-                  </PressableScale>
-                );
-              })}
+            <T variant="caption" weight="semibold" tone="muted" style={{ marginBottom: space.sm }}>
+              Available days
+            </T>
+            <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: space.sm, marginBottom: space.lg }}>
+              {DAY_LABELS.map((d, i) => (
+                <Chip
+                  key={i}
+                  label={d}
+                  selected={days.includes(i)}
+                  onPress={() => setDays((p) => (p.includes(i) ? p.filter((x) => x !== i) : [...p, i]))}
+                  style={{ height: 36, paddingHorizontal: space.md }}
+                />
+              ))}
             </View>
 
-            <Text className="mb-xs text-xs font-semibold text-text-muted">Hours</Text>
-            <View className="mb-md flex-row items-center" style={{ gap: 8 }}>
-              <Input containerClassName="flex-1" value={startTime} onChangeText={setStartTime} placeholder="09:00" />
-              <Text className="text-text-muted">to</Text>
-              <Input containerClassName="flex-1" value={endTime} onChangeText={setEndTime} placeholder="17:00" />
+            <T variant="caption" weight="semibold" tone="muted" style={{ marginBottom: space.sm }}>
+              Hours
+            </T>
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.md, marginBottom: space.lg }}>
+              <InlineInput style={{ flex: 1 }} value={startTime} onChangeText={setStartTime} placeholder="09:00" center />
+              <T variant="label" tone="muted">
+                to
+              </T>
+              <InlineInput style={{ flex: 1 }} value={endTime} onChangeText={setEndTime} placeholder="17:00" center />
             </View>
 
-            <Text className="mb-xs text-xs font-semibold text-text-muted">Where does it happen?</Text>
-            <View className="mb-md flex-row flex-wrap" style={{ gap: 8 }}>
-              <ChoiceChip label="At my place" active={mode === 'AT_BUSINESS'} onPress={() => setMode('AT_BUSINESS')} />
-              <ChoiceChip label="I travel to them" active={mode === 'MOBILE'} onPress={() => setMode('MOBILE')} />
-              <ChoiceChip label="Both" active={mode === 'BOTH'} onPress={() => setMode('BOTH')} />
+            <T variant="caption" weight="semibold" tone="muted" style={{ marginBottom: space.sm }}>
+              Where does it happen?
+            </T>
+            <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: space.sm, marginBottom: space.md }}>
+              <Chip label="At my place" selected={mode === 'AT_BUSINESS'} onPress={() => setMode('AT_BUSINESS')} style={{ height: 38, paddingHorizontal: space.md }} />
+              <Chip label="I travel to them" selected={mode === 'MOBILE'} onPress={() => setMode('MOBILE')} style={{ height: 38, paddingHorizontal: space.md }} />
+              <Chip label="Both" selected={mode === 'BOTH'} onPress={() => setMode('BOTH')} style={{ height: 38, paddingHorizontal: space.md }} />
             </View>
 
             {mode !== 'AT_BUSINESS' ? (
               <View>
-                <Text className="mb-xs text-xs font-semibold text-text-muted">How far will you travel from your store? (km)</Text>
-                <Input value={radius} onChangeText={setRadius} placeholder="5" keyboardType="number-pad" />
+                <T variant="caption" weight="semibold" tone="muted" style={{ marginBottom: space.sm }}>
+                  How far will you travel from your store? (km)
+                </T>
+                <InlineInput value={radiusKm} onChangeText={setRadiusKm} placeholder="5" keyboardType="number-pad" />
               </View>
             ) : null}
-          </View>
+          </Card>
         ) : (
           <>
             {/* Inventory — used by groceries/shops; optional for restaurants */}
-            <Text className="mb-xs mt-sm text-sm font-semibold text-text-secondary">Inventory (optional)</Text>
-            <View className="gap-sm">
-              <View className="flex-row" style={{ gap: 8 }}>
-                <Input containerClassName="flex-1" value={stock} onChangeText={setStock} placeholder="Stock qty" keyboardType="number-pad" />
-                <Input containerClassName="flex-1" value={unit} onChangeText={setUnit} placeholder="Unit (kg, ea)" />
+            <T variant="label" weight="semibold" tone="muted" style={{ marginTop: space.lg, marginBottom: space.sm }}>
+              Inventory (optional)
+            </T>
+            <View style={{ gap: space.md }}>
+              <View style={{ flexDirection: 'row', gap: space.md }}>
+                <InlineInput style={{ flex: 1 }} value={stock} onChangeText={setStock} placeholder="Stock qty" keyboardType="number-pad" />
+                <InlineInput style={{ flex: 1 }} value={unit} onChangeText={setUnit} placeholder="Unit (kg, ea)" />
               </View>
-              <Input value={sku} onChangeText={setSku} placeholder="SKU / barcode (optional)" />
-              <Input value={lowStock} onChangeText={setLowStock} placeholder="Low-stock alert at (e.g. 5)" keyboardType="number-pad" />
+              <InlineInput value={sku} onChangeText={setSku} placeholder="SKU / barcode (optional)" />
+              <InlineInput value={lowStock} onChangeText={setLowStock} placeholder="Low-stock alert at (e.g. 5)" keyboardType="number-pad" />
               {stock.trim() !== '' ? (
-                <Text className="text-xs text-text-muted">
+                <T variant="caption" tone="muted">
                   Tracked items sell down automatically and hide at 0. You’ll get an alert at your low-stock level.
-                </Text>
+                </T>
               ) : null}
             </View>
           </>
@@ -1050,44 +1290,54 @@ function VendorItemEditorScreen({ navigation, route }: any) {
         {existing && !isService ? (
           <ModifiersSection item={existing} />
         ) : !isService ? (
-          <Text className="mt-sm text-xs text-text-muted">
+          <T variant="caption" tone="muted" style={{ marginTop: space.md }}>
             Save the item first to add options &amp; add-ons (sizes, toppings, extras).
-          </Text>
+          </T>
         ) : null}
 
-        <Text className="mb-xs mt-sm text-sm font-semibold text-text-secondary">Category</Text>
-        <View className="mb-md flex-row flex-wrap" style={{ gap: 8 }}>
+        <T variant="label" weight="semibold" tone="muted" style={{ marginTop: space.lg, marginBottom: space.sm }}>
+          Category
+        </T>
+        <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: space.sm, marginBottom: space.lg }}>
           {categories.map((c) => (
-            <ChoiceChip key={c.id} label={c.name} active={c.id === categoryId} onPress={() => setCategoryId(c.id)} />
+            <Chip key={c.id} label={c.name} selected={c.id === categoryId} onPress={() => setCategoryId(c.id)} style={{ height: 38, paddingHorizontal: space.md }} />
           ))}
         </View>
 
-        <View className="mb-md flex-row" style={{ gap: 8 }}>
-          <ChoiceChip label={available ? 'Available' : 'Sold out'} active={available} onPress={() => setAvailable((v) => !v)} />
-          <ChoiceChip label="★ Popular" active={popular} onPress={() => setPopular((v) => !v)} />
+        <View style={{ flexDirection: 'row', gap: space.md, marginBottom: space.lg }}>
+          <Chip label={available ? 'Available' : 'Sold out'} selected={available} onPress={() => setAvailable((v) => !v)} style={{ height: 38, paddingHorizontal: space.md }} />
+          <Chip label="★ Popular" selected={popular} onPress={() => setPopular((v) => !v)} style={{ height: 38, paddingHorizontal: space.md }} />
         </View>
 
-        {save.isError ? <Text className="mb-sm text-sm text-error">Couldn&apos;t save. Check the details and try again.</Text> : null}
-        <Button
-          label={existing ? 'Save changes' : 'Add item'}
-          loading={busy}
-          disabled={!valid}
-          onPress={submit}
-        />
+        {save.isError ? (
+          <T variant="label" tone="error" style={{ marginBottom: space.md }}>
+            Couldn&apos;t save. Check the details and try again.
+          </T>
+        ) : null}
+        <PillButton label={existing ? 'Save changes' : 'Add item'} loading={busy} disabled={!valid} onPress={submit} />
       </ScrollView>
-      <ActionSheet
-        open={photoMenu}
-        onClose={() => setPhotoMenu(false)}
-        title="Item photo"
-        actions={[
-          { label: 'Take photo', icon: 'camera-outline', onPress: takePhoto },
-          { label: 'Choose from library', icon: 'image-outline', onPress: pickFromLibrary },
-          ...(localPhoto
-            ? [{ label: 'Remove selected photo', icon: 'trash-can-outline' as const, destructive: true, onPress: () => setLocalPhoto(null) }]
-            : []),
-        ]}
-      />
-    </SafeAreaView>
+
+      {/* Photo source picker — kit popup */}
+      <PopupCard visible={photoMenu} onClose={() => setPhotoMenu(false)}>
+        <IconChip icon="camera" size={56} />
+        <T variant="title" center style={{ marginTop: space.lg }}>
+          Item photo
+        </T>
+        <PillButton label="Take photo" style={{ alignSelf: 'stretch', marginTop: space['2xl'] }} onPress={takePhoto} />
+        <PillButton label="Choose from library" variant="soft" style={{ alignSelf: 'stretch', marginTop: space.md }} onPress={pickFromLibrary} />
+        {localPhoto ? (
+          <PillButton
+            label="Remove selected photo"
+            variant="outline"
+            style={{ alignSelf: 'stretch', marginTop: space.md }}
+            onPress={() => {
+              setLocalPhoto(null);
+              setPhotoMenu(false);
+            }}
+          />
+        ) : null}
+      </PopupCard>
+    </Screen>
   );
 }
 
@@ -1102,11 +1352,9 @@ function VendorOrdersTab({ navigation }: any) {
   const { store } = useVendorProfile();
   if (!store) {
     return (
-      <SafeAreaView style={{ flex: 1 }} edges={['top']} className="bg-surface-subtle">
-        <View className="flex-1 items-center justify-center">
-          <Spinner size="large" />
-        </View>
-      </SafeAreaView>
+      <Screen>
+        <LoadingBlock />
+      </Screen>
     );
   }
   return <VendorOps store={store} navigation={navigation} />;
@@ -1124,30 +1372,45 @@ function RevenueChart({ daily, totals }: { daily: Array<{ date: string; revenue:
     return `${d.getUTCDate()}/${d.getUTCMonth() + 1}`;
   };
   return (
-    <Card className="mb-md">
-      <View className="flex-row items-baseline justify-between">
-        <Text className="text-base font-semibold">Last {daily.length} days</Text>
-        <Text className="text-sm text-text-secondary">
+    <Card style={{ marginBottom: space.md }}>
+      <View style={{ flexDirection: 'row', alignItems: 'baseline', justifyContent: 'space-between' }}>
+        <T variant="body" weight="semibold">
+          Last {daily.length} days
+        </T>
+        <T variant="label" tone="muted">
           {money(totals.revenue)} · {totals.orders} orders
-        </Text>
+        </T>
       </View>
       {totals.orders === 0 ? (
-        <Text className="mt-md text-sm text-text-muted">No completed orders yet — sales will chart here.</Text>
+        <T variant="label" tone="muted" style={{ marginTop: space.md }}>
+          No completed orders yet — sales will chart here.
+        </T>
       ) : (
         <>
-          <View className="mt-md flex-row items-end" style={{ height: CHART_HEIGHT, gap: 3 }}>
+          <View style={{ flexDirection: 'row', alignItems: 'flex-end', gap: 3, height: CHART_HEIGHT, marginTop: space.md }}>
             {daily.map((d) => (
               <View
                 key={d.date}
-                className={d.revenue > 0 ? 'flex-1 rounded-t-sm' : 'flex-1 rounded-t-sm bg-surface-subtle'}
-                style={[{ height: Math.max(3, Math.round((d.revenue / max) * CHART_HEIGHT)) }, d.revenue > 0 ? { backgroundColor: color.brand[500] } : null]}
+                style={{
+                  flex: 1,
+                  borderTopLeftRadius: 3,
+                  borderTopRightRadius: 3,
+                  height: Math.max(3, Math.round((d.revenue / max) * CHART_HEIGHT)),
+                  backgroundColor: d.revenue > 0 ? color.brand[500] : color.border.subtle,
+                }}
               />
             ))}
           </View>
-          <View className="mt-xs flex-row justify-between">
-            <Text className="text-xs text-text-muted">{dayLabel(daily[0]!.date)}</Text>
-            <Text className="text-xs text-text-muted">peak {money(max)}</Text>
-            <Text className="text-xs text-text-muted">{dayLabel(daily[daily.length - 1]!.date)}</Text>
+          <View style={{ flexDirection: 'row', justifyContent: 'space-between', marginTop: space.sm }}>
+            <T variant="caption" tone="muted">
+              {dayLabel(daily[0]!.date)}
+            </T>
+            <T variant="caption" tone="muted">
+              peak {money(max)}
+            </T>
+            <T variant="caption" tone="muted">
+              {dayLabel(daily[daily.length - 1]!.date)}
+            </T>
           </View>
         </>
       )}
@@ -1158,28 +1421,42 @@ function RevenueChart({ daily, totals }: { daily: Array<{ date: string; revenue:
 function TopItemsCard({ items }: { items: any[] }) {
   const ranked = items.filter((i) => i.totalOrdered > 0 || i.recentOrders > 0);
   return (
-    <Card className="mb-md">
-      <Text className="text-base font-semibold">Top items</Text>
+    <Card style={{ marginBottom: space.md }}>
+      <T variant="body" weight="semibold">
+        Top items
+      </T>
       {ranked.length === 0 ? (
-        <Text className="mt-sm text-sm text-text-muted">Your best sellers will rank here once orders come in.</Text>
+        <T variant="label" tone="muted" style={{ marginTop: space.sm }}>
+          Your best sellers will rank here once orders come in.
+        </T>
       ) : (
         ranked.map((item, i) => (
-          <View key={item.id} className="mt-sm flex-row items-center">
-            <Text className="w-6 text-sm font-bold text-text-muted">{i + 1}</Text>
+          <View key={item.id} style={{ flexDirection: 'row', alignItems: 'center', marginTop: space.sm }}>
+            <T variant="label" weight="bold" tone="muted" style={{ width: 24 }}>
+              {i + 1}
+            </T>
             {item.imageUrl ? (
-              <Image source={{ uri: mediaUrl(item.imageUrl)! }} style={{ width: 34, height: 34, borderRadius: 8 }} />
+              <Image source={{ uri: mediaUrl(item.imageUrl)! }} style={{ width: 34, height: 34, borderRadius: 8 }} contentFit="cover" />
             ) : (
-              <View style={{ width: 34, height: 34, borderRadius: 8 }} className="items-center justify-center bg-surface-subtle">
+              <View style={{ width: 34, height: 34, borderRadius: 8, alignItems: 'center', justifyContent: 'center', backgroundColor: color.brand[50] }}>
                 <Feather name="image" size={14} color={color.text.muted} />
               </View>
             )}
-            <View className="ml-sm flex-1">
-              <Text className="text-sm font-semibold" numberOfLines={1}>{item.name}</Text>
-              <Text className="text-xs text-text-muted">{item.category?.name ?? ''}</Text>
+            <View style={{ flex: 1, marginLeft: space.sm }}>
+              <T variant="label" weight="semibold" numberOfLines={1}>
+                {item.name}
+              </T>
+              <T variant="caption" tone="muted">
+                {item.category?.name ?? ''}
+              </T>
             </View>
-            <View className="items-end">
-              <Text className="text-sm font-semibold">{item.recentOrders} this month</Text>
-              <Text className="text-xs text-text-muted">{item.totalOrdered} all time</Text>
+            <View style={{ alignItems: 'flex-end' }}>
+              <T variant="label" weight="semibold">
+                {item.recentOrders} this month
+              </T>
+              <T variant="caption" tone="muted">
+                {item.totalOrdered} all time
+              </T>
             </View>
           </View>
         ))
@@ -1191,39 +1468,50 @@ function TopItemsCard({ items }: { items: any[] }) {
 /** Busy-hours mini chart (§4.1): when the orders actually come in. */
 function BusyHoursCard() {
   const q = useBusyHours();
-  if (q.isLoading) return <Skeleton className="mb-md h-28 w-full rounded-2xl" />;
+  if (q.isLoading) return null;
   const data = q.data;
   if (!data) return null;
   const hours: Array<{ hour: number; orders: number }> = data.hours ?? [];
   const max = Math.max(...hours.map((h) => h.orders), 1);
   const fmtHour = (h: number) => (h === 0 ? '12am' : h < 12 ? `${h}am` : h === 12 ? '12pm' : `${h - 12}pm`);
   return (
-    <Card className="mb-md">
-      <View className="flex-row items-baseline justify-between">
-        <Text className="text-base font-semibold">Busy hours</Text>
+    <Card style={{ marginBottom: space.md }}>
+      <View style={{ flexDirection: 'row', alignItems: 'baseline', justifyContent: 'space-between' }}>
+        <T variant="body" weight="semibold">
+          Busy hours
+        </T>
         {data.peak ? (
-          <Text className="text-sm text-text-secondary">peak {fmtHour(data.peak.hour)}</Text>
+          <T variant="label" tone="muted">
+            peak {fmtHour(data.peak.hour)}
+          </T>
         ) : null}
       </View>
       {data.total === 0 ? (
-        <Text className="mt-sm text-sm text-text-muted">Order times will map out here — staff up for the rush.</Text>
+        <T variant="label" tone="muted" style={{ marginTop: space.sm }}>
+          Order times will map out here — staff up for the rush.
+        </T>
       ) : (
         <>
-          <View className="mt-md flex-row items-end" style={{ height: 64, gap: 2 }}>
+          <View style={{ flexDirection: 'row', alignItems: 'flex-end', gap: 2, height: 64, marginTop: space.md }}>
             {hours.map((h) => (
               <View
                 key={h.hour}
-                className={h.orders > 0 ? 'flex-1 rounded-t-sm' : 'flex-1 rounded-t-sm bg-surface-subtle'}
-                style={[{ height: Math.max(3, Math.round((h.orders / max) * 64)) }, h.orders > 0 ? { backgroundColor: color.brand[500] } : null]}
+                style={{
+                  flex: 1,
+                  borderTopLeftRadius: 2,
+                  borderTopRightRadius: 2,
+                  height: Math.max(3, Math.round((h.orders / max) * 64)),
+                  backgroundColor: h.orders > 0 ? color.brand[500] : color.border.subtle,
+                }}
               />
             ))}
           </View>
-          <View className="mt-xs flex-row justify-between">
-            <Text className="text-xs text-text-muted">12am</Text>
-            <Text className="text-xs text-text-muted">6am</Text>
-            <Text className="text-xs text-text-muted">12pm</Text>
-            <Text className="text-xs text-text-muted">6pm</Text>
-            <Text className="text-xs text-text-muted">11pm</Text>
+          <View style={{ flexDirection: 'row', justifyContent: 'space-between', marginTop: space.sm }}>
+            {['12am', '6am', '12pm', '6pm', '11pm'].map((l) => (
+              <T key={l} variant="caption" tone="muted">
+                {l}
+              </T>
+            ))}
           </View>
         </>
       )}
@@ -1239,61 +1527,71 @@ function ReviewsCard() {
   const [openId, setOpenId] = useState<string | null>(null);
 
   const reviews: any[] = (reviewsQ.data?.data ?? []).slice(0, 10);
-  if (reviewsQ.isLoading) return <Skeleton className="mb-md h-32 w-full rounded-2xl" />;
+  if (reviewsQ.isLoading) return null;
 
   return (
-    <Card className="mb-md">
-      <Text className="text-base font-semibold">Recent reviews</Text>
+    <Card style={{ marginBottom: space.md }}>
+      <T variant="body" weight="semibold">
+        Recent reviews
+      </T>
       {reviews.length === 0 ? (
-        <Text className="mt-sm text-sm text-text-muted">Reviews land here after customers rate their orders.</Text>
+        <T variant="label" tone="muted" style={{ marginTop: space.sm }}>
+          Reviews land here after customers rate their orders.
+        </T>
       ) : (
         reviews.map((r) => (
-          <View key={r.id} className="mt-sm border-t border-border-subtle pt-sm">
-            <View className="flex-row items-center">
-              <Text className="flex-1 text-sm font-semibold">
-                {r.rater?.firstName ?? 'Customer'} · {'★'.repeat(Number(r.score) || 0)}
-              </Text>
-              <Text className="text-xs text-text-muted">
+          <View key={r.id} style={{ marginTop: space.sm, borderTopWidth: 1, borderTopColor: color.border.subtle, paddingTop: space.sm }}>
+            <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+              <T variant="label" weight="semibold" style={{ flex: 1 }}>
+                {r.rater?.firstName ?? 'Customer'} · <T variant="label" style={{ color: color.warning }}>{'★'.repeat(Number(r.score) || 0)}</T>
+              </T>
+              <T variant="caption" tone="muted">
                 {new Date(r.createdAt).toLocaleDateString([], { month: 'short', day: 'numeric' })}
-              </Text>
+              </T>
             </View>
-            {r.comment ? <Text className="mt-xs text-sm text-text-secondary">{r.comment}</Text> : null}
+            {r.comment ? (
+              <T variant="label" tone="muted" style={{ marginTop: 4 }}>
+                {r.comment}
+              </T>
+            ) : null}
 
             {r.response && openId !== r.id ? (
-              <View className="ml-md mt-xs rounded-xl bg-surface-subtle px-sm py-xs">
-                <Text className="text-xs text-text-secondary">You replied: {r.response}</Text>
-                <PressableScale onPress={() => { setOpenId(r.id); setDrafts((s) => ({ ...s, [r.id]: r.response })); }} hitSlop={6}>
-                  <Text className="mt-0.5 text-xs font-semibold" style={{ color: color.brand[600] }}>Edit reply</Text>
-                </PressableScale>
+              <View style={{ marginLeft: space.lg, marginTop: space.sm, borderRadius: radius.md, backgroundColor: color.surface.subtle, paddingHorizontal: space.md, paddingVertical: space.sm }}>
+                <T variant="caption" tone="muted">
+                  You replied: {r.response}
+                </T>
+                <LinkText
+                  label="Edit reply"
+                  onPress={() => {
+                    setOpenId(r.id);
+                    setDrafts((s) => ({ ...s, [r.id]: r.response }));
+                  }}
+                />
               </View>
             ) : openId === r.id ? (
-              <View className="mt-xs">
-                <Input
+              <View style={{ marginTop: space.sm }}>
+                <InlineInput
+                  multiline
                   value={drafts[r.id] ?? ''}
                   onChangeText={(t: string) => setDrafts((s) => ({ ...s, [r.id]: t }))}
                   placeholder="Write a public reply…"
-                  multiline
                 />
-                <View className="mt-xs flex-row" style={{ gap: 8 }}>
-                  <Button
+                <View style={{ flexDirection: 'row', gap: space.md, marginTop: space.sm }}>
+                  <PillButton
                     label="Post reply"
-                    className="flex-1"
+                    size="md"
+                    style={{ flex: 1 }}
                     loading={respond.isPending}
                     disabled={!(drafts[r.id] ?? '').trim()}
-                    onPress={() =>
-                      respond.mutate(
-                        { id: r.id, response: (drafts[r.id] ?? '').trim() },
-                        { onSuccess: () => setOpenId(null) },
-                      )
-                    }
+                    onPress={() => respond.mutate({ id: r.id, response: (drafts[r.id] ?? '').trim() }, { onSuccess: () => setOpenId(null) })}
                   />
-                  <Button label="Cancel" variant="outline" className="flex-1" onPress={() => setOpenId(null)} />
+                  <PillButton label="Cancel" variant="soft" size="md" style={{ flex: 1 }} onPress={() => setOpenId(null)} />
                 </View>
               </View>
             ) : (
-              <PressableScale onPress={() => setOpenId(r.id)} hitSlop={6}>
-                <Text className="mt-xs text-xs font-semibold" style={{ color: color.brand[600] }}>Reply</Text>
-              </PressableScale>
+              <View style={{ marginTop: space.sm }}>
+                <LinkText label="Reply" onPress={() => setOpenId(r.id)} />
+              </View>
             )}
           </View>
         ))
@@ -1309,59 +1607,63 @@ function VendorInsightsScreen() {
   const a: any = q.data ?? {};
   const v: any = a.vendor ?? {};
   return (
-    <SafeAreaView style={{ flex: 1 }} edges={['top']} className="bg-surface-subtle">
-      <Header title="Insights" />
+    <Screen>
+      <TabHeader title="Insights" />
       <ScrollView
-        className="flex-1"
-        contentContainerStyle={{ paddingHorizontal: 16, paddingBottom: 32 }}
+        contentContainerStyle={{ paddingHorizontal: GUTTER, paddingBottom: space['3xl'] }}
         showsVerticalScrollIndicator={false}
-        refreshControl={<RefreshControl refreshing={q.isRefetching} onRefresh={() => { q.refetch(); revenueQ.refetch(); popularQ.refetch(); }} tintColor={color.brand[500]} />}
+        refreshControl={
+          <RefreshControl
+            refreshing={q.isRefetching}
+            onRefresh={() => {
+              q.refetch();
+              revenueQ.refetch();
+              popularQ.refetch();
+            }}
+            tintColor={color.brand[500]}
+          />
+        }
       >
         {q.isLoading ? (
-          <>
-            <Skeleton className="mb-md h-24 w-full rounded-2xl" />
-            <Skeleton className="mb-md h-24 w-full rounded-2xl" />
-          </>
+          <LoadingBlock />
         ) : (
           <>
-            <View className="mb-md flex-row" style={{ gap: 8 }}>
+            <View style={{ flexDirection: 'row', gap: space.md, marginBottom: space.md }}>
               <KpiTile icon="receipt" value={String(a.today?.orders ?? 0)} label="Orders today" />
               <KpiTile icon="cash" value={money(a.today?.revenue ?? 0)} label="Revenue today" />
             </View>
-            <View className="mb-md flex-row" style={{ gap: 8 }}>
+            <View style={{ flexDirection: 'row', gap: space.md, marginBottom: space.md }}>
               <KpiTile icon="calendar-week" value={String(a.week?.orders ?? 0)} label="Orders / week" />
               <KpiTile icon="calendar-month" value={String(a.month?.orders ?? 0)} label="Orders / month" />
             </View>
-            {revenueQ.isLoading ? (
-              <Skeleton className="mb-md h-40 w-full rounded-2xl" />
-            ) : revenueQ.data?.daily?.length ? (
-              <RevenueChart daily={revenueQ.data.daily} totals={revenueQ.data.totals} />
-            ) : null}
-            {popularQ.isLoading ? (
-              <Skeleton className="mb-md h-32 w-full rounded-2xl" />
-            ) : popularQ.data ? (
-              <TopItemsCard items={popularQ.data} />
-            ) : null}
+            {revenueQ.data?.daily?.length ? <RevenueChart daily={revenueQ.data.daily} totals={revenueQ.data.totals} /> : null}
+            {popularQ.data ? <TopItemsCard items={popularQ.data} /> : null}
             <BusyHoursCard />
             <ReviewsCard />
-            <Card className="mb-md">
-              <View className="flex-row items-center justify-between">
-                <View className="flex-row items-center">
-                  <MaterialCommunityIcons name="star" size={18} color={color.brand[500]} />
-                  <Text className="ml-2 text-base font-semibold">{Number(v.averageRating ?? 0).toFixed(1)}</Text>
-                  <Text className="ml-1 text-sm text-text-muted">({v.totalRatings ?? 0})</Text>
+            <Card style={{ marginBottom: space.md }}>
+              <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
+                <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.sm }}>
+                  <MaterialCommunityIcons name="star" size={18} color={color.warning} />
+                  <T variant="body" weight="semibold">
+                    {Number(v.averageRating ?? 0).toFixed(1)}
+                  </T>
+                  <T variant="label" tone="muted">
+                    ({v.totalRatings ?? 0})
+                  </T>
                 </View>
-                <Text className="text-sm text-text-secondary">{v.totalOrders ?? 0} lifetime orders</Text>
+                <T variant="label" tone="muted">
+                  {v.totalOrders ?? 0} lifetime orders
+                </T>
               </View>
             </Card>
-            <View className="flex-row" style={{ gap: 8 }}>
+            <View style={{ flexDirection: 'row', gap: space.md }}>
               <KpiTile icon="silverware-fork-knife" value={String(a.activeMenuItems ?? 0)} label="Active items" />
               <KpiTile icon="bell-ring" value={String(a.pendingOrders ?? 0)} label="Pending now" />
             </View>
           </>
         )}
       </ScrollView>
-    </SafeAreaView>
+    </Screen>
   );
 }
 
@@ -1393,33 +1695,35 @@ function VendorAccountScreen() {
     setDays((prev) => prev.map((x) => (x.dayOfWeek === d ? { ...x, ...patch } : x)));
 
   return (
-    <SafeAreaView style={{ flex: 1 }} edges={['top']} className="bg-surface-subtle">
-      <Header title="Account" />
-      <ScrollView className="flex-1" contentContainerStyle={{ paddingHorizontal: 16, paddingBottom: 32 }} showsVerticalScrollIndicator={false}>
-        <SettingsGroup>
-          <View className="flex-row items-center px-md py-md">
-            <View className="h-14 w-14 items-center justify-center rounded-full 0" style={{ backgroundColor: color.brand[50] }}>
-              <MaterialCommunityIcons name="storefront" size={26} color="#fff" />
-            </View>
-            <View className="ml-md flex-1">
-              <Text className="text-lg font-bold text-text-primary" numberOfLines={1}>{store?.name ?? 'Your store'}</Text>
-              <Text className="mt-0.5 text-sm text-text-secondary" numberOfLines={1}>
-                {prettyVendorType(store?.vendorType)}{store?.city ? ` · ${store.city}` : ''}
-              </Text>
-            </View>
+    <Screen>
+      <TabHeader title="Account" />
+      <ScrollView contentContainerStyle={{ paddingHorizontal: GUTTER, paddingBottom: space['3xl'] }} showsVerticalScrollIndicator={false}>
+        {/* Store identity */}
+        <Card style={{ flexDirection: 'row', alignItems: 'center', gap: space.md, marginBottom: space.lg }}>
+          <View style={{ width: 56, height: 56, borderRadius: 28, alignItems: 'center', justifyContent: 'center', backgroundColor: color.brand[50] }}>
+            <MaterialCommunityIcons name="storefront" size={26} color={color.brand[600]} />
           </View>
-        </SettingsGroup>
+          <View style={{ flex: 1 }}>
+            <T variant="heading" numberOfLines={1}>
+              {store?.name ?? 'Your store'}
+            </T>
+            <T variant="label" tone="muted" numberOfLines={1} style={{ marginTop: 2 }}>
+              {prettyVendorType(store?.vendorType)}
+              {store?.city ? ` · ${store.city}` : ''}
+            </T>
+          </View>
+        </Card>
 
         {isOwner ? (
-          <SettingsGroup header="Plan">
+          <Card style={{ marginBottom: space.lg, paddingVertical: space.sm }}>
             <SettingsRow
-              icon="cash-multiple"
+              icon="credit-card"
               label="Subscription"
-              sublabel={sub.data ? 'Active weekly plan' : 'Not active yet'}
-              right={<Badge label={sub.data ? 'Active' : 'Inactive'} tone={sub.data ? 'success' : 'brand'} />}
+              sub={sub.data ? 'Active weekly plan' : 'Not active yet'}
+              right={<TonePill label={sub.data ? 'Active' : 'Inactive'} tone={sub.data ? 'success' : 'brand'} />}
             />
-            {store?.phone ? <SettingsRow icon="phone-outline" label="Phone" value={store.phone} /> : null}
-          </SettingsGroup>
+            {store?.phone ? <SettingsRow icon="phone" label="Phone" right={<T variant="label" tone="muted">{store.phone}</T>} /> : null}
+          </Card>
         ) : null}
 
         {isManager ? <PromosSection /> : null}
@@ -1427,69 +1731,74 @@ function VendorAccountScreen() {
         {isOwner ? <StaffSection /> : null}
 
         {!isManager ? (
-          <Card className="mb-md mt-sm">
-            <Text className="text-sm font-semibold text-text-primary">Staff account</Text>
-            <Text className="mt-xs text-xs text-text-secondary">
-              You work the order queue and can mark items sold out. Menus, hours and
-              billing stay with the manager and owner.
-            </Text>
+          <Card style={{ marginBottom: space.lg }}>
+            <T variant="label" weight="semibold">
+              Staff account
+            </T>
+            <T variant="caption" tone="muted" style={{ marginTop: 4 }}>
+              You work the order queue and can mark items sold out. Menus, hours and billing stay with the manager and owner.
+            </T>
           </Card>
         ) : null}
 
         {isManager ? (
           <>
-        <Heading size="lg" className="mb-sm mt-sm">
-          Business hours
-        </Heading>
-        {hoursQ.isLoading ? (
-          <Skeleton className="mb-md h-48 w-full rounded-2xl" />
-        ) : (
-          <Card className="mb-md">
-            {days.map((d) => (
-              <View key={d.dayOfWeek} className="mb-sm flex-row items-center">
-                <Text className="w-10 text-sm font-semibold text-text-primary">{DAY_LABELS[d.dayOfWeek]}</Text>
-                {d.isClosed ? (
-                  <Text className="flex-1 px-sm text-sm text-text-muted">Closed</Text>
-                ) : (
-                  <View className="flex-1 flex-row items-center px-sm" style={{ gap: 6 }}>
-                    <TextInput
-                      value={d.openTime}
-                      onChangeText={(t) => setDay(d.dayOfWeek, { openTime: t })}
-                      placeholder="08:00"
-                      placeholderTextColor={color.text.muted}
-                      className="flex-1 rounded-lg border border-border-subtle bg-surface-base px-sm py-sm text-center font-body text-sm text-text-primary"
-                    />
-                    <Text className="text-text-muted">–</Text>
-                    <TextInput
-                      value={d.closeTime}
-                      onChangeText={(t) => setDay(d.dayOfWeek, { closeTime: t })}
-                      placeholder="22:00"
-                      placeholderTextColor={color.text.muted}
-                      className="flex-1 rounded-lg border border-border-subtle bg-surface-base px-sm py-sm text-center font-body text-sm text-text-primary"
-                    />
+            <T variant="heading" style={{ marginBottom: space.md }}>
+              Business hours
+            </T>
+            {hoursQ.isLoading ? (
+              <LoadingBlock />
+            ) : (
+              <Card style={{ marginBottom: space.lg }}>
+                {days.map((d) => (
+                  <View key={d.dayOfWeek} style={{ flexDirection: 'row', alignItems: 'center', marginBottom: space.sm }}>
+                    <T variant="label" weight="semibold" style={{ width: 40 }}>
+                      {DAY_LABELS[d.dayOfWeek]}
+                    </T>
+                    {d.isClosed ? (
+                      <T variant="label" tone="muted" style={{ flex: 1, paddingHorizontal: space.sm }}>
+                        Closed
+                      </T>
+                    ) : (
+                      <View style={{ flex: 1, flexDirection: 'row', alignItems: 'center', gap: 6, paddingHorizontal: space.sm }}>
+                        <View style={{ flex: 1, borderRadius: radius.md, borderWidth: 1, borderColor: color.border.subtle, backgroundColor: color.surface.base }}>
+                          <TextInput
+                            value={d.openTime}
+                            onChangeText={(t) => setDay(d.dayOfWeek, { openTime: t })}
+                            placeholder="08:00"
+                            placeholderTextColor={color.text.muted}
+                            style={{ fontFamily: 'Inter', fontSize: 13, color: color.text.primary, textAlign: 'center', paddingVertical: 8 }}
+                          />
+                        </View>
+                        <T variant="label" tone="muted">
+                          –
+                        </T>
+                        <View style={{ flex: 1, borderRadius: radius.md, borderWidth: 1, borderColor: color.border.subtle, backgroundColor: color.surface.base }}>
+                          <TextInput
+                            value={d.closeTime}
+                            onChangeText={(t) => setDay(d.dayOfWeek, { closeTime: t })}
+                            placeholder="22:00"
+                            placeholderTextColor={color.text.muted}
+                            style={{ fontFamily: 'Inter', fontSize: 13, color: color.text.primary, textAlign: 'center', paddingVertical: 8 }}
+                          />
+                        </View>
+                      </View>
+                    )}
+                    <BrandSwitch value={!d.isClosed} onChange={(val) => setDay(d.dayOfWeek, { isClosed: !val })} />
                   </View>
-                )}
-                <Switch
-                  value={!d.isClosed}
-                  onValueChange={(val) => setDay(d.dayOfWeek, { isClosed: !val })}
-                  trackColor={{ true: color.brand[500], false: color.border.subtle }}
-                />
-              </View>
-            ))}
-            <Button
-              label="Save hours"
-              loading={setHours.isPending}
-              className="mt-sm"
-              disabled={days.length === 0}
-              onPress={() => setHours.mutate(days)}
-            />
-            {setHours.isSuccess ? <Text className="mt-sm text-center text-xs text-success">Hours updated</Text> : null}
-          </Card>
-        )}
+                ))}
+                <PillButton label="Save hours" size="md" loading={setHours.isPending} style={{ marginTop: space.sm }} disabled={days.length === 0} onPress={() => setHours.mutate(days)} />
+                {setHours.isSuccess ? (
+                  <T variant="caption" tone="success" center style={{ marginTop: space.sm }}>
+                    Hours updated
+                  </T>
+                ) : null}
+              </Card>
+            )}
           </>
         ) : null}
       </ScrollView>
-    </SafeAreaView>
+    </Screen>
   );
 }
 
@@ -1513,8 +1822,8 @@ function PromosSection() {
   const [days, setDays] = useState(7);
 
   const promos: any[] = promosQ.data ?? [];
-  const errMsg = (createPromo.error as any)?.response?.data?.error?.message
-    ?? (createPromo.error as any)?.response?.data?.message;
+  const errMsg =
+    (createPromo.error as any)?.response?.data?.error?.message ?? (createPromo.error as any)?.response?.data?.message;
 
   const submit = () => {
     const v = Number(value);
@@ -1529,82 +1838,99 @@ function PromosSection() {
         ...(Number(minOrder) > 0 ? { minOrderAmount: Number(minOrder) } : {}),
         validUntil,
       },
-      { onSuccess: () => { setShowForm(false); setCode(''); setDesc(''); setValue(''); setMinOrder(''); } },
+      {
+        onSuccess: () => {
+          setShowForm(false);
+          setCode('');
+          setDesc('');
+          setValue('');
+          setMinOrder('');
+        },
+      },
     );
   };
 
   return (
     <>
-      <Heading size="lg" className="mb-sm mt-sm">Promotions</Heading>
-      <Card className="mb-md">
+      <T variant="heading" style={{ marginBottom: space.md }}>
+        Promotions
+      </T>
+      <Card style={{ marginBottom: space.lg }}>
         {promos.map((p) => {
           const expired = new Date(p.validUntil).getTime() < Date.now();
           return (
-            <View key={p.id} className="mb-sm flex-row items-center">
-              <View className="flex-1">
-                <View className="flex-row items-center">
-                  <Text className="text-sm font-bold tracking-wider">{p.code}</Text>
-                  <Badge
-                    className="ml-sm"
-                    label={expired ? 'Expired' : p.isActive ? 'Live' : 'Paused'}
-                    tone={expired ? 'neutral' : p.isActive ? 'success' : 'neutral'}
-                  />
+            <View key={p.id} style={{ flexDirection: 'row', alignItems: 'center', marginBottom: space.md }}>
+              <View style={{ flex: 1 }}>
+                <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.sm }}>
+                  <T variant="label" weight="bold" style={{ letterSpacing: 1 }}>
+                    {p.code}
+                  </T>
+                  <TonePill label={expired ? 'Expired' : p.isActive ? 'Live' : 'Paused'} tone={expired ? 'neutral' : p.isActive ? 'success' : 'neutral'} />
                 </View>
-                <Text className="text-xs text-text-muted" numberOfLines={1}>
+                <T variant="caption" tone="muted" numberOfLines={1} style={{ marginTop: 2 }}>
                   {p.discountType === 'PERCENTAGE' ? `${Number(p.discountValue)}% off` : `${money(p.discountValue)} off`}
                   {p.minOrderAmount ? ` over ${money(p.minOrderAmount)}` : ''} · used {p.currentUses}×
-                </Text>
+                </T>
               </View>
               {!expired ? (
-                <PressableScale
-                  onPress={() => updatePromo.mutate({ id: p.id, data: { isActive: !p.isActive } })}
+                <PillButton
+                  label={p.isActive ? 'Pause' : 'Resume'}
+                  variant="soft"
+                  size="sm"
+                  style={{ marginRight: space.sm }}
                   disabled={updatePromo.isPending}
-                  className="mr-sm rounded-full bg-surface-subtle px-md py-xs"
-                >
-                  <Text className="text-xs font-semibold text-text-secondary">{p.isActive ? 'Pause' : 'Resume'}</Text>
-                </PressableScale>
+                  onPress={() => updatePromo.mutate({ id: p.id, data: { isActive: !p.isActive } })}
+                />
               ) : null}
-              <PressableScale onPress={() => deletePromo.mutate(p.id)} hitSlop={8}>
-                <Feather name="trash-2" size={16} color={color.text.muted} />
-              </PressableScale>
+              <Pressable onPress={() => deletePromo.mutate(p.id)} hitSlop={8}>
+                <View style={{ width: 36, height: 36, alignItems: 'center', justifyContent: 'center' }}>
+                  <Feather name="trash-2" size={16} color={color.text.muted} />
+                </View>
+              </Pressable>
             </View>
           );
         })}
         {promos.length === 0 && !promosQ.isLoading ? (
-          <Text className="mb-sm text-sm text-text-muted">
+          <T variant="label" tone="muted" style={{ marginBottom: space.md }}>
             No codes yet — run your first promotion and it shows on your storefront.
-          </Text>
+          </T>
         ) : null}
 
         {showForm ? (
-          <View className="mt-sm">
-            <Input value={code} onChangeText={setCode} placeholder="Code (e.g. SAVE20)" autoCapitalize="characters" />
-            <Input containerClassName="mt-sm" value={desc} onChangeText={setDesc} placeholder="What customers see (e.g. 20% off this week)" />
-            <View className="mt-sm flex-row" style={{ gap: 8 }}>
-              <ChoiceChip label="% off" active={kind === 'PERCENTAGE'} onPress={() => setKind('PERCENTAGE')} />
-              <ChoiceChip label="GYD off" active={kind === 'FIXED_AMOUNT'} onPress={() => setKind('FIXED_AMOUNT')} />
+          <View style={{ gap: space.md }}>
+            <InlineInput value={code} onChangeText={setCode} placeholder="Code (e.g. SAVE20)" autoCapitalize="characters" />
+            <InlineInput value={desc} onChangeText={setDesc} placeholder="What customers see (e.g. 20% off this week)" />
+            <View style={{ flexDirection: 'row', gap: space.md }}>
+              <Chip label="% off" selected={kind === 'PERCENTAGE'} onPress={() => setKind('PERCENTAGE')} style={{ height: 38, paddingHorizontal: space.md }} />
+              <Chip label="GYD off" selected={kind === 'FIXED_AMOUNT'} onPress={() => setKind('FIXED_AMOUNT')} style={{ height: 38, paddingHorizontal: space.md }} />
             </View>
-            <View className="mt-sm flex-row" style={{ gap: 8 }}>
-              <Input containerClassName="flex-1" value={value} onChangeText={setValue} placeholder={kind === 'PERCENTAGE' ? '% (e.g. 20)' : 'GYD (e.g. 500)'} keyboardType="number-pad" />
-              <Input containerClassName="flex-1" value={minOrder} onChangeText={setMinOrder} placeholder="Min order (opt.)" keyboardType="number-pad" />
+            <View style={{ flexDirection: 'row', gap: space.md }}>
+              <InlineInput style={{ flex: 1 }} value={value} onChangeText={setValue} placeholder={kind === 'PERCENTAGE' ? '% (e.g. 20)' : 'GYD (e.g. 500)'} keyboardType="number-pad" />
+              <InlineInput style={{ flex: 1 }} value={minOrder} onChangeText={setMinOrder} placeholder="Min order (opt.)" keyboardType="number-pad" />
             </View>
-            <Text className="mb-xs mt-sm text-xs font-semibold text-text-muted">Runs for</Text>
-            <View className="flex-row" style={{ gap: 8 }}>
+            <T variant="caption" weight="semibold" tone="muted">
+              Runs for
+            </T>
+            <View style={{ flexDirection: 'row', gap: space.sm }}>
               {[3, 7, 14, 30].map((d) => (
-                <ChoiceChip key={d} label={`${d} days`} active={days === d} onPress={() => setDays(d)} />
+                <Chip key={d} label={`${d} days`} selected={days === d} onPress={() => setDays(d)} style={{ height: 36, paddingHorizontal: space.md }} />
               ))}
             </View>
-            {errMsg ? <Text className="mt-sm text-sm text-error">{errMsg}</Text> : null}
-            <Button
+            {errMsg ? (
+              <T variant="label" tone="error">
+                {errMsg}
+              </T>
+            ) : null}
+            <PillButton
               label="Launch promotion"
-              className="mt-sm"
+              size="md"
               loading={createPromo.isPending}
               disabled={!code.trim() || !desc.trim() || !(Number(value) > 0)}
               onPress={submit}
             />
           </View>
         ) : (
-          <Button label="New promotion" variant="outline" onPress={() => setShowForm(true)} />
+          <PillButton label="New promotion" variant="soft" size="md" onPress={() => setShowForm(true)} />
         )}
       </Card>
     </>
@@ -1622,10 +1948,10 @@ function StaffSection() {
   const updateRole = useUpdateStaffRole();
   const [phone, setPhone] = useState('');
   const [role, setRole] = useState<'MANAGER' | 'STAFF'>('STAFF');
+  const [removing, setRemoving] = useState<any | null>(null);
 
   const members: any[] = staffQ.data ?? [];
-  const errMsg = (addStaff.error as any)?.response?.data?.error?.message
-    ?? (addStaff.error as any)?.response?.data?.message;
+  const errMsg = (addStaff.error as any)?.response?.data?.error?.message ?? (addStaff.error as any)?.response?.data?.message;
 
   const submit = () => {
     const p = phone.trim();
@@ -1633,69 +1959,93 @@ function StaffSection() {
     addStaff.mutate({ phone: p, role }, { onSuccess: () => setPhone('') });
   };
 
-  const confirmRemove = (m: any) =>
-    Alert.alert('Remove team member', `${m.user?.firstName ?? 'This person'} will lose store access immediately.`, [
-      { text: 'Cancel', style: 'cancel' },
-      { text: 'Remove', style: 'destructive', onPress: () => removeStaff.mutate(m.id) },
-    ]);
-
   return (
     <>
-      <Heading size="lg" className="mb-sm mt-sm">Team</Heading>
-      <Card className="mb-md">
+      <T variant="heading" style={{ marginBottom: space.md }}>
+        Team
+      </T>
+      <Card style={{ marginBottom: space.lg }}>
         {members.map((m) => (
-          <View key={m.id} className="mb-sm flex-row items-center">
+          <View key={m.id} style={{ flexDirection: 'row', alignItems: 'center', marginBottom: space.md }}>
             {m.user?.avatar ? (
-              <Image source={{ uri: mediaUrl(m.user.avatar) ?? undefined }} style={{ width: 36, height: 36, borderRadius: 18 }} />
+              <Image source={{ uri: mediaUrl(m.user.avatar) ?? undefined }} style={{ width: 36, height: 36, borderRadius: 18 }} contentFit="cover" />
             ) : (
-              <View className="h-9 w-9 items-center justify-center rounded-full bg-surface-subtle">
+              <View style={{ width: 36, height: 36, borderRadius: 18, alignItems: 'center', justifyContent: 'center', backgroundColor: color.brand[50] }}>
                 <Feather name="user" size={16} color={color.text.muted} />
               </View>
             )}
-            <View className="ml-sm flex-1">
-              <Text className="text-sm font-semibold">
+            <View style={{ flex: 1, marginLeft: space.sm }}>
+              <T variant="label" weight="semibold">
                 {[m.user?.firstName, m.user?.lastName].filter(Boolean).join(' ')}
-              </Text>
-              <Text className="text-xs text-text-muted">{m.user?.phone}</Text>
+              </T>
+              <T variant="caption" tone="muted">
+                {m.user?.phone}
+              </T>
             </View>
-            <PressableScale
-              onPress={() => updateRole.mutate({ id: m.id, role: m.role === 'MANAGER' ? 'STAFF' : 'MANAGER' })}
+            <PillButton
+              label={m.role === 'MANAGER' ? 'Manager' : 'Staff'}
+              variant="soft"
+              size="sm"
+              style={{ marginRight: space.sm }}
               disabled={updateRole.isPending}
-              className="mr-sm rounded-full bg-surface-subtle px-md py-xs"
-            >
-              <Text className="text-xs font-semibold text-text-secondary">
-                {m.role === 'MANAGER' ? 'Manager' : 'Staff'}
-              </Text>
-            </PressableScale>
-            <PressableScale onPress={() => confirmRemove(m)} hitSlop={8}>
-              <Feather name="x" size={16} color={color.text.muted} />
-            </PressableScale>
+              onPress={() => updateRole.mutate({ id: m.id, role: m.role === 'MANAGER' ? 'STAFF' : 'MANAGER' })}
+            />
+            <Pressable onPress={() => setRemoving(m)} hitSlop={8}>
+              <View style={{ width: 36, height: 36, alignItems: 'center', justifyContent: 'center' }}>
+                <Feather name="x" size={16} color={color.text.muted} />
+              </View>
+            </Pressable>
           </View>
         ))}
         {members.length === 0 && !staffQ.isLoading ? (
-          <Text className="mb-sm text-sm text-text-muted">
+          <T variant="label" tone="muted" style={{ marginBottom: space.md }}>
             No team members yet — add your manager or floor staff by phone.
-          </Text>
+          </T>
         ) : null}
 
-        <Input value={phone} onChangeText={setPhone} placeholder="+592 phone of an existing Swift account" keyboardType="phone-pad" />
-        <View className="mt-sm flex-row" style={{ gap: 8 }}>
-          <ChoiceChip label="Staff (orders only)" active={role === 'STAFF'} onPress={() => setRole('STAFF')} />
-          <ChoiceChip label="Manager" active={role === 'MANAGER'} onPress={() => setRole('MANAGER')} />
+        <InlineInput value={phone} onChangeText={setPhone} placeholder="+592 phone of an existing Swift account" keyboardType="phone-pad" />
+        <View style={{ flexDirection: 'row', gap: space.md, marginTop: space.md }}>
+          <Chip label="Staff (orders only)" selected={role === 'STAFF'} onPress={() => setRole('STAFF')} style={{ height: 38, paddingHorizontal: space.md }} />
+          <Chip label="Manager" selected={role === 'MANAGER'} onPress={() => setRole('MANAGER')} style={{ height: 38, paddingHorizontal: space.md }} />
         </View>
-        {errMsg ? <Text className="mt-sm text-sm text-error">{errMsg}</Text> : null}
-        <Button
+        {errMsg ? (
+          <T variant="label" tone="error" style={{ marginTop: space.md }}>
+            {errMsg}
+          </T>
+        ) : null}
+        <PillButton
           label="Add to team"
-          variant="outline"
-          className="mt-sm"
+          variant="soft"
+          size="md"
+          style={{ marginTop: space.md }}
           loading={addStaff.isPending}
           disabled={phone.trim().length < 10}
           onPress={submit}
         />
-        <Text className="mt-xs text-center text-xs text-text-muted">
+        <T variant="caption" tone="muted" center style={{ marginTop: space.sm }}>
           Tap a role pill to switch Manager ↔ Staff.
-        </Text>
+        </T>
       </Card>
+
+      <PopupCard visible={!!removing} onClose={() => setRemoving(null)}>
+        <IconChip icon="user-x" size={56} tone="error" />
+        <T variant="title" center style={{ marginTop: space.lg }}>
+          Remove team member?
+        </T>
+        <T variant="body" tone="muted" center style={{ marginTop: space.sm }}>
+          {removing?.user?.firstName ?? 'This person'} will lose store access immediately.
+        </T>
+        <PillButton
+          label="Remove"
+          style={{ alignSelf: 'stretch', marginTop: space['2xl'] }}
+          onPress={() => {
+            const id = removing!.id;
+            setRemoving(null);
+            removeStaff.mutate(id);
+          }}
+        />
+        <PillButton label="Cancel" variant="soft" style={{ alignSelf: 'stretch', marginTop: space.md }} onPress={() => setRemoving(null)} />
+      </PopupCard>
     </>
   );
 }
