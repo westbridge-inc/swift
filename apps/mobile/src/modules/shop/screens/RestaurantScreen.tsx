@@ -90,7 +90,7 @@ export function RestaurantScreen() {
   const [showPromos, setShowPromos] = useState(false);
 
   const v = vendor.data;
-  const categories: any[] = v?.categories ?? [];
+  const categories: any[] = useMemo(() => v?.categories ?? [], [v?.categories]);
   const allItems = useMemo(() => categories.flatMap((c: any) => c.items ?? []), [categories]);
   const recommended = useMemo(() => allItems.filter((i: any) => i.isPopular).slice(0, 8), [allItems]);
   const bestSellers = useMemo(

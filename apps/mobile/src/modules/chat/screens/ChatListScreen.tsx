@@ -6,7 +6,7 @@ import { useNavigation } from '@react-navigation/native';
 import { color, space } from '@swift/ui';
 import { useOrders } from '../../../hooks/customer';
 import { useAuthStore } from '../../../stores/authStore';
-import { Card, EmptyState, ErrorState, LoadingBlock, Screen, T, VendorRow } from '../../../kit';
+import { Card, EmptyState, ErrorState, LoadingBlock, Screen, T } from '../../../kit';
 
 const ACTIVE = new Set(['RIDER_ASSIGNED', 'PICKED_UP', 'READY']);
 const RECENT = new Set(['DELIVERED', 'COMPLETED']);

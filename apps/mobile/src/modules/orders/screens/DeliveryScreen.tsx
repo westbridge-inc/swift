@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { Dimensions, Linking, Pressable, ScrollView, View } from 'react-native';
 import MapView, { Marker, Polyline } from 'react-native-maps';
 import { Image } from 'expo-image';
