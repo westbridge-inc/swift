@@ -1,22 +1,29 @@
+/** @jsxImportSource react */
 import React from 'react';
 import { View, Pressable, type ViewProps, type ViewStyle } from 'react-native';
-import { SafeAreaView } from 'react-native-safe-area-context';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Feather } from '@expo/vector-icons';
 import { useNavigation } from '@react-navigation/native';
 import { color, space } from '@swift/ui';
 import { T } from './text';
 
 /** Full-screen scaffold on paper. `bleed` skips the top inset (masthead screens
- *  paint their own gradient under the status bar). */
+ *  paint their own gradient under the status bar).
+ *  Plain View + inset padding, NOT the native SafeAreaView: on this new-arch
+ *  RN the native safe-area view mis-frames its children for hit-testing (touch
+ *  boxes land ~inset higher than the visuals), swallowing taps. */
 export function Screen({ children, style, bleed = false, ...rest }: ViewProps & { bleed?: boolean }) {
+  const insets = useSafeAreaInsets();
   return (
-    <SafeAreaView
-      edges={bleed ? [] : ['top']}
-      style={[{ flex: 1, backgroundColor: color.surface.subtle }, style as ViewStyle]}
+    <View
+      style={[
+        { flex: 1, backgroundColor: color.surface.subtle, paddingTop: bleed ? 0 : insets.top },
+        style as ViewStyle,
+      ]}
       {...rest}
     >
       {children}
-    </SafeAreaView>
+    </View>
   );
 }
 
@@ -34,22 +41,27 @@ export function CircleChip({
   size?: number;
 }) {
   return (
-    <Pressable
-      onPress={onPress}
-      hitSlop={8}
-      style={({ pressed }) => ({
-        width: size,
-        height: size,
-        borderRadius: size / 2,
-        alignItems: 'center',
-        justifyContent: 'center',
-        backgroundColor: light ? 'rgba(255,255,255,0.16)' : color.surface.base,
-        borderWidth: 1,
-        borderColor: light ? 'rgba(255,255,255,0.55)' : color.border.subtle,
-        opacity: pressed ? 0.65 : 1,
-      })}
-    >
-      <Feather name={icon} size={20} color={light ? color.white : color.text.primary} />
+    // NB: never a function-form `style` on Pressable — the NativeWind interop
+    // corrupts the touch box (it can bleed over siblings). Pressed feedback
+    // lives on the inner View via the function child.
+    <Pressable onPress={onPress} hitSlop={8}>
+      {({ pressed }) => (
+        <View
+          style={{
+            width: size,
+            height: size,
+            borderRadius: size / 2,
+            alignItems: 'center',
+            justifyContent: 'center',
+            backgroundColor: light ? 'rgba(255,255,255,0.16)' : color.surface.base,
+            borderWidth: 1,
+            borderColor: light ? 'rgba(255,255,255,0.55)' : color.border.subtle,
+            opacity: pressed ? 0.65 : 1,
+          }}
+        >
+          <Feather name={icon} size={20} color={light ? color.white : color.text.primary} />
+        </View>
+      )}
     </Pressable>
   );
 }

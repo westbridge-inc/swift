@@ -1,3 +1,4 @@
+/** @jsxImportSource react */
 import React, { useMemo, useState } from 'react';
 import { Dimensions, FlatList, Pressable, ScrollView, Share, View } from 'react-native';
 import { Image } from 'expo-image';
@@ -223,22 +224,25 @@ export function RestaurantScreen() {
 
           {/* Live promos (real active codes) */}
           {promos.length > 0 ? (
-            <Pressable
-              onPress={() => setShowPromos(true)}
-              style={({ pressed }) => ({
-                flexDirection: 'row',
-                alignItems: 'center',
-                gap: space.md,
-                paddingHorizontal: GUTTER,
-                marginTop: space.xl,
-                opacity: pressed ? 0.7 : 1,
-              })}
-            >
-              <IconChip icon="tag" />
-              <T variant="body" weight="medium" style={{ flex: 1 }}>
-                {promos.length} promo{promos.length > 1 ? 's' : ''} available
-              </T>
-              <Feather name="chevron-right" size={20} color={color.text.muted} />
+            <Pressable onPress={() => setShowPromos(true)}>
+              {({ pressed }) => (
+              <View
+                style={{
+                  flexDirection: 'row',
+                  alignItems: 'center',
+                  gap: space.md,
+                  paddingHorizontal: GUTTER,
+                  marginTop: space.xl,
+                  opacity: pressed ? 0.7 : 1,
+                }}
+              >
+                <IconChip icon="tag" />
+                <T variant="body" weight="medium" style={{ flex: 1 }}>
+                  {promos.length} promo{promos.length > 1 ? 's' : ''} available
+                </T>
+                <Feather name="chevron-right" size={20} color={color.text.muted} />
+              </View>
+              )}
             </Pressable>
           ) : null}
 

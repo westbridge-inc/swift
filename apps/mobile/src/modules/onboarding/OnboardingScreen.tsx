@@ -1,3 +1,4 @@
+/** @jsxImportSource react */
 import React, { useRef, useState } from 'react';
 import { Dimensions, FlatList, Pressable, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';

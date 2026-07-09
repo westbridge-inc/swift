@@ -1,3 +1,4 @@
+/** @jsxImportSource react */
 import React, { useEffect, useRef, useState } from 'react';
 import { FlatList, KeyboardAvoidingView, Platform, Pressable, TextInput, View } from 'react-native';
 import { Feather } from '@expo/vector-icons';
@@ -134,19 +135,21 @@ export function ConversationScreen() {
                 returnKeyType="send"
               />
             </View>
-            <Pressable
-              onPress={onSend}
-              disabled={!draft.trim() || send.isPending}
-              style={({ pressed }) => ({
-                width: 48,
-                height: 48,
-                borderRadius: 24,
-                backgroundColor: !draft.trim() ? color.brand[200] : pressed ? color.brand[600] : color.brand[500],
-                alignItems: 'center',
-                justifyContent: 'center',
-              })}
-            >
-              <Feather name="send" size={18} color={color.white} />
+            <Pressable onPress={onSend} disabled={!draft.trim() || send.isPending}>
+              {({ pressed }) => (
+                <View
+                  style={{
+                    width: 48,
+                    height: 48,
+                    borderRadius: 24,
+                    backgroundColor: !draft.trim() ? color.brand[200] : pressed ? color.brand[600] : color.brand[500],
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                  }}
+                >
+                  <Feather name="send" size={18} color={color.white} />
+                </View>
+              )}
             </Pressable>
           </View>
         </KeyboardAvoidingView>

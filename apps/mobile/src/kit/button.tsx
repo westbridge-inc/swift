@@ -1,3 +1,4 @@
+/** @jsxImportSource react */
 import React from 'react';
 import { ActivityIndicator, Pressable, View, type ViewStyle } from 'react-native';
 import { Feather } from '@expo/vector-icons';
@@ -43,36 +44,38 @@ export function PillButton({
     <Pressable
       onPress={blocked ? undefined : onPress}
       disabled={blocked}
-      style={({ pressed }) => [
-        {
-          height: HEIGHT[size],
-          borderRadius: 9999,
-          paddingHorizontal: size === 'sm' ? space.lg : space['2xl'],
-          flexDirection: 'row',
-          alignItems: 'center',
-          justifyContent: 'center',
-          gap: space.sm,
-          backgroundColor: pressed ? v.pressed : v.rest,
-          borderWidth: v.border ? 1 : 0,
-          borderColor: v.border,
-          opacity: disabled ? 0.45 : 1,
-        },
-        style,
-      ]}
+      style={{ opacity: disabled ? 0.45 : 1, ...(style as object) }}
     >
-      {loading ? (
-        <ActivityIndicator size="small" color={v.label} />
-      ) : (
-        <>
-          {icon ? <Feather name={icon} size={size === 'sm' ? 15 : 18} color={v.label} /> : null}
-          <T
-            variant={size === 'sm' ? 'label' : 'body'}
-            weight="semibold"
-            style={{ color: v.label }}
-          >
-            {label}
-          </T>
-        </>
+      {({ pressed }) => (
+        <View
+          style={{
+            height: HEIGHT[size],
+            borderRadius: 9999,
+            paddingHorizontal: size === 'sm' ? space.lg : space['2xl'],
+            flexDirection: 'row',
+            alignItems: 'center',
+            justifyContent: 'center',
+            gap: space.sm,
+            backgroundColor: pressed ? v.pressed : v.rest,
+            borderWidth: v.border ? 1 : 0,
+            borderColor: v.border,
+          }}
+        >
+          {loading ? (
+            <ActivityIndicator size="small" color={v.label} />
+          ) : (
+            <>
+              {icon ? <Feather name={icon} size={size === 'sm' ? 15 : 18} color={v.label} /> : null}
+              <T
+                variant={size === 'sm' ? 'label' : 'body'}
+                weight="semibold"
+                style={{ color: v.label }}
+              >
+                {label}
+              </T>
+            </>
+          )}
+        </View>
       )}
     </Pressable>
   );

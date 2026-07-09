@@ -1,3 +1,4 @@
+/** @jsxImportSource react */
 import React, { useMemo, useState } from 'react';
 import { Dimensions, ScrollView, View } from 'react-native';
 import { Image } from 'expo-image';

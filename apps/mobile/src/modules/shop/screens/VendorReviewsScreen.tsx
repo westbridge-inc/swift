@@ -1,3 +1,4 @@
+/** @jsxImportSource react */
 import React from 'react';
 import { FlatList, View } from 'react-native';
 import { useRoute } from '@react-navigation/native';

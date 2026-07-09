@@ -1,3 +1,4 @@
+/** @jsxImportSource react */
 import React, { useEffect, useMemo, useState } from 'react';
 import { FlatList, Pressable, ScrollView, View } from 'react-native';
 import { useNavigation, useRoute } from '@react-navigation/native';
@@ -138,19 +139,21 @@ export function SearchScreen() {
                 { key: 'sort', label: 'Sort By' },
               ] as const
             ).map((t) => (
-              <Pressable key={t.key} onPress={() => setTab(t.key)} style={{ flex: 1, alignItems: 'center' }}>
-                <T variant="body" weight="semibold" tone={tab === t.key ? 'ink' : 'faint'}>
-                  {t.label}
-                </T>
-                <View
-                  style={{
-                    height: 3,
-                    alignSelf: 'stretch',
-                    marginTop: space.md,
-                    borderRadius: 2,
-                    backgroundColor: tab === t.key ? color.brand[500] : color.border.subtle,
-                  }}
-                />
+              <Pressable key={t.key} onPress={() => setTab(t.key)} style={{ flex: 1 }}>
+                <View style={{ alignItems: 'center' }}>
+                  <T variant="body" weight="semibold" tone={tab === t.key ? 'ink' : 'faint'}>
+                    {t.label}
+                  </T>
+                  <View
+                    style={{
+                      height: 3,
+                      alignSelf: 'stretch',
+                      marginTop: space.md,
+                      borderRadius: 2,
+                      backgroundColor: tab === t.key ? color.brand[500] : color.border.subtle,
+                    }}
+                  />
+                </View>
               </Pressable>
             ))}
           </View>
@@ -232,9 +235,11 @@ export function SearchScreen() {
               <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
                 <SectionHeader title="Your search history" />
                 <Pressable onPress={clearSearches} hitSlop={8}>
-                  <T variant="label" tone="faint">
-                    Clear
-                  </T>
+                  <View style={{ paddingVertical: 4 }}>
+                    <T variant="label" tone="faint">
+                      Clear
+                    </T>
+                  </View>
                 </Pressable>
               </View>
               <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: space.md, marginTop: space.lg }}>

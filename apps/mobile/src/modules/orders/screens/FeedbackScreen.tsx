@@ -1,3 +1,4 @@
+/** @jsxImportSource react */
 import React, { useState } from 'react';
 import { KeyboardAvoidingView, Platform, ScrollView, TextInput, View } from 'react-native';
 import { Image } from 'expo-image';

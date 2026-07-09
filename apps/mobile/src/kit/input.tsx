@@ -1,3 +1,4 @@
+/** @jsxImportSource react */
 import React, { useState } from 'react';
 import { TextInput, View, type TextInputProps, type ViewStyle } from 'react-native';
 import { Feather } from '@expo/vector-icons';

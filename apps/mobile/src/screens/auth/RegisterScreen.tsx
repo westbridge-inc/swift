@@ -1,3 +1,4 @@
+/** @jsxImportSource react */
 import React, { useState } from 'react';
 import { KeyboardAvoidingView, Platform, Pressable, ScrollView, View } from 'react-native';
 import { useMutation } from '@tanstack/react-query';

@@ -1,3 +1,4 @@
+/** @jsxImportSource react */
 import React from 'react';
 import { Pressable, Switch, View, type ViewStyle } from 'react-native';
 import { Feather, Ionicons } from '@expo/vector-icons';
@@ -17,23 +18,23 @@ function RoundIconButton({
   size?: number;
 }) {
   return (
-    <Pressable
-      onPress={onPress}
-      disabled={disabled}
-      hitSlop={6}
-      style={({ pressed }) => ({
-        width: size,
-        height: size,
-        borderRadius: size / 2,
-        borderWidth: 1,
-        borderColor: color.border.strong,
-        backgroundColor: pressed ? color.brand[50] : color.surface.base,
-        alignItems: 'center',
-        justifyContent: 'center',
-        opacity: disabled ? 0.4 : 1,
-      })}
-    >
-      <Feather name={icon} size={size * 0.5} color={color.text.primary} />
+    <Pressable onPress={onPress} disabled={disabled} hitSlop={6} style={{ opacity: disabled ? 0.4 : 1 }}>
+      {({ pressed }) => (
+        <View
+          style={{
+            width: size,
+            height: size,
+            borderRadius: size / 2,
+            borderWidth: 1,
+            borderColor: color.border.strong,
+            backgroundColor: pressed ? color.brand[50] : color.surface.base,
+            alignItems: 'center',
+            justifyContent: 'center',
+          }}
+        >
+          <Feather name={icon} size={size * 0.5} color={color.text.primary} />
+        </View>
+      )}
     </Pressable>
   );
 }
@@ -64,19 +65,19 @@ export function QtyStepper({
 /** Kit rounded-square checkbox (cart row selection). */
 export function BrandCheckbox({ checked, onToggle }: { checked: boolean; onToggle: () => void }) {
   return (
-    <Pressable
-      onPress={onToggle}
-      hitSlop={8}
-      style={{
-        width: 24,
-        height: 24,
-        borderRadius: 8,
-        backgroundColor: checked ? color.brand[500] : color.border.subtle,
-        alignItems: 'center',
-        justifyContent: 'center',
-      }}
-    >
-      {checked ? <Feather name="check" size={15} color={color.white} /> : null}
+    <Pressable onPress={onToggle} hitSlop={8}>
+      <View
+        style={{
+          width: 24,
+          height: 24,
+          borderRadius: 8,
+          backgroundColor: checked ? color.brand[500] : color.border.subtle,
+          alignItems: 'center',
+          justifyContent: 'center',
+        }}
+      >
+        {checked ? <Feather name="check" size={15} color={color.white} /> : null}
+      </View>
     </Pressable>
   );
 }
@@ -92,26 +93,26 @@ export function HeartBadge({
   size?: number;
 }) {
   return (
-    <Pressable
-      onPress={onPress}
-      hitSlop={8}
-      style={[
-        {
-          width: size,
-          height: size,
-          borderRadius: size / 2,
-          backgroundColor: color.surface.base,
-          alignItems: 'center',
-          justifyContent: 'center',
-        },
-        cardShadow,
-      ]}
-    >
-      <Ionicons
-        name={active ? 'heart' : 'heart-outline'}
-        size={size * 0.55}
-        color={active ? color.brand[500] : color.text.muted}
-      />
+    <Pressable onPress={onPress} hitSlop={8}>
+      <View
+        style={[
+          {
+            width: size,
+            height: size,
+            borderRadius: size / 2,
+            backgroundColor: color.surface.base,
+            alignItems: 'center',
+            justifyContent: 'center',
+          },
+          cardShadow,
+        ]}
+      >
+        <Ionicons
+          name={active ? 'heart' : 'heart-outline'}
+          size={size * 0.55}
+          color={active ? color.brand[500] : color.text.muted}
+        />
+      </View>
     </Pressable>
   );
 }
@@ -141,7 +142,7 @@ export function Stars({
         );
         return onRate ? (
           <Pressable key={n} hitSlop={6} onPress={() => onRate(n)}>
-            {star}
+            <View style={{ width: size, height: size, alignItems: 'center', justifyContent: 'center' }}>{star}</View>
           </Pressable>
         ) : (
           <View key={n}>{star}</View>
@@ -166,28 +167,31 @@ export function Chip({
   style?: ViewStyle;
 }) {
   return (
-    <Pressable
-      onPress={onPress}
-      style={({ pressed }) => [
-        {
-          flexDirection: 'row',
-          alignItems: 'center',
-          gap: space.sm,
-          paddingHorizontal: space.xl,
-          height: 48,
-          borderRadius: 9999,
-          backgroundColor: selected ? color.brand[50] : color.surface.base,
-          borderWidth: 1,
-          borderColor: selected ? color.brand[500] : color.border.subtle,
-          opacity: pressed ? 0.75 : 1,
-        },
-        style,
-      ]}
-    >
-      {emoji ? <T variant="body">{emoji}</T> : null}
-      <T variant="label" weight={selected ? 'semibold' : 'medium'} tone={selected ? 'deep' : 'ink'}>
-        {label}
-      </T>
+    <Pressable onPress={onPress}>
+      {({ pressed }) => (
+        <View
+          style={[
+            {
+              flexDirection: 'row',
+              alignItems: 'center',
+              gap: space.sm,
+              paddingHorizontal: space.xl,
+              height: 48,
+              borderRadius: 9999,
+              backgroundColor: selected ? color.brand[50] : color.surface.base,
+              borderWidth: 1,
+              borderColor: selected ? color.brand[500] : color.border.subtle,
+              opacity: pressed ? 0.75 : 1,
+            },
+            style,
+          ]}
+        >
+          {emoji ? <T variant="body">{emoji}</T> : null}
+          <T variant="label" weight={selected ? 'semibold' : 'medium'} tone={selected ? 'deep' : 'ink'}>
+            {label}
+          </T>
+        </View>
+      )}
     </Pressable>
   );
 }

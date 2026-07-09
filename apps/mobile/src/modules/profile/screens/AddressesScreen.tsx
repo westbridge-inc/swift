@@ -1,3 +1,4 @@
+/** @jsxImportSource react */
 import React from 'react';
 import { FlatList, Pressable, View } from 'react-native';
 import { Feather } from '@expo/vector-icons';

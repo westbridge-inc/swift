@@ -1,3 +1,4 @@
+/** @jsxImportSource react */
 import React, { useEffect, useState } from 'react';
 import { KeyboardAvoidingView, Platform, Pressable, ScrollView, View } from 'react-native';
 import { Feather } from '@expo/vector-icons';
@@ -79,28 +80,33 @@ export function AddAddressScreen() {
           {/* Pin on map */}
           <Pressable
             onPress={() => navigation.navigate('LocationPicker', { returnTo: 'AddAddress', initial: pin })}
-            style={({ pressed }) => ({
-              flexDirection: 'row',
-              alignItems: 'center',
-              gap: space.md,
-              padding: space.lg,
-              borderRadius: radius.md,
-              borderWidth: 1,
-              borderColor: pin ? color.border.subtle : color.brand[500],
-              backgroundColor: color.surface.base,
-              opacity: pressed ? 0.75 : 1,
-            })}
           >
-            <Feather name="crosshair" size={18} color={pin ? color.success : color.brand[500]} />
-            <View style={{ flex: 1 }}>
-              <T variant="body" weight="medium">
-                {pin ? 'Pin set on the map' : 'Drop the pin on the map'}
-              </T>
-              <T variant="caption" tone="muted">
-                {pin ? `${pin.latitude.toFixed(5)}, ${pin.longitude.toFixed(5)} — tap to adjust` : 'Required so riders find you'}
-              </T>
+            {({ pressed }) => (
+            <View
+              style={{
+                flexDirection: 'row',
+                alignItems: 'center',
+                gap: space.md,
+                padding: space.lg,
+                borderRadius: radius.md,
+                borderWidth: 1,
+                borderColor: pin ? color.border.subtle : color.brand[500],
+                backgroundColor: color.surface.base,
+                opacity: pressed ? 0.75 : 1,
+              }}
+            >
+              <Feather name="crosshair" size={18} color={pin ? color.success : color.brand[500]} />
+              <View style={{ flex: 1 }}>
+                <T variant="body" weight="medium">
+                  {pin ? 'Pin set on the map' : 'Drop the pin on the map'}
+                </T>
+                <T variant="caption" tone="muted">
+                  {pin ? `${pin.latitude.toFixed(5)}, ${pin.longitude.toFixed(5)} — tap to adjust` : 'Required so riders find you'}
+                </T>
+              </View>
+              <Feather name="chevron-right" size={18} color={color.text.muted} />
             </View>
-            <Feather name="chevron-right" size={18} color={color.text.muted} />
+            )}
           </Pressable>
 
           <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>

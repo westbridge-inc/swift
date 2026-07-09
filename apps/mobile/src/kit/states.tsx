@@ -1,3 +1,4 @@
+/** @jsxImportSource react */
 import React from 'react';
 import { ActivityIndicator, View, type ViewStyle } from 'react-native';
 import { Feather } from '@expo/vector-icons';

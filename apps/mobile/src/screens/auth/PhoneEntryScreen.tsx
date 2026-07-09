@@ -1,3 +1,4 @@
+/** @jsxImportSource react */
 import React, { useState } from 'react';
 import { KeyboardAvoidingView, Platform, Pressable, ScrollView, View } from 'react-native';
 import { useMutation } from '@tanstack/react-query';
@@ -58,16 +59,18 @@ export function PhoneEntryScreen() {
                 <Pressable onPress={() => navigation.navigate('CountryPicker')} hitSlop={8}>
                   {({ pressed }) => (
                     <View
-                      style={{
-                        flexDirection: 'row',
-                        alignItems: 'center',
-                        gap: 6,
-                        paddingHorizontal: space.md,
-                        paddingVertical: 6,
-                        borderRadius: 9999,
-                        backgroundColor: color.brand[50],
-                        opacity: pressed ? 0.7 : 1,
-                      }}
+                      style={[
+                        {
+                          flexDirection: 'row',
+                          alignItems: 'center',
+                          gap: 6,
+                          paddingHorizontal: space.md,
+                          paddingVertical: 6,
+                          borderRadius: 9999,
+                          backgroundColor: color.brand[50],
+                        },
+                        { opacity: pressed ? 0.7 : 1 },
+                      ]}
                     >
                       <T variant="label">{flagEmoji(countryCode)}</T>
                       <T variant="label" weight="semibold" tone="deep">

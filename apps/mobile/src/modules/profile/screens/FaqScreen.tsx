@@ -1,3 +1,4 @@
+/** @jsxImportSource react */
 import React, { useState } from 'react';
 import { Pressable, ScrollView, View } from 'react-native';
 import { Feather } from '@expo/vector-icons';

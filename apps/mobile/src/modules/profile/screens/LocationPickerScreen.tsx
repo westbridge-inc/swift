@@ -1,3 +1,4 @@
+/** @jsxImportSource react */
 import React, { useRef, useState } from 'react';
 import { View } from 'react-native';
 import MapView, { type Region } from 'react-native-maps';

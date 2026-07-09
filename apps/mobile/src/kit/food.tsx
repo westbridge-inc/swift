@@ -1,3 +1,4 @@
+/** @jsxImportSource react */
 import React from 'react';
 import { Pressable, View, type ViewStyle } from 'react-native';
 import { Image } from 'expo-image';
@@ -53,8 +54,9 @@ export function FoodCard({
   width: number;
 }) {
   return (
-    <Pressable onPress={onPress} style={({ pressed }) => ({ width, opacity: pressed ? 0.85 : 1 })}>
-      <Card pad={false} style={{ width }}>
+    <Pressable onPress={onPress}>
+      {({ pressed }) => (
+      <Card pad={false} style={{ width, opacity: pressed ? 0.85 : 1 }}>
         <View>
           <Image
             source={{ uri: image }}
@@ -85,6 +87,7 @@ export function FoodCard({
           </View>
         </View>
       </Card>
+      )}
     </Pressable>
   );
 }
@@ -108,8 +111,9 @@ export function VendorRow({
   style?: ViewStyle;
 }) {
   return (
-    <Pressable onPress={onPress} style={({ pressed }) => [{ opacity: pressed ? 0.85 : 1 }, style]}>
-      <Card style={{ flexDirection: 'row', alignItems: 'center', gap: space.md, padding: space.md }}>
+    <Pressable onPress={onPress}>
+      {({ pressed }) => (
+      <Card style={[{ flexDirection: 'row', alignItems: 'center', gap: space.md, padding: space.md, opacity: pressed ? 0.85 : 1 }, style]}>
         <Image
           source={{ uri: image }}
           placeholder={{ blurhash: DARK_BLURHASH }}
@@ -130,6 +134,7 @@ export function VendorRow({
         </View>
         {trailing ?? <Feather name="chevron-right" size={18} color={color.text.muted} />}
       </Card>
+      )}
     </Pressable>
   );
 }

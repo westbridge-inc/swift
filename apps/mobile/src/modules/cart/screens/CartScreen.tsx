@@ -1,3 +1,4 @@
+/** @jsxImportSource react */
 import React, { useState } from 'react';
 import { Pressable, ScrollView, View } from 'react-native';
 import { Image } from 'expo-image';
@@ -250,7 +251,11 @@ export function CartScreen() {
                   </View>
                 </View>
                 <Pressable onPress={() => removeItem.mutate(it.id)} hitSlop={8}>
-                  {({ pressed }) => <Feather name="trash-2" size={20} color={pressed ? color.brand[600] : color.error} />}
+                  {({ pressed }) => (
+                    <View style={{ width: 44, height: 44, alignItems: 'center', justifyContent: 'center' }}>
+                      <Feather name="trash-2" size={20} color={pressed ? color.brand[600] : color.error} />
+                    </View>
+                  )}
                 </Pressable>
               </Card>
             ))}

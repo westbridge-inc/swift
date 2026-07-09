@@ -1,3 +1,4 @@
+/** @jsxImportSource react */
 import React from 'react';
 import { Text as RNText, type TextProps, type TextStyle } from 'react-native';
 import { color, fontSize, lineHeight } from '@swift/ui';

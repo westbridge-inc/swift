@@ -1,3 +1,4 @@
+/** @jsxImportSource react */
 import React from 'react';
 import { StyleSheet, View, type ViewProps } from 'react-native';
 import { color } from '@swift/ui';

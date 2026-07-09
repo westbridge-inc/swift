@@ -1,3 +1,4 @@
+/** @jsxImportSource react */
 import React from 'react';
 import { Pressable, View, type ViewStyle } from 'react-native';
 import { Feather } from '@expo/vector-icons';
@@ -73,29 +74,31 @@ export function SettingsRow({
   tone?: 'brand' | 'error';
 }) {
   return (
-    <Pressable
-      onPress={onPress}
-      disabled={!onPress}
-      style={({ pressed }) => ({
-        flexDirection: 'row',
-        alignItems: 'center',
-        gap: space.lg,
-        paddingVertical: space.md,
-        opacity: pressed ? 0.65 : 1,
-      })}
-    >
-      <IconChip icon={icon} tone={tone} />
-      <View style={{ flex: 1 }}>
-        <T variant="body" weight="medium" tone={tone === 'error' ? 'error' : 'ink'}>
-          {label}
-        </T>
-        {sub ? (
-          <T variant="caption" tone="muted" style={{ marginTop: 2 }}>
-            {sub}
+    <Pressable onPress={onPress} disabled={!onPress}>
+      {({ pressed }) => (
+      <View
+        style={{
+          flexDirection: 'row',
+          alignItems: 'center',
+          gap: space.lg,
+          paddingVertical: space.md,
+          opacity: pressed ? 0.65 : 1,
+        }}
+      >
+        <IconChip icon={icon} tone={tone} />
+        <View style={{ flex: 1 }}>
+          <T variant="body" weight="medium" tone={tone === 'error' ? 'error' : 'ink'}>
+            {label}
           </T>
-        ) : null}
+          {sub ? (
+            <T variant="caption" tone="muted" style={{ marginTop: 2 }}>
+              {sub}
+            </T>
+          ) : null}
+        </View>
+        {right ?? (onPress ? <Feather name="chevron-right" size={20} color={color.text.muted} /> : null)}
       </View>
-      {right ?? (onPress ? <Feather name="chevron-right" size={20} color={color.text.muted} /> : null)}
+      )}
     </Pressable>
   );
 }

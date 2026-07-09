@@ -1,3 +1,4 @@
+/** @jsxImportSource react */
 import 'react-native-gesture-handler';
 import '../global.css';
 import { useCallback, useEffect, useState } from 'react';

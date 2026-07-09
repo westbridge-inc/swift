@@ -1,3 +1,4 @@
+/** @jsxImportSource react */
 import React, { useEffect, useRef, useState } from 'react';
 import { Pressable, TextInput, View } from 'react-native';
 import { useMutation } from '@tanstack/react-query';
@@ -118,9 +119,11 @@ export function OtpVerificationScreen() {
             </T>
           ) : (
             <Pressable onPress={() => resend.mutate()} hitSlop={8} disabled={resend.isPending}>
-              <T variant="label" weight="semibold" tone="brand">
-                {resend.isPending ? 'Sending…' : 'Resend code'}
-              </T>
+              <View style={{ paddingVertical: 4 }}>
+                <T variant="label" weight="semibold" tone="brand">
+                  {resend.isPending ? 'Sending…' : 'Resend code'}
+                </T>
+              </View>
             </Pressable>
           )}
         </View>

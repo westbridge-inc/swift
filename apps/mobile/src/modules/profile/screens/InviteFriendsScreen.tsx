@@ -1,3 +1,4 @@
+/** @jsxImportSource react */
 import React from 'react';
 import { Share, View } from 'react-native';
 import { color, space } from '@swift/ui';

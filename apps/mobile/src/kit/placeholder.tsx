@@ -1,3 +1,4 @@
+/** @jsxImportSource react */
 import React from 'react';
 import { Header, Screen } from './screen';
 import { EmptyState } from './states';

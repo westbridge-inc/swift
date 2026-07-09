@@ -1,3 +1,4 @@
+/** @jsxImportSource react */
 import React from 'react';
 import { Modal, Pressable, View, type ViewProps, type ViewStyle } from 'react-native';
 import { color, radius, space } from '@swift/ui';

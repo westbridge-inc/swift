@@ -1,3 +1,4 @@
+/** @jsxImportSource react */
 import React, { useMemo } from 'react';
 import { FlatList, View } from 'react-native';
 import { Image } from 'expo-image';
