@@ -1,22 +1,55 @@
-import { useState } from 'react';
-import { View, FlatList } from 'react-native';
-import { SafeAreaView } from 'react-native-safe-area-context';
-import { Feather, MaterialCommunityIcons } from '@expo/vector-icons';
-import { color } from '@swift/ui';
-import { Text, Card, Spinner, PressableScale, Input, EmptyState } from '../../../components/ui';
+/** @jsxImportSource react */
+import React, { useState } from 'react';
+import { FlatList, Pressable, View } from 'react-native';
+import { Feather } from '@expo/vector-icons';
+import { color, space } from '@swift/ui';
 import { useAddresses } from '../../../hooks';
 import { usePlacesAutocomplete, usePlaceDetails } from '../../../hooks/usePlacesAutocomplete';
 import { useLocationStore } from '../../../stores/locationStore';
 import type { PlaceSuggestion } from '../../../services/api';
+import { Card, EmptyState, Header, IconChip, LabeledInput, Screen, T } from '../../../kit';
 
 // What every place picker hands back to its caller.
 export type PickedPlace = { lat: number; lng: number; label: string; placeId?: string };
 
+/** Kit place row: icon chip · primary + secondary lines. */
+function PlaceRow({
+  icon,
+  primary,
+  secondary,
+  onPress,
+}: {
+  icon: React.ComponentProps<typeof Feather>['name'];
+  primary: string;
+  secondary?: string;
+  onPress: () => void;
+}) {
+  return (
+    <Pressable onPress={onPress}>
+      {({ pressed }) => (
+        <Card style={{ flexDirection: 'row', alignItems: 'center', gap: space.md, marginBottom: space.md, opacity: pressed ? 0.8 : 1 }}>
+          <IconChip icon={icon} />
+          <View style={{ flex: 1 }}>
+            <T variant="body" weight="semibold" numberOfLines={1}>
+              {primary}
+            </T>
+            {secondary ? (
+              <T variant="caption" tone="muted" numberOfLines={1} style={{ marginTop: 2 }}>
+                {secondary}
+              </T>
+            ) : null}
+          </View>
+          <Feather name="chevron-right" size={18} color={color.text.muted} />
+        </Card>
+      )}
+    </Pressable>
+  );
+}
+
 /**
- * "Where to?" destination search. Suggestions come from the server-side Places
- * seam (proximity-biased on current location), with the user's saved addresses
- * and a "Set on map" pin option as shortcuts. Returns the choice to the caller
- * via the `onSelect` route param.
+ * "Where to?" destination search (kit 57-style list). Suggestions come from the
+ * server-side Places seam (proximity-biased), with saved addresses and a
+ * "Set on map" pin as shortcuts. Returns the choice via the `onSelect` param.
  */
 export function DestinationSearchScreen({ navigation, route }: any) {
   const onSelect: (place: PickedPlace) => void = route?.params?.onSelect ?? (() => {});
@@ -49,82 +82,70 @@ export function DestinationSearchScreen({ navigation, route }: any) {
     }
   };
 
-  const openPin = () => {
-    navigation?.navigate?.('PinConfirm', { onSelect: choose, title });
-  };
-
   return (
-    <SafeAreaView style={{ flex: 1 }} edges={['top']} className="bg-surface-subtle">
-      <View className="flex-row items-center px-lg py-sm">
-        <PressableScale onPress={() => navigation?.goBack?.()} hitSlop={10}>
-          <Feather name="chevron-left" size={24} color={color.text.primary} />
-        </PressableScale>
-        <Text className="ml-md text-base font-bold">{title}</Text>
-      </View>
-
-      <View className="px-lg pb-sm">
-        <Input
+    <Screen>
+      <Header title={title} />
+      <View style={{ paddingHorizontal: space['2xl'], paddingTop: space.sm }}>
+        <LabeledInput
           autoFocus
+          icon="search"
+          placeholder="Search a place or address"
           value={query}
           onChangeText={setQuery}
-          placeholder="Search a place or address"
-          left={<Feather name="search" size={18} color={color.text.muted} />}
           right={
             query.length > 0 ? (
-              <PressableScale onPress={() => setQuery('')} hitSlop={8}>
-                <Feather name="x-circle" size={18} color={color.text.muted} />
-              </PressableScale>
+              <Pressable onPress={() => setQuery('')} hitSlop={8}>
+                <View style={{ padding: 4 }}>
+                  <Feather name="x-circle" size={18} color={color.text.muted} />
+                </View>
+              </Pressable>
             ) : resolving || isFetching ? (
-              <Spinner />
+              <Feather name="loader" size={18} color={color.text.muted} />
             ) : null
           }
         />
-      </View>
 
-      <PressableScale onPress={openPin}>
-        <View className="mx-lg mb-sm flex-row items-center rounded-2xl border border-border-subtle bg-surface-base px-lg py-md">
-          <View className="h-9 w-9 items-center justify-center rounded-full" style={{ backgroundColor: color.brand[50] }}>
-            <MaterialCommunityIcons name="map-marker-radius-outline" size={18} color={color.brand[500]} />
-          </View>
-          <Text className="ml-sm font-semibold" style={{ color: color.brand[600] }}>Set location on map</Text>
-        </View>
-      </PressableScale>
+        {/* Set-on-map shortcut */}
+        <Pressable onPress={() => navigation?.navigate?.('PinConfirm', { onSelect: choose, title })}>
+          {({ pressed }) => (
+            <Card style={{ flexDirection: 'row', alignItems: 'center', gap: space.md, marginTop: space.lg, opacity: pressed ? 0.8 : 1 }}>
+              <IconChip icon="crosshair" />
+              <T variant="body" weight="semibold" tone="brand" style={{ flex: 1 }}>
+                Set location on map
+              </T>
+              <Feather name="chevron-right" size={18} color={color.text.muted} />
+            </Card>
+          )}
+        </Pressable>
+      </View>
 
       {showSaved ? (
         <FlatList
           data={savedList}
           keyExtractor={(a) => a.id}
           keyboardShouldPersistTaps="handled"
-          contentContainerStyle={{ paddingHorizontal: 16, paddingBottom: 32 }}
+          contentContainerStyle={{ paddingHorizontal: space['2xl'], paddingTop: space.lg, paddingBottom: space['3xl'] }}
           ListHeaderComponent={
             savedList.length > 0 ? (
-              <Text className="mb-sm mt-xs text-xs font-semibold uppercase text-text-muted">Saved places</Text>
+              <T variant="label" weight="semibold" tone="muted" style={{ marginBottom: space.md }}>
+                Saved places
+              </T>
             ) : null
           }
           ListEmptyComponent={
             <EmptyState
-              icon="map-marker-outline"
+              icon="map-pin"
               title="Search for a destination"
               body="Type a place or address above, or set a point on the map."
             />
           }
           renderItem={({ item: a }) => (
-            <PressableScale
-              onPress={() =>
-                choose({ lat: a.latitude, lng: a.longitude, label: a.label || a.addressLine1 })
-              }
-            >
-              <Card className="mb-sm flex-row items-center">
-                <MaterialCommunityIcons name="map-marker-outline" size={20} color={color.text.muted} />
-                <View className="ml-sm flex-1">
-                  <Text className="text-base font-semibold">{a.label || a.addressLine1}</Text>
-                  <Text className="mt-xs text-sm text-text-secondary" numberOfLines={1}>
-                    {a.addressLine1}
-                    {a.city ? `, ${a.city}` : ''}
-                  </Text>
-                </View>
-              </Card>
-            </PressableScale>
+            <PlaceRow
+              icon="map-pin"
+              primary={a.label || a.addressLine1}
+              secondary={`${a.addressLine1}${a.city ? `, ${a.city}` : ''}`}
+              onPress={() => choose({ lat: a.latitude, lng: a.longitude, label: a.label || a.addressLine1 })}
+            />
           )}
         />
       ) : (
@@ -132,29 +153,17 @@ export function DestinationSearchScreen({ navigation, route }: any) {
           data={suggestions ?? []}
           keyExtractor={(s) => s.placeId}
           keyboardShouldPersistTaps="handled"
-          contentContainerStyle={{ paddingHorizontal: 16, paddingBottom: 32 }}
+          contentContainerStyle={{ paddingHorizontal: space['2xl'], paddingTop: space.lg, paddingBottom: space['3xl'] }}
           ListEmptyComponent={
             isFetching ? null : (
-              <EmptyState icon="magnify" title="No matches" body="Try a different place, or set it on the map." />
+              <EmptyState icon="search" title="No matches" body="Try a different place, or set it on the map." />
             )
           }
           renderItem={({ item: s }) => (
-            <PressableScale onPress={() => pickSuggestion(s)}>
-              <Card className="mb-sm flex-row items-center">
-                <Feather name="map-pin" size={18} color={color.text.muted} />
-                <View className="ml-sm flex-1">
-                  <Text className="text-base font-semibold">{s.primary}</Text>
-                  {s.secondary ? (
-                    <Text className="mt-xs text-sm text-text-secondary" numberOfLines={1}>
-                      {s.secondary}
-                    </Text>
-                  ) : null}
-                </View>
-              </Card>
-            </PressableScale>
+            <PlaceRow icon="map-pin" primary={s.primary} secondary={s.secondary} onPress={() => pickSuggestion(s)} />
           )}
         />
       )}
-    </SafeAreaView>
+    </Screen>
   );
 }

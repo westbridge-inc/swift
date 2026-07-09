@@ -1,13 +1,14 @@
-import { useRef, useState } from 'react';
+/** @jsxImportSource react */
+import React, { useRef, useState } from 'react';
 import { View } from 'react-native';
-import { SafeAreaView } from 'react-native-safe-area-context';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import MapView, { PROVIDER_DEFAULT, type Region } from 'react-native-maps';
 import * as Location from 'expo-location';
-import { Feather, MaterialCommunityIcons } from '@expo/vector-icons';
-import { color } from '@swift/ui';
-import { Text, Button, PressableScale } from '../../../components/ui';
+import { Ionicons } from '@expo/vector-icons';
+import { color, space } from '@swift/ui';
 import { useLocationStore } from '../../../stores/locationStore';
 import { GEORGETOWN } from '../../../hooks/useDeviceLocation';
+import { CircleChip, PillButton, T } from '../../../kit';
 import type { PickedPlace } from './DestinationSearchScreen';
 
 /**
@@ -18,6 +19,7 @@ import type { PickedPlace } from './DestinationSearchScreen';
 export function PinConfirmScreen({ navigation, route }: any) {
   const onSelect: (place: PickedPlace) => void = route?.params?.onSelect ?? (() => {});
   const title: string = route?.params?.title ?? 'Set location';
+  const insets = useSafeAreaInsets();
 
   const { latitude, longitude } = useLocationStore();
   const start = {
@@ -41,8 +43,7 @@ export function PinConfirmScreen({ navigation, route }: any) {
     try {
       const [place] = await Location.reverseGeocodeAsync({ latitude: lat, longitude: lng });
       if (place) {
-        label =
-          [place.name ?? place.street, place.city ?? place.subregion].filter(Boolean).join(', ') || label;
+        label = [place.name ?? place.street, place.city ?? place.subregion].filter(Boolean).join(', ') || label;
       }
     } catch {
       // Best-effort label; the coordinate is what matters.
@@ -54,16 +55,7 @@ export function PinConfirmScreen({ navigation, route }: any) {
   };
 
   return (
-    <SafeAreaView style={{ flex: 1 }} edges={['top']} className="bg-surface-base">
-      <View className="absolute left-0 right-0 top-0 z-10 flex-row items-center px-lg pt-2xl">
-        <PressableScale onPress={() => navigation?.goBack?.()} hitSlop={10}>
-          <View className="h-10 w-10 items-center justify-center rounded-full bg-surface-base" style={{ elevation: 3 }}>
-            <Feather name="chevron-left" size={22} color={color.text.primary} />
-          </View>
-        </PressableScale>
-        <Text className="ml-md text-base font-bold">{title}</Text>
-      </View>
-
+    <View style={{ flex: 1, backgroundColor: color.surface.subtle }}>
       <MapView
         provider={PROVIDER_DEFAULT}
         style={{ flex: 1 }}
@@ -72,19 +64,62 @@ export function PinConfirmScreen({ navigation, route }: any) {
         showsUserLocation
       />
 
-      {/* Fixed centre pin — the map slides underneath it. */}
-      <View pointerEvents="none" className="absolute inset-0 items-center justify-center">
-        <MaterialCommunityIcons name="map-marker" size={44} color={color.brand[500]} style={{ marginBottom: 44 }} />
+      {/* Floating header over the map (kit hero-chip language) */}
+      <View
+        style={{
+          position: 'absolute',
+          top: insets.top + space.sm,
+          left: space['2xl'],
+          right: space['2xl'],
+          flexDirection: 'row',
+          alignItems: 'center',
+          gap: space.md,
+        }}
+      >
+        <CircleChip icon="chevron-left" onPress={() => navigation?.goBack?.()} />
+        <View
+          style={{
+            paddingHorizontal: space.lg,
+            height: 44,
+            borderRadius: 9999,
+            backgroundColor: color.surface.base,
+            justifyContent: 'center',
+            borderWidth: 1,
+            borderColor: color.border.subtle,
+          }}
+        >
+          <T variant="label" weight="semibold">
+            {title}
+          </T>
+        </View>
       </View>
 
-      <View className="absolute inset-x-0 bottom-0 border-t border-border-subtle bg-surface-base px-lg pb-2xl pt-md">
-        <Text className="mb-sm text-center text-sm text-text-secondary">
-          Move the map to place the pin, then confirm.
-        </Text>
-        <Button loading={confirming} onPress={confirm}>
-          <Text className="font-body font-semibold text-white">Confirm location</Text>
-        </Button>
+      {/* Fixed centre pin — the map slides underneath it. */}
+      <View pointerEvents="none" style={{ position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, alignItems: 'center', justifyContent: 'center' }}>
+        <Ionicons name="location" size={46} color={color.brand[500]} style={{ marginBottom: 46 }} />
       </View>
-    </SafeAreaView>
+
+      {/* Confirm bar */}
+      <View
+        style={{
+          position: 'absolute',
+          left: 0,
+          right: 0,
+          bottom: 0,
+          backgroundColor: color.surface.base,
+          borderTopWidth: 1,
+          borderTopColor: color.border.subtle,
+          paddingHorizontal: space['2xl'],
+          paddingTop: space.lg,
+          paddingBottom: insets.bottom + space.lg,
+          gap: space.md,
+        }}
+      >
+        <T variant="label" tone="muted" center>
+          Move the map to place the pin, then confirm.
+        </T>
+        <PillButton label="Confirm location" loading={confirming} onPress={confirm} />
+      </View>
+    </View>
   );
 }

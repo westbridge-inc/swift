@@ -196,6 +196,23 @@ export function Chip({
   );
 }
 
+/** Soft status pill — order/job states. Tint per tone, never color alone. */
+export function TonePill({ label, tone = 'neutral' }: { label: string; tone?: 'brand' | 'success' | 'neutral' | 'error' }) {
+  const c = {
+    brand: { bg: color.brand[50], fg: color.brand[600] },
+    success: { bg: '#E8F6EE', fg: color.success },
+    error: { bg: '#FDECEC', fg: color.error },
+    neutral: { bg: color.border.subtle, fg: color.text.secondary },
+  }[tone];
+  return (
+    <View style={{ paddingHorizontal: space.md, paddingVertical: 5, borderRadius: 9999, backgroundColor: c.bg, alignSelf: 'flex-start' }}>
+      <T variant="caption" weight="semibold" style={{ color: c.fg }}>
+        {label}
+      </T>
+    </View>
+  );
+}
+
 /** Brand-tracked switch (settings rows). */
 export function BrandSwitch({ value, onChange }: { value: boolean; onChange: (v: boolean) => void }) {
   return (
