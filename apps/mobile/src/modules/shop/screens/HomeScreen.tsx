@@ -47,6 +47,15 @@ function categoryEmoji(name: string): string {
   return '🍽️';
 }
 
+// Swift is a super-app: every vertical is one tap from Home (kit tile language).
+const VERTICALS: { key: string; emoji: string; label: string; nav: (n: any) => void }[] = [
+  { key: 'food', emoji: '🍔', label: 'Food', nav: (n) => n.navigate('Search', { type: 'RESTAURANT' }) },
+  { key: 'grocery', emoji: '🛒', label: 'Groceries', nav: (n) => n.navigate('Search', { type: 'SUPERMARKET' }) },
+  { key: 'taxi', emoji: '🚕', label: 'Taxi', nav: (n) => n.navigate('Taxi') },
+  { key: 'courier', emoji: '📦', label: 'Send', nav: (n) => n.navigate('Courier') },
+  { key: 'services', emoji: '🧰', label: 'Services', nav: (n) => n.navigate('Services') },
+];
+
 const ORDER_STATUS_LABEL: Record<string, string> = {
   PENDING: 'Waiting for the store',
   ACCEPTED: 'Order accepted',
@@ -167,6 +176,40 @@ export function HomeScreen() {
           )}
         </View>
 
+        {/* Vertical tiles — the super-app surface (food/grocery/taxi/courier/services) */}
+        <View
+          style={{
+            flexDirection: 'row',
+            justifyContent: 'space-between',
+            paddingHorizontal: GUTTER,
+            marginTop: space.xl,
+          }}
+        >
+          {VERTICALS.map((v) => (
+            <Pressable key={v.key} onPress={() => v.nav(navigation)} style={{ alignItems: 'center', gap: 6 }}>
+              {({ pressed }) => (
+                <>
+                  <View
+                    style={{
+                      width: 56,
+                      height: 56,
+                      borderRadius: radius.md,
+                      backgroundColor: pressed ? color.brand[100] : color.brand[50],
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                    }}
+                  >
+                    <T style={{ fontSize: 26, lineHeight: 32 }}>{v.emoji}</T>
+                  </View>
+                  <T variant="caption" weight="medium" tone={pressed ? 'brand' : 'ink'}>
+                    {v.label}
+                  </T>
+                </>
+              )}
+            </Pressable>
+          ))}
+        </View>
+
         {home.isLoading ? (
           <LoadingBlock style={{ paddingTop: 96 }} />
         ) : home.isError ? (
@@ -261,13 +304,41 @@ export function HomeScreen() {
               </>
             ) : null}
 
-            {/* Swift's other verticals stay one tap away (not in the kit's food scope). */}
-            <SectionHeader title="More from Swift" style={{ paddingHorizontal: GUTTER, marginTop: space['3xl'] }} />
-            <View style={{ flexDirection: 'row', gap: space.md, paddingHorizontal: GUTTER, paddingTop: space.lg }}>
-              <Chip label="Taxi" emoji="🚕" onPress={() => navigation.navigate('Taxi')} />
-              <Chip label="Send" emoji="📦" onPress={() => navigation.navigate('Courier')} />
-              <Chip label="Services" emoji="🧰" onPress={() => navigation.navigate('Services')} />
-            </View>
+            {/* Groceries & shops — the non-restaurant storefronts, same shop flow */}
+            {(() => {
+              const shops = (feed?.openVendors ?? []).filter(
+                (v: any) => v.vendorType === 'SUPERMARKET' || v.vendorType === 'STORE',
+              );
+              if (shops.length === 0) return null;
+              return (
+                <>
+                  <SectionHeader
+                    title="Groceries & shops"
+                    onSeeAll={() => navigation.navigate('Search', { type: 'SUPERMARKET' })}
+                    style={{ paddingHorizontal: GUTTER, marginTop: space['3xl'] }}
+                  />
+                  <FlatList
+                    horizontal
+                    showsHorizontalScrollIndicator={false}
+                    data={shops.slice(0, 8)}
+                    keyExtractor={(v: any) => v.id}
+                    contentContainerStyle={{ paddingHorizontal: GUTTER, gap: space.lg, paddingTop: space.lg }}
+                    renderItem={({ item: v }) => (
+                      <FoodCard
+                        width={CARD_W}
+                        image={vendorImage(v)}
+                        name={v.name}
+                        rating={Number(v.averageRating) || 0}
+                        meta={v.etaMin ? `${v.etaMin} min` : undefined}
+                        favorite={v.isFavorite}
+                        onToggleFavorite={() => onFavorite(v.id, !!v.isFavorite)}
+                        onPress={() => navigation.navigate('Restaurant', { vendorId: v.id })}
+                      />
+                    )}
+                  />
+                </>
+              );
+            })()}
           </>
         )}
       </ScrollView>
