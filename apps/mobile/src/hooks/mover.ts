@@ -130,6 +130,49 @@ export function useRiderAction() {
   });
 }
 
+/** Rider ops stats — online hours today (Redis-accumulated) + week deliveries.
+ *  The driver module has no /stats route, so this is rider-only. */
+export function useMoverStats(kind: MoverKind | null) {
+  return useQuery({
+    queryKey: ['mover', 'stats'],
+    queryFn: () => unwrap<any>(riderApi.stats()),
+    enabled: kind === 'RIDER',
+    refetchInterval: 60000,
+  });
+}
+
+/** Finished-job history: driver rides (status-filterable) / rider deliveries. */
+export function useJobHistory(kind: MoverKind | null, page: number, status?: string) {
+  return useQuery({
+    queryKey: ['mover', 'history', kind, page, status ?? 'all'],
+    queryFn: async () => {
+      const r =
+        kind === 'DRIVER'
+          ? await driverApi.rides({ page, limit: 20, ...(status ? { status } : {}) })
+          : await riderApi.history({ page, limit: 20 });
+      return r?.data as { data: any[]; meta: { page: number; limit: number; total: number; hasNext: boolean } };
+    },
+    enabled: !!kind,
+    placeholderData: (prev) => prev,
+  });
+}
+
+/** The mover's own weekly flat-fee subscription (trial/grace/rate/next bill). */
+export function useMoverSubscription(kind: MoverKind | null) {
+  return useQuery({
+    queryKey: ['mover', 'subscription', kind],
+    queryFn: () => tryUnwrap<any>(svc(kind as MoverKind).subscription()),
+    enabled: !!kind,
+  });
+}
+
+/** Post-trip DRIVER_TO_CUSTOMER rating (409 when already rated — treat as done). */
+export function useRateCustomer() {
+  return useMutation({
+    mutationFn: ({ id, score }: { id: string; score: number }) => unwrap(driverApi.rateCustomer(id, score)),
+  });
+}
+
 /**
  * Streams the mover's device GPS to the backend while they're online. Each PUT
  * persists the position AND (server-side) broadcasts `driver:location` /

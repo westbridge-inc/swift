@@ -36,7 +36,7 @@ interface AuthState {
 // immediately; a stale one is handled by the 401 -> refresh -> logout flow.
 export const useAuthStore = create<AuthState>()(
   persist(
-    (set) => ({
+    (set, get) => ({
       user: null,
       accessToken: null,
       refreshToken: null,
@@ -48,8 +48,26 @@ export const useAuthStore = create<AuthState>()(
       dialCode: null,
       currencyCode: null,
       currencySymbol: null,
-      setAuth: (user, accessToken, refreshToken) =>
-        set({ user, accessToken, refreshToken, isAuthenticated: true, isLoading: false, wantsAuth: false }),
+      setAuth: (user, accessToken, refreshToken) => {
+        // The surface follows THIS account's roles — never inherit the previous
+        // session's mode (a driver signing in after a vendor session must not
+        // land in the vendor dashboard on a shared device). A multi-role
+        // account keeps the prior choice only when it actually has that role.
+        const u: any = user;
+        const roles: string[] = u?.roles ?? [];
+        const isMover = roles.includes('DRIVER') || roles.includes('RIDER') || roles.includes('MOVER') || !!u?.driver || !!u?.rider;
+        const isVendor = roles.includes('VENDOR') || !!u?.vendorOwner;
+        const prev = get().intent;
+        const intent =
+          (prev === 'vendor' && isVendor) || (prev === 'mover' && isMover) || prev === 'customer'
+            ? prev
+            : isVendor && !isMover
+              ? ('vendor' as const)
+              : isMover && !isVendor
+                ? ('mover' as const)
+                : ('customer' as const);
+        set({ user, accessToken, refreshToken, isAuthenticated: true, isLoading: false, wantsAuth: false, intent });
+      },
       setUser: (user) => set({ user }),
       promptLogin: () => set({ wantsAuth: true }),
       cancelAuth: () => set({ wantsAuth: false }),

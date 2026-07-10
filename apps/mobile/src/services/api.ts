@@ -285,6 +285,9 @@ export const riderApi = {
   earningsToday: () => api.get('/rider/earnings/today'),
   earningsSummary: () => api.get('/rider/earnings/summary'),
   earnings: () => api.get('/rider/earnings'),
+  history: (params?: { page?: number; limit?: number }) => api.get('/rider/orders', { params }),
+  stats: () => api.get('/rider/stats'),
+  subscription: () => api.get('/rider/subscription'),
   uploadVehiclePhoto: (form: FormData) =>
     api.post('/rider/vehicle-photo', form, { headers: { 'Content-Type': 'multipart/form-data' } }),
 };
@@ -306,6 +309,10 @@ export const driverApi = {
   earningsToday: () => api.get('/driver/earnings/today'),
   earningsSummary: () => api.get('/driver/earnings/summary'),
   earnings: () => api.get('/driver/earnings'),
+  rides: (params?: { page?: number; limit?: number; status?: string }) => api.get('/driver/rides', { params }),
+  rateCustomer: (id: string, score: number, comment?: string) =>
+    api.post(`/driver/rides/${id}/rate-customer`, { score, ...(comment ? { comment } : {}) }),
+  subscription: () => api.get('/driver/subscription'),
   uploadVehiclePhoto: (form: FormData) =>
     api.post('/driver/vehicle-photo', form, { headers: { 'Content-Type': 'multipart/form-data' } }),
 };

@@ -1,12 +1,13 @@
-import { View } from 'react-native';
-import { SafeAreaView } from 'react-native-safe-area-context';
+/** @jsxImportSource react */
+import React from 'react';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
-import { Spinner } from '../../components/ui';
+import { LoadingBlock, Screen } from '../../kit';
 import { ChatScreen } from '../../screens/shared/ChatScreen';
 import { useVerificationStatus } from '../../hooks';
 import { MoverHomeScreen } from './screens/MoverHomeScreen';
 import { ActiveJobScreen } from './screens/ActiveJobScreen';
 import { EarningsScreen } from './screens/EarningsScreen';
+import { JobHistoryScreen } from './screens/JobHistoryScreen';
 import { MoverAccountScreen } from './screens/MoverAccountScreen';
 import { MoverOnboardingScreen } from './screens/MoverOnboardingScreen';
 
@@ -18,11 +19,9 @@ function MoverRoot({ navigation }: any) {
 
   if (isLoading) {
     return (
-      <SafeAreaView style={{ flex: 1 }} edges={['top']} className="bg-surface-base">
-        <View className="flex-1 items-center justify-center">
-          <Spinner size="large" />
-        </View>
-      </SafeAreaView>
+      <Screen>
+        <LoadingBlock />
+      </Screen>
     );
   }
 
@@ -35,6 +34,7 @@ export function MoverStack() {
       <Stack.Screen name="MoverRoot" component={MoverRoot} />
       <Stack.Screen name="ActiveJob" component={ActiveJobScreen} />
       <Stack.Screen name="Earnings" component={EarningsScreen} />
+      <Stack.Screen name="JobHistory" component={JobHistoryScreen} />
       <Stack.Screen name="Account" component={MoverAccountScreen} />
       <Stack.Screen name="Chat" component={ChatScreen} />
     </Stack.Navigator>
