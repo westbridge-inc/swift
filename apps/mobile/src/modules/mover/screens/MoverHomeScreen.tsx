@@ -19,6 +19,7 @@ import {
   useGoOffline,
   useAcceptJob,
   useBroadcastLocation,
+  useVerificationStatus,
   type MoverKind,
 } from '../../../hooks';
 import { useLocationStore } from '../../../stores/locationStore';
@@ -179,6 +180,7 @@ export function MoverHomeScreen({ navigation }: any) {
   const accept = useAcceptJob(k);
   const earnings = useEarningsToday(kind);
   const stats = useMoverStats(kind);
+  const vstatus = useVerificationStatus<any>('MOVER');
   const active = useActiveJob(kind);
   const online = !!profile?.isOnline;
   const available = useAvailableJobs(kind, online);
@@ -197,6 +199,28 @@ export function MoverHomeScreen({ navigation }: any) {
   const activeJob = active.data;
   const jobs: any[] = available.data ?? [];
   const errMsg = (goOnline.error as any)?.response?.data?.error?.message;
+
+  // Soonest checklist document inside its 30-day renewal window (skipping any
+  // with a renewal already in review) — surfaced before it costs them a shift.
+  const DAY = 24 * 60 * 60 * 1000;
+  const expiringDoc = (() => {
+    const s: any = vstatus.data;
+    if (!s?.checklist) return null;
+    let soonest: { docType: string; days: number } | null = null;
+    for (const dt of s.checklist as string[]) {
+      const docs = (s.documents ?? []) as any[];
+      if (docs.some((d) => d.docType === dt && d.status === 'PENDING')) continue;
+      for (const d of docs) {
+        if (d.docType !== dt || d.status !== 'APPROVED' || !d.expiresAt) continue;
+        const ms = new Date(d.expiresAt).getTime() - Date.now();
+        if (ms > 0 && ms <= 30 * DAY) {
+          const days = Math.ceil(ms / DAY);
+          if (!soonest || days < soonest.days) soonest = { docType: dt, days };
+        }
+      }
+    }
+    return soonest;
+  })();
   const todayTotal = (earnings.data as any)?.total ?? (earnings.data as any)?.todayEarnings ?? 0;
   const tripsToday = (earnings.data as any)?.todayDeliveries ?? (earnings.data as any)?.trips ?? 0;
   const onlineHours = (stats.data as any)?.onlineHoursToday;
@@ -262,6 +286,20 @@ export function MoverHomeScreen({ navigation }: any) {
                 {errMsg}
               </T>
             </View>
+          ) : null}
+
+          {/* Renewal nudge — a document is inside its 30-day window */}
+          {expiringDoc ? (
+            <Pressable onPress={() => navigation?.navigate?.('MoverDocuments')}>
+              {({ pressed }) => (
+                <View style={{ flexDirection: 'row', alignItems: 'flex-start', gap: space.sm, borderRadius: radius.lg, backgroundColor: '#FDF1DC', padding: space.md, marginTop: space.md, opacity: pressed ? 0.85 : 1 }}>
+                  <Feather name="clock" size={15} color={color.warning} style={{ marginTop: 1 }} />
+                  <T variant="label" style={{ flex: 1, color: '#8A5A00' }}>
+                    Your {expiringDoc.docType.replace(/_/g, ' ')} expires in {expiringDoc.days} day{expiringDoc.days === 1 ? '' : 's'} — tap to upload the renewal.
+                  </T>
+                </View>
+              )}
+            </Pressable>
           ) : null}
 
           {/* Earnings hero — taps into the full Earnings screen */}

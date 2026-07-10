@@ -9,6 +9,7 @@ import { ActiveJobScreen } from './screens/ActiveJobScreen';
 import { EarningsScreen } from './screens/EarningsScreen';
 import { JobHistoryScreen } from './screens/JobHistoryScreen';
 import { MoverAccountScreen } from './screens/MoverAccountScreen';
+import { MoverDocumentsScreen } from './screens/MoverDocumentsScreen';
 import { MoverOnboardingScreen } from './screens/MoverOnboardingScreen';
 
 const Stack = createNativeStackNavigator();
@@ -36,6 +37,7 @@ export function MoverStack() {
       <Stack.Screen name="Earnings" component={EarningsScreen} />
       <Stack.Screen name="JobHistory" component={JobHistoryScreen} />
       <Stack.Screen name="Account" component={MoverAccountScreen} />
+      <Stack.Screen name="MoverDocuments" component={MoverDocumentsScreen} />
       <Stack.Screen name="Chat" component={ChatScreen} />
     </Stack.Navigator>
   );

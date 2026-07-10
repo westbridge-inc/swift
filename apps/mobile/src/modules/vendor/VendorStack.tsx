@@ -437,6 +437,20 @@ function VendorOps({ store, navigation }: any) {
           </ScrollView>
         ) : null}
 
+        {/* Verification suspension — commerce is off until documents are renewed */}
+        {store.isVerified === false ? (
+          <Pressable onPress={() => navigation?.navigate?.('Account')}>
+            {({ pressed }) => (
+              <View style={{ flexDirection: 'row', alignItems: 'flex-start', gap: space.sm, borderRadius: radius.lg, backgroundColor: '#FDECEC', padding: space.md, marginBottom: space.lg, opacity: pressed ? 0.85 : 1 }}>
+                <Feather name="alert-circle" size={15} color={color.error} style={{ marginTop: 1 }} />
+                <T variant="label" tone="error" style={{ flex: 1 }}>
+                  Store suspended — a required document is missing or expired, so new orders are off. Tap to renew it under Account.
+                </T>
+              </View>
+            )}
+          </Pressable>
+        ) : null}
+
         {/* Today's sales — Eats-Manager hero */}
         <Card style={{ marginBottom: space.lg }}>
           <T variant="caption" weight="bold" tone="muted">
@@ -477,6 +491,11 @@ function VendorOps({ store, navigation }: any) {
             loading={toggleOrders.isPending}
             onPress={() => toggleOrders.mutate()}
           />
+          {toggleOrders.isError ? (
+            <T variant="caption" tone="error" style={{ marginTop: space.sm }}>
+              {(toggleOrders.error as any)?.response?.data?.error?.message ?? 'Couldn’t update — try again.'}
+            </T>
+          ) : null}
         </Card>
 
         {/* KPIs */}
@@ -1818,6 +1837,8 @@ function VendorAccountScreen() {
 
         {isOwner ? <SubscriptionCard sub={sub.data} phone={store?.phone} /> : null}
 
+        {isOwner && store?.vendorType ? <VendorDocumentsSection vendorType={store.vendorType} /> : null}
+
         {isManager ? <StoreQrCard /> : null}
 
         {isManager ? <PromosSection /> : null}
@@ -1898,6 +1919,20 @@ function VendorAccountScreen() {
 
 /** Billing state exactly as the subscription engine records it: trial, grace,
  *  rate and the next billing date (weekly flat fee — the whole Swift model). */
+/**
+ * The business's legal documents, owner-only: live checklist status with
+ * expiry — an approved document re-opens for upload inside its 30-day renewal
+ * window, and an expired one explains exactly why commerce stopped.
+ */
+function VendorDocumentsSection({ vendorType }: { vendorType: string }) {
+  const { data: status, isLoading, isError, refetch } = useVerificationStatus<any>(vendorType);
+  return (
+    <View style={{ marginBottom: space.lg }}>
+      <DocumentChecklist role={vendorType} status={status} isLoading={isLoading} isError={isError} onRetry={refetch} />
+    </View>
+  );
+}
+
 function SubscriptionCard({ sub, phone }: { sub: any; phone?: string }) {
   const pill = !sub
     ? { label: 'Inactive', tone: 'brand' as const }

@@ -123,6 +123,7 @@ export function MoverAccountScreen({ navigation }: any) {
         <Card style={{ marginTop: space.md, paddingVertical: space.sm }}>
           <SettingsRow icon="dollar-sign" label="Earnings" sub={`${money(allTime)} all-time · 100% yours`} onPress={() => navigation?.navigate?.('Earnings')} />
           <SettingsRow icon="clock" label="Job history" sub="Every completed and cancelled job" onPress={() => navigation?.navigate?.('JobHistory')} />
+          <SettingsRow icon="file-text" label="Documents" sub="Licences, insurance and renewals" onPress={() => navigation?.navigate?.('MoverDocuments')} />
           <SettingsRow
             icon="credit-card"
             label="Weekly fee"

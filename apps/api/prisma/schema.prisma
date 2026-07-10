@@ -537,7 +537,9 @@ model Vendor {
   longitude        Float
   operatingHours   OperatingHours[]
   isCurrentlyOpen  Boolean         @default(false)
-  acceptingOrders  Boolean         @default(true)
+  /// Born OFF: commerce opens when the owner's document checklist is verified
+  /// (verification afterApproval) and closes when a required document lapses.
+  acceptingOrders  Boolean         @default(false)
   deliveryRadius   Float           @default(10.0)
   minOrderAmount   Decimal         @default(0) @db.Decimal(10, 2)
   estimatedPrepTime Int            @default(30)

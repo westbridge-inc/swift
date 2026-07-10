@@ -433,7 +433,7 @@ export async function vendorRoutes(app: FastifyInstance) {
     const stores = await app.prisma.vendor.findMany({
       where: { id: { in: access.vendorIds } },
       orderBy: { createdAt: 'asc' },
-      select: { id: true, name: true, vendorType: true, isCurrentlyOpen: true, acceptingOrders: true, city: true },
+      select: { id: true, name: true, vendorType: true, isCurrentlyOpen: true, acceptingOrders: true, city: true, isVerified: true },
     });
     return { success: true, data: { stores, selectedId: access.vendorId, myRole: access.role } };
   });
@@ -698,6 +698,17 @@ export async function vendorRoutes(app: FastifyInstance) {
   app.put('/vendor/toggle-orders', auth, async (request) => {
     const { vendorId } = await resolveVendor(app, request.user.userId, selectedVendorId(request));
     const vendor = await app.prisma.vendor.findUniqueOrThrow({ where: { id: vendorId } });
+
+    // Turning commerce ON requires a verified business (same gate as listing
+    // items; the checklist belongs to the owner). Turning OFF is always allowed.
+    if (!vendor.acceptingOrders) {
+      const verified = vendor.isVerified
+        || await verification.isRoleVerified(await vendorOwnerUserId(app, vendorId), vendor.vendorType);
+      if (!verified) {
+        throw new AppError(403, 'VERIFICATION_REQUIRED',
+          'Your store can take orders once its documents are verified. Check Documents for anything missing or expired.');
+      }
+    }
 
     const updated = await app.prisma.vendor.update({
       where: { id: vendorId },

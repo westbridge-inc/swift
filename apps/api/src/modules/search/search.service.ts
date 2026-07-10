@@ -50,7 +50,7 @@ export class SearchService {
 
   async syncAllVendors(): Promise<number> {
     const vendors = await this.prisma.vendor.findMany({
-      where: { status: 'ACTIVE' },
+      where: { status: 'ACTIVE', isVerified: true },
       include: { categories: true },
     });
 

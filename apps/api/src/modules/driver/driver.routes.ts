@@ -167,7 +167,10 @@ export async function driverRoutes(app: FastifyInstance) {
       throw new AppError(403, 'VERIFICATION_REQUIRED', 'Your documents must be verified before going online');
     }
 
-    if (!driver.subscription || driver.subscription.status !== 'ACTIVE') {
+    // TRIAL and ACTIVE operate; PAST_DUE keeps operating through the grace
+    // window (the billing sweep suspends when grace runs out). A missing,
+    // paused, suspended, or cancelled subscription blocks going online.
+    if (!driver.subscription || !['TRIAL', 'ACTIVE', 'PAST_DUE'].includes(driver.subscription.status)) {
       throw new AppError(400, 'SUBSCRIPTION_REQUIRED', 'An active subscription is required to go online');
     }
 
