@@ -8,6 +8,7 @@ import { Image } from 'expo-image';
 import { color, radius, space } from '@swift/ui';
 import { Feather, MaterialCommunityIcons } from '@expo/vector-icons';
 import * as ImagePicker from 'expo-image-picker';
+import { SvgXml } from 'react-native-svg';
 import {
   Card,
   Chip,
@@ -22,9 +23,26 @@ import {
   SettingsRow,
   T,
   TonePill,
-  cardShadow,
 } from '../../kit';
 import { BrandSwitch } from '../../kit/controls';
+import {
+  DAY_LABELS,
+  DeltaBadge,
+  FulfillmentTag,
+  GUTTER,
+  InlineInput,
+  KpiTile,
+  OrderStatusPill,
+  SubHeader,
+  fmtDate,
+  fmtWhen,
+  formatSlot,
+  orderActions,
+  prettyVendorType,
+  type VendorOrderActionKind,
+} from './shared';
+import { VendorOrderDetailScreen } from './screens/VendorOrderDetailScreen';
+import { VendorOrderHistoryScreen } from './screens/VendorOrderHistoryScreen';
 import { DocumentChecklist } from '../../components/onboarding/DocumentChecklist';
 import { useBecomePartner, useVerificationStatus } from '../../hooks/verification';
 import {
@@ -35,6 +53,9 @@ import {
   useOrderAction,
   useVendorMenu,
   useCreateCategory,
+  useUpdateCategory,
+  useDeleteCategory,
+  useVendorQr,
   useSaveItem,
   useDeleteItem,
   useSetItemAvailability,
@@ -72,72 +93,12 @@ import { VendorBulkImportScreen } from '../../screens/vendor/VendorBulkImportScr
 
 const Stack = createNativeStackNavigator();
 
-const GUTTER = space['2xl'];
-
 const TYPES = [
   { key: 'RESTAURANT', label: 'Restaurant', icon: 'silverware-fork-knife' },
   { key: 'SUPERMARKET', label: 'Grocery', icon: 'basket-outline' },
   { key: 'STORE', label: 'Shop', icon: 'storefront-outline' },
   { key: 'SERVICE', label: 'Services', icon: 'tools' },
 ] as const;
-
-/** Compact inline text field (pill outline) for dense operator forms. */
-function InlineInput({
-  value,
-  onChangeText,
-  placeholder,
-  keyboardType,
-  autoCapitalize,
-  multiline,
-  style,
-  center,
-}: {
-  value: string;
-  onChangeText: (t: string) => void;
-  placeholder?: string;
-  keyboardType?: 'default' | 'phone-pad' | 'number-pad' | 'decimal-pad';
-  autoCapitalize?: 'none' | 'sentences' | 'words' | 'characters';
-  multiline?: boolean;
-  style?: object;
-  center?: boolean;
-}) {
-  return (
-    <View
-      style={[
-        {
-          borderRadius: multiline ? radius.lg : 9999,
-          borderWidth: 1,
-          borderColor: color.border.subtle,
-          backgroundColor: color.surface.base,
-          paddingHorizontal: space.lg,
-          paddingVertical: multiline ? space.md : 0,
-          height: multiline ? undefined : 48,
-          minHeight: multiline ? 64 : undefined,
-          justifyContent: multiline ? undefined : 'center',
-        },
-        style,
-      ]}
-    >
-      <TextInput
-        value={value}
-        onChangeText={onChangeText}
-        placeholder={placeholder}
-        placeholderTextColor={color.text.muted}
-        keyboardType={keyboardType}
-        autoCapitalize={autoCapitalize}
-        multiline={multiline}
-        style={{
-          fontFamily: 'Inter',
-          fontSize: 15,
-          color: color.text.primary,
-          paddingVertical: 0,
-          textAlign: center ? 'center' : undefined,
-          minHeight: multiline ? 48 : undefined,
-        }}
-      />
-    </View>
-  );
-}
 
 function BizValuePill({ icon, label }: { icon: keyof typeof MaterialCommunityIcons.glyphMap; label: string }) {
   return (
@@ -299,117 +260,30 @@ function VendorOnboarding({ store }: { store: any }) {
   );
 }
 
-type VendorOrderActionKind = 'accept' | 'preparing' | 'ready' | 'reject' | 'complete-pickup' | 'complete-appointment';
-
-function orderActions(order: any): { label: string; action: VendorOrderActionKind }[] {
-  const s = (order?.status || '').toUpperCase();
-  const isPickup = order?.fulfillment === 'PICKUP';
-  const isAppt = order?.fulfillment === 'APPOINTMENT';
-  if (s === 'PENDING' || s === 'PLACED')
-    return [{ label: 'Accept', action: 'accept' }, { label: isAppt ? 'Decline' : 'Reject', action: 'reject' }];
-  // Appointments skip prepare/ready — accepting books the slot, then the vendor marks it done.
-  if (isAppt && (s === 'ACCEPTED' || s === 'CONFIRMED')) return [{ label: 'Mark complete', action: 'complete-appointment' }];
-  if (s === 'ACCEPTED' || s === 'CONFIRMED') return [{ label: 'Start preparing', action: 'preparing' }];
-  if (s === 'PREPARING') return [{ label: isPickup ? 'Ready for pickup' : 'Mark ready', action: 'ready' }];
-  // Takeaway: the vendor closes the order when the customer collects it (no rider).
-  if ((s === 'READY' || s === 'READY_FOR_PICKUP') && isPickup) return [{ label: 'Mark picked up', action: 'complete-pickup' }];
-  return [];
-}
-
-function timeAgo(iso?: string) {
-  if (!iso) return '';
-  const mins = Math.max(0, Math.floor((Date.now() - new Date(iso).getTime()) / 60000));
-  if (mins < 1) return 'just now';
-  if (mins < 60) return `${mins}m ago`;
-  return `${Math.floor(mins / 60)}h ${mins % 60}m ago`;
-}
-
-// Appointment slot → "Mon 14 Jul · 2:30 PM" (manual format; Hermes Intl is limited).
-function formatSlot(iso?: string) {
-  if (!iso) return 'Time to be confirmed';
-  const d = new Date(iso);
-  const days = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
-  const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
-  let h = d.getHours();
-  const m = d.getMinutes();
-  const ampm = h >= 12 ? 'PM' : 'AM';
-  h = h % 12 || 12;
-  return `${days[d.getDay()]} ${d.getDate()} ${months[d.getMonth()]} · ${h}:${String(m).padStart(2, '0')} ${ampm}`;
-}
-
-/** Order status pill — "New" pops in solid brand; the rest are soft tints. */
-function OrderStatusPill({ status }: { status: string }) {
-  const s = (status || '').toUpperCase();
-  if (s === 'PENDING' || s === 'PLACED') {
-    return (
-      <View style={{ borderRadius: 9999, paddingHorizontal: space.md, paddingVertical: 5, backgroundColor: color.brand[500] }}>
-        <T variant="caption" weight="semibold" tone="onBrand">
-          New
-        </T>
-      </View>
-    );
-  }
-  if (s === 'ACCEPTED' || s === 'CONFIRMED') return <TonePill label="Accepted" tone="brand" />;
-  if (s === 'PREPARING') return <TonePill label="Preparing" tone="neutral" />;
-  if (s === 'READY' || s === 'READY_FOR_PICKUP') return <TonePill label="Ready" tone="success" />;
-  return <TonePill label={s.replace(/_/g, ' ').toLowerCase()} tone="neutral" />;
-}
-
-function KpiTile({ icon, value, label }: { icon: keyof typeof MaterialCommunityIcons.glyphMap; value: string; label: string }) {
-  return (
-    <View style={[{ flex: 1, borderRadius: radius.lg, backgroundColor: color.surface.base, padding: space.md }, cardShadow]}>
-      <MaterialCommunityIcons name={icon} size={18} color={color.brand[500]} />
-      <T variant="body" weight="bold" numberOfLines={1} style={{ marginTop: 4 }}>
-        {value}
-      </T>
-      <T variant="caption" tone="muted" numberOfLines={1}>
-        {label}
-      </T>
-    </View>
-  );
-}
-
-/** Small soft tag beside the order number (Takeaway / Appointment). */
-function FulfillmentTag({ icon, label }: { icon: keyof typeof MaterialCommunityIcons.glyphMap; label: string }) {
-  return (
-    <View
-      style={{
-        flexDirection: 'row',
-        alignItems: 'center',
-        gap: 4,
-        borderRadius: 9999,
-        backgroundColor: color.brand[50],
-        paddingHorizontal: space.sm,
-        paddingVertical: 2,
-      }}
-    >
-      <MaterialCommunityIcons name={icon} size={12} color={color.brand[500]} />
-      <T variant="caption" weight="semibold" tone="deep">
-        {label}
-      </T>
-    </View>
-  );
-}
-
 function VendorOrderCard({
   order,
   onAction,
+  onOpen,
   busy,
   showStore,
 }: {
   order: any;
   onAction: (action: VendorOrderActionKind) => void;
+  onOpen?: () => void;
   busy: boolean;
   showStore?: boolean;
 }) {
   const actions = orderActions(order);
   const items = order.itemCount ?? order.items?.length ?? 0;
+  const lines: any[] = order.items ?? [];
   const isPickup = order.fulfillment === 'PICKUP';
   const isAppt = order.fulfillment === 'APPOINTMENT';
   // A mobile service stores the customer's address (≠ the store's pickup address).
   const apptMobile = isAppt && !!order.deliveryAddress && order.deliveryAddress !== order.pickupAddress;
   return (
-    <Card style={{ marginBottom: space.md }}>
+    <Pressable onPress={onOpen} disabled={!onOpen}>
+      {({ pressed }) => (
+    <Card style={{ marginBottom: space.md, opacity: pressed && onOpen ? 0.88 : 1 }}>
       <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
         <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.md }}>
           <T variant="body" weight="bold">
@@ -421,7 +295,10 @@ function VendorOrderCard({
             <FulfillmentTag icon="calendar-clock" label="Appointment" />
           ) : null}
         </View>
-        <OrderStatusPill status={order.status} />
+        <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.sm }}>
+          <OrderStatusPill status={order.status} />
+          {onOpen ? <Feather name="chevron-right" size={16} color={color.text.muted} /> : null}
+        </View>
       </View>
       {showStore && order.vendor?.name ? (
         <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4, marginTop: 4 }}>
@@ -434,11 +311,31 @@ function VendorOrderCard({
       <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.sm, marginTop: 4 }}>
         <Feather name="clock" size={13} color={color.text.muted} />
         <T variant="caption" tone="muted">
-          {timeAgo(order.placedAt)}
+          {fmtWhen(order.placedAt)}
           {items ? ` · ${items} item${items === 1 ? '' : 's'}` : ''}
           {` · ${order.paymentMethod === 'CASH' ? 'Cash' : order.paymentMethod ?? ''}`}
         </T>
       </View>
+      {/* What to make — the kitchen reads this off the card */}
+      {lines.length > 0 ? (
+        <View style={{ marginTop: space.sm, borderRadius: radius.md, backgroundColor: color.surface.subtle, paddingHorizontal: space.md, paddingVertical: space.sm }}>
+          {lines.slice(0, 3).map((it: any) => (
+            <View key={it.id} style={{ flexDirection: 'row', alignItems: 'baseline' }}>
+              <T variant="label" weight="bold" tone="brand" style={{ width: 30 }}>
+                {it.quantity}×
+              </T>
+              <T variant="label" numberOfLines={1} style={{ flex: 1 }}>
+                {it.name}
+              </T>
+            </View>
+          ))}
+          {lines.length > 3 ? (
+            <T variant="caption" tone="muted" style={{ marginTop: 2 }}>
+              +{lines.length - 3} more — tap for the full order
+            </T>
+          ) : null}
+        </View>
+      ) : null}
       {isAppt ? (
         <View style={{ marginTop: space.sm }}>
           <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4 }}>
@@ -491,6 +388,8 @@ function VendorOrderCard({
         </View>
       ) : null}
     </Card>
+      )}
+    </Pressable>
   );
 }
 
@@ -507,11 +406,14 @@ function VendorOps({ store, navigation }: any) {
     setSelectedStore(id);
     qc.invalidateQueries({ queryKey: ['vendor'] });
   };
-  const orders: any[] = ordersQ.data ?? [];
+  const fetched: any[] = ordersQ.data ?? [];
   const open = !!store.isCurrentlyOpen;
   const accepting = !!store.acceptingOrders;
   const busy = orderAction.isPending;
 
+  // The live board works the open queue; finished orders live in History.
+  const TERMINAL = ['DELIVERED', 'COMPLETED', 'CANCELLED'];
+  const orders = fetched.filter((o) => !TERMINAL.includes((o.status || '').toUpperCase()));
   const isNew = (s: string) => ['PENDING', 'PLACED'].includes((s || '').toUpperCase());
   const newOrders = orders.filter((o) => isNew(o.status));
   const inProgress = orders.filter((o) => !isNew(o.status));
@@ -604,9 +506,12 @@ function VendorOps({ store, navigation }: any) {
         </View>
 
         {/* The Menu tab isn't registered for STAFF — don't show a door that goes nowhere. */}
-        {myRole !== 'STAFF' ? (
-          <PillButton label="Manage menu & inventory" variant="outline" size="md" style={{ marginBottom: space.xl }} onPress={() => navigation.navigate('Menu')} />
-        ) : null}
+        <View style={{ flexDirection: 'row', gap: space.md, marginBottom: space.xl }}>
+          {myRole !== 'STAFF' ? (
+            <PillButton label="Manage menu" variant="outline" size="md" style={{ flex: 1 }} onPress={() => navigation.navigate('Menu')} />
+          ) : null}
+          <PillButton label="Order history" variant="outline" size="md" style={{ flex: 1 }} onPress={() => navigation.navigate('VendorOrderHistory')} />
+        </View>
 
         {/* New orders */}
         <T variant="heading" style={{ marginBottom: space.md }}>
@@ -623,7 +528,13 @@ function VendorOps({ store, navigation }: any) {
           </View>
         ) : (
           newOrders.map((o) => (
-            <VendorOrderCard key={o.id} order={o} busy={busy} showStore={stores.length > 1} onAction={(action) => orderAction.mutate({ id: o.id, action })} />
+            <VendorOrderCard
+              key={o.id}
+              order={o}
+              busy={busy}
+              onAction={(action) => orderAction.mutate({ id: o.id, action })}
+              onOpen={() => navigation.navigate('VendorOrderDetail', { orderId: o.id, orderNumber: o.orderNumber })}
+            />
           ))
         )}
 
@@ -634,7 +545,13 @@ function VendorOps({ store, navigation }: any) {
               In progress
             </T>
             {inProgress.map((o) => (
-              <VendorOrderCard key={o.id} order={o} busy={busy} showStore={stores.length > 1} onAction={(action) => orderAction.mutate({ id: o.id, action })} />
+              <VendorOrderCard
+                key={o.id}
+                order={o}
+                busy={busy}
+                onAction={(action) => orderAction.mutate({ id: o.id, action })}
+                onOpen={() => navigation.navigate('VendorOrderDetail', { orderId: o.id, orderNumber: o.orderNumber })}
+              />
             ))}
           </>
         ) : null}
@@ -644,13 +561,24 @@ function VendorOps({ store, navigation }: any) {
 }
 
 function VendorRoot() {
-  const { store, isLoading } = useVendorProfile();
+  const { store, stores, isLoading } = useVendorProfile();
+  const selectedStoreId = useStoreSwitcher((s) => s.selectedStoreId);
+  const setSelectedStore = useStoreSwitcher((s) => s.setSelectedStore);
+
+  // Make the default store an EXPLICIT selection before the tabs mount: every
+  // vendor request then carries x-vendor-id, so the order board, menu and
+  // insights all scope to the store named in the header (a stale id from a
+  // previous session gets re-pointed to a store this account actually has).
+  const validSelection = !!selectedStoreId && stores.some((s: any) => s.id === selectedStoreId);
+  useEffect(() => {
+    if (stores.length > 0 && !validSelection) setSelectedStore(stores[0].id);
+  }, [stores, validSelection, setSelectedStore]);
 
   useEffect(() => {
     if (store) track('vendor_suite_opened', { vendorType: String(store.vendorType ?? '') });
   }, [store?.id]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  if (isLoading) {
+  if (isLoading || (stores.length > 0 && !validSelection)) {
     return (
       <Screen>
         <LoadingBlock />
@@ -663,58 +591,6 @@ function VendorRoot() {
 }
 
 // ─── Menu management ─────────────────────────────────────────────────────────
-
-function SubHeader({
-  title,
-  navigation,
-  action,
-  hideBack,
-}: {
-  title: string;
-  navigation: any;
-  action?: { label: string; onPress: () => void; disabled?: boolean };
-  hideBack?: boolean;
-}) {
-  return (
-    <View
-      style={{
-        flexDirection: 'row',
-        alignItems: 'center',
-        justifyContent: 'space-between',
-        paddingHorizontal: GUTTER,
-        height: 56,
-      }}
-    >
-      {hideBack ? (
-        <View style={{ width: 44 }} />
-      ) : (
-        <Pressable onPress={() => navigation.goBack()} hitSlop={8}>
-          {({ pressed }) => (
-            <View style={{ width: 44, height: 44, alignItems: 'flex-start', justifyContent: 'center', opacity: pressed ? 0.6 : 1 }}>
-              <Feather name="chevron-left" size={24} color={color.text.primary} />
-            </View>
-          )}
-        </Pressable>
-      )}
-      <T variant="heading" numberOfLines={1} style={{ flex: 1, textAlign: 'center', paddingHorizontal: space.md }}>
-        {title}
-      </T>
-      {action ? (
-        <Pressable onPress={action.onPress} disabled={action.disabled} hitSlop={8}>
-          {({ pressed }) => (
-            <View style={{ minWidth: 44, height: 44, alignItems: 'flex-end', justifyContent: 'center', opacity: pressed ? 0.6 : 1 }}>
-              <T variant="body" weight="semibold" tone={action.disabled ? 'muted' : 'brand'}>
-                {action.label}
-              </T>
-            </View>
-          )}
-        </Pressable>
-      ) : (
-        <View style={{ width: 44 }} />
-      )}
-    </View>
-  );
-}
 
 function MenuItemRow({
   item,
@@ -974,6 +850,132 @@ function ModifiersSection({ item }: { item: any }) {
   );
 }
 
+/** Stock alerts from the fetched menu itself: tracked items at/below their
+ *  own alert level (or sold out and auto-hidden). */
+function LowStockCard({ categories, navigation, catOptions }: { categories: any[]; navigation: any; catOptions: { id: string; name: string }[] }) {
+  const low = categories
+    .flatMap((c: any) => c.items ?? [])
+    .filter(
+      (i: any) =>
+        i.stockQuantity != null &&
+        (i.stockQuantity <= 0 || (i.lowStockThreshold != null && i.stockQuantity <= i.lowStockThreshold)),
+    )
+    .sort((a: any, b: any) => a.stockQuantity - b.stockQuantity);
+  if (low.length === 0) return null;
+  return (
+    <View style={{ borderRadius: radius.lg, backgroundColor: '#FDF1DC', padding: space.lg, marginBottom: space.lg }}>
+      <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.sm }}>
+        <Feather name="alert-triangle" size={16} color={color.warning} />
+        <T variant="body" weight="semibold">
+          Inventory alerts · {low.length}
+        </T>
+      </View>
+      {low.slice(0, 4).map((i: any) => (
+        <Pressable key={i.id} onPress={() => navigation.navigate('VendorItemEditor', { item: i, categories: catOptions })}>
+          {({ pressed }) => (
+            <View style={{ flexDirection: 'row', alignItems: 'center', marginTop: space.sm, opacity: pressed ? 0.7 : 1 }}>
+              <T variant="label" numberOfLines={1} style={{ flex: 1, paddingRight: space.md }}>
+                {i.name}
+              </T>
+              <T variant="label" weight="semibold" tone={i.stockQuantity <= 0 ? 'error' : 'ink'}>
+                {i.stockQuantity <= 0 ? 'Out — hidden' : `${i.stockQuantity} left`}
+              </T>
+              <Feather name="chevron-right" size={14} color={color.text.muted} style={{ marginLeft: 4 }} />
+            </View>
+          )}
+        </Pressable>
+      ))}
+      {low.length > 4 ? (
+        <T variant="caption" tone="muted" style={{ marginTop: space.sm }}>
+          +{low.length - 4} more below their alert level
+        </T>
+      ) : null}
+    </View>
+  );
+}
+
+/** Category heading with operator controls: rename inline, delete with count. */
+function CategoryHeader({ cat }: { cat: any }) {
+  const updateCategory = useUpdateCategory();
+  const deleteCategory = useDeleteCategory();
+  const [editing, setEditing] = useState(false);
+  const [name, setName] = useState<string>(cat.name);
+  const [confirmDelete, setConfirmDelete] = useState(false);
+  const itemCount = (cat.items ?? []).length;
+
+  const saveName = () => {
+    const n = name.trim();
+    if (!n || n === cat.name) {
+      setEditing(false);
+      setName(cat.name);
+      return;
+    }
+    updateCategory.mutate({ id: cat.id, data: { name: n } }, { onSuccess: () => setEditing(false) });
+  };
+
+  if (editing) {
+    return (
+      <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.md, marginBottom: space.md }}>
+        <InlineInput style={{ flex: 1 }} value={name} onChangeText={setName} placeholder="Category name" />
+        <PillButton label="Save" size="sm" loading={updateCategory.isPending} disabled={!name.trim()} onPress={saveName} />
+        <PillButton
+          label="Cancel"
+          variant="soft"
+          size="sm"
+          onPress={() => {
+            setEditing(false);
+            setName(cat.name);
+          }}
+        />
+      </View>
+    );
+  }
+
+  return (
+    <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: space.md }}>
+      <T variant="heading" numberOfLines={1} style={{ flex: 1, paddingRight: space.md }}>
+        {cat.name}
+      </T>
+      <Pressable onPress={() => setEditing(true)} hitSlop={6}>
+        {({ pressed }) => (
+          <View style={{ width: 36, height: 36, alignItems: 'center', justifyContent: 'center', opacity: pressed ? 0.6 : 1 }}>
+            <Feather name="edit-2" size={16} color={color.text.muted} />
+          </View>
+        )}
+      </Pressable>
+      <Pressable onPress={() => setConfirmDelete(true)} hitSlop={6}>
+        {({ pressed }) => (
+          <View style={{ width: 36, height: 36, alignItems: 'center', justifyContent: 'center', opacity: pressed ? 0.6 : 1 }}>
+            <Feather name="trash-2" size={16} color={color.text.muted} />
+          </View>
+        )}
+      </Pressable>
+
+      <PopupCard visible={confirmDelete} onClose={() => setConfirmDelete(false)}>
+        <IconChip icon="trash-2" size={56} tone="error" />
+        <T variant="title" center style={{ marginTop: space.lg }}>
+          Delete “{cat.name}”?
+        </T>
+        <T variant="body" tone="muted" center style={{ marginTop: space.sm }}>
+          {itemCount > 0
+            ? `This removes the section AND its ${itemCount} item${itemCount === 1 ? '' : 's'} from your menu.`
+            : 'This removes the empty section from your menu.'}
+        </T>
+        <PillButton
+          label={itemCount > 0 ? `Delete section + ${itemCount} item${itemCount === 1 ? '' : 's'}` : 'Delete section'}
+          style={{ alignSelf: 'stretch', marginTop: space['2xl'] }}
+          loading={deleteCategory.isPending}
+          onPress={() => {
+            setConfirmDelete(false);
+            deleteCategory.mutate(cat.id);
+          }}
+        />
+        <PillButton label="Keep it" variant="soft" style={{ alignSelf: 'stretch', marginTop: space.md }} onPress={() => setConfirmDelete(false)} />
+      </PopupCard>
+    </View>
+  );
+}
+
 function VendorMenuScreen({ navigation }: any) {
   const menuQ = useVendorMenu();
   const createCategory = useCreateCategory();
@@ -1030,14 +1032,14 @@ function VendorMenuScreen({ navigation }: any) {
             )}
           </Pressable>
 
+          <LowStockCard categories={categories} navigation={navigation} catOptions={catOptions} />
+
           {categories.length === 0 ? (
             <EmptyState icon="book-open" title="Build your menu" body="Add a category above, then start adding items." />
           ) : (
             categories.map((cat) => (
               <View key={cat.id} style={{ marginBottom: space.lg }}>
-                <T variant="heading" style={{ marginBottom: space.md }}>
-                  {cat.name}
-                </T>
+                <CategoryHeader cat={cat} />
                 {(cat.items ?? []).length === 0 ? (
                   <T variant="label" tone="muted" style={{ marginBottom: space.md }}>
                     No items yet.
@@ -1341,12 +1343,6 @@ function VendorItemEditorScreen({ navigation, route }: any) {
   );
 }
 
-function prettyVendorType(t?: string) {
-  return t === 'SUPERMARKET' ? 'Grocery' : t === 'STORE' ? 'Shop' : t === 'SERVICE' ? 'Services' : 'Restaurant';
-}
-
-const DAY_LABELS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
-
 // Orders tab — the (cached) store, then the live order board.
 function VendorOrdersTab({ navigation }: any) {
   const { store } = useVendorProfile();
@@ -1600,12 +1596,81 @@ function ReviewsCard() {
   );
 }
 
+/** Ratings histogram — the reviews endpoint's score distribution, drawn as bars. */
+function RatingsCard() {
+  const reviewsQ = useMyStoreReviews();
+  const summary = reviewsQ.data?.summary;
+  if (!summary || !summary.totalReviews) return null;
+  const dist = summary.distribution ?? {};
+  const max = Math.max(...[1, 2, 3, 4, 5].map((s) => Number(dist[String(s)] ?? 0)), 1);
+  return (
+    <Card style={{ marginBottom: space.md }}>
+      <View style={{ flexDirection: 'row', gap: space.xl }}>
+        <View style={{ alignItems: 'center', justifyContent: 'center', minWidth: 88 }}>
+          <T variant="display">{Number(summary.averageRating).toFixed(1)}</T>
+          <View style={{ flexDirection: 'row', gap: 1, marginTop: 2 }}>
+            {[1, 2, 3, 4, 5].map((s) => (
+              <MaterialCommunityIcons
+                key={s}
+                name={Number(summary.averageRating) >= s - 0.25 ? 'star' : 'star-outline'}
+                size={13}
+                color={color.warning}
+              />
+            ))}
+          </View>
+          <T variant="caption" tone="muted" style={{ marginTop: 2 }}>
+            {summary.totalReviews} rating{summary.totalReviews === 1 ? '' : 's'}
+          </T>
+        </View>
+        <View style={{ flex: 1, justifyContent: 'center', gap: 4 }}>
+          {[5, 4, 3, 2, 1].map((s) => {
+            const n = Number(dist[String(s)] ?? 0);
+            return (
+              <View key={s} style={{ flexDirection: 'row', alignItems: 'center', gap: space.sm }}>
+                <T variant="caption" tone="muted" style={{ width: 10, textAlign: 'right' }}>
+                  {s}
+                </T>
+                <View style={{ flex: 1, height: 7, borderRadius: 4, backgroundColor: color.border.subtle, overflow: 'hidden' }}>
+                  <View style={{ width: `${Math.round((n / max) * 100)}%`, height: 7, borderRadius: 4, backgroundColor: n > 0 ? color.warning : 'transparent' }} />
+                </View>
+                <T variant="caption" tone="muted" style={{ width: 22 }}>
+                  {n}
+                </T>
+              </View>
+            );
+          })}
+        </View>
+      </View>
+    </Card>
+  );
+}
+
+const PERIODS = [7, 30, 90] as const;
+
+/** Sum a window off the endpoint's own daily series (dates ascending). */
+function windowTotals(daily: any[], take: number) {
+  const sum = (rows: any[], k: string) => rows.reduce((s, d) => s + Number(d?.[k] ?? 0), 0);
+  const cur = daily.slice(-take);
+  const prevRows = daily.slice(-take * 2, -take);
+  const prev = prevRows.length === take ? { revenue: sum(prevRows, 'revenue'), orders: sum(prevRows, 'orders') } : null;
+  return { curDaily: cur, cur: { revenue: sum(cur, 'revenue'), orders: sum(cur, 'orders') }, prev };
+}
+
 function VendorInsightsScreen() {
   const q = useVendorAnalytics();
-  const revenueQ = useVendorRevenue(14);
+  // Fetch double the window so "vs the previous N days" comes from the same
+  // real series (90 is the endpoint's max — no prior window at that depth).
+  const [period, setPeriod] = useState<(typeof PERIODS)[number]>(7);
+  const revenueQ = useVendorRevenue(period === 90 ? 90 : period * 2);
   const popularQ = usePopularItems(8);
   const a: any = q.data ?? {};
   const v: any = a.vendor ?? {};
+
+  const daily: any[] = revenueQ.data?.daily ?? [];
+  const w = windowTotals(daily, Math.min(period, daily.length || period));
+  const aovCur = w.cur.orders > 0 ? w.cur.revenue / w.cur.orders : 0;
+  const aovPrev = w.prev && w.prev.orders > 0 ? w.prev.revenue / w.prev.orders : null;
+
   return (
     <Screen>
       <TabHeader title="Insights" />
@@ -1628,17 +1693,54 @@ function VendorInsightsScreen() {
           <LoadingBlock />
         ) : (
           <>
-            <View style={{ flexDirection: 'row', gap: space.md, marginBottom: space.md }}>
+            {/* Live today, straight off the overview endpoint */}
+            <View style={{ flexDirection: 'row', gap: space.md, marginBottom: space.lg }}>
               <KpiTile icon="receipt" value={String(a.today?.orders ?? 0)} label="Orders today" />
               <KpiTile icon="cash" value={money(a.today?.revenue ?? 0)} label="Revenue today" />
+              <KpiTile icon="bell-ring" value={String(a.pendingOrders ?? 0)} label="Pending now" />
             </View>
-            <View style={{ flexDirection: 'row', gap: space.md, marginBottom: space.md }}>
-              <KpiTile icon="calendar-week" value={String(a.week?.orders ?? 0)} label="Orders / week" />
-              <KpiTile icon="calendar-month" value={String(a.month?.orders ?? 0)} label="Orders / month" />
+
+            {/* Performance window */}
+            <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: space.md }}>
+              <T variant="heading">Performance</T>
+              <View style={{ flexDirection: 'row', gap: space.sm }}>
+                {PERIODS.map((p) => (
+                  <Chip key={p} label={`${p}d`} selected={period === p} onPress={() => setPeriod(p)} style={{ height: 34, paddingHorizontal: space.md }} />
+                ))}
+              </View>
             </View>
-            {revenueQ.data?.daily?.length ? <RevenueChart daily={revenueQ.data.daily} totals={revenueQ.data.totals} /> : null}
+            {w.curDaily.length ? <RevenueChart daily={w.curDaily} totals={{ revenue: w.cur.revenue, orders: w.cur.orders }} /> : null}
+            <View style={{ flexDirection: 'row', gap: space.md, marginBottom: space.sm }}>
+              <KpiTile
+                icon="cash-multiple"
+                value={money(w.cur.revenue)}
+                label={`Revenue · ${period}d`}
+                delta={<DeltaBadge cur={w.cur.revenue} prev={w.prev?.revenue ?? null} />}
+              />
+              <KpiTile
+                icon="receipt"
+                value={String(w.cur.orders)}
+                label={`Orders · ${period}d`}
+                delta={<DeltaBadge cur={w.cur.orders} prev={w.prev?.orders ?? null} />}
+              />
+              <KpiTile
+                icon="chart-line"
+                value={money(aovCur)}
+                label="Avg order"
+                delta={aovPrev != null ? <DeltaBadge cur={aovCur} prev={aovPrev} /> : undefined}
+              />
+            </View>
+            {w.prev ? (
+              <T variant="caption" tone="muted" style={{ marginBottom: space.lg }}>
+                Change vs the previous {period} days.
+              </T>
+            ) : (
+              <View style={{ marginBottom: space.lg }} />
+            )}
+
             {popularQ.data ? <TopItemsCard items={popularQ.data} /> : null}
             <BusyHoursCard />
+            <RatingsCard />
             <ReviewsCard />
             <Card style={{ marginBottom: space.md }}>
               <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
@@ -1658,7 +1760,7 @@ function VendorInsightsScreen() {
             </Card>
             <View style={{ flexDirection: 'row', gap: space.md }}>
               <KpiTile icon="silverware-fork-knife" value={String(a.activeMenuItems ?? 0)} label="Active items" />
-              <KpiTile icon="bell-ring" value={String(a.pendingOrders ?? 0)} label="Pending now" />
+              <KpiTile icon="calendar-month" value={String(a.month?.orders ?? 0)} label="Orders / month" />
             </View>
           </>
         )}
@@ -1714,17 +1816,9 @@ function VendorAccountScreen() {
           </View>
         </Card>
 
-        {isOwner ? (
-          <Card style={{ marginBottom: space.lg, paddingVertical: space.sm }}>
-            <SettingsRow
-              icon="credit-card"
-              label="Subscription"
-              sub={sub.data ? 'Active weekly plan' : 'Not active yet'}
-              right={<TonePill label={sub.data ? 'Active' : 'Inactive'} tone={sub.data ? 'success' : 'brand'} />}
-            />
-            {store?.phone ? <SettingsRow icon="phone" label="Phone" right={<T variant="label" tone="muted">{store.phone}</T>} /> : null}
-          </Card>
-        ) : null}
+        {isOwner ? <SubscriptionCard sub={sub.data} phone={store?.phone} /> : null}
+
+        {isManager ? <StoreQrCard /> : null}
 
         {isManager ? <PromosSection /> : null}
 
@@ -1799,6 +1893,55 @@ function VendorAccountScreen() {
         ) : null}
       </ScrollView>
     </Screen>
+  );
+}
+
+/** Billing state exactly as the subscription engine records it: trial, grace,
+ *  rate and the next billing date (weekly flat fee — the whole Swift model). */
+function SubscriptionCard({ sub, phone }: { sub: any; phone?: string }) {
+  const pill = !sub
+    ? { label: 'Inactive', tone: 'brand' as const }
+    : sub.isTrialActive
+      ? { label: 'Free trial', tone: 'brand' as const }
+      : sub.isInGracePeriod
+        ? { label: 'Grace period', tone: 'error' as const }
+        : sub.status === 'ACTIVE'
+          ? { label: 'Active', tone: 'success' as const }
+          : { label: String(sub.status ?? '').toLowerCase() || 'Inactive', tone: 'neutral' as const };
+  const subLine = !sub
+    ? 'Not active yet'
+    : sub.isTrialActive && sub.trialEndDate
+      ? `Trial ends ${fmtDate(sub.trialEndDate)} · then ${money(sub.weeklyRate)}/week`
+      : sub.isInGracePeriod && sub.gracePeriodEnd
+        ? `Pay by ${fmtDate(sub.gracePeriodEnd)} to stay online`
+        : `${money(sub.customRate ?? sub.weeklyRate)}/week${sub.nextBillingDate ? ` · next bill ${fmtDate(sub.nextBillingDate)}` : ''}`;
+  return (
+    <Card style={{ marginBottom: space.lg, paddingVertical: space.sm }}>
+      <SettingsRow icon="credit-card" label="Subscription" sub={subLine} right={<TonePill label={pill.label} tone={pill.tone} />} />
+      {phone ? <SettingsRow icon="phone" label="Phone" right={<T variant="label" tone="muted">{phone}</T>} /> : null}
+    </Card>
+  );
+}
+
+/** Storefront QR (real /vendor/qr payload): print it, customers scan to order. */
+function StoreQrCard() {
+  const qrQ = useVendorQr();
+  if (!qrQ.data?.svg) return null;
+  return (
+    <Card style={{ alignItems: 'center', marginBottom: space.lg }}>
+      <T variant="body" weight="semibold" style={{ alignSelf: 'flex-start' }}>
+        Your store QR
+      </T>
+      <View style={{ padding: space.md, borderRadius: radius.lg, backgroundColor: color.white, marginTop: space.md }}>
+        <SvgXml xml={qrQ.data.svg} width={168} height={168} />
+      </View>
+      <T variant="caption" weight="semibold" tone="brand" style={{ marginTop: space.md }}>
+        {qrQ.data.deepLink}
+      </T>
+      <T variant="caption" tone="muted" center style={{ marginTop: 4 }}>
+        Print it for your counter — customers scan to open your storefront and order.
+      </T>
+    </Card>
   );
 }
 
@@ -2108,6 +2251,8 @@ export function VendorStack() {
   return (
     <Stack.Navigator screenOptions={{ headerShown: false }}>
       <Stack.Screen name="VendorRoot" component={VendorRoot} />
+      <Stack.Screen name="VendorOrderDetail" component={VendorOrderDetailScreen} />
+      <Stack.Screen name="VendorOrderHistory" component={VendorOrderHistoryScreen} />
     </Stack.Navigator>
   );
 }

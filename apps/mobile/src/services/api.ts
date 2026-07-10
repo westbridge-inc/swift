@@ -328,7 +328,9 @@ export const vendorApi = {
   profile: () => api.get('/vendor/profile'),
   toggleOpen: () => api.put('/vendor/vendor/toggle-open'),
   toggleOrders: () => api.put('/vendor/vendor/toggle-orders'),
-  orders: () => api.get('/vendor/orders'),
+  orders: (params?: { status?: string; search?: string; page?: number; limit?: number }) =>
+    api.get('/vendor/orders', { params }),
+  order: (id: string) => api.get(`/vendor/orders/${id}`),
   acceptOrder: (id: string) => api.put(`/vendor/orders/${id}/accept`),
   preparing: (id: string) => api.put(`/vendor/orders/${id}/preparing`),
   ready: (id: string) => api.put(`/vendor/orders/${id}/ready`),
@@ -340,6 +342,8 @@ export const vendorApi = {
   // Menu management
   categories: () => api.get('/vendor/categories'),
   createCategory: (data: { name: string; description?: string }) => api.post('/vendor/categories', data),
+  updateCategory: (id: string, data: { name?: string; description?: string }) => api.put(`/vendor/categories/${id}`, data),
+  deleteCategory: (id: string) => api.delete(`/vendor/categories/${id}`),
   createItem: (data: VendorItemInput) => api.post('/vendor/items', data),
   updateItem: (id: string, data: Partial<VendorItemInput>) => api.put(`/vendor/items/${id}`, data),
   deleteItem: (id: string) => api.delete(`/vendor/items/${id}`),
@@ -375,6 +379,8 @@ export const vendorApi = {
     api.post('/vendor/items/import/xlsx', form, { headers: { 'Content-Type': 'multipart/form-data' } }),
   importMenuPdf: (form: FormData) =>
     api.post('/vendor/items/import/menu-parse', form, { headers: { 'Content-Type': 'multipart/form-data' } }),
+  // Storefront QR (manager+) — deep link + printable SVG code
+  qr: () => api.get('/vendor/qr'),
   // Reviews (manager+ can respond)
   reviews: () => api.get('/vendor/reviews'),
   respondReview: (id: string, response: string) => api.post(`/vendor/reviews/${id}/respond`, { response }),

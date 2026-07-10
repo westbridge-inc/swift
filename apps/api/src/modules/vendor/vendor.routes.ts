@@ -284,6 +284,18 @@ export function pickVendorId(ownedVendorIds: string[], requested?: string): stri
   return requested && ownedVendorIds.includes(requested) ? requested : ownedVendorIds[0]!;
 }
 
+/**
+ * Order-board scope: an explicitly selected store (x-vendor-id) scopes the
+ * board to that store — matching every other vendor surface — while no
+ * selection keeps the franchise roll-up across all the caller's stores.
+ */
+export function ordersScope(
+  access: { vendorId: string; vendorIds: string[] },
+  requested?: string,
+): string | { in: string[] } {
+  return requested ? access.vendorId : { in: access.vendorIds };
+}
+
 /** OWNER > MANAGER > STAFF — every vendor route resolves one of these. */
 export type VendorAccessRole = 'OWNER' | 'MANAGER' | 'STAFF';
 const ROLE_RANK: Record<VendorAccessRole, number> = { STAFF: 0, MANAGER: 1, OWNER: 2 };
@@ -724,12 +736,13 @@ export async function vendorRoutes(app: FastifyInstance) {
 
   /** GET /orders — Paginated, filterable order list */
   app.get('/orders', auth, async (request) => {
-    const { vendorIds } = await resolveVendor(app, request.user.userId, selectedVendorId(request));
+    const requested = selectedVendorId(request);
+    const access = await resolveVendor(app, request.user.userId, requested);
     const query = request.query as Record<string, string | undefined>;
     const pagination = parsePagination(query);
     const { status, orderType, from, to, search } = vendorOrdersQuerySchema.parse(request.query);
 
-    const where: Record<string, unknown> = { vendorId: { in: vendorIds } };
+    const where: Record<string, unknown> = { vendorId: ordersScope(access, requested) };
     if (status) where['status'] = status;
     if (orderType) where['orderType'] = orderType;
     if (from) where['placedAt'] = { ...(where['placedAt'] as object || {}), gte: from };
