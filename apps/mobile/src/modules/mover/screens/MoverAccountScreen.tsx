@@ -130,7 +130,10 @@ export function MoverAccountScreen({ navigation }: any) {
             sub={sub ? `${money(sub.customRate ?? sub.weeklyRate)}/week` : 'Not active yet'}
             right={<TonePill label={subPill.label} tone={subPill.tone} />}
           />
-          <SettingsRow icon="refresh-cw" label="Switch how you use Swift" sub="Order as a customer, sell as a business" onPress={() => navigation?.navigate?.('RolePicker')} />
+          {/* RolePicker lives in the ROOT navigator (only mounted when intent
+              is unset) — clearing the intent swaps the whole surface; a
+              navigate('RolePicker') from inside this stack cannot resolve. */}
+          <SettingsRow icon="refresh-cw" label="Switch how you use Swift" sub="Order as a customer, sell as a business" onPress={() => useAuthStore.getState().setIntent(null)} />
         </Card>
 
         {/* The model */}

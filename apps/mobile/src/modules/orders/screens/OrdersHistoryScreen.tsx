@@ -8,7 +8,7 @@ import { useOrders, useReorder } from '../../../hooks/customer';
 import { useAuthStore } from '../../../stores/authStore';
 import { DARK_BLURHASH, vendorImage } from '../../../lib/images';
 import { money } from '../../../lib/money';
-import { Card, EmptyState, ErrorState, Header, LoadingBlock, PillButton, Screen, T } from '../../../kit';
+import { Card, EmptyState, ErrorState, LoadingBlock, PillButton, Screen, T } from '../../../kit';
 
 // No kit frame for order history — composed from the kit's Recent Order card
 // pattern (thumb · name · meta · trailing action).
@@ -36,7 +36,9 @@ export function OrdersHistoryScreen() {
   if (!isAuthenticated) {
     return (
       <Screen>
-        <Header title="My Orders" />
+        <View style={{ height: 56, alignItems: 'center', justifyContent: 'center' }}>
+        <T variant="heading">Activity</T>
+      </View>
         <EmptyState icon="clipboard" title="Sign in to see orders" body="Your order history lives on your account." actionLabel="Sign In" onAction={promptLogin} />
       </Screen>
     );
@@ -46,7 +48,9 @@ export function OrdersHistoryScreen() {
 
   return (
     <Screen>
-      <Header title="My Orders" />
+      <View style={{ height: 56, alignItems: 'center', justifyContent: 'center' }}>
+        <T variant="heading">Activity</T>
+      </View>
       {orders.isLoading ? (
         <LoadingBlock />
       ) : orders.isError ? (

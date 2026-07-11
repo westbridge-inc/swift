@@ -44,11 +44,13 @@ import { ChatScreen } from '../screens/shared/ChatScreen';
 const Tab = createBottomTabNavigator();
 const Stack = createNativeStackNavigator();
 
-// Kit tab bar: Home · Cart · Chat · Profile (filled icon when active).
+// Tab bar: Home · Activity · Cart · Profile (filled icon when active).
+// Activity is a first-class super-app surface (orders/rides history + live
+// status); order chats stay reachable from each order and the chat list.
 const TAB_ICON: Record<string, keyof typeof Ionicons.glyphMap> = {
   Home: 'home',
+  Activity: 'receipt',
   Cart: 'bag-handle',
-  ChatTab: 'chatbubble-ellipses',
   Profile: 'person',
 };
 
@@ -77,8 +79,8 @@ function HomeTabs() {
       })}
     >
       <Tab.Screen name="Home" component={HomeScreen} />
+      <Tab.Screen name="Activity" component={OrdersHistoryScreen} />
       <Tab.Screen name="Cart" component={CartScreen} />
-      <Tab.Screen name="ChatTab" component={ChatListScreen} options={{ tabBarLabel: 'Chat' }} />
       <Tab.Screen name="Profile" component={ProfileScreen} />
     </Tab.Navigator>
   );
@@ -101,6 +103,7 @@ export function CustomerStack() {
       <Stack.Screen name="Delivery" component={DeliveryScreen} />
       <Stack.Screen name="Feedback" component={FeedbackScreen} />
       {/* Chat */}
+      <Stack.Screen name="ChatList" component={ChatListScreen} />
       <Stack.Screen name="Conversation" component={ConversationScreen} />
       {/* Profile */}
       <Stack.Screen name="PersonalData" component={PersonalDataScreen} />
