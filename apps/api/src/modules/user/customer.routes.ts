@@ -92,9 +92,17 @@ const checkoutSchema = z.object({
   fulfillmentSelections: z.record(z.enum(['DELIVERY', 'PICKUP'])).optional(),
   // Priority delivery: 1.5x delivery fee, dispatched ahead of standard orders
   express: z.boolean().optional(),
-  // Requested slots for APPOINTMENT listings (booked at vendor acceptance)
+  // Requested slots for APPOINTMENT listings (booked at vendor acceptance).
+  // mode: where the service happens when the business offers BOTH — at their
+  // place (AT_BUSINESS) or the customer's (MOBILE).
   appointments: z
-    .array(z.object({ itemId: z.string().min(1), slotStart: z.coerce.date() }))
+    .array(
+      z.object({
+        itemId: z.string().min(1),
+        slotStart: z.coerce.date(),
+        mode: z.enum(['AT_BUSINESS', 'MOBILE']).optional(),
+      }),
+    )
     .max(10)
     .optional(),
 });
@@ -1068,6 +1076,8 @@ export async function customerRoutes(app: FastifyInstance) {
     const config = item.bookingConfig as unknown as {
       durationMinutes: number;
       slots: Array<{ dayOfWeek: number; start: string; end: string }>;
+      serviceMode?: 'AT_BUSINESS' | 'MOBILE' | 'BOTH';
+      serviceRadiusKm?: number;
     };
     const duration = config.durationMinutes;
     const [y, m, d] = date.split('-').map(Number);
@@ -1103,7 +1113,19 @@ export async function customerRoutes(app: FastifyInstance) {
       : new Set<string>();
 
     const slots = candidates.filter((c) => !taken.has(c.toISOString())).map((c) => c.toISOString());
-    return { success: true, data: { date, durationMinutes: duration, slots } };
+    // Which weekdays have windows at all — drives the day chips in the picker.
+    const bookableWeekdays = Array.from(new Set((config.slots ?? []).map((w) => w.dayOfWeek)));
+    return {
+      success: true,
+      data: {
+        date,
+        durationMinutes: duration,
+        slots,
+        bookableWeekdays,
+        serviceMode: config.serviceMode ?? 'AT_BUSINESS',
+        serviceRadiusKm: config.serviceRadiusKm ?? null,
+      },
+    };
   });
 
   // ========================================================================

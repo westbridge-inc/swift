@@ -165,10 +165,14 @@ export async function chatRoutes(app: FastifyInstance) {
 
   // Get user's active chat rooms
   app.get('/rooms', { preHandler: [app.authenticate] }, async (request) => {
+    // Surfaces are role-scoped: the shopping app lists the rooms you're in AS
+    // the customer; a mover's job chats live in the driver app (?as=rider).
+    const { as } = request.query as { as?: string };
+    const roleFilter = as === 'customer' || as === 'rider' ? { role: as } : {};
     const rooms = await app.prisma.chatRoom.findMany({
       where: {
         isActive: true,
-        participants: { some: { userId: request.user.userId } },
+        participants: { some: { userId: request.user.userId, ...roleFilter } },
       },
       include: {
         participants: { include: { user: { select: { id: true, firstName: true, avatar: true } } } },

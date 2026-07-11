@@ -30,6 +30,7 @@ const TYPES = [
   { key: 'RESTAURANT', label: 'Restaurants' },
   { key: 'SUPERMARKET', label: 'Groceries' },
   { key: 'STORE', label: 'Shops' },
+  { key: 'SERVICE', label: 'Services' },
 ] as const;
 
 const SORTS = [

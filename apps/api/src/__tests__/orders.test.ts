@@ -568,6 +568,45 @@ describe('Appointments — booked at acceptance, never double-held', () => {
     expect(db.status).toBe('PENDING');
   });
 
+  it('where-it-happens: mode is validated against the business and lands on the order address', async () => {
+    // The haircut has no serviceMode = AT_BUSINESS: asking them to travel is a 400.
+    const cust = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
+    const laterSlot = new Date(slot.getTime() + 60 * 60_000);
+    await inject('POST', '/api/v1/customer/cart/items', { vendorId: service.vendorId, itemId: haircutId, quantity: 1 }, cust.token);
+    const refused = await inject('POST', '/api/v1/customer/checkout', {
+      paymentMethod: 'CASH',
+      appointments: [{ itemId: haircutId, slotStart: laterSlot.toISOString(), mode: 'MOBILE' }],
+    }, cust.token);
+    expect(refused.statusCode).toBe(400);
+    expect(refused.json().error.code).toBe('MODE_NOT_OFFERED');
+
+    // A BOTH-mode service honours the customer's pick: AT_BUSINESS books at
+    // the store's address — no customer address required at all.
+    const mobileWash = (await makeItem(service.vendorId, service.categoryId, 'Step7 Wash', 3000, {
+      fulfillment: 'APPOINTMENT',
+      bookingConfig: {
+        durationMinutes: 30,
+        slots: [{ dayOfWeek: 4, start: '09:00', end: '17:00' }],
+        serviceMode: 'BOTH',
+        serviceRadiusKm: 10,
+      },
+    })).id;
+    await app.prisma.cart.deleteMany({ where: { customerId: cust.userId } });
+    await inject('POST', '/api/v1/customer/cart/items', { vendorId: service.vendorId, itemId: mobileWash, quantity: 1 }, cust.token);
+    const atStore = await inject('POST', '/api/v1/customer/checkout', {
+      paymentMethod: 'CASH',
+      appointments: [{ itemId: mobileWash, slotStart: laterSlot.toISOString(), mode: 'AT_BUSINESS' }],
+    }, cust.token);
+    expect(atStore.statusCode).toBe(200);
+    const order = atStore.json().data.order;
+    createdOrderIds.push(order.id);
+    // The order carries the BUSINESS's address — you go to them.
+    const db = await app.prisma.order.findUniqueOrThrow({ where: { id: order.id } });
+    const vendorRow = await app.prisma.vendor.findUniqueOrThrow({ where: { id: service.vendorId } });
+    expect(db.deliveryLat).toBe(vendorRow.latitude);
+    expect(db.deliveryLng).toBe(vendorRow.longitude);
+  });
+
   it('cancelling an accepted appointment frees the slot', async () => {
     const first = await app.prisma.booking.findFirstOrThrow({
       where: { itemId: haircutId, slotStart: slot, status: 'CONFIRMED' },

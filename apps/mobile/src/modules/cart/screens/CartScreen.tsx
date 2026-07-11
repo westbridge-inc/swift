@@ -16,6 +16,7 @@ import {
   useUpdateCartItem,
 } from '../../../hooks/customer';
 import { useAuthStore } from '../../../stores/authStore';
+import { useBookingStore } from '../../../stores/bookingStore';
 import { useLocationStore } from '../../../stores/locationStore';
 import { DARK_BLURHASH, itemImage } from '../../../lib/images';
 import { money } from '../../../lib/money';
@@ -63,6 +64,8 @@ export function CartScreen() {
   const [express, setExpress] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
   const [placedOrderId, setPlacedOrderId] = useState<string | null>(null);
+  const appointments = useBookingStore((s) => s.appointments);
+  const clearAppointments = useBookingStore((s) => s.clear);
 
   const applyPromo = useMutation({
     mutationFn: (code: string) => customerApi.validatePromo(code),
@@ -97,17 +100,27 @@ export function CartScreen() {
   const c = cart.data; // null = empty cart
   const items: any[] = c?.items ?? [];
 
+  // Appointment lines need their chosen slot (picked on the service screen)
+  // before checkout — the API rejects slotless bookings with SLOT_REQUIRED.
+  const bookingItems = items.filter((i) => i.fulfillment === 'APPOINTMENT');
+  const unslotted = bookingItems.filter((i) => !appointments[i.itemId]);
+  const apptPayload = bookingItems
+    .filter((i) => appointments[i.itemId])
+    .map((i) => ({ itemId: i.itemId, slotStart: appointments[i.itemId]!.slotStart, ...(appointments[i.itemId]!.mode ? { mode: appointments[i.itemId]!.mode } : {}) }));
+
   const onOrder = () => {
     placeOrder.mutate(
       {
         paymentMethod: 'CASH',
         ...(express ? { express: true } : {}),
+        ...(apptPayload.length ? { appointments: apptPayload } : {}),
         ...(instructions.trim() ? { deliveryInstructions: instructions.trim() } : {}),
       },
       {
         onSuccess: (data: any) => {
           const first = data?.orders?.[0];
           setPlacedOrderId(first?.id ?? null);
+          if (apptPayload.length) clearAppointments();
         },
       },
     );
@@ -355,6 +368,14 @@ export function CartScreen() {
               </T>
             </View>
           ) : null}
+          {unslotted.length > 0 ? (
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: space.md }}>
+              <Feather name="calendar" size={14} color={color.error} />
+              <T variant="label" tone="error">
+                Pick a time for {unslotted[0].name} before ordering.
+              </T>
+            </View>
+          ) : null}
           {orderErr ? (
             <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: space.md }}>
               <Feather name="alert-circle" size={14} color={color.error} />
@@ -368,7 +389,7 @@ export function CartScreen() {
             label="Order Now"
             onPress={onOrder}
             loading={placeOrder.isPending}
-            disabled={!c.meetsMinimum || c.unavailableItemIds?.length > 0 || !c.deliveryAddress}
+            disabled={!c.meetsMinimum || c.unavailableItemIds?.length > 0 || !c.deliveryAddress || unslotted.length > 0}
             style={{ marginTop: space.xl }}
           />
           {!c.deliveryAddress ? (

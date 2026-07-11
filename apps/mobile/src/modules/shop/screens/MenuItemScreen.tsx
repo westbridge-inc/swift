@@ -6,8 +6,9 @@ import { Feather } from '@expo/vector-icons';
 import { useNavigation, useRoute } from '@react-navigation/native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { color, radius, space } from '@swift/ui';
-import { useAddToCart, useVendor } from '../../../hooks/customer';
+import { useAddToCart, useItemSlots, useVendor } from '../../../hooks/customer';
 import { useAuthStore } from '../../../stores/authStore';
+import { useBookingStore, type ServiceVisitMode } from '../../../stores/bookingStore';
 import { DARK_BLURHASH, itemImage } from '../../../lib/images';
 import { money } from '../../../lib/money';
 import {
@@ -57,12 +58,32 @@ export function MenuItemScreen() {
   const [qty, setQty] = useState(1);
   const [added, setAdded] = useState(false);
 
+  // Appointment listings book a moment, not a quantity (kit chips reused as
+  // day + time pickers). Dates run on the UTC calendar to mirror the API.
+  const [dayOffset, setDayOffset] = useState(0);
+  const [slot, setSlot] = useState<string | null>(null);
+  const [visitMode, setVisitMode] = useState<ServiceVisitMode>('AT_BUSINESS');
+  const setAppointment = useBookingStore((st) => st.setAppointment);
+
   const item = useMemo(
     () => vendor.data?.categories?.flatMap((c: any) => c.items ?? []).find((i: any) => i.id === itemId),
     [vendor.data, itemId],
   );
   const groups: any[] = item?.optionGroups ?? [];
   const [selected, setSelected] = useState<Selected>(() => defaultSelections(groups));
+
+  const isBooking = item?.fulfillment === 'APPOINTMENT';
+  // Dates run on the UTC calendar to mirror the API's slot math exactly.
+  const selectedDate = useMemo(() => {
+    const now = new Date();
+    return new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + dayOffset))
+      .toISOString()
+      .slice(0, 10);
+  }, [dayOffset]);
+  const slotsQ = useItemSlots<any>(isBooking ? itemId : '', selectedDate);
+  const serviceMode: 'AT_BUSINESS' | 'MOBILE' | 'BOTH' = slotsQ.data?.serviceMode ?? 'AT_BUSINESS';
+  const bookableWeekdays: number[] | undefined = slotsQ.data?.bookableWeekdays;
+  const daySlots: string[] = slotsQ.data?.slots ?? [];
 
   // Re-seed defaults when the item arrives after a cold load.
   const seededFor = React.useRef<string | null>(item ? itemId : null);
@@ -126,8 +147,15 @@ export function MenuItemScreen() {
       return;
     }
     addToCart.mutate(
-      { vendorId, itemId, quantity: qty, selectedOptions: Object.keys(selected).length ? selected : undefined },
-      { onSuccess: () => setAdded(true) },
+      { vendorId, itemId, quantity: isBooking ? 1 : qty, selectedOptions: Object.keys(selected).length ? selected : undefined },
+      {
+        onSuccess: () => {
+          if (isBooking && slot) {
+            setAppointment(itemId, { slotStart: slot, ...(serviceMode === 'BOTH' ? { mode: visitMode } : {}) });
+          }
+          setAdded(true);
+        },
+      },
     );
   };
 
@@ -218,7 +246,7 @@ export function MenuItemScreen() {
             <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
               <Feather name="clock" size={14} color={color.brand[600]} />
               <T variant="label" tone="deep">
-                {vendor.data?.estimatedPrepTime ?? 30} min prep
+                {isBooking ? `${slotsQ.data?.durationMinutes ?? 30} min service` : `${vendor.data?.estimatedPrepTime ?? 30} min prep`}
               </T>
             </View>
             <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
@@ -280,6 +308,99 @@ export function MenuItemScreen() {
             );
           })}
 
+          {isBooking ? (
+            <>
+              {/* Where it happens — the business's setting; BOTH lets you pick */}
+              <SectionHeader title="Where" style={{ marginTop: space['2xl'] }} />
+              {serviceMode === 'BOTH' ? (
+                <View style={{ flexDirection: 'row', gap: space.md, marginTop: space.md }}>
+                  <Chip
+                    label="You go to them"
+                    selected={visitMode === 'AT_BUSINESS'}
+                    onPress={() => setVisitMode('AT_BUSINESS')}
+                    style={{ height: 42, paddingHorizontal: space.lg }}
+                  />
+                  <Chip
+                    label="They come to you"
+                    selected={visitMode === 'MOBILE'}
+                    onPress={() => setVisitMode('MOBILE')}
+                    style={{ height: 42, paddingHorizontal: space.lg }}
+                  />
+                </View>
+              ) : (
+                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, marginTop: space.md }}>
+                  <Feather name={serviceMode === 'MOBILE' ? 'navigation' : 'map-pin'} size={14} color={color.brand[600]} />
+                  <T variant="label" tone="muted" style={{ flex: 1 }}>
+                    {serviceMode === 'MOBILE'
+                      ? `They come to your address${slotsQ.data?.serviceRadiusKm ? ` (within ${slotsQ.data.serviceRadiusKm} km)` : ''}`
+                      : `At ${vendor.data?.name ?? 'their place'}${vendor.data?.addressLine1 ? ` — ${vendor.data.addressLine1}` : ''}`}
+                  </T>
+                </View>
+              )}
+              {serviceMode === 'BOTH' && visitMode === 'MOBILE' ? (
+                <T variant="caption" tone="faint" style={{ marginTop: 6 }}>
+                  They travel to your saved address{slotsQ.data?.serviceRadiusKm ? ` (within ${slotsQ.data.serviceRadiusKm} km)` : ''}.
+                </T>
+              ) : null}
+
+              {/* When — day chips + real availability from the booking engine */}
+              <SectionHeader title="Pick a time" style={{ marginTop: space['2xl']}} />
+              <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{ marginTop: space.md, flexGrow: 0 }} contentContainerStyle={{ gap: space.md }}>
+                {Array.from({ length: 7 }, (_, i) => {
+                  const now = new Date();
+                  const d = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + i));
+                  const wd = d.getUTCDay();
+                  const closed = bookableWeekdays ? !bookableWeekdays.includes(wd) : false;
+                  const label =
+                    i === 0
+                      ? 'Today'
+                      : i === 1
+                        ? 'Tomorrow'
+                        : `${['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'][wd]} ${d.getUTCDate()}`;
+                  return (
+                    <Chip
+                      key={i}
+                      label={closed ? `${label} · closed` : label}
+                      selected={dayOffset === i}
+                      onPress={() => {
+                        if (closed) return;
+                        setDayOffset(i);
+                        setSlot(null);
+                      }}
+                      style={{ height: 40, paddingHorizontal: space.lg, opacity: closed ? 0.45 : 1 }}
+                    />
+                  );
+                })}
+              </ScrollView>
+              {slotsQ.isLoading ? (
+                <T variant="label" tone="muted" style={{ marginTop: space.md }}>
+                  Checking times…
+                </T>
+              ) : daySlots.length === 0 ? (
+                <T variant="label" tone="muted" style={{ marginTop: space.md }}>
+                  No times left this day — try another.
+                </T>
+              ) : (
+                <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: space.md, marginTop: space.md }}>
+                  {daySlots.map((iso) => (
+                    <Chip
+                      key={iso}
+                      label={new Date(iso).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit', timeZone: 'UTC' })}
+                      selected={slot === iso}
+                      onPress={() => setSlot(iso)}
+                      style={{ height: 42, paddingHorizontal: space.lg }}
+                    />
+                  ))}
+                </View>
+              )}
+              {slotsQ.data?.durationMinutes ? (
+                <T variant="caption" tone="faint" style={{ marginTop: space.sm }}>
+                  Each appointment runs about {slotsQ.data.durationMinutes} minutes.
+                </T>
+              ) : null}
+            </>
+          ) : null}
+
           {addErr ? (
             <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: space.lg }}>
               <Feather name="alert-circle" size={14} color={color.error} />
@@ -314,12 +435,22 @@ export function MenuItemScreen() {
           gap: space.lg,
         }}
       >
-        <QtyStepper value={qty} onDec={() => setQty((q) => Math.max(1, q - 1))} onInc={() => setQty((q) => q + 1)} min={1} />
+        {isBooking ? null : (
+          <QtyStepper value={qty} onDec={() => setQty((q) => Math.max(1, q - 1))} onInc={() => setQty((q) => q + 1)} min={1} />
+        )}
         <PillButton
-          label={outOfStock ? 'Out of stock' : `Add to cart · ${money(total)}`}
-          icon="shopping-cart"
+          label={
+            outOfStock
+              ? 'Out of stock'
+              : isBooking
+                ? slot
+                  ? `Book ${new Date(slot).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit', timeZone: 'UTC' })} · ${money(total)}`
+                  : 'Pick a time'
+                : `Add to cart · ${money(total)}`
+          }
+          icon={isBooking ? 'calendar' : 'shopping-cart'}
           variant={outOfStock ? 'dark' : 'primary'}
-          disabled={outOfStock || requiredUnmet}
+          disabled={outOfStock || requiredUnmet || (isBooking && !slot)}
           loading={addToCart.isPending}
           onPress={onAdd}
           style={{ flex: 1 }}
@@ -330,7 +461,7 @@ export function MenuItemScreen() {
       <PopupCard visible={added} onClose={() => setAdded(false)}>
         <IconChip icon="shopping-cart" size={64} />
         <T variant="heading" center style={{ marginTop: space.md }}>
-          Added to your cart!
+          {isBooking ? 'Booking added — confirm at checkout' : 'Added to your cart!'}
         </T>
         <View style={{ alignSelf: 'stretch', gap: space.md, marginTop: space.xl }}>
           <PillButton

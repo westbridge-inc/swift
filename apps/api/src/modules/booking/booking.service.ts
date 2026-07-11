@@ -5,6 +5,10 @@ import { AppError, NotFoundError } from '../../utils/errors';
 export interface BookingConfig {
   durationMinutes: number;
   slots: Array<{ dayOfWeek: number; start: string; end: string }>;
+  /** Where the service happens: the business's place, the customer's, or
+   *  the customer's choice. Absent = AT_BUSINESS (legacy listings). */
+  serviceMode?: 'AT_BUSINESS' | 'MOBILE' | 'BOTH';
+  serviceRadiusKm?: number;
 }
 
 // ---------------------------------------------------------------------------

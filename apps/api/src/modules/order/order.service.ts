@@ -24,8 +24,10 @@ interface CheckoutInput {
   /** Priority delivery: 1.5x the delivery fee, dispatched ahead of standard
    *  orders, premium goes to the rider. DELIVERY groups only. */
   express?: boolean;
-  /** Requested appointment slots for APPOINTMENT listings in the cart */
-  appointments?: Array<{ itemId: string; slotStart: Date }>;
+  /** Requested appointment slots for APPOINTMENT listings in the cart.
+   *  mode picks where a BOTH-mode service happens (validated against what
+   *  the business actually offers). */
+  appointments?: Array<{ itemId: string; slotStart: Date; mode?: 'AT_BUSINESS' | 'MOBILE' }>;
   /** Injectable clock so the risk heuristic is testable */
   now?: Date;
 }
@@ -128,6 +130,7 @@ export class OrderService {
     }
 
     const requestedSlots = new Map((input.appointments ?? []).map((a) => [a.itemId, a.slotStart]));
+    const requestedModes = new Map((input.appointments ?? []).map((a) => [a.itemId, a.mode]));
 
     // Default address (only required when some group is DELIVERY)
     let address = cart.deliveryAddressId
@@ -213,7 +216,19 @@ export class OrderService {
         // MOBILE / BOTH services travel to the customer — require their address and
         // enforce the provider's service radius (mirrors the DELIVERY gate above).
         const bcfg = (appointmentItems[0]!.item.bookingConfig ?? {}) as { serviceMode?: string; serviceRadiusKm?: number };
-        if (bcfg.serviceMode === 'MOBILE' || bcfg.serviceMode === 'BOTH') {
+        const offered = bcfg.serviceMode ?? 'AT_BUSINESS';
+        // Where it happens: the business's setting, narrowed by the customer's
+        // choice when the business offers BOTH. Asking for a mode the business
+        // does not offer is a 400, never a silent fallback.
+        const requestedMode = requestedModes.get(appointmentItems[0]!.itemId);
+        if (requestedMode === 'MOBILE' && offered === 'AT_BUSINESS') {
+          throw new AppError(400, 'MODE_NOT_OFFERED', `${vendor.name} does not travel to customers for this service`);
+        }
+        if (requestedMode === 'AT_BUSINESS' && offered === 'MOBILE') {
+          throw new AppError(400, 'MODE_NOT_OFFERED', `${vendor.name} only offers this service at your address`);
+        }
+        const mobileVisit = requestedMode ? requestedMode === 'MOBILE' : offered === 'MOBILE' || offered === 'BOTH';
+        if (mobileVisit) {
           if (!address) throw new AppError(400, 'NO_ADDRESS', `Add your address — ${vendor.name} travels to you`);
           const travelKm = (await this.maps.routeKm(
             { lat: vendor.latitude, lng: vendor.longitude },
