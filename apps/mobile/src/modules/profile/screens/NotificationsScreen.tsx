@@ -13,11 +13,24 @@ const ICON_FOR: Record<string, React.ComponentProps<typeof IconChip>['icon']> = 
   PAYMENT: 'dollar-sign',
 };
 
+// Notifications are account-level, but SURFACES are role-level: someone who
+// drives AND shops must not see operator alerts (docs expiring, taken
+// offline) inside the shopping app — those belong to the driver/business
+// surface. L2 identity is customer-side and stays.
+const EARNER_KINDS = new Set([
+  'verification_approved',
+  'verification_rejected',
+  'verification_expired',
+  'verification_expiry_reminder',
+  'verification_forced_offline',
+]);
+
 export function NotificationsScreen() {
   const notifications = useNotifications<any>();
-  const rows: any[] = Array.isArray(notifications.data)
+  const all: any[] = Array.isArray(notifications.data)
     ? notifications.data
     : (notifications.data?.notifications ?? []);
+  const rows = all.filter((n) => !EARNER_KINDS.has(n?.data?.kind));
 
   return (
     <Screen>
