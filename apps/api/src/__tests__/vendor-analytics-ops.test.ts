@@ -91,7 +91,9 @@ beforeAll(async () => {
   vendorId = vendor.id;
 
   const customer = await makeUser(['CUSTOMER'], 'CUSTOMER');
-  const base = Date.now() - 2 * DAY;
+  // Firmly 3 days back so the days=1 "empty window" test can never catch
+  // these fixtures regardless of the wall-clock hour the suite runs at.
+  const base = Date.now() - 3 * DAY;
 
   // A: accepted in 4 min, prep 20 min (quoted 15), delivered
   await order(customer.userId, {

@@ -99,7 +99,7 @@ function DispatchOfferCard({
             <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.sm }}>
               <MaterialCommunityIcons name={isDriver ? 'car' : 'package-variant'} size={18} color={color.white} />
               <T variant="caption" weight="bold" tone="onBrand" style={{ letterSpacing: 1 }}>
-                NEW {isDriver ? 'RIDE' : 'DELIVERY'} REQUEST
+                {offer.isExpress ? 'EXPRESS · BIGGER FEE' : `NEW ${isDriver ? 'RIDE' : 'DELIVERY'} REQUEST`}
               </T>
             </View>
             {secs > 0 ? (

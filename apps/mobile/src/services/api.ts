@@ -119,6 +119,8 @@ export const customerApi = {
     scheduledFor?: string;
     promoCode?: string;
     fulfillmentSelections?: Record<string, 'DELIVERY' | 'PICKUP'>;
+    /** Priority delivery: 1.5x delivery fee, dispatched first */
+    express?: boolean;
   }) => api.post('/customer/checkout', data),
   getNotifications: () => api.get('/customer/notifications'),
   reorder: (id: string) => api.post(`/customer/orders/${id}/reorder`, {}),

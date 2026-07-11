@@ -373,9 +373,17 @@ export function DeliveryScreen() {
             </View>
           ) : (
             <>
-              <T variant="heading" style={{ marginTop: rider ? space.xl : 0 }}>
-                Your Delivery Time
-              </T>
+              <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.sm, marginTop: rider ? space.xl : 0 }}>
+                <T variant="heading">Your Delivery Time</T>
+                {o.isExpress ? (
+                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: 3, borderRadius: 9999, paddingHorizontal: 8, paddingVertical: 3, backgroundColor: '#FDF1DC' }}>
+                    <Feather name="zap" size={11} color={color.warning} />
+                    <T variant="caption" weight="bold" style={{ color: '#8A5A00' }}>
+                      Express
+                    </T>
+                  </View>
+                ) : null}
+              </View>
               <T variant="label" tone="muted" style={{ marginTop: 2 }}>
                 {eta ? `Estimated by ${eta}` : 'The store will confirm your order shortly'}
               </T>

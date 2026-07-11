@@ -821,9 +821,11 @@ export async function vendorRoutes(app: FastifyInstance) {
     await ackVendorAlert(app, request.user.userId, order.id); // accepting acknowledges the alert
 
     // acceptance of a DELIVERY order starts the dispatch cascade.
-    // PICKUP and APPOINTMENT orders never dispatch.
+    // PICKUP and APPOINTMENT orders never dispatch. Express orders jump the
+    // dispatch queue (lower number = higher BullMQ priority).
     if (order.fulfillment === 'DELIVERY' && app.dispatchQueue) {
       await app.dispatchQueue.add('dispatch-order', { orderId: order.id }, {
+        priority: order.isExpress ? 1 : 10,
         removeOnComplete: 100,
         removeOnFail: 50,
       });

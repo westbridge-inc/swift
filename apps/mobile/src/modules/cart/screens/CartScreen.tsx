@@ -35,6 +35,7 @@ import {
   Screen,
   T,
 } from '../../../kit';
+import { BrandSwitch } from '../../../kit/controls';
 
 const GUTTER = space['2xl'];
 const TIP_PRESETS = [0, 200, 500, 1000];
@@ -59,6 +60,7 @@ export function CartScreen() {
   const [promoMsg, setPromoMsg] = useState<{ ok: boolean; text: string } | null>(null);
   const [promoPopup, setPromoPopup] = useState(false);
   const [instructions, setInstructions] = useState('');
+  const [express, setExpress] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
   const [placedOrderId, setPlacedOrderId] = useState<string | null>(null);
 
@@ -99,6 +101,7 @@ export function CartScreen() {
     placeOrder.mutate(
       {
         paymentMethod: 'CASH',
+        ...(express ? { express: true } : {}),
         ...(instructions.trim() ? { deliveryInstructions: instructions.trim() } : {}),
       },
       {
@@ -305,16 +308,37 @@ export function CartScreen() {
             </T>
           </View>
 
+          {/* Express delivery — priority dispatch; the premium goes to the rider */}
+          {c.deliveryFee > 0 ? (
+            <Card style={{ marginTop: space.xl }}>
+              <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
+                <View style={{ flex: 1, paddingRight: space.md }}>
+                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                    <Feather name="zap" size={15} color={color.warning} />
+                    <T variant="body" weight="semibold">
+                      Express delivery
+                    </T>
+                  </View>
+                  <T variant="caption" tone="muted" style={{ marginTop: 2 }}>
+                    Jumps the dispatch queue · +{money(Math.round(c.deliveryFee * 0.5))} — all of it goes to your rider.
+                  </T>
+                </View>
+                <BrandSwitch value={express} onChange={() => setExpress((v) => !v)} />
+              </View>
+            </Card>
+          ) : null}
+
           {/* Order summary */}
           <Card style={{ marginTop: space.xl }}>
             <T variant="heading">Order Summary</T>
             <View style={{ marginTop: space.md }}>
               <InfoRow label={`Total Items (${c.itemCount})`} value={money(c.subtotalCustomer)} />
               <InfoRow label="Delivery Fee" value={c.deliveryFee === 0 ? 'Free' : money(c.deliveryFee)} />
+              {express && c.deliveryFee > 0 ? <InfoRow label="Express" value={money(Math.round(c.deliveryFee * 0.5))} /> : null}
               {c.discount > 0 ? <InfoRow label="Discount" value={`-${money(c.discount)}`} /> : null}
               {Number(c.tipAmount) > 0 ? <InfoRow label="Rider Tip" value={money(c.tipAmount)} /> : null}
               <View style={{ height: 1, backgroundColor: color.border.subtle, marginVertical: space.sm }} />
-              <InfoRow label="Total" value={money(c.totalAmount)} strong />
+              <InfoRow label="Total" value={money(c.totalAmount + (express && c.deliveryFee > 0 ? Math.round(c.deliveryFee * 0.5) : 0))} strong />
             </View>
             {c.estimatedTotalMin ? (
               <T variant="caption" tone="muted" style={{ marginTop: space.sm }}>

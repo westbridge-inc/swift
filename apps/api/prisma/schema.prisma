@@ -810,6 +810,10 @@ model Order {
   estimatedPrepTime     Int?
   estimatedDeliveryTime Int?
   actualDeliveryTime    Int?
+  /// Priority delivery (§4.2 parity with courier speed tiers): customer pays
+  /// 1.5x the delivery fee, the order dispatches ahead of standard ones, and
+  /// the whole premium goes to the rider (cash, no commission).
+  isExpress             Boolean   @default(false)
   scheduledFor          DateTime?
   placedAt              DateTime  @default(now())
   acceptedAt            DateTime?

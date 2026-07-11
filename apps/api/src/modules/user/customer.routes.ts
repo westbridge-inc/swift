@@ -89,6 +89,8 @@ const checkoutSchema = z.object({
   promoCode: z.string().max(40).optional(),
   // Per-vendor DELIVERY|PICKUP choice for multi-vendor carts
   fulfillmentSelections: z.record(z.enum(['DELIVERY', 'PICKUP'])).optional(),
+  // Priority delivery: 1.5x delivery fee, dispatched ahead of standard orders
+  express: z.boolean().optional(),
   // Requested slots for APPOINTMENT listings (booked at vendor acceptance)
   appointments: z
     .array(z.object({ itemId: z.string().min(1), slotStart: z.coerce.date() }))
@@ -1399,6 +1401,7 @@ export async function customerRoutes(app: FastifyInstance) {
       scheduledFor: body.scheduledFor,
       promoCode: body.promoCode,
       fulfillmentSelections: body.fulfillmentSelections,
+      express: body.express,
       appointments: body.appointments,
     });
 
@@ -1557,6 +1560,7 @@ export async function customerRoutes(app: FastifyInstance) {
         subtotalBase: Number(order.subtotalBase),
         subtotalCustomer: Number(order.subtotalCustomer),
         deliveryFee: Number(order.deliveryFee),
+        isExpress: order.isExpress,
         tipAmount: Number(order.tipAmount),
         discount: Number(order.discount),
         totalAmount: Number(order.totalAmount),

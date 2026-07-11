@@ -294,6 +294,8 @@ function VendorOrderCard({
             <FulfillmentTag icon="bag-personal-outline" label="Takeaway" />
           ) : isAppt ? (
             <FulfillmentTag icon="calendar-clock" label="Appointment" />
+          ) : order.isExpress ? (
+            <FulfillmentTag icon="lightning-bolt" label="Express" />
           ) : null}
         </View>
         <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.sm }}>

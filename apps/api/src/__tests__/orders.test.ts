@@ -327,6 +327,45 @@ describe('Checkout — ID gate, multi-vendor split, fulfillment', () => {
     expect(order.pickupCode).toMatch(/^\d{6}$/);
   });
 
+  it('express charges exactly 1.5x the delivery fee and flags the order — pickup ignores it', async () => {
+    // Baseline: the same cart at standard speed
+    await addToCart(customer.token, restaurant.vendorId, burgerId, 1);
+    const std = await inject('POST', '/api/v1/customer/checkout', { paymentMethod: 'CASH' }, customer.token);
+    expect(std.statusCode).toBe(200);
+    const stdOrder = std.json().data.order ?? std.json().data.orders[0];
+    createdOrderIds.push(stdOrder.id);
+    const stdFee = Number(stdOrder.deliveryFee);
+    expect(stdFee).toBeGreaterThan(0);
+    expect(stdOrder.isExpress).toBe(false);
+
+    // Express: same route, 1.5x fee, flag persisted, premium in the total
+    await addToCart(customer.token, restaurant.vendorId, burgerId, 1);
+    const exp = await inject('POST', '/api/v1/customer/checkout', { paymentMethod: 'CASH', express: true }, customer.token);
+    expect(exp.statusCode).toBe(200);
+    const expOrder = exp.json().data.order ?? exp.json().data.orders[0];
+    createdOrderIds.push(expOrder.id);
+    expect(Number(expOrder.deliveryFee)).toBe(Math.round(stdFee * 1.5));
+    expect(expOrder.isExpress).toBe(true);
+
+    const db = await app.prisma.order.findUniqueOrThrow({ where: { id: expOrder.id } });
+    expect(db.isExpress).toBe(true);
+    expect(Number(db.totalAmount)).toBe(Number(db.subtotalBase) + Math.round(stdFee * 1.5));
+
+    // Express is meaningless for pickup — no fee, no flag
+    await addToCart(customer.token, supermarket.vendorId, riceId, 1);
+    const pick = await inject('POST', '/api/v1/customer/checkout', {
+      paymentMethod: 'CASH',
+      express: true,
+      fulfillmentSelections: { [supermarket.vendorId]: 'PICKUP' },
+    }, customer.token);
+    expect(pick.statusCode).toBe(200);
+    const pickOrder = pick.json().data.order;
+    createdOrderIds.push(pickOrder.id);
+    expect(pickOrder.deliveryFee).toBe(0);
+    const pdb = await app.prisma.order.findUniqueOrThrow({ where: { id: pickOrder.id } });
+    expect(pdb.isExpress).toBe(false);
+  });
+
   describe('Takeaway — pickup completion (no rider)', () => {
     async function makePickupOrder(status: OrderStatus, pickupCode: string | null) {
       const order = await app.prisma.order.create({

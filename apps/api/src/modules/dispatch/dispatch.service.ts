@@ -150,7 +150,7 @@ export class DispatchService {
       where: { id: orderId },
       select: {
         id: true, status: true, riderId: true, driverId: true, orderType: true,
-        fulfillment: true, orderNumber: true, rideClass: true,
+        fulfillment: true, orderNumber: true, rideClass: true, isExpress: true,
         customerId: true, pickupLat: true, pickupLng: true,
         subtotalBase: true, paymentMethod: true,
         vendor: { select: { name: true, owner: { select: { userId: true } } } },
@@ -195,6 +195,8 @@ export class DispatchService {
       orderId,
       orderNumber: order.orderNumber,
       vendorName: order.vendor?.name,
+      // Express = bigger fee for the mover; badge it so they know why.
+      isExpress: order.isExpress,
       expiresInSeconds: OFFER_TIMEOUT_SECONDS,
       etaMinutes: Math.round(top.etaMinutes),
     });
