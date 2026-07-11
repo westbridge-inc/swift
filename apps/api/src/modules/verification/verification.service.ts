@@ -45,6 +45,15 @@ export interface InsuranceReview {
 
 const REMINDER_WINDOW_DAYS = 30;
 
+/** Which app surface a document notification belongs to: operator docs go to
+ *  the driver/business surface, never the shopping feed; L2 identity is the
+ *  customer's own. */
+function audienceForRole(role: string): 'customer' | 'earner' | 'business' {
+  if (role === 'MOVER') return 'earner';
+  if (role === 'CUSTOMER') return 'customer';
+  return 'business';
+}
+
 export class VerificationService {
   private countryConfig: CountryConfigService;
   private subscriptions: SubscriptionService;
@@ -221,6 +230,7 @@ export class VerificationService {
       type: 'SYSTEM_ANNOUNCEMENT',
       title: 'Document approved',
       body: `Your ${doc.docType.replace(/_/g, ' ')} has been approved.`,
+      audience: audienceForRole(doc.role),
       data: { kind: 'verification_approved', docId },
     });
 
@@ -438,6 +448,7 @@ export class VerificationService {
         type: 'SYSTEM_ANNOUNCEMENT',
         title: 'Document expired',
         body: `Your ${doc.docType.replace(/_/g, ' ')} has expired. Upload a new one to keep operating.`,
+        audience: audienceForRole(doc.role),
         data: { kind: 'verification_expired', docId: doc.id },
       });
     }
@@ -469,6 +480,7 @@ export class VerificationService {
         type: 'SYSTEM_ANNOUNCEMENT',
         title: 'Document expiring soon',
         body: `Your ${doc.docType.replace(/_/g, ' ')} expires on ${doc.expiresAt!.toISOString().slice(0, 10)}. Renew it to avoid suspension.`,
+        audience: audienceForRole(doc.role),
         data: { kind: 'verification_expiry_reminder', docId: doc.id },
       });
       sent += 1;
@@ -540,6 +552,7 @@ export class VerificationService {
       type: 'SYSTEM_ANNOUNCEMENT',
       title: 'Identity verified',
       body: 'You are now ID-verified and can place orders of any size.',
+      audience: 'customer',
       data: { kind: 'verification_l2' },
     });
   }
@@ -612,6 +625,7 @@ export class VerificationService {
       type: 'SYSTEM_ANNOUNCEMENT',
       title: 'You have been taken offline',
       body: 'A required document has expired, so you can no longer take jobs. Renew it to go back online.',
+      audience: 'earner',
       data: { kind: 'verification_forced_offline' },
     });
   }

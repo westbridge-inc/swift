@@ -30,7 +30,12 @@ export function NotificationsScreen() {
   const all: any[] = Array.isArray(notifications.data)
     ? notifications.data
     : (notifications.data?.notifications ?? []);
-  const rows = all.filter((n) => !EARNER_KINDS.has(n?.data?.kind));
+  // Server-tagged audience wins; the kind deny-list covers legacy rows.
+  const rows = all.filter((n) => {
+    const audience = n?.data?.audience;
+    if (audience) return audience === 'customer';
+    return !EARNER_KINDS.has(n?.data?.kind);
+  });
 
   return (
     <Screen>

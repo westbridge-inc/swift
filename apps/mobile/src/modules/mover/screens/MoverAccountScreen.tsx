@@ -9,11 +9,13 @@ import { Card, Header, LinkText, PillButton, Screen, SettingsRow, T, TonePill } 
 import { Stars } from '../../../kit/controls';
 import { useMoverKind, useVerificationStatus, useEarningsSummary, useMoverSubscription, useUploadVehiclePhoto } from '../../../hooks';
 import { useAuthStore } from '../../../stores/authStore';
+import { RoleSwitcherSheet } from '../../../components/RoleSwitcherSheet';
 import { money } from '../../../lib/money';
 import { mediaUrl } from '../../../lib/images';
 
 export function MoverAccountScreen({ navigation }: any) {
   const { user, logout } = useAuthStore();
+  const [switcherOpen, setSwitcherOpen] = React.useState(false);
   const { kind, profile } = useMoverKind();
   const verified = (useVerificationStatus<any>('MOVER').data as any)?.roleVerified;
   const summaryQ = useEarningsSummary<any>(kind);
@@ -130,10 +132,7 @@ export function MoverAccountScreen({ navigation }: any) {
             sub={sub ? `${money(sub.customRate ?? sub.weeklyRate)}/week` : 'Not active yet'}
             right={<TonePill label={subPill.label} tone={subPill.tone} />}
           />
-          {/* RolePicker lives in the ROOT navigator (only mounted when intent
-              is unset) — clearing the intent swaps the whole surface; a
-              navigate('RolePicker') from inside this stack cannot resolve. */}
-          <SettingsRow icon="refresh-cw" label="Switch how you use Swift" sub="Order as a customer, sell as a business" onPress={() => useAuthStore.getState().setIntent(null)} />
+          <SettingsRow icon="refresh-cw" label="Switch app" sub="Swift · Swift Business" onPress={() => setSwitcherOpen(true)} />
         </Card>
 
         {/* The model */}
@@ -151,6 +150,8 @@ export function MoverAccountScreen({ navigation }: any) {
 
         <PillButton label="Log out" variant="outline" style={{ marginTop: space.xl }} onPress={logout} />
       </ScrollView>
+
+      <RoleSwitcherSheet visible={switcherOpen} current="mover" onClose={() => setSwitcherOpen(false)} />
     </Screen>
   );
 }

@@ -465,6 +465,7 @@ describe('Expiry automation', () => {
       where: { userId: vendorUserId, title: 'Document expired' },
     });
     expect(note).not.toBeNull();
+    expect((note!.data as any)?.audience).toBe('business');
   });
 
   it('sends exactly one 30-day reminder per expiring document', async () => {
@@ -946,6 +947,9 @@ describe('Lapsed documents force movers offline (daily sweep)', () => {
       where: { userId: taxi.id, title: 'You have been taken offline' },
     });
     expect(note).not.toBeNull();
+    // Role separation: operator alerts are tagged for the driver surface,
+    // so a multi-role account never sees them in the shopping feed.
+    expect((note!.data as any)?.audience).toBe('earner');
   });
 
   it('an online courier is pulled offline when their police clearance lapses — others untouched', async () => {

@@ -253,7 +253,7 @@ export function MoverHomeScreen({ navigation }: any) {
         <View style={[{ flexDirection: 'row', alignItems: 'center', gap: space.sm, borderRadius: 9999, backgroundColor: color.surface.base, paddingHorizontal: space.md, height: 36 }, cardShadow]}>
           <View style={{ width: 9, height: 9, borderRadius: 5, backgroundColor: online ? color.success : color.text.muted }} />
           <T variant="label" weight="bold">
-            {isDriver ? 'Driver' : 'Rider'}
+            {isDriver ? 'Swift Driver' : 'Swift Rider'}
           </T>
         </View>
         <Pressable onPress={() => navigation?.navigate?.('Account')} hitSlop={8}>

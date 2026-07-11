@@ -88,6 +88,7 @@ import { useAuthStore } from '../../stores/authStore';
 import { track } from '../../lib/analytics';
 import { useLocationStore } from '../../stores/locationStore';
 import { useStoreSwitcher } from '../../stores/storeSwitcher';
+import { RoleSwitcherSheet } from '../../components/RoleSwitcherSheet';
 import { money } from '../../lib/money';
 import { mediaUrl } from '../../lib/images';
 import { VendorBulkImportScreen } from '../../screens/vendor/VendorBulkImportScreen';
@@ -172,9 +173,14 @@ function TabHeader({ title }: { title: string }) {
         height: 56,
       }}
     >
-      <T variant="title" numberOfLines={1} style={{ flex: 1, paddingRight: space.md }}>
-        {title}
-      </T>
+      <View style={{ flex: 1, paddingRight: space.md }}>
+        <T variant="caption" weight="bold" tone="brand" style={{ letterSpacing: 1.5 }}>
+          SWIFT BUSINESS
+        </T>
+        <T variant="title" numberOfLines={1}>
+          {title}
+        </T>
+      </View>
       <LinkText label="Log out" tone="muted" onPress={logout} />
     </View>
   );
@@ -1839,6 +1845,7 @@ function VendorInsightsScreen() {
 
 function VendorAccountScreen() {
   const { store, myRole } = useVendorProfile();
+  const [switcherOpen, setSwitcherOpen] = useState(false);
   const isOwner = myRole === 'OWNER';
   const isManager = myRole !== 'STAFF';
   const sub = useVendorSubscription(isOwner);
@@ -1882,6 +1889,10 @@ function VendorAccountScreen() {
               {store?.city ? ` · ${store.city}` : ''}
             </T>
           </View>
+        </Card>
+
+        <Card style={{ marginBottom: space.lg, paddingVertical: space.sm }}>
+          <SettingsRow icon="refresh-cw" label="Switch app" sub="Swift · Swift Driver" onPress={() => setSwitcherOpen(true)} />
         </Card>
 
         {isOwner ? <SubscriptionCard sub={sub.data} phone={store?.phone} /> : null}
@@ -1962,6 +1973,8 @@ function VendorAccountScreen() {
           </>
         ) : null}
       </ScrollView>
+
+      <RoleSwitcherSheet visible={switcherOpen} current="vendor" onClose={() => setSwitcherOpen(false)} />
     </Screen>
   );
 }

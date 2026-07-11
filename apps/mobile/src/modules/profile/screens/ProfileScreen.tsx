@@ -8,6 +8,7 @@ import { color, space } from '@swift/ui';
 import { useProfile } from '../../../hooks/customer';
 import { useAuthStore } from '../../../stores/authStore';
 import { EmptyState, IconChip, PillButton, PopupCard, Screen, SettingsRow, T } from '../../../kit';
+import { RoleSwitcherSheet } from '../../../components/RoleSwitcherSheet';
 
 const GUTTER = space['2xl'];
 
@@ -16,9 +17,10 @@ const GUTTER = space['2xl'];
 // Mode") is omitted — the app ships light-only.
 export function ProfileScreen() {
   const navigation = useNavigation<any>();
-  const { isAuthenticated, promptLogin, logout, user, setIntent } = useAuthStore();
+  const { isAuthenticated, promptLogin, logout, user } = useAuthStore();
   const profile = useProfile<any>();
   const [confirmLogout, setConfirmLogout] = useState(false);
+  const [switcherOpen, setSwitcherOpen] = useState(false);
 
   if (!isAuthenticated) {
     return (
@@ -129,9 +131,9 @@ export function ProfileScreen() {
           <SettingsRow icon="phone" label="Contact Us" onPress={() => navigation.navigate('ContactUs')} />
           <SettingsRow
             icon="refresh-ccw"
-            label="Switch how you use Swift"
-            sub="Order · Earn · Sell"
-            onPress={() => setIntent(null)}
+            label="Switch app"
+            sub="Swift Driver · Swift Business"
+            onPress={() => setSwitcherOpen(true)}
           />
         </View>
 
@@ -165,6 +167,8 @@ export function ProfileScreen() {
           <PillButton label="Stay signed in" variant="soft" size="md" onPress={() => setConfirmLogout(false)} />
         </View>
       </PopupCard>
+
+      <RoleSwitcherSheet visible={switcherOpen} current="customer" onClose={() => setSwitcherOpen(false)} />
     </Screen>
   );
 }

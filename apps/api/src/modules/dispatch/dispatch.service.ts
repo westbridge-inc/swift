@@ -341,6 +341,7 @@ export class DispatchService {
       type: 'SYSTEM_ANNOUNCEMENT',
       title: 'No movers available right now',
       body: `We could not find a mover for order ${order.orderNumber}. ${order.vendor?.name ?? 'The vendor'} can hold it or cancel — we will keep you posted.`,
+      audience: 'customer',
       data: { kind: 'dispatch_exhausted', orderId: order.id },
     });
     if (order.vendor) {
@@ -349,6 +350,7 @@ export class DispatchService {
         type: 'SYSTEM_ANNOUNCEMENT',
         title: 'No movers available',
         body: `No mover accepted order ${order.orderNumber}. You can hold it and retry, or cancel it.`,
+        audience: 'business',
         data: { kind: 'dispatch_exhausted', orderId: order.id },
       });
     }

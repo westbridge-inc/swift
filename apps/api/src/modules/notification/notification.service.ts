@@ -32,11 +32,19 @@ type NotificationType =
   | 'CHAT_MESSAGE'
   | 'LOW_STOCK';
 
+/** Which app-within-the-app a notification belongs to. One ACCOUNT spans
+ *  roles, but SURFACES are role-scoped: the shopping app must not feed a
+ *  driver's operator alerts. Untagged = legacy rows; clients fall back to a
+ *  kind deny-list for those. */
+export type NotificationAudience = 'customer' | 'earner' | 'business';
+
 interface NotificationPayload {
   userId: string;
   type: NotificationType;
   title: string;
   body: string;
+  /** Surface this belongs to — merged into data.audience. */
+  audience?: NotificationAudience;
   data?: Record<string, unknown>;
 }
 
@@ -102,6 +110,8 @@ export class NotificationService {
   ) {}
 
   async send(payload: NotificationPayload): Promise<string> {
+    const data = payload.audience ? { ...(payload.data ?? {}), audience: payload.audience } : payload.data;
+
     // Persist to DB
     const notification = await this.prisma.notification.create({
       data: {
@@ -109,7 +119,7 @@ export class NotificationService {
         type: payload.type,
         title: payload.title,
         body: payload.body,
-        data: (payload.data ?? undefined) as any,
+        data: (data ?? undefined) as any,
       },
     });
 
@@ -119,7 +129,7 @@ export class NotificationService {
       type: payload.type,
       title: payload.title,
       body: payload.body,
-      data: payload.data,
+      data,
       createdAt: notification.createdAt,
     });
 
