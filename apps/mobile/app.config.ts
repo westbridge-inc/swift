@@ -61,6 +61,7 @@ const config: ExpoConfig = {
   plugins: [
     'expo-font',
     'expo-splash-screen',
+    ['expo-notifications', { color: '#803B3B' }],
     'react-native-maps',
     'expo-image',
     'expo-secure-store',

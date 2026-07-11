@@ -4,6 +4,7 @@ import { NavigationContainer } from '@react-navigation/native';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
 import { useAuthStore } from '../stores/authStore';
 import { useAppStore } from '../stores/appStore';
+import { registerDeviceForPush } from '../services/push';
 import { OnboardingScreen } from '../modules/onboarding/OnboardingScreen';
 import { CountryPickerScreen } from '../screens/auth/CountryPickerScreen';
 import { RolePickerScreen } from '../screens/auth/RolePickerScreen';
@@ -34,6 +35,12 @@ function mainForIntent(intent?: string | null) {
 export function RootNavigator() {
   const { isAuthenticated, wantsAuth, intent, countryCode, user } = useAuthStore();
   const hasOnboarded = useAppStore((s) => s.hasOnboarded);
+
+  // Push registration follows the session (config-gated no-op until the EAS
+  // project id ships — see services/push.ts).
+  React.useEffect(() => {
+    if (isAuthenticated) void registerDeviceForPush();
+  }, [isAuthenticated]);
 
   // Earners (mover/vendor) must be signed in before their stack. Customers
   // browse freely and only authenticate when an action (checkout) asks via

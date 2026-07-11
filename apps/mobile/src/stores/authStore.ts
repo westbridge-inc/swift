@@ -84,6 +84,9 @@ export const useAuthStore = create<AuthState>()(
       // device must not show the next user this user's orders/addresses) and the
       // socket (authed with the old token; the next session reconnects fresh).
       logout: () => {
+        // Deactivate this device's push token BEFORE the token-bearing session
+        // dies (the DELETE needs auth); best-effort and config-gated inside.
+        void import('../services/push').then((m) => m.unregisterDeviceForPush());
         set({ user: null, accessToken: null, refreshToken: null, isAuthenticated: false });
         queryClient.clear();
         // Lazy import: socket.ts reads this store, so a static import here
