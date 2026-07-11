@@ -1818,6 +1818,71 @@ export async function vendorRoutes(app: FastifyInstance) {
     };
   });
 
+  /** GET /analytics/ops — Operational quality over a window: how fast orders
+   *  are accepted, how honest the prep quote is, and how often orders die.
+   *  Everything derives from real order timestamps — no synthetic numbers. */
+  app.get('/analytics/ops', auth, async (request) => {
+    const { vendorId } = await requireVendor(app, request, 'MANAGER');
+    const { days } = revenueQuerySchema.parse(request.query);
+
+    const since = new Date();
+    since.setDate(since.getDate() - days);
+    since.setHours(0, 0, 0, 0);
+
+    const orders = await app.prisma.order.findMany({
+      where: { vendorId, placedAt: { gte: since } },
+      select: {
+        status: true,
+        placedAt: true,
+        acceptedAt: true,
+        readyAt: true,
+        estimatedPrepTime: true,
+        cancelledBy: true,
+      },
+    });
+
+    const placed = orders.length;
+    const accepted = orders.filter((o) => o.acceptedAt);
+    const cancelled = orders.filter((o) => o.status === 'CANCELLED' || o.status === 'REFUNDED');
+    const vendorCancelled = cancelled.filter((o) => (o.cancelledBy ?? '').toUpperCase().includes('VENDOR'));
+    // Acceptance is judged on DECIDED orders (accepted, or killed by the
+    // store) — customer cancellations before acceptance are not held against
+    // the vendor.
+    const decided = accepted.length + vendorCancelled.length;
+
+    const avgMinutes = (pairs: Array<[Date, Date]>) =>
+      pairs.length
+        ? pairs.reduce((sum, [a, b]) => sum + (b.getTime() - a.getTime()) / 60000, 0) / pairs.length
+        : null;
+
+    const acceptPairs = accepted
+      .filter((o) => o.acceptedAt! >= o.placedAt)
+      .map((o) => [o.placedAt, o.acceptedAt!] as [Date, Date]);
+    const prepPairs = orders
+      .filter((o) => o.acceptedAt && o.readyAt && o.readyAt >= o.acceptedAt)
+      .map((o) => [o.acceptedAt!, o.readyAt!] as [Date, Date]);
+    const quoted = orders.filter((o) => o.acceptedAt && o.readyAt && o.estimatedPrepTime != null);
+    const avgQuotedPrep = quoted.length
+      ? quoted.reduce((s, o) => s + (o.estimatedPrepTime ?? 0), 0) / quoted.length
+      : null;
+
+    const round1 = (n: number | null) => (n == null ? null : Math.round(n * 10) / 10);
+
+    return {
+      success: true,
+      data: {
+        days,
+        placedOrders: placed,
+        acceptanceRate: decided ? Math.round((accepted.length / decided) * 100) : null,
+        cancellationRate: placed ? Math.round((cancelled.length / placed) * 100) : null,
+        vendorCancellations: vendorCancelled.length,
+        avgAcceptMinutes: round1(avgMinutes(acceptPairs)),
+        avgPrepMinutes: round1(avgMinutes(prepPairs)),
+        avgQuotedPrepMinutes: round1(avgQuotedPrep),
+      },
+    };
+  });
+
   /** GET /analytics/revenue — Daily revenue breakdown for the last 30 days */
   app.get('/analytics/revenue', auth, async (request) => {
     const { vendorId } = await requireVendor(app, request, 'MANAGER');

@@ -77,6 +77,7 @@ import {
   useVendorSubscription,
   useVendorAnalytics,
   useVendorRevenue,
+  useVendorOps,
   usePopularItems,
   useBusyHours,
   useVendorHours,
@@ -1664,6 +1665,49 @@ function RatingsCard() {
   );
 }
 
+/**
+ * Operational quality (Eats-Manager style): how fast the store answers, how
+ * honest its prep quote is, and how often orders die. All real timestamps
+ * from /vendor/analytics/ops — rows hide (not zero-fill) when there's no data.
+ */
+function OpsCard({ ops, period }: { ops: any; period: number }) {
+  if (!ops || !ops.placedOrders) return null;
+  const prepDelta =
+    ops.avgPrepMinutes != null && ops.avgQuotedPrepMinutes != null
+      ? Math.round((ops.avgPrepMinutes - ops.avgQuotedPrepMinutes) * 10) / 10
+      : null;
+  return (
+    <Card style={{ marginBottom: space.lg }}>
+      <T variant="body" weight="bold">
+        Operations · {period}d
+      </T>
+      <View style={{ flexDirection: 'row', gap: space.md, marginTop: space.md }}>
+        {ops.acceptanceRate != null ? (
+          <KpiTile icon="check-circle-outline" value={`${ops.acceptanceRate}%`} label="Acceptance" />
+        ) : null}
+        {ops.cancellationRate != null ? (
+          <KpiTile icon="close-circle-outline" value={`${ops.cancellationRate}%`} label="Cancelled" />
+        ) : null}
+        {ops.avgAcceptMinutes != null ? (
+          <KpiTile icon="timer-sand" value={`${ops.avgAcceptMinutes}m`} label="To accept" />
+        ) : null}
+      </View>
+      {ops.avgPrepMinutes != null ? (
+        <T variant="caption" tone="muted" style={{ marginTop: space.md }}>
+          Prep runs ~{ops.avgPrepMinutes} min
+          {ops.avgQuotedPrepMinutes != null ? ` against a ~${ops.avgQuotedPrepMinutes} min quote` : ''}
+          {prepDelta != null && prepDelta > 2 ? ' — quote a little more time so customers aren’t kept waiting.' : '.'}
+        </T>
+      ) : null}
+      {ops.vendorCancellations > 0 ? (
+        <T variant="caption" tone="muted" style={{ marginTop: 4 }}>
+          {ops.vendorCancellations} cancelled by the store — keep stock and hours current to protect your rating.
+        </T>
+      ) : null}
+    </Card>
+  );
+}
+
 const PERIODS = [7, 30, 90] as const;
 
 /** Sum a window off the endpoint's own daily series (dates ascending). */
@@ -1681,6 +1725,7 @@ function VendorInsightsScreen() {
   // real series (90 is the endpoint's max — no prior window at that depth).
   const [period, setPeriod] = useState<(typeof PERIODS)[number]>(7);
   const revenueQ = useVendorRevenue(period === 90 ? 90 : period * 2);
+  const opsQ = useVendorOps(period);
   const popularQ = usePopularItems(8);
   const a: any = q.data ?? {};
   const v: any = a.vendor ?? {};
@@ -1756,6 +1801,8 @@ function VendorInsightsScreen() {
             ) : (
               <View style={{ marginBottom: space.lg }} />
             )}
+
+            <OpsCard ops={opsQ.data} period={period} />
 
             {popularQ.data ? <TopItemsCard items={popularQ.data} /> : null}
             <BusyHoursCard />

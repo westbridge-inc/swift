@@ -318,6 +318,14 @@ export function useVendorRevenue(days = 14) {
   });
 }
 
+/** Operational quality: acceptance/cancellation rates + accept/prep timing. */
+export function useVendorOps(days = 30) {
+  return useQuery({
+    queryKey: ['vendor', 'analytics', 'ops', days],
+    queryFn: () => unwrap<any>(vendorApi.analyticsOps(days)),
+  });
+}
+
 /** Orders by local hour (last 30 days) — the §4.1 busy-hours view. */
 export function useBusyHours() {
   return useQuery({

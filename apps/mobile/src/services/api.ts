@@ -372,6 +372,7 @@ export const vendorApi = {
   // Insights / settings
   analytics: () => api.get('/vendor/analytics/overview'),
   analyticsRevenue: (days = 14) => api.get('/vendor/analytics/revenue', { params: { days } }),
+  analyticsOps: (days = 30) => api.get('/vendor/analytics/ops', { params: { days } }),
   analyticsPopularItems: (limit = 8) => api.get('/vendor/analytics/popular-items', { params: { limit } }),
   analyticsBusyHours: () => api.get('/vendor/analytics/busy-hours'),
   hours: () => api.get('/vendor/hours'),
