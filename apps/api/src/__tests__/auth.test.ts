@@ -210,6 +210,49 @@ describe('Auth Routes', () => {
   });
 
   // -----------------------------------------------------------------------
+  // Sensitive fields never leave the API on a user object
+  // -----------------------------------------------------------------------
+
+  describe('User serialization', () => {
+    const SENSITIVE = ['passwordHash', 'failedLoginAttempts', 'lockedUntil', 'lastKnownLat', 'lastKnownLng'];
+
+    it('login response carries no credential or lockout internals', async () => {
+      const res = await loginWithOtp(app, '+5926002000');
+      const user = res.json().data.user;
+      expect(user).toBeDefined();
+      for (const field of SENSITIVE) {
+        expect(user, `user.${field} must not be serialized`).not.toHaveProperty(field);
+      }
+      // The shape the app routes on is intact
+      expect(user.roles).toBeDefined();
+    });
+
+    it('registration response carries no credential or lockout internals', async () => {
+      const phone = '+5929998866';
+      try {
+        await loginWithOtp(app, phone);
+        const res = await inject('POST', '/api/v1/auth/register', {
+          phone,
+          firstName: 'Sanitize',
+          lastName: 'Check',
+        });
+        expect(res.statusCode).toBe(201);
+        const user = res.json().data.user;
+        for (const field of SENSITIVE) {
+          expect(user, `user.${field} must not be serialized`).not.toHaveProperty(field);
+        }
+      } finally {
+        const u = await app.prisma.user.findUnique({ where: { phone } });
+        if (u) {
+          await app.prisma.session.deleteMany({ where: { userId: u.id } });
+          await app.prisma.customer.deleteMany({ where: { userId: u.id } });
+          await app.prisma.user.delete({ where: { id: u.id } });
+        }
+      }
+    });
+  });
+
+  // -----------------------------------------------------------------------
   // POST /api/v1/auth/refresh
   // -----------------------------------------------------------------------
 

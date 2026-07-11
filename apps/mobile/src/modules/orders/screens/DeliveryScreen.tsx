@@ -148,9 +148,13 @@ export function DeliveryScreen() {
 
   const vendorPos = o?.vendor?.latitude != null ? { latitude: o.vendor.latitude, longitude: o.vendor.longitude } : null;
   const dropPos = o?.deliveryLat != null ? { latitude: o.deliveryLat, longitude: o.deliveryLng } : null;
+  // REST last-known position seeds the marker instantly on open/reconnect;
+  // the live socket stream overrides it from the first event.
+  const courierPos =
+    courier ?? (o?.rider?.currentLat != null ? { latitude: Number(o.rider.currentLat), longitude: Number(o.rider.currentLng) } : null);
 
   const fitMap = () => {
-    const pts = [vendorPos, dropPos, courier].filter(Boolean) as { latitude: number; longitude: number }[];
+    const pts = [vendorPos, dropPos, courierPos].filter(Boolean) as { latitude: number; longitude: number }[];
     if (pts.length < 2 || !mapRef.current) return;
     mapRef.current.fitToCoordinates(pts, {
       edgePadding: { top: 90, bottom: 60, left: 60, right: 60 },
@@ -158,7 +162,7 @@ export function DeliveryScreen() {
     });
   };
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  useEffect(fitMap, [!!vendorPos, !!dropPos, !!courier]);
+  useEffect(fitMap, [!!vendorPos, !!dropPos, !!courierPos]);
 
   if (order.isLoading) return <LoadingBlock style={{ backgroundColor: color.surface.subtle }} />;
   if (order.isError || !o) {
@@ -224,8 +228,8 @@ export function DeliveryScreen() {
               </View>
             </Marker>
           ) : null}
-          {courier ? (
-            <Marker coordinate={courier} title="Your rider">
+          {courierPos ? (
+            <Marker coordinate={courierPos} title="Your rider">
               <View
                 style={{
                   width: 38,
@@ -244,7 +248,7 @@ export function DeliveryScreen() {
           ) : null}
           {vendorPos && dropPos ? (
             <Polyline
-              coordinates={courier ? [vendorPos, courier, dropPos] : [vendorPos, dropPos]}
+              coordinates={courierPos ? [vendorPos, courierPos, dropPos] : [vendorPos, dropPos]}
               strokeColor={color.brand[500]}
               strokeWidth={4}
               lineDashPattern={[1, 6]}

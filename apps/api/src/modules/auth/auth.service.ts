@@ -24,6 +24,25 @@ const OTP_VERIFIED_TTL = 600; // 10 min window between verify-otp and register
 const MAX_FAILED_LOGINS = 5;
 const LOCKOUT_MINUTES = 15;
 
+/** Fields that must never leave the API on a user object. A deny-list (not a
+ *  select) so the response keeps its shape — the app reads roles and the
+ *  rider/driver/vendorOwner includes to route the account to its surface. */
+const SENSITIVE_USER_FIELDS = [
+  'passwordHash',
+  'failedLoginAttempts',
+  'lockedUntil',
+  'lastKnownLat',
+  'lastKnownLng',
+] as const;
+
+export function sanitizeUser<T extends Record<string, unknown>>(
+  user: T,
+): Omit<T, (typeof SENSITIVE_USER_FIELDS)[number]> {
+  const copy: Record<string, unknown> = { ...user };
+  for (const field of SENSITIVE_USER_FIELDS) delete copy[field];
+  return copy as Omit<T, (typeof SENSITIVE_USER_FIELDS)[number]>;
+}
+
 export class AuthService {
   private countryConfig: CountryConfigService;
   private channels = getChannels();
@@ -102,7 +121,7 @@ export class AuthService {
       data: { lastActiveAt: new Date(), isPhoneVerified: true },
     });
 
-    return { isNewUser: false, user, tokens };
+    return { isNewUser: false, user: sanitizeUser(user), tokens };
   }
 
   async register(data: {
@@ -177,7 +196,7 @@ export class AuthService {
     // Role-specific onboarding stub — verification itself comes later.
     const onboarding = await this.buildOnboarding(signupRole, countryCode);
 
-    return { user, tokens, onboarding };
+    return { user: sanitizeUser(user), tokens, onboarding };
   }
 
   /** What the client should do next after signup (stub until verification). */
@@ -247,7 +266,7 @@ export class AuthService {
     });
 
     const tokens = await this.createSession(user.id, user.activeRole, deviceInfo);
-    return { user, tokens };
+    return { user: sanitizeUser(user), tokens };
   }
 
   /** Reset = prove phone ownership again via OTP, then rotate everything. */

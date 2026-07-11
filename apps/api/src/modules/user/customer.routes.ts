@@ -1583,6 +1583,10 @@ export async function customerRoutes(app: FastifyInstance) {
           vehicleColor: order.rider.vehicleColor,
           licensePlate: order.rider.licensePlate,
           vehiclePhotoUrl: order.rider.vehiclePhotoUrl,
+          // Last-known position seeds the tracking marker instantly; the
+          // socket stream (rider:location) takes over from the first event.
+          currentLat: order.rider.currentLat,
+          currentLng: order.rider.currentLng,
         } : null,
         timeline,
         placedAt: order.placedAt,

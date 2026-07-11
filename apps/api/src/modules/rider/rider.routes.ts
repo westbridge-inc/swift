@@ -1006,7 +1006,9 @@ export async function riderRoutes(app: FastifyInstance) {
 
     const sub = rider.subscription;
     const now = new Date();
-    const isActive = sub.status === 'ACTIVE' && sub.currentPeriodEnd > now;
+    // Mirrors the go-online gate: a trial or grace-window subscription IS
+    // operating — showing it "inactive" contradicted the switch that works.
+    const isActive = ['TRIAL', 'ACTIVE', 'PAST_DUE'].includes(sub.status) && sub.currentPeriodEnd > now;
 
     return {
       success: true,

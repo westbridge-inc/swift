@@ -1,6 +1,6 @@
 /** @jsxImportSource react */
-import React, { useMemo, useRef, useState } from 'react';
-import { Linking, Pressable, View, useWindowDimensions } from 'react-native';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
+import { Linking, Pressable, Share, View, useWindowDimensions } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import MapView, { Marker, PROVIDER_DEFAULT, Polyline } from 'react-native-maps';
 import BottomSheet, { BottomSheetView, BottomSheetScrollView } from '@gorhom/bottom-sheet';
@@ -8,6 +8,7 @@ import { Image } from 'expo-image';
 import { Feather, MaterialCommunityIcons } from '@expo/vector-icons';
 import { color, radius, space } from '@swift/ui';
 import { useActiveRide, useRideEstimate, useRequestRide, useCancelRide } from '../../../hooks';
+import { connectSocket, getSocket, subscribeToOrder } from '../../../services/socket';
 import { useLocationStore } from '../../../stores/locationStore';
 import { GEORGETOWN } from '../../../hooks/useDeviceLocation';
 import { money } from '../../../lib/money';
@@ -376,13 +377,51 @@ function ActiveRide({ navigation, ride, cancelRide, insets }: any) {
   const { height: winH } = useWindowDimensions();
   const sheetRef = useRef<BottomSheet>(null);
   const [confirmCancel, setConfirmCancel] = useState(false);
+  const [liveDriver, setLiveDriver] = useState<LatLng | null>(null);
   const d = ride.driver;
+
+  // Live driver position: taxi rides are orders, so the order room streams
+  // `driver:location` straight from the driver's GPS uploads. The REST
+  // snapshot (driver.currentLat) seeds the marker until the first event.
+  useEffect(() => {
+    if (!ride?.id) return;
+    connectSocket();
+    subscribeToOrder(ride.id);
+    const s = getSocket();
+    const onDriver = (p: any) => {
+      if (p?.latitude != null && p?.longitude != null) {
+        setLiveDriver({ latitude: Number(p.latitude), longitude: Number(p.longitude) });
+      }
+    };
+    s.on('driver:location', onDriver);
+    return () => {
+      s.off('driver:location', onDriver);
+    };
+  }, [ride?.id]);
+
   const pickup = ride.pickupLat != null ? { latitude: Number(ride.pickupLat), longitude: Number(ride.pickupLng) } : null;
   const drop =
     ride.deliveryLat != null ? { latitude: Number(ride.deliveryLat), longitude: Number(ride.deliveryLng) } : null;
-  const driverLoc = d?.currentLat != null ? { latitude: Number(d.currentLat), longitude: Number(d.currentLng) } : null;
+  const driverLoc =
+    liveDriver ?? (d?.currentLat != null ? { latitude: Number(d.currentLat), longitude: Number(d.currentLng) } : null);
   const pts = [pickup, drop, driverLoc].filter(Boolean) as LatLng[];
   const region = useMemo(() => (pts.length ? regionFor(pts) : GEORGETOWN_REGION), [ride]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const shareTrip = () => {
+    const vehicle = [d?.vehicleColor, d?.vehicleMake, d?.vehicleModel].filter(Boolean).join(' ');
+    const message = [
+      'I’m on a Swift taxi ride.',
+      d?.user?.firstName ? `Driver: ${d.user.firstName}${d?.averageRating ? ` (★${Number(d.averageRating).toFixed(1)})` : ''}` : null,
+      vehicle ? `Vehicle: ${vehicle}` : null,
+      d?.licensePlate ? `Plate: ${d.licensePlate}` : null,
+      ride.pickupAddress ? `From: ${ride.pickupAddress}` : null,
+      ride.deliveryAddress ? `To: ${ride.deliveryAddress}` : null,
+      driverLoc ? `Live position: https://maps.google.com/?q=${driverLoc.latitude.toFixed(5)},${driverLoc.longitude.toFixed(5)}` : null,
+    ]
+      .filter(Boolean)
+      .join('\n');
+    Share.share({ message }).catch(() => {});
+  };
 
   return (
     <View style={{ flex: 1, backgroundColor: color.surface.subtle }}>
@@ -431,6 +470,7 @@ function ActiveRide({ navigation, ride, cancelRide, insets }: any) {
           <T variant="label" tone="muted" style={{ marginTop: 4 }}>
             {ride.rideClass ? `${TIER_META[ride.rideClass as RideClass]?.label ?? ride.rideClass} · ` : ''}
             Fare {money(ride.taxiFareTotal ?? ride.totalAmount)} · cash
+            {ride.taxiDuration ? ` · ~${Math.round(Number(ride.taxiDuration))} min` : ''}
           </T>
           {ride.ridePin ? (
             <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.sm, marginTop: space.sm }}>
@@ -519,13 +559,23 @@ function ActiveRide({ navigation, ride, cancelRide, insets }: any) {
             </T>
           )}
 
-          <PillButton
-            label="Cancel ride"
-            variant="outline"
-            style={{ marginTop: space.xl }}
-            loading={cancelRide.isPending}
-            onPress={() => setConfirmCancel(true)}
-          />
+          {/* Safety row: let someone you trust follow the trip */}
+          <View style={{ flexDirection: 'row', gap: space.md, marginTop: space.xl }}>
+            <PillButton
+              label="Share trip"
+              variant="soft"
+              icon="share-2"
+              style={{ flex: 1 }}
+              onPress={shareTrip}
+            />
+            <PillButton
+              label="Cancel ride"
+              variant="outline"
+              style={{ flex: 1 }}
+              loading={cancelRide.isPending}
+              onPress={() => setConfirmCancel(true)}
+            />
+          </View>
         </BottomSheetView>
       </BottomSheet>
 
