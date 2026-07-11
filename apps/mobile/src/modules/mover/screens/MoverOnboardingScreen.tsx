@@ -8,6 +8,7 @@ import { SwiftMark } from '../../../components/SwiftLogo';
 import { DocumentChecklist } from '../../../components/onboarding/DocumentChecklist';
 import { useVerificationStatus, useBecomePartner } from '../../../hooks';
 import { useAuthStore } from '../../../stores/authStore';
+import { RoleSwitcherSheet } from '../../../components/RoleSwitcherSheet';
 import { GUTTER } from '../shared';
 
 type VehicleKind = 'BICYCLE' | 'MOTORCYCLE' | 'CAR';
@@ -114,6 +115,7 @@ function VehicleSetup({ vt, setVt, onDone }: { vt: VehicleKind; setVt: (v: Vehic
 
 export function MoverOnboardingScreen({ status }: { status: any }) {
   const { logout } = useAuthStore();
+  const [switcherOpen, setSwitcherOpen] = useState(false);
   const savedVehicle: VehicleKind | null = status?.vehicleType ?? null;
   const [vt, setVt] = useState<VehicleKind>(savedVehicle ?? 'MOTORCYCLE');
   const [vehicleSaved, setVehicleSaved] = useState(!!savedVehicle);
@@ -124,7 +126,10 @@ export function MoverOnboardingScreen({ status }: { status: any }) {
     <Screen>
       <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: GUTTER, height: 56 }}>
         <SwiftMark size={28} />
-        <LinkText label="Log out" tone="muted" onPress={logout} />
+        <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.lg }}>
+          <LinkText label="Switch app" onPress={() => setSwitcherOpen(true)} />
+          <LinkText label="Log out" tone="muted" onPress={logout} />
+        </View>
       </View>
       <ScrollView contentContainerStyle={{ paddingHorizontal: GUTTER, paddingBottom: space['3xl'] }} showsVerticalScrollIndicator={false}>
         <T variant="title" style={{ marginTop: space.sm }}>
@@ -158,6 +163,8 @@ export function MoverOnboardingScreen({ status }: { status: any }) {
           <DocumentChecklist role="MOVER" status={checklistStatus} />
         </View>
       </ScrollView>
+
+      <RoleSwitcherSheet visible={switcherOpen} current="mover" onClose={() => setSwitcherOpen(false)} />
     </Screen>
   );
 }

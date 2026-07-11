@@ -161,7 +161,7 @@ function BizTypeTile({ t, active, onPress }: { t: (typeof TYPES)[number]; active
 }
 
 /** Tab-root header: title left, Log out link right (kit language). */
-function TabHeader({ title }: { title: string }) {
+function TabHeader({ title, onSwitch }: { title: string; onSwitch?: () => void }) {
   const { logout } = useAuthStore();
   return (
     <View
@@ -181,13 +181,17 @@ function TabHeader({ title }: { title: string }) {
           {title}
         </T>
       </View>
-      <LinkText label="Log out" tone="muted" onPress={logout} />
+      <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.lg }}>
+        {onSwitch ? <LinkText label="Switch app" onPress={onSwitch} /> : null}
+        <LinkText label="Log out" tone="muted" onPress={logout} />
+      </View>
     </View>
   );
 }
 
 function BusinessSetup() {
   const become = useBecomePartner();
+  const [switcherOpen, setSwitcherOpen] = useState(false);
   const { latitude, longitude } = useLocationStore();
   const [name, setName] = useState('');
   const [type, setType] = useState<'RESTAURANT' | 'SUPERMARKET' | 'STORE' | 'SERVICE'>('RESTAURANT');
@@ -213,7 +217,8 @@ function BusinessSetup() {
 
   return (
     <Screen>
-      <TabHeader title="Sell on Swift" />
+      <TabHeader title="Sell on Swift" onSwitch={() => setSwitcherOpen(true)} />
+      <RoleSwitcherSheet visible={switcherOpen} current="vendor" onClose={() => setSwitcherOpen(false)} />
       <ScrollView contentContainerStyle={{ paddingHorizontal: GUTTER, paddingBottom: space['3xl'] }} showsVerticalScrollIndicator={false}>
         <T variant="title">List your business</T>
         <T variant="body" tone="muted" style={{ marginTop: space.sm }}>
