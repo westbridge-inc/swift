@@ -3,6 +3,7 @@ import { z } from 'zod';
 import { VendorType, OrderStatus, NotificationType } from '@prisma/client';
 import { calculateDeliveryFee } from '../../utils/markup';
 import { estimateDrivingDistance, estimateDeliveryMinutes } from '../../utils/distance';
+import { getMapsProvider } from '../../providers/maps/maps-provider';
 import { parsePagination, paginatedResponse } from '../../utils/pagination';
 import { AppError, NotFoundError, ValidationError, ForbiddenError } from '../../utils/errors';
 import { OrderService } from '../order/order.service';
@@ -215,22 +216,32 @@ async function buildCartResponse(
     return null;
   }
 
-  // Fetch related address and promo code separately (no direct relations on Cart)
-  const deliveryAddr = cart.deliveryAddressId
+  // Fetch related address and promo code separately (no direct relations on
+  // Cart). Same resolution as checkout: the cart's chosen address, else the
+  // customer's default — so the quote prices the same journey checkout will.
+  let deliveryAddr = cart.deliveryAddressId
     ? await app.prisma.address.findUnique({ where: { id: cart.deliveryAddressId } })
     : null;
+  if (!deliveryAddr) {
+    deliveryAddr = await app.prisma.address.findFirst({
+      where: { userId: cart.customerId, isDefault: true },
+    });
+  }
   const promoCodeRecord = cart.promoCodeId
     ? await app.prisma.promoCode.findUnique({ where: { id: cart.promoCodeId } })
     : null;
-  const addrLat = lat ?? deliveryAddr?.latitude;
-  const addrLng = lng ?? deliveryAddr?.longitude;
+  // The fee is about where the order is GOING: the chosen delivery address
+  // wins over device coords (those are only a fallback before an address is
+  // set). Same routing source as checkout, so the quote equals the final fee.
+  const addrLat = deliveryAddr?.latitude ?? lat;
+  const addrLng = deliveryAddr?.longitude ?? lng;
 
   let distanceKm = 3; // sensible default
   if (addrLat && addrLng && cart.vendor) {
-    distanceKm = estimateDrivingDistance(
-      cart.vendor.latitude, cart.vendor.longitude,
-      addrLat, addrLng,
-    );
+    distanceKm = (await getMapsProvider().routeKm(
+      { lat: cart.vendor.latitude, lng: cart.vendor.longitude },
+      { lat: addrLat, lng: addrLng },
+    )).km;
   }
 
   // Line items — zero markup: customers pay the vendor base price; platform

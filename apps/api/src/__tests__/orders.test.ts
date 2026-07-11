@@ -366,6 +366,21 @@ describe('Checkout — ID gate, multi-vendor split, fulfillment', () => {
     expect(pdb.isExpress).toBe(false);
   });
 
+  it('the cart quote matches the checkout fee (same address, same routing source)', async () => {
+    await addToCart(customer.token, restaurant.vendorId, burgerId, 1);
+    const cartRes = await inject('GET', '/api/v1/customer/cart', undefined, customer.token);
+    expect(cartRes.statusCode).toBe(200);
+    const quoted = Number(cartRes.json().data.deliveryFee);
+    expect(quoted).toBeGreaterThan(0);
+
+    const res = await inject('POST', '/api/v1/customer/checkout', { paymentMethod: 'CASH' }, customer.token);
+    expect(res.statusCode).toBe(200);
+    const order = res.json().data.order ?? res.json().data.orders[0];
+    createdOrderIds.push(order.id);
+    // What the cart promised is what checkout charges — no quote drift.
+    expect(Number(order.deliveryFee)).toBe(quoted);
+  });
+
   describe('Takeaway — pickup completion (no rider)', () => {
     async function makePickupOrder(status: OrderStatus, pickupCode: string | null) {
       const order = await app.prisma.order.create({
