@@ -102,6 +102,31 @@ export async function escalateVendorAlert(
   return 'sms_sent';
 }
 
+/** Ops trigger for review queues: PENDING work is invisible until someone is
+ *  told it exists — "we review within 24 hours" needs a tap on the shoulder,
+ *  not a dashboard someone remembers to open. Fans one notification (row +
+ *  live socket) to every active ADMIN/SUPER_ADMIN account. */
+export async function notifyAdmins(
+  prisma: PrismaClient,
+  notifications: NotificationService,
+  input: { title: string; body: string; data?: Record<string, unknown> },
+): Promise<number> {
+  const admins = await prisma.user.findMany({
+    where: { roles: { hasSome: ['ADMIN', 'SUPER_ADMIN'] }, status: 'ACTIVE' },
+    select: { id: true },
+  });
+  for (const admin of admins) {
+    await notifications.send({
+      userId: admin.id,
+      type: 'SYSTEM_ANNOUNCEMENT',
+      title: input.title,
+      body: input.body,
+      data: input.data,
+    });
+  }
+  return admins.length;
+}
+
 export class NotificationService {
   constructor(
     private prisma: PrismaClient,

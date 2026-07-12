@@ -2,6 +2,7 @@ import type { PrismaClient, UserRole } from '@prisma/client';
 import { nanoid } from 'nanoid';
 import { AppError, ValidationError } from '../../utils/errors';
 import { FloatService } from '../dispatch/float.service';
+import { NotificationService, notifyAdmins } from '../notification/notification.service';
 
 // ---------------------------------------------------------------------------
 // Partner provisioning (deterministic code — hard rule #1). `register` appends
@@ -41,7 +42,10 @@ function slugify(name: string): string {
 }
 
 export class PartnerService {
-  constructor(private prisma: PrismaClient) {}
+  constructor(
+    private prisma: PrismaClient,
+    private notifications?: NotificationService,
+  ) {}
 
   async becomePartner(userId: string, input: BecomePartnerInput) {
     const user = await this.prisma.user.findUnique({ where: { id: userId }, select: { id: true, roles: true } });
@@ -125,6 +129,18 @@ export class PartnerService {
       },
     });
     const updatedRoles = await this.ensureRoles(userId, roles, ['VENDOR_OWNER']);
+
+    // A new business enters the manual approval queue — tell the reviewers,
+    // or "we review within 24 hours" is a promise with no trigger (found
+    // live: businesses sat PENDING_APPROVAL for weeks, unseen).
+    if (this.notifications) {
+      await notifyAdmins(this.prisma, this.notifications, {
+        title: 'New business awaiting approval',
+        body: `${vendor.name} (${business.vendorType.toLowerCase()}) just signed up and is waiting for review.`,
+        data: { kind: 'vendor_pending', vendorId: vendor.id },
+      });
+    }
+
     return { kind: 'VENDOR' as const, id: vendor.id, created: true, roles: updatedRoles };
   }
 }
