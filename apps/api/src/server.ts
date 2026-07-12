@@ -90,10 +90,12 @@ async function buildApp() {
     },
   });
   await app.register(rateLimit, {
-    max: 200,
+    // Global per-IP ceiling. Tunable via RATE_LIMIT_MAX so a load test or a
+    // busy launch can raise it without a code change (per-route limits on
+    // auth/OTP stay tight regardless). Keys off request.ip (resolved via
+    // trustProxy above) — never the raw, client-spoofable X-Forwarded-For.
+    max: parseInt(process.env['RATE_LIMIT_MAX'] || '200', 10),
     timeWindow: '1 minute',
-    // Keys off request.ip (resolved via trustProxy above) — never the raw,
-    // client-spoofable X-Forwarded-For header.
   });
   await app.register(multipart, {
     limits: { fileSize: 5 * 1024 * 1024, files: 1 },
