@@ -410,7 +410,17 @@ export function MoverHomeScreen({ navigation }: any) {
                 {jobs.map((j) => (
                   <Card key={j.id} style={{ marginBottom: space.md }}>
                     <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
-                      <T variant="title">{jobAmount(j)}</T>
+                      <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.sm }}>
+                        <T variant="title">{jobAmount(j)}</T>
+                        {j.isExpress ? (
+                          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 3, borderRadius: 9999, backgroundColor: color.brand[50], paddingHorizontal: space.sm, paddingVertical: 2 }}>
+                            <MaterialCommunityIcons name="lightning-bolt" size={12} color={color.brand[500]} />
+                            <T variant="caption" weight="semibold" tone="deep">
+                              EXPRESS
+                            </T>
+                          </View>
+                        ) : null}
+                      </View>
                       {j.distanceKm != null ? (
                         <T variant="caption" weight="semibold" tone="muted">
                           {j.distanceKm} km away

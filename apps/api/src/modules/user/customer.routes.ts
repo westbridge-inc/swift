@@ -1515,6 +1515,10 @@ export async function customerRoutes(app: FastifyInstance) {
       discount: Number(o.discount),
       totalAmount: Number(o.totalAmount),
       paymentMethod: o.paymentMethod,
+      fulfillment: o.fulfillment,
+      // Takeaway handover gate — the customer PRESENTS this at the counter,
+      // so it must survive past the checkout confirmation screen.
+      pickupCode: o.pickupCode,
       rider: o.rider ? { firstName: o.rider.user?.firstName, avatar: o.rider.user?.avatar } : null,
       placedAt: o.placedAt,
       deliveredAt: o.deliveredAt,
@@ -1598,6 +1602,11 @@ export async function customerRoutes(app: FastifyInstance) {
         discount: Number(order.discount),
         totalAmount: Number(order.totalAmount),
         paymentMethod: order.paymentMethod,
+        fulfillment: order.fulfillment,
+        // Takeaway handover gate — the customer PRESENTS this code at the
+        // counter. It was only in the checkout response before, so it
+        // vanished the moment they left the confirmation screen.
+        pickupCode: order.pickupCode,
         deliveryAddress: order.deliveryAddress,
         deliveryLat: order.deliveryLat,
         deliveryLng: order.deliveryLng,

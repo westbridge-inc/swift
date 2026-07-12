@@ -510,6 +510,7 @@ export async function riderRoutes(app: FastifyInstance) {
           deliveryFee: Number(order.deliveryFee),
           tipAmount: Number(order.tipAmount),
           totalEarning: Number(order.deliveryFee) + Number(order.tipAmount),
+          isExpress: order.isExpress,
           pickupDistanceKm: Math.round(pickupDistance * 10) / 10,
           deliveryDistanceKm: Math.round(deliveryDistance * 10) / 10,
           estimatedPrepTime: order.estimatedPrepTime,
@@ -518,7 +519,9 @@ export async function riderRoutes(app: FastifyInstance) {
         };
       })
       .filter((o) => o.pickupDistanceKm <= maxRadiusKm)
-      .sort((a, b) => a.pickupDistanceKm - b.pickupDistanceKm);
+      // Express (bigger fee, customer paid to jump the queue) surfaces first;
+      // distance breaks ties within each tier.
+      .sort((a, b) => Number(b.isExpress) - Number(a.isExpress) || a.pickupDistanceKm - b.pickupDistanceKm);
 
     return { success: true, data: withDistance };
   });

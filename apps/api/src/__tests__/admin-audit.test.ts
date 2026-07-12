@@ -70,7 +70,13 @@ describe('admin audit trail', () => {
     });
     expect(res.statusCode).toBe(200);
 
-    const after = await app.prisma.auditLog.count({ where: { action: { startsWith: 'ADMIN ' } } });
+    // The audit row lands in an async onResponse hook AFTER the reply is
+    // sent — poll briefly instead of racing it (CI flaked exactly here).
+    let after = before;
+    for (let i = 0; i < 30 && after !== before + 1; i++) {
+      await new Promise((r) => setTimeout(r, 100));
+      after = await app.prisma.auditLog.count({ where: { action: { startsWith: 'ADMIN ' } } });
+    }
     expect(after).toBe(before + 1);
 
     const row = await app.prisma.auditLog.findFirst({

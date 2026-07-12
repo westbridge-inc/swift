@@ -4,6 +4,8 @@ import { nanoid } from 'nanoid';
 import { estimateCourierFee, type PackageSize, type DeliverySpeed } from './courier.service';
 import { getMapsProvider } from '../../providers/maps/maps-provider';
 import { makeDispatchService } from '../dispatch/dispatch.service';
+import { OrderService } from '../order/order.service';
+import { NotificationService } from '../notification/notification.service';
 import { orderingRestriction } from '../cash/cash-rules.service';
 import { generateOrderNumber } from '../../utils/markup';
 import { AppError, NotFoundError } from '../../utils/errors';
@@ -62,6 +64,19 @@ async function quote(
 export default async function courierRoutes(app: FastifyInstance) {
   const auth = { preHandler: [app.authenticate] };
   const dispatch = makeDispatchService(app);
+  const orderService = new OrderService(app.prisma, app.io);
+  const notifications = new NotificationService(app.prisma, app.io);
+
+  /** Terminal courier writes happen outside updateStatus (they carry courier-
+   *  specific fields and may skip intermediate states), so the terminal
+   *  effects — freeing the rider — are applied here, guarded the same way. */
+  async function freeCourierRider(orderId: string, riderId: string | null) {
+    if (!riderId) return;
+    await app.prisma.rider.updateMany({
+      where: { id: riderId, currentOrderId: orderId },
+      data: { isAvailable: true, currentOrderId: null },
+    });
+  }
 
   /** POST /estimate — price quote (size + distance + speed) before requesting. */
   app.post('/estimate', auth, async (request) => {
@@ -198,6 +213,24 @@ export default async function courierRoutes(app: FastifyInstance) {
         statusHistory: { create: { status: 'CANCELLED', changedBy: request.user.userId, note: body.reason ?? 'Cancelled by sender' } },
       },
     });
+
+    // Terminal effects (found live: cancelling an assigned courier left the
+    // rider stuck on the dead job, invisible to dispatch).
+    await freeCourierRider(id, order.riderId);
+    app.io.to(`order:${id}`).emit('order:status_changed', { orderId: id, status: 'CANCELLED', timestamp: new Date().toISOString() });
+    if (order.riderId) {
+      const rider = await app.prisma.rider.findUnique({ where: { id: order.riderId }, select: { userId: true } });
+      if (rider) {
+        await notifications.send({
+          userId: rider.userId,
+          type: 'ORDER_UPDATE',
+          title: 'Courier job cancelled',
+          body: `The sender cancelled ${order.orderNumber}. You are back in the dispatch pool.`,
+          data: { orderId: id, status: 'CANCELLED' },
+        });
+      }
+    }
+
     return { success: true, data: updated };
   });
 
@@ -221,6 +254,25 @@ export default async function courierRoutes(app: FastifyInstance) {
         statusHistory: { create: { status: 'DELIVERED', changedBy: request.user.userId, note: 'Proof of delivery captured' } },
       },
     });
-    return { success: true, data: updated };
+
+    // Terminal effects (found live: the proof path paid the rider NOTHING,
+    // left them stuck on the finished job, and told nobody).
+    await orderService.createEarnings(id);
+    await freeCourierRider(id, order.riderId);
+    const totalDeliveries = await app.prisma.rider.update({
+      where: { id: rider.id },
+      data: { totalDeliveries: { increment: 1 } },
+      select: { totalDeliveries: true },
+    });
+    app.io.to(`order:${id}`).emit('order:status_changed', { orderId: id, status: 'DELIVERED', timestamp: new Date().toISOString() });
+    await notifications.send({
+      userId: order.customerId,
+      type: 'ORDER_UPDATE',
+      title: 'Parcel delivered',
+      body: `${order.orderNumber} was handed to ${order.courierRecipientName ?? 'the recipient'} — proof photo captured.`,
+      data: { orderId: id, status: 'DELIVERED' },
+    });
+
+    return { success: true, data: { ...updated, totalDeliveries: totalDeliveries.totalDeliveries } };
   });
 }
