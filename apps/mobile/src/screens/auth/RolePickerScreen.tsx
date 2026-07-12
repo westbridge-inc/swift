@@ -1,68 +1,68 @@
-import { View, ScrollView } from 'react-native';
-import { SafeAreaView } from 'react-native-safe-area-context';
-import { Feather, MaterialCommunityIcons } from '@expo/vector-icons';
-import { color } from '@swift/ui';
-import { Text, Heading, PressableScale, elevation } from '../../components/ui';
-import { SwiftMark } from '../../components/SwiftLogo';
+/** @jsxImportSource react */
+import React from 'react';
+import { Pressable, View } from 'react-native';
+import { Feather } from '@expo/vector-icons';
+import { color, space } from '@swift/ui';
 import { useAuthStore } from '../../stores/authStore';
+import { SwiftMark } from '../../components/SwiftLogo';
+import { Card, IconChip, Screen, T } from '../../kit';
 
-type Intent = 'customer' | 'mover' | 'vendor';
-
-const ROLES: {
-  intent: Intent;
-  icon: keyof typeof MaterialCommunityIcons.glyphMap;
+// Entry gate ("How will you use Swift?") — business rule, not a kit frame;
+// composed from the kit's card + icon-chip language. Customer browses as a
+// guest; mover/vendor go straight to sign-in.
+const OPTIONS: {
+  intent: 'customer' | 'mover' | 'vendor';
+  icon: React.ComponentProps<typeof Feather>['name'];
   title: string;
   sub: string;
-  tag?: string;
 }[] = [
-  { intent: 'customer', icon: 'shopping-outline', title: 'Order on Swift', sub: 'Food, groceries, rides, courier & services' },
-  { intent: 'mover', icon: 'car', title: 'Drive & deliver', sub: 'Taxi rides, food, parcels — keep every fare', tag: 'Verify in ~24h' },
-  { intent: 'vendor', icon: 'storefront-outline', title: 'Sell on Swift', sub: 'Restaurant, grocery, shop or services' },
+  { intent: 'customer', icon: 'shopping-bag', title: 'Order with Swift', sub: 'Food, groceries, rides and more' },
+  { intent: 'mover', icon: 'navigation', title: 'Earn as a driver or rider', sub: 'Deliveries and taxi trips, your schedule' },
+  { intent: 'vendor', icon: 'briefcase', title: 'Sell as a business', sub: 'Restaurants, stores and services' },
 ];
 
-// The single app's entry screen. Picking an option only sets `intent`;
-// RootNavigator reacts — customers browse straight away as a guest, earners are
-// routed into the sign-in + onboarding flow. No navigation here (no dead ends).
 export function RolePickerScreen() {
   const setIntent = useAuthStore((s) => s.setIntent);
-  return (
-    <SafeAreaView style={{ flex: 1 }} edges={['top', 'bottom']} className="bg-surface-subtle">
-      <ScrollView
-        contentContainerStyle={{ flexGrow: 1, paddingHorizontal: 20, paddingTop: 28, paddingBottom: 24 }}
-        showsVerticalScrollIndicator={false}
-      >
-        <SwiftMark size={40} />
-        <Heading size="2xl" className="mt-lg">
-          How will you use Swift?
-        </Heading>
-        <Text className="mt-xs text-[15px] leading-5 text-text-secondary">
-          You can add another role later from your account.
-        </Text>
 
-        <View className="mt-xl" style={{ gap: 12 }}>
-          {ROLES.map((r) => (
-            <PressableScale key={r.intent} onPress={() => setIntent(r.intent)}>
-              <View className="flex-row items-center rounded-3xl bg-surface-base p-lg" style={elevation.card}>
-                <View className="h-14 w-14 items-center justify-center rounded-2xl" style={{ backgroundColor: color.brand[500] }}>
-                  <MaterialCommunityIcons name={r.icon} size={28} color="#fff" />
-                </View>
-                <View className="ml-md flex-1">
-                  <View className="flex-row items-center" style={{ gap: 8 }}>
-                    <Text className="text-base font-bold text-text-primary">{r.title}</Text>
-                    {r.tag ? (
-                      <View className="rounded-full px-2 py-0.5" style={{ backgroundColor: color.brand[50] }}>
-                        <Text className="text-[10px] font-bold" style={{ color: color.brand[700] }}>{r.tag}</Text>
-                      </View>
-                    ) : null}
+  return (
+    <Screen>
+      <View style={{ flex: 1, paddingHorizontal: space['2xl'], paddingTop: space['2xl'] }}>
+        <SwiftMark size={56} />
+        <T variant="title" style={{ marginTop: space['3xl'] }}>
+          How will you use Swift?
+        </T>
+        <T variant="body" tone="muted" style={{ marginTop: space.sm }}>
+          Pick one to get going — you can switch any time.
+        </T>
+
+        <View style={{ gap: space.lg, marginTop: space['3xl'] }}>
+          {OPTIONS.map((o) => (
+            <Pressable key={o.intent} onPress={() => setIntent(o.intent)}>
+              {({ pressed }) => (
+                <Card
+                  style={{
+                    flexDirection: 'row',
+                    alignItems: 'center',
+                    gap: space.lg,
+                    opacity: pressed ? 0.8 : 1,
+                  }}
+                >
+                  <IconChip icon={o.icon} size={52} />
+                  <View style={{ flex: 1 }}>
+                    <T variant="body" weight="semibold">
+                      {o.title}
+                    </T>
+                    <T variant="caption" tone="muted" style={{ marginTop: 2 }}>
+                      {o.sub}
+                    </T>
                   </View>
-                  <Text className="mt-0.5 text-sm text-text-secondary">{r.sub}</Text>
-                </View>
-                <Feather name="chevron-right" size={22} color={color.text.muted} />
-              </View>
-            </PressableScale>
+                  <Feather name="chevron-right" size={20} color={color.text.muted} />
+                </Card>
+              )}
+            </Pressable>
           ))}
         </View>
-      </ScrollView>
-    </SafeAreaView>
+      </View>
+    </Screen>
   );
 }

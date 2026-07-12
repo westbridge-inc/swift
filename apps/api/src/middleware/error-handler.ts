@@ -76,13 +76,15 @@ export function registerErrorHandler(app: FastifyInstance) {
     });
   });
 
-  // 404 handler
+  // 404 handler. Echo only the path — never the query string (reflected
+  // attacker input has no business in responses) — and cap the length.
   app.setNotFoundHandler((request, reply) => {
+    const path = request.url.split('?')[0]!.slice(0, 200);
     reply.status(404).send({
       success: false,
       error: {
         code: 'NOT_FOUND',
-        message: `Route ${request.method} ${request.url} not found`,
+        message: `Route ${request.method} ${path} not found`,
       },
     });
   });

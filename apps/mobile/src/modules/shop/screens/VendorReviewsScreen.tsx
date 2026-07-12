@@ -1,113 +1,70 @@
-import { View, ScrollView } from 'react-native';
-import { SafeAreaView } from 'react-native-safe-area-context';
-import { Feather, MaterialCommunityIcons } from '@expo/vector-icons';
-import { color } from '@swift/ui';
-import { Text, PressableScale, Skeleton, EmptyState } from '../../../components/ui';
-import { useVendorReviews } from '../../../hooks';
+/** @jsxImportSource react */
+import React from 'react';
+import { FlatList, View } from 'react-native';
+import { useRoute } from '@react-navigation/native';
+import { color, space } from '@swift/ui';
+import { useVendorReviews } from '../../../hooks/customer';
+import { Card, EmptyState, ErrorState, Header, LoadingBlock, Screen, Stars, T } from '../../../kit';
 
-function Stars({ value, size = 14 }: { value: number; size?: number }) {
-  const rounded = Math.round(value);
-  return (
-    <View className="flex-row">
-      {[1, 2, 3, 4, 5].map((i) => (
-        <MaterialCommunityIcons key={i} name={i <= rounded ? 'star' : 'star-outline'} size={size} color={color.warning} />
-      ))}
-    </View>
-  );
-}
+// No dedicated kit frame — composed from the kit's card + gold-star language.
+export function VendorReviewsScreen() {
+  const route = useRoute<any>();
+  const vendorId: string = route.params?.vendorId;
+  const reviews = useVendorReviews<any>(vendorId);
 
-function fmtDate(d?: string) {
-  if (!d) return '';
-  try {
-    return new Date(d).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' });
-  } catch {
-    return '';
-  }
-}
-
-export function VendorReviewsScreen({ navigation, route }: any) {
-  const id: string = route?.params?.id ?? '';
-  const name: string = route?.params?.vendorName ?? 'Reviews';
-  const avg = Number(route?.params?.averageRating ?? 0);
-
-  const { data, isLoading } = useVendorReviews<any>(id);
-  const reviews: any[] = data?.reviews ?? [];
-  const total: number = data?.total ?? 0;
-  const dist: Record<string, number> = data?.distribution ?? {};
-  const maxDist = Math.max(1, ...[5, 4, 3, 2, 1].map((s) => Number(dist[s] ?? 0)));
+  const rows: any[] = Array.isArray(reviews.data) ? reviews.data : (reviews.data?.reviews ?? []);
 
   return (
-    <SafeAreaView style={{ flex: 1 }} edges={['top']} className="bg-surface-base">
-      <View className="flex-row items-center px-lg py-sm">
-        <PressableScale onPress={() => navigation?.goBack?.()} hitSlop={10}>
-          <Feather name="chevron-left" size={24} color={color.text.primary} />
-        </PressableScale>
-        <Text className="ml-md flex-1 text-base font-bold text-text-primary" numberOfLines={1}>{name}</Text>
-      </View>
-
-      <ScrollView contentContainerStyle={{ paddingBottom: 32 }} showsVerticalScrollIndicator={false}>
-        <View className="items-center pb-md pt-sm">
-          <Text className="font-display text-3xl font-bold text-text-primary">{avg > 0 ? avg.toFixed(1) : 'New'}</Text>
-          <View className="mt-xs"><Stars value={avg} size={18} /></View>
-          <Text className="mt-xs text-sm text-text-muted">{total} {total === 1 ? 'review' : 'reviews'}</Text>
-        </View>
-
-        {total > 0 ? (
-          <View className="mx-lg mb-md">
-            {[5, 4, 3, 2, 1].map((s) => {
-              const n = Number(dist[s] ?? 0);
-              return (
-                <View key={s} className="mb-1 flex-row items-center">
-                  <Text className="w-3 text-xs text-text-secondary">{s}</Text>
-                  <MaterialCommunityIcons name="star" size={12} color={color.warning} />
-                  <View className="mx-sm h-2 flex-1 overflow-hidden rounded-full bg-surface-subtle">
-                    <View style={{ width: `${(n / maxDist) * 100}%`, height: '100%', backgroundColor: color.warning }} />
-                  </View>
-                  <Text className="w-7 text-right text-xs text-text-muted">{n}</Text>
-                </View>
-              );
-            })}
-          </View>
-        ) : null}
-
-        <View className="h-2 bg-surface-subtle" />
-
-        {isLoading ? (
-          <View className="px-lg pt-md">
-            {[0, 1, 2].map((i) => <Skeleton key={i} className="mb-md h-20 w-full rounded-2xl" />)}
-          </View>
-        ) : reviews.length === 0 ? (
-          <View className="pt-2xl">
-            <EmptyState icon="star-outline" title="No reviews yet" body="Be the first to rate this place after your order." />
-          </View>
-        ) : (
-          reviews.map((r) => {
-            const first = r.rater?.firstName ?? 'Guest';
-            const initial = (first[0] || '?').toUpperCase();
-            return (
-              <View key={r.id} className="border-b border-border-subtle px-lg py-md">
-                <View className="flex-row items-center">
-                  <View className="h-9 w-9 items-center justify-center rounded-full bg-surface-subtle">
-                    <Text className="text-sm font-bold text-text-secondary">{initial}</Text>
-                  </View>
-                  <View className="ml-md flex-1">
-                    <Text className="text-sm font-semibold text-text-primary">{first}</Text>
-                    <Text className="text-xs text-text-muted">{fmtDate(r.createdAt)}</Text>
-                  </View>
-                  <Stars value={Number(r.score ?? 0)} size={13} />
-                </View>
-                {r.comment ? <Text className="mt-sm text-sm text-text-secondary">{r.comment}</Text> : null}
-                {r.response ? (
-                  <View className="ml-lg mt-sm rounded-2xl bg-surface-subtle px-md py-sm">
-                    <Text className="text-xs font-semibold text-text-primary">Response from the store</Text>
-                    <Text className="mt-0.5 text-sm text-text-secondary">{r.response}</Text>
-                  </View>
-                ) : null}
+    <Screen>
+      <Header title="Reviews" />
+      {reviews.isLoading ? (
+        <LoadingBlock />
+      ) : reviews.isError ? (
+        <ErrorState onRetry={() => reviews.refetch()} />
+      ) : rows.length === 0 ? (
+        <EmptyState icon="star" title="No reviews yet" body="Ratings land here after customers order and rate." />
+      ) : (
+        <FlatList
+          data={rows}
+          keyExtractor={(r, i) => r.id ?? String(i)}
+          contentContainerStyle={{ padding: space['2xl'], gap: space.md }}
+          renderItem={({ item: r }) => (
+            <Card>
+              <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
+                <Stars value={Number(r.score ?? r.rating ?? 0)} size={16} />
+                <T variant="caption" tone="faint">
+                  {r.createdAt ? new Date(r.createdAt).toLocaleDateString() : ''}
+                </T>
               </View>
-            );
-          })
-        )}
-      </ScrollView>
-    </SafeAreaView>
+              {r.comment ? (
+                <T variant="body" style={{ marginTop: space.md }}>
+                  {r.comment}
+                </T>
+              ) : null}
+              <T variant="caption" tone="muted" style={{ marginTop: space.sm }}>
+                {r.customerName ?? r.author ?? 'Swift customer'}
+              </T>
+              {r.response ? (
+                <View
+                  style={{
+                    marginTop: space.md,
+                    padding: space.md,
+                    borderRadius: 12,
+                    backgroundColor: color.brand[50],
+                  }}
+                >
+                  <T variant="caption" weight="semibold" tone="deep">
+                    Store reply
+                  </T>
+                  <T variant="label" tone="deep" style={{ marginTop: 2 }}>
+                    {r.response}
+                  </T>
+                </View>
+              ) : null}
+            </Card>
+          )}
+        />
+      )}
+    </Screen>
   );
 }

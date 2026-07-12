@@ -5,6 +5,7 @@ import { NotificationService } from '../notification/notification.service';
 import type { KycProvider } from '../../providers/kyc/kyc-provider';
 import { getStorageProvider } from '../../providers/storage/storage-provider';
 import { FloatService } from '../dispatch/float.service';
+import { SubscriptionService } from '../subscription/subscription.service';
 
 /** Checklist keys come from CountryConfig.documentChecklists. */
 export type ChecklistRole = 'MOVER' | 'RESTAURANT' | 'SUPERMARKET' | 'STORE' | 'SERVICE';
@@ -44,8 +45,18 @@ export interface InsuranceReview {
 
 const REMINDER_WINDOW_DAYS = 30;
 
+/** Which app surface a document notification belongs to: operator docs go to
+ *  the driver/business surface, never the shopping feed; L2 identity is the
+ *  customer's own. */
+function audienceForRole(role: string): 'customer' | 'earner' | 'business' {
+  if (role === 'MOVER') return 'earner';
+  if (role === 'CUSTOMER') return 'customer';
+  return 'business';
+}
+
 export class VerificationService {
   private countryConfig: CountryConfigService;
+  private subscriptions: SubscriptionService;
 
   constructor(
     private prisma: PrismaClient,
@@ -53,6 +64,7 @@ export class VerificationService {
     private kyc: KycProvider,
   ) {
     this.countryConfig = new CountryConfigService(prisma);
+    this.subscriptions = new SubscriptionService(prisma);
   }
 
   // -------------------------------------------------------------------------
@@ -81,12 +93,16 @@ export class VerificationService {
       throw new AppError(400, 'INVALID_DOC_TYPE', `${docType} is not required for ${roleKey} in your country`);
     }
 
+    // A document valid beyond the renewal window can't be re-submitted; once it
+    // enters the 30-day reminder window the renewal is accepted early, so the
+    // operator is never forced offline waiting for a lapse-then-reupload cycle.
+    const renewalOpensAt = new Date(Date.now() + REMINDER_WINDOW_DAYS * 24 * 60 * 60 * 1000);
     const alreadyApproved = await this.prisma.verificationDocument.findFirst({
       where: {
         userId,
         docType,
         status: 'APPROVED',
-        OR: [{ expiresAt: null }, { expiresAt: { gt: new Date() } }],
+        OR: [{ expiresAt: null }, { expiresAt: { gt: renewalOpensAt } }],
       },
     });
     if (alreadyApproved) {
@@ -214,6 +230,7 @@ export class VerificationService {
       type: 'SYSTEM_ANNOUNCEMENT',
       title: 'Document approved',
       body: `Your ${doc.docType.replace(/_/g, ' ')} has been approved.`,
+      audience: audienceForRole(doc.role),
       data: { kind: 'verification_approved', docId },
     });
 
@@ -371,7 +388,9 @@ export class VerificationService {
     if (!baseOk) return { allowed: false, reason: 'docs' };
 
     // Taxi (CAR): a current, manually-confirmed HIRE-class policy is mandatory
-    // before carrying passengers. PRIVATE insurance never qualifies.
+    // before carrying passengers, and the reviewer must have cross-checked the
+    // policy's plate against the H plate on the registration + photos.
+    // PRIVATE insurance never qualifies.
     if (opts.vehicleType === 'CAR') {
       const insurance = await this.prisma.verificationDocument.findFirst({
         where: {
@@ -380,10 +399,15 @@ export class VerificationService {
           status: 'APPROVED',
           OR: [{ expiresAt: null }, { expiresAt: { gt: new Date() } }],
         },
-        select: { coverageClass: true, hireClassConfirmed: true },
+        select: { coverageClass: true, hireClassConfirmed: true, plateCrossChecked: true },
         orderBy: { reviewedAt: 'desc' },
       });
-      if (!insurance || insurance.coverageClass !== 'HIRE' || !insurance.hireClassConfirmed) {
+      if (
+        !insurance ||
+        insurance.coverageClass !== 'HIRE' ||
+        !insurance.hireClassConfirmed ||
+        !insurance.plateCrossChecked
+      ) {
         return { allowed: false, reason: 'insurance' };
       }
     }
@@ -410,13 +434,21 @@ export class VerificationService {
       // L2 is permanent once earned — an expired ID does not demote the user
       if (doc.docType === IDENTITY_DOC_TYPE) continue;
 
-      await this.suspendListingsIfUnverified(doc.userId);
+      // A lapsed document takes effect IMMEDIATELY: vendors' listings go dark,
+      // and a mover whose live-operation status broke is pulled offline now —
+      // not "after they next toggle" (an uninsured taxi must stop getting jobs).
+      if (doc.role === 'MOVER') {
+        await this.forceMoverOfflineIfNotLive(doc.userId);
+      } else {
+        await this.suspendListingsIfUnverified(doc.userId);
+      }
 
       await this.notifications.send({
         userId: doc.userId,
         type: 'SYSTEM_ANNOUNCEMENT',
         title: 'Document expired',
         body: `Your ${doc.docType.replace(/_/g, ' ')} has expired. Upload a new one to keep operating.`,
+        audience: audienceForRole(doc.role),
         data: { kind: 'verification_expired', docId: doc.id },
       });
     }
@@ -448,6 +480,7 @@ export class VerificationService {
         type: 'SYSTEM_ANNOUNCEMENT',
         title: 'Document expiring soon',
         body: `Your ${doc.docType.replace(/_/g, ' ')} expires on ${doc.expiresAt!.toISOString().slice(0, 10)}. Renew it to avoid suspension.`,
+        audience: audienceForRole(doc.role),
         data: { kind: 'verification_expiry_reminder', docId: doc.id },
       });
       sent += 1;
@@ -489,14 +522,21 @@ export class VerificationService {
     if (due.length === 0) return 0;
 
     const storage = getStorageProvider();
+    let purged = 0;
     for (const doc of due) {
-      if (doc.fileUrl) await storage.delete(doc.fileUrl).catch(() => undefined);
+      // Never mark a row purged while the stored object may still exist — a
+      // failed delete stays due and retries on tomorrow's sweep (DPA §3.5).
+      if (doc.fileUrl) {
+        const deleted = await storage.delete(doc.fileUrl).then(() => true).catch(() => false);
+        if (!deleted) continue;
+      }
       await this.prisma.verificationDocument.update({
         where: { id: doc.id },
         data: { purgedAt: new Date(), fileUrl: '' },
       });
+      purged += 1;
     }
-    return due.length;
+    return purged;
   }
 
   // -------------------------------------------------------------------------
@@ -512,24 +552,82 @@ export class VerificationService {
       type: 'SYSTEM_ANNOUNCEMENT',
       title: 'Identity verified',
       body: 'You are now ID-verified and can place orders of any size.',
+      audience: 'customer',
       data: { kind: 'verification_l2' },
     });
   }
 
-  /** Reflect full verification onto owned vendors (display flag; gates check live). */
+  /**
+   * Verification-completion side effects. A weekly subscription is BORN as a
+   * 14-day trial the moment a participant is fully verified (idempotent — the
+   * admin entity-verify endpoints feed the same seams), so the KYC
+   * auto-approval path can never strand a verified operator without a
+   * subscription. Vendors additionally get their display flag, and a store
+   * suspended by a lapsed document re-opens when verification is restored.
+   */
   private async afterApproval(userId: string) {
     const owner = await this.prisma.vendorOwner.findUnique({
       where: { userId },
-      include: { vendors: { select: { id: true, vendorType: true } } },
+      include: { vendors: { select: { id: true, vendorType: true, isVerified: true } } },
     });
-    if (!owner) return;
-
-    for (const vendor of owner.vendors) {
-      const verified = await this.isRoleVerified(userId, vendor.vendorType as ChecklistRole);
-      if (verified) {
-        await this.prisma.vendor.update({ where: { id: vendor.id }, data: { isVerified: true } });
+    if (owner) {
+      for (const vendor of owner.vendors) {
+        const verified = await this.isRoleVerified(userId, vendor.vendorType as ChecklistRole);
+        if (!verified) continue;
+        // Restore acceptingOrders only on the unverified -> verified edge; a
+        // routine renewal approval must not override a deliberate pause.
+        await this.prisma.vendor.update({
+          where: { id: vendor.id },
+          data: { isVerified: true, ...(vendor.isVerified ? {} : { acceptingOrders: true }) },
+        });
+        await this.subscriptions.startTrialForVendor(vendor.id);
       }
     }
+
+    const [driver, rider] = await Promise.all([
+      this.prisma.driver.findUnique({ where: { userId }, select: { id: true } }),
+      this.prisma.rider.findUnique({ where: { userId }, select: { id: true } }),
+    ]);
+    if ((driver || rider) && (await this.isRoleVerified(userId, 'MOVER'))) {
+      if (driver) await this.subscriptions.startTrialForDriver(driver.id);
+      if (rider) await this.subscriptions.startTrialForRider(rider.id);
+    }
+  }
+
+  /**
+   * When a lapsed document breaks a mover's live-operation status, pull them
+   * offline immediately. Respects the same rules as go-online (legacy
+   * documentsVerified flag, taxi hire-insurance requirement), so a mover the
+   * gate would still admit is left alone.
+   */
+  private async forceMoverOfflineIfNotLive(userId: string) {
+    const driver = await this.prisma.driver.findUnique({
+      where: { userId },
+      select: { id: true, documentsVerified: true },
+    });
+    const vehicleType = driver ? 'CAR' as const : (await this.getMoverVehicleType(userId));
+    if (!vehicleType) return;
+
+    const live = await this.getLiveOperationStatus(userId, {
+      vehicleType,
+      legacyVerified: driver?.documentsVerified,
+    });
+    if (live.allowed) return;
+
+    const [driverOff, riderOff] = await Promise.all([
+      this.prisma.driver.updateMany({ where: { userId, isOnline: true }, data: { isOnline: false } }),
+      this.prisma.rider.updateMany({ where: { userId, isOnline: true }, data: { isOnline: false } }),
+    ]);
+    if (driverOff.count + riderOff.count === 0) return;
+
+    await this.notifications.send({
+      userId,
+      type: 'SYSTEM_ANNOUNCEMENT',
+      title: 'You have been taken offline',
+      body: 'A required document has expired, so you can no longer take jobs. Renew it to go back online.',
+      audience: 'earner',
+      data: { kind: 'verification_forced_offline' },
+    });
   }
 
   /** When a lapsed doc breaks a vendor-type checklist, listings go dark. */

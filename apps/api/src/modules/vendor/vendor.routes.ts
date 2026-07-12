@@ -13,6 +13,7 @@ import { AiService } from '../ai/ai.service';
 import { guessColumnMapping, applyMapping, toImportCsv, REQUIRED_FIELDS, type ColumnMapping } from '../../utils/catalogue-map';
 import { parsePagination, paginatedResponse } from '../../utils/pagination';
 import { AppError, NotFoundError, ValidationError } from '../../utils/errors';
+import { throwForMissingProfile } from '../../utils/role-gate';
 import { ALLOWED_IMAGE_TYPES, looksLikeImage } from '../../utils/images';
 
 // ---------------------------------------------------------------------------
@@ -284,6 +285,18 @@ export function pickVendorId(ownedVendorIds: string[], requested?: string): stri
   return requested && ownedVendorIds.includes(requested) ? requested : ownedVendorIds[0]!;
 }
 
+/**
+ * Order-board scope: an explicitly selected store (x-vendor-id) scopes the
+ * board to that store — matching every other vendor surface — while no
+ * selection keeps the franchise roll-up across all the caller's stores.
+ */
+export function ordersScope(
+  access: { vendorId: string; vendorIds: string[] },
+  requested?: string,
+): string | { in: string[] } {
+  return requested ? access.vendorId : { in: access.vendorIds };
+}
+
 /** OWNER > MANAGER > STAFF — every vendor route resolves one of these. */
 export type VendorAccessRole = 'OWNER' | 'MANAGER' | 'STAFF';
 const ROLE_RANK: Record<VendorAccessRole, number> = { STAFF: 0, MANAGER: 1, OWNER: 2 };
@@ -316,7 +329,10 @@ async function resolveVendor(app: FastifyInstance, userId: string, requestedVend
     select: { vendorId: true, role: true },
     orderBy: { createdAt: 'asc' },
   });
-  if (memberships.length === 0) throw new NotFoundError('Vendor');
+  // Neither an owner with stores nor staff anywhere: outsiders get 403 (authz
+  // answers, not existence); a VENDOR_OWNER with no store yet keeps the 404
+  // the onboarding flow expects.
+  if (memberships.length === 0) await throwForMissingProfile(app, userId, 'VENDOR_OWNER', 'Vendor');
   const vendorIds = memberships.map((m) => m.vendorId);
   const vendorId = pickVendorId(vendorIds, requestedVendorId);
   const role = memberships.find((m) => m.vendorId === vendorId)!.role as VendorAccessRole;
@@ -421,7 +437,7 @@ export async function vendorRoutes(app: FastifyInstance) {
     const stores = await app.prisma.vendor.findMany({
       where: { id: { in: access.vendorIds } },
       orderBy: { createdAt: 'asc' },
-      select: { id: true, name: true, vendorType: true, isCurrentlyOpen: true, acceptingOrders: true, city: true },
+      select: { id: true, name: true, vendorType: true, isCurrentlyOpen: true, acceptingOrders: true, city: true, isVerified: true },
     });
     return { success: true, data: { stores, selectedId: access.vendorId, myRole: access.role } };
   });
@@ -687,6 +703,17 @@ export async function vendorRoutes(app: FastifyInstance) {
     const { vendorId } = await resolveVendor(app, request.user.userId, selectedVendorId(request));
     const vendor = await app.prisma.vendor.findUniqueOrThrow({ where: { id: vendorId } });
 
+    // Turning commerce ON requires a verified business (same gate as listing
+    // items; the checklist belongs to the owner). Turning OFF is always allowed.
+    if (!vendor.acceptingOrders) {
+      const verified = vendor.isVerified
+        || await verification.isRoleVerified(await vendorOwnerUserId(app, vendorId), vendor.vendorType);
+      if (!verified) {
+        throw new AppError(403, 'VERIFICATION_REQUIRED',
+          'Your store can take orders once its documents are verified. Check Documents for anything missing or expired.');
+      }
+    }
+
     const updated = await app.prisma.vendor.update({
       where: { id: vendorId },
       data: { acceptingOrders: !vendor.acceptingOrders },
@@ -703,6 +730,7 @@ export async function vendorRoutes(app: FastifyInstance) {
 
   /** GET /alerts/pending — unacknowledged order alerts (dashboard banner state). */
   app.get('/alerts/pending', auth, async (request) => {
+    await resolveVendor(app, request.user.userId, selectedVendorId(request)); // vendor surface only
     const alerts = await app.prisma.notification.findMany({
       where: {
         userId: request.user.userId,
@@ -724,12 +752,13 @@ export async function vendorRoutes(app: FastifyInstance) {
 
   /** GET /orders — Paginated, filterable order list */
   app.get('/orders', auth, async (request) => {
-    const { vendorIds } = await resolveVendor(app, request.user.userId, selectedVendorId(request));
+    const requested = selectedVendorId(request);
+    const access = await resolveVendor(app, request.user.userId, requested);
     const query = request.query as Record<string, string | undefined>;
     const pagination = parsePagination(query);
     const { status, orderType, from, to, search } = vendorOrdersQuerySchema.parse(request.query);
 
-    const where: Record<string, unknown> = { vendorId: { in: vendorIds } };
+    const where: Record<string, unknown> = { vendorId: ordersScope(access, requested) };
     if (status) where['status'] = status;
     if (orderType) where['orderType'] = orderType;
     if (from) where['placedAt'] = { ...(where['placedAt'] as object || {}), gte: from };
@@ -797,9 +826,11 @@ export async function vendorRoutes(app: FastifyInstance) {
     await ackVendorAlert(app, request.user.userId, order.id); // accepting acknowledges the alert
 
     // acceptance of a DELIVERY order starts the dispatch cascade.
-    // PICKUP and APPOINTMENT orders never dispatch.
+    // PICKUP and APPOINTMENT orders never dispatch. Express orders jump the
+    // dispatch queue (lower number = higher BullMQ priority).
     if (order.fulfillment === 'DELIVERY' && app.dispatchQueue) {
       await app.dispatchQueue.add('dispatch-order', { orderId: order.id }, {
+        priority: order.isExpress ? 1 : 10,
         removeOnComplete: 100,
         removeOnFail: 50,
       });
@@ -1133,7 +1164,8 @@ export async function vendorRoutes(app: FastifyInstance) {
   });
 
   /** GET /items/import/template — CSV template for bulk import */
-  app.get('/items/import/template', auth, async (_request, reply) => {
+  app.get('/items/import/template', auth, async (request, reply) => {
+    await resolveVendor(app, request.user.userId, selectedVendorId(request)); // vendor surface only
     reply.type('text/csv').header('content-disposition', 'attachment; filename="swift-catalogue-template.csv"');
     return CSV_TEMPLATE;
   });
@@ -1790,6 +1822,71 @@ export async function vendorRoutes(app: FastifyInstance) {
         },
         activeMenuItems: activeItems,
         pendingOrders,
+      },
+    };
+  });
+
+  /** GET /analytics/ops — Operational quality over a window: how fast orders
+   *  are accepted, how honest the prep quote is, and how often orders die.
+   *  Everything derives from real order timestamps — no synthetic numbers. */
+  app.get('/analytics/ops', auth, async (request) => {
+    const { vendorId } = await requireVendor(app, request, 'MANAGER');
+    const { days } = revenueQuerySchema.parse(request.query);
+
+    const since = new Date();
+    since.setDate(since.getDate() - days);
+    since.setHours(0, 0, 0, 0);
+
+    const orders = await app.prisma.order.findMany({
+      where: { vendorId, placedAt: { gte: since } },
+      select: {
+        status: true,
+        placedAt: true,
+        acceptedAt: true,
+        readyAt: true,
+        estimatedPrepTime: true,
+        cancelledBy: true,
+      },
+    });
+
+    const placed = orders.length;
+    const accepted = orders.filter((o) => o.acceptedAt);
+    const cancelled = orders.filter((o) => o.status === 'CANCELLED' || o.status === 'REFUNDED');
+    const vendorCancelled = cancelled.filter((o) => (o.cancelledBy ?? '').toUpperCase().includes('VENDOR'));
+    // Acceptance is judged on DECIDED orders (accepted, or killed by the
+    // store) — customer cancellations before acceptance are not held against
+    // the vendor.
+    const decided = accepted.length + vendorCancelled.length;
+
+    const avgMinutes = (pairs: Array<[Date, Date]>) =>
+      pairs.length
+        ? pairs.reduce((sum, [a, b]) => sum + (b.getTime() - a.getTime()) / 60000, 0) / pairs.length
+        : null;
+
+    const acceptPairs = accepted
+      .filter((o) => o.acceptedAt! >= o.placedAt)
+      .map((o) => [o.placedAt, o.acceptedAt!] as [Date, Date]);
+    const prepPairs = orders
+      .filter((o) => o.acceptedAt && o.readyAt && o.readyAt >= o.acceptedAt)
+      .map((o) => [o.acceptedAt!, o.readyAt!] as [Date, Date]);
+    const quoted = orders.filter((o) => o.acceptedAt && o.readyAt && o.estimatedPrepTime != null);
+    const avgQuotedPrep = quoted.length
+      ? quoted.reduce((s, o) => s + (o.estimatedPrepTime ?? 0), 0) / quoted.length
+      : null;
+
+    const round1 = (n: number | null) => (n == null ? null : Math.round(n * 10) / 10);
+
+    return {
+      success: true,
+      data: {
+        days,
+        placedOrders: placed,
+        acceptanceRate: decided ? Math.round((accepted.length / decided) * 100) : null,
+        cancellationRate: placed ? Math.round((cancelled.length / placed) * 100) : null,
+        vendorCancellations: vendorCancelled.length,
+        avgAcceptMinutes: round1(avgMinutes(acceptPairs)),
+        avgPrepMinutes: round1(avgMinutes(prepPairs)),
+        avgQuotedPrepMinutes: round1(avgQuotedPrep),
       },
     };
   });

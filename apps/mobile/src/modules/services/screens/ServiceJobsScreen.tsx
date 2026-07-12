@@ -1,13 +1,11 @@
-import { useState } from 'react';
-import { View, ScrollView, RefreshControl, Alert } from 'react-native';
-import { SafeAreaView } from 'react-native-safe-area-context';
-import { Feather } from '@expo/vector-icons';
-import { color } from '@swift/ui';
-import { Text, Heading, Card, Button, Badge, Skeleton, PressableScale, EmptyState, ChoiceChip, Input } from '../../../components/ui';
+/** @jsxImportSource react */
+import React, { useState } from 'react';
+import { RefreshControl, ScrollView, TextInput, View } from 'react-native';
+import { color, radius, space } from '@swift/ui';
 import { useServiceJobs, useScheduleJob, useCancelJob, useRateJob, useQuoteJob, useConfirmJob, useDeclineSlot } from '../../../hooks';
 import { useAuthStore } from '../../../stores/authStore';
-
-const money = (n: number | string) => `$${Number(n).toLocaleString()} GYD`;
+import { money } from '../../../lib/money';
+import { Card, Chip, EmptyState, Header, IconChip, LoadingBlock, PillButton, PopupCard, Screen, Stars, T, TonePill } from '../../../kit';
 
 const STATUS_LABEL: Record<string, { label: string; tone: 'brand' | 'success' | 'neutral' }> = {
   REQUESTED: { label: 'Waiting for quote', tone: 'neutral' },
@@ -38,43 +36,52 @@ function ScheduleSheet({ job, onDone }: { job: any; onDone: () => void }) {
   const days = upcomingDays();
   const [dayKey, setDayKey] = useState<string>(days[0]!.key);
   const [time, setTime] = useState<string>('09:00');
+  const [pastErr, setPastErr] = useState(false);
 
   const confirm = () => {
     const scheduledFor = new Date(`${dayKey}T${time}:00`);
     if (scheduledFor.getTime() < Date.now()) {
-      Alert.alert('Pick a later time', 'That time has already passed today.');
+      setPastErr(true);
       return;
     }
-    schedule.mutate(
-      { id: job.id, scheduledFor: scheduledFor.toISOString() },
-      { onSuccess: onDone },
-    );
+    setPastErr(false);
+    schedule.mutate({ id: job.id, scheduledFor: scheduledFor.toISOString() }, { onSuccess: onDone });
   };
 
   return (
-    <View className="mt-md rounded-2xl bg-surface-subtle p-md">
-      <Text className="text-sm font-semibold text-text-secondary">Pick a day</Text>
-      <View className="mt-sm flex-row flex-wrap" style={{ gap: 8 }}>
+    <View style={{ marginTop: space.md, borderRadius: radius.lg, backgroundColor: color.surface.subtle, padding: space.lg }}>
+      <T variant="label" weight="semibold" tone="muted">
+        Pick a day
+      </T>
+      <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: space.sm, marginTop: space.sm }}>
         {days.map((d) => (
-          <ChoiceChip key={d.key} label={d.label} active={d.key === dayKey} onPress={() => setDayKey(d.key)} />
+          <Chip key={d.key} label={d.label} selected={d.key === dayKey} onPress={() => setDayKey(d.key)} style={{ height: 36, paddingHorizontal: space.md }} />
         ))}
       </View>
-      <Text className="mt-md text-sm font-semibold text-text-secondary">Pick a time</Text>
-      <View className="mt-sm flex-row flex-wrap" style={{ gap: 8 }}>
+      <T variant="label" weight="semibold" tone="muted" style={{ marginTop: space.lg }}>
+        Pick a time
+      </T>
+      <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: space.sm, marginTop: space.sm }}>
         {HOURS.map((h) => (
-          <ChoiceChip key={h} label={h} active={h === time} onPress={() => setTime(h)} />
+          <Chip key={h} label={h} selected={h === time} onPress={() => setTime(h)} style={{ height: 36, paddingHorizontal: space.md }} />
         ))}
       </View>
-      <Button
-        label={`Accept quote — book for ${days.find((d) => d.key === dayKey)?.label ?? ''} ${time}`}
-        className="mt-md"
+      <PillButton
+        label={`Accept quote — ${days.find((d) => d.key === dayKey)?.label ?? ''} ${time}`}
+        size="md"
+        style={{ marginTop: space.lg }}
         loading={schedule.isPending}
         onPress={confirm}
       />
+      {pastErr ? (
+        <T variant="caption" tone="error" center style={{ marginTop: space.sm }}>
+          That time has already passed today — pick a later one.
+        </T>
+      ) : null}
       {schedule.isError ? (
-        <Text className="mt-sm text-center text-sm text-error">
+        <T variant="caption" tone="error" center style={{ marginTop: space.sm }}>
           {(schedule.error as any)?.response?.data?.message ?? 'Couldn’t schedule. Try again.'}
-        </Text>
+        </T>
       ) : null}
     </View>
   );
@@ -86,28 +93,33 @@ function RateRow({ job }: { job: any }) {
   // Already rated in a past session → the API answers with a conflict; show it calmly.
   const errMsg = (rate.error as any)?.response?.data?.message;
   return (
-    <View className="mt-sm flex-row items-center">
-      <Text className="mr-sm text-sm text-text-secondary">Rate the work:</Text>
-      {[1, 2, 3, 4, 5].map((s) => (
-        <PressableScale
-          key={s}
-          hitSlop={4}
-          disabled={rate.isPending || rate.isSuccess}
-          onPress={() => {
-            setScore(s);
-            rate.mutate({ id: job.id, score: s });
-          }}
-        >
-          <Feather
-            name="star"
-            size={20}
-            color={s <= score && score > 0 ? color.warning : color.text.muted}
-            style={{ marginRight: 4 }}
-          />
-        </PressableScale>
-      ))}
-      {rate.isSuccess ? <Text className="ml-sm text-sm text-success">Thanks!</Text> : null}
-      {rate.isError ? <Text className="ml-sm flex-1 text-xs text-text-muted" numberOfLines={1}>{errMsg ?? 'Couldn’t rate'}</Text> : null}
+    <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.md, marginTop: space.md }}>
+      <T variant="label" tone="muted">
+        Rate the work:
+      </T>
+      <Stars
+        value={score}
+        size={22}
+        gap={4}
+        onRate={
+          rate.isPending || rate.isSuccess
+            ? undefined
+            : (n) => {
+                setScore(n);
+                rate.mutate({ id: job.id, score: n });
+              }
+        }
+      />
+      {rate.isSuccess ? (
+        <T variant="label" tone="success">
+          Thanks!
+        </T>
+      ) : null}
+      {rate.isError ? (
+        <T variant="caption" tone="muted" numberOfLines={1} style={{ flex: 1 }}>
+          {errMsg ?? 'Couldn’t rate'}
+        </T>
+      ) : null}
     </View>
   );
 }
@@ -121,16 +133,31 @@ function ProviderActions({ job }: { job: any }) {
 
   if (job.status === 'REQUESTED') {
     return (
-      <View className="mt-sm flex-row items-center" style={{ gap: 8 }}>
-        <Input
-          containerClassName="flex-1"
-          value={amount}
-          onChangeText={setAmount}
-          placeholder="Quote (GYD)"
-          keyboardType="number-pad"
-        />
-        <Button
+      <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.md, marginTop: space.md }}>
+        <View
+          style={{
+            flex: 1,
+            height: 48,
+            borderRadius: 9999,
+            borderWidth: 1,
+            borderColor: color.border.subtle,
+            backgroundColor: color.surface.base,
+            paddingHorizontal: space.lg,
+            justifyContent: 'center',
+          }}
+        >
+          <TextInput
+            value={amount}
+            onChangeText={setAmount}
+            placeholder="Quote (GYD)"
+            placeholderTextColor={color.text.muted}
+            keyboardType="number-pad"
+            style={{ fontFamily: 'Inter', fontSize: 15, color: color.text.primary, paddingVertical: 0 }}
+          />
+        </View>
+        <PillButton
           label="Send quote"
+          size="md"
           loading={quote.isPending}
           disabled={!(Number(amount) > 0)}
           onPress={() => quote.mutate({ id: job.id, amount: Number(amount) })}
@@ -140,9 +167,9 @@ function ProviderActions({ job }: { job: any }) {
   }
   if (job.status === 'SCHEDULED' && !job.providerConfirmedAt) {
     return (
-      <View className="mt-sm flex-row" style={{ gap: 8 }}>
-        <Button label="Confirm time" className="flex-1" loading={confirm.isPending} onPress={() => confirm.mutate(job.id)} />
-        <Button label="Can’t make it" variant="outline" className="flex-1" loading={decline.isPending} onPress={() => decline.mutate(job.id)} />
+      <View style={{ flexDirection: 'row', gap: space.md, marginTop: space.md }}>
+        <PillButton label="Confirm time" size="md" style={{ flex: 1 }} loading={confirm.isPending} onPress={() => confirm.mutate(job.id)} />
+        <PillButton label="Can’t make it" variant="outline" size="md" style={{ flex: 1 }} loading={decline.isPending} onPress={() => decline.mutate(job.id)} />
       </View>
     );
   }
@@ -154,68 +181,92 @@ function JobCard({ job, navigation }: { job: any; navigation: any }) {
   const isCustomer = job.customerId === myId;
   const cancel = useCancelJob();
   const [scheduling, setScheduling] = useState(false);
+  const [confirmCancel, setConfirmCancel] = useState(false);
   const status = STATUS_LABEL[job.status] ?? { label: job.status, tone: 'neutral' as const };
 
-  const confirmCancel = () =>
-    Alert.alert('Cancel request', 'Withdraw this job request?', [
-      { text: 'Keep it', style: 'cancel' },
-      { text: 'Cancel job', style: 'destructive', onPress: () => cancel.mutate(job.id) },
-    ]);
-
   return (
-    <Card className="mb-md">
-      <View className="flex-row items-start justify-between">
-        <View className="flex-1 pr-md">
-          <Text className="text-base font-semibold" numberOfLines={2}>{job.description}</Text>
-          <Text className="mt-xs text-xs text-text-muted">
+    <Card style={{ marginBottom: space.md }}>
+      <View style={{ flexDirection: 'row', alignItems: 'flex-start', gap: space.md }}>
+        <View style={{ flex: 1 }}>
+          <T variant="body" weight="semibold" numberOfLines={2}>
+            {job.description}
+          </T>
+          <T variant="caption" tone="muted" style={{ marginTop: 4 }}>
             {new Date(job.createdAt).toLocaleDateString([], { month: 'short', day: 'numeric' })}
-            {job.scheduledFor ? ` · booked ${new Date(job.scheduledFor).toLocaleString([], { weekday: 'short', hour: 'numeric', minute: '2-digit' })}` : ''}
-          </Text>
+            {job.scheduledFor
+              ? ` · booked ${new Date(job.scheduledFor).toLocaleString([], { weekday: 'short', hour: 'numeric', minute: '2-digit' })}`
+              : ''}
+          </T>
         </View>
-        <Badge label={status.label} tone={status.tone} />
+        <TonePill label={status.label} tone={status.tone} />
       </View>
 
       {job.status === 'QUOTED' && job.quoteAmount != null ? (
-        <View className="mt-sm rounded-2xl px-md py-sm" style={{ backgroundColor: color.brand[50] }}>
-          <Text className="text-base font-bold" style={{ color: color.brand[700] }}>Quote: {money(job.quoteAmount)}</Text>
-          <Text className="text-xs text-text-secondary">Cash on completion — accept by booking a time.</Text>
+        <View style={{ marginTop: space.md, borderRadius: radius.md, paddingHorizontal: space.lg, paddingVertical: space.md, backgroundColor: color.brand[50] }}>
+          <T variant="body" weight="bold" tone="deep">
+            Quote: {money(job.quoteAmount)}
+          </T>
+          <T variant="caption" tone="muted" style={{ marginTop: 2 }}>
+            Cash on completion — accept by booking a time.
+          </T>
         </View>
       ) : null}
 
       {job.status === 'SCHEDULED' && job.quoteAmount != null ? (
-        <View className="mt-sm flex-row items-center">
-          <Text className="flex-1 text-sm text-text-secondary">Agreed price: {money(job.quoteAmount)} · cash on completion</Text>
-          <Badge
+        <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.md, marginTop: space.md }}>
+          <T variant="label" tone="muted" style={{ flex: 1 }}>
+            Agreed price: {money(job.quoteAmount)} · cash on completion
+          </T>
+          <TonePill
             label={job.providerConfirmedAt ? 'Time confirmed' : 'Awaiting confirmation'}
             tone={job.providerConfirmedAt ? 'success' : 'neutral'}
           />
         </View>
       ) : null}
 
-      {isCustomer && scheduling && job.status === 'QUOTED' ? (
-        <ScheduleSheet job={job} onDone={() => setScheduling(false)} />
-      ) : null}
+      {isCustomer && scheduling && job.status === 'QUOTED' ? <ScheduleSheet job={job} onDone={() => setScheduling(false)} /> : null}
 
       {!isCustomer ? <ProviderActions job={job} /> : null}
 
-      <View className="mt-sm flex-row" style={{ gap: 8 }}>
+      <View style={{ flexDirection: 'row', gap: space.md, marginTop: space.md }}>
         {isCustomer && job.status === 'QUOTED' && !scheduling ? (
-          <Button label="Accept & book" className="flex-1" onPress={() => setScheduling(true)} />
+          <PillButton label="Accept & book" size="md" style={{ flex: 1 }} onPress={() => setScheduling(true)} />
         ) : null}
         {job.chatRoomId && !['COMPLETED', 'CANCELLED'].includes(job.status) ? (
-          <Button
+          <PillButton
             label="Chat"
-            variant="outline"
-            className="flex-1"
+            variant="soft"
+            size="md"
+            style={{ flex: 1 }}
             onPress={() => navigation.navigate('Chat', { roomId: job.chatRoomId, title: 'Job chat' })}
           />
         ) : null}
         {isCustomer && ['REQUESTED', 'QUOTED'].includes(job.status) ? (
-          <Button label="Cancel" variant="outline" className="flex-1" loading={cancel.isPending} onPress={confirmCancel} />
+          <PillButton label="Cancel" variant="outline" size="md" style={{ flex: 1 }} loading={cancel.isPending} onPress={() => setConfirmCancel(true)} />
         ) : null}
       </View>
 
       {isCustomer && job.status === 'COMPLETED' ? <RateRow job={job} /> : null}
+
+      {/* Kit confirm popup */}
+      <PopupCard visible={confirmCancel} onClose={() => setConfirmCancel(false)}>
+        <IconChip icon="x-circle" size={56} tone="error" />
+        <T variant="title" center style={{ marginTop: space.lg }}>
+          Cancel request?
+        </T>
+        <T variant="body" tone="muted" center style={{ marginTop: space.sm }}>
+          This withdraws the job request.
+        </T>
+        <PillButton
+          label="Cancel job"
+          style={{ alignSelf: 'stretch', marginTop: space['2xl'] }}
+          onPress={() => {
+            setConfirmCancel(false);
+            cancel.mutate(job.id);
+          }}
+        />
+        <PillButton label="Keep it" variant="soft" style={{ alignSelf: 'stretch', marginTop: space.md }} onPress={() => setConfirmCancel(false)} />
+      </PopupCard>
     </Card>
   );
 }
@@ -225,31 +276,21 @@ export function ServiceJobsScreen({ navigation }: any) {
   const jobs = q.data ?? [];
 
   return (
-    <SafeAreaView style={{ flex: 1 }} edges={['top']} className="bg-surface-subtle">
-      <View className="flex-row items-center px-lg py-sm">
-        <PressableScale onPress={() => navigation?.goBack?.()} hitSlop={10}>
-          <Feather name="chevron-left" size={24} color={color.text.primary} />
-        </PressableScale>
-        <Heading size="xl" className="ml-md">My service jobs</Heading>
-      </View>
+    <Screen>
+      <Header title="My Jobs" />
       <ScrollView
-        className="flex-1"
-        contentContainerStyle={{ paddingHorizontal: 16, paddingBottom: 32 }}
+        contentContainerStyle={{ paddingHorizontal: space['2xl'], paddingTop: space.sm, paddingBottom: space['3xl'] }}
         showsVerticalScrollIndicator={false}
         refreshControl={<RefreshControl refreshing={q.isRefetching} onRefresh={() => q.refetch()} tintColor={color.brand[500]} />}
       >
         {q.isLoading ? (
-          [0, 1, 2].map((i) => <Skeleton key={i} className="mb-md h-28 w-full rounded-2xl" />)
+          <LoadingBlock />
         ) : jobs.length === 0 ? (
-          <EmptyState
-            icon="toolbox-outline"
-            title="No jobs yet"
-            body="Request a pro from Services and quotes land here."
-          />
+          <EmptyState icon="tool" title="No jobs yet" body="Request a pro from Services and quotes land here." />
         ) : (
           jobs.map((j) => <JobCard key={j.id} job={j} navigation={navigation} />)
         )}
       </ScrollView>
-    </SafeAreaView>
+    </Screen>
   );
 }

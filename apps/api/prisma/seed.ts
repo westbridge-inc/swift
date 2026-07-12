@@ -252,16 +252,62 @@ async function main() {
         tags: ['Groceries'],
       },
     });
-    if ((await prisma.category.count({ where: { vendorId: freshMart.id } })) === 0) {
-      const groceries = await prisma.category.create({
-        data: { vendorId: freshMart.id, name: 'Groceries', sortOrder: 0 },
-      });
-      await prisma.item.createMany({
-        data: [
-          { vendorId: freshMart.id, categoryId: groceries.id, name: 'Basmati Rice 5kg', basePrice: 3500, fulfillment: 'DELIVERY', unit: 'bag', stockQuantity: 40, sortOrder: 0, dietaryTags: [], allergens: [] },
-          { vendorId: freshMart.id, categoryId: groceries.id, name: 'Cooking Oil 1L', basePrice: 1200, fulfillment: 'DELIVERY', unit: 'bottle', stockQuantity: 60, sortOrder: 1, dietaryTags: [], allergens: [] },
-        ],
-      });
+    // Aisled like a real mart; re-runs top up missing aisles/items by name.
+    {
+      const aisle = async (name: string, sortOrder: number) =>
+        (await prisma.category.findFirst({ where: { vendorId: freshMart.id, name } })) ??
+        prisma.category.create({ data: { vendorId: freshMart.id, name, sortOrder } });
+      const produce = await aisle('Produce', 0);
+      const grains = await aisle('Rice & Grains', 1);
+      const essentials = await aisle('Cooking Essentials', 2);
+      const drinks = await aisle('Drinks & Snacks', 3);
+
+      const shelf: Array<{ cat: string; name: string; price: number; unit: string; stock: number }> = [
+        { cat: produce.id, name: 'Bananas 1kg', price: 600, unit: 'bunch', stock: 50 },
+        { cat: produce.id, name: 'Tomatoes 500g', price: 450, unit: 'pack', stock: 40 },
+        { cat: produce.id, name: 'Onions 1kg', price: 500, unit: 'bag', stock: 45 },
+        { cat: produce.id, name: 'Avocado', price: 350, unit: 'each', stock: 30 },
+        { cat: grains.id, name: 'Basmati Rice 5kg', price: 3500, unit: 'bag', stock: 40 },
+        { cat: grains.id, name: 'Parboiled Rice 10kg', price: 5200, unit: 'bag', stock: 25 },
+        { cat: grains.id, name: 'All-Purpose Flour 2kg', price: 900, unit: 'bag', stock: 35 },
+        { cat: grains.id, name: 'Red Lentils 1kg', price: 800, unit: 'bag', stock: 30 },
+        { cat: essentials.id, name: 'Cooking Oil 1L', price: 1200, unit: 'bottle', stock: 60 },
+        { cat: essentials.id, name: 'Garam Masala 100g', price: 550, unit: 'jar', stock: 24 },
+        { cat: essentials.id, name: 'Brown Sugar 2kg', price: 700, unit: 'bag', stock: 40 },
+        { cat: essentials.id, name: 'Sea Salt 1kg', price: 300, unit: 'bag', stock: 50 },
+        { cat: drinks.id, name: 'Coconut Water 500ml', price: 400, unit: 'bottle', stock: 60 },
+        { cat: drinks.id, name: 'Orange Juice 1L', price: 950, unit: 'carton', stock: 30 },
+        { cat: drinks.id, name: 'Plantain Chips 150g', price: 350, unit: 'pack', stock: 48 },
+        { cat: drinks.id, name: 'Cream Crackers 200g', price: 420, unit: 'pack', stock: 36 },
+      ];
+      const have = new Set(
+        (await prisma.item.findMany({ where: { vendorId: freshMart.id }, select: { name: true } })).map((i) => i.name),
+      );
+      const missing = shelf.filter((it) => !have.has(it.name));
+      if (missing.length) {
+        await prisma.item.createMany({
+          data: missing.map((it, idx) => ({
+            vendorId: freshMart.id,
+            categoryId: it.cat,
+            name: it.name,
+            basePrice: it.price,
+            fulfillment: 'DELIVERY' as const,
+            unit: it.unit,
+            stockQuantity: it.stock,
+            sortOrder: idx,
+            dietaryTags: [],
+            allergens: [],
+          })),
+        });
+      }
+      // Re-home the two original items into their aisles, then drop the old
+      // catch-all category once it's empty.
+      await prisma.item.updateMany({ where: { vendorId: freshMart.id, name: 'Basmati Rice 5kg' }, data: { categoryId: grains.id } });
+      await prisma.item.updateMany({ where: { vendorId: freshMart.id, name: 'Cooking Oil 1L' }, data: { categoryId: essentials.id } });
+      const legacy = await prisma.category.findFirst({ where: { vendorId: freshMart.id, name: 'Groceries' } });
+      if (legacy && (await prisma.item.count({ where: { categoryId: legacy.id } })) === 0) {
+        await prisma.category.delete({ where: { id: legacy.id } });
+      }
     }
 
     const hardwareStore = await prisma.vendor.upsert({
@@ -287,13 +333,39 @@ async function main() {
         tags: ['Hardware'],
       },
     });
-    if ((await prisma.category.count({ where: { vendorId: hardwareStore.id } })) === 0) {
-      const tools = await prisma.category.create({
-        data: { vendorId: hardwareStore.id, name: 'Tools', sortOrder: 0 },
-      });
-      await prisma.item.create({
-        data: { vendorId: hardwareStore.id, categoryId: tools.id, name: 'Claw Hammer', basePrice: 2500, fulfillment: 'PICKUP', stockQuantity: 12, sortOrder: 0, dietaryTags: [], allergens: [] },
-      });
+    {
+      const cat = async (name: string, sortOrder: number) =>
+        (await prisma.category.findFirst({ where: { vendorId: hardwareStore.id, name } })) ??
+        prisma.category.create({ data: { vendorId: hardwareStore.id, name, sortOrder } });
+      const tools = await cat('Tools', 0);
+      const homeElec = await cat('Home & Electrical', 1);
+      const shelf = [
+        { cat: tools.id, name: 'Claw Hammer', price: 2500, unit: 'each', stock: 12 },
+        { cat: tools.id, name: 'Screwdriver Set (6pc)', price: 3800, unit: 'set', stock: 10 },
+        { cat: tools.id, name: 'Measuring Tape 5m', price: 1500, unit: 'each', stock: 20 },
+        { cat: homeElec.id, name: 'Emulsion Paint 4L — White', price: 6500, unit: 'bucket', stock: 8 },
+        { cat: homeElec.id, name: 'LED Bulb 9W (2-pack)', price: 1200, unit: 'pack', stock: 30 },
+      ];
+      const have = new Set(
+        (await prisma.item.findMany({ where: { vendorId: hardwareStore.id }, select: { name: true } })).map((i) => i.name),
+      );
+      const missing = shelf.filter((it) => !have.has(it.name));
+      if (missing.length) {
+        await prisma.item.createMany({
+          data: missing.map((it, idx) => ({
+            vendorId: hardwareStore.id,
+            categoryId: it.cat,
+            name: it.name,
+            basePrice: it.price,
+            fulfillment: 'PICKUP' as const,
+            unit: it.unit,
+            stockQuantity: it.stock,
+            sortOrder: idx,
+            dietaryTags: [],
+            allergens: [],
+          })),
+        });
+      }
     }
 
     const barbershop = await prisma.vendor.upsert({
@@ -319,46 +391,67 @@ async function main() {
         tags: ['Barber', 'Grooming'],
       },
     });
-    if ((await prisma.category.count({ where: { vendorId: barbershop.id } })) === 0) {
-      const services = await prisma.category.create({
-        data: { vendorId: barbershop.id, name: 'Services', sortOrder: 0 },
-      });
-      await prisma.item.create({
-        data: {
-          vendorId: barbershop.id,
-          categoryId: services.id,
-          name: "Men's Haircut",
-          basePrice: 2000,
-          fulfillment: 'APPOINTMENT',
-          bookingConfig: {
-            durationMinutes: 30,
-            slots: [
-              { dayOfWeek: 2, start: '09:00', end: '17:00' },
-              { dayOfWeek: 3, start: '09:00', end: '17:00' },
-              { dayOfWeek: 4, start: '09:00', end: '17:00' },
-              { dayOfWeek: 5, start: '09:00', end: '18:00' },
-              { dayOfWeek: 6, start: '08:00', end: '18:00' },
-            ],
-          },
-          sortOrder: 0,
-          dietaryTags: [],
-          allergens: [],
-        },
-      });
+    {
+      const services =
+        (await prisma.category.findFirst({ where: { vendorId: barbershop.id, name: 'Services' } })) ??
+        (await prisma.category.create({ data: { vendorId: barbershop.id, name: 'Services', sortOrder: 0 } }));
+      const week = [
+        { dayOfWeek: 2, start: '09:00', end: '17:00' },
+        { dayOfWeek: 3, start: '09:00', end: '17:00' },
+        { dayOfWeek: 4, start: '09:00', end: '17:00' },
+        { dayOfWeek: 5, start: '09:00', end: '18:00' },
+        { dayOfWeek: 6, start: '08:00', end: '18:00' },
+      ];
+      // The demo menu exercises every where-it-happens mode the editor offers.
+      const menu = [
+        { name: "Men's Haircut", price: 2000, minutes: 30, mode: 'BOTH', radius: 8 },
+        { name: 'Beard Trim', price: 1000, minutes: 15, mode: 'AT_BUSINESS' },
+        { name: 'Hot Towel Shave', price: 1500, minutes: 30, mode: 'AT_BUSINESS' },
+        { name: 'Home Visit Cut', price: 3500, minutes: 45, mode: 'MOBILE', radius: 10 },
+      ] as const;
+      for (const [idx, m] of menu.entries()) {
+        const bookingConfig = {
+          durationMinutes: m.minutes,
+          slots: week,
+          serviceMode: m.mode,
+          ...('radius' in m && m.radius ? { serviceRadiusKm: m.radius } : {}),
+        };
+        const existing = await prisma.item.findFirst({ where: { vendorId: barbershop.id, name: m.name } });
+        if (existing) {
+          await prisma.item.update({ where: { id: existing.id }, data: { bookingConfig } });
+        } else {
+          await prisma.item.create({
+            data: {
+              vendorId: barbershop.id,
+              categoryId: services.id,
+              name: m.name,
+              basePrice: m.price,
+              fulfillment: 'APPOINTMENT',
+              bookingConfig,
+              sortOrder: idx,
+              dietaryTags: [],
+              allergens: [],
+            },
+          });
+        }
+      }
     }
   }
 
   // ── Item imagery ──────────────────────────────────────────────────────────
-  // Every seeded listing gets a photo that actually matches it (URLs verified
-  // 200 on 2026-07-06) — without one the app falls back to a generic pool and
-  // "Pepperpot" renders as cake. updateMany by name heals existing dev DBs on
-  // re-run; the imageUrl:null guard never stomps a vendor-uploaded photo.
+  // Every seeded listing gets a photo that actually matches it (subjects
+  // EYE-verified 2026-07-11 — an HTTP 200 alone proved nothing: several IDs
+  // resolved to tandoori chicken/guitars/excavators). Free-license Unsplash
+  // only, no plus.unsplash.com premium. Without a photo the app falls back to
+  // a generic pool and "Pepperpot" renders as cake. updateMany by name heals
+  // existing dev DBs on re-run; the imageUrl:null guard never stomps a
+  // vendor-uploaded photo.
   const itemImages: Record<string, string> = {
     Pepperpot: '1544025162-d76694265947',
     'Cook-Up Rice': '1516684732162-798a0062be99',
     'Fried Rice': '1603133872878-684f208fb84b',
     'Chow Mein': '1585032226651-759b368d7246',
-    'Fresh Coconut Water': '1600271886742-f049cd451bba',
+    'Fresh Coconut Water': '1588413336019-dd5d3beddf55',
     Mauby: '1541544537156-7627a7a4aa1c',
     'Chicken Curry & Roti': '1565557623262-b51c2513a641',
     'Dhal Puri (2)': '1567620905732-2d1ec7ab7445',
@@ -381,15 +474,51 @@ async function main() {
     'Buddha Bowl': '1512621776951-a57141f2eefd',
     'Avocado Toast': '1482049016688-2d3e1b311543',
     'Fresh Juice': '1613478223719-2ab802602423',
-    'Basmati Rice 5kg': '1626074353765-517a681e40be',
-    'Cooking Oil 1L': '1620706857370-e1b9770e8bb1',
-    'Claw Hammer': '1426927308491-6380b6a9936f',
+    'Basmati Rice 5kg': '1536304993881-ff6e9eefa2a6',
+    'Cooking Oil 1L': '1474979266404-7eaacbcd87c5',
+    'Claw Hammer': '1586864387967-d02ef85d93e8',
     "Men's Haircut": '1503951914875-452162b0f3f1',
+    'Bananas 1kg': '1571771894821-ce9b6c11b08e',
+    'Tomatoes 500g': '1592924357228-91a4daadcfea',
+    'Onions 1kg': '1518977956812-cd3dbadaaf31',
+    'Avocado': '1523049673857-eb18f1d7b578',
+    'Parboiled Rice 10kg': '1586201375761-83865001e31c',
+    'All-Purpose Flour 2kg': '1610725664285-7c57e6eeac3f',
+    'Red Lentils 1kg': '1614373532201-c40b993f0013',
+    'Garam Masala 100g': '1596040033229-a9821ebd058d',
+    'Brown Sugar 2kg': '1704079611177-a3a60ce6f975',
+    'Sea Salt 1kg': '1518110925495-5fe2fda0442c',
+    'Coconut Water 500ml': '1588413336019-dd5d3beddf55',
+    'Orange Juice 1L': '1613478223719-2ab802602423',
+    'Plantain Chips 150g': '1762884601729-0eeeafbdfb8a',
+    'Cream Crackers 200g': '1691332663036-6f196621c2ee',
+    'Screwdriver Set (6pc)': '1663638964046-4b576e739a3a',
+    'Measuring Tape 5m': '1703756291638-b1774ae3c186',
+    'Emulsion Paint 4L — White': '1562259949-e8e7689d7828',
+    'LED Bulb 9W (2-pack)': '1529310399831-ed472b81d589',
+    'Beard Trim': '1621605815971-fbc98d665033',
+    'Hot Towel Shave': '1599351431202-1e0f0137899a',
+    'Home Visit Cut': '1599351431613-18ef1fdd27e1',
   };
   for (const [name, photo] of Object.entries(itemImages)) {
     await prisma.item.updateMany({
       where: { name, imageUrl: null },
       data: { imageUrl: `https://images.unsplash.com/photo-${photo}?w=600&q=80` },
+    });
+  }
+
+  // Storefront covers for the demo stores. Without one, RestaurantScreen's hero
+  // falls back to a type-pooled hash pick — the barbershop drew a clothing
+  // store. Null-guarded like item photos: a real vendor upload is never stomped.
+  const vendorCovers: Record<string, string> = {
+    'fresh-mart': '1604719312566-8912e9227c6a',
+    'city-hardware': '1631856954655-966f97d809de',
+    'sharp-cuts': '1610475680335-dafab5475150',
+  };
+  for (const [slug, photo] of Object.entries(vendorCovers)) {
+    await prisma.vendor.updateMany({
+      where: { slug, coverImageUrl: null },
+      data: { coverImageUrl: `https://images.unsplash.com/photo-${photo}?w=1200&q=80` },
     });
   }
 

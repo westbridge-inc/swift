@@ -1,20 +1,25 @@
-import { View, ScrollView } from 'react-native';
-import { SafeAreaView } from 'react-native-safe-area-context';
-import { Feather, MaterialCommunityIcons } from '@expo/vector-icons';
+/** @jsxImportSource react */
+import React from 'react';
+import { ScrollView, View } from 'react-native';
+import { MaterialCommunityIcons } from '@expo/vector-icons';
 import * as ImagePicker from 'expo-image-picker';
 import { Image } from 'expo-image';
-import { color } from '@swift/ui';
-import { Text, Heading, Button, PressableScale, elevation } from '../../../components/ui';
-import { useMoverKind, useVerificationStatus, useEarningsSummary, useUploadVehiclePhoto } from '../../../hooks';
+import { color, space } from '@swift/ui';
+import { Card, Header, LinkText, PillButton, Screen, SettingsRow, T, TonePill } from '../../../kit';
+import { Stars } from '../../../kit/controls';
+import { useMoverKind, useVerificationStatus, useEarningsSummary, useMoverSubscription, useUploadVehiclePhoto } from '../../../hooks';
 import { useAuthStore } from '../../../stores/authStore';
+import { RoleSwitcherSheet } from '../../../components/RoleSwitcherSheet';
 import { money } from '../../../lib/money';
 import { mediaUrl } from '../../../lib/images';
 
 export function MoverAccountScreen({ navigation }: any) {
   const { user, logout } = useAuthStore();
+  const [switcherOpen, setSwitcherOpen] = React.useState(false);
   const { kind, profile } = useMoverKind();
   const verified = (useVerificationStatus<any>('MOVER').data as any)?.roleVerified;
   const summaryQ = useEarningsSummary<any>(kind);
+  const subQ = useMoverSubscription(kind);
   const allTime = (summaryQ.data as any)?.allTime?.total ?? 0;
   const uploadVehiclePhoto = useUploadVehiclePhoto(kind);
 
@@ -26,6 +31,16 @@ export function MoverAccountScreen({ navigation }: any) {
     ? [profile.vehicleColor, profile.vehicleMake, profile.vehicleModel].filter(Boolean).join(' ') ||
       (profile.vehicleType ? String(profile.vehicleType).toLowerCase() : '')
     : null;
+  const sub = subQ.data;
+  const subPill = !sub
+    ? { label: 'Inactive', tone: 'brand' as const }
+    : sub.isTrialActive
+      ? { label: 'Free trial', tone: 'brand' as const }
+      : sub.isInGracePeriod
+        ? { label: 'Grace', tone: 'error' as const }
+        : sub.status === 'ACTIVE'
+          ? { label: 'Active', tone: 'success' as const }
+          : { label: String(sub.status ?? '').toLowerCase() || 'Inactive', tone: 'neutral' as const };
 
   const pickVehiclePhoto = async () => {
     const perm = await ImagePicker.requestMediaLibraryPermissionsAsync();
@@ -37,107 +52,106 @@ export function MoverAccountScreen({ navigation }: any) {
   };
 
   return (
-    <SafeAreaView style={{ flex: 1 }} edges={['top']} className="bg-surface-subtle">
-      <View className="flex-row items-center px-lg py-sm">
-        <PressableScale onPress={() => navigation?.goBack?.()} hitSlop={8} className="mr-sm">
-          <Feather name="chevron-left" size={24} color={color.text.primary} />
-        </PressableScale>
-        <Heading size="xl">Account</Heading>
-      </View>
-
-      <ScrollView contentContainerStyle={{ paddingHorizontal: 16, paddingBottom: 32 }} showsVerticalScrollIndicator={false}>
+    <Screen>
+      <Header title="Account" />
+      <ScrollView contentContainerStyle={{ paddingHorizontal: space['2xl'], paddingBottom: space['3xl'] }} showsVerticalScrollIndicator={false}>
         {/* Profile */}
-        <View className="flex-row items-center rounded-3xl bg-surface-base p-lg" style={elevation.card}>
-          <View className="h-14 w-14 items-center justify-center rounded-full" style={{ backgroundColor: color.brand[500] }}>
-            <Text className="font-display text-xl font-extrabold text-white">{initial}</Text>
+        <Card style={{ flexDirection: 'row', alignItems: 'center', gap: space.md }}>
+          <View style={{ width: 56, height: 56, borderRadius: 28, alignItems: 'center', justifyContent: 'center', backgroundColor: color.brand[500] }}>
+            <T variant="title" tone="onBrand">
+              {initial}
+            </T>
           </View>
-          <View className="ml-md flex-1">
-            <Heading size="lg" numberOfLines={1}>{name}</Heading>
-            <Text className="text-sm text-text-muted">{user?.phone ?? ''}</Text>
-            <View className="mt-1 flex-row items-center" style={{ gap: 10 }}>
-              <View className="flex-row items-center rounded-full bg-surface-subtle px-2 py-0.5">
-                <MaterialCommunityIcons name={isDriver ? 'car' : 'bike-fast'} size={12} color={color.text.secondary} />
-                <Text className="ml-1 text-[11px] font-bold text-text-secondary">{isDriver ? 'Driver' : 'Rider'}</Text>
-              </View>
+          <View style={{ flex: 1 }}>
+            <T variant="heading" numberOfLines={1}>
+              {name}
+            </T>
+            <T variant="label" tone="muted" style={{ marginTop: 2 }}>
+              {user?.phone ?? ''}
+            </T>
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.md, marginTop: 6 }}>
+              <TonePill label={isDriver ? 'Driver' : 'Rider'} tone="neutral" />
               {rating ? (
-                <View className="flex-row items-center">
-                  <MaterialCommunityIcons name="star" size={13} color="#F5A623" />
-                  <Text className="ml-0.5 text-[11px] font-bold text-text-secondary">{Number(rating).toFixed(1)}</Text>
+                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 3 }}>
+                  <Stars value={Number(rating)} size={12} />
+                  <T variant="caption" weight="bold" tone="muted">
+                    {Number(rating).toFixed(1)}
+                  </T>
                 </View>
               ) : null}
-              {verified ? (
-                <View className="flex-row items-center">
-                  <MaterialCommunityIcons name="check-decagram" size={13} color={color.success} />
-                  <Text className="ml-0.5 text-[11px] font-bold text-success">Verified</Text>
-                </View>
-              ) : null}
+              {verified ? <TonePill label="Verified" tone="success" /> : null}
             </View>
           </View>
-        </View>
+        </Card>
 
         {/* Vehicle — customers see this photo when you accept (§5) */}
         {vehicle || profile ? (
-          <View className="mt-md rounded-2xl bg-surface-base p-md" style={elevation.card}>
-            <View className="flex-row items-center">
+          <Card style={{ marginTop: space.md }}>
+            <View style={{ flexDirection: 'row', alignItems: 'center' }}>
               {profile?.vehiclePhotoUrl ? (
-                <Image
-                  source={{ uri: mediaUrl(profile.vehiclePhotoUrl) ?? undefined }}
-                  style={{ width: 64, height: 44, borderRadius: 8 }}
-                  contentFit="cover"
-                />
+                <Image source={{ uri: mediaUrl(profile.vehiclePhotoUrl) ?? undefined }} style={{ width: 64, height: 44, borderRadius: 8 }} contentFit="cover" />
               ) : (
-                <View className="h-9 w-9 items-center justify-center rounded-full bg-surface-subtle">
-                  <MaterialCommunityIcons name={isDriver ? 'car-side' : 'bike-fast'} size={18} color={color.brand[500]} />
+                <View style={{ width: 44, height: 44, borderRadius: 22, alignItems: 'center', justifyContent: 'center', backgroundColor: color.brand[50] }}>
+                  <MaterialCommunityIcons name={isDriver ? 'car-side' : 'bike-fast'} size={20} color={color.brand[600]} />
                 </View>
               )}
-              <View className="ml-md flex-1">
-                <Text className="text-sm font-bold text-text-primary">{vehicle || 'Your vehicle'}</Text>
-                <Text className="text-xs text-text-muted">{profile?.licensePlate ?? ''}</Text>
+              <View style={{ flex: 1, marginLeft: space.md }}>
+                <T variant="label" weight="bold" numberOfLines={1}>
+                  {vehicle || 'Your vehicle'}
+                </T>
+                <T variant="caption" tone="muted">
+                  {profile?.licensePlate ?? ''}
+                </T>
               </View>
-              <PressableScale onPress={pickVehiclePhoto} disabled={uploadVehiclePhoto.isPending} hitSlop={8}>
-                <Text className="text-sm font-semibold" style={{ color: color.brand[600] }}>
-                  {uploadVehiclePhoto.isPending ? 'Uploading…' : profile?.vehiclePhotoUrl ? 'Change photo' : 'Add photo'}
-                </Text>
-              </PressableScale>
+              <LinkText
+                label={uploadVehiclePhoto.isPending ? 'Uploading…' : profile?.vehiclePhotoUrl ? 'Change photo' : 'Add photo'}
+                onPress={pickVehiclePhoto}
+              />
             </View>
             {!profile?.vehiclePhotoUrl ? (
-              <Text className="mt-xs text-xs text-text-muted">
+              <T variant="caption" tone="muted" style={{ marginTop: space.sm }}>
                 Add a clear photo of your vehicle — customers see it the moment you accept.
-              </Text>
+              </T>
             ) : null}
             {uploadVehiclePhoto.isError ? (
-              <Text className="mt-xs text-xs text-error">Upload failed — try a different photo.</Text>
+              <T variant="caption" tone="error" style={{ marginTop: space.sm }}>
+                Upload failed — try a different photo.
+              </T>
             ) : null}
-          </View>
+          </Card>
         ) : null}
 
-        {/* Earnings link */}
-        <PressableScale className="mt-md" onPress={() => navigation?.navigate?.('Earnings')}>
-          <View className="flex-row items-center rounded-2xl bg-surface-base p-md" style={elevation.card}>
-            <View className="h-9 w-9 items-center justify-center rounded-full bg-surface-subtle">
-              <MaterialCommunityIcons name="cash-multiple" size={18} color={color.brand[500]} />
-            </View>
-            <View className="ml-md flex-1">
-              <Text className="text-sm font-bold text-text-primary">Earnings</Text>
-              <Text className="text-xs text-text-muted">{money(allTime)} all-time · 100% yours</Text>
-            </View>
-            <Feather name="chevron-right" size={18} color={color.text.muted} />
-          </View>
-        </PressableScale>
+        {/* Ops rows */}
+        <Card style={{ marginTop: space.md, paddingVertical: space.sm }}>
+          <SettingsRow icon="dollar-sign" label="Earnings" sub={`${money(allTime)} all-time · 100% yours`} onPress={() => navigation?.navigate?.('Earnings')} />
+          <SettingsRow icon="clock" label="Job history" sub="Every completed and cancelled job" onPress={() => navigation?.navigate?.('JobHistory')} />
+          <SettingsRow icon="file-text" label="Documents" sub="Licences, insurance and renewals" onPress={() => navigation?.navigate?.('MoverDocuments')} />
+          <SettingsRow
+            icon="credit-card"
+            label="Weekly fee"
+            sub={sub ? `${money(sub.customRate ?? sub.weeklyRate)}/week` : 'Not active yet'}
+            right={<TonePill label={subPill.label} tone={subPill.tone} />}
+          />
+          <SettingsRow icon="refresh-cw" label="Switch app" sub="Swift · Swift Business" onPress={() => setSwitcherOpen(true)} />
+        </Card>
 
         {/* The model */}
-        <View className="mt-md rounded-2xl bg-surface-base p-lg" style={elevation.card}>
-          <View className="flex-row items-center">
+        <Card style={{ marginTop: space.md }}>
+          <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.sm }}>
             <MaterialCommunityIcons name="check-decagram" size={16} color={color.success} />
-            <Text className="ml-2 text-sm font-bold text-text-primary">You keep 100%</Text>
+            <T variant="body" weight="semibold">
+              You keep 100%
+            </T>
           </View>
-          <Text className="mt-1 text-xs leading-4 text-text-secondary">
+          <T variant="caption" tone="muted" style={{ marginTop: 4 }}>
             Swift only charges a flat weekly fee — no commission on any fare, ever. You&apos;re paid in cash, on every job.
-          </Text>
-        </View>
+          </T>
+        </Card>
 
-        <Button label="Log out" variant="outline" className="mt-lg" onPress={logout} />
+        <PillButton label="Log out" variant="outline" style={{ marginTop: space.xl }} onPress={logout} />
       </ScrollView>
-    </SafeAreaView>
+
+      <RoleSwitcherSheet visible={switcherOpen} current="mover" onClose={() => setSwitcherOpen(false)} />
+    </Screen>
   );
 }

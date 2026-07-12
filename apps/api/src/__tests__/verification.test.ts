@@ -465,6 +465,7 @@ describe('Expiry automation', () => {
       where: { userId: vendorUserId, title: 'Document expired' },
     });
     expect(note).not.toBeNull();
+    expect((note!.data as any)?.audience).toBe('business');
   });
 
   it('sends exactly one 30-day reminder per expiring document', async () => {
@@ -727,5 +728,247 @@ describe('Operator identity docs are face-matched against the signup selfie', ()
       },
     });
     expect(calls[1]?.path).toBe('document');
+  });
+});
+
+describe('Subscriptions are born on verification (auto-approval path)', () => {
+  // The dead-end this prevents: KYC auto-approves the full checklist, the
+  // operator is "verified", but only the ADMIN entity-verify endpoints ever
+  // started trials — so go-online failed with SUBSCRIPTION_REQUIRED and there
+  // was no self-serve way out.
+  it('a fully-verified mover holds exactly one TRIAL subscription', async () => {
+    const rider = await app.prisma.rider.findFirstOrThrow({
+      where: { userId: moverUserId },
+      include: { subscription: true },
+    });
+    expect(rider.subscription).not.toBeNull();
+    expect(rider.subscription!.status).toBe('TRIAL');
+    expect(Number(rider.subscription!.weeklyRate)).toBe(12000);
+
+    // afterApproval fired once per approved document — birth must be idempotent
+    const count = await app.prisma.subscription.count({ where: { riderId: rider.id } });
+    expect(count).toBe(1);
+  });
+
+  it('a fully-verified vendor holds exactly one TRIAL subscription', async () => {
+    const subs = await app.prisma.subscription.findMany({ where: { vendorId: serviceVendorId } });
+    expect(subs).toHaveLength(1);
+    expect(subs[0]!.status).toBe('TRIAL');
+    expect(Number(subs[0]!.weeklyRate)).toBe(20000);
+  });
+
+  it('a mover on TRIAL can go online (the trial is not a dead-end)', async () => {
+    const res = await inject('POST', '/api/v1/rider/go-online', {}, moverToken);
+    expect(res.statusCode).toBe(200);
+  });
+});
+
+describe('Commerce gate — acceptingOrders requires verification', () => {
+  // State from the expiry suite: the SERVICE vendor's owner_national_id lapsed,
+  // so the store sits suspended (isVerified=false, acceptingOrders=false).
+  it('an unverified store cannot turn ordering back on', async () => {
+    const res = await inject('PUT', '/api/v1/vendor/vendor/toggle-orders', {}, vendorToken);
+    expect(res.statusCode).toBe(403);
+    expect(res.json().error.code).toBe('VERIFICATION_REQUIRED');
+
+    const vendor = await app.prisma.vendor.findUniqueOrThrow({ where: { id: serviceVendorId } });
+    expect(vendor.acceptingOrders).toBe(false);
+  });
+
+  it('re-verification restores commerce automatically', async () => {
+    const res = await inject('POST', '/api/v1/verification/documents', {
+      role: 'SERVICE',
+      docType: 'owner_national_id',
+      fileUrl: 'storage://t/auto-approve/owner_id_renewed.jpg',
+      consent: true,
+      privacyNoticeVersion: 'v1',
+    }, vendorToken);
+    expect(res.statusCode).toBe(201);
+    expect(res.json().data.status).toBe('APPROVED');
+
+    const vendor = await app.prisma.vendor.findUniqueOrThrow({ where: { id: serviceVendorId } });
+    expect(vendor.isVerified).toBe(true);
+    expect(vendor.acceptingOrders).toBe(true);
+
+    // Re-verification never mints a second subscription
+    const count = await app.prisma.subscription.count({ where: { vendorId: serviceVendorId } });
+    expect(count).toBe(1);
+  });
+
+  it('a verified store can pause and resume freely', async () => {
+    const off = await inject('PUT', '/api/v1/vendor/vendor/toggle-orders', {}, vendorToken);
+    expect(off.statusCode).toBe(200);
+    expect(off.json().data.acceptingOrders).toBe(false);
+
+    const on = await inject('PUT', '/api/v1/vendor/vendor/toggle-orders', {}, vendorToken);
+    expect(on.statusCode).toBe(200);
+    expect(on.json().data.acceptingOrders).toBe(true);
+  });
+
+  it('a routine renewal approval does not override a deliberate pause', async () => {
+    // The owner pauses on purpose…
+    const off = await inject('PUT', '/api/v1/vendor/vendor/toggle-orders', {}, vendorToken);
+    expect(off.json().data.acceptingOrders).toBe(false);
+
+    // …then a document renewal is approved (police clearance enters its
+    // 30-day window and the renewal auto-approves).
+    await app.prisma.verificationDocument.updateMany({
+      where: { userId: vendorUserId, docType: 'police_clearance', status: 'APPROVED' },
+      data: { expiresAt: new Date(Date.now() + 10 * 24 * 60 * 60 * 1000) },
+    });
+    const renewal = await inject('POST', '/api/v1/verification/documents', {
+      role: 'SERVICE',
+      docType: 'police_clearance',
+      fileUrl: 'storage://t/auto-approve/clearance_renewed.jpg',
+      consent: true,
+      privacyNoticeVersion: 'v1',
+    }, vendorToken);
+    expect(renewal.statusCode).toBe(201);
+
+    // Still verified — but the pause the owner chose stays.
+    const vendor = await app.prisma.vendor.findUniqueOrThrow({ where: { id: serviceVendorId } });
+    expect(vendor.isVerified).toBe(true);
+    expect(vendor.acceptingOrders).toBe(false);
+
+    // restore for any later suite
+    await inject('PUT', '/api/v1/vendor/vendor/toggle-orders', {}, vendorToken);
+  });
+});
+
+describe('Early renewal window — resubmission opens 30 days before expiry', () => {
+  it('accepts a renewal once the document is inside the window', async () => {
+    // drivers_licence carries a +10d expiry from the reminder test above
+    const res = await inject('POST', '/api/v1/verification/documents', {
+      role: 'MOVER',
+      docType: 'drivers_licence',
+      fileUrl: 'storage://t/licence_renewal.jpg',
+      consent: true,
+      privacyNoticeVersion: 'v1',
+    }, moverToken);
+    expect(res.statusCode).toBe(201);
+    expect(res.json().data.status).toBe('PENDING');
+  });
+
+  it('rejects resubmission while the document is valid beyond the window', async () => {
+    await app.prisma.verificationDocument.updateMany({
+      where: { userId: moverUserId, docType: 'vehicle_registration', status: 'APPROVED' },
+      data: { expiresAt: new Date(Date.now() + 100 * 24 * 60 * 60 * 1000) },
+    });
+    const res = await inject('POST', '/api/v1/verification/documents', {
+      role: 'MOVER',
+      docType: 'vehicle_registration',
+      fileUrl: 'storage://t/too-early.jpg',
+      consent: true,
+      privacyNoticeVersion: 'v1',
+    }, moverToken);
+    expect(res.statusCode).toBe(409);
+    expect(res.json().error.code).toBe('ALREADY_APPROVED');
+  });
+});
+
+describe('Taxi hire-class insurance — the manual 5-point check is enforced', () => {
+  let taxiUserId: string;
+  const TAXI_CHECKLIST = [
+    'national_id', 'police_clearance', 'drivers_licence', 'vehicle_registration',
+    'vehicle_insurance', 'hire_car_permit', 'vehicle_plate_photo', 'vehicle_exterior_photo', 'fitness_cert',
+  ];
+
+  beforeAll(async () => {
+    const u = await app.prisma.user.findUniqueOrThrow({ where: { phone: TAXI_MOVER_PHONE } });
+    taxiUserId = u.id;
+    // Full CAR checklist approved; insurance reviewed HIRE + hire class
+    // confirmed, but the reviewer has NOT cross-checked the plate yet.
+    await app.prisma.verificationDocument.createMany({
+      data: TAXI_CHECKLIST.map((docType) => ({
+        userId: taxiUserId,
+        role: 'MOVER' as const,
+        docType,
+        fileUrl: `storage://t/taxi/${docType}.jpg`,
+        status: 'APPROVED' as const,
+        reviewedBy: 'test',
+        reviewedAt: new Date(),
+        consentAt: new Date(),
+        privacyNoticeVersion: 'v1',
+        ...(docType === 'vehicle_insurance' && {
+          insurerName: 'Demerara Mutual',
+          policyNumber: 'HC-TEST-5PT',
+          coverageClass: 'HIRE' as const,
+          hireClassConfirmed: true,
+          plateCrossChecked: false,
+        }),
+      })),
+    });
+  });
+
+  it('blocks live operation until the plate cross-check is confirmed', async () => {
+    const live = await sweepService.getLiveOperationStatus(taxiUserId, { vehicleType: 'CAR' });
+    expect(live).toEqual({ allowed: false, reason: 'insurance' });
+  });
+
+  it('passes once the reviewer confirms the plate against the policy', async () => {
+    await app.prisma.verificationDocument.updateMany({
+      where: { userId: taxiUserId, docType: 'vehicle_insurance' },
+      data: { plateCrossChecked: true },
+    });
+    const live = await sweepService.getLiveOperationStatus(taxiUserId, { vehicleType: 'CAR' });
+    expect(live).toEqual({ allowed: true, reason: 'ok' });
+  });
+
+  it('PRIVATE coverage never operates a taxi', async () => {
+    await app.prisma.verificationDocument.updateMany({
+      where: { userId: taxiUserId, docType: 'vehicle_insurance' },
+      data: { coverageClass: 'PRIVATE' },
+    });
+    const live = await sweepService.getLiveOperationStatus(taxiUserId, { vehicleType: 'CAR' });
+    expect(live).toEqual({ allowed: false, reason: 'insurance' });
+
+    await app.prisma.verificationDocument.updateMany({
+      where: { userId: taxiUserId, docType: 'vehicle_insurance' },
+      data: { coverageClass: 'HIRE' },
+    });
+  });
+});
+
+describe('Lapsed documents force movers offline (daily sweep)', () => {
+  it('an online taxi whose insurance lapses is pulled offline immediately', async () => {
+    const taxi = await app.prisma.user.findUniqueOrThrow({ where: { phone: TAXI_MOVER_PHONE } });
+    await app.prisma.driver.updateMany({ where: { userId: taxi.id }, data: { isOnline: true } });
+    await app.prisma.verificationDocument.updateMany({
+      where: { userId: taxi.id, docType: 'vehicle_insurance', status: 'APPROVED' },
+      data: { expiresAt: new Date(Date.now() - 60 * 1000) },
+    });
+
+    await sweepService.expireLapsedDocuments();
+
+    const driver = await app.prisma.driver.findFirstOrThrow({ where: { userId: taxi.id } });
+    expect(driver.isOnline).toBe(false);
+
+    const note = await app.prisma.notification.findFirst({
+      where: { userId: taxi.id, title: 'You have been taken offline' },
+    });
+    expect(note).not.toBeNull();
+    // Role separation: operator alerts are tagged for the driver surface,
+    // so a multi-role account never sees them in the shopping feed.
+    expect((note!.data as any)?.audience).toBe('earner');
+  });
+
+  it('an online courier is pulled offline when their police clearance lapses — others untouched', async () => {
+    // A bystander who stays online through someone else's expiry
+    const cyclist = await app.prisma.user.findUniqueOrThrow({ where: { phone: BICYCLE_MOVER_PHONE } });
+    await app.prisma.rider.updateMany({ where: { userId: cyclist.id }, data: { isOnline: true } });
+
+    await app.prisma.rider.updateMany({ where: { userId: moverUserId }, data: { isOnline: true } });
+    await app.prisma.verificationDocument.updateMany({
+      where: { userId: moverUserId, docType: 'police_clearance', status: 'APPROVED' },
+      data: { expiresAt: new Date(Date.now() - 60 * 1000) },
+    });
+
+    await sweepService.expireLapsedDocuments();
+
+    const rider = await app.prisma.rider.findFirstOrThrow({ where: { userId: moverUserId } });
+    expect(rider.isOnline).toBe(false);
+
+    const bystander = await app.prisma.rider.findFirstOrThrow({ where: { userId: cyclist.id } });
+    expect(bystander.isOnline).toBe(true);
   });
 });

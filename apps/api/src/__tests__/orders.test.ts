@@ -327,6 +327,60 @@ describe('Checkout — ID gate, multi-vendor split, fulfillment', () => {
     expect(order.pickupCode).toMatch(/^\d{6}$/);
   });
 
+  it('express charges exactly 1.5x the delivery fee and flags the order — pickup ignores it', async () => {
+    // Baseline: the same cart at standard speed
+    await addToCart(customer.token, restaurant.vendorId, burgerId, 1);
+    const std = await inject('POST', '/api/v1/customer/checkout', { paymentMethod: 'CASH' }, customer.token);
+    expect(std.statusCode).toBe(200);
+    const stdOrder = std.json().data.order ?? std.json().data.orders[0];
+    createdOrderIds.push(stdOrder.id);
+    const stdFee = Number(stdOrder.deliveryFee);
+    expect(stdFee).toBeGreaterThan(0);
+    expect(stdOrder.isExpress).toBe(false);
+
+    // Express: same route, 1.5x fee, flag persisted, premium in the total
+    await addToCart(customer.token, restaurant.vendorId, burgerId, 1);
+    const exp = await inject('POST', '/api/v1/customer/checkout', { paymentMethod: 'CASH', express: true }, customer.token);
+    expect(exp.statusCode).toBe(200);
+    const expOrder = exp.json().data.order ?? exp.json().data.orders[0];
+    createdOrderIds.push(expOrder.id);
+    expect(Number(expOrder.deliveryFee)).toBe(Math.round(stdFee * 1.5));
+    expect(expOrder.isExpress).toBe(true);
+
+    const db = await app.prisma.order.findUniqueOrThrow({ where: { id: expOrder.id } });
+    expect(db.isExpress).toBe(true);
+    expect(Number(db.totalAmount)).toBe(Number(db.subtotalBase) + Math.round(stdFee * 1.5));
+
+    // Express is meaningless for pickup — no fee, no flag
+    await addToCart(customer.token, supermarket.vendorId, riceId, 1);
+    const pick = await inject('POST', '/api/v1/customer/checkout', {
+      paymentMethod: 'CASH',
+      express: true,
+      fulfillmentSelections: { [supermarket.vendorId]: 'PICKUP' },
+    }, customer.token);
+    expect(pick.statusCode).toBe(200);
+    const pickOrder = pick.json().data.order;
+    createdOrderIds.push(pickOrder.id);
+    expect(pickOrder.deliveryFee).toBe(0);
+    const pdb = await app.prisma.order.findUniqueOrThrow({ where: { id: pickOrder.id } });
+    expect(pdb.isExpress).toBe(false);
+  });
+
+  it('the cart quote matches the checkout fee (same address, same routing source)', async () => {
+    await addToCart(customer.token, restaurant.vendorId, burgerId, 1);
+    const cartRes = await inject('GET', '/api/v1/customer/cart', undefined, customer.token);
+    expect(cartRes.statusCode).toBe(200);
+    const quoted = Number(cartRes.json().data.deliveryFee);
+    expect(quoted).toBeGreaterThan(0);
+
+    const res = await inject('POST', '/api/v1/customer/checkout', { paymentMethod: 'CASH' }, customer.token);
+    expect(res.statusCode).toBe(200);
+    const order = res.json().data.order ?? res.json().data.orders[0];
+    createdOrderIds.push(order.id);
+    // What the cart promised is what checkout charges — no quote drift.
+    expect(Number(order.deliveryFee)).toBe(quoted);
+  });
+
   describe('Takeaway — pickup completion (no rider)', () => {
     async function makePickupOrder(status: OrderStatus, pickupCode: string | null) {
       const order = await app.prisma.order.create({
@@ -512,6 +566,45 @@ describe('Appointments — booked at acceptance, never double-held', () => {
 
     const db = await app.prisma.order.findUniqueOrThrow({ where: { id: order.id }, select: { status: true } });
     expect(db.status).toBe('PENDING');
+  });
+
+  it('where-it-happens: mode is validated against the business and lands on the order address', async () => {
+    // The haircut has no serviceMode = AT_BUSINESS: asking them to travel is a 400.
+    const cust = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
+    const laterSlot = new Date(slot.getTime() + 60 * 60_000);
+    await inject('POST', '/api/v1/customer/cart/items', { vendorId: service.vendorId, itemId: haircutId, quantity: 1 }, cust.token);
+    const refused = await inject('POST', '/api/v1/customer/checkout', {
+      paymentMethod: 'CASH',
+      appointments: [{ itemId: haircutId, slotStart: laterSlot.toISOString(), mode: 'MOBILE' }],
+    }, cust.token);
+    expect(refused.statusCode).toBe(400);
+    expect(refused.json().error.code).toBe('MODE_NOT_OFFERED');
+
+    // A BOTH-mode service honours the customer's pick: AT_BUSINESS books at
+    // the store's address — no customer address required at all.
+    const mobileWash = (await makeItem(service.vendorId, service.categoryId, 'Step7 Wash', 3000, {
+      fulfillment: 'APPOINTMENT',
+      bookingConfig: {
+        durationMinutes: 30,
+        slots: [{ dayOfWeek: 4, start: '09:00', end: '17:00' }],
+        serviceMode: 'BOTH',
+        serviceRadiusKm: 10,
+      },
+    })).id;
+    await app.prisma.cart.deleteMany({ where: { customerId: cust.userId } });
+    await inject('POST', '/api/v1/customer/cart/items', { vendorId: service.vendorId, itemId: mobileWash, quantity: 1 }, cust.token);
+    const atStore = await inject('POST', '/api/v1/customer/checkout', {
+      paymentMethod: 'CASH',
+      appointments: [{ itemId: mobileWash, slotStart: laterSlot.toISOString(), mode: 'AT_BUSINESS' }],
+    }, cust.token);
+    expect(atStore.statusCode).toBe(200);
+    const order = atStore.json().data.order;
+    createdOrderIds.push(order.id);
+    // The order carries the BUSINESS's address — you go to them.
+    const db = await app.prisma.order.findUniqueOrThrow({ where: { id: order.id } });
+    const vendorRow = await app.prisma.vendor.findUniqueOrThrow({ where: { id: service.vendorId } });
+    expect(db.deliveryLat).toBe(vendorRow.latitude);
+    expect(db.deliveryLng).toBe(vendorRow.longitude);
   });
 
   it('cancelling an accepted appointment frees the slot', async () => {

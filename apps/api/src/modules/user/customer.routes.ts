@@ -3,6 +3,7 @@ import { z } from 'zod';
 import { VendorType, OrderStatus, NotificationType } from '@prisma/client';
 import { calculateDeliveryFee } from '../../utils/markup';
 import { estimateDrivingDistance, estimateDeliveryMinutes } from '../../utils/distance';
+import { getMapsProvider } from '../../providers/maps/maps-provider';
 import { parsePagination, paginatedResponse } from '../../utils/pagination';
 import { AppError, NotFoundError, ValidationError, ForbiddenError } from '../../utils/errors';
 import { OrderService } from '../order/order.service';
@@ -89,9 +90,19 @@ const checkoutSchema = z.object({
   promoCode: z.string().max(40).optional(),
   // Per-vendor DELIVERY|PICKUP choice for multi-vendor carts
   fulfillmentSelections: z.record(z.enum(['DELIVERY', 'PICKUP'])).optional(),
-  // Requested slots for APPOINTMENT listings (booked at vendor acceptance)
+  // Priority delivery: 1.5x delivery fee, dispatched ahead of standard orders
+  express: z.boolean().optional(),
+  // Requested slots for APPOINTMENT listings (booked at vendor acceptance).
+  // mode: where the service happens when the business offers BOTH — at their
+  // place (AT_BUSINESS) or the customer's (MOBILE).
   appointments: z
-    .array(z.object({ itemId: z.string().min(1), slotStart: z.coerce.date() }))
+    .array(
+      z.object({
+        itemId: z.string().min(1),
+        slotStart: z.coerce.date(),
+        mode: z.enum(['AT_BUSINESS', 'MOBILE']).optional(),
+      }),
+    )
     .max(10)
     .optional(),
 });
@@ -213,22 +224,32 @@ async function buildCartResponse(
     return null;
   }
 
-  // Fetch related address and promo code separately (no direct relations on Cart)
-  const deliveryAddr = cart.deliveryAddressId
+  // Fetch related address and promo code separately (no direct relations on
+  // Cart). Same resolution as checkout: the cart's chosen address, else the
+  // customer's default — so the quote prices the same journey checkout will.
+  let deliveryAddr = cart.deliveryAddressId
     ? await app.prisma.address.findUnique({ where: { id: cart.deliveryAddressId } })
     : null;
+  if (!deliveryAddr) {
+    deliveryAddr = await app.prisma.address.findFirst({
+      where: { userId: cart.customerId, isDefault: true },
+    });
+  }
   const promoCodeRecord = cart.promoCodeId
     ? await app.prisma.promoCode.findUnique({ where: { id: cart.promoCodeId } })
     : null;
-  const addrLat = lat ?? deliveryAddr?.latitude;
-  const addrLng = lng ?? deliveryAddr?.longitude;
+  // The fee is about where the order is GOING: the chosen delivery address
+  // wins over device coords (those are only a fallback before an address is
+  // set). Same routing source as checkout, so the quote equals the final fee.
+  const addrLat = deliveryAddr?.latitude ?? lat;
+  const addrLng = deliveryAddr?.longitude ?? lng;
 
   let distanceKm = 3; // sensible default
   if (addrLat && addrLng && cart.vendor) {
-    distanceKm = estimateDrivingDistance(
-      cart.vendor.latitude, cart.vendor.longitude,
-      addrLat, addrLng,
-    );
+    distanceKm = (await getMapsProvider().routeKm(
+      { lat: cart.vendor.latitude, lng: cart.vendor.longitude },
+      { lat: addrLat, lng: addrLng },
+    )).km;
   }
 
   // Line items — zero markup: customers pay the vendor base price; platform
@@ -634,9 +655,10 @@ export async function customerRoutes(app: FastifyInstance) {
       recentOrders,
       popularItemRows,
     ] = await Promise.all([
-      // All active vendors
+      // All active, document-verified vendors (unverified stores stay out of
+      // discovery; favorites and direct links still resolve their storefront)
       app.prisma.vendor.findMany({
-        where: { status: 'ACTIVE' },
+        where: { status: 'ACTIVE', isVerified: true },
         include: {
           categories: { select: { id: true, name: true }, take: 5 },
         },
@@ -772,7 +794,7 @@ export async function customerRoutes(app: FastifyInstance) {
     const { page, limit, skip } = parsePagination(query);
     const { type, cuisine, search, lat, lng, open, sort, minRating } = vendorsBrowseQuerySchema.parse(request.query);
 
-    const where: Record<string, unknown> = { status: 'ACTIVE' };
+    const where: Record<string, unknown> = { status: 'ACTIVE', isVerified: true };
     if (type) where['vendorType'] = type;
     if (cuisine) where['cuisineTypes'] = { has: cuisine };
     if (open === 'true') where['isCurrentlyOpen'] = true;
@@ -1054,6 +1076,8 @@ export async function customerRoutes(app: FastifyInstance) {
     const config = item.bookingConfig as unknown as {
       durationMinutes: number;
       slots: Array<{ dayOfWeek: number; start: string; end: string }>;
+      serviceMode?: 'AT_BUSINESS' | 'MOBILE' | 'BOTH';
+      serviceRadiusKm?: number;
     };
     const duration = config.durationMinutes;
     const [y, m, d] = date.split('-').map(Number);
@@ -1089,7 +1113,19 @@ export async function customerRoutes(app: FastifyInstance) {
       : new Set<string>();
 
     const slots = candidates.filter((c) => !taken.has(c.toISOString())).map((c) => c.toISOString());
-    return { success: true, data: { date, durationMinutes: duration, slots } };
+    // Which weekdays have windows at all — drives the day chips in the picker.
+    const bookableWeekdays = Array.from(new Set((config.slots ?? []).map((w) => w.dayOfWeek)));
+    return {
+      success: true,
+      data: {
+        date,
+        durationMinutes: duration,
+        slots,
+        bookableWeekdays,
+        serviceMode: config.serviceMode ?? 'AT_BUSINESS',
+        serviceRadiusKm: config.serviceRadiusKm ?? null,
+      },
+    };
   });
 
   // ========================================================================
@@ -1398,6 +1434,7 @@ export async function customerRoutes(app: FastifyInstance) {
       scheduledFor: body.scheduledFor,
       promoCode: body.promoCode,
       fulfillmentSelections: body.fulfillmentSelections,
+      express: body.express,
       appointments: body.appointments,
     });
 
@@ -1556,6 +1593,7 @@ export async function customerRoutes(app: FastifyInstance) {
         subtotalBase: Number(order.subtotalBase),
         subtotalCustomer: Number(order.subtotalCustomer),
         deliveryFee: Number(order.deliveryFee),
+        isExpress: order.isExpress,
         tipAmount: Number(order.tipAmount),
         discount: Number(order.discount),
         totalAmount: Number(order.totalAmount),
@@ -1582,6 +1620,10 @@ export async function customerRoutes(app: FastifyInstance) {
           vehicleColor: order.rider.vehicleColor,
           licensePlate: order.rider.licensePlate,
           vehiclePhotoUrl: order.rider.vehiclePhotoUrl,
+          // Last-known position seeds the tracking marker instantly; the
+          // socket stream (rider:location) takes over from the first event.
+          currentLat: order.rider.currentLat,
+          currentLng: order.rider.currentLng,
         } : null,
         timeline,
         placedAt: order.placedAt,

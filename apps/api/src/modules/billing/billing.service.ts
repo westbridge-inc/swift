@@ -220,6 +220,7 @@ export class BillingService {
       type: 'SYSTEM_ANNOUNCEMENT',
       title: 'Subscription payment received',
       body: `$${amount.toLocaleString()} ${sub.currencyCode} received. You are active until ${periodEnd.toISOString().slice(0, 10)}.`,
+      audience: this.payerAudience(sub),
       data: { kind: 'billing_success', subscriptionId: sub.id },
     });
   }
@@ -266,6 +267,7 @@ export class BillingService {
       type: 'SYSTEM_ANNOUNCEMENT',
       title: 'Subscription payment failed',
       body: `${reason}. We will retry tomorrow (attempt ${attempts} of ${MAX_FAILED_ATTEMPTS}). Top up or update your card to stay active.`,
+      audience: this.payerAudience(sub),
       data: { kind: 'billing_failed', subscriptionId: sub.id },
     });
     return 'failed';
@@ -312,6 +314,7 @@ export class BillingService {
       type: 'SYSTEM_ANNOUNCEMENT',
       title: 'Subscription suspended',
       body: 'Your subscription is unpaid and your access is suspended. Top up or pay to be reinstated instantly.',
+      audience: this.payerAudience(sub),
       data: { kind: 'billing_suspended', subscriptionId: sub.id },
     });
   }
@@ -339,6 +342,7 @@ export class BillingService {
       type: 'SYSTEM_ANNOUNCEMENT',
       title: 'Subscription reinstated',
       body: 'Payment received — welcome back. Your access is restored.',
+      audience: this.payerAudience(sub),
       data: { kind: 'billing_reinstated', subscriptionId: sub.id },
     });
   }
@@ -382,6 +386,7 @@ export class BillingService {
       type: 'SYSTEM_ANNOUNCEMENT',
       title: 'Top-up received',
       body: `$${amount.toLocaleString()} ${sub.currencyCode} added to your subscription balance.`,
+      audience: this.payerAudience(sub),
       data: { kind: 'billing_topup', subscriptionId },
     });
 
@@ -441,6 +446,7 @@ export class BillingService {
         type: 'SYSTEM_ANNOUNCEMENT',
         title: 'Subscription due tomorrow',
         body: `Your weekly fee of $${Number(this.amountFor(sub)).toLocaleString()} ${sub.currencyCode} is due tomorrow.`,
+        audience: this.payerAudience(sub),
         data: { kind: 'billing_reminder', subscriptionId: sub.id },
       });
       sent += 1;
@@ -498,5 +504,10 @@ export class BillingService {
     const userId = sub.rider?.userId ?? sub.driver?.userId ?? sub.vendor?.owner.userId;
     if (!userId) throw new AppError(500, 'ORPHAN_SUBSCRIPTION', `Subscription ${sub.id} has no payer`);
     return userId;
+  }
+
+  /** Billing notices belong to the surface that pays the fee. */
+  private payerAudience(sub: SubWithRelations): 'earner' | 'business' {
+    return sub.vendor ? 'business' : 'earner';
   }
 }

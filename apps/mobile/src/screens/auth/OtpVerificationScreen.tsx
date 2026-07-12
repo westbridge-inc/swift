@@ -1,132 +1,142 @@
-import { useEffect, useRef, useState } from 'react';
-import { View, TextInput, Pressable } from 'react-native';
-import { SafeAreaView } from 'react-native-safe-area-context';
-import { Feather } from '@expo/vector-icons';
-import { color } from '@swift/ui';
+/** @jsxImportSource react */
+import React, { useEffect, useRef, useState } from 'react';
+import { Pressable, TextInput, View } from 'react-native';
+import { useMutation } from '@tanstack/react-query';
+import { useNavigation, useRoute } from '@react-navigation/native';
+import { color, radius, space } from '@swift/ui';
 import { authApi } from '../../services/api';
 import { useAuthStore } from '../../stores/authStore';
-import { Text, Heading, PressableScale, StepProgress } from '../../components/ui';
-import { SwiftMark } from '../../components/SwiftLogo';
+import { Header, PillButton, Screen, T } from '../../kit';
 
-export function OtpVerificationScreen({ route, navigation }: any) {
-  const { phone } = route.params;
-  const [otp, setOtp] = useState('');
-  const [error, setError] = useState(false);
-  const [seconds, setSeconds] = useState(60);
-  const { setAuth } = useAuthStore();
+const CODE_LEN = 6;
+
+// Composed in the kit's input language (no OTP frame in the kit): six cells
+// driven by one hidden input. verify-otp forks: existing user → session;
+// new phone → Register.
+export function OtpVerificationScreen() {
+  const navigation = useNavigation<any>();
+  const route = useRoute<any>();
+  const phone: string = route.params?.phone ?? '';
+  const setAuth = useAuthStore((s) => s.setAuth);
+
+  const [code, setCode] = useState('');
+  const [cooldown, setCooldown] = useState(30);
   const inputRef = useRef<TextInput>(null);
 
   useEffect(() => {
-    // One interval for the screen's lifetime — the functional update carries the
-    // countdown, parking at 0 is a no-op tick, and a resend's setSeconds(60)
-    // simply resumes it. (Previously deps [seconds] rebuilt it every tick.)
-    const t = setInterval(() => setSeconds((s) => (s <= 1 ? 0 : s - 1)), 1000);
-    return () => clearInterval(t);
-  }, []);
+    if (cooldown <= 0) return;
+    const t = setTimeout(() => setCooldown((c) => c - 1), 1000);
+    return () => clearTimeout(t);
+  }, [cooldown]);
 
-  const handleVerify = async (code: string) => {
-    if (code.length !== 6) return;
-    try {
-      const { data } = await authApi.verifyOtp(phone, code);
-      if (data.data.isNewUser) {
-        // Role is already chosen on the entry screen (intent); go straight to
-        // the name step. Defaults to a customer account if somehow unset.
+  const verify = useMutation({
+    mutationFn: (c: string) => authApi.verifyOtp(phone, c),
+    onSuccess: (res) => {
+      const data = res.data?.data;
+      if (data?.isNewUser) {
         navigation.navigate('Register', { phone });
-      } else {
-        setAuth(data.data.user, data.data.tokens.accessToken, data.data.tokens.refreshToken);
+        return;
       }
-    } catch {
-      setError(true);
-    }
+      if (data?.user && data?.tokens) {
+        setAuth(data.user, data.tokens.accessToken, data.tokens.refreshToken);
+      }
+    },
+  });
+
+  const resend = useMutation({
+    mutationFn: () => authApi.sendOtp(phone),
+    onSuccess: () => setCooldown(30),
+  });
+
+  const onChange = (v: string) => {
+    const clean = v.replace(/\D/g, '').slice(0, CODE_LEN);
+    setCode(clean);
+    if (clean.length === CODE_LEN && !verify.isPending) verify.mutate(clean);
   };
 
-  const resend = async () => {
-    if (seconds > 0) return;
-    try {
-      await authApi.sendOtp(phone);
-      setSeconds(60);
-      setOtp('');
-      setError(false);
-    } catch {
-      setError(true);
-    }
-  };
-
-  const onChange = (t: string) => {
-    const digits = t.replace(/[^0-9]/g, '').slice(0, 6);
-    setOtp(digits);
-    setError(false);
-    if (digits.length === 6) handleVerify(digits);
-  };
+  const err = verify.isError
+    ? ((verify.error as any)?.response?.data?.error?.message ?? 'That code didn’t match. Try again.')
+    : undefined;
 
   return (
-    <SafeAreaView style={{ flex: 1 }} edges={['top', 'bottom']} className="bg-surface-base">
-      <View className="flex-row items-center px-lg pt-md">
-        <PressableScale onPress={() => navigation?.goBack?.()} hitSlop={12} className="mr-md">
-          <Feather name="chevron-left" size={24} color={color.text.primary} />
-        </PressableScale>
-        <View className="flex-1">
-          <StepProgress step={2} total={4} />
-        </View>
-      </View>
+    <Screen style={{ backgroundColor: color.surface.base }}>
+      <Header title="Verify" />
+      <View style={{ flex: 1, paddingHorizontal: space['2xl'], paddingTop: space['2xl'] }}>
+        <T variant="title">Enter the code.</T>
+        <T variant="body" tone="muted" style={{ marginTop: space.sm }}>
+          We sent a 6-digit code to <T weight="semibold">{phone}</T>
+        </T>
 
-      <View className="flex-1 px-lg pt-3xl">
-        <View className="items-center">
-          <SwiftMark size={48} />
-          <Heading size="xl" className="mt-md text-center">Verify your number</Heading>
-          <Text className="mt-xs text-center text-text-secondary">
-            Enter the 6-digit code sent to{'\n'}
-            <Text className="font-semibold text-text-primary">{phone}</Text>
-          </Text>
-          <PressableScale onPress={() => navigation?.goBack?.()} hitSlop={6}>
-            <Text className="mt-sm text-center text-sm font-semibold" style={{ color: color.brand[600] }}>Wrong number? Change it</Text>
-          </PressableScale>
-        </View>
-
-        {/* Six digit boxes — a hidden input captures the code */}
-        <Pressable onPress={() => inputRef.current?.focus()} className="mt-2xl">
-          <View className="flex-row justify-center" style={{ gap: 8 }}>
-            {Array.from({ length: 6 }).map((_, i) => {
-              const active = otp.length === i;
-              const filled = i < otp.length;
+        {/* Hidden driver input + six visible cells */}
+        <Pressable onPress={() => inputRef.current?.focus()} style={{ marginTop: space['3xl'] }}>
+          <View style={{ flexDirection: 'row', justifyContent: 'space-between' }}>
+            {Array.from({ length: CODE_LEN }, (_, i) => {
+              const filled = i < code.length;
+              const active = i === code.length;
               return (
                 <View
                   key={i}
-                  style={active ? { borderColor: color.brand[500] } : undefined}
-                  className={
-                    active
-                      ? 'h-14 w-12 items-center justify-center rounded-2xl border-2 bg-surface-base'
-                      : filled
-                        ? 'h-14 w-12 items-center justify-center rounded-2xl border border-border-subtle bg-surface-base'
-                        : 'h-14 w-12 items-center justify-center rounded-2xl border border-border-subtle bg-surface-subtle'
-                  }
+                  style={{
+                    width: 48,
+                    height: 56,
+                    borderRadius: radius.lg,
+                    borderWidth: 1.5,
+                    borderColor: err ? color.error : active || filled ? color.brand[500] : color.border.subtle,
+                    backgroundColor: color.surface.base,
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                  }}
                 >
-                  <Text className="font-display text-2xl font-extrabold text-text-primary">{otp[i] ?? ''}</Text>
+                  <T variant="title">{code[i] ?? ''}</T>
                 </View>
               );
             })}
           </View>
-          <TextInput
-            ref={inputRef}
-            value={otp}
-            onChangeText={onChange}
-            keyboardType="number-pad"
-            maxLength={6}
-            autoFocus
-            caretHidden
-            style={{ position: 'absolute', width: 1, height: 1, opacity: 0 }}
-          />
         </Pressable>
+        <TextInput
+          ref={inputRef}
+          value={code}
+          onChangeText={onChange}
+          keyboardType="number-pad"
+          maxLength={CODE_LEN}
+          autoFocus
+          style={{ position: 'absolute', opacity: 0, height: 1, width: 1 }}
+        />
 
-        {error ? <Text className="mt-md text-center text-sm text-error">Invalid or expired code. Try again.</Text> : null}
-        {seconds > 0 ? (
-          <Text className="mt-xl text-center text-sm text-text-muted">Resend code in {seconds}s</Text>
-        ) : (
-          <PressableScale onPress={resend} hitSlop={8}>
-            <Text className="mt-xl text-center text-sm font-semibold" style={{ color: color.brand[600] }}>Resend code</Text>
-          </PressableScale>
-        )}
+        {err ? (
+          <T variant="label" tone="error" style={{ marginTop: space.lg }}>
+            {err}
+          </T>
+        ) : null}
+
+        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: space['2xl'] }}>
+          <T variant="label" tone="muted">
+            Didn’t get it?
+          </T>
+          {cooldown > 0 ? (
+            <T variant="label" tone="faint">
+              Resend in {cooldown}s
+            </T>
+          ) : (
+            <Pressable onPress={() => resend.mutate()} hitSlop={8} disabled={resend.isPending}>
+              <View style={{ paddingVertical: 4 }}>
+                <T variant="label" weight="semibold" tone="brand">
+                  {resend.isPending ? 'Sending…' : 'Resend code'}
+                </T>
+              </View>
+            </Pressable>
+          )}
+        </View>
+
+        <View style={{ flex: 1 }} />
+        <PillButton
+          label="Verify"
+          onPress={() => verify.mutate(code)}
+          disabled={code.length < CODE_LEN}
+          loading={verify.isPending}
+          style={{ marginBottom: space['2xl'] }}
+        />
       </View>
-    </SafeAreaView>
+    </Screen>
   );
 }

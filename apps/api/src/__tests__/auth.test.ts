@@ -210,6 +210,49 @@ describe('Auth Routes', () => {
   });
 
   // -----------------------------------------------------------------------
+  // Sensitive fields never leave the API on a user object
+  // -----------------------------------------------------------------------
+
+  describe('User serialization', () => {
+    const SENSITIVE = ['passwordHash', 'failedLoginAttempts', 'lockedUntil', 'lastKnownLat', 'lastKnownLng'];
+
+    it('login response carries no credential or lockout internals', async () => {
+      const res = await loginWithOtp(app, '+5926002000');
+      const user = res.json().data.user;
+      expect(user).toBeDefined();
+      for (const field of SENSITIVE) {
+        expect(user, `user.${field} must not be serialized`).not.toHaveProperty(field);
+      }
+      // The shape the app routes on is intact
+      expect(user.roles).toBeDefined();
+    });
+
+    it('registration response carries no credential or lockout internals', async () => {
+      const phone = '+5929998866';
+      try {
+        await loginWithOtp(app, phone);
+        const res = await inject('POST', '/api/v1/auth/register', {
+          phone,
+          firstName: 'Sanitize',
+          lastName: 'Check',
+        });
+        expect(res.statusCode).toBe(201);
+        const user = res.json().data.user;
+        for (const field of SENSITIVE) {
+          expect(user, `user.${field} must not be serialized`).not.toHaveProperty(field);
+        }
+      } finally {
+        const u = await app.prisma.user.findUnique({ where: { phone } });
+        if (u) {
+          await app.prisma.session.deleteMany({ where: { userId: u.id } });
+          await app.prisma.customer.deleteMany({ where: { userId: u.id } });
+          await app.prisma.user.delete({ where: { id: u.id } });
+        }
+      }
+    });
+  });
+
+  // -----------------------------------------------------------------------
   // POST /api/v1/auth/refresh
   // -----------------------------------------------------------------------
 
@@ -241,6 +284,61 @@ describe('Auth Routes', () => {
     it('rejects malformed body — missing refreshToken (SEC-4)', async () => {
       const res = await inject('POST', '/api/v1/auth/refresh', {});
       expect(res.statusCode).toBe(400);
+    });
+
+    // Rotation theft detection: replaying a refresh token that was already
+    // rotated away is how a stolen token surfaces. Outside the race-grace
+    // window the whole session dies (both holders re-authenticate) and the
+    // event is audited.
+    it('reuse of a rotated refresh token revokes the session and audits it', async () => {
+      const prevGrace = process.env['REFRESH_REUSE_GRACE_MS'];
+      process.env['REFRESH_REUSE_GRACE_MS'] = '0';
+      try {
+        const loginRes = await loginWithOtp(app, '+5926002000');
+        const r1 = loginRes.json().data.tokens.refreshToken;
+
+        const rotate = await inject('POST', '/api/v1/auth/refresh', { refreshToken: r1 });
+        expect(rotate.statusCode).toBe(200);
+        const r2 = rotate.json().data.refreshToken;
+
+        // Replay the consumed token — same 401 shape as any bad token (no oracle)
+        const replay = await inject('POST', '/api/v1/auth/refresh', { refreshToken: r1 });
+        expect(replay.statusCode).toBe(401);
+
+        // The theft response killed the session: the CURRENT token is dead too
+        const afterKill = await inject('POST', '/api/v1/auth/refresh', { refreshToken: r2 });
+        expect(afterKill.statusCode).toBe(401);
+
+        const audit = await app.prisma.auditLog.findFirst({
+          where: { action: 'REFRESH_TOKEN_REUSE' },
+          orderBy: { createdAt: 'desc' },
+        });
+        expect(audit).not.toBeNull();
+      } finally {
+        if (prevGrace === undefined) delete process.env['REFRESH_REUSE_GRACE_MS'];
+        else process.env['REFRESH_REUSE_GRACE_MS'] = prevGrace;
+      }
+    });
+
+    it('concurrent double-fire within the grace window is idempotent, not theft', async () => {
+      // The mobile interceptor can legitimately re-send the same refresh token
+      // when two requests 401 at once — that must return the already-rotated
+      // pair, not kill the session.
+      const loginRes = await loginWithOtp(app, '+5926002000');
+      const r1 = loginRes.json().data.tokens.refreshToken;
+
+      const first = await inject('POST', '/api/v1/auth/refresh', { refreshToken: r1 });
+      expect(first.statusCode).toBe(200);
+      const pair = first.json().data;
+
+      const retry = await inject('POST', '/api/v1/auth/refresh', { refreshToken: r1 });
+      expect(retry.statusCode).toBe(200);
+      expect(retry.json().data.refreshToken).toBe(pair.refreshToken);
+      expect(retry.json().data.accessToken).toBe(pair.accessToken);
+
+      // Session is still alive: the current pair keeps working
+      const next = await inject('POST', '/api/v1/auth/refresh', { refreshToken: pair.refreshToken });
+      expect(next.statusCode).toBe(200);
     });
   });
 

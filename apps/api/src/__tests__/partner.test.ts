@@ -91,9 +91,12 @@ describe('partner provisioning — failure paths', () => {
     expect(res.statusCode).toBe(401);
   });
 
-  it('a fresh customer 404s on /driver before provisioning', async () => {
+  it('a fresh customer is FORBIDDEN on /driver before provisioning', async () => {
+    // Sharpened by the authz matrix: an account without the MOVER role is an
+    // outsider — 403, not a 404 oracle. (After /partner/become grants the role,
+    // a missing profile is a real 404.)
     const res = await get('/api/v1/driver/profile', carToken);
-    expect(res.statusCode).toBe(404);
+    expect(res.statusCode).toBe(403);
   });
 
   it('rejects a car driver with no vehicle details', async () => {

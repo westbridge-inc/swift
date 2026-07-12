@@ -1,100 +1,117 @@
-import { useState } from 'react';
-import { View, Alert, ScrollView } from 'react-native';
-import { SafeAreaView } from 'react-native-safe-area-context';
-import { Feather } from '@expo/vector-icons';
-import { color } from '@swift/ui';
-import { authApi, customerApi } from '../../services/api';
+/** @jsxImportSource react */
+import React, { useState } from 'react';
+import { KeyboardAvoidingView, Platform, Pressable, ScrollView, View } from 'react-native';
+import { useMutation } from '@tanstack/react-query';
+import { useRoute } from '@react-navigation/native';
+import { color, space } from '@swift/ui';
+import { authApi } from '../../services/api';
 import { useAuthStore } from '../../stores/authStore';
-import { Text, Heading, Button, Field, PressableScale, StepProgress } from '../../components/ui';
 import { SwiftMark } from '../../components/SwiftLogo';
+import { BrandCheckbox, LabeledInput, PillButton, Screen, T } from '../../kit';
 
-export function RegisterScreen({ navigation, route }: any) {
-  const phone = route?.params?.phone;
-  const intent = useAuthStore((s) => s.intent);
-  const role = (intent === 'mover' ? 'MOVER' : intent === 'vendor' ? 'VENDOR' : 'CUSTOMER') as
-    | 'CUSTOMER'
-    | 'MOVER'
-    | 'VENDOR';
+// Kit "Register" (frame 7) on the real signup contract: the phone arrived
+// verified from the OTP step; name (+ optional email) completes the account.
+export function RegisterScreen() {
+  const route = useRoute<any>();
+  const phone: string = route.params?.phone ?? '';
+  const { setAuth, intent, countryCode } = useAuthStore();
+
   const [firstName, setFirstName] = useState('');
   const [lastName, setLastName] = useState('');
   const [email, setEmail] = useState('');
-  const [referral, setReferral] = useState('');
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState(false);
-  const { setAuth, countryCode } = useAuthStore();
+  const [agreed, setAgreed] = useState(false);
 
-  const handleRegister = async () => {
-    setLoading(true);
-    setError(false);
-    try {
-      const { data } = await authApi.register({
+  const role = intent === 'mover' ? 'MOVER' : intent === 'vendor' ? 'VENDOR' : 'CUSTOMER';
+
+  const register = useMutation({
+    mutationFn: () =>
+      authApi.register({
         phone,
-        firstName,
-        lastName,
-        email: email || undefined,
+        firstName: firstName.trim(),
+        lastName: lastName.trim(),
+        ...(email.trim() ? { email: email.trim() } : {}),
         role,
-        countryCode: countryCode ?? 'GY',
-      });
-      const access = data.data.tokens.accessToken;
-      setAuth(data.data.user, access, data.data.tokens.refreshToken);
-      if (role === 'CUSTOMER' && referral.trim()) {
-        try {
-          await customerApi.redeemReferral(referral.trim(), access);
-        } catch {
-          Alert.alert('Account created', 'We couldn’t apply that referral code, but your account is ready.');
-        }
+        ...(countryCode ? { countryCode } : {}),
+      }),
+    onSuccess: (res) => {
+      const data = res.data?.data;
+      if (data?.user && data?.tokens) {
+        setAuth(data.user, data.tokens.accessToken, data.tokens.refreshToken);
       }
-    } catch {
-      setError(true);
-      setLoading(false);
-    }
-  };
+    },
+  });
+
+  const err = register.isError
+    ? ((register.error as any)?.response?.data?.error?.message ?? 'Registration failed. Try again.')
+    : undefined;
+  const valid = firstName.trim().length >= 2 && lastName.trim().length >= 2 && agreed;
 
   return (
-    <SafeAreaView style={{ flex: 1 }} edges={['top', 'bottom']} className="bg-surface-base">
-      <View className="flex-row items-center px-lg pt-md">
-        <PressableScale onPress={() => navigation?.goBack?.()} hitSlop={12} className="mr-md">
-          <Feather name="chevron-left" size={24} color={color.text.primary} />
-        </PressableScale>
-        <View className="flex-1">
-          <StepProgress step={3} total={4} />
-        </View>
-      </View>
-      <ScrollView
-        className="flex-1"
-        contentContainerStyle={{ paddingHorizontal: 16, paddingTop: 40, paddingBottom: 24 }}
-        keyboardShouldPersistTaps="handled"
-        showsVerticalScrollIndicator={false}
-      >
-        <View className="items-center">
-          <SwiftMark size={48} />
-          <Heading size="xl" className="mt-md text-center">Create your account</Heading>
-          <Text className="mt-xs text-center text-text-secondary">Almost there — tell us your name.</Text>
-        </View>
-        <View className="mt-xl">
-          <Field label="First name" value={firstName} onChangeText={setFirstName} autoFocus />
-          <Field label="Last name" value={lastName} onChangeText={setLastName} />
-          <Field
-            label="Email (optional)"
-            value={email}
-            onChangeText={setEmail}
-            keyboardType="email-address"
-            autoCapitalize="none"
-          />
-          {role === 'CUSTOMER' ? (
-            <Field
-              label="Referral code (optional)"
-              value={referral}
-              onChangeText={setReferral}
-              autoCapitalize="characters"
-              autoCorrect={false}
+    <Screen style={{ backgroundColor: color.surface.base }}>
+      <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} style={{ flex: 1 }}>
+        <ScrollView
+          contentContainerStyle={{ flexGrow: 1, paddingHorizontal: space['2xl'], paddingTop: space['2xl'] }}
+          keyboardShouldPersistTaps="handled"
+        >
+          <SwiftMark size={56} />
+
+          <T variant="title" style={{ marginTop: space['2xl'] }}>
+            Create your new account
+          </T>
+          <T variant="body" tone="muted" style={{ marginTop: space.sm }}>
+            You’re signing up with <T weight="semibold">{phone}</T>
+          </T>
+
+          <View style={{ gap: space.xl, marginTop: space['2xl'] }}>
+            <LabeledInput
+              label="First Name"
+              icon="user"
+              placeholder="First name"
+              value={firstName}
+              onChangeText={setFirstName}
+              autoFocus
             />
-          ) : null}
-        </View>
-        {error ? <Text className="mb-sm text-center text-sm text-error">Couldn&apos;t create your account. Try again.</Text> : null}
-        <Button label="Create account" loading={loading} disabled={!firstName || !lastName} onPress={handleRegister} />
-        <Text className="mt-md text-center text-xs text-text-muted">No platform fees, ever. Pay cash on delivery.</Text>
-      </ScrollView>
-    </SafeAreaView>
+            <LabeledInput
+              label="Last Name"
+              icon="user"
+              placeholder="Last name"
+              value={lastName}
+              onChangeText={setLastName}
+            />
+            <LabeledInput
+              label="Email Address (optional)"
+              icon="mail"
+              placeholder="Enter email"
+              keyboardType="email-address"
+              autoCapitalize="none"
+              value={email}
+              onChangeText={setEmail}
+              error={err}
+            />
+          </View>
+
+          <Pressable
+            onPress={() => setAgreed((a) => !a)}
+            style={{ flexDirection: 'row', alignItems: 'center', gap: space.md, marginTop: space.xl }}
+          >
+            <BrandCheckbox checked={agreed} onToggle={() => setAgreed((a) => !a)} />
+            <T variant="label" tone="muted" style={{ flex: 1 }}>
+              I agree with the <T variant="label" weight="semibold" tone="brand">Terms of Service</T> and{' '}
+              <T variant="label" weight="semibold" tone="brand">Privacy Policy</T>
+              {/* TODO(ui-rebuild): endpoint missing — no hosted ToS/Privacy pages yet to link. */}
+            </T>
+          </Pressable>
+
+          <View style={{ flex: 1 }} />
+          <PillButton
+            label="Register"
+            onPress={() => register.mutate()}
+            disabled={!valid}
+            loading={register.isPending}
+            style={{ marginTop: space['2xl'], marginBottom: space['2xl'] }}
+          />
+        </ScrollView>
+      </KeyboardAvoidingView>
+    </Screen>
   );
 }

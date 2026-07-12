@@ -79,6 +79,7 @@ export async function searchRoutes(app: FastifyInstance) {
       app.prisma.vendor.findMany({
         where: {
           status: 'ACTIVE',
+          isVerified: true,
           OR: [
             { name: { contains: q, mode: 'insensitive' } },
             { description: { contains: q, mode: 'insensitive' } },
@@ -153,7 +154,7 @@ export async function searchRoutes(app: FastifyInstance) {
 
     const [vendors, items] = await Promise.all([
       app.prisma.vendor.findMany({
-        where: { status: 'ACTIVE', name: { contains: q, mode: 'insensitive' } },
+        where: { status: 'ACTIVE', isVerified: true, name: { contains: q, mode: 'insensitive' } },
         select: { name: true, vendorType: true },
         take: 5,
       }),
@@ -175,7 +176,7 @@ export async function searchRoutes(app: FastifyInstance) {
   // Trending / popular items
   app.get('/search/trending', { preHandler: [app.authenticate] }, async (_request) => {
     const items = await app.prisma.item.findMany({
-      where: { isAvailable: true, isPopular: true, vendor: { status: 'ACTIVE', isCurrentlyOpen: true } },
+      where: { isAvailable: true, isPopular: true, vendor: { status: 'ACTIVE', isVerified: true, isCurrentlyOpen: true } },
       include: { vendor: { select: { name: true, slug: true } } },
       orderBy: { totalOrdered: 'desc' },
       take: 20,
@@ -202,6 +203,7 @@ export async function searchRoutes(app: FastifyInstance) {
     const vendors = await app.prisma.vendor.findMany({
       where: {
         status: 'ACTIVE',
+        isVerified: true,
         isCurrentlyOpen: true,
         ...(type && { vendorType: type }),
       },

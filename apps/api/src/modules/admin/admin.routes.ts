@@ -213,6 +213,36 @@ export async function adminRoutes(app: FastifyInstance) {
     }
   };
 
+  // Every successful admin STATE CHANGE is audited, automatically. A scoped
+  // onResponse hook (plugin encapsulation: admin routes only) means a new
+  // mutating route is covered the day it ships — the same philosophy as the
+  // authz matrix. Reads stay out of the log; failures (4xx/5xx) changed
+  // nothing so they stay out too. Route template (not raw URL) keeps the
+  // action name stable and free of user data.
+  app.addHook('onResponse', async (request, reply) => {
+    if (request.method === 'GET' || reply.statusCode >= 400) return;
+    const userId = (request as { user?: { userId?: string } }).user?.userId;
+    if (!userId) return;
+    try {
+      const routeUrl = request.routeOptions?.url ?? request.url;
+      const params = (request.params ?? {}) as Record<string, string>;
+      const body = request.body ? JSON.stringify(request.body).slice(0, 2000) : undefined;
+      await app.prisma.auditLog.create({
+        data: {
+          userId,
+          action: `ADMIN ${request.method} ${routeUrl}`,
+          entity: routeUrl.split('/').filter(Boolean)[0] ?? 'admin',
+          entityId: params['id'] ?? params['key'] ?? '-',
+          changes: body ? { params, body } : { params },
+          ipAddress: request.ip,
+          userAgent: request.headers['user-agent'],
+        },
+      });
+    } catch (err) {
+      app.log.error({ err }, '[admin-audit] failed to write audit log');
+    }
+  });
+
   // Helper: write an audit log entry
   async function audit(
     userId: string,

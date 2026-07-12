@@ -25,7 +25,8 @@ const config: ExpoConfig = {
   newArchEnabled: true,
   backgroundColor: '#FFFFFF',
   splash: {
-    backgroundColor: '#FFFFFF',
+    // Kit splash = a full brand wash (Indian Red) while the app boots.
+    backgroundColor: '#803B3B',
     resizeMode: 'contain',
   },
   ios: {
@@ -36,6 +37,23 @@ const config: ExpoConfig = {
       NSLocationWhenInUseUsageDescription: locationWhenInUse,
       NSLocationAlwaysAndWhenInUseUsageDescription: locationAlways,
       UIBackgroundModes: ['location', 'remote-notification', 'fetch'],
+      // TLS pinning for the production API domain (iOS 14+ system pinning —
+      // config only, no runtime library). Pinned to the Let's Encrypt roots'
+      // SPKI hashes (ISRG Root X1 + X2, both computed from the published
+      // certs), so certificate renewals never invalidate the pin; only a CA
+      // change does, which is an app update by design. Dev traffic
+      // (localhost) and any non-pinned staging domain are unaffected.
+      NSAppTransportSecurity: {
+        NSPinnedDomains: {
+          'api.swift.gy': {
+            NSIncludesSubdomains: true,
+            NSPinnedCAIdentities: [
+              { 'SPKI-SHA256-BASE64': 'C5+lpZ7tcVwmwQIMcRtPbsQtWLABXhQzejna0wHFr8M=' },
+              { 'SPKI-SHA256-BASE64': 'diGVwiVYbubAI3RW4hB9xU8e/CH2GnkuvVFZE8zmgzI=' },
+            ],
+          },
+        },
+      },
     },
   },
   android: {
@@ -60,6 +78,7 @@ const config: ExpoConfig = {
   plugins: [
     'expo-font',
     'expo-splash-screen',
+    ['expo-notifications', { color: '#803B3B' }],
     'react-native-maps',
     'expo-image',
     'expo-secure-store',
@@ -78,6 +97,9 @@ const config: ExpoConfig = {
         cameraPermission,
       },
     ],
+    // Android half of the api.swift.gy TLS pinning (iOS half: NSPinnedDomains
+    // in infoPlist above).
+    './plugins/withTlsPinning.js',
   ],
   extra: {
     ...(process.env['EAS_PROJECT_ID'] ? { eas: { projectId: process.env['EAS_PROJECT_ID'] } } : {}),

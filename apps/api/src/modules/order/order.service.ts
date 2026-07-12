@@ -21,8 +21,13 @@ interface CheckoutInput {
   promoCode?: string;
   /** Per-vendor fulfillment choice; DELIVERY when omitted */
   fulfillmentSelections?: Record<string, 'DELIVERY' | 'PICKUP'>;
-  /** Requested appointment slots for APPOINTMENT listings in the cart */
-  appointments?: Array<{ itemId: string; slotStart: Date }>;
+  /** Priority delivery: 1.5x the delivery fee, dispatched ahead of standard
+   *  orders, premium goes to the rider. DELIVERY groups only. */
+  express?: boolean;
+  /** Requested appointment slots for APPOINTMENT listings in the cart.
+   *  mode picks where a BOTH-mode service happens (validated against what
+   *  the business actually offers). */
+  appointments?: Array<{ itemId: string; slotStart: Date; mode?: 'AT_BUSINESS' | 'MOBILE' }>;
   /** Injectable clock so the risk heuristic is testable */
   now?: Date;
 }
@@ -125,6 +130,7 @@ export class OrderService {
     }
 
     const requestedSlots = new Map((input.appointments ?? []).map((a) => [a.itemId, a.slotStart]));
+    const requestedModes = new Map((input.appointments ?? []).map((a) => [a.itemId, a.mode]));
 
     // Default address (only required when some group is DELIVERY)
     let address = cart.deliveryAddressId
@@ -203,11 +209,26 @@ export class OrderService {
           throw new AppError(400, 'OUT_OF_RANGE', `${vendor.name} only delivers within ${vendor.deliveryRadius} km. You are ${distanceKm.toFixed(1)} km away.`);
         }
         deliveryFee = calculateDeliveryFee(distanceKm);
+        // Express mirrors the courier EXPRESS multiplier (1.5x). The premium
+        // is part of the fee the rider collects in cash — it is THEIR upside.
+        if (input.express) deliveryFee = Math.round(deliveryFee * 1.5);
       } else if (fulfillment === 'APPOINTMENT') {
         // MOBILE / BOTH services travel to the customer — require their address and
         // enforce the provider's service radius (mirrors the DELIVERY gate above).
         const bcfg = (appointmentItems[0]!.item.bookingConfig ?? {}) as { serviceMode?: string; serviceRadiusKm?: number };
-        if (bcfg.serviceMode === 'MOBILE' || bcfg.serviceMode === 'BOTH') {
+        const offered = bcfg.serviceMode ?? 'AT_BUSINESS';
+        // Where it happens: the business's setting, narrowed by the customer's
+        // choice when the business offers BOTH. Asking for a mode the business
+        // does not offer is a 400, never a silent fallback.
+        const requestedMode = requestedModes.get(appointmentItems[0]!.itemId);
+        if (requestedMode === 'MOBILE' && offered === 'AT_BUSINESS') {
+          throw new AppError(400, 'MODE_NOT_OFFERED', `${vendor.name} does not travel to customers for this service`);
+        }
+        if (requestedMode === 'AT_BUSINESS' && offered === 'MOBILE') {
+          throw new AppError(400, 'MODE_NOT_OFFERED', `${vendor.name} only offers this service at your address`);
+        }
+        const mobileVisit = requestedMode ? requestedMode === 'MOBILE' : offered === 'MOBILE' || offered === 'BOTH';
+        if (mobileVisit) {
           if (!address) throw new AppError(400, 'NO_ADDRESS', `Add your address — ${vendor.name} travels to you`);
           const travelKm = (await this.maps.routeKm(
             { lat: vendor.latitude, lng: vendor.longitude },
@@ -342,6 +363,7 @@ export class OrderService {
             subtotalMarkup: 0,
             subtotalCustomer: plan.subtotal,
             deliveryFee: plan.deliveryFee,
+            isExpress: input.express === true && plan.fulfillment === 'DELIVERY',
             tipAmount: planTip,
             discount: planDiscount,
             totalAmount,
@@ -486,6 +508,7 @@ export class OrderService {
       items: order.items.map((i) => ({ name: i.name, quantity: i.quantity, price: Number(i.totalCustomer) })),
       subtotal: Number(order.subtotalCustomer),
       deliveryFee: Number(order.deliveryFee),
+      isExpress: order.isExpress,
       tip: Number(order.tipAmount),
       discount: Number(order.discount),
       total: Number(order.totalAmount),

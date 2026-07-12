@@ -1,184 +1,279 @@
-import { useEffect, useMemo, useState } from 'react';
-import { View, ScrollView, RefreshControl } from 'react-native';
-import { SafeAreaView } from 'react-native-safe-area-context';
-import { Feather } from '@expo/vector-icons';
-import { color } from '@swift/ui';
-import { Text, Skeleton, List, Input, PressableScale, EmptyState, elevation } from '../../../components/ui';
-import { VendorRow } from '../../../components/customer/VendorCards';
-import { useVendors } from '../../../hooks';
+/** @jsxImportSource react */
+import React, { useEffect, useMemo, useState } from 'react';
+import { FlatList, Pressable, ScrollView, View } from 'react-native';
+import { useNavigation, useRoute } from '@react-navigation/native';
+import { color, space } from '@swift/ui';
+import { useHome, useVendors } from '../../../hooks/customer';
+import { useAppStore } from '../../../stores/appStore';
 import { useLocationStore } from '../../../stores/locationStore';
+import { itemImage, vendorImage } from '../../../lib/images';
+import { money } from '../../../lib/money';
+import {
+  Chip,
+  EmptyState,
+  ErrorState,
+  Header,
+  LabeledInput,
+  LoadingBlock,
+  PillButton,
+  RatingMeta,
+  Screen,
+  SectionHeader,
+  T,
+  VendorRow,
+} from '../../../kit';
 
-const FILTERS: { key: string; label: string; type?: string }[] = [
-  { key: 'all', label: 'All' },
-  { key: 'food', label: 'Food', type: 'RESTAURANT' },
-  { key: 'grocery', label: 'Groceries', type: 'SUPERMARKET' },
-  { key: 'shops', label: 'Shops', type: 'STORE' },
-  { key: 'services', label: 'Services', type: 'SERVICE' },
-];
+// Kit 57–60: idle = headline + history chips + popular rows; typing/results =
+// underline tabs Result | Sort By; sort = radio list + Apply/Reset.
+const TYPES = [
+  { key: undefined, label: 'All' },
+  { key: 'RESTAURANT', label: 'Restaurants' },
+  { key: 'SUPERMARKET', label: 'Groceries' },
+  { key: 'STORE', label: 'Shops' },
+  { key: 'SERVICE', label: 'Services' },
+] as const;
 
-const SORTS: { key: 'recommended' | 'popular' | 'name'; label: string }[] = [
-  { key: 'recommended', label: 'Recommended' },
-  { key: 'popular', label: 'Popular' },
-  { key: 'name', label: 'A–Z' },
-];
+const SORTS = [
+  { key: undefined, label: 'Recommended' },
+  { key: 'rating', label: 'Rating' },
+  { key: 'popular', label: 'Popularity' },
+  { key: 'distance', label: 'Distance' },
+] as const;
 
-function Pill({ label, active, onPress }: { label: string; active: boolean; onPress: () => void }) {
+function Radio({ on }: { on: boolean }) {
   return (
-    <PressableScale
-      onPress={onPress}
-      className={active ? 'rounded-full px-lg py-sm' : 'rounded-full bg-surface-base px-lg py-sm'}
-      style={active ? { backgroundColor: color.brand[500] } : elevation.card}
-    >
-      <Text className={active ? 'text-sm font-semibold text-white' : 'text-sm font-semibold text-text-secondary'}>{label}</Text>
-    </PressableScale>
+    <View
+      style={{
+        width: 22,
+        height: 22,
+        borderRadius: 11,
+        borderWidth: on ? 6 : 1.5,
+        borderColor: on ? color.brand[500] : color.border.strong,
+        backgroundColor: color.surface.base,
+      }}
+    />
   );
 }
 
-export function SearchScreen({ navigation }: any) {
+export function SearchScreen() {
+  const navigation = useNavigation<any>();
+  const route = useRoute<any>();
   const { latitude, longitude } = useLocationStore();
-  const [text, setText] = useState('');
-  const [debounced, setDebounced] = useState('');
-  const [filter, setFilter] = useState('all');
-  const [sort, setSort] = useState<'recommended' | 'popular' | 'name'>('recommended');
-  const [openNow, setOpenNow] = useState(false);
-  const [topRated, setTopRated] = useState(false);
+  const { recentSearches, pushSearch, clearSearches } = useAppStore();
 
-  // Debounce keystrokes → one query when typing settles.
+  const [q, setQ] = useState<string>(route.params?.q ?? '');
+  const [type, setType] = useState<string | undefined>(route.params?.type);
+  const [tab, setTab] = useState<'result' | 'sort'>('result');
+  const [sort, setSort] = useState<string | undefined>(undefined);
+  const [draftSort, setDraftSort] = useState<string | undefined>(undefined);
+  const [debounced, setDebounced] = useState(q);
+
   useEffect(() => {
-    const t = setTimeout(() => setDebounced(text.trim()), 300);
+    const t = setTimeout(() => setDebounced(q), 300);
     return () => clearTimeout(t);
-  }, [text]);
+  }, [q]);
+
+  // Commit a finished query to local history once results are being shown.
+  useEffect(() => {
+    if (debounced.trim().length >= 2) pushSearch(debounced);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [debounced]);
+
+  const searching = debounced.trim().length > 0 || !!type;
 
   const params = useMemo(() => {
-    const sortParam = sort === 'popular' ? 'popular' : sort === 'name' ? 'name' : 'rating';
-    const p: Record<string, string> = { sort: sortParam };
-    if (debounced) p['search'] = debounced;
-    const type = FILTERS.find((f) => f.key === filter)?.type;
+    const p: Record<string, string> = {};
+    if (debounced.trim()) p['search'] = debounced.trim();
     if (type) p['type'] = type;
-    if (openNow) p['open'] = 'true';
-    if (topRated) p['minRating'] = '4.5';
+    if (sort) p['sort'] = sort;
     if (latitude != null && longitude != null) {
       p['lat'] = String(latitude);
       p['lng'] = String(longitude);
     }
     return p;
-  }, [debounced, filter, sort, openNow, topRated, latitude, longitude]);
+  }, [debounced, type, sort, latitude, longitude]);
 
-  const { data, isLoading, isError, refetch, isRefetching } = useVendors<any[]>(params);
-  const vendors = data ?? [];
+  const vendors = useVendors<any[]>(searching ? params : undefined);
+  const home = useHome<any>(latitude ?? undefined, longitude ?? undefined);
+  const popularItems: any[] = home.data?.popularItems ?? [];
+
+  const results: any[] = Array.isArray(vendors.data) ? vendors.data : [];
 
   return (
-    // Kit search screens are light-first: title + field on paper, no canopy.
-    <SafeAreaView style={{ flex: 1, backgroundColor: color.surface.subtle }} edges={['top']}>
-      <View className="px-lg pb-md pt-md">
-        <Text className="font-display font-extrabold text-text-primary" style={{ fontSize: 26, lineHeight: 32 }}>
-          Search
-        </Text>
-        <Text className="mt-xs text-text-secondary" style={{ fontSize: 14 }}>
-          Discover food, groceries, shops and services
-        </Text>
-        <View style={{ marginTop: 12 }}>
-          <Input
-            value={text}
-            onChangeText={setText}
-            placeholder="Search food, shops, services…"
-            returnKeyType="search"
-            left={<Feather name="search" size={18} color={color.brand[500]} style={{ marginRight: 8 }} />}
-            right={
-              text ? (
-                <PressableScale onPress={() => setText('')} hitSlop={8}>
-                  <Feather name="x" size={18} color={color.text.muted} />
-                </PressableScale>
-              ) : null
-            }
-          />
-        </View>
-      </View>
-
-      <View className="bg-surface-subtle" style={{ flex: 1 }}>
-
-      {/* Category chips */}
-      <View className="mb-sm">
-        <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ paddingHorizontal: 16, gap: 8 }}>
-          {FILTERS.map((item) => {
-            const active = item.key === filter;
-            return (
-              <PressableScale
-                key={item.key}
-                onPress={() => setFilter(item.key)}
-                className={
-                  active
-                    ? 'rounded-full px-lg py-sm'
-                    : 'rounded-full bg-surface-base px-lg py-sm'
-                }
-                style={active ? { backgroundColor: color.brand[500] } : elevation.card}
-              >
-                <Text className={active ? 'text-sm font-semibold text-white' : 'text-sm font-semibold text-text-secondary'}>
-                  {item.label}
-                </Text>
-              </PressableScale>
-            );
-          })}
-        </ScrollView>
-      </View>
-
-      {/* Filters + sort (all wired to real backend params) */}
-      <View className="mb-sm">
-        <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ paddingHorizontal: 16, gap: 8, alignItems: 'center' }}>
-          <Pill label="Open now" active={openNow} onPress={() => setOpenNow((v) => !v)} />
-          <Pill label="Top rated" active={topRated} onPress={() => setTopRated((v) => !v)} />
-          <View style={{ width: 1, height: 20, backgroundColor: color.border.subtle, marginHorizontal: 4 }} />
-          {SORTS.map((s) => (
-            <Pill key={s.key} label={s.label} active={sort === s.key} onPress={() => setSort(s.key)} />
+    <Screen>
+      <Header title="Search" />
+      <View style={{ paddingHorizontal: space['2xl'], paddingTop: space.sm }}>
+        {!searching ? (
+          <T variant="title" style={{ marginBottom: space.xl }}>
+            Discover your{'\n'}favorite food
+          </T>
+        ) : null}
+        <LabeledInput
+          icon="search"
+          placeholder="What would you like to eat?"
+          value={q}
+          onChangeText={setQ}
+          returnKeyType="search"
+          autoFocus={!!route.params?.focus}
+        />
+        {/* Vendor-type filter chips (the Home tiles preset these) */}
+        <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{ marginTop: space.lg }} contentContainerStyle={{ gap: space.md }}>
+          {TYPES.map((t) => (
+            <Chip
+              key={t.label}
+              label={t.label}
+              selected={type === t.key}
+              onPress={() => setType(t.key)}
+              style={{ height: 40, paddingHorizontal: space.lg }}
+            />
           ))}
         </ScrollView>
       </View>
 
-      {/* Results */}
-      <View style={{ flex: 1 }}>
-        {isLoading ? (
-          <View className="px-lg pt-sm">
-            {[0, 1, 2].map((i) => (
-              <Skeleton key={i} className="mb-md h-28 w-full" style={{ borderRadius: 12 }} />
+      {searching ? (
+        <>
+          {/* Kit underline tabs: Result | Sort By */}
+          <View style={{ flexDirection: 'row', marginTop: space.xl }}>
+            {(
+              [
+                { key: 'result', label: 'Result' },
+                { key: 'sort', label: 'Sort By' },
+              ] as const
+            ).map((t) => (
+              <Pressable key={t.key} onPress={() => setTab(t.key)} style={{ flex: 1 }}>
+                <View style={{ alignItems: 'center' }}>
+                  <T variant="body" weight="semibold" tone={tab === t.key ? 'ink' : 'faint'}>
+                    {t.label}
+                  </T>
+                  <View
+                    style={{
+                      height: 3,
+                      alignSelf: 'stretch',
+                      marginTop: space.md,
+                      borderRadius: 2,
+                      backgroundColor: tab === t.key ? color.brand[500] : color.border.subtle,
+                    }}
+                  />
+                </View>
+              </Pressable>
             ))}
           </View>
-        ) : isError ? (
-          <View className="flex-1 items-center justify-center">
-            <EmptyState
-              icon="alert-circle-outline"
-              title="Couldn’t load places"
-              body="Something went wrong — give it another go."
-              actionLabel="Retry"
-              onAction={() => refetch()}
-            />
-          </View>
-        ) : (
-          <List
-            data={vendors}
-            keyExtractor={(v: any) => String(v.id)}
-            contentContainerStyle={{ paddingHorizontal: 16, paddingBottom: 32, paddingTop: 4 }}
-            keyboardShouldPersistTaps="handled"
-            refreshControl={<RefreshControl refreshing={isRefetching} onRefresh={() => refetch()} tintColor={color.brand[500]} />}
-            renderItem={({ item }: { item: any }) => (
-              <VendorRow vendor={item} onPress={() => navigation?.navigate?.('VendorDetail', { id: item.id })} />
-            )}
-            ListEmptyComponent={
-              <View className="pt-2xl">
-                <EmptyState
-                  icon="magnify"
-                  title={debounced ? 'No matches' : 'Search Swift'}
-                  body={
-                    debounced
-                      ? `Nothing for “${debounced}” — try another term.`
-                      : 'Find food, groceries, shops and services near you.'
-                  }
+
+          {tab === 'result' ? (
+            vendors.isLoading ? (
+              <LoadingBlock />
+            ) : vendors.isError ? (
+              <ErrorState onRetry={() => vendors.refetch()} />
+            ) : results.length === 0 ? (
+              <EmptyState
+                icon="search"
+                title="No matches"
+                body={`Nothing found${debounced ? ` for “${debounced}”` : ''}. Try another name or category.`}
+              />
+            ) : (
+              <FlatList
+                data={results}
+                keyExtractor={(v) => v.id}
+                contentContainerStyle={{ padding: space['2xl'], gap: space.md, paddingBottom: space['3xl'] }}
+                ListHeaderComponent={<SectionHeader title="Search Result" style={{ marginBottom: space.md }} />}
+                renderItem={({ item: v }) => (
+                  <VendorRow
+                    image={vendorImage(v)}
+                    name={v.name}
+                    meta={
+                      <RatingMeta
+                        rating={Number(v.averageRating) || 0}
+                        extra={v.etaMin ? `${v.etaMin} min` : v.distanceKm != null ? `${v.distanceKm} km` : undefined}
+                      />
+                    }
+                    sub={v.isCurrentlyOpen === false ? 'Closed right now' : undefined}
+                    onPress={() => navigation.navigate('Restaurant', { vendorId: v.id })}
+                  />
+                )}
+              />
+            )
+          ) : (
+            <View style={{ flex: 1, paddingHorizontal: space['2xl'], paddingTop: space.xl }}>
+              <SectionHeader title="Sort by" />
+              <View style={{ marginTop: space.md }}>
+                {SORTS.map((s) => (
+                  <Pressable
+                    key={s.label}
+                    onPress={() => setDraftSort(s.key)}
+                    style={{ flexDirection: 'row', alignItems: 'center', gap: space.md, paddingVertical: space.md }}
+                  >
+                    <Radio on={draftSort === s.key} />
+                    <T variant="body">{s.label}</T>
+                  </Pressable>
+                ))}
+              </View>
+              <View style={{ flex: 1 }} />
+              <View style={{ gap: space.md, paddingBottom: space['2xl'] }}>
+                <PillButton
+                  label="Apply"
+                  onPress={() => {
+                    setSort(draftSort);
+                    setTab('result');
+                  }}
+                />
+                <PillButton
+                  label="Reset"
+                  variant="soft"
+                  onPress={() => {
+                    setDraftSort(undefined);
+                    setSort(undefined);
+                    setTab('result');
+                  }}
                 />
               </View>
-            }
-          />
-        )}
-      </View>
-      </View>
-    </SafeAreaView>
+            </View>
+          )}
+        </>
+      ) : (
+        <ScrollView contentContainerStyle={{ paddingHorizontal: space['2xl'], paddingTop: space['2xl'], paddingBottom: space['3xl'] }}>
+          {recentSearches.length > 0 ? (
+            <>
+              <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
+                <SectionHeader title="Your search history" />
+                <Pressable onPress={clearSearches} hitSlop={8}>
+                  <View style={{ paddingVertical: 4 }}>
+                    <T variant="label" tone="faint">
+                      Clear
+                    </T>
+                  </View>
+                </Pressable>
+              </View>
+              <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: space.md, marginTop: space.lg }}>
+                {recentSearches.map((r, i) => (
+                  <Chip key={r} label={r} selected={i === 0} onPress={() => setQ(r)} style={{ height: 44 }} />
+                ))}
+              </View>
+            </>
+          ) : null}
+
+          {popularItems.length > 0 ? (
+            <>
+              <SectionHeader title="Popular right now" style={{ marginTop: recentSearches.length ? space['3xl'] : 0 }} />
+              <View style={{ gap: space.md, marginTop: space.lg }}>
+                {popularItems.slice(0, 6).map((it) => (
+                  <VendorRow
+                    key={it.id}
+                    image={itemImage(it)}
+                    name={it.name}
+                    meta={
+                      <T variant="label" weight="bold" tone="brand">
+                        {money(it.price)}
+                      </T>
+                    }
+                    sub={it.vendorName}
+                    onPress={() => navigation.navigate('MenuItem', { itemId: it.id, vendorId: it.vendorId })}
+                  />
+                ))}
+              </View>
+            </>
+          ) : null}
+        </ScrollView>
+      )}
+    </Screen>
   );
 }

@@ -37,23 +37,33 @@ const docIcon = (docType: string): keyof typeof MaterialCommunityIcons.glyphMap 
       ? 'card-account-details-outline'
       : 'file-document-outline';
 
-type DocStatus = 'APPROVED' | 'PENDING' | 'REJECTED' | undefined;
+type DocStatus = 'APPROVED' | 'PENDING' | 'REJECTED' | 'EXPIRED' | undefined;
+
+const DAY_MS = 24 * 60 * 60 * 1000;
+// Mirrors the API's renewal window: re-submission opens 30 days before expiry.
+const RENEWAL_WINDOW_DAYS = 30;
 
 export function DocumentUploadCard({
   role,
   docType,
   status,
+  expiresAt,
   isNext,
 }: {
   role: string;
   docType: string;
   status: DocStatus;
+  expiresAt?: string | null;
   isNext?: boolean;
 }) {
   const upload = useUploadDocument(role);
-  const approved = status === 'APPROVED';
+  const expired = status === 'EXPIRED';
   const pending = status === 'PENDING';
   const rejected = status === 'REJECTED';
+  const daysLeft = expiresAt ? Math.ceil((new Date(expiresAt).getTime() - Date.now()) / DAY_MS) : null;
+  const expiringSoon = status === 'APPROVED' && daysLeft != null && daysLeft <= RENEWAL_WINDOW_DAYS;
+  // An approved doc inside its renewal window re-opens for upload.
+  const approved = status === 'APPROVED' && !expiringSoon;
 
   const pick = async () => {
     const perm = await ImagePicker.requestMediaLibraryPermissionsAsync();
@@ -71,27 +81,35 @@ export function DocumentUploadCard({
   };
 
   const caption = approved
-    ? 'Approved'
-    : pending
-      ? 'Pending review'
-      : rejected
-        ? 'Rejected — tap to re-upload'
-        : isNext
-          ? 'Recommended next step'
-          : 'Get started';
+    ? daysLeft != null
+      ? `Approved — valid until ${new Date(expiresAt!).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' })}`
+      : 'Approved'
+    : expiringSoon
+      ? `Expires in ${daysLeft} day${daysLeft === 1 ? '' : 's'} — tap to upload the renewal`
+      : expired
+        ? 'Expired — upload the renewal to keep operating'
+        : pending
+          ? 'Pending review'
+          : rejected
+            ? 'Rejected — tap to re-upload'
+            : isNext
+              ? 'Recommended next step'
+              : 'Get started';
 
   return (
-    <Pressable disabled={approved || upload.isPending} onPress={pick}>
+    <Pressable disabled={approved || pending || upload.isPending} onPress={pick}>
       <Card style={isNext && !status ? { borderColor: color.brand[500] } : undefined} className={isNext && !status ? 'mb-sm flex-row items-center' : 'mb-sm flex-row items-center'}>
         <View className="h-11 w-11 items-center justify-center rounded-full" style={{ backgroundColor: color.surface.subtle }}>
           <MaterialCommunityIcons
             name={approved ? 'check-decagram' : docIcon(docType)}
             size={20}
-            color={approved ? color.success : color.brand[500]}
+            color={approved ? color.success : expired || expiringSoon ? color.warning : color.brand[500]}
           />
         </View>
         <View className="ml-md flex-1">
-          <Text className="text-xs text-text-secondary">{caption}</Text>
+          <Text className="text-xs text-text-secondary" style={expiringSoon || expired ? { color: color.warning } : undefined}>
+            {caption}
+          </Text>
           <Text className="text-base font-semibold">{label(docType)}</Text>
           {docType === 'national_id' || docType === 'owner_national_id' ? (
             <Text className="mt-0.5 text-xs text-text-muted">
@@ -103,6 +121,8 @@ export function DocumentUploadCard({
           <ActivityIndicator />
         ) : approved ? (
           <Badge label="Approved" tone="success" />
+        ) : expired ? (
+          <Badge label="Expired" tone="error" />
         ) : pending ? (
           <Badge label="In review" tone="brand" />
         ) : (

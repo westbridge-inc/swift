@@ -113,6 +113,11 @@ model Session {
   user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
   token        String   @unique
   refreshToken String   @unique
+  // Refresh rotation theft detection: the token this one replaced, and when.
+  // A replay of previousRefreshToken outside the race-grace window means the
+  // token was stolen — the whole session is revoked (see AuthService.refreshTokens).
+  previousRefreshToken String?   @unique
+  rotatedAt            DateTime?
   deviceId     String
   deviceType   String
   ipAddress    String?
@@ -537,7 +542,9 @@ model Vendor {
   longitude        Float
   operatingHours   OperatingHours[]
   isCurrentlyOpen  Boolean         @default(false)
-  acceptingOrders  Boolean         @default(true)
+  /// Born OFF: commerce opens when the owner's document checklist is verified
+  /// (verification afterApproval) and closes when a required document lapses.
+  acceptingOrders  Boolean         @default(false)
   deliveryRadius   Float           @default(10.0)
   minOrderAmount   Decimal         @default(0) @db.Decimal(10, 2)
   estimatedPrepTime Int            @default(30)
@@ -808,6 +815,10 @@ model Order {
   estimatedPrepTime     Int?
   estimatedDeliveryTime Int?
   actualDeliveryTime    Int?
+  /// Priority delivery (§4.2 parity with courier speed tiers): customer pays
+  /// 1.5x the delivery fee, the order dispatches ahead of standard ones, and
+  /// the whole premium goes to the rider (cash, no commission).
+  isExpress             Boolean   @default(false)
   scheduledFor          DateTime?
   placedAt              DateTime  @default(now())
   acceptedAt            DateTime?

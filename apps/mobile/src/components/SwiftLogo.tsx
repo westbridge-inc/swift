@@ -1,3 +1,4 @@
+/** @jsxImportSource react */
 import Svg, { G, Path } from 'react-native-svg';
 import { color } from '@swift/ui';
 

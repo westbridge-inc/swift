@@ -38,7 +38,10 @@ export function useMyStoreReviews() {
     queryKey: ['vendor', 'reviews'],
     queryFn: async () => {
       const r = await vendorApi.reviews();
-      return r?.data as { data: any[]; summary: { averageRating: number; totalReviews: number } };
+      return r?.data as {
+        data: any[];
+        summary: { averageRating: number; totalReviews: number; distribution: Record<string, number> };
+      };
     },
   });
 }
@@ -125,6 +128,31 @@ export function useVendorOrders(enabled: boolean) {
   });
 }
 
+/** Full order drill-down (line items, status log, customer/rider contacts).
+ *  Keyed under ['vendor','orders'] so order-action mutations refresh it too. */
+export function useVendorOrder(id: string | undefined) {
+  return useQuery({
+    queryKey: ['vendor', 'orders', 'detail', id],
+    queryFn: () => unwrap<any>(vendorApi.order(id!)),
+    enabled: !!id,
+    refetchInterval: 15000,
+  });
+}
+
+export type OrderHistoryFilters = { status?: string; search?: string; page: number };
+
+/** Paginated, filterable order history (the endpoint's status/search/page params). */
+export function useVendorOrderHistory(filters: OrderHistoryFilters) {
+  return useQuery({
+    queryKey: ['vendor', 'orders', 'history', filters],
+    queryFn: async () => {
+      const r = await vendorApi.orders({ ...filters, limit: 20 });
+      return r?.data as { data: any[]; meta: { page: number; limit: number; total: number; hasNext: boolean } };
+    },
+    placeholderData: (prev) => prev,
+  });
+}
+
 export function useVendorSubscription(enabled = true) {
   // Billing is owner-only (staff & roles §4.1) — staff sessions skip the call.
   return useQuery({ queryKey: ['vendor', 'subscription'], queryFn: () => unwrap(vendorApi.subscription()), enabled });
@@ -173,6 +201,23 @@ export function useCreateCategory() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: (data: { name: string }) => unwrap(vendorApi.createCategory(data)),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['vendor', 'menu'] }),
+  });
+}
+
+export function useUpdateCategory() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, data }: { id: string; data: { name?: string } }) => unwrap(vendorApi.updateCategory(id, data)),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['vendor', 'menu'] }),
+  });
+}
+
+/** Deleting a category removes its items too — the UI must confirm with the count. */
+export function useDeleteCategory() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (id: string) => unwrap(vendorApi.deleteCategory(id)),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['vendor', 'menu'] }),
   });
 }
@@ -273,6 +318,14 @@ export function useVendorRevenue(days = 14) {
   });
 }
 
+/** Operational quality: acceptance/cancellation rates + accept/prep timing. */
+export function useVendorOps(days = 30) {
+  return useQuery({
+    queryKey: ['vendor', 'analytics', 'ops', days],
+    queryFn: () => unwrap<any>(vendorApi.analyticsOps(days)),
+  });
+}
+
 /** Orders by local hour (last 30 days) — the §4.1 busy-hours view. */
 export function useBusyHours() {
   return useQuery({
@@ -286,6 +339,16 @@ export function usePopularItems(limit = 8) {
   return useQuery({
     queryKey: ['vendor', 'analytics', 'popular', limit],
     queryFn: () => unwrap<any>(vendorApi.analyticsPopularItems(limit)),
+  });
+}
+
+/** Storefront QR + deep link (manager+). Static per store — cache hard. */
+export function useVendorQr(enabled = true) {
+  return useQuery({
+    queryKey: ['vendor', 'qr'],
+    queryFn: () => unwrap<{ deepLink: string; svg: string; vendorName: string }>(vendorApi.qr()),
+    enabled,
+    staleTime: Infinity,
   });
 }
 

@@ -1,18 +1,20 @@
-import { useMemo, useRef, useState } from 'react';
-import { View, Linking, useWindowDimensions } from 'react-native';
-import { SafeAreaView } from 'react-native-safe-area-context';
+/** @jsxImportSource react */
+import React, { useEffect, useMemo, useRef, useState } from 'react';
+import { Linking, Pressable, Share, View, useWindowDimensions } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import MapView, { Marker, PROVIDER_DEFAULT, Polyline } from 'react-native-maps';
 import BottomSheet, { BottomSheetView, BottomSheetScrollView } from '@gorhom/bottom-sheet';
-import { color } from '@swift/ui';
+import { Image } from 'expo-image';
 import { Feather, MaterialCommunityIcons } from '@expo/vector-icons';
-import { Text, Heading, Card, Button, Spinner, PressableScale, ConfirmDialog, choiceSurface, choiceSurfaceStyle, elevation } from '../../../components/ui';
+import { color, radius, space } from '@swift/ui';
 import { useActiveRide, useRideEstimate, useRequestRide, useCancelRide } from '../../../hooks';
+import { connectSocket, getSocket, subscribeToOrder } from '../../../services/socket';
 import { useLocationStore } from '../../../stores/locationStore';
 import { GEORGETOWN } from '../../../hooks/useDeviceLocation';
 import { money } from '../../../lib/money';
-import { Image } from 'expo-image';
 import { mediaUrl } from '../../../lib/images';
 import type { RideClass, TierEstimate } from '../../../services/api';
+import { Card, CircleChip, IconChip, LoadingBlock, PillButton, PopupCard, Stars, T, cardShadow } from '../../../kit';
 import type { PickedPlace } from './DestinationSearchScreen';
 
 const STATUS_LABEL: Record<string, string> = {
@@ -34,38 +36,30 @@ type LatLng = { latitude: number; longitude: number };
 function regionFor(pts: LatLng[]) {
   const lats = pts.map((p) => p.latitude);
   const lngs = pts.map((p) => p.longitude);
-  const minLat = Math.min(...lats);
-  const maxLat = Math.max(...lats);
-  const minLng = Math.min(...lngs);
-  const maxLng = Math.max(...lngs);
   return {
-    latitude: (minLat + maxLat) / 2,
-    longitude: (minLng + maxLng) / 2,
-    latitudeDelta: Math.max(0.02, (maxLat - minLat) * 2.2),
-    longitudeDelta: Math.max(0.02, (maxLng - minLng) * 2.2),
+    latitude: (Math.min(...lats) + Math.max(...lats)) / 2,
+    longitude: (Math.min(...lngs) + Math.max(...lngs)) / 2,
+    latitudeDelta: Math.max(0.02, (Math.max(...lats) - Math.min(...lats)) * 2.2),
+    longitudeDelta: Math.max(0.02, (Math.max(...lngs) - Math.min(...lngs)) * 2.2),
   };
 }
 
-function BackButton({ navigation }: any) {
+function FloatingBack({ navigation, insets }: any) {
   return (
-    <SafeAreaView edges={['top']} style={{ position: 'absolute', top: 0, left: 0, zIndex: 10 }}>
-      <PressableScale onPress={() => navigation?.goBack?.()} hitSlop={10} className="m-lg">
-        <View className="h-10 w-10 items-center justify-center rounded-full bg-surface-base" style={{ elevation: 4 }}>
-          <Feather name="chevron-left" size={22} color={color.text.primary} />
-        </View>
-      </PressableScale>
-    </SafeAreaView>
+    <View style={{ position: 'absolute', top: insets.top + space.sm, left: space['2xl'] }}>
+      <CircleChip icon="chevron-left" onPress={() => navigation?.goBack?.()} />
+    </View>
   );
 }
 
-// Same marker language as the courier map: pickup = ink dot in a white ring,
-// drop-off = the brand map pin.
+// Marker language shared with courier: pickup = ink dot in a white ring,
+// drop-off = brand location pin.
 function PickupDot() {
   return (
     <View
       style={[
         { width: 16, height: 16, borderRadius: 8, backgroundColor: color.text.primary, borderWidth: 3, borderColor: '#fff' },
-        elevation.card,
+        cardShadow,
       ]}
     />
   );
@@ -74,11 +68,70 @@ function DropPin() {
   return <MaterialCommunityIcons name="map-marker" size={36} color={color.brand[600]} />;
 }
 
-const SHEET_STYLE = { backgroundColor: color.surface.subtle, borderTopLeftRadius: 24, borderTopRightRadius: 24 };
+/** Route card: pickup dot → destination pin, two pressable rows. */
+export function RouteCard({
+  pickupLabel,
+  dropoffLabel,
+  onPickup,
+  onDropoff,
+  pickupTitle = 'Pickup',
+  dropoffTitle = 'Where to?',
+}: {
+  pickupLabel?: string;
+  dropoffLabel?: string;
+  onPickup: () => void;
+  onDropoff: () => void;
+  pickupTitle?: string;
+  dropoffTitle?: string;
+}) {
+  return (
+    <Card>
+      <Pressable onPress={onPickup}>
+        {({ pressed }) => (
+          <View style={{ flexDirection: 'row', alignItems: 'center', opacity: pressed ? 0.7 : 1 }}>
+            <View style={{ width: 24, alignItems: 'center' }}>
+              <View style={{ width: 11, height: 11, borderRadius: 6, borderWidth: 2.5, borderColor: color.text.muted }} />
+            </View>
+            <View style={{ flex: 1, marginLeft: space.sm }}>
+              <T variant="caption" tone="muted">
+                {pickupTitle}
+              </T>
+              <T variant="body" weight="semibold" numberOfLines={1}>
+                {pickupLabel ?? 'Set pickup location'}
+              </T>
+            </View>
+          </View>
+        )}
+      </Pressable>
+      <View style={{ marginLeft: 11, height: 16, width: 2, backgroundColor: color.border.subtle, marginVertical: 4 }} />
+      <Pressable onPress={onDropoff}>
+        {({ pressed }) => (
+          <View style={{ flexDirection: 'row', alignItems: 'center', opacity: pressed ? 0.7 : 1 }}>
+            <View style={{ width: 24, alignItems: 'center' }}>
+              <MaterialCommunityIcons name="map-marker" size={18} color={color.brand[500]} />
+            </View>
+            <View style={{ flex: 1, marginLeft: space.sm }}>
+              <T variant="caption" tone="muted">
+                {dropoffTitle}
+              </T>
+              <T variant="body" weight="semibold" numberOfLines={1}>
+                {dropoffLabel ?? 'Choose your destination'}
+              </T>
+            </View>
+            <Feather name="search" size={18} color={color.text.muted} />
+          </View>
+        )}
+      </Pressable>
+    </Card>
+  );
+}
+
+const SHEET_STYLE = { backgroundColor: color.surface.subtle, borderTopLeftRadius: radius.xl, borderTopRightRadius: radius.xl };
 const HANDLE_STYLE = { width: 44, backgroundColor: color.border.strong };
 
 export function TaxiScreen({ navigation }: any) {
   const { height: winH } = useWindowDimensions();
+  const insets = useSafeAreaInsets();
   const { latitude, longitude, address } = useLocationStore();
   const { data: activeRide, isLoading: loadingActive } = useActiveRide<any>(true);
   const requestRide = useRequestRide();
@@ -105,16 +158,14 @@ export function TaxiScreen({ navigation }: any) {
 
   if (loadingActive) {
     return (
-      <SafeAreaView style={{ flex: 1 }} edges={['top']} className="bg-surface-base">
-        <View className="flex-1 items-center justify-center">
-          <Spinner size="large" />
-        </View>
-      </SafeAreaView>
+      <View style={{ flex: 1, backgroundColor: color.surface.subtle }}>
+        <LoadingBlock />
+      </View>
     );
   }
 
   if (activeRide) {
-    return <ActiveRide navigation={navigation} ride={activeRide} cancelRide={cancelRide} />;
+    return <ActiveRide navigation={navigation} ride={activeRide} cancelRide={cancelRide} insets={insets} />;
   }
 
   // ===== Request flow (idle → route chosen) =====
@@ -148,7 +199,7 @@ export function TaxiScreen({ navigation }: any) {
   };
 
   return (
-    <View style={{ flex: 1 }} className="bg-surface-base">
+    <View style={{ flex: 1, backgroundColor: color.surface.subtle }}>
       <MapView
         provider={PROVIDER_DEFAULT}
         style={{ flex: 1 }}
@@ -171,7 +222,7 @@ export function TaxiScreen({ navigation }: any) {
         ) : null}
       </MapView>
 
-      <BackButton navigation={navigation} />
+      <FloatingBack navigation={navigation} insets={insets} />
 
       <BottomSheet
         index={0}
@@ -180,45 +231,26 @@ export function TaxiScreen({ navigation }: any) {
         backgroundStyle={SHEET_STYLE}
         handleIndicatorStyle={HANDLE_STYLE}
       >
-        <BottomSheetScrollView contentContainerStyle={{ paddingHorizontal: 16, paddingBottom: 32 }}>
-          {/* Route — pickup → destination, connected */}
-          <View className="rounded-3xl bg-surface-base p-lg" style={elevation.card}>
-            <PressableScale onPress={() => openSearch((p) => setPickupOverride(p), 'Pickup')}>
-              <View className="flex-row items-center">
-                <View style={{ width: 22, alignItems: 'center' }}>
-                  <View style={{ width: 11, height: 11, borderRadius: 6, borderWidth: 2.5, borderColor: color.text.muted }} />
-                </View>
-                <View className="ml-sm flex-1">
-                  <Text className="text-xs text-text-muted">Pickup</Text>
-                  <Text className="text-base font-semibold text-text-primary" numberOfLines={1}>{pickup?.label ?? 'Set pickup location'}</Text>
-                </View>
-              </View>
-            </PressableScale>
-            <View style={{ marginLeft: 10, height: 16, width: 2, backgroundColor: color.border.subtle, marginVertical: 3 }} />
-            <PressableScale onPress={() => openSearch((p) => setDropoff(p), 'Where to?')}>
-              <View className="flex-row items-center">
-                <View style={{ width: 22, alignItems: 'center' }}>
-                  <MaterialCommunityIcons name="map-marker" size={18} color={color.brand[500]} />
-                </View>
-                <View className="ml-sm flex-1">
-                  <Text className="text-xs text-text-muted">Where to?</Text>
-                  <Text className="text-base font-semibold text-text-primary" numberOfLines={1}>{dropoff?.label ?? 'Choose your destination'}</Text>
-                </View>
-                <Feather name="search" size={18} color={color.text.muted} />
-              </View>
-            </PressableScale>
-          </View>
+        <BottomSheetScrollView contentContainerStyle={{ paddingHorizontal: space['2xl'], paddingBottom: space['3xl'] }}>
+          <RouteCard
+            pickupLabel={pickup?.label}
+            dropoffLabel={dropoff?.label}
+            onPickup={() => openSearch((p) => setPickupOverride(p), 'Pickup')}
+            onDropoff={() => openSearch((p) => setDropoff(p), 'Where to?')}
+          />
 
           {/* Tiers */}
           {dropoffPoint ? (
-            <View className="mt-lg">
-              <Heading size="lg" className="mb-sm">
+            <View style={{ marginTop: space.xl }}>
+              <T variant="heading" style={{ marginBottom: space.md }}>
                 Choose a ride
-              </Heading>
+              </T>
               {estimating && !estimate ? (
-                <Card className="flex-row items-center">
-                  <Spinner />
-                  <Text className="ml-sm text-text-secondary">Calculating fares…</Text>
+                <Card style={{ flexDirection: 'row', alignItems: 'center', gap: space.md }}>
+                  <Feather name="loader" size={16} color={color.text.muted} />
+                  <T variant="body" tone="muted">
+                    Calculating fares…
+                  </T>
                 </Card>
               ) : estimate ? (
                 <>
@@ -231,41 +263,49 @@ export function TaxiScreen({ navigation }: any) {
                       onPress={() => setSelectedClass(tier.rideClass)}
                     />
                   ))}
-                  <Text className="mt-sm text-center text-xs text-text-muted">
+                  <T variant="caption" tone="muted" center style={{ marginTop: space.sm }}>
                     Fixed fare, locked before you book — no surge, pay cash.
-                  </Text>
+                  </T>
                 </>
               ) : (
                 <Card>
-                  <Text className="text-text-secondary">Couldn&apos;t get a fare. Try another destination.</Text>
+                  <T variant="body" tone="muted">
+                    Couldn&apos;t get a fare. Try another destination.
+                  </T>
                 </Card>
               )}
             </View>
           ) : (
-            <Text className="mt-lg px-xs text-sm text-text-secondary">
+            <T variant="label" tone="muted" style={{ marginTop: space.xl, paddingHorizontal: space.xs }}>
               Set your destination to see ride options and fixed fares.
-            </Text>
+            </T>
           )}
 
-          {errMsg ? <Text className="mt-md text-center text-sm text-error">{errMsg}</Text> : null}
+          {errMsg ? (
+            <T variant="label" tone="error" center style={{ marginTop: space.lg }}>
+              {errMsg}
+            </T>
+          ) : null}
           {needsL2 ? (
-            <Button
+            <PillButton
               label="Verify your ID — takes a minute"
               variant="outline"
-              className="mt-sm"
+              style={{ marginTop: space.md }}
               onPress={() => navigation?.navigate?.('IdentityVerification')}
             />
           ) : null}
 
-          <Button className="mt-md" loading={requestRide.isPending} disabled={!canRequest} onPress={onRequest}>
-            <Text className="font-body font-semibold text-white">
-              {selectedTier
-                ? `Request ${TIER_META[selectedClass].label} · ${money(selectedTier.fare)}`
-                : 'Request ride'}
-            </Text>
-          </Button>
+          <PillButton
+            label={selectedTier ? `Request ${TIER_META[selectedClass].label} · ${money(selectedTier.fare)}` : 'Request ride'}
+            style={{ marginTop: space.lg }}
+            loading={requestRide.isPending}
+            disabled={!canRequest}
+            onPress={onRequest}
+          />
           {!canRequest && dropoffPoint ? (
-            <Text className="mt-xs text-center text-xs text-text-muted">Pick a ride option to continue.</Text>
+            <T variant="caption" tone="muted" center style={{ marginTop: space.sm }}>
+              Pick a ride option to continue.
+            </T>
           ) : null}
         </BottomSheetScrollView>
       </BottomSheet>
@@ -273,6 +313,7 @@ export function TaxiScreen({ navigation }: any) {
   );
 }
 
+/** Kit selection card: soft brand tint + brand border when selected. */
 function TierRow({
   tier,
   selected,
@@ -286,40 +327,104 @@ function TierRow({
 }) {
   const meta = TIER_META[tier.rideClass];
   return (
-    <PressableScale onPress={onPress}>
-      <View className={`mb-sm flex-row items-center rounded-2xl border px-lg py-md ${choiceSurface(selected)}`} style={choiceSurfaceStyle(selected)}>
-        <MaterialCommunityIcons name={meta.icon} size={26} color={selected ? '#fff' : color.text.primary} />
-        <View className="ml-md flex-1">
-          <Text className={`text-base font-bold ${selected ? 'text-white' : 'text-text-primary'}`}>
-            {meta.label}
-            <Text className={selected ? 'text-white' : 'text-text-muted'}> · {tier.capacity} seats</Text>
-          </Text>
-          <Text className={`text-xs ${selected ? 'text-white/90' : 'text-text-secondary'}`}>
-            {meta.blurb} · ~{durationMin} min
-          </Text>
+    <Pressable onPress={onPress}>
+      {({ pressed }) => (
+        <View
+          style={{
+            flexDirection: 'row',
+            alignItems: 'center',
+            gap: space.md,
+            marginBottom: space.md,
+            paddingHorizontal: space.lg,
+            paddingVertical: space.md,
+            borderRadius: radius.lg,
+            borderWidth: 1,
+            borderColor: selected ? color.brand[500] : color.border.subtle,
+            backgroundColor: selected ? color.brand[50] : color.surface.base,
+            opacity: pressed ? 0.85 : 1,
+          }}
+        >
+          <View
+            style={{
+              width: 44,
+              height: 44,
+              borderRadius: 22,
+              alignItems: 'center',
+              justifyContent: 'center',
+              backgroundColor: selected ? color.brand[500] : color.brand[50],
+            }}
+          >
+            <MaterialCommunityIcons name={meta.icon} size={22} color={selected ? color.white : color.brand[600]} />
+          </View>
+          <View style={{ flex: 1 }}>
+            <T variant="body" weight="semibold" tone={selected ? 'deep' : 'ink'}>
+              {meta.label} <T variant="label" tone="muted">· {tier.capacity} seats</T>
+            </T>
+            <T variant="caption" tone="muted" style={{ marginTop: 2 }}>
+              {meta.blurb} · ~{durationMin} min
+            </T>
+          </View>
+          <T variant="body" weight="bold" tone={selected ? 'brand' : 'ink'}>
+            {money(tier.fare)}
+          </T>
         </View>
-        <Text className={`text-lg font-bold ${selected ? 'text-white' : 'text-text-primary'}`}>
-          {money(tier.fare)}
-        </Text>
-      </View>
-    </PressableScale>
+      )}
+    </Pressable>
   );
 }
 
-function ActiveRide({ navigation, ride, cancelRide }: any) {
+function ActiveRide({ navigation, ride, cancelRide, insets }: any) {
   const { height: winH } = useWindowDimensions();
   const sheetRef = useRef<BottomSheet>(null);
   const [confirmCancel, setConfirmCancel] = useState(false);
+  const [liveDriver, setLiveDriver] = useState<LatLng | null>(null);
   const d = ride.driver;
+
+  // Live driver position: taxi rides are orders, so the order room streams
+  // `driver:location` straight from the driver's GPS uploads. The REST
+  // snapshot (driver.currentLat) seeds the marker until the first event.
+  useEffect(() => {
+    if (!ride?.id) return;
+    connectSocket();
+    subscribeToOrder(ride.id);
+    const s = getSocket();
+    const onDriver = (p: any) => {
+      if (p?.latitude != null && p?.longitude != null) {
+        setLiveDriver({ latitude: Number(p.latitude), longitude: Number(p.longitude) });
+      }
+    };
+    s.on('driver:location', onDriver);
+    return () => {
+      s.off('driver:location', onDriver);
+    };
+  }, [ride?.id]);
+
   const pickup = ride.pickupLat != null ? { latitude: Number(ride.pickupLat), longitude: Number(ride.pickupLng) } : null;
   const drop =
     ride.deliveryLat != null ? { latitude: Number(ride.deliveryLat), longitude: Number(ride.deliveryLng) } : null;
-  const driverLoc = d?.currentLat != null ? { latitude: Number(d.currentLat), longitude: Number(d.currentLng) } : null;
+  const driverLoc =
+    liveDriver ?? (d?.currentLat != null ? { latitude: Number(d.currentLat), longitude: Number(d.currentLng) } : null);
   const pts = [pickup, drop, driverLoc].filter(Boolean) as LatLng[];
   const region = useMemo(() => (pts.length ? regionFor(pts) : GEORGETOWN_REGION), [ride]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  const shareTrip = () => {
+    const vehicle = [d?.vehicleColor, d?.vehicleMake, d?.vehicleModel].filter(Boolean).join(' ');
+    const message = [
+      'I’m on a Swift taxi ride.',
+      d?.user?.firstName ? `Driver: ${d.user.firstName}${d?.averageRating ? ` (★${Number(d.averageRating).toFixed(1)})` : ''}` : null,
+      vehicle ? `Vehicle: ${vehicle}` : null,
+      d?.licensePlate ? `Plate: ${d.licensePlate}` : null,
+      ride.pickupAddress ? `From: ${ride.pickupAddress}` : null,
+      ride.deliveryAddress ? `To: ${ride.deliveryAddress}` : null,
+      driverLoc ? `Live position: https://maps.google.com/?q=${driverLoc.latitude.toFixed(5)},${driverLoc.longitude.toFixed(5)}` : null,
+    ]
+      .filter(Boolean)
+      .join('\n');
+    Share.share({ message }).catch(() => {});
+  };
+
   return (
-    <View style={{ flex: 1 }} className="bg-surface-base">
+    <View style={{ flex: 1, backgroundColor: color.surface.subtle }}>
       <MapView
         provider={PROVIDER_DEFAULT}
         style={{ flex: 1 }}
@@ -339,8 +444,10 @@ function ActiveRide({ navigation, ride, cancelRide }: any) {
         {driverLoc ? (
           <Marker coordinate={driverLoc} title="Driver" anchor={{ x: 0.5, y: 0.5 }}>
             <View
-              className="h-9 w-9 items-center justify-center rounded-full"
-              style={[{ backgroundColor: color.text.primary }, elevation.card]}
+              style={[
+                { width: 36, height: 36, borderRadius: 18, alignItems: 'center', justifyContent: 'center', backgroundColor: color.text.primary },
+                cardShadow,
+              ]}
             >
               <MaterialCommunityIcons name="car" size={18} color="#fff" />
             </View>
@@ -348,7 +455,7 @@ function ActiveRide({ navigation, ride, cancelRide }: any) {
         ) : null}
       </MapView>
 
-      <BackButton navigation={navigation} />
+      <FloatingBack navigation={navigation} insets={insets} />
 
       <BottomSheet
         ref={sheetRef}
@@ -358,99 +465,140 @@ function ActiveRide({ navigation, ride, cancelRide }: any) {
         backgroundStyle={SHEET_STYLE}
         handleIndicatorStyle={HANDLE_STYLE}
       >
-        <BottomSheetView style={{ paddingHorizontal: 16, paddingBottom: 24 }}>
-          <Heading size="lg">{STATUS_LABEL[ride.status] ?? 'On the way'}</Heading>
-          <Text className="mt-xs text-sm text-text-secondary">
+        <BottomSheetView style={{ paddingHorizontal: space['2xl'], paddingBottom: space['2xl'] }}>
+          <T variant="title">{STATUS_LABEL[ride.status] ?? 'On the way'}</T>
+          <T variant="label" tone="muted" style={{ marginTop: 4 }}>
             {ride.rideClass ? `${TIER_META[ride.rideClass as RideClass]?.label ?? ride.rideClass} · ` : ''}
             Fare {money(ride.taxiFareTotal ?? ride.totalAmount)} · cash
-          </Text>
+            {ride.taxiDuration ? ` · ~${Math.round(Number(ride.taxiDuration))} min` : ''}
+          </T>
           {ride.ridePin ? (
-            <View className="mt-sm flex-row items-center">
-              <Text className="text-sm text-text-secondary">PIN </Text>
-              <Text className="text-lg font-semibold" style={{ color: color.brand[600] }}>{ride.ridePin}</Text>
-              <Text className="ml-sm text-xs text-text-muted">show to your driver</Text>
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.sm, marginTop: space.sm }}>
+              <T variant="label" tone="muted">
+                PIN
+              </T>
+              <T variant="heading" tone="brand">
+                {ride.ridePin}
+              </T>
+              <T variant="caption" tone="faint">
+                show to your driver
+              </T>
             </View>
           ) : null}
 
           {d ? (
-            <Card className="mt-md">
-              <View className="flex-row items-center justify-between">
-                <View className="flex-row flex-1 items-center pr-md">
-                  {/* Trust visibility (master plan §5): see WHO is coming */}
-                  {d.user?.avatar ? (
-                    <Image
-                      source={{ uri: mediaUrl(d.user.avatar) ?? undefined }}
-                      style={{ width: 48, height: 48, borderRadius: 24 }}
-                      contentFit="cover"
-                    />
-                  ) : (
-                    <View className="h-12 w-12 items-center justify-center rounded-full bg-surface-subtle">
-                      <Feather name="user" size={20} color={color.text.muted} />
+            <Card style={{ marginTop: space.lg }}>
+              <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.md }}>
+                {/* Trust visibility (master plan §5): see WHO is coming */}
+                {d.user?.avatar ? (
+                  <Image
+                    source={{ uri: mediaUrl(d.user.avatar) ?? undefined }}
+                    style={{ width: 48, height: 48, borderRadius: 24 }}
+                    contentFit="cover"
+                  />
+                ) : (
+                  <IconChip icon="user" size={48} />
+                )}
+                <View style={{ flex: 1 }}>
+                  <T variant="body" weight="semibold">
+                    {d.user?.firstName ?? 'Your driver'}
+                  </T>
+                  <T variant="caption" tone="muted" style={{ marginTop: 2 }}>
+                    {[d.vehicleColor, d.vehicleMake, d.vehicleModel].filter(Boolean).join(' ')}
+                  </T>
+                  {d.averageRating ? (
+                    <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4, marginTop: 2 }}>
+                      <Stars value={Number(d.averageRating)} size={11} />
+                      <T variant="caption" tone="muted">
+                        {Number(d.averageRating).toFixed(1)}
+                      </T>
                     </View>
-                  )}
-                  <View className="ml-md flex-1">
-                    <Text className="text-base font-semibold">{d.user?.firstName ?? 'Your driver'}</Text>
-                    <Text className="mt-xs text-sm text-text-secondary">
-                      {[d.vehicleColor, d.vehicleMake, d.vehicleModel].filter(Boolean).join(' ')}
-                    </Text>
-                    {d.averageRating ? (
-                      <Text className="mt-xs text-xs text-text-muted">{Number(d.averageRating).toFixed(1)} ★</Text>
-                    ) : null}
-                  </View>
+                  ) : null}
                 </View>
                 {d.user?.phone ? (
-                  <Button variant="outline" className="px-lg" onPress={() => Linking.openURL(`tel:${d.user.phone}`).catch(() => {})}>
-                    <View className="flex-row items-center">
-                      <Feather name="phone" size={15} color={color.brand[500]} />
-                      <Text className="ml-sm font-body font-semibold" style={{ color: color.brand[500] }}>Call</Text>
-                    </View>
-                  </Button>
+                  <PillButton
+                    label="Call"
+                    variant="soft"
+                    size="sm"
+                    icon="phone"
+                    onPress={() => Linking.openURL(`tel:${d.user.phone}`).catch(() => {})}
+                  />
                 ) : null}
               </View>
               {/* …and WHAT is coming: the car photo + plate, big enough to match at the kerb */}
-              <View className="mt-sm flex-row items-center">
-                {d.vehiclePhotoUrl ? (
-                  <Image
-                    source={{ uri: mediaUrl(d.vehiclePhotoUrl) ?? undefined }}
-                    style={{ width: 88, height: 56, borderRadius: 10 }}
-                    contentFit="cover"
-                  />
-                ) : null}
-                {d.licensePlate ? (
-                  <View className={d.vehiclePhotoUrl ? 'ml-md rounded-lg border border-border-subtle px-md py-xs' : 'rounded-lg border border-border-subtle px-md py-xs'}>
-                    <Text className="text-base font-bold tracking-widest text-text-primary">{d.licensePlate}</Text>
-                  </View>
-                ) : null}
-              </View>
+              {d.vehiclePhotoUrl || d.licensePlate ? (
+                <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.md, marginTop: space.md }}>
+                  {d.vehiclePhotoUrl ? (
+                    <Image
+                      source={{ uri: mediaUrl(d.vehiclePhotoUrl) ?? undefined }}
+                      style={{ width: 88, height: 56, borderRadius: radius.md }}
+                      contentFit="cover"
+                    />
+                  ) : null}
+                  {d.licensePlate ? (
+                    <View
+                      style={{
+                        paddingHorizontal: space.md,
+                        paddingVertical: space.sm,
+                        borderRadius: radius.md,
+                        borderWidth: 1,
+                        borderColor: color.border.strong,
+                      }}
+                    >
+                      <T variant="body" weight="bold" style={{ letterSpacing: 2 }}>
+                        {d.licensePlate}
+                      </T>
+                    </View>
+                  ) : null}
+                </View>
+              ) : null}
             </Card>
           ) : (
-            <Text className="mt-md text-sm text-text-secondary">Hang tight — we&apos;re matching you with a nearby driver.</Text>
+            <T variant="label" tone="muted" style={{ marginTop: space.lg }}>
+              Hang tight — we&apos;re matching you with a nearby driver.
+            </T>
           )}
 
-          <Button
-            label="Cancel ride"
-            variant="neutral"
-            className="mt-lg"
-            loading={cancelRide.isPending}
-            onPress={() => setConfirmCancel(true)}
-          />
+          {/* Safety row: let someone you trust follow the trip */}
+          <View style={{ flexDirection: 'row', gap: space.md, marginTop: space.xl }}>
+            <PillButton
+              label="Share trip"
+              variant="soft"
+              icon="share-2"
+              style={{ flex: 1 }}
+              onPress={shareTrip}
+            />
+            <PillButton
+              label="Cancel ride"
+              variant="outline"
+              style={{ flex: 1 }}
+              loading={cancelRide.isPending}
+              onPress={() => setConfirmCancel(true)}
+            />
+          </View>
         </BottomSheetView>
       </BottomSheet>
 
-      <ConfirmDialog
-        open={confirmCancel}
-        title="Cancel this ride?"
-        body={d ? 'Your driver is already on the way.' : 'We’ll stop looking for a driver.'}
-        confirmLabel="Cancel ride"
-        cancelLabel="Keep ride"
-        destructive
-        loading={cancelRide.isPending}
-        onConfirm={() => {
-          setConfirmCancel(false);
-          cancelRide.mutate({ id: ride.id });
-        }}
-        onClose={() => setConfirmCancel(false)}
-      />
+      {/* Kit confirm popup (kit 30-style) */}
+      <PopupCard visible={confirmCancel} onClose={() => setConfirmCancel(false)}>
+        <IconChip icon="x-circle" size={56} tone="error" />
+        <T variant="title" center style={{ marginTop: space.lg }}>
+          Cancel this ride?
+        </T>
+        <T variant="body" tone="muted" center style={{ marginTop: space.sm }}>
+          {d ? 'Your driver is already on the way.' : 'We’ll stop looking for a driver.'}
+        </T>
+        <PillButton
+          label="Cancel ride"
+          style={{ alignSelf: 'stretch', marginTop: space['2xl'] }}
+          loading={cancelRide.isPending}
+          onPress={() => {
+            setConfirmCancel(false);
+            cancelRide.mutate({ id: ride.id });
+          }}
+        />
+        <PillButton label="Keep ride" variant="soft" style={{ alignSelf: 'stretch', marginTop: space.md }} onPress={() => setConfirmCancel(false)} />
+      </PopupCard>
     </View>
   );
 }

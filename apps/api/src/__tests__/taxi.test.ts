@@ -289,6 +289,9 @@ describe('Taxi live-operation gate (hire-class insurance)', () => {
         status: 'APPROVED',
         coverageClass,
         hireClassConfirmed,
+        // A complete admin 5-point review confirms the plate too; the
+        // cross-check's own enforcement is covered in verification.test.ts.
+        plateCrossChecked: hireClassConfirmed,
         consentAt: new Date(),
         privacyNoticeVersion: 'v1',
       },

@@ -27,27 +27,42 @@ api.interceptors.request.use((config) => {
   return config;
 });
 
-// Response interceptor for token refresh
+// Response interceptor for token refresh. Refreshes are single-flighted: when
+// several requests 401 together, only one refresh POST goes out and the rest
+// await it — the server rotates the refresh token on every use, so racing it
+// with the same token reads as replay/theft on the API side.
+let refreshInFlight: Promise<string | null> | null = null;
+
+async function refreshAccessToken(): Promise<string | null> {
+  const refreshToken = useAuthStore.getState().refreshToken;
+  if (!refreshToken) return null;
+  try {
+    const { data } = await axios.post(`${API_URL}/api/v1/auth/refresh`, { refreshToken });
+    useAuthStore.getState().setAuth(
+      useAuthStore.getState().user!,
+      data.data.accessToken,
+      data.data.refreshToken,
+    );
+    return data.data.accessToken as string;
+  } catch {
+    useAuthStore.getState().logout();
+    return null;
+  }
+}
+
 api.interceptors.response.use(
   (response) => response,
   async (error) => {
     const originalRequest = error.config;
     if (error.response?.status === 401 && !originalRequest._retry) {
       originalRequest._retry = true;
-      const refreshToken = useAuthStore.getState().refreshToken;
-      if (refreshToken) {
-        try {
-          const { data } = await axios.post(`${API_URL}/api/v1/auth/refresh`, { refreshToken });
-          useAuthStore.getState().setAuth(
-            useAuthStore.getState().user!,
-            data.data.accessToken,
-            data.data.refreshToken,
-          );
-          originalRequest.headers.Authorization = `Bearer ${data.data.accessToken}`;
-          return api(originalRequest);
-        } catch {
-          useAuthStore.getState().logout();
-        }
+      refreshInFlight ??= refreshAccessToken().finally(() => {
+        refreshInFlight = null;
+      });
+      const newToken = await refreshInFlight;
+      if (newToken) {
+        originalRequest.headers.Authorization = `Bearer ${newToken}`;
+        return api(originalRequest);
       }
     }
     return Promise.reject(error);
@@ -89,7 +104,8 @@ export interface AddressInput {
 
 export const customerApi = {
   getProfile: () => api.get('/customer/profile'),
-  updateProfile: (data: { firstName?: string; lastName?: string }) => api.put('/customer/profile', data),
+  updateProfile: (data: { firstName?: string; lastName?: string; email?: string }) =>
+    api.put('/customer/profile', data),
   switchRole: (role: string) => api.post('/customer/switch-role', { role }),
   // Redeem a referral code (writes referredBy). `token` lets a just-registered
   // user redeem before the auth store has propagated.
@@ -108,6 +124,7 @@ export const customerApi = {
   getOrders: () => api.get('/customer/orders'),
   validatePromo: (code: string) => api.post('/customer/promo/validate', { code }),
   getOrder: (id: string) => api.get(`/customer/orders/${id}`),
+  cancelOrder: (id: string, reason?: string) => api.post(`/customer/orders/${id}/cancel`, { reason }),
   // Order placement = checkout; it reads the server-side cart. (The old POST
   // /customer/orders had no backend route.)
   placeOrder: (data: {
@@ -117,6 +134,8 @@ export const customerApi = {
     scheduledFor?: string;
     promoCode?: string;
     fulfillmentSelections?: Record<string, 'DELIVERY' | 'PICKUP'>;
+    /** Priority delivery: 1.5x delivery fee, dispatched first */
+    express?: boolean;
   }) => api.post('/customer/checkout', data),
   getNotifications: () => api.get('/customer/notifications'),
   reorder: (id: string) => api.post(`/customer/orders/${id}/reorder`, {}),
@@ -283,6 +302,9 @@ export const riderApi = {
   earningsToday: () => api.get('/rider/earnings/today'),
   earningsSummary: () => api.get('/rider/earnings/summary'),
   earnings: () => api.get('/rider/earnings'),
+  history: (params?: { page?: number; limit?: number }) => api.get('/rider/orders', { params }),
+  stats: () => api.get('/rider/stats'),
+  subscription: () => api.get('/rider/subscription'),
   uploadVehiclePhoto: (form: FormData) =>
     api.post('/rider/vehicle-photo', form, { headers: { 'Content-Type': 'multipart/form-data' } }),
 };
@@ -304,6 +326,10 @@ export const driverApi = {
   earningsToday: () => api.get('/driver/earnings/today'),
   earningsSummary: () => api.get('/driver/earnings/summary'),
   earnings: () => api.get('/driver/earnings'),
+  rides: (params?: { page?: number; limit?: number; status?: string }) => api.get('/driver/rides', { params }),
+  rateCustomer: (id: string, score: number, comment?: string) =>
+    api.post(`/driver/rides/${id}/rate-customer`, { score, ...(comment ? { comment } : {}) }),
+  subscription: () => api.get('/driver/subscription'),
   uploadVehiclePhoto: (form: FormData) =>
     api.post('/driver/vehicle-photo', form, { headers: { 'Content-Type': 'multipart/form-data' } }),
 };
@@ -326,7 +352,9 @@ export const vendorApi = {
   profile: () => api.get('/vendor/profile'),
   toggleOpen: () => api.put('/vendor/vendor/toggle-open'),
   toggleOrders: () => api.put('/vendor/vendor/toggle-orders'),
-  orders: () => api.get('/vendor/orders'),
+  orders: (params?: { status?: string; search?: string; page?: number; limit?: number }) =>
+    api.get('/vendor/orders', { params }),
+  order: (id: string) => api.get(`/vendor/orders/${id}`),
   acceptOrder: (id: string) => api.put(`/vendor/orders/${id}/accept`),
   preparing: (id: string) => api.put(`/vendor/orders/${id}/preparing`),
   ready: (id: string) => api.put(`/vendor/orders/${id}/ready`),
@@ -338,6 +366,8 @@ export const vendorApi = {
   // Menu management
   categories: () => api.get('/vendor/categories'),
   createCategory: (data: { name: string; description?: string }) => api.post('/vendor/categories', data),
+  updateCategory: (id: string, data: { name?: string; description?: string }) => api.put(`/vendor/categories/${id}`, data),
+  deleteCategory: (id: string) => api.delete(`/vendor/categories/${id}`),
   createItem: (data: VendorItemInput) => api.post('/vendor/items', data),
   updateItem: (id: string, data: Partial<VendorItemInput>) => api.put(`/vendor/items/${id}`, data),
   deleteItem: (id: string) => api.delete(`/vendor/items/${id}`),
@@ -359,6 +389,7 @@ export const vendorApi = {
   // Insights / settings
   analytics: () => api.get('/vendor/analytics/overview'),
   analyticsRevenue: (days = 14) => api.get('/vendor/analytics/revenue', { params: { days } }),
+  analyticsOps: (days = 30) => api.get('/vendor/analytics/ops', { params: { days } }),
   analyticsPopularItems: (limit = 8) => api.get('/vendor/analytics/popular-items', { params: { limit } }),
   analyticsBusyHours: () => api.get('/vendor/analytics/busy-hours'),
   hours: () => api.get('/vendor/hours'),
@@ -373,6 +404,8 @@ export const vendorApi = {
     api.post('/vendor/items/import/xlsx', form, { headers: { 'Content-Type': 'multipart/form-data' } }),
   importMenuPdf: (form: FormData) =>
     api.post('/vendor/items/import/menu-parse', form, { headers: { 'Content-Type': 'multipart/form-data' } }),
+  // Storefront QR (manager+) — deep link + printable SVG code
+  qr: () => api.get('/vendor/qr'),
   // Reviews (manager+ can respond)
   reviews: () => api.get('/vendor/reviews'),
   respondReview: (id: string, response: string) => api.post(`/vendor/reviews/${id}/respond`, { response }),

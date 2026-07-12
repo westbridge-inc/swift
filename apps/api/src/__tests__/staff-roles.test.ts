@@ -222,6 +222,6 @@ describe('Role gates hold', () => {
     expect(removed.statusCode).toBe(200);
 
     const after = await inject('GET', '/api/v1/vendor/profile', undefined, staffUser.token);
-    expect(after.statusCode).toBe(404); // no store access at all any more
+    expect(after.statusCode).toBe(403); // outsider again — authz answers, not existence
   });
 });
