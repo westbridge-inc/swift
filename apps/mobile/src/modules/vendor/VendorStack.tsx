@@ -430,8 +430,11 @@ function VendorOps({ store, navigation }: any) {
   const TERMINAL = ['DELIVERED', 'COMPLETED', 'CANCELLED'];
   const orders = fetched.filter((o) => !TERMINAL.includes((o.status || '').toUpperCase()));
   const isNew = (s: string) => ['PENDING', 'PLACED'].includes((s || '').toUpperCase());
-  const newOrders = orders.filter((o) => isNew(o.status));
-  const inProgress = orders.filter((o) => !isNew(o.status));
+  // Express bought its place at the FRONT of the kitchen queue — the customer
+  // paid for it and the rider cascade runs on a shorter clock.
+  const expressFirst = (a: any, b: any) => Number(!!b.isExpress) - Number(!!a.isExpress);
+  const newOrders = orders.filter((o) => isNew(o.status)).sort(expressFirst);
+  const inProgress = orders.filter((o) => !isNew(o.status)).sort(expressFirst);
   const queueValue = orders.reduce((sum, o) => sum + Number(o.totalAmount ?? o.total ?? 0), 0);
   const today: any = (analyticsQ.data as any)?.today ?? {};
 

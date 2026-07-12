@@ -1004,12 +1004,16 @@ export async function vendorRoutes(app: FastifyInstance) {
       });
     }
 
-    app.io.to(`order:${order.id}`).emit('order:status_changed', {
-      orderId: order.id,
-      status: 'CANCELLED',
-      reason,
-      timestamp: new Date().toISOString(),
-    });
+    // The goods never left the store — tracked stock goes back on the shelf.
+    // (Found live: reject left sold-out items sold out forever while the
+    // customer-cancel path restocked correctly.)
+    await orderService.restockCancelledOrder(order.id);
+
+    const rejectEvent = { orderId: order.id, status: 'CANCELLED', reason, timestamp: new Date().toISOString() };
+    app.io.to(`order:${order.id}`).emit('order:status_changed', rejectEvent);
+    if (order.vendorId) {
+      app.io.to(`vendor:${order.vendorId}`).emit('order:status_changed', rejectEvent);
+    }
 
     return { success: true, data: updated };
   });

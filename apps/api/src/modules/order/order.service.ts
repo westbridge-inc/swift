@@ -55,8 +55,11 @@ export const ORDER_TRANSITIONS: Record<OrderStatus, OrderStatus[]> = {
   DRIVER_ARRIVED: ['DRIVER_EN_ROUTE'],
   RIDE_IN_PROGRESS: ['DRIVER_ARRIVED'],
   DELIVERED: ['PICKED_UP', 'EN_ROUTE_DELIVERY', 'ARRIVED', 'RIDE_IN_PROGRESS'],
-  // DELIVERED for delivery; READY_FOR_PICKUP for takeaway (vendor hands it over).
-  COMPLETED: ['DELIVERED', 'READY_FOR_PICKUP'],
+  // DELIVERED for delivery; READY_FOR_PICKUP for takeaway (vendor hands it
+  // over); ACCEPTED for appointments, which skip prep/dispatch entirely —
+  // without it the services vertical could never be closed out (found live:
+  // complete-appointment always 409'd).
+  COMPLETED: ['DELIVERED', 'READY_FOR_PICKUP', 'ACCEPTED'],
   CANCELLED: [
     'PENDING', 'ACCEPTED', 'PREPARING', 'READY_FOR_PICKUP', 'RIDER_ASSIGNED',
     'RIDER_EN_ROUTE_PICKUP', 'RIDER_ARRIVED_PICKUP',
@@ -540,7 +543,10 @@ export class OrderService {
    * deliberately do NOT restock — returned food is the vendor's manual call.
    * Pure auto-hides (stock hit 0) un-hide once stock is back above zero.
    */
-  private async restockCancelledOrder(orderId: string) {
+  /** Put tracked stock back on the shelf for a cancelled order. Public: the
+   *  vendor reject route does its own status write (for reason fields) and
+   *  must restock too — goods never left the store either way. */
+  async restockCancelledOrder(orderId: string) {
     const items = await this.prisma.orderItem.findMany({
       where: { orderId },
       select: { itemId: true, quantity: true },

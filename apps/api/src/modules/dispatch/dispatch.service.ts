@@ -25,11 +25,18 @@ declare module 'fastify' {
 // ---------------------------------------------------------------------------
 
 export const OFFER_TIMEOUT_SECONDS = 20;
+/** Express really IS faster at the dispatch layer, not just a badge: each
+ *  offer expires sooner, so the cascade burns through non-responders and
+ *  reaches a willing mover earlier. (The bigger fee is the accept incentive;
+ *  this is the mechanical speed-up.) */
+export const EXPRESS_OFFER_TIMEOUT_SECONDS = 12;
 const BASE_RADIUS_KM = 5;
 const RADIUS_STEP_KM = 5;
 const MAX_ROUNDS = 3;
 /** One automatic re-sweep after exhaustion — supply changes by the minute. */
 export const REDISPATCH_DELAY_MS = 90_000;
+/** Express orders retry the sweep sooner too. */
+export const EXPRESS_REDISPATCH_DELAY_MS = 45_000;
 /** GPS silent this long while "online" = the app is gone, not slow. */
 export const STALE_LOCATION_MINUTES = 15;
 
@@ -200,7 +207,8 @@ export class DispatchService {
     }
 
     const top = candidates[0]!;
-    await this.redis.set(offerKey(orderId), top.riderId, 'EX', OFFER_TIMEOUT_SECONDS + 10);
+    const timeoutSeconds = order.isExpress ? EXPRESS_OFFER_TIMEOUT_SECONDS : OFFER_TIMEOUT_SECONDS;
+    await this.redis.set(offerKey(orderId), top.riderId, 'EX', timeoutSeconds + 10);
 
     this.io.to(`user:${top.userId}`).emit('dispatch:offer', {
       orderId,
@@ -208,11 +216,11 @@ export class DispatchService {
       vendorName: order.vendor?.name,
       // Express = bigger fee for the mover; badge it so they know why.
       isExpress: order.isExpress,
-      expiresInSeconds: OFFER_TIMEOUT_SECONDS,
+      expiresInSeconds: timeoutSeconds,
       etaMinutes: Math.round(top.etaMinutes),
     });
 
-    await this.scheduleTimeout(orderId, top.riderId, OFFER_TIMEOUT_SECONDS * 1000);
+    await this.scheduleTimeout(orderId, top.riderId, timeoutSeconds * 1000);
     return { offered: top.riderId };
   }
 
@@ -353,7 +361,7 @@ export class DispatchService {
   // -------------------------------------------------------------------------
 
   private async exhaust(order: {
-    id: string; orderNumber: string; customerId: string;
+    id: string; orderNumber: string; customerId: string; isExpress?: boolean;
     vendor: { name: string; owner: { userId: string } } | null;
   }) {
     await this.redis.del(offerKey(order.id), roundKey(order.id));
@@ -364,7 +372,8 @@ export class DispatchService {
     if (this.scheduleRedispatch) {
       const attempts = await this.redis.incr(exhaustKey(order.id));
       await this.redis.expire(exhaustKey(order.id), 3600);
-      if (attempts < 2 && (await this.scheduleRedispatch(order.id, REDISPATCH_DELAY_MS))) {
+      const retryDelay = order.isExpress ? EXPRESS_REDISPATCH_DELAY_MS : REDISPATCH_DELAY_MS;
+      if (attempts < 2 && (await this.scheduleRedispatch(order.id, retryDelay))) {
         await this.redis.del(declinedKey(order.id));
         await this.notifications.send({
           userId: order.customerId,

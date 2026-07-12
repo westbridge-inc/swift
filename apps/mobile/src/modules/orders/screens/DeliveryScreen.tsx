@@ -399,6 +399,28 @@ export function DeliveryScreen() {
             </>
           )}
 
+          {/* Takeaway handover gate — the counter asks for THIS code. It only
+              lived on the checkout confirmation before; now the order screen
+              keeps it until the store marks the order collected. */}
+          {o.fulfillment === 'PICKUP' && o.pickupCode && !cancelled && stage < 3 ? (
+            <View
+              style={{
+                alignItems: 'center',
+                borderRadius: radius.lg,
+                backgroundColor: color.brand[50],
+                paddingVertical: space.lg,
+                marginTop: space.xl,
+              }}
+            >
+              <T variant="caption" weight="bold" tone="muted" style={{ letterSpacing: 1 }}>
+                PICKUP CODE — SHOW AT THE COUNTER
+              </T>
+              <T variant="display" weight="bold" tone="brand" style={{ marginTop: 4, letterSpacing: 6 }}>
+                {o.pickupCode}
+              </T>
+            </View>
+          ) : null}
+
           {/* Order lines */}
           <T variant="heading" style={{ marginTop: space['2xl'] }}>
             Order

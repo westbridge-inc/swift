@@ -607,6 +607,21 @@ async function main() {
             currentLat: 6.81,
             currentLng: -58.155,
             lastLocationUpdate: new Date(),
+            // go-online requires a live subscription for drivers (no missing-row
+            // grandfathering, unlike riders) — without this the Comfort/XL demo
+            // fleet can never come online (found in the platform audit).
+            subscription: {
+              create: {
+                type: 'TAXI_DRIVER',
+                status: 'TRIAL',
+                weeklyRate: 12000,
+                currentPeriodStart: new Date(),
+                currentPeriodEnd: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
+                nextBillingDate: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
+                isTrialActive: true,
+                trialEndDate: new Date(Date.now() + 14 * 24 * 60 * 60 * 1000),
+              },
+            },
           },
         },
       },
