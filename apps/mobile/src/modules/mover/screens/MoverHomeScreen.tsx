@@ -18,6 +18,7 @@ import {
   useGoOnline,
   useGoOffline,
   useAcceptJob,
+  useDeclineOffer,
   useBroadcastLocation,
   useVerificationStatus,
   type MoverKind,
@@ -178,6 +179,7 @@ export function MoverHomeScreen({ navigation }: any) {
   const goOnline = useGoOnline(k);
   const goOffline = useGoOffline(k);
   const accept = useAcceptJob(k);
+  const decline = useDeclineOffer(k);
   const earnings = useEarningsToday(kind);
   const stats = useMoverStats(kind);
   const vstatus = useVerificationStatus<any>('MOVER');
@@ -442,7 +444,12 @@ export function MoverHomeScreen({ navigation }: any) {
           kind={k}
           accepting={accept.isPending}
           onAccept={(fare) => accept.mutate({ id: offer.orderId, fare }, { onSuccess: dismiss })}
-          onDecline={dismiss}
+          // Tell the server too — the cascade re-offers the next mover NOW
+          // instead of waiting out the 20s timeout on a card nobody wants.
+          onDecline={() => {
+            decline.mutate(offer.orderId);
+            dismiss();
+          }}
         />
       ) : null}
     </View>

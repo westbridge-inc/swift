@@ -711,20 +711,18 @@ export async function riderRoutes(app: FastifyInstance) {
       throw new AppError(400, 'INVALID_PIN', 'Incorrect delivery PIN. Please ask the customer for the correct PIN.');
     }
 
-    // 1. Update order status (handles notifications + socket).
+    // 1. Update order status — handles notifications, sockets, float release,
+    //    and freeing the rider (isAvailable/currentOrderId/totalDeliveries)
+    //    centrally, so every terminal path behaves the same.
     await orderService.updateStatus(id, 'DELIVERED', request.user.userId, 'Delivery completed');
 
     // 2. Create earning records (delivery fee + tip).
     await orderService.createEarnings(id);
 
-    // 3. Free up the rider.
-    const updated = await app.prisma.rider.update({
+    // 3. Read the freed rider back for the response payload.
+    const updated = await app.prisma.rider.findUniqueOrThrow({
       where: { id: rider.id },
-      data: {
-        isAvailable: true,
-        currentOrderId: null,
-        totalDeliveries: { increment: 1 },
-      },
+      select: { totalDeliveries: true, isAvailable: true },
     });
 
     // 4. Calculate this delivery's earnings for the response.

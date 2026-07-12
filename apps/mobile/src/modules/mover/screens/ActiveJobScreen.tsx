@@ -5,7 +5,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import MapView, { Marker, PROVIDER_DEFAULT, Polyline } from 'react-native-maps';
 import BottomSheet, { BottomSheetScrollView } from '@gorhom/bottom-sheet';
 import { color, radius, space } from '@swift/ui';
-import { Feather } from '@expo/vector-icons';
+import { Feather, MaterialCommunityIcons } from '@expo/vector-icons';
 import { Card, EmptyState, LabeledInput, PillButton, PopupCard, Screen, T, cardShadow } from '../../../kit';
 import { Stars } from '../../../kit/controls';
 import { useMoverKind, useActiveJob, useDriverAction, useRiderAction, useRateCustomer } from '../../../hooks';
@@ -171,6 +171,16 @@ export function ActiveJobScreen({ navigation }: any) {
               <T variant="title" style={{ marginTop: space.sm }}>
                 {jobAmount(job)} <T variant="label" tone="muted">· cash</T>
               </T>
+              {/* Kitchen signal (readyAt rides outside the status lane once a
+                  rider is assigned) — tells the rider the bag is on the counter. */}
+              {!isDriver && (job.readyAt || String(job.status).toUpperCase() === 'READY_FOR_PICKUP') ? (
+                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: space.sm }}>
+                  <MaterialCommunityIcons name="check-circle" size={15} color={color.success} />
+                  <T variant="label" weight="semibold" style={{ color: color.success }}>
+                    Order is packed and ready for pickup
+                  </T>
+                </View>
+              ) : null}
               <StatusStepper status={job.status} isDriver={isDriver} />
               <View style={{ marginTop: space.md }}>
                 <RoutePair pickup={job.pickupAddress ?? 'Pickup'} dropoff={job.deliveryAddress ?? job.dropoffAddress ?? 'Drop-off'} />

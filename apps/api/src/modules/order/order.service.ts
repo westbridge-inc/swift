@@ -608,15 +608,30 @@ export class OrderService {
       data: { orderId, status: 'CANCELLED', changedBy: userId, note: reason || 'Cancelled by customer' },
     });
 
-    // Free up assigned rider
+    // Free up assigned rider — and give back the float they committed for a
+    // CASH order (this path does its own CAS and never reaches updateStatus).
     if (order.riderId) {
+      if (order.paymentMethod === 'CASH') {
+        await new FloatService(this.prisma).release(this.prisma, order.riderId, Number(order.subtotalBase));
+      }
       await this.prisma.rider.update({
         where: { id: order.riderId },
         data: { isAvailable: true, currentOrderId: null },
       });
     }
 
+    // A taxi cancelled after assignment frees its driver the same way.
+    if (order.driverId) {
+      await this.prisma.driver.updateMany({
+        where: { id: order.driverId, currentRideId: orderId },
+        data: { isAvailable: true, currentRideId: null },
+      });
+    }
+
     this.io.to(`order:${orderId}`).emit('order:status_changed', { orderId, status: 'CANCELLED' });
+    if (order.vendorId) {
+      this.io.to(`vendor:${order.vendorId}`).emit('order:status_changed', { orderId, status: 'CANCELLED' });
+    }
 
     return { message: freeCancellation ? 'Order cancelled — no charge' : 'Order cancelled', cancellationFee };
   }
@@ -664,8 +679,39 @@ export class OrderService {
     });
 
     // D.3 — release the rider's committed float on a terminal CASH transition.
-    if ((status === 'DELIVERED' || status === 'CANCELLED') && order.riderId && order.paymentMethod === 'CASH') {
+    // FAILED is terminal too (no_show/refused handover) — the cash never left
+    // the rider's float, so it must come back.
+    const terminal = status === 'DELIVERED' || status === 'CANCELLED' || status === 'FAILED';
+    if (terminal && order.riderId && order.paymentMethod === 'CASH') {
       await new FloatService(this.prisma).release(this.prisma, order.riderId, Number(order.subtotalBase));
+    }
+
+    // Free the mover on ANY terminal transition. Guarded on currentOrderId /
+    // currentRideId so it is idempotent with route-level freeing and never
+    // clobbers a mover who already moved on to a new job. Without this, a
+    // delivery completed through the cash handover left the rider invisible
+    // to dispatch forever (isAvailable=false, currentOrderId stuck).
+    if (terminal) {
+      if (order.riderId) {
+        await this.prisma.rider.updateMany({
+          where: { id: order.riderId, currentOrderId: orderId },
+          data: {
+            isAvailable: true,
+            currentOrderId: null,
+            ...(status === 'DELIVERED' ? { totalDeliveries: { increment: 1 } } : {}),
+          },
+        });
+      }
+      if (order.driverId) {
+        await this.prisma.driver.updateMany({
+          where: { id: order.driverId, currentRideId: orderId },
+          data: {
+            isAvailable: true,
+            currentRideId: null,
+            ...(status === 'DELIVERED' ? { totalRides: { increment: 1 } } : {}),
+          },
+        });
+      }
     }
 
     // Every CANCELLED source state precedes handover — restock tracked items.
@@ -679,11 +725,13 @@ export class OrderService {
       data: { orderId, status: target, changedBy, note },
     });
 
-    this.io.to(`order:${orderId}`).emit('order:status_changed', {
-      orderId,
-      status,
-      timestamp: new Date().toISOString(),
-    });
+    const statusEvent = { orderId, status, timestamp: new Date().toISOString() };
+    this.io.to(`order:${orderId}`).emit('order:status_changed', statusEvent);
+    // The vendor board listens on its own room so it sees every transition
+    // live without subscribing to each order individually.
+    if (order.vendorId) {
+      this.io.to(`vendor:${order.vendorId}`).emit('order:status_changed', statusEvent);
+    }
 
     // Send notifications
     const riderName = order.rider?.user?.firstName || 'Your rider';
@@ -730,7 +778,7 @@ export class OrderService {
   async createEarnings(orderId: string) {
     const order = await this.prisma.order.findUnique({
       where: { id: orderId },
-      select: { riderId: true, driverId: true, deliveryFee: true, tipAmount: true, orderType: true },
+      select: { riderId: true, driverId: true, deliveryFee: true, tipAmount: true, orderType: true, taxiFareTotal: true },
     });
     if (!order) return;
 
@@ -769,7 +817,10 @@ export class OrderService {
         driverId: order.driverId,
         orderId,
         type: 'TAXI_FARE',
-        amount: Number(order.deliveryFee),
+        // Zero-commission model: the driver keeps the whole fare. A taxi
+        // order's money lives in taxiFareTotal — deliveryFee is 0 for rides,
+        // which silently paid drivers $0 before this read the right field.
+        amount: Number(order.taxiFareTotal ?? order.deliveryFee),
         status: 'AVAILABLE',
       });
 

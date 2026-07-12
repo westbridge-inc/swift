@@ -2,6 +2,7 @@ import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { OrderStatus, OrderType, SettlementStatus } from '@prisma/client';
 import { OrderService } from '../order/order.service';
+import { makeDispatchService } from '../dispatch/dispatch.service';
 import { NotificationService } from '../notification/notification.service';
 import { BookingService } from '../booking/booking.service';
 import { VerificationService } from '../verification/verification.service';
@@ -418,6 +419,7 @@ async function resolveOwnedOrder(app: FastifyInstance, userId: string, orderId: 
 export async function vendorRoutes(app: FastifyInstance) {
   const auth = { preHandler: [app.authenticate] };
   const orderService = new OrderService(app.prisma, app.io);
+  const dispatch = makeDispatchService(app);
   const notifications = new NotificationService(app.prisma, app.io);
   const verification = new VerificationService(
     app.prisma,
@@ -839,24 +841,96 @@ export async function vendorRoutes(app: FastifyInstance) {
     return { success: true, data: updated };
   });
 
+  /** Statuses where a rider already owns the status lane. Kitchen progress
+   *  then rides the preparingAt/readyAt timestamps instead of the status —
+   *  without this, a rider accepting within seconds of the vendor (the normal
+   *  case) killed the vendor's Start-preparing/Mark-ready buttons with 400s. */
+  const COURIER_ACTIVE: string[] = ['RIDER_ASSIGNED', 'RIDER_EN_ROUTE_PICKUP', 'RIDER_ARRIVED_PICKUP'];
+
+  async function recordPrepProgress(
+    order: { id: string; status: OrderStatus; vendorId: string | null; riderId: string | null; orderNumber: string; preparingAt: Date | null },
+    phase: 'PREPARING' | 'READY',
+    userId: string,
+  ) {
+    const now = new Date();
+    // Marking READY implies preparing happened — backfill it for the timeline.
+    const data: Record<string, Date> = phase === 'PREPARING'
+      ? { preparingAt: now }
+      : { readyAt: now, ...(order.preparingAt ? {} : { preparingAt: now }) };
+    const updated = await app.prisma.order.update({ where: { id: order.id }, data });
+    await app.prisma.orderStatusLog.create({
+      data: {
+        orderId: order.id,
+        status: order.status,
+        changedBy: userId,
+        note: phase === 'PREPARING' ? 'Vendor started preparing (rider already assigned)' : 'Order ready for pickup (rider already assigned)',
+      },
+    });
+    const evt = { orderId: order.id, prep: phase, timestamp: new Date().toISOString() };
+    app.io.to(`order:${order.id}`).emit('order:prep_update', evt);
+    if (order.vendorId) app.io.to(`vendor:${order.vendorId}`).emit('order:prep_update', evt);
+    // The rider at (or heading to) the store is the one who needs "it's ready".
+    if (phase === 'READY' && order.riderId) {
+      const rider = await app.prisma.rider.findUnique({ where: { id: order.riderId }, select: { userId: true } });
+      if (rider) {
+        await notifications.send({
+          userId: rider.userId,
+          type: 'ORDER_UPDATE',
+          title: 'Order ready for pickup',
+          body: `Order ${order.orderNumber} is packed and waiting at the counter.`,
+          data: { orderId: order.id, kind: 'prep_ready' },
+        });
+      }
+    }
+    return updated;
+  }
+
   /** PUT /orders/:id/preparing — Mark order as being prepared */
   app.put<{ Params: IdParam }>('/orders/:id/preparing', auth, async (request) => {
     const order = await resolveOwnedOrder(app, request.user.userId, request.params.id);
-    if (order.status !== 'ACCEPTED') {
-      throw new AppError(400, 'INVALID_STATUS', `Cannot mark as preparing from ${order.status} status`);
+    if (order.status === 'ACCEPTED') {
+      const updated = await orderService.updateStatus(order.id, 'PREPARING', request.user.userId, 'Vendor started preparing');
+      return { success: true, data: updated };
     }
-    const updated = await orderService.updateStatus(order.id, 'PREPARING', request.user.userId, 'Vendor started preparing');
-    return { success: true, data: updated };
+    if (COURIER_ACTIVE.includes(order.status)) {
+      if (order.preparingAt) return { success: true, data: order }; // double-tap safe
+      const updated = await recordPrepProgress(order, 'PREPARING', request.user.userId);
+      return { success: true, data: updated };
+    }
+    throw new AppError(400, 'INVALID_STATUS', `Cannot mark as preparing from ${order.status} status`);
   });
 
   /** PUT /orders/:id/ready — Mark order as ready for pickup */
   app.put<{ Params: IdParam }>('/orders/:id/ready', auth, async (request) => {
     const order = await resolveOwnedOrder(app, request.user.userId, request.params.id);
-    if (order.status !== 'PREPARING') {
-      throw new AppError(400, 'INVALID_STATUS', `Cannot mark as ready from ${order.status} status`);
+    if (order.status === 'PREPARING') {
+      const updated = await orderService.updateStatus(order.id, 'READY_FOR_PICKUP', request.user.userId, 'Order ready for pickup');
+      return { success: true, data: updated };
     }
-    const updated = await orderService.updateStatus(order.id, 'READY_FOR_PICKUP', request.user.userId, 'Order ready for pickup');
-    return { success: true, data: updated };
+    if (COURIER_ACTIVE.includes(order.status)) {
+      if (order.readyAt) return { success: true, data: order }; // double-tap safe
+      const updated = await recordPrepProgress(order, 'READY', request.user.userId);
+      return { success: true, data: updated };
+    }
+    throw new AppError(400, 'INVALID_STATUS', `Cannot mark as ready from ${order.status} status`);
+  });
+
+  /** POST /orders/:id/retry-dispatch — after "no movers available", the vendor
+   *  holds the order and asks Swift to search again (fresh radius, cleared
+   *  decline memory). No-op while an offer is already live. */
+  app.post<{ Params: IdParam }>('/orders/:id/retry-dispatch', auth, async (request) => {
+    const order = await resolveOwnedOrder(app, request.user.userId, request.params.id);
+    if (order.fulfillment !== 'DELIVERY') {
+      throw new AppError(400, 'NOT_DELIVERY', 'Only delivery orders are dispatched to movers');
+    }
+    if (order.riderId) {
+      throw new AppError(409, 'ALREADY_ASSIGNED', 'A mover already has this order');
+    }
+    if (!['ACCEPTED', 'PREPARING', 'READY_FOR_PICKUP'].includes(order.status)) {
+      throw new AppError(400, 'INVALID_STATUS', `Cannot search for a mover while the order is ${order.status}`);
+    }
+    const result = await dispatch.retryDispatch(order.id);
+    return { success: true, data: { orderId: order.id, searching: !result.exhausted, exhausted: !!result.exhausted } };
   });
 
   /** PUT /orders/:id/complete-pickup — Takeaway: customer collected the order.

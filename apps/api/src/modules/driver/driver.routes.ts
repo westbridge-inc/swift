@@ -183,14 +183,6 @@ export async function driverRoutes(app: FastifyInstance) {
       data: { isOnline: true, isAvailable: true },
     });
 
-    // Cache online status in Redis for fast lookups
-    await app.redis.geoadd(
-      'drivers:online',
-      driver.currentLng || 0,
-      driver.currentLat || 0,
-      driver.id,
-    );
-
     return { success: true, data: updated };
   });
 
@@ -205,8 +197,6 @@ export async function driverRoutes(app: FastifyInstance) {
       where: { id: driver.id },
       data: { isOnline: false, isAvailable: false },
     });
-
-    await app.redis.zrem('drivers:online', driver.id);
 
     return { success: true, data: updated };
   });
@@ -236,10 +226,8 @@ export async function driverRoutes(app: FastifyInstance) {
       await app.redis.set(`driver:location_db_ts:${driver.id}`, Date.now().toString());
     }
 
-    // Update position in Redis geo set
-    if (driver.isOnline) {
-      await app.redis.geoadd('drivers:online', longitude, latitude, driver.id);
-    }
+    // (No Redis geo set here — dispatch queries the persisted PostGIS point;
+    // a parallel geo index nobody reads is a bug waiting to disagree.)
 
     // Broadcast location to anyone tracking this ride
     if (driver.currentRideId) {
@@ -401,6 +389,17 @@ export async function driverRoutes(app: FastifyInstance) {
     });
 
     return { success: true, data: responseOrder };
+  });
+
+  /** POST /offers/decline — pass on a live dispatch offer. The cascade moves
+   *  to the next driver immediately instead of waiting out the 20s timeout.
+   *  (Parity with the rider route — this side simply didn't exist before, so
+   *  a driver tapping Decline only dismissed the card locally.) */
+  app.post('/offers/decline', { preHandler: [app.authenticate] }, async (request) => {
+    await getDriver(request.user.userId); // authz before validation
+    const { orderId } = z.object({ orderId: z.string().min(1).max(64) }).parse(request.body);
+    await dispatch.declineOffer(orderId, request.user.userId);
+    return { success: true, data: { message: 'Offer declined' } };
   });
 
   /** POST /rides/:id/rate-customer — post-trip rating goes both ways (§4.2). */

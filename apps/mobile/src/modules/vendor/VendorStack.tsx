@@ -48,6 +48,7 @@ import { useBecomePartner, useVerificationStatus } from '../../hooks/verificatio
 import {
   useVendorProfile,
   useVendorOrders,
+  useVendorOrdersLive,
   useToggleOpen,
   useToggleOrders,
   useOrderAction,
@@ -597,6 +598,9 @@ function VendorRoot() {
   const { store, stores, isLoading } = useVendorProfile();
   const selectedStoreId = useStoreSwitcher((s) => s.selectedStoreId);
   const setSelectedStore = useStoreSwitcher((s) => s.setSelectedStore);
+  // Live order feed for the selected store, on every tab — new orders land
+  // instantly (socket) with the 12s poll as fallback.
+  useVendorOrdersLive(store && store.status === 'ACTIVE' ? store.id : undefined);
 
   // Make the default store an EXPLICIT selection before the tabs mount: every
   // vendor request then carries x-vendor-id, so the order board, menu and
