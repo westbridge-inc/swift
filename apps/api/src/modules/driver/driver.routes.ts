@@ -9,6 +9,7 @@ import { getKycProvider } from '../../providers/kyc/kyc-provider';
 import { haversineDistance, estimateDeliveryMinutes } from '../../utils/distance';
 import { parsePagination, paginatedResponse } from '../../utils/pagination';
 import { AppError, NotFoundError } from '../../utils/errors';
+import { throwForMissingProfile } from '../../utils/role-gate';
 import { clampDriverFare } from '../../utils/markup';
 import { ALLOWED_IMAGE_TYPES, looksLikeImage } from '../../utils/images';
 import { getStorageProvider } from '../../providers/storage/storage-provider';
@@ -53,14 +54,16 @@ export async function driverRoutes(app: FastifyInstance) {
   const verification = new VerificationService(app.prisma, notifications, getKycProvider());
   const dispatch = makeDispatchService(app);
 
-  // Helper: resolve driver record from JWT userId
+  // Helper: resolve driver record from JWT userId. Missing row = 403 for
+  // outsiders (authz answers before anything else), 404 only for movers who
+  // haven't onboarded a driver profile yet.
   async function getDriver(userId: string) {
     const driver = await app.prisma.driver.findUnique({
       where: { userId },
       include: { user: true, subscription: true },
     });
-    if (!driver) throw new NotFoundError('Driver');
-    return driver;
+    if (!driver) await throwForMissingProfile(app, userId, 'MOVER', 'Driver');
+    return driver!;
   }
 
   // Helper: verify the driver owns this ride
@@ -83,11 +86,12 @@ export async function driverRoutes(app: FastifyInstance) {
         subscription: true,
       },
     });
-    if (!driver) throw new NotFoundError('Driver');
+    if (!driver) await throwForMissingProfile(app, request.user.userId, 'MOVER', 'Driver');
     return { success: true, data: driver };
   });
 
   app.put('/profile', { preHandler: [app.authenticate] }, async (request) => {
+    await getDriver(request.user.userId); // authz before validation
     const body = updateDriverProfileSchema.parse(request.body);
 
     const driver = await app.prisma.driver.update({
@@ -210,10 +214,11 @@ export async function driverRoutes(app: FastifyInstance) {
   // ─── Location ──────────────────────────────────────────────────────────
 
   app.put('/location', { preHandler: [app.authenticate] }, async (request) => {
-    const { latitude, longitude, heading } = driverLocationSchema.parse(request.body);
+    const found = await app.prisma.driver.findUnique({ where: { userId: request.user.userId } });
+    if (!found) await throwForMissingProfile(app, request.user.userId, 'MOVER', 'Driver');
+    const driver = found!;
 
-    const driver = await app.prisma.driver.findUnique({ where: { userId: request.user.userId } });
-    if (!driver) throw new NotFoundError('Driver');
+    const { latitude, longitude, heading } = driverLocationSchema.parse(request.body);
 
     // DB write debounced to ≥10 s (same policy as the rider route): dispatch
     // reads the persisted fix, and a <10 s-stale point is noise at ride speeds —
@@ -401,12 +406,11 @@ export async function driverRoutes(app: FastifyInstance) {
   /** POST /rides/:id/rate-customer — post-trip rating goes both ways (§4.2). */
   app.post('/rides/:id/rate-customer', { preHandler: [app.authenticate] }, async (request) => {
     const { id } = request.params as { id: string };
+    const driver = await getDriver(request.user.userId); // authz before validation
     const body = z.object({
       score: z.number().int().min(1).max(5),
       comment: z.string().max(500).optional(),
     }).parse(request.body);
-
-    const driver = await getDriver(request.user.userId);
     const order = await app.prisma.order.findFirst({
       where: { id, driverId: driver.id, orderType: 'TAXI', status: { in: ['DELIVERED', 'COMPLETED'] } },
       select: { id: true, customerId: true },
@@ -517,8 +521,8 @@ export async function driverRoutes(app: FastifyInstance) {
   // 4. Verify ride PIN
   app.put('/rides/:id/verify-pin', { preHandler: [app.authenticate] }, async (request) => {
     const { id } = request.params as { id: string };
+    const driver = await getDriver(request.user.userId); // authz before validation
     const { pin } = verifyPinSchema.parse(request.body);
-    const driver = await getDriver(request.user.userId);
     const order = await getDriverRide(driver.id, id);
 
     if (order.status !== 'DRIVER_ARRIVED') {
@@ -667,8 +671,9 @@ export async function driverRoutes(app: FastifyInstance) {
   // ─── Ride History ──────────────────────────────────────────────────────
 
   app.get('/rides', { preHandler: [app.authenticate] }, async (request) => {
-    const driver = await app.prisma.driver.findUnique({ where: { userId: request.user.userId } });
-    if (!driver) throw new NotFoundError('Driver');
+    const found = await app.prisma.driver.findUnique({ where: { userId: request.user.userId } });
+    if (!found) await throwForMissingProfile(app, request.user.userId, 'MOVER', 'Driver');
+    const driver = found!;
 
     const { page, limit, skip } = parsePagination(request.query as Record<string, string>);
     const { status } = ridesQuerySchema.parse(request.query);
@@ -713,8 +718,9 @@ export async function driverRoutes(app: FastifyInstance) {
   // ─── Earnings ──────────────────────────────────────────────────────────
 
   app.get('/earnings', { preHandler: [app.authenticate] }, async (request) => {
-    const driver = await app.prisma.driver.findUnique({ where: { userId: request.user.userId } });
-    if (!driver) throw new NotFoundError('Driver');
+    const found = await app.prisma.driver.findUnique({ where: { userId: request.user.userId } });
+    if (!found) await throwForMissingProfile(app, request.user.userId, 'MOVER', 'Driver');
+    const driver = found!;
 
     const { page, limit, skip } = parsePagination(request.query as Record<string, string>);
     const { type, status } = driverEarningsQuerySchema.parse(request.query);
@@ -747,8 +753,9 @@ export async function driverRoutes(app: FastifyInstance) {
   });
 
   app.get('/earnings/today', { preHandler: [app.authenticate] }, async (request) => {
-    const driver = await app.prisma.driver.findUnique({ where: { userId: request.user.userId } });
-    if (!driver) throw new NotFoundError('Driver');
+    const found = await app.prisma.driver.findUnique({ where: { userId: request.user.userId } });
+    if (!found) await throwForMissingProfile(app, request.user.userId, 'MOVER', 'Driver');
+    const driver = found!;
 
     const today = new Date();
     today.setHours(0, 0, 0, 0);
@@ -778,8 +785,9 @@ export async function driverRoutes(app: FastifyInstance) {
   });
 
   app.get('/earnings/summary', { preHandler: [app.authenticate] }, async (request) => {
-    const driver = await app.prisma.driver.findUnique({ where: { userId: request.user.userId } });
-    if (!driver) throw new NotFoundError('Driver');
+    const found = await app.prisma.driver.findUnique({ where: { userId: request.user.userId } });
+    if (!found) await throwForMissingProfile(app, request.user.userId, 'MOVER', 'Driver');
+    const driver = found!;
 
     const today = new Date();
     today.setHours(0, 0, 0, 0);
@@ -849,7 +857,7 @@ export async function driverRoutes(app: FastifyInstance) {
         },
       },
     });
-    if (!driver) throw new NotFoundError('Driver');
-    return { success: true, data: driver.subscription || null };
+    if (!driver) await throwForMissingProfile(app, request.user.userId, 'MOVER', 'Driver');
+    return { success: true, data: driver!.subscription || null };
   });
 }

@@ -113,6 +113,11 @@ model Session {
   user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
   token        String   @unique
   refreshToken String   @unique
+  // Refresh rotation theft detection: the token this one replaced, and when.
+  // A replay of previousRefreshToken outside the race-grace window means the
+  // token was stolen — the whole session is revoked (see AuthService.refreshTokens).
+  previousRefreshToken String?   @unique
+  rotatedAt            DateTime?
   deviceId     String
   deviceType   String
   ipAddress    String?

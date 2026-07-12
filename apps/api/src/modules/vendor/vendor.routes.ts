@@ -13,6 +13,7 @@ import { AiService } from '../ai/ai.service';
 import { guessColumnMapping, applyMapping, toImportCsv, REQUIRED_FIELDS, type ColumnMapping } from '../../utils/catalogue-map';
 import { parsePagination, paginatedResponse } from '../../utils/pagination';
 import { AppError, NotFoundError, ValidationError } from '../../utils/errors';
+import { throwForMissingProfile } from '../../utils/role-gate';
 import { ALLOWED_IMAGE_TYPES, looksLikeImage } from '../../utils/images';
 
 // ---------------------------------------------------------------------------
@@ -328,7 +329,10 @@ async function resolveVendor(app: FastifyInstance, userId: string, requestedVend
     select: { vendorId: true, role: true },
     orderBy: { createdAt: 'asc' },
   });
-  if (memberships.length === 0) throw new NotFoundError('Vendor');
+  // Neither an owner with stores nor staff anywhere: outsiders get 403 (authz
+  // answers, not existence); a VENDOR_OWNER with no store yet keeps the 404
+  // the onboarding flow expects.
+  if (memberships.length === 0) await throwForMissingProfile(app, userId, 'VENDOR_OWNER', 'Vendor');
   const vendorIds = memberships.map((m) => m.vendorId);
   const vendorId = pickVendorId(vendorIds, requestedVendorId);
   const role = memberships.find((m) => m.vendorId === vendorId)!.role as VendorAccessRole;
@@ -726,6 +730,7 @@ export async function vendorRoutes(app: FastifyInstance) {
 
   /** GET /alerts/pending — unacknowledged order alerts (dashboard banner state). */
   app.get('/alerts/pending', auth, async (request) => {
+    await resolveVendor(app, request.user.userId, selectedVendorId(request)); // vendor surface only
     const alerts = await app.prisma.notification.findMany({
       where: {
         userId: request.user.userId,
@@ -1159,7 +1164,8 @@ export async function vendorRoutes(app: FastifyInstance) {
   });
 
   /** GET /items/import/template — CSV template for bulk import */
-  app.get('/items/import/template', auth, async (_request, reply) => {
+  app.get('/items/import/template', auth, async (request, reply) => {
+    await resolveVendor(app, request.user.userId, selectedVendorId(request)); // vendor surface only
     reply.type('text/csv').header('content-disposition', 'attachment; filename="swift-catalogue-template.csv"');
     return CSV_TEMPLATE;
   });

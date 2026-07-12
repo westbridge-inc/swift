@@ -297,7 +297,10 @@ export class AuthService {
       include: { user: true },
     });
 
-    if (!session || session.expiresAt < new Date()) {
+    if (!session) {
+      return this.handleUnknownRefreshToken(refreshToken);
+    }
+    if (session.expiresAt < new Date()) {
       throw new AppError(401, 'INVALID_TOKEN', 'Invalid or expired refresh token');
     }
 
@@ -313,6 +316,9 @@ export class AuthService {
       data: {
         token: newAccessToken,
         refreshToken: newRefreshToken,
+        // Theft detection: remember what this rotation consumed, and when
+        previousRefreshToken: refreshToken,
+        rotatedAt: new Date(),
         expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
       },
     });
@@ -322,6 +328,52 @@ export class AuthService {
       refreshToken: newRefreshToken,
       expiresIn: 1800,
     };
+  }
+
+  /** A refresh token we don't recognize is either garbage or — the case that
+   *  matters — one that a rotation already consumed. The mobile interceptor
+   *  can double-fire the same token when two requests 401 together, so a
+   *  replay right after rotation is answered idempotently with the current
+   *  pair. Outside that grace window a replay means the token leaked: revoke
+   *  the whole session (both holders must log in again) and audit it.
+   *  Every path returns the same 401 shape — no oracle for attackers. */
+  private async handleUnknownRefreshToken(refreshToken: string): Promise<never | {
+    accessToken: string;
+    refreshToken: string;
+    expiresIn: number;
+  }> {
+    const rotated = await this.app.prisma.session.findUnique({
+      where: { previousRefreshToken: refreshToken },
+    });
+    if (!rotated) {
+      throw new AppError(401, 'INVALID_TOKEN', 'Invalid or expired refresh token');
+    }
+
+    const graceMs = Number(process.env['REFRESH_REUSE_GRACE_MS'] ?? 10_000);
+    const age = rotated.rotatedAt ? Date.now() - rotated.rotatedAt.getTime() : Infinity;
+    if (age <= graceMs) {
+      return {
+        accessToken: rotated.token,
+        refreshToken: rotated.refreshToken,
+        expiresIn: 1800,
+      };
+    }
+
+    await this.app.prisma.session.delete({ where: { id: rotated.id } });
+    await this.app.prisma.auditLog.create({
+      data: {
+        userId: rotated.userId,
+        action: 'REFRESH_TOKEN_REUSE',
+        entity: 'Session',
+        entityId: rotated.id,
+        changes: { deviceId: rotated.deviceId, deviceType: rotated.deviceType },
+      },
+    });
+    this.app.log.warn(
+      { userId: rotated.userId, sessionId: rotated.id },
+      '[auth] rotated refresh token replayed — session revoked',
+    );
+    throw new AppError(401, 'INVALID_TOKEN', 'Invalid or expired refresh token');
   }
 
   async logout(token: string) {

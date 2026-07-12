@@ -10,6 +10,7 @@ import { getKycProvider } from '../../providers/kyc/kyc-provider';
 import { haversineDistance } from '../../utils/distance';
 import { parsePagination, paginatedResponse } from '../../utils/pagination';
 import { AppError, NotFoundError, ConflictError, ValidationError } from '../../utils/errors';
+import { throwForMissingProfile } from '../../utils/role-gate';
 import { clampDriverFare } from '../../utils/markup';
 import { ALLOWED_IMAGE_TYPES, looksLikeImage } from '../../utils/images';
 import { getStorageProvider } from '../../providers/storage/storage-provider';
@@ -64,13 +65,15 @@ const handoverSchema = z.object({
 // Helpers
 // ---------------------------------------------------------------------------
 
-/** Resolve the Rider record for the authenticated user; throws if missing. */
+/** Resolve the Rider record for the authenticated user. Missing row = 403 for
+ *  outsiders (authz answers before anything else), 404 only for movers who
+ *  haven't onboarded a rider profile yet. */
 async function getRider(app: FastifyInstance, userId: string) {
   const rider = await app.prisma.rider.findUnique({
     where: { userId },
   });
-  if (!rider) throw new NotFoundError('Rider');
-  return rider;
+  if (!rider) await throwForMissingProfile(app, userId, 'MOVER', 'Rider');
+  return rider!;
 }
 
 /** Validate that a given order belongs to the requesting rider. */
@@ -146,6 +149,7 @@ export async function riderRoutes(app: FastifyInstance) {
    *  evidence, strikes the customer, and opens the guarantee claim. */
   app.post('/orders/:id/handover', { preHandler: [app.authenticate] }, async (request) => {
     const { id } = request.params as { id: string };
+    await getRider(app, request.user.userId); // authz before validation
     const body = handoverSchema.parse(request.body);
     const result = await cashRules.handover(id, request.user.userId, body);
     return {
@@ -162,6 +166,7 @@ export async function riderRoutes(app: FastifyInstance) {
 
   /** POST /offers/accept — atomic claim of a live dispatch offer. */
   app.post('/offers/accept', { preHandler: [app.authenticate] }, async (request) => {
+    await getRider(app, request.user.userId); // authz before validation
     const { orderId } = offerActionSchema.parse(request.body);
     const order = await dispatch.acceptOffer(orderId, request.user.userId);
     return { success: true, data: { orderId: order.id, status: order.status, orderNumber: order.orderNumber } };
@@ -169,6 +174,7 @@ export async function riderRoutes(app: FastifyInstance) {
 
   /** POST /offers/decline — pass; the cascade moves to the next mover. */
   app.post('/offers/decline', { preHandler: [app.authenticate] }, async (request) => {
+    await getRider(app, request.user.userId); // authz before validation
     const { orderId } = offerActionSchema.parse(request.body);
     await dispatch.declineOffer(orderId, request.user.userId);
     return { success: true, data: { message: 'Offer declined' } };
@@ -180,7 +186,7 @@ export async function riderRoutes(app: FastifyInstance) {
 
   /** GET /profile — Full rider profile with user info, subscription & stats. */
   app.get('/profile', { preHandler: [app.authenticate] }, async (request) => {
-    const rider = await app.prisma.rider.findUnique({
+    const found = await app.prisma.rider.findUnique({
       where: { userId: request.user.userId },
       include: {
         user: {
@@ -198,7 +204,8 @@ export async function riderRoutes(app: FastifyInstance) {
         operatingZones: true,
       },
     });
-    if (!rider) throw new NotFoundError('Rider');
+    if (!found) await throwForMissingProfile(app, request.user.userId, 'MOVER', 'Rider');
+    const rider = found!;
 
     const todayStart = startOfDay();
     const [todayEarnings, todayDeliveries] = await Promise.all([
@@ -386,9 +393,8 @@ export async function riderRoutes(app: FastifyInstance) {
 
   /** PUT /location — Update lat/lng, persist to DB + Redis, broadcast to active order. */
   app.put('/location', { preHandler: [app.authenticate] }, async (request) => {
+    const rider = await getRider(app, request.user.userId); // authz before validation
     const { latitude, longitude, heading, speed } = riderLocationSchema.parse(request.body);
-
-    const rider = await getRider(app, request.user.userId);
     const now = new Date();
 
     // DB update (batched — not every ping needs to hit PG immediately).
@@ -985,7 +991,7 @@ export async function riderRoutes(app: FastifyInstance) {
 
   /** GET /subscription — Current subscription with payment history. */
   app.get('/subscription', { preHandler: [app.authenticate] }, async (request) => {
-    const rider = await app.prisma.rider.findUnique({
+    const found = await app.prisma.rider.findUnique({
       where: { userId: request.user.userId },
       include: {
         subscription: {
@@ -998,7 +1004,8 @@ export async function riderRoutes(app: FastifyInstance) {
         },
       },
     });
-    if (!rider) throw new NotFoundError('Rider');
+    if (!found) await throwForMissingProfile(app, request.user.userId, 'MOVER', 'Rider');
+    const rider = found!;
 
     if (!rider.subscription) {
       return { success: true, data: null };

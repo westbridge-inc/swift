@@ -27,27 +27,42 @@ api.interceptors.request.use((config) => {
   return config;
 });
 
-// Response interceptor for token refresh
+// Response interceptor for token refresh. Refreshes are single-flighted: when
+// several requests 401 together, only one refresh POST goes out and the rest
+// await it — the server rotates the refresh token on every use, so racing it
+// with the same token reads as replay/theft on the API side.
+let refreshInFlight: Promise<string | null> | null = null;
+
+async function refreshAccessToken(): Promise<string | null> {
+  const refreshToken = useAuthStore.getState().refreshToken;
+  if (!refreshToken) return null;
+  try {
+    const { data } = await axios.post(`${API_URL}/api/v1/auth/refresh`, { refreshToken });
+    useAuthStore.getState().setAuth(
+      useAuthStore.getState().user!,
+      data.data.accessToken,
+      data.data.refreshToken,
+    );
+    return data.data.accessToken as string;
+  } catch {
+    useAuthStore.getState().logout();
+    return null;
+  }
+}
+
 api.interceptors.response.use(
   (response) => response,
   async (error) => {
     const originalRequest = error.config;
     if (error.response?.status === 401 && !originalRequest._retry) {
       originalRequest._retry = true;
-      const refreshToken = useAuthStore.getState().refreshToken;
-      if (refreshToken) {
-        try {
-          const { data } = await axios.post(`${API_URL}/api/v1/auth/refresh`, { refreshToken });
-          useAuthStore.getState().setAuth(
-            useAuthStore.getState().user!,
-            data.data.accessToken,
-            data.data.refreshToken,
-          );
-          originalRequest.headers.Authorization = `Bearer ${data.data.accessToken}`;
-          return api(originalRequest);
-        } catch {
-          useAuthStore.getState().logout();
-        }
+      refreshInFlight ??= refreshAccessToken().finally(() => {
+        refreshInFlight = null;
+      });
+      const newToken = await refreshInFlight;
+      if (newToken) {
+        originalRequest.headers.Authorization = `Bearer ${newToken}`;
+        return api(originalRequest);
       }
     }
     return Promise.reject(error);
