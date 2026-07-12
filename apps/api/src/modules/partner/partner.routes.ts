@@ -1,6 +1,7 @@
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { PartnerService } from './partner.service';
+import { NotificationService } from '../notification/notification.service';
 
 const vehicleSchema = z.object({
   make: z.string().trim().min(1).max(60),
@@ -30,7 +31,7 @@ const becomeSchema = z.object({
 
 export async function partnerRoutes(app: FastifyInstance) {
   const auth = { preHandler: [app.authenticate] };
-  const service = new PartnerService(app.prisma);
+  const service = new PartnerService(app.prisma, new NotificationService(app.prisma, app.io));
 
   /** POST /become — self-serve provisioning of a Rider/Driver/Vendor entity. */
   app.post('/become', auth, async (request, reply) => {

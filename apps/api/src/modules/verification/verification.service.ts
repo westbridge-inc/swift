@@ -1,7 +1,7 @@
 import type { PrismaClient, VerificationDocument, UserRole, VehicleType } from '@prisma/client';
 import { AppError, NotFoundError } from '../../utils/errors';
 import { CountryConfigService } from '../country/country-config.service';
-import { NotificationService } from '../notification/notification.service';
+import { NotificationService, notifyAdmins } from '../notification/notification.service';
 import type { KycProvider } from '../../providers/kyc/kyc-provider';
 import { getStorageProvider } from '../../providers/storage/storage-provider';
 import { FloatService } from '../dispatch/float.service';
@@ -150,6 +150,15 @@ export class VerificationService {
 
     if (doc.status === 'APPROVED') await this.afterApproval(userId);
     if (doc.status === 'REJECTED') await this.notifyRejection(userId, docType, result.reason);
+    // Manual-review path: the queue is invisible until an admin is told about
+    // it — found live: documents (and whole onboardings) sat PENDING for weeks.
+    if (doc.status === 'PENDING') {
+      await notifyAdmins(this.prisma, this.notifications, {
+        title: 'Verification review needed',
+        body: `A ${docType.replace(/_/g, ' ')} (${roleKey}) is waiting in the review queue.`,
+        data: { kind: 'verification_pending', docId: doc.id },
+      });
+    }
 
     return doc;
   }
@@ -191,6 +200,13 @@ export class VerificationService {
 
     if (doc.status === 'APPROVED') await this.promoteToL2(userId);
     if (doc.status === 'REJECTED') await this.notifyRejection(userId, 'identity', result.reason);
+    if (doc.status === 'PENDING') {
+      await notifyAdmins(this.prisma, this.notifications, {
+        title: 'Verification review needed',
+        body: 'An identity check (L2) is waiting in the review queue.',
+        data: { kind: 'verification_pending', docId: doc.id },
+      });
+    }
 
     return doc;
   }
