@@ -17,6 +17,10 @@ export function prettyVendorType(t?: string) {
 
 export type VendorOrderActionKind = 'accept' | 'preparing' | 'ready' | 'reject' | 'complete-pickup' | 'complete-appointment';
 
+/** Statuses where a rider owns the status lane; kitchen progress then rides
+ *  the preparingAt/readyAt timestamps (see the vendor prep routes). */
+const COURIER_ACTIVE = ['RIDER_ASSIGNED', 'RIDER_EN_ROUTE_PICKUP', 'RIDER_ARRIVED_PICKUP'];
+
 export function orderActions(order: any): { label: string; action: VendorOrderActionKind }[] {
   const s = (order?.status || '').toUpperCase();
   const isPickup = order?.fulfillment === 'PICKUP';
@@ -27,6 +31,13 @@ export function orderActions(order: any): { label: string; action: VendorOrderAc
   if (isAppt && (s === 'ACCEPTED' || s === 'CONFIRMED')) return [{ label: 'Mark complete', action: 'complete-appointment' }];
   if (s === 'ACCEPTED' || s === 'CONFIRMED') return [{ label: 'Start preparing', action: 'preparing' }];
   if (s === 'PREPARING') return [{ label: isPickup ? 'Ready for pickup' : 'Mark ready', action: 'ready' }];
+  // A rider claimed the order before the kitchen tapped anything (the normal
+  // case when movers are close) — the buttons keep working via timestamps.
+  if (COURIER_ACTIVE.includes(s)) {
+    if (!order?.preparingAt) return [{ label: 'Start preparing', action: 'preparing' }];
+    if (!order?.readyAt) return [{ label: 'Mark ready', action: 'ready' }];
+    return [];
+  }
   // Takeaway: the vendor closes the order when the customer collects it (no rider).
   if ((s === 'READY' || s === 'READY_FOR_PICKUP') && isPickup) return [{ label: 'Mark picked up', action: 'complete-pickup' }];
   return [];
@@ -98,6 +109,10 @@ export function OrderStatusPill({ status }: { status: string }) {
   if (s === 'ACCEPTED' || s === 'CONFIRMED') return <TonePill label="Accepted" tone="brand" />;
   if (s === 'PREPARING') return <TonePill label="Preparing" tone="neutral" />;
   if (s === 'READY' || s === 'READY_FOR_PICKUP') return <TonePill label="Ready" tone="success" />;
+  if (s === 'RIDER_ASSIGNED') return <TonePill label="Rider assigned" tone="brand" />;
+  if (s === 'RIDER_EN_ROUTE_PICKUP') return <TonePill label="Rider en route" tone="brand" />;
+  if (s === 'RIDER_ARRIVED_PICKUP') return <TonePill label="Rider at counter" tone="brand" />;
+  if (s === 'PICKED_UP' || s === 'EN_ROUTE_DELIVERY' || s === 'ARRIVED') return <TonePill label="Out for delivery" tone="neutral" />;
   if (s === 'DELIVERED' || s === 'COMPLETED') return <TonePill label={prettyStatus(s)} tone="success" />;
   if (s === 'CANCELLED') return <TonePill label="Cancelled" tone="error" />;
   return <TonePill label={s.replace(/_/g, ' ').toLowerCase()} tone="neutral" />;

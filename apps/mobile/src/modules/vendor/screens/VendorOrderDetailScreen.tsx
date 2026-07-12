@@ -4,7 +4,7 @@ import { Linking, ScrollView, View } from 'react-native';
 import { Feather, MaterialCommunityIcons } from '@expo/vector-icons';
 import { color, radius, space } from '@swift/ui';
 import { Card, IconChip, InfoRow, LoadingBlock, ErrorState, PillButton, PopupCard, Screen, T } from '../../../kit';
-import { useOrderAction, useVendorOrder } from '../../../hooks/vendorops';
+import { useOrderAction, useRetryDispatch, useVendorOrder } from '../../../hooks/vendorops';
 import { money } from '../../../lib/money';
 import {
   FulfillmentTag,
@@ -100,6 +100,7 @@ export function VendorOrderDetailScreen({ navigation, route }: any) {
   const orderId: string | undefined = route.params?.orderId;
   const { data: order, isLoading, isError, refetch } = useVendorOrder(orderId);
   const orderAction = useOrderAction();
+  const retryDispatch = useRetryDispatch();
   const [confirmReject, setConfirmReject] = useState(false);
 
   if (isLoading || !orderId) {
@@ -275,6 +276,33 @@ export function VendorOrderDetailScreen({ navigation, route }: any) {
 
         {/* Rider — only once dispatch has assigned one */}
         {riderName ? <ContactCard icon="bike" title="Rider" name={riderName} phone={order.rider?.user?.phone} /> : null}
+
+        {/* No rider yet on an accepted delivery — let the vendor re-run the
+            search ("hold it and retry" from the no-movers notice). Harmless
+            mid-cascade: the server no-ops while an offer is live. */}
+        {!riderName && !isPickup && !isAppt && ['ACCEPTED', 'PREPARING', 'READY_FOR_PICKUP'].includes(s) ? (
+          <Card style={{ marginBottom: space.md }}>
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.md }}>
+              <MaterialCommunityIcons name="bike-fast" size={20} color={color.text.muted} />
+              <View style={{ flex: 1 }}>
+                <T variant="label" weight="semibold">
+                  No rider yet
+                </T>
+                <T variant="caption" tone="muted">
+                  Swift searches nearby movers automatically — retry if nobody took it.
+                </T>
+              </View>
+            </View>
+            <PillButton
+              label="Find a rider"
+              variant="outline"
+              size="md"
+              style={{ marginTop: space.md }}
+              loading={retryDispatch.isPending}
+              onPress={() => retryDispatch.mutate(order.id)}
+            />
+          </Card>
+        ) : null}
 
         {/* Immutable status log */}
         {timeline.length > 0 ? (

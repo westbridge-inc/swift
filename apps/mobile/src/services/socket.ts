@@ -11,7 +11,11 @@ export function getSocket(): Socket {
     socket = io(SOCKET_URL, {
       autoConnect: false,
       transports: ['websocket'],
-      auth: { token: useAuthStore.getState().accessToken },
+      // Callback form: every (re)connection attempt reads the CURRENT access
+      // token. A static object froze the login-time token, so any reconnect
+      // after a token refresh was rejected forever — an online mover silently
+      // stopped receiving dispatch offers after a network blip.
+      auth: (cb) => cb({ token: useAuthStore.getState().accessToken }),
     });
   }
   return socket;
@@ -20,7 +24,6 @@ export function getSocket(): Socket {
 export function connectSocket() {
   const s = getSocket();
   if (!s.connected) {
-    s.auth = { token: useAuthStore.getState().accessToken };
     s.connect();
   }
 }

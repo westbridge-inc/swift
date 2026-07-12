@@ -1,5 +1,8 @@
+import { useEffect } from 'react';
+import { Vibration } from 'react-native';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { vendorApi } from '../services/api';
+import { connectSocket, getSocket } from '../services/socket';
 import { useStoreSwitcher } from '../stores/storeSwitcher';
 
 async function unwrap<T = any>(p: Promise<any>): Promise<T> {
@@ -128,6 +131,37 @@ export function useVendorOrders(enabled: boolean) {
   });
 }
 
+/** Live board: join the store's socket room and refresh the order queries the
+ *  moment the server says something happened (new order, status change, prep
+ *  signal) instead of waiting out the 12s poll — the poll stays as the
+ *  reconnect safety net. A new order also buzzes the phone: the board is a
+ *  counter appliance, not a screen someone stares at. */
+export function useVendorOrdersLive(vendorId: string | undefined) {
+  const qc = useQueryClient();
+  useEffect(() => {
+    if (!vendorId) return;
+    connectSocket();
+    const s = getSocket();
+    const join = () => s.emit('vendor:subscribe', { vendorId });
+    join();
+    s.on('connect', join); // rooms are per-connection — re-join after reconnects
+    const refresh = () => qc.invalidateQueries({ queryKey: ['vendor', 'orders'] });
+    const onNew = () => {
+      Vibration.vibrate(400);
+      refresh();
+    };
+    s.on('order:new', onNew);
+    s.on('order:status_changed', refresh);
+    s.on('order:prep_update', refresh);
+    return () => {
+      s.off('connect', join);
+      s.off('order:new', onNew);
+      s.off('order:status_changed', refresh);
+      s.off('order:prep_update', refresh);
+    };
+  }, [vendorId, qc]);
+}
+
 /** Full order drill-down (line items, status log, customer/rider contacts).
  *  Keyed under ['vendor','orders'] so order-action mutations refresh it too. */
 export function useVendorOrder(id: string | undefined) {
@@ -156,6 +190,16 @@ export function useVendorOrderHistory(filters: OrderHistoryFilters) {
 export function useVendorSubscription(enabled = true) {
   // Billing is owner-only (staff & roles §4.1) — staff sessions skip the call.
   return useQuery({ queryKey: ['vendor', 'subscription'], queryFn: () => unwrap(vendorApi.subscription()), enabled });
+}
+
+/** "Find a mover again" after dispatch exhausted — clears the cascade's
+ *  decline memory server-side and searches again from the tightest radius. */
+export function useRetryDispatch() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (id: string) => unwrap(vendorApi.retryDispatch(id)),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['vendor', 'orders'] }),
+  });
 }
 
 export function useToggleOpen() {

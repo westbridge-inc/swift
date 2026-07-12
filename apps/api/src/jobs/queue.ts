@@ -64,6 +64,9 @@ export function createWorkers(ctx: JobContext) {
               data: { orderId, status: 'CANCELLED', note: 'Auto-cancelled after timeout' },
             });
             ctx.io.to(`order:${orderId}`).emit('order:status_changed', { orderId, status: 'CANCELLED' });
+            if (order.vendorId) {
+              ctx.io.to(`vendor:${order.vendorId}`).emit('order:status_changed', { orderId, status: 'CANCELLED' });
+            }
             ctx.log.info({ orderId }, 'Order auto-cancelled');
           }
           break;
@@ -262,12 +265,21 @@ export function createWorkers(ctx: JobContext) {
     { connection, concurrency: 5 },
   );
 
-  // DISPATCH: offer cascade — start offers and enforce the 20s timeout
+  // DISPATCH: offer cascade — start offers, enforce the 20s timeout, retry
+  // an exhausted order once, and sweep ghost movers off the online pool.
   const dispatchWorker = new Worker(
     QUEUE_NAMES.DISPATCH,
     async (job: Job) => {
-      const { DispatchService } = await import('../modules/dispatch/dispatch.service');
+      const { DispatchService, sweepStaleMovers } = await import('../modules/dispatch/dispatch.service');
       const { getMapsProvider } = await import('../providers/maps/maps-provider');
+
+      if (job.name === 'stale-movers') {
+        const swept = await sweepStaleMovers(ctx.prisma);
+        if (swept.riders + swept.drivers > 0) {
+          ctx.log.warn(swept, 'Stale-GPS movers forced offline');
+        }
+        return;
+      }
 
       const dispatchQueue = new Queue(QUEUE_NAMES.DISPATCH, { connection });
       const dispatch = new DispatchService(
@@ -281,6 +293,14 @@ export function createWorkers(ctx: JobContext) {
             removeOnComplete: 100,
             removeOnFail: 50,
           });
+        },
+        async (orderId, delayMs) => {
+          await dispatchQueue.add('dispatch-order', { orderId }, {
+            delay: delayMs,
+            removeOnComplete: 100,
+            removeOnFail: 50,
+          });
+          return true;
         },
       );
 
@@ -368,5 +388,13 @@ export async function scheduleRecurringJobs(queues: ReturnType<typeof createQueu
     repeat: { pattern: '0 3 * * *' },
     removeOnComplete: 30,
     removeOnFail: 30,
+  });
+
+  // Ghost-mover sweep: force-offline anyone whose GPS went silent, every 5
+  // minutes — dead phones must not keep swallowing dispatch offers.
+  await queues.dispatchQueue.add('stale-movers', {}, {
+    repeat: { pattern: '*/5 * * * *' },
+    removeOnComplete: 20,
+    removeOnFail: 20,
   });
 }

@@ -108,6 +108,15 @@ export function useAcceptJob(kind: MoverKind) {
   const qc = useQueryClient();
   return useMutation({ mutationFn: ({ id, fare }: { id: string; fare?: number }) => unwrap(svc(kind).accept(id, fare)), onSuccess: () => qc.invalidateQueries({ queryKey: ['mover'] }) });
 }
+/** Explicit pass on a dispatch offer — tells the cascade to move to the next
+ *  mover NOW instead of letting the 20s timeout burn. Best-effort: if the
+ *  offer already expired server-side the decline 409s, which is fine. */
+export function useDeclineOffer(kind: MoverKind) {
+  return useMutation({
+    mutationFn: (orderId: string) => svc(kind).declineOffer(orderId).catch(() => null),
+    onSuccess: () => track('offer_declined', { kind }),
+  });
+}
 export function useDriverAction() {
   const qc = useQueryClient();
   return useMutation({

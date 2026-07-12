@@ -28,6 +28,10 @@ export const OFFER_TIMEOUT_SECONDS = 20;
 const BASE_RADIUS_KM = 5;
 const RADIUS_STEP_KM = 5;
 const MAX_ROUNDS = 3;
+/** One automatic re-sweep after exhaustion — supply changes by the minute. */
+export const REDISPATCH_DELAY_MS = 90_000;
+/** GPS silent this long while "online" = the app is gone, not slow. */
+export const STALE_LOCATION_MINUTES = 15;
 
 /** Taxi rides draw from the driver pool; everything else from riders.
  *  Same scoring, same cascade, same atomic claim — shared code, not a copy. */
@@ -40,9 +44,15 @@ function poolForOrder(order: { orderType: string }): DispatchPool {
 const offerKey = (orderId: string) => `dispatch:offer:${orderId}`;
 const declinedKey = (orderId: string) => `dispatch:declined:${orderId}`;
 const roundKey = (orderId: string) => `dispatch:round:${orderId}`;
+const exhaustKey = (orderId: string) => `dispatch:exhausts:${orderId}`;
 
 /** How the production wiring schedules the timeout check (BullMQ delayed job). */
 export type TimeoutScheduler = (orderId: string, riderId: string, delayMs: number) => Promise<void>;
+
+/** Schedules a delayed full re-dispatch. Returns false when no queue is up
+ *  (tests, degraded boot) so exhaustion falls through to the honest "no
+ *  movers" notices instead of promising a retry that will never run. */
+export type RedispatchScheduler = (orderId: string, delayMs: number) => Promise<boolean>;
 
 interface GeoCandidateRow {
   id: string;
@@ -63,6 +73,7 @@ export class DispatchService {
     private io: Server,
     private maps: MapsProvider,
     private scheduleTimeout: TimeoutScheduler = async () => {},
+    private scheduleRedispatch?: RedispatchScheduler,
   ) {
     this.notifications = new NotificationService(prisma, io);
   }
@@ -236,6 +247,17 @@ export class DispatchService {
     await this.dispatchOrder(orderId);
   }
 
+  /** Vendor-initiated "find a mover again" after exhaustion. Wipes the
+   *  cascade's memory (declined set, radius, retry counter) and re-runs from
+   *  the tightest radius. No-op while an offer is already live — retrying
+   *  mid-cascade would yank the countdown out from under a mover. */
+  async retryDispatch(orderId: string) {
+    const live = await this.redis.get(offerKey(orderId));
+    if (live) return { offered: live };
+    await this.redis.del(declinedKey(orderId), roundKey(orderId), exhaustKey(orderId));
+    return this.dispatchOrder(orderId);
+  }
+
   // -------------------------------------------------------------------------
   // Atomic acceptance
   // -------------------------------------------------------------------------
@@ -309,13 +331,13 @@ export class DispatchService {
     }
     await this.recordOfferOutcome(moverId, true, pool);
 
-    await this.redis.del(offerKey(orderId), declinedKey(orderId), roundKey(orderId));
+    await this.redis.del(offerKey(orderId), declinedKey(orderId), roundKey(orderId), exhaustKey(orderId));
 
-    this.io.to(`order:${orderId}`).emit('order:status_changed', {
-      orderId,
-      status: assignedStatus,
-      timestamp: new Date().toISOString(),
-    });
+    const assignedEvent = { orderId, status: assignedStatus, timestamp: new Date().toISOString() };
+    this.io.to(`order:${orderId}`).emit('order:status_changed', assignedEvent);
+    if (order.vendorId) {
+      this.io.to(`vendor:${order.vendorId}`).emit('order:status_changed', assignedEvent);
+    }
     await this.notifications.riderAssigned(
       order.customerId,
       order.orderNumber,
@@ -335,6 +357,26 @@ export class DispatchService {
     vendor: { name: string; owner: { userId: string } } | null;
   }) {
     await this.redis.del(offerKey(order.id), roundKey(order.id));
+
+    // One automatic re-sweep before giving up: movers toggle online by the
+    // minute, and a mover who declined two minutes ago may take the re-offer.
+    // The declined set is cleared so the retry searches the full pool again.
+    if (this.scheduleRedispatch) {
+      const attempts = await this.redis.incr(exhaustKey(order.id));
+      await this.redis.expire(exhaustKey(order.id), 3600);
+      if (attempts < 2 && (await this.scheduleRedispatch(order.id, REDISPATCH_DELAY_MS))) {
+        await this.redis.del(declinedKey(order.id));
+        await this.notifications.send({
+          userId: order.customerId,
+          type: 'SYSTEM_ANNOUNCEMENT',
+          title: 'Still looking for a mover',
+          body: `All nearby movers are busy right now — we are automatically retrying for order ${order.orderNumber}.`,
+          audience: 'customer',
+          data: { kind: 'dispatch_retrying', orderId: order.id },
+        });
+        return;
+      }
+    }
 
     await this.notifications.send({
       userId: order.customerId,
@@ -414,5 +456,34 @@ export function makeDispatchService(app: FastifyInstance): DispatchService {
       removeOnFail: 50,
     });
   };
-  return new DispatchService(app.prisma, app.redis, app.io, getMapsProvider(), scheduler);
+  const redispatch: RedispatchScheduler = async (orderId, delayMs) => {
+    if (!app.dispatchQueue) return false; // no queue -> exhaustion stays final
+    await app.dispatchQueue.add('dispatch-order', { orderId }, {
+      delay: delayMs,
+      removeOnComplete: 100,
+      removeOnFail: 50,
+    });
+    return true;
+  };
+  return new DispatchService(app.prisma, app.redis, app.io, getMapsProvider(), scheduler, redispatch);
+}
+
+/** Force-offline movers whose GPS went silent while flagged online. A phone
+ *  that died mid-shift otherwise keeps swallowing offers (one 20s timeout
+ *  each) forever. The app pings location every 8–25s while online, so
+ *  STALE_LOCATION_MINUTES of silence means the app is gone, not slow.
+ *  Movers with no location at all are already invisible to findCandidates. */
+export async function sweepStaleMovers(prisma: PrismaClient, staleMinutes = STALE_LOCATION_MINUTES) {
+  const cutoff = new Date(Date.now() - staleMinutes * 60_000);
+  const [riders, drivers] = await Promise.all([
+    prisma.rider.updateMany({
+      where: { isOnline: true, lastLocationUpdate: { lt: cutoff } },
+      data: { isOnline: false },
+    }),
+    prisma.driver.updateMany({
+      where: { isOnline: true, lastLocationUpdate: { lt: cutoff } },
+      data: { isOnline: false },
+    }),
+  ]);
+  return { riders: riders.count, drivers: drivers.count };
 }
