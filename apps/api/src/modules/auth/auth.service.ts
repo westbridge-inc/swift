@@ -3,6 +3,7 @@ import { nanoid } from 'nanoid';
 import bcrypt from 'bcryptjs';
 import type { UserRole } from '@prisma/client';
 import { AppError } from '../../utils/errors';
+import { countryFromPhone } from '../../utils/phone-country';
 import { generateOtp, storeOtp, verifyOtp, checkOtpRateLimit } from '../../utils/otp';
 import { checkOtpDailyBudget } from '../../utils/sms-budget';
 import { CountryConfigService } from '../country/country-config.service';
@@ -151,8 +152,10 @@ export class AuthService {
       }
     }
 
-    // Country comes from the live config; inactive countries are waitlist-only.
-    const countryCode = data.countryCode ?? 'GY';
+    // The PHONE decides the market: pricing, currency, and checklists follow
+    // the dial prefix, never a client-picked field (which is only a fallback
+    // for prefixes we don't know). Inactive countries stay waitlist-only.
+    const countryCode = countryFromPhone(data.phone) ?? data.countryCode ?? 'GY';
     const activeCountries = await this.countryConfig.getActiveCountries();
     if (!activeCountries.some((c) => c.code === countryCode)) {
       throw new AppError(400, 'COUNTRY_NOT_ACTIVE', 'Swift is not live in this country yet — join the waitlist');

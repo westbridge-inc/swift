@@ -1,6 +1,7 @@
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { AuthService } from './auth.service';
+import { TRIAL_DAYS } from '../subscription/subscription.service';
 import { AppError } from '../../utils/errors';
 import { ALLOWED_IMAGE_TYPES, looksLikeImage } from '../../utils/images';
 import { getStorageProvider } from '../../providers/storage/storage-provider';
@@ -186,6 +187,35 @@ export async function authRoutes(app: FastifyInstance) {
     return reply.send({
       success: true,
       data: countries.map((c) => ({ ...c, dialCode: DIAL_CODES[c.code] ?? null })),
+    });
+  });
+
+  /** Public price list — SaaS sells with the price on the door: partners see
+   *  "14 days free, then X/week" BEFORE committing. Customers never pay, so
+   *  nothing here concerns them. Weekly tiers only; checklists/cash-rules
+   *  stay internal (OWASP API3). */
+  app.get('/pricing', async (request, reply) => {
+    const { country } = z.object({ country: z.string().length(2).default('GY') }).parse(request.query ?? {});
+    const config = await app.prisma.countryConfig.findUnique({
+      where: { code: country.toUpperCase() },
+      select: { code: true, currencyCode: true, currencySymbol: true, subscriptionTiers: true, isActive: true },
+    });
+    if (!config) throw new AppError(404, 'COUNTRY_NOT_FOUND', 'No such market');
+    const tiers = (config.subscriptionTiers ?? {}) as Record<string, number>;
+    return reply.send({
+      success: true,
+      data: {
+        countryCode: config.code,
+        currencyCode: config.currencyCode,
+        currencySymbol: config.currencySymbol,
+        isActive: config.isActive,
+        trialDays: TRIAL_DAYS,
+        weekly: {
+          mover: tiers['mover'] ?? null,
+          smallVendor: tiers['smallVendor'] ?? null,
+          largeVendor: tiers['largeVendor'] ?? null,
+        },
+      },
     });
   });
 }

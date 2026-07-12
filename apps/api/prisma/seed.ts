@@ -568,6 +568,11 @@ async function main() {
     },
   });
 
+  // Weekly SaaS tiers (GYD) — single source for the GY CountryConfig below AND
+  // any seeded subscription rows, so a tier change never leaves demo accounts
+  // on a stale rate.
+  const guyanaTiers = { mover: 12000, smallVendor: 20000, largeVendor: 30000 };
+
   // Taxi drivers spread across tiers so Economy/Comfort/XL is demoable (verified,
   // tier-tagged, in Georgetown Central). Seeded OFFLINE — they go online from the
   // driver app; this also keeps dispatch tests deterministic (an always-online
@@ -614,7 +619,7 @@ async function main() {
               create: {
                 type: 'TAXI_DRIVER',
                 status: 'TRIAL',
-                weeklyRate: 12000,
+                weeklyRate: guyanaTiers.mover,
                 currentPeriodStart: new Date(),
                 currentPeriodEnd: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
                 nextBillingDate: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
@@ -726,7 +731,7 @@ async function main() {
 
   // Guyana CountryConfig — the single source for currency, ID-gate, tiers,
   // and document checklists. Adding a country = adding a row, not code.
-  const guyanaTiers = { mover: 12000, smallVendor: 20000, largeVendor: 30000 };
+  // (guyanaTiers is declared above the demo drivers, which seed at the same rate.)
   const guyanaChecklists = {
     // Every mover (incl. bicycle couriers) proves identity AND character —
     // couriers handle cash and walk up to homes, so the Police Clearance
@@ -863,7 +868,9 @@ async function main() {
       regulatoryNotes:
         'Tiers and taxi rates are USD-pegged defaults; document checklist mirrors Guyana. Refine with local business/legal input before launch.',
       locale: c.locale,
-      isActive: false, // launch market = Guyana; others appear as "coming soon" until ops go live
+      // Whole-Caribbean availability (founder directive 2026-07-12): partners
+      // sign up from any island and start; per-country ops polish follows.
+      isActive: true,
     };
     await prisma.countryConfig.upsert({ where: { code: c.code }, update: data, create: { code: c.code, ...data } });
   }

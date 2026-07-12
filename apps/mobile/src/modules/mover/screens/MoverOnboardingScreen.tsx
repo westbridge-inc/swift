@@ -6,6 +6,7 @@ import { color, radius, space } from '@swift/ui';
 import { Card, LabeledInput, LinkText, PillButton, Screen, T } from '../../../kit';
 import { SwiftMark } from '../../../components/SwiftLogo';
 import { DocumentChecklist } from '../../../components/onboarding/DocumentChecklist';
+import { PricingCard } from '../../../components/onboarding/PricingCard';
 import { useVerificationStatus, useBecomePartner } from '../../../hooks';
 import { useAuthStore } from '../../../stores/authStore';
 import { RoleSwitcherSheet } from '../../../components/RoleSwitcherSheet';
@@ -142,6 +143,11 @@ export function MoverOnboardingScreen({ status }: { status: any }) {
           <ValuePill icon="check-decagram" label="Keep 100%" />
           <ValuePill icon="cash" label="Cash payouts" />
           <ValuePill icon="calendar-check" label="Flat weekly fee" />
+        </View>
+
+        {/* The price on the door — what "flat weekly fee" actually costs. */}
+        <View style={{ marginTop: space.lg }}>
+          <PricingCard kind="mover" />
         </View>
 
         <View style={{ marginTop: space.xl }}>

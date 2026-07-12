@@ -10,7 +10,7 @@ import { CountryConfigService } from '../country/country-config.service';
 // balance; a missed payment flows through the normal grace → suspend path.
 // ---------------------------------------------------------------------------
 
-const TRIAL_DAYS = 14;
+export const TRIAL_DAYS = 14;
 const DAY_MS = 24 * 60 * 60 * 1000;
 
 const VENDOR_SUB_TYPE: Record<VendorType, SubscriptionType> = {

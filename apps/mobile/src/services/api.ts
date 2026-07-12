@@ -74,6 +74,8 @@ export const authApi = {
   sendOtp: (phone: string) => api.post('/auth/send-otp', { phone }),
   verifyOtp: (phone: string, code: string) => api.post('/auth/verify-otp', { phone, code }),
   countries: () => api.get('/auth/countries'),
+  // Public weekly price list — the pitch partners see BEFORE committing.
+  pricing: (country?: string) => api.get('/auth/pricing', { params: country ? { country } : undefined }),
   register: (data: {
     phone: string;
     firstName: string;

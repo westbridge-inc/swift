@@ -44,6 +44,9 @@ import {
 import { VendorOrderDetailScreen } from './screens/VendorOrderDetailScreen';
 import { VendorOrderHistoryScreen } from './screens/VendorOrderHistoryScreen';
 import { DocumentChecklist } from '../../components/onboarding/DocumentChecklist';
+import { PricingCard } from '../../components/onboarding/PricingCard';
+import { useWentLive, WentLivePopup } from '../../components/onboarding/WentLive';
+import { docLabel } from '../../components/onboarding/DocumentUploadCard';
 import { useBecomePartner, useVerificationStatus } from '../../hooks/verification';
 import {
   useVendorProfile,
@@ -225,11 +228,14 @@ function BusinessSetup() {
         <T variant="body" tone="muted" style={{ marginTop: space.sm }}>
           Reach customers across town and keep 100% of every sale — Swift charges a flat weekly fee, never commission.
         </T>
-        <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: space.md, marginTop: space.lg, marginBottom: space.lg }}>
+        <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: space.md, marginTop: space.lg, marginBottom: space.md }}>
           <BizValuePill icon="check-decagram" label="Keep 100%" />
           <BizValuePill icon="cash-remove" label="No commission" />
           <BizValuePill icon="calendar-check" label="Flat weekly fee" />
         </View>
+
+        {/* The price on the door — what the flat weekly fee actually is. */}
+        <PricingCard kind="vendor" />
 
         <T variant="heading" style={{ marginBottom: space.md }}>
           Business type
@@ -262,11 +268,13 @@ function BusinessSetup() {
 }
 
 function VendorOnboarding({ store }: { store: any }) {
-  const { data: status, isLoading, isError, refetch } = useVerificationStatus<any>(store.vendorType);
+  // Poll while onboarding so an approval reflects within seconds.
+  const { data: status, isLoading, isError, refetch } = useVerificationStatus<any>(store.vendorType, undefined, { poll: true });
   return (
     <Screen>
       <TabHeader title={store.name} />
       <ScrollView contentContainerStyle={{ paddingHorizontal: GUTTER, paddingBottom: space['3xl'] }} showsVerticalScrollIndicator={false}>
+        <PricingCard kind="vendor" />
         <DocumentChecklist role={store.vendorType} status={status} isLoading={isLoading} isError={isError} onRetry={refetch} />
       </ScrollView>
     </Screen>
@@ -415,6 +423,14 @@ function VendorOps({ store, navigation }: any) {
   const ordersQ = useVendorOrders(true);
   const analyticsQ = useVendorAnalytics();
   const { stores, myRole } = useVendorProfile();
+  // Only fetched to NAME the failing document in the suspension banner.
+  const vstatus = useVerificationStatus<any>(store.vendorType);
+  const failingDocs: string[] = store.isVerified === false
+    ? (vstatus.data?.checklist ?? []).filter((dt: string) => {
+        const docs = (vstatus.data?.documents ?? []).filter((d: any) => d.docType === dt);
+        return !docs.some((d: any) => d.status === 'APPROVED' && (!d.expiresAt || new Date(d.expiresAt) > new Date()));
+      })
+    : [];
   const setSelectedStore = useStoreSwitcher((s) => s.setSelectedStore);
   const qc = useQueryClient();
   const switchStore = (id: string) => {
@@ -462,7 +478,9 @@ function VendorOps({ store, navigation }: any) {
               <View style={{ flexDirection: 'row', alignItems: 'flex-start', gap: space.sm, borderRadius: radius.lg, backgroundColor: '#FDECEC', padding: space.md, marginBottom: space.lg, opacity: pressed ? 0.85 : 1 }}>
                 <Feather name="alert-circle" size={15} color={color.error} style={{ marginTop: 1 }} />
                 <T variant="label" tone="error" style={{ flex: 1 }}>
-                  Store suspended — a required document is missing or expired, so new orders are off. Tap to renew it under Account.
+                  {failingDocs.length > 0
+                    ? `Store suspended — ${failingDocs.map((d) => docLabel(d)).join(', ')} ${failingDocs.length === 1 ? 'needs' : 'need'} renewal, so new orders are off. Tap to fix it under Account.`
+                    : 'Store suspended — a required document is missing or expired, so new orders are off. Tap to renew it under Account.'}
                 </T>
               </View>
             )}
@@ -604,6 +622,8 @@ function VendorRoot() {
   // Live order feed for the selected store, on every tab — new orders land
   // instantly (socket) with the 12s poll as fallback.
   useVendorOrdersLive(store && store.status === 'ACTIVE' ? store.id : undefined);
+  // The approval moment gets its moment (observed PENDING → ACTIVE flip only).
+  const live = useWentLive(store ? store.status === 'ACTIVE' : undefined);
 
   // Make the default store an EXPLICIT selection before the tabs mount: every
   // vendor request then carries x-vendor-id, so the order board, menu and
@@ -626,8 +646,12 @@ function VendorRoot() {
     );
   }
   if (!store) return <BusinessSetup />;
-  if (store.status !== 'ACTIVE') return <VendorOnboarding store={store} />;
-  return <VendorTabs />;
+  return (
+    <>
+      {store.status !== 'ACTIVE' ? <VendorOnboarding store={store} /> : <VendorTabs />}
+      <WentLivePopup visible={live.celebrate} onClose={live.dismiss} kind="vendor" />
+    </>
+  );
 }
 
 // ─── Menu management ─────────────────────────────────────────────────────────

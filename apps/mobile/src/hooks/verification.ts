@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { verificationApi, partnerApi } from '../services/api';
+import { authApi, verificationApi, partnerApi } from '../services/api';
 
 const PRIVACY_NOTICE_VERSION = 'v1';
 
@@ -8,10 +8,30 @@ async function unwrap<T = any>(p: Promise<any>): Promise<T> {
   return r?.data?.data as T;
 }
 
-export function useVerificationStatus<T = any>(role: string, vehicleType?: string) {
+export function useVerificationStatus<T = any>(role: string, vehicleType?: string, opts?: { poll?: boolean }) {
   return useQuery<T>({
     queryKey: ['verification', role, vehicleType],
     queryFn: () => unwrap<T>(verificationApi.status(role, vehicleType)),
+    // Onboarding screens poll so an approval flips the app to "live" within
+    // seconds, not on the next cold refetch. Stops itself once verified.
+    refetchInterval: opts?.poll
+      ? (query) => ((query.state.data as any)?.roleVerified ? false : 15000)
+      : undefined,
+  });
+}
+
+/** Public weekly price list for the partner pitch ("N days free, then X/week"). */
+export function usePartnerPricing(countryCode?: string) {
+  return useQuery({
+    queryKey: ['pricing', countryCode ?? 'GY'],
+    queryFn: () => unwrap<{
+      countryCode: string;
+      currencyCode: string;
+      currencySymbol: string;
+      trialDays: number;
+      weekly: { mover: number | null; smallVendor: number | null; largeVendor: number | null };
+    }>(authApi.pricing(countryCode)),
+    staleTime: 60 * 60 * 1000,
   });
 }
 
