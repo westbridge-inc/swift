@@ -105,8 +105,10 @@ async function buildApp() {
   await app.register(authPlugin);
   await app.register(socketPlugin);
 
-  // Health check — detailed
-  app.get('/health', async () => {
+  // Health check. The load balancer needs a bare status; per-dependency
+  // detail (db/redis state, uptime) is an internal map of the deployment and
+  // stays behind HEALTH_DETAIL_TOKEN outside development.
+  app.get('/health', async (request) => {
     const checks: Record<string, string> = { api: 'ok' };
 
     try {
@@ -124,8 +126,17 @@ async function buildApp() {
     }
 
     const allOk = Object.values(checks).every((v) => v === 'ok');
+    const status = allOk ? 'healthy' : 'degraded';
+
+    const detailToken = process.env['HEALTH_DETAIL_TOKEN'];
+    const showDetail =
+      process.env['NODE_ENV'] === 'development' ||
+      (!!detailToken && request.headers['x-health-detail'] === detailToken);
+    if (!showDetail) {
+      return { status, timestamp: new Date().toISOString() };
+    }
     return {
-      status: allOk ? 'healthy' : 'degraded',
+      status,
       timestamp: new Date().toISOString(),
       uptime: process.uptime(),
       checks,
