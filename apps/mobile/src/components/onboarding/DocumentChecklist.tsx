@@ -73,14 +73,36 @@ export function DocumentChecklist({
     );
   }
 
+  const approvedCount = checklist.filter((dt) => latestDoc(dt)?.status === 'APPROVED').length;
+  const allSubmitted = checklist.every((dt) => ['APPROVED', 'PENDING'].includes(latestDoc(dt)?.status));
+
   return (
     <View>
       <Heading size="lg" className="mb-xs">
         Required steps
       </Heading>
-      <Text className="mb-md text-sm text-text-secondary">
+      <Text className="mb-sm text-sm text-text-secondary">
         Upload these to activate your account. We review within 24 hours.
       </Text>
+      {/* Progress — how far through the door they are */}
+      <View className="mb-md">
+        <View className="mb-1 flex-row items-center justify-between">
+          <Text className="text-xs font-semibold text-text-secondary">
+            {approvedCount} of {checklist.length} approved
+          </Text>
+          {allSubmitted && approvedCount < checklist.length ? (
+            <Text className="text-xs font-semibold" style={{ color: color.brand[500] }}>
+              All submitted — in review
+            </Text>
+          ) : null}
+        </View>
+        <View className="h-1.5 overflow-hidden rounded-full" style={{ backgroundColor: color.surface.subtle }}>
+          <View
+            className="h-1.5 rounded-full"
+            style={{ width: `${Math.round((approvedCount / checklist.length) * 100)}%`, backgroundColor: color.success }}
+          />
+        </View>
+      </View>
       {checklist.map((docType) => {
         const doc = latestDoc(docType);
         return (
@@ -90,6 +112,8 @@ export function DocumentChecklist({
             docType={docType}
             status={doc?.status}
             expiresAt={doc?.status === 'APPROVED' ? doc?.expiresAt : null}
+            submittedAt={doc?.createdAt ?? null}
+            reviewNote={doc?.reviewNote ?? null}
             isNext={docType === nextDoc}
           />
         );

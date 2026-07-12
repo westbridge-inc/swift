@@ -19,7 +19,9 @@ import { requestOtp, loginWithOtp } from './helpers/otp';
 
 const MOVER_PHONE = '+5920001111';
 const VENDOR_PHONE = '+5920002222';
-const WAITLIST_PHONE = '+5920003333';
+// Outside the Caribbean footprint (UK) — the dial prefix derives no market,
+// and the claimed country has no config row, so signup hits the waitlist gate.
+const WAITLIST_PHONE = '+4477009003333';
 const CROSSING_PHONE = '+5920003334';
 const PASSWORD = 'correct-horse-battery';
 
@@ -104,14 +106,14 @@ describe('Signup — OTP mandatory, role + country aware', () => {
     expect(res.json().error.code).toBe('OTP_REQUIRED');
   });
 
-  it('rejects signup for a country that is not live', async () => {
+  it('rejects signup for a market Swift is not in (whole Caribbean IS live)', async () => {
     await loginWithOtp(app, WAITLIST_PHONE);
     const res = await inject('POST', '/api/v1/auth/register', {
-      phone: WAITLIST_PHONE,
+      phone: WAITLIST_PHONE, // UK prefix — derives no Caribbean market
       firstName: 'Wait',
       lastName: 'List',
       role: 'CUSTOMER',
-      countryCode: 'TT',
+      countryCode: 'US', // no config row → waitlist
     });
     expect(res.statusCode).toBe(400);
     expect(res.json().error.code).toBe('COUNTRY_NOT_ACTIVE');

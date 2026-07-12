@@ -4,6 +4,7 @@ import { createNativeStackNavigator } from '@react-navigation/native-stack';
 import { LoadingBlock, Screen } from '../../kit';
 import { ChatScreen } from '../../screens/shared/ChatScreen';
 import { useVerificationStatus } from '../../hooks';
+import { useWentLive, WentLivePopup } from '../../components/onboarding/WentLive';
 import { MoverHomeScreen } from './screens/MoverHomeScreen';
 import { ActiveJobScreen } from './screens/ActiveJobScreen';
 import { EarningsScreen } from './screens/EarningsScreen';
@@ -15,8 +16,11 @@ import { MoverOnboardingScreen } from './screens/MoverOnboardingScreen';
 const Stack = createNativeStackNavigator();
 
 // Verified movers land in the map-first ops home; unverified see onboarding.
+// Polling means an admin approval flips this screen within seconds — and the
+// flip itself gets its moment (the went-live popup), Uber-style.
 function MoverRoot({ navigation }: any) {
-  const { data: status, isLoading } = useVerificationStatus<any>('MOVER');
+  const { data: status, isLoading } = useVerificationStatus<any>('MOVER', undefined, { poll: true });
+  const live = useWentLive(status ? !!status.roleVerified : undefined);
 
   if (isLoading) {
     return (
@@ -26,7 +30,12 @@ function MoverRoot({ navigation }: any) {
     );
   }
 
-  return status?.roleVerified ? <MoverHomeScreen navigation={navigation} /> : <MoverOnboardingScreen status={status} />;
+  return (
+    <>
+      {status?.roleVerified ? <MoverHomeScreen navigation={navigation} /> : <MoverOnboardingScreen status={status} />}
+      <WentLivePopup visible={live.celebrate} onClose={live.dismiss} kind="mover" />
+    </>
+  );
 }
 
 export function MoverStack() {

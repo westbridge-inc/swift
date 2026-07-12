@@ -1,4 +1,4 @@
-import { Pressable, View, ActivityIndicator } from 'react-native';
+import { Alert, Pressable, View, ActivityIndicator } from 'react-native';
 import * as ImagePicker from 'expo-image-picker';
 import { Feather, MaterialCommunityIcons } from '@expo/vector-icons';
 import { color } from '@swift/ui';
@@ -29,6 +29,8 @@ const DOC_LABELS: Record<string, string> = {
   selfie: 'Selfie',
 };
 const label = (docType: string) => DOC_LABELS[docType] ?? humanize(docType);
+/** Friendly document name for other surfaces (suspension banners etc.). */
+export const docLabel = label;
 // Safe, always-present icons only.
 const docIcon = (docType: string): keyof typeof MaterialCommunityIcons.glyphMap =>
   docType.includes('photo') || docType === 'selfie'
@@ -48,12 +50,16 @@ export function DocumentUploadCard({
   docType,
   status,
   expiresAt,
+  submittedAt,
+  reviewNote,
   isNext,
 }: {
   role: string;
   docType: string;
   status: DocStatus;
   expiresAt?: string | null;
+  submittedAt?: string | null;
+  reviewNote?: string | null;
   isNext?: boolean;
 }) {
   const upload = useUploadDocument(role);
@@ -65,36 +71,64 @@ export function DocumentUploadCard({
   // An approved doc inside its renewal window re-opens for upload.
   const approved = status === 'APPROVED' && !expiringSoon;
 
-  const pick = async () => {
+  const send = (a: ImagePicker.ImagePickerAsset) =>
+    upload.mutate({
+      docType,
+      file: { uri: a.uri, name: a.fileName ?? `${docType}.jpg`, type: a.mimeType ?? 'image/jpeg' },
+    });
+
+  const fromCamera = async () => {
+    const perm = await ImagePicker.requestCameraPermissionsAsync();
+    if (!perm.granted) return;
+    const res = await ImagePicker.launchCameraAsync({ quality: 0.8 });
+    if (!res.canceled && res.assets?.[0]) send(res.assets[0]);
+  };
+
+  const fromLibrary = async () => {
     const perm = await ImagePicker.requestMediaLibraryPermissionsAsync();
     if (!perm.granted) return;
     const res = await ImagePicker.launchImageLibraryAsync({
       mediaTypes: ImagePicker.MediaTypeOptions.Images,
       quality: 0.8,
     });
-    if (res.canceled || !res.assets?.[0]) return;
-    const a = res.assets[0];
-    upload.mutate({
-      docType,
-      file: { uri: a.uri, name: a.fileName ?? `${docType}.jpg`, type: a.mimeType ?? 'image/jpeg' },
-    });
+    if (!res.canceled && res.assets?.[0]) send(res.assets[0]);
   };
 
-  const caption = approved
-    ? daysLeft != null
-      ? `Approved — valid until ${new Date(expiresAt!).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' })}`
-      : 'Approved'
-    : expiringSoon
-      ? `Expires in ${daysLeft} day${daysLeft === 1 ? '' : 's'} — tap to upload the renewal`
-      : expired
-        ? 'Expired — upload the renewal to keep operating'
-        : pending
-          ? 'Pending review'
-          : rejected
-            ? 'Rejected — tap to re-upload'
-            : isNext
-              ? 'Recommended next step'
-              : 'Get started';
+  // Docs are photographed at the counter/kerb more often than they sit in the
+  // gallery — offer the camera first, library as the alternative.
+  const pick = () =>
+    Alert.alert(label(docType), 'Add a clear, well-lit photo. All corners visible, no glare.', [
+      { text: 'Take photo', onPress: fromCamera },
+      { text: 'Choose from library', onPress: fromLibrary },
+      { text: 'Cancel', style: 'cancel' },
+    ]);
+
+  // The server's rejection reason is the fix instruction — surface it verbatim.
+  const uploadErr = upload.isError
+    ? ((upload.error as any)?.response?.data?.error?.message ?? 'Upload failed — tap to try again')
+    : null;
+
+  const caption = uploadErr
+    ? uploadErr
+    : approved
+      ? daysLeft != null
+        ? `Approved — valid until ${new Date(expiresAt!).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' })}`
+        : 'Approved'
+      : expiringSoon
+        ? `Expires in ${daysLeft} day${daysLeft === 1 ? '' : 's'} — tap to upload the renewal`
+        : expired
+          ? 'Expired — upload the renewal to keep operating'
+          : pending
+            ? submittedAt
+              ? `Submitted ${new Date(submittedAt).toLocaleDateString('en-GB', { day: 'numeric', month: 'short' })} — in review`
+              : 'In review'
+            : rejected
+              ? reviewNote
+                ? `Rejected: ${reviewNote} — tap to re-upload`
+                : 'Rejected — tap to re-upload'
+              : isNext
+                ? 'Recommended next step'
+                : 'Get started';
 
   return (
     <Pressable disabled={approved || pending || upload.isPending} onPress={pick}>
@@ -107,7 +141,10 @@ export function DocumentUploadCard({
           />
         </View>
         <View className="ml-md flex-1">
-          <Text className="text-xs text-text-secondary" style={expiringSoon || expired ? { color: color.warning } : undefined}>
+          <Text
+            className="text-xs text-text-secondary"
+            style={uploadErr || rejected ? { color: color.error } : expiringSoon || expired ? { color: color.warning } : undefined}
+          >
             {caption}
           </Text>
           <Text className="text-base font-semibold">{label(docType)}</Text>
@@ -123,6 +160,8 @@ export function DocumentUploadCard({
           <Badge label="Approved" tone="success" />
         ) : expired ? (
           <Badge label="Expired" tone="error" />
+        ) : rejected ? (
+          <Badge label="Rejected" tone="error" />
         ) : pending ? (
           <Badge label="In review" tone="brand" />
         ) : (
