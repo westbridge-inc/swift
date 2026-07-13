@@ -127,6 +127,8 @@ export function usePlaceOrder<T = any>() {
   const qc = useQueryClient();
   return useMutation<T, unknown, any>({
     mutationFn: (payload: any) => unwrap<T>(customerApi.placeOrder(payload)),
+    // Checkout shows its own inline error (orderErr) — no global toast on top.
+    meta: { silent: true },
     onSuccess: (data: any) => {
       qc.invalidateQueries({ queryKey: customerKeys.orders });
       qc.invalidateQueries({ queryKey: ['customer', 'cart'] });

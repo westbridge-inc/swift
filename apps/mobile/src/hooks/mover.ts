@@ -4,6 +4,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { riderApi, driverApi } from '../services/api';
 import { track } from '../lib/analytics';
 import { connectSocket, getSocket } from '../services/socket';
+import { startMoverLocation, stopMoverLocation } from '../services/backgroundLocation';
 
 async function unwrap<T = any>(p: Promise<any>): Promise<T> {
   const r = await p;
@@ -94,6 +95,9 @@ export function useGoOnline(kind: MoverKind) {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: () => unwrap(svc(kind).goOnline()),
+    // MoverHomeScreen renders goOnline.error inline (the verification/selfie/
+    // subscription reason) — opt out of the global toast to avoid doubling.
+    meta: { silent: true },
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['mover'] });
       track('go_online', { kind });
@@ -194,9 +198,17 @@ export function useBroadcastLocation(kind: MoverKind | null, enabled: boolean) {
     if (!kind || !enabled) return;
     let cancelled = false;
     let sub: Location.LocationSubscription | undefined;
+    let background = false;
 
     (async () => {
       try {
+        // Prefer the background task so the marker keeps moving when the driver
+        // switches to Maps or locks the screen. If background isn't available
+        // (permission denied, or the native module isn't in this build yet),
+        // fall back to the foreground watcher — same behaviour as before.
+        background = await startMoverLocation(kind);
+        if (background || cancelled) return;
+
         const { status } = await Location.requestForegroundPermissionsAsync();
         if (status !== 'granted' || cancelled) return;
         sub = await Location.watchPositionAsync(
@@ -214,6 +226,7 @@ export function useBroadcastLocation(kind: MoverKind | null, enabled: boolean) {
     return () => {
       cancelled = true;
       sub?.remove();
+      if (background) void stopMoverLocation();
     };
   }, [kind, enabled]);
 }

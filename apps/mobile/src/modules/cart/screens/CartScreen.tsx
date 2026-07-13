@@ -69,6 +69,8 @@ export function CartScreen() {
 
   const applyPromo = useMutation({
     mutationFn: (code: string) => customerApi.validatePromo(code),
+    // Own inline feedback (promoMsg) — opt out of the global error toast.
+    meta: { silent: true },
     onSuccess: (res) => {
       const d = res.data?.data;
       setPromoMsg({ ok: true, text: d?.description ?? 'Promo applied' });
