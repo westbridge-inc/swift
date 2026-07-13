@@ -8,6 +8,7 @@ import { color, space } from '@swift/ui';
 import { authApi } from '../../services/api';
 import { useAuthStore } from '../../stores/authStore';
 import { flagEmoji } from '../../lib/flags';
+import { phoneRule } from '../../lib/phone';
 import { SwiftMark } from '../../components/SwiftLogo';
 import { LabeledInput, PillButton, Screen, T } from '../../kit';
 
@@ -18,8 +19,15 @@ export function PhoneEntryScreen() {
   const { dialCode, countryCode, intent, moverPreset, cancelAuth } = useAuthStore();
   const [digits, setDigits] = useState('');
 
-  const fullPhone = `${dialCode ?? '+592'}${digits.replace(/\D/g, '')}`;
-  const valid = digits.replace(/\D/g, '').length >= 6;
+  // Per-country rule: the local number length + a realistic example. The dial
+  // code carries the country code, so `digits` is just the local number.
+  const rule = phoneRule(countryCode);
+  const onChangeDigits = (t: string) => setDigits(t.replace(/\D/g, '').slice(0, rule.nsnLength));
+
+  const fullPhone = `${dialCode ?? '+592'}${digits}`;
+  // Must be exactly the country's local length — not just "6+" — so a number
+  // that's too short (or, capped above, too long) can't be submitted.
+  const valid = digits.length === rule.nsnLength;
 
   // Earners (rider/taxi/seller) reach this screen to SIGN UP, not sign in —
   // frame it that way with their role, instead of a generic "Sign in" that
@@ -61,10 +69,11 @@ export function PhoneEntryScreen() {
             <LabeledInput
               label="Phone Number"
               icon="phone"
-              placeholder="600 0000"
+              placeholder={rule.example}
               keyboardType="phone-pad"
+              maxLength={rule.nsnLength}
               value={digits}
-              onChangeText={setDigits}
+              onChangeText={onChangeDigits}
               error={err}
               autoFocus
               right={
