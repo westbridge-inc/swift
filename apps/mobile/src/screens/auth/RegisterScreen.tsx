@@ -61,6 +61,13 @@ export function RegisterScreen() {
           <T variant="body" tone="muted" style={{ marginTop: space.sm }}>
             You’re signing up with <T weight="semibold">{phone}</T>
           </T>
+          {role !== 'CUSTOMER' ? (
+            // Make the earner "full sign-up" honest: account first, then the
+            // vehicle/business + documents step that actually lets them earn.
+            <T variant="body" tone="muted" style={{ marginTop: space.xs }}>
+              Next, you’ll add {role === 'VENDOR' ? 'your business details and documents' : 'your vehicle and documents'} to finish.
+            </T>
+          ) : null}
 
           <View style={{ gap: space.xl, marginTop: space['2xl'] }}>
             <LabeledInput
