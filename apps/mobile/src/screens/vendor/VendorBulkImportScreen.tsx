@@ -5,6 +5,7 @@ import * as DocumentPicker from 'expo-document-picker';
 import { Feather } from '@expo/vector-icons';
 import { color } from '@swift/ui';
 import { Text, Card, Button, PressableScale } from '../../components/ui';
+import { toast } from '../../components/ui/toast';
 import { useImportAutomap, useImportItems, useImportFile } from '../../hooks/vendorops';
 
 const RECOMMENDED = 'category, name, basePrice, sku, unit, stockQuantity, description';
@@ -53,7 +54,8 @@ export function VendorBulkImportScreen({ navigation }: any) {
         setCsv(text);
         automap.mutate(text.trim());
       } catch {
-        // fall through — the paste box still works
+        // Tell the vendor instead of silently accepting a file that didn't load.
+        toast.error('Couldn’t read that file', 'Paste the rows below instead, or try a different file.');
       }
     }
   };

@@ -11,18 +11,22 @@ import { Card, IconChip, Screen, T } from '../../kit';
 // composed from the kit's card + icon-chip language. Customer browses as a
 // guest; mover/vendor go straight to sign-in.
 const OPTIONS: {
+  key: string;
   intent: 'customer' | 'mover' | 'vendor';
+  moverPreset?: 'delivery' | 'taxi';
   icon: React.ComponentProps<typeof Feather>['name'];
   title: string;
   sub: string;
 }[] = [
-  { intent: 'customer', icon: 'shopping-bag', title: 'Order with Swift', sub: 'Food, groceries, rides and more' },
-  { intent: 'mover', icon: 'navigation', title: 'Earn as a driver or rider', sub: 'Deliveries and taxi trips, your schedule' },
-  { intent: 'vendor', icon: 'briefcase', title: 'Sell as a business', sub: 'Restaurants, stores and services' },
+  { key: 'customer', intent: 'customer', icon: 'shopping-bag', title: 'Order with Swift', sub: 'Food, groceries, rides and more' },
+  { key: 'rider', intent: 'mover', moverPreset: 'delivery', icon: 'package', title: 'Deliver as a rider', sub: 'Food, groceries and parcels — bike or motorcycle' },
+  { key: 'taxi', intent: 'mover', moverPreset: 'taxi', icon: 'navigation', title: 'Drive as a taxi driver', sub: 'Passenger trips in your car' },
+  { key: 'vendor', intent: 'vendor', icon: 'briefcase', title: 'Sell as a business', sub: 'Restaurants, stores and services' },
 ];
 
 export function RolePickerScreen() {
   const setIntent = useAuthStore((s) => s.setIntent);
+  const setMoverPreset = useAuthStore((s) => s.setMoverPreset);
 
   return (
     <Screen>
@@ -37,7 +41,13 @@ export function RolePickerScreen() {
 
         <View style={{ gap: space.lg, marginTop: space['3xl'] }}>
           {OPTIONS.map((o) => (
-            <Pressable key={o.intent} onPress={() => setIntent(o.intent)}>
+            <Pressable
+              key={o.key}
+              onPress={() => {
+                setMoverPreset(o.moverPreset ?? null);
+                setIntent(o.intent);
+              }}
+            >
               {({ pressed }) => (
                 <Card
                   style={{
