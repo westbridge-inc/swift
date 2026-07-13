@@ -18,6 +18,7 @@ import {
   RideClass,
 } from '@prisma/client';
 import { NotificationService } from '../notification/notification.service';
+import { SupportService } from '../support/support.service';
 import { VerificationService } from '../verification/verification.service';
 import { BillingService } from '../billing/billing.service';
 import { SubscriptionService } from '../subscription/subscription.service';
@@ -1634,5 +1635,27 @@ export async function adminRoutes(app: FastifyInstance) {
     ]);
 
     return { success: true, ...paginatedResponse(logs, total, { page, limit, skip }) };
+  });
+
+  // ── Support tickets ──────────────────────────────────────────────────────
+  const support = new SupportService(app.prisma, notifications);
+
+  app.get('/support', { preHandler: [adminGuard] }, async (request) => {
+    const { status, page } = z.object({
+      status: z.enum(['OPEN', 'IN_PROGRESS', 'RESOLVED']).optional(),
+      page: z.coerce.number().int().min(1).optional(),
+    }).parse(request.query);
+    const result = await support.listForAdmin({ status, page });
+    return { success: true, data: result };
+  });
+
+  app.put('/support/:id/resolve', { preHandler: [adminGuard] }, async (request) => {
+    const { id } = request.params as { id: string };
+    const body = z.object({
+      status: z.enum(['OPEN', 'IN_PROGRESS', 'RESOLVED']).default('RESOLVED'),
+      adminNote: z.string().trim().max(2000).optional(),
+    }).parse(request.body ?? {});
+    const updated = await support.resolve(id, request.user.userId, body);
+    return { success: true, data: updated };
   });
 }

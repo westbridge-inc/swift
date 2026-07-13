@@ -104,11 +104,19 @@ export interface AddressInput {
   isDefault?: boolean;
 }
 
+export type SupportCategory = 'ORDER_ISSUE' | 'PAYMENT' | 'SAFETY' | 'ACCOUNT' | 'VENDOR' | 'MOVER' | 'OTHER';
+
 export const customerApi = {
   getProfile: () => api.get('/customer/profile'),
   updateProfile: (data: { firstName?: string; lastName?: string; email?: string }) =>
     api.put('/customer/profile', data),
   switchRole: (role: string) => api.post('/customer/switch-role', { role }),
+  // In-app support / dispute channel.
+  createTicket: (data: { category: SupportCategory; subject: string; message: string; orderId?: string }) =>
+    api.post('/customer/support', data),
+  supportTickets: () => api.get('/customer/support'),
+  // Post-delivery tip (100% to the mover).
+  tipOrder: (id: string, amount: number) => api.post(`/customer/orders/${id}/tip`, { amount }),
   // Redeem a referral code (writes referredBy). `token` lets a just-registered
   // user redeem before the auth store has propagated.
   redeemReferral: (code: string, token?: string) =>

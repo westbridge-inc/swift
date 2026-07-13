@@ -8,7 +8,8 @@ import { useNavigation, useRoute } from '@react-navigation/native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { color, radius, space } from '@swift/ui';
 import { useMutation } from '@tanstack/react-query';
-import { useOrder } from '../../../hooks/customer';
+import { useOrder, useTipOrder } from '../../../hooks/customer';
+import { toast } from '../../../components/ui/toast';
 import { customerApi } from '../../../services/api';
 import { connectSocket, getSocket, subscribeToOrder } from '../../../services/socket';
 import { money } from '../../../lib/money';
@@ -111,6 +112,7 @@ export function DeliveryScreen() {
     mutationFn: () => customerApi.cancelOrder(orderId),
     onSuccess: () => order.refetch(),
   });
+  const tip = useTipOrder(orderId);
 
   const o = order.data;
 
@@ -447,14 +449,57 @@ export function DeliveryScreen() {
             </View>
           </View>
 
+          {/* Post-delivery tip — 100% to the rider. Shown once, after delivery,
+              only if they haven't tipped yet. */}
+          {stage === 3 && !cancelled && o.rider && Number(o.tipAmount ?? 0) === 0 ? (
+            <View style={{ borderRadius: radius.lg, backgroundColor: color.surface.subtle, padding: space.lg, marginTop: space.xl }}>
+              <T variant="body" weight="bold">
+                Add a tip for {o.rider?.firstName ?? 'your rider'}?
+              </T>
+              <T variant="caption" tone="muted" style={{ marginTop: 2 }}>
+                100% goes to them — Swift takes nothing.
+              </T>
+              <View style={{ flexDirection: 'row', gap: space.sm, marginTop: space.md }}>
+                {[200, 500, 1000].map((amt) => (
+                  <PillButton
+                    key={amt}
+                    label={money(amt)}
+                    variant="soft"
+                    size="md"
+                    style={{ flex: 1 }}
+                    disabled={tip.isPending}
+                    onPress={() => tip.mutate(amt, { onSuccess: () => toast.success('Thanks!', `${money(amt)} tip sent to ${o.rider?.firstName ?? 'your rider'}.`) })}
+                  />
+                ))}
+              </View>
+            </View>
+          ) : stage === 3 && !cancelled && Number(o.tipAmount ?? 0) > 0 ? (
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: space.xl }}>
+              <Feather name="heart" size={14} color={color.success} />
+              <T variant="caption" tone="muted">
+                You tipped {money(o.tipAmount)} — thank you.
+              </T>
+            </View>
+          ) : null}
+
           {stage === 3 && !cancelled && !o.hasBeenRated ? (
             <PillButton
               label="Rate this order"
               icon="star"
               onPress={() => navigation.navigate('Feedback', { orderId })}
-              style={{ marginTop: space.xl }}
+              style={{ marginTop: space.md }}
             />
           ) : null}
+
+          {/* Something wrong with this order? Open a tracked support ticket
+              pre-tied to it, instead of an email into the void. */}
+          <PillButton
+            label="Report a problem"
+            variant="soft"
+            icon="life-buoy"
+            onPress={() => navigation.navigate('GetHelp', { orderId, category: 'ORDER_ISSUE' })}
+            style={{ marginTop: space.md }}
+          />
 
           {o.canCancel ? (
             <PillButton

@@ -74,6 +74,12 @@ export function EarningsScreen({ navigation }: any) {
   const onlineHours = (stats.data as any)?.onlineHoursToday;
   const weekDeliveries = (stats.data as any)?.weekDeliveries;
 
+  // "Where your money came from" — split fees vs tips across recent jobs. Tips
+  // now include post-delivery ones customers add later, so this surfaces that
+  // income instead of burying it in the total.
+  const tips = history.filter((e) => e?.type === 'TIP').reduce((a, e) => a + Number(e.amount ?? 0), 0);
+  const fees = history.filter((e) => e?.type && e.type !== 'TIP').reduce((a, e) => a + Number(e.amount ?? 0), 0);
+
   return (
     <Screen>
       <Header title="Earnings" />
@@ -111,6 +117,25 @@ export function EarningsScreen({ navigation }: any) {
             <StatTile label="All time" total={s.allTime?.total ?? 0} count={s.allTime?.count ?? 0} />
             <StatTile label="Pending payout" total={s.pendingPayout ?? 0} sub="cash in hand" />
           </View>
+
+          {/* Where the money came from — fees vs tips across recent jobs */}
+          {(fees > 0 || tips > 0) ? (
+            <Card style={{ marginTop: space.md }}>
+              <T variant="caption" weight="bold" tone="muted" style={{ letterSpacing: 1 }}>
+                RECENT BREAKDOWN
+              </T>
+              <View style={{ flexDirection: 'row', marginTop: space.sm }}>
+                <View style={{ flex: 1 }}>
+                  <T variant="heading">{money(fees)}</T>
+                  <T variant="caption" tone="muted">Job fees</T>
+                </View>
+                <View style={{ flex: 1 }}>
+                  <T variant="heading">{money(tips)}</T>
+                  <T variant="caption" tone="muted">Tips</T>
+                </View>
+              </View>
+            </Card>
+          ) : null}
 
           {/* Weekly flat fee — billing transparency for the mover */}
           <WeeklyFeeCard sub={subQ.data} />

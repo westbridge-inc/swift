@@ -10,6 +10,7 @@ import { OrderService } from '../order/order.service';
 import { resolveSelectedOptions, optionsUnitPrice } from '../order/options';
 import { RatingService } from '../rating/rating.service';
 import { NotificationService } from '../notification/notification.service';
+import { SupportService } from '../support/support.service';
 
 // ---------------------------------------------------------------------------
 // Input schemas
@@ -413,6 +414,29 @@ export async function customerRoutes(app: FastifyInstance) {
       return;
     }
     await app.authenticate(request, reply);
+  });
+
+  // ========================================================================
+  // SUPPORT — in-app help / dispute channel (replaces the old mailto).
+  // ========================================================================
+
+  const support = new SupportService(app.prisma, notificationService);
+  const createTicketSchema = z.object({
+    category: z.enum(['ORDER_ISSUE', 'PAYMENT', 'SAFETY', 'ACCOUNT', 'VENDOR', 'MOVER', 'OTHER']),
+    subject: z.string().trim().min(3).max(120),
+    message: z.string().trim().min(5).max(2000),
+    orderId: z.string().min(1).max(64).optional(),
+  });
+
+  app.post('/support', async (request: AuthRequest) => {
+    const body = createTicketSchema.parse(request.body);
+    const ticket = await support.createTicket(request.user.userId, body);
+    return { success: true, data: { id: ticket.id, status: ticket.status, createdAt: ticket.createdAt } };
+  });
+
+  app.get('/support', async (request: AuthRequest) => {
+    const tickets = await support.listForUser(request.user.userId);
+    return { success: true, data: tickets };
   });
 
   // ========================================================================
@@ -1707,6 +1731,15 @@ export async function customerRoutes(app: FastifyInstance) {
 
     const result = await ratingService.rateOrder(userId, id, body);
 
+    return { success: true, data: result };
+  });
+
+  /** POST /orders/:id/tip — add a tip AFTER delivery (Uber-style). 100% to the
+   *  mover; allowed once, within 7 days, only if not already tipped. */
+  app.post('/orders/:id/tip', async (request: AuthRequest) => {
+    const { id } = request.params as { id: string };
+    const { amount } = z.object({ amount: z.number().positive().max(50_000) }).parse(request.body);
+    const result = await orderService.addPostDeliveryTip(id, request.user.userId, amount);
     return { success: true, data: result };
   });
 
