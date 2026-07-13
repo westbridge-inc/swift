@@ -2,11 +2,15 @@
 import React, { useState } from 'react';
 import { TextInput, View, type TextInputProps, type ViewStyle } from 'react-native';
 import { Feather } from '@expo/vector-icons';
-import { color, space } from '@swift/ui';
+import { color, radius, space } from '@swift/ui';
 import { T } from './text';
 
-/** Kit input: label above, rounded-full outline field, leading icon, right slot.
- *  Focus ring = brand; error state = danger border + caption (never color alone). */
+/** Kit input — gluestack-grade field: label above, a DEFINED rounded-rectangle
+ *  (not a faint pill), a visible resting border that reads as a real control,
+ *  a brand focus state, and a danger error state with caption (never colour
+ *  alone). Leading icon + right slot supported. This is the single field used
+ *  across auth, vendor onboarding and the item editor, so every "enter info"
+ *  surface inherits the same weight. */
 export function LabeledInput({
   label,
   icon,
@@ -22,28 +26,29 @@ export function LabeledInput({
   containerStyle?: ViewStyle;
 }) {
   const [focused, setFocused] = useState(false);
-  const borderColor = error ? color.error : focused ? color.brand[500] : color.border.subtle;
+  const borderColor = error ? color.error : focused ? color.brand[500] : color.border.strong;
   return (
     <View style={containerStyle}>
       {label ? (
-        <T variant="label" weight="medium" style={{ marginBottom: space.sm }}>
+        <T variant="label" weight="semibold" style={{ marginBottom: space.sm }}>
           {label}
         </T>
       ) : null}
       <View
         style={{
-          height: 56,
-          borderRadius: 9999,
-          borderWidth: 1,
+          minHeight: 52,
+          borderRadius: radius.md,
+          // 1.5 on focus/error so the state reads without shifting layout much.
+          borderWidth: focused || error ? 1.5 : 1,
           borderColor,
           backgroundColor: color.surface.base,
           flexDirection: 'row',
           alignItems: 'center',
-          paddingHorizontal: space.xl,
+          paddingHorizontal: space.lg,
           gap: space.md,
         }}
       >
-        {icon ? <Feather name={icon} size={18} color={color.text.muted} /> : null}
+        {icon ? <Feather name={icon} size={18} color={focused ? color.brand[500] : color.text.muted} /> : null}
         <TextInput
           {...input}
           onFocus={(e) => {
@@ -56,14 +61,14 @@ export function LabeledInput({
           }}
           placeholderTextColor={color.text.muted}
           style={[
-            { flex: 1, fontFamily: 'Inter', fontSize: 16, color: color.text.primary, paddingVertical: 0 },
+            { flex: 1, fontFamily: 'Inter', fontSize: 16, color: color.text.primary, paddingVertical: 14 },
             input.style,
           ]}
         />
         {right}
       </View>
       {error ? (
-        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: space.sm, paddingLeft: space.lg }}>
+        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: space.sm, paddingLeft: space.xs }}>
           <Feather name="alert-circle" size={13} color={color.error} />
           <T variant="caption" tone="error">
             {error}

@@ -402,8 +402,9 @@ describe('Waivers, reminders, tier recalculation', () => {
     const category = await app.prisma.category.create({
       data: { vendorId: fixture.vendorId, name: 'Bulk', sortOrder: 0 },
     });
+    // Large tier is 1000+ active listings (30k/week).
     await app.prisma.item.createMany({
-      data: Array.from({ length: 120 }, (_, i) => ({
+      data: Array.from({ length: 1000 }, (_, i) => ({
         vendorId: fixture.vendorId,
         categoryId: category.id,
         name: `Bulk item ${i}`,

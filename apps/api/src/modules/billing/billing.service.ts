@@ -14,8 +14,9 @@ import type { PaymentProvider } from '../../providers/payment/payment-provider';
 const MAX_FAILED_ATTEMPTS = 3;
 const RETRY_HOURS = 24;
 const WEEK_MS = 7 * 24 * 60 * 60 * 1000;
-/** Catalogue size at which a vendor moves to the large tier (config can override). */
-const DEFAULT_LARGE_CATALOGUE_THRESHOLD = 100;
+/** Catalogue size (active listings) at which a vendor moves to the large tier —
+ *  1000+ items. Config can override per country. */
+const DEFAULT_LARGE_CATALOGUE_THRESHOLD = 1000;
 
 type SubWithRelations = Subscription & {
   rider: { userId: string } | null;
@@ -477,7 +478,9 @@ export class BillingService {
       const activeListings = await this.prisma.item.count({
         where: { vendorId: sub.vendor.id, isAvailable: true },
       });
-      const targetRate = activeListings > threshold ? tiers.largeVendor : tiers.smallVendor;
+      // "1000+ items" → large: the threshold count itself qualifies.
+      const isLarge = activeListings >= threshold;
+      const targetRate = isLarge ? tiers.largeVendor : tiers.smallVendor;
 
       if (Number(sub.weeklyRate) !== targetRate) {
         await this.prisma.subscription.update({
@@ -491,7 +494,7 @@ export class BillingService {
             amount: targetRate,
             currencyCode: sub.currencyCode,
             idempotencyKey: `tier:${sub.id}:${new Date().toISOString().slice(0, 10)}:${targetRate}`,
-            note: `${activeListings} active listings -> ${activeListings > threshold ? 'large' : 'small'} tier`,
+            note: `${activeListings} active listings -> ${isLarge ? 'large' : 'small'} tier`,
           },
         });
         changed += 1;
