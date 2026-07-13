@@ -77,6 +77,8 @@ model User {
   payoutSchedule   PayoutSchedule?
   cart             Cart?
   chatParticipants ChatRoomParticipant[]
+  supportTickets   SupportTicket[]
+  resolvedTickets  SupportTicket[] @relation("supportResolver")
 
   @@map("users")
 }
@@ -760,6 +762,7 @@ model Order {
   status      OrderStatus @default(PENDING)
   statusHistory OrderStatusLog[]
   items       OrderItem[]
+  supportTickets SupportTicket[]
 
   pickupAddress        String?
   pickupLat            Float?
@@ -1294,6 +1297,50 @@ model Earning {
   @@index([riderId])
   @@index([driverId])
   @@map("earnings")
+}
+
+/// In-app support / dispute channel (replaces a mailto). A customer, mover, or
+/// vendor opens a ticket — optionally tied to an order — every open ticket
+/// pings the admins, and an admin resolves it. The customer sees their tickets
+/// and their status. Chat/reply threading is a later step; this is the
+/// report → acknowledge → resolve loop launch actually needs.
+model SupportTicket {
+  id         String          @id @default(cuid())
+  userId     String
+  user       User            @relation(fields: [userId], references: [id])
+  orderId    String?
+  order      Order?          @relation(fields: [orderId], references: [id])
+  category   SupportCategory
+  subject    String
+  message    String
+  status     SupportStatus   @default(OPEN)
+  adminNote  String?
+  resolvedById String?
+  resolvedBy   User?         @relation("supportResolver", fields: [resolvedById], references: [id])
+  resolvedAt DateTime?
+  createdAt  DateTime        @default(now())
+  updatedAt  DateTime        @updatedAt
+
+  @@index([userId])
+  @@index([status])
+  @@index([orderId])
+  @@map("support_tickets")
+}
+
+enum SupportCategory {
+  ORDER_ISSUE
+  PAYMENT
+  SAFETY
+  ACCOUNT
+  VENDOR
+  MOVER
+  OTHER
+}
+
+enum SupportStatus {
+  OPEN
+  IN_PROGRESS
+  RESOLVED
 }
 
 enum EarningType {

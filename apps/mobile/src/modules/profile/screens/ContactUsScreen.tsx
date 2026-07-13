@@ -21,6 +21,12 @@ export function ContactUsScreen() {
         </T>
         <View style={{ marginTop: space.xl }}>
           <SettingsRow
+            icon="life-buoy"
+            label="Report a problem"
+            sub="Open a support ticket — we track it to resolution"
+            onPress={() => navigation.navigate('GetHelp')}
+          />
+          <SettingsRow
             icon="message-circle"
             label="Message about an active order"
             sub="Fastest — chat with your rider directly"

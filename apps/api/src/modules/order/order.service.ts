@@ -891,6 +891,58 @@ export class OrderService {
     }
   }
 
+  /** Post-delivery tip. Uber-style: the customer can tip AFTER the job, not
+   *  only at checkout. Rules (migration-free + abuse-safe): the order must be
+   *  the caller's, delivered/completed within the last 7 days, have a mover,
+   *  and carry NO tip yet (tip at checkout OR after, once). The tip becomes an
+   *  AVAILABLE TIP earning for the mover — 100% theirs, like every fee. */
+  async addPostDeliveryTip(orderId: string, userId: string, amount: number) {
+    if (amount <= 0 || amount > 50_000) throw new AppError(400, 'INVALID_TIP', 'Enter a tip between 1 and 50,000.');
+    const order = await this.prisma.order.findFirst({
+      where: { id: orderId, customerId: userId },
+      select: { id: true, status: true, deliveredAt: true, tipAmount: true, riderId: true, driverId: true, orderType: true },
+    });
+    if (!order) throw new AppError(404, 'NOT_FOUND', 'Order not found');
+    if (!['DELIVERED', 'COMPLETED'].includes(order.status)) {
+      throw new AppError(400, 'NOT_TIPPABLE', 'You can only tip a completed order.');
+    }
+    if (!order.riderId && !order.driverId) {
+      throw new AppError(400, 'NO_MOVER', 'This order had no rider or driver to tip.');
+    }
+    if (Number(order.tipAmount) > 0) {
+      throw new AppError(409, 'ALREADY_TIPPED', 'A tip was already added to this order.');
+    }
+    const deliveredAt = order.deliveredAt?.getTime() ?? 0;
+    if (deliveredAt && Date.now() - deliveredAt > 7 * 24 * 60 * 60 * 1000) {
+      throw new AppError(400, 'TIP_WINDOW_CLOSED', 'Tips can be added for up to 7 days after delivery.');
+    }
+
+    // Serialize on the order row so two taps can't both create a tip.
+    await this.prisma.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT id FROM "orders" WHERE id = ${orderId} FOR UPDATE`;
+      const fresh = await tx.order.findUniqueOrThrow({ where: { id: orderId }, select: { tipAmount: true } });
+      if (Number(fresh.tipAmount) > 0) throw new AppError(409, 'ALREADY_TIPPED', 'A tip was already added to this order.');
+      await tx.order.update({ where: { id: orderId }, data: { tipAmount: amount } });
+      await tx.earning.create({
+        data: {
+          ...(order.riderId ? { riderId: order.riderId } : { driverId: order.driverId }),
+          orderId,
+          type: 'TIP',
+          amount,
+          status: 'AVAILABLE',
+        },
+      });
+    });
+
+    const moverEntity = order.riderId
+      ? await this.prisma.rider.findUnique({ where: { id: order.riderId }, select: { userId: true } })
+      : await this.prisma.driver.findUnique({ where: { id: order.driverId! }, select: { userId: true } });
+    if (moverEntity) await this.notifications.earningAvailable(moverEntity.userId, amount, 'TIP');
+
+    log().info({ orderId, userId, amount }, 'order: post-delivery tip added');
+    return { orderId, tipAmount: amount };
+  }
+
   async reorder(userId: string, orderId: string) {
     const original = await this.prisma.order.findFirst({
       where: { id: orderId, customerId: userId },

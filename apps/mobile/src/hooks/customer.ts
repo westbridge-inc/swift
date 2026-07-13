@@ -209,3 +209,29 @@ export function useReorder() {
     onSuccess: () => invalidateCart(qc),
   });
 }
+
+// ── Support / dispute ────────────────────────────────────────────────────
+export function useMySupportTickets() {
+  return useQuery({ queryKey: ['support', 'tickets'], queryFn: () => unwrap<any[]>(customerApi.supportTickets()) });
+}
+
+export function useCreateTicket() {
+  const qc = useQueryClient();
+  return useMutation({
+    // Own inline success/reset — opt out of the global error toast so the
+    // form can show its own state.
+    mutationFn: (data: Parameters<typeof customerApi.createTicket>[0]) => unwrap(customerApi.createTicket(data)),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['support', 'tickets'] }),
+  });
+}
+
+export function useTipOrder(orderId: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (amount: number) => unwrap(customerApi.tipOrder(orderId, amount)),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: customerKeys.order(orderId) });
+      qc.invalidateQueries({ queryKey: customerKeys.orders });
+    },
+  });
+}
