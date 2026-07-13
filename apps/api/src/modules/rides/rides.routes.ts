@@ -4,7 +4,9 @@ import { z } from 'zod';
 import { randomInt } from 'node:crypto';
 import { FareService } from './fare.service';
 import { OrderService } from '../order/order.service';
+import { NotificationService, notifyAdmins } from '../notification/notification.service';
 import { makeDispatchService } from '../dispatch/dispatch.service';
+import { log } from '../../utils/logger';
 import { orderingRestriction } from '../cash/cash-rules.service';
 import { generateOrderNumber } from '../../utils/markup';
 import { AppError, NotFoundError } from '../../utils/errors';
@@ -235,5 +237,53 @@ export async function ridesRoutes(app: FastifyInstance) {
     const body = cancelSchema.parse(request.body ?? {});
     const result = await orderService.cancelOrder(request.params.id, request.user.userId, body.reason);
     return { success: true, data: result };
+  });
+
+  /** POST /:id/sos — passenger or driver raises an emergency on an active ride.
+   *  The app also dials the local emergency number; this records the incident
+   *  with the live location, pings every admin, and leaves a loud trace — so
+   *  Swift has an evidence trail and ops can respond, which ride-hailing safety
+   *  requires (pre-launch audit: no SOS was a rides blocker). */
+  app.post<{ Params: { id: string } }>('/:id/sos', auth, async (request) => {
+    const { id } = request.params;
+    const body = z.object({
+      lat: z.number().min(-90).max(90).optional(),
+      lng: z.number().min(-180).max(180).optional(),
+      note: z.string().max(500).optional(),
+    }).parse(request.body ?? {});
+
+    // Only a participant in THIS ride may raise its SOS.
+    const ride = await app.prisma.order.findFirst({
+      where: {
+        id,
+        orderType: 'TAXI',
+        OR: [{ customerId: request.user.userId }, { driver: { userId: request.user.userId } }],
+      },
+      select: {
+        id: true, orderNumber: true, status: true, customerId: true,
+        pickupAddress: true, deliveryAddress: true,
+        driver: { select: { id: true, user: { select: { firstName: true, phone: true } } } },
+        customer: { select: { firstName: true, phone: true } },
+      },
+    });
+    if (!ride) throw new NotFoundError('Ride', id);
+
+    const raisedBy = ride.customerId === request.user.userId ? 'passenger' : 'driver';
+    const notifications = new NotificationService(app.prisma, app.io);
+
+    // Loud, correlated trace for ops + evidence trail.
+    log().error({ orderId: ride.id, orderNumber: ride.orderNumber, raisedBy, lat: body.lat, lng: body.lng, note: body.note }, 'SOS raised on active ride');
+
+    // Persist an audit trail row (immutable order log) and alert every admin.
+    await app.prisma.orderStatusLog.create({
+      data: { orderId: ride.id, status: ride.status, changedBy: request.user.userId, note: `SOS raised by ${raisedBy}${body.note ? `: ${body.note}` : ''} ${body.lat != null ? `@${body.lat},${body.lng}` : ''}`.trim() },
+    });
+    await notifyAdmins(app.prisma, notifications, {
+      title: '🚨 SOS on an active ride',
+      body: `${raisedBy} raised an emergency on ride ${ride.orderNumber}. Passenger ${ride.customer?.phone ?? '?'}, driver ${ride.driver?.user?.phone ?? '?'}. Respond now.`,
+      data: { kind: 'sos', orderId: ride.id, raisedBy, lat: body.lat, lng: body.lng },
+    });
+
+    return { success: true, data: { acknowledged: true, orderId: ride.id } };
   });
 }

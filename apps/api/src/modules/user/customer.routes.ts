@@ -163,6 +163,10 @@ const referralRedeemSchema = z.object({
 
 const MAX_DELIVERY_RADIUS_KM = 25;
 const FREE_CANCEL_WINDOW_MIN = 5;
+// The flat late-cancellation fee (must match order.service.cancelOrder). The
+// order detail exposes what a cancel WOULD cost now so the app can preview it
+// before the customer confirms (pre-launch audit: fee wasn't shown).
+const LATE_CANCEL_FEE = 500;
 const HOME_CACHE_TTL = 60; // 1 min
 const MAX_ADDRESSES = 10;
 const MAX_TIP_GYD = 50_000;
@@ -1647,6 +1651,9 @@ export async function customerRoutes(app: FastifyInstance) {
         hasBeenRated,
         canCancel,
         freeCancellationWindow: freeCancellation,
+        // What a cancel would cost right now (0 inside the free window) — so
+        // the app shows the fee BEFORE the customer confirms.
+        cancellationFee: canCancel && !freeCancellation ? LATE_CANCEL_FEE : 0,
         freeCancellationExpiresAt: canCancel && order.status === 'PENDING'
           ? new Date(order.placedAt.getTime() + FREE_CANCEL_WINDOW_MIN * 60000).toISOString()
           : null,
