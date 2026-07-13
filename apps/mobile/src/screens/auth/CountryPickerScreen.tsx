@@ -39,7 +39,7 @@ export function CountryPickerScreen({ navigation }: any) {
         </View>
         <Heading size="xl" className="mt-xl">Where are you?</Heading>
         <Text className="mt-xs text-text-secondary">
-          Choose your country to get started. Live in Guyana, rolling out across the Caribbean.
+          Choose your country to get started — Swift is live across the Caribbean.
         </Text>
         <View className="mt-lg">
           <StepProgress step={0} total={4} />
