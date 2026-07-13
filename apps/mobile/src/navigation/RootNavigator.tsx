@@ -59,10 +59,13 @@ export function RootNavigator() {
         {!hasOnboarded ? (
           // First run only: kit onboarding slides, then never again.
           <Stack.Screen name="Onboarding" component={OnboardingScreen} />
+        ) : !intent ? (
+          // Role FIRST: "How will you use Swift?" decides the whole path — a
+          // customer then just picks a country and browses (sign-in waits for
+          // checkout); a mover/vendor picks a country then does full sign-up.
+          <Stack.Screen name="RolePicker" component={RolePickerScreen} />
         ) : !countryCode ? (
           <Stack.Screen name="Country" component={CountryPickerScreen} />
-        ) : !intent ? (
-          <Stack.Screen name="RolePicker" component={RolePickerScreen} />
         ) : needsAuth ? (
           <Stack.Screen name="Auth" component={AuthStack} />
         ) : needsSelfie ? (
