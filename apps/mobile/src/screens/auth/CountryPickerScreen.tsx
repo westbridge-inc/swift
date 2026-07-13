@@ -27,7 +27,14 @@ export function CountryPickerScreen({ navigation }: any) {
       currencyCode: item.currencyCode,
       currencySymbol: item.currencySymbol,
     });
-    navigation?.navigate?.('PhoneEntry');
+    // This screen appears two ways. As the root "Country" gate (first run) it's
+    // the only screen in its navigator — nothing to pop, and RootNavigator
+    // advances by conditional render (earner → AuthStack, customer → browsing).
+    // Pushed on top of PhoneEntry via "Change country", it must pop back. The
+    // old unconditional navigate('PhoneEntry') threw "not handled by any
+    // navigator" for customers (whose stack has no PhoneEntry); canGoBack tells
+    // the two contexts apart.
+    if (navigation?.canGoBack?.()) navigation.goBack();
   };
 
   return (
