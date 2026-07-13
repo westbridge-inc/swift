@@ -30,7 +30,7 @@ export function ContactUsScreen() {
             icon="message-circle"
             label="Message about an active order"
             sub="Fastest — chat with your rider directly"
-            onPress={() => navigation.navigate('Tabs', { screen: 'ChatTab' })}
+            onPress={() => navigation.navigate('ChatList')}
           />
           <SettingsRow
             icon="mail"

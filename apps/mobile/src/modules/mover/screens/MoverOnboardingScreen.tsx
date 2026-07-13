@@ -115,10 +115,13 @@ function VehicleSetup({ vt, setVt, onDone }: { vt: VehicleKind; setVt: (v: Vehic
 }
 
 export function MoverOnboardingScreen({ status }: { status: any }) {
-  const { logout } = useAuthStore();
+  const { logout, moverPreset } = useAuthStore();
   const [switcherOpen, setSwitcherOpen] = useState(false);
   const savedVehicle: VehicleKind | null = status?.vehicleType ?? null;
-  const [vt, setVt] = useState<VehicleKind>(savedVehicle ?? 'MOTORCYCLE');
+  // Default the vehicle from what they picked on the entry screen: a taxi
+  // driver starts on Car, a rider on Motorcycle. A saved vehicle always wins.
+  const presetVehicle: VehicleKind = moverPreset === 'taxi' ? 'CAR' : 'MOTORCYCLE';
+  const [vt, setVt] = useState<VehicleKind>(savedVehicle ?? presetVehicle);
   const [vehicleSaved, setVehicleSaved] = useState(!!savedVehicle);
   const { data: preview } = useVerificationStatus<any>('MOVER', vt);
   const checklistStatus = preview ?? status;

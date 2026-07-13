@@ -16,6 +16,10 @@ interface AuthState {
   // One-app routing: what the user picked on the entry "How will you use Swift?"
   // screen. 'customer' browses as a guest; 'mover'/'vendor' must sign in + onboard.
   intent: 'customer' | 'mover' | 'vendor' | null;
+  // When intent is 'mover', which kind they picked on the entry screen —
+  // 'delivery' (rider) pre-selects a bike/moped in onboarding, 'taxi' a car.
+  // Routing is identical (both are the mover app); this is only the default.
+  moverPreset: 'delivery' | 'taxi' | null;
   countryCode: string | null;
   dialCode: string | null;
   currencyCode: string | null;
@@ -25,6 +29,7 @@ interface AuthState {
   promptLogin: () => void;
   cancelAuth: () => void;
   setIntent: (intent: 'customer' | 'mover' | 'vendor' | null) => void;
+  setMoverPreset: (preset: 'delivery' | 'taxi' | null) => void;
   setCountry: (c: { code: string; dialCode?: string | null; currencyCode?: string | null; currencySymbol?: string | null }) => void;
   logout: () => void;
   setLoading: (loading: boolean) => void;
@@ -44,6 +49,7 @@ export const useAuthStore = create<AuthState>()(
       isLoading: true,
       wantsAuth: false,
       intent: null,
+      moverPreset: null,
       countryCode: null,
       dialCode: null,
       currencyCode: null,
@@ -72,6 +78,7 @@ export const useAuthStore = create<AuthState>()(
       promptLogin: () => set({ wantsAuth: true }),
       cancelAuth: () => set({ wantsAuth: false }),
       setIntent: (intent) => set({ intent }),
+      setMoverPreset: (moverPreset) => set({ moverPreset }),
       setCountry: (c) =>
         set({
           countryCode: c.code,
@@ -110,6 +117,7 @@ export const useAuthStore = create<AuthState>()(
         refreshToken: state.refreshToken,
         isAuthenticated: state.isAuthenticated,
         intent: state.intent,
+        moverPreset: state.moverPreset,
         countryCode: state.countryCode,
         dialCode: state.dialCode,
         currencyCode: state.currencyCode,
