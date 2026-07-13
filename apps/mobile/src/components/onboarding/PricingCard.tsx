@@ -29,7 +29,7 @@ export function PricingCard({ kind }: { kind: 'mover' | 'vendor' }) {
           <Text className="mt-0.5 text-xs text-text-secondary">
             {kind === 'mover'
               ? 'Keep 100% of every fare, fee and tip — Swift never takes a commission.'
-              : `Keep 100% of every sale — no commission, ever.${p.weekly.largeVendor != null ? ` Large catalogues (100+ items) ${fmt(p.weekly.largeVendor)}/week.` : ''}`}
+              : `Keep 100% of every sale — no commission, ever.${p.weekly.largeVendor != null ? ` Large catalogues (1000+ items) ${fmt(p.weekly.largeVendor)}/week.` : ''}`}
           </Text>
         </View>
       </View>
