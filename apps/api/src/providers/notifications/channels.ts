@@ -9,6 +9,10 @@ export interface SmsProvider {
   sendSms(to: string, body: string): Promise<{ ref: string }>;
 }
 
+/** Hard cap on an outbound SMS call — a hung provider must never hang the
+ *  login request that is awaiting it. */
+const SMS_TIMEOUT_MS = 8000;
+
 export interface PushProvider {
   /** `invalidTokens` = tokens the provider says are dead (app uninstalled) —
    *  the caller deactivates them so we stop pushing at ghosts. */
@@ -94,11 +98,22 @@ class TwilioSmsProvider implements SmsProvider {
 
   async sendSms(to: string, body: string): Promise<{ ref: string }> {
     const auth = Buffer.from(`${this.sid}:${this.token}`).toString('base64');
-    const res = await fetch(`https://api.twilio.com/2010-04-01/Accounts/${this.sid}/Messages.json`, {
-      method: 'POST',
-      headers: { Authorization: `Basic ${auth}`, 'Content-Type': 'application/x-www-form-urlencoded' },
-      body: new URLSearchParams({ To: to, From: this.from, Body: body }).toString(),
-    });
+    // Bound the call: a hung Twilio must not hang the login request behind it.
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), SMS_TIMEOUT_MS);
+    let res: Response;
+    try {
+      res = await fetch(`https://api.twilio.com/2010-04-01/Accounts/${this.sid}/Messages.json`, {
+        method: 'POST',
+        headers: { Authorization: `Basic ${auth}`, 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams({ To: to, From: this.from, Body: body }).toString(),
+        signal: controller.signal,
+      });
+    } catch (err) {
+      throw new Error(`Twilio SMS request failed: ${(err as Error).message}`);
+    } finally {
+      clearTimeout(timer);
+    }
     if (!res.ok) {
       const detail = await res.text().catch(() => '');
       throw new Error(`Twilio SMS failed (${res.status}): ${detail.slice(0, 200)}`);

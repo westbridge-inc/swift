@@ -16,6 +16,10 @@ services:
   redis:
     image: redis:7-alpine
     container_name: swift-redis
+    # Append-only persistence: dispatch offer state + delayed BullMQ jobs live
+    # here, so a restart without AOF silently strands in-flight orders. fsync
+    # every second bounds worst-case loss to ~1s of writes.
+    command: ['redis-server', '--appendonly', 'yes', '--appendfsync', 'everysec']
     ports:
       - '6382:6379'
     volumes:

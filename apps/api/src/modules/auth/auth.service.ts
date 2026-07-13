@@ -46,10 +46,12 @@ export function sanitizeUser<T extends Record<string, unknown>>(
 
 export class AuthService {
   private countryConfig: CountryConfigService;
-  private channels = getChannels();
+  private channels: ReturnType<typeof getChannels>;
 
-  constructor(private app: FastifyInstance) {
+  // channels is injectable so tests can drive the SMS-failure path.
+  constructor(private app: FastifyInstance, channels?: ReturnType<typeof getChannels>) {
     this.countryConfig = new CountryConfigService(app.prisma);
+    this.channels = channels ?? getChannels();
   }
 
   async sendOtp(phone: string) {
@@ -78,10 +80,18 @@ export class AuthService {
       this.app.log.info(`[DEV] OTP for ${phone}: ${otp}`);
     }
 
-    // Delivery rides the swappable SMS channel (Twilio-class adapter later)
-    await this.channels.sms
-      .sendSms(phone, `Your Swift verification code is: ${otp}`)
-      .catch(() => {});
+    // Delivery rides the swappable SMS channel (Twilio-class adapter later).
+    // Do NOT claim success when the send fails — the user would wait forever
+    // for a code that never left the building. send-otp runs before any
+    // account exists, so a real error can't leak whether a number is
+    // registered; failing loudly is honest and lets the user retry. The dev
+    // adapter never throws, so local flows are unaffected.
+    try {
+      await this.channels.sms.sendSms(phone, `Your Swift verification code is: ${otp}`);
+    } catch (err) {
+      this.app.log.error({ err, phone: phone.slice(0, 5) + '***' }, '[otp] SMS send failed');
+      throw new AppError(502, 'SMS_SEND_FAILED', "We couldn't send your code right now. Please try again in a moment.");
+    }
 
     return { message: 'OTP sent successfully', expiresIn: 300 };
   }

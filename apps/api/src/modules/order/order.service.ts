@@ -8,6 +8,7 @@ import { CountryConfigService } from '../country/country-config.service';
 import { BookingService } from '../booking/booking.service';
 import { orderingRestriction, CashRulesService } from '../cash/cash-rules.service';
 import { resolveSelectedOptions, optionsUnitPrice, type ResolvedOption } from './options';
+import { log } from '../../utils/logger';
 import { FloatService } from '../dispatch/float.service';
 import { AppError } from '../../utils/errors';
 import { randomInt } from 'node:crypto';
@@ -499,6 +500,10 @@ export class OrderService {
       }
     }
 
+    for (const order of orders) {
+      log().info({ orderId: order.id, orderNumber: order.orderNumber, vendorId: order.vendorId, orderType: order.orderType, fulfillment: order.fulfillment, total: Number(order.totalAmount), customerId: input.userId }, 'order: placed');
+    }
+
     const summaries = orders.map((order) => ({
       id: order.id,
       orderNumber: order.orderNumber,
@@ -731,6 +736,7 @@ export class OrderService {
       data: { orderId, status: target, changedBy, note },
     });
 
+    log().info({ orderId, orderNumber: order.orderNumber, status, changedBy, vendorId: order.vendorId }, 'order: status changed');
     const statusEvent = { orderId, status, timestamp: new Date().toISOString() };
     this.io.to(`order:${orderId}`).emit('order:status_changed', statusEvent);
     // The vendor board listens on its own room so it sees every transition

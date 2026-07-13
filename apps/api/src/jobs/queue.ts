@@ -270,13 +270,30 @@ export function createWorkers(ctx: JobContext) {
   const dispatchWorker = new Worker(
     QUEUE_NAMES.DISPATCH,
     async (job: Job) => {
-      const { DispatchService, sweepStaleMovers } = await import('../modules/dispatch/dispatch.service');
+      const { DispatchService, sweepStaleMovers, reconcileStuckDispatch } = await import('../modules/dispatch/dispatch.service');
       const { getMapsProvider } = await import('../providers/maps/maps-provider');
 
       if (job.name === 'stale-movers') {
         const swept = await sweepStaleMovers(ctx.prisma);
         if (swept.riders + swept.drivers > 0) {
           ctx.log.warn(swept, 'Stale-GPS movers forced offline');
+        }
+        return;
+      }
+
+      if (job.name === 'reconcile-dispatch') {
+        // Recover orders stranded by lost Redis state (offer key + timeout job
+        // both live only in Redis). Re-drives them through the normal path.
+        const reconcileQueue = new Queue(QUEUE_NAMES.DISPATCH, { connection });
+        try {
+          const { recovered } = await reconcileStuckDispatch(ctx.prisma, ctx.redis, async (orderId) => {
+            await reconcileQueue.add('dispatch-order', { orderId }, { removeOnComplete: 100, removeOnFail: 50 });
+          });
+          if (recovered.length > 0) {
+            ctx.log.error({ recovered, count: recovered.length }, 'Dispatch reconciliation re-drove stranded orders — investigate Redis health');
+          }
+        } finally {
+          await reconcileQueue.close();
         }
         return;
       }
@@ -316,6 +333,23 @@ export function createWorkers(ctx: JobContext) {
     },
     { connection, concurrency: 5 },
   );
+
+  // A worker that throws otherwise drops the job into the failed set with NO
+  // log and NO alert — money jobs (billing, settlements) and dispatch could
+  // fail invisibly. Surface every terminal failure and worker error loudly so
+  // observability (Sentry, see server bootstrap) and ops actually see them.
+  const allWorkers: Record<string, Worker> = {
+    order: orderWorker, riderAssignment: riderAssignmentWorker, subscription: subscriptionWorker,
+    settlement: settlementWorker, verification: verificationWorker, dispatch: dispatchWorker, notification: notificationWorker,
+  };
+  for (const [queue, worker] of Object.entries(allWorkers)) {
+    worker.on('failed', (job, err) => {
+      ctx.log.error({ queue, jobName: job?.name, jobId: job?.id, attempts: job?.attemptsMade, data: job?.data, err }, 'BullMQ job failed');
+    });
+    worker.on('error', (err) => {
+      ctx.log.error({ queue, err }, 'BullMQ worker error');
+    });
+  }
 
   return {
     orderWorker,
@@ -394,6 +428,15 @@ export async function scheduleRecurringJobs(queues: ReturnType<typeof createQueu
   // minutes — dead phones must not keep swallowing dispatch offers.
   await queues.dispatchQueue.add('stale-movers', {}, {
     repeat: { pattern: '*/5 * * * *' },
+    removeOnComplete: 20,
+    removeOnFail: 20,
+  });
+
+  // Dispatch reconciliation: every 2 minutes, recover any order stranded by
+  // lost Redis state (the offer key + timeout job vanish on a Redis restart).
+  // This is the self-heal for the platform's most failure-sensitive path.
+  await queues.dispatchQueue.add('reconcile-dispatch', {}, {
+    repeat: { pattern: '*/2 * * * *' },
     removeOnComplete: 20,
     removeOnFail: 20,
   });
