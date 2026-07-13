@@ -324,6 +324,32 @@ export class OrderService {
       // double-submit deterministic (the loser waits, then rolls back on the
       // now-deleted cart) instead of leaning on the delete's P2025 by accident.
       await tx.$queryRaw`SELECT id FROM "carts" WHERE id = ${cart.id} FOR UPDATE`;
+
+      // Serialize promo redemption (pre-launch audit H11). validatePromoCode
+      // ran BEFORE this transaction, so two concurrent checkouts of the SAME
+      // code — different carts, or a global-cap code across users — could both
+      // read the caps as unmet and both redeem. Lock the promo row: the loser
+      // blocks here until the winner commits (incrementing currentUses and
+      // creating its order), then re-reads the now-updated counts and is
+      // correctly rejected. The pre-transaction check stays for the friendly
+      // discount preview; THIS is the enforcement point.
+      if (promoCodeId) {
+        await tx.$queryRaw`SELECT id FROM "promo_codes" WHERE id = ${promoCodeId} FOR UPDATE`;
+        const fresh = await tx.promoCode.findUniqueOrThrow({
+          where: { id: promoCodeId },
+          select: { currentUses: true, maxUses: true, maxUsesPerUser: true },
+        });
+        if (fresh.maxUses && fresh.currentUses >= fresh.maxUses) {
+          throw new AppError(400, 'USED_PROMO', 'This promo code has reached its usage limit');
+        }
+        const userUses = await tx.order.count({
+          where: { customerId: input.userId, promoCodeId, status: { notIn: ['CANCELLED', 'REFUNDED'] } },
+        });
+        if (userUses >= fresh.maxUsesPerUser) {
+          throw new AppError(400, 'USED_PROMO', 'You have already used this promo code');
+        }
+      }
+
       const created = [];
       let sequence = todayCount;
 

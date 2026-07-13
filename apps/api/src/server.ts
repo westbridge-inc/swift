@@ -227,8 +227,19 @@ async function buildApp() {
   return app;
 }
 
+/** Refuse to boot in a dangerous config. The OTP master-code bypass is
+ *  triple-guarded in code, but its last line of defence is NODE_ENV — if prod
+ *  ever runs without NODE_ENV=production and the flag leaks in, `000000`
+ *  becomes universal account takeover. Fail loud at boot instead. */
+function assertSafeBootConfig() {
+  if (process.env['NODE_ENV'] === 'production' && process.env['DEV_OTP_BYPASS'] === '1') {
+    throw new Error('FATAL: DEV_OTP_BYPASS=1 in production — this disables OTP verification. Refusing to start.');
+  }
+}
+
 async function start() {
   try {
+    assertSafeBootConfig();
     const app = await buildApp();
     await app.listen({ port: PORT, host: HOST });
     console.warn(`Swift API running on http://${HOST}:${PORT}`);
