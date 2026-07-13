@@ -52,26 +52,32 @@ export async function searchRoutes(app: FastifyInstance) {
     }
 
     if (searchService) {
-      const [vendorResults, itemResults] = await Promise.all([
-        searchService.searchVendors(q, { type, cuisine, openOnly: true, limit: parsedLimit }),
-        searchService.searchItems(q, { limit: parsedLimit }),
-      ]);
+      try {
+        const [vendorResults, itemResults] = await Promise.all([
+          searchService.searchVendors(q, { type, cuisine, openOnly: true, limit: parsedLimit }),
+          searchService.searchItems(q, { limit: parsedLimit }),
+        ]);
 
-      return {
-        success: true,
-        data: {
-          vendors: vendorResults.hits,
-          items: itemResults.hits,
-          meta: {
-            vendorCount: vendorResults.estimatedTotalHits,
-            itemCount: itemResults.estimatedTotalHits,
-            processingTimeMs: vendorResults.processingTimeMs + itemResults.processingTimeMs,
+        return {
+          success: true,
+          data: {
+            vendors: vendorResults.hits,
+            items: itemResults.hits,
+            meta: {
+              vendorCount: vendorResults.estimatedTotalHits,
+              itemCount: itemResults.estimatedTotalHits,
+              processingTimeMs: vendorResults.processingTimeMs + itemResults.processingTimeMs,
+            },
           },
-        },
-      };
+        };
+      } catch (err) {
+        // Meili went down AFTER boot (timeout or error) — don't 500; fall
+        // through to the DB query below (pre-launch audit M3).
+        app.log.warn({ err }, 'Meilisearch query failed — falling back to DB search');
+      }
     }
 
-    // DB fallback
+    // DB fallback (boot-time Meili absence OR a runtime Meili failure)
     const userLat = lat ?? null;
     const userLng = lng ?? null;
 

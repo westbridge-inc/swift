@@ -15,6 +15,7 @@ import {
   Inter_700Bold,
 } from '@expo-google-fonts/inter';
 import { GluestackUIProvider, ToastHost } from './components/ui';
+import { OfflineBanner } from './components/OfflineBanner';
 import { RootNavigator } from './navigation/RootNavigator';
 import { queryClient } from './lib/queryClient';
 import { initSecureStorage } from './lib/storage';
@@ -85,6 +86,7 @@ export default function App() {
             <LocationBootstrap />
             <RootNavigator />
             <ToastHost />
+            <OfflineBanner />
           </QueryClientProvider>
         </GluestackUIProvider>
       </SafeAreaProvider>

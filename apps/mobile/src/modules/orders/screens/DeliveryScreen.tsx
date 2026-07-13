@@ -476,8 +476,10 @@ export function DeliveryScreen() {
         </T>
         <T variant="label" tone="muted" center style={{ marginTop: space.sm }}>
           {o.freeCancellationWindow
-            ? 'You’re inside the free-cancellation window.'
-            : 'The store may have already started preparing it.'}
+            ? 'You’re inside the free-cancellation window — no charge.'
+            : Number(o.cancellationFee) > 0
+              ? `The store may have started preparing it. Cancelling now costs ${money(o.cancellationFee)}.`
+              : 'The store may have already started preparing it.'}
         </T>
         <View style={{ alignSelf: 'stretch', gap: space.md, marginTop: space.xl }}>
           <PillButton

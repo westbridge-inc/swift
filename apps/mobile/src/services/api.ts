@@ -193,6 +193,8 @@ export const rideApi = {
   active: () => api.get('/rides/active'),
   get: (id: string) => api.get(`/rides/${id}`),
   cancel: (id: string, reason?: string) => api.post(`/rides/${id}/cancel`, { reason }),
+  sos: (id: string, coords?: { lat: number; lng: number }) =>
+    api.post(`/rides/${id}/sos`, coords ? { lat: coords.lat, lng: coords.lng } : {}),
 };
 
 // Places (mounted at /api/v1/places) — "Where to?" search behind the server-side

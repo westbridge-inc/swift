@@ -18,6 +18,7 @@ import courierRoutes from './modules/courier/courier.routes';
 import { servicesRoutes } from './modules/services/services.routes';
 import { partnerRoutes } from './modules/partner/partner.routes';
 import { aiRoutes } from './modules/ai/ai.routes';
+import { setAppLogger } from './utils/logger';
 import { prismaPlugin } from './plugins/prisma';
 import { authPlugin } from './plugins/auth';
 import { socketPlugin } from './plugins/socket';
@@ -61,7 +62,14 @@ async function buildApp() {
     },
     requestIdHeader: 'x-request-id',
     genReqId: () => `req_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`,
+    // A slow dependency (SMS, S3, search, an upstream provider) must not pin a
+    // handler open forever and exhaust the connection pool. 30s is far above
+    // any healthy request; anything longer is a stuck dependency, not work.
+    requestTimeout: Number(process.env['REQUEST_TIMEOUT_MS'] ?? 30_000),
   });
+
+  // Give deep services (order, dispatch) the real logger for orderId tracing.
+  setAppLogger(app.log);
 
   // Global error handler
   registerErrorHandler(app);
@@ -196,6 +204,16 @@ async function buildApp() {
     app.log.warn({ err }, 'Background jobs failed to initialize — running without queues');
   }
 
+  // Last-resort visibility: an unhandled rejection or uncaught exception must
+  // leave a loud, structured trace instead of a silent death (pre-launch audit
+  // H5). Kept process-alive on rejection (Node default would too) but logged.
+  process.on('unhandledRejection', (reason) => {
+    app.log.error({ err: reason }, 'UNHANDLED PROMISE REJECTION');
+  });
+  process.on('uncaughtException', (err) => {
+    app.log.fatal({ err }, 'UNCAUGHT EXCEPTION');
+  });
+
   // Graceful shutdown
   const signals = ['SIGINT', 'SIGTERM'];
   for (const signal of signals) {
@@ -209,8 +227,19 @@ async function buildApp() {
   return app;
 }
 
+/** Refuse to boot in a dangerous config. The OTP master-code bypass is
+ *  triple-guarded in code, but its last line of defence is NODE_ENV — if prod
+ *  ever runs without NODE_ENV=production and the flag leaks in, `000000`
+ *  becomes universal account takeover. Fail loud at boot instead. */
+function assertSafeBootConfig() {
+  if (process.env['NODE_ENV'] === 'production' && process.env['DEV_OTP_BYPASS'] === '1') {
+    throw new Error('FATAL: DEV_OTP_BYPASS=1 in production — this disables OTP verification. Refusing to start.');
+  }
+}
+
 async function start() {
   try {
+    assertSafeBootConfig();
     const app = await buildApp();
     await app.listen({ port: PORT, host: HOST });
     console.warn(`Swift API running on http://${HOST}:${PORT}`);

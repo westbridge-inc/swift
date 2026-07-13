@@ -8,6 +8,7 @@ import { CountryConfigService } from '../country/country-config.service';
 import { BookingService } from '../booking/booking.service';
 import { orderingRestriction, CashRulesService } from '../cash/cash-rules.service';
 import { resolveSelectedOptions, optionsUnitPrice, type ResolvedOption } from './options';
+import { log } from '../../utils/logger';
 import { FloatService } from '../dispatch/float.service';
 import { AppError } from '../../utils/errors';
 import { randomInt } from 'node:crypto';
@@ -323,6 +324,32 @@ export class OrderService {
       // double-submit deterministic (the loser waits, then rolls back on the
       // now-deleted cart) instead of leaning on the delete's P2025 by accident.
       await tx.$queryRaw`SELECT id FROM "carts" WHERE id = ${cart.id} FOR UPDATE`;
+
+      // Serialize promo redemption (pre-launch audit H11). validatePromoCode
+      // ran BEFORE this transaction, so two concurrent checkouts of the SAME
+      // code — different carts, or a global-cap code across users — could both
+      // read the caps as unmet and both redeem. Lock the promo row: the loser
+      // blocks here until the winner commits (incrementing currentUses and
+      // creating its order), then re-reads the now-updated counts and is
+      // correctly rejected. The pre-transaction check stays for the friendly
+      // discount preview; THIS is the enforcement point.
+      if (promoCodeId) {
+        await tx.$queryRaw`SELECT id FROM "promo_codes" WHERE id = ${promoCodeId} FOR UPDATE`;
+        const fresh = await tx.promoCode.findUniqueOrThrow({
+          where: { id: promoCodeId },
+          select: { currentUses: true, maxUses: true, maxUsesPerUser: true },
+        });
+        if (fresh.maxUses && fresh.currentUses >= fresh.maxUses) {
+          throw new AppError(400, 'USED_PROMO', 'This promo code has reached its usage limit');
+        }
+        const userUses = await tx.order.count({
+          where: { customerId: input.userId, promoCodeId, status: { notIn: ['CANCELLED', 'REFUNDED'] } },
+        });
+        if (userUses >= fresh.maxUsesPerUser) {
+          throw new AppError(400, 'USED_PROMO', 'You have already used this promo code');
+        }
+      }
+
       const created = [];
       let sequence = todayCount;
 
@@ -497,6 +524,10 @@ export class OrderService {
           stockEventsByVendor.delete(order.vendorId);
         }
       }
+    }
+
+    for (const order of orders) {
+      log().info({ orderId: order.id, orderNumber: order.orderNumber, vendorId: order.vendorId, orderType: order.orderType, fulfillment: order.fulfillment, total: Number(order.totalAmount), customerId: input.userId }, 'order: placed');
     }
 
     const summaries = orders.map((order) => ({
@@ -731,6 +762,7 @@ export class OrderService {
       data: { orderId, status: target, changedBy, note },
     });
 
+    log().info({ orderId, orderNumber: order.orderNumber, status, changedBy, vendorId: order.vendorId }, 'order: status changed');
     const statusEvent = { orderId, status, timestamp: new Date().toISOString() };
     this.io.to(`order:${orderId}`).emit('order:status_changed', statusEvent);
     // The vendor board listens on its own room so it sees every transition

@@ -60,9 +60,17 @@ const processSettlementSchema = z.object({
 });
 
 const configValueSchema = z.object({
-  // Platform config values are free-form JSON; presence is what we validate
-  value: z.any(),
+  // Free-form JSON, but bounded: a config value must serialise under 16KB so a
+  // stray blob can't bloat the table or a response. (No key drives live
+  // behaviour today — real config is CountryConfig — so we bound rather than
+  // allowlist; add a semantic allowlist when a key starts gating behaviour.)
+  value: z.any().refine(
+    (v) => { try { return JSON.stringify(v ?? null).length <= 16_384; } catch { return false; } },
+    'Config value must be JSON-serialisable and under 16KB',
+  ),
 });
+// Keys are identifiers, not free text — keep them greppable and injection-inert.
+const configKeySchema = z.string().regex(/^[a-z0-9_.-]{1,64}$/i, 'Invalid config key');
 
 const usersQuerySchema = z.object({
   role: z.nativeEnum(UserRole).optional(),
@@ -212,6 +220,14 @@ export async function adminRoutes(app: FastifyInstance) {
       throw new ForbiddenError('Admin access required');
     }
   };
+
+  // Belt-and-suspenders (pre-launch audit): the guard is applied per-route on
+  // all 42 routes today, but a future admin route that forgets its preHandler
+  // would be unauthenticated. This plugin-scoped onRequest hook enforces admin
+  // on EVERY admin route — encapsulation means it touches nothing else. The
+  // per-route guards stay (re-running auth is idempotent) so nothing changes
+  // for existing routes; this just closes the forgot-the-guard gap.
+  app.addHook('onRequest', adminGuard);
 
   // Every successful admin STATE CHANGE is audited, automatically. A scoped
   // onResponse hook (plugin encapsulation: admin routes only) means a new
@@ -1104,7 +1120,7 @@ export async function adminRoutes(app: FastifyInstance) {
   });
 
   app.put('/config/:key', { preHandler: [adminGuard] }, async (request) => {
-    const { key } = request.params as { key: string };
+    const key = configKeySchema.parse((request.params as { key: string }).key);
     const { value } = configValueSchema.parse(request.body);
 
     const config = await app.prisma.platformConfig.upsert({

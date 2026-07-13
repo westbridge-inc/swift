@@ -15,6 +15,9 @@ export class SearchService {
     this.client = new MeiliSearch({
       host: url || process.env['MEILISEARCH_URL'] || 'http://localhost:7700',
       apiKey: apiKey || process.env['MEILISEARCH_KEY'] || '',
+      // A hung/slow Meili must not hang the search handler (pre-launch audit
+      // M3). 5s ceiling; the route falls back to a DB query on any failure.
+      timeout: 5000,
     });
   }
 

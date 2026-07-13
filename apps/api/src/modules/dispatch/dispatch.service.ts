@@ -8,6 +8,7 @@ import { NotificationService } from '../notification/notification.service';
 import { getMapsProvider, type MapsProvider } from '../../providers/maps/maps-provider';
 import { classesAtOrAbove } from '../rides/fare.service';
 import { rankCandidates, type DispatchCandidate } from './scoring';
+import { log } from '../../utils/logger';
 
 declare module 'fastify' {
   interface FastifyInstance {
@@ -52,6 +53,13 @@ const offerKey = (orderId: string) => `dispatch:offer:${orderId}`;
 const declinedKey = (orderId: string) => `dispatch:declined:${orderId}`;
 const roundKey = (orderId: string) => `dispatch:round:${orderId}`;
 const exhaustKey = (orderId: string) => `dispatch:exhausts:${orderId}`;
+const reconciledKey = (orderId: string) => `dispatch:reconciled:${orderId}`;
+
+/** An order should have been in the cascade this long before we treat a
+ *  missing offer key as LOST STATE rather than an in-flight gap. */
+export const RECONCILE_STUCK_MINUTES = 3;
+/** Don't reconcile the same order more than once per this window (anti-spam). */
+const RECONCILE_COOLDOWN_SECONDS = 600;
 
 /** How the production wiring schedules the timeout check (BullMQ delayed job). */
 export type TimeoutScheduler = (orderId: string, riderId: string, delayMs: number) => Promise<void>;
@@ -202,6 +210,7 @@ export class DispatchService {
         await this.redis.set(roundKey(orderId), String(round + 1), 'EX', 3600);
         return this.dispatchOrder(orderId);
       }
+      log().warn({ orderId, orderNumber: order.orderNumber, pool, rounds: MAX_ROUNDS }, 'dispatch: exhausted — no movers found');
       await this.exhaust(order);
       return { exhausted: true };
     }
@@ -220,6 +229,7 @@ export class DispatchService {
       etaMinutes: Math.round(top.etaMinutes),
     });
 
+    log().info({ orderId, orderNumber: order.orderNumber, moverId: top.riderId, pool, round, etaMinutes: Math.round(top.etaMinutes), candidates: candidates.length }, 'dispatch: offer sent');
     await this.scheduleTimeout(orderId, top.riderId, timeoutSeconds * 1000);
     return { offered: top.riderId };
   }
@@ -353,6 +363,7 @@ export class DispatchService {
       orderId,
     );
 
+    log().info({ orderId, orderNumber: order.orderNumber, moverId, pool, status: assignedStatus }, 'dispatch: accepted');
     return order;
   }
 
@@ -482,6 +493,63 @@ export function makeDispatchService(app: FastifyInstance): DispatchService {
  *  each) forever. The app pings location every 8–25s while online, so
  *  STALE_LOCATION_MINUTES of silence means the app is gone, not slow.
  *  Movers with no location at all are already invisible to findCandidates. */
+/**
+ * Recover orders that fell OUT of the dispatch lifecycle — the load-bearing
+ * failure this whole design has to survive. The offer key and the delayed
+ * BullMQ timeout job both live only in Redis; a Redis restart (or a lost
+ * failover) erases them, and nothing else re-drives the order. A customer's
+ * accepted food order or a hailed taxi then silently never gets a mover.
+ *
+ * This sweep finds any order still in a dispatchable state with no mover, that
+ * has sat past RECONCILE_STUCK_MINUTES with NO live offer key (so it isn't
+ * mid-cascade), is NOT deliberately exhausted (exhaustKey — awaiting the
+ * vendor's manual/auto retry), and hasn't been reconciled in the cooldown
+ * window, and re-enqueues the normal `dispatch-order` job. dispatchOrder is
+ * idempotent on the offer key, so re-enqueuing an order that turns out to be
+ * fine is a no-op. Returns the orders it re-drove (loud for ops).
+ */
+export async function reconcileStuckDispatch(
+  prisma: PrismaClient,
+  redis: Redis,
+  enqueue: (orderId: string) => Promise<void>,
+  stuckMinutes = RECONCILE_STUCK_MINUTES,
+): Promise<{ recovered: string[] }> {
+  const cutoff = new Date(Date.now() - stuckMinutes * 60_000);
+  const candidates = await prisma.order.findMany({
+    where: {
+      updatedAt: { lt: cutoff },
+      OR: [
+        // Food / grocery / courier: waiting on a rider.
+        {
+          orderType: { not: 'TAXI' },
+          fulfillment: 'DELIVERY',
+          riderId: null,
+          status: { in: ['ACCEPTED', 'PREPARING', 'READY_FOR_PICKUP'] },
+        },
+        // Taxi: waiting on a driver.
+        { orderType: 'TAXI', driverId: null, status: 'PENDING' },
+      ],
+    },
+    select: { id: true },
+    take: 500,
+  });
+
+  const recovered: string[] = [];
+  for (const { id } of candidates) {
+    // In cascade, deliberately exhausted, or just reconciled — leave alone.
+    const [offer, exhausted, already] = await Promise.all([
+      redis.get(offerKey(id)),
+      redis.get(exhaustKey(id)),
+      redis.get(reconciledKey(id)),
+    ]);
+    if (offer || exhausted || already) continue;
+    await redis.set(reconciledKey(id), '1', 'EX', RECONCILE_COOLDOWN_SECONDS);
+    await enqueue(id);
+    recovered.push(id);
+  }
+  return { recovered };
+}
+
 export async function sweepStaleMovers(prisma: PrismaClient, staleMinutes = STALE_LOCATION_MINUTES) {
   const cutoff = new Date(Date.now() - staleMinutes * 60_000);
   const [riders, drivers] = await Promise.all([
