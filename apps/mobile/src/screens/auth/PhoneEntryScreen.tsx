@@ -3,6 +3,7 @@ import React, { useState } from 'react';
 import { KeyboardAvoidingView, Platform, Pressable, ScrollView, View } from 'react-native';
 import { useMutation } from '@tanstack/react-query';
 import { useNavigation } from '@react-navigation/native';
+import { Feather } from '@expo/vector-icons';
 import { color, space } from '@swift/ui';
 import { authApi } from '../../services/api';
 import { useAuthStore } from '../../stores/authStore';
@@ -76,11 +77,18 @@ export function PhoneEntryScreen() {
                       <T variant="label" weight="semibold" tone="deep">
                         {dialCode ?? '+592'}
                       </T>
+                      {/* Caret makes it obvious the country is tappable to change */}
+                      <Feather name="chevron-down" size={14} color={color.brand[500]} />
                     </View>
                   )}
                 </Pressable>
               }
             />
+            <Pressable onPress={() => navigation.navigate('CountryPicker')} hitSlop={6}>
+              <T variant="caption" tone="muted" style={{ marginTop: space.sm }}>
+                Not in Guyana? <T variant="caption" weight="semibold" tone="brand">Change country</T>
+              </T>
+            </Pressable>
           </View>
 
           <View style={{ flex: 1 }} />
