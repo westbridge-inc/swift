@@ -214,17 +214,21 @@ export function InlineInput({
   style?: object;
   center?: boolean;
 }) {
+  // Same gluestack-grade field language as the kit LabeledInput: a defined
+  // rounded-rectangle with a visible resting border and a brand focus state,
+  // not a faint pill.
+  const [focused, setFocused] = React.useState(false);
   return (
     <View
       style={[
         {
-          borderRadius: multiline ? radius.lg : 9999,
-          borderWidth: 1,
-          borderColor: color.border.subtle,
+          borderRadius: radius.md,
+          borderWidth: focused ? 1.5 : 1,
+          borderColor: focused ? color.brand[500] : color.border.strong,
           backgroundColor: color.surface.base,
           paddingHorizontal: space.lg,
           paddingVertical: multiline ? space.md : 0,
-          height: multiline ? undefined : 48,
+          height: multiline ? undefined : 52,
           minHeight: multiline ? 64 : undefined,
           justifyContent: multiline ? undefined : 'center',
         },
@@ -239,6 +243,8 @@ export function InlineInput({
         keyboardType={keyboardType}
         autoCapitalize={autoCapitalize}
         multiline={multiline}
+        onFocus={() => setFocused(true)}
+        onBlur={() => setFocused(false)}
         style={{
           fontFamily: 'Inter',
           fontSize: 15,
