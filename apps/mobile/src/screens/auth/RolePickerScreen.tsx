@@ -4,6 +4,7 @@ import { Pressable, View } from 'react-native';
 import { Feather } from '@expo/vector-icons';
 import { color, space } from '@swift/ui';
 import { useAuthStore } from '../../stores/authStore';
+import { DEFAULT_COUNTRY } from '../../lib/markets';
 import { SwiftMark } from '../../components/SwiftLogo';
 import { Card, IconChip, Screen, T } from '../../kit';
 
@@ -27,6 +28,8 @@ const OPTIONS: {
 export function RolePickerScreen() {
   const setIntent = useAuthStore((s) => s.setIntent);
   const setMoverPreset = useAuthStore((s) => s.setMoverPreset);
+  const setCountry = useAuthStore((s) => s.setCountry);
+  const countryCode = useAuthStore((s) => s.countryCode);
 
   return (
     <Screen>
@@ -45,6 +48,10 @@ export function RolePickerScreen() {
               key={o.key}
               onPress={() => {
                 setMoverPreset(o.moverPreset ?? null);
+                // Customer picks role → straight to browsing. Seed a market so
+                // Home is never empty; useCustomerCountry then refines it from
+                // device location. Earners pick a country on the next screen.
+                if (o.intent === 'customer' && !countryCode) setCountry(DEFAULT_COUNTRY);
                 setIntent(o.intent);
               }}
             >

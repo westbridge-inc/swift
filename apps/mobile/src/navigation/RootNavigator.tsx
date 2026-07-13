@@ -4,6 +4,7 @@ import { NavigationContainer } from '@react-navigation/native';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
 import { useAuthStore } from '../stores/authStore';
 import { useAppStore } from '../stores/appStore';
+import { useCustomerCountry } from '../hooks/useCustomerCountry';
 import { registerDeviceForPush } from '../services/push';
 import { OnboardingScreen } from '../modules/onboarding/OnboardingScreen';
 import { CountryPickerScreen } from '../screens/auth/CountryPickerScreen';
@@ -35,6 +36,9 @@ function mainForIntent(intent?: string | null) {
 export function RootNavigator() {
   const { isAuthenticated, wantsAuth, intent, countryCode, user } = useAuthStore();
   const hasOnboarded = useAppStore((s) => s.hasOnboarded);
+  // Customers skip the country picker — their market is seeded + resolved from
+  // location instead (spec: pick role → straight to browsing).
+  useCustomerCountry();
 
   // Push registration follows the session (config-gated no-op until the EAS
   // project id ships — see services/push.ts).
@@ -64,7 +68,10 @@ export function RootNavigator() {
           // customer then just picks a country and browses (sign-in waits for
           // checkout); a mover/vendor picks a country then does full sign-up.
           <Stack.Screen name="RolePicker" component={RolePickerScreen} />
-        ) : !countryCode ? (
+        ) : earner && !countryCode ? (
+          // Only earners pick a country here (it drives their signup + pricing);
+          // customers are seeded/resolved by useCustomerCountry and go straight
+          // to browsing.
           <Stack.Screen name="Country" component={CountryPickerScreen} />
         ) : needsAuth ? (
           <Stack.Screen name="Auth" component={AuthStack} />
