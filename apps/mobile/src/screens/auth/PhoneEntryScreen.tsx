@@ -1,5 +1,5 @@
 /** @jsxImportSource react */
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { KeyboardAvoidingView, Platform, Pressable, ScrollView, View } from 'react-native';
 import { useMutation } from '@tanstack/react-query';
 import { useNavigation } from '@react-navigation/native';
@@ -8,7 +8,7 @@ import { color, space } from '@swift/ui';
 import { authApi } from '../../services/api';
 import { useAuthStore } from '../../stores/authStore';
 import { flagEmoji } from '../../lib/flags';
-import { phoneRule } from '../../lib/phone';
+import { phoneExample, phoneLenState, clampPhone } from '../../lib/phone';
 import { SwiftMark } from '../../components/SwiftLogo';
 import { LabeledInput, PillButton, Screen, T } from '../../kit';
 
@@ -19,15 +19,15 @@ export function PhoneEntryScreen() {
   const { dialCode, countryCode, intent, moverPreset, cancelAuth } = useAuthStore();
   const [digits, setDigits] = useState('');
 
-  // Per-country rule: the local number length + a realistic example. The dial
-  // code carries the country code, so `digits` is just the local number.
-  const rule = phoneRule(countryCode);
-  const onChangeDigits = (t: string) => setDigits(t.replace(/\D/g, '').slice(0, rule.nsnLength));
+  // Length is validated per-country by libphonenumber (handles fixed, variable
+  // and long numbers — not just Guyana's 7). Typing is clamped so you can't
+  // exceed your country's number; the example placeholder matches the country.
+  const onChangeDigits = (t: string) => setDigits(clampPhone(dialCode, t));
+  // Changing country can shorten the max — re-clamp what's already typed.
+  useEffect(() => setDigits((d) => clampPhone(dialCode, d)), [dialCode]);
 
   const fullPhone = `${dialCode ?? '+592'}${digits}`;
-  // Must be exactly the country's local length — not just "6+" — so a number
-  // that's too short (or, capped above, too long) can't be submitted.
-  const valid = digits.length === rule.nsnLength;
+  const valid = phoneLenState(dialCode, digits) === 'ok';
 
   // Earners (rider/taxi/seller) reach this screen to SIGN UP, not sign in —
   // frame it that way with their role, instead of a generic "Sign in" that
@@ -69,9 +69,9 @@ export function PhoneEntryScreen() {
             <LabeledInput
               label="Phone Number"
               icon="phone"
-              placeholder={rule.example}
+              placeholder={phoneExample(countryCode)}
               keyboardType="phone-pad"
-              maxLength={rule.nsnLength}
+              maxLength={15}
               value={digits}
               onChangeText={onChangeDigits}
               error={err}

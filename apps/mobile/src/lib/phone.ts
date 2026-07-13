@@ -1,36 +1,64 @@
-// Per-market phone rules for Swift's 13 Caribbean countries.
-//
-// The dial code already carries the country/area code (e.g. +1268 for Antigua,
-// +592 for Guyana), so `nsnLength` is the LOCAL subscriber number the user
-// actually types. Every current market is 7 digits — the NANP islands are
-// area-code + 7 (area code lives in the dial code), and Guyana / Belize /
-// Suriname mobile are 7 too. `example` is a realistic local number so the
-// placeholder matches the chosen country instead of always showing a Guyana one.
-//
-// Curated table, not a phone library: the market list is fixed (it mirrors the
-// backend CountryConfig), so this stays dependency-free and auditable. Add a row
-// when a market is added.
-export type PhoneRule = { example: string; nsnLength: number };
+import { validatePhoneNumberLength } from 'libphonenumber-js';
 
-const PHONE_RULES: Record<string, PhoneRule> = {
-  AG: { example: '464 1234', nsnLength: 7 }, // Antigua & Barbuda (+1268)
-  BS: { example: '359 1234', nsnLength: 7 }, // Bahamas (+1242)
-  BB: { example: '250 1234', nsnLength: 7 }, // Barbados (+1246)
-  BZ: { example: '610 1234', nsnLength: 7 }, // Belize (+501)
-  DM: { example: '225 1234', nsnLength: 7 }, // Dominica (+1767)
-  GD: { example: '403 1234', nsnLength: 7 }, // Grenada (+1473)
-  GY: { example: '612 3456', nsnLength: 7 }, // Guyana (+592)
-  JM: { example: '210 1234', nsnLength: 7 }, // Jamaica (+1876)
-  KN: { example: '765 1234', nsnLength: 7 }, // Saint Kitts & Nevis (+1869)
-  LC: { example: '284 1234', nsnLength: 7 }, // Saint Lucia (+1758)
-  VC: { example: '430 1234', nsnLength: 7 }, // Saint Vincent & the Grenadines (+1784)
-  SR: { example: '741 1234', nsnLength: 7 }, // Suriname (+597, mobile)
-  TT: { example: '291 1234', nsnLength: 7 }, // Trinidad & Tobago (+1868)
+// Phone handling for Swift's markets — and any country we expand to.
+//
+// LENGTH is delegated to libphonenumber-js (pure JS, no native module) so it's
+// correct for every country, including LONG and VARIABLE-length numbers — not
+// hardcoded to Guyana's 7 digits. We judge the full E.164 (dial code + the
+// digits the user types), because for NANP islands the area code lives in the
+// dial code (+1784) while libphonenumber counts it as part of the national
+// number. That single rule covers Caribbean 7-digit, UK/Nigeria 10-digit, etc.
+//
+// EXAMPLE (placeholder) stays a small curated table so each market shows a
+// realistic local number; unknown countries fall back to a generic hint.
+
+const EXAMPLES: Record<string, string> = {
+  AG: '464 1234', // Antigua & Barbuda
+  BS: '359 1234', // Bahamas
+  BB: '250 1234', // Barbados
+  BZ: '610 1234', // Belize
+  DM: '225 1234', // Dominica
+  GD: '403 1234', // Grenada
+  GY: '612 3456', // Guyana
+  JM: '210 1234', // Jamaica
+  KN: '765 1234', // Saint Kitts & Nevis
+  LC: '284 1234', // Saint Lucia
+  VC: '430 1234', // Saint Vincent & the Grenadines
+  SR: '741 1234', // Suriname
+  TT: '291 1234', // Trinidad & Tobago
 };
+const FALLBACK_EXAMPLE = '612 3456';
 
-const FALLBACK: PhoneRule = { example: '612 3456', nsnLength: 7 };
+/** Realistic local-number example for the placeholder. */
+export function phoneExample(countryCode?: string | null): string {
+  return (countryCode ? EXAMPLES[countryCode] : undefined) ?? FALLBACK_EXAMPLE;
+}
 
-/** Phone rule for a market code (ISO alpha-2). Falls back to a 7-digit default. */
-export function phoneRule(countryCode?: string | null): PhoneRule {
-  return (countryCode ? PHONE_RULES[countryCode] : undefined) ?? FALLBACK;
+export type PhoneLenState = 'short' | 'ok' | 'long';
+
+/**
+ * Length state of the local number the user has typed, for the given dial code.
+ * 'ok' means it's a valid length for that country (fixed OR variable OR long);
+ * 'long' means one digit too many. Falls back to a lenient 6–15 digit range if
+ * libphonenumber doesn't recognise the dial code, so an unknown market still
+ * works instead of being un-submittable.
+ */
+export function phoneLenState(dialCode: string | null | undefined, digits: string): PhoneLenState {
+  const local = digits.replace(/\D/g, '');
+  const res = dialCode ? validatePhoneNumberLength(`${dialCode}${local}`) : 'INVALID_COUNTRY';
+  if (res === undefined) return 'ok';
+  if (res === 'TOO_LONG') return 'long';
+  if (res === 'TOO_SHORT') return 'short';
+  // INVALID_COUNTRY / NOT_A_NUMBER / no dial code → lenient fallback.
+  if (local.length > 15) return 'long';
+  return local.length >= 6 ? 'ok' : 'short';
+}
+
+/** Clamp typed digits to the longest prefix that isn't too long for the country. */
+export function clampPhone(dialCode: string | null | undefined, digits: string): string {
+  let local = digits.replace(/\D/g, '').slice(0, 15); // hard E.164 ceiling
+  while (local.length > 6 && phoneLenState(dialCode, local) === 'long') {
+    local = local.slice(0, -1);
+  }
+  return local;
 }
