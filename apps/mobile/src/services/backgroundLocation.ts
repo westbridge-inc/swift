@@ -1,7 +1,20 @@
 import * as Location from 'expo-location';
-import * as TaskManager from 'expo-task-manager';
 import { riderApi, driverApi } from './api';
 import type { MoverKind } from '../hooks/mover';
+
+// expo-task-manager is a NATIVE module: importing it runs requireNativeModule
+// at bundle-eval time, which THROWS on a binary built before this dependency
+// was added — crashing the whole app at startup, not just disabling background
+// GPS. Load it defensively so a missing native module degrades to "no
+// background task" (the caller falls back to the foreground watcher). The
+// background stream lights up on the next native build.
+let TaskManager: typeof import('expo-task-manager') | null = null;
+try {
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  TaskManager = require('expo-task-manager');
+} catch {
+  TaskManager = null;
+}
 
 // H9 (pre-launch audit): the driver's GPS was foreground-only, so the customer's
 // live marker froze the instant the driver opened Maps/WhatsApp or locked the
@@ -18,7 +31,7 @@ export const MOVER_LOCATION_TASK = 'swift-mover-location';
 // backgrounding).
 let activeKind: MoverKind | null = null;
 
-TaskManager.defineTask(MOVER_LOCATION_TASK, async ({ data, error }) => {
+TaskManager?.defineTask(MOVER_LOCATION_TASK, async ({ data, error }) => {
   if (error || !activeKind) return;
   const locations = (data as { locations?: Location.LocationObject[] })?.locations ?? [];
   const last = locations[locations.length - 1];
@@ -32,6 +45,7 @@ TaskManager.defineTask(MOVER_LOCATION_TASK, async ({ data, error }) => {
  *  background updates actually started; false means the caller should use the
  *  foreground watcher instead. Never throws. */
 export async function startMoverLocation(kind: MoverKind): Promise<boolean> {
+  if (!TaskManager) return false; // native module absent — use foreground watch
   try {
     const fg = await Location.requestForegroundPermissionsAsync();
     if (fg.status !== 'granted') return false;
