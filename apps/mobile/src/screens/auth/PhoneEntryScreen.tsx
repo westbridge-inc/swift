@@ -15,11 +15,22 @@ import { LabeledInput, PillButton, Screen, T } from '../../kit';
 // passwords, no social sign-in — the backend has neither.
 export function PhoneEntryScreen() {
   const navigation = useNavigation<any>();
-  const { dialCode, countryCode, intent, cancelAuth } = useAuthStore();
+  const { dialCode, countryCode, intent, moverPreset, cancelAuth } = useAuthStore();
   const [digits, setDigits] = useState('');
 
   const fullPhone = `${dialCode ?? '+592'}${digits.replace(/\D/g, '')}`;
   const valid = digits.replace(/\D/g, '').length >= 6;
+
+  // Earners (rider/taxi/seller) reach this screen to SIGN UP, not sign in —
+  // frame it that way with their role, instead of a generic "Sign in" that
+  // reads like a returning-user login. Customers (guest → checkout) can be
+  // new or returning, so they get the honest "sign in or sign up".
+  const earner = intent === 'mover' || intent === 'vendor';
+  const earnerLabel = intent === 'vendor' ? 'a business' : moverPreset === 'taxi' ? 'a taxi driver' : 'a rider';
+  const heading = earner ? 'Create your account' : 'Sign in or sign up';
+  const subheading = earner
+    ? `Sign up as ${earnerLabel} — we’ll text a one-time code to verify your number.`
+    : 'We’ll text you a one-time code — no passwords here.';
 
   const send = useMutation({
     mutationFn: () => authApi.sendOtp(fullPhone),
@@ -40,10 +51,10 @@ export function PhoneEntryScreen() {
           <SwiftMark size={56} />
 
           <T variant="title" style={{ marginTop: space['4xl'] }}>
-            Sign in to Swift.
+            {heading}
           </T>
           <T variant="body" tone="muted" style={{ marginTop: space.sm }}>
-            We’ll text you a one-time code — no passwords here.
+            {subheading}
           </T>
 
           <View style={{ marginTop: space['3xl'] }}>
@@ -86,7 +97,7 @@ export function PhoneEntryScreen() {
             />
             <Pressable onPress={() => navigation.navigate('CountryPicker')} hitSlop={6}>
               <T variant="caption" tone="muted" style={{ marginTop: space.sm }}>
-                Not in Guyana? <T variant="caption" weight="semibold" tone="brand">Change country</T>
+                Wrong country? <T variant="caption" weight="semibold" tone="brand">Change country</T>
               </T>
             </Pressable>
           </View>
