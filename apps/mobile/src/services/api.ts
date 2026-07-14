@@ -151,7 +151,14 @@ export const customerApi = {
   reorder: (id: string) => api.post(`/customer/orders/${id}/reorder`, {}),
   rateOrder: (
     id: string,
-    body: { vendorScore?: number; vendorComment?: string; riderScore?: number; riderComment?: string },
+    body: {
+      vendorScore?: number;
+      vendorComment?: string;
+      riderScore?: number;
+      riderComment?: string;
+      driverScore?: number;
+      driverComment?: string;
+    },
   ) => api.post(`/customer/orders/${id}/rate`, body),
   // Cart
   getCart: (lat?: number, lng?: number) => api.get('/customer/cart', { params: { lat, lng } }),
