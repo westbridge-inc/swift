@@ -332,6 +332,7 @@ export const riderApi = {
 // Mover ops — Driver (taxi), mounted at /api/v1/driver
 export const driverApi = {
   profile: () => api.get('/driver/profile'),
+  updateProfile: (data: { mmgPayUrl?: string | null }) => api.put('/driver/profile', data),
   goOnline: () => api.post('/driver/go-online'),
   goOffline: () => api.post('/driver/go-offline'),
   location: (latitude: number, longitude: number) => api.put('/driver/location', { latitude, longitude }),
@@ -417,7 +418,7 @@ export const vendorApi = {
   hours: () => api.get('/vendor/hours'),
   setHours: (hours: { dayOfWeek: number; openTime: string; closeTime: string; isClosed: boolean }[]) =>
     api.put('/vendor/hours', { hours }),
-  updateProfile: (data: { name?: string; phone?: string; description?: string }) =>
+  updateProfile: (data: { name?: string; phone?: string; description?: string; mmgPayUrl?: string | null }) =>
     api.put('/vendor/profile', data),
   importItems: (csv: string) => api.post('/vendor/items/import', { csv }),
   importTemplate: () => api.get('/vendor/items/import/template'),

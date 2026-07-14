@@ -27,6 +27,8 @@ const updateDriverProfileSchema = z.object({
   driverLicenseUrl: z.string().max(2048).optional(),
   vehicleInsuranceUrl: z.string().max(2048).optional(),
   vehicleInspectionUrl: z.string().max(2048).optional(),
+  // The taxi driver's own MMG "pay me" link (opt-in). null/empty clears it.
+  mmgPayUrl: z.string().trim().max(500).nullable().optional(),
 });
 
 const driverLocationSchema = z.object({
@@ -109,6 +111,7 @@ export async function driverRoutes(app: FastifyInstance) {
         ...(body.driverLicenseUrl !== undefined && { driverLicenseUrl: body.driverLicenseUrl }),
         ...(body.vehicleInsuranceUrl !== undefined && { vehicleInsuranceUrl: body.vehicleInsuranceUrl }),
         ...(body.vehicleInspectionUrl !== undefined && { vehicleInspectionUrl: body.vehicleInspectionUrl }),
+        ...(body.mmgPayUrl !== undefined && { mmgPayUrl: body.mmgPayUrl || null }),
       },
       include: { user: { select: { id: true, firstName: true, lastName: true, phone: true, email: true, avatar: true } } },
     });

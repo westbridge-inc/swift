@@ -472,6 +472,9 @@ model Driver {
   subscription         Subscription?
   earnings             Earning[]
   orders               Order[]
+  /// The taxi driver's OWN MMG "pay me" link. Opt-in: when set, riders can pay
+  /// the fare directly via MMG (money never touches Swift); null = cash-only.
+  mmgPayUrl            String?
   createdAt            DateTime     @default(now())
   updatedAt            DateTime     @updatedAt
 
@@ -568,6 +571,11 @@ model Vendor {
 
   /// Stable slug for printed QR deep links: /v/{qrSlug}. Never reuse or rotate.
   qrSlug String @unique @default(cuid())
+
+  /// The vendor's OWN MMG (Mobile Money Guyana) "pay me" link. Opt-in: when set,
+  /// customers can pay this vendor directly via MMG (money never touches Swift);
+  /// null = cash-only. A public pay URL, not a secret credential.
+  mmgPayUrl String?
 
   createdAt        DateTime        @default(now())
   updatedAt        DateTime        @updatedAt
