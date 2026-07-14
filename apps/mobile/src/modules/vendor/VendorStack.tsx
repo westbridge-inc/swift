@@ -297,6 +297,9 @@ function VendorOrderCard({
   showStore?: boolean;
 }) {
   const actions = orderActions(order);
+  const isMmg = order.paymentMethod === 'MOBILE_MONEY';
+  const mmgPaid = order.paymentStatus === 'CAPTURED';
+  const terminal = ['DELIVERED', 'COMPLETED', 'CANCELLED', 'REFUNDED'].includes((order.status || '').toUpperCase());
   const items = order.itemCount ?? order.items?.length ?? 0;
   const lines: any[] = order.items ?? [];
   const isPickup = order.fulfillment === 'PICKUP';
@@ -397,6 +400,32 @@ function VendorOrderCard({
       <T variant="heading" style={{ marginTop: space.sm }}>
         {money(order.totalAmount ?? order.total)}
       </T>
+      {/* MMG direct-pay: the customer paid the store's own MMG. The vendor
+          confirms they got it → the customer's screen flips to Paid. */}
+      {isMmg ? (
+        <View style={{ marginTop: space.sm }}>
+          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+            <MaterialCommunityIcons
+              name={mmgPaid ? 'check-circle' : 'cellphone-check'}
+              size={14}
+              color={mmgPaid ? color.success : color.warning}
+            />
+            <T variant="label" weight="semibold" style={{ color: mmgPaid ? color.success : color.warning }}>
+              {mmgPaid ? 'MMG payment received' : 'Awaiting MMG payment'}
+            </T>
+          </View>
+          {!mmgPaid && !terminal ? (
+            <PillButton
+              label="Payment received"
+              size="md"
+              icon="check"
+              style={{ marginTop: space.sm }}
+              disabled={busy}
+              onPress={() => onAction('confirm-payment')}
+            />
+          ) : null}
+        </View>
+      ) : null}
       {actions.length > 0 ? (
         <View style={{ flexDirection: 'row', gap: space.md, marginTop: space.md }}>
           {actions.map((a) => (
