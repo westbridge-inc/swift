@@ -20,6 +20,7 @@ import { useBookingStore } from '../../../stores/bookingStore';
 import { useLocationStore } from '../../../stores/locationStore';
 import { DARK_BLURHASH, itemImage } from '../../../lib/images';
 import { money } from '../../../lib/money';
+import { openPayLink } from '../../../lib/payLink';
 import {
   Card,
   Chip,
@@ -62,6 +63,7 @@ export function CartScreen() {
   const [promoPopup, setPromoPopup] = useState(false);
   const [instructions, setInstructions] = useState('');
   const [express, setExpress] = useState(false);
+  const [payMethod, setPayMethod] = useState<'CASH' | 'MMG'>('CASH');
   const [menuOpen, setMenuOpen] = useState(false);
   const [placedOrderId, setPlacedOrderId] = useState<string | null>(null);
   const appointments = useBookingStore((s) => s.appointments);
@@ -113,7 +115,7 @@ export function CartScreen() {
   const onOrder = () => {
     placeOrder.mutate(
       {
-        paymentMethod: 'CASH',
+        paymentMethod: payMethod === 'MMG' ? 'MOBILE_MONEY' : 'CASH',
         ...(express ? { express: true } : {}),
         ...(apptPayload.length ? { appointments: apptPayload } : {}),
         ...(instructions.trim() ? { deliveryInstructions: instructions.trim() } : {}),
@@ -123,6 +125,12 @@ export function CartScreen() {
           const first = data?.orders?.[0];
           setPlacedOrderId(first?.id ?? null);
           if (apptPayload.length) clearAppointments();
+          // MMG: take the customer straight to the store's own MMG link, in-app.
+          if (payMethod === 'MMG') void openPayLink(first?.vendor?.mmgPayUrl);
+        },
+        onError: (err: any) => {
+          // Store isn't set up for MMG → fall back to cash so they can proceed.
+          if (err?.response?.data?.error?.code === 'MMG_NOT_AVAILABLE') setPayMethod('CASH');
         },
       },
     );
@@ -305,22 +313,44 @@ export function CartScreen() {
             />
           </View>
 
-          {/* Payment fact — V1 is cash on delivery */}
-          <View
-            style={{
-              flexDirection: 'row',
-              alignItems: 'center',
-              gap: space.md,
-              marginTop: space.xl,
-              padding: space.lg,
-              borderRadius: radius.md,
-              backgroundColor: color.brand[50],
-            }}
-          >
-            <Feather name="dollar-sign" size={16} color={color.brand[600]} />
-            <T variant="label" tone="deep" style={{ flex: 1 }}>
-              Cash on delivery — pay the rider when your order arrives.
+          {/* Payment — cash, or pay the store directly on their own MMG */}
+          <View style={{ marginTop: space.xl, gap: space.sm }}>
+            <T variant="label" weight="semibold">
+              Payment
             </T>
+            {([
+              { key: 'CASH', icon: 'dollar-sign', title: 'Cash on delivery', sub: 'Pay the rider when your order arrives.' },
+              { key: 'MMG', icon: 'smartphone', title: 'Pay with MMG', sub: 'Pay the store directly on their MMG — opens right in the app.' },
+            ] as const).map((o) => {
+              const active = payMethod === o.key;
+              return (
+                <Pressable key={o.key} onPress={() => setPayMethod(o.key)}>
+                  <View
+                    style={{
+                      flexDirection: 'row',
+                      alignItems: 'center',
+                      gap: space.md,
+                      padding: space.lg,
+                      borderRadius: radius.md,
+                      borderWidth: active ? 1.5 : 1,
+                      borderColor: active ? color.brand[500] : color.border.strong,
+                      backgroundColor: active ? color.brand[50] : color.surface.base,
+                    }}
+                  >
+                    <Feather name={o.icon} size={18} color={active ? color.brand[600] : color.text.muted} />
+                    <View style={{ flex: 1 }}>
+                      <T variant="label" weight="semibold" tone={active ? 'deep' : 'ink'}>
+                        {o.title}
+                      </T>
+                      <T variant="caption" tone="muted" style={{ marginTop: 2 }}>
+                        {o.sub}
+                      </T>
+                    </View>
+                    <Feather name={active ? 'check-circle' : 'circle'} size={18} color={active ? color.brand[500] : color.border.strong} />
+                  </View>
+                </Pressable>
+              );
+            })}
           </View>
 
           {/* Express delivery — priority dispatch; the premium goes to the rider */}
