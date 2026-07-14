@@ -164,6 +164,11 @@ export class OrderService {
       if (!vendor.isCurrentlyOpen || !vendor.acceptingOrders || vendor.status !== 'ACTIVE') {
         throw new AppError(400, 'VENDOR_CLOSED', `${vendor.name} is currently not accepting orders`);
       }
+      // MMG direct-pay: only offer it for a vendor who attached their own MMG
+      // link (the customer pays them directly). Otherwise stay on cash.
+      if (input.paymentMethod === 'MOBILE_MONEY' && !vendor.mmgPayUrl) {
+        throw new AppError(400, 'MMG_NOT_AVAILABLE', `${vendor.name} isn't set up for MMG yet — choose cash instead.`);
+      }
 
       // Inventory (§4.2): a tracked item can't be ordered beyond the shelf.
       // The race-proof guard is the conditional decrement in the transaction
@@ -436,7 +441,7 @@ export class OrderService {
               create: { status: 'PENDING', changedBy: input.userId, note: 'Order placed' },
             },
           },
-          include: { items: true, vendor: { select: { id: true, name: true, ownerId: true } } },
+          include: { items: true, vendor: { select: { id: true, name: true, ownerId: true, mmgPayUrl: true } } },
         });
 
         await tx.vendor.update({

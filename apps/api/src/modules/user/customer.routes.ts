@@ -1567,6 +1567,9 @@ export async function customerRoutes(app: FastifyInstance) {
           select: {
             id: true, name: true, slug: true, logoUrl: true, coverImageUrl: true,
             vendorType: true, phone: true, latitude: true, longitude: true,
+            // MMG direct-pay: the pay/track screen opens this to let the customer
+            // pay the vendor (only present when the vendor opted in).
+            mmgPayUrl: true,
           },
         },
         items: {
@@ -1630,6 +1633,9 @@ export async function customerRoutes(app: FastifyInstance) {
         discount: Number(order.discount),
         totalAmount: Number(order.totalAmount),
         paymentMethod: order.paymentMethod,
+        // MMG: PENDING → CAPTURED when the vendor confirms they received it, so
+        // the pay/track screen can flip from Awaiting to Paid.
+        paymentStatus: order.paymentStatus,
         fulfillment: order.fulfillment,
         // Takeaway handover gate — the customer PRESENTS this code at the
         // counter. It was only in the checkout response before, so it
