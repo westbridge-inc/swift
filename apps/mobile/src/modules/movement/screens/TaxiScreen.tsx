@@ -7,8 +7,10 @@ import BottomSheet, { BottomSheetView, BottomSheetScrollView } from '@gorhom/bot
 import { Image } from 'expo-image';
 import { Feather, MaterialCommunityIcons } from '@expo/vector-icons';
 import { color, radius, space } from '@swift/ui';
+import { useQueryClient } from '@tanstack/react-query';
 import { useActiveRide, useRideEstimate, useRequestRide, useCancelRide } from '../../../hooks';
 import { connectSocket, getSocket, subscribeToOrder } from '../../../services/socket';
+import { RidePostTripSheet } from '../RidePostTripSheet';
 import { useLocationStore } from '../../../stores/locationStore';
 import { GEORGETOWN } from '../../../hooks/useDeviceLocation';
 import { money } from '../../../lib/money';
@@ -136,6 +138,36 @@ export function TaxiScreen({ navigation }: any) {
   const { data: activeRide, isLoading: loadingActive } = useActiveRide<any>(true);
   const requestRide = useRequestRide();
   const cancelRide = useCancelRide();
+  const qc = useQueryClient();
+
+  // Post-trip closure: the ride that just completed, held so we can show the
+  // rate + tip sheet after `useActiveRide` drops it (a completed ride is no
+  // longer "active").
+  const [completedRide, setCompletedRide] = useState<any>(null);
+  const activeRef = useRef<any>(null);
+  activeRef.current = activeRide;
+
+  // Make the ride feel LIVE: the order room already emits status changes (the
+  // rider previously only saw them on the 8s poll). Listen so the status flips
+  // instantly, and capture the ride on completion to close the loop.
+  useEffect(() => {
+    const id = activeRide?.id;
+    if (!id) return;
+    connectSocket();
+    subscribeToOrder(id);
+    const s = getSocket();
+    const onStatus = (p: any) => {
+      if (p?.orderId && p.orderId !== id) return;
+      if (p?.status === 'DELIVERED' || p?.status === 'COMPLETED') {
+        if (activeRef.current) setCompletedRide(activeRef.current);
+      }
+      qc.invalidateQueries({ queryKey: ['rides', 'active'] });
+    };
+    s.on('order:status_changed', onStatus);
+    return () => {
+      s.off('order:status_changed', onStatus);
+    };
+  }, [activeRide?.id, qc]);
 
   // Pickup defaults to live location; a manual override wins when set.
   const [pickupOverride, setPickupOverride] = useState<PickedPlace | undefined>();
@@ -309,6 +341,9 @@ export function TaxiScreen({ navigation }: any) {
           ) : null}
         </BottomSheetScrollView>
       </BottomSheet>
+
+      {/* Ride just ended → rate the driver + optional cash tip, then dismiss. */}
+      <RidePostTripSheet ride={completedRide} onDone={() => setCompletedRide(null)} />
     </View>
   );
 }

@@ -106,8 +106,14 @@ export function useOrder<T = any>(id: string, refetchInterval?: number) {
 export function useRateOrder(id: string) {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: (body: { vendorScore?: number; vendorComment?: string; riderScore?: number; riderComment?: string }) =>
-      unwrap(customerApi.rateOrder(id, body)),
+    mutationFn: (body: {
+      vendorScore?: number;
+      vendorComment?: string;
+      riderScore?: number;
+      riderComment?: string;
+      driverScore?: number;
+      driverComment?: string;
+    }) => unwrap(customerApi.rateOrder(id, body)),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: customerKeys.order(id) });
       // The list rows carry the "Rate" affordance — refresh them too.
