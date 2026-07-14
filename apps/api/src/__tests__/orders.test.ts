@@ -327,6 +327,30 @@ describe('Checkout — ID gate, multi-vendor split, fulfillment', () => {
     expect(order.pickupCode).toMatch(/^\d{6}$/);
   });
 
+  it('MMG checkout needs the vendor to have a link, and makes an unpaid MMG order', async () => {
+    // No link yet → MMG is refused (stay on cash).
+    await addToCart(customer.token, restaurant.vendorId, burgerId, 1);
+    const noLink = await inject('POST', '/api/v1/customer/checkout', { paymentMethod: 'MOBILE_MONEY' }, customer.token);
+    expect(noLink.statusCode).toBe(400);
+    expect(noLink.json().error.code).toBe('MMG_NOT_AVAILABLE');
+    await app.prisma.cart.deleteMany({ where: { customerId: customer.userId } });
+
+    // Vendor attaches a link → the MMG order is created UNPAID and the pay
+    // screen can read the vendor's link to open it.
+    await app.prisma.vendor.update({ where: { id: restaurant.vendorId }, data: { mmgPayUrl: 'https://mmg.gy/pay/x' } });
+    await addToCart(customer.token, restaurant.vendorId, burgerId, 1);
+    const ok = await inject('POST', '/api/v1/customer/checkout', { paymentMethod: 'MOBILE_MONEY' }, customer.token);
+    expect(ok.statusCode).toBe(200);
+    const mmgOrder = ok.json().data.order ?? ok.json().data.orders[0];
+    createdOrderIds.push(mmgOrder.id);
+    expect(mmgOrder.paymentMethod).toBe('MOBILE_MONEY');
+
+    const got = await inject('GET', `/api/v1/customer/orders/${mmgOrder.id}`, undefined, customer.token);
+    expect(got.json().data.paymentStatus).toBe('PENDING');
+    expect(got.json().data.vendor.mmgPayUrl).toBe('https://mmg.gy/pay/x');
+    await app.prisma.vendor.update({ where: { id: restaurant.vendorId }, data: { mmgPayUrl: null } });
+  });
+
   it('express charges exactly 1.5x the delivery fee and flags the order — pickup ignores it', async () => {
     // Baseline: the same cart at standard speed
     await addToCart(customer.token, restaurant.vendorId, burgerId, 1);
