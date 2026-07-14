@@ -1,6 +1,6 @@
 /** @jsxImportSource react */
 import React, { useState, useEffect } from 'react';
-import { useQueryClient } from '@tanstack/react-query';
+import { useQueryClient, useMutation } from '@tanstack/react-query';
 import { Pressable, RefreshControl, ScrollView, TextInput, View } from 'react-native';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
@@ -45,6 +45,8 @@ import { VendorOrderDetailScreen } from './screens/VendorOrderDetailScreen';
 import { VendorOrderHistoryScreen } from './screens/VendorOrderHistoryScreen';
 import { DocumentChecklist } from '../../components/onboarding/DocumentChecklist';
 import { PricingCard } from '../../components/onboarding/PricingCard';
+import { MmgPayLinkCard } from '../../components/MmgPayLinkCard';
+import { vendorApi } from '../../services/api';
 import { useWentLive, WentLivePopup } from '../../components/onboarding/WentLive';
 import { docLabel } from '../../components/onboarding/DocumentUploadCard';
 import { useBecomePartner, useVerificationStatus } from '../../hooks/verification';
@@ -1887,6 +1889,11 @@ function VendorAccountScreen() {
   const sub = useVendorSubscription(isOwner);
   const hoursQ = useVendorHours();
   const setHours = useSetHours();
+  const qc = useQueryClient();
+  const saveMmgLink = useMutation({
+    mutationFn: (mmgPayUrl: string | null) => vendorApi.updateProfile({ mmgPayUrl }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['vendor', 'profile'] }),
+  });
 
   const [days, setDays] = useState<DayHours[]>([]);
   useEffect(() => {
@@ -1932,6 +1939,15 @@ function VendorAccountScreen() {
         </Card>
 
         {isOwner ? <SubscriptionCard sub={sub.data} phone={store?.phone} /> : null}
+
+        {isManager ? (
+          <MmgPayLinkCard
+            who="store"
+            value={store?.mmgPayUrl}
+            saving={saveMmgLink.isPending}
+            onSave={(u) => saveMmgLink.mutate(u)}
+          />
+        ) : null}
 
         {isOwner && store?.vendorType ? <VendorDocumentsSection vendorType={store.vendorType} /> : null}
 

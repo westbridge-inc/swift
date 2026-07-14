@@ -4,8 +4,11 @@ import { ScrollView, View } from 'react-native';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 import * as ImagePicker from 'expo-image-picker';
 import { Image } from 'expo-image';
+import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { color, space } from '@swift/ui';
 import { Card, Header, LinkText, PillButton, Screen, SettingsRow, T, TonePill } from '../../../kit';
+import { MmgPayLinkCard } from '../../../components/MmgPayLinkCard';
+import { driverApi } from '../../../services/api';
 import { Stars } from '../../../kit/controls';
 import { useMoverKind, useVerificationStatus, useEarningsSummary, useMoverSubscription, useUploadVehiclePhoto } from '../../../hooks';
 import { useAuthStore } from '../../../stores/authStore';
@@ -22,6 +25,11 @@ export function MoverAccountScreen({ navigation }: any) {
   const subQ = useMoverSubscription(kind);
   const allTime = (summaryQ.data as any)?.allTime?.total ?? 0;
   const uploadVehiclePhoto = useUploadVehiclePhoto(kind);
+  const qc = useQueryClient();
+  const saveMmgLink = useMutation({
+    mutationFn: (mmgPayUrl: string | null) => driverApi.updateProfile({ mmgPayUrl }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['mover', 'driverProfile'] }),
+  });
 
   const name = [user?.firstName, user?.lastName].filter(Boolean).join(' ') || 'Your account';
   const initial = (user?.firstName ?? 'S').charAt(0).toUpperCase();
@@ -119,6 +127,15 @@ export function MoverAccountScreen({ navigation }: any) {
               </T>
             ) : null}
           </Card>
+        ) : null}
+
+        {isDriver ? (
+          <MmgPayLinkCard
+            who="rides"
+            value={profile?.mmgPayUrl}
+            saving={saveMmgLink.isPending}
+            onSave={(u) => saveMmgLink.mutate(u)}
+          />
         ) : null}
 
         {/* Ops rows */}
