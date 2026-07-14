@@ -57,7 +57,7 @@ async function makeDriver(userId: string) {
   return driver.id;
 }
 
-function inject(method: 'GET' | 'PUT', url: string, token: string, payload?: unknown, vendorId?: string) {
+function inject(method: 'GET' | 'PUT' | 'POST', url: string, token: string, payload?: unknown, vendorId?: string) {
   return app.inject({
     method, url,
     ...(payload !== undefined ? { payload: payload as Record<string, unknown> } : {}),
