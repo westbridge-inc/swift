@@ -918,6 +918,29 @@ export async function vendorRoutes(app: FastifyInstance) {
     throw new AppError(400, 'INVALID_STATUS', `Cannot mark as ready from ${order.status} status`);
   });
 
+  /** POST /orders/:id/confirm-payment — the vendor saw the customer's MMG payment
+   *  land in their OWN MMG wallet and marks it received. Money never touches
+   *  Swift; this only records confirmation + tells the customer live. MMG orders
+   *  only (cash is settled at handover). Idempotent. */
+  app.post<{ Params: IdParam }>('/orders/:id/confirm-payment', auth, async (request) => {
+    const order = await resolveOwnedOrder(app, request.user.userId, request.params.id);
+    if (order.paymentMethod !== 'MOBILE_MONEY') {
+      throw new AppError(400, 'NOT_MMG', 'Only MMG orders are confirmed here — cash is handled at handover.');
+    }
+    if (order.paymentStatus === 'CAPTURED') {
+      return { success: true, data: order }; // double-tap safe
+    }
+    const updated = await app.prisma.order.update({
+      where: { id: order.id },
+      data: { paymentStatus: 'CAPTURED' },
+    });
+    await app.prisma.orderStatusLog.create({
+      data: { orderId: order.id, status: order.status, changedBy: request.user.userId, note: 'MMG payment confirmed received by vendor' },
+    });
+    app.io.to(`order:${order.id}`).emit('order:status_changed', { orderId: order.id, status: order.status, paymentStatus: 'CAPTURED' });
+    return { success: true, data: updated };
+  });
+
   /** POST /orders/:id/retry-dispatch — after "no movers available", the vendor
    *  holds the order and asks Swift to search again (fresh radius, cleared
    *  decline memory). No-op while an offer is already live. */

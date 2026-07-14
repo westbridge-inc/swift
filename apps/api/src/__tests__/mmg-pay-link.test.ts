@@ -57,7 +57,7 @@ async function makeDriver(userId: string) {
   return driver.id;
 }
 
-function inject(method: 'GET' | 'PUT', url: string, token: string, payload?: unknown, vendorId?: string) {
+function inject(method: 'GET' | 'PUT' | 'POST', url: string, token: string, payload?: unknown, vendorId?: string) {
   return app.inject({
     method, url,
     ...(payload !== undefined ? { payload: payload as Record<string, unknown> } : {}),
@@ -72,6 +72,20 @@ function inject(method: 'GET' | 'PUT', url: string, token: string, payload?: unk
 let vendorOwner: { userId: string; token: string };
 let vendorId: string;
 let driver: { userId: string; token: string };
+let customer: { userId: string; token: string };
+
+async function makeOrder(payment: 'CASH' | 'MOBILE_MONEY') {
+  const order = await app.prisma.order.create({
+    data: {
+      orderNumber: `MMG-${nanoid(10)}`, orderType: 'FOOD_DELIVERY',
+      customerId: customer.userId, vendorId, status: 'ACCEPTED',
+      deliveryAddress: 'x', deliveryLat: 6.8, deliveryLng: -58.15,
+      subtotalBase: 1000, subtotalMarkup: 0, subtotalCustomer: 1000, deliveryFee: 300, totalAmount: 1300,
+      paymentMethod: payment,
+    },
+  });
+  return order.id;
+}
 
 beforeAll(async () => {
   process.env['NODE_ENV'] = 'development';
@@ -92,9 +106,11 @@ beforeAll(async () => {
   vendorId = await makeVendor(vendorOwner.userId);
   driver = await makeUser(['DRIVER', 'CUSTOMER'], 'DRIVER');
   await makeDriver(driver.userId);
+  customer = await makeUser(['CUSTOMER'], 'CUSTOMER');
 });
 
 afterAll(async () => {
+  await app.prisma.order.deleteMany({ where: { customerId: { in: userIds } } });
   await app.prisma.driver.deleteMany({ where: { userId: { in: userIds } } });
   await app.prisma.vendor.deleteMany({ where: { owner: { userId: { in: userIds } } } });
   await app.prisma.vendorOwner.deleteMany({ where: { userId: { in: userIds } } });
@@ -138,5 +154,31 @@ describe('MMG pay link — taxi driver', () => {
     const clear = await inject('PUT', '/api/v1/driver/profile', driver.token, { mmgPayUrl: '' });
     expect(clear.statusCode).toBe(200);
     expect(clear.json().data.mmgPayUrl).toBeNull();
+  });
+});
+
+describe('MMG payment — vendor confirms received', () => {
+  it('marks an MMG order paid (CAPTURED) and is idempotent', async () => {
+    const id = await makeOrder('MOBILE_MONEY');
+    const res = await inject('POST', `/api/v1/vendor/orders/${id}/confirm-payment`, vendorOwner.token, {}, vendorId);
+    expect(res.statusCode).toBe(200);
+    expect(res.json().data.paymentStatus).toBe('CAPTURED');
+    // double-tap safe
+    const again = await inject('POST', `/api/v1/vendor/orders/${id}/confirm-payment`, vendorOwner.token, {}, vendorId);
+    expect(again.statusCode).toBe(200);
+    expect(again.json().data.paymentStatus).toBe('CAPTURED');
+  });
+
+  it('refuses to "confirm payment" on a cash order (cash is settled at handover)', async () => {
+    const id = await makeOrder('CASH');
+    const res = await inject('POST', `/api/v1/vendor/orders/${id}/confirm-payment`, vendorOwner.token, {}, vendorId);
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error.code).toBe('NOT_MMG');
+  });
+
+  it("a different owner can't confirm this vendor's order", async () => {
+    const id = await makeOrder('MOBILE_MONEY');
+    const res = await inject('POST', `/api/v1/vendor/orders/${id}/confirm-payment`, driver.token, {});
+    expect([403, 404]).toContain(res.statusCode);
   });
 });
