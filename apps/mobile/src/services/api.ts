@@ -378,6 +378,7 @@ export const vendorApi = {
     api.get('/vendor/orders', { params }),
   order: (id: string) => api.get(`/vendor/orders/${id}`),
   acceptOrder: (id: string) => api.put(`/vendor/orders/${id}/accept`),
+  confirmPayment: (id: string) => api.post(`/vendor/orders/${id}/confirm-payment`, {}),
   preparing: (id: string) => api.put(`/vendor/orders/${id}/preparing`),
   ready: (id: string) => api.put(`/vendor/orders/${id}/ready`),
   completePickup: (id: string, code?: string) => api.put(`/vendor/orders/${id}/complete-pickup`, { code }),
