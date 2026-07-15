@@ -8,7 +8,7 @@ import { useNavigation, useRoute } from '@react-navigation/native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { color, radius, space } from '@swift/ui';
 import { useMutation } from '@tanstack/react-query';
-import { useOrder, useTipOrder } from '../../../hooks/customer';
+import { useOrder, useTipOrder, useDecideSubstitution } from '../../../hooks/customer';
 import { toast } from '../../../components/ui/toast';
 import { customerApi } from '../../../services/api';
 import { connectSocket, getSocket, subscribeToOrder } from '../../../services/socket';
@@ -159,6 +159,7 @@ export function DeliveryScreen() {
     onSuccess: () => order.refetch(),
   });
   const tip = useTipOrder(orderId);
+  const decideSub = useDecideSubstitution(orderId);
 
   const o = order.data;
 
@@ -178,10 +179,12 @@ export function DeliveryScreen() {
     s.on('rider:location', onRider);
     s.on('driver:location', onDriver);
     s.on('order:status_changed', onStatus);
+    s.on('order:substitution', onStatus);
     return () => {
       s.off('rider:location', onRider);
       s.off('driver:location', onDriver);
       s.off('order:status_changed', onStatus);
+      s.off('order:substitution', onStatus);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [orderId]);
@@ -336,6 +339,45 @@ export function DeliveryScreen() {
           {/* LIFECYCLE_V2 hold — the store hasn't been told yet; cancelling is
               free until the countdown ends. Server clock decides; this is UI. */}
           <HeldBanner holdExpiresAt={o.holdExpiresAt} vendorName={o.vendor?.name} onExpire={() => order.refetch()} />
+
+          {/* Out-of-stock substitutions (§5.3) — the store asked; you decide. */}
+          {items
+            .filter((it: any) => it.subStatus === 'PENDING')
+            .map((it: any) => (
+              <View
+                key={`sub-${it.id}`}
+                style={{ backgroundColor: color.brand[50], borderRadius: radius.lg, padding: space.md, marginBottom: space.md }}
+              >
+                <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.sm }}>
+                  <Feather name="repeat" size={16} color={color.brand[600]} />
+                  <T variant="label" weight="bold" style={{ flex: 1 }}>
+                    {it.name} is out of stock
+                  </T>
+                </View>
+                <T variant="caption" tone="muted" style={{ marginTop: 4 }}>
+                  {o.vendor?.name ?? 'The store'} suggests {it.substituteName} ({money(Number(it.substitutePrice ?? 0))}
+                  {it.quantity > 1 ? ` × ${it.quantity}` : ''}) instead. Rejecting removes the item and lowers your total.
+                </T>
+                <View style={{ flexDirection: 'row', gap: space.md, marginTop: space.md }}>
+                  <PillButton
+                    label="Approve swap"
+                    size="sm"
+                    style={{ flex: 1 }}
+                    loading={decideSub.isPending}
+                    disabled={decideSub.isPending}
+                    onPress={() => decideSub.mutate({ lineId: it.id, approve: true })}
+                  />
+                  <PillButton
+                    label="No thanks"
+                    variant="soft"
+                    size="sm"
+                    style={{ flex: 1 }}
+                    disabled={decideSub.isPending}
+                    onPress={() => decideSub.mutate({ lineId: it.id, approve: false })}
+                  />
+                </View>
+              </View>
+            ))}
 
           {/* Rider card */}
           {rider ? (

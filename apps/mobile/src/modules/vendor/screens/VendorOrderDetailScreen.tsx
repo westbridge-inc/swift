@@ -1,10 +1,10 @@
 /** @jsxImportSource react */
 import React, { useState } from 'react';
-import { Linking, ScrollView, View } from 'react-native';
+import { Linking, Pressable, ScrollView, View } from 'react-native';
 import { Feather, MaterialCommunityIcons } from '@expo/vector-icons';
 import { color, radius, space } from '@swift/ui';
-import { Card, IconChip, InfoRow, LoadingBlock, ErrorState, PillButton, PopupCard, Screen, T } from '../../../kit';
-import { useOrderAction, useRetryDispatch, useVendorOrder } from '../../../hooks/vendorops';
+import { Card, Chip, IconChip, InfoRow, LoadingBlock, ErrorState, PillButton, PopupCard, Screen, T } from '../../../kit';
+import { useOrderAction, useRetryDispatch, useVendorOrder, usePickingActions, useVendorMenu } from '../../../hooks/vendorops';
 import { money } from '../../../lib/money';
 import {
   FulfillmentTag,
@@ -102,6 +102,9 @@ export function VendorOrderDetailScreen({ navigation, route }: any) {
   const orderAction = useOrderAction();
   const retryDispatch = useRetryDispatch();
   const [confirmReject, setConfirmReject] = useState(false);
+  const [subFor, setSubFor] = useState<string | null>(null);
+  const picking = usePickingActions();
+  const menu = useVendorMenu();
 
   if (isLoading || !orderId) {
     return (
@@ -123,6 +126,21 @@ export function VendorOrderDetailScreen({ navigation, route }: any) {
   const items: any[] = order.items ?? [];
   const s = (order.status || '').toUpperCase();
   const terminal = ['DELIVERED', 'COMPLETED', 'CANCELLED'].includes(s);
+  // Shelf-pick UI: quantity-tracked store types, while the bag is still open.
+  const PICKABLE_STATES = ['ACCEPTED', 'PREPARING', 'READY_FOR_PICKUP', 'RIDER_ASSIGNED', 'RIDER_EN_ROUTE_PICKUP', 'RIDER_ARRIVED_PICKUP'];
+  const pickable = ['SUPERMARKET', 'STORE'].includes(order.vendor?.vendorType ?? '') && PICKABLE_STATES.includes(s);
+  const lineResolved = (l: any) => l.picked || l.subStatus === 'REFUNDED' || l.subStatus === 'REJECTED';
+  const openLines = pickable ? items.filter((l) => !lineResolved(l)).length : 0;
+  /** Same substitutionGroup wins; otherwise same category; always in stock. */
+  const substituteCandidates = (line: any) => {
+    const all: any[] = (menu.data ?? []).flatMap((c: any) => (c.items ?? []).map((i: any) => ({ ...i, categoryId: c.id })));
+    const original = all.find((i) => i.id === line.itemId);
+    const pool = all.filter((i) => i.id !== line.itemId && i.isAvailable !== false);
+    const grouped = original?.substitutionGroup
+      ? pool.filter((i) => i.substitutionGroup === original.substitutionGroup)
+      : pool.filter((i) => original && i.categoryId === original.categoryId);
+    return grouped.slice(0, 6);
+  };
   const isPickup = order.fulfillment === 'PICKUP';
   const isAppt = order.fulfillment === 'APPOINTMENT';
   const apptMobile = isAppt && !!order.deliveryAddress && order.deliveryAddress !== order.pickupAddress;
@@ -198,36 +216,103 @@ export function VendorOrderDetailScreen({ navigation, route }: any) {
           </Card>
         ) : null}
 
-        {/* Line items */}
+        {/* Line items — quantity-tracked stores get the shelf PICK LIST (§5.3):
+            tick as you pick; out-of-stock becomes a customer-decided
+            substitution or a line refund. The bag can't close with open lines. */}
         <Card style={{ marginBottom: space.md }}>
-          <T variant="body" weight="semibold" style={{ marginBottom: space.sm }}>
-            {items.length} item{items.length === 1 ? '' : 's'}
-          </T>
-          {items.map((it) => (
-            <View key={it.id} style={{ flexDirection: 'row', alignItems: 'flex-start', paddingVertical: 6 }}>
-              <T variant="label" weight="bold" tone="brand" style={{ width: 34 }}>
-                {it.quantity}×
+          <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: space.sm }}>
+            <T variant="body" weight="semibold">
+              {items.length} item{items.length === 1 ? '' : 's'}
+            </T>
+            {pickable ? (
+              <T variant="caption" weight="semibold" tone={openLines === 0 ? 'muted' : 'brand'}>
+                {openLines === 0 ? 'All picked' : `${openLines} to pick`}
               </T>
-              <View style={{ flex: 1, paddingRight: space.md }}>
-                <T variant="label" weight="semibold">
-                  {it.name}
-                </T>
-                {it.specialInstructions ? (
-                  <T variant="caption" tone="muted" style={{ marginTop: 2 }}>
-                    “{it.specialInstructions}”
+            ) : null}
+          </View>
+          {items.map((it) => {
+            const closed = it.subStatus === 'REFUNDED' || it.subStatus === 'REJECTED';
+            const pending = it.subStatus === 'PENDING';
+            return (
+              <View key={it.id} style={{ paddingVertical: 6, opacity: closed ? 0.45 : 1 }}>
+                <View style={{ flexDirection: 'row', alignItems: 'flex-start' }}>
+                  {pickable && !closed ? (
+                    <Pressable
+                      onPress={() => !pending && picking.setPicked.mutate({ orderId: order.id, lineId: it.id, picked: !it.picked })}
+                      hitSlop={8}
+                      style={{ marginRight: space.sm, marginTop: 1 }}
+                    >
+                      <MaterialCommunityIcons
+                        name={it.picked ? 'checkbox-marked' : 'checkbox-blank-outline'}
+                        size={22}
+                        color={pending ? color.border.strong : it.picked ? color.success : color.text.muted}
+                      />
+                    </Pressable>
+                  ) : null}
+                  <T variant="label" weight="bold" tone="brand" style={{ width: 34 }}>
+                    {it.quantity}×
                   </T>
-                ) : null}
-                {it.quantity > 1 ? (
-                  <T variant="caption" tone="muted" style={{ marginTop: 2 }}>
-                    {money(it.basePrice)} each
+                  <View style={{ flex: 1, paddingRight: space.md }}>
+                    <T variant="label" weight="semibold" style={closed ? { textDecorationLine: 'line-through' } : undefined}>
+                      {it.name}
+                    </T>
+                    {it.specialInstructions ? (
+                      <T variant="caption" tone="muted" style={{ marginTop: 2 }}>
+                        “{it.specialInstructions}”
+                      </T>
+                    ) : null}
+                    {pending ? (
+                      <T variant="caption" weight="semibold" tone="brand" style={{ marginTop: 2 }}>
+                        Waiting on the customer: {it.substituteName}
+                      </T>
+                    ) : null}
+                    {closed ? (
+                      <T variant="caption" tone="muted" style={{ marginTop: 2 }}>
+                        {it.subStatus === 'REFUNDED' ? 'Refunded — out of stock' : 'Customer declined the substitute'}
+                      </T>
+                    ) : null}
+                  </View>
+                  <T variant="label" weight="semibold">
+                    {money(it.totalBase)}
                   </T>
+                </View>
+                {pickable && !closed && !pending && !it.picked ? (
+                  <View style={{ marginLeft: 64 }}>
+                    {subFor === it.id ? (
+                      <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: space.sm, marginTop: space.sm }}>
+                        {substituteCandidates(it).map((cand: any) => (
+                          <Chip
+                            key={cand.id}
+                            label={`${cand.name} · ${money(cand.basePrice)}`}
+                            onPress={() => {
+                              setSubFor(null);
+                              picking.substitute.mutate({ orderId: order.id, lineId: it.id, substituteItemId: cand.id });
+                            }}
+                            style={{ height: 32, paddingHorizontal: space.md }}
+                          />
+                        ))}
+                        <Chip
+                          label="Refund line"
+                          onPress={() => {
+                            setSubFor(null);
+                            picking.refundLine.mutate({ orderId: order.id, lineId: it.id });
+                          }}
+                          style={{ height: 32, paddingHorizontal: space.md }}
+                        />
+                        <Chip label="Back" selected onPress={() => setSubFor(null)} style={{ height: 32, paddingHorizontal: space.md }} />
+                      </View>
+                    ) : (
+                      <Pressable onPress={() => setSubFor(it.id)} hitSlop={6}>
+                        <T variant="caption" weight="semibold" tone="brand" style={{ marginTop: 4 }}>
+                          Out of stock?
+                        </T>
+                      </Pressable>
+                    )}
+                  </View>
                 ) : null}
               </View>
-              <T variant="label" weight="semibold">
-                {money(it.totalBase)}
-              </T>
-            </View>
-          ))}
+            );
+          })}
         </Card>
 
         {/* Money — recorded amounts only (cash model: payment before handover) */}

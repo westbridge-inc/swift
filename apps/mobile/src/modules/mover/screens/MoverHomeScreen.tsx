@@ -127,6 +127,13 @@ function DispatchOfferCard({
                 </View>
                 {/* Who you'd front cash for — decide BEFORE you ride */}
                 <CustomerTrustBadge trust={offer.customerTrust} cash={offer.paymentMethod === 'CASH'} />
+                {/* Judge the bag before you commit (grocery runs get big) */}
+                {offer.itemCount ? (
+                  <T variant="caption" tone="muted" style={{ marginTop: 4 }}>
+                    {offer.itemCount} item{offer.itemCount === 1 ? '' : 's'}
+                    {offer.estLoad ? ` · ${offer.estLoad} load` : ''}
+                  </T>
+                ) : null}
               </>
             ) : (
               <>
@@ -432,6 +439,11 @@ export function MoverHomeScreen({ navigation }: any) {
                     <View style={{ marginTop: space.md }}>
                       <RoutePair pickup={j.vendor?.name ?? j.pickupAddress ?? 'Pickup'} dropoff={j.deliveryAddress ?? j.dropoffAddress} />
                     </View>
+                    {j.itemCount ? (
+                      <T variant="caption" tone="muted" style={{ marginTop: space.sm }}>
+                        {j.itemCount} item{j.itemCount === 1 ? '' : 's'}{j.estLoad ? ` · ${j.estLoad} load` : ''}
+                      </T>
+                    ) : null}
                     {/* Who you'd front cash for — trust before float (§4d) */}
                     <CustomerTrustBadge trust={j.customerTrust} cash={j.paymentMethod === 'CASH'} />
                     <PillButton label="Accept" size="md" style={{ marginTop: space.md }} loading={accept.isPending} onPress={() => accept.mutate({ id: j.id })} />

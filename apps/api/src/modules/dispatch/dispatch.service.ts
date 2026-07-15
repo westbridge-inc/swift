@@ -9,6 +9,7 @@ import { getMapsProvider, type MapsProvider } from '../../providers/maps/maps-pr
 import { classesAtOrAbove } from '../rides/fare.service';
 import { rankCandidates, type DispatchCandidate } from './scoring';
 import { customerTrustSummaries } from '../cash/cash-rules.service';
+import { estimateLoad } from '../../utils/load';
 import { log } from '../../utils/logger';
 
 declare module 'fastify' {
@@ -181,6 +182,7 @@ export class DispatchService {
         customerId: true, pickupLat: true, pickupLng: true,
         subtotalBase: true, paymentMethod: true,
         vendor: { select: { name: true, owner: { select: { userId: true } } } },
+        items: { select: { quantity: true } },
       },
     });
     if (!order) throw new NotFoundError('Order', orderId);
@@ -224,6 +226,9 @@ export class DispatchService {
     // fronting it for (trust level, completed orders, strikes) before accept.
     const trust = (await customerTrustSummaries(this.prisma, [order.customerId])).get(order.customerId);
 
+    // §7: a mover judges a big grocery order BEFORE accepting.
+    const totalUnits = order.items.reduce((s, i) => s + i.quantity, 0);
+
     this.io.to(`user:${top.userId}`).emit('dispatch:offer', {
       orderId,
       orderNumber: order.orderNumber,
@@ -234,6 +239,8 @@ export class DispatchService {
       etaMinutes: Math.round(top.etaMinutes),
       paymentMethod: order.paymentMethod,
       customerTrust: trust ?? null,
+      itemCount: order.items.length,
+      estLoad: order.items.length > 0 ? estimateLoad(totalUnits) : null,
     });
 
     log().info({ orderId, orderNumber: order.orderNumber, moverId: top.riderId, pool, round, etaMinutes: Math.round(top.etaMinutes), candidates: candidates.length }, 'dispatch: offer sent');

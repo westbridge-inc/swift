@@ -11,6 +11,7 @@ import { DeliveryCashSettlementService, assertSettlementId } from '../cash/deliv
 import { makeDispatchService } from '../dispatch/dispatch.service';
 import { getKycProvider } from '../../providers/kyc/kyc-provider';
 import { haversineDistance } from '../../utils/distance';
+import { estimateLoad } from '../../utils/load';
 import { parsePagination, paginatedResponse } from '../../utils/pagination';
 import { AppError, NotFoundError, ConflictError, ValidationError } from '../../utils/errors';
 import { throwForMissingProfile } from '../../utils/role-gate';
@@ -518,6 +519,7 @@ export async function riderRoutes(app: FastifyInstance) {
           deliveryInstructions: order.deliveryInstructions,
           items: order.items,
           itemCount: order.items.reduce((s, i) => s + i.quantity, 0),
+          estLoad: estimateLoad(order.items.reduce((s, i) => s + i.quantity, 0)),
           deliveryFee: Number(order.deliveryFee),
           tipAmount: Number(order.tipAmount),
           totalEarning: Number(order.deliveryFee) + Number(order.tipAmount),
