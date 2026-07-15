@@ -519,12 +519,15 @@ export async function reconcileStuckDispatch(
     where: {
       updatedAt: { lt: cutoff },
       OR: [
-        // Food / grocery / courier: waiting on a rider.
+        // Food / grocery / courier: waiting on a rider. A held order
+        // (LIFECYCLE_V2 free-cancel window still open) is NOT stuck —
+        // reconciling it would dispatch inside the customer's window.
         {
           orderType: { not: 'TAXI' },
           fulfillment: 'DELIVERY',
           riderId: null,
           status: { in: ['ACCEPTED', 'PREPARING', 'READY_FOR_PICKUP'] },
+          AND: [{ OR: [{ holdExpiresAt: null }, { holdExpiresAt: { lte: new Date() } }] }],
         },
         // Taxi: waiting on a driver.
         { orderType: 'TAXI', driverId: null, status: 'PENDING' },

@@ -834,6 +834,12 @@ model Order {
   /// the whole premium goes to the rider (cash, no commission).
   isExpress             Boolean   @default(false)
   scheduledFor          DateTime?
+  /// LIFECYCLE_V2 hold (spec Part A): while in the FUTURE the order is HIDDEN
+  /// from the vendor and undispatched — the customer's free-cancel window.
+  /// Cleared (null) by the release worker; the server clock is authoritative.
+  holdExpiresAt         DateTime?
+  /// Set exactly once when the hold releases (vendor notified + dispatchable).
+  releasedToVendorAt    DateTime?
   placedAt              DateTime  @default(now())
   acceptedAt            DateTime?
   preparingAt           DateTime?
@@ -876,6 +882,8 @@ model Order {
   @@index([status])
   @@index([placedAt])
   @@index([customerId, status])
+  // Release-worker tick: WHERE status=PENDING AND holdExpiresAt <= now
+  @@index([status, holdExpiresAt])
   // The vendor order board reads "my orders in these states" constantly.
   @@index([vendorId, status])
   @@map("orders")

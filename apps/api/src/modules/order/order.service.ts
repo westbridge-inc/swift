@@ -74,6 +74,31 @@ export const ORDER_TRANSITIONS: Record<OrderStatus, OrderStatus[]> = {
 /** States where the order is physically with the mover — no cancellation. */
 const IN_TRANSIT: OrderStatus[] = ['PICKED_UP', 'EN_ROUTE_DELIVERY', 'ARRIVED', 'RIDE_IN_PROGRESS'];
 
+// ---------------------------------------------------------------------------
+// LIFECYCLE_V2 hold (spec Part A). While holdExpiresAt is in the FUTURE the
+// order is hidden from the vendor and undispatched — the customer's free-cancel
+// window. OFF by default: with the flag unset, orders are born with no hold and
+// behave exactly as before. The server clock decides everything; any client
+// countdown is cosmetic.
+// ---------------------------------------------------------------------------
+
+/** Hold duration in ms, or null when the feature is off / misconfigured. */
+export function holdWindowMs(): number | null {
+  if (process.env['LIFECYCLE_V2'] !== '1') return null;
+  const minutes = Number(process.env['ORDER_HOLD_MINUTES'] ?? 2);
+  return Number.isFinite(minutes) && minutes > 0 ? minutes * 60_000 : null;
+}
+
+/** Prisma WHERE fragment: only orders a vendor/mover is allowed to see. */
+export function notHeldFilter() {
+  return { OR: [{ holdExpiresAt: null }, { holdExpiresAt: { lte: new Date() } }] };
+}
+
+/** A held order = pre-release: hidden, undispatched, freely cancellable. */
+export function isHeld(order: { holdExpiresAt: Date | null }, now = new Date()): boolean {
+  return order.holdExpiresAt != null && order.holdExpiresAt > now;
+}
+
 const RISK_NEW_ACCOUNT_HOURS = 72;
 /** Guyana is UTC-4 year-round */
 const GUYANA_UTC_OFFSET_HOURS = -4;
@@ -399,6 +424,13 @@ export class OrderService {
             subtotalCustomer: plan.subtotal,
             deliveryFee: plan.deliveryFee,
             isExpress: input.express === true && plan.fulfillment === 'DELIVERY',
+            // LIFECYCLE_V2: born held (hidden from the vendor, free-cancel
+            // window open). Express skips the hold — the customer paid 1.5x
+            // for priority; making them wait would break the product promise.
+            holdExpiresAt:
+              holdWindowMs() != null && !(input.express === true && plan.fulfillment === 'DELIVERY')
+                ? new Date(now.getTime() + holdWindowMs()!)
+                : null,
             tipAmount: planTip,
             discount: planDiscount,
             totalAmount,
@@ -509,19 +541,27 @@ export class OrderService {
     // Post-transaction: emit and notify per vendor (best-effort). The socket
     // event goes to that vendor's room only — a global emit would fan out to
     // every connected client and leak order metadata platform-wide.
+    // A HELD order tells the vendor NOTHING here — the release worker does
+    // that when the customer's cancel window closes. Low-stock alerts still
+    // go out now: inventory already moved regardless of the hold.
     for (const order of orders) {
-      this.io
-        .to(`vendor:${order.vendorId}`)
-        .emit('order:new', { orderId: order.id, vendorId: order.vendorId, orderNumber: order.orderNumber });
+      const held = isHeld(order);
+      if (!held) {
+        this.io
+          .to(`vendor:${order.vendorId}`)
+          .emit('order:new', { orderId: order.id, vendorId: order.vendorId, orderNumber: order.orderNumber });
+      }
       const vendorOwner = await this.prisma.vendorOwner.findUnique({ where: { id: order.vendor!.ownerId } });
       if (vendorOwner) {
-        await this.notifications.newOrderForVendor(
-          vendorOwner.userId,
-          order.orderNumber,
-          order.items.length,
-          Number(order.totalAmount),
-          order.id,
-        );
+        if (!held) {
+          await this.notifications.newOrderForVendor(
+            vendorOwner.userId,
+            order.orderNumber,
+            order.items.length,
+            Number(order.totalAmount),
+            order.id,
+          );
+        }
         if (order.vendorId) {
           for (const ev of stockEventsByVendor.get(order.vendorId) ?? []) {
             await this.notifications.lowStock(vendorOwner.userId, ev);
@@ -539,6 +579,8 @@ export class OrderService {
       id: order.id,
       orderNumber: order.orderNumber,
       status: order.status,
+      // The confirmation screen shows the free-cancel countdown off this.
+      holdExpiresAt: order.holdExpiresAt,
       fulfillment: order.fulfillment,
       appointmentSlot: order.appointmentSlot,
       pickupCode: order.pickupCode,
@@ -617,7 +659,10 @@ export class OrderService {
     }
 
     const minutesSincePlaced = (Date.now() - order.placedAt.getTime()) / 60000;
-    const freeCancellation = minutesSincePlaced <= 5 && order.status === 'PENDING';
+    // LIFECYCLE_V2: the hold IS the free window — nothing was committed to a
+    // vendor or mover yet, so cancelling a held order can never cost anything.
+    const heldNow = isHeld(order) && !order.riderId && !order.driverId;
+    const freeCancellation = heldNow || (minutesSincePlaced <= 5 && order.status === 'PENDING');
     const cancellationFee = freeCancellation ? 0 : 500;
 
     // Same compare-and-set machinery as every other transition: if the order
@@ -671,7 +716,9 @@ export class OrderService {
     }
 
     this.io.to(`order:${orderId}`).emit('order:status_changed', { orderId, status: 'CANCELLED' });
-    if (order.vendorId) {
+    // A held order was never shown to the vendor — telling them about a
+    // cancellation of something they never saw would only confuse the board.
+    if (order.vendorId && !heldNow) {
       this.io.to(`vendor:${order.vendorId}`).emit('order:status_changed', { orderId, status: 'CANCELLED' });
     }
 
@@ -816,6 +863,76 @@ export class OrderService {
     }
 
     return order;
+  }
+
+  /**
+   * LIFECYCLE_V2 release tick (BullMQ repeatable, every 30s): every held order
+   * whose window closed becomes visible + dispatchable. The updateMany guard
+   * is the race protection — a customer cancel that landed a millisecond
+   * earlier flips the status, the CAS matches nothing, and we skip. Clearing
+   * holdExpiresAt IS the release; a crash after the CAS is recovered by the
+   * vendor board (order now visible) and the dispatch reconcile job.
+   *
+   * Courier orders (born READY_FOR_PICKUP, no vendor) start their offer
+   * cascade here instead of at creation.
+   */
+  async releaseDueHeldOrders(enqueueDispatch: (orderId: string) => Promise<void>, batch = 100) {
+    const due = await this.prisma.order.findMany({
+      where: { status: { in: ['PENDING', 'READY_FOR_PICKUP'] }, holdExpiresAt: { lte: new Date() } },
+      select: { id: true },
+      take: batch,
+    });
+
+    const released: string[] = [];
+    for (const { id } of due) {
+      const res = await this.prisma.order.updateMany({
+        where: { id, status: { in: ['PENDING', 'READY_FOR_PICKUP'] }, holdExpiresAt: { lte: new Date() } },
+        data: { holdExpiresAt: null, releasedToVendorAt: new Date() },
+      });
+      if (res.count === 0) continue; // cancelled or raced — idempotent skip
+
+      released.push(id);
+      const order = await this.prisma.order.findUnique({
+        where: { id },
+        include: {
+          items: { select: { id: true } },
+          vendor: { select: { id: true, name: true, ownerId: true } },
+        },
+      });
+      if (!order) continue;
+
+      // No vendor to notify on a courier job — release = start the cascade.
+      if (order.orderType === 'COURIER') {
+        try {
+          await enqueueDispatch(id);
+        } catch (err) {
+          log().error({ err, orderId: id }, 'hold-release: courier dispatch enqueue failed — reconcile will recover');
+        }
+        continue;
+      }
+
+      if (order.vendorId && order.vendor) {
+        this.io
+          .to(`vendor:${order.vendorId}`)
+          .emit('order:new', { orderId: order.id, vendorId: order.vendorId, orderNumber: order.orderNumber });
+        try {
+          const vendorOwner = await this.prisma.vendorOwner.findUnique({ where: { id: order.vendor.ownerId } });
+          if (vendorOwner) {
+            await this.notifications.newOrderForVendor(
+              vendorOwner.userId,
+              order.orderNumber,
+              order.items.length,
+              Number(order.totalAmount),
+              order.id,
+            );
+          }
+        } catch (err) {
+          log().error({ err, orderId: id }, 'hold-release: vendor notification failed — board still shows the order');
+        }
+      }
+    }
+
+    return { released };
   }
 
   async createEarnings(orderId: string) {

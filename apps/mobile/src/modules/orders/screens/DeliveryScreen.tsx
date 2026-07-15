@@ -95,6 +95,52 @@ function StageBar({ stage }: { stage: number }) {
 // time, stage bar, order lines. Live courier via socket (rider:location uses
 // {lat,lng}; driver:location uses {latitude,longitude} — different keys!) with
 // a 15s poll as fallback; order:status_changed refetches.
+
+/** Free-cancel countdown while the order is held (hidden from the store). */
+function HeldBanner({ holdExpiresAt, vendorName, onExpire }: { holdExpiresAt?: string | null; vendorName?: string; onExpire: () => void }) {
+  const [, tick] = useState(0);
+  const expiresMs = holdExpiresAt ? new Date(holdExpiresAt).getTime() : 0;
+  const remaining = Math.max(0, Math.floor((expiresMs - Date.now()) / 1000));
+  const active = !!holdExpiresAt && remaining > 0;
+
+  useEffect(() => {
+    if (!active) return;
+    const t = setInterval(() => {
+      tick((n) => n + 1);
+      if (new Date(holdExpiresAt!).getTime() <= Date.now()) onExpire();
+    }, 1000);
+    return () => clearInterval(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [active, holdExpiresAt]);
+
+  if (!active) return null;
+  const mm = Math.floor(remaining / 60);
+  const ss = remaining % 60;
+  return (
+    <View
+      style={{
+        flexDirection: 'row',
+        alignItems: 'center',
+        gap: space.md,
+        backgroundColor: color.brand[50],
+        borderRadius: radius.lg,
+        padding: space.md,
+        marginBottom: space.md,
+      }}
+    >
+      <Feather name="clock" size={18} color={color.brand[600]} />
+      <View style={{ flex: 1 }}>
+        <T variant="label" weight="semibold">
+          {vendorName ?? 'The store'} gets your order in {mm}:{String(ss).padStart(2, '0')}
+        </T>
+        <T variant="caption" tone="muted" style={{ marginTop: 1 }}>
+          Changed your mind? Cancelling is free until then.
+        </T>
+      </View>
+    </View>
+  );
+}
+
 export function DeliveryScreen() {
   const navigation = useNavigation<any>();
   const route = useRoute<any>();
@@ -287,6 +333,10 @@ export function DeliveryScreen() {
       >
         <View style={{ width: 44, height: 5, borderRadius: 3, backgroundColor: color.border.subtle, alignSelf: 'center' }} />
         <ScrollView contentContainerStyle={{ padding: GUTTER, paddingBottom: insets.bottom + space['2xl'] }}>
+          {/* LIFECYCLE_V2 hold — the store hasn't been told yet; cancelling is
+              free until the countdown ends. Server clock decides; this is UI. */}
+          <HeldBanner holdExpiresAt={o.holdExpiresAt} vendorName={o.vendor?.name} onExpire={() => order.refetch()} />
+
           {/* Rider card */}
           {rider ? (
             <View

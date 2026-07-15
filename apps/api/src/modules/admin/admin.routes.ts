@@ -359,6 +359,8 @@ export async function adminRoutes(app: FastifyInstance) {
           riderId: null,
           status: { in: ['PENDING', 'ACCEPTED', 'PREPARING', 'READY_FOR_PICKUP'] },
           placedAt: { lt: new Date(Date.now() - 10 * 60 * 1000) },
+          // A held order (LIFECYCLE_V2) is waiting on the customer, not ops.
+          AND: [{ OR: [{ holdExpiresAt: null }, { holdExpiresAt: { lte: new Date() } }] }],
         },
       }),
     ]);

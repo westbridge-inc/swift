@@ -1,7 +1,7 @@
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { RiderType, VehicleType, EarningType, EarningStatus } from '@prisma/client';
-import { OrderService } from '../order/order.service';
+import { OrderService, notHeldFilter } from '../order/order.service';
 import { NotificationService } from '../notification/notification.service';
 import { VerificationService } from '../verification/verification.service';
 import { CashRulesService } from '../cash/cash-rules.service';
@@ -473,6 +473,8 @@ export async function riderRoutes(app: FastifyInstance) {
         status: { in: ['READY_FOR_PICKUP', 'ACCEPTED', 'PREPARING'] },
         riderId: null,
         orderType: { in: orderTypes as import('@prisma/client').OrderType[] },
+        // LIFECYCLE_V2: a held courier job isn't offerable yet.
+        ...notHeldFilter(),
       },
       include: {
         vendor: {
