@@ -15,6 +15,8 @@ import {
   Settings,
   FileText,
   ShieldCheck,
+  ShieldAlert,
+  RefreshCw,
 } from 'lucide-react';
 
 // Grouped by what the operator is doing, not by table name. Sections only list
@@ -41,6 +43,8 @@ const NAV_SECTIONS: { title: string; items: { label: string; href: string; icon:
     title: 'Money',
     items: [
       { label: 'Finance', href: '/finance', icon: DollarSign },
+      { label: 'Subscriptions', href: '/subscriptions', icon: RefreshCw },
+      { label: 'Claims', href: '/claims', icon: ShieldAlert },
       { label: 'Promos', href: '/promos', icon: Tag },
     ],
   },

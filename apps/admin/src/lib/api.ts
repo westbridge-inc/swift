@@ -192,6 +192,26 @@ export const suspendVendor = (id: string, reason?: string) =>
 export const featureVendor = (id: string, featured: boolean) =>
   apiFetch(`/api/v1/admin/vendors/${id}/feature`, { method: 'PUT', body: JSON.stringify({ featured }) });
 
+// ─── Money center ────────────────────────────────────────────────
+export const fetchSubscriptions = (params?: string) => apiFetch(`/api/v1/admin/subscriptions?${params || 'limit=50'}`);
+export const waiveSubscriptionFee = (id: string, reason?: string) =>
+  apiFetch(`/api/v1/admin/subscriptions/${id}/waive-fee`, { method: 'PUT', body: JSON.stringify({ reason }) });
+export const topUpSubscription = (id: string, amount: number, reference?: string) =>
+  apiFetch(`/api/v1/admin/subscriptions/${id}/topup`, { method: 'POST', body: JSON.stringify({ amount, reference }) });
+export const fetchBillingEvents = (id: string) => apiFetch(`/api/v1/admin/subscriptions/${id}/billing-events?limit=20`);
+export const fetchSettlements = (params?: string) => apiFetch(`/api/v1/admin/finance/settlements?${params || 'limit=50'}`);
+export const processSettlement = (id: string, reference?: string) =>
+  apiFetch(`/api/v1/admin/finance/settlements/${id}/process`, { method: 'PUT', body: JSON.stringify({ reference }) });
+export const fetchClaims = (status?: string) =>
+  apiFetch(`/api/v1/admin/cash-rules/claims?limit=50${status ? `&status=${status}` : ''}`);
+export const approveClaim = (id: string, reason?: string) =>
+  apiFetch(`/api/v1/admin/cash-rules/claims/${id}/approve`, { method: 'PUT', body: JSON.stringify({ reason }) });
+export const rejectClaim = (id: string, reason: string) =>
+  apiFetch(`/api/v1/admin/cash-rules/claims/${id}/reject`, { method: 'PUT', body: JSON.stringify({ reason }) });
+export const payClaim = (id: string, reference?: string) =>
+  apiFetch(`/api/v1/admin/cash-rules/claims/${id}/paid`, { method: 'PUT', body: JSON.stringify({ reference }) });
+export const fetchCashMetrics = () => apiFetch('/api/v1/admin/cash-rules/metrics');
+
 // ─── Global ⌘K search ────────────────────────────────────────────
 export interface GlobalSearchResult {
   orders: { id: string; orderNumber: string; status: string; orderType: string; totalAmount: number; placedAt: string }[];
