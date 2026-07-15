@@ -10,6 +10,7 @@ import {
   OrderType,
   SettlementStatus,
   CashSettlementStatus,
+  AgentActionStatus,
   SubscriptionStatus,
   SubscriptionType,
   DiscountType,
@@ -24,6 +25,7 @@ import { VerificationService } from '../verification/verification.service';
 import { BillingService } from '../billing/billing.service';
 import { SubscriptionService } from '../subscription/subscription.service';
 import { CashRulesService } from '../cash/cash-rules.service';
+import { AgentService } from '../agent/agent.service';
 import { OrderService } from '../order/order.service';
 import { getKycProvider } from '../../providers/kyc/kyc-provider';
 import { getPaymentProvider } from '../../providers/payment/payment-provider';
@@ -1923,5 +1925,47 @@ export async function adminRoutes(app: FastifyInstance) {
     }).parse(request.body ?? {});
     const updated = await support.resolve(id, request.user.userId, body);
     return { success: true, data: updated };
+  });
+
+  // ── Ops agent (spec Part B) — approvals + audit ───────────────────────────
+  // The agent proposes; humans decide here. Approval replays the SAME
+  // deterministic executor — the model is nowhere in this path.
+  const agentService = new AgentService(app.prisma, app.io, async (orderId) => {
+    if (!app.queues?.dispatchQueue) throw new AppError(503, 'QUEUES_DOWN', 'Dispatch queue unavailable');
+    await app.queues.dispatchQueue.add('dispatch-order', { orderId }, { removeOnComplete: 100, removeOnFail: 50 });
+  });
+
+  app.get('/agent/approvals', { preHandler: [adminGuard] }, async (request) => {
+    const { status } = z.object({ status: z.nativeEnum(AgentActionStatus).default('PENDING') }).parse(request.query);
+    const requests = await app.prisma.agentActionRequest.findMany({
+      where: { status },
+      orderBy: { createdAt: 'asc' },
+      take: 100,
+    });
+    return { success: true, data: requests };
+  });
+
+  app.post('/agent/approvals/:id/approve', { preHandler: [adminGuard] }, async (request) => {
+    const { id } = request.params as { id: string };
+    const decided = await agentService.decideRequest(id, request.user.userId, true);
+    await audit(request.user.userId, 'APPROVE_AGENT_ACTION', 'AgentActionRequest', id, { action: decided.action, orderId: decided.orderId }, request);
+    return { success: true, data: decided };
+  });
+
+  app.post('/agent/approvals/:id/reject', { preHandler: [adminGuard] }, async (request) => {
+    const { id } = request.params as { id: string };
+    const decided = await agentService.decideRequest(id, request.user.userId, false);
+    await audit(request.user.userId, 'REJECT_AGENT_ACTION', 'AgentActionRequest', id, { action: decided.action, orderId: decided.orderId }, request);
+    return { success: true, data: decided };
+  });
+
+  /** The agent's every move, append-only — what it saw, chose, and why. */
+  app.get('/agent/audit', { preHandler: [adminGuard] }, async (request) => {
+    const { page, limit, skip } = parsePagination(request.query as Record<string, string>);
+    const [events, total] = await Promise.all([
+      app.prisma.agentAuditEvent.findMany({ orderBy: { at: 'desc' }, skip, take: limit }),
+      app.prisma.agentAuditEvent.count(),
+    ]);
+    return { success: true, ...paginatedResponse(events, total, { page, limit, skip }) };
   });
 }

@@ -1816,3 +1816,54 @@ model CartItem {
 
   @@map("cart_items")
 }
+
+// ==========================================
+// OPS AGENT (spec Part B) — flag-gated OFF
+// The model only CLASSIFIES; every action executes through existing
+// deterministic services, and money-adjacent actions wait for a human.
+// ==========================================
+
+enum AgentActionStatus {
+  PENDING
+  APPROVED
+  REJECTED
+  EXECUTED
+  FAILED
+}
+
+model AgentActionRequest {
+  id        String            @id @default(cuid())
+  /// Tool name from the fixed allowlist (request_cancel, requeue_dispatch, …)
+  action    String
+  /// Tool input, JSON — replayed verbatim on approval
+  input     Json
+  /// The model's rationale — shown to the approving human
+  reasoning String?
+  orderId   String?
+  status    AgentActionStatus @default(PENDING)
+  /// Idempotency: one open request per (action, orderId) problem
+  actionKey String            @unique
+  createdAt DateTime          @default(now())
+  decidedAt DateTime?
+  decidedBy String?
+
+  @@index([status, createdAt])
+  @@map("agent_action_requests")
+}
+
+model AgentAuditEvent {
+  id        String   @id @default(cuid())
+  at        DateTime @default(now())
+  /// ops | approval
+  job       String
+  subjectId String?
+  action    String
+  input     Json
+  /// suggested | executed | pending_approval | auto_executed | rejected | error
+  outcome   String
+  reasoning String?
+
+  @@index([at])
+  @@index([subjectId])
+  @@map("agent_audit_events")
+}

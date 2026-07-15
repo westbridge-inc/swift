@@ -103,6 +103,24 @@ describe('Import boundary — money never touches AI (build-failing check)', () 
 
     expect(offenders).toEqual([]);
   });
+
+  it('the ops agent never imports billing or payment providers (it proposes; humans move money)', () => {
+    const srcRoot = path.resolve(__dirname, '..');
+    let files: string[] = [];
+    try {
+      files = tsFilesUnder(path.join(srcRoot, 'modules/agent'));
+    } catch {
+      return; // module absent — nothing to police
+    }
+    const offenders: string[] = [];
+    for (const file of files) {
+      const content = readFileSync(file, 'utf8');
+      if (/from\s+['"][^'"]*(modules\/billing|providers\/payment|providers\/mmg)/.test(content)) {
+        offenders.push(path.relative(srcRoot, file));
+      }
+    }
+    expect(offenders).toEqual([]);
+  });
 });
 
 describe('Prompt scrubber — hard rule 3 proven', () => {
