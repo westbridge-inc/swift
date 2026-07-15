@@ -1,5 +1,6 @@
 'use client';
 
+import Link from 'next/link';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { fetchRiders, verifyRiderDocuments } from '@/lib/api';
 
@@ -35,7 +36,7 @@ export default function RidersPage() {
             ) : (
               data?.data?.map((rider: any) => (
                 <tr key={rider.id} className="border-b border-[#38383A] hover:bg-white/5">
-                  <td className="p-4 font-medium">{rider.user?.firstName} {rider.user?.lastName}</td>
+                  <td className="p-4 font-medium"><Link href={`/riders/${rider.id}`} className="hover:text-[#E8192C] transition-colors">{rider.user?.firstName} {rider.user?.lastName}</Link></td>
                   <td className="p-4">{rider.user?.phone || '\u2014'}</td>
                   <td className="p-4">{rider.riderType}</td>
                   <td className="p-4">

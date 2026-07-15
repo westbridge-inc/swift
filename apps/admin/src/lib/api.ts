@@ -180,6 +180,18 @@ export const fetchDrivers = () => apiFetch('/api/v1/admin/drivers');
 export const fetchOrders = (params?: string) => apiFetch(`/api/v1/admin/orders?${params || ''}`);
 export const fetchOrderDetail = (id: string) => apiFetch(`/api/v1/admin/orders/${id}`);
 
+// ─── Detail pages (People phase) ─────────────────────────────────
+export const fetchUserDetail = (id: string) => apiFetch(`/api/v1/admin/users/${id}`);
+export const fetchVendorDetail = (id: string) => apiFetch(`/api/v1/admin/vendors/${id}`);
+export const fetchRiderDetail = (id: string) => apiFetch(`/api/v1/admin/riders/${id}`);
+export const fetchDriverDetail = (id: string) => apiFetch(`/api/v1/admin/drivers/${id}`);
+export const banUser = (id: string, reason: string) =>
+  apiFetch(`/api/v1/admin/users/${id}/ban`, { method: 'PUT', body: JSON.stringify({ reason }) });
+export const suspendVendor = (id: string, reason?: string) =>
+  apiFetch(`/api/v1/admin/vendors/${id}/suspend`, { method: 'PUT', body: JSON.stringify({ reason }) });
+export const featureVendor = (id: string, featured: boolean) =>
+  apiFetch(`/api/v1/admin/vendors/${id}/feature`, { method: 'PUT', body: JSON.stringify({ featured }) });
+
 // ─── Global ⌘K search ────────────────────────────────────────────
 export interface GlobalSearchResult {
   orders: { id: string; orderNumber: string; status: string; orderType: string; totalAmount: number; placedAt: string }[];
