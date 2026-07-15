@@ -14,7 +14,7 @@ import { flagEmoji } from '../../lib/flags';
 // Haiti / Cuba / Puerto Rico are deliberately not in the backend's market list.
 export function CountryPickerScreen({ navigation }: any) {
   const setCountry = useAuthStore((s) => s.setCountry);
-  const { data, isLoading } = useQuery({
+  const { data, isLoading, isError, refetch } = useQuery({
     queryKey: ['countries'],
     queryFn: async () => (await authApi.countries()).data?.data,
   });
@@ -55,6 +55,18 @@ export function CountryPickerScreen({ navigation }: any) {
         {isLoading ? (
           <View className="mt-lg">
             {[0, 1, 2, 3, 4].map((i) => <Skeleton key={i} className="mb-sm h-[68px] w-full rounded-3xl" />)}
+          </View>
+        ) : isError || countries.length === 0 ? (
+          // The very first screen of the app must never dead-end silently —
+          // an unreachable API previously rendered an empty list with no way out.
+          <View className="mt-xl">
+            <EmptyState
+              icon="wifi-off"
+              title="Can't reach Swift"
+              body="We couldn't load the country list. Check your connection and try again."
+              actionLabel="Try again"
+              onAction={() => refetch()}
+            />
           </View>
         ) : (
           <FlatList
