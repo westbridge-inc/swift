@@ -9,6 +9,7 @@ import {
   OrderStatus,
   OrderType,
   SettlementStatus,
+  CashSettlementStatus,
   SubscriptionStatus,
   SubscriptionType,
   DiscountType,
@@ -103,6 +104,12 @@ const adminOrdersQuerySchema = z.object({
 const settlementsQuerySchema = z.object({
   status: z.nativeEnum(SettlementStatus).optional(),
   vendorId: z.string().optional(),
+});
+
+const cashSettlementsQuerySchema = z.object({
+  status: z.nativeEnum(CashSettlementStatus).optional(),
+  vendorId: z.string().optional(),
+  riderId: z.string().optional(),
 });
 
 const promosQuerySchema = z.object({
@@ -1109,6 +1116,94 @@ export async function adminRoutes(app: FastifyInstance) {
     });
 
     return { success: true, data: updated };
+  });
+
+  /** MMG direct-pay ledger (visibility ONLY — Swift moves no money): the
+   *  delivery fees stores owe riders in cash on MMG-paid orders, with the
+   *  dual-confirm state each row is in. Outstanding = anything not SETTLED. */
+  app.get('/finance/cash-settlements', { preHandler: [adminGuard] }, async (request) => {
+    const { page, limit, skip } = parsePagination(request.query as Record<string, string>);
+    const { status, vendorId, riderId } = cashSettlementsQuerySchema.parse(request.query);
+
+    const where: any = {
+      ...(status && { status }),
+      ...(vendorId && { vendorId }),
+      ...(riderId && { riderId }),
+    };
+
+    const [rows, total, byStatus] = await Promise.all([
+      app.prisma.deliveryCashSettlement.findMany({
+        where,
+        include: {
+          order: { select: { orderNumber: true } },
+          vendor: { select: { id: true, name: true } },
+          rider: { select: { id: true, user: { select: { firstName: true, lastName: true } } } },
+        },
+        skip,
+        take: limit,
+        orderBy: { createdAt: 'desc' },
+      }),
+      app.prisma.deliveryCashSettlement.count({ where }),
+      // Unfiltered health totals — how much store→rider cash is in each state.
+      app.prisma.deliveryCashSettlement.groupBy({
+        by: ['status'],
+        _sum: { amount: true },
+        _count: true,
+      }),
+    ]);
+
+    const summary = Object.fromEntries(
+      byStatus.map((b) => [b.status, { total: Number(b._sum.amount ?? 0), count: b._count }]),
+    );
+    const data = rows.map((s) => ({
+      id: s.id,
+      orderId: s.orderId,
+      orderNumber: s.order?.orderNumber ?? null,
+      amount: Number(s.amount),
+      status: s.status,
+      riderConfirmedAt: s.riderConfirmedAt,
+      storeConfirmedAt: s.storeConfirmedAt,
+      createdAt: s.createdAt,
+      vendor: s.vendor ? { id: s.vendor.id, name: s.vendor.name } : null,
+      rider: s.rider
+        ? { id: s.rider.id, name: [s.rider.user.firstName, s.rider.user.lastName].filter(Boolean).join(' ') }
+        : null,
+    }));
+
+    const paged = paginatedResponse(data, total, { page, limit, skip });
+    return { success: true, ...paged, summary };
+  });
+
+  /** MMG-vs-cash mix, last 30 days of completed orders, plus MMG confirmation
+   *  health (UNPAID after delivery = vendor never confirmed / never paid). */
+  app.get('/finance/payment-mix', { preHandler: [adminGuard] }, async () => {
+    const thirtyDaysAgo = new Date();
+    thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
+    const completed = { createdAt: { gte: thirtyDaysAgo }, status: { in: ['DELIVERED', 'COMPLETED'] as any } };
+
+    const [byMethod, mmgUnconfirmed] = await Promise.all([
+      app.prisma.order.groupBy({
+        by: ['paymentMethod'],
+        where: completed,
+        _sum: { totalAmount: true },
+        _count: true,
+      }),
+      app.prisma.order.count({
+        where: { ...completed, paymentMethod: 'MOBILE_MONEY', paymentStatus: { not: 'CAPTURED' } },
+      }),
+    ]);
+
+    return {
+      success: true,
+      data: {
+        byMethod: byMethod.map((m) => ({
+          method: m.paymentMethod,
+          count: m._count,
+          total: Number(m._sum.totalAmount ?? 0),
+        })),
+        mmgUnconfirmed,
+      },
+    };
   });
 
   // ─── Config ────────────────────────────────────────────────────────────
