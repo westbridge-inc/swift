@@ -151,6 +151,15 @@ export function createWorkers(ctx: JobContext) {
           ctx.log.info({ converted }, 'Expired trials converted to active');
           break;
         }
+        case 'poll-mmg-billing': {
+          // §13 MMG rail: settle in-flight merchant-initiated weekly-fee
+          // requests (approved → period advances; declined/expired → dunning).
+          const polled = await billing.pollPendingMmgCharges();
+          if (polled.settled + polled.failed > 0) {
+            ctx.log.info(polled, 'MMG billing poll settled pending charges');
+          }
+          break;
+        }
       }
     },
     { connection, concurrency: 1 },
@@ -445,6 +454,14 @@ export async function scheduleRecurringJobs(queues: ReturnType<typeof createQueu
     repeat: { pattern: '0 3 * * *' },
     removeOnComplete: 30,
     removeOnFail: 30,
+  });
+
+  // §13 MMG billing rail: poll in-flight merchant-initiated requests every 2
+  // minutes — the payer approves on their phone in seconds, not next hour.
+  await queues.subscriptionQueue.add('poll-mmg-billing', {}, {
+    repeat: { every: 120_000 },
+    removeOnComplete: 20,
+    removeOnFail: 20,
   });
 
   // Ghost-mover sweep: force-offline anyone whose GPS went silent, every 5

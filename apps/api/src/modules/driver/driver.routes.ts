@@ -6,6 +6,8 @@ import { NotificationService } from '../notification/notification.service';
 import { VerificationService } from '../verification/verification.service';
 import { makeDispatchService } from '../dispatch/dispatch.service';
 import { getKycProvider } from '../../providers/kyc/kyc-provider';
+import { BillingService } from '../billing/billing.service';
+import { getPaymentProvider } from '../../providers/payment/payment-provider';
 import { haversineDistance, estimateDeliveryMinutes } from '../../utils/distance';
 import { parsePagination, paginatedResponse } from '../../utils/pagination';
 import { AppError, NotFoundError } from '../../utils/errors';
@@ -861,5 +863,20 @@ export async function driverRoutes(app: FastifyInstance) {
     });
     if (!driver) await throwForMissingProfile(app, request.user.userId, 'MOVER', 'Driver');
     return { success: true, data: driver!.subscription || null };
+  });
+
+  /** PUT /subscription/billing-method — §13 rail selection (CASH prepaid vs
+   *  MOBILE_MONEY merchant-initiated with the driver's MMG account). */
+  app.put('/subscription/billing-method', { preHandler: [app.authenticate] }, async (request) => {
+    const driver = await getDriver(request.user.userId);
+    const body = z.object({
+      method: z.enum(['CASH', 'MOBILE_MONEY']),
+      mmgPayerMsisdn: z.string().trim().min(5).max(30).optional(),
+    }).parse(request.body);
+    const sub = await app.prisma.subscription.findFirst({ where: { driverId: driver.id } });
+    if (!sub) throw new NotFoundError('Subscription');
+    const billing = new BillingService(app.prisma, new NotificationService(app.prisma, app.io), getPaymentProvider());
+    const updated = await billing.setBillingRail(sub.id, body.method, body.mmgPayerMsisdn);
+    return { success: true, data: { billingMethod: updated.billingMethod, mmgPayerMsisdn: updated.mmgPayerMsisdn } };
   });
 }

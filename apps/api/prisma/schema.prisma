@@ -1197,10 +1197,14 @@ model Subscription {
   autoSuspendEnabled Boolean            @default(true)
   prepaidBalance     PrepaidBalance?
 
-  /// How this subscription pays: CASH = prepaid balance path; CARD = stored token
+  /// How this subscription pays: CASH = prepaid balance path; CARD = stored
+  /// token; MOBILE_MONEY = MMG merchant-initiated request the subscriber
+  /// approves on their phone (§13 dual-rail — card primary, MMG fallback)
   billingMethod PaymentMethod @default(CASH)
   /// Tokenized card reference from the PaymentProvider — never raw card data
   paymentToken  String?
+  /// The subscriber's MMG account (MSISDN) merchant-initiated requests charge
+  mmgPayerMsisdn String?
   /// Failed charges retry on a daily cadence, not every job run
   nextRetryAt   DateTime?
 

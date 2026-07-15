@@ -5,6 +5,8 @@ import { OrderService, notHeldFilter } from '../order/order.service';
 import { NotificationService } from '../notification/notification.service';
 import { VerificationService } from '../verification/verification.service';
 import { CashRulesService, customerTrustSummaries } from '../cash/cash-rules.service';
+import { BillingService } from '../billing/billing.service';
+import { getPaymentProvider } from '../../providers/payment/payment-provider';
 import { DeliveryCashSettlementService, assertSettlementId } from '../cash/delivery-cash-settlement.service';
 import { makeDispatchService } from '../dispatch/dispatch.service';
 import { getKycProvider } from '../../providers/kyc/kyc-provider';
@@ -145,6 +147,7 @@ export async function riderRoutes(app: FastifyInstance) {
     orderService,
   );
   const settlements = new DeliveryCashSettlementService(app.prisma, new NotificationService(app.prisma, app.io));
+  const billing = new BillingService(app.prisma, new NotificationService(app.prisma, app.io), getPaymentProvider());
 
   /** POST /orders/:id/handover — the golden rule at the door.
    *  'paid' completes the delivery; 'no_show'/'refused' fails it with GPS
@@ -994,6 +997,21 @@ export async function riderRoutes(app: FastifyInstance) {
         pendingPayout: Number(pendingPayout._sum.amount ?? 0),
       },
     };
+  });
+
+  /** PUT /subscription/billing-method — §13 rail selection: pay the weekly fee
+   *  from the prepaid balance (CASH) or by approving an MMG request on my
+   *  phone (MOBILE_MONEY + my MMG account number). */
+  app.put('/subscription/billing-method', { preHandler: [app.authenticate] }, async (request) => {
+    const rider = await getRider(app, request.user.userId);
+    const body = z.object({
+      method: z.enum(['CASH', 'MOBILE_MONEY']),
+      mmgPayerMsisdn: z.string().trim().min(5).max(30).optional(),
+    }).parse(request.body);
+    const sub = await app.prisma.subscription.findFirst({ where: { riderId: rider.id } });
+    if (!sub) throw new NotFoundError('Subscription');
+    const updated = await billing.setBillingRail(sub.id, body.method, body.mmgPayerMsisdn);
+    return { success: true, data: { billingMethod: updated.billingMethod, mmgPayerMsisdn: updated.mmgPayerMsisdn } };
   });
 
   // =========================================================================
