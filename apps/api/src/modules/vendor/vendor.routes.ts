@@ -940,6 +940,14 @@ export async function vendorRoutes(app: FastifyInstance) {
       data: { orderId: order.id, status: order.status, changedBy: request.user.userId, note: 'MMG payment confirmed received by vendor' },
     });
     app.io.to(`order:${order.id}`).emit('order:status_changed', { orderId: order.id, status: order.status, paymentStatus: 'CAPTURED' });
+    // The socket covers an open order screen; the notification survives it.
+    await notifications.send({
+      userId: order.customerId,
+      type: 'PAYMENT_RECEIVED',
+      title: 'Payment received',
+      body: `Your MMG payment for order #${order.orderNumber} is confirmed.`,
+      data: { orderId: order.id, kind: 'mmg_payment_confirmed' },
+    });
     return { success: true, data: updated };
   });
 

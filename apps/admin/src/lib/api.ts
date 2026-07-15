@@ -180,6 +180,37 @@ export const fetchDrivers = () => apiFetch('/api/v1/admin/drivers');
 export const fetchOrders = (params?: string) => apiFetch(`/api/v1/admin/orders?${params || ''}`);
 export const fetchRevenue = (): Promise<Envelope<RevenueResponse>> =>
   apiFetch('/api/v1/admin/finance/revenue');
+
+// ─── MMG direct-pay visibility (Swift moves no money) ────────────
+export interface CashSettlementRow {
+  id: string;
+  orderId: string;
+  orderNumber: string | null;
+  amount: number;
+  status: 'OWED' | 'RIDER_CONFIRMED' | 'STORE_CONFIRMED' | 'SETTLED';
+  riderConfirmedAt: string | null;
+  storeConfirmedAt: string | null;
+  createdAt: string;
+  vendor: { id: string; name: string } | null;
+  rider: { id: string; name: string } | null;
+}
+export interface CashSettlementsResponse {
+  success: boolean;
+  data: CashSettlementRow[];
+  meta: { page: number; limit: number; total: number; totalPages: number };
+  /** Unfiltered totals per status — the platform-wide ledger health. */
+  summary: Partial<Record<CashSettlementRow['status'], { total: number; count: number }>>;
+}
+export const fetchCashSettlements = (params?: string): Promise<CashSettlementsResponse> =>
+  apiFetch(`/api/v1/admin/finance/cash-settlements?${params || 'limit=50'}`);
+
+export interface PaymentMix {
+  byMethod: { method: string; count: number; total: number }[];
+  /** Delivered MMG orders the vendor never marked received — follow up. */
+  mmgUnconfirmed: number;
+}
+export const fetchPaymentMix = (): Promise<Envelope<PaymentMix>> =>
+  apiFetch('/api/v1/admin/finance/payment-mix');
 export const fetchPromos = (): Promise<Envelope<Promo[]>> => apiFetch('/api/v1/admin/promos');
 
 export interface CreatePromoInput {
