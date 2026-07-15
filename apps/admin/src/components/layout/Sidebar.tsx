@@ -20,6 +20,8 @@ import {
   LifeBuoy,
   PackageOpen,
   Megaphone,
+  Radar,
+  Globe,
 } from 'lucide-react';
 
 // Grouped by what the operator is doing, not by table name. Sections only list
@@ -29,6 +31,7 @@ const NAV_SECTIONS: { title: string; items: { label: string; href: string; icon:
     title: 'Operations',
     items: [
       { label: 'Dashboard', href: '/dashboard', icon: LayoutDashboard },
+      { label: 'Live map', href: '/ops', icon: Radar },
       { label: 'Orders', href: '/orders', icon: ShoppingCart },
     ],
   },
@@ -62,6 +65,7 @@ const NAV_SECTIONS: { title: string; items: { label: string; href: string; icon:
   {
     title: 'Platform',
     items: [
+      { label: 'Markets', href: '/markets', icon: Globe },
       { label: 'Zones', href: '/zones', icon: Map },
       { label: 'Config', href: '/config', icon: Settings },
       { label: 'Audit Log', href: '/audit', icon: FileText },
