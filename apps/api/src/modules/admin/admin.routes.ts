@@ -966,6 +966,90 @@ export async function adminRoutes(app: FastifyInstance) {
     return { success: true, ...paginatedResponse(orders, total, { page, limit, skip }) };
   });
 
+  /** Live ops snapshot for the command map: every online mover's position +
+   *  every order in flight. Read-only; the console polls it. */
+  app.get('/ops/live', { preHandler: [adminGuard] }, async () => {
+    const ACTIVE_STATUSES = [
+      'PENDING', 'ACCEPTED', 'PREPARING', 'READY_FOR_PICKUP',
+      'RIDER_ASSIGNED', 'RIDER_EN_ROUTE_PICKUP', 'RIDER_ARRIVED_PICKUP', 'PICKED_UP', 'EN_ROUTE_DELIVERY', 'ARRIVED',
+      'DRIVER_ASSIGNED', 'DRIVER_EN_ROUTE', 'DRIVER_ARRIVED', 'RIDE_IN_PROGRESS',
+    ] as const;
+
+    const [riders, drivers, orders] = await Promise.all([
+      app.prisma.rider.findMany({
+        where: { isOnline: true, currentLat: { not: null } },
+        select: {
+          id: true, currentLat: true, currentLng: true, isAvailable: true, currentOrderId: true,
+          user: { select: { firstName: true, lastName: true } },
+        },
+        take: 500,
+      }),
+      app.prisma.driver.findMany({
+        where: { isOnline: true, currentLat: { not: null } },
+        select: {
+          id: true, currentLat: true, currentLng: true, isAvailable: true, currentRideId: true, rideClass: true,
+          user: { select: { firstName: true, lastName: true } },
+        },
+        take: 500,
+      }),
+      app.prisma.order.findMany({
+        where: { status: { in: ACTIVE_STATUSES as any } },
+        select: {
+          id: true, orderNumber: true, status: true, orderType: true,
+          pickupLat: true, pickupLng: true, deliveryLat: true, deliveryLng: true,
+          vendor: { select: { name: true, latitude: true, longitude: true } },
+        },
+        orderBy: { placedAt: 'asc' },
+        take: 300,
+      }),
+    ]);
+
+    const mover = (m: any, kind: 'rider' | 'driver') => ({
+      id: m.id,
+      kind,
+      lat: m.currentLat,
+      lng: m.currentLng,
+      name: [m.user?.firstName, m.user?.lastName].filter(Boolean).join(' '),
+      busy: !!(m.currentOrderId ?? m.currentRideId) || !m.isAvailable,
+      ...(kind === 'driver' ? { rideClass: m.rideClass } : {}),
+    });
+
+    return {
+      success: true,
+      data: {
+        movers: [...riders.map((r) => mover(r, 'rider')), ...drivers.map((d) => mover(d, 'driver'))],
+        activeOrders: orders.map((o) => ({
+          id: o.id,
+          orderNumber: o.orderNumber,
+          status: o.status,
+          orderType: o.orderType,
+          pickupLat: o.pickupLat ?? o.vendor?.latitude ?? null,
+          pickupLng: o.pickupLng ?? o.vendor?.longitude ?? null,
+          deliveryLat: o.deliveryLat,
+          deliveryLng: o.deliveryLng,
+          vendorName: o.vendor?.name ?? null,
+        })),
+      },
+    };
+  });
+
+  /** The 13 Caribbean markets — CountryConfig read-only (editing arrives with
+   *  the billing-rail work; blind edits to money thresholds are not a UI). */
+  app.get('/countries', { preHandler: [adminGuard] }, async () => {
+    const countries = await app.prisma.countryConfig.findMany({ orderBy: { name: 'asc' } });
+    return {
+      success: true,
+      data: countries.map((c) => ({
+        ...c,
+        usdExchangeRate: Number(c.usdExchangeRate),
+        idGateThresholdUsd: Number(c.idGateThresholdUsd),
+        floatL1: Number(c.floatL1),
+        floatL2: Number(c.floatL2),
+        floatL3: Number(c.floatL3),
+      })),
+    };
+  });
+
   /** Global ⌘K search — one query fans out across orders (number), users
    *  (phone/name) and vendors (name). Read-only, capped, for the console's
    *  jump-to-anything box. */

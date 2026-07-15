@@ -224,6 +224,24 @@ export const resolveReturn = (id: string, status: 'APPROVED' | 'REJECTED' | 'REF
 export const broadcastNotification = (body: { title: string; body: string; role?: string }) =>
   apiFetch('/api/v1/admin/notifications/broadcast', { method: 'POST', body: JSON.stringify(body) });
 
+// ─── Live ops + markets ──────────────────────────────────────────
+export interface LiveOps {
+  movers: { id: string; kind: 'rider' | 'driver'; lat: number; lng: number; name: string; busy: boolean; rideClass?: string }[];
+  activeOrders: {
+    id: string;
+    orderNumber: string;
+    status: string;
+    orderType: string;
+    pickupLat: number | null;
+    pickupLng: number | null;
+    deliveryLat: number | null;
+    deliveryLng: number | null;
+    vendorName: string | null;
+  }[];
+}
+export const fetchLiveOps = (): Promise<Envelope<LiveOps>> => apiFetch('/api/v1/admin/ops/live');
+export const fetchCountries = () => apiFetch('/api/v1/admin/countries');
+
 // ─── Global ⌘K search ────────────────────────────────────────────
 export interface GlobalSearchResult {
   orders: { id: string; orderNumber: string; status: string; orderType: string; totalAmount: number; placedAt: string }[];
