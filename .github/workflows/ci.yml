@@ -128,6 +128,20 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm --filter @swift/admin build
 
+  web-build:
+    name: Web Build
+    runs-on: ubuntu-latest
+    needs: lint-and-type-check
+    steps:
+      - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 20
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm --filter @swift/web build
+
   # Broken or drifted migrations must fail CI, not the deploy: replay every
   # committed migration on a clean DB, then prove the result matches
   # schema.prisma exactly (validated locally: expression GIST indexes that live
