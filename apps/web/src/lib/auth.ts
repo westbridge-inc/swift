@@ -91,8 +91,8 @@ export async function sendOtp(phone: string) {
   if (!res.ok || !json.success) throw new Error(json?.error?.message || 'Could not send the code.');
 }
 
-/** OTP login gated to accounts that actually have a business. */
-export async function verifyVendorLogin(phone: string, code: string) {
+/** OTP login for partners: businesses land on /dashboard, earners on /portal. */
+export async function verifyPartnerLogin(phone: string, code: string): Promise<{ user: unknown; home: string }> {
   const res = await fetch(`${API_URL}/api/v1/auth/verify-otp`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -104,13 +104,15 @@ export async function verifyVendorLogin(phone: string, code: string) {
   if (data.isNewUser || !data.tokens?.accessToken) {
     throw new Error('No Swift account is registered to that number.');
   }
+  const roles: string[] = data.user?.roles ?? [];
   // Same vendor-ness rule as the mobile app's authStore: role string or the
   // vendorOwner relation on the login payload.
-  const roles: string[] = data.user?.roles ?? [];
   const isVendor = roles.includes('VENDOR') || roles.includes('VENDOR_OWNER') || !!data.user?.vendorOwner;
-  if (!isVendor) {
-    throw new Error('No business on this account yet — sign up as a business in the Swift app first.');
+  const isMover = roles.some((r) => ['MOVER', 'RIDER', 'DRIVER'].includes(r));
+  if (!isVendor && !isMover) {
+    throw new Error('No business or earner profile on this account yet — sign up in the Swift app first.');
   }
   setTokens(data.tokens.accessToken, data.tokens.refreshToken);
-  return data.user;
+  // An account with both keeps the store dashboard as home; /portal stays a link away.
+  return { user: data.user, home: isVendor ? '/dashboard' : '/portal' };
 }

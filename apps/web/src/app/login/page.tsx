@@ -3,7 +3,7 @@
 import { useState } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
-import { sendOtp, verifyVendorLogin } from '@/lib/auth';
+import { sendOtp, verifyPartnerLogin } from '@/lib/auth';
 
 export default function LoginPage() {
   const router = useRouter();
@@ -30,8 +30,8 @@ export default function LoginPage() {
     setError(null);
     setBusy(true);
     try {
-      await verifyVendorLogin(phone.trim(), code.trim());
-      router.replace('/dashboard');
+      const { home } = await verifyPartnerLogin(phone.trim(), code.trim());
+      router.replace(home);
     } catch (e) {
       setError((e as Error).message);
       setBusy(false);
@@ -42,11 +42,11 @@ export default function LoginPage() {
     <div className="flex min-h-screen items-center justify-center bg-[var(--swift-subtle)] p-4">
       <div className="w-full max-w-sm rounded-2xl border border-black/5 bg-white p-8 shadow-sm">
         <Link href="/" className="text-xl font-extrabold tracking-tight">
-          <span className="text-[var(--swift-red)]">Swift</span> <span className="font-semibold">Business</span>
+          <span className="text-[var(--swift-red)]">Swift</span> <span className="font-semibold">Partners</span>
         </Link>
         <p className="mt-2 mb-6 text-sm text-[var(--swift-muted)]">
           {step === 'phone'
-            ? 'Sign in with the phone number on your business account.'
+            ? 'Businesses and earners — sign in with the phone number on your Swift account.'
             : `Enter the code sent to ${phone}.`}
         </p>
 
@@ -105,8 +105,8 @@ export default function LoginPage() {
         {error && <p className="mt-4 text-sm text-[var(--swift-red)]">{error}</p>}
 
         <p className="mt-6 border-t border-black/5 pt-4 text-xs text-[var(--swift-muted)]">
-          New to Swift? <Link href="/for-vendors" className="font-semibold text-[var(--swift-red)]">Put your business on Swift</Link> —
-          sign-up and document verification happen in the app.
+          New to Swift? <Link href="/for-vendors" className="font-semibold text-[var(--swift-red)]">Put your business on Swift</Link> or{' '}
+          <Link href="/for-drivers" className="font-semibold text-[var(--swift-red)]">drive &amp; deliver</Link> — sign-up starts in the app.
         </p>
       </div>
     </div>

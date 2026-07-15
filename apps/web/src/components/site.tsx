@@ -29,7 +29,7 @@ export function SiteNav() {
             href="/login"
             className="text-sm font-semibold text-[var(--swift-muted)] transition-colors hover:text-[var(--swift-ink)]"
           >
-            Business sign in
+            Partner sign in
           </Link>
           <Link
             href="/for-vendors"
