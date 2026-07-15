@@ -249,6 +249,14 @@ export const decideAgentApproval = (id: string, approve: boolean) =>
   apiFetch(`/api/v1/admin/agent/approvals/${id}/${approve ? 'approve' : 'reject'}`, { method: 'POST', body: '{}' });
 export const fetchAgentAudit = () => apiFetch('/api/v1/admin/agent/audit?limit=50');
 
+// ─── Compliance (liability shield) ───────────────────────────────
+export const fetchCompliance = () => apiFetch('/api/v1/admin/compliance');
+export const runComplianceAudit = () => apiFetch('/api/v1/admin/compliance/run', { method: 'POST', body: '{}' });
+export const decideComplianceReview = (id: string, pass: boolean, note?: string) =>
+  apiFetch(`/api/v1/admin/compliance/reviews/${id}/decide`, { method: 'POST', body: JSON.stringify({ pass, ...(note ? { note } : {}) }) });
+export const resolveComplianceViolation = (id: string) =>
+  apiFetch(`/api/v1/admin/compliance/violations/${id}/resolve`, { method: 'POST', body: '{}' });
+
 // ─── Global ⌘K search ────────────────────────────────────────────
 export interface GlobalSearchResult {
   orders: { id: string; orderNumber: string; status: string; orderType: string; totalAmount: number; placedAt: string }[];

@@ -616,7 +616,9 @@ export class VerificationService {
    * documentsVerified flag, taxi hire-insurance requirement), so a mover the
    * gate would still admit is left alone.
    */
-  private async forceMoverOfflineIfNotLive(userId: string) {
+  /** Public: the compliance audit reuses the exact same force-offline the
+   *  expiry sweep applies — one behavior, one notification copy. */
+  async forceMoverOfflineIfNotLive(userId: string) {
     const driver = await this.prisma.driver.findUnique({
       where: { userId },
       select: { id: true, documentsVerified: true },

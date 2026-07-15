@@ -23,6 +23,7 @@ import {
   Radar,
   Globe,
   Bot,
+  Scale,
 } from 'lucide-react';
 
 // Grouped by what the operator is doing, not by table name. Sections only list
@@ -45,6 +46,7 @@ const NAV_SECTIONS: { title: string; items: { label: string; href: string; icon:
       { label: 'Riders', href: '/riders', icon: Bike },
       { label: 'Drivers', href: '/drivers', icon: Car },
       { label: 'Verification', href: '/verification', icon: ShieldCheck },
+      { label: 'Compliance', href: '/compliance', icon: Scale },
     ],
   },
   {

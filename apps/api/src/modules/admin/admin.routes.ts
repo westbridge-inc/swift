@@ -22,6 +22,7 @@ import {
 import { NotificationService } from '../notification/notification.service';
 import { SupportService } from '../support/support.service';
 import { VerificationService } from '../verification/verification.service';
+import { ComplianceAuditService } from '../verification/compliance-audit.service';
 import { BillingService } from '../billing/billing.service';
 import { SubscriptionService } from '../subscription/subscription.service';
 import { CashRulesService } from '../cash/cash-rules.service';
@@ -1967,5 +1968,36 @@ export async function adminRoutes(app: FastifyInstance) {
       app.prisma.agentAuditEvent.count(),
     ]);
     return { success: true, ...paginatedResponse(events, total, { page, limit, skip }) };
+  });
+
+  // =========================================================================
+  // COMPLIANCE — the liability shield: audit runs, violations, re-reviews
+  // =========================================================================
+  const compliance = new ComplianceAuditService(app.prisma, notifications, verification);
+
+  app.get('/compliance', { preHandler: [adminGuard] }, async () => {
+    return { success: true, data: await compliance.overview() };
+  });
+
+  /** Run the invariant check right now (the daily job runs it anyway). */
+  app.post('/compliance/run', { preHandler: [adminGuard] }, async (request) => {
+    const run = await compliance.runAudit('MANUAL');
+    await audit(request.user.userId, 'RUN_COMPLIANCE_AUDIT', 'ComplianceAuditRun', run.id, { moversChecked: run.moversChecked, violations: run.violations }, request);
+    return { success: true, data: run };
+  });
+
+  app.post('/compliance/reviews/:id/decide', { preHandler: [adminGuard] }, async (request) => {
+    const { id } = request.params as { id: string };
+    const body = z.object({ pass: z.boolean(), note: z.string().max(500).optional() }).parse(request.body);
+    const decided = await compliance.decideReview(id, request.user.userId, body.pass, body.note);
+    await audit(request.user.userId, body.pass ? 'PASS_COMPLIANCE_REVIEW' : 'FAIL_COMPLIANCE_REVIEW', 'ComplianceReviewCase', id, { userId: decided.userId }, request);
+    return { success: true, data: decided };
+  });
+
+  app.post('/compliance/violations/:id/resolve', { preHandler: [adminGuard] }, async (request) => {
+    const { id } = request.params as { id: string };
+    const resolved = await compliance.resolveViolation(id);
+    await audit(request.user.userId, 'RESOLVE_COMPLIANCE_VIOLATION', 'ComplianceViolation', id, { userId: resolved.userId }, request);
+    return { success: true, data: resolved };
   });
 }
