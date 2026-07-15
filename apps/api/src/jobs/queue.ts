@@ -308,6 +308,27 @@ export function createWorkers(ctx: JobContext) {
         return;
       }
 
+      if (job.name === 'agent-ops-scan') {
+        // Ops agent (spec Part B): deterministic detection → model classifies
+        // a PII-free snapshot → gated execution. No-op unless AGENT_ENABLED=1
+        // with a key; sensitive actions wait for a human in assist mode.
+        const { AgentService, agentEnabled } = await import('../modules/agent/agent.service');
+        if (!agentEnabled()) return;
+        const agentQueue = new Queue(QUEUE_NAMES.DISPATCH, { connection });
+        try {
+          const agent = new AgentService(ctx.prisma, ctx.io, async (orderId) => {
+            await agentQueue.add('dispatch-order', { orderId }, { removeOnComplete: 100, removeOnFail: 50 });
+          });
+          const result = await agent.runOpsScan();
+          if (result.scanned > 0) {
+            ctx.log.info(result, 'Agent ops scan complete');
+          }
+        } finally {
+          await agentQueue.close();
+        }
+        return;
+      }
+
       if (job.name === 'release-held-orders') {
         // LIFECYCLE_V2 (spec Part A): held orders whose cancel window closed
         // become visible to the vendor + dispatchable. No-op while every order
@@ -468,6 +489,15 @@ export async function scheduleRecurringJobs(queues: ReturnType<typeof createQueu
   // minutes — dead phones must not keep swallowing dispatch offers.
   await queues.dispatchQueue.add('stale-movers', {}, {
     repeat: { pattern: '*/5 * * * *' },
+    removeOnComplete: 20,
+    removeOnFail: 20,
+  });
+
+  // Ops agent problem scan (spec Part B): every 60s; a no-op unless
+  // AGENT_ENABLED=1 + ANTHROPIC_API_KEY. Detection is deterministic SQL —
+  // the model only classifies; money actions wait in the approval queue.
+  await queues.dispatchQueue.add('agent-ops-scan', {}, {
+    repeat: { every: Number(process.env['AGENT_SCAN_INTERVAL_SECONDS'] ?? 60) * 1000 },
     removeOnComplete: 20,
     removeOnFail: 20,
   });

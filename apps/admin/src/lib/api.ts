@@ -242,6 +242,13 @@ export interface LiveOps {
 export const fetchLiveOps = (): Promise<Envelope<LiveOps>> => apiFetch('/api/v1/admin/ops/live');
 export const fetchCountries = () => apiFetch('/api/v1/admin/countries');
 
+// ─── Ops agent ───────────────────────────────────────────────────
+export const fetchAgentApprovals = (status = 'PENDING') =>
+  apiFetch(`/api/v1/admin/agent/approvals?status=${status}`);
+export const decideAgentApproval = (id: string, approve: boolean) =>
+  apiFetch(`/api/v1/admin/agent/approvals/${id}/${approve ? 'approve' : 'reject'}`, { method: 'POST', body: '{}' });
+export const fetchAgentAudit = () => apiFetch('/api/v1/admin/agent/audit?limit=50');
+
 // ─── Global ⌘K search ────────────────────────────────────────────
 export interface GlobalSearchResult {
   orders: { id: string; orderNumber: string; status: string; orderType: string; totalAmount: number; placedAt: string }[];
