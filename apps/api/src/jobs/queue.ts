@@ -229,7 +229,30 @@ export function createWorkers(ctx: JobContext) {
         const expired = await verification.expireLapsedDocuments();
         const reminded = await verification.sendExpiryReminders();
         const purged = await verification.purgeExpiredDocuments();
-        ctx.log.info(`Verification sweep: ${expired} expired, ${reminded} reminders sent, ${purged} purged`);
+
+        // Liability shield: after enforcement, AUDIT — verify nobody is on the
+        // road with a broken checklist, and leave an evidence row either way.
+        const { ComplianceAuditService } = await import('../modules/verification/compliance-audit.service');
+        const audit = new ComplianceAuditService(ctx.prisma, new NotificationService(ctx.prisma, ctx.io), verification);
+        const run = await audit.runAudit('SCHEDULED');
+        ctx.log.info(
+          `Verification sweep: ${expired} expired, ${reminded} reminders sent, ${purged} purged; compliance audit: ${run.moversChecked} online movers checked, ${run.violations} violations`,
+        );
+      }
+
+      if (job.name === 'compliance-sample') {
+        const { VerificationService } = await import('../modules/verification/verification.service');
+        const { ComplianceAuditService } = await import('../modules/verification/compliance-audit.service');
+        const { NotificationService } = await import('../modules/notification/notification.service');
+        const { getKycProvider } = await import('../providers/kyc/kyc-provider');
+        const notifications = new NotificationService(ctx.prisma, ctx.io);
+        const audit = new ComplianceAuditService(
+          ctx.prisma,
+          notifications,
+          new VerificationService(ctx.prisma, notifications, getKycProvider()),
+        );
+        const sampled = await audit.sampleForReview(10);
+        ctx.log.info(`Compliance re-verification sample: ${sampled} movers queued for manual review`);
       }
 
       if (job.name === 'flag-ratings') {
@@ -446,6 +469,14 @@ export async function scheduleRecurringJobs(queues: ReturnType<typeof createQueu
     repeat: { pattern: '0 6 * * *' },
     removeOnComplete: 30,
     removeOnFail: 30,
+  });
+
+  // Random document re-verification sample (liability shield): monthly on the
+  // 1st at 07:00 — a human re-reviews a random slice of active movers.
+  await queues.verificationQueue.add('compliance-sample', {}, {
+    repeat: { pattern: '0 7 1 * *' },
+    removeOnComplete: 12,
+    removeOnFail: 12,
   });
 
   // Rating anti-manipulation sweep: daily at 04:00

@@ -51,6 +51,8 @@ model User {
   walletBalance Decimal @default(0) @db.Decimal(12, 2)
 
   verificationDocuments VerificationDocument[]
+  complianceViolations  ComplianceViolation[]
+  complianceReviews     ComplianceReviewCase[]
   strikes               Strike[]
 
   deviceTokens DeviceToken[]
@@ -271,6 +273,72 @@ model VerificationDocument {
   @@index([expiresAt])
   @@index([retentionExpiresAt])
   @@map("verification_documents")
+}
+
+/// Liability shield (founder directive 2026-07-15): the ENFORCEMENT layer
+/// (expiry sweep, go-online gate) keeps bad actors off the road; this AUDIT
+/// layer proves it. Every run snapshots who was online and whether their
+/// checklist held — immutable evidence that the platform checked.
+model ComplianceAuditRun {
+  id            String    @id @default(cuid())
+  startedAt     DateTime  @default(now())
+  finishedAt    DateTime?
+  /// Movers who were online (live-operating) when the run executed
+  moversChecked Int       @default(0)
+  violations    Int       @default(0)
+  /// MANUAL (admin button) or SCHEDULED (daily job)
+  trigger       String    @default("SCHEDULED")
+
+  @@index([startedAt])
+  @@map("compliance_audit_runs")
+}
+
+/// One mover found live-operating without a valid checklist. The evidence
+/// field freezes the per-document state at detection time (docType/status/
+/// expiry) — what a court or regulator asks for.
+model ComplianceViolation {
+  id          String    @id @default(cuid())
+  runId       String?
+  userId      String
+  user        User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  /// RIDER | DRIVER (which live table they were online in)
+  moverKind   String
+  /// docs | insurance — the gate reason that failed
+  reason      String
+  evidence    Json
+  actionTaken String    @default("FORCED_OFFLINE")
+  createdAt   DateTime  @default(now())
+  /// Set when the mover re-verifies (their checklist passes again)
+  resolvedAt  DateTime?
+
+  @@index([userId])
+  @@index([createdAt])
+  @@index([resolvedAt])
+  @@map("compliance_violations")
+}
+
+/// Random re-verification (fraud catch): a monthly sample of active movers is
+/// queued for a human re-review of their documents, regardless of expiry.
+model ComplianceReviewCase {
+  id        String                @id @default(cuid())
+  userId    String
+  user      User                  @relation(fields: [userId], references: [id], onDelete: Cascade)
+  status    ComplianceReviewStatus @default(OPEN)
+  dueAt     DateTime
+  decidedBy String?
+  decidedAt DateTime?
+  note      String?
+  createdAt DateTime              @default(now())
+
+  @@index([status])
+  @@index([userId])
+  @@map("compliance_review_cases")
+}
+
+enum ComplianceReviewStatus {
+  OPEN
+  PASSED
+  FAILED
 }
 
 enum VerificationDocumentStatus {
