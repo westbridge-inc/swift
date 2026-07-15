@@ -409,6 +409,7 @@ model Rider {
   subscription        Subscription?
   earnings            Earning[]
   orders              Order[]
+  deliveryCashSettlements DeliveryCashSettlement[]
   createdAt           DateTime    @default(now())
   updatedAt           DateTime    @updatedAt
 
@@ -562,6 +563,7 @@ model Vendor {
   totalOrders      Int             @default(0)
   subscription     Subscription?
   settlements      Settlement[]
+  deliveryCashSettlements DeliveryCashSettlement[]
   cuisineTypes     String[]
   tags             String[]
   favoritedBy      Customer[]      @relation("customerFavorites")
@@ -769,6 +771,7 @@ model Order {
   driver      Driver?     @relation(fields: [driverId], references: [id])
   status      OrderStatus @default(PENDING)
   statusHistory OrderStatusLog[]
+  deliveryCashSettlement DeliveryCashSettlement?
   items       OrderItem[]
   supportTickets SupportTicket[]
 
@@ -1386,6 +1389,36 @@ enum SettlementStatus {
   PROCESSING
   PAID
   FAILED
+}
+
+/// MMG direct-pay: for an MMG-paid DELIVERY the customer paid the STORE (not
+/// the rider), so the store owes the rider the delivery fee IN CASH. Swift only
+/// tracks the debt until both sides confirm the handover — it moves no money.
+enum CashSettlementStatus {
+  OWED
+  RIDER_CONFIRMED
+  STORE_CONFIRMED
+  SETTLED
+}
+
+model DeliveryCashSettlement {
+  id        String   @id @default(cuid())
+  orderId   String   @unique
+  order     Order    @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  riderId   String
+  rider     Rider    @relation(fields: [riderId], references: [id])
+  vendorId  String
+  vendor    Vendor   @relation(fields: [vendorId], references: [id])
+  /// Delivery fee the store owes the rider (GYD).
+  amount    Decimal  @db.Decimal(10, 2)
+  status    CashSettlementStatus @default(OWED)
+  riderConfirmedAt DateTime?
+  storeConfirmedAt DateTime?
+  createdAt DateTime @default(now())
+
+  @@index([riderId, status])
+  @@index([vendorId, status])
+  @@map("delivery_cash_settlements")
 }
 
 // ==========================================

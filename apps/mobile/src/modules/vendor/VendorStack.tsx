@@ -84,6 +84,8 @@ import {
   useVendorAnalytics,
   useVendorRevenue,
   useVendorOps,
+  useVendorCashSettlements,
+  useConfirmVendorCashSettlement,
   usePopularItems,
   useBusyHours,
   useVendorHours,
@@ -1794,6 +1796,70 @@ function windowTotals(daily: any[], take: number) {
   return { curDaily: cur, cur: { revenue: sum(cur, 'revenue'), orders: sum(cur, 'orders') }, prev };
 }
 
+/** MMG orders: the customer's payment (delivery fee included) landed in the
+ *  store's MMG wallet — so the store hands the rider their fee in cash. This
+ *  card is that ledger; "Mark paid" is the store's half of the dual confirm. */
+function RiderFeesOwedCard() {
+  const q = useVendorCashSettlements();
+  const confirm = useConfirmVendorCashSettlement();
+  const rows: any[] = q.data?.unsettled ?? [];
+  if (rows.length === 0) return null;
+  return (
+    <Card style={{ marginBottom: space.lg }}>
+      <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
+        <T variant="caption" weight="bold" tone="muted" style={{ letterSpacing: 1 }}>
+          YOU OWE RIDERS
+        </T>
+        <T variant="label" weight="bold">
+          {money(q.data?.summary?.owed ?? 0)}
+        </T>
+      </View>
+      <T variant="caption" tone="muted" style={{ marginTop: 2 }}>
+        MMG orders — the delivery fee came to you with the customer&apos;s payment. Hand it to the rider in cash (usually at pickup).
+      </T>
+      {rows.map((r) => (
+        <View key={r.id} style={{ paddingTop: space.md, marginTop: space.md, borderTopWidth: 1, borderTopColor: color.border.subtle }}>
+          <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+            <View style={{ flex: 1 }}>
+              <T variant="label" weight="semibold" numberOfLines={1}>
+                {r.rider?.name || 'Rider'}
+              </T>
+              <T variant="caption" tone="muted">
+                {r.orderNumber ? `#${r.orderNumber} · ` : ''}{fmtDate(r.createdAt)}
+              </T>
+            </View>
+            <T variant="label" weight="bold" style={{ marginLeft: space.md }}>
+              {money(r.amount)}
+            </T>
+          </View>
+          {r.status === 'STORE_CONFIRMED' ? (
+            <T variant="caption" tone="muted" style={{ marginTop: space.sm }}>
+              You marked this paid — waiting for the rider to confirm.
+            </T>
+          ) : (
+            <>
+              {r.status === 'RIDER_CONFIRMED' ? (
+                <T variant="caption" weight="semibold" tone="deep" style={{ marginTop: space.sm }}>
+                  The rider confirmed receiving it — mark it paid to close it out.
+                </T>
+              ) : null}
+              <PillButton
+                label="Mark paid"
+                variant="soft"
+                size="sm"
+                style={{ alignSelf: 'flex-start', marginTop: space.sm }}
+                loading={confirm.isPending && confirm.variables === r.id}
+                disabled={confirm.isPending}
+                onPress={() => confirm.mutate(r.id)}
+              />
+            </>
+          )}
+        </View>
+      ))}
+    </Card>
+  );
+}
+
 function VendorInsightsScreen() {
   const q = useVendorAnalytics();
   // Fetch double the window so "vs the previous N days" comes from the same
@@ -1838,6 +1904,9 @@ function VendorInsightsScreen() {
               <KpiTile icon="cash" value={money(a.today?.revenue ?? 0)} label="Revenue today" />
               <KpiTile icon="bell-ring" value={String(a.pendingOrders ?? 0)} label="Pending now" />
             </View>
+
+            {/* MMG cash ledger — delivery fees owed to riders (renders only when non-empty) */}
+            <RiderFeesOwedCard />
 
             {/* Performance window */}
             <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: space.md }}>

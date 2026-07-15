@@ -70,7 +70,7 @@ export function ActiveJobScreen({ navigation }: any) {
   const riderAct = useRiderAction();
   const rate = useRateCustomer();
   const [pin, setPin] = useState('');
-  const [ratePopup, setRatePopup] = useState<{ orderId: string; name: string } | null>(null);
+  const [ratePopup, setRatePopup] = useState<{ orderId: string; name: string; mmg: boolean } | null>(null);
   const [stars, setStars] = useState(5);
   const job: any = active.data;
 
@@ -101,6 +101,11 @@ export function ActiveJobScreen({ navigation }: any) {
 
   const busy = driverAct.isPending || riderAct.isPending;
   const isDriver = kind === 'DRIVER';
+  // MMG direct-pay: the customer already paid the STORE — the rider collects
+  // NOTHING at the door; their delivery fee comes from the store in cash.
+  const isMmgPaid = job?.paymentMethod === 'MOBILE_MONEY';
+  const pickedUp = ['PICKED_UP', 'EN_ROUTE_DELIVERY', 'ARRIVED'].includes(String(job?.status ?? '').toUpperCase());
+  const feeLabel = `GYD ${Number(job?.deliveryFee ?? 0).toLocaleString()}`;
   const cust: any = job?.customer ?? job?.user ?? null;
   const custName = cust ? [cust.firstName, cust.lastName].filter(Boolean).join(' ') : null;
   const inProgress = String(job?.status ?? '').toUpperCase() === 'RIDE_IN_PROGRESS';
@@ -121,7 +126,7 @@ export function ActiveJobScreen({ navigation }: any) {
           // Trip done → rate the passenger while it's fresh (DRIVER_TO_CUSTOMER).
           if (step.action === 'complete') {
             setStars(5);
-            setRatePopup({ orderId: job.id, name: custName ?? 'your passenger' });
+            setRatePopup({ orderId: job.id, name: custName ?? 'your passenger', mmg: job.paymentMethod === 'MOBILE_MONEY' });
           }
         },
       },
@@ -169,7 +174,7 @@ export function ActiveJobScreen({ navigation }: any) {
                 </T>
               </View>
               <T variant="title" style={{ marginTop: space.sm }}>
-                {jobAmount(job)} <T variant="label" tone="muted">· cash</T>
+                {jobAmount(job)} <T variant="label" tone="muted">{isMmgPaid ? '· MMG — already paid' : '· cash'}</T>
               </T>
               {/* Kitchen signal (readyAt rides outside the status lane once a
                   rider is assigned) — tells the rider the bag is on the counter. */}
@@ -244,6 +249,20 @@ export function ActiveJobScreen({ navigation }: any) {
                   Trip complete.
                 </T>
               )
+            ) : isMmgPaid ? (
+              <>
+                {/* Customer paid the store via MMG — the door is a pure handover;
+                    the rider's fee comes from the STORE (tracked in Earnings). */}
+                <View style={{ flexDirection: 'row', alignItems: 'flex-start', gap: space.sm, borderRadius: radius.lg, backgroundColor: color.brand[50], padding: space.md, marginBottom: space.md }}>
+                  <Feather name="check-circle" size={15} color={color.brand[600]} style={{ marginTop: 1 }} />
+                  <T variant="caption" weight="semibold" tone="deep" style={{ flex: 1 }}>
+                    {pickedUp
+                      ? `Customer already paid via MMG — collect NOTHING at the door. Your ${feeLabel} fee comes from the store (see Earnings).`
+                      : `Customer already paid via MMG. Collect your ${feeLabel} delivery fee from the store with the order.`}
+                  </T>
+                </View>
+                <PillButton label="Mark delivered" loading={riderAct.isPending} disabled={busy} onPress={() => riderAct.mutate({ id: job.id, action: 'delivered' })} />
+              </>
             ) : (
               <>
                 <View style={{ flexDirection: 'row', alignItems: 'flex-start', gap: space.sm, borderRadius: radius.lg, backgroundColor: color.brand[50], padding: space.md, marginBottom: space.md }}>
@@ -269,7 +288,7 @@ export function ActiveJobScreen({ navigation }: any) {
           Trip complete
         </T>
         <T variant="body" tone="muted" center style={{ marginTop: space.sm }}>
-          Cash collected — 100% yours. How was {ratePopup?.name}?
+          {ratePopup?.mmg ? 'Paid to your MMG — 100% yours.' : 'Cash collected — 100% yours.'} How was {ratePopup?.name}?
         </T>
         <View style={{ marginTop: space.lg }}>
           <Stars value={stars} size={34} gap={6} onRate={setStars} />
