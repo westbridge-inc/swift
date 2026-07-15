@@ -755,6 +755,12 @@ async function main() {
     SERVICE: ['owner_national_id', 'police_clearance'],
     // Hire-a-professional providers (§4.6): ID + police clearance are mandatory.
     SERVICE_PROVIDER: ['national_id', 'police_clearance'],
+    // Trade-mandated extensions (spec §3.5): electrical work is illegal in
+    // Guyana without a GEI Electrical Contractor Licence (Electricity Sector
+    // Reform Act 1999) — for electricians it is a GATE, not a badge. Every
+    // other trade is ID-only by law; qualifications stay opt-in badges.
+    SERVICE_PROVIDER_TRADE_ELECTRICIAN: ['gei_electrical_licence'],
+    SERVICE_PROVIDER_TRADE_ELECTRICAL: ['gei_electrical_licence'],
     CUSTOMER_L2: ['national_id', 'selfie'],
   };
   const guyanaTaxiRates = { base: 1000, perKm: 300, perMin: 25, minimum: 1500 };

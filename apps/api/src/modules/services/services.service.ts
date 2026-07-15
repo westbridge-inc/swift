@@ -110,16 +110,38 @@ export async function sendBookingReminders(
   return sent;
 }
 
+/** Checklist key for a trade's mandatory extension ("electrician" → …_ELECTRICIAN). */
+function tradeChecklistKey(trade: string): string {
+  return `SERVICE_PROVIDER_TRADE_${trade.trim().toUpperCase().replace(/[^A-Z0-9]+/g, '_')}`;
+}
+
 /**
- * A provider may operate live only when ID + police clearance are approved
- * (the SERVICE_PROVIDER checklist). Mirrors the verification gate without
- * coupling to the vendor-oriented ChecklistRole type.
+ * The full document checklist a provider must satisfy: the SERVICE_PROVIDER
+ * base (identity + character) PLUS any trade-mandated extension from
+ * CountryConfig (onboarding spec §3.5 — requirements are data, not code).
+ * In Guyana that is exactly one trade: electrical work is illegal without a
+ * GEI Electrical Contractor Licence, so electricians carry
+ * `gei_electrical_licence` as a GATE, never a badge.
+ */
+export async function providerChecklist(prisma: PrismaClient, userId: string): Promise<string[]> {
+  const user = await prisma.user.findUnique({ where: { id: userId }, select: { countryCode: true } });
+  if (!user) return [];
+  const config = await prisma.countryConfig.findUnique({ where: { code: user.countryCode } });
+  const lists = (config?.documentChecklists as Record<string, string[]>) ?? {};
+  const base = lists['SERVICE_PROVIDER'] ?? [];
+  const provider = await prisma.serviceProvider.findUnique({ where: { userId }, select: { trade: true } });
+  const extra = provider?.trade ? (lists[tradeChecklistKey(provider.trade)] ?? []) : [];
+  return [...new Set([...base, ...extra])];
+}
+
+/**
+ * A provider may operate live only when their FULL checklist is approved and
+ * unexpired — base identity/character plus the trade's legal gate (§3.5).
+ * Mirrors the verification gate without coupling to the vendor-oriented
+ * ChecklistRole type.
  */
 export async function isProviderVerified(prisma: PrismaClient, userId: string): Promise<boolean> {
-  const user = await prisma.user.findUnique({ where: { id: userId }, select: { countryCode: true } });
-  if (!user) return false;
-  const config = await prisma.countryConfig.findUnique({ where: { code: user.countryCode } });
-  const checklist = ((config?.documentChecklists as Record<string, string[]>) ?? {})['SERVICE_PROVIDER'] ?? [];
+  const checklist = await providerChecklist(prisma, userId);
   if (checklist.length === 0) return false;
 
   const approved = await prisma.verificationDocument.findMany({
@@ -133,4 +155,19 @@ export async function isProviderVerified(prisma: PrismaClient, userId: string): 
   });
   const have = new Set(approved.map((d) => d.docType));
   return checklist.every((docType) => have.has(docType));
+}
+
+/**
+ * Recompute + persist a provider's live flag after any document event
+ * (approval, rejection, expiry). Providers previously refreshed only when
+ * they re-saved their profile — a lapsed GEI licence must pull an
+ * electrician off the marketplace the moment the sweep sees it.
+ */
+export async function refreshProviderVerification(prisma: PrismaClient, userId: string): Promise<void> {
+  const provider = await prisma.serviceProvider.findUnique({ where: { userId }, select: { id: true, isVerified: true } });
+  if (!provider) return;
+  const verified = await isProviderVerified(prisma, userId);
+  if (verified !== provider.isVerified) {
+    await prisma.serviceProvider.update({ where: { id: provider.id }, data: { isVerified: verified } });
+  }
 }
