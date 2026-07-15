@@ -46,6 +46,10 @@ export function RidePostTripSheet({ ride, onDone }: { ride: any | null; onDone: 
     onDone();
   };
 
+  const when = ride.deliveredAt ?? ride.placedAt;
+  const rideClassLabel =
+    ride.rideClass ? String(ride.rideClass).charAt(0) + String(ride.rideClass).slice(1).toLowerCase() : null;
+
   return (
     <PopupCard visible={!!ride} onClose={onDone}>
       <IconChip icon="check-circle" size={56} />
@@ -55,6 +59,36 @@ export function RidePostTripSheet({ ride, onDone }: { ride: any | null; onDone: 
       <T variant="body" tone="muted" center style={{ marginTop: space.sm }}>
         {money(fare)} · cash · paid to {driverName}
       </T>
+
+      {/* Receipt — the trip on paper: route, when, class + fare. */}
+      <View style={{ alignSelf: 'stretch', borderRadius: radius.lg, backgroundColor: color.surface.subtle, padding: space.md, marginTop: space.lg }}>
+        {ride.pickupAddress ? (
+          <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.sm }}>
+            <View style={{ width: 9, height: 9, borderRadius: 5, borderWidth: 2, borderColor: color.text.muted }} />
+            <T variant="caption" tone="muted" numberOfLines={1} style={{ flex: 1 }}>
+              {ride.pickupAddress}
+            </T>
+          </View>
+        ) : null}
+        {ride.deliveryAddress ? (
+          <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.sm, marginTop: 6 }}>
+            <View style={{ width: 9, alignItems: 'center' }}>
+              <View style={{ width: 9, height: 9, borderRadius: 2, backgroundColor: color.brand[500] }} />
+            </View>
+            <T variant="caption" tone="muted" numberOfLines={1} style={{ flex: 1 }}>
+              {ride.deliveryAddress}
+            </T>
+          </View>
+        ) : null}
+        <View style={{ flexDirection: 'row', justifyContent: 'space-between', marginTop: space.sm, paddingTop: space.sm, borderTopWidth: 1, borderTopColor: color.border.subtle }}>
+          <T variant="caption" tone="muted">
+            {[rideClassLabel, when ? new Date(when).toLocaleString() : null].filter(Boolean).join(' · ')}
+          </T>
+          <T variant="caption" weight="bold">
+            {money(fare)}
+          </T>
+        </View>
+      </View>
 
       <T variant="body" weight="semibold" center style={{ marginTop: space['2xl'] }}>
         How was your ride?

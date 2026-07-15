@@ -1,6 +1,6 @@
 /** @jsxImportSource react */
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { Alert, Linking, Pressable, Share, View, useWindowDimensions } from 'react-native';
+import { Alert, Animated, Easing, Linking, Pressable, Share, View, useWindowDimensions } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import MapView, { Marker, PROVIDER_DEFAULT, Polyline } from 'react-native-maps';
 import BottomSheet, { BottomSheetView, BottomSheetScrollView } from '@gorhom/bottom-sheet';
@@ -15,6 +15,7 @@ import { useLocationStore } from '../../../stores/locationStore';
 import { GEORGETOWN } from '../../../hooks/useDeviceLocation';
 import { money } from '../../../lib/money';
 import { mediaUrl } from '../../../lib/images';
+import { streetEtaMin } from '../../../lib/geo';
 import { rideApi, type RideClass, type TierEstimate } from '../../../services/api';
 import { Card, CircleChip, IconChip, LoadingBlock, PillButton, PopupCard, Stars, T, cardShadow } from '../../../kit';
 import type { PickedPlace } from './DestinationSearchScreen';
@@ -130,6 +131,57 @@ export function RouteCard({
 
 const SHEET_STYLE = { backgroundColor: color.surface.subtle, borderTopLeftRadius: radius.xl, borderTopRightRadius: radius.xl };
 const HANDLE_STYLE = { width: 44, backgroundColor: color.border.strong };
+
+/** "Finding your driver" — a live search deserves motion, not a static line:
+ *  a breathing ring around a car mark + how long we've been looking. */
+function SearchingCard({ startedAt }: { startedAt?: string }) {
+  const pulse = useRef(new Animated.Value(0)).current;
+  const [, forceTick] = useState(0);
+
+  useEffect(() => {
+    const loop = Animated.loop(
+      Animated.timing(pulse, { toValue: 1, duration: 1600, easing: Easing.out(Easing.ease), useNativeDriver: true }),
+    );
+    loop.start();
+    // Elapsed-time ticker (1s) — reassurance that the search is alive.
+    const t = setInterval(() => forceTick((n) => n + 1), 1000);
+    return () => {
+      loop.stop();
+      clearInterval(t);
+    };
+  }, [pulse]);
+
+  const ringStyle = (delay: number) => ({
+    position: 'absolute' as const,
+    width: 64,
+    height: 64,
+    borderRadius: 32,
+    backgroundColor: color.brand[500],
+    opacity: pulse.interpolate({ inputRange: [0, delay, 1], outputRange: [0.25, 0.18, 0] }),
+    transform: [{ scale: pulse.interpolate({ inputRange: [0, 1], outputRange: [1, 2.1] }) }],
+  });
+
+  const elapsed = startedAt ? Math.max(0, Math.floor((Date.now() - new Date(startedAt).getTime()) / 1000)) : null;
+  const mm = elapsed != null ? Math.floor(elapsed / 60) : 0;
+  const ss = elapsed != null ? elapsed % 60 : 0;
+
+  return (
+    <View style={{ alignItems: 'center', paddingVertical: space.lg }}>
+      <View style={{ width: 64, height: 64, alignItems: 'center', justifyContent: 'center' }}>
+        <Animated.View style={ringStyle(0.5)} />
+        <View style={{ width: 64, height: 64, borderRadius: 32, alignItems: 'center', justifyContent: 'center', backgroundColor: color.brand[500] }}>
+          <MaterialCommunityIcons name="car" size={30} color="#fff" />
+        </View>
+      </View>
+      <T variant="body" weight="semibold" style={{ marginTop: space.lg }}>
+        Contacting drivers near you…
+      </T>
+      <T variant="caption" tone="muted" style={{ marginTop: 4 }}>
+        {elapsed != null ? `Searching for ${mm}:${String(ss).padStart(2, '0')} · ` : ''}usually under a couple of minutes
+      </T>
+    </View>
+  );
+}
 
 export function TaxiScreen({ navigation }: any) {
   const { height: winH } = useWindowDimensions();
@@ -442,6 +494,15 @@ function ActiveRide({ navigation, ride, cancelRide, insets }: any) {
   const pts = [pickup, drop, driverLoc].filter(Boolean) as LatLng[];
   const region = useMemo(() => (pts.length ? regionFor(pts) : GEORGETOWN_REGION), [ride]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  const status = String(ride.status ?? '').toUpperCase();
+  const arrived = status === 'DRIVER_ARRIVED';
+  // "Arrives in ~X min" while the driver closes on the pickup — live off the
+  // same driver:location stream that moves the map marker.
+  const pickupEta =
+    (status === 'DRIVER_ASSIGNED' || status === 'DRIVER_EN_ROUTE') && driverLoc && pickup
+      ? streetEtaMin(driverLoc, pickup)
+      : null;
+
   const shareTrip = () => {
     const vehicle = [d?.vehicleColor, d?.vehicleMake, d?.vehicleModel].filter(Boolean).join(' ');
     const message = [
@@ -522,11 +583,29 @@ function ActiveRide({ navigation, ride, cancelRide, insets }: any) {
         handleIndicatorStyle={HANDLE_STYLE}
       >
         <BottomSheetView style={{ paddingHorizontal: space['2xl'], paddingBottom: space['2xl'] }}>
-          <T variant="title">{STATUS_LABEL[ride.status] ?? 'On the way'}</T>
+          {arrived ? (
+            /* The kerb moment — loud on purpose so it isn't missed in-pocket. */
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.md, borderRadius: radius.lg, backgroundColor: color.brand[500], padding: space.lg, marginBottom: space.sm }}>
+              <MaterialCommunityIcons name="car-side" size={28} color="#fff" />
+              <View style={{ flex: 1 }}>
+                <T variant="body" weight="bold" tone="onBrand">
+                  Your driver is here
+                </T>
+                <T variant="caption" tone="onBrand" style={{ opacity: 0.9, marginTop: 2 }}>
+                  Meet them at the pickup point{d?.licensePlate ? ` · look for ${d.licensePlate}` : ''}
+                </T>
+              </View>
+            </View>
+          ) : (
+            <T variant="title">
+              {STATUS_LABEL[ride.status] ?? 'On the way'}
+              {pickupEta != null ? ` · ~${pickupEta} min` : ''}
+            </T>
+          )}
           <T variant="label" tone="muted" style={{ marginTop: 4 }}>
             {ride.rideClass ? `${TIER_META[ride.rideClass as RideClass]?.label ?? ride.rideClass} · ` : ''}
             Fare {money(ride.taxiFareTotal ?? ride.totalAmount)} · cash
-            {ride.taxiDuration ? ` · ~${Math.round(Number(ride.taxiDuration))} min` : ''}
+            {ride.taxiDuration ? ` · ~${Math.round(Number(ride.taxiDuration))} min trip` : ''}
           </T>
           {ride.ridePin ? (
             <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.sm, marginTop: space.sm }}>
@@ -610,9 +689,7 @@ function ActiveRide({ navigation, ride, cancelRide, insets }: any) {
               ) : null}
             </Card>
           ) : (
-            <T variant="label" tone="muted" style={{ marginTop: space.lg }}>
-              Hang tight — we&apos;re matching you with a nearby driver.
-            </T>
+            <SearchingCard startedAt={ride.placedAt ?? ride.createdAt} />
           )}
 
           {/* Emergency — always one tap away on an active ride */}
