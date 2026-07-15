@@ -25,7 +25,11 @@ let app: FastifyInstance;
 let token: string;
 let userId: string;
 const marker = nanoid(6).toLowerCase();
-const PLAINTEXT = Buffer.from(`swift-envelope-test-${marker}-\x89PNG fake bytes`);
+// Real PNG magic at offset 0 — the upload route magic-byte-sniffs content now.
+const PLAINTEXT = Buffer.concat([
+  Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+  Buffer.from(`swift-envelope-test-${marker}`),
+]);
 
 beforeAll(async () => {
   process.env['NODE_ENV'] = 'development';

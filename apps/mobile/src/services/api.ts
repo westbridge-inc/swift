@@ -149,7 +149,12 @@ export const customerApi = {
     fulfillmentSelections?: Record<string, 'DELIVERY' | 'PICKUP'>;
     /** Priority delivery: 1.5x delivery fee, dispatched first */
     express?: boolean;
-  }) => api.post('/customer/checkout', data),
+  }) =>
+    // Idempotency-Key: transport-level duplicates of ONE tap can't double-
+    // order (the server refuses a concurrent twin and replays a finished one).
+    api.post('/customer/checkout', data, {
+      headers: { 'Idempotency-Key': `chk_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 12)}` },
+    }),
   getNotifications: () => api.get('/customer/notifications'),
   reorder: (id: string) => api.post(`/customer/orders/${id}/reorder`, {}),
   rateOrder: (
