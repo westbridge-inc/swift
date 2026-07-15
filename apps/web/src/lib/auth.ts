@@ -104,8 +104,11 @@ export async function verifyVendorLogin(phone: string, code: string) {
   if (data.isNewUser || !data.tokens?.accessToken) {
     throw new Error('No Swift account is registered to that number.');
   }
+  // Same vendor-ness rule as the mobile app's authStore: role string or the
+  // vendorOwner relation on the login payload.
   const roles: string[] = data.user?.roles ?? [];
-  if (!roles.includes('VENDOR')) {
+  const isVendor = roles.includes('VENDOR') || roles.includes('VENDOR_OWNER') || !!data.user?.vendorOwner;
+  if (!isVendor) {
     throw new Error('No business on this account yet — sign up as a business in the Swift app first.');
   }
   setTokens(data.tokens.accessToken, data.tokens.refreshToken);

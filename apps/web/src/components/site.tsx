@@ -3,6 +3,7 @@ import Link from 'next/link';
 /** Shared marketing chrome: nav + footer, Swift red on a light canvas. */
 
 const NAV = [
+  { href: '/stores', label: 'Stores' },
   { href: '/how-it-works', label: 'How it works' },
   { href: '/for-vendors', label: 'For businesses' },
   { href: '/for-drivers', label: 'For drivers' },

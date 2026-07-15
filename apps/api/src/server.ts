@@ -30,6 +30,7 @@ import { loggerRedactConfig } from './utils/logger-config';
 import { registerPublicUploads } from './utils/public-uploads';
 import { observabilityPlugin } from './plugins/observability';
 import { legalRoutes } from './modules/legal/legal.routes';
+import { publicRoutes } from './modules/public/public.routes';
 import path from 'node:path';
 
 const PORT = parseInt(process.env['PORT'] || '3000', 10);
@@ -180,6 +181,8 @@ async function buildApp() {
   await app.register(servicesRoutes, { prefix: '/api/v1/services' });
   await app.register(partnerRoutes, { prefix: '/api/v1/partner' });
   await app.register(aiRoutes, { prefix: '/api/v1/ai' });
+  // Unauthenticated read-only storefront pages (web SEO) — see module header.
+  await app.register(publicRoutes, { prefix: '/api/v1/public' });
 
   // Background job queues
   try {
