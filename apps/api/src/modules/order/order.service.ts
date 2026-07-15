@@ -389,10 +389,13 @@ export class OrderService {
         ? plans.findIndex((p) => p.vendor.id === promoVendorId)
         : 0;
 
+      // "Tip your rider" is delivery money: it rides the first DELIVERY plan.
+      // A pickup or appointment has no rider — a lingering cart tip must never
+      // be charged there (founder screenshot 2026-07-15: haircut w/ rider tip).
+      const tipPlanIndex = plans.findIndex((p) => p.fulfillment === 'DELIVERY');
       for (const [index, plan] of plans.entries()) {
         sequence += 1;
-        const isFirst = index === 0;
-        const planTip = isFirst ? tip : 0;
+        const planTip = index === tipPlanIndex ? tip : 0;
         const planDiscount = index === promoPlanIndex ? discount : 0;
         const totalAmount = Math.max(0, plan.subtotal + plan.deliveryFee + planTip - planDiscount);
         // DELIVERY and MOBILE appointments go to the customer's address; PICKUP and

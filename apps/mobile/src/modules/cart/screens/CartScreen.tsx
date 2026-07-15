@@ -68,6 +68,8 @@ export function CartScreen() {
   const [placedOrderId, setPlacedOrderId] = useState<string | null>(null);
   // LIFECYCLE_V2: while held, the store has NOT been told yet — say so honestly.
   const [placedHeld, setPlacedHeld] = useState(false);
+  // The cart empties after placement — remember it was a booking for the popup.
+  const [placedAppt, setPlacedAppt] = useState(false);
   const appointments = useBookingStore((s) => s.appointments);
   const clearAppointments = useBookingStore((s) => s.clear);
 
@@ -114,6 +116,20 @@ export function CartScreen() {
     .filter((i) => appointments[i.itemId])
     .map((i) => ({ itemId: i.itemId, slotStart: appointments[i.itemId]!.slotStart, ...(appointments[i.itemId]!.mode ? { mode: appointments[i.itemId]!.mode } : {}) }));
 
+  // A booking is not a delivery: no rider, no delivery fee, no address unless
+  // the pro travels to you. The checkout reshapes itself around that.
+  const apptOnly = items.length > 0 && bookingItems.length === items.length;
+  const homeVisit = apptOnly && apptPayload.some((a) => (a as { mode?: string }).mode === 'MOBILE');
+  const needsAddress = !apptOnly || homeVisit;
+  // Slot ISOs carry local wall-clock time on their UTC face (same convention
+  // as the slot picker) — format in UTC or the time shifts by the device TZ.
+  const fmtSlot = (iso: string) => {
+    const d = new Date(iso);
+    const day = d.toLocaleDateString([], { weekday: 'short', month: 'short', day: 'numeric', timeZone: 'UTC' });
+    const time = d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit', timeZone: 'UTC' });
+    return `${day}, ${time}`;
+  };
+
   const onOrder = () => {
     placeOrder.mutate(
       {
@@ -127,6 +143,7 @@ export function CartScreen() {
           const first = data?.orders?.[0];
           setPlacedOrderId(first?.id ?? null);
           setPlacedHeld(!!(first?.holdExpiresAt && new Date(first.holdExpiresAt) > new Date()));
+          setPlacedAppt(apptPayload.length > 0);
           if (apptPayload.length) clearAppointments();
           // MMG: take the customer straight to the store's own MMG link, in-app.
           if (payMethod === 'MMG') void openPayLink(first?.vendor?.mmgPayUrl);
@@ -185,23 +202,33 @@ export function CartScreen() {
           contentContainerStyle={{ paddingHorizontal: GUTTER, paddingBottom: space['3xl'] }}
           keyboardShouldPersistTaps="handled"
         >
-          {/* Delivery location */}
-          <View style={{ flexDirection: 'row', alignItems: 'center', marginTop: space.sm }}>
-            <View style={{ flex: 1 }}>
+          {/* Delivery location — or the service address when the pro travels to
+              you. An at-the-business booking has no address to collect at all. */}
+          {needsAddress ? (
+            <View style={{ flexDirection: 'row', alignItems: 'center', marginTop: space.sm }}>
+              <View style={{ flex: 1 }}>
+                <T variant="label" tone="muted">
+                  {apptOnly ? 'Service Address' : 'Delivery Location'}
+                </T>
+                <T variant="body" weight="semibold" style={{ marginTop: 2 }} numberOfLines={1}>
+                  {c.deliveryAddress?.label ?? c.deliveryAddress?.addressLine1 ?? 'No address yet'}
+                </T>
+              </View>
+              <PillButton
+                label={c.deliveryAddress ? 'Change Location' : 'Add Address'}
+                variant="soft"
+                size="sm"
+                onPress={() => navigation.navigate('Addresses', { selectFor: 'cart' })}
+              />
+            </View>
+          ) : (
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.sm, marginTop: space.sm }}>
+              <Feather name="map-pin" size={14} color={color.text.muted} />
               <T variant="label" tone="muted">
-                Delivery Location
-              </T>
-              <T variant="body" weight="semibold" style={{ marginTop: 2 }} numberOfLines={1}>
-                {c.deliveryAddress?.label ?? c.deliveryAddress?.addressLine1 ?? 'No address yet'}
+                At the business — show up at your booked time.
               </T>
             </View>
-            <PillButton
-              label={c.deliveryAddress ? 'Change Location' : 'Add Address'}
-              variant="soft"
-              size="sm"
-              onPress={() => navigation.navigate('Addresses', { selectFor: 'cart' })}
-            />
-          </View>
+          )}
 
           {/* Promo code (kit 31–32) — server-applied via validate */}
           <View style={{ marginTop: space.xl }}>
@@ -290,27 +317,31 @@ export function CartScreen() {
             ))}
           </View>
 
-          {/* Tip the rider (real cart-level tip) */}
-          <T variant="heading" style={{ marginTop: space['2xl'] }}>
-            Tip your rider
-          </T>
-          <View style={{ flexDirection: 'row', gap: space.md, marginTop: space.md }}>
-            {TIP_PRESETS.map((t) => (
-              <Chip
-                key={t}
-                label={t === 0 ? 'No tip' : money(t)}
-                selected={Number(c.tipAmount) === t}
-                onPress={() => setTip.mutate(t)}
-                style={{ height: 40, paddingHorizontal: space.lg }}
-              />
-            ))}
-          </View>
+          {/* Tip the rider (real cart-level tip) — bookings have no rider */}
+          {!apptOnly ? (
+            <>
+              <T variant="heading" style={{ marginTop: space['2xl'] }}>
+                Tip your rider
+              </T>
+              <View style={{ flexDirection: 'row', gap: space.md, marginTop: space.md }}>
+                {TIP_PRESETS.map((t) => (
+                  <Chip
+                    key={t}
+                    label={t === 0 ? 'No tip' : money(t)}
+                    selected={Number(c.tipAmount) === t}
+                    onPress={() => setTip.mutate(t)}
+                    style={{ height: 40, paddingHorizontal: space.lg }}
+                  />
+                ))}
+              </View>
+            </>
+          ) : null}
 
-          {/* Delivery instructions */}
+          {/* Delivery instructions / notes for the pro */}
           <View style={{ marginTop: space.xl }}>
             <LabeledInput
               icon="message-square"
-              placeholder="Delivery instructions (optional)"
+              placeholder={apptOnly ? 'Notes for your appointment (optional)' : 'Delivery instructions (optional)'}
               value={instructions}
               onChangeText={setInstructions}
             />
@@ -322,9 +353,19 @@ export function CartScreen() {
               Payment
             </T>
             {([
-              { key: 'CASH', icon: 'dollar-sign', title: 'Cash on delivery', sub: 'Pay the rider when your order arrives.' },
-              { key: 'MMG', icon: 'smartphone', title: 'Pay with MMG', sub: 'Pay the store directly on their MMG — opens right in the app.' },
-            ] as const).map((o) => {
+              {
+                key: 'CASH' as const,
+                icon: 'dollar-sign' as const,
+                title: apptOnly ? 'Pay at your appointment' : 'Cash on delivery',
+                sub: apptOnly ? 'Cash, when the service is done.' : 'Pay the rider when your order arrives.',
+              },
+              {
+                key: 'MMG' as const,
+                icon: 'smartphone' as const,
+                title: 'Pay with MMG',
+                sub: 'Pay the business directly on their MMG — opens right in the app.',
+              },
+            ]).map((o) => {
               const active = payMethod === o.key;
               return (
                 <Pressable key={o.key} onPress={() => setPayMethod(o.key)}>
@@ -378,17 +419,34 @@ export function CartScreen() {
 
           {/* Order summary */}
           <Card style={{ marginTop: space.xl }}>
-            <T variant="heading">Order Summary</T>
+            <T variant="heading">{apptOnly ? 'Booking Summary' : 'Order Summary'}</T>
             <View style={{ marginTop: space.md }}>
               <InfoRow label={`Total Items (${c.itemCount})`} value={money(c.subtotalCustomer)} />
-              <InfoRow label="Delivery Fee" value={c.deliveryFee === 0 ? 'Free' : money(c.deliveryFee)} />
+              {!apptOnly ? <InfoRow label="Delivery Fee" value={c.deliveryFee === 0 ? 'Free' : money(c.deliveryFee)} /> : null}
               {express && c.deliveryFee > 0 ? <InfoRow label="Express" value={money(Math.round(c.deliveryFee * 0.5))} /> : null}
               {c.discount > 0 ? <InfoRow label="Discount" value={`-${money(c.discount)}`} /> : null}
-              {Number(c.tipAmount) > 0 ? <InfoRow label="Rider Tip" value={money(c.tipAmount)} /> : null}
+              {!apptOnly && Number(c.tipAmount) > 0 ? <InfoRow label="Rider Tip" value={money(c.tipAmount)} /> : null}
               <View style={{ height: 1, backgroundColor: color.border.subtle, marginVertical: space.sm }} />
               <InfoRow label="Total" value={money(c.totalAmount + (express && c.deliveryFee > 0 ? Math.round(c.deliveryFee * 0.5) : 0))} strong />
             </View>
-            {c.estimatedTotalMin ? (
+            {apptOnly ? (
+              <View style={{ marginTop: space.sm, gap: 4 }}>
+                {bookingItems.map((i) =>
+                  appointments[i.itemId] ? (
+                    <View key={i.itemId} style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                      <Feather name="calendar" size={13} color={color.brand[500]} />
+                      <T variant="caption" tone="muted">
+                        {i.name} — {fmtSlot(appointments[i.itemId]!.slotStart)}
+                        {appointments[i.itemId]!.mode === 'MOBILE' ? ' · at your address' : ''}
+                      </T>
+                    </View>
+                  ) : null,
+                )}
+                <T variant="caption" tone="muted" style={{ marginTop: 2 }}>
+                  Your time is confirmed when the business accepts the booking.
+                </T>
+              </View>
+            ) : c.estimatedTotalMin ? (
               <T variant="caption" tone="muted" style={{ marginTop: space.sm }}>
                 Estimated arrival ~{c.estimatedTotalMin} min after the store confirms.
               </T>
@@ -421,15 +479,15 @@ export function CartScreen() {
           ) : null}
 
           <PillButton
-            label="Order Now"
+            label={apptOnly ? 'Book Now' : 'Order Now'}
             onPress={onOrder}
             loading={placeOrder.isPending}
-            disabled={!c.meetsMinimum || c.unavailableItemIds?.length > 0 || !c.deliveryAddress || unslotted.length > 0}
+            disabled={!c.meetsMinimum || c.unavailableItemIds?.length > 0 || (needsAddress && !c.deliveryAddress) || unslotted.length > 0}
             style={{ marginTop: space.xl }}
           />
-          {!c.deliveryAddress ? (
+          {needsAddress && !c.deliveryAddress ? (
             <T variant="caption" tone="muted" center style={{ marginTop: space.sm }}>
-              Add a delivery address to place the order.
+              {homeVisit ? 'Add your address — the business travels to you.' : 'Add a delivery address to place the order.'}
             </T>
           ) : null}
         </ScrollView>
@@ -493,15 +551,17 @@ export function CartScreen() {
           <Feather name="check" size={30} color={color.white} />
         </View>
         <T variant="heading" center style={{ marginTop: space.md }}>
-          Your order is placed
+          {placedAppt ? 'Booking requested' : 'Your order is placed'}
         </T>
         <T variant="label" tone="muted" center style={{ marginTop: space.sm }}>
-          {placedHeld
-            ? 'You have a few minutes to change your mind — cancelling is free until the store gets it.'
-            : 'The store has been notified — pay cash on delivery.'}
+          {placedAppt
+            ? 'Your time is confirmed when the business accepts — we will let you know.'
+            : placedHeld
+              ? 'You have a few minutes to change your mind — cancelling is free until the store gets it.'
+              : 'The store has been notified — pay cash on delivery.'}
         </T>
         <PillButton
-          label="Track Order"
+          label={placedAppt ? 'View Booking' : 'Track Order'}
           size="md"
           onPress={() => {
             const id = placedOrderId;
