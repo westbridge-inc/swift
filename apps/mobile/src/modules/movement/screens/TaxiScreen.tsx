@@ -1,6 +1,6 @@
 /** @jsxImportSource react */
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { Alert, Animated, Easing, Linking, Pressable, Share, View, useWindowDimensions } from 'react-native';
+import { Animated, Easing, Linking, Pressable, Share, View, useWindowDimensions } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import MapView, { Marker, PROVIDER_DEFAULT, Polyline } from 'react-native-maps';
 import BottomSheet, { BottomSheetView, BottomSheetScrollView } from '@gorhom/bottom-sheet';
@@ -16,7 +16,7 @@ import { GEORGETOWN } from '../../../hooks/useDeviceLocation';
 import { money } from '../../../lib/money';
 import { mediaUrl } from '../../../lib/images';
 import { streetEtaMin } from '../../../lib/geo';
-import { rideApi, type RideClass, type TierEstimate } from '../../../services/api';
+import { type RideClass, type TierEstimate } from '../../../services/api';
 import { Card, CircleChip, IconChip, LoadingBlock, PillButton, PopupCard, Stars, T, cardShadow } from '../../../kit';
 import type { PickedPlace } from './DestinationSearchScreen';
 
@@ -519,27 +519,6 @@ function ActiveRide({ navigation, ride, cancelRide, insets }: any) {
     Share.share({ message }).catch(() => {});
   };
 
-  // Emergency: dial the local number AND alert Swift with live coords so ops
-  // have an evidence trail and can respond (ride-hailing safety).
-  const raiseSos = () => {
-    Alert.alert(
-      'Emergency',
-      'Call emergency services now and alert Swift with your live location?',
-      [
-        { text: 'Cancel', style: 'cancel' },
-        {
-          text: 'Call 911',
-          style: 'destructive',
-          onPress: () => {
-            const coords = driverLoc ? { lat: driverLoc.latitude, lng: driverLoc.longitude } : undefined;
-            void rideApi.sos(ride.id, coords).catch(() => {});
-            Linking.openURL('tel:911').catch(() => {});
-          },
-        },
-      ],
-    );
-  };
-
   return (
     <View style={{ flex: 1, backgroundColor: color.surface.subtle }}>
       <MapView
@@ -692,32 +671,8 @@ function ActiveRide({ navigation, ride, cancelRide, insets }: any) {
             <SearchingCard startedAt={ride.placedAt ?? ride.createdAt} />
           )}
 
-          {/* Emergency — always one tap away on an active ride */}
-          <Pressable onPress={raiseSos} style={{ marginTop: space.xl }}>
-            {({ pressed }) => (
-              <View
-                style={{
-                  flexDirection: 'row',
-                  alignItems: 'center',
-                  justifyContent: 'center',
-                  gap: 6,
-                  borderRadius: radius.lg,
-                  borderWidth: 1.5,
-                  borderColor: color.error,
-                  backgroundColor: pressed ? '#FDECEC' : 'transparent',
-                  paddingVertical: space.md,
-                }}
-              >
-                <MaterialCommunityIcons name="shield-alert" size={18} color={color.error} />
-                <T variant="body" weight="bold" style={{ color: color.error }}>
-                  Emergency — SOS
-                </T>
-              </View>
-            )}
-          </Pressable>
-
           {/* Safety row: let someone you trust follow the trip */}
-          <View style={{ flexDirection: 'row', gap: space.md, marginTop: space.md }}>
+          <View style={{ flexDirection: 'row', gap: space.md, marginTop: space.xl }}>
             <PillButton
               label="Share trip"
               variant="soft"
