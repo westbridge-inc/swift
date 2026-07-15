@@ -23,12 +23,20 @@ export function SiteNav() {
             </Link>
           ))}
         </nav>
-        <Link
-          href="/for-vendors"
-          className="rounded-full bg-[var(--swift-red)] px-5 py-2 text-sm font-semibold text-white transition-colors hover:bg-[var(--swift-red-600)]"
-        >
-          Join Swift
-        </Link>
+        <div className="flex items-center gap-4">
+          <Link
+            href="/login"
+            className="text-sm font-semibold text-[var(--swift-muted)] transition-colors hover:text-[var(--swift-ink)]"
+          >
+            Business sign in
+          </Link>
+          <Link
+            href="/for-vendors"
+            className="rounded-full bg-[var(--swift-red)] px-5 py-2 text-sm font-semibold text-white transition-colors hover:bg-[var(--swift-red-600)]"
+          >
+            Join Swift
+          </Link>
+        </div>
       </div>
     </header>
   );
