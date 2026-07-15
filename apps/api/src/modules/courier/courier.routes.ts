@@ -4,7 +4,7 @@ import { nanoid } from 'nanoid';
 import { estimateCourierFee, type PackageSize, type DeliverySpeed } from './courier.service';
 import { getMapsProvider } from '../../providers/maps/maps-provider';
 import { makeDispatchService } from '../dispatch/dispatch.service';
-import { OrderService } from '../order/order.service';
+import { OrderService, holdWindowMs } from '../order/order.service';
 import { NotificationService } from '../notification/notification.service';
 import { orderingRestriction } from '../cash/cash-rules.service';
 import { generateOrderNumber } from '../../utils/markup';
@@ -106,8 +106,10 @@ export default async function courierRoutes(app: FastifyInstance) {
         orderNumber: generateOrderNumber(todayCount + 1),
         orderType: 'COURIER',
         customerId: userId,
-        // No vendor prep step — the parcel is ready, so dispatch can run at once.
+        // No vendor prep step — the parcel is ready, so dispatch can run at once
+        // (or at hold release when LIFECYCLE_V2 keeps the free-cancel window open).
         status: 'READY_FOR_PICKUP',
+        holdExpiresAt: holdWindowMs() != null ? new Date(Date.now() + holdWindowMs()!) : null,
         fulfillment: 'DELIVERY',
         pickupAddress: body.pickupAddress,
         pickupLat: body.pickup.lat,
@@ -137,7 +139,10 @@ export default async function courierRoutes(app: FastifyInstance) {
       },
     });
 
-    await dispatch.dispatchOrder(order.id);
+    // Held courier jobs dispatch at release (the worker enqueues); otherwise now.
+    if (!order.holdExpiresAt) {
+      await dispatch.dispatchOrder(order.id);
+    }
 
     reply.code(201);
     return {

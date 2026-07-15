@@ -298,6 +298,26 @@ export function createWorkers(ctx: JobContext) {
         return;
       }
 
+      if (job.name === 'release-held-orders') {
+        // LIFECYCLE_V2 (spec Part A): held orders whose cancel window closed
+        // become visible to the vendor + dispatchable. No-op while every order
+        // is unheld (flag off ⇒ nothing ever matches).
+        const { OrderService } = await import('../modules/order/order.service');
+        const releaseQueue = new Queue(QUEUE_NAMES.DISPATCH, { connection });
+        try {
+          const orders = new OrderService(ctx.prisma, ctx.io);
+          const { released } = await orders.releaseDueHeldOrders(async (orderId) => {
+            await releaseQueue.add('dispatch-order', { orderId }, { removeOnComplete: 100, removeOnFail: 50 });
+          });
+          if (released.length > 0) {
+            ctx.log.info({ count: released.length }, 'Held orders released to vendors/dispatch');
+          }
+        } finally {
+          await releaseQueue.close();
+        }
+        return;
+      }
+
       const dispatchQueue = new Queue(QUEUE_NAMES.DISPATCH, { connection });
       const dispatch = new DispatchService(
         ctx.prisma,
@@ -428,6 +448,15 @@ export async function scheduleRecurringJobs(queues: ReturnType<typeof createQueu
   // minutes — dead phones must not keep swallowing dispatch offers.
   await queues.dispatchQueue.add('stale-movers', {}, {
     repeat: { pattern: '*/5 * * * *' },
+    removeOnComplete: 20,
+    removeOnFail: 20,
+  });
+
+  // LIFECYCLE_V2 hold release: every 30s, flip held orders whose cancel window
+  // closed to visible + dispatchable. The server clock owns the window — the
+  // customer closing the app changes nothing. No-op while the flag is off.
+  await queues.dispatchQueue.add('release-held-orders', {}, {
+    repeat: { every: 30_000 },
     removeOnComplete: 20,
     removeOnFail: 20,
   });

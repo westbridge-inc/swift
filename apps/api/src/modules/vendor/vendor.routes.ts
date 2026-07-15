@@ -1,7 +1,7 @@
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { OrderStatus, OrderType, SettlementStatus } from '@prisma/client';
-import { OrderService } from '../order/order.service';
+import { OrderService, notHeldFilter } from '../order/order.service';
 import { makeDispatchService } from '../dispatch/dispatch.service';
 import { NotificationService } from '../notification/notification.service';
 import { BookingService } from '../booking/booking.service';
@@ -412,6 +412,10 @@ async function resolveOwnedOrder(app: FastifyInstance, userId: string, orderId: 
   if (!order || !order.vendorId || !vendorIds.includes(order.vendorId)) {
     throw new NotFoundError('Order', orderId);
   }
+  // LIFECYCLE_V2: a held order is invisible to the vendor even by direct id.
+  if (order.holdExpiresAt && order.holdExpiresAt > new Date()) {
+    throw new NotFoundError('Order', orderId);
+  }
   return order;
 }
 
@@ -765,7 +769,9 @@ export async function vendorRoutes(app: FastifyInstance) {
     const pagination = parsePagination(query);
     const { status, orderType, from, to, search } = vendorOrdersQuerySchema.parse(request.query);
 
-    const where: Record<string, unknown> = { vendorId: ordersScope(access, requested) };
+    // LIFECYCLE_V2: a held order does not exist for the vendor yet. Lives in
+    // AND[] so the search block's own OR can't clobber it.
+    const where: Record<string, unknown> = { vendorId: ordersScope(access, requested), AND: [notHeldFilter()] };
     if (status) where['status'] = status;
     if (orderType) where['orderType'] = orderType;
     if (from) where['placedAt'] = { ...(where['placedAt'] as object || {}), gte: from };
@@ -1930,7 +1936,8 @@ export async function vendorRoutes(app: FastifyInstance) {
         _sum: { subtotalBase: true },
       }),
       app.prisma.item.count({ where: { vendorId, isAvailable: true } }),
-      app.prisma.order.count({ where: { vendorId, status: 'PENDING' } }),
+      // Held orders (LIFECYCLE_V2) aren't the vendor's to act on yet.
+      app.prisma.order.count({ where: { vendorId, status: 'PENDING', ...notHeldFilter() } }),
     ]);
 
     return {

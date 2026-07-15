@@ -1556,6 +1556,9 @@ export async function customerRoutes(app: FastifyInstance) {
       placedAt: o.placedAt,
       deliveredAt: o.deliveredAt,
       scheduledFor: o.scheduledFor,
+      // LIFECYCLE_V2: while in the future, the free-cancel window is open
+      // (the server clock decides; any app countdown is cosmetic).
+      holdExpiresAt: o.holdExpiresAt,
     }));
 
     return { success: true, ...paginatedResponse(enrichedOrders, total, { page, limit, skip }) };
@@ -1602,7 +1605,10 @@ export async function customerRoutes(app: FastifyInstance) {
     const hasBeenRated = orderRatings.length > 0;
     const canCancel = !['DELIVERED', 'COMPLETED', 'CANCELLED', 'REFUNDED', 'PICKED_UP', 'EN_ROUTE_DELIVERY', 'ARRIVED'].includes(order.status);
     const minutesSincePlaced = (Date.now() - order.placedAt.getTime()) / 60000;
-    const freeCancellation = canCancel && minutesSincePlaced <= FREE_CANCEL_WINDOW_MIN && order.status === 'PENDING';
+    // LIFECYCLE_V2: while held, the store hasn't seen the order — cancelling
+    // is free by construction, whatever the legacy 5-minute clock says.
+    const heldNow = order.holdExpiresAt != null && order.holdExpiresAt > new Date();
+    const freeCancellation = heldNow || (canCancel && minutesSincePlaced <= FREE_CANCEL_WINDOW_MIN && order.status === 'PENDING');
 
     // Timeline
     const timeline = order.statusHistory.map((sh) => ({
@@ -1689,9 +1695,13 @@ export async function customerRoutes(app: FastifyInstance) {
         // What a cancel would cost right now (0 inside the free window) — so
         // the app shows the fee BEFORE the customer confirms.
         cancellationFee: canCancel && !freeCancellation ? LATE_CANCEL_FEE : 0,
-        freeCancellationExpiresAt: canCancel && order.status === 'PENDING'
-          ? new Date(order.placedAt.getTime() + FREE_CANCEL_WINDOW_MIN * 60000).toISOString()
-          : null,
+        // Held orders: the free window IS the hold; otherwise the legacy clock.
+        holdExpiresAt: order.holdExpiresAt,
+        freeCancellationExpiresAt: heldNow
+          ? order.holdExpiresAt!.toISOString()
+          : canCancel && order.status === 'PENDING'
+            ? new Date(order.placedAt.getTime() + FREE_CANCEL_WINDOW_MIN * 60000).toISOString()
+            : null,
       },
     };
   });
