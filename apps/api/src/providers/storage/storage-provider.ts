@@ -1,4 +1,4 @@
-import { mkdir, writeFile, unlink } from 'node:fs/promises';
+import { mkdir, writeFile, unlink, readFile } from 'node:fs/promises';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { nanoid } from 'nanoid';
@@ -24,6 +24,9 @@ export interface StorageProvider {
   getSignedUrl(fileKey: string, ttlSeconds?: number): Promise<string>;
   /** Permanently delete an object (retention / right-to-erasure). */
   delete(fileKey: string): Promise<void>;
+
+  /** Read an object's raw bytes (the decrypting render path needs the ciphertext). */
+  getObject(fileKey: string): Promise<Buffer>;
 }
 
 const DEFAULT_TTL_SECONDS = 300;
@@ -58,6 +61,11 @@ export class LocalStorageProvider implements StorageProvider {
     // Map the stored "/uploads/..." key back to disk; best-effort.
     const rel = fileKey.replace(/^\/?uploads\//, '');
     await unlink(path.join(this.baseDir, rel)).catch(() => undefined);
+  }
+
+  async getObject(fileKey: string): Promise<Buffer> {
+    const rel = fileKey.replace(/^\/?uploads\//, '');
+    return readFile(path.join(this.baseDir, rel));
   }
 }
 
@@ -105,6 +113,13 @@ export class S3StorageProvider implements StorageProvider {
 
   async delete(fileKey: string): Promise<void> {
     await this.client.send(new DeleteObjectCommand({ Bucket: this.bucket, Key: fileKey }));
+  }
+
+  async getObject(fileKey: string): Promise<Buffer> {
+    const res = await this.client.send(new GetObjectCommand({ Bucket: this.bucket, Key: fileKey }));
+    const bytes = await res.Body?.transformToByteArray();
+    if (!bytes) throw new Error(`Empty object body for ${fileKey}`);
+    return Buffer.from(bytes);
   }
 }
 

@@ -341,6 +341,27 @@ enum ComplianceReviewStatus {
   FAILED
 }
 
+/// Envelope-encryption metadata for a stored verification object (onboarding
+/// spec §5): the object in the bucket is AES-256-GCM ciphertext; the per-file
+/// DEK lives here wrapped by the master KEK. Nulling wrappedDek is the
+/// crypto-shred — the ciphertext (and any backup of it) becomes permanently
+/// unrecoverable. Keyed by fileKey because upload happens before the
+/// VerificationDocument row exists (two-step upload → submit).
+model EncryptedObject {
+  fileKey    String    @id
+  iv         Bytes
+  authTag    Bytes
+  wrappedDek Bytes?
+  mimeType   String
+  sizeBytes  Int
+  sha256     String
+  createdBy  String
+  createdAt  DateTime  @default(now())
+  shreddedAt DateTime?
+
+  @@map("encrypted_objects")
+}
+
 enum VerificationDocumentStatus {
   PENDING
   APPROVED

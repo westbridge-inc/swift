@@ -545,6 +545,13 @@ export class VerificationService {
       if (doc.fileUrl) {
         const deleted = await storage.delete(doc.fileUrl).then(() => true).catch(() => false);
         if (!deleted) continue;
+        // Crypto-shred (spec §5.5): null the wrapped DEK so even a backup of
+        // the ciphertext is permanently unrecoverable. Shred FIRST-class —
+        // the object delete above is belt, this is braces.
+        await this.prisma.encryptedObject.updateMany({
+          where: { fileKey: doc.fileUrl },
+          data: { wrappedDek: null, shreddedAt: new Date() },
+        });
       }
       await this.prisma.verificationDocument.update({
         where: { id: doc.id },

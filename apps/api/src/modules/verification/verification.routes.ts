@@ -4,6 +4,8 @@ import { VerificationService } from './verification.service';
 import { NotificationService } from '../notification/notification.service';
 import { getKycProvider } from '../../providers/kyc/kyc-provider';
 import { getStorageProvider } from '../../providers/storage/storage-provider';
+import { decryptBuffer, encryptBuffer, generateDek, getKeyProvider, signRenderToken } from '../../providers/storage/envelope';
+import { createHash } from 'node:crypto';
 import { AppError } from '../../utils/errors';
 
 const checklistRoleSchema = z.enum(['MOVER', 'RESTAURANT', 'SUPERMARKET', 'STORE', 'SERVICE']);
@@ -72,6 +74,36 @@ export async function verificationRoutes(app: FastifyInstance) {
     }
     const buffer = await file.toBuffer();
     const storage = getStorageProvider();
+
+    // Envelope encryption (onboarding spec §5): with a KEK configured the
+    // bucket only ever holds AES-256-GCM ciphertext; the wrapped per-file DEK
+    // lands in encrypted_objects. Without one, behavior is unchanged
+    // (private object + provider-side SSE) — encryption is config, not code.
+    const keys = getKeyProvider();
+    if (keys) {
+      const dek = generateDek();
+      const { ciphertext, iv, authTag } = encryptBuffer(buffer, dek);
+      const { url } = await storage.upload({
+        buffer: ciphertext,
+        filename: `${file.filename}.enc`,
+        mimeType: 'application/octet-stream',
+        folder: `verification/${request.user.userId}`,
+      });
+      await app.prisma.encryptedObject.create({
+        data: {
+          fileKey: url,
+          iv: new Uint8Array(iv),
+          authTag: new Uint8Array(authTag),
+          wrappedDek: new Uint8Array(await keys.wrapDek(dek)),
+          mimeType: file.mimetype,
+          sizeBytes: buffer.length,
+          sha256: createHash('sha256').update(buffer).digest('hex'),
+          createdBy: request.user.userId,
+        },
+      });
+      return { success: true, data: { url } };
+    }
+
     const { url } = await storage.upload({
       buffer,
       filename: file.filename,
@@ -79,6 +111,47 @@ export async function verificationRoutes(app: FastifyInstance) {
       folder: `verification/${request.user.userId}`,
     });
     return { success: true, data: { url } };
+  });
+
+  /**
+   * GET /render/:docId?expires&sig — decrypting stream for envelope-encrypted
+   * documents. HMAC-token gated (not JWT) so the admin console's <img> can load
+   * it; tokens are minted ONLY by the audited admin document-url route and live
+   * seconds. The bucket object is ciphertext — this is the only way to see it.
+   */
+  app.get<{ Params: { docId: string } }>('/render/:docId', async (request, reply) => {
+    const { docId } = request.params;
+    const { expires, sig } = z.object({ expires: z.coerce.number(), sig: z.string().min(16) }).parse(request.query);
+    if (expires < Math.floor(Date.now() / 1000)) {
+      throw new AppError(410, 'LINK_EXPIRED', 'This view link has expired — reopen the document.');
+    }
+    if (sig !== signRenderToken(docId, expires)) {
+      throw new AppError(403, 'BAD_SIGNATURE', 'Invalid view link.');
+    }
+
+    const doc = await app.prisma.verificationDocument.findUnique({
+      where: { id: docId },
+      select: { fileUrl: true, purgedAt: true },
+    });
+    if (!doc || doc.purgedAt || !doc.fileUrl) {
+      throw new AppError(410, 'DOCUMENT_PURGED', 'This document has been deleted under the retention policy');
+    }
+    const meta = await app.prisma.encryptedObject.findUnique({ where: { fileKey: doc.fileUrl } });
+    if (!meta) throw new AppError(404, 'NOT_ENCRYPTED', 'No encrypted object for this document.');
+    if (!meta.wrappedDek || meta.shreddedAt) {
+      throw new AppError(410, 'DOCUMENT_SHREDDED', 'This document was crypto-shredded and cannot be recovered.');
+    }
+    const keys = getKeyProvider();
+    if (!keys) throw new AppError(503, 'ENCRYPTION_OFF', 'MASTER_KEK is not configured on this server.');
+
+    const ciphertext = await getStorageProvider().getObject(doc.fileUrl);
+    const dek = await keys.unwrapDek(Buffer.from(meta.wrappedDek));
+    const plaintext = decryptBuffer(ciphertext, dek, Buffer.from(meta.iv), Buffer.from(meta.authTag));
+    reply
+      .type(meta.mimeType)
+      .header('Cache-Control', 'no-store, max-age=0')
+      .header('Content-Disposition', 'inline');
+    return reply.send(plaintext);
   });
 
   /** POST /identity — L2 flow: government ID + selfie. Permanent once approved. */
