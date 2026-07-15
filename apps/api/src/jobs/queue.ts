@@ -229,6 +229,8 @@ export function createWorkers(ctx: JobContext) {
         const expired = await verification.expireLapsedDocuments();
         const reminded = await verification.sendExpiryReminders();
         const purged = await verification.purgeExpiredDocuments();
+        // Review-SLA watchdog: docs waiting >24h on a human get escalated.
+        await verification.alertReviewSlaBreaches();
 
         // Liability shield: after enforcement, AUDIT — verify nobody is on the
         // road with a broken checklist, and leave an evidence row either way.

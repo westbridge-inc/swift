@@ -45,6 +45,27 @@ export interface InsuranceReview {
 
 const REMINDER_WINDOW_DAYS = 30;
 
+/** Rejection reason codes (onboarding spec §9.3) — templated openings so
+ *  applicants get consistent, actionable messages across reviewers. */
+export const REJECTION_REASON_CODES = [
+  'EXPIRED', 'UNREADABLE', 'WRONG_DOCUMENT', 'FACE_MISMATCH', 'NAME_MISMATCH',
+  'INSURANCE_NOT_HIRE', 'NOT_YELLOW', 'SUSPECTED_TAMPERING', 'DUPLICATE', 'INCOMPLETE',
+] as const;
+export type RejectionReasonCode = (typeof REJECTION_REASON_CODES)[number];
+
+const REJECTION_TEMPLATES: Record<RejectionReasonCode, string> = {
+  EXPIRED: 'This document has expired — upload a current one.',
+  UNREADABLE: 'The photo is too blurry or dark to read — retake it in good light.',
+  WRONG_DOCUMENT: 'This is not the document we asked for.',
+  FACE_MISMATCH: 'The photo does not match your selfie — upload your own document.',
+  NAME_MISMATCH: 'The name on this document does not match your account.',
+  INSURANCE_NOT_HIRE: 'This policy does not cover hire/passenger use — taxi work needs HIRE-class insurance.',
+  NOT_YELLOW: 'The vehicle must be Corporate Yellow with the H plate visible.',
+  SUSPECTED_TAMPERING: 'This document appears edited or altered.',
+  DUPLICATE: 'This document is already registered to another account.',
+  INCOMPLETE: 'Part of the document is cut off — capture the whole page.',
+};
+
 /** Which app surface a document notification belongs to: operator docs go to
  *  the driver/business surface, never the shopping feed; L2 identity is the
  *  customer's own. */
@@ -253,16 +274,54 @@ export class VerificationService {
     return updated;
   }
 
-  async rejectDocument(docId: string, adminId: string, reason: string) {
+  async rejectDocument(docId: string, adminId: string, reason: string, reasonCode?: RejectionReasonCode) {
     const doc = await this.requirePending(docId);
+
+    // Templated reason codes (onboarding spec §9.3): the code drives a clear,
+    // consistent opening line; the reviewer's free text adds the specifics.
+    const template = reasonCode ? REJECTION_TEMPLATES[reasonCode] : null;
+    const fullReason = template ? (reason ? `${template} ${reason}` : template) : reason;
 
     const updated = await this.prisma.verificationDocument.update({
       where: { id: docId },
-      data: { status: 'REJECTED', reviewedBy: adminId, reviewedAt: new Date(), reviewNote: reason },
+      data: {
+        status: 'REJECTED',
+        reviewedBy: adminId,
+        reviewedAt: new Date(),
+        reviewNote: reasonCode ? `[${reasonCode}] ${fullReason}` : fullReason,
+      },
     });
 
-    await this.notifyRejection(doc.userId, doc.docType, reason);
+    await this.notifyRejection(doc.userId, doc.docType, fullReason);
+    // A rejection can break a provider's live checklist (e.g. GEI licence).
+    const { refreshProviderVerification } = await import('../services/services.service');
+    await refreshProviderVerification(this.prisma, doc.userId);
     return updated;
+  }
+
+  /**
+   * Review-SLA watchdog (spec §13): documents waiting on a human for more than
+   * SLA_HOURS get surfaced to every admin once per sweep — a queue nobody
+   * opens is how "24h review" promises die.
+   */
+  async alertReviewSlaBreaches(slaHours = Number(process.env['REVIEW_SLA_HOURS'] ?? 24)): Promise<number> {
+    const cutoff = new Date(Date.now() - slaHours * 3600 * 1000);
+    const [breached, oldest] = await Promise.all([
+      this.prisma.verificationDocument.count({ where: { status: 'PENDING', createdAt: { lt: cutoff } } }),
+      this.prisma.verificationDocument.findFirst({
+        where: { status: 'PENDING' },
+        orderBy: { createdAt: 'asc' },
+        select: { createdAt: true },
+      }),
+    ]);
+    if (breached === 0) return 0;
+    const oldestHours = oldest ? Math.floor((Date.now() - oldest.createdAt.getTime()) / 3600_000) : slaHours;
+    await notifyAdmins(this.prisma, this.notifications, {
+      title: 'Verification queue is breaching SLA',
+      body: `${breached} document${breached === 1 ? '' : 's'} have waited over ${slaHours}h for review (oldest ${oldestHours}h). People cannot work until these are decided.`,
+      data: { kind: 'verification_sla_breach', breached, slaHours },
+    });
+    return breached;
   }
 
   private async requirePending(docId: string): Promise<VerificationDocument> {
@@ -458,6 +517,10 @@ export class VerificationService {
       } else {
         await this.suspendListingsIfUnverified(doc.userId);
       }
+      // A lapsed GEI licence (or clearance) must also pull a service provider
+      // off the marketplace immediately — no-op for everyone else.
+      const { refreshProviderVerification } = await import('../services/services.service');
+      await refreshProviderVerification(this.prisma, doc.userId);
 
       await this.notifications.send({
         userId: doc.userId,
@@ -615,6 +678,11 @@ export class VerificationService {
       if (driver) await this.subscriptions.startTrialForDriver(driver.id);
       if (rider) await this.subscriptions.startTrialForRider(rider.id);
     }
+
+    // Service providers flip live the moment their checklist completes —
+    // previously the flag only refreshed when they re-saved their profile.
+    const { refreshProviderVerification } = await import('../services/services.service');
+    await refreshProviderVerification(this.prisma, userId);
   }
 
   /**

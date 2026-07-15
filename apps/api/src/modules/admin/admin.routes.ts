@@ -21,7 +21,7 @@ import {
 } from '@prisma/client';
 import { NotificationService } from '../notification/notification.service';
 import { SupportService } from '../support/support.service';
-import { VerificationService } from '../verification/verification.service';
+import { VerificationService, REJECTION_REASON_CODES } from '../verification/verification.service';
 import { ComplianceAuditService } from '../verification/compliance-audit.service';
 import { BillingService } from '../billing/billing.service';
 import { SubscriptionService } from '../subscription/subscription.service';
@@ -212,6 +212,8 @@ const approveDocSchema = z.object({
 
 const rejectDocSchema = z.object({
   reason: z.string().min(3).max(500),
+  // Templated opener (spec §9.3) — consistent applicant messaging across reviewers.
+  reasonCode: z.enum(REJECTION_REASON_CODES).optional(),
 });
 
 const auditLogsQuerySchema = z.object({
@@ -1767,8 +1769,8 @@ export async function adminRoutes(app: FastifyInstance) {
     const { id } = request.params as { id: string };
     const body = rejectDocSchema.parse(request.body);
 
-    const doc = await verification.rejectDocument(id, request.user.userId, body.reason);
-    await audit(request.user.userId, 'REJECT_VERIFICATION_DOC', 'VerificationDocument', id, { docType: doc.docType, reason: body.reason }, request);
+    const doc = await verification.rejectDocument(id, request.user.userId, body.reason, body.reasonCode);
+    await audit(request.user.userId, 'REJECT_VERIFICATION_DOC', 'VerificationDocument', id, { docType: doc.docType, reason: body.reason, reasonCode: body.reasonCode ?? null }, request);
 
     return { success: true, data: doc };
   });
