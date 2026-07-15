@@ -1,5 +1,6 @@
 'use client';
 
+import Link from 'next/link';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { fetchOrders, cancelOrder } from '@/lib/api';
 import { statusClass } from '@/lib/status';
@@ -47,7 +48,11 @@ export default function OrdersPage() {
             ) : (
               data?.data?.map((order: any) => (
                 <tr key={order.id} className="border-b border-[#38383A] hover:bg-white/5">
-                  <td className="p-4 font-mono">{order.orderNumber}</td>
+                  <td className="p-4 font-mono">
+                    <Link href={`/orders/${order.id}`} className="hover:text-[#E8192C] transition-colors">
+                      {order.orderNumber}
+                    </Link>
+                  </td>
                   <td className="p-4">{order.orderType}</td>
                   <td className="p-4">
                     {order.fulfillment === 'PICKUP' ? (

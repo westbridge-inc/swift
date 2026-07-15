@@ -178,6 +178,16 @@ export const fetchPendingVendors = () => apiFetch('/api/v1/admin/vendors/pending
 export const fetchRiders = () => apiFetch('/api/v1/admin/riders');
 export const fetchDrivers = () => apiFetch('/api/v1/admin/drivers');
 export const fetchOrders = (params?: string) => apiFetch(`/api/v1/admin/orders?${params || ''}`);
+export const fetchOrderDetail = (id: string) => apiFetch(`/api/v1/admin/orders/${id}`);
+
+// ─── Global ⌘K search ────────────────────────────────────────────
+export interface GlobalSearchResult {
+  orders: { id: string; orderNumber: string; status: string; orderType: string; totalAmount: number; placedAt: string }[];
+  users: { id: string; firstName: string; lastName: string; phone: string; roles: string[]; status: string }[];
+  vendors: { id: string; name: string; vendorType: string; status: string; city: string }[];
+}
+export const fetchGlobalSearch = (q: string): Promise<Envelope<GlobalSearchResult>> =>
+  apiFetch(`/api/v1/admin/search?q=${encodeURIComponent(q)}`);
 export const fetchRevenue = (): Promise<Envelope<RevenueResponse>> =>
   apiFetch('/api/v1/admin/finance/revenue');
 

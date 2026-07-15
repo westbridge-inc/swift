@@ -1,5 +1,6 @@
 'use client';
 
+import Link from 'next/link';
 import { useQuery } from '@tanstack/react-query';
 import { fetchRecentOrders } from '@/lib/api';
 
@@ -28,14 +29,14 @@ export function LiveOrderFeed() {
       <h3 className="text-lg font-semibold mb-4">Live Order Feed</h3>
       <div className="space-y-2 max-h-80 overflow-auto">
         {data?.data?.map((order: any) => (
-          <div key={order.id} className="flex items-center gap-3 p-2 rounded-lg hover:bg-white/5">
+          <Link key={order.id} href={`/orders/${order.id}`} className="flex items-center gap-3 p-2 rounded-lg hover:bg-white/5 transition-colors">
             <span className={`w-2 h-2 rounded-full ${STATUS_COLORS[order.status] || 'bg-gray-500'}`} />
             <span className="text-sm font-mono">#{order.orderNumber}</span>
             <span className="text-xs text-[#8E8E93]">{order.status}</span>
             <span className="text-xs text-[#8E8E93] ml-auto">
               ${Number(order.totalAmount).toLocaleString()}
             </span>
-          </div>
+          </Link>
         )) || <p className="text-[#8E8E93] text-sm">No recent orders</p>}
       </div>
     </div>

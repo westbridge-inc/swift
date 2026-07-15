@@ -112,6 +112,10 @@ const cashSettlementsQuerySchema = z.object({
   riderId: z.string().optional(),
 });
 
+const globalSearchQuerySchema = z.object({
+  q: z.string().trim().min(2).max(60),
+});
+
 const promosQuerySchema = z.object({
   active: z.enum(['true', 'false']).optional(),
 });
@@ -917,6 +921,44 @@ export async function adminRoutes(app: FastifyInstance) {
     ]);
 
     return { success: true, ...paginatedResponse(orders, total, { page, limit, skip }) };
+  });
+
+  /** Global ⌘K search — one query fans out across orders (number), users
+   *  (phone/name) and vendors (name). Read-only, capped, for the console's
+   *  jump-to-anything box. */
+  app.get('/search', { preHandler: [adminGuard] }, async (request) => {
+    const { q } = globalSearchQuerySchema.parse(request.query);
+    const contains = { contains: q, mode: 'insensitive' as const };
+
+    const [orders, users, vendors] = await Promise.all([
+      app.prisma.order.findMany({
+        where: { orderNumber: contains },
+        select: { id: true, orderNumber: true, status: true, orderType: true, totalAmount: true, placedAt: true },
+        orderBy: { placedAt: 'desc' },
+        take: 5,
+      }),
+      app.prisma.user.findMany({
+        where: {
+          OR: [{ phone: contains }, { firstName: contains }, { lastName: contains }, { email: contains }],
+        },
+        select: { id: true, firstName: true, lastName: true, phone: true, roles: true, status: true },
+        take: 5,
+      }),
+      app.prisma.vendor.findMany({
+        where: { name: contains },
+        select: { id: true, name: true, vendorType: true, status: true, city: true },
+        take: 5,
+      }),
+    ]);
+
+    return {
+      success: true,
+      data: {
+        orders: orders.map((o) => ({ ...o, totalAmount: Number(o.totalAmount) })),
+        users,
+        vendors,
+      },
+    };
   });
 
   app.get('/orders/:id', { preHandler: [adminGuard] }, async (request) => {
