@@ -3,6 +3,7 @@ import type Redis from 'ioredis';
 import type { PrismaClient } from '@prisma/client';
 import type { Server } from 'socket.io';
 import type { FastifyBaseLogger } from 'fastify';
+import { captureError } from '../plugins/observability';
 
 export interface JobContext {
   prisma: PrismaClient;
@@ -365,9 +366,11 @@ export function createWorkers(ctx: JobContext) {
   for (const [queue, worker] of Object.entries(allWorkers)) {
     worker.on('failed', (job, err) => {
       ctx.log.error({ queue, jobName: job?.name, jobId: job?.id, attempts: job?.attemptsMade, data: job?.data, err }, 'BullMQ job failed');
+      captureError(err, { queue, jobName: job?.name, jobId: job?.id, attempts: job?.attemptsMade });
     });
     worker.on('error', (err) => {
       ctx.log.error({ queue, err }, 'BullMQ worker error');
+      captureError(err, { queue });
     });
   }
 
