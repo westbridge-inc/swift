@@ -17,19 +17,41 @@ import {
   ShieldCheck,
 } from 'lucide-react';
 
-const navItems = [
-  { label: 'Dashboard', href: '/dashboard', icon: LayoutDashboard },
-  { label: 'Orders', href: '/orders', icon: ShoppingCart },
-  { label: 'Vendors', href: '/vendors', icon: Store },
-  { label: 'Riders', href: '/riders', icon: Bike },
-  { label: 'Drivers', href: '/drivers', icon: Car },
-  { label: 'Verification', href: '/verification', icon: ShieldCheck },
-  { label: 'Users', href: '/users', icon: Users },
-  { label: 'Finance', href: '/finance', icon: DollarSign },
-  { label: 'Promos', href: '/promos', icon: Tag },
-  { label: 'Zones', href: '/zones', icon: Map },
-  { label: 'Config', href: '/config', icon: Settings },
-  { label: 'Audit Log', href: '/audit', icon: FileText },
+// Grouped by what the operator is doing, not by table name. Sections only list
+// pages that exist — a dead link is worse than a missing one.
+const NAV_SECTIONS: { title: string; items: { label: string; href: string; icon: typeof LayoutDashboard }[] }[] = [
+  {
+    title: 'Operations',
+    items: [
+      { label: 'Dashboard', href: '/dashboard', icon: LayoutDashboard },
+      { label: 'Orders', href: '/orders', icon: ShoppingCart },
+    ],
+  },
+  {
+    title: 'People',
+    items: [
+      { label: 'Users', href: '/users', icon: Users },
+      { label: 'Vendors', href: '/vendors', icon: Store },
+      { label: 'Riders', href: '/riders', icon: Bike },
+      { label: 'Drivers', href: '/drivers', icon: Car },
+      { label: 'Verification', href: '/verification', icon: ShieldCheck },
+    ],
+  },
+  {
+    title: 'Money',
+    items: [
+      { label: 'Finance', href: '/finance', icon: DollarSign },
+      { label: 'Promos', href: '/promos', icon: Tag },
+    ],
+  },
+  {
+    title: 'Platform',
+    items: [
+      { label: 'Zones', href: '/zones', icon: Map },
+      { label: 'Config', href: '/config', icon: Settings },
+      { label: 'Audit Log', href: '/audit', icon: FileText },
+    ],
+  },
 ];
 
 export function Sidebar() {
@@ -42,24 +64,33 @@ export function Sidebar() {
           <span className="text-[#E8192C]">Swift</span> Admin
         </h1>
       </div>
-      <nav className="flex-1 p-4 space-y-1">
-        {navItems.map((item) => {
-          const isActive = pathname.startsWith(item.href);
-          return (
-            <Link
-              key={item.href}
-              href={item.href}
-              className={`flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm transition-colors ${
-                isActive
-                  ? 'bg-[#E8192C]/10 text-[#E8192C]'
-                  : 'text-[#8E8E93] hover:text-white hover:bg-white/5'
-              }`}
-            >
-              <item.icon size={18} />
-              {item.label}
-            </Link>
-          );
-        })}
+      <nav className="flex-1 p-4 space-y-4 overflow-y-auto">
+        {NAV_SECTIONS.map((section) => (
+          <div key={section.title}>
+            <p className="px-3 pb-1 text-[10px] font-semibold tracking-widest text-[#8E8E93]/70">
+              {section.title.toUpperCase()}
+            </p>
+            <div className="space-y-1">
+              {section.items.map((item) => {
+                const isActive = pathname.startsWith(item.href);
+                return (
+                  <Link
+                    key={item.href}
+                    href={item.href}
+                    className={`flex items-center gap-3 px-3 py-2 rounded-lg text-sm transition-colors ${
+                      isActive
+                        ? 'bg-[#E8192C]/10 text-[#E8192C]'
+                        : 'text-[#8E8E93] hover:text-white hover:bg-white/5'
+                    }`}
+                  >
+                    <item.icon size={18} />
+                    {item.label}
+                  </Link>
+                );
+              })}
+            </div>
+          </div>
+        ))}
       </nav>
     </aside>
   );

@@ -1,20 +1,22 @@
 'use client';
 
-import { AlertTriangle, AlertCircle, CheckCircle2 } from 'lucide-react';
+import Link from 'next/link';
+import { AlertTriangle, AlertCircle, CheckCircle2, ChevronRight } from 'lucide-react';
 
 type Alerts = { pendingVendors: number; pastDueSubs: number; unassignedOrders: number };
 
 const plural = (n: number, s: string) => `${n} ${s}${n === 1 ? '' : 's'}`;
 
 export function AlertsPanel({ alerts }: { alerts?: Alerts }) {
-  const items: { level: 'warning' | 'error'; message: string }[] = [];
+  // Every alert is a door, not a label — it deep-links to where the work is.
+  const items: { level: 'warning' | 'error'; message: string; href: string }[] = [];
   if (alerts) {
     if (alerts.unassignedOrders > 0)
-      items.push({ level: 'error', message: `${plural(alerts.unassignedOrders, 'order')} unassigned for > 10 minutes` });
+      items.push({ level: 'error', message: `${plural(alerts.unassignedOrders, 'order')} unassigned for > 10 minutes`, href: '/orders' });
     if (alerts.pastDueSubs > 0)
-      items.push({ level: 'warning', message: `${plural(alerts.pastDueSubs, 'subscription')} past due` });
+      items.push({ level: 'warning', message: `${plural(alerts.pastDueSubs, 'subscription')} past due`, href: '/finance' });
     if (alerts.pendingVendors > 0)
-      items.push({ level: 'warning', message: `${plural(alerts.pendingVendors, 'vendor')} pending approval` });
+      items.push({ level: 'warning', message: `${plural(alerts.pendingVendors, 'vendor')} pending approval`, href: '/vendors' });
   }
 
   return (
@@ -28,14 +30,19 @@ export function AlertsPanel({ alerts }: { alerts?: Alerts }) {
           </div>
         ) : (
           items.map((alert, i) => (
-            <div key={i} className="flex items-center gap-3 p-3 rounded-lg bg-white/5">
+            <Link
+              key={i}
+              href={alert.href}
+              className="flex items-center gap-3 p-3 rounded-lg bg-white/5 hover:bg-white/10 transition-colors group"
+            >
               {alert.level === 'error' ? (
                 <AlertCircle size={16} className="text-red-400 shrink-0" />
               ) : (
                 <AlertTriangle size={16} className="text-yellow-400 shrink-0" />
               )}
-              <span className="text-sm">{alert.message}</span>
-            </div>
+              <span className="text-sm flex-1">{alert.message}</span>
+              <ChevronRight size={15} className="text-[#8E8E93] group-hover:text-white transition-colors" />
+            </Link>
           ))
         )}
       </div>
