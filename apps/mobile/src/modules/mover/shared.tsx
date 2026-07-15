@@ -31,6 +31,22 @@ export function whenLabel(iso?: string) {
   return `${d.getDate()} ${MONTHS[d.getMonth()]}, ${h}:${String(m).padStart(2, '0')} ${ampm}`;
 }
 
+/** §4d — who the mover is fronting cash for, shown BEFORE accepting: trust
+ *  level, completed orders, and any recent strikes (the real warning). */
+export function CustomerTrustBadge({ trust, cash }: { trust?: { trustLevel: string; completedOrders: number; strikes: number } | null; cash?: boolean }) {
+  if (!trust) return null;
+  const risky = trust.strikes > 0;
+  return (
+    <View style={{ flexDirection: 'row', alignItems: 'center', gap: 5, alignSelf: 'center', marginTop: space.sm }}>
+      <Feather name={risky ? 'alert-triangle' : 'shield'} size={12} color={risky ? color.warning : color.text.muted} />
+      <T variant="caption" weight={risky ? 'bold' : 'semibold'} tone={risky ? undefined : 'muted'} style={risky ? { color: color.warning } : undefined}>
+        {trust.trustLevel} · {trust.completedOrders} completed{trust.strikes > 0 ? ` · ${trust.strikes} strike${trust.strikes === 1 ? '' : 's'}` : ''}
+        {cash && risky ? ' — cash job, your float' : ''}
+      </T>
+    </View>
+  );
+}
+
 export function JobStatusPill({ status }: { status?: string }) {
   const s = String(status ?? '').toUpperCase();
   const label = s.replace(/_/g, ' ').toLowerCase();

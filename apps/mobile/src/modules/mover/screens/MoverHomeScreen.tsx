@@ -27,7 +27,7 @@ import { useLocationStore } from '../../../stores/locationStore';
 import { GEORGETOWN } from '../../../hooks/useDeviceLocation';
 import { money } from '../../../lib/money';
 import { FareSlider } from '../../../components/FareSlider';
-import { GUTTER, RoutePair, jobAmount } from '../shared';
+import { GUTTER, RoutePair, jobAmount, CustomerTrustBadge } from '../shared';
 
 /** Small stat tile inside the earnings hero. */
 function HeroTile({ icon, value, label }: { icon: keyof typeof MaterialCommunityIcons.glyphMap; value: string; label: string }) {
@@ -125,6 +125,8 @@ function DispatchOfferCard({
                     100% yours · cash
                   </T>
                 </View>
+                {/* Who you'd front cash for — decide BEFORE you ride */}
+                <CustomerTrustBadge trust={offer.customerTrust} cash={offer.paymentMethod === 'CASH'} />
               </>
             ) : (
               <>
@@ -430,6 +432,8 @@ export function MoverHomeScreen({ navigation }: any) {
                     <View style={{ marginTop: space.md }}>
                       <RoutePair pickup={j.vendor?.name ?? j.pickupAddress ?? 'Pickup'} dropoff={j.deliveryAddress ?? j.dropoffAddress} />
                     </View>
+                    {/* Who you'd front cash for — trust before float (§4d) */}
+                    <CustomerTrustBadge trust={j.customerTrust} cash={j.paymentMethod === 'CASH'} />
                     <PillButton label="Accept" size="md" style={{ marginTop: space.md }} loading={accept.isPending} onPress={() => accept.mutate({ id: j.id })} />
                   </Card>
                 ))}
