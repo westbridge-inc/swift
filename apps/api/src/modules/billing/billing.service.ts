@@ -3,6 +3,7 @@ import { AppError, NotFoundError } from '../../utils/errors';
 import { NotificationService } from '../notification/notification.service';
 import { CountryConfigService } from '../country/country-config.service';
 import type { PaymentProvider } from '../../providers/payment/payment-provider';
+import { getMmgProvider } from '../../providers/mmg/mmg-provider';
 
 // ---------------------------------------------------------------------------
 // BillingService — the one place V1 touches money: Swift's own weekly fee.
@@ -31,6 +32,8 @@ export interface BillingCycleResult {
   suspended: number;
   skipped: number;
   errors: number;
+  /** MMG merchant-initiated requests awaiting the payer's phone approval */
+  pending: number;
 }
 
 export class BillingService {
@@ -67,7 +70,7 @@ export class BillingService {
       },
     });
 
-    const result: BillingCycleResult = { processed: 0, succeeded: 0, failed: 0, suspended: 0, skipped: 0, errors: 0 };
+    const result: BillingCycleResult = { processed: 0, succeeded: 0, failed: 0, suspended: 0, skipped: 0, errors: 0, pending: 0 };
 
     for (const sub of due) {
       result.processed += 1;
@@ -91,7 +94,7 @@ export class BillingService {
   async billSubscription(
     sub: SubWithRelations,
     now = new Date(),
-  ): Promise<'succeeded' | 'failed' | 'suspended' | 'skipped'> {
+  ): Promise<'succeeded' | 'failed' | 'suspended' | 'skipped' | 'pending'> {
     const periodKey = sub.nextBillingDate.toISOString().slice(0, 10);
     const attemptKey = `charge:${sub.id}:${periodKey}:a${sub.failedAttempts}`;
 
@@ -127,6 +130,37 @@ export class BillingService {
       return 'succeeded';
     }
 
+    if ('pendingTx' in charged) {
+      // MMG merchant-initiated: the request is on the payer's phone. Record
+      // the in-flight payment; the poller settles it either way. The retry
+      // clock still advances so an ignored request becomes tomorrow's dunning
+      // attempt instead of a same-hour duplicate ping.
+      await this.prisma.subscriptionPayment.create({
+        data: {
+          subscriptionId: sub.id,
+          amount,
+          status: 'PENDING',
+          paymentMethod: sub.billingMethod,
+          externalRef: charged.pendingTx,
+          periodStart: sub.nextBillingDate,
+          periodEnd: new Date(sub.nextBillingDate.getTime() + WEEK_MS),
+        },
+      });
+      await this.prisma.subscription.update({
+        where: { id: sub.id },
+        data: { nextRetryAt: new Date(now.getTime() + RETRY_HOURS * 60 * 60 * 1000) },
+      });
+      await this.notifications.send({
+        userId: this.payerUserId(sub),
+        type: 'SYSTEM_ANNOUNCEMENT',
+        title: 'Approve your weekly fee in MMG',
+        body: `We sent an MMG request for $${amount.toLocaleString()} ${sub.currencyCode}. Approve it on your phone to stay active.`,
+        audience: this.payerAudience(sub),
+        data: { kind: 'billing_mmg_pending', subscriptionId: sub.id },
+      });
+      return 'pending';
+    }
+
     return this.applyFailedCharge(sub, amount, charged.reason, now, periodKey);
   }
 
@@ -134,11 +168,12 @@ export class BillingService {
     return sub.customRate ?? sub.weeklyRate;
   }
 
-  /** CARD charges the stored token; CASH deducts the prepaid balance atomically. */
+  /** CARD charges the stored token; MOBILE_MONEY pushes an MMG request the
+   *  payer approves on their phone; CASH deducts the prepaid balance atomically. */
   private async attemptCharge(
     sub: SubWithRelations,
     amount: number,
-  ): Promise<{ ok: true; ref: string } | { ok: false; reason: string }> {
+  ): Promise<{ ok: true; ref: string } | { ok: false; reason: string } | { ok: false; pendingTx: string }> {
     if (sub.billingMethod === 'CARD' && sub.paymentToken) {
       const result = await this.payments.chargeToken({
         token: sub.paymentToken,
@@ -150,6 +185,20 @@ export class BillingService {
       return result.status === 'succeeded'
         ? { ok: true, ref: result.providerRef }
         : { ok: false, reason: result.reason ?? 'Charge declined' };
+    }
+
+    if (sub.billingMethod === 'MOBILE_MONEY' && sub.mmgPayerMsisdn) {
+      // §13 MMG rail — merchant-initiated. Amounts are minor units at the
+      // provider seam; the reference doubles as the retry-safe correlation id.
+      const result = await getMmgProvider().initiatePayment({
+        payerId: sub.mmgPayerMsisdn,
+        amountMinor: Math.round(amount * 100),
+        currencyCode: sub.currencyCode,
+        reference: `sub:${sub.id}:${sub.nextBillingDate.toISOString().slice(0, 10)}:a${sub.failedAttempts}`,
+      });
+      if (result.status === 'approved') return { ok: true, ref: result.transactionId };
+      if (result.status === 'pending' && result.transactionId) return { ok: false, pendingTx: result.transactionId };
+      return { ok: false, reason: result.reason ?? 'MMG request failed' };
     }
 
     // Prepaid path: conditional decrement — atomic, no read-then-write race
@@ -168,23 +217,32 @@ export class BillingService {
     paymentRef: string,
     now: Date,
     periodKey: string,
+    /** Settle an existing PENDING payment row (MMG poll path) instead of creating one. */
+    settlePaymentId?: string,
   ) {
     const periodStart = sub.nextBillingDate;
     const periodEnd = new Date(periodStart.getTime() + WEEK_MS);
     const wasInterrupted = sub.status === 'PAST_DUE' || sub.status === 'SUSPENDED';
 
-    await this.prisma.subscriptionPayment.create({
-      data: {
-        subscriptionId: sub.id,
-        amount,
-        status: 'CAPTURED',
-        paymentMethod: sub.billingMethod,
-        externalRef: paymentRef,
-        periodStart,
-        periodEnd,
-        paidAt: now,
-      },
-    });
+    if (settlePaymentId) {
+      await this.prisma.subscriptionPayment.update({
+        where: { id: settlePaymentId },
+        data: { status: 'CAPTURED', paidAt: now },
+      });
+    } else {
+      await this.prisma.subscriptionPayment.create({
+        data: {
+          subscriptionId: sub.id,
+          amount,
+          status: 'CAPTURED',
+          paymentMethod: sub.billingMethod,
+          externalRef: paymentRef,
+          periodStart,
+          periodEnd,
+          paidAt: now,
+        },
+      });
+    }
 
     await this.prisma.subscription.update({
       where: { id: sub.id },
@@ -224,6 +282,88 @@ export class BillingService {
       audience: this.payerAudience(sub),
       data: { kind: 'billing_success', subscriptionId: sub.id },
     });
+  }
+
+  /**
+   * §13 MMG rail poller (BullMQ repeatable, ~2 min): settle every in-flight
+   * merchant-initiated request. Approved → the period advances off the SAME
+   * pending payment row (no duplicate). Declined/expired — or older than 24h —
+   * → the normal dunning path (PAST_DUE → retries → suspend). Still-pending
+   * stays pending; the payer's phone is the clock, the DB is the truth.
+   */
+  async pollPendingMmgCharges(now = new Date()): Promise<{ settled: number; failed: number; stillPending: number }> {
+    const pending = await this.prisma.subscriptionPayment.findMany({
+      where: { status: 'PENDING', paymentMethod: 'MOBILE_MONEY', externalRef: { not: null } },
+      take: 200,
+    });
+    const out = { settled: 0, failed: 0, stillPending: 0 };
+    if (pending.length === 0) return out;
+
+    const mmg = getMmgProvider();
+    for (const payment of pending) {
+      const sub = await this.prisma.subscription.findUnique({
+        where: { id: payment.subscriptionId },
+        include: {
+          rider: { select: { userId: true } },
+          driver: { select: { userId: true } },
+          vendor: { select: { id: true, owner: { select: { userId: true } } } },
+        },
+      });
+      if (!sub) continue;
+      const periodKey = payment.periodStart.toISOString().slice(0, 10);
+
+      let status: string;
+      try {
+        status = (await mmg.transactionLookup({ transactionId: payment.externalRef! })).status;
+      } catch {
+        out.stillPending += 1; // transport hiccup — the next tick retries
+        continue;
+      }
+
+      const expired =
+        status === 'expired' ||
+        (status === 'pending' && now.getTime() - payment.createdAt.getTime() > 24 * 60 * 60 * 1000);
+
+      if (status === 'approved') {
+        await this.applySuccessfulCharge(sub as SubWithRelations, Number(payment.amount), payment.externalRef!, now, periodKey, payment.id);
+        out.settled += 1;
+      } else if (status === 'declined' || status === 'reversed' || expired) {
+        await this.prisma.subscriptionPayment.update({ where: { id: payment.id }, data: { status: 'FAILED' } });
+        await this.applyFailedCharge(sub as SubWithRelations, Number(payment.amount), `MMG request ${expired ? 'expired unapproved' : status}`, now, periodKey);
+        out.failed += 1;
+      } else {
+        out.stillPending += 1;
+      }
+    }
+    return out;
+  }
+
+  /**
+   * §13 rail selection — one place flips how a subscription pays. CASH is the
+   * prepaid path; MOBILE_MONEY needs the payer's MMG account. CARD enrollment
+   * stays with the tokenization flow, not here.
+   */
+  async setBillingRail(subscriptionId: string, method: 'CASH' | 'MOBILE_MONEY', mmgPayerMsisdn?: string) {
+    if (method === 'MOBILE_MONEY' && !mmgPayerMsisdn?.trim()) {
+      throw new AppError(400, 'MSISDN_REQUIRED', 'Your MMG account number is required to pay the weekly fee via MMG.');
+    }
+    const updated = await this.prisma.subscription.update({
+      where: { id: subscriptionId },
+      data: {
+        billingMethod: method,
+        mmgPayerMsisdn: method === 'MOBILE_MONEY' ? mmgPayerMsisdn!.trim() : null,
+      },
+    });
+    await this.prisma.billingEvent.create({
+      data: {
+        subscriptionId,
+        type: 'TIER_CHANGE',
+        currencyCode: updated.currencyCode,
+        idempotencyKey: `rail:${subscriptionId}:${Date.now()}`,
+        note: `Billing rail set to ${method}${method === 'MOBILE_MONEY' ? ' (MMG merchant-initiated)' : ' (prepaid)'}`,
+      },
+    });
+    return updated;
   }
 
   private async applyFailedCharge(

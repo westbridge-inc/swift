@@ -15,6 +15,8 @@ import { guessColumnMapping, applyMapping, toImportCsv, REQUIRED_FIELDS, type Co
 import { parsePagination, paginatedResponse } from '../../utils/pagination';
 import { AppError, NotFoundError, ValidationError } from '../../utils/errors';
 import { DeliveryCashSettlementService, assertSettlementId } from '../cash/delivery-cash-settlement.service';
+import { BillingService } from '../billing/billing.service';
+import { getPaymentProvider } from '../../providers/payment/payment-provider';
 import { throwForMissingProfile } from '../../utils/role-gate';
 import { ALLOWED_IMAGE_TYPES, looksLikeImage } from '../../utils/images';
 
@@ -2220,6 +2222,21 @@ export async function vendorRoutes(app: FastifyInstance) {
           }
         : null,
     };
+  });
+
+  /** PUT /subscription/billing-method — §13 rail selection (owner-only:
+   *  CASH prepaid vs MOBILE_MONEY merchant-initiated on the owner's MMG). */
+  app.put('/subscription/billing-method', auth, async (request) => {
+    const { vendorId } = await requireVendor(app, request, 'OWNER');
+    const body = z.object({
+      method: z.enum(['CASH', 'MOBILE_MONEY']),
+      mmgPayerMsisdn: z.string().trim().min(5).max(30).optional(),
+    }).parse(request.body);
+    const sub = await app.prisma.subscription.findFirst({ where: { vendorId } });
+    if (!sub) throw new NotFoundError('Subscription');
+    const billingSvc = new BillingService(app.prisma, notifications, getPaymentProvider());
+    const updated = await billingSvc.setBillingRail(sub.id, body.method, body.mmgPayerMsisdn);
+    return { success: true, data: { billingMethod: updated.billingMethod, mmgPayerMsisdn: updated.mmgPayerMsisdn } };
   });
 
   // =========================================================================

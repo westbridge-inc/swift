@@ -29,6 +29,12 @@ beforeAll(async () => {
   await app.register(authPlugin);
   await app.register(authRoutes, { prefix: '/api/v1/auth' });
   await app.ready();
+
+  // Reset the day-scoped SMS budget counters too (same hygiene as
+  // helpers/otp.ts) — repeated local runs otherwise exhaust the global daily
+  // cap and every send-otp 429s before the route limiter is even exercised.
+  const day = new Date().toISOString().slice(0, 10);
+  await app.redis.del(`sms_global_day:${day}`, ...phones.map((p) => `otp_phone_day:${day}:${p}`));
 });
 
 afterAll(async () => {
