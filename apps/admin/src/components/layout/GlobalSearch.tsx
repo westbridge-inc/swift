@@ -128,7 +128,7 @@ export function GlobalSearch() {
                 <div className="mb-1">
                   <p className="px-3 pt-1 pb-1 text-[10px] font-semibold tracking-widest text-[#8E8E93]">USERS</p>
                   {r!.users.map((u) => (
-                    <button key={u.id} className={rowCls} onClick={() => go('/users')}>
+                    <button key={u.id} className={rowCls} onClick={() => go(`/users/${u.id}`)}>
                       <User size={15} className="text-[#8E8E93] shrink-0" />
                       <span>{[u.firstName, u.lastName].filter(Boolean).join(' ')}</span>
                       <span className="text-[#8E8E93]">{u.phone}</span>
@@ -144,7 +144,7 @@ export function GlobalSearch() {
                 <div>
                   <p className="px-3 pt-1 pb-1 text-[10px] font-semibold tracking-widest text-[#8E8E93]">VENDORS</p>
                   {r!.vendors.map((v) => (
-                    <button key={v.id} className={rowCls} onClick={() => go('/vendors')}>
+                    <button key={v.id} className={rowCls} onClick={() => go(`/vendors/${v.id}`)}>
                       <Store size={15} className="text-[#8E8E93] shrink-0" />
                       <span>{v.name}</span>
                       <span className="text-[#8E8E93]">

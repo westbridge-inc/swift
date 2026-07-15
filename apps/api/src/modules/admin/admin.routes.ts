@@ -450,7 +450,14 @@ export async function adminRoutes(app: FastifyInstance) {
         driver: { include: { subscription: true } },
         vendorOwner: { include: { vendors: true } },
         addresses: true,
-        _count: { select: { orders: true, notifications: true, transactions: true } },
+        // The trust story + the paper trail the operator acts on.
+        strikes: { orderBy: { createdAt: 'desc' }, take: 20 },
+        orders: {
+          orderBy: { placedAt: 'desc' },
+          take: 10,
+          select: { id: true, orderNumber: true, status: true, orderType: true, totalAmount: true, placedAt: true },
+        },
+        _count: { select: { orders: true, notifications: true, transactions: true, strikes: true } },
       },
     });
     if (!user) throw new NotFoundError('User', id);
@@ -580,6 +587,42 @@ export async function adminRoutes(app: FastifyInstance) {
       orderBy: { createdAt: 'asc' },
     });
     return { success: true, data: vendors };
+  });
+
+  /** One business, whole story: profile, owner, sibling stores, subscription,
+   *  catalogue size, order volume, recent orders. Read-only. */
+  app.get('/vendors/:id', { preHandler: [adminGuard] }, async (request) => {
+    const { id } = request.params as { id: string };
+
+    const vendor = await app.prisma.vendor.findUnique({
+      where: { id },
+      include: {
+        owner: {
+          include: {
+            user: { select: { id: true, firstName: true, lastName: true, phone: true, email: true, status: true } },
+            vendors: { select: { id: true, name: true, status: true, vendorType: true } },
+          },
+        },
+        subscription: true,
+        _count: { select: { items: true, orders: true } },
+      },
+    });
+    if (!vendor) throw new NotFoundError('Vendor', id);
+
+    const recentOrders = await app.prisma.order.findMany({
+      where: { vendorId: id },
+      orderBy: { placedAt: 'desc' },
+      take: 10,
+      select: { id: true, orderNumber: true, status: true, totalAmount: true, paymentMethod: true, placedAt: true },
+    });
+
+    return {
+      success: true,
+      data: {
+        ...vendor,
+        recentOrders: recentOrders.map((o) => ({ ...o, totalAmount: Number(o.totalAmount) })),
+      },
+    };
   });
 
   app.put('/vendors/:id/approve', { preHandler: [adminGuard] }, async (request) => {

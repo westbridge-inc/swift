@@ -1,5 +1,6 @@
 'use client';
 
+import Link from 'next/link';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { fetchUsers, suspendUser, unsuspendUser, type AdminUser } from '@/lib/api';
 
@@ -41,7 +42,7 @@ export default function UsersPage() {
             ) : (
               data?.data?.map((user: AdminUser) => (
                 <tr key={user.id} className="border-b border-[#38383A] hover:bg-white/5">
-                  <td className="p-4 font-medium">{user.firstName} {user.lastName}</td>
+                  <td className="p-4 font-medium"><Link href={`/users/${user.id}`} className="hover:text-[#E8192C] transition-colors">{user.firstName} {user.lastName}</Link></td>
                   <td className="p-4">{user.email}</td>
                   <td className="p-4">{user.phone || '\u2014'}</td>
                   <td className="p-4">

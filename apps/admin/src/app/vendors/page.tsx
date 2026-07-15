@@ -1,5 +1,6 @@
 'use client';
 
+import Link from 'next/link';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { fetchVendors, approveVendor } from '@/lib/api';
 
@@ -32,7 +33,7 @@ export default function VendorsPage() {
             ) : (
               data?.data?.map((vendor: any) => (
                 <tr key={vendor.id} className="border-b border-[#38383A] hover:bg-white/5">
-                  <td className="p-4 font-medium">{vendor.name}</td>
+                  <td className="p-4 font-medium"><Link href={`/vendors/${vendor.id}`} className="hover:text-[#E8192C] transition-colors">{vendor.name}</Link></td>
                   <td className="p-4">{vendor.vendorType}</td>
                   <td className="p-4">
                     <span className={`px-2 py-1 rounded-full text-xs ${

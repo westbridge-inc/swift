@@ -1,5 +1,6 @@
 'use client';
 
+import Link from 'next/link';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { fetchDrivers, verifyDriverDocuments, setDriverRideClass } from '@/lib/api';
 
@@ -43,7 +44,7 @@ export default function DriversPage() {
             ) : (
               data?.data?.map((driver: any) => (
                 <tr key={driver.id} className="border-b border-[#38383A] hover:bg-white/5">
-                  <td className="p-4 font-medium">{driver.user?.firstName} {driver.user?.lastName}</td>
+                  <td className="p-4 font-medium"><Link href={`/drivers/${driver.id}`} className="hover:text-[#E8192C] transition-colors">{driver.user?.firstName} {driver.user?.lastName}</Link></td>
                   <td className="p-4">{driver.user?.phone || '—'}</td>
                   <td className="p-4">{driver.vehicleMake} {driver.vehicleModel}</td>
                   <td className="p-4">
