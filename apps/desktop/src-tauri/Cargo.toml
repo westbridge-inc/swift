@@ -1,0 +1,20 @@
+[package]
+name = "swift-mission-control"
+version = "0.1.0"
+description = "Swift Mission Control — the founder's cockpit over the admin API"
+authors = ["Westbridge Inc"]
+edition = "2021"
+
+[lib]
+name = "swift_mission_control_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# Tokens live in the macOS Keychain ONLY (desktop standing order 28).
+keyring = { version = "3", features = ["apple-native"] }
