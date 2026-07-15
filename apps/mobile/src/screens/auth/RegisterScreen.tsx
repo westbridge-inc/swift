@@ -4,7 +4,8 @@ import { KeyboardAvoidingView, Platform, Pressable, ScrollView, View } from 'rea
 import { useMutation } from '@tanstack/react-query';
 import { useRoute } from '@react-navigation/native';
 import { color, space } from '@swift/ui';
-import { authApi } from '../../services/api';
+import { authApi, API_URL } from '../../services/api';
+import { openPayLink } from '../../lib/payLink';
 import { useAuthStore } from '../../stores/authStore';
 import { SwiftMark } from '../../components/SwiftLogo';
 import { BrandCheckbox, LabeledInput, PillButton, Screen, T } from '../../kit';
@@ -103,9 +104,14 @@ export function RegisterScreen() {
           >
             <BrandCheckbox checked={agreed} onToggle={() => setAgreed((a) => !a)} />
             <T variant="label" tone="muted" style={{ flex: 1 }}>
-              I agree with the <T variant="label" weight="semibold" tone="brand">Terms of Service</T> and{' '}
-              <T variant="label" weight="semibold" tone="brand">Privacy Policy</T>
-              {/* TODO(ui-rebuild): endpoint missing — no hosted ToS/Privacy pages yet to link. */}
+              I agree with the{' '}
+              <T variant="label" weight="semibold" tone="brand" onPress={() => openPayLink(`${API_URL}/legal/terms`)}>
+                Terms of Service
+              </T>{' '}
+              and{' '}
+              <T variant="label" weight="semibold" tone="brand" onPress={() => openPayLink(`${API_URL}/legal/privacy`)}>
+                Privacy Policy
+              </T>
             </T>
           </Pressable>
 

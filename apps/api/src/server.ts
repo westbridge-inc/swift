@@ -28,6 +28,8 @@ import { registerEmptyJsonBodyParser } from './plugins/empty-json';
 import { createQueues, createWorkers, scheduleRecurringJobs } from './jobs/queue';
 import { loggerRedactConfig } from './utils/logger-config';
 import { registerPublicUploads } from './utils/public-uploads';
+import { observabilityPlugin } from './plugins/observability';
+import { legalRoutes } from './modules/legal/legal.routes';
 import path from 'node:path';
 
 const PORT = parseInt(process.env['PORT'] || '3000', 10);
@@ -114,6 +116,11 @@ async function buildApp() {
   await app.register(redisPlugin);
   await app.register(authPlugin);
   await app.register(socketPlugin);
+  // Sentry (SENTRY_DSN) + Prometheus /metrics (METRICS_TOKEN) — both env-gated,
+  // free when unset.
+  await app.register(observabilityPlugin);
+  // Public legal pages (ToS/Privacy) — linked from the app's register screen.
+  await app.register(legalRoutes, { prefix: '/legal' });
 
   // Health check. The load balancer needs a bare status; per-dependency
   // detail (db/redis state, uptime) is an internal map of the deployment and
