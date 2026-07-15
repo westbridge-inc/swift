@@ -3,6 +3,7 @@ import React from 'react';
 import { FlatList, View } from 'react-native';
 import { Image } from 'expo-image';
 import { useNavigation } from '@react-navigation/native';
+import { MaterialCommunityIcons } from '@expo/vector-icons';
 import { color, radius, space } from '@swift/ui';
 import { useOrders, useReorder } from '../../../hooks/customer';
 import { useAuthStore } from '../../../stores/authStore';
@@ -23,9 +24,18 @@ const STATUS_TONE: Record<string, { label: string; color: string; bg: string }> 
   COMPLETED: { label: 'Completed', color: '#15803D', bg: '#DCFCE7' },
   CANCELLED: { label: 'Cancelled', color: '#B91C1C', bg: '#FEE2E2' },
   REFUNDED: { label: 'Refunded', color: '#B91C1C', bg: '#FEE2E2' },
+  // Taxi lifecycle — rides are orders too and land in the same history.
+  DRIVER_ASSIGNED: { label: 'Driver assigned', color: '#1D4ED8', bg: '#DBEAFE' },
+  DRIVER_EN_ROUTE: { label: 'Driver on the way', color: '#1D4ED8', bg: '#DBEAFE' },
+  DRIVER_ARRIVED: { label: 'Driver arrived', color: '#1D4ED8', bg: '#DBEAFE' },
+  RIDE_IN_PROGRESS: { label: 'On trip', color: '#1D4ED8', bg: '#DBEAFE' },
+  FAILED: { label: 'Failed', color: '#B91C1C', bg: '#FEE2E2' },
 };
 
-const ACTIVE = new Set(['PENDING', 'ACCEPTED', 'PREPARING', 'READY', 'RIDER_ASSIGNED', 'PICKED_UP']);
+const ACTIVE = new Set([
+  'PENDING', 'ACCEPTED', 'PREPARING', 'READY', 'RIDER_ASSIGNED', 'PICKED_UP',
+  'DRIVER_ASSIGNED', 'DRIVER_EN_ROUTE', 'DRIVER_ARRIVED', 'RIDE_IN_PROGRESS',
+]);
 
 export function OrdersHistoryScreen() {
   const navigation = useNavigation<any>();
@@ -71,25 +81,42 @@ export function OrdersHistoryScreen() {
           renderItem={({ item: o }) => {
             const st = STATUS_TONE[o.status] ?? { label: o.status, color: color.text.secondary, bg: color.surface.subtle };
             const active = ACTIVE.has(o.status);
+            const isRide = o.orderType === 'TAXI';
             return (
               <Card style={{ padding: space.md }}>
                 <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.md }}>
-                  <Image
-                    source={{ uri: vendorImage(o.vendor ?? {}) }}
-                    placeholder={{ blurhash: DARK_BLURHASH }}
-                    transition={150}
-                    style={{ width: 64, height: 64, borderRadius: radius.md }}
-                    contentFit="cover"
-                  />
+                  {isRide ? (
+                    // A ride has no storefront — a car tile is its identity.
+                    <View style={{ width: 64, height: 64, borderRadius: radius.md, alignItems: 'center', justifyContent: 'center', backgroundColor: color.brand[50] }}>
+                      <MaterialCommunityIcons name="car" size={30} color={color.brand[600]} />
+                    </View>
+                  ) : (
+                    <Image
+                      source={{ uri: vendorImage(o.vendor ?? {}) }}
+                      placeholder={{ blurhash: DARK_BLURHASH }}
+                      transition={150}
+                      style={{ width: 64, height: 64, borderRadius: radius.md }}
+                      contentFit="cover"
+                    />
+                  )}
                   <View style={{ flex: 1, gap: 3 }}>
                     <T variant="body" weight="semibold" numberOfLines={1}>
-                      {o.vendor?.name ?? 'Order'}
+                      {isRide
+                        ? `Taxi${o.rideClass ? ` · ${String(o.rideClass).charAt(0)}${String(o.rideClass).slice(1).toLowerCase()}` : ''}`
+                        : o.vendor?.name ?? 'Order'}
                     </T>
-                    <T variant="caption" tone="muted">
-                      #{o.orderNumber} · {o.placedAt ? new Date(o.placedAt).toLocaleDateString() : ''}
+                    <T variant="caption" tone="muted" numberOfLines={1}>
+                      {isRide && (o.pickupAddress || o.deliveryAddress)
+                        ? `${o.pickupAddress ?? 'Pickup'} → ${o.deliveryAddress ?? 'Drop-off'}`
+                        : `#${o.orderNumber} · ${o.placedAt ? new Date(o.placedAt).toLocaleDateString() : ''}`}
                     </T>
                     <T variant="label" weight="bold" tone="brand">
-                      {money(o.totalAmount ?? o.total)}
+                      {money(isRide ? (o.taxiFareTotal ?? o.totalAmount) : (o.totalAmount ?? o.total))}
+                      {isRide && o.placedAt ? (
+                        <T variant="caption" tone="muted">
+                          {'  '}{new Date(o.placedAt).toLocaleDateString()}
+                        </T>
+                      ) : null}
                     </T>
                   </View>
                   <View
@@ -108,9 +135,18 @@ export function OrdersHistoryScreen() {
                 <View style={{ flexDirection: 'row', gap: space.md, marginTop: space.md }}>
                   {active ? (
                     <PillButton
-                      label="Track"
+                      label={isRide ? 'Track ride' : 'Track'}
                       size="sm"
-                      onPress={() => navigation.navigate('Delivery', { orderId: o.id })}
+                      onPress={() => navigation.navigate(isRide ? 'Taxi' : 'Delivery', isRide ? undefined : { orderId: o.id })}
+                      style={{ flex: 1 }}
+                    />
+                  ) : isRide ? (
+                    // No storefront to reorder from — rebook the same trip instead.
+                    <PillButton
+                      label="Book again"
+                      variant="soft"
+                      size="sm"
+                      onPress={() => navigation.navigate('Taxi')}
                       style={{ flex: 1 }}
                     />
                   ) : (

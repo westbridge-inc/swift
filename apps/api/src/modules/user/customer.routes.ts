@@ -1547,6 +1547,11 @@ export async function customerRoutes(app: FastifyInstance) {
       // Takeaway handover gate — the customer PRESENTS this at the counter,
       // so it must survive past the checkout confirmation screen.
       pickupCode: o.pickupCode,
+      // Taxi context — a ride's identity is its route + class, not a vendor.
+      rideClass: o.rideClass,
+      pickupAddress: o.pickupAddress,
+      deliveryAddress: o.deliveryAddress,
+      taxiFareTotal: o.taxiFareTotal != null ? Number(o.taxiFareTotal) : null,
       rider: o.rider ? { firstName: o.rider.user?.firstName, avatar: o.rider.user?.avatar } : null,
       placedAt: o.placedAt,
       deliveredAt: o.deliveredAt,
