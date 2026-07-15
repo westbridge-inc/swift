@@ -592,6 +592,32 @@ describe('Appointments — booked at acceptance, never double-held', () => {
     expect(db.status).toBe('PENDING');
   });
 
+  it('a lingering cart tip is never charged on a booking (no rider to tip)', async () => {
+    // Founder screenshot 2026-07-15: a haircut checkout offered "Tip your
+    // rider". The UI now hides it, and the backend guarantees it: tips ride
+    // the first DELIVERY plan only.
+    const cust = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
+    const tipSlot = new Date(slot.getTime() + 3 * 60 * 60_000);
+    await inject('POST', '/api/v1/customer/cart/items', { vendorId: service.vendorId, itemId: haircutId, quantity: 1 }, cust.token);
+    const tipSet = await inject('PUT', '/api/v1/customer/cart/tip', { amount: 500 }, cust.token);
+    expect(tipSet.statusCode).toBe(200);
+
+    const res = await inject('POST', '/api/v1/customer/checkout', {
+      paymentMethod: 'CASH',
+      appointments: [{ itemId: haircutId, slotStart: tipSlot.toISOString() }],
+    }, cust.token);
+    expect(res.statusCode).toBe(200);
+    const order = res.json().data.order;
+    createdOrderIds.push(order.id);
+    const db = await app.prisma.order.findUniqueOrThrow({
+      where: { id: order.id },
+      select: { tipAmount: true, deliveryFee: true, totalAmount: true, subtotalBase: true },
+    });
+    expect(Number(db.tipAmount)).toBe(0);
+    expect(Number(db.deliveryFee)).toBe(0);
+    expect(Number(db.totalAmount)).toBe(Number(db.subtotalBase));
+  });
+
   it('where-it-happens: mode is validated against the business and lands on the order address', async () => {
     // The haircut has no serviceMode = AT_BUSINESS: asking them to travel is a 400.
     const cust = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
