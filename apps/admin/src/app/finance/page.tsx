@@ -1,8 +1,15 @@
 'use client';
 
 import { useState } from 'react';
-import { useQuery } from '@tanstack/react-query';
-import { fetchRevenue, fetchCashSettlements, fetchPaymentMix, type CashSettlementRow } from '@/lib/api';
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import {
+  fetchRevenue,
+  fetchCashSettlements,
+  fetchPaymentMix,
+  fetchSettlements,
+  processSettlement,
+  type CashSettlementRow,
+} from '@/lib/api';
 
 const gyd = (n: unknown) => `$${Number(n || 0).toLocaleString()}`;
 
@@ -121,6 +128,53 @@ function MmgSection() {
   );
 }
 
+/** Manual weekly vendor payouts: mark PAID with a transfer reference. */
+function SettlementsSection() {
+  const qc = useQueryClient();
+  const { data, isLoading } = useQuery({ queryKey: ['settlements'], queryFn: () => fetchSettlements('limit=50&status=PENDING') });
+  const process = useMutation({
+    mutationFn: ({ id, reference }: { id: string; reference?: string }) => processSettlement(id, reference),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['settlements'] }),
+  });
+  const rows: any[] = data?.data ?? [];
+  if (!isLoading && rows.length === 0) return null; // nothing pending → no noise
+
+  return (
+    <div className="bg-[#1C1C1E] rounded-xl border border-[#38383A] p-6 mb-6">
+      <h2 className="text-lg font-semibold mb-1">Vendor settlements pending</h2>
+      <p className="text-[#8E8E93] text-xs mb-4">
+        Manual transfers — mark each PAID with its bank reference once the money has moved.
+      </p>
+      {isLoading ? (
+        <p className="text-sm text-[#8E8E93]">Loading…</p>
+      ) : (
+        <div className="space-y-2">
+          {rows.map((s: any) => (
+            <div key={s.id} className="flex items-center gap-3 p-3 rounded-lg bg-white/5 text-sm">
+              <span className="font-medium">{s.vendor?.name ?? 'Vendor'}</span>
+              <span className="text-xs text-[#8E8E93]">
+                {s.periodStart ? new Date(s.periodStart).toLocaleDateString() : ''} –{' '}
+                {s.periodEnd ? new Date(s.periodEnd).toLocaleDateString() : ''}
+              </span>
+              <span className="ml-auto font-semibold">{gyd(s.totalBase ?? s.amount)}</span>
+              <button
+                onClick={() => {
+                  const ref = window.prompt(`Bank/transfer reference for ${s.vendor?.name ?? 'this settlement'} (optional):`) ?? undefined;
+                  if (window.confirm(`Mark this settlement PAID?`)) process.mutate({ id: s.id, reference: ref || undefined });
+                }}
+                disabled={process.isPending}
+                className="px-3 py-1 rounded-lg text-xs bg-[#E8192C] hover:bg-[#E8192C]/80 disabled:opacity-50"
+              >
+                Mark paid
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 export default function FinancePage() {
   const { data, isLoading } = useQuery({ queryKey: ['revenue'], queryFn: fetchRevenue });
   const summary = data?.data?.summary;
@@ -151,6 +205,9 @@ export default function FinancePage() {
           <p className="text-[#8E8E93] text-xs mt-1">paying participants</p>
         </div>
       </div>
+
+      {/* Manual vendor payouts awaiting a transfer reference */}
+      <SettlementsSection />
 
       {/* MMG visibility — payment mix + the store⇄rider fee ledger */}
       <MmgSection />
