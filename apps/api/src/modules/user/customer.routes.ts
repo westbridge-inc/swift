@@ -7,6 +7,7 @@ import { getMapsProvider } from '../../providers/maps/maps-provider';
 import { parsePagination, paginatedResponse } from '../../utils/pagination';
 import { AppError, NotFoundError, ValidationError, ForbiddenError } from '../../utils/errors';
 import { OrderService } from '../order/order.service';
+import { PickingService } from '../order/picking.service';
 import { resolveSelectedOptions, optionsUnitPrice } from '../order/options';
 import { RatingService } from '../rating/rating.service';
 import { NotificationService } from '../notification/notification.service';
@@ -396,6 +397,7 @@ function enrichVendor<T extends { latitude: number; longitude: number; estimated
 export async function customerRoutes(app: FastifyInstance) {
   // Service singletons
   const orderService = new OrderService(app.prisma, app.io);
+  const picking = new PickingService(app.prisma, app.io);
   const ratingService = new RatingService(app.prisma);
   const notificationService = new NotificationService(app.prisma, app.io);
 
@@ -1714,6 +1716,16 @@ export async function customerRoutes(app: FastifyInstance) {
     const result = await orderService.cancelOrder(id, userId, reason);
 
     return { success: true, data: result };
+  });
+
+  /** POST /orders/:id/items/:lineId/substitution — the customer's live verdict
+   *  on an out-of-stock swap the store proposed (§5.3). Approve = the line
+   *  becomes the substitute (totals adjust); reject = the line is refunded. */
+  app.post('/orders/:id/items/:lineId/substitution', async (request: AuthRequest) => {
+    const { id, lineId } = request.params as { id: string; lineId: string };
+    const { approve } = z.object({ approve: z.boolean() }).parse(request.body);
+    const line = await picking.decideSubstitution(id, lineId, request.user.userId, approve);
+    return { success: true, data: line };
   });
 
   app.post('/orders/:id/reorder', async (request: AuthRequest) => {

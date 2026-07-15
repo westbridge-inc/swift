@@ -253,6 +253,31 @@ export function useConfirmVendorCashSettlement() {
   });
 }
 
+/** Grocery picking (§5.3): tick lines, swap out-of-stock, refund a line. */
+export function usePickingActions() {
+  const qc = useQueryClient();
+  const invalidate = (orderId: string) => {
+    qc.invalidateQueries({ queryKey: ['vendor', 'order', orderId] });
+    qc.invalidateQueries({ queryKey: ['vendor', 'orders'] });
+  };
+  const setPicked = useMutation({
+    mutationFn: ({ orderId, lineId, picked }: { orderId: string; lineId: string; picked: boolean }) =>
+      unwrap(vendorApi.setLinePicked(orderId, lineId, picked)),
+    onSuccess: (_d, v) => invalidate(v.orderId),
+  });
+  const substitute = useMutation({
+    mutationFn: ({ orderId, lineId, substituteItemId }: { orderId: string; lineId: string; substituteItemId: string }) =>
+      unwrap(vendorApi.proposeSubstitution(orderId, lineId, substituteItemId)),
+    onSuccess: (_d, v) => invalidate(v.orderId),
+  });
+  const refundLine = useMutation({
+    mutationFn: ({ orderId, lineId }: { orderId: string; lineId: string }) =>
+      unwrap(vendorApi.refundLine(orderId, lineId)),
+    onSuccess: (_d, v) => invalidate(v.orderId),
+  });
+  return { setPicked, substitute, refundLine };
+}
+
 // ─── Menu ────────────────────────────────────────────────────────────────────
 
 /** Categories with their nested items (the menu, grouped by section). */

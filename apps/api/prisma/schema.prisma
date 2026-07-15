@@ -666,7 +666,11 @@ model Item {
   isAvailable   Boolean       @default(true)
   isPopular     Boolean       @default(false)
   sku           String?
+  barcode       String?
   unit          String?
+  /// Items sharing a group are valid substitutes when one is out of stock
+  /// at picking time (grocery §5.3). Null = substitute from the same category.
+  substitutionGroup String?
   /// null = untracked (always in stock). Tracked items decrement atomically at
   /// checkout, auto-hide at 0, and restock on pre-pickup cancellation.
   stockQuantity Int?
@@ -680,6 +684,7 @@ model Item {
   totalOrdered  Int           @default(0)
   sortOrder     Int           @default(0)
   cartItems     CartItem[]
+  stockAdjustments StockAdjustment[]
   createdAt     DateTime      @default(now())
   updatedAt     DateTime      @updatedAt
 
@@ -970,7 +975,50 @@ model OrderItem {
   selectedOptions OrderItemOption[]
   specialInstructions String?
 
+  // Grocery picking (§5.3): staff tick lines as they shelf-pick; an
+  // out-of-stock line becomes a substitution the CUSTOMER approves, or a
+  // line refund. PENDING blocks Mark-ready; picking rides inside PREPARING —
+  // no new order status (the state machine is locked).
+  picked             Boolean          @default(false)
+  subStatus          SubstitutionStatus @default(NONE)
+  substituteItemId   String?
+  substituteName     String?
+  substitutePrice    Decimal?         @db.Decimal(10, 2)
+
   @@map("order_items")
+}
+
+enum SubstitutionStatus {
+  NONE
+  PENDING
+  APPROVED
+  REJECTED
+  REFUNDED
+}
+
+/// Reasoned inventory movements (spec §5.6) — the paper trail behind
+/// quantity_on_hand. Checkout decrements/cancel restocks stay implicit (they
+/// ride the order itself); this logs the HUMAN and picking-driven changes.
+model StockAdjustment {
+  id        String   @id @default(cuid())
+  itemId    String
+  item      Item     @relation(fields: [itemId], references: [id], onDelete: Cascade)
+  delta     Int
+  reason    StockAdjustmentReason
+  note      String?
+  createdBy String?
+  createdAt DateTime @default(now())
+
+  @@index([itemId, createdAt])
+  @@map("stock_adjustments")
+}
+
+enum StockAdjustmentReason {
+  RECEIVED
+  DAMAGED
+  MANUAL
+  RECONCILE
+  RETURN
 }
 
 model OrderItemOption {

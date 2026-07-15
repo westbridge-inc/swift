@@ -2,6 +2,7 @@ import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { OrderStatus, OrderType, SettlementStatus } from '@prisma/client';
 import { OrderService, notHeldFilter } from '../order/order.service';
+import { PickingService } from '../order/picking.service';
 import { makeDispatchService } from '../dispatch/dispatch.service';
 import { NotificationService } from '../notification/notification.service';
 import { BookingService } from '../booking/booking.service';
@@ -409,6 +410,8 @@ async function resolveOwnedOrder(app: FastifyInstance, userId: string, orderId: 
       statusHistory: { orderBy: { createdAt: 'desc' } },
       customer: { select: { id: true, firstName: true, lastName: true, phone: true } },
       rider: { include: { user: { select: { firstName: true, lastName: true, phone: true } } } },
+      // vendorType drives the pick-list UI (grocery/goods shelf-pick §5.3).
+      vendor: { select: { vendorType: true } },
     },
   });
   if (!order || !order.vendorId || !vendorIds.includes(order.vendorId)) {
@@ -431,6 +434,7 @@ export async function vendorRoutes(app: FastifyInstance) {
   const dispatch = makeDispatchService(app);
   const notifications = new NotificationService(app.prisma, app.io);
   const settlementLedger = new DeliveryCashSettlementService(app.prisma, notifications);
+  const picking = new PickingService(app.prisma, app.io);
   const verification = new VerificationService(
     app.prisma,
     new NotificationService(app.prisma, app.io),
@@ -916,6 +920,18 @@ export async function vendorRoutes(app: FastifyInstance) {
   /** PUT /orders/:id/ready — Mark order as ready for pickup */
   app.put<{ Params: IdParam }>('/orders/:id/ready', auth, async (request) => {
     const order = await resolveOwnedOrder(app, request.user.userId, request.params.id);
+    // Grocery/goods picking gate (§5.3): the bag never closes with an open
+    // question in it — every line picked, or its substitution resolved.
+    // Restaurants don't shelf-pick, so only quantity-tracked store types gate.
+    if (order.vendorId) {
+      const v = await app.prisma.vendor.findUnique({ where: { id: order.vendorId }, select: { vendorType: true } });
+      if (v && ['SUPERMARKET', 'STORE'].includes(v.vendorType)) {
+        const open = await picking.unresolvedLines(order.id);
+        if (open > 0) {
+          throw new AppError(409, 'PICKING_INCOMPLETE', `${open} line${open === 1 ? '' : 's'} still need picking or a substitution decision`);
+        }
+      }
+    }
     if (order.status === 'PREPARING') {
       const updated = await orderService.updateStatus(order.id, 'READY_FOR_PICKUP', request.user.userId, 'Order ready for pickup');
       return { success: true, data: updated };
@@ -926,6 +942,92 @@ export async function vendorRoutes(app: FastifyInstance) {
       return { success: true, data: updated };
     }
     throw new AppError(400, 'INVALID_STATUS', `Cannot mark as ready from ${order.status} status`);
+  });
+
+  // ── Grocery picking (§5.3) — the pick list inside PREPARING ───────────────
+
+  /** PUT /orders/:id/items/:lineId/picked — staff tick a shelf-picked line. */
+  app.put('/orders/:id/items/:lineId/picked', auth, async (request) => {
+    const { id, lineId } = request.params as { id: string; lineId: string };
+    await resolveOwnedOrder(app, request.user.userId, id);
+    const { picked } = z.object({ picked: z.boolean() }).parse(request.body);
+    const line = await picking.setPicked(id, lineId, picked);
+    return { success: true, data: line };
+  });
+
+  /** POST /orders/:id/items/:lineId/substitute — out of stock: propose a swap
+   *  the CUSTOMER approves live. Same vendor; same substitutionGroup when set. */
+  app.post('/orders/:id/items/:lineId/substitute', auth, async (request) => {
+    const { id, lineId } = request.params as { id: string; lineId: string };
+    await resolveOwnedOrder(app, request.user.userId, id);
+    const { substituteItemId } = z.object({ substituteItemId: z.string().min(1) }).parse(request.body);
+    const line = await picking.proposeSubstitution(id, lineId, substituteItemId, request.user.userId);
+    return { success: true, data: line };
+  });
+
+  /** POST /orders/:id/items/:lineId/refund-line — nothing to swap: the line
+   *  comes off the order, totals shrink, stock goes back on the shelf. */
+  app.post('/orders/:id/items/:lineId/refund-line', auth, async (request) => {
+    const { id, lineId } = request.params as { id: string; lineId: string };
+    await resolveOwnedOrder(app, request.user.userId, id);
+    const line = await picking.refundLine(id, lineId, request.user.userId);
+    return { success: true, data: line };
+  });
+
+  /** POST /items/:id/adjust — reasoned stock movement (received/damaged/…),
+   *  atomic and logged. The audit trail behind quantity-on-hand. */
+  app.post<{ Params: IdParam }>('/items/:id/adjust', auth, async (request) => {
+    const access = await resolveVendor(app, request.user.userId, selectedVendorId(request));
+    const body = z.object({
+      delta: z.number().int().min(-100_000).max(100_000).refine((n) => n !== 0, 'Zero is not an adjustment'),
+      reason: z.enum(['RECEIVED', 'DAMAGED', 'MANUAL', 'RECONCILE', 'RETURN']),
+      note: z.string().max(300).optional(),
+    }).parse(request.body);
+
+    const item = await app.prisma.item.findFirst({ where: { id: request.params.id, vendorId: { in: access.vendorIds } } });
+    if (!item) throw new NotFoundError('Item', request.params.id);
+    if (item.stockQuantity == null) {
+      throw new AppError(400, 'UNTRACKED', 'This item does not track stock — set a quantity on it first');
+    }
+
+    // Guarded: stock can't be adjusted below zero.
+    const applied = await app.prisma.item.updateMany({
+      where: { id: item.id, stockQuantity: { gte: body.delta < 0 ? -body.delta : 0 } },
+      data: { stockQuantity: { increment: body.delta } },
+    });
+    if (applied.count === 0) {
+      throw new AppError(409, 'INSUFFICIENT_STOCK', 'That would take the stock below zero');
+    }
+    // Mirror the inventory engine's edges: zero hides, restock un-hides.
+    await app.prisma.item.updateMany({
+      where: { id: item.id, stockQuantity: { lte: 0 }, isAvailable: true },
+      data: { isAvailable: false, autoHiddenAt: new Date() },
+    });
+    await app.prisma.item.updateMany({
+      where: { id: item.id, autoHiddenAt: { not: null }, stockQuantity: { gt: 0 } },
+      data: { isAvailable: true, autoHiddenAt: null },
+    });
+
+    const adjustment = await app.prisma.stockAdjustment.create({
+      data: { itemId: item.id, delta: body.delta, reason: body.reason, note: body.note, createdBy: request.user.userId },
+    });
+    const fresh = await app.prisma.item.findUnique({ where: { id: item.id }, select: { stockQuantity: true, isAvailable: true } });
+    return { success: true, data: { adjustment, stockQuantity: fresh?.stockQuantity, isAvailable: fresh?.isAvailable } };
+  });
+
+  /** GET /items/low-stock — everything at/under its threshold. */
+  app.get('/items/low-stock', auth, async (request) => {
+    const access = await resolveVendor(app, request.user.userId, selectedVendorId(request));
+    const items = await app.prisma.$queryRaw<Array<{ id: string; name: string; stockQuantity: number; lowStockThreshold: number }>>`
+      SELECT id, name, "stockQuantity", "lowStockThreshold"
+      FROM items
+      WHERE "vendorId" = ANY(${access.vendorIds})
+        AND "stockQuantity" IS NOT NULL AND "lowStockThreshold" IS NOT NULL
+        AND "stockQuantity" <= "lowStockThreshold"
+      ORDER BY "stockQuantity" ASC
+      LIMIT 200
+    `;
+    return { success: true, data: items };
   });
 
   /** POST /orders/:id/confirm-payment — the vendor saw the customer's MMG payment

@@ -117,6 +117,9 @@ export const customerApi = {
   supportTickets: () => api.get('/customer/support'),
   // Post-delivery tip (100% to the mover).
   tipOrder: (id: string, amount: number) => api.post(`/customer/orders/${id}/tip`, { amount }),
+  // Live verdict on an out-of-stock substitution the store proposed (§5.3).
+  decideSubstitution: (orderId: string, lineId: string, approve: boolean) =>
+    api.post(`/customer/orders/${orderId}/items/${lineId}/substitution`, { approve }),
   // Redeem a referral code (writes referredBy). `token` lets a just-registered
   // user redeem before the auth store has propagated.
   redeemReferral: (code: string, token?: string) =>
@@ -385,6 +388,16 @@ export const vendorApi = {
   order: (id: string) => api.get(`/vendor/orders/${id}`),
   acceptOrder: (id: string) => api.put(`/vendor/orders/${id}/accept`),
   confirmPayment: (id: string) => api.post(`/vendor/orders/${id}/confirm-payment`, {}),
+  // Grocery picking (§5.3)
+  setLinePicked: (orderId: string, lineId: string, picked: boolean) =>
+    api.put(`/vendor/orders/${orderId}/items/${lineId}/picked`, { picked }),
+  proposeSubstitution: (orderId: string, lineId: string, substituteItemId: string) =>
+    api.post(`/vendor/orders/${orderId}/items/${lineId}/substitute`, { substituteItemId }),
+  refundLine: (orderId: string, lineId: string) =>
+    api.post(`/vendor/orders/${orderId}/items/${lineId}/refund-line`, {}),
+  adjustStock: (itemId: string, body: { delta: number; reason: string; note?: string }) =>
+    api.post(`/vendor/items/${itemId}/adjust`, body),
+  lowStock: () => api.get('/vendor/items/low-stock'),
   // MMG cash ledger — delivery fees this store owes riders
   cashSettlements: () => api.get('/vendor/cash-settlements'),
   confirmCashSettlement: (id: string) => api.post(`/vendor/cash-settlements/${id}/confirm`, {}),

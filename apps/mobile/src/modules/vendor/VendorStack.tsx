@@ -947,6 +947,54 @@ function ModifiersSection({ item }: { item: any }) {
   );
 }
 
+/** §5.6 reasoned stock movement — the audit-trail path, not a raw overwrite:
+ *  ±delta with a reason (received / damaged / manual / reconcile / return). */
+function StockAdjustRow({ item }: { item: any }) {
+  const qc = useQueryClient();
+  const [open, setOpen] = useState(false);
+  const [delta, setDelta] = useState('');
+  const [reason, setReason] = useState<'RECEIVED' | 'DAMAGED' | 'MANUAL' | 'RECONCILE' | 'RETURN'>('RECEIVED');
+  const adjust = useMutation({
+    mutationFn: () => vendorApi.adjustStock(item.id, { delta: Number(delta), reason }),
+    onSuccess: () => {
+      setOpen(false);
+      setDelta('');
+      qc.invalidateQueries({ queryKey: ['vendor', 'menu'] });
+    },
+  });
+  const n = Number(delta);
+  const valid = delta.trim() !== '' && Number.isInteger(n) && n !== 0;
+
+  if (!open) {
+    return (
+      <Pressable onPress={() => setOpen(true)} hitSlop={6}>
+        <T variant="caption" weight="semibold" tone="brand">
+          Adjust stock (received / damaged)…
+        </T>
+      </Pressable>
+    );
+  }
+  return (
+    <View style={{ gap: space.sm }}>
+      <InlineInput value={delta} onChangeText={setDelta} placeholder="+50 received, -3 damaged" keyboardType="default" />
+      <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: space.sm }}>
+        {(['RECEIVED', 'DAMAGED', 'MANUAL', 'RECONCILE', 'RETURN'] as const).map((r) => (
+          <Chip key={r} label={r.toLowerCase()} selected={reason === r} onPress={() => setReason(r)} style={{ height: 32, paddingHorizontal: space.md }} />
+        ))}
+      </View>
+      {adjust.isError ? (
+        <T variant="caption" tone="error">
+          {((adjust.error as any)?.response?.data?.error?.message) ?? 'Adjustment failed.'}
+        </T>
+      ) : null}
+      <View style={{ flexDirection: 'row', gap: space.md }}>
+        <PillButton label="Apply" size="sm" style={{ flex: 1 }} loading={adjust.isPending} disabled={!valid || adjust.isPending} onPress={() => adjust.mutate()} />
+        <PillButton label="Cancel" variant="soft" size="sm" style={{ flex: 1 }} onPress={() => setOpen(false)} />
+      </View>
+    </View>
+  );
+}
+
 /** Stock alerts from the fetched menu itself: tracked items at/below their
  *  own alert level (or sold out and auto-hidden). */
 function LowStockCard({ categories, navigation, catOptions }: { categories: any[]; navigation: any; catOptions: { id: string; name: string }[] }) {
@@ -1381,6 +1429,11 @@ function VendorItemEditorScreen({ navigation, route }: any) {
                 <T variant="caption" tone="muted">
                   Tracked items sell down automatically and hide at 0. You’ll get an alert at your low-stock level.
                 </T>
+              ) : null}
+              {/* Reasoned movements (received/damaged/…) keep an audit trail —
+                  different from overwriting the number above. */}
+              {existing && existing.stockQuantity != null ? (
+                <StockAdjustRow item={existing} />
               ) : null}
             </View>
           </>

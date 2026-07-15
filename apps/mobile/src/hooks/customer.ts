@@ -241,3 +241,13 @@ export function useTipOrder(orderId: string) {
     },
   });
 }
+
+/** Approve/reject the store's out-of-stock substitution, live (§5.3). */
+export function useDecideSubstitution(orderId: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ lineId, approve }: { lineId: string; approve: boolean }) =>
+      customerApi.decideSubstitution(orderId, lineId, approve),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['order', orderId] }),
+  });
+}
