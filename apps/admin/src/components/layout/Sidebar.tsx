@@ -17,6 +17,9 @@ import {
   ShieldCheck,
   ShieldAlert,
   RefreshCw,
+  LifeBuoy,
+  PackageOpen,
+  Megaphone,
 } from 'lucide-react';
 
 // Grouped by what the operator is doing, not by table name. Sections only list
@@ -46,6 +49,14 @@ const NAV_SECTIONS: { title: string; items: { label: string; href: string; icon:
       { label: 'Subscriptions', href: '/subscriptions', icon: RefreshCw },
       { label: 'Claims', href: '/claims', icon: ShieldAlert },
       { label: 'Promos', href: '/promos', icon: Tag },
+    ],
+  },
+  {
+    title: 'Support',
+    items: [
+      { label: 'Tickets', href: '/support', icon: LifeBuoy },
+      { label: 'Returns', href: '/returns', icon: PackageOpen },
+      { label: 'Broadcast', href: '/broadcast', icon: Megaphone },
     ],
   },
   {

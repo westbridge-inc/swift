@@ -212,6 +212,18 @@ export const payClaim = (id: string, reference?: string) =>
   apiFetch(`/api/v1/admin/cash-rules/claims/${id}/paid`, { method: 'PUT', body: JSON.stringify({ reference }) });
 export const fetchCashMetrics = () => apiFetch('/api/v1/admin/cash-rules/metrics');
 
+// ─── Support & comms ─────────────────────────────────────────────
+export const fetchSupportTickets = (status?: string) =>
+  apiFetch(`/api/v1/admin/support?${status ? `status=${status}` : ''}`);
+export const resolveSupportTicket = (id: string, status: 'OPEN' | 'IN_PROGRESS' | 'RESOLVED', adminNote?: string) =>
+  apiFetch(`/api/v1/admin/support/${id}/resolve`, { method: 'PUT', body: JSON.stringify({ status, adminNote }) });
+export const fetchReturns = (status?: string) =>
+  apiFetch(`/api/v1/admin/returns?limit=50${status ? `&status=${status}` : ''}`);
+export const resolveReturn = (id: string, status: 'APPROVED' | 'REJECTED' | 'REFUNDED', note?: string) =>
+  apiFetch(`/api/v1/admin/returns/${id}/resolve`, { method: 'PUT', body: JSON.stringify({ status, note }) });
+export const broadcastNotification = (body: { title: string; body: string; role?: string }) =>
+  apiFetch('/api/v1/admin/notifications/broadcast', { method: 'POST', body: JSON.stringify(body) });
+
 // ─── Global ⌘K search ────────────────────────────────────────────
 export interface GlobalSearchResult {
   orders: { id: string; orderNumber: string; status: string; orderType: string; totalAmount: number; placedAt: string }[];
