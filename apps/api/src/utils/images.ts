@@ -15,3 +15,14 @@ export function looksLikeImage(buffer: Buffer): boolean {
     buffer.toString('ascii', 0, 4) === 'RIFF' && buffer.toString('ascii', 8, 12) === 'WEBP';
   return jpeg || png || webp;
 }
+
+/**
+ * Document sniff (security spec §6): verification uploads accept PDFs too —
+ * the content must match one of the allowed formats, never just the header.
+ */
+export function looksLikeDocument(buffer: Buffer, mimeType: string): boolean {
+  if (mimeType === 'application/pdf') {
+    return buffer.length >= 5 && buffer.toString('ascii', 0, 5) === '%PDF-';
+  }
+  return looksLikeImage(buffer);
+}

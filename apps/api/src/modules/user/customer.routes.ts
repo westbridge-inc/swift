@@ -1435,6 +1435,27 @@ export async function customerRoutes(app: FastifyInstance) {
     const { userId } = request.user;
     const body = checkoutSchema.parse(request.body ?? {});
 
+    // Idempotency (security spec §5.5): the cart-clear after success already
+    // suppresses SEQUENTIAL retries, but two in-flight requests racing (flaky
+    // network + a retry) could both read the full cart and place twice. With
+    // an Idempotency-Key header, the first request claims the key atomically;
+    // a concurrent duplicate is refused, and a later replay gets the stored
+    // result back instead of a second order.
+    const idemKey = request.headers['idempotency-key'];
+    const redisKey = typeof idemKey === 'string' && idemKey.length >= 8 && idemKey.length <= 128
+      ? `checkout:idem:${userId}:${idemKey}`
+      : null;
+    if (redisKey) {
+      const claimed = await app.redis.set(redisKey, 'IN_FLIGHT', 'EX', 86_400, 'NX');
+      if (!claimed) {
+        const existing = await app.redis.get(redisKey);
+        if (existing && existing !== 'IN_FLIGHT') {
+          return { success: true, data: JSON.parse(existing), replayed: true };
+        }
+        throw new AppError(409, 'DUPLICATE_REQUEST', 'This order is already being placed — hold on.');
+      }
+    }
+
     // Validate payment method
     const validMethods = ['CASH', 'MOBILE_MONEY', 'BANK_TRANSFER', 'CARD'];
     const paymentMethod = body.paymentMethod || 'CASH';
@@ -1456,17 +1477,25 @@ export async function customerRoutes(app: FastifyInstance) {
       }
     }
 
-    const result = await orderService.checkout({
-      userId,
-      paymentMethod,
-      deliveryInstructions: body.deliveryInstructions,
-      tipAmount: body.tipAmount,
-      scheduledFor: body.scheduledFor,
-      promoCode: body.promoCode,
-      fulfillmentSelections: body.fulfillmentSelections,
-      express: body.express,
-      appointments: body.appointments,
-    });
+    let result;
+    try {
+      result = await orderService.checkout({
+        userId,
+        paymentMethod,
+        deliveryInstructions: body.deliveryInstructions,
+        tipAmount: body.tipAmount,
+        scheduledFor: body.scheduledFor,
+        promoCode: body.promoCode,
+        fulfillmentSelections: body.fulfillmentSelections,
+        express: body.express,
+        appointments: body.appointments,
+      });
+    } catch (err) {
+      // A failed attempt must not hold the key hostage — release so the same
+      // key can retry once the customer fixes the problem (e.g. MIN_ORDER).
+      if (redisKey) await app.redis.del(redisKey).catch(() => {});
+      throw err;
+    }
 
     // the vendor order alert escalates while unacknowledged —
     // re-alert after 60s, SMS fallback 60s after that
@@ -1485,6 +1514,12 @@ export async function customerRoutes(app: FastifyInstance) {
       app.redis.del(`cart:${userId}`).catch(() => {}),
       app.redis.keys(`home:${userId}:*`).then((keys) => keys.length > 0 ? app.redis.del(...keys) : null).catch(() => {}),
     ]);
+
+    // Store the result for idempotent replay (best-effort — the order exists
+    // regardless; a lost write only downgrades a replay to NO_CART).
+    if (redisKey) {
+      await app.redis.set(redisKey, JSON.stringify(result), 'EX', 86_400).catch(() => {});
+    }
 
     return { success: true, data: result };
   });

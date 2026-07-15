@@ -6,6 +6,7 @@ import { getKycProvider } from '../../providers/kyc/kyc-provider';
 import { getStorageProvider } from '../../providers/storage/storage-provider';
 import { decryptBuffer, encryptBuffer, generateDek, getKeyProvider, signRenderToken } from '../../providers/storage/envelope';
 import { createHash } from 'node:crypto';
+import { looksLikeDocument } from '../../utils/images';
 import { AppError } from '../../utils/errors';
 
 const checklistRoleSchema = z.enum(['MOVER', 'RESTAURANT', 'SUPERMARKET', 'STORE', 'SERVICE']);
@@ -73,6 +74,11 @@ export async function verificationRoutes(app: FastifyInstance) {
       throw new AppError(400, 'BAD_TYPE', 'Only JPEG, PNG, WebP or PDF files are accepted');
     }
     const buffer = await file.toBuffer();
+    // Magic-byte sniff (security spec §6): a spoofed Content-Type must not
+    // smuggle an executable/HTML into the document store.
+    if (!looksLikeDocument(buffer, file.mimetype)) {
+      throw new AppError(400, 'BAD_CONTENT', 'File content does not match its declared format');
+    }
     const storage = getStorageProvider();
 
     // Envelope encryption (onboarding spec §5): with a KEK configured the
