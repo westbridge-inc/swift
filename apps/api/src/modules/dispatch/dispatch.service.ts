@@ -8,6 +8,7 @@ import { NotificationService } from '../notification/notification.service';
 import { getMapsProvider, type MapsProvider } from '../../providers/maps/maps-provider';
 import { classesAtOrAbove } from '../rides/fare.service';
 import { rankCandidates, type DispatchCandidate } from './scoring';
+import { customerTrustSummaries } from '../cash/cash-rules.service';
 import { log } from '../../utils/logger';
 
 declare module 'fastify' {
@@ -219,6 +220,10 @@ export class DispatchService {
     const timeoutSeconds = order.isExpress ? EXPRESS_OFFER_TIMEOUT_SECONDS : OFFER_TIMEOUT_SECONDS;
     await this.redis.set(offerKey(orderId), top.riderId, 'EX', timeoutSeconds + 10);
 
+    // §4d: on a CASH job the mover fronts real money — show them WHO they're
+    // fronting it for (trust level, completed orders, strikes) before accept.
+    const trust = (await customerTrustSummaries(this.prisma, [order.customerId])).get(order.customerId);
+
     this.io.to(`user:${top.userId}`).emit('dispatch:offer', {
       orderId,
       orderNumber: order.orderNumber,
@@ -227,6 +232,8 @@ export class DispatchService {
       isExpress: order.isExpress,
       expiresInSeconds: timeoutSeconds,
       etaMinutes: Math.round(top.etaMinutes),
+      paymentMethod: order.paymentMethod,
+      customerTrust: trust ?? null,
     });
 
     log().info({ orderId, orderNumber: order.orderNumber, moverId: top.riderId, pool, round, etaMinutes: Math.round(top.etaMinutes), candidates: candidates.length }, 'dispatch: offer sent');

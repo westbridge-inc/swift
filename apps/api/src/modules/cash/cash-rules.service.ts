@@ -64,6 +64,45 @@ export async function orderingRestriction(
   return null;
 }
 
+/** The trust badge a mover sees before fronting cash for a customer (§4d):
+ *  trust level, completed-order count, strikes in the last 90 days, tenure.
+ *  Batch-shaped (3 queries total, whatever the list size) — never per-row. */
+export async function customerTrustSummaries(
+  prisma: PrismaClient,
+  userIds: string[],
+): Promise<Map<string, { trustLevel: string; completedOrders: number; strikes: number; memberSince: Date }>> {
+  const ids = [...new Set(userIds)].filter(Boolean);
+  if (ids.length === 0) return new Map();
+
+  const [users, strikes, completed] = await Promise.all([
+    prisma.user.findMany({ where: { id: { in: ids } }, select: { id: true, trustLevel: true, createdAt: true } }),
+    prisma.strike.groupBy({
+      by: ['userId'],
+      where: { userId: { in: ids }, createdAt: { gte: new Date(Date.now() - 90 * DAY_MS) } },
+      _count: true,
+    }),
+    prisma.order.groupBy({
+      by: ['customerId'],
+      where: { customerId: { in: ids }, status: { in: ['DELIVERED', 'COMPLETED'] } },
+      _count: true,
+    }),
+  ]);
+
+  const strikeMap = new Map(strikes.map((s) => [s.userId, s._count]));
+  const orderMap = new Map(completed.map((o) => [o.customerId, o._count]));
+  return new Map(
+    users.map((u) => [
+      u.id,
+      {
+        trustLevel: u.trustLevel,
+        completedOrders: orderMap.get(u.id) ?? 0,
+        strikes: strikeMap.get(u.id) ?? 0,
+        memberSince: u.createdAt,
+      },
+    ]),
+  );
+}
+
 export class CashRulesService {
   private countryConfig: CountryConfigService;
 

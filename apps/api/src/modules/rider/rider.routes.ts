@@ -4,7 +4,7 @@ import { RiderType, VehicleType, EarningType, EarningStatus } from '@prisma/clie
 import { OrderService, notHeldFilter } from '../order/order.service';
 import { NotificationService } from '../notification/notification.service';
 import { VerificationService } from '../verification/verification.service';
-import { CashRulesService } from '../cash/cash-rules.service';
+import { CashRulesService, customerTrustSummaries } from '../cash/cash-rules.service';
 import { DeliveryCashSettlementService, assertSettlementId } from '../cash/delivery-cash-settlement.service';
 import { makeDispatchService } from '../dispatch/dispatch.service';
 import { getKycProvider } from '../../providers/kyc/kyc-provider';
@@ -490,6 +490,10 @@ export async function riderRoutes(app: FastifyInstance) {
       take: 50,
     });
 
+    // §4d trust badge: WHO the rider would front cash for — trust level,
+    // completed orders, strikes. One batch (3 queries), never per-row.
+    const trust = await customerTrustSummaries(app.prisma, orders.map((o) => o.customerId));
+
     // Compute distance from rider to each vendor, filter by radius, sort.
     const withDistance = orders
       .map((order) => {
@@ -515,6 +519,8 @@ export async function riderRoutes(app: FastifyInstance) {
           tipAmount: Number(order.tipAmount),
           totalEarning: Number(order.deliveryFee) + Number(order.tipAmount),
           isExpress: order.isExpress,
+          paymentMethod: order.paymentMethod,
+          customerTrust: trust.get(order.customerId) ?? null,
           pickupDistanceKm: Math.round(pickupDistance * 10) / 10,
           deliveryDistanceKm: Math.round(deliveryDistance * 10) / 10,
           estimatedPrepTime: order.estimatedPrepTime,
