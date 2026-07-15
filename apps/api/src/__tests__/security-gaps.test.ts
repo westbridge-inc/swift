@@ -19,6 +19,7 @@ import { looksLikeDocument } from '../utils/images';
 let app: FastifyInstance;
 let token: string;
 let userId: string;
+let ownerUserId: string;
 let vendorId: string;
 let itemId: string;
 const marker = nanoid(6).toLowerCase();
@@ -62,17 +63,38 @@ beforeAll(async () => {
   });
 
   // A live vendor + item + address so checkout can succeed
-  // An ORDERABLE store (open + accepting) with a cheap untracked item — the
-  // cart gate rejects closed stores, and pricier items trip the L2 ID gate.
-  const vendor = await app.prisma.vendor.findFirstOrThrow({
-    where: {
-      status: 'ACTIVE', isVerified: true, isCurrentlyOpen: true, acceptingOrders: true,
-      items: { some: { isAvailable: true, stockQuantity: null, basePrice: { lt: 3000 } } },
+  // Self-contained orderable store (the seeded ones close by hours — CI runs
+  // UTC and crossed their 22:00 close, which 400'd add-to-cart). No hours
+  // rows = always open; cheap item stays under the L2 ID gate.
+  const ownerUser = await app.prisma.user.create({
+    data: {
+      phone: `+59264${String(Math.floor(Math.random() * 90000) + 10000)}`,
+      firstName: 'Sec', lastName: 'Vendor',
+      roles: ['VENDOR_OWNER'] as never[], activeRole: 'VENDOR_OWNER' as never,
+      isPhoneVerified: true,
     },
-    select: { id: true, items: { where: { isAvailable: true, stockQuantity: null, basePrice: { lt: 3000 } }, take: 1, select: { id: true } } },
+  });
+  ownerUserId = ownerUser.id;
+  const owner = await app.prisma.vendorOwner.create({ data: { userId: ownerUser.id } });
+  const vendor = await app.prisma.vendor.create({
+    data: {
+      ownerId: owner.id,
+      name: `SecGap Diner ${marker}`,
+      slug: `secgap-${marker}`,
+      vendorType: 'RESTAURANT',
+      phone: '+5926999001',
+      addressLine1: '1 Idempotent Ave', city: 'Georgetown', region: 'Demerara-Mahaica',
+      latitude: 6.801, longitude: -58.156,
+      status: 'ACTIVE', acceptingOrders: true, isCurrentlyOpen: true, isVerified: true,
+      minOrderAmount: 0,
+    },
   });
   vendorId = vendor.id;
-  itemId = vendor.items[0]!.id;
+  const category = await app.prisma.category.create({ data: { vendorId, name: 'Menu', sortOrder: 0 } });
+  const item = await app.prisma.item.create({
+    data: { vendorId, categoryId: category.id, name: `SecGap Plate ${marker}`, basePrice: 1500, isAvailable: true },
+  });
+  itemId = item.id;
   await app.prisma.address.create({
     data: {
       userId: user.id, label: 'Home', addressLine1: '1 Test St', city: 'Georgetown',
@@ -94,6 +116,15 @@ afterAll(async () => {
     await app.prisma.session.deleteMany({ where: { userId } });
     await app.prisma.customer.deleteMany({ where: { userId } });
     await app.prisma.user.deleteMany({ where: { id: userId } });
+  }
+  if (vendorId) {
+    await app.prisma.item.deleteMany({ where: { vendorId } });
+    await app.prisma.category.deleteMany({ where: { vendorId } });
+    await app.prisma.vendor.deleteMany({ where: { id: vendorId } });
+  }
+  if (ownerUserId) {
+    await app.prisma.vendorOwner.deleteMany({ where: { userId: ownerUserId } });
+    await app.prisma.user.deleteMany({ where: { id: ownerUserId } });
   }
   await app.close();
 });
