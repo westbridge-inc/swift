@@ -188,14 +188,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: pnpm/action-setup@v6
-      - uses: actions/setup-node@v6
-        with:
-          node-version: 20
-          cache: pnpm
-      - run: pnpm install --frozen-lockfile
-      # Blocking: a HIGH CVE should red the build (verified clean 2026-07-06).
-      - name: Audit dependencies
-        run: pnpm audit --audit-level=high
-      - name: Check for known vulnerabilities
-        run: npx audit-ci --high
+      # Blocking: a HIGH CVE should red the build. `pnpm audit` (and audit-ci,
+      # which shells out to it) died 2026-07-14 when the npm registry retired
+      # its audits endpoint (410 Gone) with no fixed pnpm release available —
+      # Trivy reads pnpm-lock.yaml directly against the GHSA/OSV feeds with the
+      # same HIGH+ blocking threshold, version-pinned like gitleaks above.
+      - name: Audit dependencies (HIGH+ blocks)
+        run: |
+          curl -sSfL https://github.com/aquasecurity/trivy/releases/download/v0.72.0/trivy_0.72.0_Linux-64bit.tar.gz | tar -xz trivy
+          ./trivy fs --scanners vuln --severity HIGH,CRITICAL --exit-code 1 pnpm-lock.yaml
