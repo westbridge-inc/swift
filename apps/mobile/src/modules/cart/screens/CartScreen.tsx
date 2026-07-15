@@ -66,6 +66,8 @@ export function CartScreen() {
   const [payMethod, setPayMethod] = useState<'CASH' | 'MMG'>('CASH');
   const [menuOpen, setMenuOpen] = useState(false);
   const [placedOrderId, setPlacedOrderId] = useState<string | null>(null);
+  // LIFECYCLE_V2: while held, the store has NOT been told yet — say so honestly.
+  const [placedHeld, setPlacedHeld] = useState(false);
   const appointments = useBookingStore((s) => s.appointments);
   const clearAppointments = useBookingStore((s) => s.clear);
 
@@ -124,6 +126,7 @@ export function CartScreen() {
         onSuccess: (data: any) => {
           const first = data?.orders?.[0];
           setPlacedOrderId(first?.id ?? null);
+          setPlacedHeld(!!(first?.holdExpiresAt && new Date(first.holdExpiresAt) > new Date()));
           if (apptPayload.length) clearAppointments();
           // MMG: take the customer straight to the store's own MMG link, in-app.
           if (payMethod === 'MMG') void openPayLink(first?.vendor?.mmgPayUrl);
@@ -493,7 +496,9 @@ export function CartScreen() {
           Your order is placed
         </T>
         <T variant="label" tone="muted" center style={{ marginTop: space.sm }}>
-          The store has been notified — pay cash on delivery.
+          {placedHeld
+            ? 'You have a few minutes to change your mind — cancelling is free until the store gets it.'
+            : 'The store has been notified — pay cash on delivery.'}
         </T>
         <PillButton
           label="Track Order"

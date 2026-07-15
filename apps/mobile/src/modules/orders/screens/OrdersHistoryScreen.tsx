@@ -1,8 +1,8 @@
 /** @jsxImportSource react */
-import React from 'react';
-import { FlatList, View } from 'react-native';
+import React, { useEffect } from 'react';
+import { FlatList, RefreshControl, View } from 'react-native';
 import { Image } from 'expo-image';
-import { useNavigation } from '@react-navigation/native';
+import { useNavigation, useIsFocused } from '@react-navigation/native';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 import { color, radius, space } from '@swift/ui';
 import { useOrders, useReorder } from '../../../hooks/customer';
@@ -43,6 +43,14 @@ export function OrdersHistoryScreen() {
   const orders = useOrders<any>();
   const reorder = useReorder();
 
+  // Tab screens stay mounted, so without this the list NEVER updates after
+  // first load (found live: a delivered order stuck on "Pending" forever).
+  const isFocused = useIsFocused();
+  useEffect(() => {
+    if (isFocused && isAuthenticated) orders.refetch();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isFocused]);
+
   if (!isAuthenticated) {
     return (
       <Screen>
@@ -77,6 +85,7 @@ export function OrdersHistoryScreen() {
         <FlatList
           data={rows}
           keyExtractor={(o) => o.id}
+          refreshControl={<RefreshControl refreshing={orders.isRefetching} onRefresh={() => orders.refetch()} tintColor={color.brand[500]} />}
           contentContainerStyle={{ padding: space['2xl'], gap: space.md, paddingBottom: space['3xl'] }}
           renderItem={({ item: o }) => {
             const st = STATUS_TONE[o.status] ?? { label: o.status, color: color.text.secondary, bg: color.surface.subtle };
