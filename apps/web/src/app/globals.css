@@ -1,0 +1,23 @@
+@import 'tailwindcss';
+
+:root {
+  /* Swift brand — the mobile app's red identity on a light marketing canvas. */
+  --swift-red: #e8192c;
+  --swift-red-600: #bc1320;
+  --swift-red-50: #fff2f3;
+  --swift-ink: #17181a;
+  --swift-muted: #6e6e73;
+  --swift-canvas: #ffffff;
+  --swift-subtle: #f6f5f4;
+}
+
+html {
+  scroll-behavior: smooth;
+}
+
+body {
+  background: var(--swift-canvas);
+  color: var(--swift-ink);
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
