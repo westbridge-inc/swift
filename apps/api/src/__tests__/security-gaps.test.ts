@@ -62,9 +62,13 @@ beforeAll(async () => {
   });
 
   // A live vendor + item + address so checkout can succeed
-  // Cheap untracked item — stays under the L2 ID-gate threshold for cash.
+  // An ORDERABLE store (open + accepting) with a cheap untracked item — the
+  // cart gate rejects closed stores, and pricier items trip the L2 ID gate.
   const vendor = await app.prisma.vendor.findFirstOrThrow({
-    where: { status: 'ACTIVE', isVerified: true, items: { some: { isAvailable: true, stockQuantity: null, basePrice: { lt: 3000 } } } },
+    where: {
+      status: 'ACTIVE', isVerified: true, isCurrentlyOpen: true, acceptingOrders: true,
+      items: { some: { isAvailable: true, stockQuantity: null, basePrice: { lt: 3000 } } },
+    },
     select: { id: true, items: { where: { isAvailable: true, stockQuantity: null, basePrice: { lt: 3000 } }, take: 1, select: { id: true } } },
   });
   vendorId = vendor.id;
