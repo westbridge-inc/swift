@@ -97,12 +97,21 @@ export class AgentService {
   async findProblems(now = new Date()): Promise<ProblemSnapshot[]> {
     const min = (m: number) => new Date(now.getTime() - m * 60_000);
     const notHeld = { OR: [{ holdExpiresAt: null }, { holdExpiresAt: { lte: now } }] };
+    // An ACTIVE incident window: stuck-for-20-minutes is an ops problem the
+    // agent can still save; stuck-since-yesterday is dead history the daily
+    // reconcile sweep owns. Without the bound, ancient orders re-enter every
+    // scan forever, fill the cap, and drown fresh incidents.
+    const ACTIVE_WINDOW = { gte: min(24 * 60) };
+    // Oldest active problem first — deterministic under the cap, and the
+    // most-stuck order is exactly the one to look at first.
+    const oldestFirst = { updatedAt: 'asc' as const };
 
     const [unaccepted, unassigned, notPickedUp, taxiUnmatched] = await Promise.all([
       // Released but the vendor never accepted
       this.prisma.order.findMany({
-        where: { status: 'PENDING', orderType: { not: 'TAXI' }, placedAt: { lt: min(15) }, ...notHeld },
+        where: { status: 'PENDING', orderType: { not: 'TAXI' }, placedAt: { lt: min(15), ...ACTIVE_WINDOW }, ...notHeld },
         take: SCAN_CAP(),
+        orderBy: oldestFirst,
         include: PROBLEM_INCLUDE,
       }),
       // Accepted/prepared but no rider bound long past release
@@ -112,25 +121,28 @@ export class AgentService {
           fulfillment: 'DELIVERY',
           orderType: { not: 'TAXI' },
           riderId: null,
-          updatedAt: { lt: min(20) },
+          updatedAt: { lt: min(20), ...ACTIVE_WINDOW },
           ...notHeld,
         },
         take: SCAN_CAP(),
+        orderBy: oldestFirst,
         include: PROBLEM_INCLUDE,
       }),
       // A rider owns it but the parcel never left
       this.prisma.order.findMany({
         where: {
           status: { in: ['RIDER_ASSIGNED', 'RIDER_EN_ROUTE_PICKUP', 'RIDER_ARRIVED_PICKUP'] },
-          updatedAt: { lt: min(25) },
+          updatedAt: { lt: min(25), ...ACTIVE_WINDOW },
         },
         take: SCAN_CAP(),
+        orderBy: oldestFirst,
         include: PROBLEM_INCLUDE,
       }),
       // Taxi request that never matched
       this.prisma.order.findMany({
-        where: { status: 'PENDING', orderType: 'TAXI', placedAt: { lt: min(6) } },
+        where: { status: 'PENDING', orderType: 'TAXI', placedAt: { lt: min(6), ...ACTIVE_WINDOW } },
         take: SCAN_CAP(),
+        orderBy: oldestFirst,
         include: PROBLEM_INCLUDE,
       }),
     ]);
