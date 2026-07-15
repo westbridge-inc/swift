@@ -821,9 +821,20 @@ export class OrderService {
   async createEarnings(orderId: string) {
     const order = await this.prisma.order.findUnique({
       where: { id: orderId },
-      select: { riderId: true, driverId: true, deliveryFee: true, tipAmount: true, orderType: true, taxiFareTotal: true },
+      select: { riderId: true, driverId: true, deliveryFee: true, tipAmount: true, orderType: true, taxiFareTotal: true, paymentMethod: true, vendorId: true },
     });
     if (!order) return;
+
+    // MMG direct-pay: the customer paid the STORE (not the rider), so the store
+    // owes the rider the delivery fee IN CASH. Record the debt for the dual-
+    // confirm ledger (idempotent — orderId is unique). Swift moves no money.
+    if (order.paymentMethod === 'MOBILE_MONEY' && order.riderId && order.vendorId && Number(order.deliveryFee) > 0) {
+      await this.prisma.deliveryCashSettlement.upsert({
+        where: { orderId },
+        create: { orderId, riderId: order.riderId, vendorId: order.vendorId, amount: Number(order.deliveryFee) },
+        update: {},
+      });
+    }
 
     const earnings: Array<{
       riderId?: string;

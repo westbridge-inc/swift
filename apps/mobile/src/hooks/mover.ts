@@ -137,9 +137,35 @@ export function useDriverAction() {
 export function useRiderAction() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: ({ id, action }: { id: string; action: 'handover' | 'delivered' }) =>
-      action === 'handover' ? unwrap(riderApi.handover(id)) : unwrap(riderApi.delivered(id)),
+    mutationFn: async ({ id, action }: { id: string; action: 'handover' | 'delivered' }) => {
+      if (action !== 'handover') return unwrap(riderApi.delivered(id));
+      // The golden-rule handover NEEDS the rider's GPS (server-side mandatory —
+      // it's the evidence a guarantee claim stands on). Last-known is instant;
+      // fall back to a fresh fix.
+      const pos =
+        (await Location.getLastKnownPositionAsync().catch(() => null)) ??
+        (await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced }));
+      return unwrap(riderApi.handover(id, { outcome: 'paid', gps: { lat: pos.coords.latitude, lng: pos.coords.longitude } }));
+    },
     onSuccess: () => qc.invalidateQueries({ queryKey: ['mover'] }),
+  });
+}
+
+/** MMG cash ledger — delivery fees stores owe this rider (the customer paid
+ *  the store via MMG, so the store hands the fee over in cash). Rider-only. */
+export function useCashSettlements(kind: MoverKind | null) {
+  return useQuery({
+    queryKey: ['mover', 'cash-settlements'],
+    queryFn: () => unwrap<any>(riderApi.cashSettlements()),
+    enabled: kind === 'RIDER',
+  });
+}
+/** "The store handed me the cash" — my half of the dual confirm. */
+export function useConfirmCashSettlement() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (id: string) => unwrap(riderApi.confirmCashSettlement(id)),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['mover', 'cash-settlements'] }),
   });
 }
 

@@ -235,6 +235,24 @@ export function useOrderAction() {
   });
 }
 
+/** MMG cash ledger — delivery fees this store owes riders in cash (the
+ *  customer's MMG payment, fee included, landed in the store's wallet). */
+export function useVendorCashSettlements(enabled = true) {
+  return useQuery({
+    queryKey: ['vendor', 'cash-settlements'],
+    queryFn: () => unwrap<any>(vendorApi.cashSettlements()),
+    enabled,
+  });
+}
+/** "We handed the rider their fee" — the store's half of the dual confirm. */
+export function useConfirmVendorCashSettlement() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (id: string) => unwrap(vendorApi.confirmCashSettlement(id)),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['vendor', 'cash-settlements'] }),
+  });
+}
+
 // ─── Menu ────────────────────────────────────────────────────────────────────
 
 /** Categories with their nested items (the menu, grouped by section). */

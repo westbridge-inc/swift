@@ -3,8 +3,8 @@ import React from 'react';
 import { ScrollView, View } from 'react-native';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 import { color, radius, space } from '@swift/ui';
-import { Card, Header, LinkText, LoadingBlock, Screen, T, TonePill } from '../../../kit';
-import { useMoverKind, useMoverStats, useMoverSubscription, useEarningsSummary, useEarnings } from '../../../hooks';
+import { Card, Header, LinkText, LoadingBlock, PillButton, Screen, T, TonePill } from '../../../kit';
+import { useMoverKind, useMoverStats, useMoverSubscription, useEarningsSummary, useEarnings, useCashSettlements, useConfirmCashSettlement } from '../../../hooks';
 import { money } from '../../../lib/money';
 import { dateLabel } from '../shared';
 
@@ -27,6 +27,68 @@ function StatTile({ label, total, count, sub }: { label: string; total: number; 
 function earnLabel(t?: string) {
   const s = (t ?? 'Trip').replace(/_/g, ' ').toLowerCase();
   return s.charAt(0).toUpperCase() + s.slice(1);
+}
+
+/** MMG deliveries: the customer paid the STORE, so the store owes the rider
+ *  the delivery fee in cash. This is that ledger — confirm as stores pay up. */
+function StoreOwesYouCard({ ledger }: { ledger: any }) {
+  const confirm = useConfirmCashSettlement();
+  const rows: any[] = ledger?.unsettled ?? [];
+  if (rows.length === 0) return null;
+  return (
+    <Card style={{ marginTop: space.md }}>
+      <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
+        <T variant="caption" weight="bold" tone="muted" style={{ letterSpacing: 1 }}>
+          STORES OWE YOU
+        </T>
+        <T variant="label" weight="bold">
+          {money(ledger?.summary?.owed ?? 0)}
+        </T>
+      </View>
+      <T variant="caption" tone="muted" style={{ marginTop: 2 }}>
+        MMG orders — the customer paid the store, so your delivery fee comes from them in cash.
+      </T>
+      {rows.map((r) => (
+        <View key={r.id} style={{ paddingTop: space.md, marginTop: space.md, borderTopWidth: 1, borderTopColor: color.border.subtle }}>
+          <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+            <View style={{ flex: 1 }}>
+              <T variant="label" weight="semibold" numberOfLines={1}>
+                {r.vendor?.name ?? 'Store'}
+              </T>
+              <T variant="caption" tone="muted">
+                {r.orderNumber ? `#${r.orderNumber} · ` : ''}{dateLabel(r.createdAt)}
+              </T>
+            </View>
+            <T variant="label" weight="bold" style={{ marginLeft: space.md }}>
+              {money(r.amount)}
+            </T>
+          </View>
+          {r.status === 'RIDER_CONFIRMED' ? (
+            <T variant="caption" tone="muted" style={{ marginTop: space.sm }}>
+              You confirmed — waiting for the store to close it out.
+            </T>
+          ) : (
+            <>
+              {r.status === 'STORE_CONFIRMED' ? (
+                <T variant="caption" weight="semibold" tone="deep" style={{ marginTop: space.sm }}>
+                  {r.vendor?.name ?? 'The store'} says they paid you.
+                </T>
+              ) : null}
+              <PillButton
+                label="I received the cash"
+                variant="soft"
+                size="sm"
+                style={{ alignSelf: 'flex-start', marginTop: space.sm }}
+                loading={confirm.isPending && confirm.variables === r.id}
+                disabled={confirm.isPending}
+                onPress={() => confirm.mutate(r.id)}
+              />
+            </>
+          )}
+        </View>
+      ))}
+    </Card>
+  );
 }
 
 /** The mover's flat weekly fee — status straight off the subscription engine. */
@@ -68,6 +130,7 @@ export function EarningsScreen({ navigation }: any) {
   const historyQ = useEarnings<any>(kind);
   const stats = useMoverStats(kind);
   const subQ = useMoverSubscription(kind);
+  const ledgerQ = useCashSettlements(kind);
   const s: any = summaryQ.data ?? {};
   const raw: any = historyQ.data;
   const history: any[] = Array.isArray(raw) ? raw : raw?.data ?? raw?.earnings ?? [];
@@ -136,6 +199,9 @@ export function EarningsScreen({ navigation }: any) {
               </View>
             </Card>
           ) : null}
+
+          {/* MMG cash ledger — delivery fees stores still owe this rider */}
+          <StoreOwesYouCard ledger={ledgerQ.data} />
 
           {/* Weekly flat fee — billing transparency for the mover */}
           <WeeklyFeeCard sub={subQ.data} />

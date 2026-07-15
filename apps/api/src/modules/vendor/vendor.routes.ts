@@ -14,6 +14,7 @@ import { AiService } from '../ai/ai.service';
 import { guessColumnMapping, applyMapping, toImportCsv, REQUIRED_FIELDS, type ColumnMapping } from '../../utils/catalogue-map';
 import { parsePagination, paginatedResponse } from '../../utils/pagination';
 import { AppError, NotFoundError, ValidationError } from '../../utils/errors';
+import { DeliveryCashSettlementService, assertSettlementId } from '../cash/delivery-cash-settlement.service';
 import { throwForMissingProfile } from '../../utils/role-gate';
 import { ALLOWED_IMAGE_TYPES, looksLikeImage } from '../../utils/images';
 
@@ -423,6 +424,7 @@ export async function vendorRoutes(app: FastifyInstance) {
   const orderService = new OrderService(app.prisma, app.io);
   const dispatch = makeDispatchService(app);
   const notifications = new NotificationService(app.prisma, app.io);
+  const settlementLedger = new DeliveryCashSettlementService(app.prisma, notifications);
   const verification = new VerificationService(
     app.prisma,
     new NotificationService(app.prisma, app.io),
@@ -939,6 +941,27 @@ export async function vendorRoutes(app: FastifyInstance) {
     });
     app.io.to(`order:${order.id}`).emit('order:status_changed', { orderId: order.id, status: order.status, paymentStatus: 'CAPTURED' });
     return { success: true, data: updated };
+  });
+
+  /** GET /cash-settlements — MMG direct-pay ledger: delivery fees this store
+   *  owes riders in cash (the customer's MMG payment landed in the store's
+   *  wallet, fee included). Scoped like the order board: selected store, else
+   *  all. Distinct from /settlements, the weekly billing history. */
+  app.get('/cash-settlements', auth, async (request) => {
+    const requested = selectedVendorId(request);
+    const access = await resolveVendor(app, request.user.userId, requested);
+    const scope = ordersScope(access, requested);
+    const data = await settlementLedger.listForVendors(typeof scope === 'string' ? [scope] : scope.in);
+    return { success: true, data };
+  });
+
+  /** POST /cash-settlements/:id/confirm — "we handed the rider their delivery
+   *  fee". First confirm marks the store's half; the rider's confirm settles
+   *  it. Idempotent; any staff can confirm (same as the payment-received button). */
+  app.post<{ Params: IdParam }>('/cash-settlements/:id/confirm', auth, async (request) => {
+    const access = await resolveVendor(app, request.user.userId);
+    const data = await settlementLedger.confirm(assertSettlementId(request.params.id), 'STORE', { vendorIds: access.vendorIds });
+    return { success: true, data };
   });
 
   /** POST /orders/:id/retry-dispatch — after "no movers available", the vendor

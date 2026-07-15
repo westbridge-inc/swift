@@ -5,6 +5,7 @@ import { OrderService } from '../order/order.service';
 import { NotificationService } from '../notification/notification.service';
 import { VerificationService } from '../verification/verification.service';
 import { CashRulesService } from '../cash/cash-rules.service';
+import { DeliveryCashSettlementService, assertSettlementId } from '../cash/delivery-cash-settlement.service';
 import { makeDispatchService } from '../dispatch/dispatch.service';
 import { getKycProvider } from '../../providers/kyc/kyc-provider';
 import { haversineDistance } from '../../utils/distance';
@@ -143,6 +144,7 @@ export async function riderRoutes(app: FastifyInstance) {
     new NotificationService(app.prisma, app.io),
     orderService,
   );
+  const settlements = new DeliveryCashSettlementService(app.prisma, new NotificationService(app.prisma, app.io));
 
   /** POST /orders/:id/handover — the golden rule at the door.
    *  'paid' completes the delivery; 'no_show'/'refused' fails it with GPS
@@ -984,6 +986,27 @@ export async function riderRoutes(app: FastifyInstance) {
         pendingPayout: Number(pendingPayout._sum.amount ?? 0),
       },
     };
+  });
+
+  // =========================================================================
+  // 8b. MMG CASH SETTLEMENTS — delivery fees stores owe me
+  // =========================================================================
+
+  /** GET /cash-settlements — MMG direct-pay ledger: delivery fees stores owe
+   *  me in cash (customer paid the store, not me). Swift tracks the debt only. */
+  app.get('/cash-settlements', { preHandler: [app.authenticate] }, async (request) => {
+    const rider = await getRider(app, request.user.userId);
+    const data = await settlements.listForRider(rider.id);
+    return { success: true, data };
+  });
+
+  /** POST /cash-settlements/:id/confirm — "the store handed me the cash".
+   *  First confirm marks my half; the store's confirm settles it. Idempotent. */
+  app.post('/cash-settlements/:id/confirm', { preHandler: [app.authenticate] }, async (request) => {
+    const { id } = request.params as { id: string };
+    const rider = await getRider(app, request.user.userId);
+    const data = await settlements.confirm(assertSettlementId(id), 'RIDER', { riderId: rider.id });
+    return { success: true, data };
   });
 
   // =========================================================================

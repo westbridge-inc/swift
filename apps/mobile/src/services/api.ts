@@ -317,11 +317,17 @@ export const riderApi = {
   active: () => api.get('/rider/orders/active'),
   accept: (id: string, fare?: number) => api.post(`/rider/orders/${id}/accept`, { fare }),
   declineOffer: (orderId: string) => api.post('/rider/offers/decline', { orderId }),
-  handover: (id: string) => api.post(`/rider/orders/${id}/handover`),
+  // Golden-rule handover: GPS is mandatory server-side (claims are impossible
+  // without it) — an empty body 400s.
+  handover: (id: string, body: { outcome: 'paid' | 'no_show' | 'refused'; gps: { lat: number; lng: number }; photoUrl?: string }) =>
+    api.post(`/rider/orders/${id}/handover`, body),
   delivered: (id: string) => api.put(`/rider/orders/${id}/delivered`),
   earningsToday: () => api.get('/rider/earnings/today'),
   earningsSummary: () => api.get('/rider/earnings/summary'),
   earnings: () => api.get('/rider/earnings'),
+  // MMG cash ledger — delivery fees stores owe me (customer paid the store)
+  cashSettlements: () => api.get('/rider/cash-settlements'),
+  confirmCashSettlement: (id: string) => api.post(`/rider/cash-settlements/${id}/confirm`, {}),
   history: (params?: { page?: number; limit?: number }) => api.get('/rider/orders', { params }),
   stats: () => api.get('/rider/stats'),
   subscription: () => api.get('/rider/subscription'),
@@ -379,6 +385,9 @@ export const vendorApi = {
   order: (id: string) => api.get(`/vendor/orders/${id}`),
   acceptOrder: (id: string) => api.put(`/vendor/orders/${id}/accept`),
   confirmPayment: (id: string) => api.post(`/vendor/orders/${id}/confirm-payment`, {}),
+  // MMG cash ledger — delivery fees this store owes riders
+  cashSettlements: () => api.get('/vendor/cash-settlements'),
+  confirmCashSettlement: (id: string) => api.post(`/vendor/cash-settlements/${id}/confirm`, {}),
   preparing: (id: string) => api.put(`/vendor/orders/${id}/preparing`),
   ready: (id: string) => api.put(`/vendor/orders/${id}/ready`),
   completePickup: (id: string, code?: string) => api.put(`/vendor/orders/${id}/complete-pickup`, { code }),
