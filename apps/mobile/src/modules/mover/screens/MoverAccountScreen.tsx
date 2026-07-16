@@ -84,7 +84,7 @@ export function MoverAccountScreen({ navigation }: any) {
               {user?.phone ?? ''}
             </T>
             <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.md, marginTop: 6 }}>
-              <TonePill label={isDriver ? 'Driver' : 'Rider'} tone="neutral" />
+              <TonePill label={isDriver ? 'Driver' : 'Rider'} tone="neutral" dark />
               {rating ? (
                 <View style={{ flexDirection: 'row', alignItems: 'center', gap: 3 }}>
                   <Stars value={Number(rating)} size={12} />
@@ -93,7 +93,7 @@ export function MoverAccountScreen({ navigation }: any) {
                   </T>
                 </View>
               ) : null}
-              {verified ? <TonePill label="Verified" tone="success" /> : null}
+              {verified ? <TonePill label="Verified" tone="success" dark /> : null}
             </View>
           </View>
         </DCard>
@@ -154,7 +154,7 @@ export function MoverAccountScreen({ navigation }: any) {
             icon="credit-card"
             label="Weekly fee"
             sub={sub ? `${money(sub.customRate ?? sub.weeklyRate)}/week` : 'Not active yet'}
-            right={<TonePill label={subPill.label} tone={subPill.tone} />}
+            right={<TonePill label={subPill.label} tone={subPill.tone} dark />}
           />
           <DRow icon="refresh-cw" label="Switch app" sub="Swift · Swift Business" onPress={() => setSwitcherOpen(true)} />
         </DCard>
