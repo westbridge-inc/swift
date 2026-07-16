@@ -46,7 +46,8 @@ import { VendorOrderHistoryScreen } from './screens/VendorOrderHistoryScreen';
 import { DocumentChecklist } from '../../components/onboarding/DocumentChecklist';
 import { PricingCard } from '../../components/onboarding/PricingCard';
 import { MmgPayLinkCard } from '../../components/MmgPayLinkCard';
-import { vendorApi } from '../../services/api';
+import { api, API_URL, vendorApi } from '../../services/api';
+import { openPayLink } from '../../lib/payLink';
 import { useWentLive, WentLivePopup } from '../../components/onboarding/WentLive';
 import { docLabel } from '../../components/onboarding/DocumentUploadCard';
 import { useBecomePartner, useVerificationStatus } from '../../hooks/verification';
@@ -1976,6 +1977,14 @@ function RiderFeesOwedCard() {
 
 function VendorInsightsScreen() {
   const q = useVendorAnalytics();
+  // Signed short-lived link (the JWT can't ride an in-app browser).
+  const statement = useMutation({
+    mutationFn: async () => {
+      const r = await api.get('/vendor/sales-statement', { params: { link: 1 } });
+      const path = r.data?.data?.path as string;
+      if (path) await openPayLink(`${API_URL}${path}`);
+    },
+  });
   // Fetch double the window so "vs the previous N days" comes from the same
   // real series (90 is the endpoint's max — no prior window at that depth).
   const [period, setPeriod] = useState<(typeof PERIODS)[number]>(7);
@@ -2086,6 +2095,22 @@ function VendorInsightsScreen() {
               <KpiTile icon="silverware-fork-knife" value={String(a.activeMenuItems ?? 0)} label="Active items" />
               <KpiTile icon="calendar-month" value={String(a.month?.orders ?? 0)} label="Orders / month" />
             </View>
+
+            {/* Printable 30-day sales statement (marketplace §12) — what a
+                store shows their accountant. Opens in the in-app browser. */}
+            <PillButton
+              label="Get sales statement"
+              variant="outline"
+              size="md"
+              style={{ marginTop: space.lg }}
+              loading={statement.isPending}
+              onPress={() => statement.mutate()}
+            />
+            {statement.isError ? (
+              <T variant="caption" tone="error" center style={{ marginTop: space.sm }}>
+                Couldn’t open the statement — try again.
+              </T>
+            ) : null}
           </>
         )}
       </ScrollView>
