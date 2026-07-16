@@ -11,6 +11,7 @@ import { rankCandidates, type DispatchCandidate } from './scoring';
 import { customerTrustSummaries } from '../cash/cash-rules.service';
 import { estimateLoad } from '../../utils/load';
 import { log } from '../../utils/logger';
+import { dispatchSearchesCounter, dispatchTimeToAssign } from '../../plugins/observability';
 
 declare module 'fastify' {
   interface FastifyInstance {
@@ -346,6 +347,7 @@ export class DispatchService {
           radiusKm: radius,
         },
       });
+      dispatchSearchesCounter.inc({ status: 'started' });
     } catch {
       // Journaling never fails dispatch.
     }
@@ -470,13 +472,25 @@ export class DispatchService {
     }
     await this.recordOfferOutcome(moverId, true, pool);
 
-    // Journal (§3): the search resolved — somebody took the job.
-    await this.prisma.dispatchSearch
-      .updateMany({
+    // Journal (§3): the search resolved — somebody took the job. The duration
+    // read rides the same fire-and-caught boat as the journal itself.
+    try {
+      const assignedAt = new Date();
+      const open = await this.prisma.dispatchSearch.findFirst({
         where: { subjectId: orderId, status: 'SEARCHING' },
-        data: { status: 'ASSIGNED', assignedTo: moverId, assignedAt: new Date() },
-      })
-      .catch(() => {});
+        select: { id: true, startedAt: true },
+      });
+      if (open) {
+        await this.prisma.dispatchSearch.update({
+          where: { id: open.id },
+          data: { status: 'ASSIGNED', assignedTo: moverId, assignedAt },
+        });
+        dispatchSearchesCounter.inc({ status: 'assigned' });
+        dispatchTimeToAssign.observe((assignedAt.getTime() - open.startedAt.getTime()) / 1000);
+      }
+    } catch {
+      // Journaling never fails a claim.
+    }
 
     await this.redis.del(offerKey(orderId), declinedKey(orderId), roundKey(orderId), exhaustKey(orderId));
 
@@ -512,6 +526,9 @@ export class DispatchService {
       .updateMany({
         where: { subjectId: order.id, status: 'SEARCHING' },
         data: { status: 'EXHAUSTED', exhaustedAt: new Date() },
+      })
+      .then((r) => {
+        if (r.count > 0) dispatchSearchesCounter.inc({ status: 'exhausted' });
       })
       .catch(() => {});
 
