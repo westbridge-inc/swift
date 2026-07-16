@@ -422,6 +422,12 @@ export function createWorkers(ctx: JobContext) {
           await dispatch.dispatchOrder(job.data.orderId);
         } else if (job.name === 'offer-timeout') {
           await dispatch.handleOfferTimeout(job.data.orderId, job.data.riderId);
+        } else if (job.name === 'supply-watch-scan') {
+          // Availability spec §5: tell waiting customers when supply returns.
+          const { scanSupplyWatches } = await import('../modules/dispatch/supply-watch.service');
+          const { NotificationService } = await import('../modules/notification/notification.service');
+          const n = await scanSupplyWatches(ctx.prisma, dispatch, new NotificationService(ctx.prisma, ctx.io));
+          if (n > 0) ctx.log.info({ notified: n }, 'supply watch: customers told drivers are back');
         }
       } finally {
         await dispatchQueue.close();
@@ -499,6 +505,14 @@ export async function scheduleRecurringJobs(queues: ReturnType<typeof createQueu
     repeat: { pattern: '0 7 1 * *' },
     removeOnComplete: 12,
     removeOnFail: 12,
+  });
+
+  // Supply watcher scan (availability §5): every 2 minutes, cheap no-op when
+  // no watches exist.
+  await queues.dispatchQueue.add('supply-watch-scan', {}, {
+    repeat: { pattern: '*/2 * * * *' },
+    removeOnComplete: 20,
+    removeOnFail: 20,
   });
 
   // Rating anti-manipulation sweep: daily at 04:00

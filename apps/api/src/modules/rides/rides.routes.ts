@@ -65,6 +65,27 @@ export async function ridesRoutes(app: FastifyInstance) {
     return { success: true, data };
   });
 
+  /** POST /availability/watch — "tell me when drivers are back" (spec §5).
+   *  One active watch per customer; the 2-min scan notifies once. */
+  app.post('/availability/watch', auth, async (request) => {
+    const { lat, lng } = z
+      .object({ lat: z.coerce.number().min(-90).max(90), lng: z.coerce.number().min(-180).max(180) })
+      .parse(request.body);
+    // Replace any previous active watch — the newest location wins.
+    await app.prisma.supplyWatch.deleteMany({
+      where: { customerId: request.user.userId, notifiedAt: null },
+    });
+    const watch = await app.prisma.supplyWatch.create({
+      data: {
+        customerId: request.user.userId,
+        pool: 'DRIVER',
+        lat, lng,
+        expiresAt: new Date(Date.now() + 2 * 3600 * 1000),
+      },
+    });
+    return { success: true, data: { id: watch.id, expiresAt: watch.expiresAt } };
+  });
+
   app.post('/estimate', auth, async (request) => {
     const body = estimateSchema.parse(request.body);
     const user = await app.prisma.user.findUniqueOrThrow({

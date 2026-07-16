@@ -335,6 +335,24 @@ model ComplianceReviewCase {
   @@map("compliance_review_cases")
 }
 
+/// Supply watcher (availability spec §5): a customer who hit "no drivers
+/// nearby" asks to be told when supply returns. One active watch per
+/// customer; the scan notifies once and stamps, watches expire in 2h.
+model SupplyWatch {
+  id         String    @id @default(cuid())
+  customerId String
+  pool       String // DRIVER | RIDER
+  lat        Float
+  lng        Float
+  createdAt  DateTime  @default(now())
+  expiresAt  DateTime
+  notifiedAt DateTime?
+
+  @@index([notifiedAt, expiresAt])
+  @@index([customerId])
+  @@map("supply_watches")
+}
+
 /// Alert delivery tracking (alerts spec §A4): every money-critical alert
 /// (vendor new-order, mover offer) writes a row at send and stamps
 /// acknowledgedAt when the recipient ACTS (accept/reject/ack). Ack-rate and
