@@ -59,10 +59,13 @@ export async function ridesRoutes(app: FastifyInstance) {
       .parse(request.query);
     const cacheKey = `avail:DRIVER:${lat.toFixed(2)}:${lng.toFixed(2)}`;
     const cached = await app.redis.get(cacheKey);
-    if (cached) return { success: true, data: JSON.parse(cached) };
+    // gate mirrors DISPATCH_AVAILABILITY: with the flag off, clients read the
+    // truth but change NOTHING — byte-identical UX until the launch decision.
+    const gate = process.env['DISPATCH_AVAILABILITY'] === '1';
+    if (cached) return { success: true, data: { ...JSON.parse(cached), gate } };
     const data = await dispatch.getAvailability('DRIVER', { lat, lng });
     await app.redis.set(cacheKey, JSON.stringify(data), 'EX', 10).catch(() => {});
-    return { success: true, data };
+    return { success: true, data: { ...data, gate } };
   });
 
   /** POST /availability/watch — "tell me when drivers are back" (spec §5).

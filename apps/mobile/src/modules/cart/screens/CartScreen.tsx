@@ -130,13 +130,14 @@ export function CartScreen() {
     return `${day}, ${time}`;
   };
 
-  const onOrder = () => {
+  const onOrder = (extra?: Record<string, unknown>) => {
     placeOrder.mutate(
       {
         paymentMethod: payMethod === 'MMG' ? 'MOBILE_MONEY' : 'CASH',
         ...(express ? { express: true } : {}),
         ...(apptPayload.length ? { appointments: apptPayload } : {}),
         ...(instructions.trim() ? { deliveryInstructions: instructions.trim() } : {}),
+        ...(extra ?? {}),
       },
       {
         onSuccess: (data: any) => {
@@ -159,6 +160,14 @@ export function CartScreen() {
   const orderErr = placeOrder.isError
     ? ((placeOrder.error as any)?.response?.data?.error?.message ?? 'Could not place the order. Try again.')
     : undefined;
+  // Availability spec §2: zero riders online → the server refuses delivery
+  // honestly; pickup is the same food without the wait for a rider.
+  const noRiders = (placeOrder.error as any)?.response?.data?.error?.code === 'DELIVERY_NO_RIDERS';
+  const retryAsPickup = () => {
+    const vendorId = c?.vendor?.id;
+    if (!vendorId) return;
+    onOrder({ fulfillmentSelections: { [vendorId]: 'PICKUP' } });
+  };
 
   return (
     <Screen>
@@ -476,6 +485,16 @@ export function CartScreen() {
                 {orderErr}
               </T>
             </View>
+          ) : null}
+          {noRiders ? (
+            <PillButton
+              label="Order for pickup instead — no delivery fee"
+              variant="outline"
+              size="md"
+              style={{ marginTop: space.md }}
+              loading={placeOrder.isPending}
+              onPress={retryAsPickup}
+            />
           ) : null}
 
           <PillButton

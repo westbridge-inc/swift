@@ -8,7 +8,7 @@ import { Image } from 'expo-image';
 import { Feather, MaterialCommunityIcons } from '@expo/vector-icons';
 import { color, radius, space } from '@swift/ui';
 import { useQueryClient } from '@tanstack/react-query';
-import { useActiveRide, useRideEstimate, useRequestRide, useCancelRide } from '../../../hooks';
+import { useActiveRide, useRideEstimate, useRequestRide, useCancelRide, useRideAvailability, useWatchAvailability } from '../../../hooks';
 import { connectSocket, getSocket, subscribeToOrder } from '../../../services/socket';
 import { RidePostTripSheet } from '../RidePostTripSheet';
 import { useLocationStore } from '../../../stores/locationStore';
@@ -237,6 +237,11 @@ export function TaxiScreen({ navigation }: any) {
 
   const { data: estimate, isFetching: estimating } = useRideEstimate(pickupPoint, dropoffPoint);
 
+  // Availability spec §2.1 (hooks live ABOVE the early returns — the active-ride
+  // and loading branches must never change the hook order).
+  const supply = useRideAvailability(pickupPoint);
+  const watch = useWatchAvailability();
+
   const openSearch = (onSelect: (p: PickedPlace) => void, title: string) =>
     navigation?.navigate?.('DestinationSearch', { onSelect, title });
 
@@ -269,6 +274,15 @@ export function TaxiScreen({ navigation }: any) {
   const errMsg = errBody?.error?.message ?? errBody?.message;
   // L2-before-first-ride (§5): the gate must open a door, never dead-end.
   const needsL2 = (errBody?.error?.code ?? errBody?.code) === 'ID_VERIFICATION_REQUIRED';
+
+  // Availability spec §2.1: NONE → the request button becomes "Notify me";
+  // LOW → a soft note. The UI only reshapes when the server's gate
+  // (DISPATCH_AVAILABILITY) is on — flag off keeps today's screen
+  // byte-identical. A 409 is the server speaking regardless.
+  const gated = supply.data?.gate === true;
+  const supplyNone = (gated && supply.data?.level === 'NONE')
+    || (errBody?.error?.code ?? errBody?.code) === 'NO_DRIVERS_NEARBY';
+  const supplyLow = gated && !supplyNone && supply.data?.level === 'LOW';
 
   const onRequest = () => {
     if (!pickupPoint || !dropoffPoint || !dropoff || !pickup) return;
@@ -379,18 +393,52 @@ export function TaxiScreen({ navigation }: any) {
             />
           ) : null}
 
-          <PillButton
-            label={selectedTier ? `Request ${TIER_META[selectedClass].label} · ${money(selectedTier.fare)}` : 'Request ride'}
-            style={{ marginTop: space.lg }}
-            loading={requestRide.isPending}
-            disabled={!canRequest}
-            onPress={onRequest}
-          />
-          {!canRequest && dropoffPoint ? (
-            <T variant="caption" tone="muted" center style={{ marginTop: space.sm }}>
-              Pick a ride option to continue.
-            </T>
-          ) : null}
+          {supplyNone ? (
+            // §2.1: an empty field gets honesty, not a spinner. Watch swaps in;
+            // "Try anyway" stays — drivers come online mid-search.
+            <>
+              <PillButton
+                label={watch.isSuccess ? "We'll ping you — watching for drivers" : 'Notify me when a driver is available'}
+                style={{ marginTop: space.lg }}
+                loading={watch.isPending}
+                disabled={watch.isSuccess || !pickupPoint}
+                onPress={() => pickupPoint && watch.mutate(pickupPoint)}
+              />
+              <T variant="caption" tone="muted" center style={{ marginTop: space.sm }}>
+                No drivers are available near you right now — we&apos;re sorry.{' '}
+                {watch.isSuccess ? "We'll ping you the moment one comes online." : ''}
+              </T>
+              <T
+                variant="caption"
+                tone="muted"
+                center
+                style={{ marginTop: space.sm, textDecorationLine: 'underline' }}
+                onPress={() => canRequest && !requestRide.isPending && onRequest()}
+              >
+                Try anyway — some drivers come online mid-search
+              </T>
+            </>
+          ) : (
+            <>
+              <PillButton
+                label={selectedTier ? `Request ${TIER_META[selectedClass].label} · ${money(selectedTier.fare)}` : 'Request ride'}
+                style={{ marginTop: space.lg }}
+                loading={requestRide.isPending}
+                disabled={!canRequest}
+                onPress={onRequest}
+              />
+              {supplyLow ? (
+                <T variant="caption" tone="muted" center style={{ marginTop: space.sm }}>
+                  Few drivers nearby — may take a little longer
+                </T>
+              ) : null}
+              {!canRequest && dropoffPoint ? (
+                <T variant="caption" tone="muted" center style={{ marginTop: space.sm }}>
+                  Pick a ride option to continue.
+                </T>
+              ) : null}
+            </>
+          )}
         </BottomSheetScrollView>
       </BottomSheet>
 

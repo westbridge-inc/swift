@@ -205,6 +205,9 @@ export interface TieredEstimate {
 }
 export const rideApi = {
   estimate: (pickup: Point, dropoff: Point) => api.post('/rides/estimate', { pickup, dropoff }),
+  // Availability spec §1/§2.1: buckets only (GOOD/LOW/NONE), never counts.
+  availability: (p: Point) => api.get(`/rides/availability?lat=${p.lat}&lng=${p.lng}`),
+  watchAvailability: (p: Point) => api.post('/rides/availability/watch', p),
   request: (data: {
     pickup: Point;
     dropoff: Point;

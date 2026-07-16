@@ -163,6 +163,8 @@ export const REASON_CODES = [
 
 // ── Live Ops ─────────────────────────────────────────────────────────────────
 export const fetchOpsLive = () => apiFetch('/api/v1/admin/ops/live').then((r) => r.data);
+export const retryDispatch = (orderId: string) =>
+  apiFetch(`/api/v1/admin/orders/${orderId}/retry-dispatch`, { method: 'POST', body: '{}' });
 
 // ── Agent ────────────────────────────────────────────────────────────────────
 export const fetchAgentApprovals = () =>

@@ -1,5 +1,5 @@
-import { useQuery } from '@tanstack/react-query';
-import { fetchOpsLive } from '../lib/api';
+import { useMutation, useQuery } from '@tanstack/react-query';
+import { fetchOpsLive, retryDispatch } from '../lib/api';
 
 // Live Ops (spec §5.3) as the FEED: every in-flight order grouped by lane,
 // oldest (most stuck) first — the server already orders by placedAt asc.
@@ -36,6 +36,7 @@ export default function LiveOps() {
 
   const movers: any[] = q.data?.movers ?? [];
   const orders: any[] = q.data?.activeOrders ?? [];
+  const exhausted: any[] = q.data?.exhaustedSearches ?? [];
   const riders = movers.filter((m) => m.kind === 'rider');
   const drivers = movers.filter((m) => m.kind === 'driver');
   const busy = movers.filter((m) => m.busy).length;
@@ -49,6 +50,21 @@ export default function LiveOps() {
         <span><b className="text-white">{busy}</b> busy</span>
         <span className="ml-auto text-xs text-white/30">10s refresh · map view lives in the admin console</span>
       </div>
+
+      {/* Availability spec §6: exhausted searches float to the TOP in danger —
+          every one is a customer whose search found nobody and nobody acted. */}
+      {exhausted.length > 0 && (
+        <div className="rounded-2xl border border-[var(--swift-red)]/50 bg-[var(--swift-red)]/10 p-4">
+          <p className="text-xs font-bold uppercase tracking-wider text-[var(--swift-red)]">
+            Search exhausted · {exhausted.length}
+          </p>
+          <div className="mt-2 space-y-1.5">
+            {exhausted.map((s) => (
+              <ExhaustedRow key={s.id} search={s} onDone={() => q.refetch()} />
+            ))}
+          </div>
+        </div>
+      )}
 
       {orders.length === 0 && (
         <p className="rounded-2xl border border-dashed border-white/10 p-10 text-center text-sm text-white/40">
@@ -80,6 +96,34 @@ export default function LiveOps() {
           );
         })}
       </div>
+    </div>
+  );
+}
+
+/** One exhausted search: what was tried, and the one-tap re-run (§6).
+ *  No optimism — the row renders the server's answer or its error. */
+function ExhaustedRow({ search, onDone }: { search: any; onDone: () => void }) {
+  const rerun = useMutation({ mutationFn: () => retryDispatch(search.orderId), onSuccess: onDone });
+  return (
+    <div className="flex items-center justify-between gap-3 rounded-lg bg-black/30 px-3 py-2">
+      <div>
+        <p className="text-sm font-semibold">
+          #{search.orderNumber ?? search.orderId}
+          <span className="ml-2 text-[11px] text-white/40">{search.vertical}</span>
+        </p>
+        <p className="mt-0.5 text-xs text-white/50">
+          {search.waves} wave{search.waves === 1 ? '' : 's'} · {search.candidatesTried} candidate
+          {search.candidatesTried === 1 ? '' : 's'} tried · {search.vendorName ?? 'no vendor'}
+        </p>
+        {rerun.isError && <p className="mt-0.5 text-xs text-[var(--swift-red)]">{(rerun.error as Error).message}</p>}
+      </div>
+      <button
+        onClick={() => rerun.mutate()}
+        disabled={rerun.isPending}
+        className="rounded-lg bg-[var(--swift-red)] px-3 py-1.5 text-xs font-semibold disabled:opacity-40"
+      >
+        {rerun.isPending ? 'Re-running…' : 'Re-run search'}
+      </button>
     </div>
   );
 }
