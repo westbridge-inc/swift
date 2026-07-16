@@ -200,3 +200,12 @@ export const fetchVendors = (params: { search?: string; status?: string; page?: 
   return apiFetch(`/api/v1/admin/vendors?${q}`).then((r) => ({ rows: r.data as any[], meta: r.meta }));
 };
 export const fetchPaymentMix = () => apiFetch('/api/v1/admin/finance/payment-mix').then((r) => r.data);
+
+// ── Health ───────────────────────────────────────────────────────────────────
+export const fetchHealth = () =>
+  fetch(`${API_ORIGIN}/health`).then(async (r) => ({ httpOk: r.ok, ...(await r.json()) }));
+export const fetchDlq = () => apiFetch('/api/v1/admin/dlq').then((r) => r.data);
+export const requeueDlqJob = (queue: string, id: string) =>
+  apiFetch(`/api/v1/admin/dlq/${queue}/${id}/requeue`, { method: 'POST', body: '{}' });
+export const discardDlqJob = (queue: string, id: string) =>
+  apiFetch(`/api/v1/admin/dlq/${queue}/${id}`, { method: 'DELETE' });
