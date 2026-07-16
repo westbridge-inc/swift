@@ -96,6 +96,7 @@ import { useAuthStore } from '../../stores/authStore';
 import { track } from '../../lib/analytics';
 import { useLocationStore } from '../../stores/locationStore';
 import { useStoreSwitcher } from '../../stores/storeSwitcher';
+import { useVendorPreview } from '../../stores/vendorPreview';
 import { RoleSwitcherSheet } from '../../components/RoleSwitcherSheet';
 import { money } from '../../lib/money';
 import { mediaUrl } from '../../lib/images';
@@ -272,7 +273,7 @@ function BusinessSetup() {
   );
 }
 
-function VendorOnboarding({ store }: { store: any }) {
+function VendorOnboarding({ store, onPreview }: { store: any; onPreview: () => void }) {
   // Poll while onboarding so an approval reflects within seconds.
   const { data: status, isLoading, isError, refetch } = useVerificationStatus<any>(store.vendorType, undefined, { poll: true });
   return (
@@ -281,6 +282,12 @@ function VendorOnboarding({ store }: { store: any }) {
       <ScrollView contentContainerStyle={{ paddingHorizontal: GUTTER, paddingBottom: space['3xl'] }} showsVerticalScrollIndicator={false}>
         <PricingCard kind="vendor" />
         <DocumentChecklist role={store.vendorType} status={status} isLoading={isLoading} isError={isError} onRetry={refetch} />
+        {/* Gated-trials spec §B: waiting shouldn't mean staring at a checklist.
+            The dashboard is browsable in preview; selling stays locked. */}
+        <PillButton label="Preview your dashboard" variant="soft" style={{ marginTop: space.lg }} onPress={onPreview} />
+        <T variant="caption" tone="muted" center style={{ marginTop: space.sm }}>
+          Look around while you wait — selling unlocks the moment you&apos;re approved.
+        </T>
       </ScrollView>
     </Screen>
   );
@@ -457,6 +464,9 @@ function VendorOps({ store, navigation }: any) {
   const ordersQ = useVendorOrders(true);
   const analyticsQ = useVendorAnalytics();
   const { stores, myRole } = useVendorProfile();
+  // §B preview: the board renders for a not-yet-ACTIVE store only via preview.
+  const inPreview = store.status !== 'ACTIVE';
+  const exitPreview = useVendorPreview((s) => s.exitPreview);
   // Only fetched to NAME the failing document in the suspension banner.
   const vstatus = useVerificationStatus<any>(store.vendorType);
   const failingDocs: string[] = store.isVerified === false
@@ -505,8 +515,25 @@ function VendorOps({ store, navigation }: any) {
           </ScrollView>
         ) : null}
 
-        {/* Verification suspension — commerce is off until documents are renewed */}
-        {store.isVerified === false ? (
+        {/* Gated-trials spec §B: a pending store browses in PREVIEW — encouraging
+            copy, not the suspension scare. Tap returns to the checklist. */}
+        {inPreview ? (
+          <Pressable onPress={exitPreview}>
+            {({ pressed }) => (
+              <View style={{ flexDirection: 'row', alignItems: 'flex-start', gap: space.sm, borderRadius: radius.lg, backgroundColor: color.brand[50], padding: space.md, marginBottom: space.lg, opacity: pressed ? 0.85 : 1 }}>
+                <Feather name="eye" size={15} color={color.brand[500]} style={{ marginTop: 1 }} />
+                <T variant="label" tone="brand" style={{ flex: 1 }}>
+                  Preview — this is your dashboard-to-be. Selling unlocks the moment your documents are approved. Tap to track your verification.
+                </T>
+              </View>
+            )}
+          </Pressable>
+        ) : null}
+
+        {/* Verification suspension — commerce is off until documents are renewed.
+            Only a store that has BEEN live can be suspended; pending stores get
+            the preview banner above instead. */}
+        {!inPreview && store.isVerified === false ? (
           <Pressable onPress={() => navigation?.navigate?.('Account')}>
             {({ pressed }) => (
               <View style={{ flexDirection: 'row', alignItems: 'flex-start', gap: space.sm, borderRadius: radius.lg, backgroundColor: '#FDECEC', padding: space.md, marginBottom: space.lg, opacity: pressed ? 0.85 : 1 }}>
@@ -537,30 +564,35 @@ function VendorOps({ store, navigation }: any) {
           </View>
         </Card>
 
-        {/* Store status */}
+        {/* Store status. In §B preview the controls are honestly locked — the
+            server refuses commerce-on for an unverified business anyway. */}
         <Card style={{ marginBottom: space.lg }}>
           <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
             <View style={{ flex: 1, paddingRight: space.md }}>
               <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.sm }}>
-                <View style={{ width: 10, height: 10, borderRadius: 5, backgroundColor: open && accepting ? color.success : color.text.muted }} />
+                <View style={{ width: 10, height: 10, borderRadius: 5, backgroundColor: !inPreview && open && accepting ? color.success : color.text.muted }} />
                 <T variant="body" weight="bold">
-                  {!open ? 'Store closed' : accepting ? 'Open for orders' : 'Orders paused'}
+                  {inPreview ? 'Not open yet' : !open ? 'Store closed' : accepting ? 'Open for orders' : 'Orders paused'}
                 </T>
               </View>
               <T variant="caption" tone="muted" style={{ marginTop: 4 }}>
-                {!open ? 'Outside business hours' : accepting ? 'Accepting new orders' : 'You’re open but not taking new orders'}
+                {inPreview
+                  ? 'Your store opens for orders once verification is approved.'
+                  : !open ? 'Outside business hours' : accepting ? 'Accepting new orders' : 'You’re open but not taking new orders'}
               </T>
             </View>
-            <BrandSwitch value={open} onChange={() => (toggleOpen.isPending ? undefined : toggleOpen.mutate())} />
+            <BrandSwitch value={!inPreview && open} disabled={inPreview} onChange={() => (inPreview || toggleOpen.isPending ? undefined : toggleOpen.mutate())} />
           </View>
-          <PillButton
-            label={accepting ? 'Pause new orders' : 'Resume orders'}
-            variant="soft"
-            size="md"
-            style={{ marginTop: space.md }}
-            loading={toggleOrders.isPending}
-            onPress={() => toggleOrders.mutate()}
-          />
+          {!inPreview ? (
+            <PillButton
+              label={accepting ? 'Pause new orders' : 'Resume orders'}
+              variant="soft"
+              size="md"
+              style={{ marginTop: space.md }}
+              loading={toggleOrders.isPending}
+              onPress={() => toggleOrders.mutate()}
+            />
+          ) : null}
           {toggleOrders.isError ? (
             <T variant="caption" tone="error" style={{ marginTop: space.sm }}>
               {(toggleOrders.error as any)?.response?.data?.error?.message ?? 'Couldn’t update — try again.'}
@@ -653,6 +685,12 @@ function VendorRoot() {
   const { store, stores, isLoading } = useVendorProfile();
   const selectedStoreId = useStoreSwitcher((s) => s.selectedStoreId);
   const setSelectedStore = useStoreSwitcher((s) => s.setSelectedStore);
+  const { preview, enterPreview, exitPreview } = useVendorPreview();
+  // Preview is a per-store choice: switching stores lands on that store's
+  // real state (checklist for pending, board for live) — never a stale peek.
+  useEffect(() => {
+    exitPreview();
+  }, [store?.id, exitPreview]);
   // Live order feed for the selected store, on every tab — new orders land
   // instantly (socket) with the 12s poll as fallback.
   const { takeover, dismissTakeover } = useVendorOrdersLive(store && store.status === 'ACTIVE' ? store.id : undefined);
@@ -682,7 +720,11 @@ function VendorRoot() {
   if (!store) return <BusinessSetup />;
   return (
     <>
-      {store.status !== 'ACTIVE' ? <VendorOnboarding store={store} /> : <VendorTabs />}
+      {store.status !== 'ACTIVE' && !preview ? (
+        <VendorOnboarding store={store} onPreview={enterPreview} />
+      ) : (
+        <VendorTabs />
+      )}
       <WentLivePopup visible={live.celebrate} onClose={live.dismiss} kind="vendor" />
       {/* Alerts spec §A1: the NEW-ORDER takeover sits above every tab. */}
       {takeover.length > 0 ? <NewOrderTakeover queue={takeover} onDismiss={dismissTakeover} /> : null}
