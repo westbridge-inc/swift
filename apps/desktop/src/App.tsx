@@ -7,6 +7,8 @@ import ReviewCenter from './modules/ReviewCenter';
 import LiveOps from './modules/LiveOps';
 import AgentDesk from './modules/AgentDesk';
 import Compliance from './modules/Compliance';
+import People from './modules/People';
+import Vendors from './modules/Vendors';
 
 // ─── Login ───────────────────────────────────────────────────────────────────
 
@@ -207,7 +209,7 @@ export default function App() {
   const [ready, setReady] = useState(false);
   const [authed, setAuthed] = useState(false);
   const [cmdk, setCmdk] = useState(false);
-  const [module, setModule] = useState<'today' | 'review' | 'ops' | 'agent' | 'compliance'>('today');
+  const [module, setModule] = useState<'today' | 'review' | 'ops' | 'people' | 'vendors' | 'agent' | 'compliance'>('today');
 
   useEffect(() => {
     loadSession().then((ok) => { setAuthed(ok); setReady(true); });
@@ -239,7 +241,7 @@ export default function App() {
           <span className="text-[var(--swift-red)]">Swift</span> MC
         </p>
         <nav className="mt-5 flex-1 space-y-0.5">
-          {([['today', 'Today'], ['review', 'Review'], ['ops', 'Live Ops'], ['agent', 'Agent'], ['compliance', 'Compliance']] as const).map(([key, label]) => (
+          {([['today', 'Today'], ['review', 'Review'], ['ops', 'Live Ops'], ['people', 'People'], ['vendors', 'Vendors'], ['agent', 'Agent'], ['compliance', 'Compliance']] as const).map(([key, label]) => (
             <button
               key={key}
               onClick={() => setModule(key)}
@@ -262,13 +264,15 @@ export default function App() {
       </aside>
       <main className="min-w-0 flex-1 p-8">
         <h1 className="mb-5 text-2xl font-extrabold">
-          {{ today: 'Today', review: 'Review Center', ops: 'Live Ops', agent: 'Agent approvals', compliance: 'Compliance' }[module]}
+          {{ today: 'Today', review: 'Review Center', ops: 'Live Ops', people: 'People', vendors: 'Vendors & Billing', agent: 'Agent approvals', compliance: 'Compliance' }[module]}
         </h1>
         {module === 'today' && <Today />}
         {module === 'review' && <ReviewCenter />}
         {module === 'ops' && <LiveOps />}
         {module === 'agent' && <AgentDesk />}
         {module === 'compliance' && <Compliance />}
+        {module === 'people' && <People />}
+        {module === 'vendors' && <Vendors />}
       </main>
       <CommandPalette open={cmdk} onClose={() => setCmdk(false)} />
     </div>
