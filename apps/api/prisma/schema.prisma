@@ -34,6 +34,10 @@ model User {
 
   /// ISO-3166 alpha-2; picked at signup from active CountryConfigs.
   countryCode String @default("GY")
+  /// SaaS tenant (operator instance). DB-defaulted to the single current tenant
+  /// so every existing + new row is assigned with no app change (stage 1).
+  tenantId    String   @default("swift-default")
+  tenant      Tenant   @relation(fields: [tenantId], references: [id])
 
   /// Email+password login lands later; phone OTP remains primary.
   passwordHash        String?
@@ -171,6 +175,31 @@ model Address {
 /// Wraps everything country-specific: currency, ID-gate threshold,
 /// subscription tiers, required-document checklists. Adding a country
 /// must be config, not code.
+/// A marketplace operator instance (the SaaS tenant). Today there is exactly
+/// one — Westbridge's Swift, operating across the Caribbean markets. A future
+/// white-label licensee running their own Swift is a separate tenant, fully
+/// isolated. `countryCode`/CountryConfig are the MARKET dimension WITHIN a
+/// tenant, not the tenant boundary. Multi-tenancy foundation (stage 1): every
+/// tenant-owned root carries `tenantId`; enforcement (RLS) lands in stage 2.
+model Tenant {
+  id        String   @id @default(cuid())
+  /// Human name ("Swift").
+  name      String
+  /// URL/route-safe key, unique across operators.
+  slug      String   @unique
+  isActive  Boolean  @default(true)
+  /// Per-tenant branding/config/billing (JSON until it needs columns).
+  config    Json?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  users   User[]
+  vendors Vendor[]
+  orders  Order[]
+
+  @@map("tenants")
+}
+
 model CountryConfig {
   id             String  @id @default(cuid())
   /// ISO-3166 alpha-2 ("GY")
@@ -675,6 +704,8 @@ model VendorStaff {
 
 model Vendor {
   id               String          @id @default(cuid())
+  tenantId         String          @default("swift-default")
+  tenant           Tenant          @relation(fields: [tenantId], references: [id])
   ownerId          String
   owner            VendorOwner     @relation(fields: [ownerId], references: [id], onDelete: Cascade)
   name             String
@@ -912,6 +943,8 @@ model Option {
 
 model Order {
   id          String      @id @default(cuid())
+  tenantId    String      @default("swift-default")
+  tenant      Tenant      @relation(fields: [tenantId], references: [id])
   orderNumber String      @unique
   orderType   OrderType
   customerId  String
