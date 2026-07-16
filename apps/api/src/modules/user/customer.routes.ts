@@ -1601,6 +1601,27 @@ export async function customerRoutes(app: FastifyInstance) {
     return { success: true, ...paginatedResponse(enrichedOrders, total, { page, limit, skip }) };
   });
 
+  /** GET /orders/:id/receipt — print-ready HTML receipt (marketplace §12).
+   *  Derived from the order row on demand: always exactly what the ledger says. */
+  app.get('/orders/:id/receipt', async (request: AuthRequest, reply) => {
+    const { id } = request.params as { id: string };
+    const order = await app.prisma.order.findFirst({
+      where: { id, customerId: request.user.userId },
+      include: {
+        vendor: { select: { name: true, addressLine1: true, city: true, phone: true } },
+        customer: { select: { firstName: true, lastName: true } },
+        items: { select: { name: true, quantity: true, totalCustomer: true } },
+      },
+    });
+    if (!order) throw new NotFoundError('Order', id);
+    if (!['DELIVERED', 'COMPLETED'].includes(order.status)) {
+      throw new AppError(400, 'ORDER_NOT_COMPLETE', 'Receipts are issued once the order completes.');
+    }
+    const { renderReceiptHtml } = await import('../order/receipt');
+    reply.type('text/html; charset=utf-8');
+    return renderReceiptHtml(order as never);
+  });
+
   app.get('/orders/:id', async (request: AuthRequest) => {
     const { id } = request.params as { id: string };
     const { userId } = request.user;
