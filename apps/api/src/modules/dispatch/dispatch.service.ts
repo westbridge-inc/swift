@@ -261,6 +261,12 @@ export class DispatchService {
       estLoad: order.items.length > 0 ? estimateLoad(totalUnits) : null,
     });
 
+    // Alert-delivery tracking (§A4): every offer gets a row; the mover's
+    // accept/decline stamps acknowledgedAt. Fire-and-caught.
+    await this.prisma.alertDelivery
+      .create({ data: { kind: 'MOVER_OFFER', subjectId: orderId, recipientId: top.userId } })
+      .catch(() => {});
+
     // Loud alerts (alerts spec §A2/§A3, flag-gated): the socket only reaches a
     // FOREGROUNDED app — a mover with the phone in their pocket would sleep
     // through a 30s offer. notifications.send fans out to Expo push (and the
@@ -308,6 +314,8 @@ export class DispatchService {
 
   /** Explicit decline from the mover app. */
   async declineOffer(orderId: string, moverUserId: string): Promise<void> {
+    const { acknowledgeAlert } = await import('../notification/notification.service');
+    await acknowledgeAlert(this.prisma, 'MOVER_OFFER', orderId, moverUserId).catch(() => {});
     const pool = await this.poolOf(orderId);
     const mover = await this.requireMover(moverUserId, pool);
     const current = await this.redis.get(offerKey(orderId));
@@ -344,6 +352,8 @@ export class DispatchService {
    * every rider in town calls this at once, exactly one wins.
    */
   async acceptOffer(orderId: string, moverUserId: string) {
+    const { acknowledgeAlert } = await import('../notification/notification.service');
+    await acknowledgeAlert(this.prisma, 'MOVER_OFFER', orderId, moverUserId).catch(() => {});
     const pool = await this.poolOf(orderId);
     const mover = await this.requireMover(moverUserId, pool);
 
