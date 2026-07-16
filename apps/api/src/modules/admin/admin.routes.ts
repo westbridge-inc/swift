@@ -2020,4 +2020,65 @@ export async function adminRoutes(app: FastifyInstance) {
     await audit(request.user.userId, 'RESOLVE_COMPLIANCE_VIOLATION', 'ComplianceViolation', id, { userId: resolved.userId }, request);
     return { success: true, data: resolved };
   });
+
+  // =========================================================================
+  // DLQ — dead-lettered background jobs (mission-control spec §5.7). A failed
+  // job that exhausted its retries is invisible until someone looks; this is
+  // where someone looks. Requeue and discard are audited.
+  // =========================================================================
+  const requireQueues = () => {
+    if (!app.queues) throw new AppError(503, 'QUEUES_OFFLINE', 'Background queues are not running on this server.');
+    return app.queues as unknown as Record<string, import('bullmq').Queue>;
+  };
+  const dlqQueue = (name: string) => {
+    const q = requireQueues()[`${name}Queue`];
+    if (!q) throw new NotFoundError('Queue', name);
+    return q;
+  };
+  const DLQ_NAMES = ['order', 'riderAssignment', 'subscription', 'settlement', 'notification', 'verification', 'dispatch'] as const;
+
+  /** GET /dlq — failed jobs across every queue, newest first. */
+  app.get('/dlq', { preHandler: [adminGuard] }, async () => {
+    const queues = requireQueues();
+    const out: Array<Record<string, unknown>> = [];
+    for (const name of DLQ_NAMES) {
+      const q = queues[`${name}Queue`];
+      if (!q) continue;
+      const failed = await q.getFailed(0, 49);
+      for (const j of failed) {
+        out.push({
+          queue: name,
+          id: j.id,
+          name: j.name,
+          failedReason: j.failedReason ?? null,
+          attemptsMade: j.attemptsMade,
+          // Payload preview only — enough to triage, never a full dump.
+          data: JSON.stringify(j.data ?? {}).slice(0, 500),
+          finishedOn: j.finishedOn ?? null,
+        });
+      }
+    }
+    out.sort((a, b) => Number(b['finishedOn'] ?? 0) - Number(a['finishedOn'] ?? 0));
+    return { success: true, data: out.slice(0, 200) };
+  });
+
+  /** POST /dlq/:queue/:id/requeue — retry a dead job. */
+  app.post('/dlq/:queue/:id/requeue', { preHandler: [adminGuard] }, async (request) => {
+    const { queue, id } = request.params as { queue: string; id: string };
+    const job = await dlqQueue(queue).getJob(id);
+    if (!job) throw new NotFoundError('Job', id);
+    await job.retry();
+    await audit(request.user.userId, 'REQUEUE_DLQ_JOB', 'Job', `${queue}:${id}`, { jobName: job.name }, request);
+    return { success: true, data: { queue, id, retried: true } };
+  });
+
+  /** DELETE /dlq/:queue/:id — discard a dead job for good. */
+  app.delete('/dlq/:queue/:id', { preHandler: [adminGuard] }, async (request) => {
+    const { queue, id } = request.params as { queue: string; id: string };
+    const job = await dlqQueue(queue).getJob(id);
+    if (!job) throw new NotFoundError('Job', id);
+    await job.remove();
+    await audit(request.user.userId, 'DISCARD_DLQ_JOB', 'Job', `${queue}:${id}`, { jobName: job.name, failedReason: job.failedReason ?? null }, request);
+    return { success: true, data: { queue, id, discarded: true } };
+  });
 }
