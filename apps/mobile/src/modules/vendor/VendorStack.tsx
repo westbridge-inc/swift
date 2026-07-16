@@ -100,6 +100,7 @@ import { RoleSwitcherSheet } from '../../components/RoleSwitcherSheet';
 import { money } from '../../lib/money';
 import { mediaUrl } from '../../lib/images';
 import { VendorBulkImportScreen } from '../../screens/vendor/VendorBulkImportScreen';
+import { NewOrderTakeover } from './NewOrderTakeover';
 
 const Stack = createNativeStackNavigator();
 
@@ -654,7 +655,7 @@ function VendorRoot() {
   const setSelectedStore = useStoreSwitcher((s) => s.setSelectedStore);
   // Live order feed for the selected store, on every tab — new orders land
   // instantly (socket) with the 12s poll as fallback.
-  useVendorOrdersLive(store && store.status === 'ACTIVE' ? store.id : undefined);
+  const { takeover, dismissTakeover } = useVendorOrdersLive(store && store.status === 'ACTIVE' ? store.id : undefined);
   // The approval moment gets its moment (observed PENDING → ACTIVE flip only).
   const live = useWentLive(store ? store.status === 'ACTIVE' : undefined);
 
@@ -683,6 +684,8 @@ function VendorRoot() {
     <>
       {store.status !== 'ACTIVE' ? <VendorOnboarding store={store} /> : <VendorTabs />}
       <WentLivePopup visible={live.celebrate} onClose={live.dismiss} kind="vendor" />
+      {/* Alerts spec §A1: the NEW-ORDER takeover sits above every tab. */}
+      {takeover.length > 0 ? <NewOrderTakeover queue={takeover} onDismiss={dismissTakeover} /> : null}
     </>
   );
 }
