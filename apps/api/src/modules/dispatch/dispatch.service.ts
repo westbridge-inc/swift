@@ -51,6 +51,13 @@ function poolForOrder(order: { orderType: string }): DispatchPool {
   return order.orderType === 'TAXI' ? 'DRIVER' : 'RIDER';
 }
 
+/** Journal vertical (availability spec §3): TAXI | COURIER | DELIVERY. */
+function verticalForOrder(order: { orderType: string }): string {
+  if (order.orderType === 'TAXI') return 'TAXI';
+  if (String(order.orderType).startsWith('COURIER')) return 'COURIER';
+  return 'DELIVERY';
+}
+
 const offerKey = (orderId: string) => `dispatch:offer:${orderId}`;
 const declinedKey = (orderId: string) => `dispatch:declined:${orderId}`;
 const roundKey = (orderId: string) => `dispatch:round:${orderId}`;
@@ -221,6 +228,9 @@ export class DispatchService {
 
     const round = Number((await this.redis.get(roundKey(orderId))) ?? 0);
     const radius = BASE_RADIUS_KM + round * RADIUS_STEP_KM;
+    // Search journal (§3): open/refresh the record BESIDE the state machine —
+    // fire-and-caught, never load-bearing for the cascade itself.
+    await this.journalOpenSearch(order, round, radius);
     // D.3 — a rider must have enough free float to front this order's vendor-cash (CASH deliveries only).
     const floatRequired = pool === 'RIDER' && order.paymentMethod === 'CASH' ? Number(order.subtotalBase) : 0;
     const candidates = await this.findCandidates(orderId, { lat: order.pickupLat, lng: order.pickupLng }, radius, pool, floatRequired, order.rideClass);
@@ -267,6 +277,15 @@ export class DispatchService {
       .create({ data: { kind: 'MOVER_OFFER', subjectId: orderId, recipientId: top.userId } })
       .catch(() => {});
 
+    // Journal (§3): who this wave actually tried — cooldown + "everyone
+    // declined" proof for Live Ops.
+    await this.prisma.dispatchSearch
+      .updateMany({
+        where: { subjectId: orderId, status: 'SEARCHING' },
+        data: { candidatesTried: { push: top.riderId } },
+      })
+      .catch(() => {});
+
     // Loud alerts (alerts spec §A2/§A3, flag-gated): the socket only reaches a
     // FOREGROUNDED app — a mover with the phone in their pocket would sleep
     // through a 30s offer. notifications.send fans out to Expo push (and the
@@ -296,6 +315,40 @@ export class DispatchService {
     log().info({ orderId, orderNumber: order.orderNumber, moverId: top.riderId, pool, round, etaMinutes: Math.round(top.etaMinutes), candidates: candidates.length }, 'dispatch: offer sent');
     await this.scheduleTimeout(orderId, top.riderId, timeoutSeconds * 1000);
     return { offered: top.riderId };
+  }
+
+  /** §3 journal upkeep: keep ONE open SEARCHING row per subject current
+   *  (wave/radius), resolving a prior EXHAUSTED row as RETRIED when a fresh
+   *  search begins. Never throws — the journal is beside the machine. */
+  private async journalOpenSearch(order: { id: string; orderType: string }, round: number, radius: number) {
+    try {
+      const open = await this.prisma.dispatchSearch.findFirst({
+        where: { subjectId: order.id, status: 'SEARCHING' },
+        select: { id: true },
+      });
+      if (open) {
+        await this.prisma.dispatchSearch.update({
+          where: { id: open.id },
+          data: { wave: round + 1, radiusKm: radius },
+        });
+        return;
+      }
+      await this.prisma.dispatchSearch.updateMany({
+        where: { subjectId: order.id, status: 'EXHAUSTED', resolution: null },
+        data: { resolution: 'RETRIED' },
+      });
+      await this.prisma.dispatchSearch.create({
+        data: {
+          vertical: verticalForOrder(order),
+          subjectId: order.id,
+          status: 'SEARCHING',
+          wave: round + 1,
+          radiusKm: radius,
+        },
+      });
+    } catch {
+      // Journaling never fails dispatch.
+    }
   }
 
   /** Timeout: the offer lapsed unanswered — penalise softly and move on. */
@@ -417,6 +470,14 @@ export class DispatchService {
     }
     await this.recordOfferOutcome(moverId, true, pool);
 
+    // Journal (§3): the search resolved — somebody took the job.
+    await this.prisma.dispatchSearch
+      .updateMany({
+        where: { subjectId: orderId, status: 'SEARCHING' },
+        data: { status: 'ASSIGNED', assignedTo: moverId, assignedAt: new Date() },
+      })
+      .catch(() => {});
+
     await this.redis.del(offerKey(orderId), declinedKey(orderId), roundKey(orderId), exhaustKey(orderId));
 
     const assignedEvent = { orderId, status: assignedStatus, timestamp: new Date().toISOString() };
@@ -444,6 +505,15 @@ export class DispatchService {
     vendor: { name: string; owner: { userId: string } } | null;
   }) {
     await this.redis.del(offerKey(order.id), roundKey(order.id));
+
+    // Journal (§3): the honest outcome. A later retry opens a FRESH record
+    // and stamps this one RETRIED (journalOpenSearch).
+    await this.prisma.dispatchSearch
+      .updateMany({
+        where: { subjectId: order.id, status: 'SEARCHING' },
+        data: { status: 'EXHAUSTED', exhaustedAt: new Date() },
+      })
+      .catch(() => {});
 
     // One automatic re-sweep before giving up: movers toggle online by the
     // minute, and a mover who declined two minutes ago may take the re-offer.

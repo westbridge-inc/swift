@@ -123,15 +123,17 @@ export async function ridesRoutes(app: FastifyInstance) {
     }
 
     // Hard pre-check (availability spec §2.1, flag-gated): when the same query
-    // dispatch would ping with finds NOBODY, say so before taking the request —
-    // a search that cannot succeed is a promise the platform can't keep.
-    if (process.env['DISPATCH_AVAILABILITY'] === '1') {
+    // dispatch would ping finds NOBODY, say so before taking the request. The
+    // client shows Notify-me; "Try anyway" stays honored unless the market
+    // config forbids it (TAXI_ALLOW_REQUEST_ON_NONE, spec default TRUE — some
+    // drivers come online mid-search).
+    if (process.env['DISPATCH_AVAILABILITY'] === '1' && process.env['TAXI_ALLOW_REQUEST_ON_NONE'] === '0') {
       const supply = await dispatch.getAvailability('DRIVER', body.pickup);
       if (supply.level === 'NONE') {
         throw new AppError(
           409,
           'NO_DRIVERS_NEARBY',
-          'No drivers are nearby right now. Try again in a few minutes.',
+          "No drivers are available near you right now — we're sorry. We'll ping you the moment one comes online.",
         );
       }
     }

@@ -397,7 +397,15 @@ function enrichVendor<T extends { latitude: number; longitude: number; estimated
 
 export async function customerRoutes(app: FastifyInstance) {
   // Service singletons
-  const orderService = new OrderService(app.prisma, app.io);
+  const { makeDispatchService } = await import('../dispatch/dispatch.service');
+  const dispatchForAvailability = makeDispatchService(app);
+  const orderService = new OrderService(
+    app.prisma,
+    app.io,
+    undefined,
+    // §2 checkout gate reads the SAME supply dispatch would search.
+    (point) => dispatchForAvailability.getAvailability('RIDER', point),
+  );
   const picking = new PickingService(app.prisma, app.io);
   const ratingService = new RatingService(app.prisma);
   const notificationService = new NotificationService(app.prisma, app.io);
@@ -1829,6 +1837,14 @@ export async function customerRoutes(app: FastifyInstance) {
         note: `Customer switched to pickup (no rider found) — delivery fee $${fee.toLocaleString()} and tip $${tip.toLocaleString()} removed`,
       },
     });
+
+    // Search journal (§3): the search is over — the customer solved it.
+    await app.prisma.dispatchSearch
+      .updateMany({
+        where: { subjectId: order.id, status: { in: ['SEARCHING', 'EXHAUSTED'] } },
+        data: { status: 'CANCELLED', resolution: 'SWITCHED_PICKUP' },
+      })
+      .catch(() => {});
 
     // Both sides hear it now.
     app.io.to(`order:${order.id}`).emit('order:status_changed', {

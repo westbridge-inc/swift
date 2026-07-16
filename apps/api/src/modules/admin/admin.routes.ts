@@ -994,7 +994,7 @@ export async function adminRoutes(app: FastifyInstance) {
       'DRIVER_ASSIGNED', 'DRIVER_EN_ROUTE', 'DRIVER_ARRIVED', 'RIDE_IN_PROGRESS',
     ] as const;
 
-    const [riders, drivers, orders] = await Promise.all([
+    const [riders, drivers, orders, exhausted] = await Promise.all([
       app.prisma.rider.findMany({
         where: { isOnline: true, currentLat: { not: null } },
         select: {
@@ -1021,7 +1021,21 @@ export async function adminRoutes(app: FastifyInstance) {
         orderBy: { placedAt: 'asc' },
         take: 300,
       }),
+      // Availability spec §6: exhausted searches float to the top in danger —
+      // unresolved means no retry took over, nobody switched, nobody cancelled.
+      app.prisma.dispatchSearch.findMany({
+        where: { status: 'EXHAUSTED', resolution: null, startedAt: { gte: new Date(Date.now() - 24 * 3600_000) } },
+        orderBy: { exhaustedAt: 'asc' },
+        take: 50,
+      }),
     ]);
+    const exhaustedOrders = exhausted.length
+      ? await app.prisma.order.findMany({
+          where: { id: { in: exhausted.map((s) => s.subjectId) } },
+          select: { id: true, orderNumber: true, status: true, orderType: true, vendor: { select: { name: true } } },
+        })
+      : [];
+    const orderById = new Map(exhaustedOrders.map((o) => [o.id, o]));
 
     const mover = (m: any, kind: 'rider' | 'driver') => ({
       id: m.id,
@@ -1048,8 +1062,35 @@ export async function adminRoutes(app: FastifyInstance) {
           deliveryLng: o.deliveryLng,
           vendorName: o.vendor?.name ?? null,
         })),
+        exhaustedSearches: exhausted.map((s) => {
+          const o = orderById.get(s.subjectId);
+          return {
+            id: s.id,
+            orderId: s.subjectId,
+            orderNumber: o?.orderNumber ?? null,
+            orderStatus: o?.status ?? null,
+            vendorName: o?.vendor?.name ?? null,
+            vertical: s.vertical,
+            waves: s.wave,
+            candidatesTried: s.candidatesTried.length,
+            exhaustedAt: s.exhaustedAt,
+          };
+        }),
       },
     };
+  });
+
+  /** POST /orders/:id/retry-dispatch — availability spec §6: one-tap re-run
+   *  for an exhausted search from Live Ops. Same engine as the vendor button;
+   *  audited because an admin is acting on someone else's order. */
+  app.post('/orders/:id/retry-dispatch', { preHandler: [adminGuard] }, async (request) => {
+    const { id } = request.params as { id: string };
+    const order = await app.prisma.order.findUnique({ where: { id }, select: { id: true, orderNumber: true } });
+    if (!order) throw new NotFoundError('Order', id);
+    const { makeDispatchService } = await import('../dispatch/dispatch.service');
+    const result = await makeDispatchService(app).retryDispatch(id);
+    await audit(request.user.userId, 'RETRY_DISPATCH', 'Order', id, { result }, request);
+    return { success: true, data: result };
   });
 
   /** The 13 Caribbean markets — CountryConfig read-only (editing arrives with
