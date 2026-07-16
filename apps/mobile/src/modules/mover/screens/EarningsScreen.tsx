@@ -1,34 +1,29 @@
 /** @jsxImportSource react */
 import React from 'react';
 import { ScrollView, View } from 'react-native';
-import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
-import { radius, space } from '@swift/ui';
-import { LinkText, LoadingBlock, PillButton, T, TonePill } from '../../../kit';
+import { color, radius, space } from '@swift/ui';
+import { Card, Header, LinkText, LoadingBlock, PillButton, Screen, T, TonePill } from '../../../kit';
 import { useMoverKind, useMoverStats, useMoverSubscription, useEarningsSummary, useEarnings, useCashSettlements, useConfirmCashSettlement } from '../../../hooks';
 import { money } from '../../../lib/money';
 import { dateLabel } from '../shared';
 import { useMutation } from '@tanstack/react-query';
 import { api, API_URL } from '../../../services/api';
 import { openPayLink } from '../../../lib/payLink';
-import { dk, withAlpha, DCard, DHeader } from '../dark';
-
-/** Earnings, in the earner app's dark language (dashboard plan Phase E-lite).
- *  Same ledger, same rules — the money story just reads like the reference. */
 
 function StatTile({ label, total, count, sub }: { label: string; total: number; count?: number; sub?: string }) {
   return (
-    <DCard style={{ flex: 1, paddingVertical: space.md }}>
-      <T variant="caption" weight="bold" style={{ color: dk.muted, letterSpacing: 1 }}>
+    <Card style={{ flex: 1, paddingVertical: space.md }}>
+      <T variant="caption" weight="bold" tone="muted" style={{ letterSpacing: 1 }}>
         {label.toUpperCase()}
       </T>
-      <T variant="heading" numberOfLines={1} style={{ marginTop: 2, color: dk.text }}>
+      <T variant="heading" numberOfLines={1} style={{ marginTop: 2 }}>
         {money(total)}
       </T>
-      <T variant="caption" style={{ color: dk.muted }}>
+      <T variant="caption" tone="muted">
         {sub ?? `${count ?? 0} ${count === 1 ? 'job' : 'jobs'}`}
       </T>
-    </DCard>
+    </Card>
   );
 }
 
@@ -44,41 +39,41 @@ function StoreOwesYouCard({ ledger }: { ledger: any }) {
   const rows: any[] = ledger?.unsettled ?? [];
   if (rows.length === 0) return null;
   return (
-    <DCard style={{ marginTop: space.md }}>
+    <Card style={{ marginTop: space.md }}>
       <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
-        <T variant="caption" weight="bold" style={{ color: dk.muted, letterSpacing: 1 }}>
+        <T variant="caption" weight="bold" tone="muted" style={{ letterSpacing: 1 }}>
           STORES OWE YOU
         </T>
-        <T variant="label" weight="bold" style={{ color: dk.text }}>
+        <T variant="label" weight="bold">
           {money(ledger?.summary?.owed ?? 0)}
         </T>
       </View>
-      <T variant="caption" style={{ color: dk.muted, marginTop: 2 }}>
+      <T variant="caption" tone="muted" style={{ marginTop: 2 }}>
         MMG orders — the customer paid the store, so your delivery fee comes from them in cash.
       </T>
       {rows.map((r) => (
-        <View key={r.id} style={{ paddingTop: space.md, marginTop: space.md, borderTopWidth: 1, borderTopColor: dk.line }}>
+        <View key={r.id} style={{ paddingTop: space.md, marginTop: space.md, borderTopWidth: 1, borderTopColor: color.border.subtle }}>
           <View style={{ flexDirection: 'row', alignItems: 'center' }}>
             <View style={{ flex: 1 }}>
-              <T variant="label" weight="semibold" numberOfLines={1} style={{ color: dk.text }}>
+              <T variant="label" weight="semibold" numberOfLines={1}>
                 {r.vendor?.name ?? 'Store'}
               </T>
-              <T variant="caption" style={{ color: dk.muted }}>
+              <T variant="caption" tone="muted">
                 {r.orderNumber ? `#${r.orderNumber} · ` : ''}{dateLabel(r.createdAt)}
               </T>
             </View>
-            <T variant="label" weight="bold" style={{ marginLeft: space.md, color: dk.text }}>
+            <T variant="label" weight="bold" style={{ marginLeft: space.md }}>
               {money(r.amount)}
             </T>
           </View>
           {r.status === 'RIDER_CONFIRMED' ? (
-            <T variant="caption" style={{ color: dk.muted, marginTop: space.sm }}>
+            <T variant="caption" tone="muted" style={{ marginTop: space.sm }}>
               You confirmed — waiting for the store to close it out.
             </T>
           ) : (
             <>
               {r.status === 'STORE_CONFIRMED' ? (
-                <T variant="caption" weight="semibold" style={{ color: dk.text, marginTop: space.sm }}>
+                <T variant="caption" weight="semibold" tone="deep" style={{ marginTop: space.sm }}>
                   {r.vendor?.name ?? 'The store'} says they paid you.
                 </T>
               ) : null}
@@ -95,7 +90,7 @@ function StoreOwesYouCard({ ledger }: { ledger: any }) {
           )}
         </View>
       ))}
-    </DCard>
+    </Card>
   );
 }
 
@@ -115,25 +110,24 @@ function WeeklyFeeCard({ sub }: { sub: any }) {
       ? `Pay by ${dateLabel(sub.gracePeriodEnd)} to keep going online`
       : `${money(sub.customRate ?? sub.weeklyRate)}/week${sub.nextBillingDate ? ` · next bill ${dateLabel(sub.nextBillingDate)}` : ''}`;
   return (
-    <DCard style={{ marginTop: space.md }}>
+    <Card style={{ marginTop: space.md }}>
       <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
-        <T variant="body" weight="semibold" style={{ color: dk.text }}>
+        <T variant="body" weight="semibold">
           Your weekly fee
         </T>
-        <TonePill label={pill.label} tone={pill.tone} dark />
+        <TonePill label={pill.label} tone={pill.tone} />
       </View>
-      <T variant="label" style={{ color: dk.muted, marginTop: 4 }}>
+      <T variant="label" tone="muted" style={{ marginTop: 4 }}>
         {line}
       </T>
-      <T variant="caption" style={{ color: dk.muted, marginTop: 4 }}>
+      <T variant="caption" tone="muted" style={{ marginTop: 4 }}>
         The flat fee is Swift&apos;s only charge — every fare stays yours.
       </T>
-    </DCard>
+    </Card>
   );
 }
 
 export function EarningsScreen({ navigation }: any) {
-  const insets = useSafeAreaInsets();
   const { kind } = useMoverKind();
   const summaryQ = useEarningsSummary<any>(kind);
   const historyQ = useEarnings<any>(kind);
@@ -161,32 +155,32 @@ export function EarningsScreen({ navigation }: any) {
   const fees = history.filter((e) => e?.type && e.type !== 'TIP').reduce((a, e) => a + Number(e.amount ?? 0), 0);
 
   return (
-    <View style={{ flex: 1, backgroundColor: dk.bg, paddingTop: insets.top }}>
-      <DHeader title="Earnings" onBack={() => navigation?.goBack?.()} />
+    <Screen>
+      <Header title="Earnings" />
       {summaryQ.isLoading ? (
         <LoadingBlock />
       ) : (
         <ScrollView contentContainerStyle={{ paddingHorizontal: space['2xl'], paddingBottom: space['3xl'] }} showsVerticalScrollIndicator={false}>
           {/* This-week hero */}
-          <DCard>
-            <T variant="caption" weight="bold" style={{ color: dk.muted, letterSpacing: 1 }}>
+          <Card>
+            <T variant="caption" weight="bold" tone="muted" style={{ letterSpacing: 1 }}>
               THIS WEEK
             </T>
-            <T variant="display" style={{ marginTop: 2, color: dk.text }}>
+            <T variant="display" style={{ marginTop: 2 }}>
               {money(s.thisWeek?.total ?? 0)}
             </T>
             <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4, marginTop: 2 }}>
-              <MaterialCommunityIcons name="check-decagram" size={14} color={dk.success} />
-              <T variant="caption" weight="bold" style={{ color: dk.success }}>
+              <MaterialCommunityIcons name="check-decagram" size={14} color={color.success} />
+              <T variant="caption" weight="bold" tone="success">
                 100% yours · cash · 0% commission
               </T>
             </View>
-            <T variant="caption" style={{ color: dk.muted, marginTop: 2 }}>
+            <T variant="caption" tone="muted" style={{ marginTop: 2 }}>
               {s.thisWeek?.count ?? 0} jobs this week
               {weekDeliveries != null ? ` · ${weekDeliveries} delivered` : ''}
               {onlineHours != null ? ` · ${onlineHours}h online today` : ''}
             </T>
-          </DCard>
+          </Card>
 
           {/* Stat grid */}
           <View style={{ flexDirection: 'row', gap: space.md, marginTop: space.md }}>
@@ -200,21 +194,21 @@ export function EarningsScreen({ navigation }: any) {
 
           {/* Where the money came from — fees vs tips across recent jobs */}
           {(fees > 0 || tips > 0) ? (
-            <DCard style={{ marginTop: space.md }}>
-              <T variant="caption" weight="bold" style={{ color: dk.muted, letterSpacing: 1 }}>
+            <Card style={{ marginTop: space.md }}>
+              <T variant="caption" weight="bold" tone="muted" style={{ letterSpacing: 1 }}>
                 RECENT BREAKDOWN
               </T>
               <View style={{ flexDirection: 'row', marginTop: space.sm }}>
                 <View style={{ flex: 1 }}>
-                  <T variant="heading" style={{ color: dk.text }}>{money(fees)}</T>
-                  <T variant="caption" style={{ color: dk.muted }}>Job fees</T>
+                  <T variant="heading">{money(fees)}</T>
+                  <T variant="caption" tone="muted">Job fees</T>
                 </View>
                 <View style={{ flex: 1 }}>
-                  <T variant="heading" style={{ color: dk.text }}>{money(tips)}</T>
-                  <T variant="caption" style={{ color: dk.muted }}>Tips</T>
+                  <T variant="heading">{money(tips)}</T>
+                  <T variant="caption" tone="muted">Tips</T>
                 </View>
               </View>
-            </DCard>
+            </Card>
           ) : null}
 
           {/* MMG cash ledger — delivery fees stores still owe this rider */}
@@ -241,17 +235,15 @@ export function EarningsScreen({ navigation }: any) {
 
           {/* Recent earnings */}
           <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginTop: space.xl, marginBottom: space.md }}>
-            <T variant="heading" style={{ color: dk.text }}>
-              Recent
-            </T>
+            <T variant="heading">Recent</T>
             <LinkText label="All jobs" onPress={() => navigation?.navigate?.('JobHistory')} />
           </View>
           {history.length === 0 ? (
-            <T variant="label" style={{ color: dk.muted }}>
+            <T variant="label" tone="muted">
               Completed jobs land here with the cash you took on each.
             </T>
           ) : (
-            <DCard style={{ paddingVertical: space.sm }}>
+            <Card style={{ paddingVertical: space.sm }}>
               {history.slice(0, 30).map((e: any, i: number) => (
                 <View
                   key={e.id ?? i}
@@ -260,35 +252,35 @@ export function EarningsScreen({ navigation }: any) {
                     alignItems: 'center',
                     paddingVertical: space.sm,
                     borderTopWidth: i > 0 ? 1 : 0,
-                    borderTopColor: dk.line,
+                    borderTopColor: color.border.subtle,
                   }}
                 >
-                  <View style={{ width: 32, height: 32, borderRadius: 16, alignItems: 'center', justifyContent: 'center', backgroundColor: 'rgba(47,191,113,0.15)' }}>
-                    <MaterialCommunityIcons name="cash" size={15} color={dk.success} />
+                  <View style={{ width: 32, height: 32, borderRadius: 16, alignItems: 'center', justifyContent: 'center', backgroundColor: '#E8F6EE' }}>
+                    <MaterialCommunityIcons name="cash" size={15} color={color.success} />
                   </View>
                   <View style={{ flex: 1, marginLeft: space.md }}>
-                    <T variant="label" weight="semibold" style={{ color: dk.text }}>
+                    <T variant="label" weight="semibold">
                       {earnLabel(e.type)}
                     </T>
-                    <T variant="caption" style={{ color: dk.muted }}>
+                    <T variant="caption" tone="muted">
                       {dateLabel(e.createdAt)}
                     </T>
                   </View>
-                  <T variant="label" weight="bold" style={{ color: dk.text }}>
+                  <T variant="label" weight="bold">
                     {money(Number(e.amount ?? 0))}
                   </T>
                 </View>
               ))}
-            </DCard>
+            </Card>
           )}
-          <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.sm, borderRadius: radius.lg, backgroundColor: withAlpha(dk.accent, 0.12), borderWidth: 1, borderColor: dk.accentBorder, padding: space.md, marginTop: space.lg }}>
-            <MaterialCommunityIcons name="calendar-check" size={16} color={dk.accent} />
-            <T variant="caption" weight="semibold" style={{ flex: 1, color: dk.text }}>
+          <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.sm, borderRadius: radius.lg, backgroundColor: color.brand[50], padding: space.md, marginTop: space.lg }}>
+            <MaterialCommunityIcons name="calendar-check" size={16} color={color.brand[600]} />
+            <T variant="caption" weight="semibold" tone="deep" style={{ flex: 1 }}>
               You keep every cent — Swift only charges the flat weekly fee. No commission, ever.
             </T>
           </View>
         </ScrollView>
       )}
-    </View>
+    </Screen>
   );
 }
