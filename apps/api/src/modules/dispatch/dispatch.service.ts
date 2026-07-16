@@ -99,6 +99,24 @@ export class DispatchService {
   // Candidate discovery — PostGIS over the live rider positions
   // -------------------------------------------------------------------------
 
+  /**
+   * Availability read (availability spec §1): derived from findCandidates —
+   * the EXACT query dispatch pings with, at the base radius. Customers get a
+   * bucket and a nearest ETA, never counts or positions. A probe orderId has
+   * no declined-set, so nothing is excluded that dispatch wouldn't exclude.
+   */
+  async getAvailability(pool: DispatchPool, point: { lat: number; lng: number }): Promise<{
+    level: 'GOOD' | 'LOW' | 'NONE';
+    nearestEtaMinutes?: number;
+  }> {
+    const candidates = await this.findCandidates(`availability:${pool}`, point, BASE_RADIUS_KM, pool, 0, null);
+    const level = candidates.length >= 3 ? 'GOOD' : candidates.length >= 1 ? 'LOW' : 'NONE';
+    return {
+      level,
+      ...(candidates[0] ? { nearestEtaMinutes: Math.max(1, Math.round(candidates[0].etaMinutes)) } : {}),
+    };
+  }
+
   async findCandidates(
     orderId: string,
     pickup: { lat: number; lng: number },
