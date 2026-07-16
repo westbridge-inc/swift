@@ -61,37 +61,42 @@ export function RoutePair({
   dropoff,
   pickupHint,
   muted,
+  dark,
 }: {
   pickup?: string | null;
   dropoff?: string | null;
   pickupHint?: string;
   muted?: boolean;
+  /** Render on the earner app's dark cards (dashboard plan Phase B). */
+  dark?: boolean;
 }) {
+  const inkStyle = dark ? { color: '#FFFFFF' } : undefined;
+  const mutedStyle = dark ? { color: 'rgba(255,255,255,0.55)' } : undefined;
   return (
     <View>
       <View style={{ flexDirection: 'row', alignItems: 'center' }}>
         <View style={{ width: 16, alignItems: 'center' }}>
-          <View style={{ width: 10, height: 10, borderRadius: 5, borderWidth: 2.5, borderColor: color.text.muted }} />
+          <View style={{ width: 10, height: 10, borderRadius: 5, borderWidth: 2.5, borderColor: dark ? 'rgba(255,255,255,0.55)' : color.text.muted }} />
         </View>
         <View style={{ flex: 1, marginLeft: space.sm }}>
           {pickupHint ? (
-            <T variant="caption" tone="muted">
+            <T variant="caption" tone="muted" style={mutedStyle}>
               {pickupHint}
             </T>
           ) : null}
-          <T variant="label" weight="semibold" tone={muted ? 'muted' : 'ink'} numberOfLines={1}>
+          <T variant="label" weight="semibold" tone={muted ? 'muted' : 'ink'} numberOfLines={1} style={muted ? mutedStyle : inkStyle}>
             {pickup ?? 'Pickup'}
           </T>
         </View>
       </View>
       {dropoff ? (
         <>
-          <View style={{ marginLeft: 7, width: 2, height: 12, marginVertical: 2, borderRadius: 1, backgroundColor: color.border.subtle }} />
+          <View style={{ marginLeft: 7, width: 2, height: 12, marginVertical: 2, borderRadius: 1, backgroundColor: dark ? 'rgba(255,255,255,0.15)' : color.border.subtle }} />
           <View style={{ flexDirection: 'row', alignItems: 'center' }}>
             <View style={{ width: 16, alignItems: 'center' }}>
               <Feather name="map-pin" size={14} color={color.brand[500]} />
             </View>
-            <T variant="label" weight={muted ? 'regular' : 'semibold'} tone={muted ? 'muted' : 'ink'} numberOfLines={1} style={{ flex: 1, marginLeft: space.sm }}>
+            <T variant="label" weight={muted ? 'regular' : 'semibold'} tone={muted ? 'muted' : 'ink'} numberOfLines={1} style={[{ flex: 1, marginLeft: space.sm }, muted ? mutedStyle : inkStyle]}>
               {dropoff}
             </T>
           </View>

@@ -75,6 +75,17 @@ export function useEarnings<T = any>(kind: MoverKind | null) {
     enabled: !!kind,
   });
 }
+/** Nearby REAL demand for the dashboard (plan Phase A): waiting taxi
+ *  requests + watchers for drivers; unassigned orders by store for riders. */
+export function useDemand<T = any>(kind: MoverKind | null, point?: { lat: number; lng: number }) {
+  return useQuery<T>({
+    queryKey: ['mover', 'demand', kind, point ? `${point.lat.toFixed(3)},${point.lng.toFixed(3)}` : null],
+    queryFn: () => unwrap<T>(svc(kind as MoverKind).demand(point as { lat: number; lng: number })),
+    enabled: !!kind && !!point,
+    refetchInterval: 20_000,
+  });
+}
+
 export function useAvailableJobs(kind: MoverKind | null, online: boolean) {
   return useQuery({
     queryKey: ['mover', 'available', kind],
