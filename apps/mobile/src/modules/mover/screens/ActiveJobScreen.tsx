@@ -6,10 +6,20 @@ import MapView, { Marker, PROVIDER_DEFAULT, Polyline } from 'react-native-maps';
 import BottomSheet, { BottomSheetScrollView } from '@gorhom/bottom-sheet';
 import { color, radius, space } from '@swift/ui';
 import { Feather, MaterialCommunityIcons } from '@expo/vector-icons';
-import { Card, EmptyState, LabeledInput, PillButton, PopupCard, Screen, T, cardShadow } from '../../../kit';
+import { EmptyState, LabeledInput, PillButton, PopupCard, Screen, T, cardShadow } from '../../../kit';
 import { Stars } from '../../../kit/controls';
 import { useMoverKind, useActiveJob, useDriverAction, useRiderAction, useRateCustomer } from '../../../hooks';
+import { useLocationStore } from '../../../stores/locationStore';
+import { haversineKm, streetEtaMin } from '../../../lib/geo';
 import { jobAmount, RoutePair } from '../shared';
+import { dk, DCard } from '../dark';
+
+/**
+ * The active job/ride screen at navigation grade (dashboard plan Phase D):
+ * dark map, bold route, a live distance/ETA pill to the CURRENT target, and
+ * one huge next-action button. Every rule survives untouched — the PIN gate,
+ * the golden cash rule, MMG honesty, the post-trip rating.
+ */
 
 type DriverAction = 'en-route' | 'arrived' | 'verify-pin' | 'start' | 'complete';
 
@@ -46,15 +56,15 @@ function StatusStepper({ status, isDriver }: { status?: string; isDriver: boolea
                 width: 12,
                 height: 12,
                 borderRadius: 6,
-                backgroundColor: i <= idx ? color.brand[500] : color.border.subtle,
+                backgroundColor: i <= idx ? dk.accent : dk.cardSoft,
               }}
             />
-            <T variant="caption" tone={i <= idx ? 'deep' : 'faint'} weight={i === idx ? 'semibold' : 'regular'} style={{ marginTop: 3 }}>
+            <T variant="caption" weight={i === idx ? 'semibold' : 'regular'} style={{ marginTop: 3, color: i <= idx ? dk.text : dk.faint }}>
               {labels[i]}
             </T>
           </View>
           {i < steps.length - 1 ? (
-            <View style={{ flex: 1, height: 2, marginHorizontal: 4, marginBottom: 16, borderRadius: 1, backgroundColor: i < idx ? color.brand[500] : color.border.subtle }} />
+            <View style={{ flex: 1, height: 2, marginHorizontal: 4, marginBottom: 16, borderRadius: 1, backgroundColor: i < idx ? dk.accent : dk.cardSoft }} />
           ) : null}
         </React.Fragment>
       ))}
@@ -69,6 +79,7 @@ export function ActiveJobScreen({ navigation }: any) {
   const driverAct = useDriverAction();
   const riderAct = useRiderAction();
   const rate = useRateCustomer();
+  const { latitude, longitude } = useLocationStore();
   const [pin, setPin] = useState('');
   const [ratePopup, setRatePopup] = useState<{ orderId: string; name: string; mmg: boolean } | null>(null);
   const [stars, setStars] = useState(5);
@@ -109,13 +120,21 @@ export function ActiveJobScreen({ navigation }: any) {
   const cust: any = job?.customer ?? job?.user ?? null;
   const custName = cust ? [cust.firstName, cust.lastName].filter(Boolean).join(' ') : null;
   const inProgress = String(job?.status ?? '').toUpperCase() === 'RIDE_IN_PROGRESS';
-  const navTarget = inProgress ? drop : pickup;
+  const riderToDrop = !isDriver && pickedUp;
+  const navTarget = inProgress || riderToDrop ? drop : pickup;
+  const targetLabel = inProgress || riderToDrop ? 'drop-off' : 'pickup';
   const openNav = () => {
     if (!navTarget) return;
     const q = `${navTarget.latitude},${navTarget.longitude}`;
     Linking.openURL(`maps://?daddr=${q}`).catch(() => Linking.openURL(`https://maps.google.com/?daddr=${q}`));
   };
   const step = isDriver && job ? driverStep(job) : null;
+
+  // Live distance/ETA to the CURRENT target (reference nav pill) — straight
+  // GPS math via the shared street-pace estimator, never presented as routing.
+  const me = latitude != null && longitude != null ? { latitude, longitude } : null;
+  const distKm = navTarget && me ? haversineKm(me, navTarget) : null;
+  const etaMin = navTarget && me ? streetEtaMin(me, navTarget) : null;
 
   const runDriverStep = () => {
     if (!step || !job) return;
@@ -138,97 +157,146 @@ export function ActiveJobScreen({ navigation }: any) {
     navigation?.goBack?.();
   };
 
+  // The one big action at the bottom (reference "Arrived" button).
+  const bigButton = (label: string, onPress: () => void, opts?: { disabled?: boolean; loading?: boolean; soft?: boolean }) => (
+    <PillButton
+      label={label}
+      loading={opts?.loading}
+      disabled={opts?.disabled}
+      variant={opts?.soft ? 'outline' : 'primary'}
+      onPress={onPress}
+      style={{ minHeight: 56 }}
+    />
+  );
+
   return (
-    <View style={{ flex: 1, backgroundColor: color.surface.base }}>
+    <View style={{ flex: 1, backgroundColor: dk.bg }}>
       {job ? (
-        <MapView provider={PROVIDER_DEFAULT} style={{ flex: 1 }} initialRegion={region} showsUserLocation>
+        <MapView provider={PROVIDER_DEFAULT} style={{ flex: 1 }} initialRegion={region} showsUserLocation userInterfaceStyle="dark">
           {pickup ? <Marker coordinate={pickup} title="Pickup" /> : null}
           {drop ? <Marker coordinate={drop} title="Drop-off" pinColor={color.brand[500]} /> : null}
-          {pickup && drop ? <Polyline coordinates={[pickup, drop]} strokeColor={color.brand[500]} strokeWidth={4} /> : null}
+          {pickup && drop ? (
+            <>
+              {/* Bold route line: white halo under the accent stroke. Geodesic
+                  connector — a heading, not turn-by-turn. */}
+              <Polyline coordinates={[pickup, drop]} geodesic strokeColor="rgba(255,255,255,0.35)" strokeWidth={9} />
+              <Polyline coordinates={[pickup, drop]} geodesic strokeColor={color.brand[500]} strokeWidth={5} />
+            </>
+          ) : null}
         </MapView>
       ) : (
         <View style={{ flex: 1 }} />
       )}
 
-      <View style={{ position: 'absolute', top: insets.top, left: 0, zIndex: 10, padding: space.lg }}>
+      <View style={{ position: 'absolute', top: insets.top, left: 0, right: 0, zIndex: 10, flexDirection: 'row', alignItems: 'center', padding: space.lg }}>
         <Pressable onPress={() => navigation?.goBack?.()} hitSlop={10}>
           {({ pressed }) => (
-            <View style={[{ width: 40, height: 40, borderRadius: 20, alignItems: 'center', justifyContent: 'center', backgroundColor: color.surface.base, opacity: pressed ? 0.7 : 1 }, cardShadow]}>
-              <Feather name="chevron-left" size={22} color={color.text.primary} />
+            <View style={[{ width: 40, height: 40, borderRadius: 20, alignItems: 'center', justifyContent: 'center', backgroundColor: dk.card, borderWidth: 1, borderColor: dk.line, opacity: pressed ? 0.7 : 1 }, cardShadow]}>
+              <Feather name="chevron-left" size={22} color={dk.text} />
             </View>
           )}
         </Pressable>
+        {/* Live nav pill (reference): distance · ETA → current target. Tap = real navigation. */}
+        {job && distKm != null ? (
+          <Pressable onPress={openNav} style={{ flex: 1, alignItems: 'center' }} hitSlop={6}>
+            {({ pressed }) => (
+              <View style={[{ flexDirection: 'row', alignItems: 'center', gap: 6, borderRadius: 9999, backgroundColor: dk.card, borderWidth: 1, borderColor: dk.line, paddingHorizontal: space.lg, height: 40, opacity: pressed ? 0.8 : 1 }, cardShadow]}>
+                <MaterialCommunityIcons name="navigation-variant" size={15} color={dk.accent} />
+                <T variant="label" weight="bold" style={{ color: dk.text }}>
+                  {distKm < 10 ? distKm.toFixed(1) : Math.round(distKm)} km · ~{etaMin} min
+                </T>
+                <T variant="label" style={{ color: dk.muted }}>
+                  to {targetLabel}
+                </T>
+              </View>
+            )}
+          </Pressable>
+        ) : (
+          <View style={{ flex: 1 }} />
+        )}
+        <View style={{ width: 40 }} />
       </View>
 
       {job ? (
-        <BottomSheet index={0} snapPoints={['52%', '88%']} enableDynamicSizing={false} backgroundStyle={{ backgroundColor: color.surface.subtle }}>
+        <BottomSheet
+          index={0}
+          snapPoints={['52%', '88%']}
+          enableDynamicSizing={false}
+          backgroundStyle={{ backgroundColor: dk.bg, borderTopLeftRadius: 20, borderTopRightRadius: 20 }}
+          handleIndicatorStyle={{ backgroundColor: dk.faint }}
+        >
           <BottomSheetScrollView contentContainerStyle={{ paddingHorizontal: space['2xl'], paddingBottom: space['3xl'] }}>
             {/* Route + fare + live progress */}
-            <Card style={{ marginBottom: space.md }}>
+            <DCard style={{ marginBottom: space.md }}>
               <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
-                <T variant="caption" weight="bold" tone="muted" style={{ letterSpacing: 1 }}>
+                <T variant="caption" weight="bold" style={{ color: dk.muted, letterSpacing: 1 }}>
                   {job.orderNumber ? `ORDER #${job.orderNumber}` : 'CURRENT JOB'}
                 </T>
-                <T variant="caption" weight="semibold" tone="muted">
+                <T variant="caption" weight="semibold" style={{ color: dk.muted }}>
                   {String(job.status ?? '').replace(/_/g, ' ').toLowerCase()}
                 </T>
               </View>
-              <T variant="title" style={{ marginTop: space.sm }}>
-                {jobAmount(job)} <T variant="label" tone="muted">{isMmgPaid ? '· MMG — already paid' : '· cash'}</T>
+              <T variant="title" style={{ marginTop: space.sm, color: dk.text }}>
+                {jobAmount(job)}{' '}
+                <T variant="label" style={{ color: dk.muted }}>
+                  {isMmgPaid ? '· MMG — already paid' : '· cash'}
+                </T>
               </T>
               {/* Kitchen signal (readyAt rides outside the status lane once a
                   rider is assigned) — tells the rider the bag is on the counter. */}
               {!isDriver && (job.readyAt || String(job.status).toUpperCase() === 'READY_FOR_PICKUP') ? (
                 <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: space.sm }}>
-                  <MaterialCommunityIcons name="check-circle" size={15} color={color.success} />
-                  <T variant="label" weight="semibold" style={{ color: color.success }}>
+                  <MaterialCommunityIcons name="check-circle" size={15} color={dk.success} />
+                  <T variant="label" weight="semibold" style={{ color: dk.success }}>
                     Order is packed and ready for pickup
                   </T>
                 </View>
               ) : null}
               <StatusStepper status={job.status} isDriver={isDriver} />
               <View style={{ marginTop: space.md }}>
-                <RoutePair pickup={job.pickupAddress ?? 'Pickup'} dropoff={job.deliveryAddress ?? job.dropoffAddress ?? 'Drop-off'} />
+                <RoutePair pickup={job.pickupAddress ?? 'Pickup'} dropoff={job.deliveryAddress ?? job.dropoffAddress ?? 'Drop-off'} dark />
               </View>
-            </Card>
+            </DCard>
 
             {/* Passenger / customer */}
             {cust ? (
-              <Card style={{ flexDirection: 'row', alignItems: 'center', marginBottom: space.md }}>
-                <View style={{ width: 44, height: 44, borderRadius: 22, alignItems: 'center', justifyContent: 'center', backgroundColor: color.brand[500] }}>
-                  <T variant="body" weight="bold" tone="onBrand">
+              <DCard style={{ flexDirection: 'row', alignItems: 'center', marginBottom: space.md }}>
+                <View style={{ width: 44, height: 44, borderRadius: 22, alignItems: 'center', justifyContent: 'center', backgroundColor: dk.accent }}>
+                  <T variant="body" weight="bold" style={{ color: '#fff' }}>
                     {(cust.firstName ?? 'C').charAt(0).toUpperCase()}
                   </T>
                 </View>
                 <View style={{ flex: 1, marginLeft: space.md }}>
-                  <T variant="caption" tone="muted">
+                  <T variant="caption" style={{ color: dk.muted }}>
                     {isDriver ? 'Passenger' : 'Customer'}
                   </T>
-                  <T variant="body" weight="bold" numberOfLines={1}>
+                  <T variant="body" weight="bold" numberOfLines={1} style={{ color: dk.text }}>
                     {custName ?? 'Customer'}
                   </T>
                 </View>
                 {cust.phone ? (
                   <Pressable onPress={() => Linking.openURL(`tel:${cust.phone}`)} hitSlop={6}>
                     {({ pressed }) => (
-                      <View style={{ width: 40, height: 40, borderRadius: 20, alignItems: 'center', justifyContent: 'center', backgroundColor: color.surface.subtle, marginRight: space.sm, opacity: pressed ? 0.7 : 1 }}>
-                        <Feather name="phone" size={17} color={color.success} />
+                      <View style={{ width: 40, height: 40, borderRadius: 20, alignItems: 'center', justifyContent: 'center', backgroundColor: dk.cardSoft, marginRight: space.sm, opacity: pressed ? 0.7 : 1 }}>
+                        <Feather name="phone" size={17} color={dk.success} />
                       </View>
                     )}
                   </Pressable>
                 ) : null}
                 <Pressable onPress={() => navigation.navigate('Chat', { orderId: job.id, title: custName ?? 'Customer' })} hitSlop={6}>
                   {({ pressed }) => (
-                    <View style={{ width: 40, height: 40, borderRadius: 20, alignItems: 'center', justifyContent: 'center', backgroundColor: color.surface.subtle, opacity: pressed ? 0.7 : 1 }}>
-                      <Feather name="message-circle" size={17} color={color.brand[500]} />
+                    <View style={{ width: 40, height: 40, borderRadius: 20, alignItems: 'center', justifyContent: 'center', backgroundColor: dk.cardSoft, opacity: pressed ? 0.7 : 1 }}>
+                      <Feather name="message-circle" size={17} color={dk.accent} />
                     </View>
                   )}
                 </Pressable>
-              </Card>
+              </DCard>
             ) : null}
 
             {/* Navigate */}
-            {navTarget ? <PillButton label={`Navigate to ${inProgress ? 'drop-off' : 'pickup'}`} variant="outline" style={{ marginBottom: space.md }} onPress={openNav} /> : null}
+            {navTarget ? (
+              <PillButton label={`Navigate to ${targetLabel}`} variant="outline" style={{ marginBottom: space.md }} onPress={openNav} />
+            ) : null}
 
             {/* The single next step (driver) or handover/deliver (rider) */}
             {isDriver ? (
@@ -237,15 +305,15 @@ export function ActiveJobScreen({ navigation }: any) {
                   {step.pin ? (
                     <View style={{ marginBottom: space.md }}>
                       <LabeledInput value={pin} onChangeText={setPin} placeholder="Enter rider's PIN" keyboardType="number-pad" maxLength={6} />
-                      <T variant="caption" tone="muted" style={{ marginTop: space.sm }}>
+                      <T variant="caption" style={{ color: dk.muted, marginTop: space.sm }}>
                         The passenger has this PIN in their app — verifying it proves you picked up the right person.
                       </T>
                     </View>
                   ) : null}
-                  <PillButton label={step.label} loading={busy} disabled={busy || (!!step.pin && pin.length < 4)} onPress={runDriverStep} />
+                  {bigButton(step.label, runDriverStep, { loading: busy, disabled: busy || (!!step.pin && pin.length < 4) })}
                 </>
               ) : (
-                <T variant="label" tone="muted" center style={{ paddingVertical: space.md }}>
+                <T variant="label" center style={{ color: dk.muted, paddingVertical: space.md }}>
                   Trip complete.
                 </T>
               )
@@ -253,26 +321,28 @@ export function ActiveJobScreen({ navigation }: any) {
               <>
                 {/* Customer paid the store via MMG — the door is a pure handover;
                     the rider's fee comes from the STORE (tracked in Earnings). */}
-                <View style={{ flexDirection: 'row', alignItems: 'flex-start', gap: space.sm, borderRadius: radius.lg, backgroundColor: color.brand[50], padding: space.md, marginBottom: space.md }}>
-                  <Feather name="check-circle" size={15} color={color.brand[600]} style={{ marginTop: 1 }} />
-                  <T variant="caption" weight="semibold" tone="deep" style={{ flex: 1 }}>
+                <View style={{ flexDirection: 'row', alignItems: 'flex-start', gap: space.sm, borderRadius: radius.lg, backgroundColor: 'rgba(47,191,113,0.12)', borderWidth: 1, borderColor: 'rgba(47,191,113,0.4)', padding: space.md, marginBottom: space.md }}>
+                  <Feather name="check-circle" size={15} color={dk.success} style={{ marginTop: 1 }} />
+                  <T variant="caption" weight="semibold" style={{ flex: 1, color: dk.text }}>
                     {pickedUp
                       ? `Customer already paid via MMG — collect NOTHING at the door. Your ${feeLabel} fee comes from the store (see Earnings).`
                       : `Customer already paid via MMG. Collect your ${feeLabel} delivery fee from the store with the order.`}
                   </T>
                 </View>
-                <PillButton label="Mark delivered" loading={riderAct.isPending} disabled={busy} onPress={() => riderAct.mutate({ id: job.id, action: 'delivered' })} />
+                {bigButton('Mark delivered', () => riderAct.mutate({ id: job.id, action: 'delivered' }), { loading: riderAct.isPending, disabled: busy })}
               </>
             ) : (
               <>
-                <View style={{ flexDirection: 'row', alignItems: 'flex-start', gap: space.sm, borderRadius: radius.lg, backgroundColor: color.brand[50], padding: space.md, marginBottom: space.md }}>
-                  <Feather name="alert-circle" size={15} color={color.brand[600]} style={{ marginTop: 1 }} />
-                  <T variant="caption" weight="semibold" tone="deep" style={{ flex: 1 }}>
+                <View style={{ flexDirection: 'row', alignItems: 'flex-start', gap: space.sm, borderRadius: radius.lg, backgroundColor: 'rgba(232,25,44,0.14)', borderWidth: 1, borderColor: 'rgba(232,25,44,0.4)', padding: space.md, marginBottom: space.md }}>
+                  <Feather name="alert-circle" size={15} color={dk.accent} style={{ marginTop: 1 }} />
+                  <T variant="caption" weight="semibold" style={{ flex: 1, color: dk.text }}>
                     Golden rule: collect the cash BEFORE handing over the order.
                   </T>
                 </View>
                 <PillButton label="Confirm payment & hand over" variant="outline" disabled={busy} onPress={() => riderAct.mutate({ id: job.id, action: 'handover' })} />
-                <PillButton label="Mark delivered" style={{ marginTop: space.md }} loading={riderAct.isPending} disabled={busy} onPress={() => riderAct.mutate({ id: job.id, action: 'delivered' })} />
+                <View style={{ marginTop: space.md }}>
+                  {bigButton('Mark delivered', () => riderAct.mutate({ id: job.id, action: 'delivered' }), { loading: riderAct.isPending, disabled: busy })}
+                </View>
               </>
             )}
           </BottomSheetScrollView>
