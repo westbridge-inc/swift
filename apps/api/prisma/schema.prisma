@@ -1163,8 +1163,13 @@ model Rating {
   /// Anti-manipulation (spec §5.2): flagged for review by the daily sweep
   flagged    Boolean  @default(false)
   flagReason String?
+  /// Double-blind release (marketplace §1): the WRITTEN rating stays hidden
+  /// from the ratee until both sides have rated this order, or the daily
+  /// sweep releases it after the blind window. Aggregates update immediately.
+  visibleAt DateTime?
   createdAt DateTime  @default(now())
 
+  @@index([visibleAt])
   @@index([raterId])
   @@index([vendorId])
   @@index([rateeId])

@@ -82,6 +82,10 @@ export class RatingService {
       },
     });
 
+    // Double-blind (marketplace §1): written ratings stay hidden until the
+    // other side has rated too (aggregates still update immediately below).
+    await this.releaseIfBothSidesRated(input.orderId);
+
     // Update aggregate ratings
     if (input.type === 'CUSTOMER_TO_VENDOR' && input.vendorId) {
       await this.updateVendorRating(input.vendorId);
@@ -167,13 +171,13 @@ export class RatingService {
   async getVendorReviews(vendorId: string, limit = 20, offset = 0) {
     const [reviews, total] = await Promise.all([
       this.prisma.rating.findMany({
-        where: { vendorId, type: 'CUSTOMER_TO_VENDOR', isPublic: true },
+        where: { vendorId, type: 'CUSTOMER_TO_VENDOR', isPublic: true, visibleAt: { not: null } },
         include: { rater: { select: { firstName: true, avatar: true } } },
         orderBy: { createdAt: 'desc' },
         take: limit,
         skip: offset,
       }),
-      this.prisma.rating.count({ where: { vendorId, type: 'CUSTOMER_TO_VENDOR', isPublic: true } }),
+      this.prisma.rating.count({ where: { vendorId, type: 'CUSTOMER_TO_VENDOR', isPublic: true, visibleAt: { not: null } } }),
     ]);
 
     // Rating distribution
@@ -187,6 +191,37 @@ export class RatingService {
     for (const d of distribution) dist[d.score] = d._count;
 
     return { reviews, total, distribution: dist };
+  }
+
+  /**
+   * Double-blind release: once the order has ratings from BOTH directions
+   * (a customer-authored one and a counterpart-authored one), every rating on
+   * the order becomes visible. Until then — or the sweep window — the written
+   * rating stays hidden from the ratee, so nobody retaliates.
+   */
+  async releaseIfBothSidesRated(orderId: string) {
+    const sides = await this.prisma.rating.findMany({
+      where: { orderId },
+      select: { type: true },
+    });
+    const customerSide = sides.some((r) => r.type.startsWith('CUSTOMER_TO'));
+    const counterpartSide = sides.some((r) => !r.type.startsWith('CUSTOMER_TO'));
+    if (customerSide && counterpartSide) {
+      await this.prisma.rating.updateMany({
+        where: { orderId, visibleAt: null },
+        data: { visibleAt: new Date() },
+      });
+    }
+  }
+
+  /** Sweep half of double-blind: release anything older than the window —
+   *  a no-show counterpart must not hide feedback forever. */
+  async releaseDoubleBlind(windowHours = 72): Promise<number> {
+    const res = await this.prisma.rating.updateMany({
+      where: { visibleAt: null, createdAt: { lt: new Date(Date.now() - windowHours * 3600_000) } },
+      data: { visibleAt: new Date() },
+    });
+    return res.count;
   }
 
   private async updateVendorRating(vendorId: string) {

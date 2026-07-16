@@ -437,6 +437,9 @@ export async function driverRoutes(app: FastifyInstance) {
         tags: [],
       },
     });
+    // Double-blind: if the passenger already rated, both sides release now.
+    const { RatingService } = await import('../rating/rating.service');
+    await new RatingService(app.prisma).releaseIfBothSidesRated(id);
     return { success: true, data: rating };
   });
 

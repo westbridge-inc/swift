@@ -259,8 +259,11 @@ export function createWorkers(ctx: JobContext) {
 
       if (job.name === 'flag-ratings') {
         const { RatingService } = await import('../modules/rating/rating.service');
-        const flagged = await new RatingService(ctx.prisma).flagSuspiciousRatings();
-        ctx.log.info(`Rating anti-manipulation sweep: ${flagged} flagged`);
+        const svc = new RatingService(ctx.prisma);
+        const flagged = await svc.flagSuspiciousRatings();
+        // Double-blind window: a no-show counterpart must not hide feedback forever.
+        const released = await svc.releaseDoubleBlind();
+        ctx.log.info(`Rating sweep: ${flagged} flagged, ${released} double-blind released`);
       }
 
       if (job.name === 'booking-reminders') {
