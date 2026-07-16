@@ -37,7 +37,7 @@ beforeAll(async () => {
   await app.register(adminRoutes, { prefix: '/api/v1/admin' });
 
   // A real (empty) queue under the exact name the route resolves.
-  testQueue = new Queue('order-processing-dlq-test', { connection: app.redis.duplicate() });
+  testQueue = new Queue('order-processing-dlq-test', { connection: app.redis.duplicate() as unknown as import('bullmq').ConnectionOptions });
   app.decorate('queues', { orderQueue: testQueue } as never);
   await app.ready();
 
@@ -79,7 +79,7 @@ describe('GET /admin/dlq', () => {
     const worker = new Worker(
       testQueue.name,
       async () => { throw new Error('boom: downstream exploded'); },
-      { connection: app.redis.duplicate({ maxRetriesPerRequest: null }) },
+      { connection: app.redis.duplicate({ maxRetriesPerRequest: null }) as unknown as import('bullmq').ConnectionOptions },
     );
     // Wait until BullMQ marks it failed.
     for (let i = 0; i < 50; i++) {
