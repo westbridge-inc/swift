@@ -1502,7 +1502,9 @@ export async function customerRoutes(app: FastifyInstance) {
     if (app.queues) {
       for (const order of result.orders) {
         await app.queues.notificationQueue.add('vendor-alert-escalate', { orderId: order.id, level: 0 }, {
-          delay: 60_000,
+          // Alerts spec §A1 ladder: second alert at +30s when loud alerts are
+          // on; the shipping default stays 60s.
+          delay: process.env['ALERTS_LOUD'] === '1' ? 30_000 : 60_000,
           removeOnComplete: 100,
           removeOnFail: 50,
         });
