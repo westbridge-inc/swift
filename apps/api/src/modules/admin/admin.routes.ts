@@ -473,6 +473,17 @@ export async function adminRoutes(app: FastifyInstance) {
     return { success: true, data: user };
   });
 
+  /** GET /users/:id/risk — one deterministic number from existing signals
+   *  (marketplace §10). Throttles inform decisions; bans stay with the
+   *  explicit strike rules. */
+  app.get('/users/:id/risk', { preHandler: [adminGuard] }, async (request) => {
+    const { id } = request.params as { id: string };
+    const user = await app.prisma.user.findUnique({ where: { id }, select: { id: true } });
+    if (!user) throw new NotFoundError('User', id);
+    const { riskScoreFor } = await import('../cash/risk-score.service');
+    return { success: true, data: await riskScoreFor(app.prisma, id) };
+  });
+
   app.put('/users/:id/suspend', { preHandler: [adminGuard] }, async (request) => {
     const { id } = request.params as { id: string };
     const { reason } = reasonSchema.parse(request.body ?? {});
