@@ -48,6 +48,23 @@ export async function ridesRoutes(app: FastifyInstance) {
 
   /** POST /estimate — exact per-tier fares (Economy/Comfort/XL), before anything
    *  is requested. */
+  /**
+   * GET /availability — the honest supply read (availability spec §1/§2.1):
+   * derived from the EXACT candidate query dispatch pings with. Buckets only,
+   * never counts or positions. 10s cache per ~1km cell.
+   */
+  app.get('/availability', auth, async (request) => {
+    const { lat, lng } = z
+      .object({ lat: z.coerce.number().min(-90).max(90), lng: z.coerce.number().min(-180).max(180) })
+      .parse(request.query);
+    const cacheKey = `avail:DRIVER:${lat.toFixed(2)}:${lng.toFixed(2)}`;
+    const cached = await app.redis.get(cacheKey);
+    if (cached) return { success: true, data: JSON.parse(cached) };
+    const data = await dispatch.getAvailability('DRIVER', { lat, lng });
+    await app.redis.set(cacheKey, JSON.stringify(data), 'EX', 10).catch(() => {});
+    return { success: true, data };
+  });
+
   app.post('/estimate', auth, async (request) => {
     const body = estimateSchema.parse(request.body);
     const user = await app.prisma.user.findUniqueOrThrow({
@@ -82,6 +99,20 @@ export async function ridesRoutes(app: FastifyInstance) {
     const restriction = await orderingRestriction(app.prisma, user.id);
     if (restriction === 'banned') {
       throw new AppError(403, 'ACCOUNT_RESTRICTED', 'Rides are disabled on this account after repeated failed payments. Contact support.');
+    }
+
+    // Hard pre-check (availability spec §2.1, flag-gated): when the same query
+    // dispatch would ping with finds NOBODY, say so before taking the request —
+    // a search that cannot succeed is a promise the platform can't keep.
+    if (process.env['DISPATCH_AVAILABILITY'] === '1') {
+      const supply = await dispatch.getAvailability('DRIVER', body.pickup);
+      if (supply.level === 'NONE') {
+        throw new AppError(
+          409,
+          'NO_DRIVERS_NEARBY',
+          'No drivers are nearby right now. Try again in a few minutes.',
+        );
+      }
     }
     if (restriction === 'restricted') {
       throw new AppError(403, 'STRIKE_RESTRICTED', 'After repeated failed payments, rides require ID verification. Verify your identity to continue.');
