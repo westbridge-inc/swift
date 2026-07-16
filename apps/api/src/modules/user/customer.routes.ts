@@ -1466,8 +1466,11 @@ export async function customerRoutes(app: FastifyInstance) {
       }
     }
 
-    // Validate payment method
-    const validMethods = ['CASH', 'MOBILE_MONEY', 'BANK_TRANSFER', 'CARD'];
+    // Validate payment method. Orders are cash-only P2P: CASH, or MOBILE_MONEY
+    // (the vendor's own MMG "pay me" link — money never touches Swift). CARD /
+    // BANK_TRANSFER are NOT valid for orders — Swift is a SaaS, not a money
+    // transmitter, and must never carry an in-app order-payment method.
+    const validMethods = ['CASH', 'MOBILE_MONEY'];
     const paymentMethod = body.paymentMethod || 'CASH';
     if (!validMethods.includes(paymentMethod)) {
       throw new ValidationError(`Invalid payment method. Valid options: ${validMethods.join(', ')}`);
