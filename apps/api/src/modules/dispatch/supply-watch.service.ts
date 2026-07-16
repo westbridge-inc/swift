@@ -53,3 +53,58 @@ export async function scanSupplyWatches(
   }
   return notified;
 }
+
+
+/**
+ * Struggling-delivery options (availability spec §4.2 row 2): READY for
+ * DELIVERY_ESCALATE_AFTER minutes with no rider bound — the customer gets the
+ * options push ONCE (dedupe on the notification log): keep waiting, switch to
+ * pickup (#242's conversion), or cancel. The search itself keeps retrying —
+ * this is about giving the human a choice, not about giving up.
+ */
+export async function scanStrugglingDeliveries(
+  prisma: PrismaClient,
+  notifications: NotificationService,
+  escalateAfterMinutes = Number(process.env['DELIVERY_ESCALATE_AFTER_MIN'] ?? 5),
+  cap = 50,
+): Promise<number> {
+  const cutoff = new Date(Date.now() - escalateAfterMinutes * 60_000);
+  const struggling = await prisma.order.findMany({
+    where: {
+      status: 'READY_FOR_PICKUP',
+      fulfillment: 'DELIVERY',
+      riderId: null,
+      readyAt: { lte: cutoff },
+      vendorId: { not: null },
+      orderType: { not: 'TAXI' },
+    },
+    select: { id: true, customerId: true, orderNumber: true },
+    orderBy: { readyAt: 'asc' },
+    take: cap,
+  });
+
+  let prompted = 0;
+  for (const o of struggling) {
+    const already = await prisma.notification.findFirst({
+      where: {
+        userId: o.customerId,
+        data: { path: ['orderId'], equals: o.id },
+        AND: { data: { path: ['kind'], equals: 'delivery_options' } },
+      },
+      select: { id: true },
+    });
+    if (already) continue;
+
+    await notifications
+      .send({
+        userId: o.customerId,
+        type: 'ORDER_UPDATE',
+        title: "We're having trouble finding a rider",
+        body: `Order #${o.orderNumber} is ready and waiting. Keep waiting, switch to pickup, or cancel — your call.`,
+        data: { kind: 'delivery_options', orderId: o.id },
+      })
+      .catch(() => {});
+    prompted += 1;
+  }
+  return prompted;
+}
