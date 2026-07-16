@@ -353,6 +353,30 @@ model SupplyWatch {
   @@map("supply_watches")
 }
 
+/// Search journal (availability spec §3): one row per dispatch search, written
+/// BESIDE the order/ride state machines — never inside them. Journaling is
+/// fire-and-caught; dispatch never fails on it. A retry after exhaustion opens
+/// a FRESH row (the exhausted one keeps its resolution).
+model DispatchSearch {
+  id              String    @id @default(cuid())
+  vertical        String // TAXI | DELIVERY | COURIER
+  subjectType     String    @default("ORDER")
+  subjectId       String
+  status          String // SEARCHING | ASSIGNED | EXHAUSTED | CANCELLED
+  wave            Int       @default(1)
+  radiusKm        Float
+  candidatesTried String[]  @default([])
+  startedAt       DateTime  @default(now())
+  assignedAt      DateTime?
+  assignedTo      String?
+  exhaustedAt     DateTime?
+  resolution      String? // RETRIED | SWITCHED_PICKUP | CANCELLED | WATCHING | MANUAL
+
+  @@index([status, startedAt])
+  @@index([subjectId])
+  @@map("dispatch_searches")
+}
+
 /// Alert delivery tracking (alerts spec §A4): every money-critical alert
 /// (vendor new-order, mover offer) writes a row at send and stamps
 /// acknowledgedAt when the recipient ACTS (accept/reject/ack). Ack-rate and

@@ -150,13 +150,31 @@ describe('GET /rides/availability', () => {
 });
 
 describe('taxi hard pre-check (flag-gated)', () => {
-  it('flag ON + empty field → honest 409 before any order exists; flag OFF → request proceeds', async () => {
+  it('blocks only when the market forbids try-anyway; spec default lets the request through', async () => {
     // Field is empty (drivers parked offline by the cache test).
+    // Market forbids requesting into a dead zone → honest 409 with the copy.
     process.env['DISPATCH_AVAILABILITY'] = '1';
+    process.env['TAXI_ALLOW_REQUEST_ON_NONE'] = '0';
     const blocked = await requestRide();
     expect(blocked.statusCode).toBe(409);
     expect(blocked.json().error.code).toBe('NO_DRIVERS_NEARBY');
-    expect(blocked.json().error.message).toContain('few minutes');
+    expect(blocked.json().error.message).toContain('the moment one comes online');
+
+    // Try-anyway is the spec DEFAULT (§2.1): flag on, config unset → proceed
+    // (some drivers come online mid-search).
+    delete process.env['TAXI_ALLOW_REQUEST_ON_NONE'];
+    const tryAnyway = await requestRide();
+    expect([200, 201]).toContain(tryAnyway.statusCode);
+    const tried = tryAnyway.json().data?.order ?? tryAnyway.json().data;
+    if (tried?.id) orderIds.push(tried.id);
+
+    // One live ride per customer — clear every active taxi order so the
+    // flag-off leg can request (response shape varies; sweep by customer).
+    const cleared = await app.prisma.order.updateMany({
+      where: { customerId: { in: userIds }, orderType: 'TAXI', status: { notIn: ['CANCELLED', 'COMPLETED'] } },
+      data: { status: 'CANCELLED' },
+    });
+    expect(cleared.count).toBeGreaterThanOrEqual(1);
 
     delete process.env['DISPATCH_AVAILABILITY'];
     const allowed = await requestRide();

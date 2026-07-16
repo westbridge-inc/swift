@@ -112,6 +112,9 @@ export class OrderService {
     private prisma: PrismaClient,
     private io: Server,
     private maps: MapsProvider = getMapsProvider(),
+    /** Rider-supply read for the §2 checkout gate (availability spec) — the
+     *  SAME read dispatch uses, injected so this service stays dispatch-free. */
+    private riderAvailability?: (point: { lat: number; lng: number }) => Promise<{ level: string }>,
   ) {
     this.notifications = new NotificationService(prisma, io);
     this.countryConfig = new CountryConfigService(prisma);
@@ -234,6 +237,23 @@ export class OrderService {
       let deliveryFee = 0;
       if (fulfillment === 'DELIVERY') {
         if (!address) throw new AppError(400, 'NO_ADDRESS', 'Please set a delivery address');
+        // §2 checkout gate (availability spec, flag-gated): zero riders online
+        // means an order that would strand food on a counter — honesty beats
+        // accepting it. Pickup remains available; appointments never get here.
+        if (
+          process.env['DISPATCH_AVAILABILITY'] === '1'
+          && process.env['DELIVERY_BLOCK_ON_NONE'] !== '0'
+          && this.riderAvailability
+        ) {
+          const supply = await this.riderAvailability({ lat: vendor.latitude, lng: vendor.longitude }).catch(() => null);
+          if (supply?.level === 'NONE') {
+            throw new AppError(
+              409,
+              'DELIVERY_NO_RIDERS',
+              'No delivery riders are online right now — you can order for Pickup instead, or try delivery again later.',
+            );
+          }
+        }
         // Real road km when OSRM is configured; deterministic estimate otherwise.
         distanceKm = (await this.maps.routeKm(
           { lat: vendor.latitude, lng: vendor.longitude },
@@ -690,6 +710,14 @@ export class OrderService {
       where: { orderId, status: { not: 'CANCELLED' } },
       data: { status: 'CANCELLED' },
     });
+
+    // Search journal (availability spec §3): a live search dies with its order.
+    await this.prisma.dispatchSearch
+      .updateMany({
+        where: { subjectId: orderId, status: { in: ['SEARCHING', 'EXHAUSTED'] } },
+        data: { status: 'CANCELLED', resolution: 'CANCELLED' },
+      })
+      .catch(() => {});
 
     // The goods never left the store — tracked stock goes back on the shelf
     await this.restockCancelledOrder(orderId);
