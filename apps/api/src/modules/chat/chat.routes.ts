@@ -1,5 +1,6 @@
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
+import { detectOffPlatformContact, OFF_PLATFORM_WARNING } from './off-platform';
 
 const createRoomSchema = z.object({
   orderId: z.string().min(1),
@@ -77,6 +78,11 @@ export async function chatRoutes(app: FastifyInstance) {
     });
     if (!participant) return { success: false, error: { code: 'FORBIDDEN', message: 'Not a participant' } };
 
+    // Off-platform contact detection (spec §2): the message still delivers —
+    // the sender gets a soft nudge and the flag feeds risk signals. Detection,
+    // never censorship.
+    const offPlatform = detectOffPlatformContact(message);
+
     const msg = await app.prisma.chatMessage.create({
       data: {
         chatRoomId: roomId,
@@ -84,6 +90,7 @@ export async function chatRoutes(app: FastifyInstance) {
         message,
         messageType,
         mediaUrl,
+        offPlatformFlag: offPlatform,
       },
     });
 
@@ -122,7 +129,11 @@ export async function chatRoutes(app: FastifyInstance) {
       });
     }
 
-    return { success: true, data: msg };
+    return {
+      success: true,
+      data: msg,
+      ...(offPlatform ? { warning: OFF_PLATFORM_WARNING } : {}),
+    };
   });
 
   // Get messages

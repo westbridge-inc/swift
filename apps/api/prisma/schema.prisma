@@ -1759,8 +1759,12 @@ model ChatMessage {
   messageType String   @default("text")
   mediaUrl    String?
   isRead      Boolean  @default(false)
+  /// Off-platform contact signal (spec §2): phone number / "WhatsApp me"
+  /// detected at send. The message still delivers — this feeds risk scoring.
+  offPlatformFlag Boolean @default(false)
   createdAt   DateTime @default(now())
 
+  @@index([offPlatformFlag])
   @@map("chat_messages")
 }
 
