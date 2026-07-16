@@ -173,6 +173,33 @@ async function buildApp() {
     };
   });
 
+  // Readiness (launch-readiness Phase 6): distinct from /health's liveness.
+  // "Can this instance serve traffic RIGHT NOW" — every hard dependency must be
+  // reachable AND the schema migrated. The load balancer / orchestrator routes
+  // traffic only to a 200 here; a booting or dependency-broken instance returns
+  // 503 and is kept out of rotation. No auth (infra probe), no detail leaked.
+  app.get('/ready', async (_request, reply) => {
+    const deps: Record<string, boolean> = {};
+    try {
+      // Schema present? An un-migrated DB is "up" but cannot serve. Checking a
+      // core table exists works whether the schema arrived via migrate deploy
+      // (prod) or db push (CI) — both leave `users` present.
+      const rows = await app.prisma.$queryRaw<Array<{ ok: boolean }>>`
+        SELECT to_regclass('public.users') IS NOT NULL AS ok`;
+      deps['database'] = rows[0]?.ok === true;
+    } catch {
+      deps['database'] = false;
+    }
+    try {
+      deps['redis'] = (await app.redis.ping()) === 'PONG';
+    } catch {
+      deps['redis'] = false;
+    }
+    const ready = Object.values(deps).every(Boolean);
+    reply.status(ready ? 200 : 503);
+    return { ready, deps, timestamp: new Date().toISOString() };
+  });
+
   // Public upload trees only (items/, avatars/). Path-traversal-guarded;
   // KYC docs in other /uploads folders are never exposed here.
   registerPublicUploads(app, UPLOAD_BASE);
