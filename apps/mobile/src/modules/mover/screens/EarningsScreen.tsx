@@ -7,6 +7,9 @@ import { Card, Header, LinkText, LoadingBlock, PillButton, Screen, T, TonePill }
 import { useMoverKind, useMoverStats, useMoverSubscription, useEarningsSummary, useEarnings, useCashSettlements, useConfirmCashSettlement } from '../../../hooks';
 import { money } from '../../../lib/money';
 import { dateLabel } from '../shared';
+import { useMutation } from '@tanstack/react-query';
+import { api, API_URL } from '../../../services/api';
+import { openPayLink } from '../../../lib/payLink';
 
 function StatTile({ label, total, count, sub }: { label: string; total: number; count?: number; sub?: string }) {
   return (
@@ -131,6 +134,14 @@ export function EarningsScreen({ navigation }: any) {
   const stats = useMoverStats(kind);
   const subQ = useMoverSubscription(kind);
   const ledgerQ = useCashSettlements(kind);
+  // Signed short-lived link (the JWT can't ride an in-app browser).
+  const statement = useMutation({
+    mutationFn: async () => {
+      const r = await api.get(`/${String(kind ?? 'RIDER').toLowerCase()}/earnings/statement`, { params: { link: 1 } });
+      const path = r.data?.data?.path as string;
+      if (path) await openPayLink(`${API_URL}${path}`);
+    },
+  });
   const s: any = summaryQ.data ?? {};
   const raw: any = historyQ.data;
   const history: any[] = Array.isArray(raw) ? raw : raw?.data ?? raw?.earnings ?? [];
@@ -205,6 +216,22 @@ export function EarningsScreen({ navigation }: any) {
 
           {/* Weekly flat fee — billing transparency for the mover */}
           <WeeklyFeeCard sub={subQ.data} />
+
+          {/* Printable 30-day statement (marketplace §12) — what you show a
+              bank. Opens in the in-app browser; share/print from its sheet. */}
+          <PillButton
+            label="Get earnings statement"
+            variant="outline"
+            size="md"
+            style={{ marginTop: space.lg }}
+            loading={statement.isPending}
+            onPress={() => statement.mutate()}
+          />
+          {statement.isError ? (
+            <T variant="caption" tone="error" center style={{ marginTop: space.sm }}>
+              Couldn’t open the statement — try again.
+            </T>
+          ) : null}
 
           {/* Recent earnings */}
           <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginTop: space.xl, marginBottom: space.md }}>

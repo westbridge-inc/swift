@@ -2288,6 +2288,23 @@ export async function vendorRoutes(app: FastifyInstance) {
   // =========================================================================
 
   /** GET /settlements — Paginated settlement history */
+  /** GET /sales-statement — print-ready HTML sales statement (the receipt's
+   *  sibling, marketplace §12): what a store shows their accountant. Completed
+   *  orders only; the store's take is items minus its own promo discounts —
+   *  fees and tips belong to the rider. Default period 30 days. */
+  app.get('/sales-statement', auth, async (request, reply) => {
+    const { vendorId } = await requireVendor(app, request, 'MANAGER');
+    const { statementPeriod, buildVendorStatement, mintStatementPath } = await import('../order/statement');
+    const q = request.query as { from?: string; to?: string; link?: string };
+    const period = statementPeriod(q);
+    // ?link=1 → a short-lived signed URL the in-app browser can open (share/print).
+    if (q.link === '1') {
+      return { success: true, data: mintStatementPath('vendor', vendorId, period) };
+    }
+    reply.type('text/html; charset=utf-8');
+    return buildVendorStatement(app.prisma, vendorId, period);
+  });
+
   app.get('/settlements', auth, async (request) => {
     const { vendorId } = await requireVendor(app, request, 'MANAGER');
     const query = request.query as Record<string, string | undefined>;

@@ -1001,6 +1001,22 @@ export async function riderRoutes(app: FastifyInstance) {
     };
   });
 
+  /** GET /earnings/statement — print-ready HTML earnings statement (the
+   *  receipt's sibling, marketplace §12): what an earner shows a bank.
+   *  Derived from the earnings ledger on demand; default period 30 days. */
+  app.get('/earnings/statement', { preHandler: [app.authenticate] }, async (request, reply) => {
+    const rider = await getRider(app, request.user.userId);
+    const { statementPeriod, buildRiderStatement, mintStatementPath } = await import('../order/statement');
+    const q = request.query as { from?: string; to?: string; link?: string };
+    const period = statementPeriod(q);
+    // ?link=1 → a short-lived signed URL the in-app browser can open (share/print).
+    if (q.link === '1') {
+      return { success: true, data: mintStatementPath('rider', rider.id, period) };
+    }
+    reply.type('text/html; charset=utf-8');
+    return buildRiderStatement(app.prisma, rider.id, request.user.userId, period);
+  });
+
   /** PUT /subscription/billing-method — §13 rail selection: pay the weekly fee
    *  from the prepaid balance (CASH) or by approving an MMG request on my
    *  phone (MOBILE_MONEY + my MMG account number). */

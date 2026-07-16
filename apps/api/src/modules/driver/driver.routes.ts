@@ -791,6 +791,23 @@ export async function driverRoutes(app: FastifyInstance) {
     };
   });
 
+  /** GET /earnings/statement — print-ready HTML earnings statement (the
+   *  receipt's sibling, marketplace §12). Default period 30 days. */
+  app.get('/earnings/statement', { preHandler: [app.authenticate] }, async (request, reply) => {
+    const found = await app.prisma.driver.findUnique({ where: { userId: request.user.userId } });
+    if (!found) await throwForMissingProfile(app, request.user.userId, 'MOVER', 'Driver');
+    const driver = found!;
+    const { statementPeriod, buildDriverStatement, mintStatementPath } = await import('../order/statement');
+    const q = request.query as { from?: string; to?: string; link?: string };
+    const period = statementPeriod(q);
+    // ?link=1 → a short-lived signed URL the in-app browser can open (share/print).
+    if (q.link === '1') {
+      return { success: true, data: mintStatementPath('driver', driver.id, period) };
+    }
+    reply.type('text/html; charset=utf-8');
+    return buildDriverStatement(app.prisma, driver.id, request.user.userId, period);
+  });
+
   app.get('/earnings/summary', { preHandler: [app.authenticate] }, async (request) => {
     const found = await app.prisma.driver.findUnique({ where: { userId: request.user.userId } });
     if (!found) await throwForMissingProfile(app, request.user.userId, 'MOVER', 'Driver');
