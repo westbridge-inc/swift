@@ -293,7 +293,8 @@ export function createWorkers(ctx: JobContext) {
       if (outcome === 'realerted') {
         const queue = new Queue(QUEUE_NAMES.NOTIFICATION, { connection });
         await queue.add('vendor-alert-escalate', { orderId, level: 1 }, {
-          delay: 60_000,
+          // §A1: SMS at +75s total when loud (30+45); default stays 60+60.
+          delay: process.env['ALERTS_LOUD'] === '1' ? 45_000 : 60_000,
           removeOnComplete: 100,
           removeOnFail: 50,
         });
@@ -369,7 +370,23 @@ export function createWorkers(ctx: JobContext) {
             await releaseQueue.add('dispatch-order', { orderId }, { removeOnComplete: 100, removeOnFail: 50 });
           });
           if (released.length > 0) {
-            ctx.log.info({ count: released.length }, 'Held orders released to vendors/dispatch');
+            // A RELEASED order is the vendor's first sight of it — it deserves
+            // the same escalation ladder a fresh checkout gets (re-alert, then
+            // SMS). Previously only checkout enqueued this; a held order the
+            // vendor slept through escalated nowhere.
+            const notifQueue = new Queue(QUEUE_NAMES.NOTIFICATION, { connection });
+            try {
+              for (const orderId of released) {
+                await notifQueue.add('vendor-alert-escalate', { orderId, level: 0 }, {
+                  delay: process.env['ALERTS_LOUD'] === '1' ? 30_000 : 60_000,
+                  removeOnComplete: 100,
+                  removeOnFail: 50,
+                });
+              }
+            } finally {
+              await notifQueue.close();
+            }
+            ctx.log.info({ count: released.length }, 'Held orders released to vendors/dispatch (+escalation ladders armed)');
           }
         } finally {
           await releaseQueue.close();
