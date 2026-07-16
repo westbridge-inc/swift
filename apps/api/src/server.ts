@@ -19,7 +19,7 @@ import { servicesRoutes } from './modules/services/services.routes';
 import { partnerRoutes } from './modules/partner/partner.routes';
 import { aiRoutes } from './modules/ai/ai.routes';
 import { setAppLogger } from './utils/logger';
-import { prismaPlugin } from './plugins/prisma';
+import { prismaPlugin, beginRequestTenantContext } from './plugins/prisma';
 import { authPlugin } from './plugins/auth';
 import { socketPlugin } from './plugins/socket';
 import { redisPlugin } from './plugins/redis';
@@ -122,6 +122,13 @@ async function buildApp() {
   await app.register(redisPlugin);
   await app.register(authPlugin);
   await app.register(socketPlugin);
+
+  // Multi-tenancy: give every request a fresh tenant store BEFORE any auth runs,
+  // so `authenticate` can bind the caller's tenant without leaking across
+  // requests. Unauthenticated requests stay tenant-null (unscoped browse).
+  app.addHook('onRequest', async () => {
+    beginRequestTenantContext();
+  });
   // Sentry (SENTRY_DSN) + Prometheus /metrics (METRICS_TOKEN) — both env-gated,
   // free when unset.
   await app.register(observabilityPlugin);

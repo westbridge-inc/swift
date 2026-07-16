@@ -86,6 +86,7 @@ model User {
   supportTickets   SupportTicket[]
   resolvedTickets  SupportTicket[] @relation("supportResolver")
 
+  @@index([tenantId])
   @@map("users")
 }
 
@@ -764,6 +765,7 @@ model Vendor {
   @@index([status])
   @@index([vendorType])
   @@index([latitude, longitude])
+  @@index([tenantId])
   @@map("vendors")
 }
 
@@ -1072,6 +1074,7 @@ model Order {
   @@index([status, holdExpiresAt])
   // The vendor order board reads "my orders in these states" constantly.
   @@index([vendorId, status])
+  @@index([tenantId])
   @@map("orders")
 }
 

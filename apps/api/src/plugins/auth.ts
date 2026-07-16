@@ -1,6 +1,7 @@
 import fp from 'fastify-plugin';
 import jwt from '@fastify/jwt';
 import type { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
+import { enterTenant } from './prisma';
 
 declare module 'fastify' {
   interface FastifyInstance {
@@ -40,11 +41,14 @@ export const authPlugin = fp(async (app: FastifyInstance) => {
       const token = request.headers.authorization?.slice('Bearer '.length) ?? '';
       const session = await app.prisma.session.findUnique({
         where: { token },
-        select: { expiresAt: true },
+        select: { expiresAt: true, user: { select: { tenantId: true } } },
       });
       if (!session || session.expiresAt < new Date()) {
         throw new Error('Session revoked or expired');
       }
+      // Multi-tenancy stage 2: bind this request to the caller's tenant so
+      // every tenant-owned query downstream is scoped to it.
+      enterTenant(session.user.tenantId);
     } catch {
       reply.status(401).send({ success: false, error: { code: 'UNAUTHORIZED', message: 'Invalid or expired token' } });
     }
@@ -59,10 +63,12 @@ export const authPlugin = fp(async (app: FastifyInstance) => {
       const token = request.headers.authorization?.slice('Bearer '.length) ?? '';
       const session = await app.prisma.session.findUnique({
         where: { token },
-        select: { expiresAt: true },
+        select: { expiresAt: true, user: { select: { tenantId: true } } },
       });
       if (!session || session.expiresAt < new Date()) {
         (request as { user?: unknown }).user = undefined;
+      } else {
+        enterTenant(session.user.tenantId);
       }
     } catch {
       (request as { user?: unknown }).user = undefined;
