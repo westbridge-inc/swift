@@ -77,7 +77,7 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await app.prisma.order.deleteMany({ where: { customerId: { in: createdUserIds } } });
-  await app.prisma.promoCode.deleteMany({ where: { id: promoId } });
+  if (promoId) await app.prisma.promoCode.deleteMany({ where: { id: promoId } });
   await app.prisma.notification.deleteMany({ where: { userId: { in: createdUserIds } } });
   await app.prisma.address.deleteMany({ where: { userId: { in: createdUserIds } } });
   await app.prisma.cart.deleteMany({ where: { customerId: { in: createdUserIds } } });

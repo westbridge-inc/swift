@@ -109,7 +109,7 @@ afterAll(async () => {
     await app.prisma.item.deleteMany({ where: { vendorId: { in: vendorIds } } });
     await app.prisma.category.deleteMany({ where: { vendorId: { in: vendorIds } } });
     await app.prisma.vendor.deleteMany({ where: { id: { in: vendorIds } } });
-    await app.prisma.vendorOwner.deleteMany({ where: { id: ownerId } });
+    if (ownerId) await app.prisma.vendorOwner.deleteMany({ where: { id: ownerId } });
   }
   if (riderIds.length > 0) await app.prisma.rider.deleteMany({ where: { id: { in: riderIds } } });
   if (userIds.length > 0) {

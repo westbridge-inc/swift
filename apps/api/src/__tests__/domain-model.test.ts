@@ -34,9 +34,13 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await prisma.order.deleteMany({ where: { id: { in: createdOrderIds } } });
-  await prisma.notification.deleteMany({ where: { userId: customerId, createdAt: { gte: testStart } } });
-  await prisma.verificationDocument.deleteMany({ where: { userId: customerId } });
-  await prisma.strike.deleteMany({ where: { userId: customerId } });
+  // Guarded: a beforeAll that dies before customerId is set must never strip
+  // the where-clause into a table-wide wipe (the pressure-test lesson).
+  if (customerId) {
+    await prisma.notification.deleteMany({ where: { userId: customerId, createdAt: { gte: testStart } } });
+    await prisma.verificationDocument.deleteMany({ where: { userId: customerId } });
+    await prisma.strike.deleteMany({ where: { userId: customerId } });
+  }
   await prisma.user.deleteMany({ where: { phone: '+5920000888' } });
   await prisma.$disconnect();
 });

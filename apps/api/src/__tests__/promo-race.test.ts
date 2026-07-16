@@ -80,7 +80,7 @@ afterAll(async () => {
   // Orders reference customers + the promo — clear every order these fixtures
   // touched before deleting the users, or the FK blocks the user delete.
   await app.prisma.order.deleteMany({ where: { customerId: { in: createdUserIds } } });
-  await app.prisma.promoCode.deleteMany({ where: { id: promoId } });
+  if (promoId) await app.prisma.promoCode.deleteMany({ where: { id: promoId } });
   await app.prisma.notification.deleteMany({ where: { userId: { in: createdUserIds } } });
   await app.prisma.address.deleteMany({ where: { userId: { in: createdUserIds } } });
   await app.prisma.cart.deleteMany({ where: { customerId: { in: createdUserIds } } });
