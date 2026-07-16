@@ -2048,6 +2048,42 @@ export async function adminRoutes(app: FastifyInstance) {
   };
   const DLQ_NAMES = ['order', 'riderAssignment', 'subscription', 'settlement', 'notification', 'verification', 'dispatch'] as const;
 
+  /** GET /alerts/health — ack rate + median time-to-ack per alert kind
+   *  (alerts spec §A4): how silently-failing pushes get caught before churn.
+   *  Thresholds surfaced: ack-rate <90% or median >20s deserve eyes. */
+  app.get('/alerts/health', { preHandler: [adminGuard] }, async (request) => {
+    const { hours } = z.object({ hours: z.coerce.number().min(1).max(168).default(24) }).parse(request.query);
+    const since = new Date(Date.now() - hours * 3600_000);
+    const rows = await app.prisma.alertDelivery.findMany({
+      where: { sentAt: { gte: since } },
+      select: { kind: true, sentAt: true, acknowledgedAt: true },
+    });
+    const kinds = new Map<string, { sent: number; acked: number; ackSeconds: number[] }>();
+    for (const r of rows) {
+      const k = kinds.get(r.kind) ?? { sent: 0, acked: 0, ackSeconds: [] };
+      k.sent += 1;
+      if (r.acknowledgedAt) {
+        k.acked += 1;
+        k.ackSeconds.push((r.acknowledgedAt.getTime() - r.sentAt.getTime()) / 1000);
+      }
+      kinds.set(r.kind, k);
+    }
+    const data = [...kinds.entries()].map(([kind, k]) => {
+      const sorted = k.ackSeconds.sort((a, b) => a - b);
+      const median = sorted.length ? sorted[Math.floor(sorted.length / 2)]! : null;
+      const ackRate = k.sent ? k.acked / k.sent : null;
+      return {
+        kind,
+        sent: k.sent,
+        acked: k.acked,
+        ackRate,
+        medianTimeToAckSeconds: median === null ? null : Math.round(median),
+        breaching: (ackRate !== null && ackRate < 0.9) || (median !== null && median > 20),
+      };
+    });
+    return { success: true, data: { windowHours: hours, kinds: data } };
+  });
+
   /** GET /dlq — failed jobs across every queue, newest first. */
   app.get('/dlq', { preHandler: [adminGuard] }, async () => {
     const queues = requireQueues();

@@ -762,6 +762,9 @@ export async function vendorRoutes(app: FastifyInstance) {
 
   /** PUT /orders/:id/ack — explicit acknowledgement without accept/reject. */
   app.put<{ Params: IdParam }>('/orders/:id/ack', auth, async (request) => {
+    // Alert-delivery ack (§A4): the store ACTED on this order's alert.
+    const { acknowledgeAlert } = await import('../notification/notification.service');
+    await acknowledgeAlert(app.prisma, 'VENDOR_ORDER', request.params.id).catch(() => {});
     await resolveOwnedOrder(app, request.user.userId, request.params.id);
     await ackVendorAlert(app, request.user.userId, request.params.id);
     return { success: true, data: { acknowledged: true } };
@@ -819,6 +822,9 @@ export async function vendorRoutes(app: FastifyInstance) {
 
   /** PUT /orders/:id/accept — Accept an incoming order */
   app.put<{ Params: IdParam }>('/orders/:id/accept', auth, async (request) => {
+    // Alert-delivery ack (§A4): the store ACTED on this order's alert.
+    const { acknowledgeAlert } = await import('../notification/notification.service');
+    await acknowledgeAlert(app.prisma, 'VENDOR_ORDER', request.params.id).catch(() => {});
     const order = await resolveOwnedOrder(app, request.user.userId, request.params.id);
     if (order.status !== 'PENDING') {
       throw new AppError(400, 'INVALID_STATUS', `Cannot accept order in ${order.status} status`);
@@ -1134,6 +1140,9 @@ export async function vendorRoutes(app: FastifyInstance) {
 
   /** PUT /orders/:id/reject — Vendor cancels / rejects an order */
   app.put<{ Params: IdParam }>('/orders/:id/reject', auth, async (request) => {
+    // Alert-delivery ack (§A4): the store ACTED on this order's alert.
+    const { acknowledgeAlert } = await import('../notification/notification.service');
+    await acknowledgeAlert(app.prisma, 'VENDOR_ORDER', request.params.id).catch(() => {});
     const order = await resolveOwnedOrder(app, request.user.userId, request.params.id);
     const rejectableStatuses = ['PENDING', 'ACCEPTED', 'PREPARING'];
     if (!rejectableStatuses.includes(order.status)) {

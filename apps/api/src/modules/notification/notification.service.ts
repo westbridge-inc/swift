@@ -106,6 +106,20 @@ export async function escalateVendorAlert(
  *  told it exists — "we review within 24 hours" needs a tap on the shoulder,
  *  not a dashboard someone remembers to open. Fans one notification (row +
  *  live socket) to every active ADMIN/SUPER_ADMIN account. */
+/** Stamp acknowledgment on an alert delivery — the recipient ACTED. Idempotent,
+ *  fire-and-caught at call sites (tracking never blocks the action). */
+export async function acknowledgeAlert(
+  prisma: PrismaClient,
+  kind: 'VENDOR_ORDER' | 'MOVER_OFFER',
+  subjectId: string,
+  recipientId?: string,
+): Promise<void> {
+  await prisma.alertDelivery.updateMany({
+    where: { kind, subjectId, ...(recipientId ? { recipientId } : {}), acknowledgedAt: null },
+    data: { acknowledgedAt: new Date() },
+  });
+}
+
 export async function notifyAdmins(
   prisma: PrismaClient,
   notifications: NotificationService,
@@ -282,6 +296,12 @@ export class NotificationService {
    * NOT optional for vendors — prefs are ignored on this path by design.
    */
   async newOrderForVendor(vendorOwnerId: string, orderNumber: string, itemCount: number, total: number, orderId: string): Promise<string> {
+    // Alert-delivery tracking (alerts spec §A4) — a row per money-critical
+    // alert; the vendor's accept/reject/ack stamps acknowledgedAt. Tracking
+    // must never fail the alert itself.
+    await this.prisma.alertDelivery
+      .create({ data: { kind: 'VENDOR_ORDER', subjectId: orderId, recipientId: vendorOwnerId } })
+      .catch(() => {});
     const notificationId = await this.send({
       userId: vendorOwnerId,
       type: 'ORDER_UPDATE',

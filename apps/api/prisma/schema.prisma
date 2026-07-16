@@ -335,6 +335,23 @@ model ComplianceReviewCase {
   @@map("compliance_review_cases")
 }
 
+/// Alert delivery tracking (alerts spec §A4): every money-critical alert
+/// (vendor new-order, mover offer) writes a row at send and stamps
+/// acknowledgedAt when the recipient ACTS (accept/reject/ack). Ack-rate and
+/// time-to-ack are how silently-failing pushes get caught before churn.
+model AlertDelivery {
+  id             String    @id @default(cuid())
+  kind           String // VENDOR_ORDER | MOVER_OFFER
+  subjectId      String // orderId
+  recipientId    String // userId
+  sentAt         DateTime  @default(now())
+  acknowledgedAt DateTime?
+
+  @@index([kind, sentAt])
+  @@index([subjectId, recipientId])
+  @@map("alert_deliveries")
+}
+
 enum ComplianceReviewStatus {
   OPEN
   PASSED
