@@ -179,3 +179,24 @@ export const decideComplianceReview = (id: string, pass: boolean, note?: string)
     method: 'POST',
     body: JSON.stringify({ pass, ...(note ? { note } : {}) }),
   });
+
+// ── People ───────────────────────────────────────────────────────────────────
+export const fetchUsers = (params: { search?: string; status?: string; page?: number } = {}) => {
+  const q = new URLSearchParams({ page: String(params.page ?? 1), limit: '30' });
+  if (params.search) q.set('search', params.search);
+  if (params.status) q.set('status', params.status);
+  return apiFetch(`/api/v1/admin/users?${q}`).then((r) => ({ rows: r.data as any[], meta: r.meta }));
+};
+export const suspendUser = (id: string, reason: string) =>
+  apiFetch(`/api/v1/admin/users/${id}/suspend`, { method: 'PUT', body: JSON.stringify({ reason }) });
+export const unsuspendUser = (id: string) =>
+  apiFetch(`/api/v1/admin/users/${id}/unsuspend`, { method: 'PUT', body: '{}' });
+
+// ── Vendors & Billing ────────────────────────────────────────────────────────
+export const fetchVendors = (params: { search?: string; status?: string; page?: number } = {}) => {
+  const q = new URLSearchParams({ page: String(params.page ?? 1), limit: '30' });
+  if (params.search) q.set('search', params.search);
+  if (params.status) q.set('status', params.status);
+  return apiFetch(`/api/v1/admin/vendors?${q}`).then((r) => ({ rows: r.data as any[], meta: r.meta }));
+};
+export const fetchPaymentMix = () => apiFetch('/api/v1/admin/finance/payment-mix').then((r) => r.data);
