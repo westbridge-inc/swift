@@ -10,7 +10,14 @@ export default defineConfig({
     // DEV_OTP_BYPASS=1, which Prisma's dotenv otherwise leaks into the test
     // process (no-override, so setting it here first wins) and turns 2 auth
     // security tests into false negatives. Pin it off + force NODE_ENV=test.
-    env: { DEV_OTP_BYPASS: '0', NODE_ENV: 'test' },
+    env: {
+      DEV_OTP_BYPASS: '0',
+      NODE_ENV: 'test',
+      // Auth fails fast without a JWT secret — and a suite that crashes at
+      // boot still runs afterAll teardowns, which is how a missing env var
+      // once wiped a seeded DB. Tests always get a secret; prod never does.
+      JWT_SECRET: process.env['JWT_SECRET'] ?? 'vitest-local-jwt-secret',
+    },
     // All test files share ONE Postgres DB, so run files sequentially: parallel
     // files race on create/delete of shared fixtures (phones, carts→vendors→users)
     // and flake intermittently (FK violations). Sequential is deterministic (~22s).

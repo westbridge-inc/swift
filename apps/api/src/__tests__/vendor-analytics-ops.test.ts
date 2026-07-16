@@ -129,7 +129,7 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await app.prisma.order.deleteMany({ where: { vendorId } });
-  await app.prisma.vendor.deleteMany({ where: { id: vendorId } });
+  if (vendorId) await app.prisma.vendor.deleteMany({ where: { id: vendorId } });
   await app.prisma.user.deleteMany({ where: { id: { in: createdUserIds } } });
   await app.close();
 });

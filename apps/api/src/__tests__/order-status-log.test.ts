@@ -48,7 +48,7 @@ afterAll(async () => {
   // Deleting the parent order cascades its logs at the DB level — the intended,
   // un-intercepted cleanup path. That this leaves no rows proves the teardown
   // pattern the whole suite now relies on (no explicit orderStatusLog.deleteMany).
-  await app.prisma.order.deleteMany({ where: { id: orderId } });
+  if (orderId) await app.prisma.order.deleteMany({ where: { id: orderId } });
   const leftover = await app.prisma.orderStatusLog.count({ where: { orderId } });
   expect(leftover).toBe(0);
   await app.close();

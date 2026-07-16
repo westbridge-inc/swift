@@ -68,9 +68,11 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
-  await app.prisma.chatMessage.deleteMany({ where: { chatRoomId: roomId } });
-  await app.prisma.chatRoomParticipant.deleteMany({ where: { chatRoomId: roomId } });
-  await app.prisma.chatRoom.deleteMany({ where: { id: roomId } });
+  if (roomId) {
+    await app.prisma.chatMessage.deleteMany({ where: { chatRoomId: roomId } });
+    await app.prisma.chatRoomParticipant.deleteMany({ where: { chatRoomId: roomId } });
+    await app.prisma.chatRoom.deleteMany({ where: { id: roomId } });
+  }
   await app.prisma.notification.deleteMany({ where: { userId: { in: [userId, otherId] } } });
   await app.prisma.session.deleteMany({ where: { userId } });
   await app.prisma.user.deleteMany({ where: { id: { in: [userId, otherId] } } });

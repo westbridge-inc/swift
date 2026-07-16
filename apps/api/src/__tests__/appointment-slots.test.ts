@@ -60,9 +60,13 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
-  await app.prisma.session.deleteMany({ where: { userId } });
-  await app.prisma.customer.deleteMany({ where: { userId } });
-  await app.prisma.user.deleteMany({ where: { id: userId } });
+  // Guarded: if beforeAll dies before userId is set, an undefined here would
+  // strip the where-clause and DELETE EVERY ROW (the pressure-test wipe).
+  if (userId) {
+    await app.prisma.session.deleteMany({ where: { userId } });
+    await app.prisma.customer.deleteMany({ where: { userId } });
+    await app.prisma.user.deleteMany({ where: { id: userId } });
+  }
   await app.close();
 });
 

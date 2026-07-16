@@ -70,7 +70,7 @@ beforeAll(async () => {
 afterAll(async () => {
   await app.prisma.earning.deleteMany({ where: { orderId: { in: createdOrderIds } } });
   await app.prisma.order.deleteMany({ where: { id: { in: createdOrderIds } } });
-  await app.prisma.rider.deleteMany({ where: { id: riderId } });
+  if (riderId) await app.prisma.rider.deleteMany({ where: { id: riderId } });
   await app.prisma.notification.deleteMany({ where: { userId: { in: createdUserIds } } });
   await app.prisma.customer.deleteMany({ where: { userId: { in: createdUserIds } } });
   await app.prisma.user.deleteMany({ where: { id: { in: createdUserIds } } });
