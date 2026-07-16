@@ -108,10 +108,12 @@ afterAll(async () => {
 
 describe('Channels — one interface, dev adapter logs everything', () => {
   it('OTPs go out through the SMS channel', async () => {
-    const code = await requestOtp(app, OTP_PHONE);
+    await requestOtp(app, OTP_PHONE);
     const sms = smsEntriesTo(OTP_PHONE);
     expect(sms.length).toBeGreaterThan(0);
-    expect(sms.at(-1)!.body).toContain(code);
+    // Codes are hashed at rest now, so the helper can't return the real one —
+    // assert the SMS carried A six-digit code through the channel.
+    expect(sms.at(-1)!.body).toMatch(/code is: \d{6}/);
   });
 
   it('send() fans out to device tokens and honours prefs', async () => {

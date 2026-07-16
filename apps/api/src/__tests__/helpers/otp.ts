@@ -1,11 +1,16 @@
 import type { FastifyInstance } from 'fastify';
 import type { LightMyRequestResponse } from 'fastify';
+import { storeOtp } from '../../utils/otp';
 
 /**
- * Requests a real OTP through the API and reads the generated code from Redis.
- * SEC-6 removed the hardcoded dev OTP, so tests exercise the actual flow:
- * send-otp -> code stored in Redis -> verify-otp with that code.
+ * Requests a real OTP through the API, then pins a KNOWN code for the same
+ * phone. Codes are hashed at rest (launch-readiness §1.1), so the old trick of
+ * reading the plaintext back out of Redis is exactly what the hardening
+ * forbids — instead the helper overwrites the stored hash via the real
+ * storeOtp(), and verify-otp still exercises the full hashed-compare path.
  */
+const KNOWN_TEST_OTP = '246810';
+
 export async function requestOtp(app: FastifyInstance, phone: string): Promise<string> {
   // Reset the per-phone cooldown AND the daily SMS-budget counters so repeated
   // test runs stay deterministic (these caps are cost guardrails, not test gates).
@@ -27,11 +32,12 @@ export async function requestOtp(app: FastifyInstance, phone: string): Promise<s
     throw new Error(`send-otp failed for ${phone}: ${res.statusCode} ${res.body}`);
   }
 
-  const code = await app.redis.get(`otp:${phone}`);
-  if (!code) {
+  const stored = await app.redis.get(`otp:${phone}`);
+  if (!stored) {
     throw new Error(`No OTP stored in Redis for ${phone}`);
   }
-  return code;
+  await storeOtp(app.redis, phone, KNOWN_TEST_OTP);
+  return KNOWN_TEST_OTP;
 }
 
 /** Full login: request an OTP, then verify it. Returns the verify-otp response. */

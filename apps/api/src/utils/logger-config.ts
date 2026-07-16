@@ -15,6 +15,18 @@ export const loggerRedactConfig = {
     '*.token',
     '*.cardNumber',
     '*.cvc',
+    // Launch-readiness §1.6 / CLAUDE.md rule 4: OTPs, ride/pickup codes and
+    // MMG credentials never reach a log line, even via logged payloads.
+    '*.otp',
+    '*.code',
+    '*.pin',
+    '*.ridePin',
+    '*.pickupCode',
+    '*.mmgPassword',
+    '*.mkey',
+    '*.msecret',
+    'req.body.code',
+    'req.body.otp',
   ],
   censor: '[redacted]',
 };
