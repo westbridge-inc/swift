@@ -205,6 +205,7 @@ export const fetchPaymentMix = () => apiFetch('/api/v1/admin/finance/payment-mix
 export const fetchHealth = () =>
   fetch(`${API_ORIGIN}/health`).then(async (r) => ({ httpOk: r.ok, ...(await r.json()) }));
 export const fetchDlq = () => apiFetch('/api/v1/admin/dlq').then((r) => r.data);
+export const fetchAlertsHealth = () => apiFetch('/api/v1/admin/alerts/health').then((r) => r.data);
 export const requeueDlqJob = (queue: string, id: string) =>
   apiFetch(`/api/v1/admin/dlq/${queue}/${id}/requeue`, { method: 'POST', body: '{}' });
 export const discardDlqJob = (queue: string, id: string) =>

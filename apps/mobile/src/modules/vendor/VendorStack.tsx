@@ -469,6 +469,14 @@ function VendorOps({ store, navigation }: any) {
   const exitPreview = useVendorPreview((s) => s.exitPreview);
   // Only fetched to NAME the failing document in the suspension banner.
   const vstatus = useVerificationStatus<any>(store.vendorType);
+  // §B5 progress: N of M checklist documents currently approved (unexpired).
+  const checklist: string[] = vstatus.data?.checklist ?? [];
+  const checklistTotal = checklist.length;
+  const checklistApproved = checklist.filter((dt: string) =>
+    (vstatus.data?.documents ?? []).some(
+      (d: any) => d.docType === dt && d.status === 'APPROVED' && (!d.expiresAt || new Date(d.expiresAt) > new Date()),
+    ),
+  ).length;
   const failingDocs: string[] = store.isVerified === false
     ? (vstatus.data?.checklist ?? []).filter((dt: string) => {
         const docs = (vstatus.data?.documents ?? []).filter((d: any) => d.docType === dt);
@@ -516,15 +524,23 @@ function VendorOps({ store, navigation }: any) {
         ) : null}
 
         {/* Gated-trials spec §B: a pending store browses in PREVIEW — encouraging
-            copy, not the suspension scare. Tap returns to the checklist. */}
+            copy with live progress (§B5), not the suspension scare. Tap returns
+            to the checklist. */}
         {inPreview ? (
           <Pressable onPress={exitPreview}>
             {({ pressed }) => (
               <View style={{ flexDirection: 'row', alignItems: 'flex-start', gap: space.sm, borderRadius: radius.lg, backgroundColor: color.brand[50], padding: space.md, marginBottom: space.lg, opacity: pressed ? 0.85 : 1 }}>
                 <Feather name="eye" size={15} color={color.brand[500]} style={{ marginTop: 1 }} />
-                <T variant="label" tone="brand" style={{ flex: 1 }}>
-                  Preview — this is your dashboard-to-be. Selling unlocks the moment your documents are approved. Tap to track your verification.
-                </T>
+                <View style={{ flex: 1 }}>
+                  <T variant="label" tone="brand" weight="bold">
+                    {checklistTotal > 0
+                      ? `Finish verification to start earning — ${checklistApproved} of ${checklistTotal} documents approved.`
+                      : 'Finish verification to start earning.'}
+                  </T>
+                  <T variant="caption" tone="brand" style={{ marginTop: 2 }}>
+                    You&apos;re in preview: selling unlocks the moment you&apos;re approved. Tap to track your verification.
+                  </T>
+                </View>
               </View>
             )}
           </Pressable>
