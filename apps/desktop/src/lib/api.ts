@@ -7,9 +7,14 @@ const API_URL = import.meta.env.VITE_API_URL ?? 'http://localhost:3000';
 let accessToken: string | null = null;
 
 export async function loadSession(): Promise<boolean> {
-  // A denied/locked Keychain must read as "logged out", never a hang — the
-  // OS prompts for permission when a rebuilt (re-signed) binary reads items
-  // created by an older build.
+  // Session restore reads the Keychain — which, on UNSIGNED dev builds,
+  // fires an unskippable OS permission prompt after every rebuild (each
+  // ad-hoc signature is a "new app" to macOS, and the dialog rejects
+  // synthetic input by design). Until builds are signed with a stable
+  // identity, restore is opt-in: without the flag we start logged-out and
+  // never touch the Keychain at launch. Writes remain fire-and-forget, so
+  // flipping the flag on a signed build restores sessions seamlessly.
+  if (!import.meta.env.VITE_RESTORE_SESSION) return false;
   try {
     accessToken = (await invoke<string | null>('keychain_get', { key: 'access' })) ?? null;
   } catch {
@@ -155,3 +160,22 @@ export const REASON_CODES = [
   'EXPIRED', 'UNREADABLE', 'WRONG_DOCUMENT', 'FACE_MISMATCH', 'NAME_MISMATCH',
   'INSURANCE_NOT_HIRE', 'NOT_YELLOW', 'SUSPECTED_TAMPERING', 'DUPLICATE', 'INCOMPLETE',
 ] as const;
+
+// ── Live Ops ─────────────────────────────────────────────────────────────────
+export const fetchOpsLive = () => apiFetch('/api/v1/admin/ops/live').then((r) => r.data);
+
+// ── Agent ────────────────────────────────────────────────────────────────────
+export const fetchAgentApprovals = () =>
+  apiFetch('/api/v1/admin/agent/approvals?status=PENDING').then((r) => r.data);
+export const decideAgentApproval = (id: string, approve: boolean) =>
+  apiFetch(`/api/v1/admin/agent/approvals/${id}/${approve ? 'approve' : 'reject'}`, { method: 'POST', body: '{}' });
+
+// ── Compliance ───────────────────────────────────────────────────────────────
+export const fetchCompliance = () => apiFetch('/api/v1/admin/compliance').then((r) => r.data);
+export const runComplianceAudit = () =>
+  apiFetch('/api/v1/admin/compliance/run', { method: 'POST', body: '{}' });
+export const decideComplianceReview = (id: string, pass: boolean, note?: string) =>
+  apiFetch(`/api/v1/admin/compliance/reviews/${id}/decide`, {
+    method: 'POST',
+    body: JSON.stringify({ pass, ...(note ? { note } : {}) }),
+  });
