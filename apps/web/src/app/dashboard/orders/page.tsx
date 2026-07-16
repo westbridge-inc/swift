@@ -3,6 +3,7 @@
 import { useMemo, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { RefreshCw } from 'lucide-react';
+import NewOrderTakeover from '@/components/NewOrderTakeover';
 import {
   acceptOrder, completePickup, confirmPayment, getItems, getOrder, getOrders,
   markPreparing, markReady, proposeSubstitution, refundLine, rejectOrder,
@@ -333,6 +334,7 @@ export default function OrdersPage() {
 
   return (
     <div className="space-y-5">
+      <NewOrderTakeover orders={all} />
       <div className="flex items-center justify-between">
         <h1 className="text-2xl font-extrabold">Orders</h1>
         <button
