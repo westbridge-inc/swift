@@ -312,6 +312,15 @@ export function createWorkers(ctx: JobContext) {
       const { DispatchService, sweepStaleMovers, reconcileStuckDispatch } = await import('../modules/dispatch/dispatch.service');
       const { getMapsProvider } = await import('../providers/maps/maps-provider');
 
+      if (job.name === 'scheduler-heartbeat') {
+        // Liveness beacon for the job scheduler (launch-readiness Phase 6). If
+        // this worker process dies, holds stop releasing, expiry sweeps stop,
+        // settlements stop — silently. The heartbeat key's AGE (exposed as a
+        // Prometheus gauge) makes that stall detectable and alertable.
+        await ctx.redis.set('scheduler:heartbeat', String(Date.now()));
+        return;
+      }
+
       if (job.name === 'stale-movers') {
         const swept = await sweepStaleMovers(ctx.prisma);
         if (swept.riders + swept.drivers > 0) {
@@ -557,6 +566,15 @@ export async function scheduleRecurringJobs(queues: ReturnType<typeof createQueu
     repeat: { every: 120_000 },
     removeOnComplete: 20,
     removeOnFail: 20,
+  });
+
+  // Scheduler liveness heartbeat, every 60s (launch-readiness Phase 6). The
+  // observability gauge reads its age; a stale beacon = the worker died and
+  // every recurring job silently stopped.
+  await queues.dispatchQueue.add('scheduler-heartbeat', {}, {
+    repeat: { every: 60_000 },
+    removeOnComplete: 5,
+    removeOnFail: 5,
   });
 
   // Ghost-mover sweep: force-offline anyone whose GPS went silent, every 5
