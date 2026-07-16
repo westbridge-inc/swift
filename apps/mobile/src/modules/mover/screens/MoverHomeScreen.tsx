@@ -29,7 +29,7 @@ import { GEORGETOWN } from '../../../hooks/useDeviceLocation';
 import { money } from '../../../lib/money';
 import { FareSlider } from '../../../components/FareSlider';
 import { GUTTER, RoutePair, jobAmount, CustomerTrustBadge } from '../shared';
-import { dk, DCard, DStat, DWeekBars } from '../dark';
+import { dk, withAlpha, DCard, DStat, DWeekBars } from '../dark';
 
 /**
  * The earner home (dashboard plan Phase B/C): dark, map-first, demand-aware.
@@ -178,7 +178,7 @@ function DispatchOfferCard({
 /** Demand dot: a waiting taxi request, rounded to ~300 m server-side. */
 function DemandDot() {
   return (
-    <View style={{ width: 18, height: 18, borderRadius: 9, backgroundColor: 'rgba(232,25,44,0.25)', alignItems: 'center', justifyContent: 'center' }}>
+    <View style={{ width: 18, height: 18, borderRadius: 9, backgroundColor: dk.accentSoft, alignItems: 'center', justifyContent: 'center' }}>
       <View style={{ width: 8, height: 8, borderRadius: 4, backgroundColor: dk.accent }} />
     </View>
   );
@@ -386,7 +386,7 @@ export function MoverHomeScreen({ navigation }: any) {
         <View pointerEvents="box-none" style={{ position: 'absolute', left: 0, right: 0, bottom: '38%', alignItems: 'center' }}>
           <Pressable disabled={busyToggle} onPress={() => goOnline.mutate()}>
             {({ pressed }) => (
-              <View style={{ width: 96, height: 96, borderRadius: 48, alignItems: 'center', justifyContent: 'center', backgroundColor: 'rgba(232,25,44,0.25)' }}>
+              <View style={{ width: 96, height: 96, borderRadius: 48, alignItems: 'center', justifyContent: 'center', backgroundColor: dk.accentGlow }}>
                 <View
                   style={[
                     { width: 76, height: 76, borderRadius: 38, alignItems: 'center', justifyContent: 'center', backgroundColor: dk.accent, opacity: pressed || busyToggle ? 0.8 : 1 },
@@ -440,7 +440,7 @@ export function MoverHomeScreen({ navigation }: any) {
 
           {/* Why the switch snapped back — the gate's own words, right where you flipped it. */}
           {errMsg ? (
-            <View style={{ flexDirection: 'row', alignItems: 'flex-start', gap: space.sm, borderRadius: radius.lg, backgroundColor: 'rgba(232,25,44,0.14)', borderWidth: 1, borderColor: 'rgba(232,25,44,0.4)', padding: space.md, marginTop: space.md }}>
+            <View style={{ flexDirection: 'row', alignItems: 'flex-start', gap: space.sm, borderRadius: radius.lg, backgroundColor: withAlpha(dk.accent, 0.14), borderWidth: 1, borderColor: dk.accentBorder, padding: space.md, marginTop: space.md }}>
               <Feather name="alert-circle" size={15} color={dk.accent} style={{ marginTop: 1 }} />
               <T variant="label" style={{ flex: 1, color: dk.text }}>
                 {errMsg}
@@ -541,7 +541,7 @@ export function MoverHomeScreen({ navigation }: any) {
           {activeJob ? (
             <Pressable onPress={() => navigation?.navigate?.('ActiveJob')}>
               {({ pressed }) => (
-                <DCard style={{ marginTop: space.md, borderColor: 'rgba(232,25,44,0.5)', opacity: pressed ? 0.9 : 1 }}>
+                <DCard style={{ marginTop: space.md, borderColor: dk.accentBorder, opacity: pressed ? 0.9 : 1 }}>
                   <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
                     <T variant="caption" weight="bold" style={{ color: dk.accent, letterSpacing: 1 }}>
                       ACTIVE JOB
@@ -578,7 +578,7 @@ export function MoverHomeScreen({ navigation }: any) {
                           {jobAmount(j)}
                         </T>
                         {j.isExpress ? (
-                          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 3, borderRadius: 9999, backgroundColor: 'rgba(232,25,44,0.2)', paddingHorizontal: space.sm, paddingVertical: 2 }}>
+                          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 3, borderRadius: 9999, backgroundColor: dk.accentSoft, paddingHorizontal: space.sm, paddingVertical: 2 }}>
                             <MaterialCommunityIcons name="lightning-bolt" size={12} color={dk.accent} />
                             <T variant="caption" weight="semibold" style={{ color: dk.accent }}>
                               EXPRESS

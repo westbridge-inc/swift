@@ -11,7 +11,7 @@ import { dateLabel } from '../shared';
 import { useMutation } from '@tanstack/react-query';
 import { api, API_URL } from '../../../services/api';
 import { openPayLink } from '../../../lib/payLink';
-import { dk, DCard, DHeader } from '../dark';
+import { dk, withAlpha, DCard, DHeader } from '../dark';
 
 /** Earnings, in the earner app's dark language (dashboard plan Phase E-lite).
  *  Same ledger, same rules — the money story just reads like the reference. */
@@ -120,7 +120,7 @@ function WeeklyFeeCard({ sub }: { sub: any }) {
         <T variant="body" weight="semibold" style={{ color: dk.text }}>
           Your weekly fee
         </T>
-        <TonePill label={pill.label} tone={pill.tone} />
+        <TonePill label={pill.label} tone={pill.tone} dark />
       </View>
       <T variant="label" style={{ color: dk.muted, marginTop: 4 }}>
         {line}
@@ -281,7 +281,7 @@ export function EarningsScreen({ navigation }: any) {
               ))}
             </DCard>
           )}
-          <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.sm, borderRadius: radius.lg, backgroundColor: 'rgba(232,25,44,0.12)', borderWidth: 1, borderColor: 'rgba(232,25,44,0.35)', padding: space.md, marginTop: space.lg }}>
+          <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.sm, borderRadius: radius.lg, backgroundColor: withAlpha(dk.accent, 0.12), borderWidth: 1, borderColor: dk.accentBorder, padding: space.md, marginTop: space.lg }}>
             <MaterialCommunityIcons name="calendar-check" size={16} color={dk.accent} />
             <T variant="caption" weight="semibold" style={{ flex: 1, color: dk.text }}>
               You keep every cent — Swift only charges the flat weekly fee. No commission, ever.

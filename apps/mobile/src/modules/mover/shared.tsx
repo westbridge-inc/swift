@@ -47,12 +47,12 @@ export function CustomerTrustBadge({ trust, cash }: { trust?: { trustLevel: stri
   );
 }
 
-export function JobStatusPill({ status }: { status?: string }) {
+export function JobStatusPill({ status, dark }: { status?: string; dark?: boolean }) {
   const s = String(status ?? '').toUpperCase();
   const label = s.replace(/_/g, ' ').toLowerCase();
-  if (s === 'DELIVERED' || s === 'COMPLETED') return <TonePill label={s === 'DELIVERED' ? 'Delivered' : 'Completed'} tone="success" />;
-  if (s === 'CANCELLED') return <TonePill label="Cancelled" tone="error" />;
-  return <TonePill label={label || 'In progress'} tone="brand" />;
+  if (s === 'DELIVERED' || s === 'COMPLETED') return <TonePill label={s === 'DELIVERED' ? 'Delivered' : 'Completed'} tone="success" dark={dark} />;
+  if (s === 'CANCELLED') return <TonePill label="Cancelled" tone="error" dark={dark} />;
+  return <TonePill label={label || 'In progress'} tone="brand" dark={dark} />;
 }
 
 /** Pickup → drop-off pair with the dot / line / pin idiom. */

@@ -197,13 +197,20 @@ export function Chip({
 }
 
 /** Soft status pill — order/job states. Tint per tone, never color alone. */
-export function TonePill({ label, tone = 'neutral' }: { label: string; tone?: 'brand' | 'success' | 'neutral' | 'error' }) {
-  const c = {
-    brand: { bg: color.brand[50], fg: color.brand[600] },
-    success: { bg: '#E8F6EE', fg: color.success },
-    error: { bg: '#FDECEC', fg: color.error },
-    neutral: { bg: color.border.subtle, fg: color.text.secondary },
-  }[tone];
+export function TonePill({ label, tone = 'neutral', dark }: { label: string; tone?: 'brand' | 'success' | 'neutral' | 'error'; dark?: boolean }) {
+  const c = (dark
+    ? {
+        brand: { bg: 'rgba(128,59,59,0.35)', fg: '#E9B9B9' },
+        success: { bg: 'rgba(47,191,113,0.18)', fg: '#5AD695' },
+        error: { bg: 'rgba(224,82,82,0.2)', fg: '#F09A9A' },
+        neutral: { bg: 'rgba(255,255,255,0.1)', fg: 'rgba(255,255,255,0.7)' },
+      }
+    : {
+        brand: { bg: color.brand[50], fg: color.brand[600] },
+        success: { bg: '#E8F6EE', fg: color.success },
+        error: { bg: '#FDECEC', fg: color.error },
+        neutral: { bg: color.border.subtle, fg: color.text.secondary },
+      })[tone];
   return (
     <View style={{ paddingHorizontal: space.md, paddingVertical: 5, borderRadius: 9999, backgroundColor: c.bg, alignSelf: 'flex-start' }}>
       <T variant="caption" weight="semibold" style={{ color: c.fg }}>
