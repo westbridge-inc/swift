@@ -117,6 +117,8 @@ beforeAll(async () => {
       type: 'CUSTOMER_TO_VENDOR',
       score: 4,
       comment: 'Great pepperpot, slow delivery',
+      // Double-blind released — the public feed only lists visible ratings.
+      visibleAt: new Date(),
     },
   });
   ratingId = rating.id;
