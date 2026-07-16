@@ -243,6 +243,32 @@ export class DispatchService {
       estLoad: order.items.length > 0 ? estimateLoad(totalUnits) : null,
     });
 
+    // Loud alerts (alerts spec §A2/§A3, flag-gated): the socket only reaches a
+    // FOREGROUNDED app — a mover with the phone in their pocket would sleep
+    // through a 30s offer. notifications.send fans out to Expo push (and the
+    // notification row survives the offer). Never let alert plumbing fail the
+    // offer itself. expiresAt rides along so a late-opening client can drop
+    // stale offers instead of showing ghosts.
+    if (process.env['ALERTS_LOUD'] === '1') {
+      const isTaxi = pool === 'DRIVER';
+      await this.notifications
+        .send({
+          userId: top.userId,
+          type: 'ORDER_UPDATE',
+          title: isTaxi ? '\u{1F695} Someone nearby needs a pickup' : '\u{1F6F5} Order available nearby',
+          body: isTaxi
+            ? `~${Math.round(top.etaMinutes)} min away · ${timeoutSeconds}s to accept`
+            : `${order.vendor?.name ?? 'A store'} · ~${Math.round(top.etaMinutes)} min away · ${timeoutSeconds}s to accept`,
+          audience: 'earner',
+          data: {
+            kind: 'dispatch_offer',
+            orderId,
+            expiresAt: new Date(Date.now() + timeoutSeconds * 1000).toISOString(),
+          },
+        })
+        .catch(() => {});
+    }
+
     log().info({ orderId, orderNumber: order.orderNumber, moverId: top.riderId, pool, round, etaMinutes: Math.round(top.etaMinutes), candidates: candidates.length }, 'dispatch: offer sent');
     await this.scheduleTimeout(orderId, top.riderId, timeoutSeconds * 1000);
     return { offered: top.riderId };
