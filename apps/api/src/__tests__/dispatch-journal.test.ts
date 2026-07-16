@@ -83,6 +83,8 @@ beforeAll(async () => {
   registerEmptyJsonBodyParser(app);
   const { customerRoutes } = await import('../modules/user/customer.routes');
   await app.register(customerRoutes, { prefix: '/api/v1/customer' });
+  const { observabilityPlugin } = await import('../plugins/observability');
+  await app.register(observabilityPlugin);
   await app.ready();
 
   const me = await app.prisma.user.create({
@@ -173,6 +175,23 @@ describe('search journal (§3)', () => {
 
     await app.prisma.rider.update({ where: { id: rider.id }, data: { isOnline: false, isAvailable: false } });
     await app.redis.del(`dispatch:offer:${order.id}`);
+  });
+
+  it('the §6 metrics ride the journal: started/assigned counted, time-to-assign observed', async () => {
+    process.env['METRICS_TOKEN'] = 'test-metrics-token';
+    const res = await app.inject({
+      method: 'GET', url: '/metrics',
+      headers: { authorization: 'Bearer test-metrics-token' },
+    });
+    delete process.env['METRICS_TOKEN'];
+    expect(res.statusCode).toBe(200);
+    const body = res.body;
+    // The lifecycle tests above already drove started → assigned → exhausted.
+    expect(body).toMatch(/swift_dispatch_searches_total\{status="started"\} [1-9]/);
+    expect(body).toMatch(/swift_dispatch_searches_total\{status="assigned"\} [1-9]/);
+    expect(body).toMatch(/swift_dispatch_searches_total\{status="exhausted"\} [1-9]/);
+    expect(body).toContain('swift_dispatch_time_to_assign_seconds_count');
+    expect(body).toMatch(/swift_supply_online\{pool="RIDER"\}/);
   });
 
   it('a cancelled order closes its search as CANCELLED', async () => {

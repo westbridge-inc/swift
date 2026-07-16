@@ -51,10 +51,46 @@ export const ordersPlacedCounter = new client.Counter({
   registers: [registry],
 });
 
+// Dispatch search lifecycle (availability spec §6) — incremented beside the
+// §3 journal writes. Exhaustion RATE is a PromQL division of these counters.
+export const dispatchSearchesCounter = new client.Counter({
+  name: 'swift_dispatch_searches_total',
+  help: 'Dispatch searches by lifecycle outcome (started/assigned/exhausted/cancelled)',
+  labelNames: ['status'] as const,
+  registers: [registry],
+});
+
+export const dispatchTimeToAssign = new client.Histogram({
+  name: 'swift_dispatch_time_to_assign_seconds',
+  help: 'Seconds from search start to a mover claiming the job',
+  buckets: [5, 15, 30, 60, 120, 300, 600, 1200],
+  registers: [registry],
+});
+
 export async function observabilityPlugin(app: FastifyInstance) {
   initSentry();
   if (!metricsWired) {
     client.collectDefaultMetrics({ register: registry });
+    // Live supply gauge (§6): counted at scrape time — two indexed counts,
+    // no background loop. "Zero riders online at lunch" is a founder-must-know.
+    new client.Gauge({
+      name: 'swift_supply_online',
+      help: 'Movers currently online, by pool',
+      labelNames: ['pool'] as const,
+      registers: [registry],
+      async collect() {
+        try {
+          const [riders, drivers] = await Promise.all([
+            app.prisma.rider.count({ where: { isOnline: true } }),
+            app.prisma.driver.count({ where: { isOnline: true } }),
+          ]);
+          this.set({ pool: 'RIDER' }, riders);
+          this.set({ pool: 'DRIVER' }, drivers);
+        } catch {
+          // A scrape must never fail on a transient DB hiccup — stale beats broken.
+        }
+      },
+    });
     metricsWired = true;
   }
 

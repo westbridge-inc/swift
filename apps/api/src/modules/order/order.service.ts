@@ -11,6 +11,7 @@ import { resolveSelectedOptions, optionsUnitPrice, type ResolvedOption } from '.
 import { log } from '../../utils/logger';
 import { FloatService } from '../dispatch/float.service';
 import { AppError } from '../../utils/errors';
+import { dispatchSearchesCounter } from '../../plugins/observability';
 import { randomInt } from 'node:crypto';
 
 interface CheckoutInput {
@@ -716,6 +717,9 @@ export class OrderService {
       .updateMany({
         where: { subjectId: orderId, status: { in: ['SEARCHING', 'EXHAUSTED'] } },
         data: { status: 'CANCELLED', resolution: 'CANCELLED' },
+      })
+      .then((r) => {
+        if (r.count > 0) dispatchSearchesCounter.inc({ status: 'cancelled' });
       })
       .catch(() => {});
 

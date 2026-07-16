@@ -9,6 +9,7 @@ import { AppError, NotFoundError, ValidationError, ForbiddenError } from '../../
 import { randomInt } from 'node:crypto';
 import { OrderService } from '../order/order.service';
 import { PickingService } from '../order/picking.service';
+import { dispatchSearchesCounter } from '../../plugins/observability';
 import { resolveSelectedOptions, optionsUnitPrice } from '../order/options';
 import { RatingService } from '../rating/rating.service';
 import { NotificationService } from '../notification/notification.service';
@@ -1843,6 +1844,9 @@ export async function customerRoutes(app: FastifyInstance) {
       .updateMany({
         where: { subjectId: order.id, status: { in: ['SEARCHING', 'EXHAUSTED'] } },
         data: { status: 'CANCELLED', resolution: 'SWITCHED_PICKUP' },
+      })
+      .then((r) => {
+        if (r.count > 0) dispatchSearchesCounter.inc({ status: 'cancelled' });
       })
       .catch(() => {});
 
