@@ -5,6 +5,15 @@ const prisma = new PrismaClient();
 async function main() {
   console.warn('Seeding database...');
 
+  // The single current SaaS tenant MUST exist before any tenant-owned row
+  // (users/vendors/orders default their tenantId to it via FK). CI uses
+  // `db push` + this seed, so the tenant is created here first.
+  await prisma.tenant.upsert({
+    where: { id: 'swift-default' },
+    update: {},
+    create: { id: 'swift-default', name: 'Swift', slug: 'swift', isActive: true },
+  });
+
   // Partial unique index Prisma cannot express: one LIVE booking per item per
   // slot (CANCELLED frees the slot). CI uses `db push`, so it lands here.
   await prisma.$executeRawUnsafe(
