@@ -1001,6 +1001,28 @@ export async function riderRoutes(app: FastifyInstance) {
     };
   });
 
+  /** GET /demand — unassigned deliveries near the rider, grouped by store
+   *  (dashboard plan Phase A): READY to collect now vs SOON, with the fees
+   *  waiting at each store. Held orders invisible. 10s cache per ~1 km cell. */
+  app.get('/demand', { preHandler: [app.authenticate] }, async (request) => {
+    const rider = await getRider(app, request.user.userId);
+    const q = z
+      .object({ lat: z.coerce.number().min(-90).max(90).optional(), lng: z.coerce.number().min(-180).max(180).optional() })
+      .parse(request.query);
+    const lat = q.lat ?? Number(rider.currentLat);
+    const lng = q.lng ?? Number(rider.currentLng);
+    if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
+      throw new AppError(400, 'NO_POSITION', 'Send lat/lng or go online so Swift knows where you are.');
+    }
+    const cacheKey = `demand:RIDER:${lat.toFixed(2)}:${lng.toFixed(2)}`;
+    const cached = await app.redis.get(cacheKey);
+    if (cached) return { success: true, data: JSON.parse(cached) };
+    const { riderDemand } = await import('../dispatch/demand.service');
+    const data = await riderDemand(app.prisma, { lat, lng });
+    await app.redis.set(cacheKey, JSON.stringify(data), 'EX', 10).catch(() => {});
+    return { success: true, data };
+  });
+
   /** GET /earnings/statement — print-ready HTML earnings statement (the
    *  receipt's sibling, marketplace §12): what an earner shows a bank.
    *  Derived from the earnings ledger on demand; default period 30 days. */

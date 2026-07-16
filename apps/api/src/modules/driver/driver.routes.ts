@@ -791,6 +791,28 @@ export async function driverRoutes(app: FastifyInstance) {
     };
   });
 
+  /** GET /demand — waiting taxi requests + supply-watchers near the driver
+   *  (dashboard plan Phase A): real demand, ~300 m rounded, zero customer
+   *  fields. 10s cache per ~1 km cell. */
+  app.get('/demand', { preHandler: [app.authenticate] }, async (request) => {
+    const driver = await getDriver(request.user.userId);
+    const q = z
+      .object({ lat: z.coerce.number().min(-90).max(90).optional(), lng: z.coerce.number().min(-180).max(180).optional() })
+      .parse(request.query);
+    const lat = q.lat ?? Number(driver.currentLat);
+    const lng = q.lng ?? Number(driver.currentLng);
+    if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
+      throw new AppError(400, 'NO_POSITION', 'Send lat/lng or go online so Swift knows where you are.');
+    }
+    const cacheKey = `demand:DRIVER:${lat.toFixed(2)}:${lng.toFixed(2)}`;
+    const cached = await app.redis.get(cacheKey);
+    if (cached) return { success: true, data: JSON.parse(cached) };
+    const { driverDemand } = await import('../dispatch/demand.service');
+    const data = await driverDemand(app.prisma, { lat, lng });
+    await app.redis.set(cacheKey, JSON.stringify(data), 'EX', 10).catch(() => {});
+    return { success: true, data };
+  });
+
   /** GET /earnings/statement — print-ready HTML earnings statement (the
    *  receipt's sibling, marketplace §12). Default period 30 days. */
   app.get('/earnings/statement', { preHandler: [app.authenticate] }, async (request, reply) => {

@@ -335,7 +335,8 @@ export const riderApi = {
   delivered: (id: string) => api.put(`/rider/orders/${id}/delivered`),
   earningsToday: () => api.get('/rider/earnings/today'),
   earningsSummary: () => api.get('/rider/earnings/summary'),
-  earnings: () => api.get('/rider/earnings'),
+  earnings: (params?: Record<string, string | number>) => api.get('/rider/earnings', { params }),
+  demand: (p: Point) => api.get(`/rider/demand?lat=${p.lat}&lng=${p.lng}`),
   // MMG cash ledger — delivery fees stores owe me (customer paid the store)
   cashSettlements: () => api.get('/rider/cash-settlements'),
   confirmCashSettlement: (id: string) => api.post(`/rider/cash-settlements/${id}/confirm`, {}),
@@ -364,7 +365,8 @@ export const driverApi = {
   complete: (id: string) => api.put(`/driver/rides/${id}/complete`),
   earningsToday: () => api.get('/driver/earnings/today'),
   earningsSummary: () => api.get('/driver/earnings/summary'),
-  earnings: () => api.get('/driver/earnings'),
+  earnings: (params?: Record<string, string | number>) => api.get('/driver/earnings', { params }),
+  demand: (p: Point) => api.get(`/driver/demand?lat=${p.lat}&lng=${p.lng}`),
   rides: (params?: { page?: number; limit?: number; status?: string }) => api.get('/driver/rides', { params }),
   rateCustomer: (id: string, score: number, comment?: string) =>
     api.post(`/driver/rides/${id}/rate-customer`, { score, ...(comment ? { comment } : {}) }),
