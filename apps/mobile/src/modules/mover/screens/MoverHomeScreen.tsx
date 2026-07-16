@@ -199,9 +199,9 @@ function ClusterBadge({ count }: { count: number }) {
 function StoreBadge({ ready, soon }: { ready: number; soon: number }) {
   const hot = ready > 0;
   return (
-    <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4, borderRadius: 12, paddingHorizontal: 8, paddingVertical: 4, backgroundColor: hot ? dk.accent : 'rgba(23,23,27,0.92)', borderWidth: 1.5, borderColor: '#fff' }}>
-      <MaterialCommunityIcons name="storefront" size={12} color="#fff" />
-      <T variant="caption" weight="bold" style={{ color: '#fff' }}>
+    <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4, borderRadius: 12, paddingHorizontal: 8, paddingVertical: 4, backgroundColor: hot ? dk.accent : '#FFFFFF', borderWidth: 1.5, borderColor: hot ? '#fff' : dk.accentBorder }}>
+      <MaterialCommunityIcons name="storefront" size={12} color={hot ? '#fff' : dk.accent} />
+      <T variant="caption" weight="bold" style={{ color: hot ? '#fff' : dk.text }}>
         {hot ? ready : soon}
       </T>
     </View>
@@ -291,8 +291,10 @@ export function MoverHomeScreen({ navigation }: any) {
   const onlineHours = (stats.data as any)?.onlineHoursToday;
   const busyToggle = goOnline.isPending || goOffline.isPending;
 
+  // Camera sits slightly SOUTH of the earner so the location dot floats in
+  // the upper map half, clear of the GO ring.
   const region = {
-    latitude: latitude ?? GEORGETOWN.latitude,
+    latitude: (latitude ?? GEORGETOWN.latitude) - 0.008,
     longitude: longitude ?? GEORGETOWN.longitude,
     latitudeDelta: 0.04,
     longitudeDelta: 0.04,
@@ -318,7 +320,6 @@ export function MoverHomeScreen({ navigation }: any) {
         style={{ flex: 1 }}
         region={region}
         showsUserLocation
-        userInterfaceStyle="dark"
       >
         {/* REAL demand on the map (Phase A): taxi pickups rounded ~300 m /
             stores with unassigned orders. Never customer identities. */}
@@ -593,7 +594,7 @@ export function MoverHomeScreen({ navigation }: any) {
                       ) : null}
                     </View>
                     <View style={{ marginTop: space.md }}>
-                      <RoutePair pickup={j.vendor?.name ?? j.pickupAddress ?? 'Pickup'} dropoff={j.deliveryAddress ?? j.dropoffAddress} dark />
+                      <RoutePair pickup={j.vendor?.name ?? j.pickupAddress ?? 'Pickup'} dropoff={j.deliveryAddress ?? j.dropoffAddress} />
                     </View>
                     {j.itemCount ? (
                       <T variant="caption" style={{ color: dk.muted, marginTop: space.sm }}>

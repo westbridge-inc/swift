@@ -172,7 +172,7 @@ export function ActiveJobScreen({ navigation }: any) {
   return (
     <View style={{ flex: 1, backgroundColor: dk.bg }}>
       {job ? (
-        <MapView provider={PROVIDER_DEFAULT} style={{ flex: 1 }} initialRegion={region} showsUserLocation userInterfaceStyle="dark">
+        <MapView provider={PROVIDER_DEFAULT} style={{ flex: 1 }} initialRegion={region} showsUserLocation>
           {pickup ? <Marker coordinate={pickup} title="Pickup" /> : null}
           {drop ? <Marker coordinate={drop} title="Drop-off" pinColor={color.brand[500]} /> : null}
           {pickup && drop ? (
@@ -254,7 +254,7 @@ export function ActiveJobScreen({ navigation }: any) {
               ) : null}
               <StatusStepper status={job.status} isDriver={isDriver} />
               <View style={{ marginTop: space.md }}>
-                <RoutePair pickup={job.pickupAddress ?? 'Pickup'} dropoff={job.deliveryAddress ?? job.dropoffAddress ?? 'Drop-off'} dark />
+                <RoutePair pickup={job.pickupAddress ?? 'Pickup'} dropoff={job.deliveryAddress ?? job.dropoffAddress ?? 'Drop-off'} />
               </View>
             </DCard>
 
@@ -304,7 +304,7 @@ export function ActiveJobScreen({ navigation }: any) {
                 <>
                   {step.pin ? (
                     <View style={{ marginBottom: space.md }}>
-                      <LabeledInput dark value={pin} onChangeText={setPin} placeholder="Enter rider's PIN" keyboardType="number-pad" maxLength={6} />
+                      <LabeledInput value={pin} onChangeText={setPin} placeholder="Enter rider's PIN" keyboardType="number-pad" maxLength={6} />
                       <T variant="caption" style={{ color: dk.muted, marginTop: space.sm }}>
                         The passenger has this PIN in their app — verifying it proves you picked up the right person.
                       </T>
