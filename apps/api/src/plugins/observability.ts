@@ -91,6 +91,22 @@ export async function observabilityPlugin(app: FastifyInstance) {
         }
       },
     });
+    // Scheduler liveness (launch-readiness Phase 6): seconds since the worker's
+    // heartbeat job last ran. A dead worker → this climbs unbounded → alert
+    // (e.g. > 180s). Reads Redis at scrape time; -1 if never beaten.
+    new client.Gauge({
+      name: 'swift_scheduler_heartbeat_age_seconds',
+      help: 'Seconds since the job scheduler last beat (worker liveness); -1 if never',
+      registers: [registry],
+      async collect() {
+        try {
+          const last = await app.redis.get('scheduler:heartbeat');
+          this.set(last ? Math.max(0, Math.round((Date.now() - Number(last)) / 1000)) : -1);
+        } catch {
+          // Redis unreachable at scrape — leave the last value rather than fail.
+        }
+      },
+    });
     metricsWired = true;
   }
 
