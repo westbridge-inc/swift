@@ -64,7 +64,13 @@ describe('storeOtp', () => {
     const redis = createMockRedis();
     await storeOtp(redis as never, '+5926003000', '123456');
 
-    expect(redis.set).toHaveBeenCalledWith('otp:+5926003000', '123456', 'EX', 300);
+    // Hashed at rest (launch-readiness §1.1): the stored value is sha256:<hex>.
+    expect(redis.set).toHaveBeenCalledWith(
+      'otp:+5926003000',
+      'sha256:8d969eef6ecad3c29a3a629280e686cf0c3f5d5a86aff3ca12020c923adc6c92',
+      'EX',
+      300,
+    );
   });
 
   it('clears previous attempts on store', async () => {

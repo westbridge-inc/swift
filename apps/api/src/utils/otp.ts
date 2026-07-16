@@ -1,3 +1,4 @@
+import crypto from 'node:crypto';
 import type Redis from 'ioredis';
 
 const OTP_PREFIX = 'otp:';
@@ -6,13 +7,26 @@ const OTP_RATE_PREFIX = 'otp_rate:';
 const OTP_RATE_TTL = 60; // 1 request per 60 seconds
 const OTP_MAX_ATTEMPTS = 5;
 const OTP_ATTEMPT_PREFIX = 'otp_attempt:';
+const HASH_TAG = 'sha256:';
 
+/** CSPRNG 6-digit code — Math.random is guessable in principle; this isn't. */
 export function generateOtp(): string {
-  return Math.floor(100000 + Math.random() * 900000).toString();
+  return crypto.randomInt(100000, 1000000).toString();
 }
 
+const hashOtp = (otp: string) => HASH_TAG + crypto.createHash('sha256').update(otp).digest('hex');
+
+/** Constant-time equality on equal-length strings. */
+function safeEqual(a: string, b: string): boolean {
+  const ab = Buffer.from(a);
+  const bb = Buffer.from(b);
+  return ab.length === bb.length && crypto.timingSafeEqual(ab, bb);
+}
+
+/** Codes are HASHED at rest (launch-readiness §1.1): a redis snapshot or a
+ *  MONITOR tap never yields a usable code. */
 export async function storeOtp(redis: Redis, phone: string, otp: string): Promise<void> {
-  await redis.set(`${OTP_PREFIX}${phone}`, otp, 'EX', OTP_TTL);
+  await redis.set(`${OTP_PREFIX}${phone}`, hashOtp(otp), 'EX', OTP_TTL);
   await redis.del(`${OTP_ATTEMPT_PREFIX}${phone}`);
 }
 
@@ -32,7 +46,10 @@ export async function verifyOtp(redis: Redis, phone: string, code: string): Prom
   await redis.incr(`${OTP_ATTEMPT_PREFIX}${phone}`);
   await redis.expire(`${OTP_ATTEMPT_PREFIX}${phone}`, OTP_TTL);
 
-  if (stored !== code) {
+  // Hashed compare (constant-time). The plaintext branch only exists for codes
+  // already in flight when this shipped — the 5-minute TTL retires it fast.
+  const matches = stored.startsWith(HASH_TAG) ? safeEqual(stored, hashOtp(code)) : safeEqual(stored, code);
+  if (!matches) {
     return { valid: false, reason: 'Invalid OTP code' };
   }
 

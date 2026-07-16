@@ -26,7 +26,9 @@ export const authPlugin = fp(async (app: FastifyInstance) => {
 
   await app.register(jwt, {
     secret,
-    sign: { expiresIn: '30m' },
+    // Launch-readiness §1.1: short-lived access tokens; the mobile client
+    // silently refreshes on 401 (rotating refresh + reuse detection tested).
+    sign: { expiresIn: '15m' },
   });
 
   app.decorate('authenticate', async (request: FastifyRequest, reply: FastifyReply) => {
