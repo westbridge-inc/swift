@@ -17,7 +17,6 @@ import { customerRoutes } from '../modules/user/customer.routes';
 
 let app: FastifyInstance;
 let tokenA: string;
-let userA: string;
 let userB: string;
 let orderB: string;
 let addressB: string;
@@ -64,7 +63,6 @@ beforeAll(async () => {
 
   const a = await makeCustomer();
   tokenA = a.token;
-  userA = a.id;
   const b = await makeCustomer();
   userB = b.id;
 
