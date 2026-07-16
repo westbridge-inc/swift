@@ -86,7 +86,11 @@ async function buildApp() {
   const corsOrigin = process.env['CORS_ORIGIN']
     ? process.env['CORS_ORIGIN'].split(',')
     : process.env['NODE_ENV'] === 'development'
-      ? ['http://localhost:3001', 'http://localhost:3000', 'http://127.0.0.1:3001']
+      ? [
+          'http://localhost:3001', 'http://localhost:3000', 'http://127.0.0.1:3001',
+          // Web app dev server + Mission Control's Tauri webview origins
+          'http://localhost:3002', 'tauri://localhost', 'http://tauri.localhost',
+        ]
       : false;
   await app.register(cors, {
     origin: corsOrigin,

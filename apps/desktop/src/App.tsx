@@ -3,6 +3,7 @@ import { useQuery } from '@tanstack/react-query';
 import {
   clearSession, fetchOverview, globalSearch, loadSession, sendOtp, verifyAdminLogin,
 } from './lib/api';
+import ReviewCenter from './modules/ReviewCenter';
 
 // ─── Login ───────────────────────────────────────────────────────────────────
 
@@ -203,6 +204,7 @@ export default function App() {
   const [ready, setReady] = useState(false);
   const [authed, setAuthed] = useState(false);
   const [cmdk, setCmdk] = useState(false);
+  const [module, setModule] = useState<'today' | 'review'>('today');
 
   useEffect(() => {
     loadSession().then((ok) => { setAuthed(ok); setReady(true); });
@@ -234,9 +236,15 @@ export default function App() {
           <span className="text-[var(--swift-red)]">Swift</span> MC
         </p>
         <nav className="mt-5 flex-1 space-y-0.5">
-          <span className="block rounded-lg bg-[var(--swift-red)]/15 px-3 py-2 text-sm font-semibold text-[var(--swift-red)]">
-            Today
-          </span>
+          {([['today', 'Today'], ['review', 'Review']] as const).map(([key, label]) => (
+            <button
+              key={key}
+              onClick={() => setModule(key)}
+              className={`block w-full rounded-lg px-3 py-2 text-left text-sm font-semibold ${module === key ? 'bg-[var(--swift-red)]/15 text-[var(--swift-red)]' : 'text-white/60 hover:bg-white/5'}`}
+            >
+              {label}
+            </button>
+          ))}
           {/* Further modules land per the build order — never stubbed (V1 mandate). */}
         </nav>
         <button
@@ -250,8 +258,8 @@ export default function App() {
         </button>
       </aside>
       <main className="min-w-0 flex-1 p-8">
-        <h1 className="mb-5 text-2xl font-extrabold">Today</h1>
-        <Today />
+        <h1 className="mb-5 text-2xl font-extrabold">{module === 'today' ? 'Today' : 'Review Center'}</h1>
+        {module === 'today' ? <Today /> : <ReviewCenter />}
       </main>
       <CommandPalette open={cmdk} onClose={() => setCmdk(false)} />
     </div>

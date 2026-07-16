@@ -7,20 +7,30 @@ const API_URL = import.meta.env.VITE_API_URL ?? 'http://localhost:3000';
 let accessToken: string | null = null;
 
 export async function loadSession(): Promise<boolean> {
-  accessToken = (await invoke<string | null>('keychain_get', { key: 'access' })) ?? null;
+  // A denied/locked Keychain must read as "logged out", never a hang — the
+  // OS prompts for permission when a rebuilt (re-signed) binary reads items
+  // created by an older build.
+  try {
+    accessToken = (await invoke<string | null>('keychain_get', { key: 'access' })) ?? null;
+  } catch {
+    accessToken = null;
+  }
   return !!accessToken;
 }
 
-async function storeSession(access: string, refresh?: string | null) {
+function storeSession(access: string, refresh?: string | null) {
+  // Memory is the session; Keychain is persistence. On ad-hoc dev builds the
+  // OS may prompt (or deny) keychain access — that must NEVER block login,
+  // so the writes are fire-and-forget. Worst case: re-login next launch.
   accessToken = access;
-  await invoke('keychain_set', { key: 'access', value: access });
-  if (refresh) await invoke('keychain_set', { key: 'refresh', value: refresh });
+  invoke('keychain_set', { key: 'access', value: access }).catch(() => {});
+  if (refresh) invoke('keychain_set', { key: 'refresh', value: refresh }).catch(() => {});
 }
 
 export async function clearSession() {
   accessToken = null;
-  await invoke('keychain_delete', { key: 'access' });
-  await invoke('keychain_delete', { key: 'refresh' });
+  await invoke('keychain_delete', { key: 'access' }).catch(() => {});
+  await invoke('keychain_delete', { key: 'refresh' }).catch(() => {});
 }
 
 async function tryRefresh(): Promise<string | null> {
@@ -96,7 +106,7 @@ export async function verifyAdminLogin(phone: string, code: string) {
   if (!roles.some((r) => ADMIN_ROLES.includes(r))) {
     throw new Error('This account does not have admin access.');
   }
-  await storeSession(data.tokens.accessToken, data.tokens.refreshToken);
+  storeSession(data.tokens.accessToken, data.tokens.refreshToken);
   return data.user;
 }
 
@@ -104,3 +114,44 @@ export async function verifyAdminLogin(phone: string, code: string) {
 export const fetchOverview = () => apiFetch('/api/v1/admin/dashboard/overview').then((r) => r.data);
 export const globalSearch = (q: string) =>
   apiFetch(`/api/v1/admin/search?q=${encodeURIComponent(q)}`).then((r) => r.data);
+
+// ── Review Center ────────────────────────────────────────────────────────────
+export const API_ORIGIN = API_URL;
+
+export interface ReviewDoc {
+  id: string;
+  docType: string;
+  role: string;
+  status: string;
+  createdAt: string;
+  expiresAt: string | null;
+  reviewNote: string | null;
+  user: { id: string; firstName: string | null; lastName: string | null; phone: string; countryCode: string } | null;
+}
+
+export const fetchReviewQueue = (status = 'PENDING', page = 1) =>
+  apiFetch(`/api/v1/admin/verification/queue?status=${status}&page=${page}&limit=50`).then((r) => ({
+    rows: r.data as ReviewDoc[],
+    meta: r.meta as { total: number; totalPages: number },
+  }));
+
+export const approveDoc = (id: string, body: Record<string, unknown>) =>
+  apiFetch(`/api/v1/admin/verification/${id}/approve`, { method: 'PUT', body: JSON.stringify(body) });
+
+export const rejectDoc = (id: string, reason: string, reasonCode?: string) =>
+  apiFetch(`/api/v1/admin/verification/${id}/reject`, {
+    method: 'PUT',
+    body: JSON.stringify({ reason, ...(reasonCode ? { reasonCode } : {}) }),
+  });
+
+export const documentViewUrl = (id: string) =>
+  apiFetch(`/api/v1/admin/verification/${id}/document-url`).then((r) => {
+    const url: string = r.data.url;
+    return url.startsWith('http') ? url : `${API_URL}${url}`;
+  });
+
+/** Mirrors the server's RejectionReasonCode enum (verification.service). */
+export const REASON_CODES = [
+  'EXPIRED', 'UNREADABLE', 'WRONG_DOCUMENT', 'FACE_MISMATCH', 'NAME_MISMATCH',
+  'INSURANCE_NOT_HIRE', 'NOT_YELLOW', 'SUSPECTED_TAMPERING', 'DUPLICATE', 'INCOMPLETE',
+] as const;
