@@ -17,6 +17,7 @@ export function LabeledInput({
   right,
   error,
   containerStyle,
+  dark,
   ...input
 }: TextInputProps & {
   label?: string;
@@ -24,13 +25,15 @@ export function LabeledInput({
   right?: React.ReactNode;
   error?: string;
   containerStyle?: ViewStyle;
+  /** Render on the earner app's dark surfaces. */
+  dark?: boolean;
 }) {
   const [focused, setFocused] = useState(false);
-  const borderColor = error ? color.error : focused ? color.brand[500] : color.border.strong;
+  const borderColor = error ? color.error : focused ? color.brand[500] : dark ? 'rgba(255,255,255,0.14)' : color.border.strong;
   return (
     <View style={containerStyle}>
       {label ? (
-        <T variant="label" weight="semibold" style={{ marginBottom: space.sm }}>
+        <T variant="label" weight="semibold" style={{ marginBottom: space.sm, ...(dark ? { color: '#FFFFFF' } : {}) }}>
           {label}
         </T>
       ) : null}
@@ -41,7 +44,7 @@ export function LabeledInput({
           // 1.5 on focus/error so the state reads without shifting layout much.
           borderWidth: focused || error ? 1.5 : 1,
           borderColor,
-          backgroundColor: color.surface.base,
+          backgroundColor: dark ? '#212127' : color.surface.base,
           flexDirection: 'row',
           alignItems: 'center',
           paddingHorizontal: space.lg,
@@ -59,9 +62,9 @@ export function LabeledInput({
             setFocused(false);
             input.onBlur?.(e);
           }}
-          placeholderTextColor={color.text.muted}
+          placeholderTextColor={dark ? 'rgba(255,255,255,0.4)' : color.text.muted}
           style={[
-            { flex: 1, fontFamily: 'Inter', fontSize: 16, color: color.text.primary, paddingVertical: 14 },
+            { flex: 1, fontFamily: 'Inter', fontSize: 16, color: dark ? '#FFFFFF' : color.text.primary, paddingVertical: 14 },
             input.style,
           ]}
         />

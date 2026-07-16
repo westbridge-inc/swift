@@ -9,6 +9,15 @@ import { T } from '../../kit';
  * cards on a dark map, ONE accent — Swift red. The customer app stays light;
  * the earner works at night and lives on the map, so the map leads.
  */
+/** Alpha tint of a #RRGGBB hex — keeps every glow/border on the BRAND ramp
+ *  (tokens.ts), so a palette change re-themes the dark app automatically. */
+export function withAlpha(hex: string, alpha: number): string {
+  const r = parseInt(hex.slice(1, 3), 16);
+  const g = parseInt(hex.slice(3, 5), 16);
+  const b = parseInt(hex.slice(5, 7), 16);
+  return `rgba(${r},${g},${b},${alpha})`;
+}
+
 export const dk = {
   bg: '#0C0C0E',
   card: '#17171B',
@@ -18,6 +27,10 @@ export const dk = {
   muted: 'rgba(255,255,255,0.55)',
   faint: 'rgba(255,255,255,0.35)',
   accent: color.brand[500],
+  /** Brand tints for glows, badges and banner fills — Swift theme, not generic red. */
+  accentGlow: withAlpha(color.brand[500], 0.3),
+  accentSoft: withAlpha(color.brand[500], 0.22),
+  accentBorder: withAlpha(color.brand[500], 0.5),
   success: '#2FBF71',
   warning: '#F5A623',
 } as const;
@@ -132,7 +145,7 @@ export function DWeekBars({ days }: { days: Array<{ label: string; total: number
                 alignSelf: 'stretch',
                 height: h,
                 borderRadius: 6,
-                backgroundColor: d.isToday ? dk.accent : 'rgba(232,25,44,0.35)',
+                backgroundColor: d.isToday ? dk.accent : dk.accentSoft,
               }}
             />
             <T variant="caption" style={{ color: d.isToday ? dk.text : dk.faint, fontSize: 10, marginTop: 4 }}>

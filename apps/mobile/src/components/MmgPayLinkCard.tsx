@@ -47,6 +47,7 @@ export function MmgPayLinkCard({
       </T>
       <View style={{ marginTop: space.md }}>
         <LabeledInput
+          dark={dark}
           value={url}
           onChangeText={setUrl}
           placeholder="Paste your MMG pay link"

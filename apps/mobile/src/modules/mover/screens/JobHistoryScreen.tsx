@@ -61,7 +61,7 @@ function JobRow({ job, isDriver }: { job: any; isDriver: boolean }) {
         <T variant="caption" style={{ color: dk.muted }}>
           {whenLabel(job.deliveredAt ?? job.placedAt ?? job.createdAt)}
         </T>
-        <JobStatusPill status={job.status} />
+        <JobStatusPill status={job.status} dark />
       </View>
       <View style={{ marginTop: space.md }}>
         <RoutePair pickup={pickup ?? 'Pickup'} dropoff={dropoff} muted dark />

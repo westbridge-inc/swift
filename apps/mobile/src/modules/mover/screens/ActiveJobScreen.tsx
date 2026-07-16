@@ -12,7 +12,7 @@ import { useMoverKind, useActiveJob, useDriverAction, useRiderAction, useRateCus
 import { useLocationStore } from '../../../stores/locationStore';
 import { haversineKm, streetEtaMin } from '../../../lib/geo';
 import { jobAmount, RoutePair } from '../shared';
-import { dk, DCard } from '../dark';
+import { dk, withAlpha, DCard } from '../dark';
 
 /**
  * The active job/ride screen at navigation grade (dashboard plan Phase D):
@@ -304,7 +304,7 @@ export function ActiveJobScreen({ navigation }: any) {
                 <>
                   {step.pin ? (
                     <View style={{ marginBottom: space.md }}>
-                      <LabeledInput value={pin} onChangeText={setPin} placeholder="Enter rider's PIN" keyboardType="number-pad" maxLength={6} />
+                      <LabeledInput dark value={pin} onChangeText={setPin} placeholder="Enter rider's PIN" keyboardType="number-pad" maxLength={6} />
                       <T variant="caption" style={{ color: dk.muted, marginTop: space.sm }}>
                         The passenger has this PIN in their app — verifying it proves you picked up the right person.
                       </T>
@@ -333,7 +333,7 @@ export function ActiveJobScreen({ navigation }: any) {
               </>
             ) : (
               <>
-                <View style={{ flexDirection: 'row', alignItems: 'flex-start', gap: space.sm, borderRadius: radius.lg, backgroundColor: 'rgba(232,25,44,0.14)', borderWidth: 1, borderColor: 'rgba(232,25,44,0.4)', padding: space.md, marginBottom: space.md }}>
+                <View style={{ flexDirection: 'row', alignItems: 'flex-start', gap: space.sm, borderRadius: radius.lg, backgroundColor: withAlpha(dk.accent, 0.14), borderWidth: 1, borderColor: dk.accentBorder, padding: space.md, marginBottom: space.md }}>
                   <Feather name="alert-circle" size={15} color={dk.accent} style={{ marginTop: 1 }} />
                   <T variant="caption" weight="semibold" style={{ flex: 1, color: dk.text }}>
                     Golden rule: collect the cash BEFORE handing over the order.
