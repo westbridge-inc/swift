@@ -6,6 +6,7 @@ import { estimateDrivingDistance, estimateDeliveryMinutes } from '../../utils/di
 import { getMapsProvider } from '../../providers/maps/maps-provider';
 import { parsePagination, paginatedResponse } from '../../utils/pagination';
 import { AppError, NotFoundError, ValidationError, ForbiddenError } from '../../utils/errors';
+import { randomInt } from 'node:crypto';
 import { OrderService } from '../order/order.service';
 import { PickingService } from '../order/picking.service';
 import { resolveSelectedOptions, optionsUnitPrice } from '../order/options';
@@ -1764,6 +1765,101 @@ export async function customerRoutes(app: FastifyInstance) {
             : null,
       },
     };
+  });
+
+  /**
+   * POST /orders/:id/convert-to-pickup — the ONE additive transition
+   * (availability spec §4.2), flag-gated: when delivery dispatch struggles
+   * and the food may already be cooking, the customer collects it instead.
+   * Allowed ONLY while no rider is assigned; the delivery fee AND rider tip
+   * come off the total (both were the rider's money, and no rider exists —
+   * no Swift money involved). Guarded by CAS: a rider claiming the job
+   * mid-request wins, the conversion loses, honestly.
+   */
+  app.post('/orders/:id/convert-to-pickup', async (request: AuthRequest) => {
+    if (process.env['DISPATCH_EXHAUSTION'] !== '1') {
+      throw new AppError(404, 'NOT_FOUND', 'Not available');
+    }
+    const { id } = request.params as { id: string };
+    const { userId } = request.user;
+
+    const order = await app.prisma.order.findFirst({
+      where: { id, customerId: userId },
+      select: {
+        id: true, status: true, fulfillment: true, riderId: true, vendorId: true,
+        deliveryFee: true, tipAmount: true, totalAmount: true, orderNumber: true,
+        vendor: { select: { name: true, ownerId: true } },
+      },
+    });
+    if (!order) throw new NotFoundError('Order', id);
+    if (order.fulfillment !== 'DELIVERY' || !order.vendorId) {
+      throw new AppError(400, 'NOT_A_DELIVERY', 'Only delivery orders can switch to pickup.');
+    }
+    if (order.riderId) {
+      throw new AppError(409, 'RIDER_ALREADY_ASSIGNED', 'A rider already has this order — it is on its way.');
+    }
+    if (!['PENDING', 'ACCEPTED', 'PREPARING', 'READY_FOR_PICKUP'].includes(order.status)) {
+      throw new AppError(400, 'INVALID_STATUS', `Cannot switch a ${order.status} order to pickup.`);
+    }
+
+    const fee = Number(order.deliveryFee ?? 0);
+    const tip = Number(order.tipAmount ?? 0);
+    const pickupCode = String(randomInt(100000, 1000000));
+
+    // CAS: only convert while STILL unassigned and still a delivery.
+    const converted = await app.prisma.order.updateMany({
+      where: { id: order.id, riderId: null, fulfillment: 'DELIVERY' },
+      data: {
+        fulfillment: 'PICKUP',
+        deliveryFee: 0,
+        tipAmount: 0,
+        totalAmount: Math.max(0, Number(order.totalAmount) - fee - tip),
+        pickupCode,
+      },
+    });
+    if (converted.count === 0) {
+      throw new AppError(409, 'RIDER_ALREADY_ASSIGNED', 'A rider just took this order — it is on its way.');
+    }
+
+    await app.prisma.orderStatusLog.create({
+      data: {
+        orderId: order.id,
+        status: order.status,
+        changedBy: userId,
+        note: `Customer switched to pickup (no rider found) — delivery fee $${fee.toLocaleString()} and tip $${tip.toLocaleString()} removed`,
+      },
+    });
+
+    // Both sides hear it now.
+    app.io.to(`order:${order.id}`).emit('order:status_changed', {
+      orderId: order.id, status: order.status, fulfillment: 'PICKUP',
+    });
+    if (order.vendor) {
+      const owner = await app.prisma.vendorOwner.findUnique({ where: { id: order.vendor.ownerId } });
+      if (owner) {
+        await notificationService.send({
+          userId: owner.userId,
+          type: 'ORDER_UPDATE',
+          title: 'Order switched to pickup',
+          body: `#${order.orderNumber}: no rider is coming — the customer collects it with a pickup code.`,
+          audience: 'business',
+          data: { orderId: order.id, kind: 'converted_to_pickup' },
+        });
+      }
+    }
+    await notificationService.send({
+      userId,
+      type: 'ORDER_UPDATE',
+      title: 'Switched to pickup',
+      body: `Show ${order.vendor?.name ?? 'the store'} your pickup code when you arrive.`,
+      data: { orderId: order.id, kind: 'converted_to_pickup', pickupCode },
+    });
+
+    const updated = await app.prisma.order.findUniqueOrThrow({
+      where: { id: order.id },
+      select: { id: true, fulfillment: true, pickupCode: true, totalAmount: true, deliveryFee: true, tipAmount: true },
+    });
+    return { success: true, data: updated };
   });
 
   app.post('/orders/:id/cancel', async (request: AuthRequest) => {
