@@ -1,4 +1,4 @@
-import { useEffect } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { Vibration } from 'react-native';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { vendorApi } from '../services/api';
@@ -138,6 +138,9 @@ export function useVendorOrders(enabled: boolean) {
  *  counter appliance, not a screen someone stares at. */
 export function useVendorOrdersLive(vendorId: string | undefined) {
   const qc = useQueryClient();
+  // NEW-ORDER takeover queue (alerts spec §A1): every order:new lands here;
+  // the takeover component works it FIFO and dismisses per order.
+  const [takeover, setTakeover] = useState<Array<{ orderId: string; orderNumber?: string }>>([]);
   useEffect(() => {
     if (!vendorId) return;
     connectSocket();
@@ -146,8 +149,15 @@ export function useVendorOrdersLive(vendorId: string | undefined) {
     join();
     s.on('connect', join); // rooms are per-connection — re-join after reconnects
     const refresh = () => qc.invalidateQueries({ queryKey: ['vendor', 'orders'] });
-    const onNew = () => {
+    const onNew = (payload?: { orderId?: string; orderNumber?: string }) => {
       Vibration.vibrate(400);
+      if (payload?.orderId) {
+        setTakeover((q) =>
+          q.some((x) => x.orderId === payload.orderId)
+            ? q
+            : [...q, { orderId: payload.orderId!, orderNumber: payload.orderNumber }],
+        );
+      }
       refresh();
     };
     s.on('order:new', onNew);
@@ -160,6 +170,12 @@ export function useVendorOrdersLive(vendorId: string | undefined) {
       s.off('order:prep_update', refresh);
     };
   }, [vendorId, qc]);
+
+  const dismissTakeover = useCallback(
+    (orderId: string) => setTakeover((q) => q.filter((x) => x.orderId !== orderId)),
+    [],
+  );
+  return { takeover, dismissTakeover };
 }
 
 /** Full order drill-down (line items, status log, customer/rider contacts).
