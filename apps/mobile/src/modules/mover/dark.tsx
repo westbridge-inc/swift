@@ -1,6 +1,6 @@
 import React from 'react';
-import { View, type ViewStyle } from 'react-native';
-import { MaterialCommunityIcons } from '@expo/vector-icons';
+import { Pressable, View, type ViewStyle } from 'react-native';
+import { Feather, MaterialCommunityIcons } from '@expo/vector-icons';
 import { color } from '@swift/ui';
 import { T } from '../../kit';
 
@@ -52,6 +52,64 @@ export function DStat({
         {label}
       </T>
     </View>
+  );
+}
+
+/** Dark screen header: centered title + optional back chevron. */
+export function DHeader({ title, onBack }: { title: string; onBack?: () => void }) {
+  return (
+    <View style={{ height: 52, alignItems: 'center', justifyContent: 'center' }}>
+      {onBack ? (
+        <Pressable onPress={onBack} hitSlop={10} style={{ position: 'absolute', left: 16 }}>
+          {({ pressed }) => (
+            <View style={{ width: 36, height: 36, borderRadius: 18, alignItems: 'center', justifyContent: 'center', backgroundColor: dk.card, borderWidth: 1, borderColor: dk.line, opacity: pressed ? 0.7 : 1 }}>
+              <Feather name="chevron-left" size={20} color={dk.text} />
+            </View>
+          )}
+        </Pressable>
+      ) : null}
+      <T variant="heading" style={{ color: dk.text }}>
+        {title}
+      </T>
+    </View>
+  );
+}
+
+/** Dark settings row (Feather icon + label + sub + right slot). */
+export function DRow({
+  icon,
+  label,
+  sub,
+  right,
+  onPress,
+}: {
+  icon: React.ComponentProps<typeof Feather>['name'];
+  label: string;
+  sub?: string;
+  right?: React.ReactNode;
+  onPress?: () => void;
+}) {
+  return (
+    <Pressable onPress={onPress} disabled={!onPress}>
+      {({ pressed }) => (
+        <View style={{ flexDirection: 'row', alignItems: 'center', paddingVertical: 12, opacity: pressed ? 0.7 : 1 }}>
+          <View style={{ width: 34, height: 34, borderRadius: 17, alignItems: 'center', justifyContent: 'center', backgroundColor: dk.cardSoft }}>
+            <Feather name={icon} size={15} color={dk.muted} />
+          </View>
+          <View style={{ flex: 1, marginLeft: 12 }}>
+            <T variant="label" weight="semibold" style={{ color: dk.text }}>
+              {label}
+            </T>
+            {sub ? (
+              <T variant="caption" numberOfLines={1} style={{ color: dk.muted, marginTop: 1 }}>
+                {sub}
+              </T>
+            ) : null}
+          </View>
+          {right ?? (onPress ? <Feather name="chevron-right" size={16} color={dk.faint} /> : null)}
+        </View>
+      )}
+    </Pressable>
   );
 }
 

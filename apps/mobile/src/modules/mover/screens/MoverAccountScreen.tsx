@@ -1,12 +1,13 @@
 /** @jsxImportSource react */
 import React from 'react';
 import { ScrollView, View } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 import * as ImagePicker from 'expo-image-picker';
 import { Image } from 'expo-image';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
-import { color, space } from '@swift/ui';
-import { Card, Header, LinkText, PillButton, Screen, SettingsRow, T, TonePill } from '../../../kit';
+import { space } from '@swift/ui';
+import { LinkText, PillButton, T, TonePill } from '../../../kit';
 import { MmgPayLinkCard } from '../../../components/MmgPayLinkCard';
 import { driverApi } from '../../../services/api';
 import { Stars } from '../../../kit/controls';
@@ -15,8 +16,13 @@ import { useAuthStore } from '../../../stores/authStore';
 import { RoleSwitcherSheet } from '../../../components/RoleSwitcherSheet';
 import { money } from '../../../lib/money';
 import { mediaUrl } from '../../../lib/images';
+import { dk, DCard, DRow, DHeader } from '../dark';
+
+/** The earner account, in the app's dark language (Phase E-lite) — the
+ *  reference's profile screen: identity, vehicle, stats, doors. */
 
 export function MoverAccountScreen({ navigation }: any) {
+  const insets = useSafeAreaInsets();
   const { user, logout } = useAuthStore();
   const [switcherOpen, setSwitcherOpen] = React.useState(false);
   const { kind, profile } = useMoverKind();
@@ -60,21 +66,21 @@ export function MoverAccountScreen({ navigation }: any) {
   };
 
   return (
-    <Screen>
-      <Header title="Account" />
+    <View style={{ flex: 1, backgroundColor: dk.bg, paddingTop: insets.top }}>
+      <DHeader title="Account" onBack={() => navigation?.goBack?.()} />
       <ScrollView contentContainerStyle={{ paddingHorizontal: space['2xl'], paddingBottom: space['3xl'] }} showsVerticalScrollIndicator={false}>
         {/* Profile */}
-        <Card style={{ flexDirection: 'row', alignItems: 'center', gap: space.md }}>
-          <View style={{ width: 56, height: 56, borderRadius: 28, alignItems: 'center', justifyContent: 'center', backgroundColor: color.brand[500] }}>
-            <T variant="title" tone="onBrand">
+        <DCard style={{ flexDirection: 'row', alignItems: 'center', gap: space.md }}>
+          <View style={{ width: 56, height: 56, borderRadius: 28, alignItems: 'center', justifyContent: 'center', backgroundColor: dk.accent }}>
+            <T variant="title" style={{ color: '#fff' }}>
               {initial}
             </T>
           </View>
           <View style={{ flex: 1 }}>
-            <T variant="heading" numberOfLines={1}>
+            <T variant="heading" numberOfLines={1} style={{ color: dk.text }}>
               {name}
             </T>
-            <T variant="label" tone="muted" style={{ marginTop: 2 }}>
+            <T variant="label" style={{ color: dk.muted, marginTop: 2 }}>
               {user?.phone ?? ''}
             </T>
             <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.md, marginTop: 6 }}>
@@ -82,7 +88,7 @@ export function MoverAccountScreen({ navigation }: any) {
               {rating ? (
                 <View style={{ flexDirection: 'row', alignItems: 'center', gap: 3 }}>
                   <Stars value={Number(rating)} size={12} />
-                  <T variant="caption" weight="bold" tone="muted">
+                  <T variant="caption" weight="bold" style={{ color: dk.muted }}>
                     {Number(rating).toFixed(1)}
                   </T>
                 </View>
@@ -90,24 +96,24 @@ export function MoverAccountScreen({ navigation }: any) {
               {verified ? <TonePill label="Verified" tone="success" /> : null}
             </View>
           </View>
-        </Card>
+        </DCard>
 
         {/* Vehicle — customers see this photo when you accept (§5) */}
         {vehicle || profile ? (
-          <Card style={{ marginTop: space.md }}>
+          <DCard style={{ marginTop: space.md }}>
             <View style={{ flexDirection: 'row', alignItems: 'center' }}>
               {profile?.vehiclePhotoUrl ? (
                 <Image source={{ uri: mediaUrl(profile.vehiclePhotoUrl) ?? undefined }} style={{ width: 64, height: 44, borderRadius: 8 }} contentFit="cover" />
               ) : (
-                <View style={{ width: 44, height: 44, borderRadius: 22, alignItems: 'center', justifyContent: 'center', backgroundColor: color.brand[50] }}>
-                  <MaterialCommunityIcons name={isDriver ? 'car-side' : 'bike-fast'} size={20} color={color.brand[600]} />
+                <View style={{ width: 44, height: 44, borderRadius: 22, alignItems: 'center', justifyContent: 'center', backgroundColor: dk.cardSoft }}>
+                  <MaterialCommunityIcons name={isDriver ? 'car-side' : 'bike-fast'} size={20} color={dk.accent} />
                 </View>
               )}
               <View style={{ flex: 1, marginLeft: space.md }}>
-                <T variant="label" weight="bold" numberOfLines={1}>
+                <T variant="label" weight="bold" numberOfLines={1} style={{ color: dk.text }}>
                   {vehicle || 'Your vehicle'}
                 </T>
-                <T variant="caption" tone="muted">
+                <T variant="caption" style={{ color: dk.muted }}>
                   {profile?.licensePlate ?? ''}
                 </T>
               </View>
@@ -117,7 +123,7 @@ export function MoverAccountScreen({ navigation }: any) {
               />
             </View>
             {!profile?.vehiclePhotoUrl ? (
-              <T variant="caption" tone="muted" style={{ marginTop: space.sm }}>
+              <T variant="caption" style={{ color: dk.muted, marginTop: space.sm }}>
                 Add a clear photo of your vehicle — customers see it the moment you accept.
               </T>
             ) : null}
@@ -126,12 +132,13 @@ export function MoverAccountScreen({ navigation }: any) {
                 Upload failed — try a different photo.
               </T>
             ) : null}
-          </Card>
+          </DCard>
         ) : null}
 
         {isDriver ? (
           <MmgPayLinkCard
             who="rides"
+            dark
             value={profile?.mmgPayUrl}
             saving={saveMmgLink.isPending}
             onSave={(u) => saveMmgLink.mutate(u)}
@@ -139,36 +146,36 @@ export function MoverAccountScreen({ navigation }: any) {
         ) : null}
 
         {/* Ops rows */}
-        <Card style={{ marginTop: space.md, paddingVertical: space.sm }}>
-          <SettingsRow icon="dollar-sign" label="Earnings" sub={`${money(allTime)} all-time · 100% yours`} onPress={() => navigation?.navigate?.('Earnings')} />
-          <SettingsRow icon="clock" label="Job history" sub="Every completed and cancelled job" onPress={() => navigation?.navigate?.('JobHistory')} />
-          <SettingsRow icon="file-text" label="Documents" sub="Licences, insurance and renewals" onPress={() => navigation?.navigate?.('MoverDocuments')} />
-          <SettingsRow
+        <DCard style={{ marginTop: space.md, paddingVertical: space.sm }}>
+          <DRow icon="dollar-sign" label="Earnings" sub={`${money(allTime)} all-time · 100% yours`} onPress={() => navigation?.navigate?.('Earnings')} />
+          <DRow icon="clock" label="Job history" sub="Every completed and cancelled job" onPress={() => navigation?.navigate?.('JobHistory')} />
+          <DRow icon="file-text" label="Documents" sub="Licences, insurance and renewals" onPress={() => navigation?.navigate?.('MoverDocuments')} />
+          <DRow
             icon="credit-card"
             label="Weekly fee"
             sub={sub ? `${money(sub.customRate ?? sub.weeklyRate)}/week` : 'Not active yet'}
             right={<TonePill label={subPill.label} tone={subPill.tone} />}
           />
-          <SettingsRow icon="refresh-cw" label="Switch app" sub="Swift · Swift Business" onPress={() => setSwitcherOpen(true)} />
-        </Card>
+          <DRow icon="refresh-cw" label="Switch app" sub="Swift · Swift Business" onPress={() => setSwitcherOpen(true)} />
+        </DCard>
 
         {/* The model */}
-        <Card style={{ marginTop: space.md }}>
+        <DCard style={{ marginTop: space.md }}>
           <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.sm }}>
-            <MaterialCommunityIcons name="check-decagram" size={16} color={color.success} />
-            <T variant="body" weight="semibold">
+            <MaterialCommunityIcons name="check-decagram" size={16} color={dk.success} />
+            <T variant="body" weight="semibold" style={{ color: dk.text }}>
               You keep 100%
             </T>
           </View>
-          <T variant="caption" tone="muted" style={{ marginTop: 4 }}>
+          <T variant="caption" style={{ color: dk.muted, marginTop: 4 }}>
             Swift only charges a flat weekly fee — no commission on any fare, ever. You&apos;re paid in cash, on every job.
           </T>
-        </Card>
+        </DCard>
 
         <PillButton label="Log out" variant="outline" style={{ marginTop: space.xl }} onPress={logout} />
       </ScrollView>
 
       <RoleSwitcherSheet visible={switcherOpen} current="mover" onClose={() => setSwitcherOpen(false)} />
-    </Screen>
+    </View>
   );
 }
