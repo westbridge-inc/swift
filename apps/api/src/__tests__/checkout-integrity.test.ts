@@ -118,6 +118,26 @@ describe('checkout money math', () => {
   });
 });
 
+describe('cash-only guardrail — orders never carry an in-app payment method', () => {
+  it('rejects CARD as an order payment method', async () => {
+    const c = await makeCustomer();
+    const res = await cartAndCheckout(c, { paymentMethod: 'CARD' });
+    expect(res.statusCode).toBeGreaterThanOrEqual(400);
+  });
+
+  it('rejects BANK_TRANSFER as an order payment method', async () => {
+    const c = await makeCustomer();
+    const res = await cartAndCheckout(c, { paymentMethod: 'BANK_TRANSFER' });
+    expect(res.statusCode).toBeGreaterThanOrEqual(400);
+  });
+
+  it('accepts CASH (the default cash-only path)', async () => {
+    const c = await makeCustomer();
+    const res = await cartAndCheckout(c, { paymentMethod: 'CASH' });
+    expect(res.statusCode).toBe(200);
+  });
+});
+
 describe('IDOR — wrong owner (CI guard for the live-proven protection)', () => {
   it('a customer cannot read or cancel another customer’s order', async () => {
     const victim = await makeCustomer();
