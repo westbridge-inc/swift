@@ -26,6 +26,25 @@ export function useRideEstimate(pickup?: Point, dropoff?: Point) {
   });
 }
 
+/** Honest supply read for the request screen (availability spec §2.1):
+ *  GOOD/LOW/NONE buckets from the same query dispatch searches. */
+export function useRideAvailability(point?: Point) {
+  return useQuery<{ level: 'GOOD' | 'LOW' | 'NONE'; nearestEtaMinutes: number | null; gate?: boolean }>({
+    queryKey: ['rides', 'availability', point ? `${point.lat.toFixed(3)},${point.lng.toFixed(3)}` : null],
+    queryFn: () => unwrap(rideApi.availability(point as Point)),
+    enabled: !!point,
+    refetchInterval: 30_000,
+  });
+}
+
+/** "Notify me when a driver is available" (spec §5) — one active watch. */
+export function useWatchAvailability() {
+  return useMutation({
+    mutationFn: (point: Point) => unwrap(rideApi.watchAvailability(point)),
+    onSuccess: () => track('ride_supply_watch', {}),
+  });
+}
+
 export function useRequestRide() {
   const qc = useQueryClient();
   return useMutation({
