@@ -86,7 +86,8 @@ beforeAll(async () => {
 
 afterAll(async () => {
   delete process.env['DISPATCH_AVAILABILITY'];
-  if (orderIds.length > 0) await app.prisma.order.deleteMany({ where: { id: { in: orderIds } } });
+  // Delete by customer, not by captured id — response-shape drift must not orphan rows.
+  if (userIds.length > 0) await app.prisma.order.deleteMany({ where: { customerId: { in: userIds } } });
   if (driverIds.length > 0) await app.prisma.driver.deleteMany({ where: { id: { in: driverIds } } });
   if (userIds.length > 0) {
     await app.prisma.session.deleteMany({ where: { userId: { in: userIds } } });
