@@ -25,6 +25,7 @@ let token: string;
 let customerId: string;
 const userIds: string[] = [];
 const driverIds: string[] = [];
+const watchOrderIds: string[] = [];
 
 beforeAll(async () => {
   process.env['NODE_ENV'] = 'development';
@@ -64,6 +65,7 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await app.prisma.supplyWatch.deleteMany({ where: { customerId: { in: userIds } } });
+  if (watchOrderIds.length > 0) await app.prisma.order.deleteMany({ where: { id: { in: watchOrderIds } } });
   if (driverIds.length > 0) await app.prisma.driver.deleteMany({ where: { id: { in: driverIds } } });
   if (userIds.length > 0) {
     await app.prisma.notification.deleteMany({ where: { userId: { in: userIds } } });
@@ -124,5 +126,44 @@ describe('supply watcher', () => {
     // Second scan: nothing left to notify.
     expect(await scanSupplyWatches(app.prisma, dispatch, notifications)).toBe(0);
     expect(await app.prisma.notification.count({ where: { userId: customerId } })).toBe(1);
+  });
+});
+
+describe('struggling-delivery options (spec §4.2)', () => {
+  it('prompts ONCE for a ready-no-rider order past the window; fresh or ridden orders stay quiet', async () => {
+    const { scanStrugglingDeliveries } = await import('../modules/dispatch/supply-watch.service');
+    const notifications = new NotificationService(app.prisma, app.io);
+    const vendor = await app.prisma.vendor.findFirstOrThrow({ where: { status: 'ACTIVE' }, select: { id: true } });
+
+    const mk = (minutesReady: number) =>
+      app.prisma.order.create({
+        data: {
+          orderNumber: `OPT-${nanoid(8)}`,
+          orderType: 'FOOD_DELIVERY',
+          customerId,
+          vendorId: vendor.id,
+          status: 'READY_FOR_PICKUP',
+          fulfillment: 'DELIVERY',
+          deliveryAddress: 'x', deliveryLat: 6.8, deliveryLng: -58.15,
+          subtotalBase: 1000, subtotalMarkup: 0, subtotalCustomer: 1000, deliveryFee: 300, totalAmount: 1300,
+          paymentMethod: 'CASH',
+          readyAt: new Date(Date.now() - minutesReady * 60_000),
+        },
+      });
+    const stale = await mk(6); // past the 5-min window
+    const fresh = await mk(1); // inside it
+    watchOrderIds.push(stale.id, fresh.id);
+
+    const before = await app.prisma.notification.count({ where: { userId: customerId } });
+    expect(await scanStrugglingDeliveries(app.prisma, notifications)).toBe(1);
+    const note = await app.prisma.notification.findFirstOrThrow({
+      where: { userId: customerId, data: { path: ['kind'], equals: 'delivery_options' } },
+    });
+    expect(note.title).toContain('trouble finding a rider');
+    expect((note.data as { orderId: string }).orderId).toBe(stale.id);
+
+    // Second scan: dedupe holds — nothing new.
+    expect(await scanStrugglingDeliveries(app.prisma, notifications)).toBe(0);
+    expect(await app.prisma.notification.count({ where: { userId: customerId } })).toBe(before + 1);
   });
 });

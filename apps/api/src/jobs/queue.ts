@@ -424,10 +424,17 @@ export function createWorkers(ctx: JobContext) {
           await dispatch.handleOfferTimeout(job.data.orderId, job.data.riderId);
         } else if (job.name === 'supply-watch-scan') {
           // Availability spec §5: tell waiting customers when supply returns.
-          const { scanSupplyWatches } = await import('../modules/dispatch/supply-watch.service');
+          const { scanSupplyWatches, scanStrugglingDeliveries } = await import('../modules/dispatch/supply-watch.service');
           const { NotificationService } = await import('../modules/notification/notification.service');
-          const n = await scanSupplyWatches(ctx.prisma, dispatch, new NotificationService(ctx.prisma, ctx.io));
+          const notifications = new NotificationService(ctx.prisma, ctx.io);
+          const n = await scanSupplyWatches(ctx.prisma, dispatch, notifications);
           if (n > 0) ctx.log.info({ notified: n }, 'supply watch: customers told drivers are back');
+          // §4.2: ready-with-no-rider orders prompt the customer with options
+          // (once). Flag-gated with the conversion it offers.
+          if (process.env['DISPATCH_EXHAUSTION'] === '1') {
+            const p = await scanStrugglingDeliveries(ctx.prisma, notifications);
+            if (p > 0) ctx.log.info({ prompted: p }, 'struggling deliveries: options pushed');
+          }
         }
       } finally {
         await dispatchQueue.close();
