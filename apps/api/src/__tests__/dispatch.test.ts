@@ -274,6 +274,40 @@ describe('The offer cascade', () => {
     await app.prisma.rider.updateMany({ where: { id: { in: [a.riderId, b.riderId] } }, data: { isOnline: false } });
   });
 
+  it('ALERTS_LOUD: an offer lands a push-backed notification with expiry; flag off is silent (alerts spec A2)', async () => {
+    const quiet = await makeRider({ lat: PICKUP.lat + 0.0045, acceptance: 100 });
+    const loud = await makeRider({ lat: PICKUP.lat + 0.02, acceptance: 100 }); // farther: not offered while quiet is online
+    try {
+      const orderQuiet = await makeDeliveryOrder();
+      delete process.env['ALERTS_LOUD'];
+      await dispatch.dispatchOrder(orderQuiet.id);
+      expect(await app.prisma.notification.count({ where: { userId: quiet.userId } })).toBe(0);
+
+      // Park quiet; with the flag ON the offer goes to loud and must notify.
+      await app.prisma.rider.update({ where: { id: quiet.riderId }, data: { isOnline: false } });
+      process.env['ALERTS_LOUD'] = '1';
+      const orderLoud = await makeDeliveryOrder();
+      await dispatch.dispatchOrder(orderLoud.id);
+      const note = await app.prisma.notification.findFirst({
+        where: { userId: loud.userId },
+        orderBy: { createdAt: 'desc' },
+      });
+      expect(note).toBeTruthy();
+      expect(note!.title).toContain('Order available nearby');
+      const data = note!.data as { kind: string; orderId: string; expiresAt: string };
+      expect(data.kind).toBe('dispatch_offer');
+      expect(data.orderId).toBe(orderLoud.id);
+      expect(new Date(data.expiresAt).getTime()).toBeGreaterThan(Date.now());
+    } finally {
+      delete process.env['ALERTS_LOUD'];
+      // Park this test's riders so later field-geometry tests stay clean.
+      await app.prisma.rider.updateMany({
+        where: { id: { in: [quiet.riderId, loud.riderId] } },
+        data: { isOnline: false },
+      });
+    }
+  });
+
   it('a stale timeout for a superseded offer is a no-op', async () => {
     const a = await makeRider({ lat: PICKUP.lat + 0.004 });
     const order = await makeDeliveryOrder();
