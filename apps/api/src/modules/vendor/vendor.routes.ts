@@ -366,6 +366,31 @@ async function vendorOwnerUserId(app: FastifyInstance, vendorId: string): Promis
   return vendor.owner.userId;
 }
 
+/**
+ * Listing gate (gated-trials spec §B2). Verified stores list freely. With
+ * PREVIEW_MODE on, a store that has NEVER been live (pending approval) may
+ * build its menu as DRAFTS — customer surfaces only show ACTIVE stores, so
+ * nothing leaks — and goes live the minute verification lands. A store that
+ * HAS been live (ACTIVE/SUSPENDED) keeps the hard gate: suspension means
+ * suspended.
+ */
+async function requireListingAllowed(
+  app: FastifyInstance,
+  verification: VerificationService,
+  vendorId: string,
+): Promise<void> {
+  const vendorRecord = await app.prisma.vendor.findUniqueOrThrow({
+    where: { id: vendorId },
+    select: { isVerified: true, vendorType: true, status: true },
+  });
+  const verified = vendorRecord.isVerified
+    || await verification.isRoleVerified(await vendorOwnerUserId(app, vendorId), vendorRecord.vendorType);
+  if (verified) return;
+  const draftableStatus = vendorRecord.status !== 'ACTIVE' && vendorRecord.status !== 'SUSPENDED';
+  if (process.env['PREVIEW_MODE'] === '1' && draftableStatus) return;
+  throw new AppError(403, 'VERIFICATION_REQUIRED', 'Complete document verification before listing items');
+}
+
 /** The selected store from the `x-vendor-id` header (multi-store switch). */
 function selectedVendorId(request: { headers: Record<string, string | string[] | undefined> }): string | undefined {
   const h = request.headers['x-vendor-id'];
@@ -1338,19 +1363,7 @@ export async function vendorRoutes(app: FastifyInstance) {
   /** POST /items — Create an item with optional option groups */
   app.post('/items', auth, async (request) => {
     const { vendorId } = await requireVendor(app, request, 'MANAGER');
-
-    // Verification gate: no listing until the vendor-type checklist is approved.
-    // The checklist belongs to the BUSINESS (its owner) — a verified store stays
-    // verified when staff manage it. Legacy isVerified grandfathers.
-    const vendorRecord = await app.prisma.vendor.findUniqueOrThrow({
-      where: { id: vendorId },
-      select: { isVerified: true, vendorType: true },
-    });
-    const verified = vendorRecord.isVerified
-      || await verification.isRoleVerified(await vendorOwnerUserId(app, vendorId), vendorRecord.vendorType);
-    if (!verified) {
-      throw new AppError(403, 'VERIFICATION_REQUIRED', 'Complete document verification before listing items');
-    }
+    await requireListingAllowed(app, verification, vendorId);
 
     const body = createItemSchema.parse(request.body);
 
@@ -1586,17 +1599,8 @@ export async function vendorRoutes(app: FastifyInstance) {
   /** POST /items/import — CSV bulk import: bad rows reported, good rows imported */
   app.post('/items/import', auth, async (request) => {
     const { vendorId } = await requireVendor(app, request, 'MANAGER');
-
-    // Same listing gate as single-item creation (owner-based)
-    const vendorRecord = await app.prisma.vendor.findUniqueOrThrow({
-      where: { id: vendorId },
-      select: { isVerified: true, vendorType: true },
-    });
-    const verified = vendorRecord.isVerified
-      || await verification.isRoleVerified(await vendorOwnerUserId(app, vendorId), vendorRecord.vendorType);
-    if (!verified) {
-      throw new AppError(403, 'VERIFICATION_REQUIRED', 'Complete document verification before listing items');
-    }
+    // Same listing gate as single-item creation (owner-based, §B2 draft-aware).
+    await requireListingAllowed(app, verification, vendorId);
 
     const { csv } = importCsvSchema.parse(request.body);
     const rows = parseCsvWithHeader(csv);

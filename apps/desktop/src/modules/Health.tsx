@@ -1,13 +1,16 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { discardDlqJob, fetchDlq, fetchHealth, requeueDlqJob } from '../lib/api';
+import { discardDlqJob, fetchAlertsHealth, fetchDlq, fetchHealth, requeueDlqJob } from '../lib/api';
 
 // Health (spec §5.7): is the platform alive, and what died in the queues.
 // The DLQ is where retry-exhausted jobs get eyes; requeue/discard are audited.
+// Alert delivery (alerts spec §A4): ack rate + median time-to-ack per kind —
+// how silently-failing pushes get caught before they become churn.
 
 export default function Health() {
   const queryClient = useQueryClient();
   const health = useQuery({ queryKey: ['health'], queryFn: fetchHealth, refetchInterval: 15_000 });
   const dlq = useQuery({ queryKey: ['dlq'], queryFn: fetchDlq, refetchInterval: 30_000 });
+  const alerts = useQuery({ queryKey: ['alerts-health'], queryFn: fetchAlertsHealth, refetchInterval: 60_000 });
   const refresh = () => queryClient.invalidateQueries({ queryKey: ['dlq'] });
   const requeue = useMutation({
     mutationFn: ({ queue, id }: { queue: string; id: string }) => requeueDlqJob(queue, id),
@@ -44,6 +47,33 @@ export default function Health() {
           </div>
         ))}
       </div>
+
+      <section>
+        <p className="text-xs font-bold uppercase tracking-wider text-white/40">
+          Alert delivery · last {alerts.data?.windowHours ?? 24}h
+        </p>
+        <div className="mt-2 flex flex-wrap gap-3">
+          {(alerts.data?.kinds ?? []).length === 0 && (
+            <p className="rounded-xl border border-dashed border-white/10 p-4 text-sm text-white/40">
+              No alerts sent in the window.
+            </p>
+          )}
+          {(alerts.data?.kinds ?? []).map((k: any) => (
+            <div
+              key={k.kind}
+              className={`rounded-2xl border p-4 ${k.breaching ? 'border-[var(--swift-red)]/50 bg-[var(--swift-red)]/10' : 'border-white/10 bg-white/5'}`}
+            >
+              <p className="text-[11px] font-bold uppercase tracking-wider text-white/40">{k.kind}</p>
+              <p className={`mt-1 text-lg font-extrabold ${k.breaching ? 'text-[var(--swift-red)]' : 'text-green-400'}`}>
+                {k.ackRate === null ? '—' : `${Math.round(k.ackRate * 100)}% acked`}
+              </p>
+              <p className="mt-1 text-xs text-white/40">
+                {k.acked}/{k.sent} · median {k.medianTimeToAckSeconds === null ? '—' : `${k.medianTimeToAckSeconds}s`} to ack
+              </p>
+            </div>
+          ))}
+        </div>
+      </section>
 
       <section>
         <p className="text-xs font-bold uppercase tracking-wider text-white/40">
