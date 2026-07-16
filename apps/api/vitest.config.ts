@@ -17,6 +17,13 @@ export default defineConfig({
       // boot still runs afterAll teardowns, which is how a missing env var
       // once wiped a seeded DB. Tests always get a secret; prod never does.
       JWT_SECRET: process.env['JWT_SECRET'] ?? 'vitest-local-jwt-secret',
+      // Pin the test DB here so a bare `vitest` NEVER touches the dev DB.
+      // Set first, this wins over the dev .env that Prisma's dotenv loads
+      // (no-override). Every test file falls back to `|| .../swift` internally;
+      // without this pin that default leaked fixture vendors (Race Diner ×3,
+      // Audit Corner Shop ×3, …) into the seeded dev DB, where they duplicated
+      // in the customer app. CI/local still override by exporting DATABASE_URL.
+      DATABASE_URL: process.env['DATABASE_URL'] ?? 'postgresql://swift:swift@localhost:5434/swift_test',
     },
     // All test files share ONE Postgres DB, so run files sequentially: parallel
     // files race on create/delete of shared fixtures (phones, carts→vendors→users)
