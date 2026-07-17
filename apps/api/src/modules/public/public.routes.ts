@@ -47,7 +47,8 @@ export async function publicRoutes(app: FastifyInstance) {
   /** GET /storefronts — the public directory. */
   app.get('/storefronts', async (request) => {
     const query = listQuerySchema.parse(request.query);
-    const where: Record<string, unknown> = { ...PUBLIC_WHERE };
+    // Empty stores stay out of the public directory (a direct /storefronts/:slug link still resolves).
+    const where: Record<string, unknown> = { ...PUBLIC_WHERE, items: { some: { isAvailable: true } } };
     if (query.type) where['vendorType'] = query.type;
     if (query.city) where['city'] = { equals: query.city, mode: 'insensitive' };
     if (query.q) where['name'] = { contains: query.q, mode: 'insensitive' };

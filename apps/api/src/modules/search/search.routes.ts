@@ -211,6 +211,8 @@ export async function searchRoutes(app: FastifyInstance) {
         status: 'ACTIVE',
         isVerified: true,
         isCurrentlyOpen: true,
+        // Empty stores (no orderable item) stay out of nearby discovery.
+        items: { some: { isAvailable: true } },
         ...(type && { vendorType: type }),
       },
       select: {

@@ -83,6 +83,11 @@ async function makeVendorWithSub(opts: { rate: number; prepaid: number; due: Dat
       isVerified: true,
     },
   });
+  // One available item so the vendor is browse-visible: these tests assert
+  // browse visibility tracks SUBSCRIPTION status, and the discovery feeds now
+  // exclude empty stores (no orderable item).
+  const cat = await app.prisma.category.create({ data: { vendorId: vendor.id, name: 'Menu', sortOrder: 0 } });
+  await app.prisma.item.create({ data: { vendorId: vendor.id, categoryId: cat.id, name: 'Billing Plate', basePrice: 1500, isAvailable: true } });
   const sub = await app.prisma.subscription.create({
     data: {
       vendorId: vendor.id,

@@ -695,10 +695,12 @@ export async function customerRoutes(app: FastifyInstance) {
       recentOrders,
       popularItemRows,
     ] = await Promise.all([
-      // All active, document-verified vendors (unverified stores stay out of
-      // discovery; favorites and direct links still resolve their storefront)
+      // All active, document-verified vendors with at least one orderable item
+      // (unverified stores AND empty stores stay out of discovery — a vendor
+      // with nothing available dead-ends when tapped; favorites and direct
+      // links still resolve their storefront)
       app.prisma.vendor.findMany({
-        where: { status: 'ACTIVE', isVerified: true },
+        where: { status: 'ACTIVE', isVerified: true, items: { some: { isAvailable: true } } },
         include: {
           categories: { select: { id: true, name: true }, take: 5 },
         },
@@ -834,7 +836,8 @@ export async function customerRoutes(app: FastifyInstance) {
     const { page, limit, skip } = parsePagination(query);
     const { type, cuisine, search, lat, lng, open, sort, minRating } = vendorsBrowseQuerySchema.parse(request.query);
 
-    const where: Record<string, unknown> = { status: 'ACTIVE', isVerified: true };
+    // Require ≥1 orderable item so empty stores don't clutter browse / dead-end on tap.
+    const where: Record<string, unknown> = { status: 'ACTIVE', isVerified: true, items: { some: { isAvailable: true } } };
     if (type) where['vendorType'] = type;
     if (cuisine) where['cuisineTypes'] = { has: cuisine };
     if (open === 'true') where['isCurrentlyOpen'] = true;

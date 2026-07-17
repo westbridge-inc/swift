@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { nanoid } from 'nanoid';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { prismaPlugin } from '../plugins/prisma';
 import { redisPlugin } from '../plugins/redis';
@@ -62,6 +63,35 @@ describe('guest browsing (no account)', () => {
       await app.redis.del('home:guest:x:x');
     }
   });
+  it('keeps EMPTY stores (no orderable item) out of browse + home, adds them back once stocked', async () => {
+    // An ACTIVE, verified store with zero available items must not surface in
+    // discovery — tapping it dead-ends on an empty menu. Once it has one
+    // available item, it appears.
+    const rnd = 592_700_000_000 + Math.floor(Math.random() * 900_000_000);
+    const user = await app.prisma.user.create({ data: { phone: `+${rnd}`, firstName: 'Empty', lastName: 'Store', roles: ['VENDOR_OWNER'], activeRole: 'VENDOR_OWNER', isPhoneVerified: true } });
+    const owner = await app.prisma.vendorOwner.create({ data: { userId: user.id } });
+    const v = await app.prisma.vendor.create({ data: { ownerId: owner.id, name: `Empty Store ${nanoid(6)}`, slug: `empty-${nanoid(8).toLowerCase()}`, vendorType: 'STORE', phone: `+${rnd + 1}`, addressLine1: '1 Empty', city: 'Georgetown', region: 'Demerara-Mahaica', latitude: 6.8, longitude: -58.15, status: 'ACTIVE', acceptingOrders: true, isCurrentlyOpen: true, isVerified: true } });
+    const inBody = (body: unknown) => JSON.stringify(body).includes(v.id);
+    try {
+      await app.redis.del('home:guest:x:x');
+      // Empty → excluded from both the browse list and Home.
+      expect(inBody((await get('/api/v1/customer/vendors')).json())).toBe(false);
+      expect(inBody((await get('/api/v1/customer/home')).json())).toBe(false);
+      // Stock one available item → now discoverable.
+      const cat = await app.prisma.category.create({ data: { vendorId: v.id, name: 'Menu', sortOrder: 0 } });
+      await app.prisma.item.create({ data: { vendorId: v.id, categoryId: cat.id, name: 'Thing', basePrice: 1000, isAvailable: true } });
+      await app.redis.del('home:guest:x:x');
+      expect(inBody((await get('/api/v1/customer/vendors')).json())).toBe(true);
+    } finally {
+      await app.prisma.item.deleteMany({ where: { vendorId: v.id } });
+      await app.prisma.category.deleteMany({ where: { vendorId: v.id } });
+      await app.prisma.vendor.delete({ where: { id: v.id } });
+      await app.prisma.vendorOwner.delete({ where: { id: owner.id } });
+      await app.prisma.user.delete({ where: { id: user.id } });
+      await app.redis.del('home:guest:x:x');
+    }
+  });
+
   it('lets guests see the vendor list', async () => {
     expect((await get('/api/v1/customer/vendors')).statusCode).toBe(200);
   });
