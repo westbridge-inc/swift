@@ -41,10 +41,17 @@ export const authPlugin = fp(async (app: FastifyInstance) => {
       const token = request.headers.authorization?.slice('Bearer '.length) ?? '';
       const session = await app.prisma.session.findUnique({
         where: { token },
-        select: { expiresAt: true, user: { select: { tenantId: true } } },
+        select: { expiresAt: true, user: { select: { tenantId: true, status: true } } },
       });
       if (!session || session.expiresAt < new Date()) {
         throw new Error('Session revoked or expired');
+      }
+      // SEC: a suspended/banned/deactivated account is cut off on its very next
+      // request — even with a still-valid access token + live session. (Admin
+      // suspend previously left the token working until it expired.) In-progress
+      // PENDING_VERIFICATION still needs access to finish onboarding.
+      if (session.user.status === 'SUSPENDED' || session.user.status === 'BANNED' || session.user.status === 'DEACTIVATED') {
+        throw new Error('Account is not active');
       }
       // Multi-tenancy stage 2: bind this request to the caller's tenant so
       // every tenant-owned query downstream is scoped to it.

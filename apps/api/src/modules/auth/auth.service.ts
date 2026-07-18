@@ -316,6 +316,12 @@ export class AuthService {
     if (session.expiresAt < new Date()) {
       throw new AppError(401, 'INVALID_TOKEN', 'Invalid or expired refresh token');
     }
+    // SEC: a suspended/banned/deactivated account cannot rotate new tokens — this
+    // closes the loop with the authenticate-time status check so suspension is not
+    // merely cosmetic for an already-logged-in user.
+    if (['SUSPENDED', 'BANNED', 'DEACTIVATED'].includes(session.user.status)) {
+      throw new AppError(403, 'ACCOUNT_SUSPENDED', 'This account is suspended.');
+    }
 
     const newAccessToken = this.app.jwt.sign({
       userId: session.user.id,
