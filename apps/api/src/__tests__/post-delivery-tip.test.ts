@@ -91,6 +91,14 @@ describe('post-delivery tip', () => {
     expect(Number(earning!.amount)).toBe(500);
     expect(earning!.status).toBe('AVAILABLE');
     expect(earning!.riderId).toBe(riderId);
+
+    // D5-01: the tip must also land in the grand total, so the receipt lines
+    // (which itemize the tip) still sum to the printed total and admin GMV isn't
+    // undercounted. makeOrder starts at 2000 + 500 fee = 2500; +500 tip = 3000.
+    const updated = await app.prisma.order.findUniqueOrThrow({ where: { id: order.id } });
+    expect(Number(updated.tipAmount)).toBe(500);
+    expect(Number(updated.totalAmount)).toBe(3000);
+    expect(Number(updated.totalAmount)).toBe(Number(updated.subtotalCustomer) + Number(updated.deliveryFee) + Number(updated.tipAmount) - Number(updated.discount));
   });
 
   it('rejects a second tip on the same order', async () => {
