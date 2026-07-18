@@ -1,0 +1,121 @@
+'use client';
+
+import { useEffect, useRef, useState } from 'react';
+import { useRouter } from 'next/navigation';
+import { MapPin, Navigation, Search } from 'lucide-react';
+import { rideAvailability, rideEstimate, requestRide, activeRide, watchRide, placesAutocomplete, placeDetails, money, type Place } from '@/lib/customer';
+
+type Pt = { lat: number; lng: number; label: string };
+
+export default function TaxiPage() {
+  const router = useRouter();
+  const [pickup, setPickup] = useState<Pt | null>(null);
+  const [dropoff, setDropoff] = useState<Pt | null>(null);
+  const [q, setQ] = useState('');
+  const [sugg, setSugg] = useState<Place[]>([]);
+  const [avail, setAvail] = useState<{ level: string; gate?: boolean; nearestEtaMinutes?: number | null } | null>(null);
+  const [fare, setFare] = useState<any>(null);
+  const [busy, setBusy] = useState(false);
+  const [watching, setWatching] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const debounce = useRef<any>(null);
+
+  // Pickup = device location; Georgetown fallback.
+  useEffect(() => {
+    const set = (lat: number, lng: number) => setPickup({ lat, lng, label: 'Current location' });
+    if (navigator.geolocation) navigator.geolocation.getCurrentPosition((p) => set(p.coords.latitude, p.coords.longitude), () => set(6.8013, -58.1551), { timeout: 5000 });
+    else set(6.8013, -58.1551);
+    activeRide().then((r) => { if (r?.id) router.push(`/orders/${r.id}`); }).catch(() => {});
+  }, [router]);
+
+  // Availability at the pickup.
+  useEffect(() => { if (pickup) rideAvailability(pickup.lat, pickup.lng).then(setAvail).catch(() => {}); }, [pickup]);
+
+  // Fare estimate once both ends are set.
+  useEffect(() => {
+    if (pickup && dropoff) rideEstimate({ pickup, dropoff }).then(setFare).catch(() => setFare(null));
+  }, [pickup, dropoff]);
+
+  function onSearch(v: string) {
+    setQ(v);
+    clearTimeout(debounce.current);
+    if (v.trim().length < 3) { setSugg([]); return; }
+    debounce.current = setTimeout(() => {
+      placesAutocomplete(v.trim(), pickup ?? undefined).then(setSugg).catch(() => setSugg([]));
+    }, 250);
+  }
+  async function pick(p: Place) {
+    setQ(p.label); setSugg([]);
+    try {
+      const d = p.lat != null && p.lng != null ? { lat: p.lat, lng: p.lng, label: p.label } : { ...(await placeDetails(p.placeId)), label: p.label };
+      setDropoff({ lat: d.lat, lng: d.lng, label: p.label });
+    } catch (e: any) { setError(e.message); }
+  }
+
+  async function request() {
+    if (!pickup || !dropoff) return;
+    setBusy(true); setError(null);
+    try {
+      const r = await requestRide({ pickup, dropoff, pickupAddress: pickup.label, dropoffAddress: dropoff.label, passengerCount: 1, rideClass: 'ECONOMY' });
+      const rid = r?.id ?? r?.ride?.id;
+      router.push(rid ? `/orders/${rid}` : '/orders');
+    } catch (e: any) { setError(e.message); }
+    finally { setBusy(false); }
+  }
+
+  const noDrivers = avail?.gate && avail.level === 'NONE';
+
+  return (
+    <div className="mx-auto max-w-lg space-y-5">
+      <h1 className="text-2xl font-extrabold">Get a ride</h1>
+
+      <div className="rounded-2xl border border-black/5 bg-white p-4">
+        <div className="flex items-center gap-2 border-b border-black/5 pb-3">
+          <MapPin className="h-4 w-4 text-[var(--swift-red)]" />
+          <span className="text-sm text-[var(--swift-muted)]">Pickup</span>
+          <span className="ml-auto font-semibold">{pickup?.label ?? 'Locating…'}</span>
+        </div>
+        <div className="relative pt-3">
+          <div className="flex items-center gap-2">
+            <Search className="h-4 w-4 text-[var(--swift-muted)]" />
+            <input value={q} onChange={(e) => onSearch(e.target.value)} placeholder="Where to?" className="w-full py-1 outline-none" />
+          </div>
+          {sugg.length > 0 && (
+            <ul className="absolute inset-x-0 top-full z-10 mt-1 overflow-hidden rounded-xl border border-black/10 bg-white shadow-lg">
+              {sugg.map((s) => (
+                <li key={s.placeId}><button onClick={() => pick(s)} className="flex w-full items-center gap-2 px-3 py-2.5 text-left hover:bg-[var(--swift-subtle)]"><Navigation className="h-4 w-4 text-[var(--swift-muted)]" /><span><span className="font-semibold">{s.label}</span>{s.secondary && <span className="block text-xs text-[var(--swift-muted)]">{s.secondary}</span>}</span></button></li>
+              ))}
+            </ul>
+          )}
+        </div>
+      </div>
+
+      {fare && dropoff && (
+        <div className="rounded-2xl border border-black/5 bg-white p-4">
+          <div className="flex items-center justify-between">
+            <div><p className="font-bold">Economy</p><p className="text-sm text-[var(--swift-muted)]">~{fare.etaMinutes ?? fare.durationMin ?? '—'} min · {fare.distanceKm?.toFixed?.(1) ?? fare.distanceKm} km</p></div>
+            <p className="text-lg font-extrabold">{money(fare.fare ?? fare.estimatedFare ?? fare.total ?? 0)}</p>
+          </div>
+          <p className="mt-1 text-xs text-[var(--swift-muted)]">Cash on arrival — you pay the driver directly.</p>
+        </div>
+      )}
+
+      {error && <p className="text-sm font-semibold text-[var(--swift-red)]">{error}</p>}
+
+      {noDrivers ? (
+        <div className="space-y-2 text-center">
+          <button onClick={async () => { if (pickup) { await watchRide(pickup).catch(() => {}); setWatching(true); } }} disabled={watching}
+            className="w-full rounded-full bg-[var(--swift-red)] py-3.5 font-bold text-white disabled:opacity-70">
+            {watching ? 'We’ll ping you — watching for drivers' : 'Notify me when a driver is available'}
+          </button>
+          <p className="text-sm text-[var(--swift-muted)]">No drivers are available near you right now — we’re sorry.</p>
+          <button onClick={request} disabled={!dropoff || busy} className="text-sm font-semibold text-[var(--swift-muted)] underline disabled:opacity-50">Try anyway — some drivers come online mid-search</button>
+        </div>
+      ) : (
+        <button onClick={request} disabled={!pickup || !dropoff || busy} className="w-full rounded-full bg-[var(--swift-red)] py-3.5 font-bold text-white disabled:opacity-50">
+          {busy ? 'Requesting…' : dropoff ? 'Request ride' : 'Set your destination'}
+        </button>
+      )}
+    </div>
+  );
+}
