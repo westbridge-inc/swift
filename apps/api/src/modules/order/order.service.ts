@@ -332,7 +332,7 @@ export class OrderService {
       const promo = await this.validatePromoCode(
         input.promoCode,
         input.userId,
-        plans.map((p) => ({ vendorId: p.vendor.id, subtotal: p.subtotal })),
+        plans.map((p) => ({ vendorId: p.vendor.id, subtotal: p.subtotal, deliveryFee: p.deliveryFee })),
       );
       discount = promo.discount;
       promoCodeId = promo.id;
@@ -405,19 +405,37 @@ export class OrderService {
       let sequence = todayCount;
 
       // A vendor promotion discounts (and records against) THAT vendor's order;
-      // platform-wide codes keep landing on the first order of the batch.
+      // a platform-wide code applies to the whole basket.
       const promoPlanIndex = promoVendorId
         ? plans.findIndex((p) => p.vendor.id === promoVendorId)
-        : 0;
+        : -1;
 
       // "Tip your rider" is delivery money: it rides the first DELIVERY plan.
       // A pickup or appointment has no rider — a lingering cart tip must never
       // be charged there (founder screenshot 2026-07-15: haircut w/ rider tip).
       const tipPlanIndex = plans.findIndex((p) => p.fulfillment === 'DELIVERY');
+      const planTipFor = (i: number) => (i === tipPlanIndex ? tip : 0);
+
+      // Spread the discount across orders so it's never swallowed by a per-order
+      // Math.max(0,…) clamp. A platform code larger than the first vendor's order
+      // used to overcharge — grandTotal disagreed with the cash actually collected.
+      // A vendor code hits only its plan; a platform code fills each plan up to its
+      // own total until the discount is exhausted.
+      const discountAlloc = new Array<number>(plans.length).fill(0);
+      let remainingDiscount = discount;
+      const discountTargets = promoPlanIndex >= 0 ? [promoPlanIndex] : plans.map((_, i) => i);
+      for (const i of discountTargets) {
+        if (remainingDiscount <= 0) break;
+        const cap = plans[i]!.subtotal + plans[i]!.deliveryFee + planTipFor(i);
+        const take = Math.min(remainingDiscount, cap);
+        discountAlloc[i] = take;
+        remainingDiscount -= take;
+      }
+
       for (const [index, plan] of plans.entries()) {
         sequence += 1;
-        const planTip = index === tipPlanIndex ? tip : 0;
-        const planDiscount = index === promoPlanIndex ? discount : 0;
+        const planTip = planTipFor(index);
+        const planDiscount = discountAlloc[index]!;
         const totalAmount = Math.max(0, plan.subtotal + plan.deliveryFee + planTip - planDiscount);
         // DELIVERY and MOBILE appointments go to the customer's address; PICKUP and
         // AT_BUSINESS appointments use the store (distanceKm>0 marks a mobile service).
@@ -467,7 +485,9 @@ export class OrderService {
             // Takeaway: a collection code the customer shows the vendor at pickup.
             // 6-digit, CSPRNG (not Math.random); handover is vendor-mediated in person.
             pickupCode: plan.fulfillment === 'PICKUP' ? String(randomInt(100000, 1000000)) : null,
-            promoCodeId: index === promoPlanIndex ? promoCodeId : null,
+            // Stamp the redemption on exactly one order (the vendor's plan, or
+            // order 0 for a platform code) so per-user usage counting stays correct.
+            promoCodeId: index === (promoPlanIndex >= 0 ? promoPlanIndex : 0) ? promoCodeId : null,
             items: {
               create: plan.orderItems.map((oi) => ({
                 itemId: oi.itemId,
@@ -1175,7 +1195,7 @@ export class OrderService {
   private async validatePromoCode(
     code: string,
     userId: string,
-    plans: Array<{ vendorId: string; subtotal: number }>,
+    plans: Array<{ vendorId: string; subtotal: number; deliveryFee: number }>,
   ) {
     const promo = await this.prisma.promoCode.findUnique({ where: { code: code.toUpperCase() } });
     if (!promo) throw new AppError(404, 'INVALID_PROMO', 'Promo code not found');
@@ -1200,14 +1220,17 @@ export class OrderService {
 
     // The discount basis: the promo vendor's plan, or the whole basket.
     let subtotal: number;
+    let deliveryFeeBasis: number;
     if (promo.vendorId) {
       const plan = plans.find((p) => p.vendorId === promo.vendorId);
       if (!plan) {
         throw new AppError(400, 'PROMO_WRONG_VENDOR', 'This code belongs to a different store — add their items to use it');
       }
       subtotal = plan.subtotal;
+      deliveryFeeBasis = plan.deliveryFee;
     } else {
       subtotal = plans.reduce((s, p) => s + p.subtotal, 0);
+      deliveryFeeBasis = plans.reduce((s, p) => s + p.deliveryFee, 0);
     }
 
     if (promo.minOrderAmount && subtotal < Number(promo.minOrderAmount)) {
@@ -1223,7 +1246,10 @@ export class OrderService {
         discount = Number(promo.discountValue);
         break;
       case 'FREE_DELIVERY':
-        discount = 0; // Handled separately in checkout
+        // Waive the delivery fee — the whole basket's, or the promo vendor's.
+        // (Previously returned 0 and was never applied → the customer was shown
+        // "Free delivery" but charged the full fee in cash at the door.)
+        discount = deliveryFeeBasis;
         break;
     }
 
