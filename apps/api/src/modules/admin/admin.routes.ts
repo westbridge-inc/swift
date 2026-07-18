@@ -229,7 +229,8 @@ export async function adminRoutes(app: FastifyInstance) {
   const verification = new VerificationService(app.prisma, notifications, getKycProvider());
   const billing = new BillingService(app.prisma, notifications, getPaymentProvider());
   const subscriptions = new SubscriptionService(app.prisma);
-  const cashRules = new CashRulesService(app.prisma, notifications, new OrderService(app.prisma, app.io));
+  const orderService = new OrderService(app.prisma, app.io);
+  const cashRules = new CashRulesService(app.prisma, notifications, orderService);
 
   // Middleware: verify ADMIN or SUPER_ADMIN role
   const adminGuard = async (request: any, reply: any) => {
@@ -1185,8 +1186,10 @@ export async function adminRoutes(app: FastifyInstance) {
 
     const newStatus = refund ? 'REFUNDED' : 'CANCELLED';
 
-    await app.prisma.order.update({
-      where: { id },
+    // Compare-and-set so a concurrent transition can't be silently overwritten
+    // (the pre-check above is time-of-check/time-of-use). Loser → 400.
+    const claimed = await app.prisma.order.updateMany({
+      where: { id, status: { notIn: terminalStatuses as OrderStatus[] } },
       data: {
         status: newStatus,
         cancelledAt: new Date(),
@@ -1194,24 +1197,22 @@ export async function adminRoutes(app: FastifyInstance) {
         cancellationReason: reason || 'Cancelled by admin',
       },
     });
+    if (claimed.count === 0) {
+      throw new AppError(400, 'INVALID_STATUS', `Cannot cancel an order with status ${order.status}`);
+    }
 
     await app.prisma.orderStatusLog.create({
       data: { orderId: id, status: newStatus, changedBy: request.user.userId, note: reason || 'Admin cancellation' },
     });
 
-    // Free up assigned rider or driver
-    if (order.riderId) {
-      await app.prisma.rider.update({
-        where: { id: order.riderId },
-        data: { isAvailable: true, currentOrderId: null },
-      });
-    }
-    if (order.driverId) {
-      await app.prisma.driver.update({
-        where: { id: order.driverId },
-        data: { isAvailable: true, currentRideId: null },
-      });
-    }
+    // Terminal cleanup that this handler previously skipped entirely: restock
+    // tracked stock (only when the goods were still in the store — NOT once
+    // picked up), return the CASH rider's committed float (a leak here silently
+    // froze riders out of CASH offers), and free the assigned mover.
+    await orderService.applyCancellationSideEffects(
+      { id, paymentMethod: order.paymentMethod, riderId: order.riderId, driverId: order.driverId, subtotalBase: Number(order.subtotalBase) },
+      { restock: OrderService.restocksOnCancel(order.status) },
+    );
 
     // V1 is cash-only: the platform never holds order money, so there is no wallet
     // to credit. A cancellation before handover means no cash changed hands; if cash
