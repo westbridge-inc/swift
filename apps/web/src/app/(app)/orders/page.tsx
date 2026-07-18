@@ -33,7 +33,7 @@ export default function OrdersPage() {
             </div>
             <div className="text-right">
               <span className="rounded-full bg-[var(--swift-red-50)] px-2.5 py-1 text-xs font-bold text-[var(--swift-red)]">{LABEL[o.status] ?? o.status}</span>
-              <p className="mt-1 font-bold">{money(o.total ?? o.grandTotal ?? 0)}</p>
+              <p className="mt-1 font-bold">{money(o.totalAmount ?? o.total ?? 0)}</p>
             </div>
           </Link>
         ))}
