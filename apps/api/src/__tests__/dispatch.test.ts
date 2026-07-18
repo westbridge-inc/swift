@@ -416,4 +416,36 @@ describe('Atomic acceptance — the concurrency proof', () => {
 
     await app.prisma.rider.updateMany({ where: { id: { in: [a.riderId, b.riderId] } }, data: { isOnline: false } });
   });
+
+  it('two riders racing the DIRECT accept endpoint: exactly one wins, the loser is not stuck busy', async () => {
+    // POST /rider/orders/:id/accept used a plain update-by-id, so two riders who
+    // both passed the JS riderId-null check could double-assign AND both mark
+    // themselves busy. This proves the compare-and-set fix.
+    const a = await makeRider({ lat: PICKUP.lat + 0.003 });
+    const b = await makeRider({ lat: PICKUP.lat + 0.004 });
+    const order = await makeDeliveryOrder('READY_FOR_PICKUP');
+
+    const accept = (token: string) => app.inject({
+      method: 'POST',
+      url: `/api/v1/rider/orders/${order.id}/accept`,
+      payload: {},
+      headers: { 'content-type': 'application/json', authorization: `Bearer ${token}` },
+    });
+    const [ra, rb] = await Promise.all([accept(a.token), accept(b.token)]);
+
+    // Exactly one winner (200), one clean conflict (409) — never two winners.
+    expect([ra.statusCode, rb.statusCode].sort()).toEqual([200, 409]);
+
+    const db = await app.prisma.order.findUniqueOrThrow({ where: { id: order.id }, select: { riderId: true, status: true } });
+    expect(db.status).toBe('RIDER_ASSIGNED');
+    expect([a.riderId, b.riderId]).toContain(db.riderId);
+
+    // Only the winner is busy on this order; the loser is free, not stranded.
+    const riders = await app.prisma.rider.findMany({ where: { id: { in: [a.riderId, b.riderId] } }, select: { id: true, currentOrderId: true } });
+    const busyOnThis = riders.filter((r) => r.currentOrderId === order.id);
+    expect(busyOnThis).toHaveLength(1);
+    expect(busyOnThis[0]!.id).toBe(db.riderId);
+
+    await app.prisma.rider.updateMany({ where: { id: { in: [a.riderId, b.riderId] } }, data: { isOnline: false } });
+  });
 });
