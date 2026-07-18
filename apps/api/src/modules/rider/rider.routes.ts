@@ -1,6 +1,6 @@
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
-import { RiderType, VehicleType, EarningType, EarningStatus } from '@prisma/client';
+import { RiderType, VehicleType, EarningType, EarningStatus, type OrderStatus } from '@prisma/client';
 import { OrderService, notHeldFilter } from '../order/order.service';
 import { NotificationService } from '../notification/notification.service';
 import { VerificationService } from '../verification/verification.service';
@@ -627,7 +627,10 @@ export async function riderRoutes(app: FastifyInstance) {
       throw new ConflictError('This order has already been claimed by another rider');
     }
 
-    const acceptableStatuses = ['READY_FOR_PICKUP', 'ACCEPTED', 'PREPARING', 'PENDING'];
+    // RIDER_ASSIGNED is only reachable from these states — NOT PENDING (the vendor
+    // hasn't accepted yet). Kept in sync with the order transition table; accepting
+    // a PENDING order used to strand the rider stuck-busy after the throw below.
+    const acceptableStatuses: OrderStatus[] = ['READY_FOR_PICKUP', 'ACCEPTED', 'PREPARING'];
     if (!acceptableStatuses.includes(order.status)) {
       throw new AppError(400, 'INVALID_STATUS', `Order cannot be accepted in status ${order.status}`);
     }
@@ -638,9 +641,12 @@ export async function riderRoutes(app: FastifyInstance) {
     const marketFee = Number(order.deliveryFee);
     const chosenFee = fare != null ? clampDriverFare(fare, marketFee) : marketFee;
 
-    // Assign rider first, then update status (sequential to avoid race).
-    const updatedOrder = await app.prisma.order.update({
-      where: { id },
+    // Single-winner claim: an ATOMIC compare-and-set is the real lock. A plain
+    // update-by-id let two riders who both passed the JS null-check above assign
+    // the same order (and both mark themselves busy). Only one caller can flip
+    // riderId from null under a still-acceptable status — mirrors dispatch.claimOrder.
+    const claimed = await app.prisma.order.updateMany({
+      where: { id, riderId: null, status: { in: acceptableStatuses } },
       data: {
         riderId: rider.id,
         ...(chosenFee !== marketFee
@@ -648,7 +654,11 @@ export async function riderRoutes(app: FastifyInstance) {
           : {}),
       },
     });
+    if (claimed.count === 0) {
+      throw new ConflictError('This order was just claimed by another rider, or is no longer available');
+    }
 
+    // Only the winner reaches here — safe to advance status + mark the rider busy.
     await Promise.all([
       orderService.updateStatus(id, 'RIDER_ASSIGNED', request.user.userId, 'Rider accepted the order'),
       app.prisma.rider.update({
@@ -656,6 +666,8 @@ export async function riderRoutes(app: FastifyInstance) {
         data: { isAvailable: false, currentOrderId: id },
       }),
     ]);
+
+    const updatedOrder = await app.prisma.order.findUniqueOrThrow({ where: { id } });
 
     return {
       success: true,
