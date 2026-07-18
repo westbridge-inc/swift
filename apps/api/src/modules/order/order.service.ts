@@ -1179,7 +1179,12 @@ export class OrderService {
       await tx.$queryRaw`SELECT id FROM "orders" WHERE id = ${orderId} FOR UPDATE`;
       const fresh = await tx.order.findUniqueOrThrow({ where: { id: orderId }, select: { tipAmount: true } });
       if (Number(fresh.tipAmount) > 0) throw new AppError(409, 'ALREADY_TIPPED', 'A tip was already added to this order.');
-      await tx.order.update({ where: { id: orderId }, data: { tipAmount: amount } });
+      // The tip is part of what the customer pays, so it must land in BOTH
+      // tipAmount AND the grand total — otherwise the receipt lines (which
+      // include the tip) no longer sum to the printed total, and admin GMV
+      // undercounts every post-delivery tip. (The rider is paid correctly either
+      // way via the earnings ledger below; this fixes the customer-facing total.)
+      await tx.order.update({ where: { id: orderId }, data: { tipAmount: amount, totalAmount: { increment: amount } } });
       await tx.earning.create({
         data: {
           ...(order.riderId ? { riderId: order.riderId } : { driverId: order.driverId }),
