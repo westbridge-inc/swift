@@ -269,6 +269,27 @@ describe('The guarantee — honest claim pays, guardrails catch patterns', () =>
     expect(strike!.addressKey).toContain('geo:');
   });
 
+  it('claim payout is single-winner: two concurrent markClaimPaid → one pays, one 400s (no double-payout)', async () => {
+    const customer = await makeUser(['CUSTOMER'], 'CUSTOMER');
+    const rider = await makeRider();
+    const claim = await plantClaim(rider.riderId, customer.userId, 0); // AUTO_APPROVED
+
+    // Two admins (or a double-click / retry) mark the SAME claim paid at once.
+    const results = await Promise.allSettled([
+      cash.markClaimPaid(claim.id, 'admin-a', 'ref-a'),
+      cash.markClaimPaid(claim.id, 'admin-b', 'ref-b'),
+    ]);
+    // Exactly one payout goes through; the loser is rejected, not a second payout.
+    expect(results.filter((r) => r.status === 'fulfilled')).toHaveLength(1);
+    expect(results.filter((r) => r.status === 'rejected')).toHaveLength(1);
+
+    const final = await app.prisma.reimbursementClaim.findUniqueOrThrow({ where: { id: claim.id } });
+    expect(final.status).toBe('PAID');
+
+    // A later attempt on an already-PAID claim is a clean 400, never another payout.
+    await expect(cash.markClaimPaid(claim.id, 'admin-c')).rejects.toThrow(/PAID/);
+  });
+
   it('orders at/over the USD gate are not auto-covered (strike still recorded)', async () => {
     const customer = await makeUser(['CUSTOMER'], 'CUSTOMER', { trustLevel: 'L2' });
     const rider = await makeRider();
