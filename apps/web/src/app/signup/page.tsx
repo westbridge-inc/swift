@@ -42,7 +42,14 @@ export default function SignupPage() {
   const doSend = () => wrap(async () => { await sendOtp(phone.trim()); setStep('code'); });
   const doVerify = () => wrap(async () => {
     const r = await verifyOtp(phone.trim(), code.trim());
-    if (r.signedIn) { router.replace(role === 'VENDOR' ? '/dashboard' : role === 'MOVER' ? '/portal' : '/order'); return; }
+    if (r.signedIn) {
+      // Existing account: route by its ACTUAL roles, not the tile they tapped.
+      const roles: string[] = r.user?.roles ?? [];
+      const isVendor = roles.includes('VENDOR') || roles.includes('VENDOR_OWNER') || !!r.user?.vendorOwner;
+      const isMover = roles.some((x) => ['MOVER', 'RIDER', 'DRIVER'].includes(x));
+      router.replace(isVendor ? '/dashboard' : isMover ? '/portal' : '/order');
+      return;
+    }
     setStep('name');
   });
   const doRegister = () => wrap(async () => {

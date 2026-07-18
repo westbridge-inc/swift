@@ -88,8 +88,8 @@ export interface VendorDetail extends Vendor {
   description?: string;
   categories: Array<{ id: string; name: string; items: MenuItem[] }>;
 }
-export interface CartLine { id: string; itemId: string; name: string; quantity: number; unitPrice: number; imageUrl?: string | null; vendorId: string; vendorName?: string; }
-export interface Cart { items: CartLine[]; subtotal?: number; deliveryAddressId?: string | null; }
+export interface CartLine { id: string; itemId: string; name: string; quantity: number; customerPrice: number; imageUrl?: string | null; vendorId?: string; vendorName?: string; }
+export interface Cart { items: CartLine[]; subtotal?: number; totalAmount?: number; deliveryAddressId?: string | null; vendor?: { id: string; name: string } }
 
 // ── Browse ────────────────────────────────────────────────────────────────
 export async function getHome() { return (await apiFetch('/api/v1/customer/home')).data; }
@@ -162,7 +162,7 @@ export async function requestCourier(body: { pickup: { lat: number; lng: number 
 }
 
 // ── Places (taxi pickup/dropoff search) ─────────────────────────────────────
-export interface Place { placeId: string; label: string; secondary?: string; lat?: number; lng?: number; }
+export interface Place { placeId: string; primary: string; secondary?: string; label?: string; lat?: number; lng?: number; }
 export async function placesAutocomplete(q: string, near?: { lat: number; lng: number }): Promise<Place[]> {
   const qs = new URLSearchParams({ q, ...(near ? { lat: String(near.lat), lng: String(near.lng) } : {}) });
   return (await apiFetch(`/api/v1/places/autocomplete?${qs}`)).data as Place[];

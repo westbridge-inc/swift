@@ -29,7 +29,7 @@ export default function CartPage() {
   }
   useEffect(() => { refresh().catch((e) => setError(e.message)); }, []);
 
-  const subtotal = (cart?.items ?? []).reduce((s, l) => s + l.unitPrice * l.quantity, 0);
+  const subtotal = (cart?.items ?? []).reduce((s, l) => s + (l.customerPrice ?? 0) * l.quantity, 0);
 
   async function saveAddress() {
     setBusy(true); setError(null);
@@ -56,8 +56,8 @@ export default function CartPage() {
     try {
       if (addrId) await setCartAddress(addrId).catch(() => {});
       const body: any = { paymentMethod: pay, tipAmount: tip };
-      if (asPickup && cart.items[0]) {
-        body.fulfillmentSelections = Object.fromEntries([...new Set(cart.items.map((l) => l.vendorId))].map((v) => [v, 'PICKUP']));
+      if (asPickup && cart.vendor?.id) {
+        body.fulfillmentSelections = { [cart.vendor.id]: 'PICKUP' };
       }
       const appts = getPendingAppointments();
       if (appts.length) body.appointments = appts.map((a) => ({ itemId: a.itemId, slotStart: a.slotStart, ...(a.mode ? { mode: a.mode } : {}) }));
@@ -88,7 +88,7 @@ export default function CartPage() {
             <div className="min-w-0 flex-1">
               <p className="font-bold">{l.name}</p>
               {l.vendorName && <p className="text-xs text-[var(--swift-muted)]">{l.vendorName}</p>}
-              <p className="mt-0.5 font-semibold text-[var(--swift-red)]">{money(l.unitPrice)}</p>
+              <p className="mt-0.5 font-semibold text-[var(--swift-red)]">{money(l.customerPrice)}</p>
             </div>
             <div className="flex items-center gap-2 rounded-full border border-black/10 px-2 py-1">
               <button onClick={async () => { l.quantity <= 1 ? await removeCartLine(l.id) : await updateCartLine(l.id, l.quantity - 1); refresh(); }} className="px-2 font-bold">−</button>

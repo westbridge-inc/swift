@@ -45,10 +45,10 @@ export default function TaxiPage() {
     }, 250);
   }
   async function pick(p: Place) {
-    setQ(p.label); setSugg([]);
+    setQ(p.primary); setSugg([]);
     try {
-      const d = p.lat != null && p.lng != null ? { lat: p.lat, lng: p.lng, label: p.label } : { ...(await placeDetails(p.placeId)), label: p.label };
-      setDropoff({ lat: d.lat, lng: d.lng, label: p.label });
+      const d = p.lat != null && p.lng != null ? { lat: p.lat, lng: p.lng } : await placeDetails(p.placeId);
+      setDropoff({ lat: d.lat, lng: d.lng, label: p.primary });
     } catch (e: any) { setError(e.message); }
   }
 
@@ -83,7 +83,7 @@ export default function TaxiPage() {
           {sugg.length > 0 && (
             <ul className="absolute inset-x-0 top-full z-10 mt-1 overflow-hidden rounded-xl border border-black/10 bg-white shadow-lg">
               {sugg.map((s) => (
-                <li key={s.placeId}><button onClick={() => pick(s)} className="flex w-full items-center gap-2 px-3 py-2.5 text-left hover:bg-[var(--swift-subtle)]"><Navigation className="h-4 w-4 text-[var(--swift-muted)]" /><span><span className="font-semibold">{s.label}</span>{s.secondary && <span className="block text-xs text-[var(--swift-muted)]">{s.secondary}</span>}</span></button></li>
+                <li key={s.placeId}><button onClick={() => pick(s)} className="flex w-full items-center gap-2 px-3 py-2.5 text-left hover:bg-[var(--swift-subtle)]"><Navigation className="h-4 w-4 text-[var(--swift-muted)]" /><span><span className="font-semibold">{s.primary}</span>{s.secondary && <span className="block text-xs text-[var(--swift-muted)]">{s.secondary}</span>}</span></button></li>
               ))}
             </ul>
           )}
@@ -93,8 +93,8 @@ export default function TaxiPage() {
       {fare && dropoff && (
         <div className="rounded-2xl border border-black/5 bg-white p-4">
           <div className="flex items-center justify-between">
-            <div><p className="font-bold">Economy</p><p className="text-sm text-[var(--swift-muted)]">~{fare.etaMinutes ?? fare.durationMin ?? '—'} min · {fare.distanceKm?.toFixed?.(1) ?? fare.distanceKm} km</p></div>
-            <p className="text-lg font-extrabold">{money(fare.fare ?? fare.estimatedFare ?? fare.total ?? 0)}</p>
+            <div><p className="font-bold">Economy</p><p className="text-sm text-[var(--swift-muted)]">~{fare.durationMin ?? '—'} min · {fare.distanceKm?.toFixed?.(1) ?? fare.distanceKm} km</p></div>
+            <p className="text-lg font-extrabold">{money((fare.tiers?.find((t: any) => t.rideClass === 'ECONOMY') ?? fare.tiers?.[0])?.fare ?? 0)}</p>
           </div>
           <p className="mt-1 text-xs text-[var(--swift-muted)]">Cash on arrival — you pay the driver directly.</p>
         </div>

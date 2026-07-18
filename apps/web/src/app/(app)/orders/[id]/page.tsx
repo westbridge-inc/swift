@@ -37,7 +37,7 @@ export default function OrderDetailPage() {
         {o.pickupCode && <p className="mt-2 text-sm">Pickup code: <span className="font-bold tracking-widest">{o.pickupCode}</span></p>}
       </div>
 
-      {!cancelled && !isPickup && (
+      {!cancelled && !isPickup && idx >= 0 && (
         <div className="rounded-2xl border border-black/5 bg-white p-5">
           <ol className="space-y-3">
             {STEPS.slice(0, 6).map((s, i) => (
@@ -54,9 +54,9 @@ export default function OrderDetailPage() {
       <div className="rounded-2xl border border-black/5 bg-white p-5">
         <p className="mb-2 font-bold">Order</p>
         {(o.items ?? []).map((it: any, i: number) => (
-          <div key={i} className="flex justify-between py-1 text-sm"><span>{it.quantity}× {it.name}</span><span className="font-semibold">{money(it.price ?? it.totalCustomer ?? 0)}</span></div>
+          <div key={i} className="flex justify-between py-1 text-sm"><span>{it.quantity}× {it.name}</span><span className="font-semibold">{money(it.lineTotal ?? it.price ?? 0)}</span></div>
         ))}
-        <div className="mt-2 flex justify-between border-t border-black/5 pt-2 font-extrabold"><span>Total</span><span>{money(o.total ?? o.grandTotal ?? 0)}</span></div>
+        <div className="mt-2 flex justify-between border-t border-black/5 pt-2 font-extrabold"><span>Total</span><span>{money(o.totalAmount ?? o.total ?? 0)}</span></div>
         <p className="mt-2 text-xs text-[var(--swift-muted)]">{o.paymentMethod === 'MOBILE_MONEY' ? 'Pay the business via MMG' : 'Cash on delivery'} · {o.deliveryAddress}</p>
       </div>
 
