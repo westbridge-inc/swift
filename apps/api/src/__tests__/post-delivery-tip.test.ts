@@ -7,6 +7,7 @@ import { redisPlugin } from '../plugins/redis';
 import { authPlugin } from '../plugins/auth';
 import { socketPlugin } from '../plugins/socket';
 import { customerRoutes } from '../modules/user/customer.routes';
+import { OrderService } from '../modules/order/order.service';
 import { registerErrorHandler } from '../middleware/error-handler';
 
 // ---------------------------------------------------------------------------
@@ -116,5 +117,21 @@ describe('post-delivery tip', () => {
     const stranger = await makeCustomer();
     const order = await makeOrder(owner.userId, 'DELIVERED', { deliveredAt: new Date() });
     expect((await inject(`/api/v1/customer/orders/${order.id}/tip`, { amount: 300 }, stranger.token)).statusCode).toBe(404);
+  });
+
+  it('createEarnings is idempotent — two concurrent completions pay the mover once', async () => {
+    const c = await makeCustomer();
+    const order = await makeOrder(c.userId, 'DELIVERED', { tipAmount: 300, deliveredAt: new Date() });
+    const orders = new OrderService(app.prisma, app.io);
+
+    // The courier/driver "complete" write is not a CAS, so two concurrent
+    // completions of the same order can both reach createEarnings. The
+    // @@unique([orderId,type]) + skipDuplicates must make it a no-op the 2nd time.
+    await Promise.all([orders.createEarnings(order.id), orders.createEarnings(order.id)]);
+
+    const earnings = await app.prisma.earning.findMany({ where: { orderId: order.id } });
+    expect(earnings).toHaveLength(2); // fee + tip — never 4
+    const byType = Object.fromEntries(earnings.map((e) => [e.type, Number(e.amount)]));
+    expect(byType).toEqual({ DELIVERY_FEE: 500, TIP: 300 });
   });
 });

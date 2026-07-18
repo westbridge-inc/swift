@@ -1128,7 +1128,10 @@ export class OrderService {
     }
 
     if (earnings.length > 0) {
-      await this.prisma.earning.createMany({ data: earnings });
+      // skipDuplicates + the @@unique([orderId, type]) index makes this
+      // idempotent: a concurrent second completion of the same order inserts
+      // nothing rather than double-paying the mover.
+      await this.prisma.earning.createMany({ data: earnings, skipDuplicates: true });
 
       // Notify rider/driver
       for (const earning of earnings) {
