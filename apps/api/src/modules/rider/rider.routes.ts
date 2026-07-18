@@ -1,6 +1,6 @@
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
-import { RiderType, VehicleType, EarningType, EarningStatus } from '@prisma/client';
+import { RiderType, VehicleType, EarningType, EarningStatus, type OrderStatus } from '@prisma/client';
 import { OrderService, notHeldFilter } from '../order/order.service';
 import { NotificationService } from '../notification/notification.service';
 import { VerificationService } from '../verification/verification.service';
@@ -630,7 +630,7 @@ export async function riderRoutes(app: FastifyInstance) {
     // RIDER_ASSIGNED is only reachable from these states — NOT PENDING (the vendor
     // hasn't accepted yet). Kept in sync with the order transition table; accepting
     // a PENDING order used to strand the rider stuck-busy after the throw below.
-    const acceptableStatuses = ['READY_FOR_PICKUP', 'ACCEPTED', 'PREPARING'];
+    const acceptableStatuses: OrderStatus[] = ['READY_FOR_PICKUP', 'ACCEPTED', 'PREPARING'];
     if (!acceptableStatuses.includes(order.status)) {
       throw new AppError(400, 'INVALID_STATUS', `Order cannot be accepted in status ${order.status}`);
     }
