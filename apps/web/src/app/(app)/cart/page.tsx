@@ -4,7 +4,7 @@ import { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import { Trash2, MapPin } from 'lucide-react';
-import { getCart, updateCartLine, removeCartLine, getAddresses, addAddress, setCartAddress, checkout, money, type Cart } from '@/lib/customer';
+import { getCart, updateCartLine, removeCartLine, getAddresses, addAddress, setCartAddress, checkout, getPendingAppointments, clearPendingAppointments, money, type Cart } from '@/lib/customer';
 
 const TIPS = [0, 200, 500, 1000];
 
@@ -59,7 +59,10 @@ export default function CartPage() {
       if (asPickup && cart.items[0]) {
         body.fulfillmentSelections = Object.fromEntries([...new Set(cart.items.map((l) => l.vendorId))].map((v) => [v, 'PICKUP']));
       }
+      const appts = getPendingAppointments();
+      if (appts.length) body.appointments = appts.map((a) => ({ itemId: a.itemId, slotStart: a.slotStart, ...(a.mode ? { mode: a.mode } : {}) }));
       const res = await checkout(body);
+      clearPendingAppointments();
       const oid = res.order?.id ?? res.orders?.[0]?.id;
       router.push(oid ? `/orders/${oid}` : '/orders');
     } catch (e: any) {
