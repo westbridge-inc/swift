@@ -33,7 +33,9 @@ export async function placesRoutes(app: FastifyInstance) {
   /** GET /details?placeId= — resolve a suggestion to a labelled coordinate. */
   app.get('/details', auth, async (request) => {
     const { placeId } = detailsSchema.parse(request.query);
-    const detail = await places.details(placeId);
+    // Scope saved-address (`addr:`) resolution to the caller — otherwise any
+    // authenticated user could resolve another user's address id (IDOR).
+    const detail = await places.details(placeId, { userId: request.user.userId });
     return { success: true, data: detail };
   });
 }

@@ -140,6 +140,33 @@ describe('GET /places/details — resolves to a coordinate', () => {
   });
 });
 
+describe('GET /places/details — saved addresses are owner-scoped (IDOR guard)', () => {
+  it("a caller cannot resolve another user's saved address id", async () => {
+    // The owner's private address, seeded in beforeAll.
+    const owned = await app.prisma.address.findFirstOrThrow({ where: { user: { phone: '+59200201' } } });
+
+    // A second, unrelated user (phone under the purge prefix so it's cleaned up).
+    const attacker = await app.prisma.user.create({
+      data: { phone: '+592002012', firstName: 'Nosy', lastName: 'Neighbour', roles: ['CUSTOMER'], activeRole: 'CUSTOMER', isPhoneVerified: true, selfieCapturedAt: new Date(), customer: { create: {} } },
+    });
+    const attackerToken = app.jwt.sign({ userId: attacker.id, role: 'CUSTOMER', jti: nanoid(8) });
+    await app.prisma.session.create({
+      data: { userId: attacker.id, token: attackerToken, refreshToken: nanoid(48), deviceId: 'places', deviceType: 'test', expiresAt: new Date(Date.now() + DAY) },
+    });
+
+    // The owner resolves their OWN address — allowed, real coordinates.
+    const mine = await inject(`/api/v1/places/details?placeId=addr:${owned.id}`, token);
+    expect(mine.statusCode).toBe(200);
+    expect(mine.json().data).not.toBeNull();
+    expect(mine.json().data.lat).toBeCloseTo(6.805, 3);
+
+    // The attacker requests the SAME id — must get nothing, never the coordinates.
+    const theirs = await inject(`/api/v1/places/details?placeId=addr:${owned.id}`, attackerToken);
+    expect(theirs.statusCode).toBe(200);
+    expect(theirs.json().data).toBeNull();
+  });
+});
+
 describe('LocalPlacesProvider — reverse geocode', () => {
   it('labels a point with its nearest active zone', async () => {
     const provider = new LocalPlacesProvider(app.prisma);

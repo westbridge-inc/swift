@@ -36,7 +36,9 @@ export interface PlacesQueryContext {
 
 export interface PlacesProvider {
   autocomplete(query: string, ctx?: PlacesQueryContext): Promise<PlaceSuggestion[]>;
-  details(placeId: string): Promise<PlaceDetail | null>;
+  // ctx carries the caller's identity: resolving an `addr:` placeId (a saved
+  // address) MUST be scoped to its owner, or it's an IDOR.
+  details(placeId: string, ctx?: PlacesQueryContext): Promise<PlaceDetail | null>;
   reverseGeocode(point: PlacePoint): Promise<string | null>;
 }
 
@@ -117,10 +119,16 @@ export class LocalPlacesProvider implements PlacesProvider {
     return out.slice(0, MAX_SUGGESTIONS);
   }
 
-  async details(placeId: string): Promise<PlaceDetail | null> {
+  async details(placeId: string, ctx?: PlacesQueryContext): Promise<PlaceDetail | null> {
     const [kind, id] = placeId.split(':', 2);
     if (kind === 'addr' && id) {
-      const a = await this.prisma.address.findUnique({ where: { id } });
+      // A saved address is private — only its owner may resolve it. Without the
+      // userId scope this is an IDOR: any authenticated caller could turn an
+      // address id into someone else's home label + coordinates. Refuse outright
+      // when the caller is anonymous (findFirst with userId:undefined would
+      // silently drop the predicate and re-open the hole).
+      if (!ctx?.userId) return null;
+      const a = await this.prisma.address.findFirst({ where: { id, userId: ctx.userId } });
       if (!a) return null;
       return {
         placeId,
@@ -224,7 +232,7 @@ export class GooglePlacesProvider implements PlacesProvider {
       }));
   }
 
-  async details(placeId: string): Promise<PlaceDetail | null> {
+  async details(placeId: string, _ctx?: PlacesQueryContext): Promise<PlaceDetail | null> {
     const url = new URL(DETAILS_URL);
     url.searchParams.set('place_id', placeId);
     url.searchParams.set('fields', 'name,formatted_address,geometry');
@@ -332,8 +340,10 @@ export class OsmPlacesProvider implements PlacesProvider {
     return suggestions.slice(0, MAX_SUGGESTIONS);
   }
 
-  async details(placeId: string): Promise<PlaceDetail | null> {
-    if (!placeId.startsWith('osm:')) return this.fallback.details(placeId);
+  async details(placeId: string, ctx?: PlacesQueryContext): Promise<PlaceDetail | null> {
+    // addr:/zone: ids are resolved by the local provider — forward the caller
+    // identity so the saved-address scope holds through the OSM config too.
+    if (!placeId.startsWith('osm:')) return this.fallback.details(placeId, ctx);
     const [, coords, encoded] = placeId.split(':');
     const [lat, lng] = (coords ?? '').split(',').map(Number);
     if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null;
