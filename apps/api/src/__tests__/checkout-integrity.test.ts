@@ -139,6 +139,23 @@ describe('checkout money math', () => {
   });
 });
 
+describe('availability guardrail — a 86ed item never gets charged', () => {
+  it('rejects checkout with ITEM_UNAVAILABLE when a cart item was marked unavailable', async () => {
+    const c = await makeCustomer();
+    await inject('POST', '/api/v1/customer/cart/items', { vendorId, itemId, quantity: 1 }, c.token);
+    await inject('PUT', '/api/v1/customer/cart/address', { addressId: c.addressId }, c.token);
+    // Vendor 86's the dish between add-to-cart and checkout (untracked stock).
+    await app.prisma.item.update({ where: { id: itemId }, data: { isAvailable: false } });
+    try {
+      const res = await inject('POST', '/api/v1/customer/checkout', { paymentMethod: 'CASH' }, c.token);
+      expect(res.statusCode).toBe(409);
+      expect(res.json().error.code).toBe('ITEM_UNAVAILABLE');
+    } finally {
+      await app.prisma.item.update({ where: { id: itemId }, data: { isAvailable: true } });
+    }
+  });
+});
+
 describe('cash-only guardrail — orders never carry an in-app payment method', () => {
   it('rejects CARD as an order payment method', async () => {
     const c = await makeCustomer();
