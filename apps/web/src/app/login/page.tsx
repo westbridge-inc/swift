@@ -78,9 +78,7 @@ function LoginInner() {
         {error && <p className="mt-4 text-sm text-[var(--swift-red)]">{error}</p>}
 
         <p className="mt-6 border-t border-black/5 pt-4 text-xs text-[var(--swift-muted)]">
-          {isCustomer
-            ? <>New to Swift? Create your account in the Swift app, then order here.</>
-            : <>New to Swift? <Link href="/for-vendors" className="font-semibold text-[var(--swift-red)]">Put your business on Swift</Link> or <Link href="/for-drivers" className="font-semibold text-[var(--swift-red)]">drive &amp; deliver</Link>.</>}
+          New to Swift? <Link href="/signup" className="font-semibold text-[var(--swift-red)]">Create an account</Link> — order, sell, or drive.
         </p>
       </div>
     </div>

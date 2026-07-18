@@ -26,13 +26,13 @@ export function SiteNav() {
         </nav>
         <div className="flex items-center gap-4">
           <Link
-            href="/login"
+            href="/login?next=/order"
             className="text-sm font-semibold text-[var(--swift-muted)] transition-colors hover:text-[var(--swift-ink)]"
           >
-            Partner sign in
+            Sign in
           </Link>
           <Link
-            href="/for-vendors"
+            href="/signup"
             className="rounded-full bg-[var(--swift-red)] px-5 py-2 text-sm font-semibold text-white transition-colors hover:bg-[var(--swift-red-600)]"
           >
             Join Swift
