@@ -114,8 +114,10 @@ export class OrderService {
     private io: Server,
     private maps: MapsProvider = getMapsProvider(),
     /** Rider-supply read for the §2 checkout gate (availability spec) — the
-     *  SAME read dispatch uses, injected so this service stays dispatch-free. */
-    private riderAvailability?: (point: { lat: number; lng: number }) => Promise<{ level: string }>,
+     *  SAME read dispatch uses, injected so this service stays dispatch-free.
+     *  floatRequired mirrors dispatch's cash-float gate so the probe counts only
+     *  riders that could actually take THIS order. */
+    private riderAvailability?: (point: { lat: number; lng: number }, floatRequired?: number) => Promise<{ level: string }>,
   ) {
     this.notifications = new NotificationService(prisma, io);
     this.countryConfig = new CountryConfigService(prisma);
@@ -258,7 +260,13 @@ export class OrderService {
           && process.env['DELIVERY_BLOCK_ON_NONE'] !== '0'
           && this.riderAvailability
         ) {
-          const supply = await this.riderAvailability({ lat: vendor.latitude, lng: vendor.longitude }).catch(() => null);
+          // Mirror dispatch's cash-float gate: a CASH delivery needs a rider who
+          // can front this order's vendor-cash. Probing float-blind would count
+          // riders dispatch then skips → checkout says "yes", dispatch exhausts.
+          const cashFloat = input.paymentMethod === 'CASH'
+            ? items.reduce((s, ci) => s + (Number(ci.item.basePrice) + optionsUnitPrice(resolveSelectedOptions(ci.item, ci.selectedOptions))) * ci.quantity, 0)
+            : 0;
+          const supply = await this.riderAvailability({ lat: vendor.latitude, lng: vendor.longitude }, cashFloat).catch(() => null);
           if (supply?.level === 'NONE') {
             throw new AppError(
               409,

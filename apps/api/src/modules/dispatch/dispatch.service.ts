@@ -115,11 +115,19 @@ export class DispatchService {
    * bucket and a nearest ETA, never counts or positions. A probe orderId has
    * no declined-set, so nothing is excluded that dispatch wouldn't exclude.
    */
-  async getAvailability(pool: DispatchPool, point: { lat: number; lng: number }): Promise<{
+  async getAvailability(
+    pool: DispatchPool,
+    point: { lat: number; lng: number },
+    /** Cash a rider must be able to front (RIDER pool). Match dispatch's float
+     *  gate so a checkout probe doesn't count riders dispatch would skip — a
+     *  high-value CASH order needs a rider with the headroom to front it. 0
+     *  (the browsing default) counts everyone, exactly as before. */
+    floatRequired = 0,
+  ): Promise<{
     level: 'GOOD' | 'LOW' | 'NONE';
     nearestEtaMinutes?: number;
   }> {
-    const candidates = await this.findCandidates(`availability:${pool}`, point, BASE_RADIUS_KM, pool, 0, null);
+    const candidates = await this.findCandidates(`availability:${pool}`, point, BASE_RADIUS_KM, pool, floatRequired, null);
     const level = candidates.length >= 3 ? 'GOOD' : candidates.length >= 1 ? 'LOW' : 'NONE';
     return {
       level,

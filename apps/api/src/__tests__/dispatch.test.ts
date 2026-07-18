@@ -277,6 +277,25 @@ describe('Candidate discovery — PostGIS radius', () => {
   });
 });
 
+describe('Availability — float-aware supply (matches the dispatch cash-float gate)', () => {
+  it('a rider without the float headroom to front a cash order is not counted', async () => {
+    const SPOT = { lat: 6.42, lng: -57.92 }; // remote — no other fixtures in range
+    const r = await makeRider({ lat: SPOT.lat, lng: SPOT.lng });
+    // Only 5,000 GYD of free float.
+    await app.prisma.rider.update({ where: { id: r.riderId }, data: { floatLimit: 5000, committedFloat: 0 } });
+
+    // Browsing (float 0) and a small order within the rider's headroom: counted.
+    expect((await dispatch.getAvailability('RIDER', SPOT, 0)).level).not.toBe('NONE');
+    expect((await dispatch.getAvailability('RIDER', SPOT, 5000)).level).not.toBe('NONE');
+
+    // A 12,000 GYD cash order needs more float than the rider has → NONE, the
+    // SAME rider dispatch's cash-float gate would skip (no false "yes").
+    expect((await dispatch.getAvailability('RIDER', SPOT, 12000)).level).toBe('NONE');
+
+    await app.prisma.rider.update({ where: { id: r.riderId }, data: { isOnline: false } });
+  });
+});
+
 describe('The offer cascade', () => {
   it('offers best-first, walks the field on decline/timeout, and honest-fails when empty', async () => {
     const a = await makeRider({ lat: PICKUP.lat + 0.0045, acceptance: 100 }); // best
