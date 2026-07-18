@@ -45,16 +45,22 @@ export default function HomePage() {
           </p>
           <div className="mt-8 flex flex-wrap gap-3">
             <Link
-              href="/for-vendors"
+              href="/order"
               className="rounded-full bg-[var(--swift-red)] px-6 py-3 font-semibold text-white transition-colors hover:bg-[var(--swift-red-600)]"
             >
-              Put your business on Swift
+              Order now
             </Link>
             <Link
-              href="/how-it-works"
+              href="/stores"
               className="rounded-full border border-black/10 px-6 py-3 font-semibold transition-colors hover:bg-[var(--swift-subtle)]"
             >
-              How it works
+              Browse stores
+            </Link>
+            <Link
+              href="/signup"
+              className="rounded-full border border-black/10 px-6 py-3 font-semibold transition-colors hover:bg-[var(--swift-subtle)]"
+            >
+              Put your business on Swift
             </Link>
           </div>
         </div>

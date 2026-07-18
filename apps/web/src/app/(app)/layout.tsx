@@ -5,6 +5,7 @@ import Link from 'next/link';
 import { usePathname, useRouter } from 'next/navigation';
 import { ShoppingBag, User, MapPin, Search } from 'lucide-react';
 import { getToken } from '@/lib/auth';
+import { SwiftLogo } from '@/components/swift-logo';
 
 // The customer ordering shell — everything under (app) requires a signed-in
 // customer. Same localStorage token as the partner flow; a customer just lands
@@ -32,10 +33,7 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
     <div className="min-h-screen">
       <header className="sticky top-0 z-30 border-b border-black/5 bg-white/90 backdrop-blur">
         <div className="mx-auto flex max-w-6xl items-center gap-3 px-4 py-3">
-          <Link href="/order" className="flex items-center gap-2">
-            <span className="grid h-8 w-8 place-items-center rounded-lg bg-[var(--swift-red)] font-black text-white">S</span>
-            <span className="text-lg font-extrabold">Swift</span>
-          </Link>
+          <Link href="/order" aria-label="Swift home"><SwiftLogo /></Link>
           <Link href="/order/location" className="ml-2 hidden items-center gap-1.5 rounded-full border border-black/10 px-3 py-1.5 text-sm font-semibold hover:bg-[var(--swift-subtle)] sm:flex">
             <MapPin className="h-4 w-4 text-[var(--swift-red)]" /> Deliver to…
           </Link>
