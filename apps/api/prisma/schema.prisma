@@ -1553,6 +1553,10 @@ model Earning {
   status    EarningStatus @default(PENDING)
   createdAt DateTime      @default(now())
 
+  // One earning per (order, type): a mover's fee/fare/tip for an order is a
+  // single fact. This makes createEarnings idempotent — two concurrent order
+  // completions can't double-pay (createMany skipDuplicates relies on it).
+  @@unique([orderId, type])
   @@index([status])
   @@index([riderId])
   @@index([driverId])
