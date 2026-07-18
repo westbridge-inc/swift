@@ -453,15 +453,15 @@ export async function driverRoutes(app: FastifyInstance) {
       throw new AppError(400, 'INVALID_STATUS', `Cannot mark en-route from status ${order.status}`);
     }
 
-    const [updatedOrder] = await Promise.all([
-      app.prisma.order.update({
-        where: { id },
-        data: { status: 'DRIVER_EN_ROUTE' },
-      }),
-      app.prisma.orderStatusLog.create({
-        data: { orderId: id, status: 'DRIVER_EN_ROUTE', changedBy: request.user.userId },
-      }),
-    ]);
+    // Compare-and-set: exactly one transition wins, so a double-tap / retry
+    // can't double-fire notifications or clobber a concurrent transition.
+    const claimed = await app.prisma.order.updateMany({
+      where: { id, status: 'DRIVER_ASSIGNED' },
+      data: { status: 'DRIVER_EN_ROUTE' },
+    });
+    if (claimed.count === 0) throw new AppError(409, 'INVALID_STATUS', `Cannot mark en-route from status ${order.status}`);
+    await app.prisma.orderStatusLog.create({ data: { orderId: id, status: 'DRIVER_EN_ROUTE', changedBy: request.user.userId } });
+    const updatedOrder = await app.prisma.order.findUniqueOrThrow({ where: { id } });
 
     // Compute ETA to pickup
     let etaMinutes: number | null = null;
@@ -499,15 +499,13 @@ export async function driverRoutes(app: FastifyInstance) {
       throw new AppError(400, 'INVALID_STATUS', `Cannot mark arrived from status ${order.status}`);
     }
 
-    const [updatedOrder] = await Promise.all([
-      app.prisma.order.update({
-        where: { id },
-        data: { status: 'DRIVER_ARRIVED' },
-      }),
-      app.prisma.orderStatusLog.create({
-        data: { orderId: id, status: 'DRIVER_ARRIVED', changedBy: request.user.userId },
-      }),
-    ]);
+    const claimed = await app.prisma.order.updateMany({
+      where: { id, status: 'DRIVER_EN_ROUTE' },
+      data: { status: 'DRIVER_ARRIVED' },
+    });
+    if (claimed.count === 0) throw new AppError(409, 'INVALID_STATUS', `Cannot mark arrived from status ${order.status}`);
+    await app.prisma.orderStatusLog.create({ data: { orderId: id, status: 'DRIVER_ARRIVED', changedBy: request.user.userId } });
+    const updatedOrder = await app.prisma.order.findUniqueOrThrow({ where: { id } });
 
     app.io.to(`order:${id}`).emit('order:status_changed', {
       orderId: id,
@@ -581,15 +579,13 @@ export async function driverRoutes(app: FastifyInstance) {
       throw new AppError(400, 'PIN_REQUIRED', 'Ride PIN must be verified before starting the ride');
     }
 
-    const [updatedOrder] = await Promise.all([
-      app.prisma.order.update({
-        where: { id },
-        data: { status: 'RIDE_IN_PROGRESS', pickedUpAt: new Date() },
-      }),
-      app.prisma.orderStatusLog.create({
-        data: { orderId: id, status: 'RIDE_IN_PROGRESS', changedBy: request.user.userId, note: 'Ride started' },
-      }),
-    ]);
+    const claimed = await app.prisma.order.updateMany({
+      where: { id, status: 'DRIVER_ARRIVED' },
+      data: { status: 'RIDE_IN_PROGRESS', pickedUpAt: new Date() },
+    });
+    if (claimed.count === 0) throw new AppError(409, 'INVALID_STATUS', `Cannot start ride from status ${order.status}`);
+    await app.prisma.orderStatusLog.create({ data: { orderId: id, status: 'RIDE_IN_PROGRESS', changedBy: request.user.userId, note: 'Ride started' } });
+    const updatedOrder = await app.prisma.order.findUniqueOrThrow({ where: { id } });
 
     app.io.to(`order:${id}`).emit('order:status_changed', {
       orderId: id,
@@ -625,30 +621,22 @@ export async function driverRoutes(app: FastifyInstance) {
       ? Math.round((Date.now() - order.pickedUpAt.getTime()) / 60000)
       : order.taxiDuration;
 
-    const [updatedOrder] = await Promise.all([
-      app.prisma.order.update({
-        where: { id },
-        data: {
-          status: 'DELIVERED',
-          deliveredAt: new Date(),
-          actualDeliveryTime: actualDuration,
-        },
-        include: { customer: { select: { id: true, firstName: true } } },
-      }),
-      app.prisma.driver.update({
-        where: { id: driver.id },
-        data: {
-          isAvailable: true,
-          currentRideId: null,
-          totalRides: { increment: 1 },
-        },
-      }),
-      app.prisma.orderStatusLog.create({
-        data: { orderId: id, status: 'DELIVERED', changedBy: request.user.userId, note: 'Ride completed' },
-      }),
-    ]);
+    // Compare-and-set so two concurrent completes can't both increment
+    // totalRides / double-free the driver (earnings are separately idempotent).
+    const claimed = await app.prisma.order.updateMany({
+      where: { id, status: 'RIDE_IN_PROGRESS' },
+      data: { status: 'DELIVERED', deliveredAt: new Date(), actualDeliveryTime: actualDuration },
+    });
+    if (claimed.count === 0) throw new AppError(409, 'INVALID_STATUS', `Cannot complete ride from status ${order.status}`);
+    // Only the winner frees the driver + counts the ride (guarded on this ride).
+    await app.prisma.driver.updateMany({
+      where: { id: driver.id, currentRideId: id },
+      data: { isAvailable: true, currentRideId: null, totalRides: { increment: 1 } },
+    });
+    await app.prisma.orderStatusLog.create({ data: { orderId: id, status: 'DELIVERED', changedBy: request.user.userId, note: 'Ride completed' } });
+    const updatedOrder = await app.prisma.order.findUniqueOrThrow({ where: { id }, include: { customer: { select: { id: true, firstName: true } } } });
 
-    // Create earnings
+    // Create earnings (idempotent via @@unique([orderId, type]))
     await orderService.createEarnings(id);
 
     app.io.to(`order:${id}`).emit('order:status_changed', {
