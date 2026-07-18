@@ -145,3 +145,37 @@ describe('authz matrix — every role-prefixed route rejects outsiders', () => {
     });
   }
 });
+
+describe('Suspended accounts are cut off immediately', () => {
+  it('a suspended user cannot use a live access token and cannot refresh', async () => {
+    // Self-contained: create a fresh ACTIVE customer + a live session directly.
+    const rnd = `${Date.now()}${Math.floor(Math.random() * 1e6)}`;
+    const user = await app.prisma.user.create({
+      data: { phone: `+59269${rnd.slice(-7)}`, firstName: 'Susp', lastName: 'Test', roles: ['CUSTOMER'], activeRole: 'CUSTOMER', isPhoneVerified: true, selfieCapturedAt: new Date(), customer: { create: {} } },
+    });
+    const userId = user.id;
+    const accessToken = app.jwt.sign({ userId, role: 'CUSTOMER', jti: rnd.slice(0, 8) });
+    const refreshToken = `rt-${rnd}`;
+    await app.prisma.session.create({ data: { userId, token: accessToken, refreshToken, deviceId: 'susp', deviceType: 'test', expiresAt: new Date(Date.now() + 86400000) } });
+
+    // Works while ACTIVE.
+    const ok = await app.inject({ method: 'GET', url: '/api/v1/customer/profile', headers: { authorization: `Bearer ${accessToken}` } });
+    expect(ok.statusCode).toBe(200);
+
+    // Admin suspends the account (status only — sessions are NOT deleted; the
+    // cut-off must hold via the authenticate + refresh status checks).
+    await app.prisma.user.update({ where: { id: userId }, data: { status: 'SUSPENDED' } });
+
+    // The same still-valid token is now rejected on the very next request.
+    const cut = await app.inject({ method: 'GET', url: '/api/v1/customer/profile', headers: { authorization: `Bearer ${accessToken}` } });
+    expect(cut.statusCode).toBe(401);
+
+    // And the refresh token cannot mint a fresh access token.
+    const refreshed = await app.inject({ method: 'POST', url: '/api/v1/auth/refresh', payload: { refreshToken }, headers: { 'content-type': 'application/json' } });
+    expect(refreshed.statusCode).toBe(403);
+
+    await app.prisma.session.deleteMany({ where: { userId } });
+    await app.prisma.customer.deleteMany({ where: { userId } });
+    await app.prisma.user.deleteMany({ where: { id: userId } });
+  });
+});
