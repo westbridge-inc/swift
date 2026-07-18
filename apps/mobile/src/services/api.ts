@@ -332,6 +332,15 @@ export const riderApi = {
   // without it) — an empty body 400s.
   handover: (id: string, body: { outcome: 'paid' | 'no_show' | 'refused'; gps: { lat: number; lng: number }; photoUrl?: string }) =>
     api.post(`/rider/orders/${id}/handover`, body),
+  // Intermediate delivery-leg transitions. The state machine walks
+  // RIDER_ASSIGNED → en-route-pickup → arrived-pickup → picked-up →
+  // en-route-delivery → arrived → handover/delivered. Without these the rider
+  // can never reach ARRIVED, so handover/delivered always 4xx.
+  enRoutePickup: (id: string) => api.put(`/rider/orders/${id}/en-route-pickup`),
+  arrivedPickup: (id: string) => api.put(`/rider/orders/${id}/arrived-pickup`),
+  pickedUp: (id: string) => api.put(`/rider/orders/${id}/picked-up`),
+  enRouteDelivery: (id: string) => api.put(`/rider/orders/${id}/en-route-delivery`),
+  arrivedAtCustomer: (id: string) => api.put(`/rider/orders/${id}/arrived`),
   delivered: (id: string) => api.put(`/rider/orders/${id}/delivered`),
   earningsToday: () => api.get('/rider/earnings/today'),
   earningsSummary: () => api.get('/rider/earnings/summary'),

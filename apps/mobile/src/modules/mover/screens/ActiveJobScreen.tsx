@@ -34,6 +34,20 @@ function driverStep(job: any): { label: string; action: DriverAction; pin?: bool
   return null;
 }
 
+// The ONE next step a rider takes before the door, driven by the backend status:
+// RIDER_ASSIGNED → en-route-pickup → arrived-pickup → picked-up →
+// en-route-delivery → arrived → (ARRIVED: handover/delivered UI takes over).
+type RiderStep = { label: string; action: 'en-route-pickup' | 'arrived-pickup' | 'picked-up' | 'en-route-delivery' | 'arrived' };
+function riderStep(job: any): RiderStep | null {
+  const s = String(job?.status ?? '').toUpperCase();
+  if (s === 'RIDER_ASSIGNED') return { label: "I'm on the way to pick up", action: 'en-route-pickup' };
+  if (s === 'RIDER_EN_ROUTE_PICKUP') return { label: "I've arrived at pickup", action: 'arrived-pickup' };
+  if (s === 'RIDER_ARRIVED_PICKUP' || s === 'READY_FOR_PICKUP') return { label: 'Picked up the order', action: 'picked-up' };
+  if (s === 'PICKED_UP') return { label: "I'm on the way to the customer", action: 'en-route-delivery' };
+  if (s === 'EN_ROUTE_DELIVERY') return { label: "I've arrived at the customer", action: 'arrived' };
+  return null; // ARRIVED → the handover/delivered controls below take over
+}
+
 const DRIVER_STEPS = ['DRIVER_ASSIGNED', 'DRIVER_EN_ROUTE', 'DRIVER_ARRIVED', 'RIDE_IN_PROGRESS'];
 const RIDER_STEPS = ['RIDER_ASSIGNED', 'PICKED_UP', 'DELIVERED'];
 const DRIVER_STEP_LABELS = ['Assigned', 'En route', 'Arrived', 'Riding'];
@@ -45,7 +59,13 @@ function StatusStepper({ status, isDriver }: { status?: string; isDriver: boolea
   const labels = isDriver ? DRIVER_STEP_LABELS : RIDER_STEP_LABELS;
   const s = String(status ?? '').toUpperCase();
   let idx = steps.indexOf(s);
-  if (idx < 0) idx = s === 'COMPLETED' || s === 'DELIVERED' ? steps.length - 1 : 0;
+  if (idx < 0) {
+    if (s === 'COMPLETED' || s === 'DELIVERED') idx = steps.length - 1;
+    // Rider mid-leg states aren't in the 3-dot stepper: past pickup (en route to
+    // customer / arrived) sits on the "Picked up" dot; pre-pickup on "Assigned".
+    else if (!isDriver && (s === 'EN_ROUTE_DELIVERY' || s === 'ARRIVED')) idx = 1;
+    else idx = 0;
+  }
   return (
     <View style={{ flexDirection: 'row', alignItems: 'center', marginTop: space.md }}>
       {steps.map((_, i) => (
@@ -317,6 +337,15 @@ export function ActiveJobScreen({ navigation }: any) {
                   Trip complete.
                 </T>
               )
+            ) : riderStep(job) ? (
+              // Before the door: walk the delivery leg one step at a time
+              // (heading to pickup → picked up → heading to customer → arrived).
+              // Only once the order is ARRIVED do the handover/delivered controls
+              // below take over.
+              bigButton(riderStep(job)!.label, () => riderAct.mutate({ id: job.id, action: riderStep(job)!.action }), {
+                loading: riderAct.isPending,
+                disabled: busy,
+              })
             ) : isMmgPaid ? (
               <>
                 {/* Customer paid the store via MMG — the door is a pure handover;

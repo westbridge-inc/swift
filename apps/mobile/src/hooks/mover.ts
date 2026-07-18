@@ -145,18 +145,31 @@ export function useDriverAction() {
     onSuccess: () => qc.invalidateQueries({ queryKey: ['mover'] }),
   });
 }
+export type RiderAction =
+  | 'en-route-pickup' | 'arrived-pickup' | 'picked-up' | 'en-route-delivery' | 'arrived'
+  | 'handover' | 'delivered';
+
 export function useRiderAction() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: async ({ id, action }: { id: string; action: 'handover' | 'delivered' }) => {
-      if (action !== 'handover') return unwrap(riderApi.delivered(id));
-      // The golden-rule handover NEEDS the rider's GPS (server-side mandatory —
-      // it's the evidence a guarantee claim stands on). Last-known is instant;
-      // fall back to a fresh fix.
-      const pos =
-        (await Location.getLastKnownPositionAsync().catch(() => null)) ??
-        (await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced }));
-      return unwrap(riderApi.handover(id, { outcome: 'paid', gps: { lat: pos.coords.latitude, lng: pos.coords.longitude } }));
+    mutationFn: async ({ id, action }: { id: string; action: RiderAction }) => {
+      switch (action) {
+        case 'en-route-pickup': return unwrap(riderApi.enRoutePickup(id));
+        case 'arrived-pickup': return unwrap(riderApi.arrivedPickup(id));
+        case 'picked-up': return unwrap(riderApi.pickedUp(id));
+        case 'en-route-delivery': return unwrap(riderApi.enRouteDelivery(id));
+        case 'arrived': return unwrap(riderApi.arrivedAtCustomer(id));
+        case 'delivered': return unwrap(riderApi.delivered(id));
+        case 'handover': {
+          // The golden-rule handover NEEDS the rider's GPS (server-side mandatory —
+          // it's the evidence a guarantee claim stands on). Last-known is instant;
+          // fall back to a fresh fix.
+          const pos =
+            (await Location.getLastKnownPositionAsync().catch(() => null)) ??
+            (await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced }));
+          return unwrap(riderApi.handover(id, { outcome: 'paid', gps: { lat: pos.coords.latitude, lng: pos.coords.longitude } }));
+        }
+      }
     },
     onSuccess: () => qc.invalidateQueries({ queryKey: ['mover'] }),
   });
