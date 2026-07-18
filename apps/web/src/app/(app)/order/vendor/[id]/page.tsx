@@ -5,7 +5,17 @@ import Link from 'next/link';
 import Image from 'next/image';
 import { useParams } from 'next/navigation';
 import { Star, Clock, Plus, X, Minus } from 'lucide-react';
-import { getVendor, addToCart, money, type VendorDetail, type MenuItem } from '@/lib/customer';
+import { getVendor, addToCart, getItemSlots, savePendingAppointment, money, type VendorDetail, type MenuItem } from '@/lib/customer';
+
+function nextDays(n: number) {
+  const out: { key: string; label: string }[] = [];
+  const base = new Date();
+  for (let i = 0; i < n; i++) {
+    const d = new Date(base); d.setDate(base.getDate() + i);
+    out.push({ key: d.toISOString().slice(0, 10), label: i === 0 ? 'Today' : i === 1 ? 'Tomorrow' : d.toLocaleDateString(undefined, { weekday: 'short', day: 'numeric' }) });
+  }
+  return out;
+}
 
 function itemPrice(item: MenuItem, sel: Record<string, string>) {
   let p = item.customerPrice ?? item.basePrice;
@@ -26,11 +36,34 @@ export default function VendorPage() {
   const [busy, setBusy] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
   const [added, setAdded] = useState(0);
+  // Service booking (fulfillment=APPOINTMENT)
+  const [book, setBook] = useState<MenuItem | null>(null);
+  const [bday, setBday] = useState(() => new Date().toISOString().slice(0, 10));
+  const [slots, setSlots] = useState<string[] | null>(null);
+  const [slot, setSlot] = useState<string | null>(null);
 
   useEffect(() => { getVendor(id).then(setV).catch((e) => setError(e.message)); }, [id]);
+  useEffect(() => {
+    if (!book) return;
+    setSlots(null); setSlot(null);
+    getItemSlots(book.id, bday).then((r) => setSlots(r.slots ?? [])).catch(() => setSlots([]));
+  }, [book, bday]);
+
+  async function confirmBook() {
+    if (!book || !v || !slot) return;
+    setBusy(true);
+    try {
+      await addToCart({ vendorId: v.id, itemId: book.id, quantity: 1 });
+      savePendingAppointment({ itemId: book.id, slotStart: slot, label: `${book.name} — ${new Date(slot).toLocaleString()}` });
+      setAdded((n) => n + 1); setBook(null); setToast('Booking added to your cart');
+      setTimeout(() => setToast(null), 2500);
+    } catch (e: any) { setToast(e.message || 'Could not book'); }
+    finally { setBusy(false); }
+  }
 
   function openItem(item: MenuItem) {
     if (!item.isAvailable) return;
+    if (item.fulfillment === 'APPOINTMENT') { setBday(new Date().toISOString().slice(0, 10)); setBook(item); return; }
     const defaults: Record<string, string> = {};
     for (const g of item.optionGroups ?? []) {
       const d = g.options.find((o) => o.isDefault) ?? g.options[0];
@@ -134,6 +167,31 @@ export default function VendorPage() {
                 {busy ? 'Adding…' : `Add · ${money(itemPrice(modal, sel) * qty)}`}
               </button>
             </div>
+          </div>
+        </div>
+      )}
+
+      {book && (
+        <div className="fixed inset-0 z-40 flex items-end justify-center bg-black/40 p-0 sm:items-center sm:p-4" onClick={() => setBook(null)}>
+          <div className="max-h-[85vh] w-full max-w-md overflow-y-auto rounded-t-3xl bg-white p-5 sm:rounded-3xl" onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-start justify-between">
+              <h3 className="text-xl font-extrabold">Book {book.name}</h3>
+              <button onClick={() => setBook(null)} className="grid h-8 w-8 place-items-center rounded-full hover:bg-[var(--swift-subtle)]"><X className="h-5 w-5" /></button>
+            </div>
+            <p className="mt-1 font-semibold text-[var(--swift-red)]">{money(book.customerPrice ?? book.basePrice)}</p>
+            <p className="mt-4 font-bold">Pick a day</p>
+            <div className="mt-2 flex gap-2 overflow-x-auto pb-1">
+              {nextDays(7).map((d) => (
+                <button key={d.key} onClick={() => setBday(d.key)} className={`shrink-0 rounded-xl border px-3 py-2 text-sm font-semibold ${bday === d.key ? 'border-[var(--swift-red)] bg-[var(--swift-red-50)]' : 'border-black/10'}`}>{d.label}</button>
+              ))}
+            </div>
+            <p className="mt-4 font-bold">Pick a time</p>
+            {slots === null ? <p className="mt-2 text-sm text-[var(--swift-muted)]">Loading times…</p>
+              : slots.length === 0 ? <p className="mt-2 text-sm text-[var(--swift-muted)]">No times available on this day — try another.</p>
+              : <div className="mt-2 grid grid-cols-3 gap-2">
+                  {slots.map((s) => <button key={s} onClick={() => setSlot(s)} className={`rounded-xl border py-2 text-sm font-semibold ${slot === s ? 'border-[var(--swift-red)] bg-[var(--swift-red-50)]' : 'border-black/10'}`}>{new Date(s).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}</button>)}
+                </div>}
+            <button onClick={confirmBook} disabled={busy || !slot} className="mt-5 w-full rounded-full bg-[var(--swift-red)] py-3 font-bold text-white disabled:opacity-50">{busy ? 'Booking…' : slot ? 'Add booking to cart' : 'Choose a time'}</button>
           </div>
         </div>
       )}

@@ -67,7 +67,23 @@ export interface Vendor {
   isCurrentlyOpen: boolean; acceptingOrders: boolean; city?: string;
   deliveryFee?: number | string | null; etaMin?: number | null;
 }
-export interface MenuItem { id: string; name: string; description?: string; basePrice: number; imageUrl?: string | null; isAvailable: boolean; customerPrice?: number; optionGroups?: OptionGroup[]; }
+export interface MenuItem { id: string; name: string; description?: string; basePrice: number; imageUrl?: string | null; isAvailable: boolean; customerPrice?: number; fulfillment?: string; optionGroups?: OptionGroup[]; }
+
+// ── Service appointments (SERVICE listings, fulfillment=APPOINTMENT) ─────────
+export interface Appointment { itemId: string; slotStart: string; mode?: 'AT_BUSINESS' | 'MOBILE'; label?: string }
+export async function getItemSlots(itemId: string, date: string): Promise<{ slots: string[]; serviceMode?: string; durationMinutes?: number }> {
+  const d = (await apiFetch(`/api/v1/customer/items/${itemId}/slots?date=${date}`)).data;
+  return Array.isArray(d) ? { slots: d } : d;
+}
+const APPT_KEY = 'swift_web_appointments';
+export function getPendingAppointments(): Appointment[] {
+  try { return JSON.parse(localStorage.getItem(APPT_KEY) || '[]'); } catch { return []; }
+}
+export function savePendingAppointment(a: Appointment) {
+  const list = getPendingAppointments().filter((x) => x.itemId !== a.itemId);
+  list.push(a); localStorage.setItem(APPT_KEY, JSON.stringify(list));
+}
+export function clearPendingAppointments() { localStorage.removeItem(APPT_KEY); }
 export interface VendorDetail extends Vendor {
   description?: string;
   categories: Array<{ id: string; name: string; items: MenuItem[] }>;
@@ -113,7 +129,7 @@ export async function addAddress(body: { label: string; addressLine1: string; ci
 }
 
 // ── Checkout & orders ─────────────────────────────────────────────────────
-export async function checkout(body: { paymentMethod: 'CASH' | 'MOBILE_MONEY'; tipAmount?: number; deliveryInstructions?: string; fulfillmentSelections?: Record<string, string>; promoCode?: string }) {
+export async function checkout(body: { paymentMethod: 'CASH' | 'MOBILE_MONEY'; tipAmount?: number; deliveryInstructions?: string; fulfillmentSelections?: Record<string, string>; promoCode?: string; appointments?: Array<{ itemId: string; slotStart: string; mode?: string }> }) {
   return (await apiFetch('/api/v1/customer/checkout', { method: 'POST', body: JSON.stringify(body) })).data;
 }
 export async function getOrders(): Promise<any[]> { return (await apiFetch('/api/v1/customer/orders')).data as any[]; }
