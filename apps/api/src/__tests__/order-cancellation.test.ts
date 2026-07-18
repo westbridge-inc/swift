@@ -224,6 +224,52 @@ describe('Vendor rejects an order — PUT /vendor/orders/:id/reject', () => {
     expect(freed.currentOrderId).toBeNull();
   });
 
+  it('restocks tracked stock AND releases the CASH rider’s committed float on reject', async () => {
+    const vendor = await makeVendor();
+    const item = await app.prisma.item.create({
+      data: { vendorId: vendor.vendorId, categoryId: vendor.categoryId, name: 'Tracked Plate', basePrice: 1000, stockQuantity: 4, isAvailable: true },
+    });
+    const rider = await makeRider();
+    const order = await makeOrder(customer.userId, vendor.vendorId, 'ACCEPTED', { riderId: rider.riderId, itemId: item.id, qty: 2 });
+    // Rider is mid-job on this CASH order: float committed for the vendor-cash.
+    await app.prisma.rider.update({
+      where: { id: rider.riderId },
+      data: { floatLimit: 100_000, committedFloat: 1000, currentOrderId: order.id, isAvailable: false },
+    });
+    // Checkout decremented the shelf 4 → 2.
+    await app.prisma.item.update({ where: { id: item.id }, data: { stockQuantity: 2 } });
+
+    const res = await inject('PUT', `/api/v1/vendor/orders/${order.id}/reject`, { reason: '86ed' }, vendor.token);
+    expect(res.statusCode).toBe(200);
+
+    const freshItem = await app.prisma.item.findUniqueOrThrow({ where: { id: item.id } });
+    expect(freshItem.stockQuantity).toBe(4); // the 2 units go back on the shelf
+
+    const freshRider = await app.prisma.rider.findUniqueOrThrow({ where: { id: rider.riderId } });
+    expect(Number(freshRider.committedFloat)).toBe(0); // float released (was leaking → rider frozen out of CASH offers)
+    expect(freshRider.currentOrderId).toBeNull();
+    expect(freshRider.isAvailable).toBe(true);
+  });
+
+  it('two concurrent rejects: exactly one wins, stock restocked once (no phantom stock)', async () => {
+    const vendor = await makeVendor();
+    const item = await app.prisma.item.create({
+      data: { vendorId: vendor.vendorId, categoryId: vendor.categoryId, name: 'Race Plate', basePrice: 1000, stockQuantity: 5, isAvailable: true },
+    });
+    const order = await makeOrder(customer.userId, vendor.vendorId, 'PENDING', { itemId: item.id, qty: 3 });
+    await app.prisma.item.update({ where: { id: item.id }, data: { stockQuantity: 2 } }); // post-checkout
+
+    const [a, b] = await Promise.allSettled([
+      inject('PUT', `/api/v1/vendor/orders/${order.id}/reject`, {}, vendor.token),
+      inject('PUT', `/api/v1/vendor/orders/${order.id}/reject`, {}, vendor.token),
+    ]);
+    const codes = [a, b].map((r) => (r.status === 'fulfilled' ? r.value.statusCode : 0)).sort();
+    expect(codes).toEqual([200, 400]); // one wins, the loser 400s — not a second restock
+
+    const freshItem = await app.prisma.item.findUniqueOrThrow({ where: { id: item.id } });
+    expect(freshItem.stockQuantity).toBe(5); // 3 restored EXACTLY once (a double-restock would read 8)
+  });
+
   it('refuses to reject once the order is READY_FOR_PICKUP (goods already made)', async () => {
     const vendor = await makeVendor();
     const order = await makeOrder(customer.userId, vendor.vendorId, 'READY_FOR_PICKUP');

@@ -710,6 +710,52 @@ export class OrderService {
     }
   }
 
+  /** Statuses where the goods are still in the store (nothing picked up yet), so
+   *  a cancellation should put tracked stock back. After PICKED_UP the goods are
+   *  with the mover and must NOT be restocked. Taxi/ride states carry no goods. */
+  private static readonly PRE_PICKUP: OrderStatus[] = [
+    'PENDING', 'ACCEPTED', 'PREPARING', 'READY_FOR_PICKUP',
+    'RIDER_ASSIGNED', 'RIDER_EN_ROUTE_PICKUP', 'RIDER_ARRIVED_PICKUP',
+  ];
+
+  /** Whether cancelling FROM this status should restock (goods still in store). */
+  static restocksOnCancel(status: OrderStatus): boolean {
+    return OrderService.PRE_PICKUP.includes(status);
+  }
+
+  /**
+   * The terminal side-effects EVERY cancel/reject path must run once it has WON
+   * the status compare-and-set: put tracked stock back (when the goods are still
+   * in the store), return a CASH rider's committed float, and free the assigned
+   * mover. The customer cancelOrder inlines this; the vendor-reject and
+   * admin-cancel paths do their own status write (for reason/refund fields) and
+   * MUST call this or they leak stock AND float. Call ONLY as the CAS winner so
+   * restock and the float release each run exactly once.
+   */
+  async applyCancellationSideEffects(
+    order: { id: string; paymentMethod: string; riderId: string | null; driverId: string | null; subtotalBase: number },
+    opts: { restock: boolean },
+  ): Promise<void> {
+    // Mirrors the customer cancelOrder path exactly (rider freed by id; driver
+    // CAS'd on currentRideId) so all three cancel routes behave identically.
+    if (opts.restock) await this.restockCancelledOrder(order.id);
+    if (order.riderId) {
+      if (order.paymentMethod === 'CASH') {
+        await new FloatService(this.prisma).release(this.prisma, order.riderId, order.subtotalBase);
+      }
+      await this.prisma.rider.update({
+        where: { id: order.riderId },
+        data: { isAvailable: true, currentOrderId: null },
+      });
+    }
+    if (order.driverId) {
+      await this.prisma.driver.updateMany({
+        where: { id: order.driverId, currentRideId: order.id },
+        data: { isAvailable: true, currentRideId: null },
+      });
+    }
+  }
+
   async cancelOrder(orderId: string, userId: string, reason?: string) {
     const order = await this.prisma.order.findFirst({
       where: { id: orderId, customerId: userId },

@@ -1177,14 +1177,23 @@ export async function vendorRoutes(app: FastifyInstance) {
     const reason = body.reason || 'Rejected by vendor';
     await ackVendorAlert(app, request.user.userId, order.id); // rejecting acknowledges too
 
-    const updated = await app.prisma.order.update({
-      where: { id: order.id },
+    // Compare-and-set: exactly one reject wins. A double-tap (or a reject racing
+    // the customer's cancel) would otherwise both pass the status pre-check and
+    // both run the non-idempotent restock → phantom stock. The loser gets 400.
+    const claimed = await app.prisma.order.updateMany({
+      where: { id: order.id, status: { in: rejectableStatuses as OrderStatus[] } },
       data: {
         status: 'CANCELLED',
         cancelledAt: new Date(),
         cancelledBy: request.user.userId,
         cancellationReason: reason,
       },
+    });
+    if (claimed.count === 0) {
+      throw new AppError(400, 'INVALID_STATUS', 'This order can no longer be rejected');
+    }
+    const updated = await app.prisma.order.findUniqueOrThrow({
+      where: { id: order.id },
       include: { customer: { select: { id: true, firstName: true } } },
     });
 
@@ -1197,18 +1206,15 @@ export async function vendorRoutes(app: FastifyInstance) {
       },
     });
 
-    // Free up assigned rider if one was already assigned
-    if (order.riderId) {
-      await app.prisma.rider.update({
-        where: { id: order.riderId },
-        data: { isAvailable: true, currentOrderId: null },
-      });
-    }
-
-    // The goods never left the store — tracked stock goes back on the shelf.
-    // (Found live: reject left sold-out items sold out forever while the
-    // customer-cancel path restocked correctly.)
-    await orderService.restockCancelledOrder(order.id);
+    // Restock (goods never left the store — reject is only from pre-pickup
+    // states), return the CASH rider's committed float, and free the mover.
+    // (Found live: reject left sold-out items sold out forever AND, separately,
+    // never released the rider's float → the rider silently stopped getting
+    // CASH offers.)
+    await orderService.applyCancellationSideEffects(
+      { id: order.id, paymentMethod: order.paymentMethod, riderId: order.riderId, driverId: order.driverId, subtotalBase: Number(order.subtotalBase) },
+      { restock: true },
+    );
 
     const rejectEvent = { orderId: order.id, status: 'CANCELLED', reason, timestamp: new Date().toISOString() };
     app.io.to(`order:${order.id}`).emit('order:status_changed', rejectEvent);
