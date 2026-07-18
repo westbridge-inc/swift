@@ -381,6 +381,27 @@ describe('Waivers, reminders, tier recalculation', () => {
     expect(Number(success!.amount)).toBe(0);
   });
 
+  it('a waiver is for ONE period only — the flag clears and the next cycle bills normally', async () => {
+    const now = new Date();
+    const { subId } = await makeMoverWithCardSub({ token: 'tok_good_waive_once', due: new Date(now.getTime() - HOUR) });
+    await app.prisma.subscription.update({ where: { id: subId }, data: { feeWaived: true } });
+
+    // Period 1: the waived cycle advances free AND clears the flag.
+    await billing.runBillingCycle(now);
+    const afterWaive = await app.prisma.subscription.findUniqueOrThrow({ where: { id: subId } });
+    expect(afterWaive.feeWaived).toBe(false); // no longer a permanent free ride
+
+    // Period 2: once the next bill is due it charges the real fee.
+    await billing.runBillingCycle(new Date(afterWaive.nextBillingDate.getTime() + HOUR));
+    const charges = await app.prisma.billingEvent.findMany({
+      where: { subscriptionId: subId, type: 'CHARGE_SUCCESS' },
+      orderBy: { createdAt: 'asc' },
+    });
+    expect(charges).toHaveLength(2);
+    expect(Number(charges[0]!.amount)).toBe(0);            // the waived period
+    expect(Number(charges[1]!.amount)).toBeGreaterThan(0); // billed normally after
+  });
+
   it('sends exactly one due-tomorrow reminder per period', async () => {
     const { subId } = await makeMoverWithCardSub({
       token: 'tok_good_reminder',
