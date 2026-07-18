@@ -41,7 +41,7 @@ export function Scrim({
       ? { position: 'absolute', left: 0, right: 0, top: 0, height }
       : { position: 'absolute', left: 0, right: 0, bottom: 0, height };
   return (
-    <View pointerEvents="none" style={[pos, style]}>
+    <View style={[pos, { pointerEvents: 'none' }, style]}>
       {Array.from({ length: SLICES }, (_, i) => {
         // `to` is always the dark end, at the anchored edge.
         const t = top ? 1 - i / SLICES : (i + 1) / SLICES;

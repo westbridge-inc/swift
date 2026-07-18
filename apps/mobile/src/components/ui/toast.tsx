@@ -48,8 +48,7 @@ export function ToastHost() {
   const insets = useSafeAreaInsets();
   return (
     <View
-      pointerEvents="box-none"
-      style={{ position: 'absolute', top: insets.top + 8, left: 16, right: 16, zIndex: 100 }}
+      style={{ pointerEvents: 'box-none', position: 'absolute', top: insets.top + 8, left: 16, right: 16, zIndex: 100 }}
     >
       {toasts.map((t) => (
         <Animated.View key={t.id} entering={FadeInDown.duration(180)} exiting={FadeOutUp.duration(140)} style={{ marginBottom: 8 }}>

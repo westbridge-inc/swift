@@ -66,10 +66,7 @@ function HomeTabs() {
         tabBarStyle: {
           backgroundColor: color.surface.base,
           borderTopWidth: 0,
-          shadowColor: '#211A1A',
-          shadowOpacity: 0.08,
-          shadowRadius: 12,
-          shadowOffset: { width: 0, height: -4 },
+          boxShadow: '0px -4px 12px rgba(33,26,26,0.08)',
           elevation: 10,
         },
         tabBarLabelStyle: { fontSize: 12, fontFamily: 'InterMedium' },

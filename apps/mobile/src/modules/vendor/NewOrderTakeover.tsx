@@ -20,19 +20,20 @@ export function NewOrderTakeover({
   onDismiss: (orderId: string) => void;
 }) {
   const current = queue[0];
-  const order = useVendorOrder(current?.orderId);
+  const orderId = current?.orderId;
+  const order = useVendorOrder(orderId);
   const act = useOrderAction();
 
   // The buzz loop lives exactly as long as the takeover does.
   useEffect(() => {
-    if (!current) return;
+    if (!orderId) return;
     Vibration.vibrate([0, 400, 200, 400]);
     const timer = setInterval(() => Vibration.vibrate([0, 400, 200, 400]), 5000);
     return () => {
       clearInterval(timer);
       Vibration.cancel();
     };
-  }, [current?.orderId]);
+  }, [orderId]);
 
   if (!current) return null;
   const o: any = order.data;

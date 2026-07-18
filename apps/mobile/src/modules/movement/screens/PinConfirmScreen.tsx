@@ -95,7 +95,7 @@ export function PinConfirmScreen({ navigation, route }: any) {
       </View>
 
       {/* Fixed centre pin — the map slides underneath it. */}
-      <View pointerEvents="none" style={{ position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, alignItems: 'center', justifyContent: 'center' }}>
+      <View style={{ pointerEvents: 'none', position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, alignItems: 'center', justifyContent: 'center' }}>
         <Ionicons name="location" size={46} color={color.brand[500]} style={{ marginBottom: 46 }} />
       </View>
 

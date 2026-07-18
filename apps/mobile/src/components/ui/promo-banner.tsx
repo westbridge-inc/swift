@@ -40,8 +40,7 @@ export function PromoBanner({
         ) : null}
         {/* Signature — a swift in flight across the banner */}
         <View
-          pointerEvents="none"
-          style={{ position: 'absolute', right: -28, top: -24, opacity: 0.12, transform: [{ rotate: '-8deg' }] }}
+          style={{ pointerEvents: 'none', position: 'absolute', right: -28, top: -24, opacity: 0.12, transform: [{ rotate: '-8deg' }] }}
         >
           <SwiftMark size={172} tint="#FFFFFF" accent="#FFFFFF" />
         </View>

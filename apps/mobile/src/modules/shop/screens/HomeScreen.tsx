@@ -224,10 +224,7 @@ export function HomeScreen() {
             paddingHorizontal: space.sm,
             flexDirection: 'row',
             flexWrap: 'wrap',
-            shadowColor: '#211A1A',
-            shadowOpacity: 0.06,
-            shadowRadius: 12,
-            shadowOffset: { width: 0, height: 4 },
+            boxShadow: '0px 4px 12px rgba(33,26,26,0.06)',
             elevation: 3,
           }}
         >
