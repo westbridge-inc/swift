@@ -322,42 +322,49 @@ export class CashRulesService {
   // -------------------------------------------------------------------------
 
   async approveClaim(claimId: string, adminId: string, note?: string) {
-    const claim = await this.requireClaim(claimId, ['PENDING_REVIEW']);
-    const updated = await this.prisma.reimbursementClaim.update({
-      where: { id: claim.id },
-      data: { status: 'APPROVED', reviewedBy: adminId, reviewNote: note, reviewedAt: new Date() },
+    const updated = await this.transitionClaim(claimId, ['PENDING_REVIEW'], {
+      status: 'APPROVED', reviewedBy: adminId, reviewNote: note, reviewedAt: new Date(),
     });
     await this.notifyClaim(updated.riderId, 'Claim approved', `Your $${Number(updated.amount).toLocaleString()} claim was approved and will be paid out.`, claimId);
     return updated;
   }
 
   async rejectClaim(claimId: string, adminId: string, note: string) {
-    const claim = await this.requireClaim(claimId, ['PENDING_REVIEW']);
-    const updated = await this.prisma.reimbursementClaim.update({
-      where: { id: claim.id },
-      data: { status: 'REJECTED', reviewedBy: adminId, reviewNote: note, reviewedAt: new Date() },
+    const updated = await this.transitionClaim(claimId, ['PENDING_REVIEW'], {
+      status: 'REJECTED', reviewedBy: adminId, reviewNote: note, reviewedAt: new Date(),
     });
     await this.notifyClaim(updated.riderId, 'Claim rejected', `Your claim was rejected: ${note}`, claimId);
     return updated;
   }
 
   async markClaimPaid(claimId: string, adminId: string, paymentRef?: string) {
-    const claim = await this.requireClaim(claimId, ['AUTO_APPROVED', 'APPROVED']);
-    const updated = await this.prisma.reimbursementClaim.update({
-      where: { id: claim.id },
-      data: { status: 'PAID', paidAt: new Date(), paymentRef, reviewedBy: claim.reviewedBy ?? adminId },
+    // reviewedBy: keep the original reviewer if there was one; else stamp the payer.
+    const existing = await this.prisma.reimbursementClaim.findUnique({ where: { id: claimId }, select: { reviewedBy: true } });
+    const updated = await this.transitionClaim(claimId, ['AUTO_APPROVED', 'APPROVED'], {
+      status: 'PAID', paidAt: new Date(), paymentRef, reviewedBy: existing?.reviewedBy ?? adminId,
     });
     await this.notifyClaim(updated.riderId, 'Guarantee paid', `$${Number(updated.amount).toLocaleString()} has been paid out to you.`, claimId);
     return updated;
   }
 
-  private async requireClaim(claimId: string, allowed: string[]) {
-    const claim = await this.prisma.reimbursementClaim.findUnique({ where: { id: claimId } });
-    if (!claim) throw new NotFoundError('Claim', claimId);
-    if (!allowed.includes(claim.status)) {
-      throw new AppError(400, 'INVALID_CLAIM_STATE', `Claim is ${claim.status}; expected ${allowed.join('/')}`);
+  /**
+   * Atomic claim state transition — the single winner. This is a MONEY step
+   * (markClaimPaid issues a real payout), so it must be compare-and-set, not a
+   * read-then-write: two admins (or a double-click / retry) both reading
+   * AUTO_APPROVED and both writing PAID would pay the rider twice. updateMany
+   * with the status in the WHERE matches at most once; the loser sees count===0.
+   */
+  private async transitionClaim(claimId: string, from: string[], data: Record<string, unknown>) {
+    const res = await this.prisma.reimbursementClaim.updateMany({
+      where: { id: claimId, status: { in: from as never } },
+      data: data as never,
+    });
+    if (res.count === 0) {
+      const exists = await this.prisma.reimbursementClaim.findUnique({ where: { id: claimId }, select: { status: true } });
+      if (!exists) throw new NotFoundError('Claim', claimId);
+      throw new AppError(400, 'INVALID_CLAIM_STATE', `Claim is ${exists.status}; expected ${from.join('/')}`);
     }
-    return claim;
+    return this.prisma.reimbursementClaim.findUniqueOrThrow({ where: { id: claimId } });
   }
 
   private async notifyClaim(riderId: string, title: string, body: string, claimId: string) {
