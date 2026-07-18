@@ -1,4 +1,5 @@
 import type { PrismaClient, RideClass } from '@prisma/client';
+import { Prisma } from '@prisma/client';
 import type { Server } from 'socket.io';
 import type Redis from 'ioredis';
 import type { FastifyInstance } from 'fastify';
@@ -12,6 +13,7 @@ import { customerTrustSummaries } from '../cash/cash-rules.service';
 import { estimateLoad } from '../../utils/load';
 import { log } from '../../utils/logger';
 import { dispatchSearchesCounter, dispatchTimeToAssign } from '../../plugins/observability';
+import { getTenantId } from '../../plugins/tenant-context';
 
 declare module 'fastify' {
   interface FastifyInstance {
@@ -132,6 +134,7 @@ export class DispatchService {
     pool: DispatchPool = 'RIDER',
     floatRequired = 0,
     rideClass?: RideClass | null,
+    tenantId: string | null = getTenantId(),
   ): Promise<DispatchCandidate[]> {
     const declined = await this.redis.smembers(declinedKey(orderId));
 
@@ -140,13 +143,23 @@ export class DispatchService {
     // 4-seat Economy car). Legacy/untagged orders fall back to ECONOMY = all.
     const eligibleClasses = classesAtOrAbove(rideClass ?? 'ECONOMY');
 
+    // Multi-tenancy: these are raw geo queries, so the Prisma tenantScope
+    // extension does NOT reach them — an order must only ever be offered to a
+    // mover in its OWN tenant. We JOIN the mover's user and filter on its
+    // tenantId (the order's tenant when dispatching; the caller's tenant for an
+    // availability probe). A null tenant (untagged system/test call) skips the
+    // filter and behaves exactly as before.
+    const tenantFilter = tenantId ? Prisma.sql`AND u."tenantId" = ${tenantId}` : Prisma.empty;
+
     const rows = pool === 'DRIVER'
       ? await this.prisma.$queryRaw<GeoCandidateRow[]>`
           SELECT d."id", d."userId", d."currentLat", d."currentLng",
                  d."averageRating", d."acceptanceRate", d."currentRideId" AS "currentOrderId"
           FROM "drivers" d
+          JOIN "users" u ON u."id" = d."userId"
           WHERE d."isOnline" = true
             AND d."isAvailable" = true
+            ${tenantFilter}
             AND d."rideClass"::text = ANY(${eligibleClasses})
             AND d."currentLat" IS NOT NULL
             AND d."currentLng" IS NOT NULL
@@ -161,8 +174,10 @@ export class DispatchService {
           SELECT r."id", r."userId", r."currentLat", r."currentLng",
                  r."averageRating", r."acceptanceRate", r."currentOrderId"
           FROM "riders" r
+          JOIN "users" u ON u."id" = r."userId"
           WHERE r."isOnline" = true
             AND r."isAvailable" = true
+            ${tenantFilter}
             AND (r."floatLimit" - r."committedFloat") >= ${floatRequired}
             AND r."currentLat" IS NOT NULL
             AND r."currentLng" IS NOT NULL
@@ -206,7 +221,7 @@ export class DispatchService {
         id: true, status: true, riderId: true, driverId: true, orderType: true,
         fulfillment: true, orderNumber: true, rideClass: true, isExpress: true,
         customerId: true, pickupLat: true, pickupLng: true,
-        subtotalBase: true, paymentMethod: true,
+        subtotalBase: true, paymentMethod: true, tenantId: true,
         vendor: { select: { name: true, owner: { select: { userId: true } } } },
         items: { select: { quantity: true } },
       },
@@ -234,7 +249,7 @@ export class DispatchService {
     await this.journalOpenSearch(order, round, radius);
     // D.3 — a rider must have enough free float to front this order's vendor-cash (CASH deliveries only).
     const floatRequired = pool === 'RIDER' && order.paymentMethod === 'CASH' ? Number(order.subtotalBase) : 0;
-    const candidates = await this.findCandidates(orderId, { lat: order.pickupLat, lng: order.pickupLng }, radius, pool, floatRequired, order.rideClass);
+    const candidates = await this.findCandidates(orderId, { lat: order.pickupLat, lng: order.pickupLng }, radius, pool, floatRequired, order.rideClass, order.tenantId);
 
     if (candidates.length === 0) {
       if (round + 1 < MAX_ROUNDS) {
