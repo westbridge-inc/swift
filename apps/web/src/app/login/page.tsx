@@ -5,6 +5,7 @@ import { useRouter, useSearchParams } from 'next/navigation';
 import Link from 'next/link';
 import { sendOtp, verifyPartnerLogin } from '@/lib/auth';
 import { verifyCustomerLogin } from '@/lib/customer';
+import { SwiftLogo } from '@/components/swift-logo';
 
 const CUSTOMER_ROUTES = ['/order', '/cart', '/orders', '/taxi', '/account', '/explore', '/courier'];
 
@@ -43,9 +44,7 @@ function LoginInner() {
   return (
     <div className="flex min-h-screen items-center justify-center bg-[var(--swift-subtle)] p-4">
       <div className="w-full max-w-sm rounded-2xl border border-black/5 bg-white p-8 shadow-sm">
-        <Link href="/" className="text-xl font-extrabold tracking-tight">
-          <span className="text-[var(--swift-red)]">Swift</span> <span className="font-semibold">{isCustomer ? '' : 'Partners'}</span>
-        </Link>
+        <Link href="/" aria-label="Swift home"><SwiftLogo /></Link>
         <p className="mt-2 mb-6 text-sm text-[var(--swift-muted)]">
           {step === 'code' ? `Enter the code sent to ${phone}.`
             : isCustomer ? 'Sign in with your phone number to order on Swift.'

@@ -6,6 +6,7 @@ import Link from 'next/link';
 import { ShoppingBag, Store, Car, ChevronLeft } from 'lucide-react';
 import { sendOtp } from '@/lib/auth';
 import { verifyOtp, registerAccount, becomePartner } from '@/lib/customer';
+import { SwiftLogo } from '@/components/swift-logo';
 
 type Role = 'CUSTOMER' | 'VENDOR' | 'MOVER';
 type Step = 'role' | 'phone' | 'code' | 'name' | 'business' | 'vehicle';
@@ -66,7 +67,7 @@ export default function SignupPage() {
     <div className="flex min-h-screen items-center justify-center bg-[var(--swift-subtle)] p-4">
       <div className="w-full max-w-md rounded-2xl border border-black/5 bg-white p-8 shadow-sm">
         {step !== 'role' && <button onClick={() => setStep(step === 'code' ? 'phone' : step === 'phone' ? 'role' : step === 'name' ? 'code' : 'name')} className="mb-3 flex items-center gap-1 text-sm font-semibold text-[var(--swift-muted)]"><ChevronLeft className="h-4 w-4" /> Back</button>}
-        <Link href="/" className="text-xl font-extrabold"><span className="text-[var(--swift-red)]">Swift</span></Link>
+        <Link href="/" aria-label="Swift home"><SwiftLogo /></Link>
 
         {step === 'role' && (
           <div className="mt-5 space-y-3">

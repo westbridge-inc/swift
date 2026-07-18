@@ -1,4 +1,5 @@
 import Link from 'next/link';
+import { SwiftLogo } from './swift-logo';
 
 /** Shared marketing chrome: nav + footer, Swift red on a light canvas. */
 
@@ -14,9 +15,7 @@ export function SiteNav() {
   return (
     <header className="sticky top-0 z-50 border-b border-black/5 bg-white/85 backdrop-blur">
       <div className="mx-auto flex h-16 max-w-6xl items-center justify-between px-5">
-        <Link href="/" className="text-xl font-extrabold tracking-tight">
-          <span className="text-[var(--swift-red)]">Swift</span>
-        </Link>
+        <Link href="/" aria-label="Swift home"><SwiftLogo /></Link>
         <nav className="hidden gap-7 text-sm font-medium text-[var(--swift-muted)] md:flex">
           {NAV.map((n) => (
             <Link key={n.href} href={n.href} className="transition-colors hover:text-[var(--swift-ink)]">
@@ -48,9 +47,7 @@ export function SiteFooter() {
     <footer className="border-t border-black/5 bg-[var(--swift-subtle)]">
       <div className="mx-auto flex max-w-6xl flex-col gap-6 px-5 py-10 md:flex-row md:items-center md:justify-between">
         <div>
-          <p className="text-lg font-extrabold">
-            <span className="text-[var(--swift-red)]">Swift</span>
-          </p>
+          <SwiftLogo />
           <p className="mt-1 text-sm text-[var(--swift-muted)]">
             One app for food, groceries, shops, couriers and rides — built for the Caribbean.
           </p>

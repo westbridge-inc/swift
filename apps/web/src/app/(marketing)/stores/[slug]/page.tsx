@@ -62,10 +62,10 @@ export default async function StorefrontPage({ params }: { params: Promise<{ slu
             </div>
           </div>
           <Link
-            href="/how-it-works"
+            href={`/order/vendor/${store.id}`}
             className="shrink-0 rounded-full bg-[var(--swift-red)] px-6 py-3 text-center font-semibold text-white hover:bg-[var(--swift-red-600)]"
           >
-            Order on the Swift app
+            Order now
           </Link>
         </div>
 
