@@ -175,12 +175,24 @@ export class BillingService {
     return sub.customRate ?? sub.weeklyRate;
   }
 
-  /** CARD charges the stored token; MOBILE_MONEY pushes an MMG request the
-   *  payer approves on their phone; CASH deducts the prepaid balance atomically. */
+  /** Prepaid balance settles FIRST (money already in hand); otherwise CARD
+   *  charges the stored token and MOBILE_MONEY pushes an MMG request the payer
+   *  approves on their phone. */
   private async attemptCharge(
     sub: SubWithRelations,
     amount: number,
   ): Promise<{ ok: true; ref: string } | { ok: false; reason: string } | { ok: false; pendingTx: string }> {
+    // Prepaid balance is money Swift already holds — spend it before pinging any
+    // external rail. Atomic conditional decrement (no read-then-write race). This
+    // is also what makes an admin top-up reinstate a CARD/MMG sub: the recorded
+    // cash settles the fee instead of firing a fresh (and duplicate) external
+    // charge while the top-up sits unused and the partner stays suspended.
+    const prepaid = await this.prisma.prepaidBalance.updateMany({
+      where: { subscriptionId: sub.id, balance: { gte: amount } },
+      data: { balance: { decrement: amount } },
+    });
+    if (prepaid.count === 1) return { ok: true, ref: 'prepaid' };
+
     if (sub.billingMethod === 'CARD' && sub.paymentToken) {
       const result = await this.payments.chargeToken({
         token: sub.paymentToken,
@@ -208,14 +220,9 @@ export class BillingService {
       return { ok: false, reason: result.reason ?? 'MMG request failed' };
     }
 
-    // Prepaid path: conditional decrement — atomic, no read-then-write race
-    const deducted = await this.prisma.prepaidBalance.updateMany({
-      where: { subscriptionId: sub.id, balance: { gte: amount } },
-      data: { balance: { decrement: amount } },
-    });
-    return deducted.count === 1
-      ? { ok: true, ref: 'prepaid' }
-      : { ok: false, reason: 'Insufficient prepaid balance' };
+    // Prepaid already tried and came up short above; no usable external rail
+    // (a CASH sub with an empty balance, or a CARD/MMG sub missing credentials).
+    return { ok: false, reason: 'Insufficient prepaid balance' };
   }
 
   private async applySuccessfulCharge(
