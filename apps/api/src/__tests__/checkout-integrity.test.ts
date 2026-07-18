@@ -116,6 +116,27 @@ describe('checkout money math', () => {
     expect(order.tip).toBe(500);
     expect(order.total).toBe(order.subtotal + order.deliveryFee + 500 - (order.discount ?? 0));
   });
+
+  it('FREE_DELIVERY waives the whole delivery fee (was a silent no-op → charged in full)', async () => {
+    const code = `FREEDEL${nanoid(5).toUpperCase()}`;
+    const promo = await app.prisma.promoCode.create({
+      data: { code, description: 'free delivery', discountType: 'FREE_DELIVERY', discountValue: 0, validFrom: new Date(Date.now() - 3600000), validUntil: new Date(Date.now() + 3600000), maxUses: 100, maxUsesPerUser: 5, isActive: true },
+    });
+    try {
+      const c = await makeCustomer();
+      const res = await cartAndCheckout(c, { promoCode: code });
+      expect(res.statusCode).toBe(200);
+      const order = res.json().data.orders[0];
+      // The discount equals the delivery fee, so the total drops by exactly the fee
+      // (no tip in this cart → total collapses to the item subtotal).
+      expect(order.deliveryFee).toBeGreaterThan(0);
+      expect(order.discount).toBe(order.deliveryFee);
+      expect(order.total).toBe(order.subtotal);
+      await app.prisma.order.updateMany({ where: { promoCodeId: promo.id }, data: { promoCodeId: null } });
+    } finally {
+      await app.prisma.promoCode.delete({ where: { id: promo.id } });
+    }
+  });
 });
 
 describe('cash-only guardrail — orders never carry an in-app payment method', () => {
