@@ -333,6 +333,32 @@ describe('Prepaid path, retries across days, suspension, top-up reinstatement', 
     });
     expect(note).not.toBeNull();
   });
+
+  it('a top-up reinstates an MMG-rail sub from prepaid — no fresh MMG request', async () => {
+    // A suspended mover on the MMG rail (billingMethod MOBILE_MONEY).
+    const { userId } = await makeUserWithSession(['MOVER', 'CUSTOMER'], 'MOVER');
+    const rider = await app.prisma.rider.create({ data: { userId, riderType: 'DELIVERY', vehicleType: 'MOTORCYCLE' } });
+    const sub = await app.prisma.subscription.create({
+      data: {
+        riderId: rider.id, type: 'DELIVERY_RIDER', status: 'SUSPENDED', weeklyRate: 12000,
+        billingMethod: 'MOBILE_MONEY', mmgPayerMsisdn: '5926001234',
+        currentPeriodStart: new Date(Date.now() - 8 * DAY), currentPeriodEnd: new Date(Date.now() - DAY),
+        nextBillingDate: new Date(Date.now() - DAY), nextRetryAt: new Date(Date.now() - HOUR),
+      },
+    });
+    createdSubIds.push(sub.id);
+
+    // Admin records a real bank-transfer top-up covering the week.
+    await billing.recordTopUp(sub.id, 12000, 'admin', 'bank-xfer-123');
+
+    const fresh = await app.prisma.subscription.findUniqueOrThrow({ where: { id: sub.id } });
+    expect(fresh.status).toBe('ACTIVE'); // reinstated by the recorded cash...
+    const bal = await app.prisma.prepaidBalance.findUniqueOrThrow({ where: { subscriptionId: sub.id } });
+    expect(Number(bal.balance)).toBe(0); // ...which was CONSUMED, not left sitting unused
+    // and it must NOT have fired a duplicate MMG request on the payer's phone
+    const pendingMmg = await app.prisma.subscriptionPayment.count({ where: { subscriptionId: sub.id, status: 'PENDING' } });
+    expect(pendingMmg).toBe(0);
+  });
 });
 
 describe('Suspended movers are kicked and blocked', () => {
