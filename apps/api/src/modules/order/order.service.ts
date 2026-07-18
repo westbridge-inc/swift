@@ -203,6 +203,18 @@ export class OrderService {
       // The race-proof guard is the conditional decrement in the transaction
       // below — this is the friendly early error for the common case.
       for (const ci of items) {
+        // A vendor can 86 a listing (isAvailable=false) independently of stock
+        // tracking. Without this guard an un-tracked, hidden item would be
+        // CHARGED — and a percentage/free-delivery promo would be computed
+        // against a basket that includes an item the vendor can't fulfil. We
+        // reject rather than silently drop: changing someone's order (and the
+        // total they'll pay in cash) without consent is worse than asking them
+        // to remove it. Mirrors the sold-out path so the client handles both.
+        if (!ci.item.isAvailable) {
+          throw new AppError(409, 'ITEM_UNAVAILABLE',
+            `${ci.item.name} is no longer available — remove it to continue`,
+            { itemId: ci.item.id });
+        }
         if (ci.item.stockQuantity !== null && ci.quantity > ci.item.stockQuantity) {
           throw new AppError(409, 'INSUFFICIENT_STOCK',
             ci.item.stockQuantity <= 0
