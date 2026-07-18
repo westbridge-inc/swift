@@ -11,6 +11,7 @@ import { registerErrorHandler } from '../middleware/error-handler';
 import { DispatchService } from '../modules/dispatch/dispatch.service';
 import { scoreCandidate, rankCandidates } from '../modules/dispatch/scoring';
 import { HaversineMapsProvider } from '../providers/maps/maps-provider';
+import { runWithoutTenant } from '../plugins/tenant-context';
 
 // ---------------------------------------------------------------------------
 // dispatch. Hardest paths: the no-acceptance path
@@ -28,6 +29,7 @@ const scheduled: Array<{ orderId: string; riderId: string; delayMs: number }> = 
 
 const createdUserIds: string[] = [];
 const createdOrderIds: string[] = [];
+const createdTenantIds: string[] = [];
 let vendorOwnerUserId: string;
 let vendorId: string;
 let customerId: string;
@@ -48,13 +50,16 @@ async function purgeFixtures() {
   const orderIds = orders.map((o) => o.id);
   await app.prisma.order.deleteMany({ where: { id: { in: orderIds } } });
   await app.prisma.notification.deleteMany({ where: { userId: { in: ids } } });
+  // Carts have a restrict FK to the customer — must go before the user or the
+  // whole user.deleteMany fails atomically and strands every fixture.
+  await app.prisma.cart.deleteMany({ where: { customerId: { in: ids } } });
   await app.prisma.user.deleteMany({ where: { id: { in: ids } } });
 }
 
 let seq = 0;
 async function makeRider(opts: {
   lat?: number; lng?: number; online?: boolean; available?: boolean;
-  rating?: number; acceptance?: number; busy?: boolean;
+  rating?: number; acceptance?: number; busy?: boolean; tenantId?: string;
 }) {
   seq += 1;
   const user = await app.prisma.user.create({
@@ -65,6 +70,7 @@ async function makeRider(opts: {
       roles: ['RIDER' as UserRole, 'CUSTOMER' as UserRole],
       activeRole: 'RIDER' as UserRole,
       isPhoneVerified: true, selfieCapturedAt: new Date(),
+      ...(opts.tenantId ? { tenantId: opts.tenantId } : {}),
     },
   });
   createdUserIds.push(user.id);
@@ -180,7 +186,14 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
-  await purgeFixtures();
+  // The HTTP accept tests run authenticate -> enterTenant, whose enterWith
+  // leaks a tenant into this async context; without clearing it, purge's
+  // findMany is scoped to swift-default and never sees the foreign-tenant rider.
+  await runWithoutTenant(async () => {
+    await purgeFixtures(); // deletes the fixture users (incl. the foreign-tenant rider) by phone
+    // Now that no user points at them, the throwaway tenants can go.
+    if (createdTenantIds.length) await app.prisma.tenant.deleteMany({ where: { id: { in: createdTenantIds } } });
+  });
   await app.close();
 });
 
@@ -233,6 +246,34 @@ describe('Candidate discovery — PostGIS radius', () => {
       where: { id: { in: [near.riderId, mid.riderId] } },
       data: { isOnline: false },
     });
+  });
+
+  it('never offers across tenants — a mover in another operator is invisible (raw geo query bypasses tenantScope)', async () => {
+    // A second operator on the same platform. Both riders sit on the SAME remote
+    // spot, far from every other fixture, so tenancy is the ONLY thing that can
+    // separate them.
+    const FAR = { lat: 6.95, lng: -58.42 };
+    const otherTenant = await app.prisma.tenant.create({ data: { name: 'Other Op', slug: `other-${nanoid(6).toLowerCase()}` } });
+    createdTenantIds.push(otherTenant.id);
+    const foreign = await makeRider({ lat: FAR.lat, lng: FAR.lng, tenantId: otherTenant.id });
+    const local = await makeRider({ lat: FAR.lat, lng: FAR.lng }); // swift-default
+    const order = await makeDeliveryOrder('ACCEPTED', FAR);        // swift-default
+
+    // Dispatching a swift-default order must see the local rider and NOT the
+    // foreign one — even though the foreign rider is an identical, closer-or-equal
+    // candidate. This is the assertion that fails without the JOIN+tenant filter.
+    const forDefault = await dispatch.findCandidates(order.id, FAR, 5, 'RIDER', 0, null, 'swift-default');
+    const defaultIds = forDefault.map((c) => c.riderId);
+    expect(defaultIds).toContain(local.riderId);
+    expect(defaultIds).not.toContain(foreign.riderId);
+
+    // And the other operator sees only its own rider — never the default one.
+    const forOther = await dispatch.findCandidates(order.id, FAR, 5, 'RIDER', 0, null, otherTenant.id);
+    const otherIds = forOther.map((c) => c.riderId);
+    expect(otherIds).toContain(foreign.riderId);
+    expect(otherIds).not.toContain(local.riderId);
+
+    await app.prisma.rider.updateMany({ where: { id: { in: [foreign.riderId, local.riderId] } }, data: { isOnline: false } });
   });
 });
 
