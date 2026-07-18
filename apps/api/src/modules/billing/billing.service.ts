@@ -120,6 +120,13 @@ export class BillingService {
     // Waived subscriptions advance for free, with the audit trail intact
     if (sub.feeWaived || amount === 0) {
       await this.applySuccessfulCharge(sub, 0, 'fee-waived', now, periodKey);
+      // A waive covers ONE period — the admin notice promises "for this period".
+      // Clear it so normal billing resumes next cycle instead of a permanent free
+      // ride (silent, recurring revenue loss). A genuinely $0 tier (amount===0,
+      // feeWaived false) is NOT a waive and stays free.
+      if (sub.feeWaived) {
+        await this.prisma.subscription.update({ where: { id: sub.id }, data: { feeWaived: false } });
+      }
       return 'succeeded';
     }
 
