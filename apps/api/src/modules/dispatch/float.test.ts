@@ -69,4 +69,14 @@ describe('FloatService (D.3)', () => {
     const r = await prisma.rider.findUniqueOrThrow({ where: { id: riderId } });
     expect(Number(r.committedFloat)).toBe(0); // clamped, not −4999
   });
+
+  it('concurrent releases are atomic — every one counts, no lost update', async () => {
+    // Five committed cash orders for one rider, all terminating at once.
+    await prisma.rider.update({ where: { id: riderId }, data: { committedFloat: 5000 } });
+    await Promise.all(Array.from({ length: 5 }, () => float.release(prisma, riderId, 1000)));
+    const r = await prisma.rider.findUniqueOrThrow({ where: { id: riderId } });
+    // All five decrements applied → 0. The old read-then-write would let racing
+    // releases read the same value and clobber each other, leaving float stuck > 0.
+    expect(Number(r.committedFloat)).toBe(0);
+  });
 });

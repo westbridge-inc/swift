@@ -53,12 +53,28 @@ export class FloatService {
     await tx.rider.update({ where: { id: riderId }, data: { committedFloat: { increment: amount } } });
   }
 
-  /** Release float on a terminal transition (delivered / cancelled / failed) — clamped ≥ 0. */
+  /** Release float on a terminal transition (delivered / cancelled / failed) —
+   *  clamped ≥ 0. ATOMIC guarded decrement, never read-then-write: two terminal
+   *  transitions for the SAME rider on DIFFERENT cash orders can race (callers
+   *  don't share a tx), and a read-compute-write would lose one release —
+   *  permanently inflating committedFloat and shrinking the rider's dispatchable
+   *  float until an admin corrects it. */
   async release(tx: Tx, riderId: string, amount: number): Promise<void> {
     if (amount <= 0) return;
-    const rider = await tx.rider.findUnique({ where: { id: riderId }, select: { committedFloat: true } });
-    if (!rider) return;
-    const next = Math.max(0, Number(rider.committedFloat) - amount);
-    await tx.rider.update({ where: { id: riderId }, data: { committedFloat: next } });
+    // Enough committed → atomic decrement. The DB serializes concurrent
+    // decrements, so two releases both apply (no lost update).
+    const dec = await tx.rider.updateMany({
+      where: { id: riderId, committedFloat: { gte: amount } },
+      data: { committedFloat: { decrement: amount } },
+    });
+    if (dec.count === 0) {
+      // Over-release (committedFloat < amount — shouldn't happen if commit/
+      // release balance, but clamp defensively). Zero it ONLY while still short,
+      // so a concurrent commit isn't wiped.
+      await tx.rider.updateMany({
+        where: { id: riderId, committedFloat: { lt: amount } },
+        data: { committedFloat: 0 },
+      });
+    }
   }
 }
