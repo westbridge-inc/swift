@@ -19,6 +19,7 @@ import { servicesRoutes } from './modules/services/services.routes';
 import { partnerRoutes } from './modules/partner/partner.routes';
 import { aiRoutes } from './modules/ai/ai.routes';
 import { setAppLogger } from './utils/logger';
+import { assertSafeBootConfig } from './utils/boot-config';
 import { prismaPlugin, beginRequestTenantContext } from './plugins/prisma';
 import { authPlugin } from './plugins/auth';
 import { socketPlugin } from './plugins/socket';
@@ -276,16 +277,6 @@ async function buildApp() {
   }
 
   return app;
-}
-
-/** Refuse to boot in a dangerous config. The OTP master-code bypass is
- *  triple-guarded in code, but its last line of defence is NODE_ENV — if prod
- *  ever runs without NODE_ENV=production and the flag leaks in, `000000`
- *  becomes universal account takeover. Fail loud at boot instead. */
-function assertSafeBootConfig() {
-  if (process.env['NODE_ENV'] === 'production' && process.env['DEV_OTP_BYPASS'] === '1') {
-    throw new Error('FATAL: DEV_OTP_BYPASS=1 in production — this disables OTP verification. Refusing to start.');
-  }
 }
 
 async function start() {
