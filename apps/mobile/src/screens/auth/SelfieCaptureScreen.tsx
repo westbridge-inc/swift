@@ -67,10 +67,7 @@ export function SelfieCaptureScreen() {
         height: FRAME,
         borderColor: color.brand[500],
         // the ring glows brand-red — this is a Swift moment, not a form field
-        shadowColor: color.brand[500],
-        shadowOpacity: 0.35,
-        shadowRadius: 24,
-        shadowOffset: { width: 0, height: 8 },
+        boxShadow: '0px 8px 24px rgba(128,59,59,0.35)',
         elevation: 8,
       }}
     >

@@ -27,7 +27,7 @@ export function BrandGradient({
   const [r0, g0, b0] = hexToRgb(from);
   const [r1, g1, b1] = hexToRgb(to);
   return (
-    <View pointerEvents="none" style={[{ position: 'absolute', left: 0, right: 0, top: 0, bottom: 0 }, style]}>
+    <View style={[{ position: 'absolute', left: 0, right: 0, top: 0, bottom: 0, pointerEvents: 'none' }, style]}>
       {Array.from({ length: SLICES }, (_, i) => {
         const t = (i + 1) / SLICES;
         const eased = t * (2 - t); // ease-out: lighter top settles into the deep base

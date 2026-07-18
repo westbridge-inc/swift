@@ -584,10 +584,7 @@ export function RestaurantScreen() {
                 paddingHorizontal: space.xl,
                 backgroundColor: color.brand[500],
                 opacity: pressed ? 0.9 : 1,
-                shadowColor: '#211A1A',
-                shadowOpacity: 0.25,
-                shadowRadius: 12,
-                shadowOffset: { width: 0, height: 6 },
+                boxShadow: '0px 6px 12px rgba(33,26,26,0.25)',
                 elevation: 8,
               }}
             >

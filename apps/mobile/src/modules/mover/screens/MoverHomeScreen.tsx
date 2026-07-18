@@ -384,7 +384,7 @@ export function MoverHomeScreen({ navigation }: any) {
 
       {/* The GO ring — the one big action when offline (reference language). */}
       {!online && !activeJob ? (
-        <View pointerEvents="box-none" style={{ position: 'absolute', left: 0, right: 0, bottom: '38%', alignItems: 'center' }}>
+        <View style={{ pointerEvents: 'box-none', position: 'absolute', left: 0, right: 0, bottom: '38%', alignItems: 'center' }}>
           <Pressable disabled={busyToggle} onPress={() => goOnline.mutate()}>
             {({ pressed }) => (
               <View style={{ width: 96, height: 96, borderRadius: 48, alignItems: 'center', justifyContent: 'center', backgroundColor: dk.accentGlow }}>

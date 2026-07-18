@@ -47,7 +47,7 @@ export function LocationPickerScreen() {
       />
 
       {/* Fixed center pin */}
-      <View pointerEvents="none" style={{ position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, alignItems: 'center', justifyContent: 'center' }}>
+      <View style={{ pointerEvents: 'none', position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, alignItems: 'center', justifyContent: 'center' }}>
         <View style={{ marginBottom: 36, alignItems: 'center' }}>
           <View
             style={{
