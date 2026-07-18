@@ -192,6 +192,18 @@ jobs:
         run: cd apps/api && npx prisma migrate deploy
         env:
           DATABASE_URL: postgresql://swift:swift@localhost:5432/swift_migrate
+      # SWIFT-AUD-D6-04: the two dispatch geo indexes are functional GiST, which
+      # Prisma can't express in schema.prisma — they live ONLY in raw-SQL
+      # migrations and are invisible to `db push`. Assert `migrate deploy`
+      # actually created them, so a regression (or a db-push-provisioned env)
+      # that would silently degrade dispatch to a full table seq-scan goes RED.
+      - name: Dispatch geo GiST indexes exist
+        run: |
+          for idx in riders_geo_gist drivers_geo_gist; do
+            found=$(psql "postgresql://swift:swift@localhost:5432/swift_migrate" -tAc "SELECT 1 FROM pg_indexes WHERE indexname='$idx'")
+            if [ "$found" != "1" ]; then echo "::error::MISSING dispatch geo index: $idx (raw-SQL migration did not apply)"; exit 1; fi
+            echo "ok: $idx present"
+          done
       - name: Schema matches migration state
         run: >
           cd apps/api && npx prisma migrate diff
