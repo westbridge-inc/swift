@@ -27,6 +27,37 @@ export async function verifyCustomerLogin(phone: string, code: string): Promise<
   return { user: data.user };
 }
 
+const API_BASE = API_URL;
+
+/** Verify the OTP without deciding a role — returns whether the number is new. */
+export async function verifyOtp(phone: string, code: string): Promise<{ isNewUser: boolean; user?: any; signedIn: boolean }> {
+  const res = await fetch(`${API_BASE}/api/v1/auth/verify-otp`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ phone, code }),
+  });
+  const json = await res.json().catch(() => ({}));
+  if (!res.ok || !json.success) throw new Error(json?.error?.message || 'That code is not valid.');
+  const d = json.data;
+  if (!d.isNewUser && d.tokens?.accessToken) { setTokens(d.tokens.accessToken, d.tokens.refreshToken); return { isNewUser: false, user: d.user, signedIn: true }; }
+  return { isNewUser: true, signedIn: false };
+}
+
+/** Register a brand-new account with the chosen role (after OTP verify). */
+export async function registerAccount(body: { phone: string; firstName: string; lastName: string; role: 'CUSTOMER' | 'VENDOR' | 'MOVER'; countryCode?: string }): Promise<{ user: any; roles: string[] }> {
+  const res = await fetch(`${API_BASE}/api/v1/auth/register`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ countryCode: 'GY', ...body }),
+  });
+  const json = await res.json().catch(() => ({}));
+  const token = json?.data?.tokens?.accessToken;
+  if (!res.ok || !token) throw new Error(json?.error?.message || 'Could not create your account.');
+  setTokens(token, json.data.tokens.refreshToken);
+  return { user: json.data.user, roles: json.data.user?.roles ?? [] };
+}
+
+/** Partner onboarding — turn a fresh account into a vendor or a mover. */
+export async function becomePartner(body: any) {
+  return (await apiFetch('/api/v1/partner/become', { method: 'POST', body: JSON.stringify(body) })).data;
+}
+
 // ── Types ──────────────────────────────────────────────────────────────────
 export interface Vendor {
   id: string; name: string; slug: string; vendorType: string;
