@@ -1,7 +1,9 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { io as ioClient, type Socket } from 'socket.io-client';
+import { nanoid } from 'nanoid';
 import type { AddressInfo } from 'node:net';
+import type { UserStatus } from '@prisma/client';
 import { prismaPlugin } from '../plugins/prisma';
 import { redisPlugin } from '../plugins/redis';
 import { authPlugin } from '../plugins/auth';
@@ -9,13 +11,31 @@ import { socketPlugin } from '../plugins/socket';
 import { registerErrorHandler } from '../middleware/error-handler';
 
 // ---------------------------------------------------------------------------
-// SEC-1 regression — Socket.IO connections must present a valid JWT.
-// Before the fix, any client could connect and claim any userId.
+// SEC-1 regression — Socket.IO connections must present a valid JWT AND a live
+// session for an active account (SWIFT-AUD-D3-03): a JWT alone (logged out, or
+// suspended) must not admit a realtime socket.
 // ---------------------------------------------------------------------------
 
 let app: FastifyInstance;
 let url: string;
 const openSockets: Socket[] = [];
+const createdUserIds: string[] = [];
+const phoneBase = 592_140_000_000 + Math.floor(Math.random() * 800_000_000);
+let seq = 0;
+
+/** A real user + live session; returns the session token (what a client holds). */
+async function makeSessionToken(status: UserStatus = 'ACTIVE'): Promise<{ userId: string; token: string }> {
+  seq += 1;
+  const user = await app.prisma.user.create({
+    data: { phone: `+${phoneBase + seq}`, firstName: 'Sock', lastName: `U${seq}`, roles: ['CUSTOMER'], activeRole: 'CUSTOMER', isPhoneVerified: true, status },
+  });
+  createdUserIds.push(user.id);
+  const token = app.jwt.sign({ userId: user.id, role: 'CUSTOMER', jti: nanoid(8) });
+  await app.prisma.session.create({
+    data: { userId: user.id, token, refreshToken: nanoid(48), deviceId: 'sock', deviceType: 'test', expiresAt: new Date(Date.now() + 86400000) },
+  });
+  return { userId: user.id, token };
+}
 
 beforeAll(async () => {
   process.env['NODE_ENV'] = 'development';
@@ -37,6 +57,10 @@ beforeAll(async () => {
 
 afterAll(async () => {
   for (const socket of openSockets) socket.disconnect();
+  if (createdUserIds.length) {
+    await app.prisma.session.deleteMany({ where: { userId: { in: createdUserIds } } });
+    await app.prisma.user.deleteMany({ where: { id: { in: createdUserIds } } });
+  }
   await app.close();
 });
 
@@ -76,14 +100,31 @@ describe('SEC-1 regression — Socket.IO authentication', () => {
     expect(socket.connected).toBe(false);
   });
 
-  it('accepts a connection with a valid JWT and joins the user room', async () => {
-    const token = app.jwt.sign({ userId: 'sec1-regression-user', role: 'CUSTOMER' });
+  it('accepts a connection with a valid JWT + live session, joins the user room', async () => {
+    const { userId, token } = await makeSessionToken('ACTIVE');
     const { socket, error } = await connect({ token });
     expect(error).toBeUndefined();
     expect(socket.connected).toBe(true);
 
     // The server derives the room from the verified token, never from client data
-    const room = app.io.sockets.adapter.rooms.get('user:sec1-regression-user');
+    const room = app.io.sockets.adapter.rooms.get(`user:${userId}`);
     expect(room?.size).toBe(1);
+  });
+
+  it('rejects a validly-signed JWT with NO session (logged out) [SWIFT-AUD-D3-03]', async () => {
+    // A real, signature-valid token whose session was deleted (logout/reset).
+    const token = app.jwt.sign({ userId: 'no-session-user', role: 'CUSTOMER', jti: nanoid(8) });
+    const { socket, error } = await connect({ token });
+    expect(error).toBeDefined();
+    expect(error!.message).toBe('Session revoked or expired');
+    expect(socket.connected).toBe(false);
+  });
+
+  it('rejects a suspended account even with a live session [SWIFT-AUD-D3-03]', async () => {
+    const { token } = await makeSessionToken('SUSPENDED');
+    const { socket, error } = await connect({ token });
+    expect(error).toBeDefined();
+    expect(error!.message).toBe('Account not active');
+    expect(socket.connected).toBe(false);
   });
 });
