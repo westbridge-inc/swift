@@ -2,6 +2,7 @@ import Fastify from 'fastify';
 import cors from '@fastify/cors';
 import helmet from '@fastify/helmet';
 import rateLimit from '@fastify/rate-limit';
+import Redis from 'ioredis';
 import multipart from '@fastify/multipart';
 import { authRoutes } from './modules/auth/auth.routes';
 import { customerRoutes } from './modules/user/customer.routes';
@@ -106,11 +107,28 @@ async function buildApp() {
       },
     },
   });
+  // SWIFT-AUD-D6-02: back the limiter with Redis IN PRODUCTION so the ceiling is
+  // shared across all API instances. An in-memory store gives each instance its
+  // own counter → the effective limit becomes N×max, and the deliberately tight
+  // OTP/login limits weaken linearly with the fleet size you scale up for launch.
+  // Dev/test keep the in-memory store (a shared Redis counter across vitest's
+  // per-file workers would cross-contaminate the whole suite's rate-limit state).
+  const rateLimitRedis =
+    process.env['NODE_ENV'] === 'production'
+      ? new Redis(process.env['REDIS_URL'] || 'redis://localhost:6379', {
+          connectionName: 'swift-rate-limit',
+          // A rate-limit store must fail OPEN, never queue or crash a request if
+          // Redis blips — the plugin degrades gracefully on a store error.
+          maxRetriesPerRequest: 1,
+          enableOfflineQueue: false,
+        })
+      : undefined;
   await app.register(rateLimit, {
     // Global per-IP ceiling. Tunable via RATE_LIMIT_MAX so a load test or a
     // busy launch can raise it without a code change (per-route limits on
     // auth/OTP stay tight regardless). Keys off request.ip (resolved via
     // trustProxy above) — never the raw, client-spoofable X-Forwarded-For.
+    ...(rateLimitRedis ? { redis: rateLimitRedis, nameSpace: 'swift-rl:' } : {}),
     max: parseInt(process.env['RATE_LIMIT_MAX'] || '200', 10),
     timeWindow: '1 minute',
   });
