@@ -1,5 +1,8 @@
 generator client {
-  provider = "prisma-client-js"
+  provider        = "prisma-client-js"
+  // metrics: exposes the live connection-pool counters ($metrics.json()) that
+  // the observability plugin turns into the swift_db_pool gauge (D7-04).
+  previewFeatures = ["metrics"]
 }
 
 datasource db {

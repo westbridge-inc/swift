@@ -107,6 +107,30 @@ export async function observabilityPlugin(app: FastifyInstance) {
         }
       },
     });
+    // DB connection-pool health (D7-04). Prisma's own pool counters, surfaced at
+    // scrape time via the metrics preview feature. The launch signal to alert on
+    // is state="waiting" climbing above 0 — queries queued for a free connection
+    // means the pool is saturated and connection_limit should rise (see
+    // .env.example). One labeled metric, matching swift_supply_online's shape.
+    new client.Gauge({
+      name: 'swift_db_pool',
+      help: 'Prisma connection-pool state (open/busy/idle connections; queries waiting for one)',
+      labelNames: ['state'] as const,
+      registers: [registry],
+      async collect() {
+        try {
+          const m = await app.prisma.$metrics.json();
+          const g = (key: string) => m.gauges.find((x) => x.key === key)?.value ?? 0;
+          this.set({ state: 'open' }, g('prisma_pool_connections_open'));
+          this.set({ state: 'busy' }, g('prisma_pool_connections_busy'));
+          this.set({ state: 'idle' }, g('prisma_pool_connections_idle'));
+          this.set({ state: 'waiting' }, g('prisma_client_queries_wait'));
+        } catch {
+          // Pool not initialised yet, or prisma absent in a unit-test harness —
+          // a scrape must never fail on it. Stale/absent beats broken.
+        }
+      },
+    });
     metricsWired = true;
   }
 
