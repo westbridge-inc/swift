@@ -301,6 +301,11 @@ describe('The offer cascade', () => {
     const a = await makeRider({ lat: PICKUP.lat + 0.0045, acceptance: 100 }); // best
     const b = await makeRider({ lat: PICKUP.lat + 0.018, acceptance: 100 }); // next
     const order = await makeDeliveryOrder();
+    // An admin who should be paged when the pool goes dead (SWIFT-AUD-D7-02).
+    const admin = await app.prisma.user.create({
+      data: { phone: '+5920008899', firstName: 'Ops', lastName: 'Admin', roles: ['ADMIN'], activeRole: 'ADMIN', isPhoneVerified: true },
+    });
+    createdUserIds.push(admin.id);
 
     // 1) Best candidate gets the offer + a timeout is scheduled
     const first = await dispatch.dispatchOrder(order.id);
@@ -326,6 +331,12 @@ describe('The offer cascade', () => {
     });
     expect(customerNote).not.toBeNull();
     expect(vendorNote).not.toBeNull();
+
+    // Ops is paged too — a dead mover pool must not be invisible (D7-02).
+    const adminNote = await app.prisma.notification.findFirst({
+      where: { userId: admin.id, title: 'Dispatch exhausted — no mover found' },
+    });
+    expect(adminNote).not.toBeNull();
 
     const final = await app.prisma.order.findUniqueOrThrow({ where: { id: order.id }, select: { status: true, riderId: true } });
     expect(final.riderId).toBeNull();
