@@ -221,8 +221,21 @@ export async function ridesRoutes(app: FastifyInstance) {
       },
     });
 
-    // Shared dispatch engine, driver pool — same cascade, same atomicity
-    await dispatch.dispatchOrder(order.id);
+    // Shared dispatch engine, driver pool — same cascade, same atomicity.
+    // SWIFT-AUD-D6-08: enqueue the first-pass dispatch instead of running it
+    // inline. It does external ETA round-trips that would otherwise pin this
+    // request handler (and a DB connection) open under a hail storm; the client
+    // listens for the dispatch:offer socket event either way. Fall back to inline
+    // when no queue is up (tests / degraded boot) so behaviour is unchanged there.
+    if (app.dispatchQueue) {
+      await app.dispatchQueue.add('dispatch-order', { orderId: order.id }, {
+        priority: 5,
+        removeOnComplete: 100,
+        removeOnFail: 50,
+      });
+    } else {
+      await dispatch.dispatchOrder(order.id);
+    }
 
     reply.code(201);
     return {
