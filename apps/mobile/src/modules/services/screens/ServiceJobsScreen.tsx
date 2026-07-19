@@ -2,7 +2,7 @@
 import React, { useState } from 'react';
 import { RefreshControl, ScrollView, TextInput, View } from 'react-native';
 import { color, radius, space } from '@swift/ui';
-import { useServiceJobs, useScheduleJob, useCancelJob, useRateJob, useQuoteJob, useConfirmJob, useDeclineSlot } from '../../../hooks';
+import { useServiceJobs, useScheduleJob, useCancelJob, useRateJob, useQuoteJob, useConfirmJob, useDeclineSlot, useCompleteJob } from '../../../hooks';
 import { useAuthStore } from '../../../stores/authStore';
 import { money } from '../../../lib/money';
 import { Card, Chip, EmptyState, Header, IconChip, LoadingBlock, PillButton, PopupCard, Screen, Stars, T, TonePill } from '../../../kit';
@@ -129,6 +129,7 @@ function ProviderActions({ job }: { job: any }) {
   const quote = useQuoteJob();
   const confirm = useConfirmJob();
   const decline = useDeclineSlot();
+  const complete = useCompleteJob();
   const [amount, setAmount] = useState('');
 
   if (job.status === 'REQUESTED') {
@@ -170,6 +171,13 @@ function ProviderActions({ job }: { job: any }) {
       <View style={{ flexDirection: 'row', gap: space.md, marginTop: space.md }}>
         <PillButton label="Confirm time" size="md" style={{ flex: 1 }} loading={confirm.isPending} onPress={() => confirm.mutate(job.id)} />
         <PillButton label="Can’t make it" variant="outline" size="md" style={{ flex: 1 }} loading={decline.isPending} onPress={() => decline.mutate(job.id)} />
+      </View>
+    );
+  }
+  if (job.status === 'SCHEDULED' && job.providerConfirmedAt) {
+    return (
+      <View style={{ marginTop: space.md }}>
+        <PillButton label="Mark job complete" size="md" loading={complete.isPending} onPress={() => complete.mutate(job.id)} />
       </View>
     );
   }

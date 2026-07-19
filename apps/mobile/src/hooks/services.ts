@@ -75,6 +75,14 @@ export function useConfirmJob() {
   });
 }
 
+export function useCompleteJob() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (id: string) => unwrap(servicesApi.completeJob(id)),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['services', 'jobs'] }),
+  });
+}
+
 export function useDeclineSlot() {
   const qc = useQueryClient();
   return useMutation({
