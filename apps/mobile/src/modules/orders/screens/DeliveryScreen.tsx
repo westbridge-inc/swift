@@ -10,7 +10,7 @@ import { color, radius, space } from '@swift/ui';
 import { useMutation } from '@tanstack/react-query';
 import { useOrder, useTipOrder, useDecideSubstitution } from '../../../hooks/customer';
 import { toast } from '../../../components/ui/toast';
-import { customerApi } from '../../../services/api';
+import { customerApi, courierApi } from '../../../services/api';
 import { connectSocket, getSocket, subscribeToOrder } from '../../../services/socket';
 import { money } from '../../../lib/money';
 import { CircleChip, ErrorState, IconChip, LoadingBlock, PillButton, PopupCard, T } from '../../../kit';
@@ -154,8 +154,13 @@ export function DeliveryScreen() {
   const prevStatus = useRef<string | null>(null);
   const mapRef = useRef<MapView>(null);
 
+  // A courier job cancels through its own endpoint so the assigned rider is
+  // freed AND told they're back in the dispatch pool (the generic order-cancel
+  // frees the rider row but doesn't notify them). Everything else uses the
+  // standard customer cancel with its free-window / fee logic.
   const cancelOrder = useMutation({
-    mutationFn: () => customerApi.cancelOrder(orderId),
+    mutationFn: () =>
+      order.data?.orderType === 'COURIER' ? courierApi.cancel(orderId) : customerApi.cancelOrder(orderId),
     onSuccess: () => order.refetch(),
   });
   const tip = useTipOrder(orderId);
@@ -612,11 +617,13 @@ export function DeliveryScreen() {
           Cancel this order?
         </T>
         <T variant="label" tone="muted" center style={{ marginTop: space.sm }}>
-          {o.freeCancellationWindow
-            ? 'You’re inside the free-cancellation window — no charge.'
-            : Number(o.cancellationFee) > 0
-              ? `The store may have started preparing it. Cancelling now costs ${money(o.cancellationFee)}.`
-              : 'The store may have already started preparing it.'}
+          {o.orderType === 'COURIER'
+            ? 'This cancels the pickup and puts the rider back in the dispatch pool. It can’t be undone.'
+            : o.freeCancellationWindow
+              ? 'You’re inside the free-cancellation window — no charge.'
+              : Number(o.cancellationFee) > 0
+                ? `The store may have started preparing it. Cancelling now costs ${money(o.cancellationFee)}.`
+                : 'The store may have already started preparing it.'}
         </T>
         <View style={{ alignSelf: 'stretch', gap: space.md, marginTop: space.xl }}>
           <PillButton
