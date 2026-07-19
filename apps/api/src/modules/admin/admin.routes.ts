@@ -1326,14 +1326,15 @@ export async function adminRoutes(app: FastifyInstance) {
     if (!settlement) throw new NotFoundError('Settlement', id);
     if (settlement.status === 'PAID') throw new AppError(400, 'ALREADY_PAID', 'Settlement has already been processed');
 
-    const updated = await app.prisma.settlement.update({
-      where: { id },
-      data: {
-        status: 'PAID',
-        paidAt: new Date(),
-        reference: reference || null,
-      },
+    // Compare-and-set: this is a real payout instruction. Two admins (or a
+    // double-click / retry) both passing the in-memory check would otherwise both
+    // mark PAID and both fire the payout notification — a duplicate payout.
+    const claimed = await app.prisma.settlement.updateMany({
+      where: { id, status: { not: 'PAID' } },
+      data: { status: 'PAID', paidAt: new Date(), reference: reference || null },
     });
+    if (claimed.count === 0) throw new AppError(409, 'ALREADY_PAID', 'Settlement has already been processed');
+    const updated = await app.prisma.settlement.findUniqueOrThrow({ where: { id } });
 
     await audit(request.user.userId, 'PROCESS_SETTLEMENT', 'Settlement', id, { amount: settlement.totalBase, reference }, request);
 
