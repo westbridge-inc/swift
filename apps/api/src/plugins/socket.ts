@@ -34,6 +34,18 @@ export const socketPlugin = fp(async (app: FastifyInstance) => {
     pingTimeout: 20000,
   });
 
+  // SWIFT-AUD-D6-01: fan emits out across ALL API instances in production. Without
+  // a Redis adapter, io.to(room).emit() reaches only sockets on the EMITTING
+  // instance — a rider connected to instance B never receives the dispatch offer
+  // a worker emits on instance A, and customers miss order-status updates. Dev/
+  // test run a single process (the default in-memory adapter is correct there);
+  // gating on production also keeps vitest's per-file socket servers from
+  // cross-talking through a shared Redis pub/sub channel.
+  if (process.env['NODE_ENV'] === 'production') {
+    const { createAdapter } = await import('@socket.io/redis-adapter');
+    io.adapter(createAdapter(app.redis.duplicate(), app.redis.duplicate()));
+  }
+
   // Require valid JWT on every connection — no unauthenticated sockets
   io.use((socket, next) => {
     const token = (socket.handshake.auth as Record<string, unknown>)?.['token'] as string | undefined;
