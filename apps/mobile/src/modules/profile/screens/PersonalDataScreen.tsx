@@ -1,6 +1,6 @@
 /** @jsxImportSource react */
 import React, { useEffect, useState } from 'react';
-import { KeyboardAvoidingView, Platform, ScrollView, View } from 'react-native';
+import { KeyboardAvoidingView, Platform, ScrollView, Share, View } from 'react-native';
 import { Image } from 'expo-image';
 import { Feather } from '@expo/vector-icons';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
@@ -8,7 +8,8 @@ import { color, space } from '@swift/ui';
 import { customerApi } from '../../../services/api';
 import { useProfile } from '../../../hooks/customer';
 import { useAuthStore } from '../../../stores/authStore';
-import { ErrorState, Header, LabeledInput, LoadingBlock, PillButton, Screen, T } from '../../../kit';
+import { ErrorState, Header, IconChip, LabeledInput, LoadingBlock, PillButton, PopupCard, Screen, SettingsRow, T } from '../../../kit';
+import { toast } from '../../../components/ui/toast';
 
 const GUTTER = space['2xl'];
 
@@ -19,11 +20,13 @@ export function PersonalDataScreen() {
   const profile = useProfile<any>();
   const setUser = useAuthStore((s) => s.setUser);
   const user = useAuthStore((s) => s.user);
+  const logout = useAuthStore((s) => s.logout);
 
   const [firstName, setFirstName] = useState('');
   const [lastName, setLastName] = useState('');
   const [email, setEmail] = useState('');
   const [savedFlash, setSavedFlash] = useState(false);
+  const [confirmDelete, setConfirmDelete] = useState(false);
 
   const p = profile.data;
   useEffect(() => {
@@ -47,6 +50,32 @@ export function PersonalDataScreen() {
       qc.invalidateQueries({ queryKey: ['customer', 'profile'] });
       setSavedFlash(true);
       setTimeout(() => setSavedFlash(false), 2500);
+    },
+  });
+
+  // DPA right of access + portability: hand the user their own data as JSON
+  // through the native share sheet (save to Files, mail to themselves, etc.).
+  const exportData = useMutation({
+    mutationFn: () => customerApi.exportAccount(),
+    onSuccess: async (res) => {
+      const bundle = res.data?.data ?? res.data;
+      await Share.share({ title: 'My Swift data', message: JSON.stringify(bundle, null, 2) });
+    },
+    onError: () => toast.error('Couldn’t prepare your data. Try again.'),
+  });
+
+  // DPA right to erasure. Server crypto-shreds documents, revokes every session
+  // and de-identifies the account; we then drop the local session.
+  const deleteAccount = useMutation({
+    mutationFn: () => customerApi.deleteAccount(),
+    onSuccess: () => {
+      setConfirmDelete(false);
+      toast.success('Your account has been deleted.');
+      logout();
+    },
+    onError: (e: any) => {
+      setConfirmDelete(false);
+      toast.error(e?.response?.data?.error?.message ?? 'Couldn’t delete the account. Try again.');
     },
   });
 
@@ -125,8 +154,41 @@ export function PersonalDataScreen() {
             onPress={() => save.mutate()}
             style={{ marginTop: space.xl }}
           />
+
+          {/* DPA-2023 rights: access/portability + erasure (D9-05). */}
+          <View style={{ marginTop: space['3xl'] }}>
+            <T variant="label" weight="semibold" tone="muted" style={{ marginBottom: space.sm }}>
+              Privacy & data
+            </T>
+            <SettingsRow
+              icon="download"
+              label={exportData.isPending ? 'Preparing your data…' : 'Download my data'}
+              onPress={() => !exportData.isPending && exportData.mutate()}
+            />
+            <SettingsRow icon="trash-2" label="Delete my account" tone="error" onPress={() => setConfirmDelete(true)} />
+          </View>
         </ScrollView>
       </KeyboardAvoidingView>
+
+      <PopupCard visible={confirmDelete} onClose={() => setConfirmDelete(false)}>
+        <IconChip icon="alert-triangle" size={56} tone="error" />
+        <T variant="heading" center style={{ marginTop: space.md }}>
+          Delete your account?
+        </T>
+        <T variant="label" tone="muted" center style={{ marginTop: space.sm }}>
+          This erases your profile, saved addresses and verification documents for good — it can’t be undone. Past orders
+          are kept in de-identified form only where the law requires it.
+        </T>
+        <View style={{ alignSelf: 'stretch', gap: space.md, marginTop: space.xl }}>
+          <PillButton
+            label="Delete my account"
+            variant="primary"
+            loading={deleteAccount.isPending}
+            onPress={() => deleteAccount.mutate()}
+          />
+          <PillButton label="Keep my account" variant="soft" onPress={() => setConfirmDelete(false)} />
+        </View>
+      </PopupCard>
     </Screen>
   );
 }
