@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
 import rateLimit from '@fastify/rate-limit';
+import { rateLimitKey } from '../utils/rate-limit-key';
 import { prismaPlugin } from '../plugins/prisma';
 import { redisPlugin } from '../plugins/redis';
 import { authPlugin } from '../plugins/auth';
@@ -23,7 +24,7 @@ beforeAll(async () => {
 
   app = Fastify({ logger: false });
   registerErrorHandler(app);
-  await app.register(rateLimit, { max: 200, timeWindow: '1 minute' });
+  await app.register(rateLimit, { keyGenerator: rateLimitKey, max: 200, timeWindow: '1 minute' });
   await app.register(prismaPlugin);
   await app.register(redisPlugin);
   await app.register(authPlugin);

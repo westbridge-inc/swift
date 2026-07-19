@@ -4,6 +4,7 @@ import helmet from '@fastify/helmet';
 import rateLimit from '@fastify/rate-limit';
 import Redis from 'ioredis';
 import multipart from '@fastify/multipart';
+import { rateLimitKey } from './utils/rate-limit-key';
 import { authRoutes } from './modules/auth/auth.routes';
 import { customerRoutes } from './modules/user/customer.routes';
 import { vendorRoutes } from './modules/vendor/vendor.routes';
@@ -124,11 +125,12 @@ async function buildApp() {
         })
       : undefined;
   await app.register(rateLimit, {
-    // Global per-IP ceiling. Tunable via RATE_LIMIT_MAX so a load test or a
-    // busy launch can raise it without a code change (per-route limits on
-    // auth/OTP stay tight regardless). Keys off request.ip (resolved via
-    // trustProxy above) — never the raw, client-spoofable X-Forwarded-For.
+    // Global ceiling. Tunable via RATE_LIMIT_MAX so a load test or a busy launch
+    // can raise it without a code change (per-route limits on auth/OTP stay tight
+    // regardless). Authenticated callers are bucketed per session token, anonymous
+    // ones per resolved IP (never the spoofable X-Forwarded-For) — see D1-01.
     ...(rateLimitRedis ? { redis: rateLimitRedis, nameSpace: 'swift-rl:' } : {}),
+    keyGenerator: rateLimitKey,
     max: parseInt(process.env['RATE_LIMIT_MAX'] || '200', 10),
     timeWindow: '1 minute',
   });

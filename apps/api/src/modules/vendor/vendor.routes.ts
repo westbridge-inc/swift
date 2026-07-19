@@ -1692,8 +1692,8 @@ export async function vendorRoutes(app: FastifyInstance) {
   /** POST /items/:id/image — upload behind the StorageProvider interface */
   app.post<{ Params: IdParam }>('/items/:id/image', auth, async (request) => {
     const { vendorId } = await requireVendor(app, request, 'MANAGER');
-    const existing = await app.prisma.item.findUnique({ where: { id: request.params.id } });
-    if (!existing || existing.vendorId !== vendorId) throw new NotFoundError('Item', request.params.id);
+    const existing = await app.prisma.item.findFirst({ where: { id: request.params.id, vendorId } });
+    if (!existing) throw new NotFoundError('Item', request.params.id);
 
     const file = await request.file();
     if (!file) throw new AppError(400, 'NO_FILE', 'Attach an image file');
@@ -1725,8 +1725,8 @@ export async function vendorRoutes(app: FastifyInstance) {
   /** PUT /items/:id — Update an item */
   app.put<{ Params: IdParam }>('/items/:id', auth, async (request) => {
     const { vendorId } = await requireVendor(app, request, 'MANAGER');
-    const existing = await app.prisma.item.findUnique({ where: { id: request.params.id } });
-    if (!existing || existing.vendorId !== vendorId) throw new NotFoundError('Item', request.params.id);
+    const existing = await app.prisma.item.findFirst({ where: { id: request.params.id, vendorId } });
+    if (!existing) throw new NotFoundError('Item', request.params.id);
 
     const body = updateItemSchema.parse(request.body);
 
@@ -1775,8 +1775,8 @@ export async function vendorRoutes(app: FastifyInstance) {
   /** DELETE /items/:id — Delete an item and its option groups/options */
   app.delete<{ Params: IdParam }>('/items/:id', auth, async (request) => {
     const { vendorId } = await requireVendor(app, request, 'MANAGER');
-    const existing = await app.prisma.item.findUnique({ where: { id: request.params.id } });
-    if (!existing || existing.vendorId !== vendorId) throw new NotFoundError('Item', request.params.id);
+    const existing = await app.prisma.item.findFirst({ where: { id: request.params.id, vendorId } });
+    if (!existing) throw new NotFoundError('Item', request.params.id);
 
     await app.prisma.option.deleteMany({ where: { optionGroup: { itemId: request.params.id } } });
     await app.prisma.optionGroup.deleteMany({ where: { itemId: request.params.id } });
@@ -1788,8 +1788,8 @@ export async function vendorRoutes(app: FastifyInstance) {
   /** PUT /items/:id/availability — Quick toggle availability */
   app.put<{ Params: IdParam }>('/items/:id/availability', auth, async (request) => {
     const { vendorId } = await resolveVendor(app, request.user.userId, selectedVendorId(request));
-    const existing = await app.prisma.item.findUnique({ where: { id: request.params.id } });
-    if (!existing || existing.vendorId !== vendorId) throw new NotFoundError('Item', request.params.id);
+    const existing = await app.prisma.item.findFirst({ where: { id: request.params.id, vendorId } });
+    if (!existing) throw new NotFoundError('Item', request.params.id);
 
     const body = itemAvailabilitySchema.parse(request.body ?? {});
     const newAvailability = body.isAvailable !== undefined ? body.isAvailable : !existing.isAvailable;
@@ -1810,8 +1810,8 @@ export async function vendorRoutes(app: FastifyInstance) {
   /** POST /items/:itemId/option-groups — Add an option group to an item */
   app.post<{ Params: ItemIdParam }>('/items/:itemId/option-groups', auth, async (request) => {
     const { vendorId } = await requireVendor(app, request, 'MANAGER');
-    const item = await app.prisma.item.findUnique({ where: { id: request.params.itemId } });
-    if (!item || item.vendorId !== vendorId) throw new NotFoundError('Item', request.params.itemId);
+    const item = await app.prisma.item.findFirst({ where: { id: request.params.itemId, vendorId } });
+    if (!item) throw new NotFoundError('Item', request.params.itemId);
 
     const body = addOptionGroupSchema.parse(request.body);
 
