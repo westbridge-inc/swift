@@ -1071,12 +1071,17 @@ export async function vendorRoutes(app: FastifyInstance) {
       throw new AppError(400, 'NOT_MMG', 'Only MMG orders are confirmed here — cash is handled at handover.');
     }
     if (order.paymentStatus === 'CAPTURED') {
-      return { success: true, data: order }; // double-tap safe
+      return { success: true, data: order }; // double-tap safe (fast path)
     }
-    const updated = await app.prisma.order.update({
-      where: { id: order.id },
+    // Compare-and-set the capture so two concurrent confirm taps by store staff
+    // don't both send the customer a "Payment received" push. Record-only (no
+    // money moves), so a lost race is a benign idempotent success.
+    const claimed = await app.prisma.order.updateMany({
+      where: { id: order.id, paymentStatus: { not: 'CAPTURED' } },
       data: { paymentStatus: 'CAPTURED' },
     });
+    if (claimed.count === 0) return { success: true, data: order };
+    const updated = await app.prisma.order.findUniqueOrThrow({ where: { id: order.id } });
     await app.prisma.orderStatusLog.create({
       data: { orderId: order.id, status: order.status, changedBy: request.user.userId, note: 'MMG payment confirmed received by vendor' },
     });
