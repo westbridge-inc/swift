@@ -1230,6 +1230,11 @@ model OrderStatusLog {
   changedBy String?
   createdAt DateTime    @default(now())
 
+  // Read on every order-detail / timeline open via the statusHistory relation.
+  // This append-only dispute log becomes the largest table in the DB, so the FK
+  // must be indexed (Prisma doesn't auto-index FKs); createdAt serves the
+  // ORDER BY the timeline includes use. (SWIFT-AUD-D6-03: was a full seq-scan.)
+  @@index([orderId, createdAt])
   @@map("order_status_logs")
 }
 
