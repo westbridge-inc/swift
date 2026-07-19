@@ -47,13 +47,27 @@ export const socketPlugin = fp(async (app: FastifyInstance) => {
   }
 
   // Require valid JWT on every connection — no unauthenticated sockets
-  io.use((socket, next) => {
+  io.use(async (socket, next) => {
     const token = (socket.handshake.auth as Record<string, unknown>)?.['token'] as string | undefined;
     if (!token) {
       return next(new Error('Authentication required'));
     }
     try {
       const payload = app.jwt.verify<{ userId: string; role: string }>(token);
+      // SWIFT-AUD-D3-03: a valid JWT is not enough — mirror the REST authenticate
+      // gate. The session must still exist (logout/reset deletes it) and the
+      // account must be live, or a logged-out / suspended user keeps a realtime
+      // socket alive until the 15-minute token expiry.
+      const session = await app.prisma.session.findUnique({
+        where: { token },
+        select: { expiresAt: true, user: { select: { status: true } } },
+      });
+      if (!session || session.expiresAt < new Date()) {
+        return next(new Error('Session revoked or expired'));
+      }
+      if (['SUSPENDED', 'BANNED', 'DEACTIVATED'].includes(session.user.status)) {
+        return next(new Error('Account not active'));
+      }
       socket.data.userId = payload.userId;
       socket.data.role = payload.role;
       next();
