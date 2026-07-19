@@ -28,10 +28,11 @@ export const NEUTRAL_IMAGES = [
   'https://images.unsplash.com/photo-1521791136064-7986c2920216?w=600&q=80',
 ];
 
-// Category-tile imagery (Home "what do you need?" grid). Photo-led, one per
-// vertical. A dark placeholder blurhash means a slow/failed load still reads as
-// an intentional dark tile under the scrim + label, never a broken-image icon.
-export const DARK_BLURHASH = 'L13[?ZWB00of%MfQ_3of00fQ~qof';
+// Neutral dark-charcoal placeholder blurhash (avg sRGB ~#1d1d1f) so a slow or
+// failed image load reads as an intentional dark tile under the scrim + label,
+// never a broken-image icon. NB: the previous value decoded to vivid BLUE
+// (sRGB 34,38,178) — every un-loaded product/vendor card showed a blue block.
+export const DARK_BLURHASH = 'L03R{_fQfQfQfQfQfQfQfQfQfQfQ';
 
 export const CATEGORY_IMAGES: Record<string, string> = {
   food: 'https://images.unsplash.com/photo-1504674900247-0877df9cc836?w=400&q=80',
