@@ -176,38 +176,40 @@ export function createWorkers(ctx: JobContext) {
 
       const vendors = await ctx.prisma.vendor.findMany({
         where: { status: 'ACTIVE' },
-        select: { id: true, ownerId: true },
+        select: { id: true },
+      });
+      const activeIds = vendors.map((v) => v.id);
+      if (activeIds.length === 0) return;
+
+      // SWIFT-AUD-D6-05: one grouped aggregate instead of a per-vendor
+      // findMany+create loop (N+1 that grew linearly with the vendor count).
+      const groups = await ctx.prisma.order.groupBy({
+        by: ['vendorId'],
+        where: {
+          vendorId: { in: activeIds },
+          status: { in: ['DELIVERED', 'COMPLETED'] },
+          deliveredAt: { gte: weekAgo, lte: now },
+        },
+        _sum: { subtotalBase: true, subtotalMarkup: true },
+        _count: { _all: true },
       });
 
-      for (const vendor of vendors) {
-        const orders = await ctx.prisma.order.findMany({
-          where: {
-            vendorId: vendor.id,
-            status: { in: ['DELIVERED', 'COMPLETED'] },
-            deliveredAt: { gte: weekAgo, lte: now },
-          },
-          select: { subtotalBase: true, subtotalMarkup: true },
-        });
+      const settlements = groups
+        .filter((g) => g.vendorId && g._count._all > 0)
+        .map((g) => ({
+          vendorId: g.vendorId!,
+          periodStart: weekAgo,
+          periodEnd: now,
+          totalOrders: g._count._all,
+          totalBase: Number(g._sum.subtotalBase ?? 0),
+          totalMarkup: Number(g._sum.subtotalMarkup ?? 0),
+          status: 'PENDING' as const,
+        }));
 
-        if (orders.length === 0) continue;
-
-        const totalBase = orders.reduce((s, o) => s + Number(o.subtotalBase), 0);
-        const totalMarkup = orders.reduce((s, o) => s + Number(o.subtotalMarkup), 0);
-
-        await ctx.prisma.settlement.create({
-          data: {
-            vendorId: vendor.id,
-            periodStart: weekAgo,
-            periodEnd: now,
-            totalOrders: orders.length,
-            totalBase,
-            totalMarkup,
-            status: 'PENDING',
-          },
-        });
-
-        ctx.log.info({ vendorId: vendor.id, totalBase, orders: orders.length }, 'Settlement created');
+      if (settlements.length > 0) {
+        await ctx.prisma.settlement.createMany({ data: settlements });
       }
+      ctx.log.info({ settlements: settlements.length }, 'Settlements created');
     },
     { connection, concurrency: 1 },
   );
