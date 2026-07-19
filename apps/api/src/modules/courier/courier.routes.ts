@@ -209,15 +209,16 @@ export default async function courierRoutes(app: FastifyInstance) {
     if (['DELIVERED', 'COMPLETED', 'CANCELLED'].includes(order.status)) {
       throw new AppError(400, 'NOT_CANCELLABLE', `A ${order.status.toLowerCase()} courier job cannot be cancelled`);
     }
-    const updated = await app.prisma.order.update({
-      where: { id },
-      data: {
-        status: 'CANCELLED',
-        cancelledAt: new Date(),
-        cancellationReason: body.reason ?? 'Cancelled by sender',
-        statusHistory: { create: { status: 'CANCELLED', changedBy: request.user.userId, note: body.reason ?? 'Cancelled by sender' } },
-      },
+    // Compare-and-set: the sender-cancel races the rider's proof-of-delivery.
+    // Only one terminal transition wins; the loser gets 409 rather than both
+    // stamping (an order ending CANCELLED after the rider was already paid).
+    const claimed = await app.prisma.order.updateMany({
+      where: { id, status: { notIn: ['DELIVERED', 'COMPLETED', 'CANCELLED'] } },
+      data: { status: 'CANCELLED', cancelledAt: new Date(), cancellationReason: body.reason ?? 'Cancelled by sender' },
     });
+    if (claimed.count === 0) throw new AppError(409, 'NOT_CANCELLABLE', 'This courier job can no longer be cancelled');
+    await app.prisma.orderStatusLog.create({ data: { orderId: id, status: 'CANCELLED', changedBy: request.user.userId, note: body.reason ?? 'Cancelled by sender' } });
+    const updated = await app.prisma.order.findUniqueOrThrow({ where: { id } });
 
     // Terminal effects (found live: cancelling an assigned courier left the
     // rider stuck on the dead job, invisible to dispatch).
@@ -250,18 +251,20 @@ export default async function courierRoutes(app: FastifyInstance) {
     if (['DELIVERED', 'COMPLETED', 'CANCELLED'].includes(order.status)) {
       throw new AppError(400, 'NOT_IN_TRANSIT', 'This courier job is already closed');
     }
-    const updated = await app.prisma.order.update({
-      where: { id },
-      data: {
-        status: 'DELIVERED',
-        deliveredAt: new Date(),
-        courierProofPhotoUrl: body.proofPhotoUrl,
-        statusHistory: { create: { status: 'DELIVERED', changedBy: request.user.userId, note: 'Proof of delivery captured' } },
-      },
+    // Compare-and-set: the rider's proof races the sender's cancel. Only one
+    // terminal transition wins; the loser 409s rather than paying the rider on a
+    // job that was simultaneously cancelled.
+    const claimed = await app.prisma.order.updateMany({
+      where: { id, status: { notIn: ['DELIVERED', 'COMPLETED', 'CANCELLED'] } },
+      data: { status: 'DELIVERED', deliveredAt: new Date(), courierProofPhotoUrl: body.proofPhotoUrl },
     });
+    if (claimed.count === 0) throw new AppError(409, 'NOT_IN_TRANSIT', 'This courier job is already closed');
+    await app.prisma.orderStatusLog.create({ data: { orderId: id, status: 'DELIVERED', changedBy: request.user.userId, note: 'Proof of delivery captured' } });
+    const updated = await app.prisma.order.findUniqueOrThrow({ where: { id } });
 
-    // Terminal effects (found live: the proof path paid the rider NOTHING,
-    // left them stuck on the finished job, and told nobody).
+    // Terminal effects — only the CAS winner reaches here (found live: the proof
+    // path paid the rider NOTHING, left them stuck on the finished job, told
+    // nobody). createEarnings is idempotent; totalDeliveries counts once.
     await orderService.createEarnings(id);
     await freeCourierRider(id, order.riderId);
     const totalDeliveries = await app.prisma.rider.update({

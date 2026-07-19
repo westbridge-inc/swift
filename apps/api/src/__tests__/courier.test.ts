@@ -184,4 +184,30 @@ describe('Courier — create, track, deliver', () => {
     expect(res.statusCode).toBe(200);
     expect(res.json().data.status).toBe('CANCELLED');
   });
+
+  it('cancel vs proof race: exactly one wins, one terminal state [SWIFT-AUD-D2-03]', async () => {
+    const sender = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
+    const created = (await inject('POST', '/api/v1/courier/order', ORDER_BODY, sender.token)).json().data;
+    const moverUser = await makeUserWithSession(['MOVER', 'CUSTOMER'], 'MOVER');
+    const rider = await app.prisma.rider.create({ data: { userId: moverUser.userId, riderType: 'DELIVERY', vehicleType: 'MOTORCYCLE', documentsVerified: true } });
+    await app.prisma.order.update({ where: { id: created.orderId }, data: { riderId: rider.id, status: 'PICKED_UP' } });
+
+    // Sender cancels while the rider submits proof — same instant.
+    const [a, b] = await Promise.allSettled([
+      inject('POST', `/api/v1/courier/order/${created.orderId}/cancel`, { reason: 'race' }, sender.token),
+      inject('POST', `/api/v1/courier/order/${created.orderId}/proof`, { proofPhotoUrl: 'storage://t/p.jpg' }, moverUser.token),
+    ]);
+    const codes = [a, b].map((r) => (r.status === 'fulfilled' ? r.value.statusCode : 0));
+    expect(codes.filter((c) => c === 200)).toHaveLength(1); // exactly one terminal transition wins
+    expect(codes.filter((c) => c >= 400)).toHaveLength(1);
+
+    // The order lands in ONE clean terminal state — never delivered-and-paid
+    // while also cancelled.
+    const final = await app.prisma.order.findUniqueOrThrow({ where: { id: created.orderId } });
+    expect(['DELIVERED', 'CANCELLED']).toContain(final.status);
+    // The invariant that matters: a job that ended CANCELLED never paid the rider.
+    if (final.status === 'CANCELLED') {
+      expect(await app.prisma.earning.count({ where: { orderId: created.orderId } })).toBe(0);
+    }
+  });
 });
