@@ -9,6 +9,8 @@ import { useProfile } from '../../../hooks/customer';
 import { useAuthStore } from '../../../stores/authStore';
 import { EmptyState, IconChip, PillButton, PopupCard, Screen, SettingsRow, T } from '../../../kit';
 import { RoleSwitcherSheet } from '../../../components/RoleSwitcherSheet';
+import { API_URL } from '../../../services/api';
+import { openPayLink } from '../../../lib/payLink';
 
 const GUTTER = space['2xl'];
 
@@ -129,6 +131,8 @@ export function ProfileScreen() {
           <SettingsRow icon="user-plus" label="Invite Friends" onPress={() => navigation.navigate('InviteFriends')} />
           <SettingsRow icon="help-circle" label="FAQ" onPress={() => navigation.navigate('Faq')} />
           <SettingsRow icon="phone" label="Contact Us" onPress={() => navigation.navigate('ContactUs')} />
+          <SettingsRow icon="file-text" label="Terms of Service" onPress={() => openPayLink(`${API_URL}/legal/terms`)} />
+          <SettingsRow icon="shield" label="Privacy Policy" onPress={() => openPayLink(`${API_URL}/legal/privacy`)} />
           <SettingsRow
             icon="refresh-ccw"
             label="Switch app"

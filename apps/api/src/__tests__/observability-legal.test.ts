@@ -60,5 +60,10 @@ describe('legal pages', () => {
     expect(res.statusCode).toBe(200);
     expect(res.body).toContain('Privacy Policy');
     expect(res.body).toContain('never sell your data');
+    // D9-04: a lawful privacy notice names the controller, cites the governing
+    // law, and gives an off-app contact that a locked-out user can still reach.
+    expect(res.body).toContain('data controller');
+    expect(res.body).toContain('Data Protection Act 2023');
+    expect(res.body).toContain('privacy@swift.gy');
   });
 });
