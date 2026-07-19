@@ -128,14 +128,21 @@ const createPromoSchema = z.object({
   code: z.string().trim().min(2).max(40),
   description: z.string().max(500),
   discountType: z.nativeEnum(DiscountType),
-  discountValue: z.number().min(0),
-  minOrderAmount: z.number().min(0).optional(),
-  maxDiscount: z.number().min(0).optional(),
+  // SWIFT-AUD-D3-04: bound the discount + cap a PERCENTAGE at 100 (mirrors the
+  // vendor promo schema). discountValue feeds order totals, so an unbounded /
+  // >100% value is a fat-finger money-wrong risk even from a trusted admin.
+  // min(0) not positive(): FREE_DELIVERY promos legitimately carry value 0.
+  discountValue: z.number().min(0).max(10_000_000),
+  minOrderAmount: z.number().min(0).max(10_000_000).optional(),
+  maxDiscount: z.number().min(0).max(10_000_000).optional(),
   applicableTo: z.array(z.string().max(50)).max(20).optional(),
   validFrom: z.coerce.date(),
   validUntil: z.coerce.date(),
-  maxUses: z.number().int().min(1).optional(),
-  maxUsesPerUser: z.number().int().min(1).optional(),
+  maxUses: z.number().int().min(1).max(1_000_000).optional(),
+  maxUsesPerUser: z.number().int().min(1).max(100).optional(),
+}).refine((d) => d.discountType !== 'PERCENTAGE' || d.discountValue <= 100, {
+  message: 'A percentage discount cannot exceed 100',
+  path: ['discountValue'],
 });
 
 const updatePromoSchema = z.object({
