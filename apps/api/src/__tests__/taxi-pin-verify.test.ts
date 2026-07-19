@@ -203,3 +203,29 @@ describe('Taxi PIN verification — PUT /driver/rides/:id/verify-pin', () => {
     expect(after.ridePinVerified).toBe(false);
   });
 });
+
+describe('Taxi ride completion — single-winner under concurrency [SWIFT-AUD-D2-01]', () => {
+  it('two concurrent completes: one wins, one 409, driver totalRides +1 exactly once', async () => {
+    const driver = await makeDriver();
+    const ride = await makeArrivedRide(driver.driverId, customer.userId, '654321');
+    await inject('PUT', `/api/v1/driver/rides/${ride.id}/verify-pin`, { pin: '654321' }, driver.token);
+    const started = await inject('PUT', `/api/v1/driver/rides/${ride.id}/start`, {}, driver.token);
+    expect(started.json().data.status).toBe('RIDE_IN_PROGRESS');
+    // In the real flow the driver is on this ride (set at claim); the guarded
+    // free + totalRides increment key off currentRideId.
+    await app.prisma.driver.update({ where: { id: driver.driverId }, data: { currentRideId: ride.id, totalRides: 0 } });
+
+    const results = await Promise.allSettled([
+      inject('PUT', `/api/v1/driver/rides/${ride.id}/complete`, {}, driver.token),
+      inject('PUT', `/api/v1/driver/rides/${ride.id}/complete`, {}, driver.token),
+    ]);
+    const codes = results.map((r) => (r.status === 'fulfilled' ? r.value.statusCode : 0));
+    // Exactly one winner; the loser is rejected (409 from the CAS, or 400 from
+    // the pre-check if it serialized) — never a second success.
+    expect(codes.filter((c) => c === 200)).toHaveLength(1);
+    expect(codes.filter((c) => c >= 400)).toHaveLength(1);
+
+    const d = await app.prisma.driver.findUniqueOrThrow({ where: { id: driver.driverId } });
+    expect(d.totalRides).toBe(1); // incremented once, not twice
+  });
+});
