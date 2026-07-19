@@ -1,50 +1,19 @@
-import { zustandStorage } from './storage';
-import { useAuthStore } from '../stores/authStore';
-
 // ---------------------------------------------------------------------------
-// Product analytics (build kit: PostHog). Owned, dependency-light client over
-// PostHog's capture API — config-gated and PRIVACY-SAFE by construction:
-//   · disabled entirely unless EXPO_PUBLIC_POSTHOG_KEY is set
-//   · distinct id = the opaque user id (or a random anonymous id) — never
-//     phone numbers, names, or any document data
-//   · fire-and-forget with a swallow-all catch: analytics can never break,
-//     slow, or block a user flow
+// Product analytics — DISABLED (SWIFT-AUD-D9-01).
+//
+// The prior PostHog client POSTed product events to a US endpoint
+// (us.i.posthog.com) with distinct_id = the account id — a cross-border transfer
+// of personal data that the Privacy Policy never disclosed, i.e. a Guyana Data
+// Protection Act 2023 transparency + lawful-transfer gap. It also contradicted
+// the declared stack.
+//
+// `track()` is kept as a no-op so every call site is unaffected — no event ever
+// leaves the device. Re-enable analytics only once it is (a) disclosed in the
+// Privacy Policy (processor, location, purpose), (b) consent-gated, and (c)
+// configured with IP capture disabled.
 // ---------------------------------------------------------------------------
 
-const KEY = process.env['EXPO_PUBLIC_POSTHOG_KEY'];
-const HOST = (process.env['EXPO_PUBLIC_POSTHOG_HOST'] ?? 'https://us.i.posthog.com').replace(/\/$/, '');
-const ANON_ID_KEY = 'analytics-anon-id';
-
-function anonId(): string {
-  try {
-    const existing = zustandStorage.getItem(ANON_ID_KEY);
-    if (typeof existing === 'string' && existing) return existing;
-    // Non-crypto randomness is fine for an anonymous analytics id.
-    const fresh = `anon_${Math.random().toString(36).slice(2, 10)}${Date.now().toString(36)}`;
-    zustandStorage.setItem(ANON_ID_KEY, fresh);
-    return fresh;
-  } catch {
-    return 'anon_unknown'; // storage not ready yet — still never throw
-  }
-}
-
-/** Track a product event. No-op without a key; never throws; never blocks. */
-export function track(event: string, properties: Record<string, string | number | boolean> = {}): void {
-  if (!KEY) return;
-  try {
-    const userId = useAuthStore.getState().user?.id;
-    void fetch(`${HOST}/capture/`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({
-        api_key: KEY,
-        event,
-        distinct_id: userId ?? anonId(),
-        properties: { ...properties, platform: 'mobile' },
-        timestamp: new Date().toISOString(),
-      }),
-    }).catch(() => undefined);
-  } catch {
-    // storage/store not ready — drop the event, never the flow
-  }
+/** No-op. Analytics is disabled pending DPA-compliant disclosure + consent. */
+export function track(_event: string, _properties: Record<string, string | number | boolean> = {}): void {
+  // intentionally does nothing — no data is collected or transmitted
 }
