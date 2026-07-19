@@ -73,6 +73,9 @@ const PRIVACY = page(
   `
 <p>This policy explains what Swift collects, why, and what control you have. We collect the minimum needed to run a delivery, ride and marketplace platform — and we never sell your data.</p>
 
+<h2>Who is responsible (data controller)</h2>
+<p>Swift is the data controller for the personal data described here, operated in and from Guyana. Our full registered business name and postal address are available on request from the contact below. For anything about your privacy — access, correction, deletion or a complaint — email <b><a href="mailto:privacy@swift.gy">privacy@swift.gy</a></b>. This inbox reaches us even if you can no longer sign in to the app, so you are never locked out of your rights.</p>
+
 <h2>1. What we collect</h2>
 <ul>
 <li><b>Account:</b> your phone number (verified by SMS code), name, and optional email.</li>
@@ -97,8 +100,8 @@ const PRIVACY = page(
 <h2>6. Security</h2>
 <p>Data in transit is encrypted (the app pins Swift's certificates), access to production data is restricted and audit-logged, and administrative actions on your account leave a permanent trail.</p>
 
-<h2>7. Your rights</h2>
-<p>You can access the personal data we hold about you, correct it, or request deletion, subject to legal retention duties. Contact us through Help &amp; Support in the app.</p>
+<h2>7. Your rights under the Data Protection Act 2023</h2>
+<p>Guyana's Data Protection Act 2023 gives you the right to access the personal data we hold about you, to have it corrected, to request its deletion or a restriction on how we process it, to object to processing, and to receive a copy of your data in a portable form — each subject to the legal retention duties described above. To exercise any of these, email <b><a href="mailto:privacy@swift.gy">privacy@swift.gy</a></b> or use Help &amp; Support in the app. If you believe we have mishandled your data, you also have the right to complain to Guyana's data-protection supervisory authority.</p>
 
 <h2>8. Changes</h2>
 <p>Material changes to this policy are announced in the app before they take effect.</p>
