@@ -19,12 +19,32 @@ const { height: SCREEN_H } = Dimensions.get('window');
 const GUTTER = space['2xl'];
 
 // Order status → kit stage index (35–38): placed · preparing · oncoming · done.
-const STAGES = [
-  { icon: 'clipboard' as const, label: 'Placed' },
-  { icon: 'coffee' as const, label: 'Preparing' },
-  { icon: 'navigation' as const, label: 'On the way' },
-  { icon: 'check' as const, label: 'Delivered' },
-];
+// The four words are fulfillment-specific — a booked haircut is not "On the
+// way / Delivered" (D8-07). Same stage indices, right vocabulary per journey.
+const STAGES_BY_FULFILLMENT = {
+  DELIVERY: [
+    { icon: 'clipboard' as const, label: 'Placed' },
+    { icon: 'coffee' as const, label: 'Preparing' },
+    { icon: 'navigation' as const, label: 'On the way' },
+    { icon: 'check' as const, label: 'Delivered' },
+  ],
+  PICKUP: [
+    { icon: 'clipboard' as const, label: 'Placed' },
+    { icon: 'coffee' as const, label: 'Preparing' },
+    { icon: 'shopping-bag' as const, label: 'Ready' },
+    { icon: 'check' as const, label: 'Picked up' },
+  ],
+  APPOINTMENT: [
+    { icon: 'clipboard' as const, label: 'Booked' },
+    { icon: 'check-circle' as const, label: 'Confirmed' },
+    { icon: 'clock' as const, label: 'In progress' },
+    { icon: 'check' as const, label: 'Completed' },
+  ],
+} as const;
+
+function stagesFor(fulfillment?: string) {
+  return STAGES_BY_FULFILLMENT[fulfillment as keyof typeof STAGES_BY_FULFILLMENT] ?? STAGES_BY_FULFILLMENT.DELIVERY;
+}
 
 function stageFor(status?: string): number {
   switch (status) {
@@ -45,10 +65,10 @@ function stageFor(status?: string): number {
   }
 }
 
-function StageBar({ stage }: { stage: number }) {
+function StageBar({ stage, fulfillment }: { stage: number; fulfillment?: string }) {
   return (
     <View style={{ flexDirection: 'row', alignItems: 'center' }}>
-      {STAGES.map((s, i) => {
+      {stagesFor(fulfillment).map((s, i) => {
         const done = i < stage;
         const current = i === stage;
         const tint = done || current ? color.brand[500] : color.text.muted;
@@ -493,7 +513,7 @@ export function DeliveryScreen() {
               ) : null}
 
               <View style={{ marginTop: space.xl }}>
-                <StageBar stage={stage} />
+                <StageBar stage={stage} fulfillment={o.fulfillment} />
               </View>
             </>
           )}
