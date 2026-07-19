@@ -5,7 +5,7 @@ import type Redis from 'ioredis';
 import type { FastifyInstance } from 'fastify';
 import type { Queue } from 'bullmq';
 import { AppError, NotFoundError } from '../../utils/errors';
-import { NotificationService } from '../notification/notification.service';
+import { NotificationService, notifyAdmins } from '../notification/notification.service';
 import { getMapsProvider, type MapsProvider } from '../../providers/maps/maps-provider';
 import { classesAtOrAbove } from '../rides/fare.service';
 import { rankCandidates, type DispatchCandidate } from './scoring';
@@ -594,6 +594,17 @@ export class DispatchService {
         data: { kind: 'dispatch_exhausted', orderId: order.id },
       });
     }
+
+    // Ops visibility (SWIFT-AUD-D7-02): a fully-exhausted dispatch = a customer's
+    // order stranded with no mover, one of the fatal five. Customer + vendor are
+    // told; admins must be too, so a dead/absent mover pool at launch is caught
+    // before it becomes a wave of stranded orders. Fire-and-caught — never let an
+    // alert failure change the dispatch outcome.
+    await notifyAdmins(this.prisma, this.notifications, {
+      title: 'Dispatch exhausted — no mover found',
+      body: `Order ${order.orderNumber} found no mover after all retries. Check mover supply and dispatch health.`,
+      data: { kind: 'ops_dispatch_exhausted', orderId: order.id },
+    }).catch(() => {});
   }
 
   // -------------------------------------------------------------------------
