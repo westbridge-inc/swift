@@ -641,6 +641,23 @@ export async function riderRoutes(app: FastifyInstance) {
     const marketFee = Number(order.deliveryFee);
     const chosenFee = fare != null ? clampDriverFare(fare, marketFee) : marketFee;
 
+    // D.3 cash-exposure parity with dispatch.claimOrder [debug-ledger P2]: a
+    // board-grab accept must respect the same float gate the offer cascade
+    // enforces — the rider fronts the vendor the CASH subtotal at pickup — and
+    // commit the float it consumes, or the cap is bypassable through this
+    // entrance and a later release decrements float never committed.
+    const floatAmt = order.paymentMethod === 'CASH' ? Number(order.subtotalBase) : 0;
+    if (floatAmt > 0) {
+      const headroom = Number(rider.floatLimit) - Number(rider.committedFloat);
+      if (headroom < floatAmt) {
+        throw new AppError(
+          400,
+          'FLOAT_EXCEEDED',
+          `This cash order needs $${floatAmt.toLocaleString()} float headroom (you front the vendor at pickup); you have $${Math.max(0, headroom).toLocaleString()} available`,
+        );
+      }
+    }
+
     // Single-winner claim: an ATOMIC compare-and-set is the real lock. A plain
     // update-by-id let two riders who both passed the JS null-check above assign
     // the same order (and both mark themselves busy). Only one caller can flip
@@ -658,12 +675,17 @@ export async function riderRoutes(app: FastifyInstance) {
       throw new ConflictError('This order was just claimed by another rider, or is no longer available');
     }
 
-    // Only the winner reaches here — safe to advance status + mark the rider busy.
+    // Only the winner reaches here — safe to advance status, mark the rider
+    // busy, and commit the CASH float (mirrors dispatch.claimOrder exactly).
     await Promise.all([
       orderService.updateStatus(id, 'RIDER_ASSIGNED', request.user.userId, 'Rider accepted the order'),
       app.prisma.rider.update({
         where: { id: rider.id },
-        data: { isAvailable: false, currentOrderId: id },
+        data: {
+          isAvailable: false,
+          currentOrderId: id,
+          ...(floatAmt > 0 ? { committedFloat: { increment: floatAmt } } : {}),
+        },
       }),
     ]);
 

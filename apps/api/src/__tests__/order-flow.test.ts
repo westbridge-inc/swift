@@ -169,6 +169,10 @@ beforeAll(async () => {
       documentsVerified: true,
       currentLat: 6.8013,
       currentLng: -58.1551,
+      // The direct accept now enforces the same CASH float gate as dispatch
+      // (schema default is 0, which correctly refuses cash orders) — this
+      // rider fronts the flow's cash order, so give it real headroom.
+      floatLimit: 1_000_000,
     },
   });
 });
