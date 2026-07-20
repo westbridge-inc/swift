@@ -24,7 +24,7 @@
     "@swift/types": "workspace:*",
     "@swift/ui": "workspace:^",
     "@tanstack/react-query": "^5.66.0",
-    "axios": "^1.17.0",
+    "axios": "^1.18.0",
     "expo": "^56.0.12",
     "expo-application": "~56.0.3",
     "expo-camera": "~56.0.8",
