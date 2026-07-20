@@ -180,14 +180,44 @@ export function getPushProvider(): PushProvider {
   }
 }
 
+/** Bounded in-process retry for push delivery [SWIFT-UG-NOTIF-01]. Push is
+ *  ephemeral (seconds-relevant), so a restart-surviving retry queue would be
+ *  over-engineering — but one transient FCM/Expo blip silently eating a
+ *  notification is not acceptable either. Two backed-off retries, then the
+ *  caller's fire-and-caught owns the final failure. CRITICAL alerts have
+ *  their own guarantee regardless: the vendor-alert escalation ladder
+ *  re-alerts and falls back to SMS. Delays are injectable for tests. */
+export const PUSH_RETRY_DELAYS_MS = [2_000, 8_000];
+export function withPushRetry(inner: PushProvider, delays: number[] = PUSH_RETRY_DELAYS_MS): PushProvider & { inner: PushProvider } {
+  return {
+    /** The wrapped provider — lets composition tests assert WHICH provider
+     *  config selected without unwrapping behavior. */
+    inner,
+    async sendPush(deviceTokens, title, body, data) {
+      let lastErr: unknown;
+      for (let attempt = 0; attempt <= delays.length; attempt += 1) {
+        try {
+          return await inner.sendPush(deviceTokens, title, body, data);
+        } catch (err) {
+          lastErr = err;
+          const delay = delays[attempt];
+          if (delay == null) break;
+          await new Promise((resolve) => setTimeout(resolve, delay));
+        }
+      }
+      throw lastErr;
+    },
+  };
+}
+
 /** Provider selection is config, not code. */
 export function getChannels(): NotificationChannels {
   const provider = process.env['NOTIFICATION_PROVIDER'] ?? 'dev';
   switch (provider) {
     case 'dev':
-      return { sms: devChannels.sms, push: getPushProvider(), email: devChannels.email };
+      return { sms: devChannels.sms, push: withPushRetry(getPushProvider()), email: devChannels.email };
     case 'twilio':
-      return { sms: new TwilioSmsProvider(), push: getPushProvider(), email: new DevEmail() };
+      return { sms: new TwilioSmsProvider(), push: withPushRetry(getPushProvider()), email: new DevEmail() };
     default:
       throw new Error(`Unknown NOTIFICATION_PROVIDER: ${provider}`);
   }

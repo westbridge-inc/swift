@@ -176,6 +176,26 @@ async function buildApp() {
       checks['redis'] = 'error';
     }
 
+    // SWIFT-AUD-D7-02: scheduler-stall paging. A stalled worker can't page
+    // about itself, so the check rides the load balancer's /health polls —
+    // the one thing still running when the job scheduler is dead. Dedup'd
+    // (30 min) and fire-and-caught: paging never slows a probe.
+    void (async () => {
+      const beat = await app.redis.get('scheduler:heartbeat');
+      if (!beat) return; // no worker has EVER run here (fresh boot / RUN_WORKERS=0 fleet mid-deploy)
+      const ageMs = Date.now() - Number(beat);
+      const stallMs = Number(process.env['SCHEDULER_STALL_ALERT_MINUTES'] ?? '5') * 60_000;
+      if (ageMs <= stallMs) return;
+      const claimed = await app.redis.set('ops_page:scheduler-stall', '1', 'EX', 1800, 'NX');
+      if (claimed !== 'OK') return;
+      const { notifyAdmins, NotificationService } = await import('./modules/notification/notification.service');
+      await notifyAdmins(app.prisma, new NotificationService(app.prisma, app.io), {
+        title: 'Job scheduler stalled',
+        body: `No scheduler heartbeat for ${Math.round(ageMs / 60_000)} min — holds, expiry sweeps, billing and settlements are NOT running. Restart the worker.`,
+        data: { kind: 'ops_scheduler_stall', ageMs },
+      });
+    })().catch(() => {});
+
     const allOk = Object.values(checks).every((v) => v === 'ok');
     const status = allOk ? 'healthy' : 'degraded';
 

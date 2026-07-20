@@ -67,6 +67,27 @@ export function registerErrorHandler(app: FastifyInstance) {
 
     // Unknown errors
     app.log.error({ err: error, url: request.url, method: request.method }, 'Unhandled error');
+    // SWIFT-AUD-D7-02: an error-rate SPIKE pages (dedup'd via the exact-count
+    // trigger + a redis NX guard). Per-minute window counter; fire-and-caught
+    // — accounting must never slow the error response, and minimal test
+    // harnesses without redis just skip it.
+    void (async () => {
+      const redis = (app as { redis?: { incr(k: string): Promise<number>; expire(k: string, s: number): Promise<unknown>; set(k: string, v: string, ...a: unknown[]): Promise<unknown> } }).redis;
+      if (!redis) return;
+      const windowKey = `err5xx:${Math.floor(Date.now() / 60_000)}`;
+      const count = await redis.incr(windowKey);
+      if (count === 1) await redis.expire(windowKey, 180);
+      const threshold = Number(process.env['ERROR_RATE_ALERT_PER_MIN'] ?? '30');
+      if (count !== threshold) return; // fire exactly once per window crossing
+      const claimed = await redis.set('ops_page:error-spike', '1', 'EX', 900, 'NX');
+      if (claimed !== 'OK') return;
+      const { notifyAdmins, NotificationService } = await import('../modules/notification/notification.service');
+      await notifyAdmins(app.prisma, new NotificationService(app.prisma, app.io), {
+        title: 'Server error spike',
+        body: `${threshold}+ unhandled 500s in the last minute. Check Sentry / the API logs now.`,
+        data: { kind: 'ops_error_spike', perMinute: threshold },
+      });
+    })().catch(() => {});
     return reply.status(500).send({
       success: false,
       error: {

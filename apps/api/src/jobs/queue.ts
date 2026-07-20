@@ -108,6 +108,25 @@ export async function runWeeklySettlement(ctx: JobContext) {
   ctx.log.info({ settlements: settlements.length }, 'Settlements created');
 }
 
+/** One ops page per condition per window [SWIFT-AUD-D7-02]: redis SET NX is
+ *  the dedup, so N instances or repeated scans can never spam the admins.
+ *  Fire-and-caught — paging must not fail the job that noticed the problem. */
+export async function opsPageOnce(
+  ctx: Pick<JobContext, 'redis'>,
+  key: string,
+  ttlSeconds: number,
+  page: () => Promise<unknown>,
+): Promise<boolean> {
+  try {
+    const claimed = await ctx.redis.set(`ops_page:${key}`, '1', 'EX', ttlSeconds, 'NX');
+    if (claimed !== 'OK') return false;
+    await page();
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export function createWorkers(ctx: JobContext) {
   const connection = { host: ctx.redis.options.host, port: ctx.redis.options.port };
 
@@ -202,6 +221,20 @@ export function createWorkers(ctx: JobContext) {
           const result = await billing.runBillingCycle();
           const reminders = await billing.sendUpcomingReminders();
           ctx.log.info({ ...result, reminders }, 'Billing cycle complete');
+          // SWIFT-AUD-D7-02: billing failures must PAGE, not just log — a
+          // broken rail silently suspends paying partners.
+          const troubled = result.failed + result.errors + result.suspended;
+          const threshold = Number(process.env['BILLING_FAILURE_ALERT_THRESHOLD'] ?? '3');
+          if (troubled >= threshold) {
+            const { notifyAdmins } = await import('../modules/notification/notification.service');
+            await opsPageOnce(ctx, 'billing-failures', 3600, () =>
+              notifyAdmins(ctx.prisma, new NotificationService(ctx.prisma, ctx.io), {
+                title: 'Billing failures spiking',
+                body: `${troubled} subscriptions failed, errored, or suspended this cycle (threshold ${threshold}). Check the billing dashboard before partners start calling.`,
+                data: { kind: 'ops_billing_failures', failed: result.failed, errors: result.errors, suspended: result.suspended },
+              }),
+            );
+          }
           break;
         }
         case 'tier-recalc': {
@@ -345,6 +378,25 @@ export function createWorkers(ctx: JobContext) {
         // settlements stop — silently. The heartbeat key's AGE (exposed as a
         // Prometheus gauge) makes that stall detectable and alertable.
         await ctx.redis.set('scheduler:heartbeat', String(Date.now()));
+        // SWIFT-AUD-D7-02: pool saturation pages (dedup'd). Queries queueing
+        // for a connection is the "API is about to brown-out" signal, and the
+        // 60s heartbeat is the natural in-process sampling point.
+        try {
+          const m = await ctx.prisma.$metrics.json();
+          const waiting = m.gauges.find((x: { key: string; value: number }) => x.key === 'prisma_client_queries_wait')?.value ?? 0;
+          if (waiting >= Number(process.env['POOL_WAIT_ALERT_THRESHOLD'] ?? '5')) {
+            const { notifyAdmins, NotificationService } = await import('../modules/notification/notification.service');
+            await opsPageOnce(ctx, 'db-pool-saturation', 1800, () =>
+              notifyAdmins(ctx.prisma, new NotificationService(ctx.prisma, ctx.io), {
+                title: 'Database pool saturated',
+                body: `${waiting} queries are waiting for a database connection. Find the slow query or raise connection_limit.`,
+                data: { kind: 'ops_pool_saturation', waiting },
+              }),
+            );
+          }
+        } catch {
+          // metrics preview unavailable — the Prometheus gauge shares this guard
+        }
         return;
       }
 
