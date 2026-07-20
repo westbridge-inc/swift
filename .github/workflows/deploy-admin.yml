@@ -9,6 +9,10 @@ concurrency:
   group: deploy-admin
   cancel-in-progress: false
 
+# Deploys need nothing from the repo-scoped GITHUB_TOKEN beyond checkout.
+permissions:
+  contents: read
+
 jobs:
   deploy:
     name: Deploy Admin to Vercel
@@ -26,11 +30,14 @@ jobs:
       - run: pnpm install --frozen-lockfile
 
       - name: Deploy to Vercel
+        # Token flows via env, not a CLI argument — argv is visible to every
+        # process on the runner; env vars are not.
         run: |
-          npx vercel --prod --token=${{ secrets.VERCEL_TOKEN }} \
+          npx vercel --prod --token="$VERCEL_TOKEN" \
             --scope=${{ vars.VERCEL_ORG_ID }} \
             --yes
         working-directory: apps/admin
         env:
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
           VERCEL_ORG_ID: ${{ vars.VERCEL_ORG_ID }}
           VERCEL_PROJECT_ID: ${{ vars.VERCEL_PROJECT_ID }}

@@ -9,6 +9,10 @@ concurrency:
   group: deploy-api
   cancel-in-progress: false
 
+# Deploys need nothing from the repo-scoped GITHUB_TOKEN beyond checkout.
+permissions:
+  contents: read
+
 jobs:
   deploy:
     name: Deploy API to Fly.io

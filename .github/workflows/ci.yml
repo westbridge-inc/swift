@@ -10,6 +10,12 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+# CI consumes no secrets and needs nothing from the repo-scoped GITHUB_TOKEN
+# beyond checkout. Explicit read-only is defense-in-depth on a public repo
+# (the repo default is already read-only).
+permissions:
+  contents: read
+
 jobs:
   lint-and-type-check:
     name: Lint & Type Check
