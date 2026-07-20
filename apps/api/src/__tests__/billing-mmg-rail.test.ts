@@ -101,6 +101,48 @@ afterAll(async () => {
   await app.close();
 });
 
+describe('poll settle correctness [SWIFT-AUD-D2-04]', () => {
+  it('concurrent polls settle a payment ONCE — single winner, both runs survive (4 race rounds)', async () => {
+    // Two poller deliveries racing (second instance / overlapping tick). The
+    // PENDING-claim CAS must pick exactly one winner and neither run may
+    // throw (pre-fix, the loser either died on the billing-event idempotency
+    // key or double-advanced the period off a re-read subscription). Race
+    // windows are timing-dependent, so run several rounds.
+    for (let round = 0; round < 4; round += 1) {
+      const due = new Date(Date.now() - 60_000);
+      const { subId } = await makeMoverWithMmgSub({ due, msisdn: `609117${round}` });
+      const outcome = await billing.billSubscription((await subWithRelations(subId)) as any);
+      expect(outcome).toBe('pending');
+
+      await Promise.all([billing.pollPendingMmgCharges(), billing.pollPendingMmgCharges()]);
+
+      const after = await app.prisma.subscription.findUniqueOrThrow({ where: { id: subId } });
+      expect(after.nextBillingDate.getTime()).toBe(due.getTime() + 7 * DAY); // advanced exactly one period
+      const events = await app.prisma.billingEvent.findMany({ where: { subscriptionId: subId, type: 'CHARGE_SUCCESS' } });
+      expect(events).toHaveLength(1);
+      const payments = await app.prisma.subscriptionPayment.findMany({ where: { subscriptionId: subId } });
+      expect(payments).toHaveLength(1);
+      expect(payments[0]!.status).toBe('CAPTURED');
+    }
+  });
+
+  it('runBillingCycle honors nextRetryAt on ACTIVE subs — no re-initiate while a request is in flight', async () => {
+    const due = new Date(Date.now() - 60_000);
+    const { subId } = await makeMoverWithMmgSub({ due, msisdn: '6091172' });
+    // An in-flight MMG request parks the sub ACTIVE with a future retry stamp;
+    // the hourly cycle must NOT fire a second initiate for the same week.
+    await app.prisma.subscription.update({
+      where: { id: subId },
+      data: { nextRetryAt: new Date(Date.now() + 60 * 60 * 1000) },
+    });
+
+    await billing.runBillingCycle();
+
+    const payments = await app.prisma.subscriptionPayment.findMany({ where: { subscriptionId: subId } });
+    expect(payments).toHaveLength(0); // nothing initiated — future nextRetryAt gates the ACTIVE arm
+  });
+});
+
 describe('MMG charge lifecycle', () => {
   it('bill → pending (no period advance), poll → approved settles the SAME payment row', async () => {
     const due = new Date(Date.now() - 60_000);

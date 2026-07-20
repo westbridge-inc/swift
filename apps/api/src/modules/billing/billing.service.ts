@@ -4,6 +4,7 @@ import { NotificationService } from '../notification/notification.service';
 import { CountryConfigService } from '../country/country-config.service';
 import type { PaymentProvider } from '../../providers/payment/payment-provider';
 import { getMmgProvider } from '../../providers/mmg/mmg-provider';
+import { log } from '../../utils/logger';
 
 // ---------------------------------------------------------------------------
 // BillingService — the one place V1 touches money: Swift's own weekly fee.
@@ -57,7 +58,14 @@ export class BillingService {
       where: {
         autoRenew: true,
         OR: [
-          { status: 'ACTIVE', nextBillingDate: { lte: now } },
+          // ACTIVE respects nextRetryAt too [debug-ledger P2]: an in-flight
+          // MMG request parks the sub ACTIVE with a future retry stamp — the
+          // hourly cycle must not re-initiate the same week while it pends.
+          {
+            status: 'ACTIVE',
+            nextBillingDate: { lte: now },
+            OR: [{ nextRetryAt: null }, { nextRetryAt: { lte: now } }],
+          },
           // Failed charges retry daily, while due — including SUSPENDED, so a
           // top-up between runs gets picked up even without the instant path
           { status: { in: ['PAST_DUE', 'SUSPENDED'] }, nextRetryAt: { lte: now } },
@@ -338,15 +346,39 @@ export class BillingService {
         status === 'expired' ||
         (status === 'pending' && now.getTime() - payment.createdAt.getTime() > 24 * 60 * 60 * 1000);
 
-      if (status === 'approved') {
-        await this.applySuccessfulCharge(sub as SubWithRelations, Number(payment.amount), payment.externalRef!, now, periodKey, payment.id);
-        out.settled += 1;
-      } else if (status === 'declined' || status === 'reversed' || expired) {
-        await this.prisma.subscriptionPayment.update({ where: { id: payment.id }, data: { status: 'FAILED' } });
-        await this.applyFailedCharge(sub as SubWithRelations, Number(payment.amount), `MMG request ${expired ? 'expired unapproved' : status}`, now, periodKey);
-        out.failed += 1;
-      } else {
-        out.stillPending += 1;
+      // SWIFT-AUD-D2-04: settle is single-winner. The PENDING→terminal write
+      // is a compare-and-set claim; a second poller delivery (overlapping
+      // tick, second instance, an admin top-up racing the poll) matches 0
+      // rows and skips — it can never re-advance the period or die on the
+      // billing-event idempotency key. Each item is isolated in try/catch so
+      // one settle failure can't kill the rest of the run. (Full transactional
+      // coupling of claim+advance ships with the MMG expiryTime program.)
+      try {
+        if (status === 'approved') {
+          const claimed = await this.prisma.subscriptionPayment.updateMany({
+            where: { id: payment.id, status: 'PENDING' },
+            data: { status: 'CAPTURED', paidAt: now },
+          });
+          if (claimed.count === 0) continue; // another settler won this row
+          await this.applySuccessfulCharge(sub as SubWithRelations, Number(payment.amount), payment.externalRef!, now, periodKey, payment.id);
+          out.settled += 1;
+        } else if (status === 'declined' || status === 'reversed' || expired) {
+          const claimed = await this.prisma.subscriptionPayment.updateMany({
+            where: { id: payment.id, status: 'PENDING' },
+            data: { status: 'FAILED' },
+          });
+          if (claimed.count === 0) continue;
+          await this.applyFailedCharge(sub as SubWithRelations, Number(payment.amount), `MMG request ${expired ? 'expired unapproved' : status}`, now, periodKey);
+          out.failed += 1;
+        } else {
+          out.stillPending += 1;
+        }
+      } catch (err) {
+        // The claim may have landed while the advance threw — the payment row
+        // is terminal and the subscription lags one poll. Loud log with the
+        // ids so ops can reconcile; the next legitimate cycle self-corrects
+        // the period, and the row never double-charges.
+        log().error({ err, paymentId: payment.id, subscriptionId: sub.id }, 'MMG poll settle failed for one payment — continuing');
       }
     }
     return out;
