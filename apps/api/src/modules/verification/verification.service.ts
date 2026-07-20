@@ -6,6 +6,7 @@ import type { KycProvider } from '../../providers/kyc/kyc-provider';
 import { getStorageProvider } from '../../providers/storage/storage-provider';
 import { FloatService } from '../dispatch/float.service';
 import { SubscriptionService } from '../subscription/subscription.service';
+import { SearchService } from '../search/search.service';
 
 /** Checklist keys come from CountryConfig.documentChecklists. */
 export type ChecklistRole = 'MOVER' | 'RESTAURANT' | 'SUPERMARKET' | 'STORE' | 'SERVICE';
@@ -666,6 +667,9 @@ export class VerificationService {
           where: { id: vendor.id },
           data: { isVerified: true, ...(vendor.isVerified ? {} : { acceptingOrders: true }) },
         });
+        // A newly-live vendor must be searchable now, not at the next boot [SWIFT-UG-SRCH-01].
+        const search = new SearchService(this.prisma);
+        void search.syncVendor(vendor.id).then(() => search.syncVendorItems(vendor.id)).catch(() => {});
         await this.subscriptions.startTrialForVendor(vendor.id);
       }
     }
@@ -742,6 +746,11 @@ export class VerificationService {
           where: { vendorId: vendor.id },
           data: { isAvailable: false },
         });
+        // A darkened vendor's items must leave search now, not at the next
+        // boot [SWIFT-UG-SRCH-01] — same direct sync as afterApproval (this
+        // sweep runs from jobs; no queue-decorated app in reach).
+        const search = new SearchService(this.prisma);
+        void search.syncVendor(vendor.id).then(() => search.syncVendorItems(vendor.id)).catch(() => {});
       }
     }
   }

@@ -30,6 +30,7 @@ const QUEUE_NAMES = {
   NOTIFICATION: 'notification-jobs',
   VERIFICATION: 'verification-jobs',
   DISPATCH: 'dispatch-jobs',
+  SEARCH: 'search-jobs',
 } as const;
 
 export { QUEUE_NAMES };
@@ -45,6 +46,7 @@ export function createQueues(redis: Redis) {
     notificationQueue: new Queue(QUEUE_NAMES.NOTIFICATION, { connection }),
     verificationQueue: new Queue(QUEUE_NAMES.VERIFICATION, { connection }),
     dispatchQueue: new Queue(QUEUE_NAMES.DISPATCH, { connection }),
+    searchQueue: new Queue(QUEUE_NAMES.SEARCH, { connection }),
   };
 }
 
@@ -496,6 +498,27 @@ export function createWorkers(ctx: JobContext) {
     });
   }
 
+  // SEARCH: debounced per-vendor index sync [SWIFT-UG-SRCH-01]. Best-effort —
+  // a failure logs and waits for the next write or the boot reconciler; it
+  // must never crash a worker or spam retries against a down Meili.
+  const searchWorker = new Worker(
+    QUEUE_NAMES.SEARCH,
+    async (job: Job) => {
+      if (job.name !== 'sync-vendor') return;
+      const { vendorId } = job.data as { vendorId: string };
+      try {
+        const { SearchService } = await import('../modules/search/search.service');
+        const svc = new SearchService(ctx.prisma);
+        await svc.syncVendor(vendorId);
+        const items = await svc.syncVendorItems(vendorId);
+        ctx.log.info({ vendorId, items }, 'Search index synced for vendor');
+      } catch (err) {
+        ctx.log.warn({ err, vendorId }, 'Search sync failed — boot/manual reindex remains the reconciler');
+      }
+    },
+    { connection, concurrency: 1 },
+  );
+
   return {
     orderWorker,
     riderAssignmentWorker,
@@ -504,6 +527,7 @@ export function createWorkers(ctx: JobContext) {
     verificationWorker,
     dispatchWorker,
     notificationWorker,
+    searchWorker,
     cleanup: async () => {
       await Promise.all([
         orderWorker.close(),
@@ -513,6 +537,7 @@ export function createWorkers(ctx: JobContext) {
         verificationWorker.close(),
         dispatchWorker.close(),
         notificationWorker.close(),
+        searchWorker.close(),
       ]);
     },
   };
