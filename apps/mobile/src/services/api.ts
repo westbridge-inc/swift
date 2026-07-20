@@ -110,6 +110,9 @@ export const customerApi = {
   getProfile: () => api.get('/customer/profile'),
   updateProfile: (data: { firstName?: string; lastName?: string; email?: string }) =>
     api.put('/customer/profile', data),
+  // DPA-2023 self-serve rights (D9-05): export your data; erase your account.
+  exportAccount: () => api.get('/customer/account/export'),
+  deleteAccount: () => api.delete('/customer/account'),
   switchRole: (role: string) => api.post('/customer/switch-role', { role }),
   // In-app support / dispute channel.
   createTicket: (data: { category: SupportCategory; subject: string; message: string; orderId?: string }) =>

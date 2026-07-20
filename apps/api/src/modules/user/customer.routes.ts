@@ -14,6 +14,7 @@ import { resolveSelectedOptions, optionsUnitPrice } from '../order/options';
 import { RatingService } from '../rating/rating.service';
 import { NotificationService } from '../notification/notification.service';
 import { SupportService } from '../support/support.service';
+import { AccountService } from './account.service';
 
 // ---------------------------------------------------------------------------
 // Input schemas
@@ -434,6 +435,7 @@ export async function customerRoutes(app: FastifyInstance) {
   // ========================================================================
 
   const support = new SupportService(app.prisma, notificationService);
+  const account = new AccountService(app);
   const createTicketSchema = z.object({
     category: z.enum(['ORDER_ISSUE', 'PAYMENT', 'SAFETY', 'ACCOUNT', 'VENDOR', 'MOVER', 'OTHER']),
     subject: z.string().trim().min(3).max(120),
@@ -558,6 +560,33 @@ export async function customerRoutes(app: FastifyInstance) {
     });
 
     return { success: true, data: user };
+  });
+
+  /** GET /account/export — DPA right of access + portability: the customer's own
+   *  data as portable JSON. Documents' contents are never exported. */
+  app.get('/account/export', async (request: AuthRequest) => {
+    const data = await account.exportData(request.user.userId);
+    return { success: true, data };
+  });
+
+  /** DELETE /account — DPA right to erasure: crypto-shred + de-identify. The
+   *  client must log the user out afterwards; every session is already revoked. */
+  app.delete('/account', async (request: AuthRequest) => {
+    const result = await account.deleteAccount(request.user.userId);
+    // Leave an audit trail (the de-identified row is retained, so its id stays a
+    // valid FK). Best-effort — the erasure itself has already committed.
+    await app.prisma.auditLog
+      .create({
+        data: {
+          userId: request.user.userId,
+          action: 'ACCOUNT_SELF_DELETED',
+          entity: 'User',
+          entityId: request.user.userId,
+          changes: { reason: 'DPA right to erasure (self-serve)' },
+        },
+      })
+      .catch(() => {});
+    return { success: true, data: result };
   });
 
   // ========================================================================
