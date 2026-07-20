@@ -246,20 +246,31 @@ async function buildApp() {
   // HMAC-signed statement renders (the authed routes mint the links).
   await app.register(statementRoutes, { prefix: '/api/v1/statements' });
 
-  // Background job queues
+  // Background job queues.
+  // SWIFT-AUD-D7-01: workers are opt-out per process. Default (unset) keeps
+  // the single-process topology — the API runs its own workers, byte-identical
+  // to before. Set RUN_WORKERS=0 on API instances when a dedicated worker
+  // process (dist/worker.js) owns the queues, so N API instances don't run N
+  // copies of billing/settlement/reconcile processing. Queues are always
+  // created — routes still enqueue either way.
   try {
     const queues = createQueues(app.redis);
-    const workers = createWorkers({
-      prisma: app.prisma,
-      io: app.io,
-      redis: app.redis,
-      log: app.log,
-    });
-    await scheduleRecurringJobs(queues);
-    app.log.info('Background job queues initialized');
+    const runWorkers = process.env['RUN_WORKERS'] !== '0';
+    const workers = runWorkers
+      ? createWorkers({
+          prisma: app.prisma,
+          io: app.io,
+          redis: app.redis,
+          log: app.log,
+        })
+      : null;
+    // Repeatable-job registration lives with the process that consumes them.
+    if (runWorkers) await scheduleRecurringJobs(queues);
+    app.decorate('workersActive', runWorkers);
+    app.log.info({ runWorkers }, 'Background job queues initialized');
 
     app.addHook('onClose', async () => {
-      await workers.cleanup();
+      if (workers) await workers.cleanup();
       await queues.orderQueue.close();
       await queues.riderAssignmentQueue.close();
       await queues.subscriptionQueue.close();
