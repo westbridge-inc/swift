@@ -278,6 +278,7 @@ async function buildApp() {
       await queues.notificationQueue.close();
       await queues.verificationQueue.close();
       await queues.dispatchQueue.close();
+      await queues.searchQueue.close();
     });
 
     // Decorate so routes can enqueue jobs

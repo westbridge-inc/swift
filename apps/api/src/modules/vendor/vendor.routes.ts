@@ -20,6 +20,8 @@ import { BillingService } from '../billing/billing.service';
 import { getPaymentProvider } from '../../providers/payment/payment-provider';
 import { throwForMissingProfile } from '../../utils/role-gate';
 import { ALLOWED_IMAGE_TYPES, looksLikeImage } from '../../utils/images';
+import { scheduleVendorSearchSync } from '../search/search-sync';
+import { SearchService } from '../search/search.service';
 
 // ---------------------------------------------------------------------------
 // Input schemas
@@ -717,6 +719,9 @@ export async function vendorRoutes(app: FastifyInstance) {
       include: { operatingHours: { orderBy: { dayOfWeek: 'asc' } } },
     });
 
+    // On-write search sync [SWIFT-UG-SRCH-01]: catalog writes schedule a debounced per-vendor reindex.
+    scheduleVendorSearchSync(app, vendorId);
+
     return { success: true, data: vendor };
   });
 
@@ -736,6 +741,8 @@ export async function vendorRoutes(app: FastifyInstance) {
 
     // Broadcast to anyone watching this vendor's storefront
     app.io.emit('vendor:status', { vendorId, isCurrentlyOpen: updated.isCurrentlyOpen });
+
+    scheduleVendorSearchSync(app, vendorId);
 
     return { success: true, data: { isCurrentlyOpen: updated.isCurrentlyOpen, acceptingOrders: updated.acceptingOrders } };
   });
@@ -1043,6 +1050,7 @@ export async function vendorRoutes(app: FastifyInstance) {
       data: { itemId: item.id, delta: body.delta, reason: body.reason, note: body.note, createdBy: request.user.userId },
     });
     const fresh = await app.prisma.item.findUnique({ where: { id: item.id }, select: { stockQuantity: true, isAvailable: true } });
+    scheduleVendorSearchSync(app, item.vendorId);
     return { success: true, data: { adjustment, stockQuantity: fresh?.stockQuantity, isAvailable: fresh?.isAvailable } };
   });
 
@@ -1276,6 +1284,7 @@ export async function vendorRoutes(app: FastifyInstance) {
         sortOrder,
       },
     });
+    scheduleVendorSearchSync(app, vendorId);
     return { success: true, data: category };
   });
 
@@ -1296,6 +1305,7 @@ export async function vendorRoutes(app: FastifyInstance) {
         ...(body.isActive !== undefined && { isActive: body.isActive }),
       },
     });
+    scheduleVendorSearchSync(app, vendorId);
     return { success: true, data: category };
   });
 
@@ -1304,7 +1314,7 @@ export async function vendorRoutes(app: FastifyInstance) {
     const { vendorId } = await requireVendor(app, request, 'MANAGER');
     const existing = await app.prisma.category.findUnique({
       where: { id: request.params.id },
-      include: { _count: { select: { items: true } } },
+      include: { _count: { select: { items: true } }, items: { select: { id: true } } },
     });
     if (!existing || existing.vendorId !== vendorId) throw new NotFoundError('Category', request.params.id);
 
@@ -1317,6 +1327,11 @@ export async function vendorRoutes(app: FastifyInstance) {
     });
     await app.prisma.item.deleteMany({ where: { categoryId: request.params.id } });
     await app.prisma.category.delete({ where: { id: request.params.id } });
+
+    // hard delete: no sweep could find these rows later [SWIFT-UG-SRCH-01]
+    const search = new SearchService(app.prisma);
+    for (const item of existing.items) search.removeItemDoc(item.id).catch(() => {});
+    scheduleVendorSearchSync(app, vendorId);
 
     return { success: true, data: { deleted: true, itemsRemoved: existing._count.items } };
   });
@@ -1339,6 +1354,7 @@ export async function vendorRoutes(app: FastifyInstance) {
       where: { vendorId },
       orderBy: { sortOrder: 'asc' },
     });
+    scheduleVendorSearchSync(app, vendorId);
     return { success: true, data: categories };
   });
 
@@ -1437,6 +1453,8 @@ export async function vendorRoutes(app: FastifyInstance) {
         optionGroups: { include: { options: { orderBy: { sortOrder: 'asc' } } }, orderBy: { sortOrder: 'asc' } },
       },
     });
+
+    scheduleVendorSearchSync(app, vendorId);
 
     return { success: true, data: item };
   });
@@ -1678,6 +1696,8 @@ export async function vendorRoutes(app: FastifyInstance) {
       }
     }
 
+    scheduleVendorSearchSync(app, vendorId);
+
     return {
       success: true,
       data: {
@@ -1718,6 +1738,8 @@ export async function vendorRoutes(app: FastifyInstance) {
       data: { imageUrl: url },
       select: { id: true, name: true, imageUrl: true },
     });
+
+    scheduleVendorSearchSync(app, vendorId);
 
     return { success: true, data: item };
   });
@@ -1769,6 +1791,8 @@ export async function vendorRoutes(app: FastifyInstance) {
       },
     });
 
+    scheduleVendorSearchSync(app, vendorId);
+
     return { success: true, data: item };
   });
 
@@ -1781,6 +1805,10 @@ export async function vendorRoutes(app: FastifyInstance) {
     await app.prisma.option.deleteMany({ where: { optionGroup: { itemId: request.params.id } } });
     await app.prisma.optionGroup.deleteMany({ where: { itemId: request.params.id } });
     await app.prisma.item.delete({ where: { id: request.params.id } });
+
+    // hard delete: no sweep could find this row later [SWIFT-UG-SRCH-01]
+    new SearchService(app.prisma).removeItemDoc(request.params.id).catch(() => {});
+    scheduleVendorSearchSync(app, vendorId);
 
     return { success: true, data: { deleted: true } };
   });
@@ -1799,6 +1827,8 @@ export async function vendorRoutes(app: FastifyInstance) {
       data: { isAvailable: newAvailability },
       select: { id: true, name: true, isAvailable: true },
     });
+
+    scheduleVendorSearchSync(app, vendorId);
 
     return { success: true, data: item };
   });
@@ -2012,6 +2042,8 @@ export async function vendorRoutes(app: FastifyInstance) {
         orderBy: { dayOfWeek: 'asc' },
       });
     });
+
+    scheduleVendorSearchSync(app, vendorId);
 
     return { success: true, data: results };
   });

@@ -191,4 +191,53 @@ export class SearchService {
       await this.client.index(VENDOR_INDEX).deleteDocument(vendorId);
     }
   }
+
+  /** Per-vendor ITEM sync [SWIFT-UG-SRCH-01]: upserts the vendor's live
+   *  (available, ACTIVE-vendor) items and explicitly deletes the docs for
+   *  items that still exist but are no longer searchable (86'd, vendor
+   *  suspended). Hard-DELETED rows can't be enumerated here — the item-delete
+   *  route removes its own doc via removeItemDoc, and the boot/admin full
+   *  sync remains the reconciler for anything missed. */
+  async syncVendorItems(vendorId: string): Promise<number> {
+    const items = await this.prisma.item.findMany({
+      where: { vendorId },
+      include: {
+        vendor: { select: { name: true, status: true } },
+        category: { select: { name: true } },
+      },
+    });
+
+    const live = items.filter((i) => i.isAvailable && i.vendor.status === 'ACTIVE');
+    const gone = items.filter((i) => !(i.isAvailable && i.vendor.status === 'ACTIVE'));
+
+    if (live.length > 0) {
+      await this.client.index(ITEM_INDEX).addDocuments(
+        live.map((i) => ({
+          id: i.id,
+          name: i.name,
+          description: i.description || '',
+          vendorId: i.vendorId,
+          vendorName: i.vendor.name,
+          categoryName: i.category.name,
+          basePrice: Number(i.basePrice),
+          imageUrl: i.imageUrl,
+          isAvailable: i.isAvailable,
+          isPopular: i.isPopular,
+          dietaryTags: i.dietaryTags,
+          allergens: i.allergens,
+          totalOrdered: i.totalOrdered,
+        })),
+      );
+    }
+    if (gone.length > 0) {
+      await this.client.index(ITEM_INDEX).deleteDocuments(gone.map((i) => i.id));
+    }
+    return live.length;
+  }
+
+  /** Remove one item's search doc (the hard-delete route calls this — the
+   *  row is gone from the DB, so no sweep could find it later). */
+  async removeItemDoc(itemId: string): Promise<void> {
+    await this.client.index(ITEM_INDEX).deleteDocument(itemId);
+  }
 }

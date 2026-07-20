@@ -23,6 +23,7 @@ import { NotificationService } from '../notification/notification.service';
 import { SupportService } from '../support/support.service';
 import { VerificationService, REJECTION_REASON_CODES } from '../verification/verification.service';
 import { ComplianceAuditService } from '../verification/compliance-audit.service';
+import { scheduleVendorSearchSync } from '../search/search-sync';
 import { BillingService } from '../billing/billing.service';
 import { SubscriptionService } from '../subscription/subscription.service';
 import { CashRulesService } from '../cash/cash-rules.service';
@@ -667,6 +668,9 @@ export async function adminRoutes(app: FastifyInstance) {
       data: { status: 'ACTIVE', isVerified: true },
     });
 
+    // On-write search sync [SWIFT-UG-SRCH-01]: status changes gate the vendor in/out of the index.
+    scheduleVendorSearchSync(app, id);
+
     await audit(request.user.userId, 'APPROVE_VENDOR', 'Vendor', id, { previousStatus: vendor.status }, request);
 
     // A subscription is born as a 14-day trial the moment the vendor goes live.
@@ -697,6 +701,8 @@ export async function adminRoutes(app: FastifyInstance) {
       where: { id },
       data: { status: 'SUSPENDED', acceptingOrders: false },
     });
+
+    scheduleVendorSearchSync(app, id);
 
     await audit(request.user.userId, 'SUSPEND_VENDOR', 'Vendor', id, { reason, previousStatus: vendor.status }, request);
 
