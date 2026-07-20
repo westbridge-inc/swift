@@ -16,6 +16,9 @@ declare module 'fastify' {
   interface FastifyInstance {
     /** Decorated in server.ts when background queues are up */
     queues?: ReturnType<typeof createQueues>;
+    /** False when RUN_WORKERS=0 — this process enqueues but never consumes
+     *  (a dedicated worker process owns the queues). [SWIFT-AUD-D7-01] */
+    workersActive?: boolean;
   }
 }
 
@@ -43,6 +46,64 @@ export function createQueues(redis: Redis) {
     verificationQueue: new Queue(QUEUE_NAMES.VERIFICATION, { connection }),
     dispatchQueue: new Queue(QUEUE_NAMES.DISPATCH, { connection }),
   };
+}
+
+/** Weekly vendor settlement snapshot [SWIFT-AUD-D6-05 / D7-01].
+ *  Exported so tests can drive it directly; the settlement worker delegates
+ *  here. BullMQ single-delivery keeps the schedule from double-firing across
+ *  instances — this function's own guard is what makes a RETRY or an operator
+ *  requeue safe (see the covered-window check). */
+export async function runWeeklySettlement(ctx: JobContext) {
+  const now = new Date();
+  const weekAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
+
+  const vendors = await ctx.prisma.vendor.findMany({
+    where: { status: 'ACTIVE' },
+    select: { id: true },
+  });
+  const activeIds = vendors.map((v) => v.id);
+  if (activeIds.length === 0) return;
+
+  // Idempotency guard [SWIFT-AUD-D7-01]: period bounds are wall-clock, so a
+  // retry recomputes a shifted window and no unique key could dedupe it. A
+  // vendor whose latest settlement already reaches into this window is
+  // settled for the week and skipped; its tail (prior periodEnd → now) rolls
+  // into the next weekly cycle rather than risking a double-created week.
+  const covered = await ctx.prisma.settlement.findMany({
+    where: { vendorId: { in: activeIds }, periodEnd: { gt: weekAgo } },
+    select: { vendorId: true },
+  });
+  const alreadyCovered = new Set(covered.map((s) => s.vendorId));
+
+  // SWIFT-AUD-D6-05: one grouped aggregate instead of a per-vendor
+  // findMany+create loop (N+1 that grew linearly with the vendor count).
+  const groups = await ctx.prisma.order.groupBy({
+    by: ['vendorId'],
+    where: {
+      vendorId: { in: activeIds },
+      status: { in: ['DELIVERED', 'COMPLETED'] },
+      deliveredAt: { gte: weekAgo, lte: now },
+    },
+    _sum: { subtotalBase: true, subtotalMarkup: true },
+    _count: { _all: true },
+  });
+
+  const settlements = groups
+    .filter((g) => g.vendorId && g._count._all > 0 && !alreadyCovered.has(g.vendorId!))
+    .map((g) => ({
+      vendorId: g.vendorId!,
+      periodStart: weekAgo,
+      periodEnd: now,
+      totalOrders: g._count._all,
+      totalBase: Number(g._sum.subtotalBase ?? 0),
+      totalMarkup: Number(g._sum.subtotalMarkup ?? 0),
+      status: 'PENDING' as const,
+    }));
+
+  if (settlements.length > 0) {
+    await ctx.prisma.settlement.createMany({ data: settlements });
+  }
+  ctx.log.info({ settlements: settlements.length }, 'Settlements created');
 }
 
 export function createWorkers(ctx: JobContext) {
@@ -165,51 +226,13 @@ export function createWorkers(ctx: JobContext) {
     { connection, concurrency: 1 },
   );
 
-  // SETTLEMENT: weekly vendor payouts
+  // SETTLEMENT: weekly vendor payouts (logic lives in runWeeklySettlement so
+  // tests can prove its idempotency without BullMQ plumbing)
   const settlementWorker = new Worker(
     QUEUE_NAMES.SETTLEMENT,
     async (job: Job) => {
       if (job.name !== 'process-settlements') return;
-
-      const now = new Date();
-      const weekAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
-
-      const vendors = await ctx.prisma.vendor.findMany({
-        where: { status: 'ACTIVE' },
-        select: { id: true },
-      });
-      const activeIds = vendors.map((v) => v.id);
-      if (activeIds.length === 0) return;
-
-      // SWIFT-AUD-D6-05: one grouped aggregate instead of a per-vendor
-      // findMany+create loop (N+1 that grew linearly with the vendor count).
-      const groups = await ctx.prisma.order.groupBy({
-        by: ['vendorId'],
-        where: {
-          vendorId: { in: activeIds },
-          status: { in: ['DELIVERED', 'COMPLETED'] },
-          deliveredAt: { gte: weekAgo, lte: now },
-        },
-        _sum: { subtotalBase: true, subtotalMarkup: true },
-        _count: { _all: true },
-      });
-
-      const settlements = groups
-        .filter((g) => g.vendorId && g._count._all > 0)
-        .map((g) => ({
-          vendorId: g.vendorId!,
-          periodStart: weekAgo,
-          periodEnd: now,
-          totalOrders: g._count._all,
-          totalBase: Number(g._sum.subtotalBase ?? 0),
-          totalMarkup: Number(g._sum.subtotalMarkup ?? 0),
-          status: 'PENDING' as const,
-        }));
-
-      if (settlements.length > 0) {
-        await ctx.prisma.settlement.createMany({ data: settlements });
-      }
-      ctx.log.info({ settlements: settlements.length }, 'Settlements created');
+      await runWeeklySettlement(ctx);
     },
     { connection, concurrency: 1 },
   );
