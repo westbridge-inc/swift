@@ -9,10 +9,23 @@ dist/
 .turbo/
 build/
 
-# Environment
-.env
-.env.local
-.env.*.local
+# Environment — every .env variant except the tracked examples [SWIFT-UG-SEC-02]
+.env*
+!.env.example
+
+# Keys, certs, keystores, service accounts — never committable
+*.pem
+*.key
+*.p8
+*.p12
+google-services.json
+GoogleService-Info.plist
+*service-account*.json
+
+# Database dumps / local db files (migrations stay tracked as .sql)
+*.dump
+*.sqlite
+*.sqlite3
 
 # IDE
 .vscode/
@@ -56,3 +69,8 @@ gitleaks
 
 # Security/launch audit reports — internal only, public repo
 /reports/
+
+# Local design references + reskin notes (previously only in .git/info/exclude,
+# which does not protect fresh clones)
+/design/
+/RESKIN.md
