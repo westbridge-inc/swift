@@ -3,6 +3,7 @@ import type { Server } from 'socket.io';
 import { calculateDeliveryFee, generateOrderNumber } from '../../utils/markup';
 import { estimateDeliveryMinutes } from '../../utils/distance';
 import { getMapsProvider, type MapsProvider } from '../../providers/maps/maps-provider';
+import { FREE_CANCEL_WINDOW_MIN, LATE_CANCEL_FEE } from './cancel-policy';
 import { NotificationService } from '../notification/notification.service';
 import { CountryConfigService } from '../country/country-config.service';
 import { BookingService } from '../booking/booking.service';
@@ -772,8 +773,8 @@ export class OrderService {
     // LIFECYCLE_V2: the hold IS the free window — nothing was committed to a
     // vendor or mover yet, so cancelling a held order can never cost anything.
     const heldNow = isHeld(order) && !order.riderId && !order.driverId;
-    const freeCancellation = heldNow || (minutesSincePlaced <= 5 && order.status === 'PENDING');
-    const cancellationFee = freeCancellation ? 0 : 500;
+    const freeCancellation = heldNow || (minutesSincePlaced <= FREE_CANCEL_WINDOW_MIN && order.status === 'PENDING');
+    const cancellationFee = freeCancellation ? 0 : LATE_CANCEL_FEE;
 
     // Same compare-and-set machinery as every other transition: if the order
     // moved (e.g. the vendor accepted into a non-cancellable state, or it was
