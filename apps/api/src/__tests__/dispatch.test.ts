@@ -519,4 +519,52 @@ describe('Atomic acceptance — the concurrency proof', () => {
 
     await app.prisma.rider.updateMany({ where: { id: { in: [a.riderId, b.riderId] } }, data: { isOnline: false } });
   });
+
+  // D.3 cash-exposure parity [debug-ledger P2]: the offer cascade gates
+  // candidates on float headroom and commits float on claim — the DIRECT
+  // board-grab accept must do the same, or the cash-exposure cap is
+  // bypassable through this entrance and a later release decrements float
+  // that was never committed.
+  it('direct accept REFUSES a CASH order beyond the rider float headroom', async () => {
+    const r = await makeRider({ lat: PICKUP.lat + 0.003 });
+    // Order fronts 2,000 GYD of vendor cash; the rider only has 1,000 headroom.
+    await app.prisma.rider.update({ where: { id: r.riderId }, data: { floatLimit: 1000, committedFloat: 0 } });
+    const order = await makeDeliveryOrder('READY_FOR_PICKUP');
+
+    const res = await app.inject({
+      method: 'POST',
+      url: `/api/v1/rider/orders/${order.id}/accept`,
+      payload: {},
+      headers: { 'content-type': 'application/json', authorization: `Bearer ${r.token}` },
+    });
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error.code).toBe('FLOAT_EXCEEDED');
+
+    // Nothing claimed, rider not stuck.
+    const db = await app.prisma.order.findUniqueOrThrow({ where: { id: order.id }, select: { riderId: true } });
+    expect(db.riderId).toBeNull();
+
+    await app.prisma.rider.update({ where: { id: r.riderId }, data: { isOnline: false, floatLimit: 1_000_000 } });
+  });
+
+  it('direct accept COMMITS the CASH float, mirroring dispatch.claimOrder', async () => {
+    const r = await makeRider({ lat: PICKUP.lat + 0.003 });
+    const order = await makeDeliveryOrder('READY_FOR_PICKUP');
+
+    const res = await app.inject({
+      method: 'POST',
+      url: `/api/v1/rider/orders/${order.id}/accept`,
+      payload: {},
+      headers: { 'content-type': 'application/json', authorization: `Bearer ${r.token}` },
+    });
+    expect(res.statusCode).toBe(200);
+
+    const rider = await app.prisma.rider.findUniqueOrThrow({ where: { id: r.riderId }, select: { committedFloat: true } });
+    expect(Number(rider.committedFloat)).toBe(2000); // = the order's subtotalBase
+
+    await app.prisma.rider.update({
+      where: { id: r.riderId },
+      data: { isOnline: false, committedFloat: 0, currentOrderId: null, isAvailable: true },
+    });
+  });
 });
