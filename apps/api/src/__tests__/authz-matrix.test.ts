@@ -12,6 +12,16 @@ import { vendorRoutes } from '../modules/vendor/vendor.routes';
 import { riderRoutes } from '../modules/rider/rider.routes';
 import { driverRoutes } from '../modules/driver/driver.routes';
 import { adminRoutes } from '../modules/admin/admin.routes';
+import { searchRoutes } from '../modules/search/search.routes';
+import { chatRoutes } from '../modules/chat/chat.routes';
+import { verificationRoutes } from '../modules/verification/verification.routes';
+import { ridesRoutes } from '../modules/rides/rides.routes';
+import { placesRoutes } from '../modules/places/places.routes';
+import courierRoutes from '../modules/courier/courier.routes';
+import { servicesRoutes } from '../modules/services/services.routes';
+import { partnerRoutes } from '../modules/partner/partner.routes';
+import { aiRoutes } from '../modules/ai/ai.routes';
+import { statementRoutes } from '../modules/order/statement.routes';
 import { loginWithOtp } from './helpers/otp';
 
 // ---------------------------------------------------------------------------
@@ -51,6 +61,19 @@ async function buildTestApp() {
   await server.register(riderRoutes, { prefix: '/api/v1/rider' });
   await server.register(driverRoutes, { prefix: '/api/v1/driver' });
   await server.register(adminRoutes, { prefix: '/api/v1/admin' });
+  // SWIFT-AUD-D3-02: every authenticated prefix is enrolled, mirroring
+  // server.ts registration exactly — a prefix missing here is a prefix whose
+  // future missing gate this control cannot catch.
+  await server.register(searchRoutes, { prefix: '/api/v1' });
+  await server.register(chatRoutes, { prefix: '/api/v1/chat' });
+  await server.register(verificationRoutes, { prefix: '/api/v1/verification' });
+  await server.register(ridesRoutes, { prefix: '/api/v1/rides' });
+  await server.register(placesRoutes, { prefix: '/api/v1/places' });
+  await server.register(courierRoutes, { prefix: '/api/v1/courier' });
+  await server.register(servicesRoutes, { prefix: '/api/v1/services' });
+  await server.register(partnerRoutes, { prefix: '/api/v1/partner' });
+  await server.register(aiRoutes, { prefix: '/api/v1/ai' });
+  await server.register(statementRoutes, { prefix: '/api/v1/statements' });
   await server.ready();
   return server;
 }
@@ -107,7 +130,35 @@ const MATRIX: PrefixSpec[] = [
   { prefix: '/api/v1/rider/', wrongRoles: ['customer', 'vendor'] },
   { prefix: '/api/v1/driver/', wrongRoles: ['customer', 'vendor'] },
   { prefix: '/api/v1/admin/', wrongRoles: ['customer', 'vendor', 'mover'] },
+  // SWIFT-AUD-D3-02 — the remaining authenticated surface. wrongRoles is
+  // empty where the prefix is multi-role by design (any authenticated user
+  // may act as a customer — a vendor owner orders food; chat spans both
+  // parties of an order; partner/become upgrades a customer). The
+  // unauthenticated sweep still applies to every route.
+  { prefix: '/api/v1/search/', wrongRoles: [] },
+  { prefix: '/api/v1/chat/', wrongRoles: [] },
+  { prefix: '/api/v1/verification/', wrongRoles: [] },
+  { prefix: '/api/v1/rides/', wrongRoles: [] },
+  { prefix: '/api/v1/places/', wrongRoles: [] },
+  { prefix: '/api/v1/courier/', wrongRoles: [] },
+  { prefix: '/api/v1/services/', wrongRoles: [] },
+  { prefix: '/api/v1/partner/', wrongRoles: [] },
+  { prefix: '/api/v1/ai/', wrongRoles: [] },
+  { prefix: '/api/v1/statements/', wrongRoles: [] },
 ];
+
+/** Routes that are UNAUTHENTICATED on purpose: a server-minted HMAC signature
+ *  (issued only to the authenticated owner) IS the authorization — the
+ *  document/statement render-token model. Anything added here needs the same
+ *  written justification. */
+const PUBLIC_BY_DESIGN = new Set([
+  'GET /api/v1/statements/render',
+  'GET /api/v1/verification/render/:docId',
+  // Recipient tracking link SMS'd to package receivers (who have no account):
+  // the unguessable courierTrackingToken IS the authorization; the handler
+  // selects a narrow, phone-free projection.
+  'GET /api/v1/courier/track/:token',
+]);
 
 describe('authz matrix — every role-prefixed route rejects outsiders', () => {
   it('collected a non-trivial route table', () => {
@@ -117,8 +168,9 @@ describe('authz matrix — every role-prefixed route rejects outsiders', () => {
   for (const spec of MATRIX) {
     describe(spec.prefix + '*', () => {
       it('rejects unauthenticated requests on every route', async () => {
-        const routes = routeTable.filter((r) => r.url.startsWith(spec.prefix));
-        expect(routes.length).toBeGreaterThan(0);
+        const prefixRoutes = routeTable.filter((r) => r.url.startsWith(spec.prefix));
+        expect(prefixRoutes.length).toBeGreaterThan(0);
+        const routes = prefixRoutes.filter((r) => !PUBLIC_BY_DESIGN.has(`${r.method} ${r.url}`));
         const offenders: string[] = [];
         for (const r of routes) {
           const res = await fire(r.method, r.url);
@@ -131,7 +183,9 @@ describe('authz matrix — every role-prefixed route rejects outsiders', () => {
 
       for (const role of spec.wrongRoles) {
         it(`rejects a ${role} token on every route`, async () => {
-          const routes = routeTable.filter((r) => r.url.startsWith(spec.prefix));
+          const routes = routeTable.filter(
+          (r) => r.url.startsWith(spec.prefix) && !PUBLIC_BY_DESIGN.has(`${r.method} ${r.url}`)
+        );
           const offenders: string[] = [];
           for (const r of routes) {
             const res = await fire(r.method, r.url, tokens[role]);
