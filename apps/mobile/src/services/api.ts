@@ -83,6 +83,8 @@ export const authApi = {
     email?: string;
     role?: 'CUSTOMER' | 'MOVER' | 'VENDOR';
     countryCode?: string;
+    /** Server records consent + the legal version it covered [SWIFT-AUD-D9-03]. */
+    acceptTerms?: boolean;
   }) => api.post('/auth/register', data),
   refresh: (refreshToken: string) => api.post('/auth/refresh', { refreshToken }),
   logout: () => api.post('/auth/logout'),

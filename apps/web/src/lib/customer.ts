@@ -42,7 +42,7 @@ export async function verifyOtp(phone: string, code: string): Promise<{ isNewUse
 }
 
 /** Register a brand-new account with the chosen role (after OTP verify). */
-export async function registerAccount(body: { phone: string; firstName: string; lastName: string; role: 'CUSTOMER' | 'VENDOR' | 'MOVER'; countryCode?: string }): Promise<{ user: any; roles: string[] }> {
+export async function registerAccount(body: { phone: string; firstName: string; lastName: string; role: 'CUSTOMER' | 'VENDOR' | 'MOVER'; countryCode?: string; acceptTerms?: boolean }): Promise<{ user: any; roles: string[] }> {
   const res = await fetch(`${API_BASE}/api/v1/auth/register`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ countryCode: 'GY', ...body }),
   });

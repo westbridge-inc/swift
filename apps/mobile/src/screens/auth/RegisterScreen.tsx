@@ -33,6 +33,7 @@ export function RegisterScreen() {
         ...(email.trim() ? { email: email.trim() } : {}),
         role,
         ...(countryCode ? { countryCode } : {}),
+        acceptTerms: agreed, // recorded server-side w/ the legal version [D9-03]
       }),
     onSuccess: (res) => {
       const data = res.data?.data;

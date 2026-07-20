@@ -6,7 +6,11 @@ import type { FastifyInstance } from 'fastify';
 // docs. Plain HTML — no client JS, readable in any in-app browser.
 // ---------------------------------------------------------------------------
 
-const LAST_UPDATED = '15 July 2026';
+/** Machine version of the served legal pack — stamped onto User.tosVersion at
+ *  signup consent [SWIFT-AUD-D9-03]. Bump BOTH constants together whenever the
+ *  Terms/Privacy content changes. */
+export const LEGAL_VERSION = '2026-07-15';
+const LAST_UPDATED = '15 July 2026'; // human form of LEGAL_VERSION
 
 function page(title: string, body: string): string {
   return `<!doctype html>

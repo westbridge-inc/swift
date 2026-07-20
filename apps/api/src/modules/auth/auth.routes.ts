@@ -22,6 +22,9 @@ const registerSchema = z.object({
   email: z.string().email().optional(),
   role: z.enum(['CUSTOMER', 'MOVER', 'VENDOR']).default('CUSTOMER'),
   countryCode: z.string().length(2).default('GY'),
+  /// SWIFT-AUD-D9-03: recorded consent. Optional so shipped clients keep
+  /// working; CONSENT_REQUIRED=1 enforces it once updated clients are out.
+  acceptTerms: z.boolean().optional(),
 });
 
 const refreshSchema = z.object({
@@ -80,6 +83,11 @@ export async function authRoutes(app: FastifyInstance) {
 
   app.post('/register', authRateLimit, async (request, reply) => {
     const body = registerSchema.parse(request.body);
+    // Read at request time so the flag flips without a restart (tsx watch) and
+    // tests can exercise both modes.
+    if (process.env['CONSENT_REQUIRED'] === '1' && body.acceptTerms !== true) {
+      throw new AppError(400, 'CONSENT_REQUIRED', 'You must accept the Terms of Service and Privacy Policy to create an account');
+    }
     const result = await authService.register(body);
     return reply.status(201).send({ success: true, data: result });
   });
