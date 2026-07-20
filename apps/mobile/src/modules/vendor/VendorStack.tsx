@@ -294,7 +294,13 @@ function VendorOnboarding({ store, onPreview }: { store: any; onPreview: () => v
   );
 }
 
-function VendorOrderCard({
+// Memoized: the live board re-renders on every socket event, but react-query's
+// structural sharing keeps the SAME reference for orders that didn't change, so
+// comparing `order` by reference re-renders only the card whose order actually
+// moved — not the whole list (D6-MOB-03). The inline onAction/onOpen closures
+// change each render but are equivalent for a given order id, so ignoring them
+// is safe.
+const VendorOrderCard = React.memo(function VendorOrderCard({
   order,
   onAction,
   onOpen,
@@ -456,7 +462,7 @@ function VendorOrderCard({
       )}
     </Pressable>
   );
-}
+}, (prev, next) => prev.order === next.order && prev.busy === next.busy && prev.showStore === next.showStore);
 
 function VendorOps({ store, navigation }: any) {
   const toggleOpen = useToggleOpen();
