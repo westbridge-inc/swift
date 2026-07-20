@@ -266,6 +266,10 @@ export const courierApi = {
   orders: () => api.get('/courier/orders'),
   get: (id: string) => api.get(`/courier/order/${id}`),
   cancel: (id: string, reason?: string) => api.post(`/courier/order/${id}/cancel`, { reason }),
+  // Proof of delivery (D8-02): upload the photo → get a url → confirm handoff.
+  uploadProof: (id: string, form: FormData) =>
+    api.post(`/courier/order/${id}/proof-photo`, form, { headers: { 'Content-Type': 'multipart/form-data' } }),
+  proof: (id: string, proofPhotoUrl: string) => api.post(`/courier/order/${id}/proof`, { proofPhotoUrl }),
 };
 
 // Services (mounted at /api/v1/services)

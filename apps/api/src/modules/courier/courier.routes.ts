@@ -9,6 +9,8 @@ import { NotificationService } from '../notification/notification.service';
 import { orderingRestriction } from '../cash/cash-rules.service';
 import { generateOrderNumber } from '../../utils/markup';
 import { AppError, NotFoundError } from '../../utils/errors';
+import { getStorageProvider } from '../../providers/storage/storage-provider';
+import { ALLOWED_IMAGE_TYPES, looksLikeImage } from '../../utils/images';
 
 // ---------------------------------------------------------------------------
 // Module C: Courier (spec §4.3) — send a parcel person-to-person. A non-cart
@@ -66,6 +68,7 @@ export default async function courierRoutes(app: FastifyInstance) {
   const dispatch = makeDispatchService(app);
   const orderService = new OrderService(app.prisma, app.io);
   const notifications = new NotificationService(app.prisma, app.io);
+  const storage = getStorageProvider();
 
   /** Terminal courier writes happen outside updateStatus (they carry courier-
    *  specific fields and may skip intermediate states), so the terminal
@@ -238,6 +241,38 @@ export default async function courierRoutes(app: FastifyInstance) {
     }
 
     return { success: true, data: updated };
+  });
+
+  /** POST /order/:id/proof-photo — the assigned rider uploads the delivery photo
+   *  (magic-byte checked, stored in a public folder), then confirms the handoff
+   *  via /proof with the returned url. Two steps keep the CAS handoff transition
+   *  (and its concurrency test) untouched. Proof photos are delivery-confirmation
+   *  images, not KYC — public like item photos, never the private document path. */
+  app.post<{ Params: { id: string } }>('/order/:id/proof-photo', auth, async (request) => {
+    const { id } = request.params;
+    const rider = await app.prisma.rider.findUnique({ where: { userId: request.user.userId }, select: { id: true } });
+    if (!rider) throw new NotFoundError('Rider');
+    const order = await app.prisma.order.findFirst({
+      where: { id, orderType: 'COURIER', riderId: rider.id },
+      select: { id: true, status: true },
+    });
+    if (!order) throw new NotFoundError('CourierOrder', id);
+    if (['DELIVERED', 'COMPLETED', 'CANCELLED'].includes(order.status)) {
+      throw new AppError(400, 'NOT_IN_TRANSIT', 'This courier job is already closed');
+    }
+
+    const file = await request.file();
+    if (!file) throw new AppError(400, 'NO_FILE', 'Attach a photo of the delivery');
+    if (!ALLOWED_IMAGE_TYPES.has(file.mimetype)) {
+      throw new AppError(400, 'BAD_IMAGE_TYPE', 'Only JPEG, PNG or WebP images are accepted');
+    }
+    const buffer = await file.toBuffer();
+    if (!looksLikeImage(buffer)) {
+      throw new AppError(400, 'BAD_IMAGE', 'File content does not match an image format');
+    }
+
+    const { url } = await storage.upload({ buffer, filename: file.filename, mimeType: file.mimetype, folder: `courier-proof/${id}` });
+    return { success: true, data: { url } };
   });
 
   /** POST /order/:id/proof — the assigned rider confirms handoff with proof. */

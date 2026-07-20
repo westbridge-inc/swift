@@ -4,11 +4,13 @@ import { Linking, Pressable, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import MapView, { Marker, PROVIDER_DEFAULT, Polyline } from 'react-native-maps';
 import BottomSheet, { BottomSheetScrollView } from '@gorhom/bottom-sheet';
+import * as ImagePicker from 'expo-image-picker';
 import { color, radius, space } from '@swift/ui';
 import { Feather, MaterialCommunityIcons } from '@expo/vector-icons';
 import { EmptyState, LabeledInput, PillButton, PopupCard, Screen, T, cardShadow } from '../../../kit';
 import { Stars } from '../../../kit/controls';
-import { useMoverKind, useActiveJob, useDriverAction, useRiderAction, useRateCustomer } from '../../../hooks';
+import { useMoverKind, useActiveJob, useDriverAction, useRiderAction, useRateCustomer, useCourierProof } from '../../../hooks';
+import { toast } from '../../../components/ui/toast';
 import { useLocationStore } from '../../../stores/locationStore';
 import { haversineKm, streetEtaMin } from '../../../lib/geo';
 import { jobAmount, RoutePair } from '../shared';
@@ -98,6 +100,7 @@ export function ActiveJobScreen({ navigation }: any) {
   const active = useActiveJob(kind);
   const driverAct = useDriverAction();
   const riderAct = useRiderAction();
+  const courierProof = useCourierProof();
   const rate = useRateCustomer();
   const { latitude, longitude } = useLocationStore();
   const [pin, setPin] = useState('');
@@ -130,8 +133,31 @@ export function ActiveJobScreen({ navigation }: any) {
         ? { ...pickup, latitudeDelta: 0.02, longitudeDelta: 0.02 }
         : undefined;
 
-  const busy = driverAct.isPending || riderAct.isPending;
+  const busy = driverAct.isPending || riderAct.isPending || courierProof.isPending;
   const isDriver = kind === 'DRIVER';
+  // Courier deliveries close with a proof-of-delivery photo (D8-02): capture →
+  // upload → the handoff transition (which pays the rider). Everything else uses
+  // the plain "Mark delivered" action.
+  const isCourier = String(job?.orderType ?? '').toUpperCase() === 'COURIER';
+  const captureCourierProof = async () => {
+    const perm = await ImagePicker.requestCameraPermissionsAsync();
+    if (!perm.granted) {
+      toast.error('Camera access is needed to capture proof of delivery.');
+      return;
+    }
+    const shot = await ImagePicker.launchCameraAsync({ quality: 0.6 });
+    if (shot.canceled || !shot.assets?.[0]) return;
+    courierProof.mutate(
+      { orderId: job.id, uri: shot.assets[0].uri },
+      {
+        onSuccess: () => active.refetch?.(),
+        onError: () => toast.error('Couldn’t save the proof. Try again.'),
+      },
+    );
+  };
+  const markDelivered = () =>
+    isCourier ? captureCourierProof() : riderAct.mutate({ id: job.id, action: 'delivered' });
+  const deliverLabel = isCourier ? 'Capture proof & deliver' : 'Mark delivered';
   // MMG direct-pay: the customer already paid the STORE — the rider collects
   // NOTHING at the door; their delivery fee comes from the store in cash.
   const isMmgPaid = job?.paymentMethod === 'MOBILE_MONEY';
@@ -358,7 +384,7 @@ export function ActiveJobScreen({ navigation }: any) {
                       : `Customer already paid via MMG. Collect your ${feeLabel} delivery fee from the store with the order.`}
                   </T>
                 </View>
-                {bigButton('Mark delivered', () => riderAct.mutate({ id: job.id, action: 'delivered' }), { loading: riderAct.isPending, disabled: busy })}
+                {bigButton(deliverLabel, markDelivered, { loading: riderAct.isPending || courierProof.isPending, disabled: busy })}
               </>
             ) : (
               <>
@@ -370,7 +396,7 @@ export function ActiveJobScreen({ navigation }: any) {
                 </View>
                 <PillButton label="Confirm payment & hand over" variant="outline" disabled={busy} onPress={() => riderAct.mutate({ id: job.id, action: 'handover' })} />
                 <View style={{ marginTop: space.md }}>
-                  {bigButton('Mark delivered', () => riderAct.mutate({ id: job.id, action: 'delivered' }), { loading: riderAct.isPending, disabled: busy })}
+                  {bigButton(deliverLabel, markDelivered, { loading: riderAct.isPending || courierProof.isPending, disabled: busy })}
                 </View>
               </>
             )}

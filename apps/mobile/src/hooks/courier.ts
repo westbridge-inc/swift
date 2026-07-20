@@ -29,3 +29,23 @@ export function useSendCourier() {
     onSuccess: () => qc.invalidateQueries({ queryKey: ['courier', 'orders'] }),
   });
 }
+
+/** Proof of delivery (D8-02): upload the captured photo, then confirm the
+ *  handoff with the returned url. One mutation, two server calls. */
+export function useCourierProof() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async ({ orderId, uri }: { orderId: string; uri: string }) => {
+      const form = new FormData();
+      form.append('file', { uri, name: 'proof.jpg', type: 'image/jpeg' } as unknown as Blob);
+      const up = await courierApi.uploadProof(orderId, form);
+      const url = (up as any)?.data?.data?.url as string;
+      if (!url) throw new Error('upload failed');
+      return unwrap(courierApi.proof(orderId, url));
+    },
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['courier', 'orders'] });
+      qc.invalidateQueries({ queryKey: ['mover'] });
+    },
+  });
+}
