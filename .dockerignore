@@ -1,0 +1,59 @@
+# Build-context minimization + secret hygiene [SWIFT-UG-SEC-01].
+# Both Dockerfiles `COPY . .` from the repo root; nothing below may enter a
+# builder layer or remote-builder cache. The runtime stages copy only built
+# artifacts, but builder layers persist in caches — keep secrets out entirely.
+
+.git
+.github
+
+# Secrets & local env — images get configuration at runtime, never baked in
+.env
+.env.*
+**/.env
+**/.env.*
+!.env.example
+!**/.env.example
+*.pem
+*.key
+*.p8
+*.p12
+*.jks
+*.keystore
+google-services.json
+GoogleService-Info.plist
+
+# Local data that must never enter an image: KYC uploads, internal reports
+uploads
+**/uploads
+reports
+design
+CLAUDE.md
+RESKIN.md
+
+# Dependencies & host build artifacts (rebuilt inside the image)
+node_modules
+**/node_modules
+dist
+**/dist
+build
+**/build
+.next
+**/.next
+.turbo
+**/.turbo
+coverage
+**/coverage
+*.tsbuildinfo
+
+# Heavy native/mobile artifacts irrelevant to server images
+apps/mobile/ios
+apps/mobile/android
+apps/mobile/.expo
+apps/desktop/src-tauri/target
+
+# Noise
+.DS_Store
+**/.DS_Store
+*.log
+.vscode
+.idea
