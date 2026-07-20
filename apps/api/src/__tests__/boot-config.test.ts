@@ -6,7 +6,7 @@ import { assertSafeBootConfig } from '../utils/boot-config';
 // without the OTP-bypass guard. Non-production is unaffected.
 
 const KEK = Buffer.alloc(32, 7).toString('base64'); // valid 32-byte base64
-const good: Record<string, string | undefined> = { NODE_ENV: 'production', MASTER_KEK: KEK, STORAGE_SIGNING_SECRET: 'a-real-secret' };
+const good: Record<string, string | undefined> = { NODE_ENV: 'production', MASTER_KEK: KEK, STORAGE_SIGNING_SECRET: 'a-real-secret', STORAGE_PROVIDER: 's3' };
 
 describe('assertSafeBootConfig — fail-closed production secrets', () => {
   it('boots when every required secret is present', () => {
@@ -31,6 +31,26 @@ describe('assertSafeBootConfig — fail-closed production secrets', () => {
 
   it('still refuses DEV_OTP_BYPASS=1 in production', () => {
     expect(() => assertSafeBootConfig({ ...good, DEV_OTP_BYPASS: '1' })).toThrow(/DEV_OTP_BYPASS/);
+  });
+
+  // SWIFT-AUD-D6-06: the default 'local' storage provider writes uploads/KYC
+  // documents to one instance's disk — fragmenting on multi-instance deploys
+  // and sitting outside the backup story. Production must pick a real
+  // provider, or explicitly acknowledge a single-instance pilot.
+  it('refuses to boot in production with STORAGE_PROVIDER unset (defaults to local disk)', () => {
+    expect(() => assertSafeBootConfig({ ...good, STORAGE_PROVIDER: undefined })).toThrow(/STORAGE_PROVIDER/);
+  });
+
+  it('refuses local storage in production without the explicit acknowledgement', () => {
+    expect(() => assertSafeBootConfig({ ...good, STORAGE_PROVIDER: 'local' })).toThrow(/STORAGE_PROVIDER/);
+  });
+
+  it('allows local storage in production only with STORAGE_ALLOW_LOCAL=1 (deliberate pilot)', () => {
+    expect(() => assertSafeBootConfig({ ...good, STORAGE_PROVIDER: 'local', STORAGE_ALLOW_LOCAL: '1' })).not.toThrow();
+  });
+
+  it('accepts the real object-storage providers', () => {
+    expect(() => assertSafeBootConfig({ ...good, STORAGE_PROVIDER: 'r2' })).not.toThrow();
   });
 
   it('does NOT enforce any of this outside production (dev/test boot freely)', () => {

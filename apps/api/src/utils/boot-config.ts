@@ -34,4 +34,15 @@ export function assertSafeBootConfig(env: Record<string, string | undefined> = p
   if (!signing || signing === 'dev-signing-secret') {
     throw new Error('FATAL: STORAGE_SIGNING_SECRET must be set to a non-default value in production — the document render/signed-URL HMAC depends on it. Refusing to start.');
   }
+
+  // SWIFT-AUD-D6-06: the default 'local' storage provider writes uploads and
+  // KYC documents to this instance's disk. On a multi-instance or
+  // ephemeral-disk deploy the files silently fragment or vanish, and they sit
+  // outside the database backup story. Require a real object-storage
+  // provider; STORAGE_ALLOW_LOCAL=1 is the explicit acknowledgement for a
+  // deliberate single-instance pilot on a persistent volume.
+  const storage = env['STORAGE_PROVIDER'] ?? 'local';
+  if (storage === 'local' && env['STORAGE_ALLOW_LOCAL'] !== '1') {
+    throw new Error('FATAL: STORAGE_PROVIDER is local (or unset) in production — uploads and verification documents would live on a single instance\'s disk. Set STORAGE_PROVIDER=s3|r2, or STORAGE_ALLOW_LOCAL=1 only for a deliberate single-instance pilot with a persistent volume.');
+  }
 }
