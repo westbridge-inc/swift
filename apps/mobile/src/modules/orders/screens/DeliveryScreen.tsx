@@ -169,6 +169,9 @@ export function DeliveryScreen() {
 
   const order = useOrder<any>(orderId, 15000);
   const [courier, setCourier] = useState<{ latitude: number; longitude: number } | null>(null);
+  // Server-computed ETA for the courier's ACTIVE leg, refreshed with the
+  // location stream [SWIFT-UG-RT-01]. Null until the first event lands.
+  const [liveEtaMin, setLiveEtaMin] = useState<number | null>(null);
   const [arrived, setArrived] = useState(false);
   const [confirmCancel, setConfirmCancel] = useState(false);
   const prevStatus = useRef<string | null>(null);
@@ -196,9 +199,11 @@ export function DeliveryScreen() {
     const s = getSocket();
     const onRider = (p: any) => {
       if (p?.lat != null && p?.lng != null) setCourier({ latitude: p.lat, longitude: p.lng });
+      if (typeof p?.etaMinutes === 'number') setLiveEtaMin(p.etaMinutes);
     };
     const onDriver = (p: any) => {
       if (p?.latitude != null && p?.longitude != null) setCourier({ latitude: p.latitude, longitude: p.longitude });
+      if (typeof p?.etaMinutes === 'number') setLiveEtaMin(p.etaMinutes);
     };
     const onStatus = () => order.refetch();
     s.on('rider:location', onRider);
@@ -504,7 +509,11 @@ export function DeliveryScreen() {
                 ) : null}
               </View>
               <T variant="label" tone="muted" style={{ marginTop: 2 }}>
-                {eta ? `Estimated by ${eta}` : 'The store will confirm your order shortly'}
+                {liveEtaMin != null
+                  ? `Arriving in ~${liveEtaMin} min`
+                  : eta
+                    ? `Estimated by ${eta}`
+                    : 'The store will confirm your order shortly'}
               </T>
               {o.deliveryAddress ? (
                 <T variant="caption" tone="faint" style={{ marginTop: 2 }} numberOfLines={1}>

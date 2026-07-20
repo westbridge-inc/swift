@@ -513,6 +513,8 @@ function ActiveRide({ navigation, ride, cancelRide, insets }: any) {
   const sheetRef = useRef<BottomSheet>(null);
   const [confirmCancel, setConfirmCancel] = useState(false);
   const [liveDriver, setLiveDriver] = useState<LatLng | null>(null);
+  // Server-computed active-leg ETA riding the same stream [SWIFT-UG-RT-01].
+  const [liveEtaMin, setLiveEtaMin] = useState<number | null>(null);
   const d = ride.driver;
 
   // Live driver position: taxi rides are orders, so the order room streams
@@ -527,6 +529,7 @@ function ActiveRide({ navigation, ride, cancelRide, insets }: any) {
       if (p?.latitude != null && p?.longitude != null) {
         setLiveDriver({ latitude: Number(p.latitude), longitude: Number(p.longitude) });
       }
+      if (typeof p?.etaMinutes === 'number') setLiveEtaMin(p.etaMinutes);
     };
     s.on('driver:location', onDriver);
     return () => {
@@ -544,12 +547,22 @@ function ActiveRide({ navigation, ride, cancelRide, insets }: any) {
 
   const status = String(ride.status ?? '').toUpperCase();
   const arrived = status === 'DRIVER_ARRIVED';
-  // "Arrives in ~X min" while the driver closes on the pickup — live off the
-  // same driver:location stream that moves the map marker.
-  const pickupEta =
-    (status === 'DRIVER_ASSIGNED' || status === 'DRIVER_EN_ROUTE') && driverLoc && pickup
-      ? streetEtaMin(driverLoc, pickup)
-      : null;
+  // Reset the streamed ETA when the leg changes so a pickup-leg number never
+  // lingers into the dropoff leg (the fallback fills the gap until the next
+  // server refresh).
+  useEffect(() => {
+    setLiveEtaMin(null);
+  }, [status]);
+  // Live leg ETA [SWIFT-UG-RT-01]: the server refreshes etaMinutes on the
+  // driver:location stream (road-routed when OSRM is live) — pickup leg
+  // before the ride starts, dropoff leg during it. The straight-line
+  // estimate stays as the fallback until the first event lands.
+  const legEta =
+    status === 'DRIVER_ASSIGNED' || status === 'DRIVER_EN_ROUTE'
+      ? (liveEtaMin ?? (driverLoc && pickup ? streetEtaMin(driverLoc, pickup) : null))
+      : status === 'RIDE_IN_PROGRESS'
+        ? (liveEtaMin ?? (driverLoc && drop ? streetEtaMin(driverLoc, drop) : null))
+        : null;
 
   const shareTrip = () => {
     const vehicle = [d?.vehicleColor, d?.vehicleMake, d?.vehicleModel].filter(Boolean).join(' ');
@@ -626,7 +639,7 @@ function ActiveRide({ navigation, ride, cancelRide, insets }: any) {
           ) : (
             <T variant="title">
               {STATUS_LABEL[ride.status] ?? 'On the way'}
-              {pickupEta != null ? ` · ~${pickupEta} min` : ''}
+              {legEta != null ? ` · ~${legEta} min` : ''}
             </T>
           )}
           <T variant="label" tone="muted" style={{ marginTop: 4 }}>

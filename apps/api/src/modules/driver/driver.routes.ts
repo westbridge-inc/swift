@@ -15,6 +15,7 @@ import { throwForMissingProfile } from '../../utils/role-gate';
 import { clampDriverFare } from '../../utils/markup';
 import { ALLOWED_IMAGE_TYPES, looksLikeImage } from '../../utils/images';
 import { getStorageProvider } from '../../providers/storage/storage-provider';
+import { refreshLegEta, cachedLegEta } from '../dispatch/live-eta';
 
 const updateDriverProfileSchema = z.object({
   vehicleMake: z.string().max(50).optional(),
@@ -219,7 +220,8 @@ export async function driverRoutes(app: FastifyInstance) {
     // reads the persisted fix, and a <10 s-stale point is noise at ride speeds —
     // this keeps a busy fleet from hitting PG on every ping.
     const lastDbWrite = await app.redis.get(`driver:location_db_ts:${driver.id}`);
-    if (!lastDbWrite || Date.now() - parseInt(lastDbWrite, 10) > 10_000) {
+    const shouldWriteDb = !lastDbWrite || Date.now() - parseInt(lastDbWrite, 10) > 10_000;
+    if (shouldWriteDb) {
       await app.prisma.driver.update({
         where: { id: driver.id },
         data: {
@@ -236,12 +238,19 @@ export async function driverRoutes(app: FastifyInstance) {
 
     // Broadcast location to anyone tracking this ride
     if (driver.currentRideId) {
+      // Live-leg ETA [SWIFT-UG-RT-01]: pickup ETA while en route to the
+      // passenger, dropoff ETA once the ride is in progress — refreshed on
+      // the throttled branch, cached in between (same policy as the rider).
+      const etaMinutes = shouldWriteDb
+        ? await refreshLegEta(app, driver.currentRideId, { lat: latitude, lng: longitude })
+        : await cachedLegEta(app, driver.currentRideId);
       app.io.to(`order:${driver.currentRideId}`).emit('driver:location', {
         driverId: driver.id,
         orderId: driver.currentRideId,
         latitude,
         longitude,
         heading: heading || null,
+        etaMinutes,
         timestamp: new Date().toISOString(),
       });
     }

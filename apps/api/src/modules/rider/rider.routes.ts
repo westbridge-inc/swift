@@ -9,6 +9,7 @@ import { BillingService } from '../billing/billing.service';
 import { getPaymentProvider } from '../../providers/payment/payment-provider';
 import { DeliveryCashSettlementService, assertSettlementId } from '../cash/delivery-cash-settlement.service';
 import { makeDispatchService } from '../dispatch/dispatch.service';
+import { refreshLegEta, cachedLegEta } from '../dispatch/live-eta';
 import { getKycProvider } from '../../providers/kyc/kyc-provider';
 import { haversineDistance } from '../../utils/distance';
 import { estimateLoad } from '../../utils/load';
@@ -428,12 +429,19 @@ export async function riderRoutes(app: FastifyInstance) {
 
     // Broadcast to order room if rider has an active order.
     if (rider.currentOrderId) {
+      // Live-leg ETA [SWIFT-UG-RT-01]: recomputed on the same ≥10 s throttle
+      // as the DB write, served from cache on the pings in between — the
+      // tracking screen gets a moving ETA without a maps call per ping.
+      const etaMinutes = shouldWriteDb
+        ? await refreshLegEta(app, rider.currentOrderId, { lat: latitude, lng: longitude })
+        : await cachedLegEta(app, rider.currentOrderId);
       app.io.to(`order:${rider.currentOrderId}`).emit('rider:location', {
         riderId: rider.id,
         lat: latitude,
         lng: longitude,
         heading: heading ?? null,
         speed: speed ?? null,
+        etaMinutes,
         ts: now.toISOString(),
       });
     }
