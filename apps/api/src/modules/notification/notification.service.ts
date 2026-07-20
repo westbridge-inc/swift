@@ -1,6 +1,7 @@
 import type { PrismaClient } from '@prisma/client';
 import type { Server } from 'socket.io';
 import { getChannels, type NotificationChannels } from '../../providers/notifications/channels';
+import { log } from '../../utils/logger';
 
 /** Per-user channel switches; the vendor order alert ignores these. */
 interface NotificationPrefs {
@@ -138,6 +139,14 @@ export async function notifyAdmins(
       data: input.data,
     });
   }
+  // SWIFT-AUD-D7-03: ops pages get the same ack-tracking as vendor/mover
+  // alerts, so /alerts/health can show whether anyone actually SAW them.
+  if (admins.length > 0) {
+    const subjectId = String((input.data?.['kind'] as string | undefined) ?? 'ops');
+    await prisma.alertDelivery
+      .createMany({ data: admins.map((a) => ({ kind: 'ADMIN_OPS', subjectId, recipientId: a.id })) })
+      .catch(() => {});
+  }
   return admins.length;
 }
 
@@ -185,11 +194,15 @@ export class NotificationService {
         select: { token: true },
       });
       if (tokens.length > 0) {
-        // Channel failures must never break the request path
+        // Channel failures must never break the request path — but after the
+        // provider-level retries (withPushRetry) a final failure is LOGGED,
+        // never swallowed silently [SWIFT-UG-NOTIF-01].
         await this.channels.push
           .sendPush(tokens.map((t) => t.token), payload.title, payload.body, payload.data)
           .then((r) => deactivateDeadTokens(this.prisma, r.invalidTokens))
-          .catch(() => {});
+          .catch((err) => {
+            log().warn({ err, userId: payload.userId, type: payload.type }, 'push delivery failed after retries');
+          });
       }
     }
 
@@ -269,11 +282,14 @@ export class NotificationService {
   }
 
   async orderPickedUp(customerId: string, orderNumber: string, riderName: string, orderId: string, eta: number): Promise<void> {
+    // Template guard [SWIFT-UG-NOTIF-02]: a missing/NaN ETA must never render
+    // "Arriving in ~undefined min" to a customer.
+    const etaPart = typeof eta === 'number' && Number.isFinite(eta) ? ` Arriving in ~${Math.max(1, Math.round(eta))} min.` : '';
     await this.send({
       userId: customerId,
       type: 'ORDER_UPDATE',
       title: 'On Its Way!',
-      body: `${riderName} picked up your order ${orderNumber}. Arriving in ~${eta} min.`,
+      body: `${riderName} picked up your order ${orderNumber}.${etaPart}`,
       data: { orderId, orderNumber, status: 'PICKED_UP', eta },
     });
   }

@@ -45,7 +45,9 @@ describe('getPushProvider', () => {
 
   it('composes into getChannels for both sms provider bundles', () => {
     process.env['PUSH_PROVIDER'] = 'expo';
-    expect(getChannels().push).toBeInstanceOf(ExpoPushProvider);
+    // getChannels wraps push in withPushRetry [SWIFT-UG-NOTIF-01] — the
+    // selected provider sits behind the wrapper's `inner`.
+    expect((getChannels().push as { inner?: unknown }).inner).toBeInstanceOf(ExpoPushProvider);
   });
 });
 
