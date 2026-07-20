@@ -7,6 +7,7 @@ import { socketPlugin } from '../plugins/socket';
 import { authRoutes } from '../modules/auth/auth.routes';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { requestOtp, loginWithOtp, wrongCode } from './helpers/otp';
+import { LEGAL_VERSION } from '../modules/legal/legal.routes';
 
 // ---------------------------------------------------------------------------
 // Setup
@@ -206,6 +207,71 @@ describe('Auth Routes', () => {
       expect(res.statusCode).toBe(409);
       const body = res.json();
       expect(body.error.code).toBe('USER_EXISTS');
+    });
+
+    // SWIFT-AUD-D9-03: DPA-2023 consent must be demonstrable — the acceptance
+    // is recorded server-side with the legal version it covered. Optional in
+    // the schema so shipped clients keep working; CONSENT_REQUIRED=1 flips
+    // enforcement once updated clients are out.
+    describe('consent recording [SWIFT-AUD-D9-03]', () => {
+      const consentPhone = '+5929998866';
+      const noConsentPhone = '+5929998855';
+
+      afterAll(async () => {
+        delete process.env['CONSENT_REQUIRED'];
+        for (const phone of [consentPhone, noConsentPhone]) {
+          const u = await app.prisma.user.findUnique({ where: { phone } });
+          if (u) {
+            await app.prisma.session.deleteMany({ where: { userId: u.id } });
+            await app.prisma.customer.deleteMany({ where: { userId: u.id } });
+            await app.prisma.user.delete({ where: { id: u.id } });
+          }
+        }
+      });
+
+      it('stamps acceptedTermsAt + the served legal version when the client accepts', async () => {
+        await loginWithOtp(app, consentPhone);
+        const res = await inject('POST', '/api/v1/auth/register', {
+          phone: consentPhone,
+          firstName: 'Consent',
+          lastName: 'Given',
+          acceptTerms: true,
+        });
+        expect(res.statusCode).toBe(201);
+        const row = await app.prisma.user.findUnique({ where: { phone: consentPhone } });
+        expect(row?.acceptedTermsAt).toBeInstanceOf(Date);
+        expect(row?.tosVersion).toBe(LEGAL_VERSION);
+      });
+
+      it('still registers old clients that send no consent field — and stamps nothing', async () => {
+        await loginWithOtp(app, noConsentPhone);
+        const res = await inject('POST', '/api/v1/auth/register', {
+          phone: noConsentPhone,
+          firstName: 'Old',
+          lastName: 'Client',
+        });
+        expect(res.statusCode).toBe(201);
+        const row = await app.prisma.user.findUnique({ where: { phone: noConsentPhone } });
+        expect(row?.acceptedTermsAt).toBeNull();
+        expect(row?.tosVersion).toBeNull();
+      });
+
+      it('CONSENT_REQUIRED=1 refuses a consent-less registration', async () => {
+        process.env['CONSENT_REQUIRED'] = '1';
+        try {
+          const phone = '+5929998844'; // never registers → nothing to clean up
+          await loginWithOtp(app, phone);
+          const res = await inject('POST', '/api/v1/auth/register', {
+            phone,
+            firstName: 'No',
+            lastName: 'Consent',
+          });
+          expect(res.statusCode).toBe(400);
+          expect(res.json().error.code).toBe('CONSENT_REQUIRED');
+        } finally {
+          delete process.env['CONSENT_REQUIRED'];
+        }
+      });
     });
   });
 

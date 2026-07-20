@@ -53,7 +53,9 @@ export default function SignupPage() {
     setStep('name');
   });
   const doRegister = () => wrap(async () => {
-    await registerAccount({ phone: phone.trim(), firstName: first.trim(), lastName: last.trim() || 'Swift', role });
+    // Consent is explicit clickwrap: the agreement line sits directly above
+    // the button that triggers this. Recorded server-side [SWIFT-AUD-D9-03].
+    await registerAccount({ phone: phone.trim(), firstName: first.trim(), lastName: last.trim() || 'Swift', role, acceptTerms: true });
     if (role === 'CUSTOMER') router.replace('/order');
     else setStep(role === 'VENDOR' ? 'business' : 'vehicle');
   });
@@ -108,6 +110,12 @@ export default function SignupPage() {
             <p className="font-bold">Your name</p>
             <input value={first} onChange={(e) => setFirst(e.target.value)} placeholder="First name" className={input} />
             <input value={last} onChange={(e) => setLast(e.target.value)} placeholder="Last name" className={input} />
+            <p className="text-xs text-[var(--swift-muted)]">
+              By creating an account you agree to the{' '}
+              <a href="/legal/terms" target="_blank" rel="noreferrer" className="font-semibold text-[var(--swift-red)]">Terms of Service</a>{' '}
+              and{' '}
+              <a href="/legal/privacy" target="_blank" rel="noreferrer" className="font-semibold text-[var(--swift-red)]">Privacy Policy</a>.
+            </p>
             <button onClick={doRegister} disabled={busy || !first.trim()} className={primary}>{busy ? 'Creating…' : 'Create account'}</button>
           </div>
         )}

@@ -31,6 +31,13 @@ model User {
   isPhoneVerified Boolean    @default(false)
   isEmailVerified Boolean    @default(false)
 
+  /// DPA-2023 consent demonstrability [SWIFT-AUD-D9-03]: stamped at signup
+  /// when the client sends acceptTerms; tosVersion = the LEGAL_VERSION served
+  /// at that moment. Null on accounts created before consent recording (or by
+  /// old clients while CONSENT_REQUIRED is off).
+  acceptedTermsAt DateTime?
+  tosVersion      String?
+
   /// Locked domain model: L1 phone-verified (mandatory), L2 ID-verified
   /// (required for orders >= the CountryConfig USD-equivalent gate), L3 earned.
   trustLevel TrustLevel @default(L1)

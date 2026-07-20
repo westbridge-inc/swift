@@ -8,6 +8,7 @@ import { generateOtp, storeOtp, verifyOtp, checkOtpRateLimit } from '../../utils
 import { checkOtpDailyBudget } from '../../utils/sms-budget';
 import { CountryConfigService } from '../country/country-config.service';
 import { getChannels } from '../../providers/notifications/channels';
+import { LEGAL_VERSION } from '../legal/legal.routes';
 
 interface DeviceInfo {
   deviceId: string;
@@ -142,6 +143,7 @@ export class AuthService {
     email?: string;
     role?: SignupRole;
     countryCode?: string;
+    acceptTerms?: boolean;
   }) {
     const existing = await this.app.prisma.user.findUnique({ where: { phone: data.phone } });
     if (existing) {
@@ -190,6 +192,9 @@ export class AuthService {
         activeRole,
         countryCode,
         isPhoneVerified: true,
+        // SWIFT-AUD-D9-03: consent is recorded with the version it covered —
+        // demonstrable under DPA 2023, not just a client-side checkbox.
+        ...(data.acceptTerms === true && { acceptedTermsAt: new Date(), tosVersion: LEGAL_VERSION }),
         customer: { create: {} },
         ...(signupRole === 'VENDOR' && { vendorOwner: { create: {} } }),
       },
