@@ -220,6 +220,12 @@ export function RestaurantScreen() {
   // Mart mode: aisle filter + in-store search + on-card add (Grab Mart, not a menu)
   const [aisleId, setAisleId] = useState<string | null>(null);
   const [storeQuery, setStoreQuery] = useState('');
+  // D6-MOB-01: a supermarket/store can carry hundreds of SKUs. Mounting every
+  // ProductTile (each an expo-image) at once opens slowly and risks OOM on the
+  // low-end Android of the launch market. Render a bounded window and grow it as
+  // the shopper nears the end. (Full unmount-on-scroll virtualization via
+  // FlashList is the on-device follow-up — this bounds the eager mount now.)
+  const [renderCap, setRenderCap] = useState(48);
   const cart = useCart<any>();
   const addToCart = useAddToCart();
   const updateCartItem = useUpdateCartItem();
@@ -241,6 +247,25 @@ export function RestaurantScreen() {
     const q = storeQuery.trim().toLowerCase();
     return q ? base.filter((i: any) => String(i.name).toLowerCase().includes(q)) : base;
   }, [aisleId, storeQuery, categories, allItems]);
+
+  // Bounded render windows (see renderCap above). The mart grid is a flat slice;
+  // the restaurant "full menu" caps the CUMULATIVE item count across categories
+  // so a huge store never mounts everything before the shopper scrolls to it.
+  const martShown = useMemo(() => martItems.slice(0, renderCap), [martItems, renderCap]);
+  const cappedCategories = useMemo(() => {
+    let budget = renderCap;
+    const out: any[] = [];
+    for (const cat of categories) {
+      if (budget <= 0) break;
+      const items = (cat.items ?? []).slice(0, budget);
+      if (items.length > 0) {
+        out.push({ ...cat, items });
+        budget -= items.length;
+      }
+    }
+    return out;
+  }, [categories, renderCap]);
+  const totalItems = isMart ? martItems.length : allItems.length;
 
   if (vendor.isLoading) {
     return (
@@ -277,7 +302,17 @@ export function RestaurantScreen() {
 
   return (
     <View style={{ flex: 1, backgroundColor: color.surface.subtle }}>
-      <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={{ paddingBottom: space['3xl'] }}>
+      <ScrollView
+        showsVerticalScrollIndicator={false}
+        contentContainerStyle={{ paddingBottom: space['3xl'] }}
+        scrollEventThrottle={64}
+        onScroll={(e) => {
+          const { contentOffset, contentSize, layoutMeasurement } = e.nativeEvent;
+          if (renderCap < totalItems && contentOffset.y + layoutMeasurement.height > contentSize.height - 1000) {
+            setRenderCap((c) => c + 48);
+          }
+        }}
+      >
         {/* Cover hero + floating chips */}
         <View>
           <Image
@@ -472,7 +507,7 @@ export function RestaurantScreen() {
                   paddingTop: space.lg,
                 }}
               >
-                {martItems.map((item: any) => (
+                {martShown.map((item: any) => (
                   <ProductTile
                     key={item.id}
                     item={item}
@@ -535,8 +570,8 @@ export function RestaurantScreen() {
             </>
           ) : null}
 
-          {/* Full menu by category */}
-          {categories.map((cat: any) =>
+          {/* Full menu by category (bounded window; see renderCap) */}
+          {cappedCategories.map((cat: any) =>
             (cat.items?.length ?? 0) > 0 ? (
               <View key={cat.id}>
                 <SectionHeader title={cat.name} style={{ paddingHorizontal: GUTTER, marginTop: space['3xl'] }} />
