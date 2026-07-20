@@ -1,4 +1,4 @@
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { track } from '../lib/analytics';
 import { customerApi, type AddressInput } from '../services/api';
 
@@ -92,6 +92,23 @@ export function useToggleFavorite() {
 
 export function useOrders<T = any>() {
   return useQuery<T>({ queryKey: customerKeys.orders, queryFn: () => unwrap<T>(customerApi.getOrders()) });
+}
+
+/** Paginated order history (D6-MOB-02): the endpoint pages at ~20, so the plain
+ *  query only ever showed the most recent page — older orders were unreachable.
+ *  This walks every page via the FlatList's onEndReached. */
+export function useOrdersInfinite() {
+  return useInfiniteQuery({
+    queryKey: [...customerKeys.orders, 'infinite'],
+    initialPageParam: 1,
+    queryFn: async ({ pageParam }) => {
+      const res = await customerApi.getOrders(pageParam as number);
+      const body = res?.data ?? {};
+      return { items: (body.data ?? []) as any[], meta: body.meta ?? { page: 1, totalPages: 1 } };
+    },
+    getNextPageParam: (last: { meta: { page: number; totalPages: number } }) =>
+      last.meta.page < last.meta.totalPages ? last.meta.page + 1 : undefined,
+  });
 }
 
 export function useOrder<T = any>(id: string, refetchInterval?: number) {

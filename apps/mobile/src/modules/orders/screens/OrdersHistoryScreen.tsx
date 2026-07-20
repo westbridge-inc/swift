@@ -5,7 +5,7 @@ import { Image } from 'expo-image';
 import { useNavigation, useIsFocused } from '@react-navigation/native';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 import { color, radius, space } from '@swift/ui';
-import { useOrders, useReorder } from '../../../hooks/customer';
+import { useOrdersInfinite, useReorder } from '../../../hooks/customer';
 import { useAuthStore } from '../../../stores/authStore';
 import { DARK_BLURHASH, vendorImage } from '../../../lib/images';
 import { money } from '../../../lib/money';
@@ -40,7 +40,7 @@ const ACTIVE = new Set([
 export function OrdersHistoryScreen() {
   const navigation = useNavigation<any>();
   const { isAuthenticated, promptLogin } = useAuthStore();
-  const orders = useOrders<any>();
+  const orders = useOrdersInfinite();
   const reorder = useReorder();
 
   // Tab screens stay mounted, so without this the list NEVER updates after
@@ -62,7 +62,7 @@ export function OrdersHistoryScreen() {
     );
   }
 
-  const rows: any[] = Array.isArray(orders.data) ? orders.data : (orders.data?.orders ?? []);
+  const rows: any[] = orders.data?.pages.flatMap((p: any) => p.items) ?? [];
 
   return (
     <Screen>
@@ -87,6 +87,17 @@ export function OrdersHistoryScreen() {
           keyExtractor={(o) => o.id}
           refreshControl={<RefreshControl refreshing={orders.isRefetching} onRefresh={() => orders.refetch()} tintColor={color.brand[500]} />}
           contentContainerStyle={{ padding: space['2xl'], gap: space.md, paddingBottom: space['3xl'] }}
+          onEndReachedThreshold={0.5}
+          onEndReached={() => {
+            if (orders.hasNextPage && !orders.isFetchingNextPage) orders.fetchNextPage();
+          }}
+          ListFooterComponent={
+            orders.isFetchingNextPage ? (
+              <T variant="caption" tone="muted" center style={{ paddingVertical: space.lg }}>
+                Loading more…
+              </T>
+            ) : null
+          }
           renderItem={({ item: o }) => {
             const st = STATUS_TONE[o.status] ?? { label: o.status, color: color.text.secondary, bg: color.surface.subtle };
             const active = ACTIVE.has(o.status);
