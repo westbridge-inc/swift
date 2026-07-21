@@ -14,6 +14,7 @@ import { getKycProvider } from '../../providers/kyc/kyc-provider';
 import { haversineDistance } from '../../utils/distance';
 import { estimateLoad } from '../../utils/load';
 import { parsePagination, paginatedResponse } from '../../utils/pagination';
+import { tenantCacheKey } from '../../utils/tenant-cache';
 import { AppError, NotFoundError, ConflictError, ValidationError } from '../../utils/errors';
 import { throwForMissingProfile } from '../../utils/role-gate';
 import { clampDriverFare } from '../../utils/markup';
@@ -1056,7 +1057,7 @@ export async function riderRoutes(app: FastifyInstance) {
     if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
       throw new AppError(400, 'NO_POSITION', 'Send lat/lng or go online so Swift knows where you are.');
     }
-    const cacheKey = `demand:RIDER:${lat.toFixed(2)}:${lng.toFixed(2)}`;
+    const cacheKey = tenantCacheKey(`demand:RIDER:${lat.toFixed(2)}:${lng.toFixed(2)}`);
     const cached = await app.redis.get(cacheKey);
     if (cached) return { success: true, data: JSON.parse(cached) };
     const { riderDemand } = await import('../dispatch/demand.service');

@@ -10,6 +10,7 @@ import { log } from '../../utils/logger';
 import { orderingRestriction } from '../cash/cash-rules.service';
 import { generateOrderNumber } from '../../utils/markup';
 import { AppError, NotFoundError } from '../../utils/errors';
+import { tenantCacheKey } from '../../utils/tenant-cache';
 
 // ---------------------------------------------------------------------------
 // Taxi: the fare is computed and SHOWN before any driver
@@ -57,7 +58,7 @@ export async function ridesRoutes(app: FastifyInstance) {
     const { lat, lng } = z
       .object({ lat: z.coerce.number().min(-90).max(90), lng: z.coerce.number().min(-180).max(180) })
       .parse(request.query);
-    const cacheKey = `avail:DRIVER:${lat.toFixed(2)}:${lng.toFixed(2)}`;
+    const cacheKey = tenantCacheKey(`avail:DRIVER:${lat.toFixed(2)}:${lng.toFixed(2)}`);
     const cached = await app.redis.get(cacheKey);
     // gate mirrors DISPATCH_AVAILABILITY: with the flag off, clients read the
     // truth but change NOTHING — byte-identical UX until the launch decision.

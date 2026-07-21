@@ -6,6 +6,7 @@ import { estimateDrivingDistance, estimateDeliveryMinutes } from '../../utils/di
 import { getMapsProvider } from '../../providers/maps/maps-provider';
 import { FREE_CANCEL_WINDOW_MIN, LATE_CANCEL_FEE } from '../order/cancel-policy';
 import { parsePagination, paginatedResponse } from '../../utils/pagination';
+import { tenantCacheKey } from '../../utils/tenant-cache';
 import { AppError, NotFoundError, ValidationError, ForbiddenError } from '../../utils/errors';
 import { randomInt } from 'node:crypto';
 import { OrderService } from '../order/order.service';
@@ -708,7 +709,7 @@ export async function customerRoutes(app: FastifyInstance) {
     const { lat, lng } = latLngQuerySchema.parse(request.query);
 
     // Try Redis cache
-    const cacheKey = `home:${userId ?? 'guest'}:${lat ?? 'x'}:${lng ?? 'x'}`;
+    const cacheKey = tenantCacheKey(`home:${userId ?? 'guest'}:${lat ?? 'x'}:${lng ?? 'x'}`);
     const cached = await app.redis.get(cacheKey).catch(() => null);
     if (cached) {
       return { success: true, data: JSON.parse(cached) };

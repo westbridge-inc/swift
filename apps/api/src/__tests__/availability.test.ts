@@ -126,14 +126,16 @@ describe('GET /rides/availability', () => {
     expect(res.json().data.level).toBe('NONE');
 
     await makeDriver(0.004);
-    await app.redis.del(`avail:DRIVER:${SPOT.lat.toFixed(2)}:${SPOT.lng.toFixed(2)}`);
+    // Cache keys are tenant-prefixed [SWIFT-SEC-CACHE]; the seeded test user is
+    // the default tenant, so the handler writes under t:swift-default:.
+    await app.redis.del(`t:swift-default:avail:DRIVER:${SPOT.lat.toFixed(2)}:${SPOT.lng.toFixed(2)}`);
     res = await availability();
     expect(res.json().data.level).toBe('LOW');
     expect(res.json().data.nearestEtaMinutes).toBeGreaterThanOrEqual(1);
 
     await makeDriver(0.006);
     await makeDriver(-0.005);
-    await app.redis.del(`avail:DRIVER:${SPOT.lat.toFixed(2)}:${SPOT.lng.toFixed(2)}`);
+    await app.redis.del(`t:swift-default:avail:DRIVER:${SPOT.lat.toFixed(2)}:${SPOT.lng.toFixed(2)}`);
     res = await availability();
     expect(res.json().data.level).toBe('GOOD');
   });
@@ -143,7 +145,7 @@ describe('GET /rides/availability', () => {
     await app.prisma.driver.updateMany({ where: { id: { in: driverIds } }, data: { isOnline: false } });
     const cachedRead = await availability();
     expect(cachedRead.json().data.level).toBe(first.json().data.level); // still cached
-    await app.redis.del(`avail:DRIVER:${SPOT.lat.toFixed(2)}:${SPOT.lng.toFixed(2)}`);
+    await app.redis.del(`t:swift-default:avail:DRIVER:${SPOT.lat.toFixed(2)}:${SPOT.lng.toFixed(2)}`);
     const fresh = await availability();
     expect(fresh.json().data.level).toBe('NONE'); // truth after cache clears
   });
