@@ -98,4 +98,30 @@ describe('tenant isolation (stage 2)', () => {
     const all = await runWithoutTenant(() => prisma.user.findMany({ where: { id: { in: userIds } } }));
     expect(all.length).toBe(userIds.length); // every tenant's rows visible
   });
+
+  it('SEC-CT-01: the dispatch-claim pre-read must use findFirst (scoped), not findUnique (leaks)', async () => {
+    // A tenant-B order (the unassigned kind a mover claims — no owner yet).
+    const bOrder = await runWithoutTenant(() =>
+      prisma.order.create({
+        data: {
+          orderNumber: `CT-${nanoid(8)}`, orderType: 'FOOD_DELIVERY', customerId: userIds[0]!,
+          tenantId: TENANT_B, status: 'READY_FOR_PICKUP',
+          pickupAddress: 'B pickup', pickupLat: 6.8, pickupLng: -58.15,
+          deliveryAddress: 'B delivery — PII', deliveryLat: 6.81, deliveryLng: -58.16,
+          subtotalBase: 1000, subtotalMarkup: 0, subtotalCustomer: 1000, deliveryFee: 500, totalAmount: 1500, paymentMethod: 'CASH',
+        },
+      }),
+    );
+    try {
+      // A tenant-A (default) mover reads the tenant-B order by id.
+      const viaFindFirst = await runWithTenant('swift-default', () => prisma.order.findFirst({ where: { id: bOrder.id } }));
+      expect(viaFindFirst).toBeNull(); // the FIX: scoped → cannot read another tenant's order
+
+      // Demonstrate WHY the fix was needed: findUnique bypasses the extension.
+      const viaFindUnique = await runWithTenant('swift-default', () => prisma.order.findUnique({ where: { id: bOrder.id } }));
+      expect(viaFindUnique?.deliveryAddress).toBe('B delivery — PII'); // unscoped would have leaked it
+    } finally {
+      await runWithoutTenant(() => prisma.order.deleteMany({ where: { id: bOrder.id } }));
+    }
+  });
 });

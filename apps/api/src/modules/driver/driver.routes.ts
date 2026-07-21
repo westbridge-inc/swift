@@ -350,7 +350,10 @@ export async function driverRoutes(app: FastifyInstance) {
       throw new AppError(400, 'UNAVAILABLE', 'You already have an active ride');
     }
 
-    const order = await app.prisma.order.findUnique({ where: { id } });
+    // findFirst so the tenant-scope extension applies [SWIFT-SEC-CT-01]: an
+    // unassigned ride has no owner yet; the tenant filter is the only barrier
+    // stopping a driver from reading another operator's ride by id.
+    const order = await app.prisma.order.findFirst({ where: { id } });
     if (!order) throw new NotFoundError('Ride', id);
     if (order.orderType !== 'TAXI') throw new AppError(400, 'INVALID_TYPE', 'This is not a taxi ride');
 
