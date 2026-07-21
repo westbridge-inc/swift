@@ -757,7 +757,9 @@ export async function driverRoutes(app: FastifyInstance) {
     return {
       success: true,
       ...paginatedResponse(earnings, total, { page, limit, skip }),
-      totalEarnings: aggregate._sum.amount || 0,
+      // DASH-07: Number() — a raw Prisma Decimal serializes oddly and `|| 0`
+      // can't default a Decimal(0). The rider routes already wrap every amount.
+      totalEarnings: Number(aggregate._sum.amount ?? 0),
     };
   });
 
@@ -786,7 +788,7 @@ export async function driverRoutes(app: FastifyInstance) {
       success: true,
       data: {
         earnings,
-        total: aggregate._sum.amount || 0,
+        total: Number(aggregate._sum.amount ?? 0), // DASH-07: number, not raw Decimal
         ridesCompleted: ridesCount,
       },
     };
@@ -876,11 +878,13 @@ export async function driverRoutes(app: FastifyInstance) {
     return {
       success: true,
       data: {
-        today: todayEarnings._sum.amount || 0,
-        thisWeek: weekEarnings._sum.amount || 0,
-        thisMonth: monthEarnings._sum.amount || 0,
-        allTime: allTimeEarnings._sum.amount || 0,
-        pendingPayout: pendingPayout._sum.amount || 0,
+        // DASH-07: Number() every amount — raw Decimals serialize oddly and
+        // `|| 0` can't default a Decimal(0). Matches the rider routes.
+        today: Number(todayEarnings._sum.amount ?? 0),
+        thisWeek: Number(weekEarnings._sum.amount ?? 0),
+        thisMonth: Number(monthEarnings._sum.amount ?? 0),
+        allTime: Number(allTimeEarnings._sum.amount ?? 0),
+        pendingPayout: Number(pendingPayout._sum.amount ?? 0),
         todayRides,
         totalRides,
         averageRating: driver.averageRating,
