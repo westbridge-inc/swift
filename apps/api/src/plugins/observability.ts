@@ -67,6 +67,18 @@ export const dispatchTimeToAssign = new client.Histogram({
   registers: [registry],
 });
 
+// OSRM routing outcome [SWIFT-UG-ETA-01]: when OSRM is configured but a call
+// times out / errors / returns no route, the provider silently degrades to
+// the haversine estimate — dispatch and fares carry on, so the degradation is
+// otherwise invisible. The fallback RATE (fallback / (ok+fallback), by op) is
+// the "is OSRM actually up?" signal. Labels: op = eta|route, outcome = ok|fallback.
+export const osrmOutcomeCounter = new client.Counter({
+  name: 'swift_osrm_calls_total',
+  help: 'OSRM routing calls by operation and outcome (ok vs haversine fallback)',
+  labelNames: ['op', 'outcome'] as const,
+  registers: [registry],
+});
+
 export async function observabilityPlugin(app: FastifyInstance) {
   initSentry();
   if (!metricsWired) {

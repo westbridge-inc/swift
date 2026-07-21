@@ -1,9 +1,20 @@
 import { haversineDistance, estimateDrivingDistance } from '../../utils/distance';
+import { osrmOutcomeCounter } from '../../plugins/observability';
 
 // ---------------------------------------------------------------------------
 // MapsProvider — hard rule 4: swappable interface. Dispatch only ever asks for
 // ETAs through this seam, so a real routing service slots in behind it.
 // ---------------------------------------------------------------------------
+
+/** Metric bump for OSRM outcomes [SWIFT-UG-ETA-01]; a routing seam must never
+ *  break on an accounting failure. */
+function recordOsrm(op: 'eta' | 'route', outcome: 'ok' | 'fallback'): void {
+  try {
+    osrmOutcomeCounter.inc({ op, outcome });
+  } catch {
+    /* metrics optional — never fail a route on it */
+  }
+}
 
 export interface LatLng {
   lat: number;
@@ -149,20 +160,28 @@ export class OsrmMapsProvider implements MapsProvider {
     const timer = setTimeout(() => controller.abort(), OSRM_TIMEOUT_MS);
     try {
       const res = await fetch(url, { signal: controller.signal });
-      if (!res.ok) return fallback;
+      if (!res.ok) return this.degraded('eta', fallback);
       const data = (await res.json()) as OsrmTableResponse;
       // durations is a 1×N row: [origin->origin (self), origin->dest1, ...] in seconds.
       const row = data.code === 'Ok' ? data.durations?.[0] : undefined;
-      if (!row) return fallback;
+      if (!row) return this.degraded('eta', fallback);
+      recordOsrm('eta', 'ok');
       return destinations.map((_, i) => {
         const seconds = row[i + 1]; // skip the self entry
         return seconds != null ? seconds / 60 : fallback[i]!;
       });
     } catch {
-      return fallback; // down, slow, or blocked — dispatch carries on
+      return this.degraded('eta', fallback); // down, slow, or blocked — dispatch carries on
     } finally {
       clearTimeout(timer);
     }
+  }
+
+  /** Count the fallback and return it — one place so every degrade path is
+   *  observable [SWIFT-UG-ETA-01]. */
+  private degraded<T>(op: 'eta' | 'route', value: T): T {
+    recordOsrm(op, 'fallback');
+    return value;
   }
 
   /** Real road distance + duration via the OSRM `route` service. Falls back to
@@ -174,16 +193,17 @@ export class OsrmMapsProvider implements MapsProvider {
     const timer = setTimeout(() => controller.abort(), OSRM_TIMEOUT_MS);
     try {
       const res = await fetch(url, { signal: controller.signal });
-      if (!res.ok) return this.fallback.routeKm(origin, dest);
+      if (!res.ok) return this.degraded('route', await this.fallback.routeKm(origin, dest));
       const data = (await res.json()) as OsrmRouteResponse;
       const route = data.code === 'Ok' ? data.routes?.[0] : undefined;
-      if (!route || route.distance == null) return this.fallback.routeKm(origin, dest);
+      if (!route || route.distance == null) return this.degraded('route', await this.fallback.routeKm(origin, dest));
+      recordOsrm('route', 'ok');
       return {
         km: route.distance / 1000,
         minutes: route.duration != null ? route.duration / 60 : null,
       };
     } catch {
-      return this.fallback.routeKm(origin, dest);
+      return this.degraded('route', await this.fallback.routeKm(origin, dest));
     } finally {
       clearTimeout(timer);
     }
