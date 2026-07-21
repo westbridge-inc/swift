@@ -17,6 +17,7 @@ import { clampDriverFare } from '../../utils/markup';
 import { ALLOWED_IMAGE_TYPES, looksLikeImage } from '../../utils/images';
 import { getStorageProvider } from '../../providers/storage/storage-provider';
 import { refreshLegEta, cachedLegEta } from '../dispatch/live-eta';
+import { startOfDayGY, startOfWeekGY, startOfMonthGY } from '../../utils/time-gy';
 
 const updateDriverProfileSchema = z.object({
   vehicleMake: z.string().max(50).optional(),
@@ -765,8 +766,7 @@ export async function driverRoutes(app: FastifyInstance) {
     if (!found) await throwForMissingProfile(app, request.user.userId, 'MOVER', 'Driver');
     const driver = found!;
 
-    const today = new Date();
-    today.setHours(0, 0, 0, 0);
+    const today = startOfDayGY(); // DASH-06: Guyana-local "today", not UTC midnight
 
     const [earnings, aggregate, ridesCount] = await Promise.all([
       app.prisma.earning.findMany({
@@ -836,13 +836,12 @@ export async function driverRoutes(app: FastifyInstance) {
     if (!found) await throwForMissingProfile(app, request.user.userId, 'MOVER', 'Driver');
     const driver = found!;
 
-    const today = new Date();
-    today.setHours(0, 0, 0, 0);
-
-    const weekStart = new Date(today);
-    weekStart.setDate(weekStart.getDate() - weekStart.getDay());
-
-    const monthStart = new Date(today.getFullYear(), today.getMonth(), 1);
+    // DASH-06/07: Guyana-local boundaries, and week starts MONDAY (matching the
+    // rider) — was UTC midnight + Sunday-start, so "today"/"this week" money
+    // read wrong and disagreed with the rider's week.
+    const today = startOfDayGY();
+    const weekStart = startOfWeekGY();
+    const monthStart = startOfMonthGY();
 
     const [todayEarnings, weekEarnings, monthEarnings, allTimeEarnings, pendingPayout, todayRides, totalRides] =
       await Promise.all([

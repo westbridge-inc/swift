@@ -15,6 +15,7 @@ import { AiService } from '../ai/ai.service';
 import { guessColumnMapping, applyMapping, toImportCsv, REQUIRED_FIELDS, type ColumnMapping } from '../../utils/catalogue-map';
 import { parsePagination, paginatedResponse } from '../../utils/pagination';
 import { AppError, NotFoundError, ValidationError } from '../../utils/errors';
+import { startOfDayGY } from '../../utils/time-gy';
 import { DeliveryCashSettlementService, assertSettlementId } from '../cash/delivery-cash-settlement.service';
 import { BillingService } from '../billing/billing.service';
 import { getPaymentProvider } from '../../providers/payment/payment-provider';
@@ -2135,9 +2136,8 @@ export async function vendorRoutes(app: FastifyInstance) {
     const { vendorId } = await requireVendor(app, request, 'MANAGER');
     const { days } = revenueQuerySchema.parse(request.query);
 
-    const since = new Date();
-    since.setDate(since.getDate() - days);
-    since.setHours(0, 0, 0, 0);
+    // DASH-06: window from Guyana-local midnight N days ago, not UTC midnight.
+    const since = startOfDayGY(new Date(Date.now() - days * 24 * 60 * 60 * 1000));
 
     const orders = await app.prisma.order.findMany({
       where: { vendorId, placedAt: { gte: since } },
@@ -2198,9 +2198,8 @@ export async function vendorRoutes(app: FastifyInstance) {
     const { vendorId } = await requireVendor(app, request, 'MANAGER');
     const { days } = revenueQuerySchema.parse(request.query);
 
-    const since = new Date();
-    since.setDate(since.getDate() - days);
-    since.setHours(0, 0, 0, 0);
+    // DASH-06: window from Guyana-local midnight N days ago, not UTC midnight.
+    const since = startOfDayGY(new Date(Date.now() - days * 24 * 60 * 60 * 1000));
 
     const completedStatuses = ['DELIVERED', 'COMPLETED'] as import('@prisma/client').OrderStatus[];
 
