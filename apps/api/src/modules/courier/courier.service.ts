@@ -5,21 +5,35 @@
 export type PackageSize = 'SMALL' | 'MEDIUM' | 'LARGE' | 'EXTRA_LARGE';
 export type DeliverySpeed = 'STANDARD' | 'EXPRESS' | 'RUSH';
 
-const SIZE_SURCHARGE: Record<PackageSize, number> = {
-  SMALL: 0,
-  MEDIUM: 500,
-  LARGE: 1000,
-  EXTRA_LARGE: 2000,
+/** Courier pricing knobs [UG-CRAFT-03] — per-country via
+ *  CountryConfig.courierRates (same null→code-default pattern as taxiRates;
+ *  rides were already priced per-country, courier was the one vertical
+ *  hardcoded to GYD literals). */
+export interface CourierRates {
+  baseFee: number;
+  perKmRate: number;
+  sizeSurcharge: Record<PackageSize, number>;
+  speedMultiplier: Record<DeliverySpeed, number>;
+}
+
+export const DEFAULT_COURIER_RATES: CourierRates = {
+  baseFee: 1000, // GYD
+  perKmRate: 300, // GYD
+  sizeSurcharge: { SMALL: 0, MEDIUM: 500, LARGE: 1000, EXTRA_LARGE: 2000 },
+  speedMultiplier: { STANDARD: 1.0, EXPRESS: 1.5, RUSH: 2.0 },
 };
 
-const SPEED_MULTIPLIER: Record<DeliverySpeed, number> = {
-  STANDARD: 1.0,
-  EXPRESS: 1.5,
-  RUSH: 2.0,
-};
-
-const BASE_FEE = 1000; // GYD
-const PER_KM_RATE = 300; // GYD
+/** Tolerant merge of a CountryConfig.courierRates JSON over the defaults —
+ *  a partial or malformed config can only override what it validly sets. */
+export function mergeCourierRates(raw: unknown): CourierRates {
+  const cfg = (raw && typeof raw === 'object' ? raw : {}) as Partial<CourierRates>;
+  return {
+    baseFee: typeof cfg.baseFee === 'number' ? cfg.baseFee : DEFAULT_COURIER_RATES.baseFee,
+    perKmRate: typeof cfg.perKmRate === 'number' ? cfg.perKmRate : DEFAULT_COURIER_RATES.perKmRate,
+    sizeSurcharge: { ...DEFAULT_COURIER_RATES.sizeSurcharge, ...(cfg.sizeSurcharge ?? {}) },
+    speedMultiplier: { ...DEFAULT_COURIER_RATES.speedMultiplier, ...(cfg.speedMultiplier ?? {}) },
+  };
+}
 
 export interface CourierEstimate {
   baseFee: number;
@@ -34,12 +48,13 @@ export interface CourierEstimate {
 export function estimateCourierFee(
   distanceKm: number,
   packageSize: PackageSize,
-  speed: DeliverySpeed
+  speed: DeliverySpeed,
+  rates: CourierRates = DEFAULT_COURIER_RATES,
 ): CourierEstimate {
-  const baseFee = BASE_FEE;
-  const distanceFee = distanceKm * PER_KM_RATE;
-  const sizeSurcharge = SIZE_SURCHARGE[packageSize];
-  const speedMultiplier = SPEED_MULTIPLIER[speed];
+  const baseFee = rates.baseFee;
+  const distanceFee = distanceKm * rates.perKmRate;
+  const sizeSurcharge = rates.sizeSurcharge[packageSize];
+  const speedMultiplier = rates.speedMultiplier[speed];
   const totalFee = Math.round((baseFee + distanceFee + sizeSurcharge) * speedMultiplier);
 
   const estimatedMinutes =
