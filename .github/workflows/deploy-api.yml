@@ -27,17 +27,46 @@ jobs:
         with:
           version: 0.3.199
 
-      - name: Deploy to Fly.io
-        run: flyctl deploy --remote-only --config apps/api/fly.toml
+      # SWIFT-AUD-D7-05: capture the currently-live release BEFORE deploying so
+      # a failed gate can roll straight back to it (no scrambling for the id
+      # mid-incident).
+      - name: Record the current release for rollback
+        id: prev
+        run: |
+          PREV=$(flyctl releases --config apps/api/fly.toml --json | jq -r 'map(select(.Status=="succeeded")) | .[0].Version // empty')
+          echo "version=$PREV" >> "$GITHUB_OUTPUT"
+          echo "Current live release: v$PREV"
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
 
+      # Migrations run BEFORE the new image boots (expand→migrate→contract):
+      # additive migrations are safe against the old running code.
       - name: Run database migrations
         run: flyctl ssh console --config apps/api/fly.toml -C "npx prisma migrate deploy"
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
 
-      - name: Health check
+      - name: Deploy to Fly.io
+        run: flyctl deploy --remote-only --config apps/api/fly.toml
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+
+      # Gate on /ready (schema + redis reachable), not just /health (liveness) —
+      # a booted-but-not-ready instance must count as a failed deploy.
+      - name: Readiness gate
+        id: ready
         run: |
           sleep 10
-          curl --fail --retry 5 --retry-delay 5 "${{ vars.API_URL }}/health" || exit 1
+          curl --fail --retry 6 --retry-delay 5 "${{ vars.API_URL }}/ready" || exit 1
+
+      # If the readiness gate failed and we captured a prior release, roll back
+      # to it automatically and fail the run loudly.
+      - name: Roll back on failed readiness
+        if: failure() && steps.ready.outcome == 'failure' && steps.prev.outputs.version != ''
+        run: |
+          echo "::error::Readiness gate failed — rolling back to v${{ steps.prev.outputs.version }}"
+          flyctl releases rollback ${{ steps.prev.outputs.version }} --config apps/api/fly.toml
+          curl --fail --retry 6 --retry-delay 5 "${{ vars.API_URL }}/ready"
+          exit 1
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
