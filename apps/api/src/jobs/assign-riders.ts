@@ -23,13 +23,26 @@ export async function assignReadyRiders(
 ): Promise<AssignResult> {
   const { prisma, io } = deps;
 
-  // The whole outstanding batch, oldest first (fairness on scarce riders).
+  // SWIFT-SEC-JOB-01: this fallback sweep runs in a worker (no request tenant
+  // context → the Prisma tenant-scope extension is a no-op), so it must apply
+  // the tenant boundary itself — exactly as the primary dispatch path does in
+  // its raw candidate SQL. Without it the planner could pair a tenant-A order
+  // with a tenant-B rider. Each trigger plans its OWN tenant's batch: read the
+  // trigger order's tenant, then scope both the orders and the rider pool to it.
+  const trigger = await prisma.order.findUnique({
+    where: { id: triggerOrderId },
+    select: { tenantId: true },
+  });
+  const tenantId = trigger?.tenantId ?? null;
+
+  // The whole outstanding batch FOR THIS TENANT, oldest first (fairness on scarce riders).
   const orders = await prisma.order.findMany({
     where: {
       status: 'READY_FOR_PICKUP',
       riderId: null,
       pickupLat: { not: null },
       pickupLng: { not: null },
+      ...(tenantId ? { tenantId } : {}),
     },
     select: { id: true, orderNumber: true, pickupLat: true, pickupLng: true },
     orderBy: { placedAt: 'asc' },
@@ -44,6 +57,8 @@ export async function assignReadyRiders(
       documentsVerified: true,
       currentLat: { not: null },
       currentLng: { not: null },
+      // Same-tenant riders only — a mover never fulfils another operator's order.
+      ...(tenantId ? { user: { tenantId } } : {}),
     },
     include: { user: { select: { id: true, firstName: true } } },
   });
