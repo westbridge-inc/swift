@@ -34,6 +34,7 @@ import { getPaymentProvider } from '../../providers/payment/payment-provider';
 import { getStorageProvider } from '../../providers/storage/storage-provider';
 import { mintRenderPath } from '../../providers/storage/envelope';
 import { parsePagination, paginatedResponse } from '../../utils/pagination';
+import { startOfDayGY } from '../../utils/time-gy';
 import { AppError, NotFoundError, ForbiddenError } from '../../utils/errors';
 
 // ---------------------------------------------------------------------------
@@ -311,9 +312,7 @@ export async function adminRoutes(app: FastifyInstance) {
   // ─── Dashboard ─────────────────────────────────────────────────────────
 
   app.get('/dashboard/overview', { preHandler: [adminGuard] }, async () => {
-    const today = new Date();
-    today.setHours(0, 0, 0, 0);
-
+    const today = startOfDayGY(); // DASH-06: Guyana-local "today", not UTC midnight
     const weekAgo = new Date(today);
     weekAgo.setDate(weekAgo.getDate() - 7);
 

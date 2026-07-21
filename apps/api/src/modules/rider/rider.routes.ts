@@ -20,6 +20,7 @@ import { throwForMissingProfile } from '../../utils/role-gate';
 import { clampDriverFare } from '../../utils/markup';
 import { ALLOWED_IMAGE_TYPES, looksLikeImage } from '../../utils/images';
 import { getStorageProvider } from '../../providers/storage/storage-provider';
+import { startOfDayGY, startOfWeekGY, startOfMonthGY } from '../../utils/time-gy';
 
 const updateRiderProfileSchema = z.object({
   riderType: z.nativeEnum(RiderType).optional(),
@@ -107,30 +108,11 @@ const STATUS_TRANSITIONS: Record<string, { from: string[]; to: string }> = {
   'arrived':         { from: ['EN_ROUTE_DELIVERY'], to: 'ARRIVED' },
 };
 
-/** Start-of-day Date for "today" queries. */
-function startOfDay(date: Date = new Date()): Date {
-  const d = new Date(date);
-  d.setHours(0, 0, 0, 0);
-  return d;
-}
-
-/** Start of week (Monday 00:00). */
-function startOfWeek(date: Date = new Date()): Date {
-  const d = new Date(date);
-  const day = d.getDay();
-  const diff = d.getDate() - day + (day === 0 ? -6 : 1);
-  d.setDate(diff);
-  d.setHours(0, 0, 0, 0);
-  return d;
-}
-
-/** Start of month. */
-function startOfMonth(date: Date = new Date()): Date {
-  const d = new Date(date);
-  d.setDate(1);
-  d.setHours(0, 0, 0, 0);
-  return d;
-}
+// DASH-06: "today"/"this week"/"this month" for earnings are Guyana-local
+// boundaries (UTC-4), not the server's UTC midnight. Shared helpers.
+const startOfDay = startOfDayGY;
+const startOfWeek = startOfWeekGY;
+const startOfMonth = startOfMonthGY;
 
 // ---------------------------------------------------------------------------
 // Routes
