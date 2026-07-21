@@ -75,6 +75,15 @@ export function useEarnings<T = any>(kind: MoverKind | null) {
     enabled: !!kind,
   });
 }
+/** DASH-03: server-aggregated per-Guyana-day totals for the Home trend chart —
+ *  replaces the client-side grouping of the paginated earnings list. */
+export function useDailyEarnings<T = any>(kind: MoverKind | null, days = 7) {
+  return useQuery<T>({
+    queryKey: ['mover', 'earnings-daily', kind, days],
+    queryFn: () => unwrap<T>(svc(kind as MoverKind).earningsDaily(days)),
+    enabled: !!kind,
+  });
+}
 /** Nearby REAL demand for the dashboard (plan Phase A): waiting taxi
  *  requests + watchers for drivers; unassigned orders by store for riders. */
 export function useDemand<T = any>(kind: MoverKind | null, point?: { lat: number; lng: number }) {
