@@ -1157,6 +1157,12 @@ model OrderItem {
   id              String            @id @default(cuid())
   orderId         String
   order           Order             @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  /// ADR [SWIFT-AUD-D5-04]: itemId is a DELIBERATE loose reference — NO FK to
+  /// Item, by design. name + every price below are SNAPSHOTTED at order time
+  /// so a delivered order's receipt/totals never change when the vendor later
+  /// edits or deletes the menu item. A cascade FK would destroy order history;
+  /// a SetNull FK would null the breadcrumb a dispute may need. The id stays
+  /// only as a soft pointer back to the (possibly-changed) live item.
   itemId          String
   name            String
   quantity        Int
