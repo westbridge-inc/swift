@@ -11,7 +11,7 @@ import {
   useMoverKind,
   useMoverStats,
   useEarningsToday,
-  useEarnings,
+  useDailyEarnings,
   useDemand,
   useAvailableJobs,
   useDispatchOffers,
@@ -218,7 +218,7 @@ export function MoverHomeScreen({ navigation }: any) {
   const accept = useAcceptJob(k);
   const decline = useDeclineOffer(k);
   const earnings = useEarningsToday(kind);
-  const history = useEarnings<any>(kind);
+  const daily = useDailyEarnings<any>(kind); // DASH-03: server-aggregated 7-day trend
   const stats = useMoverStats(kind);
   const vstatus = useVerificationStatus<any>('MOVER');
   const active = useActiveJob(kind);
@@ -230,26 +230,19 @@ export function MoverHomeScreen({ navigation }: any) {
   const here = latitude != null && longitude != null ? { lat: latitude, lng: longitude } : undefined;
   const demand = useDemand<any>(kind, here);
 
-  // Last 7 days from the earnings ledger, grouped client-side (reference chart).
+  // DASH-03: last 7 days from the SERVER-aggregated daily endpoint — the old
+  // client-side grouping summed the paginated (limit-20) earnings list, so an
+  // active mover's older days silently truncated to ~0.
   const week = useMemo(() => {
-    const raw: any = history.data;
-    const rows: any[] = Array.isArray(raw) ? raw : raw?.data ?? raw?.earnings ?? [];
-    const days: Array<{ label: string; total: number; isToday: boolean }> = [];
-    for (let i = 6; i >= 0; i--) {
-      const d = new Date();
-      d.setHours(0, 0, 0, 0);
-      d.setDate(d.getDate() - i);
-      const next = new Date(d.getTime() + 24 * 3600 * 1000);
-      const total = rows
-        .filter((e) => {
-          const t = new Date(e.createdAt).getTime();
-          return t >= d.getTime() && t < next.getTime();
-        })
-        .reduce((s, e) => s + Number(e.amount ?? 0), 0);
-      days.push({ label: 'SMTWTFS'[d.getDay()]!, total, isToday: i === 0 });
-    }
-    return days;
-  }, [history.data]);
+    const raw: any = daily.data;
+    const rows: Array<{ date: string; total: number; isToday: boolean }> = Array.isArray(raw) ? raw : raw?.data ?? [];
+    return rows.map((r) => ({
+      // 'YYYY-MM-DD' (Guyana day) → weekday letter; noon avoids any DST/edge slip.
+      label: 'SMTWTFS'[new Date(`${r.date}T12:00:00Z`).getUTCDay()]!,
+      total: Number(r.total ?? 0),
+      isToday: !!r.isToday,
+    }));
+  }, [daily.data]);
 
   if (loading || !kind) {
     return (

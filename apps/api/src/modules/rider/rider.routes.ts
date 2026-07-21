@@ -21,6 +21,7 @@ import { clampDriverFare } from '../../utils/markup';
 import { ALLOWED_IMAGE_TYPES, looksLikeImage } from '../../utils/images';
 import { getStorageProvider } from '../../providers/storage/storage-provider';
 import { startOfDayGY, startOfWeekGY, startOfMonthGY } from '../../utils/time-gy';
+import { dailyEarnings } from '../order/daily-earnings';
 
 const updateRiderProfileSchema = z.object({
   riderType: z.nativeEnum(RiderType).optional(),
@@ -924,6 +925,15 @@ export async function riderRoutes(app: FastifyInstance) {
       ...paginatedResponse(data, total, pagination),
       totalAmount: Number(aggregate._sum.amount ?? 0),
     };
+  });
+
+  /** GET /earnings/daily — per-Guyana-day totals for the Home trend chart
+   *  [DASH-03]: server-aggregated, so older days aren't truncated by the
+   *  paginated earnings list. */
+  app.get('/earnings/daily', { preHandler: [app.authenticate] }, async (request) => {
+    const rider = await getRider(app, request.user.userId);
+    const days = Math.min(31, Math.max(1, Number((request.query as { days?: string }).days ?? 7)));
+    return { success: true, data: await dailyEarnings(app.prisma, { riderId: rider.id }, days) };
   });
 
   /** GET /earnings/today — Today's earnings breakdown. */

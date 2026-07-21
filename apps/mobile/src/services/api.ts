@@ -358,6 +358,7 @@ export const riderApi = {
   earningsToday: () => api.get('/rider/earnings/today'),
   earningsSummary: () => api.get('/rider/earnings/summary'),
   earnings: (params?: Record<string, string | number>) => api.get('/rider/earnings', { params }),
+  earningsDaily: (days = 7) => api.get('/rider/earnings/daily', { params: { days } }),
   demand: (p: Point) => api.get(`/rider/demand?lat=${p.lat}&lng=${p.lng}`),
   // MMG cash ledger — delivery fees stores owe me (customer paid the store)
   cashSettlements: () => api.get('/rider/cash-settlements'),
@@ -388,6 +389,7 @@ export const driverApi = {
   earningsToday: () => api.get('/driver/earnings/today'),
   earningsSummary: () => api.get('/driver/earnings/summary'),
   earnings: (params?: Record<string, string | number>) => api.get('/driver/earnings', { params }),
+  earningsDaily: (days = 7) => api.get('/driver/earnings/daily', { params: { days } }),
   demand: (p: Point) => api.get(`/driver/demand?lat=${p.lat}&lng=${p.lng}`),
   rides: (params?: { page?: number; limit?: number; status?: string }) => api.get('/driver/rides', { params }),
   rateCustomer: (id: string, score: number, comment?: string) =>

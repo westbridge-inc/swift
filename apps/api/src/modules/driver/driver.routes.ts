@@ -18,6 +18,7 @@ import { ALLOWED_IMAGE_TYPES, looksLikeImage } from '../../utils/images';
 import { getStorageProvider } from '../../providers/storage/storage-provider';
 import { refreshLegEta, cachedLegEta } from '../dispatch/live-eta';
 import { startOfDayGY, startOfWeekGY, startOfMonthGY } from '../../utils/time-gy';
+import { dailyEarnings } from '../order/daily-earnings';
 
 const updateDriverProfileSchema = z.object({
   vehicleMake: z.string().max(50).optional(),
@@ -761,6 +762,14 @@ export async function driverRoutes(app: FastifyInstance) {
       // can't default a Decimal(0). The rider routes already wrap every amount.
       totalEarnings: Number(aggregate._sum.amount ?? 0),
     };
+  });
+
+  /** GET /earnings/daily — per-Guyana-day totals for the Home trend chart
+   *  [DASH-03], server-aggregated so older days aren't truncated. */
+  app.get('/earnings/daily', { preHandler: [app.authenticate] }, async (request) => {
+    const driver = await getDriver(request.user.userId);
+    const days = Math.min(31, Math.max(1, Number((request.query as { days?: string }).days ?? 7)));
+    return { success: true, data: await dailyEarnings(app.prisma, { driverId: driver.id }, days) };
   });
 
   app.get('/earnings/today', { preHandler: [app.authenticate] }, async (request) => {
