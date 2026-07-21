@@ -10,6 +10,7 @@ import { BillingService } from '../billing/billing.service';
 import { getPaymentProvider } from '../../providers/payment/payment-provider';
 import { haversineDistance, estimateDeliveryMinutes } from '../../utils/distance';
 import { parsePagination, paginatedResponse } from '../../utils/pagination';
+import { tenantCacheKey } from '../../utils/tenant-cache';
 import { AppError, NotFoundError } from '../../utils/errors';
 import { throwForMissingProfile } from '../../utils/role-gate';
 import { clampDriverFare } from '../../utils/markup';
@@ -801,7 +802,7 @@ export async function driverRoutes(app: FastifyInstance) {
     if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
       throw new AppError(400, 'NO_POSITION', 'Send lat/lng or go online so Swift knows where you are.');
     }
-    const cacheKey = `demand:DRIVER:${lat.toFixed(2)}:${lng.toFixed(2)}`;
+    const cacheKey = tenantCacheKey(`demand:DRIVER:${lat.toFixed(2)}:${lng.toFixed(2)}`);
     const cached = await app.redis.get(cacheKey);
     if (cached) return { success: true, data: JSON.parse(cached) };
     const { driverDemand } = await import('../dispatch/demand.service');
