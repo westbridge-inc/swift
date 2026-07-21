@@ -786,6 +786,10 @@ export class OrderService {
         cancelledAt: new Date(),
         cancelledBy: userId,
         cancellationReason: reason,
+        // Founder decision #5: the announced fee is RECORDED as a marker
+        // (cash-only — never collected). Feeds the risk score's late-cancel
+        // signal and admin visibility; 0 on free cancels.
+        lateCancelFeeDue: cancellationFee,
       },
     });
     if (applied.count === 0) {
