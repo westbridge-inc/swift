@@ -4,6 +4,7 @@ import { VendorType, OrderStatus, NotificationType } from '@prisma/client';
 import { calculateDeliveryFee } from '../../utils/markup';
 import { estimateDrivingDistance, estimateDeliveryMinutes } from '../../utils/distance';
 import { getMapsProvider } from '../../providers/maps/maps-provider';
+import { FREE_CANCEL_WINDOW_MIN, LATE_CANCEL_FEE } from '../order/cancel-policy';
 import { parsePagination, paginatedResponse } from '../../utils/pagination';
 import { AppError, NotFoundError, ValidationError, ForbiddenError } from '../../utils/errors';
 import { randomInt } from 'node:crypto';
@@ -167,11 +168,9 @@ const referralRedeemSchema = z.object({
 // ---------------------------------------------------------------------------
 
 const MAX_DELIVERY_RADIUS_KM = 25;
-const FREE_CANCEL_WINDOW_MIN = 5;
-// The flat late-cancellation fee (must match order.service.cancelOrder). The
-// order detail exposes what a cancel WOULD cost now so the app can preview it
-// before the customer confirms (pre-launch audit: fee wasn't shown).
-const LATE_CANCEL_FEE = 500;
+// Cancel window/fee now import from the ONE policy module [UG-CRAFT-01] —
+// the "must match order.service" comment era is over: the preview and the
+// charge read the same constants by construction.
 const HOME_CACHE_TTL = 60; // 1 min
 const MAX_ADDRESSES = 10;
 const MAX_TIP_GYD = 50_000;
