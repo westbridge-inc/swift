@@ -1,6 +1,7 @@
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { detectOffPlatformContact, OFF_PLATFORM_WARNING } from './off-platform';
+import { NotFoundError, ForbiddenError } from '../../utils/errors';
 
 const createRoomSchema = z.object({
   orderId: z.string().min(1),
@@ -27,14 +28,18 @@ export async function chatRoutes(app: FastifyInstance) {
       where: { id: orderId },
       select: { customerId: true, riderId: true, driverId: true, rider: { select: { userId: true } }, driver: { select: { userId: true } } },
     });
-    if (!order) return { success: false, error: { code: 'NOT_FOUND', message: 'Order not found' } };
+    // UG-CRAFT-02: chat previously hand-rolled 200-with-success:false error
+    // envelopes — axios clients RESOLVED them as success and rendered broken
+    // empties. Thrown AppErrors ride the platform taxonomy like every other
+    // module (real status codes, standard client error handling).
+    if (!order) throw new NotFoundError('Order', orderId);
 
     const participantUserIds = [order.customerId];
     if (order.rider?.userId) participantUserIds.push(order.rider.userId);
     if (order.driver?.userId) participantUserIds.push(order.driver.userId);
 
     if (!participantUserIds.includes(request.user.userId)) {
-      return { success: false, error: { code: 'FORBIDDEN', message: 'You are not part of this order' } };
+      throw new ForbiddenError('You are not part of this order');
     }
 
     // Find existing room
@@ -76,7 +81,7 @@ export async function chatRoutes(app: FastifyInstance) {
     const participant = await app.prisma.chatRoomParticipant.findFirst({
       where: { chatRoomId: roomId, userId: request.user.userId },
     });
-    if (!participant) return { success: false, error: { code: 'FORBIDDEN', message: 'Not a participant' } };
+    if (!participant) throw new ForbiddenError('Not a participant');
 
     // Off-platform contact detection (spec §2): the message still delivers —
     // the sender gets a soft nudge and the flag feeds risk signals. Detection,
@@ -144,7 +149,7 @@ export async function chatRoutes(app: FastifyInstance) {
     const participant = await app.prisma.chatRoomParticipant.findFirst({
       where: { chatRoomId: roomId, userId: request.user.userId },
     });
-    if (!participant) return { success: false, error: { code: 'FORBIDDEN', message: 'Not a participant' } };
+    if (!participant) throw new ForbiddenError('Not a participant');
 
     const messages = await app.prisma.chatMessage.findMany({
       where: {
@@ -178,8 +183,17 @@ export async function chatRoutes(app: FastifyInstance) {
   app.get('/rooms', { preHandler: [app.authenticate] }, async (request) => {
     // Surfaces are role-scoped: the shopping app lists the rooms you're in AS
     // the customer; a mover's job chats live in the driver app (?as=rider).
-    const { as } = request.query as { as?: string };
+    const { as, page, limit } = z
+      .object({
+        as: z.string().optional(),
+        page: z.coerce.number().int().min(1).default(1),
+        limit: z.coerce.number().int().min(1).max(100).default(50),
+      })
+      .parse(request.query);
     const roleFilter = as === 'customer' || as === 'rider' ? { role: as } : {};
+    // UG-CRAFT-02: bounded — a long-lived account accumulates rooms without
+    // limit. The response shape stays a plain array (existing clients read it
+    // directly), newest first, with opt-in page/limit for deeper history.
     const rooms = await app.prisma.chatRoom.findMany({
       where: {
         isActive: true,
@@ -190,6 +204,8 @@ export async function chatRoutes(app: FastifyInstance) {
         messages: { orderBy: { createdAt: 'desc' }, take: 1 },
       },
       orderBy: { createdAt: 'desc' },
+      skip: (page - 1) * limit,
+      take: limit,
     });
 
     return {
