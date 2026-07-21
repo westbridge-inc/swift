@@ -2065,6 +2065,11 @@ export async function vendorRoutes(app: FastifyInstance) {
     monthStart.setDate(monthStart.getDate() - 30);
 
     const completedStatuses = ['DELIVERED', 'COMPLETED'] as import('@prisma/client').OrderStatus[];
+    // DASH-05: "orders today/week/month" must not count DEAD orders
+    // (cancelled/refunded) — the paired revenue already excludes them, so
+    // counting them produced "10 orders / $X from only 7". In-progress orders
+    // (pending/accepted/preparing) still count — a vendor needs live work.
+    const liveOrderStatuses = { notIn: ['CANCELLED', 'REFUNDED'] as import('@prisma/client').OrderStatus[] };
 
     const [
       vendor,
@@ -2081,9 +2086,9 @@ export async function vendorRoutes(app: FastifyInstance) {
         where: { id: vendorId },
         select: { averageRating: true, totalRatings: true, totalOrders: true, isCurrentlyOpen: true, acceptingOrders: true },
       }),
-      app.prisma.order.count({ where: { vendorId, placedAt: { gte: todayStart } } }),
-      app.prisma.order.count({ where: { vendorId, placedAt: { gte: weekStart } } }),
-      app.prisma.order.count({ where: { vendorId, placedAt: { gte: monthStart } } }),
+      app.prisma.order.count({ where: { vendorId, status: liveOrderStatuses, placedAt: { gte: todayStart } } }),
+      app.prisma.order.count({ where: { vendorId, status: liveOrderStatuses, placedAt: { gte: weekStart } } }),
+      app.prisma.order.count({ where: { vendorId, status: liveOrderStatuses, placedAt: { gte: monthStart } } }),
       app.prisma.order.aggregate({
         where: { vendorId, status: { in: completedStatuses }, placedAt: { gte: todayStart } },
         _sum: { subtotalBase: true },
