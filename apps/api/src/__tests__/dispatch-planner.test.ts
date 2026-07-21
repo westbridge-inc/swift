@@ -200,6 +200,54 @@ describe('assignReadyRiders sweep (CAS application)', () => {
     expect(riderAfter.currentOrderId).toBe(order.id);
   });
 
+  it('SEC-JOB-01: never pairs a tenant-A order with a tenant-B rider (real planner)', async () => {
+    // A remote field far from every other test's coordinates so the global
+    // sweep batch is deterministic here.
+    const SPOT = { lat: 8.51, lng: -59.92 };
+    await app.prisma.tenant.upsert({ where: { id: 'sec-ta' }, update: {}, create: { id: 'sec-ta', name: 'Sec A', slug: 'sec-a' } });
+    await app.prisma.tenant.upsert({ where: { id: 'sec-tb' }, update: {}, create: { id: 'sec-tb', name: 'Sec B', slug: 'sec-b' } });
+
+    // The ONLY rider near the field belongs to tenant A.
+    const riderUser = await app.prisma.user.create({
+      data: {
+        phone: `+59200377${String(++seq).padStart(2, '0')}`, firstName: 'Sec', lastName: 'RiderA',
+        roles: ['RIDER' as UserRole], activeRole: 'RIDER' as UserRole, isPhoneVerified: true, tenantId: 'sec-ta',
+      },
+    });
+    createdUserIds.push(riderUser.id);
+    const riderA = await app.prisma.rider.create({
+      data: { userId: riderUser.id, riderType: 'DELIVERY', vehicleType: 'MOTORCYCLE', documentsVerified: true, isOnline: true, isAvailable: true, currentLat: SPOT.lat, currentLng: SPOT.lng },
+    });
+
+    // A ready order in tenant B, at the same spot.
+    const custUser = await app.prisma.user.create({
+      data: {
+        phone: `+59200376${String(++seq).padStart(2, '0')}`, firstName: 'Sec', lastName: 'CustB',
+        roles: ['CUSTOMER' as UserRole], activeRole: 'CUSTOMER' as UserRole, isPhoneVerified: true, tenantId: 'sec-tb', customer: { create: {} },
+      },
+    });
+    createdUserIds.push(custUser.id);
+    const orderB = await app.prisma.order.create({
+      data: {
+        orderNumber: `SEC-${nanoid(8)}`, orderType: 'FOOD_DELIVERY', customerId: custUser.id, tenantId: 'sec-tb',
+        status: 'READY_FOR_PICKUP', pickupAddress: 'v', pickupLat: SPOT.lat, pickupLng: SPOT.lng,
+        deliveryAddress: 'c', deliveryLat: SPOT.lat + 0.01, deliveryLng: SPOT.lng,
+        subtotalBase: 1000, subtotalMarkup: 0, subtotalCustomer: 1000, deliveryFee: 500, totalAmount: 1500, paymentMethod: 'CASH',
+      },
+    });
+
+    // Real greedy planner (in range → WOULD pair them without the tenant scope).
+    await assignReadyRiders({ prisma: app.prisma, io: ioStub }, orderB.id);
+
+    const orderAfter = await app.prisma.order.findUniqueOrThrow({ where: { id: orderB.id } });
+    expect(orderAfter.riderId).toBeNull(); // NOT handed to the tenant-A rider
+    expect(orderAfter.status).toBe('READY_FOR_PICKUP');
+    const riderAfter = await app.prisma.rider.findUniqueOrThrow({ where: { id: riderA.id } });
+    expect(riderAfter.isAvailable).toBe(true); // tenant-A rider untouched
+
+    await app.prisma.rider.deleteMany({ where: { id: riderA.id } });
+  });
+
   it('a claimed order is skipped and the rider is rolled back (CAS)', async () => {
     const rider = await makeRider(6.8105, -58.1500);
     const order = await makeReadyOrder(6.8100, -58.1500);
