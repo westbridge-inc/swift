@@ -45,6 +45,19 @@ beforeAll(async () => {
   await app.ready();
   orders = new OrderService(app.prisma, ioStub);
 
+  // Purge-first: parallel local runs / interrupted prior runs may have left
+  // this file's fixture phone behind (house pattern — unique prefix per file
+  // + idempotent sweep).
+  const stale = await app.prisma.user.findUnique({ where: { phone: '+5920079401' } });
+  if (stale) {
+    // NB: order_status_logs is append-only (prisma plugin) — order deletion
+    // cascades them; never deleteMany the logs directly.
+    await app.prisma.order.deleteMany({ where: { customerId: stale.id } });
+    await app.prisma.notification.deleteMany({ where: { userId: stale.id } });
+    await app.prisma.customer.deleteMany({ where: { userId: stale.id } });
+    await app.prisma.user.delete({ where: { id: stale.id } });
+  }
+
   const user = await app.prisma.user.create({
     data: {
       phone: '+5920079401', firstName: 'Marker', lastName: 'Cust',
@@ -57,7 +70,7 @@ beforeAll(async () => {
 
 afterAll(async () => {
   if (orderIds.length) {
-    await app.prisma.orderStatusLog.deleteMany({ where: { orderId: { in: orderIds } } });
+    // order deletion cascades the append-only status logs (never delete those directly)
     await app.prisma.order.deleteMany({ where: { id: { in: orderIds } } });
   }
   if (customerId) {
