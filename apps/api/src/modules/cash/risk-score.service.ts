@@ -33,8 +33,11 @@ export async function riskScoreFor(prisma: PrismaClient, userId: string): Promis
   const [strikes, claims90d, cancels30d, offPlatform30d] = await Promise.all([
     prisma.strike.count({ where: { userId } }),
     prisma.reimbursementClaim.count({ where: { customerId: userId, createdAt: { gte: d90 } } }),
+    // Only cancels AFTER the free window count (the doc above always said so;
+    // until lateCancelFeeDue existed the query couldn't tell them apart and
+    // punished free cancels too). Marker recorded since 2026-07-21.
     prisma.order.count({
-      where: { customerId: userId, status: 'CANCELLED', cancelledBy: userId, updatedAt: { gte: d30 } },
+      where: { customerId: userId, status: 'CANCELLED', cancelledBy: userId, lateCancelFeeDue: { gt: 0 }, updatedAt: { gte: d30 } },
     }),
     prisma.chatMessage.count({ where: { senderId: userId, offPlatformFlag: true, createdAt: { gte: d30 } } }),
   ]);

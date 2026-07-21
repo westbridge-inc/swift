@@ -1052,6 +1052,11 @@ model Order {
 
   cancelledBy        String?
   cancellationReason String?
+  /// Late-cancel fee ANNOUNCED at cancellation (GYD int; 0 = cancelled free).
+  /// Founder decision 2026-07-20: cash-only means Swift can't collect it — its
+  /// role is the risk-score marker ("customer cancels after the free window")
+  /// and admin visibility. Never charged, never summed into money totals.
+  lateCancelFeeDue Int @default(0)
 
   promoCodeId String?
   promoCode   PromoCode? @relation(fields: [promoCodeId], references: [id])

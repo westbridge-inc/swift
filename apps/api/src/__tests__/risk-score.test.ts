@@ -76,6 +76,10 @@ describe('riskScoreFor', () => {
         customerId: u.id,
         status: 'CANCELLED' as never,
         cancelledBy: u.id,
+        // The cancel signal counts LATE cancels only (decision #5, 2026-07-21)
+        // — this fixture always meant "a punishable cancel", so it carries the
+        // marker the real cancel path now records.
+        lateCancelFeeDue: 500,
         fulfillment: 'DELIVERY' as never,
         deliveryAddress: 'x', deliveryLat: 6.8, deliveryLng: -58.15,
         subtotalBase: 1000, subtotalMarkup: 0, subtotalCustomer: 1000, deliveryFee: 300, totalAmount: 1300,
