@@ -346,9 +346,15 @@ export async function adminRoutes(app: FastifyInstance) {
       app.prisma.driver.count({ where: { isOnline: true } }),
       app.prisma.vendor.count({ where: { status: 'ACTIVE' } }),
       app.prisma.vendor.count(),
+      // DASH-01: real per-type revenue = the SUMMED weeklyRate of ACTIVE subs,
+      // never count × a hardcoded rate table (which undercounted large vendors
+      // 33% and counted TRIAL/PAST_DUE/CANCELLED as revenue). ACTIVE-only so
+      // the per-type lines reconcile with the weeklySubscriptionRevenue total.
       app.prisma.subscription.groupBy({
-        by: ['type', 'status'],
+        by: ['type'],
+        where: { status: 'ACTIVE' },
         _count: true,
+        _sum: { weeklyRate: true },
       }),
       app.prisma.subscription.aggregate({
         where: { status: 'ACTIVE' },
@@ -403,7 +409,12 @@ export async function adminRoutes(app: FastifyInstance) {
           todayDeliveryFees: todayRevenue._sum.deliveryFee || 0,
           todayTotal: todayRevenue._sum.totalAmount || 0,
         },
-        subscriptionBreakdown: subscriptionCounts,
+        // Per-type ACTIVE count + real summed weekly revenue (Decimal → number).
+        subscriptionBreakdown: subscriptionCounts.map((s) => ({
+          type: s.type,
+          count: s._count,
+          weeklyRevenue: Number(s._sum.weeklyRate ?? 0),
+        })),
         weeklyTrend: weeklyOrderCounts,
         alerts: { pendingVendors, pastDueSubs, unassignedOrders },
       },

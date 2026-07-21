@@ -1,13 +1,8 @@
 'use client';
 
-const RATES: Record<string, number> = {
-  DELIVERY_RIDER: 10000,
-  COURIER_RIDER: 20000,
-  TAXI_DRIVER: 20000,
-  RESTAURANT: 20000,
-  SUPERMARKET: 20000,
-};
-
+// DASH-01: per-type revenue is the API's REAL summed weeklyRate of ACTIVE
+// subscriptions — no hardcoded rate table (which undercounted large vendors
+// 33% and counted non-active statuses). This component only formats.
 const LABELS: Record<string, string> = {
   DELIVERY_RIDER: 'Delivery Riders',
   COURIER_RIDER: 'Courier Riders',
@@ -18,7 +13,8 @@ const LABELS: Record<string, string> = {
 
 interface SubscriptionBreakdown {
   type: string;
-  _count: number;
+  count: number;
+  weeklyRevenue: number;
 }
 
 interface RevenueBreakdownProps {
@@ -35,9 +31,9 @@ export function RevenueBreakdown({ data, weeklyTotal }: RevenueBreakdownProps) {
           <div key={item.type} className="flex items-center justify-between text-sm">
             <span className="text-[#8E8E93]">{LABELS[item.type] || item.type}</span>
             <span>
-              {item._count} active &times; ${(RATES[item.type] || 0).toLocaleString()} ={' '}
+              {item.count} active ={' '}
               <span className="font-semibold text-white">
-                ${(item._count * (RATES[item.type] || 0)).toLocaleString()}
+                ${item.weeklyRevenue.toLocaleString()}
               </span>
             </span>
           </div>
