@@ -94,8 +94,14 @@ export function statementPeriod(query: { from?: string; to?: string }): { from: 
 // render route — the link opens EXACTLY what the app would have shown.
 
 type PrismaLike = {
-  earning: { findMany: (args: unknown) => Promise<Array<{ orderId: string; createdAt: Date; type: unknown; amount: unknown }>> };
-  order: { findMany: (args: unknown) => Promise<Array<Record<string, unknown>>> };
+  earning: {
+    findMany: (args: unknown) => Promise<Array<{ orderId: string; createdAt: Date; type: unknown; amount: unknown }>>;
+    aggregate: (args: unknown) => Promise<{ _sum: { amount: unknown } }>;
+  };
+  order: {
+    findMany: (args: unknown) => Promise<Array<Record<string, unknown>>>;
+    aggregate: (args: unknown) => Promise<{ _sum: { subtotalCustomer: unknown; discount: unknown } }>;
+  };
   user: { findUniqueOrThrow: (args: unknown) => Promise<{ firstName: string | null; lastName: string | null; phone: string }> };
   vendor: { findUniqueOrThrow: (args: unknown) => Promise<{ name: string; addressLine1: string; city: string }> };
 };
@@ -105,17 +111,21 @@ async function earnerStatement(
   opts: { title: string; footNote: string; where: Record<string, string>; userId: string },
   period: { from: Date; to: Date; label: string },
 ): Promise<string> {
-  const earnings = await prisma.earning.findMany({
-    where: { ...opts.where, createdAt: { gte: period.from, lte: period.to } },
-    orderBy: { createdAt: 'asc' },
-    take: 1000,
-  });
+  // DASH-04: TRUE period total from a SQL aggregate (not a capped-list reduce),
+  // so a high-volume statement never understates.
+  const LINE_CAP = 1000;
+  const periodWhere = { ...opts.where, createdAt: { gte: period.from, lte: period.to } };
+  const [totalAgg, earnings] = await Promise.all([
+    prisma.earning.aggregate({ where: periodWhere, _sum: { amount: true } }),
+    prisma.earning.findMany({ where: periodWhere, orderBy: { createdAt: 'asc' }, take: LINE_CAP }),
+  ]);
+  const total = Number(totalAgg._sum.amount ?? 0);
+  const capped = earnings.length === LINE_CAP;
   const orders = (await prisma.order.findMany({
     where: { id: { in: earnings.map((e) => e.orderId) } },
     select: { id: true, orderNumber: true },
   })) as Array<{ id: string; orderNumber: string }>;
   const numberOf = new Map(orders.map((o) => [o.id, o.orderNumber]));
-  const total = earnings.reduce((s, e) => s + Number(e.amount), 0);
   const user = await prisma.user.findUniqueOrThrow({
     where: { id: opts.userId },
     select: { firstName: true, lastName: true, phone: true },
@@ -129,7 +139,9 @@ async function earnerStatement(
       label: `${numberOf.get(e.orderId) ?? e.orderId} · ${String(e.type).replaceAll('_', ' ').toLowerCase()}`,
       amount: e.amount,
     })),
-    totalLabel: `Total earned (${earnings.length} entr${earnings.length === 1 ? 'y' : 'ies'})`,
+    totalLabel: capped
+      ? `Total earned (full period; showing the first ${LINE_CAP} entries)`
+      : `Total earned (${earnings.length} entr${earnings.length === 1 ? 'y' : 'ies'})`,
     totalAmount: total,
     footNote: opts.footNote,
   });
@@ -163,19 +175,28 @@ export async function buildVendorStatement(prisma: unknown, vendorId: string, pe
     where: { id: vendorId },
     select: { name: true, addressLine1: true, city: true },
   });
-  const orders = (await p.order.findMany({
-    where: {
-      vendorId,
-      status: { in: ['DELIVERED', 'COMPLETED'] },
-      placedAt: { gte: period.from, lte: period.to },
-    },
-    select: { orderNumber: true, placedAt: true, fulfillment: true, subtotalCustomer: true, discount: true },
-    orderBy: { placedAt: 'asc' },
-    take: 2000,
-  })) as Array<{ orderNumber: string; placedAt: Date; fulfillment: string | null; subtotalCustomer: unknown; discount: unknown }>;
+  // DASH-04: TRUE sales total from a SQL aggregate (sum of subtotals minus sum
+  // of discounts = sum of the per-order take), so a busy vendor's statement
+  // never understates past the line cap.
+  const LINE_CAP = 2000;
+  const periodWhere = {
+    vendorId,
+    status: { in: ['DELIVERED', 'COMPLETED'] },
+    placedAt: { gte: period.from, lte: period.to },
+  };
+  const [totalAgg, orders] = await Promise.all([
+    p.order.aggregate({ where: periodWhere, _sum: { subtotalCustomer: true, discount: true } }),
+    p.order.findMany({
+      where: periodWhere,
+      select: { orderNumber: true, placedAt: true, fulfillment: true, subtotalCustomer: true, discount: true },
+      orderBy: { placedAt: 'asc' },
+      take: LINE_CAP,
+    }) as Promise<Array<{ orderNumber: string; placedAt: Date; fulfillment: string | null; subtotalCustomer: unknown; discount: unknown }>>,
+  ]);
   const takeOf = (o: { subtotalCustomer: unknown; discount: unknown }) =>
     Number(o.subtotalCustomer ?? 0) - Number(o.discount ?? 0);
-  const total = orders.reduce((s, o) => s + takeOf(o), 0);
+  const total = Number(totalAgg._sum.subtotalCustomer ?? 0) - Number(totalAgg._sum.discount ?? 0);
+  const capped = orders.length === LINE_CAP;
   return renderStatementHtml({
     title: 'Sales statement',
     holder: `${vendorRecord.name} — ${vendorRecord.addressLine1}, ${vendorRecord.city}`,
@@ -185,7 +206,9 @@ export async function buildVendorStatement(prisma: unknown, vendorId: string, pe
       label: `${o.orderNumber} · ${String(o.fulfillment ?? 'DELIVERY').toLowerCase()}`,
       amount: takeOf(o),
     })),
-    totalLabel: `Total sales (${orders.length} order${orders.length === 1 ? '' : 's'})`,
+    totalLabel: capped
+      ? `Total sales (full period; showing the first ${LINE_CAP} orders)`
+      : `Total sales (${orders.length} order${orders.length === 1 ? '' : 's'})`,
     totalAmount: total,
     footNote:
       'You keep 100% of every sale — Swift charges a flat weekly subscription, never commission. '
