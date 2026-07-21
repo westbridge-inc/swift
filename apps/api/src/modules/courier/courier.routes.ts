@@ -1,7 +1,8 @@
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { nanoid } from 'nanoid';
-import { estimateCourierFee, type PackageSize, type DeliverySpeed } from './courier.service';
+import { estimateCourierFee, mergeCourierRates, type CourierRates, type PackageSize, type DeliverySpeed } from './courier.service';
+import { CountryConfigService } from '../country/country-config.service';
 import { getMapsProvider } from '../../providers/maps/maps-provider';
 import { makeDispatchService } from '../dispatch/dispatch.service';
 import { OrderService, holdWindowMs } from '../order/order.service';
@@ -57,10 +58,11 @@ async function quote(
   dropoff: { lat: number; lng: number },
   size: PackageSize,
   speed: DeliverySpeed,
+  rates?: CourierRates,
 ) {
   // Real road km when OSRM is configured; deterministic estimate otherwise.
   const { km: distanceKm } = await courierMaps.routeKm(pickup, dropoff);
-  return { distanceKm, estimate: estimateCourierFee(distanceKm, size, speed) };
+  return { distanceKm, estimate: estimateCourierFee(distanceKm, size, speed, rates) };
 }
 
 export default async function courierRoutes(app: FastifyInstance) {
@@ -81,10 +83,23 @@ export default async function courierRoutes(app: FastifyInstance) {
     });
   }
 
+  // Per-country courier pricing [UG-CRAFT-03]: the caller's market decides
+  // the rates; null config = the code defaults (byte-identical to before).
+  const countryConfig = new CountryConfigService(app.prisma);
+  async function ratesFor(userId: string): Promise<CourierRates> {
+    try {
+      const user = await app.prisma.user.findUnique({ where: { id: userId }, select: { countryCode: true } });
+      const cfg = await countryConfig.getByCode(user?.countryCode ?? 'GY');
+      return mergeCourierRates(cfg.courierRates);
+    } catch {
+      return mergeCourierRates(null); // config lookup must never break a quote
+    }
+  }
+
   /** POST /estimate — price quote (size + distance + speed) before requesting. */
   app.post('/estimate', auth, async (request) => {
     const body = estimateSchema.parse(request.body);
-    const { distanceKm, estimate } = await quote(body.pickup, body.dropoff, body.packageSize, body.speed);
+    const { distanceKm, estimate } = await quote(body.pickup, body.dropoff, body.packageSize, body.speed, await ratesFor(request.user.userId));
     return { success: true, data: { ...estimate, distanceKm: Math.round(distanceKm * 10) / 10 } };
   });
 
@@ -98,7 +113,7 @@ export default async function courierRoutes(app: FastifyInstance) {
       throw new AppError(403, 'ACCOUNT_RESTRICTED', 'Courier is disabled on this account after repeated failed payments. Contact support.');
     }
 
-    const { distanceKm, estimate } = await quote(body.pickup, body.dropoff, body.packageSize, body.speed);
+    const { distanceKm, estimate } = await quote(body.pickup, body.dropoff, body.packageSize, body.speed, await ratesFor(userId));
 
     const today = new Date();
     today.setHours(0, 0, 0, 0);

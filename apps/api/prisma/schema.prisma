@@ -238,6 +238,10 @@ model CountryConfig {
   /// Per-tier fare multipliers applied to the base (Economy) fare:
   /// { ECONOMY: 1.0, COMFORT: 1.35, XL: 1.8 }. Code default when null.
   taxiClassRates Json?
+  /// Courier fee formula [UG-CRAFT-03], local currency; code defaults when
+  /// null (same pattern as taxiRates): { baseFee, perKmRate,
+  /// sizeSurcharge: {SMALL..EXTRA_LARGE}, speedMultiplier: {STANDARD..RUSH} }
+  courierRates Json?
 
   /// Cash guarantee + strike thresholds:
   /// { maxClaimsPerRiderPerMonth, strikeRestrictThreshold, strikeBanThreshold,
