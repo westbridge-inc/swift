@@ -625,8 +625,12 @@ export async function riderRoutes(app: FastifyInstance) {
       throw new ConflictError('You already have an active delivery. Complete it before accepting a new one.');
     }
 
-    // Atomic check: order must still be unassigned.
-    const order = await app.prisma.order.findUnique({
+    // Atomic check: order must still be unassigned. findFirst (not findUnique)
+    // so the tenant-scope extension applies [SWIFT-SEC-CT-01]: an unassigned
+    // order has no owner yet, so the ONLY isolation on this pre-claim read is
+    // the tenant filter — a mover must never read another operator's order PII
+    // (customer name/phone, pickup+delivery addresses) by id.
+    const order = await app.prisma.order.findFirst({
       where: { id },
       include: { vendor: { select: { id: true, name: true } } },
     });
