@@ -11,14 +11,24 @@ function RoundIconButton({
   onPress,
   disabled = false,
   size = 32,
+  label,
 }: {
   icon: React.ComponentProps<typeof Feather>['name'];
   onPress?: () => void;
   disabled?: boolean;
   size?: number;
+  label?: string;
 }) {
   return (
-    <Pressable onPress={onPress} disabled={disabled} hitSlop={6} style={{ opacity: disabled ? 0.4 : 1 }}>
+    <Pressable
+      onPress={onPress}
+      disabled={disabled}
+      hitSlop={6}
+      accessibilityRole="button"
+      accessibilityLabel={label ?? icon.replace(/-/g, ' ')}
+      accessibilityState={{ disabled }}
+      style={{ opacity: disabled ? 0.4 : 1 }}
+    >
       {({ pressed }) => (
         <View
           style={{
@@ -53,19 +63,25 @@ export function QtyStepper({
 }) {
   return (
     <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.md }}>
-      <RoundIconButton icon="minus" onPress={onDec} disabled={value <= min} />
+      <RoundIconButton icon="minus" onPress={onDec} disabled={value <= min} label="Decrease quantity" />
       <T weight="semibold" style={{ minWidth: 20, textAlign: 'center' }}>
         {value}
       </T>
-      <RoundIconButton icon="plus" onPress={onInc} />
+      <RoundIconButton icon="plus" onPress={onInc} label="Increase quantity" />
     </View>
   );
 }
 
 /** Kit rounded-square checkbox (cart row selection). */
-export function BrandCheckbox({ checked, onToggle }: { checked: boolean; onToggle: () => void }) {
+export function BrandCheckbox({ checked, onToggle, label }: { checked: boolean; onToggle: () => void; label?: string }) {
   return (
-    <Pressable onPress={onToggle} hitSlop={8}>
+    <Pressable
+      onPress={onToggle}
+      hitSlop={8}
+      accessibilityRole="checkbox"
+      accessibilityLabel={label ?? 'Select item'}
+      accessibilityState={{ checked }}
+    >
       <View
         style={{
           width: 24,
@@ -93,7 +109,13 @@ export function HeartBadge({
   size?: number;
 }) {
   return (
-    <Pressable onPress={onPress} hitSlop={8}>
+    <Pressable
+      onPress={onPress}
+      hitSlop={8}
+      accessibilityRole="button"
+      accessibilityLabel={active ? 'Remove from favourites' : 'Add to favourites'}
+      accessibilityState={{ selected: active }}
+    >
       <View
         style={[
           {
@@ -131,7 +153,10 @@ export function Stars({
   onRate?: (n: number) => void;
 }) {
   return (
-    <View style={{ flexDirection: 'row', alignItems: 'center', gap }}>
+    <View
+      style={{ flexDirection: 'row', alignItems: 'center', gap }}
+      accessibilityLabel={onRate ? undefined : `Rated ${value} out of 5 stars`}
+    >
       {[1, 2, 3, 4, 5].map((n) => {
         const star = (
           <Ionicons
@@ -141,7 +166,14 @@ export function Stars({
           />
         );
         return onRate ? (
-          <Pressable key={n} hitSlop={6} onPress={() => onRate(n)}>
+          <Pressable
+            key={n}
+            hitSlop={6}
+            onPress={() => onRate(n)}
+            accessibilityRole="button"
+            accessibilityLabel={`Rate ${n} out of 5 stars`}
+            accessibilityState={{ selected: n <= Math.round(value) }}
+          >
             <View style={{ width: size, height: size, alignItems: 'center', justifyContent: 'center' }}>{star}</View>
           </Pressable>
         ) : (
@@ -167,7 +199,12 @@ export function Chip({
   style?: ViewStyle;
 }) {
   return (
-    <Pressable onPress={onPress}>
+    <Pressable
+      onPress={onPress}
+      accessibilityRole="button"
+      accessibilityLabel={label}
+      accessibilityState={{ selected }}
+    >
       {({ pressed }) => (
         <View
           style={[

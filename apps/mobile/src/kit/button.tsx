@@ -44,6 +44,9 @@ export function PillButton({
     <Pressable
       onPress={blocked ? undefined : onPress}
       disabled={blocked}
+      accessibilityRole="button"
+      accessibilityLabel={label}
+      accessibilityState={{ disabled: blocked, busy: loading }}
       style={{ opacity: disabled ? 0.45 : 1, ...(style as object) }}
     >
       {({ pressed }) => (
@@ -84,7 +87,7 @@ export function PillButton({
 /** Bare inline text action — “See All”, “Forgot password?”. */
 export function LinkText({ label, onPress, tone = 'brand' as const }: { label: string; onPress?: () => void; tone?: 'brand' | 'muted' }) {
   return (
-    <Pressable onPress={onPress} hitSlop={8}>
+    <Pressable onPress={onPress} hitSlop={8} accessibilityRole="button" accessibilityLabel={label}>
       {({ pressed }) => (
         <View style={{ opacity: pressed ? 0.6 : 1 }}>
           <T variant="label" tone={tone} weight="medium">

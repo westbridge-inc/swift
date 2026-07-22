@@ -54,7 +54,7 @@ export function FoodCard({
   width: number;
 }) {
   return (
-    <Pressable onPress={onPress}>
+    <Pressable onPress={onPress} accessibilityRole="button" accessibilityLabel={name}>
       {({ pressed }) => (
       <Card pad={false} style={{ width, opacity: pressed ? 0.85 : 1 }}>
         <View>
@@ -111,7 +111,7 @@ export function VendorRow({
   style?: ViewStyle;
 }) {
   return (
-    <Pressable onPress={onPress}>
+    <Pressable onPress={onPress} accessibilityRole="button" accessibilityLabel={sub ? `${name}. ${sub}` : name}>
       {({ pressed }) => (
       <Card style={[{ flexDirection: 'row', alignItems: 'center', gap: space.md, padding: space.md, opacity: pressed ? 0.85 : 1 }, style]}>
         <Image
