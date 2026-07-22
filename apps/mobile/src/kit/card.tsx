@@ -45,6 +45,7 @@ export function PopupCard({
     <Modal visible={visible} transparent animationType="fade" onRequestClose={onClose}>
       <Pressable
         onPress={onClose}
+        accessibilityLabel="Dismiss"
         style={{
           flex: 1,
           backgroundColor: 'rgba(33,26,26,0.45)',

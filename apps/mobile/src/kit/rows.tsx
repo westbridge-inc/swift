@@ -74,7 +74,12 @@ export function SettingsRow({
   tone?: 'brand' | 'error';
 }) {
   return (
-    <Pressable onPress={onPress} disabled={!onPress}>
+    <Pressable
+      onPress={onPress}
+      disabled={!onPress}
+      accessibilityRole={onPress ? 'button' : undefined}
+      accessibilityLabel={sub ? `${label}. ${sub}` : label}
+    >
       {({ pressed }) => (
       <View
         style={{

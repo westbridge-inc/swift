@@ -34,17 +34,24 @@ export function CircleChip({
   onPress,
   light = false,
   size = 44,
+  label,
 }: {
   icon: React.ComponentProps<typeof Feather>['name'];
   onPress?: () => void;
   light?: boolean;
   size?: number;
+  label?: string;
 }) {
   return (
     // NB: never a function-form `style` on Pressable — the NativeWind interop
     // corrupts the touch box (it can bleed over siblings). Pressed feedback
     // lives on the inner View via the function child.
-    <Pressable onPress={onPress} hitSlop={8}>
+    <Pressable
+      onPress={onPress}
+      hitSlop={8}
+      accessibilityRole="button"
+      accessibilityLabel={label ?? icon.replace(/-/g, ' ')}
+    >
       {({ pressed }) => (
         <View
           style={{
@@ -89,7 +96,7 @@ export function Header({
         justifyContent: 'space-between',
       }}
     >
-      <CircleChip icon="chevron-left" light={light} onPress={onBack ?? (() => nav.goBack())} />
+      <CircleChip icon="chevron-left" label="Back" light={light} onPress={onBack ?? (() => nav.goBack())} />
       {title ? (
         <T variant="heading" tone={light ? 'onBrand' : 'ink'}>
           {title}
