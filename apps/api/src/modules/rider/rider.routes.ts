@@ -10,6 +10,7 @@ import { getPaymentProvider } from '../../providers/payment/payment-provider';
 import { DeliveryCashSettlementService, assertSettlementId } from '../cash/delivery-cash-settlement.service';
 import { makeDispatchService, vehicleCanCarry } from '../dispatch/dispatch.service';
 import { FloatService } from '../dispatch/float.service';
+import { startOnlineSession, closeOnlineSession } from './online-hours';
 import { refreshLegEta, cachedLegEta } from '../dispatch/live-eta';
 import { getKycProvider } from '../../providers/kyc/kyc-provider';
 import { haversineDistance } from '../../utils/distance';
@@ -365,7 +366,7 @@ export async function riderRoutes(app: FastifyInstance) {
     });
 
     // Track online session start in Redis for hours tracking.
-    await app.redis.set(`rider:online_since:${rider.id}`, Date.now().toString());
+    await startOnlineSession(app.redis, rider.id);
 
     return { success: true, data: { isOnline: updated.isOnline, isAvailable: updated.isAvailable } };
   });
@@ -383,15 +384,9 @@ export async function riderRoutes(app: FastifyInstance) {
       data: { isOnline: false, isAvailable: false },
     });
 
-    // Accumulate today's online hours in Redis.
-    const onlineSince = await app.redis.get(`rider:online_since:${rider.id}`);
-    if (onlineSince) {
-      const sessionMs = Date.now() - parseInt(onlineSince, 10);
-      const todayKey = `rider:online_ms:${rider.id}:${startOfDay().toISOString().slice(0, 10)}`;
-      await app.redis.incrby(todayKey, sessionMs);
-      await app.redis.expire(todayKey, 172800); // TTL 48h
-      await app.redis.del(`rider:online_since:${rider.id}`);
-    }
+    // Accumulate today's online hours in Redis (SWIFT-143: same helper the
+    // force-offline paths use, so a session closes the same way however it ends).
+    await closeOnlineSession(app.redis, rider.id);
 
     return { success: true, data: { isOnline: updated.isOnline, isAvailable: updated.isAvailable } };
   });

@@ -477,7 +477,7 @@ export function createWorkers(ctx: JobContext) {
       }
 
       if (job.name === 'stale-movers') {
-        const swept = await sweepStaleMovers(ctx.prisma);
+        const swept = await sweepStaleMovers(ctx.prisma, undefined, ctx.redis);
         if (swept.riders + swept.drivers > 0) {
           ctx.log.warn(swept, 'Stale-GPS movers forced offline');
         }

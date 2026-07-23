@@ -4,6 +4,7 @@ import { nanoid } from 'nanoid';
 import type { OrderStatus, UserRole } from '@prisma/client';
 import { prismaPlugin } from '../plugins/prisma';
 import { redisPlugin } from '../plugins/redis';
+import { startOfDayGY } from '../utils/time-gy';
 import { authPlugin } from '../plugins/auth';
 import { socketPlugin } from '../plugins/socket';
 import { vendorRoutes } from '../modules/vendor/vendor.routes';
@@ -550,5 +551,20 @@ describe('sweepStaleMovers', () => {
     expect((await app.prisma.rider.findUniqueOrThrow({ where: { id: staleRider.riderId } })).isOnline).toBe(false);
     expect((await app.prisma.rider.findUniqueOrThrow({ where: { id: freshRider.riderId } })).isOnline).toBe(true);
     expect((await app.prisma.driver.findUniqueOrThrow({ where: { id: staleDriver.driverId } })).isOnline).toBe(false);
+  });
+
+  it('closes the online-hours session of a rider it forces offline [SWIFT-143]', async () => {
+    const rider = await makeRider({ online: true, lastLocationUpdate: new Date(Date.now() - 25 * 60_000) });
+    // An open online session that began ~1h ago.
+    await app.redis.set(`rider:online_since:${rider.riderId}`, String(Date.now() - 60 * 60_000));
+
+    await sweepStaleMovers(app.prisma, undefined, app.redis);
+
+    // Pre-fix the marker lingered → the stats endpoint counted a phantom open
+    // session forever. Now it's cleared and the elapsed time is banked.
+    expect(await app.redis.get(`rider:online_since:${rider.riderId}`)).toBeNull();
+    const dayKey = `rider:online_ms:${rider.riderId}:${startOfDayGY().toISOString().slice(0, 10)}`;
+    expect(Number(await app.redis.get(dayKey))).toBeGreaterThanOrEqual(59 * 60_000);
+    await app.redis.del(dayKey);
   });
 });

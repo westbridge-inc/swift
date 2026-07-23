@@ -8,6 +8,7 @@ import { AppError, NotFoundError } from '../../utils/errors';
 import { NotificationService, notifyAdmins } from '../notification/notification.service';
 import { getMapsProvider, type MapsProvider } from '../../providers/maps/maps-provider';
 import { classesAtOrAbove } from '../rides/fare.service';
+import { closeOnlineSession } from '../rider/online-hours';
 import { rankCandidates, type DispatchCandidate } from './scoring';
 import { customerTrustSummaries } from '../cash/cash-rules.service';
 import { estimateLoad } from '../../utils/load';
@@ -798,8 +799,14 @@ export async function reconcileStuckDispatch(
   return { recovered };
 }
 
-export async function sweepStaleMovers(prisma: PrismaClient, staleMinutes = STALE_LOCATION_MINUTES) {
+export async function sweepStaleMovers(prisma: PrismaClient, staleMinutes = STALE_LOCATION_MINUTES, redis?: Redis) {
   const cutoff = new Date(Date.now() - staleMinutes * 60_000);
+  // SWIFT-143: a bulk updateMany returns no ids, so capture the riders we're about
+  // to force offline FIRST — otherwise their online-hours session (`online_since`)
+  // is never closed and the stats endpoint counts a phantom open session forever.
+  const staleRiderIds = redis
+    ? (await prisma.rider.findMany({ where: { isOnline: true, lastLocationUpdate: { lt: cutoff } }, select: { id: true } })).map((r) => r.id)
+    : [];
   const [riders, drivers] = await Promise.all([
     prisma.rider.updateMany({
       where: { isOnline: true, lastLocationUpdate: { lt: cutoff } },
@@ -810,5 +817,8 @@ export async function sweepStaleMovers(prisma: PrismaClient, staleMinutes = STAL
       data: { isOnline: false },
     }),
   ]);
+  if (redis) {
+    for (const id of staleRiderIds) await closeOnlineSession(redis, id);
+  }
   return { riders: riders.count, drivers: drivers.count };
 }
