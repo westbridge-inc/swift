@@ -36,6 +36,25 @@ export const OFFER_TIMEOUT_SECONDS = 20;
  *  reaches a willing mover earlier. (The bigger fee is the accept incentive;
  *  this is the mechanical speed-up.) */
 export const EXPRESS_OFFER_TIMEOUT_SECONDS = 12;
+
+// SWIFT-062: a courier parcel must only ever reach a mover whose vehicle can
+// actually carry it — a bicycle can't take a wardrobe box. Map each package size
+// to the vehicle types that can hold it. (Config can override per country later.)
+const VEHICLES_FOR_SIZE: Record<string, string[]> = {
+  SMALL: ['BICYCLE', 'MOTORCYCLE', 'CAR'],
+  MEDIUM: ['BICYCLE', 'MOTORCYCLE', 'CAR'],
+  LARGE: ['MOTORCYCLE', 'CAR'],
+  EXTRA_LARGE: ['CAR'],
+};
+/** Vehicle types that can carry a package of this size (all three if unknown). */
+export function vehiclesForPackageSize(size: string | null | undefined): string[] {
+  return (size && VEHICLES_FOR_SIZE[size]) || ['BICYCLE', 'MOTORCYCLE', 'CAR'];
+}
+/** Can this vehicle carry a parcel of this size? */
+export function vehicleCanCarry(vehicleType: string, size: string | null | undefined): boolean {
+  return vehiclesForPackageSize(size).includes(vehicleType);
+}
+
 const BASE_RADIUS_KM = 5;
 const RADIUS_STEP_KM = 5;
 const MAX_ROUNDS = 3;
@@ -152,8 +171,15 @@ export class DispatchService {
     floatRequired = 0,
     rideClass?: RideClass | null,
     tenantId: string | null = getTenantId(),
+    packageSize?: string | null,
   ): Promise<DispatchCandidate[]> {
     const declined = await this.redis.smembers(declinedKey(orderId));
+
+    // SWIFT-062: a courier parcel only goes to a vehicle that can carry it.
+    const capableVehicles = vehiclesForPackageSize(packageSize);
+    const vehicleFilter = packageSize
+      ? Prisma.sql`AND r."vehicleType"::text = ANY(${capableVehicles})`
+      : Prisma.empty;
 
     // A driver's rideClass is the TOP tier their vehicle serves, so only drivers
     // at or above the order's tier are eligible (an XL request never offers to a
@@ -202,6 +228,7 @@ export class DispatchService {
           WHERE r."isOnline" = true
             AND r."isAvailable" = true
             ${tenantFilter}
+            ${vehicleFilter}
             AND (r."floatLimit" - r."committedFloat") >= ${floatRequired}
             AND r."currentLat" IS NOT NULL
             AND r."currentLng" IS NOT NULL
@@ -248,7 +275,7 @@ export class DispatchService {
       where: { id: orderId },
       select: {
         id: true, status: true, riderId: true, driverId: true, orderType: true,
-        fulfillment: true, orderNumber: true, rideClass: true, isExpress: true,
+        fulfillment: true, orderNumber: true, rideClass: true, isExpress: true, courierPackageSize: true,
         customerId: true, pickupLat: true, pickupLng: true,
         subtotalBase: true, paymentMethod: true, tenantId: true,
         vendor: { select: { name: true, owner: { select: { userId: true } } } },
@@ -278,7 +305,7 @@ export class DispatchService {
     await this.journalOpenSearch(order, round, radius);
     // D.3 — a rider must have enough free float to front this order's vendor-cash (CASH deliveries only).
     const floatRequired = pool === 'RIDER' && order.paymentMethod === 'CASH' ? Number(order.subtotalBase) : 0;
-    const candidates = await this.findCandidates(orderId, { lat: order.pickupLat, lng: order.pickupLng }, radius, pool, floatRequired, order.rideClass, order.tenantId);
+    const candidates = await this.findCandidates(orderId, { lat: order.pickupLat, lng: order.pickupLng }, radius, pool, floatRequired, order.rideClass, order.tenantId, order.courierPackageSize);
 
     if (candidates.length === 0) {
       if (round + 1 < MAX_ROUNDS) {

@@ -714,3 +714,34 @@ describe('candidate selection at scale [SWIFT-142]', () => {
     }
   });
 });
+
+describe('vehicle capability matching [SWIFT-062]', () => {
+  it('an EXTRA_LARGE parcel is offered to a CAR, never to a bicycle', async () => {
+    await app.prisma.rider.updateMany({ data: { isOnline: false } });
+    const localUserIds: string[] = [];
+    const phoneBase = 592_830_000_000 + Math.floor(Math.random() * 80_000_000);
+    let n = 0;
+    const mkVeh = async (veh: 'BICYCLE' | 'MOTORCYCLE' | 'CAR') => {
+      n += 1;
+      const u = await app.prisma.user.create({ data: { phone: `+${phoneBase + n}`, firstName: 'Veh', lastName: `${n}`, roles: ['MOVER', 'CUSTOMER'], activeRole: 'MOVER', isPhoneVerified: true } });
+      const r = await app.prisma.rider.create({ data: { userId: u.id, riderType: 'BOTH', vehicleType: veh, documentsVerified: true, isOnline: true, isAvailable: true, currentLat: PICKUP.lat + 0.001, currentLng: PICKUP.lng, floatLimit: 1_000_000, committedFloat: 0 } });
+      localUserIds.push(u.id);
+      return r.id;
+    };
+    const bike = await mkVeh('BICYCLE');
+    const car = await mkVeh('CAR');
+    try {
+      const xl = new Set((await dispatch.findCandidates(`s62-xl-${nanoid(6)}`, PICKUP, 5, 'RIDER', 0, null, null, 'EXTRA_LARGE')).map((c) => (c as { riderId: string }).riderId));
+      expect(xl.has(car)).toBe(true);
+      expect(xl.has(bike)).toBe(false); // a bicycle can't carry a wardrobe box
+
+      // A SMALL parcel fits any vehicle — both are eligible.
+      const sm = new Set((await dispatch.findCandidates(`s62-sm-${nanoid(6)}`, PICKUP, 5, 'RIDER', 0, null, null, 'SMALL')).map((c) => (c as { riderId: string }).riderId));
+      expect(sm.has(car)).toBe(true);
+      expect(sm.has(bike)).toBe(true);
+    } finally {
+      await app.prisma.rider.deleteMany({ where: { userId: { in: localUserIds } } });
+      await app.prisma.user.deleteMany({ where: { id: { in: localUserIds } } });
+    }
+  });
+});
