@@ -8,7 +8,7 @@ import { CashRulesService, customerTrustSummaries } from '../cash/cash-rules.ser
 import { BillingService } from '../billing/billing.service';
 import { getPaymentProvider } from '../../providers/payment/payment-provider';
 import { DeliveryCashSettlementService, assertSettlementId } from '../cash/delivery-cash-settlement.service';
-import { makeDispatchService } from '../dispatch/dispatch.service';
+import { makeDispatchService, vehicleCanCarry } from '../dispatch/dispatch.service';
 import { FloatService } from '../dispatch/float.service';
 import { refreshLegEta, cachedLegEta } from '../dispatch/live-eta';
 import { getKycProvider } from '../../providers/kyc/kyc-provider';
@@ -647,6 +647,13 @@ export async function riderRoutes(app: FastifyInstance) {
     const acceptableStatuses: OrderStatus[] = ['READY_FOR_PICKUP', 'ACCEPTED', 'PREPARING'];
     if (!acceptableStatuses.includes(order.status)) {
       throw new AppError(400, 'INVALID_STATUS', `Order cannot be accepted in status ${order.status}`);
+    }
+
+    // SWIFT-062: the board-grab entrance must respect vehicle capability too — a
+    // parcel can't be grabbed by a mover whose vehicle can't carry it (the offer
+    // cascade already filters candidates this way in findCandidates).
+    if (order.orderType === 'COURIER' && order.courierPackageSize && !vehicleCanCarry(rider.vehicleType, order.courierPackageSize)) {
+      throw new AppError(400, 'VEHICLE_TOO_SMALL', `A ${order.courierPackageSize.toLowerCase().replace(/_/g, ' ')} parcel needs a bigger vehicle than your ${rider.vehicleType.toLowerCase()}.`);
     }
 
     // Rider-set delivery fee, capped at the market rate (deliveryFee). The rider
