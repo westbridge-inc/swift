@@ -2126,7 +2126,10 @@ export async function adminRoutes(app: FastifyInstance) {
     if (!q) throw new NotFoundError('Queue', name);
     return q;
   };
-  const DLQ_NAMES = ['order', 'riderAssignment', 'subscription', 'settlement', 'notification', 'verification', 'dispatch'] as const;
+  // SWIFT-121: one entry per LIVE queue (createQueues). 'riderAssignment' was
+  // removed (SWIFT-023) — dropped here; 'search' was missing, so search's failed
+  // jobs were invisible in the DLQ — added.
+  const DLQ_NAMES = ['order', 'subscription', 'settlement', 'notification', 'verification', 'dispatch', 'search'] as const;
 
   /** GET /alerts/health — ack rate + median time-to-ack per alert kind
    *  (alerts spec §A4): how silently-failing pushes get caught before churn.
