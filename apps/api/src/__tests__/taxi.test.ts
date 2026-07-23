@@ -359,3 +359,37 @@ describe('Taxi live-operation gate (hire-class insurance)', () => {
     expect(after.isAvailable).toBe(false);
   });
 });
+
+describe('Available-rides board — freshness window [SWIFT-064]', () => {
+  function taxiRequest(customerId: string, minutesAgo: number) {
+    return app.prisma.order.create({
+      data: {
+        orderNumber: `BRD-${nanoid(8)}`,
+        orderType: 'TAXI' as never,
+        customerId,
+        status: 'PENDING' as never,
+        pickupLat: CENTRAL.lat, pickupLng: CENTRAL.lng,
+        pickupAddress: 'x', deliveryAddress: 'y',
+        deliveryLat: CENTRAL.lat + 0.03, deliveryLng: CENTRAL.lng,
+        subtotalBase: 0, subtotalMarkup: 0, subtotalCustomer: 0,
+        deliveryFee: 0, totalAmount: 1500, paymentMethod: 'CASH' as never,
+        placedAt: new Date(Date.now() - minutesAgo * 60_000),
+      },
+    });
+  }
+
+  it('shows a fresh request but hides a stale one (past the demand window)', async () => {
+    const cust = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
+    const driver = await makeDriver(); // online + available, in CENTRAL
+    const fresh = await taxiRequest(cust.userId, 1);   // 1 min ago — live
+    const stale = await taxiRequest(cust.userId, 60);  // 60 min ago — abandoned
+
+    const res = await inject('GET', '/api/v1/driver/rides/available', undefined, driver.token);
+    expect(res.statusCode).toBe(200);
+    const ids = (res.json().data as Array<{ id: string }>).map((o) => o.id);
+    expect(ids).toContain(fresh.id);
+    // RED before SWIFT-064: the board returned the oldest-first, so the stale
+    // request showed (and could crowd out fresh ones at 20+ backlog).
+    expect(ids).not.toContain(stale.id);
+  });
+});
