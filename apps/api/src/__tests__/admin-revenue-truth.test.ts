@@ -102,3 +102,30 @@ describe('admin subscription revenue truth [DASH-01]', () => {
     expect(restaurant!.weeklyRevenue % 20000).not.toBe(0);
   });
 });
+
+describe('overview revenue fields serialize as numbers [SWIFT-119]', () => {
+  it('todayDeliveryFees / todayTotal are numbers, not Decimal strings', async () => {
+    const cust = await app.prisma.user.create({ data: { phone: '+5920074899', firstName: 'Rev', lastName: 'Cust', roles: ['CUSTOMER'], activeRole: 'CUSTOMER', isPhoneVerified: true } });
+    const order = await app.prisma.order.create({
+      data: {
+        orderNumber: `REV-${nanoid(8)}`, orderType: 'FOOD_DELIVERY', customerId: cust.id, vendorId: vendorIds[0]!, status: 'DELIVERED',
+        deliveryAddress: 'x', deliveryLat: 6.8, deliveryLng: -58.15,
+        subtotalBase: 1000, subtotalMarkup: 0, subtotalCustomer: 1000, deliveryFee: 300, totalAmount: 1300,
+        paymentMethod: 'CASH', placedAt: new Date(),
+      },
+    });
+    try {
+      const res = await app.inject({ method: 'GET', url: '/api/v1/admin/dashboard/overview', headers: { authorization: `Bearer ${adminToken}` } });
+      expect(res.statusCode).toBe(200);
+      const rev = res.json().data.revenue;
+      // Pre-fix these were raw Prisma Decimals → JSON strings, breaking the admin
+      // client's number type (NaN in the UI math).
+      expect(typeof rev.todayDeliveryFees).toBe('number');
+      expect(typeof rev.todayTotal).toBe('number');
+      expect(Number.isFinite(rev.todayDeliveryFees) && Number.isFinite(rev.todayTotal)).toBe(true);
+    } finally {
+      await app.prisma.order.deleteMany({ where: { id: order.id } });
+      await app.prisma.user.deleteMany({ where: { id: cust.id } });
+    }
+  });
+});

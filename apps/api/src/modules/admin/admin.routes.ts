@@ -394,9 +394,12 @@ export async function adminRoutes(app: FastifyInstance) {
         revenue: {
           // Platform revenue = weekly subscriptions only (no markup, no commission).
           weeklySubscriptionRevenue,
-          // Context only — mover earnings / GMV, NOT platform revenue:
-          todayDeliveryFees: todayRevenue._sum.deliveryFee || 0,
-          todayTotal: todayRevenue._sum.totalAmount || 0,
+          // Context only — mover earnings / GMV, NOT platform revenue.
+          // SWIFT-119: Number() at the seam — a Prisma Decimal is truthy, so
+          // `|| 0` let the raw Decimal through and it JSON-serialized to a STRING,
+          // not the number the admin client's type promises (→ NaN in the UI math).
+          todayDeliveryFees: Number(todayRevenue._sum.deliveryFee ?? 0),
+          todayTotal: Number(todayRevenue._sum.totalAmount ?? 0),
         },
         // Per-type ACTIVE count + real summed weekly revenue (Decimal → number).
         subscriptionBreakdown: subscriptionCounts.map((s) => ({
