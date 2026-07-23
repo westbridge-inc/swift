@@ -116,7 +116,6 @@ export interface DashboardOverview {
   totalVendors: number;
   revenue: { weeklySubscriptionRevenue: number; todayDeliveryFees: number; todayTotal: number };
   subscriptionBreakdown: { type: string; count: number; weeklyRevenue: number }[];
-  weeklyTrend: { date: string; count: number; revenue: number }[];
   alerts: { pendingVendors: number; pastDueSubs: number; unassignedOrders: number };
 }
 
