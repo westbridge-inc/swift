@@ -51,3 +51,11 @@ export function startOfMonthGY(date: Date = new Date()): Date {
   l.setUTCHours(0, 0, 0, 0);
   return toUtc(l);
 }
+
+/** `YYYY-MM-DD` of the Guyana-local day an instant falls in. Use this to bucket
+ *  rows into day-labelled series, never `date.toISOString().slice(0,10)` —
+ *  that keys by the UTC day, so an order at 21:00 GY (01:00 UTC next day) lands
+ *  in tomorrow's bucket. [SWIFT-039] */
+export function dayKeyGY(date: Date = new Date()): string {
+  return toGyLocal(date).toISOString().slice(0, 10);
+}
