@@ -84,21 +84,24 @@ afterAll(async () => {
   await app.close();
 });
 
-function uploadMultipart() {
+function uploadAs(bearer: string, bytes: Buffer) {
   const boundary = `----swift${marker}`;
   const body = Buffer.concat([
     Buffer.from(
       `--${boundary}\r\ncontent-disposition: form-data; name="file"; filename="doc.png"\r\ncontent-type: image/png\r\n\r\n`,
     ),
-    PLAINTEXT,
+    bytes,
     Buffer.from(`\r\n--${boundary}--\r\n`),
   ]);
   return app.inject({
     method: 'POST',
     url: '/api/v1/verification/upload',
-    headers: { authorization: `Bearer ${token}`, 'content-type': `multipart/form-data; boundary=${boundary}` },
+    headers: { authorization: `Bearer ${bearer}`, 'content-type': `multipart/form-data; boundary=${boundary}` },
     payload: body,
   });
+}
+function uploadMultipart() {
+  return uploadAs(token, PLAINTEXT);
 }
 
 describe('crypto primitives', () => {
@@ -207,5 +210,40 @@ describe('retention purge shreds the envelope', () => {
     const meta = await app.prisma.encryptedObject.findUniqueOrThrow({ where: { fileKey: key } });
     expect(meta.wrappedDek).toBeNull();
     expect(meta.shreddedAt).toBeTruthy();
+  });
+});
+
+describe('duplicate-document detection [SWIFT-078]', () => {
+  it('flags a document already on another account and alerts admins', async () => {
+    const admin = await app.prisma.user.create({
+      data: { phone: `+59268${String(Math.floor(Math.random() * 90000) + 10000)}`, firstName: 'Adm', lastName: 'In', roles: ['ADMIN'] as never[], activeRole: 'ADMIN' as never, isPhoneVerified: true },
+    });
+    const userB = await app.prisma.user.create({
+      data: { phone: `+59269${String(Math.floor(Math.random() * 90000) + 10000)}`, firstName: 'Env', lastName: 'B', roles: ['MOVER'] as never[], activeRole: 'MOVER' as never, isPhoneVerified: true },
+    });
+    const tokenB = app.jwt.sign({ userId: userB.id, role: 'MOVER', jti: nanoid(8) });
+    await app.prisma.session.create({ data: { userId: userB.id, token: tokenB, refreshToken: nanoid(48), deviceId: 't', deviceType: 'test', expiresAt: new Date(Date.now() + 86400000) } });
+
+    // A distinct valid PNG so this test doesn't collide with the others' hash.
+    const bytes = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), Buffer.from(`dup-${marker}`)]);
+
+    const a = await uploadAs(token, bytes); // applicant A
+    expect(a.statusCode).toBe(200);
+    expect(a.json().data.duplicate).toBe(false);
+
+    const b = await uploadAs(tokenB, bytes); // applicant B — same physical document
+    expect(b.statusCode).toBe(200);
+    // RED before SWIFT-078: no detection → duplicate false and no admin alert.
+    expect(b.json().data.duplicate).toBe(true);
+
+    const alert = await app.prisma.notification.findFirst({
+      where: { userId: admin.id, data: { path: ['kind'], equals: 'dup_doc' } },
+    });
+    expect(alert).not.toBeNull();
+
+    await app.prisma.encryptedObject.deleteMany({ where: { createdBy: { in: [userB.id] } } });
+    await app.prisma.notification.deleteMany({ where: { userId: { in: [admin.id, userB.id] } } });
+    await app.prisma.session.deleteMany({ where: { userId: userB.id } });
+    await app.prisma.user.deleteMany({ where: { id: { in: [admin.id, userB.id] } } });
   });
 });

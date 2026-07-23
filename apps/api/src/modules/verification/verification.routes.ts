@@ -1,7 +1,7 @@
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { VerificationService } from './verification.service';
-import { NotificationService } from '../notification/notification.service';
+import { NotificationService, notifyAdmins } from '../notification/notification.service';
 import { getKycProvider } from '../../providers/kyc/kyc-provider';
 import { getStorageProvider } from '../../providers/storage/storage-provider';
 import { decryptBuffer, encryptBuffer, generateDek, getKeyProvider, signRenderToken } from '../../providers/storage/envelope';
@@ -87,6 +87,15 @@ export async function verificationRoutes(app: FastifyInstance) {
     // (private object + provider-side SSE) — encryption is config, not code.
     const keys = getKeyProvider();
     if (keys) {
+      const sha256 = createHash('sha256').update(buffer).digest('hex');
+      // SWIFT-078: the SAME physical document already on ANOTHER account is a
+      // fraud signal — one person opening several accounts, or a reused/forged
+      // ID. Flag it to the reviewers; it must never quietly auto-progress.
+      const dup = await app.prisma.encryptedObject.findFirst({
+        where: { sha256, createdBy: { not: request.user.userId } },
+        select: { createdBy: true },
+      });
+
       const dek = generateDek();
       const { ciphertext, iv, authTag } = encryptBuffer(buffer, dek);
       const { url } = await storage.upload({
@@ -103,11 +112,20 @@ export async function verificationRoutes(app: FastifyInstance) {
           wrappedDek: new Uint8Array(await keys.wrapDek(dek)),
           mimeType: file.mimetype,
           sizeBytes: buffer.length,
-          sha256: createHash('sha256').update(buffer).digest('hex'),
+          sha256,
           createdBy: request.user.userId,
         },
       });
-      return { success: true, data: { url } };
+
+      if (dup) {
+        // The hash, not the document, goes to admins — never the PII itself.
+        await notifyAdmins(app.prisma, notifications, {
+          title: 'Duplicate verification document',
+          body: 'A document just uploaded is byte-identical to one already on another account. Review both before approving — possible multi-accounting or a reused/forged document.',
+          data: { kind: 'dup_doc', sha256, uploader: request.user.userId, matchesUser: dup.createdBy },
+        }).catch(() => {});
+      }
+      return { success: true, data: { url, duplicate: !!dup } };
     }
 
     const { url } = await storage.upload({
