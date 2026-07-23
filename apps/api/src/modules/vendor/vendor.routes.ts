@@ -1156,8 +1156,17 @@ export async function vendorRoutes(app: FastifyInstance) {
       throw new AppError(400, 'INVALID_STATUS', `Cannot complete pickup from ${order.status} status`);
     }
     const { code } = completePickupSchema.parse(request.body ?? {});
-    if (order.pickupCode && code != null && code !== order.pickupCode) {
-      throw new AppError(400, 'WRONG_PICKUP_CODE', 'That pickup code does not match.');
+    // SWIFT-077: when a pickup code is set, it is REQUIRED — it's the only proof
+    // the person collecting is the customer (mirrors the taxi ride PIN). The old
+    // check let a missing code through (`code != null`), so the handover could be
+    // closed without ever verifying it — anyone could claim the order.
+    if (order.pickupCode) {
+      if (code == null || code === '') {
+        throw new AppError(400, 'MISSING_PICKUP_CODE', "Enter the customer's pickup code to hand over this order.");
+      }
+      if (code !== order.pickupCode) {
+        throw new AppError(400, 'WRONG_PICKUP_CODE', 'That pickup code does not match.');
+      }
     }
     const updated = await orderService.updateStatus(order.id, 'COMPLETED', request.user.userId, 'Picked up by customer');
     return { success: true, data: updated };
