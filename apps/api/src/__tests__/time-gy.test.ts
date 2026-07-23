@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { startOfDayGY, startOfWeekGY, startOfMonthGY } from '../utils/time-gy';
+import { startOfDayGY, startOfWeekGY, startOfMonthGY, dayKeyGY } from '../utils/time-gy';
 
 // ---------------------------------------------------------------------------
 // DASH-06 — Guyana (UTC-4) day/week/month boundaries. The boundary must be
@@ -35,5 +35,28 @@ describe('Guyana-local boundaries [DASH-06]', () => {
   it('month starts on the 1st (Guyana)', () => {
     const d = startOfMonthGY(new Date('2026-07-22T15:00:00Z'));
     expect(d.toISOString()).toBe('2026-07-01T04:00:00.000Z');
+  });
+});
+
+describe('dayKeyGY bucketing [SWIFT-039]', () => {
+  it('an order at 21:00 GY counts on the SAME Guyana day, not tomorrow', () => {
+    // 21:00 on 2026-07-21 in Guyana = 2026-07-22T01:00Z. The UTC-slice bug keys
+    // this as the 22nd; dayKeyGY must key it as the 21st, matching morning orders.
+    const evening = new Date('2026-07-22T01:00:00Z'); // 21:00 GY, 21st
+    const morning = new Date('2026-07-21T13:00:00Z'); // 09:00 GY, 21st
+    expect(dayKeyGY(evening)).toBe('2026-07-21');
+    expect(dayKeyGY(morning)).toBe('2026-07-21');
+    expect(dayKeyGY(evening)).toBe(dayKeyGY(morning));
+  });
+
+  it('the naive UTC slice would have mis-bucketed that same instant', () => {
+    const evening = new Date('2026-07-22T01:00:00Z');
+    expect(evening.toISOString().slice(0, 10)).toBe('2026-07-22'); // the bug
+    expect(dayKeyGY(evening)).toBe('2026-07-21'); // the fix
+  });
+
+  it('the day key equals the startOfDayGY date for any instant in the day', () => {
+    const anytime = new Date('2026-07-22T01:00:00Z'); // 21:00 GY on the 21st
+    expect(dayKeyGY(anytime)).toBe(startOfDayGY(anytime).toISOString().slice(0, 10));
   });
 });

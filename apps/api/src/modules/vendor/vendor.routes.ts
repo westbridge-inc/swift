@@ -15,7 +15,7 @@ import { AiService } from '../ai/ai.service';
 import { guessColumnMapping, applyMapping, toImportCsv, REQUIRED_FIELDS, type ColumnMapping } from '../../utils/catalogue-map';
 import { parsePagination, paginatedResponse } from '../../utils/pagination';
 import { AppError, NotFoundError, ValidationError } from '../../utils/errors';
-import { startOfDayGY } from '../../utils/time-gy';
+import { startOfDayGY, dayKeyGY } from '../../utils/time-gy';
 import { DeliveryCashSettlementService, assertSettlementId } from '../cash/delivery-cash-settlement.service';
 import { BillingService } from '../billing/billing.service';
 import { getPaymentProvider } from '../../providers/payment/payment-provider';
@@ -2057,12 +2057,13 @@ export async function vendorRoutes(app: FastifyInstance) {
   app.get('/analytics/overview', auth, async (request) => {
     const { vendorId } = await requireVendor(app, request, 'MANAGER');
 
-    const now = new Date();
-    const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-    const weekStart = new Date(todayStart);
-    weekStart.setDate(weekStart.getDate() - 7);
-    const monthStart = new Date(todayStart);
-    monthStart.setDate(monthStart.getDate() - 30);
+    // DASH-05/SWIFT-039: "today" is the vendor's Guyana day, not the server's.
+    // A prod container runs UTC, so a naive local-midnight cut buckets the last
+    // 4h of each Guyana day (00:00–03:59 UTC) into the wrong day. Week/month are
+    // rolling 7/30-day windows anchored to that Guyana-local midnight.
+    const todayStart = startOfDayGY();
+    const weekStart = new Date(todayStart.getTime() - 7 * 24 * 60 * 60 * 1000);
+    const monthStart = new Date(todayStart.getTime() - 30 * 24 * 60 * 60 * 1000);
 
     const completedStatuses = ['DELIVERED', 'COMPLETED'] as import('@prisma/client').OrderStatus[];
     // DASH-05: "orders today/week/month" must not count DEAD orders
@@ -2225,16 +2226,19 @@ export async function vendorRoutes(app: FastifyInstance) {
     // Aggregate by day
     const dailyMap = new Map<string, { date: string; orders: number; revenue: number; total: number }>();
 
-    // Pre-fill all days so gaps show as zero
+    // Pre-fill all days so gaps show as zero. `since` is Guyana-local midnight;
+    // advance by whole days on the instant (TZ-independent) and key each bar by
+    // its Guyana day so it lines up with the orders bucketed below.
     for (let d = 0; d < days; d++) {
-      const date = new Date(since);
-      date.setDate(date.getDate() + d);
-      const key = date.toISOString().slice(0, 10);
+      const date = new Date(since.getTime() + d * 24 * 60 * 60 * 1000);
+      const key = dayKeyGY(date);
       dailyMap.set(key, { date: key, orders: 0, revenue: 0, total: 0 });
     }
 
     for (const o of orders) {
-      const key = o.placedAt.toISOString().slice(0, 10);
+      // SWIFT-039: bucket by the Guyana day, not the UTC day — otherwise an
+      // order placed after 20:00 GY (past UTC midnight) falls in tomorrow's bar.
+      const key = dayKeyGY(o.placedAt);
       const entry = dailyMap.get(key);
       if (entry) {
         entry.orders += 1;
