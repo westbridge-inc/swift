@@ -218,6 +218,74 @@ describe('MMG charge lifecycle', () => {
   });
 });
 
+describe('MMG double-charge guard [SWIFT-004]', () => {
+  it('a dunning retry does NOT fire a second request while the first is still live at MMG', async () => {
+    const due = new Date(Date.now() - 60_000);
+    const { subId } = await makeMoverWithMmgSub({ due, msisdn: '6091164' });
+    // State right after the poller synthetically expired an ignored-but-still-
+    // live request: the sub is dunning (failedAttempts=1) and the original
+    // payment row is FAILED — yet its MMG lookup still says pending (the request
+    // is live on the payer's phone; our 24h expiry was a DB-side guess).
+    await app.prisma.subscription.update({
+      where: { id: subId },
+      data: { status: 'PAST_DUE', failedAttempts: 1, nextRetryAt: new Date(Date.now() - 1000) },
+    });
+    const originalRef = `mmgtx_pending_${nanoid(8)}`; // sandbox lookup → stays pending
+    await app.prisma.subscriptionPayment.create({
+      data: {
+        subscriptionId: subId, amount: 12000, status: 'FAILED', paymentMethod: 'MOBILE_MONEY',
+        externalRef: originalRef, periodStart: due, periodEnd: new Date(due.getTime() + 7 * DAY),
+        createdAt: new Date(Date.now() - 25 * 60 * 60 * 1000),
+      },
+    });
+
+    const outcome = await billing.billSubscription((await subWithRelations(subId)) as any);
+    expect(outcome).toBe('pending');
+
+    const payments = await app.prisma.subscriptionPayment.findMany({ where: { subscriptionId: subId } });
+    // The guard must NOT have initiated a second MMG request: exactly one MMG
+    // reference is in play for the week. (Pre-fix, a blind re-initiate added a
+    // second approvable request → the double-charge.)
+    const refs = new Set(payments.map((p) => p.externalRef));
+    expect(refs.size).toBe(1);
+    expect([...refs][0]).toBe(originalRef);
+    // The original is re-attached (PENDING) so the poller can still settle it.
+    expect(payments.find((p) => p.externalRef === originalRef)!.status).toBe('PENDING');
+  });
+
+  it('heals a late approval — settles off the original request instead of charging again', async () => {
+    const due = new Date(Date.now() - 60_000);
+    const { subId } = await makeMoverWithMmgSub({ due, msisdn: '6091165' });
+    await app.prisma.subscription.update({
+      where: { id: subId },
+      data: { status: 'PAST_DUE', failedAttempts: 1, nextRetryAt: new Date(Date.now() - 1000) },
+    });
+    // The payer approved AFTER we synthetically gave up: the row is FAILED, but
+    // its MMG lookup now reports approved (no "pending" marker → sandbox approves).
+    const approvedRef = `mmgtx_heal_${nanoid(8)}`;
+    await app.prisma.subscriptionPayment.create({
+      data: {
+        subscriptionId: subId, amount: 12000, status: 'FAILED', paymentMethod: 'MOBILE_MONEY',
+        externalRef: approvedRef, periodStart: due, periodEnd: new Date(due.getTime() + 7 * DAY),
+      },
+    });
+
+    const outcome = await billing.billSubscription((await subWithRelations(subId)) as any);
+    expect(outcome).toBe('succeeded');
+
+    const after = await app.prisma.subscription.findUniqueOrThrow({ where: { id: subId } });
+    expect(after.status).toBe('ACTIVE');
+    expect(after.nextBillingDate.getTime()).toBe(due.getTime() + 7 * DAY); // advanced exactly once
+    const payments = await app.prisma.subscriptionPayment.findMany({ where: { subscriptionId: subId } });
+    const refs = new Set(payments.map((p) => p.externalRef));
+    expect(refs.size).toBe(1); // no new MMG request — the same reference is reused
+    expect([...refs][0]).toBe(approvedRef);
+    expect(payments.filter((p) => p.status === 'CAPTURED')).toHaveLength(1); // settled in place
+    const successes = await app.prisma.billingEvent.findMany({ where: { subscriptionId: subId, type: 'CHARGE_SUCCESS' } });
+    expect(successes).toHaveLength(1);
+  });
+});
+
 describe('rail selection', () => {
   it('PUT /rider/subscription/billing-method flips to MMG (msisdn required) and back', async () => {
     const { subId, httpToken } = await makeMoverWithMmgSub({ due: new Date(Date.now() + 3 * DAY) });

@@ -141,8 +141,31 @@ export class BillingService {
     const charged = await this.attemptCharge(sub, amount);
 
     if (charged.ok) {
-      await this.applySuccessfulCharge(sub, amount, charged.ref, now, periodKey);
+      // A guard-detected late approval settles the ORIGINAL pending row in place
+      // (settlePaymentId); a fresh success creates its own CAPTURED row.
+      await this.applySuccessfulCharge(
+        sub, amount, charged.ref, now, periodKey,
+        'settlePaymentId' in charged ? charged.settlePaymentId : undefined,
+      );
       return 'succeeded';
+    }
+
+    if ('deferred' in charged) {
+      // SWIFT-004: a prior MMG request for this period is still live at MMG (or
+      // MMG is unreachable). Don't create a second request/row — re-attach the
+      // poller to the original and push the retry clock; the poller settles a
+      // late approval or duns a genuine expiry on a later tick, never a duplicate.
+      if (charged.reopenPaymentId) {
+        await this.prisma.subscriptionPayment.updateMany({
+          where: { id: charged.reopenPaymentId, status: 'FAILED' },
+          data: { status: 'PENDING' },
+        });
+      }
+      await this.prisma.subscription.update({
+        where: { id: sub.id },
+        data: { nextRetryAt: new Date(now.getTime() + RETRY_HOURS * 60 * 60 * 1000) },
+      });
+      return 'pending';
     }
 
     if ('pendingTx' in charged) {
@@ -189,7 +212,12 @@ export class BillingService {
   private async attemptCharge(
     sub: SubWithRelations,
     amount: number,
-  ): Promise<{ ok: true; ref: string } | { ok: false; reason: string } | { ok: false; pendingTx: string }> {
+  ): Promise<
+    | { ok: true; ref: string; settlePaymentId?: string }
+    | { ok: false; reason: string }
+    | { ok: false; pendingTx: string }
+    | { ok: false; deferred: true; reopenPaymentId?: string }
+  > {
     // Prepaid balance is money Swift already holds — spend it before pinging any
     // external rail. Atomic conditional decrement (no read-then-write race). This
     // is also what makes an admin top-up reinstate a CARD/MMG sub: the recorded
@@ -215,9 +243,41 @@ export class BillingService {
     }
 
     if (sub.billingMethod === 'MOBILE_MONEY' && sub.mmgPayerMsisdn) {
+      const mmg = getMmgProvider();
+      // SWIFT-004 — MMG double-charge guard. The poller's synthetic 24h expiry
+      // can mark a prior request FAILED while MMG still holds it live on the
+      // payer's phone; initiating again here would put a SECOND approvable
+      // charge out for the same week. Reconcile every prior request for THIS
+      // period against MMG's own truth before firing a new one:
+      //   approved → settle off it (the money is already in — no new charge);
+      //   still pending, or MMG unreachable → don't fire; re-attach the poller
+      //     to the original so a late approval still settles and a genuine
+      //     expiry still duns, minus the duplicate;
+      //   only a provably-dead prior (declined/expired/reversed) lets one through.
+      const priors = await this.prisma.subscriptionPayment.findMany({
+        where: {
+          subscriptionId: sub.id,
+          paymentMethod: 'MOBILE_MONEY',
+          periodStart: sub.nextBillingDate,
+          externalRef: { not: null },
+        },
+        orderBy: { createdAt: 'desc' },
+        take: 5,
+      });
+      for (const prior of priors) {
+        let priorStatus: string;
+        try {
+          priorStatus = (await mmg.transactionLookup({ transactionId: prior.externalRef! })).status;
+        } catch {
+          return { ok: false, deferred: true, reopenPaymentId: prior.id }; // MMG down — never fire blind
+        }
+        if (priorStatus === 'approved') return { ok: true, ref: prior.externalRef!, settlePaymentId: prior.id };
+        if (priorStatus === 'pending') return { ok: false, deferred: true, reopenPaymentId: prior.id };
+      }
+
       // §13 MMG rail — merchant-initiated. Amounts are minor units at the
       // provider seam; the reference doubles as the retry-safe correlation id.
-      const result = await getMmgProvider().initiatePayment({
+      const result = await mmg.initiatePayment({
         payerId: sub.mmgPayerMsisdn,
         amountMinor: Math.round(amount * 100),
         currencyCode: sub.currencyCode,
