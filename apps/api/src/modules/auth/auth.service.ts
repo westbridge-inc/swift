@@ -350,7 +350,7 @@ export class AuthService {
     return {
       accessToken: newAccessToken,
       refreshToken: newRefreshToken,
-      expiresIn: 1800,
+      expiresIn: 900,
     };
   }
 
@@ -379,7 +379,7 @@ export class AuthService {
       return {
         accessToken: rotated.token,
         refreshToken: rotated.refreshToken,
-        expiresIn: 1800,
+        expiresIn: 900,
       };
     }
 
@@ -438,7 +438,7 @@ export class AuthService {
     return {
       accessToken,
       refreshToken,
-      expiresIn: 1800, // 30 minutes
+      expiresIn: 900, // 15 minutes — MUST match the JWT sign TTL (plugins/auth.ts) [SWIFT-107]
     };
   }
 }

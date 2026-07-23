@@ -123,6 +123,17 @@ describe('Auth Routes', () => {
       expect(body.data.user).toBeDefined();
     });
 
+    it('SWIFT-107: the advertised expiresIn equals the token\'s real TTL (900s)', async () => {
+      const code = await requestOtp(app, '+5926003000');
+      const res = await inject('POST', '/api/v1/auth/verify-otp', { phone: '+5926003000', code });
+      const { accessToken, expiresIn } = res.json().data.tokens;
+      const payload = JSON.parse(Buffer.from(accessToken.split('.')[1], 'base64url').toString());
+      // RED before SWIFT-107: expiresIn advertised 1800 while the token really
+      // lived 900s, so clients refreshed 15 minutes too late (a window of 401s).
+      expect(expiresIn).toBe(900);
+      expect(payload.exp - payload.iat).toBe(expiresIn);
+    });
+
     it('returns isNewUser true for unknown phone', async () => {
       const code = await requestOtp(app, '+5929999999');
       const res = await inject('POST', '/api/v1/auth/verify-otp', {
@@ -336,8 +347,8 @@ describe('Auth Routes', () => {
       expect(body.success).toBe(true);
       expect(body.data.accessToken).toBeDefined();
       expect(body.data.refreshToken).toBeDefined();
-      // SEC-3: access tokens are 30 minutes now, not 24h
-      expect(body.data.expiresIn).toBe(1800);
+      // SWIFT-107: advertised expiry now matches the real 15-minute JWT TTL (was 1800).
+      expect(body.data.expiresIn).toBe(900);
     });
 
     it('rejects invalid refresh token', async () => {
