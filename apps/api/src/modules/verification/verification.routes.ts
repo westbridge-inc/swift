@@ -4,7 +4,7 @@ import { VerificationService } from './verification.service';
 import { NotificationService, notifyAdmins } from '../notification/notification.service';
 import { getKycProvider } from '../../providers/kyc/kyc-provider';
 import { getStorageProvider } from '../../providers/storage/storage-provider';
-import { decryptBuffer, encryptBuffer, generateDek, getKeyProvider, signRenderToken } from '../../providers/storage/envelope';
+import { decryptBuffer, encryptBuffer, generateDek, getKeyProvider, verifyRenderToken } from '../../providers/storage/envelope';
 import { createHash } from 'node:crypto';
 import { looksLikeDocument } from '../../utils/images';
 import { AppError } from '../../utils/errors';
@@ -149,7 +149,7 @@ export async function verificationRoutes(app: FastifyInstance) {
     if (expires < Math.floor(Date.now() / 1000)) {
       throw new AppError(410, 'LINK_EXPIRED', 'This view link has expired — reopen the document.');
     }
-    if (sig !== signRenderToken(docId, expires)) {
+    if (!verifyRenderToken(docId, expires, sig)) {
       throw new AppError(403, 'BAD_SIGNATURE', 'Invalid view link.');
     }
 

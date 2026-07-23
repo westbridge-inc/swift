@@ -10,7 +10,7 @@ import { registerErrorHandler } from '../middleware/error-handler';
 import { verificationRoutes } from '../modules/verification/verification.routes';
 import {
   EnvKeyProvider, decryptBuffer, encryptBuffer, generateDek,
-  mintRenderPath, resetKeyProviderForTests, signRenderToken,
+  mintRenderPath, resetKeyProviderForTests, signRenderToken, verifyRenderToken,
 } from '../providers/storage/envelope';
 import { getStorageProvider } from '../providers/storage/storage-provider';
 import crypto from 'node:crypto';
@@ -114,6 +114,20 @@ describe('crypto primitives', () => {
     const badTag = Buffer.from(authTag);
     badTag[0] = badTag[0]! ^ 0xff;
     expect(() => decryptBuffer(ciphertext, dek, iv, badTag)).toThrow();
+  });
+
+  it('SWIFT-106: verifyRenderToken is constant-time, accepts valid, rejects tampered/wrong-length', () => {
+    const docId = 'doc-abc';
+    const expires = 1_900_000_000;
+    const good = signRenderToken(docId, expires);
+    expect(verifyRenderToken(docId, expires, good)).toBe(true);
+    // One byte flipped, SAME length — timingSafeEqual still compares fully.
+    const tampered = (good[0] === 'a' ? 'b' : 'a') + good.slice(1);
+    expect(verifyRenderToken(docId, expires, tampered)).toBe(false);
+    // Wrong length must return false, never throw (timingSafeEqual throws on ≠ length).
+    expect(verifyRenderToken(docId, expires, good.slice(0, 10))).toBe(false);
+    // Bound to the exact docId + expiry.
+    expect(verifyRenderToken('other-doc', expires, good)).toBe(false);
   });
 
   it('wrap/unwrap round-trips; a different KEK cannot unwrap', async () => {
