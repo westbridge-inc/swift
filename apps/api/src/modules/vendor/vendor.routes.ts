@@ -1236,6 +1236,18 @@ export async function vendorRoutes(app: FastifyInstance) {
       app.io.to(`vendor:${order.vendorId}`).emit('order:status_changed', rejectEvent);
     }
 
+    // Tell the CUSTOMER, with the reason — parity with the admin-cancel path
+    // [SWIFT-024]. The socket event only reaches a client already on the order
+    // screen; a customer whose app is closed or elsewhere would otherwise never
+    // learn their order was declined (it just silently vanished).
+    await notifications.send({
+      userId: updated.customer.id,
+      type: 'ORDER_UPDATE',
+      title: 'Order declined',
+      body: `Your order ${updated.orderNumber} was declined by the store. ${reason}`.trim(),
+      data: { orderId: order.id, status: 'CANCELLED' },
+    });
+
     return { success: true, data: updated };
   });
 

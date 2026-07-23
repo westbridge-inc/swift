@@ -207,6 +207,23 @@ describe('Vendor rejects an order — PUT /vendor/orders/:id/reject', () => {
     expect(log!.note).toBe('Out of stock');
   });
 
+  it('SWIFT-024: notifies the customer, with the reason', async () => {
+    const vendor = await makeVendor();
+    const order = await makeOrder(customer.userId, vendor.vendorId, 'PENDING');
+
+    const res = await inject('PUT', `/api/v1/vendor/orders/${order.id}/reject`, { reason: 'Kitchen closed' }, vendor.token);
+    expect(res.statusCode).toBe(200);
+
+    // RED before SWIFT-024: reject only emitted a socket event, so a customer
+    // whose app was closed got no persisted notification at all.
+    const note = await app.prisma.notification.findFirst({
+      where: { userId: customer.userId, type: 'ORDER_UPDATE', data: { path: ['orderId'], equals: order.id } },
+    });
+    expect(note).not.toBeNull();
+    expect(note!.body).toContain('declined');
+    expect(note!.body).toContain('Kitchen closed');
+  });
+
   it('rejecting an ACCEPTED order frees the assigned rider', async () => {
     const vendor = await makeVendor();
     const rider = await makeRider();
