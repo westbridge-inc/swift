@@ -98,6 +98,16 @@ export function signRenderToken(docId: string, expires: number): string {
     .slice(0, 32);
 }
 
+/** Constant-time verification of a render-token signature [SWIFT-106]. A plain
+ *  `sig === expected` compares byte-by-byte and short-circuits on the first
+ *  mismatch, leaking — through response timing — how much of the HMAC an
+ *  attacker has already guessed. timingSafeEqual removes that oracle. */
+export function verifyRenderToken(docId: string, expires: number, sig: string): boolean {
+  const expected = Buffer.from(signRenderToken(docId, expires));
+  const provided = Buffer.from(sig);
+  return provided.length === expected.length && crypto.timingSafeEqual(provided, expected);
+}
+
 /** Path (relative to the API origin) for a time-limited decrypted render. */
 export function mintRenderPath(docId: string, ttlSeconds = 300): { path: string; expiresInSeconds: number } {
   const expires = Math.floor(Date.now() / 1000) + ttlSeconds;
