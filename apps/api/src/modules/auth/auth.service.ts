@@ -406,6 +406,16 @@ export class AuthService {
 
   async logoutAll(userId: string) {
     await this.app.prisma.session.deleteMany({ where: { userId } });
+    // SWIFT-099: revoking every session must also drop live realtime
+    // connections. The socket auth gate only runs at CONNECT, so an already-open
+    // socket would keep receiving events after a log-out-everywhere / suspension.
+    // Fire-and-forget: a disconnect failure must never fail the logout, and io
+    // may be absent in a worker process.
+    try {
+      this.app.io?.in(`user:${userId}`).disconnectSockets(true);
+    } catch {
+      /* sockets not wired here */
+    }
   }
 
   private async createSession(userId: string, role: string, deviceInfo: DeviceInfo) {

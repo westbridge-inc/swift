@@ -9,6 +9,7 @@ import { redisPlugin } from '../plugins/redis';
 import { authPlugin } from '../plugins/auth';
 import { socketPlugin } from '../plugins/socket';
 import { registerErrorHandler } from '../middleware/error-handler';
+import { AuthService } from '../modules/auth/auth.service';
 
 // ---------------------------------------------------------------------------
 // SEC-1 regression — Socket.IO connections must present a valid JWT AND a live
@@ -125,6 +126,25 @@ describe('SEC-1 regression — Socket.IO authentication', () => {
     const { socket, error } = await connect({ token });
     expect(error).toBeDefined();
     expect(error!.message).toBe('Account not active');
+    expect(socket.connected).toBe(false);
+  });
+
+  it('SWIFT-099: logoutAll drops the user\'s already-open socket', async () => {
+    const { userId, token } = await makeSessionToken('ACTIVE');
+    const { socket, error } = await connect({ token });
+    expect(error).toBeUndefined();
+    expect(socket.connected).toBe(true);
+
+    const dropped = new Promise<boolean>((resolve) => {
+      socket.on('disconnect', () => resolve(true));
+      setTimeout(() => resolve(false), 2500);
+    });
+    // Revoke every session (the "log out everywhere" / suspension path).
+    await new AuthService(app).logoutAll(userId);
+
+    // RED before SWIFT-099: sessions are gone but the live socket stays connected
+    // (the auth gate only runs at connect), so it never disconnects.
+    expect(await dropped).toBe(true);
     expect(socket.connected).toBe(false);
   });
 });
