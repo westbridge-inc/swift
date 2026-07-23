@@ -174,6 +174,12 @@ const MAX_DELIVERY_RADIUS_KM = 25;
 // charge read the same constants by construction.
 const HOME_CACHE_TTL = 60; // 1 min
 const MAX_ADDRESSES = 10;
+// SWIFT-163: the Home discovery scan is bounded so an ever-growing catalogue
+// can't load every ACTIVE vendor into memory per request. The feed only ever
+// surfaces a few dozen (featured/nearby/open slices), so a generous cap is
+// lossless at launch scale; the large-scale path is a geo-bounded (PostGIS)
+// fetch of the nearest N, tracked separately.
+const HOME_DISCOVERY_SCAN_CAP = 500;
 const MAX_TIP_GYD = 50_000;
 
 // ---------------------------------------------------------------------------
@@ -735,6 +741,7 @@ export async function customerRoutes(app: FastifyInstance) {
           categories: { select: { id: true, name: true }, take: 5 },
         },
         orderBy: { averageRating: 'desc' },
+        take: HOME_DISCOVERY_SCAN_CAP, // SWIFT-163: bound the per-request scan
       }),
 
       // Customer's favorite vendor IDs (guests have none)

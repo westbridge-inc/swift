@@ -40,6 +40,17 @@ describe('guest browsing (no account)', () => {
   it('lets guests see Home', async () => {
     expect((await get('/api/v1/customer/home')).statusCode).toBe(200);
   });
+  it('returns a bounded discovery feed — sections never exceed their caps [SWIFT-163]', async () => {
+    // The Home scan is capped (HOME_DISCOVERY_SCAN_CAP) so a growing catalogue
+    // can't load unboundedly per request. Whatever the vendor count, the feed
+    // stays within its documented section sizes.
+    await app.redis.del('t:_notenant:home:guest:x:x');
+    const d = (await get('/api/v1/customer/home')).json().data;
+    expect(d.openVendors.length).toBeLessThanOrEqual(30);
+    expect(d.closedVendors.length).toBeLessThanOrEqual(10);
+    expect(d.featured.length).toBeLessThanOrEqual(8);
+    expect(d.orderAgain.length).toBeLessThanOrEqual(6);
+  });
   it('keeps not-accepting vendors out of orderable feeds (no checkout dead-end)', async () => {
     // A vendor that's open-by-hours but paused (acceptingOrders=false) must not
     // surface where it can be ordered, else it dead-ends at checkout (VENDOR_CLOSED).
