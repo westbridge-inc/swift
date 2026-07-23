@@ -6,7 +6,7 @@ import { space } from '@swift/ui';
 import { Header, Screen, SettingsRow, T } from '../../../kit';
 
 // Kit Contact Us (55). Channels below are the launch support set —
-// TODO(ui-rebuild): Mayur to confirm the final support phone/handles before release.
+// TODO(SWIFT-117): confirm the final support phone/handles before release.
 const SUPPORT_EMAIL = 'support@swift.gy';
 
 export function ContactUsScreen() {
