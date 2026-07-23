@@ -189,6 +189,27 @@ export async function autoCancelUnresponsiveOrder(ctx: JobContext, orderId: stri
   return true;
 }
 
+/** SWIFT-164 — periodic vendor↔rider collusion affinity scan. Surfaces pairs
+ *  with an unusual concentration of guarantee claims to admins for review (via
+ *  opsPageOnce so a standing pattern pages once, not every run). Detection only;
+ *  never an automatic money action. Exported so tests can drive it directly. */
+export async function runCollusionAffinityScan(ctx: JobContext): Promise<{ flaggedPairs: number }> {
+  const { scanVendorRiderClaimAffinity } = await import('../modules/cash/cash-rules.service');
+  const pairs = await scanVendorRiderClaimAffinity(ctx.prisma);
+  if (pairs.length > 0) {
+    const { notifyAdmins, NotificationService } = await import('../modules/notification/notification.service');
+    await opsPageOnce(ctx, 'vendor-rider-collusion', 6 * 3600, () =>
+      notifyAdmins(ctx.prisma, new NotificationService(ctx.prisma, ctx.io), {
+        title: 'Possible vendor–rider collusion',
+        body: `${pairs.length} vendor–rider pair(s) show an unusual concentration of guarantee claims. Review the claims dashboard before the next settlement.`,
+        data: { kind: 'ops_collusion_affinity', pairs: pairs.slice(0, 20) },
+      }),
+    );
+  }
+  ctx.log.info({ flaggedPairs: pairs.length }, 'Vendor–rider collusion affinity scan');
+  return { flaggedPairs: pairs.length };
+}
+
 export function createWorkers(ctx: JobContext) {
   const connection = { host: ctx.redis.options.host, port: ctx.redis.options.port };
 
@@ -353,6 +374,10 @@ export function createWorkers(ctx: JobContext) {
         // Double-blind window: a no-show counterpart must not hide feedback forever.
         const released = await svc.releaseDoubleBlind();
         ctx.log.info(`Rating sweep: ${flagged} flagged, ${released} double-blind released`);
+      }
+
+      if (job.name === 'collusion-affinity-scan') {
+        await runCollusionAffinityScan(ctx);
       }
 
       if (job.name === 'booking-reminders') {
@@ -665,6 +690,14 @@ export async function scheduleRecurringJobs(queues: ReturnType<typeof createQueu
     repeat: { pattern: '0 4 * * *' },
     removeOnComplete: 30,
     removeOnFail: 30,
+  });
+
+  // Vendor↔rider collusion affinity scan (SWIFT-164): weekly, Monday 06:00 —
+  // after tier-recalc (05:00), before the human's week starts.
+  await queues.verificationQueue.add('collusion-affinity-scan', {}, {
+    repeat: { pattern: '0 6 * * 1' },
+    removeOnComplete: 10,
+    removeOnFail: 10,
   });
 
   // Booking reminders (§4.3): hourly — each confirmed slot nudges both sides

@@ -483,3 +483,57 @@ export class CashRulesService {
     return this.prisma.rider.findUniqueOrThrow({ where: { id: riderId }, select: { userId: true } });
   }
 }
+
+export interface VendorRiderAffinity {
+  vendorId: string;
+  riderId: string;
+  claims: number;
+}
+
+/**
+ * SWIFT-164 — vendor↔rider collusion affinity scan.
+ *
+ * The per-claim guardrails model rider↔customer and same-door collusion, but the
+ * VENDOR is not a node in that graph: a vendor that funnels fabricated failed
+ * deliveries to one favoured rider (splitting the guarantee payout) is invisible
+ * on the first cycle. This periodic scan counts guarantee claims by
+ * (vendorId, riderId) over a window and returns pairs at or above a threshold so
+ * a human can review them. Detection only — it never takes an automatic money
+ * action (hard rule 1). Courier/taxi claims have no vendor node and are skipped.
+ */
+export async function scanVendorRiderClaimAffinity(
+  prisma: PrismaClient,
+  opts: { sinceDays?: number; minClaims?: number } = {},
+): Promise<VendorRiderAffinity[]> {
+  const sinceDays = opts.sinceDays ?? 90;
+  const minClaims = opts.minClaims ?? 3;
+  const since = new Date(Date.now() - sinceDays * DAY_MS);
+
+  const claims = await prisma.reimbursementClaim.findMany({
+    where: { createdAt: { gte: since } },
+    select: { orderId: true, riderId: true },
+  });
+  if (claims.length === 0) return [];
+
+  // The claim carries orderId, not vendorId — resolve the vendor per order.
+  const vendorByOrder = new Map<string, string>();
+  const orders = await prisma.order.findMany({
+    where: { id: { in: claims.map((c) => c.orderId) }, vendorId: { not: null } },
+    select: { id: true, vendorId: true },
+  });
+  for (const o of orders) if (o.vendorId) vendorByOrder.set(o.id, o.vendorId);
+
+  const counts = new Map<string, VendorRiderAffinity>();
+  for (const c of claims) {
+    const vendorId = vendorByOrder.get(c.orderId);
+    if (!vendorId) continue; // courier/taxi claim — no vendor node
+    const key = `${vendorId}::${c.riderId}`;
+    const cur = counts.get(key) ?? { vendorId, riderId: c.riderId, claims: 0 };
+    cur.claims += 1;
+    counts.set(key, cur);
+  }
+
+  return [...counts.values()]
+    .filter((p) => p.claims >= minClaims)
+    .sort((a, b) => b.claims - a.claims);
+}
