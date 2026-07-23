@@ -120,7 +120,9 @@ async function makeArrivedCashOrder(customerId: string, riderId: string, amount:
     data: {
       orderNumber: `ACC-${nanoid(10)}`, orderType: 'FOOD_DELIVERY',
       customerId, vendorId, riderId, status: 'ARRIVED',
-      deliveryAddress: '9 Acc Street, Georgetown', deliveryLat: 6.80451, deliveryLng: -58.15532,
+      // SWIFT-076: guarantee claims now assert handover proximity — a legit
+      // at-door handover (gps: GPS) must be beside the delivery point.
+      deliveryAddress: '9 Acc Street, Georgetown', deliveryLat: 7.2007, deliveryLng: -58.6007,
       pickupLat: GPS.lat, pickupLng: GPS.lng, pickupAddress: 'Vendor corner',
       subtotalBase: amount, subtotalMarkup: 0, subtotalCustomer: amount,
       deliveryFee: 500, totalAmount: amount, paymentMethod: 'CASH',
