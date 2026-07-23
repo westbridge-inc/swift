@@ -1237,6 +1237,13 @@ export async function adminRoutes(app: FastifyInstance) {
       { restock: OrderService.restocksOnCancel(order.status) },
     );
 
+    // SWIFT-095: an order cancelled mid-dispatch left its search journal stuck at
+    // SEARCHING forever — a ghost on the ops board and in the dispatch metrics.
+    // Close it, mirroring how the cascade closes on assign/exhaust.
+    await app.prisma.dispatchSearch
+      .updateMany({ where: { subjectId: id, status: 'SEARCHING' }, data: { status: 'CANCELLED', resolution: 'CANCELLED' } })
+      .catch(() => {});
+
     // V1 is cash-only: the platform never holds order money, so there is no wallet
     // to credit. A cancellation before handover means no cash changed hands; if cash
     // was already collected, the refund is settled in cash and tracked via the audit

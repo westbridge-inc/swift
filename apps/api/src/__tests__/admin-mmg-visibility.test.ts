@@ -143,6 +143,38 @@ describe('GET /admin/finance/cash-settlements', () => {
   });
 });
 
+describe('PUT /admin/orders/:id/cancel — journal close [SWIFT-095]', () => {
+  it('closes an open dispatch search instead of leaving it SEARCHING forever', async () => {
+    const customer = await makeUser(['CUSTOMER'], 'CUSTOMER');
+    const order = await app.prisma.order.create({
+      data: {
+        orderNumber: `AVIS-C-${nanoid(8)}`, orderType: 'FOOD_DELIVERY',
+        customerId: customer.id, vendorId, status: 'ACCEPTED',
+        deliveryAddress: 'x', deliveryLat: 6.8, deliveryLng: -58.15,
+        subtotalBase: 1000, subtotalMarkup: 0, subtotalCustomer: 1000,
+        deliveryFee: 300, totalAmount: 1300, paymentMethod: 'CASH',
+      },
+    });
+    // As if the order were mid-dispatch when the admin cancels it.
+    const search = await app.prisma.dispatchSearch.create({
+      data: { vertical: 'DELIVERY', subjectId: order.id, status: 'SEARCHING', radiusKm: 5 },
+    });
+
+    const res = await app.inject({
+      method: 'PUT', url: `/api/v1/admin/orders/${order.id}/cancel`,
+      headers: { authorization: `Bearer ${adminToken}`, 'content-type': 'application/json' },
+      payload: { reason: 'ops override' },
+    });
+    expect(res.statusCode).toBe(200);
+    expect((await app.prisma.order.findUniqueOrThrow({ where: { id: order.id } })).status).toBe('CANCELLED');
+    // RED before SWIFT-095: the search journal stayed SEARCHING — a ghost on the ops board.
+    const after = await app.prisma.dispatchSearch.findUniqueOrThrow({ where: { id: search.id } });
+    expect(after.status).toBe('CANCELLED');
+
+    await app.prisma.dispatchSearch.deleteMany({ where: { subjectId: order.id } });
+  });
+});
+
 describe('GET /admin/finance/payment-mix', () => {
   it('splits completed orders by payment method and counts unconfirmed MMG', async () => {
     const res = await get('/api/v1/admin/finance/payment-mix');
