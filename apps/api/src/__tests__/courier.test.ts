@@ -211,3 +211,22 @@ describe('Courier — create, track, deliver', () => {
     }
   });
 });
+
+describe('Courier — priority dispatch is REAL [SWIFT-061]', () => {
+  it('EXPRESS/RUSH map to isExpress (12s offers / 45s redispatch / sort-first); STANDARD does not', async () => {
+    const sender = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
+    const mk = async (speed: 'STANDARD' | 'EXPRESS' | 'RUSH') => {
+      const res = await inject('POST', '/api/v1/courier/order', { ...ORDER_BODY, speed }, sender.token);
+      expect(res.statusCode).toBe(201);
+      return app.prisma.order.findUniqueOrThrow({
+        where: { id: res.json().data.orderId },
+        select: { isExpress: true, courierSpeed: true },
+      });
+    };
+    // The surcharge was already charged; now the priority is mechanically real —
+    // isExpress is the single flag the dispatch cascade + board sort read.
+    expect((await mk('RUSH')).isExpress).toBe(true);
+    expect((await mk('EXPRESS')).isExpress).toBe(true);
+    expect((await mk('STANDARD')).isExpress).toBe(false);
+  });
+});
