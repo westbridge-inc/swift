@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { assertSafeBootConfig } from '../utils/boot-config';
+import { assertSafeBootConfig, assertProductionData } from '../utils/boot-config';
 
 // SWIFT-AUD-D9-02 / D3-01: production must refuse to boot without the two
 // secrets that keep KYC documents private (envelope KEK + render HMAC), and
@@ -65,5 +65,29 @@ describe('assertSafeBootConfig — fail-closed production secrets', () => {
   it('does NOT enforce any of this outside production (dev/test boot freely)', () => {
     expect(() => assertSafeBootConfig({ NODE_ENV: 'development' })).not.toThrow();
     expect(() => assertSafeBootConfig({ NODE_ENV: 'test', DEV_OTP_BYPASS: '1' })).not.toThrow();
+  });
+});
+
+// SWIFT-010: a production DB with no CountryConfig rows has no active market,
+// so countryFromPhone rejects every signup — a healthy-looking but dead front
+// door. The boot must refuse it. Uses a mock prisma so the guard is proven
+// without a database.
+const prismaWith = (n: number) => ({ countryConfig: { count: async () => n } });
+
+describe('assertProductionData — fail-closed empty-market guard', () => {
+  it('refuses to boot in production when zero CountryConfig rows exist', async () => {
+    await expect(assertProductionData(prismaWith(0), { NODE_ENV: 'production' })).rejects.toThrow(/CountryConfig/);
+  });
+
+  it('boots in production once at least one CountryConfig (market) is seeded', async () => {
+    await expect(assertProductionData(prismaWith(1), { NODE_ENV: 'production' })).resolves.toBeUndefined();
+  });
+
+  it('does not query or block outside production, even on an empty DB', async () => {
+    let queried = false;
+    const spy = { countryConfig: { count: async () => { queried = true; return 0; } } };
+    await expect(assertProductionData(spy, { NODE_ENV: 'test' })).resolves.toBeUndefined();
+    await expect(assertProductionData(spy, { NODE_ENV: 'development' })).resolves.toBeUndefined();
+    expect(queried).toBe(false);
   });
 });

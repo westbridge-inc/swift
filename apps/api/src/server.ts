@@ -22,7 +22,7 @@ import { servicesRoutes } from './modules/services/services.routes';
 import { partnerRoutes } from './modules/partner/partner.routes';
 import { aiRoutes } from './modules/ai/ai.routes';
 import { setAppLogger } from './utils/logger';
-import { assertSafeBootConfig } from './utils/boot-config';
+import { assertSafeBootConfig, assertProductionData } from './utils/boot-config';
 import { prismaPlugin, beginRequestTenantContext } from './plugins/prisma';
 import { authPlugin } from './plugins/auth';
 import { socketPlugin } from './plugins/socket';
@@ -328,6 +328,9 @@ async function start() {
   try {
     assertSafeBootConfig();
     const app = await buildApp();
+    // SWIFT-010: refuse to serve a production DB with no active market seeded
+    // (empty CountryConfig = every signup rejected). Dev/test/CI skip inside.
+    await assertProductionData(app.prisma);
     await app.listen({ port: PORT, host: HOST });
     console.warn(`Swift API running on http://${HOST}:${PORT}`);
   } catch (err) {
