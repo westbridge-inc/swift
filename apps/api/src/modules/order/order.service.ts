@@ -69,8 +69,13 @@ export const ORDER_TRANSITIONS: Record<OrderStatus, OrderStatus[]> = {
     'DRIVER_ASSIGNED', 'DRIVER_EN_ROUTE', 'DRIVER_ARRIVED',
   ],
   REFUNDED: ['CANCELLED', 'DELIVERED', 'COMPLETED'],
-  // Failed cash handover — only from the door or en route
-  FAILED: ['PENDING', 'PICKED_UP', 'EN_ROUTE_DELIVERY', 'ARRIVED'],
+  // Failed cash handover is the only path into FAILED, and it is recorded ONLY
+  // at the door (cash-rules HANDOVER_STATES = ['ARRIVED']). The old list also
+  // allowed PENDING/PICKED_UP/EN_ROUTE_DELIVERY — states the guard rejects with
+  // NOT_AT_DOOR, so no code could ever exercise them. Narrowed to match reality
+  // (SWIFT-096): an unstarted/in-transit order that goes wrong is CANCELLED, not
+  // FAILED. Kept in lockstep with HANDOVER_STATES by order-transition-failed.test.ts.
+  FAILED: ['ARRIVED'],
 };
 
 /** States where the order is physically with the mover — no cancellation. */
