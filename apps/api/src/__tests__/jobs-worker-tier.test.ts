@@ -1,8 +1,10 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { nanoid } from 'nanoid';
+import Redis from 'ioredis';
+import type { Worker } from 'bullmq';
 import { prismaPlugin } from '../plugins/prisma';
-import { runWeeklySettlement, type JobContext } from '../jobs/queue';
+import { runWeeklySettlement, createWorkers, type JobContext } from '../jobs/queue';
 
 // ---------------------------------------------------------------------------
 // SWIFT-AUD-D7-01 — the weekly settlement snapshot is a money-adjacent write
@@ -133,5 +135,34 @@ describe('runWeeklySettlement — idempotent weekly snapshot [SWIFT-AUD-D7-01]',
     await app.prisma.vendor.deleteMany({ where: { id: vendor2.id } });
     await app.prisma.vendorOwner.deleteMany({ where: { userId: owner2.id } });
     await app.prisma.user.deleteMany({ where: { id: owner2.id } });
+  });
+});
+
+describe('worker failure-handler completeness [SWIFT-121]', () => {
+  it('EVERY worker createWorkers builds has a failed + error handler', async () => {
+    // A silent worker (no 'failed'/'error' listener) drops job failures with no
+    // log and no Sentry event. This is the invariant guard: it catches the whole
+    // class — add a new worker and forget its handlers, and this fails.
+    const redis = new Redis(process.env['REDIS_URL'] ?? 'redis://localhost:6382/15', { maxRetriesPerRequest: null });
+    const noopLog = { info() {}, warn() {}, error() {}, fatal() {}, debug() {}, trace() {}, child() { return noopLog; } };
+    const workerCtx = {
+      prisma: app.prisma,
+      redis,
+      io: { to: () => ({ emit: () => {} }) },
+      log: noopLog,
+    } as unknown as JobContext;
+
+    const workers = createWorkers(workerCtx);
+    try {
+      const built = Object.entries(workers).filter(([, v]) => typeof (v as Worker | undefined)?.on === 'function');
+      expect(built.length).toBeGreaterThanOrEqual(7); // one per live queue
+      for (const [name, w] of built) {
+        expect((w as Worker).listenerCount('failed'), `${name} has no 'failed' handler`).toBeGreaterThanOrEqual(1);
+        expect((w as Worker).listenerCount('error'), `${name} has no 'error' handler`).toBeGreaterThanOrEqual(1);
+      }
+    } finally {
+      await workers.cleanup();
+      await redis.quit();
+    }
   });
 });

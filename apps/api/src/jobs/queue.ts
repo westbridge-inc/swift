@@ -607,25 +607,6 @@ export function createWorkers(ctx: JobContext) {
     { connection, concurrency: 5 },
   );
 
-  // A worker that throws otherwise drops the job into the failed set with NO
-  // log and NO alert — money jobs (billing, settlements) and dispatch could
-  // fail invisibly. Surface every terminal failure and worker error loudly so
-  // observability (Sentry, see server bootstrap) and ops actually see them.
-  const allWorkers: Record<string, Worker> = {
-    order: orderWorker, subscription: subscriptionWorker,
-    settlement: settlementWorker, verification: verificationWorker, dispatch: dispatchWorker, notification: notificationWorker,
-  };
-  for (const [queue, worker] of Object.entries(allWorkers)) {
-    worker.on('failed', (job, err) => {
-      ctx.log.error({ queue, jobName: job?.name, jobId: job?.id, attempts: job?.attemptsMade, data: job?.data, err }, 'BullMQ job failed');
-      captureError(err, { queue, jobName: job?.name, jobId: job?.id, attempts: job?.attemptsMade });
-    });
-    worker.on('error', (err) => {
-      ctx.log.error({ queue, err }, 'BullMQ worker error');
-      captureError(err, { queue });
-    });
-  }
-
   // SEARCH: debounced per-vendor index sync [SWIFT-UG-SRCH-01]. Best-effort —
   // a failure logs and waits for the next write or the boot reconciler; it
   // must never crash a worker or spam retries against a down Meili.
@@ -646,6 +627,28 @@ export function createWorkers(ctx: JobContext) {
     },
     { connection, concurrency: 1 },
   );
+
+  // A worker that throws otherwise drops the job into the failed set with NO
+  // log and NO alert — money jobs (billing, settlements) and dispatch could
+  // fail invisibly. Surface every terminal failure and worker error loudly so
+  // observability (Sentry, see server bootstrap) and ops actually see them.
+  // SWIFT-121: EVERY worker — including search, which was created after the old
+  // loop and silently had no handlers — is attached here, after all are built.
+  const allWorkers: Record<string, Worker> = {
+    order: orderWorker, subscription: subscriptionWorker,
+    settlement: settlementWorker, verification: verificationWorker, dispatch: dispatchWorker,
+    notification: notificationWorker, search: searchWorker,
+  };
+  for (const [queue, worker] of Object.entries(allWorkers)) {
+    worker.on('failed', (job, err) => {
+      ctx.log.error({ queue, jobName: job?.name, jobId: job?.id, attempts: job?.attemptsMade, data: job?.data, err }, 'BullMQ job failed');
+      captureError(err, { queue, jobName: job?.name, jobId: job?.id, attempts: job?.attemptsMade });
+    });
+    worker.on('error', (err) => {
+      ctx.log.error({ queue, err }, 'BullMQ worker error');
+      captureError(err, { queue });
+    });
+  }
 
   return {
     orderWorker,
