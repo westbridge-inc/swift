@@ -9,6 +9,7 @@ import { BillingService } from '../billing/billing.service';
 import { getPaymentProvider } from '../../providers/payment/payment-provider';
 import { DeliveryCashSettlementService, assertSettlementId } from '../cash/delivery-cash-settlement.service';
 import { makeDispatchService } from '../dispatch/dispatch.service';
+import { FloatService } from '../dispatch/float.service';
 import { refreshLegEta, cachedLegEta } from '../dispatch/live-eta';
 import { getKycProvider } from '../../providers/kyc/kyc-provider';
 import { haversineDistance } from '../../utils/distance';
@@ -121,6 +122,7 @@ const startOfMonth = startOfMonthGY;
 
 export async function riderRoutes(app: FastifyInstance) {
   const orderService = new OrderService(app.prisma, app.io);
+  const floatService = new FloatService(app.prisma);
   const verification = new VerificationService(
     app.prisma,
     new NotificationService(app.prisma, app.io),
@@ -659,6 +661,8 @@ export async function riderRoutes(app: FastifyInstance) {
     // commit the float it consumes, or the cap is bypassable through this
     // entrance and a later release decrements float never committed.
     const floatAmt = order.paymentMethod === 'CASH' ? Number(order.subtotalBase) : 0;
+    // Fast-fail hint only — this reads a possibly-stale committedFloat. The
+    // authoritative cap is the guarded commit below.
     if (floatAmt > 0) {
       const headroom = Number(rider.floatLimit) - Number(rider.committedFloat);
       if (headroom < floatAmt) {
@@ -666,6 +670,23 @@ export async function riderRoutes(app: FastifyInstance) {
           400,
           'FLOAT_EXCEEDED',
           `This cash order needs $${floatAmt.toLocaleString()} float headroom (you front the vendor at pickup); you have $${Math.max(0, headroom).toLocaleString()} available`,
+        );
+      }
+    }
+
+    // SWIFT-104: reserve the float FIRST with an ATOMIC guarded commit. The JS
+    // check above cannot cap concurrency — two board-grabs of DIFFERENT orders by
+    // the same rider each read the same committedFloat and both pass. The DB
+    // predicate (floatLimit − committedFloat ≥ amount) is what actually bounds the
+    // cash a rider fronts. Reserve before claiming so a lost float race never
+    // leaves an order half-assigned; a lost ORDER race releases it (below).
+    if (floatAmt > 0) {
+      const reserved = await floatService.commit(app.prisma, rider.id, floatAmt);
+      if (!reserved) {
+        throw new AppError(
+          400,
+          'FLOAT_EXCEEDED',
+          `This cash order needs $${floatAmt.toLocaleString()} float headroom (you front the vendor at pickup); your other live orders have used it up.`,
         );
       }
     }
@@ -684,11 +705,13 @@ export async function riderRoutes(app: FastifyInstance) {
       },
     });
     if (claimed.count === 0) {
+      // Lost the order to another rider — release the float we just reserved.
+      if (floatAmt > 0) await floatService.release(app.prisma, rider.id, floatAmt);
       throw new ConflictError('This order was just claimed by another rider, or is no longer available');
     }
 
-    // Only the winner reaches here — safe to advance status, mark the rider
-    // busy, and commit the CASH float (mirrors dispatch.claimOrder exactly).
+    // Only the winner reaches here — the float is already committed above; advance
+    // status and mark the rider busy.
     await Promise.all([
       orderService.updateStatus(id, 'RIDER_ASSIGNED', request.user.userId, 'Rider accepted the order'),
       app.prisma.rider.update({
@@ -696,7 +719,6 @@ export async function riderRoutes(app: FastifyInstance) {
         data: {
           isAvailable: false,
           currentOrderId: id,
-          ...(floatAmt > 0 ? { committedFloat: { increment: floatAmt } } : {}),
         },
       }),
     ]);

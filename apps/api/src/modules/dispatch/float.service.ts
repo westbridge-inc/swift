@@ -47,10 +47,20 @@ export class FloatService {
     return Number(rider.floatLimit) - Number(rider.committedFloat);
   }
 
-  /** Commit float when a rider claims a CASH order — increments committedFloat (atomic via tx). */
-  async commit(tx: Tx, riderId: string, amount: number): Promise<void> {
-    if (amount <= 0) return;
-    await tx.rider.update({ where: { id: riderId }, data: { committedFloat: { increment: amount } } });
+  /** Commit float when a rider claims a CASH order. ATOMIC GUARDED increment
+   *  [SWIFT-104]: succeeds only while headroom (floatLimit − committedFloat) still
+   *  covers `amount`, so two concurrent claims by the SAME rider (two board-grabs
+   *  or two offers of DIFFERENT orders) can't push committedFloat past the cap. A
+   *  JS read-then-check can't guarantee this — both concurrent claims read the
+   *  same committedFloat and both pass. Returns false when the cap would be
+   *  exceeded; the caller must NOT proceed with the claim (release/revert). */
+  async commit(tx: Tx, riderId: string, amount: number): Promise<boolean> {
+    if (amount <= 0) return true;
+    const rows = await tx.$executeRaw`
+      UPDATE "riders"
+      SET "committedFloat" = "committedFloat" + ${amount}
+      WHERE "id" = ${riderId} AND ("floatLimit" - "committedFloat") >= ${amount}`;
+    return rows === 1;
   }
 
   /** Release float on a terminal transition (delivered / cancelled / failed) —
