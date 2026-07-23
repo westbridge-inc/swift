@@ -6,6 +6,8 @@ import { authPlugin } from '../plugins/auth';
 import { socketPlugin } from '../plugins/socket';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { registerEmptyJsonBodyParser } from '../plugins/empty-json';
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import { authRoutes } from '../modules/auth/auth.routes';
 import { customerRoutes } from '../modules/user/customer.routes';
 import { vendorRoutes } from '../modules/vendor/vendor.routes';
@@ -231,5 +233,55 @@ describe('Suspended accounts are cut off immediately', () => {
     await app.prisma.session.deleteMany({ where: { userId } });
     await app.prisma.customer.deleteMany({ where: { userId } });
     await app.prisma.user.deleteMany({ where: { id: userId } });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// SWIFT-092 — server↔matrix prefix drift guard. buildTestApp() must mirror
+// server.ts's route registration: any /api/v1 prefix server.ts mounts but this
+// suite never enrolls is a prefix whose future missing authz gate this control
+// cannot catch. Fail the build the moment a new prefix is added to server.ts
+// without either enrolling it in buildTestApp() or exempting it (unauthenticated
+// by design). This is the drift guard the AUD-D3-02 comment above assumes.
+// ---------------------------------------------------------------------------
+
+/** /api/v1 prefixes registered in server.ts that are neither mounted in the
+ *  test app nor explicitly exempt. Pure, so the guard itself is unit-testable. */
+function unmountedApiPrefixes(serverPrefixes: string[], mountedUrls: string[], exempt: Set<string>): string[] {
+  return serverPrefixes.filter((p) => {
+    if (exempt.has(p)) return false;
+    return !mountedUrls.some((u) => u === p || u.startsWith(p + '/'));
+  });
+}
+
+describe('server↔matrix prefix drift guard [SWIFT-092]', () => {
+  // Unauthenticated by design — outside the authz matrix on purpose.
+  const EXEMPT = new Set(['/api/v1/public']);
+
+  it('flags a server prefix the matrix never mounts (red-first)', () => {
+    // Pretend server.ts added /api/v1/loyalty but buildTestApp never enrolled it.
+    const missing = unmountedApiPrefixes(
+      ['/api/v1/customer', '/api/v1/loyalty'],
+      ['/api/v1/customer/profile', '/api/v1/customer/orders'],
+      EXEMPT,
+    );
+    expect(missing).toEqual(['/api/v1/loyalty']);
+  });
+
+  it('every /api/v1 prefix server.ts registers is enrolled here (or exempt)', () => {
+    const serverSrc = readFileSync(resolve(process.cwd(), 'src/server.ts'), 'utf8');
+    const serverPrefixes = [...new Set([...serverSrc.matchAll(/prefix:\s*'(\/api\/v1[^']*)'/g)].map((m) => m[1]!))];
+    // Sanity: the parse actually found the registrations (guards against a regex/path break).
+    expect(serverPrefixes.length).toBeGreaterThan(10);
+
+    const mountedUrls = routeTable.map((r) => r.url);
+    const missing = unmountedApiPrefixes(serverPrefixes, mountedUrls, EXEMPT);
+    if (missing.length) {
+      throw new Error(
+        `server.ts registers /api/v1 prefixes with no authz-matrix enrollment: ${missing.join(', ')}. ` +
+          `Enroll them in buildTestApp() so their gates are tested, or add to EXEMPT if unauthenticated by design.`,
+      );
+    }
+    expect(missing).toEqual([]);
   });
 });
