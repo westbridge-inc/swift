@@ -116,3 +116,16 @@ describe('vendor overview order counts [DASH-05]', () => {
     expect(await overview()).toBe(before + 600);
   });
 });
+
+describe('vendor queue value covers the WHOLE queue [SWIFT-041]', () => {
+  it('queueValue aggregates every pending order server-side, not a displayed page', async () => {
+    const N = 25; // more than the board's client-side fetch page
+    for (let i = 0; i < N; i += 1) await makeOrder('PENDING');
+    const res = await app.inject({ method: 'GET', url: '/api/v1/vendor/analytics/overview', headers: { authorization: `Bearer ${token}` } });
+    expect(res.statusCode).toBe(200);
+    const d = res.json().data;
+    expect(d.pendingOrders).toBe(N);
+    // Pre-fix there was no server queueValue — the client summed its capped list.
+    expect(d.queueValue).toBe(N * 1300);
+  });
+});

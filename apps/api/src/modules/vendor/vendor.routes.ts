@@ -2103,7 +2103,7 @@ export async function vendorRoutes(app: FastifyInstance) {
       weekRevenue,
       monthRevenue,
       activeItems,
-      pendingOrders,
+      pendingAgg,
     ] = await Promise.all([
       app.prisma.vendor.findUnique({
         where: { id: vendorId },
@@ -2130,7 +2130,14 @@ export async function vendorRoutes(app: FastifyInstance) {
       }),
       app.prisma.item.count({ where: { vendorId, isAvailable: true } }),
       // Held orders (LIFECYCLE_V2) aren't the vendor's to act on yet.
-      app.prisma.order.count({ where: { vendorId, status: 'PENDING', ...notHeldFilter() } }),
+      // SWIFT-041: count AND value of the pending queue in one aggregate, so the
+      // "In queue" KPI reflects the WHOLE queue — the client summed only the
+      // displayed page, undercounting once the board ran past its fetch limit.
+      app.prisma.order.aggregate({
+        where: { vendorId, status: 'PENDING', ...notHeldFilter() },
+        _count: true,
+        _sum: { totalAmount: true },
+      }),
     ]);
 
     return {
@@ -2156,7 +2163,8 @@ export async function vendorRoutes(app: FastifyInstance) {
           revenue: Number(monthRevenue._sum?.subtotalCustomer ?? 0) - Number(monthRevenue._sum?.discount ?? 0),
         },
         activeMenuItems: activeItems,
-        pendingOrders,
+        pendingOrders: pendingAgg._count,
+        queueValue: Number(pendingAgg._sum.totalAmount ?? 0),
       },
     };
   });

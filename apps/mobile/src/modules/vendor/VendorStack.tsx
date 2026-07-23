@@ -510,7 +510,12 @@ function VendorOps({ store, navigation }: any) {
   const expressFirst = (a: any, b: any) => Number(!!b.isExpress) - Number(!!a.isExpress);
   const newOrders = orders.filter((o) => isNew(o.status)).sort(expressFirst);
   const inProgress = orders.filter((o) => !isNew(o.status)).sort(expressFirst);
-  const queueValue = orders.reduce((sum, o) => sum + Number(o.totalAmount ?? o.total ?? 0), 0);
+  // SWIFT-041: prefer the SERVER queueValue (aggregates the whole pending queue);
+  // fall back to summing the loaded page only if the server hasn't provided it.
+  const serverQueueValue = (analyticsQ.data as any)?.queueValue;
+  const queueValue = typeof serverQueueValue === 'number'
+    ? serverQueueValue
+    : orders.reduce((sum, o) => sum + Number(o.totalAmount ?? o.total ?? 0), 0);
   const today: any = (analyticsQ.data as any)?.today ?? {};
 
   return (
