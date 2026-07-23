@@ -24,7 +24,6 @@ declare module 'fastify' {
 
 const QUEUE_NAMES = {
   ORDER: 'order-jobs',
-  RIDER_ASSIGNMENT: 'rider-assignment',
   SUBSCRIPTION: 'subscription-jobs',
   SETTLEMENT: 'settlement-jobs',
   NOTIFICATION: 'notification-jobs',
@@ -40,7 +39,6 @@ export function createQueues(redis: Redis) {
 
   return {
     orderQueue: new Queue(QUEUE_NAMES.ORDER, { connection }),
-    riderAssignmentQueue: new Queue(QUEUE_NAMES.RIDER_ASSIGNMENT, { connection }),
     subscriptionQueue: new Queue(QUEUE_NAMES.SUBSCRIPTION, { connection }),
     settlementQueue: new Queue(QUEUE_NAMES.SETTLEMENT, { connection }),
     notificationQueue: new Queue(QUEUE_NAMES.NOTIFICATION, { connection }),
@@ -174,31 +172,13 @@ export function createWorkers(ctx: JobContext) {
     { connection, concurrency: 5 },
   );
 
-  // RIDER ASSIGNMENT: plan the whole outstanding batch per trigger — greedy by
-  // default; with DISPATCH_PLANNER=vroom the batch is solved globally (the
-  // build kit's dispatch brain), so simultaneous orders never race for the
-  // same nearest rider. Concurrency 1: one sweep at a time; CAS keeps any
-  // stragglers safe anyway.
-  const riderAssignmentWorker = new Worker(
-    QUEUE_NAMES.RIDER_ASSIGNMENT,
-    async (job: Job) => {
-      const { orderId, vendorLat, vendorLng, attempt = 1 } = job.data;
-      const { assignReadyRiders } = await import('./assign-riders');
-
-      const result = await assignReadyRiders({ prisma: ctx.prisma, io: ctx.io }, orderId);
-      if (result.assigned > 0) {
-        ctx.log.info({ trigger: orderId, assigned: result.assigned }, 'Rider auto-assignment sweep');
-      }
-
-      if (!result.triggerAssigned && attempt < 6) {
-        // Nobody suitable yet — retry this order in 30 seconds, as before.
-        const queue = new Queue(QUEUE_NAMES.RIDER_ASSIGNMENT, { connection });
-        await queue.add('assign-rider', { orderId, vendorLat, vendorLng, attempt: attempt + 1 }, { delay: 30000 });
-        await queue.close();
-      }
-    },
-    { connection, concurrency: 1 },
-  );
+  // (Removed [SWIFT-023]: the rider-assignment auto-sweep. It force-assigned
+  // riders to orders WITHOUT the offer/consent cascade and WITHOUT committing
+  // the rider's cash float — bypassing two invariants — and had no producer
+  // (nothing ever seeded the queue), so it was dormant dead code that would
+  // have been a booby-trap if ever triggered. Real assignment runs through the
+  // offer cascade in dispatch.service. If a batch planner is ever wanted, wire
+  // the still-present dispatch-planner into claimOrder deliberately.)
 
   // SUBSCRIPTION BILLING — idempotent BillingService, never wallets
   const subscriptionWorker = new Worker(
@@ -536,7 +516,7 @@ export function createWorkers(ctx: JobContext) {
   // fail invisibly. Surface every terminal failure and worker error loudly so
   // observability (Sentry, see server bootstrap) and ops actually see them.
   const allWorkers: Record<string, Worker> = {
-    order: orderWorker, riderAssignment: riderAssignmentWorker, subscription: subscriptionWorker,
+    order: orderWorker, subscription: subscriptionWorker,
     settlement: settlementWorker, verification: verificationWorker, dispatch: dispatchWorker, notification: notificationWorker,
   };
   for (const [queue, worker] of Object.entries(allWorkers)) {
@@ -573,7 +553,6 @@ export function createWorkers(ctx: JobContext) {
 
   return {
     orderWorker,
-    riderAssignmentWorker,
     subscriptionWorker,
     settlementWorker,
     verificationWorker,
@@ -583,7 +562,6 @@ export function createWorkers(ctx: JobContext) {
     cleanup: async () => {
       await Promise.all([
         orderWorker.close(),
-        riderAssignmentWorker.close(),
         subscriptionWorker.close(),
         settlementWorker.close(),
         verificationWorker.close(),
