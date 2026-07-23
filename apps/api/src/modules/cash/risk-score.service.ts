@@ -1,11 +1,18 @@
 import type { PrismaClient } from '@prisma/client';
 
 /**
- * Risk scoring (marketplace-mechanics spec §10): many signals → ONE number →
- * throttles, NEVER auto-bans. Every input already exists and is deterministic;
- * the score is a pure read computed on demand — no stored state to drift, no
- * model, no vibes. Bans remain exactly where they are today: the strike
- * system's explicit thresholds (cash-rules), decided by rules a human wrote.
+ * Risk scoring (marketplace-mechanics spec §10): many signals → ONE number.
+ * Every input already exists and is deterministic; the score is a pure read
+ * computed on demand — no stored state to drift, no model, no vibes.
+ *
+ * SWIFT-160 — what this ACTUALLY does today: it is an ADVISORY signal. Its only
+ * caller is the admin risk-lookup endpoint (admin.routes.ts) — a human reads the
+ * tier. It throttles nothing automatically and it never auto-bans. Real
+ * consequences live in the strike system's explicit thresholds (cash-rules),
+ * written by a human. Turning a HIGH tier into an automatic consequence (claim
+ * review, prepay-only, tighter dispatch) is a founder product decision,
+ * deliberately NOT wired here (Q-FRAUD-160 in DECISIONS). Until it is, don't
+ * cite this score as if it gates anything — it doesn't.
  *
  * Signals and weights (0–100 scale, capped):
  *   strikes (all time)            25 each  — the platform's strongest signal
