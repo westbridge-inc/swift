@@ -2,6 +2,7 @@ import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { OrderStatus, EarningType, EarningStatus, RideClass } from '@prisma/client';
 import { OrderService } from '../order/order.service';
+import { earningsWindow } from '../order/earnings-window';
 import { NotificationService } from '../notification/notification.service';
 import { VerificationService } from '../verification/verification.service';
 import { makeDispatchService } from '../dispatch/dispatch.service';
@@ -916,18 +917,22 @@ export async function driverRoutes(app: FastifyInstance) {
         app.prisma.earning.aggregate({
           where: { driverId: driver.id, createdAt: { gte: today } },
           _sum: { amount: true },
+          _count: true,
         }),
         app.prisma.earning.aggregate({
           where: { driverId: driver.id, createdAt: { gte: weekStart } },
           _sum: { amount: true },
+          _count: true,
         }),
         app.prisma.earning.aggregate({
           where: { driverId: driver.id, createdAt: { gte: monthStart } },
           _sum: { amount: true },
+          _count: true,
         }),
         app.prisma.earning.aggregate({
           where: { driverId: driver.id },
           _sum: { amount: true },
+          _count: true,
         }),
         app.prisma.earning.aggregate({
           where: { driverId: driver.id, status: 'AVAILABLE' },
@@ -944,12 +949,13 @@ export async function driverRoutes(app: FastifyInstance) {
     return {
       success: true,
       data: {
-        // DASH-07: Number() every amount — raw Decimals serialize oddly and
-        // `|| 0` can't default a Decimal(0). Matches the rider routes.
-        today: Number(todayEarnings._sum.amount ?? 0),
-        thisWeek: Number(weekEarnings._sum.amount ?? 0),
-        thisMonth: Number(monthEarnings._sum.amount ?? 0),
-        allTime: Number(allTimeEarnings._sum.amount ?? 0),
+        // SWIFT-080: each window is { total, count } — the SAME shape the rider
+        // route returns and the mover EarningsScreen/MoverAccountScreen read.
+        // Was a bare Number(), so a driver's tiles silently showed $0.
+        today: earningsWindow(todayEarnings),
+        thisWeek: earningsWindow(weekEarnings),
+        thisMonth: earningsWindow(monthEarnings),
+        allTime: earningsWindow(allTimeEarnings),
         pendingPayout: Number(pendingPayout._sum.amount ?? 0),
         todayRides,
         totalRides,

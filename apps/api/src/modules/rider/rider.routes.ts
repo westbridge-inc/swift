@@ -2,6 +2,7 @@ import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { RiderType, VehicleType, EarningType, EarningStatus, type OrderStatus } from '@prisma/client';
 import { OrderService, notHeldFilter } from '../order/order.service';
+import { earningsWindow } from '../order/earnings-window';
 import { NotificationService } from '../notification/notification.service';
 import { VerificationService } from '../verification/verification.service';
 import { CashRulesService, customerTrustSummaries } from '../cash/cash-rules.service';
@@ -1067,10 +1068,12 @@ export async function riderRoutes(app: FastifyInstance) {
     return {
       success: true,
       data: {
-        today: { total: Number(today._sum.amount ?? 0), count: today._count },
-        thisWeek: { total: Number(week._sum.amount ?? 0), count: week._count },
-        thisMonth: { total: Number(month._sum.amount ?? 0), count: month._count },
-        allTime: { total: Number(allTime._sum.amount ?? 0), count: allTime._count },
+        // SWIFT-080: { total, count } per window via the shared earningsWindow
+        // helper — the single source the driver route now also uses.
+        today: earningsWindow(today),
+        thisWeek: earningsWindow(week),
+        thisMonth: earningsWindow(month),
+        allTime: earningsWindow(allTime),
         pendingPayout: Number(pendingPayout._sum.amount ?? 0),
       },
     };
