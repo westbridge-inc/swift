@@ -59,15 +59,20 @@ beforeAll(async () => {
   });
   customerUserId = customer.id;
 
-  await app.prisma.order.create({
+  const settled = await app.prisma.order.create({
     data: {
       orderNumber: `STL-${nanoid(10)}`, orderType: 'FOOD_DELIVERY',
-      customerId: customer.id, vendorId, status: 'DELIVERED',
+      customerId: customer.id, vendorId, status: 'COMPLETED',
       deliveredAt: new Date(Date.now() - 24 * 60 * 60 * 1000),
       deliveryAddress: 'x', deliveryLat: 6.8, deliveryLng: -58.15,
       subtotalBase: 1000, subtotalMarkup: 0, subtotalCustomer: 1000,
       deliveryFee: 300, totalAmount: 1300, paymentMethod: 'CASH',
     },
+  });
+  // A real completed order carries a COMPLETED status-log entry — that is what
+  // the settlement now windows on [SWIFT-022].
+  await app.prisma.orderStatusLog.create({
+    data: { orderId: settled.id, status: 'COMPLETED', note: 'test', createdAt: new Date(Date.now() - 24 * 60 * 60 * 1000) },
   });
 });
 
@@ -95,5 +100,38 @@ describe('runWeeklySettlement — idempotent weekly snapshot [SWIFT-AUD-D7-01]',
     await runWeeklySettlement(ctx()); // second delivery of the same job
     const rows = await app.prisma.settlement.findMany({ where: { vendorId } });
     expect(rows.length).toBe(1); // still exactly one — the covered-window guard
+  });
+
+  it('SWIFT-022: counts a completed TAKEAWAY order the old deliveredAt window dropped', async () => {
+    // Fresh vendor so the covered-window guard doesn't skip it.
+    const owner2 = await app.prisma.user.create({ data: { phone: '+5920076299', firstName: 'Take', lastName: 'Away', roles: ['VENDOR_OWNER'], activeRole: 'VENDOR_OWNER', isPhoneVerified: true } });
+    const vo2 = await app.prisma.vendorOwner.create({ data: { userId: owner2.id } });
+    const vendor2 = await app.prisma.vendor.create({ data: { ownerId: vo2.id, name: 'Takeaway Co', slug: `takeaway-${nanoid(6)}`, vendorType: 'RESTAURANT', phone: '+5920076299', addressLine1: '2 Test St', city: 'Georgetown', region: 'Demerara-Mahaica', latitude: 6.8, longitude: -58.15, status: 'ACTIVE', acceptingOrders: true, isVerified: true } });
+    // A completed TAKEAWAY: fulfillment PICKUP, so deliveredAt is null forever.
+    const takeaway = await app.prisma.order.create({
+      data: {
+        orderNumber: `TKW-${nanoid(10)}`, orderType: 'FOOD_DELIVERY', fulfillment: 'PICKUP',
+        customerId: customerUserId, vendorId: vendor2.id, status: 'COMPLETED', deliveredAt: null,
+        deliveryAddress: 'x', deliveryLat: 6.8, deliveryLng: -58.15,
+        subtotalBase: 2000, subtotalMarkup: 0, subtotalCustomer: 2000,
+        deliveryFee: 0, totalAmount: 2000, paymentMethod: 'CASH',
+      },
+    });
+    await app.prisma.orderStatusLog.create({
+      data: { orderId: takeaway.id, status: 'COMPLETED', note: 'test', createdAt: new Date(Date.now() - 12 * 60 * 60 * 1000) },
+    });
+
+    await runWeeklySettlement(ctx());
+    const rows = await app.prisma.settlement.findMany({ where: { vendorId: vendor2.id } });
+    // RED before SWIFT-022: deliveredAt=null → the takeaway was invisible → no row.
+    expect(rows.length).toBe(1);
+    expect(rows[0]!.totalOrders).toBe(1);
+    expect(Number(rows[0]!.totalBase)).toBe(2000);
+
+    await app.prisma.settlement.deleteMany({ where: { vendorId: vendor2.id } });
+    await app.prisma.order.deleteMany({ where: { vendorId: vendor2.id } });
+    await app.prisma.vendor.deleteMany({ where: { id: vendor2.id } });
+    await app.prisma.vendorOwner.deleteMany({ where: { userId: owner2.id } });
+    await app.prisma.user.deleteMany({ where: { id: owner2.id } });
   });
 });

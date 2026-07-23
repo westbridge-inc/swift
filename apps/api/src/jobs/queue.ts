@@ -77,12 +77,31 @@ export async function runWeeklySettlement(ctx: JobContext) {
 
   // SWIFT-AUD-D6-05: one grouped aggregate instead of a per-vendor
   // findMany+create loop (N+1 that grew linearly with the vendor count).
+  //
+  // SWIFT-022: window on the COMPLETED status-log entry, NOT deliveredAt. Only
+  // delivery orders ever set deliveredAt, so filtering on it silently dropped
+  // ALL takeaway (PICKUP) and appointment revenue from the digest. Every order
+  // type reaches COMPLETED exactly once (delivery auto-completes), so its
+  // COMPLETED log is the one universal, once-per-order completion marker — no
+  // type is missed and nothing is counted in two weeks.
+  const completed = await ctx.prisma.orderStatusLog.findMany({
+    where: {
+      status: 'COMPLETED',
+      createdAt: { gte: weekAgo, lte: now },
+      order: { vendorId: { in: activeIds } },
+    },
+    select: { orderId: true },
+    distinct: ['orderId'],
+  });
+  const completedOrderIds = completed.map((c) => c.orderId);
+  if (completedOrderIds.length === 0) return;
+
   const groups = await ctx.prisma.order.groupBy({
     by: ['vendorId'],
     where: {
-      vendorId: { in: activeIds },
+      id: { in: completedOrderIds },
+      // Exclude anything refunded/cancelled after it completed.
       status: { in: ['DELIVERED', 'COMPLETED'] },
-      deliveredAt: { gte: weekAgo, lte: now },
     },
     _sum: { subtotalBase: true, subtotalMarkup: true },
     _count: { _all: true },
