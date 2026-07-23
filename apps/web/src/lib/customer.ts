@@ -89,7 +89,7 @@ export interface VendorDetail extends Vendor {
   categories: Array<{ id: string; name: string; items: MenuItem[] }>;
 }
 export interface CartLine { id: string; itemId: string; name: string; quantity: number; customerPrice: number; imageUrl?: string | null; vendorId?: string; vendorName?: string; }
-export interface Cart { items: CartLine[]; subtotal?: number; totalAmount?: number; deliveryAddressId?: string | null; vendor?: { id: string; name: string } }
+export interface Cart { items: CartLine[]; subtotal?: number; subtotalCustomer?: number; deliveryFee?: number; discount?: number; tipAmount?: number; totalAmount?: number; deliveryAddressId?: string | null; vendor?: { id: string; name: string } }
 
 // ── Browse ────────────────────────────────────────────────────────────────
 export async function getHome() { return (await apiFetch('/api/v1/customer/home')).data; }

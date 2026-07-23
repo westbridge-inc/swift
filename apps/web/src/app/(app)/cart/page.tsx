@@ -13,7 +13,7 @@ export default function CartPage() {
   const [cart, setCart] = useState<Cart | null>(null);
   const [addresses, setAddresses] = useState<any[]>([]);
   const [addrId, setAddrId] = useState<string | null>(null);
-  const [tip, setTip] = useState(500);
+  const [tip, setTip] = useState(0); // SWIFT-071: no pre-selected tip — the rider tip is opt-in
   const [pay, setPay] = useState<'CASH' | 'MOBILE_MONEY'>('CASH');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -30,6 +30,13 @@ export default function CartPage() {
   useEffect(() => { refresh().catch((e) => setError(e.message)); }, []);
 
   const subtotal = (cart?.items ?? []).reduce((s, l) => s + (l.customerPrice ?? 0) * l.quantity, 0);
+  // SWIFT-071: the total must reflect the DELIVERY FEE (and discount), not just
+  // items + tip. Delivery fee and discount are server-computed money; only the
+  // tip is the shopper's live selection.
+  const serverSubtotal = cart?.subtotalCustomer ?? subtotal;
+  const deliveryFee = cart?.deliveryFee ?? 0;
+  const discount = cart?.discount ?? 0;
+  const total = serverSubtotal + deliveryFee - discount + tip;
 
   async function saveAddress() {
     setBusy(true); setError(null);
@@ -139,9 +146,11 @@ export default function CartPage() {
         </div>
 
         <div className="rounded-2xl border border-black/5 bg-white p-4">
-          <div className="flex justify-between text-sm"><span className="text-[var(--swift-muted)]">Items</span><span className="font-semibold">{money(subtotal)}</span></div>
+          <div className="flex justify-between text-sm"><span className="text-[var(--swift-muted)]">Items</span><span className="font-semibold">{money(serverSubtotal)}</span></div>
+          {deliveryFee > 0 ? <div className="mt-1 flex justify-between text-sm"><span className="text-[var(--swift-muted)]">Delivery fee</span><span className="font-semibold">{money(deliveryFee)}</span></div> : null}
+          {discount > 0 ? <div className="mt-1 flex justify-between text-sm"><span className="text-[var(--swift-muted)]">Discount</span><span className="font-semibold">-{money(discount)}</span></div> : null}
           <div className="mt-1 flex justify-between text-sm"><span className="text-[var(--swift-muted)]">Rider tip</span><span className="font-semibold">{money(tip)}</span></div>
-          <div className="mt-2 flex justify-between border-t border-black/5 pt-2 text-lg font-extrabold"><span>Total</span><span>{money(subtotal + tip)}</span><span className="text-xs font-normal text-[var(--swift-muted)]">+ delivery</span></div>
+          <div className="mt-2 flex justify-between border-t border-black/5 pt-2 text-lg font-extrabold"><span>Total</span><span>{money(total)}</span></div>
           {error && <p className="mt-2 text-sm font-semibold text-[var(--swift-red)]">{error}</p>}
           {noRiders ? (
             <div className="mt-3 space-y-2">
