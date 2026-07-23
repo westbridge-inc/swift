@@ -1361,11 +1361,15 @@ export async function adminRoutes(app: FastifyInstance) {
 
     await audit(request.user.userId, 'PROCESS_SETTLEMENT', 'Settlement', id, { amount: settlement.totalBase, reference }, request);
 
+    // SWIFT-031: this is a weekly SALES DIGEST, not a payout. Swift takes no
+    // commission and never holds vendor money (cash is customer→vendor direct),
+    // so "settlement processed / payment received" was a fiction. Reframe the
+    // copy to what it truly is — a record of the vendor's own completed sales.
     await notifications.send({
       userId: settlement.vendor.owner.userId,
-      type: 'PAYMENT_RECEIVED',
-      title: 'Settlement Processed',
-      body: `Your settlement of $${Number(settlement.totalBase).toLocaleString()} GYD for ${settlement.vendor.name} has been processed.`,
+      type: 'SYSTEM_ANNOUNCEMENT',
+      title: 'Weekly sales digest ready',
+      body: `${settlement.vendor.name}: $${Number(settlement.totalBase).toLocaleString()} GYD in completed sales this week. Swift takes no cut — this is your record, not a payout.`,
       data: { settlementId: id },
     });
 
