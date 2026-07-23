@@ -55,3 +55,26 @@ export function assertSafeBootConfig(env: Record<string, string | undefined> = p
     throw new Error('FATAL: STORAGE_PROVIDER is local (or unset) in production — uploads and verification documents would live on a single instance\'s disk. Set STORAGE_PROVIDER=s3|r2, or STORAGE_ALLOW_LOCAL=1 only for a deliberate single-instance pilot with a persistent volume.');
   }
 }
+
+/**
+ * SWIFT-010: data-shape boot guard. The env guard above can't see the DB, but a
+ * production database with ZERO CountryConfig rows is just as fatal and just as
+ * invisible: `countryFromPhone` maps every signup to a country, and with no
+ * active market row it rejects them all — a front door that boots perfectly
+ * healthy yet lets nobody in. Seed the spine first (`prisma/seed-production.ts`).
+ * Async (needs a query) and thus separate from the sync env guard; skipped
+ * outside production so dev/test/CI boot on an empty DB as before.
+ */
+export async function assertProductionData(
+  prisma: { countryConfig: { count: () => Promise<number> } },
+  env: Record<string, string | undefined> = process.env,
+): Promise<void> {
+  if (env['NODE_ENV'] !== 'production') return;
+
+  const countries = await prisma.countryConfig.count();
+  if (countries === 0) {
+    throw new Error(
+      'FATAL: no CountryConfig rows in production — no market is active, so every signup is rejected (countryFromPhone has nothing to match). Run `prisma/seed-production.ts` to seed the platform spine before starting. Refusing to start.',
+    );
+  }
+}
