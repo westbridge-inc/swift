@@ -2,6 +2,7 @@ import type { PrismaClient } from '@prisma/client';
 import type { Server } from 'socket.io';
 import { getChannels, type NotificationChannels } from '../../providers/notifications/channels';
 import { log } from '../../utils/logger';
+import { notificationFailuresCounter } from '../../plugins/observability';
 
 /** Per-user channel switches; the vendor order alert ignores these. */
 interface NotificationPrefs {
@@ -99,7 +100,12 @@ export async function escalateVendorAlert(
 
   await channels.sms
     .sendSms(alert.user.phone, `Swift: order ${data?.orderNumber ?? ''} is still waiting for your response. Open your dashboard now.`)
-    .catch(() => {});
+    .catch((err) => {
+      // SWIFT-100: the last rung of the escalation ladder. A silent failure here
+      // means the vendor was never reached and no one knows — log + count it.
+      log().warn({ err, orderId }, 'escalation SMS (last resort) failed — vendor not reached');
+      notificationFailuresCounter.inc({ channel: 'sms', stage: 'escalation' });
+    });
   return 'sms_sent';
 }
 
@@ -202,6 +208,7 @@ export class NotificationService {
           .then((r) => deactivateDeadTokens(this.prisma, r.invalidTokens))
           .catch((err) => {
             log().warn({ err, userId: payload.userId, type: payload.type }, 'push delivery failed after retries');
+            notificationFailuresCounter.inc({ channel: 'push', stage: 'send' });
           });
       }
     }
@@ -211,7 +218,12 @@ export class NotificationService {
 
   /** Direct SMS through the interface (OTPs, vendor-alert fallbacks). */
   async sms(to: string, body: string): Promise<void> {
-    await this.channels.sms.sendSms(to, body).catch(() => {});
+    // SWIFT-100: fail-soft, but never silent — a dropped OTP/fallback SMS is
+    // otherwise invisible. Log the error (never the number or body — rule 4) + count it.
+    await this.channels.sms.sendSms(to, body).catch((err) => {
+      log().warn({ err }, 'direct SMS delivery failed');
+      notificationFailuresCounter.inc({ channel: 'sms', stage: 'direct' });
+    });
   }
 
   async sendToMany(userIds: string[], payload: Omit<NotificationPayload, 'userId'>): Promise<void> {
