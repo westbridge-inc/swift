@@ -189,7 +189,9 @@ export function EarningsScreen({ navigation }: any) {
           </View>
           <View style={{ flexDirection: 'row', gap: space.md, marginTop: space.md }}>
             <StatTile label="All time" total={s.allTime?.total ?? 0} count={s.allTime?.count ?? 0} />
-            <StatTile label="Pending payout" total={s.pendingPayout ?? 0} sub="cash in hand" />
+            {/* SWIFT-031: not a "payout" — Swift never pays movers. It's cash they
+                already collected and keep 100% of. Honest label. */}
+            <StatTile label="Cash collected" total={s.pendingPayout ?? 0} sub="cash in hand" />
           </View>
 
           {/* Where the money came from — fees vs tips across recent jobs */}
