@@ -670,3 +670,47 @@ describe('Atomic acceptance — the concurrency proof', () => {
     });
   });
 });
+
+describe('candidate selection at scale [SWIFT-142]', () => {
+  it('with >50 movers in range, the pool is the NEAREST 50 — not an arbitrary 50', async () => {
+    // Isolate the pool: take every other test's residual riders offline first.
+    await app.prisma.rider.updateMany({ data: { isOnline: false } });
+
+    const nearIds: string[] = [];
+    const farIds: string[] = [];
+    const localUserIds: string[] = [];
+    const phoneBase = 592_800_000_000 + Math.floor(Math.random() * 90_000_000);
+    let n = 0;
+    const mk = async (lat: number, lng: number, bucket: string[]) => {
+      n += 1;
+      const u = await app.prisma.user.create({
+        data: { phone: `+${phoneBase + n}`, firstName: 'Cand', lastName: `${n}`, roles: ['MOVER', 'CUSTOMER'], activeRole: 'MOVER', isPhoneVerified: true },
+      });
+      const r = await app.prisma.rider.create({
+        data: { userId: u.id, riderType: 'DELIVERY', vehicleType: 'MOTORCYCLE', documentsVerified: true, isOnline: true, isAvailable: true, currentLat: lat, currentLng: lng, floatLimit: 1_000_000, committedFloat: 0 },
+      });
+      bucket.push(r.id);
+      localUserIds.push(u.id);
+    };
+    // FAR first, then NEAR — so nothing but the ORDER BY puts the near ones in
+    // the pool (insertion order alone would keep the far ones). 20 FAR (~4.8 km,
+    // still inside the 5 km radius) + 50 NEAR (≤ ~555 m): any 50-of-70 that isn't
+    // distance-ordered admits far riders and drops near ones.
+    for (let i = 0; i < 20; i += 1) await mk(PICKUP.lat + 0.043, PICKUP.lng + 0.00001 * i, farIds);
+    for (let i = 0; i < 50; i += 1) await mk(PICKUP.lat + 0.0001 * (i + 1), PICKUP.lng, nearIds);
+
+    try {
+      const candidates = await dispatch.findCandidates(`s142-${nanoid(6)}`, PICKUP, 5, 'RIDER', 0, null);
+      const ids = new Set(candidates.map((c) => (c as { riderId: string }).riderId));
+      expect(candidates.length).toBeLessThanOrEqual(50);
+      // Every NEAR rider made the cut...
+      expect(nearIds.every((id) => ids.has(id))).toBe(true);
+      // ...and no FAR rider did. (Pre-fix, an arbitrary 50 of the 55 in range
+      // would almost surely drop a near rider and admit a far one.)
+      expect(farIds.some((id) => ids.has(id))).toBe(false);
+    } finally {
+      await app.prisma.rider.deleteMany({ where: { id: { in: [...nearIds, ...farIds] } } });
+      await app.prisma.user.deleteMany({ where: { id: { in: localUserIds } } });
+    }
+  });
+});

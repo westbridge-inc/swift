@@ -185,6 +185,13 @@ export class DispatchService {
               geography(ST_MakePoint(${pickup.lng}, ${pickup.lat})),
               ${radiusKm * 1000}
             )
+          -- SWIFT-142: nearest-first BEFORE the cap, so with >50 movers in range
+          -- the candidate pool is the 50 CLOSEST, not an arbitrary 50 the index
+          -- happened to return (which could drop the mover at the door).
+          ORDER BY ST_Distance(
+            geography(ST_MakePoint(d."currentLng", d."currentLat")),
+            geography(ST_MakePoint(${pickup.lng}, ${pickup.lat}))
+          ) ASC
           LIMIT 50
         `
       : await this.prisma.$queryRaw<GeoCandidateRow[]>`
@@ -203,6 +210,11 @@ export class DispatchService {
               geography(ST_MakePoint(${pickup.lng}, ${pickup.lat})),
               ${radiusKm * 1000}
             )
+          -- SWIFT-142: nearest-first BEFORE the cap (see the driver branch).
+          ORDER BY ST_Distance(
+            geography(ST_MakePoint(r."currentLng", r."currentLat")),
+            geography(ST_MakePoint(${pickup.lng}, ${pickup.lat}))
+          ) ASC
           LIMIT 50
         `;
 
