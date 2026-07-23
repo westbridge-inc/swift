@@ -13,7 +13,10 @@ import { AppError } from '../utils/errors';
 
 let sentryReady = false;
 
-/** Idempotent Sentry init — shared by the API server and the worker process. */
+/** Idempotent Sentry init. MUST be called in EVERY process entrypoint that can
+ *  throw — the API server (via observabilityPlugin) AND the worker process
+ *  (worker.ts main). captureError is a silent no-op until this runs, so a
+ *  process that skips it reports nothing [SWIFT-042]. */
 export function initSentry() {
   const dsn = process.env['SENTRY_DSN'];
   if (!dsn || sentryReady) return sentryReady;
@@ -25,6 +28,11 @@ export function initSentry() {
   });
   sentryReady = true;
   return true;
+}
+
+/** Test hook: clear the one-time init latch so a test can re-exercise it. */
+export function resetSentryForTests() {
+  sentryReady = false;
 }
 
 /** Report to Sentry when configured; always safe to call. */

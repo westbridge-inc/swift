@@ -20,9 +20,15 @@ import { Server } from 'socket.io';
 import { pino } from 'pino';
 import { createQueues, createWorkers, scheduleRecurringJobs } from './jobs/queue';
 import { assertSafeBootConfig } from './utils/boot-config';
+import { initSentry } from './plugins/observability';
 
 async function main() {
   assertSafeBootConfig();
+  // SWIFT-042: the worker is a SEPARATE process — it must initialize Sentry
+  // itself, or every job failure (captureError in the workers) is silently
+  // dropped. The API server does this via observabilityPlugin; the worker never
+  // loads that plugin, so it inits here.
+  initSentry();
 
   const log = pino({ level: process.env['LOG_LEVEL'] ?? 'info' });
   const redis = new Redis(process.env['REDIS_URL'] ?? 'redis://localhost:6379', {
