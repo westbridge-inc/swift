@@ -23,6 +23,7 @@ import { partnerRoutes } from './modules/partner/partner.routes';
 import { aiRoutes } from './modules/ai/ai.routes';
 import { setAppLogger } from './utils/logger';
 import { assertSafeBootConfig, assertProductionData } from './utils/boot-config';
+import { evaluateSchedulerHealth } from './utils/scheduler-health';
 import { prismaPlugin, beginRequestTenantContext } from './plugins/prisma';
 import { authPlugin } from './plugins/auth';
 import { socketPlugin } from './plugins/socket';
@@ -40,6 +41,10 @@ import path from 'node:path';
 
 const PORT = parseInt(process.env['PORT'] || '3000', 10);
 const HOST = process.env['HOST'] || '0.0.0.0';
+
+// Process start ≈ API boot. Grace-windows the scheduler "never booted" page so a
+// fleet that is still coming up isn't paged before its first heartbeat (SWIFT-122).
+const SERVER_BOOTED_AT = Date.now();
 
 // Public upload trees (items/, avatars/) are served via registerPublicUploads.
 // KYC / verification documents live under other /uploads folders and stay
@@ -176,17 +181,26 @@ async function buildApp() {
     // (30 min) and fire-and-caught: paging never slows a probe.
     void (async () => {
       const beat = await app.redis.get('scheduler:heartbeat');
-      if (!beat) return; // no worker has EVER run here (fresh boot / RUN_WORKERS=0 fleet mid-deploy)
-      const ageMs = Date.now() - Number(beat);
       const stallMs = Number(process.env['SCHEDULER_STALL_ALERT_MINUTES'] ?? '5') * 60_000;
-      if (ageMs <= stallMs) return;
-      const claimed = await app.redis.set('ops_page:scheduler-stall', '1', 'EX', 1800, 'NX');
+      // `!beat` is NOT benign: the heartbeat key has no TTL, so its absence means
+      // the worker fleet never booted (crash / RUN_WORKERS misconfigured). Page it
+      // once we're past the grace window — the case this check used to swallow.
+      const health = evaluateSchedulerHealth({ beat, nowMs: Date.now(), bootAtMs: SERVER_BOOTED_AT, stallMs });
+      if (!health.page) return;
+      const neverBooted = health.kind === 'never-booted';
+      // Separate dedup keys so a "never booted" alert and a later "stall" don't mask each other.
+      const claimed = await app.redis.set(
+        neverBooted ? 'ops_page:scheduler-never-booted' : 'ops_page:scheduler-stall', '1', 'EX', 1800, 'NX',
+      );
       if (claimed !== 'OK') return;
+      const mins = Math.round(health.ageMs / 60_000);
       const { notifyAdmins, NotificationService } = await import('./modules/notification/notification.service');
       await notifyAdmins(app.prisma, new NotificationService(app.prisma, app.io), {
-        title: 'Job scheduler stalled',
-        body: `No scheduler heartbeat for ${Math.round(ageMs / 60_000)} min — holds, expiry sweeps, billing and settlements are NOT running. Restart the worker.`,
-        data: { kind: 'ops_scheduler_stall', ageMs },
+        title: neverBooted ? 'Job scheduler never started' : 'Job scheduler stalled',
+        body: neverBooted
+          ? `No scheduler heartbeat since boot (${mins} min) — the worker fleet never started (crash or RUN_WORKERS misconfigured). Holds, expiry sweeps, billing and settlements have NEVER run. Start the worker.`
+          : `No scheduler heartbeat for ${mins} min — holds, expiry sweeps, billing and settlements are NOT running. Restart the worker.`,
+        data: { kind: neverBooted ? 'ops_scheduler_never_booted' : 'ops_scheduler_stall', ageMs: health.ageMs },
       });
     })().catch(() => {});
 
