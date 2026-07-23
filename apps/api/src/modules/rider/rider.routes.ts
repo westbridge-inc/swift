@@ -419,15 +419,11 @@ export async function riderRoutes(app: FastifyInstance) {
       await app.redis.set(`rider:location_db_ts:${rider.id}`, Date.now().toString());
     }
 
-    // Redis — always update (fast path for real-time queries).
-    const locationPayload = JSON.stringify({
-      lat: latitude,
-      lng: longitude,
-      heading: heading ?? null,
-      speed: speed ?? null,
-      ts: now.toISOString(),
-    });
-    await app.redis.set(`rider:location:${rider.id}`, locationPayload, 'EX', 300); // TTL 5 min
+    // SWIFT-141: the `rider:location:<id>` Redis write was a "fast path for
+    // real-time queries" with ZERO readers — every ping serialized + wrote a
+    // payload nothing consumed. Deleted (rule 17). The live path is the socket
+    // emit below; the persistent path is the throttled DB write above
+    // (currentLat/Lng, read by dispatch/presence). There is no third copy.
 
     // Broadcast to order room if rider has an active order.
     if (rider.currentOrderId) {
