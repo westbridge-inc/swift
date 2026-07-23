@@ -222,3 +222,17 @@ describe('OsmPlacesProvider — Photon search + Nominatim reverse (build-kit M)'
     expect(await withoutNominatim.reverseGeocode({ lat: 6.81, lng: -58.155 })).toBe('Georgetown Central');
   });
 });
+
+describe('GET /places/reverse — coordinate → address label [SWIFT-111]', () => {
+  it('requires auth (was an unrouted provider method)', async () => {
+    expect((await inject('/api/v1/places/reverse?lat=6.81&lng=-58.155')).statusCode).toBe(401);
+  });
+  it('returns an address label for a coordinate', async () => {
+    const res = await inject('/api/v1/places/reverse?lat=6.81&lng=-58.155', token);
+    expect(res.statusCode).toBe(200);
+    expect(res.json().data.address).toBeTruthy(); // the local provider labels it
+  });
+  it('rejects out-of-range coordinates', async () => {
+    expect((await inject('/api/v1/places/reverse?lat=999&lng=0', token)).statusCode).toBe(400);
+  });
+});

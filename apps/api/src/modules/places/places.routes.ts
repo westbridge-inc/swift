@@ -18,6 +18,11 @@ const detailsSchema = z.object({
   placeId: z.string().trim().min(1).max(400),
 });
 
+const reverseSchema = z.object({
+  lat: z.coerce.number().min(-90).max(90),
+  lng: z.coerce.number().min(-180).max(180),
+});
+
 export async function placesRoutes(app: FastifyInstance) {
   const auth = { preHandler: [app.authenticate] };
   const places = getPlacesProvider(app.prisma);
@@ -37,5 +42,14 @@ export async function placesRoutes(app: FastifyInstance) {
     // authenticated user could resolve another user's address id (IDOR).
     const detail = await places.details(placeId, { userId: request.user.userId });
     return { success: true, data: detail };
+  });
+
+  /** GET /reverse?lat=&lng= — a human address label for a coordinate [SWIFT-111].
+   *  Wires the provider's reverseGeocode (implemented across all three adapters
+   *  but previously unrouted) to "use my current location" address prefill. */
+  app.get('/reverse', auth, async (request) => {
+    const { lat, lng } = reverseSchema.parse(request.query);
+    const address = await places.reverseGeocode({ lat, lng });
+    return { success: true, data: { address } };
   });
 }
