@@ -5,6 +5,7 @@ import { OrderService } from '../order/order.service';
 import { NotificationService } from '../notification/notification.service';
 import { VerificationService } from '../verification/verification.service';
 import { makeDispatchService } from '../dispatch/dispatch.service';
+import { TAXI_DEMAND_WINDOW_MIN } from '../dispatch/demand.service';
 import { getKycProvider } from '../../providers/kyc/kyc-provider';
 import { BillingService } from '../billing/billing.service';
 import { getPaymentProvider } from '../../providers/payment/payment-provider';
@@ -274,16 +275,24 @@ export async function driverRoutes(app: FastifyInstance) {
       return { success: true, data: [] };
     }
 
+    // Only show requests still within the freshness window. Without this the
+    // board returned the 20 OLDEST PENDING taxi orders forever — once 20 stale
+    // requests piled up (riders who gave up but whose orders never cancelled),
+    // brand-new requests never surfaced and drivers saw a frozen, dead board
+    // [SWIFT-064]. The demand heatmap uses the same window (one source of
+    // truth); actually CANCELLING abandoned requests is SWIFT-021.
+    const freshSince = new Date(Date.now() - TAXI_DEMAND_WINDOW_MIN * 60_000);
     const orders = await app.prisma.order.findMany({
       where: {
         orderType: 'TAXI',
         status: 'PENDING',
         driverId: null,
+        placedAt: { gte: freshSince },
       },
       include: {
         customer: { select: { id: true, firstName: true, avatar: true } },
       },
-      orderBy: { createdAt: 'asc' },
+      orderBy: { placedAt: 'asc' },
       take: 20,
     });
 

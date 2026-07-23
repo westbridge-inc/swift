@@ -9,8 +9,11 @@ import { haversineDistance } from '../../utils/distance';
  * data). Nothing here reveals who is waiting — only that work exists.
  */
 
-/** How far back a waiting taxi request still counts as live demand. */
-const TAXI_DEMAND_WINDOW_MIN = 15;
+/** How far back a waiting taxi request still counts as live demand. The single
+ *  source of truth for request freshness — the demand heatmap AND the driver's
+ *  available-rides board both use it, so they can never disagree on what's
+ *  "live" [SWIFT-064]. Env-tunable for market conditions. */
+export const TAXI_DEMAND_WINDOW_MIN = Number(process.env['TAXI_DEMAND_WINDOW_MIN'] ?? 15);
 /** ~300 m snap: coarse enough to hide a doorstep, fine enough to drive toward. */
 const POINT_SNAP_DEG = 0.003;
 /** ~1.3 km cluster cells for the "N waiting near here" badges. */
