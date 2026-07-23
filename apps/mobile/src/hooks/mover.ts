@@ -132,6 +132,13 @@ export function useAcceptJob(kind: MoverKind) {
   const qc = useQueryClient();
   return useMutation({ mutationFn: ({ id, fare }: { id: string; fare?: number }) => unwrap(svc(kind).accept(id, fare)), onSuccess: () => qc.invalidateQueries({ queryKey: ['mover'] }) });
 }
+/** Accept a dispatch OFFER (the offer card), not a board grab. Hits
+ *  /offers/accept, which acknowledges the offer so accepting is never scored as
+ *  a timeout and the mover's acceptance rate goes UP, not down [SWIFT-016]. */
+export function useAcceptOffer(kind: MoverKind) {
+  const qc = useQueryClient();
+  return useMutation({ mutationFn: ({ orderId, fare }: { orderId: string; fare?: number }) => unwrap(svc(kind).acceptOffer(orderId, fare)), onSuccess: () => qc.invalidateQueries({ queryKey: ['mover'] }) });
+}
 /** Explicit pass on a dispatch offer — tells the cascade to move to the next
  *  mover NOW instead of letting the 20s timeout burn. Best-effort: if the
  *  offer already expired server-side the decline 409s, which is fine. */

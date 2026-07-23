@@ -340,6 +340,9 @@ export const riderApi = {
   available: () => api.get('/rider/orders/available'),
   active: () => api.get('/rider/orders/active'),
   accept: (id: string, fare?: number) => api.post(`/rider/orders/${id}/accept`, { fare }),
+  // Accepting a dispatch OFFER (the offer card) vs grabbing from the open board:
+  // this path acks the offer so it's never scored as a timeout [SWIFT-016].
+  acceptOffer: (orderId: string, fare?: number) => api.post('/rider/offers/accept', { orderId, fare }),
   declineOffer: (orderId: string) => api.post('/rider/offers/decline', { orderId }),
   // Golden-rule handover: GPS is mandatory server-side (claims are impossible
   // without it) — an empty body 400s.
@@ -380,6 +383,8 @@ export const driverApi = {
   available: () => api.get('/driver/rides/available'),
   active: () => api.get('/driver/rides/active'),
   accept: (id: string, fare?: number) => api.post(`/driver/rides/${id}/accept`, { fare }),
+  // Offer-card accept (acks the offer, no timeout penalty) vs board-grab [SWIFT-016].
+  acceptOffer: (orderId: string, fare?: number) => api.post('/driver/offers/accept', { orderId, fare }),
   declineOffer: (orderId: string) => api.post('/driver/offers/decline', { orderId }),
   enRoute: (id: string) => api.put(`/driver/rides/${id}/en-route`),
   arrived: (id: string) => api.put(`/driver/rides/${id}/arrived`),

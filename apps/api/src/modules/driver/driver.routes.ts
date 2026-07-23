@@ -435,6 +435,33 @@ export async function driverRoutes(app: FastifyInstance) {
     return { success: true, data: { message: 'Offer declined' } };
   });
 
+  /** POST /offers/accept — atomic claim of a live dispatch offer, the offer-CARD
+   *  path [SWIFT-016]. acceptOffer acknowledges the offer alert and records a
+   *  POSITIVE acceptance, so accepting is never scored as a timeout. (Parity
+   *  with the rider route — this side didn't exist, so a driver accepting from
+   *  the offer card fell through to board-grab and had their acceptance rate
+   *  quietly decayed by the un-acked offer's timeout.) */
+  app.post('/offers/accept', { preHandler: [app.authenticate] }, async (request) => {
+    await getDriver(request.user.userId); // authz before validation
+    const { orderId, fare } = z.object({
+      orderId: z.string().min(1).max(64),
+      fare: z.number().min(0).optional(),
+    }).parse(request.body);
+    const order = await dispatch.acceptOffer(orderId, request.user.userId);
+    // Driver-set price, capped at the market fare — applied after the claim,
+    // matching /rides/:id/accept.
+    if (fare != null) {
+      const chosen = clampDriverFare(fare, Number(order.taxiFareTotal));
+      if (chosen !== Number(order.taxiFareTotal)) {
+        await app.prisma.order.update({
+          where: { id: orderId },
+          data: { taxiFareTotal: chosen, totalAmount: chosen },
+        });
+      }
+    }
+    return { success: true, data: { orderId: order.id, status: order.status, orderNumber: order.orderNumber } };
+  });
+
   /** POST /rides/:id/rate-customer — post-trip rating goes both ways (§4.2). */
   app.post('/rides/:id/rate-customer', { preHandler: [app.authenticate] }, async (request) => {
     const { id } = request.params as { id: string };

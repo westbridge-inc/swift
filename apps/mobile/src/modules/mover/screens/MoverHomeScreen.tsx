@@ -19,6 +19,7 @@ import {
   useGoOnline,
   useGoOffline,
   useAcceptJob,
+  useAcceptOffer,
   useDeclineOffer,
   useBroadcastLocation,
   useVerificationStatus,
@@ -217,6 +218,7 @@ export function MoverHomeScreen({ navigation }: any) {
   const goOnline = useGoOnline(k);
   const goOffline = useGoOffline(k);
   const accept = useAcceptJob(k);
+  const acceptOffer = useAcceptOffer(k);
   const decline = useDeclineOffer(k);
   const earnings = useEarningsToday(kind);
   const daily = useDailyEarnings<any>(kind); // DASH-03: server-aggregated 7-day trend
@@ -620,8 +622,8 @@ export function MoverHomeScreen({ navigation }: any) {
           offer={offer}
           job={jobs.find((j) => j.id === offer.orderId)}
           kind={k}
-          accepting={accept.isPending}
-          onAccept={(fare) => accept.mutate({ id: offer.orderId, fare }, { onSuccess: dismiss })}
+          accepting={acceptOffer.isPending}
+          onAccept={(fare) => acceptOffer.mutate({ orderId: offer.orderId, fare }, { onSuccess: dismiss })}
           // Tell the server too — the cascade re-offers the next mover NOW
           // instead of waiting out the 20s timeout on a card nobody wants.
           onDecline={() => {

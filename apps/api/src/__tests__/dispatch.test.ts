@@ -345,6 +345,39 @@ describe('The offer cascade', () => {
     await app.prisma.rider.updateMany({ where: { id: { in: [a.riderId, b.riderId] } }, data: { isOnline: false } });
   });
 
+  it('SWIFT-016: accepting via /offers/accept claims, applies the fare, and never a timeout penalty', async () => {
+    await app.prisma.rider.updateMany({ data: { isOnline: false } });
+    const rider = await makeRider({ lat: PICKUP.lat + 0.002, acceptance: 100 });
+    const order = await makeDeliveryOrder();
+
+    // The offer lands on the rider (offerKey set, alert created, timeout scheduled).
+    const offered = await dispatch.dispatchOrder(order.id);
+    expect(offered.offered).toBe(rider.riderId);
+
+    // Accept through the OFFER path (what the offer card now calls), undercutting
+    // the 500 market fee to 300.
+    const res = await app.inject({
+      method: 'POST', url: '/api/v1/rider/offers/accept',
+      headers: { authorization: `Bearer ${rider.token}`, 'content-type': 'application/json' },
+      payload: { orderId: order.id, fare: 300 },
+    });
+    expect(res.statusCode).toBe(200);
+
+    const claimed = await app.prisma.order.findUniqueOrThrow({ where: { id: order.id } });
+    expect(claimed.riderId).toBe(rider.riderId);
+    expect(claimed.status).toBe('RIDER_ASSIGNED');
+    expect(Number(claimed.deliveryFee)).toBe(300); // rider-set fee applied
+
+    // The originally-scheduled offer timeout fires. Because acceptOffer cleared
+    // the offer, it must NOT penalise the rider who accepted.
+    await dispatch.handleOfferTimeout(order.id, rider.riderId);
+    const after = await app.prisma.rider.findUniqueOrThrow({ where: { id: rider.riderId } });
+    // RED before SWIFT-016: the offer card hit board-grab, which left the offer
+    // live, so this timeout scored a miss and dropped acceptanceRate below 100.
+    expect(after.acceptanceRate).toBe(100);
+    await app.prisma.rider.updateMany({ where: { id: rider.riderId }, data: { isOnline: false } });
+  });
+
   it('SWIFT-065: exhaustion is terminal — long-TTL marker + admins paged once, not every hour', async () => {
     await app.prisma.rider.updateMany({ data: { isOnline: false } }); // guarantee an empty pool
     const order = await makeDeliveryOrder();
