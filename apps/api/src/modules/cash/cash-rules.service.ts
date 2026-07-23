@@ -39,8 +39,14 @@ export const DEFAULT_CASH_RULES: CashRulesConfig = {
   maxHandoverDistanceKm: 0.75,
 };
 
-/** Handover is only legal at the door. */
-const HANDOVER_STATES = ['ARRIVED'] as const;
+/**
+ * Handover is only legal at the door. Exported so the order state machine's
+ * FAILED predecessor list stays in lockstep with this guard (SWIFT-096): a
+ * failed cash handover is the ONLY way an order reaches FAILED, and it can only
+ * be recorded from these states. Widening one without the other would let the
+ * machine permit a transition the service can never produce.
+ */
+export const HANDOVER_STATES = ['ARRIVED'] as const;
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
