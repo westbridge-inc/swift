@@ -2102,17 +2102,21 @@ export async function vendorRoutes(app: FastifyInstance) {
       app.prisma.order.count({ where: { vendorId, status: liveOrderStatuses, placedAt: { gte: todayStart } } }),
       app.prisma.order.count({ where: { vendorId, status: liveOrderStatuses, placedAt: { gte: weekStart } } }),
       app.prisma.order.count({ where: { vendorId, status: liveOrderStatuses, placedAt: { gte: monthStart } } }),
+      // Canonical vendor "sales" = Σ(subtotalCustomer − discount) — what the
+      // customer actually paid, net of any promo — matching the vendor
+      // statement exactly [SWIFT-040/DASH-08]. Summing subtotalBase here made
+      // Insights and the statement disagree by the discount on every promo order.
       app.prisma.order.aggregate({
         where: { vendorId, status: { in: completedStatuses }, placedAt: { gte: todayStart } },
-        _sum: { subtotalBase: true },
+        _sum: { subtotalCustomer: true, discount: true },
       }),
       app.prisma.order.aggregate({
         where: { vendorId, status: { in: completedStatuses }, placedAt: { gte: weekStart } },
-        _sum: { subtotalBase: true },
+        _sum: { subtotalCustomer: true, discount: true },
       }),
       app.prisma.order.aggregate({
         where: { vendorId, status: { in: completedStatuses }, placedAt: { gte: monthStart } },
-        _sum: { subtotalBase: true },
+        _sum: { subtotalCustomer: true, discount: true },
       }),
       app.prisma.item.count({ where: { vendorId, isAvailable: true } }),
       // Held orders (LIFECYCLE_V2) aren't the vendor's to act on yet.
@@ -2131,15 +2135,15 @@ export async function vendorRoutes(app: FastifyInstance) {
         },
         today: {
           orders: todayOrders,
-          revenue: Number(todayRevenue._sum?.subtotalBase ?? 0),
+          revenue: Number(todayRevenue._sum?.subtotalCustomer ?? 0) - Number(todayRevenue._sum?.discount ?? 0),
         },
         week: {
           orders: weekOrders,
-          revenue: Number(weekRevenue._sum?.subtotalBase ?? 0),
+          revenue: Number(weekRevenue._sum?.subtotalCustomer ?? 0) - Number(weekRevenue._sum?.discount ?? 0),
         },
         month: {
           orders: monthOrders,
-          revenue: Number(monthRevenue._sum?.subtotalBase ?? 0),
+          revenue: Number(monthRevenue._sum?.subtotalCustomer ?? 0) - Number(monthRevenue._sum?.discount ?? 0),
         },
         activeMenuItems: activeItems,
         pendingOrders,
@@ -2229,7 +2233,8 @@ export async function vendorRoutes(app: FastifyInstance) {
       },
       select: {
         placedAt: true,
-        subtotalBase: true,
+        subtotalCustomer: true,
+        discount: true,
         totalAmount: true,
       },
       orderBy: { placedAt: 'asc' },
@@ -2254,7 +2259,8 @@ export async function vendorRoutes(app: FastifyInstance) {
       const entry = dailyMap.get(key);
       if (entry) {
         entry.orders += 1;
-        entry.revenue += Number(o.subtotalBase);
+        // Canonical net-of-discount sales [SWIFT-040], same as the overview + statement.
+        entry.revenue += Number(o.subtotalCustomer) - Number(o.discount);
         entry.total += Number(o.totalAmount);
       }
     }

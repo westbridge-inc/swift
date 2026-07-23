@@ -94,4 +94,25 @@ describe('vendor overview order counts [DASH-05]', () => {
     // revenue is from the 1 DELIVERED only — count >= revenue-producing orders, never below.
     expect(today.revenue).toBe(1000);
   });
+
+  it('SWIFT-040: revenue is net of discount (matches the statement), not pre-discount base', async () => {
+    const overview = async () =>
+      (await app.inject({ method: 'GET', url: '/api/v1/vendor/analytics/overview', headers: { authorization: `Bearer ${token}`, 'x-vendor-id': vendorId } })).json().data.today.revenue as number;
+
+    const before = await overview();
+    // A delivered order the customer got 400 off: they paid 600, not 1000.
+    const o = await app.prisma.order.create({
+      data: {
+        orderNumber: `OVT-${nanoid(8)}`, orderType: 'FOOD_DELIVERY', customerId: customerUserId, vendorId,
+        status: 'DELIVERED' as never, deliveryAddress: 'x', deliveryLat: 6.8, deliveryLng: -58.15,
+        subtotalBase: 1000, subtotalMarkup: 0, subtotalCustomer: 1000, discount: 400,
+        deliveryFee: 300, totalAmount: 900, paymentMethod: 'CASH',
+      },
+    });
+    orderIds.push(o.id);
+
+    // RED before SWIFT-040: revenue summed subtotalBase, so it rose by the full
+    // 1000 and disagreed with the statement (which nets the discount).
+    expect(await overview()).toBe(before + 600);
+  });
 });
