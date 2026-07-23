@@ -445,6 +445,17 @@ describe('Checkout — ID gate, multi-vendor split, fulfillment', () => {
       expect(res.json().error.code).toBe('WRONG_PICKUP_CODE');
     });
 
+    it('SWIFT-077: refuses to complete a coded pickup with NO code (was silently allowed)', async () => {
+      const o = await makePickupOrder('READY_FOR_PICKUP', '1234');
+      // RED before SWIFT-077: `code != null` let a missing code through, so the
+      // handover closed without ever verifying the customer's code.
+      const res = await inject('PUT', `/api/v1/vendor/orders/${o.id}/complete-pickup`, {}, supermarket.token);
+      expect(res.statusCode).toBe(400);
+      expect(res.json().error.code).toBe('MISSING_PICKUP_CODE');
+      const still = await app.prisma.order.findUniqueOrThrow({ where: { id: o.id } });
+      expect(still.status).toBe('READY_FOR_PICKUP'); // not completed
+    });
+
     it('rejects completing before the order is ready', async () => {
       const o = await makePickupOrder('PREPARING', '1234');
       const res = await inject('PUT', `/api/v1/vendor/orders/${o.id}/complete-pickup`, { code: '1234' }, supermarket.token);
