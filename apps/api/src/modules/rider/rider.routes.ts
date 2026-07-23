@@ -155,11 +155,27 @@ export async function riderRoutes(app: FastifyInstance) {
     };
   });
 
-  /** POST /offers/accept — atomic claim of a live dispatch offer. */
+  /** POST /offers/accept — atomic claim of a live dispatch offer. This is the
+   *  path the offer CARD uses [SWIFT-016]: acceptOffer acknowledges the offer
+   *  alert (so accepting is never scored as a timeout) and records a POSITIVE
+   *  acceptance — unlike the board-grab entrance, which is for the open list. */
   app.post('/offers/accept', { preHandler: [app.authenticate] }, async (request) => {
     await getRider(app, request.user.userId); // authz before validation
-    const { orderId } = offerActionSchema.parse(request.body);
+    const { orderId, fare } = offerActionSchema.extend({ fare: z.number().min(0).optional() }).parse(request.body);
     const order = await dispatch.acceptOffer(orderId, request.user.userId);
+    // Rider-set delivery fee, capped at market — the same rule as the board-grab
+    // accept, applied AFTER the offer claim (which already acked the alert and
+    // committed the float). Lowering the fee lowers the customer's total 1:1.
+    if (fare != null) {
+      const marketFee = Number(order.deliveryFee);
+      const chosenFee = clampDriverFare(fare, marketFee);
+      if (chosenFee !== marketFee) {
+        await app.prisma.order.update({
+          where: { id: orderId },
+          data: { deliveryFee: chosenFee, totalAmount: Number(order.totalAmount) - (marketFee - chosenFee) },
+        });
+      }
+    }
     return { success: true, data: { orderId: order.id, status: order.status, orderNumber: order.orderNumber } };
   });
 
