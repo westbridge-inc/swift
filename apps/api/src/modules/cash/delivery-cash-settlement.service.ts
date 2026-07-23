@@ -56,7 +56,7 @@ export class DeliveryCashSettlementService {
   }
 
   private async list(scope: Record<string, unknown>, owedStatuses: CashSettlementStatus[]) {
-    const [unsettled, settled] = await Promise.all([
+    const [unsettled, settled, owedAgg] = await Promise.all([
       this.prisma.deliveryCashSettlement.findMany({
         where: { ...scope, status: { not: 'SETTLED' } },
         include: SETTLEMENT_INCLUDE,
@@ -69,12 +69,19 @@ export class DeliveryCashSettlementService {
         orderBy: { createdAt: 'desc' },
         take: 20,
       }),
+      // SWIFT-120: the owed SUMMARY must aggregate EVERY owed row on the DB, not
+      // sum the displayed (capped-100) list — otherwise the "stores owe you" /
+      // "you owe" figure silently undercounts once a party has >100 open rows.
+      this.prisma.deliveryCashSettlement.aggregate({
+        where: { ...scope, status: { in: owedStatuses } },
+        _sum: { amount: true },
+        _count: true,
+      }),
     ]);
-    const owedRows = unsettled.filter((s) => owedStatuses.includes(s.status));
     return {
       summary: {
-        owed: owedRows.reduce((sum, s) => sum + Number(s.amount), 0),
-        count: owedRows.length,
+        owed: Number(owedAgg._sum.amount ?? 0),
+        count: owedAgg._count,
       },
       unsettled: unsettled.map(toWire),
       settled: settled.map(toWire),
