@@ -212,6 +212,42 @@ describe('Courier — create, track, deliver', () => {
   });
 });
 
+describe('Courier — first-pass dispatch is enqueued, not inline [SWIFT-097]', () => {
+  it('enqueues a dispatch-order job when a queue is up (like taxi), instead of blocking on the cascade', async () => {
+    const added: Array<{ name: string; data: unknown }> = [];
+    const app2 = Fastify({ logger: false });
+    registerErrorHandler(app2);
+    await app2.register(prismaPlugin);
+    await app2.register(redisPlugin);
+    await app2.register(authPlugin);
+    await app2.register(socketPlugin);
+    app2.decorate('dispatchQueue', { add: async (name: string, data: unknown) => { added.push({ name, data }); } } as never);
+    await app2.register(courierRoutes, { prefix: '/api/v1/courier' });
+    await app2.ready();
+
+    const rnd = 592_840_000_000 + Math.floor(Math.random() * 90_000_000);
+    const u = await app2.prisma.user.create({ data: { phone: `+${rnd}`, firstName: 'Enq', lastName: 'Sender', roles: ['CUSTOMER'], activeRole: 'CUSTOMER', isPhoneVerified: true } });
+    const token = app2.jwt.sign({ userId: u.id, role: 'CUSTOMER', jti: nanoid(8) });
+    await app2.prisma.session.create({ data: { userId: u.id, token, refreshToken: nanoid(48), deviceId: 'enq', deviceType: 'test', expiresAt: new Date(Date.now() + 86400000) } });
+
+    try {
+      const res = await app2.inject({ method: 'POST', url: '/api/v1/courier/order', payload: ORDER_BODY, headers: { 'content-type': 'application/json', authorization: `Bearer ${token}` } });
+      expect(res.statusCode).toBe(201);
+      const orderId = res.json().data.orderId;
+      // A dispatch-order job was enqueued for the worker...
+      expect(added.some((j) => j.name === 'dispatch-order' && (j.data as { orderId?: string }).orderId === orderId)).toBe(true);
+      // ...and the cascade did NOT run inline — the mock queue never processes it,
+      // so no search journal exists yet. (Pre-fix, inline dispatchOrder created one.)
+      expect(await app2.prisma.dispatchSearch.count({ where: { subjectId: orderId } })).toBe(0);
+    } finally {
+      await app2.prisma.order.deleteMany({ where: { customerId: u.id } });
+      await app2.prisma.session.deleteMany({ where: { userId: u.id } });
+      await app2.prisma.user.deleteMany({ where: { id: u.id } });
+      await app2.close();
+    }
+  });
+});
+
 describe('Courier — priority dispatch is REAL [SWIFT-061]', () => {
   it('EXPRESS/RUSH map to isExpress (12s offers / 45s redispatch / sort-first); STANDARD does not', async () => {
     const sender = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');

@@ -162,8 +162,21 @@ export default async function courierRoutes(app: FastifyInstance) {
     });
 
     // Held courier jobs dispatch at release (the worker enqueues); otherwise now.
+    // SWIFT-097: enqueue the first-pass dispatch like taxi does (SWIFT-AUD-D6-08),
+    // instead of awaiting the offer cascade inline — the cascade does ETA
+    // round-trips that would pin this handler (and a DB connection) open. The
+    // client listens for the dispatch:offer socket event either way. Inline
+    // fallback when no queue is up (tests / degraded boot).
     if (!order.holdExpiresAt) {
-      await dispatch.dispatchOrder(order.id);
+      if (app.dispatchQueue) {
+        await app.dispatchQueue.add('dispatch-order', { orderId: order.id }, {
+          priority: 5,
+          removeOnComplete: 100,
+          removeOnFail: 50,
+        });
+      } else {
+        await dispatch.dispatchOrder(order.id);
+      }
     }
 
     reply.code(201);
