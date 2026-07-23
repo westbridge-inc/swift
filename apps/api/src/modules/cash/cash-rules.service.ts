@@ -4,6 +4,7 @@ import { NotificationService } from '../notification/notification.service';
 import { CountryConfigService } from '../country/country-config.service';
 import { OrderService } from '../order/order.service';
 import { FloatService } from '../dispatch/float.service';
+import { haversineDistance } from '../../utils/distance';
 
 // ---------------------------------------------------------------------------
 // Cash rules engine — the golden rule as code. Payment
@@ -21,6 +22,11 @@ export interface CashRulesConfig {
   l3MinPaidOrders: number;
   l3MinAccountAgeDays: number;
   outlierMultiplier: number;
+  /** SWIFT-076: a guarantee claim whose handover GPS is farther than this from
+   *  the order's delivery point can't be trusted to auto-pay — it's flagged for
+   *  review. Generous enough for GPS drift + a large compound; tight enough to
+   *  catch a claim fabricated from across town. Overridable per CountryConfig. */
+  maxHandoverDistanceKm: number;
 }
 
 export const DEFAULT_CASH_RULES: CashRulesConfig = {
@@ -30,6 +36,7 @@ export const DEFAULT_CASH_RULES: CashRulesConfig = {
   l3MinPaidOrders: 20,
   l3MinAccountAgeDays: 30,
   outlierMultiplier: 3,
+  maxHandoverDistanceKm: 0.75,
 };
 
 /** Handover is only legal at the door. */
@@ -196,7 +203,13 @@ export class CashRulesService {
   // -------------------------------------------------------------------------
 
   private async createClaim(
-    order: { id: string; totalAmount: unknown; customer: { id: string; phone: string; countryCode: string } },
+    order: {
+      id: string;
+      totalAmount: unknown;
+      deliveryLat: number | null;
+      deliveryLng: number | null;
+      customer: { id: string; phone: string; countryCode: string };
+    },
     riderId: string,
     input: { outcome: 'paid' | 'no_show' | 'refused'; gps: { lat: number; lng: number }; photoUrl?: string },
     addressKey: string,
@@ -219,6 +232,17 @@ export class CashRulesService {
 
     const rules = await this.configFor(order.customer.countryCode);
     const flags = await this.guardrailFlags(riderId, order.customer.id, order.customer.phone, addressKey, rules);
+
+    // SWIFT-076: the handover GPS is the claim's evidence — validate it, don't
+    // just record it. Server-side proximity assertion (rule 3: never trust a
+    // client coordinate for a money outcome). A claim reported implausibly far
+    // from the order's delivery point routes to manual review instead of
+    // auto-paying — the same "flag → PENDING_REVIEW" path as the other
+    // guardrails, so a legitimate claim is unaffected.
+    if (order.deliveryLat != null && order.deliveryLng != null) {
+      const km = haversineDistance(input.gps.lat, input.gps.lng, order.deliveryLat, order.deliveryLng);
+      if (km > rules.maxHandoverDistanceKm) flags.push('gps_far');
+    }
 
     const claim = await this.prisma.reimbursementClaim.create({
       data: {

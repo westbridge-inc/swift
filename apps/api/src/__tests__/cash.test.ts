@@ -26,6 +26,11 @@ const DAY = 24 * 60 * 60 * 1000;
 // Own geo sandbox, ~50km from step8/step9 fixtures — online riders here must
 // never enter another file's dispatch radius when suites run in parallel.
 const GPS = { lat: 7.2, lng: -58.6 };
+// SWIFT-076: handover claims now assert proximity — a legit handover happens AT
+// the door, so the delivery point sits beside GPS (~110 m). GPS_FAR is a claim
+// reported implausibly far from the door (spoofed), well outside the guarantee
+// radius; it stays inside this file's isolated geo sandbox.
+const GPS_FAR = { lat: 7.3, lng: -58.7 };
 
 let app: FastifyInstance;
 let cash: CashRulesService;
@@ -97,7 +102,13 @@ async function makeRider() {
   return { ...u, riderId: rider.id };
 }
 
-async function makeAtDoorOrder(customerId: string, riderId: string, amount: number, status: OrderStatus = 'ARRIVED') {
+async function makeAtDoorOrder(
+  customerId: string,
+  riderId: string,
+  amount: number,
+  status: OrderStatus = 'ARRIVED',
+  delivery: { lat: number; lng: number } = { lat: 7.2007, lng: -58.6007 },
+) {
   return app.prisma.order.create({
     data: {
       orderNumber: `S10-${nanoid(10)}`,
@@ -107,8 +118,8 @@ async function makeAtDoorOrder(customerId: string, riderId: string, amount: numb
       riderId,
       status,
       deliveryAddress: '9 Cash Street, Georgetown',
-      deliveryLat: 6.80451,
-      deliveryLng: -58.15532,
+      deliveryLat: delivery.lat,
+      deliveryLng: delivery.lng,
       pickupLat: GPS.lat,
       pickupLng: GPS.lng,
       pickupAddress: 'Vendor corner',
@@ -267,6 +278,30 @@ describe('The guarantee — honest claim pays, guardrails catch patterns', () =>
     expect(strike).not.toBeNull();
     expect(strike!.phone).toBeTruthy();
     expect(strike!.addressKey).toContain('geo:');
+  });
+
+  it('a claim reported implausibly far from the door goes to review, not auto-payout [SWIFT-076]', async () => {
+    const customer = await makeUser(['CUSTOMER'], 'CUSTOMER');
+    const rider = await makeRider();
+    // A unique delivery point so no historical guardrail (shared-address, pair,
+    // outlier) can co-fire — gps_far is proven in isolation. The reported
+    // handover GPS is ~17 km from this door.
+    const door = { lat: 7.25, lng: -58.55 };
+    const order = await makeAtDoorOrder(customer.userId, rider.riderId, 3500, 'ARRIVED', door);
+
+    const res = await inject('POST', `/api/v1/rider/orders/${order.id}/handover`, {
+      outcome: 'refused',
+      gps: GPS_FAR,
+      photoUrl: 'storage://t/door.jpg',
+    }, rider.token);
+    expect(res.statusCode).toBe(200);
+    expect(res.json().data.status).toBe('FAILED'); // the order still fails through the machine
+    expect(res.json().data.claim.status).toBe('PENDING_REVIEW'); // caused solely by proximity
+    expect(res.json().data.claim.flags).toEqual(['gps_far']);
+
+    // The customer is still struck — a far GPS doesn't erase the failed handover.
+    const strike = await app.prisma.strike.findFirst({ where: { orderId: order.id } });
+    expect(strike).not.toBeNull();
   });
 
   it('claim payout is single-winner: two concurrent markClaimPaid → one pays, one 400s (no double-payout)', async () => {
