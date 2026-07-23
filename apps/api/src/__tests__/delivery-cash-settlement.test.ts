@@ -9,6 +9,8 @@ import { socketPlugin } from '../plugins/socket';
 import { vendorRoutes } from '../modules/vendor/vendor.routes';
 import { riderRoutes } from '../modules/rider/rider.routes';
 import { OrderService } from '../modules/order/order.service';
+import { DeliveryCashSettlementService } from '../modules/cash/delivery-cash-settlement.service';
+import { NotificationService } from '../modules/notification/notification.service';
 import { registerErrorHandler } from '../middleware/error-handler';
 
 // MMG Phase 3: for an MMG-paid delivery the customer paid the STORE, so the
@@ -274,5 +276,38 @@ describe('ledger lists', () => {
   it('rejects a bearer-less request', async () => {
     const res = await app.inject({ method: 'GET', url: '/api/v1/rider/cash-settlements' });
     expect(res.statusCode).toBe(401);
+  });
+
+  it('the owed total sums EVERY open row, not just the displayed 100 [SWIFT-120]', async () => {
+    // A rider with 105 open MMG debts — more than the display cap.
+    const bigUser = await makeUser(['MOVER', 'CUSTOMER'], 'MOVER');
+    const bigRiderId = await makeRider(bigUser.userId);
+    const N = 105;
+    const FEE = 300;
+    await app.prisma.order.createMany({
+      data: Array.from({ length: N }, (_, i) => ({
+        orderNumber: `S120-${nanoid(8)}-${i}`, orderType: 'FOOD_DELIVERY' as const,
+        customerId: customer.userId, vendorId, riderId: bigRiderId, status: 'DELIVERED' as const,
+        deliveryAddress: 'x', deliveryLat: 6.8, deliveryLng: -58.15,
+        subtotalBase: 1000, subtotalMarkup: 0, subtotalCustomer: 1000,
+        deliveryFee: FEE, totalAmount: 1000 + FEE, paymentMethod: 'MOBILE_MONEY' as const,
+      })),
+    });
+    const orderRows = await app.prisma.order.findMany({ where: { orderNumber: { startsWith: 'S120-' } }, select: { id: true } });
+    await app.prisma.deliveryCashSettlement.createMany({
+      data: orderRows.map((o) => ({ orderId: o.id, riderId: bigRiderId, vendorId, amount: FEE, status: 'OWED' as const })),
+    });
+
+    const ledger = await new DeliveryCashSettlementService(app.prisma, new NotificationService(app.prisma, app.io)).listForRider(bigRiderId);
+    // Summary covers ALL 105 (the bug summed only the 100 displayed rows).
+    expect(ledger.summary.count).toBe(N);
+    expect(ledger.summary.owed).toBe(N * FEE);
+    // The display list is still capped for payload size.
+    expect(ledger.unsettled.length).toBe(100);
+
+    await app.prisma.deliveryCashSettlement.deleteMany({ where: { riderId: bigRiderId } });
+    await app.prisma.order.deleteMany({ where: { id: { in: orderRows.map((o) => o.id) } } });
+    await app.prisma.rider.deleteMany({ where: { id: bigRiderId } });
+    await app.prisma.user.deleteMany({ where: { id: bigUser.userId } });
   });
 });
