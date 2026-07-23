@@ -345,6 +345,39 @@ describe('The offer cascade', () => {
     await app.prisma.rider.updateMany({ where: { id: { in: [a.riderId, b.riderId] } }, data: { isOnline: false } });
   });
 
+  it('SWIFT-065: exhaustion is terminal — long-TTL marker + admins paged once, not every hour', async () => {
+    await app.prisma.rider.updateMany({ data: { isOnline: false } }); // guarantee an empty pool
+    const order = await makeDeliveryOrder();
+    const admin = await app.prisma.user.create({
+      data: { phone: '+5920008877', firstName: 'Ops2', lastName: 'Admin', roles: ['ADMIN'], activeRole: 'ADMIN', isPhoneVerified: true },
+    });
+    createdUserIds.push(admin.id);
+
+    // First full exhaustion (widens through every round, finds no candidate).
+    const r1 = await dispatch.dispatchOrder(order.id);
+    expect(r1).toMatchObject({ exhausted: true });
+
+    // The attempt marker now persists far longer than the old 1h TTL, so the
+    // reconciler leaves this stranded order alone instead of re-cascading hourly.
+    const ttl = await app.redis.ttl(`dispatch:exhausts:${order.id}`);
+    expect(ttl).toBeGreaterThan(3600);
+
+    const pagedOnce = await app.prisma.notification.count({
+      where: { userId: admin.id, title: 'Dispatch exhausted — no mover found' },
+    });
+    expect(pagedOnce).toBe(1);
+
+    // A second exhaustion of the SAME order must NOT re-page the admins.
+    await dispatch.dispatchOrder(order.id);
+    const pagedAfter = await app.prisma.notification.count({
+      where: { userId: admin.id, title: 'Dispatch exhausted — no mover found' },
+    });
+    // RED before SWIFT-065: 2 — admins were paged on every re-exhaust.
+    expect(pagedAfter).toBe(1);
+
+    await app.redis.del(`dispatch:exhausts:${order.id}`, `ops_page:dispatch_exhausted:${order.id}`);
+  });
+
   it('ALERTS_LOUD: an offer lands a push-backed notification with expiry; flag off is silent (alerts spec A2)', async () => {
     const quiet = await makeRider({ lat: PICKUP.lat + 0.0045, acceptance: 100 });
     const loud = await makeRider({ lat: PICKUP.lat + 0.02, acceptance: 100 }); // farther: not offered while quiet is online

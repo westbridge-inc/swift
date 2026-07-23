@@ -448,7 +448,7 @@ describe('dispatch exhaustion auto-retry', () => {
   // An empty patch of map — no mover fixture is ever placed here.
   const EXHAUST_AT = { lat: 7.61, lng: -59.61 };
 
-  it('first exhaustion schedules a redispatch; second sends the final notices', async () => {
+  it('retries up to the cap (default 3), then sends the final notices [SWIFT-065]', async () => {
     const vendor = await makeVendor();
     const customer = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
     // No riders online anywhere near this order.
@@ -467,6 +467,7 @@ describe('dispatch exhaustion auto-retry', () => {
       },
     );
 
+    // Attempts 1 and 2 (< EXHAUST_CAP=3) each schedule one more re-sweep.
     const first = await dispatch.dispatchOrder(order.id);
     expect(first.exhausted).toBe(true);
     expect(redispatches).toHaveLength(1);
@@ -477,11 +478,18 @@ describe('dispatch exhaustion auto-retry', () => {
 
     const second = await dispatch.dispatchOrder(order.id);
     expect(second.exhausted).toBe(true);
-    expect(redispatches).toHaveLength(1); // no infinite loop
+    expect(redispatches).toHaveLength(2);
+
+    // The 3rd exhaustion is TERMINAL — no further cascade, final notices sent.
+    const third = await dispatch.dispatchOrder(order.id);
+    expect(third.exhausted).toBe(true);
+    expect(redispatches).toHaveLength(2); // capped — never an unbounded loop
     const final = await app.prisma.notification.findFirst({
       where: { userId: customer.userId, data: { path: ['kind'], equals: 'dispatch_exhausted' } },
     });
     expect(final).not.toBeNull();
+    // The terminal marker persists well past the old 1h TTL (no hourly re-cascade).
+    expect(await app.redis.ttl(`dispatch:exhausts:${order.id}`)).toBeGreaterThan(3600);
     await app.redis.del(`dispatch:exhausts:${order.id}`);
   });
 

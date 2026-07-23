@@ -43,6 +43,15 @@ const MAX_ROUNDS = 3;
 export const REDISPATCH_DELAY_MS = 90_000;
 /** Express orders retry the sweep sooner too. */
 export const EXPRESS_REDISPATCH_DELAY_MS = 45_000;
+/** How many exhaustion cycles before dispatch gives up for good [SWIFT-065].
+ *  Attempts 1..CAP-1 schedule one more re-sweep; the CAP-th is TERMINAL — no
+ *  further cascade, admins paged exactly once. Env-tunable so a too-eager cap
+ *  can be relaxed without a deploy. */
+export const EXHAUST_CAP = Math.max(1, Number(process.env['DISPATCH_EXHAUST_CAP'] ?? 3));
+/** Once exhausted, the attempt counter (and the reconciler's "leave it alone"
+ *  signal) persists this long, so a permanently stranded order can't reset the
+ *  counter every hour and re-cascade + re-page admins forever [SWIFT-065]. */
+export const EXHAUST_TERMINAL_TTL_SECONDS = Math.max(3600, Number(process.env['DISPATCH_EXHAUST_TERMINAL_TTL'] ?? 6 * 3600));
 /** GPS silent this long while "online" = the app is gone, not slow. */
 export const STALE_LOCATION_MINUTES = 15;
 
@@ -555,14 +564,17 @@ export class DispatchService {
       })
       .catch(() => {});
 
-    // One automatic re-sweep before giving up: movers toggle online by the
-    // minute, and a mover who declined two minutes ago may take the re-offer.
-    // The declined set is cleared so the retry searches the full pool again.
-    if (this.scheduleRedispatch) {
-      const attempts = await this.redis.incr(exhaustKey(order.id));
-      await this.redis.expire(exhaustKey(order.id), 3600);
+    // Automatic re-sweeps before giving up: movers toggle online by the minute,
+    // and a mover who declined two minutes ago may take the re-offer. The
+    // counter persists for the terminal window [SWIFT-065] — the 1h TTL used to
+    // expire and let a permanently-stranded order re-cascade + re-page admins
+    // every hour, forever. Now attempts accumulate up to EXHAUST_CAP and the
+    // reconciler (which skips any order with a live exhaustKey) leaves it alone.
+    const attempts = await this.redis.incr(exhaustKey(order.id));
+    await this.redis.expire(exhaustKey(order.id), EXHAUST_TERMINAL_TTL_SECONDS);
+    if (attempts < EXHAUST_CAP && this.scheduleRedispatch) {
       const retryDelay = order.isExpress ? EXPRESS_REDISPATCH_DELAY_MS : REDISPATCH_DELAY_MS;
-      if (attempts < 2 && (await this.scheduleRedispatch(order.id, retryDelay))) {
+      if (await this.scheduleRedispatch(order.id, retryDelay)) {
         await this.redis.del(declinedKey(order.id));
         await this.notifications.send({
           userId: order.customerId,
@@ -599,12 +611,17 @@ export class DispatchService {
     // order stranded with no mover, one of the fatal five. Customer + vendor are
     // told; admins must be too, so a dead/absent mover pool at launch is caught
     // before it becomes a wave of stranded orders. Fire-and-caught — never let an
-    // alert failure change the dispatch outcome.
-    await notifyAdmins(this.prisma, this.notifications, {
-      title: 'Dispatch exhausted — no mover found',
-      body: `Order ${order.orderNumber} found no mover after all retries. Check mover supply and dispatch health.`,
-      data: { kind: 'ops_dispatch_exhausted', orderId: order.id },
-    }).catch(() => {});
+    // alert failure change the dispatch outcome. opsPageOnce dedups [SWIFT-065]:
+    // one page per order per terminal window, so a stranded order can't spam the
+    // admins on every re-exhaust.
+    const { opsPageOnce } = await import('../../jobs/queue');
+    await opsPageOnce({ redis: this.redis }, `dispatch_exhausted:${order.id}`, EXHAUST_TERMINAL_TTL_SECONDS, () =>
+      notifyAdmins(this.prisma, this.notifications, {
+        title: 'Dispatch exhausted — no mover found',
+        body: `Order ${order.orderNumber} found no mover after all retries. Check mover supply and dispatch health.`,
+        data: { kind: 'ops_dispatch_exhausted', orderId: order.id },
+      }),
+    ).catch(() => {});
   }
 
   // -------------------------------------------------------------------------
