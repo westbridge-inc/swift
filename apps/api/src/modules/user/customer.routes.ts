@@ -1546,11 +1546,22 @@ export async function customerRoutes(app: FastifyInstance) {
     // the vendor order alert escalates while unacknowledged —
     // re-alert after 60s, SMS fallback 60s after that
     if (app.queues) {
+      // SWIFT-021: schedule the vendor-no-response auto-cancel so an order the
+      // vendor never accepts doesn't hang in PENDING forever. Fire after the
+      // hold window (LIFECYCLE_V2 only) PLUS the response SLA; the worker
+      // re-checks status + hold, so an accepted or still-held order is a no-op.
+      const holdMin = process.env['LIFECYCLE_V2'] === '1' ? Number(process.env['ORDER_HOLD_MINUTES'] ?? 2) : 0;
+      const slaMin = Number(process.env['VENDOR_RESPONSE_SLA_MINUTES'] ?? 10);
       for (const order of result.orders) {
         await app.queues.notificationQueue.add('vendor-alert-escalate', { orderId: order.id, level: 0 }, {
           // Alerts spec §A1 ladder: second alert at +30s when loud alerts are
           // on; the shipping default stays 60s.
           delay: process.env['ALERTS_LOUD'] === '1' ? 30_000 : 60_000,
+          removeOnComplete: 100,
+          removeOnFail: 50,
+        });
+        await app.queues.orderQueue.add('auto-cancel', { orderId: order.id }, {
+          delay: (holdMin + slaMin) * 60_000,
           removeOnComplete: 100,
           removeOnFail: 50,
         });

@@ -9,6 +9,7 @@ import { socketPlugin } from '../plugins/socket';
 import { customerRoutes } from '../modules/user/customer.routes';
 import { vendorRoutes } from '../modules/vendor/vendor.routes';
 import { registerErrorHandler } from '../middleware/error-handler';
+import { autoCancelUnresponsiveOrder } from '../jobs/queue';
 
 // ---------------------------------------------------------------------------
 // Cancellation & rejection lifecycle — the failure paths of an order, hit over
@@ -392,5 +393,49 @@ describe('Customer cancels an order — POST /customer/orders/:id/cancel', () =>
 
     const untouched = await app.prisma.order.findUniqueOrThrow({ where: { id: order.id } });
     expect(untouched.status).toBe('PENDING');
+  });
+});
+
+describe('Vendor-no-response auto-cancel [SWIFT-021]', () => {
+  const ctx = () => ({ prisma: app.prisma, io: app.io, redis: app.redis, log: app.log });
+
+  it('cancels a PENDING order the vendor never accepted — notifies the customer, exempt from risk', async () => {
+    const vendor = await makeVendor();
+    const order = await makeOrder(customer.userId, vendor.vendorId, 'PENDING');
+
+    // RED before SWIFT-021: nothing produced the auto-cancel job, so this order
+    // hung in PENDING forever.
+    const did = await autoCancelUnresponsiveOrder(ctx(), order.id);
+    expect(did).toBe(true);
+
+    const after = await app.prisma.order.findUniqueOrThrow({ where: { id: order.id } });
+    expect(after.status).toBe('CANCELLED');
+    // Risk-exempt: the customer didn't cancel, so cancelledBy must NOT be them
+    // (the risk query only counts cancels where cancelledBy === the customer).
+    expect(after.cancelledBy).toBeNull();
+
+    const note = await app.prisma.notification.findFirst({
+      where: { userId: customer.userId, type: 'ORDER_UPDATE', data: { path: ['orderId'], equals: order.id } },
+    });
+    expect(note).not.toBeNull();
+    expect(note!.body).toMatch(/didn.t respond|no response|in time/i);
+  });
+
+  it('does NOT cancel an order still within its hold window', async () => {
+    const vendor = await makeVendor();
+    const order = await makeOrder(customer.userId, vendor.vendorId, 'PENDING');
+    await app.prisma.order.update({ where: { id: order.id }, data: { holdExpiresAt: new Date(Date.now() + 5 * 60_000) } });
+
+    const did = await autoCancelUnresponsiveOrder(ctx(), order.id);
+    expect(did).toBe(false); // still held — the vendor hasn't even seen it yet
+    expect((await app.prisma.order.findUniqueOrThrow({ where: { id: order.id } })).status).toBe('PENDING');
+  });
+
+  it('does NOT cancel an order the vendor already accepted', async () => {
+    const vendor = await makeVendor();
+    const order = await makeOrder(customer.userId, vendor.vendorId, 'ACCEPTED');
+    const did = await autoCancelUnresponsiveOrder(ctx(), order.id);
+    expect(did).toBe(false);
+    expect((await app.prisma.order.findUniqueOrThrow({ where: { id: order.id } })).status).toBe('ACCEPTED');
   });
 });
