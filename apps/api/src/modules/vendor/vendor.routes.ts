@@ -740,8 +740,9 @@ export async function vendorRoutes(app: FastifyInstance) {
       data: { isCurrentlyOpen: !vendor.isCurrentlyOpen },
     });
 
-    // Broadcast to anyone watching this vendor's storefront
-    app.io.emit('vendor:status', { vendorId, isCurrentlyOpen: updated.isCurrentlyOpen });
+    // SWIFT-102: was a GLOBAL io.emit('vendor:status') to EVERY connected socket
+    // with zero listeners — noise + a privacy smell, no consumer. Deleted (rule
+    // 17); a storefront-watch feature would emit to a `vendor:<id>` room instead.
 
     scheduleVendorSearchSync(app, vendorId);
 
@@ -769,7 +770,7 @@ export async function vendorRoutes(app: FastifyInstance) {
       data: { acceptingOrders: !vendor.acceptingOrders },
     });
 
-    app.io.emit('vendor:status', { vendorId, acceptingOrders: updated.acceptingOrders });
+    // SWIFT-102: global vendor:status emit deleted (zero listeners) — see above.
 
     return { success: true, data: { isCurrentlyOpen: updated.isCurrentlyOpen, acceptingOrders: updated.acceptingOrders } };
   });
