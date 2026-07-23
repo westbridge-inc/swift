@@ -633,4 +633,40 @@ describe('Atomic acceptance — the concurrency proof', () => {
       data: { isOnline: false, committedFloat: 0, currentOrderId: null, isAvailable: true },
     });
   });
+
+  it('one rider grabbing TWO cash orders at once cannot exceed the float cap [SWIFT-104]', async () => {
+    const r = await makeRider({ lat: PICKUP.lat + 0.003 });
+    // Headroom 3,000; each order fronts 2,000 — either fits ALONE, both do NOT.
+    await app.prisma.rider.update({ where: { id: r.riderId }, data: { floatLimit: 3000, committedFloat: 0 } });
+    const orderA = await makeDeliveryOrder('READY_FOR_PICKUP');
+    const orderB = await makeDeliveryOrder('READY_FOR_PICKUP');
+
+    const accept = (orderId: string) => app.inject({
+      method: 'POST', url: `/api/v1/rider/orders/${orderId}/accept`, payload: {},
+      headers: { 'content-type': 'application/json', authorization: `Bearer ${r.token}` },
+    });
+    // Fire both grabs concurrently — both pass the stale JS headroom/busy checks;
+    // the ATOMIC guarded float commit is the only real gate.
+    const [ra, rb] = await Promise.all([accept(orderA.id), accept(orderB.id)]);
+
+    // Exactly one winner; the other is refused for float — never two.
+    expect([ra, rb].filter((x) => x.statusCode === 200)).toHaveLength(1);
+    const loser = [ra, rb].find((x) => x.statusCode !== 200)!;
+    expect(loser.statusCode).toBe(400);
+    expect(loser.json().error.code).toBe('FLOAT_EXCEEDED');
+
+    // The cap HELD: float committed exactly once (2,000, not 4,000).
+    const after = await app.prisma.rider.findUniqueOrThrow({ where: { id: r.riderId }, select: { committedFloat: true } });
+    expect(Number(after.committedFloat)).toBe(2000);
+
+    // One order assigned to the rider; the other is back on the board (compensated).
+    const orders = await app.prisma.order.findMany({ where: { id: { in: [orderA.id, orderB.id] } }, select: { riderId: true } });
+    expect(orders.filter((o) => o.riderId === r.riderId)).toHaveLength(1);
+    expect(orders.filter((o) => o.riderId === null)).toHaveLength(1);
+
+    await app.prisma.rider.update({
+      where: { id: r.riderId },
+      data: { isOnline: false, committedFloat: 0, currentOrderId: null, isAvailable: true, floatLimit: 1_000_000 },
+    });
+  });
 });

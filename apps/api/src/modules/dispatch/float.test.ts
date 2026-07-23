@@ -64,6 +64,18 @@ describe('FloatService (D.3)', () => {
     expect(float.available(r)).toBe(3000); // 8000 − 5000
   });
 
+  it('commit is a GUARDED increment — it refuses to exceed the float cap [SWIFT-104]', async () => {
+    await prisma.rider.update({ where: { id: riderId }, data: { floatLimit: 8000, committedFloat: 5000 } });
+    // 3000 headroom. One over is rejected, and NOTHING is written.
+    const tooBig = await float.commit(prisma, riderId, 3001);
+    expect(tooBig).toBe(false);
+    expect(Number((await prisma.rider.findUniqueOrThrow({ where: { id: riderId } })).committedFloat)).toBe(5000);
+    // Exactly filling the cap is allowed.
+    const exact = await float.commit(prisma, riderId, 3000);
+    expect(exact).toBe(true);
+    expect(Number((await prisma.rider.findUniqueOrThrow({ where: { id: riderId } })).committedFloat)).toBe(8000);
+  });
+
   it('release decrements and clamps at zero (never negative)', async () => {
     await float.release(prisma, riderId, 9999); // over-release
     const r = await prisma.rider.findUniqueOrThrow({ where: { id: riderId } });
