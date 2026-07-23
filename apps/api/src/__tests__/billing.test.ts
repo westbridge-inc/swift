@@ -359,6 +359,28 @@ describe('Prepaid path, retries across days, suspension, top-up reinstatement', 
     const pendingMmg = await app.prisma.subscriptionPayment.count({ where: { subscriptionId: sub.id, status: 'PENDING' } });
     expect(pendingMmg).toBe(0);
   });
+
+  it('SWIFT-030: a top-up retry with the same Idempotency-Key credits ONCE', async () => {
+    const { userId } = await makeUserWithSession(['MOVER', 'CUSTOMER'], 'MOVER');
+    const rider = await app.prisma.rider.create({ data: { userId, riderType: 'DELIVERY', vehicleType: 'MOTORCYCLE' } });
+    // ACTIVE so the top-up just accumulates (a suspended sub would consume it on reinstate).
+    const sub = await app.prisma.subscription.create({
+      data: {
+        riderId: rider.id, type: 'DELIVERY_RIDER', status: 'ACTIVE', weeklyRate: 12000, billingMethod: 'CASH',
+        currentPeriodStart: new Date(), currentPeriodEnd: new Date(Date.now() + 7 * DAY), nextBillingDate: new Date(Date.now() + 7 * DAY),
+      },
+    });
+    createdSubIds.push(sub.id);
+
+    await billing.recordTopUp(sub.id, 5000, 'admin', 'cash-at-office', 'IDEM-KEY-1');
+    await billing.recordTopUp(sub.id, 5000, 'admin', 'cash-at-office', 'IDEM-KEY-1'); // retry, same key
+
+    const bal = await app.prisma.prepaidBalance.findUniqueOrThrow({ where: { subscriptionId: sub.id } });
+    // RED before SWIFT-030: the Date.now() key made every call unique → 10000 (double credit).
+    expect(Number(bal.balance)).toBe(5000);
+    const events = await app.prisma.billingEvent.count({ where: { subscriptionId: sub.id, type: 'PREPAID_TOPUP' } });
+    expect(events).toBe(1);
+  });
 });
 
 describe('Suspended movers are kicked and blocked', () => {
