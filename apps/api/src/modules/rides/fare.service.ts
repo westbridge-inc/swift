@@ -43,6 +43,17 @@ export function classesAtOrAbove(orderClass: RideClass): RideClass[] {
 }
 
 /**
+ * The ride classes a driver of `driverClass` can serve — their own tier and every
+ * tier below it [SWIFT-063]. The inverse of classesAtOrAbove: an Economy driver
+ * serves only Economy, an XL driver serves everything. Used to gate the driver's
+ * board + accept path so the cascade isn't the ONLY place ride class is enforced.
+ */
+export function classesAtOrBelow(driverClass: RideClass): RideClass[] {
+  const i = RIDE_CLASS_ORDER.indexOf(driverClass);
+  return i < 0 ? [...RIDE_CLASS_ORDER] : RIDE_CLASS_ORDER.slice(0, i + 1);
+}
+
+/**
  * Apply a tier multiplier to the base (Economy) fare. Economy (×1.0) is returned
  * unchanged so existing fares never move. Other tiers scale the fare and the
  * per-class minimum, with the same cash-friendly 100-unit rounding as the formula.

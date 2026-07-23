@@ -7,11 +7,13 @@ import { redisPlugin } from '../plugins/redis';
 import { authPlugin } from '../plugins/auth';
 import { socketPlugin } from '../plugins/socket';
 import { ridesRoutes } from '../modules/rides/rides.routes';
+import { driverRoutes } from '../modules/driver/driver.routes';
 import { registerErrorHandler } from '../middleware/error-handler';
 import {
   FareService,
   applyClassMultiplier,
   classesAtOrAbove,
+  classesAtOrBelow,
   CLASS_CAPACITY,
 } from '../modules/rides/fare.service';
 import { DispatchService } from '../modules/dispatch/dispatch.service';
@@ -96,7 +98,11 @@ async function makeDriver(rideClass: RideClass) {
       currentLat: CENTRAL.lat, currentLng: CENTRAL.lng,
     },
   });
-  return { ...u, id: u.id, driverId: driver.id };
+  const token = app.jwt.sign({ userId: u.id, role: 'DRIVER', jti: nanoid(8) });
+  await app.prisma.session.create({
+    data: { userId: u.id, token, refreshToken: nanoid(48), deviceId: 'tiers', deviceType: 'test', expiresAt: new Date(Date.now() + DAY) },
+  });
+  return { ...u, id: u.id, driverId: driver.id, token };
 }
 
 function inject(method: 'GET' | 'POST', url: string, payload?: unknown, token?: string) {
@@ -122,6 +128,7 @@ beforeAll(async () => {
   await app.register(authPlugin);
   await app.register(socketPlugin);
   await app.register(ridesRoutes, { prefix: '/api/v1/rides' });
+  await app.register(driverRoutes, { prefix: '/api/v1/driver' });
   await app.ready();
 
   fare = new FareService(app.prisma);
@@ -222,5 +229,38 @@ describe('Dispatch class filter — an XL request never offers to an Economy car
     const econIds = econCandidates.map((c) => c.riderId);
     expect(econIds).toContain(economy.driverId);
     expect(econIds).toContain(xl.driverId);
+  });
+});
+
+describe('Ride-class gate on the board + accept [SWIFT-063]', () => {
+  it('classesAtOrBelow: a driver serves their tier and below', () => {
+    expect(classesAtOrBelow('ECONOMY')).toEqual(['ECONOMY']);
+    expect(classesAtOrBelow('XL')).toEqual(['ECONOMY', 'COMFORT', 'XL']);
+  });
+
+  it('an Economy driver can neither SEE nor CLAIM an XL ride', async () => {
+    const xlDriver = await makeDriver('XL'); // supply so the request isn't no-driver-rejected
+    const econDriver = await makeDriver('ECONOMY');
+    const { token: cust } = await makeCustomer();
+
+    const req = await inject('POST', '/api/v1/rides/request', {
+      pickup: CENTRAL, dropoff: { lat: 6.755, lng: -58.155 },
+      pickupAddress: 'Central GT', dropoffAddress: 'South GT',
+      passengerCount: 5, rideClass: 'XL',
+    }, cust);
+    expect(req.statusCode).toBe(201);
+    const rideId = req.json().data.ride.id;
+
+    // Board: the XL ride is on the XL driver's board, NOT the Economy driver's.
+    const econBoard = await inject('GET', '/api/v1/driver/rides/available', undefined, econDriver.token);
+    expect(econBoard.json().data.some((r: { id: string }) => r.id === rideId)).toBe(false);
+    const xlBoard = await inject('GET', '/api/v1/driver/rides/available', undefined, xlDriver.token);
+    expect(xlBoard.json().data.some((r: { id: string }) => r.id === rideId)).toBe(true);
+
+    // Accept: the Economy driver is refused; the ride stays unassigned.
+    const econAccept = await inject('POST', `/api/v1/driver/rides/${rideId}/accept`, {}, econDriver.token);
+    expect(econAccept.statusCode).toBe(400);
+    expect(econAccept.json().error.code).toBe('WRONG_RIDE_CLASS');
+    expect((await app.prisma.order.findUniqueOrThrow({ where: { id: rideId } })).driverId).toBeNull();
   });
 });

@@ -6,6 +6,7 @@ import { NotificationService } from '../notification/notification.service';
 import { VerificationService } from '../verification/verification.service';
 import { makeDispatchService } from '../dispatch/dispatch.service';
 import { TAXI_DEMAND_WINDOW_MIN } from '../dispatch/demand.service';
+import { classesAtOrAbove, classesAtOrBelow } from '../rides/fare.service';
 import { getKycProvider } from '../../providers/kyc/kyc-provider';
 import { BillingService } from '../billing/billing.service';
 import { getPaymentProvider } from '../../providers/payment/payment-provider';
@@ -288,6 +289,14 @@ export async function driverRoutes(app: FastifyInstance) {
         status: 'PENDING',
         driverId: null,
         placedAt: { gte: freshSince },
+        // SWIFT-063: only rides this driver's class can serve — their tier and
+        // below (an Economy car never sees an XL request). Legacy null-class
+        // rides are Economy, so everyone sees them. The cascade already gates
+        // this; the OPEN BOARD must too.
+        OR: [
+          { rideClass: { in: classesAtOrBelow(driver.rideClass ?? 'ECONOMY') } },
+          { rideClass: null },
+        ],
       },
       include: {
         customer: { select: { id: true, firstName: true, avatar: true } },
@@ -372,6 +381,14 @@ export async function driverRoutes(app: FastifyInstance) {
     const order = await app.prisma.order.findFirst({ where: { id } });
     if (!order) throw new NotFoundError('Ride', id);
     if (order.orderType !== 'TAXI') throw new AppError(400, 'INVALID_TYPE', 'This is not a taxi ride');
+
+    // SWIFT-063: the accept path enforces ride class too — the board filter is a
+    // convenience, this is the barrier. An Economy driver cannot claim an XL ride
+    // (mirrors the cascade's classesAtOrAbove eligibility).
+    const rideClass = order.rideClass ?? 'ECONOMY';
+    if (!classesAtOrAbove(rideClass).includes(driver.rideClass ?? 'ECONOMY')) {
+      throw new AppError(400, 'WRONG_RIDE_CLASS', `This is a ${rideClass} ride; your ${driver.rideClass ?? 'ECONOMY'} vehicle can't serve it.`);
+    }
 
     // Shared claim: the DB compare-and-set means two drivers tapping
     // accept at the same instant resolve to exactly one winner — the old
