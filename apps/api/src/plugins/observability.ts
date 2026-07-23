@@ -79,6 +79,18 @@ export const osrmOutcomeCounter = new client.Counter({
   registers: [registry],
 });
 
+// Notification delivery failures [SWIFT-100]: channel sends fail-soft (they must
+// never break the request path), but a SILENT failure of the last-resort rung
+// means a vendor/ops nudge vanished with no trace. Count every post-retry
+// failure so the rate is visible. Labels: channel = sms|push, stage =
+// escalation (vendor-alert ladder) | direct (OTP/fallback) | send (fan-out).
+export const notificationFailuresCounter = new client.Counter({
+  name: 'swift_notification_failures_total',
+  help: 'Notification deliveries that failed after retries, by channel and stage',
+  labelNames: ['channel', 'stage'] as const,
+  registers: [registry],
+});
+
 export async function observabilityPlugin(app: FastifyInstance) {
   initSentry();
   if (!metricsWired) {

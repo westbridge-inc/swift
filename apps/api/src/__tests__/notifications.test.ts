@@ -14,7 +14,13 @@ import { registerErrorHandler } from '../middleware/error-handler';
 import { NotificationService, escalateVendorAlert } from '../modules/notification/notification.service';
 import { OrderService } from '../modules/order/order.service';
 import { getChannels, devChannelLog } from '../providers/notifications/channels';
+import { notificationFailuresCounter } from '../plugins/observability';
 import { requestOtp } from './helpers/otp';
+
+async function failuresCount(channel: string, stage: string): Promise<number> {
+  const metric = await notificationFailuresCounter.get();
+  return metric.values.find((v) => v.labels.channel === channel && v.labels.stage === stage)?.value ?? 0;
+}
 
 // ---------------------------------------------------------------------------
 // every event through one interface. The vendor order alert is the
@@ -224,6 +230,20 @@ describe('THE vendor order alert — unmissable until acknowledged', () => {
     expect(second).toBe('sms_sent');
     const sms = smsEntriesTo(vendorUser.phone);
     expect(sms.at(-1)!.body).toContain('still waiting');
+  });
+
+  it('a failed escalation SMS is counted, never swallowed silently [SWIFT-100]', async () => {
+    // The last rung fails at the provider. It must NOT throw (the ladder still
+    // "completes"), but the failure must be visible — the counter moves.
+    const failingChannels = {
+      sms: { sendSms: async () => { throw new Error('SMS provider 500'); } },
+      push: { sendPush: async () => ({ invalidTokens: [] }) },
+    } as unknown as ReturnType<typeof getChannels>;
+
+    const before = await failuresCount('sms', 'escalation');
+    const outcome = await escalateVendorAlert(app.prisma, ioStub, failingChannels, orderId, 1);
+    expect(outcome).toBe('sms_sent'); // fail-soft — never throws
+    expect((await failuresCount('sms', 'escalation')) - before).toBe(1); // but no longer silent
   });
 
   it('acknowledging clears the banner and silences the escalation', async () => {
