@@ -193,3 +193,61 @@ describe('IDOR — wrong owner (CI guard for the live-proven protection)', () =>
     expect(ok.statusCode).toBe(200);
   });
 });
+
+describe('high-value promo gate [SWIFT-162]', () => {
+  // A pricey item + a huge FIXED discount: the discount clears the ID-gate while
+  // the NET total stays far below it — so the order-TOTAL gate cannot fire, and
+  // a 403 here can only be the promo-value gate.
+  async function bigPromoSetup(label: string) {
+    const cat = await app.prisma.category.create({ data: { vendorId, name: label, sortOrder: 9 } });
+    const item = await app.prisma.item.create({ data: { vendorId, categoryId: cat.id, name: `${label} Plate`, basePrice: 100500, isAvailable: true } });
+    const code = `BIG${nanoid(6).toUpperCase()}`;
+    const promo = await app.prisma.promoCode.create({ data: { code, description: 'big', discountType: 'FIXED_AMOUNT', discountValue: 100000, validFrom: new Date(Date.now() - 3600000), validUntil: new Date(Date.now() + 3600000), maxUses: 100, maxUsesPerUser: 5, isActive: true } });
+    return { cat, item, code, promo };
+  }
+  async function cleanup(s: { cat: { id: string }; item: { id: string }; promo: { id: string } }) {
+    await app.prisma.order.deleteMany({ where: { promoCodeId: s.promo.id } }); // cascades order items
+    await app.prisma.promoCode.delete({ where: { id: s.promo.id } }).catch(() => {});
+    await app.prisma.item.delete({ where: { id: s.item.id } }).catch(() => {}); // itemId is a loose ref — safe
+    await app.prisma.category.delete({ where: { id: s.cat.id } }).catch(() => {});
+  }
+
+  it('an L1 account cannot redeem a high-value promo without ID verification', async () => {
+    const s = await bigPromoSetup('L1Big');
+    try {
+      const c = await makeCustomer(); // trustLevel L1 by default
+      await inject('POST', '/api/v1/customer/cart/items', { vendorId, itemId: s.item.id, quantity: 1 }, c.token);
+      await inject('PUT', '/api/v1/customer/cart/address', { addressId: c.addressId }, c.token);
+      const res = await inject('POST', '/api/v1/customer/checkout', { paymentMethod: 'CASH', promoCode: s.code }, c.token);
+      expect(res.statusCode).toBe(403);
+      expect(res.json().error.code).toBe('ID_VERIFICATION_REQUIRED');
+      expect(res.json().error.message).toMatch(/promo/i); // the promo-value gate, not the order-total gate
+    } finally {
+      await cleanup(s);
+    }
+  });
+
+  it('an ID-verified (L2) account redeems the same high-value promo fine', async () => {
+    const s = await bigPromoSetup('L2Big');
+    try {
+      seq += 1;
+      const user = await app.prisma.user.create({
+        data: {
+          phone: `+${phoneBase + 700000 + seq}`, firstName: 'Intg', lastName: `L2${seq}`,
+          roles: ['CUSTOMER'] as UserRole[], activeRole: 'CUSTOMER', isPhoneVerified: true,
+          selfieCapturedAt: new Date(), trustLevel: 'L2', customer: { create: {} },
+        },
+      });
+      createdUserIds.push(user.id);
+      const token = app.jwt.sign({ userId: user.id, role: 'CUSTOMER', jti: nanoid(8) });
+      await app.prisma.session.create({ data: { userId: user.id, token, refreshToken: nanoid(48), deviceId: 'intg', deviceType: 'test', expiresAt: new Date(Date.now() + 86400000) } });
+      const addr = await app.prisma.address.create({ data: { userId: user.id, label: 'Home', addressLine1: '1 Intg', city: 'Georgetown', region: 'Demerara-Mahaica', latitude: 6.8014, longitude: -58.1552, isDefault: true } });
+      await inject('POST', '/api/v1/customer/cart/items', { vendorId, itemId: s.item.id, quantity: 1 }, token);
+      await inject('PUT', '/api/v1/customer/cart/address', { addressId: addr.id }, token);
+      const res = await inject('POST', '/api/v1/customer/checkout', { paymentMethod: 'CASH', promoCode: s.code }, token);
+      expect(res.statusCode).toBe(200); // L2 is verified — the gate does not apply
+    } finally {
+      await cleanup(s);
+    }
+  });
+});

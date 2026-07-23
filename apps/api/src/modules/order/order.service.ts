@@ -371,6 +371,20 @@ export class OrderService {
         { threshold: gateLocal, total: grandTotal });
     }
 
+    // SWIFT-162: high-value promo codes are the multi-account (fresh-SIM) abuse
+    // target — the total-gate above misses a big code redeemed on a small NET
+    // basket (a large discount pulls grandTotal back under the threshold). Gate
+    // the discount itself: an L1 account claiming a discount worth at least the
+    // ID-gate threshold must verify identity first, raising the bar from a
+    // throwaway SIM to a verified ID. L2/L3 and ordinary low-value codes flow
+    // through untouched. The threshold is the same CountryConfig ID-gate value —
+    // one trust boundary, tunable per country, no new magic number.
+    if (user.trustLevel === 'L1' && discount >= gateLocal) {
+      throw new AppError(403, 'ID_VERIFICATION_REQUIRED',
+        `This promo needs ID verification to use. Verify once in the app and it's yours to keep.`,
+        { threshold: gateLocal, discount });
+    }
+
     // Deterministic risk heuristic — vendor sees a call-to-confirm prompt
     const accountAgeHours = (now.getTime() - user.createdAt.getTime()) / 3_600_000;
     const localHour = ((now.getUTCHours() + GUYANA_UTC_OFFSET_HOURS) + 24) % 24;
