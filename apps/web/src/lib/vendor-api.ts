@@ -74,10 +74,17 @@ export const getStores = () =>
 export const getProfile = () => apiFetch(`${V}/profile`).then((r) => r.data);
 export const updateProfile = (body: Record<string, unknown>) =>
   apiFetch(`${V}/profile`, { method: 'PUT', body: JSON.stringify(body) });
+// NB: these two routes are registered as `/vendor/toggle-*` UNDER the
+// `/api/v1/vendor` prefix, so their real path is double-prefixed
+// (`/api/v1/vendor/vendor/toggle-open`). The mobile client already calls the
+// double-prefix; the single-prefix path 404s. Matching it here so the web
+// vendor dashboard can actually open / start accepting orders. (Consistency
+// cleanup — collapsing the route strings to single-prefix and updating mobile
+// — is tracked separately; it is breaking for the double-prefix callers.)
 export const toggleOpen = (isCurrentlyOpen: boolean) =>
-  apiFetch(`${V}/toggle-open`, { method: 'PUT', body: JSON.stringify({ isCurrentlyOpen }) });
+  apiFetch(`${V}/vendor/toggle-open`, { method: 'PUT', body: JSON.stringify({ isCurrentlyOpen }) });
 export const toggleOrders = (acceptingOrders: boolean) =>
-  apiFetch(`${V}/toggle-orders`, { method: 'PUT', body: JSON.stringify({ acceptingOrders }) });
+  apiFetch(`${V}/vendor/toggle-orders`, { method: 'PUT', body: JSON.stringify({ acceptingOrders }) });
 export const getHours = () => apiFetch(`${V}/hours`).then((r) => r.data);
 export const putHours = (hours: Array<{ dayOfWeek: number; openTime?: string; closeTime?: string; isClosed: boolean }>) =>
   apiFetch(`${V}/hours`, { method: 'PUT', body: JSON.stringify({ hours }) });
