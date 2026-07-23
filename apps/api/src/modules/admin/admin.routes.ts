@@ -1729,7 +1729,10 @@ export async function adminRoutes(app: FastifyInstance) {
     const { id } = request.params as { id: string };
     const body = topUpSchema.parse(request.body);
 
-    const balance = await billing.recordTopUp(id, body.amount, request.user.userId, body.reference);
+    // SWIFT-030: an Idempotency-Key header makes a retry of the same top-up a
+    // no-op (no double-credit). The admin console sends one per top-up action.
+    const clientKey = request.headers['idempotency-key'] as string | undefined;
+    const balance = await billing.recordTopUp(id, body.amount, request.user.userId, body.reference, clientKey);
     await audit(request.user.userId, 'PREPAID_TOPUP', 'Subscription', id, { amount: body.amount, reference: body.reference }, request);
 
     return { success: true, data: { balance: Number(balance.balance), currencyCode: balance.currencyCode } };

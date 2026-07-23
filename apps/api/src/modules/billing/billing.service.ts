@@ -538,7 +538,7 @@ export class BillingService {
   // Prepaid top-ups (manual confirm in admin for now)
   // -------------------------------------------------------------------------
 
-  async recordTopUp(subscriptionId: string, amount: number, recordedBy: string, reference?: string) {
+  async recordTopUp(subscriptionId: string, amount: number, recordedBy: string, reference?: string, clientKey?: string) {
     if (amount <= 0) throw new AppError(400, 'INVALID_AMOUNT', 'Top-up must be positive');
 
     const sub = await this.prisma.subscription.findUnique({
@@ -551,22 +551,43 @@ export class BillingService {
     });
     if (!sub) throw new NotFoundError('Subscription', subscriptionId);
 
-    const balance = await this.prisma.prepaidBalance.upsert({
-      where: { subscriptionId },
-      update: { balance: { increment: amount } },
-      create: { subscriptionId, balance: amount, currencyCode: sub.currencyCode },
-    });
+    // Idempotency [SWIFT-030]: this is the only live collection path, so a retry
+    // (network retry, admin double-tap) MUST NOT credit twice. A client-supplied
+    // Idempotency-Key makes the retry a no-op; without one we fall back to a
+    // time-based key (the caller opted out of dedup). The BillingEvent's unique
+    // idempotencyKey is the DB-level guard — created FIRST inside the transaction,
+    // so a replay rolls the whole thing back before the balance is ever touched.
+    const eventKey = clientKey
+      ? `topup:${subscriptionId}:${clientKey}`
+      : `topup:${subscriptionId}:${Date.now()}:${recordedBy}`;
 
-    await this.prisma.billingEvent.create({
-      data: {
-        subscriptionId,
-        type: 'PREPAID_TOPUP',
-        amount,
-        currencyCode: sub.currencyCode,
-        idempotencyKey: `topup:${subscriptionId}:${Date.now()}:${recordedBy}`,
-        note: reference ? `ref: ${reference} (by ${recordedBy})` : `recorded by ${recordedBy}`,
-      },
-    });
+    let balance;
+    try {
+      balance = await this.prisma.$transaction(async (tx) => {
+        await tx.billingEvent.create({
+          data: {
+            subscriptionId,
+            type: 'PREPAID_TOPUP',
+            amount,
+            currencyCode: sub.currencyCode,
+            idempotencyKey: eventKey,
+            note: reference ? `ref: ${reference} (by ${recordedBy})` : `recorded by ${recordedBy}`,
+          },
+        });
+        return tx.prepaidBalance.upsert({
+          where: { subscriptionId },
+          update: { balance: { increment: amount } },
+          create: { subscriptionId, balance: amount, currencyCode: sub.currencyCode },
+        });
+      });
+    } catch (error) {
+      if ((error as Prisma.PrismaClientKnownRequestError).code === 'P2002') {
+        // Replay of an already-recorded top-up: return the current balance
+        // without crediting again, notifying, or re-billing.
+        return this.prisma.prepaidBalance.findUniqueOrThrow({ where: { subscriptionId } });
+      }
+      throw error;
+    }
 
     await this.notifications.send({
       userId: this.payerUserId(sub as SubWithRelations),
