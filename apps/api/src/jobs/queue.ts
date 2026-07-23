@@ -125,6 +125,51 @@ export async function opsPageOnce(
   }
 }
 
+/** Vendor-no-response auto-cancel [SWIFT-021]. Exported so tests drive it
+ *  directly; the order worker delegates here. A CAS single-winner cancel of an
+ *  order that is STILL PENDING and no longer HELD — the vendor had the hold
+ *  window plus the response SLA and never accepted. Restocks (goods were
+ *  reserved at checkout; a PENDING order has no rider/float), notifies the
+ *  customer honestly, and — crucially — leaves `cancelledBy` unset, so this
+ *  NEVER counts against the customer's risk score (the vendor was silent, not
+ *  the customer; the risk query requires cancelledBy === the customer). */
+export async function autoCancelUnresponsiveOrder(ctx: JobContext, orderId: string): Promise<boolean> {
+  const cancelled = await ctx.prisma.order.updateMany({
+    where: {
+      id: orderId,
+      status: 'PENDING',
+      OR: [{ holdExpiresAt: null }, { holdExpiresAt: { lte: new Date() } }],
+    },
+    data: { status: 'CANCELLED', cancelledAt: new Date(), cancellationReason: 'Auto-cancelled: vendor did not respond' },
+  });
+  if (cancelled.count === 0) return false; // held, already accepted, or gone — no-op
+
+  const order = await ctx.prisma.order.findUniqueOrThrow({ where: { id: orderId } });
+  await ctx.prisma.orderStatusLog.create({
+    data: { orderId, status: 'CANCELLED', note: 'Auto-cancelled: vendor did not respond' },
+  });
+
+  const { OrderService } = await import('../modules/order/order.service');
+  await new OrderService(ctx.prisma, ctx.io).applyCancellationSideEffects(
+    { id: order.id, paymentMethod: order.paymentMethod, riderId: order.riderId, driverId: order.driverId, subtotalBase: Number(order.subtotalBase) },
+    { restock: true },
+  );
+
+  ctx.io.to(`order:${orderId}`).emit('order:status_changed', { orderId, status: 'CANCELLED' });
+  if (order.vendorId) ctx.io.to(`vendor:${order.vendorId}`).emit('order:status_changed', { orderId, status: 'CANCELLED' });
+
+  const { NotificationService } = await import('../modules/notification/notification.service');
+  await new NotificationService(ctx.prisma, ctx.io).send({
+    userId: order.customerId,
+    type: 'ORDER_UPDATE',
+    title: 'Order cancelled — no response',
+    body: `We're sorry — the store didn't respond to order ${order.orderNumber} in time, so it was cancelled. You were not charged; please try another store.`,
+    data: { orderId, status: 'CANCELLED' },
+  });
+  ctx.log.info({ orderId }, 'Order auto-cancelled (vendor no-response)');
+  return true;
+}
+
 export function createWorkers(ctx: JobContext) {
   const connection = { host: ctx.redis.options.host, port: ctx.redis.options.port };
 
@@ -134,22 +179,7 @@ export function createWorkers(ctx: JobContext) {
     async (job: Job) => {
       switch (job.name) {
         case 'auto-cancel': {
-          const { orderId } = job.data;
-          const order = await ctx.prisma.order.findUnique({ where: { id: orderId } });
-          if (order && order.status === 'PENDING') {
-            await ctx.prisma.order.update({
-              where: { id: orderId },
-              data: { status: 'CANCELLED', cancelledAt: new Date(), cancellationReason: 'Auto-cancelled: vendor did not respond' },
-            });
-            await ctx.prisma.orderStatusLog.create({
-              data: { orderId, status: 'CANCELLED', note: 'Auto-cancelled after timeout' },
-            });
-            ctx.io.to(`order:${orderId}`).emit('order:status_changed', { orderId, status: 'CANCELLED' });
-            if (order.vendorId) {
-              ctx.io.to(`vendor:${order.vendorId}`).emit('order:status_changed', { orderId, status: 'CANCELLED' });
-            }
-            ctx.log.info({ orderId }, 'Order auto-cancelled');
-          }
+          await autoCancelUnresponsiveOrder(ctx, job.data.orderId);
           break;
         }
         case 'auto-complete': {
