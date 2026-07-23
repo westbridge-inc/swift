@@ -24,6 +24,22 @@ export default defineConfig({
       // Audit Corner Shop ×3, …) into the seeded dev DB, where they duplicated
       // in the customer app. CI/local still override by exporting DATABASE_URL.
       DATABASE_URL: process.env['DATABASE_URL'] ?? 'postgresql://swift:swift@localhost:5434/swift_test',
+      // Dormant feature flags default OFF in tests, exactly as CI runs them.
+      // The dev .env turns some ON (LIFECYCLE_V2=1, DISPATCH_AVAILABILITY=1);
+      // Prisma's dotenv otherwise leaks those into a bare local `vitest` and
+      // flips ~33 flag-agnostic tests red (checkout → 409 no-riders, promo
+      // scoping → 400) while CI — which has no dev .env — stays green. Pinning
+      // them empty here (set first, wins over the no-override dev .env) makes a
+      // local run bit-identical to CI. Tests that exercise a flag ON set it
+      // themselves per-case (order-hold, availability, dispatch-journal) and
+      // are unaffected. Add any new dormant flag here so it can't leak either.
+      LIFECYCLE_V2: '',
+      DISPATCH_AVAILABILITY: '',
+      DISPATCH_EXHAUSTION: '',
+      DELIVERY_BLOCK_ON_NONE: '',
+      CONSENT_REQUIRED: '',
+      ALERTS_LOUD: '',
+      PREVIEW_MODE: '',
     },
     // All test files share ONE Postgres DB, so run files sequentially: parallel
     // files race on create/delete of shared fixtures (phones, carts→vendors→users)
