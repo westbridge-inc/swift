@@ -16,6 +16,15 @@ export function assertSafeBootConfig(env: Record<string, string | undefined> = p
     throw new Error('FATAL: DEV_OTP_BYPASS=1 in production — this disables OTP verification. Refusing to start.');
   }
 
+  // SWIFT-012: the 'dev' notification provider logs OTP SMS to the console
+  // instead of delivering them. In production that silently means signup and
+  // login receive no code — a dead front door that looks perfectly healthy at
+  // boot. A real provider is required; there is no safe default here.
+  const notifier = env['NOTIFICATION_PROVIDER'] ?? 'dev';
+  if (notifier === 'dev') {
+    throw new Error('FATAL: NOTIFICATION_PROVIDER is dev (console) in production — OTP SMS would never be delivered, so no one can sign up or log in. Set NOTIFICATION_PROVIDER=twilio with the TWILIO_* credentials. Refusing to start.');
+  }
+
   // Verification documents are envelope-encrypted at rest ONLY when MASTER_KEK
   // is set; unset silently stores KYC PII in the clear (plaintext on disk with
   // the default local storage provider). Fail closed.

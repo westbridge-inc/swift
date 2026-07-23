@@ -6,7 +6,7 @@ import { assertSafeBootConfig } from '../utils/boot-config';
 // without the OTP-bypass guard. Non-production is unaffected.
 
 const KEK = Buffer.alloc(32, 7).toString('base64'); // valid 32-byte base64
-const good: Record<string, string | undefined> = { NODE_ENV: 'production', MASTER_KEK: KEK, STORAGE_SIGNING_SECRET: 'a-real-secret', STORAGE_PROVIDER: 's3' };
+const good: Record<string, string | undefined> = { NODE_ENV: 'production', MASTER_KEK: KEK, STORAGE_SIGNING_SECRET: 'a-real-secret', STORAGE_PROVIDER: 's3', NOTIFICATION_PROVIDER: 'twilio' };
 
 describe('assertSafeBootConfig — fail-closed production secrets', () => {
   it('boots when every required secret is present', () => {
@@ -31,6 +31,15 @@ describe('assertSafeBootConfig — fail-closed production secrets', () => {
 
   it('still refuses DEV_OTP_BYPASS=1 in production', () => {
     expect(() => assertSafeBootConfig({ ...good, DEV_OTP_BYPASS: '1' })).toThrow(/DEV_OTP_BYPASS/);
+  });
+
+  it('SWIFT-012: refuses the dev (console) notification provider in production — OTP would never send', () => {
+    expect(() => assertSafeBootConfig({ ...good, NOTIFICATION_PROVIDER: 'dev' })).toThrow(/NOTIFICATION_PROVIDER/);
+    expect(() => assertSafeBootConfig({ ...good, NOTIFICATION_PROVIDER: undefined })).toThrow(/NOTIFICATION_PROVIDER/);
+  });
+
+  it('SWIFT-012: accepts a real notification provider (twilio)', () => {
+    expect(() => assertSafeBootConfig({ ...good, NOTIFICATION_PROVIDER: 'twilio' })).not.toThrow();
   });
 
   // SWIFT-AUD-D6-06: the default 'local' storage provider writes uploads/KYC
