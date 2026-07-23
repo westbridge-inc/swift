@@ -27,6 +27,7 @@ import {
 import { useLocationStore } from '../../../stores/locationStore';
 import { GEORGETOWN } from '../../../hooks/useDeviceLocation';
 import { money } from '../../../lib/money';
+import { moverJobsToday } from '../../../lib/earnings';
 import { FareSlider } from '../../../components/FareSlider';
 import { GUTTER, RoutePair, jobAmount, CustomerTrustBadge } from '../shared';
 import { dk, withAlpha, DCard, DStat, DWeekBars } from '../dark';
@@ -280,7 +281,7 @@ export function MoverHomeScreen({ navigation }: any) {
     return soonest;
   })();
   const todayTotal = (earnings.data as any)?.total ?? (earnings.data as any)?.todayEarnings ?? 0;
-  const tripsToday = (earnings.data as any)?.todayDeliveries ?? (earnings.data as any)?.trips ?? (earnings.data as any)?.ridesCompleted ?? 0;
+  const tripsToday = moverJobsToday(earnings.data);
   const onlineHours = (stats.data as any)?.onlineHoursToday;
   const busyToggle = goOnline.isPending || goOffline.isPending;
 
