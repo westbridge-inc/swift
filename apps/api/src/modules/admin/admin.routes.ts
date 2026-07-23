@@ -313,8 +313,6 @@ export async function adminRoutes(app: FastifyInstance) {
 
   app.get('/dashboard/overview', { preHandler: [adminGuard] }, async () => {
     const today = startOfDayGY(); // DASH-06: Guyana-local "today", not UTC midnight
-    const weekAgo = new Date(today);
-    weekAgo.setDate(weekAgo.getDate() - 7);
 
     const [
       totalUsers,
@@ -328,7 +326,6 @@ export async function adminRoutes(app: FastifyInstance) {
       subscriptionCounts,
       activeSubRevenue,
       todayNewUsers,
-      weeklyOrderCounts,
       pendingVendors,
       pastDueSubs,
       unassignedOrders,
@@ -360,17 +357,10 @@ export async function adminRoutes(app: FastifyInstance) {
         _sum: { weeklyRate: true },
       }),
       app.prisma.user.count({ where: { createdAt: { gte: today } } }),
-      // Weekly trend: orders per day for the last 7 days
-      app.prisma.$queryRaw<Array<{ date: string; count: bigint; revenue: number }>>`
-        SELECT
-          DATE("placedAt") as date,
-          COUNT(*)::int as count,
-          COALESCE(SUM(CASE WHEN status IN ('DELIVERED', 'COMPLETED') THEN "totalAmount" ELSE 0 END), 0) as revenue
-        FROM orders
-        WHERE "placedAt" >= ${weekAgo}
-        GROUP BY DATE("placedAt")
-        ORDER BY date ASC
-      `,
+      // SWIFT-118: the weeklyTrend raw SQL was removed — it was computed on every
+      // 30s dashboard poll (an UNSCOPED FROM orders, cross-tenant) but never
+      // rendered by any admin component. Deleted (rule 17); re-add scoped + wired
+      // if a trend chart ships.
       // Operational alerts — real counts for the dashboard AlertsPanel.
       app.prisma.vendor.count({ where: { status: 'PENDING_APPROVAL' } }),
       app.prisma.subscription.count({ where: { status: 'PAST_DUE' } }),
@@ -414,7 +404,6 @@ export async function adminRoutes(app: FastifyInstance) {
           count: s._count,
           weeklyRevenue: Number(s._sum.weeklyRate ?? 0),
         })),
-        weeklyTrend: weeklyOrderCounts,
         alerts: { pendingVendors, pastDueSubs, unassignedOrders },
       },
     };
