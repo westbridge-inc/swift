@@ -139,6 +139,10 @@ export default async function courierRoutes(app: FastifyInstance) {
         courierPackageDescription: body.packageDescription,
         courierPackagePhotoUrl: body.packagePhotoUrl,
         courierSpeed: body.speed,
+        // SWIFT-061: EXPRESS/RUSH are priced ×1.5/×2 — make the priority REAL, not
+        // just a surcharge. isExpress is the ONE dispatch-priority flag (same as a
+        // food EXPRESS order): 12s offers, 45s redispatch, sorted first on the board.
+        isExpress: body.speed !== 'STANDARD',
         courierRecipientName: body.recipientName,
         courierRecipientPhone: body.recipientPhone,
         courierPayer: body.payer,
