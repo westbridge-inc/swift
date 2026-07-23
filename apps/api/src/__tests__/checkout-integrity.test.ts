@@ -8,6 +8,7 @@ import { authPlugin } from '../plugins/auth';
 import { socketPlugin } from '../plugins/socket';
 import { customerRoutes } from '../modules/user/customer.routes';
 import { registerErrorHandler } from '../middleware/error-handler';
+import { expressDeliveryFee } from '../utils/markup';
 
 // ---------------------------------------------------------------------------
 // Pre-launch audit gaps: (1) checkout money math was only asserted "> 0" —
@@ -249,5 +250,26 @@ describe('high-value promo gate [SWIFT-162]', () => {
     } finally {
       await cleanup(s);
     }
+  });
+});
+
+describe('express surcharge is server-owned [SWIFT-070]', () => {
+  it('the cart quotes the express surcharge, and checkout charges exactly that', async () => {
+    const c = await makeCustomer();
+    await inject('POST', '/api/v1/customer/cart/items', { vendorId, itemId, quantity: 1 }, c.token);
+    await inject('PUT', '/api/v1/customer/cart/address', { addressId: c.addressId }, c.token);
+
+    const cart = (await inject('GET', '/api/v1/customer/cart', undefined, c.token)).json().data;
+    // The surcharge is DERIVED ON THE SERVER from the standard fee — the client
+    // renders it, never recomputes it (rule 17).
+    expect(cart.expressSurcharge).toBe(expressDeliveryFee(cart.deliveryFee) - cart.deliveryFee);
+    expect(cart.expressTotal).toBe(cart.totalAmount + cart.expressSurcharge);
+
+    // Checkout with express charges the base fee + EXACTLY the quoted surcharge —
+    // the preview and the charge are the same number, from the same helper.
+    const placed = await inject('POST', '/api/v1/customer/checkout', { paymentMethod: 'CASH', express: true }, c.token);
+    expect(placed.statusCode).toBe(200);
+    const order = placed.json().data.orders[0];
+    expect(order.deliveryFee).toBe(cart.deliveryFee + cart.expressSurcharge);
   });
 });

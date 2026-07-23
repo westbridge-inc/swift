@@ -1,6 +1,6 @@
 import type { PrismaClient, OrderStatus, FulfillmentType } from '@prisma/client';
 import type { Server } from 'socket.io';
-import { calculateDeliveryFee, generateOrderNumber } from '../../utils/markup';
+import { calculateDeliveryFee, expressDeliveryFee, generateOrderNumber } from '../../utils/markup';
 import { estimateDeliveryMinutes } from '../../utils/distance';
 import { getMapsProvider, type MapsProvider } from '../../providers/maps/maps-provider';
 import { FREE_CANCEL_WINDOW_MIN, LATE_CANCEL_FEE } from './cancel-policy';
@@ -285,9 +285,10 @@ export class OrderService {
           throw new AppError(400, 'OUT_OF_RANGE', `${vendor.name} only delivers within ${vendor.deliveryRadius} km. You are ${distanceKm.toFixed(1)} km away.`);
         }
         deliveryFee = calculateDeliveryFee(distanceKm);
-        // Express mirrors the courier EXPRESS multiplier (1.5x). The premium
-        // is part of the fee the rider collects in cash — it is THEIR upside.
-        if (input.express) deliveryFee = Math.round(deliveryFee * 1.5);
+        // Express mirrors the courier EXPRESS multiplier. The premium is part of
+        // the fee the rider collects in cash — it is THEIR upside. Same helper
+        // the cart quote uses, so the preview and the charge never disagree.
+        if (input.express) deliveryFee = expressDeliveryFee(deliveryFee);
       } else if (fulfillment === 'APPOINTMENT') {
         // MOBILE / BOTH services travel to the customer — require their address and
         // enforce the provider's service radius (mirrors the DELIVERY gate above).

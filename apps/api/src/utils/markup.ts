@@ -20,6 +20,17 @@ export function calculateDeliveryFee(
   return Math.ceil(subtotal * surgeMultiplier);
 }
 
+/** Express (priority) delivery multiplier — the whole premium is the rider's
+ *  cash upside. ONE definition [SWIFT-070]: the cart quote and the checkout
+ *  charge both derive the express fee from here, so the displayed total can
+ *  never drift from the total actually charged. */
+export const EXPRESS_DELIVERY_MULTIPLIER = 1.5;
+
+/** The delivery fee when express/priority is chosen. */
+export function expressDeliveryFee(standardFee: number): number {
+  return Math.round(standardFee * EXPRESS_DELIVERY_MULTIPLIER);
+}
+
 /**
  * Calculate courier fee based on distance, package size, and speed.
  */

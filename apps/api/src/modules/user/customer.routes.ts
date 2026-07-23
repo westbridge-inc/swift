@@ -1,7 +1,7 @@
 import type { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 import { z } from 'zod';
 import { VendorType, OrderStatus, NotificationType } from '@prisma/client';
-import { calculateDeliveryFee } from '../../utils/markup';
+import { calculateDeliveryFee, expressDeliveryFee } from '../../utils/markup';
 import { estimateDrivingDistance, estimateDeliveryMinutes } from '../../utils/distance';
 import { getMapsProvider } from '../../providers/maps/maps-provider';
 import { FREE_CANCEL_WINDOW_MIN, LATE_CANCEL_FEE } from '../order/cancel-policy';
@@ -337,6 +337,13 @@ async function buildCartResponse(
   const tip = Number(cart.tipAmount) || 0;
   const totalAmount = Math.max(0, subtotalCustomer + deliveryFee + tip - discount);
 
+  // SWIFT-070: the express premium is computed on the SERVER (same helper as
+  // checkout) and handed to the client to RENDER — never re-derived on the
+  // client, so the displayed total can't drift from the charged total. Zero for
+  // services / free delivery.
+  const expressSurcharge = deliveryFee > 0 ? expressDeliveryFee(deliveryFee) - deliveryFee : 0;
+  const expressTotal = totalAmount + expressSurcharge;
+
   // ETA
   const prepMin = cart.vendor?.estimatedPrepTime || 30;
   const deliveryMin = estimateDeliveryMinutes(distanceKm);
@@ -364,6 +371,8 @@ async function buildCartResponse(
     promoCode: promoInfo,
     tipAmount: tip,
     totalAmount,
+    expressSurcharge,
+    expressTotal,
     deliveryAddress: deliveryAddr ? {
       id: deliveryAddr.id,
       label: deliveryAddr.label,

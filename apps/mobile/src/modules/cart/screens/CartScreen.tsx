@@ -418,7 +418,7 @@ export function CartScreen() {
                     </T>
                   </View>
                   <T variant="caption" tone="muted" style={{ marginTop: 2 }}>
-                    Jumps the dispatch queue · +{money(Math.round(c.deliveryFee * 0.5))} — all of it goes to your rider.
+                    Jumps the dispatch queue · +{money(c.expressSurcharge)} — all of it goes to your rider.
                   </T>
                 </View>
                 <BrandSwitch value={express} onChange={() => setExpress((v) => !v)} />
@@ -432,11 +432,11 @@ export function CartScreen() {
             <View style={{ marginTop: space.md }}>
               <InfoRow label={`Total Items (${c.itemCount})`} value={money(c.subtotalCustomer)} />
               {!apptOnly ? <InfoRow label="Delivery Fee" value={c.deliveryFee === 0 ? 'Free' : money(c.deliveryFee)} /> : null}
-              {express && c.deliveryFee > 0 ? <InfoRow label="Express" value={money(Math.round(c.deliveryFee * 0.5))} /> : null}
+              {express && c.deliveryFee > 0 ? <InfoRow label="Express" value={money(c.expressSurcharge)} /> : null}
               {c.discount > 0 ? <InfoRow label="Discount" value={`-${money(c.discount)}`} /> : null}
               {!apptOnly && Number(c.tipAmount) > 0 ? <InfoRow label="Rider Tip" value={money(c.tipAmount)} /> : null}
               <View style={{ height: 1, backgroundColor: color.border.subtle, marginVertical: space.sm }} />
-              <InfoRow label="Total" value={money(c.totalAmount + (express && c.deliveryFee > 0 ? Math.round(c.deliveryFee * 0.5) : 0))} strong />
+              <InfoRow label="Total" value={money(express && c.deliveryFee > 0 ? c.expressTotal : c.totalAmount)} strong />
             </View>
             {apptOnly ? (
               <View style={{ marginTop: space.sm, gap: 4 }}>
