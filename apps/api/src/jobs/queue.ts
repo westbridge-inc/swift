@@ -1,4 +1,4 @@
-import { Queue, Worker, type Job } from 'bullmq';
+import { Queue, Worker, type Job, type ConnectionOptions } from 'bullmq';
 import type Redis from 'ioredis';
 import type { PrismaClient } from '@prisma/client';
 import type { Server } from 'socket.io';
@@ -34,8 +34,30 @@ const QUEUE_NAMES = {
 
 export { QUEUE_NAMES };
 
+/**
+ * SWIFT-007: BullMQ's connection must carry EVERYTHING REDIS_URL encodes — auth
+ * (username/password), TLS, and the db index — not just host+port. The old
+ * `{ host, port }` silently dropped the password and TLS (so jobs never connect
+ * to a managed/authenticated Redis — they die on the floor) and the db suffix
+ * (test jobs landed on db0 instead of the isolated db15). IORedis already parsed
+ * the URL into `.options`; forward the connection-relevant fields to EVERY Queue
+ * and Worker so a single source (REDIS_URL) configures them all.
+ */
+export function bullConnectionOpts(redis: Redis): ConnectionOptions {
+  const o = redis.options;
+  return {
+    host: o.host,
+    port: o.port,
+    ...(o.username ? { username: o.username } : {}),
+    ...(o.password ? { password: o.password } : {}),
+    ...(o.db != null ? { db: o.db } : {}),
+    ...(o.tls ? { tls: o.tls } : {}),
+    ...(o.family ? { family: o.family } : {}),
+  };
+}
+
 export function createQueues(redis: Redis) {
-  const connection = { host: redis.options.host, port: redis.options.port };
+  const connection = bullConnectionOpts(redis);
 
   return {
     orderQueue: new Queue(QUEUE_NAMES.ORDER, { connection }),
@@ -211,7 +233,7 @@ export async function runCollusionAffinityScan(ctx: JobContext): Promise<{ flagg
 }
 
 export function createWorkers(ctx: JobContext) {
-  const connection = { host: ctx.redis.options.host, port: ctx.redis.options.port };
+  const connection = bullConnectionOpts(ctx.redis);
 
   // ORDER JOBS: auto-cancel, auto-complete
   const orderWorker = new Worker(
