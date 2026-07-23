@@ -292,7 +292,6 @@ async function buildApp() {
     app.addHook('onClose', async () => {
       if (workers) await workers.cleanup();
       await queues.orderQueue.close();
-      await queues.riderAssignmentQueue.close();
       await queues.subscriptionQueue.close();
       await queues.settlementQueue.close();
       await queues.notificationQueue.close();
