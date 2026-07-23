@@ -336,4 +336,26 @@ describe('Taxi live-operation gate (hire-class insurance)', () => {
     const res = await inject('POST', '/api/v1/driver/go-online', {}, d.token);
     expect(res.statusCode).toBe(200);
   });
+
+  it('SWIFT-066: a driver mid-ride who re-opens and taps GO is online but NOT available', async () => {
+    const d = await offlineDriver();
+    await setInsurance(d.userId, 'HIRE', true);
+    await app.prisma.subscription.create({
+      data: {
+        driverId: d.driverId, type: 'TAXI_DRIVER', status: 'ACTIVE', weeklyRate: 12000,
+        currentPeriodStart: new Date(), currentPeriodEnd: new Date(Date.now() + 7 * DAY),
+        nextBillingDate: new Date(Date.now() + 7 * DAY),
+      },
+    });
+    // The driver is mid-ride: currentRideId is set. Re-opening the app and
+    // tapping GO must not re-advertise them as free supply.
+    await app.prisma.driver.update({ where: { id: d.driverId }, data: { currentRideId: 'ride-in-progress' } });
+
+    const res = await inject('POST', '/api/v1/driver/go-online', {}, d.token);
+    expect(res.statusCode).toBe(200);
+    const after = await app.prisma.driver.findUniqueOrThrow({ where: { id: d.driverId } });
+    expect(after.isOnline).toBe(true);
+    // RED before SWIFT-066: this was true → dispatch would offer a second ride mid-trip.
+    expect(after.isAvailable).toBe(false);
+  });
 });

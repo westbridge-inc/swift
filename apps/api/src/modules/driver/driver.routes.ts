@@ -187,9 +187,13 @@ export async function driverRoutes(app: FastifyInstance) {
       throw new AppError(400, 'SUBSCRIPTION_REQUIRED', 'An active subscription is required to go online');
     }
 
+    // A driver already on a ride who re-opens the app and taps GO must NOT be
+    // advertised as free supply — otherwise dispatch offers them a second ride
+    // mid-trip (phantom supply). Mirror the rider guard [SWIFT-066]: online,
+    // yes; available only if not mid-ride. Availability returns on completion.
     const updated = await app.prisma.driver.update({
       where: { id: driver.id },
-      data: { isOnline: true, isAvailable: true },
+      data: { isOnline: true, isAvailable: !driver.currentRideId },
     });
 
     return { success: true, data: updated };
