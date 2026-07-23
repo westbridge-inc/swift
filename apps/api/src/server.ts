@@ -4,6 +4,7 @@ import helmet from '@fastify/helmet';
 import rateLimit from '@fastify/rate-limit';
 import Redis from 'ioredis';
 import multipart from '@fastify/multipart';
+import { helmetOptions } from './config/security-headers';
 import { rateLimitKey } from './utils/rate-limit-key';
 import { authRoutes } from './modules/auth/auth.routes';
 import { customerRoutes } from './modules/user/customer.routes';
@@ -100,14 +101,7 @@ async function buildApp() {
     origin: corsOrigin,
     credentials: true,
   });
-  await app.register(helmet, {
-    contentSecurityPolicy: {
-      directives: {
-        defaultSrc: ["'self'"],
-        connectSrc: ["'self'", 'wss:', 'ws:'],
-      },
-    },
-  });
+  await app.register(helmet, helmetOptions);
   // SWIFT-AUD-D6-02: back the limiter with Redis IN PRODUCTION so the ceiling is
   // shared across all API instances. An in-memory store gives each instance its
   // own counter → the effective limit becomes N×max, and the deliberately tight
