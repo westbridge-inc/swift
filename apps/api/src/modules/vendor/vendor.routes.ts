@@ -5,6 +5,7 @@ import { OrderService, notHeldFilter } from '../order/order.service';
 import { PickingService } from '../order/picking.service';
 import { makeDispatchService } from '../dispatch/dispatch.service';
 import { dispatchTrigger, enqueueDeliveryDispatch } from '../dispatch/dispatch-trigger';
+import { resolveDeliveryMode } from '../fulfillment/fulfillment-mode';
 import { NotificationService } from '../notification/notification.service';
 import { BookingService } from '../booking/booking.service';
 import { VerificationService } from '../verification/verification.service';
@@ -442,7 +443,7 @@ async function resolveOwnedOrder(app: FastifyInstance, userId: string, orderId: 
       customer: { select: { id: true, firstName: true, lastName: true, phone: true } },
       rider: { include: { user: { select: { firstName: true, lastName: true, phone: true } } } },
       // vendorType drives the pick-list UI (grocery/goods shelf-pick §5.3).
-      vendor: { select: { vendorType: true } },
+      vendor: { select: { vendorType: true, selfDeliveryEnabled: true } },
     },
   });
   if (!order || !order.vendorId || !vendorIds.includes(order.vendorId)) {
@@ -840,7 +841,7 @@ export async function vendorRoutes(app: FastifyInstance) {
           rider: { include: { user: { select: { firstName: true, lastName: true, phone: true } } } },
           // Franchise roll-up: the board aggregates every store the owner has, so each
           // order needs to say which store it belongs to.
-          vendor: { select: { id: true, name: true } },
+          vendor: { select: { id: true, name: true, selfDeliveryEnabled: true } },
         },
         orderBy: { placedAt: 'desc' },
         skip: pagination.skip,
@@ -893,7 +894,12 @@ export async function vendorRoutes(app: FastifyInstance) {
     // (the default) — the rider travels to the store during prep. ON_READY
     // defers dispatch to the Mark-ready transition below instead.
     if (order.fulfillment === 'DELIVERY' && dispatchTrigger() === 'ON_ACCEPT') {
-      await enqueueDeliveryDispatch(app, order);
+      // FUL-004b: resolve who delivers (vendor default / prior override), record
+      // it, and dispatch a platform rider ONLY for PLATFORM_RIDER — VENDOR_DELIVERY
+      // means the vendor's own courier delivers, so no rider is pinged.
+      const mode = resolveDeliveryMode(order.fulfillmentMode, order.vendor?.selfDeliveryEnabled ?? false);
+      await app.prisma.order.update({ where: { id: order.id }, data: { fulfillmentMode: mode } });
+      if (mode === 'PLATFORM_RIDER') await enqueueDeliveryDispatch(app, order);
     }
 
     return { success: true, data: updated };
@@ -979,7 +985,10 @@ export async function vendorRoutes(app: FastifyInstance) {
       // No-op under the ON_ACCEPT default (the rider was already dispatched); and
       // never dispatches if a rider is already assigned.
       if (order.fulfillment === 'DELIVERY' && !order.riderId && dispatchTrigger() === 'ON_READY') {
-        await enqueueDeliveryDispatch(app, order);
+        // FUL-004b: same resolution as at accept — VENDOR_DELIVERY skips the rider.
+        const mode = resolveDeliveryMode(order.fulfillmentMode, order.vendor?.selfDeliveryEnabled ?? false);
+        await app.prisma.order.update({ where: { id: order.id }, data: { fulfillmentMode: mode } });
+        if (mode === 'PLATFORM_RIDER') await enqueueDeliveryDispatch(app, order);
       }
       return { success: true, data: updated };
     }

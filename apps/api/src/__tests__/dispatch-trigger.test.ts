@@ -7,6 +7,7 @@ import { redisPlugin } from '../plugins/redis';
 import { authPlugin } from '../plugins/auth';
 import { socketPlugin } from '../plugins/socket';
 import { vendorRoutes } from '../modules/vendor/vendor.routes';
+import { resolveDeliveryMode } from '../modules/fulfillment/fulfillment-mode';
 import { registerErrorHandler } from '../middleware/error-handler';
 
 // FUL-005: WHEN a delivery order dispatches to riders is per-deployment config
@@ -71,9 +72,11 @@ beforeAll(async () => {
   customerId = (await mkUser(['CUSTOMER'] as UserRole[], 'CUSTOMER' as UserRole)).id;
 });
 
-afterEach(() => {
+afterEach(async () => {
   added.length = 0;
   delete process.env['DISPATCH_TRIGGER'];
+  // reset self-delivery so the trigger cases (which assume platform-rider) are isolated
+  await app.prisma.vendor.update({ where: { id: vendorId }, data: { selfDeliveryEnabled: false } });
 });
 
 afterAll(async () => {
@@ -110,5 +113,38 @@ describe('dispatch trigger (FUL-005)', () => {
     const res = await put(`/orders/${id}/ready`);
     expect(res.statusCode).toBe(200);
     expect(added.filter((j) => j.name === 'dispatch-order' && j.data.orderId === id)).toHaveLength(1);
+  });
+});
+
+const readMode = (id: string) => app.prisma.order.findUniqueOrThrow({ where: { id }, select: { fulfillmentMode: true } });
+
+describe('FUL-004b: fulfillment-mode resolution at the dispatch decision', () => {
+  it('a self-delivery vendor: accepting sets VENDOR_DELIVERY and does NOT dispatch a platform rider', async () => {
+    await app.prisma.vendor.update({ where: { id: vendorId }, data: { selfDeliveryEnabled: true } });
+    const id = await mkOrder('PENDING');
+    const res = await put(`/orders/${id}/accept`);
+    expect(res.statusCode).toBe(200);
+    expect(added.filter((j) => j.name === 'dispatch-order')).toHaveLength(0);
+    expect((await readMode(id)).fulfillmentMode).toBe('VENDOR_DELIVERY');
+  });
+
+  it('a platform-rider vendor (default): accepting sets PLATFORM_RIDER and dispatches', async () => {
+    const id = await mkOrder('PENDING'); // vendor selfDeliveryEnabled reset to false in afterEach
+    const res = await put(`/orders/${id}/accept`);
+    expect(res.statusCode).toBe(200);
+    expect(added.filter((j) => j.name === 'dispatch-order' && j.data.orderId === id)).toHaveLength(1);
+    expect((await readMode(id)).fulfillmentMode).toBe('PLATFORM_RIDER');
+  });
+});
+
+describe('resolveDeliveryMode (FUL-004b pure logic)', () => {
+  it('an explicit order choice wins over the vendor default', () => {
+    expect(resolveDeliveryMode('VENDOR_DELIVERY', false)).toBe('VENDOR_DELIVERY');
+    expect(resolveDeliveryMode('PLATFORM_RIDER', true)).toBe('PLATFORM_RIDER');
+  });
+  it('with no explicit choice, a self-delivery-capable vendor self-delivers; otherwise a platform rider', () => {
+    expect(resolveDeliveryMode(null, true)).toBe('VENDOR_DELIVERY');
+    expect(resolveDeliveryMode(null, false)).toBe('PLATFORM_RIDER');
+    expect(resolveDeliveryMode(undefined, false)).toBe('PLATFORM_RIDER');
   });
 });
