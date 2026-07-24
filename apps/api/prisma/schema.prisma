@@ -745,6 +745,10 @@ model Vendor {
   /// Born OFF: commerce opens when the owner's document checklist is verified
   /// (verification afterApproval) and closes when a required document lapses.
   acceptingOrders  Boolean         @default(false)
+  /// FUL-004: this vendor can fulfil its own DELIVERY orders with its own
+  /// courier (vs a platform rider). Default off — existing vendors are
+  /// platform-rider-only until they opt in.
+  selfDeliveryEnabled Boolean      @default(false)
   deliveryRadius   Float           @default(10.0)
   minOrderAmount   Decimal         @default(0) @db.Decimal(10, 2)
   estimatedPrepTime Int            @default(30)
@@ -895,6 +899,16 @@ model Item {
 enum FulfillmentType {
   DELIVERY
   APPOINTMENT
+  PICKUP
+}
+
+/// FUL-004 (fulfillment Part 4): HOW a DELIVERY order actually reaches the
+/// customer — a platform rider, the vendor's own courier, or counter pickup.
+/// Distinct from FulfillmentType (what the CUSTOMER chose): the customer picks
+/// delivery-vs-pickup, the vendor picks who delivers. Recorded on the order.
+enum FulfillmentMode {
+  PLATFORM_RIDER
+  VENDOR_DELIVERY
   PICKUP
 }
 
@@ -1069,6 +1083,9 @@ model Order {
   /// How this order is fulfilled (locked model): DELIVERY dispatches a mover,
   /// PICKUP skips dispatch, APPOINTMENT books the slot at vendor acceptance.
   fulfillment     FulfillmentType @default(DELIVERY)
+  /// FUL-004: who actually delivers this order (set when the vendor chooses at
+  /// Ready). NULL on orders predating the choice — treated as PLATFORM_RIDER.
+  fulfillmentMode FulfillmentMode?
   appointmentSlot DateTime?
   /// Takeaway: 4-digit code the customer shows to collect a PICKUP order; the
   /// vendor verifies it to close the order (no rider involved). Null otherwise.
