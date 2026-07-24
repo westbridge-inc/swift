@@ -3,6 +3,7 @@ import { z } from 'zod';
 import { OrderStatus, EarningType, EarningStatus, RideClass } from '@prisma/client';
 import { OrderService } from '../order/order.service';
 import { earningsWindow } from '../order/earnings-window';
+import { zMoneyMinor } from '../../utils/money-schema';
 import { NotificationService } from '../notification/notification.service';
 import { VerificationService } from '../verification/verification.service';
 import { makeDispatchService } from '../dispatch/dispatch.service';
@@ -366,7 +367,7 @@ export async function driverRoutes(app: FastifyInstance) {
   // 1. Accept ride
   app.post('/rides/:id/accept', { preHandler: [app.authenticate] }, async (request) => {
     const { id } = request.params as { id: string };
-    const { fare } = z.object({ fare: z.number().min(0).optional() }).parse(request.body ?? {});
+    const { fare } = z.object({ fare: zMoneyMinor.optional() }).parse(request.body ?? {});
     const driver = await getDriver(request.user.userId);
 
     if (!driver.isOnline) {
@@ -463,7 +464,7 @@ export async function driverRoutes(app: FastifyInstance) {
     await getDriver(request.user.userId); // authz before validation
     const { orderId, fare } = z.object({
       orderId: z.string().min(1).max(64),
-      fare: z.number().min(0).optional(),
+      fare: zMoneyMinor.optional(),
     }).parse(request.body);
     const order = await dispatch.acceptOffer(orderId, request.user.userId);
     // Driver-set price, capped at the market fare — applied after the claim,

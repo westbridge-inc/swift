@@ -8,6 +8,7 @@ import { FREE_CANCEL_WINDOW_MIN, LATE_CANCEL_FEE } from '../order/cancel-policy'
 import { parsePagination, paginatedResponse } from '../../utils/pagination';
 import { tenantCacheKey } from '../../utils/tenant-cache';
 import { AppError, NotFoundError, ValidationError, ForbiddenError } from '../../utils/errors';
+import { zMoneyMinor } from '../../utils/money-schema';
 import { randomInt } from 'node:crypto';
 import { OrderService } from '../order/order.service';
 import { PickingService } from '../order/picking.service';
@@ -82,7 +83,7 @@ const cartAddressSchema = z.object({
 });
 
 const cartTipSchema = z.object({
-  amount: z.number().min(0),
+  amount: zMoneyMinor,
 });
 
 const cartInstructionsSchema = z.object({
@@ -92,7 +93,7 @@ const cartInstructionsSchema = z.object({
 const checkoutSchema = z.object({
   paymentMethod: z.string().max(30).optional(),
   deliveryInstructions: z.string().max(500).optional(),
-  tipAmount: z.number().min(0).optional(),
+  tipAmount: zMoneyMinor.optional(),
   scheduledFor: z.string().max(40).optional(),
   promoCode: z.string().max(40).optional(),
   // Per-vendor DELIVERY|PICKUP choice for multi-vendor carts
