@@ -1,6 +1,7 @@
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { nanoid } from 'nanoid';
+import { NotificationService } from '../modules/notification/notification.service';
 import { prismaPlugin } from '../plugins/prisma';
 import { redisPlugin } from '../plugins/redis';
 import { authPlugin } from '../plugins/auth';
@@ -121,5 +122,26 @@ describe('send path', () => {
     expect(res.json().warning).toBeUndefined();
     const row = await app.prisma.chatMessage.findUniqueOrThrow({ where: { id: res.json().data.id } });
     expect(row.offPlatformFlag).toBe(false);
+  });
+});
+
+// SWIFT-101: chat used to write a notification row + a socket emit by hand,
+// bypassing NotificationService — so a chat message could never push and lived
+// on a second, divergent notification path. It must route through the ONE path.
+describe('SWIFT-101: chat notifies the recipient through NotificationService', () => {
+  it('a message calls NotificationService.send for the recipient (the push path), once', async () => {
+    const sendSpy = vi.spyOn(NotificationService.prototype, 'send').mockResolvedValue('notif-id');
+    try {
+      const res = await send('are you close?');
+      expect(res.statusCode).toBe(200);
+      // the OTHER participant is notified via the service — not the sender, and
+      // not a bespoke row+emit that a backgrounded app never receives.
+      expect(sendSpy).toHaveBeenCalledTimes(1);
+      expect(sendSpy).toHaveBeenCalledWith(
+        expect.objectContaining({ userId: otherId, type: 'CHAT_MESSAGE' }),
+      );
+    } finally {
+      sendSpy.mockRestore();
+    }
   });
 });
