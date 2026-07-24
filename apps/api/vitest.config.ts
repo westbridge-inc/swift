@@ -6,6 +6,17 @@ export default defineConfig({
     include: ['src/**/*.test.ts'],
     testTimeout: 30000,
     hookTimeout: 30000,
+    // SWIFT-165: measure coverage (v8) and publish the number in CI. No
+    // thresholds yet — measure first, ratchet later (the suite is case-rich but
+    // its blind spots were never quantified). Excludes tests, generated Prisma
+    // client, type decls, and the seed/migration scripts.
+    coverage: {
+      provider: 'v8',
+      reporter: ['text-summary', 'json-summary'],
+      reportsDirectory: './coverage',
+      include: ['src/**/*.ts'],
+      exclude: ['src/**/*.test.ts', 'src/**/*.d.ts', 'src/generated/**'],
+    },
     // Match CI: tests must exercise the REAL OTP flow. The dev .env sets
     // DEV_OTP_BYPASS=1, which Prisma's dotenv otherwise leaks into the test
     // process (no-override, so setting it here first wins) and turns 2 auth

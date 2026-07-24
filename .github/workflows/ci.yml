@@ -80,12 +80,20 @@ jobs:
           DATABASE_URL: postgresql://swift:swift@localhost:5432/swift_test
           REDIS_URL: redis://localhost:6379
       - name: Run tests
-        run: pnpm --filter @swift/api test
+        run: pnpm --filter @swift/api test -- --coverage
         env:
           NODE_ENV: test
           DATABASE_URL: postgresql://swift:swift@localhost:5432/swift_test
           REDIS_URL: redis://localhost:6379
           JWT_SECRET: ci-test-jwt-secret-not-for-production
+      # SWIFT-165: publish the coverage number to the run summary. Measured, not
+      # gated — no thresholds yet (ratchet later once the baseline is watched).
+      - name: Publish coverage to the run summary
+        if: always()
+        run: |
+          test -f apps/api/coverage/coverage-summary.json || exit 0
+          echo "### API test coverage" >> "$GITHUB_STEP_SUMMARY"
+          node -e "const t=require('./apps/api/coverage/coverage-summary.json').total; for (const k of ['lines','statements','branches','functions']) console.log('- **'+k+'**: '+t[k].pct+'% ('+t[k].covered+'/'+t[k].total+')');" >> "$GITHUB_STEP_SUMMARY"
 
       # Step 15: an untested backup does not exist. Dump the post-suite
       # database and prove it restores into a scratch DB with sane contents.
