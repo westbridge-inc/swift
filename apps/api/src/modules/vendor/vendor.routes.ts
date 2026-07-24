@@ -47,6 +47,8 @@ const updateVendorProfileSchema = z.object({
   deliveryRadius: z.number().positive().max(100).optional(),
   minOrderAmount: z.number().min(0).optional(),
   estimatedPrepTime: z.number().int().min(0).max(480).optional(),
+  // FUL-004: whether this vendor fulfils its own DELIVERY orders with its own courier.
+  selfDeliveryEnabled: z.boolean().optional(),
   // The vendor's own MMG "pay me" link (opt-in). null/empty clears it → cash-only.
   mmgPayUrl: z.string().trim().max(500).nullable().optional(),
 });
@@ -716,6 +718,7 @@ export async function vendorRoutes(app: FastifyInstance) {
         ...(body.deliveryRadius !== undefined && { deliveryRadius: body.deliveryRadius }),
         ...(body.minOrderAmount !== undefined && { minOrderAmount: body.minOrderAmount }),
         ...(body.estimatedPrepTime !== undefined && { estimatedPrepTime: body.estimatedPrepTime }),
+        ...(body.selfDeliveryEnabled !== undefined && { selfDeliveryEnabled: body.selfDeliveryEnabled }),
         ...(body.mmgPayUrl !== undefined && { mmgPayUrl: body.mmgPayUrl || null }),
       },
       include: { operatingHours: { orderBy: { dayOfWeek: 'asc' } } },
