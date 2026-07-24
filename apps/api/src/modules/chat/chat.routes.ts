@@ -1,6 +1,7 @@
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { detectOffPlatformContact, OFF_PLATFORM_WARNING } from './off-platform';
+import { NotificationService } from '../notification/notification.service';
 import { NotFoundError, ForbiddenError } from '../../utils/errors';
 
 const createRoomSchema = z.object({
@@ -19,6 +20,8 @@ const messagesQuerySchema = z.object({
 });
 
 export async function chatRoutes(app: FastifyInstance) {
+  const notifications = new NotificationService(app.prisma, app.io);
+
   // Get or create chat room for an order
   app.post('/rooms', { preHandler: [app.authenticate] }, async (request) => {
     const { orderId } = createRoomSchema.parse(request.body);
@@ -117,20 +120,18 @@ export async function chatRoutes(app: FastifyInstance) {
 
     const sender = await app.prisma.user.findUnique({ where: { id: request.user.userId }, select: { firstName: true } });
 
+    // SWIFT-101: route through NotificationService — the ONE notification path
+    // (rule #17) — so a chat message is delivered as a PUSH (when the provider
+    // is live), respects the recipient's prefs, and lands in the failure
+    // metrics. The old code wrote a row + a socket emit only, so a backgrounded
+    // app never learned about the message.
     for (const p of otherParticipants) {
-      await app.prisma.notification.create({
-        data: {
-          userId: p.userId,
-          type: 'CHAT_MESSAGE',
-          title: `Message from ${sender?.firstName || 'Someone'}`,
-          body: message.substring(0, 100),
-          data: { roomId, messageId: msg.id },
-        },
-      });
-      app.io.to(`user:${p.userId}`).emit('notification', {
+      await notifications.send({
+        userId: p.userId,
         type: 'CHAT_MESSAGE',
-        title: `Message from ${sender?.firstName}`,
+        title: `Message from ${sender?.firstName || 'Someone'}`,
         body: message.substring(0, 100),
+        data: { roomId, messageId: msg.id },
       });
     }
 
