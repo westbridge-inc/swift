@@ -3,6 +3,7 @@ import { z } from 'zod';
 import { RiderType, VehicleType, EarningType, EarningStatus, type OrderStatus } from '@prisma/client';
 import { OrderService, notHeldFilter } from '../order/order.service';
 import { earningsWindow } from '../order/earnings-window';
+import { zMoneyMinor } from '../../utils/money-schema';
 import { NotificationService } from '../notification/notification.service';
 import { VerificationService } from '../verification/verification.service';
 import { CashRulesService, customerTrustSummaries } from '../cash/cash-rules.service';
@@ -165,7 +166,7 @@ export async function riderRoutes(app: FastifyInstance) {
    *  acceptance — unlike the board-grab entrance, which is for the open list. */
   app.post('/offers/accept', { preHandler: [app.authenticate] }, async (request) => {
     await getRider(app, request.user.userId); // authz before validation
-    const { orderId, fare } = offerActionSchema.extend({ fare: z.number().min(0).optional() }).parse(request.body);
+    const { orderId, fare } = offerActionSchema.extend({ fare: zMoneyMinor.optional() }).parse(request.body);
     const order = await dispatch.acceptOffer(orderId, request.user.userId);
     // Rider-set delivery fee, capped at market — the same rule as the board-grab
     // accept, applied AFTER the offer claim (which already acked the alert and
@@ -605,7 +606,7 @@ export async function riderRoutes(app: FastifyInstance) {
   /** POST /orders/:id/accept — Claim an available order. */
   app.post('/orders/:id/accept', { preHandler: [app.authenticate] }, async (request) => {
     const { id } = request.params as { id: string };
-    const { fare } = z.object({ fare: z.number().min(0).optional() }).parse(request.body ?? {});
+    const { fare } = z.object({ fare: zMoneyMinor.optional() }).parse(request.body ?? {});
     const rider = await getRider(app, request.user.userId);
 
     // Must be online.
