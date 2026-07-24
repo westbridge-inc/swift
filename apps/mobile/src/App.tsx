@@ -16,6 +16,8 @@ import {
 } from '@expo-google-fonts/inter';
 import { GluestackUIProvider, ToastHost } from './components/ui';
 import { OfflineBanner } from './components/OfflineBanner';
+import { ErrorBoundary } from './components/ErrorBoundary';
+import { installGlobalErrorHandler } from './lib/crash-reporter';
 import { RootNavigator } from './navigation/RootNavigator';
 import { queryClient } from './lib/queryClient';
 import { initSecureStorage } from './lib/storage';
@@ -27,6 +29,10 @@ import { useDeviceLocation } from './hooks/useDeviceLocation';
 
 // Hold the native splash until the brand fonts are ready (avoids a System-font flash).
 SplashScreen.preventAutoHideAsync().catch(() => {});
+
+// SWIFT-013: capture uncaught JS errors (timers/async/event handlers) at the
+// RN global handler before the first render, so nothing crashes silently.
+installGlobalErrorHandler();
 
 // Resolves device GPS into locationStore on launch. Rendered only after the
 // encrypted store is open (see App `ready` gate) so the persisted write inside
@@ -79,17 +85,19 @@ export default function App() {
   if (!ready) return null;
 
   return (
-    <GestureHandlerRootView style={{ flex: 1 }} onLayout={onLayoutRootView}>
-      <SafeAreaProvider>
-        <GluestackUIProvider>
-          <QueryClientProvider client={queryClient}>
-            <LocationBootstrap />
-            <RootNavigator />
-            <ToastHost />
-            <OfflineBanner />
-          </QueryClientProvider>
-        </GluestackUIProvider>
-      </SafeAreaProvider>
-    </GestureHandlerRootView>
+    <ErrorBoundary>
+      <GestureHandlerRootView style={{ flex: 1 }} onLayout={onLayoutRootView}>
+        <SafeAreaProvider>
+          <GluestackUIProvider>
+            <QueryClientProvider client={queryClient}>
+              <LocationBootstrap />
+              <RootNavigator />
+              <ToastHost />
+              <OfflineBanner />
+            </QueryClientProvider>
+          </GluestackUIProvider>
+        </SafeAreaProvider>
+      </GestureHandlerRootView>
+    </ErrorBoundary>
   );
 }
