@@ -148,3 +148,31 @@ describe('resolveDeliveryMode (FUL-004b pure logic)', () => {
     expect(resolveDeliveryMode(undefined, false)).toBe('PLATFORM_RIDER');
   });
 });
+
+describe('FUL-004d: vendor fulfillment-mode override + the get-a-rider fallback', () => {
+  const putMode = (id: string, mode: string) =>
+    app.inject({ method: 'PUT', url: `/api/v1/vendor/orders/${id}/fulfillment-mode`, headers: { authorization: `Bearer ${vendorToken}`, 'content-type': 'application/json' }, payload: { mode } });
+
+  it('a self-delivery vendor can switch an order to VENDOR_DELIVERY — no rider dispatched', async () => {
+    await app.prisma.vendor.update({ where: { id: vendorId }, data: { selfDeliveryEnabled: true } });
+    const id = await mkOrder('PENDING');
+    const res = await putMode(id, 'VENDOR_DELIVERY');
+    expect(res.statusCode).toBe(200);
+    expect((await readMode(id)).fulfillmentMode).toBe('VENDOR_DELIVERY');
+    expect(added.filter((j) => j.name === 'dispatch-order')).toHaveLength(0);
+  });
+
+  it('"get a rider instead" (→ PLATFORM_RIDER) dispatches a rider — the kitchen-rescue fallback', async () => {
+    const id = await mkOrder('PENDING'); // no rider assigned yet
+    const res = await putMode(id, 'PLATFORM_RIDER');
+    expect(res.statusCode).toBe(200);
+    expect((await readMode(id)).fulfillmentMode).toBe('PLATFORM_RIDER');
+    expect(added.filter((j) => j.name === 'dispatch-order' && j.data.orderId === id)).toHaveLength(1);
+  });
+
+  it('a vendor WITHOUT self-delivery cannot choose VENDOR_DELIVERY', async () => {
+    const id = await mkOrder('PENDING'); // selfDeliveryEnabled reset to false in afterEach
+    const res = await putMode(id, 'VENDOR_DELIVERY');
+    expect(res.statusCode).toBe(400);
+  });
+});

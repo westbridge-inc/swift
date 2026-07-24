@@ -58,6 +58,12 @@ const acceptOrderSchema = z.object({
   estimatedPrepTime: z.number().int().min(1).max(480).optional(),
 });
 
+// FUL-004d: the vendor's one-tap fulfillment override — "we'll deliver it
+// ourselves" / "get a rider instead".
+const fulfillmentModeSchema = z.object({
+  mode: z.enum(['PLATFORM_RIDER', 'VENDOR_DELIVERY']),
+});
+
 const rejectOrderSchema = z.object({
   reason: z.string().max(500).optional(),
 });
@@ -998,6 +1004,31 @@ export async function vendorRoutes(app: FastifyInstance) {
       return { success: true, data: updated };
     }
     throw new AppError(400, 'INVALID_STATUS', `Cannot mark as ready from ${order.status} status`);
+  });
+
+  /** PUT /orders/:id/fulfillment-mode — FUL-004d: the vendor's one-tap choice of
+   *  who delivers. VENDOR_DELIVERY = "we'll deliver it ourselves"; PLATFORM_RIDER
+   *  = "get a rider instead" — which dispatches a rider if none is assigned yet,
+   *  the fallback that stops a self-delivery order dying in the kitchen. */
+  app.put<{ Params: IdParam }>('/orders/:id/fulfillment-mode', auth, async (request) => {
+    const order = await resolveOwnedOrder(app, request.user.userId, request.params.id);
+    const { mode } = fulfillmentModeSchema.parse(request.body);
+    if (order.fulfillment !== 'DELIVERY') {
+      throw new AppError(400, 'NOT_DELIVERY', 'Only delivery orders have a fulfillment mode');
+    }
+    if (['DELIVERED', 'CANCELLED', 'FAILED', 'COMPLETED'].includes(order.status)) {
+      throw new AppError(409, 'ORDER_CLOSED', 'This order is already closed');
+    }
+    if (mode === 'VENDOR_DELIVERY' && !order.vendor?.selfDeliveryEnabled) {
+      throw new AppError(400, 'SELF_DELIVERY_DISABLED', 'Turn on self-delivery in settings first');
+    }
+    await app.prisma.order.update({ where: { id: order.id }, data: { fulfillmentMode: mode } });
+    // Fallback: "get a rider instead" dispatches a platform rider now if none is
+    // on it yet. VENDOR_DELIVERY needs no rider — the vendor's own courier delivers.
+    if (mode === 'PLATFORM_RIDER' && !order.riderId) {
+      await enqueueDeliveryDispatch(app, order);
+    }
+    return { success: true, data: { orderId: order.id, fulfillmentMode: mode } };
   });
 
   // ── Grocery picking (§5.3) — the pick list inside PREPARING ───────────────
