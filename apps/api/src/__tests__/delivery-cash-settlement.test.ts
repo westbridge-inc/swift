@@ -11,6 +11,7 @@ import { riderRoutes } from '../modules/rider/rider.routes';
 import { OrderService } from '../modules/order/order.service';
 import { DeliveryCashSettlementService } from '../modules/cash/delivery-cash-settlement.service';
 import { NotificationService } from '../modules/notification/notification.service';
+import { settle } from '../modules/fulfillment/money-matrix';
 import { registerErrorHandler } from '../middleware/error-handler';
 
 // MMG Phase 3: for an MMG-paid delivery the customer paid the STORE, so the
@@ -309,5 +310,38 @@ describe('ledger lists', () => {
     await app.prisma.order.deleteMany({ where: { id: { in: orderRows.map((o) => o.id) } } });
     await app.prisma.rider.deleteMany({ where: { id: bigRiderId } });
     await app.prisma.user.deleteMany({ where: { id: bigUser.userId } });
+  });
+});
+
+// FUL-002: the money-matrix oracle (FUL-001) only earns its keep if the REAL
+// settlement matches it. Drive real DELIVERED orders through createEarnings and
+// assert the recorded money equals settle() for matrix rows 1 (cash) and 2 (MMG)
+// — the Part-6.4 reconciliation, proving the oracle reflects Swift's actual code.
+describe('FUL-002: real settlement reconciles to the money-matrix oracle', () => {
+  const FOOD = 1000; // makeDeliveredOrder fixes subtotalCustomer = 1000
+
+  it('CASH delivery (row 1): the rider EARNS exactly the oracle riderNets, and nothing is owed', async () => {
+    const fee = 700;
+    const orderId = await makeDeliveredOrder({ payment: 'CASH', fee });
+    const oracle = settle({ foodTotal: FOOD, deliveryFee: fee, mode: 'PLATFORM_RIDER', payment: 'CASH' });
+    const earning = await app.prisma.earning.findFirst({ where: { orderId, type: 'DELIVERY_FEE' } });
+    expect(earning).not.toBeNull();
+    expect(Number(earning!.amount)).toBe(oracle.riderNets); // rider nets the fee
+    // cash settles at the door — the oracle carries no obligation, and neither does the DB
+    expect(oracle.obligations).toHaveLength(0);
+    expect(await app.prisma.deliveryCashSettlement.findUnique({ where: { orderId } })).toBeNull();
+  });
+
+  it('MMG delivery (row 2): the real vendor-owes-rider debt equals the oracle VENDOR_OWES_RIDER obligation', async () => {
+    const fee = 550;
+    const orderId = await makeDeliveredOrder({ payment: 'MOBILE_MONEY', fee });
+    const oracle = settle({ foodTotal: FOOD, deliveryFee: fee, mode: 'PLATFORM_RIDER', payment: 'VENDOR_MMG' });
+    expect(oracle.obligations[0]).toMatchObject({ type: 'VENDOR_OWES_RIDER', amount: fee });
+    const debt = await app.prisma.deliveryCashSettlement.findUnique({ where: { orderId } });
+    expect(debt).not.toBeNull();
+    expect(Number(debt!.amount)).toBe(oracle.obligations[0]!.amount); // real debt == oracle obligation
+    // the rider's income is still the fee — fulfilled via the debt, not at the door
+    const earning = await app.prisma.earning.findFirst({ where: { orderId, type: 'DELIVERY_FEE' } });
+    expect(Number(earning!.amount)).toBe(oracle.riderNets);
   });
 });
