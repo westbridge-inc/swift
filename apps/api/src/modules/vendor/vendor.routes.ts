@@ -4,6 +4,7 @@ import { OrderStatus, OrderType, SettlementStatus } from '@prisma/client';
 import { OrderService, notHeldFilter } from '../order/order.service';
 import { PickingService } from '../order/picking.service';
 import { makeDispatchService } from '../dispatch/dispatch.service';
+import { dispatchTrigger, enqueueDeliveryDispatch } from '../dispatch/dispatch-trigger';
 import { NotificationService } from '../notification/notification.service';
 import { BookingService } from '../booking/booking.service';
 import { VerificationService } from '../verification/verification.service';
@@ -884,15 +885,12 @@ export async function vendorRoutes(app: FastifyInstance) {
     const updated = await orderService.updateStatus(order.id, 'ACCEPTED', request.user.userId, 'Accepted by vendor');
     await ackVendorAlert(app, request.user.userId, order.id); // accepting acknowledges the alert
 
-    // acceptance of a DELIVERY order starts the dispatch cascade.
-    // PICKUP and APPOINTMENT orders never dispatch. Express orders jump the
-    // dispatch queue (lower number = higher BullMQ priority).
-    if (order.fulfillment === 'DELIVERY' && app.dispatchQueue) {
-      await app.dispatchQueue.add('dispatch-order', { orderId: order.id }, {
-        priority: order.isExpress ? 1 : 10,
-        removeOnComplete: 100,
-        removeOnFail: 50,
-      });
+    // acceptance of a DELIVERY order starts the dispatch cascade (PICKUP and
+    // APPOINTMENT orders never dispatch). FUL-005: this is the ON_ACCEPT trigger
+    // (the default) — the rider travels to the store during prep. ON_READY
+    // defers dispatch to the Mark-ready transition below instead.
+    if (order.fulfillment === 'DELIVERY' && dispatchTrigger() === 'ON_ACCEPT') {
+      await enqueueDeliveryDispatch(app, order);
     }
 
     return { success: true, data: updated };
@@ -974,6 +972,12 @@ export async function vendorRoutes(app: FastifyInstance) {
     }
     if (order.status === 'PREPARING') {
       const updated = await orderService.updateStatus(order.id, 'READY_FOR_PICKUP', request.user.userId, 'Order ready for pickup');
+      // FUL-005: ON_READY — dispatch NOW, when the food is ready, not at accept.
+      // No-op under the ON_ACCEPT default (the rider was already dispatched); and
+      // never dispatches if a rider is already assigned.
+      if (order.fulfillment === 'DELIVERY' && !order.riderId && dispatchTrigger() === 'ON_READY') {
+        await enqueueDeliveryDispatch(app, order);
+      }
       return { success: true, data: updated };
     }
     if (COURIER_ACTIVE.includes(order.status)) {
