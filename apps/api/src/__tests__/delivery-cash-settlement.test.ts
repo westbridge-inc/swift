@@ -345,3 +345,29 @@ describe('FUL-002: real settlement reconciles to the money-matrix oracle', () =>
     expect(Number(earning!.amount)).toBe(oracle.riderNets);
   });
 });
+
+// FUL-004c: a VENDOR_DELIVERY order is fulfilled by the vendor's own courier —
+// there is no platform rider, so the settlement records NO rider earning and NO
+// vendor-owes-rider debt, and the vendor keeps everything (matrix rows 3/4).
+describe('FUL-004c: VENDOR_DELIVERY settles as matrix rows 3/4 (vendor keeps all, no rider)', () => {
+  it('a vendor-delivered CASH order records no rider earning and no debt — matching the oracle', async () => {
+    const order = await app.prisma.order.create({
+      data: {
+        orderNumber: `VD-${nanoid(10)}`, orderType: 'FOOD_DELIVERY', fulfillment: 'DELIVERY',
+        fulfillmentMode: 'VENDOR_DELIVERY', customerId: customer.userId, vendorId, status: 'DELIVERED',
+        deliveryAddress: 'x', deliveryLat: 6.8, deliveryLng: -58.15,
+        subtotalBase: 1000, subtotalMarkup: 0, subtotalCustomer: 1000, deliveryFee: 400, totalAmount: 1400, paymentMethod: 'CASH',
+      },
+    });
+    await orders.createEarnings(order.id);
+    // no platform rider → no rider earning, no vendor-owes-rider debt
+    expect(await app.prisma.earning.findFirst({ where: { orderId: order.id } })).toBeNull();
+    expect(await app.prisma.deliveryCashSettlement.findUnique({ where: { orderId: order.id } })).toBeNull();
+    // reconciles to oracle row 3: vendor keeps everything, no rider, no obligation
+    const oracle = settle({ foodTotal: 1000, deliveryFee: 400, mode: 'VENDOR_DELIVERY', payment: 'CASH' });
+    expect(oracle.net.VENDOR).toBe(1400);
+    expect(oracle.riderNets).toBe(0);
+    expect(oracle.obligations).toHaveLength(0);
+    await app.prisma.order.delete({ where: { id: order.id } });
+  });
+});
