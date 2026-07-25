@@ -34,6 +34,7 @@ import { getPaymentProvider } from '../../providers/payment/payment-provider';
 import { getStorageProvider } from '../../providers/storage/storage-provider';
 import { mintRenderPath } from '../../providers/storage/envelope';
 import { parsePagination, paginatedResponse } from '../../utils/pagination';
+import { computeOrderSla } from '../fulfillment/order-sla';
 import { startOfDayGY } from '../../utils/time-gy';
 import { AppError, NotFoundError, ForbiddenError } from '../../utils/errors';
 
@@ -1161,6 +1162,38 @@ export async function adminRoutes(app: FastifyInstance) {
         users,
         vendors,
       },
+    };
+  });
+
+  // FUL-008: SLA-breach board (Part 10B). The live delivery orders whose dwell
+  // in some stage is past its threshold — a stuck-order watchlist for ops.
+  // Bounded scan of the oldest live orders (they're the ones that can breach);
+  // for V1 Guyana the live-order set is small. Worst breach first.
+  app.get('/orders/sla-breaches', { preHandler: [adminGuard] }, async () => {
+    const SCAN_CAP = 500;
+    const live = await app.prisma.order.findMany({
+      where: {
+        fulfillment: 'DELIVERY',
+        status: { notIn: ['DELIVERED', 'COMPLETED', 'CANCELLED', 'REFUNDED', 'FAILED'] },
+      },
+      select: {
+        id: true, orderNumber: true, status: true, vendorId: true,
+        placedAt: true, acceptedAt: true, readyAt: true, pickedUpAt: true, deliveredAt: true, cancelledAt: true,
+      },
+      orderBy: { placedAt: 'asc' },
+      take: SCAN_CAP,
+    });
+    const now = new Date();
+    const breaches = live
+      .map((o) => ({ orderNumber: o.orderNumber, vendorId: o.vendorId, ...computeOrderSla(o, now) }))
+      .filter((s) => s.breached)
+      .sort((a, b) => b.worstOverMs - a.worstOverMs);
+    return {
+      success: true,
+      scanCap: SCAN_CAP,
+      scanned: live.length,
+      truncated: live.length === SCAN_CAP,
+      data: breaches,
     };
   });
 
