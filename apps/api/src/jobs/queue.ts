@@ -503,8 +503,8 @@ export function createWorkers(ctx: JobContext) {
 
       if (job.name === 'agent-ops-scan') {
         // Ops agent (spec Part B): deterministic detection → model classifies
-        // a PII-free snapshot → gated execution. No-op unless AGENT_ENABLED=1
-        // with a key; sensitive actions wait for a human in assist mode.
+        // a PII-free snapshot → gated execution. Runs whenever a key is present
+        // (AGENT_ENABLED=0 disables); sensitive actions wait for a human in assist mode.
         const { AgentService, agentEnabled } = await import('../modules/agent/agent.service');
         if (!agentEnabled()) return;
         const agentQueue = new Queue(QUEUE_NAMES.DISPATCH, { connection });
@@ -772,9 +772,10 @@ export async function scheduleRecurringJobs(queues: ReturnType<typeof createQueu
     removeOnFail: 20,
   });
 
-  // Ops agent problem scan (spec Part B): every 60s; a no-op unless
-  // AGENT_ENABLED=1 + ANTHROPIC_API_KEY. Detection is deterministic SQL —
-  // the model only classifies; money actions wait in the approval queue.
+  // Ops agent problem scan (spec Part B): every 60s; runs whenever
+  // ANTHROPIC_API_KEY is set (AGENT_ENABLED=0 disables). Detection is
+  // deterministic SQL — the model only classifies; money actions wait in the
+  // approval queue.
   await queues.dispatchQueue.add('agent-ops-scan', {}, {
     repeat: { every: Number(process.env['AGENT_SCAN_INTERVAL_SECONDS'] ?? 60) * 1000 },
     removeOnComplete: 20,

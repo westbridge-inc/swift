@@ -6,7 +6,12 @@ import { AppError, NotFoundError } from '../../utils/errors';
 import { log } from '../../utils/logger';
 
 // ---------------------------------------------------------------------------
-// Ops agent (spec Part B) — flag-gated OFF (AGENT_ENABLED=1 to turn on).
+// Ops agent (spec Part B) — ON by default wherever an ANTHROPIC_API_KEY is
+// configured (i.e. production); set AGENT_ENABLED=0 to disable. Founder decision
+// 2026-07-25 ("the app should run automatically") — the agent auto-activates
+// once the key is present. Dev/test/CI have no key → it stays off, no surprise
+// LLM cost. Default mode is `assist`: it acts on the safe things and routes the
+// one dangerous action (cancel) through human approval.
 //
 // Division of labour, per the hard rules:
 //   - DETECTION is deterministic SQL (thresholds, never a model).
@@ -51,7 +56,8 @@ export interface ProblemSnapshot {
 }
 
 export function agentEnabled(): boolean {
-  return process.env['AGENT_ENABLED'] === '1' && Boolean(process.env['ANTHROPIC_API_KEY']);
+  // On by default when a key is present; AGENT_ENABLED=0 is the explicit off switch.
+  return process.env['AGENT_ENABLED'] !== '0' && Boolean(process.env['ANTHROPIC_API_KEY']);
 }
 
 export function agentMode(): AgentMode {

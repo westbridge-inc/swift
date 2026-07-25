@@ -97,12 +97,22 @@ afterAll(async () => {
 });
 
 describe('flag plumbing', () => {
-  it('the agent is OFF by default and the scan is a hard no-op', async () => {
+  it('the agent is ON by default when a key is present; AGENT_ENABLED=0 disables it (a hard no-op scan)', async () => {
+    // New default (founder 2026-07-25): unset + key present → ON.
     delete process.env['AGENT_ENABLED'];
+    expect(agentEnabled()).toBe(true);
+
+    // The explicit off switch still works and the disabled scan does nothing.
+    process.env['AGENT_ENABLED'] = '0';
     expect(agentEnabled()).toBe(false);
     const agent = makeAgent({ likelyCause: 'x', recommendedAction: 'ops_alert', urgency: 'high', rationale: 'x' });
     const result = await agent.runOpsScan();
     expect(result).toEqual({ scanned: 0, executed: 0, queued: 0, suggested: 0, errors: 0 });
+
+    // No key means off regardless — dev/test/CI never fire it by accident.
+    process.env['AGENT_ENABLED'] = '1';
+    delete process.env['ANTHROPIC_API_KEY'];
+    expect(agentEnabled()).toBe(false);
   });
 
   it('mode defaults to assist and never to auto', () => {
