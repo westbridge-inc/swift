@@ -252,6 +252,7 @@ describe('ledger lists', () => {
     for (const s of data.unsettled) {
       expect(s.status).not.toBe('SETTLED');
       expect(s.vendor?.name).toBeTruthy();
+      expect(s.vendor?.phone).toBeTruthy(); // reachable to make the cash handover
       expect(typeof s.amount).toBe('number');
     }
   });
@@ -265,7 +266,10 @@ describe('ledger lists', () => {
       .filter((s: any) => owedStatuses.includes(s.status))
       .reduce((sum: number, s: any) => sum + s.amount, 0);
     expect(data.summary.owed).toBe(expected);
-    for (const s of data.unsettled) expect(s.rider?.name).toBeTruthy();
+    for (const s of data.unsettled) {
+      expect(s.rider?.name).toBeTruthy();
+      expect(s.rider?.phone).toBeTruthy(); // reachable to make the cash handover
+    }
   });
 
   it('an outsider rider has an empty ledger', async () => {

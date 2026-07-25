@@ -19,8 +19,12 @@ import type { NotificationService } from '../notification/notification.service';
 
 const SETTLEMENT_INCLUDE = {
   order: { select: { orderNumber: true } },
-  rider: { select: { userId: true, user: { select: { firstName: true, lastName: true } } } },
-  vendor: { select: { name: true, logoUrl: true, owner: { select: { userId: true } } } },
+  // Phones are included so the two parties can actually reach each other to make
+  // the CASH handover this ledger tracks — you can't hand someone money you owe
+  // if you can't call them. Same contact the delivery already shared between
+  // them; the ledger is scoped (each side sees only its own settlements).
+  rider: { select: { userId: true, user: { select: { firstName: true, lastName: true, phone: true } } } },
+  vendor: { select: { name: true, logoUrl: true, phone: true, owner: { select: { userId: true } } } },
 } as const;
 
 /** Wire shape both apps render — Decimal flattened to number. */
@@ -34,8 +38,8 @@ function toWire(s: any) {
     riderConfirmedAt: s.riderConfirmedAt,
     storeConfirmedAt: s.storeConfirmedAt,
     createdAt: s.createdAt,
-    vendor: s.vendor ? { name: s.vendor.name, logoUrl: s.vendor.logoUrl } : null,
-    rider: s.rider?.user ? { name: [s.rider.user.firstName, s.rider.user.lastName].filter(Boolean).join(' ') } : null,
+    vendor: s.vendor ? { name: s.vendor.name, logoUrl: s.vendor.logoUrl, phone: s.vendor.phone ?? null } : null,
+    rider: s.rider?.user ? { name: [s.rider.user.firstName, s.rider.user.lastName].filter(Boolean).join(' '), phone: s.rider.user.phone ?? null } : null,
   };
 }
 
