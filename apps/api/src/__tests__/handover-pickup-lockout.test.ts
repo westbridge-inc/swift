@@ -133,3 +133,37 @@ describe('pickup-code lockout (HND-001)', () => {
     expect((await app.prisma.order.findUniqueOrThrow({ where: { id } })).pickupCodeAttempts).toBe(2);
   });
 });
+
+describe('verifier-never-sees-code (HND-003)', () => {
+  const getDetail = (id: string) =>
+    app.inject({ method: 'GET', url: `/api/v1/vendor/orders/${id}`, headers: { authorization: `Bearer ${vendorToken}` } });
+  const listOrders = () =>
+    app.inject({ method: 'GET', url: '/api/v1/vendor/orders', headers: { authorization: `Bearer ${vendorToken}` } });
+
+  it('the vendor order DETAIL never exposes the pickup code (the vendor is the verifier)', async () => {
+    const id = await mkPickupOrder('246810');
+    const res = await getDetail(id);
+    expect(res.statusCode).toBe(200);
+    const order = res.json().data;
+    expect(order.id).toBe(id); // it's really the order...
+    expect(order.pickupCode).toBeUndefined(); // ...but the code is stripped
+    expect(order.pickupCodeAttempts).toBeUndefined();
+    expect(order.ridePin).toBeUndefined();
+  });
+
+  it('the vendor order BOARD (list) never exposes the pickup code', async () => {
+    const id = await mkPickupOrder('135790');
+    const res = await listOrders();
+    expect(res.statusCode).toBe(200);
+    const mine = res.json().data.find((o: { id: string }) => o.id === id);
+    expect(mine).toBeTruthy();
+    expect(mine.pickupCode).toBeUndefined();
+    expect(mine.ridePin).toBeUndefined();
+  });
+
+  it('stripping the code did NOT break verification — the handover still enforces it', async () => {
+    const id = await mkPickupOrder('112233');
+    expect((await completePickup(id, '999999')).statusCode).toBe(400); // wrong still rejected
+    expect((await completePickup(id, '112233')).statusCode).toBe(200); // right still works
+  });
+});

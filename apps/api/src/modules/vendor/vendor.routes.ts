@@ -447,6 +447,12 @@ async function resolveOwnedOrder(app: FastifyInstance, userId: string, orderId: 
   const { vendorIds } = await resolveVendor(app, userId);
   const order = await app.prisma.order.findUnique({
     where: { id: orderId },
+    // HND-003: the vendor is the pickup-code VERIFIER — it must never READ the
+    // code (or it could close the handover without the customer present). The
+    // shared vendor order object is stripped of every handover secret by
+    // construction; the one path that needs the code (complete-pickup) fetches
+    // it explicitly. Same rule the driver ride-PIN response already follows.
+    omit: { pickupCode: true, pickupCodeAttempts: true, ridePin: true },
     include: {
       items: true,
       statusHistory: { orderBy: { createdAt: 'desc' } },
@@ -846,6 +852,8 @@ export async function vendorRoutes(app: FastifyInstance) {
     const [orders, total] = await Promise.all([
       app.prisma.order.findMany({
         where,
+        // HND-003: strip handover secrets from the vendor board too (see resolveOwnedOrder).
+        omit: { pickupCode: true, pickupCodeAttempts: true, ridePin: true },
         include: {
           items: true,
           customer: { select: { id: true, firstName: true, lastName: true, avatar: true } },
@@ -1209,23 +1217,29 @@ export async function vendorRoutes(app: FastifyInstance) {
       throw new AppError(400, 'INVALID_STATUS', `Cannot complete pickup from ${order.status} status`);
     }
     const { code } = completePickupSchema.parse(request.body ?? {});
+    // HND-003: the shared vendor order object never carries the code (the vendor
+    // is the verifier). Read the secret ONLY here, where it's actually checked.
+    const secret = await app.prisma.order.findUnique({
+      where: { id: order.id },
+      select: { pickupCode: true, pickupCodeAttempts: true },
+    });
     // SWIFT-077: when a pickup code is set, it is REQUIRED — it's the only proof
     // the person collecting is the customer (mirrors the taxi ride PIN). The old
     // check let a missing code through (`code != null`), so the handover could be
     // closed without ever verifying it — anyone could claim the order.
-    if (order.pickupCode) {
+    if (secret?.pickupCode) {
       if (code == null || code === '') {
         throw new AppError(400, 'MISSING_PICKUP_CODE', "Enter the customer's pickup code to hand over this order.");
       }
       // HND-001: brute-force lockout, parity with the taxi ride PIN. A 6-digit
       // code is guessable without it. Refuse once the budget is spent, then
       // count this try BEFORE comparing so a wrong guess always burns an attempt.
-      const { locked, remaining } = handoverAttemptState(order.pickupCodeAttempts);
+      const { locked, remaining } = handoverAttemptState(secret.pickupCodeAttempts);
       if (locked) {
         throw new AppError(400, 'MAX_ATTEMPTS', 'Too many incorrect pickup-code attempts on this order. Please contact support.');
       }
       await app.prisma.order.update({ where: { id: order.id }, data: { pickupCodeAttempts: { increment: 1 } } });
-      if (code !== order.pickupCode) {
+      if (code !== secret.pickupCode) {
         throw new AppError(400, 'WRONG_PICKUP_CODE', `That pickup code does not match. ${remaining} attempt(s) remaining.`);
       }
     }
