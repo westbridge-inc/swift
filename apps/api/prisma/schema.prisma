@@ -749,6 +749,10 @@ model Vendor {
   /// courier (vs a platform rider). Default off — existing vendors are
   /// platform-rider-only until they opt in.
   selfDeliveryEnabled Boolean      @default(false)
+  /// FUL-007: kitchen-capacity guard. When set, new orders are refused once
+  /// the vendor already holds this many in-flight (still-in-kitchen) orders —
+  /// server-computed so it can't be gamed. Null = unlimited (current behavior).
+  maxConcurrentOrders Int?
   deliveryRadius   Float           @default(10.0)
   minOrderAmount   Decimal         @default(0) @db.Decimal(10, 2)
   estimatedPrepTime Int            @default(30)
