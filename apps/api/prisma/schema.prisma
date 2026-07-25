@@ -1968,6 +1968,61 @@ model AuditLog {
 }
 
 // ==========================================
+// CONTENT MODERATION (STORE-001 — store-compliance §5.4)
+// In-app reporting of objectionable user-generated content (ratings, chat,
+// profiles, listings) + a moderation queue. Apple 1.2 / Google UGC & CSAE
+// policy REQUIRE both a report mechanism and a way to act on reports. Reporter
+// and resolver are plain ids (audit-log style — no relation, no cascade).
+// ==========================================
+
+enum ReportTargetType {
+  RATING
+  CHAT_MESSAGE
+  USER
+  VENDOR
+  ITEM
+}
+
+enum ReportReason {
+  SPAM
+  HARASSMENT
+  HATE_SPEECH
+  VIOLENCE
+  SEXUAL_CONTENT
+  CSAE // child sexual abuse & exploitation — legal escalation is a founder/legal process
+  ILLEGAL_GOODS
+  OTHER
+}
+
+enum ReportStatus {
+  PENDING
+  REVIEWING
+  ACTIONED
+  DISMISSED
+}
+
+model ContentReport {
+  id             String           @id @default(cuid())
+  reporterId     String
+  targetType     ReportTargetType
+  targetId       String
+  reason         ReportReason
+  detail         String?
+  status         ReportStatus     @default(PENDING)
+  resolvedBy     String?
+  resolvedAt     DateTime?
+  resolutionNote String?
+  createdAt      DateTime         @default(now())
+  updatedAt      DateTime         @updatedAt
+
+  // One report per reporter per target — re-reporting is idempotent, not spam.
+  @@unique([reporterId, targetType, targetId])
+  @@index([status, createdAt]) // the FIFO moderation queue
+  @@index([targetType, targetId]) // "how many reports on this thing?"
+  @@map("content_reports")
+}
+
+// ==========================================
 // ACCOUNT RECOVERY
 // ==========================================
 

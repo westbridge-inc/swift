@@ -14,6 +14,7 @@ import { driverRoutes } from './modules/driver/driver.routes';
 import { adminRoutes } from './modules/admin/admin.routes';
 import { searchRoutes } from './modules/search/search.routes';
 import { chatRoutes } from './modules/chat/chat.routes';
+import { moderationRoutes } from './modules/moderation/moderation.routes';
 import { verificationRoutes } from './modules/verification/verification.routes';
 import { ridesRoutes } from './modules/rides/rides.routes';
 import { placesRoutes } from './modules/places/places.routes';
@@ -262,6 +263,7 @@ async function buildApp() {
   await app.register(adminRoutes, { prefix: '/api/v1/admin' });
   await app.register(searchRoutes, { prefix: '/api/v1' });
   await app.register(chatRoutes, { prefix: '/api/v1/chat' });
+  await app.register(moderationRoutes, { prefix: '/api/v1' });
   await app.register(verificationRoutes, { prefix: '/api/v1/verification' });
   await app.register(ridesRoutes, { prefix: '/api/v1/rides' });
   await app.register(placesRoutes, { prefix: '/api/v1/places' });
