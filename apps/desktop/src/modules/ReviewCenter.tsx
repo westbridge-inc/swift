@@ -33,6 +33,15 @@ function QuickLook({ docId, onClose }: { docId: string; onClose: () => void }) {
   );
 }
 
+// The document itself, always visible in the workspace. A fresh audited link is
+// minted per doc (server-side logged); PDFs render in the webview, images inline.
+function DocViewer({ docId }: { docId: string }) {
+  const url = useQuery({ queryKey: ['doc-url', docId], queryFn: () => documentViewUrl(docId), staleTime: 0 });
+  if (url.isLoading) return <div className="grid h-full place-items-center text-sm text-neutral-500">Fetching a fresh audited link…</div>;
+  if (url.isError) return <div className="grid h-full place-items-center px-6 text-center text-sm text-[var(--swift-red)]">{(url.error as Error).message}</div>;
+  return <iframe src={url.data} title="document" className="h-full w-full bg-white" />;
+}
+
 function ApprovePanel({ doc, onDone, onCancel }: { doc: ReviewDoc; onDone: () => void; onCancel: () => void }) {
   const isInsurance = doc.docType === 'vehicle_insurance';
   const [expiresAt, setExpiresAt] = useState('');
@@ -185,9 +194,9 @@ export default function ReviewCenter() {
         if (e.key === 'Escape') setPanel(null);
         return;
       }
-      if (e.key === 'j' || e.key === 'ArrowDown') setCursor((c) => Math.min(c + 1, rows.length - 1));
-      if (e.key === 'k' || e.key === 'ArrowUp') setCursor((c) => Math.max(c - 1, 0));
-      if (e.key === ' ') { e.preventDefault(); setLook((v) => !v); }
+      if (e.key === 'j' || e.key === 'ArrowDown') { setCursor((c) => Math.min(c + 1, rows.length - 1)); setPanel(null); }
+      if (e.key === 'k' || e.key === 'ArrowUp') { setCursor((c) => Math.max(c - 1, 0)); setPanel(null); }
+      if (e.key === ' ' || e.key === 'f') { e.preventDefault(); setLook((v) => !v); }
       if (e.key === 'Escape') { setLook(false); setPanel(null); }
       if (e.key === 'a' && current) setPanel('approve');
       if (e.key === 'r' && current) setPanel('reject');
@@ -211,12 +220,13 @@ export default function ReviewCenter() {
   }
 
   return (
-    <div className="grid grid-cols-[1.1fr_1fr] gap-5">
-      <div>
+    <div className="flex h-[calc(100vh-8.5rem)] gap-4">
+      {/* LEFT — the queue */}
+      <div className="flex w-80 shrink-0 flex-col">
         <p className="mb-2 text-xs text-neutral-400">
-          {q.data?.meta.total ?? 0} waiting · J/K move · Space quick look · A approve · R reject
+          {q.data?.meta.total ?? 0} waiting · J/K move · A approve · R reject · F full-screen
         </p>
-        <div ref={listRef} className="max-h-[75vh] space-y-1.5 overflow-auto pr-1">
+        <div ref={listRef} className="flex-1 space-y-1.5 overflow-auto pr-1">
           {rows.length === 0 && (
             <p className="rounded-2xl border border-dashed border-neutral-200 p-10 text-center text-sm text-neutral-400">
               Queue is clear — nobody is waiting on you.
@@ -228,16 +238,16 @@ export default function ReviewCenter() {
             return (
               <button
                 key={d.id}
-                onClick={() => setCursor(i)}
-                className={`block w-full rounded-xl border p-3 text-left ${i === cursor ? 'border-[var(--swift-red)] bg-[var(--swift-red)]/10' : 'border-neutral-200 bg-neutral-100 hover:bg-neutral-100'}`}
+                onClick={() => { setCursor(i); setPanel(null); }}
+                className={`block w-full rounded-xl border p-3 text-left ${i === cursor ? 'border-[var(--swift-red)] bg-[var(--swift-red)]/10' : 'border-neutral-200 bg-white hover:bg-neutral-50'}`}
               >
-                <div className="flex items-center justify-between">
-                  <p className="text-sm font-semibold">
+                <div className="flex items-center justify-between gap-2">
+                  <p className="truncate text-sm font-semibold">
                     {[d.user?.firstName, d.user?.lastName].filter(Boolean).join(' ') || d.user?.phone}
                     <span className="ml-2 text-neutral-400">{d.user?.countryCode}</span>
                   </p>
-                  <span className={`rounded-full px-2 py-0.5 text-[11px] font-bold ${breach ? 'bg-[var(--swift-red)]/20 text-[var(--swift-red)]' : 'bg-neutral-100 text-neutral-500'}`}>
-                    {breach ? `${waited}h — SLA breached` : `${waited}h`}
+                  <span className={`shrink-0 rounded-full px-2 py-0.5 text-[11px] font-bold ${breach ? 'bg-[var(--swift-red)]/20 text-[var(--swift-red)]' : 'bg-neutral-100 text-neutral-500'}`}>
+                    {breach ? `${waited}h !` : `${waited}h`}
                   </span>
                 </div>
                 <p className="mt-0.5 text-xs text-neutral-500">{pretty(d.docType)} · {d.role}</p>
@@ -247,35 +257,32 @@ export default function ReviewCenter() {
         </div>
       </div>
 
-      <div className="space-y-3">
-        {current ? (
-          <>
-            <div className="rounded-xl border border-neutral-200 bg-neutral-100 p-4">
-              <p className="text-sm font-bold">{pretty(current.docType)}</p>
-              <p className="mt-1 text-xs text-neutral-500">
-                {[current.user?.firstName, current.user?.lastName].filter(Boolean).join(' ')} · {current.user?.phone} · submitted{' '}
-                {new Date(current.createdAt).toLocaleString()}
+      {/* RIGHT — the document workspace: doc always visible, decide one by one */}
+      {current ? (
+        <div className="flex min-w-0 flex-1 flex-col">
+          <div className="mb-3 flex items-start justify-between gap-3">
+            <div className="min-w-0">
+              <p className="text-lg font-bold">{pretty(current.docType)}</p>
+              <p className="truncate text-xs text-neutral-500">
+                {[current.user?.firstName, current.user?.lastName].filter(Boolean).join(' ')} · {current.user?.phone} · {current.role} · submitted {new Date(current.createdAt).toLocaleString()}
               </p>
-              <button
-                onClick={() => setLook(true)}
-                className="mt-3 rounded-lg border border-neutral-200 px-3 py-1.5 text-sm hover:bg-neutral-100"
-              >
-                Quick Look (Space)
-              </button>
             </div>
-            {panel === 'approve' && <ApprovePanel doc={current} onDone={refresh} onCancel={() => setPanel(null)} />}
-            {panel === 'reject' && <RejectPanel doc={current} onDone={refresh} onCancel={() => setPanel(null)} />}
-            {panel === null && (
-              <div className="flex gap-2">
-                <button onClick={() => setPanel('approve')} className="rounded-lg bg-green-600 px-4 py-2 text-sm font-semibold">Approve (A)</button>
-                <button onClick={() => setPanel('reject')} className="rounded-lg bg-[var(--swift-red)] px-4 py-2 text-sm font-semibold">Reject (R)</button>
-              </div>
-            )}
-          </>
-        ) : (
-          <p className="text-sm text-neutral-400">Select a document.</p>
-        )}
-      </div>
+            <div className="flex shrink-0 gap-2">
+              <button onClick={() => setLook(true)} className="rounded-lg border border-neutral-200 px-3 py-2 text-sm hover:bg-neutral-50">⤢ Full screen</button>
+              <button onClick={() => setPanel(panel === 'reject' ? null : 'reject')} className="rounded-lg bg-[var(--swift-red)] px-4 py-2 text-sm font-semibold text-white">Reject (R)</button>
+              <button onClick={() => setPanel(panel === 'approve' ? null : 'approve')} className="rounded-lg bg-green-600 px-4 py-2 text-sm font-semibold text-white">Approve (A)</button>
+            </div>
+          </div>
+          <div className="min-h-0 flex-1 overflow-hidden rounded-xl border border-neutral-200 bg-white">
+            <DocViewer docId={current.id} />
+          </div>
+          {panel === 'approve' && <div className="mt-3"><ApprovePanel doc={current} onDone={refresh} onCancel={() => setPanel(null)} /></div>}
+          {panel === 'reject' && <div className="mt-3"><RejectPanel doc={current} onDone={refresh} onCancel={() => setPanel(null)} /></div>}
+        </div>
+      ) : (
+        <div className="grid flex-1 place-items-center text-sm text-neutral-400">Queue is clear — nobody is waiting on you.</div>
+      )}
+
       {look && current && <QuickLook docId={current.id} onClose={() => setLook(false)} />}
     </div>
   );
