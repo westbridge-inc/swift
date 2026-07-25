@@ -112,6 +112,33 @@ const PRIVACY = page(
 `,
 );
 
+// STORE-003: published Child Safety Standards (store-compliance §5.4). Google
+// Play requires apps with user-generated content to publish a child-safety
+// standards page, provide an in-app way to report CSAE, and name a point of
+// contact. This page states the standard and links it to the STORE-001 report
+// mechanism (in-app report → CSAE) and a dedicated contact.
+const CHILD_SAFETY = page(
+  'Child Safety Standards',
+  `
+<p>Swift has zero tolerance for child sexual abuse and exploitation (CSAE). This page sets out the standards we hold every account to, and how anyone can report a concern.</p>
+
+<h2>1. What is prohibited</h2>
+<p>It is strictly forbidden to use Swift to create, share, request, or promote any content or conduct that sexually abuses, exploits, or endangers a child. This includes child sexual abuse material (CSAM), grooming, sextortion, trafficking, and any sexualisation of a minor — in ratings, chat messages, profiles, images, listings, or any other surface. There is no exception.</p>
+
+<h2>2. How to report</h2>
+<p>Any user can report content or a person directly in the app: use the <b>Report</b> action on a review, chat message, profile or listing and select the <b>Child safety (CSAE)</b> reason. Reports reach our moderation team immediately and are prioritised. You can also email our child-safety point of contact at <b><a href="mailto:childsafety@swift.gy">childsafety@swift.gy</a></b>.</p>
+
+<h2>3. How we respond</h2>
+<p>CSAE reports are triaged ahead of all other moderation. Confirmed material is removed, the account is banned, and we report to the relevant authorities and, where applicable, to recognised child-protection bodies such as the National Center for Missing &amp; Exploited Children (NCMEC), as the law requires. We preserve evidence needed for those reports.</p>
+
+<h2>4. Prevention</h2>
+<p>Every account is phone-verified, higher-trust actions require government-ID verification, and a live registration selfie deters fake accounts. Reports feed an account risk system that restricts and removes abusers.</p>
+
+<h2>5. Point of contact</h2>
+<p>For child-safety matters, including law-enforcement and child-protection enquiries: <b><a href="mailto:childsafety@swift.gy">childsafety@swift.gy</a></b>.</p>
+`,
+);
+
 export async function legalRoutes(app: FastifyInstance) {
   app.get('/terms', async (_request, reply) => {
     reply.header('content-type', 'text/html; charset=utf-8');
@@ -120,5 +147,9 @@ export async function legalRoutes(app: FastifyInstance) {
   app.get('/privacy', async (_request, reply) => {
     reply.header('content-type', 'text/html; charset=utf-8');
     return PRIVACY;
+  });
+  app.get('/child-safety', async (_request, reply) => {
+    reply.header('content-type', 'text/html; charset=utf-8');
+    return CHILD_SAFETY;
   });
 }

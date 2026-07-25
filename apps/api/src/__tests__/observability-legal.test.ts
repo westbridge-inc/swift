@@ -66,4 +66,16 @@ describe('legal pages', () => {
     expect(res.body).toContain('Data Protection Act 2023');
     expect(res.body).toContain('privacy@swift.gy');
   });
+
+  it('serves the Child Safety Standards page (STORE-003 — Google Play UGC gate)', async () => {
+    const res = await app.inject({ method: 'GET', url: '/legal/child-safety' });
+    expect(res.statusCode).toBe(200);
+    expect(res.headers['content-type']).toContain('text/html');
+    expect(res.body).toContain('Child Safety Standards');
+    // The store requires: a stated CSAE prohibition, an in-app report path, and
+    // a named point of contact.
+    expect(res.body).toContain('CSAE');
+    expect(res.body).toContain('Report');
+    expect(res.body).toContain('childsafety@swift.gy');
+  });
 });
