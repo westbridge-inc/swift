@@ -1,45 +1,53 @@
 import { invoke } from '@tauri-apps/api/core';
 
 // Mission Control talks ONLY to the admin API (desktop standing order 26).
-// Tokens live in the macOS Keychain via the Rust commands — never localStorage.
 const API_URL = import.meta.env.VITE_API_URL ?? 'http://localhost:3000';
+
+// Token store: the macOS Keychain in the native Tauri app (never localStorage
+// in production). In a browser preview (`pnpm dev`) Tauri's invoke doesn't
+// exist — calling it crashes with `window.__TAURI_INTERNALS__` undefined — so
+// there we fall back to localStorage. The inTauri gate keeps the real app on
+// the Keychain.
+const inTauri = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
+const KC = 'swift-mc:';
+async function kcGet(key: string): Promise<string | null> {
+  if (inTauri) { try { return (await invoke<string | null>('keychain_get', { key })) ?? null; } catch { return null; } }
+  try { return localStorage.getItem(KC + key); } catch { return null; }
+}
+function kcSet(key: string, value: string): void {
+  if (inTauri) { invoke('keychain_set', { key, value }).catch(() => {}); return; }
+  try { localStorage.setItem(KC + key, value); } catch { /* ignore */ }
+}
+async function kcDelete(key: string): Promise<void> {
+  if (inTauri) { await invoke('keychain_delete', { key }).catch(() => {}); return; }
+  try { localStorage.removeItem(KC + key); } catch { /* ignore */ }
+}
 
 let accessToken: string | null = null;
 
 export async function loadSession(): Promise<boolean> {
-  // Session restore reads the Keychain — which, on UNSIGNED dev builds,
-  // fires an unskippable OS permission prompt after every rebuild (each
-  // ad-hoc signature is a "new app" to macOS, and the dialog rejects
-  // synthetic input by design). Until builds are signed with a stable
-  // identity, restore is opt-in: without the flag we start logged-out and
-  // never touch the Keychain at launch. Writes remain fire-and-forget, so
-  // flipping the flag on a signed build restores sessions seamlessly.
-  if (!import.meta.env.VITE_RESTORE_SESSION) return false;
-  try {
-    accessToken = (await invoke<string | null>('keychain_get', { key: 'access' })) ?? null;
-  } catch {
-    accessToken = null;
-  }
+  // Tauri keychain restore fires an OS prompt on unsigned dev builds, so it's
+  // opt-in there (VITE_RESTORE_SESSION). The browser preview has no such prompt
+  // → restore from localStorage freely so a page refresh keeps you signed in.
+  if (inTauri && !import.meta.env.VITE_RESTORE_SESSION) return false;
+  accessToken = await kcGet('access');
   return !!accessToken;
 }
 
 function storeSession(access: string, refresh?: string | null) {
-  // Memory is the session; Keychain is persistence. On ad-hoc dev builds the
-  // OS may prompt (or deny) keychain access — that must NEVER block login,
-  // so the writes are fire-and-forget. Worst case: re-login next launch.
   accessToken = access;
-  invoke('keychain_set', { key: 'access', value: access }).catch(() => {});
-  if (refresh) invoke('keychain_set', { key: 'refresh', value: refresh }).catch(() => {});
+  kcSet('access', access);
+  if (refresh) kcSet('refresh', refresh);
 }
 
 export async function clearSession() {
   accessToken = null;
-  await invoke('keychain_delete', { key: 'access' }).catch(() => {});
-  await invoke('keychain_delete', { key: 'refresh' }).catch(() => {});
+  await kcDelete('access');
+  await kcDelete('refresh');
 }
 
 async function tryRefresh(): Promise<string | null> {
-  const refreshToken = await invoke<string | null>('keychain_get', { key: 'refresh' });
+  const refreshToken = await kcGet('refresh');
   if (!refreshToken) return null;
   const res = await fetch(`${API_URL}/api/v1/auth/refresh`, {
     method: 'POST',
