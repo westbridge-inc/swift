@@ -1246,7 +1246,24 @@ export async function adminRoutes(app: FastifyInstance) {
       app.prisma.contentReport.count({ where }),
       app.prisma.contentReport.count({ where: { status: 'PENDING' } }),
     ]);
-    return { success: true, pendingTotal, ...paginatedResponse(reports, total, { page, limit, skip }) };
+
+    // STORE-002: enrich each report with a snapshot of WHAT was reported, so the
+    // reviewer sees the content, not an opaque id. Batched by type (no N+1). A
+    // null target means the content was already removed — itself a useful signal.
+    const idsOf = (t: string) => [...new Set(reports.filter((r) => r.targetType === t).map((r) => r.targetId))];
+    const preview = new Map<string, unknown>();
+    const stash = (t: string, rows: Array<{ id: string }>) => rows.forEach((row) => preview.set(`${t}:${row.id}`, row));
+    const [ratings, messages, users, vendors, items] = await Promise.all([
+      idsOf('RATING').length ? app.prisma.rating.findMany({ where: { id: { in: idsOf('RATING') } }, select: { id: true, comment: true, score: true, raterId: true } }) : [],
+      idsOf('CHAT_MESSAGE').length ? app.prisma.chatMessage.findMany({ where: { id: { in: idsOf('CHAT_MESSAGE') } }, select: { id: true, message: true, senderId: true } }) : [],
+      idsOf('USER').length ? app.prisma.user.findMany({ where: { id: { in: idsOf('USER') } }, select: { id: true, firstName: true, lastName: true, avatar: true } }) : [],
+      idsOf('VENDOR').length ? app.prisma.vendor.findMany({ where: { id: { in: idsOf('VENDOR') } }, select: { id: true, name: true, slug: true } }) : [],
+      idsOf('ITEM').length ? app.prisma.item.findMany({ where: { id: { in: idsOf('ITEM') } }, select: { id: true, name: true } }) : [],
+    ]);
+    stash('RATING', ratings); stash('CHAT_MESSAGE', messages); stash('USER', users); stash('VENDOR', vendors); stash('ITEM', items);
+    const enriched = reports.map((r) => ({ ...r, target: preview.get(`${r.targetType}:${r.targetId}`) ?? null }));
+
+    return { success: true, pendingTotal, ...paginatedResponse(enriched, total, { page, limit, skip }) };
   });
 
   app.put('/moderation/reports/:id', { preHandler: [adminGuard] }, async (request) => {

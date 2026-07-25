@@ -20,6 +20,7 @@ const userIds: string[] = [];
 let reporterId = '';
 let reporterToken = '';
 let adminToken = '';
+let adminId = '';
 
 async function mkUser(roles: UserRole[], activeRole: UserRole) {
   const u = await app.prisma.user.create({
@@ -54,7 +55,8 @@ beforeAll(async () => {
 
   const reporter = await mkUser(['CUSTOMER'] as UserRole[], 'CUSTOMER' as UserRole);
   reporterId = reporter.id; reporterToken = reporter.token;
-  adminToken = (await mkUser(['ADMIN'] as UserRole[], 'ADMIN' as UserRole)).token;
+  const admin = await mkUser(['ADMIN'] as UserRole[], 'ADMIN' as UserRole);
+  adminToken = admin.token; adminId = admin.id;
 });
 
 afterAll(async () => {
@@ -132,5 +134,21 @@ describe('admin moderation queue (STORE-001)', () => {
   it('resolving a non-existent report is a 404', async () => {
     const res = await resolve(`missing-${nanoid(6)}`, { status: 'DISMISSED' });
     expect(res.statusCode).toBe(404);
+  });
+
+  it('STORE-002: the queue enriches each row with the reported content (or null if gone)', async () => {
+    // Report a REAL user (the admin) — the row should carry that user's snapshot.
+    await report(reporterToken, { targetType: 'USER', targetId: adminId, reason: 'HARASSMENT' });
+    // Report a target that does not exist — its snapshot should be null.
+    const ghostId = `ghost-${nanoid(6)}`;
+    await report(reporterToken, { targetType: 'ITEM', targetId: ghostId, reason: 'OTHER' });
+
+    const rows = (await queue()).json().data as Array<{ targetType: string; targetId: string; target: { firstName?: string } | null }>;
+    const userRow = rows.find((r) => r.targetType === 'USER' && r.targetId === adminId);
+    expect(userRow?.target).toBeTruthy();
+    expect(userRow?.target?.firstName).toBe('Mod'); // the admin's seeded first name
+
+    const ghostRow = rows.find((r) => r.targetType === 'ITEM' && r.targetId === ghostId);
+    expect(ghostRow?.target).toBeNull(); // content already gone
   });
 });
