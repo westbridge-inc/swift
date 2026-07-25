@@ -24,15 +24,20 @@ function Login({ onDone }: { onDone: () => void }) {
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
+  // Strip ALL whitespace so a typed/pasted "+592 600 1000" matches the stored
+  // E.164 "+5926001000" — and only digits from the code.
+  const cleanPhone = () => phone.replace(/\s+/g, '');
+  const cleanCode = () => code.replace(/\D+/g, '');
+
   async function send() {
     setError(null); setBusy(true);
-    try { await sendOtp(phone.trim()); setStep('code'); }
+    try { await sendOtp(cleanPhone()); setStep('code'); }
     catch (e) { setError((e as Error).message); }
     finally { setBusy(false); }
   }
   async function verify() {
     setError(null); setBusy(true);
-    try { await verifyAdminLogin(phone.trim(), code.trim()); onDone(); }
+    try { await verifyAdminLogin(cleanPhone(), cleanCode()); onDone(); }
     catch (e) { setError((e as Error).message); setBusy(false); }
   }
 
