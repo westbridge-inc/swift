@@ -172,6 +172,29 @@ export const fetchAgentApprovals = () =>
 export const decideAgentApproval = (id: string, approve: boolean) =>
   apiFetch(`/api/v1/admin/agent/approvals/${id}/${approve ? 'approve' : 'reject'}`, { method: 'POST', body: '{}' });
 
+// ── Moderation (UGC reports — STORE-001/002) ─────────────────────────────────
+export interface ModerationReport {
+  id: string;
+  targetType: string;
+  targetId: string;
+  reason: string;
+  detail: string | null;
+  status: string;
+  createdAt: string;
+  /** STORE-002: a snapshot of the reported content (or null if it's already gone). */
+  target: Record<string, unknown> | null;
+}
+export const fetchModerationQueue = (status = 'PENDING') =>
+  apiFetch(`/api/v1/admin/moderation/reports?status=${status}&limit=100`).then((r) => ({
+    rows: r.data as ModerationReport[],
+    pendingTotal: r.pendingTotal as number,
+  }));
+export const resolveReport = (id: string, status: 'ACTIONED' | 'DISMISSED' | 'REVIEWING', note?: string) =>
+  apiFetch(`/api/v1/admin/moderation/reports/${id}`, {
+    method: 'PUT',
+    body: JSON.stringify({ status, ...(note ? { note } : {}) }),
+  });
+
 // ── Compliance ───────────────────────────────────────────────────────────────
 export const fetchCompliance = () => apiFetch('/api/v1/admin/compliance').then((r) => r.data);
 export const runComplianceAudit = () =>
