@@ -1087,6 +1087,9 @@ model Order {
   ridePinVerified   Boolean   @default(false)
   ridePinAttempts   Int       @default(0)
   ridePinVerifiedAt DateTime?
+  /// HND-001: failed pickup-code attempts, for the same brute-force lockout the
+  /// taxi ride PIN already has (a 6-digit handover code is guessable without it).
+  pickupCodeAttempts Int      @default(0)
 
   /// How this order is fulfilled (locked model): DELIVERY dispatches a mover,
   /// PICKUP skips dispatch, APPOINTMENT books the slot at vendor acceptance.

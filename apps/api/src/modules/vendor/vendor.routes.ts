@@ -6,6 +6,7 @@ import { PickingService } from '../order/picking.service';
 import { makeDispatchService } from '../dispatch/dispatch.service';
 import { dispatchTrigger, enqueueDeliveryDispatch } from '../dispatch/dispatch-trigger';
 import { resolveDeliveryMode } from '../fulfillment/fulfillment-mode';
+import { handoverAttemptState } from '../handover/handover-security';
 import { NotificationService } from '../notification/notification.service';
 import { BookingService } from '../booking/booking.service';
 import { VerificationService } from '../verification/verification.service';
@@ -1216,8 +1217,16 @@ export async function vendorRoutes(app: FastifyInstance) {
       if (code == null || code === '') {
         throw new AppError(400, 'MISSING_PICKUP_CODE', "Enter the customer's pickup code to hand over this order.");
       }
+      // HND-001: brute-force lockout, parity with the taxi ride PIN. A 6-digit
+      // code is guessable without it. Refuse once the budget is spent, then
+      // count this try BEFORE comparing so a wrong guess always burns an attempt.
+      const { locked, remaining } = handoverAttemptState(order.pickupCodeAttempts);
+      if (locked) {
+        throw new AppError(400, 'MAX_ATTEMPTS', 'Too many incorrect pickup-code attempts on this order. Please contact support.');
+      }
+      await app.prisma.order.update({ where: { id: order.id }, data: { pickupCodeAttempts: { increment: 1 } } });
       if (code !== order.pickupCode) {
-        throw new AppError(400, 'WRONG_PICKUP_CODE', 'That pickup code does not match.');
+        throw new AppError(400, 'WRONG_PICKUP_CODE', `That pickup code does not match. ${remaining} attempt(s) remaining.`);
       }
     }
     const updated = await orderService.updateStatus(order.id, 'COMPLETED', request.user.userId, 'Picked up by customer');
