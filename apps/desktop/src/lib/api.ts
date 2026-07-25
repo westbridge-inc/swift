@@ -185,6 +185,29 @@ export interface AgentAuditEvent {
 export const fetchAgentAudit = () =>
   apiFetch('/api/v1/admin/agent/audit?limit=50').then((r) => r.data as AgentAuditEvent[]);
 
+// ── Support tickets ──────────────────────────────────────────────────────────
+export interface SupportTicket {
+  id: string;
+  category: string;
+  subject: string;
+  message: string;
+  status: string;
+  adminNote: string | null;
+  orderId: string | null;
+  createdAt: string;
+  user: { firstName: string | null; lastName: string | null; phone: string } | null;
+}
+export const fetchSupport = (status = 'OPEN') =>
+  apiFetch(`/api/v1/admin/support?status=${status}`).then((r) => ({
+    tickets: r.data.tickets as SupportTicket[],
+    total: r.data.total as number,
+  }));
+export const resolveTicket = (id: string, status: 'IN_PROGRESS' | 'RESOLVED', adminNote?: string) =>
+  apiFetch(`/api/v1/admin/support/${id}/resolve`, {
+    method: 'PUT',
+    body: JSON.stringify({ status, ...(adminNote ? { adminNote } : {}) }),
+  });
+
 // ── SLA / stuck orders (FUL-008) ─────────────────────────────────────────────
 export interface SlaBreach {
   orderId: string;
