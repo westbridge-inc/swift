@@ -1,7 +1,8 @@
 import type { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 import { z } from 'zod';
 import { VendorType, OrderStatus, NotificationType } from '@prisma/client';
-import { calculateDeliveryFee, expressDeliveryFee } from '../../utils/markup';
+import { calculateDeliveryFee, deliveryFeeFromRates, expressDeliveryFee } from '../../utils/markup';
+import { CountryConfigService } from '../country/country-config.service';
 import { estimateDrivingDistance, estimateDeliveryMinutes } from '../../utils/distance';
 import { getMapsProvider } from '../../providers/maps/maps-provider';
 import { FREE_CANCEL_WINDOW_MIN, LATE_CANCEL_FEE } from '../order/cancel-policy';
@@ -305,8 +306,12 @@ async function buildCartResponse(
 
   // Delivery fee — services are appointments (you go to them / they come to you),
   // not deliveries, so they never carry a delivery fee.
+  // FUL-003b: resolve the same country delivery-fee schedule checkout uses, so
+  // the fee previewed here equals the fee charged (null config → code default).
   const isService = cart.vendor?.vendorType === 'SERVICE';
-  const deliveryFee = isService ? 0 : calculateDeliveryFee(distanceKm);
+  const buyer = await app.prisma.user.findUnique({ where: { id: userId }, select: { countryCode: true } });
+  const deliveryRates = await new CountryConfigService(app.prisma).getDeliveryRates(buyer?.countryCode ?? '');
+  const deliveryFee = isService ? 0 : deliveryFeeFromRates(distanceKm, deliveryRates);
 
   // Promo discount
   let discount = 0;

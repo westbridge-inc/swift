@@ -20,6 +20,50 @@ export function calculateDeliveryFee(
   return Math.ceil(subtotal * surgeMultiplier);
 }
 
+/**
+ * FUL-003b: the food/grocery delivery-fee schedule, per-country via
+ * CountryConfig.deliveryRates — the SAME null→code-default pattern courier
+ * (courierRates) and taxi (taxiRates) already use. Delivery was the one
+ * remaining vertical whose fee was computed from `calculateDeliveryFee`'s
+ * hardcoded parameter defaults instead of config: fine for Georgetown (the
+ * defaults ARE its zone) but silently wrong for a second market. The defaults
+ * below are byte-for-byte the old function defaults, so a null config changes
+ * nothing.
+ */
+export interface DeliveryRates {
+  baseFee: number;
+  perKmRate: number;
+  includedKm: number;
+  surgeMultiplier: number;
+}
+
+export const DEFAULT_DELIVERY_RATES: DeliveryRates = {
+  baseFee: 500,
+  perKmRate: 200,
+  includedKm: 2,
+  surgeMultiplier: 1.0,
+};
+
+/** Tolerant merge of a CountryConfig.deliveryRates JSON over the defaults — a
+ *  partial or malformed config can only override what it validly sets (mirrors
+ *  mergeCourierRates). */
+export function mergeDeliveryRates(raw: unknown): DeliveryRates {
+  const cfg = (raw && typeof raw === 'object' ? raw : {}) as Partial<DeliveryRates>;
+  return {
+    baseFee: typeof cfg.baseFee === 'number' ? cfg.baseFee : DEFAULT_DELIVERY_RATES.baseFee,
+    perKmRate: typeof cfg.perKmRate === 'number' ? cfg.perKmRate : DEFAULT_DELIVERY_RATES.perKmRate,
+    includedKm: typeof cfg.includedKm === 'number' ? cfg.includedKm : DEFAULT_DELIVERY_RATES.includedKm,
+    surgeMultiplier: typeof cfg.surgeMultiplier === 'number' ? cfg.surgeMultiplier : DEFAULT_DELIVERY_RATES.surgeMultiplier,
+  };
+}
+
+/** Delivery fee from a resolved schedule — the config-driven entry point.
+ *  `deliveryFeeFromRates(d, DEFAULT_DELIVERY_RATES)` === `calculateDeliveryFee(d)`
+ *  for every distance, so wiring a call site through this preserves behavior. */
+export function deliveryFeeFromRates(distanceKm: number, rates: DeliveryRates): number {
+  return calculateDeliveryFee(distanceKm, rates.baseFee, rates.perKmRate, rates.includedKm, rates.surgeMultiplier);
+}
+
 /** Express (priority) delivery multiplier — the whole premium is the rider's
  *  cash upside. ONE definition [SWIFT-070]: the cart quote and the checkout
  *  charge both derive the express fee from here, so the displayed total can
