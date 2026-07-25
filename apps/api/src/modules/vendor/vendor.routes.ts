@@ -50,6 +50,9 @@ const updateVendorProfileSchema = z.object({
   estimatedPrepTime: z.number().int().min(0).max(480).optional(),
   // FUL-004: whether this vendor fulfils its own DELIVERY orders with its own courier.
   selfDeliveryEnabled: z.boolean().optional(),
+  // FUL-007: kitchen-capacity cap. Positive int caps concurrent in-flight orders;
+  // null clears the cap (unlimited intake).
+  maxConcurrentOrders: z.number().int().min(1).max(1000).nullable().optional(),
   // The vendor's own MMG "pay me" link (opt-in). null/empty clears it → cash-only.
   mmgPayUrl: z.string().trim().max(500).nullable().optional(),
 });
@@ -726,6 +729,7 @@ export async function vendorRoutes(app: FastifyInstance) {
         ...(body.minOrderAmount !== undefined && { minOrderAmount: body.minOrderAmount }),
         ...(body.estimatedPrepTime !== undefined && { estimatedPrepTime: body.estimatedPrepTime }),
         ...(body.selfDeliveryEnabled !== undefined && { selfDeliveryEnabled: body.selfDeliveryEnabled }),
+        ...(body.maxConcurrentOrders !== undefined && { maxConcurrentOrders: body.maxConcurrentOrders }),
         ...(body.mmgPayUrl !== undefined && { mmgPayUrl: body.mmgPayUrl || null }),
       },
       include: { operatingHours: { orderBy: { dayOfWeek: 'asc' } } },

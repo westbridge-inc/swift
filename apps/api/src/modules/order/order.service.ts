@@ -9,6 +9,7 @@ import { CountryConfigService } from '../country/country-config.service';
 import { BookingService } from '../booking/booking.service';
 import { orderingRestriction, CashRulesService } from '../cash/cash-rules.service';
 import { resolveSelectedOptions, optionsUnitPrice, type ResolvedOption } from './options';
+import { isKitchenAtCapacity, KITCHEN_ACTIVE_STATUSES } from '../fulfillment/kitchen-capacity';
 import { log } from '../../utils/logger';
 import { FloatService } from '../dispatch/float.service';
 import { AppError } from '../../utils/errors';
@@ -200,6 +201,21 @@ export class OrderService {
       const vendor = items[0]!.item.vendor;
       if (!vendor.isCurrentlyOpen || !vendor.acceptingOrders || vendor.status !== 'ACTIVE') {
         throw new AppError(400, 'VENDOR_CLOSED', `${vendor.name} is currently not accepting orders`);
+      }
+      // FUL-007: kitchen-capacity guard (Part 5D). A vendor can cap how many
+      // orders it holds in the kitchen at once so a small shop isn't drowned.
+      // Best-effort early check (like the inventory early-check below): a rare
+      // simultaneous-checkout race could admit one over the cap, which is
+      // harmless — capacity is a protective throttle, not money. Null cap
+      // (every vendor's default) means unlimited intake.
+      if (vendor.maxConcurrentOrders != null) {
+        const active = await this.prisma.order.count({
+          where: { vendorId: vendor.id, status: { in: KITCHEN_ACTIVE_STATUSES } },
+        });
+        if (isKitchenAtCapacity(active, vendor.maxConcurrentOrders)) {
+          throw new AppError(400, 'VENDOR_AT_CAPACITY',
+            `${vendor.name} is at capacity right now — please try again in a few minutes`);
+        }
       }
       // MMG direct-pay: only offer it for a vendor who attached their own MMG
       // link (the customer pays them directly). Otherwise stay on cash.
