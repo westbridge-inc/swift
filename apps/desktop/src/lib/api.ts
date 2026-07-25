@@ -172,6 +172,22 @@ export const fetchAgentApprovals = () =>
 export const decideAgentApproval = (id: string, approve: boolean) =>
   apiFetch(`/api/v1/admin/agent/approvals/${id}/${approve ? 'approve' : 'reject'}`, { method: 'POST', body: '{}' });
 
+// ── SLA / stuck orders (FUL-008) ─────────────────────────────────────────────
+export interface SlaBreach {
+  orderId: string;
+  orderNumber: string;
+  status: string;
+  openStage: 'ACCEPT' | 'PREP' | 'PICKUP_WAIT' | 'DELIVERY' | null;
+  breached: boolean;
+  worstOverMs: number;
+}
+export const fetchSlaBreaches = () =>
+  apiFetch('/api/v1/admin/orders/sla-breaches').then((r) => ({
+    rows: r.data as SlaBreach[],
+    scanned: r.scanned as number,
+    truncated: r.truncated as boolean,
+  }));
+
 // ── Moderation (UGC reports — STORE-001/002) ─────────────────────────────────
 export interface ModerationReport {
   id: string;
