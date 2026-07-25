@@ -1222,6 +1222,53 @@ export async function adminRoutes(app: FastifyInstance) {
     return { success: true, data: { ...order, sla } };
   });
 
+  // STORE-001: the content-moderation queue (admin side of UGC reporting).
+  // POST /reports (moderation.routes) files a report; these two surfaces let an
+  // admin work the queue and record a decision — the "act on reports" half the
+  // stores require. The onResponse audit hook records every resolution.
+  const moderationQuerySchema = z.object({
+    status: z.enum(['PENDING', 'REVIEWING', 'ACTIONED', 'DISMISSED']).optional(),
+    reason: z.enum(['SPAM', 'HARASSMENT', 'HATE_SPEECH', 'VIOLENCE', 'SEXUAL_CONTENT', 'CSAE', 'ILLEGAL_GOODS', 'OTHER']).optional(),
+  });
+  const resolveReportSchema = z.object({
+    status: z.enum(['REVIEWING', 'ACTIONED', 'DISMISSED']),
+    note: z.string().trim().max(2000).optional(),
+  });
+
+  app.get('/moderation/reports', { preHandler: [adminGuard] }, async (request) => {
+    const { page, limit, skip } = parsePagination(request.query as Record<string, string>);
+    const { status, reason } = moderationQuerySchema.parse(request.query);
+    // Default view is the open work: PENDING, first-in-first-out so nothing
+    // rots at the back. The reason filter floats CSAE to the top of the queue.
+    const where = { ...(status ? { status } : { status: 'PENDING' as const }), ...(reason ? { reason } : {}) };
+    const [reports, total, pendingTotal] = await Promise.all([
+      app.prisma.contentReport.findMany({ where, orderBy: { createdAt: 'asc' }, skip, take: limit }),
+      app.prisma.contentReport.count({ where }),
+      app.prisma.contentReport.count({ where: { status: 'PENDING' } }),
+    ]);
+    return { success: true, pendingTotal, ...paginatedResponse(reports, total, { page, limit, skip }) };
+  });
+
+  app.put('/moderation/reports/:id', { preHandler: [adminGuard] }, async (request) => {
+    const { id } = request.params as { id: string };
+    const { status, note } = resolveReportSchema.parse(request.body ?? {});
+    const existing = await app.prisma.contentReport.findUnique({ where: { id } });
+    if (!existing) throw new NotFoundError('ContentReport', id);
+    // ACTIONED/DISMISSED close the report (stamp who + when); REVIEWING just
+    // claims it. Enforcement (remove the rating, ban the user) uses the existing
+    // admin endpoints — the report records the DECISION, not the mechanism.
+    const closing = status === 'ACTIONED' || status === 'DISMISSED';
+    const updated = await app.prisma.contentReport.update({
+      where: { id },
+      data: {
+        status,
+        ...(note !== undefined ? { resolutionNote: note } : {}),
+        ...(closing ? { resolvedBy: request.user.userId, resolvedAt: new Date() } : {}),
+      },
+    });
+    return { success: true, data: updated };
+  });
+
   app.put('/orders/:id/cancel', { preHandler: [adminGuard] }, async (request) => {
     const { id } = request.params as { id: string };
     const { reason, refund } = cancelOrderSchema.parse(request.body ?? {});
