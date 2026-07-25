@@ -1214,7 +1214,12 @@ export async function adminRoutes(app: FastifyInstance) {
     });
     if (!order) throw new NotFoundError('Order', id);
 
-    return { success: true, data: order };
+    // FUL-008: attach this order's live SLA so an admin drilling into one order
+    // sees where its clock stands (open stage, whether it's breaching) without
+    // cross-referencing the breach board. Delivery-path only.
+    const sla = order.fulfillment === 'DELIVERY' ? computeOrderSla(order, new Date()) : null;
+
+    return { success: true, data: { ...order, sla } };
   });
 
   app.put('/orders/:id/cancel', { preHandler: [adminGuard] }, async (request) => {

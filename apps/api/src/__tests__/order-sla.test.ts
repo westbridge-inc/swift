@@ -169,3 +169,25 @@ describe('admin SLA-breach board (FUL-008)', () => {
     expect(res.statusCode).toBe(401);
   });
 });
+
+describe('per-order SLA on admin detail (FUL-008)', () => {
+  const H = 60;
+  const detail = (id: string) =>
+    app.inject({ method: 'GET', url: `/api/v1/admin/orders/${id}`, headers: { authorization: `Bearer ${adminToken}` } });
+
+  it('a breaching delivery order carries its SLA (open stage + breached) on the detail view', async () => {
+    const now = Date.now();
+    const id = await seedOrder({ status: 'PREPARING', placedAt: new Date(now - 2 * H * MIN), acceptedAt: new Date(now - 2 * H * MIN + MIN) });
+    const res = await detail(id);
+    expect(res.statusCode).toBe(200);
+    expect(res.json().data.sla.breached).toBe(true);
+    expect(res.json().data.sla.openStage).toBe('PREP');
+  });
+
+  it('a healthy delivery order carries an un-breached SLA', async () => {
+    const id = await seedOrder({ status: 'PENDING', placedAt: new Date(Date.now() - MIN) });
+    const res = await detail(id);
+    expect(res.json().data.sla.breached).toBe(false);
+    expect(res.json().data.sla.openStage).toBe('ACCEPT');
+  });
+});
