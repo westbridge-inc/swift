@@ -9,6 +9,7 @@ import AgentDesk from './modules/AgentDesk';
 import Compliance from './modules/Compliance';
 import Moderation from './modules/Moderation';
 import StuckOrders from './modules/StuckOrders';
+import Money from './modules/Money';
 import People from './modules/People';
 import Vendors from './modules/Vendors';
 import Health from './modules/Health';
@@ -212,7 +213,7 @@ export default function App() {
   const [ready, setReady] = useState(false);
   const [authed, setAuthed] = useState(false);
   const [cmdk, setCmdk] = useState(false);
-  const [module, setModule] = useState<'today' | 'review' | 'ops' | 'stuck' | 'people' | 'vendors' | 'agent' | 'moderation' | 'compliance' | 'health'>('today');
+  const [module, setModule] = useState<'today' | 'review' | 'ops' | 'stuck' | 'money' | 'people' | 'vendors' | 'agent' | 'moderation' | 'compliance' | 'health'>('today');
 
   useEffect(() => {
     loadSession().then((ok) => { setAuthed(ok); setReady(true); });
@@ -244,7 +245,7 @@ export default function App() {
           <span className="text-[var(--swift-red)]">Swift</span> MC
         </p>
         <nav className="mt-5 flex-1 space-y-0.5">
-          {([['today', 'Today'], ['review', 'Review'], ['ops', 'Live Ops'], ['stuck', 'Stuck'], ['people', 'People'], ['vendors', 'Vendors'], ['agent', 'Agent'], ['moderation', 'Reports'], ['compliance', 'Compliance'], ['health', 'Health']] as const).map(([key, label]) => (
+          {([['today', 'Today'], ['review', 'Review'], ['ops', 'Live Ops'], ['stuck', 'Stuck'], ['money', 'Money'], ['people', 'People'], ['vendors', 'Vendors'], ['agent', 'Agent'], ['moderation', 'Reports'], ['compliance', 'Compliance'], ['health', 'Health']] as const).map(([key, label]) => (
             <button
               key={key}
               onClick={() => setModule(key)}
@@ -267,13 +268,14 @@ export default function App() {
       </aside>
       <main className="min-w-0 flex-1 p-8">
         <h1 className="mb-5 text-2xl font-extrabold">
-          {{ today: 'Today', review: 'Review Center', ops: 'Live Ops', stuck: 'Stuck Orders', people: 'People', vendors: 'Vendors & Billing', agent: 'Agent approvals', moderation: 'Reports', compliance: 'Compliance', health: 'Health' }[module]}
+          {{ today: 'Today', review: 'Review Center', ops: 'Live Ops', stuck: 'Stuck Orders', money: 'Money', people: 'People', vendors: 'Vendors & Billing', agent: 'Agent approvals', moderation: 'Reports', compliance: 'Compliance', health: 'Health' }[module]}
         </h1>
         {module === 'today' && <Today />}
         {module === 'review' && <ReviewCenter />}
         {module === 'ops' && <LiveOps />}
         {module === 'agent' && <AgentDesk />}
         {module === 'stuck' && <StuckOrders />}
+        {module === 'money' && <Money />}
         {module === 'moderation' && <Moderation />}
         {module === 'compliance' && <Compliance />}
         {module === 'people' && <People />}

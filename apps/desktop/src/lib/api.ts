@@ -255,6 +255,19 @@ export const fetchVendors = (params: { search?: string; status?: string; page?: 
 };
 export const fetchPaymentMix = () => apiFetch('/api/v1/admin/finance/payment-mix').then((r) => r.data);
 
+export interface RevenueSummary {
+  thirtyDayMarkup: number;
+  thirtyDayDeliveryFees: number;
+  weeklySubscriptionRevenue: number;
+  monthlySubscriptionRevenue: number;
+  activeSubscriptions: number;
+}
+export const fetchRevenue = () =>
+  apiFetch('/api/v1/admin/finance/revenue').then((r) => r.data as {
+    dailyRevenue: Array<{ date: string; total: number; order_count: number }>;
+    summary: RevenueSummary;
+  });
+
 // ── Health ───────────────────────────────────────────────────────────────────
 export const fetchHealth = () =>
   fetch(`${API_ORIGIN}/health`).then(async (r) => ({ httpOk: r.ok, ...(await r.json()) }));
