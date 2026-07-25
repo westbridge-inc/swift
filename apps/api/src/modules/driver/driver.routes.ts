@@ -16,6 +16,7 @@ import { haversineDistance, estimateDeliveryMinutes } from '../../utils/distance
 import { parsePagination, paginatedResponse } from '../../utils/pagination';
 import { tenantCacheKey } from '../../utils/tenant-cache';
 import { AppError, NotFoundError } from '../../utils/errors';
+import { handoverAttemptState } from '../handover/handover-security';
 import { throwForMissingProfile } from '../../utils/role-gate';
 import { clampDriverFare } from '../../utils/markup';
 import { ALLOWED_IMAGE_TYPES, looksLikeImage } from '../../utils/images';
@@ -612,8 +613,9 @@ export async function driverRoutes(app: FastifyInstance) {
       throw new AppError(400, 'ALREADY_VERIFIED', 'Ride PIN has already been verified');
     }
 
-    const MAX_PIN_ATTEMPTS = 5;
-    if (order.ridePinAttempts >= MAX_PIN_ATTEMPTS) {
+    // HND-004: the SAME lockout rule the pickup code uses (one handover engine).
+    const { locked, remaining } = handoverAttemptState(order.ridePinAttempts);
+    if (locked) {
       throw new AppError(400, 'MAX_ATTEMPTS', 'Maximum PIN verification attempts exceeded. Please contact support.');
     }
 
@@ -624,7 +626,6 @@ export async function driverRoutes(app: FastifyInstance) {
     });
 
     if (order.ridePin !== pin) {
-      const remaining = MAX_PIN_ATTEMPTS - order.ridePinAttempts - 1;
       throw new AppError(400, 'INVALID_PIN', `Incorrect PIN. ${remaining} attempt(s) remaining.`);
     }
 
