@@ -3,20 +3,21 @@ import { z } from 'zod';
 import { AuthService } from './auth.service';
 import { TRIAL_DAYS } from '../subscription/subscription.service';
 import { AppError } from '../../utils/errors';
+import { zPhone } from '../../utils/phone';
 import { ALLOWED_IMAGE_TYPES, looksLikeImage } from '../../utils/images';
 import { getStorageProvider } from '../../providers/storage/storage-provider';
 
 const sendOtpSchema = z.object({
-  phone: z.string().min(10).max(15),
+  phone: zPhone,
 });
 
 const verifyOtpSchema = z.object({
-  phone: z.string().min(10).max(15),
+  phone: zPhone,
   code: z.string().length(6),
 });
 
 const registerSchema = z.object({
-  phone: z.string().min(10).max(15),
+  phone: zPhone,
   firstName: z.string().min(1).max(50),
   lastName: z.string().min(1).max(50),
   email: z.string().email().optional(),
@@ -33,7 +34,7 @@ const refreshSchema = z.object({
 
 const passwordLoginSchema = z
   .object({
-    phone: z.string().min(10).max(15).optional(),
+    phone: zPhone.optional(),
     email: z.string().email().optional(),
     password: z.string().min(8).max(100),
   })
@@ -44,7 +45,7 @@ const setPasswordSchema = z.object({
 });
 
 const resetPasswordSchema = z.object({
-  phone: z.string().min(10).max(15),
+  phone: zPhone,
   code: z.string().length(6),
   newPassword: z.string().min(8).max(100),
 });
