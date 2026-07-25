@@ -101,6 +101,8 @@ async function buildApp() {
           'http://localhost:3001', 'http://localhost:3000', 'http://127.0.0.1:3001',
           // Web app dev server + Mission Control's Tauri webview origins
           'http://localhost:3002', 'tauri://localhost', 'http://tauri.localhost',
+          // Mission Control run in a browser via `pnpm dev` (Vite on :1420)
+          'http://localhost:1420', 'http://127.0.0.1:1420',
         ]
       : false;
   await app.register(cors, {
