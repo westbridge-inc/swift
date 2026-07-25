@@ -172,6 +172,19 @@ export const fetchAgentApprovals = () =>
 export const decideAgentApproval = (id: string, approve: boolean) =>
   apiFetch(`/api/v1/admin/agent/approvals/${id}/${approve ? 'approve' : 'reject'}`, { method: 'POST', body: '{}' });
 
+export interface AgentAuditEvent {
+  id: string;
+  at: string;
+  job: string;
+  subjectId: string | null;
+  action: string;
+  /** suggested | executed | pending_approval | auto_executed | rejected | error */
+  outcome: string;
+  reasoning: string | null;
+}
+export const fetchAgentAudit = () =>
+  apiFetch('/api/v1/admin/agent/audit?limit=50').then((r) => r.data as AgentAuditEvent[]);
+
 // ── SLA / stuck orders (FUL-008) ─────────────────────────────────────────────
 export interface SlaBreach {
   orderId: string;
