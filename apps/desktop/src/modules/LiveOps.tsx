@@ -24,11 +24,11 @@ const LANES: Array<{ title: string; match: (s: string) => boolean }> = [
 export default function LiveOps() {
   const q = useQuery({ queryKey: ['ops-live'], queryFn: fetchOpsLive, refetchInterval: 10_000 });
 
-  if (q.isLoading) return <p className="text-sm text-white/40">Loading live operations…</p>;
+  if (q.isLoading) return <p className="text-sm text-neutral-400">Loading live operations…</p>;
   if (q.isError) {
     return (
-      <div className="rounded-2xl border border-white/10 bg-white/5 p-8 text-center">
-        <p className="text-sm text-white/60">{(q.error as Error).message}</p>
+      <div className="rounded-2xl border border-neutral-200 bg-neutral-100 p-8 text-center">
+        <p className="text-sm text-neutral-600">{(q.error as Error).message}</p>
         <button onClick={() => q.refetch()} className="mt-4 rounded-lg bg-[var(--swift-red)] px-4 py-2 text-sm font-semibold">Try again</button>
       </div>
     );
@@ -43,12 +43,12 @@ export default function LiveOps() {
 
   return (
     <div className="space-y-5">
-      <div className="flex gap-4 text-sm text-white/60">
-        <span><b className="text-white">{orders.length}</b> in flight</span>
-        <span><b className="text-white">{riders.length}</b> riders online</span>
-        <span><b className="text-white">{drivers.length}</b> taxis online</span>
-        <span><b className="text-white">{busy}</b> busy</span>
-        <span className="ml-auto text-xs text-white/30">10s refresh · map view lives in the admin console</span>
+      <div className="flex gap-4 text-sm text-neutral-600">
+        <span><b className="text-neutral-900">{orders.length}</b> in flight</span>
+        <span><b className="text-neutral-900">{riders.length}</b> riders online</span>
+        <span><b className="text-neutral-900">{drivers.length}</b> taxis online</span>
+        <span><b className="text-neutral-900">{busy}</b> busy</span>
+        <span className="ml-auto text-xs text-neutral-400">10s refresh · map view lives in the admin console</span>
       </div>
 
       {/* Availability spec §6: exhausted searches float to the TOP in danger —
@@ -67,7 +67,7 @@ export default function LiveOps() {
       )}
 
       {orders.length === 0 && (
-        <p className="rounded-2xl border border-dashed border-white/10 p-10 text-center text-sm text-white/40">
+        <p className="rounded-2xl border border-dashed border-neutral-200 p-10 text-center text-sm text-neutral-400">
           Nothing in flight right now.
         </p>
       )}
@@ -77,8 +77,8 @@ export default function LiveOps() {
           const rows = orders.filter((o) => lane.match(String(o.status)));
           if (rows.length === 0) return null;
           return (
-            <div key={lane.title} className="rounded-2xl border border-white/10 bg-white/5 p-4">
-              <p className="text-xs font-bold uppercase tracking-wider text-white/40">
+            <div key={lane.title} className="rounded-2xl border border-neutral-200 bg-neutral-100 p-4">
+              <p className="text-xs font-bold uppercase tracking-wider text-neutral-400">
                 {lane.title} · {rows.length}
               </p>
               <div className="mt-2 max-h-72 space-y-1.5 overflow-auto pr-1">
@@ -86,9 +86,9 @@ export default function LiveOps() {
                   <div key={o.id} className="rounded-lg bg-black/30 px-3 py-2">
                     <div className="flex items-center justify-between">
                       <p className="text-sm font-semibold">#{o.orderNumber}</p>
-                      <span className="text-[11px] text-white/40">{String(o.orderType).replaceAll('_', ' ')}</span>
+                      <span className="text-[11px] text-neutral-400">{String(o.orderType).replaceAll('_', ' ')}</span>
                     </div>
-                    <p className="mt-0.5 text-xs text-white/50">{String(o.status).replaceAll('_', ' ')}</p>
+                    <p className="mt-0.5 text-xs text-neutral-500">{String(o.status).replaceAll('_', ' ')}</p>
                   </div>
                 ))}
               </div>
@@ -109,9 +109,9 @@ function ExhaustedRow({ search, onDone }: { search: any; onDone: () => void }) {
       <div>
         <p className="text-sm font-semibold">
           #{search.orderNumber ?? search.orderId}
-          <span className="ml-2 text-[11px] text-white/40">{search.vertical}</span>
+          <span className="ml-2 text-[11px] text-neutral-400">{search.vertical}</span>
         </p>
-        <p className="mt-0.5 text-xs text-white/50">
+        <p className="mt-0.5 text-xs text-neutral-500">
           {search.waves} wave{search.waves === 1 ? '' : 's'} · {search.candidatesTried} candidate
           {search.candidatesTried === 1 ? '' : 's'} tried · {search.vendorName ?? 'no vendor'}
         </p>

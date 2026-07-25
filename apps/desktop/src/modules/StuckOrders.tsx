@@ -21,10 +21,10 @@ function Row({ b, onActed }: { b: SlaBreach; onActed: () => void }) {
   const mut = useMutation({ mutationFn: () => retryDispatch(b.orderId), onSuccess: onActed });
 
   return (
-    <div className="flex items-center gap-3 rounded-xl border border-white/10 bg-white/5 px-4 py-3">
+    <div className="flex items-center gap-3 rounded-xl border border-neutral-200 bg-neutral-100 px-4 py-3">
       <div className="min-w-0 flex-1">
-        <p className="text-sm font-semibold">#{b.orderNumber} <span className="ml-1 text-xs font-normal text-white/40">{b.status}</span></p>
-        <p className="text-xs text-white/50">{b.openStage ? STAGE_LABEL[b.openStage] ?? b.openStage : 'stalled'}</p>
+        <p className="text-sm font-semibold">#{b.orderNumber} <span className="ml-1 text-xs font-normal text-neutral-400">{b.status}</span></p>
+        <p className="text-xs text-neutral-500">{b.openStage ? STAGE_LABEL[b.openStage] ?? b.openStage : 'stalled'}</p>
       </div>
       <span className="rounded-md bg-[var(--swift-red)]/15 px-2 py-1 text-xs font-bold text-[var(--swift-red)]">
         +{overMin(b.worstOverMs)} min over
@@ -32,7 +32,7 @@ function Row({ b, onActed }: { b: SlaBreach; onActed: () => void }) {
       {canRedispatch && (
         <button
           onClick={() => mut.mutate()} disabled={mut.isPending}
-          className="rounded-lg bg-white/10 px-3 py-1.5 text-sm font-semibold text-white/80 hover:bg-white/15 disabled:opacity-50"
+          className="rounded-lg bg-neutral-100 px-3 py-1.5 text-sm font-semibold text-neutral-700 hover:bg-neutral-200 disabled:opacity-50"
         >
           {mut.isPending ? '…' : 'Find a rider'}
         </button>
@@ -46,17 +46,17 @@ export default function StuckOrders() {
   const q = useQuery({ queryKey: ['sla-breaches'], queryFn: fetchSlaBreaches, refetchInterval: 15_000 });
   const onActed = () => qc.invalidateQueries({ queryKey: ['sla-breaches'] });
 
-  if (q.isLoading) return <p className="text-sm text-white/50">Checking the clocks…</p>;
+  if (q.isLoading) return <p className="text-sm text-neutral-500">Checking the clocks…</p>;
   if (q.isError) return <p className="text-sm text-[var(--swift-red)]">{(q.error as Error).message}</p>;
 
   const rows = q.data?.rows ?? [];
   return (
     <div className="max-w-3xl space-y-3">
-      <p className="text-sm text-white/50">
+      <p className="text-sm text-neutral-500">
         {rows.length === 0
           ? 'No orders are breaching their SLA — the agent and the auto-sweeps are keeping up.'
           : `${rows.length} order${rows.length === 1 ? '' : 's'} past SLA, worst first.`}
-        {q.data?.truncated && <span className="text-white/30"> (scan capped at {q.data.scanned})</span>}
+        {q.data?.truncated && <span className="text-neutral-400"> (scan capped at {q.data.scanned})</span>}
       </p>
       {rows.map((b) => <Row key={b.orderId} b={b} onActed={onActed} />)}
     </div>

@@ -20,32 +20,32 @@ function Ticket({ t, onDone }: { t: SupportTicket; onDone: () => void }) {
   });
 
   return (
-    <div className="rounded-xl border border-white/10 bg-white/5 p-4">
+    <div className="rounded-xl border border-neutral-200 bg-neutral-100 p-4">
       <div className="flex items-center gap-2">
-        <span className="rounded-md bg-white/10 px-2 py-0.5 text-xs font-bold text-white/70">{pretty(t.category)}</span>
-        {t.status === 'IN_PROGRESS' && <span className="rounded-md bg-amber-500/20 px-2 py-0.5 text-xs font-semibold text-amber-300">In progress</span>}
-        <span className="ml-auto text-xs text-white/30">{hoursSince(t.createdAt)}h ago</span>
+        <span className="rounded-md bg-neutral-100 px-2 py-0.5 text-xs font-bold text-neutral-600">{pretty(t.category)}</span>
+        {t.status === 'IN_PROGRESS' && <span className="rounded-md bg-amber-100 px-2 py-0.5 text-xs font-semibold text-amber-700">In progress</span>}
+        <span className="ml-auto text-xs text-neutral-400">{hoursSince(t.createdAt)}h ago</span>
       </div>
       <p className="mt-2 text-sm font-semibold">{t.subject}</p>
-      <p className="mt-1 text-sm text-white/70">{t.message}</p>
-      <p className="mt-1 text-xs text-white/40">
+      <p className="mt-1 text-sm text-neutral-600">{t.message}</p>
+      <p className="mt-1 text-xs text-neutral-400">
         from {who}{t.user?.phone ? ` · ${t.user.phone}` : ''}{t.orderId ? ` · order ${t.orderId.slice(0, 8)}` : ''}
       </p>
 
       <div className="mt-3 flex items-center gap-2">
         <input
           value={note} onChange={(e) => setNote(e.target.value)} placeholder="Reply / internal note (optional)"
-          className="min-w-0 flex-1 rounded-lg border border-white/10 bg-black/40 px-2 py-1.5 text-sm outline-none focus:border-white/30"
+          className="min-w-0 flex-1 rounded-lg border border-neutral-200 bg-neutral-50 px-2 py-1.5 text-sm outline-none focus:border-[var(--swift-red)]"
         />
         <button
           onClick={() => mut.mutate('IN_PROGRESS')} disabled={mut.isPending}
-          className="rounded-lg bg-white/10 px-3 py-1.5 text-sm font-semibold text-white/70 hover:bg-white/15 disabled:opacity-50"
+          className="rounded-lg bg-neutral-100 px-3 py-1.5 text-sm font-semibold text-neutral-600 hover:bg-neutral-200 disabled:opacity-50"
         >
           Working on it
         </button>
         <button
           onClick={() => mut.mutate('RESOLVED')} disabled={mut.isPending}
-          className="rounded-lg bg-green-500/20 px-3 py-1.5 text-sm font-semibold text-green-300 hover:bg-green-500/30 disabled:opacity-50"
+          className="rounded-lg bg-green-100 px-3 py-1.5 text-sm font-semibold text-green-700 hover:bg-green-200 disabled:opacity-50"
         >
           Resolve
         </button>
@@ -60,14 +60,14 @@ export default function Support() {
   const q = useQuery({ queryKey: ['support', 'OPEN'], queryFn: () => fetchSupport('OPEN') });
   const onDone = () => qc.invalidateQueries({ queryKey: ['support'] });
 
-  if (q.isLoading) return <p className="text-sm text-white/50">Opening the inbox…</p>;
+  if (q.isLoading) return <p className="text-sm text-neutral-500">Opening the inbox…</p>;
   if (q.isError) return <p className="text-sm text-[var(--swift-red)]">{(q.error as Error).message}</p>;
 
   const tickets = q.data?.tickets ?? [];
   return (
     <div className="max-w-3xl space-y-3">
-      <p className="text-sm text-white/50">{tickets.length} open ticket{tickets.length === 1 ? '' : 's'}.</p>
-      {tickets.length === 0 && <p className="text-sm text-white/40">Inbox zero. 🎉</p>}
+      <p className="text-sm text-neutral-500">{tickets.length} open ticket{tickets.length === 1 ? '' : 's'}.</p>
+      {tickets.length === 0 && <p className="text-sm text-neutral-400">Inbox zero. 🎉</p>}
       {tickets.map((t) => <Ticket key={t.id} t={t} onDone={onDone} />)}
     </div>
   );
