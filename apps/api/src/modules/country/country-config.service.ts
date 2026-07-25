@@ -1,5 +1,6 @@
 import type { PrismaClient, CountryConfig, VehicleType } from '@prisma/client';
 import { NotFoundError } from '../../utils/errors';
+import { mergeDeliveryRates, type DeliveryRates } from '../../utils/markup';
 
 /** Weekly subscription tiers in local currency. */
 export interface SubscriptionTiers {
@@ -41,6 +42,18 @@ export class CountryConfigService {
   async getIdGateThresholdLocal(code: string): Promise<number> {
     const config = await this.getByCode(code);
     return Number(config.idGateThresholdUsd) * Number(config.usdExchangeRate);
+  }
+
+  /** FUL-003b: the food/grocery delivery-fee schedule for a country, merged
+   *  over code defaults. Resilient by design — a missing config falls back to
+   *  the defaults rather than throwing, so a delivery fee never crashes
+   *  checkout (unlike the ID gate, delivery pricing has a safe default). */
+  async getDeliveryRates(code: string): Promise<DeliveryRates> {
+    const config = await this.prisma.countryConfig.findUnique({
+      where: { code },
+      select: { deliveryRates: true },
+    });
+    return mergeDeliveryRates(config?.deliveryRates ?? null);
   }
 
   /** Required-document checklist for a role key (drives verification). */

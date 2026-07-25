@@ -1,6 +1,6 @@
 import type { PrismaClient, OrderStatus, FulfillmentType } from '@prisma/client';
 import type { Server } from 'socket.io';
-import { calculateDeliveryFee, expressDeliveryFee, generateOrderNumber } from '../../utils/markup';
+import { deliveryFeeFromRates, expressDeliveryFee, generateOrderNumber, type DeliveryRates } from '../../utils/markup';
 import { estimateDeliveryMinutes } from '../../utils/distance';
 import { getMapsProvider, type MapsProvider } from '../../providers/maps/maps-provider';
 import { FREE_CANCEL_WINDOW_MIN, LATE_CANCEL_FEE } from './cancel-policy';
@@ -182,6 +182,12 @@ export class OrderService {
       address = await this.prisma.address.findFirst({ where: { userId: input.userId, isDefault: true } });
     }
 
+    // FUL-003b: resolve the delivery-fee schedule from the buyer's country
+    // ONCE for this checkout (null config → code defaults). The cart preview
+    // (buildCartResponse) resolves the same schedule, so the fee shown and the
+    // fee charged never disagree.
+    const deliveryRates: DeliveryRates = await this.countryConfig.getDeliveryRates(user.countryCode);
+
     // First pass: validate every group and price it (zero markup — §18)
     const plans: Array<{
       vendor: (typeof cart.items)[number]['item']['vendor'];
@@ -305,7 +311,7 @@ export class OrderService {
         if (distanceKm > vendor.deliveryRadius) {
           throw new AppError(400, 'OUT_OF_RANGE', `${vendor.name} only delivers within ${vendor.deliveryRadius} km. You are ${distanceKm.toFixed(1)} km away.`);
         }
-        deliveryFee = calculateDeliveryFee(distanceKm);
+        deliveryFee = deliveryFeeFromRates(distanceKm, deliveryRates);
         // Express mirrors the courier EXPRESS multiplier. The premium is part of
         // the fee the rider collects in cash — it is THEIR upside. Same helper
         // the cart quote uses, so the preview and the charge never disagree.

@@ -242,6 +242,10 @@ model CountryConfig {
   /// null (same pattern as taxiRates): { baseFee, perKmRate,
   /// sizeSurcharge: {SMALL..EXTRA_LARGE}, speedMultiplier: {STANDARD..RUSH} }
   courierRates Json?
+  /// FUL-003b: food/grocery delivery-fee schedule, local currency; code
+  /// defaults when null (same pattern as courierRates/taxiRates):
+  /// { baseFee, perKmRate, includedKm, surgeMultiplier }
+  deliveryRates Json?
 
   /// Cash guarantee + strike thresholds:
   /// { maxClaimsPerRiderPerMonth, strikeRestrictThreshold, strikeBanThreshold,
