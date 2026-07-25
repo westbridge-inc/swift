@@ -1,14 +1,20 @@
 @import "tailwindcss";
 
 :root {
-  --swift-red: #e8192c;
+  /* Swift brand palette — matches the consumer app (packages/ui/tokens.ts):
+     deep "Indian Red" on warm off-white paper with white cards. */
+  --swift-red: #803B3B;   /* brand primary — CTAs, active tabs, the mark, prices */
+  --swift-deep: #5C2A2C;  /* pressed / emphasis */
+  --swift-soft: #F5EBEC;  /* soft tint — selected rows, chips, icon circles */
+  --swift-paper: #FBFBF9; /* the app background */
+  --swift-ink: #1c1c1e;   /* primary text */
 }
 
 body {
   margin: 0;
   font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", sans-serif;
-  background: #0a0a0a;
-  color: #fff;
+  background: var(--swift-paper);
+  color: var(--swift-ink);
   -webkit-font-smoothing: antialiased;
   user-select: none;
   cursor: default;

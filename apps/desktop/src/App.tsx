@@ -1,12 +1,13 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import {
-  clearSession, fetchOverview, globalSearch, loadSession, sendOtp, verifyAdminLogin,
+  clearSession, globalSearch, loadSession, sendOtp, verifyAdminLogin,
 } from './lib/api';
 import ReviewCenter from './modules/ReviewCenter';
 import LiveOps from './modules/LiveOps';
 import AgentDesk from './modules/AgentDesk';
 import Compliance from './modules/Compliance';
+import Home from './modules/Home';
 import Moderation from './modules/Moderation';
 import Support from './modules/Support';
 import StuckOrders from './modules/StuckOrders';
@@ -43,11 +44,11 @@ function Login({ onDone }: { onDone: () => void }) {
 
   return (
     <div className="flex min-h-screen items-center justify-center">
-      <div className="w-80 rounded-2xl border border-white/10 bg-white/5 p-8">
+      <div className="w-80 rounded-2xl border border-neutral-200 bg-neutral-100 p-8">
         <p className="text-xl font-extrabold tracking-tight">
           <span className="text-[var(--swift-red)]">Swift</span> Mission Control
         </p>
-        <p className="mt-1 mb-6 text-sm text-white/50">
+        <p className="mt-1 mb-6 text-sm text-neutral-500">
           {step === 'phone' ? 'Sign in with your admin phone.' : `Code sent to ${phone}.`}
         </p>
         {step === 'phone' ? (
@@ -56,7 +57,7 @@ function Login({ onDone }: { onDone: () => void }) {
               autoFocus value={phone} onChange={(e) => setPhone(e.target.value)}
               onKeyDown={(e) => e.key === 'Enter' && send()}
               placeholder="+592 600 1000"
-              className="w-full rounded-lg border border-white/10 bg-black/40 px-3 py-2.5 text-sm outline-none focus:border-[var(--swift-red)]"
+              className="w-full rounded-lg border border-neutral-200 bg-neutral-50 px-3 py-2.5 text-sm outline-none focus:border-[var(--swift-red)]"
             />
             <button
               onClick={send} disabled={busy || phone.trim().length < 6}
@@ -71,7 +72,7 @@ function Login({ onDone }: { onDone: () => void }) {
               autoFocus inputMode="numeric" value={code} onChange={(e) => setCode(e.target.value)}
               onKeyDown={(e) => e.key === 'Enter' && verify()}
               placeholder="000000"
-              className="w-full rounded-lg border border-white/10 bg-black/40 px-3 py-2.5 text-sm tracking-widest outline-none focus:border-[var(--swift-red)]"
+              className="w-full rounded-lg border border-neutral-200 bg-neutral-50 px-3 py-2.5 text-sm tracking-widest outline-none focus:border-[var(--swift-red)]"
             />
             <button
               onClick={verify} disabled={busy || code.trim().length < 4}
@@ -125,28 +126,28 @@ function CommandPalette({ open, onClose }: { open: boolean; onClose: () => void 
   return (
     <div className="fixed inset-0 z-50 bg-black/60 pt-28" onClick={onClose}>
       <div
-        className="mx-auto w-[560px] overflow-hidden rounded-xl border border-white/10 bg-[#161617] shadow-2xl"
+        className="mx-auto w-[560px] overflow-hidden rounded-xl border border-neutral-200 bg-white shadow-2xl"
         onClick={(e) => e.stopPropagation()}
       >
         <input
           autoFocus value={q} onChange={(e) => setQ(e.target.value)}
           onKeyDown={(e) => e.key === 'Escape' && onClose()}
           placeholder="Search orders, people, vendors…"
-          className="w-full border-b border-white/10 bg-transparent px-4 py-3.5 text-sm outline-none"
+          className="w-full border-b border-neutral-200 bg-transparent px-4 py-3.5 text-sm outline-none"
         />
         <div className="max-h-96 overflow-auto p-2">
-          {search.isFetching && <p className="px-3 py-2 text-sm text-white/40">Searching…</p>}
+          {search.isFetching && <p className="px-3 py-2 text-sm text-neutral-400">Searching…</p>}
           {!search.isFetching && q.trim().length >= 2 && groups.every((g) => g.rows.length === 0) && (
-            <p className="px-3 py-2 text-sm text-white/40">Nothing matches.</p>
+            <p className="px-3 py-2 text-sm text-neutral-400">Nothing matches.</p>
           )}
           {groups.map((g) =>
             g.rows.length === 0 ? null : (
               <div key={g.title} className="mb-2">
-                <p className="px-3 py-1 text-[11px] font-bold uppercase tracking-wider text-white/30">{g.title}</p>
+                <p className="px-3 py-1 text-[11px] font-bold uppercase tracking-wider text-neutral-400">{g.title}</p>
                 {g.rows.map((r) => (
-                  <div key={r.id} className="rounded-lg px-3 py-2 hover:bg-white/5">
+                  <div key={r.id} className="rounded-lg px-3 py-2 hover:bg-neutral-100">
                     <p className="text-sm font-medium">{r.label}</p>
-                    <p className="text-xs text-white/40">{r.sub}</p>
+                    <p className="text-xs text-neutral-400">{r.sub}</p>
                   </div>
                 ))}
               </div>
@@ -154,61 +155,6 @@ function CommandPalette({ open, onClose }: { open: boolean; onClose: () => void 
           )}
         </div>
       </div>
-    </div>
-  );
-}
-
-// ─── Today (the morning briefing) ────────────────────────────────────────────
-
-const money = (n: number) => `$${Math.round(Number(n ?? 0)).toLocaleString()}`;
-
-function Tile({ label, value, sub, danger }: { label: string; value: string; sub?: string; danger?: boolean }) {
-  return (
-    <div className={`rounded-2xl border p-5 ${danger ? 'border-[var(--swift-red)]/50 bg-[var(--swift-red)]/10' : 'border-white/10 bg-white/5'}`}>
-      <p className="text-[11px] font-bold uppercase tracking-wider text-white/40">{label}</p>
-      <p className="mt-2 text-3xl font-extrabold">{value}</p>
-      {sub && <p className="mt-1 text-xs text-white/40">{sub}</p>}
-    </div>
-  );
-}
-
-function Today() {
-  const q = useQuery({ queryKey: ['overview'], queryFn: fetchOverview, refetchInterval: 30_000 });
-
-  if (q.isLoading) return <p className="text-sm text-white/40">Loading the briefing…</p>;
-  if (q.isError) {
-    return (
-      <div className="rounded-2xl border border-white/10 bg-white/5 p-8 text-center">
-        <p className="text-sm text-white/60">Could not reach the admin API.</p>
-        <p className="mt-1 text-xs text-white/30">{(q.error as Error).message}</p>
-        <button onClick={() => q.refetch()} className="mt-4 rounded-lg bg-[var(--swift-red)] px-4 py-2 text-sm font-semibold">
-          Try again
-        </button>
-      </div>
-    );
-  }
-
-  const d = q.data;
-  const alerts = d.alerts ?? {};
-  const alertCount = (alerts.pendingVendors ?? 0) + (alerts.pastDueSubs ?? 0) + (alerts.unassignedOrders ?? 0);
-
-  return (
-    <div className="space-y-4">
-      <div className="grid grid-cols-4 gap-4">
-        <Tile label="Orders today" value={String(d.todayOrders ?? 0)} sub={`${d.todayCompletedOrders ?? 0} completed`} />
-        <Tile label="On the road" value={String((d.activeRiders ?? 0) + (d.activeDrivers ?? 0))} sub={`${d.activeRiders} riders · ${d.activeDrivers} taxis`} />
-        <Tile label="Weekly sub revenue" value={money(d.revenue?.weeklySubscriptionRevenue)} sub="platform revenue — subscriptions only" />
-        <Tile label="Active vendors" value={String(d.activeVendors ?? 0)} sub={`${d.totalVendors ?? 0} total`} />
-      </div>
-      <div className="grid grid-cols-3 gap-4">
-        <Tile label="Vendors awaiting review" value={String(alerts.pendingVendors ?? 0)} danger={(alerts.pendingVendors ?? 0) > 0} />
-        <Tile label="Past-due subscriptions" value={String(alerts.pastDueSubs ?? 0)} danger={(alerts.pastDueSubs ?? 0) > 0} />
-        <Tile label="Orders needing attention" value={String(alerts.unassignedOrders ?? 0)} danger={(alerts.unassignedOrders ?? 0) > 0} />
-      </div>
-      <p className="text-xs text-white/30">
-        {alertCount === 0 ? 'Nothing on fire. ' : `${alertCount} alert${alertCount === 1 ? '' : 's'} need eyes. `}
-        Live since {new Date().toLocaleTimeString()} — refreshes every 30s. ⌘K to search anything.
-      </p>
     </div>
   );
 }
@@ -246,7 +192,7 @@ export default function App() {
 
   return (
     <div className="flex min-h-screen">
-      <aside className="flex w-52 flex-col border-r border-white/10 p-4">
+      <aside className="flex w-52 flex-col border-r border-neutral-200 p-4">
         <p className="px-2 text-base font-extrabold tracking-tight">
           <span className="text-[var(--swift-red)]">Swift</span> MC
         </p>
@@ -255,7 +201,7 @@ export default function App() {
             <button
               key={key}
               onClick={() => setModule(key)}
-              className={`block w-full rounded-lg px-3 py-2 text-left text-sm font-semibold ${module === key ? 'bg-[var(--swift-red)]/15 text-[var(--swift-red)]' : 'text-white/60 hover:bg-white/5'}`}
+              className={`block w-full rounded-lg px-3 py-2 text-left text-sm font-semibold ${module === key ? 'bg-[var(--swift-red)]/15 text-[var(--swift-red)]' : 'text-neutral-600 hover:bg-neutral-100'}`}
             >
               {label}
             </button>
@@ -264,11 +210,11 @@ export default function App() {
         </nav>
         <button
           onClick={() => setCmdk(true)}
-          className="mb-2 rounded-lg border border-white/10 px-3 py-2 text-left text-sm text-white/50 hover:bg-white/5"
+          className="mb-2 rounded-lg border border-neutral-200 px-3 py-2 text-left text-sm text-neutral-500 hover:bg-neutral-100"
         >
           Search <span className="float-right text-xs">⌘K</span>
         </button>
-        <button onClick={signOut} className="rounded-lg px-3 py-2 text-left text-sm text-white/50 hover:bg-white/5">
+        <button onClick={signOut} className="rounded-lg px-3 py-2 text-left text-sm text-neutral-500 hover:bg-neutral-100">
           Sign out
         </button>
       </aside>
@@ -276,7 +222,7 @@ export default function App() {
         <h1 className="mb-5 text-2xl font-extrabold">
           {{ today: 'Today', review: 'Review Center', ops: 'Live Ops', stuck: 'Stuck Orders', money: 'Money', support: 'Support', people: 'People', vendors: 'Vendors & Billing', agent: 'Agent approvals', moderation: 'Reports', compliance: 'Compliance', health: 'Health' }[module]}
         </h1>
-        {module === 'today' && <Today />}
+        {module === 'today' && <Home go={setModule} />}
         {module === 'review' && <ReviewCenter />}
         {module === 'ops' && <LiveOps />}
         {module === 'agent' && <AgentDesk />}

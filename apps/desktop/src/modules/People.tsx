@@ -30,20 +30,20 @@ export default function People() {
           value={search}
           onChange={(e) => setSearch(e.target.value)}
           placeholder="Search name, phone, email…"
-          className="w-80 rounded-lg border border-white/10 bg-black/30 px-3 py-2 text-sm outline-none focus:border-[var(--swift-red)]"
+          className="w-80 rounded-lg border border-neutral-200 bg-black/30 px-3 py-2 text-sm outline-none focus:border-[var(--swift-red)]"
         />
-        <button className="rounded-lg border border-white/15 px-4 py-2 text-sm">Search</button>
+        <button className="rounded-lg border border-neutral-200 px-4 py-2 text-sm">Search</button>
       </form>
 
-      {users.isLoading && <p className="text-sm text-white/40">Loading…</p>}
+      {users.isLoading && <p className="text-sm text-neutral-400">Loading…</p>}
       {users.isError && (
-        <div className="rounded-2xl border border-white/10 bg-white/5 p-6 text-center">
-          <p className="text-sm text-white/60">{(users.error as Error).message}</p>
+        <div className="rounded-2xl border border-neutral-200 bg-neutral-100 p-6 text-center">
+          <p className="text-sm text-neutral-600">{(users.error as Error).message}</p>
           <button onClick={() => users.refetch()} className="mt-3 rounded-lg bg-[var(--swift-red)] px-4 py-2 text-sm font-semibold">Try again</button>
         </div>
       )}
       {!users.isLoading && rows.length === 0 && !users.isError && (
-        <p className="rounded-2xl border border-dashed border-white/10 p-10 text-center text-sm text-white/40">
+        <p className="rounded-2xl border border-dashed border-neutral-200 p-10 text-center text-sm text-neutral-400">
           Nobody matches.
         </p>
       )}
@@ -52,16 +52,16 @@ export default function People() {
         {rows.map((u) => {
           const suspended = u.status === 'SUSPENDED';
           return (
-            <div key={u.id} className="rounded-xl border border-white/10 bg-white/5 p-4">
+            <div key={u.id} className="rounded-xl border border-neutral-200 bg-neutral-100 p-4">
               <div className="flex items-center justify-between gap-3">
                 <div>
                   <p className="text-sm font-semibold">
                     {[u.firstName, u.lastName].filter(Boolean).join(' ') || u.phone}
-                    <span className="ml-2 text-xs text-white/40">{u.phone}</span>
+                    <span className="ml-2 text-xs text-neutral-400">{u.phone}</span>
                   </p>
-                  <p className="mt-0.5 text-xs text-white/50">
+                  <p className="mt-0.5 text-xs text-neutral-500">
                     {(u.roles ?? []).join(' · ')} ·{' '}
-                    <span className={suspended ? 'text-[var(--swift-red)] font-bold' : 'text-green-400'}>{u.status}</span>
+                    <span className={suspended ? 'text-[var(--swift-red)] font-bold' : 'text-green-600'}>{u.status}</span>
                   </p>
                 </div>
                 {suspended ? (
@@ -78,7 +78,7 @@ export default function People() {
                       value={reason[u.id] ?? ''}
                       onChange={(e) => setReason({ ...reason, [u.id]: e.target.value })}
                       placeholder="Reason (required)"
-                      className="w-44 rounded-lg border border-white/10 bg-black/30 px-2 py-1.5 text-xs outline-none"
+                      className="w-44 rounded-lg border border-neutral-200 bg-black/30 px-2 py-1.5 text-xs outline-none"
                     />
                     <button
                       onClick={() => suspend.mutate({ id: u.id, why: reason[u.id]!.trim() })}
