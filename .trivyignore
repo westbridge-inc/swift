@@ -1,0 +1,12 @@
+# CVE-2026-14257 / GHSA-mh99-v99m-4gvg — brace-expansion DoS (unbounded expansion → OOM).
+# The advisory has ONE affected range (<=5.0.7) fixed ONLY in 5.0.8 — no per-major
+# backport, so 1.1.16 and 2.1.2 (the maintainer's maintenance-v1/v2 heads, the latest
+# of their lines) are flagged with no in-line fix. Forcing those consumers to 5.x breaks
+# them: 5.x moved `module.exports = expand` to a named export, so minimatch@3 / glob /
+# eslint (which `require('brace-expansion')()` as a function) throw "expand is not a
+# function" (verified in CI). Our genuinely-current 5.x path IS bumped to 5.0.8 (see the
+# pnpm override). The residual 1.x/2.x are reached only by build/dev tooling (eslint) and
+# server-controlled file archiving (exceljs→archiver, glob patterns we author) — never a
+# user-controlled brace pattern, so the DoS is not reachable with untrusted input.
+# Revisit when minimatch/glob/eslint upstream adopt brace-expansion@5-native.
+CVE-2026-14257
