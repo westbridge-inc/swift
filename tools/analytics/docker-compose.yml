@@ -1,0 +1,36 @@
+# Swift Analytics — Apache Superset, local, themed Swift, reading Swift's DB.
+#   cd tools/analytics && docker compose up -d
+# Then open http://localhost:8088  (login: admin / admin — change it).
+# Reads Swift's Postgres through the READ-ONLY superset_ro user (host.docker.internal:5434).
+services:
+  swift-superset:
+    build: .                      # apache/superset:4.1.1 + psycopg2 (Postgres driver)
+    image: swift-superset:local
+    container_name: swift-superset
+    ports:
+      - "8088:8088"
+    environment:
+      # Local-only signing key. Override for anything non-local.
+      SUPERSET_SECRET_KEY: "${SUPERSET_SECRET_KEY:-swift-analytics-local-dev-only-not-a-real-secret-change-me}"
+      SUPERSET_CONFIG_PATH: /app/pythonpath/superset_config.py
+      SUPERSET_LOAD_EXAMPLES: "no"
+    volumes:
+      - ./superset_config.py:/app/pythonpath/superset_config.py:ro
+      - swift_superset_home:/app/superset_home
+    # First boot: migrate metadata, create the admin, init roles, then serve.
+    command:
+      - /bin/bash
+      - -c
+      - |
+        superset db upgrade &&
+        superset fab create-admin --username admin --firstname Swift --lastname Admin --email admin@swift.gy --password admin || true &&
+        superset init &&
+        /usr/bin/run-server.sh
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8088/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 20
+
+volumes:
+  swift_superset_home:
