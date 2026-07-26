@@ -16,6 +16,7 @@ const DOC_LABELS: Record<string, string> = {
   vehicle_registration: 'Vehicle Registration',
   vehicle_insurance: 'Vehicle Insurance',
   hire_car_permit: 'Hire-Car Permit',
+  road_service_licence: 'Road Service Licence',
   vehicle_plate_photo: 'Vehicle Plate Photo',
   police_clearance: 'Police Clearance Certificate',
   fitness_cert: 'Fitness Certificate',

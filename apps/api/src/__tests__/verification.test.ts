@@ -651,6 +651,23 @@ describe('Taxi movers are shown — and gated on — the taxi-extra checklist', 
     expect(data.checklist).toEqual(TAXI_DOCS);
     expect(data.vehicleType).toBeNull(); // nothing saved yet — gate would use the entity
   });
+
+  it('asks a box truck for base + motor + commercial docs, not the taxi-hire extras', async () => {
+    const res = await inject('GET', '/api/v1/verification/status?role=MOVER&vehicleType=BOX_TRUCK_LONG', undefined, taxiToken);
+    const data = res.json().data;
+    // A box truck is a commercial goods vehicle, not a hire car.
+    expect(data.checklist).toEqual([...MOVER_DOCS, 'road_service_licence', 'fitness_cert']);
+    expect(data.checklist).not.toContain('hire_car_permit');
+  });
+
+  it('asks a bus for the hire extras AND commercial docs — fitness cert only once', async () => {
+    const res = await inject('GET', '/api/v1/verification/status?role=MOVER&vehicleType=BUS_15', undefined, taxiToken);
+    const data = res.json().data;
+    expect(data.checklist).toContain('hire_car_permit'); // it carries passengers
+    expect(data.checklist).toContain('road_service_licence'); // it is commercial
+    // fitness_cert is in both the taxi and commercial profiles — deduped to one.
+    expect(data.checklist.filter((d: string) => d === 'fitness_cert')).toHaveLength(1);
+  });
 });
 
 describe('Operator identity docs are face-matched against the signup selfie', () => {

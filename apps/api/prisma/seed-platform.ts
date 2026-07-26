@@ -91,6 +91,11 @@ export async function seedPlatformSpine(prisma: PrismaClient): Promise<void> {
     // H-plate photo, exterior car photo with the H plate + corporate-yellow
     // paint visible (master plan §3.1), and an annual fitness certificate.
     MOVER_TAXI_EXTRA: ['hire_car_permit', 'vehicle_plate_photo', 'vehicle_exterior_photo', 'fitness_cert'],
+    // Commercial goods/passenger vehicles (canters, box trucks, buses) run under
+    // a Road Service Licence and carry an annual Certificate of Fitness on top of
+    // the base motor documents. (fitness_cert reuses the taxi key so a bus that is
+    // both hire + commercial uploads it once.)
+    MOVER_COMMERCIAL: ['road_service_licence', 'fitness_cert'],
     // Commerce operators (master plan §3.3–3.5): registration + TIN for every
     // business; restaurants add the GRA eating-house licence + food handler
     // cert; every storefront photographs its premises (shown to customers).
