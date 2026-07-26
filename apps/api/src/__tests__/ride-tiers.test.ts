@@ -154,22 +154,25 @@ describe('Pure fare helpers', () => {
   });
 
   it('classesAtOrAbove encodes "serves all tiers <= it"', () => {
-    expect(classesAtOrAbove('ECONOMY')).toEqual(['ECONOMY', 'COMFORT', 'XL']);
-    expect(classesAtOrAbove('COMFORT')).toEqual(['COMFORT', 'XL']);
-    expect(classesAtOrAbove('XL')).toEqual(['XL']);
+    expect(classesAtOrAbove('ECONOMY')).toEqual(['ECONOMY', 'COMFORT', 'XL', 'GROUP']);
+    expect(classesAtOrAbove('COMFORT')).toEqual(['COMFORT', 'XL', 'GROUP']);
+    expect(classesAtOrAbove('XL')).toEqual(['XL', 'GROUP']);
+    expect(classesAtOrAbove('GROUP')).toEqual(['GROUP']);
   });
 
-  it('XL seats 6, the rest 4', () => {
-    expect(CLASS_CAPACITY).toEqual({ ECONOMY: 4, COMFORT: 4, XL: 6 });
+  it('XL seats 6, GROUP (minibus) 14, the rest 4', () => {
+    expect(CLASS_CAPACITY).toEqual({ ECONOMY: 4, COMFORT: 4, XL: 6, GROUP: 14 });
   });
 });
 
 describe('FareService.estimateTiers', () => {
-  it('returns three tiers, strictly ascending in fare', async () => {
+  it('returns four tiers, strictly ascending in fare, GROUP the priciest', async () => {
     const { tiers } = await fare.estimateTiers(CENTRAL, { lat: 6.755, lng: -58.155 }, 'GY');
-    expect(tiers.map((t) => t.rideClass)).toEqual(['ECONOMY', 'COMFORT', 'XL']);
+    expect(tiers.map((t) => t.rideClass)).toEqual(['ECONOMY', 'COMFORT', 'XL', 'GROUP']);
     expect(tiers[0]!.fare).toBeLessThan(tiers[1]!.fare);
     expect(tiers[1]!.fare).toBeLessThan(tiers[2]!.fare);
+    expect(tiers[2]!.fare).toBeLessThan(tiers[3]!.fare);
+    expect(tiers[3]!.fare).toBeGreaterThan(tiers[0]!.fare * 2); // GROUP ×2.5 economy
   });
 });
 
@@ -180,7 +183,7 @@ describe('POST /rides/estimate — tiered shape', () => {
     expect(res.statusCode).toBe(200);
     const data = res.json().data;
     expect(Array.isArray(data.tiers)).toBe(true);
-    expect(data.tiers).toHaveLength(3);
+    expect(data.tiers).toHaveLength(4);
     expect(data.fare).toBeUndefined();
   });
 });
@@ -195,6 +198,21 @@ describe('POST /rides/request — capacity guard (failure path)', () => {
     }, token);
     expect(res.statusCode).toBe(400);
     expect(res.json().error.code).toBe('TOO_MANY_PASSENGERS');
+  });
+
+  it('accepts a 10-passenger group on GROUP but rejects it on XL', async () => {
+    const { token } = await makeCustomer();
+    const base = {
+      pickup: CENTRAL, dropoff: { lat: 6.755, lng: -58.155 },
+      pickupAddress: 'Central GT', dropoffAddress: 'South GT', passengerCount: 10,
+    };
+    const onXl = await inject('POST', '/api/v1/rides/request', { ...base, rideClass: 'XL' }, token);
+    expect(onXl.statusCode).toBe(400);
+    expect(onXl.json().error.code).toBe('TOO_MANY_PASSENGERS'); // XL seats 6
+
+    await makeDriver('GROUP'); // a minibus to dispatch to
+    const onGroup = await inject('POST', '/api/v1/rides/request', { ...base, rideClass: 'GROUP' }, token);
+    expect(onGroup.statusCode).toBe(201); // 10 is within GROUP's 14 seats — ride created
   });
 
   it('persists the chosen tier and its fare on a valid request', async () => {

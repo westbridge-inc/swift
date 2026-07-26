@@ -33,7 +33,7 @@ const requestRideSchema = z.object({
   dropoff: pointSchema,
   pickupAddress: z.string().trim().min(3).max(200),
   dropoffAddress: z.string().trim().min(3).max(200),
-  passengerCount: z.number().int().min(1).max(6).default(1),
+  passengerCount: z.number().int().min(1).max(14).default(1),
   rideClass: z.nativeEnum(RideClass).default(RideClass.ECONOMY),
 });
 

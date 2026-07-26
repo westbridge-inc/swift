@@ -194,7 +194,7 @@ export const customerApi = {
 
 // Taxi / rides (mounted at /api/v1/rides)
 type Point = { lat: number; lng: number };
-export type RideClass = 'ECONOMY' | 'COMFORT' | 'XL';
+export type RideClass = 'ECONOMY' | 'COMFORT' | 'XL' | 'GROUP';
 export interface TierEstimate {
   rideClass: RideClass;
   fare: number;

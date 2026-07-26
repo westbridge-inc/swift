@@ -117,7 +117,7 @@ export async function seedPlatformSpine(prisma: PrismaClient): Promise<void> {
   };
   const guyanaTaxiRates = { base: 1000, perKm: 300, perMin: 25, minimum: 1500 };
   // Per-tier multipliers on the base (Economy) fare — country-independent.
-  const taxiClassRates = { ECONOMY: 1.0, COMFORT: 1.35, XL: 1.8 };
+  const taxiClassRates = { ECONOMY: 1.0, COMFORT: 1.35, XL: 1.8, GROUP: 2.5 };
   const guyanaCashRules = {
     maxClaimsPerRiderPerMonth: 3,
     strikeRestrictThreshold: 2,
