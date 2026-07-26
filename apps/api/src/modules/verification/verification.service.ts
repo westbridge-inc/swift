@@ -29,6 +29,7 @@ const AUTO_APPROVE_EXPIRY_DAYS: Record<string, number> = {
   fitness_cert: 365,       // annual fitness
   vehicle_insurance: 365,  // annual policy
   hire_car_permit: 365,    // annual occupational permit
+  road_service_licence: 365, // annual commercial road-service licence
   food_handler_cert: 365,  // annual health cert
   gra_restaurant_licence: 365,
   drivers_licence: 3 * 365,
