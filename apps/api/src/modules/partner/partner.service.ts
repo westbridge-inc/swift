@@ -1,4 +1,4 @@
-import type { PrismaClient, UserRole } from '@prisma/client';
+import type { PrismaClient, UserRole, VehicleType } from '@prisma/client';
 import { nanoid } from 'nanoid';
 import { AppError, ValidationError } from '../../utils/errors';
 import { FloatService } from '../dispatch/float.service';
@@ -28,7 +28,7 @@ export type Business = {
 
 export interface BecomePartnerInput {
   role: 'MOVER' | 'VENDOR';
-  vehicleType?: 'BICYCLE' | 'MOTORCYCLE' | 'CAR';
+  vehicleType?: VehicleType;
   vehicle?: Vehicle;
   business?: Business;
 }
@@ -69,7 +69,11 @@ export class PartnerService {
     return roles;
   }
 
-  private async provisionRider(userId: string, roles: UserRole[], vehicleType: 'BICYCLE' | 'MOTORCYCLE') {
+  // Every non-CAR vehicle provisions a delivery/courier Rider (CAR provisions a
+  // taxi Driver above). The expanded fleet — wagon, buses, canters, box trucks —
+  // are delivery-capable movers here; wiring buses/wagons into taxi passenger
+  // service (the Driver side) is a later layer.
+  private async provisionRider(userId: string, roles: UserRole[], vehicleType: VehicleType) {
     const existing = await this.prisma.rider.findUnique({ where: { userId } });
     const rider = existing ?? (await this.prisma.rider.create({ data: { userId, riderType: 'BOTH', vehicleType } }));
     // D.3 — seed the new rider's float limit from their trust level + country.

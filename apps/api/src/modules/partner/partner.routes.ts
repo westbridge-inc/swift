@@ -1,5 +1,6 @@
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
+import { VehicleType } from '@prisma/client';
 import { PartnerService } from './partner.service';
 import { NotificationService } from '../notification/notification.service';
 
@@ -24,7 +25,7 @@ const businessSchema = z.object({
 
 const becomeSchema = z.object({
   role: z.enum(['MOVER', 'VENDOR']),
-  vehicleType: z.enum(['BICYCLE', 'MOTORCYCLE', 'CAR']).optional(),
+  vehicleType: z.nativeEnum(VehicleType).optional(),
   vehicle: vehicleSchema.optional(),
   business: businessSchema.optional(),
 });

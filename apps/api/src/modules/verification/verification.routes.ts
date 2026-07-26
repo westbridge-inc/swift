@@ -1,5 +1,6 @@
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
+import { VehicleType } from '@prisma/client';
 import { VerificationService } from './verification.service';
 import { NotificationService, notifyAdmins } from '../notification/notification.service';
 import { getKycProvider } from '../../providers/kyc/kyc-provider';
@@ -15,7 +16,7 @@ const statusQuerySchema = z.object({
   role: checklistRoleSchema.default('MOVER'),
   // Preview the checklist for a vehicle the mover is selecting but hasn't saved
   // yet. Display-only — gates always use the saved Driver/Rider entity.
-  vehicleType: z.enum(['BICYCLE', 'MOTORCYCLE', 'CAR']).optional(),
+  vehicleType: z.nativeEnum(VehicleType).optional(),
 });
 
 // DPA §3.5: a document upload is only accepted with explicit consent and the
