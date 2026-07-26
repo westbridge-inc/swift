@@ -1,6 +1,7 @@
 import type { PrismaClient, VerificationDocument, UserRole, VehicleType } from '@prisma/client';
 import { AppError, NotFoundError } from '../../utils/errors';
 import { CountryConfigService } from '../country/country-config.service';
+import { isPassengerVehicle } from '../../config/vehicle-classes';
 import { NotificationService, notifyAdmins } from '../notification/notification.service';
 import type { KycProvider } from '../../providers/kyc/kyc-provider';
 import { getStorageProvider } from '../../providers/storage/storage-provider';
@@ -345,8 +346,8 @@ export class VerificationService {
    * gate apply a stricter MOTORCYCLE default for the null case.
    */
   private async getMoverVehicleType(userId: string): Promise<VehicleType | null> {
-    const driver = await this.prisma.driver.findUnique({ where: { userId }, select: { id: true } });
-    if (driver) return 'CAR';
+    const driver = await this.prisma.driver.findUnique({ where: { userId }, select: { vehicleType: true } });
+    if (driver) return driver.vehicleType;
     const rider = await this.prisma.rider.findUnique({ where: { userId }, select: { vehicleType: true } });
     return rider?.vehicleType ?? null;
   }
@@ -464,11 +465,12 @@ export class VerificationService {
     }
     if (!baseOk) return { allowed: false, reason: 'docs' };
 
-    // Taxi (CAR): a current, manually-confirmed HIRE-class policy is mandatory
-    // before carrying passengers, and the reviewer must have cross-checked the
-    // policy's plate against the H plate on the registration + photos.
-    // PRIVATE insurance never qualifies.
-    if (opts.vehicleType === 'CAR') {
+    // Any PASSENGER vehicle (car, wagon, bus): a current, manually-confirmed
+    // HIRE-class policy is mandatory before carrying passengers, and the reviewer
+    // must have cross-checked the policy's plate against the plate on the
+    // registration + photos. PRIVATE insurance never qualifies. Cargo-only movers
+    // (bike/motorbike/canter/box-truck) are not gated on hire insurance.
+    if (isPassengerVehicle(opts.vehicleType)) {
       const insurance = await this.prisma.verificationDocument.findFirst({
         where: {
           userId,
@@ -701,9 +703,9 @@ export class VerificationService {
   async forceMoverOfflineIfNotLive(userId: string) {
     const driver = await this.prisma.driver.findUnique({
       where: { userId },
-      select: { id: true, documentsVerified: true },
+      select: { vehicleType: true, documentsVerified: true },
     });
-    const vehicleType = driver ? 'CAR' as const : (await this.getMoverVehicleType(userId));
+    const vehicleType = driver ? driver.vehicleType : (await this.getMoverVehicleType(userId));
     if (!vehicleType) return;
 
     const live = await this.getLiveOperationStatus(userId, {

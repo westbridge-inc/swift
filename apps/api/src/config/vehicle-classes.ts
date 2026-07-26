@@ -115,3 +115,10 @@ export function vehicleTypesForPackageSize(size: string | null | undefined): Veh
 export function docProfilesFor(vehicleType: VehicleType): string[] {
   return VEHICLE_CLASSES[vehicleType]?.docProfiles ?? [];
 }
+
+/** A passenger-carrying vehicle (has a ride class): car, wagon, bus. These carry
+ *  people, so they must clear the same hire-insurance + plate gate a taxi does —
+ *  as opposed to cargo-only movers (bicycle, motorbike, canter, box truck). */
+export function isPassengerVehicle(vehicleType: VehicleType): boolean {
+  return VEHICLE_CLASSES[vehicleType]?.rideClass != null;
+}
