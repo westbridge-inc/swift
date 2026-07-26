@@ -495,7 +495,7 @@ export const vendorApi = {
   hours: () => api.get('/vendor/hours'),
   setHours: (hours: { dayOfWeek: number; openTime: string; closeTime: string; isClosed: boolean }[]) =>
     api.put('/vendor/hours', { hours }),
-  updateProfile: (data: { name?: string; phone?: string; description?: string; mmgPayUrl?: string | null }) =>
+  updateProfile: (data: { name?: string; phone?: string; description?: string; mmgPayUrl?: string | null; selfDeliveryEnabled?: boolean }) =>
     api.put('/vendor/profile', data),
   importItems: (csv: string) => api.post('/vendor/items/import', { csv }),
   importTemplate: () => api.get('/vendor/items/import/template'),
