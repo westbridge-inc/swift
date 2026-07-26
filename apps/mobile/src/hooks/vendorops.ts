@@ -226,6 +226,15 @@ export function useToggleOrders() {
   const qc = useQueryClient();
   return useMutation({ mutationFn: () => unwrap(vendorApi.toggleOrders()), onSuccess: () => qc.invalidateQueries({ queryKey: ['vendor', 'profile'] }) });
 }
+/** Turn self-delivery on/off. When on, the server routes this store's delivery
+ *  orders to VENDOR_DELIVERY (the vendor delivers) instead of dispatching a rider. */
+export function useSetSelfDelivery() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (selfDeliveryEnabled: boolean) => unwrap(vendorApi.updateProfile({ selfDeliveryEnabled })),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['vendor', 'profile'] }),
+  });
+}
 
 export function useOrderAction() {
   const qc = useQueryClient();

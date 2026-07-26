@@ -57,6 +57,7 @@ import {
   useVendorOrdersLive,
   useToggleOpen,
   useToggleOrders,
+  useSetSelfDelivery,
   useOrderAction,
   useVendorMenu,
   useCreateCategory,
@@ -467,6 +468,7 @@ const VendorOrderCard = React.memo(function VendorOrderCard({
 function VendorOps({ store, navigation }: any) {
   const toggleOpen = useToggleOpen();
   const toggleOrders = useToggleOrders();
+  const setSelfDelivery = useSetSelfDelivery();
   const orderAction = useOrderAction();
   const ordersQ = useVendorOrders(true);
   const analyticsQ = useVendorAnalytics();
@@ -499,6 +501,7 @@ function VendorOps({ store, navigation }: any) {
   const fetched: any[] = ordersQ.data ?? [];
   const open = !!store.isCurrentlyOpen;
   const accepting = !!store.acceptingOrders;
+  const selfDelivery = !!store.selfDeliveryEnabled;
   const busy = orderAction.isPending;
 
   // The live board works the open queue; finished orders live in History.
@@ -627,6 +630,35 @@ function VendorOps({ store, navigation }: any) {
             </T>
           ) : null}
         </Card>
+
+        {/* Who delivers — self-delivery vs a Swift rider. When on, the server
+            routes this store's delivery orders to the vendor (no rider sent). */}
+        {!inPreview ? (
+          <Card style={{ marginBottom: space.lg }}>
+            <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
+              <View style={{ flex: 1, paddingRight: space.md }}>
+                <T variant="body" weight="bold">
+                  Deliver my own orders
+                </T>
+                <T variant="caption" tone="muted" style={{ marginTop: 4 }}>
+                  {selfDelivery
+                    ? 'You deliver your orders yourself — Swift won’t send a rider.'
+                    : 'Swift sends the nearest rider for your delivery orders.'}
+                </T>
+              </View>
+              <BrandSwitch
+                value={selfDelivery}
+                disabled={setSelfDelivery.isPending}
+                onChange={() => (setSelfDelivery.isPending ? undefined : setSelfDelivery.mutate(!selfDelivery))}
+              />
+            </View>
+            {setSelfDelivery.isError ? (
+              <T variant="caption" tone="error" style={{ marginTop: space.sm }}>
+                Couldn’t update — try again.
+              </T>
+            ) : null}
+          </Card>
+        ) : null}
 
         {/* KPIs */}
         <View style={{ flexDirection: 'row', gap: space.md, marginBottom: space.lg }}>
