@@ -2,6 +2,18 @@ import type { NextConfig } from 'next';
 
 const API = process.env['NEXT_PUBLIC_API_URL'] || 'http://localhost:3000';
 
+// The admin console is a high-value target — refuse to build it pointed at a
+// plaintext backend on a real host (an http:// API is a token-stealable MITM).
+// Only the dangerous case throws; unset / http-localhost stay allowed so it
+// never breaks a CI/dev build.
+{
+  const url = process.env['NEXT_PUBLIC_API_URL'];
+  const isLocal = !!url && (url.includes('localhost') || url.includes('127.0.0.1'));
+  if (url && url.startsWith('http://') && !isLocal) {
+    throw new Error('NEXT_PUBLIC_API_URL must use https:// — a plaintext admin API exposes admin tokens to MITM');
+  }
+}
+
 // Admin XSS hardening (SEC-11 mitigation — tokens stay in the browser, so we
 // shrink the XSS blast radius). Next.js needs 'unsafe-inline'/'unsafe-eval' for
 // hydration/HMR without nonce infrastructure; the load-bearing protections here

@@ -9,6 +9,14 @@ const API_URL = import.meta.env.VITE_API_URL ?? 'http://localhost:3000';
 // there we fall back to localStorage. The inTauri gate keeps the real app on
 // the Keychain.
 const inTauri = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
+
+// In the packaged app, refuse a plaintext API on a real host — a MITM on the
+// admin's network would otherwise steal the admin token straight off the wire.
+// localhost stays allowed for dev; the browser preview isn't the real client.
+if (inTauri && API_URL.startsWith('http://') && !API_URL.includes('localhost') && !API_URL.includes('127.0.0.1')) {
+  throw new Error('VITE_API_URL must use https:// in the packaged Mission Control app');
+}
+
 const KC = 'swift-mc:';
 async function kcGet(key: string): Promise<string | null> {
   if (inTauri) { try { return (await invoke<string | null>('keychain_get', { key })) ?? null; } catch { return null; } }
@@ -160,7 +168,14 @@ export const rejectDoc = (id: string, reason: string, reasonCode?: string) =>
 export const documentViewUrl = (id: string) =>
   apiFetch(`/api/v1/admin/verification/${id}/document-url`).then((r) => {
     const url: string = r.data.url;
-    return url.startsWith('http') ? url : `${API_URL}${url}`;
+    const resolved = url.startsWith('http') ? url : `${API_URL}${url}`;
+    // Defence-in-depth before it lands in an <iframe src>: only ever an http(s)
+    // URL — never javascript:/data:/blob:, even if the server were tricked.
+    const proto = new URL(resolved, API_URL).protocol;
+    if (proto !== 'http:' && proto !== 'https:') {
+      throw new Error('Refusing a non-http document URL');
+    }
+    return resolved;
   });
 
 /** Mirrors the server's RejectionReasonCode enum (verification.service). */
