@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { authApi, verificationApi, partnerApi } from '../services/api';
+import { authApi, verificationApi, partnerApi, type VehicleKind } from '../services/api';
 
 const PRIVACY_NOTICE_VERSION = 'v1';
 
@@ -40,7 +40,7 @@ export function useBecomePartner() {
   return useMutation({
     mutationFn: (data: {
       role: 'MOVER' | 'VENDOR';
-      vehicleType?: 'BICYCLE' | 'MOTORCYCLE' | 'CAR';
+      vehicleType?: VehicleKind;
       vehicle?: { make: string; model: string; year: number; color: string; licensePlate: string };
       business?: {
         name: string;

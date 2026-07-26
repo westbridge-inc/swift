@@ -8,16 +8,26 @@ import { SwiftMark } from '../../../components/SwiftLogo';
 import { DocumentChecklist } from '../../../components/onboarding/DocumentChecklist';
 import { PricingCard } from '../../../components/onboarding/PricingCard';
 import { useVerificationStatus, useBecomePartner } from '../../../hooks';
+import { type VehicleKind } from '../../../services/api';
 import { useAuthStore } from '../../../stores/authStore';
 import { RoleSwitcherSheet } from '../../../components/RoleSwitcherSheet';
 import { GUTTER } from '../shared';
 
-type VehicleKind = 'BICYCLE' | 'MOTORCYCLE' | 'CAR';
-
+// The full Guyana fleet, small → large. Order matches the vehicle-class
+// taxonomy on the server (config/vehicle-classes). Only CAR provisions a taxi
+// Driver (and collects vehicle details below); the rest register a delivery/
+// courier Rider — details and commercial docs follow in the Documents step.
 const VTYPES: { key: VehicleKind; label: string; icon: keyof typeof MaterialCommunityIcons.glyphMap; hint: string }[] = [
-  { key: 'BICYCLE', label: 'Bicycle', icon: 'bike', hint: 'Deliveries' },
-  { key: 'MOTORCYCLE', label: 'Motorcycle', icon: 'moped', hint: 'Deliveries' },
-  { key: 'CAR', label: 'Car', icon: 'car', hint: 'Taxi + rides' },
+  { key: 'BICYCLE', label: 'Bicycle', icon: 'bike', hint: 'Small deliveries' },
+  { key: 'MOTORCYCLE', label: 'Motorbike', icon: 'moped', hint: 'Deliveries' },
+  { key: 'CAR', label: 'Car', icon: 'car', hint: 'Taxi + delivery' },
+  { key: 'WAGON_CAR', label: 'Wagon Car', icon: 'car-estate', hint: 'Taxi + larger loads' },
+  { key: 'BUS_9', label: 'Bus (9-seater)', icon: 'van-passenger', hint: 'Groups & tours' },
+  { key: 'BUS_15', label: 'Bus (15-seater)', icon: 'bus', hint: 'Groups & airport runs' },
+  { key: 'CANTER_SHORT', label: 'Short-Base Canter (Open Back)', icon: 'truck-flatbed', hint: 'Open cargo' },
+  { key: 'CANTER_LONG', label: 'Long-Base Canter (Open Back)', icon: 'truck-flatbed', hint: 'Large open cargo' },
+  { key: 'BOX_TRUCK_SHORT', label: 'Short-Base Box Truck', icon: 'truck', hint: 'Enclosed cargo' },
+  { key: 'BOX_TRUCK_LONG', label: 'Long-Base Box Truck', icon: 'truck-delivery', hint: 'Large enclosed cargo' },
 ];
 
 function ValuePill({ icon, label }: { icon: keyof typeof MaterialCommunityIcons.glyphMap; label: string }) {
@@ -31,30 +41,39 @@ function ValuePill({ icon, label }: { icon: keyof typeof MaterialCommunityIcons.
   );
 }
 
-function VehicleTile({ v, active, onPress }: { v: (typeof VTYPES)[number]; active: boolean; onPress: () => void }) {
+function VehicleRow({ v, active, onPress }: { v: (typeof VTYPES)[number]; active: boolean; onPress: () => void }) {
   return (
-    <Pressable onPress={onPress} style={{ flex: 1 }}>
+    <Pressable onPress={onPress}>
       {({ pressed }) => (
         <View
           style={{
+            flexDirection: 'row',
             alignItems: 'center',
+            gap: space.md,
             borderRadius: radius.lg,
             borderWidth: 1,
-            paddingVertical: space.md,
+            padding: space.md,
             borderColor: active ? color.brand[500] : color.border.subtle,
             backgroundColor: active ? color.brand[50] : color.surface.base,
             opacity: pressed ? 0.85 : 1,
           }}
         >
-          <View style={{ width: 44, height: 44, borderRadius: 22, alignItems: 'center', justifyContent: 'center', marginBottom: 4, backgroundColor: active ? color.brand[500] : color.surface.subtle }}>
+          <View style={{ width: 44, height: 44, borderRadius: 22, alignItems: 'center', justifyContent: 'center', backgroundColor: active ? color.brand[500] : color.surface.subtle }}>
             <MaterialCommunityIcons name={v.icon} size={22} color={active ? color.white : color.text.secondary} />
           </View>
-          <T variant="label" weight="bold" tone={active ? 'deep' : 'ink'}>
-            {v.label}
-          </T>
-          <T variant="caption" tone="muted">
-            {v.hint}
-          </T>
+          <View style={{ flex: 1 }}>
+            <T variant="label" weight="bold" tone={active ? 'deep' : 'ink'}>
+              {v.label}
+            </T>
+            <T variant="caption" tone="muted">
+              {v.hint}
+            </T>
+          </View>
+          <MaterialCommunityIcons
+            name={active ? 'check-circle' : 'circle-outline'}
+            size={22}
+            color={active ? color.brand[500] : color.border.subtle}
+          />
         </View>
       )}
     </Pressable>
@@ -88,9 +107,9 @@ function VehicleSetup({ vt, setVt, onDone }: { vt: VehicleKind; setVt: (v: Vehic
       <T variant="label" tone="muted" style={{ marginTop: 4 }}>
         How will you earn?
       </T>
-      <View style={{ flexDirection: 'row', gap: space.md, marginTop: space.md }}>
+      <View style={{ gap: space.sm, marginTop: space.md }}>
         {VTYPES.map((v) => (
-          <VehicleTile key={v.key} v={v} active={v.key === vt} onPress={() => setVt(v.key)} />
+          <VehicleRow key={v.key} v={v} active={v.key === vt} onPress={() => setVt(v.key)} />
         ))}
       </View>
       {isCar ? (

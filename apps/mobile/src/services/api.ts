@@ -312,11 +312,26 @@ export const verificationApi = {
     api.post('/verification/identity', data),
 };
 
+// The mover vehicle taxonomy — mirrors the server's VehicleType enum
+// (config/vehicle-classes). Kept in one place so the picker, the hook and the
+// API client never drift.
+export type VehicleKind =
+  | 'BICYCLE'
+  | 'MOTORCYCLE'
+  | 'CAR'
+  | 'WAGON_CAR'
+  | 'BUS_9'
+  | 'BUS_15'
+  | 'CANTER_SHORT'
+  | 'CANTER_LONG'
+  | 'BOX_TRUCK_SHORT'
+  | 'BOX_TRUCK_LONG';
+
 // Partner provisioning (mounted at /api/v1/partner)
 export const partnerApi = {
   become: (data: {
     role: 'MOVER' | 'VENDOR';
-    vehicleType?: 'BICYCLE' | 'MOTORCYCLE' | 'CAR';
+    vehicleType?: VehicleKind;
     vehicle?: { make: string; model: string; year: number; color: string; licensePlate: string };
     business?: {
       name: string;
