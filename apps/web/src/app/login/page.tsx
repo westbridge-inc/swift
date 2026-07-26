@@ -12,7 +12,11 @@ const CUSTOMER_ROUTES = ['/order', '/cart', '/orders', '/taxi', '/account', '/ex
 function LoginInner() {
   const router = useRouter();
   const params = useSearchParams();
-  const next = params.get('next') ?? '';
+  // Only ever honour a clean in-app path as the post-login redirect. Reject
+  // absolute/protocol-relative URLs and any '..' traversal so ?next= can't be an
+  // open redirect to a phishing site.
+  const rawNext = params.get('next') ?? '';
+  const next = /^\/(?!\/)/.test(rawNext) && !rawNext.includes('..') && !rawNext.includes('\\') ? rawNext : '';
   const isCustomer = CUSTOMER_ROUTES.some((r) => next.startsWith(r));
 
   const [step, setStep] = useState<'phone' | 'code'>('phone');
