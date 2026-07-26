@@ -66,12 +66,12 @@ export const VEHICLE_CLASSES: Record<VehicleType, VehicleClass> = {
   },
   BUS_9: {
     type: 'BUS_9', label: 'Bus (9-seater)', maxPackageSize: 'EXTRA_LARGE', seats: 9,
-    rideClass: 'XL', services: ['RIDE', 'COURIER'],
+    rideClass: 'GROUP', services: ['RIDE', 'COURIER'],
     docProfiles: ['MOVER_MOTOR', 'MOVER_TAXI_EXTRA', 'MOVER_COMMERCIAL'], order: 5,
   },
   BUS_15: {
     type: 'BUS_15', label: 'Bus (15-seater)', maxPackageSize: 'EXTRA_LARGE', seats: 15,
-    rideClass: 'XL', services: ['RIDE', 'COURIER'],
+    rideClass: 'GROUP', services: ['RIDE', 'COURIER'],
     docProfiles: ['MOVER_MOTOR', 'MOVER_TAXI_EXTRA', 'MOVER_COMMERCIAL'], order: 6,
   },
   CANTER_SHORT: {

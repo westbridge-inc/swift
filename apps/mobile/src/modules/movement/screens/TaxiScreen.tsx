@@ -32,6 +32,7 @@ const TIER_META: Record<RideClass, { label: string; icon: keyof typeof MaterialC
   ECONOMY: { label: 'Economy', icon: 'car', blurb: 'Affordable, everyday rides' },
   COMFORT: { label: 'Comfort', icon: 'car-estate', blurb: 'Newer cars, extra legroom' },
   XL: { label: 'XL', icon: 'car-3-plus', blurb: 'Seats up to 6' },
+  GROUP: { label: 'Bus', icon: 'bus', blurb: 'Minibus — groups, tours & airport runs' },
 };
 
 type LatLng = { latitude: number; longitude: number };

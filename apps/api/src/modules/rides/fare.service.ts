@@ -23,14 +23,17 @@ const AVG_SPEED_KMH = 25;
 
 export type ClassRates = Record<RideClass, number>;
 
-/** Multipliers on the base (Economy) fare. Code default when CountryConfig is null. */
-export const DEFAULT_CLASS_RATES: ClassRates = { ECONOMY: 1.0, COMFORT: 1.35, XL: 1.8 };
+/** Multipliers on the base (Economy) fare. Code default when CountryConfig is null.
+ *  GROUP = a minibus (9–15 seater) for group / tour / airport runs — a bigger
+ *  vehicle and a premium service, so it sits above XL. */
+export const DEFAULT_CLASS_RATES: ClassRates = { ECONOMY: 1.0, COMFORT: 1.35, XL: 1.8, GROUP: 2.5 };
 
-/** Seat capacity per tier — a code rule, not stored on the driver. */
-export const CLASS_CAPACITY: Record<RideClass, number> = { ECONOMY: 4, COMFORT: 4, XL: 6 };
+/** Seat capacity per tier — a code rule, not stored on the driver. GROUP covers
+ *  up to a 15-seater minibus (14 passengers + driver). */
+export const CLASS_CAPACITY: Record<RideClass, number> = { ECONOMY: 4, COMFORT: 4, XL: 6, GROUP: 14 };
 
 /** Tiers cheapest → priciest. Index also encodes "serves all classes <= it". */
-export const RIDE_CLASS_ORDER: RideClass[] = ['ECONOMY', 'COMFORT', 'XL'];
+export const RIDE_CLASS_ORDER: RideClass[] = ['ECONOMY', 'COMFORT', 'XL', 'GROUP'];
 
 /**
  * Driver classes eligible for an order of `orderClass`. A driver's rideClass is
