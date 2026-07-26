@@ -154,6 +154,7 @@ describe('partner provisioning — happy paths', () => {
     expect(JSON.parse(res.body).data.kind).toBe('DRIVER');
     const driver = await app.prisma.driver.findFirst({ where: { user: { phone: BUS_PHONE } } });
     expect(driver?.rideClass).toBe('GROUP');
+    expect(driver?.vehicleType).toBe('BUS_15'); // drives the commercial doc checklist + hire gate
   });
 
   it('provisions a COMFORT Driver for a wagon mover', async () => {
@@ -166,6 +167,7 @@ describe('partner provisioning — happy paths', () => {
     expect(JSON.parse(res.body).data.kind).toBe('DRIVER');
     const driver = await app.prisma.driver.findFirst({ where: { user: { phone: WAGON_PHONE } } });
     expect(driver?.rideClass).toBe('COMFORT');
+    expect(driver?.vehicleType).toBe('WAGON_CAR');
   });
 
   it('appends MOVER + RIDER roles exactly once', async () => {

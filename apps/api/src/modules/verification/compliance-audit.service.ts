@@ -1,4 +1,4 @@
-import { PrismaClient } from '@prisma/client';
+import { PrismaClient, type VehicleType } from '@prisma/client';
 import { NotificationService, notifyAdmins } from '../notification/notification.service';
 import { VerificationService } from './verification.service';
 import { AppError, NotFoundError } from '../../utils/errors';
@@ -41,7 +41,7 @@ export class ComplianceAuditService {
     const [drivers, riders] = await Promise.all([
       this.prisma.driver.findMany({
         where: { isOnline: true },
-        select: { userId: true, documentsVerified: true },
+        select: { userId: true, documentsVerified: true, vehicleType: true },
       }),
       this.prisma.rider.findMany({
         where: { isOnline: true },
@@ -49,9 +49,9 @@ export class ComplianceAuditService {
       }),
     ]);
 
-    type Subject = { userId: string; moverKind: 'DRIVER' | 'RIDER'; vehicleType: 'CAR' | string; legacyVerified?: boolean };
+    type Subject = { userId: string; moverKind: 'DRIVER' | 'RIDER'; vehicleType: VehicleType; legacyVerified?: boolean };
     const subjects: Subject[] = [
-      ...drivers.map((d) => ({ userId: d.userId, moverKind: 'DRIVER' as const, vehicleType: 'CAR', legacyVerified: d.documentsVerified })),
+      ...drivers.map((d) => ({ userId: d.userId, moverKind: 'DRIVER' as const, vehicleType: d.vehicleType, legacyVerified: d.documentsVerified })),
       ...riders.map((r) => ({ userId: r.userId, moverKind: 'RIDER' as const, vehicleType: r.vehicleType })),
     ];
 
@@ -210,9 +210,9 @@ export class ComplianceAuditService {
     if (!v) throw new NotFoundError('Violation');
     if (v.resolvedAt) return v;
 
-    const kind = await this.prisma.driver.findUnique({ where: { userId: v.userId }, select: { userId: true } });
+    const kind = await this.prisma.driver.findUnique({ where: { userId: v.userId }, select: { vehicleType: true } });
     const vehicleType = kind
-      ? ('CAR' as const)
+      ? kind.vehicleType
       : (await this.prisma.rider.findUnique({ where: { userId: v.userId }, select: { vehicleType: true } }))?.vehicleType;
     if (!vehicleType) throw new AppError(400, 'NOT_A_MOVER', 'This user has no mover profile.');
 

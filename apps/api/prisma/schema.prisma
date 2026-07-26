@@ -647,6 +647,10 @@ model Driver {
   vehicleColor         String
   licensePlate         String
   vehicleCapacity      Int          @default(4)
+  /// The physical vehicle (drives the verification document checklist + the
+  /// passenger-hire insurance gate). Defaults CAR so existing taxi drivers are
+  /// unchanged; wagons/buses set their real type at onboarding.
+  vehicleType          VehicleType  @default(CAR)
   /// Top taxi tier this vehicle serves (serves all classes <= it). Set via the
   /// driver-profile API and the admin drivers page (premium-fleet onboarding).
   rideClass            RideClass    @default(ECONOMY)

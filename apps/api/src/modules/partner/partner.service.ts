@@ -62,7 +62,7 @@ export class PartnerService {
     // Riders. Maximises each vehicle's earning reach.
     const rideClass = VEHICLE_CLASSES[input.vehicleType]?.rideClass;
     return rideClass
-      ? this.provisionDriver(user.id, user.roles, input.vehicle, rideClass)
+      ? this.provisionDriver(user.id, user.roles, input.vehicle, rideClass, input.vehicleType ?? 'CAR')
       : this.provisionRider(user.id, user.roles, input.vehicleType);
   }
 
@@ -87,7 +87,7 @@ export class PartnerService {
     return { kind: 'RIDER' as const, id: rider.id, created: !existing, roles: updatedRoles };
   }
 
-  private async provisionDriver(userId: string, roles: UserRole[], vehicle?: Vehicle, rideClass: RideClass = 'ECONOMY') {
+  private async provisionDriver(userId: string, roles: UserRole[], vehicle?: Vehicle, rideClass: RideClass = 'ECONOMY', vehicleType: VehicleType = 'CAR') {
     if (!vehicle) {
       throw new ValidationError('Vehicle details (make, model, year, colour, licence plate) are required to drive');
     }
@@ -98,6 +98,7 @@ export class PartnerService {
         data: {
           userId,
           rideClass,
+          vehicleType,
           vehicleMake: vehicle.make,
           vehicleModel: vehicle.model,
           vehicleYear: vehicle.year,
