@@ -8,7 +8,7 @@ import { SwiftMark } from '../../../components/SwiftLogo';
 import { DocumentChecklist } from '../../../components/onboarding/DocumentChecklist';
 import { PricingCard } from '../../../components/onboarding/PricingCard';
 import { useVerificationStatus, useBecomePartner } from '../../../hooks';
-import { type VehicleKind } from '../../../services/api';
+import { DRIVER_VEHICLE_KINDS, type VehicleKind } from '../../../services/api';
 import { useAuthStore } from '../../../stores/authStore';
 import { RoleSwitcherSheet } from '../../../components/RoleSwitcherSheet';
 import { GUTTER } from '../shared';
@@ -87,15 +87,15 @@ function VehicleSetup({ vt, setVt, onDone }: { vt: VehicleKind; setVt: (v: Vehic
   const [year, setYear] = useState('');
   const [colr, setColr] = useState('');
   const [plate, setPlate] = useState('');
-  const isCar = vt === 'CAR';
-  const valid = !isCar || (!!make && !!model && !!year && !!colr && !!plate);
+  const needsDetails = DRIVER_VEHICLE_KINDS.includes(vt);
+  const valid = !needsDetails || (!!make && !!model && !!year && !!colr && !!plate);
 
   const submit = () => {
     become.mutate(
       {
         role: 'MOVER',
         vehicleType: vt,
-        vehicle: isCar ? { make, model, year: Number(year) || 0, color: colr, licensePlate: plate } : undefined,
+        vehicle: needsDetails ? { make, model, year: Number(year) || 0, color: colr, licensePlate: plate } : undefined,
       },
       { onSuccess: onDone },
     );
@@ -112,7 +112,7 @@ function VehicleSetup({ vt, setVt, onDone }: { vt: VehicleKind; setVt: (v: Vehic
           <VehicleRow key={v.key} v={v} active={v.key === vt} onPress={() => setVt(v.key)} />
         ))}
       </View>
-      {isCar ? (
+      {needsDetails ? (
         <View style={{ gap: space.md, marginTop: space.md }}>
           <LabeledInput value={make} onChangeText={setMake} placeholder="Make (e.g. Toyota)" />
           <LabeledInput value={model} onChangeText={setModel} placeholder="Model (e.g. Allion)" />
