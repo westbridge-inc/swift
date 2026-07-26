@@ -11,7 +11,9 @@ function createMockRedis() {
   return {
     store,
     get: vi.fn(async (key: string) => store.get(key) ?? null),
-    set: vi.fn(async (key: string, value: string, _ex?: string, _ttl?: number) => {
+    set: vi.fn(async (key: string, value: string, _ex?: string, _ttl?: number, nx?: string) => {
+      // Model atomic SET NX: a no-op returning null when the key already exists.
+      if (nx === 'NX' && store.has(key)) return null;
       store.set(key, value);
       return 'OK';
     }),
@@ -155,7 +157,7 @@ describe('checkOtpRateLimit', () => {
   it('sets rate limit key after allowing request', async () => {
     const redis = createMockRedis();
     await checkOtpRateLimit(redis as never, '+5926003000');
-    expect(redis.set).toHaveBeenCalledWith('otp_rate:+5926003000', '1', 'EX', 60);
+    expect(redis.set).toHaveBeenCalledWith('otp_rate:+5926003000', '1', 'EX', 60, 'NX');
   });
 
   it('returns false (rate-limited) when recent request exists', async () => {
