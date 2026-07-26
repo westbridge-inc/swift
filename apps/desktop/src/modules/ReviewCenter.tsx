@@ -24,6 +24,10 @@ function QuickLook({ docId, onClose }: { docId: string; onClose: () => void }) {
           <iframe
             src={url.data}
             title="document"
+            // Sandbox: render the doc (images / native PDF viewer) but deny it
+            // scripts, so a hostile document can't reach window.parent / the
+            // Tauri bridge. View-only docs need no scripting.
+            sandbox="allow-same-origin"
             className="h-[85vh] w-[70vw] rounded-xl border border-neutral-200 bg-white"
           />
         )}
@@ -39,7 +43,8 @@ function DocViewer({ docId }: { docId: string }) {
   const url = useQuery({ queryKey: ['doc-url', docId], queryFn: () => documentViewUrl(docId), staleTime: 0 });
   if (url.isLoading) return <div className="grid h-full place-items-center text-sm text-neutral-500">Fetching a fresh audited link…</div>;
   if (url.isError) return <div className="grid h-full place-items-center px-6 text-center text-sm text-[var(--swift-red)]">{(url.error as Error).message}</div>;
-  return <iframe src={url.data} title="document" className="h-full w-full bg-white" />;
+  // Sandbox: deny the document scripts so it can't reach the Tauri bridge (see above).
+  return <iframe src={url.data} title="document" sandbox="allow-same-origin" className="h-full w-full bg-white" />;
 }
 
 function ApprovePanel({ doc, onDone, onCancel }: { doc: ReviewDoc; onDone: () => void; onCancel: () => void }) {
