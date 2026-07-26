@@ -624,6 +624,13 @@ enum VehicleType {
   BICYCLE
   MOTORCYCLE
   CAR
+  WAGON_CAR
+  BUS_9
+  BUS_15
+  CANTER_SHORT
+  CANTER_LONG
+  BOX_TRUCK_SHORT
+  BOX_TRUCK_LONG
 }
 
 // ==========================================

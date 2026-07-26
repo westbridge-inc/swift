@@ -12,6 +12,7 @@ import { closeOnlineSession } from '../rider/online-hours';
 import { rankCandidates, type DispatchCandidate } from './scoring';
 import { customerTrustSummaries } from '../cash/cash-rules.service';
 import { estimateLoad } from '../../utils/load';
+import { vehicleTypesForPackageSize } from '../../config/vehicle-classes';
 import { log } from '../../utils/logger';
 import { dispatchSearchesCounter, dispatchTimeToAssign } from '../../plugins/observability';
 import { getTenantId } from '../../plugins/tenant-context';
@@ -39,17 +40,12 @@ export const OFFER_TIMEOUT_SECONDS = 20;
 export const EXPRESS_OFFER_TIMEOUT_SECONDS = 12;
 
 // SWIFT-062: a courier parcel must only ever reach a mover whose vehicle can
-// actually carry it — a bicycle can't take a wardrobe box. Map each package size
-// to the vehicle types that can hold it. (Config can override per country later.)
-const VEHICLES_FOR_SIZE: Record<string, string[]> = {
-  SMALL: ['BICYCLE', 'MOTORCYCLE', 'CAR'],
-  MEDIUM: ['BICYCLE', 'MOTORCYCLE', 'CAR'],
-  LARGE: ['MOTORCYCLE', 'CAR'],
-  EXTRA_LARGE: ['CAR'],
-};
-/** Vehicle types that can carry a package of this size (all three if unknown). */
+// actually carry it — a bicycle can't take a wardrobe box. Capacity is derived
+// from the vehicle-class taxonomy (config/vehicle-classes) — the single source
+// of truth — so adding a box truck or canter automatically extends dispatch.
+/** Vehicle types that can carry a package of this size (any vehicle if unknown). */
 export function vehiclesForPackageSize(size: string | null | undefined): string[] {
-  return (size && VEHICLES_FOR_SIZE[size]) || ['BICYCLE', 'MOTORCYCLE', 'CAR'];
+  return vehicleTypesForPackageSize(size);
 }
 /** Can this vehicle carry a parcel of this size? */
 export function vehicleCanCarry(vehicleType: string, size: string | null | undefined): boolean {

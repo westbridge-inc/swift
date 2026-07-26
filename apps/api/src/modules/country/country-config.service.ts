@@ -1,6 +1,7 @@
 import type { PrismaClient, CountryConfig, VehicleType } from '@prisma/client';
 import { NotFoundError } from '../../utils/errors';
 import { mergeDeliveryRates, type DeliveryRates } from '../../utils/markup';
+import { docProfilesFor } from '../../config/vehicle-classes';
 
 /** Weekly subscription tiers in local currency. */
 export interface SubscriptionTiers {
@@ -65,20 +66,23 @@ export class CountryConfigService {
 
   /**
    * Mover checklist, scaled to the vehicle so we never ask for documents a
-   * vehicle can't have (a bicycle has no driver's licence or insurance):
-   *   BICYCLE    → MOVER base (identity + police clearance — master plan §3.2:
-   *                every courier handles cash and enters homes)
+   * vehicle can't have (a bicycle has no driver's licence or insurance). The
+   * document profiles per vehicle live in the vehicle-class taxonomy
+   * (config/vehicle-classes) — the single source of truth — so the base three
+   * keep their exact lists while new vehicles (buses, box trucks) pull their
+   * own profiles (e.g. MOVER_COMMERCIAL) on top of the base:
+   *   BICYCLE    → MOVER base (identity + police clearance — master plan §3.2)
    *   MOTORCYCLE → base + MOVER_MOTOR (licence, registration, insurance)
    *   CAR (taxi) → the above + MOVER_TAXI_EXTRA (hire permit, plate photo,
    *                exterior car photo, fitness — master plan §3.1)
-   * Used both to display the checklist and to gate live operation.
+   * An unseeded profile key resolves to no extra documents. Used both to display
+   * the checklist and to gate live operation.
    */
   async getMoverChecklist(code: string, vehicleType: VehicleType): Promise<string[]> {
     const config = await this.getByCode(code);
     const lists = config.documentChecklists as Record<string, string[]>;
     const base = lists['MOVER'] ?? [];
-    if (vehicleType === 'BICYCLE') return base;
-    const motor = [...base, ...(lists['MOVER_MOTOR'] ?? [])];
-    return vehicleType === 'CAR' ? [...motor, ...(lists['MOVER_TAXI_EXTRA'] ?? [])] : motor;
+    const extra = docProfilesFor(vehicleType).flatMap((key) => lists[key] ?? []);
+    return [...new Set([...base, ...extra])];
   }
 }
