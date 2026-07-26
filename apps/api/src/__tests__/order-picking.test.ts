@@ -212,6 +212,26 @@ describe('substitution round-trip', () => {
     expect(ready.statusCode).toBe(200);
   });
 
+  it('rejects a substitution that would drop the order total below zero', async () => {
+    // A heavily-discounted order (recorded total far below the line value) plus a
+    // free substitute would otherwise invert the total into "we owe the customer".
+    const original = await makeItem({ name: `Pricey ${seq}`, price: 5000, stock: 5, group: `neg-${seq}` });
+    const freeSub = await makeItem({ name: `Free sample ${seq}`, price: 0, stock: 5, group: `neg-${seq}` });
+    const order = await makeOrderWithLines([{ itemId: original.id, name: original.name, qty: 1, price: 5000 }]);
+    const line = order.items[0]!;
+    await app.prisma.order.update({ where: { id: order.id }, data: { totalAmount: 500 } }); // simulate a big discount
+
+    await inject('POST', `/api/v1/vendor/orders/${order.id}/items/${line.id}/substitute`, owner.token, { substituteItemId: freeSub.id });
+    const approve = await inject('POST', `/api/v1/customer/orders/${order.id}/items/${line.id}/substitution`, customer.token, { approve: true });
+    expect(approve.statusCode).toBe(400);
+    expect(approve.json().error.code).toBe('SUBSTITUTE_NEGATIVE_TOTAL');
+    // rejected BEFORE side-effects: total untouched, substitute stock not claimed
+    const after = await app.prisma.order.findUniqueOrThrow({ where: { id: order.id } });
+    expect(Number(after.totalAmount)).toBe(500);
+    const subAfter = await app.prisma.item.findUniqueOrThrow({ where: { id: freeSub.id } });
+    expect(subAfter.stockQuantity).toBe(5);
+  });
+
   it('customer rejects: line refunded, totals shrink, original restocked', async () => {
     const original = await makeItem({ name: `Juice ${seq}`, price: 600, stock: 4, group: `juice-${seq}` });
     const substitute = await makeItem({ name: `Other Juice ${seq}`, price: 700, stock: 4, group: `juice-${seq}` });

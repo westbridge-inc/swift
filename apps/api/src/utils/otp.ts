@@ -60,8 +60,10 @@ export async function verifyOtp(redis: Redis, phone: string, code: string): Prom
 }
 
 export async function checkOtpRateLimit(redis: Redis, phone: string): Promise<boolean> {
-  const exists = await redis.exists(`${OTP_RATE_PREFIX}${phone}`);
-  if (exists) return false;
-  await redis.set(`${OTP_RATE_PREFIX}${phone}`, '1', 'EX', OTP_RATE_TTL);
-  return true;
+  // Atomic check-and-set: SET NX returns null if the key already exists, 'OK' if
+  // we just claimed it. A plain exists→set is a TOCTOU race — N concurrent
+  // requests all see "not set" and all pass, defeating the 1-per-minute cap and
+  // letting an attacker fan out SMS (bombing a victim + burning the SMS budget).
+  const claimed = await redis.set(`${OTP_RATE_PREFIX}${phone}`, '1', 'EX', OTP_RATE_TTL, 'NX');
+  return claimed === 'OK';
 }

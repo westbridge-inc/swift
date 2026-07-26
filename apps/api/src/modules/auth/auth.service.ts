@@ -296,7 +296,10 @@ export class AuthService {
 
     const user = await this.app.prisma.user.findUnique({ where: { phone } });
     if (!user) {
-      throw new AppError(404, 'USER_NOT_FOUND', 'No account with this phone');
+      // Do NOT reveal account existence on password reset — return the same
+      // error a wrong OTP would, so an attacker (who somehow has a valid code)
+      // can't enumerate which phone numbers have accounts.
+      throw new AppError(400, 'INVALID_OTP', 'Invalid or expired OTP');
     }
 
     const passwordHash = await bcrypt.hash(newPassword, 12);

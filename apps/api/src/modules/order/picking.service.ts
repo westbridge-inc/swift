@@ -169,6 +169,15 @@ export class PickingService {
     const newLineTotal = substitutePrice * line.quantity;
     const delta = newLineTotal - Number(line.totalCustomer);
 
+    // A substitute may reduce a line's price but must NEVER drive the ORDER total
+    // below zero. On a discounted order a free/cheap substitute could otherwise
+    // invert the total into "the platform owes the customer" (cash handover would
+    // be nonsensical). Guard before any stock/restock side-effects.
+    const ord = await this.prisma.order.findUnique({ where: { id: orderId }, select: { totalAmount: true } });
+    if (ord && Number(ord.totalAmount) + delta < 0) {
+      throw new AppError(400, 'SUBSTITUTE_NEGATIVE_TOTAL', 'That substitute would drop the order total below zero — refund the line instead.');
+    }
+
     if (line.substituteItemId) {
       const sub = await this.prisma.item.findUnique({
         where: { id: line.substituteItemId },
