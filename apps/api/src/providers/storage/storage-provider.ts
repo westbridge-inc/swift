@@ -57,15 +57,25 @@ export class LocalStorageProvider implements StorageProvider {
     return `${this.publicBase}${fileKey}?expires=${expires}&sig=${sig}`;
   }
 
-  async delete(fileKey: string): Promise<void> {
-    // Map the stored "/uploads/..." key back to disk; best-effort.
+  /** Map a stored "/uploads/..." key to a disk path, refusing any '..' escape.
+   *  Defence-in-depth: keys come from the DB (nanoid names), but a poisoned key
+   *  must never let getObject/delete read or unlink outside the uploads dir. */
+  private resolveKey(fileKey: string): string {
     const rel = fileKey.replace(/^\/?uploads\//, '');
-    await unlink(path.join(this.baseDir, rel)).catch(() => undefined);
+    const full = path.resolve(this.baseDir, rel);
+    if (full !== this.baseDir && !full.startsWith(this.baseDir + path.sep)) {
+      throw new Error('Invalid file key: path escapes the uploads directory');
+    }
+    return full;
+  }
+
+  async delete(fileKey: string): Promise<void> {
+    // best-effort; a bad key resolves to a throw, swallowed here.
+    await unlink(this.resolveKey(fileKey)).catch(() => undefined);
   }
 
   async getObject(fileKey: string): Promise<Buffer> {
-    const rel = fileKey.replace(/^\/?uploads\//, '');
-    return readFile(path.join(this.baseDir, rel));
+    return readFile(this.resolveKey(fileKey));
   }
 }
 

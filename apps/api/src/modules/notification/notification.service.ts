@@ -166,51 +166,68 @@ export class NotificationService {
   async send(payload: NotificationPayload): Promise<string> {
     const data = payload.audience ? { ...(payload.data ?? {}), audience: payload.audience } : payload.data;
 
-    // Persist to DB
-    const notification = await this.prisma.notification.create({
-      data: {
-        userId: payload.userId,
+    // A notification is best-effort: a persistence/fan-out hiccup must NEVER
+    // throw into the caller's request path. An order that reached DELIVERED must
+    // not 500 because its "delivered!" push failed, and a multi-vendor checkout
+    // must not strand later vendors because an earlier notify threw
+    // [SWIFT-UG-NOTIF-02]. Persist is wrapped (returns '' on failure); fan-out is
+    // wrapped separately — every failure is LOGGED, never propagated.
+    let notification: { id: string; createdAt: Date };
+    try {
+      notification = await this.prisma.notification.create({
+        data: {
+          userId: payload.userId,
+          type: payload.type,
+          title: payload.title,
+          body: payload.body,
+          data: (data ?? undefined) as any,
+        },
+      });
+    } catch (err) {
+      log().warn({ err, userId: payload.userId, type: payload.type }, 'notification persist failed');
+      notificationFailuresCounter.inc({ channel: 'db', stage: 'persist' });
+      return '';
+    }
+
+    try {
+      // Live socket delivery
+      this.io.to(`user:${payload.userId}`).emit('notification', {
+        id: notification.id,
         type: payload.type,
         title: payload.title,
         body: payload.body,
-        data: (data ?? undefined) as any,
-      },
-    });
-
-    // Live socket delivery
-    this.io.to(`user:${payload.userId}`).emit('notification', {
-      id: notification.id,
-      type: payload.type,
-      title: payload.title,
-      body: payload.body,
-      data,
-      createdAt: notification.createdAt,
-    });
-
-    // Channel fan-out through the swappable interface, honouring prefs
-    const user = await this.prisma.user.findUnique({
-      where: { id: payload.userId },
-      select: { notificationPrefs: true },
-    });
-    const prefs = { ...DEFAULT_PREFS, ...((user?.notificationPrefs as Partial<NotificationPrefs> | null) ?? {}) };
-
-    if (prefs.push) {
-      const tokens = await this.prisma.deviceToken.findMany({
-        where: { userId: payload.userId, isActive: true },
-        select: { token: true },
+        data,
+        createdAt: notification.createdAt,
       });
-      if (tokens.length > 0) {
-        // Channel failures must never break the request path — but after the
-        // provider-level retries (withPushRetry) a final failure is LOGGED,
-        // never swallowed silently [SWIFT-UG-NOTIF-01].
-        await this.channels.push
-          .sendPush(tokens.map((t) => t.token), payload.title, payload.body, payload.data)
-          .then((r) => deactivateDeadTokens(this.prisma, r.invalidTokens))
-          .catch((err) => {
-            log().warn({ err, userId: payload.userId, type: payload.type }, 'push delivery failed after retries');
-            notificationFailuresCounter.inc({ channel: 'push', stage: 'send' });
-          });
+
+      // Channel fan-out through the swappable interface, honouring prefs
+      const user = await this.prisma.user.findUnique({
+        where: { id: payload.userId },
+        select: { notificationPrefs: true },
+      });
+      const prefs = { ...DEFAULT_PREFS, ...((user?.notificationPrefs as Partial<NotificationPrefs> | null) ?? {}) };
+
+      if (prefs.push) {
+        const tokens = await this.prisma.deviceToken.findMany({
+          where: { userId: payload.userId, isActive: true },
+          select: { token: true },
+        });
+        if (tokens.length > 0) {
+          // Channel failures must never break the request path — but after the
+          // provider-level retries (withPushRetry) a final failure is LOGGED,
+          // never swallowed silently [SWIFT-UG-NOTIF-01].
+          await this.channels.push
+            .sendPush(tokens.map((t) => t.token), payload.title, payload.body, payload.data)
+            .then((r) => deactivateDeadTokens(this.prisma, r.invalidTokens))
+            .catch((err) => {
+              log().warn({ err, userId: payload.userId, type: payload.type }, 'push delivery failed after retries');
+              notificationFailuresCounter.inc({ channel: 'push', stage: 'send' });
+            });
+        }
       }
+    } catch (err) {
+      log().warn({ err, userId: payload.userId, type: payload.type }, 'notification fan-out failed');
+      notificationFailuresCounter.inc({ channel: 'fanout', stage: 'send' });
     }
 
     return notification.id;
