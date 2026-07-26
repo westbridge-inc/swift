@@ -6,17 +6,27 @@ SECRET_KEY = os.environ.get("SUPERSET_SECRET_KEY", "swift-analytics-local-dev-on
 # Branding
 APP_NAME = "Swift Analytics"
 
-# Swift theme — deep Indian-Red #803B3B on warm paper #FBFBF9 (matches the app,
-# packages/ui/tokens.ts). Superset 4.1 runtime theming via Ant Design v5 tokens.
+# Swift theme — deep Indian-Red #803B3B (matches the app, packages/ui/tokens.ts).
+# Superset consumes colors.primary.{base,dark*,light*}; light5 == Swift's soft
+# tint #F5EBEC, dark1 == Swift's deep #5C2A2C — so buttons, links, active tabs,
+# selected rows and the primary chart series all render Swift-red.
 THEME_OVERRIDES = {
-    "token": {
-        "colorPrimary": "#803B3B",
-        "colorLink": "#803B3B",
-        "colorInfo": "#803B3B",
-        "colorBgLayout": "#FBFBF9",
-        "colorBgContainer": "#FFFFFF",
-        "borderRadius": 8,
-        "fontFamily": "-apple-system, BlinkMacSystemFont, 'SF Pro Text', sans-serif",
+    "borderRadius": 8,
+    "colors": {
+        "primary": {
+            "base": "#803B3B",
+            "dark1": "#5C2A2C",
+            "dark2": "#3D1C1D",
+            "light1": "#9D5F5F",
+            "light2": "#B98888",
+            "light3": "#D4B1B1",
+            "light4": "#E8D3D3",
+            "light5": "#F5EBEC",
+        },
+        "secondary": {
+            "base": "#5C2A2C",
+            "dark1": "#3D1C1D",
+        },
     },
 }
 
