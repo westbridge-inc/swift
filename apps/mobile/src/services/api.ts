@@ -327,6 +327,11 @@ export type VehicleKind =
   | 'BOX_TRUCK_SHORT'
   | 'BOX_TRUCK_LONG';
 
+/** Passenger-capable vehicles register as taxi Drivers (they need vehicle
+ *  make/plate details) — mirrors the server taxonomy's vehicles that carry a
+ *  ride class. The rest are delivery Riders. */
+export const DRIVER_VEHICLE_KINDS: VehicleKind[] = ['CAR', 'WAGON_CAR', 'BUS_9', 'BUS_15'];
+
 // Partner provisioning (mounted at /api/v1/partner)
 export const partnerApi = {
   become: (data: {

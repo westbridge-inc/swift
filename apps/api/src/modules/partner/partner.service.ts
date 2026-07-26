@@ -1,6 +1,7 @@
-import type { PrismaClient, UserRole, VehicleType } from '@prisma/client';
+import type { PrismaClient, UserRole, VehicleType, RideClass } from '@prisma/client';
 import { nanoid } from 'nanoid';
 import { AppError, ValidationError } from '../../utils/errors';
+import { VEHICLE_CLASSES } from '../../config/vehicle-classes';
 import { FloatService } from '../dispatch/float.service';
 import { NotificationService, notifyAdmins } from '../notification/notification.service';
 
@@ -55,8 +56,13 @@ export class PartnerService {
       return this.provisionVendor(user.id, user.roles, input.business);
     }
     if (!input.vehicleType) throw new ValidationError('Vehicle type is required to move with Swift');
-    return input.vehicleType === 'CAR'
-      ? this.provisionDriver(user.id, user.roles, input.vehicle)
+    // Passenger-capable vehicles (car → Economy, wagon → Comfort, bus → Group)
+    // provision a Driver at their tier so the vehicle earns on the higher-value
+    // ride classes; cargo-only vehicles (bike, canter, box truck) are delivery
+    // Riders. Maximises each vehicle's earning reach.
+    const rideClass = VEHICLE_CLASSES[input.vehicleType]?.rideClass;
+    return rideClass
+      ? this.provisionDriver(user.id, user.roles, input.vehicle, rideClass)
       : this.provisionRider(user.id, user.roles, input.vehicleType);
   }
 
@@ -69,10 +75,9 @@ export class PartnerService {
     return roles;
   }
 
-  // Every non-CAR vehicle provisions a delivery/courier Rider (CAR provisions a
-  // taxi Driver above). The expanded fleet — wagon, buses, canters, box trucks —
-  // are delivery-capable movers here; wiring buses/wagons into taxi passenger
-  // service (the Driver side) is a later layer.
+  // Cargo-only vehicles (bike, motorbike, canters, box trucks) provision a
+  // delivery/courier Rider. Passenger-capable vehicles (car, wagon, bus) take
+  // the Driver path above, at their ride tier.
   private async provisionRider(userId: string, roles: UserRole[], vehicleType: VehicleType) {
     const existing = await this.prisma.rider.findUnique({ where: { userId } });
     const rider = existing ?? (await this.prisma.rider.create({ data: { userId, riderType: 'BOTH', vehicleType } }));
@@ -82,7 +87,7 @@ export class PartnerService {
     return { kind: 'RIDER' as const, id: rider.id, created: !existing, roles: updatedRoles };
   }
 
-  private async provisionDriver(userId: string, roles: UserRole[], vehicle?: Vehicle) {
+  private async provisionDriver(userId: string, roles: UserRole[], vehicle?: Vehicle, rideClass: RideClass = 'ECONOMY') {
     if (!vehicle) {
       throw new ValidationError('Vehicle details (make, model, year, colour, licence plate) are required to drive');
     }
@@ -92,6 +97,7 @@ export class PartnerService {
       (await this.prisma.driver.create({
         data: {
           userId,
+          rideClass,
           vehicleMake: vehicle.make,
           vehicleModel: vehicle.model,
           vehicleYear: vehicle.year,

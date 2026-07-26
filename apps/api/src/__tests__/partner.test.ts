@@ -15,14 +15,18 @@ import { requestOtp } from './helpers/otp';
 const BIKE_PHONE = '+59200199001';
 const CAR_PHONE = '+59200199002';
 const VENDOR_PHONE = '+59200199003';
+const BUS_PHONE = '+59200199004';
+const WAGON_PHONE = '+59200199005';
 
 let app: FastifyInstance;
 let bikeToken = '';
 let carToken = '';
 let vendorToken = '';
+let busToken = '';
+let wagonToken = '';
 
 async function cleanup() {
-  await app.prisma.user.deleteMany({ where: { phone: { in: [BIKE_PHONE, CAR_PHONE, VENDOR_PHONE] } } });
+  await app.prisma.user.deleteMany({ where: { phone: { in: [BIKE_PHONE, CAR_PHONE, VENDOR_PHONE, BUS_PHONE, WAGON_PHONE] } } });
 }
 
 async function signupCustomer(phone: string): Promise<string> {
@@ -72,12 +76,14 @@ beforeAll(async () => {
   await app.ready();
 
   await cleanup();
-  for (const p of [BIKE_PHONE, CAR_PHONE, VENDOR_PHONE]) {
+  for (const p of [BIKE_PHONE, CAR_PHONE, VENDOR_PHONE, BUS_PHONE, WAGON_PHONE]) {
     await app.redis.del(`otp:${p}`, `otp_rate:${p}`, `otp_attempt:${p}`, `otp_verified:${p}`);
   }
   bikeToken = await signupCustomer(BIKE_PHONE);
   carToken = await signupCustomer(CAR_PHONE);
   vendorToken = await signupCustomer(VENDOR_PHONE);
+  busToken = await signupCustomer(BUS_PHONE);
+  wagonToken = await signupCustomer(WAGON_PHONE);
 });
 
 afterAll(async () => {
@@ -136,6 +142,30 @@ describe('partner provisioning — happy paths', () => {
     expect(JSON.parse(res.body).data.kind).toBe('RIDER');
     const profile = await get('/api/v1/rider/profile', bikeToken);
     expect(profile.statusCode).toBe(200);
+  });
+
+  it('provisions a GROUP Driver for a bus mover — passenger runs', async () => {
+    const res = await post(
+      '/api/v1/partner/become',
+      { role: 'MOVER', vehicleType: 'BUS_15', vehicle: { make: 'Toyota', model: 'Coaster', year: 2019, color: 'White', licensePlate: 'BXX 5150' } },
+      busToken,
+    );
+    expect(res.statusCode).toBe(201);
+    expect(JSON.parse(res.body).data.kind).toBe('DRIVER');
+    const driver = await app.prisma.driver.findFirst({ where: { user: { phone: BUS_PHONE } } });
+    expect(driver?.rideClass).toBe('GROUP');
+  });
+
+  it('provisions a COMFORT Driver for a wagon mover', async () => {
+    const res = await post(
+      '/api/v1/partner/become',
+      { role: 'MOVER', vehicleType: 'WAGON_CAR', vehicle: { make: 'Toyota', model: 'Fielder', year: 2017, color: 'Grey', licensePlate: 'WXX 7777' } },
+      wagonToken,
+    );
+    expect(res.statusCode).toBe(201);
+    expect(JSON.parse(res.body).data.kind).toBe('DRIVER');
+    const driver = await app.prisma.driver.findFirst({ where: { user: { phone: WAGON_PHONE } } });
+    expect(driver?.rideClass).toBe('COMFORT');
   });
 
   it('appends MOVER + RIDER roles exactly once', async () => {
