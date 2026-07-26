@@ -785,6 +785,14 @@ export async function vendorRoutes(app: FastifyInstance) {
         throw new AppError(403, 'VERIFICATION_REQUIRED',
           'Your store can take orders once its documents are verified. Check Documents for anything missing or expired.');
       }
+      // A suspended / cancelled subscription must not be able to re-open the store
+      // for orders (checkout already blocks new orders to a non-ACTIVE vendor, but
+      // the toggle is the front door — gate it too). ACTIVE/TRIAL/PAST_DUE may operate.
+      const sub = await app.prisma.subscription.findFirst({ where: { vendorId }, orderBy: { createdAt: 'desc' } });
+      if (sub && !['TRIAL', 'ACTIVE', 'PAST_DUE'].includes(sub.status)) {
+        throw new AppError(403, 'SUBSCRIPTION_INACTIVE',
+          'Your subscription must be active to accept orders. Renew from Account to reopen your store.');
+      }
     }
 
     const updated = await app.prisma.vendor.update({
@@ -1313,6 +1321,13 @@ export async function vendorRoutes(app: FastifyInstance) {
       { id: order.id, paymentMethod: order.paymentMethod, riderId: order.riderId, driverId: order.driverId, subtotalBase: Number(order.subtotalBase) },
       { restock: true },
     );
+
+    // Close any open dispatch-search journal for this order — parity with the
+    // customer-cancel path so ops dashboards don't show a phantom search that
+    // outlives a rejected order. Best-effort (journal is analytics, not load-bearing).
+    await app.prisma.dispatchSearch
+      .updateMany({ where: { subjectId: order.id, status: { in: ['SEARCHING', 'EXHAUSTED'] } }, data: { status: 'CANCELLED', resolution: 'CANCELLED' } })
+      .catch(() => {});
 
     const rejectEvent = { orderId: order.id, status: 'CANCELLED', reason, timestamp: new Date().toISOString() };
     app.io.to(`order:${order.id}`).emit('order:status_changed', rejectEvent);

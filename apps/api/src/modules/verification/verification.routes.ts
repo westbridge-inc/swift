@@ -66,8 +66,11 @@ export async function verificationRoutes(app: FastifyInstance) {
     return { success: true, data: doc };
   });
 
-  /** POST /upload — store one document file behind the StorageProvider; returns the fileUrl. */
-  app.post('/upload', auth, async (request) => {
+  /** POST /upload — store one document file behind the StorageProvider; returns the fileUrl.
+   *  Rate-limited: an authenticated attacker could otherwise fan out 5MB uploads
+   *  to fill disk / spam duplicate-document alerts. A real onboarder uploads a
+   *  handful of documents. */
+  app.post('/upload', { ...auth, config: { rateLimit: { max: 20, timeWindow: '1 minute' } } }, async (request) => {
     const file = await request.file();
     if (!file) throw new AppError(400, 'NO_FILE', 'Attach a document file');
     const allowed = new Set(['image/jpeg', 'image/png', 'image/webp', 'application/pdf']);
