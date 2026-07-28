@@ -276,6 +276,46 @@ describe('Ride request — fare shown first, dispatch shared, PIN issued', () =>
     expect(second.statusCode).toBe(409);
     expect(second.json().error.code).toBe('RIDE_IN_PROGRESS');
   });
+
+  it('driver cancels an accepted ride: freed + un-trapped, ride re-opens to PENDING', async () => {
+    const customer = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
+    const driver = await makeDriver();
+    const res = await inject('POST', '/api/v1/rides/request', {
+      pickup: CENTRAL, dropoff: SOUTH,
+      pickupAddress: '12 Main Street, Georgetown', dropoffAddress: '4 South Road, Georgetown',
+    }, customer.token);
+    const ride = res.json().data.ride;
+    await inject('POST', `/api/v1/driver/rides/${ride.id}/accept`, {}, driver.token);
+    let d = await app.prisma.driver.findUniqueOrThrow({ where: { id: driver.driverId } });
+    expect(d.currentRideId).toBe(ride.id); // trapped
+
+    const cancel = await inject('POST', `/api/v1/driver/rides/${ride.id}/cancel`, { reason: 'Vehicle broke down' }, driver.token);
+    expect(cancel.statusCode).toBe(200);
+
+    const order = await app.prisma.order.findUniqueOrThrow({ where: { id: ride.id } });
+    expect(order.status).toBe('PENDING'); // re-dispatchable, rider not stranded
+    expect(order.driverId).toBeNull();
+    d = await app.prisma.driver.findUniqueOrThrow({ where: { id: driver.driverId } });
+    expect(d.currentRideId).toBeNull();
+    expect(d.isAvailable).toBe(true); // un-trapped
+    // previously impossible — go-offline was hard-blocked while trapped
+    const offline = await inject('POST', '/api/v1/driver/go-offline', {}, driver.token);
+    expect(offline.statusCode).toBe(200);
+  });
+
+  it('driver cannot cancel once the trip is in progress (passenger aboard)', async () => {
+    const customer = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
+    const driver = await makeDriver();
+    const res = await inject('POST', '/api/v1/rides/request', {
+      pickup: CENTRAL, dropoff: SOUTH,
+      pickupAddress: '12 Main Street, Georgetown', dropoffAddress: '4 South Road, Georgetown',
+    }, customer.token);
+    const ride = res.json().data.ride;
+    await inject('POST', `/api/v1/driver/rides/${ride.id}/accept`, {}, driver.token);
+    await app.prisma.order.update({ where: { id: ride.id }, data: { status: 'RIDE_IN_PROGRESS' } });
+    const cancel = await inject('POST', `/api/v1/driver/rides/${ride.id}/cancel`, { reason: 'changed mind' }, driver.token);
+    expect(cancel.statusCode).toBe(400);
+  });
 });
 
 describe('Taxi live-operation gate (hire-class insurance)', () => {
