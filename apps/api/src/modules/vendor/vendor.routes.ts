@@ -1690,10 +1690,20 @@ export async function vendorRoutes(app: FastifyInstance) {
     try {
       const { PDFParse } = await import('pdf-parse');
       const parser = new PDFParse({ data: new Uint8Array(buffer) });
+      let timer: ReturnType<typeof setTimeout> | undefined;
       try {
-        const parsed = await parser.getText();
+        // A crafted PDF (a "bomb": a tiny file that decompresses to millions of
+        // pages) can make getText() churn CPU/memory for a long time even within
+        // the 5MB upload cap. Bound it — a real menu parses in well under a second.
+        const parsed = await Promise.race([
+          parser.getText(),
+          new Promise<never>((_, reject) => {
+            timer = setTimeout(() => reject(new Error('menu PDF parse exceeded its time budget')), 15_000);
+          }),
+        ]);
         text = (parsed.text ?? '').trim();
       } finally {
+        if (timer) clearTimeout(timer);
         await parser.destroy().catch(() => undefined);
       }
     } catch {
