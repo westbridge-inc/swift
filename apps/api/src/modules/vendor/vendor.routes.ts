@@ -491,6 +491,32 @@ export async function vendorRoutes(app: FastifyInstance) {
   const storage = getStorageProvider();
   const bookingService = new BookingService(app.prisma);
 
+  // A vendor may only DRIVE an order FORWARD (accept / prepare / ready / complete)
+  // while eligible to operate — the SAME predicate as the toggle-orders front
+  // door. The doc-expiry sweep sets isVerified=false but leaves status ACTIVE, so
+  // a lapsed store's board keeps rendering and every order already in flight when
+  // the docs lapsed could otherwise be fully accepted, prepared and handed over.
+  // This closes that server-authoritative hole (invariant 2). Reject/cancel are
+  // deliberately NOT gated — a blocked store must still be able to decline.
+  async function assertVendorCanOperate(vendorId: string) {
+    const vendor = await app.prisma.vendor.findUnique({
+      where: { id: vendorId },
+      select: { isVerified: true, status: true, vendorType: true },
+    });
+    if (!vendor) throw new NotFoundError('Vendor', vendorId);
+    if (vendor.status === 'SUSPENDED' || vendor.status === 'CLOSED') {
+      throw new AppError(403, 'VENDOR_SUSPENDED', 'Your store is not active and cannot work orders. Reopen it from Account.');
+    }
+    const verified = vendor.isVerified || (await verification.isRoleVerified(await vendorOwnerUserId(app, vendorId), vendor.vendorType));
+    if (!verified) {
+      throw new AppError(403, 'VERIFICATION_REQUIRED', 'Your store’s documents need verifying before you can work orders — check Documents for anything expired.');
+    }
+    const sub = await app.prisma.subscription.findFirst({ where: { vendorId }, orderBy: { createdAt: 'desc' } });
+    if (sub && !['TRIAL', 'ACTIVE', 'PAST_DUE'].includes(sub.status)) {
+      throw new AppError(403, 'SUBSCRIPTION_INACTIVE', 'Your subscription must be active to work orders — renew from Account.');
+    }
+  }
+
   // =========================================================================
   // Multi-store — list the owner's stores so the app can switch between them.
   // =========================================================================
@@ -892,6 +918,7 @@ export async function vendorRoutes(app: FastifyInstance) {
     const { acknowledgeAlert } = await import('../notification/notification.service');
     await acknowledgeAlert(app.prisma, 'VENDOR_ORDER', request.params.id).catch(() => {});
     const order = await resolveOwnedOrder(app, request.user.userId, request.params.id);
+    await assertVendorCanOperate(order.vendorId!);
     if (order.status !== 'PENDING') {
       throw new AppError(400, 'INVALID_STATUS', `Cannot accept order in ${order.status} status`);
     }
@@ -979,6 +1006,7 @@ export async function vendorRoutes(app: FastifyInstance) {
   /** PUT /orders/:id/preparing — Mark order as being prepared */
   app.put<{ Params: IdParam }>('/orders/:id/preparing', auth, async (request) => {
     const order = await resolveOwnedOrder(app, request.user.userId, request.params.id);
+    await assertVendorCanOperate(order.vendorId!);
     if (order.status === 'ACCEPTED') {
       const updated = await orderService.updateStatus(order.id, 'PREPARING', request.user.userId, 'Vendor started preparing');
       return { success: true, data: updated };
@@ -994,6 +1022,7 @@ export async function vendorRoutes(app: FastifyInstance) {
   /** PUT /orders/:id/ready — Mark order as ready for pickup */
   app.put<{ Params: IdParam }>('/orders/:id/ready', auth, async (request) => {
     const order = await resolveOwnedOrder(app, request.user.userId, request.params.id);
+    await assertVendorCanOperate(order.vendorId!);
     // Grocery/goods picking gate (§5.3): the bag never closes with an open
     // question in it — every line picked, or its substitution resolved.
     // Restaurants don't shelf-pick, so only quantity-tracked store types gate.
@@ -1218,6 +1247,7 @@ export async function vendorRoutes(app: FastifyInstance) {
    *  Vendor verifies the pickup code (if set) and closes it; no rider involved. */
   app.put<{ Params: IdParam }>('/orders/:id/complete-pickup', auth, async (request) => {
     const order = await resolveOwnedOrder(app, request.user.userId, request.params.id);
+    await assertVendorCanOperate(order.vendorId!);
     if (order.fulfillment !== 'PICKUP') {
       throw new AppError(400, 'NOT_A_PICKUP', 'This order is not a pickup order.');
     }
@@ -1259,6 +1289,7 @@ export async function vendorRoutes(app: FastifyInstance) {
    *  APPOINTMENT orders skip prepare/ready/dispatch; they go ACCEPTED -> COMPLETED. */
   app.put<{ Params: IdParam }>('/orders/:id/complete-appointment', auth, async (request) => {
     const order = await resolveOwnedOrder(app, request.user.userId, request.params.id);
+    await assertVendorCanOperate(order.vendorId!);
     if (order.fulfillment !== 'APPOINTMENT') {
       throw new AppError(400, 'NOT_AN_APPOINTMENT', 'This order is not an appointment.');
     }
