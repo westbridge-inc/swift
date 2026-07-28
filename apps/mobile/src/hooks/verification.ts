@@ -1,5 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { authApi, verificationApi, partnerApi, type VehicleKind } from '../services/api';
+import { useMoverPreview } from '../stores/moverPreview';
+import { PREVIEW_VERIFICATION, previewQuery } from '../lib/moverPreviewData';
 
 const PRIVACY_NOTICE_VERSION = 'v1';
 
@@ -9,15 +11,20 @@ async function unwrap<T = any>(p: Promise<any>): Promise<T> {
 }
 
 export function useVerificationStatus<T = any>(role: string, vehicleType?: string, opts?: { poll?: boolean }) {
-  return useQuery<T>({
+  // Earner preview: a prospective MOVER reads as fully approved so the GO gate
+  // shows the earning experience, not a KYC wall (the real query is disabled).
+  const previewMover = useMoverPreview((s) => s.preview) && role === 'MOVER';
+  const q = useQuery<T>({
     queryKey: ['verification', role, vehicleType],
     queryFn: () => unwrap<T>(verificationApi.status(role, vehicleType)),
+    enabled: !previewMover,
     // Onboarding screens poll so an approval flips the app to "live" within
     // seconds, not on the next cold refetch. Stops itself once verified.
     refetchInterval: opts?.poll
       ? (query) => ((query.state.data as any)?.roleVerified ? false : 15000)
       : undefined,
   });
+  return previewMover ? previewQuery(PREVIEW_VERIFICATION) : q;
 }
 
 /** Public weekly price list for the partner pitch ("N days free, then X/week"). */

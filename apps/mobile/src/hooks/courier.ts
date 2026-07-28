@@ -1,5 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { courierApi } from '../services/api';
+import { useMoverPreview } from '../stores/moverPreview';
+import { previewMutation } from '../lib/moverPreviewData';
 
 type Point = { lat: number; lng: number };
 type Size = 'SMALL' | 'MEDIUM' | 'LARGE' | 'EXTRA_LARGE';
@@ -33,8 +35,9 @@ export function useSendCourier() {
 /** Proof of delivery (D8-02): upload the captured photo, then confirm the
  *  handoff with the returned url. One mutation, two server calls. */
 export function useCourierProof() {
+  const pv = useMoverPreview((s) => s.preview);
   const qc = useQueryClient();
-  return useMutation({
+  const m = useMutation({
     mutationFn: async ({ orderId, uri }: { orderId: string; uri: string }) => {
       const form = new FormData();
       form.append('file', { uri, name: 'proof.jpg', type: 'image/jpeg' } as unknown as Blob);
@@ -48,4 +51,5 @@ export function useCourierProof() {
       qc.invalidateQueries({ queryKey: ['mover'] });
     },
   });
+  return pv ? previewMutation() : m;
 }
