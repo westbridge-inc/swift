@@ -5,6 +5,7 @@ import { Feather } from '@expo/vector-icons';
 import { color, space } from '@swift/ui';
 import { useAuthStore } from '../../stores/authStore';
 import { useMoverPreview } from '../../stores/moverPreview';
+import { useVendorPreview } from '../../stores/vendorPreview';
 import { DEFAULT_COUNTRY } from '../../lib/markets';
 import { SwiftMark } from '../../components/SwiftLogo';
 import { Card, IconChip, Screen, T } from '../../kit';
@@ -32,6 +33,7 @@ export function RolePickerScreen() {
   const setCountry = useAuthStore((s) => s.setCountry);
   const countryCode = useAuthStore((s) => s.countryCode);
   const enterPreview = useMoverPreview((s) => s.enterPreview);
+  const enterVendorPreview = useVendorPreview((s) => s.enterPreview);
 
   return (
     <Screen>
@@ -98,6 +100,26 @@ export function RolePickerScreen() {
               <Feather name="eye" size={16} color={color.brand[600]} style={{ opacity: pressed ? 0.6 : 1 }} />
               <T variant="label" style={{ color: color.brand[600], opacity: pressed ? 0.6 : 1 }}>
                 Preview the driver app
+              </T>
+            </>
+          )}
+        </Pressable>
+
+        {/* Prospective business: tap through the REAL, type-tailored dashboard
+            (switch Restaurant/Grocery/Shop/Services inside) with sample data (R4). */}
+        <Pressable
+          onPress={() => {
+            enterVendorPreview('RESTAURANT');
+            setIntent('vendor');
+          }}
+          style={{ marginTop: space.lg, alignSelf: 'center', flexDirection: 'row', alignItems: 'center', gap: space.xs }}
+          hitSlop={10}
+        >
+          {({ pressed }) => (
+            <>
+              <Feather name="eye" size={16} color={color.brand[600]} style={{ opacity: pressed ? 0.6 : 1 }} />
+              <T variant="label" style={{ color: color.brand[600], opacity: pressed ? 0.6 : 1 }}>
+                Preview a business dashboard
               </T>
             </>
           )}
