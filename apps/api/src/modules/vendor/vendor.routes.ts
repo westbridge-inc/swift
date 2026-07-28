@@ -2166,6 +2166,48 @@ export async function vendorRoutes(app: FastifyInstance) {
     return { success: true, data: hours };
   });
 
+  /** GET /bookings — the Services SCHEDULE: appointments in a date range for the
+   *  selected store, joined to the service + customer. Powers the booking-calendar
+   *  a SERVICE vendor runs their day from (R1 type-awareness — appointments were
+   *  previously only visible as rows on the generic order board). Operational, so
+   *  any vendor member (incl. floor STAFF) can read it, like the order board.
+   *  Defaults to a two-week window from today; from/to narrow it. */
+  app.get('/bookings', auth, async (request) => {
+    const { vendorId } = await resolveVendor(app, request.user.userId, selectedVendorId(request));
+    const { from, to } = z
+      .object({ from: z.coerce.date().optional(), to: z.coerce.date().optional() })
+      .parse(request.query);
+    const start = from ?? new Date(new Date().setHours(0, 0, 0, 0));
+    const end = to ?? new Date(start.getTime() + 14 * 24 * 60 * 60 * 1000);
+    const bookings = await app.prisma.booking.findMany({
+      where: { item: { vendorId }, slotStart: { gte: start, lt: end }, status: { not: 'CANCELLED' } },
+      select: {
+        id: true, customerId: true, orderId: true, slotStart: true, slotEnd: true, status: true,
+        item: { select: { name: true, basePrice: true } },
+      },
+      orderBy: { slotStart: 'asc' },
+    });
+    // Booking.customerId is a User id with no relation — resolve names in one hit.
+    const custIds = [...new Set(bookings.map((b) => b.customerId))];
+    const users = custIds.length
+      ? await app.prisma.user.findMany({ where: { id: { in: custIds } }, select: { id: true, firstName: true, lastName: true } })
+      : [];
+    const byId = new Map(users.map((u) => [u.id, u]));
+    return {
+      success: true,
+      data: bookings.map((b) => ({
+        id: b.id,
+        serviceName: b.item.name,
+        price: Number(b.item.basePrice),
+        slotStart: b.slotStart,
+        slotEnd: b.slotEnd,
+        status: b.status,
+        orderId: b.orderId,
+        customer: byId.has(b.customerId) ? { firstName: byId.get(b.customerId)!.firstName } : null,
+      })),
+    };
+  });
+
   /** PUT /hours — Bulk upsert operating hours for all 7 days */
   app.put('/hours', auth, async (request) => {
     const { vendorId } = await requireVendor(app, request, 'MANAGER');
