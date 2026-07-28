@@ -69,6 +69,7 @@ export interface VendorPreviewDataset {
   subscription: any;
   menu: any;
   verification: any;
+  bookings: any[];
 }
 
 const DAY_LABELS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
@@ -115,6 +116,14 @@ export function vendorPreviewDataset(type: VendorPreviewType): VendorPreviewData
     menu: { categories: [{ id: 'pv-cat', name: type === 'SERVICE' ? 'Services' : type === 'SUPERMARKET' ? 'Groceries' : 'Menu', items }] },
     // A fully-approved store so the dashboard shows the working experience.
     verification: { roleVerified: true, checklist: [], documents: [] },
+    // Services surface a schedule; the goods types have no appointments.
+    bookings: type === 'SERVICE'
+      ? [
+          { id: 'pv-b1', serviceName: items[0]!.name, price: items[0]!.basePrice, slotStart: '2026-07-28T10:00:00Z', slotEnd: '2026-07-28T10:45:00Z', status: 'RESERVED', orderId: null, customer: { firstName: 'Ava' } },
+          { id: 'pv-b2', serviceName: items[1 % items.length]!.name, price: items[1 % items.length]!.basePrice, slotStart: '2026-07-28T13:30:00Z', slotEnd: '2026-07-28T14:00:00Z', status: 'CONFIRMED', orderId: null, customer: { firstName: 'Ken' } },
+          { id: 'pv-b3', serviceName: items[2 % items.length]!.name, price: items[2 % items.length]!.basePrice, slotStart: '2026-07-29T11:00:00Z', slotEnd: '2026-07-29T12:30:00Z', status: 'RESERVED', orderId: null, customer: { firstName: 'Mara' } },
+        ]
+      : [],
   };
 }
 
