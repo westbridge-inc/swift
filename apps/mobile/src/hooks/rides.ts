@@ -70,3 +70,13 @@ export function useCancelRide() {
     onSuccess: () => qc.invalidateQueries({ queryKey: ['rides', 'active'] }),
   });
 }
+
+/** Raise an emergency on an active ride (rides safety spec). The app also dials
+ *  the local emergency number; this records the incident and pages ops so a
+ *  panic is never just a dropped call. Coords help ops locate the rider. */
+export function useRideSos() {
+  return useMutation({
+    mutationFn: ({ id, coords }: { id: string; coords?: { lat: number; lng: number } }) => unwrap(rideApi.sos(id, coords)),
+    onSuccess: () => track('ride_sos', {}),
+  });
+}

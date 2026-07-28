@@ -8,7 +8,7 @@ import { Image } from 'expo-image';
 import { Feather, MaterialCommunityIcons } from '@expo/vector-icons';
 import { color, radius, space } from '@swift/ui';
 import { useQueryClient } from '@tanstack/react-query';
-import { useActiveRide, useRideEstimate, useRequestRide, useCancelRide, useRideAvailability, useWatchAvailability } from '../../../hooks';
+import { useActiveRide, useRideEstimate, useRequestRide, useCancelRide, useRideSos, useRideAvailability, useWatchAvailability } from '../../../hooks';
 import { connectSocket, getSocket, subscribeToOrder } from '../../../services/socket';
 import { RidePostTripSheet } from '../RidePostTripSheet';
 import { useLocationStore } from '../../../stores/locationStore';
@@ -523,6 +523,12 @@ function ActiveRide({ navigation, ride, cancelRide, insets }: any) {
   const [lastFixAt, setLastFixAt] = useState<number | null>(null);
   const [nowTs, setNowTs] = useState(() => Date.now());
   const [connLost, setConnLost] = useState(false);
+  // Terminal dispatch outcome: the cascade tried every driver and found none.
+  // Without this the rider sits on the "Contacting drivers…" spinner forever.
+  const [exhausted, setExhausted] = useState(false);
+  const [sosConfirm, setSosConfirm] = useState(false);
+  const sos = useRideSos();
+  const riderLoc = useLocationStore();
   const mapRef = useRef<MapView>(null);
   const d = ride.driver;
   // The server streams a fix at least every ~10s; past this we treat the marker
@@ -552,17 +558,28 @@ function ActiveRide({ navigation, ride, cancelRide, insets }: any) {
     const onConnect = () => { setConnLost(false); subscribeToOrder(ride.id); };
     const onDisconnect = () => setConnLost(true);
     const onError = () => setConnLost(true);
+    // Terminal exhaustion signal (backend emits it to the order room when the
+    // cascade gives up) — flip the searching spinner to an honest dead state.
+    const onExhausted = () => setExhausted(true);
     s.on('driver:location', onDriver);
     s.on('connect', onConnect);
     s.on('disconnect', onDisconnect);
     s.on('connect_error', onError);
+    s.on('dispatch:exhausted', onExhausted);
     return () => {
       s.off('driver:location', onDriver);
       s.off('connect', onConnect);
       s.off('disconnect', onDisconnect);
       s.off('connect_error', onError);
+      s.off('dispatch:exhausted', onExhausted);
     };
   }, [ride?.id]);
+
+  // A driver was found (or the search moved on) — clear any prior dead state so
+  // the auto-re-dispatch that lands a driver flips the UI back to live tracking.
+  useEffect(() => {
+    if (d || String(ride.status ?? '').toUpperCase() !== 'PENDING') setExhausted(false);
+  }, [d, ride.status]);
 
   // Ticking clock so the "is the fix stale?" check re-evaluates without a new
   // event — a DEAD feed sends nothing, so only a timer can notice the silence.
@@ -804,9 +821,35 @@ function ActiveRide({ navigation, ride, cancelRide, insets }: any) {
                 </View>
               ) : null}
             </Card>
+          ) : exhausted ? (
+            /* Terminal dead state — honest, not an endless spinner. The backend
+               keeps re-sweeping every minute, so "still trying" is true; the
+               rider can also bail without waiting. */
+            <View style={{ alignItems: 'center', paddingVertical: space.lg }}>
+              <IconChip icon="alert-circle" size={52} tone="error" />
+              <T variant="body" weight="semibold" center style={{ marginTop: space.md }}>
+                No driver available right now
+              </T>
+              <T variant="caption" tone="muted" center style={{ marginTop: space.xs }}>
+                We&apos;re still trying every minute as drivers come online. You can keep waiting or cancel.
+              </T>
+            </View>
           ) : (
             <SearchingCard startedAt={ride.placedAt ?? ride.createdAt} />
           )}
+
+          {/* SOS — an active ride's most important control. Only while a driver
+              is engaged (assigned → in progress); records the incident + pages
+              ops AND dials local emergency services. */}
+          {d ? (
+            <PillButton
+              label="Emergency — get help now"
+              variant="outline"
+              icon="alert-triangle"
+              style={{ marginTop: space.xl, borderColor: color.error, alignSelf: 'stretch' }}
+              onPress={() => setSosConfirm(true)}
+            />
+          ) : null}
 
           {/* Safety row: let someone you trust follow the trip */}
           <View style={{ flexDirection: 'row', gap: space.md, marginTop: space.xl }}>
@@ -835,7 +878,9 @@ function ActiveRide({ navigation, ride, cancelRide, insets }: any) {
           Cancel this ride?
         </T>
         <T variant="body" tone="muted" center style={{ marginTop: space.sm }}>
-          {d ? 'Your driver is already on the way.' : 'We’ll stop looking for a driver.'}
+          {d
+            ? 'Your driver is already on the way. Cancelling now may charge a late-cancellation fee and lower your reliability rating.'
+            : 'We’ll stop looking for a driver.'}
         </T>
         <PillButton
           label="Cancel ride"
@@ -847,6 +892,36 @@ function ActiveRide({ navigation, ride, cancelRide, insets }: any) {
           }}
         />
         <PillButton label="Keep ride" variant="soft" style={{ alignSelf: 'stretch', marginTop: space.md }} onPress={() => setConfirmCancel(false)} />
+      </PopupCard>
+
+      {/* SOS confirm — a deliberate two-step so it isn't triggered by accident,
+          then records the incident + pages ops AND dials local emergency. */}
+      <PopupCard visible={sosConfirm} onClose={() => setSosConfirm(false)}>
+        <IconChip icon="alert-triangle" size={56} tone="error" />
+        <T variant="title" center style={{ marginTop: space.lg }}>
+          Get emergency help?
+        </T>
+        <T variant="body" tone="muted" center style={{ marginTop: space.sm }}>
+          This alerts Swift safety with your live location, then dials local emergency services. Use only in a real emergency.
+        </T>
+        <PillButton
+          label="Yes — get help now"
+          style={{ alignSelf: 'stretch', marginTop: space['2xl'] }}
+          loading={sos.isPending}
+          onPress={() => {
+            setSosConfirm(false);
+            const coords =
+              riderLoc.latitude != null && riderLoc.longitude != null
+                ? { lat: riderLoc.latitude, lng: riderLoc.longitude }
+                : driverLoc
+                  ? { lat: driverLoc.latitude, lng: driverLoc.longitude }
+                  : undefined;
+            sos.mutate({ id: ride.id, coords });
+            // Guyana launch emergency number; move to CountryConfig for other markets.
+            Linking.openURL('tel:911').catch(() => {});
+          }}
+        />
+        <PillButton label="Close" variant="soft" style={{ alignSelf: 'stretch', marginTop: space.md }} onPress={() => setSosConfirm(false)} />
       </PopupCard>
     </View>
   );
