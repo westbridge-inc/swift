@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { nanoid } from 'nanoid';
 import type { UserRole } from '@prisma/client';
@@ -408,6 +408,24 @@ describe('The offer cascade', () => {
     // RED before SWIFT-065: 2 — admins were paged on every re-exhaust.
     expect(pagedAfter).toBe(1);
 
+    await app.redis.del(`dispatch:exhausts:${order.id}`, `ops_page:dispatch_exhausted:${order.id}`);
+  });
+
+  it('a fully-exhausted search emits dispatch:exhausted to the rider live screen (no infinite spinner)', async () => {
+    await app.prisma.rider.updateMany({ data: { isOnline: false } }); // empty pool -> terminal exhaustion
+    const order = await makeDeliveryOrder();
+    const emits: Array<{ room: string; ev: string }> = [];
+    const spy = vi.spyOn(app.io, 'to').mockImplementation(((room: string) => ({
+      emit: (ev: string) => { emits.push({ room, ev }); return true; },
+    })) as never);
+    try {
+      const r = await dispatch.dispatchOrder(order.id);
+      expect(r).toMatchObject({ exhausted: true });
+    } finally {
+      spy.mockRestore();
+    }
+    // The rider's open ActiveRide screen gets a terminal signal, not just a push.
+    expect(emits).toContainEqual({ room: `order:${order.id}`, ev: 'dispatch:exhausted' });
     await app.redis.del(`dispatch:exhausts:${order.id}`, `ops_page:dispatch_exhausted:${order.id}`);
   });
 
