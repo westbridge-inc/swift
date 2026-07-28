@@ -259,7 +259,9 @@ export class DispatchService {
       hasActiveJob: r.currentOrderId !== null,
     }));
 
-    return rankCandidates(candidates);
+    // Taxi (DRIVER pool) ranks proximity near-absolute — the rider watches the
+    // car on the map; a farther-but-better car offered first reads as broken.
+    return rankCandidates(candidates, pool === 'DRIVER' ? 'PROXIMITY' : 'BALANCED');
   }
 
   // -------------------------------------------------------------------------
