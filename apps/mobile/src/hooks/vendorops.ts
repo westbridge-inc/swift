@@ -529,6 +529,30 @@ export function useVendorHours() {
   return pv ? previewQuery(pv.hours) : q;
 }
 
+export interface VendorBooking {
+  id: string;
+  serviceName: string;
+  price: number;
+  slotStart: string;
+  slotEnd: string;
+  status: string;
+  orderId: string | null;
+  customer: { firstName: string } | null;
+}
+
+/** The Services SCHEDULE: upcoming appointments (default two-week window) for the
+ *  selected store, from GET /vendor/bookings. Drives the booking-calendar agenda. */
+export function useVendorBookings(enabled = true) {
+  const pv = usePreviewDataset();
+  const q = useQuery<VendorBooking[]>({
+    queryKey: ['vendor', 'bookings'],
+    queryFn: () => unwrap<VendorBooking[]>(vendorApi.bookings()),
+    enabled: enabled && !pv,
+    refetchInterval: 60000,
+  });
+  return pv ? previewQuery(pv.bookings) : q;
+}
+
 export function useSetHours() {
   const qc = useQueryClient();
   return useMutation({

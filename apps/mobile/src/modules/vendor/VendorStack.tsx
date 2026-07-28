@@ -13,6 +13,7 @@ import {
   Card,
   Chip,
   EmptyState,
+  ErrorState,
   IconChip,
   LabeledInput,
   LinkText,
@@ -91,8 +92,10 @@ import {
   usePopularItems,
   useBusyHours,
   useVendorHours,
+  useVendorBookings,
   useSetHours,
   type DayHours,
+  type VendorBooking,
 } from '../../hooks/vendorops';
 import { useAuthStore } from '../../stores/authStore';
 import { track } from '../../lib/analytics';
@@ -2680,6 +2683,74 @@ function MenuStackNav() {
   );
 }
 
+function fmtClock(iso: string) {
+  const d = new Date(iso);
+  return d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+}
+
+function AppointmentCard({ b }: { b: VendorBooking }) {
+  return (
+    <Card style={{ flexDirection: 'row', alignItems: 'center', gap: space.md, marginBottom: space.sm }}>
+      <View style={{ alignItems: 'center', minWidth: 60 }}>
+        <T variant="body" weight="bold">{fmtClock(b.slotStart)}</T>
+        <T variant="caption" tone="muted">{fmtClock(b.slotEnd)}</T>
+      </View>
+      <View style={{ width: 1, alignSelf: 'stretch', backgroundColor: color.border.subtle }} />
+      <View style={{ flex: 1 }}>
+        <T variant="body" weight="semibold" numberOfLines={1}>{b.serviceName}</T>
+        <T variant="caption" tone="muted" numberOfLines={1}>
+          {b.customer?.firstName ?? 'Customer'}{b.price ? ` · ${money(b.price)}` : ''}
+        </T>
+      </View>
+      <TonePill tone={b.status === 'CONFIRMED' ? 'success' : 'neutral'} label={b.status === 'CONFIRMED' ? 'Confirmed' : 'Reserved'} />
+    </Card>
+  );
+}
+
+/** The Services SCHEDULE tab — the day's appointments as an agenda (R1: a booking
+ *  calendar, not rows on the generic order board). Fed by GET /vendor/bookings. */
+function VendorScheduleScreen({ navigation }: any) {
+  const q = useVendorBookings();
+  const rows: VendorBooking[] = q.data ?? [];
+  // Group by local day; the endpoint already returns them slot-ordered.
+  const days: Array<{ key: string; label: string; items: VendorBooking[] }> = [];
+  for (const b of rows) {
+    const d = new Date(b.slotStart);
+    const key = d.toDateString();
+    let group = days.find((g) => g.key === key);
+    if (!group) {
+      group = { key, label: d.toLocaleDateString([], { weekday: 'long', month: 'short', day: 'numeric' }), items: [] };
+      days.push(group);
+    }
+    group.items.push(b);
+  }
+  return (
+    <Screen>
+      <SubHeader title="Schedule" navigation={navigation} hideBack />
+      {q.isLoading ? (
+        <LoadingBlock />
+      ) : q.isError ? (
+        <ErrorState message="We couldn't load your schedule. Check your connection and try again." onRetry={() => q.refetch()} />
+      ) : rows.length === 0 ? (
+        <EmptyState icon="calendar" title="No upcoming appointments" body="Confirmed bookings appear here as customers reserve slots." />
+      ) : (
+        <ScrollView contentContainerStyle={{ paddingHorizontal: GUTTER, paddingBottom: space['3xl'] }} showsVerticalScrollIndicator={false}>
+          {days.map((g) => (
+            <View key={g.key} style={{ marginTop: space.lg }}>
+              <T variant="label" weight="semibold" tone="muted" style={{ marginBottom: space.sm }}>
+                {g.label}
+              </T>
+              {g.items.map((b) => (
+                <AppointmentCard key={b.id} b={b} />
+              ))}
+            </View>
+          ))}
+        </ScrollView>
+      )}
+    </Screen>
+  );
+}
+
 const VTab = createBottomTabNavigator();
 
 function VendorTabs() {
@@ -2688,6 +2759,7 @@ function VendorTabs() {
   const { myRole, store } = useVendorProfile();
   const manager = myRole !== 'STAFF';
   const cat = catalogueMeta(store?.vendorType); // R1: the catalogue tab is named for the type
+  const isService = store?.vendorType === 'SERVICE';
   return (
     <VTab.Navigator
       screenOptions={{
@@ -2702,6 +2774,14 @@ function VendorTabs() {
         component={VendorOrdersTab}
         options={{ tabBarLabel: 'Orders', tabBarIcon: ({ color: c, size }) => <Feather name="clipboard" size={size} color={c} /> }}
       />
+      {isService ? (
+        // R1: a Services store runs its day from a booking agenda, not the queue.
+        <VTab.Screen
+          name="Schedule"
+          component={VendorScheduleScreen}
+          options={{ tabBarLabel: 'Schedule', tabBarIcon: ({ color: c, size }) => <Feather name="calendar" size={size} color={c} /> }}
+        />
+      ) : null}
       {manager ? (
         <VTab.Screen
           name="Menu"

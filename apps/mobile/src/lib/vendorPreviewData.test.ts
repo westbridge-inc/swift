@@ -49,6 +49,17 @@ describe('vendor preview — per-type sample datasets are coherent', () => {
     const rest = vendorPreviewDataset('RESTAURANT');
     expect(rest.orders.every((o) => o.fulfillment === 'DELIVERY')).toBe(true);
   });
+
+  it('only SERVICE has a schedule (bookings) — the goods types have none', () => {
+    expect(vendorPreviewDataset('SERVICE').bookings.length).toBeGreaterThan(0);
+    expect(vendorPreviewDataset('RESTAURANT').bookings).toHaveLength(0);
+    expect(vendorPreviewDataset('SUPERMARKET').bookings).toHaveLength(0);
+    // Shape the Schedule agenda reads.
+    const b = vendorPreviewDataset('SERVICE').bookings[0];
+    expect(b.serviceName).toBeTruthy();
+    expect(b.customer.firstName).toBeTruthy();
+    expect(typeof b.slotStart).toBe('string');
+  });
 });
 
 describe('vendorPreview store', () => {
