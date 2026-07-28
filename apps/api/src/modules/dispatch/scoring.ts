@@ -1,7 +1,10 @@
 // ---------------------------------------------------------------------------
-// Dispatch candidate scoring — a pure function: proximity
-// dominates, then track record. Lower score = offered first. No I/O, no
-// randomness, no AI — unit-testable in isolation.
+// Dispatch candidate scoring — a pure function: proximity dominates, then track
+// record. Lower score = offered first. No I/O, no randomness, no AI —
+// unit-testable in isolation. The WEIGHT PROFILE is per-pool: a delivery rider a
+// little farther but reliable is fine, but a TAXI rider WATCHES the assigned car
+// move on the map — a farther car accepting while a nearer one idles reads as
+// broken, so taxi makes proximity near-absolute and quality a small tie-break.
 // ---------------------------------------------------------------------------
 
 export interface DispatchCandidate {
@@ -16,33 +19,33 @@ export interface DispatchCandidate {
   hasActiveJob: boolean;
 }
 
-const WEIGHTS = {
-  eta: 0.5,
-  rating: 0.2,
-  acceptance: 0.15,
-  load: 0.15,
-} as const;
+/** BALANCED = delivery/courier; PROXIMITY = taxi (the rider sees the car move). */
+export type DispatchProfile = 'BALANCED' | 'PROXIMITY';
+
+const WEIGHTS_BY_PROFILE: Record<DispatchProfile, { eta: number; rating: number; acceptance: number; load: number }> = {
+  BALANCED: { eta: 0.5, rating: 0.2, acceptance: 0.15, load: 0.15 },
+  // Proximity is near-absolute for taxi: rating/acceptance/load only reorder
+  // effectively-equidistant cars. Tuned so a 3-min car is never ranked behind a
+  // 14-min car regardless of the far car's rating/acceptance (see scoring test).
+  PROXIMITY: { eta: 0.85, rating: 0.08, acceptance: 0.05, load: 0.02 },
+};
 
 /** ETAs beyond this are treated as "max bad" so one outlier can't skew ranks */
 const ETA_CEILING_MINUTES = 60;
 
-export function scoreCandidate(candidate: DispatchCandidate): number {
+export function scoreCandidate(candidate: DispatchCandidate, profile: DispatchProfile = 'BALANCED'): number {
+  const w = WEIGHTS_BY_PROFILE[profile];
   const eta = Math.min(candidate.etaMinutes, ETA_CEILING_MINUTES) / ETA_CEILING_MINUTES;
   const rating = (5 - clamp(candidate.averageRating, 0, 5)) / 5;
   const acceptance = 1 - clamp(candidate.acceptanceRate, 0, 100) / 100;
   const load = candidate.hasActiveJob ? 1 : 0;
 
-  return (
-    WEIGHTS.eta * eta +
-    WEIGHTS.rating * rating +
-    WEIGHTS.acceptance * acceptance +
-    WEIGHTS.load * load
-  );
+  return w.eta * eta + w.rating * rating + w.acceptance * acceptance + w.load * load;
 }
 
 /** Best candidate first. */
-export function rankCandidates<T extends DispatchCandidate>(candidates: T[]): T[] {
-  return [...candidates].sort((a, b) => scoreCandidate(a) - scoreCandidate(b));
+export function rankCandidates<T extends DispatchCandidate>(candidates: T[], profile: DispatchProfile = 'BALANCED'): T[] {
+  return [...candidates].sort((a, b) => scoreCandidate(a, profile) - scoreCandidate(b, profile));
 }
 
 function clamp(value: number, min: number, max: number): number {
