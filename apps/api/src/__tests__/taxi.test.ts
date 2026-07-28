@@ -11,6 +11,7 @@ import { driverRoutes } from '../modules/driver/driver.routes';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { FareService } from '../modules/rides/fare.service';
 import { DispatchService } from '../modules/dispatch/dispatch.service';
+import { OrderService } from '../modules/order/order.service';
 import { HaversineMapsProvider } from '../providers/maps/maps-provider';
 import { pointInPolygon } from '../utils/geo';
 
@@ -301,6 +302,37 @@ describe('Ride request — fare shown first, dispatch shared, PIN issued', () =>
     // previously impossible — go-offline was hard-blocked while trapped
     const offline = await inject('POST', '/api/v1/driver/go-offline', {}, driver.token);
     expect(offline.statusCode).toBe(200);
+  });
+
+  it('passenger cancel after match pushes the assigned driver to stop', async () => {
+    const customer = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
+    const driver = await makeDriver();
+    const res = await inject('POST', '/api/v1/rides/request', {
+      pickup: CENTRAL, dropoff: SOUTH,
+      pickupAddress: '12 Main Street, Georgetown', dropoffAddress: '4 South Road, Georgetown',
+    }, customer.token);
+    const ride = res.json().data.ride;
+    await inject('POST', `/api/v1/driver/rides/${ride.id}/accept`, {}, driver.token);
+    // Advance to en route — the driver is physically heading to the pickup, app
+    // likely backgrounded. The socket room only reaches a foregrounded subscriber.
+    await app.prisma.order.update({ where: { id: ride.id }, data: { status: 'DRIVER_EN_ROUTE' } });
+
+    const orders = new OrderService(app.prisma, app.io);
+    await orders.cancelOrder(ride.id, customer.userId, 'Changed my mind');
+
+    const d = await app.prisma.driver.findUniqueOrThrow({ where: { id: driver.driverId } });
+    expect(d.currentRideId).toBeNull();
+    expect(d.isAvailable).toBe(true); // freed either way
+
+    // RED before the fix: the driver was freed but got NO push, so a
+    // backgrounded driver kept driving to a pickup the rider had abandoned.
+    const notif = await app.prisma.notification.findFirst({
+      where: { userId: driver.userId },
+      orderBy: { createdAt: 'desc' },
+    });
+    expect(notif).not.toBeNull();
+    expect(notif?.body.toLowerCase()).toContain('cancel');
+    expect(notif?.data).toMatchObject({ orderId: ride.id });
   });
 
   it('driver cannot cancel once the trip is in progress (passenger aboard)', async () => {
