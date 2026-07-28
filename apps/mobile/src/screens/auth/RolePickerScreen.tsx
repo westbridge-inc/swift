@@ -4,6 +4,7 @@ import { Pressable, View } from 'react-native';
 import { Feather } from '@expo/vector-icons';
 import { color, space } from '@swift/ui';
 import { useAuthStore } from '../../stores/authStore';
+import { useMoverPreview } from '../../stores/moverPreview';
 import { DEFAULT_COUNTRY } from '../../lib/markets';
 import { SwiftMark } from '../../components/SwiftLogo';
 import { Card, IconChip, Screen, T } from '../../kit';
@@ -30,6 +31,7 @@ export function RolePickerScreen() {
   const setMoverPreset = useAuthStore((s) => s.setMoverPreset);
   const setCountry = useAuthStore((s) => s.setCountry);
   const countryCode = useAuthStore((s) => s.countryCode);
+  const enterPreview = useMoverPreview((s) => s.enterPreview);
 
   return (
     <Screen>
@@ -79,6 +81,27 @@ export function RolePickerScreen() {
             </Pressable>
           ))}
         </View>
+
+        {/* Prospective earner: tap through the REAL driver dashboards before
+            signing up or uploading a single document — read-only sample data (R3). */}
+        <Pressable
+          onPress={() => {
+            setMoverPreset('taxi');
+            enterPreview('DRIVER');
+            setIntent('mover');
+          }}
+          style={{ marginTop: space['3xl'], alignSelf: 'center', flexDirection: 'row', alignItems: 'center', gap: space.xs }}
+          hitSlop={10}
+        >
+          {({ pressed }) => (
+            <>
+              <Feather name="eye" size={16} color={color.brand[600]} style={{ opacity: pressed ? 0.6 : 1 }} />
+              <T variant="label" style={{ color: color.brand[600], opacity: pressed ? 0.6 : 1 }}>
+                Preview the driver app
+              </T>
+            </>
+          )}
+        </Pressable>
       </View>
     </Screen>
   );

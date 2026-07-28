@@ -10,6 +10,7 @@ import { Feather, MaterialCommunityIcons } from '@expo/vector-icons';
 import { EmptyState, LabeledInput, PillButton, PopupCard, Screen, T, cardShadow } from '../../../kit';
 import { Stars } from '../../../kit/controls';
 import { useMoverKind, useActiveJob, useDriverAction, useRiderAction, useRateCustomer, useCourierProof, useRideSos } from '../../../hooks';
+import { useMoverPreview } from '../../../stores/moverPreview';
 import { toast } from '../../../components/ui/toast';
 import { useLocationStore } from '../../../stores/locationStore';
 import { haversineKm, streetEtaMin } from '../../../lib/geo';
@@ -110,6 +111,10 @@ export function ActiveJobScreen({ navigation }: any) {
   // participant on /rides/:id/sos (same route the passenger's SOS uses).
   const sos = useRideSos();
   const [sosConfirm, setSosConfirm] = useState(false);
+  // Preview (R3): useActiveJob supplies a sample in-progress trip, so this
+  // nav-grade screen is fully browsable read-only. Real actions (SOS/dial) are
+  // suppressed below; the step mutations already no-op in preview.
+  const preview = useMoverPreview((s) => s.preview);
   const job: any = active.data;
 
   if (!job && !ratePopup) {
@@ -439,6 +444,7 @@ export function ActiveJobScreen({ navigation }: any) {
           disabled={sos.isPending}
           onPress={() => {
             setSosConfirm(false);
+            if (preview) return; // read-only preview never dials or records
             const coords = latitude != null && longitude != null ? { lat: latitude, lng: longitude } : undefined;
             if (job?.id) sos.mutate({ id: job.id, coords });
             // Guyana launch emergency number; move to CountryConfig for other markets.
