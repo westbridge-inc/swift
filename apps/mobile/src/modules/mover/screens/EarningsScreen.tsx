@@ -3,7 +3,7 @@ import React from 'react';
 import { ScrollView, View } from 'react-native';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 import { color, radius, space } from '@swift/ui';
-import { Card, Header, LinkText, LoadingBlock, PillButton, Screen, T, TonePill } from '../../../kit';
+import { Card, ErrorState, Header, LinkText, LoadingBlock, PillButton, Screen, T, TonePill } from '../../../kit';
 import { useMoverKind, useMoverStats, useMoverSubscription, useEarningsSummary, useEarnings, useCashSettlements, useConfirmCashSettlement } from '../../../hooks';
 import { money } from '../../../lib/money';
 import { dateLabel } from '../shared';
@@ -159,6 +159,10 @@ export function EarningsScreen({ navigation }: any) {
       <Header title="Earnings" />
       {summaryQ.isLoading ? (
         <LoadingBlock />
+      ) : summaryQ.isError ? (
+        // Honest failure — never render an optimistic $0 that reads as "you
+        // earned nothing" when the request simply failed.
+        <ErrorState message="We couldn't load your earnings. Check your connection and try again." onRetry={() => summaryQ.refetch()} />
       ) : (
         <ScrollView contentContainerStyle={{ paddingHorizontal: space['2xl'], paddingBottom: space['3xl'] }} showsVerticalScrollIndicator={false}>
           {/* This-week hero */}
