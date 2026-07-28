@@ -518,6 +518,67 @@ export async function driverRoutes(app: FastifyInstance) {
     return { success: true, data: rating };
   });
 
+  // Driver bails on an ACCEPTED ride (breakdown, gridlock, no-show) BEFORE the
+  // passenger is aboard. Without this the driver was trapped — the only exits were
+  // /complete (recording a fare for a trip that never happened) or phoning support,
+  // and go-offline is hard-blocked while currentRideId is set. This frees the
+  // driver AND re-dispatches the ride so the rider isn't stranded. Never allowed
+  // once RIDE_IN_PROGRESS (passenger in the car). [SWIFT taxi-lifecycle]
+  const driverCancelSchema = z.object({ reason: z.string().trim().min(3).max(200) });
+  app.post('/rides/:id/cancel', { preHandler: [app.authenticate] }, async (request) => {
+    const { id } = request.params as { id: string };
+    const driver = await getDriver(request.user.userId); // authz before body validation
+    const { reason } = driverCancelSchema.parse(request.body ?? {});
+    const order = await getDriverRide(driver.id, id);
+
+    const cancellable: OrderStatus[] = ['DRIVER_ASSIGNED', 'DRIVER_EN_ROUTE', 'DRIVER_ARRIVED'];
+    if (!cancellable.includes(order.status)) {
+      throw new AppError(400, 'INVALID_STATUS',
+        order.status === 'RIDE_IN_PROGRESS'
+          ? 'You cannot cancel once the trip has started — end the trip instead.'
+          : `Cannot cancel a ride in ${order.status} status`);
+    }
+
+    // Controlled release, atomic: CAS the ride back to PENDING (unassigned) and
+    // free the driver together. The order becomes re-dispatchable; the driver is
+    // un-trapped. A concurrent transition (customer cancel, complete) makes the
+    // CAS miss and we 409 cleanly.
+    const released = await app.prisma.$transaction(async (tx) => {
+      const cas = await tx.order.updateMany({
+        where: { id, driverId: driver.id, status: { in: cancellable } },
+        data: { status: 'PENDING', driverId: null, acceptedAt: null },
+      });
+      if (cas.count === 0) return false;
+      await tx.driver.updateMany({
+        where: { id: driver.id, currentRideId: id },
+        data: { isAvailable: true, currentRideId: null },
+      });
+      await tx.orderStatusLog.create({
+        data: { orderId: id, status: 'PENDING', changedBy: request.user.userId, note: `Driver cancelled: ${reason}` },
+      });
+      return true;
+    });
+    if (!released) throw new AppError(409, 'INVALID_STATUS', 'This ride can no longer be cancelled');
+
+    // Tell the rider honestly, then re-dispatch so their ride survives.
+    app.io.to(`order:${id}`).emit('order:status_changed', { orderId: id, status: 'PENDING', reason: 'driver_cancelled' });
+    await notifications.send({
+      userId: order.customerId,
+      type: 'ORDER_UPDATE',
+      title: 'Finding you another driver',
+      body: 'Your driver had to cancel — we’re matching you with the nearest available driver now.',
+      data: { orderId: id, status: 'PENDING' },
+    });
+
+    if (app.dispatchQueue) {
+      await app.dispatchQueue.add('dispatch-order', { orderId: id }, { priority: 5, removeOnComplete: 100, removeOnFail: 50 });
+    } else {
+      await dispatch.dispatchOrder(id);
+    }
+
+    return { success: true, data: { orderId: id, status: 'PENDING', reDispatched: true } };
+  });
+
   // 2. En route to pickup
   app.put('/rides/:id/en-route', { preHandler: [app.authenticate] }, async (request) => {
     const { id } = request.params as { id: string };
