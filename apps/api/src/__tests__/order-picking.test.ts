@@ -298,6 +298,32 @@ describe('substitution round-trip', () => {
     expect(Number(after.subtotalCustomer)).toBe(0);
     expect(Number(after.subtotalBase)).toBe(0);
   });
+
+  it('a picking refund releases the CASH rider’s committed-float delta (no perma-leak)', async () => {
+    const item = await makeItem({ name: `Float ${seq}`, price: 2000, stock: 5 });
+    const order = await makeOrderWithLines([{ itemId: item.id, name: item.name, qty: 1, price: 2000 }]);
+    const line = order.items[0]!;
+    // A rider claimed this CASH order — float was committed against the ORIGINAL
+    // subtotal (2000) at claim time.
+    const rmover = await makeUser(['MOVER', 'CUSTOMER'], 'MOVER');
+    const rider = await app.prisma.rider.create({
+      data: { userId: rmover.userId, riderType: 'DELIVERY', vehicleType: 'MOTORCYCLE', documentsVerified: true, floatLimit: 100_000, committedFloat: 2000 },
+    });
+    await app.prisma.order.update({ where: { id: order.id }, data: { riderId: rider.id } });
+
+    const refund = await inject('POST', `/api/v1/vendor/orders/${order.id}/items/${line.id}/refund-line`, owner.token, {});
+    expect(refund.statusCode).toBe(200);
+
+    // RED before the fix: committedFloat stayed 2000 while subtotalBase dropped to
+    // 0, so the terminal release (against the reduced subtotal) left 2000 committed
+    // forever — the rider permanently lost that float headroom.
+    const after = await app.prisma.rider.findUniqueOrThrow({ where: { id: rider.id } });
+    expect(Number(after.committedFloat)).toBe(0); // the 2000 delta was released in lockstep
+    const ord = await app.prisma.order.findUniqueOrThrow({ where: { id: order.id } });
+    expect(Number(ord.subtotalBase)).toBe(0);
+
+    await app.prisma.rider.delete({ where: { id: rider.id } });
+  });
 });
 
 describe('stock adjust + low stock', () => {
