@@ -191,6 +191,10 @@ export class DispatchService {
     rideClass?: RideClass | null,
     tenantId: string | null = getTenantId(),
     packageSize?: string | null,
+    /** The booking user — never offer a taxi to the person who hailed it (a
+     *  dual-role user online as a driver could otherwise be dispatched their own
+     *  ride). Omitted on the availability probe, which has no booker. */
+    excludeUserId?: string | null,
   ): Promise<DispatchCandidate[]> {
     const declined = await this.redis.smembers(declinedKey(orderId));
 
@@ -212,6 +216,11 @@ export class DispatchService {
     // availability probe). A null tenant (untagged system/test call) skips the
     // filter and behaves exactly as before.
     const tenantFilter = tenantId ? Prisma.sql`AND u."tenantId" = ${tenantId}` : Prisma.empty;
+    // Self-exclusion: a mover never gets offered their own order — a dual-role
+    // user hailing a taxi (or ordering a delivery) while online as a mover must
+    // not be dispatched their own request. Filters on the joined users row, so
+    // the one clause works for both the driver (d) and rider (r) branches.
+    const selfFilter = excludeUserId ? Prisma.sql`AND u."id" <> ${excludeUserId}` : Prisma.empty;
 
     // Straight-line cap (tunable per market). rankCandidates re-ranks the
     // survivors by real road ETA below — see nearestCandidateCap() for why the
@@ -227,6 +236,7 @@ export class DispatchService {
           WHERE d."isOnline" = true
             AND d."isAvailable" = true
             ${tenantFilter}
+            ${selfFilter}
             AND d."rideClass"::text = ANY(${eligibleClasses})
             AND d."currentLat" IS NOT NULL
             AND d."currentLng" IS NOT NULL
@@ -253,6 +263,7 @@ export class DispatchService {
           WHERE r."isOnline" = true
             AND r."isAvailable" = true
             ${tenantFilter}
+            ${selfFilter}
             ${vehicleFilter}
             AND (r."floatLimit" - r."committedFloat") >= ${floatRequired}
             AND r."currentLat" IS NOT NULL
@@ -332,7 +343,7 @@ export class DispatchService {
     await this.journalOpenSearch(order, round, radius);
     // D.3 — a rider must have enough free float to front this order's vendor-cash (CASH deliveries only).
     const floatRequired = pool === 'RIDER' && order.paymentMethod === 'CASH' ? Number(order.subtotalBase) : 0;
-    const candidates = await this.findCandidates(orderId, { lat: order.pickupLat, lng: order.pickupLng }, radius, pool, floatRequired, order.rideClass, order.tenantId, order.courierPackageSize);
+    const candidates = await this.findCandidates(orderId, { lat: order.pickupLat, lng: order.pickupLng }, radius, pool, floatRequired, order.rideClass, order.tenantId, order.courierPackageSize, order.customerId);
 
     if (candidates.length === 0) {
       if (round + 1 < MAX_ROUNDS) {

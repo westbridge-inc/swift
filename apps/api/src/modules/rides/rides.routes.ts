@@ -222,6 +222,14 @@ export async function ridesRoutes(app: FastifyInstance) {
       },
     });
 
+    // The customer re-entered the funnel and got a ride — any pending "notify me
+    // when drivers are back" watch is now obsolete. Clear it so the 2-min supply
+    // scan can't push "Drivers are back!" while they're already in a ride.
+    // Best-effort: a watch-clear hiccup must never fail the ride request.
+    await app.prisma.supplyWatch
+      .deleteMany({ where: { customerId: user.id, pool: 'DRIVER', notifiedAt: null } })
+      .catch(() => {});
+
     // Shared dispatch engine, driver pool — same cascade, same atomicity.
     // SWIFT-AUD-D6-08: enqueue the first-pass dispatch instead of running it
     // inline. It does external ETA round-trips that would otherwise pin this
