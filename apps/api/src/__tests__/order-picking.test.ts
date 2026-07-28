@@ -280,6 +280,24 @@ describe('substitution round-trip', () => {
     const stock = await app.prisma.item.findUniqueOrThrow({ where: { id: item.id } });
     expect(stock.stockQuantity).toBe(4); // 2 + 2 back
   });
+
+  it('vendor refund-line on a heavily-discounted order floors the totals at 0 (never negative)', async () => {
+    const item = await makeItem({ name: `Pricey R ${seq}`, price: 5000, stock: 3 });
+    const order = await makeOrderWithLines([{ itemId: item.id, name: item.name, qty: 1, price: 5000 }]);
+    const line = order.items[0]!;
+    // Simulate a big order-level discount: the recorded totals sit far below the
+    // un-discounted line value (a 100% promo makes the discount ≈ the subtotal).
+    await app.prisma.order.update({ where: { id: order.id }, data: { totalAmount: 500, subtotalCustomer: 500, subtotalBase: 500 } });
+
+    const refund = await inject('POST', `/api/v1/vendor/orders/${order.id}/items/${line.id}/refund-line`, owner.token, {});
+    expect(refund.statusCode).toBe(200); // a refund always succeeds — it's a removal, not a choice
+    const after = await app.prisma.order.findUniqueOrThrow({ where: { id: order.id } });
+    // RED before the floor guard: decrementing by the full 5000 drove these to -4500
+    // ("the platform owes the customer"). Now each field floors at 0.
+    expect(Number(after.totalAmount)).toBe(0);
+    expect(Number(after.subtotalCustomer)).toBe(0);
+    expect(Number(after.subtotalBase)).toBe(0);
+  });
 });
 
 describe('stock adjust + low stock', () => {
