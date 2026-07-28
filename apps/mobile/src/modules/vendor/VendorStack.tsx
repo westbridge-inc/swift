@@ -114,6 +114,19 @@ const TYPES = [
   { key: 'SERVICE', label: 'Services', icon: 'tools' },
 ] as const;
 
+// R1 type-awareness: the catalogue surface is named for the BUSINESS, not the
+// kitchen. One map drives the tab label + icon, the menu-screen title, and the
+// category prompt, so a Services vendor never sees "Menu"/"Mains, Drinks".
+const CATALOGUE_META: Record<string, { label: string; icon: keyof typeof Feather.glyphMap; catPlaceholder: string }> = {
+  RESTAURANT: { label: 'Menu', icon: 'book-open', catPlaceholder: 'e.g. Mains, Drinks' },
+  SUPERMARKET: { label: 'Inventory', icon: 'package', catPlaceholder: 'e.g. Produce, Dairy, Household' },
+  STORE: { label: 'Products', icon: 'tag', catPlaceholder: 'e.g. Apparel, Accessories' },
+  SERVICE: { label: 'Services', icon: 'calendar', catPlaceholder: 'e.g. Haircuts, Nails, Spa' },
+};
+function catalogueMeta(vendorType?: string) {
+  return CATALOGUE_META[vendorType ?? 'RESTAURANT'] ?? CATALOGUE_META['RESTAURANT']!;
+}
+
 function BizValuePill({ icon, label }: { icon: keyof typeof MaterialCommunityIcons.glyphMap; label: string }) {
   return (
     <View
@@ -480,6 +493,8 @@ function VendorOps({ store, navigation }: any) {
   const exitPreview = useVendorPreview((s) => s.exitPreview);
   const setPreviewType = useVendorPreview((s) => s.setPreviewType);
   const setPreviewIntent = useAuthStore((s) => s.setIntent);
+  const cat = catalogueMeta(store.vendorType); // R1: name the catalogue per type
+  const isService = store.vendorType === 'SERVICE';
   // Only fetched to NAME the failing document in the suspension banner.
   const vstatus = useVerificationStatus<any>(store.vendorType);
   // §B5 progress: N of M checklist documents currently approved (unexpired).
@@ -686,9 +701,14 @@ function VendorOps({ store, navigation }: any) {
 
         {/* KPIs */}
         <View style={{ flexDirection: 'row', gap: space.md, marginBottom: space.lg }}>
-          <KpiTile icon="receipt" value={String(orders.length)} label="Active orders" />
+          <KpiTile icon="receipt" value={String(orders.length)} label={isService ? 'Appointments' : 'Active orders'} />
           <KpiTile icon="cash" value={money(queueValue)} label="In queue" />
-          <KpiTile icon="timer-outline" value={`${store.estimatedPrepTime ?? 30}m`} label="Prep time" />
+          {/* Prep time is a kitchen concept — appointments have no prep. */}
+          {isService ? (
+            <KpiTile icon="check-circle-outline" value={money((today?.total) ?? 0)} label="Today" />
+          ) : (
+            <KpiTile icon="timer-outline" value={`${store.estimatedPrepTime ?? 30}m`} label="Prep time" />
+          )}
         </View>
 
         {/* The Swift model — you keep everything */}
@@ -713,7 +733,7 @@ function VendorOps({ store, navigation }: any) {
         {/* The Menu tab isn't registered for STAFF — don't show a door that goes nowhere. */}
         <View style={{ flexDirection: 'row', gap: space.md, marginBottom: space.xl }}>
           {myRole !== 'STAFF' ? (
-            <PillButton label="Manage menu" variant="outline" size="md" style={{ flex: 1 }} onPress={() => navigation.navigate('Menu')} />
+            <PillButton label={`Manage ${cat.label.toLowerCase()}`} variant="outline" size="md" style={{ flex: 1 }} onPress={() => navigation.navigate('Menu')} />
           ) : null}
           <PillButton label="Order history" variant="outline" size="md" style={{ flex: 1 }} onPress={() => navigation.navigate('VendorOrderHistory')} />
         </View>
@@ -1255,6 +1275,8 @@ function CategoryHeader({ cat }: { cat: any }) {
 function VendorMenuScreen({ navigation }: any) {
   const menuQ = useVendorMenu();
   const createCategory = useCreateCategory();
+  const { store } = useVendorProfile();
+  const cat = catalogueMeta(store?.vendorType); // R1: title + prompts named for the type
   const [newCat, setNewCat] = useState('');
   const categories: any[] = menuQ.data ?? [];
   const catOptions = categories.map((c) => ({ id: c.id, name: c.name }));
@@ -1268,7 +1290,7 @@ function VendorMenuScreen({ navigation }: any) {
   return (
     <Screen>
       <SubHeader
-        title="Menu & Inventory"
+        title={cat.label}
         navigation={navigation}
         hideBack
         action={
@@ -1286,7 +1308,7 @@ function VendorMenuScreen({ navigation }: any) {
               New category
             </T>
             <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.md }}>
-              <InlineInput style={{ flex: 1 }} value={newCat} onChangeText={setNewCat} placeholder="e.g. Mains, Drinks" />
+              <InlineInput style={{ flex: 1 }} value={newCat} onChangeText={setNewCat} placeholder={cat.catPlaceholder} />
               <PillButton label="Add" size="md" loading={createCategory.isPending} disabled={newCat.trim().length < 1} onPress={addCategory} />
             </View>
           </Card>
@@ -2663,8 +2685,9 @@ const VTab = createBottomTabNavigator();
 function VendorTabs() {
   // Staff & roles (§4.1): floor STAFF work the order queue — menu tools and
   // business insights are manager/owner surfaces (the API enforces the same).
-  const { myRole } = useVendorProfile();
+  const { myRole, store } = useVendorProfile();
   const manager = myRole !== 'STAFF';
+  const cat = catalogueMeta(store?.vendorType); // R1: the catalogue tab is named for the type
   return (
     <VTab.Navigator
       screenOptions={{
@@ -2683,7 +2706,7 @@ function VendorTabs() {
         <VTab.Screen
           name="Menu"
           component={MenuStackNav}
-          options={{ tabBarLabel: 'Menu', tabBarIcon: ({ color: c, size }) => <Feather name="book-open" size={size} color={c} /> }}
+          options={{ tabBarLabel: cat.label, tabBarIcon: ({ color: c, size }) => <Feather name={cat.icon} size={size} color={c} /> }}
         />
       ) : null}
       {manager ? (
