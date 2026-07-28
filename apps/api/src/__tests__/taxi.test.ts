@@ -471,6 +471,42 @@ describe('Stranded-taxi watchdog — driver goes GPS-dark after accepting', () =
   });
 });
 
+describe('Taxi dispatch S3 — self-exclusion + supply-watch hygiene', () => {
+  it('never offers a booking user their OWN ride: findCandidates excludes excludeUserId', async () => {
+    await app.prisma.driver.updateMany({ data: { isOnline: false, isAvailable: false } }); // isolate
+    const me = await makeDriver({ lat: CENTRAL.lat, lng: CENTRAL.lng });               // online driver AND a customer
+    const other = await makeDriver({ lat: CENTRAL.lat + 0.001, lng: CENTRAL.lng });     // a different online driver
+
+    const cands = await dispatch.findCandidates(`self-${nanoid(6)}`, CENTRAL, 5, 'DRIVER', 0, null, null, null, me.userId);
+    const ids = cands.map((c) => (c as { riderId: string }).riderId);
+    // RED before self-exclusion: my own driver row was a candidate for my own ride.
+    expect(ids).not.toContain(me.driverId);
+    expect(ids).toContain(other.driverId); // a different driver is still eligible
+  });
+
+  it('requesting a ride clears the customer’s pending supply watch (no stale "drivers are back")', async () => {
+    await app.prisma.driver.updateMany({ data: { isOnline: false, isAvailable: false } });
+    const customer = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
+    await makeDriver({ lat: CENTRAL.lat, lng: CENTRAL.lng }); // a driver online so the request is accepted
+    // The customer had set a watch earlier, when drivers were absent.
+    await app.prisma.supplyWatch.create({
+      data: { customerId: customer.userId, pool: 'DRIVER', lat: CENTRAL.lat, lng: CENTRAL.lng, expiresAt: new Date(Date.now() + 3_600_000) },
+    });
+
+    const res = await inject('POST', '/api/v1/rides/request', {
+      pickup: CENTRAL, dropoff: SOUTH, pickupAddress: 'Watch A', dropoffAddress: 'Watch B',
+    }, customer.token);
+    expect(res.statusCode).toBe(201);
+
+    // RED before the fix: the watch survived, so the 2-min supply scan would push
+    // "Drivers are back!" while the customer is already in a ride.
+    const watch = await app.prisma.supplyWatch.findFirst({ where: { customerId: customer.userId, notifiedAt: null } });
+    expect(watch).toBeNull();
+
+    await app.prisma.supplyWatch.deleteMany({ where: { customerId: customer.userId } });
+  });
+});
+
 describe('Taxi live-operation gate (hire-class insurance)', () => {
   async function setInsurance(userId: string, coverageClass: 'HIRE' | 'PRIVATE', hireClassConfirmed: boolean) {
     await app.prisma.verificationDocument.create({
