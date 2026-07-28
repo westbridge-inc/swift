@@ -71,6 +71,22 @@ export const EXHAUST_TERMINAL_TTL_SECONDS = Math.max(3600, Number(process.env['D
 /** GPS silent this long while "online" = the app is gone, not slow. */
 export const STALE_LOCATION_MINUTES = 15;
 
+/** Straight-line candidate cap. The geo query keeps the N movers with the
+ *  smallest great-circle distance; rankCandidates then re-sorts THOSE by real
+ *  road ETA and the offer goes to the ETA-best. Great-circle nearest is not
+ *  road-ETA nearest across a real network (rivers, one-ways, the single Demerara
+ *  bridge), so a mover who is ETA-closest but straight-line #(N+1) is truncated
+ *  before scoring ever sees them — but ONLY when more than N movers sit in the
+ *  radius, which at launch fleet density effectively never happens. Env-tunable
+ *  per market: a dense city raises it to shrink that truncation window, at a
+ *  bounded maps-provider cost (the ETA batch already handles N destinations). We
+ *  do NOT default it high — the provider bills per element in prod. Read
+ *  per-call so ops can size it and the behaviour is testable. */
+export function nearestCandidateCap(): number {
+  const n = Number(process.env['DISPATCH_NEAREST_CANDIDATE_CAP']);
+  return Number.isInteger(n) && n > 0 ? n : 50;
+}
+
 /** Taxi rides draw from the driver pool; everything else from riders.
  *  Same scoring, same cascade, same atomic claim — shared code, not a copy. */
 export type DispatchPool = 'RIDER' | 'DRIVER';
@@ -197,6 +213,11 @@ export class DispatchService {
     // filter and behaves exactly as before.
     const tenantFilter = tenantId ? Prisma.sql`AND u."tenantId" = ${tenantId}` : Prisma.empty;
 
+    // Straight-line cap (tunable per market). rankCandidates re-ranks the
+    // survivors by real road ETA below — see nearestCandidateCap() for why the
+    // cap is straight-line and when that matters.
+    const cap = nearestCandidateCap();
+
     const rows = pool === 'DRIVER'
       ? await this.prisma.$queryRaw<GeoCandidateRow[]>`
           SELECT d."id", d."userId", d."currentLat", d."currentLng",
@@ -214,14 +235,15 @@ export class DispatchService {
               geography(ST_MakePoint(${pickup.lng}, ${pickup.lat})),
               ${radiusKm * 1000}
             )
-          -- SWIFT-142: nearest-first BEFORE the cap, so with >50 movers in range
-          -- the candidate pool is the 50 CLOSEST, not an arbitrary 50 the index
-          -- happened to return (which could drop the mover at the door).
+          -- SWIFT-142: nearest-first BEFORE the cap, so with more movers than the
+          -- cap in range the pool is the CLOSEST ones, not an arbitrary set the
+          -- index happened to return (which could drop the mover at the door).
+          -- Cap is straight-line + tunable (nearestCandidateCap); ETA re-rank below.
           ORDER BY ST_Distance(
             geography(ST_MakePoint(d."currentLng", d."currentLat")),
             geography(ST_MakePoint(${pickup.lng}, ${pickup.lat}))
           ) ASC
-          LIMIT 50
+          LIMIT ${cap}
         `
       : await this.prisma.$queryRaw<GeoCandidateRow[]>`
           SELECT r."id", r."userId", r."currentLat", r."currentLng",
@@ -245,7 +267,7 @@ export class DispatchService {
             geography(ST_MakePoint(r."currentLng", r."currentLat")),
             geography(ST_MakePoint(${pickup.lng}, ${pickup.lat}))
           ) ASC
-          LIMIT 50
+          LIMIT ${cap}
         `;
 
     const eligible = rows.filter((r) => !declined.includes(r.id));

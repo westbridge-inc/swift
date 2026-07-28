@@ -810,6 +810,36 @@ describe('candidate selection at scale [SWIFT-142]', () => {
       await app.prisma.user.deleteMany({ where: { id: { in: localUserIds } } });
     }
   });
+
+  it('the straight-line candidate cap is tunable (DISPATCH_NEAREST_CANDIDATE_CAP) and keeps the NEAREST N', async () => {
+    // Remote spot far from every other fixture (no other rider is within 5 km),
+    // so we DON'T need a global updateMany to isolate the pool — which avoids
+    // contaminating the other test files running in parallel. makeRider uses the
+    // file's own +59200088 phone prefix (auto-purged, no cross-file collision).
+    const SPOT = { lat: 6.20, lng: -57.50 };
+    const riders: Array<{ id: string; d: number }> = [];
+    for (let i = 1; i <= 6; i += 1) {
+      const r = await makeRider({ lat: SPOT.lat + 0.001 * i, lng: SPOT.lng }); // ~111 m .. ~666 m out
+      riders.push({ id: r.riderId, d: i });
+    }
+
+    const prev = process.env['DISPATCH_NEAREST_CANDIDATE_CAP'];
+    process.env['DISPATCH_NEAREST_CANDIDATE_CAP'] = '3';
+    try {
+      const candidates = await dispatch.findCandidates(`cap-${nanoid(6)}`, SPOT, 5, 'RIDER', 0, null);
+      // RED before the fix: the cap was a hardcoded 50 — all 6 came back.
+      expect(candidates.length).toBe(3);
+      const ids = new Set(candidates.map((c) => (c as { riderId: string }).riderId));
+      const byDistance = [...riders].sort((a, b) => a.d - b.d);
+      expect(byDistance.slice(0, 3).every((r) => ids.has(r.id))).toBe(true);   // nearest 3 kept
+      expect(byDistance.slice(3).some((r) => ids.has(r.id))).toBe(false);      // farthest 3 truncated
+    } finally {
+      if (prev === undefined) delete process.env['DISPATCH_NEAREST_CANDIDATE_CAP'];
+      else process.env['DISPATCH_NEAREST_CANDIDATE_CAP'] = prev;
+      // Park them (afterAll's purgeFixtures deletes the +59200088 users by phone).
+      await app.prisma.rider.updateMany({ where: { id: { in: riders.map((r) => r.id) } }, data: { isOnline: false } });
+    }
+  });
 });
 
 describe('vehicle capability matching [SWIFT-062]', () => {
