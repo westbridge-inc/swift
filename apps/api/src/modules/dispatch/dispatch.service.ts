@@ -649,6 +649,11 @@ export class DispatchService {
       audience: 'customer',
       data: { kind: 'dispatch_exhausted', orderId: order.id },
     });
+    // Terminal socket signal to the rider's LIVE screen (mirrors the assigned
+    // emit) — so a taxi rider's ActiveRide can flip from "contacting drivers…"
+    // to a real dead state (search again / cancel) instead of spinning forever.
+    // The push above reaches a backgrounded app; this reaches the open screen. [taxi #8]
+    this.io.to(`order:${order.id}`).emit('dispatch:exhausted', { orderId: order.id, orderNumber: order.orderNumber });
     if (order.vendor) {
       await this.notifications.send({
         userId: order.vendor.owner.userId,
