@@ -518,6 +518,47 @@ describe('Atomic acceptance — the concurrency proof', () => {
     });
   });
 
+  it('one mover, two live jobs at once: exactly 1 claim wins, the other rolls back open (one-active-job-per-mover)', async () => {
+    // The founder's hard invariant: a mover offered two jobs in the same window
+    // (two live cards) taps both — must NOT double-book. The claim reserves the
+    // MOVER atomically, so the second accept loses and its order stays open.
+    const rider = await makeRider({});
+    const [orderA, orderB] = await Promise.all([
+      makeDeliveryOrder('READY_FOR_PICKUP'),
+      makeDeliveryOrder('READY_FOR_PICKUP'),
+    ]);
+
+    const results = await Promise.allSettled([
+      dispatch.claimOrder(orderA.id, rider.riderId),
+      dispatch.claimOrder(orderB.id, rider.riderId),
+    ]);
+    const wins = results.filter((r) => r.status === 'fulfilled');
+    const busy = results.filter(
+      (r) => r.status === 'rejected' && (r.reason as { code?: string }).code === 'DRIVER_BUSY',
+    );
+    expect(wins).toHaveLength(1); // exactly one job claimed
+    expect(busy).toHaveLength(1); // the second refused, not double-booked
+
+    const dbRider = await app.prisma.rider.findUniqueOrThrow({
+      where: { id: rider.riderId },
+      select: { currentOrderId: true, isAvailable: true },
+    });
+    expect(dbRider.currentOrderId).not.toBeNull();
+    expect(dbRider.isAvailable).toBe(false);
+
+    const [a, b] = await Promise.all([
+      app.prisma.order.findUniqueOrThrow({ where: { id: orderA.id }, select: { riderId: true, status: true } }),
+      app.prisma.order.findUniqueOrThrow({ where: { id: orderB.id }, select: { riderId: true, status: true } }),
+    ]);
+    // Exactly one order owns the mover; the other rolled back to an open, re-dispatchable state.
+    expect([a, b].filter((o) => o.riderId === rider.riderId)).toHaveLength(1);
+    const open = [a, b].filter((o) => o.riderId === null);
+    expect(open).toHaveLength(1);
+    expect(open[0]!.status).toBe('READY_FOR_PICKUP');
+
+    await app.prisma.rider.update({ where: { id: rider.riderId }, data: { isOnline: false } });
+  });
+
   it('accepting through the HTTP endpoint honours the live offer', async () => {
     const a = await makeRider({ lat: PICKUP.lat + 0.003 });
     const b = await makeRider({ lat: PICKUP.lat + 0.02 });

@@ -490,23 +490,56 @@ export class DispatchService {
 
   /** The DB-level claim — exposed separately so tests can hammer it raw. */
   async claimOrder(orderId: string, moverId: string, pool: DispatchPool = 'RIDER') {
-    const claimed = pool === 'DRIVER'
-      ? await this.prisma.order.updateMany({
-          where: { id: orderId, driverId: null, status: 'PENDING' },
-          data: { driverId: moverId, status: 'DRIVER_ASSIGNED', acceptedAt: new Date() },
-        })
-      : await this.prisma.order.updateMany({
-          where: {
-            id: orderId,
-            riderId: null,
-            status: { in: ['ACCEPTED', 'PREPARING', 'READY_FOR_PICKUP'] },
-          },
-          data: { riderId: moverId, status: 'RIDER_ASSIGNED' },
-        });
+    // Atomic double compare-and-set: claim the ORDER (exactly-one-winner-per-order)
+    // AND reserve the MOVER (exactly-one-active-job-per-mover) in ONE transaction.
+    // The mover CAS is the REAL exclusivity lock — a mover already on a job (or won
+    // by a concurrent accept of a DIFFERENT order) fails it, the whole tx rolls back,
+    // and this order stays open for the next candidate. Without it, two orders offered
+    // to the same free driver in one window both claim and double-book the driver
+    // (the founder's one-ride-per-driver invariant). [SWIFT taxi-exclusivity]
+    await this.prisma.$transaction(async (tx) => {
+      const claimed = pool === 'DRIVER'
+        ? await tx.order.updateMany({
+            where: { id: orderId, driverId: null, status: 'PENDING' },
+            data: { driverId: moverId, status: 'DRIVER_ASSIGNED', acceptedAt: new Date() },
+          })
+        : await tx.order.updateMany({
+            where: {
+              id: orderId,
+              riderId: null,
+              status: { in: ['ACCEPTED', 'PREPARING', 'READY_FOR_PICKUP'] },
+            },
+            data: { riderId: moverId, status: 'RIDER_ASSIGNED' },
+          });
+      if (claimed.count === 0) {
+        throw new AppError(409, 'ALREADY_TAKEN', 'Another mover already took this job');
+      }
 
-    if (claimed.count === 0) {
-      throw new AppError(409, 'ALREADY_TAKEN', 'Another mover already took this job');
-    }
+      if (pool === 'DRIVER') {
+        const reserved = await tx.driver.updateMany({
+          where: { id: moverId, isAvailable: true, currentRideId: null },
+          data: { isAvailable: false, currentRideId: orderId },
+        });
+        if (reserved.count === 0) {
+          throw new AppError(409, 'DRIVER_BUSY', 'You already have an active ride — finish it before taking another');
+        }
+      } else {
+        // D.3 — commit the rider's float for a CASH order (released on delivery/cancel/fail).
+        const o = await tx.order.findUniqueOrThrow({ where: { id: orderId }, select: { paymentMethod: true, subtotalBase: true } });
+        const floatAmt = o.paymentMethod === 'CASH' ? Number(o.subtotalBase) : 0;
+        const reserved = await tx.rider.updateMany({
+          where: { id: moverId, isAvailable: true, currentOrderId: null },
+          data: {
+            isAvailable: false,
+            currentOrderId: orderId,
+            ...(floatAmt > 0 ? { committedFloat: { increment: floatAmt } } : {}),
+          },
+        });
+        if (reserved.count === 0) {
+          throw new AppError(409, 'DRIVER_BUSY', 'You already have an active job — finish it before taking another');
+        }
+      }
+    });
 
     const assignedStatus = pool === 'DRIVER' ? 'DRIVER_ASSIGNED' : 'RIDER_ASSIGNED';
     const order = await this.prisma.order.findUniqueOrThrow({
@@ -520,24 +553,6 @@ export class DispatchService {
     await this.prisma.orderStatusLog.create({
       data: { orderId, status: assignedStatus, changedBy: moverId, note: 'Mover accepted the job' },
     });
-
-    if (pool === 'DRIVER') {
-      await this.prisma.driver.update({
-        where: { id: moverId },
-        data: { isAvailable: false, currentRideId: orderId },
-      });
-    } else {
-      // D.3 — commit the rider's float for a CASH order (released on delivery/cancel/fail).
-      const floatAmt = order.paymentMethod === 'CASH' ? Number(order.subtotalBase) : 0;
-      await this.prisma.rider.update({
-        where: { id: moverId },
-        data: {
-          isAvailable: false,
-          currentOrderId: orderId,
-          ...(floatAmt > 0 ? { committedFloat: { increment: floatAmt } } : {}),
-        },
-      });
-    }
     await this.recordOfferOutcome(moverId, true, pool);
 
     // Journal (§3): the search resolved — somebody took the job. The duration
