@@ -211,6 +211,12 @@ export async function driverRoutes(app: FastifyInstance) {
       throw new AppError(400, 'ACTIVE_RIDE', 'You cannot go offline while you have an active ride');
     }
 
+    // A driver holding a live offer (not yet accepted) is still isAvailable and
+    // passes the guard above. Release that offer NOW so the ride re-dispatches
+    // immediately instead of the passenger's countdown burning on a driver who
+    // quit — and so the reconciler isn't blinded by a zombie offer key.
+    await dispatch.releaseHeldOffer(driver.id);
+
     const updated = await app.prisma.driver.update({
       where: { id: driver.id },
       data: { isOnline: false, isAvailable: false },
