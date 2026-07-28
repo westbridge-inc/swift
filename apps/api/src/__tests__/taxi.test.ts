@@ -566,6 +566,39 @@ describe('Taxi live-operation gate (hire-class insurance)', () => {
     expect(res.statusCode).toBe(200);
   });
 
+  it('blocks go-online when PAST_DUE and the grace window has ended', async () => {
+    const d = await offlineDriver();
+    await setInsurance(d.userId, 'HIRE', true);
+    await app.prisma.subscription.create({
+      data: {
+        driverId: d.driverId, type: 'TAXI_DRIVER', status: 'PAST_DUE', weeklyRate: 12000,
+        currentPeriodStart: new Date(Date.now() - 8 * DAY), currentPeriodEnd: new Date(Date.now() - DAY),
+        nextBillingDate: new Date(Date.now() - DAY),
+        gracePeriodEnd: new Date(Date.now() - 60_000), // grace ended a minute ago
+      },
+    });
+    const res = await inject('POST', '/api/v1/driver/go-online', {}, d.token);
+    // RED before the fix: PAST_DUE was allowed regardless of grace, so a lapsed
+    // mover kept earning unpaid until the billing sweep flipped SUSPENDED.
+    expect(res.statusCode).toBe(403);
+    expect(res.json().error.code).toBe('SUBSCRIPTION_PAST_DUE');
+  });
+
+  it('allows go-online while PAST_DUE but still within the grace window', async () => {
+    const d = await offlineDriver();
+    await setInsurance(d.userId, 'HIRE', true);
+    await app.prisma.subscription.create({
+      data: {
+        driverId: d.driverId, type: 'TAXI_DRIVER', status: 'PAST_DUE', weeklyRate: 12000,
+        currentPeriodStart: new Date(Date.now() - DAY), currentPeriodEnd: new Date(),
+        nextBillingDate: new Date(),
+        gracePeriodEnd: new Date(Date.now() + 2 * 3600 * 1000), // 2h of grace left
+      },
+    });
+    const res = await inject('POST', '/api/v1/driver/go-online', {}, d.token);
+    expect(res.statusCode).toBe(200);
+  });
+
   it('SWIFT-066: a driver mid-ride who re-opens and taps GO is online but NOT available', async () => {
     const d = await offlineDriver();
     await setInsurance(d.userId, 'HIRE', true);

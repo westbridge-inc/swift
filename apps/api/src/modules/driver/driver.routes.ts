@@ -191,6 +191,17 @@ export async function driverRoutes(app: FastifyInstance) {
     if (!driver.subscription || !['TRIAL', 'ACTIVE', 'PAST_DUE'].includes(driver.subscription.status)) {
       throw new AppError(400, 'SUBSCRIPTION_REQUIRED', 'An active subscription is required to go online');
     }
+    // Defense-in-depth: PAST_DUE operates only THROUGH the grace window. Once
+    // grace has lapsed, block AT go-online rather than waiting for the billing
+    // sweep to flip SUSPENDED (which can be minutes away) — otherwise a mover
+    // keeps earning unpaid, and the weekly fee is the entire business model.
+    if (
+      driver.subscription.status === 'PAST_DUE' &&
+      driver.subscription.gracePeriodEnd &&
+      driver.subscription.gracePeriodEnd < new Date()
+    ) {
+      throw new AppError(403, 'SUBSCRIPTION_PAST_DUE', 'Your grace period has ended — pay this week’s fee to go back online.');
+    }
 
     // A driver already on a ride who re-opens the app and taps GO must NOT be
     // advertised as free supply — otherwise dispatch offers them a second ride
