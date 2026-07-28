@@ -356,10 +356,16 @@ export async function riderRoutes(app: FastifyInstance) {
     // grandfathered (legacy accounts pre-dating birth-on-verification).
     const sub = await app.prisma.subscription.findFirst({
       where: { riderId: rider.id },
-      select: { status: true },
+      select: { status: true, gracePeriodEnd: true },
     });
     if (sub && !['TRIAL', 'ACTIVE', 'PAST_DUE'].includes(sub.status)) {
       throw new AppError(403, 'SUBSCRIPTION_SUSPENDED', 'Your subscription is unpaid. Top up or pay to go back online.');
+    }
+    // Defense-in-depth: PAST_DUE operates only THROUGH the grace window. Once
+    // grace has lapsed, block at go-online instead of waiting for the billing
+    // sweep to flip SUSPENDED — the weekly fee is the whole business model.
+    if (sub && sub.status === 'PAST_DUE' && sub.gracePeriodEnd && sub.gracePeriodEnd < new Date()) {
+      throw new AppError(403, 'SUBSCRIPTION_PAST_DUE', 'Your grace period has ended — pay this week’s fee to go back online.');
     }
 
     const updated = await app.prisma.rider.update({
