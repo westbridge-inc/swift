@@ -516,7 +516,18 @@ function ActiveRide({ navigation, ride, cancelRide, insets }: any) {
   const [liveDriver, setLiveDriver] = useState<LatLng | null>(null);
   // Server-computed active-leg ETA riding the same stream [SWIFT-UG-RT-01].
   const [liveEtaMin, setLiveEtaMin] = useState<number | null>(null);
+  // Live-tracking honesty: the car marker is only truthful while the GPS feed is
+  // fresh. Track the heading (to rotate it) and WHEN the last fix landed, so a
+  // dead feed (tunnel, dead battery, app killed) degrades instead of lying.
+  const [driverHeading, setDriverHeading] = useState<number | null>(null);
+  const [lastFixAt, setLastFixAt] = useState<number | null>(null);
+  const [nowTs, setNowTs] = useState(() => Date.now());
+  const [connLost, setConnLost] = useState(false);
+  const mapRef = useRef<MapView>(null);
   const d = ride.driver;
+  // The server streams a fix at least every ~10s; past this we treat the marker
+  // as stale rather than a live position.
+  const FIX_STALE_MS = 12_000;
 
   // Live driver position: taxi rides are orders, so the order room streams
   // `driver:location` straight from the driver's GPS uploads. The REST
@@ -529,22 +540,53 @@ function ActiveRide({ navigation, ride, cancelRide, insets }: any) {
     const onDriver = (p: any) => {
       if (p?.latitude != null && p?.longitude != null) {
         setLiveDriver({ latitude: Number(p.latitude), longitude: Number(p.longitude) });
+        setLastFixAt(Date.now());
+        if (typeof p?.heading === 'number') setDriverHeading(p.heading);
       }
       if (typeof p?.etaMinutes === 'number') setLiveEtaMin(p.etaMinutes);
     };
+    // socket.io auto-reconnects the transport, but the ORDER ROOM is per-
+    // connection (joined only via order:subscribe), so after any blip a
+    // "connected" socket silently stops receiving driver:location until we
+    // re-subscribe. Re-join on every (re)connect and surface a banner while down.
+    const onConnect = () => { setConnLost(false); subscribeToOrder(ride.id); };
+    const onDisconnect = () => setConnLost(true);
+    const onError = () => setConnLost(true);
     s.on('driver:location', onDriver);
+    s.on('connect', onConnect);
+    s.on('disconnect', onDisconnect);
+    s.on('connect_error', onError);
     return () => {
       s.off('driver:location', onDriver);
+      s.off('connect', onConnect);
+      s.off('disconnect', onDisconnect);
+      s.off('connect_error', onError);
     };
   }, [ride?.id]);
+
+  // Ticking clock so the "is the fix stale?" check re-evaluates without a new
+  // event — a DEAD feed sends nothing, so only a timer can notice the silence.
+  useEffect(() => {
+    const t = setInterval(() => setNowTs(Date.now()), 3000);
+    return () => clearInterval(t);
+  }, []);
 
   const pickup = ride.pickupLat != null ? { latitude: Number(ride.pickupLat), longitude: Number(ride.pickupLng) } : null;
   const drop =
     ride.deliveryLat != null ? { latitude: Number(ride.deliveryLat), longitude: Number(ride.deliveryLng) } : null;
   const driverLoc =
     liveDriver ?? (d?.currentLat != null ? { latitude: Number(d.currentLat), longitude: Number(d.currentLng) } : null);
+  // The live feed is only trustworthy while fresh. Once we've had a live fix and
+  // it ages out, the car is frozen at its last point — degrade the marker + ETA
+  // instead of confidently showing a stationary car with a shrinking ETA.
+  const fixStale = liveDriver != null && lastFixAt != null && nowTs - lastFixAt > FIX_STALE_MS;
   const pts = [pickup, drop, driverLoc].filter(Boolean) as LatLng[];
   const region = useMemo(() => (pts.length ? regionFor(pts) : GEORGETOWN_REGION), [ride]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const recenter = () => {
+    const target = driverLoc ?? pickup ?? drop;
+    if (target) mapRef.current?.animateToRegion({ ...target, latitudeDelta: 0.012, longitudeDelta: 0.012 }, 350);
+  };
 
   const status = String(ride.status ?? '').toUpperCase();
   const arrived = status === 'DRIVER_ARRIVED';
@@ -558,12 +600,15 @@ function ActiveRide({ navigation, ride, cancelRide, insets }: any) {
   // driver:location stream (road-routed when OSRM is live) — pickup leg
   // before the ride starts, dropoff leg during it. The straight-line
   // estimate stays as the fallback until the first event lands.
-  const legEta =
+  const legEtaRaw =
     status === 'DRIVER_ASSIGNED' || status === 'DRIVER_EN_ROUTE'
       ? (liveEtaMin ?? (driverLoc && pickup ? streetEtaMin(driverLoc, pickup) : null))
       : status === 'RIDE_IN_PROGRESS'
         ? (liveEtaMin ?? (driverLoc && drop ? streetEtaMin(driverLoc, drop) : null))
         : null;
+  // A stale fix would recompute a fake shrinking ETA off the frozen coordinate —
+  // suppress it so the UI shows "Updating…" rather than a confident lie.
+  const legEta = fixStale ? null : legEtaRaw;
 
   const shareTrip = () => {
     const vehicle = [d?.vehicleColor, d?.vehicleMake, d?.vehicleModel].filter(Boolean).join(' ');
@@ -584,6 +629,7 @@ function ActiveRide({ navigation, ride, cancelRide, insets }: any) {
   return (
     <View style={{ flex: 1, backgroundColor: color.surface.subtle }}>
       <MapView
+        ref={mapRef}
         provider={PROVIDER_DEFAULT}
         style={{ flex: 1 }}
         region={region}
@@ -600,18 +646,47 @@ function ActiveRide({ navigation, ride, cancelRide, insets }: any) {
           </Marker>
         ) : null}
         {driverLoc ? (
-          <Marker coordinate={driverLoc} title="Driver" anchor={{ x: 0.5, y: 0.5 }}>
+          // rotation faces the car to its heading (flat = rotate in the map
+          // plane); a stale fix dims it so a frozen car reads as "not live".
+          <Marker
+            coordinate={driverLoc}
+            title="Driver"
+            anchor={{ x: 0.5, y: 0.5 }}
+            flat
+            rotation={driverHeading ?? 0}
+          >
             <View
               style={[
-                { width: 36, height: 36, borderRadius: 18, alignItems: 'center', justifyContent: 'center', backgroundColor: color.text.primary },
+                { width: 36, height: 36, borderRadius: 18, alignItems: 'center', justifyContent: 'center', backgroundColor: color.text.primary, opacity: fixStale ? 0.4 : 1 },
                 cardShadow,
               ]}
             >
-              <MaterialCommunityIcons name="car" size={18} color="#fff" />
+              <MaterialCommunityIcons name="navigation" size={18} color="#fff" />
             </View>
           </Marker>
         ) : null}
       </MapView>
+
+      {/* Live-feed honesty banner: reconnecting (socket down) or updating (fix
+          aged out). Silence must never look like a live, moving car. */}
+      {(connLost || fixStale) ? (
+        <View style={{ position: 'absolute', top: insets.top + space.md, alignSelf: 'center', flexDirection: 'row', alignItems: 'center', gap: space.xs, backgroundColor: color.text.primary, paddingHorizontal: space.md, paddingVertical: space.xs, borderRadius: radius.full, ...cardShadow }}>
+          <MaterialCommunityIcons name={connLost ? 'wifi-off' : 'crosshairs-question'} size={13} color="#fff" />
+          <T variant="caption" style={{ color: '#fff' }}>{connLost ? 'Reconnecting…' : 'Updating driver location…'}</T>
+        </View>
+      ) : null}
+
+      {/* Recenter on the driver — the map no longer auto-follows, so give the
+          rider a one-tap way back to the car. */}
+      {driverLoc ? (
+        <Pressable
+          onPress={recenter}
+          style={{ position: 'absolute', right: space.lg, bottom: Math.round(winH * 0.36), width: 44, height: 44, borderRadius: 22, alignItems: 'center', justifyContent: 'center', backgroundColor: color.surface.base, ...cardShadow }}
+          hitSlop={8}
+        >
+          <MaterialCommunityIcons name="crosshairs-gps" size={22} color={color.text.primary} />
+        </Pressable>
+      ) : null}
 
       <FloatingBack navigation={navigation} insets={insets} />
 
@@ -640,7 +715,7 @@ function ActiveRide({ navigation, ride, cancelRide, insets }: any) {
           ) : (
             <T variant="title">
               {STATUS_LABEL[ride.status] ?? 'On the way'}
-              {legEta != null ? ` · ~${legEta} min` : ''}
+              {fixStale ? ' · locating…' : legEta != null ? ` · ~${legEta} min` : ''}
             </T>
           )}
           <T variant="label" tone="muted" style={{ marginTop: 4 }}>
