@@ -10,7 +10,7 @@ import { ridesRoutes } from '../modules/rides/rides.routes';
 import { driverRoutes } from '../modules/driver/driver.routes';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { FareService } from '../modules/rides/fare.service';
-import { DispatchService } from '../modules/dispatch/dispatch.service';
+import { DispatchService, recoverStrandedTaxiRides } from '../modules/dispatch/dispatch.service';
 import { OrderService } from '../modules/order/order.service';
 import { HaversineMapsProvider } from '../providers/maps/maps-provider';
 import { pointInPolygon } from '../utils/geo';
@@ -374,6 +374,100 @@ describe('Ride request — fare shown first, dispatch shared, PIN issued', () =>
     await app.prisma.order.update({ where: { id: ride.id }, data: { status: 'RIDE_IN_PROGRESS' } });
     const cancel = await inject('POST', `/api/v1/driver/rides/${ride.id}/cancel`, { reason: 'changed mind' }, driver.token);
     expect(cancel.statusCode).toBe(400);
+  });
+});
+
+describe('Stranded-taxi watchdog — driver goes GPS-dark after accepting', () => {
+  const STALE = new Date(Date.now() - 60 * 60 * 1000); // 60 min ago — past the 15-min window
+
+  it('recovers a PRE-PICKUP ride: re-opens to PENDING, frees the driver, re-dispatches, tells the rider', async () => {
+    await app.prisma.driver.updateMany({ data: { isOnline: false, isAvailable: false } });
+    const customer = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
+    const driver = await makeDriver();
+    const res = await inject('POST', '/api/v1/rides/request', {
+      pickup: CENTRAL, dropoff: SOUTH, pickupAddress: 'Watchdog A', dropoffAddress: 'Watchdog B',
+    }, customer.token);
+    const ride = res.json().data.ride;
+    await inject('POST', `/api/v1/driver/rides/${ride.id}/accept`, {}, driver.token);
+    // Driver is en route, then the phone goes dark: currentRideId still set, GPS silent.
+    await app.prisma.order.update({ where: { id: ride.id }, data: { status: 'DRIVER_EN_ROUTE' } });
+    await app.prisma.driver.update({ where: { id: driver.driverId }, data: { lastLocationUpdate: STALE } });
+
+    const enqueued: string[] = [];
+    const out = await recoverStrandedTaxiRides(app.prisma, app.redis, app.io, async (id) => { enqueued.push(id); });
+
+    // RED before this fix: no sweep touched this ride — it hung in DRIVER_EN_ROUTE
+    // forever with a frozen map and the rider unable to re-book.
+    expect(out.recovered).toContain(ride.id);
+    const order = await app.prisma.order.findUniqueOrThrow({ where: { id: ride.id } });
+    expect(order.status).toBe('PENDING');
+    expect(order.driverId).toBeNull();
+    const d = await app.prisma.driver.findUniqueOrThrow({ where: { id: driver.driverId } });
+    expect(d.currentRideId).toBeNull(); // un-trapped
+    expect(enqueued).toContain(ride.id); // re-dispatch enqueued
+    const note = await app.prisma.notification.findFirst({
+      where: { userId: customer.userId, data: { path: ['orderId'], equals: ride.id } },
+      orderBy: { createdAt: 'desc' },
+    });
+    expect(note?.title).toContain('another driver');
+
+    await app.prisma.driver.update({ where: { id: driver.driverId }, data: { lastLocationUpdate: null } });
+  });
+
+  it('NEVER auto-cancels an IN-PROGRESS ride: passenger aboard → ride kept, ops paged, rider warned', async () => {
+    await app.prisma.driver.updateMany({ data: { isOnline: false, isAvailable: false } });
+    const customer = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
+    const driver = await makeDriver();
+    const res = await inject('POST', '/api/v1/rides/request', {
+      pickup: CENTRAL, dropoff: SOUTH, pickupAddress: 'Aboard A', dropoffAddress: 'Aboard B',
+    }, customer.token);
+    const ride = res.json().data.ride;
+    await inject('POST', `/api/v1/driver/rides/${ride.id}/accept`, {}, driver.token);
+    // Passenger is physically in the car when the driver's signal drops.
+    await app.prisma.order.update({ where: { id: ride.id }, data: { status: 'RIDE_IN_PROGRESS' } });
+    await app.prisma.driver.update({ where: { id: driver.driverId }, data: { lastLocationUpdate: STALE } });
+    await app.redis.del(`ops_page:taxi_driver_dropped:${ride.id}`);
+
+    const enqueued: string[] = [];
+    const out = await recoverStrandedTaxiRides(app.prisma, app.redis, app.io, async (id) => { enqueued.push(id); });
+
+    expect(out.flagged).toContain(ride.id);
+    expect(out.recovered).not.toContain(ride.id);
+    // The ride is UNTOUCHED — you never strand a passenger by auto-cancelling.
+    const order = await app.prisma.order.findUniqueOrThrow({ where: { id: ride.id } });
+    expect(order.status).toBe('RIDE_IN_PROGRESS');
+    const d = await app.prisma.driver.findUniqueOrThrow({ where: { id: driver.driverId } });
+    expect(d.currentRideId).toBe(ride.id); // never silently cleared
+    expect(enqueued).not.toContain(ride.id); // no re-dispatch
+    // Ops paged (dedup key claimed) + customer warned honestly.
+    expect(await app.redis.get(`ops_page:taxi_driver_dropped:${ride.id}`)).toBe('1');
+    const note = await app.prisma.notification.findFirst({
+      where: { userId: customer.userId, title: 'Your driver lost signal' },
+    });
+    expect(note).not.toBeNull();
+
+    await app.prisma.driver.update({ where: { id: driver.driverId }, data: { lastLocationUpdate: null, currentRideId: null } });
+  });
+
+  it('leaves a driver with a FRESH fix alone (only GPS-dark rides are swept)', async () => {
+    await app.prisma.driver.updateMany({ data: { isOnline: false, isAvailable: false } });
+    const customer = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
+    const driver = await makeDriver();
+    const res = await inject('POST', '/api/v1/rides/request', {
+      pickup: CENTRAL, dropoff: SOUTH, pickupAddress: 'Fresh A', dropoffAddress: 'Fresh B',
+    }, customer.token);
+    const ride = res.json().data.ride;
+    await inject('POST', `/api/v1/driver/rides/${ride.id}/accept`, {}, driver.token);
+    await app.prisma.order.update({ where: { id: ride.id }, data: { status: 'DRIVER_EN_ROUTE' } });
+    await app.prisma.driver.update({ where: { id: driver.driverId }, data: { lastLocationUpdate: new Date() } }); // fresh
+
+    const out = await recoverStrandedTaxiRides(app.prisma, app.redis, app.io, async () => {});
+    expect(out.recovered).not.toContain(ride.id);
+    expect(out.flagged).not.toContain(ride.id);
+    const order = await app.prisma.order.findUniqueOrThrow({ where: { id: ride.id } });
+    expect(order.status).toBe('DRIVER_EN_ROUTE'); // untouched
+
+    await app.prisma.driver.update({ where: { id: driver.driverId }, data: { lastLocationUpdate: null, currentRideId: null } });
   });
 });
 

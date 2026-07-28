@@ -445,7 +445,7 @@ export function createWorkers(ctx: JobContext) {
   const dispatchWorker = new Worker(
     QUEUE_NAMES.DISPATCH,
     async (job: Job) => {
-      const { DispatchService, sweepStaleMovers, reconcileStuckDispatch } = await import('../modules/dispatch/dispatch.service');
+      const { DispatchService, sweepStaleMovers, reconcileStuckDispatch, recoverStrandedTaxiRides } = await import('../modules/dispatch/dispatch.service');
       const { getMapsProvider } = await import('../providers/maps/maps-provider');
 
       if (job.name === 'scheduler-heartbeat') {
@@ -480,6 +480,21 @@ export function createWorkers(ctx: JobContext) {
         const swept = await sweepStaleMovers(ctx.prisma, undefined, ctx.redis);
         if (swept.riders + swept.drivers > 0) {
           ctx.log.warn(swept, 'Stale-GPS movers forced offline');
+        }
+        // A stale-GPS driver may still be HOLDING a ride — the sweep only flips
+        // isOnline, it never resolves the ride. Recover it so the customer isn't
+        // stranded on a frozen map: release-and-re-dispatch before pickup, or
+        // page ops + notify if the passenger is already aboard.
+        const watchQueue = new Queue(QUEUE_NAMES.DISPATCH, { connection });
+        try {
+          const { recovered, flagged } = await recoverStrandedTaxiRides(ctx.prisma, ctx.redis, ctx.io, async (orderId) => {
+            await watchQueue.add('dispatch-order', { orderId }, { removeOnComplete: 100, removeOnFail: 50 });
+          });
+          if (recovered.length + flagged.length > 0) {
+            ctx.log.error({ recovered, flagged }, 'Stranded-taxi watchdog: released pre-pickup rides / flagged in-progress driver drops');
+          }
+        } finally {
+          await watchQueue.close();
         }
         return;
       }

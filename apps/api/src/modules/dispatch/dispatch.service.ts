@@ -1,4 +1,4 @@
-import type { PrismaClient, RideClass } from '@prisma/client';
+import type { PrismaClient, RideClass, OrderStatus } from '@prisma/client';
 import { Prisma } from '@prisma/client';
 import type { Server } from 'socket.io';
 import type Redis from 'ioredis';
@@ -874,4 +874,111 @@ export async function sweepStaleMovers(prisma: PrismaClient, staleMinutes = STAL
     for (const id of staleRiderIds) await closeOnlineSession(redis, id);
   }
   return { riders: riders.count, drivers: drivers.count };
+}
+
+/** Watchdog for a taxi whose driver went dark (GPS silent past the stale window)
+ *  AFTER accepting. Such a ride is invisible to every other sweep:
+ *  reconcileStuckDispatch only re-drives driverId-null PENDING taxis, and
+ *  sweepStaleMovers forces isOnline=false but never clears currentRideId or
+ *  touches the ride. So the ride hangs — the customer's map freezes on the last
+ *  fix, the ride never completes, and the customer can't even book again (the
+ *  /request active-guard 409s on these statuses). We resolve each stranded ride
+ *  by its stage:
+ *    • passenger NOT yet aboard (DRIVER_ASSIGNED / _EN_ROUTE / _ARRIVED): CAS the
+ *      ride back to PENDING, free the driver, tell the customer, and re-dispatch
+ *      — the same controlled release a driver-cancel does, triggered by the drop.
+ *    • passenger ABOARD (RIDE_IN_PROGRESS): NEVER auto-cancel (they are physically
+ *      in the car). Page ops once and tell the customer their driver lost signal,
+ *      so a frozen map is not the only cue. currentRideId stays set.
+ *  currentRideId is the signal, not isOnline (the sweep may already have flipped
+ *  it). Idempotent: a re-run finds the ride already PENDING / already paged. */
+export async function recoverStrandedTaxiRides(
+  prisma: PrismaClient,
+  redis: Redis,
+  io: Server,
+  enqueue: (orderId: string) => Promise<void>,
+  staleMinutes = STALE_LOCATION_MINUTES,
+): Promise<{ recovered: string[]; flagged: string[] }> {
+  const cutoff = new Date(Date.now() - staleMinutes * 60_000);
+  const stale = await prisma.driver.findMany({
+    where: { currentRideId: { not: null }, lastLocationUpdate: { lt: cutoff } },
+    select: { id: true, currentRideId: true },
+  });
+  if (stale.length === 0) return { recovered: [], flagged: [] };
+
+  const notifications = new NotificationService(prisma, io);
+  const NOT_ABOARD: OrderStatus[] = ['DRIVER_ASSIGNED', 'DRIVER_EN_ROUTE', 'DRIVER_ARRIVED'];
+  const recovered: string[] = [];
+  const flagged: string[] = [];
+
+  for (const d of stale) {
+    const orderId = d.currentRideId!;
+    const order = await prisma.order.findUnique({
+      where: { id: orderId },
+      select: { id: true, status: true, orderType: true, customerId: true, orderNumber: true },
+    });
+
+    // The ride resolved out from under us (completed / cancelled / not a live
+    // taxi ride) — release the dangling pointer so the driver isn't trapped by a
+    // stale currentRideId, and move on.
+    const live = order && order.orderType === 'TAXI' &&
+      (NOT_ABOARD.includes(order.status) || order.status === 'RIDE_IN_PROGRESS');
+    if (!live) {
+      await prisma.driver.updateMany({ where: { id: d.id, currentRideId: orderId }, data: { currentRideId: null } });
+      continue;
+    }
+
+    if (order!.status === 'RIDE_IN_PROGRESS') {
+      // Passenger aboard: do NOT auto-cancel. Page ops once + tell the customer.
+      const { opsPageOnce } = await import('../../jobs/queue');
+      await opsPageOnce({ redis }, `taxi_driver_dropped:${orderId}`, 1800, () =>
+        notifyAdmins(prisma, notifications, {
+          title: 'Taxi driver lost signal mid-trip',
+          body: `Order ${order!.orderNumber}: the driver's GPS went dark with a passenger aboard. Contact both parties — do NOT auto-cancel.`,
+          data: { kind: 'ops_taxi_driver_dropped', orderId },
+        }),
+      ).catch(() => {});
+      await notifications.send({
+        userId: order!.customerId,
+        type: 'ORDER_UPDATE',
+        title: 'Your driver lost signal',
+        body: 'We’ve lost your driver’s live location. Stay where you are — we’re reaching out to them. If you’re not moving, contact support.',
+        data: { orderId, status: order!.status },
+      }).catch(() => {});
+      flagged.push(orderId);
+      continue;
+    }
+
+    // Passenger not aboard: controlled release + re-dispatch (mirrors the
+    // driver-cancel path). CAS so a concurrent transition can't be overwritten.
+    const released = await prisma.$transaction(async (tx) => {
+      const cas = await tx.order.updateMany({
+        where: { id: orderId, driverId: d.id, status: { in: NOT_ABOARD } },
+        data: { status: 'PENDING', driverId: null, acceptedAt: null },
+      });
+      if (cas.count === 0) return false;
+      await tx.driver.updateMany({
+        where: { id: d.id, currentRideId: orderId },
+        data: { isAvailable: false, currentRideId: null }, // gone dark → not free supply
+      });
+      await tx.orderStatusLog.create({
+        data: { orderId, status: 'PENDING', changedBy: 'system:ride-watchdog', note: 'Driver went GPS-dark before pickup — auto-released and re-dispatched' },
+      });
+      return true;
+    });
+    if (!released) continue; // a concurrent transition (customer cancel, etc.) won
+
+    io.to(`order:${orderId}`).emit('order:status_changed', { orderId, status: 'PENDING', reason: 'driver_dropped' });
+    await notifications.send({
+      userId: order!.customerId,
+      type: 'ORDER_UPDATE',
+      title: 'Finding you another driver',
+      body: 'Your driver dropped off the map before pickup — we’re matching you with the nearest available driver now.',
+      data: { orderId, status: 'PENDING' },
+    }).catch(() => {});
+    await enqueue(orderId).catch(() => {});
+    recovered.push(orderId);
+  }
+
+  return { recovered, flagged };
 }
