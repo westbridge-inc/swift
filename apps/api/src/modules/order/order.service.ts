@@ -802,7 +802,10 @@ export class OrderService {
   async cancelOrder(orderId: string, userId: string, reason?: string) {
     const order = await this.prisma.order.findFirst({
       where: { id: orderId, customerId: userId },
-      include: { vendor: { select: { name: true, ownerId: true } } },
+      include: {
+        vendor: { select: { name: true, ownerId: true } },
+        driver: { select: { userId: true } },
+      },
     });
 
     if (!order) throw new AppError(404, 'NOT_FOUND', 'Order not found');
@@ -881,6 +884,19 @@ export class OrderService {
         where: { id: order.driverId, currentRideId: orderId },
         data: { isAvailable: true, currentRideId: null },
       });
+      // The socket room only reaches a foregrounded app that subscribed to this
+      // ride. A driver already en route with the app backgrounded would keep
+      // driving to a pickup the rider abandoned — push them to stop. Best-effort:
+      // NotificationService.send never throws, but a null userId shouldn't try.
+      if (order.driver?.userId) {
+        await this.notifications.send({
+          userId: order.driver.userId,
+          type: 'ORDER_UPDATE',
+          title: 'Ride cancelled',
+          body: 'The passenger cancelled this ride. You can stop and go back online.',
+          data: { orderId, status: 'CANCELLED' },
+        });
+      }
     }
 
     this.io.to(`order:${orderId}`).emit('order:status_changed', { orderId, status: 'CANCELLED' });
