@@ -1,6 +1,7 @@
 import type { PrismaClient } from '@prisma/client';
 import type { Server } from 'socket.io';
 import { NotificationService } from '../notification/notification.service';
+import { FloatService } from '../dispatch/float.service';
 import { AppError, NotFoundError } from '../../utils/errors';
 
 // ---------------------------------------------------------------------------
@@ -246,7 +247,7 @@ export class PickingService {
     // decrement per field instead of blocking it.
     const ord = await this.prisma.order.findUnique({
       where: { id: line.order.id },
-      select: { subtotalBase: true, subtotalCustomer: true, totalAmount: true },
+      select: { subtotalBase: true, subtotalCustomer: true, totalAmount: true, paymentMethod: true, riderId: true },
     });
     const decBase = Math.min(lineTotal, Number(ord?.subtotalBase ?? 0));
     const decCustomer = Math.min(lineTotal, Number(ord?.subtotalCustomer ?? 0));
@@ -265,6 +266,14 @@ export class PickingService {
         data: { orderId: line.order.id, status: line.order.status as any, changedBy, note: `Line ${subStatus.toLowerCase()}: ${line.name}` },
       }),
     ]);
+    // Keep a CASH rider's committed float in sync with the subtotal it fronts.
+    // Float is committed against the ORIGINAL subtotalBase at claim; this refund
+    // shrinks subtotalBase by decBase, and the terminal release later unwinds
+    // only the REDUCED subtotal — so without releasing the delta now, committedFloat
+    // stays perma-leaked and the rider loses that float headroom forever.
+    if (ord?.paymentMethod === 'CASH' && ord.riderId && decBase > 0) {
+      await new FloatService(this.prisma).release(this.prisma, ord.riderId, decBase);
+    }
     await this.restockLine(line, subStatus.toLowerCase());
     this.emitPickState(line.order.vendorId, line.order.id, line.id, { subStatus });
     this.io.to(`order:${line.order.id}`).emit('order:substitution', { orderId: line.order.id, lineId: line.id, status: subStatus });

@@ -48,7 +48,9 @@ beforeAll(async () => {
   vendorId = vendor.id;
 
   const cust = await app.prisma.user.create({
-    data: { phone: `+59200907${String(Math.floor(Math.random() * 90) + 10)}`, firstName: 'Gate', lastName: 'Cust', roles: ['CUSTOMER'] as UserRole[], activeRole: 'CUSTOMER', isPhoneVerified: true, customer: { create: {} } },
+    // Distinct prefix from the owner (+59200907xx) — both randoming the same 10-99
+    // range collided ~1/90 of runs (a flake #483 got lucky on).
+    data: { phone: `+59200908${String(Math.floor(Math.random() * 90) + 10)}`, firstName: 'Gate', lastName: 'Cust', roles: ['CUSTOMER'] as UserRole[], activeRole: 'CUSTOMER', isPhoneVerified: true, customer: { create: {} } },
   });
   userIds.push(cust.id);
   customerId = cust.id;
