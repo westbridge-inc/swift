@@ -559,6 +559,11 @@ export async function driverRoutes(app: FastifyInstance) {
         where: { id: driver.id, currentRideId: id },
         data: { isAvailable: true, currentRideId: null },
       });
+      // Accountability: a cancel-AFTER-accept is far more harmful to the rider
+      // than an ignored offer, so it feeds a dedicated cancellationRate (was a
+      // dead 0.0 field). EMA toward 100 (rate*0.8 + 20), capped; it decays back
+      // on each completed ride. Raw SQL so the EMA is one atomic write.
+      await tx.$executeRaw`UPDATE "drivers" SET "cancellationRate" = LEAST(100, "cancellationRate" * 0.8 + 20) WHERE "id" = ${driver.id}`;
       await tx.orderStatusLog.create({
         data: { orderId: id, status: 'PENDING', changedBy: request.user.userId, note: `Driver cancelled: ${reason}` },
       });
@@ -771,9 +776,12 @@ export async function driverRoutes(app: FastifyInstance) {
     });
     if (claimed.count === 0) throw new AppError(409, 'INVALID_STATUS', `Cannot complete ride from status ${order.status}`);
     // Only the winner frees the driver + counts the ride (guarded on this ride).
+    // A completed ride decays the cancellationRate EMA toward 0 (multiply 0.8,
+    // the event=0 case), so a driver who cancelled once recovers by finishing
+    // trips instead of being penalised forever.
     await app.prisma.driver.updateMany({
       where: { id: driver.id, currentRideId: id },
-      data: { isAvailable: true, currentRideId: null, totalRides: { increment: 1 } },
+      data: { isAvailable: true, currentRideId: null, totalRides: { increment: 1 }, cancellationRate: { multiply: 0.8 } },
     });
     await app.prisma.orderStatusLog.create({ data: { orderId: id, status: 'DELIVERED', changedBy: request.user.userId, note: 'Ride completed' } });
     const updatedOrder = await app.prisma.order.findUniqueOrThrow({ where: { id }, include: { customer: { select: { id: true, firstName: true } } } });
