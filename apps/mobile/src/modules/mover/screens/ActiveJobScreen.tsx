@@ -9,7 +9,7 @@ import { color, radius, space } from '@swift/ui';
 import { Feather, MaterialCommunityIcons } from '@expo/vector-icons';
 import { EmptyState, LabeledInput, PillButton, PopupCard, Screen, T, cardShadow } from '../../../kit';
 import { Stars } from '../../../kit/controls';
-import { useMoverKind, useActiveJob, useDriverAction, useRiderAction, useRateCustomer, useCourierProof } from '../../../hooks';
+import { useMoverKind, useActiveJob, useDriverAction, useRiderAction, useRateCustomer, useCourierProof, useRideSos } from '../../../hooks';
 import { toast } from '../../../components/ui/toast';
 import { useLocationStore } from '../../../stores/locationStore';
 import { haversineKm, streetEtaMin } from '../../../lib/geo';
@@ -106,6 +106,10 @@ export function ActiveJobScreen({ navigation }: any) {
   const [pin, setPin] = useState('');
   const [ratePopup, setRatePopup] = useState<{ orderId: string; name: string; mmg: boolean } | null>(null);
   const [stars, setStars] = useState(5);
+  // Driver-raised SOS on an active taxi ride — the backend authorizes the driver
+  // participant on /rides/:id/sos (same route the passenger's SOS uses).
+  const sos = useRideSos();
+  const [sosConfirm, setSosConfirm] = useState(false);
   const job: any = active.data;
 
   if (!job && !ratePopup) {
@@ -339,6 +343,19 @@ export function ActiveJobScreen({ navigation }: any) {
               </DCard>
             ) : null}
 
+            {/* SOS — a driver alone with a stranger on a cash trip needs an
+                emergency path too, not just the passenger. Taxi rides only (the
+                /rides/:id/sos route authorizes the driver participant). */}
+            {isDriver ? (
+              <PillButton
+                label="Emergency — get help now"
+                variant="outline"
+                icon="alert-triangle"
+                style={{ marginBottom: space.md, borderColor: color.error }}
+                onPress={() => setSosConfirm(true)}
+              />
+            ) : null}
+
             {/* Navigate */}
             {navTarget ? (
               <PillButton label={`Navigate to ${targetLabel}`} variant="outline" style={{ marginBottom: space.md }} onPress={openNav} />
@@ -403,6 +420,33 @@ export function ActiveJobScreen({ navigation }: any) {
           </BottomSheetScrollView>
         </BottomSheet>
       ) : null}
+
+      {/* SOS confirm — deliberate two-step, then records the incident + pages
+          ops AND dials local emergency (the same flow the passenger has). */}
+      <PopupCard visible={sosConfirm} onClose={() => setSosConfirm(false)}>
+        <View style={{ width: 72, height: 72, borderRadius: 36, alignItems: 'center', justifyContent: 'center', backgroundColor: color.error }}>
+          <Feather name="alert-triangle" size={32} color={color.white} />
+        </View>
+        <T variant="title" center style={{ marginTop: space.lg }}>
+          Get emergency help?
+        </T>
+        <T variant="body" tone="muted" center style={{ marginTop: space.sm }}>
+          This alerts Swift safety with your live location, then dials local emergency services. Use only in a real emergency.
+        </T>
+        <PillButton
+          label="Yes — get help now"
+          style={{ alignSelf: 'stretch', marginTop: space['2xl'] }}
+          disabled={sos.isPending}
+          onPress={() => {
+            setSosConfirm(false);
+            const coords = latitude != null && longitude != null ? { lat: latitude, lng: longitude } : undefined;
+            if (job?.id) sos.mutate({ id: job.id, coords });
+            // Guyana launch emergency number; move to CountryConfig for other markets.
+            Linking.openURL('tel:911').catch(() => {});
+          }}
+        />
+        <PillButton label="Close" variant="soft" style={{ alignSelf: 'stretch', marginTop: space.md }} onPress={() => setSosConfirm(false)} />
+      </PopupCard>
 
       {/* Post-trip passenger rating — DRIVER_TO_CUSTOMER, once per ride */}
       <PopupCard visible={!!ratePopup} onClose={closeRating}>
