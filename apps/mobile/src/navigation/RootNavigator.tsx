@@ -5,6 +5,7 @@ import { createNativeStackNavigator } from '@react-navigation/native-stack';
 import { useAuthStore } from '../stores/authStore';
 import { useAppStore } from '../stores/appStore';
 import { useMoverPreview } from '../stores/moverPreview';
+import { useVendorPreview } from '../stores/vendorPreview';
 import { useCustomerCountry } from '../hooks/useCustomerCountry';
 import { registerDeviceForPush } from '../services/push';
 import { OnboardingScreen } from '../modules/onboarding/OnboardingScreen';
@@ -51,11 +52,15 @@ export function RootNavigator() {
   // browse freely and only authenticate when an action (checkout) asks via
   // promptLogin() → wantsAuth.
   const earner = intent === 'mover' || intent === 'vendor';
-  // Earner PREVIEW (R3): a prospective driver taps "Preview the driver app" on
-  // the role picker → intent='mover' + preview on. Preview must reach the REAL
-  // MoverStack WITHOUT a country, sign-in, or selfie — it's read-only sample data.
+  // PREVIEW (earner R3 / vendor R4): a prospective driver ("Preview the driver
+  // app") or business ("Preview a business") reaches the REAL stack WITHOUT a
+  // country, sign-in, or selfie — read-only sample data. The vendor SAMPLE
+  // preview is `previewType != null` (a set type), NOT the legacy pending-vendor
+  // peek (previewType null), which stays signed-in.
   const moverPreview = useMoverPreview((s) => s.preview);
-  const needsAuth = earner ? (!isAuthenticated && !moverPreview) : wantsAuth && !isAuthenticated;
+  const vendorSamplePreview = useVendorPreview((s) => s.previewType) != null;
+  const anyPreview = moverPreview || vendorSamplePreview;
+  const needsAuth = earner ? (!isAuthenticated && !anyPreview) : wantsAuth && !isAuthenticated;
   // Mandatory signup selfie (master plan §3): every signed-in account must
   // carry a camera-captured profile photo before using the app. Guests browse
   // untouched; the API enforces the same rule on orders/rides/go-online.
@@ -73,7 +78,7 @@ export function RootNavigator() {
           // customer then just picks a country and browses (sign-in waits for
           // checkout); a mover/vendor picks a country then does full sign-up.
           <Stack.Screen name="RolePicker" component={RolePickerScreen} />
-        ) : earner && !countryCode && !moverPreview ? (
+        ) : earner && !countryCode && !anyPreview ? (
           // Only earners pick a country here (it drives their signup + pricing);
           // customers are seeded/resolved by useCustomerCountry and go straight
           // to browsing.

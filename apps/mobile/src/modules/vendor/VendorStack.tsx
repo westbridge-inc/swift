@@ -473,9 +473,13 @@ function VendorOps({ store, navigation }: any) {
   const ordersQ = useVendorOrders(true);
   const analyticsQ = useVendorAnalytics();
   const { stores, myRole } = useVendorProfile();
-  // §B preview: the board renders for a not-yet-ACTIVE store only via preview.
-  const inPreview = store.status !== 'ACTIVE';
+  // §B preview: the board renders for a not-yet-ACTIVE store (pending vendor) OR
+  // for a prospective vendor walking a read-only SAMPLE dashboard (previewType).
+  const previewType = useVendorPreview((s) => s.previewType);
+  const inPreview = store.status !== 'ACTIVE' || !!previewType;
   const exitPreview = useVendorPreview((s) => s.exitPreview);
+  const setPreviewType = useVendorPreview((s) => s.setPreviewType);
+  const setPreviewIntent = useAuthStore((s) => s.setIntent);
   // Only fetched to NAME the failing document in the suspension banner.
   const vstatus = useVerificationStatus<any>(store.vendorType);
   // §B5 progress: N of M checklist documents currently approved (unexpired).
@@ -541,7 +545,27 @@ function VendorOps({ store, navigation }: any) {
         {/* Gated-trials spec §B: a pending store browses in PREVIEW — encouraging
             copy with live progress (§B5), not the suspension scare. Tap returns
             to the checklist. */}
-        {inPreview ? (
+        {previewType ? (
+          // Unauthenticated SAMPLE preview (R4): labelled read-only, with a
+          // one-tap switch between the four business types so a prospective owner
+          // sees how the dashboard reshapes to theirs.
+          <View style={{ borderRadius: radius.lg, backgroundColor: color.brand[50], padding: space.md, marginBottom: space.lg, gap: space.sm }}>
+            <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
+              <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.xs, flex: 1 }}>
+                <Feather name="eye" size={15} color={color.brand[500]} />
+                <T variant="label" tone="brand" weight="bold">Preview · sample data, read-only</T>
+              </View>
+              <Pressable onPress={() => { exitPreview(); setPreviewIntent(null); }} hitSlop={8}>
+                <T variant="label" tone="brand" weight="bold">Exit</T>
+              </Pressable>
+            </View>
+            <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ gap: space.xs }}>
+              {TYPES.map((t) => (
+                <Chip key={t.key} label={t.label} selected={previewType === t.key} onPress={() => setPreviewType(t.key)} style={{ height: 34, paddingHorizontal: space.md }} />
+              ))}
+            </ScrollView>
+          </View>
+        ) : inPreview ? (
           <Pressable onPress={exitPreview}>
             {({ pressed }) => (
               <View style={{ flexDirection: 'row', alignItems: 'flex-start', gap: space.sm, borderRadius: radius.lg, backgroundColor: color.brand[50], padding: space.md, marginBottom: space.lg, opacity: pressed ? 0.85 : 1 }}>
@@ -745,12 +769,14 @@ function VendorRoot() {
   const { store, stores, isLoading } = useVendorProfile();
   const selectedStoreId = useStoreSwitcher((s) => s.selectedStoreId);
   const setSelectedStore = useStoreSwitcher((s) => s.setSelectedStore);
-  const { preview, enterPreview, exitPreview } = useVendorPreview();
+  const { preview, previewType, enterPreview, exitPreview } = useVendorPreview();
   // Preview is a per-store choice: switching stores lands on that store's
   // real state (checklist for pending, board for live) — never a stale peek.
+  // BUT the unauthenticated sample preview (previewType set) has one synthetic
+  // store; don't tear it down on its own mount.
   useEffect(() => {
-    exitPreview();
-  }, [store?.id, exitPreview]);
+    if (!previewType) exitPreview();
+  }, [store?.id, exitPreview, previewType]);
   // Live order feed for the selected store, on every tab — new orders land
   // instantly (socket) with the 12s poll as fallback.
   const { takeover, dismissTakeover } = useVendorOrdersLive(store && store.status === 'ACTIVE' ? store.id : undefined);

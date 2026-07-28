@@ -1,9 +1,11 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Vibration } from 'react-native';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { vendorApi } from '../services/api';
 import { connectSocket, getSocket } from '../services/socket';
 import { useStoreSwitcher } from '../stores/storeSwitcher';
+import { useVendorPreview } from '../stores/vendorPreview';
+import { vendorPreviewDataset, previewQuery, previewMutation, type VendorPreviewDataset } from '../lib/vendorPreviewData';
 
 async function unwrap<T = any>(p: Promise<any>): Promise<T> {
   const r = await p;
@@ -17,16 +19,30 @@ async function tryUnwrap<T = any>(p: Promise<any>): Promise<T | null> {
   }
 }
 
+// Vendor PREVIEW (R4): when a prospective vendor is walking a SAMPLE dashboard of
+// a chosen business type, the data hooks return that type's canned dataset (with
+// their real, auth-less query disabled) and every mutation no-ops — strictly
+// read-only. `pv` is null for a normal session AND for the legacy pending-vendor
+// peek (previewType null), so both keep their real behaviour. usePreviewDataset()
+// is called unconditionally in each hook so hook order stays stable.
+function usePreviewDataset(): VendorPreviewDataset | null {
+  const previewType = useVendorPreview((s) => s.previewType);
+  return useMemo(() => (previewType ? vendorPreviewDataset(previewType) : null), [previewType]);
+}
+
 /** The stores this account works in; `store` is the selected one and
  *  `myRole` is OWNER / MANAGER / STAFF (drives which tools the UI shows). */
 export function useVendorProfile() {
+  const pv = usePreviewDataset();
   const q = useQuery({
     queryKey: ['vendor', 'profile'],
     queryFn: () => tryUnwrap(vendorApi.profile()),
     retry: false,
     refetchInterval: 20000,
+    enabled: !pv,
   });
   const selectedStoreId = useStoreSwitcher((s) => s.selectedStoreId);
+  if (pv) return { owner: pv.owner, store: pv.store, stores: pv.stores, myRole: 'OWNER' as const, isLoading: false };
   const owner: any = q.data ?? null;
   const stores: any[] = owner?.vendors ?? [];
   const store: any = stores.find((v) => v.id === selectedStoreId) ?? stores[0] ?? null;
@@ -37,7 +53,8 @@ export function useVendorProfile() {
 // ─── Reviews (manager+ replies) ──────────────────────────────────────────────
 
 export function useMyStoreReviews() {
-  return useQuery({
+  const pv = usePreviewDataset();
+  const q = useQuery({
     queryKey: ['vendor', 'reviews'],
     queryFn: async () => {
       const r = await vendorApi.reviews();
@@ -46,7 +63,9 @@ export function useMyStoreReviews() {
         summary: { averageRating: number; totalReviews: number; distribution: Record<string, number> };
       };
     },
+    enabled: !pv,
   });
+  return pv ? previewQuery({ data: [], summary: { averageRating: 4.8, totalReviews: 0, distribution: {} } }) : q;
 }
 
 export function useRespondReview() {
@@ -60,7 +79,9 @@ export function useRespondReview() {
 // ─── Promotions (manager+) ───────────────────────────────────────────────────
 
 export function useVendorPromos(enabled = true) {
-  return useQuery({ queryKey: ['vendor', 'promos'], queryFn: () => unwrap<any[]>(vendorApi.promos()), enabled });
+  const pv = usePreviewDataset();
+  const q = useQuery({ queryKey: ['vendor', 'promos'], queryFn: () => unwrap<any[]>(vendorApi.promos()), enabled: enabled && !pv });
+  return pv ? previewQuery([] as any[]) : q;
 }
 
 export function useCreatePromo() {
@@ -91,11 +112,13 @@ export function useDeletePromo() {
 // ─── Staff & roles (owner-only) ──────────────────────────────────────────────
 
 export function useVendorStaff(enabled = true) {
-  return useQuery({
+  const pv = usePreviewDataset();
+  const q = useQuery({
     queryKey: ['vendor', 'staff'],
     queryFn: () => unwrap<any[]>(vendorApi.staff()),
-    enabled,
+    enabled: enabled && !pv,
   });
+  return pv ? previewQuery([] as any[]) : q;
 }
 
 export function useAddStaff() {
@@ -123,12 +146,14 @@ export function useUpdateStaffRole() {
 }
 
 export function useVendorOrders(enabled: boolean) {
-  return useQuery({
+  const pv = usePreviewDataset();
+  const q = useQuery({
     queryKey: ['vendor', 'orders'],
     queryFn: () => unwrap(vendorApi.orders()),
-    enabled,
-    refetchInterval: enabled ? 12000 : false,
+    enabled: enabled && !pv,
+    refetchInterval: enabled && !pv ? 12000 : false,
   });
+  return pv ? previewQuery(pv.orders) : q;
 }
 
 /** Live board: join the store's socket room and refresh the order queries the
@@ -138,11 +163,12 @@ export function useVendorOrders(enabled: boolean) {
  *  counter appliance, not a screen someone stares at. */
 export function useVendorOrdersLive(vendorId: string | undefined) {
   const qc = useQueryClient();
+  const previewType = useVendorPreview((s) => s.previewType);
   // NEW-ORDER takeover queue (alerts spec §A1): every order:new lands here;
   // the takeover component works it FIFO and dismisses per order.
   const [takeover, setTakeover] = useState<Array<{ orderId: string; orderNumber?: string }>>([]);
   useEffect(() => {
-    if (!vendorId) return;
+    if (!vendorId || previewType) return; // preview: no socket, no live buzz
     connectSocket();
     const s = getSocket();
     const join = () => s.emit('vendor:subscribe', { vendorId });
@@ -169,7 +195,7 @@ export function useVendorOrdersLive(vendorId: string | undefined) {
       s.off('order:status_changed', refresh);
       s.off('order:prep_update', refresh);
     };
-  }, [vendorId, qc]);
+  }, [vendorId, qc, previewType]);
 
   const dismissTakeover = useCallback(
     (orderId: string) => setTakeover((q) => q.filter((x) => x.orderId !== orderId)),
@@ -181,31 +207,38 @@ export function useVendorOrdersLive(vendorId: string | undefined) {
 /** Full order drill-down (line items, status log, customer/rider contacts).
  *  Keyed under ['vendor','orders'] so order-action mutations refresh it too. */
 export function useVendorOrder(id: string | undefined) {
-  return useQuery({
+  const pv = usePreviewDataset();
+  const q = useQuery({
     queryKey: ['vendor', 'orders', 'detail', id],
     queryFn: () => unwrap<any>(vendorApi.order(id!)),
-    enabled: !!id,
+    enabled: !!id && !pv,
     refetchInterval: 15000,
   });
+  return pv ? previewQuery(pv.orders.find((o) => o.id === id) ?? pv.orders[0]) : q;
 }
 
 export type OrderHistoryFilters = { status?: string; search?: string; page: number };
 
 /** Paginated, filterable order history (the endpoint's status/search/page params). */
 export function useVendorOrderHistory(filters: OrderHistoryFilters) {
-  return useQuery({
+  const pv = usePreviewDataset();
+  const q = useQuery({
     queryKey: ['vendor', 'orders', 'history', filters],
     queryFn: async () => {
       const r = await vendorApi.orders({ ...filters, limit: 20 });
       return r?.data as { data: any[]; meta: { page: number; limit: number; total: number; hasNext: boolean } };
     },
+    enabled: !pv,
     placeholderData: (prev) => prev,
   });
+  return pv ? previewQuery({ data: pv.orders, meta: { page: 1, limit: 20, total: pv.orders.length, hasNext: false } }) : q;
 }
 
 export function useVendorSubscription(enabled = true) {
   // Billing is owner-only (staff & roles §4.1) — staff sessions skip the call.
-  return useQuery({ queryKey: ['vendor', 'subscription'], queryFn: () => unwrap(vendorApi.subscription()), enabled });
+  const pv = usePreviewDataset();
+  const q = useQuery({ queryKey: ['vendor', 'subscription'], queryFn: () => unwrap(vendorApi.subscription()), enabled: enabled && !pv });
+  return pv ? previewQuery(pv.subscription) : q;
 }
 
 /** "Find a mover again" after dispatch exhausted — clears the cascade's
@@ -237,8 +270,9 @@ export function useSetSelfDelivery() {
 }
 
 export function useOrderAction() {
+  const pv = usePreviewDataset();
   const qc = useQueryClient();
-  return useMutation({
+  const m = useMutation({
     mutationFn: ({
       id,
       action,
@@ -258,16 +292,19 @@ export function useOrderAction() {
     },
     onSuccess: () => qc.invalidateQueries({ queryKey: ['vendor', 'orders'] }),
   });
+  return pv ? previewMutation() : m;
 }
 
 /** MMG cash ledger — delivery fees this store owes riders in cash (the
  *  customer's MMG payment, fee included, landed in the store's wallet). */
 export function useVendorCashSettlements(enabled = true) {
-  return useQuery({
+  const pv = usePreviewDataset();
+  const q = useQuery({
     queryKey: ['vendor', 'cash-settlements'],
     queryFn: () => unwrap<any>(vendorApi.cashSettlements()),
-    enabled,
+    enabled: enabled && !pv,
   });
+  return pv ? previewQuery([] as any[]) : q;
 }
 /** "We handed the rider their fee" — the store's half of the dual confirm. */
 export function useConfirmVendorCashSettlement() {
@@ -307,7 +344,9 @@ export function usePickingActions() {
 
 /** Categories with their nested items (the menu, grouped by section). */
 export function useVendorMenu() {
-  return useQuery({ queryKey: ['vendor', 'menu'], queryFn: () => unwrap<any[]>(vendorApi.categories()) });
+  const pv = usePreviewDataset();
+  const q = useQuery({ queryKey: ['vendor', 'menu'], queryFn: () => unwrap<any[]>(vendorApi.categories()), enabled: !pv });
+  return pv ? previewQuery(pv.menu.categories) : q;
 }
 
 export function useCreateCategory() {
@@ -416,59 +455,78 @@ export function useUploadItemImage() {
 // ─── Insights / settings ──────────────────────────────────────────────────────
 
 export function useVendorAnalytics() {
-  return useQuery({
+  const pv = usePreviewDataset();
+  const q = useQuery({
     queryKey: ['vendor', 'analytics'],
     queryFn: () => unwrap<any>(vendorApi.analytics()),
     refetchInterval: 30000,
+    enabled: !pv,
   });
+  return pv ? previewQuery(pv.analytics) : q;
 }
 
 /** Daily revenue series for the chart (endpoint pre-fills gap days with 0). */
 export function useVendorRevenue(days = 14) {
-  return useQuery({
+  const pv = usePreviewDataset();
+  const q = useQuery({
     queryKey: ['vendor', 'analytics', 'revenue', days],
     queryFn: () => unwrap<any>(vendorApi.analyticsRevenue(days)),
+    enabled: !pv,
   });
+  return pv ? previewQuery(pv.revenue) : q;
 }
 
 /** Operational quality: acceptance/cancellation rates + accept/prep timing. */
 export function useVendorOps(days = 30) {
-  return useQuery({
+  const pv = usePreviewDataset();
+  const q = useQuery({
     queryKey: ['vendor', 'analytics', 'ops', days],
     queryFn: () => unwrap<any>(vendorApi.analyticsOps(days)),
+    enabled: !pv,
   });
+  return pv ? previewQuery(pv.ops) : q;
 }
 
 /** Orders by local hour (last 30 days) — the §4.1 busy-hours view. */
 export function useBusyHours() {
-  return useQuery({
+  const pv = usePreviewDataset();
+  const q = useQuery({
     queryKey: ['vendor', 'analytics', 'busy-hours'],
     queryFn: () => unwrap<any>(vendorApi.analyticsBusyHours()),
+    enabled: !pv,
   });
+  return pv ? previewQuery(pv.busyHours) : q;
 }
 
 /** Top items by lifetime + last-30-days order counts. */
 export function usePopularItems(limit = 8) {
-  return useQuery({
+  const pv = usePreviewDataset();
+  const q = useQuery({
     queryKey: ['vendor', 'analytics', 'popular', limit],
     queryFn: () => unwrap<any>(vendorApi.analyticsPopularItems(limit)),
+    enabled: !pv,
   });
+  return pv ? previewQuery(pv.popularItems) : q;
 }
 
 /** Storefront QR + deep link (manager+). Static per store — cache hard. */
 export function useVendorQr(enabled = true) {
-  return useQuery({
+  const pv = usePreviewDataset();
+  const q = useQuery({
     queryKey: ['vendor', 'qr'],
     queryFn: () => unwrap<{ deepLink: string; svg: string; vendorName: string }>(vendorApi.qr()),
-    enabled,
+    enabled: enabled && !pv,
     staleTime: Infinity,
   });
+  return pv ? previewQuery(null) : q;
 }
 
 export type DayHours = { dayOfWeek: number; openTime: string; closeTime: string; isClosed: boolean };
 
 export function useVendorHours() {
-  return useQuery({ queryKey: ['vendor', 'hours'], queryFn: () => unwrap<DayHours[]>(vendorApi.hours()) });
+  const pv = usePreviewDataset();
+  const q = useQuery({ queryKey: ['vendor', 'hours'], queryFn: () => unwrap<DayHours[]>(vendorApi.hours()), enabled: !pv });
+  return pv ? previewQuery(pv.hours) : q;
 }
 
 export function useSetHours() {
