@@ -502,6 +502,44 @@ describe('The offer cascade', () => {
     const result = await dispatch.dispatchOrder(order.id);
     expect(result).toEqual({});
   });
+
+  it('go-offline releases a held offer: the cascade advances at once and the miss is scored', async () => {
+    await app.prisma.rider.updateMany({ data: { isOnline: false } }); // isolate the pool
+    const a = await makeRider({ lat: PICKUP.lat + 0.0045, acceptance: 100 }); // best — gets the offer
+    const b = await makeRider({ lat: PICKUP.lat + 0.018, acceptance: 100 });  // next in line
+    const order = await makeDeliveryOrder();
+
+    const first = await dispatch.dispatchOrder(order.id);
+    expect(first.offered).toBe(a.riderId);
+    expect(await app.redis.get(`dispatch:mover-offer:${a.riderId}`)).toBe(order.id); // reverse index set
+
+    // A taps "Go offline" through the REAL route while still holding the live offer.
+    const res = await app.inject({
+      method: 'POST', url: '/api/v1/rider/go-offline',
+      headers: { authorization: `Bearer ${a.token}`, 'content-type': 'application/json' },
+      payload: {},
+    });
+    expect(res.statusCode).toBe(200);
+
+    // RED before the fix: the offer key stayed pinned on A until the 20 s BullMQ
+    // timeout — the cascade never advanced and A's acceptance was never dinged.
+    expect(await app.redis.get(`dispatch:offer:${order.id}`)).toBe(b.riderId); // advanced to next mover
+    expect(await app.redis.get(`dispatch:mover-offer:${a.riderId}`)).toBeNull(); // reverse index cleared
+    expect(await app.redis.sismember(`dispatch:declined:${order.id}`, a.riderId)).toBe(1); // won't re-offer A
+    const aAfter = await app.prisma.rider.findUniqueOrThrow({ where: { id: a.riderId } });
+    expect(aAfter.acceptanceRate).toBeLessThan(100); // miss scored against the quitter
+
+    await app.prisma.rider.updateMany({ where: { id: { in: [a.riderId, b.riderId] } }, data: { isOnline: false } });
+  });
+
+  it('releaseHeldOffer is a safe no-op for a mover holding no live offer (stale/absent pointer)', async () => {
+    const r = await makeRider({ lat: PICKUP.lat + 0.6 }); // far — never offered anything
+    const before = (await app.prisma.rider.findUniqueOrThrow({ where: { id: r.riderId } })).acceptanceRate;
+    await expect(dispatch.releaseHeldOffer(r.riderId)).resolves.toBeUndefined();
+    const after = (await app.prisma.rider.findUniqueOrThrow({ where: { id: r.riderId } })).acceptanceRate;
+    expect(after).toBe(before); // nothing scored — they held nothing
+    await app.prisma.rider.update({ where: { id: r.riderId }, data: { isOnline: false } });
+  });
 });
 
 describe('Atomic acceptance — the concurrency proof', () => {

@@ -381,6 +381,11 @@ export async function riderRoutes(app: FastifyInstance) {
       throw new ConflictError('You cannot go offline while you have an active delivery. Complete or cancel the current order first.');
     }
 
+    // A rider holding a live offer (not yet accepted) is still isAvailable and
+    // passes the guard above. Release it now so the delivery re-dispatches at
+    // once rather than sitting on a rider who quit for the offer's full window.
+    await dispatch.releaseHeldOffer(rider.id);
+
     const updated = await app.prisma.rider.update({
       where: { id: rider.id },
       data: { isOnline: false, isAvailable: false },

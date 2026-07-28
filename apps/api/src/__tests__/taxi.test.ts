@@ -335,6 +335,33 @@ describe('Ride request — fare shown first, dispatch shared, PIN issued', () =>
     expect(notif?.data).toMatchObject({ orderId: ride.id });
   });
 
+  it('driver go-offline while holding a ride offer releases it (no 20s zombie offer)', async () => {
+    // Isolate the pool: earlier tests leave drivers online at CENTRAL, so park
+    // them all — otherwise the offer could rank a leftover driver above ours.
+    await app.prisma.driver.updateMany({ data: { isOnline: false, isAvailable: false } });
+    const customer = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
+    const driver = await makeDriver();
+    const res = await inject('POST', '/api/v1/rides/request', {
+      pickup: CENTRAL, dropoff: SOUTH,
+      pickupAddress: '12 Main Street, Georgetown', dropoffAddress: '4 South Road, Georgetown',
+    }, customer.token);
+    const ride = res.json().data.ride;
+    // Offer is live for our (sole) driver, not yet accepted.
+    expect(await app.redis.get(`dispatch:offer:${ride.id}`)).toBe(driver.driverId);
+    const before = (await app.prisma.driver.findUniqueOrThrow({ where: { id: driver.driverId } })).acceptanceRate;
+
+    const off = await inject('POST', '/api/v1/driver/go-offline', {}, driver.token);
+    expect(off.statusCode).toBe(200);
+
+    // RED before the fix: the offer clung to the offline driver until timeout.
+    // Sole driver now declined -> cascade widens -> exhausts -> offer key cleared.
+    expect(await app.redis.get(`dispatch:offer:${ride.id}`)).toBeNull();
+    expect(await app.redis.get(`dispatch:mover-offer:${driver.driverId}`)).toBeNull();
+    const after = await app.prisma.driver.findUniqueOrThrow({ where: { id: driver.driverId } });
+    expect(after.isOnline).toBe(false);
+    expect(after.acceptanceRate).toBeLessThan(before); // the quit-mid-offer is scored
+  });
+
   it('driver cannot cancel once the trip is in progress (passenger aboard)', async () => {
     const customer = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
     const driver = await makeDriver();

@@ -88,6 +88,12 @@ function verticalForOrder(order: { orderType: string }): string {
 
 const offerKey = (orderId: string) => `dispatch:offer:${orderId}`;
 const declinedKey = (orderId: string) => `dispatch:declined:${orderId}`;
+// Advisory reverse index: which order (if any) a mover currently holds an offer
+// for. Set beside offerKey with the same TTL so it self-expires; ALWAYS
+// re-validated against the authoritative offerKey before use, so a stale
+// pointer is a safe no-op, never a wrong release. Lets go-offline find and
+// release a live offer without scanning every open order.
+const moverOfferKey = (moverId: string) => `dispatch:mover-offer:${moverId}`;
 const roundKey = (orderId: string) => `dispatch:round:${orderId}`;
 const exhaustKey = (orderId: string) => `dispatch:exhausts:${orderId}`;
 const reconciledKey = (orderId: string) => `dispatch:reconciled:${orderId}`;
@@ -320,6 +326,9 @@ export class DispatchService {
     const top = candidates[0]!;
     const timeoutSeconds = order.isExpress ? EXPRESS_OFFER_TIMEOUT_SECONDS : OFFER_TIMEOUT_SECONDS;
     await this.redis.set(offerKey(orderId), top.riderId, 'EX', timeoutSeconds + 10);
+    // Reverse pointer so go-offline can find this offer by mover (advisory —
+    // re-validated against offerKey on read). Same TTL: it dies with the offer.
+    await this.redis.set(moverOfferKey(top.riderId), orderId, 'EX', timeoutSeconds + 10);
 
     // §4d: on a CASH job the mover fronts real money — show them WHO they're
     // fronting it for (trust level, completed orders, strikes) before accept.
@@ -434,6 +443,32 @@ export class DispatchService {
     await this.redis.expire(declinedKey(orderId), 3600);
     await this.recordOfferOutcome(moverId, false, pool);
 
+    await this.dispatchOrder(orderId);
+  }
+
+  /** A mover going offline abandons any live offer they still hold. Without
+   *  this, the offer key survives untouched until the 20s BullMQ timeout: the
+   *  reconciler treats a live offer as "in cascade" and skips the order, and
+   *  the customer's countdown burns on a mover who has explicitly quit. We turn
+   *  it into an immediate cascade advance (same release the timeout would do)
+   *  and score the miss against acceptanceRate. The reverse index is advisory:
+   *  we re-validate against the authoritative offer key, so a stale pointer
+   *  (offer already moved on) is a no-op — we never yank an offer that is now
+   *  someone else's. Safe to call unconditionally on every go-offline. */
+  async releaseHeldOffer(moverId: string): Promise<void> {
+    const orderId = await this.redis.get(moverOfferKey(moverId));
+    if (!orderId) return;
+    const current = await this.redis.get(offerKey(orderId));
+    if (current !== moverId) {
+      // Pointer is stale (offer lapsed, was declined, or is now another mover's).
+      await this.redis.del(moverOfferKey(moverId));
+      return;
+    }
+    const pool = await this.poolOf(orderId);
+    await this.redis.del(offerKey(orderId), moverOfferKey(moverId));
+    await this.redis.sadd(declinedKey(orderId), moverId);
+    await this.redis.expire(declinedKey(orderId), 3600);
+    await this.recordOfferOutcome(moverId, false, pool);
     await this.dispatchOrder(orderId);
   }
 
