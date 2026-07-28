@@ -3,7 +3,7 @@ import React, { useEffect, useState } from 'react';
 import { ScrollView, View } from 'react-native';
 import { Feather } from '@expo/vector-icons';
 import { color, space } from '@swift/ui';
-import { Card, Chip, EmptyState, Header, LoadingBlock, PillButton, Screen, T } from '../../../kit';
+import { Card, Chip, EmptyState, ErrorState, Header, LoadingBlock, PillButton, Screen, T } from '../../../kit';
 import { useJobHistory, useMoverKind } from '../../../hooks';
 import { money } from '../../../lib/money';
 import { JobStatusPill, RoutePair, whenLabel } from '../shared';
@@ -106,6 +106,10 @@ export function JobHistoryScreen({ navigation: _navigation }: any) {
 
         {q.isLoading && rows.length === 0 ? (
           <LoadingBlock />
+        ) : q.isError && rows.length === 0 ? (
+          // A failed fetch is NOT "no trips yet" — that empty state reads as a
+          // real (discouraging) zero. Show an honest, retryable error instead.
+          <ErrorState message="We couldn't load your history. Check your connection and try again." onRetry={() => q.refetch()} />
         ) : rows.length === 0 ? (
           <EmptyState
             icon="inbox"

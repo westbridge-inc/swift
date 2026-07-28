@@ -142,7 +142,7 @@ export function MoverOnboardingScreen({ status }: { status: any }) {
   const presetVehicle: VehicleKind = moverPreset === 'taxi' ? 'CAR' : 'MOTORCYCLE';
   const [vt, setVt] = useState<VehicleKind>(savedVehicle ?? presetVehicle);
   const [vehicleSaved, setVehicleSaved] = useState(!!savedVehicle);
-  const { data: preview } = useVerificationStatus<any>('MOVER', vt);
+  const { data: preview, isLoading: statusLoading, isError: statusError, refetch: refetchStatus } = useVerificationStatus<any>('MOVER', vt);
   const checklistStatus = preview ?? status;
 
   return (
@@ -188,7 +188,13 @@ export function MoverOnboardingScreen({ status }: { status: any }) {
         </View>
 
         <View style={{ marginTop: space.xl }}>
-          <DocumentChecklist role="MOVER" status={checklistStatus} />
+          <DocumentChecklist
+            role="MOVER"
+            status={checklistStatus}
+            isLoading={!checklistStatus && statusLoading}
+            isError={!checklistStatus && statusError}
+            onRetry={refetchStatus}
+          />
         </View>
       </ScrollView>
 
