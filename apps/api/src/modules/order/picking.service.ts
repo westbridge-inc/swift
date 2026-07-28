@@ -238,14 +238,27 @@ export class PickingService {
     changedBy: string,
   ) {
     const lineTotal = Number(line.totalCustomer);
+    // Floor the order totals at 0. On a discounted order the stored discount can
+    // equal (or exceed) a line's share, so decrementing by the FULL line total
+    // would drive subtotal/total negative — "the platform owes the customer",
+    // which is nonsensical for a cash handover. The substitution sibling throws
+    // (it has an alternative); a refund must always succeed, so we CLAMP the
+    // decrement per field instead of blocking it.
+    const ord = await this.prisma.order.findUnique({
+      where: { id: line.order.id },
+      select: { subtotalBase: true, subtotalCustomer: true, totalAmount: true },
+    });
+    const decBase = Math.min(lineTotal, Number(ord?.subtotalBase ?? 0));
+    const decCustomer = Math.min(lineTotal, Number(ord?.subtotalCustomer ?? 0));
+    const decTotal = Math.min(lineTotal, Number(ord?.totalAmount ?? 0));
     await this.prisma.$transaction([
       this.prisma.orderItem.update({ where: { id: line.id }, data: { subStatus, substituteItemId: null, substituteName: null, substitutePrice: null } }),
       this.prisma.order.update({
         where: { id: line.order.id },
         data: {
-          subtotalBase: { decrement: lineTotal },
-          subtotalCustomer: { decrement: lineTotal },
-          totalAmount: { decrement: lineTotal },
+          subtotalBase: { decrement: decBase },
+          subtotalCustomer: { decrement: decCustomer },
+          totalAmount: { decrement: decTotal },
         },
       }),
       this.prisma.orderStatusLog.create({
