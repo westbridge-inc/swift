@@ -586,3 +586,45 @@ describe('Available-rides board — freshness window [SWIFT-064]', () => {
     expect(ids).not.toContain(stale.id);
   });
 });
+
+describe('Driver cancellationRate accountability (was a dead 0.0 field)', () => {
+  it('a driver cancel-after-accept raises cancellationRate off zero (EMA toward 100)', async () => {
+    const customer = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
+    const driver = await makeDriver();
+    const res = await inject('POST', '/api/v1/rides/request', {
+      pickup: CENTRAL, dropoff: SOUTH, pickupAddress: 'CR Accept', dropoffAddress: 'CR Drop',
+    }, customer.token);
+    const ride = res.json().data.ride;
+    await inject('POST', `/api/v1/driver/rides/${ride.id}/accept`, {}, driver.token);
+
+    const before = (await app.prisma.driver.findUniqueOrThrow({ where: { id: driver.driverId } })).cancellationRate;
+    expect(before).toBe(0); // starts at the schema default
+
+    const cancel = await inject('POST', `/api/v1/driver/rides/${ride.id}/cancel`, { reason: 'vehicle broke down' }, driver.token);
+    expect(cancel.statusCode).toBe(200);
+
+    const after = (await app.prisma.driver.findUniqueOrThrow({ where: { id: driver.driverId } })).cancellationRate;
+    // RED before the writer: it stayed a permanent 0.0. Now: 0*0.8 + 20 = 20.
+    expect(after).toBeCloseTo(20, 1);
+  });
+
+  it('a completed ride decays cancellationRate (EMA toward 0, multiply 0.8)', async () => {
+    const customer = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
+    const driver = await makeDriver();
+    // Seed a prior cancel history so the decay is observable.
+    await app.prisma.driver.update({ where: { id: driver.driverId }, data: { cancellationRate: 50 } });
+
+    const res = await inject('POST', '/api/v1/rides/request', {
+      pickup: CENTRAL, dropoff: SOUTH, pickupAddress: 'CR Done A', dropoffAddress: 'CR Done B',
+    }, customer.token);
+    const ride = res.json().data.ride;
+    await inject('POST', `/api/v1/driver/rides/${ride.id}/accept`, {}, driver.token);
+    // Fast-forward to a passenger aboard, then complete through the real route.
+    await app.prisma.order.update({ where: { id: ride.id }, data: { status: 'RIDE_IN_PROGRESS', pickedUpAt: new Date() } });
+    const done = await inject('PUT', `/api/v1/driver/rides/${ride.id}/complete`, {}, driver.token);
+    expect(done.statusCode).toBe(200);
+
+    const after = (await app.prisma.driver.findUniqueOrThrow({ where: { id: driver.driverId } })).cancellationRate;
+    expect(after).toBeCloseTo(40, 1); // 50 * 0.8 — a completer recovers
+  });
+});
