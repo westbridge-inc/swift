@@ -37,6 +37,11 @@ export interface SosCreateInput {
   addressText?: string | null;
   clientCreatedAt?: Date | null;
   clientIdempotencyKey?: string | null;
+  /** Skip the slide-to-cancel grace → straight to ACTIVE. For a caller whose UI
+   *  has no countdown affordance and whose trigger is already a deliberate
+   *  emergency (the in-ride SOS button, fired while the rider dials emergency
+   *  services — a grace delay there only slows the ops page). */
+  immediate?: boolean;
 }
 
 export class SosService {
@@ -56,7 +61,8 @@ export class SosService {
     const source = input.triggerSource ?? 'BUTTON';
     const opsRaised = source === 'OPS_MANUAL';
     const now = new Date();
-    const grace = opsRaised || GRACE_SECONDS === 0 ? null : new Date(now.getTime() + GRACE_SECONDS * 1000);
+    const skipGrace = opsRaised || input.immediate === true || GRACE_SECONDS === 0;
+    const grace = skipGrace ? null : new Date(now.getTime() + GRACE_SECONDS * 1000);
 
     const alert = await this.prisma.sosAlert.create({
       data: {
@@ -76,7 +82,7 @@ export class SosService {
         clientIdempotencyKey: input.clientIdempotencyKey ?? null,
       },
     });
-    if (!grace) await this.fanOut(alert.id); // already ACTIVE (ops-raised / no-grace tenant)
+    if (!grace) await this.fanOut(alert.id); // already ACTIVE (ops-raised / immediate / no-grace tenant)
     return alert;
   }
 

@@ -48,6 +48,16 @@ describe('SOS state machine [safety M2]', () => {
     expect(a.graceEndsAt).toBeNull();
   });
 
+  it('immediate:true (the in-ride button) skips grace → ACTIVE, even for a BUTTON source', async () => {
+    const a = track(await sos.create({ actorUserId: u(), actorRole: 'CUSTOMER', orderType: 'TAXI', triggerSource: 'BUTTON', immediate: true }));
+    expect(a.status).toBe('ACTIVE'); // no slide-to-cancel window — the caller owns the UX
+    expect(a.graceEndsAt).toBeNull();
+    // fan-out ran at creation → receipts are persisted (create() returns the
+    // pre-fan-out row, so re-read to see them).
+    const fresh = await prisma.sosAlert.findUniqueOrThrow({ where: { id: a.id } });
+    expect(fresh.deliveryReceipts).toBeTruthy();
+  });
+
   it('confirm promotes TRIGGER_PENDING → ACTIVE and records fan-out receipts', async () => {
     const a = track(await sos.create({ actorUserId: u(), actorRole: 'MOVER', triggerSource: 'BUTTON' }));
     const active = await sos.confirm(a.id);
