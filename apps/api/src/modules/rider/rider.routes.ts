@@ -702,37 +702,54 @@ export async function riderRoutes(app: FastifyInstance) {
       }
     }
 
-    // Single-winner claim: an ATOMIC compare-and-set is the real lock. A plain
-    // update-by-id let two riders who both passed the JS null-check above assign
-    // the same order (and both mark themselves busy). Only one caller can flip
-    // riderId from null under a still-acceptable status — mirrors dispatch.claimOrder.
-    const claimed = await app.prisma.order.updateMany({
-      where: { id, riderId: null, status: { in: acceptableStatuses } },
-      data: {
-        riderId: rider.id,
-        ...(chosenFee !== marketFee
-          ? { deliveryFee: chosenFee, totalAmount: Number(order.totalAmount) - (marketFee - chosenFee) }
-          : {}),
-      },
+    // Claim the order AND reserve the rider ATOMICALLY, mirroring
+    // dispatch.claimOrder. The order updateMany is the single-winner per-ORDER
+    // lock (only one caller flips riderId from null under an acceptable status).
+    // The rider updateMany (guarded on isAvailable + currentOrderId:null) is the
+    // one-job-per-MOVER lock — WITHOUT it a single rider grabbing two DIFFERENT
+    // orders at once wins both: the float commit caps cash fronted, not job
+    // COUNT, and a MOBILE_MONEY order commits no float at all. Both writes ride in
+    // one tx so a crash between them can never strand an order on a busy rider.
+    const outcome = await app.prisma.$transaction(async (tx) => {
+      const claimed = await tx.order.updateMany({
+        where: { id, riderId: null, status: { in: acceptableStatuses } },
+        data: {
+          riderId: rider.id,
+          ...(chosenFee !== marketFee
+            ? { deliveryFee: chosenFee, totalAmount: Number(order.totalAmount) - (marketFee - chosenFee) }
+            : {}),
+        },
+      });
+      if (claimed.count === 0) return 'ORDER_TAKEN' as const;
+
+      const reserved = await tx.rider.updateMany({
+        where: { id: rider.id, isAvailable: true, currentOrderId: null },
+        data: { isAvailable: false, currentOrderId: id },
+      });
+      if (reserved.count === 0) {
+        // The rider already holds a live order — undo the claim (revert the fee
+        // too) so this order goes back on the board for another mover.
+        await tx.order.updateMany({
+          where: { id, riderId: rider.id },
+          data: { riderId: null, deliveryFee: marketFee, totalAmount: Number(order.totalAmount) },
+        });
+        return 'RIDER_BUSY' as const;
+      }
+      return 'OK' as const;
     });
-    if (claimed.count === 0) {
-      // Lost the order to another rider — release the float we just reserved.
+
+    if (outcome !== 'OK') {
+      // Nothing committed — release any float we reserved for this attempt.
       if (floatAmt > 0) await floatService.release(app.prisma, rider.id, floatAmt);
+      if (outcome === 'RIDER_BUSY') {
+        throw new ConflictError('You already have an active order — finish it before taking another one.');
+      }
       throw new ConflictError('This order was just claimed by another rider, or is no longer available');
     }
 
-    // Only the winner reaches here — the float is already committed above; advance
-    // status and mark the rider busy.
-    await Promise.all([
-      orderService.updateStatus(id, 'RIDER_ASSIGNED', request.user.userId, 'Rider accepted the order'),
-      app.prisma.rider.update({
-        where: { id: rider.id },
-        data: {
-          isAvailable: false,
-          currentOrderId: id,
-        },
-      }),
-    ]);
+    // Winner of BOTH locks — the rider is already marked busy and the float
+    // committed; advance the order to RIDER_ASSIGNED.
+    await orderService.updateStatus(id, 'RIDER_ASSIGNED', request.user.userId, 'Rider accepted the order');
 
     const updatedOrder = await app.prisma.order.findUniqueOrThrow({ where: { id } });
 

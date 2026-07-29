@@ -766,6 +766,53 @@ describe('Atomic acceptance — the concurrency proof', () => {
       data: { isOnline: false, committedFloat: 0, currentOrderId: null, isAvailable: true, floatLimit: 1_000_000 },
     });
   });
+
+  it('one rider grabbing two MOBILE_MONEY orders at once cannot double-book — the float gate does not apply [one-job-per-mover]', async () => {
+    // MOBILE_MONEY fronts no cash, so floatAmt=0 and the SWIFT-104 float commit
+    // never fires — the ONLY thing stopping one rider from winning two different
+    // orders concurrently is the rider-reserve compare-and-set. (Two small CASH
+    // orders under the cap have the same hole; MOBILE_MONEY is the sharpest case.)
+    const r = await makeRider({ lat: PICKUP.lat + 0.004 });
+    const mk = () =>
+      app.prisma.order
+        .create({
+          data: {
+            orderNumber: `MM-${nanoid(10)}`, orderType: 'FOOD_DELIVERY', customerId, vendorId,
+            status: 'READY_FOR_PICKUP', fulfillment: 'DELIVERY',
+            pickupAddress: 'Vendor HQ', pickupLat: PICKUP.lat, pickupLng: PICKUP.lng,
+            deliveryAddress: 'Customer place', deliveryLat: PICKUP.lat + 0.01, deliveryLng: PICKUP.lng + 0.01,
+            subtotalBase: 2000, subtotalMarkup: 0, subtotalCustomer: 2000, deliveryFee: 500, totalAmount: 2500,
+            paymentMethod: 'MOBILE_MONEY',
+          },
+        })
+        .then((o) => { createdOrderIds.push(o.id); return o; });
+    const [orderA, orderB] = await Promise.all([mk(), mk()]);
+
+    const accept = (orderId: string) => app.inject({
+      method: 'POST', url: `/api/v1/rider/orders/${orderId}/accept`, payload: {},
+      headers: { 'content-type': 'application/json', authorization: `Bearer ${r.token}` },
+    });
+    const [ra, rb] = await Promise.all([accept(orderA.id), accept(orderB.id)]);
+
+    // Exactly one winner — never two. The loser is a clean 409 conflict, not a 500.
+    expect([ra, rb].filter((x) => x.statusCode === 200)).toHaveLength(1);
+    const loser = [ra, rb].find((x) => x.statusCode !== 200)!;
+    expect(loser.statusCode).toBe(409);
+
+    // The rider holds exactly ONE order; the other is back on the board (riderId null).
+    const orders = await app.prisma.order.findMany({ where: { id: { in: [orderA.id, orderB.id] } }, select: { id: true, riderId: true } });
+    const mine = orders.filter((o) => o.riderId === r.riderId);
+    expect(mine).toHaveLength(1);
+    expect(orders.filter((o) => o.riderId === null)).toHaveLength(1);
+    // currentOrderId points at exactly that one order — not left double-booked.
+    const after = await app.prisma.rider.findUniqueOrThrow({ where: { id: r.riderId }, select: { currentOrderId: true } });
+    expect(after.currentOrderId).toBe(mine[0]!.id);
+
+    await app.prisma.rider.update({
+      where: { id: r.riderId },
+      data: { isOnline: false, committedFloat: 0, currentOrderId: null, isAvailable: true },
+    });
+  });
 });
 
 describe('candidate selection at scale [SWIFT-142]', () => {
