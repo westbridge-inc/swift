@@ -70,9 +70,20 @@ export interface VendorPreviewDataset {
   menu: any;
   verification: any;
   bookings: any[];
+  loyalty: any;
 }
 
 const DAY_LABELS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+
+// Repeat-customers sample (GET /vendor/analytics/repeat-customers shape). A
+// repeat customer has >=2 finished orders; repeatRate is derived, never stored,
+// so the sample can't contradict itself. Busier verticals show more loyalty.
+const LOYALTY_BASE: Record<VendorPreviewType, { totalCustomers: number; repeatCustomers: number; totalOrders: number }> = {
+  RESTAURANT: { totalCustomers: 214, repeatCustomers: 96, totalOrders: 512 },
+  SUPERMARKET: { totalCustomers: 168, repeatCustomers: 71, totalOrders: 389 },
+  STORE: { totalCustomers: 92, repeatCustomers: 28, totalOrders: 141 },
+  SERVICE: { totalCustomers: 76, repeatCustomers: 34, totalOrders: 158 },
+};
 
 export function vendorPreviewDataset(type: VendorPreviewType): VendorPreviewDataset {
   const store = {
@@ -124,6 +135,10 @@ export function vendorPreviewDataset(type: VendorPreviewType): VendorPreviewData
           { id: 'pv-b3', serviceName: items[2 % items.length]!.name, price: items[2 % items.length]!.basePrice, slotStart: '2026-07-29T11:00:00Z', slotEnd: '2026-07-29T12:30:00Z', status: 'RESERVED', orderId: null, customer: { firstName: 'Mara' } },
         ]
       : [],
+    loyalty: {
+      ...LOYALTY_BASE[type],
+      repeatRate: Math.round((LOYALTY_BASE[type].repeatCustomers / LOYALTY_BASE[type].totalCustomers) * 100),
+    },
   };
 }
 
