@@ -218,6 +218,18 @@ jobs:
             if [ "$found" != "1" ]; then echo "::error::MISSING dispatch geo index: $idx (raw-SQL migration did not apply)"; exit 1; fi
             echo "ok: $idx present"
           done
+      # Like the GiST indexes, the money-integrity CHECK constraints are raw-SQL
+      # (Prisma can't model them) so they live only in migrations and are absent
+      # from a db-push'd env. Assert `migrate deploy` created them — the
+      # zero-commission (keep-100%) guard degrading silently must go RED.
+      - name: Money-integrity CHECK constraints exist
+        run: |
+          DB="postgresql://swift:swift@localhost:5432/swift_migrate"
+          for c in chk_orders_zero_markup chk_order_items_zero_markup chk_orders_nonneg_money chk_order_items_qty_positive; do
+            found=$(psql "$DB" -tAc "SELECT 1 FROM pg_constraint WHERE conname='$c'")
+            if [ "$found" != "1" ]; then echo "::error::MISSING money CHECK constraint: $c (raw-SQL migration did not apply)"; exit 1; fi
+            echo "ok: $c present"
+          done
       - name: Schema matches migration state
         run: >
           cd apps/api && npx prisma migrate diff
