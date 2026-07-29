@@ -1,6 +1,8 @@
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { SosService } from './sos.service';
+import { EmergencyContactService } from './emergency-contact.service';
+import { getChannels } from '../../providers/notifications/channels';
 import { NotFoundError, ForbiddenError } from '../../utils/errors';
 
 // SOS endpoints (safety spec §4.5). The engine (state machine, grace, fan-out)
@@ -107,5 +109,43 @@ export async function safetyRoutes(app: FastifyInstance) {
     const body = resolveSchema.parse(request.body ?? {});
     const a = await sos.resolve(request.params.id, request.user.userId, body.resolutionCode, body.notes);
     return { success: true, data: { id: a.id, status: a.status, resolutionCode: a.resolutionCode } };
+  });
+
+  // ── Emergency contacts (safety §5) ───────────────────────────────────────
+  // Every action is owner-scoped: the caller manages only their own contacts
+  // (row-level check in the service). The confirmation code is proven by the
+  // contact relaying it back, and reads never expose it.
+  const contacts = new EmergencyContactService(app.prisma, app.redis, getChannels());
+  const contactBody = z.object({
+    name: z.string().trim().min(1).max(100),
+    phoneE164: z.string().regex(/^\+[1-9]\d{6,14}$/, 'Use international format, e.g. +5926001234.'),
+    relationship: z.string().trim().max(50).optional(),
+    priority: z.number().int().min(1).max(3).optional(),
+  });
+
+  app.get('/emergency-contacts', auth, async (request) => {
+    return { success: true, data: await contacts.list(request.user.userId) };
+  });
+
+  app.post('/emergency-contacts', auth, async (request) => {
+    const body = contactBody.parse(request.body ?? {});
+    const { contact, codeSent } = await contacts.add({ userId: request.user.userId, ...body });
+    return { success: true, data: { id: contact.id, name: contact.name, phoneE164: contact.phoneE164, relationship: contact.relationship, priority: contact.priority, verifiedAt: contact.verifiedAt, codeSent } };
+  });
+
+  app.post<{ Params: { id: string } }>('/emergency-contacts/:id/verify', auth, async (request) => {
+    const { code } = z.object({ code: z.string().regex(/^\d{4,8}$/) }).parse(request.body ?? {});
+    const c = await contacts.verify(request.user.userId, request.params.id, code);
+    return { success: true, data: { id: c.id, verifiedAt: c.verifiedAt } };
+  });
+
+  app.post<{ Params: { id: string } }>('/emergency-contacts/:id/resend', auth, async (request) => {
+    await contacts.resend(request.user.userId, request.params.id);
+    return { success: true, data: { sent: true } };
+  });
+
+  app.delete<{ Params: { id: string } }>('/emergency-contacts/:id', auth, async (request) => {
+    await contacts.remove(request.user.userId, request.params.id);
+    return { success: true, data: { deleted: true } };
   });
 }
