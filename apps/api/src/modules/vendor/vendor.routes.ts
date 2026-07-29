@@ -2,6 +2,7 @@ import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { OrderStatus, OrderType, SettlementStatus } from '@prisma/client';
 import { OrderService, notHeldFilter } from '../order/order.service';
+import { VendorAnalyticsService } from './vendor-analytics.service';
 import { PickingService } from '../order/picking.service';
 import { makeDispatchService } from '../dispatch/dispatch.service';
 import { dispatchTrigger, enqueueDeliveryDispatch } from '../dispatch/dispatch-trigger';
@@ -18,7 +19,6 @@ import { AiService } from '../ai/ai.service';
 import { guessColumnMapping, applyMapping, toImportCsv, REQUIRED_FIELDS, type ColumnMapping } from '../../utils/catalogue-map';
 import { parsePagination, paginatedResponse } from '../../utils/pagination';
 import { AppError, NotFoundError, ValidationError } from '../../utils/errors';
-import { startOfDayGY, dayKeyGY } from '../../utils/time-gy';
 import { DeliveryCashSettlementService, assertSettlementId } from '../cash/delivery-cash-settlement.service';
 import { BillingService } from '../billing/billing.service';
 import { getPaymentProvider } from '../../providers/payment/payment-provider';
@@ -479,6 +479,7 @@ async function resolveOwnedOrder(app: FastifyInstance, userId: string, orderId: 
 export async function vendorRoutes(app: FastifyInstance) {
   const auth = { preHandler: [app.authenticate] };
   const orderService = new OrderService(app.prisma, app.io);
+  const analytics = new VendorAnalyticsService(app.prisma);
   const dispatch = makeDispatchService(app);
   const notifications = new NotificationService(app.prisma, app.io);
   const settlementLedger = new DeliveryCashSettlementService(app.prisma, notifications);
@@ -2250,95 +2251,7 @@ export async function vendorRoutes(app: FastifyInstance) {
   /** GET /analytics/overview — Dashboard summary cards */
   app.get('/analytics/overview', auth, async (request) => {
     const { vendorId } = await requireVendor(app, request, 'MANAGER');
-
-    // DASH-05/SWIFT-039: "today" is the vendor's Guyana day, not the server's.
-    // A prod container runs UTC, so a naive local-midnight cut buckets the last
-    // 4h of each Guyana day (00:00–03:59 UTC) into the wrong day. Week/month are
-    // rolling 7/30-day windows anchored to that Guyana-local midnight.
-    const todayStart = startOfDayGY();
-    const weekStart = new Date(todayStart.getTime() - 7 * 24 * 60 * 60 * 1000);
-    const monthStart = new Date(todayStart.getTime() - 30 * 24 * 60 * 60 * 1000);
-
-    const completedStatuses = ['DELIVERED', 'COMPLETED'] as import('@prisma/client').OrderStatus[];
-    // DASH-05: "orders today/week/month" must not count DEAD orders
-    // (cancelled/refunded) — the paired revenue already excludes them, so
-    // counting them produced "10 orders / $X from only 7". In-progress orders
-    // (pending/accepted/preparing) still count — a vendor needs live work.
-    const liveOrderStatuses = { notIn: ['CANCELLED', 'REFUNDED'] as import('@prisma/client').OrderStatus[] };
-
-    const [
-      vendor,
-      todayOrders,
-      weekOrders,
-      monthOrders,
-      todayRevenue,
-      weekRevenue,
-      monthRevenue,
-      activeItems,
-      pendingAgg,
-    ] = await Promise.all([
-      app.prisma.vendor.findUnique({
-        where: { id: vendorId },
-        select: { averageRating: true, totalRatings: true, totalOrders: true, isCurrentlyOpen: true, acceptingOrders: true },
-      }),
-      app.prisma.order.count({ where: { vendorId, status: liveOrderStatuses, placedAt: { gte: todayStart } } }),
-      app.prisma.order.count({ where: { vendorId, status: liveOrderStatuses, placedAt: { gte: weekStart } } }),
-      app.prisma.order.count({ where: { vendorId, status: liveOrderStatuses, placedAt: { gte: monthStart } } }),
-      // Canonical vendor "sales" = Σ(subtotalCustomer − discount) — what the
-      // customer actually paid, net of any promo — matching the vendor
-      // statement exactly [SWIFT-040/DASH-08]. Summing subtotalBase here made
-      // Insights and the statement disagree by the discount on every promo order.
-      app.prisma.order.aggregate({
-        where: { vendorId, status: { in: completedStatuses }, placedAt: { gte: todayStart } },
-        _sum: { subtotalCustomer: true, discount: true },
-      }),
-      app.prisma.order.aggregate({
-        where: { vendorId, status: { in: completedStatuses }, placedAt: { gte: weekStart } },
-        _sum: { subtotalCustomer: true, discount: true },
-      }),
-      app.prisma.order.aggregate({
-        where: { vendorId, status: { in: completedStatuses }, placedAt: { gte: monthStart } },
-        _sum: { subtotalCustomer: true, discount: true },
-      }),
-      app.prisma.item.count({ where: { vendorId, isAvailable: true } }),
-      // Held orders (LIFECYCLE_V2) aren't the vendor's to act on yet.
-      // SWIFT-041: count AND value of the pending queue in one aggregate, so the
-      // "In queue" KPI reflects the WHOLE queue — the client summed only the
-      // displayed page, undercounting once the board ran past its fetch limit.
-      app.prisma.order.aggregate({
-        where: { vendorId, status: 'PENDING', ...notHeldFilter() },
-        _count: true,
-        _sum: { totalAmount: true },
-      }),
-    ]);
-
-    return {
-      success: true,
-      data: {
-        vendor: {
-          averageRating: vendor?.averageRating ?? 0,
-          totalRatings: vendor?.totalRatings ?? 0,
-          totalOrders: vendor?.totalOrders ?? 0,
-          isCurrentlyOpen: vendor?.isCurrentlyOpen ?? false,
-          acceptingOrders: vendor?.acceptingOrders ?? false,
-        },
-        today: {
-          orders: todayOrders,
-          revenue: Number(todayRevenue._sum?.subtotalCustomer ?? 0) - Number(todayRevenue._sum?.discount ?? 0),
-        },
-        week: {
-          orders: weekOrders,
-          revenue: Number(weekRevenue._sum?.subtotalCustomer ?? 0) - Number(weekRevenue._sum?.discount ?? 0),
-        },
-        month: {
-          orders: monthOrders,
-          revenue: Number(monthRevenue._sum?.subtotalCustomer ?? 0) - Number(monthRevenue._sum?.discount ?? 0),
-        },
-        activeMenuItems: activeItems,
-        pendingOrders: pendingAgg._count,
-        queueValue: Number(pendingAgg._sum.totalAmount ?? 0),
-      },
-    };
+    return { success: true, data: await analytics.overview(vendorId) };
   });
 
   /** GET /analytics/ops — Operational quality over a window: how fast orders
@@ -2348,61 +2261,7 @@ export async function vendorRoutes(app: FastifyInstance) {
     const { vendorId } = await requireVendor(app, request, 'MANAGER');
     const { days } = revenueQuerySchema.parse(request.query);
 
-    // DASH-06: window from Guyana-local midnight N days ago, not UTC midnight.
-    const since = startOfDayGY(new Date(Date.now() - days * 24 * 60 * 60 * 1000));
-
-    const orders = await app.prisma.order.findMany({
-      where: { vendorId, placedAt: { gte: since } },
-      select: {
-        status: true,
-        placedAt: true,
-        acceptedAt: true,
-        readyAt: true,
-        estimatedPrepTime: true,
-        cancelledBy: true,
-      },
-    });
-
-    const placed = orders.length;
-    const accepted = orders.filter((o) => o.acceptedAt);
-    const cancelled = orders.filter((o) => o.status === 'CANCELLED' || o.status === 'REFUNDED');
-    const vendorCancelled = cancelled.filter((o) => (o.cancelledBy ?? '').toUpperCase().includes('VENDOR'));
-    // Acceptance is judged on DECIDED orders (accepted, or killed by the
-    // store) — customer cancellations before acceptance are not held against
-    // the vendor.
-    const decided = accepted.length + vendorCancelled.length;
-
-    const avgMinutes = (pairs: Array<[Date, Date]>) =>
-      pairs.length
-        ? pairs.reduce((sum, [a, b]) => sum + (b.getTime() - a.getTime()) / 60000, 0) / pairs.length
-        : null;
-
-    const acceptPairs = accepted
-      .filter((o) => o.acceptedAt! >= o.placedAt)
-      .map((o) => [o.placedAt, o.acceptedAt!] as [Date, Date]);
-    const prepPairs = orders
-      .filter((o) => o.acceptedAt && o.readyAt && o.readyAt >= o.acceptedAt)
-      .map((o) => [o.acceptedAt!, o.readyAt!] as [Date, Date]);
-    const quoted = orders.filter((o) => o.acceptedAt && o.readyAt && o.estimatedPrepTime != null);
-    const avgQuotedPrep = quoted.length
-      ? quoted.reduce((s, o) => s + (o.estimatedPrepTime ?? 0), 0) / quoted.length
-      : null;
-
-    const round1 = (n: number | null) => (n == null ? null : Math.round(n * 10) / 10);
-
-    return {
-      success: true,
-      data: {
-        days,
-        placedOrders: placed,
-        acceptanceRate: decided ? Math.round((accepted.length / decided) * 100) : null,
-        cancellationRate: placed ? Math.round((cancelled.length / placed) * 100) : null,
-        vendorCancellations: vendorCancelled.length,
-        avgAcceptMinutes: round1(avgMinutes(acceptPairs)),
-        avgPrepMinutes: round1(avgMinutes(prepPairs)),
-        avgQuotedPrepMinutes: round1(avgQuotedPrep),
-      },
-    };
+    return { success: true, data: await analytics.ops(vendorId, days) };
   });
 
   /** GET /analytics/revenue — Daily revenue breakdown for the last 30 days */
@@ -2410,91 +2269,14 @@ export async function vendorRoutes(app: FastifyInstance) {
     const { vendorId } = await requireVendor(app, request, 'MANAGER');
     const { days } = revenueQuerySchema.parse(request.query);
 
-    // DASH-06: window from Guyana-local midnight N days ago, not UTC midnight.
-    const since = startOfDayGY(new Date(Date.now() - days * 24 * 60 * 60 * 1000));
-
-    const completedStatuses = ['DELIVERED', 'COMPLETED'] as import('@prisma/client').OrderStatus[];
-
-    const orders = await app.prisma.order.findMany({
-      where: {
-        vendorId,
-        status: { in: completedStatuses },
-        placedAt: { gte: since },
-      },
-      select: {
-        placedAt: true,
-        subtotalCustomer: true,
-        discount: true,
-        totalAmount: true,
-      },
-      orderBy: { placedAt: 'asc' },
-    });
-
-    // Aggregate by day
-    const dailyMap = new Map<string, { date: string; orders: number; revenue: number; total: number }>();
-
-    // Pre-fill all days so gaps show as zero. `since` is Guyana-local midnight;
-    // advance by whole days on the instant (TZ-independent) and key each bar by
-    // its Guyana day so it lines up with the orders bucketed below.
-    for (let d = 0; d < days; d++) {
-      const date = new Date(since.getTime() + d * 24 * 60 * 60 * 1000);
-      const key = dayKeyGY(date);
-      dailyMap.set(key, { date: key, orders: 0, revenue: 0, total: 0 });
-    }
-
-    for (const o of orders) {
-      // SWIFT-039: bucket by the Guyana day, not the UTC day — otherwise an
-      // order placed after 20:00 GY (past UTC midnight) falls in tomorrow's bar.
-      const key = dayKeyGY(o.placedAt);
-      const entry = dailyMap.get(key);
-      if (entry) {
-        entry.orders += 1;
-        // Canonical net-of-discount sales [SWIFT-040], same as the overview + statement.
-        entry.revenue += Number(o.subtotalCustomer) - Number(o.discount);
-        entry.total += Number(o.totalAmount);
-      }
-    }
-
-    const daily = Array.from(dailyMap.values());
-
-    return {
-      success: true,
-      data: {
-        days,
-        daily,
-        totals: {
-          orders: orders.length,
-          revenue: daily.reduce((s, d) => s + d.revenue, 0),
-          total: daily.reduce((s, d) => s + d.total, 0),
-        },
-      },
-    };
+    return { success: true, data: await analytics.revenue(vendorId, days) };
   });
 
   /** GET /analytics/busy-hours — orders by local hour of day, last 30 days
    *  (master plan §4.1 "busy hours"). Guyana is UTC-4 year-round. */
   app.get('/analytics/busy-hours', auth, async (request) => {
     const { vendorId } = await requireVendor(app, request, 'MANAGER');
-    const since = new Date();
-    since.setDate(since.getDate() - 30);
-
-    const orders = await app.prisma.order.findMany({
-      where: { vendorId, placedAt: { gte: since }, status: { notIn: ['CANCELLED', 'REFUNDED'] } },
-      select: { placedAt: true },
-    });
-
-    const GUYANA_OFFSET_HOURS = -4;
-    const hours = Array.from({ length: 24 }, (_, hour) => ({ hour, orders: 0 }));
-    for (const o of orders) {
-      const local = ((o.placedAt.getUTCHours() + GUYANA_OFFSET_HOURS) + 24) % 24;
-      hours[local]!.orders += 1;
-    }
-    const peak = hours.reduce((best, h) => (h.orders > best.orders ? h : best), hours[0]!);
-
-    return {
-      success: true,
-      data: { days: 30, hours, peak: peak.orders > 0 ? peak : null, total: orders.length },
-    };
+    return { success: true, data: await analytics.busyHours(vendorId) };
   });
 
   /** GET /analytics/popular-items — Top items by totalOrdered */
@@ -2502,44 +2284,7 @@ export async function vendorRoutes(app: FastifyInstance) {
     const { vendorId } = await requireVendor(app, request, 'MANAGER');
     const { limit } = popularItemsQuerySchema.parse(request.query);
 
-    const items = await app.prisma.item.findMany({
-      where: { vendorId },
-      orderBy: { totalOrdered: 'desc' },
-      take: limit,
-      select: {
-        id: true,
-        name: true,
-        basePrice: true,
-        imageUrl: true,
-        totalOrdered: true,
-        isAvailable: true,
-        category: { select: { id: true, name: true } },
-      },
-    });
-
-    // Also get recent order-item counts for the last 30 days for trending data
-    const since = new Date();
-    since.setDate(since.getDate() - 30);
-
-    const recentCounts = await app.prisma.orderItem.groupBy({
-      by: ['itemId'],
-      where: {
-        order: { vendorId, placedAt: { gte: since } },
-      },
-      _sum: { quantity: true },
-      orderBy: { _sum: { quantity: 'desc' } },
-      take: limit,
-    });
-
-    const recentMap = new Map(recentCounts.map((rc) => [rc.itemId, rc._sum.quantity || 0]));
-
-    const enriched = items.map((item) => ({
-      ...item,
-      basePrice: Number(item.basePrice),
-      recentOrders: recentMap.get(item.id) || 0,
-    }));
-
-    return { success: true, data: enriched };
+    return { success: true, data: await analytics.popularItems(vendorId, limit) };
   });
 
   /** GET /analytics/repeat-customers — how many of the store's customers come
@@ -2549,16 +2294,7 @@ export async function vendorRoutes(app: FastifyInstance) {
    *  abandoned cart. */
   app.get('/analytics/repeat-customers', auth, async (request) => {
     const { vendorId } = await requireVendor(app, request, 'MANAGER');
-    const grouped = await app.prisma.order.groupBy({
-      by: ['customerId'],
-      where: { vendorId, status: { in: ['DELIVERED', 'COMPLETED'] } },
-      _count: { _all: true },
-    });
-    const totalCustomers = grouped.length;
-    const repeatCustomers = grouped.filter((g) => g._count._all >= 2).length;
-    const totalOrders = grouped.reduce((sum, g) => sum + g._count._all, 0);
-    const repeatRate = totalCustomers > 0 ? Math.round((repeatCustomers / totalCustomers) * 100) : 0;
-    return { success: true, data: { totalCustomers, repeatCustomers, repeatRate, totalOrders } };
+    return { success: true, data: await analytics.repeatCustomers(vendorId) };
   });
 
   // =========================================================================
