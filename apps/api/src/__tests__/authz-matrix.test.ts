@@ -18,6 +18,7 @@ import { searchRoutes } from '../modules/search/search.routes';
 import { chatRoutes } from '../modules/chat/chat.routes';
 import { verificationRoutes } from '../modules/verification/verification.routes';
 import { ridesRoutes } from '../modules/rides/rides.routes';
+import { safetyRoutes } from '../modules/safety/safety.routes';
 import { placesRoutes } from '../modules/places/places.routes';
 import courierRoutes from '../modules/courier/courier.routes';
 import { servicesRoutes } from '../modules/services/services.routes';
@@ -70,6 +71,7 @@ async function buildTestApp() {
   await server.register(chatRoutes, { prefix: '/api/v1/chat' });
   await server.register(verificationRoutes, { prefix: '/api/v1/verification' });
   await server.register(ridesRoutes, { prefix: '/api/v1/rides' });
+  await server.register(safetyRoutes, { prefix: '/api/v1/safety' });
   await server.register(placesRoutes, { prefix: '/api/v1/places' });
   await server.register(courierRoutes, { prefix: '/api/v1/courier' });
   await server.register(servicesRoutes, { prefix: '/api/v1/services' });
@@ -141,6 +143,10 @@ const MATRIX: PrefixSpec[] = [
   { prefix: '/api/v1/chat/', wrongRoles: [] },
   { prefix: '/api/v1/verification/', wrongRoles: [] },
   { prefix: '/api/v1/rides/', wrongRoles: [] },
+  // SOS is raiseable by any authenticated actor (passenger/driver/rider), so
+  // multi-role by design; the ops-only ack/resolve are handler-gated + covered
+  // by safety-sos-core.test.ts. The unauthenticated sweep still hits every route.
+  { prefix: '/api/v1/safety/', wrongRoles: [] },
   { prefix: '/api/v1/places/', wrongRoles: [] },
   { prefix: '/api/v1/courier/', wrongRoles: [] },
   { prefix: '/api/v1/services/', wrongRoles: [] },
