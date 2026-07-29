@@ -2542,6 +2542,25 @@ export async function vendorRoutes(app: FastifyInstance) {
     return { success: true, data: enriched };
   });
 
+  /** GET /analytics/repeat-customers — how many of the store's customers come
+   *  back (R2 analytics — this metric didn't exist). A repeat customer has >= 2
+   *  COMPLETED/DELIVERED orders here; the repeat rate is repeat/total. Finished
+   *  orders only — a repeat means they actually came back and completed, not an
+   *  abandoned cart. */
+  app.get('/analytics/repeat-customers', auth, async (request) => {
+    const { vendorId } = await requireVendor(app, request, 'MANAGER');
+    const grouped = await app.prisma.order.groupBy({
+      by: ['customerId'],
+      where: { vendorId, status: { in: ['DELIVERED', 'COMPLETED'] } },
+      _count: { _all: true },
+    });
+    const totalCustomers = grouped.length;
+    const repeatCustomers = grouped.filter((g) => g._count._all >= 2).length;
+    const totalOrders = grouped.reduce((sum, g) => sum + g._count._all, 0);
+    const repeatRate = totalCustomers > 0 ? Math.round((repeatCustomers / totalCustomers) * 100) : 0;
+    return { success: true, data: { totalCustomers, repeatCustomers, repeatRate, totalOrders } };
+  });
+
   // =========================================================================
   // 7. SETTLEMENTS
   // =========================================================================
