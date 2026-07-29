@@ -2237,3 +2237,91 @@ model AgentAuditEvent {
   @@index([subjectId])
   @@map("agent_audit_events")
 }
+
+// ─── Safety: SOS engine (safety-system spec M1, foundation for M2) ───────────
+// Reconciled to Swift reality: a "trip" is an Order (rides are orderType=TAXI);
+// tenant is a scalar with code-level tenantScope (Swift has no RLS); actorRole
+// snapshots the user's activeRole at trigger. Evidence/incident foreign keys are
+// added when those milestones (M6/M7) land — additive, never up front.
+
+enum SosStatus {
+  TRIGGER_PENDING // client fired, grace window running (slide-to-cancel)
+  ACTIVE // grace elapsed or user confirmed — server fan-out fired
+  ACKNOWLEDGED // a human at ops has acked
+  RESOLVED
+  CANCELLED // cancelled during grace window only
+}
+
+enum SosTriggerSource {
+  BUTTON
+  CHECKIN_TIMEOUT
+  GUARDIAN_ESCALATION
+  OPS_MANUAL
+}
+
+enum SosCancelReason {
+  SLIDE_CANCEL
+  USER_MARKED_SAFE
+  OPS_RESOLVED_FALSE_ALARM
+}
+
+enum SosResolutionCode {
+  SAFE_CONFIRMED
+  POLICE_INVOLVED
+  MEDICAL
+  FALSE_ALARM
+  ABUSE
+  UNREACHABLE_CLOSED
+}
+
+model SosAlert {
+  id                   String             @id @default(cuid())
+  tenantId             String             @default("swift-default")
+  actorUserId          String // who triggered
+  actorRole            String // activeRole snapshot: CUSTOMER / MOVER / VENDOR_OWNER
+  orderId              String? // the ride/order (rides = orderType TAXI); null for a vendor store-panic
+  orderType            OrderType?
+  counterpartyUserId   String? // the other party on the trip at trigger time
+  status               SosStatus          @default(TRIGGER_PENDING)
+  triggerSource        SosTriggerSource   @default(BUTTON)
+  triggeredAt          DateTime           @default(now())
+  graceEndsAt          DateTime? // server-owned grace deadline → auto-ACTIVE (app-kill-proof)
+  cancelledAt          DateTime?
+  cancelReason         SosCancelReason?
+  userSafeFlaggedAt    DateTime? // "I'm safe now" — NEVER auto-resolves; a human must (coercion doctrine)
+  acknowledgedAt       DateTime?
+  acknowledgedBy       String?
+  resolvedAt           DateTime?
+  resolvedBy           String?
+  resolutionCode       SosResolutionCode?
+  resolutionNotes      String?
+  triggerLat           Float?
+  triggerLng           Float?
+  triggerAccuracyM     Float?
+  triggerAddressText   String? // reverse-geocoded, for the on-screen 911 script
+  clientCreatedAt      DateTime? // device clock — offline reconciliation
+  clientIdempotencyKey String?            @unique // one alert per trigger, even on retry
+  deliveryReceipts     Json? // per-channel fan-out receipts {opsPage, contactSms:[...], socket}
+  createdAt            DateTime           @default(now())
+  updatedAt            DateTime           @updatedAt
+
+  @@index([tenantId, status, triggeredAt])
+  @@index([actorUserId])
+  @@index([orderId])
+}
+
+model EmergencyContact {
+  id           String    @id @default(cuid())
+  tenantId     String    @default("swift-default")
+  userId       String
+  name         String
+  phoneE164    String
+  relationship String?
+  priority     Int       @default(1) // 1..3 fan-out order
+  verifiedAt   DateTime? // one-time SMS handshake so a typo doesn't kill the feature
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  @@unique([userId, phoneE164])
+  @@index([userId])
+}
