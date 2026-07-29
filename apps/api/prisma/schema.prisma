@@ -57,6 +57,11 @@ model User {
   /// Channel switches { push, sms, email } — the vendor order alert ignores these
   notificationPrefs Json?
 
+  /// Trip Guardian enhanced monitoring — "Extra safety check-ins on my trips"
+  /// (safety spec §5.1). OPT-IN ONLY, set solely by the user's own toggle:
+  /// never inferred from gender or any other attribute (protected data).
+  enhancedSafetyMonitoring Boolean @default(false)
+
   addresses        Address[]  @relation("userAddresses")
   lastKnownLat     Float?
   lastKnownLng     Float?
@@ -2324,4 +2329,70 @@ model EmergencyContact {
 
   @@unique([userId, phoneE164])
   @@index([userId])
+}
+
+// ─── Trip Guardian (safety spec §5): server-side trip monitoring ────────────
+// One session per monitored trip, owned entirely by the Guardian sweep (same
+// runtime doctrine as the SOS grace sweep): opened when a taxi goes
+// RIDE_IN_PROGRESS, detectors run off the persisted driver fixes, closed when
+// the order leaves RIDE_IN_PROGRESS. Every ladder rung is DB state —
+// app-kill-proof and worker-restart-proof.
+
+enum GuardianStatus {
+  MONITORING // detectors running, nothing pending from the passenger
+  CHECKIN_PENDING // hard check-in sent, deadline running (§5.3 L3)
+  ESCALATING // deadline elapsed — auto-SOS hand-off in progress (§5.3 L4)
+  CLOSED
+}
+
+enum GuardianCloseReason {
+  TRIP_COMPLETED
+  TRIP_CANCELLED
+  ESCALATED // handed to the SOS engine — escalatedToSosId points at the alert
+  OPS_CLOSED
+}
+
+model TripSafetySession {
+  id       String @id @default(cuid())
+  tenantId String @default("swift-default")
+
+  /// The monitored trip. V1 monitors TAXI rides (passenger aboard = the
+  /// route-abduction threat the spec calls T3); delivery/courier legs ride on
+  /// a later slice. UNIQUE so racing sweep ticks can never double-open.
+  orderId         String    @unique
+  orderType       OrderType
+  passengerUserId String? // customer on the ride; null on a future driver-only leg
+  driverUserId    String
+
+  status GuardianStatus @default(MONITORING)
+
+  /// §5.1 — additive risk score computed at session open; the band
+  /// (LOW <30 / ELEVATED 30–59 / HIGH ≥60) sets detector thresholds and ops
+  /// visibility. riskFactors snapshots WHY it scored what it did.
+  riskScore   Int   @default(0)
+  riskFactors Json?
+
+  /// Server-owned trip deadline: pickedUpAt + the fare's planned duration
+  /// (taxiDuration) + the overdue allowance. The overdue detector reads this.
+  plannedEtaAt DateTime?
+
+  /// Rolling detector scratch state (divergence ratchet, stop anchor/timer,
+  /// ladder event log). JSON because only the sweep reads/writes it — every
+  /// DECISION it produces lands in the typed columns below.
+  deviationState Json?
+  lastLocationAt DateTime?
+
+  // §5.3 check-in ladder — rungs are DB state, never in-process timers.
+  checkinRequestedAt DateTime?
+  checkinDeadlineAt  DateTime?
+  checkinRespondedAt DateTime?
+
+  escalatedToSosId String?
+  closedAt         DateTime?
+  closeReason      GuardianCloseReason?
+  createdAt        DateTime             @default(now())
+  updatedAt        DateTime             @updatedAt
+
+  @@index([tenantId, status])
+  @@index([tenantId, driverUserId])
 }
