@@ -106,6 +106,7 @@ import { useVendorPreview } from '../../stores/vendorPreview';
 import { RoleSwitcherSheet } from '../../components/RoleSwitcherSheet';
 import { money } from '../../lib/money';
 import { vendorSurfaceForRole } from '../../lib/vendorRbac';
+import { inventorySummary } from '../../lib/vendorInventory';
 import { mediaUrl } from '../../lib/images';
 import { VendorBulkImportScreen } from '../../screens/vendor/VendorBulkImportScreen';
 import { NewOrderTakeover } from './NewOrderTakeover';
@@ -1166,6 +1167,39 @@ function StockAdjustRow({ item }: { item: any }) {
 
 /** Stock alerts from the fetched menu itself: tracked items at/below their
  *  own alert level (or sold out and auto-hidden). */
+// Inventory-first lead for goods vendors (grocery/shop): an at-a-glance stock
+// health read above the catalogue. Data-driven — self-hides when nothing tracks
+// stock, so restaurants/services (null stock) never see it.
+function InventorySummaryCard({ categories }: { categories: any[] }) {
+  const s = inventorySummary(categories);
+  if (s.tracked === 0) return null;
+  const cells: { label: string; value: number; tone: 'ink' | 'deep' | 'error' | 'muted' }[] = [
+    { label: 'In stock', value: s.inStock, tone: 'ink' },
+    { label: 'Low', value: s.lowStock, tone: s.lowStock > 0 ? 'deep' : 'muted' },
+    { label: 'Out', value: s.outOfStock, tone: s.outOfStock > 0 ? 'error' : 'muted' },
+    { label: 'SKUs', value: s.tracked, tone: 'muted' },
+  ];
+  return (
+    <Card style={{ marginBottom: space.md }}>
+      <T variant="caption" weight="bold" tone="muted" style={{ letterSpacing: 1, marginBottom: space.sm }}>
+        INVENTORY
+      </T>
+      <View style={{ flexDirection: 'row' }}>
+        {cells.map((c) => (
+          <View key={c.label} style={{ flex: 1 }}>
+            <T variant="heading" tone={c.tone}>
+              {String(c.value)}
+            </T>
+            <T variant="caption" tone="muted">
+              {c.label}
+            </T>
+          </View>
+        ))}
+      </View>
+    </Card>
+  );
+}
+
 function LowStockCard({ categories, navigation, catOptions }: { categories: any[]; navigation: any; catOptions: { id: string; name: string }[] }) {
   const low = categories
     .flatMap((c: any) => c.items ?? [])
@@ -1321,6 +1355,9 @@ function VendorMenuScreen({ navigation }: any) {
         <LoadingBlock />
       ) : (
         <ScrollView contentContainerStyle={{ paddingHorizontal: GUTTER, paddingBottom: space['3xl'] }} showsVerticalScrollIndicator={false}>
+          {/* Inventory-first: goods vendors lead with stock health (self-hides
+              for restaurants/services, which don't track stock). */}
+          <InventorySummaryCard categories={categories} />
           <Card style={{ marginBottom: space.md }}>
             <T variant="label" weight="semibold" tone="muted" style={{ marginBottom: space.sm }}>
               New category
