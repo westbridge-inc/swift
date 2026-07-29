@@ -158,6 +158,33 @@ describe('vendor blindness while held', () => {
   });
 });
 
+// The release tick NULLs holdExpiresAt and pushes the vendor alert. If that tick
+// is down, holdExpiresAt stays set — but once it's in the PAST the customer's
+// window has closed, and the server-clock notHeldFilter must still surface the
+// order so the vendor can find and accept it off their board. This is the
+// worker-outage backstop (order.service.ts:1114 "board still shows the order");
+// without it a legitimately-placed order could sit invisible until the
+// no-response auto-cancel reaped it. Locks that recovery independent of the tick.
+describe('board-recovery backstop (release tick never ran)', () => {
+  it('a past-due held order is visible on the board and acceptable by id even if the tick did not null it', async () => {
+    const due = await makeHeldOrder({ holdMsFromNow: -60_000 }); // window closed, still flagged
+    expect(due.holdExpiresAt).not.toBeNull(); // the tick has NOT run — no release CAS
+
+    const board = await inject('GET', '/api/v1/vendor/orders', vendorOwner.token);
+    expect(board.statusCode).toBe(200);
+    expect(board.json().data.some((o: any) => o.id === due.id)).toBe(true); // recovered by the clock
+
+    const byId = await inject('GET', `/api/v1/vendor/orders/${due.id}`, vendorOwner.token);
+    expect(byId.statusCode).toBe(200); // and actionable by direct id, so the vendor can accept it
+
+    // A still-held order (window open) stays hidden — the backstop is the clock,
+    // not a blanket "show everything".
+    const future = await makeHeldOrder({ holdMsFromNow: 120_000 });
+    const board2 = await inject('GET', '/api/v1/vendor/orders', vendorOwner.token);
+    expect(board2.json().data.some((o: any) => o.id === future.id)).toBe(false);
+  });
+});
+
 describe('held cancel', () => {
   it('is free regardless of clock games, and restores stock semantics', async () => {
     const held = await makeHeldOrder({ holdMsFromNow: 120_000 });
