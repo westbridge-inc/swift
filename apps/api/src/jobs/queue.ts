@@ -505,6 +505,22 @@ export function createWorkers(ctx: JobContext) {
         return;
       }
 
+      if (job.name === 'promote-sos-grace') {
+        // SOS grace-expiry backstop [F-0003 / safety spec §4.1]. The client
+        // confirms the instant the grace bar completes (the happy path); this
+        // fires when the app was KILLED mid-grace — a closed app must never stop
+        // a life-safety escalation. The grace deadline is DB state and promotion
+        // is compare-and-set, so this is idempotent, safe to overlap, and
+        // catches up on any worker downtime. Loud: a backstop-promoted alert
+        // means a client died mid-SOS, which ops should see.
+        const { SosService } = await import('../modules/safety/sos.service');
+        const promoted = await new SosService(ctx.prisma, ctx.io).promoteExpiredGrace();
+        if (promoted.length > 0) {
+          ctx.log.warn({ promoted, count: promoted.length }, 'SOS grace backstop promoted pending alerts to ACTIVE (client never confirmed)');
+        }
+        return;
+      }
+
       if (job.name === 'stale-movers') {
         const swept = await sweepStaleMovers(ctx.prisma, undefined, ctx.redis);
         if (swept.riders + swept.drivers > 0) {
@@ -840,6 +856,20 @@ export async function scheduleRecurringJobs(queues: ReturnType<typeof createQueu
   // This is the self-heal for the platform's most failure-sensitive path.
   await queues.dispatchQueue.add('reconcile-dispatch', {}, {
     repeat: { pattern: '*/2 * * * *' },
+    removeOnComplete: 20,
+    removeOnFail: 20,
+  });
+
+  // SOS grace-expiry backstop [F-0003 / safety spec §4.1]: promote any
+  // TRIGGER_PENDING alert whose server-owned grace elapsed to ACTIVE. The client
+  // promotes on the happy path (it confirms when the grace bar completes); this
+  // is the app-kill-proof backstop — a closed app must never stop an escalation.
+  // Tight cadence because it's life-safety and the query is a trivial,
+  // highly-selective indexed lookup that returns nothing almost always. `|| `
+  // (not `??`) so garbage/NaN/0 all fall back to the default; floored at 2s so a
+  // misconfig can't turn it into pathological churn.
+  await queues.dispatchQueue.add('promote-sos-grace', {}, {
+    repeat: { every: Math.max(2_000, Number(process.env['SOS_GRACE_SWEEP_MS']) || 10_000) },
     removeOnComplete: 20,
     removeOnFail: 20,
   });
