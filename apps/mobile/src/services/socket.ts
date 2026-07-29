@@ -1,8 +1,12 @@
 import { io, Socket } from 'socket.io-client';
 import { useAuthStore } from '../stores/authStore';
+import { API_URL } from './api';
 
-// eslint-disable-next-line no-undef
-const SOCKET_URL = __DEV__ ? 'http://localhost:3000' : 'https://api.swift.gy';
+// The realtime socket rides the SAME origin as the REST API — including the
+// EXPO_PUBLIC_API_URL override — so a staging/preview EAS build repoints both at
+// once. The previous `__DEV__ ? localhost : api.swift.gy` hardcode had no env
+// escape hatch, so a non-prod build could never reach a non-prod socket.
+const SOCKET_URL = API_URL;
 
 let socket: Socket | null = null;
 
