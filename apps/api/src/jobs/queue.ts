@@ -56,17 +56,32 @@ export function bullConnectionOpts(redis: Redis): ConnectionOptions {
   };
 }
 
+/** Bounded retry with exponential backoff on EVERY job. All jobs are idempotent
+ *  — money jobs guard with DB-level uniqueness/CAS, the repeatable ticks
+ *  recompute their window — so a transient blip (DB/Redis/provider hiccup) is
+ *  retried in seconds instead of silently lost until the next scheduled tick or
+ *  reconcile sweep. removeOnFail keeps the last failures for inspection only
+ *  AFTER the attempts are exhausted. Env-tunable so ops can widen it without a
+ *  deploy. Exported so a test can pin the policy without opening a Redis socket. */
+export const DEFAULT_JOB_OPTIONS = {
+  attempts: Math.max(1, Number(process.env['JOB_MAX_ATTEMPTS'] ?? 3)),
+  backoff: { type: 'exponential' as const, delay: Math.max(100, Number(process.env['JOB_BACKOFF_MS'] ?? 5_000)) },
+  removeOnComplete: 100,
+  removeOnFail: 50,
+};
+
 export function createQueues(redis: Redis) {
   const connection = bullConnectionOpts(redis);
+  const defaultJobOptions = DEFAULT_JOB_OPTIONS;
 
   return {
-    orderQueue: new Queue(QUEUE_NAMES.ORDER, { connection }),
-    subscriptionQueue: new Queue(QUEUE_NAMES.SUBSCRIPTION, { connection }),
-    settlementQueue: new Queue(QUEUE_NAMES.SETTLEMENT, { connection }),
-    notificationQueue: new Queue(QUEUE_NAMES.NOTIFICATION, { connection }),
-    verificationQueue: new Queue(QUEUE_NAMES.VERIFICATION, { connection }),
-    dispatchQueue: new Queue(QUEUE_NAMES.DISPATCH, { connection }),
-    searchQueue: new Queue(QUEUE_NAMES.SEARCH, { connection }),
+    orderQueue: new Queue(QUEUE_NAMES.ORDER, { connection, defaultJobOptions }),
+    subscriptionQueue: new Queue(QUEUE_NAMES.SUBSCRIPTION, { connection, defaultJobOptions }),
+    settlementQueue: new Queue(QUEUE_NAMES.SETTLEMENT, { connection, defaultJobOptions }),
+    notificationQueue: new Queue(QUEUE_NAMES.NOTIFICATION, { connection, defaultJobOptions }),
+    verificationQueue: new Queue(QUEUE_NAMES.VERIFICATION, { connection, defaultJobOptions }),
+    dispatchQueue: new Queue(QUEUE_NAMES.DISPATCH, { connection, defaultJobOptions }),
+    searchQueue: new Queue(QUEUE_NAMES.SEARCH, { connection, defaultJobOptions }),
   };
 }
 
