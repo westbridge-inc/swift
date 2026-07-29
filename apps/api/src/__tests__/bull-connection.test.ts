@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import Redis from 'ioredis';
-import { bullConnectionOpts } from '../jobs/queue';
+import { bullConnectionOpts, DEFAULT_JOB_OPTIONS } from '../jobs/queue';
 
 // SWIFT-007 — BullMQ's connection must carry the WHOLE REDIS_URL, not just
 // host+port. The old `{ host, port }` dropped the password/TLS (jobs never reach
@@ -34,5 +34,17 @@ describe('bullConnectionOpts — the whole REDIS_URL reaches BullMQ [SWIFT-007]'
     expect(opts['tls']).toBeUndefined();
     expect(opts['db']).toBe(15); // NOT 0 — jobs land on the isolated db
     r.disconnect();
+  });
+});
+
+describe('DEFAULT_JOB_OPTIONS — every job gets bounded retry with backoff', () => {
+  it('retries a bounded number of times with exponential backoff (idempotent jobs)', () => {
+    expect(DEFAULT_JOB_OPTIONS.attempts).toBeGreaterThanOrEqual(1);
+    expect(DEFAULT_JOB_OPTIONS.attempts).toBeLessThanOrEqual(10); // bounded, never infinite
+    expect(DEFAULT_JOB_OPTIONS.backoff.type).toBe('exponential');
+    expect(DEFAULT_JOB_OPTIONS.backoff.delay).toBeGreaterThan(0);
+    // A persistently-failing job is retained for inspection (not evicted) only
+    // AFTER its attempts are exhausted.
+    expect(DEFAULT_JOB_OPTIONS.removeOnFail).toBeGreaterThan(0);
   });
 });
