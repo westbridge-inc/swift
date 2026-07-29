@@ -411,14 +411,26 @@ describe('Order Flow — Full Lifecycle', () => {
   // Step 11: Rider marks as delivered
   // -----------------------------------------------------------------------
 
-  it('Step 11: Rider marks order as delivered', async () => {
+  it('Step 11: /delivered refuses a CASH order until payment is captured (golden rule)', async () => {
+    // This order is CASH and payment has not been captured, so the final
+    // /delivered step must be refused — the rider has to collect at the door
+    // via /handover first. Guards against a cash order being closed unpaid.
     const res = await inject('PUT', `/api/v1/rider/orders/${createdOrderId}/delivered`, riderToken);
+    expect(res.statusCode).toBe(409);
+    expect(res.json().error.code).toBe('PAYMENT_NOT_CAPTURED');
+  });
+
+  it('Step 11b: Rider captures the cash via /handover, which completes the delivery', async () => {
+    const res = await inject('POST', `/api/v1/rider/orders/${createdOrderId}/handover`, riderToken, {
+      outcome: 'paid',
+      gps: { lat: 6.8, lng: -58.15 },
+    });
     const body = res.json();
     expect(res.statusCode).toBe(200);
-    expect(body.success).toBe(true);
     expect(body.data.status).toBe('DELIVERED');
-    expect(body.data.earning).toBeGreaterThan(0);
-    expect(body.data.isAvailable).toBe(true);
+    // Payment was captured as part of the handover — the books now match reality.
+    const ord = await app.prisma.order.findUnique({ where: { id: createdOrderId }, select: { paymentStatus: true } });
+    expect(ord?.paymentStatus).toBe('CAPTURED');
   });
 
   // -----------------------------------------------------------------------

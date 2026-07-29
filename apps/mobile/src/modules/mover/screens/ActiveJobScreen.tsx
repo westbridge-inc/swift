@@ -416,10 +416,11 @@ export function ActiveJobScreen({ navigation }: any) {
                     Golden rule: collect the cash BEFORE handing over the order.
                   </T>
                 </View>
-                <PillButton label="Confirm payment & hand over" variant="outline" disabled={busy} onPress={() => riderAct.mutate({ id: job.id, action: 'handover' })} />
-                <View style={{ marginTop: space.md }}>
-                  {bigButton(deliverLabel, markDelivered, { loading: riderAct.isPending || courierProof.isPending, disabled: busy })}
-                </View>
+                {/* CASH: the ONLY completion path is capturing the money, which
+                    hands over + completes the delivery server-side. No plain
+                    "mark delivered" here — the server refuses a cash order that
+                    wasn't paid (PAYMENT_NOT_CAPTURED), so it must not be offered. */}
+                {bigButton('Confirm payment & hand over', () => riderAct.mutate({ id: job.id, action: 'handover' }), { loading: riderAct.isPending, disabled: busy })}
               </>
             )}
           </BottomSheetScrollView>

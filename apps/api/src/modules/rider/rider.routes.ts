@@ -803,6 +803,20 @@ export async function riderRoutes(app: FastifyInstance) {
       );
     }
 
+    // Golden rule: a CASH order can't be closed until the money is in hand.
+    // Cash is captured only via POST /handover {outcome:'paid'} (which then
+    // completes the delivery); /delivered is the final step for orders already
+    // paid (MMG is CAPTURED at checkout). Without this gate a rider could mark a
+    // cash order delivered without collecting — skipping the strike/guarantee
+    // flow and leaving the books saying "delivered" while nothing was paid.
+    if (order.paymentMethod === 'CASH' && order.paymentStatus !== 'CAPTURED') {
+      throw new AppError(
+        409,
+        'PAYMENT_NOT_CAPTURED',
+        'Collect the cash first — use “Confirm payment & hand over” to record it, which completes the delivery.',
+      );
+    }
+
     // Verify ride PIN if one was set on the order.
     if (order.ridePin && order.ridePin !== ridePin) {
       throw new AppError(400, 'INVALID_PIN', 'Incorrect delivery PIN. Please ask the customer for the correct PIN.');
