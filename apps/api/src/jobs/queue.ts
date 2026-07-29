@@ -156,12 +156,26 @@ export async function opsPageOnce(
   ttlSeconds: number,
   page: () => Promise<unknown>,
 ): Promise<boolean> {
+  const redisKey = `ops_page:${key}`;
+  // Claim FIRST so concurrent scans can't both page (the NX is the mutual
+  // exclusion). But claiming before the page succeeds means a transient notify
+  // failure would leave the key set and SILENTLY suppress this condition for the
+  // whole window with no admin ever reached — worst on the highest-stakes alerts.
+  let claimed: unknown;
   try {
-    const claimed = await ctx.redis.set(`ops_page:${key}`, '1', 'EX', ttlSeconds, 'NX');
-    if (claimed !== 'OK') return false;
+    claimed = await ctx.redis.set(redisKey, '1', 'EX', ttlSeconds, 'NX');
+  } catch {
+    return false; // couldn't even claim — a later scan retries
+  }
+  if (claimed !== 'OK') return false;
+  try {
     await page();
     return true;
   } catch {
+    // The page failed — release the claim so the NEXT detection re-pages rather
+    // than staying dark until the TTL expires. Best-effort; if this del also
+    // fails, TTL expiry eventually reopens paging.
+    await ctx.redis.del(redisKey).catch(() => {});
     return false;
   }
 }
