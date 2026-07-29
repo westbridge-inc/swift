@@ -24,6 +24,13 @@ const resolveSchema = z.object({
   notes: z.string().max(2000).optional(),
 });
 
+// War-room feed (§4.4). `open` = the alerts ops must act on right now.
+const listAlertsQuery = z.object({
+  status: z.enum(['open', 'active', 'all']).default('open'),
+  limit: z.coerce.number().int().min(1).max(200).default(50),
+});
+const OPEN_STATUSES = ['TRIGGER_PENDING', 'ACTIVE', 'ACKNOWLEDGED'] as const;
+
 export async function safetyRoutes(app: FastifyInstance) {
   const auth = { preHandler: [app.authenticate] };
   const sos = new SosService(app.prisma, app.io);
@@ -109,6 +116,21 @@ export async function safetyRoutes(app: FastifyInstance) {
     const body = resolveSchema.parse(request.body ?? {});
     const a = await sos.resolve(request.params.id, request.user.userId, body.resolutionCode, body.notes);
     return { success: true, data: { id: a.id, status: a.status, resolutionCode: a.resolutionCode } };
+  });
+
+  /** GET /sos — the ops war-room feed (§4.4). Ops-only. Fan-out pages + a socket
+   *  event announce new alerts; this is what a console loads/reloads from so it
+   *  never shows a blank board after a refresh or reconnect. `open` (default) is
+   *  the un-closed set ops must act on; most-recent first. */
+  app.get('/sos', auth, async (request) => {
+    if (!isOps(request.user.role)) throw new ForbiddenError('Only ops can list alerts.');
+    const q = listAlertsQuery.parse(request.query ?? {});
+    const where =
+      q.status === 'active' ? { status: 'ACTIVE' as const }
+      : q.status === 'all' ? {}
+      : { status: { in: [...OPEN_STATUSES] } };
+    const alerts = await app.prisma.sosAlert.findMany({ where, orderBy: { triggeredAt: 'desc' }, take: q.limit });
+    return { success: true, data: alerts };
   });
 
   // ── Emergency contacts (safety §5) ───────────────────────────────────────
