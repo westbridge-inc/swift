@@ -3,6 +3,7 @@ import { z } from 'zod';
 import { OrderStatus, OrderType, SettlementStatus } from '@prisma/client';
 import { OrderService, notHeldFilter } from '../order/order.service';
 import { VendorAnalyticsService } from './vendor-analytics.service';
+import { VendorMenuService } from './vendor-menu.service';
 import { PickingService } from '../order/picking.service';
 import { makeDispatchService } from '../dispatch/dispatch.service';
 import { dispatchTrigger, enqueueDeliveryDispatch } from '../dispatch/dispatch-trigger';
@@ -480,6 +481,7 @@ export async function vendorRoutes(app: FastifyInstance) {
   const auth = { preHandler: [app.authenticate] };
   const orderService = new OrderService(app.prisma, app.io);
   const analytics = new VendorAnalyticsService(app.prisma);
+  const menu = new VendorMenuService(app.prisma);
   const dispatch = makeDispatchService(app);
   const notifications = new NotificationService(app.prisma, app.io);
   const settlementLedger = new DeliveryCashSettlementService(app.prisma, notifications);
@@ -1389,45 +1391,14 @@ export async function vendorRoutes(app: FastifyInstance) {
   /** GET /categories — List all categories for the vendor */
   app.get('/categories', auth, async (request) => {
     const { vendorId } = await resolveVendor(app, request.user.userId, selectedVendorId(request));
-    const categories = await app.prisma.category.findMany({
-      where: { vendorId },
-      include: {
-        items: {
-          orderBy: { sortOrder: 'asc' },
-          include: { optionGroups: { orderBy: { sortOrder: 'asc' }, include: { options: { orderBy: { sortOrder: 'asc' } } } } },
-        },
-      },
-      orderBy: { sortOrder: 'asc' },
-    });
-    return { success: true, data: categories };
+    return { success: true, data: await menu.listCategories(vendorId) };
   });
 
   /** POST /categories — Create a category */
   app.post('/categories', auth, async (request) => {
     const { vendorId } = await requireVendor(app, request, 'MANAGER');
     const body = createCategorySchema.parse(request.body);
-    if (!body.name?.trim()) throw new ValidationError('Category name is required');
-
-    // Auto-assign sortOrder to end if not provided
-    let sortOrder = body.sortOrder;
-    if (sortOrder === undefined) {
-      const last = await app.prisma.category.findFirst({
-        where: { vendorId },
-        orderBy: { sortOrder: 'desc' },
-        select: { sortOrder: true },
-      });
-      sortOrder = (last?.sortOrder ?? -1) + 1;
-    }
-
-    const category = await app.prisma.category.create({
-      data: {
-        vendorId,
-        name: body.name.trim(),
-        description: body.description?.trim(),
-        imageUrl: body.imageUrl,
-        sortOrder,
-      },
-    });
+    const category = await menu.createCategory(vendorId, body);
     scheduleVendorSearchSync(app, vendorId);
     return { success: true, data: category };
   });
@@ -1435,20 +1406,8 @@ export async function vendorRoutes(app: FastifyInstance) {
   /** PUT /categories/:id — Update a category */
   app.put<{ Params: IdParam }>('/categories/:id', auth, async (request) => {
     const { vendorId } = await requireVendor(app, request, 'MANAGER');
-    const existing = await app.prisma.category.findUnique({ where: { id: request.params.id } });
-    if (!existing || existing.vendorId !== vendorId) throw new NotFoundError('Category', request.params.id);
-
     const body = updateCategorySchema.parse(request.body);
-    const category = await app.prisma.category.update({
-      where: { id: request.params.id },
-      data: {
-        ...(body.name !== undefined && { name: body.name.trim() }),
-        ...(body.description !== undefined && { description: body.description?.trim() }),
-        ...(body.imageUrl !== undefined && { imageUrl: body.imageUrl }),
-        ...(body.sortOrder !== undefined && { sortOrder: body.sortOrder }),
-        ...(body.isActive !== undefined && { isActive: body.isActive }),
-      },
-    });
+    const category = await menu.updateCategory(vendorId, request.params.id, body);
     scheduleVendorSearchSync(app, vendorId);
     return { success: true, data: category };
   });
@@ -1456,48 +1415,21 @@ export async function vendorRoutes(app: FastifyInstance) {
   /** DELETE /categories/:id — Delete a category (and its items) */
   app.delete<{ Params: IdParam }>('/categories/:id', auth, async (request) => {
     const { vendorId } = await requireVendor(app, request, 'MANAGER');
-    const existing = await app.prisma.category.findUnique({
-      where: { id: request.params.id },
-      include: { _count: { select: { items: true } }, items: { select: { id: true } } },
-    });
-    if (!existing || existing.vendorId !== vendorId) throw new NotFoundError('Category', request.params.id);
-
-    // Delete all items in this category first (cascading through option groups/options)
-    await app.prisma.option.deleteMany({
-      where: { optionGroup: { item: { categoryId: request.params.id } } },
-    });
-    await app.prisma.optionGroup.deleteMany({
-      where: { item: { categoryId: request.params.id } },
-    });
-    await app.prisma.item.deleteMany({ where: { categoryId: request.params.id } });
-    await app.prisma.category.delete({ where: { id: request.params.id } });
+    const { itemsRemoved, removedItemIds } = await menu.deleteCategory(vendorId, request.params.id);
 
     // hard delete: no sweep could find these rows later [SWIFT-UG-SRCH-01]
     const search = new SearchService(app.prisma);
-    for (const item of existing.items) search.removeItemDoc(item.id).catch(() => {});
+    for (const itemId of removedItemIds) search.removeItemDoc(itemId).catch(() => {});
     scheduleVendorSearchSync(app, vendorId);
 
-    return { success: true, data: { deleted: true, itemsRemoved: existing._count.items } };
+    return { success: true, data: { deleted: true, itemsRemoved } };
   });
 
   /** PUT /categories/reorder — Bulk reorder categories */
   app.put('/categories/reorder', auth, async (request) => {
     const { vendorId } = await requireVendor(app, request, 'MANAGER');
     const body = reorderCategoriesSchema.parse(request.body);
-
-    await app.prisma.$transaction(
-      body.order.map((item) =>
-        app.prisma.category.updateMany({
-          where: { id: item.id, vendorId },
-          data: { sortOrder: item.sortOrder },
-        }),
-      ),
-    );
-
-    const categories = await app.prisma.category.findMany({
-      where: { vendorId },
-      orderBy: { sortOrder: 'asc' },
-    });
+    const categories = await menu.reorderCategories(vendorId, body.order);
     scheduleVendorSearchSync(app, vendorId);
     return { success: true, data: categories };
   });
