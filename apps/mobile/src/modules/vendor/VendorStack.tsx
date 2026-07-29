@@ -104,6 +104,7 @@ import { useStoreSwitcher } from '../../stores/storeSwitcher';
 import { useVendorPreview } from '../../stores/vendorPreview';
 import { RoleSwitcherSheet } from '../../components/RoleSwitcherSheet';
 import { money } from '../../lib/money';
+import { vendorSurfaceForRole } from '../../lib/vendorRbac';
 import { mediaUrl } from '../../lib/images';
 import { VendorBulkImportScreen } from '../../screens/vendor/VendorBulkImportScreen';
 import { NewOrderTakeover } from './NewOrderTakeover';
@@ -487,8 +488,12 @@ function VendorOps({ store, navigation }: any) {
   const setSelfDelivery = useSetSelfDelivery();
   const orderAction = useOrderAction();
   const ordersQ = useVendorOrders(true);
-  const analyticsQ = useVendorAnalytics();
   const { stores, myRole } = useVendorProfile();
+  // Client mirror of the server's vendor role guards: a STAFF board hides the
+  // manager-only money + controls the API would 403 anyway (see vendorRbac). In
+  // sample/pending preview myRole is OWNER, so the full owner view still shows.
+  const surface = vendorSurfaceForRole(myRole);
+  const analyticsQ = useVendorAnalytics(surface.canSeeMoney);
   // §B preview: the board renders for a not-yet-ACTIVE store (pending vendor) OR
   // for a prospective vendor walking a read-only SAMPLE dashboard (previewType).
   const previewType = useVendorPreview((s) => s.previewType);
@@ -621,21 +626,24 @@ function VendorOps({ store, navigation }: any) {
           </Pressable>
         ) : null}
 
-        {/* Today's sales — Eats-Manager hero */}
-        <Card style={{ marginBottom: space.lg }}>
-          <T variant="caption" weight="bold" tone="muted">
-            TODAY&apos;S SALES
-          </T>
-          <T variant="display" style={{ marginTop: 2 }}>
-            {money(today.revenue ?? 0)}
-          </T>
-          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4, marginTop: 4 }}>
-            <MaterialCommunityIcons name="check-decagram" size={14} color={color.success} />
-            <T variant="caption" weight="semibold" tone="muted">
-              100% yours · {today.orders ?? 0} order{(today.orders ?? 0) === 1 ? '' : 's'} today
+        {/* Today's sales — Eats-Manager hero. MANAGER+ only: the /analytics
+            endpoint 403s STAFF, so a staff board would render a false GYD 0. */}
+        {surface.canSeeMoney ? (
+          <Card style={{ marginBottom: space.lg }}>
+            <T variant="caption" weight="bold" tone="muted">
+              TODAY&apos;S SALES
             </T>
-          </View>
-        </Card>
+            <T variant="display" style={{ marginTop: 2 }}>
+              {money(today.revenue ?? 0)}
+            </T>
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4, marginTop: 4 }}>
+              <MaterialCommunityIcons name="check-decagram" size={14} color={color.success} />
+              <T variant="caption" weight="semibold" tone="muted">
+                100% yours · {today.orders ?? 0} order{(today.orders ?? 0) === 1 ? '' : 's'} today
+              </T>
+            </View>
+          </Card>
+        ) : null}
 
         {/* Store status. In §B preview the controls are honestly locked — the
             server refuses commerce-on for an unverified business anyway. */}
@@ -654,7 +662,11 @@ function VendorOps({ store, navigation }: any) {
                   : !open ? 'Outside business hours' : accepting ? 'Accepting new orders' : 'You’re open but not taking new orders'}
               </T>
             </View>
-            <BrandSwitch value={!inPreview && open} disabled={inPreview} onChange={() => (inPreview || toggleOpen.isPending ? undefined : toggleOpen.mutate())} />
+            {/* Open/close is MANAGER-only server-side; STAFF still get the
+                pause/resume pill below (toggle-orders is open to floor staff). */}
+            {surface.canToggleOpen ? (
+              <BrandSwitch value={!inPreview && open} disabled={inPreview} onChange={() => (inPreview || toggleOpen.isPending ? undefined : toggleOpen.mutate())} />
+            ) : null}
           </View>
           {!inPreview ? (
             <PillButton
@@ -674,8 +686,9 @@ function VendorOps({ store, navigation }: any) {
         </Card>
 
         {/* Who delivers — self-delivery vs a Swift rider. When on, the server
-            routes this store's delivery orders to the vendor (no rider sent). */}
-        {!inPreview ? (
+            routes this store's delivery orders to the vendor (no rider sent).
+            MANAGER-only setting, so STAFF don't see a control that would 403. */}
+        {!inPreview && surface.canSetSelfDelivery ? (
           <Card style={{ marginBottom: space.lg }}>
             <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
               <View style={{ flex: 1, paddingRight: space.md }}>
@@ -705,10 +718,11 @@ function VendorOps({ store, navigation }: any) {
         {/* KPIs */}
         <View style={{ flexDirection: 'row', gap: space.md, marginBottom: space.lg }}>
           <KpiTile icon="receipt" value={String(orders.length)} label={isService ? 'Appointments' : 'Active orders'} />
-          <KpiTile icon="cash" value={money(queueValue)} label="In queue" />
+          {/* Money tiles are MANAGER-only (the /analytics read 403s STAFF). */}
+          {surface.canSeeMoney ? <KpiTile icon="cash" value={money(queueValue)} label="In queue" /> : null}
           {/* Prep time is a kitchen concept — appointments have no prep. */}
           {isService ? (
-            <KpiTile icon="check-circle-outline" value={money((today?.total) ?? 0)} label="Today" />
+            surface.canSeeMoney ? <KpiTile icon="check-circle-outline" value={money((today?.total) ?? 0)} label="Today" /> : null
           ) : (
             <KpiTile icon="timer-outline" value={`${store.estimatedPrepTime ?? 30}m`} label="Prep time" />
           )}

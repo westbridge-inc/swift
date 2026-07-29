@@ -454,13 +454,15 @@ export function useUploadItemImage() {
 
 // ─── Insights / settings ──────────────────────────────────────────────────────
 
-export function useVendorAnalytics() {
+// `enabled` lets a STAFF board suppress this MANAGER-only query (it would 403,
+// and a 403 reads as empty money — a misleading GYD 0). See vendorRbac.
+export function useVendorAnalytics(enabled = true) {
   const pv = usePreviewDataset();
   const q = useQuery({
     queryKey: ['vendor', 'analytics'],
     queryFn: () => unwrap<any>(vendorApi.analytics()),
     refetchInterval: 30000,
-    enabled: !pv,
+    enabled: !pv && enabled,
   });
   return pv ? previewQuery(pv.analytics) : q;
 }
