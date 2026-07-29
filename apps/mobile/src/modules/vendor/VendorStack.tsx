@@ -91,6 +91,7 @@ import {
   useConfirmVendorCashSettlement,
   usePopularItems,
   useBusyHours,
+  useRepeatCustomers,
   useVendorHours,
   useVendorBookings,
   useSetHours,
@@ -2083,6 +2084,33 @@ function RiderFeesOwedCard() {
   );
 }
 
+// Loyalty at a glance — how many customers came back (>=2 finished orders) and
+// the repeat rate. Reads the MANAGER-only endpoint; the Insights tab is already
+// manager-gated. Stays hidden until the store has finished orders.
+function RepeatCustomersCard() {
+  const q = useRepeatCustomers();
+  const d: any = q.data;
+  if (!d || (d.totalCustomers ?? 0) === 0) return null;
+  return (
+    <Card style={{ marginBottom: space.md }}>
+      <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
+        <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.sm }}>
+          <MaterialCommunityIcons name="account-heart" size={18} color={color.brand[500]} />
+          <T variant="body" weight="semibold">
+            Repeat customers
+          </T>
+        </View>
+        <T variant="body" weight="bold" tone="brand">
+          {d.repeatRate ?? 0}%
+        </T>
+      </View>
+      <T variant="caption" tone="muted" style={{ marginTop: 4 }}>
+        {d.repeatCustomers ?? 0} of {d.totalCustomers} customers came back — {d.totalOrders ?? 0} finished order{(d.totalOrders ?? 0) === 1 ? '' : 's'}.
+      </T>
+    </Card>
+  );
+}
+
 function VendorInsightsScreen() {
   const q = useVendorAnalytics();
   // Signed short-lived link (the JWT can't ride an in-app browser).
@@ -2181,6 +2209,7 @@ function VendorInsightsScreen() {
 
             {popularQ.data ? <TopItemsCard items={popularQ.data} /> : null}
             <BusyHoursCard />
+            <RepeatCustomersCard />
             <RatingsCard />
             <ReviewsCard />
             <Card style={{ marginBottom: space.md }}>

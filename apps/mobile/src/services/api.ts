@@ -497,6 +497,7 @@ export const vendorApi = {
   analyticsOps: (days = 30) => api.get('/vendor/analytics/ops', { params: { days } }),
   analyticsPopularItems: (limit = 8) => api.get('/vendor/analytics/popular-items', { params: { limit } }),
   analyticsBusyHours: () => api.get('/vendor/analytics/busy-hours'),
+  analyticsRepeatCustomers: () => api.get('/vendor/analytics/repeat-customers'),
   hours: () => api.get('/vendor/hours'),
   bookings: (params?: { from?: string; to?: string }) => api.get('/vendor/bookings', { params }),
   setHours: (hours: { dayOfWeek: number; openTime: string; closeTime: string; isClosed: boolean }[]) =>

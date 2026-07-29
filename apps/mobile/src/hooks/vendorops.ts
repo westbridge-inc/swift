@@ -500,6 +500,18 @@ export function useBusyHours() {
   return pv ? previewQuery(pv.busyHours) : q;
 }
 
+/** Loyalty: customers with >=2 finished orders here + the repeat rate. Read on
+ *  the MANAGER-only Insights tab (the endpoint requires MANAGER). */
+export function useRepeatCustomers() {
+  const pv = usePreviewDataset();
+  const q = useQuery({
+    queryKey: ['vendor', 'analytics', 'repeat-customers'],
+    queryFn: () => unwrap<any>(vendorApi.analyticsRepeatCustomers()),
+    enabled: !pv,
+  });
+  return pv ? previewQuery(pv.loyalty) : q;
+}
+
 /** Top items by lifetime + last-30-days order counts. */
 export function usePopularItems(limit = 8) {
   const pv = usePreviewDataset();

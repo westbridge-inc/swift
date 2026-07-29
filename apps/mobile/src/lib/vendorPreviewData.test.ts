@@ -60,6 +60,18 @@ describe('vendor preview — per-type sample datasets are coherent', () => {
     expect(b.customer.firstName).toBeTruthy();
     expect(typeof b.slotStart).toBe('string');
   });
+
+  it('every type has a coherent repeat-customers (loyalty) sample — the rate is derived, never contradictory', () => {
+    for (const type of TYPES) {
+      const l = vendorPreviewDataset(type).loyalty;
+      expect(l.totalCustomers).toBeGreaterThan(0);
+      expect(l.repeatCustomers).toBeLessThanOrEqual(l.totalCustomers); // a subset came back
+      expect(l.totalOrders).toBeGreaterThanOrEqual(l.totalCustomers); // repeat buyers order more
+      // repeatRate is computed from the counts, so the tile can't show a rate
+      // that contradicts "X of Y came back".
+      expect(l.repeatRate).toBe(Math.round((l.repeatCustomers / l.totalCustomers) * 100));
+    }
+  });
 });
 
 describe('vendorPreview store', () => {
