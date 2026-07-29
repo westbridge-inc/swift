@@ -20,6 +20,7 @@ import { estimateLoad } from '../../utils/load';
 import { parsePagination, paginatedResponse } from '../../utils/pagination';
 import { tenantCacheKey } from '../../utils/tenant-cache';
 import { AppError, NotFoundError, ConflictError, ValidationError } from '../../utils/errors';
+import { withIdempotency } from '../../utils/idempotency';
 import { throwForMissingProfile } from '../../utils/role-gate';
 import { clampDriverFare } from '../../utils/markup';
 import { ALLOWED_IMAGE_TYPES, looksLikeImage } from '../../utils/images';
@@ -147,17 +148,19 @@ export async function riderRoutes(app: FastifyInstance) {
     const { id } = request.params as { id: string };
     await getRider(app, request.user.userId); // authz before validation
     const body = handoverSchema.parse(request.body);
-    const result = await cashRules.handover(id, request.user.userId, body);
-    return {
-      success: true,
-      data: {
+    // Idempotent on Idempotency-Key: a network-retried handover returns the
+    // original result instead of failing the (now-terminal) transition.
+    const { data, replayed } = await withIdempotency(app, request, 'handover', id, async () => {
+      const result = await cashRules.handover(id, request.user.userId, body);
+      return {
         orderId: id,
         status: result.order.status,
         claim: result.claim
           ? { id: result.claim.id, status: result.claim.status, amount: Number(result.claim.amount), flags: result.claim.flags }
           : null,
-      },
-    };
+      };
+    });
+    return { success: true, data, replayed };
   });
 
   /** POST /offers/accept — atomic claim of a live dispatch offer. This is the
@@ -809,66 +812,70 @@ export async function riderRoutes(app: FastifyInstance) {
     const { id } = request.params as { id: string };
     const { ridePin } = pickupPinSchema.parse(request.body ?? {});
     const rider = await getRider(app, request.user.userId);
-    const order = await getOwnedOrder(app, id, rider.id);
+    // Idempotent on Idempotency-Key: a retried final step returns the original
+    // result instead of failing the now-terminal transition. The whole effect
+    // (incl. the transition / payment / PIN checks) runs inside the claim so a
+    // replay short-circuits to the stored result.
+    const { data, replayed } = await withIdempotency(app, request, 'delivered', id, async () => {
+      const order = await getOwnedOrder(app, id, rider.id);
 
-    const validFrom = ['ARRIVED', 'EN_ROUTE_DELIVERY'];
-    if (!validFrom.includes(order.status)) {
-      throw new AppError(
-        400,
-        'INVALID_TRANSITION',
-        `Cannot mark as delivered from status ${order.status}. Rider must be ARRIVED or EN_ROUTE_DELIVERY.`,
-      );
-    }
+      const validFrom = ['ARRIVED', 'EN_ROUTE_DELIVERY'];
+      if (!validFrom.includes(order.status)) {
+        throw new AppError(
+          400,
+          'INVALID_TRANSITION',
+          `Cannot mark as delivered from status ${order.status}. Rider must be ARRIVED or EN_ROUTE_DELIVERY.`,
+        );
+      }
 
-    // Golden rule: a CASH order can't be closed until the money is in hand.
-    // Cash is captured only via POST /handover {outcome:'paid'} (which then
-    // completes the delivery); /delivered is the final step for orders already
-    // paid (MMG is CAPTURED at checkout). Without this gate a rider could mark a
-    // cash order delivered without collecting — skipping the strike/guarantee
-    // flow and leaving the books saying "delivered" while nothing was paid.
-    if (order.paymentMethod === 'CASH' && order.paymentStatus !== 'CAPTURED') {
-      throw new AppError(
-        409,
-        'PAYMENT_NOT_CAPTURED',
-        'Collect the cash first — use “Confirm payment & hand over” to record it, which completes the delivery.',
-      );
-    }
+      // Golden rule: a CASH order can't be closed until the money is in hand.
+      // Cash is captured only via POST /handover {outcome:'paid'} (which then
+      // completes the delivery); /delivered is the final step for orders already
+      // paid (MMG is CAPTURED at checkout). Without this gate a rider could mark
+      // a cash order delivered without collecting — skipping the strike/guarantee
+      // flow and leaving the books saying "delivered" while nothing was paid.
+      if (order.paymentMethod === 'CASH' && order.paymentStatus !== 'CAPTURED') {
+        throw new AppError(
+          409,
+          'PAYMENT_NOT_CAPTURED',
+          'Collect the cash first — use “Confirm payment & hand over” to record it, which completes the delivery.',
+        );
+      }
 
-    // Verify ride PIN if one was set on the order.
-    if (order.ridePin && order.ridePin !== ridePin) {
-      throw new AppError(400, 'INVALID_PIN', 'Incorrect delivery PIN. Please ask the customer for the correct PIN.');
-    }
+      // Verify ride PIN if one was set on the order.
+      if (order.ridePin && order.ridePin !== ridePin) {
+        throw new AppError(400, 'INVALID_PIN', 'Incorrect delivery PIN. Please ask the customer for the correct PIN.');
+      }
 
-    // 1. Update order status — handles notifications, sockets, float release,
-    //    and freeing the rider (isAvailable/currentOrderId/totalDeliveries)
-    //    centrally, so every terminal path behaves the same.
-    await orderService.updateStatus(id, 'DELIVERED', request.user.userId, 'Delivery completed');
+      // 1. Update order status — handles notifications, sockets, float release,
+      //    and freeing the rider (isAvailable/currentOrderId/totalDeliveries)
+      //    centrally, so every terminal path behaves the same.
+      await orderService.updateStatus(id, 'DELIVERED', request.user.userId, 'Delivery completed');
 
-    // 2. Create earning records (delivery fee + tip).
-    await orderService.createEarnings(id);
+      // 2. Create earning records (delivery fee + tip).
+      await orderService.createEarnings(id);
 
-    // 3. Read the freed rider back for the response payload.
-    const updated = await app.prisma.rider.findUniqueOrThrow({
-      where: { id: rider.id },
-      select: { totalDeliveries: true, isAvailable: true },
-    });
+      // 3. Read the freed rider back for the response payload.
+      const updated = await app.prisma.rider.findUniqueOrThrow({
+        where: { id: rider.id },
+        select: { totalDeliveries: true, isAvailable: true },
+      });
 
-    // 4. Calculate this delivery's earnings for the response.
-    const deliveryEarning = Number(order.deliveryFee) + Number(order.tipAmount);
+      // 4. Calculate this delivery's earnings for the response.
+      const deliveryEarning = Number(order.deliveryFee) + Number(order.tipAmount);
 
-    return {
-      success: true,
-      data: {
+      return {
         orderId: id,
         orderNumber: order.orderNumber,
-        status: 'DELIVERED',
+        status: 'DELIVERED' as const,
         earning: deliveryEarning,
         deliveryFee: Number(order.deliveryFee),
         tip: Number(order.tipAmount),
         totalDeliveries: updated.totalDeliveries,
         isAvailable: updated.isAvailable,
-      },
-    };
+      };
+    });
+    return { success: true, data, replayed };
   });
 
   // =========================================================================
