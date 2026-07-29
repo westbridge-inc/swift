@@ -144,9 +144,10 @@ export class SosService {
     return this.prisma.sosAlert.findUniqueOrThrow({ where: { id } });
   }
 
-  /** Fan-out on ACTIVE (§4.4): ops page + war-room socket, receipts recorded.
-   *  Emergency-contact SMS + high-frequency location ride on later slices. The
-   *  counterparty is NEVER notified (don't tip off an attacker). */
+  /** Fan-out on ACTIVE (§4.4): ops page + war-room socket + an SMS to every
+   *  VERIFIED emergency contact (§5), receipts recorded. High-frequency location
+   *  streaming rides on a later slice. The counterparty is NEVER notified (don't
+   *  tip off an attacker). */
   private async fanOut(id: string) {
     const alert = await this.prisma.sosAlert.findUnique({ where: { id } });
     if (!alert || alert.status !== 'ACTIVE') return;
@@ -168,6 +169,37 @@ export class SosService {
     } catch {
       receipts['socket'] = false;
     }
+
+    // Verified emergency contacts (§5), in priority order. Best-effort PER
+    // contact — one failed send must not stop the rest. NEVER rate-limited or
+    // budgeted: this is the real emergency, not the verification handshake.
+    // Unverified numbers are skipped (they never proved reachable / aware).
+    try {
+      const contacts = await this.prisma.emergencyContact.findMany({
+        where: { userId: alert.actorUserId, verifiedAt: { not: null } },
+        orderBy: [{ priority: 'asc' }, { createdAt: 'asc' }],
+        take: 10,
+      });
+      if (contacts.length > 0) {
+        const { getChannels } = await import('../../providers/notifications/channels');
+        const sms = getChannels().sms;
+        const actor = await this.prisma.user.findUnique({ where: { id: alert.actorUserId }, select: { firstName: true } });
+        const who = actor?.firstName?.trim() || 'Someone you know';
+        const where = alert.triggerLat != null && alert.triggerLng != null
+          ? ` Last known location: https://maps.google.com/?q=${alert.triggerLat},${alert.triggerLng}.`
+          : '';
+        const body = `🚨 ${who} triggered an emergency SOS on Swift and may need help.${where} Please check on them and contact local emergency services if needed.`;
+        const contactReceipts: Array<{ id: string; ok: boolean }> = [];
+        for (const c of contacts) {
+          try { await sms.sendSms(c.phoneE164, body); contactReceipts.push({ id: c.id, ok: true }); }
+          catch { contactReceipts.push({ id: c.id, ok: false }); }
+        }
+        receipts['contacts'] = contactReceipts;
+      }
+    } catch (e) {
+      log().error({ err: e, sosAlertId: id }, 'SOS fan-out: emergency-contact SMS failed');
+    }
+
     await this.prisma.sosAlert.update({ where: { id }, data: { deliveryReceipts: receipts as never } }).catch(() => {});
   }
 
