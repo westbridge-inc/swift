@@ -126,9 +126,14 @@ export class SosService {
     return this.transition(id, 'ACKNOWLEDGED', { acknowledgedAt: new Date(), acknowledgedBy: opsUserId });
   }
 
-  /** Ops resolves — requires a resolution code. ACTIVE|ACKNOWLEDGED → RESOLVED. */
+  /** Ops resolves — requires a resolution code. ACTIVE|ACKNOWLEDGED → RESOLVED.
+   *  Closes the loop: the emergency contacts who were alarmed get an all-clear.
+   *  ONLY ops resolution does this — "I'm safe" must NOT (a coerced victim could
+   *  be forced to tap it; §4.1). Best-effort, never fails the resolve. */
   async resolve(id: string, opsUserId: string, resolutionCode: SosResolutionCode, notes?: string) {
-    return this.transition(id, 'RESOLVED', { resolvedAt: new Date(), resolvedBy: opsUserId, resolutionCode, resolutionNotes: notes ?? null });
+    const resolved = await this.transition(id, 'RESOLVED', { resolvedAt: new Date(), resolvedBy: opsUserId, resolutionCode, resolutionNotes: notes ?? null });
+    await this.fanOutResolved(id).catch(() => {});
+    return resolved;
   }
 
   /** The single CAS transition point — rejects and logs any illegal move. */
@@ -201,6 +206,34 @@ export class SosService {
     }
 
     await this.prisma.sosAlert.update({ where: { id }, data: { deliveryReceipts: receipts as never } }).catch(() => {});
+  }
+
+  /** All-clear to the emergency contacts once ops CLOSE an alert — you don't
+   *  alarm someone's contacts and then leave them in the dark. Kept deliberately
+   *  neutral ("closed by our safety team", not "they're safe") so it's accurate
+   *  regardless of resolution code. Merges its receipts into deliveryReceipts
+   *  without clobbering the original fan-out. Only reached from resolve(). */
+  private async fanOutResolved(id: string) {
+    const alert = await this.prisma.sosAlert.findUnique({ where: { id } });
+    if (!alert || alert.status !== 'RESOLVED') return;
+    const contacts = await this.prisma.emergencyContact.findMany({
+      where: { userId: alert.actorUserId, verifiedAt: { not: null } },
+      orderBy: [{ priority: 'asc' }, { createdAt: 'asc' }],
+      take: 10,
+    });
+    if (contacts.length === 0) return;
+    const { getChannels } = await import('../../providers/notifications/channels');
+    const sms = getChannels().sms;
+    const actor = await this.prisma.user.findUnique({ where: { id: alert.actorUserId }, select: { firstName: true } });
+    const who = actor?.firstName?.trim() || 'the person you were alerted about';
+    const body = `✅ Update from Swift: the emergency alert involving ${who} has been closed by our safety team. If you're still concerned, please reach out to them directly.`;
+    const notice: Array<{ id: string; ok: boolean }> = [];
+    for (const c of contacts) {
+      try { await sms.sendSms(c.phoneE164, body); notice.push({ id: c.id, ok: true }); }
+      catch { notice.push({ id: c.id, ok: false }); }
+    }
+    const existing = (alert.deliveryReceipts as Record<string, unknown> | null) ?? {};
+    await this.prisma.sosAlert.update({ where: { id }, data: { deliveryReceipts: { ...existing, resolvedNotice: notice } as never } }).catch(() => {});
   }
 
   /** Grace-expiry sweep — every held TRIGGER_PENDING whose grace has elapsed
