@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Vibration } from 'react-native';
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { useMutation, useQuery, useQueryClient, type UseMutationOptions, type UseMutationResult } from '@tanstack/react-query';
 import { vendorApi } from '../services/api';
 import { connectSocket, getSocket } from '../services/socket';
 import { useStoreSwitcher } from '../stores/storeSwitcher';
@@ -28,6 +28,20 @@ async function tryUnwrap<T = any>(p: Promise<any>): Promise<T | null> {
 function usePreviewDataset(): VendorPreviewDataset | null {
   const previewType = useVendorPreview((s) => s.previewType);
   return useMemo(() => (previewType ? vendorPreviewDataset(previewType) : null), [previewType]);
+}
+
+// A mutation that is a strict NO-OP in a sample preview. This enforces the
+// vendor preview's read-only guarantee at the HOOK layer — the alternative is
+// relying on the server to 401 an unauthenticated preview call, which leaves the
+// invariant one dropped `disabled` prop away from firing a real write. Real and
+// legacy pending-peek sessions (pv === null) get the live mutation, unchanged.
+// usePreviewDataset() is called unconditionally so hook order stays stable.
+function usePreviewSafeMutation<TData = unknown, TError = unknown, TVars = void, TCtx = unknown>(
+  options: UseMutationOptions<TData, TError, TVars, TCtx>,
+): UseMutationResult<TData, TError, TVars, TCtx> {
+  const pv = usePreviewDataset();
+  const m = useMutation(options);
+  return (pv ? previewMutation() : m) as UseMutationResult<TData, TError, TVars, TCtx>;
 }
 
 /** The stores this account works in; `store` is the selected one and
@@ -70,7 +84,7 @@ export function useMyStoreReviews() {
 
 export function useRespondReview() {
   const qc = useQueryClient();
-  return useMutation({
+  return usePreviewSafeMutation({
     mutationFn: ({ id, response }: { id: string; response: string }) => unwrap(vendorApi.respondReview(id, response)),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['vendor', 'reviews'] }),
   });
@@ -86,7 +100,7 @@ export function useVendorPromos(enabled = true) {
 
 export function useCreatePromo() {
   const qc = useQueryClient();
-  return useMutation({
+  return usePreviewSafeMutation({
     mutationFn: (data: Parameters<typeof vendorApi.createPromo>[0]) => unwrap(vendorApi.createPromo(data)),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['vendor', 'promos'] }),
   });
@@ -94,7 +108,7 @@ export function useCreatePromo() {
 
 export function useUpdatePromo() {
   const qc = useQueryClient();
-  return useMutation({
+  return usePreviewSafeMutation({
     mutationFn: ({ id, data }: { id: string; data: { isActive?: boolean; validUntil?: string } }) =>
       unwrap(vendorApi.updatePromo(id, data)),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['vendor', 'promos'] }),
@@ -103,7 +117,7 @@ export function useUpdatePromo() {
 
 export function useDeletePromo() {
   const qc = useQueryClient();
-  return useMutation({
+  return usePreviewSafeMutation({
     mutationFn: (id: string) => unwrap(vendorApi.deletePromo(id)),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['vendor', 'promos'] }),
   });
@@ -123,7 +137,7 @@ export function useVendorStaff(enabled = true) {
 
 export function useAddStaff() {
   const qc = useQueryClient();
-  return useMutation({
+  return usePreviewSafeMutation({
     mutationFn: (data: { phone: string; role: 'MANAGER' | 'STAFF' }) => unwrap(vendorApi.addStaff(data)),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['vendor', 'staff'] }),
   });
@@ -131,7 +145,7 @@ export function useAddStaff() {
 
 export function useRemoveStaff() {
   const qc = useQueryClient();
-  return useMutation({
+  return usePreviewSafeMutation({
     mutationFn: (id: string) => unwrap(vendorApi.removeStaff(id)),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['vendor', 'staff'] }),
   });
@@ -139,7 +153,7 @@ export function useRemoveStaff() {
 
 export function useUpdateStaffRole() {
   const qc = useQueryClient();
-  return useMutation({
+  return usePreviewSafeMutation({
     mutationFn: ({ id, role }: { id: string; role: 'MANAGER' | 'STAFF' }) => unwrap(vendorApi.updateStaff(id, role)),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['vendor', 'staff'] }),
   });
@@ -245,7 +259,7 @@ export function useVendorSubscription(enabled = true) {
  *  decline memory server-side and searches again from the tightest radius. */
 export function useRetryDispatch() {
   const qc = useQueryClient();
-  return useMutation({
+  return usePreviewSafeMutation({
     mutationFn: (id: string) => unwrap(vendorApi.retryDispatch(id)),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['vendor', 'orders'] }),
   });
@@ -253,26 +267,25 @@ export function useRetryDispatch() {
 
 export function useToggleOpen() {
   const qc = useQueryClient();
-  return useMutation({ mutationFn: () => unwrap(vendorApi.toggleOpen()), onSuccess: () => qc.invalidateQueries({ queryKey: ['vendor', 'profile'] }) });
+  return usePreviewSafeMutation({ mutationFn: () => unwrap(vendorApi.toggleOpen()), onSuccess: () => qc.invalidateQueries({ queryKey: ['vendor', 'profile'] }) });
 }
 export function useToggleOrders() {
   const qc = useQueryClient();
-  return useMutation({ mutationFn: () => unwrap(vendorApi.toggleOrders()), onSuccess: () => qc.invalidateQueries({ queryKey: ['vendor', 'profile'] }) });
+  return usePreviewSafeMutation({ mutationFn: () => unwrap(vendorApi.toggleOrders()), onSuccess: () => qc.invalidateQueries({ queryKey: ['vendor', 'profile'] }) });
 }
 /** Turn self-delivery on/off. When on, the server routes this store's delivery
  *  orders to VENDOR_DELIVERY (the vendor delivers) instead of dispatching a rider. */
 export function useSetSelfDelivery() {
   const qc = useQueryClient();
-  return useMutation({
+  return usePreviewSafeMutation({
     mutationFn: (selfDeliveryEnabled: boolean) => unwrap(vendorApi.updateProfile({ selfDeliveryEnabled })),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['vendor', 'profile'] }),
   });
 }
 
 export function useOrderAction() {
-  const pv = usePreviewDataset();
   const qc = useQueryClient();
-  const m = useMutation({
+  return usePreviewSafeMutation({
     mutationFn: ({
       id,
       action,
@@ -292,7 +305,6 @@ export function useOrderAction() {
     },
     onSuccess: () => qc.invalidateQueries({ queryKey: ['vendor', 'orders'] }),
   });
-  return pv ? previewMutation() : m;
 }
 
 /** MMG cash ledger — delivery fees this store owes riders in cash (the
@@ -309,7 +321,7 @@ export function useVendorCashSettlements(enabled = true) {
 /** "We handed the rider their fee" — the store's half of the dual confirm. */
 export function useConfirmVendorCashSettlement() {
   const qc = useQueryClient();
-  return useMutation({
+  return usePreviewSafeMutation({
     mutationFn: (id: string) => unwrap(vendorApi.confirmCashSettlement(id)),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['vendor', 'cash-settlements'] }),
   });
@@ -322,17 +334,17 @@ export function usePickingActions() {
     qc.invalidateQueries({ queryKey: ['vendor', 'order', orderId] });
     qc.invalidateQueries({ queryKey: ['vendor', 'orders'] });
   };
-  const setPicked = useMutation({
+  const setPicked = usePreviewSafeMutation({
     mutationFn: ({ orderId, lineId, picked }: { orderId: string; lineId: string; picked: boolean }) =>
       unwrap(vendorApi.setLinePicked(orderId, lineId, picked)),
     onSuccess: (_d, v) => invalidate(v.orderId),
   });
-  const substitute = useMutation({
+  const substitute = usePreviewSafeMutation({
     mutationFn: ({ orderId, lineId, substituteItemId }: { orderId: string; lineId: string; substituteItemId: string }) =>
       unwrap(vendorApi.proposeSubstitution(orderId, lineId, substituteItemId)),
     onSuccess: (_d, v) => invalidate(v.orderId),
   });
-  const refundLine = useMutation({
+  const refundLine = usePreviewSafeMutation({
     mutationFn: ({ orderId, lineId }: { orderId: string; lineId: string }) =>
       unwrap(vendorApi.refundLine(orderId, lineId)),
     onSuccess: (_d, v) => invalidate(v.orderId),
@@ -351,7 +363,7 @@ export function useVendorMenu() {
 
 export function useCreateCategory() {
   const qc = useQueryClient();
-  return useMutation({
+  return usePreviewSafeMutation({
     mutationFn: (data: { name: string }) => unwrap(vendorApi.createCategory(data)),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['vendor', 'menu'] }),
   });
@@ -359,7 +371,7 @@ export function useCreateCategory() {
 
 export function useUpdateCategory() {
   const qc = useQueryClient();
-  return useMutation({
+  return usePreviewSafeMutation({
     mutationFn: ({ id, data }: { id: string; data: { name?: string } }) => unwrap(vendorApi.updateCategory(id, data)),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['vendor', 'menu'] }),
   });
@@ -368,7 +380,7 @@ export function useUpdateCategory() {
 /** Deleting a category removes its items too — the UI must confirm with the count. */
 export function useDeleteCategory() {
   const qc = useQueryClient();
-  return useMutation({
+  return usePreviewSafeMutation({
     mutationFn: (id: string) => unwrap(vendorApi.deleteCategory(id)),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['vendor', 'menu'] }),
   });
@@ -377,7 +389,7 @@ export function useDeleteCategory() {
 /** Create (no id) or update (id present) an item. */
 export function useSaveItem() {
   const qc = useQueryClient();
-  return useMutation({
+  return usePreviewSafeMutation({
     mutationFn: ({ id, data }: { id?: string; data: any }) =>
       id ? unwrap(vendorApi.updateItem(id, data)) : unwrap(vendorApi.createItem(data)),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['vendor', 'menu'] }),
@@ -386,7 +398,7 @@ export function useSaveItem() {
 
 export function useDeleteItem() {
   const qc = useQueryClient();
-  return useMutation({
+  return usePreviewSafeMutation({
     mutationFn: (id: string) => unwrap(vendorApi.deleteItem(id)),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['vendor', 'menu'] }),
   });
@@ -394,7 +406,7 @@ export function useDeleteItem() {
 
 export function useSetItemAvailability() {
   const qc = useQueryClient();
-  return useMutation({
+  return usePreviewSafeMutation({
     mutationFn: ({ id, isAvailable }: { id: string; isAvailable: boolean }) =>
       unwrap(vendorApi.setItemAvailability(id, isAvailable)),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['vendor', 'menu'] }),
@@ -407,7 +419,7 @@ export function useSetItemAvailability() {
 
 export function useAddOptionGroup() {
   const qc = useQueryClient();
-  return useMutation({
+  return usePreviewSafeMutation({
     mutationFn: ({ itemId, data }: { itemId: string; data: { name: string; isRequired?: boolean; minSelect?: number; maxSelect?: number } }) =>
       unwrap<any>(vendorApi.addOptionGroup(itemId, data)),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['vendor', 'menu'] }),
@@ -416,7 +428,7 @@ export function useAddOptionGroup() {
 
 export function useDeleteOptionGroup() {
   const qc = useQueryClient();
-  return useMutation({
+  return usePreviewSafeMutation({
     mutationFn: (id: string) => unwrap(vendorApi.deleteOptionGroup(id)),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['vendor', 'menu'] }),
   });
@@ -424,7 +436,7 @@ export function useDeleteOptionGroup() {
 
 export function useAddOption() {
   const qc = useQueryClient();
-  return useMutation({
+  return usePreviewSafeMutation({
     mutationFn: ({ groupId, data }: { groupId: string; data: { name: string; additionalPrice?: number } }) =>
       unwrap<any>(vendorApi.addOption(groupId, data)),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['vendor', 'menu'] }),
@@ -433,7 +445,7 @@ export function useAddOption() {
 
 export function useDeleteOption() {
   const qc = useQueryClient();
-  return useMutation({
+  return usePreviewSafeMutation({
     mutationFn: (id: string) => unwrap(vendorApi.deleteOption(id)),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['vendor', 'menu'] }),
   });
@@ -442,7 +454,7 @@ export function useDeleteOption() {
 /** Upload (or replace) an item's photo — multipart to the StorageProvider. */
 export function useUploadItemImage() {
   const qc = useQueryClient();
-  return useMutation({
+  return usePreviewSafeMutation({
     mutationFn: ({ id, file }: { id: string; file: { uri: string; name: string; type: string } }) => {
       const form = new FormData();
       form.append('file', { uri: file.uri, name: file.name, type: file.type } as unknown as Blob);
@@ -569,7 +581,7 @@ export function useVendorBookings(enabled = true) {
 
 export function useSetHours() {
   const qc = useQueryClient();
-  return useMutation({
+  return usePreviewSafeMutation({
     mutationFn: (hours: DayHours[]) => unwrap(vendorApi.setHours(hours)),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['vendor', 'hours'] });
@@ -581,7 +593,7 @@ export function useSetHours() {
 /** Map a pasted store CSV's columns to Swift fields (preview only, no import). */
 /** Pick-a-file imports: xlsx and PDF menus land in the same automap preview. */
 export function useImportFile() {
-  return useMutation({
+  return usePreviewSafeMutation({
     mutationFn: ({ kind, file }: { kind: 'xlsx' | 'menu-pdf'; file: { uri: string; name: string; type: string } }) => {
       const form = new FormData();
       form.append('file', file as unknown as Blob);
@@ -591,13 +603,13 @@ export function useImportFile() {
 }
 
 export function useImportAutomap() {
-  return useMutation({ mutationFn: (csv: string) => unwrap<any>(vendorApi.importAutomap(csv)) });
+  return usePreviewSafeMutation({ mutationFn: (csv: string) => unwrap<any>(vendorApi.importAutomap(csv)) });
 }
 
 /** Bulk-import the (mapped) CSV — good rows imported, bad rows reported. */
 export function useImportItems() {
   const qc = useQueryClient();
-  return useMutation({
+  return usePreviewSafeMutation({
     mutationFn: (csv: string) => unwrap<any>(vendorApi.importItems(csv)),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['vendor', 'menu'] }),
   });
