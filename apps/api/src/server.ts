@@ -17,6 +17,7 @@ import { chatRoutes } from './modules/chat/chat.routes';
 import { moderationRoutes } from './modules/moderation/moderation.routes';
 import { verificationRoutes } from './modules/verification/verification.routes';
 import { ridesRoutes } from './modules/rides/rides.routes';
+import { safetyRoutes } from './modules/safety/safety.routes';
 import { placesRoutes } from './modules/places/places.routes';
 import courierRoutes from './modules/courier/courier.routes';
 import { servicesRoutes } from './modules/services/services.routes';
@@ -273,6 +274,7 @@ async function buildApp() {
   await app.register(moderationRoutes, { prefix: '/api/v1' });
   await app.register(verificationRoutes, { prefix: '/api/v1/verification' });
   await app.register(ridesRoutes, { prefix: '/api/v1/rides' });
+  await app.register(safetyRoutes, { prefix: '/api/v1/safety' });
   await app.register(placesRoutes, { prefix: '/api/v1/places' });
   await app.register(courierRoutes, { prefix: '/api/v1/courier' });
   await app.register(servicesRoutes, { prefix: '/api/v1/services' });
