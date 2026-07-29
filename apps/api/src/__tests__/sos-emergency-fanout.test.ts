@@ -76,4 +76,32 @@ describe('SOS fan-out → emergency contacts', () => {
     expect(toVerified).toBeTruthy();
     expect(toVerified!.body).not.toContain('maps.google.com');
   });
+
+  it('ops resolving the alert sends the contacts an all-clear (loop closed), preserving the original receipts', async () => {
+    const { user, verifiedPhone } = await seedActorWithContacts();
+    const alert = await sos.create({ actorUserId: user.id, actorRole: 'CUSTOMER', triggerSource: 'OPS_MANUAL' }); // ACTIVE now
+    alertIds.push(alert.id);
+    resetDevChannelLog(); // drop the initial SOS SMS — we assert the resolution notice
+
+    await sos.resolve(alert.id, 'ops-1', 'SAFE_CONFIRMED', 'called back, safe');
+    const allClear = devChannelLog.find((e) => e.channel === 'sms' && e.to === verifiedPhone);
+    expect(allClear).toBeTruthy();
+    expect(allClear!.body).toContain('closed by our safety team');
+
+    const fresh = await prisma.sosAlert.findUniqueOrThrow({ where: { id: alert.id } });
+    const receipts = fresh.deliveryReceipts as { contacts?: unknown[]; resolvedNotice?: Array<{ ok: boolean }> };
+    expect(receipts.resolvedNotice).toHaveLength(1);
+    expect(receipts.resolvedNotice![0]!.ok).toBe(true);
+    expect(receipts.contacts).toHaveLength(1); // original fan-out receipts NOT clobbered
+  });
+
+  it('"I\'m safe" does NOT send an all-clear — only ops closing does (coercion doctrine)', async () => {
+    const { user, verifiedPhone } = await seedActorWithContacts();
+    const alert = await sos.create({ actorUserId: user.id, actorRole: 'CUSTOMER', triggerSource: 'OPS_MANUAL' }); // ACTIVE
+    alertIds.push(alert.id);
+    resetDevChannelLog();
+    await sos.markSafe(alert.id);
+    const sms = devChannelLog.find((e) => e.channel === 'sms' && e.to === verifiedPhone);
+    expect(sms).toBeFalsy(); // a coerced tap must not tell contacts the coast is clear
+  });
 });
