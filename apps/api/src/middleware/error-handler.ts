@@ -72,7 +72,7 @@ export function registerErrorHandler(app: FastifyInstance) {
     // — accounting must never slow the error response, and minimal test
     // harnesses without redis just skip it.
     void (async () => {
-      const redis = (app as { redis?: { incr(k: string): Promise<number>; expire(k: string, s: number): Promise<unknown>; set(k: string, v: string, ...a: unknown[]): Promise<unknown> } }).redis;
+      const redis = (app as { redis?: { incr(k: string): Promise<number>; expire(k: string, s: number): Promise<unknown>; set(k: string, v: string, ...a: unknown[]): Promise<unknown>; del(k: string): Promise<unknown> } }).redis;
       if (!redis) return;
       const windowKey = `err5xx:${Math.floor(Date.now() / 60_000)}`;
       const count = await redis.incr(windowKey);
@@ -82,11 +82,17 @@ export function registerErrorHandler(app: FastifyInstance) {
       const claimed = await redis.set('ops_page:error-spike', '1', 'EX', 900, 'NX');
       if (claimed !== 'OK') return;
       const { notifyAdmins, NotificationService } = await import('../modules/notification/notification.service');
-      await notifyAdmins(app.prisma, new NotificationService(app.prisma, app.io), {
-        title: 'Server error spike',
-        body: `${threshold}+ unhandled 500s in the last minute. Check Sentry / the API logs now.`,
-        data: { kind: 'ops_error_spike', perMinute: threshold },
-      });
+      try {
+        await notifyAdmins(app.prisma, new NotificationService(app.prisma, app.io), {
+          title: 'Server error spike',
+          body: `${threshold}+ unhandled 500s in the last minute. Check Sentry / the API logs now.`,
+          data: { kind: 'ops_error_spike', perMinute: threshold },
+        });
+      } catch {
+        // Release the dedup claim so the next spike re-pages rather than staying
+        // dark for the window on a transient notify failure.
+        await redis.del('ops_page:error-spike').catch(() => {});
+      }
     })().catch(() => {});
     return reply.status(500).send({
       success: false,

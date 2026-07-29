@@ -40,6 +40,7 @@ afterAll(async () => {
     await app.prisma.user.deleteMany({ where: { id: adminUserId } });
   }
   await app.redis.del('ops_page:test-dedupe');
+  await app.redis.del('ops_page:test-dedupe-fail');
   await app.close();
 });
 
@@ -113,5 +114,20 @@ describe('opsPageOnce dedup [SWIFT-AUD-D7-02]', () => {
     expect(first).toBe(true);
     expect(second).toBe(false);
     expect(fired).toBe(1);
+  });
+
+  it('a FAILED page releases the dedup key so the next detection re-pages — no silent suppression', async () => {
+    let fired = 0;
+    const failing = async () => { fired += 1; throw new Error('notify down'); };
+    const ok = async () => { fired += 1; };
+    // The page throws — the claim must NOT be left set, or this condition stays
+    // un-paged for the whole window with no admin ever reached (the exact bug on
+    // billing-failure / dead-worker-fleet alerts).
+    const first = await opsPageOnce({ redis: app.redis }, 'test-dedupe-fail', 60, failing);
+    expect(first).toBe(false);
+    // The key was released, so the very next detection actually re-pages and lands.
+    const second = await opsPageOnce({ redis: app.redis }, 'test-dedupe-fail', 60, ok);
+    expect(second).toBe(true);
+    expect(fired).toBe(2); // both attempts ran — the failure did not suppress paging
   });
 });

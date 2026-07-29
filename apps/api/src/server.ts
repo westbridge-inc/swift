@@ -192,19 +192,24 @@ async function buildApp() {
       if (!health.page) return;
       const neverBooted = health.kind === 'never-booted';
       // Separate dedup keys so a "never booted" alert and a later "stall" don't mask each other.
-      const claimed = await app.redis.set(
-        neverBooted ? 'ops_page:scheduler-never-booted' : 'ops_page:scheduler-stall', '1', 'EX', 1800, 'NX',
-      );
+      const pageKey = neverBooted ? 'ops_page:scheduler-never-booted' : 'ops_page:scheduler-stall';
+      const claimed = await app.redis.set(pageKey, '1', 'EX', 1800, 'NX');
       if (claimed !== 'OK') return;
       const mins = Math.round(health.ageMs / 60_000);
       const { notifyAdmins, NotificationService } = await import('./modules/notification/notification.service');
-      await notifyAdmins(app.prisma, new NotificationService(app.prisma, app.io), {
-        title: neverBooted ? 'Job scheduler never started' : 'Job scheduler stalled',
-        body: neverBooted
-          ? `No scheduler heartbeat since boot (${mins} min) — the worker fleet never started (crash or RUN_WORKERS misconfigured). Holds, expiry sweeps, billing and settlements have NEVER run. Start the worker.`
-          : `No scheduler heartbeat for ${mins} min — holds, expiry sweeps, billing and settlements are NOT running. Restart the worker.`,
-        data: { kind: neverBooted ? 'ops_scheduler_never_booted' : 'ops_scheduler_stall', ageMs: health.ageMs },
-      });
+      try {
+        await notifyAdmins(app.prisma, new NotificationService(app.prisma, app.io), {
+          title: neverBooted ? 'Job scheduler never started' : 'Job scheduler stalled',
+          body: neverBooted
+            ? `No scheduler heartbeat since boot (${mins} min) — the worker fleet never started (crash or RUN_WORKERS misconfigured). Holds, expiry sweeps, billing and settlements have NEVER run. Start the worker.`
+            : `No scheduler heartbeat for ${mins} min — holds, expiry sweeps, billing and settlements are NOT running. Restart the worker.`,
+          data: { kind: neverBooted ? 'ops_scheduler_never_booted' : 'ops_scheduler_stall', ageMs: health.ageMs },
+        });
+      } catch {
+        // Release the dedup claim so the next health check re-pages — a transient
+        // notify failure must not hide a dead worker fleet for the full window.
+        await app.redis.del(pageKey).catch(() => {});
+      }
     })().catch(() => {});
 
     const allOk = Object.values(checks).every((v) => v === 'ok');
