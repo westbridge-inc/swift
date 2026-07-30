@@ -252,6 +252,105 @@ export class IncidentService {
     return updated;
   }
 
+  // ── Sweeps (§8.2 SLA watch · §8.4 nightly pattern · weekly digest) ───────
+
+  /** Every live case whose ack or decide clock has blown. Pure read — the
+   *  queue handler pages ops (opsPageOnce keeps it one page per case per
+   *  window, re-paging while the breach persists). */
+  async slaWatch(now = new Date()): Promise<Array<{ id: string; caseNumber: string; severity: IncidentSeverity; kind: 'ACK' | 'DECIDE' }>> {
+    const live = await this.prisma.incidentCase.findMany({
+      where: {
+        status: { not: 'CLOSED' },
+        OR: [
+          { ackedAt: null, slaAckBy: { lt: now } },
+          { decidedAt: null, slaDecideBy: { lt: now } },
+        ],
+      },
+      select: { id: true, caseNumber: true, severity: true, ackedAt: true, slaAckBy: true, decidedAt: true, slaDecideBy: true },
+      take: 200,
+    });
+    const breaches: Array<{ id: string; caseNumber: string; severity: IncidentSeverity; kind: 'ACK' | 'DECIDE' }> = [];
+    for (const k of live) {
+      if (!k.ackedAt && k.slaAckBy < now) breaches.push({ id: k.id, caseNumber: k.caseNumber, severity: k.severity, kind: 'ACK' });
+      if (!k.decidedAt && k.slaDecideBy < now) breaches.push({ id: k.id, caseNumber: k.caseNumber, severity: k.severity, kind: 'DECIDE' });
+    }
+    return breaches;
+  }
+
+  /** §8.4 rule 2 (nightly): ≥3 reports from DIFFERENT reporters in 365 days,
+   *  regardless of severity — three "made me uncomfortable" from three
+   *  different women is a signal with zero convictions. Stamps the subject's
+   *  newest unstamped case; idempotent across runs. */
+  async crossReporterScan(now = new Date()): Promise<Array<{ subjectUserId: string; distinctReporters: number; caseNumber: string }>> {
+    const rows = await this.prisma.incidentCase.findMany({
+      where: { createdAt: { gte: new Date(now.getTime() - 365 * 86_400_000) }, reporterUserId: { not: null } },
+      select: { subjectUserId: true, reporterUserId: true },
+      take: 5000,
+    });
+    const bySubject = new Map<string, Set<string>>();
+    for (const r of rows) {
+      const set = bySubject.get(r.subjectUserId) ?? new Set<string>();
+      set.add(r.reporterUserId!);
+      bySubject.set(r.subjectUserId, set);
+    }
+    const flagged: Array<{ subjectUserId: string; distinctReporters: number; caseNumber: string }> = [];
+    for (const [subjectUserId, reporters] of bySubject) {
+      if (reporters.size < 3) continue;
+      // Already a known pattern subject → nothing new to say (idempotent
+      // across nights; a FRESH flag only when the subject wasn't flagged yet).
+      const alreadyFlagged = await this.prisma.incidentCase.count({
+        where: { subjectUserId, patternFlaggedAt: { not: null }, createdAt: { gte: new Date(now.getTime() - 365 * 86_400_000) } },
+      });
+      if (alreadyFlagged > 0) continue;
+      const newest = await this.prisma.incidentCase.findFirst({
+        where: { subjectUserId, patternFlaggedAt: null },
+        orderBy: { createdAt: 'desc' },
+      });
+      if (!newest) continue;
+      await this.prisma.incidentCase.update({ where: { id: newest.id }, data: { patternFlaggedAt: now } });
+      flagged.push({ subjectUserId, distinctReporters: reporters.size, caseNumber: newest.caseNumber });
+      try {
+        this.io.to('ops:war-room').emit('incident:pattern', { caseNumber: newest.caseNumber, subjectUserId, rule: 'CROSS_REPORTER', distinctReporters: reporters.size });
+      } catch { /* advisory only */ }
+    }
+    return flagged;
+  }
+
+  /** §8.4 weekly digest — the founder's Monday read: open load by severity,
+   *  blown SLA clocks, fresh pattern flags, top repeat subjects. */
+  async weeklyDigest(now = new Date()): Promise<{ lines: string[]; open: number; breaches: number; patternsThisWeek: number }> {
+    const openCases = await this.prisma.incidentCase.findMany({
+      where: { status: { not: 'CLOSED' } },
+      select: { severity: true, subjectUserId: true },
+      take: 2000,
+    });
+    const bySeverity = new Map<string, number>();
+    for (const k of openCases) bySeverity.set(k.severity, (bySeverity.get(k.severity) ?? 0) + 1);
+    const breaches = (await this.slaWatch(now)).length;
+    const patternsThisWeek = await this.prisma.incidentCase.count({
+      where: { patternFlaggedAt: { gte: new Date(now.getTime() - 7 * 86_400_000) } },
+    });
+    const yearSubjects = await this.prisma.incidentCase.groupBy({
+      by: ['subjectUserId'],
+      where: { createdAt: { gte: new Date(now.getTime() - 365 * 86_400_000) } },
+      _count: { subjectUserId: true },
+      orderBy: { _count: { subjectUserId: 'desc' } },
+      take: 5,
+    });
+    const severityLine = ['S0', 'S1', 'S2', 'S3', 'S4']
+      .map((s) => `${s}:${bySeverity.get(s) ?? 0}`)
+      .join(' ');
+    const lines = [
+      `Open cases ${openCases.length} (${severityLine})`,
+      `SLA breaches right now: ${breaches}`,
+      `Pattern flags this week: ${patternsThisWeek}`,
+      yearSubjects.length > 0
+        ? `Top repeat subjects (365d): ${yearSubjects.map((s) => `${s.subjectUserId.slice(0, 8)}…×${s._count.subjectUserId}`).join(', ')}`
+        : 'No repeat subjects in 365d',
+    ];
+    return { lines, open: openCases.length, breaches, patternsThisWeek };
+  }
+
   private categoryLabel(category: string): string {
     return category.replace(/^SAFETY_/, '').replace(/_/g, ' ').toLowerCase();
   }
