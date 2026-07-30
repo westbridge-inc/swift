@@ -599,6 +599,9 @@ model Rider {
   lastLivenessPassAt  DateTime?
   /// §7.1 — third consecutive liveness FAIL locks go-online until ops clears.
   livenessLockedAt    DateTime?
+  /// §7.2 — a random mid-shift check is pending; unanswered past this deadline
+  /// the sweep forces the mover offline until a fresh PASS.
+  livenessPromptDeadlineAt DateTime?
   operatingZones      Zone[]      @relation("riderZones")
   totalDeliveries     Int         @default(0)
   totalCourierJobs    Int         @default(0)
@@ -687,6 +690,9 @@ model Driver {
   lastLivenessPassAt   DateTime?
   /// §7.1 — third consecutive liveness FAIL locks go-online until ops clears.
   livenessLockedAt     DateTime?
+  /// §7.2 — a random mid-shift check is pending; unanswered past this deadline
+  /// the sweep forces the mover offline until a fresh PASS.
+  livenessPromptDeadlineAt DateTime?
   totalRides           Int          @default(0)
   averageRating        Float        @default(5.0)
   totalRatings         Int          @default(0)

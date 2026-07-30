@@ -38,6 +38,16 @@ const maxFails = () => {
  *  pass is queued for retroactive review and the outage alarms ops. */
 const outagePolicy = (): 'FAIL_OPEN_FLAGGED' | 'FAIL_CLOSED' =>
   process.env['LIVENESS_ANALYZER_OUTAGE_POLICY'] === 'FAIL_CLOSED' ? 'FAIL_CLOSED' : 'FAIL_OPEN_FLAGGED';
+/** §7.2 — average random mid-shift checks per active mover per week. */
+const midshiftPerWeek = () => {
+  const v = Number(process.env['LIVENESS_MIDSHIFT_PER_WEEK']);
+  return Number.isFinite(v) && v > 0 ? v : 2;
+};
+/** §7.2 — minutes to answer a mid-shift prompt before being forced offline. */
+const midshiftDeadlineMinutes = () => {
+  const v = Number(process.env['LIVENESS_MIDSHIFT_DEADLINE_MINUTES']);
+  return Number.isFinite(v) && v > 0 ? v : 10;
+};
 
 export type MoverProfile = 'DRIVER' | 'RIDER';
 
@@ -48,10 +58,13 @@ export function assertShiftLiveness(
   row: { lastLivenessPassAt: Date | null; livenessLockedAt: Date | null },
   now = new Date(),
 ): void {
-  if (!livenessRequired()) return;
+  // A lock is an explicit safety ACTION (repeated face-match failures or a
+  // rider's "this isn't my driver") and holds regardless of the feature flag —
+  // LIVENESS_REQUIRED gates the routine freshness cost, never a lock.
   if (row.livenessLockedAt) {
-    throw new AppError(423, 'LIVENESS_LOCKED', 'Identity checks failed repeatedly — contact support to restore access.');
+    throw new AppError(423, 'LIVENESS_LOCKED', 'Identity checks failed repeatedly or your identity was disputed — contact support to restore access.');
   }
+  if (!livenessRequired()) return;
   const fresh =
     row.lastLivenessPassAt != null &&
     now.getTime() - row.lastLivenessPassAt.getTime() < shiftHours() * 3_600_000;
@@ -125,11 +138,12 @@ export class LivenessService {
       data: { userId: input.userId, profile: input.profile, purpose, selfieUrl: input.selfieUrl, outcome, reviewRequired },
     });
 
-    // §7.1 consequences on the mover profile row.
+    // §7.1 consequences on the mover profile row. A passing check also
+    // answers any pending §7.2 mid-shift prompt.
     const allowedOnline = outcome === 'PASS' || outcome === 'BORDERLINE' || outcome === 'ERROR_FAIL_OPEN';
     const now = new Date();
     if (allowedOnline) {
-      const data = { lastLivenessPassAt: now };
+      const data = { lastLivenessPassAt: now, livenessPromptDeadlineAt: null };
       if (input.profile === 'DRIVER') await this.prisma.driver.update({ where: { id: row.id }, data });
       else await this.prisma.rider.update({ where: { id: row.id }, data });
     }
@@ -186,5 +200,192 @@ export class LivenessService {
     }
 
     return { checkId: check.id, outcome, allowedOnline, ...(attemptsLeft !== undefined ? { attemptsLeft } : {}) };
+  }
+
+  // ── §7.2 Random mid-shift checks ─────────────────────────────────────────
+
+  /** One tick: enforce expired prompts (missed → forced offline until a fresh
+   *  PASS), then randomly select idle online movers for a new prompt at a
+   *  probability that averages LIVENESS_MIDSHIFT_PER_WEEK per mover. Never
+   *  fires mid-trip (safety tooling must not cause distracted driving; the
+   *  idle-between-trips proxy stands in for "vehicle not moving" — there is
+   *  no trustworthy speed feed). Post-report/flagged movers get 3× frequency.
+   *  Dormant unless LIVENESS_REQUIRED=1. All state is DB columns — the prompt
+   *  deadline survives restarts and the enforcement is CAS. */
+  async midshiftSweep(now = new Date(), sweepMs = 300_000): Promise<{ prompted: number; enforced: number }> {
+    if (!livenessRequired()) return { prompted: 0, enforced: 0 };
+    const out = { prompted: 0, enforced: 0 };
+    const deadline = new Date(now.getTime() + midshiftDeadlineMinutes() * 60_000);
+    const ticksPerWeek = Math.max(1, (7 * 24 * 3_600_000) / sweepMs);
+    const baseP = Math.min(1, midshiftPerWeek() / ticksPerWeek);
+
+    const elevated = async (userId: string): Promise<boolean> =>
+      (await this.prisma.livenessCheck.count({
+        where: {
+          userId,
+          createdAt: { gte: new Date(now.getTime() - 30 * 86_400_000) },
+          OR: [{ purpose: 'RIDER_REPORTED' }, { reviewRequired: true, reviewedAt: null }],
+        },
+      })) > 0;
+
+    const missedBody = 'You missed the identity check and were taken offline. Take the selfie check in the app to go back online.';
+    const promptBody = `Quick identity check: take a selfie in the app within ${midshiftDeadlineMinutes()} minutes to stay online.`;
+
+    // DRIVER side.
+    const expiredDrivers = await this.prisma.driver.findMany({
+      where: { isOnline: true, livenessPromptDeadlineAt: { lte: now } },
+      select: { id: true, userId: true },
+      take: 200,
+    });
+    for (const d of expiredDrivers) {
+      const moved = await this.prisma.driver.updateMany({
+        where: { id: d.id, isOnline: true, livenessPromptDeadlineAt: { lte: now } },
+        data: { isOnline: false, isAvailable: false, lastLivenessPassAt: null, livenessPromptDeadlineAt: null },
+      });
+      if (moved.count === 1) {
+        out.enforced += 1;
+        await this.notifications.send({ userId: d.userId, type: 'SAFETY', title: 'Identity check missed', body: missedBody, data: { kind: 'liveness_midshift_missed' } });
+      }
+    }
+    const driverCandidates = await this.prisma.driver.findMany({
+      where: { isOnline: true, currentRideId: null, livenessLockedAt: null, livenessPromptDeadlineAt: null },
+      select: { id: true, userId: true },
+      take: 500,
+    });
+    for (const c of driverCandidates) {
+      let p = baseP;
+      if (p < 1 && (await elevated(c.userId))) p = Math.min(1, p * 3);
+      if (Math.random() >= p) continue;
+      const moved = await this.prisma.driver.updateMany({
+        where: { id: c.id, isOnline: true, currentRideId: null, livenessPromptDeadlineAt: null },
+        data: { livenessPromptDeadlineAt: deadline },
+      });
+      if (moved.count === 1) {
+        out.prompted += 1;
+        await this.notifications.send({ userId: c.userId, type: 'SAFETY', title: 'Safety check-in', body: promptBody, data: { kind: 'liveness_midshift_prompt', respondBy: deadline.toISOString(), profile: 'DRIVER' } });
+      }
+    }
+
+    // RIDER side (same shape; separate blocks keep the Prisma types honest).
+    const expiredRiders = await this.prisma.rider.findMany({
+      where: { isOnline: true, livenessPromptDeadlineAt: { lte: now } },
+      select: { id: true, userId: true },
+      take: 200,
+    });
+    for (const r of expiredRiders) {
+      const moved = await this.prisma.rider.updateMany({
+        where: { id: r.id, isOnline: true, livenessPromptDeadlineAt: { lte: now } },
+        data: { isOnline: false, isAvailable: false, lastLivenessPassAt: null, livenessPromptDeadlineAt: null },
+      });
+      if (moved.count === 1) {
+        out.enforced += 1;
+        await this.notifications.send({ userId: r.userId, type: 'SAFETY', title: 'Identity check missed', body: missedBody, data: { kind: 'liveness_midshift_missed' } });
+      }
+    }
+    const riderCandidates = await this.prisma.rider.findMany({
+      where: { isOnline: true, currentOrderId: null, livenessLockedAt: null, livenessPromptDeadlineAt: null },
+      select: { id: true, userId: true },
+      take: 500,
+    });
+    for (const c of riderCandidates) {
+      let p = baseP;
+      if (p < 1 && (await elevated(c.userId))) p = Math.min(1, p * 3);
+      if (Math.random() >= p) continue;
+      const moved = await this.prisma.rider.updateMany({
+        where: { id: c.id, isOnline: true, currentOrderId: null, livenessPromptDeadlineAt: null },
+        data: { livenessPromptDeadlineAt: deadline },
+      });
+      if (moved.count === 1) {
+        out.prompted += 1;
+        await this.notifications.send({ userId: c.userId, type: 'SAFETY', title: 'Safety check-in', body: promptBody, data: { kind: 'liveness_midshift_prompt', respondBy: deadline.toISOString(), profile: 'RIDER' } });
+      }
+    }
+
+    return out;
+  }
+
+  // ── §7.3 "This isn't my driver" — the account-sharing kill shot ─────────
+
+  /** One tap from the passenger BEFORE boarding: the ride is released back to
+   *  dispatch, the driver account is liveness-LOCKED (identity disputed — a
+   *  lock holds even with the liveness flag off) and forced offline, ops are
+   *  paged at S1 grade. The formal IncidentCase lands with M6; until then the
+   *  war-room page + lock + audit trail carry the weight. Aboard-the-vehicle
+   *  is SOS territory, not this. */
+  async reportNotMyDriver(
+    customerUserId: string,
+    orderId: string,
+    enqueueDispatch?: (orderId: string) => Promise<void>,
+  ): Promise<{ reDispatched: boolean; alreadyHandled?: boolean; sosAvailable: true }> {
+    const order = await this.prisma.order.findFirst({
+      where: { id: orderId, customerId: customerUserId, orderType: 'TAXI' },
+      select: {
+        id: true,
+        status: true,
+        orderNumber: true,
+        driverId: true,
+        driver: { select: { id: true, userId: true } },
+      },
+    });
+    if (!order) throw new NotFoundError('Ride', orderId);
+    if (order.status === 'RIDE_IN_PROGRESS') {
+      throw new AppError(409, 'RIDE_ALREADY_STARTED', 'If you are in the vehicle and feel unsafe, use the SOS button — help comes faster.');
+    }
+    if (!order.driverId || !order.driver) {
+      // Second tap after the release already happened — honest idempotence.
+      if (order.status === 'PENDING') return { reDispatched: true, alreadyHandled: true, sosAvailable: true };
+      throw new AppError(409, 'NO_DRIVER_ASSIGNED', 'No driver is assigned to this ride yet.');
+    }
+
+    const NOT_ABOARD = ['DRIVER_ASSIGNED', 'DRIVER_EN_ROUTE', 'DRIVER_ARRIVED'] as const;
+    const now = new Date();
+    const released = await this.prisma.$transaction(async (tx) => {
+      const cas = await tx.order.updateMany({
+        where: { id: order.id, driverId: order.driverId, status: { in: [...NOT_ABOARD] } },
+        data: { status: 'PENDING', driverId: null, acceptedAt: null },
+      });
+      if (cas.count === 0) return false;
+      await tx.driver.updateMany({
+        where: { id: order.driverId! },
+        data: { isOnline: false, isAvailable: false, currentRideId: null, livenessLockedAt: now, lastLivenessPassAt: null },
+      });
+      await tx.orderStatusLog.create({
+        data: { orderId: order.id, status: 'PENDING', changedBy: 'system:not-my-driver', note: 'Passenger reported "this isn\'t my driver" — ride released and re-dispatched; driver locked pending identity review' },
+      });
+      return true;
+    });
+    if (!released) {
+      const fresh = await this.prisma.order.findUnique({ where: { id: order.id }, select: { status: true, driverId: true } });
+      if (fresh && fresh.status === 'PENDING' && !fresh.driverId) return { reDispatched: true, alreadyHandled: true, sosAvailable: true };
+      throw new AppError(409, 'RIDE_STATE_CHANGED', 'The ride changed underneath this report — check its current status.');
+    }
+
+    try {
+      this.io.to(`order:${order.id}`).emit('order:status_changed', { orderId: order.id, status: 'PENDING', reason: 'not_my_driver' });
+      this.io.to('ops:war-room').emit('safety:not-my-driver', { orderId: order.id, driverUserId: order.driver.userId, at: now.toISOString() });
+    } catch { /* advisory only */ }
+    await notifyAdmins(this.prisma, this.notifications, {
+      title: '🚨 "Not my driver" report — identity disputed',
+      body: `Order ${order.orderNumber}: the passenger says the person arriving is NOT the account's driver. The driver account is locked and offline. Review immediately — this is the account-sharing kill shot (§7.3).`,
+      data: { kind: 'liveness_not_my_driver', orderId: order.id, driverUserId: order.driver.userId },
+    }).catch(() => {});
+    await this.notifications.send({
+      userId: customerUserId,
+      type: 'ORDER_UPDATE',
+      title: 'Finding you another driver',
+      body: 'Do not enter the vehicle. We are matching you with the nearest available driver now.',
+      data: { orderId: order.id, status: 'PENDING' },
+    });
+    // Due process (§8.3 doctrine): the driver hears the reason category, never
+    // the reporter's identity, and gets the appeal path.
+    await this.notifications.send({
+      userId: order.driver.userId,
+      type: 'SAFETY',
+      title: 'Account temporarily blocked',
+      body: 'A trip identity concern was reported on your account. You are offline pending review — contact support to respond.',
+      data: { kind: 'liveness_locked' },
+    });
+    if (enqueueDispatch) await enqueueDispatch(order.id).catch(() => {});
+    return { reDispatched: true, sosAvailable: true };
   }
 }
