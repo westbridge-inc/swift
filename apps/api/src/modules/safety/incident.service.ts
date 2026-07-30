@@ -195,8 +195,8 @@ export class IncidentService {
   async liftInterim(id: string, opsUserId: string): Promise<IncidentCase> {
     const kase = await this.prisma.incidentCase.findUnique({ where: { id } });
     if (!kase) throw new NotFoundError('IncidentCase', id);
-    await this.prisma.driver.updateMany({ where: { userId: kase.subjectUserId }, data: { safetySuspendedAt: null, livenessLockedAt: null } });
-    await this.prisma.rider.updateMany({ where: { userId: kase.subjectUserId }, data: { safetySuspendedAt: null, livenessLockedAt: null } });
+    await this.prisma.driver.updateMany({ where: { userId: kase.subjectUserId }, data: { safetySuspendedAt: null, livenessLockedAt: null, safetyShadowRestrictedAt: null } });
+    await this.prisma.rider.updateMany({ where: { userId: kase.subjectUserId }, data: { safetySuspendedAt: null, livenessLockedAt: null, safetyShadowRestrictedAt: null } });
     const updated = await this.prisma.incidentCase.update({
       where: { id },
       data: { interimAction: 'NONE', details: { ...((kase.details as Record<string, unknown> | null) ?? {}), interimLiftedBy: opsUserId, interimLiftedAt: new Date().toISOString() } as never },
@@ -207,6 +207,31 @@ export class IncidentService {
       title: 'Suspension lifted',
       body: 'The interim suspension on your account has been lifted. You can go back online.',
       data: { kind: 'incident_interim_lifted', caseNumber: kase.caseNumber },
+    });
+    return updated;
+  }
+
+  /** §8.3 S2 option — SHADOW_RESTRICTED: the subject STAYS online but is
+   *  excluded from enhanced-monitoring passengers' trips pending review
+   *  (dispatch reads the profile stamp). Softer than suspension; still an
+   *  audited interim action with the due-process notice. */
+  async shadowRestrict(id: string, opsUserId: string): Promise<IncidentCase> {
+    const kase = await this.prisma.incidentCase.findUnique({ where: { id } });
+    if (!kase) throw new NotFoundError('IncidentCase', id);
+    if (kase.status === 'CLOSED') throw new AppError(409, 'CASE_CLOSED', 'A closed case cannot apply interim actions.');
+    const now = new Date();
+    await this.prisma.driver.updateMany({ where: { userId: kase.subjectUserId }, data: { safetyShadowRestrictedAt: now } });
+    await this.prisma.rider.updateMany({ where: { userId: kase.subjectUserId }, data: { safetyShadowRestrictedAt: now } });
+    const updated = await this.prisma.incidentCase.update({
+      where: { id },
+      data: { interimAction: 'SHADOW_RESTRICTED', details: { ...((kase.details as Record<string, unknown> | null) ?? {}), shadowRestrictedBy: opsUserId, shadowRestrictedAt: now.toISOString() } as never },
+    });
+    await this.notifications.send({
+      userId: kase.subjectUserId,
+      type: 'SAFETY',
+      title: 'Account under review',
+      body: `A ${this.categoryLabel(kase.category)} report is under review on your account. You can keep working while our safety team reviews it — contact support to respond.`,
+      data: { kind: 'incident_shadow_restricted', caseNumber: kase.caseNumber, category: kase.category },
     });
     return updated;
   }
