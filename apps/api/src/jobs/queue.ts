@@ -436,6 +436,36 @@ export function createWorkers(ctx: JobContext) {
         await runCollusionAffinityScan(ctx);
       }
 
+      if (job.name === 'incident-pattern-scan') {
+        // §8.4 rule 2 (nightly): ≥3 distinct reporters on one subject in 365d.
+        const { IncidentService } = await import('../modules/safety/incident.service');
+        const flagged = await new IncidentService(ctx.prisma, ctx.io).crossReporterScan();
+        if (flagged.length > 0) {
+          ctx.log.warn({ flagged }, 'cross-reporter pattern flags');
+          const { notifyAdmins, NotificationService: NS } = await import('../modules/notification/notification.service');
+          await opsPageOnce(ctx, 'incident-pattern-scan', 20 * 3600, () =>
+            notifyAdmins(ctx.prisma, new NS(ctx.prisma, ctx.io), {
+              title: 'PATTERN — repeat-report subjects',
+              body: `${flagged.length} subject(s) now have ≥3 distinct reporters inside 365 days. Review their case history before their next shift.`,
+              data: { kind: 'incident_pattern_cross_reporter', flagged: flagged.slice(0, 10) },
+            }),
+          ).catch(() => {});
+        }
+      }
+
+      if (job.name === 'incident-weekly-digest') {
+        // §8.4 — the founder's Monday safety read.
+        const { IncidentService } = await import('../modules/safety/incident.service');
+        const digest = await new IncidentService(ctx.prisma, ctx.io).weeklyDigest();
+        const { notifyAdmins, NotificationService: NS } = await import('../modules/notification/notification.service');
+        await notifyAdmins(ctx.prisma, new NS(ctx.prisma, ctx.io), {
+          title: '🛡️ Weekly safety digest',
+          body: digest.lines.join(' · '),
+          data: { kind: 'incident_weekly_digest', open: digest.open, breaches: digest.breaches, patterns: digest.patternsThisWeek },
+        }).catch(() => {});
+        ctx.log.info({ open: digest.open, breaches: digest.breaches }, 'weekly safety digest sent');
+      }
+
       if (job.name === 'booking-reminders') {
         const { sendBookingReminders } = await import('../modules/services/services.service');
         const { NotificationService } = await import('../modules/notification/notification.service');
@@ -536,6 +566,28 @@ export function createWorkers(ctx: JobContext) {
         const res = await new GuardianService(ctx.prisma, ctx.io).sweep();
         if (res.opened + res.closed + res.flagged + res.escalated > 0) {
           ctx.log.info(res, 'Trip Guardian sweep');
+        }
+        return;
+      }
+
+      if (job.name === 'incident-sla-watch') {
+        // §8.2 — a blown SLA clock pages ops, and keeps re-paging every
+        // window while the breach persists (an SLA that only whispers once
+        // is a lie to the reporter). opsPageOnce is the dedup.
+        const { IncidentService } = await import('../modules/safety/incident.service');
+        const breaches = await new IncidentService(ctx.prisma, ctx.io).slaWatch();
+        if (breaches.length > 0) {
+          const { notifyAdmins, NotificationService: NS } = await import('../modules/notification/notification.service');
+          for (const b of breaches) {
+            await opsPageOnce(ctx, `inc-sla:${b.id}:${b.kind}`, 6 * 3600, () =>
+              notifyAdmins(ctx.prisma, new NS(ctx.prisma, ctx.io), {
+                title: `⏰ SLA breached — case ${b.caseNumber} (${b.severity})`,
+                body: `The ${b.kind === 'ACK' ? 'acknowledge' : 'decide'} clock has blown. Work the case now.`,
+                data: { kind: 'incident_sla_breach', caseId: b.id, breach: b.kind, severity: b.severity },
+              }),
+            ).catch(() => {});
+          }
+          ctx.log.warn({ count: breaches.length }, 'incident SLA breaches');
         }
         return;
       }
@@ -925,5 +977,29 @@ export async function scheduleRecurringJobs(queues: ReturnType<typeof createQueu
     repeat: { every: Math.max(60_000, Number(process.env['LIVENESS_MIDSHIFT_SWEEP_MS']) || 300_000) },
     removeOnComplete: 20,
     removeOnFail: 20,
+  });
+
+  // Incident SLA watch [safety spec §8.2]: every 5 minutes — S0 acks are due
+  // in 5, so the watch cadence IS the tightest clock it guards.
+  await queues.dispatchQueue.add('incident-sla-watch', {}, {
+    repeat: { every: Math.max(60_000, Number(process.env['INCIDENT_SLA_WATCH_MS']) || 300_000) },
+    removeOnComplete: 20,
+    removeOnFail: 20,
+  });
+
+  // Cross-reporter pattern scan [safety spec §8.4 rule 2]: nightly 05:00,
+  // after the rating sweep (04:00) whose flags may feed tomorrow's cases.
+  await queues.verificationQueue.add('incident-pattern-scan', {}, {
+    repeat: { pattern: '0 5 * * *' },
+    removeOnComplete: 30,
+    removeOnFail: 30,
+  });
+
+  // Weekly safety digest [safety spec §8.4]: Monday 06:30 — after the
+  // collusion scan (06:00), so the founder's read includes it.
+  await queues.verificationQueue.add('incident-weekly-digest', {}, {
+    repeat: { pattern: '30 6 * * 1' },
+    removeOnComplete: 10,
+    removeOnFail: 10,
   });
 }

@@ -196,6 +196,72 @@ describe('§8.4 on-intake pattern hook', () => {
   });
 });
 
+describe('§8.2/§8.4 sweeps — SLA watch, cross-reporter pattern, weekly digest', () => {
+  it('slaWatch surfaces blown ack/decide clocks and ignores healthy or CLOSED cases', async () => {
+    const ops = await makeUser(['ADMIN']);
+    const d = await makeDriver();
+    const kase = track(await svc().intake({ category: 'CASH_DISPUTE', intake: 'OPS_CREATED', subjectUserId: d.userId, summary: 'Fare dispute for SLA test' }));
+
+    expect((await svc().slaWatch()).find((b) => b.id === kase.id)).toBeFalsy(); // healthy clocks
+
+    await app.prisma.incidentCase.update({ where: { id: kase.id }, data: { slaAckBy: new Date(Date.now() - 60_000) } });
+    const ackBreach = (await svc().slaWatch()).filter((b) => b.id === kase.id);
+    expect(ackBreach).toHaveLength(1);
+    expect(ackBreach[0]!.kind).toBe('ACK');
+
+    await svc().ack(kase.id, ops.userId); // acked — ACK breach clears
+    await app.prisma.incidentCase.update({ where: { id: kase.id }, data: { slaDecideBy: new Date(Date.now() - 60_000) } });
+    const decideBreach = (await svc().slaWatch()).filter((b) => b.id === kase.id);
+    expect(decideBreach).toHaveLength(1);
+    expect(decideBreach[0]!.kind).toBe('DECIDE');
+
+    await svc().decide(kase.id, ops.userId, 'RESOLVED_OTHER');
+    await svc().close(kase.id, ops.userId);
+    expect((await svc().slaWatch()).find((b) => b.id === kase.id)).toBeFalsy(); // closed = out of the queue
+  });
+
+  it('three DISTINCT reporters in 365d flag the subject once — severity-agnostic, idempotent nightly', async () => {
+    const d = await makeDriver();
+    const reporters = [await makeUser(['CUSTOMER']), await makeUser(['CUSTOMER']), await makeUser(['CUSTOMER'])];
+    for (const r of reporters) {
+      track(await svc().intake({
+        category: 'SERVICE_QUALITY', // S4 — the rule counts reports, not severity
+        intake: 'POST_TRIP_REPORT',
+        subjectUserId: d.userId,
+        reporterUserId: r.userId,
+        summary: 'Made me uncomfortable',
+      }));
+    }
+    const flagged = await svc().crossReporterScan();
+    const mine = flagged.find((f) => f.subjectUserId === d.userId);
+    expect(mine).toBeTruthy();
+    expect(mine!.distinctReporters).toBe(3);
+    expect(await app.prisma.incidentCase.count({ where: { subjectUserId: d.userId, patternFlaggedAt: { not: null } } })).toBe(1);
+
+    // Second night: the subject is already a known pattern — no re-flag.
+    const again = await svc().crossReporterScan();
+    expect(again.find((f) => f.subjectUserId === d.userId)).toBeFalsy();
+    expect(await app.prisma.incidentCase.count({ where: { subjectUserId: d.userId, patternFlaggedAt: { not: null } } })).toBe(1);
+  });
+
+  it('two reporters is not a pattern; the same reporter three times is not a pattern', async () => {
+    const d = await makeDriver();
+    const one = await makeUser(['CUSTOMER']);
+    for (let i = 0; i < 3; i += 1) {
+      track(await svc().intake({ category: 'SERVICE_QUALITY', intake: 'POST_TRIP_REPORT', subjectUserId: d.userId, reporterUserId: one.userId, summary: `Same reporter ${i}` }));
+    }
+    expect((await svc().crossReporterScan()).find((f) => f.subjectUserId === d.userId)).toBeFalsy();
+  });
+
+  it('the weekly digest carries the load numbers the founder needs', async () => {
+    const digest = await svc().weeklyDigest();
+    expect(digest.lines).toHaveLength(4);
+    expect(digest.open).toBeGreaterThan(0); // fixtures from this file are open
+    expect(digest.lines[0]).toContain('Open cases');
+    expect(digest.lines[1]).toContain('SLA breaches');
+  });
+});
+
 describe('§8.1 system auto-intakes', () => {
   it('an SOS ops-coded as ABUSE opens a case against the counterparty', async () => {
     const ops = await makeUser(['ADMIN']);
