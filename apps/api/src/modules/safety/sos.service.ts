@@ -133,6 +133,24 @@ export class SosService {
   async resolve(id: string, opsUserId: string, resolutionCode: SosResolutionCode, notes?: string) {
     const resolved = await this.transition(id, 'RESOLVED', { resolvedAt: new Date(), resolvedBy: opsUserId, resolutionCode, resolutionNotes: notes ?? null });
     await this.fanOutResolved(id).catch(() => {});
+    // §8.1 — an SOS ops coded as real harm doesn't end at "resolved": it opens
+    // an incident case against the counterparty so investigation, interim
+    // action, and pattern intelligence all engage. Best-effort: a case-intake
+    // hiccup must never fail the resolve itself.
+    if ((resolutionCode === 'ABUSE' || resolutionCode === 'POLICE_INVOLVED') && resolved.counterpartyUserId) {
+      const { IncidentService } = await import('./incident.service');
+      await new IncidentService(this.prisma, this.io)
+        .intake({
+          category: resolutionCode === 'POLICE_INVOLVED' ? 'SAFETY_ASSAULT' : 'SAFETY_THREAT',
+          intake: 'SOS_RESOLUTION',
+          subjectUserId: resolved.counterpartyUserId,
+          reporterUserId: resolved.actorUserId,
+          orderId: resolved.orderId,
+          sosAlertId: resolved.id,
+          summary: `SOS ${resolved.id} resolved by ops as ${resolutionCode}${notes ? `: ${notes.slice(0, 200)}` : ''}`,
+        })
+        .catch((err) => log().error({ err, sosAlertId: id }, 'SOS resolution: incident intake failed — resolve stands'));
+    }
     return resolved;
   }
 

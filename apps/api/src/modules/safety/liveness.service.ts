@@ -364,26 +364,26 @@ export class LivenessService {
       this.io.to(`order:${order.id}`).emit('order:status_changed', { orderId: order.id, status: 'PENDING', reason: 'not_my_driver' });
       this.io.to('ops:war-room').emit('safety:not-my-driver', { orderId: order.id, driverUserId: order.driver.userId, at: now.toISOString() });
     } catch { /* advisory only */ }
-    await notifyAdmins(this.prisma, this.notifications, {
-      title: '🚨 "Not my driver" report — identity disputed',
-      body: `Order ${order.orderNumber}: the passenger says the person arriving is NOT the account's driver. The driver account is locked and offline. Review immediately — this is the account-sharing kill shot (§7.3).`,
-      data: { kind: 'liveness_not_my_driver', orderId: order.id, driverUserId: order.driver.userId },
-    }).catch(() => {});
+    // §7.3 → §8: the report IS an S1 incident. The case machine owns the ops
+    // page, the SLA clock, the subject's due-process notice (category only,
+    // never the reporter), and the review that eventually clears the lock.
+    const { IncidentService } = await import('./incident.service');
+    await new IncidentService(this.prisma, this.io)
+      .intake({
+        category: 'IDENTITY_MISMATCH',
+        intake: 'SYSTEM_AUTO',
+        subjectUserId: order.driver.userId,
+        reporterUserId: customerUserId,
+        orderId: order.id,
+        summary: `Passenger reported "this isn't my driver" on order ${order.orderNumber} before boarding. Driver account liveness-locked and ride re-dispatched.`,
+      })
+      .catch((err) => log().error({ err, orderId: order.id }, 'not-my-driver: incident intake failed — lock and release still hold'));
     await this.notifications.send({
       userId: customerUserId,
       type: 'ORDER_UPDATE',
       title: 'Finding you another driver',
       body: 'Do not enter the vehicle. We are matching you with the nearest available driver now.',
       data: { orderId: order.id, status: 'PENDING' },
-    });
-    // Due process (§8.3 doctrine): the driver hears the reason category, never
-    // the reporter's identity, and gets the appeal path.
-    await this.notifications.send({
-      userId: order.driver.userId,
-      type: 'SAFETY',
-      title: 'Account temporarily blocked',
-      body: 'A trip identity concern was reported on your account. You are offline pending review — contact support to respond.',
-      data: { kind: 'liveness_locked' },
     });
     if (enqueueDispatch) await enqueueDispatch(order.id).catch(() => {});
     return { reDispatched: true, sosAvailable: true };

@@ -106,6 +106,7 @@ beforeAll(async () => {
 beforeEach(() => { emits.length = 0; });
 
 afterAll(async () => {
+  await app.prisma.incidentCase.deleteMany({ where: { subjectUserId: { in: userIds } } });
   await app.prisma.tripSafetySession.deleteMany({ where: { orderId: { in: orderIds } } });
   await app.prisma.order.deleteMany({ where: { id: { in: orderIds } } });
   await app.prisma.driver.deleteMany({ where: { userId: { in: userIds } } });
@@ -136,8 +137,13 @@ describe('§5.4 completion sanity', () => {
     expect(flag).toBeTruthy();
     expect(flag!.distM).toBeGreaterThan(750);
     expect(emits.find((e) => e.event === 'guardian:completion-flag')?.room).toBe('ops:war-room');
-    const page = await app.prisma.notification.findFirst({ where: { userId: admin.userId }, orderBy: { createdAt: 'desc' } });
-    expect((page?.data as Record<string, unknown>)['kind']).toBe('guardian_completion_flag');
+    // §5.4 → §8: the post-trip flag is now an S3 auto-case; the case machine
+    // owns the ops page (kind incident_new).
+    const kase = await app.prisma.incidentCase.findFirst({ where: { orderId: far.id, category: 'COMPLETION_ANOMALY' } });
+    expect(kase).not.toBeNull();
+    expect(kase!.severity).toBe('S3');
+    expect(kase!.intake).toBe('SYSTEM_AUTO');
+    expect(await app.prisma.notification.findFirst({ where: { userId: admin.userId, title: { contains: kase!.caseNumber } } })).not.toBeNull();
 
     // ARRIVED case: last fix ~30 m from the destination → silence.
     emits.length = 0;

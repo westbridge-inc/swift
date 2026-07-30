@@ -16,6 +16,7 @@ import { startOnlineSession, closeOnlineSession } from './online-hours';
 import { refreshLegEta, cachedLegEta } from '../dispatch/live-eta';
 import { getKycProvider } from '../../providers/kyc/kyc-provider';
 import { assertShiftLiveness } from '../safety/liveness.service';
+import { assertNotSafetySuspended } from '../safety/incident.service';
 import { haversineDistance } from '../../utils/distance';
 import { estimateLoad } from '../../utils/load';
 import { parsePagination, paginatedResponse } from '../../utils/pagination';
@@ -376,6 +377,8 @@ export async function riderRoutes(app: FastifyInstance) {
     // a shift needs a fresh face-match PASS (428 tells the client to run the
     // selfie check first); repeated failures lock until ops clears.
     assertShiftLiveness(rider);
+    // §8.3 — an interim safety suspension blocks go-online until ops lifts it.
+    assertNotSafetySuspended(rider);
 
     const updated = await app.prisma.rider.update({
       where: { id: rider.id },

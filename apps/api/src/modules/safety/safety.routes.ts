@@ -3,6 +3,7 @@ import { z } from 'zod';
 import { SosService } from './sos.service';
 import { GuardianService } from './guardian.service';
 import { LivenessService } from './liveness.service';
+import { IncidentService, DECISION_CODES } from './incident.service';
 import { EmergencyContactService } from './emergency-contact.service';
 import { getChannels } from '../../providers/notifications/channels';
 import { getStorageProvider } from '../../providers/storage/storage-provider';
@@ -227,6 +228,116 @@ export async function safetyRoutes(app: FastifyInstance) {
       }
     });
     return { success: true, data: result };
+  });
+
+  // ── Incident Management (§8) ─────────────────────────────────────────────
+  const incidents = new IncidentService(app.prisma, app.io);
+  const reportWindowDays = () => {
+    const v = Number(process.env['POST_TRIP_REPORT_WINDOW_DAYS']);
+    return Number.isFinite(v) && v > 0 ? v : 30;
+  };
+  const USER_CATEGORIES = ['SAFETY_ASSAULT', 'SAFETY_THREAT', 'SAFETY_HARASSMENT', 'DRIVING_DANGEROUS', 'IDENTITY_MISMATCH', 'CASH_DISPUTE', 'OTHER'] as const;
+
+  /** §8.1 in-trip / post-trip report — "not an emergency, but something's
+   *  wrong". Caller must be a participant on the order; the SUBJECT is the
+   *  other party. Reporter identity is stored but never subject-visible. */
+  app.post('/incidents', auth, async (request) => {
+    const body = z.object({
+      orderId: z.string().min(1),
+      category: z.enum(USER_CATEGORIES),
+      summary: z.string().trim().min(5).max(2000),
+    }).parse(request.body ?? {});
+
+    const order = await app.prisma.order.findFirst({
+      where: {
+        id: body.orderId,
+        OR: [{ customerId: request.user.userId }, { driver: { userId: request.user.userId } }, { rider: { userId: request.user.userId } }],
+      },
+      select: {
+        id: true,
+        status: true,
+        createdAt: true,
+        customerId: true,
+        driver: { select: { userId: true } },
+        rider: { select: { userId: true } },
+      },
+    });
+    if (!order) throw new NotFoundError('Order', body.orderId);
+    if (Date.now() - order.createdAt.getTime() > reportWindowDays() * 86_400_000) {
+      throw new AppError(410, 'REPORT_WINDOW_CLOSED', `Reports are accepted up to ${reportWindowDays()} days after a trip — contact support instead.`);
+    }
+    const subjectUserId = [order.customerId, order.driver?.userId, order.rider?.userId].find((u) => u && u !== request.user.userId) ?? null;
+    if (!subjectUserId) throw new AppError(409, 'NO_COUNTERPARTY', 'There is no other party on this order to report yet.');
+
+    const TERMINAL = ['COMPLETED', 'DELIVERED', 'CANCELLED', 'FAILED'];
+    const kase = await incidents.intake({
+      category: body.category,
+      intake: TERMINAL.includes(order.status) ? 'POST_TRIP_REPORT' : 'IN_TRIP_REPORT',
+      subjectUserId,
+      reporterUserId: request.user.userId,
+      orderId: order.id,
+      summary: body.summary,
+    });
+    // The reporter sees their case handle — never the machinery around the subject.
+    return { success: true, data: { caseNumber: kase.caseNumber, status: kase.status } };
+  });
+
+  /** Ops intake — phone call / email / social report, logged by a human. */
+  app.post('/incidents/ops', auth, async (request) => {
+    if (!isOps(request.user.role)) throw new ForbiddenError('Only ops can log a case directly.');
+    const body = z.object({
+      subjectUserId: z.string().min(1),
+      category: z.string().trim().min(2).max(60),
+      severity: z.enum(['S0', 'S1', 'S2', 'S3', 'S4']).optional(),
+      orderId: z.string().optional(),
+      sosAlertId: z.string().optional(),
+      summary: z.string().trim().min(5).max(2000),
+    }).parse(request.body ?? {});
+    const kase = await incidents.intake({ ...body, intake: 'OPS_CREATED', reporterUserId: null });
+    return { success: true, data: kase };
+  });
+
+  /** The ops case queue. `open` = everything not CLOSED, severity-first;
+   *  `breached` = SLA clocks already blown (indexed reads, §8.2). */
+  app.get('/incidents', auth, async (request) => {
+    if (!isOps(request.user.role)) throw new ForbiddenError('Only ops can list cases.');
+    const q = z.object({
+      status: z.enum(['open', 'breached', 'all']).default('open'),
+      limit: z.coerce.number().int().min(1).max(200).default(50),
+    }).parse(request.query ?? {});
+    const now = new Date();
+    const where =
+      q.status === 'all' ? {}
+      : q.status === 'breached'
+        ? { status: { not: 'CLOSED' as const }, OR: [{ ackedAt: null, slaAckBy: { lt: now } }, { decidedAt: null, slaDecideBy: { lt: now } }] }
+        : { status: { not: 'CLOSED' as const } };
+    const cases = await app.prisma.incidentCase.findMany({
+      where,
+      orderBy: [{ severity: 'asc' }, { createdAt: 'desc' }],
+      take: q.limit,
+    });
+    return { success: true, data: cases };
+  });
+
+  const opsCaseAction = (fn: (id: string, opsUserId: string) => Promise<unknown>) =>
+    async (request: { user: { userId: string; role: string }; params: { id: string } }) => {
+      if (!isOps(request.user.role)) throw new ForbiddenError('Only ops can work a case.');
+      return { success: true, data: await fn(request.params.id, request.user.userId) };
+    };
+
+  app.post<{ Params: { id: string } }>('/incidents/:id/ack', auth, opsCaseAction((id, ops) => incidents.ack(id, ops)));
+  app.post<{ Params: { id: string } }>('/incidents/:id/investigate', auth, opsCaseAction((id, ops) => incidents.investigate(id, ops)));
+  app.post<{ Params: { id: string } }>('/incidents/:id/close', auth, opsCaseAction((id, ops) => incidents.close(id, ops)));
+  app.post<{ Params: { id: string } }>('/incidents/:id/escalate-police', auth, opsCaseAction((id, ops) => incidents.escalatePolice(id, ops)));
+  app.post<{ Params: { id: string } }>('/incidents/:id/lift-interim', auth, opsCaseAction((id, ops) => incidents.liftInterim(id, ops)));
+
+  app.post<{ Params: { id: string } }>('/incidents/:id/decide', auth, async (request) => {
+    if (!isOps(request.user.role)) throw new ForbiddenError('Only ops can work a case.');
+    const body = z.object({
+      decisionCode: z.enum(DECISION_CODES),
+      notes: z.string().max(4000).optional(),
+    }).parse(request.body ?? {});
+    return { success: true, data: await incidents.decide(request.params.id, request.user.userId, body.decisionCode, body.notes) };
   });
 
   // §5.1 enhanced-monitoring preference — the "Extra safety check-ins on my

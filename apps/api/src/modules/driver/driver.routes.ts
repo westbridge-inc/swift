@@ -11,6 +11,7 @@ import { TAXI_DEMAND_WINDOW_MIN } from '../dispatch/demand.service';
 import { classesAtOrAbove, classesAtOrBelow } from '../rides/fare.service';
 import { getKycProvider } from '../../providers/kyc/kyc-provider';
 import { assertShiftLiveness } from '../safety/liveness.service';
+import { assertNotSafetySuspended } from '../safety/incident.service';
 import { BillingService } from '../billing/billing.service';
 import { getPaymentProvider } from '../../providers/payment/payment-provider';
 import { haversineDistance, estimateDeliveryMinutes } from '../../utils/distance';
@@ -208,6 +209,8 @@ export async function driverRoutes(app: FastifyInstance) {
     // a shift needs a fresh face-match PASS (428 tells the client to run the
     // selfie check first); repeated failures lock until ops clears.
     assertShiftLiveness(driver);
+    // §8.3 — an interim safety suspension blocks go-online until ops lifts it.
+    assertNotSafetySuspended(driver);
 
     // A driver already on a ride who re-opens the app and taps GO must NOT be
     // advertised as free supply — otherwise dispatch offers them a second ride
