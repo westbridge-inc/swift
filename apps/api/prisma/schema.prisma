@@ -605,6 +605,9 @@ model Rider {
   /// §8.3 — interim SUSPENDED_PENDING_REVIEW on an S0/S1 incident: invisible
   /// to dispatch instantly, go-online blocked until ops lifts it.
   safetySuspendedAt   DateTime?
+  /// §8.3 — SHADOW_RESTRICTED (S2 option): stays online, but excluded from
+  /// enhanced-monitoring passengers' trips pending review.
+  safetyShadowRestrictedAt DateTime?
   operatingZones      Zone[]      @relation("riderZones")
   totalDeliveries     Int         @default(0)
   totalCourierJobs    Int         @default(0)
@@ -699,6 +702,9 @@ model Driver {
   /// §8.3 — interim SUSPENDED_PENDING_REVIEW on an S0/S1 incident: invisible
   /// to dispatch instantly, go-online blocked until ops lifts it.
   safetySuspendedAt    DateTime?
+  /// §8.3 — SHADOW_RESTRICTED (S2 option): stays online, but excluded from
+  /// enhanced-monitoring passengers' trips pending review.
+  safetyShadowRestrictedAt DateTime?
   totalRides           Int          @default(0)
   averageRating        Float        @default(5.0)
   totalRatings         Int          @default(0)

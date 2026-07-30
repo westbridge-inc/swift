@@ -281,8 +281,23 @@ export class DispatchService {
           LIMIT ${cap}
         `;
 
-    const eligible = rows.filter((r) => !declined.includes(r.id));
+    let eligible = rows.filter((r) => !declined.includes(r.id));
     if (eligible.length === 0) return [];
+
+    // Safety exclusions [safety spec §8.5/§8.3]. Keyed on the BOOKING user
+    // (excludeUserId at the real dispatch call; null on availability probes,
+    // so the hot browse path pays nothing): a mover who shares an incident
+    // case with this customer — either direction — is never matched with
+    // them again (retaliation guard), and a SHADOW_RESTRICTED mover is
+    // excluded from enhanced-monitoring passengers pending review.
+    if (excludeUserId && eligible.length > 0) {
+      const safetyExcluded = await this.safetyExcludedUserIds(excludeUserId, eligible.map((r) => r.userId), pool);
+      if (safetyExcluded.size > 0) {
+        eligible = eligible.filter((r) => !safetyExcluded.has(r.userId));
+        log().warn({ orderId, customerUserId: excludeUserId, excluded: safetyExcluded.size }, 'dispatch: safety exclusions removed candidates from the pool');
+        if (eligible.length === 0) return [];
+      }
+    }
 
     const etas = await this.maps.etaMinutes(
       pickup,
@@ -301,6 +316,45 @@ export class DispatchService {
     // Taxi (DRIVER pool) ranks proximity near-absolute — the rider watches the
     // car on the map; a farther-but-better car offered first reads as broken.
     return rankCandidates(candidates, pool === 'DRIVER' ? 'PROXIMITY' : 'BALANCED');
+  }
+
+  /** Safety-driven pool exclusions (spec §8.5 retaliation guard + §8.3
+   *  SHADOW_RESTRICTED). Two indexed reads, only when a booking user exists
+   *  AND candidates survived the geo query — never on availability probes. */
+  private async safetyExcludedUserIds(customerUserId: string, candidateUserIds: string[], pool: DispatchPool): Promise<Set<string>> {
+    const excluded = new Set<string>();
+    // §8.5: subject and reporter on ANY shared case (365d, either direction)
+    // are never matched by dispatch again. Retaliation risk doesn't care who
+    // reported whom.
+    const pairs = await this.prisma.incidentCase.findMany({
+      where: {
+        createdAt: { gte: new Date(Date.now() - 365 * 86_400_000) },
+        OR: [
+          { reporterUserId: customerUserId, subjectUserId: { in: candidateUserIds } },
+          { subjectUserId: customerUserId, reporterUserId: { in: candidateUserIds } },
+        ],
+      },
+      select: { subjectUserId: true, reporterUserId: true },
+      take: 100,
+    });
+    for (const p of pairs) {
+      if (p.subjectUserId !== customerUserId) excluded.add(p.subjectUserId);
+      if (p.reporterUserId && p.reporterUserId !== customerUserId) excluded.add(p.reporterUserId);
+    }
+    // §8.3: SHADOW_RESTRICTED movers stay online for the general public but
+    // are kept away from enhanced-monitoring passengers pending review.
+    const passenger = await this.prisma.user.findUnique({
+      where: { id: customerUserId },
+      select: { enhancedSafetyMonitoring: true },
+    });
+    if (passenger?.enhancedSafetyMonitoring) {
+      const restricted =
+        pool === 'DRIVER'
+          ? await this.prisma.driver.findMany({ where: { userId: { in: candidateUserIds }, safetyShadowRestrictedAt: { not: null } }, select: { userId: true } })
+          : await this.prisma.rider.findMany({ where: { userId: { in: candidateUserIds }, safetyShadowRestrictedAt: { not: null } }, select: { userId: true } });
+      for (const r of restricted) excluded.add(r.userId);
+    }
+    return excluded;
   }
 
   // -------------------------------------------------------------------------

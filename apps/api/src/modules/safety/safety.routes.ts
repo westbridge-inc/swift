@@ -330,6 +330,7 @@ export async function safetyRoutes(app: FastifyInstance) {
   app.post<{ Params: { id: string } }>('/incidents/:id/close', auth, opsCaseAction((id, ops) => incidents.close(id, ops)));
   app.post<{ Params: { id: string } }>('/incidents/:id/escalate-police', auth, opsCaseAction((id, ops) => incidents.escalatePolice(id, ops)));
   app.post<{ Params: { id: string } }>('/incidents/:id/lift-interim', auth, opsCaseAction((id, ops) => incidents.liftInterim(id, ops)));
+  app.post<{ Params: { id: string } }>('/incidents/:id/shadow-restrict', auth, opsCaseAction((id, ops) => incidents.shadowRestrict(id, ops)));
 
   app.post<{ Params: { id: string } }>('/incidents/:id/decide', auth, async (request) => {
     if (!isOps(request.user.role)) throw new ForbiddenError('Only ops can work a case.');
