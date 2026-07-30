@@ -3,7 +3,7 @@ import type { Server } from 'socket.io';
 import { haversineDistance } from '../../utils/distance';
 import { log } from '../../utils/logger';
 import { AppError, NotFoundError } from '../../utils/errors';
-import { NotificationService } from '../notification/notification.service';
+import { NotificationService, notifyAdmins } from '../notification/notification.service';
 import { SosService } from './sos.service';
 
 // Trip Guardian (safety spec §5) — server-side monitoring of live taxi rides.
@@ -61,6 +61,10 @@ const stopRadiusM = () => num('GUARDIAN_STOP_RADIUS_M', 60);
 const nearEndpointM = () => num('GUARDIAN_NEAR_ENDPOINT_M', 150);
 const overdueMinMinutes = () => num('GUARDIAN_OVERDUE_MIN_MINUTES', 15);
 const staleGpsMinutes = () => num('GUARDIAN_STALE_GPS_MINUTES', 3);
+/** §5.4 — how far from the destination a "completed" trip may end before it
+ *  is flagged for post-trip review. Generous: addresses are imprecise and the
+ *  driver may roll on before the closing tick consumes a fix. */
+const completionToleranceM = () => num('GUARDIAN_COMPLETION_TOLERANCE_M', 750);
 /** §5.3 — how long a soft check-in may sit unanswered before the hard one. */
 const softWaitSeconds = () => num('GUARDIAN_SOFT_WAIT_SECONDS', 180);
 /** §5.3 CHECKIN_DEADLINE_SECONDS — the hard check-in countdown. */
@@ -97,6 +101,11 @@ interface DetectorState {
   /** Driver's "trip status OK" tap (§5.3 L3) — a responsive driver blocks the
    *  auto-SOS at the deadline (flat-tire case); cleared on de-escalation. */
   driverConfirmedAtMs?: number;
+  /** Last fix the session CONSUMED while live — §5.4 completion sanity reads
+   *  this, not the driver row (the driver may roll on after completing). */
+  lastFix?: { lat: number; lng: number; atMs: number };
+  /** §5.4 — completion happened far from the destination; set once at close. */
+  completionFlag?: { distM: number; at: string };
   events?: Array<{ t: string; kind: string; detail?: Record<string, unknown> }>;
 }
 
@@ -315,12 +324,12 @@ export class GuardianService {
       if (!order) {
         // Order hard-deleted underneath the session (test fixtures, purges) —
         // close rather than monitor a ghost forever.
-        closed += await this.close(session, 'TRIP_CANCELLED', now);
+        closed += await this.close(session, 'TRIP_CANCELLED', now, null);
         continue;
       }
       if (order.status !== MONITORED_ORDER_STATUS) {
         const reason: GuardianCloseReason = order.status === 'CANCELLED' ? 'TRIP_CANCELLED' : 'TRIP_COMPLETED';
-        closed += await this.close(session, reason, now);
+        closed += await this.close(session, reason, now, order);
         continue;
       }
 
@@ -339,13 +348,45 @@ export class GuardianService {
     return { closed, flagged, escalated };
   }
 
-  private async close(session: TripSafetySession, reason: GuardianCloseReason, now: Date): Promise<number> {
+  private async close(session: TripSafetySession, reason: GuardianCloseReason, now: Date, order: OrderSnapshot | null): Promise<number> {
     // CAS on the open statuses so a racing tick closes exactly once.
     const moved = await this.prisma.tripSafetySession.updateMany({
       where: { id: session.id, status: { in: [...OPEN_SESSION_STATUSES] } },
       data: { status: 'CLOSED', closeReason: reason, closedAt: now },
     });
+    if (moved.count === 1 && reason === 'TRIP_COMPLETED' && order) {
+      await this.completionSanity(session, order, now).catch(() => {}); // advisory — never fails a close
+    }
     return moved.count;
+  }
+
+  /** §5.4 — a trip "completed" far from its destination, with the anomaly
+   *  latches telling the same story, is a post-trip review item. Uses the last
+   *  fix the SESSION consumed (the driver row moves on after completion).
+   *  Advisory only: war-room + ops page; the S3 auto-case lands with M6. */
+  private async completionSanity(session: TripSafetySession, order: OrderSnapshot, now: Date) {
+    const state: DetectorState = (session.deviationState as DetectorState | null) ?? {};
+    if (state.completionFlag) return;
+    const dest =
+      order.deliveryLat != null && order.deliveryLng != null
+        ? { lat: Number(order.deliveryLat), lng: Number(order.deliveryLng) }
+        : null;
+    if (!dest || !state.lastFix) return;
+    const distM = Math.round(metersBetween(state.lastFix.lat, state.lastFix.lng, dest.lat, dest.lng));
+    if (distM <= completionToleranceM()) return;
+
+    state.completionFlag = { distM, at: now.toISOString() };
+    pushEvent(state, now, 'COMPLETION_FAR_FROM_DESTINATION', { distM, toleranceM: completionToleranceM() });
+    await this.prisma.tripSafetySession
+      .update({ where: { id: session.id }, data: { deviationState: state as never } })
+      .catch(() => {});
+    log().warn({ sessionId: session.id, orderId: session.orderId, distM }, 'Trip Guardian: ride completed far from its destination');
+    this.warRoom('guardian:completion-flag', { sessionId: session.id, orderId: session.orderId, distM, riskScore: session.riskScore, at: now.toISOString() });
+    await notifyAdmins(this.prisma, this.notifications, {
+      title: 'Trip ended far from destination',
+      body: `A taxi ride completed ${distM}m from its destination. Review the trip on the war-room.`,
+      data: { kind: 'guardian_completion_flag', sessionId: session.id, orderId: session.orderId, distM },
+    }).catch(() => {});
   }
 
   // ── L1 detectors (§5.2) ──────────────────────────────────────────────────
@@ -412,6 +453,7 @@ export class GuardianService {
     if (isFreshFix && dest) {
       const lat = fix.currentLat as number;
       const lng = fix.currentLng as number;
+      state.lastFix = { lat, lng, atMs: fixAt.getTime() };
       const distToDest = metersBetween(lat, lng, dest.lat, dest.lng);
 
       // Divergence ratchet (§5.2, adapted — see header).

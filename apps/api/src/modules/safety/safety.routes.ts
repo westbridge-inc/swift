@@ -186,4 +186,45 @@ export async function safetyRoutes(app: FastifyInstance) {
   app.post('/guardian/driver-confirm', auth, async (request) => {
     return { success: true, data: await guardian.driverConfirm(request.user.userId) };
   });
+
+  // §5.1 enhanced-monitoring preference — the "Extra safety check-ins on my
+  // trips" toggle. Strictly the caller's OWN row; the server never infers it.
+  app.put('/monitoring-preference', auth, async (request) => {
+    const { enabled } = z.object({ enabled: z.boolean() }).parse(request.body ?? {});
+    const user = await app.prisma.user.update({
+      where: { id: request.user.userId },
+      data: { enhancedSafetyMonitoring: enabled },
+      select: { enhancedSafetyMonitoring: true },
+    });
+    return { success: true, data: user };
+  });
+
+  app.get('/monitoring-preference', auth, async (request) => {
+    const user = await app.prisma.user.findUniqueOrThrow({
+      where: { id: request.user.userId },
+      select: { enhancedSafetyMonitoring: true },
+    });
+    return { success: true, data: user };
+  });
+
+  /** GET /guardian — the ops live-monitoring board (§5.1: HIGH trips appear
+   *  proactively; this is what the war-room loads/reloads from). Ops-only. */
+  const listSessionsQuery = z.object({
+    status: z.enum(['live', 'flagged', 'all']).default('live'),
+    limit: z.coerce.number().int().min(1).max(200).default(50),
+  });
+  app.get('/guardian', auth, async (request) => {
+    if (!isOps(request.user.role)) throw new ForbiddenError('Only ops can list guardian sessions.');
+    const q = listSessionsQuery.parse(request.query ?? {});
+    const where =
+      q.status === 'all' ? {}
+      : q.status === 'flagged' ? { status: { in: ['CHECKIN_PENDING', 'ESCALATING'] as never[] } }
+      : { status: { in: ['MONITORING', 'CHECKIN_PENDING', 'ESCALATING'] as never[] } };
+    const sessions = await app.prisma.tripSafetySession.findMany({
+      where,
+      orderBy: [{ riskScore: 'desc' }, { createdAt: 'desc' }],
+      take: q.limit,
+    });
+    return { success: true, data: sessions };
+  });
 }
