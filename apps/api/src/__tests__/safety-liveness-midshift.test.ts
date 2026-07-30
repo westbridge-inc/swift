@@ -100,6 +100,7 @@ beforeAll(async () => {
 afterAll(async () => {
   delete process.env['LIVENESS_REQUIRED'];
   delete process.env['LIVENESS_MIDSHIFT_PER_WEEK'];
+  await app.prisma.incidentCase.deleteMany({ where: { subjectUserId: { in: userIds } } });
   await app.prisma.livenessCheck.deleteMany({ where: { userId: { in: userIds } } });
   await app.prisma.order.deleteMany({ where: { id: { in: orderIds } } });
   await app.prisma.driver.deleteMany({ where: { userId: { in: userIds } } });
@@ -192,9 +193,17 @@ describe('§7.3 "this isn\'t my driver"', () => {
 
     const log = await app.prisma.orderStatusLog.findFirst({ where: { orderId: ride.id, changedBy: 'system:not-my-driver' } });
     expect(log).not.toBeNull();
-    expect(await app.prisma.notification.findFirst({ where: { userId: admin.userId, title: { contains: 'Not my driver' } } })).not.toBeNull();
+    // §7.3 → §8: the report IS an S1 IncidentCase — the case machine owns the
+    // ops page, the interim suspension, and the driver's due-process notice.
+    const kase = await app.prisma.incidentCase.findFirst({ where: { orderId: ride.id, category: 'IDENTITY_MISMATCH' } });
+    expect(kase).not.toBeNull();
+    expect(kase!.severity).toBe('S1');
+    expect(kase!.subjectUserId).toBe(d.userId);
+    expect(await app.prisma.notification.findFirst({ where: { userId: admin.userId, title: { contains: kase!.caseNumber } } })).not.toBeNull();
     expect(await app.prisma.notification.findFirst({ where: { userId: passenger.userId, title: 'Finding you another driver' } })).not.toBeNull();
-    expect(await app.prisma.notification.findFirst({ where: { userId: d.userId, title: 'Account temporarily blocked' } })).not.toBeNull();
+    const driverNote = await app.prisma.notification.findFirst({ where: { userId: d.userId, title: 'Account suspended pending review' } });
+    expect(driverNote).not.toBeNull();
+    expect(driverNote!.body).not.toContain(passenger.userId); // reporter never leaks
 
     // Second tap: honest idempotence, no second lock/release.
     const again = await svc().reportNotMyDriver(passenger.userId, ride.id);

@@ -3,7 +3,7 @@ import type { Server } from 'socket.io';
 import { haversineDistance } from '../../utils/distance';
 import { log } from '../../utils/logger';
 import { AppError, NotFoundError } from '../../utils/errors';
-import { NotificationService, notifyAdmins } from '../notification/notification.service';
+import { NotificationService } from '../notification/notification.service';
 import { SosService } from './sos.service';
 
 // Trip Guardian (safety spec §5) — server-side monitoring of live taxi rides.
@@ -382,11 +382,20 @@ export class GuardianService {
       .catch(() => {});
     log().warn({ sessionId: session.id, orderId: session.orderId, distM }, 'Trip Guardian: ride completed far from its destination');
     this.warRoom('guardian:completion-flag', { sessionId: session.id, orderId: session.orderId, distM, riskScore: session.riskScore, at: now.toISOString() });
-    await notifyAdmins(this.prisma, this.notifications, {
-      title: 'Trip ended far from destination',
-      body: `A taxi ride completed ${distM}m from its destination. Review the trip on the war-room.`,
-      data: { kind: 'guardian_completion_flag', sessionId: session.id, orderId: session.orderId, distM },
-    }).catch(() => {});
+    // §5.4 → §8: the post-trip flag IS the spec's low-priority S3 auto-case —
+    // the case machine owns the ops surfacing and the pattern intelligence.
+    const { IncidentService } = await import('./incident.service');
+    await new IncidentService(this.prisma, this.io)
+      .intake({
+        category: 'COMPLETION_ANOMALY',
+        intake: 'SYSTEM_AUTO',
+        subjectUserId: session.driverUserId,
+        reporterUserId: null,
+        orderId: session.orderId,
+        summary: `Taxi ride completed ${distM}m from its destination (tolerance ${completionToleranceM()}m) with no route update.`,
+        details: { sessionId: session.id, distM, riskScore: session.riskScore },
+      })
+      .catch((err) => log().error({ err, sessionId: session.id }, 'completion sanity: incident intake failed — flag persisted anyway'));
   }
 
   // ── L1 detectors (§5.2) ──────────────────────────────────────────────────

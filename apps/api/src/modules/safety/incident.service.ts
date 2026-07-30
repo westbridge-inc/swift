@@ -188,12 +188,15 @@ export class IncidentService {
     return d.count > 0 || r.count > 0;
   }
 
-  /** Explicit, audited lift — also runs automatically on a DISMISSED decision. */
+  /** Explicit, audited lift — also runs automatically on a DISMISSED decision.
+   *  Clears the liveness lock too: when ops decide the person is fine, every
+   *  block that existed because of this dispute is served — leaving a
+   *  self-serve-impossible lock behind would strand a cleared driver. */
   async liftInterim(id: string, opsUserId: string): Promise<IncidentCase> {
     const kase = await this.prisma.incidentCase.findUnique({ where: { id } });
     if (!kase) throw new NotFoundError('IncidentCase', id);
-    await this.prisma.driver.updateMany({ where: { userId: kase.subjectUserId }, data: { safetySuspendedAt: null } });
-    await this.prisma.rider.updateMany({ where: { userId: kase.subjectUserId }, data: { safetySuspendedAt: null } });
+    await this.prisma.driver.updateMany({ where: { userId: kase.subjectUserId }, data: { safetySuspendedAt: null, livenessLockedAt: null } });
+    await this.prisma.rider.updateMany({ where: { userId: kase.subjectUserId }, data: { safetySuspendedAt: null, livenessLockedAt: null } });
     const updated = await this.prisma.incidentCase.update({
       where: { id },
       data: { interimAction: 'NONE', details: { ...((kase.details as Record<string, unknown> | null) ?? {}), interimLiftedBy: opsUserId, interimLiftedAt: new Date().toISOString() } as never },

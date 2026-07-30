@@ -196,6 +196,33 @@ describe('§8.4 on-intake pattern hook', () => {
   });
 });
 
+describe('§8.1 system auto-intakes', () => {
+  it('an SOS ops-coded as ABUSE opens a case against the counterparty', async () => {
+    const ops = await makeUser(['ADMIN']);
+    const victim = await makeUser(['CUSTOMER']);
+    const d = await makeDriver();
+    const { SosService } = await import('../modules/safety/sos.service');
+    const sos = new SosService(app.prisma, app.io);
+    const alert = await sos.create({
+      actorUserId: victim.userId, actorRole: 'CUSTOMER', counterpartyUserId: d.userId,
+      triggerSource: 'BUTTON', immediate: true,
+    });
+    await sos.ack(alert.id, ops.userId);
+    await sos.resolve(alert.id, ops.userId, 'ABUSE', 'Verbal threats confirmed on callback');
+
+    const kase = await app.prisma.incidentCase.findFirst({ where: { sosAlertId: alert.id } });
+    expect(kase).not.toBeNull();
+    caseIds.push(kase!.id);
+    expect(kase!.category).toBe('SAFETY_THREAT'); // ABUSE → S1 lane
+    expect(kase!.intake).toBe('SOS_RESOLUTION');
+    expect(kase!.subjectUserId).toBe(d.userId);
+    expect(kase!.reporterUserId).toBe(victim.userId);
+    // S1 auto-suspend engaged off the SOS trail too.
+    expect((await app.prisma.driver.findUniqueOrThrow({ where: { id: d.driver.id } })).safetySuspendedAt).not.toBeNull();
+    await app.prisma.sosAlert.delete({ where: { id: alert.id } });
+  });
+});
+
 describe('report + ops routes', () => {
   it('a participant reports the other party; window enforced; ops queue sees it; strangers/non-ops do not', async () => {
     const passenger = await makeUser(['CUSTOMER']);
