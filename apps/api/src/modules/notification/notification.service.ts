@@ -32,7 +32,8 @@ type NotificationType =
   | 'RATING_RECEIVED'
   | 'SYSTEM_ANNOUNCEMENT'
   | 'CHAT_MESSAGE'
-  | 'LOW_STOCK';
+  | 'LOW_STOCK'
+  | 'SAFETY';
 
 /** Which app-within-the-app a notification belongs to. One ACCOUNT spans
  *  roles, but SURFACES are role-scoped: the shopping app must not feed a

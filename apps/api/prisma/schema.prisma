@@ -1854,6 +1854,7 @@ enum NotificationType {
   SYSTEM_ANNOUNCEMENT
   CHAT_MESSAGE
   LOW_STOCK
+  SAFETY // Trip Guardian check-ins + safety-system messages (spec §5.3; bodies stay minimal per §15)
 }
 
 // ==========================================

@@ -529,7 +529,7 @@ export function createWorkers(ctx: JobContext) {
         // CAS — idempotent, overlap-safe, catches up after worker downtime.
         const { GuardianService } = await import('../modules/safety/guardian.service');
         const res = await new GuardianService(ctx.prisma, ctx.io).sweep();
-        if (res.opened + res.closed + res.flagged > 0) {
+        if (res.opened + res.closed + res.flagged + res.escalated > 0) {
           ctx.log.info(res, 'Trip Guardian sweep');
         }
         return;
