@@ -521,6 +521,20 @@ export function createWorkers(ctx: JobContext) {
         return;
       }
 
+      if (job.name === 'guardian-sweep') {
+        // Trip Guardian tick [safety spec §5]. Opens a session for every taxi
+        // that went RIDE_IN_PROGRESS, runs the L1 detectors off the SAME
+        // persisted driver fix dispatch reads, closes sessions whose ride
+        // ended. All state is DB rows and every mutation is create-unique or
+        // CAS — idempotent, overlap-safe, catches up after worker downtime.
+        const { GuardianService } = await import('../modules/safety/guardian.service');
+        const res = await new GuardianService(ctx.prisma, ctx.io).sweep();
+        if (res.opened + res.closed + res.flagged > 0) {
+          ctx.log.info(res, 'Trip Guardian sweep');
+        }
+        return;
+      }
+
       if (job.name === 'stale-movers') {
         const swept = await sweepStaleMovers(ctx.prisma, undefined, ctx.redis);
         if (swept.riders + swept.drivers > 0) {
@@ -870,6 +884,17 @@ export async function scheduleRecurringJobs(queues: ReturnType<typeof createQueu
   // misconfig can't turn it into pathological churn.
   await queues.dispatchQueue.add('promote-sos-grace', {}, {
     repeat: { every: Math.max(2_000, Number(process.env['SOS_GRACE_SWEEP_MS']) || 10_000) },
+    removeOnComplete: 20,
+    removeOnFail: 20,
+  });
+
+  // Trip Guardian tick [safety spec §5]: session open/close reconciliation +
+  // the L1 detectors on every live taxi ride. 15s default is far inside every
+  // detector budget (sustain 90s, stops 3–5 min, check-in deadline 120s);
+  // floored at 5s — the tick reads a handful of indexed rows but a misconfig
+  // must not turn it into a stampede. Same `||` discipline as above.
+  await queues.dispatchQueue.add('guardian-sweep', {}, {
+    repeat: { every: Math.max(5_000, Number(process.env['GUARDIAN_SWEEP_MS']) || 15_000) },
     removeOnComplete: 20,
     removeOnFail: 20,
   });
