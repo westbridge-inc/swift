@@ -602,6 +602,9 @@ model Rider {
   /// §7.2 — a random mid-shift check is pending; unanswered past this deadline
   /// the sweep forces the mover offline until a fresh PASS.
   livenessPromptDeadlineAt DateTime?
+  /// §8.3 — interim SUSPENDED_PENDING_REVIEW on an S0/S1 incident: invisible
+  /// to dispatch instantly, go-online blocked until ops lifts it.
+  safetySuspendedAt   DateTime?
   operatingZones      Zone[]      @relation("riderZones")
   totalDeliveries     Int         @default(0)
   totalCourierJobs    Int         @default(0)
@@ -693,6 +696,9 @@ model Driver {
   /// §7.2 — a random mid-shift check is pending; unanswered past this deadline
   /// the sweep forces the mover offline until a fresh PASS.
   livenessPromptDeadlineAt DateTime?
+  /// §8.3 — interim SUSPENDED_PENDING_REVIEW on an S0/S1 incident: invisible
+  /// to dispatch instantly, go-online blocked until ops lifts it.
+  safetySuspendedAt    DateTime?
   totalRides           Int          @default(0)
   averageRating        Float        @default(5.0)
   totalRatings         Int          @default(0)
@@ -2459,4 +2465,92 @@ model LivenessCheck {
 
   @@index([tenantId, userId, createdAt])
   @@index([tenantId, reviewRequired, reviewedAt])
+}
+
+// ─── Incident Management (safety spec §8): the case machine ─────────────────
+// One auditable case per safety concern, whatever the intake surface (SOS
+// resolution, in-trip report, post-trip report, rating flag, ops-logged).
+// State machine OPEN → TRIAGED → INVESTIGATING → DECIDED → CLOSED, with
+// ESCALATED_POLICE as a parallel flag that sets legalHold. SLA clocks are
+// computed AT INTAKE from severity and live as columns — the breach queue is
+// an indexed read, never a computation.
+
+enum IncidentSeverity {
+  S0 // life/violence — ack 5 min, decide 24h
+  S1 // credible threat / identity dispute — ack 1h, decide 48h
+  S2 // harassment / dangerous driving — ack 12h, decide 5d
+  S3 // disputes, anomalies — ack 24h, decide 10d
+  S4 // quality-grade — ack 24h, decide 10d
+}
+
+enum IncidentStatus {
+  OPEN
+  TRIAGED
+  INVESTIGATING
+  DECIDED
+  CLOSED
+}
+
+enum IncidentIntake {
+  SOS_RESOLUTION
+  IN_TRIP_REPORT
+  POST_TRIP_REPORT
+  RATING_FLAG
+  OPS_CREATED
+  SYSTEM_AUTO // guardian completion flags, not-my-driver, pattern escalations
+}
+
+model IncidentCase {
+  id         String           @id @default(cuid())
+  tenantId   String           @default("swift-default")
+  caseNumber String           @unique // human handle: INC-XXXXXXXX
+  status     IncidentStatus   @default(OPEN)
+  severity   IncidentSeverity
+  /// Structured category code (SAFETY_ASSAULT, IDENTITY_MISMATCH, …) —
+  /// severity is auto-suggested from it at intake; ops can override.
+  category   String
+  intake     IncidentIntake
+
+  /// Who the case is ABOUT.
+  subjectUserId  String
+  /// Who reported it — §8.5 reporter protection: NEVER exposed to the
+  /// subject; subject-facing notifications reference the category only.
+  reporterUserId String?
+  orderId        String?
+  sosAlertId     String?
+
+  summary String
+  details Json?
+
+  // §8.2 parallel police flag — sets legalHold on everything attached.
+  escalatedPoliceAt DateTime?
+  legalHold         Boolean   @default(false)
+
+  // §8.2 SLA clocks — stamped at intake, never recomputed.
+  slaAckBy    DateTime
+  slaDecideBy DateTime
+
+  ackedAt   DateTime?
+  ackedBy   String?
+  decidedAt DateTime?
+  decidedBy String?
+  /// DISMISSED | WARNING_ISSUED | SUSPENSION_PERMANENT | RESOLVED_OTHER
+  decisionCode  String?
+  decisionNotes String?
+  closedAt  DateTime?
+  closedBy  String?
+
+  /// §8.3 interim action applied at intake: SUSPENDED_PENDING_REVIEW |
+  /// SHADOW_RESTRICTED | NONE. Lifting it is an explicit, audited ops act.
+  interimAction String @default("NONE")
+
+  /// §8.4 pattern intelligence stamp — set by the on-intake hook / nightly job.
+  patternFlaggedAt DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([tenantId, status, severity])
+  @@index([subjectUserId, createdAt])
+  @@index([tenantId, slaAckBy])
 }
