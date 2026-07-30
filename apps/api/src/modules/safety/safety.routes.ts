@@ -2,9 +2,12 @@ import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { SosService } from './sos.service';
 import { GuardianService } from './guardian.service';
+import { LivenessService } from './liveness.service';
 import { EmergencyContactService } from './emergency-contact.service';
 import { getChannels } from '../../providers/notifications/channels';
-import { NotFoundError, ForbiddenError } from '../../utils/errors';
+import { getStorageProvider } from '../../providers/storage/storage-provider';
+import { ALLOWED_IMAGE_TYPES, looksLikeImage } from '../../utils/images';
+import { NotFoundError, ForbiddenError, AppError } from '../../utils/errors';
 
 // SOS endpoints (safety spec §4.5). The engine (state machine, grace, fan-out)
 // lives in SosService; these are thin, authed wrappers. Owner actions require
@@ -185,6 +188,33 @@ export async function safetyRoutes(app: FastifyInstance) {
 
   app.post('/guardian/driver-confirm', auth, async (request) => {
     return { success: true, data: await guardian.driverConfirm(request.user.userId) };
+  });
+
+  // ── Identity Assurance (§7.1) — the shift liveness check ────────────────
+  // Multipart selfie in, §7.1 outcome out. The image is validated exactly like
+  // the signup selfie (mime + magic bytes) and stored under liveness/ — the
+  // review queue renders it next to the profile photo.
+  const liveness = new LivenessService(app.prisma, app.io);
+
+  app.post('/liveness-check', auth, async (request) => {
+    const { profile } = z.object({ profile: z.enum(['DRIVER', 'RIDER']).default('DRIVER') }).parse(request.query ?? {});
+    const file = await request.file();
+    if (!file) throw new AppError(400, 'NO_FILE', 'Attach a selfie image');
+    if (!ALLOWED_IMAGE_TYPES.has(file.mimetype)) {
+      throw new AppError(400, 'BAD_IMAGE_TYPE', 'Only JPEG, PNG, or WebP images are accepted');
+    }
+    const buffer = await file.toBuffer();
+    if (!looksLikeImage(buffer)) {
+      throw new AppError(400, 'BAD_IMAGE', 'File content does not match an image format');
+    }
+    const { url } = await getStorageProvider().upload({
+      buffer,
+      filename: file.filename,
+      mimeType: file.mimetype,
+      folder: `liveness/${request.user.userId}`,
+    });
+    const result = await liveness.check({ userId: request.user.userId, profile, selfieUrl: url });
+    return { success: true, data: result };
   });
 
   // §5.1 enhanced-monitoring preference — the "Extra safety check-ins on my

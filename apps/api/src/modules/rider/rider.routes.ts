@@ -15,6 +15,7 @@ import { FloatService } from '../dispatch/float.service';
 import { startOnlineSession, closeOnlineSession } from './online-hours';
 import { refreshLegEta, cachedLegEta } from '../dispatch/live-eta';
 import { getKycProvider } from '../../providers/kyc/kyc-provider';
+import { assertShiftLiveness } from '../safety/liveness.service';
 import { haversineDistance } from '../../utils/distance';
 import { estimateLoad } from '../../utils/load';
 import { parsePagination, paginatedResponse } from '../../utils/pagination';
@@ -370,6 +371,11 @@ export async function riderRoutes(app: FastifyInstance) {
     if (sub && sub.status === 'PAST_DUE' && sub.gracePeriodEnd && sub.gracePeriodEnd < new Date()) {
       throw new AppError(403, 'SUBSCRIPTION_PAST_DUE', 'Your grace period has ended — pay this week’s fee to go back online.');
     }
+
+    // Identity assurance (safety spec §7.1): when the tenant enables liveness,
+    // a shift needs a fresh face-match PASS (428 tells the client to run the
+    // selfie check first); repeated failures lock until ops clears.
+    assertShiftLiveness(rider);
 
     const updated = await app.prisma.rider.update({
       where: { id: rider.id },
