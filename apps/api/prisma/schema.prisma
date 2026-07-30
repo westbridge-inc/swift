@@ -594,6 +594,11 @@ model Rider {
   currentLng          Float?
   lastLocationUpdate  DateTime?
   currentOrderId      String?
+  /// §7.1 liveness shift cache — a PASS is good for LIVENESS_SHIFT_HOURS; the
+  /// go-online gate reads this, never the provider directly.
+  lastLivenessPassAt  DateTime?
+  /// §7.1 — third consecutive liveness FAIL locks go-online until ops clears.
+  livenessLockedAt    DateTime?
   operatingZones      Zone[]      @relation("riderZones")
   totalDeliveries     Int         @default(0)
   totalCourierJobs    Int         @default(0)
@@ -677,6 +682,11 @@ model Driver {
   currentLng           Float?
   lastLocationUpdate   DateTime?
   currentRideId        String?
+  /// §7.1 liveness shift cache — a PASS is good for LIVENESS_SHIFT_HOURS; the
+  /// go-online gate reads this, never the provider directly.
+  lastLivenessPassAt   DateTime?
+  /// §7.1 — third consecutive liveness FAIL locks go-online until ops clears.
+  livenessLockedAt     DateTime?
   totalRides           Int          @default(0)
   averageRating        Float        @default(5.0)
   totalRatings         Int          @default(0)
@@ -2401,4 +2411,46 @@ model TripSafetySession {
 
   @@index([tenantId, status])
   @@index([tenantId, driverUserId])
+}
+
+// ─── Identity Assurance (safety spec §7): liveness face-match checks ────────
+// Answers "is the person driving the account's approved human?" at go-online
+// (and later mid-shift / on a rider report). The match itself rides the SAME
+// KycProvider seam the L2 flow uses; this table is the auditable outcome log
+// the go-online gate and the Command review queue read.
+
+enum LivenessPurpose {
+  GO_ONLINE
+  RANDOM_MID_SHIFT
+  RIDER_REPORTED // "this isn't my driver"
+}
+
+enum LivenessOutcome {
+  PASS
+  BORDERLINE // allowed online, queued for human review (§7.1)
+  FAIL
+  ERROR_FAIL_OPEN // analyzer down; tenant policy let them online, flagged for retro-review
+  ERROR_FAIL_CLOSED // analyzer down; tenant policy blocked go-online
+}
+
+model LivenessCheck {
+  id       String          @id @default(cuid())
+  tenantId String          @default("swift-default")
+  userId   String
+  /// Which mover profile this shift check was for (a user can hold both).
+  profile  String // 'DRIVER' | 'RIDER'
+  purpose  LivenessPurpose @default(GO_ONLINE)
+  selfieUrl String
+  /// Face-match confidence from the provider; null on transport errors.
+  score    Float?
+  outcome  LivenessOutcome
+  /// BORDERLINE / fail-open / reported checks land in the Command queue.
+  reviewRequired Boolean   @default(false)
+  reviewedAt     DateTime?
+  reviewedBy     String?
+  reviewNote     String?
+  createdAt      DateTime  @default(now())
+
+  @@index([tenantId, userId, createdAt])
+  @@index([tenantId, reviewRequired, reviewedAt])
 }
