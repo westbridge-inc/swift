@@ -19,9 +19,16 @@ let vendorId = '';
 let c1 = '';
 let c2 = '';
 
+// Collision-proof phones: one random per-run base + a sequence. The old
+// scheme drew owner AND both customers from the same 900-number pool — a
+// birthday flake (unique-phone-prefix rule; its sibling hit CI on 2026-07-30).
+const phoneBase = 592_009_100_000 + Math.floor(Math.random() * 800_000);
+let pseq = 0;
+const nextPhone = () => `+${phoneBase + (pseq += 1)}`;
+
 async function makeCustomer(): Promise<string> {
   const u = await app.prisma.user.create({
-    data: { phone: `+59200910${String(Math.floor(Math.random() * 900) + 100)}`, firstName: 'RC', lastName: 'Cust', roles: ['CUSTOMER'] as UserRole[], activeRole: 'CUSTOMER', isPhoneVerified: true, customer: { create: {} } },
+    data: { phone: nextPhone(), firstName: 'RC', lastName: 'Cust', roles: ['CUSTOMER'] as UserRole[], activeRole: 'CUSTOMER', isPhoneVerified: true, customer: { create: {} } },
   });
   userIds.push(u.id);
   return u.id;
@@ -53,7 +60,7 @@ beforeAll(async () => {
   await app.ready();
 
   const owner = await app.prisma.user.create({
-    data: { phone: `+59200910${String(Math.floor(Math.random() * 900) + 100)}`, firstName: 'RC', lastName: 'Owner', roles: ['VENDOR_OWNER'] as UserRole[], activeRole: 'VENDOR_OWNER', isPhoneVerified: true },
+    data: { phone: nextPhone(), firstName: 'RC', lastName: 'Owner', roles: ['VENDOR_OWNER'] as UserRole[], activeRole: 'VENDOR_OWNER', isPhoneVerified: true },
   });
   userIds.push(owner.id);
   vendorToken = app.jwt.sign({ userId: owner.id, role: 'VENDOR_OWNER', jti: nanoid(8) });
