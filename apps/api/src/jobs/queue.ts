@@ -540,6 +540,19 @@ export function createWorkers(ctx: JobContext) {
         return;
       }
 
+      if (job.name === 'liveness-midshift') {
+        // §7.2 random mid-shift identity checks. Dormant unless
+        // LIVENESS_REQUIRED=1; state is DB columns (prompt deadline), the
+        // enforcement is CAS — idempotent, overlap-safe, restart-proof.
+        const { LivenessService } = await import('../modules/safety/liveness.service');
+        const sweepMs = Math.max(60_000, Number(process.env['LIVENESS_MIDSHIFT_SWEEP_MS']) || 300_000);
+        const res = await new LivenessService(ctx.prisma, ctx.io).midshiftSweep(new Date(), sweepMs);
+        if (res.prompted + res.enforced > 0) {
+          ctx.log.info(res, 'Liveness mid-shift sweep');
+        }
+        return;
+      }
+
       if (job.name === 'stale-movers') {
         const swept = await sweepStaleMovers(ctx.prisma, undefined, ctx.redis);
         if (swept.riders + swept.drivers > 0) {
@@ -900,6 +913,16 @@ export async function scheduleRecurringJobs(queues: ReturnType<typeof createQueu
   // must not turn it into a stampede. Same `||` discipline as above.
   await queues.dispatchQueue.add('guardian-sweep', {}, {
     repeat: { every: Math.max(5_000, Number(process.env['GUARDIAN_SWEEP_MS']) || 15_000) },
+    removeOnComplete: 20,
+    removeOnFail: 20,
+  });
+
+  // Random mid-shift identity checks [safety spec §7.2]. 5-minute cadence,
+  // floored at 60s; the sweep itself no-ops unless LIVENESS_REQUIRED=1. The
+  // SAME interval is passed into the sweep so the per-tick selection
+  // probability keeps averaging LIVENESS_MIDSHIFT_PER_WEEK per mover.
+  await queues.dispatchQueue.add('liveness-midshift', {}, {
+    repeat: { every: Math.max(60_000, Number(process.env['LIVENESS_MIDSHIFT_SWEEP_MS']) || 300_000) },
     removeOnComplete: 20,
     removeOnFail: 20,
   });

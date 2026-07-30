@@ -217,6 +217,18 @@ export async function safetyRoutes(app: FastifyInstance) {
     return { success: true, data: result };
   });
 
+  /** §7.3 — "This isn't my driver", one tap on the arrival screen. Releases
+   *  the ride to re-dispatch, locks + offlines the driver account, pages ops.
+   *  Caller must be the ride's passenger; aboard-the-vehicle is SOS territory. */
+  app.post<{ Params: { id: string } }>('/rides/:id/not-my-driver', auth, async (request) => {
+    const result = await liveness.reportNotMyDriver(request.user.userId, request.params.id, async (orderId) => {
+      if (app.dispatchQueue) {
+        await app.dispatchQueue.add('dispatch-order', { orderId }, { removeOnComplete: 100, removeOnFail: 50 });
+      }
+    });
+    return { success: true, data: result };
+  });
+
   // §5.1 enhanced-monitoring preference — the "Extra safety check-ins on my
   // trips" toggle. Strictly the caller's OWN row; the server never infers it.
   app.put('/monitoring-preference', auth, async (request) => {
