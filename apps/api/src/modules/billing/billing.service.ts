@@ -1,6 +1,7 @@
 import type { PrismaClient, Subscription, Prisma } from '@prisma/client';
 import { AppError, NotFoundError } from '../../utils/errors';
-import { NotificationService } from '../notification/notification.service';
+import { NotificationService, notifyAdmins } from '../notification/notification.service';
+import { getChannels } from '../../providers/notifications/channels';
 import { CountryConfigService } from '../country/country-config.service';
 import type { PaymentProvider } from '../../providers/payment/payment-provider';
 import { getMmgProvider } from '../../providers/mmg/mmg-provider';
@@ -16,6 +17,13 @@ import { log } from '../../utils/logger';
 const MAX_FAILED_ATTEMPTS = 3;
 const RETRY_HOURS = 24;
 const WEEK_MS = 7 * 24 * 60 * 60 * 1000;
+const DAY_MS = 24 * 60 * 60 * 1000;
+/** §11 — how long a subscription may sit SUSPENDED before it goes CHURNED
+ *  (terminal: dunning stops, the daily MMG re-request stops; paying rejoins). */
+const suspensionMaxDays = () => {
+  const v = Number(process.env['BILLING_SUSPENSION_MAX_DAYS']);
+  return Number.isFinite(v) && v > 0 ? v : 30;
+};
 /** Catalogue size (active listings) at which a vendor moves to the large tier —
  *  1000+ items. Config can override per country. */
 const DEFAULT_LARGE_CATALOGUE_THRESHOLD = 1000;
@@ -304,7 +312,7 @@ export class BillingService {
   ) {
     const periodStart = sub.nextBillingDate;
     const periodEnd = new Date(periodStart.getTime() + WEEK_MS);
-    const wasInterrupted = sub.status === 'PAST_DUE' || sub.status === 'SUSPENDED';
+    const wasInterrupted = sub.status === 'PAST_DUE' || sub.status === 'SUSPENDED' || sub.status === 'CHURNED';
 
     if (settlePaymentId) {
       await this.prisma.subscriptionPayment.update({
@@ -338,6 +346,7 @@ export class BillingService {
         nextRetryAt: null,
         isInGracePeriod: false,
         gracePeriodEnd: null,
+        suspendedAt: null,
       },
     });
 
@@ -493,14 +502,16 @@ export class BillingService {
       },
     });
 
+    const nextRetryAt = new Date(now.getTime() + RETRY_HOURS * 60 * 60 * 1000);
     await this.prisma.subscription.update({
       where: { id: sub.id },
       data: {
         status: willSuspend ? 'SUSPENDED' : 'PAST_DUE',
         failedAttempts: attempts,
-        nextRetryAt: new Date(now.getTime() + RETRY_HOURS * 60 * 60 * 1000),
+        nextRetryAt,
         isInGracePeriod: !willSuspend,
-        gracePeriodEnd: willSuspend ? null : new Date(now.getTime() + RETRY_HOURS * 60 * 60 * 1000),
+        gracePeriodEnd: willSuspend ? null : nextRetryAt,
+        ...(willSuspend ? { suspendedAt: now } : {}),
       },
     });
 
@@ -509,14 +520,39 @@ export class BillingService {
       return 'suspended';
     }
 
-    await this.notifications.send({
-      userId: this.payerUserId(sub),
-      type: 'SYSTEM_ANNOUNCEMENT',
-      title: 'Subscription payment failed',
-      body: `${reason}. We will retry tomorrow (attempt ${attempts} of ${MAX_FAILED_ATTEMPTS}). Top up or update your card to stay active.`,
-      audience: this.payerAudience(sub),
-      data: { kind: 'billing_failed', subscriptionId: sub.id },
-    });
+    // §11 dunning depth: the LAST retry before suspension escalates —
+    // final-warning copy that NAMES the suspension moment, an SMS (the
+    // scarce resource is attention; push may be muted or the app gone), and
+    // an ops task so a human reaches out before access is cut (stage 4).
+    const finalWarning = attempts === MAX_FAILED_ATTEMPTS - 1 && sub.autoSuspendEnabled;
+    if (finalWarning) {
+      const when = nextRetryAt.toISOString().replace('T', ' ').slice(0, 16) + ' UTC';
+      await this.notifications.send({
+        userId: this.payerUserId(sub),
+        type: 'SYSTEM_ANNOUNCEMENT',
+        title: 'Final warning — payment needed',
+        body: `${reason}. Your subscription will be SUSPENDED at ${when} unless the weekly fee is paid. Pay now to keep operating.`,
+        audience: this.payerAudience(sub),
+        data: { kind: 'billing_final_warning', subscriptionId: sub.id, suspendsAt: nextRetryAt.toISOString() },
+      });
+      await this
+        .smsPayer(sub, `Swift: your weekly fee is unpaid. Your account will be suspended at ${when} unless you pay. Open the app to pay now.`)
+        .catch(() => {});
+      await notifyAdmins(this.prisma, this.notifications, {
+        title: 'Dunning — final warning issued',
+        body: `Subscription ${sub.id} suspends at ${when} (attempt ${attempts}/${MAX_FAILED_ATTEMPTS}). Contact the payer directly before access is cut.`,
+        data: { kind: 'billing_dunning_ops_task', subscriptionId: sub.id, suspendsAt: nextRetryAt.toISOString() },
+      }).catch(() => {});
+    } else {
+      await this.notifications.send({
+        userId: this.payerUserId(sub),
+        type: 'SYSTEM_ANNOUNCEMENT',
+        title: 'Subscription payment failed',
+        body: `${reason}. We will retry tomorrow (attempt ${attempts} of ${MAX_FAILED_ATTEMPTS}). Top up or update your card to stay active.`,
+        audience: this.payerAudience(sub),
+        data: { kind: 'billing_failed', subscriptionId: sub.id },
+      });
+    }
     return 'failed';
   }
 
@@ -564,6 +600,11 @@ export class BillingService {
       audience: this.payerAudience(sub),
       data: { kind: 'billing_suspended', subscriptionId: sub.id },
     });
+    // §11 stage 5→6: the suspension notice also lands as SMS with the way
+    // back in — the payer may have lost the app or muted push entirely.
+    await this
+      .smsPayer(sub, 'Swift: your account is suspended for non-payment. Pay your weekly fee in the app (or top up your balance) and access is restored instantly.')
+      .catch(() => {});
   }
 
   private async reinstate(sub: SubWithRelations, periodKey: string) {
@@ -592,6 +633,112 @@ export class BillingService {
       audience: this.payerAudience(sub),
       data: { kind: 'billing_reinstated', subscriptionId: sub.id },
     });
+  }
+
+  /** Best-effort SMS to the payer — dunning escalation channel (§11: the
+   *  scarce resource is attention; push may be muted or the app deleted).
+   *  Never throws into a billing decision. */
+  private async smsPayer(sub: SubWithRelations, body: string) {
+    const user = await this.prisma.user.findUnique({
+      where: { id: this.payerUserId(sub) },
+      select: { phone: true },
+    });
+    if (!user?.phone) return;
+    await getChannels().sms.sendSms(user.phone, body);
+  }
+
+  /**
+   * §11 stages 6..N + churn: runs with the billing job. Every SUSPENDED
+   * subscription gets ONE reinstatement nudge per day (push + SMS, idempotent
+   * via the REMINDER event key — restart/overlap safe), and one that has sat
+   * suspended past SUSPENSION_MAX_DAYS goes CHURNED: terminal for dunning
+   * (drops out of the cycle's retry set, the daily MMG re-request stops, the
+   * nudges stop) but never for the door back in — any payment reinstates.
+   */
+  async sweepSuspended(now = new Date()): Promise<{ nudged: number; churned: number }> {
+    const suspended = await this.prisma.subscription.findMany({
+      where: { status: 'SUSPENDED' },
+      include: {
+        rider: { select: { userId: true } },
+        driver: { select: { userId: true } },
+        vendor: { select: { id: true, owner: { select: { userId: true } } } },
+      },
+      take: 500,
+    });
+    const out = { nudged: 0, churned: 0 };
+    for (const sub of suspended) {
+      try {
+        const suspendedSince = sub.suspendedAt ?? sub.updatedAt; // pre-migration rows fall back to last touch
+        if (now.getTime() - suspendedSince.getTime() >= suspensionMaxDays() * DAY_MS) {
+          // CAS so racing job runs churn exactly once.
+          const moved = await this.prisma.subscription.updateMany({
+            where: { id: sub.id, status: 'SUSPENDED' },
+            data: { status: 'CHURNED', nextRetryAt: null, isInGracePeriod: false, gracePeriodEnd: null },
+          });
+          if (moved.count === 0) continue;
+          await this.prisma.billingEvent.create({
+            data: {
+              subscriptionId: sub.id,
+              type: 'CHURNED',
+              currencyCode: sub.currencyCode,
+              idempotencyKey: `churned:${sub.id}:${suspendedSince.toISOString().slice(0, 10)}`,
+              note: `Suspended ${suspensionMaxDays()} days without payment — dunning stopped`,
+            },
+          }).catch(() => {}); // audit best-effort; the CAS above is the state truth
+          await this.notifications.send({
+            userId: this.payerUserId(sub as SubWithRelations),
+            type: 'SYSTEM_ANNOUNCEMENT',
+            title: 'Subscription closed',
+            body: 'Your subscription was closed after 30 days unpaid. You can rejoin anytime — pay your weekly fee and your access is restored.',
+            audience: this.payerAudience(sub),
+            data: { kind: 'billing_churned', subscriptionId: sub.id },
+          });
+          await this
+            .smsPayer(sub as SubWithRelations, 'Swift: your subscription was closed after 30 days unpaid. Rejoin anytime — pay in the app and access is restored instantly.')
+            .catch(() => {});
+          out.churned += 1;
+          continue;
+        }
+
+        // Daily nudge — the REMINDER event's unique key IS the per-day gate.
+        const dayKey = now.toISOString().slice(0, 10);
+        try {
+          await this.prisma.billingEvent.create({
+            data: {
+              subscriptionId: sub.id,
+              type: 'REMINDER',
+              currencyCode: sub.currencyCode,
+              idempotencyKey: `nudge:${sub.id}:${dayKey}`,
+              note: 'Daily reinstatement nudge while suspended',
+            },
+          });
+        } catch (error) {
+          if ((error as Prisma.PrismaClientKnownRequestError).code === 'P2002') continue; // already nudged today
+          throw error;
+        }
+        const rail =
+          sub.billingMethod === 'MOBILE_MONEY'
+            ? 'Approve the MMG request on your phone (or tap Pay in the app)'
+            : sub.billingMethod === 'CARD'
+              ? 'Update your card or tap Pay in the app'
+              : 'Top up your prepaid balance in the app';
+        await this.notifications.send({
+          userId: this.payerUserId(sub as SubWithRelations),
+          type: 'SYSTEM_ANNOUNCEMENT',
+          title: 'Suspended — pay to restore access',
+          body: `Your weekly fee of $${Number(sub.customRate ?? sub.weeklyRate).toLocaleString()} ${sub.currencyCode} is unpaid. ${rail} and your access is restored instantly.`,
+          audience: this.payerAudience(sub),
+          data: { kind: 'billing_suspended_nudge', subscriptionId: sub.id },
+        });
+        await this
+          .smsPayer(sub as SubWithRelations, `Swift: your account is still suspended. ${rail} — access is restored the moment you pay.`)
+          .catch(() => {});
+        out.nudged += 1;
+      } catch (err) {
+        log().error({ err, subscriptionId: sub.id }, 'suspended-sweep failed for one subscription — continuing');
+      }
+    }
+    return out;
   }
 
   // -------------------------------------------------------------------------
@@ -659,8 +806,9 @@ export class BillingService {
     });
 
     // A top-up while behind triggers an instant billing attempt — paying
-    // reinstates immediately, no waiting for the next cycle
-    if (sub.status === 'PAST_DUE' || sub.status === 'SUSPENDED') {
+    // reinstates immediately, no waiting for the next cycle. CHURNED included:
+    // churn is terminal for DUNNING, never for the door back in (§11).
+    if (sub.status === 'PAST_DUE' || sub.status === 'SUSPENDED' || sub.status === 'CHURNED') {
       const fresh = await this.prisma.subscription.findUniqueOrThrow({
         where: { id: subscriptionId },
         include: {

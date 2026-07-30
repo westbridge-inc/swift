@@ -321,7 +321,12 @@ export function createWorkers(ctx: JobContext) {
         case 'process-billing': {
           const result = await billing.runBillingCycle();
           const reminders = await billing.sendUpcomingReminders();
-          ctx.log.info({ ...result, reminders }, 'Billing cycle complete');
+          // §11 stages 6..N: daily reinstatement nudges for the suspended
+          // (idempotent per day via the REMINDER event key) + CHURNED terminal
+          // past SUSPENSION_MAX_DAYS so dunning — and the daily MMG
+          // re-request — never runs forever against a dead account.
+          const swept = await billing.sweepSuspended();
+          ctx.log.info({ ...result, reminders, ...swept }, 'Billing cycle complete');
           // SWIFT-AUD-D7-02: billing failures must PAGE, not just log — a
           // broken rail silently suspends paying partners.
           const troubled = result.failed + result.errors + result.suspended;

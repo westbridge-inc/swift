@@ -1519,6 +1519,9 @@ model Subscription {
   mmgPayerMsisdn String?
   /// Failed charges retry on a daily cadence, not every job run
   nextRetryAt   DateTime?
+  /// When auto-suspend cut access (§11 dunning) — the churn clock reads this;
+  /// cleared on reinstatement.
+  suspendedAt   DateTime?
 
   billingEvents BillingEvent[]
 
@@ -1560,6 +1563,7 @@ enum BillingEventType {
   REINSTATED
   REMINDER
   TIER_CHANGE
+  CHURNED
 }
 
 /// Prepaid path for cash payers: agents/bank-transfer top-ups recorded by
@@ -1593,6 +1597,7 @@ enum SubscriptionStatus {
   SUSPENDED
   CANCELLED
   TRIAL
+  CHURNED // suspended past SUSPENSION_MAX_DAYS (§11) — terminal; dunning stops, paying rejoins
 }
 
 model SubscriptionPayment {
