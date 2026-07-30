@@ -2,6 +2,9 @@ import type { PrismaClient, TripSafetySession, GuardianCloseReason } from '@pris
 import type { Server } from 'socket.io';
 import { haversineDistance } from '../../utils/distance';
 import { log } from '../../utils/logger';
+import { AppError, NotFoundError } from '../../utils/errors';
+import { NotificationService } from '../notification/notification.service';
+import { SosService } from './sos.service';
 
 // Trip Guardian (safety spec §5) — server-side monitoring of live taxi rides.
 // Same runtime doctrine as the SOS grace sweep: a scheduled tick that owns ALL
@@ -14,9 +17,18 @@ import { log } from '../../utils/logger';
 // listener on the hot ping path — a Guardian bug can never slow a location
 // ping or a dispatch query.
 //
-// This slice (M4b) runs the detectors to L1 — silent flags + war-room
-// advisory. The graduated check-in ladder (L2 soft / L3 hard / L4 auto-SOS)
-// builds on these flags in the next slice (§5.3).
+// The graduated ladder (§5.3) — never jump straight to alarm:
+//   L1 detector flag (silent log + war-room advisory)
+//   L2 soft check-in  → passenger push/card ("Everything OK?"); no response is
+//                       NOT an emergency yet (phones sit in pockets)
+//   L3 hard check-in  → status CHECKIN_PENDING, server-owned deadline, plus a
+//                       low-key driver-side "confirm trip status" prompt
+//   L4 auto-SOS       → deadline passed, neither party responsive → SosAlert
+//                       (CHECKIN_TIMEOUT, no grace); emergency contacts are
+//                       NOT auto-SMSed at this rung by default — ops decides
+//                       (GUARDIAN_AUTONOTIFY_CONTACTS flips it per-tenant)
+// Every rung is a DB column + CAS transition; push bodies stay minimal (§15:
+// "Safety check-in", never anything scarier over an insecure channel).
 //
 // Deviation geometry: the stack's MapsProvider has no route polylines, so the
 // spec's perpendicular-distance detector is adapted to what its own rule
@@ -49,6 +61,12 @@ const stopRadiusM = () => num('GUARDIAN_STOP_RADIUS_M', 60);
 const nearEndpointM = () => num('GUARDIAN_NEAR_ENDPOINT_M', 150);
 const overdueMinMinutes = () => num('GUARDIAN_OVERDUE_MIN_MINUTES', 15);
 const staleGpsMinutes = () => num('GUARDIAN_STALE_GPS_MINUTES', 3);
+/** §5.3 — how long a soft check-in may sit unanswered before the hard one. */
+const softWaitSeconds = () => num('GUARDIAN_SOFT_WAIT_SECONDS', 180);
+/** §5.3 CHECKIN_DEADLINE_SECONDS — the hard check-in countdown. */
+const checkinDeadlineSeconds = () => num('GUARDIAN_CHECKIN_DEADLINE_SECONDS', 120);
+/** After an all-good response, how long before the ladder may re-prompt. */
+const checkinCooldownSeconds = () => num('GUARDIAN_CHECKIN_COOLDOWN_SECONDS', 600);
 /** Tenant-local clock offset for the NIGHT factor; Guyana is UTC-4 all year. */
 const tzOffsetMinutes = (): number => {
   const v = Number(process.env['GUARDIAN_TZ_OFFSET_MINUTES']);
@@ -65,13 +83,20 @@ const WEIGHT = { NIGHT: 20, NEW_DRIVER: 15, PRIOR_SOS_ON_DRIVER: 30, ENHANCED_OP
 // address zones and caution zones (no zone data exists yet).
 
 /** Rolling detector scratch — lives in TripSafetySession.deviationState.
- *  Only the sweep reads/writes it; decisions land in typed columns. */
+ *  Only the sweep and the response endpoints touch it; decisions land in
+ *  typed columns. */
 interface DetectorState {
   minDistToDestM?: number;
   divergingSinceMs?: number | null;
   stopAnchor?: { lat: number; lng: number } | null;
   stopSinceMs?: number | null;
   flags?: { deviation?: string; longStop?: string; overdue?: string; staleGps?: string };
+  /** Set when the passenger answered "all good" — suppresses re-prompts for
+   *  the cooldown window. */
+  lastCheckinClearedAtMs?: number;
+  /** Driver's "trip status OK" tap (§5.3 L3) — a responsive driver blocks the
+   *  auto-SOS at the deadline (flat-tire case); cleared on de-escalation. */
+  driverConfirmedAtMs?: number;
   events?: Array<{ t: string; kind: string; detail?: Record<string, unknown> }>;
 }
 
@@ -82,28 +107,53 @@ const pushEvent = (state: DetectorState, now: Date, kind: string, detail?: Recor
   state.events = [...(state.events ?? []), { t: now.toISOString(), kind, ...(detail ? { detail } : {}) }].slice(-40);
 };
 
+/** The position-anomaly latches that arm the ladder. staleGps deliberately
+ *  does NOT arm it (you can't fix a dead phone by pushing to it; the
+ *  stale-mover watchdog separately pages ops when a holder freezes). */
+const anomalous = (state: DetectorState): boolean =>
+  Boolean(state.flags?.deviation || state.flags?.longStop || state.flags?.overdue);
+
 /** Order statuses a Guardian session monitors. The moment an order leaves
  *  this set the session closes (reconciled by the sweep — no lifecycle hooks
  *  in the ride routes, so no shared-code writes). */
 const MONITORED_ORDER_STATUS = 'RIDE_IN_PROGRESS';
 const OPEN_SESSION_STATUSES = ['MONITORING', 'CHECKIN_PENDING', 'ESCALATING'] as const;
 
+type OrderSnapshot = {
+  id: string;
+  status: string;
+  pickedUpAt: Date | null;
+  taxiDuration: number | null;
+  pickupLat: unknown;
+  pickupLng: unknown;
+  deliveryLat: unknown;
+  deliveryLng: unknown;
+  driver: { currentLat: number | null; currentLng: number | null; lastLocationUpdate: Date | null } | null;
+};
+
 export interface GuardianSweepResult {
   opened: number;
   closed: number;
   flagged: number;
+  escalated: number;
 }
 
 export class GuardianService {
-  constructor(private prisma: PrismaClient, private io: Server) {}
+  private notifications: NotificationService;
+  private sos: SosService;
 
-  /** One tick: open sessions for newly-in-progress rides, run detectors on
-   *  live ones, close sessions whose ride ended. Idempotent and safe to
-   *  overlap — every mutation is create-unique or compare-and-set. */
+  constructor(private prisma: PrismaClient, private io: Server) {
+    this.notifications = new NotificationService(prisma, io);
+    this.sos = new SosService(prisma, io);
+  }
+
+  /** One tick: open sessions for newly-in-progress rides, run detectors and
+   *  the ladder on live ones, close sessions whose ride ended. Idempotent and
+   *  safe to overlap — every mutation is create-unique or compare-and-set. */
   async sweep(now = new Date()): Promise<GuardianSweepResult> {
     const opened = await this.openNewSessions(now);
-    const { closed, flagged } = await this.reconcileOpenSessions(now);
-    return { opened, closed, flagged };
+    const rest = await this.reconcileOpenSessions(now);
+    return { opened, ...rest };
   }
 
   // ── Open: RIDE_IN_PROGRESS taxi rides without a session ─────────────────
@@ -153,15 +203,13 @@ export class GuardianService {
         // HIGH-band trips are proactively visible to ops (§5.1) — advisory
         // only, never auto-deciding.
         if (riskBand(score) === 2) {
-          try {
-            this.io.to('ops:war-room').emit('guardian:high-risk', {
-              sessionId: session.id,
-              orderId: order.id,
-              riskScore: score,
-              riskFactors: factors,
-              openedAt: now.toISOString(),
-            });
-          } catch { /* advisory only */ }
+          this.warRoom('guardian:high-risk', {
+            sessionId: session.id,
+            orderId: order.id,
+            riskScore: score,
+            riskFactors: factors,
+            openedAt: now.toISOString(),
+          });
         }
       } catch {
         // unique(orderId) violation = a racing tick opened it first — exactly
@@ -224,14 +272,14 @@ export class GuardianService {
     return { score, factors };
   }
 
-  // ── Reconcile: run detectors on live sessions, close finished ones ──────
+  // ── Reconcile: detectors + ladder on live sessions, close finished ones ──
 
-  private async reconcileOpenSessions(now: Date): Promise<{ closed: number; flagged: number }> {
+  private async reconcileOpenSessions(now: Date): Promise<{ closed: number; flagged: number; escalated: number }> {
     const sessions = await this.prisma.tripSafetySession.findMany({
       where: { status: { in: [...OPEN_SESSION_STATUSES] } },
       take: 500,
     });
-    if (sessions.length === 0) return { closed: 0, flagged: 0 };
+    if (sessions.length === 0) return { closed: 0, flagged: 0, escalated: 0 };
 
     const orders = await this.prisma.order.findMany({
       where: { id: { in: sessions.map((s) => s.orderId) } },
@@ -251,8 +299,19 @@ export class GuardianService {
 
     let closed = 0;
     let flagged = 0;
+    let escalated = 0;
     for (const session of sessions) {
-      const order = byId.get(session.orderId);
+      const order = byId.get(session.orderId) ?? null;
+
+      // A session mid-escalation finishes its SOS hand-off BEFORE anything
+      // else — even if the ride "completed" underneath it. A timed-out
+      // check-in must not be silenced by whoever taps "complete ride"
+      // (that could be the attacker); ops closes it, not the trip state.
+      if (session.status === 'ESCALATING') {
+        escalated += await this.finishEscalation(session, order, now);
+        continue;
+      }
+
       if (!order) {
         // Order hard-deleted underneath the session (test fixtures, purges) —
         // close rather than monitor a ghost forever.
@@ -264,9 +323,20 @@ export class GuardianService {
         closed += await this.close(session, reason, now);
         continue;
       }
-      flagged += await this.runDetectors(session, order, now);
+
+      const state: DetectorState = (session.deviationState as DetectorState | null) ?? {};
+      state.flags = state.flags ?? {};
+      const { newFlags, freshFixAt } = this.runDetectors(session, order, state, now);
+      flagged += newFlags;
+      escalated += await this.evaluateLadder(session, order, state, now);
+      await this.prisma.tripSafetySession
+        .update({
+          where: { id: session.id },
+          data: { deviationState: state as never, ...(freshFixAt ? { lastLocationAt: freshFixAt } : {}) },
+        })
+        .catch(() => {}); // scratch-state write must never fail the tick
     }
-    return { closed, flagged };
+    return { closed, flagged, escalated };
   }
 
   private async close(session: TripSafetySession, reason: GuardianCloseReason, now: Date): Promise<number> {
@@ -278,25 +348,17 @@ export class GuardianService {
     return moved.count;
   }
 
-  /** L1 detectors (§5.2). Each flag fires ONCE per session (the flag itself is
-   *  the dedup), lands in the event log, and pings the war-room as advisory.
-   *  Returns how many NEW flags this tick raised. */
-  private async runDetectors(
+  // ── L1 detectors (§5.2) ──────────────────────────────────────────────────
+
+  /** Pure state-machine step: mutates `state`, writes nothing. Each flag
+   *  latches ONCE per session (the flag itself is the dedup), lands in the
+   *  event log, and pings the war-room as advisory. */
+  private runDetectors(
     session: TripSafetySession,
-    order: {
-      id: string;
-      pickedUpAt: Date | null;
-      taxiDuration: number | null;
-      pickupLat: unknown;
-      pickupLng: unknown;
-      deliveryLat: unknown;
-      deliveryLng: unknown;
-      driver: { currentLat: number | null; currentLng: number | null; lastLocationUpdate: Date | null } | null;
-    },
+    order: OrderSnapshot,
+    state: DetectorState,
     now: Date,
-  ): Promise<number> {
-    const state: DetectorState = ((session.deviationState as DetectorState | null) ?? {});
-    state.flags = state.flags ?? {};
+  ): { newFlags: number; freshFixAt: Date | null } {
     const band = riskBand(session.riskScore);
     let newFlags = 0;
 
@@ -305,17 +367,15 @@ export class GuardianService {
       pushEvent(state, now, `FLAG_${kind.replace(/([A-Z])/g, '_$1').toUpperCase()}`, detail);
       newFlags += 1;
       log().warn({ sessionId: session.id, orderId: session.orderId, kind, ...detail }, 'Trip Guardian detector flag');
-      try {
-        this.io.to('ops:war-room').emit('guardian:flag', {
-          sessionId: session.id,
-          orderId: session.orderId,
-          kind,
-          riskScore: session.riskScore,
-          band: BAND_NAMES[band],
-          at: now.toISOString(),
-          ...detail,
-        });
-      } catch { /* advisory only */ }
+      this.warRoom('guardian:flag', {
+        sessionId: session.id,
+        orderId: session.orderId,
+        kind,
+        riskScore: session.riskScore,
+        band: BAND_NAMES[band],
+        at: now.toISOString(),
+        ...detail,
+      });
     };
 
     const fix = order.driver;
@@ -330,14 +390,14 @@ export class GuardianService {
 
     // Stale telemetry — a phone that stopped reporting mid-ride. Its own L1
     // signal (the stale-mover sweep separately handles paging when it forces a
-    // holder offline); it also gates the ladder later: "telemetry still
-    // anomalous" must never rest on a frozen fix.
+    // holder offline); the ladder never rests on a frozen fix because the
+    // position detectors below only advance on fresh ones.
     const fixAt = fix?.lastLocationUpdate ?? null;
     if (fixAt && now.getTime() - fixAt.getTime() > staleGpsMinutes() * 60_000) {
-      if (!state.flags.staleGps) raise('staleGps', { lastFixAt: fixAt.toISOString() });
-    } else if (state.flags.staleGps) {
+      if (!state.flags!.staleGps) raise('staleGps', { lastFixAt: fixAt.toISOString() });
+    } else if (state.flags!.staleGps) {
       // Telemetry recovered — clear so a later real stall is caught again.
-      delete state.flags.staleGps;
+      delete state.flags!.staleGps;
       pushEvent(state, now, 'STALE_GPS_RECOVERED');
     }
 
@@ -362,7 +422,7 @@ export class GuardianService {
       if (diverging) {
         state.divergingSinceMs = state.divergingSinceMs ?? fixAt.getTime();
         const sustainedMs = fixAt.getTime() - state.divergingSinceMs;
-        if (sustainedMs >= sustainSeconds() * 1000 && !state.flags.deviation) {
+        if (sustainedMs >= sustainSeconds() * 1000 && !state.flags!.deviation) {
           raise('deviation', {
             distToDestM: Math.round(distToDest),
             minDistToDestM: Math.round(state.minDistToDestM),
@@ -388,7 +448,7 @@ export class GuardianService {
         metersBetween(lat, lng, state.stopAnchor.lat, state.stopAnchor.lng) <= stopRadiusM()
       ) {
         const stoppedMs = fixAt.getTime() - (state.stopSinceMs ?? fixAt.getTime());
-        if (stoppedMs >= stopMinutes()[band] * 60_000 && !state.flags.longStop) {
+        if (stoppedMs >= stopMinutes()[band] * 60_000 && !state.flags!.longStop) {
           raise('longStop', { stoppedMinutes: Math.round(stoppedMs / 60_000), anchor: state.stopAnchor });
         }
       } else {
@@ -398,7 +458,7 @@ export class GuardianService {
     }
 
     // Overdue (§5.2): now past planned ETA + max(floor, 50% of the plan).
-    if (session.plannedEtaAt && !state.flags.overdue) {
+    if (session.plannedEtaAt && !state.flags!.overdue) {
       const plannedMinutes =
         order.taxiDuration ??
         (order.pickedUpAt ? (session.plannedEtaAt.getTime() - order.pickedUpAt.getTime()) / 60_000 : 0);
@@ -411,13 +471,256 @@ export class GuardianService {
       }
     }
 
-    await this.prisma.tripSafetySession.update({
-      where: { id: session.id },
-      data: {
-        deviationState: state as never,
-        ...(isFreshFix && fixAt ? { lastLocationAt: fixAt } : {}),
-      },
+    return { newFlags, freshFixAt: isFreshFix && fixAt ? fixAt : null };
+  }
+
+  // ── The graduated ladder (§5.3) ──────────────────────────────────────────
+
+  /** Walks one session up the ladder if its state says so. All transitions
+   *  are CAS on the pre-read row — a racing response endpoint always wins or
+   *  loses atomically, never both. Returns 1 when this tick auto-raised SOS. */
+  private async evaluateLadder(session: TripSafetySession, order: OrderSnapshot, state: DetectorState, now: Date): Promise<number> {
+    // L2 — soft check-in: first anomaly, nothing pending, out of cooldown.
+    if (session.status === 'MONITORING' && anomalous(state) && !session.checkinRequestedAt) {
+      const cleared = state.lastCheckinClearedAtMs ?? 0;
+      if (now.getTime() - cleared < checkinCooldownSeconds() * 1000) return 0;
+      const moved = await this.prisma.tripSafetySession.updateMany({
+        where: { id: session.id, status: 'MONITORING', checkinRequestedAt: null },
+        // A fresh ask wipes any answer from a PREVIOUS ladder cycle — else a
+        // stale respondedAt would block L3 forever on the second climb.
+        data: { checkinRequestedAt: now, checkinRespondedAt: null, checkinDeadlineAt: null },
+      });
+      if (moved.count === 1) {
+        pushEvent(state, now, 'L2_SOFT_CHECKIN');
+        if (session.passengerUserId) {
+          await this.notifications.send({
+            userId: session.passengerUserId,
+            type: 'SAFETY',
+            title: 'Safety check-in',
+            body: 'Everything OK on your trip? Open Swift to respond.',
+            data: { kind: 'guardian_checkin', level: 'SOFT', sessionId: session.id, orderId: session.orderId },
+          });
+        }
+        this.roomEmit(`order:${session.orderId}`, 'guardian:checkin', {
+          level: 'SOFT',
+          sessionId: session.id,
+          orderId: session.orderId,
+          requestedAt: now.toISOString(),
+        });
+        this.warRoom('guardian:checkin-sent', { sessionId: session.id, orderId: session.orderId, level: 'SOFT' });
+      }
+      return 0;
+    }
+
+    // L3 — hard check-in: soft one unanswered past the wait, still anomalous.
+    if (
+      session.status === 'MONITORING' &&
+      anomalous(state) &&
+      session.checkinRequestedAt &&
+      !session.checkinRespondedAt &&
+      now.getTime() - session.checkinRequestedAt.getTime() >= softWaitSeconds() * 1000
+    ) {
+      const deadline = new Date(now.getTime() + checkinDeadlineSeconds() * 1000);
+      const moved = await this.prisma.tripSafetySession.updateMany({
+        where: { id: session.id, status: 'MONITORING', checkinRespondedAt: null },
+        data: { status: 'CHECKIN_PENDING', checkinDeadlineAt: deadline },
+      });
+      if (moved.count === 1) {
+        pushEvent(state, now, 'L3_HARD_CHECKIN', { deadline: deadline.toISOString() });
+        if (session.passengerUserId) {
+          await this.notifications.send({
+            userId: session.passengerUserId,
+            type: 'SAFETY',
+            title: 'Safety check-in — please respond',
+            body: 'Please confirm you are OK in the app.',
+            data: { kind: 'guardian_checkin', level: 'HARD', sessionId: session.id, orderId: session.orderId, respondBy: deadline.toISOString() },
+          });
+        }
+        // Low-key driver-side prompt (§5.3): a stopped driver with a flat
+        // tire will answer — and that answer is a record.
+        await this.notifications.send({
+          userId: session.driverUserId,
+          type: 'SAFETY',
+          title: 'Trip status check',
+          body: 'Please confirm your trip status in the app.',
+          data: { kind: 'guardian_driver_confirm', sessionId: session.id, orderId: session.orderId },
+        });
+        this.roomEmit(`order:${session.orderId}`, 'guardian:checkin', {
+          level: 'HARD',
+          sessionId: session.id,
+          orderId: session.orderId,
+          requestedAt: session.checkinRequestedAt.toISOString(),
+          respondBy: deadline.toISOString(),
+        });
+        this.warRoom('guardian:checkin-sent', { sessionId: session.id, orderId: session.orderId, level: 'HARD', respondBy: deadline.toISOString() });
+      }
+      return 0;
+    }
+
+    // L4 — deadline passed with no passenger response.
+    if (
+      session.status === 'CHECKIN_PENDING' &&
+      session.checkinDeadlineAt &&
+      now.getTime() >= session.checkinDeadlineAt.getTime() &&
+      !session.checkinRespondedAt
+    ) {
+      // A responsive DRIVER blocks the auto-SOS (§5.3: "neither party
+      // responsive") — the flat-tire case. De-escalate, reset the detectors,
+      // and leave the whole exchange on the record; if the anomaly persists
+      // the ladder simply climbs again and ops sees every cycle. Existence is
+      // enough: resetAfterAllClear wipes the confirm on every de-escalation,
+      // so a confirm can never absolve a LATER cycle it wasn't part of.
+      if (state.driverConfirmedAtMs) {
+        const moved = await this.prisma.tripSafetySession.updateMany({
+          where: { id: session.id, status: 'CHECKIN_PENDING' },
+          data: { status: 'MONITORING', checkinRequestedAt: null, checkinDeadlineAt: null },
+        });
+        if (moved.count === 1) {
+          this.resetAfterAllClear(state, now, 'DRIVER_CONFIRMED_DEESCALATE');
+          this.warRoom('guardian:driver-confirmed', { sessionId: session.id, orderId: session.orderId });
+        }
+        return 0;
+      }
+
+      const moved = await this.prisma.tripSafetySession.updateMany({
+        where: { id: session.id, status: 'CHECKIN_PENDING' },
+        data: { status: 'ESCALATING' },
+      });
+      if (moved.count === 1) {
+        pushEvent(state, now, 'L4_ESCALATE');
+        return this.finishEscalation({ ...session, status: 'ESCALATING' }, order, now);
+      }
+      return 0;
+    }
+
+    return 0;
+  }
+
+  /** ESCALATING → SOS → CLOSED/ESCALATED. Separated so a tick that died
+   *  between the CAS and the SOS create retries here forever until it lands.
+   *  clientIdempotencyKey pins ONE alert per session no matter how many
+   *  retries or racing ticks. */
+  private async finishEscalation(session: TripSafetySession, order: OrderSnapshot | null, now: Date): Promise<number> {
+    let sosId: string;
+    try {
+      const alert = await this.sos.create({
+        actorUserId: session.passengerUserId ?? session.driverUserId,
+        actorRole: 'CUSTOMER',
+        orderId: session.orderId,
+        orderType: session.orderType,
+        counterpartyUserId: session.driverUserId,
+        triggerSource: 'CHECKIN_TIMEOUT',
+        immediate: true, // server-decided emergency — a grace bar helps no one
+        lat: order?.driver?.currentLat ?? null,
+        lng: order?.driver?.currentLng ?? null,
+        clientIdempotencyKey: `guardian:${session.id}`,
+      });
+      sosId = alert.id;
+    } catch (e) {
+      log().error({ err: e, sessionId: session.id }, 'Guardian auto-SOS failed — session stays ESCALATING for retry');
+      return 0;
+    }
+    await this.prisma.tripSafetySession.updateMany({
+      where: { id: session.id, status: 'ESCALATING' },
+      data: { status: 'CLOSED', closeReason: 'ESCALATED', escalatedToSosId: sosId, closedAt: now },
     });
-    return newFlags;
+    log().warn({ sessionId: session.id, orderId: session.orderId, sosId }, 'Trip Guardian escalated an unanswered check-in to SOS');
+    return 1;
+  }
+
+  // ── Check-in responses (§5.3) — called from the safety routes ────────────
+
+  /** Passenger answers the check-in card. OK de-escalates and re-arms the
+   *  detectors; NEED_HELP is an explicit distress signal and raises a full
+   *  SOS immediately (contacts included — this is a human asking, not a
+   *  timeout guessing). */
+  async respondToCheckin(passengerUserId: string, response: 'OK' | 'NEED_HELP') {
+    const session = await this.prisma.tripSafetySession.findFirst({
+      where: { passengerUserId, status: { in: ['MONITORING', 'CHECKIN_PENDING'] } },
+      orderBy: { createdAt: 'desc' },
+    });
+    if (!session) throw new NotFoundError('SafetyCheckin', passengerUserId);
+
+    if (response === 'NEED_HELP') {
+      const alert = await this.sos.create({
+        actorUserId: passengerUserId,
+        actorRole: 'CUSTOMER',
+        orderId: session.orderId,
+        orderType: session.orderType,
+        counterpartyUserId: session.driverUserId,
+        triggerSource: 'GUARDIAN_ESCALATION',
+        immediate: true,
+        clientIdempotencyKey: `guardian-help:${session.id}`,
+      });
+      await this.prisma.tripSafetySession.updateMany({
+        where: { id: session.id, status: { in: ['MONITORING', 'CHECKIN_PENDING'] } },
+        data: { status: 'CLOSED', closeReason: 'ESCALATED', escalatedToSosId: alert.id, closedAt: new Date(), checkinRespondedAt: new Date() },
+      });
+      return { escalated: true, sosAlertId: alert.id };
+    }
+
+    // OK — CAS back to MONITORING; if the sweep already escalated, the truth
+    // is the truth: help is on the way, tell the caller instead of lying.
+    const now = new Date();
+    if (!session.checkinRequestedAt) throw new AppError(409, 'NO_CHECKIN_PENDING', 'There is no check-in waiting for a response.');
+    const moved = await this.prisma.tripSafetySession.updateMany({
+      where: { id: session.id, status: { in: ['MONITORING', 'CHECKIN_PENDING'] } },
+      data: { status: 'MONITORING', checkinRespondedAt: now, checkinRequestedAt: null, checkinDeadlineAt: null },
+    });
+    if (moved.count === 0) {
+      throw new AppError(409, 'CHECKIN_ALREADY_ESCALATED', 'This check-in already escalated — our safety team has been alerted.');
+    }
+    const state: DetectorState = (session.deviationState as DetectorState | null) ?? {};
+    this.resetAfterAllClear(state, now, 'CHECKIN_OK');
+    await this.prisma.tripSafetySession
+      .update({ where: { id: session.id }, data: { deviationState: state as never } })
+      .catch(() => {});
+    return { escalated: false, status: 'MONITORING' };
+  }
+
+  /** Driver's "trip status OK" tap. Recorded in session state — at the L3
+   *  deadline a responsive driver de-escalates instead of auto-SOS (§5.3).
+   *  Never resolves the PASSENGER's pending check-in. */
+  async driverConfirm(driverUserId: string) {
+    const session = await this.prisma.tripSafetySession.findFirst({
+      where: { driverUserId, status: { in: ['MONITORING', 'CHECKIN_PENDING'] } },
+      orderBy: { createdAt: 'desc' },
+    });
+    if (!session) throw new NotFoundError('SafetyCheckin', driverUserId);
+    const now = new Date();
+    const state: DetectorState = (session.deviationState as DetectorState | null) ?? {};
+    state.driverConfirmedAtMs = now.getTime();
+    pushEvent(state, now, 'DRIVER_CONFIRMED');
+    await this.prisma.tripSafetySession.update({ where: { id: session.id }, data: { deviationState: state as never } });
+    this.warRoom('guardian:driver-confirmed', { sessionId: session.id, orderId: session.orderId });
+    return { recorded: true };
+  }
+
+  /** Clear the anomaly latches and re-baseline the detectors after a human
+   *  said things are fine — with a cooldown so the ladder doesn't nag. The
+   *  event log keeps the whole history. */
+  private resetAfterAllClear(state: DetectorState, now: Date, eventKind: string) {
+    state.flags = { ...(state.flags?.staleGps ? { staleGps: state.flags.staleGps } : {}) };
+    state.minDistToDestM = undefined;
+    state.divergingSinceMs = null;
+    state.stopAnchor = null;
+    state.stopSinceMs = null;
+    state.driverConfirmedAtMs = undefined;
+    state.lastCheckinClearedAtMs = now.getTime();
+    pushEvent(state, now, eventKind);
+  }
+
+  // ── Socket helpers — advisory only, never allowed to throw ──────────────
+
+  private warRoom(event: string, payload: Record<string, unknown>) {
+    try {
+      this.io.to('ops:war-room').emit(event, payload);
+    } catch { /* advisory only */ }
+  }
+
+  private roomEmit(room: string, event: string, payload: Record<string, unknown>) {
+    try {
+      this.io.to(room).emit(event, payload);
+    } catch { /* advisory only */ }
   }
 }

@@ -1,6 +1,7 @@
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { SosService } from './sos.service';
+import { GuardianService } from './guardian.service';
 import { EmergencyContactService } from './emergency-contact.service';
 import { getChannels } from '../../providers/notifications/channels';
 import { NotFoundError, ForbiddenError } from '../../utils/errors';
@@ -169,5 +170,20 @@ export async function safetyRoutes(app: FastifyInstance) {
   app.delete<{ Params: { id: string } }>('/emergency-contacts/:id', auth, async (request) => {
     await contacts.remove(request.user.userId, request.params.id);
     return { success: true, data: { deleted: true } };
+  });
+
+  // ── Trip Guardian check-in responses (§5.3) ──────────────────────────────
+  // Both resolve the session by the CALLER's identity — no ids are accepted,
+  // so there is nothing cross-user to probe. The ladder itself (prompts,
+  // deadline, auto-SOS) lives in the guardian sweep.
+  const guardian = new GuardianService(app.prisma, app.io);
+
+  app.post('/guardian/checkin', auth, async (request) => {
+    const { response } = z.object({ response: z.enum(['OK', 'NEED_HELP']) }).parse(request.body ?? {});
+    return { success: true, data: await guardian.respondToCheckin(request.user.userId, response) };
+  });
+
+  app.post('/guardian/driver-confirm', auth, async (request) => {
+    return { success: true, data: await guardian.driverConfirm(request.user.userId) };
   });
 }

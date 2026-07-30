@@ -175,6 +175,18 @@ export class SosService {
       receipts['socket'] = false;
     }
 
+    // Guardian §5.3 L4: an alert born from an UNANSWERED check-in timeout is
+    // the server guessing, not a human asking. Contacts are NOT auto-SMSed by
+    // default — a false-positive "emergency" text to someone's mother erodes
+    // the whole feature; ops decides within their SLA. Per-tenant override:
+    // GUARDIAN_AUTONOTIFY_CONTACTS=1. Explicit human triggers (BUTTON, the
+    // check-in "I need help" → GUARDIAN_ESCALATION) always fan out.
+    if (alert.triggerSource === 'CHECKIN_TIMEOUT' && process.env['GUARDIAN_AUTONOTIFY_CONTACTS'] !== '1') {
+      receipts['contacts'] = 'skipped:guardian-default';
+      await this.prisma.sosAlert.update({ where: { id }, data: { deliveryReceipts: receipts as never } }).catch(() => {});
+      return;
+    }
+
     // Verified emergency contacts (§5), in priority order. Best-effort PER
     // contact — one failed send must not stop the rest. NEVER rate-limited or
     // budgeted: this is the real emergency, not the verification handshake.
