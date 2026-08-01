@@ -106,10 +106,17 @@ export class IncidentService {
       },
     });
 
+    // AUDIT-FIX (F3, 2026-08-01): run the §8.4 pattern hook FIRST, so the
+    // §8.3 interim suspension below sees the FINAL severity. Previously
+    // suspension keyed on the pre-hook severity, so a repeat subject whose
+    // 2nd S2 case was pattern-escalated to S1 got NO auto-suspension — less
+    // protection than a first-timer at the same final severity, backwards.
+    kase = await this.patternHook(kase);
+
     // §8.3 interim — movers vanish from dispatch instantly (availability is
     // the source of truth); active trips are allowed to complete (we do NOT
     // null current ride/order pointers — ops can kill a trip explicitly).
-    if ((severity === 'S0' || severity === 'S1') && autoSuspendEnabled()) {
+    if ((kase.severity === 'S0' || kase.severity === 'S1') && autoSuspendEnabled() && kase.interimAction === 'NONE') {
       const suspended = await this.applyInterimSuspension(input.subjectUserId, now);
       if (suspended) {
         kase = await this.prisma.incidentCase.update({ where: { id: kase.id }, data: { interimAction: 'SUSPENDED_PENDING_REVIEW' } });
@@ -125,8 +132,6 @@ export class IncidentService {
       }
     }
 
-    kase = await this.patternHook(kase);
-
     // §9.1 — S0/S1 cases open their evidence bundle at intake (an SOS-born
     // case adopts the alert's existing bundle). Best-effort.
     if (kase.severity === 'S0' || kase.severity === 'S1') {
@@ -136,7 +141,8 @@ export class IncidentService {
         .catch((err) => log().error({ err, caseId: kase.id }, 'evidence bundle open failed — case unaffected'));
     }
 
-    const siren = severity === 'S0' || severity === 'S1' ? '🚨 ' : '';
+    // AUDIT-FIX (siren note): read the FINAL severity, not the pre-hook local.
+    const siren = kase.severity === 'S0' || kase.severity === 'S1' ? '🚨 ' : '';
     await notifyAdmins(this.prisma, this.notifications, {
       title: `${siren}Safety case ${kase.caseNumber} (${kase.severity})`,
       body: `${this.categoryLabel(kase.category)} — ${input.summary.slice(0, 140)}. Ack by ${kase.slaAckBy.toISOString()}.`,
@@ -204,8 +210,16 @@ export class IncidentService {
   async liftInterim(id: string, opsUserId: string): Promise<IncidentCase> {
     const kase = await this.prisma.incidentCase.findUnique({ where: { id } });
     if (!kase) throw new NotFoundError('IncidentCase', id);
-    await this.prisma.driver.updateMany({ where: { userId: kase.subjectUserId }, data: { safetySuspendedAt: null, livenessLockedAt: null, safetyShadowRestrictedAt: null } });
-    await this.prisma.rider.updateMany({ where: { userId: kase.subjectUserId }, data: { safetySuspendedAt: null, livenessLockedAt: null, safetyShadowRestrictedAt: null } });
+    // AUDIT-FIX (F5, 2026-08-01): clear the liveness lock ONLY for an
+    // identity case. A lock set by 3 consecutive face-match failures (the §7
+    // sold-account defence) is an independent fact from an unrelated cash or
+    // service dispute — clearing it on THAT dismissal would silently reopen
+    // the very account-sharing hole the lock exists to close. The not-my-driver
+    // report opens an IDENTITY_MISMATCH case, so its dismissal still clears it.
+    const clearsLivenessLock = kase.category === 'IDENTITY_MISMATCH';
+    const clear = { safetySuspendedAt: null, safetyShadowRestrictedAt: null, ...(clearsLivenessLock ? { livenessLockedAt: null } : {}) };
+    await this.prisma.driver.updateMany({ where: { userId: kase.subjectUserId }, data: clear });
+    await this.prisma.rider.updateMany({ where: { userId: kase.subjectUserId }, data: clear });
     const updated = await this.prisma.incidentCase.update({
       where: { id },
       data: { interimAction: 'NONE', details: { ...((kase.details as Record<string, unknown> | null) ?? {}), interimLiftedBy: opsUserId, interimLiftedAt: new Date().toISOString() } as never },
@@ -260,8 +274,12 @@ export class IncidentService {
       decisionCode,
       decisionNotes: notes ?? null,
     });
-    if (decisionCode === 'DISMISSED' && decided.interimAction === 'SUSPENDED_PENDING_REVIEW') {
-      return this.liftInterim(id, opsUserId); // a dismissed case must not leave someone suspended
+    // AUDIT-FIX (F2, 2026-08-01): a DISMISSED decision lifts ANY interim
+    // action, not only SUSPENDED_PENDING_REVIEW. A shadow-restricted subject
+    // (the §8.3 S2 softer option) who is cleared was left restricted — quietly
+    // losing enhanced-monitoring dispatch with no self-serve remedy.
+    if (decisionCode === 'DISMISSED' && decided.interimAction !== 'NONE') {
+      return this.liftInterim(id, opsUserId); // a dismissed case must not leave anyone restricted
     }
     return decided;
   }

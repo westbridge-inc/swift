@@ -199,17 +199,22 @@ export class SosService {
     // the whole feature; ops decides within their SLA. Per-tenant override:
     // GUARDIAN_AUTONOTIFY_CONTACTS=1. Explicit human triggers (BUTTON, the
     // check-in "I need help" → GUARDIAN_ESCALATION) always fan out.
-    if (alert.triggerSource === 'CHECKIN_TIMEOUT' && process.env['GUARDIAN_AUTONOTIFY_CONTACTS'] !== '1') {
-      receipts['contacts'] = 'skipped:guardian-default';
-      await this.prisma.sosAlert.update({ where: { id }, data: { deliveryReceipts: receipts as never } }).catch(() => {});
-      return;
-    }
+    //
+    // AUDIT-FIX (F1, 2026-08-01): this gate skips ONLY the contact SMS — NOT
+    // the whole fan-out. The prior `return` here also skipped the evidence
+    // bundle open below, so the single highest-stakes alert (a suspected
+    // abduction the server auto-escalated) captured no evidence and no live
+    // location trail — exactly when tracking the victim matters most. The
+    // bundle open + receipts write now always run for every ACTIVE alert.
+    const skipContactSms = alert.triggerSource === 'CHECKIN_TIMEOUT' && process.env['GUARDIAN_AUTONOTIFY_CONTACTS'] !== '1';
 
     // Verified emergency contacts (§5), in priority order. Best-effort PER
     // contact — one failed send must not stop the rest. NEVER rate-limited or
     // budgeted: this is the real emergency, not the verification handshake.
     // Unverified numbers are skipped (they never proved reachable / aware).
-    try {
+    if (skipContactSms) {
+      receipts['contacts'] = 'skipped:guardian-default';
+    } else try {
       const contacts = await this.prisma.emergencyContact.findMany({
         where: { userId: alert.actorUserId, verifiedAt: { not: null } },
         orderBy: [{ priority: 'asc' }, { createdAt: 'asc' }],
@@ -254,6 +259,12 @@ export class SosService {
   private async fanOutResolved(id: string) {
     const alert = await this.prisma.sosAlert.findUnique({ where: { id } });
     if (!alert || alert.status !== 'RESOLVED') return;
+    // AUDIT-FIX (F6, 2026-08-01): don't send an all-clear to contacts who were
+    // never alarmed. When the initial fan-out skipped contact SMS (the
+    // Guardian-timeout default), a "closed by our safety team" text lands cold
+    // — confusing, and it confirms the person was involved in SOME safety
+    // event. The original receipts already record whether contacts were texted.
+    if ((alert.deliveryReceipts as Record<string, unknown> | null)?.['contacts'] === 'skipped:guardian-default') return;
     const contacts = await this.prisma.emergencyContact.findMany({
       where: { userId: alert.actorUserId, verifiedAt: { not: null } },
       orderBy: [{ priority: 'asc' }, { createdAt: 'asc' }],
