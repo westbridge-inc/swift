@@ -168,6 +168,12 @@ const PUBLIC_BY_DESIGN = new Set([
   // the unguessable courierTrackingToken IS the authorization; the handler
   // selects a narrow, phone-free projection.
   'GET /api/v1/courier/track/:token',
+  // Ad serving + event ingestion are public by design (ads spec §11.1/§12.2):
+  // the consumer home screen serves ads to anonymous users; server derives
+  // userHash only when signed in, and events are gated by the HMAC impression
+  // token (a token never issued by a real serve is unforgeable), not by session.
+  'GET /api/v1/ads/serve',
+  'POST /api/v1/ads/events',
 ]);
 
 describe('authz matrix — every role-prefixed route rejects outsiders', () => {
