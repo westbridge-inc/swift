@@ -80,7 +80,7 @@ describe('§11 serving', () => {
     await liveBookedCampaign(p.id, 'Survival Supermarket');
     AdServingService.invalidateTenant(tenant);
     const res = await serving.serve({ tenantId: tenant, city: 'georgetown', sessionId: 'sess-1', userHash: null, keys: [p.key] });
-    const slot = res.placements[p.key];
+    const slot = res.placements[p.key]!;
     expect(slot.items.length).toBe(1);
     expect(slot.items[0]!.advertiserName).toBe('Survival Supermarket'); // client renders "Ad · {this}"
     expect(slot.items[0]!.impressionToken).toBeTruthy();
@@ -94,15 +94,15 @@ describe('§11 serving', () => {
     houseIds.push(h.id);
     AdServingService.invalidateTenant(tenant);
     const withHouse = await serving.serve({ tenantId: tenant, city: '*', sessionId: 's', userHash: null, keys: [p.key] });
-    expect(withHouse.placements[p.key].items[0]!.advertiserName).toBe('Swift');
-    expect(withHouse.placements[p.key].items[0]!.impressionToken).toBeUndefined(); // house not tracked
+    expect(withHouse.placements[p.key]!.items[0]!.advertiserName).toBe('Swift');
+    expect(withHouse.placements[p.key]!.items[0]!.impressionToken).toBeUndefined(); // house not tracked
     expect(withHouse._house[p.key]).toBe(true);
 
     // Remove the house ad → collapsed (empty items), still no error.
     await prisma.houseAd.update({ where: { id: h.id }, data: { active: false } });
     AdServingService.invalidateTenant(tenant);
     const collapsed = await serving.serve({ tenantId: tenant, city: '*', sessionId: 's', userHash: null, keys: [p.key] });
-    expect(collapsed.placements[p.key].items).toHaveLength(0);
+    expect(collapsed.placements[p.key]!.items).toHaveLength(0);
   });
 
   it('a frequency-capped-out user gets no tracked items (falls through)', async () => {
@@ -112,7 +112,7 @@ describe('§11 serving', () => {
     await prisma.adFreqCounter.create({ data: { userHash: uh, placementKey: p.key, day: new Date(new Date().toISOString().slice(0, 10)), count: 2 } });
     AdServingService.invalidateTenant(tenant);
     const res = await serving.serve({ tenantId: tenant, city: '*', sessionId: 's', userHash: uh, keys: [p.key] });
-    expect(res.placements[p.key].items).toHaveLength(0); // capped out, no house → empty
+    expect(res.placements[p.key]!.items).toHaveLength(0); // capped out, no house → empty
   });
 });
 
