@@ -23,6 +23,8 @@ import { NotificationService } from '../notification/notification.service';
 import { SupportService } from '../support/support.service';
 import { VerificationService, REJECTION_REASON_CODES } from '../verification/verification.service';
 import { AdvertiserService } from '../ads/advertiser.service';
+import { CreativeService, CREATIVE_REJECT_REASONS } from '../ads/creative.service';
+import { AdsLifecycleService } from '../ads/lifecycle.service';
 import { ComplianceAuditService } from '../verification/compliance-audit.service';
 import { scheduleVendorSearchSync } from '../search/search-sync';
 import { BillingService } from '../billing/billing.service';
@@ -1944,6 +1946,32 @@ export async function adminRoutes(app: FastifyInstance) {
   app.put('/ads/advertisers/:id/reinstate', { preHandler: [adminGuard] }, async (request) => {
     const { id } = request.params as { id: string };
     return { success: true, data: await advertiserSvc.reinstate(id, request.user.userId) };
+  });
+
+  // ── Ad creative review queue + campaign kill (spec §10 / §6.1) ────────────
+  const creativeSvc = new CreativeService(app.prisma, app.io);
+  const adsLifecycle = new AdsLifecycleService(app.prisma, app.io);
+
+  app.get('/ads/creatives/queue', { preHandler: [adminGuard] }, async () => {
+    return { success: true, data: await creativeSvc.queue() };
+  });
+
+  app.put('/ads/creatives/:id/approve', { preHandler: [adminGuard] }, async (request) => {
+    const { id } = request.params as { id: string };
+    return { success: true, data: await creativeSvc.approve(id, request.user.userId) };
+  });
+
+  app.put('/ads/creatives/:id/reject', { preHandler: [adminGuard] }, async (request) => {
+    const { id } = request.params as { id: string };
+    const body = z.object({ reason: z.enum(CREATIVE_REJECT_REASONS), notes: z.string().trim().max(500).optional() }).parse(request.body ?? {});
+    return { success: true, data: await creativeSvc.reject(id, request.user.userId, body.reason, body.notes) };
+  });
+
+  /** §6.1 kill — admin removes a campaign for a policy violation (audited). */
+  app.put('/ads/campaigns/:id/kill', { preHandler: [adminGuard] }, async (request) => {
+    const { id } = request.params as { id: string };
+    const { reason } = z.object({ reason: z.string().trim().min(3).max(500) }).parse(request.body ?? {});
+    return { success: true, data: await adsLifecycle.transition(id, 'kill', request.user.userId, reason) };
   });
 
   /** §8.2 admin "mark invoice paid" — the Caribbean reality path (bank
