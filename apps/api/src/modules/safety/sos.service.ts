@@ -236,6 +236,14 @@ export class SosService {
     }
 
     await this.prisma.sosAlert.update({ where: { id }, data: { deliveryReceipts: receipts as never } }).catch(() => {});
+
+    // §9.1 — an ACTIVE SOS opens its evidence bundle: capture what the
+    // platform knows NOW, before anything moves. Best-effort; a vault hiccup
+    // must never slow the fan-out that just happened.
+    const { EvidenceService } = await import('./evidence.service');
+    await new EvidenceService(this.prisma, this.io)
+      .openForSos(id)
+      .catch((err) => log().error({ err, sosAlertId: id }, 'evidence bundle open failed — alert unaffected'));
   }
 
   /** All-clear to the emergency contacts once ops CLOSE an alert — you don't

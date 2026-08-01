@@ -127,6 +127,15 @@ export class IncidentService {
 
     kase = await this.patternHook(kase);
 
+    // §9.1 — S0/S1 cases open their evidence bundle at intake (an SOS-born
+    // case adopts the alert's existing bundle). Best-effort.
+    if (kase.severity === 'S0' || kase.severity === 'S1') {
+      const { EvidenceService } = await import('./evidence.service');
+      await new EvidenceService(this.prisma, this.io)
+        .openForCase(kase.id)
+        .catch((err) => log().error({ err, caseId: kase.id }, 'evidence bundle open failed — case unaffected'));
+    }
+
     const siren = severity === 'S0' || severity === 'S1' ? '🚨 ' : '';
     await notifyAdmins(this.prisma, this.notifications, {
       title: `${siren}Safety case ${kase.caseNumber} (${kase.severity})`,
@@ -273,6 +282,12 @@ export class IncidentService {
       where: { id },
       data: { escalatedPoliceAt: new Date(), legalHold: true, details: { ...((kase.details as Record<string, unknown> | null) ?? {}), policeEscalatedBy: opsUserId } as never },
     });
+    // §9.2 — police escalation puts the linked evidence bundle under legal
+    // hold too (retention must never delete what a prosecution may need).
+    const { EvidenceService } = await import('./evidence.service');
+    const evidence = new EvidenceService(this.prisma, this.io);
+    const bundle = await this.prisma.evidenceBundle.findUnique({ where: { caseId: id }, select: { id: true } });
+    if (bundle) await evidence.setLegalHold(bundle.id, opsUserId, `Case ${kase.caseNumber} escalated to police`).catch(() => {});
     log().warn({ caseId: id, opsUserId }, 'incident escalated to police — legal hold set');
     return updated;
   }

@@ -4,6 +4,7 @@ import { SosService } from './sos.service';
 import { GuardianService } from './guardian.service';
 import { LivenessService } from './liveness.service';
 import { IncidentService, DECISION_CODES } from './incident.service';
+import { EvidenceService } from './evidence.service';
 import { EmergencyContactService } from './emergency-contact.service';
 import { getChannels } from '../../providers/notifications/channels';
 import { getStorageProvider } from '../../providers/storage/storage-provider';
@@ -339,6 +340,50 @@ export async function safetyRoutes(app: FastifyInstance) {
       notes: z.string().max(4000).optional(),
     }).parse(request.body ?? {});
     return { success: true, data: await incidents.decide(request.params.id, request.user.userId, body.decisionCode, body.notes) };
+  });
+
+  // ── Evidence Vault (§9) — ops-only; content never moves without a logged
+  //    reason (chain of custody). ────────────────────────────────────────────
+  const evidence = new EvidenceService(app.prisma, app.io);
+  const reasonBody = z.object({ reason: z.string().trim().min(5).max(1000) });
+
+  /** Meta lookup (no content, no log): find the bundle behind a case/alert. */
+  app.get('/evidence', auth, async (request) => {
+    if (!isOps(request.user.role)) throw new ForbiddenError('Only ops can access evidence.');
+    const q = z.object({ caseId: z.string().optional(), sosAlertId: z.string().optional() }).parse(request.query ?? {});
+    if (!q.caseId && !q.sosAlertId) throw new AppError(400, 'LINK_REQUIRED', 'Pass caseId or sosAlertId.');
+    const bundle = await app.prisma.evidenceBundle.findFirst({
+      where: q.caseId ? { caseId: q.caseId } : { sosAlertId: q.sosAlertId },
+      select: { id: true, bundleNumber: true, sosAlertId: true, caseId: true, subjectUserId: true, openedAt: true, sealedAt: true, sealHash: true, legalHold: true, _count: { select: { items: true } } },
+    });
+    if (!bundle) throw new NotFoundError('EvidenceBundle', q.caseId ?? q.sosAlertId ?? '');
+    return { success: true, data: bundle };
+  });
+
+  app.post<{ Params: { id: string } }>('/evidence/:id/view', auth, async (request) => {
+    if (!isOps(request.user.role)) throw new ForbiddenError('Only ops can access evidence.');
+    const { reason } = reasonBody.parse(request.body ?? {});
+    return { success: true, data: await evidence.view(request.params.id, request.user.userId, reason) };
+  });
+
+  app.post<{ Params: { id: string } }>('/evidence/:id/seal', auth, async (request) => {
+    if (!isOps(request.user.role)) throw new ForbiddenError('Only ops can seal evidence.');
+    const { reason } = reasonBody.parse(request.body ?? {});
+    return { success: true, data: await evidence.seal(request.params.id, request.user.userId, reason) };
+  });
+
+  app.post<{ Params: { id: string } }>('/evidence/:id/legal-hold', auth, async (request) => {
+    if (!isOps(request.user.role)) throw new ForbiddenError('Only ops can set a legal hold.');
+    const { reason } = reasonBody.parse(request.body ?? {});
+    return { success: true, data: await evidence.setLegalHold(request.params.id, request.user.userId, reason) };
+  });
+
+  /** §9.2 export — encrypted + watermarked, passphrase returned exactly once
+   *  (hand it over on a separate channel; Swift keeps no copy). */
+  app.post<{ Params: { id: string } }>('/evidence/:id/export', auth, async (request) => {
+    if (!isOps(request.user.role)) throw new ForbiddenError('Only ops can export evidence.');
+    const { reason } = reasonBody.parse(request.body ?? {});
+    return { success: true, data: await evidence.export(request.params.id, request.user.userId, reason) };
   });
 
   // §5.1 enhanced-monitoring preference — the "Extra safety check-ins on my
