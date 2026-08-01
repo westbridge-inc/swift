@@ -3,6 +3,8 @@ import { z } from 'zod';
 import { AdvertiserService } from './advertiser.service';
 import { BookingService } from './booking.service';
 import { AdCheckoutService } from './checkout.service';
+import { CreativeService } from './creative.service';
+import { AdsLifecycleService } from './lifecycle.service';
 import { mondayOfDate, isMonday } from './ads-weeks';
 import { AppError, NotFoundError } from '../../utils/errors';
 
@@ -138,4 +140,42 @@ export async function adsRoutes(app: FastifyInstance) {
       data: { invoiceId: invoice.id, number: invoice.number, amount: Number(invoice.amount), currency: invoice.currency, status: invoice.status, paymentUrl: invoice.paymentUrl, reservedUntil },
     };
   });
+
+  // ── Creatives (spec §9) — direct multipart upload, member-gated ───────────
+  const creatives = new CreativeService(app.prisma, app.io);
+
+  /** POST /campaigns/:id/creatives — upload a creative (image or MP4). Text
+   *  fields ride multipart form fields alongside the file. */
+  app.post<{ Params: { id: string } }>('/campaigns/:id/creatives', auth, async (request) => {
+    const campaign = await app.prisma.adCampaign.findUnique({ where: { id: request.params.id }, select: { advertiserId: true } });
+    if (!campaign) throw new NotFoundError('AdCampaign', request.params.id);
+    await advertisers.assertMember(campaign.advertiserId, request.user.userId);
+
+    const file = await request.file();
+    if (!file) throw new AppError(400, 'NO_FILE', 'Attach a creative file.');
+    const buffer = await file.toBuffer();
+    const fields = file.fields as Record<string, { value?: string } | undefined>;
+    const kind = (fields['kind']?.value === 'VIDEO' ? 'VIDEO' : 'IMAGE') as 'IMAGE' | 'VIDEO';
+    const text = {
+      headline: fields['headline']?.value,
+      body: fields['body']?.value,
+      ctaLabel: fields['ctaLabel']?.value,
+    };
+    const creative = await creatives.upload({ campaignId: request.params.id, kind, buffer, mime: file.mimetype, filename: file.filename, text });
+    return { success: true, data: { id: creative.id, status: creative.status, transcodeStatus: creative.transcodeStatus, fileUrl: creative.fileUrl } };
+  });
+
+  // ── Campaign lifecycle (spec §6.1) — advertiser-side events ───────────────
+  const lifecycle = new AdsLifecycleService(app.prisma, app.io);
+  const memberEvent = (event: 'pause' | 'resume' | 'cancel') =>
+    async (request: { user: { userId: string }; params: { id: string } }) => {
+      const campaign = await app.prisma.adCampaign.findUnique({ where: { id: request.params.id }, select: { advertiserId: true } });
+      if (!campaign) throw new NotFoundError('AdCampaign', request.params.id);
+      await advertisers.assertMember(campaign.advertiserId, request.user.userId);
+      const updated = await lifecycle.transition(request.params.id, event, request.user.userId);
+      return { success: true, data: { id: updated.id, status: updated.status } };
+    };
+  app.post<{ Params: { id: string } }>('/campaigns/:id/pause', auth, memberEvent('pause'));
+  app.post<{ Params: { id: string } }>('/campaigns/:id/resume', auth, memberEvent('resume'));
+  app.post<{ Params: { id: string } }>('/campaigns/:id/cancel', auth, memberEvent('cancel'));
 }
