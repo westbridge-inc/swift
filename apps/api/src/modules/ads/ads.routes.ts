@@ -167,7 +167,7 @@ export async function adsRoutes(app: FastifyInstance) {
 
   // ── Campaign lifecycle (spec §6.1) — advertiser-side events ───────────────
   const lifecycle = new AdsLifecycleService(app.prisma, app.io);
-  const memberEvent = (event: 'pause' | 'resume' | 'cancel') =>
+  const memberEvent = (event: 'pause' | 'resume') =>
     async (request: { user: { userId: string }; params: { id: string } }) => {
       const campaign = await app.prisma.adCampaign.findUnique({ where: { id: request.params.id }, select: { advertiserId: true } });
       if (!campaign) throw new NotFoundError('AdCampaign', request.params.id);
@@ -177,5 +177,17 @@ export async function adsRoutes(app: FastifyInstance) {
     };
   app.post<{ Params: { id: string } }>('/campaigns/:id/pause', auth, memberEvent('pause'));
   app.post<{ Params: { id: string } }>('/campaigns/:id/resume', auth, memberEvent('resume'));
-  app.post<{ Params: { id: string } }>('/campaigns/:id/cancel', auth, memberEvent('cancel'));
+
+  /** §6.1 cancel — the advertiser cancels; the §8.4 refund plan executes
+   *  (future weeks per the day thresholds, current week 0%). */
+  app.post<{ Params: { id: string } }>('/campaigns/:id/cancel', auth, async (request) => {
+    const campaign = await app.prisma.adCampaign.findUnique({ where: { id: request.params.id }, select: { advertiserId: true, tenantId: true } });
+    if (!campaign) throw new NotFoundError('AdCampaign', request.params.id);
+    await advertisers.assertMember(campaign.advertiserId, request.user.userId);
+    const updated = await lifecycle.transition(request.params.id, 'cancel', request.user.userId);
+    const { AdsRefundService } = await import('./refund.service');
+    const settings = await app.prisma.adsSettings.findUnique({ where: { tenantId: campaign.tenantId }, select: { cancelFullRefundDays: true } });
+    const refund = await new AdsRefundService(app.prisma, app.io).execute(request.params.id, 'ADVERTISER_CANCEL', request.user.userId, { cancelFullRefundDays: settings?.cancelFullRefundDays ?? 7 });
+    return { success: true, data: { id: updated.id, status: updated.status, refund } };
+  });
 }

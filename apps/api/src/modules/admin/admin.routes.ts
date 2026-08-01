@@ -1971,7 +1971,11 @@ export async function adminRoutes(app: FastifyInstance) {
   app.put('/ads/campaigns/:id/kill', { preHandler: [adminGuard] }, async (request) => {
     const { id } = request.params as { id: string };
     const { reason } = z.object({ reason: z.string().trim().min(3).max(500) }).parse(request.body ?? {});
-    return { success: true, data: await adsLifecycle.transition(id, 'kill', request.user.userId, reason) };
+    const killed = await adsLifecycle.transition(id, 'kill', request.user.userId, reason);
+    // §8.4 row 5: kill refunds future weeks by default (current week 0%).
+    const { AdsRefundService } = await import('../ads/refund.service');
+    await new AdsRefundService(app.prisma, app.io).execute(id, 'ADMIN_KILL', request.user.userId).catch(() => {});
+    return { success: true, data: { id: killed.id, status: killed.status } };
   });
 
   /** §8.2 admin "mark invoice paid" — the Caribbean reality path (bank
