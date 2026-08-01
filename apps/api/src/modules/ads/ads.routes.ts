@@ -1,6 +1,9 @@
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { AdvertiserService } from './advertiser.service';
+import { BookingService } from './booking.service';
+import { mondayOfDate, isMonday } from './ads-weeks';
+import { AppError, NotFoundError } from '../../utils/errors';
 
 // Advertiser-facing ads routes (ads-platform spec §4.2/§4.3). Registration and
 // the "under review" dashboard read. Ops/admin queue actions live in the admin
@@ -37,5 +40,83 @@ export async function adsRoutes(app: FastifyInstance) {
    *  "under review" / approved dashboard gating. */
   app.get('/advertiser/me', auth, async (request) => {
     return { success: true, data: await advertisers.listForUser(request.user.userId) };
+  });
+
+  // ── Placements, availability, campaigns, reservation (spec §2/§7) ─────────
+  const booking = new BookingService(app.prisma);
+
+  /** GET /placements — the sellable home-screen placements (wizard step ①). */
+  app.get('/placements', auth, async () => {
+    const rows = await app.prisma.adPlacement.findMany({ where: { active: true }, orderBy: { tier: 'asc' } });
+    return { success: true, data: rows.map((p) => ({ id: p.id, key: p.key, name: p.name, tier: p.tier, mediaKind: p.mediaKind, slotsPerWeek: p.slotsPerWeek, rotationSeconds: p.rotationSeconds, weeklyPrice: Number(p.weeklyPrice), currency: p.currency })) };
+  });
+
+  /** GET /placements/:id/availability — per-week availability for a city over a
+   *  range; lazily materialises inventory rows (spec §7.2). */
+  app.get<{ Params: { id: string } }>('/placements/:id/availability', auth, async (request) => {
+    const q = z.object({
+      city: z.string().trim().min(1).default('*'),
+      from: z.string().date(),
+      to: z.string().date(),
+    }).parse(request.query ?? {});
+    const from = new Date(`${q.from}T00:00:00Z`);
+    const to = new Date(`${q.to}T00:00:00Z`);
+    if (to < from) throw new AppError(400, 'BAD_RANGE', 'to must be on or after from.');
+    return { success: true, data: await booking.availability(request.params.id, q.city, from, to) };
+  });
+
+  /** POST /campaigns — create a DRAFT campaign (any member; weeks snapped to
+   *  Mondays). Reserving inventory + paying is gated on an APPROVED advertiser. */
+  app.post('/campaigns', auth, async (request) => {
+    const body = z.object({
+      advertiserId: z.string().min(1),
+      placementId: z.string().min(1),
+      name: z.string().trim().min(2).max(80),
+      objective: z.enum(['AWARENESS', 'TRAFFIC', 'PROMOTION']).optional(),
+      cities: z.array(z.string().trim().min(1)).min(1).max(50).default(['*']),
+      startWeek: z.string().date(),
+      endWeek: z.string().date(),
+      destinationType: z.enum(['NONE', 'URL', 'DEEPLINK']).optional(),
+      destinationValue: z.string().trim().max(500).optional(),
+    }).parse(request.body ?? {});
+    await advertisers.assertMember(body.advertiserId, request.user.userId);
+    const placement = await app.prisma.adPlacement.findUnique({ where: { id: body.placementId } });
+    if (!placement || !placement.active) throw new NotFoundError('AdPlacement', body.placementId);
+
+    const startWeek = mondayOfDate(new Date(`${body.startWeek}T00:00:00Z`));
+    const endWeek = mondayOfDate(new Date(`${body.endWeek}T00:00:00Z`));
+    if (endWeek < startWeek) throw new AppError(400, 'BAD_RANGE', 'endWeek must be on or after startWeek.');
+    if (!isMonday(startWeek) || !isMonday(endWeek)) throw new AppError(500, 'WEEK_SNAP_FAILED', 'Internal week normalization error.');
+
+    const campaign = await app.prisma.adCampaign.create({
+      data: {
+        advertiserId: body.advertiserId, placementId: body.placementId, name: body.name,
+        objective: body.objective ?? null, cities: body.cities, startWeek, endWeek,
+        destinationType: body.destinationType ?? 'NONE', destinationValue: body.destinationValue ?? null,
+      },
+    });
+    return { success: true, data: { id: campaign.id, status: campaign.status, startWeek: campaign.startWeek, endWeek: campaign.endWeek } };
+  });
+
+  /** POST /campaigns/:id/reserve — hold the inventory (spec §7.3). Race-safe;
+   *  APPROVED advertiser only (a pending applicant can draft, not commit). */
+  app.post<{ Params: { id: string } }>('/campaigns/:id/reserve', auth, async (request) => {
+    const campaign = await app.prisma.adCampaign.findUnique({
+      where: { id: request.params.id },
+      include: { advertiser: { select: { id: true, status: true } } },
+    });
+    if (!campaign) throw new NotFoundError('AdCampaign', request.params.id);
+    await advertisers.assertMember(campaign.advertiserId, request.user.userId);
+    if (campaign.advertiser.status !== 'APPROVED') {
+      throw new AppError(403, 'ADVERTISER_NOT_APPROVED', 'Your advertiser account must be approved before you can book inventory.');
+    }
+    const settings = await app.prisma.adsSettings.findUnique({ where: { tenantId: campaign.tenantId } });
+    const result = await booking.reserve(campaign.id, { reservationMinutes: settings?.reservationMinutes ?? 20 });
+    // Move the draft to PENDING_PAYMENT and stamp the locked total.
+    await app.prisma.adCampaign.updateMany({
+      where: { id: campaign.id, status: { in: ['DRAFT', 'PENDING_PAYMENT'] } },
+      data: { status: 'PENDING_PAYMENT', totalAmount: result.total },
+    });
+    return { success: true, data: result };
   });
 }

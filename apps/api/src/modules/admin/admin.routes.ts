@@ -1946,6 +1946,16 @@ export async function adminRoutes(app: FastifyInstance) {
     return { success: true, data: await advertiserSvc.reinstate(id, request.user.userId) };
   });
 
+  /** Seed the three home placements + AdsSettings for the tenant (ads §2).
+   *  Idempotent, create-only for tunables — the operator edits prices/slots by
+   *  updating the AdPlacement rows afterward. */
+  app.post('/ads/placements/seed', { preHandler: [adminGuard] }, async () => {
+    const { seedAdPlacements } = await import('../ads/placement.seed');
+    const { getTenantId } = await import('../../plugins/tenant-context');
+    const seeded = await seedAdPlacements(app.prisma, getTenantId() ?? 'swift-default');
+    return { success: true, data: { seeded } };
+  });
+
   app.get('/verification/queue', { preHandler: [adminGuard] }, async (request) => {
     const { page, limit, skip } = parsePagination(request.query as Record<string, string>);
     const { status } = verificationQueueQuerySchema.parse(request.query);
