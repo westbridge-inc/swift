@@ -27,6 +27,7 @@ import { throwForMissingProfile } from '../../utils/role-gate';
 import { ALLOWED_IMAGE_TYPES, looksLikeImage } from '../../utils/images';
 import { scheduleVendorSearchSync } from '../search/search-sync';
 import { SearchService } from '../search/search.service';
+import { subscriptionOperability } from '../subscription/operate-gate';
 
 // ---------------------------------------------------------------------------
 // Input schemas
@@ -514,8 +515,16 @@ export async function vendorRoutes(app: FastifyInstance) {
     if (!verified) {
       throw new AppError(403, 'VERIFICATION_REQUIRED', 'Your store’s documents need verifying before you can work orders — check Documents for anything expired.');
     }
+    // THE canOperate rule (operate-gate.ts, G-BILL-03). Unification FIXED a
+    // real divergence here: this copy was missing the grace-lapse check, so a
+    // PAST_DUE vendor whose grace had run out kept working orders until the
+    // billing sweep flipped them SUSPENDED. Now all three actor gates agree.
     const sub = await app.prisma.subscription.findFirst({ where: { vendorId }, orderBy: { createdAt: 'desc' } });
-    if (sub && !['TRIAL', 'ACTIVE', 'PAST_DUE'].includes(sub.status)) {
+    const operability = subscriptionOperability(sub, { missingRow: 'GRANDFATHER' });
+    if (!operability.operable) {
+      if (operability.why === 'GRACE_LAPSED') {
+        throw new AppError(403, 'SUBSCRIPTION_PAST_DUE', 'Your grace period has ended — pay this week’s fee to keep working orders.');
+      }
       throw new AppError(403, 'SUBSCRIPTION_INACTIVE', 'Your subscription must be active to work orders — renew from Account.');
     }
   }
@@ -816,9 +825,15 @@ export async function vendorRoutes(app: FastifyInstance) {
       }
       // A suspended / cancelled subscription must not be able to re-open the store
       // for orders (checkout already blocks new orders to a non-ACTIVE vendor, but
-      // the toggle is the front door — gate it too). ACTIVE/TRIAL/PAST_DUE may operate.
+      // the toggle is the front door — gate it too). THE canOperate rule
+      // (operate-gate.ts) decides, grace-lapse included.
       const sub = await app.prisma.subscription.findFirst({ where: { vendorId }, orderBy: { createdAt: 'desc' } });
-      if (sub && !['TRIAL', 'ACTIVE', 'PAST_DUE'].includes(sub.status)) {
+      const toggleOperability = subscriptionOperability(sub, { missingRow: 'GRANDFATHER' });
+      if (!toggleOperability.operable) {
+        if (toggleOperability.why === 'GRACE_LAPSED') {
+          throw new AppError(403, 'SUBSCRIPTION_PAST_DUE',
+            'Your grace period has ended — pay this week’s fee to reopen your store.');
+        }
         throw new AppError(403, 'SUBSCRIPTION_INACTIVE',
           'Your subscription must be active to accept orders. Renew from Account to reopen your store.');
       }

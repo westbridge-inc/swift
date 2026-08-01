@@ -17,6 +17,7 @@ import { refreshLegEta, cachedLegEta } from '../dispatch/live-eta';
 import { getKycProvider } from '../../providers/kyc/kyc-provider';
 import { assertShiftLiveness } from '../safety/liveness.service';
 import { assertNotSafetySuspended } from '../safety/incident.service';
+import { subscriptionOperability } from '../subscription/operate-gate';
 import { haversineDistance } from '../../utils/distance';
 import { estimateLoad } from '../../utils/load';
 import { parsePagination, paginatedResponse } from '../../utils/pagination';
@@ -356,21 +357,19 @@ export async function riderRoutes(app: FastifyInstance) {
       throw new AppError(403, 'VERIFICATION_REQUIRED', 'Your documents must be verified before you can go online');
     }
 
-    // Subscription gate: TRIAL/ACTIVE/PAST_DUE (grace) operate; a suspended,
-    // paused, or cancelled subscription blocks going online. A missing row is
-    // grandfathered (legacy accounts pre-dating birth-on-verification).
+    // THE canOperate rule (operate-gate.ts, G-BILL-03) — a missing row is
+    // grandfathered (legacy accounts pre-dating birth-on-verification); the
+    // verdict maps onto this route's historical codes.
     const sub = await app.prisma.subscription.findFirst({
       where: { riderId: rider.id },
       select: { status: true, gracePeriodEnd: true },
     });
-    if (sub && !['TRIAL', 'ACTIVE', 'PAST_DUE'].includes(sub.status)) {
+    const operability = subscriptionOperability(sub, { missingRow: 'GRANDFATHER' });
+    if (!operability.operable) {
+      if (operability.why === 'GRACE_LAPSED') {
+        throw new AppError(403, 'SUBSCRIPTION_PAST_DUE', 'Your grace period has ended — pay this week’s fee to go back online.');
+      }
       throw new AppError(403, 'SUBSCRIPTION_SUSPENDED', 'Your subscription is unpaid. Top up or pay to go back online.');
-    }
-    // Defense-in-depth: PAST_DUE operates only THROUGH the grace window. Once
-    // grace has lapsed, block at go-online instead of waiting for the billing
-    // sweep to flip SUSPENDED — the weekly fee is the whole business model.
-    if (sub && sub.status === 'PAST_DUE' && sub.gracePeriodEnd && sub.gracePeriodEnd < new Date()) {
-      throw new AppError(403, 'SUBSCRIPTION_PAST_DUE', 'Your grace period has ended — pay this week’s fee to go back online.');
     }
 
     // Identity assurance (safety spec §7.1): when the tenant enables liveness,
@@ -1240,9 +1239,10 @@ export async function riderRoutes(app: FastifyInstance) {
 
     const sub = rider.subscription;
     const now = new Date();
-    // Mirrors the go-online gate: a trial or grace-window subscription IS
-    // operating — showing it "inactive" contradicted the switch that works.
-    const isActive = ['TRIAL', 'ACTIVE', 'PAST_DUE'].includes(sub.status) && sub.currentPeriodEnd > now;
+    // THE canOperate rule (operate-gate.ts): the badge must show exactly what
+    // the go-online switch allows — including the grace-lapse cutoff, which
+    // this display copy used to miss.
+    const isActive = subscriptionOperability(sub, { missingRow: 'BLOCK' }, now).operable && sub.currentPeriodEnd > now;
 
     return {
       success: true,

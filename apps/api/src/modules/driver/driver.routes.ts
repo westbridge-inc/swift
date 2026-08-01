@@ -12,6 +12,7 @@ import { classesAtOrAbove, classesAtOrBelow } from '../rides/fare.service';
 import { getKycProvider } from '../../providers/kyc/kyc-provider';
 import { assertShiftLiveness } from '../safety/liveness.service';
 import { assertNotSafetySuspended } from '../safety/incident.service';
+import { subscriptionOperability } from '../subscription/operate-gate';
 import { BillingService } from '../billing/billing.service';
 import { getPaymentProvider } from '../../providers/payment/payment-provider';
 import { haversineDistance, estimateDeliveryMinutes } from '../../utils/distance';
@@ -187,22 +188,14 @@ export async function driverRoutes(app: FastifyInstance) {
       throw new AppError(403, 'VERIFICATION_REQUIRED', 'Your documents must be verified before going online');
     }
 
-    // TRIAL and ACTIVE operate; PAST_DUE keeps operating through the grace
-    // window (the billing sweep suspends when grace runs out). A missing,
-    // paused, suspended, or cancelled subscription blocks going online.
-    if (!driver.subscription || !['TRIAL', 'ACTIVE', 'PAST_DUE'].includes(driver.subscription.status)) {
+    // THE canOperate rule (operate-gate.ts, G-BILL-03) — drivers require a
+    // subscription row; the verdict maps onto this route's historical codes.
+    const operability = subscriptionOperability(driver.subscription, { missingRow: 'BLOCK' });
+    if (!operability.operable) {
+      if (operability.why === 'GRACE_LAPSED') {
+        throw new AppError(403, 'SUBSCRIPTION_PAST_DUE', 'Your grace period has ended — pay this week’s fee to go back online.');
+      }
       throw new AppError(400, 'SUBSCRIPTION_REQUIRED', 'An active subscription is required to go online');
-    }
-    // Defense-in-depth: PAST_DUE operates only THROUGH the grace window. Once
-    // grace has lapsed, block AT go-online rather than waiting for the billing
-    // sweep to flip SUSPENDED (which can be minutes away) — otherwise a mover
-    // keeps earning unpaid, and the weekly fee is the entire business model.
-    if (
-      driver.subscription.status === 'PAST_DUE' &&
-      driver.subscription.gracePeriodEnd &&
-      driver.subscription.gracePeriodEnd < new Date()
-    ) {
-      throw new AppError(403, 'SUBSCRIPTION_PAST_DUE', 'Your grace period has ended — pay this week’s fee to go back online.');
     }
 
     // Identity assurance (safety spec §7.1): when the tenant enables liveness,
