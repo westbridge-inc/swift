@@ -562,6 +562,11 @@ export function createWorkers(ctx: JobContext) {
         if (promoted.length > 0) {
           ctx.log.warn({ promoted, count: promoted.length }, 'SOS grace backstop promoted pending alerts to ACTIVE (client never confirmed)');
         }
+        // §9.1 live trail: the same life-safety tick appends the mover's
+        // newest fix to every open alert's unsealed bundle — the war room
+        // replays this later. Cheap no-op when no alert is open.
+        const { EvidenceService } = await import('../modules/safety/evidence.service');
+        await new EvidenceService(ctx.prisma, ctx.io).appendLiveFixes().catch(() => {});
         return;
       }
 

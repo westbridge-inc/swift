@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto';
+import { createHash, randomBytes, scryptSync, createCipheriv } from 'node:crypto';
 import type { PrismaClient, EvidenceBundle, EvidenceItemKind, Prisma } from '@prisma/client';
 import type { Server } from 'socket.io';
 import { nanoid } from 'nanoid';
@@ -202,6 +202,116 @@ export class EvidenceService {
     const updated = await this.prisma.evidenceBundle.update({ where: { id: bundleId }, data: { legalHold: true } });
     await this.prisma.safetyAccessLog.create({ data: { bundleId, accessorUserId: opsUserId, action: 'LEGAL_HOLD', reason } });
     return updated;
+  }
+
+  // ── Live location trail (§9.1, post-trigger) ─────────────────────────────
+
+  /** Rides the 10s SOS tick: every OPEN alert (ACTIVE/ACKNOWLEDGED) with a
+   *  ride and an UNSEALED bundle gets the mover's newest fix appended as a
+   *  LOCATION_FIX item — the live trail the war room replays later. Dedup on
+   *  the fix timestamp; bounded per bundle; a sealed bundle refuses at the DB
+   *  and is skipped. (The PRE-trigger trail would need a location ring buffer
+   *  the platform doesn't keep — deferred, documented.) */
+  async appendLiveFixes(now = new Date()): Promise<{ appended: number }> {
+    const open = await this.prisma.sosAlert.findMany({
+      where: { status: { in: ['ACTIVE', 'ACKNOWLEDGED'] }, orderId: { not: null } },
+      select: { id: true, orderId: true },
+      take: 100,
+    });
+    let appended = 0;
+    for (const alert of open) {
+      try {
+        const bundle = await this.prisma.evidenceBundle.findUnique({
+          where: { sosAlertId: alert.id },
+          select: { id: true, sealedAt: true },
+        });
+        if (!bundle || bundle.sealedAt) continue;
+        const order = await this.prisma.order.findUnique({
+          where: { id: alert.orderId! },
+          select: {
+            driver: { select: { currentLat: true, currentLng: true, lastLocationUpdate: true } },
+            rider: { select: { currentLat: true, currentLng: true, lastLocationUpdate: true } },
+          },
+        });
+        const mover = order?.driver ?? order?.rider;
+        if (!mover?.lastLocationUpdate || mover.currentLat == null || mover.currentLng == null) continue;
+
+        const last = await this.prisma.evidenceItem.findFirst({
+          where: { bundleId: bundle.id, kind: 'LOCATION_FIX' },
+          orderBy: { createdAt: 'desc' },
+          select: { content: true },
+        });
+        const lastAt = (last?.content as { at?: string } | null)?.at;
+        if (lastAt && new Date(lastAt).getTime() >= mover.lastLocationUpdate.getTime()) continue; // no new fix
+        const count = await this.prisma.evidenceItem.count({ where: { bundleId: bundle.id, kind: 'LOCATION_FIX' } });
+        if (count >= 720) continue; // ~2h at the fastest fix cadence — the trail is bounded
+
+        const content = { lat: mover.currentLat, lng: mover.currentLng, at: mover.lastLocationUpdate.toISOString() };
+        const canonical = canonicalJson(content);
+        await this.prisma.evidenceItem.create({
+          data: { bundleId: bundle.id, kind: 'LOCATION_FIX', label: `Live fix ${content.at}`, content: content as never, contentHash: sha256(canonical) },
+        });
+        appended += 1;
+      } catch (err) {
+        log().error({ err, sosAlertId: alert.id }, 'evidence live-fix append failed — continuing');
+      }
+    }
+    if (appended > 0) log().info({ appended, at: now.toISOString() }, 'evidence live fixes appended');
+    return { appended };
+  }
+
+  // ── Export (§9.2) ────────────────────────────────────────────────────────
+
+  /** Server-side encrypted export for police referral: the canonical bundle
+   *  (meta + items + sealHash) WATERMARKED with the exporter and timestamp,
+   *  encrypted AES-256-GCM under a ONE-TIME passphrase returned exactly once
+   *  in the response (never stored — hand it over on a separate channel).
+   *  The export itself is chain-of-custody: reason required, EXPORT logged. */
+  async export(bundleId: string, opsUserId: string, reason: string) {
+    if (!reason || reason.trim().length < 5) {
+      throw new AppError(400, 'REASON_REQUIRED', 'State why you are exporting this evidence — the reason is part of the chain of custody.');
+    }
+    const bundle = await this.prisma.evidenceBundle.findUnique({ where: { id: bundleId }, include: { items: true } });
+    if (!bundle) throw new NotFoundError('EvidenceBundle', bundleId);
+
+    const exportedAt = new Date().toISOString();
+    const payload = {
+      watermark: { exportedBy: opsUserId, exportedAt, bundleNumber: bundle.bundleNumber, notice: 'Swift safety evidence export — access is audited; distribution is restricted.' },
+      bundle: {
+        bundleNumber: bundle.bundleNumber,
+        sosAlertId: bundle.sosAlertId,
+        caseId: bundle.caseId,
+        subjectUserId: bundle.subjectUserId,
+        openedAt: bundle.openedAt,
+        sealedAt: bundle.sealedAt,
+        sealHash: bundle.sealHash,
+        legalHold: bundle.legalHold,
+      },
+      items: bundle.items.map((i) => ({ kind: i.kind, label: i.label, content: i.content, contentHash: i.contentHash, createdAt: i.createdAt })),
+    };
+
+    const passphrase = randomBytes(24).toString('base64url'); // one-time; never persisted
+    const salt = randomBytes(16);
+    const iv = randomBytes(12);
+    const key = scryptSync(passphrase, salt, 32);
+    const cipher = createCipheriv('aes-256-gcm', key, iv);
+    const plaintext = Buffer.from(canonicalJson(payload), 'utf8');
+    const ciphertext = Buffer.concat([cipher.update(plaintext), cipher.final()]);
+    const authTag = cipher.getAuthTag();
+
+    await this.prisma.safetyAccessLog.create({ data: { bundleId, accessorUserId: opsUserId, action: 'EXPORT', reason: reason.trim() } });
+    log().warn({ bundleId, bundleNumber: bundle.bundleNumber, opsUserId }, 'evidence bundle EXPORTED (encrypted, watermarked)');
+
+    return {
+      filename: `${bundle.bundleNumber}-evidence.enc.json`,
+      algorithm: 'aes-256-gcm+scrypt',
+      salt: salt.toString('base64'),
+      iv: iv.toString('base64'),
+      authTag: authTag.toString('base64'),
+      ciphertext: ciphertext.toString('base64'),
+      /** Returned ONCE — hand it over on a separate channel; Swift keeps no copy. */
+      passphrase,
+    };
   }
 
   // ── Retention (§9.4) ─────────────────────────────────────────────────────

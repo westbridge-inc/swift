@@ -378,6 +378,14 @@ export async function safetyRoutes(app: FastifyInstance) {
     return { success: true, data: await evidence.setLegalHold(request.params.id, request.user.userId, reason) };
   });
 
+  /** §9.2 export — encrypted + watermarked, passphrase returned exactly once
+   *  (hand it over on a separate channel; Swift keeps no copy). */
+  app.post<{ Params: { id: string } }>('/evidence/:id/export', auth, async (request) => {
+    if (!isOps(request.user.role)) throw new ForbiddenError('Only ops can export evidence.');
+    const { reason } = reasonBody.parse(request.body ?? {});
+    return { success: true, data: await evidence.export(request.params.id, request.user.userId, reason) };
+  });
+
   // §5.1 enhanced-monitoring preference — the "Extra safety check-ins on my
   // trips" toggle. Strictly the caller's OWN row; the server never infers it.
   app.put('/monitoring-preference', auth, async (request) => {

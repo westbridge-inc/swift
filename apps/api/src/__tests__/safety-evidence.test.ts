@@ -75,6 +75,45 @@ beforeAll(async () => {
   await app.register(socketPlugin);
   await app.register(safetyRoutes, { prefix: '/api/v1/safety' });
   await app.ready();
+
+  // CI preps the test DB with `prisma db push`, which cannot see raw DDL —
+  // the seal triggers live in the migration (prod's source of truth, replay-
+  // verified by the Migration Replay job). Install them here idempotently so
+  // THIS suite exercises the real database refusals under any DB setup.
+  await app.prisma.$executeRawUnsafe(`
+    CREATE OR REPLACE FUNCTION evidence_item_block_sealed() RETURNS trigger AS $$
+    BEGIN
+      IF OLD."sealedAt" IS NOT NULL THEN
+        RAISE EXCEPTION 'evidence item % is sealed — sealed evidence is immutable', OLD."id";
+      END IF;
+      IF (TG_OP = 'DELETE') THEN RETURN OLD; END IF;
+      RETURN NEW;
+    END $$ LANGUAGE plpgsql`);
+  await app.prisma.$executeRawUnsafe(`DROP TRIGGER IF EXISTS evidence_item_no_mutation ON "EvidenceItem"`);
+  await app.prisma.$executeRawUnsafe(`CREATE TRIGGER evidence_item_no_mutation BEFORE UPDATE OR DELETE ON "EvidenceItem" FOR EACH ROW EXECUTE FUNCTION evidence_item_block_sealed()`);
+  await app.prisma.$executeRawUnsafe(`
+    CREATE OR REPLACE FUNCTION evidence_item_block_insert_into_sealed() RETURNS trigger AS $$
+    BEGIN
+      IF (SELECT "sealedAt" FROM "EvidenceBundle" WHERE "id" = NEW."bundleId") IS NOT NULL THEN
+        RAISE EXCEPTION 'evidence bundle % is sealed — no new items may be added', NEW."bundleId";
+      END IF;
+      RETURN NEW;
+    END $$ LANGUAGE plpgsql`);
+  await app.prisma.$executeRawUnsafe(`DROP TRIGGER IF EXISTS evidence_item_no_insert_after_seal ON "EvidenceItem"`);
+  await app.prisma.$executeRawUnsafe(`CREATE TRIGGER evidence_item_no_insert_after_seal BEFORE INSERT ON "EvidenceItem" FOR EACH ROW EXECUTE FUNCTION evidence_item_block_insert_into_sealed()`);
+  await app.prisma.$executeRawUnsafe(`
+    CREATE OR REPLACE FUNCTION evidence_bundle_block_delete_sealed() RETURNS trigger AS $$
+    BEGIN
+      IF OLD."sealedAt" IS NOT NULL THEN
+        RAISE EXCEPTION 'evidence bundle % is sealed — sealed bundles cannot be deleted', OLD."id";
+      END IF;
+      IF OLD."legalHold" THEN
+        RAISE EXCEPTION 'evidence bundle % is under legal hold', OLD."id";
+      END IF;
+      RETURN OLD;
+    END $$ LANGUAGE plpgsql`);
+  await app.prisma.$executeRawUnsafe(`DROP TRIGGER IF EXISTS evidence_bundle_no_delete_sealed ON "EvidenceBundle"`);
+  await app.prisma.$executeRawUnsafe(`CREATE TRIGGER evidence_bundle_no_delete_sealed BEFORE DELETE ON "EvidenceBundle" FOR EACH ROW EXECUTE FUNCTION evidence_bundle_block_delete_sealed()`);
 });
 
 afterAll(async () => {
@@ -191,6 +230,70 @@ describe('§9.2 sealing — the database itself refuses', () => {
     const held = await app.prisma.evidenceBundle.findUniqueOrThrow({ where: { id: bundle.id } });
     expect(held.legalHold).toBe(true);
     expect(await app.prisma.safetyAccessLog.findFirst({ where: { bundleId: bundle.id, action: 'LEGAL_HOLD' } })).not.toBeNull();
+  });
+});
+
+describe('§9.1 live trail + §9.2 export (M7b)', () => {
+  it('the 10s tick appends deduped live fixes to open, unsealed bundles only', async () => {
+    const victim = await makeUser(['CUSTOMER']);
+    const driverUser = await makeUser(['MOVER']);
+    const driver = await app.prisma.driver.create({
+      data: {
+        userId: driverUser.userId,
+        vehicleMake: 'Toyota', vehicleModel: 'Axio', vehicleYear: 2020, vehicleColor: 'White',
+        licensePlate: `EVL ${seq}`, driverLicenseUrl: 'x', vehicleInsuranceUrl: 'x',
+        currentLat: 6.81, currentLng: -58.14, lastLocationUpdate: new Date(Date.now() - 5_000),
+      },
+    });
+    const order = await makeOrder(victim.userId);
+    await app.prisma.order.update({ where: { id: order.id }, data: { driverId: driver.id } });
+    const sos = new SosService(app.prisma, app.io);
+    const alert = await sos.create({ actorUserId: victim.userId, actorRole: 'CUSTOMER', orderId: order.id, orderType: 'TAXI', counterpartyUserId: driverUser.userId, triggerSource: 'BUTTON', immediate: true });
+    const bundle = (await app.prisma.evidenceBundle.findUnique({ where: { sosAlertId: alert.id } }))!;
+    bundleIds.push(bundle.id);
+    const fixes = () => app.prisma.evidenceItem.count({ where: { bundleId: bundle.id, kind: 'LOCATION_FIX' } });
+
+    expect((await evidence().appendLiveFixes()).appended).toBeGreaterThanOrEqual(1);
+    expect(await fixes()).toBe(1);
+    await evidence().appendLiveFixes(); // same fix — dedup on timestamp
+    expect(await fixes()).toBe(1);
+
+    await app.prisma.driver.update({ where: { id: driver.id }, data: { currentLat: 6.815, currentLng: -58.135, lastLocationUpdate: new Date() } });
+    await evidence().appendLiveFixes();
+    expect(await fixes()).toBe(2);
+
+    // Sealed bundles never grow (the DB would refuse; the sweep skips first).
+    const ops = await makeUser(['ADMIN']);
+    await evidence().seal(bundle.id, ops.userId, 'sealing before the next tick');
+    await app.prisma.driver.update({ where: { id: driver.id }, data: { lastLocationUpdate: new Date(Date.now() + 1_000) } });
+    await evidence().appendLiveFixes();
+    expect(await fixes()).toBe(2);
+  });
+
+  it('export is encrypted + watermarked, decrypts with the one-time passphrase, and is custody-logged', async () => {
+    const ops = await makeUser(['ADMIN']);
+    const subject = await makeUser(['MOVER']);
+    const inc = new IncidentService(app.prisma, app.io);
+    const kase = await inc.intake({ category: 'SAFETY_THREAT', intake: 'OPS_CREATED', subjectUserId: subject.userId, summary: 'export fixture' });
+    const bundle = (await app.prisma.evidenceBundle.findUnique({ where: { caseId: kase.id } }))!;
+    bundleIds.push(bundle.id);
+
+    await expect(evidence().export(bundle.id, ops.userId, 'x')).rejects.toThrow(/reason/i);
+    const exp = await evidence().export(bundle.id, ops.userId, 'Police referral — station C division');
+    expect(exp.passphrase).toHaveLength(32); // 24 bytes base64url
+    expect(exp.filename).toContain(bundle.bundleNumber);
+
+    const { createDecipheriv, scryptSync: scrypt } = await import('node:crypto');
+    const key = scrypt(exp.passphrase, Buffer.from(exp.salt, 'base64'), 32);
+    const decipher = createDecipheriv('aes-256-gcm', key, Buffer.from(exp.iv, 'base64'));
+    decipher.setAuthTag(Buffer.from(exp.authTag, 'base64'));
+    const plain = Buffer.concat([decipher.update(Buffer.from(exp.ciphertext, 'base64')), decipher.final()]).toString('utf8');
+    const payload = JSON.parse(plain) as { watermark: { exportedBy: string }; bundle: { bundleNumber: string }; items: unknown[] };
+    expect(payload.watermark.exportedBy).toBe(ops.userId);
+    expect(payload.bundle.bundleNumber).toBe(bundle.bundleNumber);
+    expect(payload.items.length).toBeGreaterThan(0);
+
+    expect(await app.prisma.safetyAccessLog.findFirst({ where: { bundleId: bundle.id, action: 'EXPORT', accessorUserId: ops.userId } })).not.toBeNull();
   });
 });
 
