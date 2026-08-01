@@ -2560,3 +2560,76 @@ model IncidentCase {
   @@index([subjectUserId, createdAt])
   @@index([tenantId, slaAckBy])
 }
+
+// ─── Evidence Vault (safety spec §9): tamper-evident case evidence ──────────
+// A bundle opens automatically on SOS ACTIVE and on S0/S1 case intake, and
+// snapshots every artifact the platform holds AT CAPTURE TIME (content +
+// SHA-256). Sealing stamps every item and computes the bundle sealHash; after
+// that, mutation is blocked by the service layer AND by Postgres triggers
+// (see the migration) — the DB itself refuses. Chain of custody: every
+// content view/seal/export writes a SafetyAccessLog row with a required
+// reason. Retention: an unsealed bundle that never grew a case is deleted
+// after EVIDENCE_UNATTACHED_RETENTION_DAYS; legalHold overrides everything.
+
+enum EvidenceItemKind {
+  SOS_ALERT
+  INCIDENT_CASE
+  ORDER_SNAPSHOT
+  STATUS_TIMELINE
+  GUARDIAN_SESSION
+  LIVENESS_CHECKS
+  CHAT_TRANSCRIPT
+  FANOUT_RECEIPTS
+  LOCATION_FIX
+  NOTE
+}
+
+model EvidenceBundle {
+  id            String    @id @default(cuid())
+  tenantId      String    @default("swift-default")
+  bundleNumber  String    @unique // human handle: EV-XXXXXXXX
+  sosAlertId    String?   @unique
+  caseId        String?   @unique // IncidentCase
+  subjectUserId String?
+  openedAt      DateTime  @default(now())
+  sealedAt      DateTime?
+  sealedBy      String?
+  /// SHA-256 over the sorted item hashes — the tamper-evidence root.
+  sealHash      String?
+  legalHold     Boolean   @default(false)
+  items         EvidenceItem[]
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  @@index([tenantId, sealedAt])
+  @@index([subjectUserId])
+}
+
+model EvidenceItem {
+  id          String           @id @default(cuid())
+  bundleId    String
+  bundle      EvidenceBundle   @relation(fields: [bundleId], references: [id], onDelete: Cascade)
+  kind        EvidenceItemKind
+  label       String
+  /// Canonical snapshot at capture — never a live pointer.
+  content     Json
+  /// SHA-256 of the canonical serialization, computed at capture.
+  contentHash String
+  /// Stamped at bundle seal — the Postgres trigger blocks any change after.
+  sealedAt    DateTime?
+  createdAt   DateTime         @default(now())
+
+  @@index([bundleId])
+}
+
+model SafetyAccessLog {
+  id             String   @id @default(cuid())
+  tenantId       String   @default("swift-default")
+  bundleId       String
+  accessorUserId String
+  action         String // OPEN | VIEW | SEAL | EXPORT | LEGAL_HOLD
+  reason         String
+  at             DateTime @default(now())
+
+  @@index([bundleId, at])
+}

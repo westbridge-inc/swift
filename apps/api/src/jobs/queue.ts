@@ -436,6 +436,15 @@ export function createWorkers(ctx: JobContext) {
         await runCollusionAffinityScan(ctx);
       }
 
+      if (job.name === 'evidence-retention') {
+        // §9.4 — unsealed, case-less bundles past the retention window are
+        // deleted; sealed bundles and legal holds are never touched (the DB
+        // triggers refuse even if code tried).
+        const { EvidenceService } = await import('../modules/safety/evidence.service');
+        const swept = await new EvidenceService(ctx.prisma, ctx.io).retentionSweep();
+        if (swept.deleted > 0) ctx.log.info(swept, 'evidence retention sweep');
+      }
+
       if (job.name === 'incident-pattern-scan') {
         // §8.4 rule 2 (nightly): ≥3 distinct reporters on one subject in 365d.
         const { IncidentService } = await import('../modules/safety/incident.service');
@@ -991,6 +1000,14 @@ export async function scheduleRecurringJobs(queues: ReturnType<typeof createQueu
   // after the rating sweep (04:00) whose flags may feed tomorrow's cases.
   await queues.verificationQueue.add('incident-pattern-scan', {}, {
     repeat: { pattern: '0 5 * * *' },
+    removeOnComplete: 30,
+    removeOnFail: 30,
+  });
+
+  // Evidence retention [safety spec §9.4]: nightly 04:30 — unsealed
+  // case-less bundles age out; sealed/legal-hold never (DB triggers agree).
+  await queues.verificationQueue.add('evidence-retention', {}, {
+    repeat: { pattern: '30 4 * * *' },
     removeOnComplete: 30,
     removeOnFail: 30,
   });
