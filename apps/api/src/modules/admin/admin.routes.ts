@@ -22,6 +22,7 @@ import {
 import { NotificationService } from '../notification/notification.service';
 import { SupportService } from '../support/support.service';
 import { VerificationService, REJECTION_REASON_CODES } from '../verification/verification.service';
+import { AdvertiserService } from '../ads/advertiser.service';
 import { ComplianceAuditService } from '../verification/compliance-audit.service';
 import { scheduleVendorSearchSync } from '../search/search-sync';
 import { BillingService } from '../billing/billing.service';
@@ -1911,6 +1912,39 @@ export async function adminRoutes(app: FastifyInstance) {
   });
 
   // ─── Verification Review Queue ───────────────────────────────
+
+  // ── Swift Ads — advertiser application queue (ads-platform spec §4.3) ──────
+  // A new queue TYPE on the existing admin surface, not a new system. The
+  // global adminGuard + onResponse auto-audit already cover these; the service
+  // also writes AdsAuditLog with before/after per action.
+  const advertiserSvc = new AdvertiserService(app.prisma, app.io);
+
+  app.get('/ads/advertisers/queue', { preHandler: [adminGuard] }, async (request) => {
+    const { status } = z.object({ status: z.enum(['PENDING_REVIEW', 'APPROVED', 'REJECTED', 'SUSPENDED']).default('PENDING_REVIEW') }).parse(request.query ?? {});
+    return { success: true, data: await advertiserSvc.queue(status) };
+  });
+
+  app.put('/ads/advertisers/:id/approve', { preHandler: [adminGuard] }, async (request) => {
+    const { id } = request.params as { id: string };
+    return { success: true, data: await advertiserSvc.approve(id, request.user.userId) };
+  });
+
+  app.put('/ads/advertisers/:id/reject', { preHandler: [adminGuard] }, async (request) => {
+    const { id } = request.params as { id: string };
+    const { reason } = z.object({ reason: z.string().trim().min(3).max(500) }).parse(request.body ?? {});
+    return { success: true, data: await advertiserSvc.reject(id, request.user.userId, reason) };
+  });
+
+  app.put('/ads/advertisers/:id/suspend', { preHandler: [adminGuard] }, async (request) => {
+    const { id } = request.params as { id: string };
+    const { reason } = z.object({ reason: z.string().trim().min(3).max(500) }).parse(request.body ?? {});
+    return { success: true, data: await advertiserSvc.suspend(id, request.user.userId, reason) };
+  });
+
+  app.put('/ads/advertisers/:id/reinstate', { preHandler: [adminGuard] }, async (request) => {
+    const { id } = request.params as { id: string };
+    return { success: true, data: await advertiserSvc.reinstate(id, request.user.userId) };
+  });
 
   app.get('/verification/queue', { preHandler: [adminGuard] }, async (request) => {
     const { page, limit, skip } = parsePagination(request.query as Record<string, string>);

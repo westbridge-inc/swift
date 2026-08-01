@@ -16,7 +16,21 @@ const campaignIds: string[] = [];
 const MON = new Date('2026-08-03T00:00:00Z'); // a Monday
 const TUE = new Date('2026-08-04T00:00:00Z'); // a Tuesday
 
-beforeAll(async () => { await prisma.$connect(); });
+beforeAll(async () => {
+  await prisma.$connect();
+  // CI preps the test DB with `prisma db push`, which cannot see the raw CHECK
+  // constraints (they live in the migration SQL, prod's source of truth,
+  // Migration-Replay-verified). Install them idempotently so this suite
+  // exercises the real DB backstops under any DB-setup path.
+  await prisma.$executeRawUnsafe(`ALTER TABLE "ad_inventory_weeks" DROP CONSTRAINT IF EXISTS "ad_inventory_weeks_booked_range"`).catch(() => {});
+  await prisma.$executeRawUnsafe(`ALTER TABLE "ad_inventory_weeks" ADD CONSTRAINT "ad_inventory_weeks_booked_range" CHECK ("booked" >= 0 AND "booked" <= "capacity")`).catch(() => {});
+  await prisma.$executeRawUnsafe(`ALTER TABLE "ad_inventory_weeks" DROP CONSTRAINT IF EXISTS "ad_inventory_weeks_monday"`).catch(() => {});
+  await prisma.$executeRawUnsafe(`ALTER TABLE "ad_inventory_weeks" ADD CONSTRAINT "ad_inventory_weeks_monday" CHECK (EXTRACT(ISODOW FROM "weekStart") = 1)`).catch(() => {});
+  await prisma.$executeRawUnsafe(`ALTER TABLE "ad_bookings" DROP CONSTRAINT IF EXISTS "ad_bookings_monday"`).catch(() => {});
+  await prisma.$executeRawUnsafe(`ALTER TABLE "ad_bookings" ADD CONSTRAINT "ad_bookings_monday" CHECK (EXTRACT(ISODOW FROM "weekStart") = 1)`).catch(() => {});
+  await prisma.$executeRawUnsafe(`ALTER TABLE "ad_campaigns" DROP CONSTRAINT IF EXISTS "ad_campaigns_weeks_monday"`).catch(() => {});
+  await prisma.$executeRawUnsafe(`ALTER TABLE "ad_campaigns" ADD CONSTRAINT "ad_campaigns_weeks_monday" CHECK (EXTRACT(ISODOW FROM "startWeek") = 1 AND EXTRACT(ISODOW FROM "endWeek") = 1)`).catch(() => {});
+});
 
 afterAll(async () => {
   await prisma.adBooking.deleteMany({ where: { campaignId: { in: campaignIds } } });
