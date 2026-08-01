@@ -2633,3 +2633,362 @@ model SafetyAccessLog {
 
   @@index([bundleId, at])
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SWIFT ADS — in-app advertising platform (ads-platform spec §5).
+// Reconciled to the repo: id = cuid() (not the spec's uuid), tenantId defaults
+// to "swift-default" like every other model, snake_case @@map, Decimal money.
+// The spec asks for Postgres RLS; the repo enforces tenancy at the code layer
+// via tenantScope (audit F-0002 — no RLS anywhere), so these tables follow the
+// SAME code-level pattern, not RLS, for consistency. Ad money is PLATFORM
+// revenue (operator sells screen space) — it reuses the subscription billing
+// rails (PaymentProvider: Sandbox/PowerTranz/MMG) and never touches
+// order/settlement money.
+// ═══════════════════════════════════════════════════════════════════════════
+
+enum AdvertiserStatus {
+  PENDING_REVIEW
+  APPROVED
+  REJECTED
+  SUSPENDED
+}
+
+enum AdvertiserMemberRole {
+  OWNER
+  MANAGER
+  ANALYST
+}
+
+enum AdCampaignStatus {
+  DRAFT
+  PENDING_PAYMENT
+  PENDING_REVIEW
+  SCHEDULED
+  LIVE
+  PAUSED
+  COMPLETED
+  REJECTED
+  CANCELLED
+}
+
+enum AdCreativeStatus {
+  PENDING
+  APPROVED
+  REJECTED
+}
+
+enum AdTranscodeStatus {
+  QUEUED
+  PROCESSING
+  READY
+  FAILED
+}
+
+enum AdBookingStatus {
+  RESERVED
+  CONFIRMED
+  RELEASED
+  CANCELLED
+  REFUNDED
+}
+
+enum AdInvoiceStatus {
+  UNPAID
+  PAID
+  VOID
+  REFUNDED
+  PARTIALLY_REFUNDED
+}
+
+enum AdMediaKind {
+  IMAGE
+  VIDEO
+}
+
+enum AdEventType {
+  IMPRESSION
+  VIEWABLE_IMPRESSION
+  CLICK
+  VIDEO_START
+  VIDEO_Q25
+  VIDEO_Q50
+  VIDEO_Q75
+  VIDEO_COMPLETE
+}
+
+enum AdDestinationType {
+  NONE
+  URL
+  DEEPLINK
+}
+
+model Advertiser {
+  id              String             @id @default(cuid())
+  tenantId        String             @default("swift-default")
+  companyName     String
+  legalName       String?
+  registrationNo  String?
+  industry        String
+  website         String?
+  contactName     String
+  contactEmail    String
+  contactPhone    String
+  city            String?
+  status          AdvertiserStatus   @default(PENDING_REVIEW)
+  statusReason    String?
+  /// The User who registered the company (first OWNER member).
+  createdByUserId String
+  createdAt       DateTime           @default(now())
+  updatedAt       DateTime           @updatedAt
+  members         AdvertiserMember[]
+  campaigns       AdCampaign[]
+  invoices        AdInvoice[]
+
+  @@index([tenantId, status])
+  @@map("advertisers")
+}
+
+model AdvertiserMember {
+  advertiserId String
+  userId       String
+  role         AdvertiserMemberRole @default(OWNER)
+  createdAt    DateTime             @default(now())
+  advertiser   Advertiser           @relation(fields: [advertiserId], references: [id], onDelete: Cascade)
+
+  @@id([advertiserId, userId])
+  @@index([userId])
+  @@map("advertiser_members")
+}
+
+model AdPlacement {
+  id                   String            @id @default(cuid())
+  tenantId             String            @default("swift-default")
+  key                  String // home_hero_video | home_top_card | home_ad_bar
+  name                 String
+  tier                 Int // 1 | 2 | 3
+  mediaKind            AdMediaKind
+  slotsPerWeek         Int               @default(1)
+  rotationSeconds      Int? // bar only
+  weeklyPrice          Decimal           @db.Decimal(12, 2)
+  currency             String            @default("GYD")
+  freqCapPerUserPerDay Int? // viewable impressions; null = uncapped
+  active               Boolean           @default(true)
+  campaigns            AdCampaign[]
+  inventory            AdInventoryWeek[]
+  houseAds             HouseAd[]
+
+  @@unique([tenantId, key])
+  @@map("ad_placements")
+}
+
+model AdInventoryWeek {
+  id          String      @id @default(cuid())
+  placementId String
+  city        String      @default("*") // "*" = tenant-wide when tenant has one city
+  weekStart   DateTime    @db.Date // always a Monday (CHECK in migration)
+  capacity    Int
+  booked      Int         @default(0) // CHECK (booked BETWEEN 0 AND capacity) in migration; row-locked
+  placement   AdPlacement @relation(fields: [placementId], references: [id])
+
+  @@unique([placementId, city, weekStart])
+  @@map("ad_inventory_weeks")
+}
+
+model AdCampaign {
+  id               String            @id @default(cuid())
+  tenantId         String            @default("swift-default")
+  advertiserId     String
+  placementId      String
+  name             String
+  objective        String? // AWARENESS | TRAFFIC | PROMOTION
+  cities           String[] // subset of tenant cities; ["*"] for all
+  startWeek        DateTime          @db.Date
+  endWeek          DateTime          @db.Date // Monday of the LAST booked week
+  destinationType  AdDestinationType @default(NONE)
+  destinationValue String?
+  status           AdCampaignStatus  @default(DRAFT)
+  statusReason     String?
+  totalAmount      Decimal?          @db.Decimal(12, 2)
+  currency         String            @default("GYD")
+  createdAt        DateTime          @default(now())
+  updatedAt        DateTime          @updatedAt
+  advertiser       Advertiser        @relation(fields: [advertiserId], references: [id])
+  placement        AdPlacement       @relation(fields: [placementId], references: [id])
+  creatives        AdCreative[]
+  bookings         AdBooking[]
+  invoices         AdInvoice[]
+
+  @@index([tenantId, status])
+  @@index([placementId, status])
+  @@index([advertiserId, status])
+  @@map("ad_campaigns")
+}
+
+model AdCreative {
+  id               String            @id @default(cuid())
+  campaignId       String
+  kind             AdMediaKind
+  fileUrl          String
+  posterUrl        String? // required for video before review
+  width            Int?
+  height           Int?
+  durationSeconds  Decimal?          @db.Decimal(6, 2)
+  sizeBytes        BigInt?
+  headline         String? // ≤60 hero / ≤40 others — enforced in service
+  body             String? // ≤90
+  ctaLabel         String? // ≤15
+  transcodeStatus  AdTranscodeStatus @default(READY) // videos start QUEUED
+  status           AdCreativeStatus  @default(PENDING)
+  reviewNotes      String?
+  reviewedByUserId String?
+  reviewedAt       DateTime?
+  createdAt        DateTime          @default(now())
+  campaign         AdCampaign        @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+
+  @@index([status])
+  @@map("ad_creatives")
+}
+
+model AdBooking {
+  id            String          @id @default(cuid())
+  campaignId    String
+  placementId   String
+  city          String          @default("*")
+  weekStart     DateTime        @db.Date
+  amount        Decimal         @db.Decimal(12, 2) // price LOCKED at checkout
+  status        AdBookingStatus @default(RESERVED)
+  reservedUntil DateTime?
+  campaign      AdCampaign      @relation(fields: [campaignId], references: [id])
+
+  @@unique([campaignId, placementId, city, weekStart])
+  @@index([placementId, city, weekStart, status])
+  @@index([status, reservedUntil])
+  @@map("ad_bookings")
+}
+
+model AdInvoice {
+  id             String          @id @default(cuid())
+  tenantId       String          @default("swift-default")
+  advertiserId   String
+  campaignId     String
+  number         String          @unique // ADS-{YYYY}-{seq}
+  amount         Decimal         @db.Decimal(12, 2)
+  currency       String          @default("GYD")
+  status         AdInvoiceStatus @default(UNPAID)
+  provider       String? // MMG | POWERTRANZ | MANUAL | MOCK
+  providerRef    String?
+  paymentUrl     String?
+  paidAt         DateTime?
+  refundedAmount Decimal         @default(0) @db.Decimal(12, 2)
+  createdAt      DateTime        @default(now())
+  advertiser     Advertiser      @relation(fields: [advertiserId], references: [id])
+  campaign       AdCampaign      @relation(fields: [campaignId], references: [id])
+
+  @@index([tenantId, status])
+  @@index([providerRef])
+  @@map("ad_invoices")
+}
+
+model AdEvent {
+  id           BigInt      @id @default(autoincrement())
+  tenantId     String      @default("swift-default")
+  campaignId   String
+  creativeId   String
+  placementKey String
+  city         String?
+  eventType    AdEventType
+  userHash     String? // sha256(userId + daily salt) — NEVER a raw user id
+  sessionId    String
+  occurredAt   DateTime
+  receivedAt   DateTime    @default(now())
+  tokenHash    String
+  meta         Json?
+
+  @@index([campaignId, occurredAt])
+  @@index([occurredAt])
+  @@map("ad_events")
+}
+
+model AdEventDedupe {
+  tokenHash String
+  eventType AdEventType
+  createdAt DateTime @default(now())
+
+  @@id([tokenHash, eventType]) // insert-or-conflict = duplicate → drop; prune >48h via cron
+  @@map("ad_event_dedupe")
+}
+
+model AdFreqCounter {
+  userHash     String
+  placementKey String
+  day          DateTime @db.Date
+  count        Int      @default(0)
+
+  @@id([userHash, placementKey, day]) // prune >7d via cron
+  @@map("ad_freq_counters")
+}
+
+model AdStatsDaily {
+  campaignId          String
+  creativeId          String
+  day                 DateTime @db.Date
+  city                String   @default("*")
+  impressions         Int      @default(0)
+  viewableImpressions Int      @default(0)
+  clicks              Int      @default(0)
+  videoStarts         Int      @default(0)
+  videoCompletes      Int      @default(0)
+  spend               Decimal  @default(0) @db.Decimal(12, 2) // recognized daily = weekly price / 7
+
+  @@id([campaignId, creativeId, day, city])
+  @@map("ad_stats_daily")
+}
+
+model HouseAd {
+  id               String            @id @default(cuid())
+  tenantId         String            @default("swift-default")
+  placementId      String
+  kind             AdMediaKind
+  fileUrl          String
+  posterUrl        String?
+  headline         String?
+  ctaLabel         String?
+  destinationType  AdDestinationType @default(NONE)
+  destinationValue String?
+  active           Boolean           @default(true)
+  sort             Int               @default(0)
+  placement        AdPlacement       @relation(fields: [placementId], references: [id])
+
+  @@index([tenantId, placementId, active])
+  @@map("house_ads")
+}
+
+model AdsSettings {
+  tenantId                  String  @id @default("swift-default")
+  reservationMinutes        Int     @default(20)
+  reviewSlaHours            Int     @default(24) // same 24h promise as onboarding review
+  cancelFullRefundDays      Int     @default(7)
+  autoCancelUnapprovedHours Int     @default(24) // before startWeek
+  weekTimezone              String  @default("America/Guyana")
+  defaultRotationSeconds    Int     @default(6)
+  platformFeePct            Decimal @default(0) @db.Decimal(5, 2) // Westbridge cut; 0 while founder = operator
+  restrictedCategories      Json? // { alcohol, gambling, political } per tenant law/policy
+
+  @@map("ads_settings")
+}
+
+model AdsAuditLog {
+  id          String   @id @default(cuid())
+  tenantId    String   @default("swift-default")
+  actorUserId String
+  action      String // ADVERTISER_APPROVE, CREATIVE_REJECT, CAMPAIGN_KILL, INVOICE_MARK_PAID, ...
+  entityType  String
+  entityId    String
+  before      Json?
+  after       Json?
+  reason      String?
+  createdAt   DateTime @default(now())
+
+  @@index([tenantId, createdAt])
+  @@map("ads_audit_log")
+}
