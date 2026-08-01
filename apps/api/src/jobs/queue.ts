@@ -570,6 +570,16 @@ export function createWorkers(ctx: JobContext) {
         return;
       }
 
+      if (job.name === 'ads-release-expired') {
+        // Ads reservation expiry [ads-platform spec §7.3]: expired RESERVED
+        // holds go RELEASED and give the inventory back. CAS + guarded
+        // decrement = idempotent and overlap-safe.
+        const { BookingService } = await import('../modules/ads/booking.service');
+        const res = await new BookingService(ctx.prisma).releaseExpired();
+        if (res.released > 0) ctx.log.info(res, 'ads: expired reservations released');
+        return;
+      }
+
       if (job.name === 'guardian-sweep') {
         // Trip Guardian tick [safety spec §5]. Opens a session for every taxi
         // that went RIDE_IN_PROGRESS, runs the L1 detectors off the SAME
@@ -864,6 +874,14 @@ export async function scheduleRecurringJobs(queues: ReturnType<typeof createQueu
   // no watches exist.
   await queues.dispatchQueue.add('supply-watch-scan', {}, {
     repeat: { pattern: '*/2 * * * *' },
+    removeOnComplete: 20,
+    removeOnFail: 20,
+  });
+
+  // Ads reservation expiry [ads-platform spec §7.3]: every minute, release
+  // RESERVED holds whose TTL lapsed so the inventory frees up for others.
+  await queues.dispatchQueue.add('ads-release-expired', {}, {
+    repeat: { pattern: '* * * * *' },
     removeOnComplete: 20,
     removeOnFail: 20,
   });
