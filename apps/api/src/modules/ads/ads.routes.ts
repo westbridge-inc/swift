@@ -2,6 +2,7 @@ import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { AdvertiserService } from './advertiser.service';
 import { BookingService } from './booking.service';
+import { AdCheckoutService } from './checkout.service';
 import { mondayOfDate, isMonday } from './ads-weeks';
 import { AppError, NotFoundError } from '../../utils/errors';
 
@@ -118,5 +119,23 @@ export async function adsRoutes(app: FastifyInstance) {
       data: { status: 'PENDING_PAYMENT', totalAmount: result.total },
     });
     return { success: true, data: result };
+  });
+
+  /** POST /campaigns/:id/checkout — issue the invoice for the held slots
+   *  (spec §8.1). Reserves first if still DRAFT. Provider MMG/POWERTRANZ hosted
+   *  URLs need live acquirer creds (founder-gated); MOCK works in dev. The
+   *  audited mark-paid path settles it either way. */
+  const checkout = new AdCheckoutService(app.prisma, app.io);
+  app.post<{ Params: { id: string } }>('/campaigns/:id/checkout', auth, async (request) => {
+    const { provider } = z.object({ provider: z.enum(['MOCK', 'MMG', 'POWERTRANZ']).default('MOCK') }).parse(request.body ?? {});
+    const campaign = await app.prisma.adCampaign.findUnique({ where: { id: request.params.id }, select: { advertiserId: true, tenantId: true } });
+    if (!campaign) throw new NotFoundError('AdCampaign', request.params.id);
+    await advertisers.assertMember(campaign.advertiserId, request.user.userId);
+    const settings = await app.prisma.adsSettings.findUnique({ where: { tenantId: campaign.tenantId } });
+    const { invoice, reservedUntil } = await checkout.checkout(request.params.id, provider, settings?.reservationMinutes ?? 20);
+    return {
+      success: true,
+      data: { invoiceId: invoice.id, number: invoice.number, amount: Number(invoice.amount), currency: invoice.currency, status: invoice.status, paymentUrl: invoice.paymentUrl, reservedUntil },
+    };
   });
 }
