@@ -570,6 +570,17 @@ export function createWorkers(ctx: JobContext) {
         return;
       }
 
+      if (job.name === 'ads-lifecycle') {
+        // Ads campaign lifecycle tick [ads-platform spec §6.1]: auto-cancel
+        // unapproved past the go-live cutoff (+ full refund), activate
+        // scheduled weeks, complete finished runs. All via the ONE lifecycle
+        // machine — CAS, idempotent, overlap-safe.
+        const { AdsCronService } = await import('../modules/ads/cron.service');
+        const res = await new AdsCronService(ctx.prisma, ctx.io).tick();
+        if (res.autoCancelled + res.activated + res.completed > 0) ctx.log.info(res, 'ads: lifecycle tick');
+        return;
+      }
+
       if (job.name === 'ads-release-expired') {
         // Ads reservation expiry [ads-platform spec §7.3]: expired RESERVED
         // holds go RELEASED and give the inventory back. CAS + guarded
@@ -882,6 +893,14 @@ export async function scheduleRecurringJobs(queues: ReturnType<typeof createQueu
   // RESERVED holds whose TTL lapsed so the inventory frees up for others.
   await queues.dispatchQueue.add('ads-release-expired', {}, {
     repeat: { pattern: '* * * * *' },
+    removeOnComplete: 20,
+    removeOnFail: 20,
+  });
+
+  // Ads campaign lifecycle [ads-platform spec §6.1]: hourly — auto-cancel
+  // unapproved before go-live, activate scheduled weeks, complete finished runs.
+  await queues.dispatchQueue.add('ads-lifecycle', {}, {
+    repeat: { pattern: '0 * * * *' },
     removeOnComplete: 20,
     removeOnFail: 20,
   });

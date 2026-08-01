@@ -68,3 +68,12 @@ export function weeksBetween(startWeek: Date, endWeek: Date): Date[] {
 export function weekCount(startWeek: Date, endWeek: Date): number {
   return weeksBetween(startWeek, endWeek).length;
 }
+
+/** The UTC instant of tenant-local midnight on a stored Monday — the moment a
+ *  week actually begins. Guyana is UTC-4 (offset −240 min, no DST); crons that
+ *  need hour precision (the auto-cancel cutoff) use this rather than the
+ *  date-only column. offsetMinutes = local − UTC. */
+export function weekStartInstant(weekStart: Date, offsetMinutes = -240): Date {
+  const utcMidnight = Date.UTC(weekStart.getUTCFullYear(), weekStart.getUTCMonth(), weekStart.getUTCDate());
+  return new Date(utcMidnight - offsetMinutes * 60_000);
+}
