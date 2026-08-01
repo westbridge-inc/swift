@@ -1946,6 +1946,17 @@ export async function adminRoutes(app: FastifyInstance) {
     return { success: true, data: await advertiserSvc.reinstate(id, request.user.userId) };
   });
 
+  /** §8.2 admin "mark invoice paid" — the Caribbean reality path (bank
+   *  transfer / MMG sent outside checkout). Requires a reference note; audited;
+   *  idempotent. Confirms bookings + moves the campaign into creative review. */
+  app.put('/ads/invoices/:id/mark-paid', { preHandler: [adminGuard] }, async (request) => {
+    const { id } = request.params as { id: string };
+    const { reference } = z.object({ reference: z.string().trim().min(3).max(200) }).parse(request.body ?? {});
+    const { AdCheckoutService } = await import('../ads/checkout.service');
+    const invoice = await new AdCheckoutService(app.prisma, app.io).markPaid(id, { adminUserId: request.user.userId, manualReference: reference });
+    return { success: true, data: { id: invoice.id, number: invoice.number, status: invoice.status, paidAt: invoice.paidAt } };
+  });
+
   /** Seed the three home placements + AdsSettings for the tenant (ads §2).
    *  Idempotent, create-only for tunables — the operator edits prices/slots by
    *  updating the AdPlacement rows afterward. */

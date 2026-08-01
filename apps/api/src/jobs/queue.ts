@@ -576,7 +576,7 @@ export function createWorkers(ctx: JobContext) {
         // decrement = idempotent and overlap-safe.
         const { BookingService } = await import('../modules/ads/booking.service');
         const res = await new BookingService(ctx.prisma).releaseExpired();
-        if (res.released > 0) ctx.log.info(res, 'ads: expired reservations released');
+        if (res.released + res.voided > 0) ctx.log.info(res, 'ads: expired reservations released');
         return;
       }
 

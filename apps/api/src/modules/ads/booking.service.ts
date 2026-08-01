@@ -130,10 +130,10 @@ export class BookingService {
   /** §7.3 cron (every minute) — expired RESERVED holds go RELEASED and give the
    *  inventory back. Each release is CAS + guarded decrement, so the sweep is
    *  idempotent and overlap-safe. */
-  async releaseExpired(now = new Date()): Promise<{ released: number }> {
+  async releaseExpired(now = new Date()): Promise<{ released: number; voided: number }> {
     const expired = await this.prisma.adBooking.findMany({
       where: { status: 'RESERVED', reservedUntil: { lt: now } },
-      select: { id: true, placementId: true, city: true, weekStart: true },
+      select: { id: true, campaignId: true, placementId: true, city: true, weekStart: true },
       take: 500,
     });
     let released = 0;
@@ -150,7 +150,26 @@ export class BookingService {
       });
       released += 1;
     }
-    if (released > 0) log().info({ released }, 'ads: expired reservations released');
-    return { released };
+
+    // §6.1 reservation_expired: a PENDING_PAYMENT campaign that just lost its
+    // last hold goes back to DRAFT and its open invoice is VOIDed — never leave
+    // a campaign stuck holding nothing, and never keep an invoice for released
+    // inventory. Only campaigns we touched this sweep are re-checked.
+    let voided = 0;
+    const touchedCampaigns = new Set(expired.map((b) => b.campaignId));
+    for (const campaignId of touchedCampaigns) {
+      const stillHeld = await this.prisma.adBooking.count({ where: { campaignId, status: 'RESERVED' } });
+      if (stillHeld > 0) continue;
+      const moved = await this.prisma.adCampaign.updateMany({
+        where: { id: campaignId, status: 'PENDING_PAYMENT' },
+        data: { status: 'DRAFT', statusReason: 'Reservation hold expired before payment' },
+      });
+      if (moved.count === 0) continue; // already paid/confirmed or not pending
+      await this.prisma.adInvoice.updateMany({ where: { campaignId, status: 'UNPAID' }, data: { status: 'VOID' } });
+      voided += 1;
+    }
+
+    if (released > 0) log().info({ released, voided }, 'ads: expired reservations released');
+    return { released, voided };
   }
 }
