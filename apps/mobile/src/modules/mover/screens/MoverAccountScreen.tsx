@@ -146,7 +146,11 @@ export function MoverAccountScreen({ navigation }: any) {
           <SettingsRow
             icon="credit-card"
             label="Weekly fee"
-            sub={sub ? `${money(sub.customRate ?? sub.weeklyRate)}/week` : 'Not active yet'}
+            // Dual-display law (USD pricing ③): when the platform prices in
+            // USD, the server sends the composed line ("US$25.00 / week ·
+            // GY$5,200 this week"); until then it's null and the local-only
+            // line renders exactly as before.
+            sub={sub ? (sub.usdDisplay?.line ?? `${money(sub.customRate ?? sub.weeklyRate)}/week`) : 'Not active yet'}
             right={<TonePill label={subPill.label} tone={subPill.tone} />}
           />
           <SettingsRow icon="refresh-cw" label="Switch app" sub="Swift · Swift Business" onPress={() => setSwitcherOpen(true)} />

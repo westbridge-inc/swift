@@ -2474,7 +2474,9 @@ function SubscriptionCard({ sub, phone }: { sub: any; phone?: string }) {
       ? `Trial ends ${fmtDate(sub.trialEndDate)} · then ${money(sub.weeklyRate)}/week`
       : sub.isInGracePeriod && sub.gracePeriodEnd
         ? `Pay by ${fmtDate(sub.gracePeriodEnd)} to stay online`
-        : `${money(sub.customRate ?? sub.weeklyRate)}/week${sub.nextBillingDate ? ` · next bill ${fmtDate(sub.nextBillingDate)}` : ''}`;
+        : // Dual-display law (USD ③): server-composed when USD pricing is on.
+          (sub.usdDisplay?.line ??
+            `${money(sub.customRate ?? sub.weeklyRate)}/week${sub.nextBillingDate ? ` · next bill ${fmtDate(sub.nextBillingDate)}` : ''}`);
   return (
     <Card style={{ marginBottom: space.lg, paddingVertical: space.sm }}>
       <SettingsRow icon="credit-card" label="Subscription" sub={subLine} right={<TonePill label={pill.label} tone={pill.tone} />} />
