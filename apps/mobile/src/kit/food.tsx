@@ -77,7 +77,7 @@ export function FoodCard({
           </T>
           <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
             {priceLabel ? (
-              <T variant="label" weight="bold" tone="brand">
+              <T variant="numM" tone="brand">
                 {priceLabel}
               </T>
             ) : (
