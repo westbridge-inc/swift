@@ -110,7 +110,35 @@ export class CreativeService {
       },
     });
     log().info({ creativeId: creative.id, campaignId: input.campaignId, kind: input.kind }, 'ad creative uploaded — PENDING review');
+    // §10.4 advisory pre-screen — fire-and-forget. It annotates the review
+    // queue; it NEVER blocks the upload and NEVER decides the review.
+    void this.preScreen(creative.id, campaign.tenantId, {
+      kind: input.kind,
+      headline: input.text.headline ?? null,
+      body: input.text.body ?? null,
+      ctaLabel: input.text.ctaLabel ?? null,
+      destinationType: campaign.destinationType,
+      destinationValue: campaign.destinationValue,
+    }).catch(() => {});
     return creative;
+  }
+
+  /** Run the advisory pre-screen and stamp the annotation. Advisory law: any
+   *  failure here is swallowed — the creative simply carries no annotation. */
+  async preScreen(
+    creativeId: string,
+    tenantId: string,
+    input: { kind: 'IMAGE' | 'VIDEO'; headline: string | null; body: string | null; ctaLabel: string | null; destinationType: string | null; destinationValue: string | null },
+  ): Promise<void> {
+    const { getAdPreScreenProvider } = await import('../../providers/prescreen/ad-prescreen-provider');
+    const provider = getAdPreScreenProvider();
+    if (!provider) return; // kill switch (ADS_PRESCREEN_PROVIDER=off)
+    const settings = await this.prisma.adsSettings.findUnique({ where: { tenantId }, select: { restrictedCategories: true } });
+    const result = await provider.screen({
+      ...input,
+      restrictedCategories: (settings?.restrictedCategories ?? null) as Record<string, boolean> | null,
+    });
+    await this.prisma.adCreative.update({ where: { id: creativeId }, data: { preScreen: result as never } });
   }
 
   /** The transcode job's completion hook (§9.2): a normalized 720p H.264 +

@@ -2839,6 +2839,7 @@ model AdCreative {
   ctaLabel         String? // ≤15
   transcodeStatus  AdTranscodeStatus @default(READY) // videos start QUEUED
   status           AdCreativeStatus  @default(PENDING)
+  preScreen        Json? // §10.4 advisory-only annotations — assists review, NEVER decides
   reviewNotes      String?
   reviewedByUserId String?
   reviewedAt       DateTime?
