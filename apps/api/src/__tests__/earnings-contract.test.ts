@@ -40,10 +40,16 @@ beforeAll(async () => {
   await app.register(driverRoutes, { prefix: '/driver' });
   await app.ready();
 
+  // Collision-proof phones: the old 90-value pool (+59200804XX) flaked ~14%
+  // of runs against ITSELF (birthday paradox at ~5 users/run) — CI caught it.
+  // Wide random base + a per-run sequence, like the other suites.
+  let phoneSeq = 0;
+  const phoneBase = 592_860_000_000 + Math.floor(Math.random() * 9_000_000);
   const mkUser = async (n: string) => {
+    phoneSeq += 1;
     const u = await app.prisma.user.create({
       data: {
-        phone: `+59200804${String(Math.floor(Math.random() * 90) + 10)}`,
+        phone: `+${phoneBase + phoneSeq}`,
         firstName: n, lastName: 'Contract',
         roles: ['DRIVER', 'RIDER', 'CUSTOMER'] as UserRole[], activeRole: 'CUSTOMER',
         isPhoneVerified: true,
