@@ -167,9 +167,7 @@ export class AdvertiserService {
   }
 
   private async notifyOwners(advertiserId: string, title: string, body: string, kind: string) {
-    const members = await this.prisma.advertiserMember.findMany({ where: { advertiserId, role: 'OWNER' }, select: { userId: true } });
-    for (const m of members) {
-      await this.notifications.send({ userId: m.userId, type: 'SYSTEM_ANNOUNCEMENT', title, body, data: { kind, advertiserId } }).catch(() => {});
-    }
+    const { notifyAdvertiserOwners } = await import('./ads-notify');
+    await notifyAdvertiserOwners(this.prisma, this.notifications, advertiserId, { title, body, kind, data: { advertiserId } });
   }
 }

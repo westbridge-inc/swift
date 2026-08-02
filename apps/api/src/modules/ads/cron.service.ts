@@ -80,6 +80,45 @@ export class AdsCronService {
     return activated;
   }
 
+  /** §16 weekly performance report (Mon 09:00 tenant time): every campaign
+   *  that had a CONFIRMED booking LAST week gets its owners a totals digest.
+   *  Numbers come from the SAME rollups the dashboard reads (weekTotals), so
+   *  the email can never disagree with the stats screen. Idempotence rides the
+   *  cron cadence (fires once per Monday); a re-run within the same day would
+   *  re-send, which is acceptable for a report and keeps this stateless. */
+  async weeklyReport(now = new Date()): Promise<{ campaigns: number }> {
+    const thisMonday = mondayOf(now, this.tz);
+    const lastMonday = new Date(thisMonday.getTime() - 7 * 86_400_000);
+    const booked = await this.prisma.adBooking.findMany({
+      where: { weekStart: lastMonday, status: 'CONFIRMED' },
+      select: { campaignId: true, campaign: { select: { advertiserId: true, name: true } } },
+      distinct: ['campaignId'],
+      take: 500,
+    });
+    if (booked.length === 0) return { campaigns: 0 };
+    const { AdStatsService } = await import('./stats.service');
+    const { notifyAdvertiserOwners } = await import('./ads-notify');
+    const { NotificationService } = await import('../notification/notification.service');
+    const stats = new AdStatsService(this.prisma);
+    const notifications = new NotificationService(this.prisma, this.io);
+    let sent = 0;
+    for (const b of booked) {
+      try {
+        const t = await stats.weekTotals(b.campaignId, lastMonday);
+        await notifyAdvertiserOwners(this.prisma, notifications, b.campaign.advertiserId, {
+          title: `Weekly report — ${b.campaign.name}`,
+          body: `Last week: ${t.viewableImpressions.toLocaleString('en-US')} viewable impressions, ${t.clicks.toLocaleString('en-US')} clicks (CTR ${(t.ctr * 100).toFixed(2)}%), spend ${t.spend.toLocaleString('en-US')}.`,
+          kind: 'ad_weekly_report',
+          data: { campaignId: b.campaignId, weekStart: lastMonday.toISOString().slice(0, 10) },
+        });
+        sent += 1;
+      } catch (err) {
+        log().error({ err, campaignId: b.campaignId }, 'ads weekly report failed — continuing');
+      }
+    }
+    return { campaigns: sent };
+  }
+
   /** §6.1 week_end: a LIVE/PAUSED campaign whose booked window is over (the
    *  current tenant week is past endWeek) → COMPLETED. */
   async completeFinished(now: Date): Promise<number> {

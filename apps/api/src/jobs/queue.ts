@@ -578,6 +578,25 @@ export function createWorkers(ctx: JobContext) {
         const { AdsCronService } = await import('../modules/ads/cron.service');
         const res = await new AdsCronService(ctx.prisma, ctx.io).tick();
         if (res.autoCancelled + res.activated + res.completed > 0) ctx.log.info(res, 'ads: lifecycle tick');
+        // §16 "review SLA at risk": reviewable creatives past 75% of the SLA
+        // window page ops — once per creative per window (redis once-key),
+        // same posture as incident-sla-watch.
+        const { CreativeService } = await import('../modules/ads/creative.service');
+        const settings = await ctx.prisma.adsSettings.findUnique({ where: { tenantId: 'swift-default' }, select: { reviewSlaHours: true } });
+        const atRisk = await new CreativeService(ctx.prisma, ctx.io).reviewSlaAtRisk(settings?.reviewSlaHours ?? 24);
+        if (atRisk.length > 0) {
+          const { notifyAdmins, NotificationService: NS } = await import('../modules/notification/notification.service');
+          for (const cr of atRisk) {
+            await opsPageOnce(ctx, `ads-review-sla:${cr.id}`, 6 * 3600, () =>
+              notifyAdmins(ctx.prisma, new NS(ctx.prisma, ctx.io), {
+                title: `⏰ Ad creative review SLA at risk — ${cr.campaign.name}`,
+                body: 'A creative has been waiting for review for over 75% of the SLA window. Review it now.',
+                data: { kind: 'ad_review_sla_risk', creativeId: cr.id, campaignId: cr.campaignId },
+              }),
+            ).catch(() => {});
+          }
+          ctx.log.warn({ count: atRisk.length }, 'ads: creative review SLA at risk');
+        }
         return;
       }
 
@@ -586,8 +605,36 @@ export function createWorkers(ctx: JobContext) {
         // holds go RELEASED and give the inventory back. CAS + guarded
         // decrement = idempotent and overlap-safe.
         const { BookingService } = await import('../modules/ads/booking.service');
-        const res = await new BookingService(ctx.prisma).releaseExpired();
+        const bookingSvc = new BookingService(ctx.prisma);
+        const res = await bookingSvc.releaseExpired();
         if (res.released + res.voided > 0) ctx.log.info(res, 'ads: expired reservations released');
+        // §16 "reservation expiring" (5 minutes left): warn the advertiser
+        // once per campaign hold (redis once-key outlives the 5-min window).
+        const expiring = await bookingSvc.expiringSoon(5);
+        if (expiring.length > 0) {
+          const { notifyAdvertiserOwners } = await import('../modules/ads/ads-notify');
+          const { NotificationService: NS } = await import('../modules/notification/notification.service');
+          const notifications = new NS(ctx.prisma, ctx.io);
+          for (const e of expiring) {
+            await opsPageOnce(ctx, `ads-resv-warn:${e.campaignId}`, 30 * 60, () =>
+              notifyAdvertiserOwners(ctx.prisma, notifications, e.advertiserId, {
+                title: 'Your ad reservation expires in 5 minutes',
+                body: 'Complete payment now to keep your booked weeks — the hold releases automatically when the timer runs out.',
+                kind: 'ad_reservation_expiring',
+                data: { campaignId: e.campaignId, reservedUntil: e.reservedUntil.toISOString() },
+              }),
+            ).catch(() => {});
+          }
+        }
+        return;
+      }
+
+      if (job.name === 'ads-weekly-report') {
+        // §16 weekly performance report: Monday-morning totals digest to every
+        // advertiser that ran last week — same rollups the dashboard reads.
+        const { AdsCronService } = await import('../modules/ads/cron.service');
+        const res = await new AdsCronService(ctx.prisma, ctx.io).weeklyReport();
+        if (res.campaigns > 0) ctx.log.info(res, 'ads: weekly reports sent');
         return;
       }
 
@@ -923,6 +970,15 @@ export async function scheduleRecurringJobs(queues: ReturnType<typeof createQueu
     repeat: { pattern: '0 2 * * *' },
     removeOnComplete: 20,
     removeOnFail: 20,
+  });
+
+  // Ads weekly performance report [§16]: Monday 09:00 Guyana (13:00 UTC —
+  // Caribbean TZs are DST-free) — after the 02:00 rollup, so last week's
+  // numbers are complete.
+  await queues.dispatchQueue.add('ads-weekly-report', {}, {
+    repeat: { pattern: '0 13 * * 1' },
+    removeOnComplete: 12,
+    removeOnFail: 12,
   });
 
   // Rating anti-manipulation sweep: daily at 04:00

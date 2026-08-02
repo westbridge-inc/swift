@@ -132,6 +132,19 @@ export class CreativeService {
     });
   }
 
+  /** §16 "review SLA at risk": reviewable (PENDING + READY — same filter as
+   *  the queue) creatives sitting longer than `fraction` of the SLA window.
+   *  The caller pages ops once per creative (redis once-key). */
+  async reviewSlaAtRisk(slaHours: number, now = new Date(), fraction = 0.75) {
+    const cutoff = new Date(now.getTime() - slaHours * fraction * 3_600_000);
+    return this.prisma.adCreative.findMany({
+      where: { status: 'PENDING', transcodeStatus: 'READY', createdAt: { lt: cutoff } },
+      select: { id: true, campaignId: true, createdAt: true, campaign: { select: { name: true } } },
+      orderBy: { createdAt: 'asc' },
+      take: 100,
+    });
+  }
+
   /** Approve a creative. If it was the last PENDING one on a PENDING_REVIEW
    *  campaign, the campaign auto-schedules through the lifecycle. */
   async approve(creativeId: string, adminUserId: string): Promise<AdCreative> {

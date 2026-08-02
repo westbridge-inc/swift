@@ -88,6 +88,28 @@ export class AdStatsService {
     return map;
   }
 
+  /** One booked week's totals from the rollups — the §16 weekly-report and
+   *  campaign-completed numbers. Same source as the dashboard (AdStatsDaily
+   *  only), so the email can never disagree with the stats screen. */
+  async weekTotals(campaignId: string, weekStart: Date) {
+    const end = new Date(weekStart.getTime() + 7 * 86_400_000);
+    const agg = await this.prisma.adStatsDaily.aggregate({
+      where: { campaignId, day: { gte: weekStart, lt: end } },
+      _sum: { impressions: true, viewableImpressions: true, clicks: true, videoStarts: true, videoCompletes: true, spend: true },
+    });
+    const impressions = agg._sum.impressions ?? 0;
+    const clicks = agg._sum.clicks ?? 0;
+    return {
+      impressions,
+      viewableImpressions: agg._sum.viewableImpressions ?? 0,
+      clicks,
+      ctr: impressions > 0 ? Math.round((clicks / impressions) * 10000) / 10000 : 0,
+      videoStarts: agg._sum.videoStarts ?? 0,
+      videoCompletes: agg._sum.videoCompletes ?? 0,
+      spend: Number(agg._sum.spend ?? 0),
+    };
+  }
+
   /** Advertiser stats (§12.3) — reads rollups only. Series + totals with the
    *  derived ratios (ctr, completionRate). */
   async campaignStats(campaignId: string): Promise<{

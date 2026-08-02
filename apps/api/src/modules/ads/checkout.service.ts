@@ -131,6 +131,14 @@ export class AdCheckoutService {
       body: `Invoice ${invoice.number} is paid. Its campaign is now in the creative review queue.`,
       data: { kind: 'ad_campaign_paid', campaignId: invoice.campaignId, invoiceNumber: invoice.number },
     }).catch(() => {});
+    // §16 "payment received" goes to BOTH sides — the advertiser gets a receipt.
+    const { notifyAdvertiserOwners } = await import('./ads-notify');
+    await notifyAdvertiserOwners(this.prisma, this.notifications, invoice.advertiserId, {
+      title: `Payment received — ${invoice.number}`,
+      body: `We received ${invoice.currency} ${Number(invoice.amount).toLocaleString('en-US')}. Your campaign is now in creative review.`,
+      kind: 'ad_invoice_receipt',
+      data: { campaignId: invoice.campaignId, invoiceNumber: invoice.number },
+    }).catch(() => {});
     return this.prisma.adInvoice.findUniqueOrThrow({ where: { id: invoiceId } });
   }
 }
