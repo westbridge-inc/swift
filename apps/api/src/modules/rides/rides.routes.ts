@@ -3,7 +3,7 @@ import { RideClass } from '@prisma/client';
 import { z } from 'zod';
 import { FareService } from './fare.service';
 import { assertRideGates, assertL2, createRideRequest } from './rides.service';
-import { getSupplySnapshot, queueStatusFor, RIDE_QUEUE_TTL_MIN } from './queue.service';
+import { getSupplySnapshot, queueStatusFor, presenceNear, RIDE_QUEUE_TTL_MIN } from './queue.service';
 import { OrderService } from '../order/order.service';
 import { SosService } from '../safety/sos.service';
 import { makeDispatchService } from '../dispatch/dispatch.service';
@@ -211,6 +211,23 @@ export async function ridesRoutes(app: FastifyInstance) {
     return { success: true, data: { ...snapshot, level: availability.level, nearestEtaMinutes: availability.nearestEtaMinutes ?? null } };
   });
 
+  /** GET /presence — the "map is alive" read (rides spec 5.1/6.2): up to 12
+   *  COARSE positions of free online drivers near a point. Privacy is the
+   *  design: server-side ~100m deterministic jitter (stable per driver per
+   *  5-min bucket so cars don't dance between refetches), no identities, no
+   *  bearings, hailable (online + available) cars only. Zero rows ⇒ empty
+   *  array — the client renders nothing rather than faking supply (0.8). */
+  app.get('/presence', auth, async (request) => {
+    const qq = request.query as Record<string, unknown>;
+    const lat = Number(qq['lat']);
+    const lng = Number(qq['lng']);
+    if (!Number.isFinite(lat) || !Number.isFinite(lng) || Math.abs(lat) > 90 || Math.abs(lng) > 180) {
+      throw new AppError(400, 'INVALID_POINT', 'lat and lng are required.');
+    }
+    const cars = await presenceNear(app.prisma, { lat, lng });
+    return { success: true, data: { cars } };
+  });
+
   /** GET /active — the customer's current ride, with driver identity. */
   app.get('/active', auth, async (request) => {
     const ride = await app.prisma.order.findFirst({
@@ -225,6 +242,7 @@ export async function ridesRoutes(app: FastifyInstance) {
             id: true, vehicleMake: true, vehicleModel: true, vehicleColor: true,
             licensePlate: true, vehiclePhotoUrl: true, averageRating: true,
             currentLat: true, currentLng: true, bodyType: true, colorHex: true,
+            mmgPayUrl: true,
             user: { select: { firstName: true, avatar: true, phone: true } },
           },
         },
@@ -236,7 +254,14 @@ export async function ridesRoutes(app: FastifyInstance) {
     // on the card, the map marker, and the arrival screen. Classify-on-read
     // heals rows born before the assignment hook/backfill.
     const { vehicleIdentityFor } = await import('./vehicle-identity');
-    return { success: true, data: { ...ride, driver: { ...ride.driver, ...vehicleIdentityFor(ride.driver) } } };
+    // MMG is a trip-END surface (rides spec 5.9/Part 7): the driver's own pay
+    // link rides along only once the trip is underway, so the post-trip sheet
+    // holds it — never shown while they're still deciding on a driver.
+    const driver = { ...ride.driver, ...vehicleIdentityFor(ride.driver) };
+    if (ride.status !== 'RIDE_IN_PROGRESS') {
+      (driver as { mmgPayUrl?: string | null }).mmgPayUrl = null;
+    }
+    return { success: true, data: { ...ride, driver } };
   });
 
   /** GET /:id — one owned ride. */
@@ -247,7 +272,7 @@ export async function ridesRoutes(app: FastifyInstance) {
         driver: {
           select: {
             vehicleMake: true, vehicleModel: true, vehicleColor: true, licensePlate: true,
-            vehiclePhotoUrl: true, averageRating: true,
+            vehiclePhotoUrl: true, averageRating: true, mmgPayUrl: true,
             user: { select: { firstName: true, avatar: true } },
           },
         },
@@ -255,6 +280,11 @@ export async function ridesRoutes(app: FastifyInstance) {
       },
     });
     if (!ride) throw new NotFoundError('Ride', request.params.id);
+    // Same trip-end rule as /active: the pay link only for a ride that is
+    // underway or done (receipt / pay-later), never during matching.
+    if (ride.driver && !['RIDE_IN_PROGRESS', 'DELIVERED', 'COMPLETED'].includes(ride.status)) {
+      (ride.driver as { mmgPayUrl?: string | null }).mmgPayUrl = null;
+    }
     return { success: true, data: ride };
   });
 

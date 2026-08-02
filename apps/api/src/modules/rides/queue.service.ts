@@ -225,3 +225,53 @@ export async function scanRideQueue(
 
   return { expired, matched };
 }
+
+// ---------------------------------------------------------------------------
+// Coarse presence (rides spec 5.1/6.2) — the honest "map is alive" read.
+// ---------------------------------------------------------------------------
+
+const PRESENCE_CAP = 12;
+const PRESENCE_RADIUS_KM = 5;
+/** ~100m of deterministic jitter: stable per driver per 5-minute bucket so a
+ *  refetch never makes parked cars dance, yet true positions never leave the
+ *  server. */
+function jitter(id: string, now = Date.now()): { dLat: number; dLng: number } {
+  const bucket = Math.floor(now / 300_000);
+  let h = 2166136261;
+  const seed = `${id}:${bucket}`;
+  for (let i = 0; i < seed.length; i++) {
+    h ^= seed.charCodeAt(i);
+    h = Math.imul(h, 16777619);
+  }
+  const angle = ((h >>> 8) % 360) * (Math.PI / 180);
+  const meters = 40 + ((h >>> 3) % 80); // 40–120m off the true point
+  const dLat = (meters * Math.cos(angle)) / 111_320;
+  const dLng = (meters * Math.sin(angle)) / (111_320 * Math.cos((6.8 * Math.PI) / 180));
+  return { dLat, dLng };
+}
+
+export async function presenceNear(
+  prisma: PrismaClient,
+  point: { lat: number; lng: number },
+): Promise<{ lat: number; lng: number }[]> {
+  const rows = await prisma.$queryRaw<{ id: string; lat: number; lng: number }[]>(Prisma.sql`
+    SELECT d."id", d."currentLat" AS lat, d."currentLng" AS lng
+    FROM drivers d
+    WHERE d."isOnline" AND d."isAvailable"
+      AND d."currentLat" IS NOT NULL AND d."currentLng" IS NOT NULL
+      AND (
+        6371 * acos(
+          LEAST(1.0,
+            cos(radians(${point.lat})) * cos(radians(d."currentLat")) *
+            cos(radians(d."currentLng") - radians(${point.lng})) +
+            sin(radians(${point.lat})) * sin(radians(d."currentLat"))
+          )
+        )
+      ) <= ${PRESENCE_RADIUS_KM}
+    LIMIT ${PRESENCE_CAP}
+  `);
+  return rows.map((r) => {
+    const j = jitter(r.id);
+    return { lat: Number(r.lat) + j.dLat, lng: Number(r.lng) + j.dLng };
+  });
+}
