@@ -5,6 +5,7 @@ import { getChannels } from '../../providers/notifications/channels';
 import { CountryConfigService } from '../country/country-config.service';
 import type { PaymentProvider } from '../../providers/payment/payment-provider';
 import { getMmgProvider } from '../../providers/mmg/mmg-provider';
+import { convertUsdToLocal } from './fx';
 import { log } from '../../utils/logger';
 
 // ---------------------------------------------------------------------------
@@ -18,6 +19,26 @@ const MAX_FAILED_ATTEMPTS = 3;
 const RETRY_HOURS = 24;
 const WEEK_MS = 7 * 24 * 60 * 60 * 1000;
 const DAY_MS = 24 * 60 * 60 * 1000;
+
+/** USD pricing (System 2): the run-scoped context — one rate, one book. */
+interface UsdPricingCtx {
+  rateId: string;
+  rate: number;
+  increment: number;
+  currency: string;
+  book: Map<string, number>; // `${role}|${tier ?? ''}` → amountUsd
+}
+
+/** SubscriptionType → price-book role. Tier = the subscription type itself. */
+const SUB_TYPE_TRIAL_ROLE: Record<string, string> = {
+  RESTAURANT: 'VENDOR',
+  SUPERMARKET: 'VENDOR',
+  RETAIL_STORE: 'VENDOR',
+  SERVICE_PROVIDER: 'SERVICE',
+  DELIVERY_RIDER: 'RIDER',
+  COURIER_RIDER: 'RIDER',
+  TAXI_DRIVER: 'DRIVER',
+};
 /** §11 — how long a subscription may sit SUSPENDED before it goes CHURNED
  *  (terminal: dunning stops, the daily MMG re-request stops; paying rejoins). */
 const suspensionMaxDays = () => {
@@ -88,10 +109,14 @@ export class BillingService {
 
     const result: BillingCycleResult = { processed: 0, succeeded: 0, failed: 0, suspended: 0, skipped: 0, errors: 0, pending: 0 };
 
+    // USD pricing (Part 20): ONE rate per billing run, resolved here and
+    // stamped on every charge this run creates. Null = flag off → legacy.
+    const usd = await this.loadUsdPricing();
+
     for (const sub of due) {
       result.processed += 1;
       try {
-        const outcome = await this.billSubscription(sub as SubWithRelations, now);
+        const outcome = await this.billSubscription(sub as SubWithRelations, now, usd);
         result[outcome] += 1;
       } catch {
         // Partial failure mid-batch: record and continue
@@ -110,18 +135,24 @@ export class BillingService {
   async billSubscription(
     sub: SubWithRelations,
     now = new Date(),
+    /** USD pricing context — pass the RUN's context from runBillingCycle;
+     *  single-charge callers may pass undefined to resolve fresh. */
+    usdCtx?: UsdPricingCtx | null,
   ): Promise<'succeeded' | 'failed' | 'suspended' | 'skipped' | 'pending'> {
     const periodKey = sub.nextBillingDate.toISOString().slice(0, 10);
     const attemptKey = `charge:${sub.id}:${periodKey}:a${sub.failedAttempts}`;
+    const usd = usdCtx === undefined ? await this.loadUsdPricing() : usdCtx;
+    const priced = this.priceFor(sub, usd);
 
     try {
       await this.prisma.billingEvent.create({
         data: {
           subscriptionId: sub.id,
           type: 'CHARGE_ATTEMPT',
-          amount: this.amountFor(sub),
+          amount: priced.amount,
           currencyCode: sub.currencyCode,
           idempotencyKey: attemptKey,
+          ...(priced.usdTrio ?? {}),
         },
       });
     } catch (error) {
@@ -131,7 +162,7 @@ export class BillingService {
       throw error;
     }
 
-    const amount = Number(this.amountFor(sub));
+    const amount = Number(priced.amount);
 
     // Waived subscriptions advance for free, with the audit trail intact
     if (sub.feeWaived || amount === 0) {
@@ -154,6 +185,7 @@ export class BillingService {
       await this.applySuccessfulCharge(
         sub, amount, charged.ref, now, periodKey,
         'settlePaymentId' in charged ? charged.settlePaymentId : undefined,
+        priced.usdTrio,
       );
       return 'succeeded';
     }
@@ -212,6 +244,61 @@ export class BillingService {
 
   private amountFor(sub: Subscription): Prisma.Decimal | number {
     return sub.customRate ?? sub.weeklyRate;
+  }
+
+  /** USD pricing (System 2 ②): the run-scoped pricing context — ONE FxRate +
+   *  the active price book, resolved at job start and stamped on every charge
+   *  the run creates (acceptance #16). Null = flag off → legacy behavior,
+   *  byte-identical. */
+  private async loadUsdPricing(): Promise<UsdPricingCtx | null> {
+    const tenant = await this.prisma.tenantBillingCurrency.findUnique({ where: { tenantId: 'swift-default' } });
+    if (!tenant?.usdPricingEnabled) return null;
+    const { resolveRateForRun } = await import('./fx');
+    const rate = await resolveRateForRun(this.prisma, tenant.settlementCurrency);
+    if (!rate) {
+      log().warn({ currency: tenant.settlementCurrency }, 'usd pricing enabled but NO FX rate exists — billing falls back to legacy local rates');
+      return null;
+    }
+    const entries = await this.prisma.priceBookEntry.findMany({ where: { active: true } });
+    const book = new Map<string, number>();
+    for (const e of entries) book.set(`${e.role}|${e.tier ?? ''}`, Number(e.amountUsd));
+    return {
+      rateId: rate.id,
+      rate: Number(rate.rate),
+      increment: Number(tenant.roundingIncrement),
+      currency: tenant.settlementCurrency,
+      book,
+    };
+  }
+
+  /** The pinned trio from this period's charge attempt — recovered for late
+   *  settles (MMG poll) so a moved rate can never touch an issued charge. */
+  private async pinnedTrioFor(subscriptionId: string, periodKey: string): Promise<{ amountUsd: number; fxRateId: string; fxRateUsed: number } | undefined> {
+    const attempt = await this.prisma.billingEvent.findFirst({
+      where: { subscriptionId, type: 'CHARGE_ATTEMPT', idempotencyKey: { startsWith: `charge:${subscriptionId}:${periodKey}` }, amountUsd: { not: null } },
+      orderBy: { createdAt: 'desc' },
+      select: { amountUsd: true, fxRateId: true, fxRateUsed: true },
+    });
+    if (!attempt?.amountUsd || !attempt.fxRateId || !attempt.fxRateUsed) return undefined;
+    return { amountUsd: Number(attempt.amountUsd), fxRateId: attempt.fxRateId, fxRateUsed: Number(attempt.fxRateUsed) };
+  }
+
+  /** Price one subscription under the context. customRate (an explicit local
+   *  override) and any missing book entry keep the LEGACY local amount with a
+   *  loud log — pricing never blocks billing. */
+  private priceFor(sub: Subscription, usd: UsdPricingCtx | null): { amount: Prisma.Decimal | number; usdTrio?: { amountUsd: number; fxRateId: string; fxRateUsed: number } } {
+    if (!usd || sub.customRate) return { amount: this.amountFor(sub) };
+    const role = SUB_TYPE_TRIAL_ROLE[sub.type] ?? 'VENDOR';
+    const amountUsd = usd.book.get(`${role}|${sub.type}`) ?? usd.book.get(`${role}|`);
+    if (amountUsd === undefined) {
+      log().warn({ subscriptionId: sub.id, type: sub.type }, 'usd pricing: no price-book entry — legacy local rate used');
+      return { amount: this.amountFor(sub) };
+    }
+    const converted = convertUsdToLocal(amountUsd, usd.rate, usd.increment);
+    if (converted.minClamped) {
+      log().warn({ subscriptionId: sub.id, amountUsd }, 'usd pricing: MIN_CLAMPED — local amount clamped to one increment');
+    }
+    return { amount: converted.amountLocal, usdTrio: { amountUsd, fxRateId: usd.rateId, fxRateUsed: usd.rate } };
   }
 
   /** Prepaid balance settles FIRST (money already in hand); otherwise CARD
@@ -309,6 +396,8 @@ export class BillingService {
     periodKey: string,
     /** Settle an existing PENDING payment row (MMG poll path) instead of creating one. */
     settlePaymentId?: string,
+    /** USD pricing: the pinned trio from the charge attempt (System 2 ②). */
+    usdTrio?: { amountUsd: number; fxRateId: string; fxRateUsed: number },
   ) {
     const periodStart = sub.nextBillingDate;
     const periodEnd = new Date(periodStart.getTime() + WEEK_MS);
@@ -358,6 +447,7 @@ export class BillingService {
         currencyCode: sub.currencyCode,
         idempotencyKey: `success:${sub.id}:${periodKey}`,
         paymentRef,
+        ...(usdTrio ?? {}),
       },
     });
 
@@ -404,10 +494,40 @@ export class BillingService {
       const periodKey = payment.periodStart.toISOString().slice(0, 10);
 
       let status: string;
+      let reportedMinor = 0;
       try {
-        status = (await mmg.transactionLookup({ transactionId: payment.externalRef! })).status;
+        const lookup = await mmg.transactionLookup({ transactionId: payment.externalRef! });
+        status = lookup.status;
+        reportedMinor = lookup.amountMinor ?? 0;
       } catch {
         out.stillPending += 1; // transport hiccup — the next tick retries
+        continue;
+      }
+
+      // USD pricing Part 10 rule 3 / SO-6 posture: the settled amount must
+      // match OUR amount exactly. A mismatch is NEVER silently absorbed and
+      // never auto-settled — flag once for the founder and hold the row.
+      // (reportedMinor 0 = provider didn't echo an amount; nothing to check.)
+      if (status === 'approved' && reportedMinor > 0 && reportedMinor !== Math.round(Number(payment.amount) * 100)) {
+        try {
+          await this.prisma.billingEvent.create({
+            data: {
+              subscriptionId: sub.id,
+              type: 'REMINDER',
+              currencyCode: sub.currencyCode,
+              idempotencyKey: `mismatch:${payment.id}`,
+              note: `RECONCILE_MISMATCH: MMG reports ${(reportedMinor / 100).toFixed(2)} vs our ${Number(payment.amount).toFixed(2)} (payment ${payment.id})`,
+            },
+          });
+          await notifyAdmins(this.prisma, this.notifications, {
+            title: '⚠️ Payment amount mismatch — held for review',
+            body: `MMG reports a different amount than we requested on a weekly-fee payment. It is NOT settled. Payment ${payment.id}.`,
+            data: { kind: 'reconcile_mismatch', paymentId: payment.id, subscriptionId: sub.id },
+          });
+        } catch {
+          /* already flagged — the dedup key holds */
+        }
+        out.stillPending += 1;
         continue;
       }
 
@@ -429,7 +549,12 @@ export class BillingService {
             data: { status: 'CAPTURED', paidAt: now },
           });
           if (claimed.count === 0) continue; // another settler won this row
-          await this.applySuccessfulCharge(sub as SubWithRelations, Number(payment.amount), payment.externalRef!, now, periodKey, payment.id);
+          // USD pinning across the async settle: the ATTEMPT's trio is the
+          // truth — never re-price a late approval at today's rate.
+          await this.applySuccessfulCharge(
+            sub as SubWithRelations, Number(payment.amount), payment.externalRef!, now, periodKey, payment.id,
+            await this.pinnedTrioFor(sub.id, periodKey),
+          );
           out.settled += 1;
         } else if (status === 'declined' || status === 'reversed' || expired) {
           const claimed = await this.prisma.subscriptionPayment.updateMany({

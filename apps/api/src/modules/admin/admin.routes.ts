@@ -2311,6 +2311,76 @@ export async function adminRoutes(app: FastifyInstance) {
     return { success: true, data: { ...updated, amountUsd: Number(updated.amountUsd) } };
   });
 
+  /** Part 13 reporting — one truth, two columns: USD (management view) and
+   *  local (books view), summed from the SAME pinned charge rows; plus the
+   *  reconcile-mismatch flags that must never be silently absorbed. */
+  app.get('/billing/usd-summary', { preHandler: [adminGuard] }, async (request) => {
+    const { days } = z.object({ days: z.coerce.number().int().min(1).max(365).default(30) }).parse(request.query ?? {});
+    const since = new Date(Date.now() - days * 86_400_000);
+    const charges = await app.prisma.billingEvent.findMany({
+      where: { type: 'CHARGE_SUCCESS', createdAt: { gte: since } },
+      select: { amount: true, amountUsd: true, fxRateId: true, createdAt: true, currencyCode: true },
+    });
+    const weekKey = (d: Date) => {
+      const day = d.getUTCDay();
+      const monday = new Date(d.getTime() - ((day === 0 ? 6 : day - 1) * 86_400_000));
+      return monday.toISOString().slice(0, 10);
+    };
+    const weeks = new Map<string, { local: number; usd: number; pinned: number; legacy: number }>();
+    for (const c of charges) {
+      const k = weekKey(c.createdAt);
+      const w = weeks.get(k) ?? { local: 0, usd: 0, pinned: 0, legacy: 0 };
+      w.local += Number(c.amount ?? 0);
+      if (c.amountUsd) {
+        w.usd += Number(c.amountUsd);
+        w.pinned += 1;
+      } else {
+        w.legacy += 1;
+      }
+      weeks.set(k, w);
+    }
+    const mismatches = await app.prisma.billingEvent.count({
+      where: { type: 'REMINDER', idempotencyKey: { startsWith: 'mismatch:' }, createdAt: { gte: since } },
+    });
+    return {
+      success: true,
+      data: {
+        windowDays: days,
+        weeks: [...weeks.entries()]
+          .sort(([a], [b]) => a.localeCompare(b))
+          .map(([week, w]) => ({ week, localTotal: Math.round(w.local * 100) / 100, usdTotal: Math.round(w.usd * 100) / 100, pinnedCharges: w.pinned, legacyCharges: w.legacy })),
+        reconcileMismatches: mismatches,
+      },
+    };
+  });
+
+  // ── Part 13 migration (founder picks a mode per tenant) ───────────────────
+
+  /** MODE A preview — the mapping table for founder approval. Pure read. */
+  app.get('/billing/usd-migration/preview', { preHandler: [adminGuard] }, async () => {
+    const { previewModeA } = await import('../billing/usd-migration');
+    return { success: true, data: await previewModeA(app.prisma) };
+  });
+
+  /** MODE A enact — send the deduped 30-day notices; the founder flips
+   *  usdPricingEnabled once the window has run. */
+  app.post('/billing/usd-migration/mode-a', { preHandler: [adminGuard] }, async () => {
+    const { enactModeA } = await import('../billing/usd-migration');
+    return { success: true, data: await enactModeA(app.prisma, app.io) };
+  });
+
+  /** MODE B enable — grandfather existing payers on today's local price via
+   *  customRate; the daily sweep owns the T−30/T−7 notices + sunset flip. */
+  app.post('/billing/usd-migration/mode-b', { preHandler: [adminGuard] }, async (request) => {
+    const body = z.object({ sunsetAt: z.string().datetime() }).parse(request.body ?? {});
+    const sunset = new Date(body.sunsetAt);
+    if (sunset.getTime() < Date.now() + 30 * 86_400_000) {
+      throw new AppError(400, 'SUNSET_TOO_SOON', 'The sunset must be at least 30 days out — the T−30 notice needs its window.');
+    }
+    const { enableModeB } = await import('../billing/usd-migration');
+    return { success: true, data: await enableModeB(app.prisma, sunset) };
+  });
+
   /** Pure preview (Part 12): the full plan table at a hypothetical rate —
    *  commit is only ever the POST above. */
   app.get('/billing/fx-preview', { preHandler: [adminGuard] }, async (request) => {
