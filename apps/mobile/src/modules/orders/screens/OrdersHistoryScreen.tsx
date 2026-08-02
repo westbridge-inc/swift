@@ -3,33 +3,32 @@ import React, { useEffect } from 'react';
 import { FlatList, RefreshControl, View } from 'react-native';
 import { Image } from 'expo-image';
 import { useNavigation, useIsFocused } from '@react-navigation/native';
-import { MaterialCommunityIcons } from '@expo/vector-icons';
+
 import { color, radius, space } from '@swift/ui';
 import { useOrdersInfinite, useReorder } from '../../../hooks/customer';
 import { useAuthStore } from '../../../stores/authStore';
 import { DARK_BLURHASH, vendorImage } from '../../../lib/images';
-import { money } from '../../../lib/money';
-import { Card, EmptyState, ErrorState, LoadingBlock, PillButton, Screen, T } from '../../../kit';
+import { Money, Pictogram, Card, EmptyState, ErrorState, LoadingBlock, PillButton, Screen, T } from '../../../kit';
 
 // No kit frame for order history — composed from the kit's Recent Order card
 // pattern (thumb · name · meta · trailing action).
 const STATUS_TONE: Record<string, { label: string; color: string; bg: string }> = {
-  PENDING: { label: 'Pending', color: color.warning, bg: '#FEF3C7' },
-  ACCEPTED: { label: 'Accepted', color: color.warning, bg: '#FEF3C7' },
-  PREPARING: { label: 'Preparing', color: color.warning, bg: '#FEF3C7' },
-  READY: { label: 'Ready', color: color.warning, bg: '#FEF3C7' },
-  RIDER_ASSIGNED: { label: 'On the way', color: '#1D4ED8', bg: '#DBEAFE' },
-  PICKED_UP: { label: 'On the way', color: '#1D4ED8', bg: '#DBEAFE' },
-  DELIVERED: { label: 'Delivered', color: '#15803D', bg: '#DCFCE7' },
-  COMPLETED: { label: 'Completed', color: '#15803D', bg: '#DCFCE7' },
-  CANCELLED: { label: 'Cancelled', color: '#B91C1C', bg: '#FEE2E2' },
-  REFUNDED: { label: 'Refunded', color: '#B91C1C', bg: '#FEE2E2' },
+  PENDING: { label: 'Pending', color: color.warning, bg: color.soft.warning },
+  ACCEPTED: { label: 'Accepted', color: color.warning, bg: color.soft.warning },
+  PREPARING: { label: 'Preparing', color: color.warning, bg: color.soft.warning },
+  READY: { label: 'Ready', color: color.warning, bg: color.soft.warning },
+  RIDER_ASSIGNED: { label: 'On the way', color: color.info, bg: color.soft.info },
+  PICKED_UP: { label: 'On the way', color: color.info, bg: color.soft.info },
+  DELIVERED: { label: 'Delivered', color: color.success, bg: color.soft.success },
+  COMPLETED: { label: 'Completed', color: color.success, bg: color.soft.success },
+  CANCELLED: { label: 'Cancelled', color: color.error, bg: color.soft.danger },
+  REFUNDED: { label: 'Refunded', color: color.error, bg: color.soft.danger },
   // Taxi lifecycle — rides are orders too and land in the same history.
-  DRIVER_ASSIGNED: { label: 'Driver assigned', color: '#1D4ED8', bg: '#DBEAFE' },
-  DRIVER_EN_ROUTE: { label: 'Driver on the way', color: '#1D4ED8', bg: '#DBEAFE' },
-  DRIVER_ARRIVED: { label: 'Driver arrived', color: '#1D4ED8', bg: '#DBEAFE' },
-  RIDE_IN_PROGRESS: { label: 'On trip', color: '#1D4ED8', bg: '#DBEAFE' },
-  FAILED: { label: 'Failed', color: '#B91C1C', bg: '#FEE2E2' },
+  DRIVER_ASSIGNED: { label: 'Driver assigned', color: color.info, bg: color.soft.info },
+  DRIVER_EN_ROUTE: { label: 'Driver on the way', color: color.info, bg: color.soft.info },
+  DRIVER_ARRIVED: { label: 'Driver arrived', color: color.info, bg: color.soft.info },
+  RIDE_IN_PROGRESS: { label: 'On trip', color: color.info, bg: color.soft.info },
+  FAILED: { label: 'Failed', color: color.error, bg: color.soft.danger },
 };
 
 const ACTIVE = new Set([
@@ -57,7 +56,7 @@ export function OrdersHistoryScreen() {
         <View style={{ height: 56, alignItems: 'center', justifyContent: 'center' }}>
         <T variant="heading">Activity</T>
       </View>
-        <EmptyState icon="clipboard" title="Sign in to see orders" body="Your order history lives on your account." actionLabel="Sign In" onAction={promptLogin} />
+        <EmptyState picto="orders" title="Sign in to see orders" body="Your order history lives on your account." actionLabel="Sign in" onAction={promptLogin} />
       </Screen>
     );
   }
@@ -75,10 +74,10 @@ export function OrdersHistoryScreen() {
         <ErrorState onRetry={() => orders.refetch()} />
       ) : rows.length === 0 ? (
         <EmptyState
-          icon="clipboard"
+          picto="orders"
           title="No orders yet"
-          body="Once you place an order it shows up here."
-          actionLabel="Find Foods"
+          body="Your orders and rides land here — loud and trackable."
+          actionLabel="Find food"
           onAction={() => navigation.navigate('Search')}
         />
       ) : (
@@ -108,7 +107,7 @@ export function OrdersHistoryScreen() {
                   {isRide ? (
                     // A ride has no storefront — a car tile is its identity.
                     <View style={{ width: 64, height: 64, borderRadius: radius.md, alignItems: 'center', justifyContent: 'center', backgroundColor: color.brand[50] }}>
-                      <MaterialCommunityIcons name="car" size={30} color={color.brand[600]} />
+                      <Pictogram name="taxi" size={32} color={color.brand[600]} />
                     </View>
                   ) : (
                     <Image
@@ -130,14 +129,14 @@ export function OrdersHistoryScreen() {
                         ? `${o.pickupAddress ?? 'Pickup'} → ${o.deliveryAddress ?? 'Drop-off'}`
                         : `#${o.orderNumber} · ${o.placedAt ? new Date(o.placedAt).toLocaleDateString() : ''}`}
                     </T>
-                    <T variant="label" weight="bold" tone="brand">
-                      {money(isRide ? (o.taxiFareTotal ?? o.totalAmount) : (o.totalAmount ?? o.total))}
+                    <View style={{ flexDirection: 'row', alignItems: 'baseline', gap: space.sm }}>
+                      <Money amount={isRide ? (o.taxiFareTotal ?? o.totalAmount) : (o.totalAmount ?? o.total)} tone="brand" />
                       {isRide && o.placedAt ? (
                         <T variant="caption" tone="muted">
-                          {'  '}{new Date(o.placedAt).toLocaleDateString()}
+                          {new Date(o.placedAt).toLocaleDateString()}
                         </T>
                       ) : null}
-                    </T>
+                    </View>
                   </View>
                   <View
                     style={{
@@ -155,7 +154,7 @@ export function OrdersHistoryScreen() {
                 <View style={{ flexDirection: 'row', gap: space.md, marginTop: space.md }}>
                   {active ? (
                     <PillButton
-                      label={isRide ? 'Track ride' : 'Track'}
+                      label={isRide ? 'Track ride' : 'Track order'}
                       size="sm"
                       onPress={() => navigation.navigate(isRide ? 'Taxi' : 'Delivery', isRide ? undefined : { orderId: o.id })}
                       style={{ flex: 1 }}

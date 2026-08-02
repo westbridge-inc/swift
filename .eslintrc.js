@@ -32,7 +32,6 @@ module.exports = {
         'apps/mobile/src/components/FareSlider.tsx',
         'apps/mobile/src/components/MmgPayLinkCard.tsx',
         'apps/mobile/src/modules/chat/screens/ConversationScreen.tsx',
-        'apps/mobile/src/modules/orders/screens/OrdersHistoryScreen.tsx',
       ],
       rules: {
         'no-restricted-syntax': [
