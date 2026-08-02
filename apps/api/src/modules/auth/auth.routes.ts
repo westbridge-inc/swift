@@ -89,7 +89,11 @@ export async function authRoutes(app: FastifyInstance) {
     if (process.env['CONSENT_REQUIRED'] === '1' && body.acceptTerms !== true) {
       throw new AppError(400, 'CONSENT_REQUIRED', 'You must accept the Terms of Service and Privacy Policy to create an account');
     }
-    const result = await authService.register(body);
+    const result = await authService.register({
+      ...body,
+      deviceId: (request.headers['x-device-id'] as string) || null,
+      ipAddress: request.ip || null,
+    });
     return reply.status(201).send({ success: true, data: result });
   });
 

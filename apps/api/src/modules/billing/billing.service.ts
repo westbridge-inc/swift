@@ -478,6 +478,25 @@ export class BillingService {
         note: `Billing rail set to ${method}${method === 'MOBILE_MONEY' ? ' (MMG merchant-initiated)' : ' (prepaid)'}`,
       },
     });
+    // Identity-integrity capture (§2.1 MMG_PAYER — HARD: the money doesn't
+    // lie). Fire-and-forget; A4 payer-laundering unions + any §3.4
+    // retroactive trial reconciliation happen inside the capture.
+    if (method === 'MOBILE_MONEY' && mmgPayerMsisdn) {
+      const human = await this.prisma.subscription.findUnique({
+        where: { id: subscriptionId },
+        select: {
+          rider: { select: { userId: true } },
+          driver: { select: { userId: true } },
+          vendor: { select: { owner: { select: { userId: true } } } },
+        },
+      });
+      const userId = human?.rider?.userId ?? human?.driver?.userId ?? human?.vendor?.owner.userId;
+      if (userId) {
+        const { captureMmgPayer } = await import('../integrity/capture-hooks');
+        const role = human?.rider ? 'RIDER' : human?.driver ? 'DRIVER' : 'VENDOR';
+        captureMmgPayer(this.prisma, { userId, role, payerMsisdn: mmgPayerMsisdn.trim() });
+      }
+    }
     return updated;
   }
 

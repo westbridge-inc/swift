@@ -15,21 +15,21 @@ datasource db {
 // ==========================================
 
 model User {
-  id              String     @id @default(cuid())
-  phone           String     @unique
-  email           String?    @unique
-  firstName       String
-  lastName        String
-  avatar          String?
+  id               String     @id @default(cuid())
+  phone            String     @unique
+  email            String?    @unique
+  firstName        String
+  lastName         String
+  avatar           String?
   /// Set only by POST /auth/selfie (camera capture in-app). The mandatory
   /// signup selfie (master plan §3) — null means the account has not completed
   /// it and the transact gates (orders / rides / go-online) stay closed.
   selfieCapturedAt DateTime?
-  roles           UserRole[]
-  activeRole      UserRole
-  status          UserStatus @default(ACTIVE)
-  isPhoneVerified Boolean    @default(false)
-  isEmailVerified Boolean    @default(false)
+  roles            UserRole[]
+  activeRole       UserRole
+  status           UserStatus @default(ACTIVE)
+  isPhoneVerified  Boolean    @default(false)
+  isEmailVerified  Boolean    @default(false)
 
   /// DPA-2023 consent demonstrability [SWIFT-AUD-D9-03]: stamped at signup
   /// when the client sends acceptTerms; tosVersion = the LEGAL_VERSION served
@@ -46,8 +46,8 @@ model User {
   countryCode String @default("GY")
   /// SaaS tenant (operator instance). DB-defaulted to the single current tenant
   /// so every existing + new row is assigned with no app change (stage 1).
-  tenantId    String   @default("swift-default")
-  tenant      Tenant   @relation(fields: [tenantId], references: [id])
+  tenantId    String @default("swift-default")
+  tenant      Tenant @relation(fields: [tenantId], references: [id])
 
   /// Email+password login lands later; phone OTP remains primary.
   passwordHash        String?
@@ -62,9 +62,9 @@ model User {
   /// never inferred from gender or any other attribute (protected data).
   enhancedSafetyMonitoring Boolean @default(false)
 
-  addresses        Address[]  @relation("userAddresses")
-  lastKnownLat     Float?
-  lastKnownLng     Float?
+  addresses    Address[] @relation("userAddresses")
+  lastKnownLat Float?
+  lastKnownLng Float?
 
   /// V1 dormant — cash-only. Do not build on; Part C wallet rework.
   walletBalance Decimal @default(0) @db.Decimal(12, 2)
@@ -79,27 +79,27 @@ model User {
   updatedAt    DateTime      @updatedAt
   lastActiveAt DateTime?
 
-  customer        Customer?
-  rider           Rider?
-  driver          Driver?
-  vendorOwner     VendorOwner?
-  vendorStaffMemberships VendorStaff[] @relation("vendorStaffMemberships")
-  serviceProvider ServiceProvider?
-  admin           Admin?
-  orders          Order[]        @relation("customerOrders")
-  ratings         Rating[]       @relation("raterRatings")
-  ratingsReceived Rating[]       @relation("rateeRatings")
-  serviceJobs     ServiceJob[]   @relation("customerServiceJobs")
-  notifications    Notification[]
-  transactions     Transaction[]
-  sessions         Session[]
-  accountRecoveries AccountRecovery[]
-  payoutRequests   PayoutRequest[]
-  payoutSchedule   PayoutSchedule?
-  cart             Cart?
-  chatParticipants ChatRoomParticipant[]
-  supportTickets   SupportTicket[]
-  resolvedTickets  SupportTicket[] @relation("supportResolver")
+  customer               Customer?
+  rider                  Rider?
+  driver                 Driver?
+  vendorOwner            VendorOwner?
+  vendorStaffMemberships VendorStaff[]         @relation("vendorStaffMemberships")
+  serviceProvider        ServiceProvider?
+  admin                  Admin?
+  orders                 Order[]               @relation("customerOrders")
+  ratings                Rating[]              @relation("raterRatings")
+  ratingsReceived        Rating[]              @relation("rateeRatings")
+  serviceJobs            ServiceJob[]          @relation("customerServiceJobs")
+  notifications          Notification[]
+  transactions           Transaction[]
+  sessions               Session[]
+  accountRecoveries      AccountRecovery[]
+  payoutRequests         PayoutRequest[]
+  payoutSchedule         PayoutSchedule?
+  cart                   Cart?
+  chatParticipants       ChatRoomParticipant[]
+  supportTickets         SupportTicket[]
+  resolvedTickets        SupportTicket[]       @relation("supportResolver")
 
   @@index([tenantId])
   @@map("users")
@@ -132,22 +132,22 @@ enum UserStatus {
 }
 
 model Session {
-  id           String   @id @default(cuid())
-  userId       String
-  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
-  token        String   @unique
-  refreshToken String   @unique
+  id                   String    @id @default(cuid())
+  userId               String
+  user                 User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  token                String    @unique
+  refreshToken         String    @unique
   // Refresh rotation theft detection: the token this one replaced, and when.
   // A replay of previousRefreshToken outside the race-grace window means the
   // token was stolen — the whole session is revoked (see AuthService.refreshTokens).
   previousRefreshToken String?   @unique
   rotatedAt            DateTime?
-  deviceId     String
-  deviceType   String
-  ipAddress    String?
-  userAgent    String?
-  expiresAt    DateTime
-  createdAt    DateTime @default(now())
+  deviceId             String
+  deviceType           String
+  ipAddress            String?
+  userAgent            String?
+  expiresAt            DateTime
+  createdAt            DateTime  @default(now())
 
   @@map("sessions")
 }
@@ -217,40 +217,40 @@ model Tenant {
 }
 
 model CountryConfig {
-  id             String  @id @default(cuid())
+  id                 String  @id @default(cuid())
   /// ISO-3166 alpha-2 ("GY")
-  code           String  @unique
-  name           String
-  currencyCode   String
-  currencySymbol String  @default("$")
+  code               String  @unique
+  name               String
+  currencyCode       String
+  currencySymbol     String  @default("$")
   /// Local currency units per 1 USD — used to evaluate the USD ID-gate locally
-  usdExchangeRate Decimal @db.Decimal(12, 4)
+  usdExchangeRate    Decimal @db.Decimal(12, 4)
   /// Orders >= this USD-equivalent require trust level L2 (ID-verified)
   idGateThresholdUsd Decimal @default(50) @db.Decimal(10, 2)
   /// D.3 rider float gate — max vendor-cash a rider may front at once, by trust
   /// level (local currency). L1 lowest → L3 highest.
-  floatL1 Decimal @default(0) @db.Decimal(12, 2)
-  floatL2 Decimal @default(0) @db.Decimal(12, 2)
-  floatL3 Decimal @default(0) @db.Decimal(12, 2)
+  floatL1            Decimal @default(0) @db.Decimal(12, 2)
+  floatL2            Decimal @default(0) @db.Decimal(12, 2)
+  floatL3            Decimal @default(0) @db.Decimal(12, 2)
   /// Weekly subscription tiers in local currency:
   /// { mover, smallVendor, largeVendor, franchisePerStore? }
-  subscriptionTiers Json
+  subscriptionTiers  Json
   /// Required documents per role, e.g. { MOVER: ["national_id","drivers_licence",...], RESTAURANT: [...] }
   documentChecklists Json
   /// Taxi fare formula fallback (zone table wins when both ends match):
   /// { base, perKm, perMin, minimum } in local currency
-  taxiRates Json?
+  taxiRates          Json?
   /// Per-tier fare multipliers applied to the base (Economy) fare:
   /// { ECONOMY: 1.0, COMFORT: 1.35, XL: 1.8 }. Code default when null.
-  taxiClassRates Json?
+  taxiClassRates     Json?
   /// Courier fee formula [UG-CRAFT-03], local currency; code defaults when
   /// null (same pattern as taxiRates): { baseFee, perKmRate,
   /// sizeSurcharge: {SMALL..EXTRA_LARGE}, speedMultiplier: {STANDARD..RUSH} }
-  courierRates Json?
+  courierRates       Json?
   /// FUL-003b: food/grocery delivery-fee schedule, local currency; code
   /// defaults when null (same pattern as courierRates/taxiRates):
   /// { baseFee, perKmRate, includedKm, surgeMultiplier }
-  deliveryRates Json?
+  deliveryRates      Json?
 
   /// Cash guarantee + strike thresholds:
   /// { maxClaimsPerRiderPerMonth, strikeRestrictThreshold, strikeBanThreshold,
@@ -258,9 +258,9 @@ model CountryConfig {
   cashRules Json?
 
   /// DPA §3.5 — region documents are stored in (cross-border transfer rule)
-  storageRegion String?
+  storageRegion     String?
   /// Days to retain verification documents after a participant leaves
-  dataRetentionDays Int @default(365)
+  dataRetentionDays Int     @default(365)
 
   /// Region-specific labels/sources (spec §2.2) — never hardcode in features.
   /// Guyana: "Hire Car Licence" / "Hire"; Trinidad: "H-Taxi Badge" / "H".
@@ -270,7 +270,7 @@ model CountryConfig {
   verificationSources Json?
   regulatoryNotes     String?
   /// BCP-47 locale, e.g. "en-GY"
-  locale              String @default("en")
+  locale              String  @default("en")
 
   /// Inactive countries show a waitlist at signup
   isActive  Boolean  @default(false)
@@ -285,32 +285,32 @@ model CountryConfig {
 // ==========================================
 
 model VerificationDocument {
-  id     String   @id @default(cuid())
-  userId String
-  user   User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  id                   String                     @id @default(cuid())
+  userId               String
+  user                 User                       @relation(fields: [userId], references: [id], onDelete: Cascade)
   /// Which role this document supports (vendor docs, mover docs, customer L2 ID)
-  role   UserRole
+  role                 UserRole
   /// Checklist key from CountryConfig.documentChecklists (e.g. "national_id")
-  docType String
+  docType              String
   /// Storage fileKey only (never a public URL). Raw documents: private +
   /// encrypted at rest, viewed via short-lived signed URLs, never logged,
   /// never sent to any AI service (hard rule 3 / DPA §3.5).
-  fileUrl String
+  fileUrl              String
   /// Provider case reference — the only provider-side artifact we keep
-  kycRef  String?
-  status  VerificationDocumentStatus @default(PENDING)
+  kycRef               String?
+  status               VerificationDocumentStatus @default(PENDING)
   /// OCR'd / manually entered expiry; lapse of a critical doc auto-suspends listings
-  expiresAt  DateTime?
-  reviewedBy String?
-  reviewNote String?
-  reviewedAt DateTime?
+  expiresAt            DateTime?
+  reviewedBy           String?
+  reviewNote           String?
+  reviewedAt           DateTime?
   /// Insurance 5-point manual check (spec §3.4) — captured when an admin reviews
   /// a hire-insurance document. The taxi go-live gate requires HIRE + confirmed.
-  insurerName        String?
-  policyNumber       String?
-  coverageClass      CoverageClass?
-  hireClassConfirmed Boolean        @default(false)
-  plateCrossChecked  Boolean        @default(false)
+  insurerName          String?
+  policyNumber         String?
+  coverageClass        CoverageClass?
+  hireClassConfirmed   Boolean                    @default(false)
+  plateCrossChecked    Boolean                    @default(false)
   /// DPA §3.5 consent captured at upload (privacy notice acknowledged)
   consentAt            DateTime?
   privacyNoticeVersion String?
@@ -318,8 +318,8 @@ model VerificationDocument {
   /// time and records purgedAt. Set when a participant leaves / is deactivated.
   retentionExpiresAt   DateTime?
   purgedAt             DateTime?
-  createdAt  DateTime @default(now())
-  updatedAt  DateTime @updatedAt
+  createdAt            DateTime                   @default(now())
+  updatedAt            DateTime                   @updatedAt
 
   @@index([status])
   @@index([userId])
@@ -373,15 +373,15 @@ model ComplianceViolation {
 /// Random re-verification (fraud catch): a monthly sample of active movers is
 /// queued for a human re-review of their documents, regardless of expiry.
 model ComplianceReviewCase {
-  id        String                @id @default(cuid())
+  id        String                 @id @default(cuid())
   userId    String
-  user      User                  @relation(fields: [userId], references: [id], onDelete: Cascade)
+  user      User                   @relation(fields: [userId], references: [id], onDelete: Cascade)
   status    ComplianceReviewStatus @default(OPEN)
   dueAt     DateTime
   decidedBy String?
   decidedAt DateTime?
   note      String?
-  createdAt DateTime              @default(now())
+  createdAt DateTime               @default(now())
 
   @@index([status])
   @@index([userId])
@@ -568,65 +568,65 @@ model Customer {
 // ==========================================
 
 model Rider {
-  id                  String      @id @default(cuid())
-  userId              String      @unique
-  user                User        @relation(fields: [userId], references: [id], onDelete: Cascade)
-  riderType           RiderType
-  vehicleType         VehicleType
-  vehicleMake         String?
-  vehicleModel        String?
-  vehicleYear         Int?
-  vehicleColor        String?
-  licensePlate        String?
-  nationalIdUrl       String?
-  driverLicenseUrl    String?
-  vehicleInsuranceUrl String?
-  profilePhotoUrl     String?
+  id                       String                   @id @default(cuid())
+  userId                   String                   @unique
+  user                     User                     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  riderType                RiderType
+  vehicleType              VehicleType
+  vehicleMake              String?
+  vehicleModel             String?
+  vehicleYear              Int?
+  vehicleColor             String?
+  licensePlate             String?
+  nationalIdUrl            String?
+  driverLicenseUrl         String?
+  vehicleInsuranceUrl      String?
+  profilePhotoUrl          String?
   /// PUBLIC delivery-vehicle photo shown to the customer on acceptance
   /// (master plan §3.3) — uploaded via POST /rider/vehicle-photo.
-  vehiclePhotoUrl     String?
-  documentsVerified   Boolean     @default(false)
-  documentsVerifiedAt DateTime?
-  documentsVerifiedBy String?
-  isOnline            Boolean     @default(false)
-  isAvailable         Boolean     @default(true)
-  currentLat          Float?
-  currentLng          Float?
-  lastLocationUpdate  DateTime?
-  currentOrderId      String?
+  vehiclePhotoUrl          String?
+  documentsVerified        Boolean                  @default(false)
+  documentsVerifiedAt      DateTime?
+  documentsVerifiedBy      String?
+  isOnline                 Boolean                  @default(false)
+  isAvailable              Boolean                  @default(true)
+  currentLat               Float?
+  currentLng               Float?
+  lastLocationUpdate       DateTime?
+  currentOrderId           String?
   /// §7.1 liveness shift cache — a PASS is good for LIVENESS_SHIFT_HOURS; the
   /// go-online gate reads this, never the provider directly.
-  lastLivenessPassAt  DateTime?
+  lastLivenessPassAt       DateTime?
   /// §7.1 — third consecutive liveness FAIL locks go-online until ops clears.
-  livenessLockedAt    DateTime?
+  livenessLockedAt         DateTime?
   /// §7.2 — a random mid-shift check is pending; unanswered past this deadline
   /// the sweep forces the mover offline until a fresh PASS.
   livenessPromptDeadlineAt DateTime?
   /// §8.3 — interim SUSPENDED_PENDING_REVIEW on an S0/S1 incident: invisible
   /// to dispatch instantly, go-online blocked until ops lifts it.
-  safetySuspendedAt   DateTime?
+  safetySuspendedAt        DateTime?
   /// §8.3 — SHADOW_RESTRICTED (S2 option): stays online, but excluded from
   /// enhanced-monitoring passengers' trips pending review.
   safetyShadowRestrictedAt DateTime?
-  operatingZones      Zone[]      @relation("riderZones")
-  totalDeliveries     Int         @default(0)
-  totalCourierJobs    Int         @default(0)
-  averageRating       Float       @default(5.0)
-  totalRatings        Int         @default(0)
-  completionRate      Float       @default(100.0)
+  operatingZones           Zone[]                   @relation("riderZones")
+  totalDeliveries          Int                      @default(0)
+  totalCourierJobs         Int                      @default(0)
+  averageRating            Float                    @default(5.0)
+  totalRatings             Int                      @default(0)
+  completionRate           Float                    @default(100.0)
   /// % of dispatch offers accepted (EMA) — feeds candidate scoring
-  acceptanceRate      Float       @default(100.0)
+  acceptanceRate           Float                    @default(100.0)
   /// D.3 float gate — max vendor-cash this rider may front at once (derived from
   /// User.trustLevel via CountryConfig.floatL1/L2/L3); committedFloat = currently
   /// outstanding across live CASH orders. availableFloat = floatLimit - committedFloat.
-  floatLimit          Decimal     @default(0) @db.Decimal(12, 2)
-  committedFloat      Decimal     @default(0) @db.Decimal(12, 2)
-  subscription        Subscription?
-  earnings            Earning[]
-  orders              Order[]
-  deliveryCashSettlements DeliveryCashSettlement[]
-  createdAt           DateTime    @default(now())
-  updatedAt           DateTime    @updatedAt
+  floatLimit               Decimal                  @default(0) @db.Decimal(12, 2)
+  committedFloat           Decimal                  @default(0) @db.Decimal(12, 2)
+  subscription             Subscription?
+  earnings                 Earning[]
+  orders                   Order[]
+  deliveryCashSettlements  DeliveryCashSettlement[]
+  createdAt                DateTime                 @default(now())
+  updatedAt                DateTime                 @updatedAt
 
   @@index([isOnline])
   @@index([isOnline, isAvailable])
@@ -657,67 +657,67 @@ enum VehicleType {
 // ==========================================
 
 model Driver {
-  id                   String       @id @default(cuid())
-  userId               String       @unique
-  user                 User         @relation(fields: [userId], references: [id], onDelete: Cascade)
-  vehicleMake          String
-  vehicleModel         String
-  vehicleYear          Int
-  vehicleColor         String
-  licensePlate         String
-  vehicleCapacity      Int          @default(4)
+  id                       String        @id @default(cuid())
+  userId                   String        @unique
+  user                     User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  vehicleMake              String
+  vehicleModel             String
+  vehicleYear              Int
+  vehicleColor             String
+  licensePlate             String
+  vehicleCapacity          Int           @default(4)
   /// The physical vehicle (drives the verification document checklist + the
   /// passenger-hire insurance gate). Defaults CAR so existing taxi drivers are
   /// unchanged; wagons/buses set their real type at onboarding.
-  vehicleType          VehicleType  @default(CAR)
+  vehicleType              VehicleType   @default(CAR)
   /// Top taxi tier this vehicle serves (serves all classes <= it). Set via the
   /// driver-profile API and the admin drivers page (premium-fleet onboarding).
-  rideClass            RideClass    @default(ECONOMY)
-  nationalIdUrl        String?
-  driverLicenseUrl     String
-  vehicleInsuranceUrl  String
-  vehicleInspectionUrl String?
-  profilePhotoUrl      String?
+  rideClass                RideClass     @default(ECONOMY)
+  nationalIdUrl            String?
+  driverLicenseUrl         String
+  vehicleInsuranceUrl      String
+  vehicleInspectionUrl     String?
+  profilePhotoUrl          String?
   /// PUBLIC exterior car photo shown to the rider on acceptance (master plan
   /// §5) — uploaded via POST /driver/vehicle-photo into the public vehicles/
   /// tree. Distinct from the private vehicle_exterior_photo KYC document.
-  vehiclePhotoUrl      String?
-  documentsVerified    Boolean      @default(false)
-  documentsVerifiedAt  DateTime?
-  documentsVerifiedBy  String?
-  isOnline             Boolean      @default(false)
-  isAvailable          Boolean      @default(true)
-  currentLat           Float?
-  currentLng           Float?
-  lastLocationUpdate   DateTime?
-  currentRideId        String?
+  vehiclePhotoUrl          String?
+  documentsVerified        Boolean       @default(false)
+  documentsVerifiedAt      DateTime?
+  documentsVerifiedBy      String?
+  isOnline                 Boolean       @default(false)
+  isAvailable              Boolean       @default(true)
+  currentLat               Float?
+  currentLng               Float?
+  lastLocationUpdate       DateTime?
+  currentRideId            String?
   /// §7.1 liveness shift cache — a PASS is good for LIVENESS_SHIFT_HOURS; the
   /// go-online gate reads this, never the provider directly.
-  lastLivenessPassAt   DateTime?
+  lastLivenessPassAt       DateTime?
   /// §7.1 — third consecutive liveness FAIL locks go-online until ops clears.
-  livenessLockedAt     DateTime?
+  livenessLockedAt         DateTime?
   /// §7.2 — a random mid-shift check is pending; unanswered past this deadline
   /// the sweep forces the mover offline until a fresh PASS.
   livenessPromptDeadlineAt DateTime?
   /// §8.3 — interim SUSPENDED_PENDING_REVIEW on an S0/S1 incident: invisible
   /// to dispatch instantly, go-online blocked until ops lifts it.
-  safetySuspendedAt    DateTime?
+  safetySuspendedAt        DateTime?
   /// §8.3 — SHADOW_RESTRICTED (S2 option): stays online, but excluded from
   /// enhanced-monitoring passengers' trips pending review.
   safetyShadowRestrictedAt DateTime?
-  totalRides           Int          @default(0)
-  averageRating        Float        @default(5.0)
-  totalRatings         Int          @default(0)
-  acceptanceRate       Float        @default(100.0)
-  cancellationRate     Float        @default(0.0)
-  subscription         Subscription?
-  earnings             Earning[]
-  orders               Order[]
+  totalRides               Int           @default(0)
+  averageRating            Float         @default(5.0)
+  totalRatings             Int           @default(0)
+  acceptanceRate           Float         @default(100.0)
+  cancellationRate         Float         @default(0.0)
+  subscription             Subscription?
+  earnings                 Earning[]
+  orders                   Order[]
   /// The taxi driver's OWN MMG "pay me" link. Opt-in: when set, riders can pay
   /// the fare directly via MMG (money never touches Swift); null = cash-only.
-  mmgPayUrl            String?
-  createdAt            DateTime     @default(now())
-  updatedAt            DateTime     @updatedAt
+  mmgPayUrl                String?
+  createdAt                DateTime      @default(now())
+  updatedAt                DateTime      @updatedAt
 
   // Taxi dispatch filters online+available candidates before the PostGIS
   // ST_DWithin distance check (the GIST expression index lives in the
@@ -766,60 +766,60 @@ model VendorStaff {
 }
 
 model Vendor {
-  id               String          @id @default(cuid())
-  tenantId         String          @default("swift-default")
-  tenant           Tenant          @relation(fields: [tenantId], references: [id])
-  ownerId          String
-  owner            VendorOwner     @relation(fields: [ownerId], references: [id], onDelete: Cascade)
-  name             String
-  slug             String          @unique
-  description      String?
-  vendorType       VendorType
-  logoUrl          String?
-  coverImageUrl    String?
-  images           VendorImage[]
-  staff            VendorStaff[]
-  promoCodes       PromoCode[]
-  phone            String
-  email            String?
-  addressLine1     String
-  addressLine2     String?
-  city             String
-  region           String
-  latitude         Float
-  longitude        Float
-  operatingHours   OperatingHours[]
-  isCurrentlyOpen  Boolean         @default(false)
+  id                      String                   @id @default(cuid())
+  tenantId                String                   @default("swift-default")
+  tenant                  Tenant                   @relation(fields: [tenantId], references: [id])
+  ownerId                 String
+  owner                   VendorOwner              @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  name                    String
+  slug                    String                   @unique
+  description             String?
+  vendorType              VendorType
+  logoUrl                 String?
+  coverImageUrl           String?
+  images                  VendorImage[]
+  staff                   VendorStaff[]
+  promoCodes              PromoCode[]
+  phone                   String
+  email                   String?
+  addressLine1            String
+  addressLine2            String?
+  city                    String
+  region                  String
+  latitude                Float
+  longitude               Float
+  operatingHours          OperatingHours[]
+  isCurrentlyOpen         Boolean                  @default(false)
   /// Born OFF: commerce opens when the owner's document checklist is verified
   /// (verification afterApproval) and closes when a required document lapses.
-  acceptingOrders  Boolean         @default(false)
+  acceptingOrders         Boolean                  @default(false)
   /// FUL-004: this vendor can fulfil its own DELIVERY orders with its own
   /// courier (vs a platform rider). Default off — existing vendors are
   /// platform-rider-only until they opt in.
-  selfDeliveryEnabled Boolean      @default(false)
+  selfDeliveryEnabled     Boolean                  @default(false)
   /// FUL-007: kitchen-capacity guard. When set, new orders are refused once
   /// the vendor already holds this many in-flight (still-in-kitchen) orders —
   /// server-computed so it can't be gamed. Null = unlimited (current behavior).
-  maxConcurrentOrders Int?
-  deliveryRadius   Float           @default(10.0)
-  minOrderAmount   Decimal         @default(0) @db.Decimal(10, 2)
-  estimatedPrepTime Int            @default(30)
-  categories       Category[]
-  items            Item[]
-  isVerified       Boolean         @default(false)
-  isFeatured       Boolean         @default(false)
-  averageRating    Float           @default(5.0)
-  totalRatings     Int             @default(0)
-  totalOrders      Int             @default(0)
-  subscription     Subscription?
-  settlements      Settlement[]
+  maxConcurrentOrders     Int?
+  deliveryRadius          Float                    @default(10.0)
+  minOrderAmount          Decimal                  @default(0) @db.Decimal(10, 2)
+  estimatedPrepTime       Int                      @default(30)
+  categories              Category[]
+  items                   Item[]
+  isVerified              Boolean                  @default(false)
+  isFeatured              Boolean                  @default(false)
+  averageRating           Float                    @default(5.0)
+  totalRatings            Int                      @default(0)
+  totalOrders             Int                      @default(0)
+  subscription            Subscription?
+  settlements             Settlement[]
   deliveryCashSettlements DeliveryCashSettlement[]
-  cuisineTypes     String[]
-  tags             String[]
-  favoritedBy      Customer[]      @relation("customerFavorites")
-  status           VendorStatus    @default(PENDING_APPROVAL)
-  orders           Order[]
-  carts            Cart[]
+  cuisineTypes            String[]
+  tags                    String[]
+  favoritedBy             Customer[]               @relation("customerFavorites")
+  status                  VendorStatus             @default(PENDING_APPROVAL)
+  orders                  Order[]
+  carts                   Cart[]
 
   /// Stable slug for printed QR deep links: /v/{qrSlug}. Never reuse or rotate.
   qrSlug String @unique @default(cuid())
@@ -829,8 +829,8 @@ model Vendor {
   /// null = cash-only. A public pay URL, not a secret credential.
   mmgPayUrl String?
 
-  createdAt        DateTime        @default(now())
-  updatedAt        DateTime        @updatedAt
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
   @@index([status])
   @@index([vendorType])
@@ -900,44 +900,44 @@ model Category {
 /// The locked model's Listing: one model for goods AND services.
 /// Services carry bookingConfig (duration, slots) and APPOINTMENT fulfillment.
 model Item {
-  id            String        @id @default(cuid())
-  vendorId      String
-  vendor        Vendor        @relation(fields: [vendorId], references: [id], onDelete: Cascade)
-  categoryId    String
-  category      Category      @relation(fields: [categoryId], references: [id], onDelete: Cascade)
-  name          String
-  description   String?
-  imageUrl      String?
-  basePrice     Decimal       @db.Decimal(10, 2)
-  fulfillment   FulfillmentType @default(DELIVERY)
+  id                String            @id @default(cuid())
+  vendorId          String
+  vendor            Vendor            @relation(fields: [vendorId], references: [id], onDelete: Cascade)
+  categoryId        String
+  category          Category          @relation(fields: [categoryId], references: [id], onDelete: Cascade)
+  name              String
+  description       String?
+  imageUrl          String?
+  basePrice         Decimal           @db.Decimal(10, 2)
+  fulfillment       FulfillmentType   @default(DELIVERY)
   /// SERVICE listings only: { durationMinutes: number, slots: [{ dayOfWeek, start, end }] }
-  bookingConfig Json?
-  bookings      Booking[]
-  optionGroups  OptionGroup[]
-  isAvailable   Boolean       @default(true)
-  isPopular     Boolean       @default(false)
-  sku           String?
-  barcode       String?
-  unit          String?
+  bookingConfig     Json?
+  bookings          Booking[]
+  optionGroups      OptionGroup[]
+  isAvailable       Boolean           @default(true)
+  isPopular         Boolean           @default(false)
+  sku               String?
+  barcode           String?
+  unit              String?
   /// Items sharing a group are valid substitutes when one is out of stock
   /// at picking time (grocery §5.3). Null = substitute from the same category.
   substitutionGroup String?
   /// null = untracked (always in stock). Tracked items decrement atomically at
   /// checkout, auto-hide at 0, and restock on pre-pickup cancellation.
-  stockQuantity Int?
+  stockQuantity     Int?
   /// At/under this level a LOW_STOCK alert goes to the owner (crossing-edge only).
   lowStockThreshold Int?
   /// Set when the inventory engine hid the item (stock hit 0) — distinguishes
   /// auto-hides (undone automatically on restock) from the owner's own toggle.
-  autoHiddenAt  DateTime?
-  dietaryTags   String[]
-  allergens     String[]
-  totalOrdered  Int           @default(0)
-  sortOrder     Int           @default(0)
-  cartItems     CartItem[]
-  stockAdjustments StockAdjustment[]
-  createdAt     DateTime      @default(now())
-  updatedAt     DateTime      @updatedAt
+  autoHiddenAt      DateTime?
+  dietaryTags       String[]
+  allergens         String[]
+  totalOrdered      Int               @default(0)
+  sortOrder         Int               @default(0)
+  cartItems         CartItem[]
+  stockAdjustments  StockAdjustment[]
+  createdAt         DateTime          @default(now())
+  updatedAt         DateTime          @updatedAt
 
   // Menu load (vendor detail, vendor console, reorder) is the hottest read in
   // the app; browse/trending filter on availability + popularity. Postgres
@@ -993,15 +993,15 @@ enum BookingStatus {
 }
 
 model OptionGroup {
-  id        String   @id @default(cuid())
-  itemId    String
-  item      Item     @relation(fields: [itemId], references: [id], onDelete: Cascade)
-  name      String
-  isRequired Boolean @default(false)
-  minSelect Int      @default(0)
-  maxSelect Int      @default(1)
-  options   Option[]
-  sortOrder Int      @default(0)
+  id         String   @id @default(cuid())
+  itemId     String
+  item       Item     @relation(fields: [itemId], references: [id], onDelete: Cascade)
+  name       String
+  isRequired Boolean  @default(false)
+  minSelect  Int      @default(0)
+  maxSelect  Int      @default(1)
+  options    Option[]
+  sortOrder  Int      @default(0)
 
   @@map("option_groups")
 }
@@ -1024,24 +1024,24 @@ model Option {
 // ==========================================
 
 model Order {
-  id          String      @id @default(cuid())
-  tenantId    String      @default("swift-default")
-  tenant      Tenant      @relation(fields: [tenantId], references: [id])
-  orderNumber String      @unique
-  orderType   OrderType
-  customerId  String
-  customer    User        @relation("customerOrders", fields: [customerId], references: [id])
-  vendorId    String?
-  vendor      Vendor?     @relation(fields: [vendorId], references: [id])
-  riderId     String?
-  rider       Rider?      @relation(fields: [riderId], references: [id])
-  driverId    String?
-  driver      Driver?     @relation(fields: [driverId], references: [id])
-  status      OrderStatus @default(PENDING)
-  statusHistory OrderStatusLog[]
+  id                     String                  @id @default(cuid())
+  tenantId               String                  @default("swift-default")
+  tenant                 Tenant                  @relation(fields: [tenantId], references: [id])
+  orderNumber            String                  @unique
+  orderType              OrderType
+  customerId             String
+  customer               User                    @relation("customerOrders", fields: [customerId], references: [id])
+  vendorId               String?
+  vendor                 Vendor?                 @relation(fields: [vendorId], references: [id])
+  riderId                String?
+  rider                  Rider?                  @relation(fields: [riderId], references: [id])
+  driverId               String?
+  driver                 Driver?                 @relation(fields: [driverId], references: [id])
+  status                 OrderStatus             @default(PENDING)
+  statusHistory          OrderStatusLog[]
   deliveryCashSettlement DeliveryCashSettlement?
-  items       OrderItem[]
-  supportTickets SupportTicket[]
+  items                  OrderItem[]
+  supportTickets         SupportTicket[]
 
   pickupAddress        String?
   pickupLat            Float?
@@ -1057,17 +1057,17 @@ model Order {
   courierPackagePhotoUrl    String?
   /// Courier (spec §4.3): third-party recipient, speed, who pays, proof-of-delivery,
   /// and a public tracking token for the recipient's link.
-  courierRecipientName  String?
-  courierRecipientPhone String?
-  courierSpeed          String?
-  courierPayer          String?
-  courierProofPhotoUrl  String?
-  courierTrackingToken  String? @unique
+  courierRecipientName      String?
+  courierRecipientPhone     String?
+  courierSpeed              String?
+  courierPayer              String?
+  courierProofPhotoUrl      String?
+  courierTrackingToken      String?      @unique
 
   taxiPickupAddress  String?
   taxiDropoffAddress String?
   taxiPassengerCount Int?
-  taxiDistance        Float?
+  taxiDistance       Float?
   taxiDuration       Int?
 
   subtotalBase     Decimal @db.Decimal(12, 2)
@@ -1082,10 +1082,10 @@ model Order {
   discount         Decimal @default(0) @db.Decimal(12, 2)
   totalAmount      Decimal @db.Decimal(12, 2)
 
-  taxiFareBase   Decimal? @db.Decimal(10, 2)
-  taxiFarePerKm  Decimal? @db.Decimal(10, 2)
-  taxiFarePerMin Decimal? @db.Decimal(10, 2)
-  taxiFareTotal  Decimal? @db.Decimal(10, 2)
+  taxiFareBase   Decimal?   @db.Decimal(10, 2)
+  taxiFarePerKm  Decimal?   @db.Decimal(10, 2)
+  taxiFarePerMin Decimal?   @db.Decimal(10, 2)
+  taxiFareTotal  Decimal?   @db.Decimal(10, 2)
   taxiFareSurge  Float?
   /// Chosen taxi tier (Economy/Comfort/XL). Null for non-taxi orders.
   rideClass      RideClass?
@@ -1122,22 +1122,22 @@ model Order {
   /// Founder decision 2026-07-20: cash-only means Swift can't collect it — its
   /// role is the risk-score marker ("customer cancels after the free window")
   /// and admin visibility. Never charged, never summed into money totals.
-  lateCancelFeeDue Int @default(0)
+  lateCancelFeeDue   Int     @default(0)
 
   promoCodeId String?
   promoCode   PromoCode? @relation(fields: [promoCodeId], references: [id])
 
-  ridePin           String?
-  ridePinVerified   Boolean   @default(false)
-  ridePinAttempts   Int       @default(0)
-  ridePinVerifiedAt DateTime?
+  ridePin            String?
+  ridePinVerified    Boolean   @default(false)
+  ridePinAttempts    Int       @default(0)
+  ridePinVerifiedAt  DateTime?
   /// HND-001: failed pickup-code attempts, for the same brute-force lockout the
   /// taxi ride PIN already has (a 6-digit handover code is guessable without it).
-  pickupCodeAttempts Int      @default(0)
+  pickupCodeAttempts Int       @default(0)
 
   /// How this order is fulfilled (locked model): DELIVERY dispatches a mover,
   /// PICKUP skips dispatch, APPOINTMENT books the slot at vendor acceptance.
-  fulfillment     FulfillmentType @default(DELIVERY)
+  fulfillment     FulfillmentType  @default(DELIVERY)
   /// FUL-004: who actually delivers this order (set when the vendor chooses at
   /// Ready). NULL on orders predating the choice — treated as PLATFORM_RIDER.
   fulfillmentMode FulfillmentMode?
@@ -1238,36 +1238,36 @@ enum PaymentStatus {
 /// markedUpPrice/markup* fields are V1 dormant (zero-commission) — kept
 /// equal to base until the Steps 6-7 rebuild removes them.
 model OrderItem {
-  id              String            @id @default(cuid())
-  orderId         String
-  order           Order             @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  id                  String            @id @default(cuid())
+  orderId             String
+  order               Order             @relation(fields: [orderId], references: [id], onDelete: Cascade)
   /// ADR [SWIFT-AUD-D5-04]: itemId is a DELIBERATE loose reference — NO FK to
   /// Item, by design. name + every price below are SNAPSHOTTED at order time
   /// so a delivered order's receipt/totals never change when the vendor later
   /// edits or deletes the menu item. A cascade FK would destroy order history;
   /// a SetNull FK would null the breadcrumb a dispute may need. The id stays
   /// only as a soft pointer back to the (possibly-changed) live item.
-  itemId          String
-  name            String
-  quantity        Int
-  basePrice       Decimal           @db.Decimal(10, 2)
-  markedUpPrice   Decimal           @db.Decimal(10, 2)
-  markupAmount    Decimal           @db.Decimal(10, 2)
-  totalBase       Decimal           @db.Decimal(10, 2)
-  totalMarkup     Decimal           @db.Decimal(10, 2)
-  totalCustomer   Decimal           @db.Decimal(10, 2)
-  selectedOptions OrderItemOption[]
+  itemId              String
+  name                String
+  quantity            Int
+  basePrice           Decimal           @db.Decimal(10, 2)
+  markedUpPrice       Decimal           @db.Decimal(10, 2)
+  markupAmount        Decimal           @db.Decimal(10, 2)
+  totalBase           Decimal           @db.Decimal(10, 2)
+  totalMarkup         Decimal           @db.Decimal(10, 2)
+  totalCustomer       Decimal           @db.Decimal(10, 2)
+  selectedOptions     OrderItemOption[]
   specialInstructions String?
 
   // Grocery picking (§5.3): staff tick lines as they shelf-pick; an
   // out-of-stock line becomes a substitution the CUSTOMER approves, or a
   // line refund. PENDING blocks Mark-ready; picking rides inside PREPARING —
   // no new order status (the state machine is locked).
-  picked             Boolean          @default(false)
-  subStatus          SubstitutionStatus @default(NONE)
-  substituteItemId   String?
-  substituteName     String?
-  substitutePrice    Decimal?         @db.Decimal(10, 2)
+  picked           Boolean            @default(false)
+  subStatus        SubstitutionStatus @default(NONE)
+  substituteItemId String?
+  substituteName   String?
+  substitutePrice  Decimal?           @db.Decimal(10, 2)
 
   @@map("order_items")
 }
@@ -1284,14 +1284,14 @@ enum SubstitutionStatus {
 /// quantity_on_hand. Checkout decrements/cancel restocks stay implicit (they
 /// ride the order itself); this logs the HUMAN and picking-driven changes.
 model StockAdjustment {
-  id        String   @id @default(cuid())
+  id        String                @id @default(cuid())
   itemId    String
-  item      Item     @relation(fields: [itemId], references: [id], onDelete: Cascade)
+  item      Item                  @relation(fields: [itemId], references: [id], onDelete: Cascade)
   delta     Int
   reason    StockAdjustmentReason
   note      String?
   createdBy String?
-  createdAt DateTime @default(now())
+  createdAt DateTime              @default(now())
 
   @@index([itemId, createdAt])
   @@map("stock_adjustments")
@@ -1343,31 +1343,31 @@ model OrderStatusLog {
 // ==========================================
 
 model Rating {
-  id       String     @id @default(cuid())
-  orderId  String
-  raterId  String
-  rater    User       @relation("raterRatings", fields: [raterId], references: [id])
-  rateeId  String?
-  ratee    User?      @relation("rateeRatings", fields: [rateeId], references: [id])
-  vendorId String?
-  type     RatingType
-  score    Int
-  comment  String?
-  tags     String[]
-  isPublic Boolean    @default(true)
+  id          String     @id @default(cuid())
+  orderId     String
+  raterId     String
+  rater       User       @relation("raterRatings", fields: [raterId], references: [id])
+  rateeId     String?
+  ratee       User?      @relation("rateeRatings", fields: [rateeId], references: [id])
+  vendorId    String?
+  type        RatingType
+  score       Int
+  comment     String?
+  tags        String[]
+  isPublic    Boolean    @default(true)
   /// Operator's public reply (master plan §4.1 "see ratings, respond") —
   /// written once per review by MANAGER+, editable, shown on the storefront.
   response    String?
   respondedAt DateTime?
   respondedBy String?
   /// Anti-manipulation (spec §5.2): flagged for review by the daily sweep
-  flagged    Boolean  @default(false)
-  flagReason String?
+  flagged     Boolean    @default(false)
+  flagReason  String?
   /// Double-blind release (marketplace §1): the WRITTEN rating stays hidden
   /// from the ratee until both sides have rated this order, or the daily
   /// sweep releases it after the blind window. Aggregates update immediately.
-  visibleAt DateTime?
-  createdAt DateTime  @default(now())
+  visibleAt   DateTime?
+  createdAt   DateTime   @default(now())
 
   @@index([visibleAt])
   @@index([raterId])
@@ -1443,24 +1443,24 @@ model ServiceQualification {
 }
 
 model ServiceJob {
-  id           String           @id @default(cuid())
-  customerId   String
-  customer     User             @relation("customerServiceJobs", fields: [customerId], references: [id])
-  providerId   String
-  provider     ServiceProvider  @relation(fields: [providerId], references: [id])
-  description  String
-  photos       String[]
-  status       ServiceJobStatus @default(REQUESTED)
-  quoteAmount  Decimal?         @db.Decimal(12, 2)
-  scheduledFor DateTime?
+  id                  String           @id @default(cuid())
+  customerId          String
+  customer            User             @relation("customerServiceJobs", fields: [customerId], references: [id])
+  providerId          String
+  provider            ServiceProvider  @relation(fields: [providerId], references: [id])
+  description         String
+  photos              String[]
+  status              ServiceJobStatus @default(REQUESTED)
+  quoteAmount         Decimal?         @db.Decimal(12, 2)
+  scheduledFor        DateTime?
   /// Booking accept/decline (master plan §4.3): the provider confirms the
   /// customer's slot. Null on a SCHEDULED job = awaiting confirmation.
   providerConfirmedAt DateTime?
-  chatRoomId   String?
-  completedAt  DateTime?
-  cancelledAt  DateTime?
-  createdAt    DateTime         @default(now())
-  updatedAt    DateTime         @updatedAt
+  chatRoomId          String?
+  completedAt         DateTime?
+  cancelledAt         DateTime?
+  createdAt           DateTime         @default(now())
+  updatedAt           DateTime         @updatedAt
 
   @@index([customerId])
   @@index([providerId])
@@ -1506,57 +1506,57 @@ enum RatingType {
 // ==========================================
 
 model Subscription {
-  id                 String             @id @default(cuid())
-  riderId            String?            @unique
-  rider              Rider?             @relation(fields: [riderId], references: [id])
-  driverId           String?            @unique
-  driver             Driver?            @relation(fields: [driverId], references: [id])
-  vendorId           String?            @unique
-  vendor             Vendor?            @relation(fields: [vendorId], references: [id])
+  id                 String                @id @default(cuid())
+  riderId            String?               @unique
+  rider              Rider?                @relation(fields: [riderId], references: [id])
+  driverId           String?               @unique
+  driver             Driver?               @relation(fields: [driverId], references: [id])
+  vendorId           String?               @unique
+  vendor             Vendor?               @relation(fields: [vendorId], references: [id])
   type               SubscriptionType
-  status             SubscriptionStatus @default(ACTIVE)
-  weeklyRate         Decimal            @db.Decimal(10, 2)
+  status             SubscriptionStatus    @default(ACTIVE)
+  weeklyRate         Decimal               @db.Decimal(10, 2)
   currentPeriodStart DateTime
   currentPeriodEnd   DateTime
   nextBillingDate    DateTime
-  isInGracePeriod    Boolean            @default(false)
+  isInGracePeriod    Boolean               @default(false)
   gracePeriodEnd     DateTime?
-  isTrialActive      Boolean            @default(false)
+  isTrialActive      Boolean               @default(false)
   trialEndDate       DateTime?
-  autoRenew          Boolean            @default(true)
+  autoRenew          Boolean               @default(true)
   lastPaymentDate    DateTime?
   lastPaymentId      String?
-  failedAttempts     Int                @default(0)
+  failedAttempts     Int                   @default(0)
   payments           SubscriptionPayment[]
   refunds            SubscriptionRefund[]
-  feeWaived          Boolean            @default(false)
+  feeWaived          Boolean               @default(false)
   feeWaivedBy        String?
   feeWaivedReason    String?
-  customRate         Decimal?           @db.Decimal(10, 2)
+  customRate         Decimal?              @db.Decimal(10, 2)
 
   /// Locked model: currency from CountryConfig; auto-suspend on non-payment
-  currencyCode       String             @default("GYD")
-  autoSuspendEnabled Boolean            @default(true)
+  currencyCode       String          @default("GYD")
+  autoSuspendEnabled Boolean         @default(true)
   prepaidBalance     PrepaidBalance?
 
   /// How this subscription pays: CASH = prepaid balance path; CARD = stored
   /// token; MOBILE_MONEY = MMG merchant-initiated request the subscriber
   /// approves on their phone (§13 dual-rail — card primary, MMG fallback)
-  billingMethod PaymentMethod @default(CASH)
+  billingMethod  PaymentMethod @default(CASH)
   /// Tokenized card reference from the PaymentProvider — never raw card data
-  paymentToken  String?
+  paymentToken   String?
   /// The subscriber's MMG account (MSISDN) merchant-initiated requests charge
   mmgPayerMsisdn String?
   /// Failed charges retry on a daily cadence, not every job run
-  nextRetryAt   DateTime?
+  nextRetryAt    DateTime?
   /// When auto-suspend cut access (§11 dunning) — the churn clock reads this;
   /// cleared on reinstatement.
-  suspendedAt   DateTime?
+  suspendedAt    DateTime?
 
   billingEvents BillingEvent[]
 
-  createdAt          DateTime           @default(now())
-  updatedAt          DateTime           @updatedAt
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
   @@index([status])
   @@index([nextBillingDate])
@@ -1631,17 +1631,17 @@ enum SubscriptionStatus {
 }
 
 model SubscriptionPayment {
-  id             String        @id @default(cuid())
+  id             String               @id @default(cuid())
   subscriptionId String
-  subscription   Subscription  @relation(fields: [subscriptionId], references: [id], onDelete: Cascade)
-  amount         Decimal       @db.Decimal(10, 2)
+  subscription   Subscription         @relation(fields: [subscriptionId], references: [id], onDelete: Cascade)
+  amount         Decimal              @db.Decimal(10, 2)
   status         PaymentStatus
   paymentMethod  PaymentMethod
   externalRef    String?
   periodStart    DateTime
   periodEnd      DateTime
   paidAt         DateTime?
-  createdAt      DateTime      @default(now())
+  createdAt      DateTime             @default(now())
   refunds        SubscriptionRefund[]
 
   @@map("subscription_payments")
@@ -1679,21 +1679,21 @@ model Earning {
 /// and their status. Chat/reply threading is a later step; this is the
 /// report → acknowledge → resolve loop launch actually needs.
 model SupportTicket {
-  id         String          @id @default(cuid())
-  userId     String
-  user       User            @relation(fields: [userId], references: [id])
-  orderId    String?
-  order      Order?          @relation(fields: [orderId], references: [id])
-  category   SupportCategory
-  subject    String
-  message    String
-  status     SupportStatus   @default(OPEN)
-  adminNote  String?
+  id           String          @id @default(cuid())
+  userId       String
+  user         User            @relation(fields: [userId], references: [id])
+  orderId      String?
+  order        Order?          @relation(fields: [orderId], references: [id])
+  category     SupportCategory
+  subject      String
+  message      String
+  status       SupportStatus   @default(OPEN)
+  adminNote    String?
   resolvedById String?
-  resolvedBy   User?         @relation("supportResolver", fields: [resolvedById], references: [id])
-  resolvedAt DateTime?
-  createdAt  DateTime        @default(now())
-  updatedAt  DateTime        @updatedAt
+  resolvedBy   User?           @relation("supportResolver", fields: [resolvedById], references: [id])
+  resolvedAt   DateTime?
+  createdAt    DateTime        @default(now())
+  updatedAt    DateTime        @updatedAt
 
   @@index([userId])
   @@index([status])
@@ -1765,19 +1765,19 @@ enum CashSettlementStatus {
 }
 
 model DeliveryCashSettlement {
-  id        String   @id @default(cuid())
-  orderId   String   @unique
-  order     Order    @relation(fields: [orderId], references: [id], onDelete: Cascade)
-  riderId   String
-  rider     Rider    @relation(fields: [riderId], references: [id])
-  vendorId  String
-  vendor    Vendor   @relation(fields: [vendorId], references: [id])
+  id               String               @id @default(cuid())
+  orderId          String               @unique
+  order            Order                @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  riderId          String
+  rider            Rider                @relation(fields: [riderId], references: [id])
+  vendorId         String
+  vendor           Vendor               @relation(fields: [vendorId], references: [id])
   /// Delivery fee the store owes the rider (GYD).
-  amount    Decimal  @db.Decimal(10, 2)
-  status    CashSettlementStatus @default(OWED)
+  amount           Decimal              @db.Decimal(10, 2)
+  status           CashSettlementStatus @default(OWED)
   riderConfirmedAt DateTime?
   storeConfirmedAt DateTime?
-  createdAt DateTime @default(now())
+  createdAt        DateTime             @default(now())
 
   @@index([riderId, status])
   @@index([vendorId, status])
@@ -1897,19 +1897,19 @@ enum NotificationType {
 // ==========================================
 
 model Zone {
-  id              String   @id @default(cuid())
+  id              String     @id @default(cuid())
   name            String
   description     String?
   boundary        Json
-  isActive        Boolean  @default(true)
-  deliveryBaseFee Decimal? @db.Decimal(10, 2)
-  deliveryPerKm   Decimal? @db.Decimal(10, 2)
-  surgeMultiplier Float    @default(1.0)
-  riders          Rider[]  @relation("riderZones")
+  isActive        Boolean    @default(true)
+  deliveryBaseFee Decimal?   @db.Decimal(10, 2)
+  deliveryPerKm   Decimal?   @db.Decimal(10, 2)
+  surgeMultiplier Float      @default(1.0)
+  riders          Rider[]    @relation("riderZones")
   faresFrom       ZoneFare[] @relation("zoneFareFrom")
   faresTo         ZoneFare[] @relation("zoneFareTo")
-  createdAt       DateTime @default(now())
-  updatedAt       DateTime @updatedAt
+  createdAt       DateTime   @default(now())
+  updatedAt       DateTime   @updatedAt
 
   @@map("zones")
 }
@@ -1919,12 +1919,12 @@ model Zone {
 /// fall back to the CountryConfig formula. Directional on purpose (airport
 /// runs can price differently each way).
 model ZoneFare {
-  id         String  @id @default(cuid())
+  id         String   @id @default(cuid())
   fromZoneId String
-  fromZone   Zone    @relation("zoneFareFrom", fields: [fromZoneId], references: [id], onDelete: Cascade)
+  fromZone   Zone     @relation("zoneFareFrom", fields: [fromZoneId], references: [id], onDelete: Cascade)
   toZoneId   String
-  toZone     Zone    @relation("zoneFareTo", fields: [toZoneId], references: [id], onDelete: Cascade)
-  fare       Decimal @db.Decimal(10, 2)
+  toZone     Zone     @relation("zoneFareTo", fields: [toZoneId], references: [id], onDelete: Cascade)
+  fare       Decimal  @db.Decimal(10, 2)
   updatedBy  String?
   createdAt  DateTime @default(now())
   updatedAt  DateTime @updatedAt
@@ -1966,18 +1966,18 @@ model ChatRoomParticipant {
 }
 
 model ChatMessage {
-  id          String   @id @default(cuid())
-  chatRoomId  String
-  chatRoom    ChatRoom @relation(fields: [chatRoomId], references: [id], onDelete: Cascade)
-  senderId    String
-  message     String
-  messageType String   @default("text")
-  mediaUrl    String?
-  isRead      Boolean  @default(false)
+  id              String   @id @default(cuid())
+  chatRoomId      String
+  chatRoom        ChatRoom @relation(fields: [chatRoomId], references: [id], onDelete: Cascade)
+  senderId        String
+  message         String
+  messageType     String   @default("text")
+  mediaUrl        String?
+  isRead          Boolean  @default(false)
   /// Off-platform contact signal (spec §2): phone number / "WhatsApp me"
   /// detected at send. The message still delivers — this feeds risk scoring.
-  offPlatformFlag Boolean @default(false)
-  createdAt   DateTime @default(now())
+  offPlatformFlag Boolean  @default(false)
+  createdAt       DateTime @default(now())
 
   @@index([offPlatformFlag])
   @@map("chat_messages")
@@ -2119,20 +2119,20 @@ enum RecoveryStatus {
 // ==========================================
 
 model SubscriptionRefund {
-  id                String             @id @default(cuid())
+  id                String              @id @default(cuid())
   subscriptionId    String
-  subscription      Subscription       @relation(fields: [subscriptionId], references: [id])
+  subscription      Subscription        @relation(fields: [subscriptionId], references: [id])
   paymentId         String
   payment           SubscriptionPayment @relation(fields: [paymentId], references: [id])
-  amount            Decimal            @db.Decimal(10, 2)
+  amount            Decimal             @db.Decimal(10, 2)
   refundType        String
   reason            String
   processedBy       String
   refundDestination String
-  status            String             @default("PENDING")
+  status            String              @default("PENDING")
   externalRef       String?
   processedAt       DateTime?
-  createdAt         DateTime           @default(now())
+  createdAt         DateTime            @default(now())
 
   @@map("subscription_refunds")
 }
@@ -2142,36 +2142,36 @@ model SubscriptionRefund {
 // ==========================================
 
 model PayoutRequest {
-  id            String       @id @default(cuid())
-  userId        String
-  user          User         @relation(fields: [userId], references: [id])
-  amount        Decimal      @db.Decimal(12, 2)
-  method        PayoutMethod
-  status        PayoutStatus @default(PENDING)
-  destination   Json
-  fee           Decimal      @default(0) @db.Decimal(10, 2)
-  netAmount     Decimal      @db.Decimal(12, 2)
-  externalRef   String?
-  processedAt   DateTime?
-  failedReason  String?
-  createdAt     DateTime     @default(now())
+  id           String       @id @default(cuid())
+  userId       String
+  user         User         @relation(fields: [userId], references: [id])
+  amount       Decimal      @db.Decimal(12, 2)
+  method       PayoutMethod
+  status       PayoutStatus @default(PENDING)
+  destination  Json
+  fee          Decimal      @default(0) @db.Decimal(10, 2)
+  netAmount    Decimal      @db.Decimal(12, 2)
+  externalRef  String?
+  processedAt  DateTime?
+  failedReason String?
+  createdAt    DateTime     @default(now())
 
   @@map("payout_requests")
 }
 
 model PayoutSchedule {
-  id            String       @id @default(cuid())
-  userId        String       @unique
-  user          User         @relation(fields: [userId], references: [id])
-  frequency     String
-  dayOfWeek     Int?
-  method        PayoutMethod
-  destination   Json
-  isActive      Boolean      @default(true)
-  lastPayoutAt  DateTime?
-  nextPayoutAt  DateTime?
-  createdAt     DateTime     @default(now())
-  updatedAt     DateTime     @updatedAt
+  id           String       @id @default(cuid())
+  userId       String       @unique
+  user         User         @relation(fields: [userId], references: [id])
+  frequency    String
+  dayOfWeek    Int?
+  method       PayoutMethod
+  destination  Json
+  isActive     Boolean      @default(true)
+  lastPayoutAt DateTime?
+  nextPayoutAt DateTime?
+  createdAt    DateTime     @default(now())
+  updatedAt    DateTime     @updatedAt
 
   @@map("payout_schedules")
 }
@@ -2195,20 +2195,20 @@ enum PayoutStatus {
 // ==========================================
 
 model Cart {
-  id                String     @id @default(cuid())
-  customerId        String     @unique
-  customer          User       @relation(fields: [customerId], references: [id])
-  vendorId          String
-  vendor            Vendor     @relation(fields: [vendorId], references: [id])
-  items             CartItem[]
-  deliveryAddressId String?
-  scheduledFor      DateTime?
-  promoCodeId       String?
-  tipAmount         Decimal    @default(0) @db.Decimal(10, 2)
+  id                  String     @id @default(cuid())
+  customerId          String     @unique
+  customer            User       @relation(fields: [customerId], references: [id])
+  vendorId            String
+  vendor              Vendor     @relation(fields: [vendorId], references: [id])
+  items               CartItem[]
+  deliveryAddressId   String?
+  scheduledFor        DateTime?
+  promoCodeId         String?
+  tipAmount           Decimal    @default(0) @db.Decimal(10, 2)
   specialInstructions String?
-  lastActivityAt    DateTime   @default(now())
-  createdAt         DateTime   @default(now())
-  updatedAt         DateTime   @updatedAt
+  lastActivityAt      DateTime   @default(now())
+  createdAt           DateTime   @default(now())
+  updatedAt           DateTime   @updatedAt
 
   @@map("carts")
 }
@@ -2477,22 +2477,22 @@ enum LivenessOutcome {
 }
 
 model LivenessCheck {
-  id       String          @id @default(cuid())
-  tenantId String          @default("swift-default")
-  userId   String
+  id             String          @id @default(cuid())
+  tenantId       String          @default("swift-default")
+  userId         String
   /// Which mover profile this shift check was for (a user can hold both).
-  profile  String // 'DRIVER' | 'RIDER'
-  purpose  LivenessPurpose @default(GO_ONLINE)
-  selfieUrl String
+  profile        String // 'DRIVER' | 'RIDER'
+  purpose        LivenessPurpose @default(GO_ONLINE)
+  selfieUrl      String
   /// Face-match confidence from the provider; null on transport errors.
-  score    Float?
-  outcome  LivenessOutcome
+  score          Float?
+  outcome        LivenessOutcome
   /// BORDERLINE / fail-open / reported checks land in the Command queue.
-  reviewRequired Boolean   @default(false)
+  reviewRequired Boolean         @default(false)
   reviewedAt     DateTime?
   reviewedBy     String?
   reviewNote     String?
-  createdAt      DateTime  @default(now())
+  createdAt      DateTime        @default(now())
 
   @@index([tenantId, userId, createdAt])
   @@index([tenantId, reviewRequired, reviewedAt])
@@ -2561,15 +2561,15 @@ model IncidentCase {
   slaAckBy    DateTime
   slaDecideBy DateTime
 
-  ackedAt   DateTime?
-  ackedBy   String?
-  decidedAt DateTime?
-  decidedBy String?
+  ackedAt       DateTime?
+  ackedBy       String?
+  decidedAt     DateTime?
+  decidedBy     String?
   /// DISMISSED | WARNING_ISSUED | SUSPENSION_PERMANENT | RESOLVED_OTHER
   decisionCode  String?
   decisionNotes String?
-  closedAt  DateTime?
-  closedBy  String?
+  closedAt      DateTime?
+  closedBy      String?
 
   /// §8.3 interim action applied at intake: SUSPENDED_PENDING_REVIEW |
   /// SHADOW_RESTRICTED | NONE. Lifting it is an explicit, audited ops act.
@@ -2610,21 +2610,21 @@ enum EvidenceItemKind {
 }
 
 model EvidenceBundle {
-  id            String    @id @default(cuid())
-  tenantId      String    @default("swift-default")
-  bundleNumber  String    @unique // human handle: EV-XXXXXXXX
-  sosAlertId    String?   @unique
-  caseId        String?   @unique // IncidentCase
+  id            String         @id @default(cuid())
+  tenantId      String         @default("swift-default")
+  bundleNumber  String         @unique // human handle: EV-XXXXXXXX
+  sosAlertId    String?        @unique
+  caseId        String?        @unique // IncidentCase
   subjectUserId String?
-  openedAt      DateTime  @default(now())
+  openedAt      DateTime       @default(now())
   sealedAt      DateTime?
   sealedBy      String?
   /// SHA-256 over the sorted item hashes — the tamper-evidence root.
   sealHash      String?
-  legalHold     Boolean   @default(false)
+  legalHold     Boolean        @default(false)
   items         EvidenceItem[]
-  createdAt     DateTime  @default(now())
-  updatedAt     DateTime  @updatedAt
+  createdAt     DateTime       @default(now())
+  updatedAt     DateTime       @updatedAt
 
   @@index([tenantId, sealedAt])
   @@index([subjectUserId])
@@ -2938,7 +2938,7 @@ model AdEvent {
 model AdEventDedupe {
   tokenHash String
   eventType AdEventType
-  createdAt DateTime @default(now())
+  createdAt DateTime    @default(now())
 
   @@id([tokenHash, eventType]) // insert-or-conflict = duplicate → drop; prune >48h via cron
   @@map("ad_event_dedupe")
@@ -3017,4 +3017,177 @@ model AdsAuditLog {
 
   @@index([tenantId, createdAt])
   @@map("ads_audit_log")
+}
+
+// ─── Trial Integrity & Identity Resolution (trial-integrity spec Parts 2–5) ──
+// The identity graph keys trials to VERIFIED HUMANS, not accounts. Values are
+// NEVER stored raw — every signal is HMAC-SHA256(normalized, IDENTITY_SALT).
+// Matching is PLATFORM-WIDE across tenants (the one sanctioned cross-tenant
+// system): visible only in founder god's-eye tooling, every view audited.
+// SOFT signals score and flag; they NEVER merge clusters or punish alone.
+
+enum IdentitySignalType {
+  ID_DOC_NUMBER
+  TIN
+  BUSINESS_REG
+  PLATE
+  MMG_PAYER
+  FACE_EMBEDDING
+  PHONE
+  DEVICE
+  IP_SUBNET
+  ADDRESS
+  NAME_DOB
+  EMAIL
+}
+
+enum SignalStrength {
+  HARD
+  STRONG
+  SOFT
+}
+
+enum TrialGrantStatus {
+  ACTIVE
+  CONSUMED
+  REVOKED
+}
+
+enum EnforcementLevel {
+  NONE
+  DENY_TRIAL
+  REVIEW_FIRST
+  BLOCK_PENDING_FOUNDER
+}
+
+enum AppealStatus {
+  NONE
+  OPEN
+  UPHELD
+  OVERTURNED
+}
+
+model IdentityKey {
+  id         String             @id @default(cuid())
+  type       IdentitySignalType
+  valueHash  String
+  accountId  String // platform user id
+  tenantId   String             @default("swift-default") // where captured (audit); matching is platform-wide
+  actorRole  String // VENDOR | RIDER | DRIVER | SERVICE | CUSTOMER | ADVERTISER
+  source     String // AI_ID_ANALYZER | ONBOARDING_DOC | SIGNUP | BILLING | DEVICE | REQUEST_META
+  capturedAt DateTime           @default(now())
+
+  @@index([type, valueHash])
+  @@index([accountId])
+  @@map("identity_keys")
+}
+
+model IdentityCluster {
+  id           String                  @id @default(cuid())
+  createdAt    DateTime                @default(now())
+  mergedIntoId String? // union history — resolvers follow to the root
+  members      IdentityClusterMember[]
+  trialGrants  TrialGrant[]
+
+  @@map("identity_clusters")
+}
+
+model IdentityClusterMember {
+  accountId String          @id // an account lives in exactly one cluster
+  clusterId String
+  linkedVia Json // [{type, strength, matchedAccountId, at, meta?}] — the explainability record
+  addedAt   DateTime        @default(now())
+  cluster   IdentityCluster @relation(fields: [clusterId], references: [id])
+
+  @@index([clusterId])
+  @@map("identity_cluster_members")
+}
+
+model FaceTemplate {
+  accountId String   @id
+  embedding Bytes // application-layer encrypted (AES-256-GCM, INTEGRITY_FACE_KEY); compared in service memory only
+  modelVer  String
+  createdAt DateTime @default(now())
+
+  @@map("face_templates")
+}
+
+model TrialGrant {
+  id           String           @id @default(cuid())
+  tenantId     String           @default("swift-default")
+  clusterId    String
+  role         String // VENDOR | RIDER | DRIVER | SERVICE
+  accountId    String // the member actually consuming it
+  status       TrialGrantStatus @default(ACTIVE)
+  startedAt    DateTime
+  endsAt       DateTime
+  statusReason String?
+  cluster      IdentityCluster  @relation(fields: [clusterId], references: [id])
+
+  // ★ THE LAW: one trial per human per role per tenant. The DB guards the
+  // RACE via a PARTIAL unique on ACTIVE rows (raw SQL in the migration —
+  // Prisma can't express partial uniques; `db push` can't see raw DDL, so
+  // constraint-dependent tests self-install it). A FULL unique is wrong by
+  // design: CONSUMED/REVOKED history must coexist under one cluster after a
+  // retroactive union (§3.4). decide() enforces the consumed/revoked denials.
+  @@index([tenantId, clusterId, role])
+  @@index([accountId])
+  @@map("trial_grants")
+}
+
+model EnforcementAction {
+  id           String           @id @default(cuid())
+  accountId    String
+  clusterId    String?
+  level        EnforcementLevel
+  reasonCode   String // internal, precise: TRIAL_ALREADY_CONSUMED, FACE_ID_MISMATCH, PAYER_DUPLICATE, VELOCITY_DEVICE…
+  signalsFired Json // the exact evidence, for the founder's eyes
+  decidedBy    String // "SYSTEM" | admin userId
+  appeal       AppealStatus     @default(NONE)
+  appealNote   String?
+  createdAt    DateTime         @default(now())
+
+  @@index([accountId])
+  @@index([level, createdAt])
+  @@map("enforcement_actions")
+}
+
+model ExceptionGrant {
+  id        String    @id @default(cuid())
+  clusterId String
+  scope     String // MULTI_LOCATION_VENDOR | HOUSEHOLD | FOUNDER_OVERRIDE
+  note      String
+  grantedBy String
+  expiresAt DateTime?
+  createdAt DateTime  @default(now())
+
+  @@index([clusterId])
+  @@map("exception_grants")
+}
+
+model SignupAttempt {
+  id         String   @id @default(cuid())
+  phoneHash  String?
+  deviceHash String?
+  ipHash     String?
+  outcome    String // CREATED | REVIEW_FIRST | HELD | REJECTED
+  createdAt  DateTime @default(now())
+
+  @@index([deviceHash, createdAt])
+  @@index([ipHash, createdAt])
+  @@index([phoneHash, createdAt])
+  @@map("signup_attempts")
+}
+
+model IntegritySettings {
+  id                        String  @id @default("platform")
+  maxSignupsPerDevice24h    Int     @default(3)
+  maxOtpPerPhonePerHour     Int     @default(5)
+  ipFlagThreshold24h        Int     @default(15)
+  faceLinkCosine            Decimal @default(0.92) @db.Decimal(4, 3)
+  faceFlagCosine            Decimal @default(0.85) @db.Decimal(4, 3)
+  retroRevokeNoticeHours    Int     @default(48)
+  tombstoneRetentionEnabled Boolean @default(false) // DPA founder decision — OFF until decided
+
+  @@map("integrity_settings")
 }
