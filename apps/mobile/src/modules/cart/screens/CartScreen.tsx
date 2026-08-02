@@ -21,7 +21,9 @@ import { useLocationStore } from '../../../stores/locationStore';
 import { DARK_BLURHASH, itemImage } from '../../../lib/images';
 import { money } from '../../../lib/money';
 import { openPayLink } from '../../../lib/payLink';
+import { haptic } from '../../../lib/haptics';
 import {
+  AddMorph,
   Card,
   Chip,
   CircleChip,
@@ -31,9 +33,9 @@ import {
   InfoRow,
   LabeledInput,
   LoadingBlock,
+  Money,
   PillButton,
   PopupCard,
-  QtyStepper,
   Screen,
   T,
 } from '../../../kit';
@@ -92,13 +94,13 @@ export function CartScreen() {
     return (
       <Screen>
         <View style={{ height: 56, alignItems: 'center', justifyContent: 'center' }}>
-          <T variant="heading">My Cart</T>
+          <T variant="heading">Cart</T>
         </View>
         <EmptyState
-          icon="shopping-bag"
+          picto="groceries"
           title="Sign in to start a cart"
           body="Your basket lives on your account so it follows you between devices."
-          actionLabel="Sign In"
+          actionLabel="Sign in"
           onAction={promptLogin}
         />
       </Screen>
@@ -141,6 +143,7 @@ export function CartScreen() {
       },
       {
         onSuccess: (data: any) => {
+          haptic.success();
           const first = data?.orders?.[0];
           setPlacedOrderId(first?.id ?? null);
           setPlacedHeld(!!(first?.holdExpiresAt && new Date(first.holdExpiresAt) > new Date()));
@@ -182,7 +185,7 @@ export function CartScreen() {
         }}
       >
         <View style={{ width: 44 }} />
-        <T variant="heading">My Cart</T>
+        <T variant="heading">Cart</T>
         <CircleChip icon="more-horizontal" onPress={() => setMenuOpen(true)} />
       </View>
 
@@ -191,20 +194,13 @@ export function CartScreen() {
       ) : cart.isError ? (
         <ErrorState onRetry={() => cart.refetch()} />
       ) : !c || items.length === 0 ? (
-        <View style={{ flex: 1, alignItems: 'center', justifyContent: 'center', padding: space['3xl'] }}>
-          <T style={{ fontSize: 96, lineHeight: 110 }}>🍕</T>
-          <T variant="title" center style={{ marginTop: space.lg }}>
-            Your cart is empty!
-          </T>
-          <T variant="body" tone="muted" center style={{ marginTop: space.sm, maxWidth: 280 }}>
-            It appears that no food has been ordered yet
-          </T>
-          <PillButton
-            label="Find Foods"
-            onPress={() => navigation.navigate('Search')}
-            style={{ alignSelf: 'stretch', marginTop: space['2xl'] }}
-          />
-        </View>
+        <EmptyState
+          picto="groceries"
+          title="Your cart is empty"
+          body="Add something good — it lands here."
+          actionLabel="Find food"
+          onAction={() => navigation.navigate('Search')}
+        />
       ) : (
         <ScrollView
           showsVerticalScrollIndicator={false}
@@ -217,14 +213,14 @@ export function CartScreen() {
             <View style={{ flexDirection: 'row', alignItems: 'center', marginTop: space.sm }}>
               <View style={{ flex: 1 }}>
                 <T variant="label" tone="muted">
-                  {apptOnly ? 'Service Address' : 'Delivery Location'}
+                  {apptOnly ? 'Service address' : 'Deliver to'}
                 </T>
                 <T variant="body" weight="semibold" style={{ marginTop: 2 }} numberOfLines={1}>
                   {c.deliveryAddress?.label ?? c.deliveryAddress?.addressLine1 ?? 'No address yet'}
                 </T>
               </View>
               <PillButton
-                label={c.deliveryAddress ? 'Change Location' : 'Add Address'}
+                label={c.deliveryAddress ? 'Change' : 'Add address'}
                 variant="soft"
                 size="sm"
                 onPress={() => navigation.navigate('Addresses', { selectFor: 'cart' })}
@@ -243,7 +239,7 @@ export function CartScreen() {
           <View style={{ marginTop: space.xl }}>
             <LabeledInput
               icon="tag"
-              placeholder="Promo Code..."
+              placeholder="Promo code"
               autoCapitalize="characters"
               value={promo}
               onChangeText={(v) => {
@@ -286,7 +282,7 @@ export function CartScreen() {
                   source={{ uri: itemImage(it) }}
                   placeholder={{ blurhash: DARK_BLURHASH }}
                   transition={150}
-                  style={{ width: 76, height: 76, borderRadius: radius.full }}
+                  style={{ width: 76, height: 76, borderRadius: radius.md }}
                   contentFit="cover"
                 />
                 <View style={{ flex: 1, gap: 4 }}>
@@ -298,20 +294,21 @@ export function CartScreen() {
                       {it.selectedOptionNames.join(', ')}
                     </T>
                   ) : null}
-                  <T variant="label" weight="bold" tone="brand">
-                    {money(it.customerPrice)}
-                  </T>
+                  <View style={{ alignSelf: 'flex-start' }}>
+                    <Money amount={it.customerPrice} tone="brand" />
+                  </View>
                   {!it.isAvailable ? (
                     <T variant="caption" tone="error">
                       No longer available — remove to continue
                     </T>
                   ) : null}
-                  <View style={{ marginTop: 4 }}>
-                    <QtyStepper
-                      value={it.quantity}
-                      min={1}
-                      onDec={() => it.quantity > 1 && updateItem.mutate({ id: it.id, quantity: it.quantity - 1 })}
+                  <View style={{ marginTop: 4, alignSelf: 'flex-start' }}>
+                    <AddMorph
+                      qty={it.quantity}
+                      busy={updateItem.isPending}
+                      onAdd={() => updateItem.mutate({ id: it.id, quantity: it.quantity + 1 })}
                       onInc={() => updateItem.mutate({ id: it.id, quantity: it.quantity + 1 })}
+                      onDec={() => it.quantity > 1 && updateItem.mutate({ id: it.id, quantity: it.quantity - 1 })}
                     />
                   </View>
                 </View>
@@ -339,7 +336,7 @@ export function CartScreen() {
                     label={t === 0 ? 'No tip' : money(t)}
                     selected={Number(c.tipAmount) === t}
                     onPress={() => setTip.mutate(t)}
-                    style={{ height: 40, paddingHorizontal: space.lg }}
+                    style={{ height: 44, paddingHorizontal: space.lg }}
                   />
                 ))}
               </View>
@@ -412,7 +409,7 @@ export function CartScreen() {
               <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
                 <View style={{ flex: 1, paddingRight: space.md }}>
                   <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
-                    <Feather name="zap" size={15} color={color.warning} />
+                    <Feather name="zap" size={15} color={color.brand[500]} />
                     <T variant="body" weight="semibold">
                       Express delivery
                     </T>
@@ -428,13 +425,13 @@ export function CartScreen() {
 
           {/* Order summary */}
           <Card style={{ marginTop: space.xl }}>
-            <T variant="heading">{apptOnly ? 'Booking Summary' : 'Order Summary'}</T>
+            <T variant="heading">{apptOnly ? 'Booking summary' : 'Order summary'}</T>
             <View style={{ marginTop: space.md }}>
-              <InfoRow label={`Total Items (${c.itemCount})`} value={money(c.subtotalCustomer)} />
-              {!apptOnly ? <InfoRow label="Delivery Fee" value={c.deliveryFee === 0 ? 'Free' : money(c.deliveryFee)} /> : null}
+              <InfoRow label={`Items (${c.itemCount})`} value={money(c.subtotalCustomer)} />
+              {!apptOnly ? <InfoRow label="Delivery fee" value={c.deliveryFee === 0 ? 'Free' : money(c.deliveryFee)} /> : null}
               {express && c.deliveryFee > 0 ? <InfoRow label="Express" value={money(c.expressSurcharge)} /> : null}
               {c.discount > 0 ? <InfoRow label="Discount" value={`-${money(c.discount)}`} /> : null}
-              {!apptOnly && Number(c.tipAmount) > 0 ? <InfoRow label="Rider Tip" value={money(c.tipAmount)} /> : null}
+              {!apptOnly && Number(c.tipAmount) > 0 ? <InfoRow label="Rider tip" value={money(c.tipAmount)} /> : null}
               <View style={{ height: 1, backgroundColor: color.border.subtle, marginVertical: space.sm }} />
               <InfoRow label="Total" value={money(express && c.deliveryFee > 0 ? c.expressTotal : c.totalAmount)} strong />
             </View>
@@ -464,16 +461,16 @@ export function CartScreen() {
 
           {!c.meetsMinimum ? (
             <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: space.md }}>
-              <Feather name="alert-circle" size={14} color={color.error} />
-              <T variant="label" tone="error">
+              <Feather name="alert-circle" size={14} color={color.warning} />
+              <T variant="label" tone="warning">
                 This store has a minimum order of {money(c.minimumOrderAmount)}.
               </T>
             </View>
           ) : null}
           {unslotted.length > 0 ? (
             <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: space.md }}>
-              <Feather name="calendar" size={14} color={color.error} />
-              <T variant="label" tone="error">
+              <Feather name="calendar" size={14} color={color.warning} />
+              <T variant="label" tone="warning">
                 Pick a time for {unslotted[0].name} before ordering.
               </T>
             </View>
@@ -498,7 +495,7 @@ export function CartScreen() {
           ) : null}
 
           <PillButton
-            label={apptOnly ? 'Book Now' : 'Order Now'}
+            label={apptOnly ? 'Book now' : 'Place order'}
             onPress={onOrder}
             loading={placeOrder.isPending}
             disabled={!c.meetsMinimum || c.unavailableItemIds?.length > 0 || (needsAddress && !c.deliveryAddress) || unslotted.length > 0}
@@ -523,7 +520,7 @@ export function CartScreen() {
         </T>
         <View style={{ alignSelf: 'stretch', gap: space.md, marginTop: space.xl }}>
           <PillButton
-            label="Clear Cart"
+            label="Clear cart"
             size="md"
             onPress={() => {
               clearCart.mutate();
@@ -545,7 +542,7 @@ export function CartScreen() {
             {promoMsg.text}
           </T>
         ) : null}
-        <PillButton label="Nice" size="md" onPress={() => setPromoPopup(false)} style={{ alignSelf: 'stretch', marginTop: space.xl }} />
+        <PillButton label="Done" size="md" onPress={() => setPromoPopup(false)} style={{ alignSelf: 'stretch', marginTop: space.xl }} />
       </PopupCard>
 
       {/* Order placed (kit 34) */}
@@ -580,7 +577,7 @@ export function CartScreen() {
               : 'The store has been notified — pay cash on delivery.'}
         </T>
         <PillButton
-          label={placedAppt ? 'View Booking' : 'Track Order'}
+          label={placedAppt ? 'View booking' : 'Track order'}
           size="md"
           onPress={() => {
             const id = placedOrderId;

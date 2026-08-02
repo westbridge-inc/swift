@@ -112,7 +112,9 @@ export function SettingsRow({
   );
 }
 
-/** Summary line (order summary / receipts): muted label left, strong value right. */
+/** Summary line (order summary / receipts) — receipt-grade (design-100×):
+ *  quiet label left; every value in tabular `numM`; the total (`strong`) in
+ *  `numL`. Money reads like it came off a till, everywhere. */
 export function InfoRow({
   label,
   value,
@@ -134,9 +136,7 @@ export function InfoRow({
       <T variant={strong ? 'body' : 'label'} tone={strong ? 'ink' : 'muted'} weight={strong ? 'semibold' : 'regular'}>
         {label}
       </T>
-      <T variant="body" weight={strong ? 'bold' : 'semibold'}>
-        {value}
-      </T>
+      <T variant={strong ? 'numL' : 'numM'}>{value}</T>
     </View>
   );
 }

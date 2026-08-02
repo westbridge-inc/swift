@@ -2,8 +2,9 @@
 import React from 'react';
 import { ActivityIndicator, View, type ViewStyle } from 'react-native';
 import { Feather } from '@expo/vector-icons';
-import { color, space } from '@swift/ui';
+import { color, radius, space } from '@swift/ui';
 import { PillButton } from './button';
+import { Pictogram, type PictogramName } from './pictograms';
 import { IconChip } from './rows';
 import { T } from './text';
 
@@ -16,9 +17,11 @@ export function LoadingBlock({ style }: { style?: ViewStyle }) {
   );
 }
 
-/** Kit-style empty state: big soft icon chip, title, body, optional action. */
+/** Kit-style empty state: pictogram (9.6) or soft icon chip, title, body,
+ *  exactly one action. Empty states are invitations, never sad faces. */
 export function EmptyState({
   icon = 'inbox',
+  picto,
   title,
   body,
   actionLabel,
@@ -26,6 +29,7 @@ export function EmptyState({
   style,
 }: {
   icon?: React.ComponentProps<typeof Feather>['name'];
+  picto?: PictogramName;
   title: string;
   body?: string;
   actionLabel?: string;
@@ -34,7 +38,22 @@ export function EmptyState({
 }) {
   return (
     <View style={[{ flex: 1, alignItems: 'center', justifyContent: 'center', padding: space['3xl'], gap: space.md }, style]}>
-      <IconChip icon={icon} size={72} />
+      {picto ? (
+        <View
+          style={{
+            width: 72,
+            height: 72,
+            borderRadius: radius.lg,
+            backgroundColor: color.brand[50],
+            alignItems: 'center',
+            justifyContent: 'center',
+          }}
+        >
+          <Pictogram name={picto} size={36} color={color.brand[600]} />
+        </View>
+      ) : (
+        <IconChip icon={icon} size={72} />
+      )}
       <T variant="heading" center style={{ marginTop: space.sm }}>
         {title}
       </T>
@@ -56,12 +75,12 @@ export function ErrorState({ onRetry, message, style }: { onRetry?: () => void; 
     <View style={[{ flex: 1, alignItems: 'center', justifyContent: 'center', padding: space['3xl'], gap: space.md }, style]}>
       <IconChip icon="alert-circle" size={72} tone="error" />
       <T variant="heading" center style={{ marginTop: space.sm }}>
-        Something went wrong
+        We couldn't load this
       </T>
       <T variant="label" tone="muted" center style={{ maxWidth: 260 }}>
-        {message ?? "We couldn't load this. Check your connection and try again."}
+        {message ?? 'Check your connection and try again.'}
       </T>
-      {onRetry ? <PillButton label="Try Again" onPress={onRetry} size="md" style={{ marginTop: space.md }} /> : null}
+      {onRetry ? <PillButton label="Try again" onPress={onRetry} size="md" style={{ marginTop: space.md }} /> : null}
     </View>
   );
 }
