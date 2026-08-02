@@ -80,6 +80,7 @@ export const color = {
    *  Hues are harmonized to the maroon (no stock-palette greens/ambers). */
   success: '#1E6E5A', // deep viridian — delivered/open/paid; 5.9:1 on paper
   error: '#DC2626', // 4.7:1 on paper; clearly hotter than brand side-by-side
+  errorDeep: '#B91C1C', // pressed state of destructive controls
   warning: '#B45309', // burnt amber — cautions/cash-float; 4.9:1 on paper
   info: '#3B5B7A', // restrained slate — neutral notices; 6.8:1 on paper
   star: '#F59E0B', // rating hue ONLY — decorative, never carries meaning alone

@@ -5,7 +5,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import MapView, { Marker, PROVIDER_DEFAULT, Polyline } from 'react-native-maps';
 import BottomSheet, { BottomSheetView, BottomSheetScrollView } from '@gorhom/bottom-sheet';
 import { Image } from 'expo-image';
-import { Feather, MaterialCommunityIcons } from '@expo/vector-icons';
+import { Feather } from '@expo/vector-icons';
 import { color, radius, space } from '@swift/ui';
 import { useQueryClient } from '@tanstack/react-query';
 import { useActiveRide, useRideEstimate, useRequestRide, useCancelRide, useRideSos, useRideAvailability, useWatchAvailability } from '../../../hooks';
@@ -17,7 +17,7 @@ import { money } from '../../../lib/money';
 import { mediaUrl } from '../../../lib/images';
 import { streetEtaMin } from '../../../lib/geo';
 import { type RideClass, type TierEstimate } from '../../../services/api';
-import { Card, CircleChip, IconChip, LoadingBlock, PillButton, PopupCard, Stars, T, cardShadow } from '../../../kit';
+import { Card, CircleChip, IconChip, LoadingBlock, Money, PillButton, Pictogram, type PictogramName, PinGlyph, PopupCard, Stars, T, cardShadow } from '../../../kit';
 import type { PickedPlace } from './DestinationSearchScreen';
 
 const STATUS_LABEL: Record<string, string> = {
@@ -28,10 +28,10 @@ const STATUS_LABEL: Record<string, string> = {
   RIDE_IN_PROGRESS: 'On your trip',
 };
 
-const TIER_META: Record<RideClass, { label: string; icon: keyof typeof MaterialCommunityIcons.glyphMap; blurb: string }> = {
-  ECONOMY: { label: 'Economy', icon: 'car', blurb: 'Affordable, everyday rides' },
-  COMFORT: { label: 'Comfort', icon: 'car-estate', blurb: 'Newer cars, extra legroom' },
-  XL: { label: 'XL', icon: 'car-3-plus', blurb: 'Seats up to 6' },
+const TIER_META: Record<RideClass, { label: string; icon: PictogramName; blurb: string }> = {
+  ECONOMY: { label: 'Economy', icon: 'sedan', blurb: 'Affordable, everyday rides' },
+  COMFORT: { label: 'Comfort', icon: 'estate', blurb: 'Newer cars, extra legroom' },
+  XL: { label: 'XL', icon: 'van', blurb: 'Seats up to 6' },
   GROUP: { label: 'Bus', icon: 'bus', blurb: 'Minibus — groups, tours & airport runs' },
 };
 
@@ -69,7 +69,7 @@ function PickupDot() {
   );
 }
 function DropPin() {
-  return <MaterialCommunityIcons name="map-marker" size={36} color={color.brand[600]} />;
+  return <PinGlyph size={34} color={color.brand[600]} />;
 }
 
 /** Route card: pickup dot → destination pin, two pressable rows. */
@@ -112,7 +112,7 @@ export function RouteCard({
         {({ pressed }) => (
           <View style={{ flexDirection: 'row', alignItems: 'center', opacity: pressed ? 0.7 : 1 }}>
             <View style={{ width: 24, alignItems: 'center' }}>
-              <MaterialCommunityIcons name="map-marker" size={18} color={color.brand[500]} />
+              <PinGlyph size={18} color={color.brand[500]} />
             </View>
             <View style={{ flex: 1, marginLeft: space.sm }}>
               <T variant="caption" tone="muted">
@@ -171,7 +171,7 @@ function SearchingCard({ startedAt }: { startedAt?: string }) {
       <View style={{ width: 64, height: 64, alignItems: 'center', justifyContent: 'center' }}>
         <Animated.View style={ringStyle(0.5)} />
         <View style={{ width: 64, height: 64, borderRadius: 32, alignItems: 'center', justifyContent: 'center', backgroundColor: color.brand[500] }}>
-          <MaterialCommunityIcons name="car" size={30} color={color.white} />
+          <Pictogram name="taxi" size={32} color={color.white} />
         </View>
       </View>
       <T variant="body" weight="semibold" style={{ marginTop: space.lg }}>
@@ -406,7 +406,7 @@ export function TaxiScreen({ navigation }: any) {
                 onPress={() => pickupPoint && watch.mutate(pickupPoint)}
               />
               <T variant="caption" tone="muted" center style={{ marginTop: space.sm }}>
-                No drivers are available near you right now — we&apos;re sorry.{' '}
+                No drivers are available near you right now.{' '}
                 {watch.isSuccess ? "We'll ping you the moment one comes online." : ''}
               </T>
               <T
@@ -490,7 +490,7 @@ function TierRow({
               backgroundColor: selected ? color.brand[500] : color.brand[50],
             }}
           >
-            <MaterialCommunityIcons name={meta.icon} size={22} color={selected ? color.white : color.brand[600]} />
+            <Pictogram name={meta.icon} size={26} color={selected ? color.white : color.brand[600]} />
           </View>
           <View style={{ flex: 1 }}>
             <T variant="body" weight="semibold" tone={selected ? 'deep' : 'ink'}>
@@ -500,9 +500,7 @@ function TierRow({
               {meta.blurb} · ~{durationMin} min
             </T>
           </View>
-          <T variant="body" weight="bold" tone={selected ? 'brand' : 'ink'}>
-            {money(tier.fare)}
-          </T>
+          <Money amount={tier.fare} tone={selected ? 'brand' : 'ink'} />
         </View>
       )}
     </Pressable>
@@ -678,7 +676,7 @@ function ActiveRide({ navigation, ride, cancelRide, insets }: any) {
                 cardShadow,
               ]}
             >
-              <MaterialCommunityIcons name="navigation" size={18} color={color.white} />
+              <Feather name="navigation" size={17} color={color.white} />
             </View>
           </Marker>
         ) : null}
@@ -688,7 +686,7 @@ function ActiveRide({ navigation, ride, cancelRide, insets }: any) {
           aged out). Silence must never look like a live, moving car. */}
       {(connLost || fixStale) ? (
         <View style={{ position: 'absolute', top: insets.top + space.md, alignSelf: 'center', flexDirection: 'row', alignItems: 'center', gap: space.xs, backgroundColor: color.text.primary, paddingHorizontal: space.md, paddingVertical: space.xs, borderRadius: radius.full, ...cardShadow }}>
-          <MaterialCommunityIcons name={connLost ? 'wifi-off' : 'crosshairs-question'} size={13} color={color.white} />
+          <Feather name={connLost ? 'wifi-off' : 'loader'} size={13} color={color.white} />
           <T variant="caption" style={{ color: color.white }}>{connLost ? 'Reconnecting…' : 'Updating driver location…'}</T>
         </View>
       ) : null}
@@ -701,7 +699,7 @@ function ActiveRide({ navigation, ride, cancelRide, insets }: any) {
           style={{ position: 'absolute', right: space.lg, bottom: Math.round(winH * 0.36), width: 44, height: 44, borderRadius: 22, alignItems: 'center', justifyContent: 'center', backgroundColor: color.surface.base, ...cardShadow }}
           hitSlop={8}
         >
-          <MaterialCommunityIcons name="crosshairs-gps" size={22} color={color.text.primary} />
+          <Feather name="crosshair" size={21} color={color.text.primary} />
         </Pressable>
       ) : null}
 
@@ -719,7 +717,7 @@ function ActiveRide({ navigation, ride, cancelRide, insets }: any) {
           {arrived ? (
             /* The kerb moment — loud on purpose so it isn't missed in-pocket. */
             <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.md, borderRadius: radius.lg, backgroundColor: color.brand[500], padding: space.lg, marginBottom: space.sm }}>
-              <MaterialCommunityIcons name="car-side" size={28} color={color.white} />
+              <Pictogram name="taxi" size={30} color={color.white} />
               <View style={{ flex: 1 }}>
                 <T variant="body" weight="bold" tone="onBrand">
                   Your driver is here
@@ -741,47 +739,84 @@ function ActiveRide({ navigation, ride, cancelRide, insets }: any) {
             {ride.taxiDuration ? ` · ~${Math.round(Number(ride.taxiDuration))} min trip` : ''}
           </T>
           {ride.ridePin ? (
-            <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.sm, marginTop: space.sm }}>
-              <T variant="label" tone="muted">
-                PIN
+            <View
+              style={{
+                alignItems: 'center',
+                backgroundColor: color.brand[50],
+                borderRadius: radius.lg,
+                paddingVertical: space.md,
+                marginTop: space.md,
+              }}
+            >
+              <T variant="micro" tone="muted">
+                Start code — show to your driver
               </T>
-              <T variant="heading" tone="brand">
+              <T variant="displayXl" tone="brand" style={{ letterSpacing: 6, marginTop: 2 }}>
                 {ride.ridePin}
-              </T>
-              <T variant="caption" tone="faint">
-                show to your driver
               </T>
             </View>
           ) : null}
 
           {d ? (
             <Card style={{ marginTop: space.lg }}>
+              {/* THE PLATE-FIRST HANDSHAKE (design-100×): the plate is what you
+                  match at the kerb — it leads, in numL, before any face. */}
+              {d.licensePlate ? (
+                <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.md, marginBottom: space.md }}>
+                  <View
+                    style={{
+                      paddingHorizontal: space.lg,
+                      paddingVertical: space.sm,
+                      borderRadius: radius.md,
+                      borderWidth: 1.5,
+                      borderColor: color.text.primary,
+                    }}
+                  >
+                    <T variant="numL" style={{ letterSpacing: 3 }}>
+                      {d.licensePlate}
+                    </T>
+                  </View>
+                  <View style={{ flex: 1 }}>
+                    <T variant="caption" tone="muted">
+                      Match this plate before you get in.
+                    </T>
+                  </View>
+                  {d.vehiclePhotoUrl ? (
+                    <Image
+                      source={{ uri: mediaUrl(d.vehiclePhotoUrl) ?? undefined }}
+                      style={{ width: 72, height: 46, borderRadius: radius.md }}
+                      contentFit="cover"
+                    />
+                  ) : null}
+                </View>
+              ) : null}
               <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.md }}>
-                {/* Trust visibility (master plan §5): see WHO is coming */}
                 {d.user?.avatar ? (
                   <Image
                     source={{ uri: mediaUrl(d.user.avatar) ?? undefined }}
-                    style={{ width: 48, height: 48, borderRadius: 24 }}
+                    style={{ width: 44, height: 44, borderRadius: 22 }}
                     contentFit="cover"
                   />
                 ) : (
-                  <IconChip icon="user" size={48} />
+                  <IconChip icon="user" size={44} />
                 )}
                 <View style={{ flex: 1 }}>
                   <T variant="body" weight="semibold">
                     {d.user?.firstName ?? 'Your driver'}
                   </T>
-                  <T variant="caption" tone="muted" style={{ marginTop: 2 }}>
-                    {[d.vehicleColor, d.vehicleMake, d.vehicleModel].filter(Boolean).join(' ')}
-                  </T>
-                  {d.averageRating ? (
-                    <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4, marginTop: 2 }}>
-                      <Stars value={Number(d.averageRating)} size={11} />
-                      <T variant="caption" tone="muted">
-                        {Number(d.averageRating).toFixed(1)}
-                      </T>
-                    </View>
-                  ) : null}
+                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4, marginTop: 2 }}>
+                    <T variant="caption" tone="muted" numberOfLines={1} style={{ flexShrink: 1 }}>
+                      {[d.vehicleColor, d.vehicleMake, d.vehicleModel].filter(Boolean).join(' ')}
+                    </T>
+                    {d.averageRating ? (
+                      <>
+                        <Stars value={Number(d.averageRating)} size={11} />
+                        <T variant="caption" tone="muted">
+                          {Number(d.averageRating).toFixed(1)}
+                        </T>
+                      </>
+                    ) : null}
+                  </View>
                 </View>
                 {d.user?.phone ? (
                   <PillButton
@@ -793,33 +828,6 @@ function ActiveRide({ navigation, ride, cancelRide, insets }: any) {
                   />
                 ) : null}
               </View>
-              {/* …and WHAT is coming: the car photo + plate, big enough to match at the kerb */}
-              {d.vehiclePhotoUrl || d.licensePlate ? (
-                <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.md, marginTop: space.md }}>
-                  {d.vehiclePhotoUrl ? (
-                    <Image
-                      source={{ uri: mediaUrl(d.vehiclePhotoUrl) ?? undefined }}
-                      style={{ width: 88, height: 56, borderRadius: radius.md }}
-                      contentFit="cover"
-                    />
-                  ) : null}
-                  {d.licensePlate ? (
-                    <View
-                      style={{
-                        paddingHorizontal: space.md,
-                        paddingVertical: space.sm,
-                        borderRadius: radius.md,
-                        borderWidth: 1,
-                        borderColor: color.border.strong,
-                      }}
-                    >
-                      <T variant="body" weight="bold" style={{ letterSpacing: 2 }}>
-                        {d.licensePlate}
-                      </T>
-                    </View>
-                  ) : null}
-                </View>
-              ) : null}
             </Card>
           ) : exhausted ? (
             /* Terminal dead state — honest, not an endless spinner. The backend
@@ -884,6 +892,8 @@ function ActiveRide({ navigation, ride, cancelRide, insets }: any) {
         </T>
         <PillButton
           label="Cancel ride"
+          variant="destructive"
+          icon="x-circle"
           style={{ alignSelf: 'stretch', marginTop: space['2xl'] }}
           loading={cancelRide.isPending}
           onPress={() => {
