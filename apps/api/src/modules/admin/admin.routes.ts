@@ -2495,6 +2495,46 @@ export async function adminRoutes(app: FastifyInstance) {
     return { success: true, data: settings };
   });
 
+  // ── Vehicle visual identity [rides spec 6B] ───────────────────────────────
+
+  /** Backfill: classify every driver's bodyType/colorHex from the fleet
+   *  mapping. Idempotent; UNKNOWNs form the classification queue below. */
+  app.post('/rides/vehicle-identity-backfill', { preHandler: [adminGuard] }, async () => {
+    const { backfillVehicleIdentity } = await import('../rides/vehicle-identity');
+    return { success: true, data: await backfillVehicleIdentity(app.prisma) };
+  });
+
+  /** The classification queue: UNKNOWN vehicles, with the photos the reviewer
+   *  is already looking at. */
+  app.get('/rides/vehicle-identity-queue', { preHandler: [adminGuard] }, async () => {
+    const rows = await app.prisma.driver.findMany({
+      where: { bodyType: 'UNKNOWN' },
+      select: {
+        id: true, vehicleMake: true, vehicleModel: true, vehicleColor: true,
+        vehiclePhotoUrl: true, licensePlate: true,
+        user: { select: { firstName: true, lastName: true } },
+      },
+      take: 200,
+    });
+    return { success: true, data: rows };
+  });
+
+  /** One-tap classification (6B.2): the reviewer names the shape; optional
+   *  colorHex override for odd color words. */
+  app.put('/rides/drivers/:id/vehicle-identity', { preHandler: [adminGuard] }, async (request) => {
+    const { id } = z.object({ id: z.string() }).parse(request.params);
+    const body = z.object({
+      bodyType: z.enum(['SEDAN', 'HATCHBACK', 'WAGON', 'SUV', 'PICKUP', 'MINIBUS', 'COMPACT', 'UNKNOWN']),
+      colorHex: z.string().regex(/^#[0-9A-Fa-f]{6}$/).optional(),
+    }).parse(request.body ?? {});
+    const updated = await app.prisma.driver.update({
+      where: { id },
+      data: { bodyType: body.bodyType, ...(body.colorHex ? { colorHex: body.colorHex } : {}) },
+      select: { id: true, bodyType: true, colorHex: true },
+    });
+    return { success: true, data: updated };
+  });
+
   // ── Swift Account Numbers (SAN) — the cash-rail payment reference ─────────
 
   /** Backfill [san spec 2.4]: batched, resumable, ends with the integrity
