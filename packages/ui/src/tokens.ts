@@ -29,6 +29,15 @@
  */
 
 export const APP_NAME = 'Swift' as const;
+
+/** Alpha over any token hex — THE way to derive glows, scrims and tints
+ *  (never a raw rgba literal in app code). */
+export function withAlpha(hex: string, alpha: number): string {
+  const r = parseInt(hex.slice(1, 3), 16);
+  const g = parseInt(hex.slice(3, 5), 16);
+  const b = parseInt(hex.slice(5, 7), 16);
+  return `rgba(${r},${g},${b},${alpha})`;
+}
 export const BRAND_REGION = 'GY' as const;
 
 /**

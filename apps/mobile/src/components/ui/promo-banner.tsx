@@ -1,5 +1,5 @@
 import { View } from 'react-native';
-import { color } from '@swift/ui';
+import { withAlpha, color } from '@swift/ui';
 import { Text } from './text';
 import { Image } from './image';
 import { Scrim } from './scrim';
@@ -35,14 +35,14 @@ export function PromoBanner({
         {image ? (
           <>
             <Image source={{ uri: image }} style={{ position: 'absolute', width: '100%', height: '100%' }} />
-            <Scrim cover from="rgba(232,25,44,0.80)" to="rgba(147,15,26,0.90)" />
+            <Scrim cover from={withAlpha(color.brand[500], 0.8)} to={withAlpha(color.brand[600], 0.9)} />
           </>
         ) : null}
         {/* Signature — a swift in flight across the banner */}
         <View
           style={{ pointerEvents: 'none', position: 'absolute', right: -28, top: -24, opacity: 0.12, transform: [{ rotate: '-8deg' }] }}
         >
-          <SwiftMark size={172} tint="#FFFFFF" accent="#FFFFFF" />
+          <SwiftMark size={172} tint={color.white} accent={color.white} />
         </View>
         <View className="flex-row items-center p-lg">
           <View className="flex-1 pr-md">
@@ -64,9 +64,9 @@ export function PromoBanner({
           </View>
           <View
             className="h-16 w-16 items-center justify-center rounded-2xl"
-            style={{ backgroundColor: 'rgba(255,255,255,0.16)' }}
+            style={{ backgroundColor: color.surface.onBrand }}
           >
-            <SwiftMark size={34} tint="#FFFFFF" accent="rgba(255,255,255,0.85)" />
+            <SwiftMark size={34} tint={color.white} accent={withAlpha(color.white, 0.85)} />
           </View>
         </View>
       </View>

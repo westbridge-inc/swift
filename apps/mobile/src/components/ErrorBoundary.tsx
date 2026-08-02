@@ -1,6 +1,7 @@
 /** @jsxImportSource react */
 import { Component, type ReactNode } from 'react';
 import { View, Text, Pressable } from 'react-native';
+import { color, font } from '@swift/ui';
 import { reportCrash } from '../lib/crash-reporter';
 
 interface Props {
@@ -33,19 +34,19 @@ export class ErrorBoundary extends Component<Props, State> {
   override render(): ReactNode {
     if (!this.state.hasError) return this.props.children;
     return (
-      <View style={{ flex: 1, alignItems: 'center', justifyContent: 'center', padding: 24, backgroundColor: '#ffffff' }}>
-        <Text style={{ fontSize: 20, fontWeight: '700', color: '#111111', marginBottom: 8, textAlign: 'center' }}>
+      <View style={{ flex: 1, alignItems: 'center', justifyContent: 'center', padding: 24, backgroundColor: color.surface.subtle }}>
+        <Text style={{ fontSize: 22, fontFamily: font.displaySemiBold, color: color.text.primary, marginBottom: 8, textAlign: 'center' }}>
           Something went wrong
         </Text>
-        <Text style={{ fontSize: 14, color: '#555555', textAlign: 'center', marginBottom: 24, lineHeight: 20 }}>
+        <Text style={{ fontSize: 15, fontFamily: font.body, color: color.text.secondary, textAlign: 'center', marginBottom: 24, lineHeight: 22 }}>
           The app hit an unexpected error. Your data is safe — you can try again.
         </Text>
         <Pressable
           onPress={this.reset}
           accessibilityRole="button"
-          style={{ backgroundColor: '#111111', paddingVertical: 12, paddingHorizontal: 28, borderRadius: 10 }}
+          style={{ backgroundColor: color.brand[500], paddingVertical: 14, paddingHorizontal: 28, borderRadius: 9999 }}
         >
-          <Text style={{ color: '#ffffff', fontWeight: '600' }}>Try again</Text>
+          <Text style={{ color: color.text.onBrand, fontFamily: font.bodySemiBold, fontSize: 15 }}>Try again</Text>
         </Pressable>
       </View>
     );

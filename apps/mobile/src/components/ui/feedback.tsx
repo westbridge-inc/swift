@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { ActivityIndicator, View, StyleSheet, type ViewProps, type LayoutChangeEvent } from 'react-native';
 import Animated, { useSharedValue, useAnimatedStyle, withRepeat, withTiming, Easing } from 'react-native-reanimated';
-import { color } from '@swift/ui';
+import { withAlpha, color } from '@swift/ui';
 import { cn } from './cn';
 
 export function Spinner({ size = 'small' }: { size?: 'small' | 'large' }) {
@@ -31,7 +31,7 @@ export function Skeleton({ className, ...props }: ViewProps & { className?: stri
     <View onLayout={onLayout} className={cn('bg-surface-subtle overflow-hidden rounded-md', className)} {...props}>
       {w > 0 ? (
         <Animated.View style={[StyleSheet.absoluteFill, sweep]}>
-          <View style={{ height: '100%', width: w * 0.5, backgroundColor: 'rgba(255,255,255,0.6)' }} />
+          <View style={{ height: '100%', width: w * 0.5, backgroundColor: withAlpha(color.white, 0.6) }} />
         </Animated.View>
       ) : null}
     </View>

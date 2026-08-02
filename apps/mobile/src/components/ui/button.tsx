@@ -45,7 +45,7 @@ export function Button({ className, textClassName, variant = 'solid', label, chi
       {...props}
     >
       {loading ? (
-        <ActivityIndicator color={solid ? '#fff' : neutral ? color.text.secondary : color.brand[500]} />
+        <ActivityIndicator color={solid ? color.white : neutral ? color.text.secondary : color.brand[500]} />
       ) : label ? (
         <RNText className={cn('font-body text-base font-semibold', textColor, textClassName)} style={textStyle}>{label}</RNText>
       ) : (

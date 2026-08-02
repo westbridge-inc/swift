@@ -32,7 +32,7 @@ export function ActionSheet({
   const insets = useSafeAreaInsets();
   return (
     <Modal visible={open} transparent animationType="fade" statusBarTranslucent onRequestClose={onClose}>
-      <View style={{ flex: 1, justifyContent: 'flex-end', backgroundColor: 'rgba(10,11,15,0.45)' }}>
+      <View style={{ flex: 1, justifyContent: 'flex-end', backgroundColor: color.scrim }}>
         <Pressable style={{ flex: 1 }} onPress={onClose} accessibilityLabel="Close menu" />
         <Animated.View
           entering={SlideInDown.duration(220)}

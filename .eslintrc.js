@@ -14,24 +14,14 @@ module.exports = {
   ignorePatterns: ['dist/', 'node_modules/', '.next/', '.turbo/'],
   overrides: [
     {
-      // DESIGN-100× no-literal-colour gate (foundation flow): screen code uses
-      // tokens, never raw hexes/rgba. Kit layers are exempt (src/kit + the
-      // legacy components/ui kit — they define the tokens' consumers).
+      // DESIGN-100× no-literal-colour law: screen AND component code uses
+      // tokens, never raw hexes/rgba. Only src/kit is exempt — it is where
+      // the tokens' consumers are defined. The debt ledger that once lived
+      // here is EMPTY (Part 8.2 acceptance, 2026-08-02).
       files: [
         'apps/mobile/src/modules/**/*',
         'apps/mobile/src/screens/**/*',
         'apps/mobile/src/components/**/*',
-      ],
-      excludedFiles: [
-        'apps/mobile/src/components/ui/**/*', // legacy kit — migrates in the System Surfaces flow
-        // ---- DESIGN-100× DEBT LEDGER ----
-        // Pre-foundation literals, migrated flow-by-flow down the Part 6
-        // register. Each flow DELETES its files from this list at merge.
-        // Ledger empty = Part 8.2 acceptance. Do not add files.
-        'apps/mobile/src/components/ErrorBoundary.tsx',
-        'apps/mobile/src/components/FareSlider.tsx',
-        'apps/mobile/src/components/MmgPayLinkCard.tsx',
-        'apps/mobile/src/modules/chat/screens/ConversationScreen.tsx',
       ],
       rules: {
         'no-restricted-syntax': [

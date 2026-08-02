@@ -32,7 +32,7 @@ export function ConfirmDialog({
 }) {
   return (
     <Modal visible={open} transparent animationType="fade" statusBarTranslucent onRequestClose={onClose}>
-      <View style={{ flex: 1, alignItems: 'center', justifyContent: 'center', backgroundColor: 'rgba(10,11,15,0.45)', paddingHorizontal: 24 }}>
+      <View style={{ flex: 1, alignItems: 'center', justifyContent: 'center', backgroundColor: color.scrim, paddingHorizontal: 24 }}>
         <View
           style={[
             { width: '100%', borderRadius: 24, backgroundColor: color.surface.base, padding: 24 },
