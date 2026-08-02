@@ -616,7 +616,7 @@ function VendorOps({ store, navigation }: any) {
         {!inPreview && store.isVerified === false ? (
           <Pressable onPress={() => navigation?.navigate?.('Account')}>
             {({ pressed }) => (
-              <View style={{ flexDirection: 'row', alignItems: 'flex-start', gap: space.sm, borderRadius: radius.lg, backgroundColor: '#FDECEC', padding: space.md, marginBottom: space.lg, opacity: pressed ? 0.85 : 1 }}>
+              <View style={{ flexDirection: 'row', alignItems: 'flex-start', gap: space.sm, borderRadius: radius.lg, backgroundColor: color.soft.danger, padding: space.md, marginBottom: space.lg, opacity: pressed ? 0.85 : 1 }}>
                 <Feather name="alert-circle" size={15} color={color.error} style={{ marginTop: 1 }} />
                 <T variant="label" tone="error" style={{ flex: 1 }}>
                   {failingDocs.length > 0
@@ -908,7 +908,7 @@ function MenuItemRow({
                 borderRadius: 9999,
                 paddingHorizontal: space.md,
                 paddingVertical: 5,
-                backgroundColor: available ? '#E8F6EE' : color.surface.base,
+                backgroundColor: available ? color.soft.success : color.surface.base,
                 borderWidth: available ? 0 : 1,
                 borderColor: color.border.subtle,
                 opacity: pressed ? 0.7 : 1,
@@ -1211,7 +1211,7 @@ function LowStockCard({ categories, navigation, catOptions }: { categories: any[
     .sort((a: any, b: any) => a.stockQuantity - b.stockQuantity);
   if (low.length === 0) return null;
   return (
-    <View style={{ borderRadius: radius.lg, backgroundColor: '#FDF1DC', padding: space.lg, marginBottom: space.lg }}>
+    <View style={{ borderRadius: radius.lg, backgroundColor: color.soft.warning, padding: space.lg, marginBottom: space.lg }}>
       <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.sm }}>
         <Feather name="alert-triangle" size={16} color={color.warning} />
         <T variant="body" weight="semibold">

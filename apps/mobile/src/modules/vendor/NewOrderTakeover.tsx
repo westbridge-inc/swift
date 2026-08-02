@@ -1,16 +1,21 @@
 import React, { useEffect } from 'react';
 import { Modal, ScrollView, Vibration, View } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import Animated, { useAnimatedStyle, useSharedValue, withSequence, withTiming } from 'react-native-reanimated';
 import { Feather } from '@expo/vector-icons';
-import { color, radius, space } from '@swift/ui';
-import { T, PillButton } from '../../kit';
+import { color, motion, radius, space } from '@swift/ui';
+import { T, Money, PillButton } from '../../kit';
+import { haptic } from '../../lib/haptics';
 import { useVendorOrder, useOrderAction } from '../../hooks/vendorops';
 
 /**
- * The NEW-ORDER takeover (alerts spec §A1): impossible to sleep through while
- * the app is open. Full-screen, order summary, two giant buttons; a strong
- * repeating buzz every 5s until acknowledged. "View later" dismisses honestly
- * — the server's escalation ladder (re-alert → SMS) still stands behind it.
- * Multiple orders stack and are worked first-in-first-out.
+ * The NEW-ORDER takeover (alerts spec §A1 + design-100× Part 5 moment 2):
+ * impossible to sleep through while the app is open, decidable from across a
+ * kitchen. FULL-SCREEN on the paper surface — short-code in displayXl, items
+ * at heading size, total in numL, one 64dp ACCEPT. The bell tile pulses in
+ * time with the strong repeating buzz (every 5s until acknowledged). "View
+ * later" dismisses honestly — the server's escalation ladder (re-alert → SMS)
+ * still stands behind it. Multiple orders stack, worked first-in-first-out.
  */
 export function NewOrderTakeover({
   queue,
@@ -23,17 +28,31 @@ export function NewOrderTakeover({
   const orderId = current?.orderId;
   const order = useVendorOrder(orderId);
   const act = useOrderAction();
+  const insets = useSafeAreaInsets();
+  const pulse = useSharedValue(1);
 
-  // The buzz loop lives exactly as long as the takeover does.
+  // The buzz loop lives exactly as long as the takeover does — and the bell
+  // pulses on the same beat, so the sound has a visual twin.
   useEffect(() => {
     if (!orderId) return;
-    Vibration.vibrate([0, 400, 200, 400]);
-    const timer = setInterval(() => Vibration.vibrate([0, 400, 200, 400]), 5000);
+    const beat = () => {
+      Vibration.vibrate([0, 400, 200, 400]);
+      pulse.value = withSequence(
+        withTiming(1.12, { duration: motion.duration.fast }),
+        withTiming(1, { duration: motion.duration.base }),
+        withTiming(1.12, { duration: motion.duration.fast }),
+        withTiming(1, { duration: motion.duration.base }),
+      );
+    };
+    beat();
+    const timer = setInterval(beat, 5000);
     return () => {
       clearInterval(timer);
       Vibration.cancel();
     };
-  }, [orderId]);
+  }, [orderId, pulse]);
+
+  const bellStyle = useAnimatedStyle(() => ({ transform: [{ scale: pulse.value }] }));
 
   if (!current) return null;
   const o: any = order.data;
@@ -48,52 +67,86 @@ export function NewOrderTakeover({
     );
 
   return (
-    <Modal visible transparent animationType="fade" onRequestClose={() => onDismiss(current.orderId)}>
-      <View style={{ flex: 1, backgroundColor: 'rgba(0,0,0,0.82)', alignItems: 'center', justifyContent: 'center', padding: space.xl }}>
-        <View style={{ width: '100%', maxWidth: 420, backgroundColor: color.surface.base, borderRadius: radius.xl, padding: space['2xl'], alignItems: 'center' }}>
-          <View style={{ width: 64, height: 64, borderRadius: 32, backgroundColor: color.brand[50], alignItems: 'center', justifyContent: 'center' }}>
-            <Feather name="bell" size={30} color={color.brand[500]} />
-          </View>
-          <T variant="display" tone="brand" center style={{ marginTop: space.md }}>
-            {queue.length > 1 ? `${queue.length} NEW ORDERS` : 'NEW ORDER'}
-          </T>
-          <T variant="heading" center style={{ marginTop: space.sm }}>
-            #{o?.orderNumber ?? current.orderNumber ?? '…'}
-            {o?.totalAmount != null ? ` · $${Number(o.totalAmount).toLocaleString()}` : ''}
-          </T>
-          {customer ? (
-            <T variant="label" tone="muted" center style={{ marginTop: 2 }}>
-              {customer} · {items.length} item{items.length === 1 ? '' : 's'} · {o?.fulfillment === 'PICKUP' ? 'pickup' : 'delivery'}
-            </T>
-          ) : null}
-
-          <ScrollView style={{ maxHeight: 140, alignSelf: 'stretch', marginTop: space.md }}>
-            {items.map((i) => (
-              <T key={i.id} variant="label" tone="muted" style={{ marginTop: 2 }}>
-                {i.quantity}× {i.name}
-              </T>
-            ))}
-          </ScrollView>
-
-          <View style={{ alignSelf: 'stretch', gap: space.md, marginTop: space.xl }}>
-            <PillButton label="Accept" loading={busy} onPress={() => decide('accept')} />
-            <PillButton label="Reject" variant="soft" disabled={busy} onPress={() => decide('reject')} />
-          </View>
-          {act.isError ? (
-            <T variant="caption" tone="error" center style={{ marginTop: space.sm }}>
-              {(act.error as any)?.response?.data?.error?.message ?? 'That didn’t work — try again.'}
-            </T>
-          ) : null}
-          <T
-            variant="caption"
-            tone="muted"
-            center
-            style={{ marginTop: space.md, textDecorationLine: 'underline' }}
-            onPress={() => onDismiss(current.orderId)}
+    <Modal visible animationType="fade" onRequestClose={() => onDismiss(current.orderId)}>
+      <View style={{ flex: 1, backgroundColor: color.surface.subtle, padding: space['2xl'], paddingTop: insets.top + space['2xl'], paddingBottom: insets.bottom + space.md }}>
+        <View style={{ alignItems: 'center' }}>
+          <Animated.View
+            style={[
+              {
+                width: 72,
+                height: 72,
+                borderRadius: radius.lg,
+                backgroundColor: color.brand[50],
+                alignItems: 'center',
+                justifyContent: 'center',
+              },
+              bellStyle,
+            ]}
           >
-            View later — the order stays on your board
+            <Feather name="bell" size={34} color={color.brand[500]} />
+          </Animated.View>
+          <T variant="micro" tone="brand" style={{ marginTop: space.lg }}>
+            {queue.length > 1 ? `${queue.length} new orders — first in first` : 'New order'}
+          </T>
+          <T variant="displayXl" center style={{ marginTop: 2 }}>
+            #{o?.orderNumber ?? current.orderNumber ?? '…'}
+          </T>
+          <T variant="heading" tone="muted" center style={{ marginTop: 2 }}>
+            {[
+              customer || null,
+              `${items.length} item${items.length === 1 ? '' : 's'}`,
+              o?.fulfillment === 'PICKUP' ? 'pickup' : 'delivery',
+            ]
+              .filter(Boolean)
+              .join(' · ')}
           </T>
         </View>
+
+        {/* Items — glanceable from across a kitchen. */}
+        <ScrollView style={{ flex: 1, marginTop: space.xl }} contentContainerStyle={{ gap: space.sm }}>
+          {items.map((i) => (
+            <View key={i.id} style={{ flexDirection: 'row', alignItems: 'baseline', gap: space.md }}>
+              <T variant="numM">{i.quantity}×</T>
+              <T variant="heading" style={{ flex: 1 }} numberOfLines={2}>
+                {i.name}
+              </T>
+            </View>
+          ))}
+        </ScrollView>
+
+        {o?.totalAmount != null ? (
+          <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingVertical: space.lg, borderTopWidth: 1, borderTopColor: color.border.subtle }}>
+            <T variant="bodyStrong">Total</T>
+            <Money amount={Number(o.totalAmount)} size="l" />
+          </View>
+        ) : null}
+
+        <View style={{ gap: space.md }}>
+          <PillButton
+            label="Accept"
+            size="xl"
+            loading={busy}
+            onPress={() => {
+              haptic.commit();
+              decide('accept');
+            }}
+          />
+          <PillButton label="Decline" variant="soft" disabled={busy} onPress={() => decide('reject')} />
+        </View>
+        {act.isError ? (
+          <T variant="caption" tone="error" center style={{ marginTop: space.sm }}>
+            {(act.error as any)?.response?.data?.error?.message ?? 'That didn’t work — try again.'}
+          </T>
+        ) : null}
+        <T
+          variant="caption"
+          tone="muted"
+          center
+          style={{ marginTop: space.md, marginBottom: space.lg, textDecorationLine: 'underline' }}
+          onPress={() => onDismiss(current.orderId)}
+        >
+          View later — the order stays on your board
+        </T>
       </View>
     </Modal>
   );

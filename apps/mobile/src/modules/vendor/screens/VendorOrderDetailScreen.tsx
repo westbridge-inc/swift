@@ -189,7 +189,7 @@ export function VendorOrderDetailScreen({ navigation, route }: any) {
               alignItems: 'flex-start',
               gap: space.md,
               borderRadius: radius.lg,
-              backgroundColor: '#FDF1DC',
+              backgroundColor: color.soft.warning,
               padding: space.lg,
               marginBottom: space.md,
             }}
@@ -332,7 +332,7 @@ export function VendorOrderDetailScreen({ navigation, route }: any) {
 
         {/* Cancellation — reason straight off the order record */}
         {s === 'CANCELLED' ? (
-          <View style={{ borderRadius: radius.lg, backgroundColor: '#FDECEC', padding: space.lg, marginBottom: space.md }}>
+          <View style={{ borderRadius: radius.lg, backgroundColor: color.soft.danger, padding: space.lg, marginBottom: space.md }}>
             <T variant="label" weight="semibold" tone="error">
               Cancelled {fmtWhen(order.cancelledAt)}
             </T>
