@@ -591,6 +591,18 @@ export function createWorkers(ctx: JobContext) {
         return;
       }
 
+      if (job.name === 'ads-stats-rollup') {
+        // Ads stats rollup [ads-platform spec §12.3]: aggregate yesterday's
+        // AdEvent rows into AdStatsDaily — the ONLY source the advertiser
+        // dashboard reads. Delete+recompute per day = idempotent, so re-runs
+        // and late events never double-count.
+        const { AdStatsService } = await import('../modules/ads/stats.service');
+        const yesterday = new Date(Date.now() - 86_400_000);
+        const res = await new AdStatsService(ctx.prisma).rollupDay(yesterday);
+        if (res.rows > 0) ctx.log.info(res, 'ads: stats rollup');
+        return;
+      }
+
       if (job.name === 'guardian-sweep') {
         // Trip Guardian tick [safety spec §5]. Opens a session for every taxi
         // that went RIDE_IN_PROGRESS, runs the L1 detectors off the SAME
@@ -901,6 +913,14 @@ export async function scheduleRecurringJobs(queues: ReturnType<typeof createQueu
   // unapproved before go-live, activate scheduled weeks, complete finished runs.
   await queues.dispatchQueue.add('ads-lifecycle', {}, {
     repeat: { pattern: '0 * * * *' },
+    removeOnComplete: 20,
+    removeOnFail: 20,
+  });
+
+  // Ads stats rollup [ads-platform spec §12.3]: nightly at 02:00 — aggregate
+  // yesterday's AdEvent rows into AdStatsDaily for the advertiser dashboard.
+  await queues.dispatchQueue.add('ads-stats-rollup', {}, {
+    repeat: { pattern: '0 2 * * *' },
     removeOnComplete: 20,
     removeOnFail: 20,
   });
