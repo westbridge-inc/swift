@@ -52,6 +52,26 @@ export async function verificationRoutes(app: FastifyInstance) {
     return { success: true, data: status };
   });
 
+  /** POST /appeal — "Think this is a mistake?" (trial-integrity Part 4).
+   *  Opens the appeal on the caller's own latest appealable enforcement
+   *  (trial denials / velocity holds; fraud-tier holds are not user-
+   *  appealable — their message carries no appeal path). 24h SLA, same clock
+   *  culture as reviews. */
+  app.post('/appeal', auth, async (request) => {
+    const { note } = z.object({ note: z.string().trim().min(3).max(1000) }).parse(request.body ?? {});
+    const { openAppeal } = await import('../integrity/enforcement');
+    const opened = await openAppeal(app.prisma, request.user.userId, note);
+    if (!opened) {
+      throw new AppError(404, 'NOTHING_TO_APPEAL', 'There is no decision on your account to appeal.');
+    }
+    await notifyAdmins(app.prisma, new NotificationService(app.prisma, app.io), {
+      title: 'Trial-integrity appeal opened',
+      body: 'A user says an enforcement decision is a mistake. Review it with the identity panel — 24h clock.',
+      data: { kind: 'integrity_appeal', enforcementId: opened.id, accountId: request.user.userId },
+    }).catch(() => {});
+    return { success: true, data: { appealed: true, reference: opened.id } };
+  });
+
   /** POST /documents — submit one checklist document for a role. */
   app.post('/documents', auth, async (request, reply) => {
     const body = submitDocumentSchema.parse(request.body);

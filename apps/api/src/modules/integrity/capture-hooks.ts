@@ -52,15 +52,41 @@ export function captureSignup(
         type: 'IP_SUBNET', normalizedValue: normalizeIpSubnet(input.ip), source: 'REQUEST_META',
       });
     }
-    // §5 velocity ledger — recorded for every signup; thresholds read it later.
-    await prisma.signupAttempt.create({
+    // §5 velocity ledger — recorded for every signup; thresholds live in
+    // IntegritySettings (config, not code).
+    const deviceHash = input.deviceId && input.deviceId !== 'unknown' ? hashSignal(normalizeDevice(input.deviceId)) : null;
+    const attempt = await prisma.signupAttempt.create({
       data: {
         phoneHash: hashSignal(normalizePhone(input.phone)),
-        deviceHash: input.deviceId && input.deviceId !== 'unknown' ? hashSignal(normalizeDevice(input.deviceId)) : null,
+        deviceHash,
         ipHash: input.ip ? hashSignal(normalizeIpSubnet(input.ip)) : null,
         outcome: 'CREATED',
       },
     });
+
+    // §5 device-velocity rule (rung 2 of the ladder): the Nth signup from one
+    // device in 24h enters REVIEW_FIRST — signup itself completed normally
+    // (the abuser learns nothing); ACTIVATION waits for a human because the
+    // verification pipeline refuses to auto-approve held accounts.
+    if (deviceHash) {
+      const settings = await prisma.integritySettings.findUnique({ where: { id: 'platform' } });
+      const maxPerDevice = settings?.maxSignupsPerDevice24h ?? 3;
+      const dayAgo = new Date(Date.now() - 24 * 3600_000);
+      const recent = await prisma.signupAttempt.count({ where: { deviceHash, createdAt: { gte: dayAgo } } });
+      if (recent >= maxPerDevice) {
+        await prisma.signupAttempt.update({ where: { id: attempt.id }, data: { outcome: 'REVIEW_FIRST' } });
+        await prisma.enforcementAction.create({
+          data: {
+            accountId: input.userId,
+            level: 'REVIEW_FIRST',
+            reasonCode: 'VELOCITY_DEVICE',
+            signalsFired: [{ type: 'DEVICE', windowHours: 24, signups: recent, threshold: maxPerDevice }] as never,
+            decidedBy: 'SYSTEM',
+          },
+        });
+        log().warn({ userId: input.userId, signups: recent }, 'device velocity breach — account enters REVIEW_FIRST');
+      }
+    }
   })().catch((err) => log().error({ err, userId: input.userId }, 'signup identity capture failed — flow unaffected'));
 }
 

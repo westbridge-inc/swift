@@ -22,15 +22,20 @@ import { loginWithOtp } from './helpers/otp';
 // during pending review, lapse auto-suspending live listings.
 // ---------------------------------------------------------------------------
 
-const MOVER_PHONE = '+5920004444';
-const VENDOR_PHONE = '+5920005555';
-const L2_AUTO_PHONE = '+5920006666';
-const L2_MANUAL_PHONE = '+5920007777';
-const ADMIN_PHONE = '+5920004445';
-const TAXI_MOVER_PHONE = '+5920004446';
-const BICYCLE_MOVER_PHONE = '+5920004447';
-const PREVIEW_MOVER_PHONE = '+5920004448';
-const FACE_MATCH_PHONE = '+5920004449';
+// Unique per run: PHONE is a STRONG identity signal — with fixed numbers,
+// run 2's "fresh" signup unions into run 1's residual cluster (identity rows
+// outlive the deleted test users) and the trial law correctly denies the
+// second trial. Same lesson as the plate below.
+const runBase = 592_001_000_000 + Math.floor(Math.random() * 8_000_000); // window disjoint from the 592_8XX suite bases
+const MOVER_PHONE = `+${runBase + 1}`;
+const VENDOR_PHONE = `+${runBase + 2}`;
+const L2_AUTO_PHONE = `+${runBase + 3}`;
+const L2_MANUAL_PHONE = `+${runBase + 4}`;
+const ADMIN_PHONE = `+${runBase + 5}`;
+const TAXI_MOVER_PHONE = `+${runBase + 6}`;
+const BICYCLE_MOVER_PHONE = `+${runBase + 7}`;
+const PREVIEW_MOVER_PHONE = `+${runBase + 8}`;
+const FACE_MATCH_PHONE = `+${runBase + 9}`;
 const ALL_PHONES = [MOVER_PHONE, VENDOR_PHONE, L2_AUTO_PHONE, L2_MANUAL_PHONE, ADMIN_PHONE, TAXI_MOVER_PHONE, BICYCLE_MOVER_PHONE, PREVIEW_MOVER_PHONE, FACE_MATCH_PHONE];
 
 // Base (incl. police clearance — required of every courier) + motor docs.
@@ -604,7 +609,10 @@ describe('Taxi movers are shown — and gated on — the taxi-extra checklist', 
       data: {
         userId: taxi.user.id,
         vehicleMake: 'Toyota', vehicleModel: 'Allion', vehicleYear: 2020,
-        vehicleColor: 'Silver', licensePlate: 'HC-S4TAXI',
+        // Unique per run: the trial-integrity plate law (one plate = one
+        // vehicle-bound human) unions same-plate drivers across runs — a
+        // hard-coded plate made run 2's "fresh" mover inherit run 1's trial.
+        vehicleColor: 'Silver', licensePlate: `HC-${Math.floor(100000 + Math.random() * 899999)}`,
         driverLicenseUrl: 'storage://t/dl.jpg', vehicleInsuranceUrl: 'storage://t/ins.jpg',
       },
     });

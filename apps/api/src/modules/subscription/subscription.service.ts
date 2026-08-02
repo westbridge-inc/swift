@@ -129,6 +129,22 @@ export class SubscriptionService {
     try {
       if (!decision.grant) {
         log().info({ userId: human.userId, role: human.role, reason: decision.reason }, 'trial denied by entitlement law — subscription born billed');
+        // Every enforcement is explainable and appealable (Part 0.4/Part 4):
+        // the billed-from-day-1 decision leaves its evidence row. Fraud/debt
+        // paths already wrote theirs inside decide(); this covers the plain
+        // consumed/active-elsewhere denials.
+        if (decision.reason === 'TRIAL_CONSUMED' || decision.reason === 'TRIAL_ACTIVE_ELSEWHERE') {
+          await this.prisma.enforcementAction.create({
+            data: {
+              accountId: human.userId,
+              clusterId: decision.clusterId,
+              level: 'DENY_TRIAL',
+              reasonCode: decision.reason,
+              signalsFired: [{ note: 'trial law at activation', role: human.role }] as never,
+              decidedBy: 'SYSTEM',
+            },
+          }).catch(() => {});
+        }
         return await billedFromDayOne();
       }
       // Grant + subscription in ONE transaction (§3.1) — the TrialGrant unique
