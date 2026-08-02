@@ -274,7 +274,10 @@ function unmountedApiPrefixes(serverPrefixes: string[], mountedUrls: string[], e
 
 describe('server↔matrix prefix drift guard [SWIFT-092]', () => {
   // Unauthenticated by design — outside the authz matrix on purpose.
-  const EXEMPT = new Set(['/api/v1/public']);
+  // /billing/mmg is machine-to-machine (MMG's biller network calls it):
+  // HMAC-over-raw-body auth, 503 dark until configured — proven in
+  // agent-cash-channels.test.ts (401 only for signatures, per SO-6).
+  const EXEMPT = new Set(['/api/v1/public', '/api/v1/billing/mmg']);
 
   it('flags a server prefix the matrix never mounts (red-first)', () => {
     // Pretend server.ts added /api/v1/loyalty but buildTestApp never enrolled it.

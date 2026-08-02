@@ -1245,13 +1245,15 @@ export async function riderRoutes(app: FastifyInstance) {
     const isActive = subscriptionOperability(sub, { missingRow: 'BLOCK' }, now).operable && sub.currentPeriodEnd > now;
 
     const { sanDisplay } = await import('../billing/san.service');
+    const { payInfo } = await import('../billing/agent-cash.service');
     return {
       success: true,
       data: {
         ...sub,
-        // "My Swift Number" [san spec 2.4/6.1] — the cash-at-agent payment
-        // reference; heal-on-read covers pre-SAN rows.
+        // "My Swift Number" + Pay-screen block [san spec 2.4/6.1] — SAN,
+        // wallet balance, amount due, channel-honest activation copy.
         ...(await sanDisplay(app.prisma, sub)),
+        ...(await payInfo(app.prisma, sub)),
         isActive,
         daysRemaining: isActive
           ? Math.ceil((sub.currentPeriodEnd.getTime() - now.getTime()) / 86_400_000)
