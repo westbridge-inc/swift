@@ -391,6 +391,34 @@ model ComplianceReviewCase {
 /// Supply watcher (availability spec §5): a customer who hit "no drivers
 /// nearby" asks to be told when supply returns. One active watch per
 /// customer; the scan notifies once and stamps, watches expire in 2h.
+
+/// Rides spec 5.5B — the supply-gap queue: a WAITING entry is a promised
+/// auto-request. Position is derived (createdAt FIFO among WAITING), never
+/// stored; the 2-min supply scan claims the head via CAS and creates the ride
+/// through the SAME request path the route uses. Additive-only (17.2).
+model RideQueueEntry {
+  id                String    @id @default(cuid())
+  customerId        String
+  tenantId          String?
+  pickupLat         Float
+  pickupLng         Float
+  pickupAddress     String
+  dropoffLat        Float
+  dropoffLng        Float
+  dropoffAddress    String
+  rideClass         String    @default("ECONOMY")
+  passengerCount    Int       @default(1)
+  status            String    @default("WAITING") // WAITING | MATCHED | EXPIRED | LEFT
+  createdAt         DateTime  @default(now())
+  expiresAt         DateTime
+  matchedOrderId    String?
+  expiredNotifiedAt DateTime?
+
+  @@index([status, expiresAt])
+  @@index([customerId, status])
+  @@map("ride_queue_entries")
+}
+
 model SupplyWatch {
   id         String    @id @default(cuid())
   customerId String
@@ -670,22 +698,22 @@ enum VehicleType {
 // ==========================================
 
 model Driver {
-  id                       String        @id @default(cuid())
-  userId                   String        @unique
-  user                     User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  id                       String           @id @default(cuid())
+  userId                   String           @unique
+  user                     User             @relation(fields: [userId], references: [id], onDelete: Cascade)
   vehicleMake              String
   vehicleModel             String
   vehicleYear              Int
   vehicleColor             String
   licensePlate             String
-  vehicleCapacity          Int           @default(4)
+  vehicleCapacity          Int              @default(4)
   /// The physical vehicle (drives the verification document checklist + the
   /// passenger-hire insurance gate). Defaults CAR so existing taxi drivers are
   /// unchanged; wagons/buses set their real type at onboarding.
-  vehicleType              VehicleType   @default(CAR)
+  vehicleType              VehicleType      @default(CAR)
   /// Top taxi tier this vehicle serves (serves all classes <= it). Set via the
   /// driver-profile API and the admin drivers page (premium-fleet onboarding).
-  rideClass                RideClass     @default(ECONOMY)
+  rideClass                RideClass        @default(ECONOMY)
   /// Vehicle visual identity [rides spec 6B] — additive, nullable, every
   /// consumer handles null. bodyType from the make/model fleet mapping
   /// (UNKNOWN surfaces one-tap classification in admin — never guessed
@@ -702,11 +730,11 @@ model Driver {
   /// §5) — uploaded via POST /driver/vehicle-photo into the public vehicles/
   /// tree. Distinct from the private vehicle_exterior_photo KYC document.
   vehiclePhotoUrl          String?
-  documentsVerified        Boolean       @default(false)
+  documentsVerified        Boolean          @default(false)
   documentsVerifiedAt      DateTime?
   documentsVerifiedBy      String?
-  isOnline                 Boolean       @default(false)
-  isAvailable              Boolean       @default(true)
+  isOnline                 Boolean          @default(false)
+  isAvailable              Boolean          @default(true)
   currentLat               Float?
   currentLng               Float?
   lastLocationUpdate       DateTime?
@@ -725,19 +753,19 @@ model Driver {
   /// §8.3 — SHADOW_RESTRICTED (S2 option): stays online, but excluded from
   /// enhanced-monitoring passengers' trips pending review.
   safetyShadowRestrictedAt DateTime?
-  totalRides               Int           @default(0)
-  averageRating            Float         @default(5.0)
-  totalRatings             Int           @default(0)
-  acceptanceRate           Float         @default(100.0)
-  cancellationRate         Float         @default(0.0)
+  totalRides               Int              @default(0)
+  averageRating            Float            @default(5.0)
+  totalRatings             Int              @default(0)
+  acceptanceRate           Float            @default(100.0)
+  cancellationRate         Float            @default(0.0)
   subscription             Subscription?
   earnings                 Earning[]
   orders                   Order[]
   /// The taxi driver's OWN MMG "pay me" link. Opt-in: when set, riders can pay
   /// the fare directly via MMG (money never touches Swift); null = cash-only.
   mmgPayUrl                String?
-  createdAt                DateTime      @default(now())
-  updatedAt                DateTime      @updatedAt
+  createdAt                DateTime         @default(now())
+  updatedAt                DateTime         @updatedAt
 
   // Taxi dispatch filters online+available candidates before the PostGIS
   // ST_DWithin distance check (the GIST expression index lives in the
@@ -1674,22 +1702,22 @@ model MmgAgentPayment {
 /// actually deposited, minus their fees. INERT until the settlement cadence
 /// config is set (MMG question 10) — built now, activated by an answer.
 model SettlementBatch {
-  id               String    @id @default(cuid())
-  tenantId         String    @default("swift-default")
-  provider         String    @default("MMG")
-  periodStart      DateTime
-  periodEnd        DateTime
+  id             String    @id @default(cuid())
+  tenantId       String    @default("swift-default")
+  provider       String    @default("MMG")
+  periodStart    DateTime
+  periodEnd      DateTime
   /// Σ MATCHED/RESOLVED agent payments in period — computed, provable from rows
-  grossGyd         Decimal   @db.Decimal(12, 2)
-  providerFeeGyd   Decimal?  @db.Decimal(12, 2)
-  expectedNetGyd   Decimal?  @db.Decimal(12, 2)
-  depositedGyd     Decimal?  @db.Decimal(12, 2)
-  depositedAt      DateTime?
-  bankRef          String?
+  grossGyd       Decimal   @db.Decimal(12, 2)
+  providerFeeGyd Decimal?  @db.Decimal(12, 2)
+  expectedNetGyd Decimal?  @db.Decimal(12, 2)
+  depositedGyd   Decimal?  @db.Decimal(12, 2)
+  depositedAt    DateTime?
+  bankRef        String?
   /// EXPECTED | DEPOSITED | MISMATCH | RESOLVED
-  status           String    @default("EXPECTED")
-  notes            String?
-  createdAt        DateTime  @default(now())
+  status         String    @default("EXPECTED")
+  notes          String?
+  createdAt      DateTime  @default(now())
 
   @@unique([tenantId, provider, periodStart])
   @@index([status])

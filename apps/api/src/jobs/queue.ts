@@ -904,6 +904,17 @@ export function createWorkers(ctx: JobContext) {
           const notifications = new NotificationService(ctx.prisma, ctx.io);
           const n = await scanSupplyWatches(ctx.prisma, dispatch, notifications);
           if (n > 0) ctx.log.info({ notified: n }, 'supply watch: customers told drivers are back');
+          // Rides spec 5.5B: the queue rides the same cadence — expiry sweep +
+          // FIFO auto-request through the real request core. Kill switch:
+          // RIDE_QUEUE_DISABLED=1.
+          {
+            const { scanRideQueue } = await import('../modules/rides/queue.service');
+            const { FareService } = await import('../modules/rides/fare.service');
+            const q = await scanRideQueue({ prisma: ctx.prisma }, new FareService(ctx.prisma), dispatch, notifications);
+            if (q.matched > 0 || q.expired > 0) {
+              ctx.log.info(q, 'ride queue: scan results');
+            }
+          }
           // §4.2: ready-with-no-rider orders prompt the customer with options
           // (once). Flag-gated with the conversion it offers.
           if (process.env['DISPATCH_EXHAUSTION'] === '1') {
