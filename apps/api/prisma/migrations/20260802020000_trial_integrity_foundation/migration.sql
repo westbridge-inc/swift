@@ -139,7 +139,7 @@ CREATE INDEX "identity_cluster_members_clusterId_idx" ON "identity_cluster_membe
 CREATE INDEX "trial_grants_accountId_idx" ON "trial_grants"("accountId");
 
 -- CreateIndex
-CREATE UNIQUE INDEX "trial_grants_tenantId_clusterId_role_key" ON "trial_grants"("tenantId", "clusterId", "role");
+CREATE INDEX "trial_grants_tenantId_clusterId_role_idx" ON "trial_grants"("tenantId", "clusterId", "role");
 
 -- CreateIndex
 CREATE INDEX "enforcement_actions_accountId_idx" ON "enforcement_actions"("accountId");
