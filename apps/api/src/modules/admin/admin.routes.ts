@@ -2650,6 +2650,151 @@ export async function adminRoutes(app: FastifyInstance) {
     return { success: true, data: { ingestionMode: row.value } };
   });
 
+  // ── Collections workbench [san spec PART 21] — the founder's call list ────
+
+  /** Tabs of who to call, with tap-to-call + WhatsApp links and the promise
+   *  tracker. At pilot scale the founder's phone call at the right moment IS
+   *  the highest-ROI collections tool; this makes those calls effortless. */
+  app.get('/billing/collections', { preHandler: [adminGuard] }, async (request) => {
+    const { tab } = z.object({ tab: z.enum(['due72', 'pastdue', 'suspended', 'churned']).default('due72') }).parse(request.query ?? {});
+    const now = Date.now();
+    const where =
+      tab === 'due72'
+        ? { status: 'ACTIVE' as const, feeWaived: false, nextBillingDate: { lte: new Date(now + 72 * 3_600_000) } }
+        : tab === 'pastdue'
+          ? { status: 'PAST_DUE' as const }
+          : tab === 'suspended'
+            ? { status: 'SUSPENDED' as const }
+            : { status: 'CHURNED' as const };
+    const subs = await app.prisma.subscription.findMany({
+      where,
+      include: {
+        vendor: { select: { name: true, city: true, owner: { select: { user: { select: { firstName: true, lastName: true, phone: true } } } } } },
+        rider: { select: { user: { select: { firstName: true, lastName: true, phone: true } } } },
+        driver: { select: { user: { select: { firstName: true, lastName: true, phone: true } } } },
+      },
+      orderBy: tab === 'due72' ? { nextBillingDate: 'asc' } : { updatedAt: 'asc' },
+      take: 200,
+    });
+    const ids = subs.map((s) => s.id);
+    const [balances, contacts, lastPayments] = await Promise.all([
+      app.prisma.prepaidBalance.findMany({ where: { subscriptionId: { in: ids } } }),
+      app.prisma.collectionContact.findMany({ where: { subscriptionId: { in: ids } }, orderBy: { createdAt: 'desc' } }),
+      app.prisma.subscriptionPayment.findMany({
+        where: { subscriptionId: { in: ids }, status: 'CAPTURED' },
+        orderBy: { paidAt: 'desc' },
+        distinct: ['subscriptionId'],
+        select: { subscriptionId: true, paidAt: true, amount: true },
+      }),
+    ]);
+    const balanceBy = new Map(balances.map((b) => [b.subscriptionId, Number(b.balance)]));
+    const lastContactBy = new Map<string, (typeof contacts)[number]>();
+    for (const c of contacts) if (!lastContactBy.has(c.subscriptionId)) lastContactBy.set(c.subscriptionId, c);
+    const lastPayBy = new Map(lastPayments.map((p) => [p.subscriptionId, p]));
+
+    const rows = subs.map((s) => {
+      const person = s.vendor?.owner.user ?? s.rider?.user ?? s.driver?.user;
+      const phone = person?.phone ?? '';
+      const weekly = Number(s.customRate ?? s.weeklyRate);
+      const due = Math.max(0, weekly - (balanceBy.get(s.id) ?? 0));
+      const contact = lastContactBy.get(s.id);
+      const promiseMissed = Boolean(
+        contact && contact.outcome === 'PROMISED' && contact.promisedDate && contact.promisedDate.getTime() < now
+        && (!lastPayBy.get(s.id) || lastPayBy.get(s.id)!.paidAt!.getTime() < contact.createdAt.getTime()),
+      );
+      return {
+        subscriptionId: s.id,
+        name: s.vendor?.name ?? `${person?.firstName ?? ''} ${person?.lastName ?? ''}`.trim(),
+        city: s.vendor?.city ?? null,
+        type: s.type,
+        san: s.san,
+        phone,
+        waLink: phone ? `https://wa.me/${phone.replace(/\D/g, '')}` : null,
+        amountDueGyd: due,
+        status: s.status,
+        nextBillingDate: s.nextBillingDate,
+        suspendedAt: s.suspendedAt,
+        daysInState: Math.floor((now - s.updatedAt.getTime()) / 86_400_000),
+        lastPayment: lastPayBy.get(s.id) ?? null,
+        lastContact: contact ?? null,
+        promiseMissed,
+      };
+    });
+    // Missed promises float to the top — the follow-up IS the system.
+    rows.sort((a, b) => Number(b.promiseMissed) - Number(a.promiseMissed));
+    return { success: true, data: rows };
+  });
+
+  /** Outcome logging [21.2]: reached / promised {date} / refused / wrong
+   *  number. Promise-kept rate becomes a KPI. */
+  app.post('/billing/collections/:subscriptionId/contact', { preHandler: [adminGuard] }, async (request) => {
+    const { subscriptionId } = z.object({ subscriptionId: z.string() }).parse(request.params);
+    const body = z.object({
+      outcome: z.enum(['REACHED', 'PROMISED', 'REFUSED', 'WRONG_NUMBER']),
+      promisedDate: z.string().datetime().optional(),
+      note: z.string().trim().max(500).optional(),
+    }).parse(request.body ?? {});
+    if (body.outcome === 'PROMISED' && !body.promisedDate) {
+      throw new AppError(400, 'PROMISE_NEEDS_DATE', 'A promise without a date cannot be tracked.');
+    }
+    const row = await app.prisma.collectionContact.create({
+      data: {
+        subscriptionId,
+        outcome: body.outcome,
+        promisedDate: body.promisedDate ? new Date(body.promisedDate) : null,
+        note: body.note ?? null,
+        byAdminId: request.user.userId,
+      },
+    });
+    return { success: true, data: row };
+  });
+
+  /** Daily cash journal CSV [20.4] — the accountant's export. */
+  app.get('/billing/cash-journal', { preHandler: [adminGuard] }, async (request, reply) => {
+    const q = z.object({
+      from: z.string().datetime().optional(),
+      to: z.string().datetime().optional(),
+    }).parse(request.query ?? {});
+    const to = q.to ? new Date(q.to) : new Date();
+    const from = q.from ? new Date(q.from) : new Date(to.getTime() - 30 * 86_400_000);
+    const { cashJournalCsv } = await import('../billing/receipts');
+    const csv = await cashJournalCsv(app.prisma, from, to);
+    reply.header('content-type', 'text/csv; charset=utf-8');
+    reply.header('content-disposition', `attachment; filename="swift-cash-journal-${from.toISOString().slice(0, 10)}-${to.toISOString().slice(0, 10)}.csv"`);
+    return reply.send(csv);
+  });
+
+  /** The cash-rail KPI tile [PART 12/21.5] — is the rail actually working. */
+  app.get('/billing/cash-kpis', { preHandler: [adminGuard] }, async (request) => {
+    const { days } = z.object({ days: z.coerce.number().int().min(1).max(365).default(30) }).parse(request.query ?? {});
+    const since = new Date(Date.now() - days * 86_400_000);
+    const [byChannel, unmatchedDepth, oldestUnmatched, contacts, payments, dueStates] = await Promise.all([
+      app.prisma.mmgAgentPayment.groupBy({ by: ['channel'], where: { createdAt: { gte: since } }, _count: true, _sum: { amount: true } }),
+      app.prisma.mmgAgentPayment.count({ where: { status: 'UNMATCHED' } }),
+      app.prisma.mmgAgentPayment.findFirst({ where: { status: 'UNMATCHED' }, orderBy: { createdAt: 'asc' }, select: { createdAt: true } }),
+      app.prisma.collectionContact.findMany({ where: { createdAt: { gte: since } } }),
+      app.prisma.subscriptionPayment.findMany({
+        where: { status: 'CAPTURED', paidAt: { gte: since } },
+        select: { subscriptionId: true, paidAt: true, createdAt: true },
+      }),
+      app.prisma.subscription.groupBy({ by: ['status'], _count: true }),
+    ]);
+    const promised = contacts.filter((c) => c.outcome === 'PROMISED' && c.promisedDate);
+    const promisesKept = promised.filter((c) =>
+      payments.some((p) => p.subscriptionId === c.subscriptionId && p.paidAt && p.paidAt >= c.createdAt && p.paidAt.getTime() <= c.promisedDate!.getTime() + 86_400_000),
+    ).length;
+    return {
+      success: true,
+      data: {
+        windowDays: days,
+        channelMix: byChannel.map((c) => ({ channel: c.channel, count: c._count, totalGyd: Number(c._sum.amount ?? 0) })),
+        unmatched: { depth: unmatchedDepth, oldestHours: oldestUnmatched ? Math.round((Date.now() - oldestUnmatched.createdAt.getTime()) / 3_600_000) : 0 },
+        collections: { contacts: contacts.length, promises: promised.length, promisesKept, promiseKeptRate: promised.length ? promisesKept / promised.length : null },
+        subscriptionStates: dueStates.map((s) => ({ status: s.status, count: s._count })),
+      },
+    };
+  });
+
   /** Global SAN resolution (⌘K): who does this number belong to. Payment
    *  reference lookup only — the SAN is never an auth factor. */
   app.get('/billing/san/:san', { preHandler: [adminGuard] }, async (request) => {

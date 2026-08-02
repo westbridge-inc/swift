@@ -1650,6 +1650,50 @@ model MmgAgentPayment {
   @@map("mmg_agent_payments")
 }
 
+/// GRA-ready sequential receipts [san spec 20.1]: per-tenant-per-year gapless
+/// counter, one receipt per credit (cash, manual, promo — promo shows GY$0
+/// cash). Financial rows survive DPA erasure (legal-obligation basis, 20.5).
+model FeeReceipt {
+  id             String   @id @default(cuid())
+  receiptNumber  String   @unique // SWF-{TENANT}-{YYYY}-{000001}
+  tenantId       String   @default("swift-default")
+  subscriptionId String
+  billingEventId String   @unique
+  amount         Decimal  @db.Decimal(12, 2)
+  channel        String?
+  mmgRef         String?
+  issuedAt       DateTime @default(now())
+
+  @@index([subscriptionId, issuedAt])
+  @@index([tenantId, issuedAt])
+  @@map("fee_receipts")
+}
+
+/// The gapless counter behind FeeReceipt — row-locked per issue [scenario R].
+model ReceiptCounter {
+  tenantId String
+  year     Int
+  seq      Int    @default(0)
+
+  @@id([tenantId, year])
+  @@map("receipt_counters")
+}
+
+/// Collections workbench [san spec PART 21]: the founder's call log. A missed
+/// promise resurfaces the row; promise-kept rate is a KPI.
+model CollectionContact {
+  id             String    @id @default(cuid())
+  subscriptionId String
+  outcome        String // REACHED | PROMISED | REFUSED | WRONG_NUMBER
+  promisedDate   DateTime?
+  note           String?
+  byAdminId      String
+  createdAt      DateTime  @default(now())
+
+  @@index([subscriptionId, createdAt])
+  @@map("collection_contacts")
+}
+
 /// A released Swift Account Number, kept forever [san spec 2.4]: on account
 /// erasure the subscription row may be anonymized but its SAN lands here —
 /// a late agent payment to it goes to suspense, never to a stranger, and the

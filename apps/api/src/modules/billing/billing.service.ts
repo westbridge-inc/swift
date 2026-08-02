@@ -915,7 +915,7 @@ export class BillingService {
     let balance;
     try {
       balance = await this.prisma.$transaction(async (tx) => {
-        await tx.billingEvent.create({
+        const event = await tx.billingEvent.create({
           data: {
             subscriptionId,
             type: 'PREPAID_TOPUP',
@@ -924,6 +924,17 @@ export class BillingService {
             idempotencyKey: eventKey,
             note: reference ? `ref: ${reference} (by ${recordedBy})` : `recorded by ${recordedBy}`,
           },
+        });
+        // Every credit issues a sequential GRA-ready receipt [san spec 20.1]
+        // inside the SAME tx — a replayed top-up rolls the receipt (and its
+        // counter claim) back with it, so numbers stay gapless.
+        const { issueReceipt } = await import('./receipts');
+        await issueReceipt(tx, {
+          subscriptionId,
+          billingEventId: event.id,
+          amount,
+          channel: recordedBy.startsWith('agent-cash:') ? recordedBy.slice('agent-cash:'.length) : 'ADMIN_TOPUP',
+          mmgRef: reference,
         });
         return tx.prepaidBalance.upsert({
           where: { subscriptionId },

@@ -665,6 +665,27 @@ export function createWorkers(ctx: JobContext) {
         return;
       }
 
+      if (job.name === 'billing-invariants') {
+        // Nightly proofs [san spec 24.2/16.3]: wallet balances re-derived from
+        // the ledger, wrongful suspensions AUTO-HEALED (worst-harm invariant),
+        // enforcement leaks + receipt gaps surfaced. Failures page.
+        const { runBillingInvariants } = await import('../modules/billing/invariants');
+        const report = await runBillingInvariants(ctx.prisma);
+        const broken = report.walletMismatches.length + report.wrongfulSuspensions.length + report.enforcementLeaks.length + report.receiptGaps.length;
+        if (broken > 0) {
+          const { notifyAdmins, NotificationService } = await import('../modules/notification/notification.service');
+          await opsPageOnce(ctx, 'billing-invariants', 12 * 3600, () =>
+            notifyAdmins(ctx.prisma, new NotificationService(ctx.prisma, ctx.io), {
+              title: 'Billing invariant failures',
+              body: `${report.walletMismatches.length} wallet mismatch(es), ${report.wrongfulSuspensions.length} wrongful suspension(s) auto-healed, ${report.enforcementLeaks.length} enforcement leak(s), ${report.receiptGaps.length} receipt gap(s).`,
+              data: { kind: 'billing_invariants', report: { ...report, walletsChecked: report.walletsChecked } },
+            }),
+          );
+        }
+        ctx.log.info({ walletsChecked: report.walletsChecked, broken }, 'billing invariants run');
+        return;
+      }
+
       if (job.name === 'agent-cash-sla') {
         // Suspense SLA [san spec 4.6]: an unmatched agent payment older than
         // 24h is a paid-but-suspended person — page the founder, deduped per
@@ -1048,6 +1069,13 @@ export async function scheduleRecurringJobs(queues: ReturnType<typeof createQueu
     repeat: { pattern: '15 * * * *' },
     removeOnComplete: 5,
     removeOnFail: 5,
+  });
+
+  // Billing invariants: nightly 03:30 (after the 03:00 money jobs settle).
+  await queues.dispatchQueue.add('billing-invariants', {}, {
+    repeat: { pattern: '30 3 * * *' },
+    removeOnComplete: 7,
+    removeOnFail: 7,
   });
 
   // Rating anti-manipulation sweep: daily at 04:00
