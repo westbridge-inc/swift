@@ -1577,6 +1577,12 @@ model BillingEvent {
   /// PaymentProvider charge/refund reference when one exists
   paymentRef     String?
   note           String?
+  /// USD pricing (System 2): the pinned trio. `amount` = the local settlement
+  /// figure; these record the USD price + the exact rate that produced it.
+  /// Nullable — pre-USD events and non-charge events carry none.
+  amountUsd      Decimal?         @db.Decimal(10, 2)
+  fxRateId       String?
+  fxRateUsed     Decimal?         @db.Decimal(12, 6)
   createdAt      DateTime         @default(now())
 
   @@index([subscriptionId])
@@ -3190,4 +3196,47 @@ model IntegritySettings {
   tombstoneRetentionEnabled Boolean @default(false) // DPA founder decision — OFF until decided
 
   @@map("integrity_settings")
+}
+
+// ─── USD Platform Pricing (batching/USD spec System 2, Parts 10–15/20) ───────
+// USD is the price; local is the settlement; the charge is immutable once
+// written. One price book across every Caribbean market; the FX rate is
+// founder-set, append-only, and PINNED per charge — reconciled: Swift's fee
+// billing has no invoice model, so the pinned trio (USD, rate, local) lands
+// on the BillingEvent charge rows. Ships dark behind usdPricing config.
+
+model PriceBookEntry {
+  id            String   @id @default(cuid())
+  role          String // VENDOR | RIDER | DRIVER | SERVICE
+  tier          String? // plan tier where plans exist (e.g. SMALL_VENDOR)
+  amountUsd     Decimal  @db.Decimal(10, 2)
+  active        Boolean  @default(true)
+  effectiveFrom DateTime @default(now())
+
+  @@index([role, active])
+  @@map("price_book_entries")
+}
+
+model FxRate {
+  id            String   @id @default(cuid())
+  base          String   @default("USD")
+  quote         String // GYD | TTD | JMD | BBD
+  rate          Decimal  @db.Decimal(12, 6)
+  source        String // FOUNDER_MANUAL | BOG_REFERENCE (a label, not a feed)
+  setByUserId   String
+  effectiveFrom DateTime
+  createdAt     DateTime @default(now())
+
+  @@index([quote, effectiveFrom])
+  @@map("fx_rates")
+}
+
+model TenantBillingCurrency {
+  tenantId           String  @id
+  settlementCurrency String  @default("GYD")
+  roundingIncrement  Decimal @default(100) @db.Decimal(10, 2) // GYD:100 TTD:1 JMD:50 BBD:1
+  displayDual        Boolean @default(true)
+  usdPricingEnabled  Boolean @default(false) // dark until the founder enables (Mode A/B chosen then)
+
+  @@map("tenant_billing_currency")
 }
