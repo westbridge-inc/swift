@@ -494,10 +494,40 @@ export class BillingService {
       const periodKey = payment.periodStart.toISOString().slice(0, 10);
 
       let status: string;
+      let reportedMinor = 0;
       try {
-        status = (await mmg.transactionLookup({ transactionId: payment.externalRef! })).status;
+        const lookup = await mmg.transactionLookup({ transactionId: payment.externalRef! });
+        status = lookup.status;
+        reportedMinor = lookup.amountMinor ?? 0;
       } catch {
         out.stillPending += 1; // transport hiccup — the next tick retries
+        continue;
+      }
+
+      // USD pricing Part 10 rule 3 / SO-6 posture: the settled amount must
+      // match OUR amount exactly. A mismatch is NEVER silently absorbed and
+      // never auto-settled — flag once for the founder and hold the row.
+      // (reportedMinor 0 = provider didn't echo an amount; nothing to check.)
+      if (status === 'approved' && reportedMinor > 0 && reportedMinor !== Math.round(Number(payment.amount) * 100)) {
+        try {
+          await this.prisma.billingEvent.create({
+            data: {
+              subscriptionId: sub.id,
+              type: 'REMINDER',
+              currencyCode: sub.currencyCode,
+              idempotencyKey: `mismatch:${payment.id}`,
+              note: `RECONCILE_MISMATCH: MMG reports ${(reportedMinor / 100).toFixed(2)} vs our ${Number(payment.amount).toFixed(2)} (payment ${payment.id})`,
+            },
+          });
+          await notifyAdmins(this.prisma, this.notifications, {
+            title: '⚠️ Payment amount mismatch — held for review',
+            body: `MMG reports a different amount than we requested on a weekly-fee payment. It is NOT settled. Payment ${payment.id}.`,
+            data: { kind: 'reconcile_mismatch', paymentId: payment.id, subscriptionId: sub.id },
+          });
+        } catch {
+          /* already flagged — the dedup key holds */
+        }
+        out.stillPending += 1;
         continue;
       }
 
