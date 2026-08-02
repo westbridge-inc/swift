@@ -1,5 +1,22 @@
 import type { PrismaClient } from '@prisma/client';
+import type { Server } from 'socket.io';
 import { AppError } from '../../utils/errors';
+import { log } from '../../utils/logger';
+
+// Safety spec ("Rating flags: reuse the ratings/quality engine — safety-tagged
+// categories route here automatically"): a rating carrying one of these tags
+// auto-opens an incident case via the pre-provisioned RATING_FLAG intake.
+// Deterministic vocabulary, most-severe tag decides the category; the rating
+// itself NEVER fails on intake trouble (fire-and-forget).
+const SAFETY_TAG_CATEGORY: Record<string, string> = {
+  different_driver: 'IDENTITY_MISMATCH', // S1
+  harassment: 'SAFETY_HARASSMENT', // S2
+  felt_unsafe: 'SAFETY_HARASSMENT', // S2
+  unsafe_driving: 'DRIVING_DANGEROUS', // S2
+  impaired_driving: 'DRIVING_DANGEROUS', // S2
+};
+// Severity precedence for picking ONE category when several tags land.
+const SAFETY_TAG_ORDER = ['different_driver', 'harassment', 'felt_unsafe', 'unsafe_driving', 'impaired_driving'];
 
 type RatingType =
   | 'CUSTOMER_TO_VENDOR'
@@ -22,7 +39,9 @@ interface RateInput {
 }
 
 export class RatingService {
-  constructor(private prisma: PrismaClient) {}
+  /** `io` is optional so read-only callers (jobs, release paths) need no
+   *  socket; rating-CREATING routes pass it so safety flags can page ops. */
+  constructor(private prisma: PrismaClient, private io?: Server) {}
 
   async rate(input: RateInput) {
     if (input.score < 1 || input.score > 5) {
@@ -82,6 +101,10 @@ export class RatingService {
       },
     });
 
+    // Safety spec: a safety-tagged rating auto-opens an incident case
+    // (RATING_FLAG intake). Fire-and-forget — a rating never fails on it.
+    void this.flagSafetyTags(rating.id, input).catch(() => {});
+
     // Double-blind (marketplace §1): written ratings stay hidden until the
     // other side has rated too (aggregates still update immediately below).
     await this.releaseIfBothSidesRated(input.orderId);
@@ -100,14 +123,41 @@ export class RatingService {
     return rating;
   }
 
+  /** The rating→incident bridge. Most-severe safety tag decides the category;
+   *  one case per rating (ratings are unique per order+rater+type). */
+  private async flagSafetyTags(ratingId: string, input: RateInput): Promise<void> {
+    const tags = (input.tags ?? []).map((t) => t.trim().toLowerCase());
+    const hit = SAFETY_TAG_ORDER.find((t) => tags.includes(t));
+    if (!hit || !input.rateeId) return;
+    if (!this.io) {
+      // A creating path without io would silently drop safety signal — loud log
+      // so it can never rot unnoticed.
+      log().error({ ratingId, tag: hit }, 'safety-tagged rating with no io wired — incident intake skipped');
+      return;
+    }
+    const { IncidentService } = await import('../safety/incident.service');
+    await new IncidentService(this.prisma, this.io).intake({
+      category: SAFETY_TAG_CATEGORY[hit]!,
+      intake: 'RATING_FLAG',
+      subjectUserId: input.rateeId,
+      reporterUserId: input.raterId,
+      orderId: input.orderId,
+      summary: `Safety-tagged rating (${hit}, score ${input.score}/5)`,
+      details: { ratingId, tags, score: input.score, ...(input.comment ? { comment: input.comment } : {}) },
+    });
+    log().warn({ ratingId, tag: hit, orderId: input.orderId }, 'safety-tagged rating routed to incident intake');
+  }
+
   async rateOrder(userId: string, orderId: string, input: {
     vendorScore?: number;
     vendorComment?: string;
     vendorTags?: string[];
     riderScore?: number;
     riderComment?: string;
+    riderTags?: string[];
     driverScore?: number;
     driverComment?: string;
+    driverTags?: string[];
   }) {
     const order = await this.prisma.order.findFirst({
       where: { id: orderId, customerId: userId },
@@ -148,6 +198,7 @@ export class RatingService {
         type: 'CUSTOMER_TO_RIDER',
         score: input.riderScore,
         comment: input.riderComment,
+        tags: input.riderTags,
       });
       ratings.push({ type: 'rider', score: input.riderScore });
     }
@@ -161,6 +212,7 @@ export class RatingService {
         type: 'CUSTOMER_TO_DRIVER',
         score: input.driverScore,
         comment: input.driverComment,
+        tags: input.driverTags,
       });
       ratings.push({ type: 'driver', score: input.driverScore });
     }
