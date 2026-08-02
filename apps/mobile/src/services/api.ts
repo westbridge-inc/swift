@@ -213,6 +213,18 @@ export const rideApi = {
   // Availability spec §1/§2.1: buckets only (GOOD/LOW/NONE), never counts.
   availability: (p: Point) => api.get(`/rides/availability?lat=${p.lat}&lng=${p.lng}`),
   watchAvailability: (p: Point) => api.post('/rides/availability/watch', p),
+  // 5.5 queue [rides spec]: honest counts + the waitlist that auto-requests.
+  supply: (p: Point) => api.get(`/rides/supply?lat=${p.lat}&lng=${p.lng}`),
+  queueJoin: (data: {
+    pickup: Point;
+    dropoff: Point;
+    pickupAddress: string;
+    dropoffAddress: string;
+    passengerCount?: number;
+    rideClass?: RideClass;
+  }) => api.post('/rides/queue/join', data),
+  queueLeave: () => api.post('/rides/queue/leave', {}),
+  queueStatus: () => api.get('/rides/queue'),
   request: (data: {
     pickup: Point;
     dropoff: Point;
