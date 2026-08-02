@@ -5,6 +5,7 @@ import { BookingService } from './booking.service';
 import { AdCheckoutService } from './checkout.service';
 import { CreativeService } from './creative.service';
 import { AdsLifecycleService } from './lifecycle.service';
+import { AdStatsService } from './stats.service';
 import { mondayOfDate, isMonday } from './ads-weeks';
 import { AppError, NotFoundError } from '../../utils/errors';
 
@@ -225,6 +226,18 @@ export async function adsRoutes(app: FastifyInstance) {
 
   app.post<{ Params: { id: string } }>('/campaigns/:id/pause', auth, memberEvent('pause'));
   app.post<{ Params: { id: string } }>('/campaigns/:id/resume', auth, memberEvent('resume'));
+
+  /** GET /campaigns/:id/stats — the advertiser dashboard numbers (spec §12.3).
+   *  Reads the nightly AdStatsDaily rollups ONLY; the reconciliation merge-gate
+   *  proves these totals exactly equal the raw AdEvent counts. */
+  const statsService = new AdStatsService(app.prisma);
+  app.get<{ Params: { id: string } }>('/campaigns/:id/stats', auth, async (request) => {
+    z.object({ granularity: z.enum(['day']).default('day') }).parse(request.query ?? {});
+    const campaign = await app.prisma.adCampaign.findUnique({ where: { id: request.params.id }, select: { advertiserId: true } });
+    if (!campaign) throw new NotFoundError('AdCampaign', request.params.id);
+    await advertisers.assertMember(campaign.advertiserId, request.user.userId);
+    return { success: true, data: await statsService.campaignStats(request.params.id) };
+  });
 
   /** §6.1 cancel — the advertiser cancels; the §8.4 refund plan executes
    *  (future weeks per the day thresholds, current week 0%). */
