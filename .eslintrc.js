@@ -42,8 +42,6 @@ module.exports = {
         'apps/mobile/src/modules/mover/shared.tsx',
         'apps/mobile/src/modules/orders/screens/DeliveryScreen.tsx',
         'apps/mobile/src/modules/orders/screens/OrdersHistoryScreen.tsx',
-        'apps/mobile/src/modules/shop/screens/MenuItemScreen.tsx',
-        'apps/mobile/src/modules/shop/screens/RestaurantScreen.tsx',
         'apps/mobile/src/modules/vendor/NewOrderTakeover.tsx',
         'apps/mobile/src/modules/vendor/VendorStack.tsx',
         'apps/mobile/src/modules/vendor/screens/VendorOrderDetailScreen.tsx',

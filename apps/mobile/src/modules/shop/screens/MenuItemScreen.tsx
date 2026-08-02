@@ -17,6 +17,7 @@ import {
   ErrorState,
   IconChip,
   LoadingBlock,
+  Money,
   PillButton,
   PopupCard,
   QtyStepper,
@@ -187,10 +188,6 @@ export function MenuItemScreen() {
             }}
           >
             <CircleChip icon="chevron-left" onPress={() => navigation.goBack()} />
-            <T variant="heading" tone="onBrand" style={{ textShadowColor: 'rgba(0,0,0,0.4)', textShadowRadius: 8 }}>
-              Menu Details
-            </T>
-            <View style={{ width: 44 }} />
           </View>
         </View>
 
@@ -207,23 +204,21 @@ export function MenuItemScreen() {
         >
           <T variant="title">{item.name}</T>
           <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.md, marginTop: space.sm }}>
-            <T variant="title" tone="brand">
-              {money(basePrice)}
-            </T>
+            <Money amount={basePrice} size="l" tone="brand" />
             {outOfStock ? (
               <View
                 style={{
                   paddingHorizontal: space.md,
                   paddingVertical: 4,
                   borderRadius: 9999,
-                  backgroundColor: '#FBEAEA',
+                  backgroundColor: color.soft.warning,
                   flexDirection: 'row',
                   alignItems: 'center',
                   gap: 5,
                 }}
               >
-                <Feather name="slash" size={12} color={color.error} />
-                <T variant="caption" weight="semibold" tone="error">
+                <Feather name="slash" size={12} color={color.warning} />
+                <T variant="caption" weight="semibold" tone="warning">
                   Out of stock
                 </T>
               </View>
@@ -250,7 +245,7 @@ export function MenuItemScreen() {
               </T>
             </View>
             <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
-              <Feather name="star" size={14} color={color.warning} />
+              <Feather name="star" size={14} color={color.star} />
               <T variant="label" tone="deep">
                 {Number(vendor.data?.averageRating ?? 0).toFixed(1)}
               </T>
@@ -284,7 +279,7 @@ export function MenuItemScreen() {
                   <T variant="heading" style={{ flex: 1 }}>
                     {g.name}
                   </T>
-                  <T variant="caption" tone={g.isRequired ? 'error' : 'faint'}>
+                  <T variant="caption" tone={g.isRequired ? 'warning' : 'faint'}>
                     {g.isRequired ? 'Required' : 'Optional'}
                     {g.maxSelect > 1 ? ` · up to ${g.maxSelect}` : ''}
                   </T>
@@ -462,7 +457,7 @@ export function MenuItemScreen() {
         </T>
         <View style={{ alignSelf: 'stretch', gap: space.md, marginTop: space.xl }}>
           <PillButton
-            label="View Cart"
+            label="View cart"
             size="md"
             onPress={() => {
               setAdded(false);

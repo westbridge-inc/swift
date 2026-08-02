@@ -3,6 +3,8 @@
 // kit kept solely for the partner/mover/vertical screens).
 export * from './text';
 export * from './money';
+export * from './add-morph';
+export * from './menu-row';
 export * from './screen';
 export * from './button';
 export * from './card';

@@ -5,12 +5,13 @@ import { Image } from 'expo-image';
 import { Feather } from '@expo/vector-icons';
 import { useNavigation, useRoute } from '@react-navigation/native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { color, radius, space } from '@swift/ui';
+import { color, elevation, font, radius, space } from '@swift/ui';
 import { useAddToCart, useCart, useToggleFavorite, useUpdateCartItem, useVendor } from '../../../hooks/customer';
 import { useAuthStore } from '../../../stores/authStore';
 import { DARK_BLURHASH, itemImage, vendorImage } from '../../../lib/images';
 import { money } from '../../../lib/money';
 import {
+  AddMorph,
   Chip,
   CircleChip,
   ErrorState,
@@ -18,6 +19,8 @@ import {
   HeartBadge,
   IconChip,
   LoadingBlock,
+  MenuRow,
+  Money,
   PillButton,
   PopupCard,
   SectionHeader,
@@ -27,7 +30,6 @@ import {
 
 const SCREEN_W = Dimensions.get('window').width;
 const GUTTER = space['2xl'];
-const GRID_W = (SCREEN_W - GUTTER * 2 - space.lg) / 2;
 const RAIL_W = 200;
 
 const DAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
@@ -66,7 +68,7 @@ function StatCol({
       }}
     >
       <View style={{ flexDirection: 'row', alignItems: 'center', gap: 5 }}>
-        <Feather name={icon} size={14} color={color.warning} />
+        <Feather name={icon} size={14} color={icon === 'star' ? color.star : color.brand[500]} />
         <T variant="label" weight="semibold" numberOfLines={1}>
           {value}
         </T>
@@ -119,36 +121,23 @@ function ProductTile({
           {item.unit}
         </T>
       ) : null}
-      <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginTop: 2 }}>
-        <T variant="label" weight="bold" tone="brand" numberOfLines={1} style={{ flexShrink: 1 }}>
-          {money(item.customerPrice ?? item.basePrice)}
-        </T>
+      <View style={{ marginTop: 2, gap: 4 }}>
+        <Money amount={item.customerPrice ?? item.basePrice} tone={out ? 'muted' : 'brand'} numberOfLines={1} />
         {out ? (
-          <T variant="caption" tone="error">
-            Out
+          <T variant="micro" tone="warning">
+            Sold out
           </T>
-        ) : qty > 0 && !hasOptions ? (
-          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
-            <Pressable onPress={() => onSetQty(qty - 1)} disabled={busy} hitSlop={6}>
-              <View style={{ width: 24, height: 24, borderRadius: 12, alignItems: 'center', justifyContent: 'center', backgroundColor: color.surface.base, borderWidth: 1, borderColor: color.border.subtle }}>
-                <Feather name="minus" size={13} color={color.text.primary} />
-              </View>
-            </Pressable>
-            <T variant="label" weight="bold">
-              {qty}
-            </T>
-            <Pressable onPress={() => onSetQty(qty + 1)} disabled={busy} hitSlop={6}>
-              <View style={{ width: 24, height: 24, borderRadius: 12, alignItems: 'center', justifyContent: 'center', backgroundColor: color.brand[500] }}>
-                <Feather name="plus" size={13} color={color.white} />
-              </View>
-            </Pressable>
-          </View>
         ) : (
-          <Pressable onPress={hasOptions ? onOpen : onAdd} disabled={busy} hitSlop={6}>
-            <View style={{ width: 26, height: 26, borderRadius: 13, alignItems: 'center', justifyContent: 'center', backgroundColor: color.brand[500], opacity: busy ? 0.5 : 1 }}>
-              <Feather name="plus" size={14} color={color.white} />
-            </View>
-          </Pressable>
+          <View style={{ alignSelf: 'flex-end' }}>
+            <AddMorph
+              size="sm"
+              qty={hasOptions ? 0 : qty}
+              busy={busy}
+              onAdd={hasOptions ? onOpen : onAdd}
+              onInc={() => onSetQty(qty + 1)}
+              onDec={() => onSetQty(qty - 1)}
+            />
+          </View>
         )}
       </View>
     </View>
@@ -188,9 +177,9 @@ function ServiceRow({ item, onOpen }: { item: any; onOpen: () => void }) {
               {cfg.durationMinutes ? <TonePill label={`${cfg.durationMinutes} min`} tone="neutral" /> : null}
               <TonePill label={modeLabel} tone="brand" />
             </View>
-            <T variant="label" weight="bold" tone="brand" style={{ marginTop: 6 }}>
-              {money(item.customerPrice ?? item.basePrice)}
-            </T>
+            <View style={{ marginTop: 6, alignSelf: 'flex-start' }}>
+              <Money amount={item.customerPrice ?? item.basePrice} tone="brand" />
+            </View>
           </View>
           <View style={{ alignItems: 'center', gap: 2 }}>
             <Feather name="calendar" size={18} color={color.brand[500]} />
@@ -219,6 +208,7 @@ export function RestaurantScreen() {
   const [showPromos, setShowPromos] = useState(false);
   // Mart mode: aisle filter + in-store search + on-card add (Grab Mart, not a menu)
   const [aisleId, setAisleId] = useState<string | null>(null);
+  const [menuCatId, setMenuCatId] = useState<string | null>(null);
   const [storeQuery, setStoreQuery] = useState('');
   // D6-MOB-01: a supermarket/store can carry hundreds of SKUs. Mounting every
   // ProductTile (each an expo-image) at once opens slowly and risks OOM on the
@@ -365,22 +355,9 @@ export function RestaurantScreen() {
               {v.name}
             </T>
             {closed ? (
-              <View
-                style={{
-                  flexDirection: 'row',
-                  alignItems: 'center',
-                  gap: 6,
-                  paddingHorizontal: space.md,
-                  paddingVertical: 6,
-                  borderRadius: 9999,
-                  backgroundColor: '#FBEAEA',
-                }}
-              >
-                <Feather name="clock" size={13} color={color.error} />
-                <T variant="label" weight="semibold" tone="error">
-                  Closed
-                </T>
-              </View>
+              <T variant="micro" tone="faint">
+                Closed right now
+              </T>
             ) : null}
           </View>
 
@@ -473,7 +450,7 @@ export function RestaurantScreen() {
                   onChangeText={setStoreQuery}
                   placeholder={`Search ${v.name}…`}
                   placeholderTextColor={color.text.muted}
-                  style={{ flex: 1, fontFamily: 'Hanken', fontSize: 14, color: color.text.primary }}
+                  style={{ flex: 1, fontFamily: font.body, fontSize: 14, color: color.text.primary }}
                 />
                 {storeQuery ? (
                   <Pressable onPress={() => setStoreQuery('')} hitSlop={8}>
@@ -570,25 +547,79 @@ export function RestaurantScreen() {
             </>
           ) : null}
 
-          {/* Full menu by category (bounded window; see renderCap) */}
-          {cappedCategories.map((cat: any) =>
-            (cat.items?.length ?? 0) > 0 ? (
-              <View key={cat.id}>
-                <SectionHeader title={cat.name} style={{ paddingHorizontal: GUTTER, marginTop: space['3xl'] }} />
-                <View
-                  style={{
-                    flexDirection: 'row',
-                    flexWrap: 'wrap',
-                    gap: space.lg,
-                    paddingHorizontal: GUTTER,
-                    paddingTop: space.lg,
-                  }}
-                >
-                  {cat.items.map((item: any) => itemCard(item, GRID_W))}
+          {/* The menu — set like a real menu (design-100×): category chips filter
+              (one mental model with the mart aisles), rows with name/description/
+              price on one card per category. */}
+          {categories.length > 1 ? (
+            <ScrollView
+              horizontal
+              showsHorizontalScrollIndicator={false}
+              style={{ marginTop: space['2xl'], flexGrow: 0 }}
+              contentContainerStyle={{ paddingHorizontal: GUTTER, gap: space.md }}
+            >
+              <Chip label="Full menu" selected={!menuCatId} onPress={() => setMenuCatId(null)} style={{ height: 44, paddingHorizontal: space.lg }} />
+              {categories.map((c: any) => (
+                <Chip
+                  key={c.id}
+                  label={c.name}
+                  selected={menuCatId === c.id}
+                  onPress={() => setMenuCatId(c.id)}
+                  style={{ height: 44, paddingHorizontal: space.lg }}
+                />
+              ))}
+            </ScrollView>
+          ) : null}
+          {cappedCategories
+            .filter((cat: any) => !menuCatId || cat.id === menuCatId)
+            .map((cat: any) =>
+              (cat.items?.length ?? 0) > 0 ? (
+                <View key={cat.id}>
+                  <SectionHeader title={cat.name} style={{ paddingHorizontal: GUTTER, marginTop: space['2xl'] }} />
+                  <View
+                    style={{
+                      marginHorizontal: GUTTER,
+                      marginTop: space.md,
+                      paddingHorizontal: space.lg,
+                      borderRadius: radius.lg,
+                      backgroundColor: color.surface.base,
+                      borderWidth: 1,
+                      borderColor: color.border.subtle,
+                    }}
+                  >
+                    {cat.items.map((item: any, idx: number) => {
+                      const hasOptions = (item.optionGroups?.length ?? 0) > 0;
+                      const line = lineFor(item.id);
+                      const qty = hasOptions ? 0 : (line?.quantity ?? 0);
+                      return (
+                        <MenuRow
+                          key={item.id}
+                          name={item.name}
+                          description={item.description}
+                          price={item.customerPrice ?? item.basePrice}
+                          image={item.imageUrl ? itemImage(item) : null}
+                          soldOut={item.stockQuantity === 0}
+                          qty={qty}
+                          busy={addToCart.isPending || updateCartItem.isPending}
+                          last={idx === cat.items.length - 1}
+                          onOpen={() => openItem(item)}
+                          onAdd={() =>
+                            hasOptions
+                              ? openItem(item)
+                              : guardAuth(() => addToCart.mutate({ vendorId, itemId: item.id, quantity: 1 }))
+                          }
+                          onInc={() => {
+                            if (line) updateCartItem.mutate({ id: line.id, quantity: (line.quantity ?? 0) + 1 });
+                          }}
+                          onDec={() => {
+                            if (line) updateCartItem.mutate({ id: line.id, quantity: (line.quantity ?? 0) - 1 });
+                          }}
+                        />
+                      );
+                    })}
+                  </View>
                 </View>
-              </View>
-            ) : null,
-          )}
+              ) : null,
+            )}
 
             </>
           )}
@@ -619,16 +650,13 @@ export function RestaurantScreen() {
                 paddingHorizontal: space.xl,
                 backgroundColor: color.brand[500],
                 opacity: pressed ? 0.9 : 1,
-                boxShadow: '0px 6px 12px rgba(33,26,26,0.25)',
-                elevation: 8,
+                ...elevation.floating,
               }}
             >
               <T variant="body" weight="bold" tone="onBrand">
                 View cart · {cartCount} item{cartCount === 1 ? '' : 's'}
               </T>
-              <T variant="body" weight="bold" tone="onBrand">
-                {money(Number(cart.data?.subtotalCustomer ?? 0))}
-              </T>
+              <Money amount={Number(cart.data?.subtotalCustomer ?? 0)} tone="onBrand" />
             </View>
           )}
         </Pressable>
@@ -638,7 +666,7 @@ export function RestaurantScreen() {
       <PopupCard visible={showHours} onClose={() => setShowHours(false)}>
         <IconChip icon="clock" size={56} />
         <T variant="heading" style={{ marginTop: space.md }}>
-          Operational Hours
+          Opening hours
         </T>
         <View style={{ alignSelf: 'stretch', marginTop: space.lg }}>
           {(v.operatingHours ?? [])
