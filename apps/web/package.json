@@ -10,19 +10,19 @@
     "type-check": "tsc --noEmit"
   },
   "dependencies": {
-    "@tanstack/react-query": "^5.66.0",
-    "lucide-react": "^0.475.0",
-    "next": "^15.5.21",
-    "react": "^19.0.0",
-    "react-dom": "^19.0.0"
+    "@tanstack/react-query": "^5.101.4",
+    "lucide-react": "^1.27.0",
+    "next": "^16.2.12",
+    "react": "^19.2.8",
+    "react-dom": "^19.2.8"
   },
   "devDependencies": {
-    "@tailwindcss/postcss": "^4.0.0",
+    "@tailwindcss/postcss": "^4.3.3",
     "@types/node": "^22.0.0",
-    "@types/react": "^19.0.0",
+    "@types/react": "^19.2.17",
     "@types/react-dom": "^19.0.0",
     "eslint-config-next": "15.2.0",
-    "tailwindcss": "^4.0.0",
+    "tailwindcss": "^4.3.3",
     "typescript": "^5.7.0"
   }
 }
