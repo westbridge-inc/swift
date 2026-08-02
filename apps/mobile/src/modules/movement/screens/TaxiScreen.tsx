@@ -1,8 +1,9 @@
 /** @jsxImportSource react */
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { Animated, Easing, Linking, Pressable, Share, View, useWindowDimensions } from 'react-native';
+import { Animated, Easing, Linking, Pressable, Share, View, useColorScheme, useWindowDimensions } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import MapView, { Marker, PROVIDER_DEFAULT, Polyline } from 'react-native-maps';
+import { rideMapProps } from '../../../kit/map-style';
 import BottomSheet, { BottomSheetView, BottomSheetScrollView } from '@gorhom/bottom-sheet';
 import { Image } from 'expo-image';
 import { Feather } from '@expo/vector-icons';
@@ -186,6 +187,7 @@ function SearchingCard({ startedAt }: { startedAt?: string }) {
 
 export function TaxiScreen({ navigation }: any) {
   const { height: winH } = useWindowDimensions();
+  const scheme = useColorScheme();
   const insets = useSafeAreaInsets();
   const { latitude, longitude, address } = useLocationStore();
   const { data: activeRide, isLoading: loadingActive } = useActiveRide<any>(true);
@@ -305,6 +307,7 @@ export function TaxiScreen({ navigation }: any) {
         region={routeRegion}
         showsUserLocation
         mapPadding={{ top: 0, left: 0, right: 0, bottom: Math.round(winH * 0.38) }}
+        {...rideMapProps(scheme)}
       >
         {pickupLL ? (
           <Marker coordinate={pickupLL} title="Pickup" anchor={{ x: 0.5, y: 0.5 }}>
@@ -509,6 +512,7 @@ function TierRow({
 
 function ActiveRide({ navigation, ride, cancelRide, insets }: any) {
   const { height: winH } = useWindowDimensions();
+  const scheme = useColorScheme();
   const sheetRef = useRef<BottomSheet>(null);
   const [confirmCancel, setConfirmCancel] = useState(false);
   const [liveDriver, setLiveDriver] = useState<LatLng | null>(null);
@@ -649,6 +653,7 @@ function ActiveRide({ navigation, ride, cancelRide, insets }: any) {
         style={{ flex: 1 }}
         region={region}
         mapPadding={{ top: 0, left: 0, right: 0, bottom: Math.round(winH * 0.34) }}
+        {...rideMapProps(scheme)}
       >
         {pickup ? (
           <Marker coordinate={pickup} title="Pickup" anchor={{ x: 0.5, y: 0.5 }}>
