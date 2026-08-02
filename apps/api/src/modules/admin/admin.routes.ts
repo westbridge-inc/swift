@@ -2764,6 +2764,56 @@ export async function adminRoutes(app: FastifyInstance) {
     return reply.send(csv);
   });
 
+  // ── Bank-truth reconciliation [PART 25] — inert until MMG answers Q10 ─────
+
+  /** The recon read: gross collected → MMG fees → expected net → deposited,
+   *  per period. Batches build weekly (job) once the cadence config is set. */
+  app.get('/billing/settlement-batches', { preHandler: [adminGuard] }, async () => {
+    const { buildExpectedBatches, reconConfig } = await import('../billing/bank-recon');
+    const created = await buildExpectedBatches(app.prisma); // idempotent; inert without config
+    const batches = await app.prisma.settlementBatch.findMany({ orderBy: { periodStart: 'desc' }, take: 60 });
+    return {
+      success: true,
+      data: {
+        configured: (await reconConfig(app.prisma)) !== null,
+        newlyBuilt: created,
+        batches: batches.map((b) => ({
+          ...b,
+          grossGyd: Number(b.grossGyd),
+          providerFeeGyd: b.providerFeeGyd ? Number(b.providerFeeGyd) : null,
+          expectedNetGyd: b.expectedNetGyd ? Number(b.expectedNetGyd) : null,
+          depositedGyd: b.depositedGyd ? Number(b.depositedGyd) : null,
+        })),
+      },
+    };
+  });
+
+  /** The founder confirms a bank deposit; beyond-tolerance deviation goes
+   *  MISMATCH and pages. */
+  app.post('/billing/settlement-batches/:id/confirm-deposit', { preHandler: [adminGuard] }, async (request) => {
+    const { id } = z.object({ id: z.string() }).parse(request.params);
+    const body = z.object({
+      depositedGyd: z.number().positive(),
+      depositedAt: z.string().datetime(),
+      bankRef: z.string().trim().max(120).optional(),
+    }).parse(request.body ?? {});
+    const { confirmDeposit } = await import('../billing/bank-recon');
+    const result = await confirmDeposit(app.prisma, id, {
+      depositedGyd: body.depositedGyd,
+      depositedAt: new Date(body.depositedAt),
+      bankRef: body.bankRef,
+    });
+    if (result.status === 'MISMATCH') {
+      const { notifyAdmins } = await import('../notification/notification.service');
+      await notifyAdmins(app.prisma, notifications, {
+        title: 'Settlement deposit mismatch',
+        body: `A bank deposit is off the expected net by GY$${result.deltaGyd.toLocaleString()}. Reconcile with MMG — drill into the batch in Command.`,
+        data: { kind: 'settlement_deposit_mismatch', batchId: id, deltaGyd: result.deltaGyd },
+      });
+    }
+    return { success: true, data: result };
+  });
+
   /** The cash-rail KPI tile [PART 12/21.5] — is the rail actually working. */
   app.get('/billing/cash-kpis', { preHandler: [adminGuard] }, async (request) => {
     const { days } = z.object({ days: z.coerce.number().int().min(1).max(365).default(30) }).parse(request.query ?? {});

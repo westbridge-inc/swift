@@ -1650,6 +1650,32 @@ model MmgAgentPayment {
   @@map("mmg_agent_payments")
 }
 
+/// Bank-truth reconciliation [san spec PART 25]: ledger truth vs what MMG
+/// actually deposited, minus their fees. INERT until the settlement cadence
+/// config is set (MMG question 10) — built now, activated by an answer.
+model SettlementBatch {
+  id               String    @id @default(cuid())
+  tenantId         String    @default("swift-default")
+  provider         String    @default("MMG")
+  periodStart      DateTime
+  periodEnd        DateTime
+  /// Σ MATCHED/RESOLVED agent payments in period — computed, provable from rows
+  grossGyd         Decimal   @db.Decimal(12, 2)
+  providerFeeGyd   Decimal?  @db.Decimal(12, 2)
+  expectedNetGyd   Decimal?  @db.Decimal(12, 2)
+  depositedGyd     Decimal?  @db.Decimal(12, 2)
+  depositedAt      DateTime?
+  bankRef          String?
+  /// EXPECTED | DEPOSITED | MISMATCH | RESOLVED
+  status           String    @default("EXPECTED")
+  notes            String?
+  createdAt        DateTime  @default(now())
+
+  @@unique([tenantId, provider, periodStart])
+  @@index([status])
+  @@map("settlement_batches")
+}
+
 /// GRA-ready sequential receipts [san spec 20.1]: per-tenant-per-year gapless
 /// counter, one receipt per credit (cash, manual, promo — promo shows GY$0
 /// cash). Financial rows survive DPA erasure (legal-obligation basis, 20.5).
