@@ -159,7 +159,7 @@ const styles = StyleSheet.create({
   },
   scrim: {
     ...(StyleSheet.absoluteFill as object),
-    backgroundColor: 'rgba(0,0,0,0.18)',
+    backgroundColor: color.mediaScrim,
   },
   copy: {
     paddingHorizontal: space.lg,
@@ -169,17 +169,17 @@ const styles = StyleSheet.create({
   dots: {
     flexDirection: 'row',
     justifyContent: 'center',
-    gap: 5,
+    gap: space.sm,
     marginTop: space.sm,
   },
   dot: {
-    width: 5,
-    height: 5,
+    width: 6,
+    height: 6,
     borderRadius: 3,
     backgroundColor: color.border.subtle,
   },
   dotActive: {
-    backgroundColor: color.brand[600],
-    width: 14,
+    backgroundColor: color.brand[500],
+    width: 16,
   },
 });

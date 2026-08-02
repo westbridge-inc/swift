@@ -63,6 +63,7 @@ export const color = {
     subtle: '#FBFBF9', // paper — the app background
     elevated: '#FFFFFF', // elevate with shadow, not colour
     sunken: '#F7F5F3', // grouped sections / tracks — 3% brand tint on paper
+    onBrand: 'rgba(255,255,255,0.14)', // chrome chips sitting on the maroon header
   },
   text: {
     primary: '#211A1A', // ink — 16.5:1 on paper
@@ -93,6 +94,13 @@ export const color = {
   focusRing: '#803B3B',
   /** Scrim behind sheets/dialogs — ink at 40%. */
   scrim: 'rgba(33,26,26,0.4)',
+  /** The media treatment (ads, hero imagery) — THE three values every photo
+   *  surface uses, so imagery dims, chips float and text lifts identically
+   *  everywhere: panel overlay · floating chip (warm ink, 5.3:1 white-on-chip
+   *  over a worst-case white photo) · on-media text shadow. */
+  mediaScrim: 'rgba(0,0,0,0.22)',
+  mediaChip: 'rgba(21,16,16,0.62)',
+  mediaInkShadow: 'rgba(0,0,0,0.6)',
   /** Skeleton loading shapes — brand-tinted, calm. */
   skeleton: {
     base: '#F7F3F3',

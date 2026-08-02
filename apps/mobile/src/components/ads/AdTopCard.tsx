@@ -80,7 +80,7 @@ const styles = StyleSheet.create({
   },
   scrim: {
     ...(StyleSheet.absoluteFill as object),
-    backgroundColor: 'rgba(0,0,0,0.25)',
+    backgroundColor: color.mediaScrim,
   },
   copy: {
     padding: space.lg,

@@ -1,9 +1,10 @@
 /** @jsxImportSource react */
 import React from 'react';
 import { Pressable, Switch, View, type ViewStyle } from 'react-native';
-import { Feather, Ionicons } from '@expo/vector-icons';
+import { Feather } from '@expo/vector-icons';
 import { color, space } from '@swift/ui';
 import { cardShadow } from './card';
+import { HeartGlyph, StarGlyph } from './glyphs';
 import { T } from './text';
 
 function RoundIconButton({
@@ -129,9 +130,9 @@ export function HeartBadge({
           cardShadow,
         ]}
       >
-        <Ionicons
-          name={active ? 'heart' : 'heart-outline'}
+        <HeartGlyph
           size={size * 0.55}
+          filled={active}
           color={active ? color.brand[500] : color.text.muted}
         />
       </View>
@@ -139,7 +140,7 @@ export function HeartBadge({
   );
 }
 
-/** Star row — amber per the token discipline (warning doubles as rating hue).
+/** Star row — the `star` rating hue (decorative; never carries meaning alone).
  *  Pass `onRate` to make it an input. */
 export function Stars({
   value,
@@ -158,13 +159,7 @@ export function Stars({
       accessibilityLabel={onRate ? undefined : `Rated ${value} out of 5 stars`}
     >
       {[1, 2, 3, 4, 5].map((n) => {
-        const star = (
-          <Ionicons
-            name={n <= Math.round(value) ? 'star' : 'star-outline'}
-            size={size}
-            color={color.warning}
-          />
-        );
+        const star = <StarGlyph size={size} filled={n <= Math.round(value)} color={color.star} />;
         return onRate ? (
           <Pressable
             key={n}
@@ -184,7 +179,9 @@ export function Stars({
   );
 }
 
-/** Pill chip — categories, filters, sort options. */
+/** Pill chip — categories, filters, sort options.
+ *  `emoji` is DEPRECATED (design-100× Part 14: emoji are never UI icons) —
+ *  remaining passers lose it as their flow is elevated; then the prop dies. */
 export function Chip({
   label,
   emoji,
@@ -244,8 +241,8 @@ export function TonePill({ label, tone = 'neutral', dark }: { label: string; ton
       }
     : {
         brand: { bg: color.brand[50], fg: color.brand[600] },
-        success: { bg: '#E8F6EE', fg: color.success },
-        error: { bg: '#FDECEC', fg: color.error },
+        success: { bg: color.soft.success, fg: color.success },
+        error: { bg: color.soft.danger, fg: color.error },
         neutral: { bg: color.border.subtle, fg: color.text.secondary },
       })[tone];
   return (
