@@ -174,6 +174,10 @@ const PUBLIC_BY_DESIGN = new Set([
   // token (a token never issued by a real serve is unforgeable), not by session.
   'GET /api/v1/ads/serve',
   'POST /api/v1/ads/events',
+  // Trip Share public page (safety spec §6): the recipient has NO app and no
+  // account — the 128-bit CSPRNG token IS the credential; it grants only the
+  // narrow public payload and dies at trip end + grace (or revocation).
+  'GET /api/v1/safety/public/trip/:token',
 ]);
 
 describe('authz matrix — every role-prefixed route rejects outsiders', () => {
