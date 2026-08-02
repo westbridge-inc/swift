@@ -15,7 +15,7 @@ interface AuthState {
   wantsAuth: boolean;
   // One-app routing: what the user picked on the entry "How will you use Swift?"
   // screen. 'customer' browses as a guest; 'mover'/'vendor' must sign in + onboard.
-  intent: 'customer' | 'mover' | 'vendor' | null;
+  intent: 'customer' | 'mover' | 'vendor' | 'advertiser' | null;
   // When intent is 'mover', which kind they picked on the entry screen —
   // 'delivery' (rider) pre-selects a bike/moped in onboarding, 'taxi' a car.
   // Routing is identical (both are the mover app); this is only the default.
@@ -28,7 +28,7 @@ interface AuthState {
   setUser: (user: User) => void;
   promptLogin: () => void;
   cancelAuth: () => void;
-  setIntent: (intent: 'customer' | 'mover' | 'vendor' | null) => void;
+  setIntent: (intent: 'customer' | 'mover' | 'vendor' | 'advertiser' | null) => void;
   setMoverPreset: (preset: 'delivery' | 'taxi' | null) => void;
   setCountry: (c: { code: string; dialCode?: string | null; currencyCode?: string | null; currencySymbol?: string | null }) => void;
   logout: () => void;
@@ -65,7 +65,10 @@ export const useAuthStore = create<AuthState>()(
         const isVendor = roles.includes('VENDOR') || !!u?.vendorOwner;
         const prev = get().intent;
         const intent =
-          (prev === 'vendor' && isVendor) || (prev === 'mover' && isMover) || prev === 'customer'
+          // 'advertiser' is preserved like 'customer': ad access is
+          // AdvertiserMember-based (not a UserRole), so ANY signed-in account
+          // may run the advertiser surface — its gate screen sorts the rest.
+          (prev === 'vendor' && isVendor) || (prev === 'mover' && isMover) || prev === 'customer' || prev === 'advertiser'
             ? prev
             : isVendor && !isMover
               ? ('vendor' as const)

@@ -16,6 +16,7 @@ import { AuthStack } from './AuthStack';
 import { CustomerStack } from './CustomerStack';
 import { MoverStack } from '../modules/mover/MoverStack';
 import { VendorStack } from '../modules/vendor/VendorStack';
+import { AdvertiserStack } from '../modules/advertiser/AdvertiserStack';
 
 const Stack = createNativeStackNavigator();
 
@@ -30,6 +31,8 @@ function mainForIntent(intent?: string | null) {
       return MoverStack;
     case 'vendor':
       return VendorStack;
+    case 'advertiser':
+      return AdvertiserStack;
     default:
       return CustomerStack;
   }
@@ -48,10 +51,10 @@ export function RootNavigator() {
     if (isAuthenticated) void registerDeviceForPush();
   }, [isAuthenticated]);
 
-  // Earners (mover/vendor) must be signed in before their stack. Customers
-  // browse freely and only authenticate when an action (checkout) asks via
-  // promptLogin() → wantsAuth.
-  const earner = intent === 'mover' || intent === 'vendor';
+  // Earners (mover/vendor) and advertisers must be signed in before their
+  // stack. Customers browse freely and only authenticate when an action
+  // (checkout) asks via promptLogin() → wantsAuth.
+  const earner = intent === 'mover' || intent === 'vendor' || intent === 'advertiser';
   // PREVIEW (earner R3 / vendor R4): a prospective driver ("Preview the driver
   // app") or business ("Preview a business") reaches the REAL stack WITHOUT a
   // country, sign-in, or selfie — read-only sample data. The vendor SAMPLE
