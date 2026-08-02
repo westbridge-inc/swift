@@ -62,7 +62,7 @@ export function FareSlider({
           height: 28,
           width: 28,
           borderRadius: 14,
-          backgroundColor: '#fff',
+          backgroundColor: color.white,
           borderWidth: 2,
           borderColor: color.brand[500],
           boxShadow: '0px 2px 4px rgba(0,0,0,0.18)',

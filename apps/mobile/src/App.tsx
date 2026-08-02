@@ -7,13 +7,16 @@ import { SafeAreaProvider } from 'react-native-safe-area-context';
 import { QueryClientProvider } from '@tanstack/react-query';
 import { useFonts } from 'expo-font';
 import * as SplashScreen from 'expo-splash-screen';
-import { SpaceGrotesk_500Medium, SpaceGrotesk_700Bold } from '@expo-google-fonts/space-grotesk';
 import {
-  Inter_400Regular,
-  Inter_500Medium,
-  Inter_600SemiBold,
-  Inter_700Bold,
-} from '@expo-google-fonts/inter';
+  BricolageGrotesque_600SemiBold,
+  BricolageGrotesque_700Bold,
+} from '@expo-google-fonts/bricolage-grotesque';
+import {
+  HankenGrotesk_400Regular,
+  HankenGrotesk_500Medium,
+  HankenGrotesk_600SemiBold,
+  HankenGrotesk_700Bold,
+} from '@expo-google-fonts/hanken-grotesk';
 import { GluestackUIProvider, ToastHost } from './components/ui';
 import { OfflineBanner } from './components/OfflineBanner';
 import { ErrorBoundary } from './components/ErrorBoundary';
@@ -45,13 +48,14 @@ function LocationBootstrap() {
 export default function App() {
   // Register under the exact names @swift/ui tokens reference (font.display / font.body)
   // so the `font-display` / `font-body` NativeWind classes resolve to the brand typefaces.
+  // Splash holds until loaded, so there is no fallback swap (zero layout shift).
   const [fontsLoaded] = useFonts({
-    SpaceGrotesk: SpaceGrotesk_700Bold,
-    SpaceGroteskMedium: SpaceGrotesk_500Medium,
-    Inter: Inter_400Regular,
-    InterMedium: Inter_500Medium,
-    InterSemiBold: Inter_600SemiBold,
-    InterBold: Inter_700Bold,
+    Bricolage: BricolageGrotesque_700Bold,
+    BricolageSemiBold: BricolageGrotesque_600SemiBold,
+    Hanken: HankenGrotesk_400Regular,
+    HankenMedium: HankenGrotesk_500Medium,
+    HankenSemiBold: HankenGrotesk_600SemiBold,
+    HankenBold: HankenGrotesk_700Bold,
   });
 
   const [storageReady, setStorageReady] = useState(false);

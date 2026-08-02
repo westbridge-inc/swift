@@ -2,6 +2,7 @@
 // Rules: tokens only (via @swift/ui), no imports from components/ui (legacy
 // kit kept solely for the partner/mover/vertical screens).
 export * from './text';
+export * from './money';
 export * from './screen';
 export * from './button';
 export * from './card';

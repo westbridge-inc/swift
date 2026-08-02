@@ -69,7 +69,7 @@ function HomeTabs() {
           boxShadow: '0px -4px 12px rgba(33,26,26,0.08)',
           elevation: 10,
         },
-        tabBarLabelStyle: { fontSize: 12, fontFamily: 'InterMedium' },
+        tabBarLabelStyle: { fontSize: 12, fontFamily: 'HankenMedium' },
         tabBarIcon: ({ focused, color: c, size }) => {
           const base = TAB_ICON[route.name] ?? 'ellipse';
           return <Ionicons name={focused ? base : (`${base}-outline` as typeof base)} size={size} color={c} />;

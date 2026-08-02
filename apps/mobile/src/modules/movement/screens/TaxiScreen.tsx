@@ -62,7 +62,7 @@ function PickupDot() {
   return (
     <View
       style={[
-        { width: 16, height: 16, borderRadius: 8, backgroundColor: color.text.primary, borderWidth: 3, borderColor: '#fff' },
+        { width: 16, height: 16, borderRadius: 8, backgroundColor: color.text.primary, borderWidth: 3, borderColor: color.white },
         cardShadow,
       ]}
     />
@@ -171,7 +171,7 @@ function SearchingCard({ startedAt }: { startedAt?: string }) {
       <View style={{ width: 64, height: 64, alignItems: 'center', justifyContent: 'center' }}>
         <Animated.View style={ringStyle(0.5)} />
         <View style={{ width: 64, height: 64, borderRadius: 32, alignItems: 'center', justifyContent: 'center', backgroundColor: color.brand[500] }}>
-          <MaterialCommunityIcons name="car" size={30} color="#fff" />
+          <MaterialCommunityIcons name="car" size={30} color={color.white} />
         </View>
       </View>
       <T variant="body" weight="semibold" style={{ marginTop: space.lg }}>
@@ -678,7 +678,7 @@ function ActiveRide({ navigation, ride, cancelRide, insets }: any) {
                 cardShadow,
               ]}
             >
-              <MaterialCommunityIcons name="navigation" size={18} color="#fff" />
+              <MaterialCommunityIcons name="navigation" size={18} color={color.white} />
             </View>
           </Marker>
         ) : null}
@@ -688,8 +688,8 @@ function ActiveRide({ navigation, ride, cancelRide, insets }: any) {
           aged out). Silence must never look like a live, moving car. */}
       {(connLost || fixStale) ? (
         <View style={{ position: 'absolute', top: insets.top + space.md, alignSelf: 'center', flexDirection: 'row', alignItems: 'center', gap: space.xs, backgroundColor: color.text.primary, paddingHorizontal: space.md, paddingVertical: space.xs, borderRadius: radius.full, ...cardShadow }}>
-          <MaterialCommunityIcons name={connLost ? 'wifi-off' : 'crosshairs-question'} size={13} color="#fff" />
-          <T variant="caption" style={{ color: '#fff' }}>{connLost ? 'Reconnecting…' : 'Updating driver location…'}</T>
+          <MaterialCommunityIcons name={connLost ? 'wifi-off' : 'crosshairs-question'} size={13} color={color.white} />
+          <T variant="caption" style={{ color: color.white }}>{connLost ? 'Reconnecting…' : 'Updating driver location…'}</T>
         </View>
       ) : null}
 
@@ -719,7 +719,7 @@ function ActiveRide({ navigation, ride, cancelRide, insets }: any) {
           {arrived ? (
             /* The kerb moment — loud on purpose so it isn't missed in-pocket. */
             <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.md, borderRadius: radius.lg, backgroundColor: color.brand[500], padding: space.lg, marginBottom: space.sm }}>
-              <MaterialCommunityIcons name="car-side" size={28} color="#fff" />
+              <MaterialCommunityIcons name="car-side" size={28} color={color.white} />
               <View style={{ flex: 1 }}>
                 <T variant="body" weight="bold" tone="onBrand">
                   Your driver is here

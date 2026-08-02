@@ -14,10 +14,10 @@ import { Card, EmptyState, ErrorState, LoadingBlock, PillButton, Screen, T } fro
 // No kit frame for order history — composed from the kit's Recent Order card
 // pattern (thumb · name · meta · trailing action).
 const STATUS_TONE: Record<string, { label: string; color: string; bg: string }> = {
-  PENDING: { label: 'Pending', color: '#B45309', bg: '#FEF3C7' },
-  ACCEPTED: { label: 'Accepted', color: '#B45309', bg: '#FEF3C7' },
-  PREPARING: { label: 'Preparing', color: '#B45309', bg: '#FEF3C7' },
-  READY: { label: 'Ready', color: '#B45309', bg: '#FEF3C7' },
+  PENDING: { label: 'Pending', color: color.warning, bg: '#FEF3C7' },
+  ACCEPTED: { label: 'Accepted', color: color.warning, bg: '#FEF3C7' },
+  PREPARING: { label: 'Preparing', color: color.warning, bg: '#FEF3C7' },
+  READY: { label: 'Ready', color: color.warning, bg: '#FEF3C7' },
   RIDER_ASSIGNED: { label: 'On the way', color: '#1D4ED8', bg: '#DBEAFE' },
   PICKED_UP: { label: 'On the way', color: '#1D4ED8', bg: '#DBEAFE' },
   DELIVERED: { label: 'Delivered', color: '#15803D', bg: '#DCFCE7' },

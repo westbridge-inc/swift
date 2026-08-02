@@ -64,7 +64,7 @@ export function LabeledInput({
           }}
           placeholderTextColor={dark ? 'rgba(255,255,255,0.4)' : color.text.muted}
           style={[
-            { flex: 1, fontFamily: 'Inter', fontSize: 16, color: dark ? '#FFFFFF' : color.text.primary, paddingVertical: 14 },
+            { flex: 1, fontFamily: 'Hanken', fontSize: 16, color: dark ? '#FFFFFF' : color.text.primary, paddingVertical: 14 },
             input.style,
           ]}
         />

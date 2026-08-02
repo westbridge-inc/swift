@@ -30,6 +30,6 @@ const styles = StyleSheet.create({
   text: {
     color: '#FFFFFF',
     fontSize: 11,
-    fontFamily: 'InterMedium',
+    fontFamily: 'HankenMedium',
   },
 });

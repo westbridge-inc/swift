@@ -246,7 +246,7 @@ export function InlineInput({
         onFocus={() => setFocused(true)}
         onBlur={() => setFocused(false)}
         style={{
-          fontFamily: 'Inter',
+          fontFamily: 'Hanken',
           fontSize: 15,
           color: color.text.primary,
           paddingVertical: 0,

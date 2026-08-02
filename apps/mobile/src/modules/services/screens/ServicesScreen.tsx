@@ -185,7 +185,7 @@ export function ServicesScreen({ navigation }: any) {
               placeholder="Describe the job (at least 10 characters)…"
               placeholderTextColor={color.text.muted}
               multiline
-              style={{ fontFamily: 'Inter', fontSize: 15, color: color.text.primary, minHeight: 48 }}
+              style={{ fontFamily: 'Hanken', fontSize: 15, color: color.text.primary, minHeight: 48 }}
             />
           </View>
           {errMsg ? (

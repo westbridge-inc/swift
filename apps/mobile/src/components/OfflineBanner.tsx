@@ -81,8 +81,8 @@ export function OfflineBanner() {
         zIndex: 9999,
       }}
     >
-      <MaterialCommunityIcons name="wifi-off" size={14} color="#fff" />
-      <T variant="caption" weight="semibold" style={{ color: '#fff' }}>
+      <MaterialCommunityIcons name="wifi-off" size={14} color={color.white} />
+      <T variant="caption" weight="semibold" style={{ color: color.white }}>
         No connection — we’ll retry when you’re back online
       </T>
     </View>

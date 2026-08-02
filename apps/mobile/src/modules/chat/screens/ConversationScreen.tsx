@@ -130,7 +130,7 @@ export function ConversationScreen() {
                 onChangeText={setDraft}
                 placeholder="Type a message…"
                 placeholderTextColor={color.text.muted}
-                style={{ fontFamily: 'Inter', fontSize: 15, color: color.text.primary }}
+                style={{ fontFamily: 'Hanken', fontSize: 15, color: color.text.primary }}
                 onSubmitEditing={onSend}
                 returnKeyType="send"
               />

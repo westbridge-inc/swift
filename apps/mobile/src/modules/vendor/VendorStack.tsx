@@ -2405,7 +2405,7 @@ function VendorAccountScreen() {
                             onChangeText={(t) => setDay(d.dayOfWeek, { openTime: t })}
                             placeholder="08:00"
                             placeholderTextColor={color.text.muted}
-                            style={{ fontFamily: 'Inter', fontSize: 13, color: color.text.primary, textAlign: 'center', paddingVertical: 8 }}
+                            style={{ fontFamily: 'Hanken', fontSize: 13, color: color.text.primary, textAlign: 'center', paddingVertical: 8 }}
                           />
                         </View>
                         <T variant="label" tone="muted">
@@ -2417,7 +2417,7 @@ function VendorAccountScreen() {
                             onChangeText={(t) => setDay(d.dayOfWeek, { closeTime: t })}
                             placeholder="22:00"
                             placeholderTextColor={color.text.muted}
-                            style={{ fontFamily: 'Inter', fontSize: 13, color: color.text.primary, textAlign: 'center', paddingVertical: 8 }}
+                            style={{ fontFamily: 'Hanken', fontSize: 13, color: color.text.primary, textAlign: 'center', paddingVertical: 8 }}
                           />
                         </View>
                       </View>

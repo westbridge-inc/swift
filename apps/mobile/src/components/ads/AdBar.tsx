@@ -165,7 +165,7 @@ const styles = StyleSheet.create({
     paddingHorizontal: space.lg,
     paddingBottom: space.sm,
   },
-  headline: { color: '#FFFFFF' },
+  headline: { color: color.white },
   dots: {
     flexDirection: 'row',
     justifyContent: 'center',

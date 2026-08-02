@@ -153,7 +153,7 @@ function ProviderActions({ job }: { job: any }) {
             placeholder="Quote (GYD)"
             placeholderTextColor={color.text.muted}
             keyboardType="number-pad"
-            style={{ fontFamily: 'Inter', fontSize: 15, color: color.text.primary, paddingVertical: 0 }}
+            style={{ fontFamily: 'Hanken', fontSize: 15, color: color.text.primary, paddingVertical: 0 }}
           />
         </View>
         <PillButton

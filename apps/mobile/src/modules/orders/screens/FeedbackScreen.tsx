@@ -27,7 +27,7 @@ function TextArea({ value, onChangeText, placeholder }: { value: string; onChang
         borderRadius: radius.lg,
         backgroundColor: color.surface.base,
         padding: space.lg,
-        fontFamily: 'Inter',
+        fontFamily: 'Hanken',
         fontSize: 16,
         color: color.text.primary,
       }}

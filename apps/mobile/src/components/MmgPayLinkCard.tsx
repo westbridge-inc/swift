@@ -38,7 +38,7 @@ export function MmgPayLinkCard({
     <Card style={{ marginBottom: space.lg, ...darkCard }}>
       <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.sm }}>
         <MaterialCommunityIcons name="cellphone-check" size={18} color={dark ? color.brand[500] : color.brand[600]} />
-        <T variant="label" weight="semibold" style={dark ? { color: '#FFFFFF' } : undefined}>
+        <T variant="label" weight="semibold" style={dark ? { color: color.white } : undefined}>
           Your MMG pay link
         </T>
       </View>

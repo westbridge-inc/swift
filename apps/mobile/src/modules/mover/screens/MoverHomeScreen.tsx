@@ -189,8 +189,8 @@ function DemandDot() {
 /** Cluster badge: N waiting around here. */
 function ClusterBadge({ count }: { count: number }) {
   return (
-    <View style={{ minWidth: 26, height: 26, borderRadius: 13, paddingHorizontal: 6, backgroundColor: dk.accent, alignItems: 'center', justifyContent: 'center', borderWidth: 2, borderColor: '#fff' }}>
-      <T variant="caption" weight="bold" style={{ color: '#fff' }}>
+    <View style={{ minWidth: 26, height: 26, borderRadius: 13, paddingHorizontal: 6, backgroundColor: dk.accent, alignItems: 'center', justifyContent: 'center', borderWidth: 2, borderColor: color.white }}>
+      <T variant="caption" weight="bold" style={{ color: color.white }}>
         {count}
       </T>
     </View>
@@ -201,9 +201,9 @@ function ClusterBadge({ count }: { count: number }) {
 function StoreBadge({ ready, soon }: { ready: number; soon: number }) {
   const hot = ready > 0;
   return (
-    <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4, borderRadius: 12, paddingHorizontal: 8, paddingVertical: 4, backgroundColor: hot ? dk.accent : '#FFFFFF', borderWidth: 1.5, borderColor: hot ? '#fff' : dk.accentBorder }}>
-      <MaterialCommunityIcons name="storefront" size={12} color={hot ? '#fff' : dk.accent} />
-      <T variant="caption" weight="bold" style={{ color: hot ? '#fff' : dk.text }}>
+    <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4, borderRadius: 12, paddingHorizontal: 8, paddingVertical: 4, backgroundColor: hot ? dk.accent : color.white, borderWidth: 1.5, borderColor: hot ? color.white : dk.accentBorder }}>
+      <MaterialCommunityIcons name="storefront" size={12} color={hot ? color.white : dk.accent} />
+      <T variant="caption" weight="bold" style={{ color: hot ? color.white : dk.text }}>
         {hot ? ready : soon}
       </T>
     </View>
@@ -390,7 +390,7 @@ export function MoverHomeScreen({ navigation }: any) {
                     cardShadow,
                   ]}
                 >
-                  <T variant="title" weight="bold" style={{ color: '#fff', letterSpacing: 1 }}>
+                  <T variant="title" weight="bold" style={{ color: color.white, letterSpacing: 1 }}>
                     {busyToggle ? '…' : 'GO'}
                   </T>
                 </View>
