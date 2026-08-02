@@ -35,7 +35,6 @@ module.exports = {
         'apps/mobile/src/modules/advertiser/screens/CampaignDetailScreen.tsx',
         'apps/mobile/src/modules/chat/screens/ConversationScreen.tsx',
         'apps/mobile/src/modules/orders/screens/OrdersHistoryScreen.tsx',
-        'apps/mobile/src/screens/auth/SelfieCaptureScreen.tsx',
       ],
       rules: {
         'no-restricted-syntax': [

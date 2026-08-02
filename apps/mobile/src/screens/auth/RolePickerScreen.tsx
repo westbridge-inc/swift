@@ -9,6 +9,8 @@ import { useVendorPreview } from '../../stores/vendorPreview';
 import { DEFAULT_COUNTRY } from '../../lib/markets';
 import { SwiftMark } from '../../components/SwiftLogo';
 import { Card, IconChip, Screen, T } from '../../kit';
+import { PressableScale } from '../../components/ui';
+import { haptic } from '../../lib/haptics';
 
 // Entry gate ("How will you use Swift?") — business rule, not a kit frame;
 // composed from the kit's card + icon-chip language. Customer browses as a
@@ -51,9 +53,10 @@ export function RolePickerScreen() {
 
         <View style={{ gap: space.lg, marginTop: space['3xl'] }}>
           {OPTIONS.map((o) => (
-            <Pressable
+            <PressableScale
               key={o.key}
               onPress={() => {
+                haptic.select();
                 setMoverPreset(o.moverPreset ?? null);
                 // Customer picks role → straight to browsing. Seed a market so
                 // Home is never empty; useCustomerCountry then refines it from
@@ -62,13 +65,11 @@ export function RolePickerScreen() {
                 setIntent(o.intent);
               }}
             >
-              {({ pressed }) => (
                 <Card
                   style={{
                     flexDirection: 'row',
                     alignItems: 'center',
                     gap: space.lg,
-                    opacity: pressed ? 0.8 : 1,
                   }}
                 >
                   <IconChip icon={o.icon} size={52} />
@@ -82,8 +83,7 @@ export function RolePickerScreen() {
                   </View>
                   <Feather name="chevron-right" size={20} color={color.text.muted} />
                 </Card>
-              )}
-            </Pressable>
+            </PressableScale>
           ))}
         </View>
 
