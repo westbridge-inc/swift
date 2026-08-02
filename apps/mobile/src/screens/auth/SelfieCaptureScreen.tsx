@@ -4,6 +4,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { CameraView, useCameraPermissions } from 'expo-camera';
 import { Feather } from '@expo/vector-icons';
 import { color } from '@swift/ui';
+import { withAlpha } from '../../modules/mover/dark';
 import { SwiftMark } from '../../components/SwiftLogo';
 import { authApi } from '../../services/api';
 import { useAuthStore } from '../../stores/authStore';
@@ -67,7 +68,7 @@ export function SelfieCaptureScreen() {
         height: FRAME,
         borderColor: color.brand[500],
         // the ring glows brand-red — this is a Swift moment, not a form field
-        boxShadow: '0px 8px 24px rgba(128,59,59,0.35)',
+        boxShadow: `0px 8px 24px ${withAlpha(color.brand[500], 0.35)}`,
         elevation: 8,
       }}
     >
