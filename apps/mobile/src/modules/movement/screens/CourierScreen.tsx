@@ -4,29 +4,32 @@ import { Pressable, View, useWindowDimensions } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import MapView, { Marker, PROVIDER_DEFAULT, Polyline } from 'react-native-maps';
 import BottomSheet, { BottomSheetScrollView } from '@gorhom/bottom-sheet';
-import { Feather, MaterialCommunityIcons } from '@expo/vector-icons';
+import { Feather } from '@expo/vector-icons';
 import { color, radius, space } from '@swift/ui';
 import { useCourierEstimate, useCourierOrders, useSendCourier } from '../../../hooks';
 import { useLocationStore } from '../../../stores/locationStore';
 import { GEORGETOWN } from '../../../hooks/useDeviceLocation';
 import { money } from '../../../lib/money';
-import { Card, CircleChip, IconChip, LabeledInput, PillButton, T, TonePill, cardShadow } from '../../../kit';
+import { PinGlyph, Card, CircleChip, IconChip, LabeledInput, PillButton, T, TonePill, cardShadow } from '../../../kit';
 import { RouteCard } from './TaxiScreen';
 import type { PickedPlace } from './DestinationSearchScreen';
 
 type Size = 'SMALL' | 'MEDIUM' | 'LARGE' | 'EXTRA_LARGE';
 type Speed = 'STANDARD' | 'EXPRESS' | 'RUSH';
 
-const SIZES: { key: Size; label: string; icon: keyof typeof MaterialCommunityIcons.glyphMap; hint: string }[] = [
-  { key: 'SMALL', label: 'Small', icon: 'email-outline', hint: 'Documents, keys' },
-  { key: 'MEDIUM', label: 'Medium', icon: 'package-variant', hint: 'Fits a shoebox' },
-  { key: 'LARGE', label: 'Large', icon: 'package-variant-closed', hint: 'Fits a backpack' },
-  { key: 'EXTRA_LARGE', label: 'Extra large', icon: 'dolly', hint: 'Bulky or heavy' },
+// Size reads as text-first (S/M/L/XL letter + hint carry it — the F8 size
+// language); speeds keep one glyph each. Courier-specific icon inventions
+// were cut rather than drawn off-hand (set discipline, logged in the journal).
+const SIZES: { key: Size; letter: string; label: string; hint: string }[] = [
+  { key: 'SMALL', letter: 'S', label: 'Small', hint: 'Documents, keys' },
+  { key: 'MEDIUM', letter: 'M', label: 'Medium', hint: 'Fits a shoebox' },
+  { key: 'LARGE', letter: 'L', label: 'Large', hint: 'Fits a backpack' },
+  { key: 'EXTRA_LARGE', letter: 'XL', label: 'Extra large', hint: 'Bulky or heavy' },
 ];
-const SPEEDS: { key: Speed; label: string; icon: keyof typeof MaterialCommunityIcons.glyphMap; hint: string }[] = [
-  { key: 'STANDARD', label: 'Standard', icon: 'clock-outline', hint: 'Lowest price' },
-  { key: 'EXPRESS', label: 'Express', icon: 'clock-fast', hint: 'Faster' },
-  { key: 'RUSH', label: 'Rush', icon: 'lightning-bolt', hint: 'Fastest' },
+const SPEEDS: { key: Speed; label: string; icon: React.ComponentProps<typeof Feather>['name']; hint: string }[] = [
+  { key: 'STANDARD', label: 'Standard', icon: 'clock', hint: 'Lowest price' },
+  { key: 'EXPRESS', label: 'Express', icon: 'fast-forward', hint: 'Faster' },
+  { key: 'RUSH', label: 'Rush', icon: 'zap', hint: 'Fastest' },
 ];
 
 function prettyStatus(s: string) {
@@ -49,13 +52,15 @@ function regionFor(pts: LatLng[]) {
  *  `wide` = half-width row card (2×2 grid); default = equal column (3-across). */
 function OptionCard({
   icon,
+  letter,
   label,
   hint,
   active,
   onPress,
   wide,
 }: {
-  icon: keyof typeof MaterialCommunityIcons.glyphMap;
+  icon?: React.ComponentProps<typeof Feather>['name'];
+  letter?: string;
   label: string;
   hint: string;
   active: boolean;
@@ -90,7 +95,13 @@ function OptionCard({
               backgroundColor: active ? color.brand[500] : color.brand[50],
             }}
           >
-            <MaterialCommunityIcons name={icon} size={17} color={active ? color.white : color.brand[600]} />
+            {letter ? (
+              <T variant="bodyStrong" style={{ color: active ? color.white : color.brand[600] }}>
+                {letter}
+              </T>
+            ) : icon ? (
+              <Feather name={icon} size={17} color={active ? color.white : color.brand[600]} />
+            ) : null}
           </View>
           <View style={wide ? { flex: 1 } : { alignItems: 'center', marginTop: 6 }}>
             <T variant="label" weight="semibold" tone={active ? 'deep' : 'ink'} numberOfLines={1}>
@@ -195,7 +206,7 @@ export function CourierScreen({ navigation }: any) {
         ) : null}
         {dropoffLL ? (
           <Marker coordinate={dropoffLL} title="To">
-            <MaterialCommunityIcons name="map-marker" size={36} color={color.brand[600]} />
+            <PinGlyph size={34} color={color.brand[600]} />
           </Marker>
         ) : null}
         {pickupLL && dropoffLL ? (
@@ -237,7 +248,7 @@ export function CourierScreen({ navigation }: any) {
           </T>
           <View style={{ flexDirection: 'row', flexWrap: 'wrap', columnGap: space.md, rowGap: space.md }}>
             {SIZES.map((s) => (
-              <OptionCard key={s.key} wide icon={s.icon} label={s.label} hint={s.hint} active={s.key === size} onPress={() => setSize(s.key)} />
+              <OptionCard key={s.key} wide letter={s.letter} label={s.label} hint={s.hint} active={s.key === size} onPress={() => setSize(s.key)} />
             ))}
           </View>
 
@@ -274,10 +285,10 @@ export function CourierScreen({ navigation }: any) {
               ) : estimate ? (
                 <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
                   <View>
-                    <T variant="caption" weight="semibold" tone="muted">
-                      DELIVERY FEE
+                    <T variant="micro" tone="muted">
+                      Delivery fee
                     </T>
-                    <T variant="display" tone="brand" style={{ marginTop: 2 }}>
+                    <T variant="displayXl" tone="brand" style={{ marginTop: 2 }}>
                       {money(estimate.totalFee)}
                     </T>
                   </View>
@@ -286,7 +297,7 @@ export function CourierScreen({ navigation }: any) {
                       {estimate.distanceKm} km · ~{estimate.estimatedMinutes} min
                     </T>
                     <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4, marginTop: 4 }}>
-                      <MaterialCommunityIcons name="cash" size={13} color={color.success} />
+                      <Feather name="dollar-sign" size={13} color={color.success} />
                       <T variant="caption" weight="semibold" tone="muted">
                         No fees · pay cash
                       </T>
