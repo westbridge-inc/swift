@@ -40,7 +40,6 @@ module.exports = {
         'apps/mobile/src/modules/mover/screens/MoverHomeScreen.tsx',
         'apps/mobile/src/modules/mover/screens/MoverOnboardingScreen.tsx',
         'apps/mobile/src/modules/mover/shared.tsx',
-        'apps/mobile/src/modules/orders/screens/DeliveryScreen.tsx',
         'apps/mobile/src/modules/orders/screens/OrdersHistoryScreen.tsx',
         'apps/mobile/src/modules/vendor/NewOrderTakeover.tsx',
         'apps/mobile/src/modules/vendor/VendorStack.tsx',
