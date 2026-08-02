@@ -2232,6 +2232,15 @@ export async function adminRoutes(app: FastifyInstance) {
     };
   });
 
+  /** Part 7/10 KPIs — every number derived from the rows money and state
+   *  moved on (the DB testifies). Reading it at t0 IS the baseline capture;
+   *  re-read after each friction fix lands. */
+  app.get('/integrity/kpis', { preHandler: [adminGuard] }, async (request) => {
+    const { days } = z.object({ days: z.coerce.number().int().min(1).max(365).default(30) }).parse(request.query ?? {});
+    const { frictionKpis } = await import('../integrity/friction-metrics');
+    return { success: true, data: await frictionKpis(app.prisma, days) };
+  });
+
   /** Part 4 appeals queue — OPEN cases with the accused's identity attached,
    *  oldest first (the 24h clock). Part 10's overturn rate rides along: >5%
    *  is the false-positive alarm that pauses enforcement expansion. */
