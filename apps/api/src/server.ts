@@ -286,6 +286,10 @@ async function buildApp() {
   await app.register(publicRoutes, { prefix: '/api/v1/public' });
   // HMAC-signed statement renders (the authed routes mint the links).
   await app.register(statementRoutes, { prefix: '/api/v1/statements' });
+  // MMG agent-cash channels [san spec 4.1/4.2] — dark (503) until the
+  // webhook secret arrives with MMG biller onboarding.
+  const { agentCashRoutes } = await import('./modules/billing/agent-cash.routes');
+  await app.register(agentCashRoutes, { prefix: '/api/v1/billing/mmg' });
 
   // Background job queues.
   // SWIFT-AUD-D7-01: workers are opt-out per process. Default (unset) keeps

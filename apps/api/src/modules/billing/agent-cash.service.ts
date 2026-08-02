@@ -38,6 +38,41 @@ export type IngestResult =
   | { status: 'reconciled'; paymentId: string; originalPaymentId: string }
   | { status: 'received_unmatched'; paymentId: string; failureCode: string };
 
+/** Channel-honest activation copy [spec 4.5 / SO-7]: the screen must state
+ *  the LIVE channel's real latency — never "instant" in manual mode. */
+const ACTIVATION_COPY: Record<string, string> = {
+  MANUAL: 'Service resumes within 1 business day of paying.',
+  SETTLEMENT_DAILY: 'Service resumes by the next morning after paying.',
+  WEBHOOK: 'Service resumes within minutes of paying.',
+};
+
+/** The Pay-screen data block [spec 6.1] — spread into the partner's
+ *  GET /subscription next to sanDisplay. One amount-due source of truth
+ *  [3.4]: next week's fee minus the parked wallet balance, floored at 0. */
+export async function payInfo(
+  prisma: PrismaClient,
+  sub: { id: string; weeklyRate: unknown; customRate?: unknown | null },
+): Promise<{ walletBalanceGyd: number; weeklyFeeGyd: number; amountDueGyd: number; activationCopy: string; payCashSteps: string[] }> {
+  const [balanceRow, modeRow] = await Promise.all([
+    prisma.prepaidBalance.findUnique({ where: { subscriptionId: sub.id } }),
+    prisma.platformConfig.findUnique({ where: { key: 'billing.mmg_agent.ingestion_mode' } }),
+  ]);
+  const weekly = Number(sub.customRate ?? sub.weeklyRate);
+  const balance = Number(balanceRow?.balance ?? 0);
+  const mode = (modeRow?.value as string | null) ?? 'MANUAL';
+  return {
+    walletBalanceGyd: balance,
+    weeklyFeeGyd: weekly,
+    amountDueGyd: Math.max(0, weekly - balance),
+    activationCopy: ACTIVATION_COPY[mode] ?? ACTIVATION_COPY['MANUAL']!,
+    payCashSteps: [
+      'Visit any MMG agent',
+      'Say you are paying a Swift bill and give your Swift Number',
+      'Pay cash — keep the receipt',
+    ],
+  };
+}
+
 export class AgentCashService {
   constructor(
     private prisma: PrismaClient,

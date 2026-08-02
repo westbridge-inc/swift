@@ -2608,6 +2608,48 @@ export async function adminRoutes(app: FastifyInstance) {
     return { success: true, data: updated };
   });
 
+  /** Channel B — settlement file upload [san spec 4.3]. Paste/upload the CSV;
+   *  every row rides the normal pipeline; the recon report is returned and a
+   *  trailer mismatch pages. Re-importing the same file is a proven no-op. */
+  app.post('/billing/settlement-import', { preHandler: [adminGuard] }, async (request) => {
+    const body = z.object({ csv: z.string().min(10).max(5_000_000), source: z.string().trim().max(120).default('manual-upload') }).parse(request.body ?? {});
+    const { AgentCashService } = await import('../billing/agent-cash.service');
+    const { importSettlementCsv } = await import('../billing/settlement-import');
+    const svc = new AgentCashService(app.prisma, billing);
+    const report = await importSettlementCsv(app.prisma, svc, body.csv, { source: body.source });
+    if (report.trailerMismatch) {
+      const { notifyAdmins } = await import('../notification/notification.service');
+      await notifyAdmins(app.prisma, notifications, {
+        title: 'Settlement file trailer mismatch',
+        body: `File "${body.source}": rows sum GY$${report.totalGyd.toLocaleString()} but the trailer claims GY$${(report.trailerTotalGyd ?? 0).toLocaleString()}. Reconcile with MMG before trusting this file.`,
+        data: { kind: 'settlement_trailer_mismatch', source: body.source },
+      });
+    }
+    return { success: true, data: report };
+  });
+
+  /** Ingestion-mode config [4.5] — drives which jobs run and the activation-
+   *  speed copy on every screen (SO-7: never promise webhook speed in manual
+   *  mode). Stored in PlatformConfig; read by mobile via /subscription. */
+  app.get('/billing/agent-cash-config', { preHandler: [adminGuard] }, async () => {
+    const row = await app.prisma.platformConfig.findUnique({ where: { key: 'billing.mmg_agent.ingestion_mode' } });
+    const mode = (row?.value as string | null) ?? 'MANUAL';
+    return { success: true, data: { ingestionMode: mode, webhookConfigured: Boolean(process.env['AGENT_CASH_WEBHOOK_SECRET']) } };
+  });
+
+  app.put('/billing/agent-cash-config', { preHandler: [adminGuard] }, async (request) => {
+    const body = z.object({ ingestionMode: z.enum(['MANUAL', 'SETTLEMENT_DAILY', 'WEBHOOK']) }).parse(request.body ?? {});
+    if (body.ingestionMode === 'WEBHOOK' && !process.env['AGENT_CASH_WEBHOOK_SECRET']) {
+      throw new AppError(400, 'WEBHOOK_NOT_CONFIGURED', 'Set AGENT_CASH_WEBHOOK_SECRET (MMG onboarding) before promising webhook-speed activation.');
+    }
+    const row = await app.prisma.platformConfig.upsert({
+      where: { key: 'billing.mmg_agent.ingestion_mode' },
+      create: { key: 'billing.mmg_agent.ingestion_mode', value: body.ingestionMode },
+      update: { value: body.ingestionMode },
+    });
+    return { success: true, data: { ingestionMode: row.value } };
+  });
+
   /** Global SAN resolution (⌘K): who does this number belong to. Payment
    *  reference lookup only — the SAN is never an auth factor. */
   app.get('/billing/san/:san', { preHandler: [adminGuard] }, async (request) => {
