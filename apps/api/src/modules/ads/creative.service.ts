@@ -31,7 +31,7 @@ const VIDEO_MIMES = new Set(['video/mp4']);
 /** MP4 ftyp magic bytes (…ftyp at offset 4). Good enough to reject a
  *  mislabeled non-video; full codec/duration checks belong to the transcode
  *  probe (ffprobe), which runs in the job. */
-function looksLikeMp4(buffer: Buffer): boolean {
+export function looksLikeMp4(buffer: Buffer): boolean {
   return buffer.length > 12 && buffer.toString('ascii', 4, 8) === 'ftyp';
 }
 

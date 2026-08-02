@@ -23,8 +23,10 @@ import { NotificationService } from '../notification/notification.service';
 import { SupportService } from '../support/support.service';
 import { VerificationService, REJECTION_REASON_CODES } from '../verification/verification.service';
 import { AdvertiserService } from '../ads/advertiser.service';
-import { CreativeService, CREATIVE_REJECT_REASONS } from '../ads/creative.service';
+import { CreativeService, CREATIVE_REJECT_REASONS, looksLikeMp4 } from '../ads/creative.service';
 import { AdsLifecycleService } from '../ads/lifecycle.service';
+import { AdsRevenueService } from '../ads/revenue.service';
+import { looksLikeImage } from '../../utils/images';
 import { ComplianceAuditService } from '../verification/compliance-audit.service';
 import { scheduleVendorSearchSync } from '../search/search-sync';
 import { BillingService } from '../billing/billing.service';
@@ -1997,6 +1999,201 @@ export async function adminRoutes(app: FastifyInstance) {
     const { getTenantId } = await import('../../plugins/tenant-context');
     const seeded = await seedAdPlacements(app.prisma, getTenantId() ?? 'swift-default');
     return { success: true, data: { seeded } };
+  });
+
+  // ── Ads operator console (spec §15.3/§15.4/§15.5/§15.7/§15.8) ─────────────
+  const adsRevenue = new AdsRevenueService(app.prisma);
+  const adsTenant = async () => {
+    const { getTenantId } = await import('../../plugins/tenant-context');
+    return getTenantId() ?? 'swift-default';
+  };
+
+  /** §15.8 revenue dashboard — booked vs recognized (§8.5, never conflated) by
+   *  week × placement, fill rate, advertiser count, and the invoice tie-out.
+   *  Defaults to the last 8 + next 4 weeks. */
+  app.get('/ads/revenue', { preHandler: [adminGuard] }, async (request) => {
+    const q = z.object({ from: z.string().date().optional(), to: z.string().date().optional() }).parse(request.query ?? {});
+    const now = new Date();
+    const from = q.from ? new Date(`${q.from}T00:00:00Z`) : new Date(now.getTime() - 8 * 7 * 86_400_000);
+    const to = q.to ? new Date(`${q.to}T00:00:00Z`) : new Date(now.getTime() + 4 * 7 * 86_400_000);
+    if (to < from) throw new AppError(400, 'BAD_RANGE', 'to must be on or after from.');
+    return { success: true, data: await adsRevenue.dashboard(await adsTenant(), from, to) };
+  });
+
+  /** §15.3 inventory calendar — placements × next N weeks occupancy per city,
+   *  with campaign click-through. */
+  app.get('/ads/inventory', { preHandler: [adminGuard] }, async (request) => {
+    const q = z.object({ weeks: z.coerce.number().int().min(1).max(26).default(12) }).parse(request.query ?? {});
+    return { success: true, data: await adsRevenue.inventoryCalendar(await adsTenant(), q.weeks) };
+  });
+
+  /** §15.5 campaigns table with filters. */
+  app.get('/ads/campaigns', { preHandler: [adminGuard] }, async (request) => {
+    const q = z.object({
+      status: z.enum(['DRAFT', 'PENDING_PAYMENT', 'PENDING_REVIEW', 'SCHEDULED', 'LIVE', 'PAUSED', 'COMPLETED', 'CANCELLED', 'REJECTED']).optional(),
+      advertiserId: z.string().optional(),
+      placementId: z.string().optional(),
+    }).parse(request.query ?? {});
+    const { page, limit, skip } = parsePagination(request.query as Record<string, string>);
+    const where = {
+      ...(q.status ? { status: q.status } : {}),
+      ...(q.advertiserId ? { advertiserId: q.advertiserId } : {}),
+      ...(q.placementId ? { placementId: q.placementId } : {}),
+    };
+    const [campaigns, total] = await Promise.all([
+      app.prisma.adCampaign.findMany({
+        where,
+        include: {
+          advertiser: { select: { companyName: true } },
+          placement: { select: { key: true, name: true } },
+          invoices: { select: { number: true, status: true, amount: true } },
+        },
+        orderBy: { createdAt: 'desc' },
+        skip,
+        take: limit,
+      }),
+      app.prisma.adCampaign.count({ where }),
+    ]);
+    return paginatedResponse(
+      campaigns.map((c) => ({
+        id: c.id, name: c.name, status: c.status, statusReason: c.statusReason,
+        advertiser: c.advertiser.companyName, placement: c.placement.key, placementName: c.placement.name,
+        cities: c.cities, startWeek: c.startWeek, endWeek: c.endWeek,
+        totalAmount: c.totalAmount ? Number(c.totalAmount) : null, currency: c.currency,
+        invoices: c.invoices.map((i) => ({ number: i.number, status: i.status, amount: Number(i.amount) })),
+        createdAt: c.createdAt,
+      })),
+      total,
+      { page, limit, skip },
+    );
+  });
+
+  /** §15.4 placement pricing config. Price changes affect FUTURE bookings only
+   *  (E4: price is locked on booking rows at checkout). */
+  app.put('/ads/placements/:id', { preHandler: [adminGuard] }, async (request) => {
+    const { id } = request.params as { id: string };
+    const body = z.object({
+      name: z.string().trim().min(2).max(80).optional(),
+      weeklyPrice: z.number().positive().optional(),
+      slotsPerWeek: z.number().int().min(1).max(20).optional(),
+      rotationSeconds: z.number().int().min(3).max(60).nullable().optional(),
+      freqCapPerUserPerDay: z.number().int().min(1).max(100).nullable().optional(),
+      active: z.boolean().optional(),
+    }).parse(request.body ?? {});
+    const existing = await app.prisma.adPlacement.findUnique({ where: { id } });
+    if (!existing) throw new NotFoundError('AdPlacement', id);
+    const updated = await app.prisma.adPlacement.update({ where: { id }, data: body });
+    return { success: true, data: { id: updated.id, key: updated.key, name: updated.name, weeklyPrice: Number(updated.weeklyPrice), slotsPerWeek: updated.slotsPerWeek, rotationSeconds: updated.rotationSeconds, freqCapPerUserPerDay: updated.freqCapPerUserPerDay, active: updated.active } };
+  });
+
+  /** §15.4 tenant knobs (reservation TTL, SLA, refund windows, …). Upsert —
+   *  the row is born with schema defaults on first write. */
+  app.get('/ads/settings', { preHandler: [adminGuard] }, async () => {
+    const tenantId = await adsTenant();
+    const s = await app.prisma.adsSettings.findUnique({ where: { tenantId } });
+    return { success: true, data: s ?? { tenantId } };
+  });
+
+  app.put('/ads/settings', { preHandler: [adminGuard] }, async (request) => {
+    const body = z.object({
+      reservationMinutes: z.number().int().min(5).max(120).optional(),
+      reviewSlaHours: z.number().int().min(1).max(168).optional(),
+      cancelFullRefundDays: z.number().int().min(0).max(30).optional(),
+      autoCancelUnapprovedHours: z.number().int().min(1).max(168).optional(),
+      defaultRotationSeconds: z.number().int().min(3).max(60).optional(),
+    }).parse(request.body ?? {});
+    const tenantId = await adsTenant();
+    const s = await app.prisma.adsSettings.upsert({ where: { tenantId }, create: { tenantId, ...body }, update: body });
+    return { success: true, data: s };
+  });
+
+  // ── §15.7 house ads manager — the operator's own fallback fills. CRUD +
+  //    sort; no hard deletes (§18) — deactivate instead. Serving reads only
+  //    active rows ordered by sort. ────────────────────────────────────────────
+  app.get('/ads/house', { preHandler: [adminGuard] }, async () => {
+    const tenantId = await adsTenant();
+    const rows = await app.prisma.houseAd.findMany({
+      where: { tenantId },
+      include: { placement: { select: { key: true, name: true, mediaKind: true } } },
+      orderBy: [{ placementId: 'asc' }, { sort: 'asc' }],
+    });
+    return { success: true, data: rows };
+  });
+
+  /** Create a house ad — multipart: `file` (image/mp4, same §9.1 caps as paid
+   *  creatives) + optional `poster` image for videos + form fields. */
+  app.post('/ads/house', { preHandler: [adminGuard] }, async (request) => {
+    let fileBuffer: Buffer | null = null;
+    let fileMime = '';
+    let fileName = '';
+    let posterBuffer: Buffer | null = null;
+    let posterMime = '';
+    const fields: Record<string, string> = {};
+    // Per-call transport cap: file + optional poster (global limit is 1 file,
+    // 5 MB — house videos share the §9.1 25 MB cap).
+    for await (const part of request.parts({ limits: { fileSize: 25 * 1024 * 1024, files: 2 } })) {
+      if (part.type === 'file') {
+        const buf = await part.toBuffer();
+        if (part.fieldname === 'poster') { posterBuffer = buf; posterMime = part.mimetype; }
+        else { fileBuffer = buf; fileMime = part.mimetype; fileName = part.filename; }
+      } else if (typeof part.value === 'string') {
+        fields[part.fieldname] = part.value;
+      }
+    }
+    const body = z.object({
+      placementId: z.string().min(1),
+      kind: z.enum(['IMAGE', 'VIDEO']).default('IMAGE'),
+      headline: z.string().trim().max(60).optional(),
+      ctaLabel: z.string().trim().max(15).optional(),
+      destinationType: z.enum(['NONE', 'URL', 'DEEPLINK']).default('NONE'),
+      destinationValue: z.string().trim().max(500).optional(),
+      sort: z.coerce.number().int().min(0).max(999).default(0),
+    }).parse(fields);
+    const placement = await app.prisma.adPlacement.findUnique({ where: { id: body.placementId } });
+    if (!placement) throw new NotFoundError('AdPlacement', body.placementId);
+    if (body.kind !== placement.mediaKind) throw new AppError(400, 'WRONG_MEDIA_KIND', `This placement takes ${placement.mediaKind}, not ${body.kind}.`);
+    if (!fileBuffer) throw new AppError(400, 'NO_FILE', 'Attach the house ad file.');
+    if (body.kind === 'IMAGE') {
+      if (!looksLikeImage(fileBuffer)) throw new AppError(400, 'BAD_IMAGE', 'Upload a JPEG, PNG, or WebP image.');
+      if (fileBuffer.length > 500 * 1024) throw new AppError(400, 'IMAGE_TOO_LARGE', 'Image must be ≤500 KB.');
+    } else {
+      if (!looksLikeMp4(fileBuffer)) throw new AppError(400, 'BAD_VIDEO', 'Upload an MP4 video.');
+      if (fileBuffer.length > 25 * 1024 * 1024) throw new AppError(400, 'VIDEO_TOO_LARGE', 'Video must be ≤25 MB.');
+    }
+    if (posterBuffer && !looksLikeImage(posterBuffer)) throw new AppError(400, 'BAD_POSTER', 'Poster must be an image.');
+
+    const tenantId = await adsTenant();
+    const { url } = await getStorageProvider().upload({ buffer: fileBuffer, filename: fileName || 'house-ad', mimeType: fileMime, folder: 'ads/house' });
+    let posterUrl: string | null = null;
+    if (posterBuffer) {
+      posterUrl = (await getStorageProvider().upload({ buffer: posterBuffer, filename: 'poster', mimeType: posterMime, folder: 'ads/house' })).url;
+    }
+    const row = await app.prisma.houseAd.create({
+      data: {
+        tenantId, placementId: body.placementId, kind: body.kind, fileUrl: url, posterUrl,
+        headline: body.headline ?? null, ctaLabel: body.ctaLabel ?? null,
+        destinationType: body.destinationType, destinationValue: body.destinationValue ?? null,
+        sort: body.sort,
+      },
+    });
+    return { success: true, data: row };
+  });
+
+  /** Update text/destination/sort/active. Deactivation is the delete. */
+  app.put('/ads/house/:id', { preHandler: [adminGuard] }, async (request) => {
+    const { id } = request.params as { id: string };
+    const body = z.object({
+      headline: z.string().trim().max(60).nullable().optional(),
+      ctaLabel: z.string().trim().max(15).nullable().optional(),
+      destinationType: z.enum(['NONE', 'URL', 'DEEPLINK']).optional(),
+      destinationValue: z.string().trim().max(500).nullable().optional(),
+      sort: z.number().int().min(0).max(999).optional(),
+      active: z.boolean().optional(),
+    }).parse(request.body ?? {});
+    const existing = await app.prisma.houseAd.findUnique({ where: { id } });
+    if (!existing) throw new NotFoundError('HouseAd', id);
+    const row = await app.prisma.houseAd.update({ where: { id }, data: body });
+    return { success: true, data: row };
   });
 
   app.get('/verification/queue', { preHandler: [adminGuard] }, async (request) => {
