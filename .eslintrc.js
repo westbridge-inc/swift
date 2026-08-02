@@ -41,9 +41,6 @@ module.exports = {
         'apps/mobile/src/modules/mover/screens/MoverOnboardingScreen.tsx',
         'apps/mobile/src/modules/mover/shared.tsx',
         'apps/mobile/src/modules/orders/screens/OrdersHistoryScreen.tsx',
-        'apps/mobile/src/modules/vendor/NewOrderTakeover.tsx',
-        'apps/mobile/src/modules/vendor/VendorStack.tsx',
-        'apps/mobile/src/modules/vendor/screens/VendorOrderDetailScreen.tsx',
         'apps/mobile/src/screens/auth/SelfieCaptureScreen.tsx',
       ],
       rules: {

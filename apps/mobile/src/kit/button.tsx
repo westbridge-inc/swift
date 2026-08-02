@@ -5,7 +5,8 @@ import { Feather } from '@expo/vector-icons';
 import { color, space } from '@swift/ui';
 import { T } from './text';
 
-const HEIGHT = { lg: 56, md: 48, sm: 38 } as const;
+// xl = the moment buttons (Place order, ACCEPT) — Part 12's 64 tier.
+const HEIGHT = { xl: 64, lg: 56, md: 48, sm: 38 } as const;
 
 type Variant = 'primary' | 'soft' | 'dark' | 'outline' | 'destructive';
 type Size = keyof typeof HEIGHT;
