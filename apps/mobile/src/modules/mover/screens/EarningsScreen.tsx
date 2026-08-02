@@ -261,7 +261,7 @@ export function EarningsScreen({ navigation }: any) {
                     borderTopColor: color.border.subtle,
                   }}
                 >
-                  <View style={{ width: 32, height: 32, borderRadius: 16, alignItems: 'center', justifyContent: 'center', backgroundColor: '#E8F6EE' }}>
+                  <View style={{ width: 32, height: 32, borderRadius: 16, alignItems: 'center', justifyContent: 'center', backgroundColor: color.soft.success }}>
                     <MaterialCommunityIcons name="cash" size={15} color={color.success} />
                   </View>
                   <View style={{ flex: 1, marginLeft: space.md }}>

@@ -5,8 +5,9 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import MapView, { Marker, PROVIDER_DEFAULT } from 'react-native-maps';
 import BottomSheet, { BottomSheetScrollView } from '@gorhom/bottom-sheet';
 import { color, radius, space } from '@swift/ui';
+import { haptic } from '../../../lib/haptics';
 import { Feather, MaterialCommunityIcons } from '@expo/vector-icons';
-import { LoadingBlock, PillButton, Screen, T, cardShadow } from '../../../kit';
+import { Pictogram, TonePill, LoadingBlock, PillButton, Screen, T, cardShadow } from '../../../kit';
 import {
   useMoverKind,
   useMoverStats,
@@ -46,7 +47,7 @@ import { dk, withAlpha, DCard, DStat, DWeekBars } from '../dark';
  * (100% yours, cash), pickup→drop-off, a countdown, and big Accept/Decline.
  * The capped fare slider lets the mover undercut the market max, never exceed it.
  */
-function DispatchOfferCard({
+export function DispatchOfferCard({
   offer,
   job,
   kind,
@@ -85,24 +86,24 @@ function DispatchOfferCard({
   useEffect(() => setPrice(marketMax), [offer.orderId, marketMax]);
 
   return (
-    <View style={{ position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, zIndex: 30, justifyContent: 'flex-end', backgroundColor: 'rgba(0,0,0,0.45)' }}>
+    <View style={{ position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, zIndex: 30, justifyContent: 'flex-end', backgroundColor: color.scrim }}>
       <View style={[{ margin: space.lg, borderRadius: radius.xl, overflow: 'hidden', backgroundColor: color.surface.base }, cardShadow]}>
         <View style={{ backgroundColor: color.brand[500] }}>
           {total ? (
-            <View style={{ height: 4, backgroundColor: 'rgba(255,255,255,0.3)' }}>
+            <View style={{ height: 4, backgroundColor: color.surface.onBrand }}>
               <View style={{ height: 4, width: `${pct * 100}%`, backgroundColor: color.white }} />
             </View>
           ) : null}
           <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: space.xl, paddingVertical: space.md }}>
             <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.sm }}>
-              <MaterialCommunityIcons name={isDriver ? 'car' : 'package-variant'} size={18} color={color.white} />
-              <T variant="caption" weight="bold" tone="onBrand" style={{ letterSpacing: 1 }}>
-                {offer.isExpress ? 'EXPRESS · BIGGER FEE' : `NEW ${isDriver ? 'RIDE' : 'DELIVERY'} REQUEST`}
+              <Pictogram name={isDriver ? 'taxi' : 'send'} size={18} color={color.white} />
+              <T variant="micro" tone="onBrand">
+                {offer.isExpress ? 'Express · bigger fee' : `New ${isDriver ? 'ride' : 'delivery'} request`}
               </T>
             </View>
-            {secs > 0 ? (
+            {offer.etaMinutes != null ? (
               <T variant="caption" weight="bold" tone="onBrand">
-                {secs}s
+                {offer.etaMinutes} min away
               </T>
             ) : null}
           </View>
@@ -115,9 +116,9 @@ function DispatchOfferCard({
                 <T variant="caption" weight="bold" tone="muted" style={{ letterSpacing: 1 }}>
                   YOUR PRICE
                 </T>
-                <T variant="display">{money(price)}</T>
+                <T variant="displayXl">{money(price)}</T>
                 <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4, marginTop: 2 }}>
-                  <MaterialCommunityIcons name="cash" size={13} color={color.success} />
+                  <Feather name="dollar-sign" size={13} color={color.success} />
                   <T variant="caption" weight="bold" tone="success">
                     100% yours · cash
                   </T>
@@ -126,10 +127,12 @@ function DispatchOfferCard({
                 <CustomerTrustBadge trust={offer.customerTrust} cash={offer.paymentMethod === 'CASH'} />
                 {/* Judge the bag before you commit (grocery runs get big) */}
                 {offer.itemCount ? (
-                  <T variant="caption" tone="muted" style={{ marginTop: 4 }}>
-                    {offer.itemCount} item{offer.itemCount === 1 ? '' : 's'}
-                    {offer.estLoad ? ` · ${offer.estLoad} load` : ''}
-                  </T>
+                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.sm, marginTop: 6 }}>
+                    <T variant="caption" tone="muted">
+                      {offer.itemCount} item{offer.itemCount === 1 ? '' : 's'}
+                    </T>
+                    {offer.estLoad ? <TonePill label={String(offer.estLoad).toUpperCase()} tone="brand" /> : null}
+                  </View>
                 ) : null}
               </>
             ) : (
@@ -165,9 +168,12 @@ function DispatchOfferCard({
           <View style={{ flexDirection: 'row', gap: space.md, marginTop: space.xl }}>
             <PillButton label="Decline" variant="outline" onPress={onDecline} style={{ paddingHorizontal: space['2xl'] }} />
             <PillButton
-              label={accepting ? 'Accepting…' : `Accept ${isDriver ? 'ride' : 'delivery'}`}
-              disabled={accepting}
-              onPress={() => onAccept(price)}
+              label={`Accept ${isDriver ? 'ride' : 'delivery'}`}
+              loading={accepting}
+              onPress={() => {
+                haptic.commit();
+                onAccept(price);
+              }}
               style={{ flex: 1 }}
             />
           </View>
@@ -202,7 +208,7 @@ function StoreBadge({ ready, soon }: { ready: number; soon: number }) {
   const hot = ready > 0;
   return (
     <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4, borderRadius: 12, paddingHorizontal: 8, paddingVertical: 4, backgroundColor: hot ? dk.accent : color.white, borderWidth: 1.5, borderColor: hot ? color.white : dk.accentBorder }}>
-      <MaterialCommunityIcons name="storefront" size={12} color={hot ? color.white : dk.accent} />
+      <Feather name="shopping-bag" size={12} color={hot ? color.white : dk.accent} />
       <T variant="caption" weight="bold" style={{ color: hot ? color.white : dk.text }}>
         {hot ? ready : soon}
       </T>
@@ -449,7 +455,7 @@ export function MoverHomeScreen({ navigation }: any) {
           {expiringDoc ? (
             <Pressable onPress={() => navigation?.navigate?.('MoverDocuments')}>
               {({ pressed }) => (
-                <View style={{ flexDirection: 'row', alignItems: 'flex-start', gap: space.sm, borderRadius: radius.lg, backgroundColor: 'rgba(245,166,35,0.12)', borderWidth: 1, borderColor: 'rgba(245,166,35,0.4)', padding: space.md, marginTop: space.md, opacity: pressed ? 0.85 : 1 }}>
+                <View style={{ flexDirection: 'row', alignItems: 'flex-start', gap: space.sm, borderRadius: radius.lg, backgroundColor: withAlpha(color.warning, 0.12), borderWidth: 1, borderColor: withAlpha(color.warning, 0.4), padding: space.md, marginTop: space.md, opacity: pressed ? 0.85 : 1 }}>
                   <Feather name="clock" size={15} color={dk.warning} style={{ marginTop: 1 }} />
                   <T variant="label" style={{ flex: 1, color: dk.text }}>
                     Your {expiringDoc.docType.replace(/_/g, ' ')} expires in {expiringDoc.days} day{expiringDoc.days === 1 ? '' : 's'} — tap to upload the renewal.
@@ -478,7 +484,7 @@ export function MoverHomeScreen({ navigation }: any) {
                   {money(todayTotal)}
                 </T>
                 <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4, marginTop: 2 }}>
-                  <MaterialCommunityIcons name="check-decagram" size={14} color={dk.success} />
+                  <Feather name="check-circle" size={14} color={dk.success} />
                   <T variant="caption" weight="semibold" style={{ color: dk.muted }}>
                     100% yours — Swift takes 0% commission
                   </T>
@@ -492,9 +498,9 @@ export function MoverHomeScreen({ navigation }: any) {
 
           {/* Stat chips (reference profile row, Swift-real numbers). */}
           <View style={{ flexDirection: 'row', gap: space.md, marginTop: space.md }}>
-            <DStat icon={isDriver ? 'car' : 'bike-fast'} value={String(tripsToday)} label={isDriver ? 'Trips today' : 'Jobs today'} />
-            {onlineHours != null ? <DStat icon="clock-outline" value={`${onlineHours}h`} label="Online today" /> : null}
-            <DStat icon="calendar-check" value="0%" label="Commission" />
+            <DStat icon={isDriver ? 'navigation' : 'zap'} value={String(tripsToday)} label={isDriver ? 'Trips today' : 'Jobs today'} />
+            {onlineHours != null ? <DStat icon="clock" value={`${onlineHours}h`} label="Online today" /> : null}
+            <DStat icon="percent" value="0%" label="Commission" />
           </View>
 
           {/* D.3 — cash float headroom */}
@@ -512,7 +518,7 @@ export function MoverHomeScreen({ navigation }: any) {
                     </T>
                   </T>
                 </View>
-                <MaterialCommunityIcons name="cash-multiple" size={22} color={dk.accent} />
+                <Feather name="dollar-sign" size={22} color={dk.accent} />
               </View>
               {Number(profile.float.limit) > 0 ? (
                 <View style={{ height: 6, borderRadius: 3, backgroundColor: dk.cardSoft, marginTop: space.md, overflow: 'hidden' }}>
@@ -557,7 +563,7 @@ export function MoverHomeScreen({ navigation }: any) {
           ) : online ? (
             jobs.length === 0 ? (
               <View style={{ alignItems: 'center', borderRadius: radius.lg, backgroundColor: dk.card, borderWidth: 1, borderColor: dk.line, paddingVertical: space['2xl'], marginTop: space.lg }}>
-                <MaterialCommunityIcons name="radar" size={28} color={dk.muted} />
+                <Feather name="radio" size={28} color={dk.muted} />
                 <T variant="label" style={{ color: dk.muted, marginTop: space.sm }}>
                   {demandLine ?? 'Waiting for nearby jobs…'}
                 </T>

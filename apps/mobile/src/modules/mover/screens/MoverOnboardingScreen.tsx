@@ -177,7 +177,7 @@ export function MoverOnboardingScreen({ status }: { status: any }) {
             <VehicleSetup vt={vt} setVt={setVt} onDone={() => setVehicleSaved(true)} />
           ) : (
             <Card style={{ flexDirection: 'row', alignItems: 'center', gap: space.md }}>
-              <View style={{ width: 40, height: 40, borderRadius: 20, alignItems: 'center', justifyContent: 'center', backgroundColor: '#E8F6EE' }}>
+              <View style={{ width: 40, height: 40, borderRadius: 20, alignItems: 'center', justifyContent: 'center', backgroundColor: color.soft.success }}>
                 <MaterialCommunityIcons name="check" size={20} color={color.success} />
               </View>
               <T variant="body" weight="bold" style={{ flex: 1 }}>

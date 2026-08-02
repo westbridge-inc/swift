@@ -2,6 +2,7 @@
 import React from 'react';
 import { View } from 'react-native';
 import { Feather } from '@expo/vector-icons';
+import { withAlpha } from './dark';
 import { color, space } from '@swift/ui';
 import { T, TonePill } from '../../kit';
 import { money } from '../../lib/money';
@@ -71,12 +72,12 @@ export function RoutePair({
   dark?: boolean;
 }) {
   const inkStyle = dark ? { color: color.white } : undefined;
-  const mutedStyle = dark ? { color: 'rgba(255,255,255,0.55)' } : undefined;
+  const mutedStyle = dark ? { color: withAlpha(color.white, 0.55) } : undefined;
   return (
     <View>
       <View style={{ flexDirection: 'row', alignItems: 'center' }}>
         <View style={{ width: 16, alignItems: 'center' }}>
-          <View style={{ width: 10, height: 10, borderRadius: 5, borderWidth: 2.5, borderColor: dark ? 'rgba(255,255,255,0.55)' : color.text.muted }} />
+          <View style={{ width: 10, height: 10, borderRadius: 5, borderWidth: 2.5, borderColor: dark ? withAlpha(color.white, 0.55) : color.text.muted }} />
         </View>
         <View style={{ flex: 1, marginLeft: space.sm }}>
           {pickupHint ? (
@@ -91,7 +92,7 @@ export function RoutePair({
       </View>
       {dropoff ? (
         <>
-          <View style={{ marginLeft: 7, width: 2, height: 12, marginVertical: 2, borderRadius: 1, backgroundColor: dark ? 'rgba(255,255,255,0.15)' : color.border.subtle }} />
+          <View style={{ marginLeft: 7, width: 2, height: 12, marginVertical: 2, borderRadius: 1, backgroundColor: dark ? withAlpha(color.white, 0.15) : color.border.subtle }} />
           <View style={{ flexDirection: 'row', alignItems: 'center' }}>
             <View style={{ width: 16, alignItems: 'center' }}>
               <Feather name="map-pin" size={14} color={color.brand[500]} />
