@@ -127,6 +127,28 @@ export class BookingService {
     return { bookings: created, total };
   }
 
+  /** §16 "reservation expiring" feed: RESERVED holds whose TTL lapses within
+   *  `withinMinutes` — one row per campaign with its soonest deadline, so the
+   *  advertiser gets ONE "5 minutes left, finish payment" warning, not one per
+   *  booked week. The caller dedupes across cron ticks (redis once-key). */
+  async expiringSoon(withinMinutes: number, now = new Date()): Promise<Array<{ campaignId: string; advertiserId: string; reservedUntil: Date }>> {
+    const soon = new Date(now.getTime() + withinMinutes * 60_000);
+    const rows = await this.prisma.adBooking.findMany({
+      where: { status: 'RESERVED', reservedUntil: { gt: now, lte: soon } },
+      select: { campaignId: true, reservedUntil: true, campaign: { select: { advertiserId: true } } },
+      take: 500,
+    });
+    const byCampaign = new Map<string, { campaignId: string; advertiserId: string; reservedUntil: Date }>();
+    for (const r of rows) {
+      if (!r.reservedUntil) continue;
+      const cur = byCampaign.get(r.campaignId);
+      if (!cur || r.reservedUntil < cur.reservedUntil) {
+        byCampaign.set(r.campaignId, { campaignId: r.campaignId, advertiserId: r.campaign.advertiserId, reservedUntil: r.reservedUntil });
+      }
+    }
+    return [...byCampaign.values()];
+  }
+
   /** §7.3 cron (every minute) — expired RESERVED holds go RELEASED and give the
    *  inventory back. Each release is CAS + guarded decrement, so the sweep is
    *  idempotent and overlap-safe. */
