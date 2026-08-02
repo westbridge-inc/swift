@@ -2179,6 +2179,81 @@ export async function adminRoutes(app: FastifyInstance) {
     return { success: true, data: row };
   });
 
+  // ── Trial integrity (spec Part 9) — the identity graph is FOUNDER-ONLY
+  //    god's-eye tooling: platform-wide by design (the one sanctioned
+  //    cross-tenant system). The global adminGuard + onResponse auto-audit
+  //    cover both routes — every view leaves an audit row. ─────────────────────
+
+  /** Phase 2 backfill: run the matcher across the existing user base and
+   *  return the evidence report. Idempotent; evidence first, decisions second
+   *  — nothing here enforces anything. */
+  app.post('/integrity/backfill', { preHandler: [adminGuard] }, async () => {
+    const { runIdentityBackfill } = await import('../integrity/backfill');
+    return { success: true, data: await runIdentityBackfill(app.prisma) };
+  });
+
+  /** The explainability read (Part 9.1/9.4): one account's cluster — members,
+   *  every link's evidence, trial history, enforcement history, exceptions,
+   *  and SOFT advisories. Every enforcement must be explainable from here. */
+  app.get<{ Params: { userId: string } }>('/integrity/identity/:userId', { preHandler: [adminGuard] }, async (request) => {
+    const { IdentityService } = await import('../integrity/identity.service');
+    const identity = new IdentityService(app.prisma);
+    const clusterId = await identity.resolveCluster(request.params.userId);
+    if (!clusterId) {
+      return { success: true, data: { clusterId: null, members: [], trialGrants: [], enforcement: [], exceptions: [], softAdvisories: await identity.softAdvisories(request.params.userId) } };
+    }
+    const [members, grants, enforcement, exceptions, advisories] = await Promise.all([
+      app.prisma.identityClusterMember.findMany({ where: { clusterId } }),
+      app.prisma.trialGrant.findMany({ where: { clusterId }, orderBy: { startedAt: 'asc' } }),
+      app.prisma.enforcementAction.findMany({ where: { clusterId }, orderBy: { createdAt: 'desc' }, take: 50 }),
+      app.prisma.exceptionGrant.findMany({ where: { clusterId } }),
+      identity.softAdvisories(request.params.userId),
+    ]);
+    const users = await app.prisma.user.findMany({
+      where: { id: { in: members.map((m) => m.accountId) } },
+      select: { id: true, phone: true, firstName: true, lastName: true, roles: true, status: true },
+    });
+    const userById = new Map(users.map((u) => [u.id, u]));
+    return {
+      success: true,
+      data: {
+        clusterId,
+        members: members.map((m) => ({
+          accountId: m.accountId,
+          user: userById.get(m.accountId) ?? null,
+          linkedVia: m.linkedVia,
+          addedAt: m.addedAt,
+        })),
+        trialGrants: grants,
+        enforcement,
+        exceptions,
+        softAdvisories: advisories,
+      },
+    };
+  });
+
+  /** §3.5 — the founder issues a deliberate, logged exception (multi-location
+   *  vendor trial-per-location, household, override). The trial law honors
+   *  live exceptions; appeals overturn through this same mechanism. */
+  app.post('/integrity/exceptions', { preHandler: [adminGuard] }, async (request) => {
+    const body = z.object({
+      clusterId: z.string().min(1),
+      scope: z.enum(['MULTI_LOCATION_VENDOR', 'HOUSEHOLD', 'FOUNDER_OVERRIDE']),
+      note: z.string().trim().min(3).max(500),
+      expiresAt: z.string().datetime().optional(),
+    }).parse(request.body ?? {});
+    const cluster = await app.prisma.identityCluster.findUnique({ where: { id: body.clusterId }, select: { id: true } });
+    if (!cluster) throw new NotFoundError('IdentityCluster', body.clusterId);
+    const grant = await app.prisma.exceptionGrant.create({
+      data: {
+        clusterId: body.clusterId, scope: body.scope, note: body.note,
+        grantedBy: request.user.userId,
+        expiresAt: body.expiresAt ? new Date(body.expiresAt) : null,
+      },
+    });
+    return { success: true, data: grant };
+  });
+
   /** Update text/destination/sort/active. Deactivation is the delete. */
   app.put('/ads/house/:id', { preHandler: [adminGuard] }, async (request) => {
     const { id } = request.params as { id: string };

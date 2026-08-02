@@ -144,6 +144,10 @@ export class AuthService {
     role?: SignupRole;
     countryCode?: string;
     acceptTerms?: boolean;
+    /** Request metadata for silent identity capture — never client-trusted
+     *  for anything but SOFT signals (households/CGNAT never punish alone). */
+    deviceId?: string | null;
+    ipAddress?: string | null;
   }) {
     const existing = await this.app.prisma.user.findUnique({ where: { phone: data.phone } });
     if (existing) {
@@ -203,6 +207,21 @@ export class AuthService {
 
     // Single-use registration window
     await this.app.redis.del(`${OTP_VERIFIED_PREFIX}${data.phone}`);
+
+    // Identity-integrity capture (trial-integrity §2.1) — silent, fire-and-
+    // forget: PHONE (STRONG) + EMAIL (SOFT) + the §5 SignupAttempt velocity
+    // row. Zero UX change; a capture failure never touches signup.
+    {
+      const { captureSignup } = await import('../integrity/capture-hooks');
+      captureSignup(this.app.prisma, {
+        userId: user.id,
+        role: signupRole,
+        phone: data.phone,
+        email: data.email ?? null,
+        deviceId: data.deviceId ?? null,
+        ip: data.ipAddress ?? null,
+      });
+    }
 
     const tokens = await this.createSession(user.id, user.activeRole, {
       deviceId: 'registration',

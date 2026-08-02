@@ -172,6 +172,19 @@ export class VerificationService {
 
     await this.recordDecision(userId, doc.id, docType, doc.status, result.reason);
 
+    // Identity-integrity capture (silent): the analyzer's parsed document
+    // number is hashed and discarded — never stored raw. AWAITED so the
+    // signal exists before afterApproval reaches the trial decision; the
+    // service swallows its own failures (capture never breaks verification).
+    if (result.extracted?.documentNumber) {
+      const { IdentityService } = await import('../integrity/identity.service');
+      const { normalizeDocNumber } = await import('../integrity/normalize');
+      await new IdentityService(this.prisma).capture({
+        accountId: userId, tenantId: 'swift-default', actorRole: roleKey,
+        type: 'ID_DOC_NUMBER', normalizedValue: normalizeDocNumber(result.extracted.documentNumber), source: 'AI_ID_ANALYZER',
+      });
+    }
+
     if (doc.status === 'APPROVED') await this.afterApproval(userId);
     if (doc.status === 'REJECTED') await this.notifyRejection(userId, docType, result.reason);
     // Manual-review path: the queue is invisible until an admin is told about
@@ -221,6 +234,16 @@ export class VerificationService {
     });
 
     await this.recordDecision(userId, doc.id, IDENTITY_DOC_TYPE, doc.status, result.reason);
+
+    // Identity-integrity capture (silent) — hash-and-discard, never stored raw.
+    if (result.extracted?.documentNumber) {
+      const { IdentityService } = await import('../integrity/identity.service');
+      const { normalizeDocNumber } = await import('../integrity/normalize');
+      await new IdentityService(this.prisma).capture({
+        accountId: userId, tenantId: 'swift-default', actorRole: 'CUSTOMER',
+        type: 'ID_DOC_NUMBER', normalizedValue: normalizeDocNumber(result.extracted.documentNumber), source: 'AI_ID_ANALYZER',
+      });
+    }
 
     if (doc.status === 'APPROVED') await this.promoteToL2(userId);
     if (doc.status === 'REJECTED') await this.notifyRejection(userId, 'identity', result.reason);
@@ -678,10 +701,21 @@ export class VerificationService {
     }
 
     const [driver, rider] = await Promise.all([
-      this.prisma.driver.findUnique({ where: { userId }, select: { id: true } }),
+      this.prisma.driver.findUnique({ where: { userId }, select: { id: true, licensePlate: true } }),
       this.prisma.rider.findUnique({ where: { userId }, select: { id: true } }),
     ]);
     if ((driver || rider) && (await this.isRoleVerified(userId, 'MOVER'))) {
+      // PLATE capture (identity integrity §2.1 — HARD) AWAITED here so the
+      // link exists before the trial decision runs; capture failures are
+      // swallowed inside the service and never block activation.
+      if (driver?.licensePlate) {
+        const { IdentityService } = await import('../integrity/identity.service');
+        const { normalizePlate } = await import('../integrity/normalize');
+        await new IdentityService(this.prisma).capture({
+          accountId: userId, tenantId: 'swift-default', actorRole: 'DRIVER',
+          type: 'PLATE', normalizedValue: normalizePlate(driver.licensePlate), source: 'ONBOARDING_DOC',
+        });
+      }
       if (driver) await this.subscriptions.startTrialForDriver(driver.id);
       if (rider) await this.subscriptions.startTrialForRider(rider.id);
     }

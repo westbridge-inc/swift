@@ -17,6 +17,10 @@ export interface KycVerificationResult {
   /** Provider-side case id — the only provider artifact we persist */
   referenceToken: string;
   reason?: string;
+  /** Parsed document fields, surfaced ONLY for the identity-integrity capture
+   *  hook, which HMAC-hashes and discards them immediately (trial-integrity
+   *  spec §2.1 hashing law). Raw values are never persisted anywhere. */
+  extracted?: { documentNumber?: string };
 }
 
 export interface KycProvider {
@@ -36,13 +40,17 @@ export interface KycProvider {
  */
 export class SandboxKycProvider implements KycProvider {
   private decide(url: string): KycVerificationResult {
+    // Deterministic extraction marker so integrity tests can inject document
+    // numbers end-to-end: any "docno-XXXX" token in the file reference.
+    const docno = /docno-([A-Za-z0-9-]+)/.exec(url)?.[1];
+    const extracted = docno ? { documentNumber: docno } : undefined;
     if (url.includes('auto-approve')) {
-      return { status: 'approved', referenceToken: `sbx_${nanoid(10)}` };
+      return { status: 'approved', referenceToken: `sbx_${nanoid(10)}`, extracted };
     }
     if (url.includes('auto-reject')) {
-      return { status: 'rejected', referenceToken: `sbx_${nanoid(10)}`, reason: 'Document unreadable (sandbox)' };
+      return { status: 'rejected', referenceToken: `sbx_${nanoid(10)}`, reason: 'Document unreadable (sandbox)', extracted };
     }
-    return { status: 'pending_manual', referenceToken: `sbx_${nanoid(10)}` };
+    return { status: 'pending_manual', referenceToken: `sbx_${nanoid(10)}`, extracted };
   }
 
   async verifyIdentity(input: { userId: string; idDocumentUrl: string; selfieUrl: string }): Promise<KycVerificationResult> {

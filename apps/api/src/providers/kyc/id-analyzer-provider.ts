@@ -27,6 +27,9 @@ interface ScanResponse {
   authentication?: { score?: number };
   face?: { isIdentical?: boolean; confidence?: number };
   error?: { message?: string };
+  /** Parsed fields (v2 returns candidate arrays). Surfaced only to the
+   *  identity-integrity hook, which hashes and discards immediately. */
+  data?: { documentNumber?: Array<{ value?: string }> };
 }
 
 export class IdAnalyzerKycProvider implements KycProvider {
@@ -62,13 +65,15 @@ export class IdAnalyzerKycProvider implements KycProvider {
   private interpret(r: ScanResponse | null): KycVerificationResult {
     const referenceToken = r?.transactionId ?? `ida_${Date.now().toString(36)}`;
     if (!r || r.error) return { status: 'pending_manual', referenceToken };
+    const documentNumber = r.data?.documentNumber?.[0]?.value;
+    const extracted = documentNumber ? { documentNumber } : undefined;
     const auth = r.authentication?.score ?? 0;
     const faceOk = r.face?.isIdentical === true || (r.face?.confidence ?? 0) >= ACCEPT_FACE;
     if (auth <= REJECT_AUTH) {
-      return { status: 'rejected', referenceToken, reason: 'Document failed authenticity checks' };
+      return { status: 'rejected', referenceToken, reason: 'Document failed authenticity checks', extracted };
     }
-    if (auth >= ACCEPT_AUTH && faceOk) return { status: 'approved', referenceToken };
-    return { status: 'pending_manual', referenceToken };
+    if (auth >= ACCEPT_AUTH && faceOk) return { status: 'approved', referenceToken, extracted };
+    return { status: 'pending_manual', referenceToken, extracted };
   }
 
   async verifyIdentity(input: {
