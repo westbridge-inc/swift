@@ -152,7 +152,11 @@ export async function adsRoutes(app: FastifyInstance) {
     if (!campaign) throw new NotFoundError('AdCampaign', request.params.id);
     await advertisers.assertMember(campaign.advertiserId, request.user.userId);
 
-    const file = await request.file();
+    // Per-call transport cap: §9.1 allows 25 MB videos, but the GLOBAL
+    // multipart limit is 5 MB (KYC/selfie/proof photos) — without this
+    // override every ad video over 5 MB dies at the transport layer. The
+    // service still enforces the real per-kind caps (500 KB image / 25 MB mp4).
+    const file = await request.file({ limits: { fileSize: 25 * 1024 * 1024, files: 1 } });
     if (!file) throw new AppError(400, 'NO_FILE', 'Attach a creative file.');
     const buffer = await file.toBuffer();
     const fields = file.fields as Record<string, { value?: string } | undefined>;
