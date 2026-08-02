@@ -155,10 +155,12 @@ export class AgentCashService {
     // account is behind (conversion + reactivation, transition #6). Its
     // clientKey rides our externalId so a replay that survived to here still
     // can't double-credit [S-2].
+    // recordedBy carries the channel (receipt fidelity in the cash journal);
+    // the human who keyed/attached it lives on the MmgAgentPayment row.
     await this.billing.recordTopUp(
       subscriptionId,
       p.amount,
-      p.recordedBy ?? `agent-cash:${p.channel}`,
+      `agent-cash:${p.channel}`,
       `MMG agent payment ${p.externalId}`,
       `agent:${p.channel}:${p.externalId}`,
     );
