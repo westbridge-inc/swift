@@ -2418,6 +2418,83 @@ export async function adminRoutes(app: FastifyInstance) {
     return { success: true, data: await frictionKpis(app.prisma, days) };
   });
 
+  // ── Batching System 1 (shadow phase) — evidence read + config ─────────────
+
+  /** Part 8 acceptance #1: the founder's ≥2-week would-batch evidence read.
+   *  Pure aggregation over SHADOW_WOULD_BATCH rows; nothing here can turn
+   *  batching on. */
+  app.get('/batching/shadow-report', { preHandler: [adminGuard] }, async (request) => {
+    const { days } = z.object({ days: z.coerce.number().int().min(1).max(90).default(14) }).parse(request.query ?? {});
+    const { shadowReport } = await import('../batching/shadow-scan');
+    const settings = await app.prisma.batchingSettings.findUnique({ where: { tenantId: 'swift-default' } });
+    return {
+      success: true,
+      data: {
+        ...(await shadowReport(app.prisma, days)),
+        shadowMode: settings?.shadowMode ?? true,
+        liveEnabled: settings?.enabled ?? false,
+      },
+    };
+  });
+
+  /** Recent evaluations with their full rulesChecked rows — "why did/didn't
+   *  this order batch" answered from the DB, per the explainability law. */
+  app.get('/batching/evaluations', { preHandler: [adminGuard] }, async (request) => {
+    const q = z.object({
+      orderId: z.string().optional(),
+      limit: z.coerce.number().int().min(1).max(200).default(50),
+    }).parse(request.query ?? {});
+    const rows = await app.prisma.batchEvaluation.findMany({
+      where: q.orderId ? { orderId: q.orderId } : {},
+      orderBy: { createdAt: 'desc' },
+      take: q.limit,
+    });
+    return { success: true, data: rows };
+  });
+
+  /** Config, not code — thresholds/matrix editable; the live `enabled` flag
+   *  stays founder-explicit and refuses to flip without shadow evidence. */
+  app.put('/batching/settings', { preHandler: [adminGuard] }, async (request) => {
+    const body = z.object({
+      shadowMode: z.boolean().optional(),
+      enabled: z.boolean().optional(),
+      maxOrdersPerRun: z.number().int().min(1).max(3).optional(),
+      addonPickupDetourMaxS: z.number().int().min(60).max(900).optional(),
+      dropoffCorridorM: z.number().int().min(200).max(5000).optional(),
+      crossTrackMaxM: z.number().int().min(100).max(3000).optional(),
+      detourBudgetS: z.number().int().min(120).max(1200).optional(),
+      detourBudgetPct: z.number().int().min(5).max(50).optional(),
+      hotFoodReadyToDoorMaxS: z.number().int().min(600).max(3600).optional(),
+      pickupWaitMaxS: z.number().int().min(60).max(900).optional(),
+      verticalMatrix: z.record(z.string(), z.boolean()).optional(),
+      sizePoints: z.record(z.string(), z.number().int().min(1).max(10)).optional(),
+      capacityPointsByVehicle: z.record(z.string(), z.number().int().min(1).max(20)).optional(),
+      addonScanIntervalS: z.number().int().min(10).max(300).optional(),
+    }).parse(request.body ?? {});
+    if (body.enabled === true) {
+      // Acceptance #1: live offers only after ≥14 days of shadow evidence.
+      const oldest = await app.prisma.batchEvaluation.findFirst({
+        where: { decision: 'SHADOW_WOULD_BATCH' },
+        orderBy: { createdAt: 'asc' },
+        select: { createdAt: true },
+      });
+      if (!oldest || oldest.createdAt.getTime() > Date.now() - 14 * 86_400_000) {
+        throw new AppError(400, 'SHADOW_EVIDENCE_REQUIRED', 'Live batching needs at least 14 days of shadow evidence — read /batching/shadow-report first.');
+      }
+    }
+    const settings = await app.prisma.batchingSettings.upsert({
+      where: { tenantId: 'swift-default' },
+      create: { tenantId: 'swift-default', ...body },
+      update: body,
+    });
+    return { success: true, data: settings };
+  });
+
+  app.get('/batching/settings', { preHandler: [adminGuard] }, async () => {
+    const settings = await app.prisma.batchingSettings.findUnique({ where: { tenantId: 'swift-default' } });
+    return { success: true, data: settings };
+  });
+
   /** Part 4 appeals queue — OPEN cases with the accused's identity attached,
    *  oldest first (the 24h clock). Part 10's overturn rate rides along: >5%
    *  is the false-positive alarm that pauses enforcement expansion. */

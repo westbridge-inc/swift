@@ -40,7 +40,7 @@ beforeAll(async () => {
 
 afterAll(async () => {
   for (const phone of phones) {
-    await app.redis.del(`otp:${phone}`, `otp_rate:${phone}`, `otp_attempt:${phone}`);
+    await app.redis.del(`otp:${phone}`, `otp_rate:${phone}`, `otp_attempt:${phone}`, `otp_hr:${phone}`);
   }
   await app.close();
 });
@@ -51,7 +51,10 @@ describe('SEC-4 regression — auth endpoint rate limiting', () => {
     // per-IP route limit (max 5/min) can stop the 6th request.
     const statuses: number[] = [];
     for (const phone of phones) {
-      await app.redis.del(`otp_rate:${phone}`);
+      // Same hygiene as helpers/otp.ts: the trial-integrity hourly cap
+      // (otp_hr:) accumulates across same-hour local suite runs and would
+      // 429 before the route limiter is ever exercised.
+      await app.redis.del(`otp_rate:${phone}`, `otp_hr:${phone}`);
       const res = await app.inject({
         method: 'POST',
         url: '/api/v1/auth/send-otp',

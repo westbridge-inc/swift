@@ -665,6 +665,17 @@ export function createWorkers(ctx: JobContext) {
         return;
       }
 
+      if (job.name === 'batching-shadow-scan') {
+        // System 1 Part 8 — SHADOW mode: pairs the unassigned dispatchable
+        // pool and records SHADOW_WOULD_BATCH evidence rows. Writes
+        // BatchEvaluation and NOTHING else — zero dispatch behavior change.
+        // The founder's ≥2-week go/no-go (acceptance #1) reads these rows.
+        const { runShadowScan } = await import('../modules/batching/shadow-scan');
+        const res = await runShadowScan(ctx.prisma);
+        if (res.capped) ctx.log.warn(res, 'batching: shadow scan CAPPED');
+        return;
+      }
+
       if (job.name === 'guardian-sweep') {
         // Trip Guardian tick [safety spec §5]. Opens a session for every taxi
         // that went RIDE_IN_PROGRESS, runs the L1 detectors off the SAME
@@ -1002,6 +1013,14 @@ export async function scheduleRecurringJobs(queues: ReturnType<typeof createQueu
     repeat: { pattern: '0 12 * * *' },
     removeOnComplete: 12,
     removeOnFail: 12,
+  });
+
+  // Batching shadow scan: every 60s (pair dedup makes finer ticks pointless;
+  // the LIVE add-on scanner, when it exists, runs on addonScanIntervalS).
+  await queues.dispatchQueue.add('batching-shadow-scan', {}, {
+    repeat: { every: 60_000 },
+    removeOnComplete: 5,
+    removeOnFail: 5,
   });
 
   // Rating anti-manipulation sweep: daily at 04:00
