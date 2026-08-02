@@ -7,7 +7,7 @@ import BottomSheet, { BottomSheetScrollView } from '@gorhom/bottom-sheet';
 import * as ImagePicker from 'expo-image-picker';
 import { color, radius, space } from '@swift/ui';
 import { Feather, MaterialCommunityIcons } from '@expo/vector-icons';
-import { EmptyState, LabeledInput, PillButton, PopupCard, Screen, T, cardShadow } from '../../../kit';
+import { CodeInput, EmptyState, PillButton, PopupCard, Screen, T, cardShadow } from '../../../kit';
 import { Stars } from '../../../kit/controls';
 import { useMoverKind, useActiveJob, useDriverAction, useRiderAction, useRateCustomer, useCourierProof, useRideSos } from '../../../hooks';
 import { useMoverPreview } from '../../../stores/moverPreview';
@@ -15,6 +15,7 @@ import { toast } from '../../../components/ui/toast';
 import { useLocationStore } from '../../../stores/locationStore';
 import { haversineKm, streetEtaMin } from '../../../lib/geo';
 import { jobAmount, RoutePair } from '../shared';
+import { haptic } from '../../../lib/haptics';
 import { dk, withAlpha, DCard } from '../dark';
 
 /**
@@ -196,7 +197,11 @@ export function ActiveJobScreen({ navigation }: any) {
     driverAct.mutate(
       { id: job.id, action: step.action, ...(step.pin ? { pin } : {}) },
       {
+        onError: () => {
+          if (step.pin) haptic.failure();
+        },
         onSuccess: () => {
+          if (step.pin) haptic.success();
           // Trip done → rate the passenger while it's fresh (DRIVER_TO_CUSTOMER).
           if (step.action === 'complete') {
             setStars(5);
@@ -372,9 +377,9 @@ export function ActiveJobScreen({ navigation }: any) {
                 <>
                   {step.pin ? (
                     <View style={{ marginBottom: space.md }}>
-                      <LabeledInput value={pin} onChangeText={setPin} placeholder="Enter rider's PIN" keyboardType="number-pad" maxLength={6} />
-                      <T variant="caption" style={{ color: dk.muted, marginTop: space.sm }}>
-                        The passenger has this PIN in their app — verifying it proves you picked up the right person.
+                      <CodeInput value={pin} onChange={setPin} length={6} error={driverAct.isError} autoFocus={false} />
+                      <T variant="caption" center style={{ color: dk.muted, marginTop: space.sm }}>
+                        The passenger has this code in their app — it proves you picked up the right person.
                       </T>
                     </View>
                   ) : null}

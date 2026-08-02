@@ -4,11 +4,10 @@ import { View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import MapView, { PROVIDER_DEFAULT, type Region } from 'react-native-maps';
 import * as Location from 'expo-location';
-import { Ionicons } from '@expo/vector-icons';
 import { color, space } from '@swift/ui';
 import { useLocationStore } from '../../../stores/locationStore';
 import { GEORGETOWN } from '../../../hooks/useDeviceLocation';
-import { CircleChip, PillButton, T } from '../../../kit';
+import { CircleChip, PillButton, PinGlyph, T } from '../../../kit';
 import type { PickedPlace } from './DestinationSearchScreen';
 
 /**
@@ -96,7 +95,7 @@ export function PinConfirmScreen({ navigation, route }: any) {
 
       {/* Fixed centre pin — the map slides underneath it. */}
       <View style={{ pointerEvents: 'none', position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, alignItems: 'center', justifyContent: 'center' }}>
-        <Ionicons name="location" size={46} color={color.brand[500]} style={{ marginBottom: 46 }} />
+        <View style={{ marginBottom: 46 }}><PinGlyph size={46} color={color.brand[500]} /></View>
       </View>
 
       {/* Confirm bar */}
