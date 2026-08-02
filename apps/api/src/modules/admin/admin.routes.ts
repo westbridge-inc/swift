@@ -2232,6 +2232,113 @@ export async function adminRoutes(app: FastifyInstance) {
     };
   });
 
+  // ── USD Platform Pricing (batching/USD spec System 2, Part 12/20) — rate
+  //    governance: founder-controlled, boring on purpose. Append-only rates;
+  //    the fat-finger guard is how 208.72 never becomes 2087.2 in prod. ──────
+
+  app.get('/billing/fx-rates', { preHandler: [adminGuard] }, async (request) => {
+    const { quote } = z.object({ quote: z.string().length(3).optional() }).parse(request.query ?? {});
+    const { rateStaleness } = await import('../billing/fx');
+    const rates = await app.prisma.fxRate.findMany({
+      where: quote ? { quote } : {},
+      orderBy: [{ quote: 'asc' }, { effectiveFrom: 'desc' }],
+      take: 100,
+    });
+    return {
+      success: true,
+      data: rates.map((r) => ({ ...r, rate: Number(r.rate), staleness: rateStaleness(r.effectiveFrom) })),
+    };
+  });
+
+  /** Append a rate. >20% moves require typing the quote code back
+   *  (confirmQuote) — the delta comes back in words on the first attempt. */
+  app.post('/billing/fx-rates', { preHandler: [adminGuard] }, async (request) => {
+    const body = z.object({
+      quote: z.string().length(3).toUpperCase(),
+      rate: z.number().positive(),
+      source: z.enum(['FOUNDER_MANUAL', 'BOG_REFERENCE']).default('FOUNDER_MANUAL'),
+      effectiveFrom: z.string().datetime().optional(),
+      confirmQuote: z.string().optional(),
+    }).parse(request.body ?? {});
+    const { validateNewRate, convertUsdToLocal, formatMoney } = await import('../billing/fx');
+    const previous = await app.prisma.fxRate.findFirst({ where: { quote: body.quote }, orderBy: { effectiveFrom: 'desc' } });
+    const check = validateNewRate(body.rate, previous ? Number(previous.rate) : null);
+    if (!check.ok) throw new AppError(400, 'INVALID_RATE', check.error!);
+    if (check.requiresTypedConfirmation && body.confirmQuote !== body.quote) {
+      // Show the change in words against a US$25 reference plan (Part 20).
+      const tenant = await app.prisma.tenantBillingCurrency.findFirst({ where: { settlementCurrency: body.quote } });
+      const inc = tenant ? Number(tenant.roundingIncrement) : 1;
+      const before = previous ? convertUsdToLocal(25, Number(previous.rate), inc).amountLocal : null;
+      const after = convertUsdToLocal(25, body.rate, inc).amountLocal;
+      throw new AppError(
+        409,
+        'RATE_CONFIRMATION_REQUIRED',
+        `This rate moves ${Math.round((check.deltaPct ?? 0) * 100)}% — a US$25.00 plan changes from ${before !== null ? formatMoney(before, body.quote) : 'n/a'} to ${formatMoney(after, body.quote)} per week. Re-send with confirmQuote="${body.quote}" to apply.`,
+      );
+    }
+    const row = await app.prisma.fxRate.create({
+      data: {
+        quote: body.quote, rate: body.rate, source: body.source,
+        setByUserId: request.user.userId,
+        effectiveFrom: body.effectiveFrom ? new Date(body.effectiveFrom) : new Date(),
+      },
+    });
+    return { success: true, data: { ...row, rate: Number(row.rate) } };
+  });
+
+  app.get('/billing/price-book', { preHandler: [adminGuard] }, async () => {
+    const entries = await app.prisma.priceBookEntry.findMany({ orderBy: [{ role: 'asc' }, { tier: 'asc' }] });
+    return { success: true, data: entries.map((e) => ({ ...e, amountUsd: Number(e.amountUsd) })) };
+  });
+
+  /** Set a plan price (append semantics: deactivate + create keeps history;
+   *  the book is USD-only by law). */
+  app.put('/billing/price-book', { preHandler: [adminGuard] }, async (request) => {
+    const body = z.object({
+      role: z.enum(['VENDOR', 'RIDER', 'DRIVER', 'SERVICE']),
+      tier: z.string().trim().max(40).optional(),
+      amountUsd: z.number().positive().max(10_000),
+    }).parse(request.body ?? {});
+    const updated = await app.prisma.$transaction(async (tx) => {
+      await tx.priceBookEntry.updateMany({
+        where: { role: body.role, tier: body.tier ?? null, active: true },
+        data: { active: false },
+      });
+      return tx.priceBookEntry.create({
+        data: { role: body.role, tier: body.tier ?? null, amountUsd: body.amountUsd },
+      });
+    });
+    return { success: true, data: { ...updated, amountUsd: Number(updated.amountUsd) } };
+  });
+
+  /** Pure preview (Part 12): the full plan table at a hypothetical rate —
+   *  commit is only ever the POST above. */
+  app.get('/billing/fx-preview', { preHandler: [adminGuard] }, async (request) => {
+    const q = z.object({ quote: z.string().length(3).toUpperCase(), rate: z.coerce.number().positive() }).parse(request.query ?? {});
+    const { convertUsdToLocal, formatMoney } = await import('../billing/fx');
+    const tenant = await app.prisma.tenantBillingCurrency.findFirst({ where: { settlementCurrency: q.quote } });
+    const inc = tenant ? Number(tenant.roundingIncrement) : 1;
+    const previous = await app.prisma.fxRate.findFirst({ where: { quote: q.quote }, orderBy: { effectiveFrom: 'desc' } });
+    const entries = await app.prisma.priceBookEntry.findMany({ where: { active: true }, orderBy: { role: 'asc' } });
+    return {
+      success: true,
+      data: {
+        quote: q.quote,
+        rate: q.rate,
+        previousRate: previous ? Number(previous.rate) : null,
+        plans: entries.map((e) => {
+          const next = convertUsdToLocal(Number(e.amountUsd), q.rate, inc);
+          const current = previous ? convertUsdToLocal(Number(e.amountUsd), Number(previous.rate), inc).amountLocal : null;
+          return {
+            role: e.role, tier: e.tier, amountUsd: Number(e.amountUsd),
+            currentLocal: current, nextLocal: next.amountLocal, minClamped: next.minClamped,
+            display: formatMoney(next.amountLocal, q.quote),
+          };
+        }),
+      },
+    };
+  });
+
   /** Part 7/10 KPIs — every number derived from the rows money and state
    *  moved on (the DB testifies). Reading it at t0 IS the baseline capture;
    *  re-read after each friction fix lands. */
