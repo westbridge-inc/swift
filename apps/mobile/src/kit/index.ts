@@ -19,3 +19,6 @@ export * from './food';
 export * from './placeholder';
 export * from './pictograms';
 export * from './glyphs';
+export * from './ride-sheet';
+export * from './vehicle-render';
+export * from './map-style';
