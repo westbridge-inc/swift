@@ -1,4 +1,5 @@
 import type { FastifyInstance, FastifyRequest } from 'fastify';
+import type { Readable } from 'node:stream';
 import { createHmac, timingSafeEqual } from 'node:crypto';
 import { z } from 'zod';
 import { BillingService } from './billing.service';
@@ -43,14 +44,20 @@ function verifySignature(req: FastifyRequest): { ok: boolean; code?: string } {
 
 export async function agentCashRoutes(app: FastifyInstance) {
   // Scoped raw-body capture: signature verification needs the exact bytes
-  // BEFORE JSON parsing; encapsulation keeps this off every other route.
-  app.addContentTypeParser('application/json', { parseAs: 'buffer' }, (req, body, done) => {
-    (req as FastifyRequest & { rawBody?: Buffer }).rawBody = body as Buffer;
-    try {
-      done(null, JSON.parse((body as Buffer).toString('utf8') || '{}'));
-    } catch (e) {
-      done(e as Error, undefined);
-    }
+  // BEFORE JSON parsing. A preParsing tee (buffer + re-stream) instead of
+  // addContentTypeParser — the server already owns a custom application/json
+  // parser (empty-json), and re-adding one throws FST_ERR_CTP_ALREADY_PRESENT
+  // at BOOT (found by the design session; CI never boots the full server).
+  // Encapsulation keeps this hook off every other route.
+  app.addHook('preParsing', async (request, _reply, payload) => {
+    const chunks: Buffer[] = [];
+    for await (const chunk of payload) chunks.push(chunk as Buffer);
+    const raw = Buffer.concat(chunks);
+    (request as FastifyRequest & { rawBody?: Buffer }).rawBody = raw;
+    const { Readable } = await import('node:stream');
+    const stream = Readable.from(raw) as Readable & { receivedEncodedLength?: number };
+    stream.receivedEncodedLength = raw.length;
+    return stream;
   });
 
   const notifications = new NotificationService(app.prisma, app.io);
