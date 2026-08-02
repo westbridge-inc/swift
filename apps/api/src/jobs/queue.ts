@@ -665,6 +665,26 @@ export function createWorkers(ctx: JobContext) {
         return;
       }
 
+      if (job.name === 'agent-cash-sla') {
+        // Suspense SLA [san spec 4.6]: an unmatched agent payment older than
+        // 24h is a paid-but-suspended person — page the founder, deduped per
+        // 6h while the condition stands.
+        const stale = await ctx.prisma.mmgAgentPayment.count({
+          where: { status: 'UNMATCHED', createdAt: { lte: new Date(Date.now() - 24 * 3_600_000) } },
+        });
+        if (stale > 0) {
+          const { notifyAdmins, NotificationService } = await import('../modules/notification/notification.service');
+          await opsPageOnce(ctx, 'agent-cash-unmatched-sla', 6 * 3600, () =>
+            notifyAdmins(ctx.prisma, new NotificationService(ctx.prisma, ctx.io), {
+              title: 'Agent payment stuck unmatched > 24h',
+              body: `${stale} cash payment(s) are sitting unresolved — someone may be paid but still paused. Command → Billing → Unmatched.`,
+              data: { kind: 'agent_cash_sla', stale },
+            }),
+          );
+        }
+        return;
+      }
+
       if (job.name === 'batching-shadow-scan') {
         // System 1 Part 8 — SHADOW mode: pairs the unassigned dispatchable
         // pool and records SHADOW_WOULD_BATCH evidence rows. Writes
@@ -1019,6 +1039,13 @@ export async function scheduleRecurringJobs(queues: ReturnType<typeof createQueu
   // the LIVE add-on scanner, when it exists, runs on addonScanIntervalS).
   await queues.dispatchQueue.add('batching-shadow-scan', {}, {
     repeat: { every: 60_000 },
+    removeOnComplete: 5,
+    removeOnFail: 5,
+  });
+
+  // Agent-cash suspense SLA: hourly (page dedup lives in opsPageOnce).
+  await queues.dispatchQueue.add('agent-cash-sla', {}, {
+    repeat: { pattern: '15 * * * *' },
     removeOnComplete: 5,
     removeOnFail: 5,
   });
