@@ -2,13 +2,15 @@
 import React from 'react';
 import { Dimensions, FlatList, Pressable, RefreshControl, ScrollView, View } from 'react-native';
 import { Image } from 'expo-image';
-import { Feather, MaterialCommunityIcons } from '@expo/vector-icons';
+import { Feather } from '@expo/vector-icons';
 import { useNavigation } from '@react-navigation/native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { color, radius, space } from '@swift/ui';
+import { color, elevation, radius, space } from '@swift/ui';
 import { useHome, useToggleFavorite } from '../../../hooks/customer';
 import { useAds } from '../../../hooks/ads';
 import { AdHeroVideo, AdTopCard, AdBar } from '../../../components/ads';
+import { PressableScale } from '../../../components/ui';
+import { haptic } from '../../../lib/haptics';
 import { useAuthStore } from '../../../stores/authStore';
 import { useLocationStore } from '../../../stores/locationStore';
 import { vendorImage, FOOD_IMAGES } from '../../../lib/images';
@@ -18,6 +20,8 @@ import {
   ErrorState,
   FoodCard,
   LoadingBlock,
+  Pictogram,
+  type PictogramName,
   PillButton,
   PromoBanner,
   RatingMeta,
@@ -30,41 +34,22 @@ const SCREEN_W = Dimensions.get('window').width;
 const GUTTER = space['2xl'];
 const RAIL_CARD_W = Math.round(SCREEN_W * 0.44);
 
-// Category chip emoji — presentation-only mapping over real category names.
-function categoryEmoji(name: string): string {
-  const n = name.toLowerCase();
-  if (n.includes('burger')) return '🍔';
-  if (n.includes('pizza')) return '🍕';
-  if (n.includes('chicken')) return '🍗';
-  if (n.includes('drink') || n.includes('juice') || n.includes('bever')) return '🥤';
-  if (n.includes('dessert') || n.includes('cake') || n.includes('sweet')) return '🍰';
-  if (n.includes('seafood') || n.includes('fish') || n.includes('shrimp')) return '🦐';
-  if (n.includes('roti') || n.includes('curry') || n.includes('indian')) return '🫓';
-  if (n.includes('chinese') || n.includes('noodle') || n.includes('chow')) return '🍜';
-  if (n.includes('creole') || n.includes('rice')) return '🍛';
-  if (n.includes('breakfast') || n.includes('egg')) return '🍳';
-  if (n.includes('salad') || n.includes('health') || n.includes('veg')) return '🥗';
-  if (n.includes('coffee') || n.includes('cafe')) return '☕';
-  if (n.includes('grocer') || n.includes('market')) return '🛒';
-  return '🍽️';
-}
-
 // The super-app grid (Grab anatomy): every service one tap from the top of
-// Home, drawn icons — never emoji. All destinations are REAL routes.
+// Home. Icons are the Swift pictogram set (design-100× 9.6) — one hand, never
+// glyph-font clipart, never emoji. All destinations are REAL routes.
 const SERVICES: {
-  key: string;
-  icon: keyof typeof MaterialCommunityIcons.glyphMap;
+  key: PictogramName;
   label: string;
   nav: (n: any) => void;
 }[] = [
-  { key: 'food', icon: 'silverware-fork-knife', label: 'Food', nav: (n) => n.navigate('Search', { type: 'RESTAURANT' }) },
-  { key: 'grocery', icon: 'cart-outline', label: 'Groceries', nav: (n) => n.navigate('Search', { type: 'SUPERMARKET' }) },
-  { key: 'shops', icon: 'storefront-outline', label: 'Shops', nav: (n) => n.navigate('Search', { type: 'STORE' }) },
-  { key: 'taxi', icon: 'car', label: 'Taxi', nav: (n) => n.navigate('Taxi') },
-  { key: 'courier', icon: 'cube-send', label: 'Send', nav: (n) => n.navigate('Courier') },
-  { key: 'services', icon: 'hammer-wrench', label: 'Services', nav: (n) => n.navigate('Services') },
-  { key: 'orders', icon: 'receipt', label: 'Orders', nav: (n) => n.navigate('Tabs', { screen: 'Activity' }) },
-  { key: 'favorites', icon: 'heart-outline', label: 'Favourites', nav: (n) => n.navigate('Favorites') },
+  { key: 'food', label: 'Food', nav: (n) => n.navigate('Search', { type: 'RESTAURANT' }) },
+  { key: 'groceries', label: 'Groceries', nav: (n) => n.navigate('Search', { type: 'SUPERMARKET' }) },
+  { key: 'shops', label: 'Shops', nav: (n) => n.navigate('Search', { type: 'STORE' }) },
+  { key: 'taxi', label: 'Taxi', nav: (n) => n.navigate('Taxi') },
+  { key: 'send', label: 'Send', nav: (n) => n.navigate('Courier') },
+  { key: 'services', label: 'Services', nav: (n) => n.navigate('Services') },
+  { key: 'orders', label: 'Orders', nav: (n) => n.navigate('Tabs', { screen: 'Activity' }) },
+  { key: 'favourites', label: 'Favourites', nav: (n) => n.navigate('Favorites') },
 ];
 
 const ORDER_STATUS_LABEL: Record<string, string> = {
@@ -84,27 +69,32 @@ function kmLabel(km: unknown): string | undefined {
 
 function ServiceTile({ item, navigation }: { item: (typeof SERVICES)[number]; navigation: any }) {
   return (
-    <Pressable onPress={() => item.nav(navigation)} style={{ width: '25%', alignItems: 'center', marginTop: space.lg }}>
-      {({ pressed }) => (
-        <>
-          <View
-            style={{
-              width: 58,
-              height: 58,
-              borderRadius: radius.lg,
-              backgroundColor: pressed ? color.brand[100] : color.brand[50],
-              alignItems: 'center',
-              justifyContent: 'center',
-            }}
-          >
-            <MaterialCommunityIcons name={item.icon} size={26} color={color.brand[600]} />
-          </View>
-          <T variant="caption" weight="medium" tone={pressed ? 'brand' : 'ink'} style={{ marginTop: 6 }}>
-            {item.label}
-          </T>
-        </>
-      )}
-    </Pressable>
+    <PressableScale
+      strong
+      onPress={() => {
+        haptic.select();
+        item.nav(navigation);
+      }}
+      accessibilityRole="button"
+      accessibilityLabel={item.label}
+      style={{ width: '25%', alignItems: 'center', marginTop: space.lg }}
+    >
+      <View
+        style={{
+          width: 58,
+          height: 58,
+          borderRadius: radius.lg,
+          backgroundColor: color.brand[50],
+          alignItems: 'center',
+          justifyContent: 'center',
+        }}
+      >
+        <Pictogram name={item.key} size={28} color={color.brand[600]} />
+      </View>
+      <T variant="label" style={{ marginTop: 6 }}>
+        {item.label}
+      </T>
+    </PressableScale>
   );
 }
 
@@ -168,8 +158,8 @@ export function HomeScreen() {
               onPress={() => (isAuthenticated ? navigation.navigate('Addresses') : navigation.navigate('LocationPicker'))}
               style={{ flex: 1, paddingRight: space.md }}
             >
-              <T variant="caption" weight="bold" style={{ color: 'rgba(255,255,255,0.72)', letterSpacing: 1 }}>
-                DELIVER TO
+              <T variant="micro" tone="onBrand" style={{ opacity: 0.72 }}>
+                Deliver to
               </T>
               <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4, marginTop: 2 }}>
                 <T variant="body" weight="semibold" tone="onBrand" numberOfLines={1} style={{ flexShrink: 1 }}>
@@ -180,7 +170,7 @@ export function HomeScreen() {
             </Pressable>
             <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.md }}>
               <Pressable onPress={() => navigation.navigate('Notifications')} hitSlop={8}>
-                <View style={{ width: 40, height: 40, borderRadius: 20, alignItems: 'center', justifyContent: 'center', backgroundColor: 'rgba(255,255,255,0.14)' }}>
+                <View style={{ width: 40, height: 40, borderRadius: 20, alignItems: 'center', justifyContent: 'center', backgroundColor: color.surface.onBrand }}>
                   <Feather name="bell" size={18} color={color.white} />
                 </View>
               </Pressable>
@@ -209,7 +199,7 @@ export function HomeScreen() {
                   flexDirection: 'row',
                   alignItems: 'center',
                   gap: space.sm,
-                  height: 46,
+                  height: 52,
                   borderRadius: 9999,
                   paddingHorizontal: space.lg,
                   backgroundColor: color.surface.base,
@@ -236,8 +226,7 @@ export function HomeScreen() {
             paddingHorizontal: space.sm,
             flexDirection: 'row',
             flexWrap: 'wrap',
-            boxShadow: '0px 4px 12px rgba(33,26,26,0.06)',
-            elevation: 3,
+            ...elevation.card,
           }}
         >
           {SERVICES.map((s) => (
@@ -261,7 +250,7 @@ export function HomeScreen() {
                 </T>
               </View>
               <PillButton
-                label="Track"
+                label="Track order"
                 variant="dark"
                 size="sm"
                 onPress={() => navigation.navigate('Delivery', { orderId: activeOrder.id })}
@@ -287,6 +276,7 @@ export function HomeScreen() {
             {orderAgain.length > 0 ? (
               <>
                 <SectionHeader
+                  size="lg"
                   title="Order again"
                   onSeeAll={() => navigation.navigate('Tabs', { screen: 'Activity' })}
                   style={{ paddingHorizontal: GUTTER, marginTop: space['2xl'] }}
@@ -318,7 +308,7 @@ export function HomeScreen() {
               <PromoBanner
                 title="0% fees"
                 sub="No markups — pay cash on delivery."
-                cta="Order Now"
+                cta="Order now"
                 image={FOOD_IMAGES[2]}
                 onPress={() => navigation.navigate('Search')}
               />
@@ -335,7 +325,8 @@ export function HomeScreen() {
             {categories.length > 0 ? (
               <>
                 <SectionHeader
-                  title="Find by Category"
+                  size="lg"
+                  title="Find by category"
                   onSeeAll={() => navigation.navigate('Search')}
                   style={{ paddingHorizontal: GUTTER, marginTop: space['2xl'] }}
                 />
@@ -348,7 +339,6 @@ export function HomeScreen() {
                   renderItem={({ item }) => (
                     <Chip
                       label={item.name}
-                      emoji={categoryEmoji(item.name)}
                       onPress={() => navigation.navigate('Search', { q: item.name })}
                     />
                   )}
@@ -370,13 +360,14 @@ export function HomeScreen() {
 
             {/* Recommended — dense horizontal rail (Grab rails, not a sparse grid) */}
             <SectionHeader
+              size="lg"
               title="Recommended for you"
               onSeeAll={() => navigation.navigate('Recommended')}
               style={{ paddingHorizontal: GUTTER, marginTop: space['2xl'] }}
             />
             {featured.length === 0 ? (
               <T variant="label" tone="muted" style={{ paddingHorizontal: GUTTER, marginTop: space.lg }}>
-                No open restaurants right now — check back soon.
+                Nothing's open right now — check back soon.
               </T>
             ) : (
               <FlatList
@@ -404,6 +395,7 @@ export function HomeScreen() {
             {nearby.length > 0 ? (
               <>
                 <SectionHeader
+                  size="lg"
                   title="Nearby"
                   onSeeAll={() => navigation.navigate('Nearby')}
                   style={{ paddingHorizontal: GUTTER, marginTop: space['2xl'] }}
@@ -436,6 +428,7 @@ export function HomeScreen() {
               return (
                 <>
                   <SectionHeader
+                    size="lg"
                     title="Groceries & shops"
                     onSeeAll={() => navigation.navigate('Search', { type: 'SUPERMARKET' })}
                     style={{ paddingHorizontal: GUTTER, marginTop: space['2xl'] }}

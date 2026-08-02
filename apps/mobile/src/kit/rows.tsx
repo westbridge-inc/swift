@@ -6,25 +6,29 @@ import { color, radius, space } from '@swift/ui';
 import { LinkText } from './button';
 import { T } from './text';
 
-/** Section title + optional “See All”. */
+/** Section title + optional “See all”.
+ *  `size="lg"` renders the design-100× `title` step (Bricolage) — flows opt in
+ *  as they are elevated; when the register empties, lg becomes the default. */
 export function SectionHeader({
   title,
   onSeeAll,
   style,
+  size = 'md',
 }: {
   title: string;
   onSeeAll?: () => void;
   style?: ViewStyle;
+  size?: 'md' | 'lg';
 }) {
   return (
     <View
       style={[
-        { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
+        { flexDirection: 'row', alignItems: 'baseline', justifyContent: 'space-between' },
         style,
       ]}
     >
-      <T variant="heading">{title}</T>
-      {onSeeAll ? <LinkText label="See All" onPress={onSeeAll} tone="muted" /> : null}
+      <T variant={size === 'lg' ? 'title' : 'heading'}>{title}</T>
+      {onSeeAll ? <LinkText label="See all" onPress={onSeeAll} tone="muted" /> : null}
     </View>
   );
 }
@@ -40,7 +44,7 @@ export function IconChip({
   tone?: 'brand' | 'error';
 }) {
   const fg = tone === 'error' ? color.error : color.brand[600];
-  const bg = tone === 'error' ? '#FBEAEA' : color.brand[50];
+  const bg = tone === 'error' ? color.soft.danger : color.brand[50];
   return (
     <View
       style={{

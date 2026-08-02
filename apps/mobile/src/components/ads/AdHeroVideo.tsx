@@ -3,7 +3,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import { Pressable, View, StyleSheet } from 'react-native';
 import { Image } from 'expo-image';
 import { Feather } from '@expo/vector-icons';
-import { color, radius } from '@swift/ui';
+import { color, radius, space } from '@swift/ui';
 import { T } from '../../kit';
 import { AdChip } from './AdChip';
 import { useAdViewability } from './useAdViewability';
@@ -217,32 +217,32 @@ const styles = StyleSheet.create({
   },
   mute: {
     position: 'absolute',
-    top: 8,
-    right: 8,
+    top: space.sm,
+    right: space.sm,
     width: 28,
     height: 28,
     borderRadius: 14,
-    backgroundColor: 'rgba(0,0,0,0.55)',
+    backgroundColor: color.mediaChip,
     alignItems: 'center',
     justifyContent: 'center',
   },
   remaining: {
     position: 'absolute',
-    bottom: 8,
-    right: 8,
-    backgroundColor: 'rgba(0,0,0,0.55)',
-    borderRadius: 999,
-    paddingHorizontal: 8,
+    bottom: space.sm,
+    right: space.sm,
+    backgroundColor: color.mediaChip,
+    borderRadius: radius.full,
+    paddingHorizontal: space.sm,
     paddingVertical: 2,
   },
   remainingText: { color: color.white },
   copy: {
-    padding: 16,
-    paddingBottom: 12,
+    padding: space.lg,
+    paddingBottom: space.md,
   },
   headline: {
     color: color.white,
-    textShadowColor: 'rgba(0,0,0,0.6)',
+    textShadowColor: color.mediaInkShadow,
     textShadowRadius: 6,
     textShadowOffset: { width: 0, height: 1 },
   },
