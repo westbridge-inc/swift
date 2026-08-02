@@ -104,6 +104,26 @@ export class SubscriptionService {
     weeklyRate: number,
     currencyCode: string,
   ) {
+    const sub = await this.createRow(entity, type, weeklyRate, currencyCode);
+    // SAN at birth [san spec 2.4]: the number goes on welcome material so
+    // it's familiar long before the first bill. Never blocks activation —
+    // the ensureSan backstop on any later read heals a miss.
+    try {
+      const { ensureSan } = await import('../billing/san.service');
+      const san = await ensureSan(this.prisma, sub.id);
+      return { ...sub, san };
+    } catch (e) {
+      log().error({ err: e, subscriptionId: sub.id }, 'SAN assignment at activation failed — backstop will heal');
+      return sub;
+    }
+  }
+
+  private async createRow(
+    entity: { riderId?: string; driverId?: string; vendorId?: string },
+    type: SubscriptionType,
+    weeklyRate: number,
+    currencyCode: string,
+  ) {
     const now = new Date();
     const trialEnd = new Date(now.getTime() + TRIAL_DAYS * DAY_MS);
     const base = {

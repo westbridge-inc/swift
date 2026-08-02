@@ -2495,6 +2495,51 @@ export async function adminRoutes(app: FastifyInstance) {
     return { success: true, data: settings };
   });
 
+  // ── Swift Account Numbers (SAN) — the cash-rail payment reference ─────────
+
+  /** Backfill [san spec 2.4]: batched, resumable, ends with the integrity
+   *  assertion (zero NULLs, platform-wide distinctness, 100% Luhn). Safe to
+   *  re-run any time — assigned rows are skipped. */
+  app.post('/billing/san-backfill', { preHandler: [adminGuard] }, async () => {
+    const { backfillSans } = await import('../billing/san.service');
+    const result = await backfillSans(app.prisma);
+    return { success: true, data: { ...result, healthy: result.luhnFailures === 0 && result.distinct === result.total } };
+  });
+
+  /** Global SAN resolution (⌘K): who does this number belong to. Payment
+   *  reference lookup only — the SAN is never an auth factor. */
+  app.get('/billing/san/:san', { preHandler: [adminGuard] }, async (request) => {
+    const { san } = z.object({ san: z.string().min(1).max(20) }).parse(request.params);
+    const { resolveSan } = await import('../billing/san.service');
+    const res = await resolveSan(app.prisma, san);
+    if (!res.ok) return { success: true, data: { valid: false, code: res.code } };
+    const sub = res.subscription;
+    const [vendor, rider, driver] = await Promise.all([
+      sub.vendorId ? app.prisma.vendor.findUnique({ where: { id: sub.vendorId }, select: { name: true, city: true } }) : null,
+      sub.riderId ? app.prisma.rider.findUnique({ where: { id: sub.riderId }, select: { user: { select: { firstName: true, lastName: true, phone: true } } } }) : null,
+      sub.driverId ? app.prisma.driver.findUnique({ where: { id: sub.driverId }, select: { user: { select: { firstName: true, lastName: true, phone: true } } } }) : null,
+    ]);
+    const holder = vendor
+      ? { kind: 'VENDOR', name: vendor.name, city: vendor.city }
+      : rider
+        ? { kind: 'RIDER', name: `${rider.user.firstName} ${rider.user.lastName}`, phone: rider.user.phone }
+        : driver
+          ? { kind: 'DRIVER', name: `${driver.user.firstName} ${driver.user.lastName}`, phone: driver.user.phone }
+          : { kind: 'UNKNOWN' };
+    return {
+      success: true,
+      data: {
+        valid: true,
+        subscriptionId: sub.id,
+        status: sub.status,
+        type: sub.type,
+        weeklyRate: Number(sub.weeklyRate),
+        currentPeriodEnd: sub.currentPeriodEnd,
+        holder,
+      },
+    };
+  });
+
   /** Part 4 appeals queue — OPEN cases with the accused's identity attached,
    *  oldest first (the 24h clock). Part 10's overturn rate rides along: >5%
    *  is the false-positive alarm that pauses enforcement expansion. */

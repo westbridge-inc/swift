@@ -2306,11 +2306,14 @@ export async function vendorRoutes(app: FastifyInstance) {
       where: { vendorId },
     });
 
+    const { sanDisplay } = await import('../billing/san.service');
     return {
       success: true,
       data: subscription
         ? {
             ...subscription,
+            // "My Swift Number" [san spec 2.4/6.1] — heal-on-read backstop.
+            ...(await sanDisplay(app.prisma, subscription)),
             weeklyRate: Number(subscription.weeklyRate),
           }
         : null,

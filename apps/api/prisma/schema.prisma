@@ -1553,6 +1553,14 @@ model Subscription {
   /// cleared on reinstatement.
   suspendedAt    DateTime?
 
+  /// Swift Account Number [san spec PART 2] — the universal payment reference
+  /// for platform fees across every rail (agent cash / checkout / card).
+  /// 10 digits, Luhn-checked, IMMUTABLE: never changes, never re-issued,
+  /// never recycled (SanTombstone). A payment address, NOT an auth factor,
+  /// never an entity id in URLs. Format CHECK lives in raw migration SQL.
+  san           String?   @unique @db.Char(10)
+  sanAssignedAt DateTime?
+
   billingEvents BillingEvent[]
 
   createdAt DateTime @default(now())
@@ -1600,6 +1608,60 @@ enum BillingEventType {
   REMINDER
   TIER_CHANGE
   CHURNED
+}
+
+/// An inbound platform-fee payment [san spec PART 4] — every channel, one
+/// pipeline. NEVER REJECT REAL MONEY (SO-6): by the time Swift hears about
+/// it, cash already left someone's hand at an agent counter — resolution
+/// failures land here as UNMATCHED with a diagnosis, never a 4xx. Amounts are
+/// exact Decimal GYD major units, matching the incumbent billing engine
+/// (PrepaidBalance/BillingEvent) — a BigInt-minor island inside a Decimal
+/// engine would be the conversion-bug factory the money laws exist to prevent.
+model MmgAgentPayment {
+  id             String    @id @default(cuid())
+  /// MMG_AGENT_WEBHOOK | MMG_SETTLEMENT_FILE | MANUAL_ADMIN
+  channel        String
+  /// Idempotency key within the channel (MMG txn id / file row id / MANUAL:<receipt>)
+  externalId     String
+  /// Normalized MMG transaction id — cross-CHANNEL dedupe (webhook + file = one credit)
+  mmgTxnId       String?
+  sanRaw         String
+  sanNormalized  String?   @db.Char(10)
+  tenantId       String    @default("swift-default")
+  subscriptionId String?
+  amount         Decimal   @db.Decimal(12, 2)
+  currencyCode   String    @db.Char(3)
+  paidAt         DateTime
+  agentRef       String?
+  payerMsisdn    String?
+  /// RECEIVED | MATCHED | UNMATCHED | RECONCILED | RESOLVED | REFUND_FLAGGED
+  status         String
+  /// SAN_MALFORMED | SAN_CHECKSUM_FAILED | SAN_UNKNOWN | ACCOUNT_CLOSED | TOMBSTONED | BAD_CURRENCY | AMOUNT_OUT_OF_RANGE
+  failureCode    String?
+  raw            Json
+  resolvedBy     String?
+  resolvedAt     DateTime?
+  note           String?
+  createdAt      DateTime  @default(now())
+
+  @@unique([channel, externalId])
+  @@index([status, createdAt])
+  @@index([sanNormalized])
+  @@map("mmg_agent_payments")
+}
+
+/// A released Swift Account Number, kept forever [san spec 2.4]: on account
+/// erasure the subscription row may be anonymized but its SAN lands here —
+/// a late agent payment to it goes to suspense, never to a stranger, and the
+/// number can never be drawn again.
+model SanTombstone {
+  san            String   @id @db.Char(10)
+  subscriptionId String
+  tenantId       String   @default("swift-default")
+  reason         String?
+  releasedAt     DateTime @default(now())
+
+  @@map("san_tombstones")
 }
 
 /// Prepaid path for cash payers: agents/bank-transfer top-ups recorded by

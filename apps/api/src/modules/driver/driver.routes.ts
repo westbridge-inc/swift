@@ -1070,7 +1070,11 @@ export async function driverRoutes(app: FastifyInstance) {
       },
     });
     if (!driver) await throwForMissingProfile(app, request.user.userId, 'MOVER', 'Driver');
-    return { success: true, data: driver!.subscription || null };
+    const sub = driver!.subscription;
+    if (!sub) return { success: true, data: null };
+    const { sanDisplay } = await import('../billing/san.service');
+    // "My Swift Number" [san spec 2.4/6.1] — heal-on-read backstop.
+    return { success: true, data: { ...sub, ...(await sanDisplay(app.prisma, sub)) } };
   });
 
   /** PUT /subscription/billing-method — §13 rail selection (CASH prepaid vs
