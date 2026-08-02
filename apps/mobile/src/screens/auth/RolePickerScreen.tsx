@@ -15,7 +15,7 @@ import { Card, IconChip, Screen, T } from '../../kit';
 // guest; mover/vendor go straight to sign-in.
 const OPTIONS: {
   key: string;
-  intent: 'customer' | 'mover' | 'vendor';
+  intent: 'customer' | 'mover' | 'vendor' | 'advertiser';
   moverPreset?: 'delivery' | 'taxi';
   icon: React.ComponentProps<typeof Feather>['name'];
   title: string;
@@ -25,6 +25,9 @@ const OPTIONS: {
   { key: 'rider', intent: 'mover', moverPreset: 'delivery', icon: 'package', title: 'Deliver as a rider', sub: 'Food, groceries and parcels — bike or motorcycle' },
   { key: 'taxi', intent: 'mover', moverPreset: 'taxi', icon: 'navigation', title: 'Drive as a taxi driver', sub: 'Passenger trips in your car' },
   { key: 'vendor', intent: 'vendor', icon: 'briefcase', title: 'Sell as a business', sub: 'Restaurants, stores and services' },
+  // Ads spec §4.1 — advertising is AdvertiserMember-based (not a UserRole);
+  // any signed-in account can apply. The gate screen sorts registration.
+  { key: 'advertiser', intent: 'advertiser', icon: 'tv', title: 'Advertise on Swift', sub: 'Your business on every home screen — flat weekly rates' },
 ];
 
 export function RolePickerScreen() {

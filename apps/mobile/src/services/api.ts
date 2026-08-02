@@ -538,3 +538,36 @@ export const chatApi = {
   messages: (roomId: string) => api.get(`/chat/rooms/${roomId}/messages`),
   send: (roomId: string, message: string) => api.post(`/chat/rooms/${roomId}/messages`, { message }),
 };
+
+// Swift Ads (mounted at /api/v1/ads) — the advertiser dashboard surface
+// (ads-platform spec §14). Serving/events ride lib/ads.ts, not this block.
+export const adsApi = {
+  register: (data: {
+    companyName: string; industry: string; contactName: string; contactEmail: string;
+    contactPhone: string; website?: string; city?: string;
+  }) => api.post('/ads/advertiser/register', data),
+  me: () => api.get('/ads/advertiser/me'),
+  campaigns: (advertiserId: string) => api.get(`/ads/advertiser/${advertiserId}/campaigns`),
+  invoices: (advertiserId: string) => api.get(`/ads/advertiser/${advertiserId}/invoices`),
+  members: (advertiserId: string) => api.get(`/ads/advertiser/${advertiserId}/members`),
+  addMember: (advertiserId: string, data: { phone: string; role: 'MANAGER' | 'ANALYST' }) =>
+    api.post(`/ads/advertiser/${advertiserId}/members`, data),
+  placements: () => api.get('/ads/placements'),
+  availability: (placementId: string, params: { city: string; from: string; to: string }) =>
+    api.get(`/ads/placements/${placementId}/availability`, { params }),
+  createCampaign: (data: {
+    advertiserId: string; placementId: string; name: string; cities: string[];
+    startWeek: string; endWeek: string; objective?: string;
+    destinationType?: 'NONE' | 'URL' | 'DEEPLINK'; destinationValue?: string;
+  }) => api.post('/ads/campaigns', data),
+  reserve: (campaignId: string) => api.post(`/ads/campaigns/${campaignId}/reserve`, {}),
+  checkout: (campaignId: string, provider: 'MOCK' | 'MMG' | 'POWERTRANZ' = 'MOCK') =>
+    api.post(`/ads/campaigns/${campaignId}/checkout`, { provider }),
+  uploadCreative: (campaignId: string, form: FormData) =>
+    api.post(`/ads/campaigns/${campaignId}/creatives`, form, { headers: { 'Content-Type': 'multipart/form-data' } }),
+  stats: (campaignId: string) => api.get(`/ads/campaigns/${campaignId}/stats`),
+  refundPreview: (campaignId: string) => api.get(`/ads/campaigns/${campaignId}/refund-preview`),
+  pause: (campaignId: string) => api.post(`/ads/campaigns/${campaignId}/pause`, {}),
+  resume: (campaignId: string) => api.post(`/ads/campaigns/${campaignId}/resume`, {}),
+  cancel: (campaignId: string) => api.post(`/ads/campaigns/${campaignId}/cancel`, {}),
+};
