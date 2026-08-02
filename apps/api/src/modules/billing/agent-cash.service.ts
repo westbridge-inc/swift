@@ -48,11 +48,18 @@ const ACTIVATION_COPY: Record<string, string> = {
 
 /** The Pay-screen data block [spec 6.1] — spread into the partner's
  *  GET /subscription next to sanDisplay. One amount-due source of truth
- *  [3.4]: next week's fee minus the parked wallet balance, floored at 0. */
+ *  [3.4]: next week's fee minus the parked wallet balance, floored at 0.
+ *  usdDisplay [usd spec Part 6, System 2 ③]: the dual-currency line — NULL
+ *  until the founder enables usdPricingEnabled + displayDual for the tenant,
+ *  so it ships dark and every consumer already handles absence. */
 export async function payInfo(
   prisma: PrismaClient,
-  sub: { id: string; weeklyRate: unknown; customRate?: unknown | null },
-): Promise<{ walletBalanceGyd: number; weeklyFeeGyd: number; amountDueGyd: number; activationCopy: string; payCashSteps: string[] }> {
+  sub: { id: string; type?: string; weeklyRate: unknown; customRate?: unknown | null },
+): Promise<{
+  walletBalanceGyd: number; weeklyFeeGyd: number; amountDueGyd: number;
+  activationCopy: string; payCashSteps: string[];
+  usdDisplay: { amountUsd: number; rateUsed: number; line: string } | null;
+}> {
   const [balanceRow, modeRow] = await Promise.all([
     prisma.prepaidBalance.findUnique({ where: { subscriptionId: sub.id } }),
     prisma.platformConfig.findUnique({ where: { key: 'billing.mmg_agent.ingestion_mode' } }),
@@ -60,6 +67,31 @@ export async function payInfo(
   const weekly = Number(sub.customRate ?? sub.weeklyRate);
   const balance = Number(balanceRow?.balance ?? 0);
   const mode = (modeRow?.value as string | null) ?? 'MANUAL';
+
+  // Dual-display: USD is truth, local settles [System 2]. Grandfathered subs
+  // (customRate = Mode B freeze) keep a single-currency line — their price is
+  // deliberately NOT the USD book until sunset.
+  let usdDisplay: { amountUsd: number; rateUsed: number; line: string } | null = null;
+  if (sub.type && sub.customRate == null) {
+    const tenant = await prisma.tenantBillingCurrency.findUnique({ where: { tenantId: 'swift-default' } });
+    if (tenant?.usdPricingEnabled && tenant.displayDual) {
+      const { resolveRateForRun, dualDisplay } = await import('./fx');
+      const role = { RESTAURANT: 'VENDOR', SUPERMARKET: 'VENDOR', RETAIL_STORE: 'VENDOR', SERVICE_PROVIDER: 'SERVICE', DELIVERY_RIDER: 'RIDER', COURIER_RIDER: 'RIDER', TAXI_DRIVER: 'DRIVER' }[sub.type] ?? 'VENDOR';
+      const [entry, rate] = await Promise.all([
+        prisma.priceBookEntry.findFirst({ where: { role, active: true }, orderBy: { effectiveFrom: 'desc' } }),
+        resolveRateForRun(prisma, tenant.settlementCurrency),
+      ]);
+      if (entry && rate) {
+        const amountUsd = Number(entry.amountUsd);
+        usdDisplay = {
+          amountUsd,
+          rateUsed: Number(rate.rate),
+          line: dualDisplay(amountUsd, weekly, tenant.settlementCurrency),
+        };
+      }
+    }
+  }
+
   return {
     walletBalanceGyd: balance,
     weeklyFeeGyd: weekly,
@@ -70,6 +102,7 @@ export async function payInfo(
       'Say you are paying a Swift bill and give your Swift Number',
       'Pay cash — keep the receipt',
     ],
+    usdDisplay,
   };
 }
 
