@@ -1151,6 +1151,8 @@ model Order {
   riskFlagged Boolean @default(false)
   riskReason  String?
 
+  tripShares TripShareToken[]
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
@@ -2363,6 +2365,29 @@ model EmergencyContact {
 
   @@unique([userId, phoneE164])
   @@index([userId])
+}
+
+/// Trip Share (safety spec §6): a tokenized PUBLIC live-trip page — browser,
+/// no app needed. The token is 128-bit CSPRNG and grants ONLY the public page
+/// payload, never API access. Expiry = trip end + grace (checked at read time
+/// against the order's real state) under a hard mint-time ceiling. Revocable
+/// by the sharer; views are counted.
+model TripShareToken {
+  id              String    @id @default(cuid())
+  tenantId        String    @default("swift-default")
+  orderId         String
+  createdByUserId String
+  token           String    @unique // 128-bit URL-safe random, CSPRNG
+  sharedToPhone   String? // if sent by SMS from the server
+  expiresAt       DateTime // hard ceiling; public read also enforces trip-end + grace
+  revokedAt       DateTime?
+  viewCount       Int       @default(0)
+  lastViewedAt    DateTime?
+  createdAt       DateTime  @default(now())
+  order           Order     @relation(fields: [orderId], references: [id], onDelete: Cascade)
+
+  @@index([orderId])
+  @@map("trip_share_tokens")
 }
 
 // ─── Trip Guardian (safety spec §5): server-side trip monitoring ────────────

@@ -177,6 +177,36 @@ export async function safetyRoutes(app: FastifyInstance) {
     return { success: true, data: { deleted: true } };
   });
 
+  // ── Trip Share (safety §6) ───────────────────────────────────────────────
+  // Mint/revoke are the passenger's own actions. The public read is
+  // UNAUTHENTICATED BY DESIGN: the whole point is a recipient with no app and
+  // no account following a live trip — the 128-bit token IS the credential,
+  // it grants only this payload, and invalid/expired/revoked are one
+  // indistinguishable null (no oracle).
+  const { TripShareService } = await import('./trip-share.service');
+  const tripShare = new TripShareService(app.prisma, app.redis, getChannels());
+
+  app.post<{ Params: { id: string } }>('/trips/:id/share', auth, async (request) => {
+    const body = z.object({
+      sendToPhone: z.string().regex(/^\+[1-9]\d{6,14}$/, 'Use international format.').optional(),
+    }).parse(request.body ?? {});
+    const share = await tripShare.mint(request.user.userId, request.params.id, body);
+    return { success: true, data: share };
+  });
+
+  app.delete<{ Params: { token: string } }>('/share/:token', auth, async (request) => {
+    return { success: true, data: await tripShare.revoke(request.user.userId, request.params.token) };
+  });
+
+  app.get<{ Params: { token: string } }>('/public/trip/:token', async (request, reply) => {
+    const view = await tripShare.publicView(request.params.token);
+    if (!view) {
+      reply.code(404);
+      return { success: false, error: { code: 'SHARE_NOT_AVAILABLE', message: 'This trip share is no longer available.' } };
+    }
+    return { success: true, data: view };
+  });
+
   // ── Trip Guardian check-in responses (§5.3) ──────────────────────────────
   // Both resolve the session by the CALLER's identity — no ids are accepted,
   // so there is nothing cross-user to probe. The ladder itself (prompts,
