@@ -4,6 +4,7 @@ import { Pressable, Switch, View, type ViewStyle } from 'react-native';
 import { Feather } from '@expo/vector-icons';
 import { color, space } from '@swift/ui';
 import { cardShadow } from './card';
+import { haptic } from '../lib/haptics';
 import { HeartGlyph, StarGlyph } from './glyphs';
 import { T } from './text';
 
@@ -197,7 +198,14 @@ export function Chip({
 }) {
   return (
     <Pressable
-      onPress={onPress}
+      onPress={
+        onPress
+          ? () => {
+              haptic.select();
+              onPress();
+            }
+          : undefined
+      }
       accessibilityRole="button"
       accessibilityLabel={label}
       accessibilityState={{ selected }}
@@ -212,7 +220,7 @@ export function Chip({
               paddingHorizontal: space.xl,
               height: 48,
               borderRadius: 9999,
-              backgroundColor: selected ? color.brand[50] : color.surface.base,
+              backgroundColor: selected ? color.brand[500] : color.surface.base,
               borderWidth: 1,
               borderColor: selected ? color.brand[500] : color.border.subtle,
               opacity: pressed ? 0.75 : 1,
@@ -221,7 +229,7 @@ export function Chip({
           ]}
         >
           {emoji ? <T variant="body">{emoji}</T> : null}
-          <T variant="label" weight={selected ? 'semibold' : 'medium'} tone={selected ? 'deep' : 'ink'}>
+          <T variant="label" weight={selected ? 'semibold' : 'medium'} tone={selected ? 'onBrand' : 'ink'}>
             {label}
           </T>
         </View>
