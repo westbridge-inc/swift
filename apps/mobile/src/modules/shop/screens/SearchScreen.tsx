@@ -7,7 +7,6 @@ import { useHome, useVendors } from '../../../hooks/customer';
 import { useAppStore } from '../../../stores/appStore';
 import { useLocationStore } from '../../../stores/locationStore';
 import { itemImage, vendorImage } from '../../../lib/images';
-import { money } from '../../../lib/money';
 import {
   Chip,
   EmptyState,
@@ -15,6 +14,7 @@ import {
   Header,
   LabeledInput,
   LoadingBlock,
+  Money,
   PillButton,
   RatingMeta,
   Screen,
@@ -105,12 +105,12 @@ export function SearchScreen() {
       <View style={{ paddingHorizontal: space['2xl'], paddingTop: space.sm }}>
         {!searching ? (
           <T variant="title" style={{ marginBottom: space.xl }}>
-            Discover your{'\n'}favorite food
+            What are you{'\n'}looking for?
           </T>
         ) : null}
         <LabeledInput
           icon="search"
-          placeholder="What would you like to eat?"
+          placeholder="Restaurants, groceries, dishes…"
           value={q}
           onChangeText={setQ}
           returnKeyType="search"
@@ -124,7 +124,7 @@ export function SearchScreen() {
               label={t.label}
               selected={type === t.key}
               onPress={() => setType(t.key)}
-              style={{ height: 40, paddingHorizontal: space.lg }}
+              style={{ height: 44, paddingHorizontal: space.lg }}
             />
           ))}
         </ScrollView>
@@ -137,7 +137,7 @@ export function SearchScreen() {
             {(
               [
                 { key: 'result', label: 'Result' },
-                { key: 'sort', label: 'Sort By' },
+                { key: 'sort', label: 'Sort by' },
               ] as const
             ).map((t) => (
               <Pressable key={t.key} onPress={() => setTab(t.key)} style={{ flex: 1 }}>
@@ -168,14 +168,22 @@ export function SearchScreen() {
               <EmptyState
                 icon="search"
                 title="No matches"
-                body={`Nothing found${debounced ? ` for “${debounced}”` : ''}. Try another name or category.`}
+                body={
+                  debounced.trim()
+                    ? `Nothing matched “${debounced.trim()}”. Try fewer words, or browse ${(TYPES.find((t) => t.key === type)?.label ?? 'everything').toLowerCase()}.`
+                    : 'Nothing here right now — check back soon.'
+                }
               />
             ) : (
               <FlatList
                 data={results}
                 keyExtractor={(v) => v.id}
                 contentContainerStyle={{ padding: space['2xl'], gap: space.md, paddingBottom: space['3xl'] }}
-                ListHeaderComponent={<SectionHeader title="Search Result" style={{ marginBottom: space.md }} />}
+                ListHeaderComponent={
+                  <T variant="caption" tone="muted" style={{ marginBottom: space.md }}>
+                    {results.length} {results.length === 1 ? 'place' : 'places'}
+                  </T>
+                }
                 renderItem={({ item: v }) => (
                   <VendorRow
                     image={vendorImage(v)}
@@ -186,7 +194,8 @@ export function SearchScreen() {
                         extra={v.etaMin ? `${v.etaMin} min` : v.distanceKm != null ? `${v.distanceKm} km` : undefined}
                       />
                     }
-                    sub={v.isCurrentlyOpen === false ? 'Closed right now' : undefined}
+                    wide
+                    closed={v.isCurrentlyOpen === false}
                     onPress={() => navigation.navigate('Restaurant', { vendorId: v.id })}
                   />
                 )}
@@ -244,8 +253,8 @@ export function SearchScreen() {
                 </Pressable>
               </View>
               <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: space.md, marginTop: space.lg }}>
-                {recentSearches.map((r, i) => (
-                  <Chip key={r} label={r} selected={i === 0} onPress={() => setQ(r)} style={{ height: 44 }} />
+                {recentSearches.map((r) => (
+                  <Chip key={r} label={r} onPress={() => setQ(r)} style={{ height: 44 }} />
                 ))}
               </View>
             </>
@@ -260,12 +269,8 @@ export function SearchScreen() {
                     key={it.id}
                     image={itemImage(it)}
                     name={it.name}
-                    meta={
-                      <T variant="label" weight="bold" tone="brand">
-                        {money(it.price)}
-                      </T>
-                    }
                     sub={it.vendorName}
+                    trailing={<Money amount={it.price} tone="brand" />}
                     onPress={() => navigation.navigate('MenuItem', { itemId: it.id, vendorId: it.vendorId })}
                   />
                 ))}

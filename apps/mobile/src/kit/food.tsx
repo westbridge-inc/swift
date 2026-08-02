@@ -92,7 +92,11 @@ export function FoodCard({
   );
 }
 
-/** Landscape list card (nearby / search results): thumb · name · meta · trailing. */
+/** Landscape list card (nearby / search results): thumb · name · meta · trailing.
+ *  `wide` = the 16:10 vendor-imagery ratio (9.6 law: vendors 16:10, products 1:1).
+ *  `closed` = the sleep treatment — availability as typographic state: the thumb
+ *  dims, the name softens, one micro line speaks. Open rows say nothing
+ *  (silence means open — no badge soup, ever). */
 export function VendorRow({
   image,
   name,
@@ -101,6 +105,8 @@ export function VendorRow({
   trailing,
   onPress,
   style,
+  wide = false,
+  closed = false,
 }: {
   image: string;
   name: string;
@@ -109,24 +115,39 @@ export function VendorRow({
   trailing?: React.ReactNode;
   onPress?: () => void;
   style?: ViewStyle;
+  wide?: boolean;
+  closed?: boolean;
 }) {
   return (
-    <Pressable onPress={onPress} accessibilityRole="button" accessibilityLabel={sub ? `${name}. ${sub}` : name}>
+    <Pressable
+      onPress={onPress}
+      accessibilityRole="button"
+      accessibilityLabel={closed ? `${name}. Closed right now` : sub ? `${name}. ${sub}` : name}
+    >
       {({ pressed }) => (
       <Card style={[{ flexDirection: 'row', alignItems: 'center', gap: space.md, padding: space.md, opacity: pressed ? 0.85 : 1 }, style]}>
         <Image
           source={{ uri: image }}
           placeholder={{ blurhash: DARK_BLURHASH }}
           transition={150}
-          style={{ width: 84, height: 84, borderRadius: radius.md }}
+          style={{
+            width: wide ? 96 : 84,
+            height: wide ? 60 : 84,
+            borderRadius: radius.md,
+            opacity: closed ? 0.45 : 1,
+          }}
           contentFit="cover"
         />
         <View style={{ flex: 1, gap: 4 }}>
-          <T variant="body" weight="semibold" numberOfLines={1}>
+          <T variant="body" weight="semibold" tone={closed ? 'muted' : 'ink'} numberOfLines={1}>
             {name}
           </T>
           {meta}
-          {sub ? (
+          {closed ? (
+            <T variant="micro" tone="faint">
+              Closed right now
+            </T>
+          ) : sub ? (
             <T variant="caption" tone="muted" numberOfLines={1}>
               {sub}
             </T>
