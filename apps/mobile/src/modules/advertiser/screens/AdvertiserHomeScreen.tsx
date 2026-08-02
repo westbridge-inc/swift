@@ -44,7 +44,7 @@ export function AdvertiserHomeScreen() {
         <T variant="title" style={{ color: color.white }}>
           {advertiser?.companyName ?? 'Your ads'}
         </T>
-        <T variant="caption" style={{ color: 'rgba(255,255,255,0.85)', marginTop: 2 }}>
+        <T variant="caption" tone="onBrand" style={{ opacity: 0.85, marginTop: 2 }}>
           Home-screen advertising · flat weekly rates
         </T>
       </View>

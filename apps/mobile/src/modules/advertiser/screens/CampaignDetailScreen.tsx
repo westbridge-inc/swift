@@ -135,7 +135,7 @@ export function CampaignDetailScreen() {
             );
           })}
           {['CANCELLED', 'REJECTED'].includes(campaign.status) ? (
-            <View style={{ marginTop: space.md, backgroundColor: '#FDF2F2', borderRadius: radius.md, padding: space.md }}>
+            <View style={{ marginTop: space.md, backgroundColor: color.soft.danger, borderRadius: radius.md, padding: space.md }}>
               <T variant="caption" style={{ color: color.error }}>
                 {campaign.status === 'CANCELLED' ? 'Cancelled' : 'Not approved'}
                 {campaign.statusReason ? ` — ${campaign.statusReason}` : ''}
