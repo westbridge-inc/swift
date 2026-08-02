@@ -234,7 +234,7 @@ export function ActiveJobScreen({ navigation }: any) {
             <>
               {/* Bold route line: white halo under the accent stroke. Geodesic
                   connector — a heading, not turn-by-turn. */}
-              <Polyline coordinates={[pickup, drop]} geodesic strokeColor="rgba(255,255,255,0.35)" strokeWidth={9} />
+              <Polyline coordinates={[pickup, drop]} geodesic strokeColor={withAlpha(color.white, 0.35)} strokeWidth={9} />
               <Polyline coordinates={[pickup, drop]} geodesic strokeColor={color.brand[500]} strokeWidth={5} />
             </>
           ) : null}
@@ -398,7 +398,7 @@ export function ActiveJobScreen({ navigation }: any) {
               <>
                 {/* Customer paid the store via MMG — the door is a pure handover;
                     the rider's fee comes from the STORE (tracked in Earnings). */}
-                <View style={{ flexDirection: 'row', alignItems: 'flex-start', gap: space.sm, borderRadius: radius.lg, backgroundColor: 'rgba(47,191,113,0.12)', borderWidth: 1, borderColor: 'rgba(47,191,113,0.4)', padding: space.md, marginBottom: space.md }}>
+                <View style={{ flexDirection: 'row', alignItems: 'flex-start', gap: space.sm, borderRadius: radius.lg, backgroundColor: withAlpha(color.success, 0.12), borderWidth: 1, borderColor: withAlpha(color.success, 0.4), padding: space.md, marginBottom: space.md }}>
                   <Feather name="check-circle" size={15} color={dk.success} style={{ marginTop: 1 }} />
                   <T variant="caption" weight="semibold" style={{ flex: 1, color: dk.text }}>
                     {pickedUp

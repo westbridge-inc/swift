@@ -1,6 +1,6 @@
 import React from 'react';
 import { Pressable, View, type ViewStyle } from 'react-native';
-import { Feather, MaterialCommunityIcons } from '@expo/vector-icons';
+import { Feather } from '@expo/vector-icons';
 import { color } from '@swift/ui';
 import { T, cardShadow } from '../../kit';
 
@@ -49,14 +49,14 @@ export function DStat({
   label,
   flex = 1,
 }: {
-  icon?: keyof typeof MaterialCommunityIcons.glyphMap;
+  icon?: React.ComponentProps<typeof Feather>['name'];
   value: string;
   label: string;
   flex?: number;
 }) {
   return (
     <View style={{ flex, backgroundColor: dk.cardSoft, borderRadius: 14, paddingVertical: 10, paddingHorizontal: 12, alignItems: 'center' }}>
-      {icon ? <MaterialCommunityIcons name={icon} size={14} color={color.brand[600]} style={{ marginBottom: 2 }} /> : null}
+      {icon ? <Feather name={icon} size={14} color={color.brand[600]} style={{ marginBottom: 2 }} /> : null}
       <T variant="body" weight="bold" numberOfLines={1} style={{ color: dk.text }}>
         {value}
       </T>
