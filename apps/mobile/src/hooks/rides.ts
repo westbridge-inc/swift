@@ -45,6 +45,68 @@ export function useWatchAvailability() {
   });
 }
 
+/** Honest supply counts [rides spec 5.5A / S-41]: "{online} online — {busy}
+ *  on trips", straight from the server. Real numbers are respect; never
+ *  rendered from a guess. */
+export function useRideSupply(point?: Point) {
+  return useQuery<{ online: number; busy: number; level: 'GOOD' | 'LOW' | 'NONE'; nearestEtaMinutes: number | null }>({
+    queryKey: ['rides', 'supply', point ? `${point.lat.toFixed(3)},${point.lng.toFixed(3)}` : null],
+    queryFn: () => unwrap(rideApi.supply(point as Point)),
+    enabled: !!point,
+    refetchInterval: 30_000,
+  });
+}
+
+export type QueueStatus = {
+  id: string;
+  position: number;
+  joinedAt: string;
+  expiresAt: string;
+  suppliersOnline: number;
+  suppliersBusy: number;
+};
+
+/** My place in line [5.5B] — null when not queued. Polls alongside the
+ *  active-ride poll; a queue match creates a real ride server-side, so the
+ *  active-ride query is what flips the screen. */
+export function useQueueStatus(enabled = true) {
+  return useQuery<QueueStatus | null>({
+    queryKey: ['rides', 'queue'],
+    queryFn: () => unwrap<QueueStatus | null>(rideApi.queueStatus()),
+    enabled,
+    refetchInterval: enabled ? 15_000 : undefined,
+  });
+}
+
+export function useJoinQueue() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (data: {
+      pickup: Point;
+      dropoff: Point;
+      pickupAddress: string;
+      dropoffAddress: string;
+      passengerCount?: number;
+      rideClass?: RideClass;
+    }) => unwrap<QueueStatus>(rideApi.queueJoin(data)),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['rides', 'queue'] });
+      track('ride_queue_joined', {});
+    },
+  });
+}
+
+export function useLeaveQueue() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: () => unwrap(rideApi.queueLeave()),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['rides', 'queue'] });
+      track('ride_queue_left', {});
+    },
+  });
+}
+
 export function useRequestRide() {
   const qc = useQueryClient();
   return useMutation({

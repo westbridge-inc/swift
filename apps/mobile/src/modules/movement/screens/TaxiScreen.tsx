@@ -9,7 +9,7 @@ import { Image } from 'expo-image';
 import { Feather } from '@expo/vector-icons';
 import { color, radius, space } from '@swift/ui';
 import { useQueryClient } from '@tanstack/react-query';
-import { useActiveRide, useRideEstimate, useRequestRide, useCancelRide, useRideSos, useRideAvailability, useWatchAvailability } from '../../../hooks';
+import { useActiveRide, useRideEstimate, useRequestRide, useCancelRide, useRideSos, useRideAvailability, useWatchAvailability, useRideSupply, useQueueStatus, useJoinQueue, useLeaveQueue } from '../../../hooks';
 import { connectSocket, getSocket, subscribeToOrder } from '../../../services/socket';
 import { RidePostTripSheet } from '../RidePostTripSheet';
 import { useLocationStore } from '../../../stores/locationStore';
@@ -18,7 +18,7 @@ import { money } from '../../../lib/money';
 import { mediaUrl } from '../../../lib/images';
 import { streetEtaMin } from '../../../lib/geo';
 import { type RideClass, type TierEstimate } from '../../../services/api';
-import { Card, CircleChip, IconChip, LoadingBlock, Money, PillButton, Pictogram, type PictogramName, PinGlyph, PopupCard, Stars, T, cardShadow } from '../../../kit';
+import { Card, CircleChip, IconChip, LoadingBlock, Money, PillButton, Pictogram, type PictogramName, PinGlyph, PopupCard, Stars, T, VehicleRender, type VehicleBodyType, cardShadow } from '../../../kit';
 import type { PickedPlace } from './DestinationSearchScreen';
 
 const STATUS_LABEL: Record<string, string> = {
@@ -29,12 +29,14 @@ const STATUS_LABEL: Record<string, string> = {
   RIDE_IN_PROGRESS: 'On your trip',
 };
 
-const TIER_META: Record<RideClass, { label: string; icon: PictogramName; blurb: string }> = {
-  ECONOMY: { label: 'Economy', icon: 'sedan', blurb: 'Affordable, everyday rides' },
-  COMFORT: { label: 'Comfort', icon: 'estate', blurb: 'Newer cars, extra legroom' },
-  XL: { label: 'XL', icon: 'van', blurb: 'Seats up to 6' },
-  GROUP: { label: 'Bus', icon: 'bus', blurb: 'Minibus — groups, tours & airport runs' },
+const TIER_META: Record<RideClass, { label: string; icon: PictogramName; blurb: string; body: VehicleBodyType }> = {
+  ECONOMY: { label: 'Economy', icon: 'sedan', blurb: 'Affordable, everyday rides', body: 'SEDAN' },
+  COMFORT: { label: 'Comfort', icon: 'estate', blurb: 'Newer cars, extra legroom', body: 'WAGON' },
+  XL: { label: 'XL', icon: 'van', blurb: 'Seats up to 6', body: 'SUV' },
+  GROUP: { label: 'Bus', icon: 'bus', blurb: 'Minibus — groups, tours & airport runs', body: 'MINIBUS' },
 };
+
+const ordinal = (n: number) => `${n}${n % 10 === 1 && n % 100 !== 11 ? 'st' : n % 10 === 2 && n % 100 !== 12 ? 'nd' : n % 10 === 3 && n % 100 !== 13 ? 'rd' : 'th'}`;
 
 type LatLng = { latitude: number; longitude: number };
 
@@ -199,6 +201,7 @@ export function TaxiScreen({ navigation }: any) {
   // rate + tip sheet after `useActiveRide` drops it (a completed ride is no
   // longer "active").
   const [completedRide, setCompletedRide] = useState<any>(null);
+  const [rematching, setRematching] = useState(false);
   const activeRef = useRef<any>(null);
   activeRef.current = activeRide;
 
@@ -216,6 +219,11 @@ export function TaxiScreen({ navigation }: any) {
       if (p?.status === 'DELIVERED' || p?.status === 'COMPLETED') {
         if (activeRef.current) setCompletedRide(activeRef.current);
       }
+      // T18 continuity [rides spec 5.6/S-55]: a driver cancel keeps the SAME
+      // trip and re-dispatches — the screen says so instead of pretending the
+      // search just started. Clears the moment a new driver lands.
+      if (p?.status === 'PENDING' && p?.reason === 'driver_cancelled') setRematching(true);
+      else if (p?.status && p.status !== 'PENDING') setRematching(false);
       qc.invalidateQueries({ queryKey: ['rides', 'active'] });
     };
     s.on('order:status_changed', onStatus);
@@ -244,6 +252,13 @@ export function TaxiScreen({ navigation }: any) {
   // and loading branches must never change the hook order).
   const supply = useRideAvailability(pickupPoint);
   const watch = useWatchAvailability();
+  // 5.5: honest counts for the chip + the queue that auto-requests. A queue
+  // match creates a REAL ride server-side, so the active-ride poll flips the
+  // screen; the push covers the backgrounded case.
+  const supplyCounts = useRideSupply(pickupPoint);
+  const queue = useQueueStatus();
+  const joinQueue = useJoinQueue();
+  const leaveQueue = useLeaveQueue();
 
   const openSearch = (onSelect: (p: PickedPlace) => void, title: string) =>
     navigation?.navigate?.('DestinationSearch', { onSelect, title });
@@ -257,7 +272,7 @@ export function TaxiScreen({ navigation }: any) {
   }
 
   if (activeRide) {
-    return <ActiveRide navigation={navigation} ride={activeRide} cancelRide={cancelRide} insets={insets} />;
+    return <ActiveRide navigation={navigation} ride={activeRide} cancelRide={cancelRide} insets={insets} rematching={rematching} />;
   }
 
   // ===== Request flow (idle → route chosen) =====
@@ -287,17 +302,33 @@ export function TaxiScreen({ navigation }: any) {
     || (errBody?.error?.code ?? errBody?.code) === 'NO_DRIVERS_NEARBY';
   const supplyLow = gated && !supplyNone && supply.data?.level === 'LOW';
 
+  const tripPayload = () =>
+    pickupPoint && dropoffPoint && pickup && dropoff
+      ? {
+          pickup: pickupPoint,
+          dropoff: dropoffPoint,
+          pickupAddress: pickup.label || 'Current location',
+          dropoffAddress: dropoff.label || 'Drop-off',
+          passengerCount: 1,
+          rideClass: selectedClass,
+        }
+      : null;
+
   const onRequest = () => {
-    if (!pickupPoint || !dropoffPoint || !dropoff || !pickup) return;
-    requestRide.mutate({
-      pickup: pickupPoint,
-      dropoff: dropoffPoint,
-      pickupAddress: pickup.label || 'Current location',
-      dropoffAddress: dropoff.label || 'Drop-off',
-      passengerCount: 1,
-      rideClass: selectedClass,
-    });
+    const payload = tripPayload();
+    if (payload) requestRide.mutate(payload);
   };
+
+  // The supply chip [5.1/S-02..04]: one line answering "can I get a ride"
+  // before any destination is typed. Real numbers only — never a guess.
+  const counts = supplyCounts.data;
+  const supplyChip = !counts
+    ? null
+    : counts.online === 0
+      ? { label: 'No drivers online right now', tone: 'muted' as const }
+      : counts.busy >= counts.online
+        ? { label: `${counts.online} driver${counts.online === 1 ? '' : 's'} online — all on trips`, tone: 'muted' as const }
+        : { label: `${counts.online - counts.busy} driver${counts.online - counts.busy === 1 ? '' : 's'} nearby`, tone: 'ink' as const };
 
   return (
     <View style={{ flex: 1, backgroundColor: color.surface.subtle }}>
@@ -340,6 +371,25 @@ export function TaxiScreen({ navigation }: any) {
             onPickup={() => openSearch((p) => setPickupOverride(p), 'Pickup')}
             onDropoff={() => openSearch((p) => setDropoff(p), 'Where to?')}
           />
+
+          {supplyChip ? (
+            <View style={{ flexDirection: 'row', justifyContent: 'center', marginTop: space.md }}>
+              <View
+                style={{
+                  flexDirection: 'row',
+                  alignItems: 'center',
+                  gap: space.xs,
+                  paddingHorizontal: space.md,
+                  paddingVertical: 6,
+                  borderRadius: radius.full,
+                  backgroundColor: color.surface.sunken,
+                }}
+              >
+                <View style={{ width: 7, height: 7, borderRadius: 4, backgroundColor: supplyChip.tone === 'ink' ? color.success : color.text.muted }} />
+                <T variant="label" tone={supplyChip.tone === 'ink' ? 'ink' : 'muted'}>{supplyChip.label}</T>
+              </View>
+            </View>
+          ) : null}
 
           {/* Tiers */}
           {dropoffPoint ? (
@@ -397,31 +447,76 @@ export function TaxiScreen({ navigation }: any) {
             />
           ) : null}
 
-          {supplyNone ? (
-            // §2.1: an empty field gets honesty, not a spinner. Watch swaps in;
-            // "Try anyway" stays — drivers come online mid-search.
-            <>
+          {queue.data ? (
+            // 5.5B — you're in line. A supply gap is a service, not an
+            // apology: position is live, the request fires automatically the
+            // moment a driver frees, and leaving is one tap. Brand accent —
+            // queueing is service, never danger [3.1].
+            <Card style={{ marginTop: space.lg, backgroundColor: color.brand[50], borderWidth: 1, borderColor: color.brand[500] }}>
+              <T variant="title" tone="deep">You’re in line</T>
+              <T variant="body" weight="semibold" style={{ marginTop: space.xs }}>
+                {ordinal(queue.data.position)} in line
+              </T>
+              <T variant="caption" tone="muted" style={{ marginTop: space.xs }}>
+                We’ll request automatically the moment a driver frees up. You can close the app — we’ll notify you.
+              </T>
+              <T variant="caption" tone="muted" style={{ marginTop: space.xs }}>
+                {queue.data.suppliersOnline} driver{queue.data.suppliersOnline === 1 ? '' : 's'} online — {queue.data.suppliersBusy} on trips right now
+              </T>
               <PillButton
-                label={watch.isSuccess ? "We'll ping you — watching for drivers" : 'Notify me when a driver is available'}
-                style={{ marginTop: space.lg }}
+                label="Leave the queue"
+                variant="outline"
+                style={{ marginTop: space.md }}
+                loading={leaveQueue.isPending}
+                onPress={() => leaveQueue.mutate()}
+              />
+            </Card>
+          ) : supplyNone ? (
+            // 5.5A — the flagship fix: real counts, a queue, no apology.
+            <Card style={{ marginTop: space.lg }}>
+              <T variant="title">{(counts?.online ?? 0) > 0 ? 'All drivers are busy' : 'No drivers online right now'}</T>
+              {counts ? (
+                <T variant="caption" tone="muted" style={{ marginTop: space.xs }}>
+                  {counts.online} driver{counts.online === 1 ? '' : 's'} online in Georgetown — {counts.busy} on trips right now
+                </T>
+              ) : null}
+              <PillButton
+                label="Join the queue"
+                style={{ marginTop: space.md }}
+                loading={joinQueue.isPending}
+                disabled={!tripPayload()}
+                onPress={() => {
+                  const payload = tripPayload();
+                  if (payload) joinQueue.mutate(payload);
+                }}
+              />
+              {!tripPayload() ? (
+                <T variant="caption" tone="muted" center style={{ marginTop: space.sm }}>
+                  Set your destination first — we hold your whole trip in line.
+                </T>
+              ) : null}
+              <PillButton
+                label={watch.isSuccess ? "We'll ping you — watching for drivers" : 'Notify me instead'}
+                variant="outline"
+                style={{ marginTop: space.sm }}
                 loading={watch.isPending}
                 disabled={watch.isSuccess || !pickupPoint}
                 onPress={() => pickupPoint && watch.mutate(pickupPoint)}
               />
-              <T variant="caption" tone="muted" center style={{ marginTop: space.sm }}>
-                No drivers are available near you right now.{' '}
-                {watch.isSuccess ? "We'll ping you the moment one comes online." : ''}
-              </T>
-              <T
-                variant="caption"
-                tone="muted"
-                center
-                style={{ marginTop: space.sm, textDecorationLine: 'underline' }}
-                onPress={() => canRequest && !requestRide.isPending && onRequest()}
-              >
-                Try anyway — some drivers come online mid-search
-              </T>
-            </>
+              {(counts?.online ?? 0) > 0 ? (
+                // Try-anyway exists ONLY when someone is actually online —
+                // a search against an empty set is theater [0.8].
+                <T
+                  variant="caption"
+                  tone="muted"
+                  center
+                  style={{ marginTop: space.md, textDecorationLine: 'underline' }}
+                  onPress={() => canRequest && !requestRide.isPending && onRequest()}
+                >
+                  Try now anyway — drivers sometimes come online mid-search
+                </T>
+              ) : null}
+            </Card>
           ) : (
             <>
               <PillButton
@@ -483,18 +578,9 @@ function TierRow({
             opacity: pressed ? 0.85 : 1,
           }}
         >
-          <View
-            style={{
-              width: 44,
-              height: 44,
-              borderRadius: 22,
-              alignItems: 'center',
-              justifyContent: 'center',
-              backgroundColor: selected ? color.brand[500] : color.brand[50],
-            }}
-          >
-            <Pictogram name={meta.icon} size={26} color={selected ? color.white : color.brand[600]} />
-          </View>
+          {/* The class reads visually before a word is read [5.3]: the same
+              construction system that renders the assigned car (6B.5). */}
+          <VehicleRender bodyType={meta.body} view="hero" size={82} />
           <View style={{ flex: 1 }}>
             <T variant="body" weight="semibold" tone={selected ? 'deep' : 'ink'}>
               {meta.label} <T variant="label" tone="muted">· {tier.capacity} seats</T>
@@ -510,7 +596,7 @@ function TierRow({
   );
 }
 
-function ActiveRide({ navigation, ride, cancelRide, insets }: any) {
+function ActiveRide({ navigation, ride, cancelRide, insets, rematching }: any) {
   const { height: winH } = useWindowDimensions();
   const scheme = useColorScheme();
   const sheetRef = useRef<BottomSheet>(null);
@@ -734,7 +820,9 @@ function ActiveRide({ navigation, ride, cancelRide, insets }: any) {
             </View>
           ) : (
             <T variant="title">
-              {STATUS_LABEL[ride.status] ?? 'On the way'}
+              {ride.status === 'PENDING' && rematching
+                ? 'Your driver had to cancel — finding you another'
+                : STATUS_LABEL[ride.status] ?? 'On the way'}
               {fixStale ? ' · locating…' : legEta != null ? ` · ~${legEta} min` : ''}
             </T>
           )}
@@ -786,13 +874,19 @@ function ActiveRide({ navigation, ride, cancelRide, insets }: any) {
                       Match this plate before you get in.
                     </T>
                   </View>
+                  {/* Shape + tint before reading [6B.5]: the SAME render as the
+                      fare card and the map — a white Allion LOOKS like a white
+                      sedan from across the street. Real photo when we have it,
+                      the tinted body-type render otherwise. */}
                   {d.vehiclePhotoUrl ? (
                     <Image
                       source={{ uri: mediaUrl(d.vehiclePhotoUrl) ?? undefined }}
                       style={{ width: 72, height: 46, borderRadius: radius.md }}
                       contentFit="cover"
                     />
-                  ) : null}
+                  ) : (
+                    <VehicleRender bodyType={d.bodyType} colorHex={d.colorHex} view="hero" size={78} />
+                  )}
                 </View>
               ) : null}
               <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.md }}>
@@ -848,7 +942,16 @@ function ActiveRide({ navigation, ride, cancelRide, insets }: any) {
               </T>
             </View>
           ) : (
-            <SearchingCard startedAt={ride.placedAt ?? ride.createdAt} />
+            <>
+              {rematching ? (
+                // T18/S-55: SAME trip, zero re-entry — say so while the radar
+                // returns. The next assignment clears this automatically.
+                <T variant="caption" tone="muted" center style={{ marginTop: space.xs }}>
+                  Your trip is unchanged — we&apos;re asking the nearest available driver now.
+                </T>
+              ) : null}
+              <SearchingCard startedAt={ride.placedAt ?? ride.createdAt} />
+            </>
           )}
 
           {/* SOS — an active ride's most important control. Only while a driver
