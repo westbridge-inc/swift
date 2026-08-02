@@ -145,6 +145,18 @@ export class VerificationService {
       result = await this.kyc.verifyDocument({ userId, docType, fileUrl });
     }
 
+    // Enforcement ladder rung 2/3 (trial-integrity Part 4): a HELD account
+    // (velocity REVIEW_FIRST / fraud-tier hold) is never auto-approved — the
+    // document goes to a HUMAN with the identity panel open. Auto-reject
+    // stays: a bad document is a bad document.
+    if (result.status === 'approved') {
+      const { hasActiveHold } = await import('../integrity/enforcement');
+      const hold = await hasActiveHold(this.prisma, userId);
+      if (hold.held) {
+        result = { ...result, status: 'pending_manual' as const };
+      }
+    }
+
     const autoExpiryDays = AUTO_APPROVE_EXPIRY_DAYS[docType];
     const doc = await this.prisma.verificationDocument.create({
       data: {
@@ -213,7 +225,14 @@ export class VerificationService {
       throw new AppError(409, 'ALREADY_VERIFIED', 'Identity is already verified');
     }
 
-    const result = await this.kyc.verifyIdentity({ userId, idDocumentUrl, selfieUrl });
+    let result = await this.kyc.verifyIdentity({ userId, idDocumentUrl, selfieUrl });
+    // Rung 2/3: held accounts are never auto-approved (see submitDocument).
+    if (result.status === 'approved') {
+      const { hasActiveHold } = await import('../integrity/enforcement');
+      if ((await hasActiveHold(this.prisma, userId)).held) {
+        result = { ...result, status: 'pending_manual' as const };
+      }
+    }
 
     const doc = await this.prisma.verificationDocument.create({
       data: {
@@ -419,6 +438,17 @@ export class VerificationService {
     // onboarding screen initialise its selector and know whether to re-prompt.
     const vehicleType = roleKey === 'MOVER' ? await this.getMoverVehicleType(userId) : null;
 
+    // Trial-integrity Part 4: told BEFORE they commit — what activation will
+    // do for this human (copy #2/#3). Read-only preview: no side effects; the
+    // apps render `trial.message` verbatim when present. Vendor checklists are
+    // keyed by vendor TYPE; the trial role for all of them is VENDOR.
+    const { previewTrial } = await import('../integrity/enforcement');
+    const trialRole =
+      roleKey === 'MOVER'
+        ? (await this.prisma.driver.findUnique({ where: { userId }, select: { id: true } })) ? 'DRIVER' : 'RIDER'
+        : 'VENDOR';
+    const trial = await previewTrial(this.prisma, userId, trialRole, 'swift-default').catch(() => null);
+
     return {
       roleKey,
       trustLevel: user.trustLevel,
@@ -427,6 +457,7 @@ export class VerificationService {
       missing,
       vehicleType,
       roleVerified: missing.length === 0,
+      trial,
     };
   }
 

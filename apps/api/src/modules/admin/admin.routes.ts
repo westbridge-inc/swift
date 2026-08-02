@@ -2232,6 +2232,42 @@ export async function adminRoutes(app: FastifyInstance) {
     };
   });
 
+  /** Part 4 appeals queue — OPEN cases with the accused's identity attached,
+   *  oldest first (the 24h clock). Part 10's overturn rate rides along: >5%
+   *  is the false-positive alarm that pauses enforcement expansion. */
+  app.get('/integrity/appeals', { preHandler: [adminGuard] }, async () => {
+    const { appealOverturnRate } = await import('../integrity/enforcement');
+    const open = await app.prisma.enforcementAction.findMany({
+      where: { appeal: 'OPEN' },
+      orderBy: { createdAt: 'asc' },
+      take: 100,
+    });
+    const users = await app.prisma.user.findMany({
+      where: { id: { in: open.map((a) => a.accountId) } },
+      select: { id: true, phone: true, firstName: true, lastName: true },
+    });
+    const userById = new Map(users.map((u) => [u.id, u]));
+    return {
+      success: true,
+      data: {
+        appeals: open.map((a) => ({ ...a, user: userById.get(a.accountId) ?? null })),
+        overturnRate: await appealOverturnRate(app.prisma),
+      },
+    };
+  });
+
+  /** Resolve an appeal. Overturn lifts the hold AND grants the cluster a
+   *  FOUNDER_OVERRIDE exception, so the trial law honors the human next time. */
+  app.post<{ Params: { id: string } }>('/integrity/appeals/:id/resolve', { preHandler: [adminGuard] }, async (request) => {
+    const body = z.object({
+      outcome: z.enum(['OVERTURNED', 'UPHELD']),
+      note: z.string().trim().min(3).max(500),
+    }).parse(request.body ?? {});
+    const { resolveAppeal } = await import('../integrity/enforcement');
+    const resolved = await resolveAppeal(app.prisma, request.params.id, request.user.userId, body.outcome, body.note);
+    return { success: true, data: { id: resolved.id, appeal: resolved.appeal } };
+  });
+
   /** §3.5 — the founder issues a deliberate, logged exception (multi-location
    *  vendor trial-per-location, household, override). The trial law honors
    *  live exceptions; appeals overturn through this same mechanism. */
