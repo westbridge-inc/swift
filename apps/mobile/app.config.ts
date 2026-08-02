@@ -82,6 +82,7 @@ const config: ExpoConfig = {
     'react-native-maps',
     'expo-image',
     'expo-secure-store',
+    'expo-video',
     [
       'expo-location',
       {

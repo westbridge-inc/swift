@@ -39,6 +39,7 @@
     "expo-secure-store": "~56.0.4",
     "expo-splash-screen": "~56.0.10",
     "expo-task-manager": "~56.0.21",
+    "expo-video": "~56.1.4",
     "expo-web-browser": "^57.0.0",
     "libphonenumber-js": "^1.13.8",
     "nativewind": "^4.2.5",
