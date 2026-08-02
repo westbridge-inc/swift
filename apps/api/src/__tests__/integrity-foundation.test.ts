@@ -12,6 +12,7 @@ import {
 import { IdentityService } from '../modules/integrity/identity.service';
 import { TrialEntitlementService } from '../modules/integrity/trial-entitlement.service';
 import { SubscriptionService } from '../modules/subscription/subscription.service';
+import { runIdentityBackfill } from '../modules/integrity/backfill';
 
 // Trial-integrity foundation (spec Parts 2–3, test plan Part 11). The heart:
 // the trial law — ONE trial per human per role per tenant — held by the
@@ -248,6 +249,35 @@ describe('the trial law (spec §3 — scenarios A, E, G, I + churn)', () => {
     const decision = await trialLaw.decide(h.id, 'VENDOR', 'swift-default');
     expect(decision.grant).toBe(false);
     expect(decision.grant === false && decision.reason).toBe('TRIAL_CONSUMED');
+  });
+
+  it('Phase 2 backfill: existing same-plate drivers surface as an evidence cluster — no enforcement', async () => {
+    // Two accounts that predate the engine, sharing one vehicle plate.
+    const h1 = await makeUser();
+    const h2 = await makeUser();
+    const plate = `PDD ${Math.floor(1000 + Math.random() * 8999)}`;
+    for (const h of [h1, h2]) {
+      await prisma.driver.create({
+        data: {
+          userId: h.id, vehicleMake: 'Toyota', vehicleModel: 'Spacio', vehicleYear: 2016,
+          vehicleColor: 'Blue', licensePlate: plate, driverLicenseUrl: 'x', vehicleInsuranceUrl: 'x',
+        },
+      });
+    }
+
+    const report = await runIdentityBackfill(prisma);
+    expect(report.captured).toBeGreaterThan(0);
+    const c1 = await identity.resolveCluster(h1.id);
+    const c2 = await identity.resolveCluster(h2.id);
+    expect(c1).toBe(c2); // the plate united them
+    const mine = report.clusters.find((c) => c.clusterId === c1);
+    expect(mine).toBeTruthy();
+    expect(mine!.members.map((m) => m.accountId).sort()).toEqual([h1.id, h2.id].sort());
+    expect(JSON.stringify(mine!.evidence)).toContain('PLATE');
+    // Evidence first, decisions second: backfill wrote NO enforcement rows.
+    expect(await prisma.enforcementAction.count({ where: { accountId: { in: [h1.id, h2.id] } } })).toBe(0);
+    // Cleanup drivers created here (users are cleaned in afterAll).
+    await prisma.driver.deleteMany({ where: { userId: { in: [h1.id, h2.id] } } });
   });
 
   it('F: a founder ExceptionGrant authorizes the additional trial (multi-location carve-out)', async () => {
