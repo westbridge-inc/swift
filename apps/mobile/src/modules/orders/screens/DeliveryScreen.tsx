@@ -3,17 +3,27 @@ import React, { useEffect, useRef, useState } from 'react';
 import { Dimensions, Linking, Pressable, ScrollView, View } from 'react-native';
 import MapView, { Marker, Polyline } from 'react-native-maps';
 import { Image } from 'expo-image';
+import Svg, { Circle } from 'react-native-svg';
+import Animated, {
+  Easing,
+  useAnimatedProps,
+  useSharedValue,
+  withRepeat,
+  withSequence,
+  withTiming,
+} from 'react-native-reanimated';
 import { Feather } from '@expo/vector-icons';
 import { useNavigation, useRoute } from '@react-navigation/native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { color, radius, space } from '@swift/ui';
+import { color, motion, radius, space } from '@swift/ui';
 import { useMutation } from '@tanstack/react-query';
 import { useOrder, useTipOrder, useDecideSubstitution } from '../../../hooks/customer';
 import { toast } from '../../../components/ui/toast';
 import { customerApi, courierApi } from '../../../services/api';
 import { connectSocket, getSocket, subscribeToOrder } from '../../../services/socket';
 import { money } from '../../../lib/money';
-import { CircleChip, ErrorState, IconChip, LoadingBlock, PillButton, PopupCard, T } from '../../../kit';
+import { haptic } from '../../../lib/haptics';
+import { CircleChip, ErrorState, IconChip, InfoRow, LoadingBlock, PillButton, PopupCard, T } from '../../../kit';
 
 const { height: SCREEN_H } = Dimensions.get('window');
 const GUTTER = space['2xl'];
@@ -65,6 +75,27 @@ function stageFor(status?: string): number {
   }
 }
 
+/** Opacity-only pulse for the CURRENT stage step (design-100×: gentle, once
+ *  per cycle, nothing else moves). */
+function PulseIcon({ active, children }: { active: boolean; children: React.ReactNode }) {
+  const o = useSharedValue(1);
+  useEffect(() => {
+    if (active) {
+      o.value = withRepeat(
+        withSequence(
+          withTiming(0.5, { duration: motion.duration.gentle * 2 }),
+          withTiming(1, { duration: motion.duration.gentle * 2 }),
+        ),
+        -1,
+      );
+    } else {
+      o.value = withTiming(1, { duration: motion.duration.fast });
+    }
+  }, [active, o]);
+  const style = { opacity: o };
+  return <Animated.View style={style}>{children}</Animated.View>;
+}
+
 function StageBar({ stage, fulfillment }: { stage: number; fulfillment?: string }) {
   return (
     <View style={{ flexDirection: 'row', alignItems: 'center' }}>
@@ -86,20 +117,22 @@ function StageBar({ stage, fulfillment }: { stage: number; fulfillment?: string 
               />
             ) : null}
             <View style={{ alignItems: 'center', gap: 4 }}>
-              <View
-                style={{
-                  width: 34,
-                  height: 34,
-                  borderRadius: 17,
-                  alignItems: 'center',
-                  justifyContent: 'center',
-                  backgroundColor: done || current ? color.brand[50] : color.surface.subtle,
-                  borderWidth: current ? 1.5 : 0,
-                  borderColor: color.brand[500],
-                }}
-              >
-                <Feather name={s.icon} size={15} color={tint} />
-              </View>
+              <PulseIcon active={current}>
+                <View
+                  style={{
+                    width: 34,
+                    height: 34,
+                    borderRadius: 17,
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    backgroundColor: done || current ? color.brand[50] : color.surface.subtle,
+                    borderWidth: current ? 1.5 : 0,
+                    borderColor: color.brand[500],
+                  }}
+                >
+                  <Feather name={s.icon} size={15} color={tint} />
+                </View>
+              </PulseIcon>
               <T variant="caption" tone={done || current ? 'deep' : 'faint'}>
                 {s.label}
               </T>
@@ -116,47 +149,97 @@ function StageBar({ stage, fulfillment }: { stage: number; fulfillment?: string 
 // {lat,lng}; driver:location uses {latitude,longitude} — different keys!) with
 // a 15s poll as fallback; order:status_changed refetches.
 
-/** Free-cancel countdown while the order is held (hidden from the store). */
-function HeldBanner({ holdExpiresAt, vendorName, onExpire }: { holdExpiresAt?: string | null; vendorName?: string; onExpire: () => void }) {
+const AnimatedCircle = Animated.createAnimatedComponent(Circle);
+const RING_R = 45;
+const RING_C = 2 * Math.PI * RING_R;
+
+/** THE HOLD RING (design-100× Part 5 moment 1): Swift's free-cancel window as
+ *  a 96dp draining ring — brand stroke on a brand track, mm:ss in displayXl
+ *  tabular at its center, server-timestamped, one linear sweep per second.
+ *  At 0:30 the ring, digits and copy shift to warning and the warn haptic
+ *  fires once. The ticking is information, not decoration. No fake movement:
+ *  when the window ends the order refetches and the timeline takes over. */
+export function HoldRing({
+  holdExpiresAt,
+  createdAt,
+  vendorName,
+  onExpire,
+}: {
+  holdExpiresAt?: string | null;
+  createdAt?: string | null;
+  vendorName?: string;
+  onExpire: () => void;
+}) {
   const [, tick] = useState(0);
+  const warned = useRef(false);
   const expiresMs = holdExpiresAt ? new Date(holdExpiresAt).getTime() : 0;
-  const remaining = Math.max(0, Math.floor((expiresMs - Date.now()) / 1000));
-  const active = !!holdExpiresAt && remaining > 0;
+  const totalMs = Math.max(1000, expiresMs - (createdAt ? new Date(createdAt).getTime() : expiresMs - 300_000));
+  const remainingMs = Math.max(0, expiresMs - Date.now());
+  const remaining = Math.floor(remainingMs / 1000);
+  const active = !!holdExpiresAt && remainingMs > 0;
+  const warn = active && remaining <= 30;
+
+  const progress = useSharedValue(Math.min(1, remainingMs / totalMs));
 
   useEffect(() => {
     if (!active) return;
     const t = setInterval(() => {
       tick((n) => n + 1);
-      if (new Date(holdExpiresAt!).getTime() <= Date.now()) onExpire();
+      const rem = new Date(holdExpiresAt!).getTime() - Date.now();
+      progress.value = withTiming(Math.max(0, Math.min(1, rem / totalMs)), {
+        duration: 1000,
+        easing: Easing.linear,
+      });
+      if (rem <= 0) onExpire();
     }, 1000);
     return () => clearInterval(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [active, holdExpiresAt]);
 
+  useEffect(() => {
+    if (warn && !warned.current) {
+      warned.current = true;
+      haptic.warn();
+    }
+  }, [warn]);
+
+  const ringProps = useAnimatedProps(() => ({
+    strokeDashoffset: RING_C * (1 - progress.value),
+  }));
+
   if (!active) return null;
   const mm = Math.floor(remaining / 60);
   const ss = remaining % 60;
+  const hue = warn ? color.warning : color.brand[500];
+
   return (
-    <View
-      style={{
-        flexDirection: 'row',
-        alignItems: 'center',
-        gap: space.md,
-        backgroundColor: color.brand[50],
-        borderRadius: radius.lg,
-        padding: space.md,
-        marginBottom: space.md,
-      }}
-    >
-      <Feather name="clock" size={18} color={color.brand[600]} />
-      <View style={{ flex: 1 }}>
-        <T variant="label" weight="semibold">
-          {vendorName ?? 'The store'} gets your order in {mm}:{String(ss).padStart(2, '0')}
-        </T>
-        <T variant="caption" tone="muted" style={{ marginTop: 1 }}>
-          Changed your mind? Cancelling is free until then.
+    <View style={{ alignItems: 'center', paddingVertical: space.md, marginBottom: space.md }}>
+      <View style={{ width: 96, height: 96, alignItems: 'center', justifyContent: 'center' }}>
+        <Svg width={96} height={96} viewBox="0 0 96 96" style={{ position: 'absolute' }}>
+          <Circle cx={48} cy={48} r={RING_R} stroke={color.brand[100]} strokeWidth={6} fill="none" />
+          <AnimatedCircle
+            cx={48}
+            cy={48}
+            r={RING_R}
+            stroke={hue}
+            strokeWidth={6}
+            fill="none"
+            strokeLinecap="round"
+            strokeDasharray={`${RING_C}`}
+            animatedProps={ringProps}
+            transform="rotate(-90 48 48)"
+          />
+        </Svg>
+        <T variant="displayXl" style={{ color: hue }}>
+          {mm}:{String(ss).padStart(2, '0')}
         </T>
       </View>
+      <T variant="bodyStrong" center style={{ marginTop: space.md }}>
+        Your order goes to {vendorName ?? 'the store'} when the ring closes.
+      </T>
+      <T variant="caption" tone={warn ? 'warning' : 'muted'} center style={{ marginTop: 2 }}>
+        Changed your mind? Cancelling is free until then.
+      </T>
     </View>
   );
 }
@@ -223,7 +306,10 @@ export function DeliveryScreen() {
   useEffect(() => {
     const status = o?.status;
     if (!status) return;
-    if (prevStatus.current && prevStatus.current !== 'DELIVERED' && status === 'DELIVERED') setArrived(true);
+    if (prevStatus.current && prevStatus.current !== 'DELIVERED' && status === 'DELIVERED') {
+      haptic.success();
+      setArrived(true);
+    }
     prevStatus.current = status;
   }, [o?.status]);
 
@@ -368,7 +454,7 @@ export function DeliveryScreen() {
         <ScrollView contentContainerStyle={{ padding: GUTTER, paddingBottom: insets.bottom + space['2xl'] }}>
           {/* LIFECYCLE_V2 hold — the store hasn't been told yet; cancelling is
               free until the countdown ends. Server clock decides; this is UI. */}
-          <HeldBanner holdExpiresAt={o.holdExpiresAt} vendorName={o.vendor?.name} onExpire={() => order.refetch()} />
+          <HoldRing holdExpiresAt={o.holdExpiresAt} createdAt={o.createdAt} vendorName={o.vendor?.name} onExpire={() => order.refetch()} />
 
           {/* Out-of-stock substitutions (§5.3) — the store asked; you decide. */}
           {items
@@ -487,7 +573,7 @@ export function DeliveryScreen() {
                 marginTop: rider ? space.xl : 0,
                 padding: space.lg,
                 borderRadius: radius.md,
-                backgroundColor: '#FBEAEA',
+                backgroundColor: color.soft.danger,
               }}
             >
               <Feather name="x-circle" size={18} color={color.error} />
@@ -498,11 +584,11 @@ export function DeliveryScreen() {
           ) : (
             <>
               <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.sm, marginTop: rider ? space.xl : 0 }}>
-                <T variant="heading">Your Delivery Time</T>
+                <T variant="heading">Delivery time</T>
                 {o.isExpress ? (
-                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: 3, borderRadius: 9999, paddingHorizontal: 8, paddingVertical: 3, backgroundColor: '#FDF1DC' }}>
-                    <Feather name="zap" size={11} color={color.warning} />
-                    <T variant="caption" weight="bold" style={{ color: '#8A5A00' }}>
+                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: 3, borderRadius: radius.full, paddingHorizontal: space.sm, paddingVertical: 3, backgroundColor: color.brand[50] }}>
+                    <Feather name="zap" size={11} color={color.brand[600]} />
+                    <T variant="caption" weight="bold" tone="deep">
                       Express
                     </T>
                   </View>
@@ -540,10 +626,10 @@ export function DeliveryScreen() {
                 marginTop: space.xl,
               }}
             >
-              <T variant="caption" weight="bold" tone="muted" style={{ letterSpacing: 1 }}>
-                PICKUP CODE — SHOW AT THE COUNTER
+              <T variant="micro" tone="muted">
+                Pickup code — show at the counter
               </T>
-              <T variant="display" weight="bold" tone="brand" style={{ marginTop: 4, letterSpacing: 6 }}>
+              <T variant="displayXl" tone="brand" style={{ marginTop: 4, letterSpacing: 6 }}>
                 {o.pickupCode}
               </T>
             </View>
@@ -555,24 +641,14 @@ export function DeliveryScreen() {
           </T>
           <View style={{ marginTop: space.sm }}>
             {items.map((it: any, i: number) => (
-              <View key={it.id ?? i} style={{ flexDirection: 'row', alignItems: 'center', paddingVertical: 6 }}>
-                <T variant="body" tone="muted" style={{ flex: 1 }} numberOfLines={1}>
-                  {it.quantity} {it.item?.name ?? it.name}
-                </T>
-                <T variant="body" weight="semibold">
-                  {money(it.totalPrice ?? it.lineTotal ?? Number(it.unitPrice ?? 0) * (it.quantity ?? 1))}
-                </T>
-              </View>
+              <InfoRow
+                key={it.id ?? i}
+                label={`${it.quantity} ${it.item?.name ?? it.name}`}
+                value={money(it.totalPrice ?? it.lineTotal ?? Number(it.unitPrice ?? 0) * (it.quantity ?? 1))}
+              />
             ))}
             <View style={{ height: 1, backgroundColor: color.border.subtle, marginVertical: space.sm }} />
-            <View style={{ flexDirection: 'row', alignItems: 'center' }}>
-              <T variant="body" weight="semibold" style={{ flex: 1 }}>
-                Total
-              </T>
-              <T variant="body" weight="bold" tone="brand">
-                {money(o.totalAmount ?? o.total)}
-              </T>
-            </View>
+            <InfoRow label="Total" value={money(o.totalAmount ?? o.total)} strong />
           </View>
 
           {/* Post-delivery tip — 100% to the rider. Shown once, after delivery,
@@ -682,7 +758,7 @@ export function DeliveryScreen() {
           <Feather name="check" size={30} color={color.white} />
         </View>
         <T variant="heading" center style={{ marginTop: space.md }}>
-          Hooray! Your order has arrived
+          Your order has arrived
         </T>
         <View style={{ alignSelf: 'stretch', gap: space.md, marginTop: space.xl }}>
           <PillButton
