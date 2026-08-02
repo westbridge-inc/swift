@@ -187,7 +187,7 @@ export function CourierScreen({ navigation }: any) {
           <Marker coordinate={pickupLL} anchor={{ x: 0.5, y: 0.5 }} title="From">
             <View
               style={[
-                { width: 16, height: 16, borderRadius: 8, backgroundColor: color.text.primary, borderWidth: 3, borderColor: '#fff' },
+                { width: 16, height: 16, borderRadius: 8, backgroundColor: color.text.primary, borderWidth: 3, borderColor: color.white },
                 cardShadow,
               ]}
             />

@@ -70,7 +70,7 @@ export function RoutePair({
   /** Render on the earner app's dark cards (dashboard plan Phase B). */
   dark?: boolean;
 }) {
-  const inkStyle = dark ? { color: '#FFFFFF' } : undefined;
+  const inkStyle = dark ? { color: color.white } : undefined;
   const mutedStyle = dark ? { color: 'rgba(255,255,255,0.55)' } : undefined;
   return (
     <View>

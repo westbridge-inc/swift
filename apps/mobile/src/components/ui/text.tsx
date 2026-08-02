@@ -3,7 +3,7 @@ import { cn } from './cn';
 
 type Props = TextProps & { className?: string };
 
-/** Body text — Inter, neutral primary by default. */
+/** Body text — Hanken Grotesk, neutral primary by default. */
 export function Text({ className, ...props }: Props) {
   return <RNText className={cn('font-body text-base text-text-primary', className)} {...props} />;
 }
@@ -16,7 +16,7 @@ const HEADING_SIZE: Record<NonNullable<HeadingProps['size']>, string> = {
   '3xl': 'text-3xl',
 };
 
-/** Display heading — Space Grotesk, bold. */
+/** Display heading — Bricolage Grotesque, bold. */
 export function Heading({ className, size = 'xl', ...props }: HeadingProps) {
   return <RNText className={cn('font-display font-bold text-text-primary', HEADING_SIZE[size], className)} {...props} />;
 }

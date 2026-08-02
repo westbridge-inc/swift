@@ -41,7 +41,7 @@ export function AdvertiserHomeScreen() {
   return (
     <View style={{ flex: 1, backgroundColor: color.surface.subtle }}>
       <View style={{ backgroundColor: color.brand[500], paddingTop: insets.top + space.sm, paddingBottom: space.xl, paddingHorizontal: space['2xl'] }}>
-        <T variant="title" style={{ color: '#FFFFFF' }}>
+        <T variant="title" style={{ color: color.white }}>
           {advertiser?.companyName ?? 'Your ads'}
         </T>
         <T variant="caption" style={{ color: 'rgba(255,255,255,0.85)', marginTop: 2 }}>

@@ -87,9 +87,9 @@ const styles = StyleSheet.create({
     gap: space.sm,
     alignItems: 'flex-start',
   },
-  headline: { color: '#FFFFFF' },
+  headline: { color: color.white },
   cta: {
-    backgroundColor: '#FFFFFF',
+    backgroundColor: color.white,
     borderRadius: 999,
     paddingHorizontal: space.lg,
     paddingVertical: 6,

@@ -317,7 +317,7 @@ export function ActiveJobScreen({ navigation }: any) {
             {cust ? (
               <DCard style={{ flexDirection: 'row', alignItems: 'center', marginBottom: space.md }}>
                 <View style={{ width: 44, height: 44, borderRadius: 22, alignItems: 'center', justifyContent: 'center', backgroundColor: dk.accent }}>
-                  <T variant="body" weight="bold" style={{ color: '#fff' }}>
+                  <T variant="body" weight="bold" style={{ color: color.white }}>
                     {(cust.firstName ?? 'C').charAt(0).toUpperCase()}
                   </T>
                 </View>

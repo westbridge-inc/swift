@@ -16,6 +16,10 @@ export const swiftTailwindTheme = {
     success: color.success,
     error: color.error,
     warning: color.warning,
+    info: color.info,
+    star: color.star,
+    soft: color.soft,
+    skeleton: color.skeleton,
   },
   fontFamily: {
     display: [font.display, 'System', 'sans-serif'],
@@ -23,6 +27,7 @@ export const swiftTailwindTheme = {
     sans: [font.body, 'System', 'sans-serif'],
   },
   fontSize: {
+    micro: [`${fontSize.micro}px`, `${lineHeight.micro}px`],
     xs: [`${fontSize.xs}px`, `${lineHeight.xs}px`],
     sm: [`${fontSize.sm}px`, `${lineHeight.sm}px`],
     base: [`${fontSize.base}px`, `${lineHeight.base}px`],
@@ -30,6 +35,7 @@ export const swiftTailwindTheme = {
     xl: [`${fontSize.xl}px`, `${lineHeight.xl}px`],
     '2xl': [`${fontSize['2xl']}px`, `${lineHeight['2xl']}px`],
     '3xl': [`${fontSize['3xl']}px`, `${lineHeight['3xl']}px`],
+    '4xl': [`${fontSize['4xl']}px`, `${lineHeight['4xl']}px`],
   },
   borderRadius: {
     sm: `${radius.sm}px`,

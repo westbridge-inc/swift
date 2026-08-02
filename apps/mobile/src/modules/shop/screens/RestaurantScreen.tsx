@@ -473,7 +473,7 @@ export function RestaurantScreen() {
                   onChangeText={setStoreQuery}
                   placeholder={`Search ${v.name}…`}
                   placeholderTextColor={color.text.muted}
-                  style={{ flex: 1, fontFamily: 'InterRegular', fontSize: 14, color: color.text.primary }}
+                  style={{ flex: 1, fontFamily: 'Hanken', fontSize: 14, color: color.text.primary }}
                 />
                 {storeQuery ? (
                   <Pressable onPress={() => setStoreQuery('')} hitSlop={8}>

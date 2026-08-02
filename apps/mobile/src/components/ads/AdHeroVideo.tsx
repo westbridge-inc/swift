@@ -134,7 +134,7 @@ export function AdHeroVideo({ item, trackable }: { item: AdServeItem; trackable:
             style={styles.mute}
             hitSlop={10}
           >
-            <Feather name={muted ? 'volume-x' : 'volume-2'} size={14} color="#FFFFFF" />
+            <Feather name={muted ? 'volume-x' : 'volume-2'} size={14} color={color.white} />
           </Pressable>
         ) : null}
         {useVideo && remaining !== null ? (
@@ -235,13 +235,13 @@ const styles = StyleSheet.create({
     paddingHorizontal: 8,
     paddingVertical: 2,
   },
-  remainingText: { color: '#FFFFFF' },
+  remainingText: { color: color.white },
   copy: {
     padding: 16,
     paddingBottom: 12,
   },
   headline: {
-    color: '#FFFFFF',
+    color: color.white,
     textShadowColor: 'rgba(0,0,0,0.6)',
     textShadowRadius: 6,
     textShadowOffset: { width: 0, height: 1 },

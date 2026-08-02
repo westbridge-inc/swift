@@ -101,7 +101,7 @@ export function ChatScreen({ route, navigation }: any) {
             className="h-10 w-10 items-center justify-center rounded-full"
             style={{ backgroundColor: text.trim().length === 0 ? color.border.subtle : color.brand[500] }}
           >
-            <Feather name="send" size={18} color="#fff" />
+            <Feather name="send" size={18} color={color.white} />
           </PressableScale>
         </View>
       </KeyboardAvoidingView>

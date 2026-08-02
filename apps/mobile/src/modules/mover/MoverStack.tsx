@@ -65,8 +65,8 @@ function MoverPreviewBanner() {
         style={{ flexDirection: 'row', alignItems: 'center', gap: 6, backgroundColor: color.brand[500], paddingHorizontal: 14, paddingVertical: 6, borderRadius: 999 }}
         hitSlop={10}
       >
-        <Feather name="eye" size={13} color="#fff" />
-        <T variant="caption" style={{ color: '#fff', fontWeight: '700' }}>
+        <Feather name="eye" size={13} color={color.white} />
+        <T variant="caption" style={{ color: color.white, fontWeight: '700' }}>
           Preview — tap to exit
         </T>
       </Pressable>
