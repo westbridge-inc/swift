@@ -33,7 +33,7 @@ const rateSchema = z.object({ score: z.number().int().min(1).max(5), comment: z.
 
 export async function servicesRoutes(app: FastifyInstance) {
   const auth = { preHandler: [app.authenticate] };
-  const ratingService = new RatingService(app.prisma);
+  const ratingService = new RatingService(app.prisma, app.io);
   const notifications = new NotificationService(app.prisma, app.io);
 
   async function jobForUser(jobId: string, userId: string) {

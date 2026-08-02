@@ -134,8 +134,10 @@ const rateOrderSchema = z.object({
   vendorTags: z.array(z.string().max(40)).max(20).optional(),
   riderScore: z.number().int().min(1).max(5).optional(),
   riderComment: z.string().max(1000).optional(),
+  riderTags: z.array(z.string().max(40)).max(20).optional(),
   driverScore: z.number().int().min(1).max(5).optional(),
   driverComment: z.string().max(1000).optional(),
+  driverTags: z.array(z.string().max(40)).max(20).optional(),
 });
 
 const notificationsQuerySchema = z.object({
@@ -431,7 +433,7 @@ export async function customerRoutes(app: FastifyInstance) {
     (point, floatRequired) => dispatchForAvailability.getAvailability('RIDER', point, floatRequired),
   );
   const picking = new PickingService(app.prisma, app.io);
-  const ratingService = new RatingService(app.prisma);
+  const ratingService = new RatingService(app.prisma, app.io);
   const notificationService = new NotificationService(app.prisma, app.io);
 
   // Auth required by default (safe); browsing is public so guests can look
