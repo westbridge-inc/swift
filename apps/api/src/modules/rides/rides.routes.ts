@@ -1,14 +1,13 @@
 import type { FastifyInstance } from 'fastify';
 import { RideClass } from '@prisma/client';
 import { z } from 'zod';
-import { randomInt } from 'node:crypto';
 import { FareService } from './fare.service';
+import { assertRideGates, assertL2, createRideRequest } from './rides.service';
+import { getSupplySnapshot, queueStatusFor, RIDE_QUEUE_TTL_MIN } from './queue.service';
 import { OrderService } from '../order/order.service';
 import { SosService } from '../safety/sos.service';
 import { makeDispatchService } from '../dispatch/dispatch.service';
 import { log } from '../../utils/logger';
-import { orderingRestriction } from '../cash/cash-rules.service';
-import { generateOrderNumber } from '../../utils/markup';
 import { AppError, NotFoundError } from '../../utils/errors';
 import { tenantCacheKey } from '../../utils/tenant-cache';
 
@@ -100,151 +99,12 @@ export async function ridesRoutes(app: FastifyInstance) {
     return { success: true, data: estimate };
   });
 
-  /** POST /request — create the ride at the quoted fare and start dispatch. */
+  /** POST /request — create the ride at the quoted fare and start dispatch.
+   *  The core lives in rides.service createRideRequest (one source of truth
+   *  with the 5.5B queue's auto-request); this handler is HTTP only. */
   app.post('/request', auth, async (request, reply) => {
     const body = requestRideSchema.parse(request.body);
-    const user = await app.prisma.user.findUniqueOrThrow({
-      where: { id: request.user.userId },
-      select: { id: true, countryCode: true, trustLevel: true, selfieCapturedAt: true },
-    });
-
-    const active = await app.prisma.order.findFirst({
-      where: {
-        customerId: user.id,
-        orderType: 'TAXI',
-        status: { in: ['PENDING', 'DRIVER_ASSIGNED', 'DRIVER_EN_ROUTE', 'DRIVER_ARRIVED', 'RIDE_IN_PROGRESS'] },
-      },
-      select: { id: true },
-    });
-    if (active) {
-      throw new AppError(409, 'RIDE_IN_PROGRESS', 'You already have an active ride');
-    }
-
-    // Strike consequences apply to rides exactly as to deliveries
-    const restriction = await orderingRestriction(app.prisma, user.id);
-    if (restriction === 'banned') {
-      throw new AppError(403, 'ACCOUNT_RESTRICTED', 'Rides are disabled on this account after repeated failed payments. Contact support.');
-    }
-
-    // Hard pre-check (availability spec §2.1, flag-gated): when the same query
-    // dispatch would ping finds NOBODY, say so before taking the request. The
-    // client shows Notify-me; "Try anyway" stays honored unless the market
-    // config forbids it (TAXI_ALLOW_REQUEST_ON_NONE, spec default TRUE — some
-    // drivers come online mid-search).
-    if (process.env['DISPATCH_AVAILABILITY'] === '1' && process.env['TAXI_ALLOW_REQUEST_ON_NONE'] === '0') {
-      const supply = await dispatch.getAvailability('DRIVER', body.pickup);
-      if (supply.level === 'NONE') {
-        throw new AppError(
-          409,
-          'NO_DRIVERS_NEARBY',
-          "No drivers are available near you right now — we're sorry. We'll ping you the moment one comes online.",
-        );
-      }
-    }
-    if (restriction === 'restricted') {
-      throw new AppError(403, 'STRIKE_RESTRICTED', 'After repeated failed payments, rides require ID verification. Verify your identity to continue.');
-    }
-
-    // Universal signup selfie (master plan §3): the driver sees who they are
-    // picking up, so a live profile photo is required before booking rides.
-    if (!user.selfieCapturedAt) {
-      throw new AppError(403, 'SELFIE_REQUIRED', 'Add your profile photo before booking rides — your driver sees it when they accept.');
-    }
-
-    const tiered = await fareService.estimateTiers(body.pickup, body.dropoff, user.countryCode);
-    const tier = tiered.tiers.find((t) => t.rideClass === body.rideClass);
-    if (!tier) {
-      throw new AppError(400, 'INVALID_RIDE_CLASS', 'That ride tier is not available.');
-    }
-
-    // A tier can't seat more passengers than its vehicles hold (XL = 6, others = 4)
-    if (body.passengerCount > tier.capacity) {
-      throw new AppError(400, 'TOO_MANY_PASSENGERS',
-        `${body.rideClass} seats up to ${tier.capacity}. Choose a larger ride for ${body.passengerCount}.`,
-        { capacity: tier.capacity, passengerCount: body.passengerCount });
-    }
-
-    const estimate = {
-      fare: tier.fare,
-      currencyCode: tiered.currencyCode,
-      distanceKm: tiered.distanceKm,
-      durationMin: tiered.durationMin,
-      source: tier.source,
-    };
-
-    // Master plan §5: a rider reaches Level 2 BEFORE their first taxi ride —
-    // getting into a stranger's car is the highest-trust action on Swift.
-    // This supersedes the old fare-threshold gate (every ride now needs L2).
-    if (user.trustLevel === 'L1') {
-      throw new AppError(403, 'ID_VERIFICATION_REQUIRED',
-        'Rides need a one-time ID verification first — it takes a minute in the app and covers every future ride.',
-        { reason: 'first_ride_l2' });
-    }
-
-    const today = new Date();
-    today.setHours(0, 0, 0, 0);
-    const todayCount = await app.prisma.order.count({ where: { placedAt: { gte: today } } });
-
-    // PIN is verified by the driver at pickup (mandatory for taxi)
-    // 6-digit identity PIN from a CSPRNG (not Math.random) — verified by the
-    // driver and attempt-capped (driver.routes MAX_PIN_ATTEMPTS).
-    const ridePin = String(randomInt(100000, 1000000));
-
-    const order = await app.prisma.order.create({
-      data: {
-        orderNumber: generateOrderNumber(todayCount + 1),
-        orderType: 'TAXI',
-        customerId: user.id,
-        status: 'PENDING',
-        pickupAddress: body.pickupAddress,
-        pickupLat: body.pickup.lat,
-        pickupLng: body.pickup.lng,
-        deliveryAddress: body.dropoffAddress,
-        deliveryLat: body.dropoff.lat,
-        deliveryLng: body.dropoff.lng,
-        taxiPickupAddress: body.pickupAddress,
-        taxiDropoffAddress: body.dropoffAddress,
-        taxiPassengerCount: body.passengerCount,
-        rideClass: body.rideClass,
-        taxiDistance: estimate.distanceKm,
-        taxiDuration: estimate.durationMin,
-        taxiFareTotal: estimate.fare,
-        subtotalBase: estimate.fare,
-        subtotalMarkup: 0,
-        subtotalCustomer: estimate.fare,
-        deliveryFee: 0,
-        totalAmount: estimate.fare,
-        paymentMethod: 'CASH',
-        ridePin,
-        statusHistory: {
-          create: { status: 'PENDING', changedBy: user.id, note: `Ride requested — fixed fare $${estimate.fare}` },
-        },
-      },
-    });
-
-    // The customer re-entered the funnel and got a ride — any pending "notify me
-    // when drivers are back" watch is now obsolete. Clear it so the 2-min supply
-    // scan can't push "Drivers are back!" while they're already in a ride.
-    // Best-effort: a watch-clear hiccup must never fail the ride request.
-    await app.prisma.supplyWatch
-      .deleteMany({ where: { customerId: user.id, pool: 'DRIVER', notifiedAt: null } })
-      .catch(() => {});
-
-    // Shared dispatch engine, driver pool — same cascade, same atomicity.
-    // SWIFT-AUD-D6-08: enqueue the first-pass dispatch instead of running it
-    // inline. It does external ETA round-trips that would otherwise pin this
-    // request handler (and a DB connection) open under a hail storm; the client
-    // listens for the dispatch:offer socket event either way. Fall back to inline
-    // when no queue is up (tests / degraded boot) so behaviour is unchanged there.
-    if (app.dispatchQueue) {
-      await app.dispatchQueue.add('dispatch-order', { orderId: order.id }, {
-        priority: 5,
-        removeOnComplete: 100,
-        removeOnFail: 50,
-      });
-    } else {
-      await dispatch.dispatchOrder(order.id);
-    }
+    const { order, estimate, ridePin } = await createRideRequest(app, fareService, dispatch, request.user.userId, body);
 
     reply.code(201);
     return {
@@ -267,6 +127,88 @@ export async function ridesRoutes(app: FastifyInstance) {
         message: 'Looking for a driver near you…',
       },
     };
+  });
+
+  // -------------------------------------------------------------------------
+  // The 5.5B queue (rides spec): a supply gap is a service, not an apology.
+  // Join stores the trip; the 2-min scan auto-requests the head when a driver
+  // frees up; TTL expiry pushes a re-request deep link. Additive-only.
+  // -------------------------------------------------------------------------
+
+  /** POST /queue/join — enter the waitlist with the full trip, gates mirrored
+   *  from the request path (no availability pre-check: the queue exists FOR
+   *  the no-supply case). Replaces any prior WAITING entry (newest trip wins,
+   *  same semantic as the supply watch). */
+  app.post('/queue/join', auth, async (request, reply) => {
+    const body = requestRideSchema.parse(request.body);
+    const user = await assertRideGates(app, request.user.userId);
+    assertL2(user);
+
+    const ttlMin = RIDE_QUEUE_TTL_MIN();
+    await app.prisma.rideQueueEntry.updateMany({
+      where: { customerId: user.id, status: 'WAITING' },
+      data: { status: 'LEFT' },
+    });
+    const entry = await app.prisma.rideQueueEntry.create({
+      data: {
+        customerId: user.id,
+        pickupLat: body.pickup.lat,
+        pickupLng: body.pickup.lng,
+        pickupAddress: body.pickupAddress,
+        dropoffLat: body.dropoff.lat,
+        dropoffLng: body.dropoff.lng,
+        dropoffAddress: body.dropoffAddress,
+        rideClass: body.rideClass,
+        passengerCount: body.passengerCount,
+        expiresAt: new Date(Date.now() + ttlMin * 60_000),
+      },
+    });
+
+    // Joining the queue supersedes a bare notify-me watch (the queue IS the
+    // richer version of it). Best-effort, mirrors the request path's cleanup.
+    await app.prisma.supplyWatch
+      .deleteMany({ where: { customerId: user.id, pool: 'DRIVER', notifiedAt: null } })
+      .catch(() => {});
+
+    reply.code(201);
+    return { success: true, data: await queueStatusFor(app.prisma, dispatch, entry) };
+  });
+
+  /** POST /queue/leave — one tap out; idempotent. */
+  app.post('/queue/leave', auth, async (request) => {
+    await app.prisma.rideQueueEntry.updateMany({
+      where: { customerId: request.user.userId, status: 'WAITING' },
+      data: { status: 'LEFT' },
+    });
+    return { success: true, data: { left: true } };
+  });
+
+  /** GET /queue — my live queue state (position derived, never stored), or
+   *  null when I'm not in line. The client polls this alongside the socket. */
+  app.get('/queue', auth, async (request) => {
+    const entry = await app.prisma.rideQueueEntry.findFirst({
+      where: { customerId: request.user.userId, status: 'WAITING', expiresAt: { gt: new Date() } },
+      orderBy: { createdAt: 'desc' },
+    });
+    if (!entry) return { success: true, data: null };
+    return { success: true, data: await queueStatusFor(app.prisma, dispatch, entry) };
+  });
+
+  /** GET /supply — the honest counts for the 5.5A card (S-41: "{online}
+   *  drivers online — {busy} on trips"). Coarse counts only, no positions. */
+  app.get('/supply', auth, async (request) => {
+    const q = estimateSchema.pick({ pickup: true }).extend({}).safeParse({
+      pickup: {
+        lat: Number((request.query as Record<string, unknown>)['lat']),
+        lng: Number((request.query as Record<string, unknown>)['lng']),
+      },
+    });
+    if (!q.success) {
+      throw new AppError(400, 'INVALID_POINT', 'lat and lng are required.');
+    }
+    const snapshot = await getSupplySnapshot(app.prisma, q.data.pickup);
+    const availability = await dispatch.getAvailability('DRIVER', q.data.pickup);
+    return { success: true, data: { ...snapshot, level: availability.level, nearestEtaMinutes: availability.nearestEtaMinutes ?? null } };
   });
 
   /** GET /active — the customer's current ride, with driver identity. */
