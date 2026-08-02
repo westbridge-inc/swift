@@ -3232,11 +3232,13 @@ model FxRate {
 }
 
 model TenantBillingCurrency {
-  tenantId           String  @id
-  settlementCurrency String  @default("GYD")
-  roundingIncrement  Decimal @default(100) @db.Decimal(10, 2) // GYD:100 TTD:1 JMD:50 BBD:1
-  displayDual        Boolean @default(true)
-  usdPricingEnabled  Boolean @default(false) // dark until the founder enables (Mode A/B chosen then)
+  tenantId           String    @id
+  settlementCurrency String    @default("GYD")
+  roundingIncrement  Decimal   @default(100) @db.Decimal(10, 2) // GYD:100 TTD:1 JMD:50 BBD:1
+  displayDual        Boolean   @default(true)
+  usdPricingEnabled  Boolean   @default(false) // dark until the founder enables (Mode A/B chosen then)
+  usdMigrationMode   String? // A (convert) | B (grandfather) — founder-chosen at enable
+  usdSunsetAt        DateTime? // Mode B: grandfathered rates clear at this instant
 
   @@map("tenant_billing_currency")
 }

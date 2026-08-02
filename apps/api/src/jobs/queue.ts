@@ -638,6 +638,21 @@ export function createWorkers(ctx: JobContext) {
         return;
       }
 
+      if (job.name === 'billing-fx-notices') {
+        // USD pricing Part 12: the >2% FX-change notice, ≥7 days before the
+        // affected invoice, deduped per (subscription, rate) at the DB. A
+        // no-op until usdPricingEnabled. Same conversion the charge will use.
+        const { runFxChangeNotices } = await import('../modules/billing/fx-notices');
+        const res = await runFxChangeNotices(ctx.prisma, ctx.io);
+        if (res.notified > 0) ctx.log.info(res, 'billing: fx change notices');
+        // Part 13 Mode B: sunset notices (T−30/T−7, data-guaranteed) + the
+        // past-sunset flip with the missing-notice alert. No-op unless Mode B.
+        const { sweepModeB } = await import('../modules/billing/usd-migration');
+        const b = await sweepModeB(ctx.prisma, ctx.io);
+        if (b.notices + b.flipped > 0) ctx.log.info(b, 'billing: usd migration Mode B sweep');
+        return;
+      }
+
       if (job.name === 'ads-stats-rollup') {
         // Ads stats rollup [ads-platform spec §12.3]: aggregate yesterday's
         // AdEvent rows into AdStatsDaily — the ONLY source the advertiser
@@ -977,6 +992,14 @@ export async function scheduleRecurringJobs(queues: ReturnType<typeof createQueu
   // numbers are complete.
   await queues.dispatchQueue.add('ads-weekly-report', {}, {
     repeat: { pattern: '0 13 * * 1' },
+    removeOnComplete: 12,
+    removeOnFail: 12,
+  });
+
+  // USD pricing FX-change notices [System 2 Part 12]: daily 12:00 UTC (08:00
+  // Guyana) — DB-deduped per rate change; no-op until the tenant flag is on.
+  await queues.dispatchQueue.add('billing-fx-notices', {}, {
+    repeat: { pattern: '0 12 * * *' },
     removeOnComplete: 12,
     removeOnFail: 12,
   });

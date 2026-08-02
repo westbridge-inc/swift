@@ -2311,6 +2311,33 @@ export async function adminRoutes(app: FastifyInstance) {
     return { success: true, data: { ...updated, amountUsd: Number(updated.amountUsd) } };
   });
 
+  // ── Part 13 migration (founder picks a mode per tenant) ───────────────────
+
+  /** MODE A preview — the mapping table for founder approval. Pure read. */
+  app.get('/billing/usd-migration/preview', { preHandler: [adminGuard] }, async () => {
+    const { previewModeA } = await import('../billing/usd-migration');
+    return { success: true, data: await previewModeA(app.prisma) };
+  });
+
+  /** MODE A enact — send the deduped 30-day notices; the founder flips
+   *  usdPricingEnabled once the window has run. */
+  app.post('/billing/usd-migration/mode-a', { preHandler: [adminGuard] }, async () => {
+    const { enactModeA } = await import('../billing/usd-migration');
+    return { success: true, data: await enactModeA(app.prisma, app.io) };
+  });
+
+  /** MODE B enable — grandfather existing payers on today's local price via
+   *  customRate; the daily sweep owns the T−30/T−7 notices + sunset flip. */
+  app.post('/billing/usd-migration/mode-b', { preHandler: [adminGuard] }, async (request) => {
+    const body = z.object({ sunsetAt: z.string().datetime() }).parse(request.body ?? {});
+    const sunset = new Date(body.sunsetAt);
+    if (sunset.getTime() < Date.now() + 30 * 86_400_000) {
+      throw new AppError(400, 'SUNSET_TOO_SOON', 'The sunset must be at least 30 days out — the T−30 notice needs its window.');
+    }
+    const { enableModeB } = await import('../billing/usd-migration');
+    return { success: true, data: await enableModeB(app.prisma, sunset) };
+  });
+
   /** Pure preview (Part 12): the full plan table at a hypothetical rate —
    *  commit is only ever the POST above. */
   app.get('/billing/fx-preview', { preHandler: [adminGuard] }, async (request) => {
