@@ -3242,3 +3242,107 @@ model TenantBillingCurrency {
 
   @@map("tenant_billing_currency")
 }
+
+// ─── Batched Delivery Runs (batching/USD spec System 1) ──────────────────────
+// One rider, 1–3 orders, sequenced stops; every order keeps its OWN state
+// machine, PIN, cash line, and frozen quote. SHADOW FIRST (Part 8): the
+// scanner writes SHADOW_WOULD_BATCH evidence rows for ≥2 weeks before any
+// real offer fires; batching.enabled defaults OFF per tenant. RunStop is the
+// source of truth for membership + sequence; solo orders get a 2-stop run
+// too when live — one code path, no legacy fork.
+
+enum RunStatus {
+  PLANNED
+  ACTIVE
+  COMPLETED
+  CANCELLED
+}
+
+enum StopKind {
+  PICKUP
+  DROPOFF
+}
+
+enum StopStatus {
+  PENDING
+  ARRIVED
+  COMPLETED
+  SKIPPED
+  FAILED
+}
+
+model DeliveryRun {
+  id                 String    @id @default(cuid())
+  tenantId           String    @default("swift-default")
+  riderId            String
+  status             RunStatus @default(PLANNED)
+  vehicleType        String
+  capacityPointsUsed Int       @default(0)
+  cashToCollectTotal Decimal   @default(0) @db.Decimal(12, 2)
+  plannedDistanceM   Int?
+  plannedDurationS   Int?
+  version            Int       @default(0) // the versioned-accept guard (Part 18)
+  startedAt          DateTime?
+  completedAt        DateTime?
+  createdAt          DateTime  @default(now())
+  stops              RunStop[]
+
+  @@index([riderId, status])
+  @@index([tenantId, status])
+  @@map("delivery_runs")
+}
+
+model RunStop {
+  id            String      @id @default(cuid())
+  runId         String
+  orderId       String
+  kind          StopKind
+  seq           Int
+  status        StopStatus  @default(PENDING)
+  plannedEta    DateTime?
+  arrivedAt     DateTime?
+  completedAt   DateTime?
+  cashToCollect Decimal?    @db.Decimal(12, 2)
+  changeFor     Decimal?    @db.Decimal(12, 2) // C14: "bring change for GY$5,000"
+  run           DeliveryRun @relation(fields: [runId], references: [id])
+
+  @@unique([runId, seq])
+  @@index([orderId])
+  @@map("run_stops")
+}
+
+model BatchEvaluation {
+  id             String   @id @default(cuid())
+  tenantId       String   @default("swift-default")
+  orderId        String
+  riderId        String?
+  runId          String?
+  decision       String // BATCHED_STACKED | BATCHED_ADDON | SOLO | SHADOW_WOULD_BATCH
+  rulesChecked   Json // [{rule:"R7", pass:true, value:312, limit:480}, …] — founder-explainable
+  scoreBreakdown Json?
+  createdAt      DateTime @default(now())
+
+  @@index([orderId])
+  @@index([tenantId, createdAt])
+  @@map("batch_evaluations")
+}
+
+model BatchingSettings {
+  tenantId                String  @id @default("swift-default")
+  enabled                 Boolean @default(false) // real offers — OFF until the shadow report earns it
+  shadowMode              Boolean @default(true)
+  maxOrdersPerRun         Int     @default(2) // hard ceiling 3 (enforced in code)
+  addonPickupDetourMaxS   Int     @default(300)
+  dropoffCorridorM        Int     @default(1500)
+  crossTrackMaxM          Int     @default(800)
+  detourBudgetS           Int     @default(480)
+  detourBudgetPct         Int     @default(25)
+  hotFoodReadyToDoorMaxS  Int     @default(1500)
+  pickupWaitMaxS          Int     @default(300)
+  verticalMatrix          Json? // null → code seed (FOOD+FOOD, FOOD+GROCERY, GROCERY+GROCERY, COURIER+COURIER)
+  sizePoints              Json? // null → {S:1,M:2,L:3,XL:4}
+  capacityPointsByVehicle Json? // null → {BICYCLE:3,MOTORBIKE:4,CAR:6}
+  addonScanIntervalS      Int     @default(20)
+
+  @@map("batching_settings")
+}
