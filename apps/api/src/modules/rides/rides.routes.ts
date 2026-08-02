@@ -282,14 +282,19 @@ export async function ridesRoutes(app: FastifyInstance) {
           select: {
             id: true, vehicleMake: true, vehicleModel: true, vehicleColor: true,
             licensePlate: true, vehiclePhotoUrl: true, averageRating: true,
-            currentLat: true, currentLng: true,
+            currentLat: true, currentLng: true, bodyType: true, colorHex: true,
             user: { select: { firstName: true, avatar: true, phone: true } },
           },
         },
       },
       orderBy: { placedAt: 'desc' },
     });
-    return { success: true, data: ride };
+    if (!ride?.driver) return { success: true, data: ride };
+    // Vehicle visual identity [rides spec 6B]: shape + tint the client renders
+    // on the card, the map marker, and the arrival screen. Classify-on-read
+    // heals rows born before the assignment hook/backfill.
+    const { vehicleIdentityFor } = await import('./vehicle-identity');
+    return { success: true, data: { ...ride, driver: { ...ride.driver, ...vehicleIdentityFor(ride.driver) } } };
   });
 
   /** GET /:id — one owned ride. */

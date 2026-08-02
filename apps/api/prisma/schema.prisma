@@ -639,6 +639,19 @@ enum RiderType {
   BOTH
 }
 
+/// Body-type taxonomy for the vehicle visual system [rides spec 6B.2] —
+/// trimmed to the Georgetown fleet reality plus headroom.
+enum VehicleBodyType {
+  SEDAN
+  HATCHBACK
+  WAGON
+  SUV
+  PICKUP
+  MINIBUS
+  COMPACT
+  UNKNOWN
+}
+
 enum VehicleType {
   BICYCLE
   MOTORCYCLE
@@ -673,6 +686,13 @@ model Driver {
   /// Top taxi tier this vehicle serves (serves all classes <= it). Set via the
   /// driver-profile API and the admin drivers page (premium-fleet onboarding).
   rideClass                RideClass     @default(ECONOMY)
+  /// Vehicle visual identity [rides spec 6B] — additive, nullable, every
+  /// consumer handles null. bodyType from the make/model fleet mapping
+  /// (UNKNOWN surfaces one-tap classification in admin — never guessed
+  /// client-side); colorHex from the onboarding color word. The customer's
+  /// card, map marker, and the car at the curb must be the same shape+tint.
+  bodyType                 VehicleBodyType?
+  colorHex                 String?
   nationalIdUrl            String?
   driverLicenseUrl         String
   vehicleInsuranceUrl      String
