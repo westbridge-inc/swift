@@ -40,7 +40,7 @@ beforeAll(async () => {
   // Reset OTP state from prior runs so send/verify flows are deterministic
   const otpPhones = ['+5926003000', '+5926002000', '+5926004000', '+5929999999', '+5928887777'];
   for (const phone of otpPhones) {
-    await app.redis.del(`otp:${phone}`, `otp_rate:${phone}`, `otp_attempt:${phone}`);
+    await app.redis.del(`otp:${phone}`, `otp_rate:${phone}`, `otp_hr:${phone}`, `otp_attempt:${phone}`);
   }
 });
 
@@ -75,7 +75,7 @@ describe('Auth Routes', () => {
 
   describe('POST /api/v1/auth/send-otp', () => {
     it('returns success with expiresIn for valid phone', async () => {
-      await app.redis.del('otp_rate:+5926003000');
+      await app.redis.del('otp_rate:+5926003000', 'otp_hr:+5926003000');
       const res = await inject('POST', '/api/v1/auth/send-otp', {
         phone: '+5926003000',
       });

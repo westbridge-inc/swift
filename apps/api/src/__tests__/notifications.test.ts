@@ -104,7 +104,7 @@ beforeAll(async () => {
   orders = new OrderService(app.prisma, ioStub);
 
   await purgeFixtures();
-  await app.redis.del(`otp:${OTP_PHONE}`, `otp_rate:${OTP_PHONE}`, `otp_attempt:${OTP_PHONE}`, `otp_verified:${OTP_PHONE}`);
+  await app.redis.del(`otp:${OTP_PHONE}`, `otp_rate:${OTP_PHONE}`, `otp_hr:${OTP_PHONE}`, `otp_attempt:${OTP_PHONE}`, `otp_verified:${OTP_PHONE}`);
 });
 
 afterAll(async () => {

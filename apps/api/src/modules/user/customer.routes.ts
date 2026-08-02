@@ -490,6 +490,21 @@ export async function customerRoutes(app: FastifyInstance) {
       throw new AppError(409, 'ALREADY_REFERRED', 'You’ve already used a referral code');
     }
 
+    // Trial-integrity A5: one referral per HUMAN — if any account in the
+    // caller's identity cluster already redeemed, this human already used
+    // theirs. Same honest copy: true at the human level, no signal named.
+    const { clusterMemberIds } = await import('../integrity/identity.service');
+    const memberIds = await clusterMemberIds(app.prisma, userId);
+    if (memberIds.length > 1) {
+      const clusterRedeemed = await app.prisma.customer.findFirst({
+        where: { userId: { in: memberIds }, referredBy: { not: null } },
+        select: { id: true },
+      });
+      if (clusterRedeemed) {
+        throw new AppError(409, 'ALREADY_REFERRED', 'You’ve already used a referral code');
+      }
+    }
+
     const referrer = await app.prisma.customer.findFirst({
       where: { referralCode: { equals: code, mode: 'insensitive' } },
       include: { user: { select: { firstName: true } } },
@@ -498,6 +513,11 @@ export async function customerRoutes(app: FastifyInstance) {
       throw new AppError(404, 'INVALID_REFERRAL', 'That referral code wasn’t found');
     }
     if (referrer.id === customer.id) {
+      throw new AppError(400, 'SELF_REFERRAL', 'You can’t use your own referral code');
+    }
+    // A5 continued: your own code via your own OTHER account is still your
+    // own code — the cluster knows.
+    if (referrer.userId && memberIds.includes(referrer.userId)) {
       throw new AppError(400, 'SELF_REFERRAL', 'You can’t use your own referral code');
     }
 

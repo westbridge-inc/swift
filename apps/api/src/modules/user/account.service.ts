@@ -125,6 +125,21 @@ export class AccountService {
       await prisma.verificationDocument.update({ where: { id: doc.id }, data: { purgedAt: new Date(), fileUrl: '' } });
     }
 
+    // 1b. Identity-integrity purge (trial-integrity spec Part 8, DPA 2023):
+    //     the account's identity signals — hashed keys, cluster membership,
+    //     and the biometric face template — are erased with the person.
+    //     EXCEPTION: fraud tombstones, a founder/legal decision gated behind
+    //     IntegritySettings.tombstoneRetentionEnabled (default OFF). When ON,
+    //     the salted hashes + membership remain (legitimate-interest fraud
+    //     prevention, the documented sole exception); the raw-embedding face
+    //     template is deleted in EVERY case — it is not a hash.
+    const integrity = await prisma.integritySettings.findUnique({ where: { id: 'platform' } });
+    await prisma.faceTemplate.deleteMany({ where: { accountId: userId } });
+    if (!integrity?.tombstoneRetentionEnabled) {
+      await prisma.identityKey.deleteMany({ where: { accountId: userId } });
+      await prisma.identityClusterMember.deleteMany({ where: { accountId: userId } });
+    }
+
     // 2. Revoke access everywhere: refresh sessions + push tokens.
     await prisma.session.deleteMany({ where: { userId } });
     await prisma.deviceToken.deleteMany({ where: { userId } });

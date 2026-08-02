@@ -68,8 +68,26 @@ export async function orderingRestriction(
   const config = await prisma.countryConfig.findUnique({ where: { code: user.countryCode } });
   const rules = { ...DEFAULT_CASH_RULES, ...((config?.cashRules as Partial<CashRulesConfig> | null) ?? {}) };
 
+  // Trial-integrity A6: strikes follow the HUMAN, not the account — a COD
+  // no-pay history rides the identity cluster, so a fresh account starts
+  // with the cluster's live strikes (same 90-day aging; the trust ladder
+  // still lets them rebuild — the graph removes the shortcut, not the path).
+  // No cluster → exactly the old per-user check.
+  const member = await prisma.identityClusterMember.findUnique({ where: { accountId: userId }, select: { clusterId: true } });
+  let strikeUserIds = [userId];
+  if (member) {
+    let root = member.clusterId;
+    for (let hops = 0; hops < 32; hops += 1) {
+      const c = await prisma.identityCluster.findUnique({ where: { id: root }, select: { mergedIntoId: true } });
+      if (!c?.mergedIntoId) break;
+      root = c.mergedIntoId;
+    }
+    const members = await prisma.identityClusterMember.findMany({ where: { clusterId: root }, select: { accountId: true } });
+    if (members.length > 1) strikeUserIds = members.map((m) => m.accountId);
+  }
+
   const strikes = await prisma.strike.count({
-    where: { userId, createdAt: { gte: new Date(Date.now() - 90 * DAY_MS) } },
+    where: { userId: { in: strikeUserIds }, createdAt: { gte: new Date(Date.now() - 90 * DAY_MS) } },
   });
 
   if (strikes >= rules.strikeBanThreshold) return 'banned';
