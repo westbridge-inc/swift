@@ -62,6 +62,20 @@ export class AuthService {
       throw new AppError(429, 'RATE_LIMITED', 'Please wait before requesting another OTP');
     }
 
+    // Trial-integrity §5: the hourly cap (config, not code — a legit user
+    // with flaky SMS retries 3–4×; a flooder burns through 5). The cooldown
+    // is honest about when to try again.
+    const settings = await this.app.prisma.integritySettings.findUnique({ where: { id: 'platform' } }).catch(() => null);
+    const hourlyMax = settings?.maxOtpPerPhonePerHour ?? 5;
+    const hourKey = `otp_hr:${phone}`;
+    const hourCount = await this.app.redis.incr(hourKey);
+    if (hourCount === 1) await this.app.redis.expire(hourKey, 3600);
+    if (hourCount > hourlyMax) {
+      const ttl = await this.app.redis.ttl(hourKey);
+      const minutes = Math.max(1, Math.ceil((ttl > 0 ? ttl : 3600) / 60));
+      throw new AppError(429, 'RATE_LIMITED', `Too many codes requested for this number. Try again in ${minutes} minute${minutes === 1 ? '' : 's'}.`);
+    }
+
     // Hard daily cost ceilings (per-phone + global circuit breaker) so an abuse
     // spike can't run up the SMS bill. Checked before any SMS is generated/sent.
     const budget = await checkOtpDailyBudget(this.app.redis, phone);

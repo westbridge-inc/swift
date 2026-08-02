@@ -12,11 +12,14 @@ import { storeOtp } from '../../utils/otp';
 const KNOWN_TEST_OTP = '246810';
 
 export async function requestOtp(app: FastifyInstance, phone: string): Promise<string> {
-  // Reset the per-phone cooldown AND the daily SMS-budget counters so repeated
-  // test runs stay deterministic (these caps are cost guardrails, not test gates).
+  // Reset the per-phone cooldown, the trial-integrity §5 hourly cap, AND the
+  // daily SMS-budget counters so repeated test runs stay deterministic (these
+  // caps are cost/abuse guardrails, not test gates — each cap is covered by
+  // its own dedicated suite).
   const day = new Date().toISOString().slice(0, 10);
   await app.redis.del(
     `otp_rate:${phone}`,
+    `otp_hr:${phone}`,
     `otp_attempt:${phone}`,
     `otp_phone_day:${day}:${phone}`,
     `sms_global_day:${day}`,

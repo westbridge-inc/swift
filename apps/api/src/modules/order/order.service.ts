@@ -456,8 +456,13 @@ export class OrderService {
         if (fresh.maxUses && fresh.currentUses >= fresh.maxUses) {
           throw new AppError(400, 'USED_PROMO', 'This promo code has reached its usage limit');
         }
+        // Trial-integrity A5: per-user promo caps count the HUMAN — usage by
+        // any account in the identity cluster counts (promo-farming across
+        // fresh accounts dies here). Unclustered → [userId] exactly.
+        const { clusterMemberIds } = await import('../integrity/identity.service');
+        const promoMemberIds = await clusterMemberIds(this.prisma, input.userId);
         const userUses = await tx.order.count({
-          where: { customerId: input.userId, promoCodeId, status: { notIn: ['CANCELLED', 'REFUNDED'] } },
+          where: { customerId: { in: promoMemberIds }, promoCodeId, status: { notIn: ['CANCELLED', 'REFUNDED'] } },
         });
         if (userUses >= fresh.maxUsesPerUser) {
           throw new AppError(400, 'USED_PROMO', 'You have already used this promo code');
@@ -1347,9 +1352,12 @@ export class OrderService {
       throw new AppError(400, 'USED_PROMO', 'This promo code has reached its usage limit');
     }
 
-    // Check per-user usage
+    // Check per-user usage — per HUMAN (identity cluster), matching the
+    // enforcement point inside the checkout transaction (trial-integrity A5).
+    const { clusterMemberIds } = await import('../integrity/identity.service');
+    const promoMemberIds = await clusterMemberIds(this.prisma, userId);
     const userUsage = await this.prisma.order.count({
-      where: { customerId: userId, promoCodeId: promo.id, status: { notIn: ['CANCELLED', 'REFUNDED'] } },
+      where: { customerId: { in: promoMemberIds }, promoCodeId: promo.id, status: { notIn: ['CANCELLED', 'REFUNDED'] } },
     });
     if (userUsage >= promo.maxUsesPerUser) {
       throw new AppError(400, 'USED_PROMO', 'You have already used this promo code');

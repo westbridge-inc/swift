@@ -52,7 +52,7 @@ beforeAll(async () => {
 
   await cleanupUsers();
   for (const phone of [MOVER_PHONE, VENDOR_PHONE, WAITLIST_PHONE, CROSSING_PHONE]) {
-    await app.redis.del(`otp:${phone}`, `otp_rate:${phone}`, `otp_attempt:${phone}`, `otp_verified:${phone}`);
+    await app.redis.del(`otp:${phone}`, `otp_rate:${phone}`, `otp_hr:${phone}`, `otp_attempt:${phone}`, `otp_verified:${phone}`);
   }
 });
 

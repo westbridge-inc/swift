@@ -47,6 +47,22 @@ export interface CaptureResult {
   clusterId: string | null;
 }
 
+/** All account ids sharing the caller's identity cluster (self included; just
+ *  [accountId] when unclustered). The standalone shape consumers gate with —
+ *  promos, referrals, cash-risk — without constructing the service. */
+export async function clusterMemberIds(prisma: PrismaClient, accountId: string): Promise<string[]> {
+  const member = await prisma.identityClusterMember.findUnique({ where: { accountId }, select: { clusterId: true } });
+  if (!member) return [accountId];
+  let root = member.clusterId;
+  for (let hops = 0; hops < 32; hops += 1) {
+    const c = await prisma.identityCluster.findUnique({ where: { id: root }, select: { mergedIntoId: true } });
+    if (!c?.mergedIntoId) break;
+    root = c.mergedIntoId;
+  }
+  const members = await prisma.identityClusterMember.findMany({ where: { clusterId: root }, select: { accountId: true } });
+  return members.length > 0 ? members.map((m) => m.accountId) : [accountId];
+}
+
 export class IdentityService {
   constructor(private prisma: PrismaClient) {}
 
