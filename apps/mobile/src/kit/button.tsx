@@ -7,7 +7,7 @@ import { T } from './text';
 
 const HEIGHT = { lg: 56, md: 48, sm: 38 } as const;
 
-type Variant = 'primary' | 'soft' | 'dark' | 'outline';
+type Variant = 'primary' | 'soft' | 'dark' | 'outline' | 'destructive';
 type Size = keyof typeof HEIGHT;
 
 const BG: Record<Variant, { rest: string; pressed: string; label: string; border?: string }> = {
@@ -16,6 +16,9 @@ const BG: Record<Variant, { rest: string; pressed: string; label: string; border
   soft: { rest: color.brand[50], pressed: color.brand[100], label: color.brand[600] },
   dark: { rest: color.text.primary, pressed: '#3A2F2F', label: color.white },
   outline: { rest: color.surface.base, pressed: color.brand[50], label: color.text.primary, border: color.border.subtle },
+  // Part 12: destructive = danger fill + REQUIRED icon at the call site —
+  // never colour alone. Brand never signals an error (two-reds law).
+  destructive: { rest: color.error, pressed: color.errorDeep, label: color.text.onBrand },
 };
 
 /** The kit's pill CTA. Full-radius, three tiers, optional leading icon. */
