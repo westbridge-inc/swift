@@ -243,6 +243,103 @@ export async function adsRoutes(app: FastifyInstance) {
     return { success: true, data: await statsService.campaignStats(request.params.id) };
   });
 
+  // ── Advertiser dashboard reads (spec §14) — all member-gated ─────────────
+
+  /** §14.2 home — the advertiser's campaigns with placement + invoice status. */
+  app.get<{ Params: { id: string } }>('/advertiser/:id/campaigns', auth, async (request) => {
+    await advertisers.assertMember(request.params.id, request.user.userId);
+    const campaigns = await app.prisma.adCampaign.findMany({
+      where: { advertiserId: request.params.id },
+      include: {
+        placement: { select: { key: true, name: true, tier: true, mediaKind: true } },
+        invoices: { select: { id: true, number: true, status: true, amount: true, paymentUrl: true } },
+        creatives: { select: { id: true, status: true, transcodeStatus: true } },
+        bookings: { select: { weekStart: true, city: true, status: true } },
+      },
+      orderBy: { createdAt: 'desc' },
+      take: 100,
+    });
+    return {
+      success: true,
+      data: campaigns.map((c) => ({
+        id: c.id, name: c.name, status: c.status, statusReason: c.statusReason,
+        placement: { key: c.placement.key, name: c.placement.name, tier: c.placement.tier, mediaKind: c.placement.mediaKind },
+        cities: c.cities, startWeek: c.startWeek, endWeek: c.endWeek,
+        totalAmount: c.totalAmount ? Number(c.totalAmount) : null, currency: c.currency,
+        invoices: c.invoices.map((i) => ({ id: i.id, number: i.number, status: i.status, amount: Number(i.amount), paymentUrl: i.paymentUrl })),
+        creatives: c.creatives,
+        bookings: c.bookings,
+        createdAt: c.createdAt,
+      })),
+    };
+  });
+
+  /** §14.5 billing — the advertiser's invoices. */
+  app.get<{ Params: { id: string } }>('/advertiser/:id/invoices', auth, async (request) => {
+    await advertisers.assertMember(request.params.id, request.user.userId);
+    const invoices = await app.prisma.adInvoice.findMany({
+      where: { advertiserId: request.params.id },
+      include: { campaign: { select: { name: true } } },
+      orderBy: { createdAt: 'desc' },
+      take: 100,
+    });
+    return {
+      success: true,
+      data: invoices.map((i) => ({
+        id: i.id, number: i.number, campaign: i.campaign.name, amount: Number(i.amount),
+        currency: i.currency, status: i.status, provider: i.provider, paymentUrl: i.paymentUrl,
+        paidAt: i.paidAt, refundedAmount: Number(i.refundedAmount), createdAt: i.createdAt,
+      })),
+    };
+  });
+
+  /** §14.6 team — list members; OWNER adds MANAGER/ANALYST by phone (the
+   *  invited person must already have a Swift account). */
+  app.get<{ Params: { id: string } }>('/advertiser/:id/members', auth, async (request) => {
+    await advertisers.assertMember(request.params.id, request.user.userId);
+    const members = await app.prisma.advertiserMember.findMany({ where: { advertiserId: request.params.id } });
+    const users = await app.prisma.user.findMany({
+      where: { id: { in: members.map((m) => m.userId) } },
+      select: { id: true, firstName: true, lastName: true, phone: true },
+    });
+    const userById = new Map(users.map((u) => [u.id, u]));
+    return {
+      success: true,
+      data: members.map((m) => {
+        const u = userById.get(m.userId);
+        return { userId: m.userId, role: m.role, name: u ? `${u.firstName} ${u.lastName}`.trim() : null, phone: u?.phone ?? null };
+      }),
+    };
+  });
+
+  app.post<{ Params: { id: string } }>('/advertiser/:id/members', auth, async (request) => {
+    const body = z.object({
+      phone: z.string().trim().regex(/^\+[1-9]\d{6,14}$/, 'Use international format, e.g. +5926001234.'),
+      role: z.enum(['MANAGER', 'ANALYST']),
+    }).parse(request.body ?? {});
+    await advertisers.assertMember(request.params.id, request.user.userId, true); // OWNER only
+    const invited = await app.prisma.user.findUnique({ where: { phone: body.phone }, select: { id: true } });
+    if (!invited) throw new NotFoundError('User', body.phone);
+    const member = await app.prisma.advertiserMember.upsert({
+      where: { advertiserId_userId: { advertiserId: request.params.id, userId: invited.id } },
+      create: { advertiserId: request.params.id, userId: invited.id, role: body.role },
+      update: { role: body.role },
+    });
+    return { success: true, data: { userId: member.userId, role: member.role } };
+  });
+
+  /** §14.4 — the EXACT refund the advertiser will get if they cancel now,
+   *  shown BEFORE confirming. Same pure calculator the cancel executes. */
+  app.get<{ Params: { id: string } }>('/campaigns/:id/refund-preview', auth, async (request) => {
+    const campaign = await app.prisma.adCampaign.findUnique({ where: { id: request.params.id }, select: { advertiserId: true, tenantId: true } });
+    if (!campaign) throw new NotFoundError('AdCampaign', request.params.id);
+    await advertisers.assertMember(campaign.advertiserId, request.user.userId);
+    const { AdsRefundService } = await import('./refund.service');
+    const settings = await app.prisma.adsSettings.findUnique({ where: { tenantId: campaign.tenantId }, select: { cancelFullRefundDays: true } });
+    const plan = await new AdsRefundService(app.prisma, app.io).preview(request.params.id, 'ADVERTISER_CANCEL', { cancelFullRefundDays: settings?.cancelFullRefundDays ?? 7 });
+    return { success: true, data: plan };
+  });
+
   /** §6.1 cancel — the advertiser cancels; the §8.4 refund plan executes
    *  (future weeks per the day thresholds, current week 0%). */
   app.post<{ Params: { id: string } }>('/campaigns/:id/cancel', auth, async (request) => {

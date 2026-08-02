@@ -29,13 +29,13 @@ export class AdsRefundService {
     this.notifications = new NotificationService(prisma, io);
   }
 
-  async execute(campaignId: string, reason: RefundReason, actorUserId: string, opts: Omit<RefundOpts, 'now'> & { now?: Date } = {}): Promise<RefundExecResult> {
-    const campaign = await this.prisma.adCampaign.findUnique({ where: { id: campaignId }, include: { advertiser: { select: { id: true } } } });
-    if (!campaign) throw new NotFoundError('AdCampaign', campaignId);
+  /** Assemble the refundable bookings and run the pure §8.4 calculator — the
+   *  ONE input path shared by execute and the pre-confirm preview, so the
+   *  number the advertiser sees before cancelling is BY CONSTRUCTION the
+   *  number that executes. Only bookings that could still owe money —
+   *  CONFIRMED (paid) or RESERVED (paid-then-expired edge). */
+  private async planFor(campaignId: string, reason: RefundReason, opts: Omit<RefundOpts, 'now'> & { now?: Date }) {
     const now = opts.now ?? new Date();
-
-    // Only bookings that could still owe money — CONFIRMED (paid) or RESERVED
-    // (paid-then-expired edge). RELEASED/CANCELLED/REFUNDED are already settled.
     const bookings = await this.prisma.adBooking.findMany({
       where: { campaignId, status: { in: ['CONFIRMED', 'RESERVED'] } },
       select: { id: true, weekStart: true, amount: true, placementId: true, city: true },
@@ -45,6 +45,23 @@ export class AdsRefundService {
       reason,
       { ...opts, now },
     );
+    return { plan, bookings, now };
+  }
+
+  /** §14.4 — the exact refund shown BEFORE the advertiser confirms a cancel.
+   *  Same assembly, same calculator, zero mutation. */
+  async preview(campaignId: string, reason: RefundReason, opts: Omit<RefundOpts, 'now'> & { now?: Date } = {}) {
+    const campaign = await this.prisma.adCampaign.findUnique({ where: { id: campaignId }, select: { id: true } });
+    if (!campaign) throw new NotFoundError('AdCampaign', campaignId);
+    const { plan } = await this.planFor(campaignId, reason, opts);
+    return plan;
+  }
+
+  async execute(campaignId: string, reason: RefundReason, actorUserId: string, opts: Omit<RefundOpts, 'now'> & { now?: Date } = {}): Promise<RefundExecResult> {
+    const campaign = await this.prisma.adCampaign.findUnique({ where: { id: campaignId }, include: { advertiser: { select: { id: true } } } });
+    if (!campaign) throw new NotFoundError('AdCampaign', campaignId);
+
+    const { plan, bookings } = await this.planFor(campaignId, reason, opts);
     if (plan.items.length === 0) {
       return { planTotal: 0, refundedTotal: 0, creditedTotal: 0, releasedSlots: 0 };
     }
