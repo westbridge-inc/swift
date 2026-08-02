@@ -2,8 +2,8 @@
 import React from 'react';
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
-import { Ionicons } from '@expo/vector-icons';
-import { color } from '@swift/ui';
+import { color, font, fontSize } from '@swift/ui';
+import { TabGlyph, type TabGlyphName } from '../kit';
 
 // Rebuilt customer screens (Super Food layouts, Indian Red brand)
 import { HomeScreen } from '../modules/shop/screens/HomeScreen';
@@ -48,11 +48,11 @@ const Stack = createNativeStackNavigator();
 // Tab bar: Home · Activity · Cart · Profile (filled icon when active).
 // Activity is a first-class super-app surface (orders/rides history + live
 // status); order chats stay reachable from each order and the chat list.
-const TAB_ICON: Record<string, keyof typeof Ionicons.glyphMap> = {
+const TAB_ICON: Record<string, TabGlyphName> = {
   Home: 'home',
-  Activity: 'receipt',
-  Cart: 'bag-handle',
-  Profile: 'person',
+  Activity: 'activity',
+  Cart: 'cart',
+  Profile: 'profile',
 };
 
 function HomeTabs() {
@@ -69,11 +69,10 @@ function HomeTabs() {
           boxShadow: '0px -4px 12px rgba(33,26,26,0.08)',
           elevation: 10,
         },
-        tabBarLabelStyle: { fontSize: 12, fontFamily: 'HankenMedium' },
-        tabBarIcon: ({ focused, color: c, size }) => {
-          const base = TAB_ICON[route.name] ?? 'ellipse';
-          return <Ionicons name={focused ? base : (`${base}-outline` as typeof base)} size={size} color={c} />;
-        },
+        tabBarLabelStyle: { fontSize: fontSize.micro, fontFamily: font.bodyMedium },
+        tabBarIcon: ({ focused, color: c, size }) => (
+          <TabGlyph name={TAB_ICON[route.name] ?? 'home'} focused={focused} color={c} size={size} />
+        ),
       })}
     >
       <Tab.Screen name="Home" component={HomeScreen} />

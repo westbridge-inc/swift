@@ -4,7 +4,7 @@ import { FlatList, KeyboardAvoidingView, Platform, Pressable, TextInput, View } 
 import { Feather } from '@expo/vector-icons';
 import { useRoute } from '@react-navigation/native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { color, radius, space } from '@swift/ui';
+import { withAlpha, color, radius, space } from '@swift/ui';
 import { useChatMessages, useChatRoom, useSendMessage } from '../../../hooks/chat';
 import { useAuthStore } from '../../../stores/authStore';
 import { ErrorState, Header, LoadingBlock, Screen, T } from '../../../kit';
@@ -87,7 +87,7 @@ export function ConversationScreen() {
                   <T
                     variant="caption"
                     style={{
-                      color: mine ? 'rgba(255,255,255,0.7)' : color.text.muted,
+                      color: mine ? withAlpha(color.white, 0.7) : color.text.muted,
                       marginTop: 3,
                       alignSelf: 'flex-end',
                     }}

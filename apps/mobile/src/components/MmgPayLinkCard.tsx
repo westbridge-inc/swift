@@ -2,7 +2,7 @@
 import React, { useEffect, useState } from 'react';
 import { View, type ViewStyle } from 'react-native';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
-import { color, space } from '@swift/ui';
+import { withAlpha, color, space } from '@swift/ui';
 import { Card, LabeledInput, PillButton, T } from '../kit';
 
 /**
@@ -31,7 +31,7 @@ export function MmgPayLinkCard({
   const dirty = trimmed !== (value ?? '');
   const payer = who === 'store' ? 'Customers' : 'Riders';
   const darkCard: ViewStyle = dark
-    ? { backgroundColor: '#17171B', borderWidth: 1, borderColor: 'rgba(255,255,255,0.08)' }
+    ? { backgroundColor: color.text.primary, borderWidth: 1, borderColor: withAlpha(color.white, 0.08) }
     : {};
 
   return (
@@ -42,7 +42,7 @@ export function MmgPayLinkCard({
           Your MMG pay link
         </T>
       </View>
-      <T variant="caption" tone="muted" style={{ marginTop: 4, ...(dark ? { color: 'rgba(255,255,255,0.55)' } : {}) }}>
+      <T variant="caption" tone="muted" style={{ marginTop: 4, ...(dark ? { color: withAlpha(color.white, 0.55) } : {}) }}>
         {payer} can pay you directly on your own MMG — the money goes straight to you, Swift never holds it. Leave it empty to stay cash-only.
       </T>
       <View style={{ marginTop: space.md }}>

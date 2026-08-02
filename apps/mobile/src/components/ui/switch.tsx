@@ -6,7 +6,7 @@ export function Switch(props: SwitchProps) {
   return (
     <RNSwitch
       trackColor={{ false: color.border.strong, true: color.brand[500] }}
-      thumbColor="#fff"
+      thumbColor={color.white}
       ios_backgroundColor={color.border.strong}
       {...props}
     />

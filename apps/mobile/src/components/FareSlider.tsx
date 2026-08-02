@@ -1,6 +1,6 @@
 import { useRef, useState } from 'react';
 import { View, PanResponder } from 'react-native';
-import { color } from '@swift/ui';
+import { shadow, color } from '@swift/ui';
 
 /**
  * A capped price slider — a bar with a draggable circle. The driver slides between
@@ -65,7 +65,7 @@ export function FareSlider({
           backgroundColor: color.white,
           borderWidth: 2,
           borderColor: color.brand[500],
-          boxShadow: '0px 2px 4px rgba(0,0,0,0.18)',
+          boxShadow: shadow.card,
           elevation: 3,
         }}
       />

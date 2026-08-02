@@ -1,4 +1,5 @@
 import { View, type ViewStyle } from 'react-native';
+import { color, withAlpha } from '@swift/ui';
 
 /**
  * A dark gradient scrim for photo cards — keeps white text/badges legible over
@@ -19,8 +20,8 @@ function alphaOf(rgba: string): number {
 
 export function Scrim({
   height = 96,
-  from = 'rgba(0,0,0,0)',
-  to = 'rgba(0,0,0,0.72)',
+  from = withAlpha(color.text.primary, 0),
+  to = withAlpha(color.text.primary, 0.72),
   cover = false,
   anchor = 'bottom',
   style,
@@ -50,7 +51,7 @@ export function Scrim({
         return (
           <View
             key={i}
-            style={{ flex: 1, backgroundColor: `rgba(10,11,15,${alpha.toFixed(3)})` }}
+            style={{ flex: 1, backgroundColor: withAlpha(color.text.primary, Number(alpha.toFixed(3))) }}
           />
         );
       })}

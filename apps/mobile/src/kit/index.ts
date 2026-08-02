@@ -6,6 +6,7 @@ export * from './money';
 export * from './add-morph';
 export * from './menu-row';
 export * from './code-input';
+export * from './tab-glyphs';
 export * from './screen';
 export * from './button';
 export * from './card';

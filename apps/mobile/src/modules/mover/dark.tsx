@@ -1,7 +1,7 @@
 import React from 'react';
 import { Pressable, View, type ViewStyle } from 'react-native';
 import { Feather } from '@expo/vector-icons';
-import { color } from '@swift/ui';
+import { color, withAlpha } from '@swift/ui';
 import { T, cardShadow } from '../../kit';
 
 /**
@@ -10,12 +10,7 @@ import { T, cardShadow } from '../../kit';
  * the brand red; no second dark identity). The `dk` name survives from the
  * earlier dark iteration so the screens read unchanged.
  */
-export function withAlpha(hex: string, alpha: number): string {
-  const r = parseInt(hex.slice(1, 3), 16);
-  const g = parseInt(hex.slice(3, 5), 16);
-  const b = parseInt(hex.slice(5, 7), 16);
-  return `rgba(${r},${g},${b},${alpha})`;
-}
+export { withAlpha } from '@swift/ui';
 
 export const dk = {
   bg: color.surface.subtle,
