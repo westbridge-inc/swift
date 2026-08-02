@@ -7,6 +7,8 @@ import { useNavigation } from '@react-navigation/native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { color, radius, space } from '@swift/ui';
 import { useHome, useToggleFavorite } from '../../../hooks/customer';
+import { useAds } from '../../../hooks/ads';
+import { AdHeroVideo, AdTopCard, AdBar } from '../../../components/ads';
 import { useAuthStore } from '../../../stores/authStore';
 import { useLocationStore } from '../../../stores/locationStore';
 import { vendorImage, FOOD_IMAGES } from '../../../lib/images';
@@ -114,6 +116,16 @@ export function HomeScreen() {
 
   const home = useHome<any>(latitude ?? undefined, longitude ?? undefined);
   const toggleFav = useToggleFavorite();
+
+  // Ads hydrate independently (§13.4): home content NEVER waits on this call,
+  // and an ad-free answer collapses the slots so sections close up. Launch is
+  // single-city → "*" everywhere (E11).
+  const ads = useAds('*');
+  const adSlots = ads.data?.data?.placements;
+  const adTrackable = ads.data?.trackable ?? false;
+  const heroAd = adSlots?.['home_hero_video']?.items[0];
+  const topAd = adSlots?.['home_top_card']?.items[0];
+  const barSlot = adSlots?.['home_ad_bar'];
 
   const onFavorite = (vendorId: string, isFavorite: boolean) => {
     if (!isAuthenticated) {
@@ -258,6 +270,13 @@ export function HomeScreen() {
           </View>
         ) : null}
 
+        {/* Tier 1 — hero video slot (§13.1). Present only when sold+live. */}
+        {heroAd ? (
+          <View style={{ paddingHorizontal: GUTTER, marginTop: space['2xl'] }}>
+            <AdHeroVideo item={heroAd} trackable={adTrackable} />
+          </View>
+        ) : null}
+
         {home.isLoading ? (
           <LoadingBlock style={{ paddingTop: 96 }} />
         ) : home.isError ? (
@@ -305,6 +324,13 @@ export function HomeScreen() {
               />
             </View>
 
+            {/* Tier 2 — top card slot (§13.2), the widget-row area. */}
+            {topAd ? (
+              <View style={{ paddingHorizontal: GUTTER, marginTop: space['2xl'] }}>
+                <AdTopCard item={topAd} trackable={adTrackable} />
+              </View>
+            ) : null}
+
             {/* Find by Category */}
             {categories.length > 0 ? (
               <>
@@ -328,6 +354,18 @@ export function HomeScreen() {
                   )}
                 />
               </>
+            ) : null}
+
+            {/* Tier 3 — the rotating ad bar (§13.3). */}
+            {barSlot && barSlot.items.length > 0 ? (
+              <View style={{ paddingHorizontal: GUTTER, marginTop: space['2xl'] }}>
+                <AdBar
+                  items={barSlot.items}
+                  rotationSeconds={barSlot.rotationSeconds}
+                  trackable={adTrackable}
+                  width={SCREEN_W - GUTTER * 2}
+                />
+              </View>
             ) : null}
 
             {/* Recommended — dense horizontal rail (Grab rails, not a sparse grid) */}
