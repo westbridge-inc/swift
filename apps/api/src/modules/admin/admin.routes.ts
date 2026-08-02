@@ -2506,6 +2506,108 @@ export async function adminRoutes(app: FastifyInstance) {
     return { success: true, data: { ...result, healthy: result.luhnFailures === 0 && result.distinct === result.total } };
   });
 
+  // ── Agent-cash ingestion [san spec 4.4/4.6] — manual channel + suspense ──
+
+  /** Channel C — manual entry, THE DAY-1 CHANNEL: the founder keys receipts
+   *  from the MMG merchant portal each evening and the whole machine
+   *  (credit → conversion → reactivation) runs with zero MMG integration.
+   *  Law 26.5: entry requires the logged portal-verification confirmation —
+   *  never from a photo or screenshot alone. */
+  app.post('/billing/agent-payments', { preHandler: [adminGuard] }, async (request) => {
+    const body = z.object({
+      san: z.string().min(1).max(20),
+      amount: z.number().positive(),
+      paidAt: z.string().datetime(),
+      receiptNumber: z.string().trim().min(3).max(64),
+      agentRef: z.string().trim().max(200).optional(),
+      payerMsisdn: z.string().trim().max(30).optional(),
+      verifiedInPortal: z.literal(true, {
+        errorMap: () => ({ message: 'Manual credits require verifying the receipt in the MMG portal/statement first (law 26.5).' }),
+      }),
+    }).parse(request.body ?? {});
+    const { AgentCashService } = await import('../billing/agent-cash.service');
+    const svc = new AgentCashService(app.prisma, billing);
+    const result = await svc.ingest({
+      externalId: `MANUAL:${body.receiptNumber}`,
+      channel: 'MANUAL_ADMIN',
+      sanRaw: body.san,
+      amount: body.amount,
+      currencyCode: 'GYD',
+      paidAt: new Date(body.paidAt),
+      agentRef: body.agentRef,
+      payerMsisdn: body.payerMsisdn,
+      raw: { enteredBy: request.user.userId, receiptNumber: body.receiptNumber, verifiedInPortal: true },
+      recordedBy: request.user.userId,
+    });
+    return { success: true, data: result };
+  });
+
+  /** The live payments feed [spec PART 8]. */
+  app.get('/billing/agent-payments', { preHandler: [adminGuard] }, async (request) => {
+    const q = z.object({
+      status: z.enum(['RECEIVED', 'MATCHED', 'UNMATCHED', 'RECONCILED', 'RESOLVED', 'REFUND_FLAGGED']).optional(),
+      limit: z.coerce.number().int().min(1).max(200).default(50),
+    }).parse(request.query ?? {});
+    const rows = await app.prisma.mmgAgentPayment.findMany({
+      where: q.status ? { status: q.status } : {},
+      orderBy: { createdAt: 'desc' },
+      take: q.limit,
+    });
+    return { success: true, data: rows.map((r) => ({ ...r, amount: Number(r.amount) })) };
+  });
+
+  /** The suspense queue [4.6] with the Luhn diagnosis + SLA clock. Money in
+   *  limbo = a paid-but-suspended actor — the worst outcome this system can
+   *  produce; rows older than 24h page. */
+  app.get('/billing/agent-payments/unmatched', { preHandler: [adminGuard] }, async () => {
+    const { AgentCashService } = await import('../billing/agent-cash.service');
+    const svc = new AgentCashService(app.prisma, billing);
+    return { success: true, data: await svc.unmatchedQueue() };
+  });
+
+  /** Attach a suspensed payment to an account — credits via the NORMAL
+   *  pipeline (conversion + reactivation included), original linked. */
+  app.post('/billing/agent-payments/:id/attach', { preHandler: [adminGuard] }, async (request) => {
+    const { id } = z.object({ id: z.string() }).parse(request.params);
+    const body = z.object({ subscriptionId: z.string().min(1) }).parse(request.body ?? {});
+    const sub = await app.prisma.subscription.findUnique({ where: { id: body.subscriptionId } });
+    if (!sub) throw new AppError(404, 'NOT_FOUND', 'No such subscription');
+    const { AgentCashService } = await import('../billing/agent-cash.service');
+    const svc = new AgentCashService(app.prisma, billing);
+    try {
+      const result = await svc.attach(id, body.subscriptionId, request.user.userId);
+      return { success: true, data: result };
+    } catch (e) {
+      if ((e as Error).message === 'NOT_UNMATCHED') {
+        throw new AppError(409, 'NOT_UNMATCHED', 'Only unmatched payments can be attached.');
+      }
+      throw e;
+    }
+  });
+
+  /** Refund flag [S-9]: cash refunds happen OFFLINE at MMG/agent level — the
+   *  system records the flag; money never auto-moves. */
+  app.post('/billing/agent-payments/:id/refund-flag', { preHandler: [adminGuard] }, async (request) => {
+    const { id } = z.object({ id: z.string() }).parse(request.params);
+    const body = z.object({ note: z.string().trim().min(3).max(500) }).parse(request.body ?? {});
+    const row = await app.prisma.mmgAgentPayment.findUnique({ where: { id } });
+    if (!row) throw new AppError(404, 'NOT_FOUND', 'No such payment');
+    if (row.status !== 'UNMATCHED') throw new AppError(409, 'NOT_UNMATCHED', 'Only unmatched payments can be refund-flagged.');
+    const updated = await app.prisma.mmgAgentPayment.update({
+      where: { id },
+      data: { status: 'REFUND_FLAGGED', note: body.note, resolvedBy: request.user.userId, resolvedAt: new Date() },
+    });
+    return { success: true, data: updated };
+  });
+
+  /** Leave with note (stays in the queue). */
+  app.post('/billing/agent-payments/:id/note', { preHandler: [adminGuard] }, async (request) => {
+    const { id } = z.object({ id: z.string() }).parse(request.params);
+    const body = z.object({ note: z.string().trim().min(1).max(500) }).parse(request.body ?? {});
+    const updated = await app.prisma.mmgAgentPayment.update({ where: { id }, data: { note: body.note } });
+    return { success: true, data: updated };
+  });
+
   /** Global SAN resolution (⌘K): who does this number belong to. Payment
    *  reference lookup only — the SAN is never an auth factor. */
   app.get('/billing/san/:san', { preHandler: [adminGuard] }, async (request) => {
