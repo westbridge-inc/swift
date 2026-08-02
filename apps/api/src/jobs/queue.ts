@@ -326,7 +326,13 @@ export function createWorkers(ctx: JobContext) {
           // past SUSPENSION_MAX_DAYS so dunning — and the daily MMG
           // re-request — never runs forever against a dead account.
           const swept = await billing.sweepSuspended();
-          ctx.log.info({ ...result, reminders, ...swept }, 'Billing cycle complete');
+          // Trial first-payment funnel [san spec 21.4]: day-10 how-to-pay +
+          // day-13 exact-amount education, each stage once per trial
+          // (BillingEvent unique-key gate) — preloaded wallets make trial→
+          // paid conversion seamless.
+          const { sweepTrialFeeEducation } = await import('../modules/billing/trial-fee-education');
+          const edu = await sweepTrialFeeEducation(ctx.prisma, new NotificationService(ctx.prisma, ctx.io));
+          ctx.log.info({ ...result, reminders, ...swept, trialEdu: edu }, 'Billing cycle complete');
           // SWIFT-AUD-D7-02: billing failures must PAGE, not just log — a
           // broken rail silently suspends paying partners.
           const troubled = result.failed + result.errors + result.suspended;

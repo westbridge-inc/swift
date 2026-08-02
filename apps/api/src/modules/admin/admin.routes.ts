@@ -2783,6 +2783,7 @@ export async function adminRoutes(app: FastifyInstance) {
     const promisesKept = promised.filter((c) =>
       payments.some((p) => p.subscriptionId === c.subscriptionId && p.paidAt && p.paidAt >= c.createdAt && p.paidAt.getTime() <= c.promisedDate!.getTime() + 86_400_000),
     ).length;
+    const { firstPaymentFunnel } = await import('../billing/trial-fee-education');
     return {
       success: true,
       data: {
@@ -2791,6 +2792,9 @@ export async function adminRoutes(app: FastifyInstance) {
         unmatched: { depth: unmatchedDepth, oldestHours: oldestUnmatched ? Math.round((Date.now() - oldestUnmatched.createdAt.getTime()) / 3_600_000) : 0 },
         collections: { contacts: contacts.length, promises: promised.length, promisesKept, promiseKeptRate: promised.length ? promisesKept / promised.length : null },
         subscriptionStates: dueStates.map((s) => ({ status: s.status, count: s._count })),
+        // THE pilot metric [21.4]: did the education land — wallets loaded
+        // before trial end mean conversion without interruption.
+        firstPaymentFunnel: await firstPaymentFunnel(app.prisma, days),
       },
     };
   });
