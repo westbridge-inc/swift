@@ -1,7 +1,7 @@
 /** @jsxImportSource react */
 import React, { useState } from 'react';
 import { ScrollView, TextInput, View } from 'react-native';
-import { Feather, MaterialCommunityIcons } from '@expo/vector-icons';
+import { Feather } from '@expo/vector-icons';
 import { color, radius, space } from '@swift/ui';
 import { useServiceProviders, useRequestJob } from '../../../hooks';
 import { Card, Chip, EmptyState, Header, IconChip, LinkText, LoadingBlock, PillButton, PopupCard, RatingMeta, Screen, T, TonePill } from '../../../kit';
@@ -88,7 +88,7 @@ export function ServicesScreen({ navigation }: any) {
               backgroundColor: color.brand[50],
             }}
           >
-            <MaterialCommunityIcons name="shield-check" size={20} color={color.brand[600]} />
+            <Feather name="shield" size={20} color={color.brand[600]} />
             <T variant="label" tone="deep" style={{ flex: 1 }}>
               {data.guidance}
             </T>
