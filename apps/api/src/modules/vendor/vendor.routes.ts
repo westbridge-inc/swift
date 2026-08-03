@@ -14,7 +14,6 @@ import { BookingService } from '../booking/booking.service';
 import { VerificationService } from '../verification/verification.service';
 import { getKycProvider } from '../../providers/kyc/kyc-provider';
 import { getStorageProvider } from '../../providers/storage/storage-provider';
-import QRCode from 'qrcode';
 import { parseCsvWithHeader } from '../../utils/csv';
 import { AiService } from '../ai/ai.service';
 import { guessColumnMapping, applyMapping, toImportCsv, REQUIRED_FIELDS, type ColumnMapping } from '../../utils/catalogue-map';
@@ -30,6 +29,7 @@ import { SearchService } from '../search/search.service';
 import { subscriptionOperability } from '../subscription/operate-gate';
 import { QrService } from '../qr/qr.service';
 import { QrAnalyticsService } from '../qr/qr-analytics.service';
+import { cachedRender, renderQrPng, renderQrSvg, renderTemplatePdf } from '../qr/qr-assets.service';
 import { publicWebBase } from '../qr/qr-codes';
 
 // ---------------------------------------------------------------------------
@@ -640,14 +640,9 @@ export async function vendorRoutes(app: FastifyInstance) {
     const base = publicWebBase();
     const graceDays = await qrService.graceDays();
     const shortUrl = `${base}/s/${row.shortCode}`;
-    const svg = await QRCode.toString(shortUrl, {
-      type: 'svg',
-      // Print physics (spec Part 16): EC level H tolerates 30% damage and is
-      // required for the later center-logo overlay; quiet zone ≥ 4 modules.
-      errorCorrectionLevel: 'H',
-      margin: 4,
-      width: 320,
-    });
+    // EC-H + quiet zone ≥ 4 + the contrast law live in the asset service — one
+    // render home for the screen SVG, the PNGs, and the print pack.
+    const svg = await renderQrSvg(shortUrl);
     return {
       deepLink: shortUrl,
       shortUrl,
@@ -713,6 +708,52 @@ export async function vendorRoutes(app: FastifyInstance) {
     const { range } = z.object({ range: z.enum(['7d', '30d', '90d', 'all']).default('30d') })
       .parse(request.query ?? {});
     return { success: true, data: await qrAnalytics.forVendor(vendorId, range) };
+  });
+
+  /** GET /qr/assets/:format — the print & share pack (spec 4.4/4.5/16).
+   *  png (1024|4096 px) · svg · pdf (one of six 300-DPI print templates with
+   *  bleed + trim marks, vector code, brand fonts embedded). Renders cache per
+   *  (code id, version, format, options) — regenerate mints a new row, so keys
+   *  self-invalidate. Rate-limited per account-sized window (spec 20/hour). */
+  app.get('/qr/assets/:format', {
+    preHandler: [app.authenticate],
+    config: { rateLimit: { max: 20, timeWindow: '1 hour' } },
+  }, async (request, reply) => {
+    const { vendorId } = await requireVendor(app, request, 'MANAGER');
+    const { format } = z.object({ format: z.enum(['png', 'svg', 'pdf']) }).parse(request.params);
+    const query = z.object({
+      template: z.enum(['card', 'tabletent', 'sticker', 'flyer', 'decal', 'poster']).default('card'),
+      size: z.coerce.number().int().refine((n) => n === 1024 || n === 4096, '1024 or 4096').default(1024),
+    }).parse(request.query ?? {});
+
+    const vendor = await app.prisma.vendor.findUniqueOrThrow({
+      where: { id: vendorId },
+      select: { name: true, vendorType: true },
+    });
+    const row = await qrService.getOrCreateForVendor(vendorId, request.user.userId);
+    const shortUrl = `${publicWebBase()}/s/${row.shortCode}`;
+    const cacheKey = `${row.id}:${row.version}:${format}:${query.template}:${query.size}`;
+
+    if (format === 'svg') {
+      const svg = await cachedRender(`${cacheKey}`, async () => Buffer.from(await renderQrSvg(shortUrl, 1024), 'utf8'));
+      return reply
+        .type('image/svg+xml')
+        .header('content-disposition', `attachment; filename="swift-qr-${row.shortCode}.svg"`)
+        .send(svg);
+    }
+    if (format === 'png') {
+      const png = await cachedRender(cacheKey, () => renderQrPng(shortUrl, query.size));
+      return reply
+        .type('image/png')
+        .header('content-disposition', `attachment; filename="swift-qr-${row.shortCode}-${query.size}.png"`)
+        .send(png);
+    }
+    const pdf = await cachedRender(cacheKey, () =>
+      renderTemplatePdf(query.template, { vendorName: vendor.name, vendorType: vendor.vendorType, shortUrl }));
+    return reply
+      .type('application/pdf')
+      .header('content-disposition', `attachment; filename="swift-qr-${query.template}.pdf"`)
+      .send(pdf);
   });
 
   // =========================================================================
