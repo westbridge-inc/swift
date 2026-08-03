@@ -869,7 +869,9 @@ model Vendor {
   orders                  Order[]
   carts                   Cart[]
 
-  /// Stable slug for printed QR deep links: /v/{qrSlug}. Never reuse or rotate.
+  /// DORMANT (never wired to a route): superseded by the QrCode model, which
+  /// owns printed-QR deep links via /s/{shortCode}. Kept only because rows
+  /// carry values and the domain-model test pins uniqueness. Do not build on.
   qrSlug String @unique @default(cuid())
 
   /// The vendor's OWN MMG (Mobile Money Guyana) "pay me" link. Opt-in: when set,
@@ -3525,4 +3527,118 @@ model BatchingSettings {
   addonScanIntervalS      Int     @default(20)
 
   @@map("batching_settings")
+}
+
+// ---------------------------------------------------------------------------
+// QR GROWTH ENGINE (scan-to-store) — printed QR → /s/{code} resolver → web
+// storefront. QrCode supersedes the dormant Vendor.qrSlug field (never wired).
+// ---------------------------------------------------------------------------
+
+/// Storefront-bearing entity kinds. Services storefronts are Vendors
+/// (VendorType.SERVICE); ServiceProvider is an individual pro with no
+/// storefront, so VENDOR is the only member until a new storefront model exists.
+enum QrEntityType {
+  VENDOR
+}
+
+enum QrStatus {
+  ACTIVE
+  SUPERSEDED
+  DEACTIVATED
+}
+
+enum ScanDecision {
+  WEB_RENDER
+  APP_OPEN_ASSUMED
+  RETIRED_PAGE
+  UNAVAILABLE_PAGE
+  NOT_FOUND
+}
+
+model QrCode {
+  id            String       @id @default(cuid())
+  tenantId      String       @default("swift-default")
+  entityType    QrEntityType
+  entityId      String
+  /// 10-char CSPRNG, charset 23456789BCDFGHJKMNPQRSTVWXYZ, stored uppercase.
+  shortCode     String       @unique
+  /// Denormalized entity slug at creation; the resolver always redirects to
+  /// the entity's CURRENT slug, so this is provenance, not routing truth.
+  slug          String
+  version       Int          @default(1)
+  status        QrStatus     @default(ACTIVE)
+  styleTemplate String       @default("standard")
+  createdById   String
+  createdAt     DateTime     @default(now())
+  /// Supersede grace anchor: the old code keeps resolving for
+  /// QR_SUPERSEDE_GRACE_DAYS after this instant (printed materials die slowly).
+  supersededAt  DateTime?
+  deactivatedAt DateTime?
+  scanEvents    ScanEvent[]
+
+  @@index([tenantId, entityType, entityId])
+  @@index([tenantId, status])
+  @@map("qr_codes")
+}
+
+// PLUS (raw SQL in the migration — Prisma can't express partial uniques):
+// CREATE UNIQUE INDEX one_active_qr_per_entity
+//   ON "qr_codes"("tenantId","entityType","entityId") WHERE status = 'ACTIVE';
+// This is the concurrency guard for get-or-create; on P2002 re-read the winner.
+
+/// One row per scan, PII-free by construction: hashed IP (daily rotating salt),
+/// hashed UA, coarse device fields only. Raw rows older than
+/// SCAN_RAW_RETENTION_DAYS roll up into ScanDailyRollup then delete (DPA).
+model ScanEvent {
+  id          String       @id @default(cuid())
+  tenantId    String       @default("swift-default")
+  /// Null for NOT_FOUND scans — there is no QrCode row to point at (the spec's
+  /// required FK can't store its own NOT_FOUND decision; divergence logged).
+  qrCodeId    String?
+  qrCode      QrCode?      @relation(fields: [qrCodeId], references: [id])
+  occurredAt  DateTime     @default(now())
+  decision    ScanDecision
+  src         String?
+  template    String?
+  osFamily    String? // ios | android | desktop | other (coarse, from UA)
+  deviceClass String? // phone | tablet | desktop
+  uaHash      String? // sha256(UA) — never the raw UA string
+  ipHash      String? // sha256(ip + daily rotating salt) — unlinkable across days
+  country     String?
+  sessionId   String?
+
+  @@index([tenantId, qrCodeId, occurredAt])
+  @@index([occurredAt])
+  @@map("scan_events")
+}
+
+/// Printed QR codes are immortal: a rename mints a NEW slug and writes the old
+/// one here. Storefront resolution: exact slug → SlugRedirect → 301 → else 404.
+model SlugRedirect {
+  id         String       @id @default(cuid())
+  tenantId   String       @default("swift-default")
+  entityType QrEntityType
+  oldSlug    String
+  entityId   String
+  createdAt  DateTime     @default(now())
+
+  @@unique([tenantId, entityType, oldSlug])
+  @@map("slug_redirects")
+}
+
+/// Retention rollup target: per-day counts by decision/os/template. The
+/// analytics endpoint sums raw + rollup so numbers survive the purge.
+model ScanDailyRollup {
+  id       String       @id @default(cuid())
+  tenantId String       @default("swift-default")
+  qrCodeId String
+  date     DateTime     @db.Date
+  decision ScanDecision
+  osFamily String?
+  template String?
+  count    Int
+
+  @@unique([tenantId, qrCodeId, date, decision, osFamily, template])
+  @@index([tenantId, qrCodeId, date])
+  @@map("scan_daily_rollups")
 }

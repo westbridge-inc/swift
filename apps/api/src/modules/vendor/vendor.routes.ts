@@ -28,6 +28,8 @@ import { ALLOWED_IMAGE_TYPES, looksLikeImage } from '../../utils/images';
 import { scheduleVendorSearchSync } from '../search/search-sync';
 import { SearchService } from '../search/search.service';
 import { subscriptionOperability } from '../subscription/operate-gate';
+import { QrService } from '../qr/qr.service';
+import { publicWebBase } from '../qr/qr-codes';
 
 // ---------------------------------------------------------------------------
 // Input schemas
@@ -494,6 +496,7 @@ export async function vendorRoutes(app: FastifyInstance) {
   );
   const storage = getStorageProvider();
   const bookingService = new BookingService(app.prisma);
+  const qrService = new QrService(app.prisma);
 
   // A vendor may only DRIVE an order FORWARD (accept / prepare / ready / complete)
   // while eligible to operate — the SAME predicate as the toggle-orders front
@@ -624,21 +627,78 @@ export async function vendorRoutes(app: FastifyInstance) {
   });
 
   // =========================================================================
-  // 0. QR CODE (acquisition + catalogue — spec §5.4)
+  // 0. QR CODE (scan-to-store growth engine — QrCode lifecycle + short links)
   // =========================================================================
 
-  /** GET /qr — printable/shareable QR linking to this vendor's public catalogue.
-   *  Doubles as the acquisition tool (pulls a vendor's customers onto Swift). */
+  /** Render one QrCode row as the API payload: the QR image encodes the SHORT
+   *  link {base}/s/{code} (survives renames — the resolver 302s to the current
+   *  slug). `deepLink` is kept as an alias of shortUrl for the existing mobile
+   *  StoreQrCard, which renders { svg, deepLink } and predates this system. */
+  async function qrPayload(row: { shortCode: string; version: number; status: string }, vendorName: string, slug: string) {
+    const base = publicWebBase();
+    const shortUrl = `${base}/s/${row.shortCode}`;
+    const svg = await QRCode.toString(shortUrl, {
+      type: 'svg',
+      // Print physics (spec Part 16): EC level H tolerates 30% damage and is
+      // required for the later center-logo overlay; quiet zone ≥ 4 modules.
+      errorCorrectionLevel: 'H',
+      margin: 4,
+      width: 320,
+    });
+    return {
+      deepLink: shortUrl,
+      shortUrl,
+      shortCode: row.shortCode,
+      canonicalUrl: `${base}/store/${slug}`,
+      version: row.version,
+      status: row.status,
+      svg,
+      vendorName,
+    };
+  }
+
+  /** GET /qr — get-or-create this store's ACTIVE code (idempotent; the
+   *  one-ACTIVE partial unique makes it concurrency-safe). The acquisition
+   *  artifact: print it, customers scan to order. */
   app.get('/qr', auth, async (request) => {
     const { vendorId } = await requireVendor(app, request, 'MANAGER');
     const vendor = await app.prisma.vendor.findUniqueOrThrow({
       where: { id: vendorId },
       select: { slug: true, name: true },
     });
-    const base = process.env['APP_PUBLIC_URL'] ?? 'https://swift.gy';
-    const deepLink = `${base}/v/${vendor.slug}`;
-    const svg = await QRCode.toString(deepLink, { type: 'svg', margin: 1, width: 320 });
-    return { success: true, data: { deepLink, svg, vendorName: vendor.name } };
+    const row = await qrService.getOrCreateForVendor(vendorId, request.user.userId);
+    return { success: true, data: await qrPayload(row, vendor.name, vendor.slug) };
+  });
+
+  /** POST /qr/regenerate — supersede the current code (it keeps resolving for
+   *  the grace window so printed materials die slowly) and mint the next one.
+   *  Owner-only: it obsoletes physical material. */
+  app.post('/qr/regenerate', auth, async (request) => {
+    const { vendorId } = await requireVendor(app, request, 'OWNER');
+    const vendor = await app.prisma.vendor.findUniqueOrThrow({
+      where: { id: vendorId },
+      select: { slug: true, name: true },
+    });
+    const graceDays = await qrService.graceDays();
+    const { current, superseded } = await qrService.regenerateForVendor(vendorId, request.user.userId);
+    return {
+      success: true,
+      data: {
+        ...(await qrPayload(current, vendor.name, vendor.slug)),
+        previous: superseded
+          ? { shortCode: superseded.shortCode, graceDays, graceEndsAt: new Date(Date.now() + graceDays * 24 * 60 * 60 * 1000).toISOString() }
+          : null,
+      },
+    };
+  });
+
+  /** POST /qr/deactivate — immediate kill switch (stolen/misused materials).
+   *  Requires { confirm: true }; owner-only; idempotent. */
+  app.post('/qr/deactivate', auth, async (request) => {
+    const { vendorId } = await requireVendor(app, request, 'OWNER');
+    z.object({ confirm: z.literal(true) }).parse(request.body);
+    const { deactivated } = await qrService.deactivateForVendor(vendorId);
+    return { success: true, data: { deactivated: deactivated > 0 } };
   });
 
   // =========================================================================

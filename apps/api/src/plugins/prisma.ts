@@ -11,7 +11,7 @@ import { getTenantId } from './tenant-context';
 // by the existing per-owner scoping (customerId / ownerId / userId), which the
 // IDOR suite proves. No context set (jobs, tests, pre-auth) → unscoped, so
 // single-tenant behavior is unchanged.
-const TENANT_MODELS = new Set(['user', 'vendor', 'order']);
+const TENANT_MODELS = new Set(['user', 'vendor', 'order', 'qrcode', 'scanevent']);
 const SCOPED_READS = new Set([
   'findMany', 'findFirst', 'findFirstOrThrow', 'count', 'aggregate', 'groupBy', 'updateMany', 'deleteMany',
 ]);
@@ -68,6 +68,11 @@ const prisma = new PrismaClient({
     user: { $allOperations: tenantScope },
     vendor: { $allOperations: tenantScope },
     order: { $allOperations: tenantScope },
+    // QR growth engine: codes + scan analytics are tenant-owned rows. The
+    // public /s/:code resolver runs pre-auth (no context) and stays unscoped
+    // by design — a shortCode is globally unique and names its own tenant.
+    qrCode: { $allOperations: tenantScope },
+    scanEvent: { $allOperations: tenantScope },
   },
 });
 
