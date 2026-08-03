@@ -66,6 +66,9 @@ export function CartScreen() {
   const [instructions, setInstructions] = useState('');
   const [express, setExpress] = useState(false);
   const [payMethod, setPayMethod] = useState<'CASH' | 'MMG'>('CASH');
+  // Pickup spec 2.1: the FIRST decision — it reshapes everything below.
+  const [fulfillment, setFulfillment] = useState<'DELIVERY' | 'PICKUP'>('DELIVERY');
+  const [placedPickup, setPlacedPickup] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
   const [placedOrderId, setPlacedOrderId] = useState<string | null>(null);
   // LIFECYCLE_V2: while held, the store has NOT been told yet — say so honestly.
@@ -121,6 +124,15 @@ export function CartScreen() {
   // A booking is not a delivery: no rider, no delivery fee, no address unless
   // the pro travels to you. The checkout reshapes itself around that.
   const apptOnly = items.length > 0 && bookingItems.length === items.length;
+  // Bookings have no counter to collect from; pickup applies to goods carts.
+  const pickup = !apptOnly && fulfillment === 'PICKUP';
+  const choosePickup = () => {
+    setFulfillment('PICKUP');
+    setExpress(false); // express is a delivery speed
+    // No rider on a pickup — clear any rider tip SERVER-side so totals stay
+    // server-truth (the UI below hides the tip block while picked).
+    if (Number(c?.tipAmount) > 0) setTip.mutate(0);
+  };
   const homeVisit = apptOnly && apptPayload.some((a) => (a as { mode?: string }).mode === 'MOBILE');
   const needsAddress = !apptOnly || homeVisit;
   // Slot ISOs carry local wall-clock time on their UTC face (same convention
@@ -133,17 +145,20 @@ export function CartScreen() {
   };
 
   const onOrder = (extra?: Record<string, unknown>) => {
+    const asPickup = pickup && !!c?.vendor?.id;
     placeOrder.mutate(
       {
         paymentMethod: payMethod === 'MMG' ? 'MOBILE_MONEY' : 'CASH',
-        ...(express ? { express: true } : {}),
+        ...(express && !pickup ? { express: true } : {}),
         ...(apptPayload.length ? { appointments: apptPayload } : {}),
-        ...(instructions.trim() ? { deliveryInstructions: instructions.trim() } : {}),
+        ...(instructions.trim() && !pickup ? { deliveryInstructions: instructions.trim() } : {}),
+        ...(asPickup ? { fulfillmentSelections: { [c.vendor.id]: 'PICKUP' } } : {}),
         ...(extra ?? {}),
       },
       {
         onSuccess: (data: any) => {
           haptic.success();
+          setPlacedPickup(asPickup || (extra as any)?.fulfillmentSelections != null);
           const first = data?.orders?.[0];
           setPlacedOrderId(first?.id ?? null);
           setPlacedHeld(!!(first?.holdExpiresAt && new Date(first.holdExpiresAt) > new Date()));
@@ -207,9 +222,51 @@ export function CartScreen() {
           contentContainerStyle={{ paddingHorizontal: GUTTER, paddingBottom: space['3xl'] }}
           keyboardShouldPersistTaps="handled"
         >
+          {/* Pickup spec 2.1 — the mode choice, first and unmissable. */}
+          {!apptOnly && items.length > 0 ? (
+            <View style={{ flexDirection: 'row', gap: space.sm, marginTop: space.sm }}>
+              {(['DELIVERY', 'PICKUP'] as const).map((mode) => {
+                const active = fulfillment === mode;
+                return (
+                  <Pressable key={mode} style={{ flex: 1 }} onPress={() => (mode === 'PICKUP' ? choosePickup() : setFulfillment('DELIVERY'))}>
+                    <View
+                      style={{
+                        height: 44,
+                        borderRadius: radius.full,
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        flexDirection: 'row',
+                        gap: 6,
+                        borderWidth: 1.5,
+                        borderColor: active ? color.brand[500] : color.border.strong,
+                        backgroundColor: active ? color.brand[500] : color.surface.base,
+                      }}
+                    >
+                      <Feather name={mode === 'DELIVERY' ? 'navigation' : 'shopping-bag'} size={15} color={active ? color.white : color.text.muted} />
+                      <T variant="label" weight="semibold" style={{ color: active ? color.white : color.text.primary }}>
+                        {mode === 'DELIVERY' ? 'Delivery' : 'Pickup'}
+                      </T>
+                    </View>
+                  </Pressable>
+                );
+              })}
+            </View>
+          ) : null}
+
           {/* Delivery location — or the service address when the pro travels to
-              you. An at-the-business booking has no address to collect at all. */}
-          {needsAddress ? (
+              you. An at-the-business booking has no address to collect at all.
+              Pickup: the SHOP is the address — show where to collect. */}
+          {pickup ? (
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.sm, marginTop: space.md }}>
+              <Feather name="shopping-bag" size={14} color={color.text.muted} />
+              <View style={{ flex: 1 }}>
+                <T variant="label" tone="muted">Pick up from</T>
+                <T variant="body" weight="semibold" style={{ marginTop: 2 }} numberOfLines={1}>
+                  {c.vendor?.name ?? 'The store'}
+                </T>
+              </View>
+            </View>
+          ) : needsAddress ? (
             <View style={{ flexDirection: 'row', alignItems: 'center', marginTop: space.sm }}>
               <View style={{ flex: 1 }}>
                 <T variant="label" tone="muted">
@@ -323,8 +380,9 @@ export function CartScreen() {
             ))}
           </View>
 
-          {/* Tip the rider (real cart-level tip) — bookings have no rider */}
-          {!apptOnly ? (
+          {/* Tip the rider (real cart-level tip) — bookings have no rider,
+              and neither does a pickup. */}
+          {!apptOnly && !pickup ? (
             <>
               <T variant="heading" style={{ marginTop: space['2xl'] }}>
                 Tip your rider
@@ -343,15 +401,17 @@ export function CartScreen() {
             </>
           ) : null}
 
-          {/* Delivery instructions / notes for the pro */}
-          <View style={{ marginTop: space.xl }}>
-            <LabeledInput
-              icon="message-square"
-              placeholder={apptOnly ? 'Notes for your appointment (optional)' : 'Delivery instructions (optional)'}
-              value={instructions}
-              onChangeText={setInstructions}
-            />
-          </View>
+          {/* Delivery instructions / notes for the pro — a pickup has neither. */}
+          {!pickup ? (
+            <View style={{ marginTop: space.xl }}>
+              <LabeledInput
+                icon="message-square"
+                placeholder={apptOnly ? 'Notes for your appointment (optional)' : 'Delivery instructions (optional)'}
+                value={instructions}
+                onChangeText={setInstructions}
+              />
+            </View>
+          ) : null}
 
           {/* Payment — cash, or pay the store directly on their own MMG */}
           <View style={{ marginTop: space.xl, gap: space.sm }}>
@@ -362,8 +422,12 @@ export function CartScreen() {
               {
                 key: 'CASH' as const,
                 icon: 'dollar-sign' as const,
-                title: apptOnly ? 'Pay at your appointment' : 'Cash on delivery',
-                sub: apptOnly ? 'Cash, when the service is done.' : 'Pay the rider when your order arrives.',
+                title: apptOnly ? 'Pay at your appointment' : pickup ? 'Pay at the counter' : 'Cash on delivery',
+                sub: apptOnly
+                  ? 'Cash, when the service is done.'
+                  : pickup
+                    ? 'Cash when you collect your order.'
+                    : 'Pay the rider when your order arrives.',
               },
               {
                 key: 'MMG' as const,
@@ -404,7 +468,7 @@ export function CartScreen() {
           </View>
 
           {/* Express delivery — priority dispatch; the premium goes to the rider */}
-          {c.deliveryFee > 0 ? (
+          {!pickup && c.deliveryFee > 0 ? (
             <Card style={{ marginTop: space.xl }}>
               <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
                 <View style={{ flex: 1, paddingRight: space.md }}>
@@ -428,12 +492,19 @@ export function CartScreen() {
             <T variant="heading">{apptOnly ? 'Booking summary' : 'Order summary'}</T>
             <View style={{ marginTop: space.md }}>
               <InfoRow label={`Items (${c.itemCount})`} value={money(c.subtotalCustomer)} />
-              {!apptOnly ? <InfoRow label="Delivery fee" value={c.deliveryFee === 0 ? 'Free' : money(c.deliveryFee)} /> : null}
-              {express && c.deliveryFee > 0 ? <InfoRow label="Express" value={money(c.expressSurcharge)} /> : null}
+              {!apptOnly && !pickup ? <InfoRow label="Delivery fee" value={c.deliveryFee === 0 ? 'Free' : money(c.deliveryFee)} /> : null}
+              {pickup ? <InfoRow label="Pickup" value="No delivery fee" /> : null}
+              {!pickup && express && c.deliveryFee > 0 ? <InfoRow label="Express" value={money(c.expressSurcharge)} /> : null}
               {c.discount > 0 ? <InfoRow label="Discount" value={`-${money(c.discount)}`} /> : null}
-              {!apptOnly && Number(c.tipAmount) > 0 ? <InfoRow label="Rider tip" value={money(c.tipAmount)} /> : null}
+              {!apptOnly && !pickup && Number(c.tipAmount) > 0 ? <InfoRow label="Rider tip" value={money(c.tipAmount)} /> : null}
               <View style={{ height: 1, backgroundColor: color.border.subtle, marginVertical: space.sm }} />
-              <InfoRow label="Total" value={money(express && c.deliveryFee > 0 ? c.expressTotal : c.totalAmount)} strong />
+              {/* Pickup preview = the same server numbers minus the delivery
+                  leg; the server prices the real order at place time. */}
+              <InfoRow
+                label={pickup ? 'Total at the counter' : 'Total'}
+                value={money(pickup ? c.totalAmount - c.deliveryFee - Number(c.tipAmount ?? 0) : express && c.deliveryFee > 0 ? c.expressTotal : c.totalAmount)}
+                strong
+              />
             </View>
             {apptOnly ? (
               <View style={{ marginTop: space.sm, gap: 4 }}>
@@ -452,6 +523,10 @@ export function CartScreen() {
                   Your time is confirmed when the business accepts the booking.
                 </T>
               </View>
+            ) : pickup ? (
+              <T variant="caption" tone="muted" style={{ marginTop: space.sm }}>
+                We&apos;ll tell you the moment it&apos;s ready — your pickup code shows on the order screen.
+              </T>
             ) : c.estimatedTotalMin ? (
               <T variant="caption" tone="muted" style={{ marginTop: space.sm }}>
                 Estimated arrival ~{c.estimatedTotalMin} min after the store confirms.
@@ -495,7 +570,7 @@ export function CartScreen() {
           ) : null}
 
           <PillButton
-            label={apptOnly ? 'Book now' : 'Place order'}
+            label={apptOnly ? 'Book now' : pickup ? 'Place pickup order' : 'Place order'}
             onPress={onOrder}
             loading={placeOrder.isPending}
             disabled={!c.meetsMinimum || c.unavailableItemIds?.length > 0 || (needsAddress && !c.deliveryAddress) || unslotted.length > 0}
@@ -572,9 +647,11 @@ export function CartScreen() {
         <T variant="label" tone="muted" center style={{ marginTop: space.sm }}>
           {placedAppt
             ? 'Your time is confirmed when the business accepts — we will let you know.'
-            : placedHeld
-              ? 'You have a few minutes to change your mind — cancelling is free until the store gets it.'
-              : 'The store has been notified — pay cash on delivery.'}
+            : placedPickup
+              ? 'We’ll tell you the moment it’s ready — show the pickup code on your order screen at the counter.'
+              : placedHeld
+                ? 'You have a few minutes to change your mind — cancelling is free until the store gets it.'
+                : 'The store has been notified — pay cash on delivery.'}
         </T>
         <PillButton
           label={placedAppt ? 'View booking' : 'Track order'}
