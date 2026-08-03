@@ -70,8 +70,14 @@ export class QrService {
       where: { id: vendorId },
       select: { slug: true, tenantId: true },
     });
+    // Version continuity: minting after a deactivate continues the sequence
+    // (…v2 DEACTIVATED → v3 ACTIVE), so per-version analytics never collide.
+    const latest = await this.prisma.qrCode.aggregate({
+      _max: { version: true },
+      where: { entityType: 'VENDOR', entityId: vendorId },
+    });
     try {
-      return await this.createRow(vendor.tenantId, vendorId, vendor.slug, createdByUserId, 1);
+      return await this.createRow(vendor.tenantId, vendorId, vendor.slug, createdByUserId, (latest._max.version ?? 0) + 1);
     } catch (e) {
       if (!isUniqueViolation(e)) throw e;
       // Lost the one-ACTIVE race — the winner's row is the vendor's code.
