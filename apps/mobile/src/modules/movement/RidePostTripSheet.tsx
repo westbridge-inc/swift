@@ -1,6 +1,7 @@
 /** @jsxImportSource react */
 import React, { useEffect, useState } from 'react';
 import { Pressable, View } from 'react-native';
+import * as WebBrowser from 'expo-web-browser';
 import { color, radius, space } from '@swift/ui';
 import { money } from '../../lib/money';
 import { useRateOrder, useTipOrder } from '../../hooks/customer';
@@ -59,6 +60,24 @@ export function RidePostTripSheet({ ride, onDone }: { ride: any | null; onDone: 
       <T variant="body" tone="muted" center style={{ marginTop: space.sm }}>
         {money(fare)} · cash · paid to {driverName}
       </T>
+
+      {ride.driver?.mmgPayUrl ? (
+        // 5.9 MMG path [rides spec]: the DRIVER'S OWN pay link — money goes
+        // straight to them, Swift never holds it. No cash on you → one tap.
+        // Honesty law: opening the link never fakes a "Paid ✓"; the driver
+        // confirms receipt on their side like any MMG transfer.
+        <>
+          <PillButton
+            label={`Pay ${money(fare)} with MMG instead`}
+            variant="outline"
+            style={{ marginTop: space.md, alignSelf: 'stretch' }}
+            onPress={() => WebBrowser.openBrowserAsync(String(ride.driver.mmgPayUrl)).catch(() => undefined)}
+          />
+          <T variant="caption" tone="muted" center style={{ marginTop: space.xs }}>
+            Goes straight to {driverName} on their MMG — show them the confirmation.
+          </T>
+        </>
+      ) : null}
 
       {/* Receipt — the trip on paper: route, when, class + fare. */}
       <View style={{ alignSelf: 'stretch', borderRadius: radius.lg, backgroundColor: color.surface.subtle, padding: space.md, marginTop: space.lg }}>
