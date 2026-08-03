@@ -98,6 +98,12 @@ export function RootNavigator() {
         {!hasOnboarded ? (
           // First run only: kit onboarding slides, then never again.
           <Stack.Screen name="Onboarding" component={OnboardingScreen} />
+        ) : wantsAuth && !isAuthenticated ? (
+          // "Already have an account? Sign in" from first-open (intent null —
+          // after OTP the ACCOUNT routes, the trio is never asked) and the
+          // guest checkout prompt both land here. Placed before the intent
+          // question so sign-in-first needs no role answer.
+          <Stack.Screen name="Auth" component={AuthStack} />
         ) : !intent ? (
           // Role FIRST: "How will you use Swift?" decides the whole path — a
           // customer then just picks a country and browses (sign-in waits for
