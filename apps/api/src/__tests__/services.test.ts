@@ -149,6 +149,43 @@ describe('Services — risk-tiered browse', () => {
     expect(res.json().data.providers.length).toBeGreaterThanOrEqual(1);
     expect(res.json().data.providers[0].certified).toBe(true); // licensed listed first
   });
+
+  it('the verified-first promise holds mechanically: unverified never list, a CLAIM is not a badge, real certs outrank ratings', async () => {
+    // Isolated trade so the electrician rows above can't blur the ordering.
+    const trade = 'plumbing';
+
+    // 1. A provider with NO approved docs — must never appear to customers.
+    const ghost = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
+    const ghostRes = await inject('POST', '/api/v1/services/providers', { trade, bio: 'No docs yet' }, ghost.token);
+    const ghostId = ghostRes.json().data?.id;
+
+    // 2. A verified provider who merely CLAIMS a certificate (non-checkable
+    //    type → PENDING) and carries a stellar rating.
+    const claimed = await makeVerifiedProvider(trade);
+    await inject('POST', '/api/v1/services/providers/qualifications', { type: 'CVQ', referenceNumber: 'self-said-so' }, claimed.token);
+    await app.prisma.serviceProvider.update({ where: { id: claimed.providerId }, data: { averageRating: 5, totalRatings: 40 } });
+
+    // 3. A genuinely certified provider (registry-checkable licence) with a
+    //    LOWER rating than the claimer.
+    const certified = await makeVerifiedProvider(trade);
+    await inject('POST', '/api/v1/services/providers/qualifications', { type: 'GEI_LICENCE', referenceNumber: 'GEI-55021' }, certified.token);
+    await app.prisma.serviceProvider.update({ where: { id: certified.providerId }, data: { averageRating: 4.2, totalRatings: 12 } });
+
+    const customer = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
+    const res = await inject('GET', `/api/v1/services/providers?trade=${trade}`, undefined, customer.token);
+    expect(res.statusCode).toBe(200);
+    const list = res.json().data.providers as { id: string; certified: boolean }[];
+
+    // Unverified provider is invisible — not last, INVISIBLE.
+    expect(list.some((p) => p.id === ghostId)).toBe(false);
+    // The real certificate leads even against a higher rating…
+    expect(list[0]?.id).toBe(certified.providerId);
+    expect(list[0]?.certified).toBe(true);
+    // …and the self-claimed certificate earns no badge and no priority.
+    const claimedRow = list.find((p) => p.id === claimed.providerId);
+    expect(claimedRow?.certified).toBe(false);
+    expect(list.findIndex((p) => p.id === claimed.providerId)).toBeGreaterThan(0);
+  });
 });
 
 describe('Services — job lifecycle + two-way rating', () => {
