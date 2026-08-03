@@ -39,6 +39,7 @@ import { registerPublicUploads } from './utils/public-uploads';
 import { observabilityPlugin } from './plugins/observability';
 import { legalRoutes } from './modules/legal/legal.routes';
 import { publicRoutes } from './modules/public/public.routes';
+import { qrResolverRoutes } from './modules/qr/qr-resolver.routes';
 import { statementRoutes } from './modules/order/statement.routes';
 import path from 'node:path';
 
@@ -284,6 +285,10 @@ async function buildApp() {
   await app.register(aiRoutes, { prefix: '/api/v1/ai' });
   // Unauthenticated read-only storefront pages (web SEO) — see module header.
   await app.register(publicRoutes, { prefix: '/api/v1/public' });
+  // Printed-QR short links: /s/{code} at the ROOT path (the production web
+  // domain proxies /s/* here — LAUNCH_BLOCKERS deploy item). Public attack
+  // surface; treatment and decision table live in the module header.
+  await app.register(qrResolverRoutes);
   // HMAC-signed statement renders (the authed routes mint the links).
   await app.register(statementRoutes, { prefix: '/api/v1/statements' });
   // MMG agent-cash channels [san spec 4.1/4.2] — dark (503) until the

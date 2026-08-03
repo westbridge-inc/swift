@@ -738,7 +738,10 @@ describe('Trust completeness', () => {
     const res = await inject('GET', '/api/v1/vendor/qr', undefined, vendor.token);
     expect(res.statusCode).toBe(200);
     const data = res.json().data;
-    expect(data.deepLink).toContain('/v/');
+    // QR growth engine: the printed link is the short-code resolver URL
+    // (/s/{code} — survives renames); /v/{slug} was the old dead artifact.
+    expect(data.deepLink).toMatch(/\/s\/[23456789BCDFGHJKMNPQRSTVWXYZ]{10}$/);
+    expect(data.deepLink).toBe(data.shortUrl);
     expect(data.svg).toContain('svg');
   });
 
