@@ -371,6 +371,9 @@ export function RestaurantScreen() {
             />
             {v.distanceKm != null ? <StatCol icon="map-pin" value={`${v.distanceKm} km`} caption="Distance" /> : null}
             {v.etaMin != null ? <StatCol icon="clock" value={`${v.etaMin} min`} caption="Arrive" /> : null}
+            {/* Pickup spec 2.4 — quiet honesty: goods stores take order-ahead
+                pickup; the Cart's mode toggle is where it's chosen. */}
+            {!isServiceStore ? <StatCol icon="shopping-bag" value="Pickup" caption="Order ahead" /> : null}
             {hoursLabel(v.operatingHours) ? (
               <StatCol
                 icon="clock"
