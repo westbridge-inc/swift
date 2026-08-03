@@ -30,6 +30,11 @@ function scanIpSalt(): string {
 
 const sha256 = (value: string) => createHash('sha256').update(value).digest('hex');
 
+/** Funnel writers outside the resolver (e.g. INSTALL_TAP) share the hashers. */
+export function hashUa(ua: string): string {
+  return sha256(ua);
+}
+
 /** sha256(ip | UTC-day | salt): the day term rotates the derivation at 00:00
  *  UTC, so the same phone hashes differently tomorrow (per-day uniques work,
  *  cross-day tracking cannot). */

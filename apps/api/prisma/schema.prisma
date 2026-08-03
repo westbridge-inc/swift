@@ -1177,6 +1177,14 @@ model Order {
   promoCodeId String?
   promoCode   PromoCode? @relation(fields: [promoCodeId], references: [id])
 
+  /// QR growth engine: which client placed the order (null = pre-feature
+  /// mobile). Stamped WEB by the web checkout; mobile stays null until the
+  /// mobile client opts in. Never business logic — measurement only.
+  channel String?
+  /// The QrCode a scanned customer arrived through (?c= param carried to
+  /// checkout). "Orders from this QR" on the vendor dashboard reads this.
+  attributionQrCodeId String?
+
   ridePin            String?
   ridePinVerified    Boolean   @default(false)
   ridePinAttempts    Int       @default(0)
@@ -1218,6 +1226,8 @@ model Order {
   // The vendor order board reads "my orders in these states" constantly.
   @@index([vendorId, status])
   @@index([tenantId])
+  // "Orders from this QR" (vendor analytics); null-heavy so cheap.
+  @@index([attributionQrCodeId])
   @@map("orders")
 }
 
@@ -3553,6 +3563,12 @@ enum ScanDecision {
   RETIRED_PAGE
   UNAVAILABLE_PAGE
   NOT_FOUND
+  /// Storefront rendered with ?c= (web logs it once per session) — the funnel
+  /// stage between SCAN and orders.
+  STORE_VIEW
+  /// Install CTA tapped on the web storefront (both platforms; logged by
+  /// /attribution/intent so Android taps leave a server artifact too).
+  INSTALL_TAP
 }
 
 model QrCode {

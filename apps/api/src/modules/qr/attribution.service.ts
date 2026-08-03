@@ -2,6 +2,7 @@ import type { PrismaClient } from '@prisma/client';
 import { Prisma } from '@prisma/client';
 import { classifyScan } from './qr-codes';
 import { QrService } from './qr.service';
+import { enqueueScanEvent, hashScanIp, hashUa, parseUserAgent } from './scan-log';
 import {
   ATTRIB_MAX_OPEN_PER_FP,
   ATTRIB_TTL_MINUTES,
@@ -50,6 +51,23 @@ export class AttributionService {
   ): Promise<{ created: boolean; destinationPath: string } | null> {
     const dest = await this.destinationFor(shortCode);
     if (!dest) return null;
+
+    // Every install-CTA tap leaves a funnel artifact on the scan spine — this
+    // is how Android taps (which write no candidate row) stay countable.
+    const now0 = new Date();
+    const { osFamily, deviceClass } = parseUserAgent(request.ua);
+    enqueueScanEvent({
+      tenantId: dest.tenantId,
+      qrCodeId: dest.qrCodeId,
+      occurredAt: now0,
+      decision: 'INSTALL_TAP',
+      src: 'web',
+      osFamily,
+      deviceClass,
+      uaHash: request.ua ? hashUa(request.ua) : null,
+      ipHash: request.ip ? hashScanIp(request.ip, now0) : null,
+    });
+
     if (!request.isIos) return { created: false, destinationPath: dest.path };
 
     const fpHash = computeFpHash(request.ip, request.ua);

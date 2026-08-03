@@ -4,7 +4,7 @@ import { NotFoundError } from '../../utils/errors';
 import { AttributionService } from './attribution.service';
 import { appStoreUrl, playStoreUrlFor } from './attribution';
 import { normalizeShortCode, sanitizeTemplate } from './qr-codes';
-import { parseUserAgent } from './scan-log';
+import { parseUserAgent, startScanLog, stopScanLog } from './scan-log';
 
 // ---------------------------------------------------------------------------
 // Public attribution endpoints (spec 4.3). Both are pre-auth by nature (the
@@ -27,6 +27,10 @@ const claimSchema = z.object({
 
 export async function attributionRoutes(app: FastifyInstance) {
   const attribution = new AttributionService(app.prisma);
+  // intent() writes INSTALL_TAP funnel events; both scan-log starters are
+  // idempotent, so co-registration with the resolver plugin is safe.
+  startScanLog(app.prisma);
+  app.addHook('onClose', async () => { await stopScanLog(); });
 
   /** POST /intent — web install-CTA tap. Records an iOS candidate (fingerprint
    *  computed from THIS request) and returns the platform store URL. */

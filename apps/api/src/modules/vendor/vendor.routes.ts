@@ -29,6 +29,7 @@ import { scheduleVendorSearchSync } from '../search/search-sync';
 import { SearchService } from '../search/search.service';
 import { subscriptionOperability } from '../subscription/operate-gate';
 import { QrService } from '../qr/qr.service';
+import { QrAnalyticsService } from '../qr/qr-analytics.service';
 import { publicWebBase } from '../qr/qr-codes';
 
 // ---------------------------------------------------------------------------
@@ -497,6 +498,7 @@ export async function vendorRoutes(app: FastifyInstance) {
   const storage = getStorageProvider();
   const bookingService = new BookingService(app.prisma);
   const qrService = new QrService(app.prisma);
+  const qrAnalytics = new QrAnalyticsService(app.prisma);
 
   // A vendor may only DRIVE an order FORWARD (accept / prepare / ready / complete)
   // while eligible to operate — the SAME predicate as the toggle-orders front
@@ -636,6 +638,7 @@ export async function vendorRoutes(app: FastifyInstance) {
    *  StoreQrCard, which renders { svg, deepLink } and predates this system. */
   async function qrPayload(row: { shortCode: string; version: number; status: string }, vendorName: string, slug: string) {
     const base = publicWebBase();
+    const graceDays = await qrService.graceDays();
     const shortUrl = `${base}/s/${row.shortCode}`;
     const svg = await QRCode.toString(shortUrl, {
       type: 'svg',
@@ -652,6 +655,8 @@ export async function vendorRoutes(app: FastifyInstance) {
       canonicalUrl: `${base}/store/${slug}`,
       version: row.version,
       status: row.status,
+      // The regenerate confirm dialog states this (config, never a hardcoded 30).
+      graceDays,
       svg,
       vendorName,
     };
@@ -699,6 +704,15 @@ export async function vendorRoutes(app: FastifyInstance) {
     z.object({ confirm: z.literal(true) }).parse(request.body);
     const { deactivated } = await qrService.deactivateForVendor(vendorId);
     return { success: true, data: { deactivated: deactivated > 0 } };
+  });
+
+  /** GET /qr/analytics?range=7d|30d|90d|all — the performance card. Every
+   *  number reconciles to rows (raw + rollups); reconciliation is test-gated. */
+  app.get('/qr/analytics', auth, async (request) => {
+    const { vendorId } = await requireVendor(app, request, 'MANAGER');
+    const { range } = z.object({ range: z.enum(['7d', '30d', '90d', 'all']).default('30d') })
+      .parse(request.query ?? {});
+    return { success: true, data: await qrAnalytics.forVendor(vendorId, range) };
   });
 
   // =========================================================================
