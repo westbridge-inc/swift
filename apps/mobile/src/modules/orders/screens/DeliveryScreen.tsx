@@ -331,6 +331,17 @@ export function DeliveryScreen() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   useEffect(fitMap, [!!vendorPos, !!dropPos, !!courierPos]);
 
+  // The READY moment gets the success haptic exactly once per transition —
+  // the ceremony card [pickup spec 2.2] does the visual half.
+  const prevStatusRef = useRef<string | undefined>(undefined);
+  useEffect(() => {
+    const status = o?.status as string | undefined;
+    if (status === 'READY_FOR_PICKUP' && prevStatusRef.current && prevStatusRef.current !== 'READY_FOR_PICKUP' && o?.fulfillment === 'PICKUP') {
+      haptic.success();
+    }
+    prevStatusRef.current = status;
+  }, [o?.status, o?.fulfillment]);
+
   if (order.isLoading) return <LoadingBlock style={{ backgroundColor: color.surface.subtle }} />;
   if (order.isError || !o) {
     return (
@@ -584,7 +595,7 @@ export function DeliveryScreen() {
           ) : (
             <>
               <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.sm, marginTop: rider ? space.xl : 0 }}>
-                <T variant="heading">Delivery time</T>
+                <T variant="heading">{o.fulfillment === 'PICKUP' ? 'Pickup' : 'Delivery time'}</T>
                 {o.isExpress ? (
                   <View style={{ flexDirection: 'row', alignItems: 'center', gap: 3, borderRadius: radius.full, paddingHorizontal: space.sm, paddingVertical: 3, backgroundColor: color.brand[50] }}>
                     <Feather name="zap" size={11} color={color.brand[600]} />
@@ -601,7 +612,11 @@ export function DeliveryScreen() {
                     ? `Estimated by ${eta}`
                     : 'The store will confirm your order shortly'}
               </T>
-              {o.deliveryAddress ? (
+              {o.fulfillment === 'PICKUP' && o.pickupAddress ? (
+                <T variant="caption" tone="faint" style={{ marginTop: 2 }} numberOfLines={1}>
+                  From: {o.pickupAddress}
+                </T>
+              ) : o.deliveryAddress ? (
                 <T variant="caption" tone="faint" style={{ marginTop: 2 }} numberOfLines={1}>
                   To: {o.deliveryAddress}
                 </T>
@@ -613,26 +628,67 @@ export function DeliveryScreen() {
             </>
           )}
 
-          {/* Takeaway handover gate — the counter asks for THIS code. It only
-              lived on the checkout confirmation before; now the order screen
-              keeps it until the store marks the order collected. */}
+          {/* Takeaway handover gate — the counter asks for THIS code. Quiet
+              while the kitchen works; at READY it becomes the signature
+              moment [pickup spec 2.2]: "It's ready." + the code + the way
+              there. The push never carries the code — this screen does. */}
           {o.fulfillment === 'PICKUP' && o.pickupCode && !cancelled && stage < 3 ? (
-            <View
-              style={{
-                alignItems: 'center',
-                borderRadius: radius.lg,
-                backgroundColor: color.brand[50],
-                paddingVertical: space.lg,
-                marginTop: space.xl,
-              }}
-            >
-              <T variant="micro" tone="muted">
-                Pickup code — show at the counter
-              </T>
-              <T variant="displayXl" tone="brand" style={{ marginTop: 4, letterSpacing: 6 }}>
-                {o.pickupCode}
-              </T>
-            </View>
+            o.status === 'READY_FOR_PICKUP' ? (
+              <View
+                style={{
+                  alignItems: 'center',
+                  borderRadius: radius.lg,
+                  backgroundColor: color.brand[50],
+                  borderWidth: 1,
+                  borderColor: color.brand[500],
+                  paddingVertical: space.xl,
+                  paddingHorizontal: space.lg,
+                  marginTop: space.xl,
+                }}
+              >
+                <T variant="title" tone="deep">It’s ready.</T>
+                <T variant="micro" tone="muted" style={{ marginTop: space.md }}>
+                  Show this code at the counter
+                </T>
+                <T variant="displayXl" tone="brand" style={{ marginTop: 4, letterSpacing: 6 }}>
+                  {o.pickupCode}
+                </T>
+                {o.pickupAddress ? (
+                  <Pressable
+                    onPress={() => {
+                      const q = o.pickupLat != null && o.pickupLng != null ? `${o.pickupLat},${o.pickupLng}` : encodeURIComponent(o.pickupAddress);
+                      Linking.openURL(`https://maps.apple.com/?daddr=${q}`).catch(() => {});
+                    }}
+                  >
+                    {({ pressed }) => (
+                      <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: space.md, opacity: pressed ? 0.7 : 1 }}>
+                        <Feather name="navigation" size={14} color={color.brand[600]} />
+                        <T variant="label" weight="semibold" tone="deep">
+                          Directions to {o.vendor?.name ?? 'the store'}
+                        </T>
+                      </View>
+                    )}
+                  </Pressable>
+                ) : null}
+              </View>
+            ) : (
+              <View
+                style={{
+                  alignItems: 'center',
+                  borderRadius: radius.lg,
+                  backgroundColor: color.brand[50],
+                  paddingVertical: space.lg,
+                  marginTop: space.xl,
+                }}
+              >
+                <T variant="micro" tone="muted">
+                  Pickup code — show at the counter
+                </T>
+                <T variant="displayXl" tone="brand" style={{ marginTop: 4, letterSpacing: 6 }}>
+                  {o.pickupCode}
+                </T>
+              </View>
+            )
           ) : null}
 
           {/* Order lines */}
