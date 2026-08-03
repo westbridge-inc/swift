@@ -15,6 +15,7 @@ import {
   useSetCartTip,
   useUpdateCartItem,
 } from '../../../hooks/customer';
+import { maybePrimeNotifications } from '../../../services/notification-priming';
 import { useAuthStore } from '../../../stores/authStore';
 import { useBookingStore } from '../../../stores/bookingStore';
 import { useLocationStore } from '../../../stores/locationStore';
@@ -164,6 +165,9 @@ export function CartScreen() {
           setPlacedHeld(!!(first?.holdExpiresAt && new Date(first.holdExpiresAt) > new Date()));
           setPlacedAppt(apptPayload.length > 0);
           if (apptPayload.length) clearAppointments();
+          // First order = the first moment notifications are obviously useful
+          // [first-open SO-5]; primes once, never at boot.
+          maybePrimeNotifications('customer_order');
           // MMG: take the customer straight to the store's own MMG link, in-app.
           if (payMethod === 'MMG') void openPayLink(first?.vendor?.mmgPayUrl);
         },

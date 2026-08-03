@@ -25,6 +25,7 @@ import { RootNavigator } from './navigation/RootNavigator';
 import { queryClient } from './lib/queryClient';
 import { initSecureStorage } from './lib/storage';
 import { track } from './lib/analytics';
+import { PermissionPrimeSheet } from './components/PermissionPrimeSheet';
 import { useAuthStore } from './stores/authStore';
 import { useLocationStore } from './stores/locationStore';
 import { useAppStore } from './stores/appStore';
@@ -97,6 +98,7 @@ export default function App() {
               <LocationBootstrap />
               <RootNavigator />
               <ToastHost />
+              <PermissionPrimeSheet />
               <OfflineBanner />
             </QueryClientProvider>
           </GluestackUIProvider>

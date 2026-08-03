@@ -24,6 +24,17 @@ let registered = false;
  * Best-effort by design: push failing must never affect auth.
  */
 export async function registerDeviceForPush(): Promise<void> {
+  await register(true);
+}
+
+/** Session-start path [first-open SO-5]: registers ONLY when permission is
+ *  already granted — never prompts at boot. The prompt itself belongs to the
+ *  in-context priming moments (services/notification-priming). */
+export async function registerIfGranted(): Promise<void> {
+  await register(false);
+}
+
+async function register(mayPrompt: boolean): Promise<void> {
   if (registered) return;
   try {
     if (Platform.OS === 'android') {
@@ -38,7 +49,12 @@ export async function registerDeviceForPush(): Promise<void> {
     const projectId = (Constants.expoConfig?.extra as { eas?: { projectId?: string } } | undefined)?.eas?.projectId;
     if (!projectId) return;
 
-    const { status } = await Notifications.requestPermissionsAsync();
+    const current = await Notifications.getPermissionsAsync();
+    let status = current.status;
+    if (status !== 'granted') {
+      if (!mayPrompt) return;
+      status = (await Notifications.requestPermissionsAsync()).status;
+    }
     if (status !== 'granted') return;
 
     const token = (await Notifications.getExpoPushTokenAsync({ projectId })).data;

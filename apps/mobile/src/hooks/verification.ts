@@ -1,5 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { authApi, verificationApi, partnerApi, type VehicleKind } from '../services/api';
+import { maybePrimeNotifications } from '../services/notification-priming';
 import { useMoverPreview } from '../stores/moverPreview';
 import { PREVIEW_VERIFICATION, previewQuery } from '../lib/moverPreviewData';
 
@@ -60,10 +61,13 @@ export function useBecomePartner() {
         longitude: number;
       };
     }) => unwrap(partnerApi.become(data)),
-    onSuccess: () => {
+    onSuccess: (_result, variables) => {
       qc.invalidateQueries({ queryKey: ['verification'] });
       qc.invalidateQueries({ queryKey: ['vendor'] });
       qc.invalidateQueries({ queryKey: ['mover'] });
+      // Application in / store created — the earner's first obviously-useful
+      // notification moment [first-open SO-5].
+      maybePrimeNotifications(variables.role === 'MOVER' ? 'driver_application' : 'store_created');
     },
   });
 }
