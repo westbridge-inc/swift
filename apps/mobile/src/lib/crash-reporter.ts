@@ -28,7 +28,7 @@ export function setCrashReporter(fn: Reporter | null): void {
 export function reportCrash(error: unknown, context?: CrashContext): void {
   const err = error instanceof Error ? error : new Error(String(error));
   // eslint-disable-next-line no-console
-  console.error('[crash]', err.message, context ?? '');
+  console.error('[crash]', err.stack ?? err.message, context ?? '');
   try {
     reporter?.(err, context);
   } catch {
