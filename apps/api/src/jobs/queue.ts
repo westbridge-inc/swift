@@ -671,6 +671,15 @@ export function createWorkers(ctx: JobContext) {
         return;
       }
 
+      if (job.name === 'qr-attribution-purge') {
+        // Hourly hard-delete of expired install-attribution fingerprints —
+        // ephemeral by design (DPA); claim receipts keep the funnel numbers.
+        const { AttributionService } = await import('../modules/qr/attribution.service');
+        const purged = await new AttributionService(ctx.prisma).purgeExpired();
+        if (purged > 0) ctx.log.info({ purged }, 'qr: expired attribution fingerprints purged');
+        return;
+      }
+
       if (job.name === 'billing-invariants') {
         // Nightly proofs [san spec 24.2/16.3]: wallet balances re-derived from
         // the ledger, wrongful suspensions AUTO-HEALED (worst-harm invariant),
@@ -1093,6 +1102,14 @@ export async function scheduleRecurringJobs(queues: ReturnType<typeof createQueu
     repeat: { pattern: '30 3 * * *' },
     removeOnComplete: 7,
     removeOnFail: 7,
+  });
+
+  // QR attribution: expired fingerprints hard-delete hourly (DPA — ephemeral
+  // by design; ATTRIB_PURGE_CRON in the qr spec's config registry).
+  await queues.dispatchQueue.add('qr-attribution-purge', {}, {
+    repeat: { pattern: '0 * * * *' },
+    removeOnComplete: 24,
+    removeOnFail: 24,
   });
 
   // Rating anti-manipulation sweep: daily at 04:00

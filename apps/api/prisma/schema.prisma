@@ -3626,6 +3626,46 @@ model SlugRedirect {
   @@map("slug_redirects")
 }
 
+/// iOS install-attribution candidates (Android uses the Play Install Referrer
+/// instead — deterministic, no table). fpHash is computed SERVER-side from the
+/// request (client supplies no fingerprint parts) and rows are ephemeral by
+/// design: hard-purged hourly once expired (DPA). The single-candidate law:
+/// a claim matches exactly ONE unexpired row or the app opens Home — a wrong
+/// store is worse than no deep link.
+model PendingAttribution {
+  id               String    @id @default(cuid())
+  tenantId         String    @default("swift-default")
+  qrCodeId         String
+  /// e.g. /store/{slug} — the ONLY thing the app ever receives on claim.
+  destinationPath  String
+  platform         String // ios (android never writes here)
+  fpHash           String // sha256(normalizedIp | uaMajorFamily | ATTRIB_SALT)
+  createdAt        DateTime  @default(now())
+  expiresAt        DateTime // createdAt + ATTRIB_TTL_MINUTES
+  claimedAt        DateTime?
+  claimedInstallId String?
+
+  @@index([fpHash, expiresAt])
+  @@index([expiresAt])
+  @@map("pending_attributions")
+}
+
+/// Claim receipts: one per installId, forever. Makes /attribution/claim
+/// idempotent even after the pending row is purged, and records the funnel
+/// outcome (deterministic | matched | ambiguous | none) for reconciliation.
+model AttributionClaim {
+  id              String   @id @default(cuid())
+  tenantId        String   @default("swift-default")
+  installId       String   @unique
+  platform        String
+  qrCodeId        String?
+  destinationPath String? // null = Home
+  outcome         String // deterministic | matched | ambiguous | none
+  createdAt       DateTime @default(now())
+
+  @@map("attribution_claims")
+}
+
 /// Retention rollup target: per-day counts by decision/os/template. The
 /// analytics endpoint sums raw + rollup so numbers survive the purge.
 model ScanDailyRollup {
