@@ -17,6 +17,7 @@ import { GEORGETOWN } from '../../../hooks/useDeviceLocation';
 import { money } from '../../../lib/money';
 import { mediaUrl } from '../../../lib/images';
 import { streetEtaMin } from '../../../lib/geo';
+import { haptic } from '../../../lib/haptics';
 import { type RideClass, type TierEstimate } from '../../../services/api';
 import { Card, CircleChip, IconChip, LoadingBlock, Money, PillButton, Pictogram, type PictogramName, PinGlyph, PopupCard, Stars, T, VehicleRender, type VehicleBodyType, cardShadow } from '../../../kit';
 import type { PickedPlace } from './DestinationSearchScreen';
@@ -224,6 +225,11 @@ export function TaxiScreen({ navigation }: any) {
       // search just started. Clears the moment a new driver lands.
       if (p?.status === 'PENDING' && p?.reason === 'driver_cancelled') setRematching(true);
       else if (p?.status && p.status !== 'PENDING') setRematching(false);
+      // The haptic map [rides spec Part 10]: match + arrival are the two
+      // notification-success moments; code-verified trip start is the commit.
+      if (p?.status === 'DRIVER_ASSIGNED' || p?.status === 'DRIVER_ARRIVED') haptic.success();
+      else if (p?.status === 'RIDE_IN_PROGRESS') haptic.commit();
+      else if (p?.status === 'DELIVERED' || p?.status === 'COMPLETED') haptic.success();
       qc.invalidateQueries({ queryKey: ['rides', 'active'] });
     };
     s.on('order:status_changed', onStatus);
@@ -831,7 +837,45 @@ function ActiveRide({ navigation, ride, cancelRide, insets, rematching }: any) {
             Fare {money(ride.taxiFareTotal ?? ride.totalAmount)} · cash
             {ride.taxiDuration ? ` · ~${Math.round(Number(ride.taxiDuration))} min trip` : ''}
           </T>
-          {ride.ridePin ? (
+          {ride.ridePin && ride.status === 'DRIVER_ARRIVED' ? (
+            // THE SIGNATURE MOMENT [rides spec 5.7]: the code handshake as a
+            // trust ceremony. The find-your-car pairing (tinted render + the
+            // plate) sits above the code; the instruction names the driver;
+            // the safety nudge closes it. Everything else stays quiet.
+            <View
+              style={{
+                alignItems: 'center',
+                backgroundColor: color.brand[50],
+                borderRadius: radius.lg,
+                paddingVertical: space.lg,
+                paddingHorizontal: space.lg,
+                marginTop: space.md,
+                borderWidth: 1,
+                borderColor: color.brand[500],
+              }}
+            >
+              {d ? (
+                <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.md, marginBottom: space.sm }}>
+                  <VehicleRender bodyType={d.bodyType} colorHex={d.colorHex} view="hero" size={96} />
+                  {d.licensePlate ? (
+                    <View style={{ paddingHorizontal: space.md, paddingVertical: space.xs, borderRadius: radius.md, borderWidth: 1.5, borderColor: color.text.primary, backgroundColor: color.surface.base }}>
+                      <T variant="numM" style={{ letterSpacing: 2 }}>{d.licensePlate}</T>
+                    </View>
+                  ) : null}
+                </View>
+              ) : null}
+              <T variant="micro" tone="muted">Your start code</T>
+              <T variant="displayXl" tone="brand" style={{ letterSpacing: 6, marginTop: 2 }}>
+                {ride.ridePin}
+              </T>
+              <T variant="caption" tone="muted" center style={{ marginTop: space.xs }}>
+                Give this code to {d?.user?.firstName ?? 'your driver'} to start your ride
+              </T>
+              <T variant="label" weight="semibold" center style={{ marginTop: space.sm }}>
+                Check the plate before you get in
+              </T>
+            </View>
+          ) : ride.ridePin ? (
             <View
               style={{
                 alignItems: 'center',
