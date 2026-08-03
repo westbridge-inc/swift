@@ -208,6 +208,17 @@ export interface TieredEstimate {
   distanceKm: number;
   durationMin: number;
 }
+/** Customer-side safety surfaces [safety spec / rides 12.2] — thin client
+ *  over the ONE safety engine; zero safety logic lives on the phone. */
+export const safetyApi = {
+  /** Wrong person/car at the kerb: releases the ride, re-dispatches, locks
+   *  the driver pending identity review, opens the incident. */
+  notMyDriver: (rideId: string) => api.post(`/safety/rides/${rideId}/not-my-driver`, {}),
+  /** Trip Guardian check-in response (prompted via the guardian:checkin
+   *  socket event on the order room). */
+  guardianCheckin: (response: 'OK' | 'NEED_HELP') => api.post('/safety/guardian/checkin', { response }),
+};
+
 export const rideApi = {
   estimate: (pickup: Point, dropoff: Point) => api.post('/rides/estimate', { pickup, dropoff }),
   // Availability spec §1/§2.1: buckets only (GOOD/LOW/NONE), never counts.
