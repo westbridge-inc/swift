@@ -20,7 +20,7 @@ export const QR_GRACE_DEFAULT_DAYS = 30;
 const publiclyLive = (vendor: { status: string; isVerified: boolean }): boolean =>
   vendor.status === 'ACTIVE' && vendor.isVerified;
 
-export type QrLookupRow = QrLookup & { id: string; tenantId: string; version: number };
+export type QrLookupRow = QrLookup & { id: string; tenantId: string; version: number; entityId: string };
 
 const isUniqueViolation = (e: unknown): e is Prisma.PrismaClientKnownRequestError =>
   e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2002';
@@ -54,6 +54,7 @@ export class QrService {
       status: qr.status,
       supersededAt: qr.supersededAt,
       version: qr.version,
+      entityId: qr.entityId,
       entity: vendor ? { live: publiclyLive(vendor), slug: vendor.slug } : null,
     };
   }

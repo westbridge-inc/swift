@@ -41,6 +41,7 @@ import { legalRoutes } from './modules/legal/legal.routes';
 import { publicRoutes } from './modules/public/public.routes';
 import { qrResolverRoutes } from './modules/qr/qr-resolver.routes';
 import { attributionRoutes } from './modules/qr/attribution.routes';
+import { qrPublicRoutes } from './modules/qr/qr-public.routes';
 import { statementRoutes } from './modules/order/statement.routes';
 import path from 'node:path';
 
@@ -292,6 +293,8 @@ async function buildApp() {
   await app.register(qrResolverRoutes);
   // Install attribution (Android referrer / iOS single-candidate fingerprint).
   await app.register(attributionRoutes, { prefix: '/api/v1/attribution' });
+  // App-side QR twins: JSON resolve for in-app /s/ links + APP_OPEN reports.
+  await app.register(qrPublicRoutes, { prefix: '/api/v1/public' });
   // HMAC-signed statement renders (the authed routes mint the links).
   await app.register(statementRoutes, { prefix: '/api/v1/statements' });
   // MMG agent-cash channels [san spec 4.1/4.2] — dark (503) until the
