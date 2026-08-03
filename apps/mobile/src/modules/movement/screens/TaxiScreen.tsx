@@ -18,7 +18,7 @@ import { money } from '../../../lib/money';
 import { mediaUrl } from '../../../lib/images';
 import { streetEtaMin } from '../../../lib/geo';
 import { haptic } from '../../../lib/haptics';
-import { type RideClass, type TierEstimate } from '../../../services/api';
+import { safetyApi, type RideClass, type TierEstimate } from '../../../services/api';
 import { Card, CircleChip, IconChip, LoadingBlock, Money, PillButton, Pictogram, type PictogramName, PinGlyph, PopupCard, Stars, T, VehicleRender, type VehicleBodyType, cardShadow } from '../../../kit';
 import type { PickedPlace } from './DestinationSearchScreen';
 
@@ -607,6 +607,10 @@ function ActiveRide({ navigation, ride, cancelRide, insets, rematching }: any) {
   const scheme = useColorScheme();
   const sheetRef = useRef<BottomSheet>(null);
   const [confirmCancel, setConfirmCancel] = useState(false);
+  const [guardianPrompt, setGuardianPrompt] = useState(false);
+  const [guardianBusy, setGuardianBusy] = useState(false);
+  const [confirmNotMyDriver, setConfirmNotMyDriver] = useState(false);
+  const [notMyDriverBusy, setNotMyDriverBusy] = useState(false);
   const [liveDriver, setLiveDriver] = useState<LatLng | null>(null);
   // Server-computed active-leg ETA riding the same stream [SWIFT-UG-RT-01].
   const [liveEtaMin, setLiveEtaMin] = useState<number | null>(null);
@@ -655,17 +659,23 @@ function ActiveRide({ navigation, ride, cancelRide, insets, rematching }: any) {
     // Terminal exhaustion signal (backend emits it to the order room when the
     // cascade gives up) — flip the searching spinner to an honest dead state.
     const onExhausted = () => setExhausted(true);
+    // Trip Guardian check-in [safety spec §5 / rides 12.2]: the ONE safety
+    // engine prompts through the order room; the phone only renders and
+    // responds — zero safety logic client-side.
+    const onGuardianCheckin = () => { setGuardianPrompt(true); haptic.warn(); };
     s.on('driver:location', onDriver);
     s.on('connect', onConnect);
     s.on('disconnect', onDisconnect);
     s.on('connect_error', onError);
     s.on('dispatch:exhausted', onExhausted);
+    s.on('guardian:checkin', onGuardianCheckin);
     return () => {
       s.off('driver:location', onDriver);
       s.off('connect', onConnect);
       s.off('disconnect', onDisconnect);
       s.off('connect_error', onError);
       s.off('dispatch:exhausted', onExhausted);
+      s.off('guardian:checkin', onGuardianCheckin);
     };
   }, [ride?.id]);
 
@@ -873,6 +883,14 @@ function ActiveRide({ navigation, ride, cancelRide, insets, rematching }: any) {
               </T>
               <T variant="label" weight="semibold" center style={{ marginTop: space.sm }}>
                 Check the plate before you get in
+              </T>
+              <T
+                variant="caption"
+                center
+                style={{ marginTop: space.sm, color: color.error, textDecorationLine: 'underline' }}
+                onPress={() => setConfirmNotMyDriver(true)}
+              >
+                This isn’t my driver
               </T>
             </View>
           ) : ride.ridePin ? (
@@ -1084,6 +1102,72 @@ function ActiveRide({ navigation, ride, cancelRide, insets, rematching }: any) {
           }}
         />
         <PillButton label="Close" variant="soft" style={{ alignSelf: 'stretch', marginTop: space.md }} onPress={() => setSosConfirm(false)} />
+      </PopupCard>
+
+      {/* "This isn't my driver" [safety spec / rides 5.7]: wrong person or
+          car at the kerb — don't get in. The server releases the ride,
+          re-dispatches the SAME trip, and locks the driver for review. */}
+      <PopupCard visible={confirmNotMyDriver} onClose={() => setConfirmNotMyDriver(false)}>
+        <IconChip icon="alert-triangle" size={56} tone="error" />
+        <T variant="title" center style={{ marginTop: space.lg }}>
+          Not the person or car shown?
+        </T>
+        <T variant="body" tone="muted" center style={{ marginTop: space.sm }}>
+          Don’t get in. We’ll cancel this pickup, alert Swift safety, and find you another driver — your trip stays exactly as it is.
+        </T>
+        <PillButton
+          label="Confirm — this isn’t my driver"
+          variant="destructive"
+          style={{ alignSelf: 'stretch', marginTop: space['2xl'] }}
+          loading={notMyDriverBusy}
+          onPress={async () => {
+            setNotMyDriverBusy(true);
+            try {
+              await safetyApi.notMyDriver(ride.id);
+              haptic.warn();
+            } catch { /* the active-ride poll reconciles either way */ }
+            setNotMyDriverBusy(false);
+            setConfirmNotMyDriver(false);
+          }}
+        />
+        <PillButton label="Close" variant="soft" style={{ alignSelf: 'stretch', marginTop: space.md }} onPress={() => setConfirmNotMyDriver(false)} />
+      </PopupCard>
+
+      {/* Trip Guardian check-in [safety spec §5]: the engine noticed something
+          worth asking about (long stop, deviation) — one honest question,
+          two honest answers. NEED_HELP escalates server-side. */}
+      <PopupCard visible={guardianPrompt} onClose={() => setGuardianPrompt(false)}>
+        <IconChip icon="shield" size={56} />
+        <T variant="title" center style={{ marginTop: space.lg }}>
+          Everything okay?
+        </T>
+        <T variant="body" tone="muted" center style={{ marginTop: space.sm }}>
+          Swift’s Trip Guardian checks in when a trip pauses or changes route. Your driver can’t see your answer.
+        </T>
+        <PillButton
+          label="I’m okay"
+          style={{ alignSelf: 'stretch', marginTop: space['2xl'] }}
+          loading={guardianBusy}
+          onPress={async () => {
+            setGuardianBusy(true);
+            try { await safetyApi.guardianCheckin('OK'); } catch { /* sweep re-prompts if unanswered */ }
+            setGuardianBusy(false);
+            setGuardianPrompt(false);
+          }}
+        />
+        <PillButton
+          label="I need help"
+          variant="destructive"
+          style={{ alignSelf: 'stretch', marginTop: space.md }}
+          loading={guardianBusy}
+          onPress={async () => {
+            setGuardianBusy(true);
+            try { await safetyApi.guardianCheckin('NEED_HELP'); haptic.warn(); } catch { /* escalation also rides the sweep */ }
+            setGuardianBusy(false);
+            setGuardianPrompt(false);
+            setSosConfirm(true); // the full emergency path is one tap away
+          }}
+        />
       </PopupCard>
     </View>
   );
