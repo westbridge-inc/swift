@@ -2,6 +2,7 @@ import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { PrismaClient } from '@prisma/client';
 import { nanoid } from 'nanoid';
 import { signImpressionToken, verifyImpressionToken, userHash } from '../modules/ads/ads-token';
+import { mondayOf } from '../modules/ads/ads-weeks';
 import { AdServingService } from '../modules/ads/serving.service';
 import { AdEventService } from '../modules/ads/event.service';
 
@@ -20,7 +21,10 @@ const placementIds: string[] = [];
 const campaignIds: string[] = [];
 const houseIds: string[] = [];
 const tenant = `t-${nanoid(6)}`;
-const WK = (() => { const d = new Date(); const m = new Date(d); m.setUTCDate(d.getUTCDate() - ((d.getUTCDay() + 6) % 7)); m.setUTCHours(0, 0, 0, 0); return m; })(); // this week's Monday (UTC)
+// The PRODUCT week is the Guyana-local week (ads-weeks mondayOf) — keying the
+// fixture to the UTC Monday made this suite red every Sunday 20:00–24:00
+// Georgetown time (UTC already Monday, serving still reading the local week).
+const WK = mondayOf(new Date());
 
 beforeAll(async () => { await prisma.$connect(); });
 
