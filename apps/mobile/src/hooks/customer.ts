@@ -69,6 +69,11 @@ export function useItemSlots<T = any>(itemId: string, date: string) {
     queryKey: ['customer', 'slots', itemId, date],
     queryFn: () => unwrap<T>(customerApi.getItemSlots(itemId, date)),
     enabled: !!itemId && !!date,
+    // Live exclusivity: a slot someone else just booked disappears for
+    // everyone WHILE they're looking at the picker, not only on reopen —
+    // the DB unique is still the final judge (409 SLOT_TAKEN on the race).
+    refetchInterval: 20_000,
+    refetchOnWindowFocus: true,
   });
 }
 
