@@ -317,6 +317,33 @@ describe('resolver rate limit (spec RATE_RESOLVER_PER_IP)', () => {
   });
 });
 
+describe('asset endpoint (print & share pack)', () => {
+  it('serves pdf/png/svg as attachments; repeat renders are cache-identical', async () => {
+    const owner = await makeOwner();
+    await makeVendor(owner.userId);
+    const auth = { authorization: `Bearer ${owner.token}` };
+
+    const pdf = await app.inject({ method: 'GET', url: '/api/v1/vendor/qr/assets/pdf?template=card', headers: auth });
+    expect(pdf.statusCode).toBe(200);
+    expect(pdf.headers['content-type']).toContain('application/pdf');
+    expect(pdf.headers['content-disposition']).toContain('attachment');
+    expect(pdf.rawPayload.subarray(0, 4).toString()).toBe('%PDF');
+
+    const png = await app.inject({ method: 'GET', url: '/api/v1/vendor/qr/assets/png?size=1024', headers: auth });
+    expect(png.statusCode).toBe(200);
+    expect(png.headers['content-type']).toContain('image/png');
+
+    const pngAgain = await app.inject({ method: 'GET', url: '/api/v1/vendor/qr/assets/png?size=1024', headers: auth });
+    expect(pngAgain.rawPayload.equals(png.rawPayload)).toBe(true);
+
+    const svg = await app.inject({ method: 'GET', url: '/api/v1/vendor/qr/assets/svg', headers: auth });
+    expect(svg.headers['content-type']).toContain('image/svg');
+
+    const bad = await app.inject({ method: 'GET', url: '/api/v1/vendor/qr/assets/exe', headers: auth });
+    expect(bad.statusCode).toBe(400);
+  });
+});
+
 describe('one-ACTIVE concurrency guard', () => {
   it('parallel get-or-create yields exactly one ACTIVE row and one code', async () => {
     const owner = await makeOwner();
