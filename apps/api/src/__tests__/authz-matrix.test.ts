@@ -277,7 +277,10 @@ describe('server↔matrix prefix drift guard [SWIFT-092]', () => {
   // /billing/mmg is machine-to-machine (MMG's biller network calls it):
   // HMAC-over-raw-body auth, 503 dark until configured — proven in
   // agent-cash-channels.test.ts (401 only for signatures, per SO-6).
-  const EXEMPT = new Set(['/api/v1/public', '/api/v1/billing/mmg']);
+  // /attribution is pre-auth by nature (web install taps + the app's first
+  // launch, before any session exists): per-IP rate-limited, server-derived
+  // everything, single-candidate-or-Home — proven in qr-attribution.test.ts.
+  const EXEMPT = new Set(['/api/v1/public', '/api/v1/billing/mmg', '/api/v1/attribution']);
 
   it('flags a server prefix the matrix never mounts (red-first)', () => {
     // Pretend server.ts added /api/v1/loyalty but buildTestApp never enrolled it.

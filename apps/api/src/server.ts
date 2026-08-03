@@ -40,6 +40,7 @@ import { observabilityPlugin } from './plugins/observability';
 import { legalRoutes } from './modules/legal/legal.routes';
 import { publicRoutes } from './modules/public/public.routes';
 import { qrResolverRoutes } from './modules/qr/qr-resolver.routes';
+import { attributionRoutes } from './modules/qr/attribution.routes';
 import { statementRoutes } from './modules/order/statement.routes';
 import path from 'node:path';
 
@@ -289,6 +290,8 @@ async function buildApp() {
   // domain proxies /s/* here — LAUNCH_BLOCKERS deploy item). Public attack
   // surface; treatment and decision table live in the module header.
   await app.register(qrResolverRoutes);
+  // Install attribution (Android referrer / iOS single-candidate fingerprint).
+  await app.register(attributionRoutes, { prefix: '/api/v1/attribution' });
   // HMAC-signed statement renders (the authed routes mint the links).
   await app.register(statementRoutes, { prefix: '/api/v1/statements' });
   // MMG agent-cash channels [san spec 4.1/4.2] — dark (503) until the
