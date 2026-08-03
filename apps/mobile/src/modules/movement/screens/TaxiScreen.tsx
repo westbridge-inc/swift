@@ -2,8 +2,11 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { Animated, Easing, Linking, Pressable, Share, View, useColorScheme, useWindowDimensions } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import MapView, { Marker, PROVIDER_DEFAULT, Polyline } from 'react-native-maps';
+import MapView, { Marker, MarkerAnimated, PROVIDER_DEFAULT, Polyline } from 'react-native-maps';
+import Reanimated from 'react-native-reanimated';
 import { rideMapProps } from '../../../kit/map-style';
+import { useInterpolatedDriver } from '../map/useInterpolatedDriver';
+import type { DriverPing } from '../map/interpolation';
 import BottomSheet, { BottomSheetView, BottomSheetScrollView } from '@gorhom/bottom-sheet';
 import { Image } from 'expo-image';
 import { Feather } from '@expo/vector-icons';
@@ -136,6 +139,10 @@ export function RouteCard({
 
 const SHEET_STYLE = { backgroundColor: color.surface.subtle, borderTopLeftRadius: radius.xl, borderTopRightRadius: radius.xl };
 const HANDLE_STYLE = { width: 44, backgroundColor: color.border.strong };
+
+// The driving marker [rides 6.3]: reanimated shared values sweep the car
+// between pings on the UI thread — a GC mid-trip never stutters it.
+const DrivingMarker = Reanimated.createAnimatedComponent(MarkerAnimated);
 
 /** "Finding your driver" — a live search deserves motion, not a static line:
  *  a breathing ring around a car mark + how long we've been looking. */
@@ -607,6 +614,7 @@ function ActiveRide({ navigation, ride, cancelRide, insets, rematching }: any) {
   const scheme = useColorScheme();
   const sheetRef = useRef<BottomSheet>(null);
   const [confirmCancel, setConfirmCancel] = useState(false);
+  const [driverPing, setDriverPing] = useState<DriverPing | null>(null);
   const [guardianPrompt, setGuardianPrompt] = useState(false);
   const [guardianBusy, setGuardianBusy] = useState(false);
   const [confirmNotMyDriver, setConfirmNotMyDriver] = useState(false);
@@ -646,6 +654,13 @@ function ActiveRide({ navigation, ride, cancelRide, insets, rematching }: any) {
         setLiveDriver({ latitude: Number(p.latitude), longitude: Number(p.longitude) });
         setLastFixAt(Date.now());
         if (typeof p?.heading === 'number') setDriverHeading(p.heading);
+        // Feed the 6.3 sweep — the marker drives between these on the UI thread.
+        setDriverPing({
+          latitude: Number(p.latitude),
+          longitude: Number(p.longitude),
+          heading: typeof p?.heading === 'number' ? p.heading : null,
+          receivedAt: Date.now(),
+        });
       }
       if (typeof p?.etaMinutes === 'number') setLiveEtaMin(p.etaMinutes);
     };
@@ -695,6 +710,18 @@ function ActiveRide({ navigation, ride, cancelRide, insets, rematching }: any) {
   const pickup = ride.pickupLat != null ? { latitude: Number(ride.pickupLat), longitude: Number(ride.pickupLng) } : null;
   const drop =
     ride.deliveryLat != null ? { latitude: Number(ride.deliveryLat), longitude: Number(ride.deliveryLng) } : null;
+  // Seed the sweep from the payload's last-known position, so the car exists
+  // before the first live ping — the stale clock marks it honestly if no
+  // stream follows (the seed is the server's memory, not a live fix).
+  const d0 = ride?.driver;
+  useEffect(() => {
+    if (!driverPing && d0?.currentLat != null && d0?.currentLng != null) {
+      setDriverPing({ latitude: Number(d0.currentLat), longitude: Number(d0.currentLng), heading: null, receivedAt: Date.now() });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [d0?.currentLat, d0?.currentLng]);
+  const interp = useInterpolatedDriver(driverPing);
+
   const driverLoc =
     liveDriver ?? (d?.currentLat != null ? { latitude: Number(d.currentLat), longitude: Number(d.currentLng) } : null);
   // The live feed is only trustworthy while fresh. Once we've had a live fix and
@@ -767,16 +794,25 @@ function ActiveRide({ navigation, ride, cancelRide, insets, rematching }: any) {
             <DropPin />
           </Marker>
         ) : null}
-        {driverLoc ? (
-          // rotation faces the car to its heading (flat = rotate in the map
-          // plane); a stale fix dims it so a frozen car reads as "not live".
-          <Marker
-            coordinate={driverLoc}
+        {interp.hasFix ? (
+          // The 6.3 driving marker: position + bearing sweep between pings on
+          // the UI thread (no teleporting); flat = rotates in the map plane.
+          // The glyph IS the tinted top-view render (6B.5) — the car on the
+          // map matches the card and the curb. Stale = frozen + dimmed; a
+          // silent feed must never look like a live, moving car (0.8).
+          <DrivingMarker
+            animatedProps={interp.animatedProps as never}
+            coordinate={driverLoc ?? { latitude: 0, longitude: 0 }}
             title="Driver"
             anchor={{ x: 0.5, y: 0.5 }}
             flat
-            rotation={driverHeading ?? 0}
           >
+            <View style={{ opacity: interp.stale || fixStale ? 0.45 : 1 }}>
+              <VehicleRender bodyType={d?.bodyType} colorHex={d?.colorHex} view="top" size={20} />
+            </View>
+          </DrivingMarker>
+        ) : driverLoc ? (
+          <Marker coordinate={driverLoc} title="Driver" anchor={{ x: 0.5, y: 0.5 }} flat rotation={driverHeading ?? 0}>
             <View
               style={[
                 { width: 36, height: 36, borderRadius: 18, alignItems: 'center', justifyContent: 'center', backgroundColor: color.text.primary, opacity: fixStale ? 0.4 : 1 },
@@ -791,10 +827,16 @@ function ActiveRide({ navigation, ride, cancelRide, insets, rematching }: any) {
 
       {/* Live-feed honesty banner: reconnecting (socket down) or updating (fix
           aged out). Silence must never look like a live, moving car. */}
-      {(connLost || fixStale) ? (
+      {(connLost || fixStale || interp.stale) ? (
         <View style={{ position: 'absolute', top: insets.top + space.md, alignSelf: 'center', flexDirection: 'row', alignItems: 'center', gap: space.xs, backgroundColor: color.text.primary, paddingHorizontal: space.md, paddingVertical: space.xs, borderRadius: radius.full, ...cardShadow }}>
           <Feather name={connLost ? 'wifi-off' : 'loader'} size={13} color={color.white} />
-          <T variant="caption" style={{ color: color.white }}>{connLost ? 'Reconnecting…' : 'Updating driver location…'}</T>
+          <T variant="caption" style={{ color: color.white }}>
+            {connLost
+              ? 'Reconnecting…'
+              : interp.stale && interp.staleAgeS > 0
+                ? `Location last updated ${interp.staleAgeS}s ago`
+                : 'Updating driver location…'}
+          </T>
         </View>
       ) : null}
 
