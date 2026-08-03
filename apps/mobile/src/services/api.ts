@@ -534,8 +534,11 @@ export const vendorApi = {
     api.post('/vendor/items/import/xlsx', form, { headers: { 'Content-Type': 'multipart/form-data' } }),
   importMenuPdf: (form: FormData) =>
     api.post('/vendor/items/import/menu-parse', form, { headers: { 'Content-Type': 'multipart/form-data' } }),
-  // Storefront QR (manager+) — deep link + printable SVG code
+  // Storefront QR (manager+) — short link + printable SVG code + lifecycle
   qr: () => api.get('/vendor/qr'),
+  qrAnalytics: (range: '7d' | '30d' | '90d' | 'all') => api.get(`/vendor/qr/analytics?range=${range}`),
+  qrRegenerate: () => api.post('/vendor/qr/regenerate', {}),
+  qrDeactivate: () => api.post('/vendor/qr/deactivate', { confirm: true }),
   // Reviews (manager+ can respond)
   reviews: () => api.get('/vendor/reviews'),
   respondReview: (id: string, response: string) => api.post(`/vendor/reviews/${id}/respond`, { response }),

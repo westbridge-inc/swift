@@ -4,6 +4,7 @@ import { useQueryClient, useMutation } from '@tanstack/react-query';
 import { Pressable, RefreshControl, ScrollView, TextInput, View } from 'react-native';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
+import { useNavigation } from '@react-navigation/native';
 import { Image } from 'expo-image';
 import { color, radius, space } from '@swift/ui';
 import { Feather, MaterialCommunityIcons } from '@expo/vector-icons';
@@ -44,6 +45,7 @@ import {
 } from './shared';
 import { VendorOrderDetailScreen } from './screens/VendorOrderDetailScreen';
 import { VendorOrderHistoryScreen } from './screens/VendorOrderHistoryScreen';
+import { VendorMyQrScreen } from './screens/VendorMyQrScreen';
 import { DocumentChecklist } from '../../components/onboarding/DocumentChecklist';
 import { PricingCard } from '../../components/onboarding/PricingCard';
 import { MmgPayLinkCard } from '../../components/MmgPayLinkCard';
@@ -2485,25 +2487,34 @@ function SubscriptionCard({ sub, phone }: { sub: any; phone?: string }) {
   );
 }
 
-/** Storefront QR (real /vendor/qr payload): print it, customers scan to order. */
+/** Storefront QR (real /vendor/qr payload) — the entry point into the full
+ *  "My Swift QR" screen (share, performance, lifecycle). */
 function StoreQrCard() {
   const qrQ = useVendorQr();
+  const navigation = useNavigation<any>();
   if (!qrQ.data?.svg) return null;
   return (
-    <Card style={{ alignItems: 'center', marginBottom: space.lg }}>
-      <T variant="body" weight="semibold" style={{ alignSelf: 'flex-start' }}>
-        Your store QR
-      </T>
-      <View style={{ padding: space.md, borderRadius: radius.lg, backgroundColor: color.white, marginTop: space.md }}>
-        <SvgXml xml={qrQ.data.svg} width={168} height={168} />
-      </View>
-      <T variant="caption" weight="semibold" tone="brand" style={{ marginTop: space.md }}>
-        {qrQ.data.deepLink}
-      </T>
-      <T variant="caption" tone="muted" center style={{ marginTop: 4 }}>
-        Print it for your counter — customers scan to open your storefront and order.
-      </T>
-    </Card>
+    <Pressable onPress={() => navigation.navigate('VendorMyQr')} accessibilityRole="button" accessibilityLabel="Open My Swift QR">
+      {({ pressed }) => (
+        <Card style={{ alignItems: 'center', marginBottom: space.lg, opacity: pressed ? 0.85 : 1 }}>
+          <View style={{ flexDirection: 'row', alignItems: 'center', alignSelf: 'stretch', justifyContent: 'space-between' }}>
+            <T variant="body" weight="semibold">
+              My Swift QR
+            </T>
+            <Feather name="chevron-right" size={18} color={color.text.muted} />
+          </View>
+          <View style={{ padding: space.md, borderRadius: radius.lg, backgroundColor: color.white, marginTop: space.md }}>
+            <SvgXml xml={qrQ.data.svg} width={168} height={168} />
+          </View>
+          <T variant="caption" weight="semibold" tone="brand" style={{ marginTop: space.md }}>
+            {qrQ.data.deepLink}
+          </T>
+          <T variant="caption" tone="muted" center style={{ marginTop: 4 }}>
+            Customers scan this to order from you — tap to share, print and see scans.
+          </T>
+        </Card>
+      )}
+    </Pressable>
   );
 }
 
@@ -2893,6 +2904,7 @@ export function VendorStack() {
       <Stack.Screen name="VendorRoot" component={VendorRoot} />
       <Stack.Screen name="VendorOrderDetail" component={VendorOrderDetailScreen} />
       <Stack.Screen name="VendorOrderHistory" component={VendorOrderHistoryScreen} />
+      <Stack.Screen name="VendorMyQr" component={VendorMyQrScreen} />
     </Stack.Navigator>
   );
 }
