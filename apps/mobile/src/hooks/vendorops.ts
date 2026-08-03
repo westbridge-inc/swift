@@ -535,16 +535,81 @@ export function usePopularItems(limit = 8) {
   return pv ? previewQuery(pv.popularItems) : q;
 }
 
-/** Storefront QR + deep link (manager+). Static per store — cache hard. */
+export type VendorQrPayload = {
+  deepLink: string;
+  shortUrl: string;
+  shortCode: string;
+  canonicalUrl: string;
+  version: number;
+  status: string;
+  graceDays: number;
+  svg: string;
+  vendorName: string;
+};
+
+/** Storefront QR + short link (manager+). Changes only on regenerate/deactivate
+ *  — cache hard; the lifecycle mutations invalidate. */
 export function useVendorQr(enabled = true) {
   const pv = usePreviewDataset();
   const q = useQuery({
     queryKey: ['vendor', 'qr'],
-    queryFn: () => unwrap<{ deepLink: string; svg: string; vendorName: string }>(vendorApi.qr()),
+    queryFn: () => unwrap<VendorQrPayload>(vendorApi.qr()),
     enabled: enabled && !pv,
     staleTime: Infinity,
   });
   return pv ? previewQuery(null) : q;
+}
+
+export type QrAnalytics = {
+  range: '7d' | '30d' | '90d' | 'all';
+  totals: {
+    scans: number;
+    approxUniqueScanners: number;
+    storeViews: number;
+    webOrders: number;
+    appOpens: number;
+    installTaps: number;
+    installsAttributed: number;
+    attributedFirstOrders: number;
+  };
+  funnel: { stage: string; count: number }[];
+  byDay: { date: string; scans: number; webOrders: number }[];
+  byTemplate: { template: string; scans: number }[];
+};
+
+/** The performance card — server truth, reconciles to rows by test-gate. */
+export function useVendorQrAnalytics(range: QrAnalytics['range']) {
+  const pv = usePreviewDataset();
+  const q = useQuery({
+    queryKey: ['vendor', 'qr-analytics', range],
+    queryFn: () => unwrap<QrAnalytics>(vendorApi.qrAnalytics(range)),
+    enabled: !pv,
+    staleTime: 60_000,
+  });
+  return pv ? previewQuery(null) : q;
+}
+
+/** Owner-only: supersede the current code (grace window) and mint the next. */
+export function useRegenerateQr() {
+  const qc = useQueryClient();
+  return usePreviewSafeMutation({
+    mutationFn: () => unwrap<VendorQrPayload & { previous: { shortCode: string; graceDays: number; graceEndsAt: string } | null }>(vendorApi.qrRegenerate()),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: ['vendor', 'qr'] });
+      void qc.invalidateQueries({ queryKey: ['vendor', 'qr-analytics'] });
+    },
+  });
+}
+
+/** Owner-only kill switch — immediate. */
+export function useDeactivateQr() {
+  const qc = useQueryClient();
+  return usePreviewSafeMutation({
+    mutationFn: () => unwrap<{ deactivated: boolean }>(vendorApi.qrDeactivate()),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: ['vendor', 'qr'] });
+    },
+  });
 }
 
 export type DayHours = { dayOfWeek: number; openTime: string; closeTime: string; isClosed: boolean };
