@@ -17,6 +17,8 @@ import { CustomerStack } from './CustomerStack';
 import { MoverStack } from '../modules/mover/MoverStack';
 import { VendorStack } from '../modules/vendor/VendorStack';
 import { AdvertiserStack } from '../modules/advertiser/AdvertiserStack';
+import { navigationRef } from './navigationRef';
+import { installNotificationTapRouter, flushPendingNavigation } from '../services/notification-router';
 
 const Stack = createNativeStackNavigator();
 
@@ -51,6 +53,10 @@ export function RootNavigator() {
     if (isAuthenticated) void registerDeviceForPush();
   }, [isAuthenticated]);
 
+  // The tap-router [first-open 2.4]: every notification tap lands on its
+  // exact screen — cold starts flush via onReady below.
+  React.useEffect(() => installNotificationTapRouter(), []);
+
   // Earners (mover/vendor) and advertisers must be signed in before their
   // stack. Customers browse freely and only authenticate when an action
   // (checkout) asks via promptLogin() → wantsAuth.
@@ -71,7 +77,7 @@ export function RootNavigator() {
   const Main = mainForIntent(intent);
 
   return (
-    <NavigationContainer>
+    <NavigationContainer ref={navigationRef} onReady={flushPendingNavigation}>
       <Stack.Navigator screenOptions={{ headerShown: false }}>
         {!hasOnboarded ? (
           // First run only: kit onboarding slides, then never again.
