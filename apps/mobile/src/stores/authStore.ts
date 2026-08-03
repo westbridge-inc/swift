@@ -3,6 +3,7 @@ import { persist, createJSONStorage } from 'zustand/middleware';
 import type { User } from '@swift/types';
 import { queryClient } from '../lib/queryClient';
 import { zustandStorage } from '../lib/storage';
+import { landingIntent } from '../lib/roleLanding';
 
 interface AuthState {
   user: User | null;
@@ -55,26 +56,20 @@ export const useAuthStore = create<AuthState>()(
       currencyCode: null,
       currencySymbol: null,
       setAuth: (user, accessToken, refreshToken) => {
-        // The surface follows THIS account's roles — never inherit the previous
-        // session's mode (a driver signing in after a vendor session must not
-        // land in the vendor dashboard on a shared device). A multi-role
-        // account keeps the prior choice only when it actually has that role.
+        // The account answers [first-open SO-4]: a living valid choice
+        // survives; otherwise the server's last-used activeRole routes — a
+        // reinstalled multi-role account lands where it last worked, and a
+        // driver signing in after a vendor session on a shared device never
+        // lands in the vendor dashboard. Pure law + tests: lib/roleLanding.
         const u: any = user;
         const roles: string[] = u?.roles ?? [];
         const isMover = roles.includes('DRIVER') || roles.includes('RIDER') || roles.includes('MOVER') || !!u?.driver || !!u?.rider;
-        const isVendor = roles.includes('VENDOR') || !!u?.vendorOwner;
-        const prev = get().intent;
-        const intent =
-          // 'advertiser' is preserved like 'customer': ad access is
-          // AdvertiserMember-based (not a UserRole), so ANY signed-in account
-          // may run the advertiser surface — its gate screen sorts the rest.
-          (prev === 'vendor' && isVendor) || (prev === 'mover' && isMover) || prev === 'customer' || prev === 'advertiser'
-            ? prev
-            : isVendor && !isMover
-              ? ('vendor' as const)
-              : isMover && !isVendor
-                ? ('mover' as const)
-                : ('customer' as const);
+        const isVendor = roles.includes('VENDOR') || roles.includes('VENDOR_OWNER') || !!u?.vendorOwner;
+        const intent = landingIntent(get().intent, {
+          isVendor,
+          isMover,
+          activeRole: typeof u?.activeRole === 'string' ? u.activeRole : null,
+        });
         set({ user, accessToken, refreshToken, isAuthenticated: true, isLoading: false, wantsAuth: false, intent });
       },
       setUser: (user) => set({ user }),

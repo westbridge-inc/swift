@@ -1,26 +1,44 @@
 /** @jsxImportSource react */
 import React from 'react';
 import { Pressable, View } from 'react-native';
-import { Feather, MaterialCommunityIcons } from '@expo/vector-icons';
+import { Feather } from '@expo/vector-icons';
 import { color, radius, space } from '@swift/ui';
-import { PopupCard, T, TonePill } from '../kit';
+import { Pictogram, PopupCard, T, TonePill, type PictogramName } from '../kit';
 import { useAuthStore } from '../stores/authStore';
+import { customerApi } from '../services/api';
+import { switchRolePayload } from '../lib/roleLanding';
 
 type Intent = 'customer' | 'mover' | 'vendor';
 
-// One Swift account, three apps-within-the-app. Switching is IN CONTEXT —
-// you pick the app you're opening, never bounce through onboarding. The
-// root navigator handles the rest (sign-in for earner surfaces, onboarding
-// for accounts that don't hold the role yet).
+// One Swift account, three apps-within-the-app [first-open spec 2.2]. All
+// three cards ALWAYS show: owned roles switch instantly; un-owned roles read
+// as an invitation and open that path's JOIN flow (the root navigator routes
+// sign-in/onboarding) — one system for switching AND growth. Switching an
+// owned surface also tells the server (activeRole = last-used), so the next
+// sign-in on any device lands right. Pictogram trio per design-100×: the
+// basket, the wheel, the awning.
 const APPS: {
   intent: Intent;
-  icon: keyof typeof MaterialCommunityIcons.glyphMap;
+  pictogram: PictogramName;
   title: string;
   sub: string;
+  invite?: string;
 }[] = [
-  { intent: 'customer', icon: 'shopping-outline', title: 'Swift', sub: 'Order food, groceries, rides and more' },
-  { intent: 'mover', icon: 'steering', title: 'Swift Driver', sub: 'Deliveries and taxi trips — you keep 100%' },
-  { intent: 'vendor', icon: 'storefront-outline', title: 'Swift Business', sub: 'Run your store, menu and orders' },
+  { intent: 'customer', pictogram: 'groceries', title: 'Swift', sub: 'Order food, groceries, rides and more' },
+  {
+    intent: 'mover',
+    pictogram: 'wheel',
+    title: 'Swift Driver',
+    sub: 'Deliveries and taxi trips — you keep 100%',
+    invite: 'Become a driver — keep 100% of every fare',
+  },
+  {
+    intent: 'vendor',
+    pictogram: 'shops',
+    title: 'Swift Business',
+    sub: 'Run your store, menu and orders',
+    invite: 'Put your store on Swift',
+  },
 ];
 
 export function RoleSwitcherSheet({
@@ -33,10 +51,24 @@ export function RoleSwitcherSheet({
   onClose: () => void;
 }) {
   const setIntent = useAuthStore((s) => s.setIntent);
+  const user = useAuthStore((s) => s.user) as { roles?: string[]; driver?: unknown; rider?: unknown; vendorOwner?: unknown } | null;
+  const roles: string[] = user?.roles ?? [];
+  const owns = (intent: Intent): boolean => {
+    if (intent === 'customer') return true;
+    if (intent === 'mover') return roles.includes('DRIVER') || roles.includes('RIDER') || !!user?.driver || !!user?.rider;
+    return roles.includes('VENDOR_OWNER') || !!user?.vendorOwner;
+  };
 
   const pick = (intent: Intent) => {
     onClose();
-    if (intent !== current) setIntent(intent);
+    if (intent === current) return;
+    setIntent(intent);
+    // Owned switch → the server remembers last-used (fire-and-forget; the
+    // join flow for un-owned roles registers the role itself).
+    if (owns(intent)) {
+      const payload = switchRolePayload(intent, roles);
+      if (payload) void customerApi.switchRole(payload).catch(() => undefined);
+    }
   };
 
   return (
@@ -51,6 +83,7 @@ export function RoleSwitcherSheet({
       <View style={{ alignSelf: 'stretch', gap: space.md, marginTop: space.xl }}>
         {APPS.map((app) => {
           const active = app.intent === current;
+          const owned = owns(app.intent);
           return (
             <Pressable key={app.intent} onPress={() => pick(app.intent)} disabled={active}>
               {({ pressed }) => (
@@ -76,20 +109,22 @@ export function RoleSwitcherSheet({
                       backgroundColor: active ? color.brand[500] : color.brand[50],
                     }}
                   >
-                    <MaterialCommunityIcons name={app.icon} size={22} color={active ? color.white : color.brand[600]} />
+                    <Pictogram name={app.pictogram} size={24} color={active ? color.white : color.brand[600]} />
                   </View>
                   <View style={{ flex: 1 }}>
                     <T variant="body" weight="bold">
                       {app.title}
                     </T>
                     <T variant="caption" tone="muted" numberOfLines={1} style={{ marginTop: 1 }}>
-                      {app.sub}
+                      {owned || !app.invite ? app.sub : app.invite}
                     </T>
                   </View>
                   {active ? (
                     <TonePill label="You're here" tone="brand" />
-                  ) : (
+                  ) : owned ? (
                     <Feather name="chevron-right" size={18} color={color.text.muted} />
+                  ) : (
+                    <TonePill label="Join" tone="neutral" />
                   )}
                 </View>
               )}

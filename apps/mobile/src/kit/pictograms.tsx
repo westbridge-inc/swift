@@ -21,7 +21,8 @@ export type PictogramName =
   | 'sedan'
   | 'estate'
   | 'van'
-  | 'bus';
+  | 'bus'
+  | 'wheel';
 
 export function Pictogram({
   name,
@@ -80,6 +81,16 @@ export function Pictogram({
           <Path {...s} d="M4.8 17 V14.2 A3.2 3.2 0 0 1 8 11 H16 A3.2 3.2 0 0 1 19.2 14.2 V17 Z" />
           <Circle {...s} cx={8.2} cy={17.4} r={1.7} />
           <Circle {...s} cx={15.8} cy={17.4} r={1.7} />
+        </>
+      )}
+      {name === 'wheel' && (
+        <>
+          {/* steering wheel — the earner's mark (first-open trio: Swift Driver) */}
+          <Circle {...s} cx={12} cy={12} r={8.4} />
+          <Circle {...s} cx={12} cy={12} r={2.4} />
+          <Path {...s} d="M3.6 12 H9.6" />
+          <Path {...s} d="M14.4 12 H20.4" />
+          <Path {...s} d="M12 14.4 V20.4" />
         </>
       )}
       {name === 'send' && (
