@@ -260,6 +260,13 @@ describe('lifecycle: regenerate grace + deactivate kill switch', () => {
     });
     expect(again.statusCode).toBe(200);
     expect(again.json().data.deactivated).toBe(false);
+
+    // Life after the kill switch: the next dashboard read mints a fresh code
+    // and the version SEQUENCE continues (…v2 dead → v3), never regresses.
+    const reborn = (await vendorGet(owner.token)).json().data;
+    expect(reborn.version).toBe(3);
+    expect(reborn.shortCode).not.toBe(next.shortCode);
+    expect((await scan(reborn.shortCode)).headers['location']).toBe(`${WEB}/store/${vendor.slug}?src=qr&c=${reborn.shortCode}`);
   });
 });
 
