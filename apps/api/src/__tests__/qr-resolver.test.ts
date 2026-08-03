@@ -9,6 +9,7 @@ import { authPlugin } from '../plugins/auth';
 import { socketPlugin } from '../plugins/socket';
 import { vendorRoutes } from '../modules/vendor/vendor.routes';
 import { qrResolverRoutes } from '../modules/qr/qr-resolver.routes';
+import { qrPublicRoutes } from '../modules/qr/qr-public.routes';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { QrService, QR_GRACE_CONFIG_KEY } from '../modules/qr/qr.service';
 import { flushScanLog, resetScanLogForTests } from '../modules/qr/scan-log';
@@ -94,6 +95,7 @@ beforeAll(async () => {
   await app.register(socketPlugin);
   registerErrorHandler(app);
   await app.register(qrResolverRoutes);
+  await app.register(qrPublicRoutes, { prefix: '/api/v1/public' });
   await app.register(vendorRoutes, { prefix: '/api/v1/vendor' });
   await app.ready();
 
@@ -314,6 +316,41 @@ describe('resolver rate limit (spec RATE_RESOLVER_PER_IP)', () => {
     }
     expect(lastOk).toBe(30);
     expect(limited).toBe(true);
+  });
+});
+
+describe('app-side twins: JSON resolve + APP_OPEN report', () => {
+  it('resolves live codes to vendorId/slug; dead and unknown codes reveal only the verdict', async () => {
+    const owner = await makeOwner();
+    const vendor = await makeVendor(owner.userId);
+    const code = (await vendorGet(owner.token)).json().data.shortCode as string;
+
+    const live = (await app.inject({ method: 'GET', url: `/api/v1/public/qr/${code.toLowerCase()}` })).json().data;
+    expect(live).toEqual({ verdict: 'WEB_RENDER', vendorId: vendor.id, slug: vendor.slug });
+
+    await app.prisma.vendor.update({ where: { id: vendor.id }, data: { status: 'SUSPENDED' } });
+    const dead = (await app.inject({ method: 'GET', url: `/api/v1/public/qr/${code}` })).json().data;
+    expect(dead).toEqual({ verdict: 'UNAVAILABLE_PAGE', vendorId: null, slug: null });
+
+    const unknown = (await app.inject({ method: 'GET', url: '/api/v1/public/qr/BCDFGHJKMN' })).json().data;
+    const malformed = (await app.inject({ method: 'GET', url: '/api/v1/public/qr/NOPE' })).json().data;
+    expect(unknown).toEqual({ verdict: 'NOT_FOUND', vendorId: null, slug: null });
+    expect(malformed).toEqual(unknown); // one shared shape — no oracle
+  });
+
+  it('app-open files an APP_OPEN_ASSUMED event; unknown codes acknowledge identically, log nothing', async () => {
+    const owner = await makeOwner();
+    await makeVendor(owner.userId);
+    const code = (await vendorGet(owner.token)).json().data.shortCode as string;
+
+    const ok = await app.inject({ method: 'POST', url: `/api/v1/public/qr/${code}/app-open`, payload: {} });
+    expect(ok.statusCode).toBe(200);
+    await flushScanLog();
+    const qr = await app.prisma.qrCode.findUniqueOrThrow({ where: { shortCode: code } });
+    expect(await app.prisma.scanEvent.count({ where: { qrCodeId: qr.id, decision: 'APP_OPEN_ASSUMED' } })).toBe(1);
+
+    const ghost = await app.inject({ method: 'POST', url: '/api/v1/public/qr/BCDFGHJKMN/app-open', payload: {} });
+    expect(ghost.statusCode).toBe(200);
   });
 });
 

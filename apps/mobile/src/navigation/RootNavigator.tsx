@@ -19,6 +19,8 @@ import { VendorStack } from '../modules/vendor/VendorStack';
 import { AdvertiserStack } from '../modules/advertiser/AdvertiserStack';
 import { navigationRef } from './navigationRef';
 import { installNotificationTapRouter, flushPendingNavigation } from '../services/notification-router';
+import { installDeepLinkHandler, flushPendingDeepLink } from '../services/deep-links';
+import { ensureFirstLaunchClaim, flushAttributedDestination } from '../services/attribution';
 
 const Stack = createNativeStackNavigator();
 
@@ -57,6 +59,13 @@ export function RootNavigator() {
   // exact screen — cold starts flush via onReady below.
   React.useEffect(() => installNotificationTapRouter(), []);
 
+  // QR deep links (/store/{slug}, /s/{code}) + the one-time install claim
+  // [qr spec Part 6]: same queue-and-flush contract as the tap-router.
+  React.useEffect(() => {
+    ensureFirstLaunchClaim();
+    return installDeepLinkHandler();
+  }, []);
+
   // Earners (mover/vendor) and advertisers must be signed in before their
   // stack. Customers browse freely and only authenticate when an action
   // (checkout) asks via promptLogin() → wantsAuth.
@@ -77,7 +86,14 @@ export function RootNavigator() {
   const Main = mainForIntent(intent);
 
   return (
-    <NavigationContainer ref={navigationRef} onReady={flushPendingNavigation}>
+    <NavigationContainer
+      ref={navigationRef}
+      onReady={() => {
+        flushPendingNavigation();
+        flushPendingDeepLink();
+        flushAttributedDestination();
+      }}
+    >
       <Stack.Navigator screenOptions={{ headerShown: false }}>
         {!hasOnboarded ? (
           // First run only: kit onboarding slides, then never again.

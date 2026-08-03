@@ -67,7 +67,7 @@ export function scanEventsLostTotal(): number {
 export function buildScanEvent(
   request: FastifyRequest,
   qr: (QrLookup & { id: string; tenantId: string }) | null,
-  verdict: ScanVerdict,
+  decision: ScanVerdict | 'APP_OPEN_ASSUMED',
 ): PendingScanEvent {
   const now = new Date();
   const ua = request.headers['user-agent'];
@@ -78,10 +78,7 @@ export function buildScanEvent(
     tenantId: qr?.tenantId ?? 'swift-default',
     qrCodeId: qr?.id ?? null,
     occurredAt: now,
-    decision: verdict === 'WEB_RENDER' ? 'WEB_RENDER'
-      : verdict === 'RETIRED_PAGE' ? 'RETIRED_PAGE'
-      : verdict === 'UNAVAILABLE_PAGE' ? 'UNAVAILABLE_PAGE'
-      : 'NOT_FOUND',
+    decision,
     src: sanitizeSrc(query['src']) ?? 'qr',
     template: sanitizeTemplate(query['t']),
     osFamily,
