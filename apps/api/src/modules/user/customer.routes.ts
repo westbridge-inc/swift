@@ -11,7 +11,7 @@ import { tenantCacheKey } from '../../utils/tenant-cache';
 import { AppError, NotFoundError, ValidationError, ForbiddenError } from '../../utils/errors';
 import { zMoneyMinor } from '../../utils/money-schema';
 import { BookingService, type BookingConfig } from '../booking/booking.service';
-import { computeDaySlots } from '../booking/availability';
+import { computeDaySlots, fmtSlotTime } from '../booking/availability';
 import { randomInt } from 'node:crypto';
 import { OrderService } from '../order/order.service';
 import { PickingService } from '../order/picking.service';
@@ -437,7 +437,7 @@ export async function customerRoutes(app: FastifyInstance) {
   const picking = new PickingService(app.prisma, app.io);
   const ratingService = new RatingService(app.prisma, app.io);
   const notificationService = new NotificationService(app.prisma, app.io);
-  const bookingService = new BookingService(app.prisma);
+  const bookingService = new BookingService(app.prisma, app.io);
 
   // Auth required by default (safe); browsing is public so guests can look
   // around. Only these GET routes use OPTIONAL auth — everything else (cart,
@@ -1238,6 +1238,34 @@ export async function customerRoutes(app: FastifyInstance) {
         serviceRadiusKm: config.serviceRadiusKm ?? null,
       },
     };
+  });
+
+  /** POST /bookings/:id/reschedule — move my appointment (scheduling 2.4).
+   *  New slot reserved FIRST (the partial unique judges the race), old freed
+   *  in the same transaction; the provider hears about it immediately. */
+  app.post('/bookings/:id/reschedule', async (request: AuthRequest) => {
+    const { userId } = request.user;
+    const { id } = request.params as { id: string };
+    const { newSlotStart } = z.object({ newSlotStart: z.coerce.date() }).parse(request.body);
+
+    const result = await bookingService.rescheduleBooking(id, newSlotStart, { customerId: userId });
+    if (result.moved) {
+      const row = await app.prisma.booking.findUnique({
+        where: { id: result.booking.id },
+        select: { item: { select: { vendor: { select: { owner: { select: { userId: true } } } } } } },
+      });
+      const ownerUserId = row?.item.vendor.owner.userId;
+      if (ownerUserId) {
+        await notificationService.send({
+          userId: ownerUserId,
+          type: 'ORDER_UPDATE',
+          title: 'Appointment moved',
+          body: `${result.serviceName}: moved from ${fmtSlotTime(result.previousSlotStart)} to ${fmtSlotTime(result.booking.slotStart)}.`,
+          data: { kind: 'booking_rescheduled', bookingId: result.booking.id },
+        }).catch(() => undefined);
+      }
+    }
+    return { success: true, data: result.booking };
   });
 
   // ========================================================================

@@ -24,6 +24,15 @@ export function toMinutes(hhmm: string): number {
   return (h ?? 0) * 60 + (m ?? 0);
 }
 
+/** Human form of a slot instant on the UTC face — "Wed 5 Aug, 09:00". Used in
+ *  the reschedule notifications; matches what the picker shows. */
+export function fmtSlotTime(d: Date): string {
+  return d.toLocaleString('en-GB', {
+    weekday: 'short', day: 'numeric', month: 'short',
+    hour: '2-digit', minute: '2-digit', hour12: false, timeZone: 'UTC',
+  });
+}
+
 /** Candidate stride: a buffer widens the grid so every booking leaves its
  *  gap; defaults keep legacy listings byte-identical. */
 export function strideMinutes(config: BookingConfig): number {

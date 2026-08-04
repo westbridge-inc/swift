@@ -1,4 +1,5 @@
 import type { PrismaClient, Prisma } from '@prisma/client';
+import type { Server } from 'socket.io';
 import { AppError, NotFoundError } from '../../utils/errors';
 import { slotBlocked, slotFitsConfig, type ExceptionWindow } from './availability';
 
@@ -25,7 +26,17 @@ export interface BookingConfig {
 // ---------------------------------------------------------------------------
 
 export class BookingService {
-  constructor(private prisma: PrismaClient) {}
+  /** io is optional and never load-bearing (spec 2.6): mutations nudge the
+   *  vendor room so calendars/pickers refetch instantly; the 20s poll stays
+   *  the floor and the DB unique remains the only judge. */
+  constructor(private prisma: PrismaClient, private io?: Server) {}
+
+  /** Fire-and-forget liveness nudge. */
+  private nudge(vendorId: string, itemId: string): void {
+    try {
+      this.io?.to(`vendor:${vendorId}`).emit('bookings:changed', { itemId });
+    } catch { /* liveness is garnish */ }
+  }
 
   /** All slot rules except the reservation itself — checkout fails fast here.
    *  ONE availability computation: window/stride/lead-time via availability.ts
@@ -83,7 +94,7 @@ export class BookingService {
     const slotEnd = new Date(slotStart.getTime() + config.durationMinutes * 60_000);
 
     try {
-      return await this.prisma.booking.create({
+      const booking = await this.prisma.booking.create({
         data: {
           itemId,
           customerId,
@@ -93,6 +104,8 @@ export class BookingService {
           status: orderId ? 'CONFIRMED' : 'RESERVED',
         },
       });
+      await this.nudgeForItem(itemId);
+      return booking;
     } catch (error) {
       if ((error as Prisma.PrismaClientKnownRequestError).code === 'P2002') {
         throw new AppError(409, 'SLOT_TAKEN', 'That slot was just taken — pick another time');
@@ -108,10 +121,77 @@ export class BookingService {
       throw new NotFoundError('Booking', bookingId);
     }
     if (booking.status === 'CANCELLED') return booking;
-    return this.prisma.booking.update({
+    const cancelled = await this.prisma.booking.update({
       where: { id: bookingId },
       data: { status: 'CANCELLED' },
     });
+    await this.nudgeForItem(booking.itemId);
+    return cancelled;
   }
 
+  /**
+   * Reschedule (spec 2.4): reserve the NEW slot FIRST — the partial unique
+   * guards the race — then cancel the old in the SAME transaction. Two
+   * reschedules fighting for one target resolve to one winner and zero
+   * orphaned or double-held slots under any interleaving; the loser's
+   * original booking is untouched (the tx aborts whole).
+   */
+  async rescheduleBooking(
+    bookingId: string,
+    newSlotStart: Date,
+    actor: { customerId?: string; vendorId?: string },
+  ) {
+    const booking = await this.prisma.booking.findUnique({
+      where: { id: bookingId },
+      include: { item: { select: { id: true, vendorId: true, name: true } } },
+    });
+    if (!booking) throw new NotFoundError('Booking', bookingId);
+    const owned =
+      (actor.customerId && booking.customerId === actor.customerId) ||
+      (actor.vendorId && booking.item.vendorId === actor.vendorId);
+    if (!owned) throw new NotFoundError('Booking', bookingId);
+    if (booking.status !== 'RESERVED' && booking.status !== 'CONFIRMED') {
+      throw new AppError(400, 'NOT_RESCHEDULABLE', `This booking is ${booking.status.toLowerCase()} and cannot be moved`);
+    }
+    if (booking.slotStart.getTime() === newSlotStart.getTime()) return { booking, moved: false as const };
+
+    const config = await this.validateSlot(booking.itemId, newSlotStart);
+    const slotEnd = new Date(newSlotStart.getTime() + config.durationMinutes * 60_000);
+    try {
+      const next = await this.prisma.$transaction(async (tx) => {
+        const created = await tx.booking.create({
+          data: {
+            itemId: booking.itemId,
+            customerId: booking.customerId,
+            orderId: booking.orderId,
+            slotStart: newSlotStart,
+            slotEnd,
+            status: booking.status,
+          },
+        });
+        // Guarded: if the booking died while we were validating, abort whole.
+        const freed = await tx.booking.updateMany({
+          where: { id: booking.id, status: { in: ['RESERVED', 'CONFIRMED'] } },
+          data: { status: 'CANCELLED' },
+        });
+        if (freed.count !== 1) {
+          throw new AppError(409, 'BOOKING_MOVED', 'This booking just changed — reload and try again');
+        }
+        return created;
+      });
+      await this.nudgeForItem(booking.itemId);
+      return { booking: next, moved: true as const, previousSlotStart: booking.slotStart, serviceName: booking.item.name };
+    } catch (error) {
+      if ((error as Prisma.PrismaClientKnownRequestError).code === 'P2002') {
+        throw new AppError(409, 'SLOT_TAKEN', 'That slot was just taken — pick another time');
+      }
+      throw error;
+    }
+  }
+
+  private async nudgeForItem(itemId: string): Promise<void> {
+    if (!this.io) return;
+    const item = await this.prisma.item.findUnique({ where: { id: itemId }, select: { vendorId: true } });
+    if (item) this.nudge(item.vendorId, itemId);
+  }
 }

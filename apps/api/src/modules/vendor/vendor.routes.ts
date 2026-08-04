@@ -11,6 +11,7 @@ import { resolveDeliveryMode } from '../fulfillment/fulfillment-mode';
 import { handoverAttemptState } from '../handover/handover-security';
 import { NotificationService } from '../notification/notification.service';
 import { BookingService } from '../booking/booking.service';
+import { fmtSlotTime } from '../booking/availability';
 import { VerificationService } from '../verification/verification.service';
 import { getKycProvider } from '../../providers/kyc/kyc-provider';
 import { getStorageProvider } from '../../providers/storage/storage-provider';
@@ -496,7 +497,7 @@ export async function vendorRoutes(app: FastifyInstance) {
     getKycProvider(),
   );
   const storage = getStorageProvider();
-  const bookingService = new BookingService(app.prisma);
+  const bookingService = new BookingService(app.prisma, app.io);
   const qrService = new QrService(app.prisma);
   const qrAnalytics = new QrAnalyticsService(app.prisma);
 
@@ -2336,6 +2337,25 @@ export async function vendorRoutes(app: FastifyInstance) {
     });
     if (removed.count === 0) throw new NotFoundError('Block', request.params.id);
     return { success: true, data: { deleted: true } };
+  });
+
+  /** POST /bookings/:id/reschedule — vendor-initiated move (scheduling 2.4):
+   *  same law, roles reversed; the customer is told immediately. */
+  app.post<{ Params: IdParam }>('/bookings/:id/reschedule', auth, async (request) => {
+    const { vendorId } = await requireVendor(app, request, 'MANAGER');
+    const { newSlotStart } = z.object({ newSlotStart: z.coerce.date() }).parse(request.body);
+
+    const result = await bookingService.rescheduleBooking(request.params.id, newSlotStart, { vendorId });
+    if (result.moved) {
+      await notifications.send({
+        userId: result.booking.customerId,
+        type: 'ORDER_UPDATE',
+        title: 'Your appointment moved',
+        body: `${result.serviceName}: moved from ${fmtSlotTime(result.previousSlotStart)} to ${fmtSlotTime(result.booking.slotStart)}.`,
+        data: { kind: 'booking_rescheduled', bookingId: result.booking.id },
+      }).catch(() => undefined);
+    }
+    return { success: true, data: result.booking };
   });
 
   /** PUT /hours — Bulk upsert operating hours for all 7 days */
