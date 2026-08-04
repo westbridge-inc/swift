@@ -3701,6 +3701,139 @@ model AttributionClaim {
   @@map("attribution_claims")
 }
 
+// ---------------------------------------------------------------------------
+// CATEGORY DISCOVERY (#17, FIND-BY-CRAVING) — the platform taxonomy layer.
+// NOT the per-vendor menu sections (model Category = in-store navigation,
+// untouched by law B): these are curated, tenant-scoped discovery categories
+// vendors PICK from (never free-text), an auto-categorizer suggests, and the
+// Home rail renders. Flag-gated: PlatformConfig CATEGORY_DISCOVERY_ENABLED.
+// ---------------------------------------------------------------------------
+
+enum DiscoveryCategoryKind {
+  CUISINE
+  DISH
+  DIETARY
+  AISLE
+  RETAIL
+}
+
+enum DiscoveryCategoryStatus {
+  ACTIVE
+  HIDDEN
+  MERGED
+  PENDING
+}
+
+enum DiscoveryCategoryVertical {
+  FOOD
+  GROCERY
+  RETAIL
+}
+
+enum DiscoveryTagSource {
+  VENDOR
+  AUTO
+  ADMIN
+  DERIVED
+}
+
+model DiscoveryCategory {
+  id           String                    @id @default(cuid())
+  tenantId     String                    @default("swift-default")
+  /// Immutable once created; kebab-case. MERGED slugs redirect via mergedIntoId.
+  slug         String
+  name         String
+  kind         DiscoveryCategoryKind
+  vertical     DiscoveryCategoryVertical
+  emoji        String
+  iconKey      String?
+  /// Matcher dictionary — lowercased words/phrases (the Guyanese-terms moat).
+  aliases      String[]
+  sortWeight   Int                       @default(100)
+  status       DiscoveryCategoryStatus   @default(ACTIVE)
+  isSeed       Boolean                   @default(false)
+  mergedIntoId String?
+  createdAt    DateTime                  @default(now())
+  updatedAt    DateTime                  @updatedAt
+
+  @@unique([tenantId, slug])
+  @@index([tenantId, status, vertical, sortWeight])
+  @@map("discovery_categories")
+}
+
+model VendorDiscoveryCategory {
+  id         String             @id @default(cuid())
+  tenantId   String             @default("swift-default")
+  vendorId   String
+  categoryId String
+  role       String // "PRIMARY" | "SECONDARY"
+  /// VENDOR/ADMIN = chosen (untouchable by machines); DERIVED = machine-managed
+  /// by the Stage-C reconcile, which writes ONLY where source='DERIVED'.
+  source     DiscoveryTagSource
+  createdAt  DateTime           @default(now())
+
+  @@unique([vendorId, categoryId])
+  @@index([tenantId, categoryId])
+  @@map("vendor_discovery_categories")
+}
+
+// Raw SQL in the migration (Prisma can't express partial uniques):
+// CREATE UNIQUE INDEX one_primary_discovery_category_per_vendor
+//   ON "vendor_discovery_categories"("vendorId") WHERE role = 'PRIMARY';
+
+model ItemDiscoveryCategory {
+  id         String             @id @default(cuid())
+  tenantId   String             @default("swift-default")
+  itemId     String
+  categoryId String
+  source     DiscoveryTagSource
+  confidence Decimal?           @db.Decimal(3, 2)
+  createdAt  DateTime           @default(now())
+
+  @@unique([itemId, categoryId])
+  @@index([tenantId, categoryId])
+  @@map("item_discovery_categories")
+}
+
+// Service-enforced: max CAT_MAX_ITEM_TAGS (3) rows per item.
+
+/// ACCEPTED/DISMISSED rows are the "human touched this" memory that makes the
+/// sticky-choice law enforceable: machines never re-touch resolved ground.
+model DiscoveryCategorySuggestion {
+  id         String    @id @default(cuid())
+  tenantId   String    @default("swift-default")
+  itemId     String
+  categoryId String
+  confidence Decimal   @db.Decimal(3, 2)
+  stage      String // "MATCHER" | "AI"
+  status     String    @default("PENDING") // PENDING | ACCEPTED | DISMISSED | SUPERSEDED
+  createdAt  DateTime  @default(now())
+  resolvedAt DateTime?
+
+  @@unique([itemId, categoryId])
+  @@index([tenantId, itemId, status])
+  @@map("discovery_category_suggestions")
+}
+
+/// Vendors never create categories — they file requests into the founder's
+/// queue (approve / merge into existing / reject, reason shown verbatim).
+model DiscoveryCategoryRequest {
+  id                 String    @id @default(cuid())
+  tenantId           String    @default("swift-default")
+  vendorId           String
+  proposedName       String
+  note               String?
+  status             String    @default("PENDING") // PENDING | APPROVED | MERGED | REJECTED
+  resolvedCategoryId String?
+  resolvedBy         String?
+  resolvedNote       String?
+  createdAt          DateTime  @default(now())
+  resolvedAt         DateTime?
+
+  @@index([tenantId, status])
+  @@map("discovery_category_requests")
+}
+
 /// Retention rollup target: per-day counts by decision/os/template. The
 /// analytics endpoint sums raw + rollup so numbers survive the purge.
 model ScanDailyRollup {

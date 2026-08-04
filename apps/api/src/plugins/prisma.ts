@@ -11,7 +11,12 @@ import { getTenantId } from './tenant-context';
 // by the existing per-owner scoping (customerId / ownerId / userId), which the
 // IDOR suite proves. No context set (jobs, tests, pre-auth) → unscoped, so
 // single-tenant behavior is unchanged.
-const TENANT_MODELS = new Set(['user', 'vendor', 'order', 'qrcode', 'scanevent']);
+const TENANT_MODELS = new Set([
+  'user', 'vendor', 'order', 'qrcode', 'scanevent',
+  // Category discovery (#17): the whole taxonomy layer is tenant-owned.
+  'discoverycategory', 'vendordiscoverycategory', 'itemdiscoverycategory',
+  'discoverycategorysuggestion', 'discoverycategoryrequest',
+]);
 const SCOPED_READS = new Set([
   'findMany', 'findFirst', 'findFirstOrThrow', 'count', 'aggregate', 'groupBy', 'updateMany', 'deleteMany',
 ]);
@@ -73,6 +78,12 @@ const prisma = new PrismaClient({
     // by design — a shortCode is globally unique and names its own tenant.
     qrCode: { $allOperations: tenantScope },
     scanEvent: { $allOperations: tenantScope },
+    // Category discovery (#17): taxonomy + tags + suggestions + requests.
+    discoveryCategory: { $allOperations: tenantScope },
+    vendorDiscoveryCategory: { $allOperations: tenantScope },
+    itemDiscoveryCategory: { $allOperations: tenantScope },
+    discoveryCategorySuggestion: { $allOperations: tenantScope },
+    discoveryCategoryRequest: { $allOperations: tenantScope },
   },
 });
 
