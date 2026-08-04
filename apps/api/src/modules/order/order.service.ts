@@ -128,7 +128,7 @@ export class OrderService {
   ) {
     this.notifications = new NotificationService(prisma, io);
     this.countryConfig = new CountryConfigService(prisma);
-    this.booking = new BookingService(prisma);
+    this.booking = new BookingService(prisma, io);
   }
 
   async checkout(input: CheckoutInput) {

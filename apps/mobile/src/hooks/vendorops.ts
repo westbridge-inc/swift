@@ -203,11 +203,16 @@ export function useVendorOrdersLive(vendorId: string | undefined) {
     s.on('order:new', onNew);
     s.on('order:status_changed', refresh);
     s.on('order:prep_update', refresh);
+    // Scheduling liveness nudge (spec 2.6): calendar + picker refetch the
+    // moment a booking is made, moved or cancelled; the poll stays the floor.
+    const refreshBookings = () => qc.invalidateQueries({ queryKey: ['vendor', 'bookings'] });
+    s.on('bookings:changed', refreshBookings);
     return () => {
       s.off('connect', join);
       s.off('order:new', onNew);
       s.off('order:status_changed', refresh);
       s.off('order:prep_update', refresh);
+      s.off('bookings:changed', refreshBookings);
     };
   }, [vendorId, qc, previewType]);
 
@@ -642,6 +647,51 @@ export function useVendorBookings(enabled = true) {
     refetchInterval: 60000,
   });
   return pv ? previewQuery(pv.bookings) : q;
+}
+
+export type VendorBookingException = {
+  id: string;
+  itemId: string | null;
+  date: string;
+  start: string | null;
+  end: string | null;
+  reason: string | null;
+};
+
+/** Blocked time in the coming month — renders hatched on the day calendar. */
+export function useVendorBookingExceptions(enabled = true) {
+  const pv = usePreviewDataset();
+  const q = useQuery<VendorBookingException[]>({
+    queryKey: ['vendor', 'booking-exceptions'],
+    queryFn: () => unwrap<VendorBookingException[]>(vendorApi.bookingExceptions()),
+    enabled: enabled && !pv,
+    staleTime: 30_000,
+  });
+  return pv ? previewQuery([] as VendorBookingException[]) : q;
+}
+
+/** Block time — "funeral afternoon in two taps" (scheduling 2.1). */
+export function useCreateBookingException() {
+  const qc = useQueryClient();
+  return usePreviewSafeMutation({
+    mutationFn: (data: { date: string; start?: string; end?: string; reason?: string }) =>
+      unwrap(vendorApi.createBookingException(data)),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: ['vendor', 'booking-exceptions'] });
+      void qc.invalidateQueries({ queryKey: ['vendor', 'bookings'] });
+    },
+  });
+}
+
+export function useDeleteBookingException() {
+  const qc = useQueryClient();
+  return usePreviewSafeMutation({
+    mutationFn: (id: string) => unwrap(vendorApi.deleteBookingException(id)),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: ['vendor', 'booking-exceptions'] });
+      void qc.invalidateQueries({ queryKey: ['vendor', 'bookings'] });
+    },
+  });
 }
 
 export function useSetHours() {

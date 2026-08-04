@@ -1042,6 +1042,25 @@ enum BookingStatus {
   COMPLETED
 }
 
+/// One-off availability blocks (scheduling spec 2.1): vacation day, funeral
+/// afternoon, lunch hour — subtracted from slot computation BEFORE bookings.
+/// itemId null = the whole business is blocked; start/end null = full day.
+/// Customers simply never see blocked slots; `reason` never leaves the vendor.
+model BookingException {
+  id        String   @id @default(cuid())
+  tenantId  String   @default("swift-default")
+  itemId    String?
+  vendorId  String
+  date      DateTime @db.Date
+  start     String? // "13:00" local wall-clock (the UTC-face convention)
+  end       String?
+  reason    String?
+  createdAt DateTime @default(now())
+
+  @@index([vendorId, date])
+  @@map("booking_exceptions")
+}
+
 model OptionGroup {
   id         String   @id @default(cuid())
   itemId     String
