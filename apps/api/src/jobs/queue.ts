@@ -671,6 +671,16 @@ export function createWorkers(ctx: JobContext) {
         return;
       }
 
+      if (job.name === 'discovery-ai-classify') {
+        // Stage-B (category spec Part 4): budgeted AI pass over items Stage A
+        // couldn't place. Budget exhausted or model down = silent wait.
+        const { runAiClassifierBatch } = await import('../modules/discovery/ai-classifier');
+        const { AiService } = await import('../modules/ai/ai.service');
+        const r = await runAiClassifierBatch(ctx.prisma, new AiService());
+        if (r.scanned > 0) ctx.log.info(r, 'discovery: AI classifier batch');
+        return;
+      }
+
       if (job.name === 'discovery-derivation') {
         // Stage-C nightly (category spec Part 4): recompute DERIVED store
         // memberships from live-item tags; chosen rows untouchable.
@@ -1127,6 +1137,14 @@ export async function scheduleRecurringJobs(queues: ReturnType<typeof createQueu
     repeat: { pattern: '0 5 * * *' },
     removeOnComplete: 7,
     removeOnFail: 7,
+  });
+
+  // Stage-B AI classifier: hourly nibble at the un-placed backlog under the
+  // daily budget (waits silently when spent — spec: nobody sees degradation).
+  await queues.dispatchQueue.add('discovery-ai-classify', {}, {
+    repeat: { pattern: '20 * * * *' },
+    removeOnComplete: 24,
+    removeOnFail: 24,
   });
 
   // Rating anti-manipulation sweep: daily at 04:00
