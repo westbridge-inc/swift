@@ -2408,6 +2408,7 @@ export async function vendorRoutes(app: FastifyInstance) {
     await requireOwnItem(vendorId, request.params.id);
     const { slug } = z.object({ slug: z.string().min(1).max(80) }).parse(request.body);
     await discovery.addItemTag(request.params.id, slug, 'VENDOR');
+    void discovery.reconcileDerivedForItem(request.params.id).catch(() => undefined);
     return { success: true, data: await discovery.itemTags(request.params.id) };
   });
 
@@ -2416,6 +2417,7 @@ export async function vendorRoutes(app: FastifyInstance) {
     const { vendorId } = await requireVendor(app, request, 'MANAGER');
     await requireOwnItem(vendorId, request.params.id);
     await discovery.removeItemTag(request.params.id, request.params.slug);
+    void discovery.reconcileDerivedForItem(request.params.id).catch(() => undefined);
     return { success: true, data: await discovery.itemTags(request.params.id) };
   });
 
@@ -2427,6 +2429,7 @@ export async function vendorRoutes(app: FastifyInstance) {
     if (!suggestion) throw new NotFoundError('Suggestion', request.params.id);
     await requireOwnItem(vendorId, suggestion.itemId);
     await discovery.resolveSuggestion(suggestion.id, suggestion.itemId, action);
+    if (action === 'accept') void discovery.reconcileDerivedForItem(suggestion.itemId).catch(() => undefined);
     return { success: true, data: { status: action === 'accept' ? 'ACCEPTED' : 'DISMISSED' } };
   });
 

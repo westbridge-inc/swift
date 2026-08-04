@@ -2,6 +2,7 @@ import type { PrismaClient } from '@prisma/client';
 import { Prisma } from '@prisma/client';
 import { AppError, NotFoundError } from '../../utils/errors';
 import { CAT_MAX_ITEM_TAGS, suggestCategories, type MatchableCategory } from './matcher';
+import { reconcileVendorDerived } from './derivation';
 
 // ---------------------------------------------------------------------------
 // Discovery service (#17) — vendor picks, item tags, suggestions, requests.
@@ -250,6 +251,13 @@ export class DiscoveryService {
       data: { status: 'SUPERSEDED', resolvedAt: new Date() },
     });
     return written;
+  }
+
+  /** Stage-C on-change: reconcile the item's vendor after any tag mutation.
+   *  Fire-and-forget garnish — the nightly job is the safety net. */
+  async reconcileDerivedForItem(itemId: string): Promise<void> {
+    const item = await this.prisma.item.findUnique({ where: { id: itemId }, select: { vendorId: true } });
+    if (item) await reconcileVendorDerived(this.prisma, item.vendorId);
   }
 
   // ---- requests ------------------------------------------------------------
