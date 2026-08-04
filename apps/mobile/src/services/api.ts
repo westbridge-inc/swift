@@ -523,6 +523,11 @@ export const vendorApi = {
   analyticsRepeatCustomers: () => api.get('/vendor/analytics/repeat-customers'),
   hours: () => api.get('/vendor/hours'),
   bookings: (params?: { from?: string; to?: string }) => api.get('/vendor/bookings', { params }),
+  // Block time (scheduling 2.1): one-off exceptions — full day or a window.
+  bookingExceptions: (params?: { from?: string; to?: string }) => api.get('/vendor/bookings/exceptions', { params }),
+  createBookingException: (data: { date: string; start?: string; end?: string; reason?: string; itemId?: string }) =>
+    api.post('/vendor/bookings/exceptions', data),
+  deleteBookingException: (id: string) => api.delete(`/vendor/bookings/exceptions/${id}`),
   setHours: (hours: { dayOfWeek: number; openTime: string; closeTime: string; isClosed: boolean }[]) =>
     api.put('/vendor/hours', { hours }),
   updateProfile: (data: { name?: string; phone?: string; description?: string; mmgPayUrl?: string | null; selfDeliveryEnabled?: boolean }) =>
