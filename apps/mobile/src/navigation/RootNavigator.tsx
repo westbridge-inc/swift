@@ -7,7 +7,7 @@ import { useAppStore } from '../stores/appStore';
 import { useMoverPreview } from '../stores/moverPreview';
 import { useVendorPreview } from '../stores/vendorPreview';
 import { useCustomerCountry } from '../hooks/useCustomerCountry';
-import { registerDeviceForPush } from '../services/push';
+import { registerIfGranted } from '../services/push';
 import { OnboardingScreen } from '../modules/onboarding/OnboardingScreen';
 import { CountryPickerScreen } from '../screens/auth/CountryPickerScreen';
 import { RolePickerScreen } from '../screens/auth/RolePickerScreen';
@@ -49,10 +49,12 @@ export function RootNavigator() {
   // location instead (spec: pick role → straight to browsing).
   useCustomerCountry();
 
-  // Push registration follows the session (config-gated no-op until the EAS
+  // Push registration follows the session — but NEVER prompts at boot
+  // [first-open SO-5]: silent for already-granted users; the ask itself
+  // happens at in-context priming moments (config-gated no-op until the EAS
   // project id ships — see services/push.ts).
   React.useEffect(() => {
-    if (isAuthenticated) void registerDeviceForPush();
+    if (isAuthenticated) void registerIfGranted();
   }, [isAuthenticated]);
 
   // The tap-router [first-open 2.4]: every notification tap lands on its
