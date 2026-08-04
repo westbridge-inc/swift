@@ -29,6 +29,7 @@ import { scheduleVendorSearchSync } from '../search/search-sync';
 import { SearchService } from '../search/search.service';
 import { subscriptionOperability } from '../subscription/operate-gate';
 import { QrService } from '../qr/qr.service';
+import { DiscoveryService } from '../discovery/discovery.service';
 import { QrAnalyticsService } from '../qr/qr-analytics.service';
 import { cachedRender, renderQrPng, renderQrSvg, renderTemplatePdf } from '../qr/qr-assets.service';
 import { publicWebBase } from '../qr/qr-codes';
@@ -499,6 +500,7 @@ export async function vendorRoutes(app: FastifyInstance) {
   const storage = getStorageProvider();
   const bookingService = new BookingService(app.prisma, app.io);
   const qrService = new QrService(app.prisma);
+  const discovery = new DiscoveryService(app.prisma);
   const qrAnalytics = new QrAnalyticsService(app.prisma);
 
   // A vendor may only DRIVE an order FORWARD (accept / prepare / ready / complete)
@@ -1662,6 +1664,9 @@ export async function vendorRoutes(app: FastifyInstance) {
     });
 
     scheduleVendorSearchSync(app, vendorId);
+    // Stage-A categorizer reacts to what the vendor just typed (#17) —
+    // fire-and-forget; suggestions are garnish, the save never waits.
+    void discovery.runMatcherForItem(item).catch(() => undefined);
 
     return { success: true, data: item };
   });
@@ -2009,6 +2014,7 @@ export async function vendorRoutes(app: FastifyInstance) {
     });
 
     scheduleVendorSearchSync(app, vendorId);
+    void discovery.runMatcherForItem(item).catch(() => undefined);
 
     return { success: true, data: item };
   });
@@ -2356,6 +2362,92 @@ export async function vendorRoutes(app: FastifyInstance) {
       }).catch(() => undefined);
     }
     return { success: true, data: result.booking };
+  });
+
+  // =========================================================================
+  // CATEGORY DISCOVERY (#17) — store picks, item tags, suggestions, requests.
+  // Curated only (slugs validate against the tenant taxonomy); one PRIMARY
+  // per store (partial-unique raced); ≤3 tags per item; sticky human choice.
+  // =========================================================================
+
+  /** The caller must own the item — every item-tag surface goes through this. */
+  async function requireOwnItem(vendorId: string, itemId: string) {
+    const item = await app.prisma.item.findFirst({ where: { id: itemId, vendorId }, select: { id: true, name: true, description: true } });
+    if (!item) throw new NotFoundError('Listing', itemId);
+    return item;
+  }
+
+  /** GET /store-categories — { primary, secondary[], derived[] }. (The bare
+   *  /categories namespace is the vendor's MENU SECTIONS — law B — so the
+   *  platform taxonomy lives under /store-categories; divergence logged.) */
+  app.get('/store-categories', auth, async (request) => {
+    const { vendorId } = await requireVendor(app, request, 'MANAGER');
+    return { success: true, data: await discovery.getVendorCategories(vendorId) };
+  });
+
+  /** PUT /store-categories — replace the chosen set: 1 PRIMARY + ≤2 secondary. */
+  app.put('/store-categories', auth, async (request) => {
+    const { vendorId } = await requireVendor(app, request, 'MANAGER');
+    const body = z.object({
+      primarySlug: z.string().min(1).max(80),
+      secondarySlugs: z.array(z.string().min(1).max(80)).max(2).default([]),
+    }).parse(request.body);
+    return { success: true, data: await discovery.setVendorCategories(vendorId, body.primarySlug, body.secondarySlugs) };
+  });
+
+  /** GET /items/:id/category-suggestions — PENDING suggestions for the item. */
+  app.get<{ Params: IdParam }>('/items/:id/category-suggestions', auth, async (request) => {
+    const { vendorId } = await requireVendor(app, request, 'MANAGER');
+    await requireOwnItem(vendorId, request.params.id);
+    return { success: true, data: await discovery.pendingSuggestions(request.params.id) };
+  });
+
+  /** POST /items/:id/categories — add a tag ({ slug }, ≤3, curated only). */
+  app.post<{ Params: IdParam }>('/items/:id/categories', auth, async (request) => {
+    const { vendorId } = await requireVendor(app, request, 'MANAGER');
+    await requireOwnItem(vendorId, request.params.id);
+    const { slug } = z.object({ slug: z.string().min(1).max(80) }).parse(request.body);
+    await discovery.addItemTag(request.params.id, slug, 'VENDOR');
+    void discovery.reconcileDerivedForItem(request.params.id).catch(() => undefined);
+    return { success: true, data: await discovery.itemTags(request.params.id) };
+  });
+
+  /** DELETE /items/:id/categories/:slug — removing AUTO writes DISMISSED. */
+  app.delete<{ Params: { id: string; slug: string } }>('/items/:id/categories/:slug', auth, async (request) => {
+    const { vendorId } = await requireVendor(app, request, 'MANAGER');
+    await requireOwnItem(vendorId, request.params.id);
+    await discovery.removeItemTag(request.params.id, request.params.slug);
+    void discovery.reconcileDerivedForItem(request.params.id).catch(() => undefined);
+    return { success: true, data: await discovery.itemTags(request.params.id) };
+  });
+
+  /** POST /category-suggestions/:id/accept | /dismiss — one-tap disposal. */
+  app.post<{ Params: { id: string; action: string } }>('/category-suggestions/:id/:action', auth, async (request) => {
+    const { vendorId } = await requireVendor(app, request, 'MANAGER');
+    const action = z.enum(['accept', 'dismiss']).parse(request.params.action);
+    const suggestion = await app.prisma.discoveryCategorySuggestion.findUnique({ where: { id: request.params.id } });
+    if (!suggestion) throw new NotFoundError('Suggestion', request.params.id);
+    await requireOwnItem(vendorId, suggestion.itemId);
+    await discovery.resolveSuggestion(suggestion.id, suggestion.itemId, action);
+    if (action === 'accept') void discovery.reconcileDerivedForItem(suggestion.itemId).catch(() => undefined);
+    return { success: true, data: { status: action === 'accept' ? 'ACCEPTED' : 'DISMISSED' } };
+  });
+
+  /** POST /store-categories/request — the founder's queue, never free-text. */
+  app.post('/store-categories/request', auth, async (request) => {
+    const { vendorId } = await requireVendor(app, request, 'MANAGER');
+    const body = z.object({
+      proposedName: z.string().trim().min(2).max(60),
+      note: z.string().trim().max(300).optional(),
+    }).parse(request.body);
+    const created = await discovery.createRequest(vendorId, body.proposedName, body.note);
+    return { success: true, data: created };
+  });
+
+  /** GET /store-categories/requests — my requests + statuses. */
+  app.get('/store-categories/requests', auth, async (request) => {
+    const { vendorId } = await requireVendor(app, request, 'MANAGER');
+    return { success: true, data: await discovery.vendorRequests(vendorId) };
   });
 
   /** PUT /hours — Bulk upsert operating hours for all 7 days */

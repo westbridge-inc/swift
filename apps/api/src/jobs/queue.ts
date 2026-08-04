@@ -671,6 +671,15 @@ export function createWorkers(ctx: JobContext) {
         return;
       }
 
+      if (job.name === 'discovery-derivation') {
+        // Stage-C nightly (category spec Part 4): recompute DERIVED store
+        // memberships from live-item tags; chosen rows untouchable.
+        const { reconcileAllDerived } = await import('../modules/discovery/derivation');
+        const r = await reconcileAllDerived(ctx.prisma);
+        if (r.added + r.removed > 0) ctx.log.info(r, 'discovery: derived memberships reconciled');
+        return;
+      }
+
       if (job.name === 'qr-attribution-purge') {
         // Hourly hard-delete of expired install-attribution fingerprints —
         // ephemeral by design (DPA); claim receipts keep the funnel numbers.
@@ -1110,6 +1119,14 @@ export async function scheduleRecurringJobs(queues: ReturnType<typeof createQueu
     repeat: { pattern: '0 * * * *' },
     removeOnComplete: 24,
     removeOnFail: 24,
+  });
+
+  // Category discovery Stage-C: nightly derived-membership reconcile (the
+  // on-change path runs debounced in-process; this is the safety net).
+  await queues.dispatchQueue.add('discovery-derivation', {}, {
+    repeat: { pattern: '0 5 * * *' },
+    removeOnComplete: 7,
+    removeOnFail: 7,
   });
 
   // Rating anti-manipulation sweep: daily at 04:00
