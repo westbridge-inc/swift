@@ -786,6 +786,15 @@ export class OrderService {
   ): Promise<void> {
     // Mirrors the customer cancelOrder path exactly (rider freed by id; driver
     // CAS'd on currentRideId) so all three cancel routes behave identically.
+    // ONE-SLOT-ONE-PERSON (scheduling spec 2.3): every order death frees its
+    // appointment slot — found live: vendor reject and the no-response
+    // auto-cancel left bookings CONFIRMED forever, permanently blocking the
+    // provider's chair. The partial unique ignores CANCELLED rows, so the
+    // slot is instantly sellable again.
+    await this.prisma.booking.updateMany({
+      where: { orderId: order.id, status: { not: 'CANCELLED' } },
+      data: { status: 'CANCELLED' },
+    });
     if (opts.restock) await this.restockCancelledOrder(order.id);
     if (order.riderId) {
       if (order.paymentMethod === 'CASH') {
