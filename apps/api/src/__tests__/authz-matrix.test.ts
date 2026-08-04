@@ -280,7 +280,9 @@ describe('server↔matrix prefix drift guard [SWIFT-092]', () => {
   // /attribution is pre-auth by nature (web install taps + the app's first
   // launch, before any session exists): per-IP rate-limited, server-derived
   // everything, single-candidate-or-Home — proven in qr-attribution.test.ts.
-  const EXEMPT = new Set(['/api/v1/public', '/api/v1/billing/mmg', '/api/v1/attribution']);
+  // /discovery is the guest-facing category rail (flag-gated read-only
+  // aggregates — no user data; browsing needs no session by design).
+  const EXEMPT = new Set(['/api/v1/public', '/api/v1/billing/mmg', '/api/v1/attribution', '/api/v1/discovery']);
 
   it('flags a server prefix the matrix never mounts (red-first)', () => {
     // Pretend server.ts added /api/v1/loyalty but buildTestApp never enrolled it.
