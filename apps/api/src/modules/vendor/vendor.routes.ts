@@ -2271,6 +2271,73 @@ export async function vendorRoutes(app: FastifyInstance) {
     };
   });
 
+  // -------------------------------------------------------------------------
+  // Block time (scheduling spec 2.1): one-off exceptions — vacation day, sick
+  // day, lunch block. Subtracted from availability BEFORE bookings by the ONE
+  // computation both the picker and reservation validate through; customers
+  // simply never see blocked slots and no reason ever leaks.
+  // -------------------------------------------------------------------------
+
+  /** GET /bookings/exceptions?from&to — the vendor's blocks in a range. */
+  app.get('/bookings/exceptions', auth, async (request) => {
+    const { vendorId } = await requireVendor(app, request, 'MANAGER');
+    const { from, to } = z
+      .object({ from: z.coerce.date().optional(), to: z.coerce.date().optional() })
+      .parse(request.query ?? {});
+    const start = from ?? new Date(new Date().setUTCHours(0, 0, 0, 0));
+    const end = to ?? new Date(start.getTime() + 30 * 24 * 60 * 60 * 1000);
+    const exceptions = await app.prisma.bookingException.findMany({
+      where: { vendorId, date: { gte: start, lte: end } },
+      orderBy: [{ date: 'asc' }, { start: 'asc' }],
+    });
+    return { success: true, data: exceptions };
+  });
+
+  /** POST /bookings/exceptions — block a full day or a window, one listing or
+   *  the whole business. */
+  app.post('/bookings/exceptions', auth, async (request) => {
+    const { vendorId } = await requireVendor(app, request, 'MANAGER');
+    const HHMM = /^([01]\d|2[0-3]):[0-5]\d$/;
+    const body = z
+      .object({
+        itemId: z.string().optional(),
+        date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+        start: z.string().regex(HHMM).optional(),
+        end: z.string().regex(HHMM).optional(),
+        reason: z.string().trim().max(200).optional(),
+      })
+      .refine((b) => (b.start == null) === (b.end == null), { message: 'start and end come together' })
+      .refine((b) => b.start == null || b.end == null || b.start < b.end, { message: 'start must be before end' })
+      .parse(request.body);
+
+    if (body.itemId) {
+      const item = await app.prisma.item.findFirst({ where: { id: body.itemId, vendorId }, select: { id: true } });
+      if (!item) throw new NotFoundError('Listing', body.itemId);
+    }
+    const [y, m, d] = body.date.split('-').map(Number);
+    const exception = await app.prisma.bookingException.create({
+      data: {
+        vendorId,
+        itemId: body.itemId ?? null,
+        date: new Date(Date.UTC(y!, m! - 1, d!)),
+        start: body.start ?? null,
+        end: body.end ?? null,
+        reason: body.reason ?? null,
+      },
+    });
+    return { success: true, data: exception };
+  });
+
+  /** DELETE /bookings/exceptions/:id — unblock (own-vendor only). */
+  app.delete<{ Params: IdParam }>('/bookings/exceptions/:id', auth, async (request) => {
+    const { vendorId } = await requireVendor(app, request, 'MANAGER');
+    const removed = await app.prisma.bookingException.deleteMany({
+      where: { id: request.params.id, vendorId },
+    });
+    if (removed.count === 0) throw new NotFoundError('Block', request.params.id);
+    return { success: true, data: { deleted: true } };
+  });
+
   /** PUT /hours — Bulk upsert operating hours for all 7 days */
   app.put('/hours', auth, async (request) => {
     const { vendorId } = await requireVendor(app, request, 'MANAGER');

@@ -1,5 +1,6 @@
 import type { PrismaClient, Prisma } from '@prisma/client';
 import { AppError, NotFoundError } from '../../utils/errors';
+import { slotBlocked, slotFitsConfig, type ExceptionWindow } from './availability';
 
 /** Shape stored in Item.bookingConfig for SERVICE listings. */
 export interface BookingConfig {
@@ -9,6 +10,11 @@ export interface BookingConfig {
    *  the customer's choice. Absent = AT_BUSINESS (legacy listings). */
   serviceMode?: 'AT_BUSINESS' | 'MOBILE' | 'BOTH';
   serviceRadiusKm?: number;
+  /** Optional gap after each booking (scheduling spec 2.5) — widens the slot
+   *  grid so back-to-back never happens. Absent/0 = legacy behavior. */
+  bufferMinutes?: number;
+  /** Optional minimum notice — no last-second bookings. Absent/0 = legacy. */
+  minNoticeMinutes?: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -21,11 +27,14 @@ export interface BookingConfig {
 export class BookingService {
   constructor(private prisma: PrismaClient) {}
 
-  /** All slot rules except the reservation itself — checkout fails fast here. */
+  /** All slot rules except the reservation itself — checkout fails fast here.
+   *  ONE availability computation: window/stride/lead-time via availability.ts
+   *  and the SAME exception subtraction the picker applies — a stale picker
+   *  can never book into a blocked window. */
   async validateSlot(itemId: string, slotStart: Date): Promise<BookingConfig> {
     const item = await this.prisma.item.findUnique({
       where: { id: itemId },
-      select: { id: true, fulfillment: true, bookingConfig: true, isAvailable: true },
+      select: { id: true, vendorId: true, fulfillment: true, bookingConfig: true, isAvailable: true },
     });
     if (!item) throw new NotFoundError('Listing', itemId);
     if (item.fulfillment !== 'APPOINTMENT' || !item.bookingConfig) {
@@ -39,8 +48,30 @@ export class BookingService {
     }
 
     const config = item.bookingConfig as unknown as BookingConfig;
-    this.assertSlotFitsConfig(slotStart, config);
+    const fit = slotFitsConfig(slotStart, config, new Date());
+    if (fit === 'OUTSIDE') {
+      throw new AppError(400, 'SLOT_OUTSIDE_HOURS', 'That time is not offered for this service');
+    }
+    if (fit === 'TOO_SOON') {
+      throw new AppError(400, 'SLOT_TOO_SOON', 'That time is too soon to book — pick a later slot');
+    }
+
+    const exceptions = await this.exceptionsFor(item.vendorId, slotStart);
+    const minutesIntoDay = slotStart.getUTCHours() * 60 + slotStart.getUTCMinutes();
+    if (slotBlocked(minutesIntoDay, config.durationMinutes, itemId, exceptions)) {
+      // Same face as a taken slot — a block's existence (or reason) never leaks.
+      throw new AppError(409, 'SLOT_TAKEN', 'That slot was just taken — pick another time');
+    }
     return config;
+  }
+
+  /** The vendor's exception windows overlapping the slot's UTC-face date. */
+  async exceptionsFor(vendorId: string, onDate: Date): Promise<ExceptionWindow[]> {
+    const day = new Date(Date.UTC(onDate.getUTCFullYear(), onDate.getUTCMonth(), onDate.getUTCDate()));
+    return this.prisma.bookingException.findMany({
+      where: { vendorId, date: day },
+      select: { itemId: true, start: true, end: true },
+    });
   }
 
   /**
@@ -83,33 +114,4 @@ export class BookingService {
     });
   }
 
-  /** The slot must start inside a configured window, aligned to the duration. */
-  private assertSlotFitsConfig(slotStart: Date, config: BookingConfig) {
-    if (!config.durationMinutes || !Array.isArray(config.slots)) {
-      throw new AppError(400, 'BAD_BOOKING_CONFIG', 'This listing has an invalid booking configuration');
-    }
-
-    const day = slotStart.getUTCDay();
-    const minutesIntoDay = slotStart.getUTCHours() * 60 + slotStart.getUTCMinutes();
-
-    const window = config.slots.find((s) => {
-      if (s.dayOfWeek !== day) return false;
-      const start = toMinutes(s.start);
-      const end = toMinutes(s.end);
-      return (
-        minutesIntoDay >= start &&
-        minutesIntoDay + config.durationMinutes <= end &&
-        (minutesIntoDay - start) % config.durationMinutes === 0
-      );
-    });
-
-    if (!window) {
-      throw new AppError(400, 'SLOT_OUTSIDE_HOURS', 'That time is not offered for this service');
-    }
-  }
-}
-
-function toMinutes(hhmm: string): number {
-  const [h, m] = hhmm.split(':').map(Number);
-  return (h ?? 0) * 60 + (m ?? 0);
 }

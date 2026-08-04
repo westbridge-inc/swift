@@ -10,6 +10,8 @@ import { parsePagination, paginatedResponse } from '../../utils/pagination';
 import { tenantCacheKey } from '../../utils/tenant-cache';
 import { AppError, NotFoundError, ValidationError, ForbiddenError } from '../../utils/errors';
 import { zMoneyMinor } from '../../utils/money-schema';
+import { BookingService, type BookingConfig } from '../booking/booking.service';
+import { computeDaySlots } from '../booking/availability';
 import { randomInt } from 'node:crypto';
 import { OrderService } from '../order/order.service';
 import { PickingService } from '../order/picking.service';
@@ -435,6 +437,7 @@ export async function customerRoutes(app: FastifyInstance) {
   const picking = new PickingService(app.prisma, app.io);
   const ratingService = new RatingService(app.prisma, app.io);
   const notificationService = new NotificationService(app.prisma, app.io);
+  const bookingService = new BookingService(app.prisma);
 
   // Auth required by default (safe); browsing is public so guests can look
   // around. Only these GET routes use OPTIONAL auth — everything else (cart,
@@ -1183,53 +1186,45 @@ export async function customerRoutes(app: FastifyInstance) {
 
     const item = await app.prisma.item.findUnique({
       where: { id },
-      select: { id: true, fulfillment: true, bookingConfig: true, isAvailable: true },
+      select: { id: true, vendorId: true, fulfillment: true, bookingConfig: true, isAvailable: true },
     });
     if (!item) throw new NotFoundError('Listing', id);
     if (item.fulfillment !== 'APPOINTMENT' || !item.bookingConfig) {
       throw new AppError(400, 'NOT_BOOKABLE', 'This listing does not take appointments');
     }
 
-    const config = item.bookingConfig as unknown as {
-      durationMinutes: number;
-      slots: Array<{ dayOfWeek: number; start: string; end: string }>;
-      serviceMode?: 'AT_BUSINESS' | 'MOBILE' | 'BOTH';
-      serviceRadiusKm?: number;
-    };
+    const config = item.bookingConfig as unknown as BookingConfig;
     const duration = config.durationMinutes;
     const [y, m, d] = date.split('-').map(Number);
-    const dayOfWeek = new Date(Date.UTC(y!, m! - 1, d!)).getUTCDay();
     const now = new Date();
-    const toMin = (hhmm: string) => {
-      const [h, mm] = hhmm.split(':').map(Number);
-      return (h ?? 0) * 60 + (mm ?? 0);
-    };
 
-    // Aligned candidate starts (UTC) inside the day's windows, in the future.
-    const candidates: Date[] = [];
-    if (item.isAvailable && duration > 0 && Array.isArray(config.slots)) {
-      for (const w of config.slots) {
-        if (w.dayOfWeek !== dayOfWeek) continue;
-        const start = toMin(w.start);
-        const end = toMin(w.end);
-        for (let t = start; t + duration <= end; t += duration) {
-          const slot = new Date(Date.UTC(y!, m! - 1, d!, Math.floor(t / 60), t % 60));
-          if (slot > now) candidates.push(slot);
-        }
-      }
-    }
-
-    // Drop slots a non-cancelled booking already holds.
-    const taken = candidates.length
-      ? new Set(
-          (await app.prisma.booking.findMany({
-            where: { itemId: id, status: { not: 'CANCELLED' }, slotStart: { in: candidates } },
+    // THE availability computation (scheduling law: no double-source):
+    // windows MINUS the vendor's exceptions MINUS non-cancelled bookings,
+    // honoring buffers + lead time — the same math reservation validates.
+    const dayStart = new Date(Date.UTC(y!, m! - 1, d!));
+    const dayEnd = new Date(Date.UTC(y!, m! - 1, d!, 23, 59, 59, 999));
+    const [exceptions, takenRows] = item.isAvailable
+      ? await Promise.all([
+          bookingService.exceptionsFor(item.vendorId, dayStart),
+          app.prisma.booking.findMany({
+            where: { itemId: id, status: { not: 'CANCELLED' }, slotStart: { gte: dayStart, lte: dayEnd } },
             select: { slotStart: true },
-          })).map((b) => b.slotStart.toISOString()),
-        )
-      : new Set<string>();
-
-    const slots = candidates.filter((c) => !taken.has(c.toISOString())).map((c) => c.toISOString());
+          }),
+        ])
+      : [[], [] as { slotStart: Date }[]];
+    const slots = (item.isAvailable
+      ? computeDaySlots({
+          itemId: id,
+          config,
+          year: y!,
+          month: m!,
+          day: d!,
+          exceptions,
+          takenStarts: takenRows.map((b) => b.slotStart),
+          now,
+        })
+      : []
+    ).map((c) => c.toISOString());
     // Which weekdays have windows at all — drives the day chips in the picker.
     const bookableWeekdays = Array.from(new Set((config.slots ?? []).map((w) => w.dayOfWeek)));
     return {
