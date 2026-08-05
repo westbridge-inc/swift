@@ -46,6 +46,7 @@ import {
 import { VendorOrderDetailScreen } from './screens/VendorOrderDetailScreen';
 import { VendorOrderHistoryScreen } from './screens/VendorOrderHistoryScreen';
 import { VendorMyQrScreen } from './screens/VendorMyQrScreen';
+import { VendorSwiftNumberScreen } from './screens/VendorSwiftNumberScreen';
 import { DocumentChecklist } from '../../components/onboarding/DocumentChecklist';
 import { PricingCard } from '../../components/onboarding/PricingCard';
 import { MmgPayLinkCard } from '../../components/MmgPayLinkCard';
@@ -113,6 +114,7 @@ import { useLocationStore } from '../../stores/locationStore';
 import { useStoreSwitcher } from '../../stores/storeSwitcher';
 import { useVendorPreview } from '../../stores/vendorPreview';
 import { RoleSwitcherSheet } from '../../components/RoleSwitcherSheet';
+import { BillingStatusBlock } from '../../components/billing/BillingSurfaces';
 import { money } from '../../lib/money';
 import { vendorSurfaceForRole } from '../../lib/vendorRbac';
 import { inventorySummary } from '../../lib/vendorInventory';
@@ -2503,6 +2505,7 @@ function VendorDocumentsSection({ vendorType }: { vendorType: string }) {
 }
 
 function SubscriptionCard({ sub, phone }: { sub: any; phone?: string }) {
+  const navigation = useNavigation<any>();
   const pill = !sub
     ? { label: 'Inactive', tone: 'brand' as const }
     : sub.isTrialActive
@@ -2522,10 +2525,26 @@ function SubscriptionCard({ sub, phone }: { sub: any; phone?: string }) {
           (sub.usdDisplay?.line ??
             `${money(sub.customRate ?? sub.weeklyRate)}/week${sub.nextBillingDate ? ` · next bill ${fmtDate(sub.nextBillingDate)}` : ''}`);
   return (
-    <Card style={{ marginBottom: space.lg, paddingVertical: space.sm }}>
-      <SettingsRow icon="credit-card" label="Subscription" sub={subLine} right={<TonePill label={pill.label} tone={pill.tone} />} />
-      {phone ? <SettingsRow icon="phone" label="Phone" right={<T variant="label" tone="muted">{phone}</T>} /> : null}
-    </Card>
+    <>
+      <Card style={{ marginBottom: space.lg, paddingVertical: space.sm }}>
+        <SettingsRow icon="credit-card" label="Subscription" sub={subLine} right={<TonePill label={pill.label} tone={pill.tone} />} />
+        <SettingsRow
+          icon="hash"
+          label="My Swift Number"
+          sub="Pay the weekly fee at any MMG agent"
+          onPress={() => navigation.navigate('VendorMySwiftNumber')}
+        />
+        {phone ? <SettingsRow icon="phone" label="Phone" right={<T variant="label" tone="muted">{phone}</T>} /> : null}
+      </Card>
+      {/* Honest billing status — wallet balance, grace deadline, or the paused
+          block. Silent on a healthy account (the row above is the way in). */}
+      <BillingStatusBlock
+        sub={sub}
+        onPay={() => navigation.navigate('VendorMySwiftNumber')}
+        compact
+        style={{ marginTop: 0, marginBottom: space.lg }}
+      />
+    </>
   );
 }
 
@@ -3045,6 +3064,7 @@ export function VendorStack() {
       <Stack.Screen name="VendorOrderDetail" component={VendorOrderDetailScreen} />
       <Stack.Screen name="VendorOrderHistory" component={VendorOrderHistoryScreen} />
       <Stack.Screen name="VendorMyQr" component={VendorMyQrScreen} />
+      <Stack.Screen name="VendorMySwiftNumber" component={VendorSwiftNumberScreen} />
     </Stack.Navigator>
   );
 }

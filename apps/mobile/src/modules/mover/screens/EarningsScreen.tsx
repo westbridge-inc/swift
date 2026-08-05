@@ -10,6 +10,7 @@ import { dateLabel } from '../shared';
 import { useMutation } from '@tanstack/react-query';
 import { api, API_URL } from '../../../services/api';
 import { openPayLink } from '../../../lib/payLink';
+import { BillingStatusBlock } from '../../../components/billing/BillingSurfaces';
 
 function StatTile({ label, total, count, sub }: { label: string; total: number; count?: number; sub?: string }) {
   return (
@@ -95,7 +96,7 @@ function StoreOwesYouCard({ ledger }: { ledger: any }) {
 }
 
 /** The mover's flat weekly fee — status straight off the subscription engine. */
-function WeeklyFeeCard({ sub }: { sub: any }) {
+function WeeklyFeeCard({ sub, onPay }: { sub: any; onPay?: () => void }) {
   if (!sub) return null;
   const pill = sub.isTrialActive
     ? { label: 'Free trial', tone: 'brand' as const }
@@ -123,6 +124,8 @@ function WeeklyFeeCard({ sub }: { sub: any }) {
       <T variant="caption" tone="muted" style={{ marginTop: 4 }}>
         The flat fee is Swift&apos;s only charge — every fare stays yours.
       </T>
+      {/* Wallet balance / amount due / paused block — honest, in place. */}
+      <BillingStatusBlock sub={sub} onPay={onPay} />
     </Card>
   );
 }
@@ -221,7 +224,7 @@ export function EarningsScreen({ navigation }: any) {
           <StoreOwesYouCard ledger={ledgerQ.data} />
 
           {/* Weekly flat fee — billing transparency for the mover */}
-          <WeeklyFeeCard sub={subQ.data} />
+          <WeeklyFeeCard sub={subQ.data} onPay={() => navigation?.navigate?.('MySwiftNumber')} />
 
           {/* Printable 30-day statement (marketplace §12) — what you show a
               bank. Opens in the in-app browser; share/print from its sheet. */}
