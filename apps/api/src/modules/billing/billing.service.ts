@@ -7,6 +7,7 @@ import type { PaymentProvider } from '../../providers/payment/payment-provider';
 import { getMmgProvider } from '../../providers/mmg/mmg-provider';
 import { convertUsdToLocal } from './fx';
 import { postLedger, topupPostings, chargeSuccessPostings } from './ledger';
+import { mapMmgFailure, type NormalizedFailure } from './failure-taxonomy';
 import { log } from '../../utils/logger';
 
 // ---------------------------------------------------------------------------
@@ -20,6 +21,15 @@ const MAX_FAILED_ATTEMPTS = 3;
 const RETRY_HOURS = 24;
 const WEEK_MS = 7 * 24 * 60 * 60 * 1000;
 const DAY_MS = 24 * 60 * 60 * 1000;
+/** Default request TTL until MMG answers Q2 of the question register — the
+ *  poller expires an unapproved request past this, into normal dunning. */
+const MMG_REQUEST_TTL_MS = 24 * 60 * 60 * 1000;
+/** Poll backoff ladder [tollgate 14.1]: 30s → 60s → 2m → 5m cap, ±20% jitter
+ *  applied at stamp time. Fresh rows poll fast (the approve-on-phone moment);
+ *  old rows stop hammering the provider. */
+const POLL_BACKOFF_CAP_SEC = 300;
+const nextBackoff = (current: number) => Math.min(POLL_BACKOFF_CAP_SEC, Math.max(30, current * 2));
+const jitter = (sec: number) => Math.round(sec * (0.8 + Math.random() * 0.4));
 
 /** USD pricing (System 2): the run-scoped context — one rate, one book. */
 interface UsdPricingCtx {
@@ -209,6 +219,34 @@ export class BillingService {
       return 'pending';
     }
 
+    if ('unknown' in charged) {
+      // LAW M-5 — UNKNOWN is a first-class state. The initiate call itself
+      // died transport-shaped: the request MAY be live on the payer's phone,
+      // so it is neither failed (a second request could double-prompt) nor
+      // succeeded (no money confirmed). The intent records our clientKey with
+      // no provider id; the poller adopts it from transaction history or
+      // expires it at TTL, and SWIFT-004 refuses to fire over it meanwhile.
+      await this.prisma.subscriptionPayment.create({
+        data: {
+          subscriptionId: sub.id,
+          amount,
+          status: 'UNKNOWN',
+          paymentMethod: sub.billingMethod,
+          clientKey: charged.clientKey,
+          failureCode: 'TIMEOUT_UNKNOWN',
+          ...(charged.failureRaw ? { failureRaw: { reason: charged.failureRaw } } : {}),
+          expiresAt: new Date(now.getTime() + MMG_REQUEST_TTL_MS),
+          periodStart: sub.nextBillingDate,
+          periodEnd: new Date(sub.nextBillingDate.getTime() + WEEK_MS),
+        },
+      });
+      await this.prisma.subscription.update({
+        where: { id: sub.id },
+        data: { nextRetryAt: new Date(now.getTime() + RETRY_HOURS * 60 * 60 * 1000) },
+      });
+      return 'pending';
+    }
+
     if ('pendingTx' in charged) {
       // MMG merchant-initiated: the request is on the payer's phone. Record
       // the in-flight payment; the poller settles it either way. The retry
@@ -221,6 +259,8 @@ export class BillingService {
           status: 'PENDING',
           paymentMethod: sub.billingMethod,
           externalRef: charged.pendingTx,
+          clientKey: charged.clientKey,
+          expiresAt: charged.expiresAt,
           periodStart: sub.nextBillingDate,
           periodEnd: new Date(sub.nextBillingDate.getTime() + WEEK_MS),
         },
@@ -310,8 +350,9 @@ export class BillingService {
     amount: number,
   ): Promise<
     | { ok: true; ref: string; settlePaymentId?: string }
-    | { ok: false; reason: string }
-    | { ok: false; pendingTx: string }
+    | { ok: false; reason: string; failureCode?: NormalizedFailure }
+    | { ok: false; pendingTx: string; clientKey: string; expiresAt: Date }
+    | { ok: false; unknown: true; clientKey: string; failureRaw?: string }
     | { ok: false; deferred: true; reopenPaymentId?: string }
   > {
     // Prepaid balance is money Swift already holds — spend it before pinging any
@@ -355,33 +396,49 @@ export class BillingService {
           subscriptionId: sub.id,
           paymentMethod: 'MOBILE_MONEY',
           periodStart: sub.nextBillingDate,
-          externalRef: { not: null },
+          OR: [{ externalRef: { not: null } }, { status: 'UNKNOWN' }],
         },
         orderBy: { createdAt: 'desc' },
         take: 5,
       });
       for (const prior of priors) {
+        // An UNKNOWN intent with no provider id can't be looked up — the
+        // poller owns it (history adoption or TTL expiry). Never fire a new
+        // request over a live UNKNOWN [LAW M-5].
+        if (!prior.externalRef) {
+          if (prior.status === 'UNKNOWN') return { ok: false, deferred: true };
+          continue;
+        }
         let priorStatus: string;
         try {
-          priorStatus = (await mmg.transactionLookup({ transactionId: prior.externalRef! })).status;
+          priorStatus = (await mmg.transactionLookup({ transactionId: prior.externalRef })).status;
         } catch {
           return { ok: false, deferred: true, reopenPaymentId: prior.id }; // MMG down — never fire blind
         }
-        if (priorStatus === 'approved') return { ok: true, ref: prior.externalRef!, settlePaymentId: prior.id };
+        if (priorStatus === 'approved') return { ok: true, ref: prior.externalRef, settlePaymentId: prior.id };
         if (priorStatus === 'pending') return { ok: false, deferred: true, reopenPaymentId: prior.id };
       }
 
       // §13 MMG rail — merchant-initiated. Amounts are minor units at the
-      // provider seam; the reference doubles as the retry-safe correlation id.
+      // provider seam; the reference doubles as the retry-safe correlation id
+      // AND lands on the intent row as clientKey (the key that survives an
+      // initiate timeout, when MMG's own id never came back).
+      const reference = `sub:${sub.id}:${sub.nextBillingDate.toISOString().slice(0, 10)}:a${sub.failedAttempts}`;
       const result = await mmg.initiatePayment({
         payerId: sub.mmgPayerMsisdn,
         amountMinor: Math.round(amount * 100),
         currencyCode: sub.currencyCode,
-        reference: `sub:${sub.id}:${sub.nextBillingDate.toISOString().slice(0, 10)}:a${sub.failedAttempts}`,
+        reference,
       });
       if (result.status === 'approved') return { ok: true, ref: result.transactionId };
-      if (result.status === 'pending' && result.transactionId) return { ok: false, pendingTx: result.transactionId };
-      return { ok: false, reason: result.reason ?? 'MMG request failed' };
+      if (result.status === 'pending' && result.transactionId) {
+        return { ok: false, pendingTx: result.transactionId, clientKey: reference, expiresAt: new Date(Date.now() + MMG_REQUEST_TTL_MS) };
+      }
+      if (result.status === 'error') {
+        // Transport-shaped: the request MAY be live on the payer's phone.
+        return { ok: false, unknown: true, clientKey: reference, failureRaw: result.reason };
+      }
+      return { ok: false, reason: result.reason ?? 'MMG request failed', failureCode: mapMmgFailure(result.status, result.reason) };
     }
 
     // Prepaid already tried and came up short above; no usable external rail
@@ -400,10 +457,6 @@ export class BillingService {
     /** USD pricing: the pinned trio from the charge attempt (System 2 ②). */
     usdTrio?: { amountUsd: number; fxRateId: string; fxRateUsed: number },
   ) {
-    const periodStart = sub.nextBillingDate;
-    const periodEnd = new Date(periodStart.getTime() + WEEK_MS);
-    const wasInterrupted = sub.status === 'PAST_DUE' || sub.status === 'SUSPENDED' || sub.status === 'CHURNED';
-
     // One transaction for the whole advance [tollgate M-13]: payment row,
     // period move, audit event, and the balanced ledger posting commit or roll
     // back together — a crash can no longer strand a captured payment without
@@ -411,64 +464,93 @@ export class BillingService {
     // identical absolute period values; the CHARGE_SUCCESS unique key rolls
     // the loser back whole.
     await this.prisma.$transaction(async (tx) => {
-      if (settlePaymentId) {
-        await tx.subscriptionPayment.update({
-          where: { id: settlePaymentId },
-          data: { status: 'CAPTURED', paidAt: now },
-        });
-      } else {
-        await tx.subscriptionPayment.create({
-          data: {
-            subscriptionId: sub.id,
-            amount,
-            status: 'CAPTURED',
-            paymentMethod: sub.billingMethod,
-            externalRef: paymentRef,
-            periodStart,
-            periodEnd,
-            paidAt: now,
-          },
-        });
-      }
+      await this.applySuccessfulChargeInTx(tx, sub, amount, paymentRef, now, periodKey, settlePaymentId, usdTrio);
+    });
+    await this.afterSuccessfulCharge(sub, amount, periodKey);
+  }
 
-      await tx.subscription.update({
-        where: { id: sub.id },
-        data: {
-          status: 'ACTIVE',
-          currentPeriodStart: periodStart,
-          currentPeriodEnd: periodEnd,
-          nextBillingDate: periodEnd,
-          lastPaymentDate: now,
-          failedAttempts: 0,
-          nextRetryAt: null,
-          isInGracePeriod: false,
-          gracePeriodEnd: null,
-          suspendedAt: null,
-        },
+  /** The transactional core of a successful charge — callable inside a LARGER
+   *  transaction (the poller claims and advances atomically through here;
+   *  SWIFT-004's full closure). Side effects (reinstate, notifications) live
+   *  in afterSuccessfulCharge, outside any transaction. */
+  private async applySuccessfulChargeInTx(
+    tx: Prisma.TransactionClient,
+    sub: SubWithRelations,
+    amount: number,
+    paymentRef: string,
+    now: Date,
+    periodKey: string,
+    settlePaymentId?: string,
+    usdTrio?: { amountUsd: number; fxRateId: string; fxRateUsed: number },
+  ) {
+    const periodStart = sub.nextBillingDate;
+    const periodEnd = new Date(periodStart.getTime() + WEEK_MS);
+
+    if (settlePaymentId) {
+      await tx.subscriptionPayment.update({
+        where: { id: settlePaymentId },
+        data: { status: 'CAPTURED', paidAt: now },
       });
-
-      await tx.billingEvent.create({
+    } else {
+      await tx.subscriptionPayment.create({
         data: {
           subscriptionId: sub.id,
-          type: 'CHARGE_SUCCESS',
           amount,
-          currencyCode: sub.currencyCode,
-          idempotencyKey: `success:${sub.id}:${periodKey}`,
-          paymentRef,
-          ...(usdTrio ?? {}),
+          status: 'CAPTURED',
+          paymentMethod: sub.billingMethod,
+          externalRef: paymentRef,
+          periodStart,
+          periodEnd,
+          paidAt: now,
         },
       });
+    }
 
-      if (amount > 0) {
-        const rail = paymentRef === 'prepaid' ? 'prepaid' : sub.billingMethod === 'CARD' ? 'CARD' : 'EXTERNAL';
-        await postLedger(tx, {
-          idempotencyKey: `ledger:success:${sub.id}:${periodKey}`,
-          description: `Weekly fee collected (${rail === 'prepaid' ? 'prepaid balance' : sub.billingMethod}) — ${sub.type}`,
-          occurredAt: now,
-          entries: chargeSuccessPostings(sub.id, amount, rail),
-        });
-      }
+    await tx.subscription.update({
+      where: { id: sub.id },
+      data: {
+        status: 'ACTIVE',
+        currentPeriodStart: periodStart,
+        currentPeriodEnd: periodEnd,
+        nextBillingDate: periodEnd,
+        lastPaymentDate: now,
+        failedAttempts: 0,
+        nextRetryAt: null,
+        isInGracePeriod: false,
+        gracePeriodEnd: null,
+        suspendedAt: null,
+      },
     });
+
+    await tx.billingEvent.create({
+      data: {
+        subscriptionId: sub.id,
+        type: 'CHARGE_SUCCESS',
+        amount,
+        currencyCode: sub.currencyCode,
+        idempotencyKey: `success:${sub.id}:${periodKey}`,
+        paymentRef,
+        ...(usdTrio ?? {}),
+      },
+    });
+
+    if (amount > 0) {
+      const rail = paymentRef === 'prepaid' ? 'prepaid' : sub.billingMethod === 'CARD' ? 'CARD' : 'EXTERNAL';
+      await postLedger(tx, {
+        idempotencyKey: `ledger:success:${sub.id}:${periodKey}`,
+        description: `Weekly fee collected (${rail === 'prepaid' ? 'prepaid balance' : sub.billingMethod}) — ${sub.type}`,
+        occurredAt: now,
+        entries: chargeSuccessPostings(sub.id, amount, rail),
+      });
+    }
+  }
+
+  /** Post-commit side effects of a successful charge. `sub` is the pre-charge
+   *  snapshot — its status tells us whether this payment ended an
+   *  interruption. */
+  private async afterSuccessfulCharge(sub: SubWithRelations, amount: number, periodKey: string) {
+    const wasInterrupted = sub.status === 'PAST_DUE' || sub.status === 'SUSPENDED' || sub.status === 'CHURNED';
+    const periodEnd = new Date(sub.nextBillingDate.getTime() + WEEK_MS);
 
     if (wasInterrupted) {
       await this.reinstate(sub, periodKey);
@@ -484,19 +566,75 @@ export class BillingService {
     });
   }
 
-  /**
-   * §13 MMG rail poller (BullMQ repeatable, ~2 min): settle every in-flight
-   * merchant-initiated request. Approved → the period advances off the SAME
-   * pending payment row (no duplicate). Declined/expired — or older than 24h —
-   * → the normal dunning path (PAST_DUE → retries → suspend). Still-pending
-   * stays pending; the payer's phone is the clock, the DB is the truth.
-   */
-  async pollPendingMmgCharges(now = new Date()): Promise<{ settled: number; failed: number; stillPending: number }> {
-    const pending = await this.prisma.subscriptionPayment.findMany({
-      where: { status: 'PENDING', paymentMethod: 'MOBILE_MONEY', externalRef: { not: null } },
-      take: 200,
+  /** The one wallet-credit tail every rail funnels through [LAW M-1], inside
+   *  the caller's transaction: audit event (unique key = the exactly-once
+   *  funnel), gapless receipt, balanced ledger posting, balance bump —
+   *  all-or-nothing. recordTopUp wraps it; the poller banks late approvals
+   *  through it. */
+  private async creditWalletInTx(
+    tx: Prisma.TransactionClient,
+    opts: { subscriptionId: string; amount: number; currencyCode: string; eventKey: string; note: string; channel: string; mmgRef?: string },
+  ) {
+    const event = await tx.billingEvent.create({
+      data: {
+        subscriptionId: opts.subscriptionId,
+        type: 'PREPAID_TOPUP',
+        amount: opts.amount,
+        currencyCode: opts.currencyCode,
+        idempotencyKey: opts.eventKey,
+        note: opts.note,
+      },
     });
-    const out = { settled: 0, failed: 0, stillPending: 0 };
+    // Every credit issues a sequential GRA-ready receipt [san spec 20.1]
+    // inside the SAME tx — a replay rolls the receipt (and its counter claim)
+    // back with it, so numbers stay gapless.
+    const { issueReceipt } = await import('./receipts');
+    await issueReceipt(tx, {
+      subscriptionId: opts.subscriptionId,
+      billingEventId: event.id,
+      amount: opts.amount,
+      channel: opts.channel,
+      mmgRef: opts.mmgRef,
+    });
+    // Balanced books in the same tx [tollgate M-13]: money in from the
+    // collection rail, owed to the payer's wallet until a week consumes it.
+    await postLedger(tx, {
+      idempotencyKey: `ledger:${opts.eventKey}`,
+      description: `Wallet credit via ${opts.channel}${opts.mmgRef ? ` (${opts.mmgRef})` : ''}`,
+      entries: topupPostings(opts.subscriptionId, opts.amount),
+    });
+    return tx.prepaidBalance.upsert({
+      where: { subscriptionId: opts.subscriptionId },
+      update: { balance: { increment: opts.amount } },
+      create: { subscriptionId: opts.subscriptionId, balance: opts.amount, currencyCode: opts.currencyCode },
+    });
+  }
+
+  /**
+   * §13 MMG rail poller (BullMQ repeatable, ~2 min) — the intent machine's
+   * resolution engine. Approved → claim AND advance in ONE transaction (the
+   * full closure of SWIFT-004: a crash between claim and advance can no
+   * longer strand a captured payment); if the week is already covered, the
+   * money BANKS as wallet balance [tollgate BE-08] — a payer's approval is
+   * never dropped. Declined/expired → the normal dunning path with a
+   * normalized failure code. UNKNOWN intents (initiate timed out, no provider
+   * id) are adopted from transaction history by our reference, or expire at
+   * TTL [tollgate 6.6]. Rows poll on a per-row backoff ladder (30s→5m,
+   * jittered), stamped BEFORE the provider call so a crash can't hot-loop.
+   */
+  async pollPendingMmgCharges(
+    now = new Date(),
+  ): Promise<{ settled: number; banked: number; adopted: number; failed: number; stillPending: number }> {
+    const candidates = await this.prisma.subscriptionPayment.findMany({
+      where: { status: { in: ['PENDING', 'UNKNOWN'] }, paymentMethod: 'MOBILE_MONEY' },
+      orderBy: { lastPolledAt: { sort: 'asc', nulls: 'first' } },
+      take: 400,
+    });
+    // Per-row backoff can't be expressed in one Prisma where — post-filter.
+    const pending = candidates
+      .filter((p) => !p.lastPolledAt || p.lastPolledAt.getTime() + p.pollBackoffSec * 1000 <= now.getTime())
+      .slice(0, 200);
+    const out = { settled: 0, banked: 0, adopted: 0, failed: 0, stillPending: 0 };
     if (pending.length === 0) return out;
 
     const mmg = getMmgProvider();
@@ -511,11 +649,53 @@ export class BillingService {
       });
       if (!sub) continue;
       const periodKey = payment.periodStart.toISOString().slice(0, 10);
+      const ttlAt = payment.expiresAt ?? new Date(payment.createdAt.getTime() + MMG_REQUEST_TTL_MS);
+
+      // Stamp the poll clock FIRST — a crash mid-item degrades to a slower
+      // retry, never a hot loop against the provider.
+      await this.prisma.subscriptionPayment
+        .updateMany({ where: { id: payment.id }, data: { lastPolledAt: now, pollBackoffSec: jitter(nextBackoff(payment.pollBackoffSec)) } })
+        .catch(() => {});
+
+      // ── UNKNOWN with no provider id: initiate timed out [tollgate 6.6] ──
+      if (!payment.externalRef) {
+        try {
+          const recent = await mmg.transactionHistory({ from: payment.createdAt, limit: 100 });
+          const match = payment.clientKey ? recent.find((t) => t.reference === payment.clientKey) : undefined;
+          if (match) {
+            // The request DID land — adopt MMG's id; the next tick resolves
+            // it like any pending row (approved settles, declined duns).
+            const adopted = await this.prisma.subscriptionPayment.updateMany({
+              where: { id: payment.id, status: 'UNKNOWN', externalRef: null },
+              data: { externalRef: match.transactionId, status: 'PENDING', failureCode: null },
+            });
+            if (adopted.count === 1) out.adopted += 1;
+            continue;
+          }
+        } catch {
+          out.stillPending += 1; // provider unreachable — UNKNOWN stays UNKNOWN [LAW M-5]
+          continue;
+        }
+        if (now >= ttlAt) {
+          // 6.6(c): the create itself had timed out AND the provider has no
+          // record by our reference after the TTL — safe to close and dun.
+          const claimed = await this.prisma.subscriptionPayment.updateMany({
+            where: { id: payment.id, status: 'UNKNOWN' },
+            data: { status: 'EXPIRED', failureCode: 'REQUEST_EXPIRED' },
+          });
+          if (claimed.count === 0) continue;
+          await this.applyFailedCharge(sub as SubWithRelations, Number(payment.amount), 'MMG request lost in transit — never confirmed at MMG', now, periodKey);
+          out.failed += 1;
+        } else {
+          out.stillPending += 1;
+        }
+        continue;
+      }
 
       let status: string;
       let reportedMinor = 0;
       try {
-        const lookup = await mmg.transactionLookup({ transactionId: payment.externalRef! });
+        const lookup = await mmg.transactionLookup({ transactionId: payment.externalRef });
         status = lookup.status;
         reportedMinor = lookup.amountMinor ?? 0;
       } catch {
@@ -529,6 +709,10 @@ export class BillingService {
       // (reportedMinor 0 = provider didn't echo an amount; nothing to check.)
       if (status === 'approved' && reportedMinor > 0 && reportedMinor !== Math.round(Number(payment.amount) * 100)) {
         try {
+          await this.prisma.subscriptionPayment.updateMany({
+            where: { id: payment.id, status: { in: ['PENDING', 'UNKNOWN'] } },
+            data: { failureCode: 'AMOUNT_MISMATCH' },
+          });
           await this.prisma.billingEvent.create({
             data: {
               subscriptionId: sub.id,
@@ -550,35 +734,64 @@ export class BillingService {
         continue;
       }
 
-      const expired =
-        status === 'expired' ||
-        (status === 'pending' && now.getTime() - payment.createdAt.getTime() > 24 * 60 * 60 * 1000);
+      const expired = status === 'expired' || (status === 'pending' && now.getTime() >= ttlAt.getTime());
 
-      // SWIFT-AUD-D2-04: settle is single-winner. The PENDING→terminal write
-      // is a compare-and-set claim; a second poller delivery (overlapping
-      // tick, second instance, an admin top-up racing the poll) matches 0
-      // rows and skips — it can never re-advance the period or die on the
-      // billing-event idempotency key. Each item is isolated in try/catch so
-      // one settle failure can't kill the rest of the run. (Full transactional
-      // coupling of claim+advance ships with the MMG expiryTime program.)
+      // SWIFT-AUD-D2-04, completed: settle is single-winner AND atomic. The
+      // CAS claim now lives INSIDE the same transaction as the period advance
+      // (or the bank), so a crash between them is impossible — the claim
+      // rolls back with everything else and the next tick retries whole.
       try {
         if (status === 'approved') {
-          const claimed = await this.prisma.subscriptionPayment.updateMany({
-            where: { id: payment.id, status: 'PENDING' },
-            data: { status: 'CAPTURED', paidAt: now },
-          });
-          if (claimed.count === 0) continue; // another settler won this row
           // USD pinning across the async settle: the ATTEMPT's trio is the
           // truth — never re-price a late approval at today's rate.
-          await this.applySuccessfulCharge(
-            sub as SubWithRelations, Number(payment.amount), payment.externalRef!, now, periodKey, payment.id,
-            await this.pinnedTrioFor(sub.id, periodKey),
-          );
+          const trio = await this.pinnedTrioFor(sub.id, periodKey);
+          const result = await this.prisma.$transaction(async (tx) => {
+            const claimed = await tx.subscriptionPayment.updateMany({
+              where: { id: payment.id, status: { in: ['PENDING', 'UNKNOWN'] } },
+              data: { status: 'CAPTURED', paidAt: now, failureCode: null },
+            });
+            if (claimed.count === 0) return 'lost'; // another settler won this row
+            const covered = await tx.billingEvent.findUnique({
+              where: { idempotencyKey: `success:${sub.id}:${periodKey}` },
+              select: { id: true },
+            });
+            if (covered) {
+              // BE-08: another rail (cash top-up, prepaid) already paid this
+              // week. The payer's approved money BANKS as wallet balance —
+              // never double-charges the week, never silently vanishes.
+              await this.creditWalletInTx(tx, {
+                subscriptionId: sub.id,
+                amount: Number(payment.amount),
+                currencyCode: sub.currencyCode,
+                eventKey: `bank:${payment.id}`,
+                note: `late MMG approval banked — week ${periodKey} already covered (payment ${payment.id})`,
+                channel: 'MMG_LATE_APPROVAL',
+                mmgRef: payment.externalRef ?? undefined,
+              });
+              return 'banked';
+            }
+            await this.applySuccessfulChargeInTx(tx, sub as SubWithRelations, Number(payment.amount), payment.externalRef!, now, periodKey, payment.id, trio);
+            return 'advanced';
+          });
+          if (result === 'lost') continue;
+          if (result === 'banked') {
+            out.banked += 1;
+            await this.notifications.send({
+              userId: this.payerUserId(sub as SubWithRelations),
+              type: 'SYSTEM_ANNOUNCEMENT',
+              title: 'MMG payment received — added to your balance',
+              body: `Your MMG approval of $${Number(payment.amount).toLocaleString()} ${sub.currencyCode} arrived after this week was already paid. It's banked as balance and will cover your next week.`,
+              audience: this.payerAudience(sub as SubWithRelations),
+              data: { kind: 'billing_banked', subscriptionId: sub.id },
+            }).catch(() => {});
+            continue;
+          }
+          await this.afterSuccessfulCharge(sub as SubWithRelations, Number(payment.amount), periodKey);
           out.settled += 1;
         } else if (status === 'declined' || status === 'reversed' || expired) {
           const claimed = await this.prisma.subscriptionPayment.updateMany({
-            where: { id: payment.id, status: 'PENDING' },
-            data: { status: 'FAILED' },
+            where: { id: payment.id, status: { in: ['PENDING', 'UNKNOWN'] } },
+            data: { status: expired ? 'EXPIRED' : 'FAILED', failureCode: expired ? 'REQUEST_EXPIRED' : mapMmgFailure(status) },
           });
           if (claimed.count === 0) continue;
           await this.applyFailedCharge(sub as SubWithRelations, Number(payment.amount), `MMG request ${expired ? 'expired unapproved' : status}`, now, periodKey);
@@ -587,10 +800,9 @@ export class BillingService {
           out.stillPending += 1;
         }
       } catch (err) {
-        // The claim may have landed while the advance threw — the payment row
-        // is terminal and the subscription lags one poll. Loud log with the
-        // ids so ops can reconcile; the next legitimate cycle self-corrects
-        // the period, and the row never double-charges.
+        // The whole claim+advance rolled back together — the row is still
+        // claimable and the next tick retries it whole. Loud log so a
+        // persistent failure surfaces instead of aging silently.
         log().error({ err, paymentId: payment.id, subscriptionId: sub.id }, 'MMG poll settle failed for one payment — continuing');
       }
     }
@@ -933,41 +1145,17 @@ export class BillingService {
 
     let balance;
     try {
-      balance = await this.prisma.$transaction(async (tx) => {
-        const event = await tx.billingEvent.create({
-          data: {
-            subscriptionId,
-            type: 'PREPAID_TOPUP',
-            amount,
-            currencyCode: sub.currencyCode,
-            idempotencyKey: eventKey,
-            note: reference ? `ref: ${reference} (by ${recordedBy})` : `recorded by ${recordedBy}`,
-          },
-        });
-        // Every credit issues a sequential GRA-ready receipt [san spec 20.1]
-        // inside the SAME tx — a replayed top-up rolls the receipt (and its
-        // counter claim) back with it, so numbers stay gapless.
-        const { issueReceipt } = await import('./receipts');
-        await issueReceipt(tx, {
+      balance = await this.prisma.$transaction(async (tx) =>
+        this.creditWalletInTx(tx, {
           subscriptionId,
-          billingEventId: event.id,
           amount,
+          currencyCode: sub.currencyCode,
+          eventKey,
+          note: reference ? `ref: ${reference} (by ${recordedBy})` : `recorded by ${recordedBy}`,
           channel: recordedBy.startsWith('agent-cash:') ? recordedBy.slice('agent-cash:'.length) : 'ADMIN_TOPUP',
           mmgRef: reference,
-        });
-        // Balanced books in the same tx [tollgate M-13]: money in from the
-        // collection rail, owed to the payer's wallet until a week consumes it.
-        await postLedger(tx, {
-          idempotencyKey: `ledger:${eventKey}`,
-          description: `Wallet credit via ${recordedBy}${reference ? ` (${reference})` : ''}`,
-          entries: topupPostings(subscriptionId, amount),
-        });
-        return tx.prepaidBalance.upsert({
-          where: { subscriptionId },
-          update: { balance: { increment: amount } },
-          create: { subscriptionId, balance: amount, currencyCode: sub.currencyCode },
-        });
-      });
+        }),
+      );
     } catch (error) {
       if ((error as Prisma.PrismaClientKnownRequestError).code === 'P2002') {
         // Replay of an already-recorded top-up: return the current balance
