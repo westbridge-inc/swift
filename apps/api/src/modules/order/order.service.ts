@@ -58,7 +58,12 @@ export const ORDER_TRANSITIONS: Record<OrderStatus, OrderStatus[]> = {
   DRIVER_EN_ROUTE: ['DRIVER_ASSIGNED'],
   DRIVER_ARRIVED: ['DRIVER_EN_ROUTE'],
   RIDE_IN_PROGRESS: ['DRIVER_ARRIVED'],
-  DELIVERED: ['PICKED_UP', 'EN_ROUTE_DELIVERY', 'ARRIVED', 'RIDE_IN_PROGRESS'],
+  // READY_FOR_PICKUP is here for VENDOR_DELIVERY only [F-0026]: a self-delivering
+  // vendor never has a rider, so the order never passes through PICKED_UP and had
+  // no exit at all — it stranded in READY_FOR_PICKUP forever. The mode check lives
+  // on the one route that can fire this (vendor /orders/:id/delivered); rider
+  // routes cannot reach it because they all require order.riderId.
+  DELIVERED: ['PICKED_UP', 'EN_ROUTE_DELIVERY', 'ARRIVED', 'RIDE_IN_PROGRESS', 'READY_FOR_PICKUP'],
   // DELIVERED for delivery; READY_FOR_PICKUP for takeaway (vendor hands it
   // over); ACCEPTED for appointments, which skip prep/dispatch entirely —
   // without it the services vertical could never be closed out (found live:

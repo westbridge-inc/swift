@@ -1442,6 +1442,35 @@ export async function vendorRoutes(app: FastifyInstance) {
     return { success: true, data: updated };
   });
 
+  /** PUT /orders/:id/delivered — [F-0026] the self-delivery terminal.
+   *
+   *  FUL-004b lets a vendor fulfil a DELIVERY order with its own courier: the
+   *  mode resolves to VENDOR_DELIVERY at accept/ready and NO platform rider is
+   *  dispatched. That left the order with no exit — the vendor could not use
+   *  complete-pickup (it requires fulfillment PICKUP) and no rider could touch
+   *  it (every rider route requires order.riderId), so it stranded in
+   *  READY_FOR_PICKUP forever, held a kitchen-capacity slot, and kept the
+   *  dispatch reconciler offering it to riders.
+   *
+   *  This is the vendor asserting their own driver handed the food over. The
+   *  mode check is the barrier that keeps it out of the platform-rider lane:
+   *  a PLATFORM_RIDER order must go through the rider's own /delivered, which
+   *  carries the cash-capture gate and the PIN check. */
+  app.put<{ Params: IdParam }>('/orders/:id/delivered', auth, async (request) => {
+    const order = await resolveOwnedOrder(app, request.user.userId, request.params.id);
+    await assertVendorCanOperate(order.vendorId!);
+    if (order.fulfillmentMode !== 'VENDOR_DELIVERY') {
+      throw new AppError(400, 'NOT_SELF_DELIVERY', 'This order is being delivered by a Swift rider — they complete it from their app.');
+    }
+    if (order.status !== 'READY_FOR_PICKUP') {
+      throw new AppError(400, 'INVALID_STATUS', `Cannot mark delivered from ${order.status} status`);
+    }
+    // updateStatus is the CAS: a concurrent cancel (or a double-tap) matches
+    // nothing and throws, so exactly one transition and one status-log row.
+    const updated = await orderService.updateStatus(order.id, 'DELIVERED', request.user.userId, 'Delivered by the store');
+    return { success: true, data: updated };
+  });
+
   /** PUT /orders/:id/reject — Vendor cancels / rejects an order */
   app.put<{ Params: IdParam }>('/orders/:id/reject', auth, async (request) => {
     // Alert-delivery ack (§A4): the store ACTED on this order's alert.
