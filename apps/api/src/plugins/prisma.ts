@@ -11,12 +11,75 @@ import { getTenantId } from './tenant-context';
 // by the existing per-owner scoping (customerId / ownerId / userId), which the
 // IDOR suite proves. No context set (jobs, tests, pre-auth) → unscoped, so
 // single-tenant behavior is unchanged.
-const TENANT_MODELS = new Set([
-  'user', 'vendor', 'order', 'qrcode', 'scanevent',
-  // Category discovery (#17): the whole taxonomy layer is tenant-owned.
-  'discoverycategory', 'vendordiscoverycategory', 'itemdiscoverycategory',
-  'discoverycategorysuggestion', 'discoverycategoryrequest',
-]);
+// [F-0008] Every model carrying a tenantId column belongs here unless it is on
+// the reasoned exemption list in tenant-coverage.test.ts. That test walks the
+// Prisma DMMF at run time and fails if a model carrying tenantId is in neither
+// place — so this list can no longer silently fall behind the schema, which is
+// how it came to cover 10 of 47 models.
+//
+// Enrolling was deliberately done while Swift is single-tenant: injecting
+// `tenantId: 'swift-default'` matches every existing row, so it is a no-op
+// today and correct the moment a second operator exists. Doing it after that
+// point would have been a migration; doing it now is free.
+/**
+ * [F-0008] Every tenant-owned model, by its Prisma client property name.
+ *
+ * ONE list. Both the scoping predicate and the `$extends` registration below are
+ * derived from it, so they cannot drift apart — the previous shape maintained a
+ * lowercase Set and a hand-written registration block separately, which is how
+ * a model could be "registered" in one and missing from the other.
+ *
+ * tenant-coverage.test.ts walks the Prisma DMMF at run time and fails if any
+ * model carrying a tenantId column is in neither this list nor the reasoned
+ * exemption list there — so this can no longer silently fall behind the schema,
+ * which is how it came to cover 10 of 47 models.
+ *
+ * Enrolling the missing 35 was deliberately done while Swift is single-tenant:
+ * injecting `tenantId: 'swift-default'` matches every row that exists, so it is
+ * a no-op today and correct the moment a second operator is provisioned. After
+ * that point the same change would have needed a backfill and a migration.
+ */
+const scoped = { $allOperations: tenantScope };
+
+/**
+ * The registration itself is the single source of truth. Prisma type-checks
+ * every key here against the real model set, so a typo or a renamed model is a
+ * compile error; and `TENANT_MODELS` plus the exported name list are both
+ * derived from it below, so the predicate, the registration and the test can
+ * never disagree. (The previous shape kept a lowercase Set and this block as
+ * two hand-maintained lists — that is how a model could be in one and not the
+ * other.)
+ */
+const TENANT_QUERY_EXTENSIONS = {
+  user: scoped, vendor: scoped, order: scoped,
+  // QR growth engine: codes + scan analytics are tenant-owned rows. The public
+  // /s/:code resolver runs pre-auth (no context) and stays unscoped by design —
+  // a shortCode is globally unique and names its own tenant.
+  qrCode: scoped, scanEvent: scoped,
+  // Category discovery (#17): taxonomy + tags + suggestions + requests.
+  discoveryCategory: scoped, vendorDiscoveryCategory: scoped, itemDiscoveryCategory: scoped,
+  discoveryCategorySuggestion: scoped, discoveryCategoryRequest: scoped,
+  // Safety spine — SOS, guardian sessions, incidents and their evidence.
+  sosAlert: scoped, emergencyContact: scoped, tripShareToken: scoped, tripSafetySession: scoped,
+  livenessCheck: scoped, incidentCase: scoped, evidenceBundle: scoped, safetyAccessLog: scoped,
+  // Money: settlement, receipts, the agent-cash rail, trials.
+  mmgAgentPayment: scoped, settlementBatch: scoped, feeReceipt: scoped, receiptCounter: scoped,
+  sanTombstone: scoped, tenantBillingCurrency: scoped, trialGrant: scoped,
+  // Ads platform.
+  advertiser: scoped, adPlacement: scoped, adCampaign: scoped, adInvoice: scoped,
+  adEvent: scoped, houseAd: scoped, adsSettings: scoped, adsAuditLog: scoped,
+  // Ratings.
+  actorRatingStat: scoped, ratingReport: scoped, itemFeedback: scoped, ratingTagDef: scoped,
+  // Growth / QR attribution.
+  slugRedirect: scoped, pendingAttribution: scoped, attributionClaim: scoped, scanDailyRollup: scoped,
+  // Batching + scheduling.
+  deliveryRun: scoped, batchEvaluation: scoped, batchingSettings: scoped, bookingException: scoped,
+};
+
+/** Model names enrolled for tenant scoping. Derived — never hand-written. */
+export const TENANT_MODEL_NAMES = Object.keys(TENANT_QUERY_EXTENSIONS);
+
+const TENANT_MODELS = new Set<string>(TENANT_MODEL_NAMES.map((n) => n.toLowerCase()));
 const SCOPED_READS = new Set([
   'findMany', 'findFirst', 'findFirstOrThrow', 'count', 'aggregate', 'groupBy', 'updateMany', 'deleteMany',
 ]);
@@ -69,22 +132,7 @@ const prisma = new PrismaClient({
   },
 }).$extends({
   name: 'tenantScope',
-  query: {
-    user: { $allOperations: tenantScope },
-    vendor: { $allOperations: tenantScope },
-    order: { $allOperations: tenantScope },
-    // QR growth engine: codes + scan analytics are tenant-owned rows. The
-    // public /s/:code resolver runs pre-auth (no context) and stays unscoped
-    // by design — a shortCode is globally unique and names its own tenant.
-    qrCode: { $allOperations: tenantScope },
-    scanEvent: { $allOperations: tenantScope },
-    // Category discovery (#17): taxonomy + tags + suggestions + requests.
-    discoveryCategory: { $allOperations: tenantScope },
-    vendorDiscoveryCategory: { $allOperations: tenantScope },
-    itemDiscoveryCategory: { $allOperations: tenantScope },
-    discoveryCategorySuggestion: { $allOperations: tenantScope },
-    discoveryCategoryRequest: { $allOperations: tenantScope },
-  },
+  query: TENANT_QUERY_EXTENSIONS,
 });
 
 // Re-export the tenant helpers FROM the module that owns the scoping extension.
