@@ -890,6 +890,30 @@ export function createWorkers(ctx: JobContext) {
         return;
       }
 
+      if (job.name === 'reconcile-earnings') {
+        // [F-0028 / G-002] A mover who went unpaid is the one defect nobody but
+        // the mover would ever notice — and they would notice it as "Swift
+        // shorted me". Heal it, and page, because a non-zero count means an
+        // upstream path lost an earnings write.
+        const { OrderService, reconcileMissingEarnings } = await import('../modules/order/order.service');
+        const { scanned, healed } = await reconcileMissingEarnings(
+          ctx.prisma,
+          new OrderService(ctx.prisma, ctx.io),
+        );
+        if (healed.length > 0) {
+          ctx.log.error({ healed, count: healed.length, scanned }, 'Earnings reconciliation paid movers a completion had missed — investigate the completion path');
+          const { notifyAdmins, NotificationService: NS } = await import('../modules/notification/notification.service');
+          await opsPageOnce(ctx, 'earnings-missing', 6 * 3600, () =>
+            notifyAdmins(ctx.prisma, new NS(ctx.prisma, ctx.io), {
+              title: '💸 Movers were paid late by the reconciler',
+              body: `${healed.length} delivered order(s) had no earnings row and were healed. A completion path is losing the earnings write — investigate before a mover notices first.`,
+              data: { kind: 'earnings_missing', count: healed.length },
+            }),
+          ).catch(() => {});
+        }
+        return;
+      }
+
       if (job.name === 'agent-ops-scan') {
         // Ops agent (spec Part B): deterministic detection → model classifies
         // a PII-free snapshot → gated execution. Runs whenever a key is present
@@ -1306,6 +1330,17 @@ export async function scheduleRecurringJobs(queues: ReturnType<typeof createQueu
   // This is the self-heal for the platform's most failure-sensitive path.
   await queues.dispatchQueue.add('reconcile-dispatch', {}, {
     repeat: { pattern: '*/2 * * * *' },
+    removeOnComplete: 20,
+    removeOnFail: 20,
+  });
+
+  // [F-0028 / G-002] Earnings reconciliation. Every 15 minutes is enough: the
+  // grace window is 10, and a mover cares that they are paid today, not within
+  // seconds. Deliberately NOT tighter — a sweep that runs constantly makes its
+  // own alert routine, and this one should be rare enough that a page means
+  // something.
+  await queues.dispatchQueue.add('reconcile-earnings', {}, {
+    repeat: { pattern: '*/15 * * * *' },
     removeOnComplete: 20,
     removeOnFail: 20,
   });
