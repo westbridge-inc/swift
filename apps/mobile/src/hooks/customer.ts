@@ -1,6 +1,6 @@
 import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { track } from '../lib/analytics';
-import { customerApi, type AddressInput } from '../services/api';
+import { customerApi, discoveryApi, type AddressInput } from '../services/api';
 
 /**
  * Thin React Query wrappers over `customerApi`. Every consumer screen reads data
@@ -42,6 +42,22 @@ export function useAddAddress() {
 
 export function useHome<T = any>(lat?: number, lng?: number) {
   return useQuery<T>({ queryKey: customerKeys.home(lat, lng), queryFn: () => unwrap<T>(customerApi.getHome(lat, lng)) });
+}
+
+export type DiscoveryRail = {
+  enabled: boolean;
+  categories: Array<{ slug: string; name: string; emoji: string; iconKey: string | null; kind: string; vertical: string; availableVendors: number }>;
+};
+
+/** The category rail (#17) — flag-gated server-side; silent on failure (the
+ *  rail is garnish, Home never shows an error for it). */
+export function useDiscoveryCategories(lat?: number, lng?: number) {
+  return useQuery<DiscoveryRail>({
+    queryKey: ['discovery', 'categories', lat?.toFixed?.(2), lng?.toFixed?.(2)],
+    queryFn: () => unwrap<DiscoveryRail>(discoveryApi.categories({ lat, lng })),
+    staleTime: 60_000,
+    retry: false,
+  });
 }
 
 export function useVendors<T = any>(params?: Record<string, string>) {

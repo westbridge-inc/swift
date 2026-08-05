@@ -6,13 +6,14 @@ import { Feather } from '@expo/vector-icons';
 import { useNavigation } from '@react-navigation/native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { color, elevation, radius, space } from '@swift/ui';
-import { useHome, useToggleFavorite } from '../../../hooks/customer';
+import { useDiscoveryCategories, useHome, useToggleFavorite } from '../../../hooks/customer';
 import { useAds } from '../../../hooks/ads';
 import { AdHeroVideo, AdTopCard, AdBar } from '../../../components/ads';
 import { PressableScale } from '../../../components/ui';
 import { haptic } from '../../../lib/haptics';
 import { useAuthStore } from '../../../stores/authStore';
 import { useLocationStore } from '../../../stores/locationStore';
+import { CategoryRail, CAT_RAIL_MIN_CHIPS } from '../CategoryRail';
 import { vendorImage, FOOD_IMAGES } from '../../../lib/images';
 import {
   Card,
@@ -106,6 +107,11 @@ export function HomeScreen() {
 
   const home = useHome<any>(latitude ?? undefined, longitude ?? undefined);
   const toggleFav = useToggleFavorite();
+  // Category rail (#17): flag-gated server-side; when live it SUPERSEDES the
+  // old "Find by category" section (one category system on Home, ever —
+  // spec 6.2). Flag off → both absent/present exactly as before (CAT-G).
+  const discovery = useDiscoveryCategories(latitude ?? undefined, longitude ?? undefined);
+  const railLive = !!discovery.data?.enabled && (discovery.data?.categories.length ?? 0) >= CAT_RAIL_MIN_CHIPS;
 
   // Ads hydrate independently (§13.4): home content NEVER waits on this call,
   // and an ad-free answer collapses the slots so sections close up. Launch is
@@ -234,6 +240,16 @@ export function HomeScreen() {
           ))}
         </View>
 
+        {/* The category rail — the founder's X: below the tiles, above the
+            promo banner. Absent entirely unless the flag is on AND ≥4 chips
+            have open stores behind them (laws D/E). */}
+        <CategoryRail
+          data={discovery.data}
+          loading={false}
+          onChip={(c) => navigation.navigate('CategoryFeed', { slug: c.slug, name: c.name, emoji: c.emoji })}
+          onSeeAll={() => navigation.navigate('CategoryGrid')}
+        />
+
         {/* Live order first — the thing you actually care about right now */}
         {activeOrder ? (
           <View style={{ paddingHorizontal: GUTTER, marginTop: space.lg }}>
@@ -321,8 +337,9 @@ export function HomeScreen() {
               </View>
             ) : null}
 
-            {/* Find by Category */}
-            {categories.length > 0 ? (
+            {/* Find by Category — superseded by the rail when it is live
+                (spec 6.2: one category system on Home, ever). */}
+            {!railLive && categories.length > 0 ? (
               <>
                 <SectionHeader
                   size="lg"
