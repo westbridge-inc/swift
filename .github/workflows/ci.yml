@@ -230,6 +230,22 @@ jobs:
             if [ "$found" != "1" ]; then echo "::error::MISSING money CHECK constraint: $c (raw-SQL migration did not apply)"; exit 1; fi
             echo "ok: $c present"
           done
+      # TOLLGATE ledger laws are raw-SQL too (deferred balanced-transaction
+      # trigger, append-only triggers, one-side/nonneg CHECKs) — assert replay
+      # created them; the books silently losing their laws must go RED.
+      - name: Ledger-integrity constraints and triggers exist
+        run: |
+          DB="postgresql://swift:swift@localhost:5432/swift_migrate"
+          for c in ledger_entries_one_side ledger_entries_nonneg prepaid_balance_nonneg; do
+            found=$(psql "$DB" -tAc "SELECT 1 FROM pg_constraint WHERE conname='$c'")
+            if [ "$found" != "1" ]; then echo "::error::MISSING ledger CHECK constraint: $c (raw-SQL migration did not apply)"; exit 1; fi
+            echo "ok: $c present"
+          done
+          for t in ledger_txn_balanced ledger_entries_append_only ledger_transactions_append_only; do
+            found=$(psql "$DB" -tAc "SELECT 1 FROM pg_trigger WHERE tgname='$t'")
+            if [ "$found" != "1" ]; then echo "::error::MISSING ledger trigger: $t (raw-SQL migration did not apply)"; exit 1; fi
+            echo "ok: $t present"
+          done
       - name: Schema matches migration state
         run: >
           cd apps/api && npx prisma migrate diff

@@ -753,13 +753,15 @@ export function createWorkers(ctx: JobContext) {
         // enforcement leaks + receipt gaps surfaced. Failures page.
         const { runBillingInvariants } = await import('../modules/billing/invariants');
         const report = await runBillingInvariants(ctx.prisma);
-        const broken = report.walletMismatches.length + report.wrongfulSuspensions.length + report.enforcementLeaks.length + report.receiptGaps.length;
+        const broken =
+          report.walletMismatches.length + report.wrongfulSuspensions.length + report.enforcementLeaks.length +
+          report.receiptGaps.length + report.ledgerWalletMismatches.length + (report.ledgerTrialImbalance ? 1 : 0);
         if (broken > 0) {
           const { notifyAdmins, NotificationService } = await import('../modules/notification/notification.service');
           await opsPageOnce(ctx, 'billing-invariants', 12 * 3600, () =>
             notifyAdmins(ctx.prisma, new NotificationService(ctx.prisma, ctx.io), {
               title: 'Billing invariant failures',
-              body: `${report.walletMismatches.length} wallet mismatch(es), ${report.wrongfulSuspensions.length} wrongful suspension(s) auto-healed, ${report.enforcementLeaks.length} enforcement leak(s), ${report.receiptGaps.length} receipt gap(s).`,
+              body: `${report.walletMismatches.length} wallet mismatch(es), ${report.wrongfulSuspensions.length} wrongful suspension(s) auto-healed, ${report.enforcementLeaks.length} enforcement leak(s), ${report.receiptGaps.length} receipt gap(s), ${report.ledgerWalletMismatches.length} ledger-wallet drift(s)${report.ledgerTrialImbalance ? ', LEDGER TRIAL BALANCE BROKEN' : ''}.`,
               data: { kind: 'billing_invariants', report: { ...report, walletsChecked: report.walletsChecked } },
             }),
           );

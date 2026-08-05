@@ -1908,6 +1908,7 @@ model SanTombstone {
 
 /// Prepaid path for cash payers: agents/bank-transfer top-ups recorded by
 /// admin; the weekly billing job deducts from here before suspending.
+/// Floor-at-zero CHECK lives in raw migration SQL [tollgate 3.1].
 model PrepaidBalance {
   id             String       @id @default(cuid())
   subscriptionId String       @unique
@@ -1918,6 +1919,57 @@ model PrepaidBalance {
   updatedAt      DateTime     @updatedAt
 
   @@map("prepaid_balances")
+}
+
+/// TOLLGATE PART 17 — double-entry ledger. Every fee-money movement posts a
+/// balanced transaction here IN THE SAME database transaction as the mutation;
+/// wallet balances are projections and the nightly invariant proves
+/// projection == ledger (S0 page on drift). Reference chart of accounts —
+/// seeded by migration; the in-code map in modules/billing/ledger.ts is the
+/// source of truth (no FK from entries: tests run on bare `db push`).
+model LedgerAccount {
+  code         String   @id // stable: CLEARING_MMG, WALLET_LIABILITY, FEE_REVENUE, ...
+  name         String
+  type         String // ASSET | LIABILITY | REVENUE | EXPENSE | CONTRA
+  currencyCode String   @default("GYD")
+  createdAt    DateTime @default(now())
+
+  @@map("ledger_accounts")
+}
+
+/// One balanced money event. INSERT-only at the database (append-only trigger
+/// in raw migration SQL) — corrections are reversing transactions referencing
+/// the original, never edits. idempotencyKey makes every posting path
+/// replay-safe at the DB [tollgate LAW M-4].
+model LedgerTransaction {
+  id             String        @id @default(cuid())
+  idempotencyKey String        @unique
+  description    String
+  occurredAt     DateTime      @default(now())
+  createdAt      DateTime      @default(now())
+  entries        LedgerEntry[]
+
+  @@index([occurredAt])
+  @@map("ledger_transactions")
+}
+
+/// Exactly one of debit/credit is nonzero and nonnegative per row (DB CHECKs);
+/// Σdebit = Σcredit per transaction (deferred DB constraint trigger, proven by
+/// tests that try to break it). Decimal GYD major units like every other money
+/// column — see the MmgAgentPayment comment for why no BigInt-minor island.
+model LedgerEntry {
+  id            String            @id @default(cuid())
+  transactionId String
+  transaction   LedgerTransaction @relation(fields: [transactionId], references: [id])
+  accountCode   String
+  /// Subledger dimension — subscriptionId for WALLET_LIABILITY rows
+  subledgerId   String?
+  debit         Decimal           @default(0) @db.Decimal(12, 2)
+  credit        Decimal           @default(0) @db.Decimal(12, 2)
+
+  @@index([accountCode, subledgerId])
+  @@index([transactionId])
+  @@map("ledger_entries")
 }
 
 enum SubscriptionType {

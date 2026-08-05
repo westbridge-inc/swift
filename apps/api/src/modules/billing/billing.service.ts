@@ -6,6 +6,7 @@ import { CountryConfigService } from '../country/country-config.service';
 import type { PaymentProvider } from '../../providers/payment/payment-provider';
 import { getMmgProvider } from '../../providers/mmg/mmg-provider';
 import { convertUsdToLocal } from './fx';
+import { postLedger, topupPostings, chargeSuccessPostings } from './ledger';
 import { log } from '../../utils/logger';
 
 // ---------------------------------------------------------------------------
@@ -403,52 +404,70 @@ export class BillingService {
     const periodEnd = new Date(periodStart.getTime() + WEEK_MS);
     const wasInterrupted = sub.status === 'PAST_DUE' || sub.status === 'SUSPENDED' || sub.status === 'CHURNED';
 
-    if (settlePaymentId) {
-      await this.prisma.subscriptionPayment.update({
-        where: { id: settlePaymentId },
-        data: { status: 'CAPTURED', paidAt: now },
-      });
-    } else {
-      await this.prisma.subscriptionPayment.create({
+    // One transaction for the whole advance [tollgate M-13]: payment row,
+    // period move, audit event, and the balanced ledger posting commit or roll
+    // back together — a crash can no longer strand a captured payment without
+    // its period (or books without their entry). Racing settlers converge on
+    // identical absolute period values; the CHARGE_SUCCESS unique key rolls
+    // the loser back whole.
+    await this.prisma.$transaction(async (tx) => {
+      if (settlePaymentId) {
+        await tx.subscriptionPayment.update({
+          where: { id: settlePaymentId },
+          data: { status: 'CAPTURED', paidAt: now },
+        });
+      } else {
+        await tx.subscriptionPayment.create({
+          data: {
+            subscriptionId: sub.id,
+            amount,
+            status: 'CAPTURED',
+            paymentMethod: sub.billingMethod,
+            externalRef: paymentRef,
+            periodStart,
+            periodEnd,
+            paidAt: now,
+          },
+        });
+      }
+
+      await tx.subscription.update({
+        where: { id: sub.id },
         data: {
-          subscriptionId: sub.id,
-          amount,
-          status: 'CAPTURED',
-          paymentMethod: sub.billingMethod,
-          externalRef: paymentRef,
-          periodStart,
-          periodEnd,
-          paidAt: now,
+          status: 'ACTIVE',
+          currentPeriodStart: periodStart,
+          currentPeriodEnd: periodEnd,
+          nextBillingDate: periodEnd,
+          lastPaymentDate: now,
+          failedAttempts: 0,
+          nextRetryAt: null,
+          isInGracePeriod: false,
+          gracePeriodEnd: null,
+          suspendedAt: null,
         },
       });
-    }
 
-    await this.prisma.subscription.update({
-      where: { id: sub.id },
-      data: {
-        status: 'ACTIVE',
-        currentPeriodStart: periodStart,
-        currentPeriodEnd: periodEnd,
-        nextBillingDate: periodEnd,
-        lastPaymentDate: now,
-        failedAttempts: 0,
-        nextRetryAt: null,
-        isInGracePeriod: false,
-        gracePeriodEnd: null,
-        suspendedAt: null,
-      },
-    });
+      await tx.billingEvent.create({
+        data: {
+          subscriptionId: sub.id,
+          type: 'CHARGE_SUCCESS',
+          amount,
+          currencyCode: sub.currencyCode,
+          idempotencyKey: `success:${sub.id}:${periodKey}`,
+          paymentRef,
+          ...(usdTrio ?? {}),
+        },
+      });
 
-    await this.prisma.billingEvent.create({
-      data: {
-        subscriptionId: sub.id,
-        type: 'CHARGE_SUCCESS',
-        amount,
-        currencyCode: sub.currencyCode,
-        idempotencyKey: `success:${sub.id}:${periodKey}`,
-        paymentRef,
-        ...(usdTrio ?? {}),
-      },
+      if (amount > 0) {
+        const rail = paymentRef === 'prepaid' ? 'prepaid' : sub.billingMethod === 'CARD' ? 'CARD' : 'EXTERNAL';
+        await postLedger(tx, {
+          idempotencyKey: `ledger:success:${sub.id}:${periodKey}`,
+          description: `Weekly fee collected (${rail === 'prepaid' ? 'prepaid balance' : sub.billingMethod}) — ${sub.type}`,
+          occurredAt: now,
+          entries: chargeSuccessPostings(sub.id, amount, rail),
+        });
+      }
     });
 
     if (wasInterrupted) {
@@ -935,6 +954,13 @@ export class BillingService {
           amount,
           channel: recordedBy.startsWith('agent-cash:') ? recordedBy.slice('agent-cash:'.length) : 'ADMIN_TOPUP',
           mmgRef: reference,
+        });
+        // Balanced books in the same tx [tollgate M-13]: money in from the
+        // collection rail, owed to the payer's wallet until a week consumes it.
+        await postLedger(tx, {
+          idempotencyKey: `ledger:${eventKey}`,
+          description: `Wallet credit via ${recordedBy}${reference ? ` (${reference})` : ''}`,
+          entries: topupPostings(subscriptionId, amount),
         });
         return tx.prepaidBalance.upsert({
           where: { subscriptionId },
