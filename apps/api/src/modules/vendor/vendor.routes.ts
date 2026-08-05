@@ -8,7 +8,7 @@ import { PickingService } from '../order/picking.service';
 import { makeDispatchService } from '../dispatch/dispatch.service';
 import { dispatchTrigger, enqueueDeliveryDispatch } from '../dispatch/dispatch-trigger';
 import { resolveDeliveryMode } from '../fulfillment/fulfillment-mode';
-import { handoverAttemptState } from '../handover/handover-security';
+import { handoverAttemptState, HANDOVER_SECRETS_OMIT } from '../handover/handover-security';
 import { NotificationService } from '../notification/notification.service';
 import { BookingService } from '../booking/booking.service';
 import { fmtSlotTime } from '../booking/availability';
@@ -459,8 +459,13 @@ async function resolveOwnedOrder(app: FastifyInstance, userId: string, orderId: 
     // code (or it could close the handover without the customer present). The
     // shared vendor order object is stripped of every handover secret by
     // construction; the one path that needs the code (complete-pickup) fetches
-    // it explicitly. Same rule the driver ride-PIN response already follows.
-    omit: { pickupCode: true, pickupCodeAttempts: true, ridePin: true },
+    // it explicitly.
+    //
+    // [F-0011] This comment used to end "Same rule the driver ride-PIN response
+    // already follows." It did not — the driver and rider paths returned the
+    // full row for months, and this sentence is why nobody re-checked them.
+    // Do not assert another path is safe; assert it in handover-secrets.test.ts.
+    omit: HANDOVER_SECRETS_OMIT,
     include: {
       items: true,
       statusHistory: { orderBy: { createdAt: 'desc' } },

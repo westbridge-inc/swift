@@ -12,6 +12,7 @@ import { closeOnlineSession } from '../rider/online-hours';
 import { rankCandidates, type DispatchCandidate } from './scoring';
 import { customerTrustSummaries } from '../cash/cash-rules.service';
 import { estimateLoad } from '../../utils/load';
+import { HANDOVER_SECRETS_OMIT } from '../handover/handover-security';
 import { vehicleTypesForPackageSize } from '../../config/vehicle-classes';
 import { log } from '../../utils/logger';
 import { dispatchSearchesCounter, dispatchTimeToAssign } from '../../plugins/observability';
@@ -668,6 +669,9 @@ export class DispatchService {
     const assignedStatus = pool === 'DRIVER' ? 'DRIVER_ASSIGNED' : 'RIDER_ASSIGNED';
     const order = await this.prisma.order.findUniqueOrThrow({
       where: { id: orderId },
+      // [F-0011] This row is returned straight to the accepting mover by the
+      // taxi accept route. The mover VERIFIES the ride PIN — they must not read it.
+      omit: HANDOVER_SECRETS_OMIT,
       include: {
         rider: { include: { user: { select: { firstName: true } } } },
         driver: { include: { user: { select: { firstName: true } } } },

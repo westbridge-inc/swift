@@ -18,6 +18,7 @@ import { getKycProvider } from '../../providers/kyc/kyc-provider';
 import { assertShiftLiveness } from '../safety/liveness.service';
 import { assertNotSafetySuspended } from '../safety/incident.service';
 import { subscriptionOperability } from '../subscription/operate-gate';
+import { HANDOVER_SECRETS_OMIT } from '../handover/handover-security';
 import { haversineDistance } from '../../utils/distance';
 import { estimateLoad } from '../../utils/load';
 import { parsePagination, paginatedResponse } from '../../utils/pagination';
@@ -96,6 +97,9 @@ async function getRider(app: FastifyInstance, userId: string) {
 async function getOwnedOrder(app: FastifyInstance, orderId: string, riderId: string) {
   const order = await app.prisma.order.findUnique({
     where: { id: orderId },
+    // [F-0011] Feeds every rider transition route. The rider VERIFIES the
+    // delivery PIN at /delivered — this object must never carry it.
+    omit: HANDOVER_SECRETS_OMIT,
     include: {
       vendor: { select: { id: true, name: true, latitude: true, longitude: true, addressLine1: true, city: true } },
       items: { select: { name: true, quantity: true, totalCustomer: true, specialInstructions: true } },
@@ -589,6 +593,8 @@ export async function riderRoutes(app: FastifyInstance) {
 
     const order = await app.prisma.order.findUnique({
       where: { id: rider.currentOrderId },
+      // [F-0011] The response spreads this row wholesale — omit at the source.
+      omit: HANDOVER_SECRETS_OMIT,
       include: {
         vendor: {
           select: {
@@ -625,7 +631,9 @@ export async function riderRoutes(app: FastifyInstance) {
         tipAmount: Number(order.tipAmount),
         totalAmount: Number(order.totalAmount),
         totalEarning: Number(order.deliveryFee) + Number(order.tipAmount),
-        ridePin: order.ridePin,
+        // [F-0011] The delivery PIN is deliberately NOT returned: this rider is
+        // the party who verifies it at PUT /orders/:id/delivered. They must ask
+        // the customer for it.
       },
     };
   });
@@ -859,8 +867,11 @@ export async function riderRoutes(app: FastifyInstance) {
         );
       }
 
-      // Verify ride PIN if one was set on the order.
-      if (order.ridePin && order.ridePin !== ridePin) {
+      // Verify the delivery PIN if one was set on the order.
+      // [F-0011] Read the secret ONLY here, where it is compared — the rider is
+      // its VERIFIER, so no rider-facing payload may carry it (see getOwnedOrder).
+      const secret = await app.prisma.order.findUnique({ where: { id }, select: { ridePin: true } });
+      if (secret?.ridePin && secret.ridePin !== ridePin) {
         throw new AppError(400, 'INVALID_PIN', 'Incorrect delivery PIN. Please ask the customer for the correct PIN.');
       }
 
