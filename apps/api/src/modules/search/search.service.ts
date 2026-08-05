@@ -37,7 +37,7 @@ export class SearchService {
     const vendorIndex = this.client.index(VENDOR_INDEX);
     await vendorIndex.updateSettings({
       searchableAttributes: ['name', 'description', 'cuisineTypes', 'tags', 'city'],
-      filterableAttributes: ['vendorType', 'status', 'isCurrentlyOpen', 'cuisineTypes', 'averageRating', 'city'],
+      filterableAttributes: ['vendorType', 'status', 'isCurrentlyOpen', 'cuisineTypes', 'averageRating', 'city', 'store_categories', 'derived_categories'],
       sortableAttributes: ['averageRating', 'totalOrders', 'name'],
       rankingRules: ['words', 'typo', 'proximity', 'attribute', 'sort', 'exactness'],
     });
@@ -45,10 +45,48 @@ export class SearchService {
     const itemIndex = this.client.index(ITEM_INDEX);
     await itemIndex.updateSettings({
       searchableAttributes: ['name', 'description', 'vendorName', 'categoryName', 'dietaryTags'],
-      filterableAttributes: ['vendorId', 'isAvailable', 'isPopular', 'dietaryTags', 'basePrice'],
+      filterableAttributes: ['vendorId', 'isAvailable', 'isPopular', 'dietaryTags', 'basePrice', 'categories'],
       sortableAttributes: ['basePrice', 'totalOrdered', 'name'],
       rankingRules: ['words', 'typo', 'proximity', 'attribute', 'sort', 'exactness'],
     });
+  }
+
+  /** Discovery facet slugs (#17 6.4) per vendor: chosen vs derived. */
+  private async vendorCategorySlugs(vendorIds: string[]): Promise<Map<string, { chosen: string[]; derived: string[] }>> {
+    const out = new Map<string, { chosen: string[]; derived: string[] }>();
+    if (vendorIds.length === 0) return out;
+    const rows = await this.prisma.vendorDiscoveryCategory.findMany({ where: { vendorId: { in: vendorIds } } });
+    const cats = await this.prisma.discoveryCategory.findMany({
+      where: { id: { in: [...new Set(rows.map((r) => r.categoryId))] } },
+      select: { id: true, slug: true },
+    });
+    const slugById = new Map(cats.map((c) => [c.id, c.slug]));
+    for (const r of rows) {
+      const slug = slugById.get(r.categoryId);
+      if (!slug) continue;
+      const entry = out.get(r.vendorId) ?? { chosen: [], derived: [] };
+      (r.source === 'DERIVED' ? entry.derived : entry.chosen).push(slug);
+      out.set(r.vendorId, entry);
+    }
+    return out;
+  }
+
+  /** Discovery facet slugs per item. */
+  private async itemCategorySlugs(itemIds: string[]): Promise<Map<string, string[]>> {
+    const out = new Map<string, string[]>();
+    if (itemIds.length === 0) return out;
+    const rows = await this.prisma.itemDiscoveryCategory.findMany({ where: { itemId: { in: itemIds } } });
+    const cats = await this.prisma.discoveryCategory.findMany({
+      where: { id: { in: [...new Set(rows.map((r) => r.categoryId))] } },
+      select: { id: true, slug: true },
+    });
+    const slugById = new Map(cats.map((c) => [c.id, c.slug]));
+    for (const r of rows) {
+      const slug = slugById.get(r.categoryId);
+      if (!slug) continue;
+      out.set(r.itemId, [...(out.get(r.itemId) ?? []), slug]);
+    }
+    return out;
   }
 
   async syncAllVendors(): Promise<number> {
@@ -57,6 +95,7 @@ export class SearchService {
       include: { categories: true },
     });
 
+    const discovery = await this.vendorCategorySlugs(vendors.map((v) => v.id));
     const docs = vendors.map((v) => ({
       id: v.id,
       name: v.name,
@@ -78,6 +117,8 @@ export class SearchService {
       estimatedPrepTime: v.estimatedPrepTime,
       minOrderAmount: Number(v.minOrderAmount),
       categoryCount: v.categories.length,
+      store_categories: discovery.get(v.id)?.chosen ?? [],
+      derived_categories: discovery.get(v.id)?.derived ?? [],
     }));
 
     await this.client.index(VENDOR_INDEX).addDocuments(docs);
@@ -93,6 +134,7 @@ export class SearchService {
       },
     });
 
+    const itemSlugs = await this.itemCategorySlugs(items.map((i) => i.id));
     const docs = items
       .filter((i) => i.vendor.status === 'ACTIVE')
       .map((i) => ({
@@ -109,6 +151,7 @@ export class SearchService {
         dietaryTags: i.dietaryTags,
         allergens: i.allergens,
         totalOrdered: i.totalOrdered,
+        categories: itemSlugs.get(i.id) ?? [],
       }));
 
     await this.client.index(ITEM_INDEX).addDocuments(docs);
@@ -165,6 +208,7 @@ export class SearchService {
     if (!vendor) return;
 
     if (vendor.status === 'ACTIVE') {
+      const discovery = await this.vendorCategorySlugs([vendor.id]);
       await this.client.index(VENDOR_INDEX).addDocuments([{
         id: vendor.id,
         name: vendor.name,
@@ -186,6 +230,8 @@ export class SearchService {
         estimatedPrepTime: vendor.estimatedPrepTime,
         minOrderAmount: Number(vendor.minOrderAmount),
         categoryCount: vendor.categories.length,
+        store_categories: discovery.get(vendor.id)?.chosen ?? [],
+        derived_categories: discovery.get(vendor.id)?.derived ?? [],
       }]);
     } else {
       await this.client.index(VENDOR_INDEX).deleteDocument(vendorId);
@@ -211,6 +257,7 @@ export class SearchService {
     const gone = items.filter((i) => !(i.isAvailable && i.vendor.status === 'ACTIVE'));
 
     if (live.length > 0) {
+      const itemSlugs = await this.itemCategorySlugs(live.map((i) => i.id));
       await this.client.index(ITEM_INDEX).addDocuments(
         live.map((i) => ({
           id: i.id,
@@ -226,6 +273,7 @@ export class SearchService {
           dietaryTags: i.dietaryTags,
           allergens: i.allergens,
           totalOrdered: i.totalOrdered,
+          categories: itemSlugs.get(i.id) ?? [],
         })),
       );
     }
