@@ -135,7 +135,10 @@ export function CartScreen() {
     if (Number(c?.tipAmount) > 0) setTip.mutate(0);
   };
   const homeVisit = apptOnly && apptPayload.some((a) => (a as { mode?: string }).mode === 'MOBILE');
-  const needsAddress = !apptOnly || homeVisit;
+  // PU-01 law (caught by the certification pass): a pickup order is collected
+  // at the counter — it must NEVER demand a delivery address. Address is for
+  // delivery carts and home-visit bookings only.
+  const needsAddress = (!apptOnly && !pickup) || homeVisit;
   // Slot ISOs carry local wall-clock time on their UTC face (same convention
   // as the slot picker) — format in UTC or the time shifts by the device TZ.
   const fmtSlot = (iso: string) => {
