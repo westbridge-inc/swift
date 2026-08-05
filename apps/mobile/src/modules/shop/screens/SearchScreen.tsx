@@ -35,7 +35,7 @@ const TYPES = [
 
 const SORTS = [
   { key: undefined, label: 'Recommended' },
-  { key: 'rating', label: 'Rating' },
+  { key: 'top_rated', label: 'Top rated' },
   { key: 'popular', label: 'Popularity' },
   { key: 'distance', label: 'Distance' },
 ] as const;
@@ -190,7 +190,9 @@ export function SearchScreen() {
                     name={v.name}
                     meta={
                       <RatingMeta
-                        rating={Number(v.averageRating) || 0}
+                        rating={v.displayRating ?? null}
+                        bucket={v.ratingBucket}
+                        topRated={v.topRated}
                         extra={v.etaMin ? `${v.etaMin} min` : v.distanceKm != null ? `${v.distanceKm} km` : undefined}
                       />
                     }

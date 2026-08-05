@@ -308,7 +308,9 @@ export function HomeScreen() {
                       width={RAIL_CARD_W}
                       image={vendorImage(v)}
                       name={v.name}
-                      rating={Number(v.averageRating) || 0}
+                      rating={v.displayRating ?? null}
+                      ratingBucket={v.ratingBucket}
+                      topRated={v.topRated}
                       meta={v.etaMin ? `${v.etaMin} min` : undefined}
                       favorite={v.isFavorite}
                       onToggleFavorite={() => onFavorite(v.id, !!v.isFavorite)}
@@ -398,7 +400,9 @@ export function HomeScreen() {
                     width={RAIL_CARD_W}
                     image={vendorImage(v)}
                     name={v.name}
-                    rating={Number(v.averageRating) || 0}
+                    rating={v.displayRating ?? null}
+                    ratingBucket={v.ratingBucket}
+                    topRated={v.topRated}
                     meta={[v.etaMin ? `${v.etaMin} min` : null, kmLabel(v.distanceKm)].filter(Boolean).join(' · ') || undefined}
                     favorite={v.isFavorite}
                     onToggleFavorite={() => onFavorite(v.id, !!v.isFavorite)}
@@ -425,7 +429,9 @@ export function HomeScreen() {
                       name={v.name}
                       meta={
                         <RatingMeta
-                          rating={Number(v.averageRating) || 0}
+                          rating={v.displayRating ?? null}
+                          bucket={v.ratingBucket}
+                          topRated={v.topRated}
                           extra={[v.etaMin ? `${v.etaMin} min` : null, kmLabel(v.distanceKm)].filter(Boolean).join(' · ') || undefined}
                         />
                       }
@@ -461,7 +467,9 @@ export function HomeScreen() {
                         width={RAIL_CARD_W}
                         image={vendorImage(v)}
                         name={v.name}
-                        rating={Number(v.averageRating) || 0}
+                        rating={v.displayRating ?? null}
+                        ratingBucket={v.ratingBucket}
+                        topRated={v.topRated}
                         meta={v.etaMin ? `${v.etaMin} min` : undefined}
                         favorite={v.isFavorite}
                         onToggleFavorite={() => onFavorite(v.id, !!v.isFavorite)}

@@ -365,7 +365,11 @@ export function RestaurantScreen() {
           <View style={{ flexDirection: 'row', paddingHorizontal: GUTTER, marginTop: space.xl }}>
             <StatCol
               icon="star"
-              value={`${Number(v.averageRating ?? 0).toFixed(1)}`}
+              value={
+                v.displayRating != null
+                  ? `${Number(v.displayRating).toFixed(1)} ${v.ratingBucket ?? ''}`.trim()
+                  : 'New'
+              }
               caption="See reviews"
               onPress={() => navigation.navigate('VendorReviews', { vendorId })}
             />
