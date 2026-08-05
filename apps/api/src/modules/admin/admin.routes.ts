@@ -34,6 +34,7 @@ import { SubscriptionService } from '../subscription/subscription.service';
 import { CashRulesService } from '../cash/cash-rules.service';
 import { AgentService } from '../agent/agent.service';
 import { OrderService } from '../order/order.service';
+import { DiscoveryGovernanceService } from '../discovery/admin-governance';
 import { getKycProvider } from '../../providers/kyc/kyc-provider';
 import { getPaymentProvider } from '../../providers/payment/payment-provider';
 import { getStorageProvider } from '../../providers/storage/storage-provider';
@@ -246,6 +247,7 @@ export async function adminRoutes(app: FastifyInstance) {
   const subscriptions = new SubscriptionService(app.prisma);
   const orderService = new OrderService(app.prisma, app.io);
   const cashRules = new CashRulesService(app.prisma, notifications, orderService);
+  const discoveryGovernance = new DiscoveryGovernanceService(app.prisma);
 
   // Middleware: verify ADMIN or SUPER_ADMIN role
   const adminGuard = async (request: any, reply: any) => {
@@ -3390,5 +3392,111 @@ export async function adminRoutes(app: FastifyInstance) {
     await job.remove();
     await audit(request.user.userId, 'DISCARD_DLQ_JOB', 'Job', `${queue}:${id}`, { jobName: job.name, failedReason: job.failedReason ?? null }, request);
     return { success: true, data: { queue, id, discarded: true } };
+  });
+
+  // =========================================================================
+  // CATEGORY DISCOVERY GOVERNANCE (#17 Part 7) — taxonomy CRUD, the request
+  // queue (approve / map / reject; the reason reaches the vendor verbatim),
+  // and the merge tool whose row counts must reconcile or nothing lands.
+  // =========================================================================
+
+  /** GET /discovery/categories — the whole taxonomy incl HIDDEN/MERGED. */
+  app.get('/discovery/categories', { preHandler: [adminGuard] }, async () => {
+    const categories = await app.prisma.discoveryCategory.findMany({
+      orderBy: [{ vertical: 'asc' }, { sortWeight: 'asc' }],
+    });
+    return { success: true, data: categories };
+  });
+
+  /** PUT /discovery/categories/:id — rename/re-emoji/aliases/order/visibility. */
+  app.put<{ Params: { id: string } }>('/discovery/categories/:id', { preHandler: [adminGuard] }, async (request) => {
+    const body = z.object({
+      name: z.string().trim().min(2).max(60).optional(),
+      emoji: z.string().min(1).max(8).optional(),
+      iconKey: z.string().max(60).nullable().optional(),
+      aliases: z.array(z.string().trim().min(1).max(60)).max(60).optional(),
+      sortWeight: z.number().int().min(0).max(10_000).optional(),
+      status: z.enum(['ACTIVE', 'HIDDEN']).optional(),
+    }).parse(request.body);
+    const updated = await app.prisma.discoveryCategory.update({
+      where: { id: request.params.id },
+      data: {
+        ...body,
+        ...(body.aliases ? { aliases: body.aliases.map((a) => a.toLowerCase()) } : {}),
+      },
+    });
+    await audit(request.user.userId, 'DISCOVERY_CATEGORY_UPDATE', 'DiscoveryCategory', updated.id, body, request);
+    return { success: true, data: updated };
+  });
+
+  /** GET /discovery/requests?status= — the founder's queue. */
+  app.get('/discovery/requests', { preHandler: [adminGuard] }, async (request) => {
+    const { status } = z.object({ status: z.enum(['PENDING', 'APPROVED', 'MERGED', 'REJECTED']).default('PENDING') }).parse(request.query ?? {});
+    const requests = await app.prisma.discoveryCategoryRequest.findMany({
+      where: { status },
+      orderBy: { createdAt: 'asc' },
+    });
+    const vendors = await app.prisma.vendor.findMany({
+      where: { id: { in: requests.map((r) => r.vendorId) } },
+      select: { id: true, name: true },
+    });
+    const byId = new Map(vendors.map((v) => [v.id, v.name]));
+    return { success: true, data: requests.map((r) => ({ ...r, vendorName: byId.get(r.vendorId) ?? null })) };
+  });
+
+  /** Notify the requesting vendor's owner about the disposal. */
+  async function notifyRequestVendor(vendorId: string, title: string, body: string) {
+    const vendor = await app.prisma.vendor.findUnique({
+      where: { id: vendorId },
+      select: { owner: { select: { userId: true } } },
+    });
+    if (!vendor) return;
+    await notifications.send({
+      userId: vendor.owner.userId,
+      type: 'SYSTEM_ANNOUNCEMENT',
+      title,
+      body,
+      data: { kind: 'category_request_resolved' },
+    }).catch(() => undefined);
+  }
+
+  /** POST /discovery/requests/:id/approve — a new ACTIVE category is born. */
+  app.post<{ Params: { id: string } }>('/discovery/requests/:id/approve', { preHandler: [adminGuard] }, async (request) => {
+    const body = z.object({
+      name: z.string().trim().min(2).max(60).optional(),
+      emoji: z.string().min(1).max(8),
+      kind: z.enum(['CUISINE', 'DISH', 'DIETARY', 'AISLE', 'RETAIL']),
+      vertical: z.enum(['FOOD', 'GROCERY', 'RETAIL']),
+    }).parse(request.body);
+    const result = await discoveryGovernance.approveRequest(request.params.id, { ...body, resolvedBy: request.user.userId });
+    await audit(request.user.userId, 'DISCOVERY_REQUEST_APPROVE', 'DiscoveryCategoryRequest', request.params.id, { category: result.category.slug }, request);
+    await notifyRequestVendor(result.request.vendorId, 'Category added', `"${result.category.name}" is now on Swift — tag your store and items with it.`);
+    return { success: true, data: result.category };
+  });
+
+  /** POST /discovery/requests/:id/map — resolves to an existing category. */
+  app.post<{ Params: { id: string } }>('/discovery/requests/:id/map', { preHandler: [adminGuard] }, async (request) => {
+    const { targetSlug } = z.object({ targetSlug: z.string().min(1).max(80) }).parse(request.body);
+    const result = await discoveryGovernance.mapRequest(request.params.id, targetSlug, request.user.userId);
+    await audit(request.user.userId, 'DISCOVERY_REQUEST_MAP', 'DiscoveryCategoryRequest', request.params.id, { targetSlug }, request);
+    await notifyRequestVendor(result.request.vendorId, 'Category mapped', `"${result.request.proposedName}" maps to ${result.target.name} — your store now shows there.`);
+    return { success: true, data: { mappedTo: result.target.slug } };
+  });
+
+  /** POST /discovery/requests/:id/reject — reason required, read verbatim. */
+  app.post<{ Params: { id: string } }>('/discovery/requests/:id/reject', { preHandler: [adminGuard] }, async (request) => {
+    const { reason } = z.object({ reason: z.string().trim().min(3).max(300) }).parse(request.body);
+    const result = await discoveryGovernance.rejectRequest(request.params.id, reason, request.user.userId);
+    await audit(request.user.userId, 'DISCOVERY_REQUEST_REJECT', 'DiscoveryCategoryRequest', request.params.id, { reason }, request);
+    await notifyRequestVendor(result.request.vendorId, 'Category not added', reason);
+    return { success: true, data: { rejected: true } };
+  });
+
+  /** POST /discovery/categories/:id/merge-into — CAT-J, counts reconcile. */
+  app.post<{ Params: { id: string } }>('/discovery/categories/:id/merge-into', { preHandler: [adminGuard] }, async (request) => {
+    const { targetId } = z.object({ targetId: z.string().min(1) }).parse(request.body);
+    const result = await discoveryGovernance.mergeCategories(request.params.id, targetId);
+    await audit(request.user.userId, 'DISCOVERY_CATEGORY_MERGE', 'DiscoveryCategory', request.params.id, { targetId, ...result.dedupes }, request);
+    return { success: true, data: result };
   });
 }
