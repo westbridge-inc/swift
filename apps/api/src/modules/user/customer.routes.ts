@@ -848,10 +848,15 @@ export async function customerRoutes(app: FastifyInstance) {
       }),
     ]);
 
-    // Enrich vendors
+    // Enrich vendors. R8/RAT-I: the home feed feeds EVERY Home rail
+    // (featured/nearby/order-again/open/closed), so the star surface rides
+    // here too — the sim certification caught these rails showing "New"
+    // while browse showed the real display (the fields were missing HERE).
+    const homeSurfaces = await ratingSurfaces(app.prisma, 'VENDOR', allVendors.map((v) => v.id));
     const enriched = allVendors.map((v) => ({
       ...enrichVendor(v, lat, lng),
       isFavorite: favoriteIds.has(v.id),
+      ...(homeSurfaces.get(v.id) ?? NEW_ACTOR_SURFACE),
     }));
 
     // Sort by distance if location provided, otherwise by rating
