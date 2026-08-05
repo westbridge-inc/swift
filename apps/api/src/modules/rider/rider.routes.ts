@@ -19,6 +19,7 @@ import { assertShiftLiveness } from '../safety/liveness.service';
 import { assertNotSafetySuspended } from '../safety/incident.service';
 import { subscriptionOperability } from '../subscription/operate-gate';
 import { HANDOVER_SECRETS_OMIT } from '../handover/handover-security';
+import { notSelfDeliveredFilter } from '../fulfillment/fulfillment-mode';
 import { haversineDistance } from '../../utils/distance';
 import { estimateLoad } from '../../utils/load';
 import { parsePagination, paginatedResponse } from '../../utils/pagination';
@@ -517,6 +518,11 @@ export async function riderRoutes(app: FastifyInstance) {
         orderType: { in: orderTypes as import('@prisma/client').OrderType[] },
         // LIFECYCLE_V2: a held courier job isn't offerable yet.
         ...notHeldFilter(),
+        // [F-0026] A self-delivering vendor fulfils this one itself — it is not
+        // open work, and advertising it sends riders to collect food that is
+        // already out for delivery. In AND because notHeldFilter already spread
+        // an OR key above.
+        AND: [notSelfDeliveredFilter()],
       },
       include: {
         vendor: {

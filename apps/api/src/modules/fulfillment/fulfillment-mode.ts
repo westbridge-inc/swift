@@ -22,3 +22,24 @@ export function resolveDeliveryMode(
   if (orderMode === 'PLATFORM_RIDER') return 'PLATFORM_RIDER';
   return vendorSelfDeliveryEnabled ? 'VENDOR_DELIVERY' : 'PLATFORM_RIDER';
 }
+
+/**
+ * [F-0026] Prisma WHERE fragment: orders a PLATFORM RIDER may legitimately work.
+ *
+ * Excludes self-delivered orders from the rider board, the dispatch reconciler
+ * and the struggling-delivery scan — a vendor delivering with its own courier
+ * has no rider BY DESIGN, and treating that as "stranded" produced phantom
+ * offers and a false "no rider found" push to the customer.
+ *
+ * Spell the NULL case out. `fulfillmentMode` is nullable and the mode is only
+ * resolved at accept/ready, so a bare `{ not: 'VENDOR_DELIVERY' }` compiles to
+ * SQL `!= 'VENDOR_DELIVERY'`, which is NULL — not true — for an unresolved
+ * order, silently excluding exactly the orders the reconciler exists to rescue.
+ * A regression test caught this; do not "simplify" it back.
+ *
+ * Use inside `AND: [...]` — several call sites already spread an `OR` of their
+ * own (notHeldFilter), and a second bare `OR` key would overwrite it.
+ */
+export function notSelfDeliveredFilter() {
+  return { OR: [{ fulfillmentMode: null }, { fulfillmentMode: { not: 'VENDOR_DELIVERY' as const } }] };
+}

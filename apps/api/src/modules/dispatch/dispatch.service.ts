@@ -13,6 +13,7 @@ import { rankCandidates, type DispatchCandidate } from './scoring';
 import { customerTrustSummaries } from '../cash/cash-rules.service';
 import { estimateLoad } from '../../utils/load';
 import { HANDOVER_SECRETS_OMIT } from '../handover/handover-security';
+import { notSelfDeliveredFilter } from '../fulfillment/fulfillment-mode';
 import { vehicleTypesForPackageSize } from '../../config/vehicle-classes';
 import { log } from '../../utils/logger';
 import { dispatchSearchesCounter, dispatchTimeToAssign } from '../../plugins/observability';
@@ -917,7 +918,13 @@ export async function reconcileStuckDispatch(
           fulfillment: 'DELIVERY',
           riderId: null,
           status: { in: ['ACCEPTED', 'PREPARING', 'READY_FOR_PICKUP'] },
-          AND: [{ OR: [{ holdExpiresAt: null }, { holdExpiresAt: { lte: new Date() } }] }],
+          // [F-0026] A self-delivering vendor's order has no rider BY DESIGN —
+          // without this the reconciler re-enqueued it every two minutes forever,
+          // pushing riders offers for food that already left the store.
+          AND: [
+            { OR: [{ holdExpiresAt: null }, { holdExpiresAt: { lte: new Date() } }] },
+            notSelfDeliveredFilter(),
+          ],
         },
         // Taxi: waiting on a driver.
         { orderType: 'TAXI', driverId: null, status: 'PENDING' },

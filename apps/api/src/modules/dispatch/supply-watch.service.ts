@@ -1,6 +1,7 @@
 import type { PrismaClient } from '@prisma/client';
 import type { NotificationService } from '../notification/notification.service';
 import type { DispatchService } from './dispatch.service';
+import { notSelfDeliveredFilter } from '../fulfillment/fulfillment-mode';
 
 /**
  * Supply watcher scan (availability spec §5): customers who hit "no drivers
@@ -77,6 +78,9 @@ export async function scanStrugglingDeliveries(
       readyAt: { lte: cutoff },
       vendorId: { not: null },
       orderType: { not: 'TAXI' },
+      // [F-0026] Never tell a customer "no rider found — switch to pickup?" when
+      // the vendor's own driver is the one bringing it.
+      AND: [notSelfDeliveredFilter()],
     },
     select: { id: true, customerId: true, orderNumber: true },
     orderBy: { readyAt: 'asc' },
