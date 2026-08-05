@@ -164,6 +164,28 @@ describe('browse + storefront surfaces (R8)', () => {
     expect(data.topRated).toBe(true);
   });
 
+  it('the home feed rails carry the star fields too (RAT-I: EVERY card context — the sim pass caught these missing)', async () => {
+    const { token } = await makeUser(['CUSTOMER'], 'CUSTOMER');
+    const starred = await makeVendor('Surf Home', { display: 4.8, count: 60, standing: 'EXCELLENT' });
+    // Own cuisine tag: the browse tests filter by CUISINE and assert exact
+    // order — this vendor belongs to the home-feed law only.
+    await app.prisma.vendor.update({
+      where: { id: starred.id },
+      data: { isCurrentlyOpen: true, acceptingOrders: true, cuisineTypes: [`${CUISINE}-home`] },
+    });
+    const res = await app.inject({
+      method: 'GET', url: '/api/v1/customer/home',
+      headers: { authorization: `Bearer ${token}` },
+    });
+    expect(res.statusCode).toBe(200);
+    const open = res.json().data.openVendors as Array<{ id: string; displayRating: number | null; ratingBucket: string; topRated: boolean }>;
+    const row = open.find((v) => v.id === starred.id);
+    expect(row).toBeDefined();
+    expect(row!.displayRating).toBe(4.8);
+    expect(row!.ratingBucket).toBe('(60+)');
+    expect(row!.topRated).toBe(true);
+  });
+
   it('pagination math stays global for top_rated (page 2 continues the order)', async () => {
     const { token } = await makeUser(['CUSTOMER'], 'CUSTOMER');
     const p1 = await app.inject({
