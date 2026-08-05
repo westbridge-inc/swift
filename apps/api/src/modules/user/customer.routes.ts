@@ -60,6 +60,8 @@ const vendorsBrowseQuerySchema = latLngQuerySchema.extend({
   open: z.enum(['true', 'false']).optional(),
   sort: z.string().max(30).optional(),
   minRating: z.coerce.number().min(0).max(5).optional(),
+  // Category discovery (#17 6.3): the feed = THIS endpoint + category={slug}.
+  category: z.string().max(80).optional(),
 });
 
 const itemSlotsQuerySchema = z.object({
@@ -911,11 +913,37 @@ export async function customerRoutes(app: FastifyInstance) {
   app.get('/vendors', async (request: AuthRequest) => {
     const query = request.query as Record<string, string | undefined>;
     const { page, limit, skip } = parsePagination(query);
-    const { type, cuisine, search, lat, lng, open, sort, minRating } = vendorsBrowseQuerySchema.parse(request.query);
+    const { type, cuisine, search, lat, lng, open, sort, minRating, category } = vendorsBrowseQuerySchema.parse(request.query);
 
     // Require ≥1 orderable item so empty stores don't clutter browse / dead-end on tap.
     const where: Record<string, unknown> = { status: 'ACTIVE', isVerified: true, items: { some: { isAvailable: true } } };
     if (type) where['vendorType'] = type;
+
+    // Category feed (#17): membership = chosen + derived rows. A MERGED slug
+    // follows its redirect (edge 4 — old links never die); HIDDEN/unknown
+    // categories yield an honest empty feed, never an error.
+    let categoryRow: { id: string; kind: string } | null = null;
+    if (category) {
+      let cat = await app.prisma.discoveryCategory.findUnique({
+        where: { tenantId_slug: { tenantId: 'swift-default', slug: category } },
+        select: { id: true, kind: true, status: true, mergedIntoId: true },
+      });
+      if (cat?.status === 'MERGED' && cat.mergedIntoId) {
+        cat = await app.prisma.discoveryCategory.findFirst({
+          where: { id: cat.mergedIntoId },
+          select: { id: true, kind: true, status: true, mergedIntoId: true },
+        });
+      }
+      if (!cat || cat.status !== 'ACTIVE') {
+        return { success: true, ...paginatedResponse([], 0, { page, limit, skip }) };
+      }
+      categoryRow = { id: cat.id, kind: cat.kind };
+      const members = await app.prisma.vendorDiscoveryCategory.findMany({
+        where: { categoryId: cat.id },
+        select: { vendorId: true },
+      });
+      where['id'] = { in: members.map((m) => m.vendorId) };
+    }
     if (cuisine) where['cuisineTypes'] = { has: cuisine };
     if (open === 'true') where['isCurrentlyOpen'] = true;
     if (minRating != null) where['averageRating'] = { gte: minRating };
@@ -928,6 +956,8 @@ export async function customerRoutes(app: FastifyInstance) {
     }
 
     const orderBy: Record<string, string>[] = [];
+    // Category feeds read open-first, closed under the divider (honest order).
+    if (categoryRow) orderBy.push({ isCurrentlyOpen: 'desc' });
     switch (sort) {
       case 'rating': orderBy.push({ averageRating: 'desc' }); break;
       case 'popular': orderBy.push({ totalOrders: 'desc' }); break;
@@ -959,9 +989,33 @@ export async function customerRoutes(app: FastifyInstance) {
         )
       : new Set<string>();
 
+    // "14 vegan items" — the metadata line for item-truth categories (#17 6.3).
+    // Two-step (the tag table is relation-less by design): tagged itemIds for
+    // the category, then live-item counts grouped by vendor.
+    const itemCounts = new Map<string, number>();
+    if (categoryRow && ['DISH', 'DIETARY', 'AISLE'].includes(categoryRow.kind) && vendors.length) {
+      const tagRows = await app.prisma.itemDiscoveryCategory.findMany({
+        where: { categoryId: categoryRow.id },
+        select: { itemId: true },
+      });
+      if (tagRows.length) {
+        const grouped = await app.prisma.item.groupBy({
+          by: ['vendorId'],
+          where: {
+            id: { in: tagRows.map((t) => t.itemId) },
+            vendorId: { in: vendors.map((v) => v.id) },
+            isAvailable: true,
+          },
+          _count: { _all: true },
+        });
+        for (const g of grouped) itemCounts.set(g.vendorId, g._count._all);
+      }
+    }
+
     let enriched = vendors.map((v) => ({
       ...enrichVendor(v, userLat, userLng),
       isFavorite: favoriteIds.has(v.id),
+      ...(categoryRow ? { itemsInCategory: itemCounts.get(v.id) ?? null } : {}),
     }));
 
     // Re-sort by distance if location provided and no explicit sort

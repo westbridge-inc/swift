@@ -108,6 +108,12 @@ export interface AddressInput {
 
 export type SupportCategory = 'ORDER_ISSUE' | 'PAYMENT' | 'SAFETY' | 'ACCOUNT' | 'VENDOR' | 'MOVER' | 'OTHER';
 
+// Category discovery rail + feed (#17) — public, flag-gated server-side.
+export const discoveryApi = {
+  categories: (params?: { vertical?: string; lat?: number; lng?: number }) =>
+    api.get('/discovery/categories', { params }),
+};
+
 export const customerApi = {
   getProfile: () => api.get('/customer/profile'),
   updateProfile: (data: { firstName?: string; lastName?: string; email?: string }) =>

@@ -10,6 +10,8 @@ import { HomeScreen } from '../modules/shop/screens/HomeScreen';
 import { RecommendedScreen } from '../modules/shop/screens/RecommendedScreen';
 import { NearbyScreen } from '../modules/shop/screens/NearbyScreen';
 import { SearchScreen } from '../modules/shop/screens/SearchScreen';
+import { CategoryFeedScreen } from '../modules/shop/screens/CategoryFeedScreen';
+import { CategoryGridScreen } from '../modules/shop/screens/CategoryGridScreen';
 import { RestaurantScreen } from '../modules/shop/screens/RestaurantScreen';
 import { MenuItemScreen } from '../modules/shop/screens/MenuItemScreen';
 import { FavoritesScreen } from '../modules/shop/screens/FavoritesScreen';
@@ -91,6 +93,8 @@ export function CustomerStack() {
       <Stack.Screen name="Recommended" component={RecommendedScreen} />
       <Stack.Screen name="Nearby" component={NearbyScreen} />
       <Stack.Screen name="Search" component={SearchScreen} />
+      <Stack.Screen name="CategoryFeed" component={CategoryFeedScreen} />
+      <Stack.Screen name="CategoryGrid" component={CategoryGridScreen} />
       <Stack.Screen name="Restaurant" component={RestaurantScreen} />
       <Stack.Screen name="MenuItem" component={MenuItemScreen} />
       <Stack.Screen name="Favorites" component={FavoritesScreen} />
