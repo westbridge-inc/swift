@@ -541,6 +541,14 @@ export async function customerRoutes(app: FastifyInstance) {
   // 1. PROFILE
   // ========================================================================
 
+  /** Movement R9: "Your rating" — the customer's own aggregate (the drivers
+   *  and riders rate them too; respect runs both ways). Aggregate only —
+   *  never per-rating rows, never who said what. */
+  app.get('/rating', async (request: AuthRequest) => {
+    const surface = (await ratingSurfaces(app.prisma, 'CUSTOMER', [request.user.userId])).get(request.user.userId) ?? NEW_ACTOR_SURFACE;
+    return { success: true, data: surface };
+  });
+
   app.get('/profile', async (request: AuthRequest) => {
     const { userId } = request.user;
     const user = await app.prisma.user.findUnique({
@@ -1876,6 +1884,11 @@ export async function customerRoutes(app: FastifyInstance) {
 
     if (!order) throw new NotFoundError('Order', id);
 
+    // R8.4: the live-order card shows "{Rider} · {display}★" from the ONE mapper.
+    const riderSurface = order.rider?.userId
+      ? (await ratingSurfaces(app.prisma, 'RIDER', [order.rider.userId])).get(order.rider.userId)
+      : null;
+
     // Delivery progress info
     const hasBeenRated = orderRatings.length > 0;
     const canCancel = !['DELIVERED', 'COMPLETED', 'CANCELLED', 'REFUNDED', 'PICKED_UP', 'EN_ROUTE_DELIVERY', 'ARRIVED'].includes(order.status);
@@ -1941,6 +1954,7 @@ export async function customerRoutes(app: FastifyInstance) {
           lastName: order.rider.user?.lastName,
           phone: order.rider.user?.phone,
           avatar: order.rider.user?.avatar,
+          displayRating: riderSurface?.displayRating ?? null,
           // Trust visibility (master plan §5): the customer sees who and what
           // is coming — vehicle, plate, and its photo.
           vehicleType: order.rider.vehicleType,

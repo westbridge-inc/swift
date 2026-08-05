@@ -49,6 +49,7 @@ import { VendorMyQrScreen } from './screens/VendorMyQrScreen';
 import { DocumentChecklist } from '../../components/onboarding/DocumentChecklist';
 import { PricingCard } from '../../components/onboarding/PricingCard';
 import { MmgPayLinkCard } from '../../components/MmgPayLinkCard';
+import { StandingCard } from '../../components/StandingCard';
 import { api, API_URL, vendorApi } from '../../services/api';
 import { openPayLink } from '../../lib/payLink';
 import { useWentLive, WentLivePopup } from '../../components/onboarding/WentLive';
@@ -85,6 +86,8 @@ import {
   useDeletePromo,
   useMyStoreReviews,
   useRespondReview,
+  useVendorStanding,
+  useVendorItemFeedback,
   useVendorSubscription,
   useVendorAnalytics,
   useVendorRevenue,
@@ -1960,6 +1963,40 @@ function ReviewsCard() {
   );
 }
 
+/** Movement R9 — Standing module + item-thumbs Pareto (daily-folded, RAT-G). */
+function VendorStandingSection() {
+  const standingQ = useVendorStanding();
+  const thumbsQ = useVendorItemFeedback();
+  const flagged = ((thumbsQ.data ?? []) as Array<{ itemId: string; name: string; up: number; down: number }>)
+    .filter((r) => r.down > 0)
+    .slice(0, 5);
+  return (
+    <>
+      {standingQ.data ? <StandingCard data={standingQ.data} title="Store standing" /> : null}
+      {flagged.length > 0 ? (
+        <Card style={{ marginBottom: space.md }}>
+          <T variant="label" weight="semibold">
+            Item feedback — last 30 days
+          </T>
+          <View style={{ marginTop: space.sm, gap: 4 }}>
+            {flagged.map((r) => (
+              <View key={r.itemId} style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
+                <T variant="caption" numberOfLines={1} style={{ flex: 1 }}>
+                  {r.name}
+                </T>
+                <T variant="caption" tone="muted">
+                  👎 {r.down}
+                  {r.up > 0 ? `  ·  👍 ${r.up}` : ''}
+                </T>
+              </View>
+            ))}
+          </View>
+        </Card>
+      ) : null}
+    </>
+  );
+}
+
 /** Ratings histogram — the reviews endpoint's score distribution, drawn as bars. */
 function RatingsCard() {
   const reviewsQ = useMyStoreReviews();
@@ -2253,6 +2290,7 @@ function VendorInsightsScreen() {
             {popularQ.data ? <TopItemsCard items={popularQ.data} /> : null}
             <BusyHoursCard />
             <RepeatCustomersCard />
+            <VendorStandingSection />
             <RatingsCard />
             <ReviewsCard />
             <Card style={{ marginBottom: space.md }}>

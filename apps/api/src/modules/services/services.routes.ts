@@ -73,6 +73,16 @@ export async function servicesRoutes(app: FastifyInstance) {
     return { success: true, data: { ...provider, certified } };
   });
 
+  /** Movement R9: the Standing module — daily-folded, subject = the user
+   *  (provider ratings key on rateeId). No provider profile = 404, like
+   *  providers/me — never an empty standing for the wrong role. */
+  app.get('/providers/me/standing', auth, async (request) => {
+    const provider = await app.prisma.serviceProvider.findUnique({ where: { userId: request.user.userId }, select: { id: true } });
+    if (!provider) throw new NotFoundError('ServiceProvider');
+    const { actorStandingView } = await import('../rating/rating-standing');
+    return { success: true, data: await actorStandingView(app.prisma, 'SERVICE_PROVIDER', request.user.userId) };
+  });
+
   /** POST /providers/qualifications — add a trade qualification (earns the badge). */
   app.post('/providers/qualifications', auth, async (request) => {
     const body = qualificationSchema.parse(request.body);

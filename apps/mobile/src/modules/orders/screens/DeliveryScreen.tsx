@@ -537,6 +537,7 @@ export function DeliveryScreen() {
               <View style={{ flex: 1 }}>
                 <T variant="body" weight="semibold">
                   {rider.firstName} {rider.lastName ?? ''}
+                  {rider.displayRating != null ? `  ·  ${Number(rider.displayRating).toFixed(1)}★` : ''}
                 </T>
                 <T variant="caption" tone="muted" numberOfLines={1}>
                   {rider.licensePlate

@@ -1011,11 +1011,11 @@ function ActiveRide({ navigation, ride, cancelRide, insets, rematching }: any) {
                     <T variant="caption" tone="muted" numberOfLines={1} style={{ flexShrink: 1 }}>
                       {[d.vehicleColor, d.vehicleMake, d.vehicleModel].filter(Boolean).join(' ')}
                     </T>
-                    {d.averageRating ? (
+                    {d.displayRating != null || d.averageRating ? (
                       <>
-                        <Stars value={Number(d.averageRating)} size={11} />
+                        <Stars value={Number(d.displayRating ?? d.averageRating)} size={11} />
                         <T variant="caption" tone="muted">
-                          {Number(d.averageRating).toFixed(1)}
+                          {Number(d.displayRating ?? d.averageRating).toFixed(1)}
                         </T>
                       </>
                     ) : null}

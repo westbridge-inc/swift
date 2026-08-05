@@ -2490,6 +2490,41 @@ export async function vendorRoutes(app: FastifyInstance) {
   // 6. ANALYTICS
   // =========================================================================
 
+  /** GET /standing — Movement R9: the Standing module (big number + band chip
+   *  + 13-week trend + folded tag tops + coaching card). Daily-folded (RAT-G):
+   *  reads never include today's ratings, so no fresh rating is traceable. */
+  app.get('/standing', auth, async (request) => {
+    const { vendorId } = await requireVendor(app, request, 'MANAGER');
+    const { actorStandingView } = await import('../rating/rating-standing');
+    return { success: true, data: await actorStandingView(app.prisma, 'VENDOR', vendorId) };
+  });
+
+  /** GET /analytics/item-feedback — the item-thumbs Pareto (R9): which items
+   *  earn the 👎, last 30 days, worst first — so the fix list writes itself. */
+  app.get('/analytics/item-feedback', auth, async (request) => {
+    const { vendorId } = await requireVendor(app, request, 'MANAGER');
+    const since = new Date(Date.now() - 30 * 24 * 3600_000);
+    const items = await app.prisma.item.findMany({ where: { vendorId }, select: { id: true, name: true } });
+    const names = new Map(items.map((i) => [i.id, i.name]));
+    const grouped = await app.prisma.itemFeedback.groupBy({
+      by: ['itemId', 'verdict'],
+      where: { itemId: { in: items.map((i) => i.id) }, createdAt: { gte: since } },
+      _count: { _all: true },
+    });
+    const tally = new Map<string, { up: number; down: number }>();
+    for (const g of grouped) {
+      const t = tally.get(g.itemId) ?? { up: 0, down: 0 };
+      if (g.verdict === 'UP') t.up += g._count._all;
+      else t.down += g._count._all;
+      tally.set(g.itemId, t);
+    }
+    const rows = [...tally.entries()]
+      .map(([itemId, t]) => ({ itemId, name: names.get(itemId) ?? 'Removed item', ...t }))
+      .sort((a, b) => b.down - a.down || b.up - a.up)
+      .slice(0, 10);
+    return { success: true, data: rows };
+  });
+
   /** GET /analytics/overview — Dashboard summary cards */
   app.get('/analytics/overview', auth, async (request) => {
     const { vendorId } = await requireVendor(app, request, 'MANAGER');

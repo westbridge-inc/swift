@@ -680,6 +680,25 @@ export function createWorkers(ctx: JobContext) {
         return;
       }
 
+      if (job.name === 'rating-actor-fold') {
+        // Movement R daily fold (RAT-G): actor-facing aggregates advance once
+        // a day so a fresh rating never identifies this morning's customer.
+        const { runActorFold } = await import('../modules/rating/rating-standing');
+        const n = await runActorFold(ctx.prisma);
+        ctx.log.info({ stats: n }, 'ratings: actor fold stamped');
+        return;
+      }
+
+      if (job.name === 'rating-reminder-sweep') {
+        // Movement R10: ONE reminder for orders finished 24–48h ago and never
+        // rated — deduped against its own notification row, flag-gated.
+        const { runRatingReminderSweep } = await import('../modules/rating/rating-reminder');
+        const { NotificationService } = await import('../modules/notification/notification.service');
+        const n = await runRatingReminderSweep(ctx.prisma, new NotificationService(ctx.prisma, ctx.io));
+        ctx.log.info({ sent: n }, 'ratings: reminders sent');
+        return;
+      }
+
       if (job.name === 'discovery-backfill') {
         // The backfill movement (#17 CAT-I): admin-triggered, once per tenant.
         // Idempotent — a re-run writes nothing new and never re-notifies.
@@ -1179,6 +1198,22 @@ export async function scheduleRecurringJobs(queues: ReturnType<typeof createQueu
   // Movement R: nightly full stats recompute (RAT-H reconciliation leg).
   await queues.dispatchQueue.add('rating-stats-recompute', {}, {
     repeat: { pattern: '30 4 * * *' },
+    removeOnComplete: 7,
+    removeOnFail: 7,
+  });
+
+  // Movement R: daily actor-facing fold (RAT-G anonymity) — after the 04:30
+  // recompute so the folded view reads settled aggregates.
+  await queues.dispatchQueue.add('rating-actor-fold', {}, {
+    repeat: { pattern: '45 4 * * *' },
+    removeOnComplete: 7,
+    removeOnFail: 7,
+  });
+
+  // Movement R10: the one rating reminder — 22:00 UTC = 18:00 Guyana evening,
+  // when people actually have the minute.
+  await queues.dispatchQueue.add('rating-reminder-sweep', {}, {
+    repeat: { pattern: '0 22 * * *' },
     removeOnComplete: 7,
     removeOnFail: 7,
   });
