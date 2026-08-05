@@ -5,7 +5,7 @@ import { Image } from 'expo-image';
 import { Feather } from '@expo/vector-icons';
 import { useNavigation } from '@react-navigation/native';
 import { color, space } from '@swift/ui';
-import { useProfile } from '../../../hooks/customer';
+import { useMyRating, useProfile } from '../../../hooks/customer';
 import { useAuthStore } from '../../../stores/authStore';
 import { EmptyState, IconChip, PillButton, PopupCard, Screen, SettingsRow, T } from '../../../kit';
 import { RoleSwitcherSheet } from '../../../components/RoleSwitcherSheet';
@@ -21,8 +21,10 @@ export function ProfileScreen() {
   const navigation = useNavigation<any>();
   const { isAuthenticated, promptLogin, logout, user } = useAuthStore();
   const profile = useProfile<any>();
+  const myRating = useMyRating();
   const [confirmLogout, setConfirmLogout] = useState(false);
   const [switcherOpen, setSwitcherOpen] = useState(false);
+  const [ratingInfo, setRatingInfo] = useState(false);
 
   if (!isAuthenticated) {
     return (
@@ -115,6 +117,17 @@ export function ProfileScreen() {
             sub="Unlocks bigger orders and rides"
             onPress={() => navigation.navigate('IdentityVerification')}
           />
+          {/* Movement R9 — the customer's own aggregate (respect runs both ways) */}
+          <SettingsRow
+            icon="star"
+            label="Your rating"
+            sub={
+              myRating.data?.displayRating != null
+                ? `${myRating.data.displayRating.toFixed(1)} ${myRating.data.ratingBucket}`
+                : 'New — builds as you order and ride'
+            }
+            onPress={() => setRatingInfo(true)}
+          />
         </View>
 
         {/* Support section */}
@@ -151,6 +164,21 @@ export function ProfileScreen() {
       </ScrollView>
 
       {/* Logout confirm (kit 51) */}
+      {/* Movement R9 — why customers have a rating (aggregate-only honesty) */}
+      <PopupCard visible={ratingInfo} onClose={() => setRatingInfo(false)}>
+        <IconChip icon="star" size={56} />
+        <T variant="heading" center style={{ marginTop: space.md }}>
+          {myRating.data?.displayRating != null ? `${myRating.data.displayRating.toFixed(1)} ${myRating.data.ratingBucket}` : 'No rating yet'}
+        </T>
+        <T variant="label" tone="muted" center style={{ marginTop: space.sm }}>
+          Drivers and riders rate their trips with you, the same way you rate them — respect runs both ways.
+          Swift only ever shows the average, never who rated what.
+        </T>
+        <View style={{ alignSelf: 'stretch', marginTop: space.xl }}>
+          <PillButton label="Got it" size="md" onPress={() => setRatingInfo(false)} />
+        </View>
+      </PopupCard>
+
       <PopupCard visible={confirmLogout} onClose={() => setConfirmLogout(false)}>
         <IconChip icon="log-out" size={56} />
         <T variant="heading" center style={{ marginTop: space.md }}>

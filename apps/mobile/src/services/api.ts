@@ -116,6 +116,7 @@ export const discoveryApi = {
 
 export const customerApi = {
   getProfile: () => api.get('/customer/profile'),
+  myRating: () => api.get('/customer/rating'),
   updateProfile: (data: { firstName?: string; lastName?: string; email?: string }) =>
     api.put('/customer/profile', data),
   // DPA-2023 self-serve rights (D9-05): export your data; erase your account.
@@ -386,6 +387,7 @@ export const partnerApi = {
 // Mover ops — Rider (delivery/courier), mounted at /api/v1/rider
 export const riderApi = {
   profile: () => api.get('/rider/profile'),
+  standing: () => api.get('/rider/standing'),
   goOnline: () => api.post('/rider/go-online'),
   goOffline: () => api.post('/rider/go-offline'),
   location: (latitude: number, longitude: number) => api.put('/rider/location', { latitude, longitude }),
@@ -428,6 +430,7 @@ export const riderApi = {
 // Mover ops — Driver (taxi), mounted at /api/v1/driver
 export const driverApi = {
   profile: () => api.get('/driver/profile'),
+  standing: () => api.get('/driver/standing'),
   updateProfile: (data: { mmgPayUrl?: string | null }) => api.put('/driver/profile', data),
   goOnline: () => api.post('/driver/go-online'),
   goOffline: () => api.post('/driver/go-offline'),
@@ -556,6 +559,9 @@ export const vendorApi = {
   // Reviews (manager+ can respond)
   reviews: () => api.get('/vendor/reviews'),
   respondReview: (id: string, response: string) => api.post(`/vendor/reviews/${id}/respond`, { response }),
+  // Movement R9 — Standing module + item-thumbs Pareto
+  standing: () => api.get('/vendor/standing'),
+  itemFeedback: () => api.get('/vendor/analytics/item-feedback'),
   // Promotions (manager+)
   promos: () => api.get('/vendor/promos'),
   createPromo: (data: {

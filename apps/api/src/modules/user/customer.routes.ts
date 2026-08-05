@@ -541,6 +541,14 @@ export async function customerRoutes(app: FastifyInstance) {
   // 1. PROFILE
   // ========================================================================
 
+  /** Movement R9: "Your rating" — the customer's own aggregate (the drivers
+   *  and riders rate them too; respect runs both ways). Aggregate only —
+   *  never per-rating rows, never who said what. */
+  app.get('/rating', async (request: AuthRequest) => {
+    const surface = (await ratingSurfaces(app.prisma, 'CUSTOMER', [request.user.userId])).get(request.user.userId) ?? NEW_ACTOR_SURFACE;
+    return { success: true, data: surface };
+  });
+
   app.get('/profile', async (request: AuthRequest) => {
     const { userId } = request.user;
     const user = await app.prisma.user.findUnique({

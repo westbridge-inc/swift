@@ -37,7 +37,7 @@ export function subjectOf(rating: Pick<Rating, 'type' | 'vendorId' | 'rateeId'>)
   }
 }
 
-const TYPES_FOR_ROLE: Record<SubjectRef['role'], string[]> = {
+export const TYPES_FOR_ROLE: Record<SubjectRef['role'], string[]> = {
   VENDOR: ['CUSTOMER_TO_VENDOR'],
   RIDER: ['CUSTOMER_TO_RIDER'],
   DRIVER: ['CUSTOMER_TO_DRIVER'],

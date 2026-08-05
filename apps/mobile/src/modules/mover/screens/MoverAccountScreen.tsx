@@ -10,7 +10,8 @@ import { Card, Header, LinkText, PillButton, Screen, SettingsRow, T, TonePill } 
 import { MmgPayLinkCard } from '../../../components/MmgPayLinkCard';
 import { driverApi } from '../../../services/api';
 import { Stars } from '../../../kit/controls';
-import { useMoverKind, useVerificationStatus, useEarningsSummary, useMoverSubscription, useUploadVehiclePhoto } from '../../../hooks';
+import { useMoverKind, useVerificationStatus, useEarningsSummary, useMoverSubscription, useUploadVehiclePhoto, useMoverStanding } from '../../../hooks';
+import { StandingCard } from '../../../components/StandingCard';
 import { useAuthStore } from '../../../stores/authStore';
 import { RoleSwitcherSheet } from '../../../components/RoleSwitcherSheet';
 import { money } from '../../../lib/money';
@@ -20,6 +21,7 @@ export function MoverAccountScreen({ navigation }: any) {
   const { user, logout } = useAuthStore();
   const [switcherOpen, setSwitcherOpen] = React.useState(false);
   const { kind, profile } = useMoverKind();
+  const standingQ = useMoverStanding<any>(kind);
   const verified = (useVerificationStatus<any>('MOVER').data as any)?.roleVerified;
   const summaryQ = useEarningsSummary<any>(kind);
   const subQ = useMoverSubscription(kind);
@@ -91,6 +93,13 @@ export function MoverAccountScreen({ navigation }: any) {
             </View>
           </View>
         </Card>
+
+        {/* Movement R9 — Standing (daily-folded; today's ratings never show) */}
+        {standingQ.data ? (
+          <View style={{ marginTop: space.md }}>
+            <StandingCard data={standingQ.data} />
+          </View>
+        ) : null}
 
         {/* Vehicle — customers see this photo when you accept (§5) */}
         {vehicle || profile ? (

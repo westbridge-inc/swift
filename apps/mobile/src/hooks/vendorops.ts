@@ -90,6 +90,24 @@ export function useRespondReview() {
   });
 }
 
+/** Movement R9: the store's daily-folded Standing view (RAT-G). */
+export function useVendorStanding<T = any>() {
+  const pv = usePreviewDataset();
+  const q = useQuery<T>({ queryKey: ['vendor', 'standing'], queryFn: () => unwrap<T>(vendorApi.standing()), enabled: !pv });
+  return pv ? previewQuery(null as T) : q;
+}
+
+/** Movement R9: which items earn the 👎 — last 30 days, worst first. */
+export function useVendorItemFeedback() {
+  const pv = usePreviewDataset();
+  const q = useQuery({
+    queryKey: ['vendor', 'item-feedback'],
+    queryFn: () => unwrap<Array<{ itemId: string; name: string; up: number; down: number }>>(vendorApi.itemFeedback()),
+    enabled: !pv,
+  });
+  return pv ? previewQuery([] as Array<{ itemId: string; name: string; up: number; down: number }>) : q;
+}
+
 // ─── Promotions (manager+) ───────────────────────────────────────────────────
 
 export function useVendorPromos(enabled = true) {

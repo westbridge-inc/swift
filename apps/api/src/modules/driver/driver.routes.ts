@@ -94,6 +94,13 @@ export async function driverRoutes(app: FastifyInstance) {
 
   // ─── Profile ───────────────────────────────────────────────────────────
 
+  /** Movement R9: the Standing module — daily-folded, subject = the user
+   *  (driver ratings key on rateeId). */
+  app.get('/standing', { preHandler: [app.authenticate] }, async (request) => {
+    const { actorStandingView } = await import('../rating/rating-standing');
+    return { success: true, data: await actorStandingView(app.prisma, 'DRIVER', request.user.userId) };
+  });
+
   app.get('/profile', { preHandler: [app.authenticate] }, async (request) => {
     const driver = await app.prisma.driver.findUnique({
       where: { userId: request.user.userId },

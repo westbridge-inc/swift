@@ -28,6 +28,15 @@ export function useProfile<T = any>() {
   return useQuery<T>({ queryKey: customerKeys.profile, queryFn: () => unwrap<T>(customerApi.getProfile()) });
 }
 
+/** Movement R9: "Your rating" — the customer's own aggregate (aggregate only,
+ *  never per-rating rows — respect runs both ways). */
+export function useMyRating() {
+  return useQuery<{ displayRating: number | null; ratingBucket: string; ratingCount: number }>({
+    queryKey: ['customer', 'my-rating'],
+    queryFn: () => unwrap(customerApi.myRating()),
+  });
+}
+
 export function useAddresses<T = any>() {
   return useQuery<T>({ queryKey: customerKeys.addresses, queryFn: () => unwrap<T>(customerApi.getAddresses()) });
 }

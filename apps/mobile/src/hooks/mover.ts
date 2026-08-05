@@ -97,6 +97,17 @@ export function useEarnings<T = any>(kind: MoverKind | null) {
   });
   return pv ? PV.previewQuery(PV.PREVIEW_EARNINGS) : q;
 }
+/** Movement R9: the daily-folded Standing view (RAT-G — never same-day). */
+export function useMoverStanding<T = any>(kind: MoverKind | null) {
+  const pv = usePreview();
+  const q = useQuery<T>({
+    queryKey: ['mover', 'standing', kind],
+    queryFn: () => unwrap<T>(svc(kind as MoverKind).standing()),
+    enabled: !!kind && !pv,
+  });
+  return pv ? PV.previewQuery(null as T) : q;
+}
+
 /** DASH-03: server-aggregated per-Guyana-day totals for the Home trend chart —
  *  replaces the client-side grouping of the paginated earnings list. */
 export function useDailyEarnings<T = any>(kind: MoverKind | null, days = 7) {
