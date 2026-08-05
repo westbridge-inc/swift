@@ -19,7 +19,7 @@ import { haversineDistance, estimateDeliveryMinutes } from '../../utils/distance
 import { parsePagination, paginatedResponse } from '../../utils/pagination';
 import { tenantCacheKey } from '../../utils/tenant-cache';
 import { AppError, NotFoundError } from '../../utils/errors';
-import { handoverAttemptState } from '../handover/handover-security';
+import { handoverAttemptState, HANDOVER_SECRETS_OMIT } from '../handover/handover-security';
 import { throwForMissingProfile } from '../../utils/role-gate';
 import { clampDriverFare } from '../../utils/markup';
 import { ALLOWED_IMAGE_TYPES, looksLikeImage } from '../../utils/images';
@@ -86,6 +86,8 @@ export async function driverRoutes(app: FastifyInstance) {
   async function getDriverRide(driverId: string, orderId: string) {
     const order = await app.prisma.order.findFirst({
       where: { id: orderId, driverId, orderType: 'TAXI' },
+      // [F-0011] The driver VERIFIES the ride PIN — never let them read it.
+      omit: HANDOVER_SECRETS_OMIT,
       include: { customer: { select: { id: true, firstName: true, lastName: true, phone: true, avatar: true } } },
     });
     if (!order) throw new NotFoundError('Ride', orderId);
@@ -388,6 +390,8 @@ export async function driverRoutes(app: FastifyInstance) {
 
     const order = await app.prisma.order.findUnique({
       where: { id: driver.currentRideId },
+      // [F-0011] Polled continuously by the driver app — the PIN must never ride along.
+      omit: HANDOVER_SECRETS_OMIT,
       include: {
         customer: { select: { id: true, firstName: true, lastName: true, phone: true, avatar: true } },
         statusHistory: { orderBy: { createdAt: 'desc' }, take: 10 },
@@ -641,7 +645,7 @@ export async function driverRoutes(app: FastifyInstance) {
     });
     if (claimed.count === 0) throw new AppError(409, 'INVALID_STATUS', `Cannot mark en-route from status ${order.status}`);
     await app.prisma.orderStatusLog.create({ data: { orderId: id, status: 'DRIVER_EN_ROUTE', changedBy: request.user.userId } });
-    const updatedOrder = await app.prisma.order.findUniqueOrThrow({ where: { id } });
+    const updatedOrder = await app.prisma.order.findUniqueOrThrow({ where: { id }, omit: HANDOVER_SECRETS_OMIT });
 
     // Compute ETA to pickup
     let etaMinutes: number | null = null;
@@ -685,7 +689,7 @@ export async function driverRoutes(app: FastifyInstance) {
     });
     if (claimed.count === 0) throw new AppError(409, 'INVALID_STATUS', `Cannot mark arrived from status ${order.status}`);
     await app.prisma.orderStatusLog.create({ data: { orderId: id, status: 'DRIVER_ARRIVED', changedBy: request.user.userId } });
-    const updatedOrder = await app.prisma.order.findUniqueOrThrow({ where: { id } });
+    const updatedOrder = await app.prisma.order.findUniqueOrThrow({ where: { id }, omit: HANDOVER_SECRETS_OMIT });
 
     app.io.to(`order:${id}`).emit('order:status_changed', {
       orderId: id,
@@ -730,7 +734,11 @@ export async function driverRoutes(app: FastifyInstance) {
       data: { ridePinAttempts: { increment: 1 } },
     });
 
-    if (order.ridePin !== pin) {
+    // [F-0011] Read the secret ONLY here, where it is actually compared — the
+    // shared ride object the driver receives never carries it (see getDriverRide).
+    // Same shape as the vendor's complete-pickup path.
+    const secret = await app.prisma.order.findUnique({ where: { id }, select: { ridePin: true } });
+    if (secret?.ridePin !== pin) {
       throw new AppError(400, 'INVALID_PIN', `Incorrect PIN. ${remaining} attempt(s) remaining.`);
     }
 
@@ -738,6 +746,8 @@ export async function driverRoutes(app: FastifyInstance) {
     const updatedOrder = await app.prisma.order.update({
       where: { id },
       data: { ridePinVerified: true, ridePinVerifiedAt: new Date() },
+      // [F-0011] Even on the success path: confirm the PIN matched, never echo it.
+      omit: HANDOVER_SECRETS_OMIT,
     });
 
     app.io.to(`order:${id}`).emit('ride:pin_verified', { orderId: id });
@@ -765,7 +775,7 @@ export async function driverRoutes(app: FastifyInstance) {
     });
     if (claimed.count === 0) throw new AppError(409, 'INVALID_STATUS', `Cannot start ride from status ${order.status}`);
     await app.prisma.orderStatusLog.create({ data: { orderId: id, status: 'RIDE_IN_PROGRESS', changedBy: request.user.userId, note: 'Ride started' } });
-    const updatedOrder = await app.prisma.order.findUniqueOrThrow({ where: { id } });
+    const updatedOrder = await app.prisma.order.findUniqueOrThrow({ where: { id }, omit: HANDOVER_SECRETS_OMIT });
 
     app.io.to(`order:${id}`).emit('order:status_changed', {
       orderId: id,
@@ -817,7 +827,7 @@ export async function driverRoutes(app: FastifyInstance) {
       data: { isAvailable: true, currentRideId: null, totalRides: { increment: 1 }, cancellationRate: { multiply: 0.8 } },
     });
     await app.prisma.orderStatusLog.create({ data: { orderId: id, status: 'DELIVERED', changedBy: request.user.userId, note: 'Ride completed' } });
-    const updatedOrder = await app.prisma.order.findUniqueOrThrow({ where: { id }, include: { customer: { select: { id: true, firstName: true } } } });
+    const updatedOrder = await app.prisma.order.findUniqueOrThrow({ where: { id }, omit: HANDOVER_SECRETS_OMIT, include: { customer: { select: { id: true, firstName: true } } } });
 
     // Create earnings (idempotent via @@unique([orderId, type]))
     await orderService.createEarnings(id);
