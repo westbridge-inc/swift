@@ -14,6 +14,7 @@ import { BookingService, type BookingConfig } from '../booking/booking.service';
 import { computeDaySlots, fmtSlotTime } from '../booking/availability';
 import { seedRatingTags, tagsForRole } from '../rating/tag-taxonomy.seed';
 import { RATING_MAX_TAGS } from '../rating/rating-math';
+import { ratingSurfaces, NEW_ACTOR_SURFACE } from '../rating/rating-surface';
 import { randomInt } from 'node:crypto';
 import { OrderService } from '../order/order.service';
 import { PickingService } from '../order/picking.service';
@@ -967,15 +968,44 @@ export async function customerRoutes(app: FastifyInstance) {
       default: orderBy.push({ averageRating: 'desc' }); break;
     }
 
-    const [vendors, total] = await Promise.all([
-      app.prisma.vendor.findMany({
+    let vendors: Awaited<ReturnType<typeof app.prisma.vendor.findMany>>;
+    let total: number;
+    if (sort === 'top_rated') {
+      // R8: Bayesian display lives on ActorRatingStat (relation-less by
+      // design), so the global order is computed over an id projection first,
+      // then the page is fetched — unrated stores sink, ties break on the raw
+      // mean then name so the order is stable.
+      const idRows = await app.prisma.vendor.findMany({
         where,
-        skip,
-        take: limit,
-        orderBy,
-      }),
-      app.prisma.vendor.count({ where }),
-    ]);
+        select: { id: true, isCurrentlyOpen: true, averageRating: true, name: true },
+      });
+      const surfAll = await ratingSurfaces(app.prisma, 'VENDOR', idRows.map((r) => r.id));
+      idRows.sort(
+        (a, b) =>
+          (categoryRow ? Number(b.isCurrentlyOpen) - Number(a.isCurrentlyOpen) : 0) ||
+          (surfAll.get(b.id)!.displayRating ?? -1) - (surfAll.get(a.id)!.displayRating ?? -1) ||
+          b.averageRating - a.averageRating ||
+          a.name.localeCompare(b.name),
+      );
+      total = idRows.length;
+      const pageIds = idRows.slice(skip, skip + limit).map((r) => r.id);
+      const rows = await app.prisma.vendor.findMany({ where: { id: { in: pageIds } } });
+      const byId = new Map(rows.map((r) => [r.id, r]));
+      vendors = pageIds.map((id) => byId.get(id)).filter((v): v is NonNullable<typeof v> => v != null);
+    } else {
+      [vendors, total] = await Promise.all([
+        app.prisma.vendor.findMany({
+          where,
+          skip,
+          take: limit,
+          orderBy,
+        }),
+        app.prisma.vendor.count({ where }),
+      ]);
+    }
+
+    // R8: every card carries the one star line — display, bucket, badge.
+    const surfaces = await ratingSurfaces(app.prisma, 'VENDOR', vendors.map((v) => v.id));
 
     const userLat = lat;
     const userLng = lng;
@@ -1017,6 +1047,7 @@ export async function customerRoutes(app: FastifyInstance) {
     let enriched = vendors.map((v) => ({
       ...enrichVendor(v, userLat, userLng),
       isFavorite: favoriteIds.has(v.id),
+      ...(surfaces.get(v.id) ?? NEW_ACTOR_SURFACE),
       ...(categoryRow ? { itemsInCategory: itemCounts.get(v.id) ?? null } : {}),
     }));
 
@@ -1099,6 +1130,9 @@ export async function customerRoutes(app: FastifyInstance) {
       distanceKm = Math.round(distanceKm * 10) / 10;
     }
 
+    // R8: storefront header star + bucket (same mapper as every card).
+    const ratingSurface = (await ratingSurfaces(app.prisma, 'VENDOR', [id])).get(id) ?? NEW_ACTOR_SURFACE;
+
     return {
       success: true,
       data: {
@@ -1119,6 +1153,7 @@ export async function customerRoutes(app: FastifyInstance) {
         acceptingOrders: vendor.acceptingOrders,
         averageRating: vendor.averageRating,
         totalRatings: vendor.totalRatings,
+        ...ratingSurface,
         totalOrders: vendor.totalOrders,
         estimatedPrepTime: vendor.estimatedPrepTime,
         minOrderAmount: Number(vendor.minOrderAmount),

@@ -47,7 +47,9 @@ export function RecommendedScreen() {
               width={CARD_W}
               image={vendorImage(v)}
               name={v.name}
-              rating={Number(v.averageRating) || 0}
+              rating={v.displayRating ?? null}
+              ratingBucket={v.ratingBucket}
+              topRated={v.topRated}
               meta={v.etaMin ? `${v.etaMin} min` : undefined}
               favorite={v.isFavorite}
               onToggleFavorite={() =>

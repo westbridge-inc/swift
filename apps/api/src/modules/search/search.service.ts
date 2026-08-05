@@ -1,5 +1,6 @@
 import { MeiliSearch } from 'meilisearch';
 import type { PrismaClient } from '@prisma/client';
+import { ratingSurfaces } from '../rating/rating-surface';
 
 const VENDOR_INDEX = 'vendors';
 const ITEM_INDEX = 'items';
@@ -37,8 +38,8 @@ export class SearchService {
     const vendorIndex = this.client.index(VENDOR_INDEX);
     await vendorIndex.updateSettings({
       searchableAttributes: ['name', 'description', 'cuisineTypes', 'tags', 'city'],
-      filterableAttributes: ['vendorType', 'status', 'isCurrentlyOpen', 'cuisineTypes', 'averageRating', 'city', 'store_categories', 'derived_categories'],
-      sortableAttributes: ['averageRating', 'totalOrders', 'name'],
+      filterableAttributes: ['vendorType', 'status', 'isCurrentlyOpen', 'cuisineTypes', 'averageRating', 'city', 'store_categories', 'derived_categories', 'top_rated'],
+      sortableAttributes: ['averageRating', 'totalOrders', 'name', 'display_rating', 'rating_count'],
       rankingRules: ['words', 'typo', 'proximity', 'attribute', 'sort', 'exactness'],
     });
 
@@ -96,6 +97,7 @@ export class SearchService {
     });
 
     const discovery = await this.vendorCategorySlugs(vendors.map((v) => v.id));
+    const surfaces = await ratingSurfaces(this.prisma, 'VENDOR', vendors.map((v) => v.id));
     const docs = vendors.map((v) => ({
       id: v.id,
       name: v.name,
@@ -119,6 +121,10 @@ export class SearchService {
       categoryCount: v.categories.length,
       store_categories: discovery.get(v.id)?.chosen ?? [],
       derived_categories: discovery.get(v.id)?.derived ?? [],
+      // R8: the star fields ride the same reindex as the category facets (R0.3).
+      display_rating: surfaces.get(v.id)?.displayRating ?? null,
+      rating_count: surfaces.get(v.id)?.ratingCount ?? 0,
+      top_rated: surfaces.get(v.id)?.topRated ?? false,
     }));
 
     await this.client.index(VENDOR_INDEX).addDocuments(docs);
@@ -209,6 +215,7 @@ export class SearchService {
 
     if (vendor.status === 'ACTIVE') {
       const discovery = await this.vendorCategorySlugs([vendor.id]);
+      const surface = (await ratingSurfaces(this.prisma, 'VENDOR', [vendor.id])).get(vendor.id);
       await this.client.index(VENDOR_INDEX).addDocuments([{
         id: vendor.id,
         name: vendor.name,
@@ -232,6 +239,9 @@ export class SearchService {
         categoryCount: vendor.categories.length,
         store_categories: discovery.get(vendor.id)?.chosen ?? [],
         derived_categories: discovery.get(vendor.id)?.derived ?? [],
+        display_rating: surface?.displayRating ?? null,
+        rating_count: surface?.ratingCount ?? 0,
+        top_rated: surface?.topRated ?? false,
       }]);
     } else {
       await this.client.index(VENDOR_INDEX).deleteDocument(vendorId);

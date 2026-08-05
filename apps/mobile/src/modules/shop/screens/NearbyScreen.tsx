@@ -48,7 +48,9 @@ export function NearbyScreen() {
               name={v.name}
               meta={
                 <RatingMeta
-                  rating={Number(v.averageRating) || 0}
+                  rating={v.displayRating ?? null}
+                  bucket={v.ratingBucket}
+                  topRated={v.topRated}
                   extra={v.distanceKm != null ? `${v.distanceKm} km` : undefined}
                 />
               }

@@ -247,7 +247,7 @@ export function MenuItemScreen() {
             <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
               <Feather name="star" size={14} color={color.star} />
               <T variant="label" tone="deep">
-                {Number(vendor.data?.averageRating ?? 0).toFixed(1)}
+                {vendor.data?.displayRating != null ? Number(vendor.data.displayRating).toFixed(1) : 'New'}
               </T>
             </View>
             {item.isPopular ? (

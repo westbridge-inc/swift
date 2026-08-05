@@ -37,7 +37,7 @@ export function CategoryFeedScreen() {
     <VendorRow
       image={vendorImage(v)}
       name={v.name}
-      meta={<RatingMeta rating={Number(v.averageRating) || 0} extra={v.distanceKm != null ? `${v.distanceKm} km` : undefined} />}
+      meta={<RatingMeta rating={v.displayRating ?? null} bucket={v.ratingBucket} topRated={v.topRated} extra={v.distanceKm != null ? `${v.distanceKm} km` : undefined} />}
       sub={v.itemsInCategory ? `${v.itemsInCategory} ${name.toLowerCase()} items` : v.etaMin ? `~${v.etaMin} min delivery` : undefined}
       onPress={() => navigation.navigate('Restaurant', { vendorId: v.id })}
     />

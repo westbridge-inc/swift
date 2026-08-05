@@ -56,7 +56,9 @@ export function FavoritesScreen() {
               width={CARD_W}
               image={vendorImage(v)}
               name={v.name}
-              rating={Number(v.averageRating) || 0}
+              rating={v.displayRating ?? null}
+              ratingBucket={v.ratingBucket}
+              topRated={v.topRated}
               favorite
               onToggleFavorite={() => toggleFav.mutate({ vendorId: v.id, isFavorite: true })}
               onPress={() => navigation.navigate('Restaurant', { vendorId: v.id })}

@@ -10,14 +10,44 @@ import { HeartBadge, Stars } from './controls';
 import { PillButton } from './button';
 import { T } from './text';
 
-/** star · value · (dot · extra) meta line under names. */
-export function RatingMeta({ rating, extra }: { rating: number | string; extra?: string }) {
+/** THE star line (Movement R, R8) — every store-card context renders this one
+ *  component. `rating` null = under min-display → the quiet "New" word;
+ *  otherwise star · Bayesian value · count bucket, then Top rated as
+ *  typographic state (no badge soup), then (dot · extra). */
+export function RatingMeta({
+  rating,
+  bucket,
+  topRated,
+  extra,
+}: {
+  rating: number | string | null;
+  bucket?: string;
+  topRated?: boolean;
+  extra?: string;
+}) {
   return (
     <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
-      <Stars value={Number(rating) || 0} size={13} />
-      <T variant="caption" tone="muted">
-        {typeof rating === 'number' ? rating.toFixed(1) : rating}
-      </T>
+      {rating == null ? (
+        <T variant="caption" tone="muted" weight="semibold">
+          New
+        </T>
+      ) : (
+        <>
+          <Stars value={Number(rating) || 0} size={13} />
+          <T variant="caption" tone="muted">
+            {typeof rating === 'number' ? rating.toFixed(1) : rating}
+            {bucket ? ` ${bucket}` : ''}
+          </T>
+        </>
+      )}
+      {topRated ? (
+        <>
+          <View style={{ width: 3, height: 3, borderRadius: 2, backgroundColor: color.text.muted }} />
+          <T variant="caption" tone="brand" weight="semibold">
+            Top rated
+          </T>
+        </>
+      ) : null}
       {extra ? (
         <>
           <View style={{ width: 3, height: 3, borderRadius: 2, backgroundColor: color.text.muted }} />
@@ -37,6 +67,8 @@ export function FoodCard({
   name,
   priceLabel,
   rating,
+  ratingBucket,
+  topRated,
   meta,
   favorite,
   onToggleFavorite,
@@ -46,7 +78,10 @@ export function FoodCard({
   image: string;
   name: string;
   priceLabel?: string;
-  rating?: number;
+  /** number = show stars · null = the "New" face · undefined = no star line. */
+  rating?: number | null;
+  ratingBucket?: string;
+  topRated?: boolean;
   meta?: string;
   favorite?: boolean;
   onToggleFavorite?: () => void;
@@ -83,7 +118,7 @@ export function FoodCard({
             ) : (
               <View />
             )}
-            {rating !== undefined ? <RatingMeta rating={rating} extra={meta} /> : null}
+            {rating !== undefined ? <RatingMeta rating={rating} bucket={ratingBucket} topRated={topRated} extra={meta} /> : null}
           </View>
         </View>
       </Card>
