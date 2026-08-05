@@ -671,6 +671,15 @@ export function createWorkers(ctx: JobContext) {
         return;
       }
 
+      if (job.name === 'rating-stats-recompute') {
+        // Movement R nightly (RAT-H's second leg): the full recompute must
+        // land IDENTICAL to the incremental path — reconciliation is the law.
+        const { RatingStatsService } = await import('../modules/rating/rating-stats.service');
+        const n = await new RatingStatsService(ctx.prisma).recomputeAll();
+        ctx.log.info({ subjects: n }, 'ratings: stats recomputed');
+        return;
+      }
+
       if (job.name === 'discovery-backfill') {
         // The backfill movement (#17 CAT-I): admin-triggered, once per tenant.
         // Idempotent — a re-run writes nothing new and never re-notifies.
@@ -1165,6 +1174,13 @@ export async function scheduleRecurringJobs(queues: ReturnType<typeof createQueu
     repeat: { pattern: '20 * * * *' },
     removeOnComplete: 24,
     removeOnFail: 24,
+  });
+
+  // Movement R: nightly full stats recompute (RAT-H reconciliation leg).
+  await queues.dispatchQueue.add('rating-stats-recompute', {}, {
+    repeat: { pattern: '30 4 * * *' },
+    removeOnComplete: 7,
+    removeOnFail: 7,
   });
 
   // Rating anti-manipulation sweep: daily at 04:00

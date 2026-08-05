@@ -1448,12 +1448,105 @@ model Rating {
   visibleAt   DateTime?
   createdAt   DateTime   @default(now())
 
+  // --- Movement R (#18) additive columns — the live model EXTENDED, never
+  // --- rebuilt (divergence logged: the spec's fresh Rating shape maps here).
+  /// ACTIVE counts; EXCLUDED = shielded/admin-excluded (kept, uncounted);
+  /// REMOVED = moderation takedown (gone from public, kept for audit).
+  state       RatingState @default(ACTIVE)
+  /// SLA_SHIELD | PLATFORM_FAULT | FRAUD_BAN | ADMIN_<code> | MODERATION
+  stateReason String?
+  /// Edit window closes here (RATING_WINDOW_DAYS); null = legacy row.
+  editableUntil DateTime?
+  /// Rides/jobs/courier contexts (orders keep orderId): RIDE | SERVICE_JOB…
+  contextType String?
+  contextId   String?
+
+  @@unique([orderId, raterId, type], map: "ratings_one_per_context")
   @@index([visibleAt])
   @@index([raterId])
   @@index([vendorId])
   @@index([rateeId])
   @@index([flagged])
+  @@index([state])
   @@map("ratings")
+}
+
+enum RatingState {
+  ACTIVE
+  EXCLUDED
+  REMOVED
+}
+
+/// Movement R: the materialized aggregate — the ONLY thing UIs read. Written
+/// incrementally on every rating change AND by the nightly full recompute;
+/// the two must land identical (RAT-H) or the pipeline is lying.
+model ActorRatingStat {
+  id              String    @id @default(cuid())
+  tenantId        String    @default("swift-default")
+  subjectRole     String // VENDOR | RIDER | DRIVER | SERVICE_PROVIDER | CUSTOMER
+  subjectId       String
+  lifetimeCount   Int       @default(0)
+  lifetimeSum     Int       @default(0)
+  rollingCount    Int       @default(0)
+  rollingSum      Int       @default(0)
+  /// Bayesian display (null until lifetimeCount ≥ RATING_MIN_DISPLAY).
+  displayRating   Decimal?  @db.Decimal(2, 1)
+  standing        String    @default("NEW") // EXCELLENT | GOOD | ATTENTION | AT_RISK | NEW
+  topPositiveTags Json      @default("[]")
+  topNegativeTags Json      @default("[]")
+  /// Last daily actor-visible fold (anonymity law R5).
+  actorVisibleAt  DateTime?
+  recomputedAt    DateTime  @default(now())
+
+  @@unique([tenantId, subjectRole, subjectId])
+  @@map("actor_rating_stats")
+}
+
+/// Movement R: review reports → the founder's moderation queue.
+model RatingReport {
+  id         String    @id @default(cuid())
+  tenantId   String    @default("swift-default")
+  ratingId   String
+  reporterId String
+  reason     String // OFFENSIVE | FALSE_CLAIM | PRIVATE_INFO | SPAM | OTHER
+  note       String?
+  status     String    @default("PENDING") // PENDING | UPHELD | DISMISSED
+  resolvedBy String?
+  resolvedAt DateTime?
+  createdAt  DateTime  @default(now())
+
+  @@index([tenantId, status])
+  @@map("rating_reports")
+}
+
+/// Movement R: Uber-style per-item thumbs — feeds the vendor insights Pareto.
+model ItemFeedback {
+  id          String   @id @default(cuid())
+  tenantId    String   @default("swift-default")
+  orderId     String
+  itemId      String
+  raterUserId String
+  verdict     String // UP | DOWN
+  createdAt   DateTime @default(now())
+
+  @@unique([orderId, itemId, raterUserId])
+  @@index([tenantId, itemId, verdict])
+  @@map("item_feedbacks")
+}
+
+/// Movement R: the tag taxonomy (R4) — seeded exactly, per subject role,
+/// admin-editable labels, immutable slugs, positive/negative sentiment sets.
+model RatingTagDef {
+  id        String  @id @default(cuid())
+  tenantId  String  @default("swift-default")
+  role      String // VENDOR | RIDER | DRIVER | SERVICE_PROVIDER | CUSTOMER
+  slug      String
+  label     String
+  sentiment String // POSITIVE | NEGATIVE
+  isSeed    Boolean @default(true)
+
+  @@unique([tenantId, role, slug])
+  @@map("rating_tag_defs")
 }
 
 /// Retail returns/disputes (spec §4.5) — retail has returns, food doesn't.

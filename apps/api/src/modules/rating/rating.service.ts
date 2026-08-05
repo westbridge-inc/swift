@@ -1,6 +1,8 @@
 import type { PrismaClient } from '@prisma/client';
 import type { Server } from 'socket.io';
 import { AppError } from '../../utils/errors';
+import { RatingStatsService } from './rating-stats.service';
+import { RATING_WINDOW_DAYS, SHIELD_PREP_BREACH_MIN } from './rating-math';
 import { log } from '../../utils/logger';
 
 // Safety spec ("Rating flags: reuse the ratings/quality engine — safety-tagged
@@ -39,9 +41,13 @@ interface RateInput {
 }
 
 export class RatingService {
+  private stats: RatingStatsService;
+
   /** `io` is optional so read-only callers (jobs, release paths) need no
    *  socket; rating-CREATING routes pass it so safety flags can page ops. */
-  constructor(private prisma: PrismaClient, private io?: Server) {}
+  constructor(private prisma: PrismaClient, private io?: Server) {
+    this.stats = new RatingStatsService(prisma);
+  }
 
   async rate(input: RateInput) {
     if (input.score < 1 || input.score > 5) {
@@ -57,6 +63,9 @@ export class RatingService {
         driverId: true,
         vendorId: true,
         status: true,
+        acceptedAt: true,
+        readyAt: true,
+        estimatedPrepTime: true,
         rider: { select: { userId: true } },
         driver: { select: { userId: true } },
         vendor: { select: { owner: { select: { userId: true } } } },
@@ -88,6 +97,18 @@ export class RatingService {
       throw new AppError(409, 'ALREADY_RATED', 'You have already submitted a rating for this');
     }
 
+    // S1 SLA shield [Movement R6]: a low/late rider rating on a delivery
+    // whose kitchen blew its own quoted prep by ≥ SHIELD_PREP_BREACH_MIN is
+    // born EXCLUDED — kept and auditable, never counted. The blame lands
+    // where the delay happened; the customer's vendor rating stands.
+    const prepBreached =
+      order.acceptedAt != null && order.readyAt != null &&
+      order.readyAt.getTime() - order.acceptedAt.getTime() >
+        ((order.estimatedPrepTime ?? 30) + SHIELD_PREP_BREACH_MIN) * 60_000;
+    const shielded =
+      input.type === 'CUSTOMER_TO_RIDER' && prepBreached &&
+      (input.score <= 3 || (input.tags ?? []).includes('late'));
+
     const rating = await this.prisma.rating.create({
       data: {
         orderId: input.orderId,
@@ -98,6 +119,8 @@ export class RatingService {
         score: input.score,
         comment: input.comment,
         tags: input.tags || [],
+        editableUntil: new Date(Date.now() + RATING_WINDOW_DAYS * 24 * 3600_000),
+        ...(shielded ? { state: 'EXCLUDED' as const, stateReason: 'SLA_SHIELD' } : {}),
       },
     });
 
@@ -119,6 +142,11 @@ export class RatingService {
     if (input.type === 'CUSTOMER_TO_DRIVER' && order.driverId) {
       await this.updateDriverRating(order.driverId);
     }
+
+    // Movement R: the materialized stat (the only thing new UIs read) moves
+    // in the same breath — EXCLUDED rows never count, so a shielded rating
+    // leaves the rider's aggregate untouched by construction.
+    await this.stats.applyRating(rating);
 
     return rating;
   }
