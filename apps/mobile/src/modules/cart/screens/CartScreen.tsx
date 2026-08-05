@@ -578,7 +578,11 @@ export function CartScreen() {
 
           <PillButton
             label={apptOnly ? 'Book now' : pickup ? 'Place pickup order' : 'Place order'}
-            onPress={onOrder}
+            // NEVER pass the handler bare: Pressable calls onPress(event) and the
+            // cyclical press event would spread into onOrder's `extra` payload,
+            // killing JSON serialization — no request ever left the phone
+            // (certification catch: "cyclical structure in JSON object").
+            onPress={() => onOrder()}
             loading={placeOrder.isPending}
             disabled={!c.meetsMinimum || c.unavailableItemIds?.length > 0 || (needsAddress && !c.deliveryAddress) || unslotted.length > 0}
             style={{ marginTop: space.xl }}
