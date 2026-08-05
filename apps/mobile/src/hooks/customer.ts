@@ -141,6 +141,26 @@ export function useOrder<T = any>(id: string, refetchInterval?: number) {
   });
 }
 
+export type RatingTagSets = Record<string, { positive: Array<{ slug: string; label: string }>; negative: Array<{ slug: string; label: string }> }>;
+
+/** The R4 tag taxonomy — tiny and stable; cache hard. */
+export function useRatingTags() {
+  return useQuery<RatingTagSets>({
+    queryKey: ['rating-tags'],
+    queryFn: () => unwrap<RatingTagSets>(customerApi.ratingTags()),
+    staleTime: 60 * 60 * 1000,
+    retry: false,
+  });
+}
+
+/** Per-item thumbs (R5) — fire-and-forget upserts, skippable by design. */
+export function useItemFeedback(orderId: string) {
+  return useMutation({
+    mutationFn: (body: { itemId: string; verdict: 'UP' | 'DOWN' }) => unwrap(customerApi.itemFeedback(orderId, body)),
+    meta: { silent: true },
+  });
+}
+
 export function useRateOrder(id: string) {
   const qc = useQueryClient();
   return useMutation({

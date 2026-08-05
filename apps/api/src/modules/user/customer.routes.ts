@@ -12,6 +12,8 @@ import { AppError, NotFoundError, ValidationError, ForbiddenError } from '../../
 import { zMoneyMinor } from '../../utils/money-schema';
 import { BookingService, type BookingConfig } from '../booking/booking.service';
 import { computeDaySlots, fmtSlotTime } from '../booking/availability';
+import { seedRatingTags, tagsForRole } from '../rating/tag-taxonomy.seed';
+import { RATING_MAX_TAGS } from '../rating/rating-math';
 import { randomInt } from 'node:crypto';
 import { OrderService } from '../order/order.service';
 import { PickingService } from '../order/picking.service';
@@ -2104,9 +2106,72 @@ export async function customerRoutes(app: FastifyInstance) {
       }
     }
 
+    // Movement R (R4): tags are CURATED — validate each set against the tag
+    // taxonomy for its role + star band, cap at RATING_MAX_TAGS. (No client
+    // sent tags before this shipped, so tightening breaks nothing.)
+    const tagChecks: Array<[string, number | undefined, string[] | undefined]> = [
+      ['VENDOR', body.vendorScore, body.vendorTags],
+      ['RIDER', body.riderScore, body.riderTags],
+      ['DRIVER', body.driverScore, body.driverTags],
+    ];
+    for (const [role, score, tags] of tagChecks) {
+      if (!tags?.length) continue;
+      if (!score) throw new ValidationError(`${role.toLowerCase()}Tags need a matching score`);
+      if (tags.length > RATING_MAX_TAGS) throw new ValidationError(`Pick up to ${RATING_MAX_TAGS} tags`);
+      const valid = await tagsForRole(app.prisma, role, score);
+      for (const t of tags) {
+        if (!valid.has(t)) throw new ValidationError(`Unknown tag for ${role.toLowerCase()}: ${t}`);
+      }
+    }
+
     const result = await ratingService.rateOrder(userId, id, body);
 
     return { success: true, data: result };
+  });
+
+  /** GET /rating-tags — the R4 taxonomy, grouped for the rating sheets.
+   *  Lazy-seeds on first read (idempotent, tiny) so no boot-time write. */
+  app.get('/rating-tags', async () => {
+    if ((await app.prisma.ratingTagDef.count()) === 0) {
+      await seedRatingTags(app.prisma).catch(() => undefined);
+    }
+    const rows = await app.prisma.ratingTagDef.findMany({
+      where: { tenantId: 'swift-default' },
+      orderBy: [{ role: 'asc' }, { sentiment: 'asc' }, { slug: 'asc' }],
+      select: { role: true, slug: true, label: true, sentiment: true },
+    });
+    const grouped: Record<string, { positive: Array<{ slug: string; label: string }>; negative: Array<{ slug: string; label: string }> }> = {};
+    for (const r of rows) {
+      grouped[r.role] = grouped[r.role] ?? { positive: [], negative: [] };
+      grouped[r.role]![r.sentiment === 'POSITIVE' ? 'positive' : 'negative'].push({ slug: r.slug, label: r.label });
+    }
+    return { success: true, data: grouped };
+  });
+
+  /** POST /orders/:id/item-feedback — Uber-style per-item thumbs (R5): feeds
+   *  the vendor-insights Pareto; one verdict per (order, item, rater). */
+  app.post('/orders/:id/item-feedback', async (request: AuthRequest) => {
+    const { id } = request.params as { id: string };
+    const { userId } = request.user;
+    const { itemId, verdict } = z.object({
+      itemId: z.string().min(1),
+      verdict: z.enum(['UP', 'DOWN']),
+    }).parse(request.body);
+
+    const order = await app.prisma.order.findFirst({
+      where: { id, customerId: userId, status: { in: ['DELIVERED', 'COMPLETED'] } },
+      select: { id: true, items: { select: { itemId: true } } },
+    });
+    if (!order) throw new NotFoundError('Order', id);
+    if (!order.items.some((i) => i.itemId === itemId)) {
+      throw new ValidationError('That item is not on this order');
+    }
+    const feedback = await app.prisma.itemFeedback.upsert({
+      where: { orderId_itemId_raterUserId: { orderId: id, itemId, raterUserId: userId } },
+      create: { orderId: id, itemId, raterUserId: userId, verdict },
+      update: { verdict },
+    });
+    return { success: true, data: feedback };
   });
 
   /** POST /orders/:id/tip — add a tip AFTER delivery (Uber-style). 100% to the

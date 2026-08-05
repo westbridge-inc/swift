@@ -1,13 +1,13 @@
 /** @jsxImportSource react */
 import React, { useState } from 'react';
-import { KeyboardAvoidingView, Platform, ScrollView, TextInput, View } from 'react-native';
+import { KeyboardAvoidingView, Platform, Pressable, ScrollView, TextInput, View } from 'react-native';
 import { Image } from 'expo-image';
 import { Feather } from '@expo/vector-icons';
 import { useNavigation, useRoute } from '@react-navigation/native';
 import { color, radius, space } from '@swift/ui';
-import { useOrder, useRateOrder } from '../../../hooks/customer';
+import { useItemFeedback, useOrder, useRateOrder, useRatingTags } from '../../../hooks/customer';
 import { DARK_BLURHASH, vendorImage } from '../../../lib/images';
-import { ErrorState, Header, IconChip, LoadingBlock, PillButton, PopupCard, Screen, Stars, T } from '../../../kit';
+import { Chip, ErrorState, Header, IconChip, LoadingBlock, PillButton, PopupCard, Screen, Stars, T } from '../../../kit';
 
 const GUTTER = space['2xl'];
 
@@ -32,6 +32,44 @@ function TextArea({ value, onChangeText, placeholder }: { value: string; onChang
         color: color.text.primary,
       }}
     />
+  );
+}
+
+/** Movement R (R4): star band picks the set — 1–3★ "What went wrong?",
+ *  4–5★ "What was great?". Curated chips, max 4, server re-validates. */
+const RATING_MAX_TAGS = 4;
+const BRIDGE_TAGS = ['missing-items', 'wrong-item', 'cold-food', 'not-as-described'];
+
+function TagChips({
+  score,
+  sets,
+  selected,
+  onToggle,
+}: {
+  score: number;
+  sets: { positive: Array<{ slug: string; label: string }>; negative: Array<{ slug: string; label: string }> } | undefined;
+  selected: string[];
+  onToggle: (slug: string) => void;
+}) {
+  if (!score || !sets) return null;
+  const band = score <= 3 ? sets.negative : sets.positive;
+  if (band.length === 0) return null;
+  return (
+    <View style={{ alignSelf: 'stretch', marginTop: space['2xl'] }}>
+      <T variant="label" weight="medium" style={{ marginBottom: space.sm }}>
+        {score <= 3 ? 'What went wrong?' : 'What was great?'}
+      </T>
+      <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: space.sm }}>
+        {band.map((t) => (
+          <Chip
+            key={t.slug}
+            label={t.label}
+            selected={selected.includes(t.slug)}
+            onPress={() => onToggle(t.slug)}
+          />
+        ))}
+      </View>
+    </View>
   );
 }
 
@@ -117,9 +155,16 @@ export function FeedbackScreen() {
   const [step, setStep] = useState<0 | 1>(0);
   const [vendorScore, setVendorScore] = useState(0);
   const [vendorComment, setVendorComment] = useState('');
+  const [vendorTags, setVendorTags] = useState<string[]>([]);
   const [riderScore, setRiderScore] = useState(0);
   const [riderComment, setRiderComment] = useState('');
+  const [riderTags, setRiderTags] = useState<string[]>([]);
+  const [thumbs, setThumbs] = useState<Record<string, 'UP' | 'DOWN'>>({});
   const [done, setDone] = useState(false);
+  const tags = useRatingTags();
+  const itemFeedback = useItemFeedback(orderId);
+  const toggle = (setter: React.Dispatch<React.SetStateAction<string[]>>) => (slug: string) =>
+    setter((cur) => (cur.includes(slug) ? cur.filter((t) => t !== slug) : cur.length < RATING_MAX_TAGS ? [...cur, slug] : cur));
 
   const o = order.data;
   if (order.isLoading) return <LoadingBlock style={{ backgroundColor: color.surface.subtle }} />;
@@ -138,9 +183,11 @@ export function FeedbackScreen() {
   const submit = () => {
     rate.mutate(
       {
-        ...(vendorScore ? { vendorScore, ...(vendorComment.trim() ? { vendorComment: vendorComment.trim() } : {}) } : {}),
+        ...(vendorScore
+          ? { vendorScore, ...(vendorComment.trim() ? { vendorComment: vendorComment.trim() } : {}), ...(vendorTags.length ? { vendorTags } : {}) }
+          : {}),
         ...(hasRider && riderScore
-          ? { riderScore, ...(riderComment.trim() ? { riderComment: riderComment.trim() } : {}) }
+          ? { riderScore, ...(riderComment.trim() ? { riderComment: riderComment.trim() } : {}), ...(riderTags.length ? { riderTags } : {}) }
           : {}),
       },
       { onSuccess: () => setDone(true) },
@@ -171,6 +218,67 @@ export function FeedbackScreen() {
               comment={vendorComment}
               onComment={setVendorComment}
             />
+          ) : null}
+          {step === 0 ? (
+            <>
+              <TagChips score={vendorScore} sets={tags.data?.['VENDOR']} selected={vendorTags} onToggle={toggle(setVendorTags)} />
+
+              {/* Low-star bridge (R5): a rating is a signal; a case is a
+                  remedy — route real problems into the existing help flow. */}
+              {vendorScore >= 1 && vendorScore <= 3 && vendorTags.some((t) => BRIDGE_TAGS.includes(t)) ? (
+                <Pressable onPress={() => navigation.navigate('GetHelp', { orderId })} accessibilityRole="button">
+                  {({ pressed }) => (
+                    <View
+                      style={{
+                        alignSelf: 'stretch', flexDirection: 'row', alignItems: 'center', gap: space.md,
+                        marginTop: space.lg, padding: space.lg, borderRadius: radius.lg,
+                        backgroundColor: color.brand[50], opacity: pressed ? 0.8 : 1,
+                      }}
+                    >
+                      <Feather name="life-buoy" size={18} color={color.brand[600]} />
+                      <T variant="caption" style={{ flex: 1 }}>
+                        Something wrong with your order? Report it — {o.vendor?.name ?? 'the store'} can make it right.
+                      </T>
+                      <Feather name="chevron-right" size={16} color={color.brand[600]} />
+                    </View>
+                  )}
+                </Pressable>
+              ) : null}
+
+              {/* Per-item thumbs (skippable; each tap saves immediately). */}
+              {Array.isArray(o.items) && o.items.length > 0 ? (
+                <View style={{ alignSelf: 'stretch', marginTop: space['2xl'] }}>
+                  <T variant="label" weight="medium" style={{ marginBottom: space.sm }}>
+                    How were your items?
+                  </T>
+                  {o.items.map((line: any) => (
+                    <View key={line.id} style={{ flexDirection: 'row', alignItems: 'center', paddingVertical: space.sm }}>
+                      <T variant="caption" numberOfLines={1} style={{ flex: 1, paddingRight: space.md }}>
+                        {line.name}
+                      </T>
+                      {(['UP', 'DOWN'] as const).map((v) => (
+                        <Pressable
+                          key={v}
+                          onPress={() => {
+                            setThumbs((cur) => ({ ...cur, [line.itemId]: v }));
+                            itemFeedback.mutate({ itemId: line.itemId, verdict: v });
+                          }}
+                          hitSlop={8}
+                          style={{ paddingHorizontal: space.sm }}
+                          accessibilityLabel={v === 'UP' ? `Liked ${line.name}` : `Disliked ${line.name}`}
+                        >
+                          <Feather
+                            name={v === 'UP' ? 'thumbs-up' : 'thumbs-down'}
+                            size={20}
+                            color={thumbs[line.itemId] === v ? color.brand[600] : color.text.muted}
+                          />
+                        </Pressable>
+                      ))}
+                    </View>
+                  ))}
+                </View>
+              ) : null}
+            </>
           ) : (
             <RateBlock
               image={o.rider?.avatar}
@@ -184,6 +292,9 @@ export function FeedbackScreen() {
               onComment={setRiderComment}
             />
           )}
+          {step === 1 ? (
+            <TagChips score={riderScore} sets={tags.data?.['RIDER']} selected={riderTags} onToggle={toggle(setRiderTags)} />
+          ) : null}
 
           {err ? (
             <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: space.lg }}>
