@@ -33,6 +33,7 @@ import { DiscoveryService } from '../discovery/discovery.service';
 import { QrAnalyticsService } from '../qr/qr-analytics.service';
 import { cachedRender, renderQrPng, renderQrSvg, renderTemplatePdf } from '../qr/qr-assets.service';
 import { publicWebBase } from '../qr/qr-codes';
+import { processReviewText } from '../rating/review-scrub';
 
 // ---------------------------------------------------------------------------
 // Input schemas
@@ -2702,10 +2703,17 @@ export async function vendorRoutes(app: FastifyInstance) {
       throw new NotFoundError('Review', request.params.id);
     }
 
+    // Movement R (R7): the reply rides the same scrub pipeline — PII masked;
+    // profanity is refused outright (this is the store's public face).
+    const processed = processReviewText(response);
+    if (processed.hold) {
+      throw new AppError(400, 'KEEP_IT_PROFESSIONAL', 'That language can’t go on your storefront — rephrase and post again');
+    }
+
     const isEdit = rating.response !== null;
     const updated = await app.prisma.rating.update({
       where: { id: request.params.id },
-      data: { response, respondedAt: new Date(), respondedBy: request.user.userId },
+      data: { response: processed.text, respondedAt: new Date(), respondedBy: request.user.userId },
     });
 
     if (!isEdit) {

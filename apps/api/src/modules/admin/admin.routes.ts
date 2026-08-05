@@ -35,6 +35,7 @@ import { CashRulesService } from '../cash/cash-rules.service';
 import { AgentService } from '../agent/agent.service';
 import { OrderService } from '../order/order.service';
 import { DiscoveryGovernanceService } from '../discovery/admin-governance';
+import { RatingStatsService } from '../rating/rating-stats.service';
 import { getKycProvider } from '../../providers/kyc/kyc-provider';
 import { getPaymentProvider } from '../../providers/payment/payment-provider';
 import { getStorageProvider } from '../../providers/storage/storage-provider';
@@ -248,6 +249,7 @@ export async function adminRoutes(app: FastifyInstance) {
   const orderService = new OrderService(app.prisma, app.io);
   const cashRules = new CashRulesService(app.prisma, notifications, orderService);
   const discoveryGovernance = new DiscoveryGovernanceService(app.prisma);
+  const ratingStats = new RatingStatsService(app.prisma);
 
   // Middleware: verify ADMIN or SUPER_ADMIN role
   const adminGuard = async (request: any, reply: any) => {
@@ -3498,6 +3500,126 @@ export async function adminRoutes(app: FastifyInstance) {
     await app.dispatchQueue.add('discovery-backfill', {}, { removeOnComplete: 5, removeOnFail: 5 });
     await audit(request.user.userId, 'DISCOVERY_BACKFILL_ENQUEUED', 'DiscoveryCategory', '-', {}, request);
     return { success: true, data: { queued: true } };
+  });
+
+  // =========================================================================
+  // MOVEMENT R GOVERNANCE (#18 R7) — moderation queue, at-risk queue, the S5
+  // exclusion tool. Machines never deactivate people: this surface informs
+  // the FOUNDER's hand; the only writes are review-visibility and audited
+  // exclusions, never operational status.
+  // =========================================================================
+
+  /** GET /ratings/moderation — held reviews + pending reports, one queue. */
+  app.get('/ratings/moderation', { preHandler: [adminGuard] }, async () => {
+    const held = await app.prisma.rating.findMany({
+      where: { flagged: true, flagReason: 'PROFANITY_HOLD', state: 'ACTIVE' },
+      orderBy: { createdAt: 'asc' },
+      take: 100,
+      select: { id: true, orderId: true, vendorId: true, type: true, score: true, comment: true, tags: true, createdAt: true },
+    });
+    const reports = await app.prisma.ratingReport.findMany({
+      where: { status: 'PENDING' },
+      orderBy: { createdAt: 'asc' },
+      take: 100,
+    });
+    const reported = reports.length
+      ? await app.prisma.rating.findMany({
+          where: { id: { in: reports.map((r) => r.ratingId) } },
+          select: { id: true, score: true, comment: true, tags: true, vendorId: true, state: true },
+        })
+      : [];
+    const byId = new Map(reported.map((r) => [r.id, r]));
+    return {
+      success: true,
+      data: {
+        held,
+        reports: reports.map((r) => ({ ...r, rating: byId.get(r.ratingId) ?? null })),
+      },
+    };
+  });
+
+  /** POST /ratings/:id/moderate — publish (clear hold) | remove | exclude. */
+  app.post<{ Params: { id: string } }>('/ratings/:id/moderate', { preHandler: [adminGuard] }, async (request) => {
+    const body = z.object({
+      action: z.enum(['publish', 'remove', 'exclude']),
+      reason: z.enum(['FRAUD', 'RETALIATION', 'OFF_PLATFORM_ISSUE', 'TEST_ACCOUNT', 'MODERATION', 'OTHER']).optional(),
+      note: z.string().trim().max(300).optional(),
+    }).refine((b) => b.action === 'publish' || b.reason != null, { message: 'reason required' }).parse(request.body);
+
+    const rating = await app.prisma.rating.findUnique({ where: { id: request.params.id } });
+    if (!rating) throw new NotFoundError('Rating', request.params.id);
+
+    if (body.action === 'publish') {
+      await app.prisma.rating.update({
+        where: { id: rating.id },
+        data: { isPublic: true, flagged: false, flagReason: null },
+      });
+    } else {
+      const stateReason = body.action === 'remove' ? 'MODERATION' : `ADMIN_${body.reason}`;
+      await app.prisma.rating.update({
+        where: { id: rating.id },
+        data: {
+          state: body.action === 'remove' ? 'REMOVED' : 'EXCLUDED',
+          stateReason,
+          isPublic: false,
+        },
+      });
+      await ratingStats.applyRating(rating); // re-level the touched subject
+      if (body.action === 'remove') {
+        await notifications.send({
+          userId: rating.raterId,
+          type: 'SYSTEM_ANNOUNCEMENT',
+          title: 'A review of yours was removed',
+          body: `A review you wrote was removed for: ${(body.reason ?? 'MODERATION').toLowerCase().replace(/_/g, ' ')}.`,
+          data: { kind: 'rating_removed' },
+        }).catch(() => undefined);
+      }
+    }
+    await audit(request.user.userId, 'RATING_MODERATE', 'Rating', rating.id, body, request);
+    return { success: true, data: { action: body.action } };
+  });
+
+  /** POST /rating-reports/:id/resolve — uphold (removes the review) | dismiss. */
+  app.post<{ Params: { id: string } }>('/rating-reports/:id/resolve', { preHandler: [adminGuard] }, async (request) => {
+    const { action } = z.object({ action: z.enum(['uphold', 'dismiss']) }).parse(request.body);
+    const report = await app.prisma.ratingReport.findUnique({ where: { id: request.params.id } });
+    if (!report) throw new NotFoundError('Report', request.params.id);
+    if (report.status !== 'PENDING') throw new AppError(400, 'ALREADY_RESOLVED', `This report is ${report.status.toLowerCase()}`);
+
+    await app.prisma.ratingReport.update({
+      where: { id: report.id },
+      data: { status: action === 'uphold' ? 'UPHELD' : 'DISMISSED', resolvedBy: request.user.userId, resolvedAt: new Date() },
+    });
+    if (action === 'uphold') {
+      const rating = await app.prisma.rating.findUnique({ where: { id: report.ratingId } });
+      if (rating && rating.state === 'ACTIVE') {
+        await app.prisma.rating.update({
+          where: { id: rating.id },
+          data: { state: 'REMOVED', stateReason: 'MODERATION', isPublic: false },
+        });
+        await ratingStats.applyRating(rating);
+        await notifications.send({
+          userId: rating.raterId,
+          type: 'SYSTEM_ANNOUNCEMENT',
+          title: 'A review of yours was removed',
+          body: `A review you wrote was removed for: ${report.reason.toLowerCase().replace(/_/g, ' ')}.`,
+          data: { kind: 'rating_removed' },
+        }).catch(() => undefined);
+      }
+    }
+    await audit(request.user.userId, 'RATING_REPORT_RESOLVE', 'RatingReport', report.id, { action }, request);
+    return { success: true, data: { action } };
+  });
+
+  /** GET /ratings/at-risk — the FOUNDER queue (R-Law 3): standing AT_RISK
+   *  actors with their tag breakdown. One row per actor by construction
+   *  (the stat row IS the queue item); no automated consequence exists. */
+  app.get('/ratings/at-risk', { preHandler: [adminGuard] }, async () => {
+    const atRisk = await app.prisma.actorRatingStat.findMany({
+      where: { standing: 'AT_RISK' },
+      orderBy: { recomputedAt: 'asc' },
+    });
+    return { success: true, data: atRisk };
   });
 
   /** POST /discovery/categories/:id/merge-into — CAT-J, counts reconcile. */
