@@ -671,6 +671,26 @@ export function createWorkers(ctx: JobContext) {
         return;
       }
 
+      if (job.name === 'discovery-backfill') {
+        // The backfill movement (#17 CAT-I): admin-triggered, once per tenant.
+        // Idempotent — a re-run writes nothing new and never re-notifies.
+        const { runCategoryBackfill } = await import('../modules/discovery/backfill');
+        const { AiService } = await import('../modules/ai/ai.service');
+        const { NotificationService } = await import('../modules/notification/notification.service');
+        const notifications = new NotificationService(ctx.prisma, ctx.io);
+        const report = await runCategoryBackfill(ctx.prisma, new AiService(), {
+          notify: (userId) => notifications.send({
+            userId,
+            type: 'SYSTEM_ANNOUNCEMENT',
+            title: 'Your menu just got easier to find',
+            body: 'Review your categories — takes about 2 minutes.',
+            data: { kind: 'category_backfill_review' },
+          }).then(() => undefined),
+        });
+        ctx.log.info(report, 'discovery: backfill movement complete');
+        return;
+      }
+
       if (job.name === 'discovery-ai-classify') {
         // Stage-B (category spec Part 4): budgeted AI pass over items Stage A
         // couldn't place. Budget exhausted or model down = silent wait.

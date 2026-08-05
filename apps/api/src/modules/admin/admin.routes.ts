@@ -3492,6 +3492,14 @@ export async function adminRoutes(app: FastifyInstance) {
     return { success: true, data: { rejected: true } };
   });
 
+  /** POST /discovery/backfill — run the movement (queued; idempotent). */
+  app.post('/discovery/backfill', { preHandler: [adminGuard] }, async (request) => {
+    if (!app.dispatchQueue) throw new AppError(503, 'QUEUES_OFF', 'Background workers are not running');
+    await app.dispatchQueue.add('discovery-backfill', {}, { removeOnComplete: 5, removeOnFail: 5 });
+    await audit(request.user.userId, 'DISCOVERY_BACKFILL_ENQUEUED', 'DiscoveryCategory', '-', {}, request);
+    return { success: true, data: { queued: true } };
+  });
+
   /** POST /discovery/categories/:id/merge-into — CAT-J, counts reconcile. */
   app.post<{ Params: { id: string } }>('/discovery/categories/:id/merge-into', { preHandler: [adminGuard] }, async (request) => {
     const { targetId } = z.object({ targetId: z.string().min(1) }).parse(request.body);
