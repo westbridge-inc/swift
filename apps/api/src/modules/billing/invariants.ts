@@ -12,11 +12,16 @@ export interface InvariantReport {
   wrongfulSuspensions: string[]; // auto-healed subscription ids
   enforcementLeaks: string[]; // ACTIVE but unpaid past grace+6h — alert only
   receiptGaps: { tenantId: string; year: number; expected: number; actual: number }[];
+  /** Σdebits ≠ Σcredits across the whole double-entry ledger — S0, the books are broken [tollgate 16.2]. */
+  ledgerTrialImbalance: { debits: number; credits: number } | null;
+  /** PrepaidBalance ≠ its WALLET_LIABILITY subledger — S0, a credit path bypassed the ledger [tollgate M-13]. */
+  ledgerWalletMismatches: { subscriptionId: string; ledgerBalance: number; walletBalance: number }[];
 }
 
 export async function runBillingInvariants(prisma: PrismaClient, now = new Date()): Promise<InvariantReport> {
   const report: InvariantReport = {
     walletsChecked: 0, walletMismatches: [], wrongfulSuspensions: [], enforcementLeaks: [], receiptGaps: [],
+    ledgerTrialImbalance: null, ledgerWalletMismatches: [],
   };
 
   // 1. Balance provability: PrepaidBalance == Σ(PREPAID_TOPUP) − Σ(prepaid-settled charges).
@@ -84,7 +89,41 @@ export async function runBillingInvariants(prisma: PrismaClient, now = new Date(
     if (actual !== c.seq) report.receiptGaps.push({ tenantId: c.tenantId, year: c.year, expected: c.seq, actual });
   }
 
-  const broken = report.walletMismatches.length + report.wrongfulSuspensions.length + report.enforcementLeaks.length + report.receiptGaps.length;
+  // 5. Ledger trial balance [tollgate 16.2, S0]: Σdebits == Σcredits, whole
+  //    ledger. The deferred DB trigger makes an unbalanced COMMIT impossible;
+  //    this catches what triggers can't (a bypassed environment, manual SQL).
+  const [tb] = await prisma.$queryRaw<{ debits: number; credits: number }[]>`
+    SELECT COALESCE(SUM(debit), 0)::float8 AS debits, COALESCE(SUM(credit), 0)::float8 AS credits
+    FROM ledger_entries`;
+  if (tb && Math.abs(tb.debits - tb.credits) > 0.009) {
+    report.ledgerTrialImbalance = { debits: tb.debits, credits: tb.credits };
+  }
+
+  // 6. Wallet vs ledger [tollgate M-13, S0]: every prepaid balance must equal
+  //    its WALLET_LIABILITY subledger (credits − debits). Legacy balances get
+  //    opening postings in the ledger-foundation migration, so any mismatch —
+  //    including a wallet with money but NO ledger rows — means a write path
+  //    bypassed postLedger.
+  const subledger = await prisma.$queryRaw<{ subscriptionId: string; bal: number }[]>`
+    SELECT "subledgerId" AS "subscriptionId", COALESCE(SUM(credit - debit), 0)::float8 AS bal
+    FROM ledger_entries
+    WHERE "accountCode" = 'WALLET_LIABILITY' AND "subledgerId" IS NOT NULL
+    GROUP BY "subledgerId"`;
+  const ledgerBySub = new Map(subledger.map((r) => [r.subscriptionId, r.bal]));
+  for (const w of wallets) {
+    const ledgerBalance = ledgerBySub.get(w.subscriptionId) ?? 0;
+    if (Math.abs(ledgerBalance - Number(w.balance)) > 0.009) {
+      report.ledgerWalletMismatches.push({
+        subscriptionId: w.subscriptionId,
+        ledgerBalance,
+        walletBalance: Number(w.balance),
+      });
+    }
+  }
+
+  const broken =
+    report.walletMismatches.length + report.wrongfulSuspensions.length + report.enforcementLeaks.length +
+    report.receiptGaps.length + report.ledgerWalletMismatches.length + (report.ledgerTrialImbalance ? 1 : 0);
   if (broken > 0) {
     log().error({ report }, 'billing invariants: FAILURES detected (wrongful suspensions auto-healed)');
   }
