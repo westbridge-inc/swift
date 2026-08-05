@@ -239,7 +239,7 @@ export async function ridesRoutes(app: FastifyInstance) {
       include: {
         driver: {
           select: {
-            id: true, vehicleMake: true, vehicleModel: true, vehicleColor: true,
+            id: true, userId: true, vehicleMake: true, vehicleModel: true, vehicleColor: true,
             licensePlate: true, vehiclePhotoUrl: true, averageRating: true,
             currentLat: true, currentLng: true, bodyType: true, colorHex: true,
             mmgPayUrl: true,
@@ -254,10 +254,13 @@ export async function ridesRoutes(app: FastifyInstance) {
     // on the card, the map marker, and the arrival screen. Classify-on-read
     // heals rows born before the assignment hook/backfill.
     const { vehicleIdentityFor } = await import('./vehicle-identity');
+    // R8.4: the ride card shows "{Driver} · {display}★" from the ONE mapper.
+    const { ratingSurfaces } = await import('../rating/rating-surface');
+    const surface = (await ratingSurfaces(app.prisma, 'DRIVER', [ride.driver.userId])).get(ride.driver.userId);
     // MMG is a trip-END surface (rides spec 5.9/Part 7): the driver's own pay
     // link rides along only once the trip is underway, so the post-trip sheet
     // holds it — never shown while they're still deciding on a driver.
-    const driver = { ...ride.driver, ...vehicleIdentityFor(ride.driver) };
+    const driver = { ...ride.driver, ...vehicleIdentityFor(ride.driver), displayRating: surface?.displayRating ?? null };
     if (ride.status !== 'RIDE_IN_PROGRESS') {
       (driver as { mmgPayUrl?: string | null }).mmgPayUrl = null;
     }
@@ -271,7 +274,7 @@ export async function ridesRoutes(app: FastifyInstance) {
       include: {
         driver: {
           select: {
-            vehicleMake: true, vehicleModel: true, vehicleColor: true, licensePlate: true,
+            userId: true, vehicleMake: true, vehicleModel: true, vehicleColor: true, licensePlate: true,
             vehiclePhotoUrl: true, averageRating: true, mmgPayUrl: true,
             user: { select: { firstName: true, avatar: true } },
           },
@@ -280,6 +283,11 @@ export async function ridesRoutes(app: FastifyInstance) {
       },
     });
     if (!ride) throw new NotFoundError('Ride', request.params.id);
+    if (ride.driver) {
+      const { ratingSurfaces } = await import('../rating/rating-surface');
+      const surface = (await ratingSurfaces(app.prisma, 'DRIVER', [ride.driver.userId])).get(ride.driver.userId);
+      (ride.driver as { displayRating?: number | null }).displayRating = surface?.displayRating ?? null;
+    }
     // Same trip-end rule as /active: the pay link only for a ride that is
     // underway or done (receipt / pay-later), never during matching.
     if (ride.driver && !['RIDE_IN_PROGRESS', 'DELIVERED', 'COMPLETED'].includes(ride.status)) {

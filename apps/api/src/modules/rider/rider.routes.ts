@@ -204,8 +204,10 @@ export async function riderRoutes(app: FastifyInstance) {
 
   /** GET /profile — Full rider profile with user info, subscription & stats. */
   /** Movement R9: the Standing module — daily-folded, subject = the user
-   *  (rider ratings key on rateeId). Coaching card copy rides the payload. */
+   *  (rider ratings key on rateeId). Role-gated like every rider route:
+   *  no rider profile = no standing (the authz matrix drills this). */
   app.get('/standing', { preHandler: [app.authenticate] }, async (request) => {
+    await getRider(app, request.user.userId);
     const { actorStandingView } = await import('../rating/rating-standing');
     return { success: true, data: await actorStandingView(app.prisma, 'RIDER', request.user.userId) };
   });

@@ -689,6 +689,16 @@ export function createWorkers(ctx: JobContext) {
         return;
       }
 
+      if (job.name === 'rating-reminder-sweep') {
+        // Movement R10: ONE reminder for orders finished 24–48h ago and never
+        // rated — deduped against its own notification row, flag-gated.
+        const { runRatingReminderSweep } = await import('../modules/rating/rating-reminder');
+        const { NotificationService } = await import('../modules/notification/notification.service');
+        const n = await runRatingReminderSweep(ctx.prisma, new NotificationService(ctx.prisma, ctx.io));
+        ctx.log.info({ sent: n }, 'ratings: reminders sent');
+        return;
+      }
+
       if (job.name === 'discovery-backfill') {
         // The backfill movement (#17 CAT-I): admin-triggered, once per tenant.
         // Idempotent — a re-run writes nothing new and never re-notifies.
@@ -1196,6 +1206,14 @@ export async function scheduleRecurringJobs(queues: ReturnType<typeof createQueu
   // recompute so the folded view reads settled aggregates.
   await queues.dispatchQueue.add('rating-actor-fold', {}, {
     repeat: { pattern: '45 4 * * *' },
+    removeOnComplete: 7,
+    removeOnFail: 7,
+  });
+
+  // Movement R10: the one rating reminder — 22:00 UTC = 18:00 Guyana evening,
+  // when people actually have the minute.
+  await queues.dispatchQueue.add('rating-reminder-sweep', {}, {
+    repeat: { pattern: '0 22 * * *' },
     removeOnComplete: 7,
     removeOnFail: 7,
   });

@@ -95,8 +95,9 @@ export async function driverRoutes(app: FastifyInstance) {
   // ─── Profile ───────────────────────────────────────────────────────────
 
   /** Movement R9: the Standing module — daily-folded, subject = the user
-   *  (driver ratings key on rateeId). */
+   *  (driver ratings key on rateeId). Role-gated like every driver route. */
   app.get('/standing', { preHandler: [app.authenticate] }, async (request) => {
+    await getDriver(request.user.userId);
     const { actorStandingView } = await import('../rating/rating-standing');
     return { success: true, data: await actorStandingView(app.prisma, 'DRIVER', request.user.userId) };
   });
@@ -334,6 +335,11 @@ export async function driverRoutes(app: FastifyInstance) {
       take: 20,
     });
 
+    // R8.4: the incoming request shows "{Passenger} · {rating}★" (or New) —
+    // one batched read from the ONE mapper.
+    const { ratingSurfaces } = await import('../rating/rating-surface');
+    const passengerSurfaces = await ratingSurfaces(app.prisma, 'CUSTOMER', orders.map((o) => o.customer?.id).filter((x): x is string => !!x));
+
     // Enrich with distance from driver to pickup
     const enriched = orders.map((order) => {
       const distanceToPickup =
@@ -358,7 +364,9 @@ export async function driverRoutes(app: FastifyInstance) {
         fareSurge: order.taxiFareSurge,
         distanceToPickup: distanceToPickup !== null ? Math.round(distanceToPickup * 10) / 10 : null,
         etaToPickup: etaMinutes,
-        customer: order.customer,
+        customer: order.customer
+          ? { ...order.customer, displayRating: passengerSurfaces.get(order.customer.id)?.displayRating ?? null }
+          : order.customer,
         createdAt: order.createdAt,
       };
     });
@@ -386,6 +394,11 @@ export async function driverRoutes(app: FastifyInstance) {
       },
     });
 
+    if (order?.customer) {
+      const { ratingSurfaces } = await import('../rating/rating-surface');
+      const surface = (await ratingSurfaces(app.prisma, 'CUSTOMER', [order.customer.id])).get(order.customer.id);
+      (order.customer as { displayRating?: number | null }).displayRating = surface?.displayRating ?? null;
+    }
     return { success: true, data: order };
   });
 
