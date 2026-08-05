@@ -2174,6 +2174,31 @@ export async function customerRoutes(app: FastifyInstance) {
     return { success: true, data: feedback };
   });
 
+  /** POST /ratings/:id/report — flag a public review for the moderation
+   *  queue (R7). One report per (rating, reporter); reasons are curated. */
+  app.post('/ratings/:id/report', async (request: AuthRequest) => {
+    const { id } = request.params as { id: string };
+    const { userId } = request.user;
+    const { reason, note } = z.object({
+      reason: z.enum(['OFFENSIVE', 'FALSE_CLAIM', 'PRIVATE_INFO', 'SPAM', 'OTHER']),
+      note: z.string().trim().max(300).optional(),
+    }).parse(request.body);
+
+    const rating = await app.prisma.rating.findFirst({
+      where: { id, type: { in: ['CUSTOMER_TO_VENDOR', 'CUSTOMER_TO_PROVIDER'] }, isPublic: true },
+      select: { id: true },
+    });
+    if (!rating) throw new NotFoundError('Review', id);
+
+    const existing = await app.prisma.ratingReport.findFirst({ where: { ratingId: id, reporterId: userId } });
+    if (existing) return { success: true, data: existing }; // calm idempotence
+
+    const report = await app.prisma.ratingReport.create({
+      data: { ratingId: id, reporterId: userId, reason, note: note ?? null },
+    });
+    return { success: true, data: report };
+  });
+
   /** POST /orders/:id/tip — add a tip AFTER delivery (Uber-style). 100% to the
    *  mover; allowed once, within 7 days, only if not already tipped. */
   app.post('/orders/:id/tip', async (request: AuthRequest) => {

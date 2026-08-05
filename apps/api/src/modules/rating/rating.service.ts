@@ -3,6 +3,7 @@ import type { Server } from 'socket.io';
 import { AppError } from '../../utils/errors';
 import { RatingStatsService } from './rating-stats.service';
 import { RATING_WINDOW_DAYS, SHIELD_PREP_BREACH_MIN } from './rating-math';
+import { processReviewText } from './review-scrub';
 import { log } from '../../utils/logger';
 
 // Safety spec ("Rating flags: reuse the ratings/quality engine — safety-tagged
@@ -109,6 +110,10 @@ export class RatingService {
       input.type === 'CUSTOMER_TO_RIDER' && prepBreached &&
       (input.score <= 3 || (input.tags ?? []).includes('late'));
 
+    // R7 pipeline: PII masked before storage; profanity auto-HOLDS the text
+    // from public view (stars still count) pending the moderation queue.
+    const processed = input.comment ? processReviewText(input.comment) : null;
+
     const rating = await this.prisma.rating.create({
       data: {
         orderId: input.orderId,
@@ -117,7 +122,8 @@ export class RatingService {
         vendorId: input.vendorId,
         type: input.type,
         score: input.score,
-        comment: input.comment,
+        comment: processed?.text ?? input.comment,
+        ...(processed?.hold ? { isPublic: false, flagged: true, flagReason: 'PROFANITY_HOLD' } : {}),
         tags: input.tags || [],
         editableUntil: new Date(Date.now() + RATING_WINDOW_DAYS * 24 * 3600_000),
         ...(shielded ? { state: 'EXCLUDED' as const, stateReason: 'SLA_SHIELD' } : {}),
