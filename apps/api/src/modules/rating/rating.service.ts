@@ -66,6 +66,7 @@ export class RatingService {
         status: true,
         acceptedAt: true,
         readyAt: true,
+        deliveredAt: true,
         estimatedPrepTime: true,
         rider: { select: { userId: true } },
         driver: { select: { userId: true } },
@@ -88,6 +89,46 @@ export class RatingService {
     ].filter((id): id is string => Boolean(id));
     if (!participantIds.includes(input.raterId)) {
       throw new AppError(403, 'NOT_A_PARTICIPANT', 'Only a participant in this transaction can rate it');
+    }
+
+    // RAT-A window law: rating opens at completion and closes RATING_WINDOW_DAYS
+    // later (legacy rows without deliveredAt stay permissive — never punish old
+    // data for a rule born after it).
+    if (order.deliveredAt && Date.now() - order.deliveredAt.getTime() > RATING_WINDOW_DAYS * 24 * 3600_000) {
+      throw new AppError(400, 'RATING_WINDOW_CLOSED', 'The rating window for this order has closed');
+    }
+
+    // RAT-A party-to-type matrix: each direction may only be filed by the party
+    // it belongs to, about the party it names — a vendor owner can never
+    // CUSTOMER_TO_VENDOR their own store, a customer can never rate themselves.
+    const providerUserId = order.vendor?.owner?.userId;
+    const expectedRater: Record<string, string | null | undefined> = {
+      CUSTOMER_TO_VENDOR: order.customerId,
+      CUSTOMER_TO_RIDER: order.customerId,
+      CUSTOMER_TO_DRIVER: order.customerId,
+      CUSTOMER_TO_PROVIDER: order.customerId,
+      RIDER_TO_CUSTOMER: order.rider?.userId,
+      DRIVER_TO_CUSTOMER: order.driver?.userId,
+      PROVIDER_TO_CUSTOMER: providerUserId,
+    };
+    if (expectedRater[input.type] !== input.raterId) {
+      throw new AppError(403, 'WRONG_PARTY', 'This rating direction belongs to a different party on the order');
+    }
+    const expectedSubject: Record<string, { vendorId?: string | null; rateeId?: string | null }> = {
+      CUSTOMER_TO_VENDOR: { vendorId: order.vendorId },
+      CUSTOMER_TO_RIDER: { rateeId: order.rider?.userId },
+      CUSTOMER_TO_DRIVER: { rateeId: order.driver?.userId },
+      CUSTOMER_TO_PROVIDER: { rateeId: providerUserId },
+      RIDER_TO_CUSTOMER: { rateeId: order.customerId },
+      DRIVER_TO_CUSTOMER: { rateeId: order.customerId },
+      PROVIDER_TO_CUSTOMER: { rateeId: order.customerId },
+    };
+    const subject = expectedSubject[input.type] ?? {};
+    if (subject.vendorId !== undefined && input.vendorId !== subject.vendorId) {
+      throw new AppError(400, 'WRONG_SUBJECT', 'The rating names a party that was not on this order');
+    }
+    if (subject.rateeId !== undefined && (subject.rateeId == null || input.rateeId !== subject.rateeId)) {
+      throw new AppError(400, 'WRONG_SUBJECT', 'The rating names a party that was not on this order');
     }
 
     // Prevent duplicate ratings
