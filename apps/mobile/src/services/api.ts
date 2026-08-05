@@ -168,6 +168,9 @@ export const customerApi = {
     }),
   getNotifications: () => api.get('/customer/notifications'),
   reorder: (id: string) => api.post(`/customer/orders/${id}/reorder`, {}),
+  ratingTags: () => api.get('/customer/rating-tags'),
+  itemFeedback: (id: string, body: { itemId: string; verdict: 'UP' | 'DOWN' }) =>
+    api.post(`/customer/orders/${id}/item-feedback`, body),
   rateOrder: (
     id: string,
     body: {
