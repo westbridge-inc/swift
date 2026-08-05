@@ -1461,6 +1461,7 @@ model Rating {
   contextType String?
   contextId   String?
 
+  @@unique([orderId, raterId, type], map: "ratings_one_per_context")
   @@index([visibleAt])
   @@index([raterId])
   @@index([vendorId])
