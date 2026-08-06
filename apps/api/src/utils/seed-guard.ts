@@ -1,20 +1,29 @@
 import type { PrismaClient } from '@prisma/client';
 
-/** All deterministic demo account owners use this range in prisma/seed.ts. */
-export const DEMO_PHONE_PREFIX = '+592600';
+/** Exact user identities created by prisma/seed.ts. */
+export const DEMO_IDENTITY_PHONES = [
+  '+5926001000',
+  '+5926002000',
+  '+5926003000',
+  '+5926004000',
+  '+5926005001',
+  '+5926005002',
+  '+5926005003',
+] as const;
 
 const DEMO_SEED_ENVIRONMENTS = new Set(['development', 'test']);
 
 /**
  * [F-0001] Protect the default Prisma demo seed from reaching real data.
  *
- * `prisma migrate reset` can invoke the configured seed automatically, so a
- * local-looking DATABASE_URL is not sufficient proof of intent. Every demo
- * seed requires an explicit confirmation, and existing business data is an
- * absolute stop rather than something the confirmation can override.
+ * This guard protects only demo insertion. It cannot protect data from
+ * `prisma migrate reset`, which drops and recreates the database before it can
+ * invoke the seed. Every demo seed requires an explicit confirmation, and
+ * existing business data is an absolute stop rather than something the
+ * confirmation can override.
  */
 export async function assertSafeToSeedDemo(
-  db: Pick<PrismaClient, 'vendor' | 'order'>,
+  db: Pick<PrismaClient, 'user' | 'vendor' | 'order'>,
   env: Record<string, string | undefined> = process.env,
 ): Promise<void> {
   const nodeEnv = env['NODE_ENV'];
@@ -40,15 +49,20 @@ export async function assertSafeToSeedDemo(
     );
   }
 
-  // Fail closed: a rejected inspection must reject the seed. Demo vendors are
-  // identified by the deterministic demo owner's phone range, not by hostname
-  // guesses such as `db` or `postgres`, which can point at shared databases.
-  const [nonDemoVendors, orders] = await Promise.all([
+  // Fail closed: a rejected inspection must reject the seed. Demo identities
+  // are an exact allowlist; a phone prefix can also belong to a real account.
+  const demoIdentityPhones = [...DEMO_IDENTITY_PHONES];
+  const [nonDemoUsers, nonDemoVendors, orders] = await Promise.all([
+    db.user.count({
+      where: {
+        phone: { notIn: demoIdentityPhones },
+      },
+    }),
     db.vendor.count({
       where: {
         owner: {
           user: {
-            phone: { not: { startsWith: DEMO_PHONE_PREFIX } },
+            phone: { notIn: demoIdentityPhones },
           },
         },
       },
@@ -56,10 +70,11 @@ export async function assertSafeToSeedDemo(
     db.order.count(),
   ]);
 
-  if (nonDemoVendors > 0 || orders > 0) {
+  if (nonDemoUsers > 0 || nonDemoVendors > 0 || orders > 0) {
     throw new Error(
-      `FATAL: refusing to add demo data to a database containing ${nonDemoVendors} non-demo vendor(s) ` +
-      `and ${orders} order(s). Existing business data cannot be overridden by confirmation.`,
+      `FATAL: refusing to add demo data to a database containing ${nonDemoUsers} non-demo user(s), ` +
+      `${nonDemoVendors} non-demo vendor(s), and ${orders} order(s). ` +
+      'Existing business data cannot be overridden by confirmation.',
     );
   }
 }
