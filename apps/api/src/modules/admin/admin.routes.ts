@@ -36,6 +36,7 @@ import { AgentService } from '../agent/agent.service';
 import { OrderService } from '../order/order.service';
 import { DiscoveryGovernanceService } from '../discovery/admin-governance';
 import { RatingStatsService } from '../rating/rating-stats.service';
+import { assertFounderAccess } from './founder-access';
 import { getKycProvider } from '../../providers/kyc/kyc-provider';
 import { getPaymentProvider } from '../../providers/payment/payment-provider';
 import { getStorageProvider } from '../../providers/storage/storage-provider';
@@ -257,6 +258,16 @@ export async function adminRoutes(app: FastifyInstance) {
     if (!['ADMIN', 'SUPER_ADMIN'].includes(request.user.role)) {
       throw new ForbiddenError('Admin access required');
     }
+  };
+
+  // Trial-integrity Part 0.2: the platform-wide identity graph is the one
+  // sanctioned tenant-isolation exception, so ordinary operators must never
+  // reach its evidence or enforcement controls. Authenticate locally as well
+  // as through the plugin hook so the route-level law remains self-contained.
+  const founderGuard = async (request: any, reply: any) => {
+    await app.authenticate(request, reply);
+    if (reply.sent) return;
+    assertFounderAccess(request.user.role);
   };
 
   // Belt-and-suspenders (pre-launch audit): the guard is applied per-route on
@@ -2185,13 +2196,13 @@ export async function adminRoutes(app: FastifyInstance) {
 
   // ── Trial integrity (spec Part 9) — the identity graph is FOUNDER-ONLY
   //    god's-eye tooling: platform-wide by design (the one sanctioned
-  //    cross-tenant system). The global adminGuard + onResponse auto-audit
-  //    cover both routes — every view leaves an audit row. ─────────────────────
+  //    cross-tenant system). The founderGuard + onResponse auto-audit
+  //    cover these surfaces — every view leaves an audit row. ──────────────────
 
   /** Phase 2 backfill: run the matcher across the existing user base and
    *  return the evidence report. Idempotent; evidence first, decisions second
    *  — nothing here enforces anything. */
-  app.post('/integrity/backfill', { preHandler: [adminGuard] }, async () => {
+  app.post('/integrity/backfill', { preHandler: [founderGuard] }, async () => {
     const { runIdentityBackfill } = await import('../integrity/backfill');
     return { success: true, data: await runIdentityBackfill(app.prisma) };
   });
@@ -2199,7 +2210,7 @@ export async function adminRoutes(app: FastifyInstance) {
   /** The explainability read (Part 9.1/9.4): one account's cluster — members,
    *  every link's evidence, trial history, enforcement history, exceptions,
    *  and SOFT advisories. Every enforcement must be explainable from here. */
-  app.get<{ Params: { userId: string } }>('/integrity/identity/:userId', { preHandler: [adminGuard] }, async (request) => {
+  app.get<{ Params: { userId: string } }>('/integrity/identity/:userId', { preHandler: [founderGuard] }, async (request) => {
     const { IdentityService } = await import('../integrity/identity.service');
     const identity = new IdentityService(app.prisma);
     const clusterId = await identity.resolveCluster(request.params.userId);
@@ -2930,7 +2941,7 @@ export async function adminRoutes(app: FastifyInstance) {
   /** Part 4 appeals queue — OPEN cases with the accused's identity attached,
    *  oldest first (the 24h clock). Part 10's overturn rate rides along: >5%
    *  is the false-positive alarm that pauses enforcement expansion. */
-  app.get('/integrity/appeals', { preHandler: [adminGuard] }, async () => {
+  app.get('/integrity/appeals', { preHandler: [founderGuard] }, async () => {
     const { appealOverturnRate } = await import('../integrity/enforcement');
     const open = await app.prisma.enforcementAction.findMany({
       where: { appeal: 'OPEN' },
@@ -2953,7 +2964,7 @@ export async function adminRoutes(app: FastifyInstance) {
 
   /** Resolve an appeal. Overturn lifts the hold AND grants the cluster a
    *  FOUNDER_OVERRIDE exception, so the trial law honors the human next time. */
-  app.post<{ Params: { id: string } }>('/integrity/appeals/:id/resolve', { preHandler: [adminGuard] }, async (request) => {
+  app.post<{ Params: { id: string } }>('/integrity/appeals/:id/resolve', { preHandler: [founderGuard] }, async (request) => {
     const body = z.object({
       outcome: z.enum(['OVERTURNED', 'UPHELD']),
       note: z.string().trim().min(3).max(500),
@@ -2966,7 +2977,7 @@ export async function adminRoutes(app: FastifyInstance) {
   /** §3.5 — the founder issues a deliberate, logged exception (multi-location
    *  vendor trial-per-location, household, override). The trial law honors
    *  live exceptions; appeals overturn through this same mechanism. */
-  app.post('/integrity/exceptions', { preHandler: [adminGuard] }, async (request) => {
+  app.post('/integrity/exceptions', { preHandler: [founderGuard] }, async (request) => {
     const body = z.object({
       clusterId: z.string().min(1),
       scope: z.enum(['MULTI_LOCATION_VENDOR', 'HOUSEHOLD', 'FOUNDER_OVERRIDE']),
