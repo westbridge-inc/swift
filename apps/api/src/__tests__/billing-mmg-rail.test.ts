@@ -195,7 +195,11 @@ describe('MMG charge lifecycle', () => {
     expect(after.status).toBe('PAST_DUE'); // dunning, not silence
     expect(after.failedAttempts).toBe(1);
     const payment = await app.prisma.subscriptionPayment.findFirstOrThrow({ where: { subscriptionId: subId } });
-    expect(payment.status).toBe('FAILED');
+    // The intent machine labels a timed-out request EXPIRED (distinct from a
+    // provider decline's FAILED) — same dunning consequences, sharper truth,
+    // and a normalized code the ladder can branch on.
+    expect(payment.status).toBe('EXPIRED');
+    expect(payment.failureCode).toBe('REQUEST_EXPIRED');
   });
 
   it('a fresh still-pending request is left alone', async () => {

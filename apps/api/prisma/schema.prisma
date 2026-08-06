@@ -1312,6 +1312,14 @@ enum PaymentStatus {
   FAILED
   REFUNDED
   PARTIALLY_REFUNDED
+  /// Money may have moved but cannot be confirmed [tollgate LAW M-5] — never
+  /// auto-failed, never auto-succeeded; ages into the admin queue.
+  UNKNOWN
+  /// The provider's window closed unapproved (or TTL passed on a request the
+  /// provider provably lost) — the dunning path, distinctly labeled.
+  EXPIRED
+  /// Superseded before resolution (another rail paid the week first).
+  CANCELLED
 }
 
 /// markedUpPrice/markup* fields are V1 dormant (zero-commission) — kept
@@ -1992,6 +2000,13 @@ enum SubscriptionStatus {
   CHURNED // suspended past SUSPENSION_MAX_DAYS (§11) — terminal; dunning stops, paying rejoins
 }
 
+/// A solicited collection attempt — TOLLGATE's PaymentIntent, grown from the
+/// original payment row rather than duplicated beside it (one record per
+/// attempt, never two). The intent lifecycle: PENDING (live at the provider)
+/// → CAPTURED | FAILED | EXPIRED, with UNKNOWN as a first-class state [LAW
+/// M-5] for "money may have moved but we cannot confirm" (initiate timed out,
+/// provider unreachable past TTL) — UNKNOWN is never auto-failed; it ages
+/// into the admin queue and resolves by poller, portal check, or settlement.
 model SubscriptionPayment {
   id             String               @id @default(cuid())
   subscriptionId String
@@ -2006,6 +2021,23 @@ model SubscriptionPayment {
   createdAt      DateTime             @default(now())
   refunds        SubscriptionRefund[]
 
+  /// Swift's correlation id, sent to the provider as the merchant reference —
+  /// the retry-safe key that survives even when the provider's own id never
+  /// came back (initiate timeout → UNKNOWN with clientKey, no externalRef).
+  clientKey      String?              @unique
+  /// WEEKLY_FEE | PREPAY | REINSTATE
+  purpose        String               @default("WEEKLY_FEE")
+  /// Normalized failure taxonomy [tollgate 5.2] — dunning branches on THIS,
+  /// never on provider-native strings.
+  failureCode    String?
+  failureRaw     Json?
+  /// Provider TTL when known; defaults to createdAt+24h (the Q2 register
+  /// answer replaces the default, not the mechanism).
+  expiresAt      DateTime?
+  lastPolledAt   DateTime?
+  pollBackoffSec Int                  @default(30)
+
+  @@index([status, lastPolledAt])
   @@map("subscription_payments")
 }
 

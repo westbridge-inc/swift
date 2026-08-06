@@ -787,6 +787,22 @@ export function createWorkers(ctx: JobContext) {
             }),
           );
         }
+        // TOLLGATE LAW M-5 aging: an UNKNOWN intent older than 72h means money
+        // MAY have moved and neither poller nor history has confirmed it —
+        // a human resolves it (MMG portal check), never a guess. Page, deduped.
+        const unknownAged = await ctx.prisma.subscriptionPayment.count({
+          where: { status: 'UNKNOWN', createdAt: { lte: new Date(Date.now() - 72 * 3_600_000) } },
+        });
+        if (unknownAged > 0) {
+          const { notifyAdmins, NotificationService } = await import('../modules/notification/notification.service');
+          await opsPageOnce(ctx, 'billing-unknown-intents-sla', 6 * 3600, () =>
+            notifyAdmins(ctx.prisma, new NotificationService(ctx.prisma, ctx.io), {
+              title: 'UNKNOWN payment intents aging > 72h',
+              body: `${unknownAged} MMG request(s) may have moved money without confirmation. Verify each in the MMG portal, then resolve from the billing intents queue.`,
+              data: { kind: 'billing_unknown_intents_sla', unknownAged },
+            }),
+          );
+        }
         return;
       }
 

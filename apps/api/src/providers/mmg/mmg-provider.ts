@@ -77,10 +77,34 @@ export interface MmgMerchantProvider {
  * Deterministic sandbox — lets the billing/agent code and tests run the whole
  * merchant-initiated loop without a live MMG account. Markers:
  *   - a reference containing "decline" → the initiate is declined outright;
+ *   - a reference containing "initerror" → the initiate dies transport-shaped
+ *     (status `error`, no transaction id) — the UNKNOWN-intent path;
  *   - otherwise it returns `pending` with the eventual outcome encoded in the
- *     transactionId ("pending" stays pending on lookup, else it approves), so
- *     lookup is stateless yet deterministic.
+ *     transactionId ("pending" stays pending on lookup, "expired" expires,
+ *     "mismatch" approves with a wrong amount), so lookup is stateless yet
+ *     deterministic.
+ * For flows whose outcome must CHANGE over time (pending → approved), tests
+ * script the sandbox per-transaction via sandboxSetTxStatus / and can plant
+ * history rows for the UNKNOWN-adoption path via sandboxAddHistory — the
+ * scriptable-mock seam [tollgate PART 10], reset with sandboxResetMmg().
  */
+const txStatusOverrides = new Map<string, MmgTxStatus>();
+const historyRows: MmgTransaction[] = [];
+
+/** Test control: force a transaction's lookup status (wins over markers). */
+export function sandboxSetTxStatus(transactionId: string, status: MmgTxStatus): void {
+  txStatusOverrides.set(transactionId, status);
+}
+/** Test control: plant a row the sandbox's transactionHistory will return. */
+export function sandboxAddHistory(row: MmgTransaction): void {
+  historyRows.push(row);
+}
+/** Test control: wipe all sandbox scripting. */
+export function sandboxResetMmg(): void {
+  txStatusOverrides.clear();
+  historyRows.length = 0;
+}
+
 export class SandboxMmgProvider implements MmgMerchantProvider {
   async authenticate(): Promise<{ token: string; expiresAt?: Date }> {
     return { token: `mmg_sandbox_${nanoid(12)}`, expiresAt: new Date(Date.now() + 3_600_000) };
@@ -89,6 +113,9 @@ export class SandboxMmgProvider implements MmgMerchantProvider {
   async initiatePayment(req: MmgInitiateRequest): Promise<MmgTxResult> {
     if (req.reference.toLowerCase().includes('decline')) {
       return { status: 'declined', transactionId: '', reason: 'Payer declined (sandbox)' };
+    }
+    if (req.reference.toLowerCase().includes('initerror') || req.payerId.includes('initerror')) {
+      return { status: 'error', transactionId: '', reason: 'Gateway timeout (sandbox)' };
     }
     const outcome = req.reference.toLowerCase().includes('pending') ? 'pending' : 'approved';
     return { status: 'pending', transactionId: `mmgtx_${outcome}_${nanoid(10)}` };
@@ -99,16 +126,22 @@ export class SandboxMmgProvider implements MmgMerchantProvider {
   }
 
   async transactionLookup(req: { transactionId: string }): Promise<MmgTransaction> {
-    const status: MmgTxStatus = req.transactionId.includes('pending')
-      ? 'pending'
-      : req.transactionId.includes('reversed')
-        ? 'reversed'
-        : 'approved';
-    return { transactionId: req.transactionId, status, amountMinor: 0, currencyCode: 'GYD' };
+    const scripted = txStatusOverrides.get(req.transactionId);
+    const status: MmgTxStatus =
+      scripted ??
+      (req.transactionId.includes('pending')
+        ? 'pending'
+        : req.transactionId.includes('reversed')
+          ? 'reversed'
+          : req.transactionId.includes('expired')
+            ? 'expired'
+            : 'approved');
+    const amountMinor = req.transactionId.includes('mismatch') && status === 'approved' ? 99_900 : 0;
+    return { transactionId: req.transactionId, status, amountMinor, currencyCode: 'GYD' };
   }
 
   async transactionHistory(): Promise<MmgTransaction[]> {
-    return [];
+    return [...historyRows];
   }
 
   async accountBalance(): Promise<MmgBalance> {
