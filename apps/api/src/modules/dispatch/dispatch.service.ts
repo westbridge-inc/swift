@@ -72,6 +72,12 @@ export const EXHAUST_CAP = Math.max(1, Number(process.env['DISPATCH_EXHAUST_CAP'
 export const EXHAUST_TERMINAL_TTL_SECONDS = Math.max(3600, Number(process.env['DISPATCH_EXHAUST_TERMINAL_TTL'] ?? 6 * 3600));
 /** GPS silent this long while "online" = the app is gone, not slow. */
 export const STALE_LOCATION_MINUTES = 15;
+/** [R-05] TAXI slow lane past the fast cap: re-sweep cadence — the rider's
+ *  card says "every minute", so it IS every minute. */
+export const TAXI_RESCAN_MS = Math.max(15_000, Number(process.env['TAXI_RESCAN_MS'] ?? 60_000));
+/** How long a waiting taxi request keeps re-sweeping before the honest
+ *  release (mirrors the ride-queue TTL semantics). */
+export const TAXI_WAIT_LIMIT_MIN = Math.max(5, Number(process.env['TAXI_WAIT_LIMIT_MIN'] ?? 30));
 
 /** Straight-line candidate cap. The geo query keeps the N movers with the
  *  smallest great-circle distance; rankCandidates then re-sorts THOSE by real
@@ -765,6 +771,65 @@ export class DispatchService {
           data: { kind: 'dispatch_retrying', orderId: order.id },
         });
         return;
+      }
+    }
+
+    // [R-05 certification catch] TAXI slow lane. The rider's exhausted card
+    // promises "trying every minute as drivers come online" — past the fast
+    // cap that used to be silently false: the search went TERMINAL for six
+    // hours while the customer sat on an honest-looking waiting screen and a
+    // driver who came online minutes later was never asked. A waiting taxi
+    // request now keeps re-sweeping every TAXI_RESCAN_MS (quiet: no repeat
+    // pushes, the admin page fires once below) until TAXI_WAIT_LIMIT_MIN from
+    // placement, then the ride is RELEASED honestly — cancelled, told, done —
+    // instead of stranded. Food/grocery keep the vendor-hold terminal flow.
+    if (this.scheduleRedispatch) {
+      const row = await this.prisma.order.findUnique({
+        where: { id: order.id },
+        select: { orderType: true, status: true, driverId: true, placedAt: true },
+      });
+      if (row?.orderType === 'TAXI' && row.status === 'PENDING' && !row.driverId) {
+        const ageMs = Date.now() - row.placedAt.getTime();
+        if (ageMs < TAXI_WAIT_LIMIT_MIN * 60_000) {
+          if (await this.scheduleRedispatch(order.id, TAXI_RESCAN_MS)) {
+            await this.redis.del(declinedKey(order.id));
+            // The open screen still needs its honest dead-state card.
+            this.io.to(`order:${order.id}`).emit('dispatch:exhausted', { orderId: order.id, orderNumber: order.orderNumber });
+            // Supply drought is still an ops fact — page once per terminal window.
+            const { opsPageOnce } = await import('../../jobs/queue');
+            await opsPageOnce({ redis: this.redis }, `dispatch_exhausted:${order.id}`, EXHAUST_TERMINAL_TTL_SECONDS, () =>
+              notifyAdmins(this.prisma, this.notifications, {
+                title: 'Dispatch exhausted — no mover found',
+                body: `Order ${order.orderNumber} found no mover after all retries. Check mover supply and dispatch health.`,
+                data: { kind: 'ops_dispatch_exhausted', orderId: order.id },
+              }),
+            ).catch(() => {});
+            return;
+          }
+        } else {
+          // The wait limit is up — release the ride, honestly and exactly once
+          // (conditional update: a driver matched in the same instant wins).
+          const released = await this.prisma.order.updateMany({
+            where: { id: order.id, status: 'PENDING', driverId: null },
+            data: { status: 'CANCELLED', cancelledAt: new Date(), cancellationReason: 'NO_DRIVERS_AVAILABLE' },
+          });
+          if (released.count > 0) {
+            await this.prisma.orderStatusLog
+              .create({ data: { orderId: order.id, status: 'CANCELLED', changedBy: 'system', note: `Released after ${TAXI_WAIT_LIMIT_MIN} min — no drivers available` } })
+              .catch(() => {});
+            this.io.to(`order:${order.id}`).emit('order:status_changed', { orderId: order.id, status: 'CANCELLED', timestamp: new Date().toISOString() });
+            await this.notifications.send({
+              userId: order.customerId,
+              type: 'SYSTEM_ANNOUNCEMENT',
+              title: "We couldn't find you a driver",
+              body: 'No drivers came online in time, so your request was released — nothing to pay. Try again anytime.',
+              audience: 'customer',
+              data: { kind: 'ride_released_no_drivers', orderId: order.id },
+            });
+          }
+          await this.redis.del(declinedKey(order.id), exhaustKey(order.id));
+          return;
+        }
       }
     }
 
