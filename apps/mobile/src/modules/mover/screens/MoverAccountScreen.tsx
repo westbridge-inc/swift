@@ -16,6 +16,7 @@ import { useAuthStore } from '../../../stores/authStore';
 import { RoleSwitcherSheet } from '../../../components/RoleSwitcherSheet';
 import { money } from '../../../lib/money';
 import { mediaUrl } from '../../../lib/images';
+import { BillingStatusBlock } from '../../../components/billing/BillingSurfaces';
 
 export function MoverAccountScreen({ navigation }: any) {
   const { user, logout } = useAuthStore();
@@ -162,8 +163,19 @@ export function MoverAccountScreen({ navigation }: any) {
             sub={sub ? (sub.usdDisplay?.line ?? `${money(sub.customRate ?? sub.weeklyRate)}/week`) : 'Not active yet'}
             right={<TonePill label={subPill.label} tone={subPill.tone} />}
           />
+          <SettingsRow
+            icon="hash"
+            label="My Swift Number"
+            sub="Pay the weekly fee at any MMG agent"
+            onPress={() => navigation?.navigate?.('MySwiftNumber')}
+          />
           <SettingsRow icon="refresh-cw" label="Switch app" sub="Swift · Swift Business" onPress={() => setSwitcherOpen(true)} />
         </Card>
+
+        {/* Honest billing status — wallet balance, grace deadline, or the
+            paused block. Silent on a healthy account (the row above is the way
+            in). */}
+        <BillingStatusBlock sub={sub} onPay={() => navigation?.navigate?.('MySwiftNumber')} compact />
 
         {/* The model */}
         <Card style={{ marginTop: space.md }}>
