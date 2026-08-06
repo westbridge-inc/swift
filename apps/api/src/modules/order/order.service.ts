@@ -1004,6 +1004,20 @@ export class OrderService {
           },
         });
       }
+
+      // [F-0028] Pay the mover HERE, on the transition itself, not at the call
+      // site. Four routes used to do `updateStatus(DELIVERED)` then
+      // `createEarnings(id)` as two separate statements, so a crash in between
+      // lost the rider's fee and tip permanently — and the withIdempotency
+      // retry could not heal it, because re-running the closure hits
+      // INVALID_TRANSITION (the order is no longer in an allowed source state)
+      // and never reaches the earnings call. Earnings now have exactly one
+      // owner: whoever moves an order to DELIVERED pays for it. Idempotent via
+      // @@unique([orderId, type]) + skipDuplicates, so the reconciler below and
+      // any remaining explicit call are safe no-ops.
+      if (status === 'DELIVERED') {
+        await this.createEarnings(orderId);
+      }
     }
 
     // Every CANCELLED source state precedes handover — restock tracked items.
@@ -1418,4 +1432,78 @@ export class OrderService {
 
     return { id: promo.id, discount, discountType: promo.discountType, vendorId: promo.vendorId };
   }
+}
+
+// ---------------------------------------------------------------------------
+// [F-0028 / G-002] The earnings reconciler — the last line of defence between
+// a bug and a mover who quietly went unpaid.
+//
+// Earnings now have a single owner (updateStatus pays on the DELIVERED
+// transition), which closes the window that lost them. This exists because the
+// window can never be closed to zero: the status CAS and the earnings insert
+// are still two statements, and paths that bypass updateStatus entirely — the
+// courier proof route runs its own CAS — could always grow a new gap.
+//
+// A mover is the only person who would ever notice this, and they would notice
+// it as "Swift shorted me", which is the single worst thing a mover can believe
+// about a platform they front cash for. So: sweep, heal, and page if it ever
+// fires, because a non-zero count means something upstream broke.
+// ---------------------------------------------------------------------------
+
+/**
+ * Find DELIVERED/COMPLETED orders that have a mover but no Earning row, and
+ * create the missing rows. Healing is idempotent (@@unique([orderId, type]) +
+ * skipDuplicates), so a double run changes nothing the second time.
+ *
+ * The grace window matters: an order delivered seconds ago may legitimately be
+ * mid-flight between its transition and its earnings insert. Only orders past
+ * the window are treated as missing.
+ */
+export async function reconcileMissingEarnings(
+  prisma: PrismaClient,
+  orders: OrderService,
+  opts: { graceMinutes?: number; cap?: number } = {},
+): Promise<{ scanned: number; healed: string[] }> {
+  const graceMinutes = opts.graceMinutes ?? Number(process.env['EARNINGS_RECONCILE_GRACE_MIN'] ?? 10);
+  const cap = opts.cap ?? 200;
+  const cutoff = new Date(Date.now() - graceMinutes * 60_000);
+
+  const candidates = await prisma.order.findMany({
+    where: {
+      status: { in: ['DELIVERED', 'COMPLETED'] },
+      deliveredAt: { lte: cutoff },
+      // Only a mover earns. Pickup and appointment orders have neither and are
+      // correctly absent from this sweep.
+      OR: [{ riderId: { not: null } }, { driverId: { not: null } }],
+    },
+    select: { id: true },
+    orderBy: { deliveredAt: 'asc' },
+    take: cap,
+  });
+  if (candidates.length === 0) return { scanned: 0, healed: [] };
+
+  // Earning.orderId carries no FK to Order, so this cannot be a relation
+  // filter — ask which of the candidates already have rows, and difference.
+  const ids = candidates.map((c) => c.id);
+  const paid = await prisma.earning.findMany({
+    where: { orderId: { in: ids } },
+    select: { orderId: true },
+    distinct: ['orderId'],
+  });
+  const paidSet = new Set(paid.map((p) => p.orderId));
+  const missing = ids.filter((id) => !paidSet.has(id));
+
+  const healed: string[] = [];
+  for (const orderId of missing) {
+    try {
+      await orders.createEarnings(orderId);
+      healed.push(orderId);
+    } catch (err) {
+      // One bad row must not stop the sweep — the next tick retries it, and the
+      // count below still reports it as unhealed.
+      log().error({ err, orderId }, 'earnings reconcile: could not heal order');
+    }
+  }
+
+  return { scanned: candidates.length, healed };
 }
