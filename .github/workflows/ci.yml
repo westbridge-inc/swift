@@ -77,6 +77,8 @@ jobs:
       - name: Seed database
         run: cd apps/api && npx prisma db seed
         env:
+          NODE_ENV: test
+          SEED_DEMO_CONFIRM: "YES"
           DATABASE_URL: postgresql://swift:swift@localhost:5432/swift_test
           REDIS_URL: redis://localhost:6379
       - name: Run tests
