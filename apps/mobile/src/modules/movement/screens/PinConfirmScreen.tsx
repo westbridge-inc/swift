@@ -20,7 +20,7 @@ export function PinConfirmScreen({ navigation, route }: any) {
   const title: string = route?.params?.title ?? 'Set location';
   const insets = useSafeAreaInsets();
 
-  const { latitude, longitude } = useLocationStore();
+  const { latitude, longitude, status: locationStatus } = useLocationStore();
   const start = {
     latitude: latitude ?? GEORGETOWN.latitude,
     longitude: longitude ?? GEORGETOWN.longitude,
@@ -60,7 +60,7 @@ export function PinConfirmScreen({ navigation, route }: any) {
         style={{ flex: 1 }}
         initialRegion={start}
         onRegionChangeComplete={onRegionChangeComplete}
-        showsUserLocation
+        showsUserLocation={locationStatus === 'granted'}
       />
 
       {/* Floating header over the map (kit hero-chip language) */}

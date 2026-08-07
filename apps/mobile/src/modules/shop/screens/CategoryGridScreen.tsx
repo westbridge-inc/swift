@@ -5,6 +5,7 @@ import { useNavigation } from '@react-navigation/native';
 import { color, radius, space } from '@swift/ui';
 import { useDiscoveryCategories } from '../../../hooks/customer';
 import { useLocationStore } from '../../../stores/locationStore';
+import { grantedLocationFix } from '../../../lib/deviceLocation';
 import { EmptyState, ErrorState, Header, LoadingBlock, Screen, T } from '../../../kit';
 
 // ---------------------------------------------------------------------------
@@ -23,8 +24,9 @@ const KIND_LABEL: Record<string, string> = {
 
 export function CategoryGridScreen() {
   const navigation = useNavigation<any>();
-  const { latitude, longitude } = useLocationStore();
-  const railQ = useDiscoveryCategories(latitude ?? undefined, longitude ?? undefined);
+  const { latitude, longitude, status } = useLocationStore();
+  const locationFix = grantedLocationFix(latitude, longitude, status);
+  const railQ = useDiscoveryCategories(locationFix?.latitude, locationFix?.longitude);
 
   const categories = railQ.data?.categories ?? [];
   const groups = Object.entries(

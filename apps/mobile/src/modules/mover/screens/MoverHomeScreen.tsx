@@ -219,7 +219,7 @@ function StoreBadge({ ready, soon }: { ready: number; soon: number }) {
 export function MoverHomeScreen({ navigation }: any) {
   const insets = useSafeAreaInsets();
   const { kind, profile, loading } = useMoverKind();
-  const { latitude, longitude } = useLocationStore();
+  const { latitude, longitude, status: locationStatus } = useLocationStore();
   const k: MoverKind = kind ?? 'RIDER';
   const goOnline = useGoOnline(k);
   const goOffline = useGoOffline(k);
@@ -321,7 +321,7 @@ export function MoverHomeScreen({ navigation }: any) {
         provider={PROVIDER_DEFAULT}
         style={{ flex: 1 }}
         region={region}
-        showsUserLocation
+        showsUserLocation={locationStatus === 'granted'}
       >
         {/* REAL demand on the map (Phase A): taxi pickups rounded ~300 m /
             stores with unassigned orders. Never customer identities. */}

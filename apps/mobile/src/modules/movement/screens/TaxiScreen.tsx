@@ -16,7 +16,9 @@ import { useActiveRide, useRideEstimate, useRequestRide, useCancelRide, useRideS
 import { connectSocket, getSocket, subscribeToOrder } from '../../../services/socket';
 import { RidePostTripSheet } from '../RidePostTripSheet';
 import { useLocationStore } from '../../../stores/locationStore';
-import { GEORGETOWN } from '../../../hooks/useDeviceLocation';
+import { useDeviceLocation } from '../../../hooks/useDeviceLocation';
+import { GEORGETOWN, pickupLocationContext } from '../../../lib/deviceLocation';
+import { LocationPrimerCard } from '../../../components/LocationPrimerCard';
 import { money } from '../../../lib/money';
 import { mediaUrl } from '../../../lib/images';
 import { streetEtaMin } from '../../../lib/geo';
@@ -199,7 +201,9 @@ export function TaxiScreen({ navigation }: any) {
   const { height: winH } = useWindowDimensions();
   const scheme = useColorScheme();
   const insets = useSafeAreaInsets();
-  const { latitude, longitude, address } = useLocationStore();
+  const { latitude, longitude, address, status: locationStatus } = useLocationStore();
+  const { resolve: requestLocation } = useDeviceLocation({ refreshOnMount: false });
+  const locationContext = pickupLocationContext(latitude, longitude, locationStatus);
   const { data: activeRide, isLoading: loadingActive } = useActiveRide<any>(true);
   const requestRide = useRequestRide();
   const cancelRide = useCancelRide();
@@ -250,10 +254,13 @@ export function TaxiScreen({ navigation }: any) {
   const [dropoff, setDropoff] = useState<PickedPlace | undefined>();
   const [selectedClass, setSelectedClass] = useState<RideClass>('ECONOMY');
 
-  const livePickup =
-    latitude != null && longitude != null
-      ? { lat: latitude, lng: longitude, label: address || 'Current location' }
-      : undefined;
+  const livePickup = locationContext.devicePickup
+    ? {
+        lat: locationContext.devicePickup.latitude,
+        lng: locationContext.devicePickup.longitude,
+        label: address || locationContext.devicePickup.label,
+      }
+    : undefined;
   const pickup = pickupOverride ?? livePickup;
 
   const pickupPoint = pickup ? { lat: pickup.lat, lng: pickup.lng } : undefined;
@@ -290,8 +297,8 @@ export function TaxiScreen({ navigation }: any) {
 
   // ===== Request flow (idle → route chosen) =====
   const mapCenter = {
-    latitude: pickup?.lat ?? GEORGETOWN.latitude,
-    longitude: pickup?.lng ?? GEORGETOWN.longitude,
+    latitude: pickup?.lat ?? locationContext.center.latitude,
+    longitude: pickup?.lng ?? locationContext.center.longitude,
     latitudeDelta: 0.02,
     longitudeDelta: 0.02,
   };
@@ -349,7 +356,7 @@ export function TaxiScreen({ navigation }: any) {
         provider={PROVIDER_DEFAULT}
         style={{ flex: 1 }}
         region={routeRegion}
-        showsUserLocation
+        showsUserLocation={locationContext.showUserLocation}
         mapPadding={{ top: 0, left: 0, right: 0, bottom: Math.round(winH * 0.38) }}
         {...rideMapProps(scheme)}
       >
@@ -378,6 +385,15 @@ export function TaxiScreen({ navigation }: any) {
         handleIndicatorStyle={HANDLE_STYLE}
       >
         <BottomSheetScrollView contentContainerStyle={{ paddingHorizontal: space['2xl'], paddingBottom: space['3xl'] }}>
+          {!pickupOverride && locationContext.showPrimer ? (
+            <LocationPrimerCard
+              status={locationStatus}
+              onRequest={() => {
+                void requestLocation();
+              }}
+              style={{ marginBottom: space.lg }}
+            />
+          ) : null}
           <RouteCard
             pickupLabel={pickup?.label}
             dropoffLabel={dropoff?.label}

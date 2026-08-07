@@ -10,6 +10,7 @@ import { useDiscoveryCategories, useHome, useToggleFavorite } from '../../../hoo
 import { useAds } from '../../../hooks/ads';
 import { AdHeroVideo, AdTopCard, AdBar } from '../../../components/ads';
 import { PressableScale } from '../../../components/ui';
+import { grantedLocationFix } from '../../../lib/deviceLocation';
 import { haptic } from '../../../lib/haptics';
 import { useAuthStore } from '../../../stores/authStore';
 import { useLocationStore } from '../../../stores/locationStore';
@@ -103,14 +104,15 @@ export function HomeScreen() {
   const navigation = useNavigation<any>();
   const insets = useSafeAreaInsets();
   const { user, isAuthenticated, promptLogin } = useAuthStore();
-  const { latitude, longitude, address } = useLocationStore();
+  const { latitude, longitude, address, status } = useLocationStore();
+  const locationFix = grantedLocationFix(latitude, longitude, status);
 
-  const home = useHome<any>(latitude ?? undefined, longitude ?? undefined);
+  const home = useHome<any>(locationFix?.latitude, locationFix?.longitude);
   const toggleFav = useToggleFavorite();
   // Category rail (#17): flag-gated server-side; when live it SUPERSEDES the
   // old "Find by category" section (one category system on Home, ever —
   // spec 6.2). Flag off → both absent/present exactly as before (CAT-G).
-  const discovery = useDiscoveryCategories(latitude ?? undefined, longitude ?? undefined);
+  const discovery = useDiscoveryCategories(locationFix?.latitude, locationFix?.longitude);
   const railLive = !!discovery.data?.enabled && (discovery.data?.categories.length ?? 0) >= CAT_RAIL_MIN_CHIPS;
 
   // Ads hydrate independently (§13.4): home content NEVER waits on this call,
@@ -133,7 +135,7 @@ export function HomeScreen() {
 
   const feed = home.data;
   const featured: any[] = feed?.featured ?? [];
-  const nearby: any[] = feed?.nearby ?? [];
+  const nearby: any[] = locationFix ? (feed?.nearby ?? []) : [];
   const orderAgain: any[] = feed?.orderAgain ?? [];
   const activeOrder = feed?.activeOrder;
   // Names repeat across stores ("Popular" everywhere) — one chip per name.
@@ -169,7 +171,7 @@ export function HomeScreen() {
               </T>
               <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4, marginTop: 2 }}>
                 <T variant="body" weight="semibold" tone="onBrand" numberOfLines={1} style={{ flexShrink: 1 }}>
-                  {address ?? 'Set your location'}
+                  {locationFix ? (address ?? 'Current location') : 'Set your location'}
                 </T>
                 <Feather name="chevron-down" size={16} color={color.white} />
               </View>
@@ -403,7 +405,10 @@ export function HomeScreen() {
                     rating={v.displayRating ?? null}
                     ratingBucket={v.ratingBucket}
                     topRated={v.topRated}
-                    meta={[v.etaMin ? `${v.etaMin} min` : null, kmLabel(v.distanceKm)].filter(Boolean).join(' · ') || undefined}
+                    meta={[
+                      v.etaMin ? `${v.etaMin} min` : null,
+                      locationFix ? kmLabel(v.distanceKm) : null,
+                    ].filter(Boolean).join(' · ') || undefined}
                     favorite={v.isFavorite}
                     onToggleFavorite={() => onFavorite(v.id, !!v.isFavorite)}
                     onPress={() => navigation.navigate('Restaurant', { vendorId: v.id })}
@@ -432,7 +437,10 @@ export function HomeScreen() {
                           rating={v.displayRating ?? null}
                           bucket={v.ratingBucket}
                           topRated={v.topRated}
-                          extra={[v.etaMin ? `${v.etaMin} min` : null, kmLabel(v.distanceKm)].filter(Boolean).join(' · ') || undefined}
+                          extra={[
+                            v.etaMin ? `${v.etaMin} min` : null,
+                            locationFix ? kmLabel(v.distanceKm) : null,
+                          ].filter(Boolean).join(' · ') || undefined}
                         />
                       }
                       onPress={() => navigation.navigate('Restaurant', { vendorId: v.id })}

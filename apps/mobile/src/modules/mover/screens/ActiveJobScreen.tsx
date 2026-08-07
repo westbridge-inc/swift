@@ -104,7 +104,7 @@ export function ActiveJobScreen({ navigation }: any) {
   const riderAct = useRiderAction();
   const courierProof = useCourierProof();
   const rate = useRateCustomer();
-  const { latitude, longitude } = useLocationStore();
+  const { latitude, longitude, status: locationStatus } = useLocationStore();
   const [pin, setPin] = useState('');
   const [ratePopup, setRatePopup] = useState<{ orderId: string; name: string; mmg: boolean } | null>(null);
   const [stars, setStars] = useState(5);
@@ -232,7 +232,12 @@ export function ActiveJobScreen({ navigation }: any) {
   return (
     <View style={{ flex: 1, backgroundColor: dk.bg }}>
       {job ? (
-        <MapView provider={PROVIDER_DEFAULT} style={{ flex: 1 }} initialRegion={region} showsUserLocation>
+        <MapView
+          provider={PROVIDER_DEFAULT}
+          style={{ flex: 1 }}
+          initialRegion={region}
+          showsUserLocation={locationStatus === 'granted'}
+        >
           {pickup ? <Marker coordinate={pickup} title="Pickup" /> : null}
           {drop ? <Marker coordinate={drop} title="Drop-off" pinColor={color.brand[500]} /> : null}
           {pickup && drop ? (

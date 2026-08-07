@@ -38,9 +38,9 @@ SplashScreen.preventAutoHideAsync().catch(() => {});
 // RN global handler before the first render, so nothing crashes silently.
 installGlobalErrorHandler();
 
-// Resolves device GPS into locationStore on launch. Rendered only after the
-// encrypted store is open (see App `ready` gate) so the persisted write inside
-// setLocation never runs before initSecureStorage().
+// Silently refreshes GPS only when permission is already granted. Rendered
+// after encrypted storage is open so persisted writes are safe; the explicit
+// OS request lives behind an in-context pickup primer [first-open SO-5].
 function LocationBootstrap() {
   useDeviceLocation();
   return null;
