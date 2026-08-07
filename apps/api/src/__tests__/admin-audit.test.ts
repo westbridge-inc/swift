@@ -9,11 +9,12 @@ import { registerEmptyJsonBodyParser } from '../plugins/empty-json';
 import { adminRoutes } from '../modules/admin/admin.routes';
 import { authRoutes } from '../modules/auth/auth.routes';
 import { loginWithOtp } from './helpers/otp';
+import { nanoid } from 'nanoid';
 
 // ---------------------------------------------------------------------------
 // Admin actions leave a trail. The scoped onResponse hook must write an audit
-// row for every successful mutating admin request — and stay silent for reads
-// and failures (nothing changed, nothing to attest).
+// row for every successful mutating admin request and every founder-only
+// identity view — while staying silent for ordinary reads and failures.
 // ---------------------------------------------------------------------------
 
 let app: FastifyInstance;
@@ -46,16 +47,29 @@ afterAll(async () => {
   await app.close();
 });
 
-function inject(method: 'GET' | 'PUT' | 'POST', url: string, payload?: unknown) {
+function inject(method: 'GET' | 'PUT' | 'POST', url: string, payload?: unknown, token = adminToken) {
   return app.inject({
     method,
     url,
     ...(payload === undefined ? {} : { payload: payload as Record<string, unknown> }),
     headers: {
       'content-type': 'application/json',
-      authorization: `Bearer ${adminToken}`,
+      authorization: `Bearer ${token}`,
     },
   });
+}
+
+function founderReadAction(routeTemplate: string) {
+  return { startsWith: 'ADMIN GET ', endsWith: routeTemplate };
+}
+
+async function waitForFounderReadAuditCount(routeTemplate: string, expected: number): Promise<number> {
+  let count = await app.prisma.auditLog.count({ where: { action: founderReadAction(routeTemplate) } });
+  for (let i = 0; i < 30 && count !== expected; i++) {
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    count = await app.prisma.auditLog.count({ where: { action: founderReadAction(routeTemplate) } });
+  }
+  return count;
 }
 
 describe('admin audit trail', () => {
@@ -89,12 +103,80 @@ describe('admin audit trail', () => {
     expect(row!.userId).toBeTruthy();
   });
 
-  it('reads do not audit', async () => {
+  it('ordinary reads do not audit', async () => {
     const before = await app.prisma.auditLog.count({ where: { action: { startsWith: 'ADMIN ' } } });
     const res = await inject('GET', '/api/v1/admin/dashboard/overview');
     expect(res.statusCode).toBe(200);
     const after = await app.prisma.auditLog.count({ where: { action: { startsWith: 'ADMIN ' } } });
     expect(after).toBe(before);
+  });
+
+  it.each([
+    {
+      routeTemplate: '/integrity/appeals',
+      url: '/api/v1/admin/integrity/appeals',
+      entityId: '-',
+    },
+    {
+      routeTemplate: '/integrity/identity/:userId',
+      url: '/api/v1/admin/integrity/identity/%USER_ID%',
+      entityId: '%USER_ID%',
+    },
+  ])('audits the founder-only view $routeTemplate', async ({ routeTemplate, url, entityId }) => {
+    const founder = await app.prisma.user.findUniqueOrThrow({ where: { phone: '+5926001000' } });
+    const resolvedUrl = url.replace('%USER_ID%', founder.id);
+    const resolvedEntityId = entityId.replace('%USER_ID%', founder.id);
+    const before = await app.prisma.auditLog.count({ where: { action: founderReadAction(routeTemplate) } });
+
+    const res = await inject('GET', resolvedUrl);
+    expect(res.statusCode).toBe(200);
+    expect(await waitForFounderReadAuditCount(routeTemplate, before + 1)).toBe(before + 1);
+
+    const row = await app.prisma.auditLog.findFirst({
+      where: { action: founderReadAction(routeTemplate) },
+      orderBy: { createdAt: 'desc' },
+    });
+    expect(row).not.toBeNull();
+    expect(row!.action.endsWith(routeTemplate)).toBe(true);
+    expect(row!.userId).toBe(founder.id);
+    expect(row!.entity).toBe('integrity');
+    expect(row!.entityId).toBe(resolvedEntityId);
+    expect(row!.changes).toEqual(expect.objectContaining({ params: expect.any(Object) }));
+  });
+
+  it('rejects an ordinary admin from identity data without writing a view audit', async () => {
+    const ordinaryAdmin = await app.prisma.user.create({
+      data: {
+        phone: `+592${nanoid(8)}`,
+        firstName: 'Ordinary',
+        lastName: 'Admin',
+        roles: ['ADMIN'],
+        activeRole: 'ADMIN',
+        isPhoneVerified: true,
+        admin: { create: { permissions: ['*'] } },
+      },
+    });
+    const token = app.jwt.sign({ userId: ordinaryAdmin.id, role: 'ADMIN', jti: nanoid(8) });
+    await app.prisma.session.create({
+      data: {
+        userId: ordinaryAdmin.id,
+        token,
+        refreshToken: nanoid(48),
+        deviceId: 'admin-audit',
+        deviceType: 'test',
+        expiresAt: new Date(Date.now() + 86_400_000),
+      },
+    });
+
+    const routeTemplate = '/integrity/appeals';
+    const before = await app.prisma.auditLog.count({ where: { action: founderReadAction(routeTemplate) } });
+    try {
+      const res = await inject('GET', '/api/v1/admin/integrity/appeals', undefined, token);
+      expect(res.statusCode).toBe(403);
+      expect(await waitForFounderReadAuditCount(routeTemplate, before)).toBe(before);
+    } finally {
+      await app.prisma.user.delete({ where: { id: ordinaryAdmin.id } });
+    }
   });
 
   it('failed mutations do not audit', async () => {

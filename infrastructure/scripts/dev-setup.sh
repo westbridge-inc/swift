@@ -27,7 +27,7 @@ cd apps/api && npx prisma migrate dev --name init && cd ../..
 
 # Seed database
 echo "Seeding database..."
-cd apps/api && npx prisma db seed && cd ../..
+cd apps/api && NODE_ENV=development SEED_DEMO_CONFIRM=YES npx prisma db seed && cd ../..
 
 echo ""
 echo "Setup complete! Start development:"

@@ -36,6 +36,7 @@ import { AgentService } from '../agent/agent.service';
 import { OrderService } from '../order/order.service';
 import { DiscoveryGovernanceService } from '../discovery/admin-governance';
 import { RatingStatsService } from '../rating/rating-stats.service';
+import { assertFounderAccess } from './founder-access';
 import { getKycProvider } from '../../providers/kyc/kyc-provider';
 import { getPaymentProvider } from '../../providers/payment/payment-provider';
 import { getStorageProvider } from '../../providers/storage/storage-provider';
@@ -241,6 +242,14 @@ const auditLogsQuerySchema = z.object({
   dateTo: z.coerce.date().optional(),
 });
 
+// Ordinary admin reads are intentionally not logged. These two routes are the
+// exception because they expose Swift's platform-wide identity graph; the
+// trial-integrity law requires every successful founder view to leave a trail.
+const auditedAdminReadRoutes = [
+  '/integrity/identity/:userId',
+  '/integrity/appeals',
+];
+
 export async function adminRoutes(app: FastifyInstance) {
   const notifications = new NotificationService(app.prisma, app.io);
   const verification = new VerificationService(app.prisma, notifications, getKycProvider());
@@ -259,6 +268,16 @@ export async function adminRoutes(app: FastifyInstance) {
     }
   };
 
+  // Trial-integrity Part 0.2: the platform-wide identity graph is the one
+  // sanctioned tenant-isolation exception, so ordinary operators must never
+  // reach its evidence or enforcement controls. Authenticate locally as well
+  // as through the plugin hook so the route-level law remains self-contained.
+  const founderGuard = async (request: any, reply: any) => {
+    await app.authenticate(request, reply);
+    if (reply.sent) return;
+    assertFounderAccess(request.user.role);
+  };
+
   // Belt-and-suspenders (pre-launch audit): the guard is applied per-route on
   // all 42 routes today, but a future admin route that forgets its preHandler
   // would be unauthenticated. This plugin-scoped onRequest hook enforces admin
@@ -270,23 +289,26 @@ export async function adminRoutes(app: FastifyInstance) {
   // Every successful admin STATE CHANGE is audited, automatically. A scoped
   // onResponse hook (plugin encapsulation: admin routes only) means a new
   // mutating route is covered the day it ships — the same philosophy as the
-  // authz matrix. Reads stay out of the log; failures (4xx/5xx) changed
-  // nothing so they stay out too. Route template (not raw URL) keeps the
-  // action name stable and free of user data.
+  // authz matrix. Ordinary reads stay out of the log; the two founder-only
+  // identity reads above are the deliberate exception. Failures (4xx/5xx)
+  // changed or revealed nothing, so they stay out too. Route templates keep
+  // action names stable and free of raw URL data.
   app.addHook('onResponse', async (request, reply) => {
-    if (request.method === 'GET' || reply.statusCode >= 400) return;
+    const routeUrl = request.routeOptions?.url ?? request.url;
+    const isAuditedRead = request.method === 'GET'
+      && auditedAdminReadRoutes.some((template) => routeUrl === template || routeUrl.endsWith(template));
+    if ((request.method === 'GET' && !isAuditedRead) || reply.statusCode >= 400) return;
     const userId = (request as { user?: { userId?: string } }).user?.userId;
     if (!userId) return;
     try {
-      const routeUrl = request.routeOptions?.url ?? request.url;
       const params = (request.params ?? {}) as Record<string, string>;
       const body = request.body ? JSON.stringify(request.body).slice(0, 2000) : undefined;
       await app.prisma.auditLog.create({
         data: {
           userId,
           action: `ADMIN ${request.method} ${routeUrl}`,
-          entity: routeUrl.split('/').filter(Boolean)[0] ?? 'admin',
-          entityId: params['id'] ?? params['key'] ?? '-',
+          entity: isAuditedRead ? 'integrity' : (routeUrl.split('/').filter(Boolean)[0] ?? 'admin'),
+          entityId: params['id'] ?? params['key'] ?? params['userId'] ?? '-',
           changes: body ? { params, body } : { params },
           ipAddress: request.ip,
           userAgent: request.headers['user-agent'],
@@ -2185,13 +2207,13 @@ export async function adminRoutes(app: FastifyInstance) {
 
   // ── Trial integrity (spec Part 9) — the identity graph is FOUNDER-ONLY
   //    god's-eye tooling: platform-wide by design (the one sanctioned
-  //    cross-tenant system). The global adminGuard + onResponse auto-audit
-  //    cover both routes — every view leaves an audit row. ─────────────────────
+  //    cross-tenant system). The founderGuard + onResponse auto-audit
+  //    cover these surfaces — every view leaves an audit row. ──────────────────
 
   /** Phase 2 backfill: run the matcher across the existing user base and
    *  return the evidence report. Idempotent; evidence first, decisions second
    *  — nothing here enforces anything. */
-  app.post('/integrity/backfill', { preHandler: [adminGuard] }, async () => {
+  app.post('/integrity/backfill', { preHandler: [founderGuard] }, async () => {
     const { runIdentityBackfill } = await import('../integrity/backfill');
     return { success: true, data: await runIdentityBackfill(app.prisma) };
   });
@@ -2199,7 +2221,7 @@ export async function adminRoutes(app: FastifyInstance) {
   /** The explainability read (Part 9.1/9.4): one account's cluster — members,
    *  every link's evidence, trial history, enforcement history, exceptions,
    *  and SOFT advisories. Every enforcement must be explainable from here. */
-  app.get<{ Params: { userId: string } }>('/integrity/identity/:userId', { preHandler: [adminGuard] }, async (request) => {
+  app.get<{ Params: { userId: string } }>('/integrity/identity/:userId', { preHandler: [founderGuard] }, async (request) => {
     const { IdentityService } = await import('../integrity/identity.service');
     const identity = new IdentityService(app.prisma);
     const clusterId = await identity.resolveCluster(request.params.userId);
@@ -2930,7 +2952,7 @@ export async function adminRoutes(app: FastifyInstance) {
   /** Part 4 appeals queue — OPEN cases with the accused's identity attached,
    *  oldest first (the 24h clock). Part 10's overturn rate rides along: >5%
    *  is the false-positive alarm that pauses enforcement expansion. */
-  app.get('/integrity/appeals', { preHandler: [adminGuard] }, async () => {
+  app.get('/integrity/appeals', { preHandler: [founderGuard] }, async () => {
     const { appealOverturnRate } = await import('../integrity/enforcement');
     const open = await app.prisma.enforcementAction.findMany({
       where: { appeal: 'OPEN' },
@@ -2953,7 +2975,7 @@ export async function adminRoutes(app: FastifyInstance) {
 
   /** Resolve an appeal. Overturn lifts the hold AND grants the cluster a
    *  FOUNDER_OVERRIDE exception, so the trial law honors the human next time. */
-  app.post<{ Params: { id: string } }>('/integrity/appeals/:id/resolve', { preHandler: [adminGuard] }, async (request) => {
+  app.post<{ Params: { id: string } }>('/integrity/appeals/:id/resolve', { preHandler: [founderGuard] }, async (request) => {
     const body = z.object({
       outcome: z.enum(['OVERTURNED', 'UPHELD']),
       note: z.string().trim().min(3).max(500),
@@ -2966,7 +2988,7 @@ export async function adminRoutes(app: FastifyInstance) {
   /** §3.5 — the founder issues a deliberate, logged exception (multi-location
    *  vendor trial-per-location, household, override). The trial law honors
    *  live exceptions; appeals overturn through this same mechanism. */
-  app.post('/integrity/exceptions', { preHandler: [adminGuard] }, async (request) => {
+  app.post('/integrity/exceptions', { preHandler: [founderGuard] }, async (request) => {
     const body = z.object({
       clusterId: z.string().min(1),
       scope: z.enum(['MULTI_LOCATION_VENDOR', 'HOUSEHOLD', 'FOUNDER_OVERRIDE']),
