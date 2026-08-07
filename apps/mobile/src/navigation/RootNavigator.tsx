@@ -3,12 +3,10 @@ import React from 'react';
 import { NavigationContainer } from '@react-navigation/native';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
 import { useAuthStore } from '../stores/authStore';
-import { useAppStore } from '../stores/appStore';
 import { useMoverPreview } from '../stores/moverPreview';
 import { useVendorPreview } from '../stores/vendorPreview';
 import { useCustomerCountry } from '../hooks/useCustomerCountry';
 import { registerIfGranted } from '../services/push';
-import { OnboardingScreen } from '../modules/onboarding/OnboardingScreen';
 import { CountryPickerScreen } from '../screens/auth/CountryPickerScreen';
 import { RolePickerScreen } from '../screens/auth/RolePickerScreen';
 import { SelfieCaptureScreen } from '../screens/auth/SelfieCaptureScreen';
@@ -21,6 +19,7 @@ import { navigationRef } from './navigationRef';
 import { installNotificationTapRouter, flushPendingNavigation } from '../services/notification-router';
 import { installDeepLinkHandler, flushPendingDeepLink } from '../services/deep-links';
 import { ensureFirstLaunchClaim, flushAttributedDestination } from '../services/attribution';
+import { rootEntryGate } from './rootEntryGate';
 
 const Stack = createNativeStackNavigator();
 
@@ -44,7 +43,6 @@ function mainForIntent(intent?: string | null) {
 
 export function RootNavigator() {
   const { isAuthenticated, wantsAuth, intent, countryCode, user } = useAuthStore();
-  const hasOnboarded = useAppStore((s) => s.hasOnboarded);
   // Customers skip the country picker — their market is seeded + resolved from
   // location instead (spec: pick role → straight to browsing).
   useCustomerCountry();
@@ -71,7 +69,6 @@ export function RootNavigator() {
   // Earners (mover/vendor) and advertisers must be signed in before their
   // stack. Customers browse freely and only authenticate when an action
   // (checkout) asks via promptLogin() → wantsAuth.
-  const earner = intent === 'mover' || intent === 'vendor' || intent === 'advertiser';
   // PREVIEW (earner R3 / vendor R4): a prospective driver ("Preview the driver
   // app") or business ("Preview a business") reaches the REAL stack WITHOUT a
   // country, sign-in, or selfie — read-only sample data. The vendor SAMPLE
@@ -80,12 +77,12 @@ export function RootNavigator() {
   const moverPreview = useMoverPreview((s) => s.preview);
   const vendorSamplePreview = useVendorPreview((s) => s.previewType) != null;
   const anyPreview = moverPreview || vendorSamplePreview;
-  const needsAuth = earner ? (!isAuthenticated && !anyPreview) : wantsAuth && !isAuthenticated;
   // Mandatory signup selfie (master plan §3): every signed-in account must
   // carry a camera-captured profile photo before using the app. Guests browse
   // untouched; the API enforces the same rule on orders/rides/go-online.
   const needsSelfie = isAuthenticated && !!user && !user.selfieCapturedAt;
   const Main = mainForIntent(intent);
+  const entryGate = rootEntryGate({ isAuthenticated, wantsAuth, intent, countryCode, anyPreview, needsSelfie });
 
   return (
     <NavigationContainer
@@ -97,28 +94,22 @@ export function RootNavigator() {
       }}
     >
       <Stack.Navigator screenOptions={{ headerShown: false }}>
-        {!hasOnboarded ? (
-          // First run only: kit onboarding slides, then never again.
-          <Stack.Screen name="Onboarding" component={OnboardingScreen} />
-        ) : wantsAuth && !isAuthenticated ? (
+        {entryGate === 'auth' ? (
           // "Already have an account? Sign in" from first-open (intent null —
           // after OTP the ACCOUNT routes, the trio is never asked) and the
           // guest checkout prompt both land here. Placed before the intent
           // question so sign-in-first needs no role answer.
           <Stack.Screen name="Auth" component={AuthStack} />
-        ) : !intent ? (
-          // Role FIRST: "How will you use Swift?" decides the whole path — a
-          // customer then just picks a country and browses (sign-in waits for
-          // checkout); a mover/vendor picks a country then does full sign-up.
+        ) : entryGate === 'role-picker' ? (
+          // Fresh install: the trio IS the welcome. Marketing onboarding
+          // carousels are explicitly banned by first-open spec 2.1.
           <Stack.Screen name="RolePicker" component={RolePickerScreen} />
-        ) : earner && !countryCode && !anyPreview ? (
+        ) : entryGate === 'country' ? (
           // Only earners pick a country here (it drives their signup + pricing);
           // customers are seeded/resolved by useCustomerCountry and go straight
           // to browsing.
           <Stack.Screen name="Country" component={CountryPickerScreen} />
-        ) : needsAuth ? (
-          <Stack.Screen name="Auth" component={AuthStack} />
-        ) : needsSelfie ? (
+        ) : entryGate === 'selfie' ? (
           <Stack.Screen name="Selfie" component={SelfieCaptureScreen} />
         ) : (
           <Stack.Screen name="Main" component={Main} />
