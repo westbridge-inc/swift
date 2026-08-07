@@ -242,6 +242,14 @@ const auditLogsQuerySchema = z.object({
   dateTo: z.coerce.date().optional(),
 });
 
+// Ordinary admin reads are intentionally not logged. These two routes are the
+// exception because they expose Swift's platform-wide identity graph; the
+// trial-integrity law requires every successful founder view to leave a trail.
+const auditedAdminReadRoutes = [
+  '/integrity/identity/:userId',
+  '/integrity/appeals',
+];
+
 export async function adminRoutes(app: FastifyInstance) {
   const notifications = new NotificationService(app.prisma, app.io);
   const verification = new VerificationService(app.prisma, notifications, getKycProvider());
@@ -281,23 +289,26 @@ export async function adminRoutes(app: FastifyInstance) {
   // Every successful admin STATE CHANGE is audited, automatically. A scoped
   // onResponse hook (plugin encapsulation: admin routes only) means a new
   // mutating route is covered the day it ships — the same philosophy as the
-  // authz matrix. Reads stay out of the log; failures (4xx/5xx) changed
-  // nothing so they stay out too. Route template (not raw URL) keeps the
-  // action name stable and free of user data.
+  // authz matrix. Ordinary reads stay out of the log; the two founder-only
+  // identity reads above are the deliberate exception. Failures (4xx/5xx)
+  // changed or revealed nothing, so they stay out too. Route templates keep
+  // action names stable and free of raw URL data.
   app.addHook('onResponse', async (request, reply) => {
-    if (request.method === 'GET' || reply.statusCode >= 400) return;
+    const routeUrl = request.routeOptions?.url ?? request.url;
+    const isAuditedRead = request.method === 'GET'
+      && auditedAdminReadRoutes.some((template) => routeUrl === template || routeUrl.endsWith(template));
+    if ((request.method === 'GET' && !isAuditedRead) || reply.statusCode >= 400) return;
     const userId = (request as { user?: { userId?: string } }).user?.userId;
     if (!userId) return;
     try {
-      const routeUrl = request.routeOptions?.url ?? request.url;
       const params = (request.params ?? {}) as Record<string, string>;
       const body = request.body ? JSON.stringify(request.body).slice(0, 2000) : undefined;
       await app.prisma.auditLog.create({
         data: {
           userId,
           action: `ADMIN ${request.method} ${routeUrl}`,
-          entity: routeUrl.split('/').filter(Boolean)[0] ?? 'admin',
-          entityId: params['id'] ?? params['key'] ?? '-',
+          entity: isAuditedRead ? 'integrity' : (routeUrl.split('/').filter(Boolean)[0] ?? 'admin'),
+          entityId: params['id'] ?? params['key'] ?? params['userId'] ?? '-',
           changes: body ? { params, body } : { params },
           ipAddress: request.ip,
           userAgent: request.headers['user-agent'],
