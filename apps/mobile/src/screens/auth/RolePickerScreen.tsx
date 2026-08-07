@@ -1,6 +1,7 @@
 /** @jsxImportSource react */
 import React from 'react';
-import { Pressable, View } from 'react-native';
+import { Pressable, ScrollView, View } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Feather } from '@expo/vector-icons';
 import { color, radius, space } from '@swift/ui';
 import { useAuthStore } from '../../stores/authStore';
@@ -23,19 +24,65 @@ const TRIO: {
   pictogram: PictogramName;
   title: string;
   sub: string;
+  hint: string;
 }[] = [
-  { intent: 'customer', pictogram: 'groceries', title: 'Swift', sub: 'Order food, groceries, rides and more' },
-  { intent: 'mover', pictogram: 'wheel', title: 'Swift Driver', sub: 'Deliveries and taxi trips — you keep 100%' },
-  { intent: 'vendor', pictogram: 'shops', title: 'Swift Business', sub: 'Run your store, menu and orders' },
+  {
+    intent: 'customer',
+    pictogram: 'groceries',
+    title: 'Swift',
+    sub: 'Order food, groceries, rides and more',
+    hint: 'Continue to customer browsing',
+  },
+  {
+    intent: 'mover',
+    pictogram: 'wheel',
+    title: 'Swift Driver',
+    sub: 'Deliveries and taxi trips — you keep 100%',
+    hint: 'Continue to driver setup',
+  },
+  {
+    intent: 'vendor',
+    pictogram: 'shops',
+    title: 'Swift Business',
+    sub: 'Run your store, menu and orders',
+    hint: 'Continue to business setup',
+  },
 ];
 
-function QuietRow({ icon, label, onPress }: { icon: React.ComponentProps<typeof Feather>['name']; label: string; onPress: () => void }) {
+function QuietRow({
+  icon,
+  label,
+  hint,
+  onPress,
+}: {
+  icon: React.ComponentProps<typeof Feather>['name'];
+  label: string;
+  hint: string;
+  onPress: () => void;
+}) {
   return (
-    <Pressable onPress={onPress} style={{ alignSelf: 'center', flexDirection: 'row', alignItems: 'center', gap: space.xs }} hitSlop={10}>
+    <Pressable
+      onPress={onPress}
+      style={{
+        minHeight: 44,
+        maxWidth: '100%',
+        paddingHorizontal: space.sm,
+        alignSelf: 'center',
+        flexDirection: 'row',
+        alignItems: 'center',
+        gap: space.xs,
+      }}
+      accessibilityRole="button"
+      accessibilityLabel={label}
+      accessibilityHint={hint}
+    >
       {({ pressed }) => (
         <>
           <Feather name={icon} size={16} color={color.brand[600]} style={{ opacity: pressed ? 0.6 : 1 }} />
-          <T variant="label" style={{ color: color.brand[600], opacity: pressed ? 0.6 : 1 }}>
+          <T
+            variant="label"
+            style={{ flexShrink: 1, color: color.brand[600], opacity: pressed ? 0.6 : 1 }}
+          >
             {label}
           </T>
         </>
@@ -45,6 +92,7 @@ function QuietRow({ icon, label, onPress }: { icon: React.ComponentProps<typeof 
 }
 
 export function RolePickerScreen() {
+  const insets = useSafeAreaInsets();
   const setIntent = useAuthStore((s) => s.setIntent);
   const setMoverPreset = useAuthStore((s) => s.setMoverPreset);
   const setCountry = useAuthStore((s) => s.setCountry);
@@ -64,72 +112,103 @@ export function RolePickerScreen() {
 
   return (
     <Screen>
-      <View style={{ flex: 1, paddingHorizontal: space['2xl'], paddingTop: space['2xl'] }}>
-        <SwiftMark size={56} />
-        <T variant="title" style={{ marginTop: space['3xl'] }}>
-          Welcome to Swift
-        </T>
-        <T variant="body" tone="muted" style={{ marginTop: space.sm }}>
-          One account — pick where you&apos;re headed.
-        </T>
+      <ScrollView
+        style={{ flex: 1 }}
+        contentContainerStyle={{
+          flexGrow: 1,
+          paddingHorizontal: space['2xl'],
+          paddingTop: space['2xl'],
+          paddingBottom: space['2xl'] + insets.bottom,
+        }}
+        showsVerticalScrollIndicator={false}
+      >
+        {/* Grow on tall screens to keep the footer low, while retaining the
+            original top alignment and scrolling naturally when space is tight. */}
+        <View style={{ flexGrow: 1 }}>
+          <SwiftMark size={56} />
+          <T variant="title" style={{ marginTop: space['3xl'] }}>
+            Welcome to Swift
+          </T>
+          <T variant="body" tone="muted" style={{ marginTop: space.sm }}>
+            One account — pick where you&apos;re headed.
+          </T>
 
-        <View style={{ gap: space.lg, marginTop: space['3xl'] }}>
-          {TRIO.map((o) => (
-            <PressableScale key={o.intent} onPress={() => pick(o.intent)}>
-              <Card style={{ flexDirection: 'row', alignItems: 'center', gap: space.lg }}>
-                <View
-                  style={{
-                    width: 52,
-                    height: 52,
-                    borderRadius: radius.md,
-                    alignItems: 'center',
-                    justifyContent: 'center',
-                    backgroundColor: color.brand[50],
-                  }}
-                >
-                  <Pictogram name={o.pictogram} size={28} color={color.brand[600]} />
-                </View>
-                <View style={{ flex: 1 }}>
-                  <T variant="body" weight="semibold">
-                    {o.title}
-                  </T>
-                  <T variant="caption" tone="muted" style={{ marginTop: 2 }}>
-                    {o.sub}
-                  </T>
-                </View>
-                <Feather name="chevron-right" size={20} color={color.text.muted} />
-              </Card>
-            </PressableScale>
-          ))}
+          <View style={{ gap: space.lg, marginTop: space['3xl'] }}>
+            {TRIO.map((o) => (
+              <PressableScale
+                key={o.intent}
+                onPress={() => pick(o.intent)}
+                accessibilityRole="button"
+                accessibilityLabel={`${o.title}. ${o.sub}`}
+                accessibilityHint={o.hint}
+              >
+                <Card style={{ flexDirection: 'row', alignItems: 'center', gap: space.lg }}>
+                  <View
+                    style={{
+                      width: 52,
+                      height: 52,
+                      borderRadius: radius.md,
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      backgroundColor: color.brand[50],
+                    }}
+                  >
+                    <Pictogram name={o.pictogram} size={28} color={color.brand[600]} />
+                  </View>
+                  <View style={{ flex: 1 }}>
+                    <T variant="body" weight="semibold">
+                      {o.title}
+                    </T>
+                    <T variant="caption" tone="muted" style={{ marginTop: 2 }}>
+                      {o.sub}
+                    </T>
+                  </View>
+                  <Feather name="chevron-right" size={20} color={color.text.muted} />
+                </Card>
+              </PressableScale>
+            ))}
+          </View>
+
+          {/* The account answers: sign in first and the trio question is never
+              asked — the server's roles + last-used role route (SO-4). */}
+          <Pressable
+            onPress={() => {
+              haptic.select();
+              if (!countryCode) setCountry(DEFAULT_COUNTRY);
+              setIntent(null);
+              promptLogin();
+            }}
+            style={{
+              minHeight: 44,
+              maxWidth: '100%',
+              paddingHorizontal: space.sm,
+              marginTop: space['2xl'],
+              alignSelf: 'center',
+              justifyContent: 'center',
+            }}
+            accessibilityRole="button"
+            accessibilityLabel="Already have an account? Sign in"
+            accessibilityHint="Open phone sign in"
+          >
+            {({ pressed }) => (
+              <T
+                variant="label"
+                tone="muted"
+                style={{ flexShrink: 1, textAlign: 'center', opacity: pressed ? 0.6 : 1 }}
+              >
+                Already have an account? <T variant="label" style={{ color: color.brand[600] }}>Sign in</T>
+              </T>
+            )}
+          </Pressable>
         </View>
-
-        {/* The account answers: sign in first and the trio question is never
-            asked — the server's roles + last-used role route (SO-4). */}
-        <Pressable
-          onPress={() => {
-            haptic.select();
-            if (!countryCode) setCountry(DEFAULT_COUNTRY);
-            setIntent(null);
-            promptLogin();
-          }}
-          style={{ marginTop: space['2xl'], alignSelf: 'center' }}
-          hitSlop={10}
-        >
-          {({ pressed }) => (
-            <T variant="label" tone="muted" style={{ opacity: pressed ? 0.6 : 1 }}>
-              Already have an account? <T variant="label" style={{ color: color.brand[600] }}>Sign in</T>
-            </T>
-          )}
-        </Pressable>
-
-        <View style={{ flex: 1 }} />
 
         {/* Growth funnel rows: real dashboards with sample data (R3/R4) and
             the advertiser surface — quiet, never co-equal with the trio. */}
-        <View style={{ gap: space.lg, marginBottom: space['2xl'] }}>
+        <View style={{ gap: space.lg, marginTop: space['3xl'] }}>
           <QuietRow
             icon="eye"
             label="Preview the driver app"
+            hint="Open a read-only sample driver dashboard"
             onPress={() => {
               setMoverPreset('taxi');
               enterPreview('DRIVER');
@@ -139,14 +218,20 @@ export function RolePickerScreen() {
           <QuietRow
             icon="eye"
             label="Preview a business dashboard"
+            hint="Open a read-only sample business dashboard"
             onPress={() => {
               enterVendorPreview('RESTAURANT');
               setIntent('vendor');
             }}
           />
-          <QuietRow icon="tv" label="Advertise on Swift" onPress={() => setIntent('advertiser')} />
+          <QuietRow
+            icon="tv"
+            label="Advertise on Swift"
+            hint="Open Swift advertising"
+            onPress={() => setIntent('advertiser')}
+          />
         </View>
-      </View>
+      </ScrollView>
     </Screen>
   );
 }
