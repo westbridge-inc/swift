@@ -41,7 +41,7 @@
     "ioredis": "^5.4.0",
     "jsqr": "^1.4.0",
     "meilisearch": "^0.56.0",
-    "nanoid": "^5.0.0",
+    "nanoid": "^5.1.16",
     "pdf-parse": "^2.4.5",
     "pdfkit": "^0.19.1",
     "pino": "^9.6.0",
