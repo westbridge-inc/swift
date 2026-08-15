@@ -987,7 +987,7 @@ export async function adminRoutes(app: FastifyInstance) {
 
     const updated = await app.prisma.vendor.update({
       where: { id },
-      data: { status: 'SUSPENDED', acceptingOrders: false },
+      data: { status: 'SUSPENDED', acceptingOrders: false, suspensionSource: 'ADMIN' },
     });
 
     scheduleVendorSearchSync(app, id);

@@ -937,6 +937,10 @@ model Vendor {
   // lapse between daily sweeps stops sales at the next order, not the next
   // sweep.
   activationValidUntil    DateTime?
+  // [REPORT-013 F-013-07] WHO suspended the store: 'BILLING' (non-payment,
+  // reversible by payment) or 'ADMIN' (manual/safety — payment must NOT
+  // lift it). Reinstatement CAS-matches BILLING only.
+  suspensionSource        String?
   isFeatured              Boolean                  @default(false)
   averageRating           Float                    @default(5.0)
   totalRatings            Int                      @default(0)

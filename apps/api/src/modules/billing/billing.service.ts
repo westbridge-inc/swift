@@ -168,6 +168,25 @@ export class BillingService {
       });
     } catch (error) {
       if ((error as Prisma.PrismaClientKnownRequestError).code === 'P2002') {
+        // [REPORT-013 F-013-09] A duplicate attempt key is NOT always
+        // "already handled": a crash between the durable CHARGE_FAILED
+        // record and its outcome application leaves failedAttempts at the
+        // recorded level forever — every later run collides on the same key
+        // and skipping here would suppress retries AND the suspension
+        // permanently. If the failure record exists while its outcome never
+        // landed, RESUME the outcome instead of skipping past it. (A fully
+        // applied failure advanced failedAttempts, so its next key differs
+        // and this branch is unreachable for it.)
+        const failedKey = `failed:${sub.id}:${periodKey}:a${sub.failedAttempts}`;
+        const recordedFailure = await this.prisma.billingEvent.findUnique({
+          where: { idempotencyKey: failedKey },
+          select: { note: true },
+        });
+        if (recordedFailure) {
+          return this.applyRecordedFailureOutcome(
+            sub, recordedFailure.note ?? 'Charge failed (outcome resumed after interruption)', now, periodKey,
+          );
+        }
         return 'skipped'; // someone (or a concurrent run) already attempted this
       }
       throw error;
@@ -866,9 +885,6 @@ export class BillingService {
     now: Date,
     periodKey: string,
   ): Promise<'failed' | 'suspended'> {
-    const attempts = sub.failedAttempts + 1;
-    const willSuspend = attempts >= MAX_FAILED_ATTEMPTS && sub.autoSuspendEnabled;
-
     await this.prisma.billingEvent.create({
       data: {
         subscriptionId: sub.id,
@@ -879,6 +895,23 @@ export class BillingService {
         note: reason,
       },
     });
+    return this.applyRecordedFailureOutcome(sub, reason, now, periodKey);
+  }
+
+  /** [REPORT-013 F-013-09] The APPLICATION half of a failed charge —
+   *  subscription state, access revocation, and dunning notices — separated
+   *  from the durable CHARGE_FAILED record so a crash between the two is
+   *  RESUMABLE: billSubscription's duplicate-attempt path re-enters here
+   *  when it finds a recorded failure whose outcome never landed
+   *  (failedAttempts still at the recorded level). */
+  private async applyRecordedFailureOutcome(
+    sub: SubWithRelations,
+    reason: string,
+    now: Date,
+    periodKey: string,
+  ): Promise<'failed' | 'suspended'> {
+    const attempts = sub.failedAttempts + 1;
+    const willSuspend = attempts >= MAX_FAILED_ATTEMPTS && sub.autoSuspendEnabled;
 
     const nextRetryAt = new Date(now.getTime() + RETRY_HOURS * 60 * 60 * 1000);
     const subscriptionData = {
@@ -955,7 +988,7 @@ export class BillingService {
       // SUSPENDED vendors vanish from customer browse (which filters ACTIVE)
       await tx.vendor.update({
         where: { id: sub.vendor.id },
-        data: { status: 'SUSPENDED', acceptingOrders: false },
+        data: { status: 'SUSPENDED', acceptingOrders: false, suspensionSource: 'BILLING' },
       });
     }
     if (sub.rider) {
@@ -1001,9 +1034,27 @@ export class BillingService {
 
   private async reinstate(sub: SubWithRelations, periodKey: string) {
     if (sub.vendor) {
-      await this.prisma.vendor.update({
-        where: { id: sub.vendor.id },
-        data: { status: 'ACTIVE', acceptingOrders: true },
+      // [REPORT-013 F-013-07] Payment restores ONLY what billing took. The
+      // lifecycle CAS matches a billing-caused suspension exclusively — an
+      // admin/safety suspension survives payment. Commerce reopens only
+      // where the projection-maintained document truth (isVerified, kept
+      // in-generation by every evidence path since v10) still stands: a
+      // store whose documents died mid-suspension comes back ACTIVE but
+      // closed, never a blind acceptingOrders=true.
+      // Transition rule: a pre-migration suspension has a null source; the
+      // only AUTOMATED suspender has always been billing, so null lifts with
+      // payment (an admin can always re-suspend, which stamps ADMIN).
+      await this.prisma.vendor.updateMany({
+        where: {
+          id: sub.vendor.id,
+          status: 'SUSPENDED',
+          OR: [{ suspensionSource: 'BILLING' }, { suspensionSource: null }],
+        },
+        data: { status: 'ACTIVE', suspensionSource: null },
+      });
+      await this.prisma.vendor.updateMany({
+        where: { id: sub.vendor.id, status: 'ACTIVE', isVerified: true },
+        data: { acceptingOrders: true },
       });
     }
 
