@@ -9,7 +9,7 @@ import type { FastifyInstance } from 'fastify';
 /** Machine version of the served legal pack — stamped onto User.tosVersion at
  *  signup consent [SWIFT-AUD-D9-03]. Bump BOTH constants together whenever the
  *  Terms/Privacy content changes. */
-export const LEGAL_VERSION = '2026-08-15'; // [REPORT-012 F-012-03] §4 cancellation = confirm-at-cancel protocol; Privacy names processors + AI
+export const LEGAL_VERSION = '2026-08-15.2'; // [REPORT-013 F-013-04] Privacy corrected to code-truth: KYC provider named, Sentry route-template scope, AI filter described without overclaims
 const LAST_UPDATED = '15 August 2026'; // human form of LEGAL_VERSION
 
 function page(title: string, body: string): string {
@@ -85,7 +85,7 @@ const PRIVACY = page(
 <li><b>Account:</b> your phone number (verified by SMS code), name, and optional email.</li>
 <li><b>Orders and rides:</b> what you ordered, addresses you save or enter, and the trip/delivery history tied to your account.</li>
 <li><b>Location:</b> your device location while you use the app to set pickup/delivery points. For movers, live location while online — that is what powers dispatch and customer tracking.</li>
-<li><b>Verification documents (partners and, where required, customers):</b> government ID and, for movers, licence, insurance and related documents. These are stored privately and are only viewable by our verification team through short-lived signed links, each access logged.</li>
+<li><b>Verification documents (partners and, where required, customers):</b> government ID and, for movers, licence, insurance and related documents. These are stored privately; in the app they are viewable only by our verification team through short-lived signed links, each access logged. To confirm a document and selfie match, they are also processed by our identity-verification provider (see the provider list below).</li>
 <li><b>A registration selfie</b> to deter account fraud; it becomes your in-app photo.</li>
 </ul>
 
@@ -97,8 +97,8 @@ const PRIVACY = page(
 
 <h2>4. Sharing</h2>
 <p>A business sees what it needs to fulfil your order (items, first name, delivery address). A mover sees pickup/drop-off details and your first name. Movers and customers see each other's ratings. We share data with authorities only where the law requires it.</p>
-<p><b>Technical service providers:</b> to run Swift we use a small number of providers, each receiving only what its function needs: Twilio (delivers your SMS verification codes — your phone number), Expo (delivers push notifications — a device token), Sentry (crash and error reports, scrubbed of tokens and personal identifiers), encrypted cloud object storage (verification documents and images), and Google Maps (addresses and coordinates for map display and travel estimates).</p>
-<p><b>AI processing:</b> some features — such as understanding a search query or tidying a store's menu text — use Anthropic's Claude API. Text sent to it is scrubbed of personal identifiers first; Swift does not send your name, phone number, addresses or documents to AI services.</p>
+<p><b>Technical service providers:</b> to run Swift we use a small number of providers, each receiving only what its function needs: Twilio (delivers your SMS verification codes — your phone number), Expo (delivers push notifications — a device token), an identity-verification provider — Didit or ID Analyzer — (receives the verification document and matching selfie to perform the identity check), Sentry (crash and error reports; the request context we attach is limited to route templates and passes an automated filter that removes tokens and signed links), encrypted cloud object storage (verification documents and images), and Google Maps (addresses and coordinates for map display and travel estimates).</p>
+<p><b>AI processing:</b> some features — such as understanding a search query or tidying a store's menu text — use Anthropic's Claude API. Before any text is sent it passes an automated filter that removes phone numbers, email addresses, card-like numbers, tokens, document references and common address forms. Swift never sends your verification documents or account records to AI services, and these API inputs are not used to train AI models. Free text you type could still contain personal details the filter cannot recognise — avoid putting personal information in search terms or menu text.</p>
 
 <h2>5. Retention and deletion</h2>
 <p>Verification documents are purged on a schedule after they stop being needed, with the purge itself logged. Order history is retained for the period required for disputes, guarantees and legal obligations. You can request account deletion in Help &amp; Support; we delete or de-identify personal data not subject to a legal retention duty.</p>

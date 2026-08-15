@@ -17,6 +17,40 @@ let sentryReady = false;
  *  throw — the API server (via observabilityPlugin) AND the worker process
  *  (worker.ts main). captureError is a silent no-op until this runs, so a
  *  process that skips it reports nothing [SWIFT-042]. */
+// [REPORT-013 F-013-04] Errors carry CONTEXT, never identifiers: tokenized
+// public URLs (/track/:token, /public/trip/:token), querystrings, headers,
+// cookies, and body data must not reach the error tracker. Every outgoing
+// event passes through this scrubber; capture sites additionally pass route
+// TEMPLATES instead of raw URLs.
+const TOKENISH_PARAM = /\b(token|secret|key|authorization|otp|pin|code|sig|signature)=[^&\s]+/gi;
+const TOKENISH_PATH = /\/(track|public\/trip|render)\/[A-Za-z0-9_.-]+/g;
+function scrubSentryText(value: string): string {
+  return value.replace(TOKENISH_PARAM, '$1=[scrubbed]').replace(TOKENISH_PATH, '/$1/[scrubbed]');
+}
+export function scrubSentryEvent<T extends {
+  request?: { url?: string; query_string?: unknown; headers?: unknown; cookies?: unknown; data?: unknown };
+  extra?: Record<string, unknown>;
+  breadcrumbs?: Array<{ message?: string; data?: Record<string, unknown> }>;
+}>(event: T): T {
+  if (event.request) {
+    if (event.request.url) event.request.url = scrubSentryText(event.request.url);
+    delete event.request.query_string;
+    delete event.request.headers;
+    delete event.request.cookies;
+    delete event.request.data;
+  }
+  if (event.extra) {
+    for (const [key, value] of Object.entries(event.extra)) {
+      if (typeof value === 'string') event.extra[key] = scrubSentryText(value);
+    }
+  }
+  for (const crumb of event.breadcrumbs ?? []) {
+    if (typeof crumb.message === 'string') crumb.message = scrubSentryText(crumb.message);
+    if (crumb.data && typeof crumb.data['url'] === 'string') crumb.data['url'] = scrubSentryText(crumb.data['url'] as string);
+  }
+  return event;
+}
+
 export function initSentry() {
   const dsn = process.env['SENTRY_DSN'];
   if (!dsn || sentryReady) return sentryReady;
@@ -25,6 +59,7 @@ export function initSentry() {
     environment: process.env['NODE_ENV'] ?? 'development',
     // Errors only for V1 — tracing multiplies cost without a consumer yet.
     tracesSampleRate: 0,
+    beforeSend: (event) => scrubSentryEvent(event),
   });
   sentryReady = true;
   return true;
@@ -191,7 +226,9 @@ export async function observabilityPlugin(app: FastifyInstance) {
   app.addHook('onError', (request, _reply, error, done) => {
     const status = (error as AppError).statusCode ?? 500;
     if (status >= 500) {
-      captureError(error, { method: request.method, url: request.url, requestId: request.id });
+      // Route TEMPLATE, never the raw URL — /track/:token must not leak its
+      // token into the tracker [REPORT-013 F-013-04].
+      captureError(error, { method: request.method, url: request.routeOptions?.url ?? 'unmatched', requestId: request.id });
     }
     done();
   });
