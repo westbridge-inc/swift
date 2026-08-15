@@ -107,6 +107,8 @@ export async function ridesRoutes(app: FastifyInstance) {
     });
     const watch = await app.prisma.supplyWatch.create({
       data: {
+        // [REPORT-014 F-014-03] Watches are tenant rows now.
+        tenantId: getTenantId() ?? 'swift-default',
         customerId: request.user.userId,
         pool: 'DRIVER',
         lat, lng,

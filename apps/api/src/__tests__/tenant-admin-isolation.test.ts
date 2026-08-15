@@ -9,6 +9,7 @@ import { registerErrorHandler } from '../middleware/error-handler';
 import { registerEmptyJsonBodyParser } from '../plugins/empty-json';
 import { adminRoutes } from '../modules/admin/admin.routes';
 import { authRoutes } from '../modules/auth/auth.routes';
+import { NotificationService, notifyAdmins } from '../modules/notification/notification.service';
 import { luhnCheckDigit } from '../modules/billing/san';
 import { loginWithOtp } from './helpers/otp';
 
@@ -1450,6 +1451,53 @@ describe('tenant-qualified admin access', () => {
       await runWithoutTenant(async () => {
         if (subscriptionId) await app.prisma.subscription.deleteMany({ where: { id: subscriptionId } });
         await app.prisma.order.deleteMany({ where: { id: orderId } });
+      });
+    }
+  });
+});
+
+describe('background engine output stays inside the tenant [REPORT-014 F-014-03]', () => {
+  it('a tenant-scoped notifyAdmins pages that tenant + SUPER_ADMIN, never a foreign tenant admin', async () => {
+    const suffix = nanoid(6).toLowerCase();
+    const foreignTenant = `notify-b-${suffix}`;
+    const ids: string[] = [];
+    try {
+      const [adminDefault, adminForeign, superFounder] = await runWithoutTenant(async () => {
+        await app.prisma.tenant.upsert({
+          where: { id: foreignTenant },
+          update: {},
+          create: { id: foreignTenant, name: 'Notify B', slug: foreignTenant },
+        });
+        const a = await app.prisma.user.create({ data: { phone: `+59277${suffix.replace(/\D/g, '9').padEnd(5, '1').slice(0, 5)}1`, firstName: 'Adm', lastName: 'Default', roles: ['ADMIN'], activeRole: 'ADMIN', isPhoneVerified: true, tenantId: 'swift-default' } });
+        const b = await app.prisma.user.create({ data: { phone: `+59277${suffix.replace(/\D/g, '9').padEnd(5, '1').slice(0, 5)}2`, firstName: 'Adm', lastName: 'Foreign', roles: ['ADMIN'], activeRole: 'ADMIN', isPhoneVerified: true, tenantId: foreignTenant } });
+        const f = await app.prisma.user.create({ data: { phone: `+59277${suffix.replace(/\D/g, '9').padEnd(5, '1').slice(0, 5)}3`, firstName: 'Founder', lastName: 'Eye', roles: ['SUPER_ADMIN'], activeRole: 'SUPER_ADMIN', isPhoneVerified: true, tenantId: 'swift-default' } });
+        return [a, b, f];
+      });
+      ids.push(adminDefault.id, adminForeign.id, superFounder.id);
+
+      // The worker shape: NO tenant ALS — exactly the F-014-03 scenario.
+      const notifications = new NotificationService(app.prisma, app.io);
+      await runWithoutTenant(() => notifyAdmins(app.prisma, notifications, {
+        title: 'Dispatch exhausted — no mover found',
+        body: `Order NOTIFY-${suffix} found no mover after all retries. Check mover supply and dispatch health.`,
+        data: { kind: 'ops_dispatch_exhausted' },
+        tenantId: foreignTenant,
+      }));
+
+      const rows = await runWithoutTenant(() => app.prisma.notification.findMany({
+        where: { userId: { in: ids }, body: { contains: `NOTIFY-${suffix}` } },
+        select: { userId: true },
+      }));
+      const paged = new Set(rows.map((r) => r.userId));
+      expect(paged.has(adminForeign.id)).toBe(true); // the event's tenant
+      expect(paged.has(superFounder.id)).toBe(true); // founder god's-eye always
+      expect(paged.has(adminDefault.id)).toBe(false); // FOREIGN tenant admin never
+    } finally {
+      await runWithoutTenant(async () => {
+        await app.prisma.notification.deleteMany({ where: { userId: { in: ids } } });
+        await app.prisma.alertDelivery.deleteMany({ where: { recipientId: { in: ids } } });
+        await app.prisma.user.deleteMany({ where: { id: { in: ids } } });
+        await app.prisma.tenant.deleteMany({ where: { id: foreignTenant } });
       });
     }
   });

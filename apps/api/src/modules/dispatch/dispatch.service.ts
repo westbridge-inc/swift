@@ -1184,6 +1184,7 @@ export class DispatchService {
 
   private async exhaust(order: {
     id: string; orderNumber: string; customerId: string; isExpress?: boolean;
+    tenantId: string;
     vendor: { name: string; owner: { userId: string } } | null;
   }) {
     await this.redis.del(offerKey(order.id), roundKey(order.id));
@@ -1252,6 +1253,7 @@ export class DispatchService {
                 title: 'Dispatch exhausted — no mover found',
                 body: `Order ${order.orderNumber} found no mover after all retries. Check mover supply and dispatch health.`,
                 data: { kind: 'ops_dispatch_exhausted', orderId: order.id },
+                tenantId: order.tenantId,
               }),
             ).catch(() => {});
             return;
@@ -1320,6 +1322,7 @@ export class DispatchService {
         title: 'Dispatch exhausted — no mover found',
         body: `Order ${order.orderNumber} found no mover after all retries. Check mover supply and dispatch health.`,
         data: { kind: 'ops_dispatch_exhausted', orderId: order.id },
+        tenantId: order.tenantId,
       }),
     ).catch(() => {});
   }

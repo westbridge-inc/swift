@@ -131,10 +131,22 @@ export async function acknowledgeAlert(
 export async function notifyAdmins(
   prisma: PrismaClient,
   notifications: NotificationService,
-  input: { title: string; body: string; data?: Record<string, unknown> },
+  input: { title: string; body: string; data?: Record<string, unknown>; tenantId?: string },
 ): Promise<number> {
+  // [REPORT-014 F-014-03] Background workers carry no tenant ALS, so a
+  // tenant-A event used to page tenant-B admins with A's order evidence.
+  // With a tenantId, ordinary admins are scoped to it; SUPER_ADMIN (the
+  // founder god's-eye) is always paged — cross-tenant visibility is that
+  // role's sanctioned privilege. No tenantId keeps the legacy global page
+  // for genuinely platform-wide notices.
   const admins = await prisma.user.findMany({
-    where: { roles: { hasSome: ['ADMIN', 'SUPER_ADMIN'] }, status: 'ACTIVE' },
+    where: {
+      roles: { hasSome: ['ADMIN', 'SUPER_ADMIN'] },
+      status: 'ACTIVE',
+      ...(input.tenantId
+        ? { OR: [{ tenantId: input.tenantId }, { roles: { has: 'SUPER_ADMIN' } }] }
+        : {}),
+    },
     select: { id: true },
   });
   for (const admin of admins) {
