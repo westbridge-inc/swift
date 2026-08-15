@@ -25,7 +25,7 @@ const PROMISES = [
   {
     icon: ShieldCheck,
     title: 'Verified people, honest orders',
-    body: 'ID-verified partners, PIN-verified rides, live tracking on every order and an early-cancel window before the store even starts (cash cancels free; MMG payments are refunded directly by the store).',
+    body: 'ID-verified partners, PIN-verified rides and live tracking on every order. Cancel from the order screen—typically free before store acceptance; the app confirms the exact outcome on cancel (CASH cancellations cost nothing in those cases; MMG refunds come directly from the store).',
   },
 ];
 
