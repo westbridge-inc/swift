@@ -72,9 +72,11 @@ export async function scanSupplyWatches(
 /**
  * Struggling-delivery options (availability spec §4.2 row 2): READY for
  * DELIVERY_ESCALATE_AFTER minutes with no rider bound — the customer gets the
- * options push ONCE (dedupe on the notification log): keep waiting, switch to
- * pickup (#242's conversion), or cancel. The search itself keeps retrying —
- * this is about giving the human a choice, not about giving up.
+ * options push ONCE (dedupe on the notification log): switch to pickup
+ * (#242's conversion) or cancel; waiting stays possible but is not promised
+ * as an active retry [REPORT-014 F-014-07: at terminal exhaustion nothing
+ * auto-retries — the store's retry-dispatch or returning supply revives it;
+ * a real customer "keep waiting" re-arm rides ENGINE-2].
  */
 export async function scanStrugglingDeliveries(
   prisma: PrismaClient,
@@ -83,45 +85,56 @@ export async function scanStrugglingDeliveries(
   cap = 50,
 ): Promise<number> {
   const cutoff = new Date(Date.now() - escalateAfterMinutes * 60_000);
-  const struggling = await prisma.order.findMany({
-    where: {
-      status: 'READY_FOR_PICKUP',
-      fulfillment: 'DELIVERY',
-      riderId: null,
-      readyAt: { lte: cutoff },
-      vendorId: { not: null },
-      orderType: { not: 'TAXI' },
-      // [F-0026] Never tell a customer "no rider found — switch to pickup?" when
-      // the vendor's own driver is the one bringing it.
-      AND: [notSelfDeliveredFilter()],
-    },
-    select: { id: true, customerId: true, orderNumber: true },
-    orderBy: { readyAt: 'asc' },
-    take: cap,
-  });
-
   let prompted = 0;
-  for (const o of struggling) {
-    const already = await prisma.notification.findFirst({
+  let cursor: { id: string } | undefined;
+  // [REPORT-014 F-014-15] Page until CAP FRESH prompts (or candidates run
+  // out): the old shape took the oldest 50 BEFORE the already-notified
+  // dedupe, so 50 previously-prompted stragglers permanently hid the 51st.
+  while (prompted < cap) {
+    const struggling = await prisma.order.findMany({
       where: {
-        userId: o.customerId,
-        data: { path: ['orderId'], equals: o.id },
-        AND: { data: { path: ['kind'], equals: 'delivery_options' } },
+        status: 'READY_FOR_PICKUP',
+        fulfillment: 'DELIVERY',
+        riderId: null,
+        readyAt: { lte: cutoff },
+        vendorId: { not: null },
+        orderType: { not: 'TAXI' },
+        // [F-0026] Never tell a customer "no rider found — switch to pickup?" when
+        // the vendor's own driver is the one bringing it.
+        AND: [notSelfDeliveredFilter()],
       },
-      select: { id: true },
+      select: { id: true, customerId: true, orderNumber: true },
+      orderBy: [{ readyAt: 'asc' }, { id: 'asc' }],
+      take: cap,
+      ...(cursor ? { cursor, skip: 1 } : {}),
     });
-    if (already) continue;
+    if (struggling.length === 0) break;
+    cursor = { id: struggling[struggling.length - 1]!.id };
 
-    await notifications
-      .send({
-        userId: o.customerId,
-        type: 'ORDER_UPDATE',
-        title: "We're having trouble finding a rider",
-        body: `Order #${o.orderNumber} is ready and waiting. Keep waiting, switch to pickup, or cancel — your call.`,
-        data: { kind: 'delivery_options', orderId: o.id },
-      })
-      .catch(() => {});
-    prompted += 1;
+    for (const o of struggling) {
+      if (prompted >= cap) break;
+      const already = await prisma.notification.findFirst({
+        where: {
+          userId: o.customerId,
+          data: { path: ['orderId'], equals: o.id },
+          AND: { data: { path: ['kind'], equals: 'delivery_options' } },
+        },
+        select: { id: true },
+      });
+      if (already) continue;
+
+      await notifications
+        .send({
+          userId: o.customerId,
+          type: 'ORDER_UPDATE',
+          title: "We're having trouble finding a rider",
+          body: `Order #${o.orderNumber} is ready and still waiting for a rider. You can switch to pickup or cancel — your call.`,
+          data: { kind: 'delivery_options', orderId: o.id },
+        })
+        .catch(() => {});
+      prompted += 1;
+    }
+    if (struggling.length < cap) break; // no more candidates behind the cursor
   }
   return prompted;
 }

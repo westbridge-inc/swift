@@ -178,4 +178,52 @@ describe('struggling-delivery options (spec §4.2)', () => {
     expect(await scanStrugglingDeliveries(app.prisma, notifications)).toBe(0);
     expect(await app.prisma.notification.count({ where: { userId: customerId } })).toBe(before + 1);
   });
+
+  it('a wall of already-prompted stragglers cannot hide the next one — paging beats the cap [REPORT-014 F-014-15]', async () => {
+    const { scanStrugglingDeliveries } = await import('../modules/dispatch/supply-watch.service');
+    const notifications = new NotificationService(app.prisma, app.io);
+    const vendor = await app.prisma.vendor.findFirstOrThrow({ where: { status: 'ACTIVE' }, select: { id: true } });
+
+    const mk = (minutesReady: number) =>
+      app.prisma.order.create({
+        data: {
+          orderNumber: `CAP-${nanoid(8)}`,
+          orderType: 'FOOD_DELIVERY',
+          customerId,
+          vendorId: vendor.id,
+          status: 'READY_FOR_PICKUP',
+          fulfillment: 'DELIVERY',
+          deliveryAddress: 'x', deliveryLat: 6.8, deliveryLng: -58.15,
+          subtotalBase: 1000, subtotalMarkup: 0, subtotalCustomer: 1000, deliveryFee: 300, totalAmount: 1300,
+          paymentMethod: 'CASH',
+          readyAt: new Date(Date.now() - (30 - minutesReady) * 60_000),
+        },
+      });
+
+    // Three OLDER stragglers, all already prompted…
+    const olds = [];
+    for (let i = 0; i < 3; i += 1) {
+      const o = await mk(i);
+      olds.push(o);
+      watchOrderIds.push(o.id);
+      await app.prisma.notification.create({
+        data: {
+          userId: customerId, type: 'ORDER_UPDATE', title: 'x', body: 'x',
+          data: { kind: 'delivery_options', orderId: o.id },
+        },
+      });
+    }
+    // …then a NEWER one that has never been prompted.
+    const hidden = await mk(10);
+    watchOrderIds.push(hidden.id);
+
+    // cap = 3: the old shape took only the 3 oldest (all already prompted)
+    // and returned 0, hiding the 4th forever. Paging keeps going.
+    const prompted = await scanStrugglingDeliveries(app.prisma, notifications, 5, 3);
+    expect(prompted).toBeGreaterThanOrEqual(1);
+    const note = await app.prisma.notification.findFirst({
+      where: { userId: customerId, data: { path: ['orderId'], equals: hidden.id } },
+    });
+    expect(note).not.toBeNull();
+  });
 });
