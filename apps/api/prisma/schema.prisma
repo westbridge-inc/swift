@@ -476,6 +476,9 @@ model RideQueueEntry {
 
 model SupplyWatch {
   id         String    @id @default(cuid())
+  // [REPORT-014 F-014-03] Watches are tenant-scoped: driver-demand counts and
+  // supply-recovery notifications must never read another tenant's watchers.
+  tenantId   String    @default("swift-default")
   customerId String
   pool       String // DRIVER | RIDER
   lat        Float
