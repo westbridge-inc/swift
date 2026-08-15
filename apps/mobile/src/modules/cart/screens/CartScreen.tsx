@@ -45,6 +45,7 @@ import {
 import { BrandSwitch } from '../../../kit/controls';
 import type { MmgDirectPaymentAction } from '@swift/types';
 import { CartPaymentOptions } from '../CartPaymentOptions';
+import { checkoutTipAmount } from '../checkout-tip';
 import {
   checkoutPaymentMethod,
   normalizeCartPaymentCapabilities,
@@ -78,6 +79,7 @@ export function CartScreen() {
   const [promoMsg, setPromoMsg] = useState<{ ok: boolean; text: string } | null>(null);
   const [promoPopup, setPromoPopup] = useState(false);
   const [instructions, setInstructions] = useState('');
+  const [selectedTip, setSelectedTip] = useState<number | null>(null);
   const [express, setExpress] = useState(false);
   const [paySelection, setPaySelection] = useState<CartPaymentSelection>({ method: 'CASH', scope: '' });
   // Pickup spec 2.1: the FIRST decision — it reshapes everything below.
@@ -99,6 +101,12 @@ export function CartScreen() {
     [c?.paymentCapabilities],
   );
   const effectivePaySelection = reconcileCartPaymentSelection(paySelection, paymentCapabilities);
+
+  // Tip intent belongs to one logical cart. Never reset it from tipAmount — a
+  // late persistence response must not replace the customer's local choice.
+  useEffect(() => {
+    setSelectedTip(null);
+  }, [c?.id]);
 
   // Persist the safe degradation. Merely deriving CASH would leave MMG hidden
   // in state, where it could silently revive when another capable cart loads.
@@ -158,11 +166,28 @@ export function CartScreen() {
   const apptOnly = items.length > 0 && bookingItems.length === items.length;
   // Bookings have no counter to collect from; pickup applies to goods carts.
   const pickup = !apptOnly && fulfillment === 'PICKUP';
+  const displayedTip = checkoutTipAmount({
+    pickupOrApptOnly: pickup || apptOnly,
+    selectedTip,
+    cartTip: c?.tipAmount,
+  });
+  const displayedTotal = c
+    ? Math.max(
+        0,
+        (pickup
+          ? c.totalAmount - c.deliveryFee
+          : express && c.deliveryFee > 0
+            ? c.expressTotal
+            : c.totalAmount)
+          - Number(c.tipAmount ?? 0)
+          + displayedTip,
+      )
+    : 0;
   const choosePickup = () => {
     setFulfillment('PICKUP');
     setExpress(false); // express is a delivery speed
-    // No rider on a pickup — clear any rider tip SERVER-side so totals stay
-    // server-truth (the UI below hides the tip block while picked).
+    // No rider on a pickup — clear the persisted convenience too. Checkout
+    // still submits zero synchronously if this mutation is delayed or fails.
     if (Number(c?.tipAmount) > 0) setTip.mutate(0);
   };
   const homeVisit = apptOnly && apptPayload.some((a) => (a as { mode?: string }).mode === 'MOBILE');
@@ -181,6 +206,12 @@ export function CartScreen() {
 
   const onOrder = (extra?: Record<string, unknown>) => {
     const asPickup = pickup && !!c?.vendor?.id;
+    const submittingPickup = pickup || (extra as any)?.fulfillmentSelections != null;
+    const submittedTip = checkoutTipAmount({
+      pickupOrApptOnly: apptOnly || submittingPickup,
+      selectedTip,
+      cartTip: c?.tipAmount,
+    });
     const submittedMethod = checkoutPaymentMethod(effectivePaySelection, paymentCapabilities);
     placeOrder.mutate(
       {
@@ -190,11 +221,12 @@ export function CartScreen() {
         ...(instructions.trim() && !pickup ? { deliveryInstructions: instructions.trim() } : {}),
         ...(asPickup ? { fulfillmentSelections: { [c.vendor.id]: 'PICKUP' } } : {}),
         ...(extra ?? {}),
+        tipAmount: submittedTip,
       },
       {
         onSuccess: (data: any) => {
           haptic.success();
-          setPlacedPickup(asPickup || (extra as any)?.fulfillmentSelections != null);
+          setPlacedPickup(submittingPickup);
           const first = data?.orders?.[0];
           const paymentAction = paymentActionForCheckout(data ?? {}, submittedMethod);
           setPlacedOrderId(first?.id ?? null);
@@ -439,8 +471,11 @@ export function CartScreen() {
                   <Chip
                     key={t}
                     label={t === 0 ? 'No tip' : money(t)}
-                    selected={Number(c.tipAmount) === t}
-                    onPress={() => setTip.mutate(t)}
+                    selected={(selectedTip ?? Number(c.tipAmount)) === t}
+                    onPress={() => {
+                      setSelectedTip(t);
+                      setTip.mutate(t);
+                    }}
                     style={{ height: 44, paddingHorizontal: space.lg }}
                   />
                 ))}
@@ -503,13 +538,13 @@ export function CartScreen() {
               {pickup ? <InfoRow label="Pickup" value="No delivery fee" /> : null}
               {!pickup && express && c.deliveryFee > 0 ? <InfoRow label="Express" value={money(c.expressSurcharge)} /> : null}
               {c.discount > 0 ? <InfoRow label="Discount" value={`-${money(c.discount)}`} /> : null}
-              {!apptOnly && !pickup && Number(c.tipAmount) > 0 ? <InfoRow label="Rider tip" value={money(c.tipAmount)} /> : null}
+              {!apptOnly && !pickup && displayedTip > 0 ? <InfoRow label="Rider tip" value={money(displayedTip)} /> : null}
               <View style={{ height: 1, backgroundColor: color.border.subtle, marginVertical: space.sm }} />
               {/* Pickup preview = the same server numbers minus the delivery
                   leg; the server prices the real order at place time. */}
               <InfoRow
                 label={pickup ? 'Total at the counter' : 'Total'}
-                value={money(pickup ? c.totalAmount - c.deliveryFee - Number(c.tipAmount ?? 0) : express && c.deliveryFee > 0 ? c.expressTotal : c.totalAmount)}
+                value={money(displayedTotal)}
                 strong
               />
             </View>
