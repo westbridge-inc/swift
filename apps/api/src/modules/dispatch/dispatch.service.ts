@@ -855,6 +855,25 @@ export class DispatchService {
     const pool = await this.poolOf(orderId);
     const mover = await this.requireMover(moverUserId, pool);
 
+    // [REPORT-012 F-012-02] Prove the rail BEFORE consuming the exclusive
+    // offer. A positive fare on a non-CASH order used to ride into claimOrder,
+    // which rejected it MMG_PRICE_LOCKED — but only AFTER removeOfferIfOwned
+    // had destroyed the mover's offer, and the catch below then marked that
+    // mover declined and advanced the cascade: a stale/forged client burned
+    // its own valid offer. The price on a non-CASH rail is locked and the
+    // current card sends no fare there, so a submitted fare is NEUTRALIZED —
+    // the accept proceeds at the locked market price, the offer is never
+    // consumed-then-rejected. The in-claim MMG_PRICE_LOCKED gate stays as the
+    // locked-row belt (board/direct entrances, and any future caller).
+    let fare = requestedFare;
+    if (fare !== undefined) {
+      const rail = await this.prisma.order.findUnique({
+        where: { id: orderId },
+        select: { paymentMethod: true },
+      });
+      if (rail && rail.paymentMethod !== 'CASH') fare = undefined;
+    }
+
     // Consume the offer atomically before claiming. A late accept can no longer
     // pass GET and then claim after timeout/offline has offered the job to the
     // next mover. If the DB claim loses, advance the cascade below.
@@ -867,7 +886,7 @@ export class DispatchService {
       // claimOrder does not throw after its database transaction commits. A
       // rejection here therefore means no durable winner exists and only then
       // is it safe to advance the cascade.
-      return await this.claimOrder(orderId, mover.id, pool, { requestedFare });
+      return await this.claimOrder(orderId, mover.id, pool, { requestedFare: fare });
     } catch (error) {
       await this.redis.sadd(declinedKey(orderId), mover.id).catch(() => {});
       await this.redis.expire(declinedKey(orderId), 3600).catch(() => {});

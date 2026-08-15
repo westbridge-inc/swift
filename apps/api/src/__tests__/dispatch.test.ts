@@ -1678,6 +1678,41 @@ describe('Atomic acceptance — the concurrency proof', () => {
     await app.redis.del(`dispatch:offer:${order.id}`, `dispatch:mover-offer:${r.riderId}`);
   });
 
+  it('a positive fare on an MMG offer is neutralized BEFORE the offer is consumed — the mover still wins at the locked price [REPORT-012 F-012-02]', async () => {
+    const r = await makeRider({ lat: PICKUP.lat + 0.012 });
+    const order = await makeDeliveryOrder('READY_FOR_PICKUP');
+    await app.prisma.order.update({
+      where: { id: order.id },
+      data: { paymentMethod: 'MOBILE_MONEY', paymentStatus: 'CAPTURED' },
+    });
+    const before = await app.prisma.order.findUniqueOrThrow({
+      where: { id: order.id }, select: { deliveryFee: true, totalAmount: true },
+    });
+    await app.redis.set(`dispatch:offer:${order.id}`, r.riderId, 'EX', 40);
+    // A stale/forged client undercuts the locked MMG price. Before this fix
+    // the fare rode into claimOrder and was rejected MMG_PRICE_LOCKED — but
+    // removeOfferIfOwned had already destroyed the offer, and the catch
+    // marked THIS mover declined and advanced the cascade: a valid offer
+    // burned. Neutralized pre-consumption, the accept now succeeds at the
+    // locked market price.
+    const res = await app.inject({
+      method: 'POST', url: '/api/v1/rider/offers/accept',
+      headers: { authorization: `Bearer ${r.token}`, 'content-type': 'application/json' },
+      payload: { orderId: order.id, fare: 300 },
+    });
+    expect(res.statusCode).toBe(200);
+    const fresh = await app.prisma.order.findUniqueOrThrow({ where: { id: order.id } });
+    expect(fresh.riderId).toBe(r.riderId); // the mover WON — never declined
+    expect(fresh.status).toBe('RIDER_ASSIGNED');
+    expect(Number(fresh.deliveryFee)).toBe(Number(before.deliveryFee)); // locked price untouched
+    expect(Number(fresh.totalAmount)).toBe(Number(before.totalAmount)); // captured money unchanged
+    // The cascade never advanced past the winner: no self-decline recorded.
+    expect(await app.redis.sismember(`dispatch:declined:${order.id}`, r.riderId)).toBe(0);
+    await app.prisma.order.update({ where: { id: order.id }, data: { riderId: null, status: 'READY_FOR_PICKUP' } });
+    await app.prisma.rider.update({ where: { id: r.riderId }, data: { isOnline: false, isAvailable: true, currentOrderId: null, committedFloat: 0 } });
+    await app.redis.del(`dispatch:offer:${order.id}`, `dispatch:mover-offer:${r.riderId}`);
+  });
+
   it('an UNRENDERED offer that times out never decays the acceptance rate; a SEEN one does [danger #21]', async () => {
     const r = await makeRider({ lat: PICKUP.lat + 0.009 });
     await app.prisma.rider.update({ where: { id: r.riderId }, data: { acceptanceRate: 100 } });
