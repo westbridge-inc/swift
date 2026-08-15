@@ -97,6 +97,10 @@ async function makeDriver(rideClass: RideClass) {
       vehicleMake: 'Toyota', vehicleModel: 'Allion', vehicleYear: 2021,
       vehicleColor: 'Silver', licensePlate: `TR-${seq}`,
       rideClass,
+      // [REPORT-014 F-014-01] Fixtures carry the honest physical shape: a
+      // driver serving a class seats at least that class's capacity (the old
+      // schema-default 4 codified the capacity gap this report closed).
+      vehicleCapacity: CLASS_CAPACITY[rideClass] ?? 4,
       driverLicenseUrl: 'storage://t/dl.jpg', vehicleInsuranceUrl: 'storage://t/ins.jpg',
       documentsVerified: true, isOnline: true, isAvailable: true,
       currentLat: CENTRAL.lat, currentLng: CENTRAL.lng,

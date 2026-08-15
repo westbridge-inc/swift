@@ -303,6 +303,10 @@ export class DispatchService {
      *  dual-role user online as a driver could otherwise be dispatched their own
      *  ride). Omitted on the availability probe, which has no booker. */
     excludeUserId?: string | null,
+    /** [REPORT-014 F-014-01] Taxi passenger count: DRIVER candidates must
+     *  physically seat the party — rideClass alone maps BUS_9 (9 seats) into
+     *  the same GROUP tier as BUS_15 (15 seats). */
+    passengerCount?: number | null,
   ): Promise<DispatchCandidate[]> {
     const declined = await this.redis.smembers(declinedKey(orderId));
     const locationFreshSince = new Date(Date.now() - DISPATCH_LOCATION_FRESH_SECONDS * 1000);
@@ -352,6 +356,7 @@ export class DispatchService {
             ${tenantFilter}
             ${selfFilter}
             AND d."rideClass"::text = ANY(${eligibleClasses})
+            ${passengerCount != null ? Prisma.sql`AND d."vehicleCapacity" >= ${passengerCount}` : Prisma.empty}
             AND d."currentLat" IS NOT NULL
             AND d."currentLng" IS NOT NULL
             AND ST_DWithin(
@@ -495,7 +500,7 @@ export class DispatchService {
       select: {
         id: true, status: true, riderId: true, driverId: true, orderType: true,
         fulfillment: true, orderNumber: true, rideClass: true, isExpress: true, courierPackageSize: true,
-        customerId: true, pickupLat: true, pickupLng: true,
+        customerId: true, pickupLat: true, pickupLng: true, taxiPassengerCount: true,
         subtotalBase: true, paymentMethod: true, tenantId: true,
         vendor: { select: { name: true, owner: { select: { userId: true } } } },
         items: { select: { quantity: true } },
@@ -527,7 +532,7 @@ export class DispatchService {
     await this.journalOpenSearch(order, round, radius);
     // D.3 — a rider must have enough free float to front this order's vendor-cash (CASH deliveries only).
     const floatRequired = pool === 'RIDER' && order.paymentMethod === 'CASH' ? Number(order.subtotalBase) : 0;
-    const candidates = await this.findCandidates(orderId, { lat: order.pickupLat, lng: order.pickupLng }, radius, pool, floatRequired, order.rideClass, order.tenantId, order.courierPackageSize, order.customerId);
+    const candidates = await this.findCandidates(orderId, { lat: order.pickupLat, lng: order.pickupLng }, radius, pool, floatRequired, order.rideClass, order.tenantId, order.courierPackageSize, order.customerId, order.taxiPassengerCount);
 
     if (candidates.length === 0) {
       if (round + 1 < MAX_ROUNDS) {
@@ -916,14 +921,15 @@ export class DispatchService {
       // accept and a revocation have one legal database order rather than a
       // mover becoming assigned after authority was removed.
       const authority = pool === 'DRIVER'
-        ? await tx.$queryRaw<Array<{ userId: string; activeRole: string; status: string }>>`
-            SELECT u."id" AS "userId", u."activeRole"::text AS "activeRole", u."status"::text AS "status"
+        ? await tx.$queryRaw<Array<{ userId: string; activeRole: string; status: string; vehicleCapacity?: number }>>`
+            SELECT u."id" AS "userId", u."activeRole"::text AS "activeRole", u."status"::text AS "status",
+                   d."vehicleCapacity" AS "vehicleCapacity"
             FROM "users" u
             JOIN "drivers" d ON d."userId" = u."id"
             WHERE d."id" = ${moverId}
             FOR UPDATE OF u
           `
-        : await tx.$queryRaw<Array<{ userId: string; activeRole: string; status: string }>>`
+        : await tx.$queryRaw<Array<{ userId: string; activeRole: string; status: string; vehicleCapacity?: number }>>`
             SELECT u."id" AS "userId", u."activeRole"::text AS "activeRole", u."status"::text AS "status"
             FROM "users" u
             JOIN "riders" r ON r."userId" = u."id"
@@ -950,13 +956,15 @@ export class DispatchService {
         orderType: string;
         subtotalBase: Prisma.Decimal;
         deliveryFee: Prisma.Decimal;
+        taxiPassengerCount: number | null;
       }>>`
         SELECT "customerId", "taxiFareTotal",
                "paymentMethod"::text AS "paymentMethod",
                "paymentStatus"::text AS "paymentStatus",
                "orderType"::text AS "orderType",
                "subtotalBase",
-               "deliveryFee"
+               "deliveryFee",
+               "taxiPassengerCount"
         FROM "orders"
         WHERE "id" = ${orderId}
         FOR UPDATE
@@ -965,6 +973,15 @@ export class DispatchService {
       if (!lockedOrder) throw new NotFoundError('Order', orderId);
       if (lockedOrder.customerId === moverAuthority.userId) {
         throw new AppError(409, 'SELF_OWN_ORDER', 'You cannot accept a request created by your own account');
+      }
+      // [REPORT-014 F-014-01] PHYSICAL capacity is authoritative at the claim:
+      // discovery/board filters are conveniences — a 14-passenger GROUP ride
+      // must never commit to a 9-seat bus (or a default 4-seat profile that
+      // self-tagged GROUP). Locked driver seats vs the locked order's count.
+      if (pool === 'DRIVER' && lockedOrder.taxiPassengerCount != null
+          && (moverAuthority.vehicleCapacity ?? 0) < lockedOrder.taxiPassengerCount) {
+        throw new AppError(409, 'CAPACITY_EXCEEDED',
+          `This ride needs ${lockedOrder.taxiPassengerCount} seats; your vehicle seats ${moverAuthority.vehicleCapacity ?? 0}.`);
       }
       // [SPS-F-0016 / REPORT-004 F-004-01] Offer-card claims are the third
       // assignment writer beside the canonical seam and the board grab — the

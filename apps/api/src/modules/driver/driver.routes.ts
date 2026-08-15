@@ -159,8 +159,11 @@ export async function driverRoutes(app: FastifyInstance) {
         ...(body.vehicleYear !== undefined && { vehicleYear: body.vehicleYear }),
         ...(body.vehicleColor !== undefined && { vehicleColor: body.vehicleColor }),
         ...(body.licensePlate !== undefined && { licensePlate: body.licensePlate }),
-        ...(body.vehicleCapacity !== undefined && { vehicleCapacity: body.vehicleCapacity }),
-        ...(body.rideClass !== undefined && { rideClass: body.rideClass }),
+        // [REPORT-014 F-014-01] rideClass and vehicleCapacity are TAXONOMY
+        // authority (derived from the verified vehicle type at provisioning/
+        // admin verification), never self-serve: an online driver could
+        // otherwise tag a 4-seat car GROUP and receive 14-passenger work.
+        // The fields remain accepted-and-ignored so legacy clients don't 400.
         ...(body.profilePhotoUrl !== undefined && { profilePhotoUrl: body.profilePhotoUrl }),
         ...(body.nationalIdUrl !== undefined && { nationalIdUrl: body.nationalIdUrl }),
         ...(body.driverLicenseUrl !== undefined && { driverLicenseUrl: body.driverLicenseUrl }),
@@ -596,6 +599,14 @@ export async function driverRoutes(app: FastifyInstance) {
           { rideClass: { in: classesAtOrBelow(driver.rideClass ?? 'ECONOMY') } },
           { rideClass: null },
         ],
+        // [REPORT-014 F-014-01] Physical seats too: a 14-passenger GROUP
+        // request never surfaces to a 9-seat bus (class alone can't tell).
+        AND: [{
+          OR: [
+            { taxiPassengerCount: null },
+            { taxiPassengerCount: { lte: driver.vehicleCapacity ?? 4 } },
+          ],
+        }],
       },
       include: {
         customer: { select: { id: true, firstName: true, avatar: true } },
@@ -707,6 +718,11 @@ export async function driverRoutes(app: FastifyInstance) {
     const rideClass = order.rideClass ?? 'ECONOMY';
     if (!classesAtOrAbove(rideClass).includes(driver.rideClass ?? 'ECONOMY')) {
       throw new AppError(400, 'WRONG_RIDE_CLASS', `This is a ${rideClass} ride; your ${driver.rideClass ?? 'ECONOMY'} vehicle can't serve it.`);
+    }
+    // [REPORT-014 F-014-01] Friendly pre-check; the locked claim re-proves it.
+    if (order.taxiPassengerCount != null && (driver.vehicleCapacity ?? 0) < order.taxiPassengerCount) {
+      throw new AppError(400, 'CAPACITY_EXCEEDED',
+        `This ride needs ${order.taxiPassengerCount} seats; your vehicle seats ${driver.vehicleCapacity ?? 0}.`);
     }
 
     // Shared claim: the DB compare-and-set means two drivers tapping

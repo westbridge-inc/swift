@@ -142,12 +142,18 @@ export class PartnerService {
       throw new ValidationError('Vehicle details (make, model, year, colour, licence plate) are required to drive');
     }
     const existing = await tx.driver.findUnique({ where: { userId } });
+    // [REPORT-014 F-014-01] The vehicle TAXONOMY is the authority for what a
+    // vehicle physically is: seats come from it (never the schema default 4),
+    // and the ride class is its class — a self-declared class can never
+    // outrank the declared vehicle type.
+    const taxonomy = VEHICLE_CLASSES[vehicleType];
     const driver =
       existing ??
       (await tx.driver.create({
         data: {
           userId,
-          rideClass,
+          rideClass: taxonomy?.rideClass ?? rideClass,
+          vehicleCapacity: taxonomy?.seats ?? 4,
           vehicleType,
           vehicleMake: vehicle.make,
           vehicleModel: vehicle.model,
