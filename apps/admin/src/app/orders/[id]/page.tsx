@@ -104,7 +104,8 @@ export default function OrderDetailPage({ params }: { params: Promise<{ id: stri
             <>
               <button
                 onClick={() => {
-                  if (window.confirm(`Cancel order ${o.orderNumber}?`)) cancelMutation.mutate({ refund: false });
+                  const mmgNote = o.paymentMethod === 'MOBILE_MONEY' && o.paymentStatus !== 'CAPTURED' ? '\n\nMMG payment unconfirmed: the customer gets direct-refund guidance and the store is told it may hold the transfer.' : '';
+                  if (window.confirm(`Cancel order ${o.orderNumber}?${mmgNote}`)) cancelMutation.mutate({ refund: false });
                 }}
                 disabled={cancelMutation.isPending}
                 className="px-4 py-2 rounded-lg text-sm border border-[#38383A] hover:bg-white/10 disabled:opacity-50"

@@ -87,7 +87,7 @@ export default function OrdersPage() {
                     ) : (
                       <div className="flex gap-2 justify-end">
                         <button
-                          onClick={() => { if (window.confirm(`Cancel order ${order.orderNumber}?`)) cancelMutation.mutate({ id: order.id, refund: false }); }}
+                          onClick={() => { const mmgNote = order.paymentMethod === 'MOBILE_MONEY' && order.paymentStatus !== 'CAPTURED' ? '\n\nMMG payment unconfirmed: the customer gets direct-refund guidance and the store is told it may hold the transfer.' : ''; if (window.confirm(`Cancel order ${order.orderNumber}?${mmgNote}`)) cancelMutation.mutate({ id: order.id, refund: false }); }}
                           disabled={cancelMutation.isPending}
                           className="px-3 py-1 rounded-lg text-xs border border-[#38383A] text-white hover:bg-white/10 disabled:opacity-50"
                         >

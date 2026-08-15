@@ -267,6 +267,42 @@ describe('PUT /admin/orders/:id/cancel — journal close [SWIFT-095]', () => {
     await app.prisma.auditLog.deleteMany({ where: { entityId: order.id } });
   });
 
+  it('cancelling an unattested-MMG order tells the STORE it may hold the payment [REPORT-012 F-012-04]', async () => {
+    const customer = await makeUser(['CUSTOMER'], 'CUSTOMER');
+    const order = await app.prisma.order.create({
+      data: {
+        orderNumber: `AVIS-MMG-${nanoid(8)}`, orderType: 'FOOD_DELIVERY',
+        customerId: customer.id, vendorId, status: 'ACCEPTED',
+        deliveryAddress: 'x', deliveryLat: 6.8, deliveryLng: -58.15,
+        subtotalBase: 1000, subtotalMarkup: 0, subtotalCustomer: 1000,
+        deliveryFee: 300, totalAmount: 1300,
+        paymentMethod: 'MOBILE_MONEY', paymentStatus: 'PENDING',
+      },
+    });
+    const response = await app.inject({
+      method: 'PUT', url: `/api/v1/admin/orders/${order.id}/cancel`,
+      headers: { authorization: `Bearer ${adminToken}`, 'content-type': 'application/json' },
+      payload: { reason: 'vendor unreachable', refund: false },
+    });
+    expect(response.statusCode).toBe(200);
+    // Customer guidance names the direct-refund rail…
+    const customerNote = await app.prisma.notification.findFirst({
+      where: { userId: customer.id, body: { contains: 'the store refunds you directly' } },
+    });
+    expect(customerNote).not.toBeNull();
+    // …and the STORE gets the durable liability notice through the same seam
+    // as customer cancel, auto-cancel, and the ops agent. Before F-012-04 an
+    // admin terminal told only the customer.
+    const storeNote = await app.prisma.notification.findFirst({
+      where: {
+        title: 'Cancelled order may hold an MMG payment',
+        body: { contains: order.orderNumber },
+      },
+    });
+    expect(storeNote).not.toBeNull();
+    await app.prisma.auditLog.deleteMany({ where: { entityId: order.id } });
+  });
+
   it.each([
     {
       signal: 'boolean-only PIN evidence',

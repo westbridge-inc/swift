@@ -311,24 +311,17 @@ export async function autoCancelUnresponsiveOrder(ctx: JobContext, orderId: stri
       : `We're sorry — the store didn't respond to order ${order.orderNumber} in time, so it was cancelled. You were not charged; please try another store.`,
     data: { orderId, status: 'CANCELLED' },
   });
-  // [REPORT-007-v4 F-02] The store holds the only rail that can make an
-  // already-paid MMG customer whole — it must learn the cancellation happened
-  // while the payment was unattested.
+  // [REPORT-007-v4 F-02 → REPORT-012 F-012-04] The store holds the only rail
+  // that can make an already-paid MMG customer whole — every operational
+  // cancellation flows through the ONE publication seam.
   if (mmgAmbiguous && order.vendorId) {
-    const owner = await ctx.prisma.vendor.findUnique({
-      where: { id: order.vendorId },
-      select: { owner: { select: { userId: true } } },
+    const { publishUnattestedMmgCancellation } = await import('../modules/order/order.service');
+    await publishUnattestedMmgCancellation(ctx.prisma, notifications, {
+      orderId,
+      orderNumber: order.orderNumber,
+      vendorId: order.vendorId,
+      storeBody: `Order ${order.orderNumber} was auto-cancelled (no response) before its MMG payment was confirmed. If the customer's transfer arrived in your MMG, refund them directly.`,
     });
-    if (owner?.owner) {
-      await notifications.send({
-        userId: owner.owner.userId,
-        type: 'ORDER_UPDATE',
-        title: 'Cancelled order may hold an MMG payment',
-        body: `Order ${order.orderNumber} was auto-cancelled (no response) before its MMG payment was confirmed. If the customer's transfer arrived in your MMG, refund them directly.`,
-        audience: 'business',
-        data: { orderId, kind: 'mmg_unattested_cancellation' },
-      });
-    }
   }
   ctx.log.info({ orderId }, 'Order auto-cancelled (vendor no-response)');
   return true;

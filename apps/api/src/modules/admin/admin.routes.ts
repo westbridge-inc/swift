@@ -1735,6 +1735,19 @@ export async function adminRoutes(app: FastifyInstance) {
       data: { orderId: id, status: newStatus },
     });
 
+    // [REPORT-012 F-012-04] An admin terminal on an unattested-MMG order must
+    // also tell the STORE — it may hold the customer's unconfirmed transfer
+    // and is the only rail that can send it back. Same seam as customer
+    // cancel, auto-cancel, and the ops agent.
+    if (order.paymentMethod === 'MOBILE_MONEY' && order.paymentStatus === 'PENDING' && order.vendorId) {
+      const { publishUnattestedMmgCancellation } = await import('../order/order.service');
+      await publishUnattestedMmgCancellation(app.prisma, notifications, {
+        orderId: id,
+        orderNumber: order.orderNumber,
+        vendorId: order.vendorId,
+      });
+    }
+
     return { success: true, data: { orderId: id, status: newStatus, refunded: !!refund } };
   });
 

@@ -454,7 +454,9 @@ export function VendorOrderDetailScreen({ navigation, route }: any) {
           Reject this order?
         </PopupTitle>
         <T variant="body" tone="muted" center style={{ marginTop: space.sm }}>
-          The customer is told right away. This can&apos;t be undone.
+          {order.paymentMethod === 'MOBILE_MONEY'
+            ? 'The customer is told right away. If their MMG payment already reached your MMG, refund them directly — Swift never holds the money. This can’t be undone.'
+            : 'The customer is told right away. This can’t be undone.'}
         </T>
         <PillButton
           label="Reject order"

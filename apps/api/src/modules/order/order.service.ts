@@ -55,6 +55,52 @@ function requireCheckoutMmgPayUrl(rawUrl: string | null | undefined, vendorName:
   throw new AppError(400, 'MMG_LINK_INVALID', `${vendorName}'s MMG pay link cannot be used safely right now — choose cash instead.`);
 }
 
+/** [REPORT-012 F-012-04] THE post-commit publication policy for cancelling an
+ *  order whose MMG payment was never attested (MOBILE_MONEY + PENDING).
+ *  Whoever the terminal actor is — the customer, the vendor-timeout job, an
+ *  ops agent, an admin — the STORE gets the same durable liability notice:
+ *  it holds the only rail that can make an already-paid customer whole.
+ *  Optional customer guidance rides the same seam so a new cancel path can
+ *  never ship with half the policy. Call AFTER the canonical CANCELLED
+ *  commit; per-source wording arrives via the overrides, the policy doesn't
+ *  fork. */
+export async function publishUnattestedMmgCancellation(
+  prisma: PrismaClient,
+  notifications: Pick<NotificationService, 'send'>,
+  input: {
+    orderId: string;
+    orderNumber: string;
+    vendorId: string | null;
+    storeBody?: string;
+    customer?: { userId: string; title: string; body: string; data?: Record<string, unknown> };
+  },
+): Promise<void> {
+  if (input.customer) {
+    await notifications.send({
+      userId: input.customer.userId,
+      type: 'ORDER_UPDATE',
+      title: input.customer.title,
+      body: input.customer.body,
+      data: { orderId: input.orderId, status: 'CANCELLED', ...(input.customer.data ?? {}) },
+    }).catch(() => {});
+  }
+  if (!input.vendorId) return;
+  const vendor = await prisma.vendor
+    .findUnique({ where: { id: input.vendorId }, select: { owner: { select: { userId: true } } } })
+    .catch(() => null);
+  if (!vendor?.owner) return;
+  await notifications.send({
+    userId: vendor.owner.userId,
+    type: 'ORDER_UPDATE',
+    title: 'Cancelled order may hold an MMG payment',
+    body:
+      input.storeBody
+      ?? `Order ${input.orderNumber} was cancelled before its MMG payment was confirmed. If the customer's transfer arrived in your MMG, refund them directly.`,
+    audience: 'business',
+    data: { orderId: input.orderId, kind: 'mmg_unattested_cancellation' },
+  }).catch(() => {});
+}
+
 // ---------------------------------------------------------------------------
 // The locked order state machine. Key = target state, value = states it may
 // be entered from. Anything not listed here is impossible — enforced with a
@@ -1727,18 +1773,13 @@ export class OrderService {
     // live at checkout (mobile auto-opens it), so money can be in flight
     // during the exact window the vendor board hides the order — this
     // liability notice is how the otherwise-unaware store finds out.
-    if (order.paymentMethod === 'MOBILE_MONEY' && order.paymentStatus === 'PENDING' && order.vendor?.ownerId) {
-      const owner = await this.prisma.vendorOwner.findUnique({ where: { id: order.vendor.ownerId }, select: { userId: true } });
-      if (owner) {
-        await this.notifications.send({
-          userId: owner.userId,
-          type: 'ORDER_UPDATE',
-          title: 'Cancelled order may hold an MMG payment',
-          body: `Order ${order.orderNumber} was cancelled before you confirmed its MMG payment. If the customer's transfer arrived in your MMG, refund them directly.`,
-          audience: 'business',
-          data: { orderId, kind: 'mmg_unattested_cancellation' },
-        });
-      }
+    if (order.paymentMethod === 'MOBILE_MONEY' && order.paymentStatus === 'PENDING' && order.vendorId) {
+      await publishUnattestedMmgCancellation(this.prisma, this.notifications, {
+        orderId,
+        orderNumber: order.orderNumber,
+        vendorId: order.vendorId,
+        storeBody: `Order ${order.orderNumber} was cancelled before you confirmed its MMG payment. If the customer's transfer arrived in your MMG, refund them directly.`,
+      });
     }
 
     // [REPORT-007-v4 F-02] Never assert "no charge" on an MMG order: PENDING
