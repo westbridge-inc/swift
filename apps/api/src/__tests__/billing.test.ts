@@ -595,3 +595,47 @@ describe('Subscription trial lifecycle', () => {
     expect(after.nextBillingDate.getTime()).toBeLessThanOrEqual(Date.now());
   });
 });
+
+describe('F-012-05 — suspension is ONE authority generation [REPORT-012]', () => {
+  it('with the vendor row locked, the subscription cannot flip SUSPENDED ahead of the vendor write', async () => {
+    // A store one failed charge from suspension, with nothing prepaid.
+    const fx = await makeVendorWithSub({ rate: 20000, prepaid: 0, due: new Date(Date.now() - HOUR) });
+    await app.prisma.subscription.update({
+      where: { id: fx.subId },
+      data: {
+        status: 'PAST_DUE', failedAttempts: 2,
+        nextRetryAt: new Date(Date.now() - HOUR),
+        isInGracePeriod: true, gracePeriodEnd: new Date(Date.now() - HOUR),
+      },
+    });
+
+    // Hold the vendor row lock the way any competing writer (toggle, admin)
+    // would, then run the sweep. Split-commit suspension would flip the
+    // subscription NOW and write the vendor row later; one-generation
+    // suspension blocks the WHOLE flip on this lock.
+    let release!: () => void;
+    const hold = new Promise<void>((r) => { release = r; });
+    let lockAcquired!: () => void;
+    const acquired = new Promise<void>((r) => { lockAcquired = r; });
+    const holder = app.prisma.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT id FROM "vendors" WHERE id = ${fx.vendorId} FOR UPDATE`;
+      lockAcquired();
+      await hold;
+    }, { timeout: 30_000 });
+    await acquired;
+
+    const sweep = billing.runBillingCycle(new Date());
+    await new Promise((r) => setTimeout(r, 800));
+    const during = await app.prisma.subscription.findUniqueOrThrow({ where: { id: fx.subId } });
+    expect(during.status).toBe('PAST_DUE'); // the flip waits WITH the vendor write
+
+    release();
+    await holder;
+    await sweep;
+    const after = await app.prisma.subscription.findUniqueOrThrow({ where: { id: fx.subId } });
+    const vend = await app.prisma.vendor.findUniqueOrThrow({ where: { id: fx.vendorId } });
+    expect(after.status).toBe('SUSPENDED');
+    expect(vend.status).toBe('SUSPENDED');
+    expect(vend.acceptingOrders).toBe(false);
+  });
+});

@@ -145,6 +145,30 @@ describe('checkout money math', () => {
     expect(Number(cust.totalSpent)).toBe(order.total);
   });
 
+  it('a PAST_DUE store whose grace lapsed cannot be checked out — the derived flags are not the whole authority [REPORT-012 F-012-05]', async () => {
+    // The vendor flags still say sellable (ACTIVE/open/accepting) — only the
+    // subscription knows the grace ran out a minute ago. Checkout must
+    // re-evaluate operability live, not wait for the billing sweep.
+    const sub = await app.prisma.subscription.create({
+      data: {
+        vendorId, type: 'RESTAURANT', status: 'PAST_DUE', weeklyRate: 20000,
+        billingMethod: 'CASH', isInGracePeriod: true,
+        gracePeriodEnd: new Date(Date.now() - 60_000),
+        currentPeriodStart: new Date(Date.now() - 8 * 86_400_000),
+        currentPeriodEnd: new Date(Date.now() - 86_400_000),
+        nextBillingDate: new Date(Date.now() - 86_400_000),
+      },
+    });
+    try {
+      const c = await makeCustomer();
+      const res = await cartAndCheckout(c, {});
+      expect(res.statusCode).toBe(400);
+      expect(res.json().error.code).toBe('VENDOR_CLOSED');
+    } finally {
+      await app.prisma.subscription.delete({ where: { id: sub.id } });
+    }
+  });
+
   it('a persisted cart tip on a PICKUP basket never inflates the ID-gate total or totalSpent [REPORT-012 F-012-01]', async () => {
     const c = await makeCustomer();
     await inject('POST', '/api/v1/customer/cart/items', { vendorId, itemId, quantity: 1 }, c.token);

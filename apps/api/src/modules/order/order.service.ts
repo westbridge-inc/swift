@@ -21,6 +21,7 @@ import {
   lockTaxiOrderForCustodyDecision,
 } from '../rides/passenger-custody';
 import { validateMmgPayUrl } from '../../utils/mmg-pay-url';
+import { subscriptionOperability } from '../subscription/operate-gate';
 import { lockActiveOrderCustomer } from './order-creation-authority';
 
 interface CheckoutInput {
@@ -610,6 +611,21 @@ export class OrderService {
     for (const [vendorId, items] of groups) {
       const vendor = items[0]!.item.vendor;
       if (!vendor.isCurrentlyOpen || !vendor.acceptingOrders || vendor.status !== 'ACTIVE') {
+        throw new AppError(400, 'VENDOR_CLOSED', `${vendor.name} is currently not accepting orders`);
+      }
+      // [REPORT-012 F-012-05] The derived vendor flags are not the whole
+      // authority: checkout re-evaluates SUBSCRIPTION operability live. This
+      // closes the split-commit residue (a suspension whose vendor write
+      // hasn't landed) AND the pure-wall-clock case — a PAST_DUE store whose
+      // grace lapsed a minute ago stops selling NOW, not at the next sweep,
+      // even from a cart opened while it was still operable.
+      const vendorSub = await this.prisma.subscription.findFirst({
+        where: { vendorId: vendor.id },
+        orderBy: { createdAt: 'desc' },
+        select: { status: true, gracePeriodEnd: true },
+      });
+      const vendorOperability = subscriptionOperability(vendorSub, { missingRow: 'GRANDFATHER' });
+      if (!vendorOperability.operable) {
         throw new AppError(400, 'VENDOR_CLOSED', `${vendor.name} is currently not accepting orders`);
       }
       // FUL-007: kitchen-capacity guard (Part 5D). A vendor can cap how many

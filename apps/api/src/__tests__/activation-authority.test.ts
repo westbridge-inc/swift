@@ -9,6 +9,7 @@ import { registerErrorHandler } from '../middleware/error-handler';
 import { registerEmptyJsonBodyParser } from '../plugins/empty-json';
 import { adminRoutes } from '../modules/admin/admin.routes';
 import { authRoutes } from '../modules/auth/auth.routes';
+import { vendorRoutes } from '../modules/vendor/vendor.routes';
 import { VerificationService } from '../modules/verification/verification.service';
 import { NotificationService } from '../modules/notification/notification.service';
 import { getKycProvider } from '../providers/kyc/kyc-provider';
@@ -94,6 +95,7 @@ beforeAll(async () => {
   await app.register(socketPlugin);
   await app.register(authRoutes, { prefix: '/api/v1/auth' });
   await app.register(adminRoutes, { prefix: '/api/v1/admin' });
+  await app.register(vendorRoutes, { prefix: '/api/v1/vendor' });
   await app.ready();
 
   svc = new VerificationService(app.prisma, new NotificationService(app.prisma, app.io), getKycProvider());
@@ -211,6 +213,106 @@ describe('STRAND-2 belt — the daily reconciler heals projection drift', () => 
     const fresh = await app.prisma.vendor.findUniqueOrThrow({ where: { id: vendor.id } });
     expect(fresh.isVerified).toBe(false); // cache follows document truth down
     expect(fresh.status).toBe('ACTIVE'); // lifecycle stays admin/billing-owned
+  });
+});
+
+describe('F-012-05 — one authority generation [REPORT-012]', () => {
+  it('a negative projection revokes ORDERING, not just the verified flag', async () => {
+    const owner = await makeUser('Neg');
+    const vendor = await makePendingVendor(owner.id);
+    for (const docType of SUPERMARKET_DOCS) await approvedDoc(owner.id, docType);
+    await svc.reconcileVendorActivations();
+    let fresh = await app.prisma.vendor.findUniqueOrThrow({ where: { id: vendor.id } });
+    expect(fresh.acceptingOrders).toBe(true);
+
+    // Evidence dies outside any decision path (retention purge shape)…
+    await app.prisma.verificationDocument.updateMany({
+      where: { userId: owner.id, docType: 'business_registration' },
+      data: { purgedAt: new Date(), fileUrl: '' },
+    });
+    await svc.reconcileVendorActivations();
+    fresh = await app.prisma.vendor.findUniqueOrThrow({ where: { id: vendor.id } });
+    expect(fresh.isVerified).toBe(false);
+    // …and ordering falls WITH the flag. Before this fix the checkout gate
+    // (status/open/acceptingOrders — it never reads isVerified) kept an
+    // existing cart sellable after document authority was revoked.
+    expect(fresh.acceptingOrders).toBe(false);
+  });
+
+  it('document expiry closes the store in the SAME transaction — no later-sweep window', async () => {
+    const owner = await makeUser('Exp');
+    const vendor = await makePendingVendor(owner.id);
+    for (const docType of SUPERMARKET_DOCS) await approvedDoc(owner.id, docType);
+    await svc.reconcileVendorActivations();
+
+    await app.prisma.verificationDocument.updateMany({
+      where: { userId: owner.id, docType: 'tin_certificate' },
+      data: { expiresAt: new Date(Date.now() - 60_000) },
+    });
+    await svc.expireLapsedDocuments();
+    const fresh = await app.prisma.vendor.findUniqueOrThrow({ where: { id: vendor.id } });
+    // The vendor projection rode the expiry transaction itself.
+    expect(fresh.isVerified).toBe(false);
+    expect(fresh.acceptingOrders).toBe(false);
+  });
+
+  it('toggle-ON trusts LIVE document truth, never the cached flag — and heals a discovered stale-true', async () => {
+    const owner = await makeUser('Stale');
+    const vendor = await makePendingVendor(owner.id);
+    for (const docType of SUPERMARKET_DOCS) await approvedDoc(owner.id, docType);
+    await svc.reconcileVendorActivations(); // → ACTIVE / verified / accepting
+
+    // Evidence dies by a path whose projection never landed (the stale-flag
+    // shape REPORT-012 exploited), while the owner had commerce paused.
+    await app.prisma.vendor.update({ where: { id: vendor.id }, data: { acceptingOrders: false } });
+    await app.prisma.verificationDocument.updateMany({
+      where: { userId: owner.id, docType: 'storefront_photo' },
+      data: { purgedAt: new Date(), fileUrl: '' },
+    });
+    const cached = await app.prisma.vendor.findUniqueOrThrow({ where: { id: vendor.id } });
+    expect(cached.isVerified).toBe(true); // the lie this test kills
+
+    await app.prisma.user.update({ where: { id: owner.id }, data: { activeRole: 'VENDOR_OWNER' as never } });
+    const login = await loginWithOtp(app, owner.phone);
+    const token = login.json().data.tokens.accessToken;
+    const on = await app.inject({
+      method: 'PUT', url: '/api/v1/vendor/vendor/toggle-orders',
+      headers: { authorization: `Bearer ${token}` },
+    });
+    expect(on.statusCode).toBe(403);
+    expect(on.json().error.code).toBe('VERIFICATION_REQUIRED');
+    const fresh = await app.prisma.vendor.findUniqueOrThrow({ where: { id: vendor.id } });
+    expect(fresh.isVerified).toBe(false); // healed atomically, in the refused tx
+    expect(fresh.acceptingOrders).toBe(false);
+  });
+
+  it('a PAST_DUE store whose grace lapsed cannot toggle ON — pure wall-clock, no competing writer', async () => {
+    const owner = await makeUser('Grace');
+    const vendor = await makePendingVendor(owner.id);
+    for (const docType of SUPERMARKET_DOCS) await approvedDoc(owner.id, docType);
+    await svc.reconcileVendorActivations();
+    await app.prisma.vendor.update({ where: { id: vendor.id }, data: { acceptingOrders: false } });
+    await app.prisma.subscription.create({
+      data: {
+        vendorId: vendor.id, type: 'RESTAURANT', status: 'PAST_DUE', weeklyRate: 20000,
+        billingMethod: 'CASH', isInGracePeriod: true,
+        gracePeriodEnd: new Date(Date.now() - 60_000),
+        currentPeriodStart: new Date(Date.now() - 8 * 86_400_000),
+        currentPeriodEnd: new Date(Date.now() - 86_400_000),
+        nextBillingDate: new Date(Date.now() - 86_400_000),
+      },
+    });
+
+    await app.prisma.user.update({ where: { id: owner.id }, data: { activeRole: 'VENDOR_OWNER' as never } });
+    const login = await loginWithOtp(app, owner.phone);
+    const token = login.json().data.tokens.accessToken;
+    const on = await app.inject({
+      method: 'PUT', url: '/api/v1/vendor/vendor/toggle-orders',
+      headers: { authorization: `Bearer ${token}` },
+    });
+    expect(on.statusCode).toBe(403);
+    expect(on.json().error.code).toBe('SUBSCRIPTION_PAST_DUE');
+    expect((await app.prisma.vendor.findUniqueOrThrow({ where: { id: vendor.id } })).acceptingOrders).toBe(false);
   });
 });
 

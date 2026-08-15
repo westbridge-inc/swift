@@ -650,7 +650,14 @@ export class VerificationService {
           data: { status: 'ACTIVE' },
         });
       } else if (vendor.isVerified) {
-        await db.vendor.update({ where: { id: vendor.id }, data: { isVerified: false } });
+        // [REPORT-012 F-012-05] A negative projection revokes ORDERING too:
+        // leaving acceptingOrders on kept an existing cart checkout-able
+        // (the checkout gate reads status/open/acceptingOrders, not
+        // isVerified) after the store's document authority was gone.
+        await db.vendor.update({
+          where: { id: vendor.id },
+          data: { isVerified: false, acceptingOrders: false },
+        });
       }
     }
   }
@@ -770,6 +777,10 @@ export class VerificationService {
         });
         if (won.count !== 1) return false;
         await projectProviderVerificationLocked(tx, doc.userId);
+        // [REPORT-012 F-012-05] The vendor projection rides the SAME expiry
+        // transaction — document truth and the derived vendor flags are one
+        // generation, not "EXPIRED now, store closes at some later sweep".
+        await this.projectVendorActivation(tx, doc.userId);
         return true;
       });
       if (!transitioned) continue;
@@ -894,6 +905,9 @@ export class VerificationService {
         });
         if (won.count !== 1) return false;
         await projectProviderVerificationLocked(tx, doc.userId);
+        // [REPORT-012 F-012-05] Purge invalidates evidence — the vendor
+        // projection must land in the same transaction, not never.
+        await this.projectVendorActivation(tx, doc.userId);
         return true;
       });
       if (!transitioned) continue;

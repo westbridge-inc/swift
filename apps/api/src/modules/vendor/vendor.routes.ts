@@ -1001,6 +1001,7 @@ export async function vendorRoutes(app: FastifyInstance) {
         'Your store can take orders once its documents are verified. Check Documents for anything missing or expired.');
     }
 
+    let staleVerifiedToHeal = false;
     await app.prisma.$transaction(async (tx) => {
       await tx.$queryRaw`SELECT id FROM "vendors" WHERE id = ${vendorId} FOR UPDATE`;
       // Re-read the authority generation UNDER the lock — every fact fresh.
@@ -1013,9 +1014,16 @@ export async function vendorRoutes(app: FastifyInstance) {
         throw new AppError(409, 'VENDOR_NOT_ACTIVE',
           'Your store isn’t active right now, so it can’t take orders. Approval or reinstatement switches it back on.');
       }
-      const liveVerified = locked.isVerified
-        || await verification.isRoleVerified(await vendorOwnerUserId(app, vendorId), locked.vendorType);
+      // [REPORT-012 F-012-05] LIVE document truth only, evaluated on THIS
+      // transaction: the cached isVerified flag can be stale-true when
+      // evidence was invalidated by a path whose projection hasn't landed.
+      // Turning commerce ON is exactly the moment that flag must not be
+      // trusted. A discovered stale-true is healed post-rollback (a write
+      // inside this refusing transaction would roll back with it).
+      const liveVerified = await verification.isRoleVerified(
+        await vendorOwnerUserId(app, vendorId), locked.vendorType, tx);
       if (!liveVerified) {
+        staleVerifiedToHeal = locked.isVerified;
         throw new AppError(403, 'VERIFICATION_REQUIRED',
           'Your store can take orders once its documents are verified. Check Documents for anything missing or expired.');
       }
@@ -1042,6 +1050,28 @@ export async function vendorRoutes(app: FastifyInstance) {
         throw new AppError(409, 'VENDOR_NOT_ACTIVE',
           'Your store’s status just changed — refresh and try again.');
       }
+    }).catch(async (err) => {
+      if (staleVerifiedToHeal) {
+        // The refusal rolled its transaction back — heal the stale cached
+        // flag in its own atomic write, re-proving documents under a fresh
+        // lock so a legitimate re-verification racing us is never clobbered.
+        await app.prisma.$transaction(async (tx) => {
+          await tx.$queryRaw`SELECT id FROM "vendors" WHERE id = ${vendorId} FOR UPDATE`;
+          const still = await tx.vendor.findUniqueOrThrow({
+            where: { id: vendorId }, select: { isVerified: true, vendorType: true },
+          });
+          if (!still.isVerified) return;
+          const nowVerified = await verification.isRoleVerified(
+            await vendorOwnerUserId(app, vendorId), still.vendorType, tx);
+          if (!nowVerified) {
+            await tx.vendor.updateMany({
+              where: { id: vendorId, isVerified: true },
+              data: { isVerified: false, acceptingOrders: false },
+            });
+          }
+        }).catch(() => {});
+      }
+      throw err;
     });
 
     // SWIFT-102: global vendor:status emit deleted (zero listeners) — see above.

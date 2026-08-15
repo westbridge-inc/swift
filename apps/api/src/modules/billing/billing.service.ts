@@ -1,4 +1,4 @@
-import type { PrismaClient, Subscription, Prisma } from '@prisma/client';
+import type { PrismaClient, Subscription, Prisma, SubscriptionStatus } from '@prisma/client';
 import { AppError, NotFoundError } from '../../utils/errors';
 import { NotificationService, notifyAdmins } from '../notification/notification.service';
 import { getChannels } from '../../providers/notifications/channels';
@@ -881,22 +881,31 @@ export class BillingService {
     });
 
     const nextRetryAt = new Date(now.getTime() + RETRY_HOURS * 60 * 60 * 1000);
-    await this.prisma.subscription.update({
-      where: { id: sub.id },
-      data: {
-        status: willSuspend ? 'SUSPENDED' : 'PAST_DUE',
-        failedAttempts: attempts,
-        nextRetryAt,
-        isInGracePeriod: !willSuspend,
-        gracePeriodEnd: willSuspend ? null : nextRetryAt,
-        ...(willSuspend ? { suspendedAt: now } : {}),
-      },
-    });
+    const subscriptionData = {
+      status: (willSuspend ? 'SUSPENDED' : 'PAST_DUE') as SubscriptionStatus,
+      failedAttempts: attempts,
+      nextRetryAt,
+      isInGracePeriod: !willSuspend,
+      gracePeriodEnd: willSuspend ? null : nextRetryAt,
+      ...(willSuspend ? { suspendedAt: now } : {}),
+    };
 
     if (willSuspend) {
-      await this.suspendAccess(sub, periodKey);
+      // [REPORT-012 F-012-05] Suspension is ONE authority generation: the
+      // subscription status and every derived operating row (vendor
+      // lifecycle/ordering, mover availability) commit together or not at
+      // all. The old shape committed the subscription first and the derived
+      // rows in later writes — a crash between them left a SUSPENDED
+      // subscription behind a still-ACTIVE, still-accepting store.
+      await this.prisma.$transaction(async (tx) => {
+        await tx.subscription.update({ where: { id: sub.id }, data: subscriptionData });
+        await this.suspendAccessRows(tx, sub, periodKey);
+      });
+      await this.suspendAccessNotices(sub);
       return 'suspended';
     }
+
+    await this.prisma.subscription.update({ where: { id: sub.id }, data: subscriptionData });
 
     // §11 dunning depth: the LAST retry before suspension escalates —
     // final-warning copy that NAMES the suspension moment, an SMS (the
@@ -938,29 +947,31 @@ export class BillingService {
   // Suspend / reinstate
   // -------------------------------------------------------------------------
 
-  /** Suspension removes the payer from the platform until they pay. */
-  private async suspendAccess(sub: SubWithRelations, periodKey: string) {
+  /** Suspension row writes — MUST run on the same transaction that flips the
+   *  subscription status, so the authority is one generation [REPORT-012
+   *  F-012-05]. Notifications live in suspendAccessNotices (post-commit). */
+  private async suspendAccessRows(tx: Prisma.TransactionClient, sub: SubWithRelations, periodKey: string) {
     if (sub.vendor) {
       // SUSPENDED vendors vanish from customer browse (which filters ACTIVE)
-      await this.prisma.vendor.update({
+      await tx.vendor.update({
         where: { id: sub.vendor.id },
         data: { status: 'SUSPENDED', acceptingOrders: false },
       });
     }
     if (sub.rider) {
-      await this.prisma.rider.updateMany({
+      await tx.rider.updateMany({
         where: { userId: sub.rider.userId },
         data: { isOnline: false, isAvailable: false },
       });
     }
     if (sub.driver) {
-      await this.prisma.driver.updateMany({
+      await tx.driver.updateMany({
         where: { userId: sub.driver.userId },
         data: { isOnline: false, isAvailable: false },
       });
     }
 
-    await this.prisma.billingEvent.create({
+    await tx.billingEvent.create({
       data: {
         subscriptionId: sub.id,
         type: 'SUSPENDED',
@@ -969,7 +980,10 @@ export class BillingService {
         note: `Auto-suspended after ${MAX_FAILED_ATTEMPTS} failed charges`,
       },
     });
+  }
 
+  /** Post-commit suspension side effects (push + SMS). */
+  private async suspendAccessNotices(sub: SubWithRelations) {
     await this.notifications.send({
       userId: this.payerUserId(sub),
       type: 'SYSTEM_ANNOUNCEMENT',
