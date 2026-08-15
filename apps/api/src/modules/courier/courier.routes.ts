@@ -74,13 +74,9 @@ const COURIER_CUSTODY_STATUSES = [
   'ARRIVED',
 ] as const satisfies readonly OrderStatus[];
 
-/** The full live-state list — status/tracking surfaces only. Proof is
- * custody-bound [REPORT-014 F-014-02]: delivery can only be proven for a
- * parcel the rider physically holds. */
-const COURIER_LIVE_STATUSES = [
-  ...COURIER_CANCELLABLE_STATUSES,
-  ...COURIER_CUSTODY_STATUSES,
-] as const satisfies readonly OrderStatus[];
+// Proof is custody-bound [REPORT-014 F-014-02]: delivery can only be proven
+// for a parcel the rider physically holds — the historical "full live list"
+// proof window is gone with its last consumer.
 
 function courierNotCancellable(status: OrderStatus): AppError {
   if ((COURIER_CUSTODY_STATUSES as readonly OrderStatus[]).includes(status)) {
