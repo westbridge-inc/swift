@@ -64,7 +64,7 @@ export default function OrderDetailPage() {
               : 'This order was cancelled.')}
           </p>
           {typeof cancelFee === 'number' && cancelFee > 0 && (
-            <p className="mt-1">Cancellation fee charged: {money(cancelFee)}</p>
+            <p className="mt-1">Late-cancellation fee recorded: {money(cancelFee)} — not collected by Swift.</p>
           )}
           {cancelFee === 0 && <p className="mt-1">No cancellation fee.</p>}
         </div>

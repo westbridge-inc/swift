@@ -157,7 +157,10 @@ export function placedOrderConfirmationCopy(input: {
     return 'We’ll tell you when it’s ready — show the pickup code and pay cash directly at the counter.';
   }
   if (input.held) {
-    return 'You have a few minutes to change your mind — cancelling is free until the store gets it. Pay cash at handover.';
+    // [REPORT-013 F-013-03 S2] This popup can outlive the hold (one-time
+    // device-clock snapshot, no timer) — state the RULE, never "is free"
+    // as a standing promise the order screen may already contradict.
+    return 'Changed your mind? While the store hasn’t received it, you can cancel free from the order screen. Pay cash at handover.';
   }
   return 'The store has been notified — pay cash at handover. Swift never holds the order money.';
 }

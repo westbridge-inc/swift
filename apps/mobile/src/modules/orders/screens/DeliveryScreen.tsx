@@ -632,7 +632,12 @@ export function DeliveryScreen() {
                     rendered from the committed result, never a preview. */}
                 {cancelFee != null ? (
                   <T variant="caption" tone="error" style={{ marginTop: 2 }}>
-                    {cancelFee > 0 ? `Cancellation fee: ${money(cancelFee)}` : 'No cancellation fee.'}
+                    {/* [REPORT-013 F-013-03] The fee is a recorded deterrence
+                        marker on a cash platform — Swift never collects it;
+                        saying "charged" would be a false financial fact. */}
+                    {cancelFee > 0
+                      ? `Late-cancellation fee recorded: ${money(cancelFee)} (not collected by Swift).`
+                      : 'No cancellation fee.'}
                   </T>
                 ) : null}
               </View>

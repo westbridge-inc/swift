@@ -100,10 +100,15 @@ const cartInstructionsSchema = z.object({
   instructions: z.string().max(500),
 });
 
+// [REPORT-013 F-013-02] The tip ceiling binds at EVERY tip entrance: the
+// cart endpoint enforced 50,000 while direct checkout accepted the generic
+// 99,999,999 storage ceiling — the same value the cart rejected.
+const MAX_TIP_GYD = 50_000;
+
 const checkoutSchema = z.object({
   paymentMethod: z.string().max(30).optional(),
   deliveryInstructions: z.string().max(500).optional(),
-  tipAmount: zMoneyMinor.optional(),
+  tipAmount: zMoneyMinor.max(MAX_TIP_GYD).optional(),
   scheduledFor: z.string().max(40).optional(),
   promoCode: z.string().max(40).optional(),
   // Per-vendor DELIVERY|PICKUP choice for multi-vendor carts
@@ -193,7 +198,6 @@ const MAX_ADDRESSES = 10;
 // lossless at launch scale; the large-scale path is a geo-bounded (PostGIS)
 // fetch of the nearest N, tracked separately.
 const HOME_DISCOVERY_SCAN_CAP = 500;
-const MAX_TIP_GYD = 50_000;
 
 // ---------------------------------------------------------------------------
 // Helpers
