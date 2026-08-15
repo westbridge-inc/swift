@@ -76,6 +76,9 @@ const TENANT_QUERY_EXTENSIONS = {
   // Batching + scheduling.
   deliveryRun: scoped, batchEvaluation: scoped, batchingSettings: scoped, bookingException: scoped,
   rideQueueEntry: scoped,
+  // [REPORT-014 F-014-03] Supply watches are tenant rows: demand counts and
+  // recovery notifications must never see another operator's watchers.
+  supplyWatch: scoped,
 };
 
 /** Model names enrolled for tenant scoping. Derived — never hand-written. */
