@@ -14,6 +14,7 @@ export default function OrderDetailPage() {
   const [o, setO] = useState<any | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [cancelResult, setCancelResult] = useState<string | null>(null);
+  const [cancelFee, setCancelFee] = useState<number | null>(null);
   const [confirmingCancel, setConfirmingCancel] = useState(false);
 
   const load = useCallback(async () => { try { setO(await getOrder(id)); } catch (e: any) { setError(e.message); } }, [id]);
@@ -56,11 +57,17 @@ export default function OrderDetailPage() {
         </div>
       )}
       {cancelled && (
-        <p className="rounded-2xl border border-dashed border-black/10 p-4 text-center font-semibold text-[var(--swift-red)]">
-          {cancelResult ?? (mmgAmbiguous
-            ? 'This order was cancelled. If you already sent the MMG payment, the store refunds you directly.'
-            : 'This order was cancelled.')}
-        </p>
+        <div className="rounded-2xl border border-dashed border-black/10 p-4 text-center font-semibold text-[var(--swift-red)]">
+          <p>
+            {cancelResult ?? (mmgAmbiguous
+              ? 'This order was cancelled. If you already sent the MMG payment, the store refunds you directly.'
+              : 'This order was cancelled.')}
+          </p>
+          {typeof cancelFee === 'number' && cancelFee > 0 && (
+            <p className="mt-1">Cancellation fee charged: {money(cancelFee)}</p>
+          )}
+          {cancelFee === 0 && <p className="mt-1">No cancellation fee.</p>}
+        </div>
       )}
 
       <div className="rounded-2xl border border-black/5 bg-white p-5">
@@ -87,7 +94,9 @@ export default function OrderDetailPage() {
               onClick={async () => {
                 try {
                   const res: any = await cancelOrder(id, 'changed my mind');
-                  setCancelResult(res?.data?.message ?? null);
+                  const payload = res?.data?.data ?? res?.data ?? res;
+                  setCancelResult(payload?.message ?? null);
+                  setCancelFee(typeof payload?.cancellationFee === 'number' ? payload.cancellationFee : null);
                   setConfirmingCancel(false);
                   await load();
                 } catch (e: any) { setError(e.message); }
