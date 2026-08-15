@@ -1,4 +1,5 @@
-import type { Prisma, PrismaClient, OrderStatus, FulfillmentType } from '@prisma/client';
+import { Prisma } from '@prisma/client';
+import type { PrismaClient, OrderStatus, FulfillmentType } from '@prisma/client';
 import type { Server } from 'socket.io';
 import { clampDriverFare, deliveryFeeFromRates, expressDeliveryFee, generateOrderNumber, type DeliveryRates } from '../../utils/markup';
 import { estimateDeliveryMinutes } from '../../utils/distance';
@@ -42,6 +43,11 @@ interface CheckoutInput {
   appointments?: Array<{ itemId: string; slotStart: Date; mode?: 'AT_BUSINESS' | 'MOBILE' }>;
   /** Injectable clock so the risk heuristic is testable */
   now?: Date;
+  /** Test seam [REPORT-013 F-013-01/06]: runs after pre-transaction pricing
+   *  and before the atomic commit, so interleaving proofs (a tip mutation, a
+   *  suspension, an item going dark) can be driven deterministically into the
+   *  exact window the in-transaction barriers close. Never set in routes. */
+  beforeTransaction?: () => Promise<void>;
 }
 
 function requireCheckoutMmgPayUrl(rawUrl: string | null | undefined, vendorName: string): string {
@@ -871,6 +877,8 @@ export class OrderService {
     // commits (notifications are best-effort and never roll an order back).
     const stockEventsByVendor = new Map<string, Array<{ itemId: string; name: string; remaining: number; kind: 'low' | 'out' }>>();
 
+    if (input.beforeTransaction) await input.beforeTransaction();
+
     // Atomic: all orders, stock movements, stats, and the cart deletion commit together
     const checkoutCommit = await this.prisma.$transaction(async (tx) => {
       // Global creation lock order starts with User. Account deletion takes the
@@ -882,6 +890,60 @@ export class OrderService {
       // double-submit deterministic (the loser waits, then rolls back on the
       // now-deleted cart) instead of leaning on the delete's P2025 by accident.
       await tx.$queryRaw`SELECT id FROM "carts" WHERE id = ${cart.id} FOR UPDATE`;
+
+      // [REPORT-013 F-013-01] Bind the priced snapshot to the LOCKED cart
+      // generation. Pricing, the ID gate, and promo math all ran on a
+      // pre-transaction read; any cart mutation that committed since (the
+      // mobile fire-and-forget tip PUT was the proven interleaving) makes
+      // that math a lie about a different basket. Refuse and let the client
+      // retry against truth — never charge from a stale snapshot.
+      const lockedCart = await tx.cart.findUnique({
+        where: { id: cart.id },
+        select: { updatedAt: true },
+      });
+      if (!lockedCart || lockedCart.updatedAt.getTime() !== cart.updatedAt.getTime()) {
+        throw new AppError(409, 'CART_CHANGED', 'Your cart just changed — review it and place the order again.');
+      }
+
+      // [REPORT-013 F-013-06] Authority is proven WHERE IT COMMITS: every
+      // participating vendor row is locked (deterministic id order), then
+      // lifecycle/ordering flags, subscription operability, the document
+      // authority's wall-clock bound (activationValidUntil), and live item
+      // availability are re-read on THIS transaction. The pre-transaction
+      // checks above remain the friendly fast-fail; they authorize nothing.
+      const planVendorIds = [...new Set(plans.map((p) => p.vendor.id))].sort();
+      await tx.$queryRaw`SELECT id FROM "vendors" WHERE id IN (${Prisma.join(planVendorIds)}) ORDER BY id FOR UPDATE`;
+      for (const planVendorId of planVendorIds) {
+        const lockedVendor = await tx.vendor.findUniqueOrThrow({
+          where: { id: planVendorId },
+          select: { name: true, status: true, isCurrentlyOpen: true, acceptingOrders: true, activationValidUntil: true },
+        });
+        if (
+          lockedVendor.status !== 'ACTIVE'
+          || !lockedVendor.isCurrentlyOpen
+          || !lockedVendor.acceptingOrders
+          || (lockedVendor.activationValidUntil != null && lockedVendor.activationValidUntil <= now)
+        ) {
+          throw new AppError(400, 'VENDOR_CLOSED', `${lockedVendor.name} is currently not accepting orders`);
+        }
+        const lockedSub = await tx.subscription.findFirst({
+          where: { vendorId: planVendorId },
+          orderBy: { createdAt: 'desc' },
+          select: { status: true, gracePeriodEnd: true },
+        });
+        const lockedOperability = subscriptionOperability(lockedSub, { missingRow: 'GRANDFATHER' });
+        if (!lockedOperability.operable) {
+          throw new AppError(400, 'VENDOR_CLOSED', `${lockedVendor.name} is currently not accepting orders`);
+        }
+      }
+      const basketItemIds = plans.flatMap((p) => p.orderItems.map((oi) => oi.itemId));
+      const darkItem = await tx.item.findFirst({
+        where: { id: { in: basketItemIds }, isAvailable: false },
+        select: { name: true },
+      });
+      if (darkItem) {
+        throw new AppError(400, 'ITEM_UNAVAILABLE', `${darkItem.name} just became unavailable — remove it and try again.`);
+      }
 
       let committedMmgPayUrl: string | null = null;
       let committedMmgRecipientName: string | null = null;

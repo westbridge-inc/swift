@@ -629,6 +629,49 @@ export class VerificationService {
    * commits atomically with the decision (STRAND-2); post-commit callers pass
    * the plain client (auto-approval path, repair replays).
    */
+  /** [REPORT-013 F-013-06] The wall-clock bound of a role's document
+   *  authority: each doc's validity ends at the earliest of its own
+   *  expiresAt/retentionExpiresAt (null = unbounded); a checklist type is
+   *  bounded by its furthest-out valid approval (a renewal extends it, an
+   *  unbounded approval unbinds the type); the role's bound is the tightest
+   *  type. Null = nothing expiring bounds the authority. */
+  private async checklistEvidenceValidUntil(
+    userId: string,
+    roleKey: ChecklistRole,
+    db: Prisma.TransactionClient | PrismaClient = this.prisma,
+  ): Promise<Date | null> {
+    const user = await db.user.findUnique({ where: { id: userId }, select: { countryCode: true } });
+    if (!user) return null;
+    const checklist = await this.checklistFor(userId, user.countryCode, roleKey);
+    if (checklist.length === 0) return null;
+    const now = new Date();
+    const docs = await db.verificationDocument.findMany({
+      where: {
+        userId, docType: { in: checklist }, status: 'APPROVED', purgedAt: null, fileUrl: { not: '' },
+        AND: [
+          { OR: [{ expiresAt: null }, { expiresAt: { gt: now } }] },
+          { OR: [{ retentionExpiresAt: null }, { retentionExpiresAt: { gt: now } }] },
+        ],
+      },
+      select: { docType: true, expiresAt: true, retentionExpiresAt: true },
+    });
+    const docEnd = (d: { expiresAt: Date | null; retentionExpiresAt: Date | null }): Date | null => {
+      if (d.expiresAt == null) return d.retentionExpiresAt;
+      if (d.retentionExpiresAt == null) return d.expiresAt;
+      return d.expiresAt < d.retentionExpiresAt ? d.expiresAt : d.retentionExpiresAt;
+    };
+    let bound: Date | null = null;
+    for (const docType of checklist) {
+      const ofType = docs.filter((d) => d.docType === docType);
+      if (ofType.length === 0) continue; // isRoleVerified already refused this state
+      const ends = ofType.map(docEnd);
+      if (ends.some((e) => e == null)) continue; // an unbounded approval unbinds the type
+      const typeBest = ends.reduce((a, b) => (a! > b! ? a : b))!;
+      if (bound == null || typeBest < bound) bound = typeBest;
+    }
+    return bound;
+  }
+
   private async projectVendorActivation(
     db: Prisma.TransactionClient | PrismaClient,
     userId: string,
@@ -641,9 +684,10 @@ export class VerificationService {
     for (const vendor of owner.vendors) {
       const verified = await this.isRoleVerified(userId, vendor.vendorType as ChecklistRole, db);
       if (verified) {
+        const activationValidUntil = await this.checklistEvidenceValidUntil(userId, vendor.vendorType as ChecklistRole, db);
         await db.vendor.update({
           where: { id: vendor.id },
-          data: { isVerified: true, ...(vendor.isVerified ? {} : { acceptingOrders: true }) },
+          data: { isVerified: true, activationValidUntil, ...(vendor.isVerified ? {} : { acceptingOrders: true }) },
         });
         await db.vendor.updateMany({
           where: { id: vendor.id, status: 'PENDING_APPROVAL' },
@@ -656,7 +700,7 @@ export class VerificationService {
         // isVerified) after the store's document authority was gone.
         await db.vendor.update({
           where: { id: vendor.id },
-          data: { isVerified: false, acceptingOrders: false },
+          data: { isVerified: false, acceptingOrders: false, activationValidUntil: null },
         });
       }
     }

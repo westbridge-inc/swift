@@ -930,6 +930,13 @@ model Vendor {
   categories              Category[]
   items                   Item[]
   isVerified              Boolean                  @default(false)
+  // [REPORT-013 F-013-06] The wall-clock bound of the document authority
+  // behind isVerified: min(expiresAt) over the checklist evidence, written
+  // by the activation projection. Null = no expiring evidence bounds it
+  // (legacy/grandfather or non-expiring docs). Checkout binds it in-tx so a
+  // lapse between daily sweeps stops sales at the next order, not the next
+  // sweep.
+  activationValidUntil    DateTime?
   isFeatured              Boolean                  @default(false)
   averageRating           Float                    @default(5.0)
   totalRatings            Int                      @default(0)

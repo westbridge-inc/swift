@@ -1014,26 +1014,21 @@ export async function vendorRoutes(app: FastifyInstance) {
         throw new AppError(409, 'VENDOR_NOT_ACTIVE',
           'Your store isn’t active right now, so it can’t take orders. Approval or reinstatement switches it back on.');
       }
-      // [REPORT-012 F-012-05] Turning commerce ON evaluates LIVE document
-      // truth on THIS transaction — the cached isVerified flag can be
-      // stale-true when evidence was invalidated by a path whose projection
-      // hasn't landed. ONE carve-out: a cached-true with NO document history
-      // at all is a deliberate legacy/admin grant (the grandfather; explicit
-      // scoped records are the queued slice-2d founder decision) and is
-      // honored. Any document history means the flag is a PROJECTION of
-      // evidence, and the live verdict outranks a stale cache — a discovered
-      // stale-true is healed post-rollback (a write inside this refusing
-      // transaction would roll back with it).
+      // [REPORT-012 F-012-05 / REPORT-013 F-013-08] Turning commerce ON
+      // evaluates LIVE document truth on THIS transaction — the cached
+      // isVerified flag can be stale-true when evidence was invalidated by a
+      // path whose projection hasn't landed. NO implicit grandfather: the
+      // zero-evidence-rows carve-out was rejected in review (the daily
+      // reconciler revokes exactly that state, the predicate wasn't
+      // serialized against first-document insertion, and absence proves no
+      // grant). Until the founder's slice-2d explicit grandfather records
+      // exist, this fails CLOSED — consistent with the reconciler's law.
+      // A discovered stale-true is healed post-rollback (a write inside
+      // this refusing transaction would roll back with it).
       const toggleOwnerUserId = await vendorOwnerUserId(app, vendorId);
-      let verifiedOk = await verification.isRoleVerified(toggleOwnerUserId, locked.vendorType, tx);
-      if (!verifiedOk && locked.isVerified) {
-        const evidenceRows = await tx.verificationDocument.count({
-          where: { userId: toggleOwnerUserId, role: 'VENDOR_OWNER' },
-        });
-        verifiedOk = evidenceRows === 0; // grandfather: granted flag, no evidence trail
-        if (!verifiedOk) staleVerifiedToHeal = true;
-      }
+      const verifiedOk = await verification.isRoleVerified(toggleOwnerUserId, locked.vendorType, tx);
       if (!verifiedOk) {
+        if (locked.isVerified) staleVerifiedToHeal = true;
         throw new AppError(403, 'VERIFICATION_REQUIRED',
           'Your store can take orders once its documents are verified. Check Documents for anything missing or expired.');
       }

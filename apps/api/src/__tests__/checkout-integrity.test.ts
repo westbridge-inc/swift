@@ -6,6 +6,7 @@ import { prismaPlugin } from '../plugins/prisma';
 import { redisPlugin } from '../plugins/redis';
 import { authPlugin } from '../plugins/auth';
 import { socketPlugin } from '../plugins/socket';
+import { OrderService } from '../modules/order/order.service';
 import { customerRoutes } from '../modules/user/customer.routes';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { expressDeliveryFee } from '../utils/markup';
@@ -166,6 +167,82 @@ describe('checkout money math', () => {
       expect(res.json().error.code).toBe('VENDOR_CLOSED');
     } finally {
       await app.prisma.subscription.delete({ where: { id: sub.id } });
+    }
+  });
+
+  it('a cart mutation between pricing and commit is refused — never a stale-snapshot charge [REPORT-013 F-013-01]', async () => {
+    const c = await makeCustomer();
+    await inject('POST', '/api/v1/customer/cart/items', { vendorId, itemId, quantity: 1 }, c.token);
+    await inject('PUT', '/api/v1/customer/cart/address', { addressId: c.addressId }, c.token);
+    const svc = new OrderService(app.prisma, app.io);
+    // The proven interleaving: the mobile fire-and-forget tip PUT commits in
+    // the window between the pre-transaction pricing read and the atomic
+    // commit. The locked-cart generation bind must refuse.
+    await expect(svc.checkout({
+      userId: c.userId,
+      paymentMethod: 'CASH',
+      beforeTransaction: async () => {
+        await app.prisma.cart.update({ where: { customerId: c.userId }, data: { tipAmount: 500 } });
+      },
+    })).rejects.toMatchObject({ statusCode: 409, code: 'CART_CHANGED' });
+    expect(await app.prisma.order.count({ where: { customerId: c.userId } })).toBe(0);
+  });
+
+  it('a suspension committing between preview and commit beats the order [REPORT-013 F-013-06]', async () => {
+    const c = await makeCustomer();
+    await inject('POST', '/api/v1/customer/cart/items', { vendorId, itemId, quantity: 1 }, c.token);
+    await inject('PUT', '/api/v1/customer/cart/address', { addressId: c.addressId }, c.token);
+    const svc = new OrderService(app.prisma, app.io);
+    try {
+      await expect(svc.checkout({
+        userId: c.userId,
+        paymentMethod: 'CASH',
+        beforeTransaction: async () => {
+          await app.prisma.vendor.update({ where: { id: vendorId }, data: { status: 'SUSPENDED', acceptingOrders: false } });
+        },
+      })).rejects.toMatchObject({ statusCode: 400, code: 'VENDOR_CLOSED' });
+      expect(await app.prisma.order.count({ where: { customerId: c.userId } })).toBe(0);
+    } finally {
+      await app.prisma.vendor.update({ where: { id: vendorId }, data: { status: 'ACTIVE', acceptingOrders: true } });
+    }
+  });
+
+  it('a lapsed document-authority bound refuses checkout in the transaction — no sweep needed [REPORT-013 F-013-06]', async () => {
+    const c = await makeCustomer();
+    await inject('POST', '/api/v1/customer/cart/items', { vendorId, itemId, quantity: 1 }, c.token);
+    await inject('PUT', '/api/v1/customer/cart/address', { addressId: c.addressId }, c.token);
+    const svc = new OrderService(app.prisma, app.io);
+    try {
+      await expect(svc.checkout({
+        userId: c.userId,
+        paymentMethod: 'CASH',
+        beforeTransaction: async () => {
+          // The projection wrote a bound; the wall clock passed it. The
+          // pre-transaction flags still say sellable — only the in-tx bind
+          // knows. Before v11 this window stretched to the next daily sweep.
+          await app.prisma.vendor.update({ where: { id: vendorId }, data: { activationValidUntil: new Date(Date.now() - 60_000) } });
+        },
+      })).rejects.toMatchObject({ statusCode: 400, code: 'VENDOR_CLOSED' });
+    } finally {
+      await app.prisma.vendor.update({ where: { id: vendorId }, data: { activationValidUntil: null } });
+    }
+  });
+
+  it('an item going dark between preview and commit is refused [REPORT-013 F-013-06]', async () => {
+    const c = await makeCustomer();
+    await inject('POST', '/api/v1/customer/cart/items', { vendorId, itemId, quantity: 1 }, c.token);
+    await inject('PUT', '/api/v1/customer/cart/address', { addressId: c.addressId }, c.token);
+    const svc = new OrderService(app.prisma, app.io);
+    try {
+      await expect(svc.checkout({
+        userId: c.userId,
+        paymentMethod: 'CASH',
+        beforeTransaction: async () => {
+          await app.prisma.item.update({ where: { id: itemId }, data: { isAvailable: false } });
+        },
+      })).rejects.toMatchObject({ statusCode: 400, code: 'ITEM_UNAVAILABLE' });
+    } finally {
+      await app.prisma.item.update({ where: { id: itemId }, data: { isAvailable: true } });
     }
   });
 
