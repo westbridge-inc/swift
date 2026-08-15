@@ -288,7 +288,13 @@ export const customerApi = {
   getOrders: (page?: number) => api.get('/customer/orders', page ? { params: { page } } : undefined),
   validatePromo: (code: string) => api.post('/customer/promo/validate', { code }),
   getOrder: (id: string) => api.get(`/customer/orders/${id}`),
-  cancelOrder: (id: string, reason?: string) => api.post(`/customer/orders/${id}/cancel`, { reason }),
+  // [REPORT-012 F-012-03] Unwrap the API envelope AT THE SEAM: the server
+  // returns { success, data: { message, cancellationFee } } inside the axios
+  // body — reading one level short silently discarded the authoritative
+  // cancellation outcome and the fee actually charged.
+  cancelOrder: (id: string, reason?: string) =>
+    api.post(`/customer/orders/${id}/cancel`, { reason })
+      .then((res) => (res.data?.data ?? {}) as { message?: string; cancellationFee?: number }),
   // Order placement = checkout; it reads the server-side cart. (The old POST
   // /customer/orders had no backend route.)
   placeOrder: (data: {

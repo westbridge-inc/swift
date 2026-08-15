@@ -9,8 +9,8 @@ import type { FastifyInstance } from 'fastify';
 /** Machine version of the served legal pack — stamped onto User.tosVersion at
  *  signup consent [SWIFT-AUD-D9-03]. Bump BOTH constants together whenever the
  *  Terms/Privacy content changes. */
-export const LEGAL_VERSION = '2026-08-12'; // [REPORT-011 F-02] bumped: §4 cancellation MMG-refund clarification
-const LAST_UPDATED = '12 August 2026'; // human form of LEGAL_VERSION
+export const LEGAL_VERSION = '2026-08-15'; // [REPORT-012 F-012-03] §4 cancellation = confirm-at-cancel protocol; Privacy names processors + AI
+const LAST_UPDATED = '15 August 2026'; // human form of LEGAL_VERSION
 
 function page(title: string, body: string): string {
   return `<!doctype html>
@@ -50,7 +50,7 @@ const TERMS = page(
 <p>Payment is due before or at handover. Refusing to pay for goods you ordered, or repeatedly failing to accept deliveries, leads to strikes on your account and can restrict or end your access to cash-on-delivery or to Swift entirely.</p>
 
 <h2>4. Cancellations</h2>
-<p>You can cancel within the window shown in the app for your order. Cash orders cancel free of charge inside that window. If you have already sent an MMG payment to a business for the order, cancelling stops fulfilment and the business refunds you directly on its own MMG — Swift never holds the money. After a business has started acting on your order, a cancellation fee may apply — the app always shows you the cost before you confirm a cancellation.</p>
+<p>You can cancel within the window shown in the app for your order. Cash orders cancel free of charge inside that window. If you have already sent an MMG payment to a business for the order, cancelling stops fulfilment and the business refunds you directly on its own MMG — Swift never holds the money. After a business has started acting on your order, a cancellation fee may apply — the exact outcome, including any fee, is confirmed by our servers at the moment you cancel and shown to you immediately.</p>
 
 <h2>5. Account requirements</h2>
 <p>You need a verified phone number to use Swift. Higher-value orders and all taxi rides require identity verification (a government ID), shown in the app as it becomes required. You must be at least 18 to place orders.</p>
@@ -97,6 +97,8 @@ const PRIVACY = page(
 
 <h2>4. Sharing</h2>
 <p>A business sees what it needs to fulfil your order (items, first name, delivery address). A mover sees pickup/drop-off details and your first name. Movers and customers see each other's ratings. We share data with authorities only where the law requires it.</p>
+<p><b>Technical service providers:</b> to run Swift we use a small number of providers, each receiving only what its function needs: Twilio (delivers your SMS verification codes — your phone number), Expo (delivers push notifications — a device token), Sentry (crash and error reports, scrubbed of tokens and personal identifiers), encrypted cloud object storage (verification documents and images), and Google Maps (addresses and coordinates for map display and travel estimates).</p>
+<p><b>AI processing:</b> some features — such as understanding a search query or tidying a store's menu text — use Anthropic's Claude API. Text sent to it is scrubbed of personal identifiers first; Swift does not send your name, phone number, addresses or documents to AI services.</p>
 
 <h2>5. Retention and deletion</h2>
 <p>Verification documents are purged on a schedule after they stop being needed, with the purge itself logged. Order history is retained for the period required for disputes, guarantees and legal obligations. You can request account deletion in Help &amp; Support; we delete or de-identify personal data not subject to a legal retention duty.</p>

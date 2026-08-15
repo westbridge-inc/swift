@@ -280,12 +280,17 @@ export function DeliveryScreen() {
   // it and show it, instead of discarding it and rendering a stale generic
   // banner — a client-clock/preview "free" promise must never be the last word.
   const [cancelMessage, setCancelMessage] = useState<string | null>(null);
+  const [cancelFee, setCancelFee] = useState<number | null>(null);
   const cancelOrder = useMutation({
     mutationFn: () =>
       order.data?.orderType === 'COURIER' ? courierApi.cancel(orderId) : customerApi.cancelOrder(orderId),
     onSuccess: (res: any) => {
-      const msg = res?.data?.message ?? res?.message ?? null;
-      if (typeof msg === 'string') setCancelMessage(msg);
+      // customerApi.cancelOrder is unwrapped at the seam; the courier endpoint
+      // still returns the raw envelope — accept both shapes, never lose the
+      // message OR the numeric fee the server actually charged.
+      const payload = res?.data?.data ?? res?.data ?? res ?? {};
+      if (typeof payload.message === 'string') setCancelMessage(payload.message);
+      setCancelFee(typeof payload.cancellationFee === 'number' ? payload.cancellationFee : null);
       order.refetch();
     },
   });
@@ -614,14 +619,23 @@ export function DeliveryScreen() {
               }}
             >
               <Feather name="x-circle" size={18} color={color.error} />
-              <T variant="body" weight="semibold" tone="error">
-                {/* Server's authoritative result first — it knows the real
-                    final cost/refund outcome the client clock cannot. */}
-                {cancelMessage
-                  ?? (mmgCancellationAmbiguous
-                    ? 'This order was cancelled. If you already sent the MMG payment, the store refunds you directly.'
-                    : 'This order was cancelled.')}
-              </T>
+              <View style={{ flex: 1 }}>
+                <T variant="body" weight="semibold" tone="error">
+                  {/* Server's authoritative result first — it knows the real
+                      final cost/refund outcome the client clock cannot. */}
+                  {cancelMessage
+                    ?? (mmgCancellationAmbiguous
+                      ? 'This order was cancelled. If you already sent the MMG payment, the store refunds you directly.'
+                      : 'This order was cancelled.')}
+                </T>
+                {/* [REPORT-012 F-012-03] The fee the server ACTUALLY charged —
+                    rendered from the committed result, never a preview. */}
+                {cancelFee != null ? (
+                  <T variant="caption" tone="error" style={{ marginTop: 2 }}>
+                    {cancelFee > 0 ? `Cancellation fee: ${money(cancelFee)}` : 'No cancellation fee.'}
+                  </T>
+                ) : null}
+              </View>
             </View>
           ) : (
             <>
@@ -790,7 +804,7 @@ export function DeliveryScreen() {
 
           {o.canCancel ? (
             <PillButton
-              label={o.freeCancellationWindow && !mmgCancellationAmbiguous ? 'Cancel order (free)' : 'Cancel order'}
+              label="Cancel order"
               variant="soft"
               loading={cancelOrder.isPending}
               onPress={() => setConfirmCancel(true)}
@@ -811,14 +825,11 @@ export function DeliveryScreen() {
             ? 'This cancels the pickup and puts the rider back in the dispatch pool. It can’t be undone.'
             : mmgCancellationAmbiguous
               ? 'Cancelling stops fulfilment. If you already sent the MMG payment, the store refunds you directly.'
-              : o.freeCancellationWindow
-                // [REPORT-010 F-05] Server owns the clock: this preview can
-                // cross expiry between poll and tap, so promise the RULE, not
-                // a price computed from a stale snapshot/device clock.
-                ? 'Inside the free window cancelling costs nothing — the final result is confirmed the moment you cancel.'
-                : Number(o.cancellationFee) > 0
-                  ? `The store may have started preparing it. Cancelling now costs ${money(o.cancellationFee)}.`
-                  : 'The store may have already started preparing it.'}
+              // [REPORT-012 F-012-03] No cached/device-clock promise survives
+              // here: a 15s-old "free window" snapshot can cross expiry
+              // between poll and tap. State the RULE; the committed server
+              // result (message + exact fee) is rendered after the cancel.
+              : 'If the store hasn’t started your order, cancelling is usually free; a late cancel can carry a small fee. The exact outcome is confirmed the moment you cancel.'}
         </T>
         <View style={{ alignSelf: 'stretch', gap: space.md, marginTop: space.xl }}>
           <PillButton
