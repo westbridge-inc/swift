@@ -120,6 +120,47 @@ describe('checkout money math', () => {
     expect(order.total).toBe(order.subtotal + order.deliveryFee + 500 - (order.discount ?? 0));
   });
 
+  it('an explicit tipAmount 0 overrides a persisted cart tip — nothing hidden rides the order or the MMG amount [REPORT-012 F-012-01]', async () => {
+    process.env['MMG_PAY_URL_ALLOWED_HOSTS'] = 'pay.mmg.gy';
+    await app.prisma.vendor.update({ where: { id: vendorId }, data: { mmgPayUrl: 'https://pay.mmg.gy/intg-diner' } });
+    const c = await makeCustomer();
+    await inject('POST', '/api/v1/customer/cart/items', { vendorId, itemId, quantity: 1 }, c.token);
+    // Another surface/session persisted a positive tip on the cart…
+    const tipSet = await inject('PUT', '/api/v1/customer/cart/tip', { amount: 500 }, c.token);
+    expect(tipSet.statusCode).toBe(200);
+    await inject('PUT', '/api/v1/customer/cart/address', { addressId: c.addressId }, c.token);
+    // …then checkout displays 0 and SUBMITS 0. Truthiness (`||`) used to
+    // resurrect the 500 into the order, the MMG instruction, and totalSpent.
+    const res = await inject('POST', '/api/v1/customer/checkout', { paymentMethod: 'MOBILE_MONEY', tipAmount: 0 }, c.token);
+    expect(res.statusCode).toBe(200);
+    const order = res.json().data.orders[0];
+    expect(order.tip).toBe(0);
+    expect(order.total).toBe(order.subtotal + order.deliveryFee);
+    // The MMG payment instruction charges exactly what checkout displayed.
+    const action = res.json().data.paymentAction;
+    expect(action).not.toBeNull();
+    expect(action.amount).toBe(order.total);
+    // The accounting evidence carries no phantom either.
+    const cust = await app.prisma.customer.findUniqueOrThrow({ where: { userId: c.userId } });
+    expect(Number(cust.totalSpent)).toBe(order.total);
+  });
+
+  it('a persisted cart tip on a PICKUP basket never inflates the ID-gate total or totalSpent [REPORT-012 F-012-01]', async () => {
+    const c = await makeCustomer();
+    await inject('POST', '/api/v1/customer/cart/items', { vendorId, itemId, quantity: 1 }, c.token);
+    const tipSet = await inject('PUT', '/api/v1/customer/cart/tip', { amount: 500 }, c.token);
+    expect(tipSet.statusCode).toBe(200);
+    // tipAmount OMITTED: the cart tip is inherited — but a pickup has no
+    // rider, so no order carries it AND it must not inflate grandTotal (the
+    // ID gate) or customer.totalSpent. Before the fix the phantom rode both.
+    const res = await inject('POST', '/api/v1/customer/checkout', { paymentMethod: 'CASH', fulfillmentSelections: { [vendorId]: 'PICKUP' } }, c.token);
+    expect(res.statusCode).toBe(200);
+    const order = res.json().data.orders[0];
+    expect(order.tip).toBe(0);
+    const cust = await app.prisma.customer.findUniqueOrThrow({ where: { userId: c.userId } });
+    expect(Number(cust.totalSpent)).toBe(order.total); // no +500 phantom in the evidence
+  });
+
   it('FREE_DELIVERY on a CASH delivery is refused (rider-financed promo — 409 PROMO_UNAVAILABLE_CASH_DELIVERY)', async () => {
     const code = `FREEDEL${nanoid(5).toUpperCase()}`;
     const promo = await app.prisma.promoCode.create({

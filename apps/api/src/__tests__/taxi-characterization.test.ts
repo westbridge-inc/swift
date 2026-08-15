@@ -239,6 +239,29 @@ describe('the current taxi contract (characterization — must stay green all en
     expect(statuses).toContain('DRIVER_ARRIVED');
   });
 
+  it('driver BOARD accept with fare 0 means NO price choice — the market fare applies, never the floor [REPORT-012 proof gap]', async () => {
+    const customer = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
+    const driver = await makeDriver();
+    const ride = await requestRide(customer.token);
+    const before = await app.prisma.order.findUniqueOrThrow({
+      where: { id: ride.id }, select: { taxiFareTotal: true, totalAmount: true },
+    });
+    // A forged/legacy client posting fare 0 on the open board must not clamp
+    // the driver's own pay to the floor — zero is "no choice", market applies.
+    // (The rider-board twin lives in dispatch.test.ts [REPORT-011 F-04].)
+    const accept = await app.inject({
+      method: 'POST',
+      url: `/api/v1/driver/rides/${ride.id}/accept`,
+      headers: { authorization: `Bearer ${driver.token}`, 'content-type': 'application/json' },
+      payload: { fare: 0 },
+    });
+    expect(accept.statusCode).toBe(200);
+    const fresh = await app.prisma.order.findUniqueOrThrow({ where: { id: ride.id } });
+    expect(fresh.status).toBe('DRIVER_ASSIGNED');
+    expect(Number(fresh.taxiFareTotal)).toBe(Number(before.taxiFareTotal));
+    expect(Number(fresh.totalAmount)).toBe(Number(before.totalAmount));
+  });
+
   it('driver cancel = controlled release: PENDING + reason driver_cancelled + honest push (T18 bones)', async () => {
     const customer = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
     const driver = await makeDriver();
