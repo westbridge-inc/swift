@@ -333,6 +333,11 @@ export interface CanonicalOrderTransitionInput {
   /** Queue-only guard: the worker may cancel PENDING work only after its
    * checkout hold has elapsed. Revalidated from the locked source row. */
   requireHoldExpired?: boolean;
+  /** [REPORT-014 F-014-02] Actor bind ON THE LOCKED ROW: the transition
+   * commits only while this rider still owns the order. A route-level
+   * ownership pre-read cannot survive a watchdog release or reassignment
+   * committing before the lock — this can. */
+  expectedRiderId?: string;
   /** Legacy cancel routes historically healed null/dangling mover pointers.
    * Strict state-machine completions leave every different pointer untouched. */
   releaseStaleMoverPointer?: boolean;
@@ -1447,6 +1452,13 @@ export class OrderService {
     if (!input.allowedFrom.includes(source.status)) {
       throw input.invalidStatus?.(source.status)
         ?? new AppError(409, 'INVALID_TRANSITION', `Cannot move order from ${source.status} to ${input.target}`);
+    }
+    // [REPORT-014 F-014-02] The acting rider must own the LOCKED row — a
+    // release/reassignment that committed after the route's ownership
+    // pre-read loses here, not after a fabricated DELIVERED terminal.
+    if (input.expectedRiderId !== undefined && source.riderId !== input.expectedRiderId) {
+      throw new AppError(409, 'ACTOR_NOT_ASSIGNED',
+        'This job is no longer assigned to you — it was released or reassigned.');
     }
     // [SPS-F-0016] Every canonical transition passes this seam (vendor accept/
     // prep/ready/self-deliver/pickup-complete, rider legs, /delivered), so the

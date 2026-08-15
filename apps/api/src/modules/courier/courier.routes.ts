@@ -74,8 +74,9 @@ const COURIER_CUSTODY_STATUSES = [
   'ARRIVED',
 ] as const satisfies readonly OrderStatus[];
 
-/** Proof keeps the historical full live-state list; cancellation deliberately
- * uses the narrower pre-custody list above. */
+/** The full live-state list — status/tracking surfaces only. Proof is
+ * custody-bound [REPORT-014 F-014-02]: delivery can only be proven for a
+ * parcel the rider physically holds. */
 const COURIER_LIVE_STATUSES = [
   ...COURIER_CANCELLABLE_STATUSES,
   ...COURIER_CUSTODY_STATUSES,
@@ -361,17 +362,32 @@ export default async function courierRoutes(app: FastifyInstance) {
     if (['DELIVERED', 'COMPLETED', 'CANCELLED'].includes(order.status)) {
       throw new AppError(400, 'NOT_IN_TRANSIT', 'This courier job is already closed');
     }
+    // [REPORT-014 F-014-02] The proof object must be the one the server
+    // issued FOR THIS ORDER: /proof-photo stores under courier-proof/<id>/,
+    // so an arbitrary string, another order's photo, or a guessed path can
+    // never terminalize a parcel.
+    if (!body.proofPhotoUrl.includes(`courier-proof/${id}/`)) {
+      throw new AppError(400, 'PROOF_NOT_FOR_ORDER',
+        'Attach the delivery photo through the photo step for this delivery first.');
+    }
     // Proof metadata, DELIVERED, rider release/count, float, earnings, and the
     // immutable log commit atomically. A retry after any pre-commit failure
     // sees the original live state and cannot double-pay or double-count.
+    // [REPORT-014 F-014-02] Custody statuses ONLY (a parcel never held can't
+    // be "delivered"), and the actor is re-proved on the LOCKED row — a
+    // watchdog release/reassignment between the pre-read above and the lock
+    // refuses instead of paying a former rider.
     const { order: updated } = await orderService.transitionOrderAtomically({
       orderId: id,
       target: 'DELIVERED',
-      allowedFrom: COURIER_LIVE_STATUSES,
+      allowedFrom: COURIER_CUSTODY_STATUSES,
+      expectedRiderId: rider.id,
       changedBy: request.user.userId,
       note: 'Proof of delivery captured',
       terminalMetadata: { courierProofPhotoUrl: body.proofPhotoUrl },
-      invalidStatus: () => new AppError(409, 'NOT_IN_TRANSIT', 'This courier job is already closed'),
+      invalidStatus: (status) => (COURIER_CANCELLABLE_STATUSES as readonly OrderStatus[]).includes(status)
+        ? new AppError(409, 'PARCEL_NOT_IN_CUSTODY', 'Pick the parcel up (confirm pickup) before proving delivery.')
+        : new AppError(409, 'NOT_IN_TRANSIT', 'This courier job is already closed'),
     });
 
     try {

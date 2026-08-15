@@ -171,10 +171,58 @@ describe('Courier — create, track, deliver', () => {
       data: { riderId: rider.id, status: 'PICKED_UP' },
     });
 
-    const res = await inject('POST', `/api/v1/courier/order/${created.orderId}/proof`, { proofPhotoUrl: 'storage://t/proof.jpg' }, moverUser.token);
+    const res = await inject('POST', `/api/v1/courier/order/${created.orderId}/proof`, { proofPhotoUrl: `storage://t/courier-proof/${created.orderId}/proof.jpg` }, moverUser.token);
     expect(res.statusCode).toBe(200);
     expect(res.json().data.status).toBe('DELIVERED');
-    expect(res.json().data.courierProofPhotoUrl).toBe('storage://t/proof.jpg');
+    expect(res.json().data.courierProofPhotoUrl).toBe(`storage://t/courier-proof/${created.orderId}/proof.jpg`);
+  });
+
+  it('proof cannot close a parcel the rider never held, name a foreign object, or survive reassignment [REPORT-014 F-014-02]', async () => {
+    const sender = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
+    const created = (await inject('POST', '/api/v1/courier/order', ORDER_BODY, sender.token)).json().data;
+    const moverUser = await makeUserWithSession(['MOVER', 'CUSTOMER'], 'MOVER');
+    const rider = await app.prisma.rider.create({
+      data: { userId: moverUser.userId, riderType: 'DELIVERY', vehicleType: 'MOTORCYCLE', documentsVerified: true },
+    });
+
+    // Pre-custody: assigned but never picked up — DELIVERED is unreachable.
+    await app.prisma.order.update({
+      where: { id: created.orderId },
+      data: { riderId: rider.id, status: 'RIDER_ASSIGNED' },
+    });
+    const preCustody = await inject('POST', `/api/v1/courier/order/${created.orderId}/proof`,
+      { proofPhotoUrl: `storage://t/courier-proof/${created.orderId}/x.jpg` }, moverUser.token);
+    expect(preCustody.statusCode).toBe(409);
+    expect(preCustody.json().error.code).toBe('PARCEL_NOT_IN_CUSTODY');
+
+    // Foreign object: any string/other order's photo is refused before the
+    // transition — only this order's server-issued path counts.
+    await app.prisma.order.update({ where: { id: created.orderId }, data: { status: 'PICKED_UP' } });
+    const foreign = await inject('POST', `/api/v1/courier/order/${created.orderId}/proof`,
+      { proofPhotoUrl: 'storage://t/somewhere/else.jpg' }, moverUser.token);
+    expect(foreign.statusCode).toBe(400);
+    expect(foreign.json().error.code).toBe('PROOF_NOT_FOR_ORDER');
+
+    // The LOCKED actor bind: a release/reassignment that lands after the
+    // route's ownership pre-read loses at the row lock, not after payout.
+    const orderService = new OrderService(app.prisma, app.io);
+    await expect(orderService.transitionOrderAtomically({
+      orderId: created.orderId,
+      target: 'DELIVERED',
+      allowedFrom: ['PICKED_UP'],
+      expectedRiderId: 'rider-that-was-released',
+      changedBy: moverUser.userId,
+      note: 'stale proof attempt',
+      terminalMetadata: { courierProofPhotoUrl: `storage://t/courier-proof/${created.orderId}/x.jpg` },
+    })).rejects.toMatchObject({ statusCode: 409, code: 'ACTOR_NOT_ASSIGNED' });
+    const fresh = await app.prisma.order.findUniqueOrThrow({ where: { id: created.orderId } });
+    expect(fresh.status).toBe('PICKED_UP'); // untouched — no fabricated terminal
+
+    // The real holder still closes it fine.
+    const ok = await inject('POST', `/api/v1/courier/order/${created.orderId}/proof`,
+      { proofPhotoUrl: `storage://t/courier-proof/${created.orderId}/real.jpg` }, moverUser.token);
+    expect(ok.statusCode).toBe(200);
+    expect(ok.json().data.status).toBe('DELIVERED');
   });
 
   it('proof rolls back metadata, pay, evidence, and rider release on fault, then retries once', async () => {
@@ -202,7 +250,7 @@ describe('Courier — create, track, deliver', () => {
         throw new Error('forced courier-proof pre-commit abort');
       });
     try {
-      const failed = await inject('POST', `/api/v1/courier/order/${created.orderId}/proof`, { proofPhotoUrl: 'storage://t/atomic-proof.jpg' }, moverUser.token);
+      const failed = await inject('POST', `/api/v1/courier/order/${created.orderId}/proof`, { proofPhotoUrl: `storage://t/courier-proof/${created.orderId}/atomic-proof.jpg` }, moverUser.token);
       expect(failed.statusCode).toBe(500);
     } finally {
       stageSpy.mockRestore();
@@ -220,9 +268,9 @@ describe('Courier — create, track, deliver', () => {
     expect(failedEarnings).toBe(0);
     expect(failedLogs).toBe(0);
 
-    const retry = await inject('POST', `/api/v1/courier/order/${created.orderId}/proof`, { proofPhotoUrl: 'storage://t/atomic-proof.jpg' }, moverUser.token);
+    const retry = await inject('POST', `/api/v1/courier/order/${created.orderId}/proof`, { proofPhotoUrl: `storage://t/courier-proof/${created.orderId}/atomic-proof.jpg` }, moverUser.token);
     expect(retry.statusCode).toBe(200);
-    const duplicate = await inject('POST', `/api/v1/courier/order/${created.orderId}/proof`, { proofPhotoUrl: 'storage://t/again.jpg' }, moverUser.token);
+    const duplicate = await inject('POST', `/api/v1/courier/order/${created.orderId}/proof`, { proofPhotoUrl: `storage://t/courier-proof/${created.orderId}/again.jpg` }, moverUser.token);
     expect(duplicate.statusCode).toBe(400);
     const [completedRider, earnings, logs] = await Promise.all([
       app.prisma.rider.findUniqueOrThrow({ where: { id: rider.id } }),
@@ -353,7 +401,7 @@ describe('Courier — create, track, deliver', () => {
     // Sender cancels while the rider submits proof — same instant.
     const [a, b] = await Promise.allSettled([
       inject('POST', `/api/v1/courier/order/${created.orderId}/cancel`, { reason: 'race' }, sender.token),
-      inject('POST', `/api/v1/courier/order/${created.orderId}/proof`, { proofPhotoUrl: 'storage://t/p.jpg' }, moverUser.token),
+      inject('POST', `/api/v1/courier/order/${created.orderId}/proof`, { proofPhotoUrl: `storage://t/courier-proof/${created.orderId}/p.jpg` }, moverUser.token),
     ]);
     const codes = [a, b].map((r) => (r.status === 'fulfilled' ? r.value.statusCode : 0));
     expect(codes.filter((c) => c === 200)).toHaveLength(1); // exactly one terminal transition wins
