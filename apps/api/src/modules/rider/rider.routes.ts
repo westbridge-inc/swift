@@ -32,6 +32,13 @@ import { ALLOWED_IMAGE_TYPES, looksLikeImage } from '../../utils/images';
 import { getStorageProvider } from '../../providers/storage/storage-provider';
 import { startOfDayGY, startOfWeekGY, startOfMonthGY } from '../../utils/time-gy';
 import { dailyEarnings } from '../order/daily-earnings';
+import {
+  assertMoverRoleAuthority,
+  assertActiveMoverAccount,
+  lockAndRetireDriverSupply,
+  lockUserRoleAuthority,
+  staleMoverAuthorityError,
+} from '../mover-authority';
 
 const updateRiderProfileSchema = z.object({
   riderType: z.nativeEnum(RiderType).optional(),
@@ -53,6 +60,8 @@ const riderLocationSchema = z.object({
   heading: z.number().optional(),
   speed: z.number().optional(),
 });
+
+const riderGoOnlineSchema = riderLocationSchema.pick({ latitude: true, longitude: true });
 
 const pickupPinSchema = z.object({
   ridePin: z.string().min(1).max(10).optional(),
@@ -178,20 +187,17 @@ export async function riderRoutes(app: FastifyInstance) {
   app.post('/offers/accept', { preHandler: [app.authenticate] }, async (request) => {
     await getRider(app, request.user.userId); // authz before validation
     const { orderId, fare } = offerActionSchema.extend({ fare: zMoneyMinor.optional() }).parse(request.body);
-    const order = await dispatch.acceptOffer(orderId, request.user.userId);
-    // Rider-set delivery fee, capped at market — the same rule as the board-grab
-    // accept, applied AFTER the offer claim (which already acked the alert and
-    // committed the float). Lowering the fee lowers the customer's total 1:1.
-    if (fare != null) {
-      const marketFee = Number(order.deliveryFee);
-      const chosenFee = clampDriverFare(fare, marketFee);
-      if (chosenFee !== marketFee) {
-        await app.prisma.order.update({
-          where: { id: orderId },
-          data: { deliveryFee: chosenFee, totalAmount: Number(order.totalAmount) - (marketFee - chosenFee) },
-        });
-      }
-    }
+    // Rider-set delivery fee (CASH only) rides INSIDE the locked claim
+    // transaction [REPORT-005 F-005-01]: assignment, price, float, and audit
+    // commit or roll back together — never a post-assignment second commit
+    // that can fail after a durable assignment or apply a stale total.
+    // [REPORT-010 F-07] fare 0 is NEVER a legitimate choice (the floor is 60%
+    // of market): a recovered offer card whose board row hadn't loaded used
+    // to submit 0 and silently clamp the mover's pay to the floor — and on
+    // MMG it consumed the offer with MMG_PRICE_LOCKED. Zero means "no
+    // choice"; the market rate applies.
+    const chosenFare = fare && fare > 0 ? fare : undefined;
+    const order = await dispatch.acceptOffer(orderId, request.user.userId, chosenFare);
     return { success: true, data: { orderId: order.id, status: order.status, orderNumber: order.orderNumber } };
   });
 
@@ -201,6 +207,26 @@ export async function riderRoutes(app: FastifyInstance) {
     const { orderId } = offerActionSchema.parse(request.body);
     await dispatch.declineOffer(orderId, request.user.userId);
     return { success: true, data: { message: 'Offer declined' } };
+  });
+
+  /** GET /offers/current — [E27 / danger #37] recover the live exclusive
+   *  offer after a socket drop/app restart: the card rebuilds with its real
+   *  remaining seconds instead of the job silently timing out against the
+   *  mover's acceptance ranking. Null when no live offer is owned. */
+  app.get('/offers/current', { preHandler: [app.authenticate] }, async (request) => {
+    const rider = await getRider(app, request.user.userId);
+    const offer = await dispatch.currentOfferFor(rider.id);
+    return { success: true, data: { offer } };
+  });
+
+  /** POST /offers/seen — [danger #21] the offer card RENDERED on this device.
+   *  Render proof (seenAt) keeps timeout accounting honest: an unrendered
+   *  ping never decays the acceptance rate. Fire-and-forget from the client. */
+  app.post('/offers/seen', { preHandler: [app.authenticate] }, async (request) => {
+    await getRider(app, request.user.userId); // authz before validation
+    const { orderId } = offerActionSchema.parse(request.body);
+    await dispatch.markOfferSeen(orderId, request.user.userId);
+    return { success: true, data: { seen: true } };
   });
 
   // =========================================================================
@@ -230,6 +256,8 @@ export async function riderRoutes(app: FastifyInstance) {
             phone: true,
             avatar: true,
             createdAt: true,
+            activeRole: true,
+            lastMoverRole: true,
           },
         },
         subscription: true,
@@ -337,7 +365,16 @@ export async function riderRoutes(app: FastifyInstance) {
       data: updateData,
       include: {
         user: {
-          select: { id: true, firstName: true, lastName: true, email: true, phone: true, avatar: true },
+          select: {
+            id: true,
+            firstName: true,
+            lastName: true,
+            email: true,
+            phone: true,
+            avatar: true,
+            activeRole: true,
+            lastMoverRole: true,
+          },
         },
       },
     });
@@ -352,6 +389,10 @@ export async function riderRoutes(app: FastifyInstance) {
   /** POST /go-online — Mark rider as online and available for deliveries. */
   app.post('/go-online', { preHandler: [app.authenticate] }, async (request) => {
     const rider = await getRider(app, request.user.userId);
+    const locationSessionId = request.authSessionId;
+    if (!locationSessionId) {
+      throw new AppError(401, 'UNAUTHORIZED', 'This device session is no longer active');
+    }
 
     // Universal signup selfie (master plan §3): customers see the courier's
     // photo on acceptance, so a live profile photo must exist before going online.
@@ -365,6 +406,8 @@ export async function riderRoutes(app: FastifyInstance) {
 
     // Verification gate: the country's MOVER checklist must be fully approved.
     // Legacy documentsVerified flag grandfathers pre-checklist accounts.
+    // Fast-fail preview for honest copy — the AUTHORITATIVE check re-runs
+    // inside the locked transaction below [EV-ACT-16 TOCTOU].
     const verified = rider.documentsVerified
       || await verification.isRoleVerified(request.user.userId, 'MOVER');
     if (!verified) {
@@ -392,14 +435,88 @@ export async function riderRoutes(app: FastifyInstance) {
     assertShiftLiveness(rider);
     // §8.3 — an interim safety suspension blocks go-online until ops lifts it.
     assertNotSafetySuspended(rider);
+    const location = riderGoOnlineSchema.parse(request.body ?? {});
 
-    const updated = await app.prisma.rider.update({
-      where: { id: rider.id },
-      data: { isOnline: true, isAvailable: !rider.currentOrderId },
+    // Serialize GO against role switching, then CAS the profile generation
+    // captured before verification/subscription checks. A concurrent accept,
+    // offline, safety action, or switch invalidates this request instead of
+    // allowing stale work to resurrect delivery supply.
+    const { updated, retiredDriverId } = await app.prisma.$transaction(async (tx) => {
+      const authority = await lockUserRoleAuthority(tx, request.user.userId);
+      assertActiveMoverAccount(authority.status);
+      assertMoverRoleAuthority(authority.activeRole, 'RIDER');
+
+      // Authentication can be revoked after the Fastify pre-handler but while
+      // verification checks are still running. Lock/revalidate this exact
+      // session in the same transaction as GO so a logged-out request cannot
+      // recreate a dangling location owner.
+      const sessions = await tx.$queryRaw<Array<{ id: string }>>`
+        SELECT "id"
+        FROM "sessions"
+        WHERE "id" = ${locationSessionId}
+          AND "userId" = ${request.user.userId}
+          AND "expiresAt" > NOW()
+        FOR SHARE
+      `;
+      if (!sessions[0]) {
+        throw new AppError(401, 'UNAUTHORIZED', 'This device session is no longer active');
+      }
+
+      const snapshots = await tx.$queryRaw<Array<{ currentOrderId: string | null; documentsVerified: boolean; updatedAt: Date }>>`
+        SELECT "currentOrderId", "documentsVerified", "updatedAt"
+        FROM "riders"
+        WHERE "id" = ${rider.id}
+        FOR UPDATE
+      `;
+      const snapshot = snapshots[0];
+      if (!snapshot || snapshot.updatedAt.getTime() !== rider.updatedAt.getTime()) {
+        throw staleMoverAuthorityError();
+      }
+      // [EV-ACT-16 TOCTOU] The document verdict is re-derived UNDER the same
+      // User lock document decisions take: an expiry, rejection, or admin
+      // revocation committing after the preview above can no longer slip a
+      // stale "verified" through to the online write. The legacy flag comes
+      // from the LOCKED profile snapshot, not the preview.
+      const liveVerified = snapshot.documentsVerified
+        || await verification.isRoleVerified(request.user.userId, 'MOVER', tx);
+      if (!liveVerified) {
+        throw new AppError(403, 'VERIFICATION_REQUIRED', 'Your documents must be verified before you can go online');
+      }
+      const retiredDriverId = await lockAndRetireDriverSupply(tx, request.user.userId);
+
+      const activated = await tx.rider.update({
+        where: { id: rider.id },
+        data: {
+          isOnline: true,
+          isAvailable: !snapshot.currentOrderId,
+          currentLat: location.latitude,
+          currentLng: location.longitude,
+          lastLocationUpdate: new Date(),
+          locationSessionId,
+        },
+      });
+      await tx.user.update({
+        where: { id: request.user.userId },
+        data: { lastMoverRole: 'RIDER' },
+      });
+      return { updated: activated, retiredDriverId };
     });
 
+    // These Redis keys are observability/debounce aids, not online authority.
+    // Never report GO as failed after PostgreSQL has already committed it.
+    await app.redis
+      .set(`rider:location_db_ts:${rider.id}`, Date.now().toString())
+      .catch((error) => request.log.warn({ err: error, riderId: rider.id }, 'rider go-online Redis bookkeeping failed'));
+
     // Track online session start in Redis for hours tracking.
-    await startOnlineSession(app.redis, rider.id);
+    await startOnlineSession(app.redis, rider.id)
+      .catch((error) => request.log.warn({ err: error, riderId: rider.id }, 'rider online-hours start failed'));
+
+    if (retiredDriverId) {
+      await dispatch
+        .releaseHeldOffer(retiredDriverId)
+        .catch((error) => request.log.warn({ err: error, driverId: retiredDriverId }, 'rider GO sibling driver offer cleanup failed'));
+    }
 
     return { success: true, data: { isOnline: updated.isOnline, isAvailable: updated.isAvailable } };
   });
@@ -412,19 +529,28 @@ export async function riderRoutes(app: FastifyInstance) {
       throw new ConflictError('You cannot go offline while you have an active delivery. Complete or cancel the current order first.');
     }
 
-    // A rider holding a live offer (not yet accepted) is still isAvailable and
-    // passes the guard above. Release it now so the delivery re-dispatches at
-    // once rather than sitting on a rider who quit for the offer's full window.
-    await dispatch.releaseHeldOffer(rider.id);
-
-    const updated = await app.prisma.rider.update({
-      where: { id: rider.id },
-      data: { isOnline: false, isAvailable: false },
+    // Database authority goes first. A concurrent offer accept and this CAS
+    // cannot both win; if a delivery pointer appears, the 409 keeps native GPS
+    // alive for the newly assigned job.
+    const updated = await app.prisma.$transaction(async (tx) => {
+      const stopped = await tx.rider.updateMany({
+        where: { id: rider.id, currentOrderId: null },
+        data: { isOnline: false, isAvailable: false, locationSessionId: null },
+      });
+      if (stopped.count !== 1) {
+        throw new ConflictError('You cannot go offline while you have an active delivery. Complete or cancel the current order first.');
+      }
+      return tx.rider.findUniqueOrThrow({ where: { id: rider.id } });
     });
+
+    await dispatch
+      .releaseHeldOffer(rider.id)
+      .catch((error) => request.log.warn({ err: error, riderId: rider.id }, 'rider go-offline offer cleanup failed'));
 
     // Accumulate today's online hours in Redis (SWIFT-143: same helper the
     // force-offline paths use, so a session closes the same way however it ends).
-    await closeOnlineSession(app.redis, rider.id);
+    await closeOnlineSession(app.redis, rider.id)
+      .catch((error) => request.log.warn({ err: error, riderId: rider.id }, 'rider online-hours close failed'));
 
     return { success: true, data: { isOnline: updated.isOnline, isAvailable: updated.isAvailable } };
   });
@@ -436,20 +562,96 @@ export async function riderRoutes(app: FastifyInstance) {
   /** PUT /location — Update lat/lng, persist to DB + Redis, broadcast to active order. */
   app.put('/location', { preHandler: [app.authenticate] }, async (request) => {
     const rider = await getRider(app, request.user.userId); // authz before validation
+    const locationSessionId = request.authSessionId;
+    if (!locationSessionId) {
+      throw new AppError(401, 'UNAUTHORIZED', 'This device session is no longer active');
+    }
     const { latitude, longitude, heading, speed } = riderLocationSchema.parse(request.body);
     const now = new Date();
 
+    if (!rider.isOnline && !rider.currentOrderId) {
+      return { success: true, data: { accepted: false, reason: 'OFFLINE' } };
+    }
+
+    // Migration compatibility is first-writer-wins for a legacy null owner;
+    // thereafter only the authenticated session that won GO may publish.
+    if (!rider.locationSessionId) {
+      await app.prisma.$transaction(async (tx) => {
+        // Serialize the legacy claim with exact-session revocation. If logout
+        // wins, this request cannot install the now-deleted session ID; if the
+        // claim wins, logout waits and clears it immediately afterward.
+        const users = await tx.$queryRaw<Array<{ id: string }>>`
+          SELECT "id"
+          FROM "users"
+          WHERE "id" = ${request.user.userId}
+          FOR SHARE
+        `;
+        if (!users[0]) return;
+        const sessions = await tx.$queryRaw<Array<{ id: string }>>`
+          SELECT "id"
+          FROM "sessions"
+          WHERE "id" = ${locationSessionId}
+            AND "userId" = ${request.user.userId}
+            AND "expiresAt" > NOW()
+          FOR SHARE
+        `;
+        if (!sessions[0]) return;
+        await tx.rider.updateMany({
+          where: {
+            id: rider.id,
+            locationSessionId: null,
+            OR: [{ isOnline: true }, { currentOrderId: { not: null } }],
+          },
+          data: { locationSessionId },
+        });
+      });
+    }
+    const authorized = await app.prisma.rider.findFirst({
+      where: {
+        id: rider.id,
+        locationSessionId,
+        OR: [{ isOnline: true }, { currentOrderId: { not: null } }],
+      },
+    });
+    if (!authorized) {
+      const owner = await app.prisma.rider.findUnique({
+        where: { id: rider.id },
+        select: { locationSessionId: true, isOnline: true, currentOrderId: true },
+      });
+      const reason = owner?.isOnline || owner?.currentOrderId ? 'SESSION_REPLACED' : 'OFFLINE';
+      return { success: true, data: { accepted: false, reason } };
+    }
+
     // DB update (batched — not every ping needs to hit PG immediately).
     // We update the DB if 10+ seconds have passed since last DB write.
-    const lastDbWrite = await app.redis.get(`rider:location_db_ts:${rider.id}`);
+    const lastDbWrite = await app.redis
+      .get(`rider:location_db_ts:${rider.id}`)
+      .catch((error) => {
+        request.log.warn({ err: error, riderId: rider.id }, 'rider location Redis debounce read failed');
+        return null;
+      });
     const shouldWriteDb = !lastDbWrite || Date.now() - parseInt(lastDbWrite, 10) > 10_000;
 
     if (shouldWriteDb) {
-      await app.prisma.rider.update({
-        where: { id: rider.id },
+      const persisted = await app.prisma.rider.updateMany({
+        where: {
+          id: rider.id,
+          locationSessionId,
+          OR: [{ isOnline: true }, { currentOrderId: { not: null } }],
+        },
         data: { currentLat: latitude, currentLng: longitude, lastLocationUpdate: now },
       });
-      await app.redis.set(`rider:location_db_ts:${rider.id}`, Date.now().toString());
+      if (persisted.count === 0) {
+        const owner = await app.prisma.rider.findUnique({
+          where: { id: rider.id },
+          select: { locationSessionId: true, isOnline: true, currentOrderId: true },
+        });
+        const reason = owner?.isOnline || owner?.currentOrderId ? 'SESSION_REPLACED' : 'OFFLINE';
+        return { success: true, data: { accepted: false, reason } };
+      }
+      await app.redis
+        .set(`rider:location_db_ts:${rider.id}`, Date.now().toString())
+        .catch((error) => request.log.warn({ err: error, riderId: rider.id }, 'rider location Redis debounce write failed'));
     }
 
     // SWIFT-141: the `rider:location:<id>` Redis write was a "fast path for
@@ -459,22 +661,82 @@ export async function riderRoutes(app: FastifyInstance) {
     // (currentLat/Lng, read by dispatch/presence). There is no third copy.
 
     // Broadcast to order room if rider has an active order.
-    if (rider.currentOrderId) {
+    if (authorized.currentOrderId) {
       // Live-leg ETA [SWIFT-UG-RT-01]: recomputed on the same ≥10 s throttle
       // as the DB write, served from cache on the pings in between — the
       // tracking screen gets a moving ETA without a maps call per ping.
       const etaMinutes = shouldWriteDb
-        ? await refreshLegEta(app, rider.currentOrderId, { lat: latitude, lng: longitude })
-        : await cachedLegEta(app, rider.currentOrderId);
-      app.io.to(`order:${rider.currentOrderId}`).emit('rider:location', {
-        riderId: rider.id,
-        lat: latitude,
-        lng: longitude,
-        heading: heading ?? null,
-        speed: speed ?? null,
-        etaMinutes,
-        ts: now.toISOString(),
+        ? await refreshLegEta(app, authorized.currentOrderId, { lat: latitude, lng: longitude })
+        : await cachedLegEta(app, authorized.currentOrderId);
+
+      // Authorization above and the live emit cannot be one unguarded read /
+      // publish pair: another device may win GO while ETA is being computed.
+      // Take a shared lock only for this final synchronous publication
+      // checkpoint (never for maps/cache work). Concurrent pings can still
+      // publish together, while GO/offline updates wait. GO therefore
+      // linearizes either before this check and suppresses the stale sample,
+      // or after the emit has already completed.
+      const publication = await app.prisma.$transaction(async (tx) => {
+        // User -> Session -> profile matches the authority writers' outer lock
+        // order. The shared mode keeps concurrent authorized pings concurrent
+        // while preventing logout/ban/role-switch deadlocks and stale emits.
+        const users = await tx.$queryRaw<Array<{ id: string }>>`
+          SELECT "id"
+          FROM "users"
+          WHERE "id" = ${request.user.userId}
+          FOR SHARE
+        `;
+        const sessions = await tx.$queryRaw<Array<{ id: string }>>`
+          SELECT "id"
+          FROM "sessions"
+          WHERE "id" = ${locationSessionId}
+            AND "userId" = ${request.user.userId}
+            AND "expiresAt" > NOW()
+          FOR SHARE
+        `;
+        const rows = await tx.$queryRaw<Array<{
+          locationSessionId: string | null;
+          isOnline: boolean;
+          currentOrderId: string | null;
+        }>>`
+          SELECT "locationSessionId", "isOnline", "currentOrderId"
+          FROM "riders"
+          WHERE "id" = ${rider.id}
+          FOR SHARE
+        `;
+        const current = rows[0];
+        if (
+          !users[0]
+          || !sessions[0]
+          || !current
+          || current.locationSessionId !== locationSessionId
+          || (!current.isOnline && !current.currentOrderId)
+        ) {
+          return {
+            accepted: false as const,
+            reason: current?.isOnline || current?.currentOrderId ? 'SESSION_REPLACED' as const : 'OFFLINE' as const,
+          };
+        }
+
+        // If completion/reassignment changed the pointer while ETA was in
+        // flight, skip this one old-leg sample; the next ping targets the new
+        // job. The session itself remains authoritative.
+        if (current.currentOrderId === authorized.currentOrderId) {
+          app.io.to(`order:${authorized.currentOrderId}`).emit('rider:location', {
+            riderId: rider.id,
+            lat: latitude,
+            lng: longitude,
+            heading: heading ?? null,
+            speed: speed ?? null,
+            etaMinutes,
+            ts: now.toISOString(),
+          });
+        }
+        return { accepted: true as const };
       });
+      if (!publication.accepted) {
+        return { success: true, data: publication };
+      }
     }
 
     return { success: true };
@@ -488,7 +750,7 @@ export async function riderRoutes(app: FastifyInstance) {
   app.get('/orders/available', { preHandler: [app.authenticate] }, async (request) => {
     const rider = await getRider(app, request.user.userId);
 
-    if (!rider.isOnline) {
+    if (!rider.isOnline || !rider.locationSessionId) {
       throw new AppError(400, 'OFFLINE', 'You must be online to see available orders');
     }
     if (rider.currentOrderId) {
@@ -513,9 +775,15 @@ export async function riderRoutes(app: FastifyInstance) {
 
     const orders = await app.prisma.order.findMany({
       where: {
+        customerId: { not: request.user.userId },
         status: { in: ['READY_FOR_PICKUP', 'ACCEPTED', 'PREPARING'] },
         riderId: null,
         orderType: { in: orderTypes as import('@prisma/client').OrderType[] },
+        // [REPORT-006 F-006-03] Rider work is DELIVERY only: a PICKUP or
+        // APPOINTMENT order (including one the customer just converted) must
+        // never appear on the board — the claim CAS refuses it anyway, but
+        // advertising it sends riders to collect work that doesn't exist.
+        fulfillment: 'DELIVERY',
         // LIFECYCLE_V2: a held courier job isn't offerable yet.
         ...notHeldFilter(),
         // [F-0026] A self-delivering vendor fulfils this one itself — it is not
@@ -651,11 +919,16 @@ export async function riderRoutes(app: FastifyInstance) {
   /** POST /orders/:id/accept — Claim an available order. */
   app.post('/orders/:id/accept', { preHandler: [app.authenticate] }, async (request) => {
     const { id } = request.params as { id: string };
-    const { fare } = z.object({ fare: zMoneyMinor.optional() }).parse(request.body ?? {});
+    // [REPORT-011 F-04] fare 0 is never a legitimate undercut choice (the floor
+    // is 60% of market). A forged/legacy client posting 0 must NOT clamp the
+    // rider's own pay to the floor — normalize zero to "no choice" so the
+    // market fee applies, at THIS entrance too, not just the offer card.
+    const { fare: rawFare } = z.object({ fare: zMoneyMinor.optional() }).parse(request.body ?? {});
+    const fare = rawFare && rawFare > 0 ? rawFare : undefined;
     const rider = await getRider(app, request.user.userId);
 
     // Must be online.
-    if (!rider.isOnline) {
+    if (!rider.isOnline || !rider.locationSessionId) {
       throw new AppError(400, 'OFFLINE', 'You must be online to accept orders');
     }
 
@@ -674,6 +947,10 @@ export async function riderRoutes(app: FastifyInstance) {
       include: { vendor: { select: { id: true, name: true } } },
     });
     if (!order) throw new NotFoundError('Order', id);
+
+    if (order.customerId === request.user.userId) {
+      throw new AppError(409, 'SELF_OWN_ORDER', 'You cannot accept a delivery or courier request created by your own account');
+    }
 
     if (order.riderId) {
       throw new ConflictError('This order has already been claimed by another rider');
@@ -694,11 +971,19 @@ export async function riderRoutes(app: FastifyInstance) {
       throw new AppError(400, 'VEHICLE_TOO_SMALL', `A ${order.courierPackageSize.toLowerCase().replace(/_/g, ' ')} parcel needs a bigger vehicle than your ${rider.vehicleType.toLowerCase()}.`);
     }
 
-    // Rider-set delivery fee, capped at the market rate (deliveryFee). The rider
-    // charges UP TO market and no more; lowering it lowers the customer's total by
-    // the same delta. Swift never sets the final price.
-    const marketFee = Number(order.deliveryFee);
-    const chosenFee = fare != null ? clampDriverFare(fare, marketFee) : marketFee;
+    // Rider-set delivery fee, capped at the market rate (deliveryFee) — CASH
+    // only [REPORT-005 F-005-01]: on CASH the customer simply pays less at the
+    // door; on MMG the checkout total was already paid/instructed to the store,
+    // so repricing would rewrite captured money. Early honest 409 here; the
+    // persistence seam re-derives the clamp from the LOCKED row either way.
+    if (fare != null && order.paymentMethod !== 'CASH'
+      && clampDriverFare(fare, Number(order.deliveryFee)) !== Number(order.deliveryFee)) {
+      throw new AppError(
+        409,
+        'MMG_PRICE_LOCKED',
+        'The delivery price can’t change on an MMG order — the customer already paid the checkout total to the store.',
+      );
+    }
 
     // D.3 cash-exposure parity with dispatch.claimOrder [debug-ledger P2]: a
     // board-grab accept must respect the same float gate the offer cascade
@@ -719,73 +1004,55 @@ export async function riderRoutes(app: FastifyInstance) {
       }
     }
 
-    // SWIFT-104: reserve the float FIRST with an ATOMIC guarded commit. The JS
-    // check above cannot cap concurrency — two board-grabs of DIFFERENT orders by
-    // the same rider each read the same committedFloat and both pass. The DB
-    // predicate (floatLimit − committedFloat ≥ amount) is what actually bounds the
-    // cash a rider fronts. Reserve before claiming so a lost float race never
-    // leaves an order half-assigned; a lost ORDER race releases it (below).
-    if (floatAmt > 0) {
-      const reserved = await floatService.commit(app.prisma, rider.id, floatAmt);
-      if (!reserved) {
-        throw new AppError(
-          400,
-          'FLOAT_EXCEEDED',
-          `This cash order needs $${floatAmt.toLocaleString()} float headroom (you front the vendor at pickup); your other live orders have used it up.`,
-        );
-      }
-    }
+    // Float, order ownership + RIDER_ASSIGNED status, the one-live-job Rider
+    // pointer, and the append-only audit row share one commit boundary. A crash
+    // can no longer leave a READY/PREPARING order owned by a permanently-busy
+    // rider. Socket/push publication happens only after this transaction lands.
+    const updatedOrder = await app.prisma.$transaction(async (tx) => {
+      const authority = await lockUserRoleAuthority(tx, request.user.userId);
+      assertActiveMoverAccount(authority.status);
+      assertMoverRoleAuthority(authority.activeRole, 'RIDER');
 
-    // Claim the order AND reserve the rider ATOMICALLY, mirroring
-    // dispatch.claimOrder. The order updateMany is the single-winner per-ORDER
-    // lock (only one caller flips riderId from null under an acceptable status).
-    // The rider updateMany (guarded on isAvailable + currentOrderId:null) is the
-    // one-job-per-MOVER lock — WITHOUT it a single rider grabbing two DIFFERENT
-    // orders at once wins both: the float commit caps cash fronted, not job
-    // COUNT, and a MOBILE_MONEY order commits no float at all. Both writes ride in
-    // one tx so a crash between them can never strand an order on a busy rider.
-    const outcome = await app.prisma.$transaction(async (tx) => {
-      const claimed = await tx.order.updateMany({
-        where: { id, riderId: null, status: { in: acceptableStatuses } },
-        data: {
-          riderId: rider.id,
-          ...(chosenFee !== marketFee
-            ? { deliveryFee: chosenFee, totalAmount: Number(order.totalAmount) - (marketFee - chosenFee) }
-            : {}),
-        },
+      // [REPORT-006 F-006-03] Lock order is User → orders → riders,
+      // matching dispatch.claimOrder AND the cancellation paths (orders →
+      // riders): the seam takes the orders row lock first, so the float
+      // commit below touches the riders row only after the orders lock is
+      // held — the old float-first shape inverted against cancellation's
+      // orders→riders order and could deadlock. Atomicity is unchanged: a
+      // failed float commit still rolls back the whole claim.
+      const staged = await orderService.stageDirectRiderAssignment(tx, {
+        orderId: id,
+        riderId: rider.id,
+        changedBy: request.user.userId,
+        moverUserId: request.user.userId,
+        note: 'Rider accepted the order',
+        // The seam clamps against the LOCKED row and applies the total as an
+        // atomic delta — no stale absolute totals from this preview [F-005-01].
+        ...(fare != null ? { requestedFee: fare } : {}),
       });
-      if (claimed.count === 0) return 'ORDER_TAKEN' as const;
 
-      const reserved = await tx.rider.updateMany({
-        where: { id: rider.id, isAvailable: true, currentOrderId: null },
-        data: { isAvailable: false, currentOrderId: id },
-      });
-      if (reserved.count === 0) {
-        // The rider already holds a live order — undo the claim (revert the fee
-        // too) so this order goes back on the board for another mover.
-        await tx.order.updateMany({
-          where: { id, riderId: rider.id },
-          data: { riderId: null, deliveryFee: marketFee, totalAmount: Number(order.totalAmount) },
-        });
-        return 'RIDER_BUSY' as const;
+      // Float, order, and mover reservation share this transaction. Any failed
+      // authority/order/profile predicate rolls the float back automatically;
+      // there is no compensating-write window to leak cash headroom. The
+      // amount comes from the LOCKED-row snapshot, not the route preview — a
+      // picking refund committing between preview and lock shrinks the cash
+      // the rider actually fronts [REPORT-006].
+      const lockedFloatAmt = staged.paymentMethod === 'CASH' ? Number(staged.subtotalBase) : 0;
+      if (lockedFloatAmt > 0) {
+        const floatReserved = await floatService.commit(tx, rider.id, lockedFloatAmt);
+        if (!floatReserved) {
+          throw new AppError(
+            400,
+            'FLOAT_EXCEEDED',
+            `This cash order needs $${lockedFloatAmt.toLocaleString()} float headroom (you front the vendor at pickup); your other live orders have used it up.`,
+          );
+        }
       }
-      return 'OK' as const;
+
+      return staged;
     });
 
-    if (outcome !== 'OK') {
-      // Nothing committed — release any float we reserved for this attempt.
-      if (floatAmt > 0) await floatService.release(app.prisma, rider.id, floatAmt);
-      if (outcome === 'RIDER_BUSY') {
-        throw new ConflictError('You already have an active order — finish it before taking another one.');
-      }
-      throw new ConflictError('This order was just claimed by another rider, or is no longer available');
-    }
-
-    // Winner of BOTH locks — the rider is already marked busy and the float
-    // committed; advance the order to RIDER_ASSIGNED.
-    await orderService.updateStatus(id, 'RIDER_ASSIGNED', request.user.userId, 'Rider accepted the order');
-
-    const updatedOrder = await app.prisma.order.findUniqueOrThrow({ where: { id } });
+    await orderService.publishCommittedRiderAssignment(updatedOrder, request.user.userId);
 
     return {
       success: true,

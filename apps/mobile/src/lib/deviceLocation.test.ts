@@ -2,12 +2,18 @@ import { describe, expect, it, vi } from 'vitest';
 import {
   BOOT_LOCATION_MODE,
   GEORGETOWN,
+  commitLiveDeviceLocation,
+  createLiveDeviceLocationLease,
   grantedLocationFix,
   pickupLocationContext,
+  liveLocationState,
+  resolvedLocationState,
   resolveCoordinatedDeviceLocation,
   resolveDeviceLocation,
+  advanceLocationAppState,
   type DeviceLocationApi,
   type DeviceLocationWriter,
+  type LocationStatus,
 } from './deviceLocation';
 
 function locationApi(status: 'granted' | 'denied' | 'undetermined'): DeviceLocationApi {
@@ -75,6 +81,18 @@ describe('resolveDeviceLocation', () => {
       address: undefined,
     });
   });
+
+  it('rejects a non-finite OS position instead of granting an unsafe fix', async () => {
+    const api = locationApi('granted');
+    vi.mocked(api.getCurrentPositionAsync).mockResolvedValue({
+      coords: { latitude: Number.NaN, longitude: -58.14321 },
+    });
+
+    await expect(resolveDeviceLocation('silent', api)).resolves.toEqual({
+      status: 'unavailable',
+    });
+    expect(api.reverseGeocodeAsync).not.toHaveBeenCalled();
+  });
 });
 
 describe('resolveCoordinatedDeviceLocation', () => {
@@ -97,12 +115,13 @@ describe('resolveCoordinatedDeviceLocation', () => {
     await oldResolution;
 
     expect(writer.setStatus).toHaveBeenNthCalledWith(1, 'resolving');
-    expect(writer.setStatus).toHaveBeenNthCalledWith(2, 'denied');
-    expect(writer.setStatus).toHaveBeenCalledTimes(2);
+    expect(writer.setStatus).toHaveBeenNthCalledWith(2, 'resolving');
+    expect(writer.setStatus).toHaveBeenNthCalledWith(3, 'denied');
+    expect(writer.setStatus).toHaveBeenCalledTimes(3);
     expect(writer.setLocation).not.toHaveBeenCalled();
   });
 
-  it('lets a newer silent denial invalidate an explicit grant that is still resolving', async () => {
+  it('lets a genuine newer silent denial supersede a buffered explicit fix', async () => {
     const explicitPosition = deferred<{ coords: { latitude: number; longitude: number } }>();
     const explicitApi = locationApi('granted');
     vi.mocked(explicitApi.getCurrentPositionAsync).mockReturnValue(explicitPosition.promise);
@@ -113,15 +132,10 @@ describe('resolveCoordinatedDeviceLocation', () => {
     };
 
     const explicitResolution = resolveCoordinatedDeviceLocation('request', explicitApi, writer);
-    await Promise.resolve();
-    expect(explicitApi.getCurrentPositionAsync).toHaveBeenCalledOnce();
-
+    await vi.waitFor(() => expect(explicitApi.getCurrentPositionAsync).toHaveBeenCalledOnce());
     await expect(resolveCoordinatedDeviceLocation('silent', silentApi, writer)).resolves.toEqual({
       status: 'denied',
     });
-    expect(writer.setStatus).toHaveBeenNthCalledWith(1, 'resolving');
-    expect(writer.setStatus).toHaveBeenNthCalledWith(2, 'denied');
-
     explicitPosition.resolve({ coords: { latitude: 6.91, longitude: -58.21 } });
     await expect(explicitResolution).resolves.toEqual({
       status: 'granted',
@@ -130,106 +144,47 @@ describe('resolveCoordinatedDeviceLocation', () => {
       address: 'Regent Street, Georgetown',
     });
 
-    expect(writer.setStatus).toHaveBeenCalledTimes(2);
+    expect(writer.setStatus).toHaveBeenNthCalledWith(1, 'resolving');
+    expect(writer.setStatus).toHaveBeenNthCalledWith(2, 'resolving');
+    expect(writer.setStatus).toHaveBeenNthCalledWith(3, 'denied');
     expect(writer.setLocation).not.toHaveBeenCalled();
   });
 
-  it('lets a newer reliable silent grant supersede an explicit fix that is still resolving', async () => {
-    const explicitPosition = deferred<{ coords: { latitude: number; longitude: number } }>();
-    const explicitApi = locationApi('granted');
-    vi.mocked(explicitApi.getCurrentPositionAsync).mockReturnValue(explicitPosition.promise);
-    const silentApi = locationApi('granted');
+  it('keeps resolving when silent A grants while newer silent B remains pending', async () => {
+    const firstPosition = deferred<{ coords: { latitude: number; longitude: number } }>();
+    const secondPosition = deferred<{ coords: { latitude: number; longitude: number } }>();
+    const firstApi = locationApi('granted');
+    const secondApi = locationApi('granted');
+    vi.mocked(firstApi.getCurrentPositionAsync).mockReturnValue(firstPosition.promise);
+    vi.mocked(secondApi.getCurrentPositionAsync).mockReturnValue(secondPosition.promise);
+    let status: LocationStatus = 'unknown';
     const writer: DeviceLocationWriter = {
       setLocation: vi.fn(),
-      setStatus: vi.fn(),
+      setStatus: vi.fn((next) => {
+        status = next;
+      }),
     };
 
-    const explicitResolution = resolveCoordinatedDeviceLocation('request', explicitApi, writer);
-    await Promise.resolve();
-    expect(explicitApi.getCurrentPositionAsync).toHaveBeenCalledOnce();
+    const first = resolveCoordinatedDeviceLocation('silent', firstApi, writer);
+    await vi.waitFor(() => expect(firstApi.getCurrentPositionAsync).toHaveBeenCalledOnce());
+    const second = resolveCoordinatedDeviceLocation('silent', secondApi, writer);
+    await vi.waitFor(() => expect(secondApi.getCurrentPositionAsync).toHaveBeenCalledOnce());
 
-    await expect(resolveCoordinatedDeviceLocation('silent', silentApi, writer)).resolves.toEqual({
-      status: 'granted',
-      latitude: 6.81234,
-      longitude: -58.14321,
-      address: 'Regent Street, Georgetown',
-    });
-    expect(writer.setLocation).toHaveBeenCalledOnce();
-    expect(writer.setLocation).toHaveBeenCalledWith(6.81234, -58.14321, 'Regent Street, Georgetown');
-
-    explicitPosition.resolve({ coords: { latitude: 6.91, longitude: -58.21 } });
-    await explicitResolution;
-
-    expect(writer.setStatus).toHaveBeenCalledOnce();
-    expect(writer.setStatus).toHaveBeenCalledWith('resolving');
-    expect(writer.setLocation).toHaveBeenCalledOnce();
-  });
-
-  it('keeps an explicit grant authoritative when a newer silent refresh returns unknown first', async () => {
-    const explicitPermission = deferred<{ status: string }>();
-    const explicitApi = locationApi('granted');
-    vi.mocked(explicitApi.requestForegroundPermissionsAsync).mockReturnValue(explicitPermission.promise);
-    const silentApi = locationApi('undetermined');
-    const writer: DeviceLocationWriter = {
-      setLocation: vi.fn(),
-      setStatus: vi.fn(),
-    };
-
-    const explicitResolution = resolveCoordinatedDeviceLocation('request', explicitApi, writer);
-    await expect(resolveCoordinatedDeviceLocation('silent', silentApi, writer)).resolves.toEqual({
-      status: 'unknown',
-    });
-    explicitPermission.resolve({ status: 'granted' });
-    await expect(explicitResolution).resolves.toEqual({
-      status: 'granted',
-      latitude: 6.81234,
-      longitude: -58.14321,
-      address: 'Regent Street, Georgetown',
-    });
-
-    expect(writer.setStatus).toHaveBeenCalledOnce();
-    expect(writer.setStatus).toHaveBeenCalledWith('resolving');
-    expect(writer.setLocation).toHaveBeenCalledOnce();
-    expect(writer.setLocation).toHaveBeenCalledWith(6.81234, -58.14321, 'Regent Street, Georgetown');
-  });
-
-  it('keeps an explicit grant when a newer silent refresh hangs and later becomes unavailable', async () => {
-    const explicitPosition = deferred<{ coords: { latitude: number; longitude: number } }>();
-    const explicitApi = locationApi('granted');
-    vi.mocked(explicitApi.getCurrentPositionAsync).mockReturnValue(explicitPosition.promise);
-    const silentPosition = deferred<{ coords: { latitude: number; longitude: number } }>();
-    const silentApi = locationApi('granted');
-    vi.mocked(silentApi.getCurrentPositionAsync).mockReturnValue(silentPosition.promise);
-    const writer: DeviceLocationWriter = {
-      setLocation: vi.fn(),
-      setStatus: vi.fn(),
-    };
-
-    const explicitResolution = resolveCoordinatedDeviceLocation('request', explicitApi, writer);
-    await Promise.resolve();
-    expect(explicitApi.getCurrentPositionAsync).toHaveBeenCalledOnce();
-
-    const silentResolution = resolveCoordinatedDeviceLocation('silent', silentApi, writer);
-    await Promise.resolve();
-    expect(silentApi.getCurrentPositionAsync).toHaveBeenCalledOnce();
-
-    explicitPosition.resolve({ coords: { latitude: 6.91, longitude: -58.21 } });
-    await expect(explicitResolution).resolves.toEqual({
+    firstPosition.resolve({ coords: { latitude: 6.91, longitude: -58.21 } });
+    await expect(first).resolves.toEqual({
       status: 'granted',
       latitude: 6.91,
       longitude: -58.21,
       address: 'Regent Street, Georgetown',
     });
-    expect(writer.setLocation).toHaveBeenCalledOnce();
-    expect(writer.setLocation).toHaveBeenCalledWith(6.91, -58.21, 'Regent Street, Georgetown');
+    expect(status).toBe('resolving');
+    expect(createLiveDeviceLocationLease()).toBeNull();
+    expect(writer.setLocation).not.toHaveBeenCalled();
 
-    silentPosition.reject(new Error('foreground fix unavailable'));
-    await expect(silentResolution).resolves.toEqual({ status: 'unavailable' });
-
-    expect(writer.setStatus).toHaveBeenCalledOnce();
-    expect(writer.setStatus).toHaveBeenCalledWith('resolving');
+    secondPosition.resolve({ coords: { latitude: 6.82, longitude: -58.16 } });
+    await second;
     expect(writer.setLocation).toHaveBeenCalledOnce();
-    expect(writer.setLocation).toHaveBeenCalledWith(6.91, -58.21, 'Regent Street, Georgetown');
+    expect(writer.setLocation).toHaveBeenCalledWith(6.82, -58.16, 'Regent Street, Georgetown');
   });
 
   it('lets a newer explicit request supersede an older explicit request', async () => {
@@ -260,6 +215,116 @@ describe('resolveCoordinatedDeviceLocation', () => {
     expect(writer.setStatus).toHaveBeenNthCalledWith(2, 'resolving');
     expect(writer.setLocation).toHaveBeenCalledOnce();
     expect(writer.setLocation).toHaveBeenCalledWith(6.81234, -58.14321, 'Regent Street, Georgetown');
+  });
+
+  it('invalidates an old granted fix immediately while a silent resume refresh is pending', async () => {
+    const position = deferred<{ coords: { latitude: number; longitude: number } }>();
+    const api = locationApi('granted');
+    vi.mocked(api.getCurrentPositionAsync).mockReturnValue(position.promise);
+
+    let status: LocationStatus = 'granted';
+    let latitude = 6.75;
+    let longitude = -58.22;
+    const writer: DeviceLocationWriter = {
+      setStatus: vi.fn((next: LocationStatus) => {
+        status = next;
+      }),
+      setLocation: vi.fn((nextLatitude: number, nextLongitude: number) => {
+        latitude = nextLatitude;
+        longitude = nextLongitude;
+        status = 'granted';
+      }),
+    };
+
+    const refresh = resolveCoordinatedDeviceLocation('silent', api, writer);
+
+    expect(status).toBe('resolving');
+    expect(grantedLocationFix(latitude, longitude, status)).toBeNull();
+
+    position.resolve({ coords: { latitude: 6.82, longitude: -58.16 } });
+    await refresh;
+
+    expect(status).toBe('granted');
+    expect(grantedLocationFix(latitude, longitude, status)).toEqual({
+      latitude: 6.82,
+      longitude: -58.16,
+    });
+  });
+
+  it('invalidates a live watcher lease while refresh is pending and after denial', async () => {
+    const initialApi = locationApi('granted');
+    const position = deferred<{ coords: { latitude: number; longitude: number } }>();
+    const refreshApi = locationApi('granted');
+    vi.mocked(refreshApi.getCurrentPositionAsync).mockReturnValue(position.promise);
+
+    let status: LocationStatus = 'granted';
+    let latitude = 6.75;
+    let longitude = -58.22;
+    const writer: DeviceLocationWriter = {
+      setStatus: vi.fn((next: LocationStatus) => {
+        status = next;
+      }),
+      setLocation: vi.fn((nextLatitude: number, nextLongitude: number) => {
+        latitude = nextLatitude;
+        longitude = nextLongitude;
+        status = 'granted';
+      }),
+    };
+
+    await resolveCoordinatedDeviceLocation('silent', initialApi, writer);
+    const lease = createLiveDeviceLocationLease();
+    expect(lease).not.toBeNull();
+
+    const refresh = resolveCoordinatedDeviceLocation('silent', refreshApi, writer);
+    expect(status).toBe('resolving');
+
+    const liveWriter = { setLiveLocation: writer.setLocation };
+    expect(commitLiveDeviceLocation(lease!, liveWriter, 6.93, -58.31)).toBe(false);
+    expect(status).toBe('resolving');
+
+    position.reject(new Error('permission was revoked during refresh'));
+    await expect(refresh).resolves.toEqual({ status: 'unavailable' });
+
+    expect(status).toBe('unavailable');
+    expect(commitLiveDeviceLocation(lease!, liveWriter, 6.94, -58.32)).toBe(false);
+    expect({ latitude, longitude }).toEqual({ latitude: 6.81234, longitude: -58.14321 });
+  });
+});
+
+describe('advanceLocationAppState', () => {
+  it('ignores permission-sheet inactive-to-active transitions', () => {
+    const inactive = advanceLocationAppState(false, 'inactive');
+    expect(advanceLocationAppState(inactive.wasBackgrounded, 'active')).toEqual({
+      wasBackgrounded: false,
+      shouldRefresh: false,
+    });
+  });
+
+  it('retains background history through iOS inactive and refreshes on active', () => {
+    const background = advanceLocationAppState(false, 'background');
+    const inactive = advanceLocationAppState(background.wasBackgrounded, 'inactive');
+    expect(advanceLocationAppState(inactive.wasBackgrounded, 'active')).toEqual({
+      wasBackgrounded: false,
+      shouldRefresh: true,
+    });
+  });
+});
+
+describe('location store payloads', () => {
+  it('clears an old street label when reverse geocoding fails at a new coordinate', () => {
+    const previous = { address: 'Old Street, Georgetown' };
+    expect({
+      ...previous,
+      ...resolvedLocationState(6.91, -58.21, undefined),
+    }).toMatchObject({ latitude: 6.91, longitude: -58.21, address: null });
+  });
+
+  it('does not attach a previous label to continuous mover coordinates', () => {
+    const previous = { address: 'Old Street, Georgetown' };
+    expect({
+      ...previous,
+      ...liveLocationState(6.92, -58.22),
+    }).toMatchObject({ latitude: 6.92, longitude: -58.22, address: null });
   });
 });
 

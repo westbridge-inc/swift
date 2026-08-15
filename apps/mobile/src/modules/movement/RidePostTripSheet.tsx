@@ -5,7 +5,12 @@ import * as WebBrowser from 'expo-web-browser';
 import { color, radius, space } from '@swift/ui';
 import { money } from '../../lib/money';
 import { useRateOrder, useTipOrder } from '../../hooks/customer';
-import { IconChip, PillButton, PopupCard, Stars, T } from '../../kit';
+import { IconChip, PillButton, PopupCard, PopupTitle, Stars, T } from '../../kit';
+import {
+  AuthSessionBoundaryError,
+  requireAuthSessionForPrincipal,
+  requireAuthSessionSnapshot,
+} from '../../stores/authStore';
 
 /** Round a suggested tip to a cash-friendly amount (nearest 100, min 100). */
 const roundCash = (n: number) => Math.max(100, Math.round(n / 100) * 100);
@@ -38,10 +43,23 @@ export function RidePostTripSheet({ ride, onDone }: { ride: any | null; onDone: 
   const submit = async () => {
     // Fire whichever the rider chose; a plain "Done" with nothing picked just
     // closes. Never block closing on a failed rating/tip — best-effort.
+    if (score <= 0 && (!tipAmt || tipAmt <= 0)) {
+      onDone();
+      return;
+    }
     try {
-      if (score > 0) await rate.mutateAsync({ driverScore: score });
-      if (tipAmt && tipAmt > 0) await tip.mutateAsync(tipAmt);
-    } catch {
+      const owner = requireAuthSessionSnapshot();
+      let current = owner;
+      if (score > 0) {
+        await rate.mutateAsync({ driverScore: score, authSession: current });
+        current = requireAuthSessionForPrincipal(owner);
+      }
+      if (tipAmt && tipAmt > 0) {
+        await tip.mutateAsync({ amount: tipAmt, authSession: current });
+        requireAuthSessionForPrincipal(owner);
+      }
+    } catch (submitError) {
+      if (submitError instanceof AuthSessionBoundaryError) return;
       // swallow — the ride is already over; don't trap the rider in the sheet
     }
     onDone();
@@ -54,9 +72,9 @@ export function RidePostTripSheet({ ride, onDone }: { ride: any | null; onDone: 
   return (
     <PopupCard visible={!!ride} onClose={onDone}>
       <IconChip icon="check-circle" size={56} />
-      <T variant="title" center style={{ marginTop: space.lg }}>
+      <PopupTitle variant="title" center style={{ marginTop: space.lg }}>
         Trip complete
-      </T>
+      </PopupTitle>
       <T variant="body" tone="muted" center style={{ marginTop: space.sm }}>
         {money(fare)} · cash · paid to {driverName}
       </T>

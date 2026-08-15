@@ -11,6 +11,14 @@ export interface RootEntryState {
   needsSelfie: boolean;
 }
 
+/** React Navigation must discard screen-local forms, picked media and pending
+ * callbacks whenever an interactive login/logout creates a new principal
+ * boundary. Token refresh does not change this generation, so ordinary session
+ * continuity keeps its navigation state. */
+export function rootNavigatorBoundaryKey(sessionGeneration: number): string {
+  return `principal-${sessionGeneration}`;
+}
+
 /**
  * The root entry order, kept pure so a fresh install and every existing
  * signed-in path stay characterized. First open is the trio itself: there is

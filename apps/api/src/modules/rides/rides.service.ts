@@ -7,6 +7,7 @@ import type { DispatchService } from '../dispatch/dispatch.service';
 import { orderingRestriction } from '../cash/cash-rules.service';
 import { generateOrderNumber } from '../../utils/markup';
 import { AppError } from '../../utils/errors';
+import { lockActiveOrderCustomer } from '../order/order-creation-authority';
 
 // ---------------------------------------------------------------------------
 // The ride-request core, extracted from the POST /request handler (rides spec
@@ -35,7 +36,13 @@ export interface RideRequestBody {
   rideClass: RideClass;
 }
 
-type GatedUser = { id: string; countryCode: string; trustLevel: string; selfieCapturedAt: Date | null };
+type GatedUser = {
+  id: string;
+  tenantId: string;
+  countryCode: string;
+  trustLevel: string;
+  selfieCapturedAt: Date | null;
+};
 
 /**
  * The pre-flight gates in the request route's exact order. `dispatch` present
@@ -50,12 +57,13 @@ export async function assertRideGates(
 ): Promise<GatedUser> {
   const user = await app.prisma.user.findUniqueOrThrow({
     where: { id: userId },
-    select: { id: true, countryCode: true, trustLevel: true, selfieCapturedAt: true },
+    select: { id: true, tenantId: true, countryCode: true, trustLevel: true, selfieCapturedAt: true },
   });
 
   const active = await app.prisma.order.findFirst({
     where: {
       customerId: user.id,
+      tenantId: user.tenantId,
       orderType: 'TAXI',
       status: { in: ['PENDING', 'DRIVER_ASSIGNED', 'DRIVER_EN_ROUTE', 'DRIVER_ARRIVED', 'RIDE_IN_PROGRESS'] },
     },
@@ -78,7 +86,7 @@ export async function assertRideGates(
   // drivers come online mid-search).
   if (opts.dispatch && opts.pickup
     && process.env['DISPATCH_AVAILABILITY'] === '1' && process.env['TAXI_ALLOW_REQUEST_ON_NONE'] === '0') {
-    const supply = await opts.dispatch.getAvailability('DRIVER', opts.pickup);
+    const supply = await opts.dispatch.getAvailability('DRIVER', opts.pickup, 0, user.tenantId);
     if (supply.level === 'NONE') {
       throw new AppError(
         409,
@@ -128,6 +136,10 @@ export async function createRideRequest(
   /** false ⇒ skip the flag-gated availability pre-check (queue auto-request:
    *  the scan just saw supply; re-refusing on a flap only adds a race). */
   availabilityPreCheck = true,
+  /** Queue workers carry the tenant captured from the authenticated customer
+   *  at join time. If account tenancy changed meanwhile, fail closed instead
+   *  of creating an order in a different operator from the scanned supply. */
+  expectedTenantId?: string,
 ): Promise<{
   order: { id: string; orderNumber: string; status: string };
   estimate: { fare: number; currencyCode: string; distanceKm: number; durationMin: number; source: string };
@@ -135,6 +147,14 @@ export async function createRideRequest(
 }> {
   const user = await assertRideGates(app, userId,
     availabilityPreCheck ? { dispatch, pickup: body.pickup } : {});
+  if (expectedTenantId && user.tenantId !== expectedTenantId) {
+    throw new AppError(
+      409,
+      'RIDE_QUEUE_TENANT_CHANGED',
+      'Your operator changed while this queued ride was waiting. Join the queue again.',
+    );
+  }
+  const orderTenantId = expectedTenantId ?? user.tenantId;
 
   const tiered = await fareService.estimateTiers(body.pickup, body.dropoff, user.countryCode);
   const tier = tiered.tiers.find((t) => t.rideClass === body.rideClass);
@@ -168,36 +188,40 @@ export async function createRideRequest(
   // driver and attempt-capped (driver.routes MAX_PIN_ATTEMPTS).
   const ridePin = String(randomInt(100000, 1000000));
 
-  const order = await app.prisma.order.create({
-    data: {
-      orderNumber: generateOrderNumber(todayCount + 1),
-      orderType: 'TAXI',
-      customerId: user.id,
-      status: 'PENDING',
-      pickupAddress: body.pickupAddress,
-      pickupLat: body.pickup.lat,
-      pickupLng: body.pickup.lng,
-      deliveryAddress: body.dropoffAddress,
-      deliveryLat: body.dropoff.lat,
-      deliveryLng: body.dropoff.lng,
-      taxiPickupAddress: body.pickupAddress,
-      taxiDropoffAddress: body.dropoffAddress,
-      taxiPassengerCount: body.passengerCount,
-      rideClass: body.rideClass,
-      taxiDistance: estimate.distanceKm,
-      taxiDuration: estimate.durationMin,
-      taxiFareTotal: estimate.fare,
-      subtotalBase: estimate.fare,
-      subtotalMarkup: 0,
-      subtotalCustomer: estimate.fare,
-      deliveryFee: 0,
-      totalAmount: estimate.fare,
-      paymentMethod: 'CASH',
-      ridePin,
-      statusHistory: {
-        create: { status: 'PENDING', changedBy: user.id, note: `Ride requested — fixed fare $${estimate.fare}` },
+  const order = await app.prisma.$transaction(async (tx) => {
+    await lockActiveOrderCustomer(tx, user.id, orderTenantId);
+    return tx.order.create({
+      data: {
+        tenantId: orderTenantId,
+        orderNumber: generateOrderNumber(todayCount + 1),
+        orderType: 'TAXI',
+        customerId: user.id,
+        status: 'PENDING',
+        pickupAddress: body.pickupAddress,
+        pickupLat: body.pickup.lat,
+        pickupLng: body.pickup.lng,
+        deliveryAddress: body.dropoffAddress,
+        deliveryLat: body.dropoff.lat,
+        deliveryLng: body.dropoff.lng,
+        taxiPickupAddress: body.pickupAddress,
+        taxiDropoffAddress: body.dropoffAddress,
+        taxiPassengerCount: body.passengerCount,
+        rideClass: body.rideClass,
+        taxiDistance: estimate.distanceKm,
+        taxiDuration: estimate.durationMin,
+        taxiFareTotal: estimate.fare,
+        subtotalBase: estimate.fare,
+        subtotalMarkup: 0,
+        subtotalCustomer: estimate.fare,
+        deliveryFee: 0,
+        totalAmount: estimate.fare,
+        paymentMethod: 'CASH',
+        ridePin,
+        statusHistory: {
+          create: { status: 'PENDING', changedBy: user.id, note: `Ride requested — fixed fare $${estimate.fare}` },
+        },
       },
-    },
+    });
   });
 
   // The customer re-entered the funnel and got a ride — any pending "notify me
@@ -215,13 +239,13 @@ export async function createRideRequest(
   // listens for the dispatch:offer socket event either way. Fall back to inline
   // when no queue is up (tests / degraded boot) so behaviour is unchanged there.
   if (app.dispatchQueue) {
-    await app.dispatchQueue.add('dispatch-order', { orderId: order.id }, {
+    await app.dispatchQueue.add('dispatch-order', { orderId: order.id, tenantId: orderTenantId }, {
       priority: 5,
       removeOnComplete: 100,
       removeOnFail: 50,
     });
   } else {
-    await dispatch.dispatchOrder(order.id);
+    await dispatch.dispatchOrder(order.id, orderTenantId);
   }
 
   return { order: { id: order.id, orderNumber: order.orderNumber, status: order.status }, estimate, ridePin };

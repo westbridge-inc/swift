@@ -1,7 +1,11 @@
 import { create } from 'zustand';
 import { persist, createJSONStorage } from 'zustand/middleware';
 import { zustandStorage } from '../lib/storage';
-import type { LocationStatus } from '../lib/deviceLocation';
+import {
+  liveLocationState,
+  resolvedLocationState,
+  type LocationStatus,
+} from '../lib/deviceLocation';
 
 export type { LocationStatus } from '../lib/deviceLocation';
 
@@ -14,6 +18,7 @@ interface LocationState {
   address: string | null;
   status: LocationStatus;
   setLocation: (lat: number, lng: number, address?: string) => void;
+  setLiveLocation: (lat: number, lng: number) => void;
   setStatus: (status: LocationStatus) => void;
 }
 
@@ -30,7 +35,13 @@ export const useLocationStore = create<LocationState>()(
       address: null,
       status: 'unknown',
       setLocation: (latitude, longitude, address) =>
-        set({ latitude, longitude, address, status: 'granted' }),
+        // A failed reverse geocode clears the old coordinate's label; otherwise
+        // a new GPS fix can falsely retain the previous street.
+        set(resolvedLocationState(latitude, longitude, address)),
+      // Continuous mover samples intentionally avoid reverse-geocoding every
+      // update. Clear the old label so it cannot describe the new coordinate.
+      setLiveLocation: (latitude, longitude) =>
+        set(liveLocationState(latitude, longitude)),
       setStatus: (status) => set({ status }),
     }),
     {

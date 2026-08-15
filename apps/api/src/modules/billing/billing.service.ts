@@ -694,20 +694,23 @@ export class BillingService {
 
       let status: string;
       let reportedMinor = 0;
+      let reportedCurrency = '';
       try {
         const lookup = await mmg.transactionLookup({ transactionId: payment.externalRef });
         status = lookup.status;
         reportedMinor = lookup.amountMinor ?? 0;
+        reportedCurrency = String(lookup.currencyCode ?? '').toUpperCase();
       } catch {
         out.stillPending += 1; // transport hiccup — the next tick retries
         continue;
       }
 
       // USD pricing Part 10 rule 3 / SO-6 posture: the settled amount must
-      // match OUR amount exactly. A mismatch is NEVER silently absorbed and
-      // never auto-settled — flag once for the founder and hold the row.
-      // (reportedMinor 0 = provider didn't echo an amount; nothing to check.)
-      if (status === 'approved' && reportedMinor > 0 && reportedMinor !== Math.round(Number(payment.amount) * 100)) {
+      // match OUR amount and currency exactly. Missing/zero provider amounts
+      // are mismatches too; approval alone is never proof of the right funds.
+      const expectedMinor = Math.round(Number(payment.amount) * 100);
+      const expectedCurrency = sub.currencyCode.toUpperCase();
+      if (status === 'approved' && (reportedMinor !== expectedMinor || reportedCurrency !== expectedCurrency)) {
         try {
           await this.prisma.subscriptionPayment.updateMany({
             where: { id: payment.id, status: { in: ['PENDING', 'UNKNOWN'] } },
@@ -719,12 +722,12 @@ export class BillingService {
               type: 'REMINDER',
               currencyCode: sub.currencyCode,
               idempotencyKey: `mismatch:${payment.id}`,
-              note: `RECONCILE_MISMATCH: MMG reports ${(reportedMinor / 100).toFixed(2)} vs our ${Number(payment.amount).toFixed(2)} (payment ${payment.id})`,
+              note: `RECONCILE_MISMATCH: MMG reports ${(reportedMinor / 100).toFixed(2)} ${reportedCurrency || '(missing currency)'} vs our ${Number(payment.amount).toFixed(2)} ${expectedCurrency} (payment ${payment.id})`,
             },
           });
           await notifyAdmins(this.prisma, this.notifications, {
-            title: '⚠️ Payment amount mismatch — held for review',
-            body: `MMG reports a different amount than we requested on a weekly-fee payment. It is NOT settled. Payment ${payment.id}.`,
+            title: '⚠️ Payment settlement mismatch — held for review',
+            body: `MMG did not confirm the exact amount and currency requested for a weekly-fee payment. It is NOT settled. Payment ${payment.id}.`,
             data: { kind: 'reconcile_mismatch', paymentId: payment.id, subscriptionId: sub.id },
           });
         } catch {
@@ -1120,9 +1123,50 @@ export class BillingService {
   // Prepaid top-ups (manual confirm in admin for now)
   // -------------------------------------------------------------------------
 
-  async recordTopUp(subscriptionId: string, amount: number, recordedBy: string, reference?: string, clientKey?: string) {
-    if (amount <= 0) throw new AppError(400, 'INVALID_AMOUNT', 'Top-up must be positive');
+  /**
+   * Transaction-attached wallet credit. Money-rail callers that also own an
+   * inbound payment row use this seam so the immutable billing event, receipt,
+   * balanced ledger posting, wallet balance, and payment-state CAS commit as
+   * one database operation. It deliberately performs no notification or
+   * re-bill; those are post-commit effects handled by afterTopUpCommitted().
+   */
+  async recordTopUpInTransaction(
+    tx: Prisma.TransactionClient,
+    input: {
+      subscriptionId: string;
+      amount: number;
+      recordedBy: string;
+      reference?: string;
+      /** Globally unique for the real-world payment, not the destination. */
+      eventKey: string;
+    },
+  ) {
+    if (input.amount <= 0) throw new AppError(400, 'INVALID_AMOUNT', 'Top-up must be positive');
+    const sub = await tx.subscription.findUnique({
+      where: { id: input.subscriptionId },
+      select: { id: true, currencyCode: true },
+    });
+    if (!sub) throw new NotFoundError('Subscription', input.subscriptionId);
 
+    return this.creditWalletInTx(tx, {
+      subscriptionId: input.subscriptionId,
+      amount: input.amount,
+      currencyCode: sub.currencyCode,
+      eventKey: input.eventKey,
+      note: input.reference
+        ? `ref: ${input.reference} (by ${input.recordedBy})`
+        : `recorded by ${input.recordedBy}`,
+      channel: input.recordedBy.startsWith('agent-cash:')
+        ? input.recordedBy.slice('agent-cash:'.length)
+        : 'ADMIN_TOPUP',
+      mmgRef: input.reference,
+    });
+  }
+
+  /** Post-commit effects for a durable top-up. A caller may safely retry this
+   * method: it moves no money; the billing engine's own event keys make an
+   * immediate re-bill idempotent. */
+  async afterTopUpCommitted(subscriptionId: string, amount: number): Promise<void> {
     const sub = await this.prisma.subscription.findUnique({
       where: { id: subscriptionId },
       include: {
@@ -1132,38 +1176,6 @@ export class BillingService {
       },
     });
     if (!sub) throw new NotFoundError('Subscription', subscriptionId);
-
-    // Idempotency [SWIFT-030]: this is the only live collection path, so a retry
-    // (network retry, admin double-tap) MUST NOT credit twice. A client-supplied
-    // Idempotency-Key makes the retry a no-op; without one we fall back to a
-    // time-based key (the caller opted out of dedup). The BillingEvent's unique
-    // idempotencyKey is the DB-level guard — created FIRST inside the transaction,
-    // so a replay rolls the whole thing back before the balance is ever touched.
-    const eventKey = clientKey
-      ? `topup:${subscriptionId}:${clientKey}`
-      : `topup:${subscriptionId}:${Date.now()}:${recordedBy}`;
-
-    let balance;
-    try {
-      balance = await this.prisma.$transaction(async (tx) =>
-        this.creditWalletInTx(tx, {
-          subscriptionId,
-          amount,
-          currencyCode: sub.currencyCode,
-          eventKey,
-          note: reference ? `ref: ${reference} (by ${recordedBy})` : `recorded by ${recordedBy}`,
-          channel: recordedBy.startsWith('agent-cash:') ? recordedBy.slice('agent-cash:'.length) : 'ADMIN_TOPUP',
-          mmgRef: reference,
-        }),
-      );
-    } catch (error) {
-      if ((error as Prisma.PrismaClientKnownRequestError).code === 'P2002') {
-        // Replay of an already-recorded top-up: return the current balance
-        // without crediting again, notifying, or re-billing.
-        return this.prisma.prepaidBalance.findUniqueOrThrow({ where: { subscriptionId } });
-      }
-      throw error;
-    }
 
     await this.notifications.send({
       userId: this.payerUserId(sub as SubWithRelations),
@@ -1178,16 +1190,44 @@ export class BillingService {
     // reinstates immediately, no waiting for the next cycle. CHURNED included:
     // churn is terminal for DUNNING, never for the door back in (§11).
     if (sub.status === 'PAST_DUE' || sub.status === 'SUSPENDED' || sub.status === 'CHURNED') {
-      const fresh = await this.prisma.subscription.findUniqueOrThrow({
-        where: { id: subscriptionId },
-        include: {
-          rider: { select: { userId: true } },
-          driver: { select: { userId: true } },
-          vendor: { select: { id: true, owner: { select: { userId: true } } } },
-        },
-      });
-      await this.billSubscription(fresh as SubWithRelations);
+      await this.billSubscription(sub as SubWithRelations);
     }
+  }
+
+  async recordTopUp(subscriptionId: string, amount: number, recordedBy: string, reference?: string, clientKey?: string) {
+    if (amount <= 0) throw new AppError(400, 'INVALID_AMOUNT', 'Top-up must be positive');
+
+    // Idempotency [SWIFT-030]: this is the only live collection path, so a retry
+    // (network retry, admin double-tap) MUST NOT credit twice. A client-supplied
+    // Idempotency-Key makes the retry a no-op; without one we fall back to a
+    // time-based key (the caller opted out of dedup). The BillingEvent's unique
+    // idempotencyKey is the DB-level guard — created FIRST inside the transaction,
+    // so a replay rolls the whole thing back before the balance is ever touched.
+    const eventKey = clientKey
+      ? `topup:${subscriptionId}:${clientKey}`
+      : `topup:${subscriptionId}:${Date.now()}:${recordedBy}`;
+
+    let balance;
+    try {
+      balance = await this.prisma.$transaction(async (tx) =>
+        this.recordTopUpInTransaction(tx, {
+          subscriptionId,
+          amount,
+          recordedBy,
+          reference,
+          eventKey,
+        }),
+      );
+    } catch (error) {
+      if ((error as Prisma.PrismaClientKnownRequestError).code === 'P2002') {
+        // Replay of an already-recorded top-up: return the current balance
+        // without crediting again, notifying, or re-billing.
+        return this.prisma.prepaidBalance.findUniqueOrThrow({ where: { subscriptionId } });
+      }
+      throw error;
+    }
+
+    await this.afterTopUpCommitted(subscriptionId, amount);
 
     return balance;
   }
@@ -1210,6 +1250,21 @@ export class BillingService {
 
     let sent = 0;
     for (const sub of upcoming) {
+      // A malformed legacy row must not stop every healthy payer's reminder
+      // run. Resolve the recipient before writing the immutable REMINDER
+      // evidence; otherwise an orphan can acquire the idempotency key without
+      // any notification ever being deliverable.
+      let payerUserId: string;
+      try {
+        payerUserId = this.payerUserId(sub as SubWithRelations);
+      } catch (error) {
+        if (error instanceof AppError && error.code === 'ORPHAN_SUBSCRIPTION') {
+          log().error({ subscriptionId: sub.id }, 'billing reminder skipped for orphan subscription');
+          continue;
+        }
+        throw error;
+      }
+
       const periodKey = sub.nextBillingDate.toISOString().slice(0, 10);
       try {
         await this.prisma.billingEvent.create({
@@ -1227,7 +1282,7 @@ export class BillingService {
       }
 
       await this.notifications.send({
-        userId: this.payerUserId(sub as SubWithRelations),
+        userId: payerUserId,
         type: 'SYSTEM_ANNOUNCEMENT',
         title: 'Subscription due tomorrow',
         body: `Your weekly fee of $${Number(this.amountFor(sub)).toLocaleString()} ${sub.currencyCode} is due tomorrow.`,

@@ -4,8 +4,9 @@ import { generateOtp, storeOtp, verifyOtp } from '../utils/otp';
 
 // ---------------------------------------------------------------------------
 // OTP hardening (launch-readiness §1.1): codes are CSPRNG-generated, hashed
-// at rest, verified in constant time, and single-use. A redis snapshot must
-// never contain a usable code.
+// at rest with a keyed HMAC, atomically attempt-limited, and single-use. A
+// Redis snapshot must never contain a directly usable or offline-brute-forceable
+// six-digit code.
 // ---------------------------------------------------------------------------
 
 let redis: Redis;
@@ -37,7 +38,7 @@ describe('otp hardening', () => {
     const atRest = await redis.get(`otp:${PHONE}`);
     expect(atRest).not.toBeNull();
     expect(atRest).not.toContain(otp); // the snapshot yields nothing usable
-    expect(atRest!.startsWith('sha256:')).toBe(true);
+    expect(atRest).toMatch(/^v2\|hmac-sha256:[a-f0-9]{64}\|0$/);
 
     expect((await verifyOtp(redis, PHONE, '000001')).valid).toBe(false);
     expect((await verifyOtp(redis, PHONE, otp)).valid).toBe(true);
@@ -45,10 +46,10 @@ describe('otp hardening', () => {
     expect((await verifyOtp(redis, PHONE, otp)).valid).toBe(false);
   });
 
-  it('still accepts a legacy plaintext code already in flight', async () => {
+  it('invalidates a pre-v2 plaintext record instead of retaining a weak path', async () => {
     await redis.set(`otp:${PHONE}`, '424242', 'EX', 60);
-    expect((await verifyOtp(redis, PHONE, '131313')).valid).toBe(false);
-    expect((await verifyOtp(redis, PHONE, '424242')).valid).toBe(true);
+    expect((await verifyOtp(redis, PHONE, '424242')).valid).toBe(false);
+    expect(await redis.get(`otp:${PHONE}`)).toBeNull();
   });
 
   it('locks after 5 wrong attempts even with the right code afterwards', async () => {
@@ -60,5 +61,24 @@ describe('otp hardening', () => {
     const locked = await verifyOtp(redis, PHONE, otp);
     expect(locked.valid).toBe(false);
     expect(locked.reason).toContain('Too many attempts');
+  });
+
+  it('enforces the five-attempt ceiling atomically under parallel guesses', async () => {
+    await storeOtp(redis, PHONE, '123456');
+    const results = await Promise.all(
+      Array.from({ length: 20 }, () => verifyOtp(redis, PHONE, '000000')),
+    );
+    expect(results.filter((result) => result.reason === 'Invalid OTP code')).toHaveLength(5);
+    expect(results.filter((result) => result.reason?.includes('Too many attempts'))).toHaveLength(15);
+    expect((await verifyOtp(redis, PHONE, '123456')).valid).toBe(false);
+  });
+
+  it('consumes one correct code exactly once under parallel submissions', async () => {
+    await storeOtp(redis, PHONE, '654321');
+    const results = await Promise.all(
+      Array.from({ length: 10 }, () => verifyOtp(redis, PHONE, '654321')),
+    );
+    expect(results.filter((result) => result.valid)).toHaveLength(1);
+    expect(results.filter((result) => !result.valid)).toHaveLength(9);
   });
 });

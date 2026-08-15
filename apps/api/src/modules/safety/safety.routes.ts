@@ -334,6 +334,14 @@ export async function safetyRoutes(app: FastifyInstance) {
     if (!isOps(request.user.role)) throw new ForbiddenError('Only ops can list cases.');
     const q = z.object({
       status: z.enum(['open', 'breached', 'all']).default('open'),
+      // [REPORT-007 / SPS-F-0025] The queue was a single bounded page: with
+      // severity-first ordering, any row ranked below the first `limit` was
+      // UNREACHABLE through the API — an S3 dispute could sit breached forever
+      // behind older S0/S1 rows with no way to page to it. Offset pagination +
+      // a stable id tie-break makes every qualifying row reachable; a cursor
+      // (and the spec's outstanding-SLA ordering) is the registered follow-up
+      // when the queue contract is formalized.
+      page: z.coerce.number().int().min(1).default(1),
       limit: z.coerce.number().int().min(1).max(200).default(50),
     }).parse(request.query ?? {});
     const now = new Date();
@@ -344,7 +352,8 @@ export async function safetyRoutes(app: FastifyInstance) {
         : { status: { not: 'CLOSED' as const } };
     const cases = await app.prisma.incidentCase.findMany({
       where,
-      orderBy: [{ severity: 'asc' }, { createdAt: 'desc' }],
+      orderBy: [{ severity: 'asc' }, { createdAt: 'desc' }, { id: 'asc' }],
+      skip: (q.page - 1) * q.limit,
       take: q.limit,
     });
     return { success: true, data: cases };

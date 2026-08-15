@@ -10,7 +10,7 @@ import { createHash } from 'node:crypto';
 import { looksLikeDocument } from '../../utils/images';
 import { AppError } from '../../utils/errors';
 
-const checklistRoleSchema = z.enum(['MOVER', 'RESTAURANT', 'SUPERMARKET', 'STORE', 'SERVICE']);
+const checklistRoleSchema = z.enum(['MOVER', 'RESTAURANT', 'SUPERMARKET', 'STORE', 'SERVICE', 'SERVICE_PROVIDER']);
 
 const statusQuerySchema = z.object({
   role: checklistRoleSchema.default('MOVER'),

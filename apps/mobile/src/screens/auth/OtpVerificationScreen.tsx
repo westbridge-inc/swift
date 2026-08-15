@@ -68,7 +68,15 @@ export function OtpVerificationScreen() {
         </T>
 
         {/* Hidden driver input + six visible cells */}
-        <Pressable onPress={() => inputRef.current?.focus()} style={{ marginTop: space['3xl'] }}>
+        <Pressable
+          testID="otp-code-entry"
+          accessibilityRole="button"
+          accessibilityLabel="Enter 6-digit verification code"
+          accessibilityHint="Open the number pad to enter the code sent to your phone"
+          accessibilityValue={{ text: `${code.length} of ${CODE_LEN} digits entered` }}
+          onPress={() => inputRef.current?.focus()}
+          style={{ marginTop: space['3xl'] }}
+        >
           <View style={{ flexDirection: 'row', justifyContent: 'space-between' }}>
             {Array.from({ length: CODE_LEN }, (_, i) => {
               const filled = i < code.length;
@@ -94,17 +102,27 @@ export function OtpVerificationScreen() {
           </View>
         </Pressable>
         <TextInput
+          testID="otp-code-input"
           ref={inputRef}
           value={code}
           onChangeText={onChange}
           keyboardType="number-pad"
+          textContentType="oneTimeCode"
+          autoComplete="one-time-code"
           maxLength={CODE_LEN}
           autoFocus
+          accessible={false}
           style={{ position: 'absolute', opacity: 0, height: 1, width: 1 }}
         />
 
         {err ? (
-          <T variant="label" tone="error" style={{ marginTop: space.lg }}>
+          <T
+            variant="label"
+            tone="error"
+            accessibilityRole="alert"
+            accessibilityLiveRegion="assertive"
+            style={{ marginTop: space.lg }}
+          >
             {err}
           </T>
         ) : null}
@@ -114,11 +132,19 @@ export function OtpVerificationScreen() {
             Didn’t get it?
           </T>
           {cooldown > 0 ? (
-            <T variant="label" tone="faint">
+            <T variant="label" tone="faint" accessibilityLiveRegion="polite">
               Resend in {cooldown}s
             </T>
           ) : (
-            <Pressable onPress={() => resend.mutate()} hitSlop={8} disabled={resend.isPending}>
+            <Pressable
+              testID="otp-resend"
+              accessibilityRole="button"
+              accessibilityLabel="Resend verification code"
+              accessibilityState={{ disabled: resend.isPending, busy: resend.isPending }}
+              onPress={() => resend.mutate()}
+              hitSlop={8}
+              disabled={resend.isPending}
+            >
               <View style={{ paddingVertical: 4 }}>
                 <T variant="label" weight="semibold" tone="brand">
                   {resend.isPending ? 'Sending…' : 'Resend code'}
@@ -130,6 +156,7 @@ export function OtpVerificationScreen() {
 
         <View style={{ flex: 1 }} />
         <PillButton
+          testID="otp-verify"
           label="Verify"
           onPress={() => verify.mutate(code)}
           disabled={code.length < CODE_LEN}

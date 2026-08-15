@@ -71,6 +71,9 @@ export class SandboxKycProvider implements KycProvider {
 /** Provider selection is config, not code. */
 export function getKycProvider(): KycProvider {
   const provider = process.env['KYC_PROVIDER'] ?? 'sandbox';
+  if (process.env['NODE_ENV'] === 'production' && provider === 'sandbox') {
+    throw new Error('KYC_PROVIDER=sandbox is forbidden in production');
+  }
   switch (provider) {
     case 'sandbox':
       return new SandboxKycProvider();

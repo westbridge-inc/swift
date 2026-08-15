@@ -35,7 +35,7 @@ async function makeCustomer() {
   });
   createdUserIds.push(user.id);
   const token = app.jwt.sign({ userId: user.id, role: 'CUSTOMER', jti: nanoid(8) });
-  await app.prisma.session.create({ data: { userId: user.id, token, refreshToken: nanoid(48), deviceId: 'intg', deviceType: 'test', expiresAt: new Date(Date.now() + 86400000) } });
+  await app.prisma.session.create({ data: { authMethod: 'OTP', userId: user.id, token, refreshToken: nanoid(48), deviceId: 'intg', deviceType: 'test', expiresAt: new Date(Date.now() + 86400000) } });
   // Address very close to the vendor so the delivery fee is the deterministic minimum.
   const addr = await app.prisma.address.create({ data: { userId: user.id, label: 'Home', addressLine1: '1 Intg', city: 'Georgetown', region: 'Demerara-Mahaica', latitude: 6.8014, longitude: -58.1552, isDefault: true } });
   return { userId: user.id, token, addressId: addr.id };
@@ -90,7 +90,9 @@ afterAll(async () => {
 describe('checkout money math', () => {
   it('applies an exact 10% discount on the subtotal', async () => {
     const c = await makeCustomer();
-    const res = await cartAndCheckout(c, { promoCode: PROMO });
+    // PICKUP: CASH-delivery promos fail closed by law [SPS-F-0022] — the
+    // discount math itself is rail-independent and proven here on pickup.
+    const res = await cartAndCheckout(c, { promoCode: PROMO, fulfillmentSelections: { [vendorId]: 'PICKUP' } });
     expect(res.statusCode).toBe(200);
     const order = res.json().data.orders[0];
     // 10% of 2000 = 200 (ceil). total = subtotal + fee - discount.
@@ -118,22 +120,21 @@ describe('checkout money math', () => {
     expect(order.total).toBe(order.subtotal + order.deliveryFee + 500 - (order.discount ?? 0));
   });
 
-  it('FREE_DELIVERY waives the whole delivery fee (was a silent no-op → charged in full)', async () => {
+  it('FREE_DELIVERY on a CASH delivery is refused (rider-financed promo — 409 PROMO_UNAVAILABLE_CASH_DELIVERY)', async () => {
     const code = `FREEDEL${nanoid(5).toUpperCase()}`;
     const promo = await app.prisma.promoCode.create({
       data: { code, description: 'free delivery', discountType: 'FREE_DELIVERY', discountValue: 0, validFrom: new Date(Date.now() - 3600000), validUntil: new Date(Date.now() + 3600000), maxUses: 100, maxUsesPerUser: 5, isActive: true },
     });
     try {
       const c = await makeCustomer();
+      // [SPS-F-0022] FREE_DELIVERY on a CASH platform-delivery was the sharpest
+      // rider-financed promo: the rider fronted full goods value, collected a
+      // total missing the fee, and their "fee earning" was funded by nobody.
+      // The law now refuses this combination at checkout. (The waiver math
+      // remains live for MMG deliveries, where the store absorbs its promo.)
       const res = await cartAndCheckout(c, { promoCode: code });
-      expect(res.statusCode).toBe(200);
-      const order = res.json().data.orders[0];
-      // The discount equals the delivery fee, so the total drops by exactly the fee
-      // (no tip in this cart → total collapses to the item subtotal).
-      expect(order.deliveryFee).toBeGreaterThan(0);
-      expect(order.discount).toBe(order.deliveryFee);
-      expect(order.total).toBe(order.subtotal);
-      await app.prisma.order.updateMany({ where: { promoCodeId: promo.id }, data: { promoCodeId: null } });
+      expect(res.statusCode).toBe(409);
+      expect(res.json().error.code).toBe('PROMO_UNAVAILABLE_CASH_DELIVERY');
     } finally {
       await app.prisma.promoCode.delete({ where: { id: promo.id } });
     }
@@ -219,7 +220,9 @@ describe('high-value promo gate [SWIFT-162]', () => {
       const c = await makeCustomer(); // trustLevel L1 by default
       await inject('POST', '/api/v1/customer/cart/items', { vendorId, itemId: s.item.id, quantity: 1 }, c.token);
       await inject('PUT', '/api/v1/customer/cart/address', { addressId: c.addressId }, c.token);
-      const res = await inject('POST', '/api/v1/customer/checkout', { paymentMethod: 'CASH', promoCode: s.code }, c.token);
+      // PICKUP: the CASH-delivery promo law [SPS-F-0022] would otherwise 409
+      // before this test's subject (the SWIFT-162 promo-value ID gate).
+      const res = await inject('POST', '/api/v1/customer/checkout', { paymentMethod: 'CASH', promoCode: s.code, fulfillmentSelections: { [vendorId]: 'PICKUP' } }, c.token);
       expect(res.statusCode).toBe(403);
       expect(res.json().error.code).toBe('ID_VERIFICATION_REQUIRED');
       expect(res.json().error.message).toMatch(/promo/i); // the promo-value gate, not the order-total gate
@@ -241,11 +244,11 @@ describe('high-value promo gate [SWIFT-162]', () => {
       });
       createdUserIds.push(user.id);
       const token = app.jwt.sign({ userId: user.id, role: 'CUSTOMER', jti: nanoid(8) });
-      await app.prisma.session.create({ data: { userId: user.id, token, refreshToken: nanoid(48), deviceId: 'intg', deviceType: 'test', expiresAt: new Date(Date.now() + 86400000) } });
+      await app.prisma.session.create({ data: { authMethod: 'OTP', userId: user.id, token, refreshToken: nanoid(48), deviceId: 'intg', deviceType: 'test', expiresAt: new Date(Date.now() + 86400000) } });
       const addr = await app.prisma.address.create({ data: { userId: user.id, label: 'Home', addressLine1: '1 Intg', city: 'Georgetown', region: 'Demerara-Mahaica', latitude: 6.8014, longitude: -58.1552, isDefault: true } });
       await inject('POST', '/api/v1/customer/cart/items', { vendorId, itemId: s.item.id, quantity: 1 }, token);
       await inject('PUT', '/api/v1/customer/cart/address', { addressId: addr.id }, token);
-      const res = await inject('POST', '/api/v1/customer/checkout', { paymentMethod: 'CASH', promoCode: s.code }, token);
+      const res = await inject('POST', '/api/v1/customer/checkout', { paymentMethod: 'CASH', promoCode: s.code, fulfillmentSelections: { [vendorId]: 'PICKUP' } }, token);
       expect(res.statusCode).toBe(200); // L2 is verified — the gate does not apply
     } finally {
       await cleanup(s);

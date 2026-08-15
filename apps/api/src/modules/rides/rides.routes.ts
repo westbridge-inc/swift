@@ -10,6 +10,8 @@ import { makeDispatchService } from '../dispatch/dispatch.service';
 import { log } from '../../utils/logger';
 import { AppError, NotFoundError } from '../../utils/errors';
 import { tenantCacheKey } from '../../utils/tenant-cache';
+import { safeMmgPayUrl } from '../../utils/mmg-pay-url';
+import { enterTenant, getTenantId } from '../../plugins/prisma';
 
 // ---------------------------------------------------------------------------
 // Taxi: the fare is computed and SHOWN before any driver
@@ -40,6 +42,24 @@ const cancelSchema = z.object({
   reason: z.string().max(500).optional(),
 });
 
+async function authenticatedTenantId(app: FastifyInstance, userId: string): Promise<string> {
+  const boundTenantId = getTenantId();
+  if (boundTenantId) return boundTenantId;
+
+  // Production auth binds the session's tenant into ALS. Focused/in-process
+  // callers may omit the server's onRequest hook, so fail safe by resolving the
+  // same authenticated user authority rather than guessing a default tenant.
+  const user = await app.prisma.user.findUnique({
+    where: { id: userId },
+    select: { tenantId: true },
+  });
+  if (!user) {
+    throw new AppError(401, 'UNAUTHORIZED', 'Authenticated customer no longer exists');
+  }
+  enterTenant(user.tenantId);
+  return user.tenantId;
+}
+
 export async function ridesRoutes(app: FastifyInstance) {
   const auth = { preHandler: [app.authenticate] };
   const fareService = new FareService(app.prisma);
@@ -57,13 +77,20 @@ export async function ridesRoutes(app: FastifyInstance) {
     const { lat, lng } = z
       .object({ lat: z.coerce.number().min(-90).max(90), lng: z.coerce.number().min(-180).max(180) })
       .parse(request.query);
+    const tenantId = await authenticatedTenantId(app, request.user.userId);
     const cacheKey = tenantCacheKey(`avail:DRIVER:${lat.toFixed(2)}:${lng.toFixed(2)}`);
     const cached = await app.redis.get(cacheKey);
     // gate mirrors DISPATCH_AVAILABILITY: with the flag off, clients read the
     // truth but change NOTHING — byte-identical UX until the launch decision.
     const gate = process.env['DISPATCH_AVAILABILITY'] === '1';
-    if (cached) return { success: true, data: { ...JSON.parse(cached), gate } };
-    const data = await dispatch.getAvailability('DRIVER', { lat, lng });
+    if (cached) {
+      const data = JSON.parse(cached) as { level: 'GOOD' | 'LOW' | 'NONE'; nearestEtaMinutes?: number | null };
+      // A rolling deploy may briefly read a cache entry written by the older
+      // optional-field contract. Normalize it at the boundary so TaxiScreen
+      // always receives the same shape.
+      return { success: true, data: { ...data, nearestEtaMinutes: data.nearestEtaMinutes ?? null, gate } };
+    }
+    const data = await dispatch.getAvailability('DRIVER', { lat, lng }, 0, tenantId);
     await app.redis.set(cacheKey, JSON.stringify(data), 'EX', 10).catch(() => {});
     return { success: true, data: { ...data, gate } };
   });
@@ -146,12 +173,13 @@ export async function ridesRoutes(app: FastifyInstance) {
 
     const ttlMin = RIDE_QUEUE_TTL_MIN();
     await app.prisma.rideQueueEntry.updateMany({
-      where: { customerId: user.id, status: 'WAITING' },
+      where: { customerId: user.id, tenantId: user.tenantId, status: 'WAITING' },
       data: { status: 'LEFT' },
     });
     const entry = await app.prisma.rideQueueEntry.create({
       data: {
         customerId: user.id,
+        tenantId: user.tenantId,
         pickupLat: body.pickup.lat,
         pickupLng: body.pickup.lng,
         pickupAddress: body.pickupAddress,
@@ -176,8 +204,9 @@ export async function ridesRoutes(app: FastifyInstance) {
 
   /** POST /queue/leave — one tap out; idempotent. */
   app.post('/queue/leave', auth, async (request) => {
+    const tenantId = await authenticatedTenantId(app, request.user.userId);
     await app.prisma.rideQueueEntry.updateMany({
-      where: { customerId: request.user.userId, status: 'WAITING' },
+      where: { customerId: request.user.userId, tenantId, status: 'WAITING' },
       data: { status: 'LEFT' },
     });
     return { success: true, data: { left: true } };
@@ -186,8 +215,14 @@ export async function ridesRoutes(app: FastifyInstance) {
   /** GET /queue — my live queue state (position derived, never stored), or
    *  null when I'm not in line. The client polls this alongside the socket. */
   app.get('/queue', auth, async (request) => {
+    const tenantId = await authenticatedTenantId(app, request.user.userId);
     const entry = await app.prisma.rideQueueEntry.findFirst({
-      where: { customerId: request.user.userId, status: 'WAITING', expiresAt: { gt: new Date() } },
+      where: {
+        customerId: request.user.userId,
+        tenantId,
+        status: 'WAITING',
+        expiresAt: { gt: new Date() },
+      },
       orderBy: { createdAt: 'desc' },
     });
     if (!entry) return { success: true, data: null };
@@ -206,8 +241,9 @@ export async function ridesRoutes(app: FastifyInstance) {
     if (!q.success) {
       throw new AppError(400, 'INVALID_POINT', 'lat and lng are required.');
     }
-    const snapshot = await getSupplySnapshot(app.prisma, q.data.pickup);
-    const availability = await dispatch.getAvailability('DRIVER', q.data.pickup);
+    const tenantId = await authenticatedTenantId(app, request.user.userId);
+    const snapshot = await getSupplySnapshot(app.prisma, q.data.pickup, tenantId);
+    const availability = await dispatch.getAvailability('DRIVER', q.data.pickup, 0, tenantId);
     return { success: true, data: { ...snapshot, level: availability.level, nearestEtaMinutes: availability.nearestEtaMinutes ?? null } };
   });
 
@@ -224,7 +260,8 @@ export async function ridesRoutes(app: FastifyInstance) {
     if (!Number.isFinite(lat) || !Number.isFinite(lng) || Math.abs(lat) > 90 || Math.abs(lng) > 180) {
       throw new AppError(400, 'INVALID_POINT', 'lat and lng are required.');
     }
-    const cars = await presenceNear(app.prisma, { lat, lng });
+    const tenantId = await authenticatedTenantId(app, request.user.userId);
+    const cars = await presenceNear(app.prisma, { lat, lng }, tenantId);
     return { success: true, data: { cars } };
   });
 
@@ -261,9 +298,9 @@ export async function ridesRoutes(app: FastifyInstance) {
     // link rides along only once the trip is underway, so the post-trip sheet
     // holds it — never shown while they're still deciding on a driver.
     const driver = { ...ride.driver, ...vehicleIdentityFor(ride.driver), displayRating: surface?.displayRating ?? null };
-    if (ride.status !== 'RIDE_IN_PROGRESS') {
-      (driver as { mmgPayUrl?: string | null }).mmgPayUrl = null;
-    }
+    (driver as { mmgPayUrl?: string | null }).mmgPayUrl = ride.status === 'RIDE_IN_PROGRESS'
+      ? safeMmgPayUrl(ride.driver.mmgPayUrl)
+      : null;
     return { success: true, data: { ...ride, driver } };
   });
 
@@ -290,8 +327,10 @@ export async function ridesRoutes(app: FastifyInstance) {
     }
     // Same trip-end rule as /active: the pay link only for a ride that is
     // underway or done (receipt / pay-later), never during matching.
-    if (ride.driver && !['RIDE_IN_PROGRESS', 'DELIVERED', 'COMPLETED'].includes(ride.status)) {
-      (ride.driver as { mmgPayUrl?: string | null }).mmgPayUrl = null;
+    if (ride.driver) {
+      (ride.driver as { mmgPayUrl?: string | null }).mmgPayUrl = ['RIDE_IN_PROGRESS', 'DELIVERED', 'COMPLETED'].includes(ride.status)
+        ? safeMmgPayUrl(ride.driver.mmgPayUrl)
+        : null;
     }
     return { success: true, data: ride };
   });

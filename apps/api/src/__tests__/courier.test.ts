@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { nanoid } from 'nanoid';
 import type { UserRole } from '@prisma/client';
@@ -8,6 +8,7 @@ import { authPlugin } from '../plugins/auth';
 import { socketPlugin } from '../plugins/socket';
 import courierRoutes from '../modules/courier/courier.routes';
 import { registerErrorHandler } from '../middleware/error-handler';
+import { OrderService } from '../modules/order/order.service';
 
 // ---------------------------------------------------------------------------
 // Courier (spec §4.3). Send a parcel person-to-person: pickup != dropoff,
@@ -176,13 +177,170 @@ describe('Courier — create, track, deliver', () => {
     expect(res.json().data.courierProofPhotoUrl).toBe('storage://t/proof.jpg');
   });
 
-  it('lets the sender cancel before delivery', async () => {
+  it('proof rolls back metadata, pay, evidence, and rider release on fault, then retries once', async () => {
+    const sender = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
+    const created = (await inject('POST', '/api/v1/courier/order', ORDER_BODY, sender.token)).json().data;
+    const moverUser = await makeUserWithSession(['MOVER', 'CUSTOMER'], 'MOVER');
+    const rider = await app.prisma.rider.create({
+      data: { userId: moverUser.userId, riderType: 'DELIVERY', vehicleType: 'MOTORCYCLE', documentsVerified: true },
+    });
+    const before = await app.prisma.rider.update({
+      where: { id: rider.id },
+      data: { isAvailable: false, currentOrderId: created.orderId },
+      select: { totalDeliveries: true },
+    });
+    await app.prisma.order.update({
+      where: { id: created.orderId },
+      data: { riderId: rider.id, status: 'PICKED_UP' },
+    });
+
+    const originalStage = OrderService.prototype.stageCanonicalOrderTransition;
+    const stageSpy = vi
+      .spyOn(OrderService.prototype, 'stageCanonicalOrderTransition')
+      .mockImplementationOnce(async function (this: OrderService, tx, input) {
+        await originalStage.call(this, tx, input);
+        throw new Error('forced courier-proof pre-commit abort');
+      });
+    try {
+      const failed = await inject('POST', `/api/v1/courier/order/${created.orderId}/proof`, { proofPhotoUrl: 'storage://t/atomic-proof.jpg' }, moverUser.token);
+      expect(failed.statusCode).toBe(500);
+    } finally {
+      stageSpy.mockRestore();
+    }
+
+    const [failedOrder, failedRider, failedEarnings, failedLogs] = await Promise.all([
+      app.prisma.order.findUniqueOrThrow({ where: { id: created.orderId } }),
+      app.prisma.rider.findUniqueOrThrow({ where: { id: rider.id } }),
+      app.prisma.earning.count({ where: { orderId: created.orderId } }),
+      app.prisma.orderStatusLog.count({ where: { orderId: created.orderId, status: 'DELIVERED' } }),
+    ]);
+    expect({ status: failedOrder.status, proof: failedOrder.courierProofPhotoUrl }).toEqual({ status: 'PICKED_UP', proof: null });
+    expect({ available: failedRider.isAvailable, pointer: failedRider.currentOrderId, total: failedRider.totalDeliveries })
+      .toEqual({ available: false, pointer: created.orderId, total: before.totalDeliveries });
+    expect(failedEarnings).toBe(0);
+    expect(failedLogs).toBe(0);
+
+    const retry = await inject('POST', `/api/v1/courier/order/${created.orderId}/proof`, { proofPhotoUrl: 'storage://t/atomic-proof.jpg' }, moverUser.token);
+    expect(retry.statusCode).toBe(200);
+    const duplicate = await inject('POST', `/api/v1/courier/order/${created.orderId}/proof`, { proofPhotoUrl: 'storage://t/again.jpg' }, moverUser.token);
+    expect(duplicate.statusCode).toBe(400);
+    const [completedRider, earnings, logs] = await Promise.all([
+      app.prisma.rider.findUniqueOrThrow({ where: { id: rider.id } }),
+      app.prisma.earning.count({ where: { orderId: created.orderId, type: 'COURIER_FEE' } }),
+      app.prisma.orderStatusLog.count({ where: { orderId: created.orderId, status: 'DELIVERED' } }),
+    ]);
+    expect({ available: completedRider.isAvailable, pointer: completedRider.currentOrderId, total: completedRider.totalDeliveries })
+      .toEqual({ available: true, pointer: null, total: before.totalDeliveries + 1 });
+    expect(earnings).toBe(1);
+    expect(logs).toBe(1);
+  });
+
+  it('lets the sender cancel before rider pickup', async () => {
     const sender = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
     const created = (await inject('POST', '/api/v1/courier/order', ORDER_BODY, sender.token)).json().data;
 
     const res = await inject('POST', `/api/v1/courier/order/${created.orderId}/cancel`, { reason: 'Changed my mind' }, sender.token);
     expect(res.statusCode).toBe(200);
     expect(res.json().data.status).toBe('CANCELLED');
+  });
+
+  it('requires return-to-sender recovery after pickup and never releases the parcel rider', async () => {
+    const sender = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
+    const created = (await inject('POST', '/api/v1/courier/order', ORDER_BODY, sender.token)).json().data;
+    const moverUser = await makeUserWithSession(['MOVER', 'CUSTOMER'], 'MOVER');
+    const rider = await app.prisma.rider.create({
+      data: {
+        userId: moverUser.userId,
+        riderType: 'DELIVERY',
+        vehicleType: 'MOTORCYCLE',
+        documentsVerified: true,
+        isAvailable: false,
+        currentOrderId: created.orderId,
+      },
+    });
+    await app.prisma.order.update({
+      where: { id: created.orderId },
+      data: { riderId: rider.id, status: 'PICKED_UP' },
+    });
+
+    const response = await inject(
+      'POST',
+      `/api/v1/courier/order/${created.orderId}/cancel`,
+      { reason: 'Sender wants the parcel back' },
+      sender.token,
+    );
+    expect(response.statusCode).toBe(409);
+    expect(response.json().error).toMatchObject({ code: 'PARCEL_IN_CUSTODY' });
+
+    const [order, assignedRider, cancelledLogs] = await Promise.all([
+      app.prisma.order.findUniqueOrThrow({
+        where: { id: created.orderId },
+        select: { status: true, riderId: true, cancelledAt: true },
+      }),
+      app.prisma.rider.findUniqueOrThrow({
+        where: { id: rider.id },
+        select: { isAvailable: true, currentOrderId: true },
+      }),
+      app.prisma.orderStatusLog.count({ where: { orderId: created.orderId, status: 'CANCELLED' } }),
+    ]);
+    expect(order).toEqual({ status: 'PICKED_UP', riderId: rider.id, cancelledAt: null });
+    expect(assignedRider).toEqual({ isAvailable: false, currentOrderId: created.orderId });
+    expect(cancelledLogs).toBe(0);
+  });
+
+  it('sender cancel rolls back cancellation evidence and rider release on fault, then retries cleanly', async () => {
+    const sender = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
+    const created = (await inject('POST', '/api/v1/courier/order', ORDER_BODY, sender.token)).json().data;
+    const moverUser = await makeUserWithSession(['MOVER', 'CUSTOMER'], 'MOVER');
+    const rider = await app.prisma.rider.create({
+      data: {
+        userId: moverUser.userId,
+        riderType: 'DELIVERY',
+        vehicleType: 'MOTORCYCLE',
+        documentsVerified: true,
+        isAvailable: false,
+        currentOrderId: created.orderId,
+      },
+    });
+    await app.prisma.order.update({
+      where: { id: created.orderId },
+      data: { riderId: rider.id, status: 'RIDER_ASSIGNED' },
+    });
+
+    const originalStage = OrderService.prototype.stageCanonicalOrderTransition;
+    const stageSpy = vi
+      .spyOn(OrderService.prototype, 'stageCanonicalOrderTransition')
+      .mockImplementationOnce(async function (this: OrderService, tx, input) {
+        await originalStage.call(this, tx, input);
+        throw new Error('forced courier-cancel pre-commit abort');
+      });
+    try {
+      const failed = await inject('POST', `/api/v1/courier/order/${created.orderId}/cancel`, { reason: 'atomic rollback' }, sender.token);
+      expect(failed.statusCode).toBe(500);
+    } finally {
+      stageSpy.mockRestore();
+    }
+
+    const [failedOrder, failedRider, failedLogs] = await Promise.all([
+      app.prisma.order.findUniqueOrThrow({ where: { id: created.orderId } }),
+      app.prisma.rider.findUniqueOrThrow({ where: { id: rider.id } }),
+      app.prisma.orderStatusLog.count({ where: { orderId: created.orderId, status: 'CANCELLED' } }),
+    ]);
+    expect({ status: failedOrder.status, cancelledAt: failedOrder.cancelledAt, reason: failedOrder.cancellationReason })
+      .toEqual({ status: 'RIDER_ASSIGNED', cancelledAt: null, reason: null });
+    expect({ available: failedRider.isAvailable, pointer: failedRider.currentOrderId })
+      .toEqual({ available: false, pointer: created.orderId });
+    expect(failedLogs).toBe(0);
+
+    const retry = await inject('POST', `/api/v1/courier/order/${created.orderId}/cancel`, { reason: 'atomic rollback' }, sender.token);
+    expect(retry.statusCode).toBe(200);
+    const [cancelledRider, logs] = await Promise.all([
+      app.prisma.rider.findUniqueOrThrow({ where: { id: rider.id } }),
+      app.prisma.orderStatusLog.count({ where: { orderId: created.orderId, status: 'CANCELLED' } }),
+    ]);
+    expect({ available: cancelledRider.isAvailable, pointer: cancelledRider.currentOrderId })
+      .toEqual({ available: true, pointer: null });
+    expect(logs).toBe(1);
   });
 
   it('cancel vs proof race: exactly one wins, one terminal state [SWIFT-AUD-D2-03]', async () => {

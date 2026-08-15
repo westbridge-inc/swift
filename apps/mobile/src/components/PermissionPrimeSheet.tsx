@@ -1,9 +1,8 @@
 /** @jsxImportSource react */
 import React from 'react';
-import { View } from 'react-native';
 import { Feather } from '@expo/vector-icons';
 import { color, radius, space } from '@swift/ui';
-import { LinkText, PillButton, PopupCard, T } from '../kit';
+import { DecorativeIcon, LinkText, PillButton, PopupCard, PopupTitle, T } from '../kit';
 import { PRIME_COPY, markPrimeAsked, usePrimeStore } from '../services/notification-priming';
 import { registerDeviceForPush } from '../services/push';
 
@@ -22,7 +21,7 @@ export function PermissionPrimeSheet() {
 
   return (
     <PopupCard visible={moment != null} onClose={() => answer(false)}>
-      <View
+      <DecorativeIcon
         style={{
           width: 44,
           height: 44,
@@ -34,10 +33,10 @@ export function PermissionPrimeSheet() {
         }}
       >
         <Feather name="bell" size={20} color={color.brand[600]} />
-      </View>
-      <T variant="body" weight="bold" center>
+      </DecorativeIcon>
+      <PopupTitle variant="body" weight="bold" center>
         Turn on notifications?
-      </T>
+      </PopupTitle>
       <T variant="caption" tone="muted" center style={{ marginTop: space.sm, marginBottom: space.lg }}>
         {moment ? PRIME_COPY[moment] : ''}
       </T>

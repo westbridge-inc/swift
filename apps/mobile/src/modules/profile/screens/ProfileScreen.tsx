@@ -7,7 +7,7 @@ import { useNavigation } from '@react-navigation/native';
 import { color, space } from '@swift/ui';
 import { useMyRating, useProfile } from '../../../hooks/customer';
 import { useAuthStore } from '../../../stores/authStore';
-import { EmptyState, IconChip, PillButton, PopupCard, Screen, SettingsRow, T } from '../../../kit';
+import { EmptyState, IconChip, PillButton, PopupCard, PopupTitle, Screen, SettingsRow, T } from '../../../kit';
 import { RoleSwitcherSheet } from '../../../components/RoleSwitcherSheet';
 import { API_URL } from '../../../services/api';
 import { openPayLink } from '../../../lib/payLink';
@@ -19,7 +19,7 @@ const GUTTER = space['2xl'];
 // Mode") is omitted — the app ships light-only.
 export function ProfileScreen() {
   const navigation = useNavigation<any>();
-  const { isAuthenticated, promptLogin, logout, user } = useAuthStore();
+  const { isAuthenticated, promptLogin, logout, user, setIntent } = useAuthStore();
   const profile = useProfile<any>();
   const myRating = useMyRating();
   const [confirmLogout, setConfirmLogout] = useState(false);
@@ -27,6 +27,11 @@ export function ProfileScreen() {
   const [ratingInfo, setRatingInfo] = useState(false);
 
   if (!isAuthenticated) {
+    // A guest is never trapped [first-open 2.2 / SPS-F-0024]: every other
+    // surface can leave (MoverStack, VendorStack, advertiserExit all
+    // setIntent(null)) — the customer surface must too. "Back to the welcome
+    // screen" re-opens the trio; "Switch app" is the same sheet members get,
+    // whose un-owned cards read as join invitations.
     return (
       <Screen>
         <View style={{ height: 56, alignItems: 'center', justifyContent: 'center' }}>
@@ -39,6 +44,21 @@ export function ProfileScreen() {
           actionLabel="Sign In"
           onAction={promptLogin}
         />
+        <View style={{ paddingHorizontal: GUTTER, paddingBottom: space['3xl'] }}>
+          <SettingsRow
+            icon="refresh-ccw"
+            label="Switch app"
+            sub="Swift Driver · Swift Business"
+            onPress={() => setSwitcherOpen(true)}
+          />
+          <SettingsRow
+            icon="arrow-left"
+            label="Back to the welcome screen"
+            sub="Choose again how you’ll use Swift"
+            onPress={() => setIntent(null)}
+          />
+        </View>
+        <RoleSwitcherSheet visible={switcherOpen} current="customer" onClose={() => setSwitcherOpen(false)} />
       </Screen>
     );
   }
@@ -167,9 +187,9 @@ export function ProfileScreen() {
       {/* Movement R9 — why customers have a rating (aggregate-only honesty) */}
       <PopupCard visible={ratingInfo} onClose={() => setRatingInfo(false)}>
         <IconChip icon="star" size={56} />
-        <T variant="heading" center style={{ marginTop: space.md }}>
+        <PopupTitle variant="heading" center style={{ marginTop: space.md }}>
           {myRating.data?.displayRating != null ? `${myRating.data.displayRating.toFixed(1)} ${myRating.data.ratingBucket}` : 'No rating yet'}
-        </T>
+        </PopupTitle>
         <T variant="label" tone="muted" center style={{ marginTop: space.sm }}>
           Drivers and riders rate their trips with you, the same way you rate them — respect runs both ways.
           Swift only ever shows the average, never who rated what.
@@ -181,9 +201,9 @@ export function ProfileScreen() {
 
       <PopupCard visible={confirmLogout} onClose={() => setConfirmLogout(false)}>
         <IconChip icon="log-out" size={56} />
-        <T variant="heading" center style={{ marginTop: space.md }}>
+        <PopupTitle variant="heading" center style={{ marginTop: space.md }}>
           Log out of Swift?
-        </T>
+        </PopupTitle>
         <T variant="label" tone="muted" center style={{ marginTop: space.sm }}>
           Your cart and session leave this device; your account keeps everything.
         </T>

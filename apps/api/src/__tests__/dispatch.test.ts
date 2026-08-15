@@ -8,10 +8,18 @@ import { authPlugin } from '../plugins/auth';
 import { socketPlugin } from '../plugins/socket';
 import { riderRoutes } from '../modules/rider/rider.routes';
 import { registerErrorHandler } from '../middleware/error-handler';
-import { DispatchService } from '../modules/dispatch/dispatch.service';
+import {
+  DISPATCH_LOCATION_FRESH_SECONDS,
+  DispatchService,
+  normalizeDispatchLocationFreshSeconds,
+} from '../modules/dispatch/dispatch.service';
 import { scoreCandidate, rankCandidates } from '../modules/dispatch/scoring';
 import { HaversineMapsProvider } from '../providers/maps/maps-provider';
 import { runWithoutTenant } from '../plugins/tenant-context';
+import { transitionUserRoleAuthority, transitionUserStatusAuthority } from '../modules/mover-authority';
+import { FloatService } from '../modules/dispatch/float.service';
+import { OrderService } from '../modules/order/order.service';
+import { AuthService } from '../modules/auth/auth.service';
 
 // ---------------------------------------------------------------------------
 // dispatch. Hardest paths: the no-acceptance path
@@ -59,12 +67,16 @@ async function purgeFixtures() {
 let seq = 0;
 async function makeRider(opts: {
   lat?: number; lng?: number; online?: boolean; available?: boolean;
-  rating?: number; acceptance?: number; busy?: boolean; tenantId?: string;
+    rating?: number; acceptance?: number; busy?: boolean; tenantId?: string;
+    lastLocationUpdate?: Date | null;
 }) {
   seq += 1;
   const user = await app.prisma.user.create({
     data: {
-      phone: `+59200088${String(seq).padStart(2, '0')}`,
+      // 3-digit pad: the generated range (+59200088001…) can never collide
+      // with the file's two hardcoded admin phones (+5920008877/99), which sat
+      // inside the old 2-digit space and broke the run once seq reached them.
+      phone: `+59200088${String(seq).padStart(3, '0')}`,
       firstName: 'Dispatch',
       lastName: `Rider${seq}`,
       roles: ['RIDER' as UserRole, 'CUSTOMER' as UserRole],
@@ -89,19 +101,39 @@ async function makeRider(opts: {
       isAvailable: opts.available ?? true,
       currentLat: opts.lat ?? PICKUP.lat,
       currentLng: opts.lng ?? PICKUP.lng,
+      lastLocationUpdate: opts.lastLocationUpdate === undefined ? new Date() : opts.lastLocationUpdate,
       averageRating: opts.rating ?? 5,
       acceptanceRate: opts.acceptance ?? 100,
       currentOrderId: opts.busy ? 'busy-elsewhere' : null,
     },
   });
   const token = app.jwt.sign({ userId: user.id, role: 'RIDER', jti: nanoid(8) });
-  await app.prisma.session.create({
+  const session = await app.prisma.session.create({
     data: {
       userId: user.id, token, refreshToken: nanoid(48),
       deviceId: 'step8', deviceType: 'test', expiresAt: new Date(Date.now() + DAY),
     },
   });
-  return { userId: user.id, riderId: rider.id, token };
+  await app.prisma.rider.update({
+    where: { id: rider.id },
+    data: { locationSessionId: session.id },
+  });
+  return { userId: user.id, riderId: rider.id, token, sessionId: session.id };
+}
+
+async function makeRiderDeviceSession(userId: string, deviceId: string) {
+  const token = app.jwt.sign({ userId, role: 'RIDER', jti: nanoid(8) });
+  const session = await app.prisma.session.create({
+    data: {
+      userId,
+      token,
+      refreshToken: nanoid(48),
+      deviceId,
+      deviceType: 'test',
+      expiresAt: new Date(Date.now() + DAY),
+    },
+  });
+  return { token, sessionId: session.id };
 }
 
 async function makeDeliveryOrder(status: 'ACCEPTED' | 'READY_FOR_PICKUP' = 'ACCEPTED', pickup = PICKUP) {
@@ -185,6 +217,447 @@ beforeAll(async () => {
   vendorId = vendor.id;
 });
 
+describe('Rider location authority', () => {
+  it('cannot reclaim a legacy null owner after its in-flight session is revoked', async () => {
+    const r = await makeRider({ online: true, available: true, lat: 6.831, lng: -58.171 });
+    await app.prisma.rider.update({
+      where: { id: r.riderId },
+      data: { locationSessionId: null },
+    });
+    await app.redis.del(`rider:location_db_ts:${r.riderId}`);
+
+    let reachedProfileRead!: () => void;
+    let resumeProfileRead!: () => void;
+    const atProfileRead = new Promise<void>((resolve) => { reachedProfileRead = resolve; });
+    const resume = new Promise<void>((resolve) => { resumeProfileRead = resolve; });
+    const originalFindUnique = app.prisma.rider.findUnique.bind(app.prisma.rider);
+    const profileRead = vi.spyOn(app.prisma.rider, 'findUnique').mockImplementationOnce((async (...args: unknown[]) => {
+      const profile = await originalFindUnique(...(args as [Parameters<typeof originalFindUnique>[0]]));
+      reachedProfileRead();
+      await resume;
+      return profile;
+    }) as never);
+
+    let staleSample!: Awaited<ReturnType<typeof app.inject>>;
+    try {
+      const staleSamplePromise = app.inject({
+        method: 'PUT',
+        url: '/api/v1/rider/location',
+        payload: { latitude: 6.99, longitude: -58.29 },
+        headers: { authorization: `Bearer ${r.token}` },
+      });
+      await atProfileRead;
+      await new AuthService(app).logout(r.sessionId, r.userId);
+      resumeProfileRead();
+      staleSample = await staleSamplePromise;
+    } finally {
+      resumeProfileRead();
+      profileRead.mockRestore();
+    }
+
+    expect(staleSample.statusCode).toBe(200);
+    expect(staleSample.json().data).toEqual({ accepted: false, reason: 'SESSION_REPLACED' });
+    const [after, revoked] = await Promise.all([
+      app.prisma.rider.findUniqueOrThrow({ where: { id: r.riderId } }),
+      app.prisma.session.findUnique({ where: { id: r.sessionId } }),
+    ]);
+    expect(revoked).toBeNull();
+    expect(after.locationSessionId).toBeNull();
+    expect({ lat: after.currentLat, lng: after.currentLng }).toEqual({ lat: 6.831, lng: -58.171 });
+    await app.prisma.rider.update({
+      where: { id: r.riderId },
+      data: { isOnline: false, isAvailable: false },
+    });
+  });
+
+  it('rotates GO ownership to the latest device and rejects the replaced session', async () => {
+    const r = await makeRider({ online: false, available: false });
+    const secondDevice = await makeRiderDeviceSession(r.userId, 'step8-second-device');
+
+    const firstGo = await app.inject({
+      method: 'POST',
+      url: '/api/v1/rider/go-online',
+      payload: { latitude: 6.801, longitude: -58.151 },
+      headers: { authorization: `Bearer ${r.token}` },
+    });
+    expect(firstGo.statusCode).toBe(200);
+    expect((await app.prisma.rider.findUniqueOrThrow({ where: { id: r.riderId } })).locationSessionId)
+      .toBe(r.sessionId);
+
+    const secondGo = await app.inject({
+      method: 'POST',
+      url: '/api/v1/rider/go-online',
+      payload: { latitude: 6.802, longitude: -58.152 },
+      headers: { authorization: `Bearer ${secondDevice.token}` },
+    });
+    expect(secondGo.statusCode).toBe(200);
+    const afterReplacement = await app.prisma.rider.findUniqueOrThrow({ where: { id: r.riderId } });
+    expect(afterReplacement.locationSessionId).toBe(secondDevice.sessionId);
+    expect({ lat: afterReplacement.currentLat, lng: afterReplacement.currentLng })
+      .toEqual({ lat: 6.802, lng: -58.152 });
+
+    await app.redis.del(`rider:location_db_ts:${r.riderId}`);
+    const replacedSample = await app.inject({
+      method: 'PUT',
+      url: '/api/v1/rider/location',
+      payload: { latitude: 6.91, longitude: -58.21 },
+      headers: { authorization: `Bearer ${r.token}` },
+    });
+    expect(replacedSample.statusCode).toBe(200);
+    expect(replacedSample.json().data).toEqual({ accepted: false, reason: 'SESSION_REPLACED' });
+    const afterRejectedSample = await app.prisma.rider.findUniqueOrThrow({ where: { id: r.riderId } });
+    expect({ lat: afterRejectedSample.currentLat, lng: afterRejectedSample.currentLng })
+      .toEqual({ lat: 6.802, lng: -58.152 });
+
+    const ownerSample = await app.inject({
+      method: 'PUT',
+      url: '/api/v1/rider/location',
+      payload: { latitude: 6.803, longitude: -58.153 },
+      headers: { authorization: `Bearer ${secondDevice.token}` },
+    });
+    expect(ownerSample.statusCode).toBe(200);
+    expect(ownerSample.json()).toEqual({ success: true });
+    const afterOwnerSample = await app.prisma.rider.findUniqueOrThrow({ where: { id: r.riderId } });
+    expect({ lat: afterOwnerSample.currentLat, lng: afterOwnerSample.currentLng })
+      .toEqual({ lat: 6.803, lng: -58.153 });
+
+    const offline = await app.inject({
+      method: 'POST',
+      url: '/api/v1/rider/go-offline',
+      headers: { authorization: `Bearer ${secondDevice.token}` },
+    });
+    expect(offline.statusCode).toBe(200);
+    const afterOffline = await app.prisma.rider.findUniqueOrThrow({ where: { id: r.riderId } });
+    expect(afterOffline.locationSessionId).toBeNull();
+    expect(afterOffline.isOnline).toBe(false);
+  });
+
+  it('does not emit an old-device sample when GO rotates during a debounced update', async () => {
+    const r = await makeRider({ online: false, available: false });
+    const secondDevice = await makeRiderDeviceSession(r.userId, 'step8-race-winner');
+    const firstGo = await app.inject({
+      method: 'POST',
+      url: '/api/v1/rider/go-online',
+      payload: { latitude: 6.841, longitude: -58.181 },
+      headers: { authorization: `Bearer ${r.token}` },
+    });
+    expect(firstGo.statusCode).toBe(200);
+
+    const order = await makeDeliveryOrder('READY_FOR_PICKUP');
+    await app.prisma.$transaction([
+      app.prisma.order.update({
+        where: { id: order.id },
+        data: { riderId: r.riderId, status: 'RIDER_ASSIGNED' },
+      }),
+      app.prisma.rider.update({
+        where: { id: r.riderId },
+        data: { currentOrderId: order.id, isAvailable: false },
+      }),
+    ]);
+
+    let reachedDebounce!: () => void;
+    let resumeDebounce!: () => void;
+    const atDebounce = new Promise<void>((resolve) => { reachedDebounce = resolve; });
+    const resume = new Promise<void>((resolve) => { resumeDebounce = resolve; });
+    const originalRedisGet = app.redis.get.bind(app.redis);
+    const redisGet = vi.spyOn(app.redis, 'get').mockImplementationOnce((async (...args: unknown[]) => {
+      reachedDebounce();
+      await resume;
+      return originalRedisGet(...(args as [string]));
+    }) as never);
+    const emits: Array<{ room: string; event: string }> = [];
+    const ioTo = vi.spyOn(app.io, 'to').mockImplementation(((room: string) => ({
+      emit: (event: string) => { emits.push({ room, event }); return true; },
+    })) as never);
+
+    let replacement!: Awaited<ReturnType<typeof app.inject>>;
+    let oldSample!: Awaited<ReturnType<typeof app.inject>>;
+    try {
+      const oldSamplePromise = app.inject({
+        method: 'PUT',
+        url: '/api/v1/rider/location',
+        payload: { latitude: 6.99, longitude: -58.29 },
+        headers: { authorization: `Bearer ${r.token}` },
+      });
+      await atDebounce;
+
+      replacement = await app.inject({
+        method: 'POST',
+        url: '/api/v1/rider/go-online',
+        payload: { latitude: 6.842, longitude: -58.182 },
+        headers: { authorization: `Bearer ${secondDevice.token}` },
+      });
+      resumeDebounce();
+      oldSample = await oldSamplePromise;
+    } finally {
+      resumeDebounce();
+      redisGet.mockRestore();
+      ioTo.mockRestore();
+    }
+
+    expect(replacement.statusCode).toBe(200);
+    expect(oldSample.statusCode).toBe(200);
+    expect(oldSample.json().data).toEqual({ accepted: false, reason: 'SESSION_REPLACED' });
+    expect(emits).not.toContainEqual({ room: `order:${order.id}`, event: 'rider:location' });
+    const after = await app.prisma.rider.findUniqueOrThrow({ where: { id: r.riderId } });
+    expect(after.locationSessionId).toBe(secondDevice.sessionId);
+    expect({ lat: after.currentLat, lng: after.currentLng }).toEqual({ lat: 6.842, lng: -58.182 });
+  });
+
+  it('atomically gives a legacy null owner to one device and clears it on role retirement', async () => {
+    const r = await makeRider({ online: true });
+    const secondDevice = await makeRiderDeviceSession(r.userId, 'step8-legacy-contender');
+    await app.prisma.rider.update({
+      where: { id: r.riderId },
+      data: { locationSessionId: null },
+    });
+    await app.redis.del(`rider:location_db_ts:${r.riderId}`);
+
+    const samples = [
+      { latitude: 6.811, longitude: -58.161 },
+      { latitude: 6.812, longitude: -58.162 },
+    ];
+    const responses = await Promise.all([
+      app.inject({
+        method: 'PUT',
+        url: '/api/v1/rider/location',
+        payload: samples[0],
+        headers: { authorization: `Bearer ${r.token}` },
+      }),
+      app.inject({
+        method: 'PUT',
+        url: '/api/v1/rider/location',
+        payload: samples[1],
+        headers: { authorization: `Bearer ${secondDevice.token}` },
+      }),
+    ]);
+    expect(responses.map((response) => response.statusCode)).toEqual([200, 200]);
+    const bodies = responses.map((response) => response.json());
+    expect(bodies.filter((body) => body.data?.reason === 'SESSION_REPLACED')).toHaveLength(1);
+    expect(bodies.filter((body) => body.data === undefined)).toHaveLength(1);
+
+    const winningIndex = bodies.findIndex((body) => body.data === undefined);
+    const expectedSessionIds = [r.sessionId, secondDevice.sessionId];
+    const claimed = await app.prisma.rider.findUniqueOrThrow({ where: { id: r.riderId } });
+    expect(claimed.locationSessionId).toBe(expectedSessionIds[winningIndex]);
+    expect({ lat: claimed.currentLat, lng: claimed.currentLng }).toEqual({
+      lat: samples[winningIndex]!.latitude,
+      lng: samples[winningIndex]!.longitude,
+    });
+
+    await transitionUserRoleAuthority(app, r.userId, 'CUSTOMER');
+    const retired = await app.prisma.rider.findUniqueOrThrow({ where: { id: r.riderId } });
+    expect(retired.locationSessionId).toBeNull();
+    expect({ online: retired.isOnline, available: retired.isAvailable }).toEqual({
+      online: false,
+      available: false,
+    });
+  });
+
+  it('atomically stores the fresh GO coordinate', async () => {
+    const r = await makeRider({ online: false });
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/v1/rider/go-online',
+      payload: { latitude: 6.8234, longitude: -58.1678 },
+      headers: { authorization: `Bearer ${r.token}` },
+    });
+
+    expect(res.statusCode).toBe(200);
+    const after = await app.prisma.rider.findUniqueOrThrow({ where: { id: r.riderId } });
+    expect({ lat: after.currentLat, lng: after.currentLng }).toEqual({ lat: 6.8234, lng: -58.1678 });
+    expect(after.lastLocationUpdate).not.toBeNull();
+    await app.prisma.rider.update({
+      where: { id: r.riderId },
+      data: { isOnline: false, isAvailable: false },
+    });
+  });
+
+  it.each([
+    ['empty', {}],
+    ['one-sided', { latitude: 6.8234 }],
+  ])('rejects a %s GO coordinate without advertising supply', async (_label, payload) => {
+    const r = await makeRider({ online: false, available: false });
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/v1/rider/go-online',
+      payload,
+      headers: { authorization: `Bearer ${r.token}` },
+    });
+
+    expect(res.statusCode).toBe(400);
+    const after = await app.prisma.rider.findUniqueOrThrow({ where: { id: r.riderId } });
+    expect(after.isOnline).toBe(false);
+    expect(after.isAvailable).toBe(false);
+  });
+
+  it('returns DB-authoritative GO success when Redis bookkeeping is unavailable', async () => {
+    const r = await makeRider({ online: false, available: false });
+    const redisSet = vi.spyOn(app.redis, 'set').mockRejectedValueOnce(new Error('redis down'));
+    try {
+      const res = await app.inject({
+        method: 'POST',
+        url: '/api/v1/rider/go-online',
+        payload: { latitude: 6.8234, longitude: -58.1678 },
+        headers: { authorization: `Bearer ${r.token}` },
+      });
+      expect(res.statusCode).toBe(200);
+      const after = await app.prisma.rider.findUniqueOrThrow({ where: { id: r.riderId } });
+      expect(after.isOnline).toBe(true);
+      expect(after.lastLocationUpdate).not.toBeNull();
+    } finally {
+      redisSet.mockRestore();
+      await app.prisma.rider.update({
+        where: { id: r.riderId },
+        data: { isOnline: false, isAvailable: false },
+      });
+    }
+  });
+
+  it('retires idle taxi supply before the same unified mover becomes delivery supply', async () => {
+    const r = await makeRider({ online: false, available: false });
+    const driver = await app.prisma.driver.create({
+      data: {
+        userId: r.userId,
+        vehicleMake: 'Toyota', vehicleModel: 'Allion', vehicleYear: 2020,
+        vehicleColor: 'Silver', licensePlate: `DUAL-${seq}`,
+        driverLicenseUrl: 'x', vehicleInsuranceUrl: 'x', documentsVerified: true,
+        isOnline: true, isAvailable: true,
+        currentLat: PICKUP.lat, currentLng: PICKUP.lng, lastLocationUpdate: new Date(),
+      },
+    });
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/v1/rider/go-online',
+      payload: { latitude: 6.8234, longitude: -58.1678 },
+      headers: { authorization: `Bearer ${r.token}` },
+    });
+    expect(res.statusCode).toBe(200);
+    const afterDriver = await app.prisma.driver.findUniqueOrThrow({ where: { id: driver.id } });
+    expect({ online: afterDriver.isOnline, available: afterDriver.isAvailable }).toEqual({
+      online: false,
+      available: false,
+    });
+    await app.prisma.rider.update({
+      where: { id: r.riderId },
+      data: { isOnline: false, isAvailable: false },
+    });
+  });
+
+  it('refuses delivery GO while the same unified mover has an active taxi ride', async () => {
+    const r = await makeRider({ online: false, available: false });
+    const driver = await app.prisma.driver.create({
+      data: {
+        userId: r.userId,
+        vehicleMake: 'Toyota', vehicleModel: 'Allion', vehicleYear: 2020,
+        vehicleColor: 'Silver', licensePlate: `ACTIVE-${seq}`,
+        driverLicenseUrl: 'x', vehicleInsuranceUrl: 'x', documentsVerified: true,
+        isOnline: true, isAvailable: false, currentRideId: 'active-sibling-ride',
+        currentLat: PICKUP.lat, currentLng: PICKUP.lng, lastLocationUpdate: new Date(),
+      },
+    });
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/v1/rider/go-online',
+      payload: { latitude: 6.8234, longitude: -58.1678 },
+      headers: { authorization: `Bearer ${r.token}` },
+    });
+    expect(res.statusCode).toBe(409);
+    const after = await app.prisma.driver.findUniqueOrThrow({ where: { id: driver.id } });
+    expect(after.currentRideId).toBe('active-sibling-ride');
+    expect(after.isOnline).toBe(true);
+    await app.prisma.driver.update({
+      where: { id: driver.id },
+      data: { currentRideId: null, isOnline: false, isAvailable: false },
+    });
+  });
+
+  it('persists an active location sample when Redis debounce is unavailable', async () => {
+    const r = await makeRider({ online: true });
+    const redisGet = vi.spyOn(app.redis, 'get').mockRejectedValueOnce(new Error('redis down'));
+    const redisSet = vi.spyOn(app.redis, 'set').mockRejectedValueOnce(new Error('redis down'));
+    try {
+      const res = await app.inject({
+        method: 'PUT',
+        url: '/api/v1/rider/location',
+        payload: { latitude: 6.8334, longitude: -58.1778 },
+        headers: { authorization: `Bearer ${r.token}` },
+      });
+      expect(res.statusCode).toBe(200);
+      const after = await app.prisma.rider.findUniqueOrThrow({ where: { id: r.riderId } });
+      expect({ lat: after.currentLat, lng: after.currentLng }).toEqual({ lat: 6.8334, lng: -58.1778 });
+    } finally {
+      redisGet.mockRestore();
+      redisSet.mockRestore();
+      await app.prisma.rider.update({
+        where: { id: r.riderId },
+        data: { isOnline: false, isAvailable: false },
+      });
+    }
+  });
+
+  it('rejects an offline queued sample without writing or arming the debounce key', async () => {
+    const r = await makeRider({ online: false, lat: 6.8, lng: -58.15 });
+    await app.prisma.rider.update({
+      where: { id: r.riderId },
+      data: { isAvailable: false, currentOrderId: null },
+    });
+    await app.redis.del(`rider:location_db_ts:${r.riderId}`);
+
+    const res = await app.inject({
+      method: 'PUT',
+      url: '/api/v1/rider/location',
+      payload: { latitude: 6.91, longitude: -58.21 },
+      headers: { authorization: `Bearer ${r.token}` },
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.json().data).toEqual({ accepted: false, reason: 'OFFLINE' });
+    const after = await app.prisma.rider.findUniqueOrThrow({ where: { id: r.riderId } });
+    expect({ lat: after.currentLat, lng: after.currentLng }).toEqual({ lat: 6.8, lng: -58.15 });
+    expect(await app.redis.get(`rider:location_db_ts:${r.riderId}`)).toBeNull();
+  });
+
+  it('accepts online samples and force-offlined samples with an active job pointer', async () => {
+    const online = await makeRider({ online: true });
+    await app.redis.del(`rider:location_db_ts:${online.riderId}`);
+    const onlineRes = await app.inject({
+      method: 'PUT',
+      url: '/api/v1/rider/location',
+      payload: { latitude: 6.82, longitude: -58.16 },
+      headers: { authorization: `Bearer ${online.token}` },
+    });
+    expect(onlineRes.statusCode).toBe(200);
+    await app.prisma.rider.update({
+      where: { id: online.riderId },
+      data: { isOnline: false, isAvailable: false },
+    });
+
+    const active = await makeRider({ online: false });
+    const order = await makeDeliveryOrder();
+    await app.prisma.order.update({
+      where: { id: order.id },
+      data: { riderId: active.riderId, status: 'RIDER_ASSIGNED' },
+    });
+    await app.prisma.rider.update({
+      where: { id: active.riderId },
+      data: { isAvailable: false, currentOrderId: order.id },
+    });
+    await app.redis.del(`rider:location_db_ts:${active.riderId}`);
+    const activeRes = await app.inject({
+      method: 'PUT',
+      url: '/api/v1/rider/location',
+      payload: { latitude: 6.83, longitude: -58.17 },
+      headers: { authorization: `Bearer ${active.token}` },
+    });
+    expect(activeRes.statusCode).toBe(200);
+    const after = await app.prisma.rider.findUniqueOrThrow({ where: { id: active.riderId } });
+    expect({ lat: after.currentLat, lng: after.currentLng }).toEqual({ lat: 6.83, lng: -58.17 });
+  });
+});
+
 afterAll(async () => {
   // The HTTP accept tests run authenticate -> enterTenant, whose enterWith
   // leaks a tenant into this async context; without clearing it, purge's
@@ -198,6 +671,12 @@ afterAll(async () => {
 });
 
 describe('Scoring — pure and predictable', () => {
+  it('keeps the dispatch lease safely above the 30s mobile heartbeat', () => {
+    expect(normalizeDispatchLocationFreshSeconds(30)).toBe(90);
+    expect(normalizeDispatchLocationFreshSeconds('bad')).toBe(90);
+    expect(normalizeDispatchLocationFreshSeconds(180)).toBe(180);
+  });
+
   const base = { riderId: 'r', userId: 'u', etaMinutes: 5, averageRating: 5, acceptanceRate: 100, hasActiveJob: false };
 
   it('closer beats further, all else equal', () => {
@@ -225,6 +704,56 @@ describe('Scoring — pure and predictable', () => {
 });
 
 describe('Candidate discovery — PostGIS radius', () => {
+  it('excludes an online rider whose location authority has no owning session', async () => {
+    const rider = await makeRider({ lat: PICKUP.lat + 0.001 });
+    await app.prisma.rider.update({
+      where: { id: rider.riderId },
+      data: { locationSessionId: null },
+    });
+
+    const ids = (await dispatch.findCandidates(`ownerless-${nanoid(6)}`, PICKUP, 5))
+      .map((candidate) => candidate.riderId);
+    expect(ids).not.toContain(rider.riderId);
+    await expect((dispatch as unknown as {
+      canReceiveOffer(pool: 'RIDER', moverId: string): Promise<boolean>;
+    }).canReceiveOffer('RIDER', rider.riderId)).resolves.toBe(false);
+
+    const board = await app.inject({
+      method: 'GET',
+      url: '/api/v1/rider/orders/available',
+      headers: { authorization: `Bearer ${rider.token}` },
+    });
+    expect(board.statusCode).toBe(400);
+    expect(board.json().error.code).toBe('OFFLINE');
+    await app.prisma.rider.update({ where: { id: rider.riderId }, data: { isOnline: false, isAvailable: false } });
+  });
+
+  it('atomically removes an owning rider session from dispatch supply on logout', async () => {
+    const rider = await makeRider({ lat: PICKUP.lat + 0.001 });
+    await app.prisma.rider.update({
+      where: { id: rider.riderId },
+      data: { locationSessionId: rider.sessionId },
+    });
+
+    const before = await dispatch.findCandidates(`logout-before-${nanoid(6)}`, PICKUP, 5);
+    expect(before.map((candidate) => candidate.riderId)).toContain(rider.riderId);
+
+    await new AuthService(app).logout(rider.sessionId, rider.userId);
+
+    const [profile, revokedSession, after] = await Promise.all([
+      app.prisma.rider.findUniqueOrThrow({ where: { id: rider.riderId } }),
+      app.prisma.session.findUnique({ where: { id: rider.sessionId } }),
+      dispatch.findCandidates(`logout-after-${nanoid(6)}`, PICKUP, 5),
+    ]);
+    expect({
+      locationSessionId: profile.locationSessionId,
+      isOnline: profile.isOnline,
+      isAvailable: profile.isAvailable,
+    }).toEqual({ locationSessionId: null, isOnline: false, isAvailable: false });
+    expect(revokedSession).toBeNull();
+    expect(after.map((candidate) => candidate.riderId)).not.toContain(rider.riderId);
+  });
+
   it('finds online riders inside the radius and excludes the rest', async () => {
     const near = await makeRider({ lat: PICKUP.lat + 0.0045 });            // ~0.5 km
     const mid = await makeRider({ lat: PICKUP.lat + 0.018 });              // ~2 km
@@ -248,16 +777,53 @@ describe('Candidate discovery — PostGIS radius', () => {
     });
   });
 
+  it('treats fresh location plus active mover role as a renewable supply lease', async () => {
+    const fresh = await makeRider({ lat: PICKUP.lat + 0.001 });
+    const stale = await makeRider({
+      lat: PICKUP.lat + 0.0015,
+      lastLocationUpdate: new Date(Date.now() - (DISPATCH_LOCATION_FRESH_SECONDS + 5) * 1000),
+    });
+    const wrongSurface = await makeRider({ lat: PICKUP.lat + 0.002 });
+    const suspended = await makeRider({ lat: PICKUP.lat + 0.0025 });
+    await app.prisma.user.update({
+      where: { id: wrongSurface.userId },
+      data: { activeRole: 'CUSTOMER' },
+    });
+    await app.prisma.user.update({
+      where: { id: suspended.userId },
+      data: { status: 'SUSPENDED' },
+    });
+    const order = await makeDeliveryOrder();
+
+    const ids = (await dispatch.findCandidates(order.id, PICKUP, 5)).map((candidate) => candidate.riderId);
+    expect(ids).toContain(fresh.riderId);
+    expect(ids).not.toContain(stale.riderId);
+    expect(ids).not.toContain(wrongSurface.riderId);
+    expect(ids).not.toContain(suspended.riderId);
+
+    await app.prisma.rider.updateMany({
+      where: { id: { in: [fresh.riderId, stale.riderId, wrongSurface.riderId, suspended.riderId] } },
+      data: { isOnline: false, isAvailable: false },
+    });
+  });
+
   it('never offers across tenants — a mover in another operator is invisible (raw geo query bypasses tenantScope)', async () => {
     // A second operator on the same platform. Both riders sit on the SAME remote
     // spot, far from every other fixture, so tenancy is the ONLY thing that can
     // separate them.
     const FAR = { lat: 6.95, lng: -58.42 };
-    const otherTenant = await app.prisma.tenant.create({ data: { name: 'Other Op', slug: `other-${nanoid(6).toLowerCase()}` } });
-    createdTenantIds.push(otherTenant.id);
-    const foreign = await makeRider({ lat: FAR.lat, lng: FAR.lng, tenantId: otherTenant.id });
-    const local = await makeRider({ lat: FAR.lat, lng: FAR.lng }); // swift-default
-    const order = await makeDeliveryOrder('ACCEPTED', FAR);        // swift-default
+    const { otherTenant, foreign, local, order } = await runWithoutTenant(async () => {
+      const tenant = await app.prisma.tenant.create({
+        data: { name: 'Other Op', slug: `other-${nanoid(6).toLowerCase()}` },
+      });
+      createdTenantIds.push(tenant.id);
+      return {
+        otherTenant: tenant,
+        foreign: await makeRider({ lat: FAR.lat, lng: FAR.lng, tenantId: tenant.id }),
+        local: await makeRider({ lat: FAR.lat, lng: FAR.lng }), // swift-default
+        order: await makeDeliveryOrder('ACCEPTED', FAR), // swift-default
+      };
+    });
 
     // Dispatching a swift-default order must see the local rider and NOT the
     // foreign one — even though the foreign rider is an identical, closer-or-equal
@@ -543,6 +1109,145 @@ describe('The offer cascade', () => {
 });
 
 describe('Atomic acceptance — the concurrency proof', () => {
+  it('hides and rejects a dual-role rider account claiming its own delivery at both HTTP and DB barriers', async () => {
+    const rider = await makeRider({});
+    const order = await makeDeliveryOrder('READY_FOR_PICKUP');
+    await app.prisma.order.update({ where: { id: order.id }, data: { customerId: rider.userId } });
+
+    const board = await app.inject({
+      method: 'GET',
+      url: '/api/v1/rider/orders/available',
+      headers: { authorization: `Bearer ${rider.token}` },
+    });
+    expect(board.statusCode).toBe(200);
+    expect((board.json().data as Array<{ id: string }>).map((row) => row.id)).not.toContain(order.id);
+
+    const direct = await app.inject({
+      method: 'POST',
+      url: `/api/v1/rider/orders/${order.id}/accept`,
+      payload: {},
+      headers: { authorization: `Bearer ${rider.token}`, 'content-type': 'application/json' },
+    });
+    expect(direct.statusCode).toBe(409);
+    expect(direct.json().error.code).toBe('SELF_OWN_ORDER');
+    await expect(dispatch.claimOrder(order.id, rider.riderId)).rejects.toMatchObject({ code: 'SELF_OWN_ORDER' });
+
+    const durable = await app.prisma.order.findUniqueOrThrow({ where: { id: order.id } });
+    expect({ status: durable.status, riderId: durable.riderId }).toEqual({ status: 'READY_FOR_PICKUP', riderId: null });
+    await app.prisma.rider.update({ where: { id: rider.riderId }, data: { isOnline: false, isAvailable: false } });
+  });
+
+  it('rejects a direct claim by a suspended mover and leaves the order open', async () => {
+    const rider = await makeRider({});
+    const order = await makeDeliveryOrder('READY_FOR_PICKUP');
+    await app.prisma.user.update({ where: { id: rider.userId }, data: { status: 'SUSPENDED' } });
+
+    await expect(dispatch.claimOrder(order.id, rider.riderId)).rejects.toMatchObject({
+      code: 'MOVER_INACTIVE',
+    });
+    const [afterOrder, afterRider] = await Promise.all([
+      app.prisma.order.findUniqueOrThrow({ where: { id: order.id } }),
+      app.prisma.rider.findUniqueOrThrow({ where: { id: rider.riderId } }),
+    ]);
+    expect({ riderId: afterOrder.riderId, status: afterOrder.status }).toEqual({
+      riderId: null,
+      status: 'READY_FOR_PICKUP',
+    });
+    expect(afterRider.currentOrderId).toBeNull();
+  });
+
+  it('stages the immutable assignment log in the claim transaction and rolls everything back on abort', async () => {
+    const rider = await makeRider({});
+    const order = await makeDeliveryOrder('READY_FOR_PICKUP');
+    const originalTransaction = app.prisma.$transaction.bind(app.prisma);
+    let stagedAssignmentLogs = -1;
+    const transaction = vi.spyOn(app.prisma, '$transaction').mockImplementationOnce((async (
+      callback: (tx: Parameters<Parameters<typeof app.prisma.$transaction>[0]>[0]) => Promise<unknown>,
+      options?: Parameters<typeof app.prisma.$transaction>[1],
+    ) => originalTransaction(async (tx) => {
+      await callback(tx as Parameters<Parameters<typeof app.prisma.$transaction>[0]>[0]);
+      stagedAssignmentLogs = await tx.orderStatusLog.count({
+        where: { orderId: order.id, status: 'RIDER_ASSIGNED' },
+      });
+      throw new Error('forced assignment transaction abort');
+    }, options)) as never);
+
+    try {
+      await expect(dispatch.claimOrder(order.id, rider.riderId)).rejects.toThrow(
+        'forced assignment transaction abort',
+      );
+    } finally {
+      transaction.mockRestore();
+    }
+
+    // This observation is made inside the transaction, immediately before the
+    // injected failure. Before the fix it was zero because the log was written
+    // only after the assignment transaction had already committed.
+    expect(stagedAssignmentLogs).toBe(1);
+    const [afterOrder, afterRider, committedLogs] = await Promise.all([
+      app.prisma.order.findUniqueOrThrow({ where: { id: order.id } }),
+      app.prisma.rider.findUniqueOrThrow({ where: { id: rider.riderId } }),
+      app.prisma.orderStatusLog.count({ where: { orderId: order.id, status: 'RIDER_ASSIGNED' } }),
+    ]);
+    expect({ status: afterOrder.status, riderId: afterOrder.riderId }).toEqual({
+      status: 'READY_FOR_PICKUP',
+      riderId: null,
+    });
+    expect({
+      currentOrderId: afterRider.currentOrderId,
+      isAvailable: afterRider.isAvailable,
+      committedFloat: Number(afterRider.committedFloat),
+    }).toEqual({ currentOrderId: null, isAvailable: true, committedFloat: 0 });
+    expect(committedLogs).toBe(0);
+    await app.prisma.rider.update({
+      where: { id: rider.riderId },
+      data: { isOnline: false, isAvailable: false },
+    });
+  });
+
+  it('never re-dispatches a committed winner when journal/rate/Redis/socket/notification publication fails', async () => {
+    await app.prisma.rider.updateMany({ data: { isOnline: false, isAvailable: false } });
+    const rider = await makeRider({ lat: PICKUP.lat + 0.001 });
+    const order = await makeDeliveryOrder('READY_FOR_PICKUP');
+    expect((await dispatch.dispatchOrder(order.id)).offered).toBe(rider.riderId);
+
+    const internals = dispatch as unknown as {
+      recordOfferOutcome(moverId: string, accepted: boolean, pool: 'RIDER' | 'DRIVER'): Promise<void>;
+      notifications: { riderAssigned: (...args: unknown[]) => Promise<void> };
+    };
+    const outcome = vi.spyOn(internals, 'recordOfferOutcome').mockRejectedValueOnce(new Error('rate unavailable'));
+    const journal = vi.spyOn(app.prisma.dispatchSearch, 'findFirst').mockRejectedValueOnce(new Error('journal unavailable'));
+    const redisCleanup = vi.spyOn(app.redis, 'del').mockRejectedValueOnce(new Error('redis unavailable'));
+    const socket = vi.spyOn(app.io, 'to').mockImplementationOnce(() => { throw new Error('socket unavailable'); });
+    const notification = vi
+      .spyOn(internals.notifications, 'riderAssigned')
+      .mockRejectedValueOnce(new Error('notification unavailable'));
+    const redispatch = vi.spyOn(dispatch, 'dispatchOrder');
+    try {
+      const accepted = await dispatch.acceptOffer(order.id, rider.userId);
+      expect({ status: accepted.status, riderId: accepted.riderId }).toEqual({ status: 'RIDER_ASSIGNED', riderId: rider.riderId });
+      expect(redispatch).not.toHaveBeenCalled();
+    } finally {
+      redispatch.mockRestore();
+      notification.mockRestore();
+      socket.mockRestore();
+      redisCleanup.mockRestore();
+      journal.mockRestore();
+      outcome.mockRestore();
+    }
+
+    const [durableOrder, durableRider, logs] = await Promise.all([
+      app.prisma.order.findUniqueOrThrow({ where: { id: order.id } }),
+      app.prisma.rider.findUniqueOrThrow({ where: { id: rider.riderId } }),
+      app.prisma.orderStatusLog.count({ where: { orderId: order.id, status: 'RIDER_ASSIGNED' } }),
+    ]);
+    expect({ status: durableOrder.status, riderId: durableOrder.riderId })
+      .toEqual({ status: 'RIDER_ASSIGNED', riderId: rider.riderId });
+    expect({ available: durableRider.isAvailable, pointer: durableRider.currentOrderId })
+      .toEqual({ available: false, pointer: order.id });
+    expect(logs).toBe(1);
+  });
+
   it('10 simultaneous claims on one job: exactly 1 winner, 9 clean rejections', async () => {
     const riders = await Promise.all(Array.from({ length: 10 }, () => makeRider({})));
     const order = await makeDeliveryOrder('READY_FOR_PICKUP');
@@ -651,6 +1356,153 @@ describe('Atomic acceptance — the concurrency proof', () => {
     await app.prisma.rider.updateMany({ where: { id: { in: [a.riderId, b.riderId] } }, data: { isOnline: false } });
   });
 
+  it('cannot accept an issued offer after safety or compliance forces the mover offline', async () => {
+    await app.prisma.rider.updateMany({ data: { isOnline: false } });
+    const a = await makeRider({ lat: PICKUP.lat + 0.003 });
+    const b = await makeRider({ lat: PICKUP.lat + 0.02 });
+    const order = await makeDeliveryOrder();
+
+    expect((await dispatch.dispatchOrder(order.id)).offered).toBe(a.riderId);
+    await app.prisma.rider.update({
+      where: { id: a.riderId },
+      // Compliance paths can revoke online authority before the advisory Redis
+      // offer expires. The DB claim must re-check isOnline at accept time.
+      data: { isOnline: false, isAvailable: true },
+    });
+
+    const rejected = await app.inject({
+      method: 'POST',
+      url: '/api/v1/rider/offers/accept',
+      payload: { orderId: order.id },
+      headers: { 'content-type': 'application/json', authorization: `Bearer ${a.token}` },
+    });
+    expect(rejected.statusCode).toBe(409);
+
+    const after = await app.prisma.order.findUniqueOrThrow({
+      where: { id: order.id },
+      select: { riderId: true, status: true },
+    });
+    expect(after).toEqual({ riderId: null, status: 'ACCEPTED' });
+    expect(await app.redis.get(`dispatch:offer:${order.id}`)).toBe(b.riderId);
+
+    await app.prisma.rider.updateMany({
+      where: { id: { in: [a.riderId, b.riderId] } },
+      data: { isOnline: false },
+    });
+  });
+
+  it('cannot board-grab an order after safety or compliance forces the rider offline', async () => {
+    const rider = await makeRider({});
+    const order = await makeDeliveryOrder('READY_FOR_PICKUP');
+    let reachedSeam!: () => void;
+    let resumeSeam!: () => void;
+    const atSeam = new Promise<void>((resolve) => { reachedSeam = resolve; });
+    const resume = new Promise<void>((resolve) => { resumeSeam = resolve; });
+    // [REPORT-006 F-006-03] The lock order is now User → orders → riders (the
+    // seam locks + reserves the profile row BEFORE the float commit), so the
+    // pause point moves to the seam entrance: pausing inside the float commit
+    // would hold the already-reserved riders row and deadlock the out-of-band
+    // compliance write below. Same subject, same window: the route passed its
+    // fast isOnline read, holds only the User lock, and the authoritative
+    // reservation CAS has not yet run.
+    const originalStage = OrderService.prototype.stageDirectRiderAssignment;
+    const stageSpy = vi.spyOn(OrderService.prototype, 'stageDirectRiderAssignment').mockImplementation(async function (
+      this: OrderService,
+      tx,
+      input,
+    ) {
+      if (input.riderId === rider.riderId) {
+        reachedSeam();
+        await resume;
+      }
+      return originalStage.call(this, tx, input);
+    });
+
+    let rejected;
+    try {
+      const pending = app.inject({
+        method: 'POST',
+        url: `/api/v1/rider/orders/${order.id}/accept`,
+        payload: {},
+        headers: { 'content-type': 'application/json', authorization: `Bearer ${rider.token}` },
+      });
+      // The route already passed its fast isOnline read and holds the User lock,
+      // but has not touched the order or profile rows. A compliance writer
+      // revokes supply here; the authoritative reservation CAS must observe it.
+      await atSeam;
+      await app.prisma.rider.update({
+        where: { id: rider.riderId },
+        data: { isOnline: false, isAvailable: true },
+      });
+      resumeSeam();
+      rejected = await pending;
+    } finally {
+      resumeSeam();
+      stageSpy.mockRestore();
+    }
+    expect(rejected!.statusCode).toBe(409);
+    const [afterOrder, afterRider] = await Promise.all([
+      app.prisma.order.findUniqueOrThrow({ where: { id: order.id } }),
+      app.prisma.rider.findUniqueOrThrow({ where: { id: rider.riderId } }),
+    ]);
+    expect({ riderId: afterOrder.riderId, status: afterOrder.status }).toEqual({
+      riderId: null,
+      status: 'READY_FOR_PICKUP',
+    });
+    expect(afterRider.currentOrderId).toBeNull();
+    expect(Number(afterRider.committedFloat)).toBe(0);
+  });
+
+  it('rolls back float, order, rider, status, and audit when the assignment transaction aborts', async () => {
+    const rider = await makeRider({});
+    const order = await makeDeliveryOrder('READY_FOR_PICKUP');
+    const originalStage = OrderService.prototype.stageDirectRiderAssignment;
+    const stageSpy = vi
+      .spyOn(OrderService.prototype, 'stageDirectRiderAssignment')
+      .mockImplementationOnce(async function (
+        this: OrderService,
+        tx,
+        input,
+      ) {
+        // Force the failure only AFTER every canonical write (including the
+        // immutable audit row) has been staged, but before PostgreSQL commits.
+        await originalStage.call(this, tx, input);
+        throw new Error('forced pre-commit abort');
+      });
+
+    let response;
+    try {
+      response = await app.inject({
+        method: 'POST',
+        url: `/api/v1/rider/orders/${order.id}/accept`,
+        payload: {},
+        headers: { 'content-type': 'application/json', authorization: `Bearer ${rider.token}` },
+      });
+    } finally {
+      stageSpy.mockRestore();
+    }
+    expect(response!.statusCode).toBe(500);
+
+    const [afterOrder, afterRider, auditCount] = await Promise.all([
+      app.prisma.order.findUniqueOrThrow({
+        where: { id: order.id },
+        select: { riderId: true, status: true },
+      }),
+      app.prisma.rider.findUniqueOrThrow({
+        where: { id: rider.riderId },
+        select: { currentOrderId: true, isAvailable: true, committedFloat: true },
+      }),
+      app.prisma.orderStatusLog.count({
+        where: { orderId: order.id, status: 'RIDER_ASSIGNED' },
+      }),
+    ]);
+    expect(afterOrder).toEqual({ riderId: null, status: 'READY_FOR_PICKUP' });
+    expect(afterRider.currentOrderId).toBeNull();
+    expect(afterRider.isAvailable).toBe(true);
+    expect(Number(afterRider.committedFloat)).toBe(0);
+    expect(auditCount).toBe(0);
+  });
+
   it('two riders racing the DIRECT accept endpoint: exactly one wins, the loser is not stuck busy', async () => {
     // POST /rider/orders/:id/accept used a plain update-by-id, so two riders who
     // both passed the JS riderId-null check could double-assign AND both mark
@@ -673,6 +1525,9 @@ describe('Atomic acceptance — the concurrency proof', () => {
     const db = await app.prisma.order.findUniqueOrThrow({ where: { id: order.id }, select: { riderId: true, status: true } });
     expect(db.status).toBe('RIDER_ASSIGNED');
     expect([a.riderId, b.riderId]).toContain(db.riderId);
+    expect(await app.prisma.orderStatusLog.count({
+      where: { orderId: order.id, status: 'RIDER_ASSIGNED' },
+    })).toBe(1);
 
     // Only the winner is busy on this order; the loser is free, not stranded.
     const riders = await app.prisma.rider.findMany({ where: { id: { in: [a.riderId, b.riderId] } }, select: { id: true, currentOrderId: true } });
@@ -735,22 +1590,38 @@ describe('Atomic acceptance — the concurrency proof', () => {
     const r = await makeRider({ lat: PICKUP.lat + 0.003 });
     // Headroom 3,000; each order fronts 2,000 — either fits ALONE, both do NOT.
     await app.prisma.rider.update({ where: { id: r.riderId }, data: { floatLimit: 3000, committedFloat: 0 } });
+
+    // SWIFT-104's real subject: the guarded ATOMIC increment. Two concurrent
+    // commits both read headroom 3,000; a read-then-write would let both pass.
+    // Exactly one may win, and the cap must hold with no order machinery at all.
+    const float = new FloatService(app.prisma);
+    const [c1, c2] = await Promise.all([
+      float.commit(app.prisma, r.riderId, 2000),
+      float.commit(app.prisma, r.riderId, 2000),
+    ]);
+    expect([c1, c2].filter(Boolean)).toHaveLength(1);
+    const mid = await app.prisma.rider.findUniqueOrThrow({ where: { id: r.riderId }, select: { committedFloat: true } });
+    expect(Number(mid.committedFloat)).toBe(2000);
+    await app.prisma.rider.update({ where: { id: r.riderId }, data: { committedFloat: 0 } });
+
+    // Integration shape [REPORT-006 F-006-03]: with the unified User → orders
+    // → riders lock order, two same-rider grabs SERIALIZE on the User lock and
+    // the loser now fails the one-live-job reservation CAS (409) before the
+    // float gate can bind — the cap invariant holds either way: float is
+    // committed exactly once and exactly one order is assigned.
     const orderA = await makeDeliveryOrder('READY_FOR_PICKUP');
     const orderB = await makeDeliveryOrder('READY_FOR_PICKUP');
-
     const accept = (orderId: string) => app.inject({
       method: 'POST', url: `/api/v1/rider/orders/${orderId}/accept`, payload: {},
       headers: { 'content-type': 'application/json', authorization: `Bearer ${r.token}` },
     });
-    // Fire both grabs concurrently — both pass the stale JS headroom/busy checks;
-    // the ATOMIC guarded float commit is the only real gate.
     const [ra, rb] = await Promise.all([accept(orderA.id), accept(orderB.id)]);
 
-    // Exactly one winner; the other is refused for float — never two.
+    // Exactly one winner; the loser is refused (busy reservation or float —
+    // whichever predicate its serialized turn hits first) — never two.
     expect([ra, rb].filter((x) => x.statusCode === 200)).toHaveLength(1);
     const loser = [ra, rb].find((x) => x.statusCode !== 200)!;
-    expect(loser.statusCode).toBe(400);
-    expect(loser.json().error.code).toBe('FLOAT_EXCEEDED');
+    expect([400, 409]).toContain(loser.statusCode);
 
     // The cap HELD: float committed exactly once (2,000, not 4,000).
     const after = await app.prisma.rider.findUniqueOrThrow({ where: { id: r.riderId }, select: { committedFloat: true } });
@@ -765,6 +1636,181 @@ describe('Atomic acceptance — the concurrency proof', () => {
       where: { id: r.riderId },
       data: { isOnline: false, committedFloat: 0, currentOrderId: null, isAvailable: true, floatLimit: 1_000_000 },
     });
+  });
+
+  it('the BOARD accept route also rejects fare 0 as a floor-clamp — market rate applies [REPORT-011 F-04]', async () => {
+    const r = await makeRider({ lat: PICKUP.lat + 0.011 });
+    const order = await makeDeliveryOrder('READY_FOR_PICKUP');
+    const marketFee = Number((await app.prisma.order.findUniqueOrThrow({ where: { id: order.id }, select: { deliveryFee: true } })).deliveryFee);
+    // The open-board grab (/orders/:id/accept), not the offer card — a forged
+    // or legacy client posting fare 0 must not clamp the rider's own pay down.
+    const res = await app.inject({
+      method: 'POST', url: `/api/v1/rider/orders/${order.id}/accept`,
+      headers: { authorization: `Bearer ${r.token}`, 'content-type': 'application/json' },
+      payload: { fare: 0 },
+    });
+    expect(res.statusCode).toBe(200);
+    const fresh = await app.prisma.order.findUniqueOrThrow({ where: { id: order.id } });
+    expect(fresh.riderId).toBe(r.riderId);
+    expect(Number(fresh.deliveryFee)).toBe(marketFee); // untouched — 0 meant no choice
+    await app.prisma.order.update({ where: { id: order.id }, data: { riderId: null, status: 'READY_FOR_PICKUP' } });
+    await app.prisma.rider.update({ where: { id: r.riderId }, data: { isOnline: false, isAvailable: true, currentOrderId: null, committedFloat: 0 } });
+  });
+
+  it('accepting with fare 0 means NO price choice — the market rate applies, never the 60% floor [REPORT-010 F-07]', async () => {
+    const r = await makeRider({ lat: PICKUP.lat + 0.01 });
+    const order = await makeDeliveryOrder('READY_FOR_PICKUP'); // CASH, market fee from fixture
+    const marketFee = Number((await app.prisma.order.findUniqueOrThrow({ where: { id: order.id }, select: { deliveryFee: true } })).deliveryFee);
+    await app.redis.set(`dispatch:offer:${order.id}`, r.riderId, 'EX', 40);
+    // A recovered card whose board row never loaded used to submit fare: 0 —
+    // silently clamping the rider's pay to the 60% floor.
+    const res = await app.inject({
+      method: 'POST', url: '/api/v1/rider/offers/accept',
+      headers: { authorization: `Bearer ${r.token}`, 'content-type': 'application/json' },
+      payload: { orderId: order.id, fare: 0 },
+    });
+    expect(res.statusCode).toBe(200);
+    const fresh = await app.prisma.order.findUniqueOrThrow({ where: { id: order.id } });
+    expect(fresh.riderId).toBe(r.riderId);
+    expect(Number(fresh.deliveryFee)).toBe(marketFee); // pay untouched — zero meant "no choice"
+    await app.prisma.order.update({ where: { id: order.id }, data: { riderId: null, status: 'READY_FOR_PICKUP' } });
+    await app.prisma.rider.update({ where: { id: r.riderId }, data: { isOnline: false, isAvailable: true, currentOrderId: null, committedFloat: 0 } });
+    await app.redis.del(`dispatch:offer:${order.id}`, `dispatch:mover-offer:${r.riderId}`);
+  });
+
+  it('an UNRENDERED offer that times out never decays the acceptance rate; a SEEN one does [danger #21]', async () => {
+    const r = await makeRider({ lat: PICKUP.lat + 0.009 });
+    await app.prisma.rider.update({ where: { id: r.riderId }, data: { acceptanceRate: 100 } });
+
+    // Ping 1: the network eats it — no render proof ever lands.
+    const order1 = await makeDeliveryOrder('READY_FOR_PICKUP');
+    await app.redis.set(`dispatch:offer:${order1.id}`, r.riderId, 'EX', 40);
+    await app.prisma.alertDelivery.create({
+      data: { kind: 'MOVER_OFFER', subjectId: order1.id, recipientId: r.userId },
+    });
+    await dispatch.handleOfferTimeout(order1.id, r.riderId);
+    const afterUnseen = await app.prisma.rider.findUniqueOrThrow({ where: { id: r.riderId } });
+    expect(Number(afterUnseen.acceptanceRate)).toBe(100); // spared — provably never saw it
+    // The cascade still advanced honestly: the mover is in the declined set.
+    expect(await app.redis.sismember(`dispatch:declined:${order1.id}`, r.riderId)).toBe(1);
+
+    // Ping 2: the card RENDERED (client stamped seen) — ignoring it costs.
+    const order2 = await makeDeliveryOrder('READY_FOR_PICKUP');
+    await app.redis.set(`dispatch:offer:${order2.id}`, r.riderId, 'EX', 40);
+    await app.prisma.alertDelivery.create({
+      data: { kind: 'MOVER_OFFER', subjectId: order2.id, recipientId: r.userId },
+    });
+    await dispatch.markOfferSeen(order2.id, r.userId);
+    await dispatch.handleOfferTimeout(order2.id, r.riderId);
+    const afterSeen = await app.prisma.rider.findUniqueOrThrow({ where: { id: r.riderId } });
+    expect(Number(afterSeen.acceptanceRate)).toBe(80); // 100·0.8 + 0·0.2 — the EMA applied once
+
+    await app.prisma.alertDelivery.deleteMany({ where: { subjectId: { in: [order1.id, order2.id] } } });
+    await app.prisma.rider.update({ where: { id: r.riderId }, data: { isOnline: false, isAvailable: true, currentOrderId: null } });
+  });
+
+  it('concurrent dispatch triggers install exactly ONE offer — losers emit nothing [E29 / danger #18]', async () => {
+    const r1 = await makeRider({ lat: PICKUP.lat + 0.006 });
+    const r2 = await makeRider({ lat: PICKUP.lat + 0.007 });
+    const order = await makeDeliveryOrder('READY_FOR_PICKUP');
+    // Fire the SAME trigger twice concurrently (route retry + queue job, two
+    // instances, double webhook — all real shapes). The old plain SET let the
+    // second run STEAL the first mover's offer and duplicate the card/push/
+    // journal; NX makes the install the mutual exclusion.
+    const [a, b] = await Promise.all([
+      dispatch.dispatchOrder(order.id),
+      dispatch.dispatchOrder(order.id),
+    ]);
+    // Exactly one live offer key, owned by ONE mover; both calls REPORT the
+    // same owner (the loser returns the winner's offer, never a second card).
+    const owner = await app.redis.get(`dispatch:offer:${order.id}`);
+    expect(owner).toBeTruthy();
+    expect(a.offered).toBe(owner);
+    expect(b.offered).toBe(owner);
+    // Exactly one alert-delivery row: the loser emitted nothing.
+    const pings = await app.prisma.alertDelivery.count({ where: { subjectId: order.id, kind: 'MOVER_OFFER' } });
+    expect(pings).toBe(1);
+    await app.redis.del(`dispatch:offer:${order.id}`, `dispatch:mover-offer:${owner}`);
+    for (const r of [r1, r2]) {
+      await app.prisma.rider.update({ where: { id: r.riderId }, data: { isOnline: false, isAvailable: true, currentOrderId: null } });
+    }
+  });
+
+  it('a reconnecting mover recovers their live offer with real remaining seconds [E27 / danger #37]', async () => {
+    const r = await makeRider({ lat: PICKUP.lat + 0.008 });
+    const order = await makeDeliveryOrder('READY_FOR_PICKUP');
+    // Install the exclusive offer exactly as the cascade does (the cascade
+    // itself is proven elsewhere) — under test here is the RECOVERY read.
+    await app.redis.set(`dispatch:offer:${order.id}`, r.riderId, 'EX', 40);
+    await app.redis.set(`dispatch:mover-offer:${r.riderId}`, order.id, 'EX', 40);
+
+    // The socket that carried the card is gone — the recovery read rebuilds it.
+    const offer = await dispatch.currentOfferFor(r.riderId);
+    expect(offer).not.toBeNull();
+    expect(offer!.orderId).toBe(order.id);
+    expect(offer!.orderNumber).toBe(order.orderNumber);
+    expect(offer!.expiresInSeconds).toBeGreaterThan(0);
+
+    // Ownership is authoritative, not the advisory reverse pointer: once the
+    // offer key belongs to someone else, recovery reports gone.
+    await app.redis.set(`dispatch:offer:${order.id}`, 'someone-else', 'EX', 60);
+    expect(await dispatch.currentOfferFor(r.riderId)).toBeNull();
+
+    await app.redis.del(`dispatch:offer:${order.id}`, `dispatch:mover-offer:${r.riderId}`);
+    await app.prisma.rider.update({ where: { id: r.riderId }, data: { isOnline: false, isAvailable: true, currentOrderId: null } });
+  });
+
+  it('a stale offer cannot commit float past the cap after the basket grew [REPORT-007-v4 F-01]', async () => {
+    const r = await makeRider({ lat: PICKUP.lat + 0.005 });
+    await app.prisma.rider.update({ where: { id: r.riderId }, data: { floatLimit: 2000, committedFloat: 0 } });
+    const order = await makeDeliveryOrder('READY_FOR_PICKUP'); // subtotal 2000 — exactly at the cap at OFFER time
+    // A substitution approved while the Redis offer sat live makes the basket
+    // dearer; the rider is unassigned so no float adjusts yet (correct).
+    await app.prisma.order.update({
+      where: { id: order.id },
+      data: { subtotalBase: { increment: 200 }, subtotalCustomer: { increment: 200 }, totalAmount: { increment: 200 } },
+    });
+    // Acceptance re-reads the LIVE subtotal and must run it through the
+    // guarded commit — the old inline increment blindly pushed committedFloat
+    // to 2,200 past the 2,000 hard cap and kept the assignment.
+    await expect(dispatch.claimOrder(order.id, r.riderId, 'RIDER')).rejects.toMatchObject({ code: 'FLOAT_EXCEEDED' });
+    const fresh = await app.prisma.order.findUniqueOrThrow({ where: { id: order.id } });
+    expect(fresh.riderId).toBeNull(); // the whole claim rolled back
+    expect(fresh.status).toBe('READY_FOR_PICKUP');
+    const after = await app.prisma.rider.findUniqueOrThrow({ where: { id: r.riderId } });
+    expect(Number(after.committedFloat)).toBe(0);
+    expect(after.currentOrderId).toBeNull();
+
+    // Exactly-at-cap still claims — the guard is headroom >= amount.
+    const order2 = await makeDeliveryOrder('READY_FOR_PICKUP');
+    await dispatch.claimOrder(order2.id, r.riderId, 'RIDER');
+    expect(Number((await app.prisma.rider.findUniqueOrThrow({ where: { id: r.riderId } })).committedFloat)).toBe(2000);
+    await app.prisma.rider.update({
+      where: { id: r.riderId },
+      data: { isOnline: false, committedFloat: 0, currentOrderId: null, isAvailable: true, floatLimit: 1_000_000 },
+    });
+  });
+
+  it('an offer claim refuses an unpaid MMG order and writes nothing [SPS-F-0016 / REPORT-004 F-004-01]', async () => {
+    const r = await makeRider({ lat: PICKUP.lat + 0.004 });
+    const order = await app.prisma.order.create({
+      data: {
+        orderNumber: `MM-${nanoid(10)}`, orderType: 'FOOD_DELIVERY', customerId, vendorId,
+        status: 'READY_FOR_PICKUP', fulfillment: 'DELIVERY',
+        pickupAddress: 'Vendor HQ', pickupLat: PICKUP.lat, pickupLng: PICKUP.lng,
+        deliveryAddress: 'Customer place', deliveryLat: PICKUP.lat + 0.01, deliveryLng: PICKUP.lng + 0.01,
+        subtotalBase: 2000, subtotalMarkup: 0, subtotalCustomer: 2000, deliveryFee: 500, totalAmount: 2500,
+        // paymentStatus defaults PENDING — the legacy in-flight shape the gate must refuse.
+        paymentMethod: 'MOBILE_MONEY',
+      },
+    });
+    createdOrderIds.push(order.id);
+    await expect(dispatch.claimOrder(order.id, r.riderId, 'RIDER')).rejects.toMatchObject({ code: 'MMG_PAYMENT_PENDING' });
+    const fresh = await app.prisma.order.findUniqueOrThrow({ where: { id: order.id } });
+    expect(fresh.riderId).toBeNull();
+    expect(fresh.status).toBe('READY_FOR_PICKUP');
+    // Park this rider so later nearest-N candidate assertions don't count it.
+    await app.prisma.rider.update({ where: { id: r.riderId }, data: { isOnline: false, isAvailable: false } });
   });
 
   it('one rider grabbing two MOBILE_MONEY orders at once cannot double-book — the float gate does not apply [one-job-per-mover]', async () => {
@@ -782,7 +1828,10 @@ describe('Atomic acceptance — the concurrency proof', () => {
             pickupAddress: 'Vendor HQ', pickupLat: PICKUP.lat, pickupLng: PICKUP.lng,
             deliveryAddress: 'Customer place', deliveryLat: PICKUP.lat + 0.01, deliveryLng: PICKUP.lng + 0.01,
             subtotalBase: 2000, subtotalMarkup: 0, subtotalCustomer: 2000, deliveryFee: 500, totalAmount: 2500,
-            paymentMethod: 'MOBILE_MONEY',
+            // CAPTURED: the payment-first law [SPS-F-0016] only lets a rider
+            // claim an MMG order after the store confirmed the payment — the
+            // one-job-per-mover race under test happens post-confirmation.
+            paymentMethod: 'MOBILE_MONEY', paymentStatus: 'CAPTURED',
           },
         })
         .then((o) => { createdOrderIds.push(o.id); return o; });
@@ -815,6 +1864,129 @@ describe('Atomic acceptance — the concurrency proof', () => {
   });
 });
 
+describe('Account-status authority', () => {
+  it('linearizes GO against suspension and always leaves suspended supply offline', async () => {
+    const rider = await makeRider({ online: false, available: false });
+    const [go, suspension] = await Promise.all([
+      app.inject({
+        method: 'POST',
+        url: '/api/v1/rider/go-online',
+        payload: { latitude: 6.8234, longitude: -58.1678 },
+        headers: { authorization: `Bearer ${rider.token}` },
+      }),
+      transitionUserStatusAuthority(app, rider.userId, 'SUSPENDED'),
+    ]);
+    expect([200, 401, 403]).toContain(go.statusCode);
+    expect(suspension.updated.status).toBe('SUSPENDED');
+    const [user, profile] = await Promise.all([
+      app.prisma.user.findUniqueOrThrow({ where: { id: rider.userId } }),
+      app.prisma.rider.findUniqueOrThrow({ where: { id: rider.riderId } }),
+    ]);
+    expect(user.status).toBe('SUSPENDED');
+    expect({ online: profile.isOnline, available: profile.isAvailable })
+      .toEqual({ online: false, available: false });
+  });
+
+  it('blocks GO for a pending-verification account at the locked earning gate', async () => {
+    const rider = await makeRider({ online: false, available: false });
+    await app.prisma.user.update({
+      where: { id: rider.userId },
+      data: { status: 'PENDING_VERIFICATION' },
+    });
+    const response = await app.inject({
+      method: 'POST',
+      url: '/api/v1/rider/go-online',
+      payload: { latitude: 6.8234, longitude: -58.1678 },
+      headers: { authorization: `Bearer ${rider.token}` },
+    });
+    expect(response.statusCode).toBe(403);
+    const profile = await app.prisma.rider.findUniqueOrThrow({ where: { id: rider.riderId } });
+    expect({ online: profile.isOnline, available: profile.isAvailable })
+      .toEqual({ online: false, available: false });
+  });
+
+  it('suspends idle dual-profile supply atomically and unsuspends without restoring it', async () => {
+    const rider = await makeRider({});
+    const driver = await app.prisma.driver.create({
+      data: {
+        userId: rider.userId,
+        vehicleMake: 'Toyota', vehicleModel: 'Allion', vehicleYear: 2020,
+        vehicleColor: 'Silver', licensePlate: `STATUS-${seq}`,
+        driverLicenseUrl: 'x', vehicleInsuranceUrl: 'x', documentsVerified: true,
+        isOnline: true, isAvailable: true,
+        currentLat: PICKUP.lat, currentLng: PICKUP.lng, lastLocationUpdate: new Date(),
+      },
+    });
+
+    await transitionUserStatusAuthority(app, rider.userId, 'SUSPENDED');
+    let [user, afterRider, afterDriver] = await Promise.all([
+      app.prisma.user.findUniqueOrThrow({ where: { id: rider.userId } }),
+      app.prisma.rider.findUniqueOrThrow({ where: { id: rider.riderId } }),
+      app.prisma.driver.findUniqueOrThrow({ where: { id: driver.id } }),
+    ]);
+    expect(user.status).toBe('SUSPENDED');
+    expect([afterRider.isOnline, afterRider.isAvailable, afterDriver.isOnline, afterDriver.isAvailable])
+      .toEqual([false, false, false, false]);
+
+    await transitionUserStatusAuthority(app, rider.userId, 'ACTIVE');
+    [user, afterRider, afterDriver] = await Promise.all([
+      app.prisma.user.findUniqueOrThrow({ where: { id: rider.userId } }),
+      app.prisma.rider.findUniqueOrThrow({ where: { id: rider.riderId } }),
+      app.prisma.driver.findUniqueOrThrow({ where: { id: driver.id } }),
+    ]);
+    expect(user.status).toBe('ACTIVE');
+    expect([afterRider.isOnline, afterRider.isAvailable, afterDriver.isOnline, afterDriver.isAvailable])
+      .toEqual([false, false, false, false]);
+  });
+
+  it('refuses suspension or ban while a mover owns an active job', async () => {
+    const rider = await makeRider({});
+    await app.prisma.rider.update({
+      where: { id: rider.riderId },
+      data: { currentOrderId: 'status-active-job', isOnline: true, isAvailable: false },
+    });
+
+    await expect(transitionUserStatusAuthority(app, rider.userId, 'SUSPENDED'))
+      .rejects.toMatchObject({ code: 'ACTIVE_JOB' });
+    await expect(transitionUserStatusAuthority(app, rider.userId, 'BANNED'))
+      .rejects.toMatchObject({ code: 'ACTIVE_JOB' });
+    expect((await app.prisma.user.findUniqueOrThrow({ where: { id: rider.userId } })).status)
+      .toBe('ACTIVE');
+    await app.prisma.rider.update({
+      where: { id: rider.riderId },
+      data: { currentOrderId: null, isOnline: false, isAvailable: false },
+    });
+  });
+
+  it('makes ban terminal under a concurrent suspend and revokes every session', async () => {
+    const rider = await makeRider({});
+    const outcomes = await Promise.allSettled([
+      transitionUserStatusAuthority(app, rider.userId, 'SUSPENDED'),
+      transitionUserStatusAuthority(app, rider.userId, 'BANNED'),
+    ]);
+    expect(outcomes.some((outcome) => outcome.status === 'fulfilled')).toBe(true);
+    const user = await app.prisma.user.findUniqueOrThrow({ where: { id: rider.userId } });
+    expect(user.status).toBe('BANNED');
+    expect(await app.prisma.session.count({ where: { userId: rider.userId } })).toBe(0);
+    await expect(transitionUserStatusAuthority(app, rider.userId, 'SUSPENDED'))
+      .rejects.toMatchObject({ code: 'INVALID_STATUS_TRANSITION' });
+    expect((await app.prisma.user.findUniqueOrThrow({ where: { id: rider.userId } })).status)
+      .toBe('BANNED');
+  });
+
+  it('does not turn pending verification into ACTIVE through suspend/unsuspend', async () => {
+    const rider = await makeRider({});
+    await app.prisma.user.update({
+      where: { id: rider.userId },
+      data: { status: 'PENDING_VERIFICATION' },
+    });
+    await expect(transitionUserStatusAuthority(app, rider.userId, 'SUSPENDED'))
+      .rejects.toMatchObject({ code: 'INVALID_STATUS_TRANSITION' });
+    expect((await app.prisma.user.findUniqueOrThrow({ where: { id: rider.userId } })).status)
+      .toBe('PENDING_VERIFICATION');
+  });
+});
+
 describe('candidate selection at scale [SWIFT-142]', () => {
   it('with >50 movers in range, the pool is the NEAREST 50 — not an arbitrary 50', async () => {
     // Isolate the pool: take every other test's residual riders offline first.
@@ -830,8 +2002,18 @@ describe('candidate selection at scale [SWIFT-142]', () => {
       const u = await app.prisma.user.create({
         data: { phone: `+${phoneBase + n}`, firstName: 'Cand', lastName: `${n}`, roles: ['MOVER', 'CUSTOMER'], activeRole: 'MOVER', isPhoneVerified: true },
       });
+      const session = await app.prisma.session.create({
+        data: {
+          userId: u.id,
+          token: `candidate-${nanoid(24)}`,
+          refreshToken: nanoid(48),
+          deviceId: `candidate-${n}`,
+          deviceType: 'test',
+          expiresAt: new Date(Date.now() + DAY),
+        },
+      });
       const r = await app.prisma.rider.create({
-        data: { userId: u.id, riderType: 'DELIVERY', vehicleType: 'MOTORCYCLE', documentsVerified: true, isOnline: true, isAvailable: true, currentLat: lat, currentLng: lng, floatLimit: 1_000_000, committedFloat: 0 },
+        data: { userId: u.id, riderType: 'DELIVERY', vehicleType: 'MOTORCYCLE', documentsVerified: true, isOnline: true, isAvailable: true, currentLat: lat, currentLng: lng, lastLocationUpdate: new Date(), locationSessionId: session.id, floatLimit: 1_000_000, committedFloat: 0 },
       });
       bucket.push(r.id);
       localUserIds.push(u.id);
@@ -898,7 +2080,17 @@ describe('vehicle capability matching [SWIFT-062]', () => {
     const mkVeh = async (veh: 'BICYCLE' | 'MOTORCYCLE' | 'CAR') => {
       n += 1;
       const u = await app.prisma.user.create({ data: { phone: `+${phoneBase + n}`, firstName: 'Veh', lastName: `${n}`, roles: ['MOVER', 'CUSTOMER'], activeRole: 'MOVER', isPhoneVerified: true } });
-      const r = await app.prisma.rider.create({ data: { userId: u.id, riderType: 'BOTH', vehicleType: veh, documentsVerified: true, isOnline: true, isAvailable: true, currentLat: PICKUP.lat + 0.001, currentLng: PICKUP.lng, floatLimit: 1_000_000, committedFloat: 0 } });
+      const session = await app.prisma.session.create({
+        data: {
+          userId: u.id,
+          token: `vehicle-${nanoid(24)}`,
+          refreshToken: nanoid(48),
+          deviceId: `vehicle-${n}`,
+          deviceType: 'test',
+          expiresAt: new Date(Date.now() + DAY),
+        },
+      });
+      const r = await app.prisma.rider.create({ data: { userId: u.id, riderType: 'BOTH', vehicleType: veh, documentsVerified: true, isOnline: true, isAvailable: true, currentLat: PICKUP.lat + 0.001, currentLng: PICKUP.lng, lastLocationUpdate: new Date(), locationSessionId: session.id, floatLimit: 1_000_000, committedFloat: 0 } });
       localUserIds.push(u.id);
       return r.id;
     };

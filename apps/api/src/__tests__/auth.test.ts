@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { prismaPlugin } from '../plugins/prisma';
 import { redisPlugin } from '../plugins/redis';
@@ -397,6 +397,36 @@ describe('Auth Routes', () => {
       }
     });
 
+    it('keeps the uniform 401 and revoked state when the reuse audit sink fails', async () => {
+      const prevGrace = process.env['REFRESH_REUSE_GRACE_MS'];
+      process.env['REFRESH_REUSE_GRACE_MS'] = '0';
+      const auditWrite = vi.spyOn(app.prisma.auditLog, 'create')
+        .mockRejectedValueOnce(new Error('simulated audit sink outage'));
+      try {
+        const loginRes = await loginWithOtp(app, '+5926002000');
+        const firstRefresh = loginRes.json().data.tokens.refreshToken as string;
+        const rotate = await inject('POST', '/api/v1/auth/refresh', { refreshToken: firstRefresh });
+        expect(rotate.statusCode).toBe(200);
+        const currentRefresh = rotate.json().data.refreshToken as string;
+
+        const replay = await inject('POST', '/api/v1/auth/refresh', { refreshToken: firstRefresh });
+        expect(replay.statusCode).toBe(401);
+        expect(replay.json().error.code).toBe('INVALID_TOKEN');
+
+        // The already-committed security action is not undone or hidden behind
+        // a 500 merely because its audit delivery failed.
+        const currentAfterAuditFailure = await inject('POST', '/api/v1/auth/refresh', {
+          refreshToken: currentRefresh,
+        });
+        expect(currentAfterAuditFailure.statusCode).toBe(401);
+        expect(auditWrite).toHaveBeenCalledTimes(1);
+      } finally {
+        auditWrite.mockRestore();
+        if (prevGrace === undefined) delete process.env['REFRESH_REUSE_GRACE_MS'];
+        else process.env['REFRESH_REUSE_GRACE_MS'] = prevGrace;
+      }
+    });
+
     it('concurrent double-fire within the grace window is idempotent, not theft', async () => {
       // The mobile interceptor can legitimately re-send the same refresh token
       // when two requests 401 at once — that must return the already-rotated
@@ -404,12 +434,16 @@ describe('Auth Routes', () => {
       const loginRes = await loginWithOtp(app, '+5926002000');
       const r1 = loginRes.json().data.tokens.refreshToken;
 
-      const first = await inject('POST', '/api/v1/auth/refresh', { refreshToken: r1 });
+      // Start both requests before awaiting either result. This forces the two
+      // refresh transactions to contend for the same locked Session row rather
+      // than merely exercising a sequential grace-window replay.
+      const [first, retry] = await Promise.all([
+        inject('POST', '/api/v1/auth/refresh', { refreshToken: r1 }),
+        inject('POST', '/api/v1/auth/refresh', { refreshToken: r1 }),
+      ]);
       expect(first.statusCode).toBe(200);
-      const pair = first.json().data;
-
-      const retry = await inject('POST', '/api/v1/auth/refresh', { refreshToken: r1 });
       expect(retry.statusCode).toBe(200);
+      const pair = first.json().data;
       expect(retry.json().data.refreshToken).toBe(pair.refreshToken);
       expect(retry.json().data.accessToken).toBe(pair.accessToken);
 

@@ -4,13 +4,13 @@ import type { FastifyInstance } from 'fastify';
 import { getTenantId } from './tenant-context';
 
 // Multi-tenancy stage 2 — tenant scoping at the ORM layer. When a request has
-// bound a tenant (tenant-context), tenant-owned models are filtered to it so a
-// LIST/COUNT can never span tenants, and CREATE stamps the tenant. Only the
-// filter-shaped operations are auto-scoped: findUnique/update/delete take a
-// UNIQUE where and can't carry an extra tenantId column — those stay isolated
-// by the existing per-owner scoping (customerId / ownerId / userId), which the
-// IDOR suite proves. No context set (jobs, tests, pre-auth) → unscoped, so
-// single-tenant behavior is unchanged.
+// bound a tenant (tenant-context), EVERY direct operation on a tenant-owned
+// model is qualified to it. Prisma 6 WhereUniqueInput accepts extra non-unique
+// predicates as long as one unique field remains at the top level, so an id is
+// never treated as authorization: findUnique/update/delete/upsert all carry the
+// tenant predicate too. Writes stamp tenantId LAST so request-controlled data
+// cannot create or move a row across tenants. No context set (explicit system,
+// test and pre-auth work) remains unscoped.
 // [F-0008] Every model carrying a tenantId column belongs here unless it is on
 // the reasoned exemption list in tenant-coverage.test.ts. That test walks the
 // Prisma DMMF at run time and fails if a model carrying tenantId is in neither
@@ -64,9 +64,10 @@ const TENANT_QUERY_EXTENSIONS = {
   livenessCheck: scoped, incidentCase: scoped, evidenceBundle: scoped, safetyAccessLog: scoped,
   // Money: settlement, receipts, the agent-cash rail, trials.
   mmgAgentPayment: scoped, settlementBatch: scoped, feeReceipt: scoped, receiptCounter: scoped,
-  sanTombstone: scoped, tenantBillingCurrency: scoped, trialGrant: scoped,
+  tenantBillingCurrency: scoped, trialGrant: scoped,
   // Ads platform.
   advertiser: scoped, adPlacement: scoped, adCampaign: scoped, adInvoice: scoped,
+  adRefundIntent: scoped, adRefundItem: scoped, adRefundOutbox: scoped,
   adEvent: scoped, houseAd: scoped, adsSettings: scoped, adsAuditLog: scoped,
   // Ratings.
   actorRatingStat: scoped, ratingReport: scoped, itemFeedback: scoped, ratingTagDef: scoped,
@@ -74,15 +75,25 @@ const TENANT_QUERY_EXTENSIONS = {
   slugRedirect: scoped, pendingAttribution: scoped, attributionClaim: scoped, scanDailyRollup: scoped,
   // Batching + scheduling.
   deliveryRun: scoped, batchEvaluation: scoped, batchingSettings: scoped, bookingException: scoped,
+  rideQueueEntry: scoped,
 };
 
 /** Model names enrolled for tenant scoping. Derived — never hand-written. */
 export const TENANT_MODEL_NAMES = Object.keys(TENANT_QUERY_EXTENSIONS);
 
 const TENANT_MODELS = new Set<string>(TENANT_MODEL_NAMES.map((n) => n.toLowerCase()));
-const SCOPED_READS = new Set([
-  'findMany', 'findFirst', 'findFirstOrThrow', 'count', 'aggregate', 'groupBy', 'updateMany', 'deleteMany',
+const SCOPED_WHERE_OPERATIONS = new Set([
+  'findUnique', 'findUniqueOrThrow', 'findMany', 'findFirst', 'findFirstOrThrow',
+  'count', 'aggregate', 'groupBy',
+  'update', 'updateMany', 'updateManyAndReturn', 'upsert',
+  'delete', 'deleteMany',
 ]);
+
+const TENANT_STAMPED_UPDATE_OPERATIONS = new Set(['update', 'updateMany', 'updateManyAndReturn']);
+
+function stampTenant(data: unknown, tenantId: string): Record<string, unknown> {
+  return { ...((data as Record<string, unknown> | undefined) ?? {}), tenantId };
+}
 
 function tenantScope({ model, operation, args, query }: {
   model?: string;
@@ -93,14 +104,22 @@ function tenantScope({ model, operation, args, query }: {
   const tenantId = getTenantId();
   if (!tenantId || !model || !TENANT_MODELS.has(model.toLowerCase())) return query(args);
 
-  if (SCOPED_READS.has(operation)) {
+  if (SCOPED_WHERE_OPERATIONS.has(operation)) {
     args['where'] = { ...((args['where'] as object) ?? {}), tenantId };
-  } else if (operation === 'create') {
-    args['data'] = { tenantId, ...((args['data'] as object) ?? {}) };
-  } else if (operation === 'createMany') {
+  }
+
+  if (operation === 'create') {
+    args['data'] = stampTenant(args['data'], tenantId);
+  } else if (operation === 'createMany' || operation === 'createManyAndReturn') {
     const data = args['data'];
-    const stamp = (row: object) => ({ tenantId, ...row });
-    args['data'] = Array.isArray(data) ? data.map(stamp) : stamp((data as object) ?? {});
+    args['data'] = Array.isArray(data)
+      ? data.map((row) => stampTenant(row, tenantId))
+      : stampTenant(data, tenantId);
+  } else if (TENANT_STAMPED_UPDATE_OPERATIONS.has(operation)) {
+    args['data'] = stampTenant(args['data'], tenantId);
+  } else if (operation === 'upsert') {
+    args['create'] = stampTenant(args['create'], tenantId);
+    args['update'] = stampTenant(args['update'], tenantId);
   }
   return query(args);
 }

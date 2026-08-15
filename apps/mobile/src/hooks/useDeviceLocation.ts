@@ -5,6 +5,7 @@ import { useLocationStore } from '../stores/locationStore';
 import {
   BOOT_LOCATION_MODE,
   resolveCoordinatedDeviceLocation,
+  advanceLocationAppState,
   type DeviceLocationApi,
   type LocationResolutionMode,
 } from '../lib/deviceLocation';
@@ -36,11 +37,36 @@ export function useDeviceLocation({ refreshOnMount = true }: { refreshOnMount?: 
 
   useEffect(() => {
     if (!refreshOnMount) return;
-    void refresh();
+    let cancelled = false;
+    let retryTimer: ReturnType<typeof setTimeout> | null = null;
+    const refreshWithRetry = async (attempt = 0) => {
+      const result = await refresh();
+      // A granted permission can still yield a transient no-fix result while
+      // GPS wakes after resume. The live lease was conservatively revoked at
+      // refresh start, so retry promptly instead of leaving an active trip's
+      // stream stopped forever. Confirmed denial never retries.
+      if (
+        !cancelled
+        && result.status === 'unavailable'
+        && AppState.currentState === 'active'
+        && attempt < 3
+      ) {
+        retryTimer = setTimeout(() => void refreshWithRetry(attempt + 1), 2_000 * (attempt + 1));
+      }
+    };
+
+    void refreshWithRetry();
+    let wasBackgrounded = AppState.currentState === 'background';
     const subscription = AppState.addEventListener('change', (next) => {
-      if (next === 'active') void refresh();
+      const transition = advanceLocationAppState(wasBackgrounded, next);
+      wasBackgrounded = transition.wasBackgrounded;
+      if (transition.shouldRefresh) void refreshWithRetry();
     });
-    return () => subscription.remove();
+    return () => {
+      cancelled = true;
+      if (retryTimer) clearTimeout(retryTimer);
+      subscription.remove();
+    };
   }, [refresh, refreshOnMount]);
 
   return { refresh, resolve };

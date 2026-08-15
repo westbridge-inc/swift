@@ -4,7 +4,9 @@ import { nanoid } from 'nanoid';
 import Redis from 'ioredis';
 import type { Worker } from 'bullmq';
 import { prismaPlugin } from '../plugins/prisma';
-import { runWeeklySettlement, createWorkers, type JobContext } from '../jobs/queue';
+import { runWeeklySettlement, createQueues, createWorkers, type JobContext } from '../jobs/queue';
+import { probeQueueProducers } from '../jobs/runtime';
+import { withTimeout } from '../utils/async-lifecycle';
 
 // ---------------------------------------------------------------------------
 // SWIFT-AUD-D7-01 — the weekly settlement snapshot is a money-adjacent write
@@ -139,6 +141,27 @@ describe('runWeeklySettlement — idempotent weekly snapshot [SWIFT-AUD-D7-01]',
 });
 
 describe('worker failure-handler completeness [SWIFT-121]', () => {
+  it('actively fails readiness after a real BullMQ producer disconnects post-boot', async () => {
+    const redis = new Redis(process.env['REDIS_URL'] ?? 'redis://localhost:6382/15', {
+      maxRetriesPerRequest: null,
+    });
+    const noopLog = { info() {}, warn() {}, error() {}, fatal() {}, debug() {}, trace() {}, child() { return noopLog; } };
+    const queues = createQueues(redis, noopLog as never);
+
+    try {
+      await Promise.all(Object.values(queues).map((queue) => queue.waitUntilReady()));
+      await expect(withTimeout(probeQueueProducers(queues), 500, 'real producer probe'))
+        .resolves.toBeUndefined();
+      const producerClient = await queues.orderQueue.client;
+      producerClient.disconnect();
+      await expect(withTimeout(probeQueueProducers(queues), 500, 'disconnected producer probe'))
+        .rejects.toThrow(/order-jobs/);
+    } finally {
+      await Promise.allSettled(Object.values(queues).map((queue) => queue.close()));
+      await redis.quit();
+    }
+  });
+
   it('EVERY worker createWorkers builds has a failed + error handler', async () => {
     // A silent worker (no 'failed'/'error' listener) drops job failures with no
     // log and no Sentry event. This is the invariant guard: it catches the whole
@@ -152,7 +175,8 @@ describe('worker failure-handler completeness [SWIFT-121]', () => {
       log: noopLog,
     } as unknown as JobContext;
 
-    const workers = createWorkers(workerCtx);
+    const queues = createQueues(redis, noopLog as never);
+    const workers = await createWorkers(workerCtx, queues);
     try {
       const built = Object.entries(workers).filter(([, v]) => typeof (v as Worker | undefined)?.on === 'function');
       expect(built.length).toBeGreaterThanOrEqual(7); // one per live queue
@@ -162,6 +186,7 @@ describe('worker failure-handler completeness [SWIFT-121]', () => {
       }
     } finally {
       await workers.cleanup();
+      await Promise.all(Object.values(queues).map((queue) => queue.close()));
       await redis.quit();
     }
   });

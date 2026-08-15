@@ -1,4 +1,11 @@
-import type { PrismaClient, IncidentSeverity, IncidentStatus, IncidentIntake, IncidentCase } from '@prisma/client';
+import type {
+  Prisma,
+  PrismaClient,
+  IncidentSeverity,
+  IncidentStatus,
+  IncidentIntake,
+  IncidentCase,
+} from '@prisma/client';
 import type { Server } from 'socket.io';
 import { nanoid } from 'nanoid';
 import { AppError, NotFoundError } from '../../utils/errors';
@@ -31,6 +38,7 @@ export const CATEGORY_SEVERITY: Record<string, IncidentSeverity> = {
   SAFETY_ASSAULT: 'S0',
   SAFETY_THREAT: 'S1',
   IDENTITY_MISMATCH: 'S1',
+  MOVER_SESSION_LOST_IN_CUSTODY: 'S1',
   SAFETY_HARASSMENT: 'S2',
   DRIVING_DANGEROUS: 'S2',
   CASH_DISPUTE: 'S3',
@@ -75,6 +83,114 @@ export interface IncidentIntakeInput {
   details?: Record<string, unknown> | null;
 }
 
+/**
+ * Durable, transaction-safe intake for the objective event where a mover's
+ * authenticated authority disappears while the platform still records them
+ * as holding a passenger, parcel, or prepared order.
+ *
+ * This cannot call IncidentService.intake(): that method intentionally owns
+ * post-commit sockets and provider notifications, while session revocation
+ * must commit the authority change, interim safety lock, case, and due-process
+ * inbox row atomically. The mover-revocation outbox performs the retryable
+ * realtime fan-out and evidence-vault capture after this transaction commits.
+ */
+export async function persistMoverCustodyLossIncidentInTransaction(
+  tx: Prisma.TransactionClient,
+  input: {
+    incidentId: string;
+    caseNumber: string;
+    subjectNotificationId: string;
+    eventId: string;
+    tenantId: string;
+    subjectUserId: string;
+    orderId: string;
+    orderNumber: string;
+    pool: 'RIDER' | 'DRIVER';
+    status: string;
+    summary: string;
+    now: Date;
+  },
+): Promise<IncidentCase> {
+  // Shared subject-level authority lock. IncidentService intake/lift uses the
+  // same row, so a concurrent all-clear can never erase this new suspension.
+  await tx.$queryRaw`SELECT "id" FROM "users" WHERE "id" = ${input.subjectUserId} FOR UPDATE`;
+  const priorHighSeverityCases = await tx.incidentCase.count({
+    where: {
+      subjectUserId: input.subjectUserId,
+      severity: { in: ['S0', 'S1', 'S2'] },
+      createdAt: { gte: new Date(input.now.getTime() - 180 * 86_400_000) },
+    },
+  });
+  const severity: IncidentSeverity = priorHighSeverityCases > 0 ? 'S0' : 'S1';
+  const [ackMin, decideMin] = SLA_MINUTES[severity];
+
+  // This is objective custody/authority evidence, not a subjective report:
+  // always block a fresh GO until ops explicitly resolves the case. The live
+  // assignment remains intact so suspension never strands physical custody.
+  await tx.driver.updateMany({
+    where: { userId: input.subjectUserId },
+    data: { safetySuspendedAt: input.now, isOnline: false, isAvailable: false },
+  });
+  await tx.rider.updateMany({
+    where: { userId: input.subjectUserId },
+    data: { safetySuspendedAt: input.now, isOnline: false, isAvailable: false },
+  });
+
+  const kase = await tx.incidentCase.upsert({
+    where: { id: input.incidentId },
+    create: {
+      id: input.incidentId,
+      tenantId: input.tenantId,
+      caseNumber: input.caseNumber,
+      status: 'OPEN',
+      severity,
+      category: 'MOVER_SESSION_LOST_IN_CUSTODY',
+      intake: 'SYSTEM_AUTO',
+      subjectUserId: input.subjectUserId,
+      reporterUserId: null,
+      orderId: input.orderId,
+      summary: input.summary,
+      details: {
+        source: 'mover_session_revocation',
+        eventId: input.eventId,
+        pool: input.pool,
+        orderNumber: input.orderNumber,
+        status: input.status,
+        appealPath: 'Contact Swift support to respond to the safety review.',
+      },
+      legalHold: false,
+      slaAckBy: new Date(input.now.getTime() + ackMin * 60_000),
+      slaDecideBy: new Date(input.now.getTime() + decideMin * 60_000),
+      interimAction: 'SUSPENDED_PENDING_REVIEW',
+      patternFlaggedAt: priorHighSeverityCases > 0 ? input.now : null,
+      createdAt: input.now,
+      updatedAt: input.now,
+    },
+    update: {},
+  });
+
+  await tx.notification.createMany({
+    data: [{
+      id: input.subjectNotificationId,
+      userId: input.subjectUserId,
+      type: 'SAFETY',
+      title: 'Account suspended pending review',
+      body: 'Your session ended while an active passenger or order remained in your custody. You are offline while our safety team reviews it — contact Swift support to respond.',
+      data: {
+        kind: 'incident_interim_suspension',
+        eventId: input.eventId,
+        caseNumber: input.caseNumber,
+        category: 'MOVER_SESSION_LOST_IN_CUSTODY',
+        orderId: input.orderId,
+      },
+      createdAt: input.now,
+    }],
+    skipDuplicates: true,
+  });
+
+  return kase;
+}
+
 export class IncidentService {
   private notifications: NotificationService;
 
@@ -85,51 +201,36 @@ export class IncidentService {
   /** Open a case from any intake surface. Applies the §8.3 interim action for
    *  S0/S1, runs the §8.4 on-intake pattern hook, pages ops. */
   async intake(input: IncidentIntakeInput): Promise<IncidentCase> {
-    const severity = input.severity ?? CATEGORY_SEVERITY[input.category] ?? 'S3';
-    const [ackMin, decideMin] = SLA_MINUTES[severity];
+    const initialSeverity = input.severity ?? CATEGORY_SEVERITY[input.category] ?? 'S3';
     const now = new Date();
+    const staged = await this.prisma.$transaction((tx) => this.stageIncidentIntake(
+      tx,
+      input,
+      initialSeverity,
+      now,
+    ));
+    const kase = staged.kase;
 
-    let kase = await this.prisma.incidentCase.create({
-      data: {
-        caseNumber: `INC-${nanoid(8).toUpperCase()}`,
-        severity,
-        category: input.category,
-        intake: input.intake,
-        subjectUserId: input.subjectUserId,
-        reporterUserId: input.reporterUserId ?? null,
-        orderId: input.orderId ?? null,
-        sosAlertId: input.sosAlertId ?? null,
-        summary: input.summary,
-        details: (input.details ?? undefined) as never,
-        slaAckBy: new Date(now.getTime() + ackMin * 60_000),
-        slaDecideBy: new Date(now.getTime() + decideMin * 60_000),
-      },
-    });
-
-    // AUDIT-FIX (F3, 2026-08-01): run the §8.4 pattern hook FIRST, so the
-    // §8.3 interim suspension below sees the FINAL severity. Previously
-    // suspension keyed on the pre-hook severity, so a repeat subject whose
-    // 2nd S2 case was pattern-escalated to S1 got NO auto-suspension — less
-    // protection than a first-timer at the same final severity, backwards.
-    kase = await this.patternHook(kase);
-
-    // §8.3 interim — movers vanish from dispatch instantly (availability is
-    // the source of truth); active trips are allowed to complete (we do NOT
-    // null current ride/order pointers — ops can kill a trip explicitly).
-    if ((kase.severity === 'S0' || kase.severity === 'S1') && autoSuspendEnabled() && kase.interimAction === 'NONE') {
-      const suspended = await this.applyInterimSuspension(input.subjectUserId, now);
-      if (suspended) {
-        kase = await this.prisma.incidentCase.update({ where: { id: kase.id }, data: { interimAction: 'SUSPENDED_PENDING_REVIEW' } });
-        // Due process: reason CATEGORY only — never the reporter — plus the
-        // appeal path.
-        await this.notifications.send({
-          userId: input.subjectUserId,
-          type: 'SAFETY',
-          title: 'Account suspended pending review',
-          body: `A ${this.categoryLabel(input.category)} report is under review on your account. You are offline while our safety team reviews it — contact support to respond.`,
-          data: { kind: 'incident_interim_suspension', caseNumber: kase.caseNumber, category: input.category },
+    if (staged.patternFrom) {
+      log().warn(
+        {
+          caseId: kase.id,
+          subjectUserId: kase.subjectUserId,
+          from: staged.patternFrom,
+          to: kase.severity,
+        },
+        'incident pattern escalation — repeat S2+ subject',
+      );
+      try {
+        this.io.to('ops:war-room').emit('incident:pattern', {
+          caseId: kase.id,
+          caseNumber: kase.caseNumber,
+          severity: kase.severity,
         });
-      }
+      } catch { /* advisory only */ }
+    }
+    if (staged.suspensionNotificationId) {
+      await this.notifications.publishPersisted(staged.suspensionNotificationId);
     }
 
     // §9.1 — S0/S1 cases open their evidence bundle at intake (an SOS-born
@@ -163,44 +264,97 @@ export class IncidentService {
     return kase;
   }
 
-  /** §8.4 on-intake hook: same subject, ≥2 S2+ cases in 180 days → escalate
-   *  one band + PATTERN banner. (The nightly cross-reporter rule and the
-   *  weekly digest ride the next slice.) */
-  private async patternHook(kase: IncidentCase): Promise<IncidentCase> {
-    if (!['S0', 'S1', 'S2'].includes(kase.severity)) return kase;
-    const priors = await this.prisma.incidentCase.count({
-      where: {
-        subjectUserId: kase.subjectUserId,
-        id: { not: kase.id },
-        severity: { in: ['S0', 'S1', 'S2'] },
-        createdAt: { gte: new Date(Date.now() - 180 * 86_400_000) },
-      },
-    });
-    if (priors === 0) return kase;
-    const bumped: IncidentSeverity = kase.severity === 'S2' ? 'S1' : 'S0';
-    const [ackMin, decideMin] = SLA_MINUTES[bumped];
-    const updated = await this.prisma.incidentCase.update({
-      where: { id: kase.id },
+  /** Transactional authority half of intake. Public only so deterministic
+   * fault/race tests can fail after every write and prove the whole boundary
+   * rolls back; callers should use intake(). */
+  async stageIncidentIntake(
+    tx: Prisma.TransactionClient,
+    input: IncidentIntakeInput,
+    initialSeverity: IncidentSeverity,
+    now: Date,
+  ): Promise<{
+    kase: IncidentCase;
+    patternFrom: IncidentSeverity | null;
+    suspensionNotificationId: string | null;
+  }> {
+    // Subject-level serialization keeps concurrent intake/lift decisions in a
+    // total order. The case, final severity/SLA, dispatch exclusion, interim
+    // action, and due-process inbox evidence all commit or all roll back.
+    await tx.$queryRaw`SELECT "id" FROM "users" WHERE "id" = ${input.subjectUserId} FOR UPDATE`;
+    let severity = initialSeverity;
+    let patternFrom: IncidentSeverity | null = null;
+    if (['S0', 'S1', 'S2'].includes(initialSeverity)) {
+      const priors = await tx.incidentCase.count({
+        where: {
+          subjectUserId: input.subjectUserId,
+          severity: { in: ['S0', 'S1', 'S2'] },
+          createdAt: { gte: new Date(now.getTime() - 180 * 86_400_000) },
+        },
+      });
+      if (priors > 0) {
+        patternFrom = initialSeverity;
+        severity = initialSeverity === 'S2' ? 'S1' : 'S0';
+      }
+    }
+    const [ackMin, decideMin] = SLA_MINUTES[severity];
+    let kase = await tx.incidentCase.create({
       data: {
-        severity: bumped,
-        patternFlaggedAt: new Date(),
-        slaAckBy: new Date(kase.createdAt.getTime() + ackMin * 60_000),
-        slaDecideBy: new Date(kase.createdAt.getTime() + decideMin * 60_000),
+        caseNumber: `INC-${nanoid(8).toUpperCase()}`,
+        severity,
+        category: input.category,
+        intake: input.intake,
+        subjectUserId: input.subjectUserId,
+        reporterUserId: input.reporterUserId ?? null,
+        orderId: input.orderId ?? null,
+        sosAlertId: input.sosAlertId ?? null,
+        summary: input.summary,
+        details: (input.details ?? undefined) as never,
+        slaAckBy: new Date(now.getTime() + ackMin * 60_000),
+        slaDecideBy: new Date(now.getTime() + decideMin * 60_000),
+        patternFlaggedAt: patternFrom ? now : null,
+        createdAt: now,
       },
     });
-    log().warn({ caseId: kase.id, subjectUserId: kase.subjectUserId, from: kase.severity, to: bumped }, 'incident pattern escalation — repeat S2+ subject');
-    try {
-      this.io.to('ops:war-room').emit('incident:pattern', { caseId: kase.id, caseNumber: kase.caseNumber, severity: bumped });
-    } catch { /* advisory only */ }
-    return updated;
-  }
 
-  private async applyInterimSuspension(userId: string, now: Date): Promise<boolean> {
-    // Movers are the dispatch-visible risk; vendor/customer subjects keep the
-    // existing suspension/strike tools (an ops decision, not an auto one).
-    const d = await this.prisma.driver.updateMany({ where: { userId }, data: { safetySuspendedAt: now, isOnline: false, isAvailable: false } });
-    const r = await this.prisma.rider.updateMany({ where: { userId }, data: { safetySuspendedAt: now, isOnline: false, isAvailable: false } });
-    return d.count > 0 || r.count > 0;
+    let suspensionNotificationId: string | null = null;
+    if ((severity === 'S0' || severity === 'S1') && autoSuspendEnabled()) {
+      // Movers vanish from dispatch instantly; active custody pointers remain
+      // intact for an explicit recovery/completion workflow.
+      const d = await tx.driver.updateMany({
+        where: { userId: input.subjectUserId },
+        data: { safetySuspendedAt: now, isOnline: false, isAvailable: false },
+      });
+      const r = await tx.rider.updateMany({
+        where: { userId: input.subjectUserId },
+        data: { safetySuspendedAt: now, isOnline: false, isAvailable: false },
+      });
+      if (d.count > 0 || r.count > 0) {
+        kase = await tx.incidentCase.update({
+          where: { id: kase.id },
+          data: { interimAction: 'SUSPENDED_PENDING_REVIEW' },
+        });
+        // Liability evidence and due process: suspension cannot commit without
+        // a durable subject notice, and reporter identity is never included.
+        const notice = await tx.notification.create({
+          data: {
+            userId: input.subjectUserId,
+            type: 'SAFETY',
+            title: 'Account suspended pending review',
+            body: `A ${this.categoryLabel(input.category)} report is under review on your account. You are offline while our safety team reviews it — contact support to respond.`,
+            data: {
+              kind: 'incident_interim_suspension',
+              caseId: kase.id,
+              caseNumber: kase.caseNumber,
+              category: input.category,
+            },
+            createdAt: now,
+          },
+          select: { id: true },
+        });
+        suspensionNotificationId = notice.id;
+      }
+    }
+    return { kase, patternFrom, suspensionNotificationId };
   }
 
   /** Explicit, audited lift — also runs automatically on a DISMISSED decision.
@@ -208,28 +362,71 @@ export class IncidentService {
    *  block that existed because of this dispute is served — leaving a
    *  self-serve-impossible lock behind would strand a cleared driver. */
   async liftInterim(id: string, opsUserId: string): Promise<IncidentCase> {
-    const kase = await this.prisma.incidentCase.findUnique({ where: { id } });
-    if (!kase) throw new NotFoundError('IncidentCase', id);
-    // AUDIT-FIX (F5, 2026-08-01): clear the liveness lock ONLY for an
-    // identity case. A lock set by 3 consecutive face-match failures (the §7
-    // sold-account defence) is an independent fact from an unrelated cash or
-    // service dispute — clearing it on THAT dismissal would silently reopen
-    // the very account-sharing hole the lock exists to close. The not-my-driver
-    // report opens an IDENTITY_MISMATCH case, so its dismissal still clears it.
-    const clearsLivenessLock = kase.category === 'IDENTITY_MISMATCH';
-    const clear = { safetySuspendedAt: null, safetyShadowRestrictedAt: null, ...(clearsLivenessLock ? { livenessLockedAt: null } : {}) };
-    await this.prisma.driver.updateMany({ where: { userId: kase.subjectUserId }, data: clear });
-    await this.prisma.rider.updateMany({ where: { userId: kase.subjectUserId }, data: clear });
-    const updated = await this.prisma.incidentCase.update({
-      where: { id },
-      data: { interimAction: 'NONE', details: { ...((kase.details as Record<string, unknown> | null) ?? {}), interimLiftedBy: opsUserId, interimLiftedAt: new Date().toISOString() } as never },
+    const preview = await this.prisma.incidentCase.findUnique({ where: { id }, select: { subjectUserId: true } });
+    if (!preview) throw new NotFoundError('IncidentCase', id);
+    const now = new Date();
+    const { updated, restrictionRemains } = await this.prisma.$transaction(async (tx) => {
+      // Serialize aggregate safety authority for this person. Session-loss
+      // custody intake uses the same user lock, so lifting one case cannot
+      // erase the stamp belonging to another active case.
+      await tx.$queryRaw`SELECT "id" FROM "users" WHERE "id" = ${preview.subjectUserId} FOR UPDATE`;
+      const kase = await tx.incidentCase.findUnique({ where: { id } });
+      if (!kase) throw new NotFoundError('IncidentCase', id);
+
+      const updated = await tx.incidentCase.update({
+        where: { id },
+        data: {
+          interimAction: 'NONE',
+          details: {
+            ...((kase.details as Record<string, unknown> | null) ?? {}),
+            interimLiftedBy: opsUserId,
+            interimLiftedAt: now.toISOString(),
+          } as never,
+        },
+      });
+      const remaining = await tx.incidentCase.findMany({
+        where: {
+          subjectUserId: kase.subjectUserId,
+          id: { not: id },
+          status: { not: 'CLOSED' },
+          interimAction: { in: ['SUSPENDED_PENDING_REVIEW', 'SHADOW_RESTRICTED'] },
+        },
+        select: { category: true, interimAction: true },
+      });
+      const suspensionRemains = remaining.some((other) => other.interimAction === 'SUSPENDED_PENDING_REVIEW');
+      const shadowRestrictionRemains = remaining.some((other) => other.interimAction === 'SHADOW_RESTRICTED');
+      // AUDIT-FIX (F5, 2026-08-01): clear the liveness lock ONLY when an
+      // identity case is lifted and no other active identity case still owns
+      // that safety authority. An unrelated dispute must never clear the §7
+      // sold-account defence.
+      const clearsLivenessLock = kase.category === 'IDENTITY_MISMATCH'
+        && !remaining.some((other) => other.category === 'IDENTITY_MISMATCH');
+      const clear: {
+        safetySuspendedAt?: null;
+        safetyShadowRestrictedAt?: null;
+        livenessLockedAt?: null;
+      } = {};
+      if (!suspensionRemains) clear.safetySuspendedAt = null;
+      if (!shadowRestrictionRemains) clear.safetyShadowRestrictedAt = null;
+      if (clearsLivenessLock) clear.livenessLockedAt = null;
+      if (Object.keys(clear).length > 0) {
+        await tx.driver.updateMany({ where: { userId: kase.subjectUserId }, data: clear });
+        await tx.rider.updateMany({ where: { userId: kase.subjectUserId }, data: clear });
+      }
+      return { updated, restrictionRemains: suspensionRemains || shadowRestrictionRemains };
     });
     await this.notifications.send({
-      userId: kase.subjectUserId,
+      userId: updated.subjectUserId,
       type: 'SAFETY',
-      title: 'Suspension lifted',
-      body: 'The interim suspension on your account has been lifted. You can go back online.',
-      data: { kind: 'incident_interim_lifted', caseNumber: kase.caseNumber },
+      title: restrictionRemains ? 'Safety review updated' : 'Suspension lifted',
+      body: restrictionRemains
+        ? 'The interim action for this case has been lifted. Another safety review remains active, so its account restrictions stay in place. Contact support to respond.'
+        : 'The interim suspension on your account has been lifted. You can go back online.',
+      data: {
+        kind: 'incident_interim_lifted',
+        caseNumber: updated.caseNumber,
+        restrictionRemains,
+      },
     });
     return updated;
   }
@@ -239,22 +436,37 @@ export class IncidentService {
    *  (dispatch reads the profile stamp). Softer than suspension; still an
    *  audited interim action with the due-process notice. */
   async shadowRestrict(id: string, opsUserId: string): Promise<IncidentCase> {
-    const kase = await this.prisma.incidentCase.findUnique({ where: { id } });
-    if (!kase) throw new NotFoundError('IncidentCase', id);
-    if (kase.status === 'CLOSED') throw new AppError(409, 'CASE_CLOSED', 'A closed case cannot apply interim actions.');
+    const preview = await this.prisma.incidentCase.findUnique({ where: { id }, select: { subjectUserId: true } });
+    if (!preview) throw new NotFoundError('IncidentCase', id);
     const now = new Date();
-    await this.prisma.driver.updateMany({ where: { userId: kase.subjectUserId }, data: { safetyShadowRestrictedAt: now } });
-    await this.prisma.rider.updateMany({ where: { userId: kase.subjectUserId }, data: { safetyShadowRestrictedAt: now } });
-    const updated = await this.prisma.incidentCase.update({
-      where: { id },
-      data: { interimAction: 'SHADOW_RESTRICTED', details: { ...((kase.details as Record<string, unknown> | null) ?? {}), shadowRestrictedBy: opsUserId, shadowRestrictedAt: now.toISOString() } as never },
+    const updated = await this.prisma.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT "id" FROM "users" WHERE "id" = ${preview.subjectUserId} FOR UPDATE`;
+      const kase = await tx.incidentCase.findUnique({ where: { id } });
+      if (!kase) throw new NotFoundError('IncidentCase', id);
+      if (kase.status === 'CLOSED') throw new AppError(409, 'CASE_CLOSED', 'A closed case cannot apply interim actions.');
+      if (kase.interimAction === 'SUSPENDED_PENDING_REVIEW') {
+        throw new AppError(409, 'INTERIM_ACTION_CONFLICT', 'A safety suspension cannot be replaced by a shadow restriction.');
+      }
+      await tx.driver.updateMany({ where: { userId: kase.subjectUserId }, data: { safetyShadowRestrictedAt: now } });
+      await tx.rider.updateMany({ where: { userId: kase.subjectUserId }, data: { safetyShadowRestrictedAt: now } });
+      return tx.incidentCase.update({
+        where: { id },
+        data: {
+          interimAction: 'SHADOW_RESTRICTED',
+          details: {
+            ...((kase.details as Record<string, unknown> | null) ?? {}),
+            shadowRestrictedBy: opsUserId,
+            shadowRestrictedAt: now.toISOString(),
+          } as never,
+        },
+      });
     });
     await this.notifications.send({
-      userId: kase.subjectUserId,
+      userId: updated.subjectUserId,
       type: 'SAFETY',
       title: 'Account under review',
-      body: `A ${this.categoryLabel(kase.category)} report is under review on your account. You can keep working while our safety team reviews it — contact support to respond.`,
-      data: { kind: 'incident_shadow_restricted', caseNumber: kase.caseNumber, category: kase.category },
+      body: `A ${this.categoryLabel(updated.category)} report is under review on your account. You can keep working while our safety team reviews it — contact support to respond.`,
+      data: { kind: 'incident_shadow_restricted', caseNumber: updated.caseNumber, category: updated.category },
     });
     return updated;
   }

@@ -32,6 +32,12 @@ export interface RouteEstimate {
 export interface MapsProvider {
   /** Estimated riding minutes from origin to each destination, same order. */
   etaMinutes(origin: LatLng, destinations: LatLng[]): Promise<number[]>;
+  /** Estimated riding minutes from EACH origin to one destination, same order.
+   *  [E5 / danger #13] Dispatch ranks the mover→pickup journey — the reverse
+   *  of etaMinutes' one-origin fan-out. Haversine is symmetric so the defect
+   *  hid under the default provider, but on directed roads (one-way systems)
+   *  pickup→mover can misrank real candidates. */
+  etaMinutesFrom(origins: LatLng[], dest: LatLng): Promise<number[]>;
   /** Point-to-point driving route — feeds fares, courier fees, delivery fees. */
   routeKm(origin: LatLng, dest: LatLng): Promise<RouteEstimate>;
 }
@@ -43,6 +49,14 @@ export class HaversineMapsProvider implements MapsProvider {
 
   async etaMinutes(origin: LatLng, destinations: LatLng[]): Promise<number[]> {
     return destinations.map((dest) => {
+      const km = haversineDistance(origin.lat, origin.lng, dest.lat, dest.lng) * HaversineMapsProvider.ROAD_WIGGLE;
+      return (km / HaversineMapsProvider.SPEED_KMH) * 60;
+    });
+  }
+
+  async etaMinutesFrom(origins: LatLng[], dest: LatLng): Promise<number[]> {
+    // Straight lines are symmetric — same math, honest direction.
+    return origins.map((origin) => {
       const km = haversineDistance(origin.lat, origin.lng, dest.lat, dest.lng) * HaversineMapsProvider.ROAD_WIGGLE;
       return (km / HaversineMapsProvider.SPEED_KMH) * 60;
     });
@@ -87,11 +101,49 @@ export class GoogleMapsProvider implements MapsProvider {
     return out;
   }
 
+  async etaMinutesFrom(origins: LatLng[], dest: LatLng): Promise<number[]> {
+    if (origins.length === 0) return [];
+    const out: number[] = [];
+    // Distance Matrix takes many origins × one destination just as happily;
+    // durations land at rows[i].elements[0].
+    for (let i = 0; i < origins.length; i += MAX_DESTINATIONS) {
+      out.push(...(await this.etaFromChunk(origins.slice(i, i + MAX_DESTINATIONS), dest)));
+    }
+    return out;
+  }
+
   /** Routes fall back to the deterministic estimate: Distance Matrix is paid
    *  per call, and fares/fees must stay cheap + predictable. OSRM is the
    *  self-hosted engine for real-road routing. */
   async routeKm(origin: LatLng, dest: LatLng): Promise<RouteEstimate> {
     return this.fallback.routeKm(origin, dest);
+  }
+
+  private async etaFromChunk(chunk: LatLng[], dest: LatLng): Promise<number[]> {
+    const fallback = await this.fallback.etaMinutesFrom(chunk, dest);
+
+    const url = new URL(DISTANCE_MATRIX_URL);
+    url.searchParams.set('origins', chunk.map((o) => `${o.lat},${o.lng}`).join('|'));
+    url.searchParams.set('destinations', `${dest.lat},${dest.lng}`);
+    url.searchParams.set('mode', 'driving');
+    url.searchParams.set('key', this.apiKey);
+
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), GOOGLE_TIMEOUT_MS);
+    try {
+      const res = await fetch(url, { signal: controller.signal });
+      if (!res.ok) return fallback;
+      const data = (await res.json()) as DistanceMatrixResponse;
+      if (data.status !== 'OK') return fallback;
+      return chunk.map((_, i) => {
+        const el = data.rows?.[i]?.elements?.[0];
+        return el?.status === 'OK' && el.duration?.value != null ? el.duration.value / 60 : fallback[i]!;
+      });
+    } catch {
+      return fallback; // down, slow, or blocked — dispatch carries on
+    } finally {
+      clearTimeout(timer);
+    }
   }
 
   private async etaChunk(origin: LatLng, chunk: LatLng[]): Promise<number[]> {
@@ -172,6 +224,36 @@ export class OsrmMapsProvider implements MapsProvider {
       });
     } catch {
       return this.degraded('eta', fallback); // down, slow, or blocked — dispatch carries on
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  async etaMinutesFrom(origins: LatLng[], dest: LatLng): Promise<number[]> {
+    if (origins.length === 0) return [];
+    const fallback = await this.fallback.etaMinutesFrom(origins, dest);
+
+    // Explicit sources (each origin) → one destination (the last coordinate):
+    // durations comes back as one N×1 column, origin i at durations[i][0].
+    const coords = [...origins, dest].map((p) => `${p.lng},${p.lat}`).join(';');
+    const sources = origins.map((_, i) => i).join(';');
+    const url = `${this.baseUrl.replace(/\/$/, '')}/table/v1/driving/${coords}?sources=${sources}&destinations=${origins.length}&annotations=duration`;
+
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), OSRM_TIMEOUT_MS);
+    try {
+      const res = await fetch(url, { signal: controller.signal });
+      if (!res.ok) return this.degraded('eta', fallback);
+      const data = (await res.json()) as OsrmTableResponse;
+      const rows = data.code === 'Ok' ? data.durations : undefined;
+      if (!rows) return this.degraded('eta', fallback);
+      recordOsrm('eta', 'ok');
+      return origins.map((_, i) => {
+        const seconds = rows[i]?.[0];
+        return seconds != null ? seconds / 60 : fallback[i]!;
+      });
+    } catch {
+      return this.degraded('eta', fallback);
     } finally {
       clearTimeout(timer);
     }

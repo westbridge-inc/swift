@@ -9,8 +9,8 @@ import type { FastifyInstance } from 'fastify';
 /** Machine version of the served legal pack — stamped onto User.tosVersion at
  *  signup consent [SWIFT-AUD-D9-03]. Bump BOTH constants together whenever the
  *  Terms/Privacy content changes. */
-export const LEGAL_VERSION = '2026-07-15';
-const LAST_UPDATED = '15 July 2026'; // human form of LEGAL_VERSION
+export const LEGAL_VERSION = '2026-08-12'; // [REPORT-011 F-02] bumped: §4 cancellation MMG-refund clarification
+const LAST_UPDATED = '12 August 2026'; // human form of LEGAL_VERSION
 
 function page(title: string, body: string): string {
   return `<!doctype html>
@@ -50,7 +50,7 @@ const TERMS = page(
 <p>Payment is due before or at handover. Refusing to pay for goods you ordered, or repeatedly failing to accept deliveries, leads to strikes on your account and can restrict or end your access to cash-on-delivery or to Swift entirely.</p>
 
 <h2>4. Cancellations</h2>
-<p>You can cancel free of charge within the window shown in the app for your order. After a business has started acting on your order, a cancellation fee may apply — the app always shows you the cost before you confirm a cancellation.</p>
+<p>You can cancel within the window shown in the app for your order. Cash orders cancel free of charge inside that window. If you have already sent an MMG payment to a business for the order, cancelling stops fulfilment and the business refunds you directly on its own MMG — Swift never holds the money. After a business has started acting on your order, a cancellation fee may apply — the app always shows you the cost before you confirm a cancellation.</p>
 
 <h2>5. Account requirements</h2>
 <p>You need a verified phone number to use Swift. Higher-value orders and all taxi rides require identity verification (a government ID), shown in the app as it becomes required. You must be at least 18 to place orders.</p>

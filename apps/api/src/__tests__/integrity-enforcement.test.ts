@@ -137,7 +137,7 @@ describe('told before they commit (Part 4 copy)', () => {
     const h1 = await makeUser();
     const h2 = await makeUser();
     for (const h of [h1, h2]) {
-      await identity.capture({ accountId: h.id, tenantId: 'swift-default', actorRole: 'VENDOR', type: 'ID_DOC_NUMBER', normalizedValue: normalizeDocNumber(doc), source: 'AI_ID_ANALYZER' });
+      await identity.capture({ accountId: h.id, actorRole: 'VENDOR', type: 'ID_DOC_NUMBER', normalizedValue: normalizeDocNumber(doc), source: 'AI_ID_ANALYZER' });
     }
     await subs.startTrialForVendor((await makeVendorFor(h1.id)).id); // ACTIVE trial on h1
 
@@ -164,7 +164,7 @@ describe('scenario K — the appeal loop (Part 4)', () => {
     const h1 = await makeUser();
     const h2 = await makeUser();
     for (const h of [h1, h2]) {
-      await identity.capture({ accountId: h.id, tenantId: 'swift-default', actorRole: 'VENDOR', type: 'ID_DOC_NUMBER', normalizedValue: normalizeDocNumber(doc), source: 'AI_ID_ANALYZER' });
+      await identity.capture({ accountId: h.id, actorRole: 'VENDOR', type: 'ID_DOC_NUMBER', normalizedValue: normalizeDocNumber(doc), source: 'AI_ID_ANALYZER' });
     }
     await subs.startTrialForVendor((await makeVendorFor(h1.id)).id);
 

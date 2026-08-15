@@ -21,6 +21,7 @@ import {
   LoadingBlock,
   PillButton,
   PopupCard,
+  PopupTitle,
   Screen,
   SettingsRow,
   T,
@@ -51,7 +52,7 @@ import { DocumentChecklist } from '../../components/onboarding/DocumentChecklist
 import { PricingCard } from '../../components/onboarding/PricingCard';
 import { MmgPayLinkCard } from '../../components/MmgPayLinkCard';
 import { StandingCard } from '../../components/StandingCard';
-import { api, API_URL, vendorApi } from '../../services/api';
+import { API_URL, vendorApi } from '../../services/api';
 import { openPayLink } from '../../lib/payLink';
 import { useWentLive, WentLivePopup } from '../../components/onboarding/WentLive';
 import { docLabel } from '../../components/onboarding/DocumentUploadCard';
@@ -108,7 +109,12 @@ import {
   type VendorBooking,
   type VendorBookingException,
 } from '../../hooks/vendorops';
-import { useAuthStore } from '../../stores/authStore';
+import {
+  AuthSessionBoundaryError,
+  requireAuthSessionForPrincipal,
+  requireAuthSessionSnapshot,
+  useAuthStore,
+} from '../../stores/authStore';
 import { track } from '../../lib/analytics';
 import { useLocationStore } from '../../stores/locationStore';
 import { useStoreSwitcher } from '../../stores/storeSwitcher';
@@ -591,7 +597,14 @@ function VendorOps({ store, navigation }: any) {
                 <Feather name="eye" size={15} color={color.brand[500]} />
                 <T variant="label" tone="brand" weight="bold">Preview · sample data, read-only</T>
               </View>
-              <Pressable onPress={() => { exitPreview(); setPreviewIntent(null); }} hitSlop={8}>
+              <Pressable
+                testID="vendor-preview-exit"
+                accessibilityRole="button"
+                accessibilityLabel="Exit business preview"
+                accessibilityHint="Return to the Swift role picker"
+                onPress={() => { exitPreview(); setPreviewIntent(null); }}
+                hitSlop={8}
+              >
                 <T variant="label" tone="brand" weight="bold">Exit</T>
               </Pressable>
             </View>
@@ -879,6 +892,7 @@ function MenuItemRow({
   navigation: any;
   categories: { id: string; name: string }[];
 }) {
+  const readOnly = !!useVendorPreview((state) => state.previewType);
   const setAvail = useSetItemAvailability();
   const del = useDeleteItem();
   const available = item.isAvailable !== false;
@@ -912,7 +926,11 @@ function MenuItemRow({
             </T>
           ) : null}
         </View>
-        <Pressable onPress={() => (setAvail.isPending ? undefined : setAvail.mutate({ id: item.id, isAvailable: !available }))} hitSlop={6}>
+        <Pressable
+          disabled={readOnly}
+          onPress={() => (setAvail.isPending ? undefined : setAvail.mutate({ id: item.id, isAvailable: !available }))}
+          hitSlop={6}
+        >
           {({ pressed }) => (
             <View
               style={{
@@ -934,14 +952,14 @@ function MenuItemRow({
       </View>
       <View style={{ flexDirection: 'row', gap: space.md, marginTop: space.md }}>
         <PillButton label="Edit" variant="soft" size="sm" style={{ flex: 1 }} onPress={() => navigation.navigate('VendorItemEditor', { item, categories })} />
-        <PillButton label="Delete" variant="outline" size="sm" style={{ flex: 1 }} loading={del.isPending} onPress={() => setConfirmDelete(true)} />
+        <PillButton label="Delete" variant="outline" size="sm" style={{ flex: 1 }} loading={del.isPending} disabled={readOnly} onPress={() => setConfirmDelete(true)} />
       </View>
 
       <PopupCard visible={confirmDelete} onClose={() => setConfirmDelete(false)}>
         <IconChip icon="trash-2" size={56} tone="error" />
-        <T variant="title" center style={{ marginTop: space.lg }}>
+        <PopupTitle variant="title" center style={{ marginTop: space.lg }}>
           Delete item?
-        </T>
+        </PopupTitle>
         <T variant="body" tone="muted" center style={{ marginTop: space.sm }}>
           Remove &quot;{item.name}&quot; from your menu.
         </T>
@@ -949,6 +967,7 @@ function MenuItemRow({
           label="Delete"
           style={{ alignSelf: 'stretch', marginTop: space['2xl'] }}
           onPress={() => {
+            if (readOnly) return;
             setConfirmDelete(false);
             del.mutate(item.id);
           }}
@@ -966,6 +985,7 @@ function MenuItemRow({
  * instead of waiting on the menu query.
  */
 function ModifiersSection({ item }: { item: any }) {
+  const readOnly = !!useVendorPreview((state) => state.previewType);
   const [groups, setGroups] = useState<any[]>(item.optionGroups ?? []);
   const addGroup = useAddOptionGroup();
   const delGroup = useDeleteOptionGroup();
@@ -980,12 +1000,16 @@ function ModifiersSection({ item }: { item: any }) {
   const draft = (gid: string) => drafts[gid] ?? { name: '', price: '' };
 
   const submitGroup = async () => {
+    if (readOnly) return;
     const name = groupName.trim();
     if (!name || addGroup.isPending) return;
+    const owner = requireAuthSessionSnapshot();
     const g = await addGroup.mutateAsync({
       itemId: item.id,
       data: { name, isRequired: groupRequired, minSelect: groupRequired ? 1 : 0, maxSelect: groupMulti ? 10 : 1 },
+      authSession: owner,
     });
+    requireAuthSessionForPrincipal(owner);
     setGroups((gs) => [...gs, { options: [], ...g }]);
     setGroupName('');
     setGroupRequired(false);
@@ -993,23 +1017,35 @@ function ModifiersSection({ item }: { item: any }) {
   };
 
   const submitOption = async (groupId: string) => {
+    if (readOnly) return;
     const d = draft(groupId);
     const name = d.name.trim();
     if (!name || addOption.isPending) return;
+    const owner = requireAuthSessionSnapshot();
     const opt = await addOption.mutateAsync({
       groupId,
       data: { name, additionalPrice: Number(d.price) || 0 },
+      authSession: owner,
     });
+    requireAuthSessionForPrincipal(owner);
     setGroups((gs) => gs.map((g) => (g.id === groupId ? { ...g, options: [...(g.options ?? []), opt] } : g)));
     setDrafts((s) => ({ ...s, [groupId]: { name: '', price: '' } }));
   };
 
   const removeOption = (groupId: string, optionId: string) => {
-    delOption.mutate(optionId, {
-      onSuccess: () =>
-        setGroups((gs) =>
-          gs.map((g) => (g.id === groupId ? { ...g, options: (g.options ?? []).filter((o: any) => o.id !== optionId) } : g)),
-        ),
+    if (readOnly) return;
+    const owner = requireAuthSessionSnapshot();
+    delOption.mutate({ id: optionId, authSession: owner }, {
+      onSuccess: () => {
+        try {
+          requireAuthSessionForPrincipal(owner);
+          setGroups((gs) =>
+            gs.map((g) => (g.id === groupId ? { ...g, options: (g.options ?? []).filter((o: any) => o.id !== optionId) } : g)),
+          );
+        } catch {
+          // The editor belongs to an older account and is being unmounted.
+        }
+      },
     });
   };
 
@@ -1019,6 +1055,11 @@ function ModifiersSection({ item }: { item: any }) {
       <T variant="label" tone="muted" style={{ marginTop: 4 }}>
         Sizes, toppings, extras — customers pick these when ordering.
       </T>
+      {readOnly ? (
+        <T variant="caption" tone="muted" style={{ marginTop: space.sm }}>
+          Read-only in the sample preview.
+        </T>
+      ) : null}
 
       {groups.map((g) => (
         <View key={g.id} style={{ marginTop: space.md, borderRadius: radius.lg, backgroundColor: color.surface.subtle, padding: space.md }}>
@@ -1031,7 +1072,7 @@ function ModifiersSection({ item }: { item: any }) {
                 {g.isRequired ? 'Required' : 'Optional'} · {g.maxSelect > 1 ? `up to ${g.maxSelect}` : 'pick one'}
               </T>
             </View>
-            <Pressable onPress={() => setRemoveGroupId(g.id)} hitSlop={8}>
+            <Pressable disabled={readOnly} onPress={() => setRemoveGroupId(g.id)} hitSlop={8}>
               <View style={{ width: 36, height: 36, alignItems: 'center', justifyContent: 'center' }}>
                 <Feather name="trash-2" size={18} color={color.text.muted} />
               </View>
@@ -1046,7 +1087,7 @@ function ModifiersSection({ item }: { item: any }) {
               <T variant="label" tone="muted" style={{ marginRight: space.md }}>
                 {Number(o.additionalPrice) > 0 ? `+${money(o.additionalPrice)}` : 'Free'}
               </T>
-              <Pressable onPress={() => removeOption(g.id, o.id)} hitSlop={8}>
+              <Pressable disabled={readOnly} onPress={() => removeOption(g.id, o.id)} hitSlop={8}>
                 <View style={{ width: 32, height: 32, alignItems: 'center', justifyContent: 'center' }}>
                   <Feather name="x" size={16} color={color.text.muted} />
                 </View>
@@ -1068,7 +1109,7 @@ function ModifiersSection({ item }: { item: any }) {
               placeholder="+GYD"
               keyboardType="number-pad"
             />
-            <Pressable onPress={() => submitOption(g.id)} disabled={addOption.isPending}>
+            <Pressable onPress={() => submitOption(g.id)} disabled={readOnly || addOption.isPending}>
               {({ pressed }) => (
                 <View
                   style={{
@@ -1100,16 +1141,16 @@ function ModifiersSection({ item }: { item: any }) {
           size="md"
           style={{ marginTop: space.md }}
           loading={addGroup.isPending}
-          disabled={!groupName.trim()}
+          disabled={readOnly || !groupName.trim()}
           onPress={submitGroup}
         />
       </View>
 
       <PopupCard visible={!!removeGroupId} onClose={() => setRemoveGroupId(null)}>
         <IconChip icon="trash-2" size={56} tone="error" />
-        <T variant="title" center style={{ marginTop: space.lg }}>
+        <PopupTitle variant="title" center style={{ marginTop: space.lg }}>
           Remove group?
-        </T>
+        </PopupTitle>
         <T variant="body" tone="muted" center style={{ marginTop: space.sm }}>
           Delete this option group and all its choices.
         </T>
@@ -1117,9 +1158,20 @@ function ModifiersSection({ item }: { item: any }) {
           label="Delete"
           style={{ alignSelf: 'stretch', marginTop: space['2xl'] }}
           onPress={() => {
+            if (readOnly) return;
             const gid = removeGroupId!;
             setRemoveGroupId(null);
-            delGroup.mutate(gid, { onSuccess: () => setGroups((gs) => gs.filter((g) => g.id !== gid)) });
+            const owner = requireAuthSessionSnapshot();
+            delGroup.mutate({ id: gid, authSession: owner }, {
+              onSuccess: () => {
+                try {
+                  requireAuthSessionForPrincipal(owner);
+                  setGroups((gs) => gs.filter((g) => g.id !== gid));
+                } catch {
+                  // The editor belongs to an older account and is being unmounted.
+                }
+              },
+            });
           }}
         />
         <PillButton label="Cancel" variant="soft" style={{ alignSelf: 'stretch', marginTop: space.md }} onPress={() => setRemoveGroupId(null)} />
@@ -1131,6 +1183,7 @@ function ModifiersSection({ item }: { item: any }) {
 /** §5.6 reasoned stock movement — the audit-trail path, not a raw overwrite:
  *  ±delta with a reason (received / damaged / manual / reconcile / return). */
 function StockAdjustRow({ item }: { item: any }) {
+  const readOnly = !!useVendorPreview((state) => state.previewType);
   const qc = useQueryClient();
   const [open, setOpen] = useState(false);
   const [delta, setDelta] = useState('');
@@ -1147,6 +1200,13 @@ function StockAdjustRow({ item }: { item: any }) {
   const valid = delta.trim() !== '' && Number.isInteger(n) && n !== 0;
 
   if (!open) {
+    if (readOnly) {
+      return (
+        <T variant="caption" tone="muted">
+          Stock adjustment is read-only in preview.
+        </T>
+      );
+    }
     return (
       <Pressable onPress={() => setOpen(true)} hitSlop={6}>
         <T variant="caption" weight="semibold" tone="brand">
@@ -1169,7 +1229,7 @@ function StockAdjustRow({ item }: { item: any }) {
         </T>
       ) : null}
       <View style={{ flexDirection: 'row', gap: space.md }}>
-        <PillButton label="Apply" size="sm" style={{ flex: 1 }} loading={adjust.isPending} disabled={!valid || adjust.isPending} onPress={() => adjust.mutate()} />
+        <PillButton label="Apply" size="sm" style={{ flex: 1 }} loading={adjust.isPending} disabled={readOnly || !valid || adjust.isPending} onPress={() => adjust.mutate()} />
         <PillButton label="Cancel" variant="soft" size="sm" style={{ flex: 1 }} onPress={() => setOpen(false)} />
       </View>
     </View>
@@ -1255,6 +1315,7 @@ function LowStockCard({ categories, navigation, catOptions }: { categories: any[
 
 /** Category heading with operator controls: rename inline, delete with count. */
 function CategoryHeader({ cat }: { cat: any }) {
+  const readOnly = !!useVendorPreview((state) => state.previewType);
   const updateCategory = useUpdateCategory();
   const deleteCategory = useDeleteCategory();
   const [editing, setEditing] = useState(false);
@@ -1263,6 +1324,7 @@ function CategoryHeader({ cat }: { cat: any }) {
   const itemCount = (cat.items ?? []).length;
 
   const saveName = () => {
+    if (readOnly) return;
     const n = name.trim();
     if (!n || n === cat.name) {
       setEditing(false);
@@ -1295,14 +1357,14 @@ function CategoryHeader({ cat }: { cat: any }) {
       <T variant="heading" numberOfLines={1} style={{ flex: 1, paddingRight: space.md }}>
         {cat.name}
       </T>
-      <Pressable onPress={() => setEditing(true)} hitSlop={6}>
+      <Pressable disabled={readOnly} onPress={() => setEditing(true)} hitSlop={6}>
         {({ pressed }) => (
           <View style={{ width: 36, height: 36, alignItems: 'center', justifyContent: 'center', opacity: pressed ? 0.6 : 1 }}>
             <Feather name="edit-2" size={16} color={color.text.muted} />
           </View>
         )}
       </Pressable>
-      <Pressable onPress={() => setConfirmDelete(true)} hitSlop={6}>
+      <Pressable disabled={readOnly} onPress={() => setConfirmDelete(true)} hitSlop={6}>
         {({ pressed }) => (
           <View style={{ width: 36, height: 36, alignItems: 'center', justifyContent: 'center', opacity: pressed ? 0.6 : 1 }}>
             <Feather name="trash-2" size={16} color={color.text.muted} />
@@ -1312,9 +1374,9 @@ function CategoryHeader({ cat }: { cat: any }) {
 
       <PopupCard visible={confirmDelete} onClose={() => setConfirmDelete(false)}>
         <IconChip icon="trash-2" size={56} tone="error" />
-        <T variant="title" center style={{ marginTop: space.lg }}>
+        <PopupTitle variant="title" center style={{ marginTop: space.lg }}>
           Delete “{cat.name}”?
-        </T>
+        </PopupTitle>
         <T variant="body" tone="muted" center style={{ marginTop: space.sm }}>
           {itemCount > 0
             ? `This removes the section AND its ${itemCount} item${itemCount === 1 ? '' : 's'} from your menu.`
@@ -1325,6 +1387,7 @@ function CategoryHeader({ cat }: { cat: any }) {
           style={{ alignSelf: 'stretch', marginTop: space['2xl'] }}
           loading={deleteCategory.isPending}
           onPress={() => {
+            if (readOnly) return;
             setConfirmDelete(false);
             deleteCategory.mutate(cat.id);
           }}
@@ -1336,6 +1399,7 @@ function CategoryHeader({ cat }: { cat: any }) {
 }
 
 function VendorMenuScreen({ navigation }: any) {
+  const readOnly = !!useVendorPreview((state) => state.previewType);
   const menuQ = useVendorMenu();
   const createCategory = useCreateCategory();
   const { store } = useVendorProfile();
@@ -1345,6 +1409,7 @@ function VendorMenuScreen({ navigation }: any) {
   const catOptions = categories.map((c) => ({ id: c.id, name: c.name }));
 
   const addCategory = () => {
+    if (readOnly) return;
     const name = newCat.trim();
     if (name.length < 1) return;
     createCategory.mutate({ name }, { onSuccess: () => setNewCat('') });
@@ -1375,7 +1440,7 @@ function VendorMenuScreen({ navigation }: any) {
             </T>
             <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.md }}>
               <InlineInput style={{ flex: 1 }} value={newCat} onChangeText={setNewCat} placeholder={cat.catPlaceholder} />
-              <PillButton label="Add" size="md" loading={createCategory.isPending} disabled={newCat.trim().length < 1} onPress={addCategory} />
+              <PillButton label="Add" size="md" loading={createCategory.isPending} disabled={readOnly || newCat.trim().length < 1} onPress={addCategory} />
             </View>
           </Card>
 
@@ -1421,6 +1486,7 @@ function VendorMenuScreen({ navigation }: any) {
 }
 
 function VendorItemEditorScreen({ navigation, route }: any) {
+  const readOnly = !!useVendorPreview((state) => state.previewType);
   const existing = route.params?.item;
   const categories: { id: string; name: string }[] = route.params?.categories ?? [];
   const save = useSaveItem();
@@ -1485,7 +1551,9 @@ function VendorItemEditorScreen({ navigation, route }: any) {
   };
 
   const submit = async () => {
-    if (!valid || busy) return;
+    if (readOnly || !valid || busy) return;
+    const owner = requireAuthSessionSnapshot();
+    const operationStoreId = useStoreSwitcher.getState().selectedStoreId;
     const stockNum = stock.trim() === '' ? undefined : Number(stock);
     const bookingConfig = isService
       ? {
@@ -1497,6 +1565,8 @@ function VendorItemEditorScreen({ navigation, route }: any) {
       : undefined;
     const saved: any = await save.mutateAsync({
       id: existing?.id,
+      authSession: owner,
+      storeId: operationStoreId,
       data: {
         categoryId,
         name: name.trim(),
@@ -1515,11 +1585,24 @@ function VendorItemEditorScreen({ navigation, route }: any) {
             }),
       },
     });
+    let current = requireAuthSessionForPrincipal(owner);
     const itemId = existing?.id ?? saved?.id;
     if (localPhoto && itemId) {
       // Item is already saved; a failed photo upload shouldn't block the flow.
-      await uploadImage.mutateAsync({ id: itemId, file: localPhoto }).catch(() => undefined);
+      try {
+        await uploadImage.mutateAsync({
+          id: itemId,
+          file: localPhoto,
+          authSession: current,
+          storeId: operationStoreId,
+        });
+      } catch (uploadError) {
+        if (uploadError instanceof AuthSessionBoundaryError) throw uploadError;
+        // The item itself is durable; the vendor can retry only the photo.
+      }
+      current = requireAuthSessionForPrincipal(owner);
     }
+    requireAuthSessionForPrincipal(current);
     navigation.goBack();
   };
 
@@ -1528,7 +1611,7 @@ function VendorItemEditorScreen({ navigation, route }: any) {
       <SubHeader title={existing ? 'Edit Item' : 'New Item'} navigation={navigation} />
       <ScrollView contentContainerStyle={{ paddingHorizontal: GUTTER, paddingBottom: space['3xl'] }} showsVerticalScrollIndicator={false}>
         {/* Photo */}
-        <Pressable onPress={() => setPhotoMenu(true)}>
+        <Pressable disabled={readOnly} onPress={() => setPhotoMenu(true)}>
           {({ pressed }) => (
             <View
               style={{
@@ -1557,7 +1640,11 @@ function VendorItemEditorScreen({ navigation, route }: any) {
         </Pressable>
         {previewUri ? (
           <View style={{ alignItems: 'center', marginBottom: space.lg }}>
-            <LinkText label={uploadImage.isPending ? 'Uploading…' : 'Change photo'} onPress={() => setPhotoMenu(true)} />
+            {readOnly ? (
+              <T variant="caption" tone="muted">Read-only sample photo</T>
+            ) : (
+              <LinkText label={uploadImage.isPending ? 'Uploading…' : 'Change photo'} onPress={() => setPhotoMenu(true)} />
+            )}
           </View>
         ) : null}
         {photoErr ? (
@@ -1685,15 +1772,20 @@ function VendorItemEditorScreen({ navigation, route }: any) {
             Couldn&apos;t save. Check the details and try again.
           </T>
         ) : null}
-        <PillButton label={existing ? 'Save changes' : 'Add item'} loading={busy} disabled={!valid} onPress={submit} />
+        <PillButton
+          label={readOnly ? 'Read-only preview' : existing ? 'Save changes' : 'Add item'}
+          loading={busy}
+          disabled={readOnly || !valid}
+          onPress={submit}
+        />
       </ScrollView>
 
       {/* Photo source picker — kit popup */}
       <PopupCard visible={photoMenu} onClose={() => setPhotoMenu(false)}>
         <IconChip icon="camera" size={56} />
-        <T variant="title" center style={{ marginTop: space.lg }}>
+        <PopupTitle variant="title" center style={{ marginTop: space.lg }}>
           Item photo
-        </T>
+        </PopupTitle>
         <PillButton label="Take photo" style={{ alignSelf: 'stretch', marginTop: space['2xl'] }} onPress={takePhoto} />
         <PillButton label="Choose from library" variant="soft" style={{ alignSelf: 'stretch', marginTop: space.md }} onPress={pickFromLibrary} />
         {localPhoto ? (
@@ -2198,9 +2290,12 @@ function VendorInsightsScreen() {
   // Signed short-lived link (the JWT can't ride an in-app browser).
   const statement = useMutation({
     mutationFn: async () => {
-      const r = await api.get('/vendor/sales-statement', { params: { link: 1 } });
+      const owner = requireAuthSessionSnapshot();
+      const r = await vendorApi.salesStatement(owner);
+      requireAuthSessionForPrincipal(owner);
       const path = r.data?.data?.path as string;
       if (path) await openPayLink(`${API_URL}${path}`);
+      requireAuthSessionForPrincipal(owner);
     },
   });
   // Fetch double the window so "vs the previous N days" comes from the same
@@ -2806,9 +2901,9 @@ function StaffSection() {
 
       <PopupCard visible={!!removing} onClose={() => setRemoving(null)}>
         <IconChip icon="user-x" size={56} tone="error" />
-        <T variant="title" center style={{ marginTop: space.lg }}>
+        <PopupTitle variant="title" center style={{ marginTop: space.lg }}>
           Remove team member?
-        </T>
+        </PopupTitle>
         <T variant="body" tone="muted" center style={{ marginTop: space.sm }}>
           {removing?.user?.firstName ?? 'This person'} will lose store access immediately.
         </T>
@@ -2967,9 +3062,9 @@ function VendorScheduleScreen({ navigation }: any) {
 
       {/* Block time — two taps for a funeral afternoon. */}
       <PopupCard visible={blocking} onClose={() => setBlocking(false)}>
-        <T variant="body" weight="bold" center>
+        <PopupTitle variant="body" weight="bold" center>
           Block time
-        </T>
+        </PopupTitle>
         <T variant="caption" tone="muted" center style={{ marginTop: space.xs, marginBottom: space.lg }}>
           Customers won't see these slots. Nothing is shown as a reason.
         </T>

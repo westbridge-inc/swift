@@ -130,7 +130,7 @@ export async function adsRoutes(app: FastifyInstance) {
    *  audited mark-paid path settles it either way. */
   const checkout = new AdCheckoutService(app.prisma, app.io);
   app.post<{ Params: { id: string } }>('/campaigns/:id/checkout', auth, async (request) => {
-    const { provider } = z.object({ provider: z.enum(['MOCK', 'MMG', 'POWERTRANZ']).default('MOCK') }).parse(request.body ?? {});
+    const { provider } = z.object({ provider: z.enum(['MOCK', 'MMG', 'POWERTRANZ', 'MANUAL']).default('MANUAL') }).parse(request.body ?? {});
     const campaign = await app.prisma.adCampaign.findUnique({ where: { id: request.params.id }, select: { advertiserId: true, tenantId: true } });
     if (!campaign) throw new NotFoundError('AdCampaign', request.params.id);
     await advertisers.assertMember(campaign.advertiserId, request.user.userId);
@@ -184,16 +184,15 @@ export async function adsRoutes(app: FastifyInstance) {
   //    server derives userHash when signed in. ────────────────────────────────
   const { AdServingService } = await import('./serving.service');
   const { AdEventService } = await import('./event.service');
-  const { userHash } = await import('./ads-token');
   const serving = new AdServingService(app.prisma);
   const events = new AdEventService(app.prisma);
   const optionalAuth = { preHandler: [app.authenticateOptional] };
 
-  const deriveUserHash = (request: { user?: { userId?: string } }): string | null => {
-    const uid = request.user?.userId;
-    if (!uid) return null;
-    return userHash(uid, new Date().toISOString().slice(0, 10));
-  };
+  const deriveUserId = (request: { user?: { userId?: string } }): string | null => request.user?.userId ?? null;
+  const deriveEventPrincipal = (request: { user?: { userId?: string }; headers: { authorization?: unknown } }) => ({
+    userId: deriveUserId(request),
+    authPresented: typeof request.headers.authorization === 'string' && request.headers.authorization.trim().length > 0,
+  });
 
   /** GET /serve — build the home-screen ad slots. Never errors the home screen;
    *  empty inventory → house ads → collapsed slot. */
@@ -206,7 +205,7 @@ export async function adsRoutes(app: FastifyInstance) {
     const keys = q.placements.split(',').map((k) => k.trim()).filter(Boolean).slice(0, 5);
     try {
       const { getTenantId } = await import('../../plugins/tenant-context');
-      const data = await serving.serve({ tenantId: getTenantId() ?? 'swift-default', city: q.city, sessionId: q.sessionId, userHash: deriveUserHash(request), keys });
+      const data = await serving.serve({ tenantId: getTenantId() ?? 'swift-default', city: q.city, sessionId: q.sessionId, userId: deriveUserId(request), keys });
       return { success: true, data };
     } catch {
       // Ads must NEVER break the home screen — degrade to empty on any failure.
@@ -224,7 +223,7 @@ export async function adsRoutes(app: FastifyInstance) {
         meta: z.record(z.string(), z.unknown()).optional(),
       })).min(1).max(50),
     }).parse(request.body ?? {});
-    const verdicts = await events.ingest(body.events, deriveUserHash(request));
+    const verdicts = await events.ingest(body.events, deriveEventPrincipal(request));
     return { success: true, data: { results: verdicts } };
   });
 

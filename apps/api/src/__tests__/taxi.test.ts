@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { nanoid } from 'nanoid';
 import type { UserRole } from '@prisma/client';
@@ -14,6 +14,8 @@ import { DispatchService, recoverStrandedTaxiRides } from '../modules/dispatch/d
 import { OrderService } from '../modules/order/order.service';
 import { HaversineMapsProvider } from '../providers/maps/maps-provider';
 import { pointInPolygon } from '../utils/geo';
+import { transitionUserRoleAuthority } from '../modules/mover-authority';
+import { AuthService } from '../modules/auth/auth.service';
 
 // ---------------------------------------------------------------------------
 // taxi on the same mover pool and dispatch engine. Hardest paths:
@@ -70,13 +72,28 @@ async function makeUserWithSession(roles: UserRole[], activeRole: UserRole) {
   });
   createdUserIds.push(user.id);
   const token = app.jwt.sign({ userId: user.id, role: activeRole, jti: nanoid(8) });
-  await app.prisma.session.create({
+  const session = await app.prisma.session.create({
     data: {
       userId: user.id, token, refreshToken: nanoid(48),
       deviceId: 'step9', deviceType: 'test', expiresAt: new Date(Date.now() + DAY),
     },
   });
-  return { userId: user.id, token };
+  return { userId: user.id, token, sessionId: session.id };
+}
+
+async function makeDriverDeviceSession(userId: string, deviceId: string) {
+  const token = app.jwt.sign({ userId, role: 'DRIVER', jti: nanoid(8) });
+  const session = await app.prisma.session.create({
+    data: {
+      userId,
+      token,
+      refreshToken: nanoid(48),
+      deviceId,
+      deviceType: 'test',
+      expiresAt: new Date(Date.now() + DAY),
+    },
+  });
+  return { token, sessionId: session.id };
 }
 
 async function makeDriver(opts: { lat?: number; lng?: number } = {}) {
@@ -90,9 +107,43 @@ async function makeDriver(opts: { lat?: number; lng?: number } = {}) {
       documentsVerified: true,
       isOnline: true, isAvailable: true,
       currentLat: opts.lat ?? CENTRAL.lat, currentLng: opts.lng ?? CENTRAL.lng,
+      lastLocationUpdate: new Date(),
+      locationSessionId: u.sessionId,
     },
   });
   return { ...u, driverId: driver.id };
+}
+
+async function makeDriverEligibleForGo(driver: { userId: string; driverId: string }) {
+  await app.prisma.driver.update({
+    where: { id: driver.driverId },
+    data: { isOnline: false, isAvailable: false, locationSessionId: null },
+  });
+  await app.prisma.verificationDocument.create({
+    data: {
+      userId: driver.userId,
+      role: 'MOVER',
+      docType: 'vehicle_insurance',
+      fileUrl: 'storage://t/ins.jpg',
+      status: 'APPROVED',
+      coverageClass: 'HIRE',
+      hireClassConfirmed: true,
+      plateCrossChecked: true,
+      consentAt: new Date(),
+      privacyNoticeVersion: 'v1',
+    },
+  });
+  await app.prisma.subscription.create({
+    data: {
+      driverId: driver.driverId,
+      type: 'TAXI_DRIVER',
+      status: 'ACTIVE',
+      weeklyRate: 12000,
+      currentPeriodStart: new Date(),
+      currentPeriodEnd: new Date(Date.now() + 7 * DAY),
+      nextBillingDate: new Date(Date.now() + 7 * DAY),
+    },
+  });
 }
 
 function inject(method: 'GET' | 'POST' | 'PUT', url: string, payload?: unknown, token?: string) {
@@ -236,6 +287,74 @@ describe('Ride request — fare shown first, dispatch shared, PIN issued', () =>
     expect([d1.driverId, d2.driverId]).toContain(db.driverId);
   });
 
+  it('commits the server-clamped direct fare with assignment, or rolls both back on abort', async () => {
+    const customer = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
+    const driver = await makeDriver();
+    const ride = await app.prisma.order.create({
+      data: {
+        orderNumber: `TFA-${nanoid(8)}`,
+        orderType: 'TAXI',
+        customerId: customer.userId,
+        status: 'PENDING',
+        pickupAddress: 'Atomic Fare A',
+        pickupLat: CENTRAL.lat,
+        pickupLng: CENTRAL.lng,
+        deliveryAddress: 'Atomic Fare B',
+        deliveryLat: SOUTH.lat,
+        deliveryLng: SOUTH.lng,
+        subtotalBase: 0,
+        subtotalMarkup: 0,
+        subtotalCustomer: 0,
+        deliveryFee: 0,
+        taxiFareTotal: 2000,
+        totalAmount: 2000,
+        paymentMethod: 'CASH',
+      },
+    });
+
+    const originalTransaction = app.prisma.$transaction.bind(app.prisma);
+    let staged: { status: string; driverId: string | null; fare: number; logs: number } | null = null;
+    const transaction = vi.spyOn(app.prisma, '$transaction').mockImplementationOnce((async (
+      callback: (tx: Parameters<Parameters<typeof app.prisma.$transaction>[0]>[0]) => Promise<unknown>,
+      options?: Parameters<typeof app.prisma.$transaction>[1],
+    ) => originalTransaction(async (tx) => {
+      await callback(tx as Parameters<Parameters<typeof app.prisma.$transaction>[0]>[0]);
+      const row = await tx.order.findUniqueOrThrow({ where: { id: ride.id } });
+      staged = {
+        status: row.status,
+        driverId: row.driverId,
+        fare: Number(row.taxiFareTotal),
+        logs: await tx.orderStatusLog.count({ where: { orderId: ride.id, status: 'DRIVER_ASSIGNED' } }),
+      };
+      throw new Error('forced direct-fare transaction abort');
+    }, options)) as never);
+    try {
+      await expect(dispatch.claimOrder(ride.id, driver.driverId, 'DRIVER', { requestedFare: 1200 }))
+        .rejects.toThrow('forced direct-fare transaction abort');
+    } finally {
+      transaction.mockRestore();
+    }
+
+    expect(staged).toEqual({ status: 'DRIVER_ASSIGNED', driverId: driver.driverId, fare: 1200, logs: 1 });
+    const [rolledBackRide, rolledBackDriver, rolledBackLogs] = await Promise.all([
+      app.prisma.order.findUniqueOrThrow({ where: { id: ride.id } }),
+      app.prisma.driver.findUniqueOrThrow({ where: { id: driver.driverId } }),
+      app.prisma.orderStatusLog.count({ where: { orderId: ride.id, status: 'DRIVER_ASSIGNED' } }),
+    ]);
+    expect({ status: rolledBackRide.status, driverId: rolledBackRide.driverId, fare: Number(rolledBackRide.taxiFareTotal) })
+      .toEqual({ status: 'PENDING', driverId: null, fare: 2000 });
+    expect({ available: rolledBackDriver.isAvailable, pointer: rolledBackDriver.currentRideId })
+      .toEqual({ available: true, pointer: null });
+    expect(rolledBackLogs).toBe(0);
+
+    const committed = await dispatch.claimOrder(ride.id, driver.driverId, 'DRIVER', { requestedFare: 1200 });
+    expect({ status: committed.status, driverId: committed.driverId, fare: Number(committed.taxiFareTotal) })
+      .toEqual({ status: 'DRIVER_ASSIGNED', driverId: driver.driverId, fare: 1200 });
+    const durable = await app.prisma.order.findUniqueOrThrow({ where: { id: ride.id } });
+    expect({ fare: Number(durable.taxiFareTotal), total: Number(durable.totalAmount) })
+      .toEqual({ fare: 1200, total: 1200 });
+  });
+
   it('ratings record both ways after completion', async () => {
     const customer = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
     const driver = await makeDriver();
@@ -375,6 +494,29 @@ describe('Ride request — fare shown first, dispatch shared, PIN issued', () =>
     const cancel = await inject('POST', `/api/v1/driver/rides/${ride.id}/cancel`, { reason: 'changed mind' }, driver.token);
     expect(cancel.statusCode).toBe(400);
   });
+
+  it('driver cannot cancel in the verified-PIN window before start is tapped', async () => {
+    const customer = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
+    const driver = await makeDriver();
+    const res = await inject('POST', '/api/v1/rides/request', {
+      pickup: CENTRAL, dropoff: SOUTH,
+      pickupAddress: 'Verified pickup', dropoffAddress: 'Verified dropoff',
+    }, customer.token);
+    const ride = res.json().data.ride;
+    await inject('POST', `/api/v1/driver/rides/${ride.id}/accept`, {}, driver.token);
+    const verifiedAt = new Date();
+    await app.prisma.order.update({
+      where: { id: ride.id },
+      data: { status: 'DRIVER_ARRIVED', ridePinVerified: true, ridePinVerifiedAt: verifiedAt },
+    });
+
+    const cancel = await inject('POST', `/api/v1/driver/rides/${ride.id}/cancel`, { reason: 'changed mind' }, driver.token);
+    expect(cancel.statusCode).toBe(400);
+    expect(cancel.json().error.code).toBe('INVALID_STATUS');
+    const after = await app.prisma.order.findUniqueOrThrow({ where: { id: ride.id } });
+    expect({ status: after.status, driverId: after.driverId, verified: after.ridePinVerified })
+      .toEqual({ status: 'DRIVER_ARRIVED', driverId: driver.driverId, verified: true });
+  });
 });
 
 describe('Stranded-taxi watchdog — driver goes GPS-dark after accepting', () => {
@@ -449,6 +591,40 @@ describe('Stranded-taxi watchdog — driver goes GPS-dark after accepting', () =
     await app.prisma.driver.update({ where: { id: driver.driverId }, data: { lastLocationUpdate: null, currentRideId: null } });
   });
 
+  it('treats a verified PIN at DRIVER_ARRIVED as custody and never recycles the ride', async () => {
+    await app.prisma.driver.updateMany({ data: { isOnline: false, isAvailable: false } });
+    const customer = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
+    const driver = await makeDriver();
+    const res = await inject('POST', '/api/v1/rides/request', {
+      pickup: CENTRAL, dropoff: SOUTH, pickupAddress: 'Verified A', dropoffAddress: 'Verified B',
+    }, customer.token);
+    const ride = res.json().data.ride;
+    await inject('POST', `/api/v1/driver/rides/${ride.id}/accept`, {}, driver.token);
+    await app.prisma.order.update({
+      where: { id: ride.id },
+      data: { status: 'DRIVER_ARRIVED', ridePinVerified: true, ridePinVerifiedAt: new Date() },
+    });
+    await app.prisma.driver.update({ where: { id: driver.driverId }, data: { lastLocationUpdate: STALE } });
+    await app.redis.del(`ops_page:taxi_driver_dropped:${ride.id}`);
+
+    const enqueued: string[] = [];
+    const out = await recoverStrandedTaxiRides(app.prisma, app.redis, app.io, async (id) => { enqueued.push(id); });
+
+    expect(out.flagged).toContain(ride.id);
+    expect(out.recovered).not.toContain(ride.id);
+    const [order, profile] = await Promise.all([
+      app.prisma.order.findUniqueOrThrow({ where: { id: ride.id } }),
+      app.prisma.driver.findUniqueOrThrow({ where: { id: driver.driverId } }),
+    ]);
+    expect({ status: order.status, driverId: order.driverId, verified: order.ridePinVerified })
+      .toEqual({ status: 'DRIVER_ARRIVED', driverId: driver.driverId, verified: true });
+    expect(profile.currentRideId).toBe(ride.id);
+    expect(enqueued).not.toContain(ride.id);
+
+    await app.redis.del(`ops_page:taxi_driver_dropped:${ride.id}`);
+    await app.prisma.driver.update({ where: { id: driver.driverId }, data: { lastLocationUpdate: null, currentRideId: null } });
+  });
+
   it('leaves a driver with a FRESH fix alone (only GPS-dark rides are swept)', async () => {
     await app.prisma.driver.updateMany({ data: { isOnline: false, isAvailable: false } });
     const customer = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
@@ -472,6 +648,85 @@ describe('Stranded-taxi watchdog — driver goes GPS-dark after accepting', () =
 });
 
 describe('Taxi dispatch S3 — self-exclusion + supply-watch hygiene', () => {
+  it('excludes an online driver whose location authority has no owning session', async () => {
+    await app.prisma.driver.updateMany({ data: { isOnline: false, isAvailable: false } });
+    const driver = await makeDriver({ lat: CENTRAL.lat, lng: CENTRAL.lng });
+    await app.prisma.driver.update({ where: { id: driver.driverId }, data: { locationSessionId: null } });
+
+    const candidates = await dispatch.findCandidates(`ownerless-driver-${nanoid(6)}`, CENTRAL, 5, 'DRIVER');
+    expect(candidates.map((candidate) => candidate.riderId)).not.toContain(driver.driverId);
+    await expect((dispatch as unknown as {
+      canReceiveOffer(pool: 'DRIVER', moverId: string): Promise<boolean>;
+    }).canReceiveOffer('DRIVER', driver.driverId)).resolves.toBe(false);
+
+    const board = await inject('GET', '/api/v1/driver/rides/available', undefined, driver.token);
+    expect(board.statusCode).toBe(200);
+    expect(board.json().data).toEqual([]);
+    await app.prisma.driver.update({ where: { id: driver.driverId }, data: { isOnline: false, isAvailable: false } });
+  });
+
+  it('atomically removes an owning driver session from taxi supply on logout', async () => {
+    await app.prisma.driver.updateMany({ data: { isOnline: false, isAvailable: false } });
+    const driver = await makeDriver({ lat: CENTRAL.lat, lng: CENTRAL.lng });
+    await app.prisma.driver.update({
+      where: { id: driver.driverId },
+      data: { locationSessionId: driver.sessionId },
+    });
+
+    const before = await dispatch.findCandidates(
+      `logout-before-${nanoid(6)}`,
+      CENTRAL,
+      5,
+      'DRIVER',
+    );
+    expect(before.map((candidate) => candidate.riderId)).toContain(driver.driverId);
+
+    await new AuthService(app).logout(driver.sessionId, driver.userId);
+
+    const [profile, revokedSession, after] = await Promise.all([
+      app.prisma.driver.findUniqueOrThrow({ where: { id: driver.driverId } }),
+      app.prisma.session.findUnique({ where: { id: driver.sessionId } }),
+      dispatch.findCandidates(`logout-after-${nanoid(6)}`, CENTRAL, 5, 'DRIVER'),
+    ]);
+    expect({
+      locationSessionId: profile.locationSessionId,
+      isOnline: profile.isOnline,
+      isAvailable: profile.isAvailable,
+    }).toEqual({ locationSessionId: null, isOnline: false, isAvailable: false });
+    expect(revokedSession).toBeNull();
+    expect(after.map((candidate) => candidate.riderId)).not.toContain(driver.driverId);
+  });
+
+  it('excludes a suspended Driver and rejects an already-issued taxi claim', async () => {
+    await app.prisma.driver.updateMany({ data: { isOnline: false, isAvailable: false } });
+    const customer = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
+    const driver = await makeDriver({ lat: CENTRAL.lat, lng: CENTRAL.lng });
+    const requested = await inject('POST', '/api/v1/rides/request', {
+      pickup: CENTRAL,
+      dropoff: SOUTH,
+      pickupAddress: 'Status A',
+      dropoffAddress: 'Status B',
+    }, customer.token);
+    expect(requested.statusCode).toBe(201);
+    const rideId = requested.json().data.ride.id as string;
+
+    await app.prisma.user.update({ where: { id: driver.userId }, data: { status: 'SUSPENDED' } });
+    const candidates = await dispatch.findCandidates(
+      `suspended-${nanoid(6)}`,
+      CENTRAL,
+      5,
+      'DRIVER',
+    );
+    expect(candidates.map((candidate) => candidate.riderId)).not.toContain(driver.driverId);
+    await expect(dispatch.claimOrder(rideId, driver.driverId, 'DRIVER'))
+      .rejects.toMatchObject({ code: 'MOVER_INACTIVE' });
+    const after = await app.prisma.order.findUniqueOrThrow({ where: { id: rideId } });
+    expect({ driverId: after.driverId, status: after.status }).toEqual({
+      driverId: null,
+      status: 'PENDING',
+    });
+  });
+
   it('never offers a booking user their OWN ride: findCandidates excludes excludeUserId', async () => {
     await app.prisma.driver.updateMany({ data: { isOnline: false, isAvailable: false } }); // isolate
     const me = await makeDriver({ lat: CENTRAL.lat, lng: CENTRAL.lng });               // online driver AND a customer
@@ -482,6 +737,44 @@ describe('Taxi dispatch S3 — self-exclusion + supply-watch hygiene', () => {
     // RED before self-exclusion: my own driver row was a candidate for my own ride.
     expect(ids).not.toContain(me.driverId);
     expect(ids).toContain(other.driverId); // a different driver is still eligible
+  });
+
+  it('hides and rejects a dual-role driver account claiming its own taxi request at HTTP and DB barriers', async () => {
+    await app.prisma.driver.updateMany({ data: { isOnline: false, isAvailable: false } });
+    const me = await makeDriver({ lat: CENTRAL.lat, lng: CENTRAL.lng });
+    const ride = await app.prisma.order.create({
+      data: {
+        orderNumber: `SELF-${nanoid(8)}`,
+        orderType: 'TAXI',
+        customerId: me.userId,
+        status: 'PENDING',
+        pickupAddress: 'Self Taxi A',
+        pickupLat: CENTRAL.lat,
+        pickupLng: CENTRAL.lng,
+        deliveryAddress: 'Self Taxi B',
+        deliveryLat: SOUTH.lat,
+        deliveryLng: SOUTH.lng,
+        subtotalBase: 0,
+        subtotalMarkup: 0,
+        subtotalCustomer: 0,
+        deliveryFee: 0,
+        taxiFareTotal: 2000,
+        totalAmount: 2000,
+        paymentMethod: 'CASH',
+      },
+    });
+
+    const board = await inject('GET', '/api/v1/driver/rides/available', undefined, me.token);
+    expect(board.statusCode).toBe(200);
+    expect((board.json().data as Array<{ id: string }>).map((row) => row.id)).not.toContain(ride.id);
+
+    const direct = await inject('POST', `/api/v1/driver/rides/${ride.id}/accept`, {}, me.token);
+    expect(direct.statusCode).toBe(409);
+    expect(direct.json().error.code).toBe('SELF_OWN_ORDER');
+    await expect(dispatch.claimOrder(ride.id, me.driverId, 'DRIVER')).rejects.toMatchObject({ code: 'SELF_OWN_ORDER' });
+    const durable = await app.prisma.order.findUniqueOrThrow({ where: { id: ride.id } });
+    expect({ status: durable.status, driverId: durable.driverId }).toEqual({ status: 'PENDING', driverId: null });
+    await app.prisma.driver.update({ where: { id: me.driverId }, data: { isOnline: false, isAvailable: false } });
   });
 
   it('requesting a ride clears the customer’s pending supply watch (no stale "drivers are back")', async () => {
@@ -562,8 +855,37 @@ describe('Taxi live-operation gate (hire-class insurance)', () => {
         nextBillingDate: new Date(Date.now() + 7 * DAY),
       },
     });
-    const res = await inject('POST', '/api/v1/driver/go-online', {}, d.token);
+    const siblingRider = await app.prisma.rider.create({
+      data: {
+        userId: d.userId,
+        riderType: 'DELIVERY',
+        vehicleType: 'MOTORCYCLE',
+        documentsVerified: true,
+        isOnline: true,
+        isAvailable: true,
+        currentLat: CENTRAL.lat,
+        currentLng: CENTRAL.lng,
+        lastLocationUpdate: new Date(),
+      },
+    });
+    const res = await inject('POST', '/api/v1/driver/go-online', {
+      latitude: 6.8234,
+      longitude: -58.1678,
+    }, d.token);
     expect(res.statusCode).toBe(200);
+    const located = await app.prisma.driver.findUniqueOrThrow({ where: { id: d.driverId } });
+    expect(located.currentLat).toBe(6.8234);
+    expect(located.currentLng).toBe(-58.1678);
+    expect(located.lastLocationUpdate).not.toBeNull();
+    const retiredSibling = await app.prisma.rider.findUniqueOrThrow({ where: { id: siblingRider.id } });
+    expect({ online: retiredSibling.isOnline, available: retiredSibling.isAvailable }).toEqual({
+      online: false,
+      available: false,
+    });
+    await app.prisma.driver.update({
+      where: { id: d.driverId },
+      data: { isOnline: false, isAvailable: false },
+    });
   });
 
   it('blocks go-online when PAST_DUE and the grace window has ended', async () => {
@@ -577,7 +899,10 @@ describe('Taxi live-operation gate (hire-class insurance)', () => {
         gracePeriodEnd: new Date(Date.now() - 60_000), // grace ended a minute ago
       },
     });
-    const res = await inject('POST', '/api/v1/driver/go-online', {}, d.token);
+    const res = await inject('POST', '/api/v1/driver/go-online', {
+      latitude: CENTRAL.lat,
+      longitude: CENTRAL.lng,
+    }, d.token);
     // RED before the fix: PAST_DUE was allowed regardless of grace, so a lapsed
     // mover kept earning unpaid until the billing sweep flipped SUSPENDED.
     expect(res.statusCode).toBe(403);
@@ -595,8 +920,15 @@ describe('Taxi live-operation gate (hire-class insurance)', () => {
         gracePeriodEnd: new Date(Date.now() + 2 * 3600 * 1000), // 2h of grace left
       },
     });
-    const res = await inject('POST', '/api/v1/driver/go-online', {}, d.token);
+    const res = await inject('POST', '/api/v1/driver/go-online', {
+      latitude: CENTRAL.lat,
+      longitude: CENTRAL.lng,
+    }, d.token);
     expect(res.statusCode).toBe(200);
+    await app.prisma.driver.update({
+      where: { id: d.driverId },
+      data: { isOnline: false, isAvailable: false },
+    });
   });
 
   it('SWIFT-066: a driver mid-ride who re-opens and taps GO is online but NOT available', async () => {
@@ -613,12 +945,314 @@ describe('Taxi live-operation gate (hire-class insurance)', () => {
     // tapping GO must not re-advertise them as free supply.
     await app.prisma.driver.update({ where: { id: d.driverId }, data: { currentRideId: 'ride-in-progress' } });
 
-    const res = await inject('POST', '/api/v1/driver/go-online', {}, d.token);
+    const res = await inject('POST', '/api/v1/driver/go-online', {
+      latitude: CENTRAL.lat,
+      longitude: CENTRAL.lng,
+    }, d.token);
     expect(res.statusCode).toBe(200);
     const after = await app.prisma.driver.findUniqueOrThrow({ where: { id: d.driverId } });
     expect(after.isOnline).toBe(true);
     // RED before SWIFT-066: this was true → dispatch would offer a second ride mid-trip.
     expect(after.isAvailable).toBe(false);
+    await app.prisma.driver.update({
+      where: { id: d.driverId },
+      data: { isOnline: false, isAvailable: false, currentRideId: null },
+    });
+  });
+});
+
+describe('Driver location authority', () => {
+  it('cannot reclaim a legacy null owner after its in-flight session is revoked', async () => {
+    const d = await makeDriver({ lat: 6.831, lng: -58.171 });
+    await app.prisma.driver.update({
+      where: { id: d.driverId },
+      data: { locationSessionId: null },
+    });
+    await app.redis.del(`driver:location_db_ts:${d.driverId}`);
+
+    let reachedProfileRead!: () => void;
+    let resumeProfileRead!: () => void;
+    const atProfileRead = new Promise<void>((resolve) => { reachedProfileRead = resolve; });
+    const resume = new Promise<void>((resolve) => { resumeProfileRead = resolve; });
+    const originalFindUnique = app.prisma.driver.findUnique.bind(app.prisma.driver);
+    const profileRead = vi.spyOn(app.prisma.driver, 'findUnique').mockImplementationOnce((async (...args: unknown[]) => {
+      const profile = await originalFindUnique(...(args as [Parameters<typeof originalFindUnique>[0]]));
+      reachedProfileRead();
+      await resume;
+      return profile;
+    }) as never);
+
+    let staleSample!: Awaited<ReturnType<typeof app.inject>>;
+    try {
+      const staleSamplePromise = inject('PUT', '/api/v1/driver/location', {
+        latitude: 6.99,
+        longitude: -58.29,
+      }, d.token);
+      await atProfileRead;
+      await new AuthService(app).logout(d.sessionId, d.userId);
+      resumeProfileRead();
+      staleSample = await staleSamplePromise;
+    } finally {
+      resumeProfileRead();
+      profileRead.mockRestore();
+    }
+
+    expect(staleSample.statusCode).toBe(200);
+    expect(staleSample.json().data).toEqual({ accepted: false, reason: 'SESSION_REPLACED' });
+    const [after, revoked] = await Promise.all([
+      app.prisma.driver.findUniqueOrThrow({ where: { id: d.driverId } }),
+      app.prisma.session.findUnique({ where: { id: d.sessionId } }),
+    ]);
+    expect(revoked).toBeNull();
+    expect(after.locationSessionId).toBeNull();
+    expect({ lat: after.currentLat, lng: after.currentLng }).toEqual({ lat: 6.831, lng: -58.171 });
+    await app.prisma.driver.update({
+      where: { id: d.driverId },
+      data: { isOnline: false, isAvailable: false },
+    });
+  });
+
+  it('rotates GO ownership to the latest device and rejects the replaced session', async () => {
+    const d = await makeDriver();
+    await makeDriverEligibleForGo(d);
+    const secondDevice = await makeDriverDeviceSession(d.userId, 'step9-second-device');
+
+    const firstGo = await inject('POST', '/api/v1/driver/go-online', {
+      latitude: 6.801,
+      longitude: -58.151,
+    }, d.token);
+    expect(firstGo.statusCode).toBe(200);
+    expect((await app.prisma.driver.findUniqueOrThrow({ where: { id: d.driverId } })).locationSessionId)
+      .toBe(d.sessionId);
+
+    const secondGo = await inject('POST', '/api/v1/driver/go-online', {
+      latitude: 6.802,
+      longitude: -58.152,
+    }, secondDevice.token);
+    expect(secondGo.statusCode).toBe(200);
+    const afterReplacement = await app.prisma.driver.findUniqueOrThrow({ where: { id: d.driverId } });
+    expect(afterReplacement.locationSessionId).toBe(secondDevice.sessionId);
+    expect({ lat: afterReplacement.currentLat, lng: afterReplacement.currentLng })
+      .toEqual({ lat: 6.802, lng: -58.152 });
+
+    await app.redis.del(`driver:location_db_ts:${d.driverId}`);
+    const replacedSample = await inject('PUT', '/api/v1/driver/location', {
+      latitude: 6.91,
+      longitude: -58.21,
+    }, d.token);
+    expect(replacedSample.statusCode).toBe(200);
+    expect(replacedSample.json().data).toEqual({ accepted: false, reason: 'SESSION_REPLACED' });
+    const afterRejectedSample = await app.prisma.driver.findUniqueOrThrow({ where: { id: d.driverId } });
+    expect({ lat: afterRejectedSample.currentLat, lng: afterRejectedSample.currentLng })
+      .toEqual({ lat: 6.802, lng: -58.152 });
+
+    const ownerSample = await inject('PUT', '/api/v1/driver/location', {
+      latitude: 6.803,
+      longitude: -58.153,
+    }, secondDevice.token);
+    expect(ownerSample.statusCode).toBe(200);
+    expect(ownerSample.json()).toEqual({ success: true });
+    const afterOwnerSample = await app.prisma.driver.findUniqueOrThrow({ where: { id: d.driverId } });
+    expect({ lat: afterOwnerSample.currentLat, lng: afterOwnerSample.currentLng })
+      .toEqual({ lat: 6.803, lng: -58.153 });
+
+    const offline = await inject('POST', '/api/v1/driver/go-offline', undefined, secondDevice.token);
+    expect(offline.statusCode).toBe(200);
+    const afterOffline = await app.prisma.driver.findUniqueOrThrow({ where: { id: d.driverId } });
+    expect(afterOffline.locationSessionId).toBeNull();
+    expect(afterOffline.isOnline).toBe(false);
+  });
+
+  it('does not emit an old-device sample when GO rotates during a debounced update', async () => {
+    const d = await makeDriver();
+    await makeDriverEligibleForGo(d);
+    const secondDevice = await makeDriverDeviceSession(d.userId, 'step9-race-winner');
+    const firstGo = await inject('POST', '/api/v1/driver/go-online', {
+      latitude: 6.841,
+      longitude: -58.181,
+    }, d.token);
+    expect(firstGo.statusCode).toBe(200);
+
+    const customer = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
+    const ride = await app.prisma.order.create({
+      data: {
+        orderNumber: `LOC-RACE-${nanoid(8)}`,
+        orderType: 'TAXI',
+        customerId: customer.userId,
+        driverId: d.driverId,
+        status: 'DRIVER_ASSIGNED',
+        pickupLat: CENTRAL.lat,
+        pickupLng: CENTRAL.lng,
+        pickupAddress: 'Race pickup',
+        deliveryLat: SOUTH.lat,
+        deliveryLng: SOUTH.lng,
+        deliveryAddress: 'Race dropoff',
+        subtotalBase: 0,
+        subtotalMarkup: 0,
+        subtotalCustomer: 0,
+        deliveryFee: 0,
+        totalAmount: 1500,
+        paymentMethod: 'CASH',
+      },
+    });
+    await app.prisma.driver.update({
+      where: { id: d.driverId },
+      data: { currentRideId: ride.id, isAvailable: false },
+    });
+
+    let reachedDebounce!: () => void;
+    let resumeDebounce!: () => void;
+    const atDebounce = new Promise<void>((resolve) => { reachedDebounce = resolve; });
+    const resume = new Promise<void>((resolve) => { resumeDebounce = resolve; });
+    const originalRedisGet = app.redis.get.bind(app.redis);
+    const redisGet = vi.spyOn(app.redis, 'get').mockImplementationOnce((async (...args: unknown[]) => {
+      reachedDebounce();
+      await resume;
+      return originalRedisGet(...(args as [string]));
+    }) as never);
+    const emits: Array<{ room: string; event: string }> = [];
+    const ioTo = vi.spyOn(app.io, 'to').mockImplementation(((room: string) => ({
+      emit: (event: string) => { emits.push({ room, event }); return true; },
+    })) as never);
+
+    let replacement!: Awaited<ReturnType<typeof app.inject>>;
+    let oldSample!: Awaited<ReturnType<typeof app.inject>>;
+    try {
+      const oldSamplePromise = inject('PUT', '/api/v1/driver/location', {
+        latitude: 6.99,
+        longitude: -58.29,
+      }, d.token);
+      await atDebounce;
+
+      replacement = await inject('POST', '/api/v1/driver/go-online', {
+        latitude: 6.842,
+        longitude: -58.182,
+      }, secondDevice.token);
+      resumeDebounce();
+      oldSample = await oldSamplePromise;
+    } finally {
+      resumeDebounce();
+      redisGet.mockRestore();
+      ioTo.mockRestore();
+    }
+
+    expect(replacement.statusCode).toBe(200);
+    expect(oldSample.statusCode).toBe(200);
+    expect(oldSample.json().data).toEqual({ accepted: false, reason: 'SESSION_REPLACED' });
+    expect(emits).not.toContainEqual({ room: `order:${ride.id}`, event: 'driver:location' });
+    const after = await app.prisma.driver.findUniqueOrThrow({ where: { id: d.driverId } });
+    expect(after.locationSessionId).toBe(secondDevice.sessionId);
+    expect({ lat: after.currentLat, lng: after.currentLng }).toEqual({ lat: 6.842, lng: -58.182 });
+  });
+
+  it('atomically gives a legacy null owner to one device and clears it on role retirement', async () => {
+    const d = await makeDriver();
+    const secondDevice = await makeDriverDeviceSession(d.userId, 'step9-legacy-contender');
+    await app.prisma.driver.update({
+      where: { id: d.driverId },
+      data: { locationSessionId: null },
+    });
+    await app.redis.del(`driver:location_db_ts:${d.driverId}`);
+
+    const samples = [
+      { latitude: 6.811, longitude: -58.161 },
+      { latitude: 6.812, longitude: -58.162 },
+    ];
+    const responses = await Promise.all([
+      inject('PUT', '/api/v1/driver/location', samples[0], d.token),
+      inject('PUT', '/api/v1/driver/location', samples[1], secondDevice.token),
+    ]);
+    expect(responses.map((response) => response.statusCode)).toEqual([200, 200]);
+    const bodies = responses.map((response) => response.json());
+    expect(bodies.filter((body) => body.data?.reason === 'SESSION_REPLACED')).toHaveLength(1);
+    expect(bodies.filter((body) => body.data === undefined)).toHaveLength(1);
+
+    const winningIndex = bodies.findIndex((body) => body.data === undefined);
+    const expectedSessionIds = [d.sessionId, secondDevice.sessionId];
+    const claimed = await app.prisma.driver.findUniqueOrThrow({ where: { id: d.driverId } });
+    expect(claimed.locationSessionId).toBe(expectedSessionIds[winningIndex]);
+    expect({ lat: claimed.currentLat, lng: claimed.currentLng }).toEqual({
+      lat: samples[winningIndex]!.latitude,
+      lng: samples[winningIndex]!.longitude,
+    });
+
+    await transitionUserRoleAuthority(app, d.userId, 'CUSTOMER');
+    const retired = await app.prisma.driver.findUniqueOrThrow({ where: { id: d.driverId } });
+    expect(retired.locationSessionId).toBeNull();
+    expect({ online: retired.isOnline, available: retired.isAvailable }).toEqual({
+      online: false,
+      available: false,
+    });
+  });
+
+  it('treats a queued offline sample as a no-op', async () => {
+    const d = await makeDriver({ lat: 6.8, lng: -58.15 });
+    await app.prisma.driver.update({
+      where: { id: d.driverId },
+      data: { isOnline: false, isAvailable: false, currentRideId: null },
+    });
+    await app.redis.del(`driver:location_db_ts:${d.driverId}`);
+
+    const res = await inject('PUT', '/api/v1/driver/location', {
+      latitude: 6.91,
+      longitude: -58.21,
+    }, d.token);
+
+    expect(res.statusCode).toBe(200);
+    expect(res.json().data).toEqual({ accepted: false, reason: 'OFFLINE' });
+    const after = await app.prisma.driver.findUniqueOrThrow({ where: { id: d.driverId } });
+    expect({ lat: after.currentLat, lng: after.currentLng }).toEqual({ lat: 6.8, lng: -58.15 });
+    expect(await app.redis.get(`driver:location_db_ts:${d.driverId}`)).toBeNull();
+  });
+
+  it('persists an online sample and preserves tracking for a force-offlined active ride', async () => {
+    const online = await makeDriver();
+    await app.redis.del(`driver:location_db_ts:${online.driverId}`);
+    const onlineRes = await inject('PUT', '/api/v1/driver/location', {
+      latitude: 6.82,
+      longitude: -58.16,
+    }, online.token);
+    expect(onlineRes.statusCode).toBe(200);
+    await app.prisma.driver.update({
+      where: { id: online.driverId },
+      data: { isOnline: false, isAvailable: false },
+    });
+
+    const active = await makeDriver();
+    const customer = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
+    const ride = await app.prisma.order.create({
+      data: {
+        orderNumber: `LOC-${nanoid(8)}`,
+        orderType: 'TAXI',
+        customerId: customer.userId,
+        driverId: active.driverId,
+        status: 'DRIVER_ASSIGNED',
+        pickupLat: CENTRAL.lat,
+        pickupLng: CENTRAL.lng,
+        pickupAddress: 'Location pickup',
+        deliveryLat: SOUTH.lat,
+        deliveryLng: SOUTH.lng,
+        deliveryAddress: 'Location dropoff',
+        subtotalBase: 0,
+        subtotalMarkup: 0,
+        subtotalCustomer: 0,
+        deliveryFee: 0,
+        totalAmount: 1500,
+        paymentMethod: 'CASH',
+      },
+    });
+    await app.prisma.driver.update({
+      where: { id: active.driverId },
+      data: { isOnline: false, isAvailable: false, currentRideId: ride.id },
+    });
+    await app.redis.del(`driver:location_db_ts:${active.driverId}`);
+    const activeRes = await inject('PUT', '/api/v1/driver/location', {
+      latitude: 6.83,
+      longitude: -58.17,
+    }, active.token);
+    expect(activeRes.statusCode).toBe(200);
+    const after = await app.prisma.driver.findUniqueOrThrow({ where: { id: active.driverId } });
+    expect({ lat: after.currentLat, lng: after.currentLng }).toEqual({ lat: 6.83, lng: -58.17 });
   });
 });
 
@@ -695,5 +1329,69 @@ describe('Driver cancellationRate accountability (was a dead 0.0 field)', () => 
 
     const after = (await app.prisma.driver.findUniqueOrThrow({ where: { id: driver.driverId } })).cancellationRate;
     expect(after).toBeCloseTo(40, 1); // 50 * 0.8 — a completer recovers
+  });
+
+  it('completion rolls back ride facts, driver release/count/rate, earnings, and log on fault, then retries once', async () => {
+    const customer = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
+    const driver = await makeDriver();
+    await app.prisma.driver.update({ where: { id: driver.driverId }, data: { cancellationRate: 50 } });
+    const requested = await inject('POST', '/api/v1/rides/request', {
+      pickup: CENTRAL,
+      dropoff: SOUTH,
+      pickupAddress: 'Atomic Complete A',
+      dropoffAddress: 'Atomic Complete B',
+    }, customer.token);
+    const rideId = requested.json().data.ride.id as string;
+    expect((await inject('POST', `/api/v1/driver/rides/${rideId}/accept`, {}, driver.token)).statusCode).toBe(200);
+    await app.prisma.order.update({
+      where: { id: rideId },
+      data: { status: 'RIDE_IN_PROGRESS', pickedUpAt: new Date(Date.now() - 5 * 60_000) },
+    });
+    const before = await app.prisma.driver.findUniqueOrThrow({ where: { id: driver.driverId } });
+
+    const originalStage = OrderService.prototype.stageCanonicalOrderTransition;
+    const stageSpy = vi
+      .spyOn(OrderService.prototype, 'stageCanonicalOrderTransition')
+      .mockImplementationOnce(async function (this: OrderService, tx, input) {
+        await originalStage.call(this, tx, input);
+        throw new Error('forced taxi-complete pre-commit abort');
+      });
+    try {
+      const failed = await inject('PUT', `/api/v1/driver/rides/${rideId}/complete`, {}, driver.token);
+      expect(failed.statusCode).toBe(500);
+    } finally {
+      stageSpy.mockRestore();
+    }
+
+    const [failedOrder, failedDriver, failedEarnings, failedLogs] = await Promise.all([
+      app.prisma.order.findUniqueOrThrow({ where: { id: rideId } }),
+      app.prisma.driver.findUniqueOrThrow({ where: { id: driver.driverId } }),
+      app.prisma.earning.count({ where: { orderId: rideId } }),
+      app.prisma.orderStatusLog.count({ where: { orderId: rideId, status: 'DELIVERED' } }),
+    ]);
+    expect({ status: failedOrder.status, deliveredAt: failedOrder.deliveredAt, duration: failedOrder.actualDeliveryTime })
+      .toEqual({ status: 'RIDE_IN_PROGRESS', deliveredAt: null, duration: null });
+    expect({ available: failedDriver.isAvailable, pointer: failedDriver.currentRideId, rides: failedDriver.totalRides, rate: failedDriver.cancellationRate })
+      .toEqual({ available: false, pointer: rideId, rides: before.totalRides, rate: before.cancellationRate });
+    expect(failedEarnings).toBe(0);
+    expect(failedLogs).toBe(0);
+
+    const retry = await inject('PUT', `/api/v1/driver/rides/${rideId}/complete`, {}, driver.token);
+    expect(retry.statusCode).toBe(200);
+    const duplicate = await inject('PUT', `/api/v1/driver/rides/${rideId}/complete`, {}, driver.token);
+    expect(duplicate.statusCode).toBe(400);
+    const [completedOrder, completedDriver, earnings, logs] = await Promise.all([
+      app.prisma.order.findUniqueOrThrow({ where: { id: rideId } }),
+      app.prisma.driver.findUniqueOrThrow({ where: { id: driver.driverId } }),
+      app.prisma.earning.count({ where: { orderId: rideId, type: 'TAXI_FARE' } }),
+      app.prisma.orderStatusLog.count({ where: { orderId: rideId, status: 'DELIVERED' } }),
+    ]);
+    expect(completedOrder.status).toBe('DELIVERED');
+    expect(completedOrder.actualDeliveryTime).toBeGreaterThanOrEqual(5);
+    expect({ available: completedDriver.isAvailable, pointer: completedDriver.currentRideId, rides: completedDriver.totalRides })
+      .toEqual({ available: true, pointer: null, rides: before.totalRides + 1 });
+    expect(completedDriver.cancellationRate).toBeCloseTo(40, 1);
+    expect(earnings).toBe(1);
+    expect(logs).toBe(1);
   });
 });

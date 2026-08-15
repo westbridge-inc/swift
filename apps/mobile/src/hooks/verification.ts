@@ -3,6 +3,14 @@ import { authApi, verificationApi, partnerApi, type VehicleKind } from '../servi
 import { maybePrimeNotifications } from '../services/notification-priming';
 import { useMoverPreview } from '../stores/moverPreview';
 import { PREVIEW_VERIFICATION, previewQuery } from '../lib/moverPreviewData';
+import {
+  AuthSessionBoundaryError,
+  requireAuthSessionForPrincipal,
+  requireAuthSessionSnapshot,
+  useAuthStore,
+} from '../stores/authStore';
+import { canonicalMoverAuthority } from '../lib/moverAuthorityCache';
+import type { AuthSessionSnapshot } from '../lib/authSession';
 
 const PRIVACY_NOTICE_VERSION = 'v1';
 
@@ -45,8 +53,9 @@ export function usePartnerPricing(countryCode?: string) {
 
 export function useBecomePartner() {
   const qc = useQueryClient();
+  const setUserIfCurrent = useAuthStore((s) => s.setUserIfCurrent);
   return useMutation({
-    mutationFn: (data: {
+    mutationFn: async (data: {
       role: 'MOVER' | 'VENDOR';
       vehicleType?: VehicleKind;
       vehicle?: { make: string; model: string; year: number; color: string; licensePlate: string };
@@ -60,14 +69,40 @@ export function useBecomePartner() {
         latitude: number;
         longitude: number;
       };
-    }) => unwrap(partnerApi.become(data)),
-    onSuccess: (_result, variables) => {
-      qc.invalidateQueries({ queryKey: ['verification'] });
-      qc.invalidateQueries({ queryKey: ['vendor'] });
-      qc.invalidateQueries({ queryKey: ['mover'] });
+    }) => {
+      const owner = requireAuthSessionSnapshot();
+      const user = useAuthStore.getState().user as (Parameters<
+        typeof setUserIfCurrent
+      >[1] & { lastMoverRole?: string | null }) | null;
+      if (!user || user.id !== owner.userId) throw new AuthSessionBoundaryError();
+      const result = await unwrap<{
+        roles?: string[];
+        activeRole?: string;
+        lastMoverRole?: 'DRIVER' | 'RIDER' | null;
+      }>(partnerApi.become(data, owner));
+      requireAuthSessionForPrincipal(owner);
+      if (result.roles) {
+        const canonical = canonicalMoverAuthority(
+          result,
+          result.activeRole ?? data.role,
+          user.lastMoverRole,
+        );
+        if (!setUserIfCurrent(owner, {
+          ...user,
+          roles: result.roles,
+          ...canonical,
+        } as unknown as Parameters<typeof setUserIfCurrent>[1])) {
+          throw new AuthSessionBoundaryError();
+        }
+      }
+      requireAuthSessionForPrincipal(owner);
+      void qc.invalidateQueries({ queryKey: ['verification'] });
+      void qc.invalidateQueries({ queryKey: ['vendor'] });
+      void qc.invalidateQueries({ queryKey: ['mover'] });
       // Application in / store created — the earner's first obviously-useful
       // notification moment [first-open SO-5].
-      maybePrimeNotifications(variables.role === 'MOVER' ? 'driver_application' : 'store_created');
+      maybePrimeNotifications(data.role === 'MOVER' ? 'driver_application' : 'store_created');
+      return result;
     },
   });
 }
@@ -75,10 +110,19 @@ export function useBecomePartner() {
 /** Upload a single picked file to storage; resolves to its fileUrl. */
 export function useUploadFile() {
   return useMutation({
-    mutationFn: async (file: { uri: string; name: string; type: string }) => {
+    mutationFn: async (input: {
+      uri: string;
+      name: string;
+      type: string;
+      authSession?: AuthSessionSnapshot;
+    }) => {
+      const { authSession, ...file } = input;
+      const owner = authSession ?? requireAuthSessionSnapshot();
+      const current = requireAuthSessionForPrincipal(owner);
       const form = new FormData();
       form.append('file', { uri: file.uri, name: file.name, type: file.type } as any);
-      const up = await unwrap<{ url: string }>(verificationApi.upload(form));
+      const up = await unwrap<{ url: string }>(verificationApi.upload(form, current));
+      requireAuthSessionForPrincipal(owner);
       return up.url;
     },
   });
@@ -88,9 +132,16 @@ export function useUploadFile() {
 export function useSubmitIdentity() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: (data: { idDocumentUrl: string; selfieUrl: string }) =>
-      unwrap(verificationApi.submitIdentity({ ...data, consent: true, privacyNoticeVersion: PRIVACY_NOTICE_VERSION })),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['verification'] }),
+    mutationFn: async (data: { idDocumentUrl: string; selfieUrl: string }) => {
+      const owner = requireAuthSessionSnapshot();
+      const result = await unwrap(verificationApi.submitIdentity(
+        { ...data, consent: true, privacyNoticeVersion: PRIVACY_NOTICE_VERSION },
+        owner,
+      ));
+      requireAuthSessionForPrincipal(owner);
+      void qc.invalidateQueries({ queryKey: ['verification'] });
+      return result;
+    },
   });
 }
 
@@ -98,20 +149,29 @@ export function useSubmitIdentity() {
 export function useUploadDocument(role: string) {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: async ({ docType, file }: { docType: string; file: { uri: string; name: string; type: string } }) => {
+    mutationFn: async ({ docType, file, authSession }: {
+      docType: string;
+      file: { uri: string; name: string; type: string };
+      authSession?: AuthSessionSnapshot;
+    }) => {
+      const owner = authSession ?? requireAuthSessionSnapshot();
+      const initial = requireAuthSessionForPrincipal(owner);
       const form = new FormData();
       form.append('file', { uri: file.uri, name: file.name, type: file.type } as any);
-      const uploaded = await unwrap<{ url: string }>(verificationApi.upload(form));
-      return unwrap(
+      const uploaded = await unwrap<{ url: string }>(verificationApi.upload(form, initial));
+      const current = requireAuthSessionForPrincipal(owner);
+      const result = await unwrap(
         verificationApi.submitDocument({
           role,
           docType,
           fileUrl: uploaded.url,
           consent: true,
           privacyNoticeVersion: PRIVACY_NOTICE_VERSION,
-        }),
+        }, current),
       );
+      requireAuthSessionForPrincipal(owner);
+      void qc.invalidateQueries({ queryKey: ['verification', role] });
+      return result;
     },
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['verification', role] }),
   });
 }

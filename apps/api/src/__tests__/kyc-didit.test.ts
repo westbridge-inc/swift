@@ -93,4 +93,16 @@ describe('DiditKycProvider (standalone v3 API)', () => {
     process.env['KYC_PROVIDER'] = 'didit';
     expect(getKycProvider()).toBeInstanceOf(DiditKycProvider);
   });
+
+  it('the factory never permits sandbox KYC in production', () => {
+    const previous = process.env['NODE_ENV'];
+    process.env['NODE_ENV'] = 'production';
+    delete process.env['KYC_PROVIDER'];
+    try {
+      expect(() => getKycProvider()).toThrow(/sandbox.*forbidden/i);
+    } finally {
+      if (previous === undefined) delete process.env['NODE_ENV'];
+      else process.env['NODE_ENV'] = previous;
+    }
+  });
 });

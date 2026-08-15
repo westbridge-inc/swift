@@ -2,11 +2,23 @@
 import React from 'react';
 import { Pressable, View } from 'react-native';
 import { Feather } from '@expo/vector-icons';
+import { useQueryClient } from '@tanstack/react-query';
 import { color, radius, space } from '@swift/ui';
-import { Pictogram, PopupCard, T, TonePill, type PictogramName } from '../kit';
-import { useAuthStore } from '../stores/authStore';
+import { DecorativeIcon, Pictogram, PopupCard, PopupTitle, T, TonePill, type PictogramName } from '../kit';
+import {
+  AuthSessionBoundaryError,
+  getAuthSessionSnapshot,
+  requireAuthSessionForPrincipal,
+  requireAuthSessionSnapshot,
+  useAuthStore,
+} from '../stores/authStore';
 import { customerApi } from '../services/api';
-import { switchRolePayload } from '../lib/roleLanding';
+import { roleSwitchAuthorityPayload } from '../lib/roleLanding';
+import { toast } from './ui/toast';
+import {
+  canonicalMoverAuthority,
+  clearMoverAuthorityCache,
+} from '../lib/moverAuthorityCache';
 
 type Intent = 'customer' | 'mover' | 'vendor';
 
@@ -51,31 +63,97 @@ export function RoleSwitcherSheet({
   onClose: () => void;
 }) {
   const setIntent = useAuthStore((s) => s.setIntent);
-  const user = useAuthStore((s) => s.user) as { roles?: string[]; driver?: unknown; rider?: unknown; vendorOwner?: unknown } | null;
+  const setIntentIfCurrent = useAuthStore((s) => s.setIntentIfCurrent);
+  const setUserIfCurrent = useAuthStore((s) => s.setUserIfCurrent);
+  const queryClient = useQueryClient();
+  const [switching, setSwitching] = React.useState(false);
+  const user = useAuthStore((s) => s.user) as (Parameters<typeof setUserIfCurrent>[1] & {
+    lastMoverRole?: string | null;
+    driver?: unknown;
+    rider?: unknown;
+    vendorOwner?: unknown;
+  }) | null;
   const roles: string[] = user?.roles ?? [];
   const owns = (intent: Intent): boolean => {
     if (intent === 'customer') return true;
-    if (intent === 'mover') return roles.includes('DRIVER') || roles.includes('RIDER') || !!user?.driver || !!user?.rider;
+    if (intent === 'mover') return roles.includes('MOVER') || roles.includes('DRIVER') || roles.includes('RIDER') || !!user?.driver || !!user?.rider;
     return roles.includes('VENDOR_OWNER') || !!user?.vendorOwner;
   };
 
-  const pick = (intent: Intent) => {
-    onClose();
-    if (intent === current) return;
-    setIntent(intent);
-    // Owned switch → the server remembers last-used (fire-and-forget; the
-    // join flow for un-owned roles registers the role itself).
-    if (owns(intent)) {
-      const payload = switchRolePayload(intent, roles);
-      if (payload) void customerApi.switchRole(payload).catch(() => undefined);
+  const pick = async (intent: Intent) => {
+    if (switching) return;
+    if (intent === current) {
+      onClose();
+      return;
+    }
+    const operationUser = useAuthStore.getState().user as typeof user;
+    const operationRoles: string[] = operationUser?.roles ?? [];
+    const owned = intent === 'customer'
+      || (intent === 'mover'
+        ? operationRoles.includes('MOVER')
+          || operationRoles.includes('DRIVER')
+          || operationRoles.includes('RIDER')
+          || !!operationUser?.driver
+          || !!operationUser?.rider
+        : operationRoles.includes('VENDOR_OWNER') || !!operationUser?.vendorOwner);
+    const payload = roleSwitchAuthorityPayload(
+      current,
+      intent,
+      owned,
+      operationRoles,
+      operationUser?.lastMoverRole,
+    );
+    if (!payload) {
+      const owner = getAuthSessionSnapshot();
+      if (intent === 'mover') clearMoverAuthorityCache(queryClient);
+      onClose();
+      if (owner) setIntentIfCurrent(owner, intent);
+      else setIntent(intent);
+      return;
+    }
+    setSwitching(true);
+    try {
+      const owner = requireAuthSessionSnapshot();
+      if (!operationUser || operationUser.id !== owner.userId) {
+        throw new AuthSessionBoundaryError();
+      }
+      // The server takes an idle mover offline and blocks this transition when
+      // a live job exists. Change navigation only after that authority check.
+      const response = await customerApi.switchRole(payload, owner);
+      requireAuthSessionForPrincipal(owner);
+      if (current === 'mover' || intent === 'mover') {
+        clearMoverAuthorityCache(queryClient);
+      }
+      const canonical = canonicalMoverAuthority(
+        response?.data?.data,
+        payload,
+        operationUser.lastMoverRole,
+      );
+      if (!setUserIfCurrent(owner, {
+        ...operationUser,
+        ...canonical,
+      } as unknown as Parameters<typeof setUserIfCurrent>[1])) {
+        throw new AuthSessionBoundaryError();
+      }
+      if (!setIntentIfCurrent(owner, intent)) throw new AuthSessionBoundaryError();
+      requireAuthSessionForPrincipal(owner);
+      onClose();
+    } catch (error: any) {
+      if (error instanceof AuthSessionBoundaryError) return;
+      toast.error(
+        error?.response?.data?.error?.message
+          ?? 'Couldn’t switch apps. Finish any active work and try again.',
+      );
+    } finally {
+      setSwitching(false);
     }
   };
 
   return (
     <PopupCard visible={visible} onClose={onClose}>
-      <T variant="title" center>
+      <PopupTitle variant="title" center>
         Switch app
-      </T>
+      </PopupTitle>
       <T variant="label" tone="muted" center style={{ marginTop: space.sm }}>
         One account — pick where you&apos;re headed.
       </T>
@@ -85,7 +163,7 @@ export function RoleSwitcherSheet({
           const active = app.intent === current;
           const owned = owns(app.intent);
           return (
-            <Pressable key={app.intent} onPress={() => pick(app.intent)} disabled={active}>
+            <Pressable key={app.intent} onPress={() => void pick(app.intent)} disabled={active || switching}>
               {({ pressed }) => (
                 <View
                   style={{
@@ -122,7 +200,9 @@ export function RoleSwitcherSheet({
                   {active ? (
                     <TonePill label="You're here" tone="brand" />
                   ) : owned ? (
-                    <Feather name="chevron-right" size={18} color={color.text.muted} />
+                    <DecorativeIcon>
+                      <Feather name="chevron-right" size={18} color={color.text.muted} />
+                    </DecorativeIcon>
                   ) : (
                     <TonePill label="Join" tone="neutral" />
                   )}

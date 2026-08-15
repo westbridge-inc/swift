@@ -2,6 +2,7 @@ import type { PrismaClient } from '@prisma/client';
 import { IdentityService } from './identity.service';
 import { normalizePhone, normalizeEmail, normalizePlate } from './normalize';
 import { log } from '../../utils/logger';
+import { runWithoutTenant } from '../../plugins/tenant-context';
 
 // Phase 2 (spec Part 12): run the matcher across the EXISTING user base and
 // hand the founder an evidence report of every multi-account cluster BEFORE
@@ -28,6 +29,11 @@ export interface BackfillReport {
 }
 
 export async function runIdentityBackfill(prisma: PrismaClient): Promise<BackfillReport> {
+  // This is founder-only, platform-wide reconciliation. Running it through a
+  // request-scoped client otherwise scans the default tenant's users while
+  // still seeing unscoped legacy children, producing an incomplete and
+  // internally inconsistent evidence report.
+  return runWithoutTenant(async () => {
   const identity = new IdentityService(prisma);
   let captured = 0;
 
@@ -36,11 +42,11 @@ export async function runIdentityBackfill(prisma: PrismaClient): Promise<Backfil
   });
   for (const u of users) {
     if (u.phone) {
-      await identity.capture({ accountId: u.id, tenantId: 'swift-default', actorRole: String(u.activeRole), type: 'PHONE', normalizedValue: normalizePhone(u.phone), source: 'BACKFILL' });
+      await identity.capture({ accountId: u.id, actorRole: String(u.activeRole), type: 'PHONE', normalizedValue: normalizePhone(u.phone), source: 'BACKFILL' });
       captured += 1;
     }
     if (u.email) {
-      await identity.capture({ accountId: u.id, tenantId: 'swift-default', actorRole: String(u.activeRole), type: 'EMAIL', normalizedValue: normalizeEmail(u.email), source: 'BACKFILL' });
+      await identity.capture({ accountId: u.id, actorRole: String(u.activeRole), type: 'EMAIL', normalizedValue: normalizeEmail(u.email), source: 'BACKFILL' });
       captured += 1;
     }
   }
@@ -48,7 +54,7 @@ export async function runIdentityBackfill(prisma: PrismaClient): Promise<Backfil
   const drivers = await prisma.driver.findMany({ select: { userId: true, licensePlate: true } });
   for (const d of drivers) {
     if (!d.licensePlate) continue;
-    await identity.capture({ accountId: d.userId, tenantId: 'swift-default', actorRole: 'DRIVER', type: 'PLATE', normalizedValue: normalizePlate(d.licensePlate), source: 'BACKFILL' });
+    await identity.capture({ accountId: d.userId, actorRole: 'DRIVER', type: 'PLATE', normalizedValue: normalizePlate(d.licensePlate), source: 'BACKFILL' });
     captured += 1;
   }
 
@@ -65,7 +71,7 @@ export async function runIdentityBackfill(prisma: PrismaClient): Promise<Backfil
     const userId = r.rider?.userId ?? r.driver?.userId ?? r.vendor?.owner.userId;
     if (!userId || !r.mmgPayerMsisdn) continue;
     const role = r.rider ? 'RIDER' : r.driver ? 'DRIVER' : 'VENDOR';
-    await identity.capture({ accountId: userId, tenantId: 'swift-default', actorRole: role, type: 'MMG_PAYER', normalizedValue: normalizePhone(r.mmgPayerMsisdn), source: 'BACKFILL' });
+    await identity.capture({ accountId: userId, actorRole: role, type: 'MMG_PAYER', normalizedValue: normalizePhone(r.mmgPayerMsisdn), source: 'BACKFILL' });
     captured += 1;
   }
 
@@ -107,4 +113,5 @@ export async function runIdentityBackfill(prisma: PrismaClient): Promise<Backfil
   };
   log().info({ scanned: report.scanned, captured, multiAccountClusters: clusters.length }, 'identity backfill complete');
   return report;
+  });
 }

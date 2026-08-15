@@ -15,6 +15,7 @@ type ReceiptOrder = {
   orderType: string;
   fulfillment: string | null;
   paymentMethod: string | null;
+  paymentStatus: string;
   subtotalCustomer: unknown;
   deliveryFee: unknown;
   tipAmount: unknown;
@@ -32,14 +33,24 @@ const esc = (s: string) =>
 
 export function renderReceiptHtml(order: ReceiptOrder): string {
   const customerName = [order.customer?.firstName, order.customer?.lastName].filter(Boolean).join(' ');
+  // [SPS-F-0016] Never receipt money as PAID unless its capture is confirmed.
+  // The fulfilment gate makes new DELIVERED/COMPLETED MMG orders CAPTURED by
+  // construction; this guards the legacy rows that predate the gate.
+  // [REPORT-006 F-006-07] The same honesty rule for CASH: a self-delivery or
+  // legacy terminal can reach DELIVERED with paymentStatus still PENDING, and
+  // "Paid in cash" there asserts a collection nobody recorded. Say what the
+  // ledger can prove: captured → paid; otherwise → due.
+  const cashCaptured = order.paymentStatus === 'CAPTURED';
   const paidHow =
     order.paymentMethod === 'MOBILE_MONEY'
-      ? 'Paid by MMG — directly to the store'
+      ? (order.paymentStatus === 'CAPTURED'
+        ? 'Paid by MMG — directly to the store'
+        : 'MMG payment to the store — confirmation pending')
       : order.fulfillment === 'PICKUP'
-        ? 'Paid in cash at the store'
+        ? (cashCaptured ? 'Paid in cash at the store' : 'Cash due at the store')
         : order.fulfillment === 'APPOINTMENT'
-          ? 'Paid at the appointment'
-          : 'Paid in cash on delivery';
+          ? (cashCaptured ? 'Paid at the appointment' : 'Due at the appointment')
+          : (cashCaptured ? 'Paid in cash on delivery' : 'Cash due on delivery');
   const rows = order.items
     .map(
       (i) => `<tr>
@@ -87,14 +98,15 @@ export function renderReceiptHtml(order: ReceiptOrder): string {
   <table>
     ${rows}
     <tr class="totals"><td>Items</td><td class="num">${money(order.subtotalCustomer)}</td></tr>
-    ${deliveryFee > 0 ? `<tr class="totals"><td>Delivery fee (paid to your rider)</td><td class="num">${money(deliveryFee)}</td></tr>` : ''}
+    ${deliveryFee > 0 ? `<tr class="totals"><td>Delivery pay for your rider</td><td class="num">${money(deliveryFee)}</td></tr>` : ''}
     ${discount > 0 ? `<tr class="totals"><td>Discount</td><td class="num">−${money(discount)}</td></tr>` : ''}
-    ${tip > 0 ? `<tr class="totals"><td>Rider tip (100% to the rider)</td><td class="num">${money(tip)}</td></tr>` : ''}
+    ${tip > 0 ? `<tr class="totals"><td>Rider tip</td><td class="num">${money(tip)}</td></tr>` : ''}
     <tr class="grand"><td>Total</td><td class="num">${money(order.totalAmount)}</td></tr>
   </table>
   <div class="foot">
-    Swift charges no commission and holds none of this money — every dollar above went to the
-    business and the people who served you. Questions? Support lives in the Swift app.
+    Swift charges no commission and never takes custody of order money. Order payment and any
+    delivery-pay handoff happen directly between the parties shown above. Questions? Support
+    lives in the Swift app.
   </div>
 </div>
 </body>

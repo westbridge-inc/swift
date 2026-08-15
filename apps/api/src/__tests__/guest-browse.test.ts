@@ -109,6 +109,59 @@ describe('guest browsing (no account)', () => {
   it('lets guests open a vendor (menu)', async () => {
     expect((await get(`/api/v1/customer/vendors/${vendorId}`)).statusCode).toBe(200);
   });
+  it('treats suspended, banned, and deactivated browse tokens as guests', async () => {
+    const nonce = nanoid(12);
+    const user = await app.prisma.user.create({
+      data: {
+        phone: `+592${Date.now()}${Math.floor(Math.random() * 1000)}`,
+        firstName: 'Disabled',
+        lastName: 'Browser',
+        roles: ['CUSTOMER'],
+        activeRole: 'CUSTOMER',
+        isPhoneVerified: true,
+      },
+    });
+    const token = app.jwt.sign({ userId: user.id, role: 'CUSTOMER', jti: nonce });
+
+    try {
+      await app.prisma.customer.create({
+        data: { userId: user.id, favoriteVendors: { connect: { id: vendorId } } },
+      });
+      await app.prisma.session.create({
+        data: {
+          userId: user.id,
+          token,
+          refreshToken: `disabled-browser-${nonce}`,
+          deviceId: `disabled-browser-${nonce}`,
+          deviceType: 'test',
+          expiresAt: new Date(Date.now() + 86_400_000),
+        },
+      });
+
+      const whileActive = await app.inject({
+        method: 'GET',
+        url: `/api/v1/customer/vendors/${vendorId}`,
+        headers: { authorization: `Bearer ${token}` },
+      });
+      expect(whileActive.statusCode).toBe(200);
+      expect(whileActive.json().data.isFavorite).toBe(true);
+
+      for (const status of ['SUSPENDED', 'BANNED', 'DEACTIVATED'] as const) {
+        await app.prisma.user.update({ where: { id: user.id }, data: { status } });
+        const response = await app.inject({
+          method: 'GET',
+          url: `/api/v1/customer/vendors/${vendorId}`,
+          headers: { authorization: `Bearer ${token}` },
+        });
+        expect(response.statusCode).toBe(200);
+        expect(response.json().data.isFavorite).toBe(false);
+      }
+    } finally {
+      await app.prisma.session.deleteMany({ where: { userId: user.id } });
+      await app.prisma.customer.deleteMany({ where: { userId: user.id } });
+      await app.prisma.user.deleteMany({ where: { id: user.id } });
+    }
+  });
   it('lets guests read reviews', async () => {
     expect((await get(`/api/v1/customer/vendors/${vendorId}/reviews`)).statusCode).toBe(200);
   });

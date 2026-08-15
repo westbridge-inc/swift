@@ -24,6 +24,14 @@ describe('destinationFor — the tap table', () => {
     expect(destinationFor({ kind: 'ride_sos_ack' })).toEqual({ screen: 'Taxi' });
   });
 
+  it('an OFFER ping lands the earner on their mover home, never the customer screen [E36 / danger #22]', () => {
+    // Pre-fix, the generic orderId branch dropped an earner mid-countdown on
+    // the CUSTOMER Delivery screen — a dead end with the clock running.
+    expect(destinationFor({ kind: 'dispatch_offer', orderId: 'o9' })).toEqual({ screen: 'Main' });
+    // A store's "cancelled order may hold an MMG payment" opens their dashboard.
+    expect(destinationFor({ kind: 'mmg_unattested_cancellation', orderId: 'o9' })).toEqual({ screen: 'Main' });
+  });
+
   it('anything carrying an orderId lands on that order’s tracking screen', () => {
     expect(destinationFor({ kind: 'prep_ready', orderId: 'abc' })).toEqual({ screen: 'Delivery', params: { orderId: 'abc' } });
     expect(destinationFor({ orderId: 'xyz' })).toEqual({ screen: 'Delivery', params: { orderId: 'xyz' } });

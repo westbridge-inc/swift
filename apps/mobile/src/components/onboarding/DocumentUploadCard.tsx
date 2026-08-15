@@ -4,6 +4,12 @@ import { Feather, MaterialCommunityIcons } from '@expo/vector-icons';
 import { color } from '@swift/ui';
 import { Text, Card, Badge } from '../ui';
 import { useUploadDocument } from '../../hooks/verification';
+import {
+  AuthSessionBoundaryError,
+  requireAuthSessionForPrincipal,
+  requireAuthSessionSnapshot,
+} from '../../stores/authStore';
+import type { AuthSessionSnapshot } from '../../lib/authSession';
 
 function humanize(docType: string) {
   return docType.replace(/[_-]/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
@@ -72,27 +78,42 @@ export function DocumentUploadCard({
   // An approved doc inside its renewal window re-opens for upload.
   const approved = status === 'APPROVED' && !expiringSoon;
 
-  const send = (a: ImagePicker.ImagePickerAsset) =>
+  const send = (a: ImagePicker.ImagePickerAsset, authSession: AuthSessionSnapshot) =>
     upload.mutate({
       docType,
       file: { uri: a.uri, name: a.fileName ?? `${docType}.jpg`, type: a.mimeType ?? 'image/jpeg' },
+      authSession,
     });
 
   const fromCamera = async () => {
-    const perm = await ImagePicker.requestCameraPermissionsAsync();
-    if (!perm.granted) return;
-    const res = await ImagePicker.launchCameraAsync({ quality: 0.8 });
-    if (!res.canceled && res.assets?.[0]) send(res.assets[0]);
+    try {
+      const owner = requireAuthSessionSnapshot();
+      const perm = await ImagePicker.requestCameraPermissionsAsync();
+      requireAuthSessionForPrincipal(owner);
+      if (!perm.granted) return;
+      const res = await ImagePicker.launchCameraAsync({ quality: 0.8 });
+      requireAuthSessionForPrincipal(owner);
+      if (!res.canceled && res.assets?.[0]) send(res.assets[0], owner);
+    } catch (cameraError) {
+      if (!(cameraError instanceof AuthSessionBoundaryError)) throw cameraError;
+    }
   };
 
   const fromLibrary = async () => {
-    const perm = await ImagePicker.requestMediaLibraryPermissionsAsync();
-    if (!perm.granted) return;
-    const res = await ImagePicker.launchImageLibraryAsync({
-      mediaTypes: ImagePicker.MediaTypeOptions.Images,
-      quality: 0.8,
-    });
-    if (!res.canceled && res.assets?.[0]) send(res.assets[0]);
+    try {
+      const owner = requireAuthSessionSnapshot();
+      const perm = await ImagePicker.requestMediaLibraryPermissionsAsync();
+      requireAuthSessionForPrincipal(owner);
+      if (!perm.granted) return;
+      const res = await ImagePicker.launchImageLibraryAsync({
+        mediaTypes: ImagePicker.MediaTypeOptions.Images,
+        quality: 0.8,
+      });
+      requireAuthSessionForPrincipal(owner);
+      if (!res.canceled && res.assets?.[0]) send(res.assets[0], owner);
+    } catch (libraryError) {
+      if (!(libraryError instanceof AuthSessionBoundaryError)) throw libraryError;
+    }
   };
 
   // Docs are photographed at the counter/kerb more often than they sit in the

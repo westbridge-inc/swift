@@ -70,6 +70,17 @@ gitleaks
 # Security/launch audit reports — internal only, public repo
 /reports/
 
+# Internal engineering brains, handoff docs, and agent coordination — the
+# repo is PUBLIC; audit ledgers, security posture, and program state never
+# leave this machine [SWIFT-UG-SEC / public-surface law]
+/swift-standard/
+/SWIFT-CLAUDE-FABLE-5-START-HERE-2026-08-11.md
+/SWIFT-CLAUDE-CODE-HANDOFF-2026-08-11.md
+/SWIFT-MULTI-BILLION-DOLLAR-ENGINEERING-MANDATE.md
+/ADR-001-AUTHENTICATION-AUTHORITY.md
+/deploy/README.md
+/.agents/
+
 # Local design references + reskin notes (previously only in .git/info/exclude,
 # which does not protect fresh clones)
 /design/

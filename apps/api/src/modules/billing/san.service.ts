@@ -9,6 +9,10 @@ import { log } from '../../utils/logger';
 
 type Db = PrismaClient | Prisma.TransactionClient;
 
+function hasInteractiveTransactions(db: Db): db is PrismaClient {
+  return '$transaction' in db && typeof db.$transaction === 'function';
+}
+
 const isUniqueViolation = (e: unknown) =>
   e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2002';
 
@@ -49,12 +53,46 @@ export async function ensureSan(db: Db, subscriptionId: string): Promise<string>
 
 /** Release a SAN into the tombstone registry (account erasure/closure paths).
  *  The subscription keeps no number; the tombstone keeps it forever. */
-export async function releaseSan(db: Db, subscriptionId: string, reason: string): Promise<void> {
-  const sub = await db.subscription.findUnique({ where: { id: subscriptionId }, select: { san: true } });
+async function releaseSanInTransaction(db: Db, subscriptionId: string, reason: string): Promise<void> {
+  const sub = await db.subscription.findUnique({
+    where: { id: subscriptionId },
+    select: {
+      san: true,
+      vendor: { select: { tenantId: true } },
+      rider: { select: { user: { select: { tenantId: true } } } },
+      driver: { select: { user: { select: { tenantId: true } } } },
+    },
+  });
   if (!sub?.san) return;
-  await db.sanTombstone.create({ data: { san: sub.san, subscriptionId, reason } });
-  await db.subscription.update({ where: { id: subscriptionId }, data: { san: null } });
+  const tenantId = sub.vendor?.tenantId ?? sub.rider?.user.tenantId ?? sub.driver?.user.tenantId;
+  if (!tenantId) throw new Error('SAN_OWNER_TENANT_UNRESOLVED');
+
+  // Heal a pre-atomic partial retirement only when it is demonstrably the
+  // same subscription. A tombstone owned by somebody else is a registry
+  // conflict and must never cause this live SAN to be silently cleared.
+  const existing = await db.sanTombstone.findUnique({ where: { san: sub.san } });
+  if (existing && existing.subscriptionId !== subscriptionId) {
+    throw new Error('SAN_TOMBSTONE_CONFLICT');
+  }
+  if (!existing) {
+    await db.sanTombstone.create({ data: { san: sub.san, subscriptionId, tenantId, reason } });
+  }
+  const cleared = await db.subscription.updateMany({
+    where: { id: subscriptionId, san: sub.san },
+    data: { san: null },
+  });
+  if (cleared.count !== 1) throw new Error('SAN_RELEASE_CONFLICT');
   log().info({ subscriptionId, reason }, 'SAN released to tombstone');
+}
+
+export async function releaseSan(db: Db, subscriptionId: string, reason: string): Promise<void> {
+  if (hasInteractiveTransactions(db)) {
+    await db.$transaction((tx) => releaseSanInTransaction(tx, subscriptionId, reason));
+    return;
+  }
+  // The caller already owns the surrounding transaction; never open a nested
+  // connection and never split tombstone creation from clearing the live SAN.
+  await releaseSanInTransaction(db, subscriptionId, reason);
 }
 
 /** Read-path backstop: heal a missing SAN and return display fields. Spread

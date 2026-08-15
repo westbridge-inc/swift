@@ -48,6 +48,19 @@ async function makeUser(roles: UserRole[], activeRole: UserRole) {
   return { userId: user.id, token };
 }
 
+/** Real evidence for the SERVICE_PROVIDER base checklist (ID + clearance) so
+ *  the live quote/confirm authority re-check passes for this fixture. */
+async function approveProviderChecklist(userId: string) {
+  for (const docType of ['national_id', 'police_clearance']) {
+    await app.prisma.verificationDocument.create({
+      data: {
+        userId, role: 'MOVER' as never, docType, fileUrl: `test/book/${docType}`,
+        status: 'APPROVED', expiresAt: new Date(Date.now() + 365 * DAY),
+      },
+    });
+  }
+}
+
 function inject(method: 'GET' | 'POST', url: string, payload?: unknown, token?: string) {
   return app.inject({
     method,
@@ -84,6 +97,10 @@ beforeAll(async () => {
   const provider = await app.prisma.serviceProvider.create({
     data: { userId: providerUser.userId, trade: 'Plumber', isVerified: true },
   });
+  // [STRAND-8] Quote/confirm re-prove LIVE document authority — a cached
+  // isVerified flag with no evidence is exactly what the gate refuses, so the
+  // fixture carries its real checklist (SERVICE_PROVIDER base: ID + clearance).
+  await approveProviderChecklist(providerUser.userId);
   const job = await app.prisma.serviceJob.create({
     data: {
       customerId: customer.userId,
@@ -99,6 +116,7 @@ beforeAll(async () => {
 afterAll(async () => {
   if (createdUserIds.length > 0) {
     await app.prisma.serviceJob.deleteMany({ where: { customerId: { in: createdUserIds } } });
+    await app.prisma.verificationDocument.deleteMany({ where: { userId: { in: createdUserIds } } });
     await app.prisma.serviceProvider.deleteMany({ where: { userId: { in: createdUserIds } } });
     await app.prisma.notification.deleteMany({ where: { userId: { in: createdUserIds } } });
     await app.prisma.user.deleteMany({ where: { id: { in: createdUserIds } } });

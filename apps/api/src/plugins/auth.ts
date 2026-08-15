@@ -2,11 +2,21 @@ import fp from 'fastify-plugin';
 import jwt from '@fastify/jwt';
 import type { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 import { enterTenant } from './prisma';
+import { AuthService } from '../modules/auth/auth.service';
+import {
+  hasPrivilegedSessionAssurance,
+  requiresPrivilegedSessionAssurance,
+} from '../modules/auth/session-assurance';
 
 declare module 'fastify' {
   interface FastifyInstance {
     authenticate: (request: FastifyRequest, reply: FastifyReply) => Promise<void>;
     authenticateOptional: (request: FastifyRequest) => Promise<void>;
+  }
+
+  interface FastifyRequest {
+    /** Database session that authenticated this request. Stable across access-token rotation. */
+    authSessionId: string | null;
   }
 }
 
@@ -32,6 +42,9 @@ export const authPlugin = fp(async (app: FastifyInstance) => {
     sign: { expiresIn: '15m' },
   });
 
+  app.decorateRequest('authSessionId', null);
+  const authService = new AuthService(app);
+
   app.decorate('authenticate', async (request: FastifyRequest, reply: FastifyReply) => {
     try {
       await request.jwtVerify();
@@ -41,9 +54,26 @@ export const authPlugin = fp(async (app: FastifyInstance) => {
       const token = request.headers.authorization?.slice('Bearer '.length) ?? '';
       const session = await app.prisma.session.findUnique({
         where: { token },
-        select: { expiresAt: true, user: { select: { tenantId: true, status: true } } },
+        select: {
+          id: true,
+          expiresAt: true,
+          authMethod: true,
+          user: {
+            select: {
+              id: true,
+              tenantId: true,
+              status: true,
+              roles: true,
+              activeRole: true,
+            },
+          },
+        },
       });
-      if (!session || session.expiresAt < new Date()) {
+      if (
+        !session
+        || session.expiresAt < new Date()
+        || session.user.id !== request.user.userId
+      ) {
         throw new Error('Session revoked or expired');
       }
       // SEC: a suspended/banned/deactivated account is cut off on its very next
@@ -53,10 +83,23 @@ export const authPlugin = fp(async (app: FastifyInstance) => {
       if (session.user.status === 'SUSPENDED' || session.user.status === 'BANNED' || session.user.status === 'DEACTIVATED') {
         throw new Error('Account is not active');
       }
+      if (
+        requiresPrivilegedSessionAssurance(session.user.activeRole, session.user.roles)
+        && !hasPrivilegedSessionAssurance(session.authMethod)
+      ) {
+        await authService.logout(session.id, session.user.id);
+        throw new Error('Privileged session assurance is insufficient');
+      }
+      // The JWT role is a short-lived transport hint, never current authority.
+      // Role switching intentionally keeps the session alive, so reconcile the
+      // principal from the locked database model on every protected request.
+      request.user.role = session.user.activeRole;
+      request.authSessionId = session.id;
       // Multi-tenancy stage 2: bind this request to the caller's tenant so
       // every tenant-owned query downstream is scoped to it.
       enterTenant(session.user.tenantId);
     } catch {
+      request.authSessionId = null;
       reply.status(401).send({ success: false, error: { code: 'UNAUTHORIZED', message: 'Invalid or expired token' } });
     }
   });
@@ -70,14 +113,45 @@ export const authPlugin = fp(async (app: FastifyInstance) => {
       const token = request.headers.authorization?.slice('Bearer '.length) ?? '';
       const session = await app.prisma.session.findUnique({
         where: { token },
-        select: { expiresAt: true, user: { select: { tenantId: true } } },
+        select: {
+          id: true,
+          expiresAt: true,
+          authMethod: true,
+          user: {
+            select: {
+              id: true,
+              tenantId: true,
+              status: true,
+              roles: true,
+              activeRole: true,
+            },
+          },
+        },
       });
-      if (!session || session.expiresAt < new Date()) {
+      if (
+        !session ||
+        session.expiresAt < new Date() ||
+        session.user.id !== request.user.userId ||
+        session.user.status === 'SUSPENDED' ||
+        session.user.status === 'BANNED' ||
+        session.user.status === 'DEACTIVATED'
+      ) {
+        request.authSessionId = null;
+        (request as { user?: unknown }).user = undefined;
+      } else if (
+        requiresPrivilegedSessionAssurance(session.user.activeRole, session.user.roles)
+        && !hasPrivilegedSessionAssurance(session.authMethod)
+      ) {
+        await authService.logout(session.id, session.user.id);
+        request.authSessionId = null;
         (request as { user?: unknown }).user = undefined;
       } else {
+        request.user.role = session.user.activeRole;
+        request.authSessionId = session.id;
         enterTenant(session.user.tenantId);
       }
     } catch {
+      request.authSessionId = null;
       (request as { user?: unknown }).user = undefined;
     }
   });

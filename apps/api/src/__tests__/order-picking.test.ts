@@ -60,7 +60,11 @@ async function makeItem(opts: { name: string; price?: number; stock?: number | n
   });
 }
 
-async function makeOrderWithLines(lines: Array<{ itemId: string; name: string; qty: number; price: number }>, status = 'PREPARING') {
+async function makeOrderWithLines(
+  lines: Array<{ itemId: string; name: string; qty: number; price: number }>,
+  status = 'PREPARING',
+  pay: { method?: 'CASH' | 'MOBILE_MONEY'; status?: 'PENDING' | 'CAPTURED' } = {},
+) {
   const subtotal = lines.reduce((s, l) => s + l.qty * l.price, 0);
   return app.prisma.order.create({
     data: {
@@ -73,7 +77,8 @@ async function makeOrderWithLines(lines: Array<{ itemId: string; name: string; q
       deliveryAddress: 'x', deliveryLat: 6.8, deliveryLng: -58.15,
       subtotalBase: subtotal, subtotalMarkup: 0, subtotalCustomer: subtotal,
       deliveryFee: 300, totalAmount: subtotal + 300,
-      paymentMethod: 'CASH',
+      paymentMethod: pay.method ?? 'CASH',
+      ...(pay.status ? { paymentStatus: pay.status as any } : {}),
       items: {
         create: lines.map((l) => ({
           itemId: l.itemId, name: l.name, quantity: l.qty,
@@ -323,6 +328,302 @@ describe('substitution round-trip', () => {
     expect(Number(ord.subtotalBase)).toBe(0);
 
     await app.prisma.rider.delete({ where: { id: rider.id } });
+  });
+});
+
+describe('captured MMG money is immutable in picking [REPORT-005 F-005-02]', () => {
+  it('a dearer substitution approval fails closed — totals untouched', async () => {
+    const item = await makeItem({ name: 'MMG Rice', price: 500 });
+    const dearer = await makeItem({ name: 'MMG Premium Rice', price: 900 });
+    const order = await makeOrderWithLines([{ itemId: item.id, name: item.name, qty: 1, price: 500 }], 'PREPARING', { method: 'MOBILE_MONEY', status: 'CAPTURED' });
+    const line = order.items[0]!;
+    expect((await inject('POST', `/api/v1/vendor/orders/${order.id}/items/${line.id}/substitute`, owner.token, { substituteItemId: dearer.id })).statusCode).toBe(200);
+    const approve = await inject('POST', `/api/v1/customer/orders/${order.id}/items/${line.id}/substitution`, customer.token, { approve: true });
+    expect(approve.statusCode).toBe(409);
+    expect(approve.json().error?.code ?? approve.json().code).toBe('MMG_ADJUSTMENT_UNAVAILABLE');
+    const fresh = await app.prisma.order.findUniqueOrThrow({ where: { id: order.id } });
+    expect(Number(fresh.totalAmount)).toBe(800); // 500 + 300 fee — unchanged
+  });
+
+  it('a SAME-price substitution still works on captured MMG — no money effect', async () => {
+    const item = await makeItem({ name: 'MMG Flour', price: 400 });
+    const same = await makeItem({ name: 'MMG Other Flour', price: 400 });
+    const order = await makeOrderWithLines([{ itemId: item.id, name: item.name, qty: 1, price: 400 }], 'PREPARING', { method: 'MOBILE_MONEY', status: 'CAPTURED' });
+    const line = order.items[0]!;
+    expect((await inject('POST', `/api/v1/vendor/orders/${order.id}/items/${line.id}/substitute`, owner.token, { substituteItemId: same.id })).statusCode).toBe(200);
+    const approve = await inject('POST', `/api/v1/customer/orders/${order.id}/items/${line.id}/substitution`, customer.token, { approve: true });
+    expect(approve.statusCode).toBe(200);
+    const fresh = await app.prisma.order.findUniqueOrThrow({ where: { id: order.id } });
+    expect(Number(fresh.totalAmount)).toBe(700); // 400 + 300 fee — unchanged
+  });
+
+  it('line refund and customer rejection both fail closed on captured MMG', async () => {
+    const item = await makeItem({ name: 'MMG Sugar', price: 350, stock: 0 });
+    const alt = await makeItem({ name: 'MMG Brown Sugar', price: 350 });
+    const order = await makeOrderWithLines([{ itemId: item.id, name: item.name, qty: 1, price: 350 }], 'PREPARING', { method: 'MOBILE_MONEY', status: 'CAPTURED' });
+    const line = order.items[0]!;
+    const refund = await inject('POST', `/api/v1/vendor/orders/${order.id}/items/${line.id}/refund-line`, owner.token, {});
+    expect(refund.statusCode).toBe(409);
+    expect(refund.json().error?.code ?? refund.json().code).toBe('MMG_ADJUSTMENT_UNAVAILABLE');
+
+    expect((await inject('POST', `/api/v1/vendor/orders/${order.id}/items/${line.id}/substitute`, owner.token, { substituteItemId: alt.id })).statusCode).toBe(200);
+    const reject = await inject('POST', `/api/v1/customer/orders/${order.id}/items/${line.id}/substitution`, customer.token, { approve: false });
+    expect(reject.statusCode).toBe(409);
+    expect(reject.json().error?.code ?? reject.json().code).toBe('MMG_ADJUSTMENT_UNAVAILABLE');
+    const fresh = await app.prisma.order.findUniqueOrThrow({ where: { id: order.id } });
+    expect(Number(fresh.totalAmount)).toBe(650); // 350 + 300 fee — untouched by both
+  });
+
+  it('concurrent duplicate line refunds on CASH produce exactly one money effect [closeLine CAS]', async () => {
+    const item = await makeItem({ name: 'Race Peas', price: 600, stock: 0 });
+    const order = await makeOrderWithLines([{ itemId: item.id, name: item.name, qty: 1, price: 600 }], 'PREPARING');
+    const line = order.items[0]!;
+    const [a, b] = await Promise.all([
+      inject('POST', `/api/v1/vendor/orders/${order.id}/items/${line.id}/refund-line`, owner.token, {}),
+      inject('POST', `/api/v1/vendor/orders/${order.id}/items/${line.id}/refund-line`, owner.token, {}),
+    ]);
+    expect([a.statusCode, b.statusCode].every((c) => c === 200)).toBe(true);
+    const fresh = await app.prisma.order.findUniqueOrThrow({ where: { id: order.id } });
+    expect(Number(fresh.totalAmount)).toBe(300); // 900 − 600 exactly ONCE (fee remains)
+    expect(Number(fresh.subtotalCustomer)).toBe(0);
+  });
+});
+
+describe('ALL MMG picking money is immutable — PENDING included [REPORT-006 F-006-02]', () => {
+  it('a line refund on MMG PENDING fails closed — external money may already exist', async () => {
+    const item = await makeItem({ name: `MMG Pend Rice ${seq}`, price: 700, stock: 0 });
+    const order = await makeOrderWithLines([{ itemId: item.id, name: item.name, qty: 1, price: 700 }], 'PREPARING', { method: 'MOBILE_MONEY', status: 'PENDING' });
+    const refund = await inject('POST', `/api/v1/vendor/orders/${order.id}/items/${order.items[0]!.id}/refund-line`, owner.token, {});
+    expect(refund.statusCode).toBe(409);
+    expect(refund.json().error?.code ?? refund.json().code).toBe('MMG_ADJUSTMENT_UNAVAILABLE');
+    const fresh = await app.prisma.order.findUniqueOrThrow({ where: { id: order.id } });
+    expect(Number(fresh.totalAmount)).toBe(1000); // 700 + 300 fee, untouched
+  });
+
+  it('a customer rejection on MMG PENDING fails closed too', async () => {
+    const item = await makeItem({ name: `MMG Pend Sugar ${seq}`, price: 400, stock: 0 });
+    const alt = await makeItem({ name: `MMG Pend Alt ${seq}`, price: 400 });
+    const order = await makeOrderWithLines([{ itemId: item.id, name: item.name, qty: 1, price: 400 }], 'PREPARING', { method: 'MOBILE_MONEY', status: 'PENDING' });
+    // Fixture the open question directly — proposing is itself gated on unpaid MMG.
+    await app.prisma.orderItem.update({
+      where: { id: order.items[0]!.id },
+      data: { subStatus: 'PENDING', substituteItemId: alt.id, substituteName: alt.name, substitutePrice: 400 },
+    });
+    const reject = await inject('POST', `/api/v1/customer/orders/${order.id}/items/${order.items[0]!.id}/substitution`, customer.token, { approve: false });
+    expect(reject.statusCode).toBe(409);
+    expect(reject.json().error?.code ?? reject.json().code).toBe('MMG_ADJUSTMENT_UNAVAILABLE');
+  });
+});
+
+describe('substitution approval is exactly-once and lifecycle-bound [REPORT-006 F-006-04/05]', () => {
+  async function fixtureWithPendingSub(opts: { itemPrice: number; subPrice: number; itemStock?: number; subStock?: number }) {
+    const item = await makeItem({ name: `Orig ${nanoid(6)}`, price: opts.itemPrice, stock: opts.itemStock ?? 10 });
+    const sub = await makeItem({ name: `Sub ${nanoid(6)}`, price: opts.subPrice, stock: opts.subStock ?? 10 });
+    const order = await makeOrderWithLines([{ itemId: item.id, name: item.name, qty: 1, price: opts.itemPrice }], 'PREPARING');
+    await app.prisma.orderItem.update({
+      where: { id: order.items[0]!.id },
+      data: { subStatus: 'PENDING', substituteItemId: sub.id, substituteName: sub.name, substitutePrice: opts.subPrice },
+    });
+    return { item, sub, order, lineId: order.items[0]!.id };
+  }
+
+  it('two concurrent approvals have exactly one winner — stock, totals, and evidence move ONCE', async () => {
+    const { item, sub, order, lineId } = await fixtureWithPendingSub({ itemPrice: 500, subPrice: 700 });
+    const [a, b] = await Promise.all([
+      inject('POST', `/api/v1/customer/orders/${order.id}/items/${lineId}/substitution`, customer.token, { approve: true }),
+      inject('POST', `/api/v1/customer/orders/${order.id}/items/${lineId}/substitution`, customer.token, { approve: true }),
+    ]);
+    const codes = [a.statusCode, b.statusCode].sort();
+    expect(codes).toEqual([200, 409]); // one winner, one honest loser
+    const fresh = await app.prisma.order.findUniqueOrThrow({ where: { id: order.id } });
+    expect(Number(fresh.totalAmount)).toBe(500 + 200 + 300); // ONE +200 delta (fee 300)
+    expect(Number(fresh.subtotalBase)).toBe(700);
+    const subStock = await app.prisma.item.findUniqueOrThrow({ where: { id: sub.id } });
+    const origStock = await app.prisma.item.findUniqueOrThrow({ where: { id: item.id } });
+    expect(subStock.stockQuantity).toBe(9); // ONE decrement
+    expect(origStock.stockQuantity).toBe(11); // ONE restock
+    const logs = await app.prisma.orderStatusLog.count({ where: { orderId: order.id, note: { contains: 'Substitution approved' } } });
+    expect(logs).toBe(1);
+  });
+
+  it('approval racing rejection: exactly one effect wins and totals equal the winning shape', async () => {
+    const { item, sub, order, lineId } = await fixtureWithPendingSub({ itemPrice: 500, subPrice: 700 });
+    const [approve, reject] = await Promise.all([
+      inject('POST', `/api/v1/customer/orders/${order.id}/items/${lineId}/substitution`, customer.token, { approve: true }),
+      inject('POST', `/api/v1/customer/orders/${order.id}/items/${lineId}/substitution`, customer.token, { approve: false }),
+    ]);
+    const line = await app.prisma.orderItem.findUniqueOrThrow({ where: { id: lineId } });
+    const fresh = await app.prisma.order.findUniqueOrThrow({ where: { id: order.id } });
+    const subStock = await app.prisma.item.findUniqueOrThrow({ where: { id: sub.id } });
+    const origStock = await app.prisma.item.findUniqueOrThrow({ where: { id: item.id } });
+    if (line.subStatus === 'APPROVED') {
+      expect(approve.statusCode).toBe(200);
+      expect(reject.statusCode).toBe(409);
+      expect(Number(fresh.totalAmount)).toBe(1000); // 700 + 300 fee
+      expect(subStock.stockQuantity).toBe(9);
+      expect(origStock.stockQuantity).toBe(11);
+    } else {
+      expect(line.subStatus).toBe('REJECTED');
+      expect(reject.statusCode).toBe(200);
+      expect(approve.statusCode).toBe(409);
+      expect(Number(fresh.totalAmount)).toBe(300); // line refunded; fee remains
+      expect(subStock.stockQuantity).toBe(10); // substitute untouched
+      expect(origStock.stockQuantity).toBe(11); // ONE restock from the close
+    }
+    // Whatever won: the line answered exactly one question.
+    expect(['APPROVED', 'REJECTED']).toContain(line.subStatus);
+  });
+
+  it('cancel-then-approve mutates nothing: closed order refuses and stock is counted once', async () => {
+    const { item, sub, order, lineId } = await fixtureWithPendingSub({ itemPrice: 500, subPrice: 700 });
+    const cancel = await inject('POST', `/api/v1/customer/orders/${order.id}/cancel`, customer.token, { reason: 'changed my mind' });
+    expect(cancel.statusCode).toBe(200);
+    const approve = await inject('POST', `/api/v1/customer/orders/${order.id}/items/${lineId}/substitution`, customer.token, { approve: true });
+    expect(approve.statusCode).toBe(409);
+    expect(approve.json().error?.code ?? approve.json().code).toBe('NOT_PICKABLE');
+    const line = await app.prisma.orderItem.findUniqueOrThrow({ where: { id: lineId } });
+    expect(line.subStatus).toBe('PENDING'); // question stays open on a dead order — never applied
+    const subStock = await app.prisma.item.findUniqueOrThrow({ where: { id: sub.id } });
+    const origStock = await app.prisma.item.findUniqueOrThrow({ where: { id: item.id } });
+    expect(subStock.stockQuantity).toBe(10); // substitute never moved
+    expect(origStock.stockQuantity).toBe(11); // cancellation restocked the original EXACTLY once
+    const fresh = await app.prisma.order.findUniqueOrThrow({ where: { id: order.id } });
+    expect(Number(fresh.totalAmount)).toBe(800); // money untouched after death
+  });
+
+  it('a dearer approval that would breach the assigned rider’s float cap fails closed — full rollback', async () => {
+    const { item, sub, order, lineId } = await fixtureWithPendingSub({ itemPrice: 500, subPrice: 700 });
+    const rmover = await makeUser(['MOVER', 'CUSTOMER'], 'MOVER');
+    const rider = await app.prisma.rider.create({
+      data: { userId: rmover.userId, riderType: 'DELIVERY', vehicleType: 'MOTORCYCLE', documentsVerified: true, floatLimit: 2100, committedFloat: 2000 },
+    });
+    await app.prisma.order.update({ where: { id: order.id }, data: { riderId: rider.id } });
+    try {
+      const approve = await inject('POST', `/api/v1/customer/orders/${order.id}/items/${lineId}/substitution`, customer.token, { approve: true });
+      expect(approve.statusCode).toBe(409);
+      expect(approve.json().error?.code ?? approve.json().code).toBe('SUBSTITUTE_FLOAT_EXCEEDED');
+      // The transaction rolled back EVERYTHING: line, stock, totals, float.
+      const line = await app.prisma.orderItem.findUniqueOrThrow({ where: { id: lineId } });
+      expect(line.subStatus).toBe('PENDING');
+      expect((await app.prisma.item.findUniqueOrThrow({ where: { id: sub.id } })).stockQuantity).toBe(10);
+      expect((await app.prisma.item.findUniqueOrThrow({ where: { id: item.id } })).stockQuantity).toBe(10);
+      const fresh = await app.prisma.order.findUniqueOrThrow({ where: { id: order.id } });
+      expect(Number(fresh.totalAmount)).toBe(800);
+      expect(Number((await app.prisma.rider.findUniqueOrThrow({ where: { id: rider.id } })).committedFloat)).toBe(2000);
+    } finally {
+      await app.prisma.order.update({ where: { id: order.id }, data: { riderId: null } });
+      await app.prisma.rider.delete({ where: { id: rider.id } });
+    }
+  });
+
+  it('float tracks the live subtotal: dearer approval commits the delta, cheaper releases it', async () => {
+    // Dearer within cap
+    const dearer = await fixtureWithPendingSub({ itemPrice: 500, subPrice: 700 });
+    const rmover = await makeUser(['MOVER', 'CUSTOMER'], 'MOVER');
+    const rider = await app.prisma.rider.create({
+      data: { userId: rmover.userId, riderType: 'DELIVERY', vehicleType: 'MOTORCYCLE', documentsVerified: true, floatLimit: 100_000, committedFloat: 500 },
+    });
+    await app.prisma.order.update({ where: { id: dearer.order.id }, data: { riderId: rider.id } });
+    try {
+      const up = await inject('POST', `/api/v1/customer/orders/${dearer.order.id}/items/${dearer.lineId}/substitution`, customer.token, { approve: true });
+      expect(up.statusCode).toBe(200);
+      expect(Number((await app.prisma.rider.findUniqueOrThrow({ where: { id: rider.id } })).committedFloat)).toBe(700); // +200 delta
+      // Cheaper on a second order for the same rider
+      const cheaper = await fixtureWithPendingSub({ itemPrice: 500, subPrice: 300 });
+      await app.prisma.order.update({ where: { id: cheaper.order.id }, data: { riderId: rider.id } });
+      await app.prisma.rider.update({ where: { id: rider.id }, data: { committedFloat: 700 } });
+      const down = await inject('POST', `/api/v1/customer/orders/${cheaper.order.id}/items/${cheaper.lineId}/substitution`, customer.token, { approve: true });
+      expect(down.statusCode).toBe(200);
+      expect(Number((await app.prisma.rider.findUniqueOrThrow({ where: { id: rider.id } })).committedFloat)).toBe(500); // −200 delta
+      await app.prisma.order.update({ where: { id: cheaper.order.id }, data: { riderId: null } });
+    } finally {
+      await app.prisma.order.updateMany({ where: { riderId: rider.id }, data: { riderId: null } });
+      await app.prisma.rider.delete({ where: { id: rider.id } });
+    }
+  });
+});
+
+describe('refunding an APPROVED substitution returns the SUBSTITUTE [REPORT-007-v4 F-04]', () => {
+  it('inventory identities stay true: substitute restocked, original untouched, audit targets the substitute', async () => {
+    const item = await makeItem({ name: `RefSwap ${nanoid(6)}`, price: 500, stock: 10 });
+    const sub = await makeItem({ name: `RefSwapSub ${nanoid(6)}`, price: 700, stock: 10 });
+    const order = await makeOrderWithLines([{ itemId: item.id, name: item.name, qty: 1, price: 500 }], 'PREPARING');
+    const lineId = order.items[0]!.id;
+    await app.prisma.orderItem.update({
+      where: { id: lineId },
+      data: { subStatus: 'PENDING', substituteItemId: sub.id, substituteName: sub.name, substitutePrice: 700 },
+    });
+    const approve = await inject('POST', `/api/v1/customer/orders/${order.id}/items/${lineId}/substitution`, customer.token, { approve: true });
+    expect(approve.statusCode).toBe(200);
+    // After approval: original back on shelf (11), substitute reserved (9), total 500+200+300fee.
+    expect((await app.prisma.item.findUniqueOrThrow({ where: { id: item.id } })).stockQuantity).toBe(11);
+    expect((await app.prisma.item.findUniqueOrThrow({ where: { id: sub.id } })).stockQuantity).toBe(9);
+
+    const refund = await inject('POST', `/api/v1/vendor/orders/${order.id}/items/${lineId}/refund-line`, owner.token, {});
+    expect(refund.statusCode).toBe(200);
+
+    // Pre-fix: original went to 12 and the substitute stranded at 9 with the
+    // RETURN audit written against the WRONG item. Correct: both back to truth.
+    expect((await app.prisma.item.findUniqueOrThrow({ where: { id: item.id } })).stockQuantity).toBe(11);
+    expect((await app.prisma.item.findUniqueOrThrow({ where: { id: sub.id } })).stockQuantity).toBe(10);
+    const audits = await app.prisma.stockAdjustment.findMany({
+      where: { itemId: { in: [item.id, sub.id] }, reason: 'RETURN', note: { contains: 'refunded' } },
+    });
+    expect(audits).toHaveLength(1);
+    expect(audits[0]!.itemId).toBe(sub.id);
+    // Money follows the APPROVED (substitute) price: 1000 total − 700 line = 300 fee.
+    const fresh = await app.prisma.order.findUniqueOrThrow({ where: { id: order.id } });
+    expect(Number(fresh.totalAmount)).toBe(300);
+    expect(Number(fresh.subtotalBase)).toBe(0);
+    const line = await app.prisma.orderItem.findUniqueOrThrow({ where: { id: lineId } });
+    expect(line.subStatus).toBe('REFUNDED');
+  });
+});
+
+describe('cancellation restock is substitution-aware [REPORT-006 F-006-05]', () => {
+  it('a refunded line restocks ONCE at picking — cancellation must not restock it again', async () => {
+    const item = await makeItem({ name: `Once ${nanoid(6)}`, price: 600, stock: 10 });
+    const keep = await makeItem({ name: `Keep ${nanoid(6)}`, price: 400, stock: 10 });
+    const order = await makeOrderWithLines(
+      [
+        { itemId: item.id, name: item.name, qty: 1, price: 600 },
+        { itemId: keep.id, name: keep.name, qty: 1, price: 400 },
+      ],
+      'PREPARING',
+    );
+    const refundedLine = order.items.find((l) => l.itemId === item.id)!;
+    const refund = await inject('POST', `/api/v1/vendor/orders/${order.id}/items/${refundedLine.id}/refund-line`, owner.token, {});
+    expect(refund.statusCode).toBe(200);
+    expect((await app.prisma.item.findUniqueOrThrow({ where: { id: item.id } })).stockQuantity).toBe(11);
+
+    const cancel = await inject('POST', `/api/v1/customer/orders/${order.id}/cancel`, customer.token, { reason: 'raced the refund' });
+    expect(cancel.statusCode).toBe(200);
+    // The refunded line stays at 11 (NOT 12); the live line restocks once.
+    expect((await app.prisma.item.findUniqueOrThrow({ where: { id: item.id } })).stockQuantity).toBe(11);
+    expect((await app.prisma.item.findUniqueOrThrow({ where: { id: keep.id } })).stockQuantity).toBe(11);
+  });
+
+  it('cancelling after an approved substitution returns the SUBSTITUTE to the shelf, not the original again', async () => {
+    const item = await makeItem({ name: `Swap ${nanoid(6)}`, price: 500, stock: 10 });
+    const sub = await makeItem({ name: `SwapSub ${nanoid(6)}`, price: 500, stock: 10 });
+    const order = await makeOrderWithLines([{ itemId: item.id, name: item.name, qty: 1, price: 500 }], 'PREPARING');
+    await app.prisma.orderItem.update({
+      where: { id: order.items[0]!.id },
+      data: { subStatus: 'PENDING', substituteItemId: sub.id, substituteName: sub.name, substitutePrice: 500 },
+    });
+    const approve = await inject('POST', `/api/v1/customer/orders/${order.id}/items/${order.items[0]!.id}/substitution`, customer.token, { approve: true });
+    expect(approve.statusCode).toBe(200);
+    // After approval: original back on shelf (11), substitute reserved (9).
+    expect((await app.prisma.item.findUniqueOrThrow({ where: { id: item.id } })).stockQuantity).toBe(11);
+    expect((await app.prisma.item.findUniqueOrThrow({ where: { id: sub.id } })).stockQuantity).toBe(9);
+
+    const cancel = await inject('POST', `/api/v1/customer/orders/${order.id}/cancel`, customer.token, { reason: 'after swap' });
+    expect(cancel.statusCode).toBe(200);
+    // Cancellation returns the SUBSTITUTE (9→10); the original stays at 11 —
+    // the old itemId-blind restock pushed the original to 12 and stranded the
+    // substitute at 9 forever.
+    expect((await app.prisma.item.findUniqueOrThrow({ where: { id: item.id } })).stockQuantity).toBe(11);
+    expect((await app.prisma.item.findUniqueOrThrow({ where: { id: sub.id } })).stockQuantity).toBe(10);
   });
 });
 

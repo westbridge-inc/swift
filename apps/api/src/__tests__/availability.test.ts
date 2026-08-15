@@ -17,6 +17,7 @@ import { ridesRoutes } from '../modules/rides/rides.routes';
 
 // A remote spot far from every other test's field (and the seeded city).
 const SPOT = { lat: 7.72, lng: -59.31 };
+const AVAILABILITY_CACHE_KEY = `t:swift-default:avail:DRIVER:${SPOT.lat.toFixed(2)}:${SPOT.lng.toFixed(2)}`;
 
 let app: FastifyInstance;
 let token: string;
@@ -34,6 +35,17 @@ async function makeDriver(latOffset: number) {
     },
   });
   userIds.push(u.id);
+  const driverToken = app.jwt.sign({ userId: u.id, role: 'MOVER', jti: nanoid(8) });
+  const locationSession = await app.prisma.session.create({
+    data: {
+      userId: u.id,
+      token: driverToken,
+      refreshToken: nanoid(48),
+      deviceId: `avail-driver-${u.id}`,
+      deviceType: 'test',
+      expiresAt: new Date(Date.now() + 24 * 3600 * 1000),
+    },
+  });
   const d = await app.prisma.driver.create({
     data: {
       userId: u.id,
@@ -43,6 +55,7 @@ async function makeDriver(latOffset: number) {
       isOnline: true, isAvailable: true, documentsVerified: true,
       rideClass: 'ECONOMY' as never,
       currentLat: SPOT.lat + latOffset, currentLng: SPOT.lng,
+      lastLocationUpdate: new Date(), locationSessionId: locationSession.id,
     },
   });
   driverIds.push(d.id);
@@ -121,21 +134,23 @@ const requestRide = () =>
 
 describe('GET /rides/availability', () => {
   it('NONE with an empty field, LOW at one driver, GOOD at three — with a nearest ETA', async () => {
+    await app.redis.del(AVAILABILITY_CACHE_KEY);
     let res = await availability();
     expect(res.statusCode).toBe(200);
     expect(res.json().data.level).toBe('NONE');
+    expect(res.json().data.nearestEtaMinutes).toBeNull();
 
     await makeDriver(0.004);
     // Cache keys are tenant-prefixed [SWIFT-SEC-CACHE]; the seeded test user is
     // the default tenant, so the handler writes under t:swift-default:.
-    await app.redis.del(`t:swift-default:avail:DRIVER:${SPOT.lat.toFixed(2)}:${SPOT.lng.toFixed(2)}`);
+    await app.redis.del(AVAILABILITY_CACHE_KEY);
     res = await availability();
     expect(res.json().data.level).toBe('LOW');
     expect(res.json().data.nearestEtaMinutes).toBeGreaterThanOrEqual(1);
 
     await makeDriver(0.006);
     await makeDriver(-0.005);
-    await app.redis.del(`t:swift-default:avail:DRIVER:${SPOT.lat.toFixed(2)}:${SPOT.lng.toFixed(2)}`);
+    await app.redis.del(AVAILABILITY_CACHE_KEY);
     res = await availability();
     expect(res.json().data.level).toBe('GOOD');
   });
@@ -145,9 +160,16 @@ describe('GET /rides/availability', () => {
     await app.prisma.driver.updateMany({ where: { id: { in: driverIds } }, data: { isOnline: false } });
     const cachedRead = await availability();
     expect(cachedRead.json().data.level).toBe(first.json().data.level); // still cached
-    await app.redis.del(`t:swift-default:avail:DRIVER:${SPOT.lat.toFixed(2)}:${SPOT.lng.toFixed(2)}`);
+    await app.redis.del(AVAILABILITY_CACHE_KEY);
     const fresh = await availability();
     expect(fresh.json().data.level).toBe('NONE'); // truth after cache clears
+  });
+
+  it('normalizes a rolling-deploy cache entry written before NONE carried an explicit ETA null', async () => {
+    await app.redis.set(AVAILABILITY_CACHE_KEY, JSON.stringify({ level: 'NONE' }), 'EX', 10);
+    const res = await availability();
+    expect(res.statusCode).toBe(200);
+    expect(res.json().data).toMatchObject({ level: 'NONE', nearestEtaMinutes: null });
   });
 });
 

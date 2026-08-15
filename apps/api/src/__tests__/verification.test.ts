@@ -135,6 +135,7 @@ beforeAll(async () => {
   adminToken = app.jwt.sign({ userId: adminUser.id, role: 'ADMIN', jti: `s4-${Date.now()}` });
   await app.prisma.session.create({
     data: {
+      authMethod: 'OTP',
       userId: adminUser.id,
       token: adminToken,
       refreshToken: `s4-refresh-${Date.now()}`,
@@ -321,7 +322,10 @@ describe('Manual review queue — submit, reject, resubmit, approve', () => {
     expect(status.json().data.roleVerified).toBe(true);
     expect(status.json().data.missing).toEqual([]);
 
-    const online = await inject('POST', '/api/v1/rider/go-online', {}, moverToken);
+    const online = await inject('POST', '/api/v1/rider/go-online', {
+      latitude: 6.8013,
+      longitude: -58.1551,
+    }, moverToken);
     expect(online.statusCode).toBe(200);
   });
 
@@ -783,7 +787,10 @@ describe('Subscriptions are born on verification (auto-approval path)', () => {
   });
 
   it('a mover on TRIAL can go online (the trial is not a dead-end)', async () => {
-    const res = await inject('POST', '/api/v1/rider/go-online', {}, moverToken);
+    const res = await inject('POST', '/api/v1/rider/go-online', {
+      latitude: 6.8013,
+      longitude: -58.1551,
+    }, moverToken);
     expect(res.statusCode).toBe(200);
   });
 });
@@ -829,6 +836,28 @@ describe('Commerce gate — acceptingOrders requires verification', () => {
     expect(on.statusCode).toBe(200);
     expect(on.json().data.acceptingOrders).toBe(true);
   });
+
+  it('a SUSPENDED store cannot switch commerce back on — status is admin/billing-owned [EV-ACT-14]', async () => {
+    await app.prisma.vendor.update({ where: { id: serviceVendorId }, data: { status: 'SUSPENDED', acceptingOrders: false } });
+    try {
+      const on = await inject('PUT', '/api/v1/vendor/vendor/toggle-orders', {}, vendorToken);
+      expect(on.statusCode).toBe(409);
+      expect(on.json().error.code).toBe('VENDOR_NOT_ACTIVE');
+      expect((await app.prisma.vendor.findUniqueOrThrow({ where: { id: serviceVendorId } })).acceptingOrders).toBe(false);
+
+      // Opening the storefront is refused the same way; closing stays free.
+      await app.prisma.vendor.update({ where: { id: serviceVendorId }, data: { isCurrentlyOpen: false } });
+      const open = await inject('PUT', '/api/v1/vendor/vendor/toggle-open', {}, vendorToken);
+      expect(open.statusCode).toBe(409);
+      expect(open.json().error.code).toBe('VENDOR_NOT_ACTIVE');
+    } finally {
+      await app.prisma.vendor.update({ where: { id: serviceVendorId }, data: { status: 'ACTIVE', acceptingOrders: true, isCurrentlyOpen: true } });
+    }
+  });
+
+  // The toggle write itself is now a CAS bound to the OBSERVED value (a tap
+  // that lost a race matches nothing and answers current truth) — structural;
+  // a deterministic interleaving proof belongs to the barrier-test track.
 
   it('a routine renewal approval does not override a deliberate pause', async () => {
     // The owner pauses on purpose…

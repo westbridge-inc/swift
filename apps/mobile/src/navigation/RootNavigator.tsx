@@ -15,11 +15,16 @@ import { CustomerStack } from './CustomerStack';
 import { MoverStack } from '../modules/mover/MoverStack';
 import { VendorStack } from '../modules/vendor/VendorStack';
 import { AdvertiserStack } from '../modules/advertiser/AdvertiserStack';
-import { navigationRef } from './navigationRef';
+import { navigationRef, safeNavigate } from './navigationRef';
 import { installNotificationTapRouter, flushPendingNavigation } from '../services/notification-router';
 import { installDeepLinkHandler, flushPendingDeepLink } from '../services/deep-links';
 import { ensureFirstLaunchClaim, flushAttributedDestination } from '../services/attribution';
-import { rootEntryGate } from './rootEntryGate';
+import { rootEntryGate, rootNavigatorBoundaryKey } from './rootEntryGate';
+import {
+  discardAuthContinuation,
+  flushAuthContinuation,
+  rootRouteForAuthContinuation,
+} from './authContinuation';
 
 const Stack = createNativeStackNavigator();
 
@@ -42,7 +47,7 @@ function mainForIntent(intent?: string | null) {
 }
 
 export function RootNavigator() {
-  const { isAuthenticated, wantsAuth, intent, countryCode, user } = useAuthStore();
+  const { isAuthenticated, wantsAuth, intent, countryCode, user, sessionGeneration } = useAuthStore();
   // Customers skip the country picker — their market is seeded + resolved from
   // location instead (spec: pick role → straight to browsing).
   useCustomerCountry();
@@ -53,7 +58,7 @@ export function RootNavigator() {
   // project id ships — see services/push.ts).
   React.useEffect(() => {
     if (isAuthenticated) void registerIfGranted();
-  }, [isAuthenticated]);
+  }, [isAuthenticated, sessionGeneration]);
 
   // The tap-router [first-open 2.4]: every notification tap lands on its
   // exact screen — cold starts flush via onReady below.
@@ -84,6 +89,36 @@ export function RootNavigator() {
   const Main = mainForIntent(intent);
   const entryGate = rootEntryGate({ isAuthenticated, wantsAuth, intent, countryCode, anyPreview, needsSelfie });
 
+  const resumeAuthContinuation = React.useCallback(() => {
+    flushAuthContinuation(
+      { isAuthenticated, entryGate, intent },
+      (destination) => {
+        const route = rootRouteForAuthContinuation(destination);
+        return safeNavigate(route.screen, route.params);
+      },
+    );
+  }, [entryGate, intent, isAuthenticated]);
+
+  React.useEffect(() => {
+    // Cancel and logout are terminal for an unfinished guest continuation.
+    // This also prevents an abandoned provider intent from surprising a later
+    // account on a shared device.
+    if (!isAuthenticated && !wantsAuth) {
+      discardAuthContinuation();
+      return;
+    }
+    if (!isAuthenticated || entryGate !== 'main') return;
+
+    // The first post-commit attempt normally delivers. Retain one bounded
+    // retry for native navigation containers that become ready a frame later.
+    const firstAttempt = setTimeout(resumeAuthContinuation, 0);
+    const readyRetry = setTimeout(resumeAuthContinuation, 250);
+    return () => {
+      clearTimeout(firstAttempt);
+      clearTimeout(readyRetry);
+    };
+  }, [entryGate, isAuthenticated, resumeAuthContinuation, sessionGeneration, wantsAuth]);
+
   return (
     <NavigationContainer
       ref={navigationRef}
@@ -91,9 +126,13 @@ export function RootNavigator() {
         flushPendingNavigation();
         flushPendingDeepLink();
         flushAttributedDestination();
+        resumeAuthContinuation();
       }}
     >
-      <Stack.Navigator screenOptions={{ headerShown: false }}>
+      <Stack.Navigator
+        key={rootNavigatorBoundaryKey(sessionGeneration)}
+        screenOptions={{ headerShown: false }}
+      >
         {entryGate === 'auth' ? (
           // "Already have an account? Sign in" from first-open (intent null —
           // after OTP the ACCOUNT routes, the trio is never asked) and the

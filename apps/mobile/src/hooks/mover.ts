@@ -1,12 +1,39 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import * as Location from 'expo-location';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { riderApi, driverApi } from '../services/api';
+import { customerApi, riderApi, driverApi } from '../services/api';
 import { track } from '../lib/analytics';
 import { connectSocket, getSocket } from '../services/socket';
-import { startMoverLocation, stopMoverLocation } from '../services/backgroundLocation';
+import {
+  publishMoverLocation,
+  startMoverLocation,
+  stopMoverLocation,
+} from '../services/backgroundLocation';
 import { useMoverPreview } from '../stores/moverPreview';
+import { useLocationStore } from '../stores/locationStore';
+import {
+  AuthSessionBoundaryError,
+  getAuthSessionSnapshot,
+  requireAuthSessionForPrincipal,
+  requireAuthSessionSnapshot,
+  useAuthStore,
+} from '../stores/authStore';
+import { samePrincipalBoundary, type AuthSessionSnapshot } from '../lib/authSession';
+import {
+  commitLiveDeviceLocation,
+  createLiveDeviceLocationLease,
+  isLiveDeviceLocationLeaseValid,
+} from '../lib/deviceLocation';
+import {
+  sharedMoverLocationController,
+  type MoverKind,
+} from '../lib/moverLocation';
 import * as PV from '../lib/moverPreviewData';
+import {
+  resolveMoverProfile,
+  unwrapOptionalMoverProfile,
+} from '../lib/moverProfile';
+import { canonicalMoverAuthority } from '../lib/moverAuthorityCache';
 
 async function unwrap<T = any>(p: Promise<any>): Promise<T> {
   const r = await p;
@@ -20,7 +47,7 @@ async function tryUnwrap<T = any>(p: Promise<any>): Promise<T | null> {
   }
 }
 
-export type MoverKind = 'DRIVER' | 'RIDER';
+export type { MoverKind } from '../lib/moverLocation';
 function svc(kind: MoverKind) {
   return kind === 'DRIVER' ? driverApi : riderApi;
 }
@@ -34,22 +61,96 @@ function usePreview() {
   return useMoverPreview((s) => s.preview);
 }
 
-/** Detect whether this mover is a Driver (taxi) or Rider (delivery), probing driver first. */
+/** Resolve both operational profiles. A missing profile is a successful 404;
+ * transient failures stay visible and are retried a bounded number of times.
+ * Querying both lets live work outrank stale cross-device role memory without
+ * ever treating a network error as permission to cross into the other app. */
 export function useMoverKind() {
   const pv = usePreview();
   const pvKind = useMoverPreview((s) => s.kind);
-  const driver = useQuery({ queryKey: ['mover', 'driverProfile'], queryFn: () => tryUnwrap(driverApi.profile()), retry: false, enabled: !pv });
-  const rider = useQuery({
-    queryKey: ['mover', 'riderProfile'],
-    queryFn: () => tryUnwrap(riderApi.profile()),
-    retry: false,
-    enabled: driver.data === null && !pv,
+  const authority = useAuthStore((s) => s.user) as (Parameters<ReturnType<typeof useAuthStore.getState>['setUserIfCurrent']>[1] & {
+    activeRole?: string;
+    lastMoverRole?: string | null;
+  }) | null;
+  const setUserIfCurrent = useAuthStore((s) => s.setUserIfCurrent);
+  const retryDelay = (attempt: number) => Math.min(500 * (2 ** attempt), 2_000);
+  const driver = useQuery<any | null>({
+    queryKey: ['mover', 'driverProfile'],
+    queryFn: () => unwrapOptionalMoverProfile(driverApi.profile()),
+    retry: 2,
+    retryDelay,
+    enabled: !pv,
   });
-  if (pv) return { kind: pvKind as MoverKind, profile: PV.PREVIEW_PROFILE as any, loading: false };
-  const kind: MoverKind | null = driver.data ? 'DRIVER' : rider.data ? 'RIDER' : null;
-  const profile: any = driver.data ?? rider.data ?? null;
-  const loading = driver.isLoading || (driver.data === null && rider.isLoading);
-  return { kind, profile, loading };
+  const rider = useQuery<any | null>({
+    queryKey: ['mover', 'riderProfile'],
+    queryFn: () => unwrapOptionalMoverProfile(riderApi.profile()),
+    retry: 2,
+    retryDelay,
+    enabled: !pv,
+  });
+  const serverAuthority = driver.data?.user ?? rider.data?.user;
+  const serverActiveRole = typeof serverAuthority?.activeRole === 'string'
+    ? serverAuthority.activeRole
+    : authority?.activeRole;
+  const serverLastMoverRole = typeof serverAuthority?.lastMoverRole === 'string'
+    ? serverAuthority.lastMoverRole
+    : serverAuthority?.lastMoverRole === null
+      ? null
+      : authority?.lastMoverRole;
+
+  // Profile reads are also a cheap cross-device authority refresh. Persist the
+  // canonical server pointer so every other navigator/switcher agrees with the
+  // resolver instead of keeping a stale local role until the next login.
+  useEffect(() => {
+    if (
+      pv
+      || !authority
+      || !serverAuthority
+      || (serverAuthority.id && serverAuthority.id !== authority.id)
+      || (authority.activeRole === serverActiveRole
+        && authority.lastMoverRole === serverLastMoverRole)
+    ) return;
+    const owner = getAuthSessionSnapshot();
+    if (!owner || owner.userId !== authority.id) return;
+    setUserIfCurrent(owner, {
+      ...authority,
+      activeRole: serverActiveRole,
+      lastMoverRole: serverLastMoverRole,
+    } as Parameters<typeof setUserIfCurrent>[1]);
+  }, [authority, pv, serverActiveRole, serverAuthority, serverLastMoverRole, setUserIfCurrent]);
+
+  if (pv) {
+    return {
+      kind: pvKind as MoverKind,
+      profile: PV.PREVIEW_PROFILE as any,
+      loading: false,
+      refetching: false,
+      error: null,
+      ambiguous: false,
+      refetch: async () => {},
+    };
+  }
+
+  const loading = driver.isLoading || rider.isLoading;
+  const error = driver.error ?? rider.error ?? null;
+  const resolution = !loading && !error
+      ? resolveMoverProfile({
+        activeRole: serverActiveRole,
+        lastMoverRole: serverLastMoverRole,
+        driver: driver.data ?? null,
+        rider: rider.data ?? null,
+      })
+    : { kind: null, profile: null, ambiguous: false };
+
+  return {
+    ...resolution,
+    loading,
+    refetching: driver.isFetching || rider.isFetching,
+    error,
+    refetch: async () => {
+      await Promise.all([driver.refetch(), rider.refetch()]);
+    },
+  };
 }
 
 /** Upload the PUBLIC vehicle photo customers see on acceptance (§5). */
@@ -57,10 +158,20 @@ export function useUploadVehiclePhoto(kind: MoverKind | null) {
   const pv = usePreview();
   const qc = useQueryClient();
   const m = useMutation({
-    mutationFn: (file: { uri: string; name: string; type: string }) => {
+    mutationFn: async (input: {
+      uri: string;
+      name: string;
+      type: string;
+      authSession?: AuthSessionSnapshot;
+    }) => {
+      const { authSession, ...file } = input;
+      const owner = authSession ?? requireAuthSessionSnapshot();
+      const current = requireAuthSessionForPrincipal(owner);
       const form = new FormData();
       form.append('file', file as unknown as Blob);
-      return unwrap(svc(kind as MoverKind).uploadVehiclePhoto(form));
+      const result = await unwrap(svc(kind as MoverKind).uploadVehiclePhoto(form, current));
+      requireAuthSessionForPrincipal(owner);
+      return result;
     },
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['mover', 'driverProfile'] });
@@ -158,17 +269,80 @@ export function useActiveJob(kind: MoverKind | null) {
 export function useGoOnline(kind: MoverKind) {
   const pv = usePreview();
   const qc = useQueryClient();
+  const setUserIfCurrent = useAuthStore((s) => s.setUserIfCurrent);
   const m = useMutation({
-    mutationFn: () => unwrap(svc(kind).goOnline()),
+    mutationFn: async ({ latitude, longitude, authSession }: {
+      latitude: number;
+      longitude: number;
+      authSession?: AuthSessionSnapshot;
+    }) => {
+      const owner = authSession ?? requireAuthSessionSnapshot();
+      let current = requireAuthSessionForPrincipal(owner);
+      const user = useAuthStore.getState().user as (Parameters<
+        typeof setUserIfCurrent
+      >[1] & { lastMoverRole?: string | null }) | null;
+      if (!user || user.id !== owner.userId) throw new AuthSessionBoundaryError();
+      // GO is an explicit authority acquisition, including after another device
+      // last used the customer/business surface. Serialize it through the same
+      // server role transition that safely removes supply when switching away.
+      const authorityRole = kind;
+      const response = await customerApi.switchRole(authorityRole, current);
+      current = requireAuthSessionForPrincipal(owner);
+      const canonical = canonicalMoverAuthority(
+        response?.data?.data,
+        authorityRole,
+        user.lastMoverRole,
+      );
+      if (!setUserIfCurrent(owner, {
+        ...user,
+        ...canonical,
+      } as unknown as Parameters<typeof setUserIfCurrent>[1])) {
+        throw new AuthSessionBoundaryError();
+      }
+      const result = await unwrap(svc(kind).goOnline(latitude, longitude, current));
+      requireAuthSessionForPrincipal(owner);
+      void qc.invalidateQueries({ queryKey: ['mover'] });
+      track('go_online', { kind });
+      return result;
+    },
     // MoverHomeScreen renders goOnline.error inline (the verification/selfie/
     // subscription reason) — opt out of the global toast to avoid doubling.
     meta: { silent: true },
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ['mover'] });
-      track('go_online', { kind });
-    },
   });
   return pv ? PV.previewMutation() : m;
+}
+
+/** Resolve an ambiguous legacy dual-profile account through an explicit human
+ * choice. The server serializes the transition and returns canonical authority;
+ * the subsequent profile refetch cannot inherit stale sibling-online state. */
+export function useSelectMoverKind() {
+  const qc = useQueryClient();
+  const setUserIfCurrent = useAuthStore((s) => s.setUserIfCurrent);
+  return useMutation({
+    mutationFn: async (kind: MoverKind) => {
+      const owner = requireAuthSessionSnapshot();
+      const user = useAuthStore.getState().user as (Parameters<
+        typeof setUserIfCurrent
+      >[1] & { lastMoverRole?: string | null }) | null;
+      if (!user || user.id !== owner.userId) throw new AuthSessionBoundaryError();
+      const response = await customerApi.switchRole(kind, owner);
+      requireAuthSessionForPrincipal(owner);
+      const canonical = canonicalMoverAuthority(
+        response?.data?.data,
+        kind,
+        user.lastMoverRole,
+      );
+      if (!setUserIfCurrent(owner, {
+        ...user,
+        ...canonical,
+      } as unknown as Parameters<typeof setUserIfCurrent>[1])) {
+        throw new AuthSessionBoundaryError();
+      }
+      requireAuthSessionForPrincipal(owner);
+      void qc.invalidateQueries({ queryKey: ['mover'] });
+      return canonical;
+    },
+  });
 }
 export function useGoOffline(kind: MoverKind) {
   const pv = usePreview();
@@ -234,13 +408,23 @@ export function useRiderAction() {
         case 'arrived': return unwrap(riderApi.arrivedAtCustomer(id));
         case 'delivered': return unwrap(riderApi.delivered(id));
         case 'handover': {
+          const owner = requireAuthSessionSnapshot();
           // The golden-rule handover NEEDS the rider's GPS (server-side mandatory —
           // it's the evidence a guarantee claim stands on). Last-known is instant;
           // fall back to a fresh fix.
-          const pos =
-            (await Location.getLastKnownPositionAsync().catch(() => null)) ??
-            (await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced }));
-          return unwrap(riderApi.handover(id, { outcome: 'paid', gps: { lat: pos.coords.latitude, lng: pos.coords.longitude } }));
+          let pos = await Location.getLastKnownPositionAsync().catch(() => null);
+          let current = requireAuthSessionForPrincipal(owner);
+          if (!pos) {
+            pos = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced });
+            current = requireAuthSessionForPrincipal(owner);
+          }
+          const result = await unwrap(riderApi.handover(
+            id,
+            { outcome: 'paid', gps: { lat: pos.coords.latitude, lng: pos.coords.longitude } },
+            current,
+          ));
+          requireAuthSessionForPrincipal(owner);
+          return result;
         }
       }
     },
@@ -331,42 +515,149 @@ export function useRateCustomer() {
  */
 export function useBroadcastLocation(kind: MoverKind | null, enabled: boolean) {
   const pv = usePreview();
+  const qc = useQueryClient();
+  const setLiveLocation = useLocationStore((s) => s.setLiveLocation);
+  const locationStatus = useLocationStore((s) => s.status);
+  const authGeneration = useAuthStore((s) => s.sessionGeneration);
+  const authUserId = useAuthStore((s) => s.user?.id ?? null);
+  const ownerRef = useRef<object>({});
+  const permissionOfflineRef = useRef<MoverKind | null>(null);
+
   useEffect(() => {
-    // Preview never touches the device GPS or the network.
-    if (!kind || !enabled || pv) return;
-    let cancelled = false;
-    let sub: Location.LocationSubscription | undefined;
-    let background = false;
-
-    (async () => {
-      try {
-        // Prefer the background task so the marker keeps moving when the driver
-        // switches to Maps or locks the screen. If background isn't available
-        // (permission denied, or the native module isn't in this build yet),
-        // fall back to the foreground watcher — same behaviour as before.
-        background = await startMoverLocation(kind);
-        if (background || cancelled) return;
-
-        const { status } = await Location.requestForegroundPermissionsAsync();
-        if (status !== 'granted' || cancelled) return;
-        sub = await Location.watchPositionAsync(
-          { accuracy: Location.Accuracy.Balanced, distanceInterval: 25, timeInterval: 8000 },
-          (pos) => {
-            void svc(kind).location(pos.coords.latitude, pos.coords.longitude).catch(() => {});
-          },
-        );
-      } catch {
-        // Location unavailable / permission denied — go-online still works; the
-        // customer just won't see a moving marker. Non-fatal.
+    const owner = ownerRef.current;
+    let desired = true;
+    // Preview, offline mode and unresolved permission all converge on the same
+    // serialized stop path. React runs cleanup before the replacement effect,
+    // so a restart cannot overtake an older native stop.
+    if (!kind || !enabled || pv || locationStatus !== 'granted') {
+      desired = false;
+      void sharedMoverLocationController.transition(owner, null);
+      if (
+        kind
+        && enabled
+        && !pv
+        && locationStatus === 'denied'
+        && permissionOfflineRef.current !== kind
+      ) {
+        // The server's short location lease is the hard safety net. Also remove
+        // idle supply immediately when the OS tells us this device can no longer
+        // publish; active-job conflicts deliberately keep server tracking state.
+        permissionOfflineRef.current = kind;
+        void svc(kind).goOffline()
+          .then(() => qc.invalidateQueries({ queryKey: ['mover'] }))
+          .catch(() => {
+            permissionOfflineRef.current = null;
+          });
       }
-    })();
+      return;
+    }
+    permissionOfflineRef.current = null;
+    const authSession = getAuthSessionSnapshot();
+    const principal = authUserId
+      ? { generation: authGeneration, userId: authUserId }
+      : null;
+    if (!authSession || !principal || !samePrincipalBoundary(authSession, principal)) {
+      desired = false;
+      void sharedMoverLocationController.transition(owner, null);
+      return;
+    }
+    const isPrincipalCurrent = () => (
+      desired
+      && samePrincipalBoundary(getAuthSessionSnapshot(), principal)
+    );
+    const lease = createLiveDeviceLocationLease();
+    if (!lease) {
+      desired = false;
+      void sharedMoverLocationController.transition(owner, null);
+      return;
+    }
+
+    void sharedMoverLocationController.transition(owner, {
+      kind,
+      principal,
+      isPrincipalCurrent: () => (
+        isPrincipalCurrent()
+        && isLiveDeviceLocationLeaseValid(lease)
+      ),
+      dependencies: {
+        startBackground: (moverKind, isSessionCurrent) => startMoverLocation(
+          moverKind,
+          () => isSessionCurrent()
+            && desired
+            && isLiveDeviceLocationLeaseValid(lease),
+        ),
+        stopBackground: async () => {
+          await stopMoverLocation(principal);
+        },
+        watchForeground: (onSample) => Location.watchPositionAsync(
+          { accuracy: Location.Accuracy.Balanced, distanceInterval: 25, timeInterval: 8000 },
+          (pos) => onSample({
+            latitude: pos.coords.latitude,
+            longitude: pos.coords.longitude,
+          }),
+        ),
+        refreshForegroundSample: async () => {
+          let timeout: ReturnType<typeof setTimeout> | undefined;
+          try {
+            const position = await Promise.race([
+              Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced }),
+              new Promise<never>((_resolve, reject) => {
+                timeout = setTimeout(() => reject(new Error('Location refresh timed out')), 10_000);
+              }),
+            ]);
+            return {
+              latitude: position.coords.latitude,
+              longitude: position.coords.longitude,
+            };
+          } finally {
+            if (timeout) clearTimeout(timeout);
+          }
+        },
+        commitSharedSample: (sample) => commitLiveDeviceLocation(
+          lease,
+          { setLiveLocation },
+          sample.latitude,
+          sample.longitude,
+        ),
+        publish: async (moverKind, sample) => {
+          // Pin foreground work exactly like the headless task. The controller
+          // validates user + login generation before every publish, while the
+          // explicit snapshot prevents Axios from borrowing a later account's
+          // token after this callback yields.
+          if (!isPrincipalCurrent() || !isLiveDeviceLocationLeaseValid(lease)) return;
+          const response = await publishMoverLocation(moverKind, sample, authSession);
+          if (
+            response.accepted === false
+            && isPrincipalCurrent()
+          ) {
+            // Another device or an ops action revoked server authority. Stop
+            // this device's native stream immediately; the profile refetch
+            // makes enabled=false and prevents a stale cached restart.
+            desired = false;
+            void sharedMoverLocationController.transition(owner, null);
+            void qc.invalidateQueries({ queryKey: ['mover'] });
+          }
+          return response;
+        },
+      },
+    });
 
     return () => {
-      cancelled = true;
-      sub?.remove();
-      if (background) void stopMoverLocation();
+      // Invalidate task-manager publication synchronously; native teardown is
+      // then serialized before any replacement owner starts.
+      desired = false;
+      void sharedMoverLocationController.transition(owner, null);
     };
-  }, [kind, enabled, pv]);
+  }, [
+    authGeneration,
+    authUserId,
+    kind,
+    enabled,
+    pv,
+    locationStatus,
+    qc,
+    setLiveLocation,
+  ]);
 }
 
 export interface DispatchOffer {
@@ -375,6 +666,13 @@ export interface DispatchOffer {
   vendorName?: string;
   expiresInSeconds?: number;
   etaMinutes?: number;
+  // [REPORT-010 F-07] Authoritative money/route facts carried by the RECOVERY
+  // payload so a rebuilt card never prices itself from a missing board row.
+  deliveryFee?: number;
+  tipAmount?: number;
+  taxiFareTotal?: number | null;
+  pickupAddress?: string | null;
+  deliveryAddress?: string | null;
 }
 
 /**
@@ -396,13 +694,41 @@ export function useDispatchOffers(kind: MoverKind | null, online: boolean) {
     }
     connectSocket();
     const s = getSocket();
+    const api = kind === 'DRIVER' ? driverApi : riderApi;
+    // [danger #21] Render proof: the moment the card exists on this device,
+    // tell the server — a timeout WITHOUT this stamp is UNDELIVERABLE and
+    // never decays the acceptance rate. Fire-and-forget garnish.
+    const markSeen = (orderId: string) => { void api.offerSeen(orderId).catch(() => {}); };
     const onOffer = (data: DispatchOffer) => {
       setOffer(data);
+      markSeen(data.orderId);
       qc.invalidateQueries({ queryKey: ['mover', 'available', kind] });
     };
     s.on('dispatch:offer', onOffer);
+
+    // [E27 / danger #37] Offer RECOVERY: a socket that dropped while the ping
+    // was in flight used to lose the card forever (and the silent timeout
+    // still counted against acceptance). On mount and every reconnect, ask
+    // the server for the live exclusive offer and rebuild the card with its
+    // REAL remaining seconds. Failures are garnish — the poll fallback and
+    // the next socket ping still stand.
+    let gone = false;
+    const recover = async () => {
+      try {
+        const data = await unwrap<{ offer: DispatchOffer | null }>(api.currentOffer());
+        if (!gone && data?.offer?.orderId) {
+          setOffer(data.offer);
+          markSeen(data.offer.orderId);
+          qc.invalidateQueries({ queryKey: ['mover', 'available', kind] });
+        }
+      } catch { /* recovery only — never surface */ }
+    };
+    void recover();
+    s.on('connect', recover);
     return () => {
+      gone = true;
       s.off('dispatch:offer', onOffer);
+      s.off('connect', recover);
     };
   }, [kind, online, qc, pv]);
 

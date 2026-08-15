@@ -25,8 +25,10 @@ export const queryClient = new QueryClient({
   mutationCache,
   defaultOptions: {
     queries: { staleTime: 30_000, retry: 2 },
-    // One retry on a flaky mobile network before we surface the failure —
-    // covers a transient blip without masking a real error for long.
-    mutations: { retry: 1, retryDelay: 800 },
+    // A mutation function is invoked again from scratch. On a shared device,
+    // account A can log out during the retry delay and the second invocation
+    // can then authorize a state-changing request as account B. Mutations fail
+    // fast globally; explicitly idempotent workflows own any safe retry policy.
+    mutations: { retry: false },
   },
 });

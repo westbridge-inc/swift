@@ -121,6 +121,10 @@ export function HomeScreen() {
   const ads = useAds('*');
   const adSlots = ads.data?.data?.placements;
   const adTrackable = ads.data?.trackable ?? false;
+  const adTrackingScope = ads.data?.trackingScope ?? null;
+  const adTrackingKey = adTrackingScope
+    ? `${adTrackingScope.kind}:${adTrackingScope.scopeId}:${adTrackingScope.generation}`
+    : 'display-only';
   const heroAd = adSlots?.['home_hero_video']?.items[0];
   const topAd = adSlots?.['home_top_card']?.items[0];
   const barSlot = adSlots?.['home_ad_bar'];
@@ -280,7 +284,12 @@ export function HomeScreen() {
         {/* Tier 1 — hero video slot (§13.1). Present only when sold+live. */}
         {heroAd ? (
           <View style={{ paddingHorizontal: GUTTER, marginTop: space['2xl'] }}>
-            <AdHeroVideo item={heroAd} trackable={adTrackable} />
+            <AdHeroVideo
+              key={`hero:${adTrackingKey}`}
+              item={heroAd}
+              trackable={adTrackable}
+              trackingScope={adTrackingScope}
+            />
           </View>
         ) : null}
 
@@ -337,7 +346,12 @@ export function HomeScreen() {
             {/* Tier 2 — top card slot (§13.2), the widget-row area. */}
             {topAd ? (
               <View style={{ paddingHorizontal: GUTTER, marginTop: space['2xl'] }}>
-                <AdTopCard item={topAd} trackable={adTrackable} />
+                <AdTopCard
+                  key={`top:${adTrackingKey}`}
+                  item={topAd}
+                  trackable={adTrackable}
+                  trackingScope={adTrackingScope}
+                />
               </View>
             ) : null}
 
@@ -371,9 +385,11 @@ export function HomeScreen() {
             {barSlot && barSlot.items.length > 0 ? (
               <View style={{ paddingHorizontal: GUTTER, marginTop: space['2xl'] }}>
                 <AdBar
+                  key={`bar:${adTrackingKey}`}
                   items={barSlot.items}
                   rotationSeconds={barSlot.rotationSeconds}
                   trackable={adTrackable}
+                  trackingScope={adTrackingScope}
                   width={SCREEN_W - GUTTER * 2}
                 />
               </View>

@@ -16,6 +16,61 @@ export function assertSafeBootConfig(env: Record<string, string | undefined> = p
     throw new Error('FATAL: DEV_OTP_BYPASS=1 in production — this disables OTP verification. Refusing to start.');
   }
 
+  // OTP records are only six digits; an unkeyed hash is recoverable offline in
+  // seconds. Require a strong HMAC key (dedicated, or the already load-bearing
+  // JWT secret with domain separation) before accepting production traffic.
+  const otpHashSecret = env['OTP_HASH_SECRET'] ?? env['JWT_SECRET'];
+  if (!otpHashSecret || otpHashSecret.length < 32) {
+    throw new Error('FATAL: OTP_HASH_SECRET or JWT_SECRET must be at least 32 characters in production — OTP records require a keyed HMAC. Refusing to start.');
+  }
+
+  // Identity must never silently select the deterministic test adapter. Its
+  // marker URLs can approve a user, so a missing production variable is a
+  // security failure, not a reasonable default.
+  const kycProvider = env['KYC_PROVIDER'];
+  if (kycProvider !== 'didit' && kycProvider !== 'idanalyzer') {
+    throw new Error('FATAL: KYC_PROVIDER must be didit or idanalyzer in production; sandbox/unset can self-approve test identities. Refusing to start.');
+  }
+  if (kycProvider === 'didit' && !env['DIDIT_API_KEY']) {
+    throw new Error('FATAL: DIDIT_API_KEY is required when KYC_PROVIDER=didit. Refusing to start.');
+  }
+  if (kycProvider === 'idanalyzer' && !env['ID_ANALYZER_API_KEY']) {
+    throw new Error('FATAL: ID_ANALYZER_API_KEY is required when KYC_PROVIDER=idanalyzer. Refusing to start.');
+  }
+
+  // Subscription charges are real platform revenue. The sandbox succeeds for
+  // synthetic tokens, so production must name and configure a live processor.
+  const paymentProvider = env['PAYMENT_PROVIDER'];
+  if (paymentProvider !== 'stripe' && paymentProvider !== 'powertranz') {
+    throw new Error('FATAL: PAYMENT_PROVIDER must be stripe or powertranz in production; sandbox/unset can record fake captured revenue. Refusing to start.');
+  }
+  if (paymentProvider === 'stripe' && !env['STRIPE_SECRET_KEY']?.startsWith('sk_live_')) {
+    throw new Error('FATAL: PAYMENT_PROVIDER=stripe requires a live STRIPE_SECRET_KEY in production. Refusing to start.');
+  }
+  if (paymentProvider === 'powertranz') {
+    if (!env['PAYMENT_GATEWAY_KEY'] || !env['PAYMENT_GATEWAY_SECRET']) {
+      throw new Error('FATAL: PAYMENT_PROVIDER=powertranz requires PAYMENT_GATEWAY_KEY and PAYMENT_GATEWAY_SECRET. Refusing to start.');
+    }
+    const url = env['POWERTRANZ_API_URL'];
+    if (!url || !/^https:\/\//i.test(url) || /staging|sandbox|test/i.test(url)) {
+      throw new Error('FATAL: production PowerTranz requires an explicit non-staging HTTPS POWERTRANZ_API_URL. Refusing to start.');
+    }
+  }
+
+  // MMG subscription collection has a deterministic sandbox lookup that can
+  // report approval. Require the live driver, every credential, and a URL that
+  // is not the published UAT host before workers are allowed to run.
+  if (env['MMG_DRIVER'] !== 'live') {
+    throw new Error('FATAL: MMG_DRIVER must be live in production; sandbox/unset can settle synthetic subscription payments. Refusing to start.');
+  }
+  for (const name of ['MMG_API_KEY', 'MMG_MERCHANT_ID', 'MMG_PASSWORD', 'MMG_MKEY', 'MMG_MSECRET'] as const) {
+    if (!env[name]) throw new Error(`FATAL: ${name} is required when MMG_DRIVER=live. Refusing to start.`);
+  }
+  const mmgUrl = env['MMG_API_URL'];
+  if (!mmgUrl || !/^https:\/\//i.test(mmgUrl) || /mmgtest|\buat\b|sandbox/i.test(mmgUrl)) {
+    throw new Error('FATAL: production MMG requires an explicit non-UAT HTTPS MMG_API_URL. Refusing to start.');
+  }
+
   // SWIFT-012: the 'dev' notification provider logs OTP SMS to the console
   // instead of delivering them. In production that silently means signup and
   // login receive no code — a dead front door that looks perfectly healthy at

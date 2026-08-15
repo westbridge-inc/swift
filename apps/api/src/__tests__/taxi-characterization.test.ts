@@ -58,13 +58,13 @@ async function makeUserWithSession(roles: UserRole[], activeRole: UserRole, extr
   });
   userIds.push(user.id);
   const token = app.jwt.sign({ userId: user.id, role: activeRole, jti: nanoid(8) });
-  await app.prisma.session.create({
+  const session = await app.prisma.session.create({
     data: {
       userId: user.id, token, refreshToken: nanoid(48),
       deviceId: 'char-test', deviceType: 'test', expiresAt: new Date(Date.now() + DAY),
     },
   });
-  return { userId: user.id, token };
+  return { userId: user.id, token, sessionId: session.id };
 }
 
 async function makeDriver() {
@@ -76,6 +76,7 @@ async function makeDriver() {
       licensePlate: `HD 48${seq}`, driverLicenseUrl: 'x', vehicleInsuranceUrl: 'x',
       vehiclePhotoUrl: 'https://cdn.test/allion.jpg',
       isAvailable: true, isOnline: true, currentLat: 6.8013, currentLng: -58.1553,
+      lastLocationUpdate: new Date(), locationSessionId: owned.sessionId,
       averageRating: 4.9,
     } as never,
   });
@@ -169,14 +170,15 @@ describe('the current taxi contract (characterization — must stay green all en
     expect(tier).toMatchObject({ rideClass: 'ECONOMY' });
     for (const key of ['fare', 'capacity', 'source']) expect(tier).toHaveProperty(key);
 
+    await app.redis.del('t:swift-default:avail:DRIVER:6.80:-58.16');
     const avail = await app.inject({
       method: 'GET',
       url: '/api/v1/rides/availability?lat=6.8013&lng=-58.1553',
       headers: { authorization: `Bearer ${customer.token}` },
     });
     expect(avail.statusCode).toBe(200);
-    expect(['GOOD', 'LOW', 'NONE']).toContain(avail.json().data.level);
-    expect(avail.json().data).toHaveProperty('nearestEtaMinutes');
+    expect(['GOOD', 'LOW']).toContain(avail.json().data.level);
+    expect(avail.json().data.nearestEtaMinutes).toBeGreaterThanOrEqual(1);
   });
 
   it('walks the full lifecycle through the real routes with the real socket events', async () => {

@@ -7,61 +7,111 @@ import { color } from '@swift/ui';
 import { Text, Card, Button, PressableScale } from '../../components/ui';
 import { toast } from '../../components/ui/toast';
 import { useImportAutomap, useImportItems, useImportFile } from '../../hooks/vendorops';
+import {
+  AuthSessionBoundaryError,
+  getAuthSessionSnapshot,
+  requireAuthSessionForPrincipal,
+} from '../../stores/authStore';
+import { useStoreSwitcher } from '../../stores/storeSwitcher';
+import type { AuthSessionSnapshot } from '../../lib/authSession';
+import { useVendorPreview } from '../../stores/vendorPreview';
 
 const RECOMMENDED = 'category, name, basePrice, sku, unit, stockQuantity, description';
 
 export function VendorBulkImportScreen({ navigation }: any) {
+  const previewType = useVendorPreview((state) => state.previewType);
   const automap = useImportAutomap();
   const importFile = useImportFile();
   const importItems = useImportItems();
   const [csv, setCsv] = useState('');
+  const [importScope, setImportScope] = useState<{
+    authSession: AuthSessionSnapshot;
+    storeId: string | null;
+  } | null>(null);
   // CSV-paste and file uploads land in the SAME confirm-ready preview shape.
   const mapped: any = importFile.data ?? automap.data;
   const result: any = importItems.data;
 
   const analyze = () => {
     if (csv.trim().length === 0) return;
+    const authSession = getAuthSessionSnapshot();
+    if (!authSession) return;
+    const scope = {
+      authSession,
+      storeId: useStoreSwitcher.getState().selectedStoreId,
+    };
+    setImportScope(scope);
     importItems.reset();
     importFile.reset();
-    automap.mutate(csv.trim());
+    automap.mutate({ csv: csv.trim(), ...scope });
   };
 
   const pickFile = async () => {
-    const picked = await DocumentPicker.getDocumentAsync({
-      type: [
-        'text/csv',
-        'text/comma-separated-values',
-        'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-        'application/pdf',
-      ],
-      copyToCacheDirectory: true,
-    });
-    if (picked.canceled || !picked.assets?.[0]) return;
-    const a = picked.assets[0];
-    const name = a.name ?? 'catalogue';
-    importItems.reset();
-    automap.reset();
+    const authSession = getAuthSessionSnapshot();
+    if (!authSession) return;
+    const scope = {
+      authSession,
+      storeId: useStoreSwitcher.getState().selectedStoreId,
+    };
+    try {
+      const picked = await DocumentPicker.getDocumentAsync({
+        type: [
+          'text/csv',
+          'text/comma-separated-values',
+          'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+          'application/pdf',
+        ],
+        copyToCacheDirectory: true,
+      });
+      requireAuthSessionForPrincipal(scope.authSession);
+      if (picked.canceled || !picked.assets?.[0]) return;
+      const a = picked.assets[0];
+      const name = a.name ?? 'catalogue';
+      setImportScope(scope);
+      importItems.reset();
+      automap.reset();
 
-    if (/\.xlsx$/i.test(name)) {
-      importFile.mutate({ kind: 'xlsx', file: { uri: a.uri, name, type: a.mimeType ?? 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' } });
-    } else if (/\.pdf$/i.test(name)) {
-      importFile.mutate({ kind: 'menu-pdf', file: { uri: a.uri, name, type: 'application/pdf' } });
-    } else {
-      // CSV: read the text and reuse the paste path
-      importFile.reset();
-      try {
+      if (/\.xlsx$/i.test(name)) {
+        importFile.mutate({
+          kind: 'xlsx',
+          file: {
+            uri: a.uri,
+            name,
+            type: a.mimeType ?? 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+          },
+          ...scope,
+        });
+      } else if (/\.pdf$/i.test(name)) {
+        importFile.mutate({
+          kind: 'menu-pdf',
+          file: { uri: a.uri, name, type: 'application/pdf' },
+          ...scope,
+        });
+      } else {
+        // CSV: read the text and reuse the paste path.
+        importFile.reset();
         const text = await (await fetch(a.uri)).text();
+        requireAuthSessionForPrincipal(scope.authSession);
         setCsv(text);
-        automap.mutate(text.trim());
-      } catch {
-        // Tell the vendor instead of silently accepting a file that didn't load.
-        toast.error('Couldn’t read that file', 'Paste the rows below instead, or try a different file.');
+        automap.mutate({ csv: text.trim(), ...scope });
       }
+    } catch (pickError) {
+      if (pickError instanceof AuthSessionBoundaryError) return;
+      // Tell the vendor instead of silently accepting a file that didn't load.
+      toast.error('Couldn’t read that file', 'Paste the rows below instead, or try a different file.');
     }
   };
 
   const runImport = () => {
-    importItems.mutate(mapped?.normalizedCsv ?? csv.trim());
+    const authSession = importScope?.authSession ?? getAuthSessionSnapshot();
+    if (!authSession) return;
+    const scope = importScope ?? {
+      authSession,
+      storeId: useStoreSwitcher.getState().selectedStoreId,
+    };
+    requireAuthSessionForPrincipal(scope.authSession);
+    setImportScope(scope);
+    importItems.mutate({ csv: mapped?.normalizedCsv ?? csv.trim(), ...scope });
   };
 
   const busy = automap.isPending || importFile.isPending;
@@ -91,7 +141,21 @@ export function VendorBulkImportScreen({ navigation }: any) {
           PDF menu we turn into draft items for you to confirm. Recommended columns: {RECOMMENDED}.
         </Text>
 
-        <Button label="Pick a file (CSV, Excel, or PDF menu)" loading={importFile.isPending} onPress={pickFile} />
+        {previewType ? (
+          <Card className="mb-md">
+            <Text className="text-sm font-semibold">Read-only preview</Text>
+            <Text className="mt-xs text-xs text-text-secondary">
+              Sign in and create your store before importing a catalogue.
+            </Text>
+          </Card>
+        ) : null}
+
+        <Button
+          label="Pick a file (CSV, Excel, or PDF menu)"
+          loading={importFile.isPending}
+          disabled={!!previewType}
+          onPress={pickFile}
+        />
 
         <Text className="my-md text-center text-xs text-text-muted">— or paste CSV —</Text>
 
@@ -101,6 +165,7 @@ export function VendorBulkImportScreen({ navigation }: any) {
           placeholder={'category,name,basePrice,stockQuantity\nDrinks,Cola 1L,400,50\nDrinks,Water 500ml,200,120'}
           placeholderTextColor={color.text.muted}
           multiline
+          editable={!previewType}
           textAlignVertical="top"
           style={{ minHeight: 140 }}
           className="mb-md rounded-2xl border border-border-subtle bg-surface-base px-lg py-md font-body text-sm text-text-primary"
@@ -109,7 +174,7 @@ export function VendorBulkImportScreen({ navigation }: any) {
           label="Analyze CSV"
           variant="outline"
           loading={automap.isPending}
-          disabled={csv.trim().length === 0 || busy}
+          disabled={!!previewType || csv.trim().length === 0 || busy}
           onPress={analyze}
         />
 
@@ -145,6 +210,7 @@ export function VendorBulkImportScreen({ navigation }: any) {
               label={`Import ${mapped.rowCount} items`}
               className="mt-md"
               loading={importItems.isPending}
+              disabled={!!previewType}
               onPress={runImport}
             />
           </Card>

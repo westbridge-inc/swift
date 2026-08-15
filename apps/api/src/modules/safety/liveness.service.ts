@@ -4,6 +4,10 @@ import { AppError, NotFoundError } from '../../utils/errors';
 import { getKycProvider, type KycProvider } from '../../providers/kyc/kyc-provider';
 import { NotificationService, notifyAdmins } from '../notification/notification.service';
 import { log } from '../../utils/logger';
+import {
+  hasTaxiPassengerCustody,
+  lockTaxiOrderForCustodyDecision,
+} from '../rides/passenger-custody';
 
 // Identity Assurance (safety spec §7) — "is the person driving the account's
 // approved human?" A fresh shift selfie is face-matched against the signup
@@ -324,11 +328,13 @@ export class LivenessService {
         status: true,
         orderNumber: true,
         driverId: true,
+        ridePinVerified: true,
+        ridePinVerifiedAt: true,
         driver: { select: { id: true, userId: true } },
       },
     });
     if (!order) throw new NotFoundError('Ride', orderId);
-    if (order.status === 'RIDE_IN_PROGRESS') {
+    if (hasTaxiPassengerCustody(order)) {
       throw new AppError(409, 'RIDE_ALREADY_STARTED', 'If you are in the vehicle and feel unsafe, use the SOS button — help comes faster.');
     }
     if (!order.driverId || !order.driver) {
@@ -339,30 +345,56 @@ export class LivenessService {
 
     const NOT_ABOARD = ['DRIVER_ASSIGNED', 'DRIVER_EN_ROUTE', 'DRIVER_ARRIVED'] as const;
     const now = new Date();
-    const released = await this.prisma.$transaction(async (tx) => {
-      const cas = await tx.order.updateMany({
-        where: { id: order.id, driverId: order.driverId, status: { in: [...NOT_ABOARD] } },
+    const release = await this.prisma.$transaction(async (tx) => {
+      await lockTaxiOrderForCustodyDecision(tx, order.id);
+      const current = await tx.order.findFirst({
+        where: { id: order.id, customerId: customerUserId, orderType: 'TAXI' },
+        select: {
+          id: true,
+          status: true,
+          orderNumber: true,
+          driverId: true,
+          ridePinVerified: true,
+          ridePinVerifiedAt: true,
+          driver: { select: { id: true, userId: true } },
+        },
+      });
+      if (!current) throw new NotFoundError('Ride', orderId);
+      if (hasTaxiPassengerCustody(current)) {
+        throw new AppError(409, 'RIDE_ALREADY_STARTED', 'If you are in the vehicle and feel unsafe, use the SOS button — help comes faster.');
+      }
+      if (!current.driverId || !current.driver) {
+        if (current.status === 'PENDING') return { kind: 'ALREADY_HANDLED' as const };
+        throw new AppError(409, 'NO_DRIVER_ASSIGNED', 'No driver is assigned to this ride yet.');
+      }
+      if (!NOT_ABOARD.includes(current.status as typeof NOT_ABOARD[number])) {
+        throw new AppError(409, 'RIDE_STATE_CHANGED', 'The ride changed underneath this report — check its current status.');
+      }
+      await tx.order.update({
+        where: { id: current.id },
         data: { status: 'PENDING', driverId: null, acceptedAt: null },
       });
-      if (cas.count === 0) return false;
       await tx.driver.updateMany({
-        where: { id: order.driverId! },
+        where: { id: current.driverId },
         data: { isOnline: false, isAvailable: false, currentRideId: null, livenessLockedAt: now, lastLivenessPassAt: null },
       });
       await tx.orderStatusLog.create({
-        data: { orderId: order.id, status: 'PENDING', changedBy: 'system:not-my-driver', note: 'Passenger reported "this isn\'t my driver" — ride released and re-dispatched; driver locked pending identity review' },
+        data: { orderId: current.id, status: 'PENDING', changedBy: 'system:not-my-driver', note: 'Passenger reported "this isn\'t my driver" — ride released and re-dispatched; driver locked pending identity review' },
       });
-      return true;
+      return {
+        kind: 'RELEASED' as const,
+        order: { id: current.id, orderNumber: current.orderNumber },
+        driverUserId: current.driver.userId,
+      };
     });
-    if (!released) {
-      const fresh = await this.prisma.order.findUnique({ where: { id: order.id }, select: { status: true, driverId: true } });
-      if (fresh && fresh.status === 'PENDING' && !fresh.driverId) return { reDispatched: true, alreadyHandled: true, sosAvailable: true };
-      throw new AppError(409, 'RIDE_STATE_CHANGED', 'The ride changed underneath this report — check its current status.');
+    if (release.kind === 'ALREADY_HANDLED') {
+      return { reDispatched: true, alreadyHandled: true, sosAvailable: true };
     }
+    const releasedOrder = release.order;
 
     try {
-      this.io.to(`order:${order.id}`).emit('order:status_changed', { orderId: order.id, status: 'PENDING', reason: 'not_my_driver' });
-      this.io.to('ops:war-room').emit('safety:not-my-driver', { orderId: order.id, driverUserId: order.driver.userId, at: now.toISOString() });
+      this.io.to(`order:${releasedOrder.id}`).emit('order:status_changed', { orderId: releasedOrder.id, status: 'PENDING', reason: 'not_my_driver' });
+      this.io.to('ops:war-room').emit('safety:not-my-driver', { orderId: releasedOrder.id, driverUserId: release.driverUserId, at: now.toISOString() });
     } catch { /* advisory only */ }
     // §7.3 → §8: the report IS an S1 incident. The case machine owns the ops
     // page, the SLA clock, the subject's due-process notice (category only,
@@ -372,20 +404,20 @@ export class LivenessService {
       .intake({
         category: 'IDENTITY_MISMATCH',
         intake: 'SYSTEM_AUTO',
-        subjectUserId: order.driver.userId,
+        subjectUserId: release.driverUserId,
         reporterUserId: customerUserId,
-        orderId: order.id,
-        summary: `Passenger reported "this isn't my driver" on order ${order.orderNumber} before boarding. Driver account liveness-locked and ride re-dispatched.`,
+        orderId: releasedOrder.id,
+        summary: `Passenger reported "this isn't my driver" on order ${releasedOrder.orderNumber} before boarding. Driver account liveness-locked and ride re-dispatched.`,
       })
-      .catch((err) => log().error({ err, orderId: order.id }, 'not-my-driver: incident intake failed — lock and release still hold'));
+      .catch((err) => log().error({ err, orderId: releasedOrder.id }, 'not-my-driver: incident intake failed — lock and release still hold'));
     await this.notifications.send({
       userId: customerUserId,
       type: 'ORDER_UPDATE',
       title: 'Finding you another driver',
       body: 'Do not enter the vehicle. We are matching you with the nearest available driver now.',
-      data: { orderId: order.id, status: 'PENDING' },
+      data: { orderId: releasedOrder.id, status: 'PENDING' },
     });
-    if (enqueueDispatch) await enqueueDispatch(order.id).catch(() => {});
+    if (enqueueDispatch) await enqueueDispatch(releasedOrder.id).catch(() => {});
     return { reDispatched: true, sosAvailable: true };
   }
 }

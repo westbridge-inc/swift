@@ -6,6 +6,11 @@ import { Feather } from '@expo/vector-icons';
 import { color } from '@swift/ui';
 import { Text, Heading, Card, Button, Badge, PressableScale } from '../../../components/ui';
 import { useUploadFile, useSubmitIdentity } from '../../../hooks/verification';
+import {
+  AuthSessionBoundaryError,
+  requireAuthSessionForPrincipal,
+  requireAuthSessionSnapshot,
+} from '../../../stores/authStore';
 
 function UploadRow({
   title,
@@ -42,17 +47,27 @@ export function IdentityVerificationScreen({ navigation }: any) {
   const [submitted, setSubmitted] = useState(false);
 
   const pick = async (kind: 'id' | 'selfie') => {
-    const perm = await ImagePicker.requestMediaLibraryPermissionsAsync();
-    if (!perm.granted) return;
-    const res = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ImagePicker.MediaTypeOptions.Images, quality: 0.8 });
-    if (res.canceled || !res.assets?.[0]) return;
-    const a = res.assets[0];
-    setPicking(kind);
     try {
-      const url = await upload.mutateAsync({ uri: a.uri, name: a.fileName ?? `${kind}.jpg`, type: a.mimeType ?? 'image/jpeg' });
+      const owner = requireAuthSessionSnapshot();
+      const perm = await ImagePicker.requestMediaLibraryPermissionsAsync();
+      requireAuthSessionForPrincipal(owner);
+      if (!perm.granted) return;
+      const res = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ImagePicker.MediaTypeOptions.Images, quality: 0.8 });
+      requireAuthSessionForPrincipal(owner);
+      if (res.canceled || !res.assets?.[0]) return;
+      const a = res.assets[0];
+      setPicking(kind);
+      const url = await upload.mutateAsync({
+        uri: a.uri,
+        name: a.fileName ?? `${kind}.jpg`,
+        type: a.mimeType ?? 'image/jpeg',
+        authSession: owner,
+      });
+      requireAuthSessionForPrincipal(owner);
       if (kind === 'id') setIdUrl(url);
       else setSelfieUrl(url);
-    } catch {
+    } catch (pickError) {
+      if (pickError instanceof AuthSessionBoundaryError) return;
       // surfaced below
     } finally {
       setPicking(null);

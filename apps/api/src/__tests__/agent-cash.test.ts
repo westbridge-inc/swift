@@ -223,6 +223,134 @@ describe('scenario F + the suspense laws — money is never lost, never rejected
   });
 });
 
+describe('suspense attachment is one atomic money operation', () => {
+  it('rolls back the wallet, immutable event, receipt, and ledger when payment finalization crashes, then safely retries to a different subscription', async () => {
+    const { generateSan } = await import('../modules/billing/san');
+    let unknown = '';
+    for (;;) {
+      unknown = generateSan();
+      if (!(await prisma.subscription.findUnique({ where: { san: unknown } }))
+        && !(await prisma.sanTombstone.findUnique({ where: { san: unknown } }))) break;
+    }
+    const payment = track(await svc.ingest(inbound(unknown, { amount: 1_700 })));
+    expect(payment.status).toBe('received_unmatched');
+    const first = await makeVendorSub();
+    const retryDestination = await makeVendorSub();
+
+    // Simulate the process dying exactly when the payment row would be made
+    // final, after the credit tail has already written its event/receipt/
+    // ledger/balance. The query extension runs inside the service transaction,
+    // so the invariant under test is a real PostgreSQL rollback, not a mock.
+    const crashingPrisma = prisma.$extends({
+      query: {
+        mmgAgentPayment: {
+          $allOperations: async ({ operation, args, query }) => {
+            const status = (args as { data?: { status?: string } }).data?.status;
+            if ((operation === 'update' || operation === 'updateMany')
+              && (status === 'MATCHED' || status === 'RESOLVED')) {
+              throw new Error('TEST_CRASH_BEFORE_PAYMENT_FINALIZE');
+            }
+            return query(args);
+          },
+        },
+      },
+    }) as unknown as PrismaClient;
+    const io = { to: () => ({ emit: () => undefined }) } as never;
+    const crashingBilling = new BillingService(
+      crashingPrisma,
+      new NotificationService(crashingPrisma, io),
+      getPaymentProvider(),
+    );
+    const crashingService = new AgentCashService(crashingPrisma, crashingBilling);
+
+    await expect(crashingService.attach(payment.paymentId, first.sub.id, 'admin-crash'))
+      .rejects.toThrow('TEST_CRASH_BEFORE_PAYMENT_FINALIZE');
+
+    const afterCrash = await prisma.mmgAgentPayment.findUniqueOrThrow({ where: { id: payment.paymentId } });
+    expect(afterCrash).toMatchObject({ status: 'UNMATCHED', subscriptionId: null, resolvedBy: null, resolvedAt: null });
+    expect(await prisma.billingEvent.count({ where: { subscriptionId: first.sub.id, type: 'PREPAID_TOPUP' } })).toBe(0);
+    expect(await prisma.feeReceipt.count({ where: { subscriptionId: first.sub.id } })).toBe(0);
+    expect(await prisma.ledgerEntry.count({
+      where: { subledgerId: first.sub.id, accountCode: 'WALLET_LIABILITY', credit: { gt: 0 } },
+    })).toBe(0);
+    expect(await prisma.prepaidBalance.findUnique({ where: { subscriptionId: first.sub.id } })).toBeNull();
+
+    const retry = await svc.attach(payment.paymentId, retryDestination.sub.id, 'admin-retry');
+    expect(retry).toMatchObject({ status: 'accepted', subscriptionId: retryDestination.sub.id });
+    const afterRetry = await prisma.mmgAgentPayment.findUniqueOrThrow({ where: { id: payment.paymentId } });
+    expect(afterRetry).toMatchObject({
+      status: 'RESOLVED',
+      subscriptionId: retryDestination.sub.id,
+      resolvedBy: 'admin-retry',
+    });
+    expect(await prisma.billingEvent.count({
+      where: { subscriptionId: { in: [first.sub.id, retryDestination.sub.id] }, type: 'PREPAID_TOPUP' },
+    })).toBe(1);
+    expect(await prisma.feeReceipt.count({
+      where: { subscriptionId: { in: [first.sub.id, retryDestination.sub.id] } },
+    })).toBe(1);
+    expect(await prisma.ledgerEntry.count({
+      where: {
+        subledgerId: { in: [first.sub.id, retryDestination.sub.id] },
+        accountCode: 'WALLET_LIABILITY',
+        credit: { gt: 0 },
+      },
+    })).toBe(1);
+    expect(Number((await prisma.prepaidBalance.findUniqueOrThrow({
+      where: { subscriptionId: retryDestination.sub.id },
+    })).balance)).toBe(1_700);
+
+    await expect(svc.attach(payment.paymentId, first.sub.id, 'admin-late-retry'))
+      .rejects.toThrow('NOT_UNMATCHED');
+    expect(await prisma.billingEvent.count({
+      where: { subscriptionId: { in: [first.sub.id, retryDestination.sub.id] }, type: 'PREPAID_TOPUP' },
+    })).toBe(1);
+  });
+
+  it('serializes two admins attaching the same payment to different subscriptions so exactly one destination wins', async () => {
+    const { generateSan } = await import('../modules/billing/san');
+    let unknown = '';
+    for (;;) {
+      unknown = generateSan();
+      if (!(await prisma.subscription.findUnique({ where: { san: unknown } }))
+        && !(await prisma.sanTombstone.findUnique({ where: { san: unknown } }))) break;
+    }
+    const payment = track(await svc.ingest(inbound(unknown, { amount: 1_900 })));
+    const left = await makeVendorSub();
+    const right = await makeVendorSub();
+
+    const attempts = await Promise.allSettled([
+      svc.attach(payment.paymentId, left.sub.id, 'admin-left'),
+      svc.attach(payment.paymentId, right.sub.id, 'admin-right'),
+    ]);
+    expect(attempts.filter((result) => result.status === 'fulfilled')).toHaveLength(1);
+    expect(attempts.filter((result) => result.status === 'rejected')).toHaveLength(1);
+
+    const row = await prisma.mmgAgentPayment.findUniqueOrThrow({ where: { id: payment.paymentId } });
+    expect(row.status).toBe('RESOLVED');
+    expect([left.sub.id, right.sub.id]).toContain(row.subscriptionId);
+    expect(await prisma.billingEvent.count({
+      where: { subscriptionId: { in: [left.sub.id, right.sub.id] }, type: 'PREPAID_TOPUP' },
+    })).toBe(1);
+    expect(await prisma.feeReceipt.count({
+      where: { subscriptionId: { in: [left.sub.id, right.sub.id] } },
+    })).toBe(1);
+    expect(await prisma.ledgerEntry.count({
+      where: {
+        subledgerId: { in: [left.sub.id, right.sub.id] },
+        accountCode: 'WALLET_LIABILITY',
+        credit: { gt: 0 },
+      },
+    })).toBe(1);
+    const balances = await prisma.prepaidBalance.findMany({
+      where: { subscriptionId: { in: [left.sub.id, right.sub.id] } },
+    });
+    expect(balances).toHaveLength(1);
+    expect(balances[0]!.subscriptionId).toBe(row.subscriptionId);
+    expect(Number(balances[0]!.balance)).toBe(1_900);
+  });
+});
+
 describe('cross-channel dedupe (edge 2 / scenario G core)', () => {
   it('webhook then the same mmgTxnId via settlement file → RECONCILED, zero new money', async () => {
     const { sub, san } = await makeVendorSub();

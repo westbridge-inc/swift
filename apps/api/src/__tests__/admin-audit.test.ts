@@ -162,6 +162,7 @@ describe('admin audit trail', () => {
         userId: ordinaryAdmin.id,
         token,
         refreshToken: nanoid(48),
+        authMethod: 'OTP',
         deviceId: 'admin-audit',
         deviceType: 'test',
         expiresAt: new Date(Date.now() + 86_400_000),

@@ -1,6 +1,6 @@
 /** @jsxImportSource react */
 import React from 'react';
-import { Pressable, View, type ViewStyle } from 'react-native';
+import { Pressable, View, type ViewProps, type ViewStyle } from 'react-native';
 import { Feather } from '@expo/vector-icons';
 import { color, radius, space } from '@swift/ui';
 import { LinkText } from './button';
@@ -33,6 +33,21 @@ export function SectionHeader({
   );
 }
 
+/** Hides purely visual artwork from assistive technology and keyboard focus. */
+export function DecorativeIcon({ children, ...rest }: ViewProps) {
+  return (
+    <View
+      {...rest}
+      accessible={false}
+      accessibilityElementsHidden
+      focusable={false}
+      importantForAccessibility="no-hide-descendants"
+    >
+      {children}
+    </View>
+  );
+}
+
 /** Brand-soft rounded-square icon chip (settings / profile rows). */
 export function IconChip({
   icon,
@@ -46,7 +61,10 @@ export function IconChip({
   const fg = tone === 'error' ? color.error : color.brand[600];
   const bg = tone === 'error' ? color.soft.danger : color.brand[50];
   return (
-    <View
+    <DecorativeIcon
+      // IconChip always accompanies visible text (row label, state title, or
+      // dialog heading), so exposing the font glyph only adds noise such as
+      // “log-out character” to VoiceOver/TalkBack.
       style={{
         width: size,
         height: size,
@@ -57,7 +75,7 @@ export function IconChip({
       }}
     >
       <Feather name={icon} size={size * 0.45} color={fg} />
-    </View>
+    </DecorativeIcon>
   );
 }
 

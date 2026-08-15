@@ -5,7 +5,7 @@ export const metadata: Metadata = { title: 'How it works' };
 
 const CUSTOMER_STEPS = [
   ['Order', 'Pick a restaurant, supermarket or shop and order in the app — delivery or pickup.'],
-  ['Change your mind, free', 'Every order has a short free-cancel window before the store even sees it. Nothing gets cooked or dispatched until it closes.'],
+  ['Change your mind early', 'Every order has a short cancel window before the store even sees it — nothing gets cooked or dispatched until it closes. Cash orders cancel free; if you already sent an MMG payment, the store refunds you directly.'],
   ['The store gets to work', 'Restaurants cook; supermarkets shelf-pick your list item by item — if something is out of stock, you approve the substitute live.'],
   ['The nearest rider brings it', 'Dispatch pings the closest available rider, Uber-style. You watch every step on a live map.'],
   ['Pay at the door — or MMG', 'Cash at handover, or pay the store directly on their own MMG. Swift never holds your money.'],

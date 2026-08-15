@@ -42,7 +42,7 @@ async function uniteAs(sameHuman: Array<{ id: string }>) {
   const identity = new IdentityService(app.prisma);
   const doc = `ID-${nanoid(8)}`;
   for (const u of sameHuman) {
-    await identity.capture({ accountId: u.id, tenantId: 'swift-default', actorRole: 'CUSTOMER', type: 'ID_DOC_NUMBER', normalizedValue: normalizeDocNumber(doc), source: 'AI_ID_ANALYZER' });
+    await identity.capture({ accountId: u.id, actorRole: 'CUSTOMER', type: 'ID_DOC_NUMBER', normalizedValue: normalizeDocNumber(doc), source: 'AI_ID_ANALYZER' });
   }
 }
 

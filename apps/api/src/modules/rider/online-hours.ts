@@ -19,11 +19,26 @@ export async function startOnlineSession(redis: Redis, riderId: string, now = Da
  *  and clear the open marker. No-op when no session is open, so it's safe to call
  *  unconditionally on any offline transition. */
 export async function closeOnlineSession(redis: Redis, riderId: string, now = Date.now()): Promise<void> {
-  const onlineSince = await redis.get(`rider:online_since:${riderId}`);
-  if (!onlineSince) return;
-  const sessionMs = now - parseInt(onlineSince, 10);
+  const sinceKey = `rider:online_since:${riderId}`;
   const todayKey = `rider:online_ms:${riderId}:${startOfDayGY().toISOString().slice(0, 10)}`;
-  await redis.incrby(todayKey, sessionMs);
-  await redis.expire(todayKey, ONLINE_MS_TTL_SECONDS);
-  await redis.del(`rider:online_since:${riderId}`);
+  // One Redis command is the idempotency boundary. The former GET → INCRBY →
+  // EXPIRE → DEL sequence could crash after INCRBY and then count the same
+  // shift twice when a durable revocation retry replayed it.
+  await redis.eval(
+    `
+      local onlineSince = redis.call('GET', KEYS[1])
+      if not onlineSince then return 0 end
+      local sessionMs = tonumber(ARGV[1]) - tonumber(onlineSince)
+      if sessionMs < 0 then sessionMs = 0 end
+      redis.call('INCRBY', KEYS[2], sessionMs)
+      redis.call('EXPIRE', KEYS[2], tonumber(ARGV[2]))
+      redis.call('DEL', KEYS[1])
+      return sessionMs
+    `,
+    2,
+    sinceKey,
+    todayKey,
+    now,
+    ONLINE_MS_TTL_SECONDS,
+  );
 }

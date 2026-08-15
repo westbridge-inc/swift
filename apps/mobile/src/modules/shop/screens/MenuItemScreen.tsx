@@ -20,6 +20,7 @@ import {
   Money,
   PillButton,
   PopupCard,
+  PopupTitle,
   QtyStepper,
   SectionHeader,
   T,
@@ -452,9 +453,9 @@ export function MenuItemScreen() {
       {/* Success popup (kit 24) */}
       <PopupCard visible={added} onClose={() => setAdded(false)}>
         <IconChip icon="shopping-cart" size={64} />
-        <T variant="heading" center style={{ marginTop: space.md }}>
+        <PopupTitle variant="heading" center style={{ marginTop: space.md }}>
           {isBooking ? 'Booking added — confirm at checkout' : 'Added to your cart!'}
-        </T>
+        </PopupTitle>
         <View style={{ alignSelf: 'stretch', gap: space.md, marginTop: space.xl }}>
           <PillButton
             label="View cart"

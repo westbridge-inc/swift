@@ -14,7 +14,7 @@ type Tx = Prisma.TransactionClient | PrismaClient;
  * gated. Invariant: committedFloat ≥ 0; commit/release are atomic (accept a tx).
  */
 export class FloatService {
-  constructor(private prisma: PrismaClient) {}
+  constructor(private prisma: Tx) {}
 
   /** The float limit for a country + trust level (local currency). */
   async floatLimitFor(countryCode: string, trustLevel: TrustLevel): Promise<number> {

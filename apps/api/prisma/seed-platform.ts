@@ -31,18 +31,18 @@ export async function seedPlatformSpine(prisma: PrismaClient): Promise<void> {
 
   // Partial unique index Prisma cannot express: one LIVE booking per item per
   // slot (CANCELLED frees the slot). CI uses `db push`, so it lands here.
-  await prisma.$executeRawUnsafe(
-    `CREATE UNIQUE INDEX IF NOT EXISTS "bookings_item_slot_live_key"
-     ON "bookings"("itemId", "slotStart") WHERE "status" <> 'CANCELLED'`,
-  );
+  await prisma.$executeRaw`
+    CREATE UNIQUE INDEX IF NOT EXISTS "bookings_item_slot_live_key"
+    ON "bookings"("itemId", "slotStart") WHERE "status" <> 'CANCELLED'
+  `;
 
   // PostGIS + the dispatch candidate index — also here for db push
-  await prisma.$executeRawUnsafe('CREATE EXTENSION IF NOT EXISTS postgis');
-  await prisma.$executeRawUnsafe(
-    `CREATE INDEX IF NOT EXISTS "riders_geo_gist"
-     ON "riders" USING GIST (geography(ST_MakePoint("currentLng", "currentLat")))
-     WHERE "isOnline" = true AND "currentLat" IS NOT NULL AND "currentLng" IS NOT NULL`,
-  );
+  await prisma.$executeRaw`CREATE EXTENSION IF NOT EXISTS postgis`;
+  await prisma.$executeRaw`
+    CREATE INDEX IF NOT EXISTS "riders_geo_gist"
+    ON "riders" USING GIST (geography(ST_MakePoint("currentLng", "currentLat")))
+    WHERE "isOnline" = true AND "currentLat" IS NOT NULL AND "currentLng" IS NOT NULL
+  `;
 
   // Platform config defaults
   const configs = [

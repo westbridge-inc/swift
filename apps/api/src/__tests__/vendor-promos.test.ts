@@ -43,6 +43,7 @@ async function makeUser(roles: UserRole[], activeRole: UserRole) {
   const token = app.jwt.sign({ userId: user.id, role: activeRole, jti: nanoid(8) });
   await app.prisma.session.create({
     data: {
+      authMethod: 'OTP',
       userId: user.id, token, refreshToken: nanoid(48),
       deviceId: 'promo-test', deviceType: 'test', expiresAt: new Date(Date.now() + DAY),
     },
@@ -186,7 +187,10 @@ describe('Checkout scoping', () => {
       { vendorId: shopB.vendorId, itemId: itemB.id },
       { vendorId: shopA.vendorId, itemId: itemA.id },
     ]);
-    const res = await inject('POST', '/api/v1/customer/checkout', { paymentMethod: 'CASH', promoCode: CODE }, customer.token);
+    // PICKUP both shops: the CASH-delivery promo law [SPS-F-0022] would
+    // otherwise 409 — the per-vendor discount allocation under test is
+    // rail-independent.
+    const res = await inject('POST', '/api/v1/customer/checkout', { paymentMethod: 'CASH', promoCode: CODE, fulfillmentSelections: { [shopA.vendorId]: 'PICKUP', [shopB.vendorId]: 'PICKUP' } }, customer.token);
     expect(res.statusCode).toBe(200);
     const orders = res.json().data.orders as Array<{ subtotal: number; discount: number }>;
     expect(orders).toHaveLength(2);
@@ -223,8 +227,9 @@ describe('Checkout scoping', () => {
         maxUsesPerUser: 5,
       },
     }).then(async (platform) => {
-      // cart already holds Deal Bowl from the previous test
-      const res = await inject('POST', '/api/v1/customer/checkout', { paymentMethod: 'CASH', promoCode: platform.code }, customer.token);
+      // cart already holds Deal Bowl from the previous test. PICKUP: the
+      // CASH-delivery promo law [SPS-F-0022] would otherwise 409.
+      const res = await inject('POST', '/api/v1/customer/checkout', { paymentMethod: 'CASH', promoCode: platform.code, fulfillmentSelections: { [shopA.vendorId]: 'PICKUP', [shopB.vendorId]: 'PICKUP' } }, customer.token);
       expect(res.statusCode).toBe(200);
       expect(res.json().data.orders[0].discount).toBe(500);
       await app.prisma.order.updateMany({ where: { promoCodeId: platform.id }, data: { promoCodeId: null } });

@@ -1,7 +1,7 @@
 import type { FastifyInstance } from 'fastify';
 import { nanoid } from 'nanoid';
 import bcrypt from 'bcryptjs';
-import type { UserRole } from '@prisma/client';
+import type { Prisma, SessionAuthMethod, UserRole, UserStatus } from '@prisma/client';
 import { AppError } from '../../utils/errors';
 import { countryFromPhone } from '../../utils/phone-country';
 import { generateOtp, storeOtp, verifyOtp, checkOtpRateLimit } from '../../utils/otp';
@@ -9,6 +9,22 @@ import { checkOtpDailyBudget } from '../../utils/sms-budget';
 import { CountryConfigService } from '../country/country-config.service';
 import { getChannels } from '../../providers/notifications/channels';
 import { LEGAL_VERSION } from '../legal/legal.routes';
+import {
+  completeMoverSessionRevocation,
+  emptyMoverSessionRevocationCleanup,
+  retireMoverSessionAuthorityInTransaction,
+  type MoverSessionRevocationCleanup,
+} from '../mover-authority';
+import { persistMoverRevocationOutboxInTransaction } from '../mover-revocation-outbox';
+import { captureError, securityAuditFailuresCounter } from '../../plugins/observability';
+import {
+  hasPrivilegedSessionAssurance,
+  requiresPrivilegedSessionAssurance,
+} from './session-assurance';
+import {
+  disconnectSessionSockets as disconnectAuthorizationSessionSockets,
+  disconnectUserSockets as disconnectAuthorizationUserSockets,
+} from '../../utils/socket-revocation';
 
 interface DeviceInfo {
   deviceId: string;
@@ -25,7 +41,6 @@ const OTP_VERIFIED_TTL = 600; // 10 min window between verify-otp and register
 
 const MAX_FAILED_LOGINS = 5;
 const LOCKOUT_MINUTES = 15;
-
 /** Fields that must never leave the API on a user object. A deny-list (not a
  *  select) so the response keeps its shape — the app reads roles and the
  *  rider/driver/vendorOwner includes to route the account to its surface. */
@@ -139,7 +154,7 @@ export class AuthService {
       return { isNewUser: true, phone };
     }
 
-    const tokens = await this.createSession(user.id, user.activeRole, deviceInfo);
+    const tokens = await this.createSession(user.id, user.activeRole, deviceInfo, 'OTP');
 
     // Update last active
     await this.app.prisma.user.update({
@@ -237,12 +252,17 @@ export class AuthService {
       });
     }
 
-    const tokens = await this.createSession(user.id, user.activeRole, {
-      deviceId: 'registration',
-      deviceType: 'unknown',
-      ipAddress: '',
-      userAgent: '',
-    });
+    const tokens = await this.createSession(
+      user.id,
+      user.activeRole,
+      {
+        deviceId: 'registration',
+        deviceType: 'unknown',
+        ipAddress: '',
+        userAgent: '',
+      },
+      'OTP',
+    );
 
     // Role-specific onboarding stub — verification itself comes later.
     const onboarding = await this.buildOnboarding(signupRole, countryCode);
@@ -268,11 +288,46 @@ export class AuthService {
   // Email + password (secondary to phone OTP)
   // -------------------------------------------------------------------------
 
-  async setPassword(userId: string, password: string) {
+  async setPassword(userId: string, sessionId: string, password: string) {
     const passwordHash = await bcrypt.hash(password, 12);
-    await this.app.prisma.user.update({
-      where: { id: userId },
-      data: { passwordHash, failedLoginAttempts: 0, lockedUntil: null },
+    await this.app.prisma.$transaction(async (tx) => {
+      // Authenticate-time proof is not enough for a security mutation: a
+      // password reset, ban, or logout may revoke this session while bcrypt is
+      // running. Serialize with those paths (User -> Session), then prove the
+      // exact request generation still exists before changing the credential.
+      const users = await tx.$queryRaw<Array<{ status: UserStatus }>>`
+        SELECT "status"
+        FROM "users"
+        WHERE "id" = ${userId}
+        FOR UPDATE
+      `;
+      const user = users[0];
+      if (!user) {
+        throw new AppError(401, 'UNAUTHORIZED', 'This device session is no longer active');
+      }
+
+      const sessions = await tx.$queryRaw<Array<{ id: string; expiresAt: Date }>>`
+        SELECT "id", "expiresAt"
+        FROM "sessions"
+        WHERE "id" = ${sessionId} AND "userId" = ${userId}
+        FOR UPDATE
+      `;
+      const session = sessions[0];
+      if (!session || session.expiresAt <= new Date()) {
+        throw new AppError(401, 'UNAUTHORIZED', 'This device session is no longer active');
+      }
+      if (
+        user.status === 'SUSPENDED'
+        || user.status === 'BANNED'
+        || user.status === 'DEACTIVATED'
+      ) {
+        throw new AppError(403, 'ACCOUNT_SUSPENDED', 'This account is suspended.');
+      }
+
+      await tx.user.update({
+        where: { id: userId },
+        data: { passwordHash, failedLoginAttempts: 0, lockedUntil: null },
+      });
     });
   }
 
@@ -290,34 +345,117 @@ export class AuthService {
     const invalid = new AppError(401, 'INVALID_CREDENTIALS', 'Invalid phone/email or password');
     if (!user || !user.passwordHash) throw invalid;
 
-    if (user.lockedUntil && user.lockedUntil > new Date()) {
+    if (
+      user.lockedUntil
+      && user.lockedUntil > new Date()
+      && !requiresPrivilegedSessionAssurance(user.activeRole, user.roles)
+    ) {
       const minutesLeft = Math.ceil((user.lockedUntil.getTime() - Date.now()) / 60_000);
       throw new AppError(423, 'ACCOUNT_LOCKED', `Too many failed attempts. Try again in ${minutesLeft} min`);
     }
 
     const matches = await bcrypt.compare(password, user.passwordHash);
-    if (!matches) {
-      const failed = user.failedLoginAttempts + 1;
-      await this.app.prisma.user.update({
+
+    // Password hashing stays outside the lock so one expensive comparison does
+    // not block every security mutation for this user. Once it finishes, both
+    // outcomes take the same User lock and revalidate the exact hash compared.
+    // This makes failed-attempt accounting linearizable and prevents an old
+    // failed comparison from re-locking a credential generation that reset has
+    // already replaced.
+    const login = await this.app.prisma.$transaction(async (tx) => {
+      const rows = await tx.$queryRaw<Array<{
+        passwordHash: string | null;
+        failedLoginAttempts: number;
+        lockedUntil: Date | null;
+        roles: UserRole[];
+        activeRole: UserRole;
+        status: UserStatus;
+      }>>`
+        SELECT "passwordHash", "failedLoginAttempts", "lockedUntil",
+               "roles", "activeRole", "status"
+        FROM "users"
+        WHERE "id" = ${user.id}
+        FOR UPDATE
+      `;
+      const locked = rows[0];
+      if (!locked || locked.passwordHash !== user.passwordHash) {
+        return { kind: 'invalid' as const };
+      }
+
+      // Password is not an approved privileged proof. This check deliberately
+      // precedes lockout, status, and password-result branching and returns the
+      // same generic failure as an unknown account or bad credential. A caller
+      // therefore cannot use this endpoint to confirm that a privileged
+      // password is valid, while a concurrent promotion observed under this
+      // User lock still cannot mint a password-authenticated session.
+      if (requiresPrivilegedSessionAssurance(locked.activeRole, locked.roles)) {
+        return { kind: 'invalid' as const };
+      }
+
+      const now = new Date();
+      if (locked.lockedUntil && locked.lockedUntil > now) {
+        const minutesLeft = Math.ceil((locked.lockedUntil.getTime() - now.getTime()) / 60_000);
+        throw new AppError(423, 'ACCOUNT_LOCKED', `Too many failed attempts. Try again in ${minutesLeft} min`);
+      }
+
+      if (!matches) {
+        const failed = locked.failedLoginAttempts + 1;
+        const shouldLock = failed >= MAX_FAILED_LOGINS;
+        await tx.user.update({
+          where: { id: user.id },
+          data: {
+            failedLoginAttempts: shouldLock ? 0 : failed,
+            ...(shouldLock && {
+              lockedUntil: new Date(now.getTime() + LOCKOUT_MINUTES * 60_000),
+            }),
+          },
+        });
+        return { kind: 'invalid' as const };
+      }
+
+      if (
+        locked.status === 'SUSPENDED'
+        || locked.status === 'BANNED'
+        || locked.status === 'DEACTIVATED'
+      ) {
+        throw new AppError(403, 'ACCOUNT_SUSPENDED', 'This account is suspended.');
+      }
+
+      const accessToken = this.app.jwt.sign({
+        userId: user.id,
+        role: locked.activeRole,
+        jti: nanoid(8),
+      });
+      const refreshToken = nanoid(64);
+      await tx.user.update({
         where: { id: user.id },
+        data: { failedLoginAttempts: 0, lockedUntil: null, lastActiveAt: now },
+      });
+      await tx.session.create({
         data: {
-          failedLoginAttempts: failed,
-          ...(failed >= MAX_FAILED_LOGINS && {
-            lockedUntil: new Date(Date.now() + LOCKOUT_MINUTES * 60_000),
-            failedLoginAttempts: 0,
-          }),
+          userId: user.id,
+          token: accessToken,
+          refreshToken,
+          authMethod: 'PASSWORD',
+          deviceId: deviceInfo.deviceId,
+          deviceType: deviceInfo.deviceType,
+          ipAddress: deviceInfo.ipAddress,
+          userAgent: deviceInfo.userAgent,
+          expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
         },
       });
-      throw invalid;
-    }
-
-    await this.app.prisma.user.update({
-      where: { id: user.id },
-      data: { failedLoginAttempts: 0, lockedUntil: null, lastActiveAt: new Date() },
+      return {
+        kind: 'success' as const,
+        activeRole: locked.activeRole,
+        status: locked.status,
+        tokens: { accessToken, refreshToken, expiresIn: 900 },
+      };
     });
-
-    const tokens = await this.createSession(user.id, user.activeRole, deviceInfo);
-    return { user: sanitizeUser(user), tokens };
+    if (login.kind === 'invalid') throw invalid;
+    return {
+      user: sanitizeUser({ ...user, activeRole: login.activeRole, status: login.status }),
+      tokens: login.tokens,
+    };
   }
 
   /** Reset = prove phone ownership again via OTP, then rotate everything. */
@@ -327,8 +465,11 @@ export class AuthService {
       throw new AppError(400, 'INVALID_OTP', result.reason || 'Invalid or expired OTP');
     }
 
-    const user = await this.app.prisma.user.findUnique({ where: { phone } });
-    if (!user) {
+    const candidate = await this.app.prisma.user.findUnique({
+      where: { phone },
+      select: { id: true },
+    });
+    if (!candidate) {
       // Do NOT reveal account existence on password reset — return the same
       // error a wrong OTP would, so an attacker (who somehow has a valid code)
       // can't enumerate which phone numbers have accounts.
@@ -336,125 +477,420 @@ export class AuthService {
     }
 
     const passwordHash = await bcrypt.hash(newPassword, 12);
-    await this.app.prisma.user.update({
-      where: { id: user.id },
-      data: { passwordHash, failedLoginAttempts: 0, lockedUntil: null },
+    // Keep the idempotency key stable for the lifetime of this transaction
+    // invocation. A password reset is one global security generation, not a
+    // collection of independently committed writes.
+    const revocationId = nanoid(24);
+    const reset = await this.app.prisma.$transaction(async (tx) => {
+      const users = await tx.$queryRaw<Array<{ id: string }>>`
+        SELECT "id"
+        FROM "users"
+        WHERE "id" = ${candidate.id} AND "phone" = ${phone}
+        FOR UPDATE
+      `;
+      const user = users[0];
+      if (!user) return null;
+
+      // Deliberately write the credential first: any later authority, outbox,
+      // session, or device-token failure aborts this transaction and rolls the
+      // new hash back with it. There is no window where the password changed
+      // while a stolen session remained valid.
+      await tx.user.update({
+        where: { id: user.id },
+        data: { passwordHash, failedLoginAttempts: 0, lockedUntil: null },
+      });
+      const cleanup = await this.revokeAllLockedSessionsInTransaction(
+        tx,
+        user.id,
+        `password-reset:${user.id}:${revocationId}`,
+      );
+      return { userId: user.id, cleanup };
     });
 
-    // Kill every session — a reset must log out any stolen-token holder too
-    await this.logoutAll(user.id);
+    // The phone changed or account disappeared after OTP verification. Preserve
+    // the same non-enumerating public error as the initial lookup.
+    if (!reset) {
+      throw new AppError(400, 'INVALID_OTP', 'Invalid or expired OTP');
+    }
+
+    // PostgreSQL already committed the complete security decision. Realtime
+    // eviction and low-latency outbox processing are best-effort accelerators;
+    // the recurring worker remains the durable retry path.
+    this.disconnectUserSockets(reset.userId);
+    await completeMoverSessionRevocation(this.app, reset.cleanup)
+      .catch((error) => this.app.log.error(
+        { err: error, userId: reset.userId },
+        'post-password-reset mover cleanup failed',
+      ));
   }
 
   async refreshTokens(refreshToken: string) {
-    const session = await this.app.prisma.session.findUnique({
-      where: { refreshToken },
-      include: { user: true },
-    });
-
-    if (!session) {
-      return this.handleUnknownRefreshToken(refreshToken);
-    }
-    if (session.expiresAt < new Date()) {
-      throw new AppError(401, 'INVALID_TOKEN', 'Invalid or expired refresh token');
-    }
-    // SEC: a suspended/banned/deactivated account cannot rotate new tokens — this
-    // closes the loop with the authenticate-time status check so suspension is not
-    // merely cosmetic for an already-logged-in user.
-    if (['SUSPENDED', 'BANNED', 'DEACTIVATED'].includes(session.user.status)) {
-      throw new AppError(403, 'ACCOUNT_SUSPENDED', 'This account is suspended.');
-    }
-
-    const newAccessToken = this.app.jwt.sign({
-      userId: session.user.id,
-      role: session.user.activeRole,
-      jti: nanoid(8),
-    });
-    const newRefreshToken = nanoid(64);
-
-    await this.app.prisma.session.update({
-      where: { id: session.id },
-      data: {
-        token: newAccessToken,
-        refreshToken: newRefreshToken,
-        // Theft detection: remember what this rotation consumed, and when
-        previousRefreshToken: refreshToken,
-        rotatedAt: new Date(),
-        expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
-      },
-    });
-
-    return {
-      accessToken: newAccessToken,
-      refreshToken: newRefreshToken,
-      expiresIn: 900,
-    };
-  }
-
-  /** A refresh token we don't recognize is either garbage or — the case that
-   *  matters — one that a rotation already consumed. The mobile interceptor
-   *  can double-fire the same token when two requests 401 together, so a
-   *  replay right after rotation is answered idempotently with the current
-   *  pair. Outside that grace window a replay means the token leaked: revoke
-   *  the whole session (both holders must log in again) and audit it.
-   *  Every path returns the same 401 shape — no oracle for attackers. */
-  private async handleUnknownRefreshToken(refreshToken: string): Promise<never | {
-    accessToken: string;
-    refreshToken: string;
-    expiresIn: number;
-  }> {
-    const rotated = await this.app.prisma.session.findUnique({
-      where: { previousRefreshToken: refreshToken },
-    });
-    if (!rotated) {
+    // Resolve without a lock only to discover the canonical User -> Session
+    // lock keys. Every security decision is repeated after both rows are
+    // locked, so refresh, theft-replay, authenticated logout, and
+    // refresh-credential logout have one serialization order.
+    const candidate = await this.findSessionByRefreshCredential(refreshToken);
+    if (!candidate) {
       throw new AppError(401, 'INVALID_TOKEN', 'Invalid or expired refresh token');
     }
 
-    const graceMs = Number(process.env['REFRESH_REUSE_GRACE_MS'] ?? 10_000);
-    const age = rotated.rotatedAt ? Date.now() - rotated.rotatedAt.getTime() : Infinity;
-    if (age <= graceMs) {
+    const outcome = await this.app.prisma.$transaction(async (tx) => {
+      const users = await tx.$queryRaw<Array<{
+        id: string;
+        status: string;
+        activeRole: UserRole;
+        roles: UserRole[];
+      }>>`
+        SELECT "id", "status"::text AS "status",
+               "activeRole"::text AS "activeRole", "roles"
+        FROM "users"
+        WHERE "id" = ${candidate.userId}
+        FOR UPDATE
+      `;
+      const user = users[0];
+      if (!user) return { kind: 'invalid' as const };
+
+      const sessions = await tx.$queryRaw<Array<{
+        id: string;
+        userId: string;
+        token: string;
+        refreshToken: string;
+        previousRefreshToken: string | null;
+        rotatedAt: Date | null;
+        expiresAt: Date;
+        deviceId: string;
+        deviceType: string;
+        authMethod: SessionAuthMethod;
+      }>>`
+        SELECT "id", "userId", "token", "refreshToken", "previousRefreshToken",
+               "rotatedAt", "expiresAt", "deviceId", "deviceType",
+               "authMethod"::text AS "authMethod"
+        FROM "sessions"
+        WHERE "id" = ${candidate.id} AND "userId" = ${candidate.userId}
+        FOR UPDATE
+      `;
+      const session = sessions[0];
+      if (!session) return { kind: 'invalid' as const };
+
+      if (session.expiresAt < new Date()) {
+        return { kind: 'invalid' as const };
+      }
+      // SEC: a suspended/banned/deactivated account cannot rotate new tokens.
+      if (['SUSPENDED', 'BANNED', 'DEACTIVATED'].includes(user.status)) {
+        throw new AppError(403, 'ACCOUNT_SUSPENDED', 'This account is suspended.');
+      }
+      if (
+        requiresPrivilegedSessionAssurance(user.activeRole, user.roles)
+        && !hasPrivilegedSessionAssurance(session.authMethod)
+      ) {
+        const cleanup = await this.revokeLockedSession(tx, session.id, session.userId);
+        return {
+          kind: 'insufficient_assurance' as const,
+          sessionId: session.id,
+          userId: session.userId,
+          cleanup,
+        };
+      }
+
+      if (session.refreshToken !== refreshToken) {
+        if (session.previousRefreshToken !== refreshToken) {
+          return { kind: 'invalid' as const };
+        }
+
+        // A legitimate double-fire immediately after rotation receives the
+        // already-current pair. Outside the grace period, the same credential
+        // is theft evidence and revokes the locked session atomically.
+        const graceMs = Number(process.env['REFRESH_REUSE_GRACE_MS'] ?? 10_000);
+        const age = session.rotatedAt ? Date.now() - session.rotatedAt.getTime() : Infinity;
+        if (age <= graceMs) {
+          return {
+            kind: 'success' as const,
+            tokens: {
+              accessToken: session.token,
+              refreshToken: session.refreshToken,
+              expiresIn: 900,
+            },
+          };
+        }
+
+        const cleanup = await this.revokeLockedSession(tx, session.id, session.userId);
+        return {
+          kind: 'reuse' as const,
+          userId: session.userId,
+          sessionId: session.id,
+          deviceId: session.deviceId,
+          deviceType: session.deviceType,
+          cleanup,
+        };
+      }
+
+      const newAccessToken = this.app.jwt.sign({
+        userId: user.id,
+        role: user.activeRole,
+        jti: nanoid(8),
+      });
+      const newRefreshToken = nanoid(64);
+      await tx.session.update({
+        where: { id: session.id },
+        data: {
+          token: newAccessToken,
+          refreshToken: newRefreshToken,
+          previousRefreshToken: refreshToken,
+          rotatedAt: new Date(),
+          expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
+        },
+      });
       return {
-        accessToken: rotated.token,
-        refreshToken: rotated.refreshToken,
-        expiresIn: 900,
+        kind: 'success' as const,
+        tokens: { accessToken: newAccessToken, refreshToken: newRefreshToken, expiresIn: 900 },
       };
-    }
-
-    await this.app.prisma.session.delete({ where: { id: rotated.id } });
-    await this.app.prisma.auditLog.create({
-      data: {
-        userId: rotated.userId,
-        action: 'REFRESH_TOKEN_REUSE',
-        entity: 'Session',
-        entityId: rotated.id,
-        changes: { deviceId: rotated.deviceId, deviceType: rotated.deviceType },
-      },
     });
-    this.app.log.warn(
-      { userId: rotated.userId, sessionId: rotated.id },
-      '[auth] rotated refresh token replayed — session revoked',
-    );
+
+    if (outcome.kind === 'success') return outcome.tokens;
+    if (outcome.kind === 'insufficient_assurance') {
+      this.disconnectSessionSockets(outcome.sessionId);
+      await completeMoverSessionRevocation(this.app, outcome.cleanup)
+        .catch((error) => this.app.log.error(
+          { err: error, userId: outcome.userId, sessionId: outcome.sessionId },
+          'post-insufficient-assurance mover cleanup failed',
+        ));
+      this.app.log.warn(
+        { userId: outcome.userId, sessionId: outcome.sessionId },
+        '[auth] privileged session lacked approved assurance and was revoked',
+      );
+    }
+    if (outcome.kind === 'reuse') {
+      this.disconnectSessionSockets(outcome.sessionId);
+      await completeMoverSessionRevocation(this.app, outcome.cleanup)
+        .catch((error) => this.app.log.error({ err: error, sessionId: outcome.sessionId }, 'post-revocation mover cleanup failed'));
+      await this.app.prisma.auditLog.create({
+        data: {
+          userId: outcome.userId,
+          action: 'REFRESH_TOKEN_REUSE',
+          entity: 'Session',
+          entityId: outcome.sessionId,
+          changes: { deviceId: outcome.deviceId, deviceType: outcome.deviceType },
+        },
+      }).catch((error) => {
+        // The security decision is already committed. Never turn the promised
+        // uniform 401 into a 500 or tempt a caller to retry a credential that
+        // was correctly revoked. Emit independent operational evidence instead.
+        securityAuditFailuresCounter.inc({ action: 'REFRESH_TOKEN_REUSE' });
+        captureError(error, {
+          action: 'REFRESH_TOKEN_REUSE',
+          userId: outcome.userId,
+          sessionId: outcome.sessionId,
+        });
+        this.app.log.error(
+          { err: error, userId: outcome.userId, sessionId: outcome.sessionId },
+          '[auth] refresh-token reuse audit persistence failed after revocation',
+        );
+      });
+      this.app.log.warn(
+        { userId: outcome.userId, sessionId: outcome.sessionId },
+        '[auth] rotated refresh token replayed — session revoked',
+      );
+    }
     throw new AppError(401, 'INVALID_TOKEN', 'Invalid or expired refresh token');
   }
 
-  async logout(token: string) {
-    await this.app.prisma.session.deleteMany({ where: { token } });
+  private findSessionByRefreshCredential(refreshToken: string) {
+    return this.app.prisma.session.findFirst({
+      where: {
+        OR: [{ refreshToken }, { previousRefreshToken: refreshToken }],
+      },
+      select: { id: true, userId: true },
+    });
   }
 
-  async logoutAll(userId: string) {
-    await this.app.prisma.session.deleteMany({ where: { userId } });
-    // SWIFT-099: revoking every session must also drop live realtime
-    // connections. The socket auth gate only runs at CONNECT, so an already-open
-    // socket would keep receiving events after a log-out-everywhere / suspension.
-    // Fire-and-forget: a disconnect failure must never fail the logout, and io
-    // may be absent in a worker process.
+  private async revokeLockedSession(
+    tx: Prisma.TransactionClient,
+    sessionId: string,
+    userId: string,
+    pushToken?: string,
+  ): Promise<MoverSessionRevocationCleanup> {
+    const cleanup = await retireMoverSessionAuthorityInTransaction(tx, userId, sessionId);
+    const outboxId = await persistMoverRevocationOutboxInTransaction(tx, {
+      dedupeKey: `session:${sessionId}`,
+      userId,
+      cleanup,
+    });
+    if (pushToken) {
+      await tx.deviceToken.updateMany({
+        where: { token: pushToken, userId },
+        data: { isActive: false },
+      });
+    }
+    await tx.session.delete({ where: { id: sessionId } });
+    return { ...cleanup, outboxId };
+  }
+
+  /** Revoke one authenticated device generation as a single authority change.
+   *  The User lock serializes this with mover role/status transitions; the
+   *  exact Session is then locked before any dependent ownership is cleared.
+   *  Checking that locked session before touching the push token also makes
+   *  duplicate logout calls harmless, while the userId predicate prevents an old account from
+   *  deactivating a token that has since been reassigned to another account. */
+  private async revokeSession(
+    sessionId: string,
+    userId: string,
+    pushToken?: string,
+  ): Promise<MoverSessionRevocationCleanup | null> {
+    return this.app.prisma.$transaction(async (tx) => {
+      const users = await tx.$queryRaw<Array<{ id: string }>>`
+        SELECT "id"
+        FROM "users"
+        WHERE "id" = ${userId}
+        FOR UPDATE
+      `;
+      if (!users[0]) return null;
+
+      const sessions = await tx.$queryRaw<Array<{ id: string }>>`
+        SELECT "id"
+        FROM "sessions"
+        WHERE "id" = ${sessionId} AND "userId" = ${userId}
+        FOR UPDATE
+      `;
+      if (!sessions[0]) return null;
+
+      return this.revokeLockedSession(tx, sessionId, userId, pushToken);
+    });
+  }
+
+  async logout(sessionId: string, userId: string, pushToken?: string) {
+    const cleanup = await this.revokeSession(sessionId, userId, pushToken);
+    if (cleanup) {
+      this.disconnectSessionSockets(sessionId);
+      await completeMoverSessionRevocation(this.app, cleanup)
+        .catch((error) => this.app.log.error({ err: error, sessionId }, 'post-logout mover cleanup failed'));
+    }
+  }
+
+  /** Revoke using a captured refresh credential after local state is already
+   * gone. The pre-read discovers lock keys only; the locked row must still
+   * match either the current or immediately-previous credential. Returning a
+   * boolean is service-internal — the public route deliberately always emits
+   * the same success response so it cannot be used as a token oracle. */
+  async logoutByRefreshToken(refreshToken: string, pushToken?: string): Promise<boolean> {
+    const candidate = await this.findSessionByRefreshCredential(refreshToken);
+    if (!candidate) return false;
+
+    const revokedSessionId = await this.app.prisma.$transaction(async (tx) => {
+      const users = await tx.$queryRaw<Array<{ id: string }>>`
+        SELECT "id"
+        FROM "users"
+        WHERE "id" = ${candidate.userId}
+        FOR UPDATE
+      `;
+      if (!users[0]) return null;
+
+      const sessions = await tx.$queryRaw<Array<{
+        id: string;
+        refreshToken: string;
+        previousRefreshToken: string | null;
+      }>>`
+        SELECT "id", "refreshToken", "previousRefreshToken"
+        FROM "sessions"
+        WHERE "id" = ${candidate.id} AND "userId" = ${candidate.userId}
+        FOR UPDATE
+      `;
+      const session = sessions[0];
+      if (
+        !session
+        || (session.refreshToken !== refreshToken && session.previousRefreshToken !== refreshToken)
+      ) {
+        return null;
+      }
+
+      const cleanup = await this.revokeLockedSession(tx, session.id, candidate.userId, pushToken);
+      return { sessionId: session.id, cleanup };
+    });
+
+    if (revokedSessionId) {
+      this.disconnectSessionSockets(revokedSessionId.sessionId);
+      await completeMoverSessionRevocation(this.app, revokedSessionId.cleanup)
+        .catch((error) => this.app.log.error({ err: error, sessionId: revokedSessionId.sessionId }, 'post-refresh-logout mover cleanup failed'));
+    }
+    return revokedSessionId !== null;
+  }
+
+  private disconnectSessionSockets(sessionId: string): void {
     try {
-      this.app.io?.in(`user:${userId}`).disconnectSockets(true);
+      disconnectAuthorizationSessionSockets(this.app.io, sessionId);
     } catch {
       /* sockets not wired here */
     }
   }
 
-  private async createSession(userId: string, role: string, deviceInfo: DeviceInfo) {
+  private disconnectUserSockets(userId: string): void {
+    try {
+      disconnectAuthorizationUserSockets(this.app.io, userId);
+    } catch {
+      /* sockets not wired here */
+    }
+  }
+
+  /** Global revocation core. The caller MUST hold the canonical User lock.
+   * Keeping this transaction-only primitive shared by reset-password and
+   * logout-all prevents either path from drifting into a partial commit. */
+  private async revokeAllLockedSessionsInTransaction(
+    tx: Prisma.TransactionClient,
+    userId: string,
+    dedupeKey: string,
+  ): Promise<MoverSessionRevocationCleanup> {
+    const moverCleanup = await retireMoverSessionAuthorityInTransaction(tx, userId, null);
+    const outboxId = await persistMoverRevocationOutboxInTransaction(tx, {
+      dedupeKey,
+      userId,
+      cleanup: moverCleanup,
+    });
+    await tx.session.deleteMany({ where: { userId } });
+    // Global revocation (logout-all, password reset) must silence a lost or
+    // stolen device as well as its API session. A future sign-in explicitly
+    // re-registers and reactivates the token on the current account.
+    await tx.deviceToken.updateMany({
+      where: { userId, isActive: true },
+      data: { isActive: false },
+    });
+    return { ...moverCleanup, outboxId };
+  }
+
+  async logoutAll(userId: string) {
+    // One invocation can retire more than one auth generation. Keep a stable
+    // key outside the transaction callback so any database retry writes the
+    // same outbox event instead of inventing a duplicate.
+    const revocationId = nanoid(24);
+    const cleanup = await this.app.prisma.$transaction(async (tx) => {
+      const users = await tx.$queryRaw<Array<{ id: string }>>`
+        SELECT "id"
+        FROM "users"
+        WHERE "id" = ${userId}
+        FOR UPDATE
+      `;
+      if (!users[0]) return emptyMoverSessionRevocationCleanup();
+
+      return this.revokeAllLockedSessionsInTransaction(
+        tx,
+        userId,
+        `all-sessions:${userId}:${revocationId}`,
+      );
+    });
+    // SWIFT-099: revoking every session must also drop live realtime
+    // connections. The socket auth gate only runs at CONNECT, so an already-open
+    // socket would keep receiving events after a log-out-everywhere / suspension.
+    // Fire-and-forget: a disconnect failure must never fail the logout, and io
+    // may be absent in a worker process.
+    this.disconnectUserSockets(userId);
+    await completeMoverSessionRevocation(this.app, cleanup)
+      .catch((error) => this.app.log.error({ err: error, userId }, 'post-logout-all mover cleanup failed'));
+  }
+
+  private async createSession(
+    userId: string,
+    role: string,
+    deviceInfo: DeviceInfo,
+    authMethod: SessionAuthMethod,
+  ) {
     const accessToken = this.app.jwt.sign({ userId, role, jti: nanoid(8) });
     const refreshToken = nanoid(64);
 
@@ -463,6 +899,7 @@ export class AuthService {
         userId,
         token: accessToken,
         refreshToken,
+        authMethod,
         deviceId: deviceInfo.deviceId,
         deviceType: deviceInfo.deviceType,
         ipAddress: deviceInfo.ipAddress,

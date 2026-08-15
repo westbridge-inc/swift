@@ -1,6 +1,7 @@
 import { useQuery } from '@tanstack/react-query';
 import { fetchAds, startAdEventLoop } from '../lib/ads';
 import type { AdsResult } from '../lib/ads';
+import { useAuthStore } from '../stores/authStore';
 
 /**
  * One batched serve per home mount (ads spec §13.4): a single call feeds all
@@ -11,8 +12,19 @@ import type { AdsResult } from '../lib/ads';
 export const AD_PLACEMENT_KEYS = ['home_hero_video', 'home_top_card', 'home_ad_bar'] as const;
 
 export function useAds(city: string | undefined) {
+  const adEventScopeId = useAuthStore((state) => state.adEventScopeId);
+  const sessionGeneration = useAuthStore((state) => state.sessionGeneration);
+  const isAuthenticated = useAuthStore((state) => state.isAuthenticated);
   return useQuery<AdsResult>({
-    queryKey: ['ads', 'serve', city ?? '*'],
+    // A guest/A serve must never remain the trackable query result for B.
+    queryKey: [
+      'ads',
+      'serve',
+      city ?? '*',
+      isAuthenticated ? 'authenticated' : 'anonymous',
+      sessionGeneration,
+      adEventScopeId,
+    ],
     queryFn: () => {
       startAdEventLoop();
       return fetchAds(city ?? '*', [...AD_PLACEMENT_KEYS]);

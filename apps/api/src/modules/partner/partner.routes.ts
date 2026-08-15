@@ -3,6 +3,10 @@ import { z } from 'zod';
 import { VehicleType } from '@prisma/client';
 import { PartnerService } from './partner.service';
 import { NotificationService } from '../notification/notification.service';
+import {
+  completeUserRoleAuthorityTransition,
+  transitionUserRoleAuthorityInTransaction,
+} from '../mover-authority';
 
 const vehicleSchema = z.object({
   make: z.string().trim().min(1).max(60),
@@ -37,8 +41,30 @@ export async function partnerRoutes(app: FastifyInstance) {
   /** POST /become — self-serve provisioning of a Rider/Driver/Vendor entity. */
   app.post('/become', auth, async (request, reply) => {
     const body = becomeSchema.parse(request.body);
-    const result = await service.becomePartner(request.user.userId, body);
+    const { result, authorityCleanup } = await service.becomePartnerWithAuthority(
+      request.user.userId,
+      body,
+      (tx, targetRole) => transitionUserRoleAuthorityInTransaction(
+        tx,
+        request.user.userId,
+        targetRole,
+      ),
+    );
+    await completeUserRoleAuthorityTransition(app, authorityCleanup);
     reply.code(result.created ? 201 : 200);
-    return { success: true, data: result };
+    const provisioned = {
+      kind: result.kind,
+      id: result.id,
+      created: result.created,
+      roles: result.roles,
+    };
+    return {
+      success: true,
+      data: {
+        ...provisioned,
+        activeRole: authorityCleanup.activeRole,
+        lastMoverRole: authorityCleanup.lastMoverRole,
+      },
+    };
   });
 }

@@ -7,7 +7,7 @@ import { useNavigation, useRoute } from '@react-navigation/native';
 import { color, radius, space } from '@swift/ui';
 import { useItemFeedback, useOrder, useRateOrder, useRatingTags } from '../../../hooks/customer';
 import { DARK_BLURHASH, vendorImage } from '../../../lib/images';
-import { Chip, ErrorState, Header, IconChip, LoadingBlock, PillButton, PopupCard, Screen, Stars, T } from '../../../kit';
+import { Chip, ErrorState, Header, IconChip, LoadingBlock, PillButton, PopupCard, PopupTitle, Screen, Stars, T } from '../../../kit';
 
 const GUTTER = space['2xl'];
 
@@ -336,9 +336,9 @@ export function FeedbackScreen() {
         }}
       >
         <IconChip icon="thumbs-up" size={64} />
-        <T variant="heading" center style={{ marginTop: space.md }}>
+        <PopupTitle variant="heading" center style={{ marginTop: space.md }}>
           Thanks for the feedback!
-        </T>
+        </PopupTitle>
         <T variant="label" tone="muted" center style={{ marginTop: space.sm }}>
           Ratings keep stores and riders sharp.
         </T>

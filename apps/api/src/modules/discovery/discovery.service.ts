@@ -256,8 +256,11 @@ export class DiscoveryService {
   /** Stage-C on-change: reconcile the item's vendor after any tag mutation.
    *  Fire-and-forget garnish — the nightly job is the safety net. */
   async reconcileDerivedForItem(itemId: string): Promise<void> {
-    const item = await this.prisma.item.findUnique({ where: { id: itemId }, select: { vendorId: true } });
-    if (item) await reconcileVendorDerived(this.prisma, item.vendorId);
+    const item = await this.prisma.item.findUnique({
+      where: { id: itemId },
+      select: { vendorId: true, vendor: { select: { tenantId: true } } },
+    });
+    if (item) await reconcileVendorDerived(this.prisma, item.vendorId, item.vendor.tenantId);
   }
 
   // ---- requests ------------------------------------------------------------

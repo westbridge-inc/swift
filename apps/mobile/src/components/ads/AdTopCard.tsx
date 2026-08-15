@@ -7,7 +7,7 @@ import { T } from '../../kit';
 import { AdChip } from './AdChip';
 import { useAdViewability } from './useAdViewability';
 import { trackAdEvent, openAdDestination } from '../../lib/ads';
-import type { AdServeItem } from '../../lib/adsCore';
+import type { AdEventScope, AdServeItem } from '../../lib/adsCore';
 
 // Tier 2 — the top card (spec §13.2). One static image + headline + CTA.
 // Fixed height so hydration never shifts the home layout; IMPRESSION on
@@ -16,17 +16,25 @@ import type { AdServeItem } from '../../lib/adsCore';
 
 const CARD_H = 140;
 
-export function AdTopCard({ item, trackable }: { item: AdServeItem; trackable: boolean }) {
+export function AdTopCard({
+  item,
+  trackable,
+  trackingScope,
+}: {
+  item: AdServeItem;
+  trackable: boolean;
+  trackingScope: AdEventScope | null;
+}) {
   const [failed, setFailed] = React.useState(false);
   const track = trackable ? item.impressionToken : undefined;
 
   useEffect(() => {
-    trackAdEvent(track, 'IMPRESSION');
-  }, [track]);
+    trackAdEvent(track, 'IMPRESSION', trackingScope);
+  }, [track, trackingScope]);
 
   const { ref } = useAdViewability({
     enabled: !!track,
-    onViewable: () => trackAdEvent(track, 'VIEWABLE_IMPRESSION'),
+    onViewable: () => trackAdEvent(track, 'VIEWABLE_IMPRESSION', trackingScope),
   });
 
   if (failed) return null; // §13 fail silent — a broken image never leaves a hole
@@ -37,7 +45,7 @@ export function AdTopCard({ item, trackable }: { item: AdServeItem; trackable: b
         accessibilityRole="button"
         accessibilityLabel={`Advertisement: ${item.headline ?? item.advertiserName}`}
         onPress={() => {
-          trackAdEvent(track, 'CLICK');
+          trackAdEvent(track, 'CLICK', trackingScope);
           void openAdDestination(item.destination);
         }}
         style={styles.card}

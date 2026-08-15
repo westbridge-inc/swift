@@ -99,6 +99,17 @@ export const notificationFailuresCounter = new client.Counter({
   registers: [registry],
 });
 
+// Security actions must remain externally uniform even when their audit sink
+// is degraded. Count the write failure separately so a successful revocation
+// can still return the required 401/200 while operations alerts on lost audit
+// evidence instead of learning through customer-visible 500s.
+export const securityAuditFailuresCounter = new client.Counter({
+  name: 'swift_security_audit_failures_total',
+  help: 'Security audit rows that could not be persisted, by action',
+  labelNames: ['action'] as const,
+  registers: [registry],
+});
+
 export async function observabilityPlugin(app: FastifyInstance) {
   initSentry();
   if (!metricsWired) {

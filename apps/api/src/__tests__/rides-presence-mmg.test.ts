@@ -36,10 +36,10 @@ async function makeUserWithSession(roles: UserRole[], activeRole: UserRole, extr
   });
   userIds.push(user.id);
   const token = app.jwt.sign({ userId: user.id, role: activeRole, jti: nanoid(8) });
-  await app.prisma.session.create({
+  const session = await app.prisma.session.create({
     data: { userId: user.id, token, refreshToken: nanoid(48), deviceId: 'pres-test', deviceType: 'test', expiresAt: new Date(Date.now() + DAY) },
   });
-  return { userId: user.id, token };
+  return { userId: user.id, token, sessionId: session.id };
 }
 
 async function makeDriver(opts: { online?: boolean; available?: boolean; at?: { lat: number; lng: number }; mmg?: string } = {}) {
@@ -51,6 +51,8 @@ async function makeDriver(opts: { online?: boolean; available?: boolean; at?: { 
       vehicleColor: 'White', licensePlate: `HP 2${seq}`, driverLicenseUrl: 'x', vehicleInsuranceUrl: 'x',
       isAvailable: opts.available ?? true, isOnline: opts.online ?? true,
       currentLat: at.lat, currentLng: at.lng,
+      lastLocationUpdate: new Date(),
+      locationSessionId: owned.sessionId,
       ...(opts.mmg ? { mmgPayUrl: opts.mmg } : {}),
     } as never,
   });
@@ -61,6 +63,7 @@ beforeAll(async () => {
   process.env['NODE_ENV'] = 'development';
   process.env['DATABASE_URL'] = process.env['DATABASE_URL'] || 'postgresql://swift:swift@localhost:5434/swift_test';
   process.env['REDIS_URL'] = process.env['REDIS_URL'] || 'redis://localhost:6382';
+  process.env['MMG_PAY_URL_ALLOWED_HOSTS'] = 'pay.example.com';
   app = Fastify({ logger: false });
   registerErrorHandler(app);
   registerEmptyJsonBodyParser(app);
@@ -127,7 +130,7 @@ describe('GET /rides/presence', () => {
 describe('MMG pay-link exposure (trip-end surface only)', () => {
   it('hides the link before the trip and reveals it in progress and on the receipt', async () => {
     const c = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
-    const d = await makeDriver({ mmg: 'https://mmg.test/pay/driver-1', available: false });
+    const d = await makeDriver({ mmg: 'https://pay.example.com/pay/driver-1', available: false });
 
     const order = await app.prisma.order.create({
       data: {
@@ -150,19 +153,38 @@ describe('MMG pay-link exposure (trip-end surface only)', () => {
     // Underway: the link rides along for the post-trip sheet.
     await app.prisma.order.update({ where: { id: order.id }, data: { status: 'RIDE_IN_PROGRESS' } });
     const during = await active(c.token);
-    expect(during.json().data.driver.mmgPayUrl).toBe('https://mmg.test/pay/driver-1');
+    expect(during.json().data.driver.mmgPayUrl).toBe('https://pay.example.com/pay/driver-1');
 
     // Done: the receipt fetch keeps it; a matching-phase fetch would not.
     await app.prisma.order.update({ where: { id: order.id }, data: { status: 'DELIVERED' } });
     const receipt = await app.inject({
       method: 'GET', url: `/api/v1/rides/${order.id}`, headers: { authorization: `Bearer ${c.token}` },
     });
-    expect(receipt.json().data.driver.mmgPayUrl).toBe('https://mmg.test/pay/driver-1');
+    expect(receipt.json().data.driver.mmgPayUrl).toBe('https://pay.example.com/pay/driver-1');
 
     await app.prisma.order.update({ where: { id: order.id }, data: { status: 'PENDING', driverId: d.driverId } });
     const matching = await app.inject({
       method: 'GET', url: `/api/v1/rides/${order.id}`, headers: { authorization: `Bearer ${c.token}` },
     });
     expect(matching.json().data.driver.mmgPayUrl).toBeNull();
+  });
+
+  it('redacts an unsafe legacy driver link even on an eligible trip-end surface', async () => {
+    const c = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
+    const d = await makeDriver({ mmg: 'https://evil.example/pay/legacy', available: false });
+    const order = await app.prisma.order.create({
+      data: {
+        orderNumber: `PM-UNSAFE-${seq}`, orderType: 'TAXI', customerId: c.userId, driverId: d.driverId,
+        status: 'RIDE_IN_PROGRESS', pickupAddress: 'A', pickupLat: GT.lat, pickupLng: GT.lng,
+        deliveryAddress: 'B', deliveryLat: 6.8143, deliveryLng: -58.1443,
+        subtotalBase: 1500, subtotalMarkup: 0, subtotalCustomer: 1500,
+        deliveryFee: 0, totalAmount: 1500, paymentMethod: 'CASH',
+      } as never,
+    });
+    const active = await app.inject({
+      method: 'GET', url: '/api/v1/rides/active', headers: { authorization: `Bearer ${c.token}` },
+    });
+    expect(active.json().data.driver.mmgPayUrl).toBeNull();
+    await app.prisma.order.delete({ where: { id: order.id } });
   });
 });

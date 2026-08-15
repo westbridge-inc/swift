@@ -32,6 +32,36 @@ export interface DeviceLocationWriter {
   setStatus: (status: LocationStatus) => void;
 }
 
+export interface LiveDeviceLocationWriter {
+  setLiveLocation: (latitude: number, longitude: number) => void;
+}
+
+export interface LiveDeviceLocationLease {
+  readonly generation: number;
+}
+
+export function resolvedLocationState(
+  latitude: number,
+  longitude: number,
+  address?: string,
+) {
+  return {
+    latitude,
+    longitude,
+    address: address ?? null,
+    status: 'granted' as const,
+  };
+}
+
+export function liveLocationState(latitude: number, longitude: number) {
+  return {
+    latitude,
+    longitude,
+    address: null,
+    status: 'granted' as const,
+  };
+}
+
 /**
  * Every useDeviceLocation hook writes to the same location store, so operation
  * ordering must also be shared. A per-hook flag cannot arbitrate root AppState,
@@ -39,45 +69,79 @@ export interface DeviceLocationWriter {
  */
 function createLocationResolutionCoordinator() {
   let nextSequence = 0;
-  let latestAuthoritySequence = 0;
-  const activeRequestSequences = new Set<number>();
+  let latestStartedSequence = 0;
+  let liveGeneration = 0;
+  let permissionState: LocationStatus = 'unknown';
 
   return {
-    begin(mode: LocationResolutionMode) {
+    begin(_mode: LocationResolutionMode) {
       const sequence = ++nextSequence;
-      const beganDuringRequest = mode === 'silent' && activeRequestSequences.size > 0;
+      latestStartedSequence = sequence;
 
-      // Explicit user actions reserve authority immediately, so any work that
-      // started earlier is stale even while the OS request is still pending.
-      if (mode === 'request') {
-        latestAuthoritySequence = sequence;
-        activeRequestSequences.add(sequence);
-      }
+      // Any permission refresh immediately revokes existing watcher authority.
+      // A fresh lease can be issued only after a coordinated grant commits.
+      liveGeneration += 1;
+      permissionState = 'resolving';
 
       return {
         claim(result: DeviceLocationResolution) {
-          if (mode === 'request') return sequence === latestAuthoritySequence;
-
-          const isConfirmedPermissionState = result.status === 'granted' || result.status === 'denied';
-
-          // A transient foreground result must not strand or overwrite an
-          // explicit request it overlapped. A confirmed grant or revocation is
-          // authoritative and may supersede older work.
-          if (!isConfirmedPermissionState && beganDuringRequest) return false;
-          if (sequence < latestAuthoritySequence) return false;
-
-          latestAuthoritySequence = sequence;
+          // Among operations that actually start, last-start-wins. In
+          // particular, an older grant cannot restore watcher authority while
+          // a newer silent refresh is still resolving.
+          if (sequence !== latestStartedSequence) return false;
+          permissionState = result.status;
           return true;
         },
-        finish: () => {
-          if (mode === 'request') activeRequestSequences.delete(sequence);
-        },
+        finish: () => {},
       };
+    },
+    createLiveLease(): LiveDeviceLocationLease | null {
+      return permissionState === 'granted' ? { generation: liveGeneration } : null;
+    },
+    acceptsLiveLease(lease: LiveDeviceLocationLease) {
+      return permissionState === 'granted' && lease.generation === liveGeneration;
     },
   };
 }
 
 const sharedLocationResolutionCoordinator = createLocationResolutionCoordinator();
+
+/**
+ * Commits a coordinate emitted by an already-authorized live watcher through
+ * the same authority clock used by one-shot permission resolutions.
+ */
+export function commitLiveDeviceLocation(
+  lease: LiveDeviceLocationLease,
+  writer: LiveDeviceLocationWriter,
+  latitude: number,
+  longitude: number,
+) {
+  if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) return false;
+  if (!sharedLocationResolutionCoordinator.acceptsLiveLease(lease)) return false;
+  writer.setLiveLocation(latitude, longitude);
+  return true;
+}
+
+export function createLiveDeviceLocationLease() {
+  return sharedLocationResolutionCoordinator.createLiveLease();
+}
+
+export function isLiveDeviceLocationLeaseValid(lease: LiveDeviceLocationLease) {
+  return sharedLocationResolutionCoordinator.acceptsLiveLease(lease);
+}
+
+/** Permission sheets cause inactive -> active. iOS may foreground through
+ * background -> inactive -> active, so retain a sticky background marker until
+ * active rather than comparing only the adjacent pair. */
+export function advanceLocationAppState(wasBackgrounded: boolean, next: string) {
+  if (next === 'background') {
+    return { wasBackgrounded: true, shouldRefresh: false };
+  }
+  if (next === 'active') {
+    return { wasBackgrounded: false, shouldRefresh: wasBackgrounded };
+  }
+  return { wasBackgrounded, shouldRefresh: false };
+}
 
 /**
  * Coordinates in the persisted store are only a last-known map center. They
@@ -120,6 +184,9 @@ export async function resolveDeviceLocation(
 
     const position = await api.getCurrentPositionAsync();
     const { latitude, longitude } = position.coords;
+    if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) {
+      return { status: 'unavailable' };
+    }
     let address: string | undefined;
 
     try {
@@ -152,7 +219,11 @@ export async function resolveCoordinatedDeviceLocation(
   const operation = sharedLocationResolutionCoordinator.begin(mode);
 
   try {
-    if (mode === 'request') writer.setStatus('resolving');
+    // A persisted fix remains useful map context, but it must stop being an
+    // automatic pickup/demand/SOS coordinate as soon as any refresh begins.
+    // This closes the warm-resume window where an old granted fix otherwise
+    // stayed authoritative while getCurrentPositionAsync was still pending.
+    writer.setStatus('resolving');
 
     const result = await resolveDeviceLocation(mode, api);
     if (!operation.claim(result)) return result;

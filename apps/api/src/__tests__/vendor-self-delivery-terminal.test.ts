@@ -116,11 +116,11 @@ beforeAll(async () => {
   });
   userIds.push(ru.id);
   riderToken = app.jwt.sign({ userId: ru.id, role: 'MOVER', jti: nanoid(8) });
-  await app.prisma.session.create({ data: { userId: ru.id, token: riderToken, refreshToken: nanoid(48), deviceId: 'sdr', deviceType: 'test', expiresAt: new Date(Date.now() + 86_400_000) } });
+  const riderSession = await app.prisma.session.create({ data: { userId: ru.id, token: riderToken, refreshToken: nanoid(48), deviceId: 'sdr', deviceType: 'test', expiresAt: new Date(Date.now() + 86_400_000) } });
   // Online, located at the vendor — the board requires both, and filters by a
   // 15 km radius, so the control order must actually be visible to this rider.
   const rider = await app.prisma.rider.create({
-    data: { userId: ru.id, riderType: 'BOTH', vehicleType: 'MOTORCYCLE', isOnline: true, isAvailable: true, currentLat: 6.8, currentLng: -58.15 },
+    data: { userId: ru.id, riderType: 'BOTH', vehicleType: 'MOTORCYCLE', isOnline: true, isAvailable: true, currentLat: 6.8, currentLng: -58.15, lastLocationUpdate: new Date(), locationSessionId: riderSession.id },
   });
   riderId = rider.id;
 });
@@ -196,9 +196,12 @@ describe('[F-0026] rider-side subsystems leave self-delivered orders alone', () 
     const riderOrder = await makeOrder('PLATFORM_RIDER', 'READY_FOR_PICKUP');
 
     const enqueued: string[] = [];
-    // stuckMinutes 0 → every order older than "now" qualifies, so the ONLY
-    // thing keeping the self-delivered order out is the fulfilmentMode filter.
-    await reconcileStuckDispatch(app.prisma, app.redis, async (id) => { enqueued.push(id); }, 0);
+    // stuckMinutes -1 → the cutoff sits a minute in the FUTURE, so both
+    // fixtures qualify deterministically (with 0, an order created in the
+    // same millisecond as the cutoff flaked out of `updatedAt < now`) and the
+    // ONLY thing keeping the self-delivered order out is the fulfilmentMode
+    // filter.
+    await reconcileStuckDispatch(app.prisma, app.redis, async (id) => { enqueued.push(id); }, -1);
 
     expect(enqueued).not.toContain(selfOrder.id);
     expect(enqueued).toContain(riderOrder.id); // control: the filter is not just excluding everything

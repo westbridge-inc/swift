@@ -1,4 +1,4 @@
-import type { PrismaClient } from '@prisma/client';
+import type { Notification, PrismaClient } from '@prisma/client';
 import type { Server } from 'socket.io';
 import { getChannels, type NotificationChannels } from '../../providers/notifications/channels';
 import { log } from '../../utils/logger';
@@ -190,27 +190,49 @@ export class NotificationService {
       return '';
     }
 
+    await this.publishPersisted(notification.id);
+    return notification.id;
+  }
+
+  /** Fan out an inbox row that another atomic domain transaction already
+   * persisted. This is the post-commit half for liability-sensitive workflows:
+   * socket/push failures cannot roll back the domain fact, and retrying this
+   * method never inserts a duplicate inbox notification. */
+  async publishPersisted(notificationId: string): Promise<boolean> {
+    let notification: Notification | null;
+    try {
+      notification = await this.prisma.notification.findUnique({ where: { id: notificationId } });
+    } catch (err) {
+      log().warn({ err, notificationId }, 'persisted notification lookup failed');
+      notificationFailuresCounter.inc({ channel: 'db', stage: 'fanout_lookup' });
+      return false;
+    }
+    if (!notification) return false;
+    const data = notification.data && typeof notification.data === 'object' && !Array.isArray(notification.data)
+      ? notification.data as Record<string, unknown>
+      : undefined;
+
     try {
       // Live socket delivery
-      this.io.to(`user:${payload.userId}`).emit('notification', {
+      this.io.to(`user:${notification.userId}`).emit('notification', {
         id: notification.id,
-        type: payload.type,
-        title: payload.title,
-        body: payload.body,
+        type: notification.type,
+        title: notification.title,
+        body: notification.body,
         data,
         createdAt: notification.createdAt,
       });
 
-      // Channel fan-out through the swappable interface, honouring prefs
+      // Channel fan-out through the swappable interface, honouring prefs.
       const user = await this.prisma.user.findUnique({
-        where: { id: payload.userId },
+        where: { id: notification.userId },
         select: { notificationPrefs: true },
       });
       const prefs = { ...DEFAULT_PREFS, ...((user?.notificationPrefs as Partial<NotificationPrefs> | null) ?? {}) };
 
       if (prefs.push) {
         const tokens = await this.prisma.deviceToken.findMany({
-          where: { userId: payload.userId, isActive: true },
+          where: { userId: notification.userId, isActive: true },
           select: { token: true },
         });
         if (tokens.length > 0) {
@@ -218,20 +240,25 @@ export class NotificationService {
           // provider-level retries (withPushRetry) a final failure is LOGGED,
           // never swallowed silently [SWIFT-UG-NOTIF-01].
           await this.channels.push
-            .sendPush(tokens.map((t) => t.token), payload.title, payload.body, payload.data)
+            .sendPush(tokens.map((t) => t.token), notification.title, notification.body, data)
             .then((r) => deactivateDeadTokens(this.prisma, r.invalidTokens))
             .catch((err) => {
-              log().warn({ err, userId: payload.userId, type: payload.type }, 'push delivery failed after retries');
+              log().warn(
+                { err, userId: notification.userId, type: notification.type },
+                'push delivery failed after retries',
+              );
               notificationFailuresCounter.inc({ channel: 'push', stage: 'send' });
             });
         }
       }
     } catch (err) {
-      log().warn({ err, userId: payload.userId, type: payload.type }, 'notification fan-out failed');
+      log().warn(
+        { err, userId: notification.userId, type: notification.type },
+        'notification fan-out failed',
+      );
       notificationFailuresCounter.inc({ channel: 'fanout', stage: 'send' });
     }
-
-    return notification.id;
+    return true;
   }
 
   /** Direct SMS through the interface (OTPs, vendor-alert fallbacks). */

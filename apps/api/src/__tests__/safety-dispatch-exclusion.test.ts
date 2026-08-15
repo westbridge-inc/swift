@@ -46,6 +46,17 @@ async function makeUser(roles: UserRole[], extra: Record<string, unknown> = {}) 
 
 async function makeDriverAt(offset: number, extra: Record<string, unknown> = {}) {
   const user = await makeUser(['MOVER']);
+  const token = app.jwt.sign({ userId: user.id, role: 'MOVER', jti: nanoid(8) });
+  const session = await app.prisma.session.create({
+    data: {
+      userId: user.id,
+      token,
+      refreshToken: nanoid(48),
+      deviceId: `safety-dispatch-${seq}`,
+      deviceType: 'test',
+      expiresAt: new Date(Date.now() + 24 * 3600 * 1000),
+    },
+  });
   const driver = await app.prisma.driver.create({
     data: {
       userId: user.id,
@@ -55,6 +66,7 @@ async function makeDriverAt(offset: number, extra: Record<string, unknown> = {})
       currentLat: PICKUP.lat + 0.001 * offset,
       currentLng: PICKUP.lng + 0.001 * offset,
       lastLocationUpdate: new Date(),
+      locationSessionId: session.id,
       ...extra,
     },
   });
@@ -83,6 +95,7 @@ afterAll(async () => {
   await app.prisma.driver.deleteMany({ where: { userId: { in: userIds } } });
   await app.prisma.notification.deleteMany({ where: { userId: { in: userIds } } });
   await app.prisma.customer.deleteMany({ where: { userId: { in: userIds } } });
+  await app.prisma.session.deleteMany({ where: { userId: { in: userIds } } });
   await app.prisma.user.deleteMany({ where: { id: { in: userIds } } });
   await app.close();
 });

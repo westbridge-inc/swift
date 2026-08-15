@@ -33,7 +33,8 @@ import { socketPlugin } from './plugins/socket';
 import { redisPlugin } from './plugins/redis';
 import { registerErrorHandler } from './middleware/error-handler';
 import { registerEmptyJsonBodyParser } from './plugins/empty-json';
-import { createQueues, createWorkers, scheduleRecurringJobs } from './jobs/queue';
+import { initializeJobRuntime, type JobRuntime } from './jobs/runtime';
+import { registerReadinessRoute, type RuntimeReadinessState } from './plugins/readiness';
 import { loggerRedactConfig } from './utils/logger-config';
 import { registerPublicUploads } from './utils/public-uploads';
 import { observabilityPlugin } from './plugins/observability';
@@ -45,6 +46,8 @@ import { qrPublicRoutes } from './modules/qr/qr-public.routes';
 import { discoveryRoutes } from './modules/discovery/discovery.routes';
 import { statementRoutes } from './modules/order/statement.routes';
 import path from 'node:path';
+import { installProcessLifecycle } from './utils/process-lifecycle';
+import { resolveCorsOrigins } from './utils/cors-origin';
 
 const PORT = parseInt(process.env['PORT'] || '3000', 10);
 const HOST = process.env['HOST'] || '0.0.0.0';
@@ -87,6 +90,11 @@ async function buildApp() {
     // any healthy request; anything longer is a stuck dependency, not work.
     requestTimeout: Number(process.env['REQUEST_TIMEOUT_MS'] ?? 30_000),
   });
+  const runtimeReadiness: RuntimeReadinessState = {
+    checkQueues: () => false,
+    checkConsumers: () => false,
+  };
+  let jobRuntime: JobRuntime | undefined;
 
   // Give deep services (order, dispatch) the real logger for orderId tracing.
   setAppLogger(app.log);
@@ -100,17 +108,7 @@ async function buildApp() {
   registerEmptyJsonBodyParser(app);
 
   // Core plugins
-  const corsOrigin = process.env['CORS_ORIGIN']
-    ? process.env['CORS_ORIGIN'].split(',')
-    : process.env['NODE_ENV'] === 'development'
-      ? [
-          'http://localhost:3001', 'http://localhost:3000', 'http://127.0.0.1:3001',
-          // Web app dev server + Mission Control's Tauri webview origins
-          'http://localhost:3002', 'tauri://localhost', 'http://tauri.localhost',
-          // Mission Control run in a browser via `pnpm dev` (Vite on :1420)
-          'http://localhost:1420', 'http://127.0.0.1:1420',
-        ]
-      : false;
+  const corsOrigin = resolveCorsOrigins(process.env['CORS_ORIGIN'], process.env['NODE_ENV']);
   await app.register(cors, {
     origin: corsOrigin,
     credentials: true,
@@ -151,6 +149,7 @@ async function buildApp() {
   await app.register(redisPlugin);
   await app.register(authPlugin);
   await app.register(socketPlugin);
+  runtimeReadiness.checkRealtime = app.checkSocketAdapterReady;
 
   // Multi-tenancy: give every request a fresh tenant store BEFORE any auth runs,
   // so `authenticate` can bind the caller's tenant without leaking across
@@ -236,32 +235,9 @@ async function buildApp() {
     };
   });
 
-  // Readiness (launch-readiness Phase 6): distinct from /health's liveness.
-  // "Can this instance serve traffic RIGHT NOW" — every hard dependency must be
-  // reachable AND the schema migrated. The load balancer / orchestrator routes
-  // traffic only to a 200 here; a booting or dependency-broken instance returns
-  // 503 and is kept out of rotation. No auth (infra probe), no detail leaked.
-  app.get('/ready', async (_request, reply) => {
-    const deps: Record<string, boolean> = {};
-    try {
-      // Schema present? An un-migrated DB is "up" but cannot serve. Checking a
-      // core table exists works whether the schema arrived via migrate deploy
-      // (prod) or db push (CI) — both leave `users` present.
-      const rows = await app.prisma.$queryRaw<Array<{ ok: boolean }>>`
-        SELECT to_regclass('public.users') IS NOT NULL AS ok`;
-      deps['database'] = rows[0]?.ok === true;
-    } catch {
-      deps['database'] = false;
-    }
-    try {
-      deps['redis'] = (await app.redis.ping()) === 'PONG';
-    } catch {
-      deps['redis'] = false;
-    }
-    const ready = Object.values(deps).every(Boolean);
-    reply.status(ready ? 200 : 503);
-    return { ready, deps, timestamp: new Date().toISOString() };
-  });
+  // Readiness is stricter than liveness: schema, Redis, BullMQ producer
+  // connections, and host/DB/Redis clock agreement must all be healthy.
+  registerReadinessRoute(app, runtimeReadiness);
 
   // Public upload trees only (items/, avatars/). Path-traversal-guarded;
   // KYC docs in other /uploads folders are never exposed here.
@@ -313,58 +289,69 @@ async function buildApp() {
   // copies of billing/settlement/reconcile processing. Queues are always
   // created — routes still enqueue either way.
   try {
-    const queues = createQueues(app.redis);
     const runWorkers = process.env['RUN_WORKERS'] !== '0';
-    const workers = runWorkers
-      ? createWorkers({
-          prisma: app.prisma,
-          io: app.io,
-          redis: app.redis,
-          log: app.log,
-        })
-      : null;
-    // Repeatable-job registration lives with the process that consumes them.
-    if (runWorkers) await scheduleRecurringJobs(queues);
+    const runtime = await initializeJobRuntime({
+      prisma: app.prisma,
+      io: app.io,
+      redis: app.redis,
+      log: app.log,
+    }, { runWorkers });
+    jobRuntime = runtime;
+    const { queues } = runtime;
+    runtimeReadiness.checkQueues = runtime.checkProducersReady;
+    runtimeReadiness.checkConsumers = runtime.checkConsumersReady;
     app.decorate('workersActive', runWorkers);
-    app.log.info({ runWorkers }, 'Background job queues initialized');
+    app.log.info(
+      { runWorkers, maxClockSkewMs: Math.round(runtime.clock.maxSkewMs) },
+      'Background job queues initialized',
+    );
 
     app.addHook('onClose', async () => {
-      if (workers) await workers.cleanup();
-      await queues.orderQueue.close();
-      await queues.subscriptionQueue.close();
-      await queues.settlementQueue.close();
-      await queues.notificationQueue.close();
-      await queues.verificationQueue.close();
-      await queues.dispatchQueue.close();
-      await queues.searchQueue.close();
+      runtimeReadiness.checkQueues = () => false;
+      runtimeReadiness.checkConsumers = () => false;
+      await runtime.cleanup();
     });
 
     // Decorate so routes can enqueue jobs
     app.decorate('queues', queues);
     app.decorate('dispatchQueue', queues.dispatchQueue);
   } catch (err) {
-    app.log.warn({ err }, 'Background jobs failed to initialize — running without queues');
+    if (process.env['NODE_ENV'] === 'production') {
+      app.log.fatal({ err }, 'Background jobs failed to initialize — refusing production boot');
+      await app.close().catch((closeError) => {
+        app.log.error({ err: closeError }, 'Failed to close app after queue initialization failure');
+      });
+      throw err;
+    }
+    app.log.warn({ err }, 'Background jobs failed to initialize — readiness remains false');
   }
 
-  // Last-resort visibility: an unhandled rejection or uncaught exception must
-  // leave a loud, structured trace instead of a silent death (pre-launch audit
-  // H5). Kept process-alive on rejection (Node default would too) but logged.
-  process.on('unhandledRejection', (reason) => {
-    app.log.error({ err: reason }, 'UNHANDLED PROMISE REJECTION');
+  const processLifecycle = installProcessLifecycle({
+    cleanup: () => app.close(),
+    markNotReady: () => {
+      runtimeReadiness.checkQueues = () => false;
+      runtimeReadiness.checkConsumers = () => false;
+      jobRuntime?.markNotReady();
+    },
+    exit: (code) => process.exit(code),
+    onSignal: (signal) => {
+      app.log.info({ signal }, 'Shutdown signal received');
+    },
+    onFatal: (event, error) => {
+      const message = event === 'unhandledRejection'
+        ? 'UNHANDLED PROMISE REJECTION — draining process'
+        : 'UNCAUGHT EXCEPTION — draining process';
+      app.log.fatal({ err: error, event }, message);
+    },
+    onCleanupError: (error) => {
+      app.log.fatal({ err: error }, 'Server bounded shutdown failed');
+    },
   });
-  process.on('uncaughtException', (err) => {
-    app.log.fatal({ err }, 'UNCAUGHT EXCEPTION');
+  // Test-created apps may close without a process signal. Remove only the exact
+  // listeners this app installed so repeated builds do not leak handlers.
+  app.addHook('onClose', async () => {
+    processLifecycle.dispose();
   });
-
-  // Graceful shutdown
-  const signals = ['SIGINT', 'SIGTERM'];
-  for (const signal of signals) {
-    process.on(signal, async () => {
-      app.log.info(`${signal} received, shutting down gracefully...`);
-      await app.close();
-      process.exit(0);
-    });
-  }
 
   return app;
 }

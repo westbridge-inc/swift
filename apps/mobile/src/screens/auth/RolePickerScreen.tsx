@@ -53,31 +53,32 @@ function QuietRow({
   icon,
   label,
   hint,
+  testID,
   onPress,
 }: {
   icon: React.ComponentProps<typeof Feather>['name'];
   label: string;
   hint: string;
+  testID: string;
   onPress: () => void;
 }) {
   return (
     <Pressable
+      testID={testID}
       onPress={onPress}
       style={{
         minHeight: 44,
         maxWidth: '100%',
         paddingHorizontal: space.sm,
         alignSelf: 'center',
-        flexDirection: 'row',
-        alignItems: 'center',
-        gap: space.xs,
+        justifyContent: 'center',
       }}
       accessibilityRole="button"
       accessibilityLabel={label}
       accessibilityHint={hint}
     >
       {({ pressed }) => (
-        <>
+        <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.xs }}>
           <Feather name={icon} size={16} color={color.brand[600]} style={{ opacity: pressed ? 0.6 : 1 }} />
           <T
             variant="label"
@@ -85,7 +86,7 @@ function QuietRow({
           >
             {label}
           </T>
-        </>
+        </View>
       )}
     </Pressable>
   );
@@ -111,7 +112,7 @@ export function RolePickerScreen() {
   };
 
   return (
-    <Screen>
+    <Screen testID="role-picker-screen">
       <ScrollView
         style={{ flex: 1 }}
         contentContainerStyle={{
@@ -137,6 +138,7 @@ export function RolePickerScreen() {
             {TRIO.map((o) => (
               <PressableScale
                 key={o.intent}
+                testID={`role-picker-${o.intent}`}
                 onPress={() => pick(o.intent)}
                 accessibilityRole="button"
                 accessibilityLabel={`${o.title}. ${o.sub}`}
@@ -172,6 +174,7 @@ export function RolePickerScreen() {
           {/* The account answers: sign in first and the trio question is never
               asked — the server's roles + last-used role route (SO-4). */}
           <Pressable
+            testID="role-picker-sign-in"
             onPress={() => {
               haptic.select();
               if (!countryCode) setCountry(DEFAULT_COUNTRY);
@@ -209,6 +212,7 @@ export function RolePickerScreen() {
             icon="eye"
             label="Preview the driver app"
             hint="Open a read-only sample driver dashboard"
+            testID="role-picker-preview-driver"
             onPress={() => {
               setMoverPreset('taxi');
               enterPreview('DRIVER');
@@ -219,6 +223,7 @@ export function RolePickerScreen() {
             icon="eye"
             label="Preview a business dashboard"
             hint="Open a read-only sample business dashboard"
+            testID="role-picker-preview-business"
             onPress={() => {
               enterVendorPreview('RESTAURANT');
               setIntent('vendor');
@@ -228,6 +233,7 @@ export function RolePickerScreen() {
             icon="tv"
             label="Advertise on Swift"
             hint="Open Swift advertising"
+            testID="role-picker-advertiser"
             onPress={() => setIntent('advertiser')}
           />
         </View>

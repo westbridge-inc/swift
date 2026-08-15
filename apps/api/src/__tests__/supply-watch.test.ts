@@ -102,6 +102,17 @@ describe('supply watcher', () => {
       },
     });
     userIds.push(du.id);
+    const driverToken = app.jwt.sign({ userId: du.id, role: 'MOVER', jti: nanoid(8) });
+    const locationSession = await app.prisma.session.create({
+      data: {
+        userId: du.id,
+        token: driverToken,
+        refreshToken: nanoid(48),
+        deviceId: `watch-driver-${du.id}`,
+        deviceType: 'test',
+        expiresAt: new Date(Date.now() + 24 * 3600 * 1000),
+      },
+    });
     const d = await app.prisma.driver.create({
       data: {
         userId: du.id,
@@ -111,6 +122,7 @@ describe('supply watcher', () => {
         isOnline: true, isAvailable: true, documentsVerified: true,
         rideClass: 'ECONOMY' as never,
         currentLat: SPOT.lat + 0.004, currentLng: SPOT.lng,
+        lastLocationUpdate: new Date(), locationSessionId: locationSession.id,
       },
     });
     driverIds.push(d.id);

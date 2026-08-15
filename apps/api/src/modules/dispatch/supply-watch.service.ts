@@ -22,12 +22,25 @@ export async function scanSupplyWatches(
     take: cap,
   });
 
+  // [E32 / danger #17] The watch row carries no tenant; its CUSTOMER does.
+  // This worker runs without request tenant context, so an unscoped probe
+  // counted EVERY operator's drivers — a customer could be told "drivers are
+  // back" because a different operator's supply came online. Probe strictly
+  // inside the watcher's own operator pool.
+  const customers = await prisma.user.findMany({
+    where: { id: { in: watches.map((w) => w.customerId) } },
+    select: { id: true, tenantId: true },
+  });
+  const tenantByCustomer = new Map(customers.map((c) => [c.id, c.tenantId]));
+
   let notified = 0;
   for (const w of watches) {
+    const tenantId = tenantByCustomer.get(w.customerId);
+    if (!tenantId) continue;
     const supply = await dispatch.getAvailability(w.pool === 'RIDER' ? 'RIDER' : 'DRIVER', {
       lat: w.lat,
       lng: w.lng,
-    });
+    }, 0, tenantId);
     if (supply.level === 'NONE') continue;
 
     // Stamp FIRST (CAS on notifiedAt null) so a racing scan can't double-send.

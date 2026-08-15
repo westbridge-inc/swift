@@ -88,7 +88,11 @@ async function makeDeliveredOrder(opts: { payment: 'CASH' | 'MOBILE_MONEY'; fee?
       deliveryAddress: 'x', deliveryLat: 6.8, deliveryLng: -58.15,
       subtotalBase: 1000, subtotalMarkup: 0, subtotalCustomer: 1000,
       deliveryFee: opts.fee ?? 300, totalAmount: 1000 + (opts.fee ?? 300),
-      paymentMethod: opts.payment,
+      // CAPTURED: a legitimate delivered order has confirmed payment — CASH is
+      // captured at the door, MMG by the store's confirm [SPS-F-0016]. A
+      // PENDING fixture here would encode the exact defect REPORT-004 F-004-03
+      // refuted (earnings minted from unconfirmed money).
+      paymentMethod: opts.payment, paymentStatus: 'CAPTURED',
     },
   });
   await orders.createEarnings(order.id);

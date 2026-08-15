@@ -24,7 +24,7 @@ async function makeUser(roles: UserRole[]) {
   const user = await app.prisma.user.create({ data: { phone: `+${phoneBase + seq}`, firstName: 'Ops', lastName: `U${seq}`, roles, activeRole: roles[0]!, isPhoneVerified: true, selfieCapturedAt: new Date() } });
   createdUserIds.push(user.id);
   const token = app.jwt.sign({ userId: user.id, role: roles[0]!, jti: nanoid(8) });
-  await app.prisma.session.create({ data: { userId: user.id, token, refreshToken: nanoid(48), deviceId: 'ops', deviceType: 'test', expiresAt: new Date(Date.now() + 86400000) } });
+  await app.prisma.session.create({ data: { authMethod: 'OTP', userId: user.id, token, refreshToken: nanoid(48), deviceId: 'ops', deviceType: 'test', expiresAt: new Date(Date.now() + 86400000) } });
   return { userId: user.id, token };
 }
 

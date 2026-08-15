@@ -28,6 +28,30 @@ function createMockRedis() {
     }),
     expire: vi.fn(async (_key: string, _seconds: number) => 1),
     exists: vi.fn(async (key: string) => (store.has(key) ? 1 : 0)),
+    eval: vi.fn(async (
+      _script: string,
+      _keyCount: number,
+      key: string,
+      candidate: string,
+      maxAttemptsRaw: string,
+    ) => {
+      const raw = store.get(key);
+      if (!raw) return 0;
+      const [version, expected, attemptsRaw, extra] = raw.split('|');
+      if (version !== 'v2' || !expected || !attemptsRaw || extra !== undefined) {
+        store.delete(key);
+        return 0;
+      }
+      const attempts = Number(attemptsRaw);
+      const maxAttempts = Number(maxAttemptsRaw);
+      if (attempts >= maxAttempts) return 2;
+      if (expected === candidate) {
+        store.delete(key);
+        return 1;
+      }
+      store.set(key, `v2|${expected}|${attempts + 1}`);
+      return 3;
+    }),
   };
 }
 
@@ -66,10 +90,10 @@ describe('storeOtp', () => {
     const redis = createMockRedis();
     await storeOtp(redis as never, '+5926003000', '123456');
 
-    // Hashed at rest (launch-readiness §1.1): the stored value is sha256:<hex>.
+    // Keyed at rest and versioned with the attempt counter in one record.
     expect(redis.set).toHaveBeenCalledWith(
       'otp:+5926003000',
-      'sha256:8d969eef6ecad3c29a3a629280e686cf0c3f5d5a86aff3ca12020c923adc6c92',
+      expect.stringMatching(/^v2\|hmac-sha256:[a-f0-9]{64}\|0$/),
       'EX',
       300,
     );
@@ -95,24 +119,22 @@ describe('verifyOtp', () => {
   });
 
   it('returns valid:true for correct OTP', async () => {
-    redis.store.set('otp:+5926003000', '123456');
+    await storeOtp(redis as never, '+5926003000', '123456');
 
     const result = await verifyOtp(redis as never, '+5926003000', '123456');
     expect(result).toEqual({ valid: true });
   });
 
   it('cleans up keys after successful verification', async () => {
-    redis.store.set('otp:+5926003000', '123456');
+    await storeOtp(redis as never, '+5926003000', '123456');
 
     await verifyOtp(redis as never, '+5926003000', '123456');
 
-    // Should have deleted both the OTP and attempt keys
-    expect(redis.del).toHaveBeenCalledWith('otp:+5926003000');
-    expect(redis.del).toHaveBeenCalledWith('otp_attempt:+5926003000');
+    expect(redis.store.has('otp:+5926003000')).toBe(false);
   });
 
   it('returns valid:false for wrong OTP', async () => {
-    redis.store.set('otp:+5926003000', '123456');
+    await storeOtp(redis as never, '+5926003000', '123456');
 
     const result = await verifyOtp(redis as never, '+5926003000', '999999');
     expect(result.valid).toBe(false);
@@ -127,19 +149,30 @@ describe('verifyOtp', () => {
   });
 
   it('returns valid:false after too many attempts', async () => {
-    redis.store.set('otp:+5926003000', '123456');
-    redis.store.set('otp_attempt:+5926003000', '5'); // Max attempts reached
+    await storeOtp(redis as never, '+5926003000', '123456');
+    for (let i = 0; i < 5; i++) {
+      await verifyOtp(redis as never, '+5926003000', '000000');
+    }
 
     const result = await verifyOtp(redis as never, '+5926003000', '123456');
     expect(result.valid).toBe(false);
     expect(result.reason).toContain('Too many attempts');
   });
 
-  it('increments attempts on each verification', async () => {
-    redis.store.set('otp:+5926003000', '123456');
+  it('checks, increments, and consumes through one atomic one-key script', async () => {
+    await storeOtp(redis as never, '+5926003000', '123456');
 
     await verifyOtp(redis as never, '+5926003000', '000000');
-    expect(redis.incr).toHaveBeenCalledWith('otp_attempt:+5926003000');
+    expect(redis.eval).toHaveBeenCalledWith(
+      expect.stringContaining("redis.call('GET', KEYS[1])"),
+      1,
+      'otp:+5926003000',
+      expect.stringMatching(/^hmac-sha256:[a-f0-9]{64}$/),
+      '5',
+    );
+    expect(redis.get).not.toHaveBeenCalled();
+    expect(redis.incr).not.toHaveBeenCalled();
+    expect(redis.expire).not.toHaveBeenCalled();
   });
 });
 

@@ -54,6 +54,7 @@ async function makeUserWithSession(roles: UserRole[], activeRole: UserRole) {
       userId: user.id,
       token,
       refreshToken: nanoid(48),
+      ...(roles.some((role) => role === 'ADMIN' || role === 'SUPER_ADMIN') && { authMethod: 'OTP' as const }),
       deviceId: 'step5-test',
       deviceType: 'test',
       expiresAt: new Date(Date.now() + DAY),
@@ -451,6 +452,21 @@ describe('Waivers, reminders, tier recalculation', () => {
   });
 
   it('sends exactly one due-tomorrow reminder per period', async () => {
+    // A corrupt legacy subscription cannot be notified, but it also must not
+    // poison the batch or consume a REMINDER idempotency key.
+    const orphan = await app.prisma.subscription.create({
+      data: {
+        type: 'DELIVERY_RIDER',
+        status: 'ACTIVE',
+        weeklyRate: 12000,
+        billingMethod: 'CASH',
+        currentPeriodStart: new Date(),
+        currentPeriodEnd: new Date(Date.now() + 12 * HOUR),
+        nextBillingDate: new Date(Date.now() + 12 * HOUR),
+      },
+    });
+    createdSubIds.push(orphan.id);
+
     const { subId } = await makeMoverWithCardSub({
       token: 'tok_good_reminder',
       due: new Date(Date.now() + 12 * HOUR),
@@ -460,6 +476,7 @@ describe('Waivers, reminders, tier recalculation', () => {
     expect(first).toBeGreaterThanOrEqual(1);
     const mine = await app.prisma.billingEvent.count({ where: { subscriptionId: subId, type: 'REMINDER' } });
     expect(mine).toBe(1);
+    expect(await app.prisma.billingEvent.count({ where: { subscriptionId: orphan.id, type: 'REMINDER' } })).toBe(0);
 
     await billing.sendUpcomingReminders();
     const stillOne = await app.prisma.billingEvent.count({ where: { subscriptionId: subId, type: 'REMINDER' } });

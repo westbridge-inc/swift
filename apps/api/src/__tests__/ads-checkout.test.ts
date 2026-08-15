@@ -53,6 +53,45 @@ async function makeDraft(advertiserId: string, placementId: string) {
 }
 
 describe('§8.1 checkout', () => {
+  it('rejects synthetic providers in production before reserving or invoicing', async () => {
+    const a = await makeApprovedAdvertiser();
+    const p = await makePlacement();
+    const c = await makeDraft(a.id, p.id);
+    const previous = process.env['NODE_ENV'];
+    process.env['NODE_ENV'] = 'production';
+    try {
+      await expect(checkout.checkout(c.id, 'MOCK')).rejects.toMatchObject({
+        code: 'ADS_PAYMENT_PROVIDER_UNAVAILABLE',
+      });
+      await expect(checkout.checkout(c.id, 'MMG')).rejects.toMatchObject({
+        code: 'ADS_PAYMENT_PROVIDER_UNAVAILABLE',
+      });
+    } finally {
+      if (previous === undefined) delete process.env['NODE_ENV'];
+      else process.env['NODE_ENV'] = previous;
+    }
+    expect((await prisma.adCampaign.findUniqueOrThrow({ where: { id: c.id } })).status).toBe('DRAFT');
+    expect(await prisma.adBooking.count({ where: { campaignId: c.id } })).toBe(0);
+    expect(await prisma.adInvoice.count({ where: { campaignId: c.id } })).toBe(0);
+  });
+
+  it('uses an honest manual invoice path in production', async () => {
+    const a = await makeApprovedAdvertiser();
+    const p = await makePlacement();
+    const c = await makeDraft(a.id, p.id);
+    const previous = process.env['NODE_ENV'];
+    process.env['NODE_ENV'] = 'production';
+    try {
+      const { invoice } = await checkout.checkout(c.id, 'MANUAL');
+      invoiceIds.push(invoice.id);
+      expect(invoice.provider).toBe('MANUAL');
+      expect(invoice.paymentUrl).toBeNull();
+    } finally {
+      if (previous === undefined) delete process.env['NODE_ENV'];
+      else process.env['NODE_ENV'] = previous;
+    }
+  });
+
   it('reserves, issues an ADS-{year}-{seq} invoice, and is idempotent per campaign', async () => {
     const a = await makeApprovedAdvertiser();
     const p = await makePlacement();

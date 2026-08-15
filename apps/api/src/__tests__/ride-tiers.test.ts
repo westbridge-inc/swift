@@ -87,6 +87,10 @@ async function makeDriver(rideClass: RideClass) {
     },
   });
   createdUserIds.push(u.id);
+  const token = app.jwt.sign({ userId: u.id, role: 'DRIVER', jti: nanoid(8) });
+  const session = await app.prisma.session.create({
+    data: { userId: u.id, token, refreshToken: nanoid(48), deviceId: 'tiers', deviceType: 'test', expiresAt: new Date(Date.now() + DAY) },
+  });
   const driver = await app.prisma.driver.create({
     data: {
       userId: u.id,
@@ -96,11 +100,9 @@ async function makeDriver(rideClass: RideClass) {
       driverLicenseUrl: 'storage://t/dl.jpg', vehicleInsuranceUrl: 'storage://t/ins.jpg',
       documentsVerified: true, isOnline: true, isAvailable: true,
       currentLat: CENTRAL.lat, currentLng: CENTRAL.lng,
+      lastLocationUpdate: new Date(),
+      locationSessionId: session.id,
     },
-  });
-  const token = app.jwt.sign({ userId: u.id, role: 'DRIVER', jti: nanoid(8) });
-  await app.prisma.session.create({
-    data: { userId: u.id, token, refreshToken: nanoid(48), deviceId: 'tiers', deviceType: 'test', expiresAt: new Date(Date.now() + DAY) },
   });
   return { ...u, id: u.id, driverId: driver.id, token };
 }

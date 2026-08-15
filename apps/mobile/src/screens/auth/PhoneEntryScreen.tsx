@@ -16,7 +16,7 @@ import { LabeledInput, PillButton, Screen, T } from '../../kit';
 // passwords, no social sign-in — the backend has neither.
 export function PhoneEntryScreen() {
   const navigation = useNavigation<any>();
-  const { dialCode, countryCode, intent, moverPreset, cancelAuth } = useAuthStore();
+  const { dialCode, countryCode, intent, moverPreset, cancelAuth, setIntent } = useAuthStore();
   const [digits, setDigits] = useState('');
 
   // Length is validated per-country by libphonenumber (handles fixed, variable
@@ -67,6 +67,9 @@ export function PhoneEntryScreen() {
 
           <View style={{ marginTop: space['3xl'] }}>
             <LabeledInput
+              testID="auth-phone-input"
+              accessibilityLabel="Phone number"
+              accessibilityHint="Enter your phone number without the country calling code"
               label="Phone Number"
               icon="phone"
               placeholder={phoneExample(countryCode)}
@@ -77,7 +80,13 @@ export function PhoneEntryScreen() {
               error={err}
               autoFocus
               right={
-                <Pressable onPress={() => navigation.navigate('CountryPicker')} hitSlop={8}>
+                <Pressable
+                  testID="auth-country-picker"
+                  accessibilityRole="button"
+                  accessibilityLabel={`Change country calling code. Current code ${dialCode ?? '+592'}`}
+                  onPress={() => navigation.navigate('CountryPicker')}
+                  hitSlop={8}
+                >
                   {({ pressed }) => (
                     <View
                       style={[
@@ -104,7 +113,12 @@ export function PhoneEntryScreen() {
                 </Pressable>
               }
             />
-            <Pressable onPress={() => navigation.navigate('CountryPicker')} hitSlop={6}>
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel="Change country"
+              onPress={() => navigation.navigate('CountryPicker')}
+              hitSlop={6}
+            >
               <T variant="caption" tone="muted" style={{ marginTop: space.sm }}>
                 Wrong country? <T variant="caption" weight="semibold" tone="brand">Change country</T>
               </T>
@@ -115,14 +129,32 @@ export function PhoneEntryScreen() {
 
           <View style={{ gap: space.md, paddingBottom: space['2xl'] }}>
             <PillButton
+              testID="auth-send-code"
               label="Send Code"
               onPress={() => send.mutate()}
               disabled={!valid}
               loading={send.isPending}
             />
             {intent === 'customer' ? (
-              <PillButton label="Browse as Guest" variant="soft" onPress={cancelAuth} />
-            ) : null}
+              <PillButton testID="auth-browse-guest" label="Browse as Guest" variant="soft" onPress={cancelAuth} />
+            ) : (
+              // [SPS-F-0024] No surface is a one-way door. Advertiser, driver,
+              // and business sign-ups land here as the ROOT screen (no back
+              // stack), and the entry gate keeps returning 'auth' while their
+              // intent is set — so leaving requires clearing BOTH the auth ask
+              // and the intent. Customers keep "Browse as Guest" above; the
+              // trio's sign-in-first path (intent null) also lands here and
+              // returns to the welcome trio the same way.
+              <PillButton
+                testID="auth-back-to-welcome"
+                label="Back to the welcome screen"
+                variant="soft"
+                onPress={() => {
+                  cancelAuth();
+                  setIntent(null);
+                }}
+              />
+            )}
           </View>
         </ScrollView>
       </KeyboardAvoidingView>

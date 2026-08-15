@@ -24,7 +24,7 @@ export function landingIntent(prev: Intent | null, account: AccountShape): Inten
 
   // No usable choice → the account's last-used role answers (FO-04/FO-05).
   if (account.activeRole === 'VENDOR_OWNER' && account.isVendor) return 'vendor';
-  if ((account.activeRole === 'DRIVER' || account.activeRole === 'RIDER') && account.isMover) return 'mover';
+  if ((account.activeRole === 'MOVER' || account.activeRole === 'DRIVER' || account.activeRole === 'RIDER') && account.isMover) return 'mover';
   if (account.activeRole === 'CUSTOMER') return 'customer';
 
   // No activeRole signal → the single owned role, else the open surface.
@@ -35,13 +35,55 @@ export function landingIntent(prev: Intent | null, account: AccountShape): Inten
 
 /** The switch-role sync payload for an owned surface — keeps the server's
  *  activeRole tracking "last used" so the NEXT sign-in lands right. */
-export function switchRolePayload(intent: Intent, roles: string[]): 'CUSTOMER' | 'VENDOR' | 'DRIVER' | 'RIDER' | null {
+export function switchRolePayload(
+  intent: Intent,
+  roles: string[],
+  lastMoverRole?: string | null,
+): 'CUSTOMER' | 'VENDOR' | 'MOVER' | 'DRIVER' | 'RIDER' | null {
   if (intent === 'customer') return 'CUSTOMER';
   if (intent === 'vendor') return roles.includes('VENDOR_OWNER') ? 'VENDOR' : null;
   if (intent === 'mover') {
-    if (roles.includes('DRIVER')) return 'DRIVER';
-    if (roles.includes('RIDER')) return 'RIDER';
+    if ((lastMoverRole === 'DRIVER' || lastMoverRole === 'RIDER') && roles.includes(lastMoverRole)) {
+      return lastMoverRole;
+    }
+    const specific = (['DRIVER', 'RIDER'] as const).filter((role) => roles.includes(role));
+    if (specific.length === 1) return specific[0]!;
+    // A legacy dual-profile account with no durable memory must choose inside
+    // mover mode; null deliberately avoids silently defaulting to taxi.
+    if (specific.length > 1) return null;
+    if (roles.includes('MOVER')) return 'MOVER';
     return null;
   }
   return null; // advertiser is AdvertiserMember-based, not a UserRole
+}
+
+/** Which operational mover profile should be probed first. A dual-profile
+ * account must follow the server's specific activeRole; otherwise a newly
+ * selected delivery rider can silently land in the legacy Driver profile. */
+export function moverKindOrder(
+  activeRole: string | null | undefined,
+  lastMoverRole?: string | null,
+): readonly ('DRIVER' | 'RIDER')[] {
+  const preferred = activeRole === 'DRIVER' || activeRole === 'RIDER'
+    ? activeRole
+    : lastMoverRole === 'DRIVER' || lastMoverRole === 'RIDER'
+      ? lastMoverRole
+      : null;
+  return preferred
+    ? [preferred, preferred === 'DRIVER' ? 'RIDER' : 'DRIVER']
+    : [];
+}
+
+/** Server authority transition for a surface pick. Entering an unowned JOIN
+ * flow from the mover app still leaves mover supply first (via CUSTOMER), so
+ * navigation cannot unmount GPS while the account remains dispatchable. */
+export function roleSwitchAuthorityPayload(
+  current: Intent,
+  target: Intent,
+  targetOwned: boolean,
+  roles: string[],
+  lastMoverRole?: string | null,
+) {
+  if (targetOwned) return switchRolePayload(target, roles, lastMoverRole);
+  return current === 'mover' ? 'CUSTOMER' as const : null;
 }

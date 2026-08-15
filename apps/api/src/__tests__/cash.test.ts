@@ -85,6 +85,7 @@ async function makeUser(roles: UserRole[], activeRole: UserRole, opts: { created
   await app.prisma.session.create({
     data: {
       userId: user.id, token, refreshToken: nanoid(48),
+      ...(roles.some((role) => role === 'ADMIN' || role === 'SUPER_ADMIN') && { authMethod: 'OTP' as const }),
       deviceId: 'step10', deviceType: 'test', expiresAt: new Date(Date.now() + DAY),
     },
   });

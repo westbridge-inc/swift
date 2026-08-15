@@ -118,7 +118,9 @@ export class SandboxMmgProvider implements MmgMerchantProvider {
       return { status: 'error', transactionId: '', reason: 'Gateway timeout (sandbox)' };
     }
     const outcome = req.reference.toLowerCase().includes('pending') ? 'pending' : 'approved';
-    return { status: 'pending', transactionId: `mmgtx_${outcome}_${nanoid(10)}` };
+    // Encode the requested amount so the stateless lookup can echo provider
+    // truth exactly. A synthetic zero must never exercise a settlement bypass.
+    return { status: 'pending', transactionId: `mmgtx_${outcome}_amt${req.amountMinor}_${nanoid(10)}` };
   }
 
   async reverseTransaction(req: { transactionId: string }): Promise<MmgTxResult> {
@@ -136,7 +138,10 @@ export class SandboxMmgProvider implements MmgMerchantProvider {
           : req.transactionId.includes('expired')
             ? 'expired'
             : 'approved');
-    const amountMinor = req.transactionId.includes('mismatch') && status === 'approved' ? 99_900 : 0;
+    const encodedAmount = /_amt(\d+)_/.exec(req.transactionId)?.[1];
+    const amountMinor = req.transactionId.includes('mismatch') && status === 'approved'
+      ? 99_900
+      : Number(encodedAmount ?? 0);
     return { transactionId: req.transactionId, status, amountMinor, currencyCode: 'GYD' };
   }
 
@@ -395,6 +400,9 @@ export class LiveMmgProvider implements MmgMerchantProvider {
 /** Driver selection is config, not code. Defaults to the sandbox. */
 export function getMmgProvider(): MmgMerchantProvider {
   const driver = process.env['MMG_DRIVER'] ?? 'sandbox';
+  if (process.env['NODE_ENV'] === 'production' && driver === 'sandbox') {
+    throw new Error('MMG_DRIVER=sandbox is forbidden in production');
+  }
   switch (driver) {
     case 'sandbox':
       return new SandboxMmgProvider();
@@ -413,6 +421,9 @@ export function getMmgProvider(): MmgMerchantProvider {
           'MMG_DRIVER=live needs MMG_API_KEY, MMG_MERCHANT_ID, MMG_PASSWORD, MMG_MKEY and MMG_MSECRET ' +
             `(missing: ${missing.join(', ')})`,
         );
+      }
+      if (process.env['NODE_ENV'] === 'production' && /mmgtest|\buat\b|sandbox/i.test(cfg.baseUrl)) {
+        throw new Error('A non-UAT MMG_API_URL is required in production');
       }
       return new LiveMmgProvider(cfg);
     }
