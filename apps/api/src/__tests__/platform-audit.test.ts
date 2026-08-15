@@ -246,7 +246,7 @@ describe('courier terminal effects', () => {
       data: { isAvailable: false, currentOrderId: job.id },
     });
 
-    const res = await inject('POST', `/api/v1/courier/order/${job.id}/proof`, { proofPhotoUrl: 'https://x/proof.jpg' }, rider.token);
+    const res = await inject('POST', `/api/v1/courier/order/${job.id}/proof`, { proofPhotoUrl: `https://x/courier-proof/${job.id}/proof.jpg` }, rider.token);
     expect(res.statusCode).toBe(200);
     expect(res.json().data.status).toBe('DELIVERED');
 
@@ -264,7 +264,7 @@ describe('courier terminal effects', () => {
     });
     expect(note).not.toBeNull();
     // second proof is refused — no double pay, no double count
-    const again = await inject('POST', `/api/v1/courier/order/${job.id}/proof`, { proofPhotoUrl: 'https://x/p2.jpg' }, rider.token);
+    const again = await inject('POST', `/api/v1/courier/order/${job.id}/proof`, { proofPhotoUrl: `https://x/courier-proof/${job.id}/p2.jpg` }, rider.token);
     expect(again.statusCode).toBe(400);
   });
 });
