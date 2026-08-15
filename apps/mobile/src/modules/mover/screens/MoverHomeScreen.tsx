@@ -24,6 +24,7 @@ import {
   useDeclineOffer,
   useVerificationStatus,
   useSelectMoverKind,
+  type DispatchOffer,
   type MoverKind,
 } from '../../../hooks';
 import { useLocationStore } from '../../../stores/locationStore';
@@ -40,6 +41,7 @@ import { GUTTER, RoutePair, jobAmount, CustomerTrustBadge } from '../shared';
 import { dk, withAlpha, DCard, DStat, DWeekBars } from '../dark';
 import { useMoverPreview } from '../../../stores/moverPreview';
 import { MoverHomeAccountButton } from './MoverHomeAccountButton';
+import { fareLockedFor, fareToSubmit } from './fare-locked';
 
 /**
  * The earner home (dashboard plan Phase B/C): dark, map-first, demand-aware.
@@ -62,7 +64,7 @@ export function DispatchOfferCard({
   onAccept,
   onDecline,
 }: {
-  offer: any;
+  offer: DispatchOffer;
   job: any;
   kind: MoverKind;
   accepting: boolean;
@@ -98,7 +100,7 @@ export function DispatchOfferCard({
   // cannot undercut it. Hide the fare slider and NEVER submit a fare on MMG,
   // so a recovered card can't consume the exclusive offer only to be rejected
   // with MMG_PRICE_LOCKED (which burned that mover's offer).
-  const fareLocked = (job?.paymentMethod ?? offer.paymentMethod) === 'MOBILE_MONEY';
+  const fareLocked = fareLockedFor(job, offer);
   const floor = marketMax > 0 ? Math.max(0, Math.ceil(marketMax * 0.6)) : 0;
   const [price, setPrice] = useState<number>(marketMax);
   useEffect(() => setPrice(marketMax), [offer.orderId, marketMax]);
@@ -194,7 +196,7 @@ export function DispatchOfferCard({
                 // legitimate price choice: send NO fare (= market rate).
                 // fare 0 used to clamp the mover's pay to the 60% floor on
                 // CASH and burn the offer on MMG.
-                onAccept(!fareLocked && marketMax > 0 && price > 0 && price < marketMax ? price : undefined);
+                onAccept(fareToSubmit(fareLocked, marketMax, price));
               }}
               style={{ flex: 1 }}
             />

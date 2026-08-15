@@ -666,6 +666,12 @@ export interface DispatchOffer {
   vendorName?: string;
   expiresInSeconds?: number;
   etaMinutes?: number;
+  isExpress?: boolean;
+  // Load-bearing for the MMG fare lock: movers must never submit an MMG fare.
+  paymentMethod?: 'CASH' | 'MOBILE_MONEY' | (string & {});
+  customerTrust?: { trustLevel: string; completedOrders: number; strikes: number } | null;
+  itemCount?: number;
+  estLoad?: string | null;
   // [REPORT-010 F-07] Authoritative money/route facts carried by the RECOVERY
   // payload so a rebuilt card never prices itself from a missing board row.
   deliveryFee?: number;
