@@ -660,6 +660,18 @@ export function useBroadcastLocation(kind: MoverKind | null, enabled: boolean) {
   ]);
 }
 
+export interface BoardJob {
+  id: string;
+  pickupAddress?: string | null;
+  deliveryAddress?: string | null;
+  dropoffAddress?: string | null;
+  fareTotal?: number | string | null;
+  taxiFareTotal?: number | string | null;
+  deliveryFee?: number | string | null;
+  // Load-bearing for the MMG fare lock: movers must never submit an MMG fare.
+  paymentMethod?: 'CASH' | 'MOBILE_MONEY' | (string & {}) | null;
+}
+
 export interface DispatchOffer {
   orderId: string;
   orderNumber?: string;

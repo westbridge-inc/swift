@@ -24,6 +24,7 @@ import {
   useDeclineOffer,
   useVerificationStatus,
   useSelectMoverKind,
+  type BoardJob,
   type DispatchOffer,
   type MoverKind,
 } from '../../../hooks';
@@ -65,7 +66,7 @@ export function DispatchOfferCard({
   onDecline,
 }: {
   offer: DispatchOffer;
-  job: any;
+  job: BoardJob | null | undefined;
   kind: MoverKind;
   accepting: boolean;
   onAccept: (fare: number | undefined) => void;
