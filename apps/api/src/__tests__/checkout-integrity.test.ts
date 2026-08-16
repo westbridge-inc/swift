@@ -188,6 +188,31 @@ describe('checkout money math', () => {
     expect(await app.prisma.order.count({ where: { customerId: c.userId } })).toBe(0);
   });
 
+  it('an item REMOVED between pricing and commit is refused — the parent timestamp did not move [REPORT-016 F-016-01]', async () => {
+    const c = await makeCustomer();
+    // Two lines: removing one leaves the other, so CartItem.delete never bumps
+    // Cart.updatedAt — the old timestamp token passed and ordered the removed
+    // item. The aggregate item-set token catches it.
+    await inject('POST', '/api/v1/customer/cart/items', { vendorId, itemId, quantity: 1 }, c.token);
+    const second = await app.prisma.item.create({ data: { vendorId, categoryId: (await app.prisma.category.findFirstOrThrow({ where: { vendorId } })).id, name: 'Second Plate', basePrice: 1500, isAvailable: true } });
+    await inject('POST', '/api/v1/customer/cart/items', { vendorId, itemId: second.id, quantity: 1 }, c.token);
+    await inject('PUT', '/api/v1/customer/cart/address', { addressId: c.addressId }, c.token);
+    const svc = new OrderService(app.prisma, app.io);
+    try {
+      await expect(svc.checkout({
+        userId: c.userId,
+        paymentMethod: 'CASH',
+        beforeTransaction: async () => {
+          const line = await app.prisma.cartItem.findFirstOrThrow({ where: { cart: { customerId: c.userId }, itemId: second.id } });
+          await app.prisma.cartItem.delete({ where: { id: line.id } });
+        },
+      })).rejects.toMatchObject({ statusCode: 409, code: 'CART_CHANGED' });
+      expect(await app.prisma.order.count({ where: { customerId: c.userId } })).toBe(0);
+    } finally {
+      await app.prisma.item.delete({ where: { id: second.id } }).catch(() => {});
+    }
+  });
+
   it('a suspension committing between preview and commit beats the order [REPORT-013 F-013-06]', async () => {
     const c = await makeCustomer();
     await inject('POST', '/api/v1/customer/cart/items', { vendorId, itemId, quantity: 1 }, c.token);

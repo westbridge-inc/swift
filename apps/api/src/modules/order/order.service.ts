@@ -896,17 +896,28 @@ export class OrderService {
       // now-deleted cart) instead of leaning on the delete's P2025 by accident.
       await tx.$queryRaw`SELECT id FROM "carts" WHERE id = ${cart.id} FOR UPDATE`;
 
-      // [REPORT-013 F-013-01] Bind the priced snapshot to the LOCKED cart
-      // generation. Pricing, the ID gate, and promo math all ran on a
-      // pre-transaction read; any cart mutation that committed since (the
-      // mobile fire-and-forget tip PUT was the proven interleaving) makes
-      // that math a lie about a different basket. Refuse and let the client
-      // retry against truth — never charge from a stale snapshot.
+      // [REPORT-013 F-013-01 / REPORT-016 F-016-01] Bind the priced snapshot
+      // to the LOCKED cart AGGREGATE, not the parent timestamp. Pricing, the
+      // ID gate, and promo math all ran on a pre-transaction read; any cart
+      // mutation that committed since makes that math a lie about a different
+      // basket. `Cart.updatedAt` was an INCOMPLETE token — deleting a
+      // CartItem while others remain never touches the parent row, so a
+      // removed item could still be ordered. The authoritative generation is
+      // the item set (id + quantity) plus the tip; re-read it under the lock
+      // and refuse on any drift.
+      const cartSignature = (
+        items: Array<{ id: string; quantity: number }>,
+        tipAmount: Prisma.Decimal | number,
+      ) =>
+        JSON.stringify({
+          items: items.map((i) => [i.id, i.quantity]).sort((a, b) => (a[0]! < b[0]! ? -1 : 1)),
+          tip: Number(tipAmount),
+        });
       const lockedCart = await tx.cart.findUnique({
         where: { id: cart.id },
-        select: { updatedAt: true },
+        select: { tipAmount: true, items: { select: { id: true, quantity: true } } },
       });
-      if (!lockedCart || lockedCart.updatedAt.getTime() !== cart.updatedAt.getTime()) {
+      if (!lockedCart || cartSignature(lockedCart.items, lockedCart.tipAmount) !== cartSignature(cart.items, cart.tipAmount)) {
         throw new AppError(409, 'CART_CHANGED', 'Your cart just changed — review it and place the order again.');
       }
 
