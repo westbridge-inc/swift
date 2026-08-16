@@ -1,4 +1,4 @@
-import type { PrismaClient, RideClass, OrderStatus } from '@prisma/client';
+import type { PrismaClient, RideClass, OrderStatus, VehicleType } from '@prisma/client';
 import { Prisma } from '@prisma/client';
 import type { Server } from 'socket.io';
 import type Redis from 'ioredis';
@@ -14,7 +14,7 @@ import { customerTrustSummaries } from '../cash/cash-rules.service';
 import { estimateLoad } from '../../utils/load';
 import { HANDOVER_SECRETS_OMIT } from '../handover/handover-security';
 import { notSelfDeliveredFilter } from '../fulfillment/fulfillment-mode';
-import { vehicleTypesForPackageSize } from '../../config/vehicle-classes';
+import { vehicleTypesForPackageSize, VEHICLE_CLASSES } from '../../config/vehicle-classes';
 import { log } from '../../utils/logger';
 import { dispatchSearchesCounter, dispatchTimeToAssign } from '../../plugins/observability';
 import { getTenantId } from '../../plugins/tenant-context';
@@ -921,15 +921,15 @@ export class DispatchService {
       // accept and a revocation have one legal database order rather than a
       // mover becoming assigned after authority was removed.
       const authority = pool === 'DRIVER'
-        ? await tx.$queryRaw<Array<{ userId: string; activeRole: string; status: string; vehicleCapacity?: number }>>`
+        ? await tx.$queryRaw<Array<{ userId: string; activeRole: string; status: string; vehicleType?: string }>>`
             SELECT u."id" AS "userId", u."activeRole"::text AS "activeRole", u."status"::text AS "status",
-                   d."vehicleCapacity" AS "vehicleCapacity"
+                   d."vehicleType"::text AS "vehicleType"
             FROM "users" u
             JOIN "drivers" d ON d."userId" = u."id"
             WHERE d."id" = ${moverId}
             FOR UPDATE OF u
           `
-        : await tx.$queryRaw<Array<{ userId: string; activeRole: string; status: string; vehicleCapacity?: number }>>`
+        : await tx.$queryRaw<Array<{ userId: string; activeRole: string; status: string; vehicleType?: string }>>`
             SELECT u."id" AS "userId", u."activeRole"::text AS "activeRole", u."status"::text AS "status"
             FROM "users" u
             JOIN "riders" r ON r."userId" = u."id"
@@ -978,10 +978,17 @@ export class DispatchService {
       // discovery/board filters are conveniences — a 14-passenger GROUP ride
       // must never commit to a 9-seat bus (or a default 4-seat profile that
       // self-tagged GROUP). Locked driver seats vs the locked order's count.
-      if (pool === 'DRIVER' && lockedOrder.taxiPassengerCount != null
-          && (moverAuthority.vehicleCapacity ?? 0) < lockedOrder.taxiPassengerCount) {
-        throw new AppError(409, 'CAPACITY_EXCEEDED',
-          `This ride needs ${lockedOrder.taxiPassengerCount} seats; your vehicle seats ${moverAuthority.vehicleCapacity ?? 0}.`);
+      // [REPORT-016 F-016-03] Physical seats come from the vehicle TAXONOMY
+      // keyed on the immutable vehicleType, never the mutable vehicleCapacity
+      // column — a historically self-forged/stale column can't buy a seat at
+      // the money-moving claim. (The column is separately healed + set from
+      // taxonomy at provisioning; this makes it non-authoritative here.)
+      if (pool === 'DRIVER' && lockedOrder.taxiPassengerCount != null) {
+        const seats = VEHICLE_CLASSES[moverAuthority.vehicleType as VehicleType]?.seats ?? 0;
+        if (seats < lockedOrder.taxiPassengerCount) {
+          throw new AppError(409, 'CAPACITY_EXCEEDED',
+            `This ride needs ${lockedOrder.taxiPassengerCount} seats; your vehicle seats ${seats}.`);
+        }
       }
       // [SPS-F-0016 / REPORT-004 F-004-01] Offer-card claims are the third
       // assignment writer beside the canonical seam and the board grab — the

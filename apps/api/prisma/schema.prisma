@@ -1220,6 +1220,12 @@ model Order {
   courierSpeed              String?
   courierPayer              String?
   courierProofPhotoUrl      String?
+  // [REPORT-016 F-016-04] The proof object the SERVER issued for this order at
+  // /proof-photo, bound to the uploading rider. /proof requires an EXACT match
+  // (not a substring) so a crafted or foreign URL can never terminalize a
+  // delivery. Cleared implicitly once the order reaches DELIVERED.
+  courierProofIssuedUrl     String?
+  courierProofIssuedRiderId String?
   courierTrackingToken      String?      @unique
 
   taxiPickupAddress  String?

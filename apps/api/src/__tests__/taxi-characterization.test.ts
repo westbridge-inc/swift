@@ -306,6 +306,41 @@ describe('the current taxi contract (characterization — must stay green all en
     expect(accept15.statusCode).toBe(200);
   });
 
+  it('a FORGED vehicleCapacity column cannot buy a seat — the taxonomy governs the locked claim [REPORT-016 F-016-03]', async () => {
+    const customer = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
+    const forger = await makeDriver();
+    // The historical forgery shape: a 4-seat CAR whose stored column claims 14
+    // seats and GROUP class (the old self-service writer allowed this).
+    await app.prisma.driver.update({
+      where: { id: forger.driverId },
+      data: { vehicleType: 'CAR', rideClass: 'GROUP', vehicleCapacity: 14 },
+    });
+    const res = await app.inject({
+      method: 'POST', url: '/api/v1/rides/request',
+      headers: { authorization: `Bearer ${customer.token}`, 'content-type': 'application/json' },
+      payload: {
+        pickup: { lat: 6.8013, lng: -58.1553 }, dropoff: { lat: 6.8143, lng: -58.1443 },
+        pickupAddress: 'Stabroek Market', dropoffAddress: 'Camp Street',
+        rideClass: 'GROUP', passengerCount: 10,
+      },
+    });
+    expect(res.statusCode).toBe(201);
+    const rideId = res.json().data.id ?? res.json().data.order?.id ?? res.json().data.ride?.id;
+    // The locked claim derives seats from vehicleType=CAR (4) via the taxonomy,
+    // not the forged column — a forged offer-card accept is refused.
+    await app.redis.set(`dispatch:offer:${rideId}`, forger.driverId, 'EX', 40);
+    const offerAccept = await app.inject({
+      method: 'POST', url: '/api/v1/driver/offers/accept',
+      headers: { authorization: `Bearer ${forger.token}`, 'content-type': 'application/json' },
+      payload: { orderId: rideId },
+    });
+    expect(offerAccept.statusCode).toBe(409);
+    expect(offerAccept.json().error.code).toBe('CAPACITY_EXCEEDED');
+    const fresh = await app.prisma.order.findUniqueOrThrow({ where: { id: rideId } });
+    expect(fresh.driverId).toBeNull();
+    await app.redis.del(`dispatch:offer:${rideId}`, `dispatch:mover-offer:${forger.driverId}`, `dispatch:declined:${rideId}`);
+  });
+
   it('self-serve profile writes cannot change class or capacity [REPORT-014 F-014-01]', async () => {
     const d = await makeDriver();
     const before = await app.prisma.driver.findUniqueOrThrow({ where: { id: d.driverId } });
