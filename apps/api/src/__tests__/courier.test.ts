@@ -166,15 +166,17 @@ describe('Courier — create, track, deliver', () => {
     const rider = await app.prisma.rider.create({
       data: { userId: moverUser.userId, riderType: 'DELIVERY', vehicleType: 'MOTORCYCLE', documentsVerified: true },
     });
+    const issued = `storage://t/courier-proof/${created.orderId}/proof.jpg`;
     await app.prisma.order.update({
       where: { id: created.orderId },
-      data: { riderId: rider.id, status: 'PICKED_UP' },
+      // Simulate the /proof-photo upload that issued this URL to this rider.
+      data: { riderId: rider.id, status: 'PICKED_UP', courierProofIssuedUrl: issued, courierProofIssuedRiderId: rider.id },
     });
 
-    const res = await inject('POST', `/api/v1/courier/order/${created.orderId}/proof`, { proofPhotoUrl: `storage://t/courier-proof/${created.orderId}/proof.jpg` }, moverUser.token);
+    const res = await inject('POST', `/api/v1/courier/order/${created.orderId}/proof`, { proofPhotoUrl: issued }, moverUser.token);
     expect(res.statusCode).toBe(200);
     expect(res.json().data.status).toBe('DELIVERED');
-    expect(res.json().data.courierProofPhotoUrl).toBe(`storage://t/courier-proof/${created.orderId}/proof.jpg`);
+    expect(res.json().data.courierProofPhotoUrl).toBe(issued);
   });
 
   it('proof cannot close a parcel the rider never held, name a foreign object, or survive reassignment [REPORT-014 F-014-02]', async () => {
@@ -185,23 +187,26 @@ describe('Courier — create, track, deliver', () => {
       data: { userId: moverUser.userId, riderType: 'DELIVERY', vehicleType: 'MOTORCYCLE', documentsVerified: true },
     });
 
-    // Pre-custody: assigned but never picked up — DELIVERED is unreachable.
+    // The rider uploaded a photo (issued URL recorded), then went pre-custody.
+    const issued = `storage://t/courier-proof/${created.orderId}/proof.jpg`;
     await app.prisma.order.update({
       where: { id: created.orderId },
-      data: { riderId: rider.id, status: 'RIDER_ASSIGNED' },
+      data: { riderId: rider.id, status: 'RIDER_ASSIGNED', courierProofIssuedUrl: issued, courierProofIssuedRiderId: rider.id },
     });
+    // Pre-custody: assigned but never picked up — DELIVERED is unreachable even
+    // WITH a genuine issued photo. Custody is the gate.
     const preCustody = await inject('POST', `/api/v1/courier/order/${created.orderId}/proof`,
-      { proofPhotoUrl: `storage://t/courier-proof/${created.orderId}/x.jpg` }, moverUser.token);
+      { proofPhotoUrl: issued }, moverUser.token);
     expect(preCustody.statusCode).toBe(409);
     expect(preCustody.json().error.code).toBe('PARCEL_NOT_IN_CUSTODY');
 
-    // Foreign object: any string/other order's photo is refused before the
-    // transition — only this order's server-issued path counts.
+    // Foreign object: a URL the server never ISSUED — even one embedding the
+    // folder name — is refused (exact-match, not substring).
     await app.prisma.order.update({ where: { id: created.orderId }, data: { status: 'PICKED_UP' } });
     const foreign = await inject('POST', `/api/v1/courier/order/${created.orderId}/proof`,
-      { proofPhotoUrl: 'storage://t/somewhere/else.jpg' }, moverUser.token);
+      { proofPhotoUrl: `https://evil.invalid/x?u=courier-proof/${created.orderId}/fake.jpg` }, moverUser.token);
     expect(foreign.statusCode).toBe(400);
-    expect(foreign.json().error.code).toBe('PROOF_NOT_FOR_ORDER');
+    expect(foreign.json().error.code).toBe('PROOF_NOT_ISSUED');
 
     // The LOCKED actor bind: a release/reassignment that lands after the
     // route's ownership pre-read loses at the row lock, not after payout.
@@ -218,9 +223,9 @@ describe('Courier — create, track, deliver', () => {
     const fresh = await app.prisma.order.findUniqueOrThrow({ where: { id: created.orderId } });
     expect(fresh.status).toBe('PICKED_UP'); // untouched — no fabricated terminal
 
-    // The real holder still closes it fine.
+    // The real holder still closes it fine with the ISSUED url.
     const ok = await inject('POST', `/api/v1/courier/order/${created.orderId}/proof`,
-      { proofPhotoUrl: `storage://t/courier-proof/${created.orderId}/real.jpg` }, moverUser.token);
+      { proofPhotoUrl: issued }, moverUser.token);
     expect(ok.statusCode).toBe(200);
     expect(ok.json().data.status).toBe('DELIVERED');
   });
@@ -237,9 +242,10 @@ describe('Courier — create, track, deliver', () => {
       data: { isAvailable: false, currentOrderId: created.orderId },
       select: { totalDeliveries: true },
     });
+    const atomicIssued = `storage://t/courier-proof/${created.orderId}/atomic-proof.jpg`;
     await app.prisma.order.update({
       where: { id: created.orderId },
-      data: { riderId: rider.id, status: 'PICKED_UP' },
+      data: { riderId: rider.id, status: 'PICKED_UP', courierProofIssuedUrl: atomicIssued, courierProofIssuedRiderId: rider.id },
     });
 
     const originalStage = OrderService.prototype.stageCanonicalOrderTransition;
@@ -250,7 +256,7 @@ describe('Courier — create, track, deliver', () => {
         throw new Error('forced courier-proof pre-commit abort');
       });
     try {
-      const failed = await inject('POST', `/api/v1/courier/order/${created.orderId}/proof`, { proofPhotoUrl: `storage://t/courier-proof/${created.orderId}/atomic-proof.jpg` }, moverUser.token);
+      const failed = await inject('POST', `/api/v1/courier/order/${created.orderId}/proof`, { proofPhotoUrl: atomicIssued }, moverUser.token);
       expect(failed.statusCode).toBe(500);
     } finally {
       stageSpy.mockRestore();
@@ -268,7 +274,7 @@ describe('Courier — create, track, deliver', () => {
     expect(failedEarnings).toBe(0);
     expect(failedLogs).toBe(0);
 
-    const retry = await inject('POST', `/api/v1/courier/order/${created.orderId}/proof`, { proofPhotoUrl: `storage://t/courier-proof/${created.orderId}/atomic-proof.jpg` }, moverUser.token);
+    const retry = await inject('POST', `/api/v1/courier/order/${created.orderId}/proof`, { proofPhotoUrl: atomicIssued }, moverUser.token);
     expect(retry.statusCode).toBe(200);
     const duplicate = await inject('POST', `/api/v1/courier/order/${created.orderId}/proof`, { proofPhotoUrl: `storage://t/courier-proof/${created.orderId}/again.jpg` }, moverUser.token);
     expect(duplicate.statusCode).toBe(400);
@@ -396,12 +402,13 @@ describe('Courier — create, track, deliver', () => {
     const created = (await inject('POST', '/api/v1/courier/order', ORDER_BODY, sender.token)).json().data;
     const moverUser = await makeUserWithSession(['MOVER', 'CUSTOMER'], 'MOVER');
     const rider = await app.prisma.rider.create({ data: { userId: moverUser.userId, riderType: 'DELIVERY', vehicleType: 'MOTORCYCLE', documentsVerified: true } });
-    await app.prisma.order.update({ where: { id: created.orderId }, data: { riderId: rider.id, status: 'PICKED_UP' } });
+    const raceIssued = `storage://t/courier-proof/${created.orderId}/p.jpg`;
+    await app.prisma.order.update({ where: { id: created.orderId }, data: { riderId: rider.id, status: 'PICKED_UP', courierProofIssuedUrl: raceIssued, courierProofIssuedRiderId: rider.id } });
 
     // Sender cancels while the rider submits proof — same instant.
     const [a, b] = await Promise.allSettled([
       inject('POST', `/api/v1/courier/order/${created.orderId}/cancel`, { reason: 'race' }, sender.token),
-      inject('POST', `/api/v1/courier/order/${created.orderId}/proof`, { proofPhotoUrl: `storage://t/courier-proof/${created.orderId}/p.jpg` }, moverUser.token),
+      inject('POST', `/api/v1/courier/order/${created.orderId}/proof`, { proofPhotoUrl: raceIssued }, moverUser.token),
     ]);
     const codes = [a, b].map((r) => (r.status === 'fulfilled' ? r.value.statusCode : 0));
     expect(codes.filter((c) => c === 200)).toHaveLength(1); // exactly one terminal transition wins

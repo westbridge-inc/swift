@@ -240,13 +240,18 @@ describe('courier terminal effects', () => {
   it('proof-of-delivery pays the COURIER_FEE, frees the rider, notifies the sender', async () => {
     const customer = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
     const rider = await makeRider();
+    const proofIssued = `https://x/courier-proof/x/proof.jpg`;
     const job = await makeOrder(customer.userId, null, 'PICKED_UP', { orderType: 'COURIER', riderId: rider.riderId });
+    await app.prisma.order.update({
+      where: { id: job.id },
+      data: { courierProofIssuedUrl: proofIssued, courierProofIssuedRiderId: rider.riderId },
+    });
     await app.prisma.rider.update({
       where: { id: rider.riderId },
       data: { isAvailable: false, currentOrderId: job.id },
     });
 
-    const res = await inject('POST', `/api/v1/courier/order/${job.id}/proof`, { proofPhotoUrl: `https://x/courier-proof/${job.id}/proof.jpg` }, rider.token);
+    const res = await inject('POST', `/api/v1/courier/order/${job.id}/proof`, { proofPhotoUrl: proofIssued }, rider.token);
     expect(res.statusCode).toBe(200);
     expect(res.json().data.status).toBe('DELIVERED');
 

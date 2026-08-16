@@ -344,6 +344,14 @@ export default async function courierRoutes(app: FastifyInstance) {
     }
 
     const { url } = await storage.upload({ buffer, filename: file.filename, mimeType: file.mimetype, folder: `courier-proof/${id}` });
+    // [REPORT-016 F-016-04] Record the SERVER-issued URL + the rider it was
+    // issued to. /proof exact-matches this, so proof is proof of an actual
+    // upload by this rider — not any string that contains the folder name.
+    // Guarded on rider ownership + non-terminal status (matches the read above).
+    await app.prisma.order.updateMany({
+      where: { id, orderType: 'COURIER', riderId: rider.id, status: { notIn: ['DELIVERED', 'COMPLETED', 'CANCELLED'] } },
+      data: { courierProofIssuedUrl: url, courierProofIssuedRiderId: rider.id },
+    });
     return { success: true, data: { url } };
   });
 
@@ -358,12 +366,16 @@ export default async function courierRoutes(app: FastifyInstance) {
     if (['DELIVERED', 'COMPLETED', 'CANCELLED'].includes(order.status)) {
       throw new AppError(400, 'NOT_IN_TRANSIT', 'This courier job is already closed');
     }
-    // [REPORT-014 F-014-02] The proof object must be the one the server
-    // issued FOR THIS ORDER: /proof-photo stores under courier-proof/<id>/,
-    // so an arbitrary string, another order's photo, or a guessed path can
-    // never terminalize a parcel.
-    if (!body.proofPhotoUrl.includes(`courier-proof/${id}/`)) {
-      throw new AppError(400, 'PROOF_NOT_FOR_ORDER',
+    // [REPORT-016 F-016-04] The proof object must EXACTLY equal the URL the
+    // server issued for this order to THIS rider at /proof-photo — not a
+    // substring that merely contains the folder name. A crafted/foreign URL
+    // (even one embedding `courier-proof/<id>/` in a query param) is refused
+    // because it was never issued. Legacy in-flight orders with no issued
+    // record must (re-)upload through /proof-photo first.
+    if (!order.courierProofIssuedUrl
+        || order.courierProofIssuedRiderId !== rider.id
+        || body.proofPhotoUrl !== order.courierProofIssuedUrl) {
+      throw new AppError(400, 'PROOF_NOT_ISSUED',
         'Attach the delivery photo through the photo step for this delivery first.');
     }
     // Proof metadata, DELIVERED, rider release/count, float, earnings, and the
