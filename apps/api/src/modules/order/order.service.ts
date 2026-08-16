@@ -48,6 +48,11 @@ interface CheckoutInput {
    *  suspension, an item going dark) can be driven deterministically into the
    *  exact window the in-transaction barriers close. Never set in routes. */
   beforeTransaction?: () => Promise<void>;
+  /** Test seam [REPORT-017B F-016-01]: runs INSIDE the checkout transaction,
+   *  right after the cart + cart-item rows are FOR UPDATE-locked, so an
+   *  interleaving proof can attempt a concurrent child mutation and observe it
+   *  block against the held lock. Never set in routes. */
+  afterCartLock?: () => Promise<void>;
 }
 
 function requireCheckoutMmgPayUrl(rawUrl: string | null | undefined, vendorName: string): string {
@@ -895,6 +900,17 @@ export class OrderService {
       // double-submit deterministic (the loser waits, then rolls back on the
       // now-deleted cart) instead of leaning on the delete's P2025 by accident.
       await tx.$queryRaw`SELECT id FROM "carts" WHERE id = ${cart.id} FOR UPDATE`;
+      // [REPORT-017B F-016-01] Lock the CHILD rows too. The parent-cart lock
+      // alone did not serialize a `cartItem.delete`/quantity update — those
+      // never touch the parent row — so a delete could commit AFTER the
+      // signature check below and BEFORE order creation, ordering a removed
+      // item. FOR UPDATE on every current child makes any concurrent
+      // delete/update of them block until this checkout commits (by which
+      // point the cart+items are gone), while the signature read below sees a
+      // stable set. A concurrent ADD (a NEW row) is not money-dangerous — an
+      // item not in the priced snapshot is simply never charged.
+      await tx.$queryRaw`SELECT id FROM "cart_items" WHERE "cartId" = ${cart.id} FOR UPDATE`;
+      if (input.afterCartLock) await input.afterCartLock();
 
       // [REPORT-013 F-013-01 / REPORT-016 F-016-01] Bind the priced snapshot
       // to the LOCKED cart AGGREGATE, not the parent timestamp. Pricing, the

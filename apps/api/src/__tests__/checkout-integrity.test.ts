@@ -213,6 +213,44 @@ describe('checkout money math', () => {
     }
   });
 
+  it('a delete racing AFTER the signature check is BLOCKED by the child-row lock — the removed item can never be ordered [REPORT-017B F-016-01]', async () => {
+    const c = await makeCustomer();
+    await inject('POST', '/api/v1/customer/cart/items', { vendorId, itemId, quantity: 1 }, c.token);
+    const second = await app.prisma.item.create({ data: { vendorId, categoryId: (await app.prisma.category.findFirstOrThrow({ where: { vendorId } })).id, name: 'Race Plate', basePrice: 1500, isAvailable: true } });
+    await inject('POST', '/api/v1/customer/cart/items', { vendorId, itemId: second.id, quantity: 1 }, c.token);
+    await inject('PUT', '/api/v1/customer/cart/address', { addressId: c.addressId }, c.token);
+    const svc = new OrderService(app.prisma, app.io);
+    let deleteBlocked = false;
+    try {
+      const res = await svc.checkout({
+        userId: c.userId,
+        paymentMethod: 'CASH',
+        // Fires INSIDE the checkout tx, after the child rows are FOR UPDATE-held.
+        // A concurrent delete on a SEPARATE connection with a short lock_timeout
+        // must fail to acquire the row lock — proving it cannot slip in after
+        // the signature check. (The v11/F-016-01 test proves the BEFORE-check
+        // delete → CART_CHANGED; this proves the AFTER-check window is shut.)
+        afterCartLock: async () => {
+          const line = await app.prisma.cartItem.findFirstOrThrow({ where: { cart: { customerId: c.userId }, itemId: second.id } });
+          try {
+            await app.prisma.$transaction(async (t2) => {
+              await t2.$executeRawUnsafe(`SET LOCAL lock_timeout = '600ms'`);
+              await t2.$executeRaw`DELETE FROM "cart_items" WHERE id = ${line.id}`;
+            });
+          } catch {
+            deleteBlocked = true; // lock timeout (55P03) — the delete could not proceed
+          }
+        },
+      });
+      // Checkout committed with BOTH items; the racing delete never landed.
+      expect(res.orders[0]!.subtotal).toBe(3500); // 2000 + 1500, both items
+      expect(deleteBlocked).toBe(true);
+    } finally {
+      await app.prisma.order.deleteMany({ where: { customerId: c.userId } }).catch(() => {});
+      await app.prisma.item.delete({ where: { id: second.id } }).catch(() => {});
+    }
+  });
+
   it('a suspension committing between preview and commit beats the order [REPORT-013 F-013-06]', async () => {
     const c = await makeCustomer();
     await inject('POST', '/api/v1/customer/cart/items', { vendorId, itemId, quantity: 1 }, c.token);
