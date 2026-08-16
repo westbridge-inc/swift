@@ -25,30 +25,43 @@ let sentryReady = false;
 const TOKENISH_PARAM = /\b(token|secret|key|authorization|otp|pin|code|sig|signature)=[^&\s]+/gi;
 const TOKENISH_PATH = /\/(track|public\/trip|render)\/[A-Za-z0-9_.-]+/g;
 function scrubSentryText(value: string): string {
-  return value.replace(TOKENISH_PARAM, '$1=[scrubbed]').replace(TOKENISH_PATH, '/$1/[scrubbed]');
+  let out = value.replace(TOKENISH_PARAM, '$1=[scrubbed]').replace(TOKENISH_PATH, '/$1/[scrubbed]');
+  // [REPORT-016 F-016-02] Any URL's query string can carry arbitrary user
+  // input (a raw search term, an address) that the named-param rule above
+  // won't catch — and the Sentry SDK's default RequestData integration
+  // repopulates request.url. Drop every query string wholesale.
+  out = out.replace(/(https?:\/\/[^\s"'<>]*?|\/[^\s"'<>?]*)\?[^\s"'<>]*/g, '$1?[scrubbed]');
+  return out;
+}
+// [REPORT-016 F-016-02] Deep-walk the WHOLE event: the old scrubber only
+// touched request.url, top-level extras, and breadcrumb message/url — it left
+// `message`, `exception.values[].value`, nested extras, and other breadcrumb
+// data unscrubbed. Every string in the event (bounded depth, cycle-guarded)
+// now passes the scrubber.
+function scrubDeep(node: unknown, depth: number, seen: WeakSet<object>): unknown {
+  if (typeof node === 'string') return scrubSentryText(node);
+  if (node === null || typeof node !== 'object' || depth <= 0) return node;
+  if (seen.has(node as object)) return node;
+  seen.add(node as object);
+  if (Array.isArray(node)) {
+    for (let i = 0; i < node.length; i += 1) node[i] = scrubDeep(node[i], depth - 1, seen);
+    return node;
+  }
+  const rec = node as Record<string, unknown>;
+  for (const key of Object.keys(rec)) rec[key] = scrubDeep(rec[key], depth - 1, seen);
+  return rec;
 }
 export function scrubSentryEvent<T extends {
   request?: { url?: string; query_string?: unknown; headers?: unknown; cookies?: unknown; data?: unknown };
-  extra?: Record<string, unknown>;
-  breadcrumbs?: Array<{ message?: string; data?: Record<string, unknown> }>;
 }>(event: T): T {
   if (event.request) {
-    if (event.request.url) event.request.url = scrubSentryText(event.request.url);
+    // Structural drops first — these fields are pure identifier surface.
     delete event.request.query_string;
     delete event.request.headers;
     delete event.request.cookies;
     delete event.request.data;
   }
-  if (event.extra) {
-    for (const [key, value] of Object.entries(event.extra)) {
-      if (typeof value === 'string') event.extra[key] = scrubSentryText(value);
-    }
-  }
-  for (const crumb of event.breadcrumbs ?? []) {
-    if (typeof crumb.message === 'string') crumb.message = scrubSentryText(crumb.message);
-    if (crumb.data && typeof crumb.data['url'] === 'string') crumb.data['url'] = scrubSentryText(crumb.data['url'] as string);
-  }
-  return event;
+  return scrubDeep(event, 8, new WeakSet()) as T;
 }
 
 export function initSentry() {

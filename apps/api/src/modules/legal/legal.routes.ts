@@ -9,8 +9,8 @@ import type { FastifyInstance } from 'fastify';
 /** Machine version of the served legal pack — stamped onto User.tosVersion at
  *  signup consent [SWIFT-AUD-D9-03]. Bump BOTH constants together whenever the
  *  Terms/Privacy content changes. */
-export const LEGAL_VERSION = '2026-08-15.2'; // [REPORT-013 F-013-04] Privacy corrected to code-truth: KYC provider named, Sentry route-template scope, AI filter described without overclaims
-const LAST_UPDATED = '15 August 2026'; // human form of LEGAL_VERSION
+export const LEGAL_VERSION = '2026-08-16'; // [REPORT-016 F-016-02] Sentry disclosure matched to the deep recursive scrubber (route templates, dropped query/headers/cookies/body, whole-event token/link reduction)
+const LAST_UPDATED = '16 August 2026'; // human form of LEGAL_VERSION
 
 function page(title: string, body: string): string {
   return `<!doctype html>
@@ -97,7 +97,7 @@ const PRIVACY = page(
 
 <h2>4. Sharing</h2>
 <p>A business sees what it needs to fulfil your order (items, first name, delivery address). A mover sees pickup/drop-off details and your first name. Movers and customers see each other's ratings. We share data with authorities only where the law requires it.</p>
-<p><b>Technical service providers:</b> to run Swift we use a small number of providers, each receiving only what its function needs: Twilio (delivers your SMS verification codes — your phone number), Expo (delivers push notifications — a device token), an identity-verification provider — Didit or ID Analyzer — (receives the verification document and matching selfie to perform the identity check), Sentry (crash and error reports; the request context we attach is limited to route templates and passes an automated filter that removes tokens and signed links), encrypted cloud object storage (verification documents and images), and Google Maps (addresses and coordinates for map display and travel estimates).</p>
+<p><b>Technical service providers:</b> to run Swift we use a small number of providers, each receiving only what its function needs: Twilio (delivers your SMS verification codes — your phone number), Expo (delivers push notifications — a device token), an identity-verification provider — Didit or ID Analyzer — (receives the verification document and matching selfie to perform the identity check), Sentry (crash and error reports; we attach route templates rather than full URLs, drop request query strings, headers, cookies and bodies, and run an automated filter that reduces tokens and signed links across the report — a report is diagnostic context, not your account records), encrypted cloud object storage (verification documents and images), and Google Maps (addresses and coordinates for map display and travel estimates).</p>
 <p><b>AI processing:</b> some features — such as understanding a search query or tidying a store's menu text — use Anthropic's Claude API. Before any text is sent it passes an automated filter that removes phone numbers, email addresses, card-like numbers, tokens, document references and common address forms. Swift never sends your verification documents or account records to AI services, and these API inputs are not used to train AI models. Free text you type could still contain personal details the filter cannot recognise — avoid putting personal information in search terms or menu text.</p>
 
 <h2>5. Retention and deletion</h2>
