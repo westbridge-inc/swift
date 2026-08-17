@@ -526,7 +526,7 @@ describe('vendor retry-dispatch', () => {
 
     // The retry cleared the decline memory and offered this rider again.
     const offered = await app.redis.get(`dispatch:offer:${order.id}`);
-    expect(offered).toBe(rider.riderId);
+    expect(offered!.split(':')[0]).toBe(rider.riderId); // value is `<mover>:<attemptId>` [F-014-04]
     await app.redis.del(`dispatch:offer:${order.id}`, `dispatch:declined:${order.id}`, `dispatch:round:${order.id}`);
   });
 
@@ -576,11 +576,16 @@ describe('dispatch exhaustion auto-retry', () => {
     });
     expect(retrying).not.toBeNull();
 
+    // Each re-sweep fires >=45s later in production; the [F-014-06]
+    // single-flight lock (10s) dedups only a concurrent burst. Model the
+    // elapsed delay explicitly so this compressed-time test stays honest.
+    await app.redis.del(`dispatch:exhaust-lock:${order.id}`);
     const second = await dispatch.dispatchOrder(order.id);
     expect(second.exhausted).toBe(true);
     expect(redispatches).toHaveLength(2);
 
     // The 3rd exhaustion is TERMINAL — no further cascade, final notices sent.
+    await app.redis.del(`dispatch:exhaust-lock:${order.id}`);
     const third = await dispatch.dispatchOrder(order.id);
     expect(third.exhausted).toBe(true);
     expect(redispatches).toHaveLength(2); // capped — never an unbounded loop
