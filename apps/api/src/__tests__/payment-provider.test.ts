@@ -23,11 +23,25 @@ describe('getPaymentProvider', () => {
     delete process.env['PAYMENT_PROVIDER'];
     delete process.env['PAYMENT_GATEWAY_KEY'];
     delete process.env['PAYMENT_GATEWAY_SECRET'];
+    delete process.env['POWERTRANZ_API_URL'];
+    delete process.env['STRIPE_SECRET_KEY'];
     vi.unstubAllGlobals();
   });
 
   it('defaults to sandbox', () => {
     expect(getPaymentProvider()).toBeInstanceOf(SandboxPaymentProvider);
+  });
+
+  it('never permits the sandbox factory in production', () => {
+    const previous = process.env['NODE_ENV'];
+    process.env['NODE_ENV'] = 'production';
+    try {
+      delete process.env['PAYMENT_PROVIDER'];
+      expect(() => getPaymentProvider()).toThrow(/sandbox.*forbidden/i);
+    } finally {
+      if (previous === undefined) delete process.env['NODE_ENV'];
+      else process.env['NODE_ENV'] = previous;
+    }
   });
 
   it('throws on an unknown provider', () => {

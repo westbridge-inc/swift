@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { nanoid } from 'nanoid';
 import type { UserRole } from '@prisma/client';
@@ -8,7 +8,10 @@ import { authPlugin } from '../plugins/auth';
 import { socketPlugin } from '../plugins/socket';
 import { safetyRoutes } from '../modules/safety/safety.routes';
 import { registerErrorHandler } from '../middleware/error-handler';
-import { IncidentService, assertNotSafetySuspended } from '../modules/safety/incident.service';
+import {
+  IncidentService,
+  assertNotSafetySuspended,
+} from '../modules/safety/incident.service';
 
 // Incident Management M6a (safety spec §8) — the case machine. Severity is
 // auto-suggested from category, SLA clocks stamp at intake, S0/S1 auto-apply
@@ -39,7 +42,7 @@ async function makeUser(roles: UserRole[], extra: Record<string, unknown> = {}) 
   });
   userIds.push(user.id);
   const token = app.jwt.sign({ userId: user.id, role: roles[0]!, jti: nanoid(8) });
-  await app.prisma.session.create({ data: { userId: user.id, token, refreshToken: nanoid(48), deviceId: 'inc', deviceType: 'test', expiresAt: new Date(Date.now() + 86_400_000) } });
+  await app.prisma.session.create({ data: { authMethod: 'OTP', userId: user.id, token, refreshToken: nanoid(48), ...(roles.some((role) => role === 'ADMIN' || role === 'SUPER_ADMIN') && { authMethod: 'OTP' as const }), deviceId: 'inc', deviceType: 'test', expiresAt: new Date(Date.now() + 86_400_000) } });
   return { userId: user.id, token };
 }
 
@@ -76,6 +79,29 @@ async function makeRide(driverId: string, customerId: string, status: string, cr
 const svc = () => new IncidentService(app.prisma, app.io);
 const track = <T extends { id: string }>(k: T): T => { caseIds.push(k.id); return k };
 
+/** [REPORT-007] Queue membership must not be conflated with "on the default
+ *  first page": severity-first ordering legitimately ranks this suite's S2/S3
+ *  fixtures below older S0/S1 rows retained in the shared test DB. Scan pages
+ *  until the row is found or the queue ends. */
+async function findQueuedIncident<T>(
+  token: string,
+  status: 'open' | 'breached',
+  matches: (row: T) => boolean,
+): Promise<T | undefined> {
+  const limit = 50;
+  for (let page = 1; ; page += 1) {
+    const response = await app.inject({
+      method: 'GET',
+      url: `/api/v1/safety/incidents?status=${status}&page=${page}&limit=${limit}`,
+      headers: { authorization: `Bearer ${token}` },
+    });
+    expect(response.statusCode).toBe(200);
+    const rows = response.json().data as T[];
+    const found = rows.find(matches);
+    if (found || rows.length < limit) return found;
+  }
+}
+
 beforeAll(async () => {
   process.env['NODE_ENV'] = 'development';
   process.env['DATABASE_URL'] = process.env['DATABASE_URL'] || 'postgresql://swift:swift@localhost:5434/swift_test';
@@ -98,6 +124,31 @@ afterAll(async () => {
   await app.prisma.customer.deleteMany({ where: { userId: { in: userIds } } });
   await app.prisma.user.deleteMany({ where: { id: { in: userIds } } });
   await app.close();
+});
+
+describe('canonical request role authority', () => {
+  it('records SOS under the live activeRole instead of the stale JWT claim', async () => {
+    const actor = await makeUser(['SUPER_ADMIN', 'CUSTOMER']);
+    await app.prisma.user.update({
+      where: { id: actor.userId },
+      data: { activeRole: 'CUSTOMER' },
+    });
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/api/v1/safety/sos',
+      payload: { clientIdempotencyKey: `role-authority-${nanoid(12)}` },
+      headers: {
+        authorization: `Bearer ${actor.token}`,
+        'content-type': 'application/json',
+      },
+    });
+    expect(response.statusCode).toBe(200);
+    const alertId = response.json().data.id as string;
+    const alert = await app.prisma.sosAlert.findUniqueOrThrow({ where: { id: alertId } });
+    expect(alert.actorRole).toBe('CUSTOMER');
+    await app.prisma.sosAlert.delete({ where: { id: alertId } });
+  });
 });
 
 describe('intake — severity, SLA clocks, §8.3 interim suspension', () => {
@@ -144,6 +195,40 @@ describe('intake — severity, SLA clocks, §8.3 interim suspension', () => {
     expect(kase.interimAction).toBe('NONE');
     expect((await app.prisma.driver.findUniqueOrThrow({ where: { id: d.driver.id } })).safetySuspendedAt).toBeNull();
   });
+
+  it('rolls back the case, dispatch lock, interim action, and due-process notice on a staged fault', async () => {
+    const d = await makeDriver();
+    const summary = `atomic-intake-fault-${nanoid(10)}`;
+    const originalStage = IncidentService.prototype.stageIncidentIntake;
+    const stage = vi.spyOn(IncidentService.prototype, 'stageIncidentIntake')
+      .mockImplementationOnce(async function (this: IncidentService, tx, input, severity, now) {
+        await originalStage.call(this, tx, input, severity, now);
+        throw new Error('deterministic failure after every intake authority write');
+      });
+    try {
+      await expect(svc().intake({
+        category: 'SAFETY_THREAT',
+        intake: 'OPS_CREATED',
+        subjectUserId: d.userId,
+        summary,
+      })).rejects.toThrow('deterministic failure');
+    } finally {
+      stage.mockRestore();
+    }
+
+    const [caseCount, driver, noticeCount] = await Promise.all([
+      app.prisma.incidentCase.count({ where: { subjectUserId: d.userId, summary } }),
+      app.prisma.driver.findUniqueOrThrow({ where: { id: d.driver.id } }),
+      app.prisma.notification.count({
+        where: { userId: d.userId, title: 'Account suspended pending review' },
+      }),
+    ]);
+    expect(caseCount).toBe(0);
+    expect(driver.safetySuspendedAt).toBeNull();
+    expect(driver.isOnline).toBe(true);
+    expect(driver.isAvailable).toBe(true);
+    expect(noticeCount).toBe(0);
+  });
 });
 
 describe('the case machine (§8.2)', () => {
@@ -167,6 +252,123 @@ describe('the case machine (§8.2)', () => {
 
     const closed = await svc().close(kase.id, ops.userId);
     expect(closed.status).toBe('CLOSED');
+  });
+
+  it('does not clear subject safety authority while another active suspension remains', async () => {
+    const ops = await makeUser(['ADMIN']);
+    const d = await makeDriver();
+    const first = track(await svc().intake({
+      category: 'SAFETY_THREAT',
+      intake: 'OPS_CREATED',
+      subjectUserId: d.userId,
+      summary: 'First independently reviewed threat report',
+    }));
+    const second = track(await svc().intake({
+      category: 'IDENTITY_MISMATCH',
+      intake: 'OPS_CREATED',
+      subjectUserId: d.userId,
+      summary: 'Separate identity mismatch report still under review',
+    }));
+    const third = track(await svc().intake({
+      category: 'SERVICE_QUALITY',
+      intake: 'OPS_CREATED',
+      subjectUserId: d.userId,
+      summary: 'Separate lower-severity review using a shadow restriction',
+    }));
+    await svc().shadowRestrict(third.id, ops.userId);
+    expect(first.interimAction).toBe('SUSPENDED_PENDING_REVIEW');
+    expect(second.interimAction).toBe('SUSPENDED_PENDING_REVIEW');
+
+    await svc().ack(first.id, ops.userId);
+    await svc().investigate(first.id, ops.userId);
+    const dismissed = await svc().decide(first.id, ops.userId, 'DISMISSED', 'First report cleared');
+    const [driverWhileSecondCaseRemains, secondCase, notice] = await Promise.all([
+      app.prisma.driver.findUniqueOrThrow({ where: { id: d.driver.id } }),
+      app.prisma.incidentCase.findUniqueOrThrow({ where: { id: second.id } }),
+      app.prisma.notification.findFirst({
+        where: { userId: d.userId, title: 'Safety review updated' },
+        orderBy: { createdAt: 'desc' },
+      }),
+    ]);
+    expect(dismissed.interimAction).toBe('NONE');
+    expect(secondCase.interimAction).toBe('SUSPENDED_PENDING_REVIEW');
+    expect(driverWhileSecondCaseRemains.safetySuspendedAt).not.toBeNull();
+    expect(driverWhileSecondCaseRemains.safetyShadowRestrictedAt).not.toBeNull();
+    expect(() => assertNotSafetySuspended(driverWhileSecondCaseRemains)).toThrow(/contact support/i);
+    expect(notice?.body).toContain('Another safety review remains active');
+    expect(notice?.body).not.toContain('go back online');
+
+    await svc().ack(second.id, ops.userId);
+    await svc().investigate(second.id, ops.userId);
+    await svc().decide(second.id, ops.userId, 'DISMISSED', 'Second report cleared independently');
+    const shadowOnly = await app.prisma.driver.findUniqueOrThrow({ where: { id: d.driver.id } });
+    expect(shadowOnly.safetySuspendedAt).toBeNull();
+    expect(shadowOnly.safetyShadowRestrictedAt).not.toBeNull();
+    await svc().liftInterim(third.id, ops.userId);
+    expect((await app.prisma.driver.findUniqueOrThrow({ where: { id: d.driver.id } })).safetyShadowRestrictedAt).toBeNull();
+  });
+
+  it('serializes a lift behind concurrent generic S0/S1 intake for the same subject', async () => {
+    const ops = await makeUser(['ADMIN']);
+    const d = await makeDriver();
+    const first = track(await svc().intake({
+      category: 'SAFETY_THREAT',
+      intake: 'OPS_CREATED',
+      subjectUserId: d.userId,
+      summary: 'Existing case selected for dismissal',
+    }));
+    await svc().ack(first.id, ops.userId);
+    await svc().investigate(first.id, ops.userId);
+    let intakeStaged!: () => void;
+    let releaseIntake!: () => void;
+    const atIntakeStage = new Promise<void>((resolve) => { intakeStaged = resolve; });
+    const holdIntakeCommit = new Promise<void>((resolve) => { releaseIntake = resolve; });
+    const originalStage = IncidentService.prototype.stageIncidentIntake;
+    const stage = vi.spyOn(IncidentService.prototype, 'stageIncidentIntake')
+      .mockImplementationOnce(async function (this: IncidentService, tx, input, severity, now) {
+        const staged = await originalStage.call(this, tx, input, severity, now);
+        intakeStaged();
+        await holdIntakeCommit;
+        return staged;
+      });
+    let second!: Awaited<ReturnType<IncidentService['intake']>>;
+    let lifted!: Awaited<ReturnType<IncidentService['decide']>>;
+    try {
+      const intakePending = svc().intake({
+        category: 'IDENTITY_MISMATCH',
+        intake: 'OPS_CREATED',
+        subjectUserId: d.userId,
+        summary: 'Concurrent independent high-severity review',
+      });
+      await atIntakeStage;
+
+      let liftSettled = false;
+      const liftPending = svc().decide(first.id, ops.userId, 'DISMISSED', 'Existing report cleared')
+        .finally(() => { liftSettled = true; });
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      expect(liftSettled).toBe(false);
+      releaseIntake();
+      [second, lifted] = await Promise.all([intakePending, liftPending]);
+      track(second);
+    } finally {
+      releaseIntake();
+      stage.mockRestore();
+    }
+
+    expect(lifted.interimAction).toBe('NONE');
+    expect(second.interimAction).toBe('SUSPENDED_PENDING_REVIEW');
+    const [driver, persistedSecond] = await Promise.all([
+      app.prisma.driver.findUniqueOrThrow({ where: { id: d.driver.id } }),
+      app.prisma.incidentCase.findUniqueOrThrow({ where: { id: second.id } }),
+    ]);
+    expect(driver.safetySuspendedAt).not.toBeNull();
+    expect(persistedSecond.interimAction).toBe('SUSPENDED_PENDING_REVIEW');
+    expect(await app.prisma.notification.count({
+      where: {
+        userId: d.userId,
+        data: { path: ['caseId'], equals: second.id },
+      },
+    })).toBe(1);
   });
 
   it('escalate-police is a parallel flag: any live status, sets legalHold, idempotent', async () => {
@@ -327,9 +529,9 @@ describe('report + ops routes', () => {
     });
     expect(nosy.statusCode).toBe(404);
 
-    const queue = await app.inject({ method: 'GET', url: '/api/v1/safety/incidents?status=open', headers: { authorization: `Bearer ${admin.token}` } });
-    expect(queue.statusCode).toBe(200);
-    expect((queue.json().data as Array<{ caseNumber: string }>).find((c) => c.caseNumber === caseNumber)).toBeTruthy();
+    expect(await findQueuedIncident<{ caseNumber: string }>(
+      admin.token, 'open', (c) => c.caseNumber === caseNumber,
+    )).toBeTruthy();
     const forbidden = await app.inject({ method: 'GET', url: '/api/v1/safety/incidents', headers: { authorization: `Bearer ${passenger.token}` } });
     expect(forbidden.statusCode).toBe(403);
   });
@@ -338,11 +540,30 @@ describe('report + ops routes', () => {
     const admin = await makeUser(['ADMIN']);
     const d = await makeDriver();
     const kase = track(await svc().intake({ category: 'CASH_DISPUTE', intake: 'OPS_CREATED', subjectUserId: d.userId, summary: 'Fare dispute' }));
-    let breached = await app.inject({ method: 'GET', url: '/api/v1/safety/incidents?status=breached', headers: { authorization: `Bearer ${admin.token}` } });
-    expect((breached.json().data as Array<{ id: string }>).find((c) => c.id === kase.id)).toBeFalsy();
+    expect(await findQueuedIncident<{ id: string }>(
+      admin.token, 'breached', (c) => c.id === kase.id,
+    )).toBeFalsy();
 
     await app.prisma.incidentCase.update({ where: { id: kase.id }, data: { slaAckBy: new Date(Date.now() - 60_000) } });
-    breached = await app.inject({ method: 'GET', url: '/api/v1/safety/incidents?status=breached', headers: { authorization: `Bearer ${admin.token}` } });
-    expect((breached.json().data as Array<{ id: string }>).find((c) => c.id === kase.id)).toBeTruthy();
+    expect(await findQueuedIncident<{ id: string }>(
+      admin.token, 'breached', (c) => c.id === kase.id,
+    )).toBeTruthy();
+  });
+
+  it('a low-severity case buried beyond the first page is still reachable [REPORT-007 pagination]', async () => {
+    const admin = await makeUser(['ADMIN']);
+    const d = await makeDriver();
+    // Bury the queue: 55 S0 assault cases rank ahead of ANY S3, guaranteeing
+    // the dispute lands past the default 50-row first page whatever the shared
+    // DB already holds. Before pagination this row was API-unreachable.
+    for (let i = 0; i < 55; i += 1) {
+      track(await svc().intake({ category: 'SAFETY_ASSAULT', intake: 'OPS_CREATED', subjectUserId: d.userId, summary: `burial ${i}` }));
+    }
+    const kase = track(await svc().intake({ category: 'CASH_DISPUTE', intake: 'OPS_CREATED', subjectUserId: d.userId, summary: 'Buried fare dispute' }));
+    const firstPage = await app.inject({ method: 'GET', url: '/api/v1/safety/incidents?status=open', headers: { authorization: `Bearer ${admin.token}` } });
+    expect((firstPage.json().data as Array<{ id: string }>).find((c) => c.id === kase.id)).toBeFalsy();
+    expect(await findQueuedIncident<{ id: string }>(
+      admin.token, 'open', (c) => c.id === kase.id,
+    )).toBeTruthy();
   });
 });

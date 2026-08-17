@@ -18,8 +18,6 @@ export class SlotUnavailableError extends AppError {
   }
 }
 
-const INV_TABLE = Prisma.raw('"ad_inventory_weeks"');
-
 export interface AvailabilityWeek {
   weekStart: string;
   capacity: number;
@@ -108,7 +106,7 @@ export class BookingService {
           // Row lock — the serialization point. A concurrent reserve blocks
           // here until we commit, then re-reads the incremented `booked`.
           const rows = await tx.$queryRaw<Array<{ id: string; booked: number; capacity: number }>>(
-            Prisma.sql`SELECT "id", "booked", "capacity" FROM ${INV_TABLE}
+            Prisma.sql`SELECT "id", "booked", "capacity" FROM "ad_inventory_weeks"
                        WHERE "placementId" = ${placement.id} AND "city" = ${city} AND "weekStart" = ${weekStart}::date
                        FOR UPDATE`,
           );

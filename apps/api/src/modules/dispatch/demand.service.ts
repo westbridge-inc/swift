@@ -1,4 +1,5 @@
 import type { PrismaClient } from '@prisma/client';
+import { getTenantId } from '../../plugins/tenant-context';
 import { haversineDistance } from '../../utils/distance';
 
 /**
@@ -64,7 +65,9 @@ export async function driverDemand(
       take: 500,
     }),
     prisma.supplyWatch.findMany({
-      where: { pool: 'DRIVER', notifiedAt: null, expiresAt: { gt: new Date() } },
+      // [REPORT-014 F-014-03] Only THIS tenant's watchers count toward the
+      // requester's demand signal.
+      where: { pool: 'DRIVER', notifiedAt: null, expiresAt: { gt: new Date() }, tenantId: getTenantId() ?? 'swift-default' },
       select: { lat: true, lng: true },
       take: 500,
     }),

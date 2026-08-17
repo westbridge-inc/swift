@@ -1,6 +1,7 @@
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import {
+  Prisma,
   UserRole,
   UserStatus,
   VendorStatus,
@@ -45,6 +46,8 @@ import { parsePagination, paginatedResponse } from '../../utils/pagination';
 import { computeOrderSla } from '../fulfillment/order-sla';
 import { startOfDayGY } from '../../utils/time-gy';
 import { AppError, NotFoundError, ForbiddenError } from '../../utils/errors';
+import { transitionUserStatusAuthority } from '../mover-authority';
+import { beginRequestTenantContext, getTenantId } from '../../plugins/tenant-context';
 
 // ---------------------------------------------------------------------------
 // Input schemas
@@ -252,20 +255,245 @@ const auditedAdminReadRoutes = [
 
 export async function adminRoutes(app: FastifyInstance) {
   const notifications = new NotificationService(app.prisma, app.io);
-  const verification = new VerificationService(app.prisma, notifications, getKycProvider());
-  const billing = new BillingService(app.prisma, notifications, getPaymentProvider());
-  const subscriptions = new SubscriptionService(app.prisma);
   const orderService = new OrderService(app.prisma, app.io);
-  const cashRules = new CashRulesService(app.prisma, notifications, orderService);
   const discoveryGovernance = new DiscoveryGovernanceService(app.prisma);
-  const ratingStats = new RatingStatsService(app.prisma);
+
+  const requireTenantId = (): string => {
+    const tenantId = getTenantId();
+    if (!tenantId) throw new ForbiddenError('Tenant context required');
+    return tenantId;
+  };
+
+  const subscriptionTenantScope = (tenantId: string) => ({
+    OR: [
+      { vendor: { tenantId }, riderId: null, driverId: null },
+      { rider: { user: { tenantId } }, vendorId: null, driverId: null },
+      { driver: { user: { tenantId } }, vendorId: null, riderId: null },
+    ],
+  });
+
+  const requireDefaultTenantBilling = (): void => {
+    const tenantId = requireTenantId();
+    if (tenantId !== 'swift-default') {
+      // BillingService's receipt helper still defaults its raw counter SQL to
+      // swift-default. Until that helper accepts a tenant explicitly, failing
+      // closed is the only route-local behavior that cannot corrupt another
+      // tenant's counter or issue a receipt from the wrong namespace.
+      throw new AppError(
+        503,
+        'TENANT_BILLING_UNAVAILABLE',
+        'Admin billing mutations are unavailable for this tenant until receipt counters are tenant-aware.',
+      );
+    }
+  };
+
+  const requireDefaultTenantCompliance = (): void => {
+    if (requireTenantId() !== 'swift-default') {
+      // ComplianceAuditRun has no tenant key or owning relation. The mover,
+      // document, violation and review queries below are scoped, but a second
+      // tenant cannot safely create/read run summaries until the run itself is
+      // attributable. Keep that surface closed instead of mixing evidence.
+      throw new AppError(
+        503,
+        'TENANT_COMPLIANCE_UNAVAILABLE',
+        'Compliance audit runs are unavailable for this tenant until audit runs are tenant-attributed.',
+      );
+    }
+  };
+
+  // Several mature billing/identity helpers accept a Prisma client and issue
+  // their own child-model queries. Those children do not carry tenantId, so
+  // the base Prisma extension cannot scope them. Give admin services a derived
+  // client that appends the same relation boundary to every where-operation;
+  // tenantId is read at query time so this singleton remains request-safe.
+  const childWhereOperations = new Set([
+    'findUnique', 'findUniqueOrThrow', 'findMany', 'findFirst', 'findFirstOrThrow',
+    'count', 'aggregate', 'groupBy', 'update', 'updateMany', 'updateManyAndReturn',
+    'upsert', 'delete', 'deleteMany',
+  ]);
+  const childScope = (
+    scope: (tenantId: string) => Record<string, unknown> | Promise<Record<string, unknown>>,
+  ) => ({
+    $allOperations: async ({ operation, args, query }: any) => {
+      if (childWhereOperations.has(operation)) {
+        const where = (args.where ?? {}) as Record<string, unknown>;
+        const existingAnd = where['AND'];
+        args.where = {
+          ...where,
+          AND: [
+            ...(Array.isArray(existingAnd) ? existingAnd : existingAnd ? [existingAnd] : []),
+            await scope(requireTenantId()),
+          ],
+        };
+      }
+      return query(args);
+    },
+  });
+  const tenantPrisma = app.prisma.$extends({
+    name: 'admin-indirect-tenant-scope',
+    query: {
+      rider: childScope((tenantId) => ({ user: { tenantId } })),
+      driver: childScope((tenantId) => ({ user: { tenantId } })),
+      subscription: childScope(subscriptionTenantScope),
+      settlement: childScope((tenantId) => ({ vendor: { tenantId } })),
+      deliveryCashSettlement: childScope((tenantId) => ({
+        order: { tenantId },
+        rider: { user: { tenantId } },
+        vendor: { tenantId },
+      })),
+      billingEvent: childScope((tenantId) => ({ subscription: subscriptionTenantScope(tenantId) })),
+      prepaidBalance: childScope((tenantId) => ({ subscription: subscriptionTenantScope(tenantId) })),
+      subscriptionPayment: childScope((tenantId) => ({ subscription: subscriptionTenantScope(tenantId) })),
+      subscriptionRefund: childScope((tenantId) => ({ subscription: subscriptionTenantScope(tenantId) })),
+      adCreative: childScope((tenantId) => ({ campaign: { tenantId } })),
+      supportTicket: childScope((tenantId) => ({ user: { tenantId } })),
+      item: childScope((tenantId) => ({ vendor: { tenantId } })),
+      // ContentReport keeps only a loose reporter id. Treat the reporter's
+      // tenant as the report boundary; target previews are independently
+      // scoped below so a bad cross-tenant target id cannot disclose content.
+      contentReport: childScope(async (tenantId) => {
+        const reporterIds = (await app.prisma.user.findMany({
+          where: { tenantId },
+          select: { id: true },
+        })).map((user) => user.id);
+        return { reporterId: { in: reporterIds } };
+      }),
+      // ChatMessage has no sender relation. Require both a local sender and a
+      // local order-backed room; unattributable service chats fail closed.
+      chatMessage: childScope(async (tenantId) => {
+        const [orders, senders] = await Promise.all([
+          app.prisma.order.findMany({ where: { tenantId }, select: { id: true } }),
+          app.prisma.user.findMany({ where: { tenantId }, select: { id: true } }),
+        ]);
+        return {
+          senderId: { in: senders.map((sender) => sender.id) },
+          chatRoom: { orderId: { in: orders.map((order) => order.id) } },
+        };
+      }),
+      // ReturnRequest has no relations or tenantId. Require both loose owner
+      // ids to resolve inside this tenant so a malformed cross-tenant row is
+      // hidden rather than being accepted through either side alone.
+      returnRequest: childScope(async (tenantId) => {
+        const [orders, customers] = await Promise.all([
+          app.prisma.order.findMany({ where: { tenantId }, select: { id: true } }),
+          app.prisma.user.findMany({ where: { tenantId }, select: { id: true } }),
+        ]);
+        return {
+          orderId: { in: orders.map((order) => order.id) },
+          customerId: { in: customers.map((customer) => customer.id) },
+        };
+      }),
+      // Rating's orderId is loose, while rater/ratee are User relations. All
+      // populated ownership legs must agree with the request tenant; this also
+      // prevents moderation side effects from reaching a foreign participant.
+      rating: childScope(async (tenantId) => {
+        const orderIds = (await app.prisma.order.findMany({
+          where: { tenantId },
+          select: { id: true },
+        })).map((order) => order.id);
+        return {
+          orderId: { in: orderIds },
+          rater: { tenantId },
+          OR: [{ rateeId: null }, { ratee: { tenantId } }],
+        };
+      }),
+      // Agent request/audit subjects are loose order ids in the legacy schema.
+      // Derive their allowed set through the tenant-owned Order root.
+      agentActionRequest: childScope(async (tenantId) => {
+        const orderIds = (await app.prisma.order.findMany({
+          where: { tenantId },
+          select: { id: true },
+        })).map((order) => order.id);
+        return { orderId: { in: orderIds } };
+      }),
+      agentAuditEvent: childScope(async (tenantId) => {
+        const orderIds = (await app.prisma.order.findMany({
+          where: { tenantId },
+          select: { id: true },
+        })).map((order) => order.id);
+        return { subjectId: { in: orderIds } };
+      }),
+      alertDelivery: childScope(async (tenantId) => {
+        const [orders, recipients] = await Promise.all([
+          app.prisma.order.findMany({ where: { tenantId }, select: { id: true } }),
+          app.prisma.user.findMany({ where: { tenantId }, select: { id: true } }),
+        ]);
+        return {
+          subjectId: { in: orders.map((order) => order.id) },
+          recipientId: { in: recipients.map((recipient) => recipient.id) },
+        };
+      }),
+      verificationDocument: childScope((tenantId) => ({ user: { tenantId } })),
+      complianceViolation: childScope((tenantId) => ({ user: { tenantId } })),
+      complianceReviewCase: childScope((tenantId) => ({ user: { tenantId } })),
+      // ReimbursementClaim predates relations and carries only loose ids.
+      // Require its rider, order and customer to resolve in the same tenant;
+      // this hides malformed bridge rows rather than accepting whichever leg
+      // happened to be local. The CashRulesService CAS and its re-read both
+      // inherit this scope.
+      reimbursementClaim: childScope(async (tenantId) => {
+        const [riders, orders, customers] = await Promise.all([
+          app.prisma.rider.findMany({ where: { user: { tenantId } }, select: { id: true } }),
+          app.prisma.order.findMany({ where: { tenantId }, select: { id: true } }),
+          app.prisma.user.findMany({ where: { tenantId }, select: { id: true } }),
+        ]);
+        return {
+          riderId: { in: riders.map((rider) => rider.id) },
+          orderId: { in: orders.map((order) => order.id) },
+          customerId: { in: customers.map((customer) => customer.id) },
+        };
+      }),
+      // bank-recon's legacy compound lookup embeds swift-default. Correct only
+      // that nested discriminator; the base extension still applies the same
+      // tenant at the top level and stamps creates.
+      settlementBatch: {
+        findUnique: async ({ args, query }: any) => {
+          const compound = args.where?.tenantId_provider_periodStart;
+          if (compound) compound.tenantId = requireTenantId();
+          return query(args);
+        },
+      },
+      // RatingStatsService's legacy default embeds swift-default inside this
+      // compound selector. Keep the service request-safe for other tenants.
+      actorRatingStat: {
+        upsert: async ({ args, query }: any) => {
+          const compound = args.where?.tenantId_subjectRole_subjectId;
+          if (compound) compound.tenantId = requireTenantId();
+          return query(args);
+        },
+      },
+    },
+  }) as unknown as typeof app.prisma;
+
+  const billing = new BillingService(tenantPrisma, notifications, getPaymentProvider());
+  const subscriptions = new SubscriptionService(tenantPrisma);
+  const verification = new VerificationService(tenantPrisma, notifications, getKycProvider());
+  const cashRules = new CashRulesService(tenantPrisma, notifications, orderService);
+  const ratingStats = new RatingStatsService(tenantPrisma);
+
+  const mutationOrNotFound = async <T>(entity: string, id: string, mutate: () => Promise<T>): Promise<T> => {
+    try {
+      return await mutate();
+    } catch (error) {
+      if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2025') {
+        throw new NotFoundError(entity, id);
+      }
+      throw error;
+    }
+  };
 
   // Middleware: verify ADMIN or SUPER_ADMIN role
   const adminGuard = async (request: any, reply: any) => {
+    // The production server opens this store globally. Admin routes also do it
+    // locally so isolated plugin/test hosts cannot authenticate successfully
+    // and then lose the tenant binding across the auth await boundary.
+    beginRequestTenantContext();
     await app.authenticate(request, reply);
+    if (reply.sent) return;
     if (!['ADMIN', 'SUPER_ADMIN'].includes(request.user.role)) {
       throw new ForbiddenError('Admin access required');
     }
+    requireTenantId();
   };
 
   // Trial-integrity Part 0.2: the platform-wide identity graph is the one
@@ -276,6 +504,17 @@ export async function adminRoutes(app: FastifyInstance) {
     await app.authenticate(request, reply);
     if (reply.sent) return;
     assertFounderAccess(request.user.role);
+  };
+
+  // FX, price-book and PlatformConfig rows are platform-global rather than
+  // tenant-owned. Keep their control plane on the canonical tenant as well as
+  // founder-only: SUPER_ADMIN is otherwise deliberately tenant-local.
+  const platformControlGuard = async (request: any, reply: any) => {
+    await founderGuard(request, reply);
+    if (reply.sent) return;
+    if (requireTenantId() !== 'swift-default') {
+      throw new ForbiddenError('Platform controls require the default tenant');
+    }
   };
 
   // Belt-and-suspenders (pre-launch audit): the guard is applied per-route on
@@ -344,6 +583,9 @@ export async function adminRoutes(app: FastifyInstance) {
   // ─── Dashboard ─────────────────────────────────────────────────────────
 
   app.get('/dashboard/overview', { preHandler: [adminGuard] }, async () => {
+    const tenantId = getTenantId();
+    if (!tenantId) throw new ForbiddenError('Tenant context required');
+    const subscriptionScope = subscriptionTenantScope(tenantId);
     const today = startOfDayGY(); // DASH-06: Guyana-local "today", not UTC midnight
 
     const [
@@ -370,8 +612,8 @@ export async function adminRoutes(app: FastifyInstance) {
         _sum: { deliveryFee: true, totalAmount: true },
         _count: true,
       }),
-      app.prisma.rider.count({ where: { isOnline: true } }),
-      app.prisma.driver.count({ where: { isOnline: true } }),
+      app.prisma.rider.count({ where: { isOnline: true, user: { tenantId } } }),
+      app.prisma.driver.count({ where: { isOnline: true, user: { tenantId } } }),
       app.prisma.vendor.count({ where: { status: 'ACTIVE' } }),
       app.prisma.vendor.count(),
       // DASH-01: real per-type revenue = the SUMMED weeklyRate of ACTIVE subs,
@@ -380,12 +622,12 @@ export async function adminRoutes(app: FastifyInstance) {
       // the per-type lines reconcile with the weeklySubscriptionRevenue total.
       app.prisma.subscription.groupBy({
         by: ['type'],
-        where: { status: 'ACTIVE' },
+        where: { status: 'ACTIVE', ...subscriptionScope },
         _count: true,
         _sum: { weeklyRate: true },
       }),
       app.prisma.subscription.aggregate({
-        where: { status: 'ACTIVE' },
+        where: { status: 'ACTIVE', ...subscriptionScope },
         _sum: { weeklyRate: true },
       }),
       app.prisma.user.count({ where: { createdAt: { gte: today } } }),
@@ -395,7 +637,7 @@ export async function adminRoutes(app: FastifyInstance) {
       // if a trend chart ships.
       // Operational alerts — real counts for the dashboard AlertsPanel.
       app.prisma.vendor.count({ where: { status: 'PENDING_APPROVAL' } }),
-      app.prisma.subscription.count({ where: { status: 'PAST_DUE' } }),
+      app.prisma.subscription.count({ where: { status: 'PAST_DUE', ...subscriptionScope } }),
       app.prisma.order.count({
         where: {
           riderId: null,
@@ -533,14 +775,12 @@ export async function adminRoutes(app: FastifyInstance) {
 
     const user = await app.prisma.user.findUnique({ where: { id } });
     if (!user) throw new NotFoundError('User', id);
-    if (user.status === 'SUSPENDED') throw new AppError(400, 'ALREADY_SUSPENDED', 'User is already suspended');
-
-    const updated = await app.prisma.user.update({
-      where: { id },
-      data: { status: 'SUSPENDED' },
+    const { updated } = await transitionUserStatusAuthority(app, id, 'SUSPENDED', {
+      actorUserId: request.user.userId,
+      reason: reason ?? null,
+      ipAddress: request.ip,
+      userAgent: request.headers['user-agent'],
     });
-
-    await audit(request.user.userId, 'SUSPEND_USER', 'User', id, { reason, previousStatus: user.status }, request);
 
     await notifications.send({
       userId: id,
@@ -557,14 +797,11 @@ export async function adminRoutes(app: FastifyInstance) {
 
     const user = await app.prisma.user.findUnique({ where: { id } });
     if (!user) throw new NotFoundError('User', id);
-    if (user.status !== 'SUSPENDED') throw new AppError(400, 'NOT_SUSPENDED', 'User is not suspended');
-
-    const updated = await app.prisma.user.update({
-      where: { id },
-      data: { status: 'ACTIVE' },
+    const { updated } = await transitionUserStatusAuthority(app, id, 'ACTIVE', {
+      actorUserId: request.user.userId,
+      ipAddress: request.ip,
+      userAgent: request.headers['user-agent'],
     });
-
-    await audit(request.user.userId, 'UNSUSPEND_USER', 'User', id, {}, request);
 
     await notifications.send({
       userId: id,
@@ -582,22 +819,17 @@ export async function adminRoutes(app: FastifyInstance) {
 
     const user = await app.prisma.user.findUnique({ where: { id } });
     if (!user) throw new NotFoundError('User', id);
-    if (user.status === 'BANNED') throw new AppError(400, 'ALREADY_BANNED', 'User is already banned');
-
     // Prevent banning other admins unless SUPER_ADMIN
     if (user.roles.includes('ADMIN') && request.user.role !== 'SUPER_ADMIN') {
       throw new ForbiddenError('Only SUPER_ADMIN can ban admin users');
     }
 
-    const updated = await app.prisma.user.update({
-      where: { id },
-      data: { status: 'BANNED' },
+    const { updated } = await transitionUserStatusAuthority(app, id, 'BANNED', {
+      actorUserId: request.user.userId,
+      reason: reason ?? null,
+      ipAddress: request.ip,
+      userAgent: request.headers['user-agent'],
     });
-
-    // Invalidate all sessions
-    await app.prisma.session.deleteMany({ where: { userId: id } });
-
-    await audit(request.user.userId, 'BAN_USER', 'User', id, { reason, previousStatus: user.status }, request);
 
     // DPA §3.5 — a banned participant has left: schedule document deletion
     await verification.scheduleDocumentRetention(id);
@@ -697,10 +929,32 @@ export async function adminRoutes(app: FastifyInstance) {
     if (!vendor) throw new NotFoundError('Vendor', id);
     if (vendor.status === 'ACTIVE') throw new AppError(400, 'ALREADY_ACTIVE', 'Vendor is already approved');
 
-    const updated = await app.prisma.vendor.update({
-      where: { id },
+    // [ACTIVATION AUTHORITY / EV-ACT-11] This button is no longer a
+    // checklist-free ACTIVE writer. The founder invariant is: submit owner ID
+    // + required business documents → restricted per-document review →
+    // activation. Approval here CONFIRMS that evidence; it cannot substitute
+    // for it — a store whose checklist is incomplete, expired, or purged
+    // stays pending and the reviewer is pointed at the Verification queue.
+    const checklistComplete = await verification.isRoleVerified(
+      vendor.owner.userId,
+      vendor.vendorType as Parameters<typeof verification.isRoleVerified>[1],
+    );
+    if (!checklistComplete) {
+      throw new AppError(
+        409,
+        'CHECKLIST_INCOMPLETE',
+        `${vendor.name}'s required documents are not all approved and current — review them in the Verification queue first.`,
+      );
+    }
+
+    // CAS [EV-ACT-11]: exactly one approval transitions the store, so a
+    // double-tap cannot double-fire the trial/notification side effects.
+    const won = await app.prisma.vendor.updateMany({
+      where: { id, status: { not: 'ACTIVE' } },
       data: { status: 'ACTIVE', isVerified: true },
     });
+    if (won.count === 0) throw new AppError(400, 'ALREADY_ACTIVE', 'Vendor is already approved');
+    const updated = await app.prisma.vendor.findUniqueOrThrow({ where: { id } });
 
     // On-write search sync [SWIFT-UG-SRCH-01]: status changes gate the vendor in/out of the index.
     scheduleVendorSearchSync(app, id);
@@ -733,7 +987,7 @@ export async function adminRoutes(app: FastifyInstance) {
 
     const updated = await app.prisma.vendor.update({
       where: { id },
-      data: { status: 'SUSPENDED', acceptingOrders: false },
+      data: { status: 'SUSPENDED', acceptingOrders: false, suspensionSource: 'ADMIN' },
     });
 
     scheduleVendorSearchSync(app, id);
@@ -773,24 +1027,27 @@ export async function adminRoutes(app: FastifyInstance) {
   // ─── Riders ────────────────────────────────────────────────────────────
 
   app.get('/riders', { preHandler: [adminGuard] }, async (request) => {
+    const tenantId = getTenantId();
+    if (!tenantId) throw new ForbiddenError('Tenant context required');
     const { page, limit, skip } = parsePagination(request.query as Record<string, string>);
     const { status, type, search } = moverFilterQuerySchema.parse(request.query);
 
     const where: any = {
-      ...(type && { riderType: type }),
-      ...(status === 'online' && { isOnline: true }),
-      ...(status === 'offline' && { isOnline: false }),
-      ...(status === 'verified' && { documentsVerified: true }),
-      ...(status === 'unverified' && { documentsVerified: false }),
-      ...(search && {
-        user: {
+      user: {
+        tenantId,
+        ...(search && {
           OR: [
             { firstName: { contains: search, mode: 'insensitive' } },
             { lastName: { contains: search, mode: 'insensitive' } },
             { phone: { contains: search } },
           ],
-        },
-      }),
+        }),
+      },
+      ...(type && { riderType: type }),
+      ...(status === 'online' && { isOnline: true }),
+      ...(status === 'offline' && { isOnline: false }),
+      ...(status === 'verified' && { documentsVerified: true }),
+      ...(status === 'unverified' && { documentsVerified: false }),
     };
 
     const [riders, total] = await Promise.all([
@@ -811,10 +1068,12 @@ export async function adminRoutes(app: FastifyInstance) {
   });
 
   app.get('/riders/:id', { preHandler: [adminGuard] }, async (request) => {
+    const tenantId = getTenantId();
+    if (!tenantId) throw new ForbiddenError('Tenant context required');
     const { id } = request.params as { id: string };
 
-    const rider = await app.prisma.rider.findUnique({
-      where: { id },
+    const rider = await app.prisma.rider.findFirst({
+      where: { id, user: { tenantId } },
       include: {
         user: { select: { id: true, firstName: true, lastName: true, phone: true, email: true, avatar: true, status: true, createdAt: true } },
         subscription: { include: { payments: { take: 5, orderBy: { createdAt: 'desc' } } } },
@@ -828,25 +1087,50 @@ export async function adminRoutes(app: FastifyInstance) {
   });
 
   app.put('/riders/:id/verify-documents', { preHandler: [adminGuard] }, async (request) => {
+    const tenantId = getTenantId();
+    if (!tenantId) throw new ForbiddenError('Tenant context required');
     const { id } = request.params as { id: string };
     const { verified, rejectionReason } = verifyDocsSchema.parse(request.body ?? {});
 
-    const rider = await app.prisma.rider.findUnique({
-      where: { id },
+    const rider = await app.prisma.rider.findFirst({
+      where: { id, user: { tenantId } },
       include: { user: true },
     });
     if (!rider) throw new NotFoundError('Rider', id);
 
     const isVerified = verified !== false; // default true
 
-    const updated = await app.prisma.rider.update({
-      where: { id },
+    // [ACTIVATION AUTHORITY / EV-ACT-15] The legacy flag can no longer bless
+    // missing evidence: verifying requires the canonical checklist for this
+    // rider's PERSISTED vehicle class to be individually APPROVED and current
+    // (the founder invariant: the admin verifies the vehicle is right and the
+    // documents match — this button confirms that review, it cannot replace
+    // it). An empty request body used to mean "approve on no evidence".
+    if (isVerified) {
+      const live = await verification.getLiveOperationStatus(rider.userId, { vehicleType: rider.vehicleType });
+      if (!live.allowed) {
+        throw new AppError(
+          409,
+          'CHECKLIST_INCOMPLETE',
+          live.reason === 'insurance'
+            ? 'This rider’s vehicle needs current HIRE-class insurance approved before they can be verified.'
+            : 'This rider’s required documents are not all approved and current — review them in the Verification queue first.',
+        );
+      }
+    }
+
+    const updated = await mutationOrNotFound('Rider', id, () => app.prisma.rider.update({
+      where: { id, user: { tenantId } },
       data: {
         documentsVerified: isVerified,
         documentsVerifiedAt: isVerified ? new Date() : null,
         documentsVerifiedBy: isVerified ? request.user.userId : null,
+        // [EV-ACT-15] A negative decision is a live supply revocation, not
+        // just a cache clear: an already-online rider must not stay
+        // dispatchable until the next daily sweep.
+        ...(isVerified ? {} : { isOnline: false, locationSessionId: null }),
       },
-    });
+    }));
 
     await audit(
       request.user.userId,
@@ -875,23 +1159,26 @@ export async function adminRoutes(app: FastifyInstance) {
   // ─── Drivers ───────────────────────────────────────────────────────────
 
   app.get('/drivers', { preHandler: [adminGuard] }, async (request) => {
+    const tenantId = getTenantId();
+    if (!tenantId) throw new ForbiddenError('Tenant context required');
     const { page, limit, skip } = parsePagination(request.query as Record<string, string>);
     const { status, search } = moverFilterQuerySchema.parse(request.query);
 
     const where: any = {
-      ...(status === 'online' && { isOnline: true }),
-      ...(status === 'offline' && { isOnline: false }),
-      ...(status === 'verified' && { documentsVerified: true }),
-      ...(status === 'unverified' && { documentsVerified: false }),
-      ...(search && {
-        user: {
+      user: {
+        tenantId,
+        ...(search && {
           OR: [
             { firstName: { contains: search, mode: 'insensitive' } },
             { lastName: { contains: search, mode: 'insensitive' } },
             { phone: { contains: search } },
           ],
-        },
-      }),
+        }),
+      },
+      ...(status === 'online' && { isOnline: true }),
+      ...(status === 'offline' && { isOnline: false }),
+      ...(status === 'verified' && { documentsVerified: true }),
+      ...(status === 'unverified' && { documentsVerified: false }),
     };
 
     const [drivers, total] = await Promise.all([
@@ -912,10 +1199,12 @@ export async function adminRoutes(app: FastifyInstance) {
   });
 
   app.get('/drivers/:id', { preHandler: [adminGuard] }, async (request) => {
+    const tenantId = getTenantId();
+    if (!tenantId) throw new ForbiddenError('Tenant context required');
     const { id } = request.params as { id: string };
 
-    const driver = await app.prisma.driver.findUnique({
-      where: { id },
+    const driver = await app.prisma.driver.findFirst({
+      where: { id, user: { tenantId } },
       include: {
         user: { select: { id: true, firstName: true, lastName: true, phone: true, email: true, avatar: true, status: true, createdAt: true } },
         subscription: { include: { payments: { take: 5, orderBy: { createdAt: 'desc' } } } },
@@ -929,25 +1218,48 @@ export async function adminRoutes(app: FastifyInstance) {
   });
 
   app.put('/drivers/:id/verify-documents', { preHandler: [adminGuard] }, async (request) => {
+    const tenantId = getTenantId();
+    if (!tenantId) throw new ForbiddenError('Tenant context required');
     const { id } = request.params as { id: string };
     const { verified, rejectionReason } = verifyDocsSchema.parse(request.body ?? {});
 
-    const driver = await app.prisma.driver.findUnique({
-      where: { id },
+    const driver = await app.prisma.driver.findFirst({
+      where: { id, user: { tenantId } },
       include: { user: true },
     });
     if (!driver) throw new NotFoundError('Driver', id);
 
     const isVerified = verified !== false;
 
-    const updated = await app.prisma.driver.update({
-      where: { id },
+    // [ACTIVATION AUTHORITY / EV-ACT-15] Same law as riders: verifying a taxi
+    // driver requires the canonical checklist for their PERSISTED vehicle
+    // class — including current HIRE-class insurance for passenger work — to
+    // be individually APPROVED and current. The button confirms review; it
+    // cannot bless missing evidence.
+    if (isVerified) {
+      const live = await verification.getLiveOperationStatus(driver.userId, { vehicleType: driver.vehicleType });
+      if (!live.allowed) {
+        throw new AppError(
+          409,
+          'CHECKLIST_INCOMPLETE',
+          live.reason === 'insurance'
+            ? 'This driver needs current HIRE-class insurance approved before they can be verified for passenger work.'
+            : 'This driver’s required documents are not all approved and current — review them in the Verification queue first.',
+        );
+      }
+    }
+
+    const updated = await mutationOrNotFound('Driver', id, () => app.prisma.driver.update({
+      where: { id, user: { tenantId } },
       data: {
         documentsVerified: isVerified,
         documentsVerifiedAt: isVerified ? new Date() : null,
         documentsVerifiedBy: isVerified ? request.user.userId : null,
+        // [EV-ACT-15] A negative decision revokes live supply atomically —
+        // an online driver must not stay dispatchable until the daily sweep.
+        ...(isVerified ? {} : { isOnline: false, locationSessionId: null }),
       },
-    });
+    }));
 
     await audit(
       request.user.userId,
@@ -976,13 +1288,18 @@ export async function adminRoutes(app: FastifyInstance) {
   // Premium-fleet onboarding: set the top taxi tier a vehicle serves. This is the
   // assignment surface that makes Comfort/XL dispatchable (the #112 gap).
   app.put('/drivers/:id/ride-class', { preHandler: [adminGuard] }, async (request) => {
+    const tenantId = getTenantId();
+    if (!tenantId) throw new ForbiddenError('Tenant context required');
     const { id } = request.params as { id: string };
     const { rideClass } = rideClassSchema.parse(request.body ?? {});
 
-    const driver = await app.prisma.driver.findUnique({ where: { id }, select: { id: true } });
+    const driver = await app.prisma.driver.findFirst({ where: { id, user: { tenantId } }, select: { id: true } });
     if (!driver) throw new NotFoundError('Driver', id);
 
-    const updated = await app.prisma.driver.update({ where: { id }, data: { rideClass } });
+    const updated = await mutationOrNotFound('Driver', id, () => app.prisma.driver.update({
+      where: { id, user: { tenantId } },
+      data: { rideClass },
+    }));
     await audit(request.user.userId, 'SET_DRIVER_RIDE_CLASS', 'Driver', id, { rideClass }, request);
 
     return { success: true, data: updated };
@@ -1036,6 +1353,7 @@ export async function adminRoutes(app: FastifyInstance) {
   /** Live ops snapshot for the command map: every online mover's position +
    *  every order in flight. Read-only; the console polls it. */
   app.get('/ops/live', { preHandler: [adminGuard] }, async () => {
+    const tenantId = requireTenantId();
     const ACTIVE_STATUSES = [
       'PENDING', 'ACCEPTED', 'PREPARING', 'READY_FOR_PICKUP',
       'RIDER_ASSIGNED', 'RIDER_EN_ROUTE_PICKUP', 'RIDER_ARRIVED_PICKUP', 'PICKED_UP', 'EN_ROUTE_DELIVERY', 'ARRIVED',
@@ -1044,7 +1362,7 @@ export async function adminRoutes(app: FastifyInstance) {
 
     const [riders, drivers, orders, exhausted] = await Promise.all([
       app.prisma.rider.findMany({
-        where: { isOnline: true, currentLat: { not: null } },
+        where: { isOnline: true, currentLat: { not: null }, user: { tenantId } },
         select: {
           id: true, currentLat: true, currentLng: true, isAvailable: true, currentOrderId: true,
           user: { select: { firstName: true, lastName: true } },
@@ -1052,7 +1370,7 @@ export async function adminRoutes(app: FastifyInstance) {
         take: 500,
       }),
       app.prisma.driver.findMany({
-        where: { isOnline: true, currentLat: { not: null } },
+        where: { isOnline: true, currentLat: { not: null }, user: { tenantId } },
         select: {
           id: true, currentLat: true, currentLng: true, isAvailable: true, currentRideId: true, rideClass: true,
           user: { select: { firstName: true, lastName: true } },
@@ -1071,11 +1389,32 @@ export async function adminRoutes(app: FastifyInstance) {
       }),
       // Availability spec §6: exhausted searches float to the top in danger —
       // unresolved means no retry took over, nobody switched, nobody cancelled.
-      app.prisma.dispatchSearch.findMany({
-        where: { status: 'EXHAUSTED', resolution: null, startedAt: { gte: new Date(Date.now() - 24 * 3600_000) } },
-        orderBy: { exhaustedAt: 'asc' },
-        take: 50,
-      }),
+      // DispatchSearch has no tenantId and no Prisma relation to Order. Join
+      // the tenant-owned parent explicitly; reading first and filtering in JS
+      // would still pull another tenant's operational journal into memory.
+      app.prisma.$queryRaw<Array<{
+        id: string;
+        subjectId: string;
+        vertical: string;
+        wave: number;
+        candidatesTried: string[];
+        exhaustedAt: Date | null;
+      }>>`
+        SELECT ds.id,
+               ds."subjectId",
+               ds.vertical,
+               ds.wave,
+               ds."candidatesTried",
+               ds."exhaustedAt"
+        FROM dispatch_searches ds
+        INNER JOIN orders o ON o.id = ds."subjectId"
+        WHERE o."tenantId" = ${tenantId}
+          AND ds.status = 'EXHAUSTED'
+          AND ds.resolution IS NULL
+          AND ds."startedAt" >= ${new Date(Date.now() - 24 * 3600_000)}
+        ORDER BY ds."exhaustedAt" ASC NULLS LAST
+        LIMIT 50
+      `,
     ]);
     const exhaustedOrders = exhausted.length
       ? await app.prisma.order.findMany({
@@ -1273,9 +1612,9 @@ export async function adminRoutes(app: FastifyInstance) {
     // rots at the back. The reason filter floats CSAE to the top of the queue.
     const where = { ...(status ? { status } : { status: 'PENDING' as const }), ...(reason ? { reason } : {}) };
     const [reports, total, pendingTotal] = await Promise.all([
-      app.prisma.contentReport.findMany({ where, orderBy: { createdAt: 'asc' }, skip, take: limit }),
-      app.prisma.contentReport.count({ where }),
-      app.prisma.contentReport.count({ where: { status: 'PENDING' } }),
+      tenantPrisma.contentReport.findMany({ where, orderBy: { createdAt: 'asc' }, skip, take: limit }),
+      tenantPrisma.contentReport.count({ where }),
+      tenantPrisma.contentReport.count({ where: { status: 'PENDING' } }),
     ]);
 
     // STORE-002: enrich each report with a snapshot of WHAT was reported, so the
@@ -1285,11 +1624,11 @@ export async function adminRoutes(app: FastifyInstance) {
     const preview = new Map<string, unknown>();
     const stash = (t: string, rows: Array<{ id: string }>) => rows.forEach((row) => preview.set(`${t}:${row.id}`, row));
     const [ratings, messages, users, vendors, items] = await Promise.all([
-      idsOf('RATING').length ? app.prisma.rating.findMany({ where: { id: { in: idsOf('RATING') } }, select: { id: true, comment: true, score: true, raterId: true } }) : [],
-      idsOf('CHAT_MESSAGE').length ? app.prisma.chatMessage.findMany({ where: { id: { in: idsOf('CHAT_MESSAGE') } }, select: { id: true, message: true, senderId: true } }) : [],
+      idsOf('RATING').length ? tenantPrisma.rating.findMany({ where: { id: { in: idsOf('RATING') } }, select: { id: true, comment: true, score: true, raterId: true } }) : [],
+      idsOf('CHAT_MESSAGE').length ? tenantPrisma.chatMessage.findMany({ where: { id: { in: idsOf('CHAT_MESSAGE') } }, select: { id: true, message: true, senderId: true } }) : [],
       idsOf('USER').length ? app.prisma.user.findMany({ where: { id: { in: idsOf('USER') } }, select: { id: true, firstName: true, lastName: true, avatar: true } }) : [],
       idsOf('VENDOR').length ? app.prisma.vendor.findMany({ where: { id: { in: idsOf('VENDOR') } }, select: { id: true, name: true, slug: true } }) : [],
-      idsOf('ITEM').length ? app.prisma.item.findMany({ where: { id: { in: idsOf('ITEM') } }, select: { id: true, name: true } }) : [],
+      idsOf('ITEM').length ? tenantPrisma.item.findMany({ where: { id: { in: idsOf('ITEM') } }, select: { id: true, name: true } }) : [],
     ]);
     stash('RATING', ratings); stash('CHAT_MESSAGE', messages); stash('USER', users); stash('VENDOR', vendors); stash('ITEM', items);
     const enriched = reports.map((r) => ({ ...r, target: preview.get(`${r.targetType}:${r.targetId}`) ?? null }));
@@ -1300,20 +1639,20 @@ export async function adminRoutes(app: FastifyInstance) {
   app.put('/moderation/reports/:id', { preHandler: [adminGuard] }, async (request) => {
     const { id } = request.params as { id: string };
     const { status, note } = resolveReportSchema.parse(request.body ?? {});
-    const existing = await app.prisma.contentReport.findUnique({ where: { id } });
+    const existing = await tenantPrisma.contentReport.findUnique({ where: { id } });
     if (!existing) throw new NotFoundError('ContentReport', id);
     // ACTIONED/DISMISSED close the report (stamp who + when); REVIEWING just
     // claims it. Enforcement (remove the rating, ban the user) uses the existing
     // admin endpoints — the report records the DECISION, not the mechanism.
     const closing = status === 'ACTIONED' || status === 'DISMISSED';
-    const updated = await app.prisma.contentReport.update({
+    const updated = await mutationOrNotFound('ContentReport', id, () => tenantPrisma.contentReport.update({
       where: { id },
       data: {
         status,
         ...(note !== undefined ? { resolutionNote: note } : {}),
         ...(closing ? { resolvedBy: request.user.userId, resolvedAt: new Date() } : {}),
       },
-    });
+    }));
     return { success: true, data: updated };
   });
 
@@ -1331,43 +1670,47 @@ export async function adminRoutes(app: FastifyInstance) {
     if (terminalStatuses.includes(order.status)) {
       throw new AppError(400, 'INVALID_STATUS', `Cannot cancel an order with status ${order.status}`);
     }
-
-    const newStatus = refund ? 'REFUNDED' : 'CANCELLED';
-
-    // Compare-and-set so a concurrent transition can't be silently overwritten
-    // (the pre-check above is time-of-check/time-of-use). Loser → 400.
-    const claimed = await app.prisma.order.updateMany({
-      where: { id, status: { notIn: terminalStatuses as OrderStatus[] } },
-      data: {
-        status: newStatus,
-        cancelledAt: new Date(),
-        cancelledBy: request.user.userId,
-        cancellationReason: reason || 'Cancelled by admin',
-      },
-    });
-    if (claimed.count === 0) {
-      throw new AppError(400, 'INVALID_STATUS', `Cannot cancel an order with status ${order.status}`);
+    // [REPORT-008 F-03] The legacy boolean refund override is a CASH-era
+    // control: on MMG it would mint a REFUNDED terminal (and answer
+    // refunded:true) with NO amount, actor, or evidence that the store's
+    // external money ever went back — a false financial fact. Fail closed
+    // until LB-019 ships the evidence-bearing direct-refund completion rail.
+    if (refund && order.paymentMethod === 'MOBILE_MONEY') {
+      throw new AppError(
+        409,
+        'MMG_REFUND_UNAVAILABLE',
+        'Swift cannot mark a direct-to-store MMG payment refunded without store refund evidence — the store refunds the customer directly (cancel without the refund flag to close fulfilment).',
+      );
     }
 
-    await app.prisma.orderStatusLog.create({
-      data: { orderId: id, status: newStatus, changedBy: request.user.userId, note: reason || 'Admin cancellation' },
+    const newStatus: OrderStatus = refund ? 'REFUNDED' : 'CANCELLED';
+    const allowedFrom = Object.values(OrderStatus)
+      .filter((status) => !terminalStatuses.includes(status)) as OrderStatus[];
+    const cancellationReason = reason || 'Cancelled by admin';
+
+    // The fresh source status, order mutation, status evidence, explicit admin
+    // audit, booking/search closure, stock, float, and mover release share one
+    // transaction. This closes both the crash window and the stale riderId race
+    // against a direct board assignment. Socket/push remain post-commit below.
+    await orderService.transitionOrderAtomically({
+      orderId: id,
+      target: newStatus,
+      allowedFrom,
+      changedBy: request.user.userId,
+      note: reason || 'Admin cancellation',
+      cancellation: { by: request.user.userId, reason: cancellationReason },
+      releaseStaleMoverPointer: true,
+      operatorAudit: {
+        userId: request.user.userId,
+        action: 'CANCEL_ORDER',
+        entity: 'Order',
+        entityId: id,
+        changes: (previousStatus) => ({ reason: reason ?? null, refund: !!refund, previousStatus }),
+        ipAddress: request.ip,
+        userAgent: request.headers['user-agent'],
+      },
+      invalidStatus: (current) => new AppError(400, 'INVALID_STATUS', `Cannot cancel an order with status ${current}`),
     });
-
-    // Terminal cleanup that this handler previously skipped entirely: restock
-    // tracked stock (only when the goods were still in the store — NOT once
-    // picked up), return the CASH rider's committed float (a leak here silently
-    // froze riders out of CASH offers), and free the assigned mover.
-    await orderService.applyCancellationSideEffects(
-      { id, paymentMethod: order.paymentMethod, riderId: order.riderId, driverId: order.driverId, subtotalBase: Number(order.subtotalBase) },
-      { restock: OrderService.restocksOnCancel(order.status) },
-    );
-
-    // SWIFT-095: an order cancelled mid-dispatch left its search journal stuck at
-    // SEARCHING forever — a ghost on the ops board and in the dispatch metrics.
-    // Close it, mirroring how the cascade closes on assign/exhaust.
-    await app.prisma.dispatchSearch
-      .updateMany({ where: { subjectId: id, status: 'SEARCHING' }, data: { status: 'CANCELLED', resolution: 'CANCELLED' } })
-      .catch(() => {});
 
     // V1 is cash-only: the platform never holds order money, so there is no wallet
     // to credit. A cancellation before handover means no cash changed hands; if cash
@@ -1377,17 +1720,33 @@ export async function adminRoutes(app: FastifyInstance) {
 
     app.io.to(`order:${id}`).emit('order:status_changed', { orderId: id, status: newStatus });
 
-    await audit(request.user.userId, 'CANCEL_ORDER', 'Order', id, { reason, refund, previousStatus: order.status }, request);
-
+    // [REPORT-010 F-03] Unattested MMG gets the direct-refund guidance — the
+    // customer may have already paid the store's link before this cancel.
+    const mmgGuidance = order.paymentMethod === 'MOBILE_MONEY' && order.paymentStatus === 'PENDING'
+      ? ' If you already sent the MMG payment, the store refunds you directly.'
+      : '';
     await notifications.send({
       userId: order.customerId,
       type: 'ORDER_UPDATE',
       title: 'Order Cancelled',
       body: refund
         ? `Your order ${order.orderNumber} has been cancelled. Any cash you paid will be refunded — our team will follow up.`
-        : `Your order ${order.orderNumber} has been cancelled. ${reason || ''}`.trim(),
+        : `Your order ${order.orderNumber} has been cancelled. ${reason || ''}${mmgGuidance}`.trim(),
       data: { orderId: id, status: newStatus },
     });
+
+    // [REPORT-012 F-012-04] An admin terminal on an unattested-MMG order must
+    // also tell the STORE — it may hold the customer's unconfirmed transfer
+    // and is the only rail that can send it back. Same seam as customer
+    // cancel, auto-cancel, and the ops agent.
+    if (order.paymentMethod === 'MOBILE_MONEY' && order.paymentStatus === 'PENDING' && order.vendorId) {
+      const { publishUnattestedMmgCancellation } = await import('../order/order.service');
+      await publishUnattestedMmgCancellation(app.prisma, notifications, {
+        orderId: id,
+        orderNumber: order.orderNumber,
+        vendorId: order.vendorId,
+      });
+    }
 
     return { success: true, data: { orderId: id, status: newStatus, refunded: !!refund } };
   });
@@ -1395,6 +1754,11 @@ export async function adminRoutes(app: FastifyInstance) {
   // ─── Finance ───────────────────────────────────────────────────────────
 
   app.get('/finance/revenue', { preHandler: [adminGuard] }, async () => {
+    // Admin authority is tenant-local. Raw SQL does not pass through Prisma's
+    // query extension, and Subscription is an indirect child without its own
+    // tenantId, so both paths must carry the authenticated tenant explicitly.
+    const tenantId = getTenantId();
+    if (!tenantId) throw new ForbiddenError('Tenant context required');
     const thirtyDaysAgo = new Date();
     thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
 
@@ -1411,13 +1775,17 @@ export async function adminRoutes(app: FastifyInstance) {
           COUNT(*)::int as order_count
         FROM orders
         WHERE "placedAt" >= ${thirtyDaysAgo}
+          AND "tenantId" = ${tenantId}
           AND status IN ('DELIVERED', 'COMPLETED')
         GROUP BY DATE("placedAt")
         ORDER BY date ASC
       `,
       // Active subscription revenue
       app.prisma.subscription.findMany({
-        where: { status: 'ACTIVE' },
+        where: {
+          status: 'ACTIVE',
+          ...subscriptionTenantScope(tenantId),
+        },
         select: { type: true, weeklyRate: true },
       }),
       // Total delivery fees collected
@@ -1446,10 +1814,18 @@ export async function adminRoutes(app: FastifyInstance) {
   });
 
   app.get('/finance/settlements', { preHandler: [adminGuard] }, async (request) => {
+    const tenantId = getTenantId();
+    if (!tenantId) throw new ForbiddenError('Tenant context required');
     const { page, limit, skip } = parsePagination(request.query as Record<string, string>);
     const { status, vendorId } = settlementsQuerySchema.parse(request.query);
 
+    if (vendorId) {
+      const vendor = await app.prisma.vendor.findFirst({ where: { id: vendorId, tenantId }, select: { id: true } });
+      if (!vendor) throw new NotFoundError('Vendor', vendorId);
+    }
+
     const where: any = {
+      vendor: { tenantId },
       ...(status && { status }),
       ...(vendorId && { vendorId }),
     };
@@ -1471,11 +1847,13 @@ export async function adminRoutes(app: FastifyInstance) {
   });
 
   app.put('/finance/settlements/:id/process', { preHandler: [adminGuard] }, async (request) => {
+    const tenantId = getTenantId();
+    if (!tenantId) throw new ForbiddenError('Tenant context required');
     const { id } = request.params as { id: string };
     const { reference } = processSettlementSchema.parse(request.body ?? {});
 
-    const settlement = await app.prisma.settlement.findUnique({
-      where: { id },
+    const settlement = await app.prisma.settlement.findFirst({
+      where: { id, vendor: { tenantId } },
       include: { vendor: { include: { owner: true } } },
     });
     if (!settlement) throw new NotFoundError('Settlement', id);
@@ -1484,12 +1862,16 @@ export async function adminRoutes(app: FastifyInstance) {
     // Compare-and-set: this is a real payout instruction. Two admins (or a
     // double-click / retry) both passing the in-memory check would otherwise both
     // mark PAID and both fire the payout notification — a duplicate payout.
-    const claimed = await app.prisma.settlement.updateMany({
-      where: { id, status: { not: 'PAID' } },
+    const claimed = await app.prisma.settlement.updateManyAndReturn({
+      where: { id, status: { not: 'PAID' }, vendor: { tenantId } },
       data: { status: 'PAID', paidAt: new Date(), reference: reference || null },
     });
-    if (claimed.count === 0) throw new AppError(409, 'ALREADY_PAID', 'Settlement has already been processed');
-    const updated = await app.prisma.settlement.findUniqueOrThrow({ where: { id } });
+    if (claimed.length === 0) {
+      const stillLocal = await app.prisma.settlement.findFirst({ where: { id, vendor: { tenantId } }, select: { id: true } });
+      if (!stillLocal) throw new NotFoundError('Settlement', id);
+      throw new AppError(409, 'ALREADY_PAID', 'Settlement has already been processed');
+    }
+    const updated = claimed[0]!;
 
     await audit(request.user.userId, 'PROCESS_SETTLEMENT', 'Settlement', id, { amount: settlement.totalBase, reference }, request);
 
@@ -1512,10 +1894,24 @@ export async function adminRoutes(app: FastifyInstance) {
    *  delivery fees stores owe riders in cash on MMG-paid orders, with the
    *  dual-confirm state each row is in. Outstanding = anything not SETTLED. */
   app.get('/finance/cash-settlements', { preHandler: [adminGuard] }, async (request) => {
+    const tenantId = getTenantId();
+    if (!tenantId) throw new ForbiddenError('Tenant context required');
     const { page, limit, skip } = parsePagination(request.query as Record<string, string>);
     const { status, vendorId, riderId } = cashSettlementsQuerySchema.parse(request.query);
 
+    if (vendorId) {
+      const vendor = await app.prisma.vendor.findFirst({ where: { id: vendorId, tenantId }, select: { id: true } });
+      if (!vendor) throw new NotFoundError('Vendor', vendorId);
+    }
+    if (riderId) {
+      const rider = await app.prisma.rider.findFirst({ where: { id: riderId, user: { tenantId } }, select: { id: true } });
+      if (!rider) throw new NotFoundError('Rider', riderId);
+    }
+
     const where: any = {
+      order: { tenantId },
+      rider: { user: { tenantId } },
+      vendor: { tenantId },
       ...(status && { status }),
       ...(vendorId && { vendorId }),
       ...(riderId && { riderId }),
@@ -1537,6 +1933,7 @@ export async function adminRoutes(app: FastifyInstance) {
       // Unfiltered health totals — how much store→rider cash is in each state.
       app.prisma.deliveryCashSettlement.groupBy({
         by: ['status'],
+        where: { order: { tenantId }, rider: { user: { tenantId } }, vendor: { tenantId } },
         _sum: { amount: true },
         _count: true,
       }),
@@ -1598,14 +1995,14 @@ export async function adminRoutes(app: FastifyInstance) {
 
   // ─── Config ────────────────────────────────────────────────────────────
 
-  app.get('/config', { preHandler: [adminGuard] }, async () => {
+  app.get('/config', { preHandler: [platformControlGuard] }, async () => {
     const configs = await app.prisma.platformConfig.findMany({
       orderBy: { key: 'asc' },
     });
     return { success: true, data: configs };
   });
 
-  app.put('/config/:key', { preHandler: [adminGuard] }, async (request) => {
+  app.put('/config/:key', { preHandler: [platformControlGuard] }, async (request) => {
     const key = configKeySchema.parse((request.params as { key: string }).key);
     const { value } = configValueSchema.parse(request.body);
 
@@ -1622,7 +2019,7 @@ export async function adminRoutes(app: FastifyInstance) {
 
   // ─── Promos ────────────────────────────────────────────────────────────
 
-  app.get('/promos', { preHandler: [adminGuard] }, async (request) => {
+  app.get('/promos', { preHandler: [platformControlGuard] }, async (request) => {
     const { page, limit, skip } = parsePagination(request.query as Record<string, string>);
     const { active } = promosQuerySchema.parse(request.query);
 
@@ -1644,7 +2041,7 @@ export async function adminRoutes(app: FastifyInstance) {
     return { success: true, ...paginatedResponse(promos, total, { page, limit, skip }) };
   });
 
-  app.post('/promos', { preHandler: [adminGuard] }, async (request) => {
+  app.post('/promos', { preHandler: [platformControlGuard] }, async (request) => {
     const body = createPromoSchema.parse(request.body);
 
     // Ensure code is unique and uppercase
@@ -1672,7 +2069,7 @@ export async function adminRoutes(app: FastifyInstance) {
     return { success: true, data: promo };
   });
 
-  app.put('/promos/:id', { preHandler: [adminGuard] }, async (request) => {
+  app.put('/promos/:id', { preHandler: [platformControlGuard] }, async (request) => {
     const { id } = request.params as { id: string };
     const body = updatePromoSchema.parse(request.body);
 
@@ -1699,7 +2096,7 @@ export async function adminRoutes(app: FastifyInstance) {
     return { success: true, data: promo };
   });
 
-  app.delete('/promos/:id', { preHandler: [adminGuard] }, async (request) => {
+  app.delete('/promos/:id', { preHandler: [platformControlGuard] }, async (request) => {
     const { id } = request.params as { id: string };
 
     const existing = await app.prisma.promoCode.findUnique({ where: { id } });
@@ -1718,14 +2115,14 @@ export async function adminRoutes(app: FastifyInstance) {
 
   // ─── Zones ─────────────────────────────────────────────────────────────
 
-  app.get('/zones', { preHandler: [adminGuard] }, async () => {
+  app.get('/zones', { preHandler: [platformControlGuard] }, async () => {
     const zones = await app.prisma.zone.findMany({
       orderBy: { name: 'asc' },
     });
     return { success: true, data: zones };
   });
 
-  app.post('/zones', { preHandler: [adminGuard] }, async (request) => {
+  app.post('/zones', { preHandler: [platformControlGuard] }, async (request) => {
     const body = createZoneSchema.parse(request.body);
 
     const zone = await app.prisma.zone.create({
@@ -1744,7 +2141,7 @@ export async function adminRoutes(app: FastifyInstance) {
     return { success: true, data: zone };
   });
 
-  app.put('/zones/:id', { preHandler: [adminGuard] }, async (request) => {
+  app.put('/zones/:id', { preHandler: [platformControlGuard] }, async (request) => {
     const { id } = request.params as { id: string };
     const body = updateZoneSchema.parse(request.body);
 
@@ -1769,7 +2166,7 @@ export async function adminRoutes(app: FastifyInstance) {
     return { success: true, data: zone };
   });
 
-  app.delete('/zones/:id', { preHandler: [adminGuard] }, async (request) => {
+  app.delete('/zones/:id', { preHandler: [platformControlGuard] }, async (request) => {
     const { id } = request.params as { id: string };
 
     const existing = await app.prisma.zone.findUnique({ where: { id } });
@@ -1789,10 +2186,13 @@ export async function adminRoutes(app: FastifyInstance) {
   // ─── Subscriptions ─────────────────────────────────────────────────────
 
   app.get('/subscriptions', { preHandler: [adminGuard] }, async (request) => {
+    const tenantId = getTenantId();
+    if (!tenantId) throw new ForbiddenError('Tenant context required');
     const { page, limit, skip } = parsePagination(request.query as Record<string, string>);
     const { status, type } = subscriptionsQuerySchema.parse(request.query);
 
     const where: any = {
+      ...subscriptionTenantScope(tenantId),
       ...(status && { status }),
       ...(type && { type }),
     };
@@ -1816,31 +2216,40 @@ export async function adminRoutes(app: FastifyInstance) {
   });
 
   app.put('/subscriptions/:id/waive-fee', { preHandler: [adminGuard] }, async (request) => {
+    const tenantId = getTenantId();
+    if (!tenantId) throw new ForbiddenError('Tenant context required');
     const { id } = request.params as { id: string };
     const { reason } = reasonSchema.parse(request.body ?? {});
+    const tenantScope = subscriptionTenantScope(tenantId);
 
-    const subscription = await app.prisma.subscription.findUnique({ where: { id } });
+    const subscription = await app.prisma.subscription.findFirst({
+      where: { id, ...tenantScope },
+      include: {
+        rider: { select: { userId: true } },
+        driver: { select: { userId: true } },
+        vendor: { select: { owner: { select: { userId: true } } } },
+      },
+    });
     if (!subscription) throw new NotFoundError('Subscription', id);
 
-    const updated = await app.prisma.subscription.update({
-      where: { id },
+    const updated = await mutationOrNotFound('Subscription', id, () => app.prisma.subscription.update({
+      where: { id, ...tenantScope },
       data: {
         feeWaived: true,
         feeWaivedBy: request.user.userId,
         feeWaivedReason: reason || 'Waived by admin',
       },
-    });
+    }));
 
     await audit(request.user.userId, 'WAIVE_SUBSCRIPTION_FEE', 'Subscription', id, { reason }, request);
 
     // Notify the subscription holder
     const notifyUserId = subscription.riderId
-      ? (await app.prisma.rider.findUnique({ where: { id: subscription.riderId }, select: { userId: true } }))?.userId
+      ? subscription.rider?.userId
       : subscription.driverId
-        ? (await app.prisma.driver.findUnique({ where: { id: subscription.driverId }, select: { userId: true } }))?.userId
+        ? subscription.driver?.userId
         : subscription.vendorId
-          ? (await app.prisma.vendor.findUnique({ where: { id: subscription.vendorId }, include: { owner: true } }))?.owner
-              ?.userId
+          ? subscription.vendor?.owner.userId
           : null;
 
     if (notifyUserId) {
@@ -1858,8 +2267,20 @@ export async function adminRoutes(app: FastifyInstance) {
   /** Record a cash/bank-transfer top-up (manual confirm for now).
    *  A top-up while PAST_DUE/SUSPENDED bills immediately and reinstates. */
   app.post('/subscriptions/:id/topup', { preHandler: [adminGuard] }, async (request) => {
+    requireDefaultTenantBilling();
+    const tenantId = getTenantId();
+    if (!tenantId) throw new ForbiddenError('Tenant context required');
     const { id } = request.params as { id: string };
     const body = topUpSchema.parse(request.body);
+
+    const subscription = await app.prisma.subscription.findFirst({
+      where: {
+        id,
+        ...subscriptionTenantScope(tenantId),
+      },
+      select: { id: true },
+    });
+    if (!subscription) throw new NotFoundError('Subscription', id);
 
     // SWIFT-030: an Idempotency-Key header makes a retry of the same top-up a
     // no-op (no double-credit). The admin console sends one per top-up action.
@@ -1872,13 +2293,24 @@ export async function adminRoutes(app: FastifyInstance) {
 
   /** Billing audit trail for one subscription. */
   app.get('/subscriptions/:id/billing-events', { preHandler: [adminGuard] }, async (request) => {
+    const tenantId = getTenantId();
+    if (!tenantId) throw new ForbiddenError('Tenant context required');
     const { id } = request.params as { id: string };
     const { page, limit, skip } = parsePagination(request.query as Record<string, string>);
 
+    const subscription = await app.prisma.subscription.findFirst({
+      where: {
+        id,
+        ...subscriptionTenantScope(tenantId),
+      },
+      select: { id: true },
+    });
+    if (!subscription) throw new NotFoundError('Subscription', id);
+
     const where = { subscriptionId: id };
     const [events, total] = await Promise.all([
-      app.prisma.billingEvent.findMany({ where, orderBy: { createdAt: 'desc' }, skip, take: limit }),
-      app.prisma.billingEvent.count({ where }),
+      tenantPrisma.billingEvent.findMany({ where, orderBy: { createdAt: 'desc' }, skip, take: limit }),
+      tenantPrisma.billingEvent.count({ where }),
     ]);
 
     return { success: true, ...paginatedResponse(events, total, { page, limit, skip }) };
@@ -1977,8 +2409,8 @@ export async function adminRoutes(app: FastifyInstance) {
   });
 
   // ── Ad creative review queue + campaign kill (spec §10 / §6.1) ────────────
-  const creativeSvc = new CreativeService(app.prisma, app.io);
-  const adsLifecycle = new AdsLifecycleService(app.prisma, app.io);
+  const creativeSvc = new CreativeService(tenantPrisma, app.io);
+  const adsLifecycle = new AdsLifecycleService(tenantPrisma, app.io);
 
   app.get('/ads/creatives/queue', { preHandler: [adminGuard] }, async () => {
     return { success: true, data: await creativeSvc.queue() };
@@ -2002,7 +2434,7 @@ export async function adminRoutes(app: FastifyInstance) {
     const killed = await adsLifecycle.transition(id, 'kill', request.user.userId, reason);
     // §8.4 row 5: kill refunds future weeks by default (current week 0%).
     const { AdsRefundService } = await import('../ads/refund.service');
-    await new AdsRefundService(app.prisma, app.io).execute(id, 'ADMIN_KILL', request.user.userId).catch(() => {});
+    await new AdsRefundService(tenantPrisma, app.io).execute(id, 'ADMIN_KILL', request.user.userId).catch(() => {});
     return { success: true, data: { id: killed.id, status: killed.status } };
   });
 
@@ -2013,7 +2445,7 @@ export async function adminRoutes(app: FastifyInstance) {
     const { id } = request.params as { id: string };
     const { reference } = z.object({ reference: z.string().trim().min(3).max(200) }).parse(request.body ?? {});
     const { AdCheckoutService } = await import('../ads/checkout.service');
-    const invoice = await new AdCheckoutService(app.prisma, app.io).markPaid(id, { adminUserId: request.user.userId, manualReference: reference });
+    const invoice = await new AdCheckoutService(tenantPrisma, app.io).markPaid(id, { adminUserId: request.user.userId, manualReference: reference });
     return { success: true, data: { id: invoice.id, number: invoice.number, status: invoice.status, paidAt: invoice.paidAt } };
   });
 
@@ -2207,13 +2639,13 @@ export async function adminRoutes(app: FastifyInstance) {
 
   // ── Trial integrity (spec Part 9) — the identity graph is FOUNDER-ONLY
   //    god's-eye tooling: platform-wide by design (the one sanctioned
-  //    cross-tenant system). The founderGuard + onResponse auto-audit
+  //    cross-tenant system). The platformControlGuard + onResponse auto-audit
   //    cover these surfaces — every view leaves an audit row. ──────────────────
 
   /** Phase 2 backfill: run the matcher across the existing user base and
    *  return the evidence report. Idempotent; evidence first, decisions second
    *  — nothing here enforces anything. */
-  app.post('/integrity/backfill', { preHandler: [founderGuard] }, async () => {
+  app.post('/integrity/backfill', { preHandler: [platformControlGuard] }, async () => {
     const { runIdentityBackfill } = await import('../integrity/backfill');
     return { success: true, data: await runIdentityBackfill(app.prisma) };
   });
@@ -2221,7 +2653,7 @@ export async function adminRoutes(app: FastifyInstance) {
   /** The explainability read (Part 9.1/9.4): one account's cluster — members,
    *  every link's evidence, trial history, enforcement history, exceptions,
    *  and SOFT advisories. Every enforcement must be explainable from here. */
-  app.get<{ Params: { userId: string } }>('/integrity/identity/:userId', { preHandler: [founderGuard] }, async (request) => {
+  app.get<{ Params: { userId: string } }>('/integrity/identity/:userId', { preHandler: [platformControlGuard] }, async (request) => {
     const { IdentityService } = await import('../integrity/identity.service');
     const identity = new IdentityService(app.prisma);
     const clusterId = await identity.resolveCluster(request.params.userId);
@@ -2262,7 +2694,7 @@ export async function adminRoutes(app: FastifyInstance) {
   //    governance: founder-controlled, boring on purpose. Append-only rates;
   //    the fat-finger guard is how 208.72 never becomes 2087.2 in prod. ──────
 
-  app.get('/billing/fx-rates', { preHandler: [adminGuard] }, async (request) => {
+  app.get('/billing/fx-rates', { preHandler: [platformControlGuard] }, async (request) => {
     const { quote } = z.object({ quote: z.string().length(3).optional() }).parse(request.query ?? {});
     const { rateStaleness } = await import('../billing/fx');
     const rates = await app.prisma.fxRate.findMany({
@@ -2278,7 +2710,7 @@ export async function adminRoutes(app: FastifyInstance) {
 
   /** Append a rate. >20% moves require typing the quote code back
    *  (confirmQuote) — the delta comes back in words on the first attempt. */
-  app.post('/billing/fx-rates', { preHandler: [adminGuard] }, async (request) => {
+  app.post('/billing/fx-rates', { preHandler: [platformControlGuard] }, async (request) => {
     const body = z.object({
       quote: z.string().length(3).toUpperCase(),
       rate: z.number().positive(),
@@ -2312,14 +2744,14 @@ export async function adminRoutes(app: FastifyInstance) {
     return { success: true, data: { ...row, rate: Number(row.rate) } };
   });
 
-  app.get('/billing/price-book', { preHandler: [adminGuard] }, async () => {
+  app.get('/billing/price-book', { preHandler: [platformControlGuard] }, async () => {
     const entries = await app.prisma.priceBookEntry.findMany({ orderBy: [{ role: 'asc' }, { tier: 'asc' }] });
     return { success: true, data: entries.map((e) => ({ ...e, amountUsd: Number(e.amountUsd) })) };
   });
 
   /** Set a plan price (append semantics: deactivate + create keeps history;
    *  the book is USD-only by law). */
-  app.put('/billing/price-book', { preHandler: [adminGuard] }, async (request) => {
+  app.put('/billing/price-book', { preHandler: [platformControlGuard] }, async (request) => {
     const body = z.object({
       role: z.enum(['VENDOR', 'RIDER', 'DRIVER', 'SERVICE']),
       tier: z.string().trim().max(40).optional(),
@@ -2343,7 +2775,7 @@ export async function adminRoutes(app: FastifyInstance) {
   app.get('/billing/usd-summary', { preHandler: [adminGuard] }, async (request) => {
     const { days } = z.object({ days: z.coerce.number().int().min(1).max(365).default(30) }).parse(request.query ?? {});
     const since = new Date(Date.now() - days * 86_400_000);
-    const charges = await app.prisma.billingEvent.findMany({
+    const charges = await tenantPrisma.billingEvent.findMany({
       where: { type: 'CHARGE_SUCCESS', createdAt: { gte: since } },
       select: { amount: true, amountUsd: true, fxRateId: true, createdAt: true, currencyCode: true },
     });
@@ -2365,7 +2797,7 @@ export async function adminRoutes(app: FastifyInstance) {
       }
       weeks.set(k, w);
     }
-    const mismatches = await app.prisma.billingEvent.count({
+    const mismatches = await tenantPrisma.billingEvent.count({
       where: { type: 'REMINDER', idempotencyKey: { startsWith: 'mismatch:' }, createdAt: { gte: since } },
     });
     return {
@@ -2385,14 +2817,14 @@ export async function adminRoutes(app: FastifyInstance) {
   /** MODE A preview — the mapping table for founder approval. Pure read. */
   app.get('/billing/usd-migration/preview', { preHandler: [adminGuard] }, async () => {
     const { previewModeA } = await import('../billing/usd-migration');
-    return { success: true, data: await previewModeA(app.prisma) };
+    return { success: true, data: await previewModeA(tenantPrisma) };
   });
 
   /** MODE A enact — send the deduped 30-day notices; the founder flips
    *  usdPricingEnabled once the window has run. */
   app.post('/billing/usd-migration/mode-a', { preHandler: [adminGuard] }, async () => {
     const { enactModeA } = await import('../billing/usd-migration');
-    return { success: true, data: await enactModeA(app.prisma, app.io) };
+    return { success: true, data: await enactModeA(tenantPrisma, app.io) };
   });
 
   /** MODE B enable — grandfather existing payers on today's local price via
@@ -2404,12 +2836,12 @@ export async function adminRoutes(app: FastifyInstance) {
       throw new AppError(400, 'SUNSET_TOO_SOON', 'The sunset must be at least 30 days out — the T−30 notice needs its window.');
     }
     const { enableModeB } = await import('../billing/usd-migration');
-    return { success: true, data: await enableModeB(app.prisma, sunset) };
+    return { success: true, data: await enableModeB(tenantPrisma, sunset) };
   });
 
   /** Pure preview (Part 12): the full plan table at a hypothetical rate —
    *  commit is only ever the POST above. */
-  app.get('/billing/fx-preview', { preHandler: [adminGuard] }, async (request) => {
+  app.get('/billing/fx-preview', { preHandler: [platformControlGuard] }, async (request) => {
     const q = z.object({ quote: z.string().length(3).toUpperCase(), rate: z.coerce.number().positive() }).parse(request.query ?? {});
     const { convertUsdToLocal, formatMoney } = await import('../billing/fx');
     const tenant = await app.prisma.tenantBillingCurrency.findFirst({ where: { settlementCurrency: q.quote } });
@@ -2438,10 +2870,10 @@ export async function adminRoutes(app: FastifyInstance) {
   /** Part 7/10 KPIs — every number derived from the rows money and state
    *  moved on (the DB testifies). Reading it at t0 IS the baseline capture;
    *  re-read after each friction fix lands. */
-  app.get('/integrity/kpis', { preHandler: [adminGuard] }, async (request) => {
+  app.get('/integrity/kpis', { preHandler: [platformControlGuard] }, async (request) => {
     const { days } = z.object({ days: z.coerce.number().int().min(1).max(365).default(30) }).parse(request.query ?? {});
     const { frictionKpis } = await import('../integrity/friction-metrics');
-    return { success: true, data: await frictionKpis(app.prisma, days) };
+    return { success: true, data: await frictionKpis(tenantPrisma, days) };
   });
 
   // ── Batching System 1 (shadow phase) — evidence read + config ─────────────
@@ -2526,15 +2958,38 @@ export async function adminRoutes(app: FastifyInstance) {
   /** Backfill: classify every driver's bodyType/colorHex from the fleet
    *  mapping. Idempotent; UNKNOWNs form the classification queue below. */
   app.post('/rides/vehicle-identity-backfill', { preHandler: [adminGuard] }, async () => {
-    const { backfillVehicleIdentity } = await import('../rides/vehicle-identity');
-    return { success: true, data: await backfillVehicleIdentity(app.prisma) };
+    const tenantId = requireTenantId();
+    const { classifyBodyType, resolveColorHex } = await import('../rides/vehicle-identity');
+    const out = { classified: 0, unknown: 0, tinted: 0 };
+    for (;;) {
+      const batch = await app.prisma.driver.findMany({
+        where: { bodyType: null, user: { tenantId } },
+        select: { id: true, vehicleMake: true, vehicleModel: true, vehicleColor: true },
+        take: 500,
+      });
+      if (batch.length === 0) break;
+      for (const driver of batch) {
+        const bodyType = classifyBodyType(driver.vehicleMake, driver.vehicleModel);
+        const colorHex = resolveColorHex(driver.vehicleColor);
+        const claimed = await app.prisma.driver.updateMany({
+          where: { id: driver.id, bodyType: null, user: { tenantId } },
+          data: { bodyType, colorHex },
+        });
+        if (claimed.count === 0) continue;
+        if (bodyType === 'UNKNOWN') out.unknown += 1;
+        else out.classified += 1;
+        if (colorHex) out.tinted += 1;
+      }
+    }
+    return { success: true, data: out };
   });
 
   /** The classification queue: UNKNOWN vehicles, with the photos the reviewer
    *  is already looking at. */
   app.get('/rides/vehicle-identity-queue', { preHandler: [adminGuard] }, async () => {
+    const tenantId = requireTenantId();
     const rows = await app.prisma.driver.findMany({
-      where: { bodyType: 'UNKNOWN' },
+      where: { bodyType: 'UNKNOWN', user: { tenantId } },
       select: {
         id: true, vehicleMake: true, vehicleModel: true, vehicleColor: true,
         vehiclePhotoUrl: true, licensePlate: true,
@@ -2548,16 +3003,17 @@ export async function adminRoutes(app: FastifyInstance) {
   /** One-tap classification (6B.2): the reviewer names the shape; optional
    *  colorHex override for odd color words. */
   app.put('/rides/drivers/:id/vehicle-identity', { preHandler: [adminGuard] }, async (request) => {
+    const tenantId = requireTenantId();
     const { id } = z.object({ id: z.string() }).parse(request.params);
     const body = z.object({
       bodyType: z.enum(['SEDAN', 'HATCHBACK', 'WAGON', 'SUV', 'PICKUP', 'MINIBUS', 'COMPACT', 'UNKNOWN']),
       colorHex: z.string().regex(/^#[0-9A-Fa-f]{6}$/).optional(),
     }).parse(request.body ?? {});
-    const updated = await app.prisma.driver.update({
-      where: { id },
+    const updated = await mutationOrNotFound('Driver', id, () => app.prisma.driver.update({
+      where: { id, user: { tenantId } },
       data: { bodyType: body.bodyType, ...(body.colorHex ? { colorHex: body.colorHex } : {}) },
       select: { id: true, bodyType: true, colorHex: true },
-    });
+    }));
     return { success: true, data: updated };
   });
 
@@ -2567,8 +3023,37 @@ export async function adminRoutes(app: FastifyInstance) {
    *  assertion (zero NULLs, platform-wide distinctness, 100% Luhn). Safe to
    *  re-run any time — assigned rows are skipped. */
   app.post('/billing/san-backfill', { preHandler: [adminGuard] }, async () => {
-    const { backfillSans } = await import('../billing/san.service');
-    const result = await backfillSans(app.prisma);
+    const tenantId = requireTenantId();
+    const tenantScope = subscriptionTenantScope(tenantId);
+    const { ensureSan } = await import('../billing/san.service');
+    let assigned = 0;
+    for (;;) {
+      const batch = await app.prisma.subscription.findMany({
+        where: { san: null, ...tenantScope },
+        select: { id: true },
+        take: 500,
+        orderBy: { createdAt: 'asc' },
+      });
+      if (batch.length === 0) break;
+      for (const subscription of batch) {
+        // ensureSan receives the relation-scoped client, so its internal
+        // findUnique/updateMany winner loop cannot jump to another tenant.
+        await ensureSan(tenantPrisma, subscription.id);
+        assigned += 1;
+      }
+    }
+    const rows = await app.prisma.subscription.findMany({
+      where: { san: { not: null }, ...tenantScope },
+      select: { san: true },
+    });
+    const { luhnValid } = await import('../billing/san');
+    const sans = rows.map((row) => row.san!);
+    const result = {
+      assigned,
+      total: sans.length,
+      distinct: new Set(sans).size,
+      luhnFailures: sans.filter((san) => !luhnValid(san)).length,
+    };
     return { success: true, data: { ...result, healthy: result.luhnFailures === 0 && result.distinct === result.total } };
   });
 
@@ -2580,6 +3065,7 @@ export async function adminRoutes(app: FastifyInstance) {
    *  Law 26.5: entry requires the logged portal-verification confirmation —
    *  never from a photo or screenshot alone. */
   app.post('/billing/agent-payments', { preHandler: [adminGuard] }, async (request) => {
+    requireDefaultTenantBilling();
     const body = z.object({
       san: z.string().min(1).max(20),
       amount: z.number().positive(),
@@ -2592,7 +3078,7 @@ export async function adminRoutes(app: FastifyInstance) {
       }),
     }).parse(request.body ?? {});
     const { AgentCashService } = await import('../billing/agent-cash.service');
-    const svc = new AgentCashService(app.prisma, billing);
+    const svc = new AgentCashService(tenantPrisma, billing);
     const result = await svc.ingest({
       externalId: `MANUAL:${body.receiptNumber}`,
       channel: 'MANUAL_ADMIN',
@@ -2627,20 +3113,33 @@ export async function adminRoutes(app: FastifyInstance) {
    *  produce; rows older than 24h page. */
   app.get('/billing/agent-payments/unmatched', { preHandler: [adminGuard] }, async () => {
     const { AgentCashService } = await import('../billing/agent-cash.service');
-    const svc = new AgentCashService(app.prisma, billing);
+    const svc = new AgentCashService(tenantPrisma, billing);
     return { success: true, data: await svc.unmatchedQueue() };
   });
 
   /** Attach a suspensed payment to an account — credits via the NORMAL
    *  pipeline (conversion + reactivation included), original linked. */
   app.post('/billing/agent-payments/:id/attach', { preHandler: [adminGuard] }, async (request) => {
+    requireDefaultTenantBilling();
     const { id } = z.object({ id: z.string() }).parse(request.params);
     const body = z.object({ subscriptionId: z.string().min(1) }).parse(request.body ?? {});
-    const sub = await app.prisma.subscription.findUnique({ where: { id: body.subscriptionId } });
-    if (!sub) throw new AppError(404, 'NOT_FOUND', 'No such subscription');
+    // Resolve the requested destination inside the authenticated tenant before
+    // looking at the payment's workflow state. Otherwise a local MATCHED row
+    // returns NOT_UNMATCHED for a real foreign subscription id, turning this
+    // endpoint into a cross-tenant existence/state oracle. The actual credit
+    // remains one transaction inside AgentCashService after this authz gate.
+    const destination = await tenantPrisma.subscription.findUnique({
+      where: { id: body.subscriptionId },
+      select: { id: true },
+    });
+    if (!destination) throw new NotFoundError('Subscription', body.subscriptionId);
     const { AgentCashService } = await import('../billing/agent-cash.service');
-    const svc = new AgentCashService(app.prisma, billing);
+    const svc = new AgentCashService(tenantPrisma, billing);
     try {
+      // AgentCashService owns the single transaction: payment-row claim,
+      // immutable event, receipt, balanced ledger, wallet balance, and final
+      // RESOLVED state. Keeping another route transaction open here would
+      // reintroduce the nested-connection pool deadlock this boundary removes.
       const result = await svc.attach(id, body.subscriptionId, request.user.userId);
       return { success: true, data: result };
     } catch (e) {
@@ -2656,10 +3155,10 @@ export async function adminRoutes(app: FastifyInstance) {
   app.post('/billing/agent-payments/:id/refund-flag', { preHandler: [adminGuard] }, async (request) => {
     const { id } = z.object({ id: z.string() }).parse(request.params);
     const body = z.object({ note: z.string().trim().min(3).max(500) }).parse(request.body ?? {});
-    const row = await app.prisma.mmgAgentPayment.findUnique({ where: { id } });
+    const row = await tenantPrisma.mmgAgentPayment.findUnique({ where: { id } });
     if (!row) throw new AppError(404, 'NOT_FOUND', 'No such payment');
     if (row.status !== 'UNMATCHED') throw new AppError(409, 'NOT_UNMATCHED', 'Only unmatched payments can be refund-flagged.');
-    const updated = await app.prisma.mmgAgentPayment.update({
+    const updated = await tenantPrisma.mmgAgentPayment.update({
       where: { id },
       data: { status: 'REFUND_FLAGGED', note: body.note, resolvedBy: request.user.userId, resolvedAt: new Date() },
     });
@@ -2670,7 +3169,10 @@ export async function adminRoutes(app: FastifyInstance) {
   app.post('/billing/agent-payments/:id/note', { preHandler: [adminGuard] }, async (request) => {
     const { id } = z.object({ id: z.string() }).parse(request.params);
     const body = z.object({ note: z.string().trim().min(1).max(500) }).parse(request.body ?? {});
-    const updated = await app.prisma.mmgAgentPayment.update({ where: { id }, data: { note: body.note } });
+    const updated = await mutationOrNotFound('MmgAgentPayment', id, () => tenantPrisma.mmgAgentPayment.update({
+      where: { id },
+      data: { note: body.note },
+    }));
     return { success: true, data: updated };
   });
 
@@ -2678,11 +3180,12 @@ export async function adminRoutes(app: FastifyInstance) {
    *  every row rides the normal pipeline; the recon report is returned and a
    *  trailer mismatch pages. Re-importing the same file is a proven no-op. */
   app.post('/billing/settlement-import', { preHandler: [adminGuard] }, async (request) => {
+    requireDefaultTenantBilling();
     const body = z.object({ csv: z.string().min(10).max(5_000_000), source: z.string().trim().max(120).default('manual-upload') }).parse(request.body ?? {});
     const { AgentCashService } = await import('../billing/agent-cash.service');
     const { importSettlementCsv } = await import('../billing/settlement-import');
-    const svc = new AgentCashService(app.prisma, billing);
-    const report = await importSettlementCsv(app.prisma, svc, body.csv, { source: body.source });
+    const svc = new AgentCashService(tenantPrisma, billing);
+    const report = await importSettlementCsv(tenantPrisma, svc, body.csv, { source: body.source });
     if (report.trailerMismatch) {
       const { notifyAdmins } = await import('../notification/notification.service');
       await notifyAdmins(app.prisma, notifications, {
@@ -2697,13 +3200,13 @@ export async function adminRoutes(app: FastifyInstance) {
   /** Ingestion-mode config [4.5] — drives which jobs run and the activation-
    *  speed copy on every screen (SO-7: never promise webhook speed in manual
    *  mode). Stored in PlatformConfig; read by mobile via /subscription. */
-  app.get('/billing/agent-cash-config', { preHandler: [adminGuard] }, async () => {
+  app.get('/billing/agent-cash-config', { preHandler: [platformControlGuard] }, async () => {
     const row = await app.prisma.platformConfig.findUnique({ where: { key: 'billing.mmg_agent.ingestion_mode' } });
     const mode = (row?.value as string | null) ?? 'MANUAL';
     return { success: true, data: { ingestionMode: mode, webhookConfigured: Boolean(process.env['AGENT_CASH_WEBHOOK_SECRET']) } };
   });
 
-  app.put('/billing/agent-cash-config', { preHandler: [adminGuard] }, async (request) => {
+  app.put('/billing/agent-cash-config', { preHandler: [platformControlGuard] }, async (request) => {
     const body = z.object({ ingestionMode: z.enum(['MANUAL', 'SETTLEMENT_DAILY', 'WEBHOOK']) }).parse(request.body ?? {});
     if (body.ingestionMode === 'WEBHOOK' && !process.env['AGENT_CASH_WEBHOOK_SECRET']) {
       throw new AppError(400, 'WEBHOOK_NOT_CONFIGURED', 'Set AGENT_CASH_WEBHOOK_SECRET (MMG onboarding) before promising webhook-speed activation.');
@@ -2722,9 +3225,10 @@ export async function adminRoutes(app: FastifyInstance) {
    *  tracker. At pilot scale the founder's phone call at the right moment IS
    *  the highest-ROI collections tool; this makes those calls effortless. */
   app.get('/billing/collections', { preHandler: [adminGuard] }, async (request) => {
+    const tenantId = requireTenantId();
     const { tab } = z.object({ tab: z.enum(['due72', 'pastdue', 'suspended', 'churned']).default('due72') }).parse(request.query ?? {});
     const now = Date.now();
-    const where =
+    const statusWhere =
       tab === 'due72'
         ? { status: 'ACTIVE' as const, feeWaived: false, nextBillingDate: { lte: new Date(now + 72 * 3_600_000) } }
         : tab === 'pastdue'
@@ -2732,6 +3236,7 @@ export async function adminRoutes(app: FastifyInstance) {
           : tab === 'suspended'
             ? { status: 'SUSPENDED' as const }
             : { status: 'CHURNED' as const };
+    const where = { ...statusWhere, ...subscriptionTenantScope(tenantId) };
     const subs = await app.prisma.subscription.findMany({
       where,
       include: {
@@ -2744,9 +3249,9 @@ export async function adminRoutes(app: FastifyInstance) {
     });
     const ids = subs.map((s) => s.id);
     const [balances, contacts, lastPayments] = await Promise.all([
-      app.prisma.prepaidBalance.findMany({ where: { subscriptionId: { in: ids } } }),
+      tenantPrisma.prepaidBalance.findMany({ where: { subscriptionId: { in: ids } } }),
       app.prisma.collectionContact.findMany({ where: { subscriptionId: { in: ids } }, orderBy: { createdAt: 'desc' } }),
-      app.prisma.subscriptionPayment.findMany({
+      tenantPrisma.subscriptionPayment.findMany({
         where: { subscriptionId: { in: ids }, status: 'CAPTURED' },
         orderBy: { paidAt: 'desc' },
         distinct: ['subscriptionId'],
@@ -2794,6 +3299,7 @@ export async function adminRoutes(app: FastifyInstance) {
   /** Outcome logging [21.2]: reached / promised {date} / refused / wrong
    *  number. Promise-kept rate becomes a KPI. */
   app.post('/billing/collections/:subscriptionId/contact', { preHandler: [adminGuard] }, async (request) => {
+    const tenantId = requireTenantId();
     const { subscriptionId } = z.object({ subscriptionId: z.string() }).parse(request.params);
     const body = z.object({
       outcome: z.enum(['REACHED', 'PROMISED', 'REFUSED', 'WRONG_NUMBER']),
@@ -2803,6 +3309,11 @@ export async function adminRoutes(app: FastifyInstance) {
     if (body.outcome === 'PROMISED' && !body.promisedDate) {
       throw new AppError(400, 'PROMISE_NEEDS_DATE', 'A promise without a date cannot be tracked.');
     }
+    const subscription = await app.prisma.subscription.findFirst({
+      where: { id: subscriptionId, ...subscriptionTenantScope(tenantId) },
+      select: { id: true },
+    });
+    if (!subscription) throw new NotFoundError('Subscription', subscriptionId);
     const row = await app.prisma.collectionContact.create({
       data: {
         subscriptionId,
@@ -2824,7 +3335,7 @@ export async function adminRoutes(app: FastifyInstance) {
     const to = q.to ? new Date(q.to) : new Date();
     const from = q.from ? new Date(q.from) : new Date(to.getTime() - 30 * 86_400_000);
     const { cashJournalCsv } = await import('../billing/receipts');
-    const csv = await cashJournalCsv(app.prisma, from, to);
+    const csv = await cashJournalCsv(tenantPrisma, from, to);
     reply.header('content-type', 'text/csv; charset=utf-8');
     reply.header('content-disposition', `attachment; filename="swift-cash-journal-${from.toISOString().slice(0, 10)}-${to.toISOString().slice(0, 10)}.csv"`);
     return reply.send(csv);
@@ -2836,7 +3347,7 @@ export async function adminRoutes(app: FastifyInstance) {
    *  per period. Batches build weekly (job) once the cadence config is set. */
   app.get('/billing/settlement-batches', { preHandler: [adminGuard] }, async () => {
     const { buildExpectedBatches, reconConfig } = await import('../billing/bank-recon');
-    const created = await buildExpectedBatches(app.prisma); // idempotent; inert without config
+    const created = await buildExpectedBatches(tenantPrisma); // idempotent; inert without config
     const batches = await app.prisma.settlementBatch.findMany({ orderBy: { periodStart: 'desc' }, take: 60 });
     return {
       success: true,
@@ -2884,16 +3395,19 @@ export async function adminRoutes(app: FastifyInstance) {
   app.get('/billing/cash-kpis', { preHandler: [adminGuard] }, async (request) => {
     const { days } = z.object({ days: z.coerce.number().int().min(1).max(365).default(30) }).parse(request.query ?? {});
     const since = new Date(Date.now() - days * 86_400_000);
+    // CollectionContact has no Prisma relation (only a loose subscriptionId),
+    // so derive its boundary from the caller's relation-scoped subscriptions.
+    const subscriptionIds = (await tenantPrisma.subscription.findMany({ select: { id: true } })).map((s) => s.id);
     const [byChannel, unmatchedDepth, oldestUnmatched, contacts, payments, dueStates] = await Promise.all([
       app.prisma.mmgAgentPayment.groupBy({ by: ['channel'], where: { createdAt: { gte: since } }, _count: true, _sum: { amount: true } }),
       app.prisma.mmgAgentPayment.count({ where: { status: 'UNMATCHED' } }),
       app.prisma.mmgAgentPayment.findFirst({ where: { status: 'UNMATCHED' }, orderBy: { createdAt: 'asc' }, select: { createdAt: true } }),
-      app.prisma.collectionContact.findMany({ where: { createdAt: { gte: since } } }),
-      app.prisma.subscriptionPayment.findMany({
-        where: { status: 'CAPTURED', paidAt: { gte: since } },
+      app.prisma.collectionContact.findMany({ where: { subscriptionId: { in: subscriptionIds }, createdAt: { gte: since } } }),
+      tenantPrisma.subscriptionPayment.findMany({
+        where: { subscriptionId: { in: subscriptionIds }, status: 'CAPTURED', paidAt: { gte: since } },
         select: { subscriptionId: true, paidAt: true, createdAt: true },
       }),
-      app.prisma.subscription.groupBy({ by: ['status'], _count: true }),
+      tenantPrisma.subscription.groupBy({ by: ['status'], _count: true }),
     ]);
     const promised = contacts.filter((c) => c.outcome === 'PROMISED' && c.promisedDate);
     const promisesKept = promised.filter((c) =>
@@ -2910,7 +3424,7 @@ export async function adminRoutes(app: FastifyInstance) {
         subscriptionStates: dueStates.map((s) => ({ status: s.status, count: s._count })),
         // THE pilot metric [21.4]: did the education land — wallets loaded
         // before trial end mean conversion without interruption.
-        firstPaymentFunnel: await firstPaymentFunnel(app.prisma, days),
+        firstPaymentFunnel: await firstPaymentFunnel(tenantPrisma, days),
       },
     };
   });
@@ -2920,13 +3434,16 @@ export async function adminRoutes(app: FastifyInstance) {
   app.get('/billing/san/:san', { preHandler: [adminGuard] }, async (request) => {
     const { san } = z.object({ san: z.string().min(1).max(20) }).parse(request.params);
     const { resolveSan } = await import('../billing/san.service');
-    const res = await resolveSan(app.prisma, san);
+    // The scoped client makes a foreign tenant's otherwise-valid SAN look
+    // exactly like an unknown SAN; this endpoint must not be an existence
+    // oracle for another operator's payment references.
+    const res = await resolveSan(tenantPrisma, san);
     if (!res.ok) return { success: true, data: { valid: false, code: res.code } };
     const sub = res.subscription;
     const [vendor, rider, driver] = await Promise.all([
       sub.vendorId ? app.prisma.vendor.findUnique({ where: { id: sub.vendorId }, select: { name: true, city: true } }) : null,
-      sub.riderId ? app.prisma.rider.findUnique({ where: { id: sub.riderId }, select: { user: { select: { firstName: true, lastName: true, phone: true } } } }) : null,
-      sub.driverId ? app.prisma.driver.findUnique({ where: { id: sub.driverId }, select: { user: { select: { firstName: true, lastName: true, phone: true } } } }) : null,
+      sub.riderId ? tenantPrisma.rider.findUnique({ where: { id: sub.riderId }, select: { user: { select: { firstName: true, lastName: true, phone: true } } } }) : null,
+      sub.driverId ? tenantPrisma.driver.findUnique({ where: { id: sub.driverId }, select: { user: { select: { firstName: true, lastName: true, phone: true } } } }) : null,
     ]);
     const holder = vendor
       ? { kind: 'VENDOR', name: vendor.name, city: vendor.city }
@@ -2952,7 +3469,7 @@ export async function adminRoutes(app: FastifyInstance) {
   /** Part 4 appeals queue — OPEN cases with the accused's identity attached,
    *  oldest first (the 24h clock). Part 10's overturn rate rides along: >5%
    *  is the false-positive alarm that pauses enforcement expansion. */
-  app.get('/integrity/appeals', { preHandler: [founderGuard] }, async () => {
+  app.get('/integrity/appeals', { preHandler: [platformControlGuard] }, async () => {
     const { appealOverturnRate } = await import('../integrity/enforcement');
     const open = await app.prisma.enforcementAction.findMany({
       where: { appeal: 'OPEN' },
@@ -2975,7 +3492,7 @@ export async function adminRoutes(app: FastifyInstance) {
 
   /** Resolve an appeal. Overturn lifts the hold AND grants the cluster a
    *  FOUNDER_OVERRIDE exception, so the trial law honors the human next time. */
-  app.post<{ Params: { id: string } }>('/integrity/appeals/:id/resolve', { preHandler: [founderGuard] }, async (request) => {
+  app.post<{ Params: { id: string } }>('/integrity/appeals/:id/resolve', { preHandler: [platformControlGuard] }, async (request) => {
     const body = z.object({
       outcome: z.enum(['OVERTURNED', 'UPHELD']),
       note: z.string().trim().min(3).max(500),
@@ -2988,7 +3505,7 @@ export async function adminRoutes(app: FastifyInstance) {
   /** §3.5 — the founder issues a deliberate, logged exception (multi-location
    *  vendor trial-per-location, household, override). The trial law honors
    *  live exceptions; appeals overturn through this same mechanism. */
-  app.post('/integrity/exceptions', { preHandler: [founderGuard] }, async (request) => {
+  app.post('/integrity/exceptions', { preHandler: [platformControlGuard] }, async (request) => {
     const body = z.object({
       clusterId: z.string().min(1),
       scope: z.enum(['MULTI_LOCATION_VENDOR', 'HOUSEHOLD', 'FOUNDER_OVERRIDE']),
@@ -3030,7 +3547,7 @@ export async function adminRoutes(app: FastifyInstance) {
 
     const where = { status };
     const [documents, total] = await Promise.all([
-      app.prisma.verificationDocument.findMany({
+      tenantPrisma.verificationDocument.findMany({
         where,
         include: {
           user: { select: { id: true, firstName: true, lastName: true, phone: true, countryCode: true } },
@@ -3039,7 +3556,7 @@ export async function adminRoutes(app: FastifyInstance) {
         skip,
         take: limit,
       }),
-      app.prisma.verificationDocument.count({ where }),
+      tenantPrisma.verificationDocument.count({ where }),
     ]);
 
     return { success: true, ...paginatedResponse(documents, total, { page, limit, skip }) };
@@ -3079,7 +3596,7 @@ export async function adminRoutes(app: FastifyInstance) {
    */
   app.get('/verification/:id/document-url', { preHandler: [adminGuard] }, async (request) => {
     const { id } = request.params as { id: string };
-    const doc = await app.prisma.verificationDocument.findUnique({
+    const doc = await tenantPrisma.verificationDocument.findUnique({
       where: { id },
       select: { id: true, fileUrl: true, purgedAt: true, docType: true },
     });
@@ -3119,8 +3636,8 @@ export async function adminRoutes(app: FastifyInstance) {
     const { status } = returnsQuerySchema.parse(request.query);
     const where = status ? { status } : {};
     const [items, total] = await Promise.all([
-      app.prisma.returnRequest.findMany({ where, orderBy: { createdAt: 'desc' }, skip, take: limit }),
-      app.prisma.returnRequest.count({ where }),
+      tenantPrisma.returnRequest.findMany({ where, orderBy: { createdAt: 'desc' }, skip, take: limit }),
+      tenantPrisma.returnRequest.count({ where }),
     ]);
     return { success: true, ...paginatedResponse(items, total, { page, limit, skip }) };
   });
@@ -3128,15 +3645,15 @@ export async function adminRoutes(app: FastifyInstance) {
   app.put('/returns/:id/resolve', { preHandler: [adminGuard] }, async (request) => {
     const { id } = request.params as { id: string };
     const body = resolveReturnSchema.parse(request.body);
-    const existing = await app.prisma.returnRequest.findUnique({ where: { id } });
+    const existing = await tenantPrisma.returnRequest.findUnique({ where: { id } });
     if (!existing) throw new NotFoundError('ReturnRequest', id);
     if (existing.status !== 'REQUESTED') {
       throw new AppError(400, 'ALREADY_RESOLVED', `This return is already ${existing.status.toLowerCase()}`);
     }
-    const updated = await app.prisma.returnRequest.update({
+    const updated = await mutationOrNotFound('ReturnRequest', id, () => tenantPrisma.returnRequest.update({
       where: { id },
       data: { status: body.status, resolutionNote: body.note, reviewedBy: request.user.userId, reviewedAt: new Date() },
-    });
+    }));
     await audit(request.user.userId, 'RESOLVE_RETURN', 'ReturnRequest', id, { status: body.status }, request);
     return { success: true, data: updated };
   });
@@ -3149,13 +3666,13 @@ export async function adminRoutes(app: FastifyInstance) {
 
     const where = { status };
     const [claims, total] = await Promise.all([
-      app.prisma.reimbursementClaim.findMany({
+      tenantPrisma.reimbursementClaim.findMany({
         where,
         orderBy: { createdAt: 'asc' },
         skip,
         take: limit,
       }),
-      app.prisma.reimbursementClaim.count({ where }),
+      tenantPrisma.reimbursementClaim.count({ where }),
     ]);
     return { success: true, ...paginatedResponse(claims, total, { page, limit, skip }) };
   });
@@ -3193,13 +3710,28 @@ export async function adminRoutes(app: FastifyInstance) {
   // ─── Audit Logs ────────────────────────────────────────────────────────
 
   app.get('/audit-logs', { preHandler: [adminGuard] }, async (request) => {
+    requireTenantId();
     const { page, limit, skip } = parsePagination(request.query as Record<string, string>);
     const { action, entity, userId, dateFrom, dateTo } = auditLogsQuerySchema.parse(request.query);
 
+    // AuditLog predates tenant ownership and has no relation. Its actor is the
+    // only demonstrable boundary available in this schema: derive actor IDs
+    // through the tenant-scoped User model and exclude null/system/foreign
+    // rows. A foreign actor filter is an arbitrary foreign ID and therefore
+    // resolves exactly like an unknown actor.
+    let actorIds: string[];
+    if (userId) {
+      const actor = await app.prisma.user.findUnique({ where: { id: userId }, select: { id: true } });
+      if (!actor) throw new NotFoundError('User', userId);
+      actorIds = [actor.id];
+    } else {
+      actorIds = (await app.prisma.user.findMany({ select: { id: true } })).map((actor) => actor.id);
+    }
+
     const where: any = {
+      userId: { in: actorIds },
       ...(action && { action: { contains: action, mode: 'insensitive' } }),
       ...(entity && { entity: { contains: entity, mode: 'insensitive' } }),
-      ...(userId && { userId }),
       ...(dateFrom || dateTo
         ? {
             createdAt: {
@@ -3224,7 +3756,7 @@ export async function adminRoutes(app: FastifyInstance) {
   });
 
   // ── Support tickets ──────────────────────────────────────────────────────
-  const support = new SupportService(app.prisma, notifications);
+  const support = new SupportService(tenantPrisma, notifications);
 
   app.get('/support', { preHandler: [adminGuard] }, async (request) => {
     const { status, page } = z.object({
@@ -3241,21 +3773,21 @@ export async function adminRoutes(app: FastifyInstance) {
       status: z.enum(['OPEN', 'IN_PROGRESS', 'RESOLVED']).default('RESOLVED'),
       adminNote: z.string().trim().max(2000).optional(),
     }).parse(request.body ?? {});
-    const updated = await support.resolve(id, request.user.userId, body);
+    const updated = await mutationOrNotFound('SupportTicket', id, () => support.resolve(id, request.user.userId, body));
     return { success: true, data: updated };
   });
 
   // ── Ops agent (spec Part B) — approvals + audit ───────────────────────────
   // The agent proposes; humans decide here. Approval replays the SAME
   // deterministic executor — the model is nowhere in this path.
-  const agentService = new AgentService(app.prisma, app.io, async (orderId) => {
+  const agentService = new AgentService(tenantPrisma, app.io, async (orderId) => {
     if (!app.queues?.dispatchQueue) throw new AppError(503, 'QUEUES_DOWN', 'Dispatch queue unavailable');
     await app.queues.dispatchQueue.add('dispatch-order', { orderId }, { removeOnComplete: 100, removeOnFail: 50 });
   });
 
   app.get('/agent/approvals', { preHandler: [adminGuard] }, async (request) => {
     const { status } = z.object({ status: z.nativeEnum(AgentActionStatus).default('PENDING') }).parse(request.query);
-    const requests = await app.prisma.agentActionRequest.findMany({
+    const requests = await tenantPrisma.agentActionRequest.findMany({
       where: { status },
       orderBy: { createdAt: 'asc' },
       take: 100,
@@ -3281,8 +3813,8 @@ export async function adminRoutes(app: FastifyInstance) {
   app.get('/agent/audit', { preHandler: [adminGuard] }, async (request) => {
     const { page, limit, skip } = parsePagination(request.query as Record<string, string>);
     const [events, total] = await Promise.all([
-      app.prisma.agentAuditEvent.findMany({ orderBy: { at: 'desc' }, skip, take: limit }),
-      app.prisma.agentAuditEvent.count(),
+      tenantPrisma.agentAuditEvent.findMany({ orderBy: { at: 'desc' }, skip, take: limit }),
+      tenantPrisma.agentAuditEvent.count(),
     ]);
     return { success: true, ...paginatedResponse(events, total, { page, limit, skip }) };
   });
@@ -3290,20 +3822,23 @@ export async function adminRoutes(app: FastifyInstance) {
   // =========================================================================
   // COMPLIANCE — the liability shield: audit runs, violations, re-reviews
   // =========================================================================
-  const compliance = new ComplianceAuditService(app.prisma, notifications, verification);
+  const compliance = new ComplianceAuditService(tenantPrisma, notifications, verification);
 
   app.get('/compliance', { preHandler: [adminGuard] }, async () => {
+    requireDefaultTenantCompliance();
     return { success: true, data: await compliance.overview() };
   });
 
   /** Run the invariant check right now (the daily job runs it anyway). */
   app.post('/compliance/run', { preHandler: [adminGuard] }, async (request) => {
+    requireDefaultTenantCompliance();
     const run = await compliance.runAudit('MANUAL');
     await audit(request.user.userId, 'RUN_COMPLIANCE_AUDIT', 'ComplianceAuditRun', run.id, { moversChecked: run.moversChecked, violations: run.violations }, request);
     return { success: true, data: run };
   });
 
   app.post('/compliance/reviews/:id/decide', { preHandler: [adminGuard] }, async (request) => {
+    requireDefaultTenantCompliance();
     const { id } = request.params as { id: string };
     const body = z.object({ pass: z.boolean(), note: z.string().max(500).optional() }).parse(request.body);
     const decided = await compliance.decideReview(id, request.user.userId, body.pass, body.note);
@@ -3312,6 +3847,7 @@ export async function adminRoutes(app: FastifyInstance) {
   });
 
   app.post('/compliance/violations/:id/resolve', { preHandler: [adminGuard] }, async (request) => {
+    requireDefaultTenantCompliance();
     const { id } = request.params as { id: string };
     const resolved = await compliance.resolveViolation(id);
     await audit(request.user.userId, 'RESOLVE_COMPLIANCE_VIOLATION', 'ComplianceViolation', id, { userId: resolved.userId }, request);
@@ -3343,7 +3879,7 @@ export async function adminRoutes(app: FastifyInstance) {
   app.get('/alerts/health', { preHandler: [adminGuard] }, async (request) => {
     const { hours } = z.object({ hours: z.coerce.number().min(1).max(168).default(24) }).parse(request.query);
     const since = new Date(Date.now() - hours * 3600_000);
-    const rows = await app.prisma.alertDelivery.findMany({
+    const rows = await tenantPrisma.alertDelivery.findMany({
       where: { sentAt: { gte: since } },
       select: { kind: true, sentAt: true, acknowledgedAt: true },
     });
@@ -3374,7 +3910,7 @@ export async function adminRoutes(app: FastifyInstance) {
   });
 
   /** GET /dlq — failed jobs across every queue, newest first. */
-  app.get('/dlq', { preHandler: [adminGuard] }, async () => {
+  app.get('/dlq', { preHandler: [platformControlGuard] }, async () => {
     const queues = requireQueues();
     const out: Array<Record<string, unknown>> = [];
     for (const name of DLQ_NAMES) {
@@ -3399,7 +3935,7 @@ export async function adminRoutes(app: FastifyInstance) {
   });
 
   /** POST /dlq/:queue/:id/requeue — retry a dead job. */
-  app.post('/dlq/:queue/:id/requeue', { preHandler: [adminGuard] }, async (request) => {
+  app.post('/dlq/:queue/:id/requeue', { preHandler: [platformControlGuard] }, async (request) => {
     const { queue, id } = request.params as { queue: string; id: string };
     const job = await dlqQueue(queue).getJob(id);
     if (!job) throw new NotFoundError('Job', id);
@@ -3409,7 +3945,7 @@ export async function adminRoutes(app: FastifyInstance) {
   });
 
   /** DELETE /dlq/:queue/:id — discard a dead job for good. */
-  app.delete('/dlq/:queue/:id', { preHandler: [adminGuard] }, async (request) => {
+  app.delete('/dlq/:queue/:id', { preHandler: [platformControlGuard] }, async (request) => {
     const { queue, id } = request.params as { queue: string; id: string };
     const job = await dlqQueue(queue).getJob(id);
     if (!job) throw new NotFoundError('Job', id);
@@ -3519,8 +4055,9 @@ export async function adminRoutes(app: FastifyInstance) {
   /** POST /discovery/backfill — run the movement (queued; idempotent). */
   app.post('/discovery/backfill', { preHandler: [adminGuard] }, async (request) => {
     if (!app.dispatchQueue) throw new AppError(503, 'QUEUES_OFF', 'Background workers are not running');
-    await app.dispatchQueue.add('discovery-backfill', {}, { removeOnComplete: 5, removeOnFail: 5 });
-    await audit(request.user.userId, 'DISCOVERY_BACKFILL_ENQUEUED', 'DiscoveryCategory', '-', {}, request);
+    const tenantId = requireTenantId();
+    await app.dispatchQueue.add('discovery-backfill', { tenantId }, { removeOnComplete: 5, removeOnFail: 5 });
+    await audit(request.user.userId, 'DISCOVERY_BACKFILL_ENQUEUED', 'DiscoveryCategory', '-', { tenantId }, request);
     return { success: true, data: { queued: true } };
   });
 
@@ -3533,7 +4070,7 @@ export async function adminRoutes(app: FastifyInstance) {
 
   /** GET /ratings/moderation — held reviews + pending reports, one queue. */
   app.get('/ratings/moderation', { preHandler: [adminGuard] }, async () => {
-    const held = await app.prisma.rating.findMany({
+    const held = await tenantPrisma.rating.findMany({
       where: { flagged: true, flagReason: 'PROFANITY_HOLD', state: 'ACTIVE' },
       orderBy: { createdAt: 'asc' },
       take: 100,
@@ -3545,7 +4082,7 @@ export async function adminRoutes(app: FastifyInstance) {
       take: 100,
     });
     const reported = reports.length
-      ? await app.prisma.rating.findMany({
+      ? await tenantPrisma.rating.findMany({
           where: { id: { in: reports.map((r) => r.ratingId) } },
           select: { id: true, score: true, comment: true, tags: true, vendorId: true, state: true },
         })
@@ -3568,24 +4105,24 @@ export async function adminRoutes(app: FastifyInstance) {
       note: z.string().trim().max(300).optional(),
     }).refine((b) => b.action === 'publish' || b.reason != null, { message: 'reason required' }).parse(request.body);
 
-    const rating = await app.prisma.rating.findUnique({ where: { id: request.params.id } });
+    const rating = await tenantPrisma.rating.findUnique({ where: { id: request.params.id } });
     if (!rating) throw new NotFoundError('Rating', request.params.id);
 
     if (body.action === 'publish') {
-      await app.prisma.rating.update({
+      await mutationOrNotFound('Rating', rating.id, () => tenantPrisma.rating.update({
         where: { id: rating.id },
         data: { isPublic: true, flagged: false, flagReason: null },
-      });
+      }));
     } else {
       const stateReason = body.action === 'remove' ? 'MODERATION' : `ADMIN_${body.reason}`;
-      await app.prisma.rating.update({
+      await mutationOrNotFound('Rating', rating.id, () => tenantPrisma.rating.update({
         where: { id: rating.id },
         data: {
           state: body.action === 'remove' ? 'REMOVED' : 'EXCLUDED',
           stateReason,
           isPublic: false,
         },
-      });
+      }));
       await ratingStats.applyRating(rating); // re-level the touched subject
       if (body.action === 'remove') {
         await notifications.send({
@@ -3613,12 +4150,12 @@ export async function adminRoutes(app: FastifyInstance) {
       data: { status: action === 'uphold' ? 'UPHELD' : 'DISMISSED', resolvedBy: request.user.userId, resolvedAt: new Date() },
     });
     if (action === 'uphold') {
-      const rating = await app.prisma.rating.findUnique({ where: { id: report.ratingId } });
+      const rating = await tenantPrisma.rating.findUnique({ where: { id: report.ratingId } });
       if (rating && rating.state === 'ACTIVE') {
-        await app.prisma.rating.update({
+        await mutationOrNotFound('Rating', rating.id, () => tenantPrisma.rating.update({
           where: { id: rating.id },
           data: { state: 'REMOVED', stateReason: 'MODERATION', isPublic: false },
-        });
+        }));
         await ratingStats.applyRating(rating);
         await notifications.send({
           userId: rating.raterId,

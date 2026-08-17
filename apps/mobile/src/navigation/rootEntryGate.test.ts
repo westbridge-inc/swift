@@ -1,5 +1,9 @@
 import { describe, expect, it } from 'vitest';
-import { rootEntryGate, type RootEntryState } from './rootEntryGate';
+import {
+  rootEntryGate,
+  rootNavigatorBoundaryKey,
+  type RootEntryState,
+} from './rootEntryGate';
 
 const fresh: RootEntryState = {
   isAuthenticated: false,
@@ -94,5 +98,21 @@ describe('rootEntryGate', () => {
         }
       }
     }
+  });
+});
+
+describe('rootNavigatorBoundaryKey', () => {
+  it('resets same-route local state across A logout and B login boundaries', () => {
+    const accountA = rootNavigatorBoundaryKey(1);
+    const loggedOut = rootNavigatorBoundaryKey(2);
+    const accountB = rootNavigatorBoundaryKey(3);
+
+    expect(new Set([accountA, loggedOut, accountB]).size).toBe(3);
+  });
+
+  it('does not reset while a principal moves between ordinary entry gates', () => {
+    expect(rootNavigatorBoundaryKey(7)).toBe(rootNavigatorBoundaryKey(7));
+    expect(rootEntryGate(fresh)).toBe('role-picker');
+    expect(rootEntryGate({ ...fresh, wantsAuth: true })).toBe('auth');
   });
 });

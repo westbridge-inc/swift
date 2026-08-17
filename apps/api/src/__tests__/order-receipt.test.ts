@@ -110,10 +110,70 @@ describe('GET /customer/orders/:id/receipt', () => {
     const html = res.body;
     expect(html).toContain('Pepperpot');
     expect(html).toContain('$5,300 GYD'); // total
-    expect(html).toContain('$600 GYD'); // delivery fee, labeled to the rider
-    expect(html).toContain('100% to the rider'); // tip line
-    expect(html).toContain('cash on delivery');
-    expect(html).toContain('holds none of this money');
+    // [REPORT-005 F-005-07-adjacent] Receipt copy asserts nothing about money
+    // MOVEMENT — only custody honesty. Old phrases ("100% to the rider",
+    // "holds none of this money") claimed payments the platform cannot
+    // evidence; the renderer dropped them and this suite follows.
+    expect(html).toContain('$600 GYD'); // delivery pay line
+    expect(html).toContain('Delivery pay for your rider');
+    expect(html).toContain('Rider tip');
+    // [REPORT-006 F-006-07] This DELIVERED CASH row has paymentStatus PENDING
+    // (nobody recorded a collection), so the receipt says the money is DUE —
+    // "Paid in cash" without capture evidence asserted a payment the ledger
+    // cannot prove (reachable live through the vendor self-delivery terminal).
+    expect(html).toContain('Cash due on delivery');
+    expect(html).not.toContain('Paid in cash on delivery');
+    expect(html).toContain('never takes custody of order money');
+    expect(html.toLowerCase()).not.toContain('paid to your rider');
+    expect(html.toLowerCase()).not.toContain('every dollar above went');
+  });
+
+  it('renders "Paid in cash" only once the collection is captured [F-006-07]', async () => {
+    await app.prisma.order.update({ where: { id: orderId }, data: { paymentStatus: 'CAPTURED' } });
+    try {
+      const res = await app.inject({
+        method: 'GET', url: `/api/v1/customer/orders/${orderId}/receipt`,
+        headers: { authorization: `Bearer ${token}` },
+      });
+      expect(res.statusCode).toBe(200);
+      expect(res.body).toContain('Paid in cash on delivery');
+      expect(res.body).not.toContain('Cash due on delivery');
+    } finally {
+      await app.prisma.order.update({ where: { id: orderId }, data: { paymentStatus: 'PENDING' } });
+    }
+  });
+
+  it('PICKUP and APPOINTMENT branches carry the same due/paid honesty [REPORT-007-v4 coverage]', async () => {
+    // Uncaptured → due; captured → paid, per fulfilment wording.
+    await app.prisma.order.update({ where: { id: orderId }, data: { fulfillment: 'PICKUP' } });
+    try {
+      let res = await app.inject({
+        method: 'GET', url: `/api/v1/customer/orders/${orderId}/receipt`,
+        headers: { authorization: `Bearer ${token}` },
+      });
+      expect(res.body).toContain('Cash due at the store');
+      await app.prisma.order.update({ where: { id: orderId }, data: { paymentStatus: 'CAPTURED' } });
+      res = await app.inject({
+        method: 'GET', url: `/api/v1/customer/orders/${orderId}/receipt`,
+        headers: { authorization: `Bearer ${token}` },
+      });
+      expect(res.body).toContain('Paid in cash at the store');
+
+      await app.prisma.order.update({ where: { id: orderId }, data: { fulfillment: 'APPOINTMENT', paymentStatus: 'PENDING' } });
+      res = await app.inject({
+        method: 'GET', url: `/api/v1/customer/orders/${orderId}/receipt`,
+        headers: { authorization: `Bearer ${token}` },
+      });
+      expect(res.body).toContain('Due at the appointment');
+      await app.prisma.order.update({ where: { id: orderId }, data: { paymentStatus: 'CAPTURED' } });
+      res = await app.inject({
+        method: 'GET', url: `/api/v1/customer/orders/${orderId}/receipt`,
+        headers: { authorization: `Bearer ${token}` },
+      });
+      expect(res.body).toContain('Paid at the appointment');
+    } finally {
+      await app.prisma.order.update({ where: { id: orderId }, data: { fulfillment: 'DELIVERY', paymentStatus: 'PENDING' } });
+    }
   });
 
   it("404s another customer's order and 400s an incomplete one", async () => {

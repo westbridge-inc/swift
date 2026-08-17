@@ -63,7 +63,7 @@ async function makeVendorFor(userId: string) {
 
 const captureId = (userId: string, docNo: string) =>
   identity.capture({
-    accountId: userId, tenantId: 'swift-default', actorRole: 'VENDOR',
+    accountId: userId, actorRole: 'VENDOR',
     type: 'ID_DOC_NUMBER', normalizedValue: normalizeDocNumber(docNo), source: 'AI_ID_ANALYZER',
   });
 
@@ -131,9 +131,9 @@ describe('clustering (spec §2.3)', () => {
     const a = await makeUser();
     const b = await makeUser();
     for (const u of [a, b]) {
-      await identity.capture({ accountId: u.id, tenantId: 'swift-default', actorRole: 'VENDOR', type: 'DEVICE', normalizedValue: 'shared-family-phone-1', source: 'DEVICE' });
-      await identity.capture({ accountId: u.id, tenantId: 'swift-default', actorRole: 'VENDOR', type: 'IP_SUBNET', normalizedValue: '190.83.44.0/24', source: 'REQUEST_META' });
-      await identity.capture({ accountId: u.id, tenantId: 'swift-default', actorRole: 'VENDOR', type: 'EMAIL', normalizedValue: 'cafe@shared.gy', source: 'SIGNUP' });
+      await identity.capture({ accountId: u.id, actorRole: 'VENDOR', type: 'DEVICE', normalizedValue: 'shared-family-phone-1', source: 'DEVICE' });
+      await identity.capture({ accountId: u.id, actorRole: 'VENDOR', type: 'IP_SUBNET', normalizedValue: '190.83.44.0/24', source: 'REQUEST_META' });
+      await identity.capture({ accountId: u.id, actorRole: 'VENDOR', type: 'EMAIL', normalizedValue: 'cafe@shared.gy', source: 'SIGNUP' });
     }
     const [ca, cb] = [await identity.resolveCluster(a.id), await identity.resolveCluster(b.id)];
     // SOFT captures never even create cluster membership, let alone merge.
@@ -201,8 +201,8 @@ describe('the trial law (spec §3 — scenarios A, E, G, I + churn)', () => {
 
     // The money doesn't lie: the same MMG payer appears behind both.
     const payer = `59260${Math.floor(100000 + Math.random() * 899999)}`;
-    await identity.capture({ accountId: h1.id, tenantId: 'swift-default', actorRole: 'VENDOR', type: 'MMG_PAYER', normalizedValue: payer, source: 'BILLING' });
-    await identity.capture({ accountId: h2.id, tenantId: 'swift-default', actorRole: 'VENDOR', type: 'MMG_PAYER', normalizedValue: payer, source: 'BILLING' });
+    await identity.capture({ accountId: h1.id, actorRole: 'VENDOR', type: 'MMG_PAYER', normalizedValue: payer, source: 'BILLING' });
+    await identity.capture({ accountId: h2.id, actorRole: 'VENDOR', type: 'MMG_PAYER', normalizedValue: payer, source: 'BILLING' });
 
     const cluster = await identity.resolveCluster(h1.id);
     const grants = await prisma.trialGrant.findMany({ where: { clusterId: cluster!, role: 'VENDOR' }, orderBy: { startedAt: 'asc' } });

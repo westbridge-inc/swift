@@ -17,6 +17,53 @@ let sentryReady = false;
  *  throw — the API server (via observabilityPlugin) AND the worker process
  *  (worker.ts main). captureError is a silent no-op until this runs, so a
  *  process that skips it reports nothing [SWIFT-042]. */
+// [REPORT-013 F-013-04] Errors carry CONTEXT, never identifiers: tokenized
+// public URLs (/track/:token, /public/trip/:token), querystrings, headers,
+// cookies, and body data must not reach the error tracker. Every outgoing
+// event passes through this scrubber; capture sites additionally pass route
+// TEMPLATES instead of raw URLs.
+const TOKENISH_PARAM = /\b(token|secret|key|authorization|otp|pin|code|sig|signature)=[^&\s]+/gi;
+const TOKENISH_PATH = /\/(track|public\/trip|render)\/[A-Za-z0-9_.-]+/g;
+function scrubSentryText(value: string): string {
+  let out = value.replace(TOKENISH_PARAM, '$1=[scrubbed]').replace(TOKENISH_PATH, '/$1/[scrubbed]');
+  // [REPORT-016 F-016-02] Any URL's query string can carry arbitrary user
+  // input (a raw search term, an address) that the named-param rule above
+  // won't catch — and the Sentry SDK's default RequestData integration
+  // repopulates request.url. Drop every query string wholesale.
+  out = out.replace(/(https?:\/\/[^\s"'<>]*?|\/[^\s"'<>?]*)\?[^\s"'<>]*/g, '$1?[scrubbed]');
+  return out;
+}
+// [REPORT-016 F-016-02] Deep-walk the WHOLE event: the old scrubber only
+// touched request.url, top-level extras, and breadcrumb message/url — it left
+// `message`, `exception.values[].value`, nested extras, and other breadcrumb
+// data unscrubbed. Every string in the event (bounded depth, cycle-guarded)
+// now passes the scrubber.
+function scrubDeep(node: unknown, depth: number, seen: WeakSet<object>): unknown {
+  if (typeof node === 'string') return scrubSentryText(node);
+  if (node === null || typeof node !== 'object' || depth <= 0) return node;
+  if (seen.has(node as object)) return node;
+  seen.add(node as object);
+  if (Array.isArray(node)) {
+    for (let i = 0; i < node.length; i += 1) node[i] = scrubDeep(node[i], depth - 1, seen);
+    return node;
+  }
+  const rec = node as Record<string, unknown>;
+  for (const key of Object.keys(rec)) rec[key] = scrubDeep(rec[key], depth - 1, seen);
+  return rec;
+}
+export function scrubSentryEvent<T extends {
+  request?: { url?: string; query_string?: unknown; headers?: unknown; cookies?: unknown; data?: unknown };
+}>(event: T): T {
+  if (event.request) {
+    // Structural drops first — these fields are pure identifier surface.
+    delete event.request.query_string;
+    delete event.request.headers;
+    delete event.request.cookies;
+    delete event.request.data;
+  }
+  return scrubDeep(event, 8, new WeakSet()) as T;
+}
+
 export function initSentry() {
   const dsn = process.env['SENTRY_DSN'];
   if (!dsn || sentryReady) return sentryReady;
@@ -25,6 +72,7 @@ export function initSentry() {
     environment: process.env['NODE_ENV'] ?? 'development',
     // Errors only for V1 — tracing multiplies cost without a consumer yet.
     tracesSampleRate: 0,
+    beforeSend: (event) => scrubSentryEvent(event),
   });
   sentryReady = true;
   return true;
@@ -96,6 +144,17 @@ export const notificationFailuresCounter = new client.Counter({
   name: 'swift_notification_failures_total',
   help: 'Notification deliveries that failed after retries, by channel and stage',
   labelNames: ['channel', 'stage'] as const,
+  registers: [registry],
+});
+
+// Security actions must remain externally uniform even when their audit sink
+// is degraded. Count the write failure separately so a successful revocation
+// can still return the required 401/200 while operations alerts on lost audit
+// evidence instead of learning through customer-visible 500s.
+export const securityAuditFailuresCounter = new client.Counter({
+  name: 'swift_security_audit_failures_total',
+  help: 'Security audit rows that could not be persisted, by action',
+  labelNames: ['action'] as const,
   registers: [registry],
 });
 
@@ -180,7 +239,9 @@ export async function observabilityPlugin(app: FastifyInstance) {
   app.addHook('onError', (request, _reply, error, done) => {
     const status = (error as AppError).statusCode ?? 500;
     if (status >= 500) {
-      captureError(error, { method: request.method, url: request.url, requestId: request.id });
+      // Route TEMPLATE, never the raw URL — /track/:token must not leak its
+      // token into the tracker [REPORT-013 F-013-04].
+      captureError(error, { method: request.method, url: request.routeOptions?.url ?? 'unmatched', requestId: request.id });
     }
     done();
   });

@@ -3,7 +3,7 @@ import React, { useState } from 'react';
 import { Linking, Pressable, ScrollView, View } from 'react-native';
 import { Feather, MaterialCommunityIcons } from '@expo/vector-icons';
 import { color, radius, space } from '@swift/ui';
-import { Card, Chip, IconChip, InfoRow, LoadingBlock, ErrorState, PillButton, PopupCard, Screen, T } from '../../../kit';
+import { Card, Chip, IconChip, InfoRow, LoadingBlock, ErrorState, PillButton, PopupCard, PopupTitle, Screen, T } from '../../../kit';
 import { useOrderAction, useRetryDispatch, useVendorOrder, usePickingActions, useVendorMenu } from '../../../hooks/vendorops';
 import { money } from '../../../lib/money';
 import {
@@ -450,11 +450,13 @@ export function VendorOrderDetailScreen({ navigation, route }: any) {
       {/* Reject confirm — destructive, so it gets the kit popup */}
       <PopupCard visible={confirmReject} onClose={() => setConfirmReject(false)}>
         <IconChip icon="x-circle" size={56} tone="error" />
-        <T variant="title" center style={{ marginTop: space.lg }}>
+        <PopupTitle variant="title" center style={{ marginTop: space.lg }}>
           Reject this order?
-        </T>
+        </PopupTitle>
         <T variant="body" tone="muted" center style={{ marginTop: space.sm }}>
-          The customer is told right away. This can&apos;t be undone.
+          {order.paymentMethod === 'MOBILE_MONEY'
+            ? 'The customer is told right away. If their MMG payment already reached your MMG, refund them directly — Swift never holds the money. This can’t be undone.'
+            : 'The customer is told right away. This can’t be undone.'}
         </T>
         <PillButton
           label="Reject order"

@@ -38,11 +38,24 @@ async function makeRider(at: { lat: number; lng: number }) {
     },
   });
   userIds.push(u.id);
+  const token = app.jwt.sign({ userId: u.id, role: 'MOVER', jti: nanoid(8) });
+  const session = await app.prisma.session.create({
+    data: {
+      userId: u.id,
+      token,
+      refreshToken: nanoid(48),
+      deviceId: 'dispatch-journal-rider',
+      deviceType: 'test',
+      expiresAt: new Date(Date.now() + 24 * 3600 * 1000),
+    },
+  });
   const r = await app.prisma.rider.create({
     data: {
       userId: u.id, riderType: 'DELIVERY', vehicleType: 'MOTORCYCLE',
       isOnline: true, isAvailable: true, documentsVerified: true,
       currentLat: at.lat + 0.003, currentLng: at.lng,
+      lastLocationUpdate: new Date(),
+      locationSessionId: session.id,
     },
   });
   riderIds.push(r.id);
@@ -61,7 +74,10 @@ async function makeOrder(at: { lat: number; lng: number }) {
       deliveryAddress: '9 Journal Row', deliveryLat: at.lat + 0.01, deliveryLng: at.lng,
       subtotalBase: 2000, subtotalMarkup: 0, subtotalCustomer: 2000,
       deliveryFee: 400, totalAmount: 2400,
-      paymentMethod: 'MOBILE_MONEY' as never,
+      // CAPTURED: the payment-first law [SPS-F-0016] only lets a rider claim
+      // an MMG order after the store confirmed the payment — a PENDING fixture
+      // here would (correctly) be refused by the gate, not journaled ASSIGNED.
+      paymentMethod: 'MOBILE_MONEY' as never, paymentStatus: 'CAPTURED' as never,
     },
   });
   orderIds.push(order.id);

@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { nanoid } from 'nanoid';
 import type { OrderStatus, UserRole } from '@prisma/client';
@@ -55,7 +55,7 @@ async function makeUserWithSession(roles: UserRole[], activeRole: UserRole) {
   });
   createdUserIds.push(user.id);
   const token = app.jwt.sign({ userId: user.id, role: activeRole, jti: nanoid(8) });
-  await app.prisma.session.create({
+  const session = await app.prisma.session.create({
     data: {
       userId: user.id,
       token,
@@ -65,7 +65,7 @@ async function makeUserWithSession(roles: UserRole[], activeRole: UserRole) {
       expiresAt: new Date(Date.now() + DAY),
     },
   });
-  return { userId: user.id, token };
+  return { userId: user.id, token, sessionId: session.id };
 }
 
 async function makeVendor() {
@@ -106,7 +106,12 @@ async function makeRider(opts: { online?: boolean; available?: boolean; lastLoca
       isAvailable: opts.available ?? true,
       currentLat: (opts.at ?? PICKUP).lat,
       currentLng: (opts.at ?? PICKUP).lng,
-      ...(opts.lastLocationUpdate ? { lastLocationUpdate: opts.lastLocationUpdate } : {}),
+      ...(opts.online ? { locationSessionId: owned.sessionId } : {}),
+      ...(opts.lastLocationUpdate
+        ? { lastLocationUpdate: opts.lastLocationUpdate }
+        : opts.online
+          ? { lastLocationUpdate: new Date() }
+          : {}),
     },
   });
   return { ...owned, riderId: rider.id };
@@ -129,7 +134,12 @@ async function makeDriver(opts: { online?: boolean; lastLocationUpdate?: Date; a
       isAvailable: true,
       currentLat: (opts.at ?? PICKUP).lat,
       currentLng: (opts.at ?? PICKUP).lng,
-      ...(opts.lastLocationUpdate ? { lastLocationUpdate: opts.lastLocationUpdate } : {}),
+      ...(opts.online ? { locationSessionId: owned.sessionId } : {}),
+      ...(opts.lastLocationUpdate
+        ? { lastLocationUpdate: opts.lastLocationUpdate }
+        : opts.online
+          ? { lastLocationUpdate: new Date() }
+          : {}),
     },
   });
   return { ...owned, driverId: driver.id };
@@ -291,6 +301,95 @@ describe('handover frees the rider', () => {
 // 2. cancelOrder: float release + driver freeing (paths that skip updateStatus)
 // ---------------------------------------------------------------------------
 describe('cancelOrder frees movers and float', () => {
+  it('atomically releases a direct assignment that commits after cancellation starts', async () => {
+    const vendor = await makeVendor();
+    const customer = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
+    const rider = await makeRider({ online: true });
+    const order = await makeOrder(customer.userId, vendor.vendorId, 'ACCEPTED');
+
+    let assignmentStaged!: () => void;
+    let resumeAssignment!: () => void;
+    let cancellationRead!: () => void;
+    const atAssignmentStage = new Promise<void>((resolve) => { assignmentStaged = resolve; });
+    const releaseAssignment = new Promise<void>((resolve) => { resumeAssignment = resolve; });
+    const atCancellationRead = new Promise<void>((resolve) => { cancellationRead = resolve; });
+
+    const originalStage = OrderService.prototype.stageDirectRiderAssignment;
+    const stageSpy = vi
+      .spyOn(OrderService.prototype, 'stageDirectRiderAssignment')
+      .mockImplementationOnce(async function (
+        this: OrderService,
+        tx,
+        input,
+      ) {
+        const staged = await originalStage.call(this, tx, input);
+        // The direct-accept transaction now owns Order + Rider + float, but is
+        // deliberately uncommitted so cancelOrder's first read sees the old,
+        // unassigned row — the exact stale-read production interleaving.
+        assignmentStaged();
+        await releaseAssignment;
+        return staged;
+      });
+
+    // Signal only the customer-owned cancellation preview. The board-grab's
+    // own preflight findFirst has already completed before assignmentStaged.
+    type RaceFindFirst = (args: {
+      where?: { id?: string; customerId?: string };
+      [key: string]: unknown;
+    }) => Promise<unknown>;
+    const orderDelegate = app.prisma.order as unknown as { findFirst: RaceFindFirst };
+    const originalFindFirst = orderDelegate.findFirst.bind(orderDelegate);
+    const findSpy = vi.spyOn(orderDelegate, 'findFirst').mockImplementation(async (args) => {
+      const found = await originalFindFirst(args);
+      const where = args?.where as { id?: string; customerId?: string } | undefined;
+      if (where?.id === order.id && where.customerId === customer.userId) cancellationRead();
+      return found;
+    });
+
+    let acceptResponse;
+    let cancellationResult;
+    try {
+      const acceptPending = inject('POST', `/api/v1/rider/orders/${order.id}/accept`, {}, rider.token);
+      await atAssignmentStage;
+
+      const cancellationPending = orderService.cancelOrder(order.id, customer.userId, 'changed my mind');
+      await atCancellationRead;
+      // Old behavior now used the stale riderId=null snapshot after its status
+      // CAS and leaked both the committed float and busy Rider pointer. The new
+      // transaction waits, re-reads the committed assignment, and releases it.
+      resumeAssignment();
+      [acceptResponse, cancellationResult] = await Promise.all([acceptPending, cancellationPending]);
+    } finally {
+      resumeAssignment();
+      findSpy.mockRestore();
+      stageSpy.mockRestore();
+    }
+
+    expect(acceptResponse!.statusCode).toBe(200);
+    expect(cancellationResult).toMatchObject({ message: 'Order cancelled' });
+
+    const [cancelled, freed, statusLogs] = await Promise.all([
+      app.prisma.order.findUniqueOrThrow({
+        where: { id: order.id },
+        select: { status: true, riderId: true },
+      }),
+      app.prisma.rider.findUniqueOrThrow({
+        where: { id: rider.riderId },
+        select: { isAvailable: true, currentOrderId: true, committedFloat: true },
+      }),
+      app.prisma.orderStatusLog.findMany({
+        where: { orderId: order.id },
+        orderBy: { createdAt: 'asc' },
+        select: { status: true },
+      }),
+    ]);
+    expect(cancelled).toEqual({ status: 'CANCELLED', riderId: rider.riderId });
+    expect(freed.isAvailable).toBe(true);
+    expect(freed.currentOrderId).toBeNull();
+    expect(Number(freed.committedFloat)).toBe(0);
+    expect(statusLogs.map((entry) => entry.status)).toEqual(['RIDER_ASSIGNED', 'CANCELLED']);
+  });
+
   it('customer cancel after rider assignment releases the committed float', async () => {
     const vendor = await makeVendor();
     const customer = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
@@ -427,7 +526,7 @@ describe('vendor retry-dispatch', () => {
 
     // The retry cleared the decline memory and offered this rider again.
     const offered = await app.redis.get(`dispatch:offer:${order.id}`);
-    expect(offered).toBe(rider.riderId);
+    expect(offered!.split(':')[0]).toBe(rider.riderId); // value is `<mover>:<attemptId>` [F-014-04]
     await app.redis.del(`dispatch:offer:${order.id}`, `dispatch:declined:${order.id}`, `dispatch:round:${order.id}`);
   });
 
@@ -477,11 +576,16 @@ describe('dispatch exhaustion auto-retry', () => {
     });
     expect(retrying).not.toBeNull();
 
+    // Each re-sweep fires >=45s later in production; the [F-014-06]
+    // single-flight lock (10s) dedups only a concurrent burst. Model the
+    // elapsed delay explicitly so this compressed-time test stays honest.
+    await app.redis.del(`dispatch:exhaust-lock:${order.id}`);
     const second = await dispatch.dispatchOrder(order.id);
     expect(second.exhausted).toBe(true);
     expect(redispatches).toHaveLength(2);
 
     // The 3rd exhaustion is TERMINAL — no further cascade, final notices sent.
+    await app.redis.del(`dispatch:exhaust-lock:${order.id}`);
     const third = await dispatch.dispatchOrder(order.id);
     expect(third.exhausted).toBe(true);
     expect(redispatches).toHaveLength(2); // capped — never an unbounded loop
@@ -551,6 +655,106 @@ describe('sweepStaleMovers', () => {
     expect((await app.prisma.rider.findUniqueOrThrow({ where: { id: staleRider.riderId } })).isOnline).toBe(false);
     expect((await app.prisma.rider.findUniqueOrThrow({ where: { id: freshRider.riderId } })).isOnline).toBe(true);
     expect((await app.prisma.driver.findUniqueOrThrow({ where: { id: staleDriver.driverId } })).isOnline).toBe(false);
+  });
+
+  it('delivery watchdog: a dark rider BEFORE pickup is released — order re-opens, float returns, redispatch queued [danger #32]', async () => {
+    const { recoverStrandedDeliveries } = await import('../modules/dispatch/delivery-watchdog');
+    const customer = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
+    const vendor = await makeVendor();
+    const rider = await makeRider({ online: true, lastLocationUpdate: new Date(Date.now() - 25 * 60_000), committedFloat: 2000 });
+    const order = await makeOrder(customer.userId, vendor.vendorId, 'RIDER_ASSIGNED', { riderId: rider.riderId, subtotalBase: 2000 });
+    await app.prisma.order.update({ where: { id: order.id }, data: { readyAt: new Date() } });
+    await app.prisma.rider.update({ where: { id: rider.riderId }, data: { currentOrderId: order.id } });
+
+    const enqueued: string[] = [];
+    const result = await recoverStrandedDeliveries(app.prisma, app.redis, app.io, async (id) => { enqueued.push(id); });
+    expect(result.recovered).toContain(order.id);
+
+    const fresh = await app.prisma.order.findUniqueOrThrow({ where: { id: order.id } });
+    expect(fresh.status).toBe('READY_FOR_PICKUP'); // honest kitchen stage restored
+    expect(fresh.riderId).toBeNull();
+    const freshRider = await app.prisma.rider.findUniqueOrThrow({ where: { id: rider.riderId } });
+    expect(freshRider.currentOrderId).toBeNull();
+    expect(Number(freshRider.committedFloat)).toBe(0); // CASH float released with the assignment
+    expect(await app.redis.sismember(`dispatch:declined:${order.id}`, rider.riderId)).toBe(1); // dark rider excluded from re-cascade
+    expect(enqueued).toContain(order.id);
+    await app.redis.del(`dispatch:declined:${order.id}`);
+  });
+
+  it('delivery watchdog: a dark rider WITH the goods is never auto-released — ops paged, customer told [danger #32]', async () => {
+    const { recoverStrandedDeliveries } = await import('../modules/dispatch/delivery-watchdog');
+    const customer = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
+    const vendor = await makeVendor();
+    const rider = await makeRider({ online: true, lastLocationUpdate: new Date(Date.now() - 25 * 60_000), committedFloat: 2000 });
+    const order = await makeOrder(customer.userId, vendor.vendorId, 'PICKED_UP', { riderId: rider.riderId, subtotalBase: 2000 });
+    await app.prisma.rider.update({ where: { id: rider.riderId }, data: { currentOrderId: order.id } });
+
+    const result = await recoverStrandedDeliveries(app.prisma, app.redis, app.io, async () => {});
+    expect(result.flagged).toContain(order.id);
+
+    const fresh = await app.prisma.order.findUniqueOrThrow({ where: { id: order.id } });
+    expect(fresh.status).toBe('PICKED_UP'); // custody preserved — goods are with the rider
+    expect(fresh.riderId).toBe(rider.riderId);
+    expect(Number((await app.prisma.rider.findUniqueOrThrow({ where: { id: rider.riderId } })).committedFloat)).toBe(2000); // float stays: cash was fronted
+    const notice = await app.prisma.notification.findFirst({
+      where: { userId: customer.userId, title: 'Your rider lost signal' },
+    });
+    expect(notice).not.toBeNull();
+    await app.redis.del(`ops_page:delivery_rider_dropped:${order.id}`);
+    await app.prisma.rider.update({ where: { id: rider.riderId }, data: { currentOrderId: null, committedFloat: 0 } });
+  });
+
+  it('delivery watchdog: a lingering pointer on a terminal order is healed, nothing else touched [danger #32]', async () => {
+    const { recoverStrandedDeliveries } = await import('../modules/dispatch/delivery-watchdog');
+    const customer = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
+    const vendor = await makeVendor();
+    const rider = await makeRider({ online: true, lastLocationUpdate: new Date(Date.now() - 25 * 60_000) });
+    const order = await makeOrder(customer.userId, vendor.vendorId, 'DELIVERED', { riderId: rider.riderId });
+    await app.prisma.rider.update({ where: { id: rider.riderId }, data: { currentOrderId: order.id } });
+
+    const result = await recoverStrandedDeliveries(app.prisma, app.redis, app.io, async () => {});
+    expect(result.recovered).not.toContain(order.id);
+    expect(result.flagged).not.toContain(order.id);
+    expect((await app.prisma.rider.findUniqueOrThrow({ where: { id: rider.riderId } })).currentOrderId).toBeNull();
+    expect((await app.prisma.order.findUniqueOrThrow({ where: { id: order.id } })).status).toBe('DELIVERED');
+  });
+
+  it('the sweep fully clears IDLE stale supply and catches null-timestamp rows [E23 / danger #20]', async () => {
+    // A mover who went online but NEVER sent a fix used to evade the `lt`
+    // cutoff forever; and the old sweep left isAvailable + locationSessionId
+    // behind — half-cleared supply every later path had to distrust.
+    const neverFixed = await makeRider({ online: true });
+    await app.prisma.rider.update({
+      where: { id: neverFixed.riderId },
+      data: { lastLocationUpdate: null, locationSessionId: 'ghost-session', isAvailable: true },
+    });
+    const staleIdle = await makeRider({ online: true, lastLocationUpdate: new Date(Date.now() - 25 * 60_000) });
+    await app.prisma.rider.update({
+      where: { id: staleIdle.riderId },
+      data: { locationSessionId: 'stale-session', isAvailable: true },
+    });
+    // A mover mid-JOB keeps their location session — trip recovery owns that
+    // custody; only the online flag drops.
+    const staleBusy = await makeRider({ online: true, lastLocationUpdate: new Date(Date.now() - 25 * 60_000) });
+    await app.prisma.rider.update({
+      where: { id: staleBusy.riderId },
+      data: { locationSessionId: 'busy-session', currentOrderId: 'order-ghost', isAvailable: false },
+    });
+
+    await sweepStaleMovers(app.prisma);
+
+    const never = await app.prisma.rider.findUniqueOrThrow({ where: { id: neverFixed.riderId } });
+    expect(never.isOnline).toBe(false);
+    expect(never.isAvailable).toBe(false);
+    expect(never.locationSessionId).toBeNull();
+    const idle = await app.prisma.rider.findUniqueOrThrow({ where: { id: staleIdle.riderId } });
+    expect(idle.isOnline).toBe(false);
+    expect(idle.isAvailable).toBe(false);
+    expect(idle.locationSessionId).toBeNull();
+    const busy = await app.prisma.rider.findUniqueOrThrow({ where: { id: staleBusy.riderId } });
+    expect(busy.isOnline).toBe(false);
+    expect(busy.locationSessionId).toBe('busy-session'); // custody preserved
+    await app.prisma.rider.update({ where: { id: staleBusy.riderId }, data: { currentOrderId: null } });
   });
 
   it('closes the online-hours session of a rider it forces offline [SWIFT-143]', async () => {

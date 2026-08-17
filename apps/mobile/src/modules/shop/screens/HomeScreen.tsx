@@ -10,6 +10,7 @@ import { useDiscoveryCategories, useHome, useToggleFavorite } from '../../../hoo
 import { useAds } from '../../../hooks/ads';
 import { AdHeroVideo, AdTopCard, AdBar } from '../../../components/ads';
 import { PressableScale } from '../../../components/ui';
+import { grantedLocationFix } from '../../../lib/deviceLocation';
 import { haptic } from '../../../lib/haptics';
 import { useAuthStore } from '../../../stores/authStore';
 import { useLocationStore } from '../../../stores/locationStore';
@@ -103,14 +104,15 @@ export function HomeScreen() {
   const navigation = useNavigation<any>();
   const insets = useSafeAreaInsets();
   const { user, isAuthenticated, promptLogin } = useAuthStore();
-  const { latitude, longitude, address } = useLocationStore();
+  const { latitude, longitude, address, status } = useLocationStore();
+  const locationFix = grantedLocationFix(latitude, longitude, status);
 
-  const home = useHome<any>(latitude ?? undefined, longitude ?? undefined);
+  const home = useHome<any>(locationFix?.latitude, locationFix?.longitude);
   const toggleFav = useToggleFavorite();
   // Category rail (#17): flag-gated server-side; when live it SUPERSEDES the
   // old "Find by category" section (one category system on Home, ever —
   // spec 6.2). Flag off → both absent/present exactly as before (CAT-G).
-  const discovery = useDiscoveryCategories(latitude ?? undefined, longitude ?? undefined);
+  const discovery = useDiscoveryCategories(locationFix?.latitude, locationFix?.longitude);
   const railLive = !!discovery.data?.enabled && (discovery.data?.categories.length ?? 0) >= CAT_RAIL_MIN_CHIPS;
 
   // Ads hydrate independently (§13.4): home content NEVER waits on this call,
@@ -119,6 +121,10 @@ export function HomeScreen() {
   const ads = useAds('*');
   const adSlots = ads.data?.data?.placements;
   const adTrackable = ads.data?.trackable ?? false;
+  const adTrackingScope = ads.data?.trackingScope ?? null;
+  const adTrackingKey = adTrackingScope
+    ? `${adTrackingScope.kind}:${adTrackingScope.scopeId}:${adTrackingScope.generation}`
+    : 'display-only';
   const heroAd = adSlots?.['home_hero_video']?.items[0];
   const topAd = adSlots?.['home_top_card']?.items[0];
   const barSlot = adSlots?.['home_ad_bar'];
@@ -133,7 +139,7 @@ export function HomeScreen() {
 
   const feed = home.data;
   const featured: any[] = feed?.featured ?? [];
-  const nearby: any[] = feed?.nearby ?? [];
+  const nearby: any[] = locationFix ? (feed?.nearby ?? []) : [];
   const orderAgain: any[] = feed?.orderAgain ?? [];
   const activeOrder = feed?.activeOrder;
   // Names repeat across stores ("Popular" everywhere) — one chip per name.
@@ -169,7 +175,7 @@ export function HomeScreen() {
               </T>
               <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4, marginTop: 2 }}>
                 <T variant="body" weight="semibold" tone="onBrand" numberOfLines={1} style={{ flexShrink: 1 }}>
-                  {address ?? 'Set your location'}
+                  {locationFix ? (address ?? 'Current location') : 'Set your location'}
                 </T>
                 <Feather name="chevron-down" size={16} color={color.white} />
               </View>
@@ -278,7 +284,12 @@ export function HomeScreen() {
         {/* Tier 1 — hero video slot (§13.1). Present only when sold+live. */}
         {heroAd ? (
           <View style={{ paddingHorizontal: GUTTER, marginTop: space['2xl'] }}>
-            <AdHeroVideo item={heroAd} trackable={adTrackable} />
+            <AdHeroVideo
+              key={`hero:${adTrackingKey}`}
+              item={heroAd}
+              trackable={adTrackable}
+              trackingScope={adTrackingScope}
+            />
           </View>
         ) : null}
 
@@ -335,7 +346,12 @@ export function HomeScreen() {
             {/* Tier 2 — top card slot (§13.2), the widget-row area. */}
             {topAd ? (
               <View style={{ paddingHorizontal: GUTTER, marginTop: space['2xl'] }}>
-                <AdTopCard item={topAd} trackable={adTrackable} />
+                <AdTopCard
+                  key={`top:${adTrackingKey}`}
+                  item={topAd}
+                  trackable={adTrackable}
+                  trackingScope={adTrackingScope}
+                />
               </View>
             ) : null}
 
@@ -369,9 +385,11 @@ export function HomeScreen() {
             {barSlot && barSlot.items.length > 0 ? (
               <View style={{ paddingHorizontal: GUTTER, marginTop: space['2xl'] }}>
                 <AdBar
+                  key={`bar:${adTrackingKey}`}
                   items={barSlot.items}
                   rotationSeconds={barSlot.rotationSeconds}
                   trackable={adTrackable}
+                  trackingScope={adTrackingScope}
                   width={SCREEN_W - GUTTER * 2}
                 />
               </View>
@@ -403,7 +421,10 @@ export function HomeScreen() {
                     rating={v.displayRating ?? null}
                     ratingBucket={v.ratingBucket}
                     topRated={v.topRated}
-                    meta={[v.etaMin ? `${v.etaMin} min` : null, kmLabel(v.distanceKm)].filter(Boolean).join(' · ') || undefined}
+                    meta={[
+                      v.etaMin ? `${v.etaMin} min` : null,
+                      locationFix ? kmLabel(v.distanceKm) : null,
+                    ].filter(Boolean).join(' · ') || undefined}
                     favorite={v.isFavorite}
                     onToggleFavorite={() => onFavorite(v.id, !!v.isFavorite)}
                     onPress={() => navigation.navigate('Restaurant', { vendorId: v.id })}
@@ -432,7 +453,10 @@ export function HomeScreen() {
                           rating={v.displayRating ?? null}
                           bucket={v.ratingBucket}
                           topRated={v.topRated}
-                          extra={[v.etaMin ? `${v.etaMin} min` : null, kmLabel(v.distanceKm)].filter(Boolean).join(' · ') || undefined}
+                          extra={[
+                            v.etaMin ? `${v.etaMin} min` : null,
+                            locationFix ? kmLabel(v.distanceKm) : null,
+                          ].filter(Boolean).join(' · ') || undefined}
                         />
                       }
                       onPress={() => navigation.navigate('Restaurant', { vendorId: v.id })}

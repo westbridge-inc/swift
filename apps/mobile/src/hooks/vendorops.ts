@@ -6,6 +6,11 @@ import { connectSocket, getSocket } from '../services/socket';
 import { useStoreSwitcher } from '../stores/storeSwitcher';
 import { useVendorPreview } from '../stores/vendorPreview';
 import { vendorPreviewDataset, previewQuery, previewMutation, type VendorPreviewDataset } from '../lib/vendorPreviewData';
+import type { AuthSessionSnapshot } from '../lib/authSession';
+import {
+  requireAuthSessionForPrincipal,
+  requireAuthSessionSnapshot,
+} from '../stores/authStore';
 
 async function unwrap<T = any>(p: Promise<any>): Promise<T> {
   const r = await p;
@@ -413,8 +418,15 @@ export function useDeleteCategory() {
 export function useSaveItem() {
   const qc = useQueryClient();
   return usePreviewSafeMutation({
-    mutationFn: ({ id, data }: { id?: string; data: any }) =>
-      id ? unwrap(vendorApi.updateItem(id, data)) : unwrap(vendorApi.createItem(data)),
+    mutationFn: ({ id, data, authSession, storeId }: {
+      id?: string;
+      data: any;
+      authSession?: AuthSessionSnapshot;
+      storeId?: string | null;
+    }) =>
+      id
+        ? unwrap(vendorApi.updateItem(id, data, authSession, storeId))
+        : unwrap(vendorApi.createItem(data, authSession, storeId)),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['vendor', 'menu'] }),
   });
 }
@@ -443,8 +455,11 @@ export function useSetItemAvailability() {
 export function useAddOptionGroup() {
   const qc = useQueryClient();
   return usePreviewSafeMutation({
-    mutationFn: ({ itemId, data }: { itemId: string; data: { name: string; isRequired?: boolean; minSelect?: number; maxSelect?: number } }) =>
-      unwrap<any>(vendorApi.addOptionGroup(itemId, data)),
+    mutationFn: ({ itemId, data, authSession }: {
+      itemId: string;
+      data: { name: string; isRequired?: boolean; minSelect?: number; maxSelect?: number };
+      authSession?: AuthSessionSnapshot;
+    }) => unwrap<any>(vendorApi.addOptionGroup(itemId, data, authSession)),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['vendor', 'menu'] }),
   });
 }
@@ -452,7 +467,11 @@ export function useAddOptionGroup() {
 export function useDeleteOptionGroup() {
   const qc = useQueryClient();
   return usePreviewSafeMutation({
-    mutationFn: (id: string) => unwrap(vendorApi.deleteOptionGroup(id)),
+    mutationFn: (input: string | { id: string; authSession?: AuthSessionSnapshot }) => {
+      const id = typeof input === 'string' ? input : input.id;
+      const authSession = typeof input === 'string' ? undefined : input.authSession;
+      return unwrap(vendorApi.deleteOptionGroup(id, authSession));
+    },
     onSuccess: () => qc.invalidateQueries({ queryKey: ['vendor', 'menu'] }),
   });
 }
@@ -460,8 +479,11 @@ export function useDeleteOptionGroup() {
 export function useAddOption() {
   const qc = useQueryClient();
   return usePreviewSafeMutation({
-    mutationFn: ({ groupId, data }: { groupId: string; data: { name: string; additionalPrice?: number } }) =>
-      unwrap<any>(vendorApi.addOption(groupId, data)),
+    mutationFn: ({ groupId, data, authSession }: {
+      groupId: string;
+      data: { name: string; additionalPrice?: number };
+      authSession?: AuthSessionSnapshot;
+    }) => unwrap<any>(vendorApi.addOption(groupId, data, authSession)),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['vendor', 'menu'] }),
   });
 }
@@ -469,7 +491,11 @@ export function useAddOption() {
 export function useDeleteOption() {
   const qc = useQueryClient();
   return usePreviewSafeMutation({
-    mutationFn: (id: string) => unwrap(vendorApi.deleteOption(id)),
+    mutationFn: (input: string | { id: string; authSession?: AuthSessionSnapshot }) => {
+      const id = typeof input === 'string' ? input : input.id;
+      const authSession = typeof input === 'string' ? undefined : input.authSession;
+      return unwrap(vendorApi.deleteOption(id, authSession));
+    },
     onSuccess: () => qc.invalidateQueries({ queryKey: ['vendor', 'menu'] }),
   });
 }
@@ -478,10 +504,15 @@ export function useDeleteOption() {
 export function useUploadItemImage() {
   const qc = useQueryClient();
   return usePreviewSafeMutation({
-    mutationFn: ({ id, file }: { id: string; file: { uri: string; name: string; type: string } }) => {
+    mutationFn: ({ id, file, authSession, storeId }: {
+      id: string;
+      file: { uri: string; name: string; type: string };
+      authSession?: AuthSessionSnapshot;
+      storeId?: string | null;
+    }) => {
       const form = new FormData();
       form.append('file', { uri: file.uri, name: file.name, type: file.type } as unknown as Blob);
-      return unwrap(vendorApi.uploadItemImage(id, form));
+      return unwrap(vendorApi.uploadItemImage(id, form, authSession, storeId));
     },
     onSuccess: () => qc.invalidateQueries({ queryKey: ['vendor', 'menu'] }),
   });
@@ -727,23 +758,64 @@ export function useSetHours() {
 /** Pick-a-file imports: xlsx and PDF menus land in the same automap preview. */
 export function useImportFile() {
   return usePreviewSafeMutation({
-    mutationFn: ({ kind, file }: { kind: 'xlsx' | 'menu-pdf'; file: { uri: string; name: string; type: string } }) => {
+    mutationFn: async ({ kind, file, authSession, storeId }: {
+      kind: 'xlsx' | 'menu-pdf';
+      file: { uri: string; name: string; type: string };
+      authSession?: AuthSessionSnapshot;
+      storeId?: string | null;
+    }) => {
+      const owner = authSession ?? requireAuthSessionSnapshot();
+      const current = requireAuthSessionForPrincipal(owner);
       const form = new FormData();
       form.append('file', file as unknown as Blob);
-      return unwrap<any>(kind === 'xlsx' ? vendorApi.importXlsx(form) : vendorApi.importMenuPdf(form));
+      const result = await unwrap<any>(kind === 'xlsx'
+        ? vendorApi.importXlsx(form, current, storeId)
+        : vendorApi.importMenuPdf(form, current, storeId));
+      requireAuthSessionForPrincipal(owner);
+      return result;
     },
   });
 }
 
 export function useImportAutomap() {
-  return usePreviewSafeMutation({ mutationFn: (csv: string) => unwrap<any>(vendorApi.importAutomap(csv)) });
+  return usePreviewSafeMutation({
+    mutationFn: async (input: string | {
+      csv: string;
+      authSession?: AuthSessionSnapshot;
+      storeId?: string | null;
+    }) => {
+      const csv = typeof input === 'string' ? input : input.csv;
+      const owner = typeof input === 'string'
+        ? requireAuthSessionSnapshot()
+        : input.authSession ?? requireAuthSessionSnapshot();
+      const storeId = typeof input === 'string' ? undefined : input.storeId;
+      const current = requireAuthSessionForPrincipal(owner);
+      const result = await unwrap<any>(vendorApi.importAutomap(csv, current, storeId));
+      requireAuthSessionForPrincipal(owner);
+      return result;
+    },
+  });
 }
 
 /** Bulk-import the (mapped) CSV — good rows imported, bad rows reported. */
 export function useImportItems() {
   const qc = useQueryClient();
   return usePreviewSafeMutation({
-    mutationFn: (csv: string) => unwrap<any>(vendorApi.importItems(csv)),
+    mutationFn: async (input: string | {
+      csv: string;
+      authSession?: AuthSessionSnapshot;
+      storeId?: string | null;
+    }) => {
+      const csv = typeof input === 'string' ? input : input.csv;
+      const owner = typeof input === 'string'
+        ? requireAuthSessionSnapshot()
+        : input.authSession ?? requireAuthSessionSnapshot();
+      const storeId = typeof input === 'string' ? undefined : input.storeId;
+      const current = requireAuthSessionForPrincipal(owner);
+      const result = await unwrap<any>(vendorApi.importItems(csv, current, storeId));
+      requireAuthSessionForPrincipal(owner);
+      return result;
+    },
     onSuccess: () => qc.invalidateQueries({ queryKey: ['vendor', 'menu'] }),
   });
 }

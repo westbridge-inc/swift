@@ -4,13 +4,19 @@ import { Image, Pressable, ScrollView, View } from 'react-native';
 import * as ImagePicker from 'expo-image-picker';
 import { useNavigation } from '@react-navigation/native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { useQueryClient } from '@tanstack/react-query';
 import { Feather } from '@expo/vector-icons';
 import { color, radius, space } from '@swift/ui';
 import { Card, LabeledInput, LoadingBlock, PillButton, T } from '../../../kit';
-import { useAdPlacements, useAdAvailability, useMyAdvertisers, useAdvertiserActions } from '../../../hooks/advertiser';
+import { useAdPlacements, useAdAvailability, useMyAdvertisers } from '../../../hooks/advertiser';
 import { adsApi } from '../../../services/api';
 import { errorMessage } from '../../../lib/apiError';
 import { money } from './AdvertiserHomeScreen';
+import {
+  AuthSessionBoundaryError,
+  requireAuthSessionForPrincipal,
+  requireAuthSessionSnapshot,
+} from '../../../stores/authStore';
 
 // §14.3 — the 5-step New Campaign wizard: ① placement tier cards with live
 // prices → ② weeks from the availability API (sold-out greyed) → ③ cities
@@ -25,11 +31,11 @@ const fmtISO = (d: Date) => d.toISOString().slice(0, 10);
 
 export function NewCampaignScreen() {
   const navigation = useNavigation<any>();
+  const queryClient = useQueryClient();
   const insets = useSafeAreaInsets();
   const me = useMyAdvertisers();
   const advertiser = (me.data ?? [])[0];
   const approved = advertiser?.status === 'APPROVED';
-  const actions = useAdvertiserActions(advertiser?.id);
 
   const [step, setStep] = useState<Step>(1);
   const [placement, setPlacement] = useState<any | null>(null);
@@ -69,8 +75,9 @@ export function NewCampaignScreen() {
     if (!advertiser || !placement || weeks.length === 0) return;
     setError(null);
     try {
+      const owner = requireAuthSessionSnapshot();
       setBusy('Creating campaign…');
-      const campaign = await actions.createCampaign.mutateAsync({
+      const created = await adsApi.createCampaign({
         advertiserId: advertiser.id,
         placementId: placement.id,
         name: name.trim() || `${advertiser.companyName} — ${placement.name}`,
@@ -78,7 +85,10 @@ export function NewCampaignScreen() {
         startWeek: weeks[0]!,
         endWeek: weeks[weeks.length - 1]!,
         ...(destinationValue.trim() ? { destinationType: 'URL' as const, destinationValue: destinationValue.trim() } : {}),
-      });
+      }, owner);
+      let current = requireAuthSessionForPrincipal(owner);
+      const campaign = created.data?.data;
+      if (!campaign?.id) throw new Error('Campaign creation did not return an id');
 
       if (asset) {
         setBusy('Uploading creative…');
@@ -87,24 +97,33 @@ export function NewCampaignScreen() {
         if (headline.trim()) form.append('headline', headline.trim());
         if (ctaLabel.trim()) form.append('ctaLabel', ctaLabel.trim());
         form.append('file', { uri: asset.uri, type: asset.mime, name: asset.name } as unknown as Blob);
-        await adsApi.uploadCreative(campaign.id, form);
+        await adsApi.uploadCreative(campaign.id, form, current);
+        current = requireAuthSessionForPrincipal(owner);
       }
 
       // Gated preview (§14.1): an unapproved advertiser stops at the draft —
       // the server would reject reserve anyway; the UI mirrors the lock.
       if (!approved) {
+        requireAuthSessionForPrincipal(owner);
+        void queryClient.invalidateQueries({ queryKey: ['ads'] });
         navigation.replace('CampaignDetail', { campaignId: campaign.id });
         return;
       }
 
       setBusy('Reserving your weeks…');
-      await actions.reserve.mutateAsync(campaign.id);
+      await adsApi.reserve(campaign.id, current);
+      current = requireAuthSessionForPrincipal(owner);
 
       setBusy('Issuing invoice…');
-      const checkout = await actions.checkout.mutateAsync(campaign.id);
+      const checkoutResponse = await adsApi.checkout(campaign.id, 'MANUAL', current);
+      requireAuthSessionForPrincipal(owner);
+      const checkout = checkoutResponse.data?.data;
+      void queryClient.invalidateQueries({ queryKey: ['ads'] });
       setCheckoutResult({ ...checkout, campaignId: campaign.id });
     } catch (e) {
-      setError(errorMessage(e, 'Something failed — your draft is preserved.'));
+      if (!(e instanceof AuthSessionBoundaryError)) {
+        setError(errorMessage(e, 'Something failed — your draft is preserved.'));
+      }
     } finally {
       setBusy(null);
     }

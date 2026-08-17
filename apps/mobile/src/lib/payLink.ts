@@ -1,4 +1,5 @@
 import { Linking } from 'react-native';
+import type { MmgDirectPaymentAction } from '@swift/types';
 
 // expo-web-browser is a NATIVE module: on a binary built before it was added,
 // importing it throws. Load it through a guarded require so a stale build falls
@@ -19,19 +20,74 @@ try {
  * back to the system browser if the in-app-browser module isn't in this native
  * build yet. Never throws.
  */
-export async function openPayLink(url?: string | null): Promise<void> {
-  if (!url) return;
+export async function openPayLink(url?: string | null): Promise<boolean> {
+  if (!url) return false;
   try {
     if (WebBrowser?.openBrowserAsync) {
       await WebBrowser.openBrowserAsync(url);
-      return;
+      return true;
     }
   } catch {
     // fall through to the system browser
   }
   try {
     await Linking.openURL(url);
+    return true;
   } catch {
     // malformed / unopenable link — nothing more we can do
+    return false;
   }
+}
+
+function isPublicPaymentHostname(rawHostname: string): boolean {
+  const hostname = rawHostname.toLowerCase().replace(/^\[|\]$/g, '').replace(/\.$/, '');
+  if (!hostname || !hostname.includes('.')) return false;
+  if (
+    hostname === 'localhost'
+    || hostname.endsWith('.localhost')
+    || hostname.endsWith('.local')
+    || hostname.endsWith('.internal')
+    || hostname.endsWith('.lan')
+    || hostname.endsWith('.home.arpa')
+  ) return false;
+  // The API applies the authoritative exact-host allowlist. The client adds a
+  // second invariant: a payment action can never target an IP literal.
+  if (/^\d{1,3}(?:\.\d{1,3}){3}$/.test(hostname) || rawHostname.startsWith('[')) return false;
+  return /^[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?$/.test(hostname) && !hostname.includes('..');
+}
+
+/** Defense in depth for the one server-issued post-checkout action. The client
+ * does not invent/accept a raw vendor URL and does not try to duplicate the
+ * server's deployment allowlist. */
+export function safeMmgPaymentActionUrl(action: MmgDirectPaymentAction | null | undefined): string | null {
+  if (
+    action?.kind !== 'OPEN_EXTERNAL_URL'
+    || action.method !== 'MOBILE_MONEY'
+    || action.provider !== 'MMG'
+    || action.fundsFlow !== 'DIRECT_TO_VENDOR'
+  ) return null;
+  let parsed: URL;
+  try {
+    parsed = new URL(action.url);
+  } catch {
+    return null;
+  }
+  if (
+    parsed.protocol !== 'https:'
+    || parsed.username
+    || parsed.password
+    || parsed.hash
+    || (parsed.port && parsed.port !== '443')
+    || !isPublicPaymentHostname(parsed.hostname)
+  ) return null;
+  return parsed.toString();
+}
+
+export async function openMmgPaymentAction(
+  action: MmgDirectPaymentAction | null | undefined,
+  opener: (url: string) => Promise<boolean | void> = openPayLink,
+): Promise<boolean> {
+  const url = safeMmgPaymentActionUrl(action);
+  if (!url) return false;
+  return (await opener(url)) !== false;
 }

@@ -32,6 +32,14 @@ const refreshSchema = z.object({
   refreshToken: z.string().min(1),
 });
 
+const logoutSchema = z.object({
+  pushToken: z.string().min(8).max(512).optional(),
+});
+
+const refreshLogoutSchema = logoutSchema.extend({
+  refreshToken: z.string().min(1).max(512),
+});
+
 const passwordLoginSchema = z
   .object({
     phone: zPhone.optional(),
@@ -104,8 +112,23 @@ export async function authRoutes(app: FastifyInstance) {
   });
 
   app.post('/logout', { preHandler: [app.authenticate] }, async (request, reply) => {
-    const token = request.headers.authorization?.replace('Bearer ', '') || '';
-    await authService.logout(token);
+    const body = logoutSchema.parse(request.body ?? {});
+    const sessionId = request.authSessionId;
+    if (!sessionId) {
+      throw new AppError(401, 'UNAUTHORIZED', 'This device session is no longer active');
+    }
+    await authService.logout(sessionId, request.user.userId, body.pushToken);
+    return reply.send({ success: true });
+  });
+
+  /** Logout credential for a locally-cleared client. This intentionally does
+   * not use access-token auth: an in-flight refresh may already have rotated
+   * the captured access token. Current and immediately-previous refresh
+   * credentials resolve to the same locked Session, and every valid/invalid
+   * credential receives the same response shape. */
+  app.post('/logout/refresh', authRateLimit, async (request, reply) => {
+    const body = refreshLogoutSchema.parse(request.body);
+    await authService.logoutByRefreshToken(body.refreshToken, body.pushToken);
     return reply.send({ success: true });
   });
 
@@ -137,7 +160,7 @@ export async function authRoutes(app: FastifyInstance) {
       data: { avatar: url, selfieCapturedAt: new Date() },
       select: {
         id: true, phone: true, email: true, firstName: true, lastName: true,
-        avatar: true, selfieCapturedAt: true, roles: true, activeRole: true,
+        avatar: true, selfieCapturedAt: true, roles: true, activeRole: true, lastMoverRole: true,
         status: true, isPhoneVerified: true, isEmailVerified: true,
         trustLevel: true, createdAt: true, updatedAt: true,
       },
@@ -165,7 +188,11 @@ export async function authRoutes(app: FastifyInstance) {
 
   app.post('/password/set', { preHandler: [app.authenticate] }, async (request, reply) => {
     const body = setPasswordSchema.parse(request.body);
-    await authService.setPassword(request.user.userId, body.password);
+    const sessionId = request.authSessionId;
+    if (!sessionId) {
+      throw new AppError(401, 'UNAUTHORIZED', 'This device session is no longer active');
+    }
+    await authService.setPassword(request.user.userId, sessionId, body.password);
     return reply.send({ success: true });
   });
 

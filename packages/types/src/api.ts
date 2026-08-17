@@ -53,7 +53,14 @@ export interface LoginResponse {
 }
 
 export interface SwitchRoleRequest {
+  role: 'CUSTOMER' | 'VENDOR' | 'RIDER' | 'DRIVER' | 'MOVER';
+}
+
+export interface SwitchRoleResponse {
+  role: import('./user').UserRole | 'VENDOR';
   activeRole: import('./user').UserRole;
+  lastMoverRole: import('./user').MoverRole | null;
+  message: string;
 }
 
 export interface RecoveryInitiateRequest {

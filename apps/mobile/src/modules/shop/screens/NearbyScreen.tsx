@@ -1,10 +1,12 @@
 /** @jsxImportSource react */
 import React from 'react';
-import { FlatList } from 'react-native';
+import { FlatList, Linking } from 'react-native';
 import { useNavigation } from '@react-navigation/native';
 import { space } from '@swift/ui';
 import { useHome } from '../../../hooks/customer';
 import { useLocationStore } from '../../../stores/locationStore';
+import { useDeviceLocation } from '../../../hooks/useDeviceLocation';
+import { grantedLocationFix } from '../../../lib/deviceLocation';
 import { vendorImage } from '../../../lib/images';
 import { EmptyState, ErrorState, Header, LoadingBlock, RatingMeta, Screen, VendorRow } from '../../../kit';
 
@@ -13,28 +15,39 @@ import { EmptyState, ErrorState, Header, LoadingBlock, RatingMeta, Screen, Vendo
 export function NearbyScreen() {
   const navigation = useNavigation<any>();
   const { latitude, longitude, status } = useLocationStore();
-  const home = useHome<any>(latitude ?? undefined, longitude ?? undefined);
+  const { resolve: requestLocation } = useDeviceLocation({ refreshOnMount: false });
+  const locationFix = grantedLocationFix(latitude, longitude, status);
+  const home = useHome<any>(locationFix?.latitude, locationFix?.longitude);
 
-  const nearby: any[] = home.data?.nearby ?? [];
-  const noLocation = latitude == null || longitude == null;
+  const nearby: any[] = locationFix ? (home.data?.nearby ?? []) : [];
+  const noLocation = locationFix === null;
 
   return (
     <Screen>
       <Header title="Nearby" />
-      {home.isLoading ? (
+      {noLocation ? (
+        <EmptyState
+          icon="map-pin"
+          title={status === 'denied' ? 'Location is off' : 'See what’s nearby'}
+          body={
+            status === 'denied'
+              ? 'Turn on location to see what’s close. You can keep browsing without it.'
+              : status === 'resolving'
+                ? 'Finding your location. You can keep browsing while we look.'
+              : 'Use your location to find stores around you. You can keep browsing without it.'
+          }
+          actionLabel={status === 'resolving' ? undefined : status === 'denied' ? 'Open settings' : 'Use my location'}
+          onAction={status === 'resolving'
+            ? undefined
+            : () => {
+                if (status === 'denied') void Linking.openSettings();
+                else void requestLocation();
+              }}
+        />
+      ) : home.isLoading ? (
         <LoadingBlock />
       ) : home.isError ? (
         <ErrorState onRetry={() => home.refetch()} />
-      ) : noLocation ? (
-        <EmptyState
-          icon="map-pin"
-          title="Turn on location"
-          body={
-            status === 'denied'
-              ? 'Location is off for Swift. Enable it in Settings to see what’s close.'
-              : 'We need your position to find stores around you.'
-          }
-        />
       ) : nearby.length === 0 ? (
         <EmptyState icon="map" title="Nothing close by yet" body="No open stores within 5 km of you right now." />
       ) : (

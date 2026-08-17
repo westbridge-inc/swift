@@ -1,4 +1,4 @@
-import type { PrismaClient, UserRole, VehicleType, RideClass } from '@prisma/client';
+import { Prisma, type PrismaClient, type UserRole, type VehicleType, type RideClass } from '@prisma/client';
 import { nanoid } from 'nanoid';
 import { AppError, ValidationError } from '../../utils/errors';
 import { VEHICLE_CLASSES } from '../../config/vehicle-classes';
@@ -34,6 +34,12 @@ export interface BecomePartnerInput {
   business?: Business;
 }
 
+type Tx = Prisma.TransactionClient;
+export type PartnerProvisionResult =
+  | { kind: 'RIDER'; id: string; created: boolean; roles: UserRole[]; targetRole: 'RIDER' }
+  | { kind: 'DRIVER'; id: string; created: boolean; roles: UserRole[]; targetRole: 'DRIVER' }
+  | { kind: 'VENDOR'; id: string; created: boolean; roles: UserRole[]; targetRole: 'VENDOR_OWNER' };
+
 function slugify(name: string): string {
   return name
     .toLowerCase()
@@ -48,12 +54,35 @@ export class PartnerService {
     private notifications?: NotificationService,
   ) {}
 
-  async becomePartner(userId: string, input: BecomePartnerInput) {
-    const user = await this.prisma.user.findUnique({ where: { id: userId }, select: { id: true, roles: true } });
-    if (!user) throw new AppError(404, 'USER_NOT_FOUND', 'User not found');
+  async becomePartner(userId: string, input: BecomePartnerInput): Promise<PartnerProvisionResult> {
+    this.validateInput(input);
+    const result = await this.prisma.$transaction((tx) => this.provisionLocked(tx, userId, input));
+    await this.afterCommit(result, input);
+    return result;
+  }
 
+  /** Compose provisioning with the route's authority transition in the same
+   * transaction. A rejected role switch therefore cannot leave a ghost profile
+   * or role behind, and concurrent joins cannot lose roles or race idempotency. */
+  async becomePartnerWithAuthority<TCleanup>(
+    userId: string,
+    input: BecomePartnerInput,
+    transitionAuthority: (tx: Tx, targetRole: UserRole) => Promise<TCleanup>,
+  ): Promise<{ result: PartnerProvisionResult; authorityCleanup: TCleanup }> {
+    this.validateInput(input);
+    const combined = await this.prisma.$transaction(async (tx) => {
+      const result = await this.provisionLocked(tx, userId, input);
+      const authorityCleanup = await transitionAuthority(tx, result.targetRole);
+      return { result, authorityCleanup };
+    });
+    await this.afterCommit(combined.result, input);
+    return combined;
+  }
+
+  private validateInput(input: BecomePartnerInput): void {
     if (input.role === 'VENDOR') {
-      return this.provisionVendor(user.id, user.roles, input.business);
+      if (!input.business) throw new ValidationError('Business details are required to sell on Swift');
+      return;
     }
     if (!input.vehicleType) throw new ValidationError('Vehicle type is required to move with Swift');
     // Passenger-capable vehicles (car → Economy, wagon → Comfort, bus → Group)
@@ -61,43 +90,70 @@ export class PartnerService {
     // ride classes; cargo-only vehicles (bike, canter, box truck) are delivery
     // Riders. Maximises each vehicle's earning reach.
     const rideClass = VEHICLE_CLASSES[input.vehicleType]?.rideClass;
-    return rideClass
-      ? this.provisionDriver(user.id, user.roles, input.vehicle, rideClass, input.vehicleType ?? 'CAR')
-      : this.provisionRider(user.id, user.roles, input.vehicleType);
+    if (rideClass && !input.vehicle) {
+      throw new ValidationError('Vehicle details (make, model, year, colour, licence plate) are required to drive');
+    }
   }
 
-  /** Add the given roles if missing (idempotent). */
-  private async ensureRoles(userId: string, current: UserRole[], add: UserRole[]): Promise<UserRole[]> {
+  private async provisionLocked(tx: Tx, userId: string, input: BecomePartnerInput): Promise<PartnerProvisionResult> {
+    const rows = await tx.$queryRaw<Array<{ id: string; roles: UserRole[] }>>`
+      SELECT "id", "roles"
+      FROM "users"
+      WHERE "id" = ${userId}
+      FOR UPDATE
+    `;
+    const user = rows[0];
+    if (!user) throw new AppError(404, 'USER_NOT_FOUND', 'User not found');
+
+    if (input.role === 'VENDOR') {
+      return this.provisionVendor(tx, user.id, user.roles, input.business!);
+    }
+    const vehicleType = input.vehicleType!;
+    const rideClass = VEHICLE_CLASSES[vehicleType]?.rideClass;
+    return rideClass
+      ? this.provisionDriver(tx, user.id, user.roles, input.vehicle, rideClass, vehicleType)
+      : this.provisionRider(tx, user.id, user.roles, vehicleType);
+  }
+
+  /** Add the given roles if missing (idempotent). Active-role authority is
+   * transitioned by the route through the shared locked protocol. */
+  private async ensureRoles(tx: Tx, userId: string, current: UserRole[], add: UserRole[]): Promise<UserRole[]> {
     const missing = add.filter((r) => !current.includes(r));
     if (missing.length === 0) return current;
     const roles = [...current, ...missing];
-    await this.prisma.user.update({ where: { id: userId }, data: { roles } });
+    await tx.user.update({ where: { id: userId }, data: { roles } });
     return roles;
   }
 
   // Cargo-only vehicles (bike, motorbike, canters, box trucks) provision a
   // delivery/courier Rider. Passenger-capable vehicles (car, wagon, bus) take
   // the Driver path above, at their ride tier.
-  private async provisionRider(userId: string, roles: UserRole[], vehicleType: VehicleType) {
-    const existing = await this.prisma.rider.findUnique({ where: { userId } });
-    const rider = existing ?? (await this.prisma.rider.create({ data: { userId, riderType: 'BOTH', vehicleType } }));
+  private async provisionRider(tx: Tx, userId: string, roles: UserRole[], vehicleType: VehicleType): Promise<PartnerProvisionResult> {
+    const existing = await tx.rider.findUnique({ where: { userId } });
+    const rider = existing ?? (await tx.rider.create({ data: { userId, riderType: 'BOTH', vehicleType } }));
     // D.3 — seed the new rider's float limit from their trust level + country.
-    if (!existing) await new FloatService(this.prisma).recomputeForUser(userId);
-    const updatedRoles = await this.ensureRoles(userId, roles, ['MOVER', 'RIDER']);
-    return { kind: 'RIDER' as const, id: rider.id, created: !existing, roles: updatedRoles };
+    if (!existing) await new FloatService(tx).recomputeForUser(userId);
+    const updatedRoles = await this.ensureRoles(tx, userId, roles, ['MOVER', 'RIDER']);
+    return { kind: 'RIDER' as const, id: rider.id, created: !existing, roles: updatedRoles, targetRole: 'RIDER' as const };
   }
 
-  private async provisionDriver(userId: string, roles: UserRole[], vehicle?: Vehicle, rideClass: RideClass = 'ECONOMY', vehicleType: VehicleType = 'CAR') {
+  private async provisionDriver(tx: Tx, userId: string, roles: UserRole[], vehicle?: Vehicle, rideClass: RideClass = 'ECONOMY', vehicleType: VehicleType = 'CAR'): Promise<PartnerProvisionResult> {
     if (!vehicle) {
       throw new ValidationError('Vehicle details (make, model, year, colour, licence plate) are required to drive');
     }
-    const existing = await this.prisma.driver.findUnique({ where: { userId } });
+    const existing = await tx.driver.findUnique({ where: { userId } });
+    // [REPORT-014 F-014-01] The vehicle TAXONOMY is the authority for what a
+    // vehicle physically is: seats come from it (never the schema default 4),
+    // and the ride class is its class — a self-declared class can never
+    // outrank the declared vehicle type.
+    const taxonomy = VEHICLE_CLASSES[vehicleType];
     const driver =
       existing ??
-      (await this.prisma.driver.create({
+      (await tx.driver.create({
         data: {
           userId,
-          rideClass,
+          rideClass: taxonomy?.rideClass ?? rideClass,
+          vehicleCapacity: taxonomy?.seats ?? 4,
           vehicleType,
           vehicleMake: vehicle.make,
           vehicleModel: vehicle.model,
@@ -109,22 +165,21 @@ export class PartnerService {
           vehicleInsuranceUrl: '',
         },
       }));
-    const updatedRoles = await this.ensureRoles(userId, roles, ['MOVER', 'DRIVER']);
-    return { kind: 'DRIVER' as const, id: driver.id, created: !existing, roles: updatedRoles };
+    const updatedRoles = await this.ensureRoles(tx, userId, roles, ['MOVER', 'DRIVER']);
+    return { kind: 'DRIVER' as const, id: driver.id, created: !existing, roles: updatedRoles, targetRole: 'DRIVER' as const };
   }
 
-  private async provisionVendor(userId: string, roles: UserRole[], business?: Business) {
-    if (!business) throw new ValidationError('Business details are required to sell on Swift');
-    const owner = await this.prisma.vendorOwner.upsert({ where: { userId }, create: { userId }, update: {} });
+  private async provisionVendor(tx: Tx, userId: string, roles: UserRole[], business: Business): Promise<PartnerProvisionResult> {
+    const owner = await tx.vendorOwner.upsert({ where: { userId }, create: { userId }, update: {} });
 
     // One store per owner at onboarding (idempotent).
-    const existing = await this.prisma.vendor.findFirst({ where: { ownerId: owner.id } });
+    const existing = await tx.vendor.findFirst({ where: { ownerId: owner.id } });
     if (existing) {
-      const updatedRoles = await this.ensureRoles(userId, roles, ['VENDOR_OWNER']);
-      return { kind: 'VENDOR' as const, id: existing.id, created: false, roles: updatedRoles };
+      const updatedRoles = await this.ensureRoles(tx, userId, roles, ['VENDOR_OWNER']);
+      return { kind: 'VENDOR' as const, id: existing.id, created: false, roles: updatedRoles, targetRole: 'VENDOR_OWNER' as const };
     }
 
-    const vendor = await this.prisma.vendor.create({
+    const vendor = await tx.vendor.create({
       data: {
         ownerId: owner.id,
         name: business.name,
@@ -139,19 +194,19 @@ export class PartnerService {
         status: 'PENDING_APPROVAL',
       },
     });
-    const updatedRoles = await this.ensureRoles(userId, roles, ['VENDOR_OWNER']);
+    const updatedRoles = await this.ensureRoles(tx, userId, roles, ['VENDOR_OWNER']);
 
-    // A new business enters the manual approval queue — tell the reviewers,
-    // or "we review within 24 hours" is a promise with no trigger (found
-    // live: businesses sat PENDING_APPROVAL for weeks, unseen).
-    if (this.notifications) {
-      await notifyAdmins(this.prisma, this.notifications, {
-        title: 'New business awaiting approval',
-        body: `${vendor.name} (${business.vendorType.toLowerCase()}) just signed up and is waiting for review.`,
-        data: { kind: 'vendor_pending', vendorId: vendor.id },
-      });
-    }
+    return { kind: 'VENDOR' as const, id: vendor.id, created: true, roles: updatedRoles, targetRole: 'VENDOR_OWNER' as const };
+  }
 
-    return { kind: 'VENDOR' as const, id: vendor.id, created: true, roles: updatedRoles };
+  private async afterCommit(result: PartnerProvisionResult, input: BecomePartnerInput): Promise<void> {
+    if (result.kind !== 'VENDOR' || !result.created || !this.notifications || !input.business) return;
+    // External notification work happens only after the DB transaction commits;
+    // a rolled-back or losing concurrent provisioning attempt emits nothing.
+    await notifyAdmins(this.prisma, this.notifications, {
+      title: 'New business awaiting approval',
+      body: `${input.business.name} (${input.business.vendorType.toLowerCase()}) just signed up and is waiting for review.`,
+      data: { kind: 'vendor_pending', vendorId: result.id },
+    });
   }
 }

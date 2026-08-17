@@ -1,5 +1,10 @@
 import { describe, it, expect } from 'vitest';
-import { refundCalculator, type RefundBooking } from '../modules/ads/refund-calculator';
+import {
+  refundCalculator,
+  refundCalculatorMinor,
+  type RefundBooking,
+  type RefundBookingMinor,
+} from '../modules/ads/refund-calculator';
 
 // ads-platform spec §8.4 — the refund calculator is a pure function and EVERY
 // table row is a named test case. Prices are the locked booking amounts.
@@ -84,5 +89,58 @@ describe('§8.4 edge behaviour', () => {
     const now = new Date('2026-08-06T00:00:00Z');
     const plan = refundCalculator([{ id: 'x', weekStart: WK1, amount: 5000 }], 'LATE_APPROVAL', { now, missedDaysByBooking: { x: 1 } });
     expect(plan.items[0]!.amount).toBe(714.29); // 5000/7 = 714.2857… → 714.29
+  });
+});
+
+describe('§8.4 authoritative integer-minor calculations', () => {
+  const minorBooking = (id: string, weekStart: Date, amountMinor: bigint): RefundBookingMinor => ({
+    id,
+    weekStart,
+    amountMinor,
+  });
+
+  it('rounds an odd-cent 50% refund half-up without floating point', () => {
+    const now = new Date('2026-07-30T00:00:00Z');
+    const plan = refundCalculatorMinor(
+      [minorBooking('odd-cent', WK1, 101n)],
+      'ADVERTISER_CANCEL',
+      { now, cancelFullRefundDays: 7 },
+    );
+
+    expect(plan).toEqual({
+      items: [{ bookingId: 'odd-cent', amountMinor: 51n, kind: 'REFUND' }],
+      totalMinor: 51n,
+    });
+  });
+
+  it('allocates one seventh with one deterministic half-up rounding step', () => {
+    const now = new Date('2026-08-06T00:00:00Z');
+    const plan = refundCalculatorMinor(
+      [minorBooking('round-down', WK1, 101n), minorBooking('round-up', WK1, 102n)],
+      'LATE_APPROVAL',
+      { now, missedDaysByBooking: { 'round-down': 1, 'round-up': 1 } },
+    );
+
+    expect(plan.items).toEqual([
+      { bookingId: 'round-down', amountMinor: 14n, kind: 'CREDIT' },
+      { bookingId: 'round-up', amountMinor: 15n, kind: 'CREDIT' },
+    ]);
+    expect(plan.totalMinor).toBe(29n);
+  });
+
+  it('returns the same CREDIT plan on replay and does not mutate locked amounts', () => {
+    const now = new Date('2026-08-06T00:00:00Z');
+    const bookings = [minorBooking('stable', WK1, 10_001n)];
+    const opts = { now, outageDaysByBooking: { stable: 2 } } as const;
+
+    const first = refundCalculatorMinor(bookings, 'PLACEMENT_DOWN', opts);
+    const replay = refundCalculatorMinor(bookings, 'PLACEMENT_DOWN', opts);
+
+    expect(first).toEqual(replay);
+    expect(first).toEqual({
+      items: [{ bookingId: 'stable', amountMinor: 2_857n, kind: 'CREDIT' }],
+      totalMinor: 2_857n,
+    });
+    expect(bookings[0]!.amountMinor).toBe(10_001n);
   });
 });

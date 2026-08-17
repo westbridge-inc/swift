@@ -21,6 +21,7 @@ let app: FastifyInstance;
 let adminToken: string;
 const userIds: string[] = [];
 const subjectIds: string[] = [];
+const orderIds: string[] = [];
 
 beforeAll(async () => {
   process.env['NODE_ENV'] = 'development';
@@ -45,6 +46,9 @@ beforeAll(async () => {
 afterAll(async () => {
   if (subjectIds.length > 0) {
     await app.prisma.alertDelivery.deleteMany({ where: { subjectId: { in: subjectIds } } });
+  }
+  if (orderIds.length > 0) {
+    await app.prisma.order.deleteMany({ where: { id: { in: orderIds } } });
   }
   if (userIds.length > 0) {
     await app.prisma.notification.deleteMany({ where: { userId: { in: userIds } } });
@@ -88,15 +92,40 @@ describe('send → ack → health', () => {
   });
 
   it('alerts/health reports ack rate, median time-to-ack, and breach flags', async () => {
+    // [REPORT-007] The admin health read is tenant-contained: rows count only
+    // when subjectId is a REAL tenant Order and recipientId a REAL tenant User.
+    // Orphan sentinel IDs are deliberately invisible (correct fail-closed
+    // isolation — weakening it would leak cross-tenant health), so the
+    // fixtures must be attributable.
+    const healthProbe = await app.prisma.user.create({
+      data: {
+        tenantId: 'swift-default',
+        phone: `+59257${String(Math.floor(Math.random() * 90000) + 10000)}`,
+        firstName: 'Alert', lastName: 'Probe',
+        roles: ['MOVER', 'CUSTOMER'] as never[], activeRole: 'MOVER' as never,
+        isPhoneVerified: true,
+      },
+    });
+    userIds.push(healthProbe.id);
+
     // Manufacture a controlled window: 3 sent, 2 acked (one fast, one slow).
     const mk = async (ackSecondsAgo: number | null, sentSecondsAgo: number) => {
-      const subjectId = `alert-health-${nanoid(8)}`;
-      subjectIds.push(subjectId);
+      const healthOrder = await app.prisma.order.create({
+        data: {
+          tenantId: 'swift-default', orderNumber: `ALERT-${nanoid(8)}`, orderType: 'COURIER',
+          customerId: healthProbe.id,
+          deliveryAddress: 'Alert health probe', deliveryLat: 6.8, deliveryLng: -58.15,
+          subtotalBase: 0, subtotalMarkup: 0, subtotalCustomer: 0,
+          deliveryFee: 0, totalAmount: 0, paymentMethod: 'CASH',
+        },
+      });
+      orderIds.push(healthOrder.id);
+      subjectIds.push(healthOrder.id);
       await app.prisma.alertDelivery.create({
         data: {
           kind: 'MOVER_OFFER',
-          subjectId,
-          recipientId: 'health-probe',
+          subjectId: healthOrder.id,
+          recipientId: healthProbe.id,
           sentAt: new Date(Date.now() - sentSecondsAgo * 1000),
           acknowledgedAt: ackSecondsAgo === null ? null : new Date(Date.now() - ackSecondsAgo * 1000),
         },

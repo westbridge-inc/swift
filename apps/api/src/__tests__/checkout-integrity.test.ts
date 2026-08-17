@@ -6,6 +6,7 @@ import { prismaPlugin } from '../plugins/prisma';
 import { redisPlugin } from '../plugins/redis';
 import { authPlugin } from '../plugins/auth';
 import { socketPlugin } from '../plugins/socket';
+import { OrderService } from '../modules/order/order.service';
 import { customerRoutes } from '../modules/user/customer.routes';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { expressDeliveryFee } from '../utils/markup';
@@ -35,7 +36,7 @@ async function makeCustomer() {
   });
   createdUserIds.push(user.id);
   const token = app.jwt.sign({ userId: user.id, role: 'CUSTOMER', jti: nanoid(8) });
-  await app.prisma.session.create({ data: { userId: user.id, token, refreshToken: nanoid(48), deviceId: 'intg', deviceType: 'test', expiresAt: new Date(Date.now() + 86400000) } });
+  await app.prisma.session.create({ data: { authMethod: 'OTP', userId: user.id, token, refreshToken: nanoid(48), deviceId: 'intg', deviceType: 'test', expiresAt: new Date(Date.now() + 86400000) } });
   // Address very close to the vendor so the delivery fee is the deterministic minimum.
   const addr = await app.prisma.address.create({ data: { userId: user.id, label: 'Home', addressLine1: '1 Intg', city: 'Georgetown', region: 'Demerara-Mahaica', latitude: 6.8014, longitude: -58.1552, isDefault: true } });
   return { userId: user.id, token, addressId: addr.id };
@@ -90,7 +91,9 @@ afterAll(async () => {
 describe('checkout money math', () => {
   it('applies an exact 10% discount on the subtotal', async () => {
     const c = await makeCustomer();
-    const res = await cartAndCheckout(c, { promoCode: PROMO });
+    // PICKUP: CASH-delivery promos fail closed by law [SPS-F-0022] — the
+    // discount math itself is rail-independent and proven here on pickup.
+    const res = await cartAndCheckout(c, { promoCode: PROMO, fulfillmentSelections: { [vendorId]: 'PICKUP' } });
     expect(res.statusCode).toBe(200);
     const order = res.json().data.orders[0];
     // 10% of 2000 = 200 (ceil). total = subtotal + fee - discount.
@@ -118,22 +121,225 @@ describe('checkout money math', () => {
     expect(order.total).toBe(order.subtotal + order.deliveryFee + 500 - (order.discount ?? 0));
   });
 
-  it('FREE_DELIVERY waives the whole delivery fee (was a silent no-op → charged in full)', async () => {
+  it('an explicit tipAmount 0 overrides a persisted cart tip — nothing hidden rides the order or the MMG amount [REPORT-012 F-012-01]', async () => {
+    process.env['MMG_PAY_URL_ALLOWED_HOSTS'] = 'pay.mmg.gy';
+    await app.prisma.vendor.update({ where: { id: vendorId }, data: { mmgPayUrl: 'https://pay.mmg.gy/intg-diner' } });
+    const c = await makeCustomer();
+    await inject('POST', '/api/v1/customer/cart/items', { vendorId, itemId, quantity: 1 }, c.token);
+    // Another surface/session persisted a positive tip on the cart…
+    const tipSet = await inject('PUT', '/api/v1/customer/cart/tip', { amount: 500 }, c.token);
+    expect(tipSet.statusCode).toBe(200);
+    await inject('PUT', '/api/v1/customer/cart/address', { addressId: c.addressId }, c.token);
+    // …then checkout displays 0 and SUBMITS 0. Truthiness (`||`) used to
+    // resurrect the 500 into the order, the MMG instruction, and totalSpent.
+    const res = await inject('POST', '/api/v1/customer/checkout', { paymentMethod: 'MOBILE_MONEY', tipAmount: 0 }, c.token);
+    expect(res.statusCode).toBe(200);
+    const order = res.json().data.orders[0];
+    expect(order.tip).toBe(0);
+    expect(order.total).toBe(order.subtotal + order.deliveryFee);
+    // The MMG payment instruction charges exactly what checkout displayed.
+    const action = res.json().data.paymentAction;
+    expect(action).not.toBeNull();
+    expect(action.amount).toBe(order.total);
+    // The accounting evidence carries no phantom either.
+    const cust = await app.prisma.customer.findUniqueOrThrow({ where: { userId: c.userId } });
+    expect(Number(cust.totalSpent)).toBe(order.total);
+  });
+
+  it('a PAST_DUE store whose grace lapsed cannot be checked out — the derived flags are not the whole authority [REPORT-012 F-012-05]', async () => {
+    // The vendor flags still say sellable (ACTIVE/open/accepting) — only the
+    // subscription knows the grace ran out a minute ago. Checkout must
+    // re-evaluate operability live, not wait for the billing sweep.
+    const sub = await app.prisma.subscription.create({
+      data: {
+        vendorId, type: 'RESTAURANT', status: 'PAST_DUE', weeklyRate: 20000,
+        billingMethod: 'CASH', isInGracePeriod: true,
+        gracePeriodEnd: new Date(Date.now() - 60_000),
+        currentPeriodStart: new Date(Date.now() - 8 * 86_400_000),
+        currentPeriodEnd: new Date(Date.now() - 86_400_000),
+        nextBillingDate: new Date(Date.now() - 86_400_000),
+      },
+    });
+    try {
+      const c = await makeCustomer();
+      const res = await cartAndCheckout(c, {});
+      expect(res.statusCode).toBe(400);
+      expect(res.json().error.code).toBe('VENDOR_CLOSED');
+    } finally {
+      await app.prisma.subscription.delete({ where: { id: sub.id } });
+    }
+  });
+
+  it('a cart mutation between pricing and commit is refused — never a stale-snapshot charge [REPORT-013 F-013-01]', async () => {
+    const c = await makeCustomer();
+    await inject('POST', '/api/v1/customer/cart/items', { vendorId, itemId, quantity: 1 }, c.token);
+    await inject('PUT', '/api/v1/customer/cart/address', { addressId: c.addressId }, c.token);
+    const svc = new OrderService(app.prisma, app.io);
+    // The proven interleaving: the mobile fire-and-forget tip PUT commits in
+    // the window between the pre-transaction pricing read and the atomic
+    // commit. The locked-cart generation bind must refuse.
+    await expect(svc.checkout({
+      userId: c.userId,
+      paymentMethod: 'CASH',
+      beforeTransaction: async () => {
+        await app.prisma.cart.update({ where: { customerId: c.userId }, data: { tipAmount: 500 } });
+      },
+    })).rejects.toMatchObject({ statusCode: 409, code: 'CART_CHANGED' });
+    expect(await app.prisma.order.count({ where: { customerId: c.userId } })).toBe(0);
+  });
+
+  it('an item REMOVED between pricing and commit is refused — the parent timestamp did not move [REPORT-016 F-016-01]', async () => {
+    const c = await makeCustomer();
+    // Two lines: removing one leaves the other, so CartItem.delete never bumps
+    // Cart.updatedAt — the old timestamp token passed and ordered the removed
+    // item. The aggregate item-set token catches it.
+    await inject('POST', '/api/v1/customer/cart/items', { vendorId, itemId, quantity: 1 }, c.token);
+    const second = await app.prisma.item.create({ data: { vendorId, categoryId: (await app.prisma.category.findFirstOrThrow({ where: { vendorId } })).id, name: 'Second Plate', basePrice: 1500, isAvailable: true } });
+    await inject('POST', '/api/v1/customer/cart/items', { vendorId, itemId: second.id, quantity: 1 }, c.token);
+    await inject('PUT', '/api/v1/customer/cart/address', { addressId: c.addressId }, c.token);
+    const svc = new OrderService(app.prisma, app.io);
+    try {
+      await expect(svc.checkout({
+        userId: c.userId,
+        paymentMethod: 'CASH',
+        beforeTransaction: async () => {
+          const line = await app.prisma.cartItem.findFirstOrThrow({ where: { cart: { customerId: c.userId }, itemId: second.id } });
+          await app.prisma.cartItem.delete({ where: { id: line.id } });
+        },
+      })).rejects.toMatchObject({ statusCode: 409, code: 'CART_CHANGED' });
+      expect(await app.prisma.order.count({ where: { customerId: c.userId } })).toBe(0);
+    } finally {
+      await app.prisma.item.delete({ where: { id: second.id } }).catch(() => {});
+    }
+  });
+
+  it('a delete racing AFTER the signature check is BLOCKED by the child-row lock — the removed item can never be ordered [REPORT-017B F-016-01]', async () => {
+    const c = await makeCustomer();
+    await inject('POST', '/api/v1/customer/cart/items', { vendorId, itemId, quantity: 1 }, c.token);
+    const second = await app.prisma.item.create({ data: { vendorId, categoryId: (await app.prisma.category.findFirstOrThrow({ where: { vendorId } })).id, name: 'Race Plate', basePrice: 1500, isAvailable: true } });
+    await inject('POST', '/api/v1/customer/cart/items', { vendorId, itemId: second.id, quantity: 1 }, c.token);
+    await inject('PUT', '/api/v1/customer/cart/address', { addressId: c.addressId }, c.token);
+    const svc = new OrderService(app.prisma, app.io);
+    let deleteBlocked = false;
+    try {
+      const res = await svc.checkout({
+        userId: c.userId,
+        paymentMethod: 'CASH',
+        // Fires INSIDE the checkout tx, after the child rows are FOR UPDATE-held.
+        // A concurrent delete on a SEPARATE connection with a short lock_timeout
+        // must fail to acquire the row lock — proving it cannot slip in after
+        // the signature check. (The v11/F-016-01 test proves the BEFORE-check
+        // delete → CART_CHANGED; this proves the AFTER-check window is shut.)
+        afterCartLock: async () => {
+          const line = await app.prisma.cartItem.findFirstOrThrow({ where: { cart: { customerId: c.userId }, itemId: second.id } });
+          try {
+            await app.prisma.$transaction(async (t2) => {
+              await t2.$executeRawUnsafe(`SET LOCAL lock_timeout = '600ms'`);
+              await t2.$executeRaw`DELETE FROM "cart_items" WHERE id = ${line.id}`;
+            });
+          } catch {
+            deleteBlocked = true; // lock timeout (55P03) — the delete could not proceed
+          }
+        },
+      });
+      // Checkout committed with BOTH items; the racing delete never landed.
+      expect(res.orders[0]!.subtotal).toBe(3500); // 2000 + 1500, both items
+      expect(deleteBlocked).toBe(true);
+    } finally {
+      await app.prisma.order.deleteMany({ where: { customerId: c.userId } }).catch(() => {});
+      await app.prisma.item.delete({ where: { id: second.id } }).catch(() => {});
+    }
+  });
+
+  it('a suspension committing between preview and commit beats the order [REPORT-013 F-013-06]', async () => {
+    const c = await makeCustomer();
+    await inject('POST', '/api/v1/customer/cart/items', { vendorId, itemId, quantity: 1 }, c.token);
+    await inject('PUT', '/api/v1/customer/cart/address', { addressId: c.addressId }, c.token);
+    const svc = new OrderService(app.prisma, app.io);
+    try {
+      await expect(svc.checkout({
+        userId: c.userId,
+        paymentMethod: 'CASH',
+        beforeTransaction: async () => {
+          await app.prisma.vendor.update({ where: { id: vendorId }, data: { status: 'SUSPENDED', acceptingOrders: false } });
+        },
+      })).rejects.toMatchObject({ statusCode: 400, code: 'VENDOR_CLOSED' });
+      expect(await app.prisma.order.count({ where: { customerId: c.userId } })).toBe(0);
+    } finally {
+      await app.prisma.vendor.update({ where: { id: vendorId }, data: { status: 'ACTIVE', acceptingOrders: true } });
+    }
+  });
+
+  it('a lapsed document-authority bound refuses checkout in the transaction — no sweep needed [REPORT-013 F-013-06]', async () => {
+    const c = await makeCustomer();
+    await inject('POST', '/api/v1/customer/cart/items', { vendorId, itemId, quantity: 1 }, c.token);
+    await inject('PUT', '/api/v1/customer/cart/address', { addressId: c.addressId }, c.token);
+    const svc = new OrderService(app.prisma, app.io);
+    try {
+      await expect(svc.checkout({
+        userId: c.userId,
+        paymentMethod: 'CASH',
+        beforeTransaction: async () => {
+          // The projection wrote a bound; the wall clock passed it. The
+          // pre-transaction flags still say sellable — only the in-tx bind
+          // knows. Before v11 this window stretched to the next daily sweep.
+          await app.prisma.vendor.update({ where: { id: vendorId }, data: { activationValidUntil: new Date(Date.now() - 60_000) } });
+        },
+      })).rejects.toMatchObject({ statusCode: 400, code: 'VENDOR_CLOSED' });
+    } finally {
+      await app.prisma.vendor.update({ where: { id: vendorId }, data: { activationValidUntil: null } });
+    }
+  });
+
+  it('an item going dark between preview and commit is refused [REPORT-013 F-013-06]', async () => {
+    const c = await makeCustomer();
+    await inject('POST', '/api/v1/customer/cart/items', { vendorId, itemId, quantity: 1 }, c.token);
+    await inject('PUT', '/api/v1/customer/cart/address', { addressId: c.addressId }, c.token);
+    const svc = new OrderService(app.prisma, app.io);
+    try {
+      await expect(svc.checkout({
+        userId: c.userId,
+        paymentMethod: 'CASH',
+        beforeTransaction: async () => {
+          await app.prisma.item.update({ where: { id: itemId }, data: { isAvailable: false } });
+        },
+      })).rejects.toMatchObject({ statusCode: 409, code: 'ITEM_UNAVAILABLE' }); // conflict, matching the pre-lock path
+    } finally {
+      await app.prisma.item.update({ where: { id: itemId }, data: { isAvailable: true } });
+    }
+  });
+
+  it('a persisted cart tip on a PICKUP basket never inflates the ID-gate total or totalSpent [REPORT-012 F-012-01]', async () => {
+    const c = await makeCustomer();
+    await inject('POST', '/api/v1/customer/cart/items', { vendorId, itemId, quantity: 1 }, c.token);
+    const tipSet = await inject('PUT', '/api/v1/customer/cart/tip', { amount: 500 }, c.token);
+    expect(tipSet.statusCode).toBe(200);
+    // tipAmount OMITTED: the cart tip is inherited — but a pickup has no
+    // rider, so no order carries it AND it must not inflate grandTotal (the
+    // ID gate) or customer.totalSpent. Before the fix the phantom rode both.
+    const res = await inject('POST', '/api/v1/customer/checkout', { paymentMethod: 'CASH', fulfillmentSelections: { [vendorId]: 'PICKUP' } }, c.token);
+    expect(res.statusCode).toBe(200);
+    const order = res.json().data.orders[0];
+    expect(order.tip).toBe(0);
+    const cust = await app.prisma.customer.findUniqueOrThrow({ where: { userId: c.userId } });
+    expect(Number(cust.totalSpent)).toBe(order.total); // no +500 phantom in the evidence
+  });
+
+  it('FREE_DELIVERY on a CASH delivery is refused (rider-financed promo — 409 PROMO_UNAVAILABLE_CASH_DELIVERY)', async () => {
     const code = `FREEDEL${nanoid(5).toUpperCase()}`;
     const promo = await app.prisma.promoCode.create({
       data: { code, description: 'free delivery', discountType: 'FREE_DELIVERY', discountValue: 0, validFrom: new Date(Date.now() - 3600000), validUntil: new Date(Date.now() + 3600000), maxUses: 100, maxUsesPerUser: 5, isActive: true },
     });
     try {
       const c = await makeCustomer();
+      // [SPS-F-0022] FREE_DELIVERY on a CASH platform-delivery was the sharpest
+      // rider-financed promo: the rider fronted full goods value, collected a
+      // total missing the fee, and their "fee earning" was funded by nobody.
+      // The law now refuses this combination at checkout. (The waiver math
+      // remains live for MMG deliveries, where the store absorbs its promo.)
       const res = await cartAndCheckout(c, { promoCode: code });
-      expect(res.statusCode).toBe(200);
-      const order = res.json().data.orders[0];
-      // The discount equals the delivery fee, so the total drops by exactly the fee
-      // (no tip in this cart → total collapses to the item subtotal).
-      expect(order.deliveryFee).toBeGreaterThan(0);
-      expect(order.discount).toBe(order.deliveryFee);
-      expect(order.total).toBe(order.subtotal);
-      await app.prisma.order.updateMany({ where: { promoCodeId: promo.id }, data: { promoCodeId: null } });
+      expect(res.statusCode).toBe(409);
+      expect(res.json().error.code).toBe('PROMO_UNAVAILABLE_CASH_DELIVERY');
     } finally {
       await app.prisma.promoCode.delete({ where: { id: promo.id } });
     }
@@ -219,7 +425,9 @@ describe('high-value promo gate [SWIFT-162]', () => {
       const c = await makeCustomer(); // trustLevel L1 by default
       await inject('POST', '/api/v1/customer/cart/items', { vendorId, itemId: s.item.id, quantity: 1 }, c.token);
       await inject('PUT', '/api/v1/customer/cart/address', { addressId: c.addressId }, c.token);
-      const res = await inject('POST', '/api/v1/customer/checkout', { paymentMethod: 'CASH', promoCode: s.code }, c.token);
+      // PICKUP: the CASH-delivery promo law [SPS-F-0022] would otherwise 409
+      // before this test's subject (the SWIFT-162 promo-value ID gate).
+      const res = await inject('POST', '/api/v1/customer/checkout', { paymentMethod: 'CASH', promoCode: s.code, fulfillmentSelections: { [vendorId]: 'PICKUP' } }, c.token);
       expect(res.statusCode).toBe(403);
       expect(res.json().error.code).toBe('ID_VERIFICATION_REQUIRED');
       expect(res.json().error.message).toMatch(/promo/i); // the promo-value gate, not the order-total gate
@@ -241,11 +449,11 @@ describe('high-value promo gate [SWIFT-162]', () => {
       });
       createdUserIds.push(user.id);
       const token = app.jwt.sign({ userId: user.id, role: 'CUSTOMER', jti: nanoid(8) });
-      await app.prisma.session.create({ data: { userId: user.id, token, refreshToken: nanoid(48), deviceId: 'intg', deviceType: 'test', expiresAt: new Date(Date.now() + 86400000) } });
+      await app.prisma.session.create({ data: { authMethod: 'OTP', userId: user.id, token, refreshToken: nanoid(48), deviceId: 'intg', deviceType: 'test', expiresAt: new Date(Date.now() + 86400000) } });
       const addr = await app.prisma.address.create({ data: { userId: user.id, label: 'Home', addressLine1: '1 Intg', city: 'Georgetown', region: 'Demerara-Mahaica', latitude: 6.8014, longitude: -58.1552, isDefault: true } });
       await inject('POST', '/api/v1/customer/cart/items', { vendorId, itemId: s.item.id, quantity: 1 }, token);
       await inject('PUT', '/api/v1/customer/cart/address', { addressId: addr.id }, token);
-      const res = await inject('POST', '/api/v1/customer/checkout', { paymentMethod: 'CASH', promoCode: s.code }, token);
+      const res = await inject('POST', '/api/v1/customer/checkout', { paymentMethod: 'CASH', promoCode: s.code, fulfillmentSelections: { [vendorId]: 'PICKUP' } }, token);
       expect(res.statusCode).toBe(200); // L2 is verified — the gate does not apply
     } finally {
       await cleanup(s);

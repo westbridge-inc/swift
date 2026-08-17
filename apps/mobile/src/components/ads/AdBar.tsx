@@ -7,7 +7,7 @@ import { T } from '../../kit';
 import { AdChip } from './AdChip';
 import { useAdViewability } from './useAdViewability';
 import { trackAdEvent, openAdDestination } from '../../lib/ads';
-import type { AdServeItem } from '../../lib/adsCore';
+import type { AdEventScope, AdServeItem } from '../../lib/adsCore';
 
 // Tier 3 — the rotating ad bar (spec §13.3). Horizontal pager: auto-advances
 // every rotationSeconds and loops; PAUSES while the user is touching/swiping
@@ -23,11 +23,13 @@ export function AdBar({
   items,
   rotationSeconds,
   trackable,
+  trackingScope,
   width,
 }: {
   items: AdServeItem[];
   rotationSeconds: number | null;
   trackable: boolean;
+  trackingScope: AdEventScope | null;
   width: number;
 }) {
   const listRef = useRef<FlatList<AdServeItem>>(null);
@@ -43,10 +45,10 @@ export function AdBar({
     for (const it of items) {
       if (it.impressionToken && !firedImpression.current.has(it.impressionToken)) {
         firedImpression.current.add(it.impressionToken);
-        trackAdEvent(it.impressionToken, 'IMPRESSION');
+        trackAdEvent(it.impressionToken, 'IMPRESSION', trackingScope);
       }
     }
-  }, [items, trackable]);
+  }, [items, trackable, trackingScope]);
 
   // Container visibility: the CURRENT slide's viewable fires only while the bar
   // itself is ≥50% on screen for the 1 s dwell.
@@ -58,7 +60,7 @@ export function AdBar({
       const token = current?.impressionToken;
       if (token && !firedViewable.current.has(token)) {
         firedViewable.current.add(token);
-        trackAdEvent(token, 'VIEWABLE_IMPRESSION');
+        trackAdEvent(token, 'VIEWABLE_IMPRESSION', trackingScope);
       }
     },
   });
@@ -98,7 +100,7 @@ export function AdBar({
       accessibilityRole="button"
       accessibilityLabel={`Advertisement: ${item.headline ?? item.advertiserName}`}
       onPress={() => {
-        trackAdEvent(trackable ? item.impressionToken : undefined, 'CLICK');
+        trackAdEvent(trackable ? item.impressionToken : undefined, 'CLICK', trackingScope);
         void openAdDestination(item.destination);
       }}
       style={[styles.tile, { width }]}

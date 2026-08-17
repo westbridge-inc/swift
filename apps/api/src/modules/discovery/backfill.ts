@@ -2,6 +2,7 @@ import type { PrismaClient } from '@prisma/client';
 import { DiscoveryService } from './discovery.service';
 import { reconcileAllDerived } from './derivation';
 import { runAiClassifierBatch, type CategoryClassifier } from './ai-classifier';
+import { requireDiscoveryTenantId } from './tenant-boundary';
 
 // ---------------------------------------------------------------------------
 // The backfill movement (#17 Part 4, CAT-I): run once per tenant behind the
@@ -24,19 +25,22 @@ export interface BackfillReport {
   vendorsNotified: number;
 }
 
-const NOTIFIED_MARKER = 'categories.backfill.notified';
+const LEGACY_NOTIFIED_MARKER = 'categories.backfill.notified';
+export const categoryBackfillNotifiedMarker = (tenantId: string) => `${LEGACY_NOTIFIED_MARKER}:${tenantId}`;
 
 export async function runCategoryBackfill(
   prisma: PrismaClient,
   classifier: CategoryClassifier,
   opts: {
-    tenantId?: string;
+    tenantId: string;
     /** Send the review notification to vendors with pending suggestions. */
     notify?: (userId: string) => Promise<void>;
     batchSize?: number;
-  } = {},
+    /** Injectable accounting clock; production defaults to the current UTC day. */
+    now?: Date;
+  },
 ): Promise<BackfillReport> {
-  const tenantId = opts.tenantId ?? 'swift-default';
+  const tenantId = requireDiscoveryTenantId(opts.tenantId);
   const discovery = new DiscoveryService(prisma);
   const batchSize = opts.batchSize ?? 200;
 
@@ -68,7 +72,7 @@ export async function runCategoryBackfill(
   let aiSuggested = 0;
   let aiBudgetLeft = 0;
   for (;;) {
-    const r = await runAiClassifierBatch(prisma, classifier, { tenantId, limit: 50 });
+    const r = await runAiClassifierBatch(prisma, classifier, { tenantId, limit: 50, now: opts.now });
     aiScanned += r.scanned;
     aiSuggested += r.suggested;
     aiBudgetLeft = r.budgetLeft;
@@ -76,7 +80,7 @@ export async function runCategoryBackfill(
   }
 
   // ---- Stage C: derivation across the catalog -----------------------------
-  const derived = await reconcileAllDerived(prisma);
+  const derived = await reconcileAllDerived(prisma, tenantId);
 
   // ---- Notify: one message per vendor with PENDING suggestions, ONCE ------
   let vendorsNotified = 0;
@@ -88,18 +92,26 @@ export async function runCategoryBackfill(
     });
     const items = pending.length
       ? await prisma.item.findMany({
-          where: { id: { in: pending.map((p) => p.itemId) } },
+          where: { id: { in: pending.map((p) => p.itemId) }, vendor: { tenantId } },
           select: { vendorId: true },
           distinct: ['vendorId'],
         })
       : [];
-    const marker = await prisma.platformConfig.findUnique({ where: { key: NOTIFIED_MARKER } });
-    const already = new Set<string>(Array.isArray(marker?.value) ? (marker.value as string[]) : []);
+    const markerKey = categoryBackfillNotifiedMarker(tenantId);
+    const marker = await prisma.platformConfig.findUnique({ where: { key: markerKey } });
+    // Rolling compatibility: the original marker mixed every tenant in one
+    // vendor-id array. Import it once when a tenant marker is born, but never
+    // mutate/delete it; existing vendors therefore are not re-notified.
+    const legacy = marker
+      ? null
+      : await prisma.platformConfig.findUnique({ where: { key: LEGACY_NOTIFIED_MARKER } });
+    const prior = marker?.value ?? legacy?.value;
+    const already = new Set<string>(Array.isArray(prior) ? (prior as string[]) : []);
 
     for (const { vendorId } of items) {
       if (already.has(vendorId)) continue;
-      const vendor = await prisma.vendor.findUnique({
-        where: { id: vendorId },
+      const vendor = await prisma.vendor.findFirst({
+        where: { id: vendorId, tenantId, owner: { user: { tenantId } } },
         select: { owner: { select: { userId: true } } },
       });
       if (!vendor) continue;
@@ -108,8 +120,8 @@ export async function runCategoryBackfill(
       vendorsNotified += 1;
     }
     await prisma.platformConfig.upsert({
-      where: { key: NOTIFIED_MARKER },
-      create: { key: NOTIFIED_MARKER, value: [...already] },
+      where: { key: markerKey },
+      create: { key: markerKey, value: [...already] },
       update: { value: [...already] },
     });
   }

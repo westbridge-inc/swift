@@ -98,6 +98,35 @@ describe('the shadow scanner (evidence, zero behavior)', () => {
     expect(rep.byDay[0]).toHaveProperty('pairs');
   });
 
+  it('a run never pairs across operators; evidence carries the pair tenant [REPORT-014 F-014-03]', async () => {
+    const tB = `shadow-b-${nanoid(6).toLowerCase()}`;
+    await prisma.tenant.create({ data: { id: tB, name: 'Shadow B', slug: tB } });
+    try {
+      // Two orders whose dropoffs are ~10m apart — a guaranteed pair on every
+      // order-side rule, EXCEPT they belong to different operators.
+      const a = await makeOrder({ deliveryLat: 6.806, deliveryLng: -58.153 });
+      const b = await makeOrder({ deliveryLat: 6.8061, deliveryLng: -58.1531, tenantId: tB });
+
+      await runShadowScan(prisma, T);
+
+      const rows = await prisma.batchEvaluation.findMany({ where: { decision: 'SHADOW_WOULD_BATCH' } });
+      const crossKey = [a.id, b.id].sort().join('|');
+      const keys = rows.map((r) => [r.orderId, (r.scoreBreakdown as { pairedWith?: string })?.pairedWith ?? ''].sort().join('|'));
+      expect(keys).not.toContain(crossKey); // never a cross-operator pair
+      // The foreign-tenant order pairs with nothing here at all.
+      const touchingB = rows.filter((r) => r.orderId === b.id || (r.scoreBreakdown as { pairedWith?: string })?.pairedWith === b.id);
+      expect(touchingB).toHaveLength(0);
+      // Any evidence written for a's pairs is attributed to a's own tenant.
+      for (const r of rows.filter((row) => row.orderId === a.id)) {
+        expect(r.tenantId).toBe('swift-default');
+      }
+    } finally {
+      await prisma.batchEvaluation.deleteMany({ where: { tenantId: tB } });
+      await prisma.order.deleteMany({ where: { tenantId: tB } });
+      await prisma.tenant.deleteMany({ where: { id: tB } });
+    }
+  });
+
   it('settings with shadowMode AND enabled both off make the scan a no-op', async () => {
     await prisma.batchingSettings.upsert({
       where: { tenantId: 'swift-default' },

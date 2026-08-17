@@ -7,7 +7,8 @@ import { color } from '@swift/ui';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
 import { LoadingBlock, Screen, T } from '../../kit';
 import { ChatScreen } from '../../screens/shared/ChatScreen';
-import { useVerificationStatus } from '../../hooks';
+import { useActiveJob, useBroadcastLocation, useMoverKind, useVerificationStatus } from '../../hooks';
+import { shouldTrackMoverLocation } from '../../lib/moverLocation';
 import { useMoverPreview } from '../../stores/moverPreview';
 import { useAuthStore } from '../../stores/authStore';
 import { useWentLive, WentLivePopup } from '../../components/onboarding/WentLive';
@@ -50,6 +51,20 @@ function MoverRoot({ navigation }: any) {
   );
 }
 
+/** Own the single native tracking stream above verification and navigation.
+ * A force-offlined mover can still have an assigned trip, so mounting this on
+ * Home alone loses customer-visible GPS after a restart or verification flip. */
+function MoverLocationSupervisor() {
+  const preview = useMoverPreview((s) => s.preview);
+  const { kind, profile } = useMoverKind();
+  const active = useActiveJob(kind);
+  useBroadcastLocation(
+    kind,
+    !preview && shouldTrackMoverLocation(!!profile?.isOnline, active.data),
+  );
+  return null;
+}
+
 /** A persistent, unmissable "Preview" strip while a prospective mover explores
  *  the earner app read-only — tap to leave preview and return to the role picker. */
 function MoverPreviewBanner() {
@@ -59,6 +74,10 @@ function MoverPreviewBanner() {
   return (
     <View pointerEvents="box-none" style={{ position: 'absolute', top: 0, left: 0, right: 0, paddingTop: insets.top + 4, alignItems: 'center' }}>
       <Pressable
+        testID="mover-preview-exit"
+        accessibilityRole="button"
+        accessibilityLabel="Exit driver preview"
+        accessibilityHint="Return to the Swift role picker"
         onPress={() => {
           exitPreview();
           setIntent(null); // back to "How will you use Swift?"
@@ -79,6 +98,7 @@ export function MoverStack() {
   const preview = useMoverPreview((s) => s.preview);
   return (
     <View style={{ flex: 1 }}>
+      <MoverLocationSupervisor />
       <Stack.Navigator screenOptions={{ headerShown: false }}>
         <Stack.Screen name="MoverRoot" component={MoverRoot} />
         <Stack.Screen name="ActiveJob" component={ActiveJobScreen} />

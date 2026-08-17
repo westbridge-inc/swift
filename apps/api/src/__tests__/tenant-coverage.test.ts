@@ -30,12 +30,11 @@ const DELIBERATELY_UNSCOPED: Record<string, string> = {
     'cross-tenant system (schema: IdentityKey, "the one sanctioned cross-tenant system"). Scoping it ' +
     'would let the same person take a fresh trial on every operator, which is the abuse it exists to stop. ' +
     'Values are HMAC-hashed, never raw, so platform-wide matching leaks no PII across tenants.',
-  ridequeueentry:
-    'PENDING a migration, not a decision. RideQueueEntry.tenantId is the ONLY nullable tenantId in the ' +
-    'schema and its single creation site never sets it, so every existing row is NULL. Enrolling it now ' +
-    'would inject `tenantId: swift-default` into reads and make every existing queue entry invisible. ' +
-    'Fix order: make the column non-null with a default, backfill, THEN enroll and delete this entry. ' +
-    'Tracked as F-0031.',
+  santombstone:
+    'Swift Account Numbers are globally unique payment addresses and can never be recycled. A tombstone ' +
+    'from one tenant must remain visible to every allocator and resolver; tenant-scoping this registry can ' +
+    'reissue a retired number to another tenant and misroute a late cash payment. tenantId is audit ' +
+    'provenance only, not an authorization boundary for this platform-wide deny registry.',
 };
 
 const modelsWithTenantId = Prisma.dmmf.datamodel.models

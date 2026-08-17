@@ -29,7 +29,7 @@ const FAQS: { q: string; a: string }[] = [
   },
   {
     q: 'Can I cancel an order?',
-    a: 'Yes — free within the first few minutes while the order is pending. After the store starts preparing, cancellation may not be available.',
+    a: 'Yes — within the first few minutes while the order is pending. Cash orders cancel free. If you already sent an MMG payment for the order, the store refunds you directly. After the store starts preparing, cancellation may not be available.',
   },
   {
     q: 'How do refunds work with cash?',

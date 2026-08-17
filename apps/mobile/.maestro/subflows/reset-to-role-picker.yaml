@@ -1,0 +1,13 @@
+appId: gy.swift.app
+---
+# This suite is intentionally destructive only to the selected simulator's
+# Swift app sandbox. The wrapper requires an explicit UDID and rejects the
+# protected iPhone before Maestro is allowed to execute this command.
+- launchApp:
+    clearState: true
+- openLink: swift://expo-development-client/?url=${SWIFT_EXPO_DEV_URL_ENCODED}
+- extendedWaitUntil:
+    visible:
+      id: role-picker-screen
+    timeout: 90000
+- assertVisible: Welcome to Swift

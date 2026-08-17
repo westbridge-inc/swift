@@ -258,7 +258,10 @@ describe('Transact gates refuse a selfie-less account', () => {
     expect(blocked.json().error.code).toBe('SELFIE_REQUIRED');
 
     await postSelfie(u.token);
-    const allowed = await inject('POST', '/api/v1/rider/go-online', {}, u.token);
+    const allowed = await inject('POST', '/api/v1/rider/go-online', {
+      latitude: 6.8013,
+      longitude: -58.1551,
+    }, u.token);
     expect(allowed.statusCode).toBe(200);
   });
 

@@ -11,6 +11,11 @@ import { useMyAdvertisers, useAdvertiserCampaigns, useCampaignStats, useAdvertis
 import { adsApi } from '../../../services/api';
 import { errorMessage } from '../../../lib/apiError';
 import { CAMPAIGN_STATUS, money } from './AdvertiserHomeScreen';
+import {
+  AuthSessionBoundaryError,
+  requireAuthSessionForPrincipal,
+  requireAuthSessionSnapshot,
+} from '../../../stores/authStore';
 
 // §14.4 — campaign detail: human-worded §6.1 status timeline, §12.3 stats
 // from the rollups, creatives with review status, pause/resume/cancel. THE
@@ -62,7 +67,9 @@ export function CampaignDetailScreen() {
     if (!campaign) return;
     setActing(true);
     try {
-      const res = await adsApi.refundPreview(campaign.id);
+      const owner = requireAuthSessionSnapshot();
+      const res = await adsApi.refundPreview(campaign.id, owner);
+      requireAuthSessionForPrincipal(owner);
       const plan = res?.data?.data as { total: number; items: Array<{ kind: string }> };
       const refundTotal = plan?.total ?? 0;
       Alert.alert(
@@ -76,15 +83,30 @@ export function CampaignDetailScreen() {
             text: refundTotal > 0 ? `Cancel — refund ${money(refundTotal, campaign.currency)}` : 'Cancel campaign',
             style: 'destructive',
             onPress: () => {
-              actions.cancel.mutate(campaign.id, {
-                onError: (e) => Alert.alert('Could not cancel', errorMessage(e)),
-              });
+              void (async () => {
+                setActing(true);
+                try {
+                  const current = requireAuthSessionForPrincipal(owner);
+                  await adsApi.cancel(campaign.id, current);
+                  requireAuthSessionForPrincipal(owner);
+                  await Promise.all([campaigns.refetch(), stats.refetch()]);
+                  requireAuthSessionForPrincipal(owner);
+                } catch (cancelError) {
+                  if (!(cancelError instanceof AuthSessionBoundaryError)) {
+                    Alert.alert('Could not cancel', errorMessage(cancelError));
+                  }
+                } finally {
+                  setActing(false);
+                }
+              })();
             },
           },
         ],
       );
     } catch (e) {
-      Alert.alert('Could not load refund preview', errorMessage(e));
+      if (!(e instanceof AuthSessionBoundaryError)) {
+        Alert.alert('Could not load refund preview', errorMessage(e));
+      }
     } finally {
       setActing(false);
     }
@@ -219,7 +241,7 @@ export function CampaignDetailScreen() {
               <PillButton label="Resume campaign" loading={actions.resume.isPending} onPress={() => actions.resume.mutate(campaign.id)} />
             ) : null}
             {['PENDING_REVIEW', 'SCHEDULED', 'LIVE', 'PAUSED'].includes(campaign.status) ? (
-              <PillButton label="Cancel campaign…" variant="outline" loading={acting || actions.cancel.isPending} onPress={confirmCancel} />
+              <PillButton label="Cancel campaign…" variant="outline" loading={acting} onPress={confirmCancel} />
             ) : null}
           </View>
         ) : null}

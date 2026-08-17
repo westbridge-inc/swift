@@ -22,12 +22,25 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: pnpm/action-setup@v6
       - uses: actions/setup-node@v7
         with:
           node-version: 20
-          cache: pnpm
-      - run: pnpm install --frozen-lockfile
+      # corepack-managed pnpm (from the packageManager field). The
+      # pnpm/action-setup standalone wrapper hits a deterministic linker
+      # ENOENT on this workspace (see pnpm/pnpm#9249 + the probe runs:
+      # apps/api exists before AND after, yet its node_modules mkdir
+      # 'fails') — the identical install passes with corepack pnpm on
+      # macOS and Linux-docker. No pnpm caches existed, so `cache: pnpm`
+      # is dropped with nothing lost.
+      - run: corepack enable && corepack prepare --activate
+      # The retry is a cheap belt for transient registry/link hiccups. (The
+      # 10-day deterministic install failure here was a COMMITTED
+      # apps/api/node_modules symlink — dangling on a fresh checkout, and
+      # node's recursive mkdir reports a dangling-symlink target as the
+      # misleading ENOENT. Fixed by de-indexing it; the .gitignore pattern
+      # is now 'node_modules' without the slash so a symlink can never
+      # sneak back in.)
+      - run: pnpm install --frozen-lockfile || pnpm install --frozen-lockfile
       - run: cd apps/api && npx prisma generate
       - run: pnpm lint
       - run: pnpm type-check
@@ -63,12 +76,18 @@ jobs:
           --health-retries=5
     steps:
       - uses: actions/checkout@v7
-      - uses: pnpm/action-setup@v6
       - uses: actions/setup-node@v7
         with:
           node-version: 20
-          cache: pnpm
-      - run: pnpm install --frozen-lockfile
+      # corepack-managed pnpm (from the packageManager field). The
+      # pnpm/action-setup standalone wrapper hits a deterministic linker
+      # ENOENT on this workspace (see pnpm/pnpm#9249 + the probe runs:
+      # apps/api exists before AND after, yet its node_modules mkdir
+      # 'fails') — the identical install passes with corepack pnpm on
+      # macOS and Linux-docker. No pnpm caches existed, so `cache: pnpm`
+      # is dropped with nothing lost.
+      - run: corepack enable && corepack prepare --activate
+      - run: pnpm install --frozen-lockfile || pnpm install --frozen-lockfile
       - run: cd apps/api && npx prisma generate
       - name: Run database migrations
         run: cd apps/api && npx prisma db push --skip-generate
@@ -121,12 +140,18 @@ jobs:
     needs: lint-and-type-check
     steps:
       - uses: actions/checkout@v7
-      - uses: pnpm/action-setup@v6
       - uses: actions/setup-node@v7
         with:
           node-version: 20
-          cache: pnpm
-      - run: pnpm install --frozen-lockfile
+      # corepack-managed pnpm (from the packageManager field). The
+      # pnpm/action-setup standalone wrapper hits a deterministic linker
+      # ENOENT on this workspace (see pnpm/pnpm#9249 + the probe runs:
+      # apps/api exists before AND after, yet its node_modules mkdir
+      # 'fails') — the identical install passes with corepack pnpm on
+      # macOS and Linux-docker. No pnpm caches existed, so `cache: pnpm`
+      # is dropped with nothing lost.
+      - run: corepack enable && corepack prepare --activate
+      - run: pnpm install --frozen-lockfile || pnpm install --frozen-lockfile
       - run: cd apps/api && npx prisma generate
       - run: pnpm --filter @swift/api build
 
@@ -136,12 +161,18 @@ jobs:
     needs: lint-and-type-check
     steps:
       - uses: actions/checkout@v7
-      - uses: pnpm/action-setup@v6
       - uses: actions/setup-node@v7
         with:
           node-version: 20
-          cache: pnpm
-      - run: pnpm install --frozen-lockfile
+      # corepack-managed pnpm (from the packageManager field). The
+      # pnpm/action-setup standalone wrapper hits a deterministic linker
+      # ENOENT on this workspace (see pnpm/pnpm#9249 + the probe runs:
+      # apps/api exists before AND after, yet its node_modules mkdir
+      # 'fails') — the identical install passes with corepack pnpm on
+      # macOS and Linux-docker. No pnpm caches existed, so `cache: pnpm`
+      # is dropped with nothing lost.
+      - run: corepack enable && corepack prepare --activate
+      - run: pnpm install --frozen-lockfile || pnpm install --frozen-lockfile
       - run: pnpm --filter @swift/admin build
 
   web-build:
@@ -150,12 +181,18 @@ jobs:
     needs: lint-and-type-check
     steps:
       - uses: actions/checkout@v7
-      - uses: pnpm/action-setup@v6
       - uses: actions/setup-node@v7
         with:
           node-version: 20
-          cache: pnpm
-      - run: pnpm install --frozen-lockfile
+      # corepack-managed pnpm (from the packageManager field). The
+      # pnpm/action-setup standalone wrapper hits a deterministic linker
+      # ENOENT on this workspace (see pnpm/pnpm#9249 + the probe runs:
+      # apps/api exists before AND after, yet its node_modules mkdir
+      # 'fails') — the identical install passes with corepack pnpm on
+      # macOS and Linux-docker. No pnpm caches existed, so `cache: pnpm`
+      # is dropped with nothing lost.
+      - run: corepack enable && corepack prepare --activate
+      - run: pnpm install --frozen-lockfile || pnpm install --frozen-lockfile
       - run: pnpm --filter @swift/web build
 
   desktop-build:
@@ -166,12 +203,18 @@ jobs:
     needs: lint-and-type-check
     steps:
       - uses: actions/checkout@v7
-      - uses: pnpm/action-setup@v6
       - uses: actions/setup-node@v7
         with:
           node-version: 20
-          cache: pnpm
-      - run: pnpm install --frozen-lockfile
+      # corepack-managed pnpm (from the packageManager field). The
+      # pnpm/action-setup standalone wrapper hits a deterministic linker
+      # ENOENT on this workspace (see pnpm/pnpm#9249 + the probe runs:
+      # apps/api exists before AND after, yet its node_modules mkdir
+      # 'fails') — the identical install passes with corepack pnpm on
+      # macOS and Linux-docker. No pnpm caches existed, so `cache: pnpm`
+      # is dropped with nothing lost.
+      - run: corepack enable && corepack prepare --activate
+      - run: pnpm install --frozen-lockfile || pnpm install --frozen-lockfile
       - run: pnpm --filter @swift/desktop build
 
   # Broken or drifted migrations must fail CI, not the deploy: replay every
@@ -198,12 +241,18 @@ jobs:
           --health-retries=5
     steps:
       - uses: actions/checkout@v7
-      - uses: pnpm/action-setup@v6
       - uses: actions/setup-node@v7
         with:
           node-version: 20
-          cache: pnpm
-      - run: pnpm install --frozen-lockfile
+      # corepack-managed pnpm (from the packageManager field). The
+      # pnpm/action-setup standalone wrapper hits a deterministic linker
+      # ENOENT on this workspace (see pnpm/pnpm#9249 + the probe runs:
+      # apps/api exists before AND after, yet its node_modules mkdir
+      # 'fails') — the identical install passes with corepack pnpm on
+      # macOS and Linux-docker. No pnpm caches existed, so `cache: pnpm`
+      # is dropped with nothing lost.
+      - run: corepack enable && corepack prepare --activate
+      - run: pnpm install --frozen-lockfile || pnpm install --frozen-lockfile
       - name: Replay all migrations on a clean database
         run: cd apps/api && npx prisma migrate deploy
         env:

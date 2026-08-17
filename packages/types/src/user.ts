@@ -2,9 +2,15 @@ export enum UserRole {
   CUSTOMER = 'CUSTOMER',
   RIDER = 'RIDER',
   DRIVER = 'DRIVER',
+  MOVER = 'MOVER',
   VENDOR_OWNER = 'VENDOR_OWNER',
   ADMIN = 'ADMIN',
   SUPER_ADMIN = 'SUPER_ADMIN',
+}
+
+export enum MoverRole {
+  RIDER = 'RIDER',
+  DRIVER = 'DRIVER',
 }
 
 export enum UserStatus {
@@ -27,6 +33,8 @@ export interface User {
   selfieCapturedAt?: string | null;
   roles: UserRole[];      // Changed from single role
   activeRole: UserRole;   // Currently active role
+  /** Cross-device memory of the last specific delivery/taxi work surface. */
+  lastMoverRole?: MoverRole | null;
   status: UserStatus;
   isPhoneVerified: boolean;
   isEmailVerified: boolean;

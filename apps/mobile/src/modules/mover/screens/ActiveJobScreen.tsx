@@ -7,16 +7,22 @@ import BottomSheet, { BottomSheetScrollView } from '@gorhom/bottom-sheet';
 import * as ImagePicker from 'expo-image-picker';
 import { color, radius, space } from '@swift/ui';
 import { Feather, MaterialCommunityIcons } from '@expo/vector-icons';
-import { CodeInput, EmptyState, PillButton, PopupCard, Screen, T, cardShadow } from '../../../kit';
+import { CodeInput, DecorativeIcon, EmptyState, PillButton, PopupCard, PopupTitle, Screen, T, cardShadow } from '../../../kit';
 import { Stars } from '../../../kit/controls';
 import { useMoverKind, useActiveJob, useDriverAction, useRiderAction, useRateCustomer, useCourierProof, useRideSos } from '../../../hooks';
 import { useMoverPreview } from '../../../stores/moverPreview';
 import { toast } from '../../../components/ui/toast';
 import { useLocationStore } from '../../../stores/locationStore';
+import { grantedLocationFix } from '../../../lib/deviceLocation';
 import { haversineKm, streetEtaMin } from '../../../lib/geo';
 import { jobAmount, RoutePair } from '../shared';
 import { haptic } from '../../../lib/haptics';
 import { dk, withAlpha, DCard } from '../dark';
+import {
+  AuthSessionBoundaryError,
+  requireAuthSessionForPrincipal,
+  requireAuthSessionSnapshot,
+} from '../../../stores/authStore';
 
 /**
  * The active job/ride screen at navigation grade (dashboard plan Phase D):
@@ -104,7 +110,7 @@ export function ActiveJobScreen({ navigation }: any) {
   const riderAct = useRiderAction();
   const courierProof = useCourierProof();
   const rate = useRateCustomer();
-  const { latitude, longitude } = useLocationStore();
+  const { latitude, longitude, status: locationStatus } = useLocationStore();
   const [pin, setPin] = useState('');
   const [ratePopup, setRatePopup] = useState<{ orderId: string; name: string; mmg: boolean } | null>(null);
   const [stars, setStars] = useState(5);
@@ -150,20 +156,31 @@ export function ActiveJobScreen({ navigation }: any) {
   // the plain "Mark delivered" action.
   const isCourier = String(job?.orderType ?? '').toUpperCase() === 'COURIER';
   const captureCourierProof = async () => {
-    const perm = await ImagePicker.requestCameraPermissionsAsync();
-    if (!perm.granted) {
-      toast.error('Camera access is needed to capture proof of delivery.');
-      return;
+    try {
+      const owner = preview ? null : requireAuthSessionSnapshot();
+      const perm = await ImagePicker.requestCameraPermissionsAsync();
+      if (owner) requireAuthSessionForPrincipal(owner);
+      if (!perm.granted) {
+        toast.error('Camera access is needed to capture proof of delivery.');
+        return;
+      }
+      const shot = await ImagePicker.launchCameraAsync({ quality: 0.6 });
+      if (owner) requireAuthSessionForPrincipal(owner);
+      if (shot.canceled || !shot.assets?.[0]) return;
+      courierProof.mutate(
+        { orderId: job.id, uri: shot.assets[0].uri, authSession: owner ?? undefined },
+        {
+          onSuccess: () => active.refetch?.(),
+          onError: (proofError: unknown) => {
+            if (!(proofError instanceof AuthSessionBoundaryError)) {
+              toast.error('Couldn’t save the proof. Try again.');
+            }
+          },
+        },
+      );
+    } catch (proofError) {
+      if (!(proofError instanceof AuthSessionBoundaryError)) throw proofError;
     }
-    const shot = await ImagePicker.launchCameraAsync({ quality: 0.6 });
-    if (shot.canceled || !shot.assets?.[0]) return;
-    courierProof.mutate(
-      { orderId: job.id, uri: shot.assets[0].uri },
-      {
-        onSuccess: () => active.refetch?.(),
-        onError: () => toast.error('Couldn’t save the proof. Try again.'),
-      },
-    );
   };
   const markDelivered = () =>
     isCourier ? captureCourierProof() : riderAct.mutate({ id: job.id, action: 'delivered' });
@@ -172,7 +189,10 @@ export function ActiveJobScreen({ navigation }: any) {
   // NOTHING at the door; their delivery fee comes from the store in cash.
   const isMmgPaid = job?.paymentMethod === 'MOBILE_MONEY';
   const pickedUp = ['PICKED_UP', 'EN_ROUTE_DELIVERY', 'ARRIVED'].includes(String(job?.status ?? '').toUpperCase());
-  const feeLabel = `GYD ${Number(job?.deliveryFee ?? 0).toLocaleString()}`;
+  // The store owes the rider fee PLUS any prepaid tip on MMG — the settlement
+  // ledger records fee + tip, so the door copy must claim the same number
+  // [REPORT-006 carryover: fee-only copy under-claimed the rider's pay].
+  const feeLabel = `GYD ${(Number(job?.deliveryFee ?? 0) + Number(job?.tipAmount ?? 0)).toLocaleString()}`;
   const cust: any = job?.customer ?? job?.user ?? null;
   const custName = cust ? [cust.firstName, cust.lastName].filter(Boolean).join(' ') : null;
   const inProgress = String(job?.status ?? '').toUpperCase() === 'RIDE_IN_PROGRESS';
@@ -188,7 +208,7 @@ export function ActiveJobScreen({ navigation }: any) {
 
   // Live distance/ETA to the CURRENT target (reference nav pill) — straight
   // GPS math via the shared street-pace estimator, never presented as routing.
-  const me = latitude != null && longitude != null ? { latitude, longitude } : null;
+  const me = grantedLocationFix(latitude, longitude, locationStatus);
   const distKm = navTarget && me ? haversineKm(me, navTarget) : null;
   const etaMin = navTarget && me ? streetEtaMin(me, navTarget) : null;
 
@@ -232,7 +252,12 @@ export function ActiveJobScreen({ navigation }: any) {
   return (
     <View style={{ flex: 1, backgroundColor: dk.bg }}>
       {job ? (
-        <MapView provider={PROVIDER_DEFAULT} style={{ flex: 1 }} initialRegion={region} showsUserLocation>
+        <MapView
+          provider={PROVIDER_DEFAULT}
+          style={{ flex: 1 }}
+          initialRegion={region}
+          showsUserLocation={me !== null}
+        >
           {pickup ? <Marker coordinate={pickup} title="Pickup" /> : null}
           {drop ? <Marker coordinate={drop} title="Drop-off" pinColor={color.brand[500]} /> : null}
           {pickup && drop ? (
@@ -407,8 +432,8 @@ export function ActiveJobScreen({ navigation }: any) {
                   <Feather name="check-circle" size={15} color={dk.success} style={{ marginTop: 1 }} />
                   <T variant="caption" weight="semibold" style={{ flex: 1, color: dk.text }}>
                     {pickedUp
-                      ? `Customer already paid via MMG — collect NOTHING at the door. Your ${feeLabel} fee comes from the store (see Earnings).`
-                      : `Customer already paid via MMG. Collect your ${feeLabel} delivery fee from the store with the order.`}
+                      ? `Customer already paid via MMG — collect NOTHING at the door. Your ${feeLabel} pay (fee + tip) comes from the store (see Earnings).`
+                      : `Customer already paid via MMG. Collect your ${feeLabel} pay (fee + tip) from the store with the order.`}
                   </T>
                 </View>
                 {bigButton(deliverLabel, markDelivered, { loading: riderAct.isPending || courierProof.isPending, disabled: busy })}
@@ -435,14 +460,14 @@ export function ActiveJobScreen({ navigation }: any) {
       {/* SOS confirm — deliberate two-step, then records the incident + pages
           ops AND dials local emergency (the same flow the passenger has). */}
       <PopupCard visible={sosConfirm} onClose={() => setSosConfirm(false)}>
-        <View style={{ width: 72, height: 72, borderRadius: 36, alignItems: 'center', justifyContent: 'center', backgroundColor: color.error }}>
+        <DecorativeIcon style={{ width: 72, height: 72, borderRadius: 36, alignItems: 'center', justifyContent: 'center', backgroundColor: color.error }}>
           <Feather name="alert-triangle" size={32} color={color.white} />
-        </View>
-        <T variant="title" center style={{ marginTop: space.lg }}>
+        </DecorativeIcon>
+        <PopupTitle variant="title" center style={{ marginTop: space.lg }}>
           Get emergency help?
-        </T>
+        </PopupTitle>
         <T variant="body" tone="muted" center style={{ marginTop: space.sm }}>
-          This alerts Swift safety with your live location, then dials local emergency services. Use only in a real emergency.
+          This dials 911 — local emergency services — right away. Swift also saves the alert and your live location on this trip’s record. Use only in a real emergency.
         </T>
         <PillButton
           label="Yes — get help now"
@@ -451,10 +476,13 @@ export function ActiveJobScreen({ navigation }: any) {
           onPress={() => {
             setSosConfirm(false);
             if (preview) return; // read-only preview never dials or records
-            const coords = latitude != null && longitude != null ? { lat: latitude, lng: longitude } : undefined;
-            if (job?.id) sos.mutate({ id: job.id, coords });
+            // 911 is THE action — dial first, never behind anything else. Swift
+            // records evidence; it is not an emergency responder and the copy
+            // must never imply a staffed safety desk [liability shield].
             // Guyana launch emergency number; move to CountryConfig for other markets.
             Linking.openURL('tel:911').catch(() => {});
+            const coords = me ? { lat: me.latitude, lng: me.longitude } : undefined;
+            if (job?.id) sos.mutate({ id: job.id, coords });
           }}
         />
         <PillButton label="Close" variant="soft" style={{ alignSelf: 'stretch', marginTop: space.md }} onPress={() => setSosConfirm(false)} />
@@ -462,12 +490,12 @@ export function ActiveJobScreen({ navigation }: any) {
 
       {/* Post-trip passenger rating — DRIVER_TO_CUSTOMER, once per ride */}
       <PopupCard visible={!!ratePopup} onClose={closeRating}>
-        <View style={{ width: 72, height: 72, borderRadius: 36, alignItems: 'center', justifyContent: 'center', backgroundColor: color.brand[500] }}>
+        <DecorativeIcon style={{ width: 72, height: 72, borderRadius: 36, alignItems: 'center', justifyContent: 'center', backgroundColor: color.brand[500] }}>
           <Feather name="check" size={34} color={color.white} />
-        </View>
-        <T variant="title" center style={{ marginTop: space.lg }}>
+        </DecorativeIcon>
+        <PopupTitle variant="title" center style={{ marginTop: space.lg }}>
           Trip complete
-        </T>
+        </PopupTitle>
         <T variant="body" tone="muted" center style={{ marginTop: space.sm }}>
           {ratePopup?.mmg ? 'Paid to your MMG — 100% yours.' : 'Cash collected — 100% yours.'} How was {ratePopup?.name}?
         </T>

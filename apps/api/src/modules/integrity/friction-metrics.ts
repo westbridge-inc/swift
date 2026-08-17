@@ -14,17 +14,21 @@ function percentile(sorted: number[], p: number): number | null {
   return sorted[Math.max(0, idx)]!;
 }
 
-export async function frictionKpis(prisma: PrismaClient, days = 30) {
-  const since = new Date(Date.now() - days * 24 * 3600_000);
+export async function frictionKpis(prisma: PrismaClient, days = 30, asOf = new Date()) {
+  const since = new Date(asOf.getTime() - days * 24 * 3600_000);
+  // Bound both sides of the snapshot. Besides making every counter describe
+  // the same reporting instant, this prevents bad future-dated rows (clock
+  // skew or imports) from silently contaminating today's operating metrics.
+  const window = { gte: since, lte: asOf };
 
   // ── Part 10 integrity counters ─────────────────────────────────────────────
   const [trialsDenied, retroRevokes, fraudHolds, velocityFlags, signupAttempts, reviewFirstSignups] = await Promise.all([
-    prisma.enforcementAction.count({ where: { level: 'DENY_TRIAL', createdAt: { gte: since } } }),
-    prisma.enforcementAction.count({ where: { reasonCode: 'RETROACTIVE_TRIAL_REVOKE', createdAt: { gte: since } } }),
-    prisma.enforcementAction.count({ where: { level: 'BLOCK_PENDING_FOUNDER', createdAt: { gte: since } } }),
-    prisma.enforcementAction.count({ where: { reasonCode: 'VELOCITY_DEVICE', createdAt: { gte: since } } }),
-    prisma.signupAttempt.count({ where: { createdAt: { gte: since } } }),
-    prisma.signupAttempt.count({ where: { createdAt: { gte: since }, outcome: 'REVIEW_FIRST' } }),
+    prisma.enforcementAction.count({ where: { level: 'DENY_TRIAL', createdAt: window } }),
+    prisma.enforcementAction.count({ where: { reasonCode: 'RETROACTIVE_TRIAL_REVOKE', createdAt: window } }),
+    prisma.enforcementAction.count({ where: { level: 'BLOCK_PENDING_FOUNDER', createdAt: window } }),
+    prisma.enforcementAction.count({ where: { reasonCode: 'VELOCITY_DEVICE', createdAt: window } }),
+    prisma.signupAttempt.count({ where: { createdAt: window } }),
+    prisma.signupAttempt.count({ where: { createdAt: window, outcome: 'REVIEW_FIRST' } }),
   ]);
   const multiClusters = await prisma.identityClusterMember.groupBy({
     by: ['clusterId'],
@@ -34,7 +38,7 @@ export async function frictionKpis(prisma: PrismaClient, days = 30) {
 
   // ── F4 reinstatement latency: SUSPENDED → next REINSTATED per subscription ─
   const susEvents = await prisma.billingEvent.findMany({
-    where: { type: { in: ['SUSPENDED', 'REINSTATED'] }, createdAt: { gte: since } },
+    where: { type: { in: ['SUSPENDED', 'REINSTATED'] }, createdAt: window },
     orderBy: [{ subscriptionId: 'asc' }, { createdAt: 'asc' }],
     select: { subscriptionId: true, type: true, createdAt: true },
   });
@@ -55,28 +59,28 @@ export async function frictionKpis(prisma: PrismaClient, days = 30) {
 
   // ── F3/F16/week-2: the billing ladder's own honesty ────────────────────────
   const [reminders, suspensions, chargeSuccess, chargeFailed, churnedEvents, cancelledSubs] = await Promise.all([
-    prisma.billingEvent.count({ where: { type: 'REMINDER', createdAt: { gte: since } } }),
-    prisma.billingEvent.count({ where: { type: 'SUSPENDED', createdAt: { gte: since } } }),
-    prisma.billingEvent.count({ where: { type: 'CHARGE_SUCCESS', createdAt: { gte: since } } }),
-    prisma.billingEvent.count({ where: { type: 'CHARGE_FAILED', createdAt: { gte: since } } }),
-    prisma.billingEvent.count({ where: { type: 'CHURNED', createdAt: { gte: since } } }),
-    prisma.subscription.count({ where: { status: 'CANCELLED', updatedAt: { gte: since } } }),
+    prisma.billingEvent.count({ where: { type: 'REMINDER', createdAt: window } }),
+    prisma.billingEvent.count({ where: { type: 'SUSPENDED', createdAt: window } }),
+    prisma.billingEvent.count({ where: { type: 'CHARGE_SUCCESS', createdAt: window } }),
+    prisma.billingEvent.count({ where: { type: 'CHARGE_FAILED', createdAt: window } }),
+    prisma.billingEvent.count({ where: { type: 'CHURNED', createdAt: window } }),
+    prisma.subscription.count({ where: { status: 'CANCELLED', updatedAt: window } }),
   ]);
 
   // ── F6 trial → paid ────────────────────────────────────────────────────────
   const [trialsStarted, trialsConverted, trialsLost] = await Promise.all([
-    prisma.trialGrant.count({ where: { startedAt: { gte: since } } }),
+    prisma.trialGrant.count({ where: { startedAt: window } }),
     prisma.subscription.count({
-      where: { isTrialActive: false, trialEndDate: { gte: since, lte: new Date() }, status: { in: ['ACTIVE', 'PAST_DUE'] } },
+      where: { isTrialActive: false, trialEndDate: window, status: { in: ['ACTIVE', 'PAST_DUE'] } },
     }),
     prisma.subscription.count({
-      where: { trialEndDate: { gte: since, lte: new Date() }, status: { in: ['CANCELLED', 'CHURNED'] } },
+      where: { trialEndDate: window, status: { in: ['CANCELLED', 'CHURNED'] } },
     }),
   ]);
 
   return {
     windowDays: days,
-    capturedAt: new Date().toISOString(),
+    capturedAt: asOf.toISOString(),
     integrity: {
       trialsDenied,
       retroactiveRevokes: retroRevokes,

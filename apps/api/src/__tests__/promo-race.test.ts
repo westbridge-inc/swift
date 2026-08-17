@@ -35,7 +35,7 @@ async function makeCustomer() {
   });
   createdUserIds.push(user.id);
   const token = app.jwt.sign({ userId: user.id, role: 'CUSTOMER', jti: nanoid(8) });
-  await app.prisma.session.create({ data: { userId: user.id, token, refreshToken: nanoid(48), deviceId: 'race', deviceType: 'test', expiresAt: new Date(Date.now() + 86400000) } });
+  await app.prisma.session.create({ data: { authMethod: 'OTP', userId: user.id, token, refreshToken: nanoid(48), deviceId: 'race', deviceType: 'test', expiresAt: new Date(Date.now() + 86400000) } });
   const addr = await app.prisma.address.create({ data: { userId: user.id, label: 'Home', addressLine1: '1 Race', city: 'Georgetown', region: 'Demerara-Mahaica', latitude: 6.8018, longitude: -58.1555, isDefault: true } });
   return { userId: user.id, token, addressId: addr.id };
 }
@@ -97,8 +97,10 @@ describe('promo redemption race', () => {
 
     // Fire both checkouts concurrently — the promo row lock must serialize them.
     const [ra, rb] = await Promise.all([
-      inject('POST', '/api/v1/customer/checkout', { paymentMethod: 'CASH', promoCode: CODE }, a.token),
-      inject('POST', '/api/v1/customer/checkout', { paymentMethod: 'CASH', promoCode: CODE }, b.token),
+      // PICKUP: the CASH-delivery promo law [SPS-F-0022] would otherwise 409
+      // both racers before the maxUses CAS under test.
+      inject('POST', '/api/v1/customer/checkout', { paymentMethod: 'CASH', promoCode: CODE, fulfillmentSelections: { [vendorId]: 'PICKUP' } }, a.token),
+      inject('POST', '/api/v1/customer/checkout', { paymentMethod: 'CASH', promoCode: CODE, fulfillmentSelections: { [vendorId]: 'PICKUP' } }, b.token),
     ]);
     for (const r of [ra, rb]) {
       const orders = r.json()?.data?.orders ?? [];

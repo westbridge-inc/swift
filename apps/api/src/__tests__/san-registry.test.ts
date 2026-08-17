@@ -136,6 +136,35 @@ describe('resolution pipeline + tombstones', () => {
     }
     expect(await resolveSan(prisma, unknown)).toMatchObject({ ok: false, code: 'SAN_UNKNOWN' });
   });
+
+  it('retires the live SAN and writes its global tombstone in one transaction', async () => {
+    const owned = await makeVendorWithSub();
+    const san = await ensureSan(prisma, owned.sub.id);
+    const crashingPrisma = prisma.$extends({
+      query: {
+        subscription: {
+          updateMany: async ({ args, query }) => {
+            if ((args.data as { san?: string | null }).san === null) {
+              throw new Error('TEST_CRASH_BEFORE_SAN_CLEAR');
+            }
+            return query(args);
+          },
+        },
+      },
+    }) as unknown as PrismaClient;
+
+    await expect(releaseSan(crashingPrisma, owned.sub.id, 'atomicity-test'))
+      .rejects.toThrow('TEST_CRASH_BEFORE_SAN_CLEAR');
+    expect((await prisma.subscription.findUniqueOrThrow({ where: { id: owned.sub.id } })).san).toBe(san);
+    expect(await prisma.sanTombstone.findUnique({ where: { san } })).toBeNull();
+
+    await releaseSan(prisma, owned.sub.id, 'atomicity-test-retry');
+    expect((await prisma.subscription.findUniqueOrThrow({ where: { id: owned.sub.id } })).san).toBeNull();
+    expect(await prisma.sanTombstone.findUnique({ where: { san } })).toMatchObject({
+      subscriptionId: owned.sub.id,
+      reason: 'atomicity-test-retry',
+    });
+  });
 });
 
 describe('backfill', () => {

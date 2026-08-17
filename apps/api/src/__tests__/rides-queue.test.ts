@@ -2,7 +2,7 @@ import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { nanoid } from 'nanoid';
 import type { UserRole } from '@prisma/client';
-import { prismaPlugin } from '../plugins/prisma';
+import { prismaPlugin, runWithoutTenant } from '../plugins/prisma';
 import { redisPlugin } from '../plugins/redis';
 import { authPlugin } from '../plugins/auth';
 import { socketPlugin } from '../plugins/socket';
@@ -31,6 +31,7 @@ const LINDEN = { lat: 6.0011, lng: -58.3079 };   // ~90 km away
 
 let app: FastifyInstance;
 const userIds: string[] = [];
+const createdTenantIds: string[] = [];
 let seq = 0;
 
 async function makeUserWithSession(roles: UserRole[], activeRole: UserRole, extra: Record<string, unknown> = {}) {
@@ -51,23 +52,28 @@ async function makeUserWithSession(roles: UserRole[], activeRole: UserRole, extr
   });
   userIds.push(user.id);
   const token = app.jwt.sign({ userId: user.id, role: activeRole, jti: nanoid(8) });
-  await app.prisma.session.create({
+  const session = await app.prisma.session.create({
     data: {
       userId: user.id, token, refreshToken: nanoid(48),
       deviceId: 'queue-test', deviceType: 'test', expiresAt: new Date(Date.now() + DAY),
     },
   });
-  return { userId: user.id, token };
+  return { userId: user.id, token, sessionId: session.id };
 }
 
-async function makeDriver(at = GT) {
-  const owned = await makeUserWithSession(['MOVER', 'CUSTOMER'], 'MOVER');
+async function makeDriver(at = GT, tenantId?: string) {
+  const owned = await makeUserWithSession(
+    ['MOVER', 'CUSTOMER'],
+    'MOVER',
+    tenantId ? { tenantId } : {},
+  );
   const driver = await app.prisma.driver.create({
     data: {
       userId: owned.userId,
       vehicleMake: 'Toyota', vehicleModel: 'Premio', vehicleYear: 2019, vehicleColor: 'Silver',
       licensePlate: `HQ 10${seq}`, driverLicenseUrl: 'x', vehicleInsuranceUrl: 'x',
       isAvailable: true, isOnline: true, currentLat: at.lat, currentLng: at.lng,
+      lastLocationUpdate: new Date(), locationSessionId: owned.sessionId,
     } as never,
   });
   return { ...owned, driverId: driver.id };
@@ -101,10 +107,10 @@ function scanDeps() {
   };
 }
 
-const runScan = () => {
+const runScan = () => runWithoutTenant(async () => {
   const { fare, dispatch, notifications } = scanDeps();
   return scanRideQueue({ prisma: app.prisma }, fare, dispatch, notifications);
-};
+});
 
 beforeAll(async () => {
   process.env['NODE_ENV'] = 'development';
@@ -124,15 +130,20 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
-  if (userIds.length) {
-    await app.prisma.rideQueueEntry.deleteMany({ where: { customerId: { in: userIds } } });
-    await app.prisma.notification.deleteMany({ where: { userId: { in: userIds } } });
-    await app.prisma.order.deleteMany({ where: { customerId: { in: userIds } } });
-    await app.prisma.driver.deleteMany({ where: { userId: { in: userIds } } });
-    await app.prisma.session.deleteMany({ where: { userId: { in: userIds } } });
-    await app.prisma.customer.deleteMany({ where: { userId: { in: userIds } } });
-    await app.prisma.user.deleteMany({ where: { id: { in: userIds } } });
-  }
+  await runWithoutTenant(async () => {
+    if (userIds.length) {
+      await app.prisma.rideQueueEntry.deleteMany({ where: { customerId: { in: userIds } } });
+      await app.prisma.notification.deleteMany({ where: { userId: { in: userIds } } });
+      await app.prisma.order.deleteMany({ where: { customerId: { in: userIds } } });
+      await app.prisma.driver.deleteMany({ where: { userId: { in: userIds } } });
+      await app.prisma.session.deleteMany({ where: { userId: { in: userIds } } });
+      await app.prisma.customer.deleteMany({ where: { userId: { in: userIds } } });
+      await app.prisma.user.deleteMany({ where: { id: { in: userIds } } });
+    }
+    if (createdTenantIds.length) {
+      await app.prisma.tenant.deleteMany({ where: { id: { in: createdTenantIds } } });
+    }
+  });
   await app.close();
 });
 
@@ -222,6 +233,90 @@ describe('join / position / leave', () => {
 });
 
 describe('the scan', () => {
+  it('contains FIFO, supply, worker dispatch, and created orders within each tenant', async () => {
+    const spot = { lat: 5.22, lng: -59.31 }; // isolated from every other fixture
+    const otherTenant = await app.prisma.tenant.create({
+      data: { name: 'Queue Other Operator', slug: `queue-other-${nanoid(6).toLowerCase()}` },
+    });
+    createdTenantIds.push(otherTenant.id);
+
+    const foreignDriver = await runWithoutTenant(async () => makeDriver(spot, otherTenant.id));
+    const localCustomer = await runWithoutTenant(async () => makeUserWithSession(['CUSTOMER'], 'CUSTOMER'));
+    const foreignCustomer = await runWithoutTenant(async () => makeUserWithSession(
+      ['CUSTOMER'],
+      'CUSTOMER',
+      { tenantId: otherTenant.id },
+    ));
+    const trip = {
+      pickup: spot,
+      pickupAddress: 'Tenant Boundary Pickup',
+      dropoff: { lat: spot.lat + 0.02, lng: spot.lng + 0.02 },
+      dropoffAddress: 'Tenant Boundary Dropoff',
+    };
+
+    // The only nearby driver belongs to the foreign operator. The default
+    // customer sees neither that supply nor the foreign customer's FIFO row.
+    const localJoin = await join(localCustomer.token, trip);
+    expect(localJoin.statusCode).toBe(201);
+    expect(localJoin.json().data).toMatchObject({ position: 1, suppliersOnline: 0 });
+
+    const foreignJoin = await join(foreignCustomer.token, trip);
+    expect(foreignJoin.statusCode).toBe(201);
+    expect(foreignJoin.json().data).toMatchObject({ position: 1, suppliersOnline: 1 });
+
+    const before = await runWithoutTenant(async () => Promise.all([
+      app.prisma.rideQueueEntry.findFirstOrThrow({ where: { customerId: localCustomer.userId } }),
+      app.prisma.rideQueueEntry.findFirstOrThrow({ where: { customerId: foreignCustomer.userId } }),
+    ]));
+    expect(before.map((entry) => entry.tenantId)).toEqual(['swift-default', otherTenant.id]);
+
+    const scanned = await runScan();
+    expect(scanned.matched).toBe(1);
+
+    const [localEntry, foreignEntry] = await runWithoutTenant(async () => Promise.all([
+      app.prisma.rideQueueEntry.findFirstOrThrow({ where: { customerId: localCustomer.userId } }),
+      app.prisma.rideQueueEntry.findFirstOrThrow({ where: { customerId: foreignCustomer.userId } }),
+    ]));
+    expect(localEntry.status).toBe('WAITING');
+    expect(localEntry.matchedOrderId).toBeNull();
+    expect(foreignEntry.status).toBe('MATCHED');
+    expect(foreignEntry.matchedOrderId).toBeTruthy();
+
+    const foreignOrder = await runWithoutTenant(async () => app.prisma.order.findUniqueOrThrow({
+      where: { id: foreignEntry.matchedOrderId! },
+    }));
+    expect(foreignOrder.tenantId).toBe(otherTenant.id);
+    expect(foreignOrder.customerId).toBe(foreignCustomer.userId);
+    await expect(runWithoutTenant(async () => scanDeps().dispatch.dispatchOrder(
+      foreignOrder.id,
+      'swift-default',
+    ))).rejects.toMatchObject({ code: 'DISPATCH_TENANT_MISMATCH' });
+    expect(await runWithoutTenant(async () => app.prisma.order.count({
+      where: { customerId: localCustomer.userId },
+    }))).toBe(0);
+
+    await runWithoutTenant(async () => {
+      await app.prisma.rideQueueEntry.updateMany({
+        where: { id: localEntry.id, tenantId: 'swift-default' },
+        data: { status: 'LEFT' },
+      });
+      await app.prisma.order.update({
+        where: { id: foreignOrder.id },
+        data: { status: 'CANCELLED' },
+      });
+      await app.prisma.driver.update({
+        where: { id: foreignDriver.driverId },
+        data: { isOnline: false, isAvailable: false },
+      });
+      await app.redis.del(
+        `dispatch:offer:${foreignOrder.id}`,
+        `dispatch:mover-offer:${foreignDriver.driverId}`,
+        `dispatch:round:${foreignOrder.id}`,
+        `dispatch:declined:${foreignOrder.id}`,
+      );
+    });
+  });
+
   it('leaves entries WAITING when no drivers are near their pickup', async () => {
     const c = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
     const res = await join(c.token, { pickup: LINDEN, pickupAddress: 'Linden Market' });

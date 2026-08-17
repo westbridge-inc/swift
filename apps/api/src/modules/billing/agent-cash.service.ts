@@ -184,29 +184,89 @@ export class AgentCashService {
   /** The shared credit tail — ingestion and suspense-resolution both end
    *  here, so an attached payment behaves exactly like a matched one. */
   async credit(paymentId: string, subscriptionId: string, p: { amount: number; channel: string; externalId: string; payerMsisdn?: string; recordedBy?: string }): Promise<IngestResult> {
-    // recordTopUp = credit + receipt notification + INSTANT re-bill when the
-    // account is behind (conversion + reactivation, transition #6). Its
-    // clientKey rides our externalId so a replay that survived to here still
-    // can't double-credit [S-2].
-    // recordedBy carries the channel (receipt fidelity in the cash journal);
-    // the human who keyed/attached it lives on the MmgAgentPayment row.
-    await this.billing.recordTopUp(
-      subscriptionId,
-      p.amount,
-      `agent-cash:${p.channel}`,
-      `MMG agent payment ${p.externalId}`,
-      `agent:${p.channel}:${p.externalId}`,
-    );
-    const row = await this.prisma.mmgAgentPayment.update({
-      where: { id: paymentId },
-      data: { status: 'MATCHED', subscriptionId },
+    return this.creditAtomic(paymentId, subscriptionId, p, {
+      expectedStatus: 'RECEIVED',
+      finalStatus: 'MATCHED',
     });
+  }
+
+  private async creditAtomic(
+    paymentId: string,
+    requestedSubscriptionId: string,
+    p: { amount: number; channel: string; externalId: string; payerMsisdn?: string; recordedBy?: string },
+    resolution: {
+      expectedStatus: 'RECEIVED' | 'UNMATCHED';
+      finalStatus: 'MATCHED' | 'RESOLVED';
+      adminId?: string;
+    },
+  ): Promise<IngestResult> {
+    const committed = await this.prisma.$transaction(async (tx) => {
+      // A same-value compare-and-set acquires the row lock at the beginning of
+      // the transaction. A concurrent attach waits, rechecks the predicate,
+      // and gets count=0 after the winner commits — before it can move money.
+      const claimed = await tx.mmgAgentPayment.updateMany({
+        where: { id: paymentId, status: resolution.expectedStatus },
+        data: { status: resolution.expectedStatus },
+      });
+      if (claimed.count !== 1) {
+        throw new Error(resolution.expectedStatus === 'UNMATCHED' ? 'NOT_UNMATCHED' : 'PAYMENT_NOT_RECEIVED');
+      }
+
+      const payment = await tx.mmgAgentPayment.findUniqueOrThrow({ where: { id: paymentId } });
+
+      // Heal the one legacy crash window from the pre-atomic implementation:
+      // recordTopUp used this exact suffix and could commit before the payment
+      // row advanced. Never credit a second destination if that evidence is
+      // already present; link the payment to the proven original instead.
+      const legacy = await tx.billingEvent.findFirst({
+        where: {
+          type: 'PREPAID_TOPUP',
+          idempotencyKey: { endsWith: `:agent:${p.channel}:${p.externalId}` },
+        },
+        select: { subscriptionId: true },
+      });
+      const subscriptionId = legacy?.subscriptionId ?? requestedSubscriptionId;
+      if (!legacy) {
+        await this.billing.recordTopUpInTransaction(tx, {
+          subscriptionId,
+          amount: p.amount,
+          recordedBy: `agent-cash:${p.channel}`,
+          reference: `MMG agent payment ${p.externalId}`,
+          // Destination-independent: the same real-world cash cannot acquire a
+          // second key merely because an admin selects another subscription.
+          eventKey: `agent-cash:${paymentId}`,
+        });
+      }
+
+      const finalized = await tx.mmgAgentPayment.updateMany({
+        where: { id: paymentId, status: resolution.expectedStatus },
+        data: {
+          status: resolution.finalStatus,
+          subscriptionId,
+          ...(resolution.finalStatus === 'RESOLVED'
+            ? { resolvedBy: resolution.adminId!, resolvedAt: new Date() }
+            : {}),
+        },
+      });
+      if (finalized.count !== 1) throw new Error('PAYMENT_FINALIZE_CONFLICT');
+      return { paymentId: payment.id, subscriptionId, credited: !legacy };
+    });
+
+    // Notification and immediate re-bill are intentionally post-commit: they
+    // cannot roll back or duplicate the durable cash movement. A recurring
+    // billing cycle remains the recovery path if this best-effort fast path
+    // fails after the database commit.
+    if (committed.credited) {
+      await this.billing.afterTopUpCommitted(committed.subscriptionId, p.amount).catch((err) => {
+        log().error({ err, paymentId, subscriptionId: committed.subscriptionId }, 'agent cash committed; post-top-up effects will retry through billing');
+      });
+    }
 
     // S-7: the payer's MSISDN feeds the identity graph — one phone cash-paying
     // fees for three "unrelated" trial vendors is a STRONG cluster edge.
     if (p.payerMsisdn) {
       const sub = await this.prisma.subscription.findUnique({
-        where: { id: subscriptionId },
+        where: { id: committed.subscriptionId },
         select: {
           rider: { select: { userId: true } },
           driver: { select: { userId: true } },
@@ -216,7 +276,7 @@ export class AgentCashService {
       const userId = sub?.rider?.userId ?? sub?.driver?.userId ?? sub?.vendor?.owner.userId;
       if (userId) captureMmgPayer(this.prisma, { userId, role: sub?.vendor ? 'VENDOR' : 'MOVER', payerMsisdn: p.payerMsisdn });
     }
-    return { status: 'accepted', paymentId: row.id, subscriptionId };
+    return { status: 'accepted', paymentId: committed.paymentId, subscriptionId: committed.subscriptionId };
   }
 
   private async suspense(paymentId: string, failureCode: string): Promise<IngestResult> {
@@ -233,18 +293,17 @@ export class AgentCashService {
   async attach(paymentId: string, subscriptionId: string, adminId: string): Promise<IngestResult> {
     const row = await this.prisma.mmgAgentPayment.findUniqueOrThrow({ where: { id: paymentId } });
     if (row.status !== 'UNMATCHED') throw new Error('NOT_UNMATCHED');
-    const result = await this.credit(paymentId, subscriptionId, {
+    return this.creditAtomic(paymentId, subscriptionId, {
       amount: Number(row.amount),
       channel: row.channel,
       externalId: row.externalId,
       payerMsisdn: row.payerMsisdn ?? undefined,
       recordedBy: adminId,
+    }, {
+      expectedStatus: 'UNMATCHED',
+      finalStatus: 'RESOLVED',
+      adminId,
     });
-    await this.prisma.mmgAgentPayment.update({
-      where: { id: paymentId },
-      data: { status: 'RESOLVED', resolvedBy: adminId, resolvedAt: new Date() },
-    });
-    return result;
   }
 
   /** The suspense queue with the Luhn diagnosis the founder reads [4.6]:

@@ -1,5 +1,5 @@
 /** @jsxImportSource react */
-import React, { useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { Pressable, ScrollView, View } from 'react-native';
 import { Image } from 'expo-image';
 import { Feather } from '@expo/vector-icons';
@@ -21,13 +21,14 @@ import { useBookingStore } from '../../../stores/bookingStore';
 import { useLocationStore } from '../../../stores/locationStore';
 import { DARK_BLURHASH, itemImage } from '../../../lib/images';
 import { money } from '../../../lib/money';
-import { openPayLink } from '../../../lib/payLink';
+import { openMmgPaymentAction } from '../../../lib/payLink';
 import { haptic } from '../../../lib/haptics';
 import {
   AddMorph,
   Card,
   Chip,
   CircleChip,
+  DecorativeIcon,
   EmptyState,
   ErrorState,
   IconChip,
@@ -37,10 +38,23 @@ import {
   Money,
   PillButton,
   PopupCard,
+  PopupTitle,
   Screen,
   T,
 } from '../../../kit';
 import { BrandSwitch } from '../../../kit/controls';
+import type { MmgDirectPaymentAction } from '@swift/types';
+import { CartPaymentOptions } from '../CartPaymentOptions';
+import { checkoutTipAmount } from '../checkout-tip';
+import {
+  checkoutPaymentMethod,
+  normalizeCartPaymentCapabilities,
+  paymentActionForCheckout,
+  placedOrderConfirmationCopy,
+  reconcileCartPaymentSelection,
+  selectCartPaymentMethod,
+  type CartPaymentSelection,
+} from '../cartPayment';
 
 const GUTTER = space['2xl'];
 const TIP_PRESETS = [0, 200, 500, 1000];
@@ -65,8 +79,9 @@ export function CartScreen() {
   const [promoMsg, setPromoMsg] = useState<{ ok: boolean; text: string } | null>(null);
   const [promoPopup, setPromoPopup] = useState(false);
   const [instructions, setInstructions] = useState('');
+  const [selectedTip, setSelectedTip] = useState<number | null>(null);
   const [express, setExpress] = useState(false);
-  const [payMethod, setPayMethod] = useState<'CASH' | 'MMG'>('CASH');
+  const [paySelection, setPaySelection] = useState<CartPaymentSelection>({ method: 'CASH', scope: '' });
   // Pickup spec 2.1: the FIRST decision — it reshapes everything below.
   const [fulfillment, setFulfillment] = useState<'DELIVERY' | 'PICKUP'>('DELIVERY');
   const [placedPickup, setPlacedPickup] = useState(false);
@@ -74,10 +89,35 @@ export function CartScreen() {
   const [placedOrderId, setPlacedOrderId] = useState<string | null>(null);
   // LIFECYCLE_V2: while held, the store has NOT been told yet — say so honestly.
   const [placedHeld, setPlacedHeld] = useState(false);
+  const [placedSubmittedMethod, setPlacedSubmittedMethod] = useState<'CASH' | 'MOBILE_MONEY'>('CASH');
+  const [placedPaymentAction, setPlacedPaymentAction] = useState<MmgDirectPaymentAction | null>(null);
   // The cart empties after placement — remember it was a booking for the popup.
   const [placedAppt, setPlacedAppt] = useState(false);
   const appointments = useBookingStore((s) => s.appointments);
   const clearAppointments = useBookingStore((s) => s.clear);
+  const c = cart.data; // null = empty cart
+  const paymentCapabilities = useMemo(
+    () => normalizeCartPaymentCapabilities(c?.paymentCapabilities),
+    [c?.paymentCapabilities],
+  );
+  const effectivePaySelection = reconcileCartPaymentSelection(paySelection, paymentCapabilities);
+
+  // Tip intent belongs to one logical cart. Never reset it from tipAmount — a
+  // late persistence response must not replace the customer's local choice.
+  useEffect(() => {
+    setSelectedTip(null);
+  }, [c?.id]);
+
+  // Persist the safe degradation. Merely deriving CASH would leave MMG hidden
+  // in state, where it could silently revive when another capable cart loads.
+  useEffect(() => {
+    setPaySelection((current) => {
+      const reconciled = reconcileCartPaymentSelection(current, paymentCapabilities);
+      return reconciled.method === current.method && reconciled.scope === current.scope
+        ? current
+        : reconciled;
+    });
+  }, [paymentCapabilities]);
 
   const applyPromo = useMutation({
     mutationFn: (code: string) => customerApi.validatePromo(code),
@@ -111,7 +151,6 @@ export function CartScreen() {
     );
   }
 
-  const c = cart.data; // null = empty cart
   const items: any[] = c?.items ?? [];
 
   // Appointment lines need their chosen slot (picked on the service screen)
@@ -127,11 +166,28 @@ export function CartScreen() {
   const apptOnly = items.length > 0 && bookingItems.length === items.length;
   // Bookings have no counter to collect from; pickup applies to goods carts.
   const pickup = !apptOnly && fulfillment === 'PICKUP';
+  const displayedTip = checkoutTipAmount({
+    pickupOrApptOnly: pickup || apptOnly,
+    selectedTip,
+    cartTip: c?.tipAmount,
+  });
+  const displayedTotal = c
+    ? Math.max(
+        0,
+        (pickup
+          ? c.totalAmount - c.deliveryFee
+          : express && c.deliveryFee > 0
+            ? c.expressTotal
+            : c.totalAmount)
+          - Number(c.tipAmount ?? 0)
+          + displayedTip,
+      )
+    : 0;
   const choosePickup = () => {
     setFulfillment('PICKUP');
     setExpress(false); // express is a delivery speed
-    // No rider on a pickup — clear any rider tip SERVER-side so totals stay
-    // server-truth (the UI below hides the tip block while picked).
+    // No rider on a pickup — clear the persisted convenience too. Checkout
+    // still submits zero synchronously if this mutation is delayed or fails.
     if (Number(c?.tipAmount) > 0) setTip.mutate(0);
   };
   const homeVisit = apptOnly && apptPayload.some((a) => (a as { mode?: string }).mode === 'MOBILE');
@@ -150,33 +206,49 @@ export function CartScreen() {
 
   const onOrder = (extra?: Record<string, unknown>) => {
     const asPickup = pickup && !!c?.vendor?.id;
+    const submittingPickup = pickup || (extra as any)?.fulfillmentSelections != null;
+    const submittedTip = checkoutTipAmount({
+      pickupOrApptOnly: apptOnly || submittingPickup,
+      selectedTip,
+      cartTip: c?.tipAmount,
+    });
+    const submittedMethod = checkoutPaymentMethod(effectivePaySelection, paymentCapabilities);
     placeOrder.mutate(
       {
-        paymentMethod: payMethod === 'MMG' ? 'MOBILE_MONEY' : 'CASH',
+        paymentMethod: submittedMethod,
         ...(express && !pickup ? { express: true } : {}),
         ...(apptPayload.length ? { appointments: apptPayload } : {}),
         ...(instructions.trim() && !pickup ? { deliveryInstructions: instructions.trim() } : {}),
         ...(asPickup ? { fulfillmentSelections: { [c.vendor.id]: 'PICKUP' } } : {}),
         ...(extra ?? {}),
+        tipAmount: submittedTip,
       },
       {
         onSuccess: (data: any) => {
           haptic.success();
-          setPlacedPickup(asPickup || (extra as any)?.fulfillmentSelections != null);
+          setPlacedPickup(submittingPickup);
           const first = data?.orders?.[0];
+          const paymentAction = paymentActionForCheckout(data ?? {}, submittedMethod);
           setPlacedOrderId(first?.id ?? null);
           setPlacedHeld(!!(first?.holdExpiresAt && new Date(first.holdExpiresAt) > new Date()));
           setPlacedAppt(apptPayload.length > 0);
+          setPlacedSubmittedMethod(submittedMethod);
+          setPlacedPaymentAction(paymentAction);
           if (apptPayload.length) clearAppointments();
           // First order = the first moment notifications are obviously useful
           // [first-open SO-5]; primes once, never at boot.
           maybePrimeNotifications('customer_order');
-          // MMG: take the customer straight to the store's own MMG link, in-app.
-          if (payMethod === 'MMG') void openPayLink(first?.vendor?.mmgPayUrl);
+          // The raw vendor field is never trusted/opened. Only the explicit,
+          // validated post-checkout action can leave the app for MMG.
+          if (paymentAction) void openMmgPaymentAction(paymentAction);
         },
         onError: (err: any) => {
-          // Store isn't set up for MMG → fall back to cash so they can proceed.
-          if (err?.response?.data?.error?.code === 'MMG_NOT_AVAILABLE') setPayMethod('CASH');
+          // Any server-side capability revalidation failure permanently
+          // degrades this selection to cash for the current scope.
+          const code = String(err?.response?.data?.error?.code ?? '');
+          if (code.startsWith('MMG_')) {
+            setPaySelection(selectCartPaymentMethod('CASH', paymentCapabilities));
+          }
         },
       },
     );
@@ -399,8 +471,11 @@ export function CartScreen() {
                   <Chip
                     key={t}
                     label={t === 0 ? 'No tip' : money(t)}
-                    selected={Number(c.tipAmount) === t}
-                    onPress={() => setTip.mutate(t)}
+                    selected={(selectedTip ?? Number(c.tipAmount)) === t}
+                    onPress={() => {
+                      setSelectedTip(t);
+                      setTip.mutate(t);
+                    }}
                     style={{ height: 44, paddingHorizontal: space.lg }}
                   />
                 ))}
@@ -425,53 +500,13 @@ export function CartScreen() {
             <T variant="label" weight="semibold">
               Payment
             </T>
-            {([
-              {
-                key: 'CASH' as const,
-                icon: 'dollar-sign' as const,
-                title: apptOnly ? 'Pay at your appointment' : pickup ? 'Pay at the counter' : 'Cash on delivery',
-                sub: apptOnly
-                  ? 'Cash, when the service is done.'
-                  : pickup
-                    ? 'Cash when you collect your order.'
-                    : 'Pay the rider when your order arrives.',
-              },
-              {
-                key: 'MMG' as const,
-                icon: 'smartphone' as const,
-                title: 'Pay with MMG',
-                sub: 'Pay the business directly on their MMG — opens right in the app.',
-              },
-            ]).map((o) => {
-              const active = payMethod === o.key;
-              return (
-                <Pressable key={o.key} onPress={() => setPayMethod(o.key)}>
-                  <View
-                    style={{
-                      flexDirection: 'row',
-                      alignItems: 'center',
-                      gap: space.md,
-                      padding: space.lg,
-                      borderRadius: radius.md,
-                      borderWidth: active ? 1.5 : 1,
-                      borderColor: active ? color.brand[500] : color.border.strong,
-                      backgroundColor: active ? color.brand[50] : color.surface.base,
-                    }}
-                  >
-                    <Feather name={o.icon} size={18} color={active ? color.brand[600] : color.text.muted} />
-                    <View style={{ flex: 1 }}>
-                      <T variant="label" weight="semibold" tone={active ? 'deep' : 'ink'}>
-                        {o.title}
-                      </T>
-                      <T variant="caption" tone="muted" style={{ marginTop: 2 }}>
-                        {o.sub}
-                      </T>
-                    </View>
-                    <Feather name={active ? 'check-circle' : 'circle'} size={18} color={active ? color.brand[500] : color.border.strong} />
-                  </View>
-                </Pressable>
-              );
-            })}
+            <CartPaymentOptions
+              capabilities={paymentCapabilities}
+              selection={effectivePaySelection}
+              appointmentOnly={apptOnly}
+              pickup={pickup}
+              onSelect={(method) => setPaySelection(selectCartPaymentMethod(method, paymentCapabilities))}
+            />
           </View>
 
           {/* Express delivery — priority dispatch; the premium goes to the rider */}
@@ -503,13 +538,13 @@ export function CartScreen() {
               {pickup ? <InfoRow label="Pickup" value="No delivery fee" /> : null}
               {!pickup && express && c.deliveryFee > 0 ? <InfoRow label="Express" value={money(c.expressSurcharge)} /> : null}
               {c.discount > 0 ? <InfoRow label="Discount" value={`-${money(c.discount)}`} /> : null}
-              {!apptOnly && !pickup && Number(c.tipAmount) > 0 ? <InfoRow label="Rider tip" value={money(c.tipAmount)} /> : null}
+              {!apptOnly && !pickup && displayedTip > 0 ? <InfoRow label="Rider tip" value={money(displayedTip)} /> : null}
               <View style={{ height: 1, backgroundColor: color.border.subtle, marginVertical: space.sm }} />
               {/* Pickup preview = the same server numbers minus the delivery
                   leg; the server prices the real order at place time. */}
               <InfoRow
                 label={pickup ? 'Total at the counter' : 'Total'}
-                value={money(pickup ? c.totalAmount - c.deliveryFee - Number(c.tipAmount ?? 0) : express && c.deliveryFee > 0 ? c.expressTotal : c.totalAmount)}
+                value={money(displayedTotal)}
                 strong
               />
             </View>
@@ -598,9 +633,9 @@ export function CartScreen() {
       {/* ••• menu — clear cart */}
       <PopupCard visible={menuOpen} onClose={() => setMenuOpen(false)}>
         <IconChip icon="trash-2" size={56} tone="error" />
-        <T variant="heading" center style={{ marginTop: space.md }}>
+        <PopupTitle variant="heading" center style={{ marginTop: space.md }}>
           Clear your cart?
-        </T>
+        </PopupTitle>
         <T variant="label" tone="muted" center style={{ marginTop: space.sm }}>
           Every item will be removed.
         </T>
@@ -620,9 +655,9 @@ export function CartScreen() {
       {/* Voucher applied (kit 32) */}
       <PopupCard visible={promoPopup} onClose={() => setPromoPopup(false)}>
         <IconChip icon="tag" size={64} />
-        <T variant="heading" center style={{ marginTop: space.md }}>
+        <PopupTitle variant="heading" center style={{ marginTop: space.md }}>
           Promo applied!
-        </T>
+        </PopupTitle>
         {promoMsg?.ok ? (
           <T variant="label" tone="muted" center style={{ marginTop: space.sm }}>
             {promoMsg.text}
@@ -640,7 +675,7 @@ export function CartScreen() {
           if (id) navigation.navigate('Delivery', { orderId: id });
         }}
       >
-        <View
+        <DecorativeIcon
           style={{
             width: 64,
             height: 64,
@@ -651,19 +686,28 @@ export function CartScreen() {
           }}
         >
           <Feather name="check" size={30} color={color.white} />
-        </View>
-        <T variant="heading" center style={{ marginTop: space.md }}>
+        </DecorativeIcon>
+        <PopupTitle variant="heading" center style={{ marginTop: space.md }}>
           {placedAppt ? 'Booking requested' : 'Your order is placed'}
-        </T>
+        </PopupTitle>
         <T variant="label" tone="muted" center style={{ marginTop: space.sm }}>
-          {placedAppt
-            ? 'Your time is confirmed when the business accepts — we will let you know.'
-            : placedPickup
-              ? 'We’ll tell you the moment it’s ready — show the pickup code on your order screen at the counter.'
-              : placedHeld
-                ? 'You have a few minutes to change your mind — cancelling is free until the store gets it.'
-                : 'The store has been notified — pay cash on delivery.'}
+          {placedOrderConfirmationCopy({
+            appointment: placedAppt,
+            pickup: placedPickup,
+            held: placedHeld,
+            submittedMethod: placedSubmittedMethod,
+            paymentAction: placedPaymentAction,
+          })}
         </T>
+        {placedPaymentAction ? (
+          <PillButton
+            label="Pay business with MMG"
+            icon="external-link"
+            size="md"
+            onPress={() => void openMmgPaymentAction(placedPaymentAction)}
+            style={{ alignSelf: 'stretch', marginTop: space.xl }}
+          />
+        ) : null}
         <PillButton
           label={placedAppt ? 'View booking' : 'Track order'}
           size="md"
@@ -672,7 +716,7 @@ export function CartScreen() {
             placeOrder.reset();
             if (id) navigation.navigate('Delivery', { orderId: id });
           }}
-          style={{ alignSelf: 'stretch', marginTop: space.xl }}
+          style={{ alignSelf: 'stretch', marginTop: placedPaymentAction ? space.md : space.xl }}
         />
       </PopupCard>
     </Screen>

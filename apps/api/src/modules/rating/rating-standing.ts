@@ -12,6 +12,7 @@
 import type { PrismaClient } from '@prisma/client';
 import { TYPES_FOR_ROLE, type SubjectRef } from './rating-stats.service';
 import { surfaceOf, NEW_ACTOR_SURFACE, type RatingSurface } from './rating-surface';
+import { getTenantId } from '../../plugins/tenant-context';
 
 type Role = SubjectRef['role'];
 
@@ -70,8 +71,13 @@ const WEEK_MS = 7 * 24 * 3600_000;
 
 /** The one Standing computation — every role dashboard reads this. */
 export async function actorStandingView(prisma: PrismaClient, role: Role, subjectId: string): Promise<StandingView> {
+  // [E17 / danger #23] The stat row is tenant-composite: hardcoding
+  // 'swift-default' silently degraded every non-default-tenant actor to the
+  // new-actor fallback surface. Authenticated dashboards carry their tenant
+  // in request context; the default remains only as the legacy fallback.
+  const tenantId = getTenantId() ?? 'swift-default';
   const stat = await prisma.actorRatingStat.findUnique({
-    where: { tenantId_subjectRole_subjectId: { tenantId: 'swift-default', subjectRole: role, subjectId } },
+    where: { tenantId_subjectRole_subjectId: { tenantId, subjectRole: role, subjectId } },
   });
   const surface = stat ? surfaceOf(stat, role) : NEW_ACTOR_SURFACE;
   const boundary = stat?.actorVisibleAt ?? startOfUtcDay(new Date());

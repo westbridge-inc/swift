@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { nanoid } from 'nanoid';
 import type { UserRole } from '@prisma/client';
@@ -95,6 +95,76 @@ afterAll(async () => {
 });
 
 describe('[F-0028] the DELIVERED transition pays the mover — earnings have one owner', () => {
+  it('rolls back status, float, mover, earnings, and audit when the terminal transaction aborts', async () => {
+    const order = await app.prisma.order.create({
+      data: {
+        orderNumber: `ERCF-${nanoid(10)}`,
+        orderType: 'FOOD_DELIVERY',
+        fulfillment: 'DELIVERY',
+        customerId,
+        riderId,
+        status: 'ARRIVED',
+        deliveryAddress: '9 Main St',
+        deliveryLat: 6.81,
+        deliveryLng: -58.16,
+        subtotalBase: 3000,
+        subtotalMarkup: 0,
+        subtotalCustomer: 3000,
+        deliveryFee: 800,
+        tipAmount: 200,
+        totalAmount: 4000,
+        paymentMethod: 'CASH',
+      },
+    });
+    orderIds.push(order.id);
+    const beforeRider = await app.prisma.rider.update({
+      where: { id: riderId },
+      data: { isAvailable: false, currentOrderId: order.id, committedFloat: 3000 },
+      select: { totalDeliveries: true },
+    });
+
+    const originalStage = OrderService.prototype.stageCanonicalOrderTransition;
+    const stageSpy = vi
+      .spyOn(OrderService.prototype, 'stageCanonicalOrderTransition')
+      .mockImplementationOnce(async function (this: OrderService, tx, input) {
+        // Fail only after DELIVERED, float/mover release, both earnings rows,
+        // and the immutable status log have all been written inside the tx.
+        await originalStage.call(this, tx, input);
+        throw new Error('forced terminal pre-commit abort');
+      });
+    try {
+      await expect(orders.updateStatus(order.id, 'DELIVERED', 'test', 'Delivered'))
+        .rejects.toThrow('forced terminal pre-commit abort');
+    } finally {
+      stageSpy.mockRestore();
+    }
+
+    const [afterOrder, afterRider, earnings, auditCount] = await Promise.all([
+      app.prisma.order.findUniqueOrThrow({
+        where: { id: order.id },
+        select: { status: true, deliveredAt: true },
+      }),
+      app.prisma.rider.findUniqueOrThrow({
+        where: { id: riderId },
+        select: { isAvailable: true, currentOrderId: true, committedFloat: true, totalDeliveries: true },
+      }),
+      app.prisma.earning.count({ where: { orderId: order.id } }),
+      app.prisma.orderStatusLog.count({ where: { orderId: order.id, status: 'DELIVERED' } }),
+    ]);
+    expect(afterOrder).toEqual({ status: 'ARRIVED', deliveredAt: null });
+    expect(afterRider.isAvailable).toBe(false);
+    expect(afterRider.currentOrderId).toBe(order.id);
+    expect(Number(afterRider.committedFloat)).toBe(3000);
+    expect(afterRider.totalDeliveries).toBe(beforeRider.totalDeliveries);
+    expect(earnings).toBe(0);
+    expect(auditCount).toBe(0);
+
+    await app.prisma.rider.update({
+      where: { id: riderId },
+      data: { isAvailable: true, currentOrderId: null, committedFloat: 0 },
+    });
+  });
+
   it('moving an order to DELIVERED creates its earnings, with no separate call', async () => {
     const order = await app.prisma.order.create({
       data: {

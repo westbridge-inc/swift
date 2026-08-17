@@ -1,6 +1,7 @@
 import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { track } from '../lib/analytics';
 import { customerApi, discoveryApi, type AddressInput } from '../services/api';
+import type { AuthSessionSnapshot } from '../lib/authSession';
 
 /**
  * Thin React Query wrappers over `customerApi`. Every consumer screen reads data
@@ -173,14 +174,15 @@ export function useItemFeedback(orderId: string) {
 export function useRateOrder(id: string) {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: (body: {
+    mutationFn: ({ authSession, ...body }: {
       vendorScore?: number;
       vendorComment?: string;
       riderScore?: number;
       riderComment?: string;
       driverScore?: number;
       driverComment?: string;
-    }) => unwrap(customerApi.rateOrder(id, body)),
+      authSession?: AuthSessionSnapshot;
+    }) => unwrap(customerApi.rateOrder(id, body, authSession)),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: customerKeys.order(id) });
       // The list rows carry the "Rate" affordance — refresh them too.
@@ -301,7 +303,11 @@ export function useCreateTicket() {
 export function useTipOrder(orderId: string) {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: (amount: number) => unwrap(customerApi.tipOrder(orderId, amount)),
+    mutationFn: (input: number | { amount: number; authSession?: AuthSessionSnapshot }) => {
+      const amount = typeof input === 'number' ? input : input.amount;
+      const authSession = typeof input === 'number' ? undefined : input.authSession;
+      return unwrap(customerApi.tipOrder(orderId, amount, authSession));
+    },
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: customerKeys.order(orderId) });
       qc.invalidateQueries({ queryKey: customerKeys.orders });

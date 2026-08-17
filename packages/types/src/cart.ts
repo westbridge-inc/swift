@@ -11,6 +11,29 @@ export interface Cart {
   lastActivityAt: string;
   createdAt: string;
   updatedAt: string;
+  /** Server-derived across every unique item vendor. No MMG URL is present in
+   * the cart; the validated link is released only after a successful order. */
+  paymentCapabilities?: CartPaymentCapabilities;
+}
+
+export type MmgCartUnavailableReason =
+  | 'MULTI_VENDOR_UNSUPPORTED'
+  | 'VENDOR_NOT_CONFIGURED'
+  | 'VENDOR_LINK_INVALID';
+
+export interface CartPaymentCapabilities {
+  /** Changes when the vendor set or validated payment destination changes. */
+  scope: string;
+  cash: {
+    available: true;
+    fundsFlow: 'DIRECT_AT_HANDOVER';
+  };
+  mmg: {
+    available: boolean;
+    provider: 'MMG';
+    fundsFlow: 'DIRECT_TO_VENDOR';
+    unavailableReason: MmgCartUnavailableReason | null;
+  };
 }
 
 export interface CartItem {

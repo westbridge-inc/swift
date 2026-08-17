@@ -15,7 +15,7 @@ export function LocationPickerScreen() {
   const navigation = useNavigation<any>();
   const route = useRoute<any>();
   const insets = useSafeAreaInsets();
-  const { latitude, longitude } = useLocationStore();
+  const { latitude, longitude, status: locationStatus } = useLocationStore();
 
   const initial = route.params?.initial as { latitude: number; longitude: number } | undefined;
   const returnTo: string = route.params?.returnTo ?? 'AddAddress';
@@ -43,7 +43,7 @@ export function LocationPickerScreen() {
         style={{ flex: 1 }}
         initialRegion={start}
         onRegionChangeComplete={setRegion}
-        showsUserLocation
+        showsUserLocation={locationStatus === 'granted'}
       />
 
       {/* Fixed center pin */}

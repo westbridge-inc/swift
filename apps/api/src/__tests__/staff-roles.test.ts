@@ -92,7 +92,7 @@ beforeAll(async () => {
       ownerId: vendorOwner.id,
       name: `Team Bistro ${nanoid(4)}`,
       slug: `team-bistro-${nanoid(6)}`,
-      vendorType: 'RESTAURANT',
+      vendorType: 'SUPERMARKET',
       phone: '+5920029900',
       addressLine1: '3 Crew Street', city: 'Georgetown', region: 'Demerara-Mahaica',
       latitude: 6.8, longitude: -58.15,
@@ -100,6 +100,18 @@ beforeAll(async () => {
     },
   });
   vendorId = vendor.id;
+  // Toggle-ON demands LIVE document truth (no implicit grandfather since
+  // REPORT-013 F-013-08) — the staff tests toggle commerce off/on, so the
+  // owner carries a complete approved checklist.
+  for (const docType of ['owner_national_id', 'business_registration', 'tin_certificate', 'storefront_photo']) {
+    await app.prisma.verificationDocument.create({
+      data: {
+        userId: owner.userId, role: 'VENDOR_OWNER' as never, docType,
+        fileUrl: `test/staff-roles/${docType}`, status: 'APPROVED',
+        expiresAt: new Date(Date.now() + 365 * 24 * 3600 * 1000),
+      } as never,
+    });
+  }
   const category = await app.prisma.category.create({ data: { vendorId, name: 'Mains', sortOrder: 0 } });
   categoryId = category.id;
 
@@ -123,6 +135,7 @@ beforeAll(async () => {
 
 afterAll(async () => {
   if (createdUserIds.length > 0) {
+    await app.prisma.verificationDocument.deleteMany({ where: { userId: { in: createdUserIds } } });
     await app.prisma.notification.deleteMany({ where: { userId: { in: createdUserIds } } });
     await app.prisma.user.deleteMany({ where: { id: { in: createdUserIds } } });
   }

@@ -10,3 +10,13 @@
 # user-controlled brace pattern, so the DoS is not reachable with untrusted input.
 # Revisit when minimatch/glob/eslint upstream adopt brace-expansion@5-native.
 CVE-2026-14257
+
+# CVE-2025-71329 + CVE-2025-71330 — image-size@1.2.1 DoS via crafted image buffer.
+# NO fixed version exists upstream (both advisories: affected, Fixed Version empty).
+# Sole consumer is metro (the React Native bundler inside expo's toolchain): image
+# sizing runs at BUNDLE time over repo-authored assets on our own build machines —
+# production never feeds untrusted images through metro, so the DoS is not reachable
+# with attacker-controlled input. Added 2026-08-17; revisit when metro ships a fixed
+# image-size (check `pnpm why image-size` after expo/metro upgrades).
+CVE-2025-71329
+CVE-2025-71330

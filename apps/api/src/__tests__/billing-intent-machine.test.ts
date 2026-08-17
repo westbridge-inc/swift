@@ -144,7 +144,7 @@ describe('LAW M-5 — UNKNOWN is a first-class state', () => {
     const intent = await app.prisma.subscriptionPayment.findFirstOrThrow({ where: { subscriptionId: sub.id } });
 
     // MMG did receive it — history carries our reference with THEIR id.
-    sandboxAddHistory({ transactionId: `mmgtx_hist_${nanoid(6)}`, status: 'approved', amountMinor: 0, currencyCode: 'GYD', reference: intent.clientKey! });
+    sandboxAddHistory({ transactionId: `mmgtx_hist_amt210000_${nanoid(6)}`, status: 'approved', amountMinor: 210000, currencyCode: 'GYD', reference: intent.clientKey! });
     const r1 = await billing.pollPendingMmgCharges(new Date());
     expect(r1.adopted).toBe(1);
 
@@ -317,5 +317,37 @@ describe('atomic claim+advance and the poll ladder', () => {
     expect(row.status).toBe('PENDING');
     expect(row.failureCode).toBe('AMOUNT_MISMATCH');
     expect(await app.prisma.billingEvent.count({ where: { subscriptionId: sub.id, idempotencyKey: { startsWith: 'mismatch:' } } })).toBe(1);
+  });
+
+  it('treats a missing provider amount as a mismatch, never as permission to settle', async () => {
+    const due = new Date(Date.now() - HOUR);
+    const { sub } = await makeVendorMmgSub({ due });
+    await app.prisma.subscriptionPayment.create({
+      data: {
+        subscriptionId: sub.id, amount: 2100, status: 'PENDING', paymentMethod: 'MOBILE_MONEY',
+        externalRef: `mmgtx_legacy_zero_${nanoid(6)}`, periodStart: due, periodEnd: new Date(due.getTime() + WEEK),
+      },
+    });
+    await billing.pollPendingMmgCharges(new Date());
+    const row = await app.prisma.subscriptionPayment.findFirstOrThrow({ where: { subscriptionId: sub.id } });
+    expect(row.status).toBe('PENDING');
+    expect(row.failureCode).toBe('AMOUNT_MISMATCH');
+    expect((await app.prisma.subscription.findUniqueOrThrow({ where: { id: sub.id } })).nextBillingDate.getTime()).toBe(due.getTime());
+  });
+
+  it('requires the provider currency to match before settlement', async () => {
+    const due = new Date(Date.now() - HOUR);
+    const { sub } = await makeVendorMmgSub({ due });
+    await app.prisma.subscription.update({ where: { id: sub.id }, data: { currencyCode: 'USD' } });
+    await app.prisma.subscriptionPayment.create({
+      data: {
+        subscriptionId: sub.id, amount: 2100, status: 'PENDING', paymentMethod: 'MOBILE_MONEY',
+        externalRef: `mmgtx_currency_amt210000_${nanoid(6)}`, periodStart: due, periodEnd: new Date(due.getTime() + WEEK),
+      },
+    });
+    await billing.pollPendingMmgCharges(new Date());
+    const row = await app.prisma.subscriptionPayment.findFirstOrThrow({ where: { subscriptionId: sub.id } });
+    expect(row.status).toBe('PENDING');
+    expect(row.failureCode).toBe('AMOUNT_MISMATCH');
   });
 });

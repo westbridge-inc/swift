@@ -155,6 +155,14 @@ describe('Prompt scrubber — hard rule 3 proven', () => {
     expect(clean).toContain('[redacted-address]');
   });
 
+  it('scrubs Guyanese lot/block address forms [REPORT-013 F-013-04]', () => {
+    const clean = scrubPrompt('deliver to Lot 42 Sophia, Georgetown; backup: block 8 Diamond Housing Scheme');
+    expect(clean).not.toContain('Lot 42');
+    expect(clean).not.toContain('Sophia');
+    expect(clean).not.toContain('block 8');
+    expect(clean).toContain('[redacted-address]');
+  });
+
   it('leaves harmless text alone', () => {
     const text = 'cheap lunch near me, open now, under 2 thousand';
     expect(scrubPrompt(text)).toBe(text);

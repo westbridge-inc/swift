@@ -6,6 +6,7 @@ import { color, space } from '@swift/ui';
 import { useHome, useVendors } from '../../../hooks/customer';
 import { useAppStore } from '../../../stores/appStore';
 import { useLocationStore } from '../../../stores/locationStore';
+import { grantedLocationFix } from '../../../lib/deviceLocation';
 import { itemImage, vendorImage } from '../../../lib/images';
 import {
   Chip,
@@ -58,7 +59,10 @@ function Radio({ on }: { on: boolean }) {
 export function SearchScreen() {
   const navigation = useNavigation<any>();
   const route = useRoute<any>();
-  const { latitude, longitude } = useLocationStore();
+  const { latitude, longitude, status } = useLocationStore();
+  const locationFix = grantedLocationFix(latitude, longitude, status);
+  const deviceLatitude = locationFix?.latitude;
+  const deviceLongitude = locationFix?.longitude;
   const { recentSearches, pushSearch, clearSearches } = useAppStore();
 
   const [q, setQ] = useState<string>(route.params?.q ?? '');
@@ -86,15 +90,15 @@ export function SearchScreen() {
     if (debounced.trim()) p['search'] = debounced.trim();
     if (type) p['type'] = type;
     if (sort) p['sort'] = sort;
-    if (latitude != null && longitude != null) {
-      p['lat'] = String(latitude);
-      p['lng'] = String(longitude);
+    if (deviceLatitude !== undefined && deviceLongitude !== undefined) {
+      p['lat'] = String(deviceLatitude);
+      p['lng'] = String(deviceLongitude);
     }
     return p;
-  }, [debounced, type, sort, latitude, longitude]);
+  }, [debounced, type, sort, deviceLatitude, deviceLongitude]);
 
   const vendors = useVendors<any[]>(searching ? params : undefined);
-  const home = useHome<any>(latitude ?? undefined, longitude ?? undefined);
+  const home = useHome<any>(deviceLatitude, deviceLongitude);
   const popularItems: any[] = home.data?.popularItems ?? [];
 
   const results: any[] = Array.isArray(vendors.data) ? vendors.data : [];
@@ -193,7 +197,11 @@ export function SearchScreen() {
                         rating={v.displayRating ?? null}
                         bucket={v.ratingBucket}
                         topRated={v.topRated}
-                        extra={v.etaMin ? `${v.etaMin} min` : v.distanceKm != null ? `${v.distanceKm} km` : undefined}
+                        extra={v.etaMin
+                          ? `${v.etaMin} min`
+                          : locationFix && v.distanceKm != null
+                            ? `${v.distanceKm} km`
+                            : undefined}
                       />
                     }
                     wide

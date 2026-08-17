@@ -54,6 +54,7 @@ async function makeUserWithSession(roles: UserRole[], activeRole: UserRole) {
       userId: user.id,
       token,
       refreshToken: nanoid(48),
+      ...(roles.some((role) => role === 'ADMIN' || role === 'SUPER_ADMIN') && { authMethod: 'OTP' as const }),
       deviceId: 'step5-test',
       deviceType: 'test',
       expiresAt: new Date(Date.now() + DAY),
@@ -451,6 +452,21 @@ describe('Waivers, reminders, tier recalculation', () => {
   });
 
   it('sends exactly one due-tomorrow reminder per period', async () => {
+    // A corrupt legacy subscription cannot be notified, but it also must not
+    // poison the batch or consume a REMINDER idempotency key.
+    const orphan = await app.prisma.subscription.create({
+      data: {
+        type: 'DELIVERY_RIDER',
+        status: 'ACTIVE',
+        weeklyRate: 12000,
+        billingMethod: 'CASH',
+        currentPeriodStart: new Date(),
+        currentPeriodEnd: new Date(Date.now() + 12 * HOUR),
+        nextBillingDate: new Date(Date.now() + 12 * HOUR),
+      },
+    });
+    createdSubIds.push(orphan.id);
+
     const { subId } = await makeMoverWithCardSub({
       token: 'tok_good_reminder',
       due: new Date(Date.now() + 12 * HOUR),
@@ -460,6 +476,7 @@ describe('Waivers, reminders, tier recalculation', () => {
     expect(first).toBeGreaterThanOrEqual(1);
     const mine = await app.prisma.billingEvent.count({ where: { subscriptionId: subId, type: 'REMINDER' } });
     expect(mine).toBe(1);
+    expect(await app.prisma.billingEvent.count({ where: { subscriptionId: orphan.id, type: 'REMINDER' } })).toBe(0);
 
     await billing.sendUpcomingReminders();
     const stillOne = await app.prisma.billingEvent.count({ where: { subscriptionId: subId, type: 'REMINDER' } });
@@ -576,5 +593,131 @@ describe('Subscription trial lifecycle', () => {
     expect(after.status).toBe('ACTIVE');
     expect(after.isTrialActive).toBe(false);
     expect(after.nextBillingDate.getTime()).toBeLessThanOrEqual(Date.now());
+  });
+});
+
+describe('F-012-05 — suspension is ONE authority generation [REPORT-012]', () => {
+  it('with the vendor row locked, the subscription cannot flip SUSPENDED ahead of the vendor write', async () => {
+    // A store one failed charge from suspension, with nothing prepaid.
+    const fx = await makeVendorWithSub({ rate: 20000, prepaid: 0, due: new Date(Date.now() - HOUR) });
+    await app.prisma.subscription.update({
+      where: { id: fx.subId },
+      data: {
+        status: 'PAST_DUE', failedAttempts: 2,
+        nextRetryAt: new Date(Date.now() - HOUR),
+        isInGracePeriod: true, gracePeriodEnd: new Date(Date.now() - HOUR),
+      },
+    });
+
+    // Hold the vendor row lock the way any competing writer (toggle, admin)
+    // would, then run the sweep. Split-commit suspension would flip the
+    // subscription NOW and write the vendor row later; one-generation
+    // suspension blocks the WHOLE flip on this lock.
+    let release!: () => void;
+    const hold = new Promise<void>((r) => { release = r; });
+    let lockAcquired!: () => void;
+    const acquired = new Promise<void>((r) => { lockAcquired = r; });
+    const holder = app.prisma.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT id FROM "vendors" WHERE id = ${fx.vendorId} FOR UPDATE`;
+      lockAcquired();
+      await hold;
+    }, { timeout: 30_000 });
+    await acquired;
+
+    const sweep = billing.runBillingCycle(new Date());
+    await new Promise((r) => setTimeout(r, 800));
+    const during = await app.prisma.subscription.findUniqueOrThrow({ where: { id: fx.subId } });
+    expect(during.status).toBe('PAST_DUE'); // the flip waits WITH the vendor write
+
+    release();
+    await holder;
+    await sweep;
+    const after = await app.prisma.subscription.findUniqueOrThrow({ where: { id: fx.subId } });
+    const vend = await app.prisma.vendor.findUniqueOrThrow({ where: { id: fx.vendorId } });
+    expect(after.status).toBe('SUSPENDED');
+    expect(vend.status).toBe('SUSPENDED');
+    expect(vend.acceptingOrders).toBe(false);
+  });
+});
+
+describe('F-013-07/09 — reinstatement authority + resumable retry [REPORT-013]', () => {
+  it('payment lifts ONLY a billing suspension: admin authority survives, and dead documents keep commerce closed', async () => {
+    const adminToken = (await makeUserWithSession(['ADMIN'], 'ADMIN')).token;
+
+    // A — admin-suspended store pays: entitlement restores, lifecycle does not.
+    const a = await makeVendorWithSub({ rate: 20000, prepaid: 0, due: new Date(Date.now() - HOUR) });
+    await app.prisma.subscription.update({
+      where: { id: a.subId },
+      data: { status: 'SUSPENDED', failedAttempts: 3, nextRetryAt: new Date(Date.now() - HOUR), suspendedAt: new Date() },
+    });
+    await app.prisma.vendor.update({
+      where: { id: a.vendorId },
+      data: { status: 'SUSPENDED', acceptingOrders: false, suspensionSource: 'ADMIN' },
+    });
+    const resA = await app.inject({
+      method: 'POST', url: `/api/v1/admin/subscriptions/${a.subId}/topup`,
+      payload: { amount: 100000, reference: 'test-admin-survives' },
+      headers: { authorization: `Bearer ${adminToken}`, 'content-type': 'application/json' },
+    });
+    expect(resA.statusCode).toBe(200);
+    expect((await app.prisma.subscription.findUniqueOrThrow({ where: { id: a.subId } })).status).toBe('ACTIVE');
+    const vendA = await app.prisma.vendor.findUniqueOrThrow({ where: { id: a.vendorId } });
+    expect(vendA.status).toBe('SUSPENDED'); // the admin's call, not billing's
+    expect(vendA.acceptingOrders).toBe(false);
+
+    // B — billing-suspended store whose documents died mid-suspension pays:
+    // lifecycle restores, commerce stays closed (no blind acceptingOrders).
+    const b = await makeVendorWithSub({ rate: 20000, prepaid: 0, due: new Date(Date.now() - HOUR) });
+    await app.prisma.subscription.update({
+      where: { id: b.subId },
+      data: { status: 'SUSPENDED', failedAttempts: 3, nextRetryAt: new Date(Date.now() - HOUR), suspendedAt: new Date() },
+    });
+    await app.prisma.vendor.update({
+      where: { id: b.vendorId },
+      data: { status: 'SUSPENDED', acceptingOrders: false, suspensionSource: 'BILLING', isVerified: false },
+    });
+    const resB = await app.inject({
+      method: 'POST', url: `/api/v1/admin/subscriptions/${b.subId}/topup`,
+      payload: { amount: 100000, reference: 'test-docs-dead' },
+      headers: { authorization: `Bearer ${adminToken}`, 'content-type': 'application/json' },
+    });
+    expect(resB.statusCode).toBe(200);
+    const vendB = await app.prisma.vendor.findUniqueOrThrow({ where: { id: b.vendorId } });
+    expect(vendB.status).toBe('ACTIVE'); // billing's suspension lifted
+    expect(vendB.isVerified).toBe(false);
+    expect(vendB.acceptingOrders).toBe(false); // document truth gates commerce
+  });
+
+  it('a crash between the failure record and its outcome cannot suppress retries forever — the outcome RESUMES [F-013-09]', async () => {
+    const fx = await makeVendorWithSub({ rate: 20000, prepaid: 0, due: new Date(Date.now() - HOUR) });
+    const sub = await app.prisma.subscription.update({
+      where: { id: fx.subId },
+      data: {
+        status: 'PAST_DUE', failedAttempts: 2,
+        nextRetryAt: new Date(Date.now() - HOUR),
+        isInGracePeriod: true, gracePeriodEnd: new Date(Date.now() - HOUR),
+      },
+    });
+    const periodKey = sub.nextBillingDate.toISOString().slice(0, 10);
+    // The crash residue REPORT-013 proved: attempt + failure durably recorded
+    // at level a2, process died before the outcome (increment/suspension).
+    await app.prisma.billingEvent.create({
+      data: { subscriptionId: fx.subId, type: 'CHARGE_ATTEMPT', amount: 20000, currencyCode: sub.currencyCode, idempotencyKey: `charge:${fx.subId}:${periodKey}:a2` },
+    });
+    await app.prisma.billingEvent.create({
+      data: { subscriptionId: fx.subId, type: 'CHARGE_FAILED', amount: 20000, currencyCode: sub.currencyCode, idempotencyKey: `failed:${fx.subId}:${periodKey}:a2`, note: 'insufficient prepaid (crash residue)' },
+    });
+
+    // The hourly replay. Before the fix: same attempt key -> P2002 -> 'skipped'
+    // forever; the store kept selling unpaid.
+    await billing.runBillingCycle(new Date());
+
+    const after = await app.prisma.subscription.findUniqueOrThrow({ where: { id: fx.subId } });
+    expect(after.failedAttempts).toBe(3); // the recorded outcome finally applied
+    expect(after.status).toBe('SUSPENDED'); // third failure = suspension
+    const vend = await app.prisma.vendor.findUniqueOrThrow({ where: { id: fx.vendorId } });
+    expect(vend.status).toBe('SUSPENDED');
+    expect(vend.suspensionSource).toBe('BILLING');
+    expect(vend.acceptingOrders).toBe(false);
   });
 });

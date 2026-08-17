@@ -12,6 +12,8 @@ import { generateOrderNumber } from '../../utils/markup';
 import { AppError, NotFoundError } from '../../utils/errors';
 import { getStorageProvider } from '../../providers/storage/storage-provider';
 import { ALLOWED_IMAGE_TYPES, looksLikeImage } from '../../utils/images';
+import type { OrderStatus } from '@prisma/client';
+import { lockActiveOrderCustomer } from '../order/order-creation-authority';
 
 // ---------------------------------------------------------------------------
 // Module C: Courier (spec §4.3) — send a parcel person-to-person. A non-cart
@@ -51,6 +53,42 @@ const orderSchema = z.object({
 const cancelSchema = z.object({ reason: z.string().max(500).optional() });
 const proofSchema = z.object({ proofPhotoUrl: z.string().min(5).max(2048) });
 
+/** Sender cancellation is safe only before the parcel enters rider custody.
+ * Once picked up, a parcel needs an explicit return-to-sender/ops recovery
+ * flow; terminal cancellation would otherwise free a rider who still holds it.
+ * The canonical transition seam independently enforces physical custody under
+ * the order-row lock, closing pickup-vs-cancel races. */
+const COURIER_CANCELLABLE_STATUSES = [
+  'PENDING',
+  'ACCEPTED',
+  'PREPARING',
+  'READY_FOR_PICKUP',
+  'RIDER_ASSIGNED',
+  'RIDER_EN_ROUTE_PICKUP',
+  'RIDER_ARRIVED_PICKUP',
+] as const satisfies readonly OrderStatus[];
+
+const COURIER_CUSTODY_STATUSES = [
+  'PICKED_UP',
+  'EN_ROUTE_DELIVERY',
+  'ARRIVED',
+] as const satisfies readonly OrderStatus[];
+
+// Proof is custody-bound [REPORT-014 F-014-02]: delivery can only be proven
+// for a parcel the rider physically holds — the historical "full live list"
+// proof window is gone with its last consumer.
+
+function courierNotCancellable(status: OrderStatus): AppError {
+  if ((COURIER_CUSTODY_STATUSES as readonly OrderStatus[]).includes(status)) {
+    return new AppError(
+      409,
+      'PARCEL_IN_CUSTODY',
+      'This parcel has already been picked up. Contact support to arrange return-to-sender or delivery recovery.',
+    );
+  }
+  return new AppError(409, 'NOT_CANCELLABLE', 'This courier job can no longer be cancelled');
+}
+
 const courierMaps = getMapsProvider();
 
 async function quote(
@@ -71,17 +109,6 @@ export default async function courierRoutes(app: FastifyInstance) {
   const orderService = new OrderService(app.prisma, app.io);
   const notifications = new NotificationService(app.prisma, app.io);
   const storage = getStorageProvider();
-
-  /** Terminal courier writes happen outside updateStatus (they carry courier-
-   *  specific fields and may skip intermediate states), so the terminal
-   *  effects — freeing the rider — are applied here, guarded the same way. */
-  async function freeCourierRider(orderId: string, riderId: string | null) {
-    if (!riderId) return;
-    await app.prisma.rider.updateMany({
-      where: { id: riderId, currentOrderId: orderId },
-      data: { isAvailable: true, currentOrderId: null },
-    });
-  }
 
   // Per-country courier pricing [UG-CRAFT-03]: the caller's market decides
   // the rates; null config = the code defaults (byte-identical to before).
@@ -107,6 +134,10 @@ export default async function courierRoutes(app: FastifyInstance) {
   app.post('/order', auth, async (request, reply) => {
     const body = orderSchema.parse(request.body);
     const userId = request.user.userId;
+    const customer = await app.prisma.user.findUniqueOrThrow({
+      where: { id: userId },
+      select: { tenantId: true },
+    });
 
     const restriction = await orderingRestriction(app.prisma, userId);
     if (restriction === 'banned') {
@@ -119,46 +150,50 @@ export default async function courierRoutes(app: FastifyInstance) {
     today.setHours(0, 0, 0, 0);
     const todayCount = await app.prisma.order.count({ where: { placedAt: { gte: today } } });
 
-    const order = await app.prisma.order.create({
-      data: {
-        orderNumber: generateOrderNumber(todayCount + 1),
-        orderType: 'COURIER',
-        customerId: userId,
-        // No vendor prep step — the parcel is ready, so dispatch can run at once
-        // (or at hold release when LIFECYCLE_V2 keeps the free-cancel window open).
-        status: 'READY_FOR_PICKUP',
-        holdExpiresAt: holdWindowMs() != null ? new Date(Date.now() + holdWindowMs()!) : null,
-        fulfillment: 'DELIVERY',
-        pickupAddress: body.pickupAddress,
-        pickupLat: body.pickup.lat,
-        pickupLng: body.pickup.lng,
-        deliveryAddress: body.dropoffAddress,
-        deliveryLat: body.dropoff.lat,
-        deliveryLng: body.dropoff.lng,
-        courierPackageSize: body.packageSize,
-        courierPackageDescription: body.packageDescription,
-        courierPackagePhotoUrl: body.packagePhotoUrl,
-        courierSpeed: body.speed,
-        // SWIFT-061: EXPRESS/RUSH are priced ×1.5/×2 — make the priority REAL, not
-        // just a surcharge. isExpress is the ONE dispatch-priority flag (same as a
-        // food EXPRESS order): 12s offers, 45s redispatch, sorted first on the board.
-        isExpress: body.speed !== 'STANDARD',
-        courierRecipientName: body.recipientName,
-        courierRecipientPhone: body.recipientPhone,
-        courierPayer: body.payer,
-        courierTrackingToken: nanoid(16),
-        subtotalBase: 0,
-        subtotalMarkup: 0,
-        subtotalCustomer: 0,
-        // The whole courier fee is the rider's earning (100%).
-        deliveryFee: estimate.totalFee,
-        totalAmount: estimate.totalFee,
-        estimatedDeliveryTime: estimate.estimatedMinutes,
-        paymentMethod: 'CASH',
-        statusHistory: {
-          create: { status: 'READY_FOR_PICKUP', changedBy: userId, note: `Courier requested — fee $${estimate.totalFee}` },
+    const order = await app.prisma.$transaction(async (tx) => {
+      await lockActiveOrderCustomer(tx, userId, customer.tenantId);
+      return tx.order.create({
+        data: {
+          tenantId: customer.tenantId,
+          orderNumber: generateOrderNumber(todayCount + 1),
+          orderType: 'COURIER',
+          customerId: userId,
+          // No vendor prep step — the parcel is ready, so dispatch can run at once
+          // (or at hold release when LIFECYCLE_V2 keeps the free-cancel window open).
+          status: 'READY_FOR_PICKUP',
+          holdExpiresAt: holdWindowMs() != null ? new Date(Date.now() + holdWindowMs()!) : null,
+          fulfillment: 'DELIVERY',
+          pickupAddress: body.pickupAddress,
+          pickupLat: body.pickup.lat,
+          pickupLng: body.pickup.lng,
+          deliveryAddress: body.dropoffAddress,
+          deliveryLat: body.dropoff.lat,
+          deliveryLng: body.dropoff.lng,
+          courierPackageSize: body.packageSize,
+          courierPackageDescription: body.packageDescription,
+          courierPackagePhotoUrl: body.packagePhotoUrl,
+          courierSpeed: body.speed,
+          // SWIFT-061: EXPRESS/RUSH are priced ×1.5/×2 — make the priority REAL, not
+          // just a surcharge. isExpress is the ONE dispatch-priority flag (same as a
+          // food EXPRESS order): 12s offers, 45s redispatch, sorted first on the board.
+          isExpress: body.speed !== 'STANDARD',
+          courierRecipientName: body.recipientName,
+          courierRecipientPhone: body.recipientPhone,
+          courierPayer: body.payer,
+          courierTrackingToken: nanoid(16),
+          subtotalBase: 0,
+          subtotalMarkup: 0,
+          subtotalCustomer: 0,
+          // The whole courier fee is the rider's earning (100%).
+          deliveryFee: estimate.totalFee,
+          totalAmount: estimate.totalFee,
+          estimatedDeliveryTime: estimate.estimatedMinutes,
+          paymentMethod: 'CASH',
+          statusHistory: {
+            create: { status: 'READY_FOR_PICKUP', changedBy: userId, note: `Courier requested — fee $${estimate.totalFee}` },
+          },
         },
-      },
+      });
     });
 
     // Held courier jobs dispatch at release (the worker enqueues); otherwise now.
@@ -233,7 +268,7 @@ export default async function courierRoutes(app: FastifyInstance) {
     return { success: true, data: order };
   });
 
-  /** POST /order/:id/cancel — sender cancels before delivery. */
+  /** POST /order/:id/cancel — sender cancels before rider pickup. */
   app.post('/order/:id/cancel', auth, async (request) => {
     const { id } = request.params as { id: string };
     const body = cancelSchema.parse(request.body ?? {});
@@ -244,32 +279,37 @@ export default async function courierRoutes(app: FastifyInstance) {
     if (['DELIVERED', 'COMPLETED', 'CANCELLED'].includes(order.status)) {
       throw new AppError(400, 'NOT_CANCELLABLE', `A ${order.status.toLowerCase()} courier job cannot be cancelled`);
     }
-    // Compare-and-set: the sender-cancel races the rider's proof-of-delivery.
-    // Only one terminal transition wins; the loser gets 409 rather than both
-    // stamping (an order ending CANCELLED after the rider was already paid).
-    const claimed = await app.prisma.order.updateMany({
-      where: { id, status: { notIn: ['DELIVERED', 'COMPLETED', 'CANCELLED'] } },
-      data: { status: 'CANCELLED', cancelledAt: new Date(), cancellationReason: body.reason ?? 'Cancelled by sender' },
+    if ((COURIER_CUSTODY_STATUSES as readonly OrderStatus[]).includes(order.status)) {
+      throw courierNotCancellable(order.status);
+    }
+    const reason = body.reason ?? 'Cancelled by sender';
+    // Status/cancellation evidence + search/booking closure + float/mover
+    // release + immutable log are one commit. Proof races on the same row lock.
+    const { order: updated } = await orderService.transitionOrderAtomically({
+      orderId: id,
+      target: 'CANCELLED',
+      allowedFrom: COURIER_CANCELLABLE_STATUSES,
+      changedBy: request.user.userId,
+      note: reason,
+      cancellation: { by: request.user.userId, reason },
+      releaseStaleMoverPointer: true,
+      invalidStatus: courierNotCancellable,
     });
-    if (claimed.count === 0) throw new AppError(409, 'NOT_CANCELLABLE', 'This courier job can no longer be cancelled');
-    await app.prisma.orderStatusLog.create({ data: { orderId: id, status: 'CANCELLED', changedBy: request.user.userId, note: body.reason ?? 'Cancelled by sender' } });
-    const updated = await app.prisma.order.findUniqueOrThrow({ where: { id } });
 
-    // Terminal effects (found live: cancelling an assigned courier left the
-    // rider stuck on the dead job, invisible to dispatch).
-    await freeCourierRider(id, order.riderId);
-    app.io.to(`order:${id}`).emit('order:status_changed', { orderId: id, status: 'CANCELLED', timestamp: new Date().toISOString() });
-    if (order.riderId) {
-      const rider = await app.prisma.rider.findUnique({ where: { id: order.riderId }, select: { userId: true } });
-      if (rider) {
-        await notifications.send({
-          userId: rider.userId,
-          type: 'ORDER_UPDATE',
-          title: 'Courier job cancelled',
-          body: `The sender cancelled ${order.orderNumber}. You are back in the dispatch pool.`,
-          data: { orderId: id, status: 'CANCELLED' },
-        });
-      }
+    try {
+      app.io.to(`order:${id}`).emit('order:status_changed', { orderId: id, status: 'CANCELLED', timestamp: new Date().toISOString() });
+    } catch (error) {
+      request.log.warn({ err: error, orderId: id }, 'courier cancellation socket publication failed after commit');
+    }
+    if (updated.rider?.userId) {
+      await notifications.send({
+        userId: updated.rider.userId,
+        type: 'ORDER_UPDATE',
+        title: 'Courier job cancelled',
+        body: `The sender cancelled ${updated.orderNumber}. You are back in the dispatch pool.`,
+        data: { orderId: id, status: 'CANCELLED' },
+      })
+        .catch((error) => request.log.warn({ err: error, orderId: id }, 'courier cancellation notification failed after commit'));
     }
 
     return { success: true, data: updated };
@@ -304,6 +344,14 @@ export default async function courierRoutes(app: FastifyInstance) {
     }
 
     const { url } = await storage.upload({ buffer, filename: file.filename, mimeType: file.mimetype, folder: `courier-proof/${id}` });
+    // [REPORT-016 F-016-04] Record the SERVER-issued URL + the rider it was
+    // issued to. /proof exact-matches this, so proof is proof of an actual
+    // upload by this rider — not any string that contains the folder name.
+    // Guarded on rider ownership + non-terminal status (matches the read above).
+    await app.prisma.order.updateMany({
+      where: { id, orderType: 'COURIER', riderId: rider.id, status: { notIn: ['DELIVERED', 'COMPLETED', 'CANCELLED'] } },
+      data: { courierProofIssuedUrl: url, courierProofIssuedRiderId: rider.id },
+    });
     return { success: true, data: { url } };
   });
 
@@ -318,36 +366,51 @@ export default async function courierRoutes(app: FastifyInstance) {
     if (['DELIVERED', 'COMPLETED', 'CANCELLED'].includes(order.status)) {
       throw new AppError(400, 'NOT_IN_TRANSIT', 'This courier job is already closed');
     }
-    // Compare-and-set: the rider's proof races the sender's cancel. Only one
-    // terminal transition wins; the loser 409s rather than paying the rider on a
-    // job that was simultaneously cancelled.
-    const claimed = await app.prisma.order.updateMany({
-      where: { id, status: { notIn: ['DELIVERED', 'COMPLETED', 'CANCELLED'] } },
-      data: { status: 'DELIVERED', deliveredAt: new Date(), courierProofPhotoUrl: body.proofPhotoUrl },
+    // [REPORT-016 F-016-04] The proof object must EXACTLY equal the URL the
+    // server issued for this order to THIS rider at /proof-photo — not a
+    // substring that merely contains the folder name. A crafted/foreign URL
+    // (even one embedding `courier-proof/<id>/` in a query param) is refused
+    // because it was never issued. Legacy in-flight orders with no issued
+    // record must (re-)upload through /proof-photo first.
+    if (!order.courierProofIssuedUrl
+        || order.courierProofIssuedRiderId !== rider.id
+        || body.proofPhotoUrl !== order.courierProofIssuedUrl) {
+      throw new AppError(400, 'PROOF_NOT_ISSUED',
+        'Attach the delivery photo through the photo step for this delivery first.');
+    }
+    // Proof metadata, DELIVERED, rider release/count, float, earnings, and the
+    // immutable log commit atomically. A retry after any pre-commit failure
+    // sees the original live state and cannot double-pay or double-count.
+    // [REPORT-014 F-014-02] Custody statuses ONLY (a parcel never held can't
+    // be "delivered"), and the actor is re-proved on the LOCKED row — a
+    // watchdog release/reassignment between the pre-read above and the lock
+    // refuses instead of paying a former rider.
+    const { order: updated } = await orderService.transitionOrderAtomically({
+      orderId: id,
+      target: 'DELIVERED',
+      allowedFrom: COURIER_CUSTODY_STATUSES,
+      expectedRiderId: rider.id,
+      changedBy: request.user.userId,
+      note: 'Proof of delivery captured',
+      terminalMetadata: { courierProofPhotoUrl: body.proofPhotoUrl },
+      invalidStatus: (status) => (COURIER_CANCELLABLE_STATUSES as readonly OrderStatus[]).includes(status)
+        ? new AppError(409, 'PARCEL_NOT_IN_CUSTODY', 'Pick the parcel up (confirm pickup) before proving delivery.')
+        : new AppError(409, 'NOT_IN_TRANSIT', 'This courier job is already closed'),
     });
-    if (claimed.count === 0) throw new AppError(409, 'NOT_IN_TRANSIT', 'This courier job is already closed');
-    await app.prisma.orderStatusLog.create({ data: { orderId: id, status: 'DELIVERED', changedBy: request.user.userId, note: 'Proof of delivery captured' } });
-    const updated = await app.prisma.order.findUniqueOrThrow({ where: { id } });
 
-    // Terminal effects — only the CAS winner reaches here (found live: the proof
-    // path paid the rider NOTHING, left them stuck on the finished job, told
-    // nobody). createEarnings is idempotent; totalDeliveries counts once.
-    await orderService.createEarnings(id);
-    await freeCourierRider(id, order.riderId);
-    const totalDeliveries = await app.prisma.rider.update({
-      where: { id: rider.id },
-      data: { totalDeliveries: { increment: 1 } },
-      select: { totalDeliveries: true },
-    });
-    app.io.to(`order:${id}`).emit('order:status_changed', { orderId: id, status: 'DELIVERED', timestamp: new Date().toISOString() });
+    try {
+      app.io.to(`order:${id}`).emit('order:status_changed', { orderId: id, status: 'DELIVERED', timestamp: new Date().toISOString() });
+    } catch (error) {
+      request.log.warn({ err: error, orderId: id }, 'courier proof socket publication failed after commit');
+    }
     await notifications.send({
       userId: order.customerId,
       type: 'ORDER_UPDATE',
       title: 'Parcel delivered',
       body: `${order.orderNumber} was handed to ${order.courierRecipientName ?? 'the recipient'} — proof photo captured.`,
       data: { orderId: id, status: 'DELIVERED' },
-    });
+    }).catch((error) => request.log.warn({ err: error, orderId: id }, 'courier proof notification failed after commit'));
 
-    return { success: true, data: { ...updated, totalDeliveries: totalDeliveries.totalDeliveries } };
+    return { success: true, data: { ...updated, totalDeliveries: updated.rider?.totalDeliveries ?? null } };
   });
 }

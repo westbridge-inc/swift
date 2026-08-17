@@ -3,6 +3,11 @@ generator client {
   // metrics: exposes the live connection-pool counters ($metrics.json()) that
   // the observability plugin turns into the swift_db_pool gauge (D7-04).
   previewFeatures = ["metrics"]
+  // Native = local dev (macOS/host). The two linux targets let the SAME
+  // generated client run in the deploy Docker image, whether the base is
+  // glibc (debian-slim → openssl-3.0.x) or musl (alpine). Without these the
+  // container throws "query engine not found" at boot. [deploy]
+  binaryTargets   = ["native", "debian-openssl-3.0.x", "linux-musl-openssl-3.0.x"]
 }
 
 datasource db {
@@ -27,6 +32,10 @@ model User {
   selfieCapturedAt DateTime?
   roles            UserRole[]
   activeRole       UserRole
+  /// Last specific operational mover surface. Preserved while the user visits
+  /// Customer/Business so a dual Rider+Driver account returns to the correct
+  /// work app across devices and reinstalls. Null means genuinely unknown.
+  lastMoverRole    MoverRole?
   status           UserStatus @default(ACTIVE)
   isPhoneVerified  Boolean    @default(false)
   isEmailVerified  Boolean    @default(false)
@@ -117,6 +126,11 @@ enum UserRole {
   SUPER_ADMIN
 }
 
+enum MoverRole {
+  RIDER
+  DRIVER
+}
+
 enum TrustLevel {
   L1
   L2
@@ -137,6 +151,12 @@ model Session {
   user                 User      @relation(fields: [userId], references: [id], onDelete: Cascade)
   token                String    @unique
   refreshToken         String    @unique
+  /// Durable authentication assurance for this exact session generation.
+  /// Existing/pre-cutover rows intentionally remain LEGACY and can continue
+  /// serving non-privileged accounts, but can never inherit platform-admin
+  /// authority. Only OTP is approved for ADMIN/SUPER_ADMIN until ADR-001's
+  /// managed-identity/WebAuthn follow-up adds another explicit assurance.
+  authMethod            SessionAuthMethod @default(LEGACY)
   // Refresh rotation theft detection: the token this one replaced, and when.
   // A replay of previousRefreshToken outside the race-grace window means the
   // token was stolen — the whole session is revoked (see AuthService.refreshTokens).
@@ -150,6 +170,35 @@ model Session {
   createdAt            DateTime  @default(now())
 
   @@map("sessions")
+}
+
+enum SessionAuthMethod {
+  LEGACY
+  PASSWORD
+  OTP
+}
+
+/// Transactional outbox for session/security revocations that retire mover
+/// supply. The authoritative order/profile/session change and this row commit
+/// together; a worker retries Redis cleanup and redispatch after process death.
+/// Customer notices and custody IncidentCases are persisted in that same
+/// transaction, so this queue never substitutes an ephemeral signal for proof.
+model MoverRevocationOutbox {
+  id          String    @id
+  dedupeKey   String    @unique
+  userId      String
+  payload     Json
+  attempts    Int       @default(0)
+  availableAt DateTime  @default(now())
+  claimedAt   DateTime?
+  processedAt DateTime?
+  lastError   String?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  @@index([processedAt, availableAt])
+  @@index([claimedAt])
+  @@map("mover_revocation_outbox")
 }
 
 model DeviceToken {
@@ -209,9 +258,13 @@ model Tenant {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  users   User[]
-  vendors Vendor[]
-  orders  Order[]
+  users            User[]
+  vendors          Vendor[]
+  orders           Order[]
+  rideQueueEntries RideQueueEntry[]
+  adRefundIntents  AdRefundIntent[]
+  adRefundItems    AdRefundItem[]
+  adRefundOutbox   AdRefundOutbox[]
 
   @@map("tenants")
 }
@@ -399,7 +452,8 @@ model ComplianceReviewCase {
 model RideQueueEntry {
   id                String    @id @default(cuid())
   customerId        String
-  tenantId          String?
+  tenantId          String
+  tenant            Tenant    @relation(fields: [tenantId], references: [id])
   pickupLat         Float
   pickupLng         Float
   pickupAddress     String
@@ -416,11 +470,15 @@ model RideQueueEntry {
 
   @@index([status, expiresAt])
   @@index([customerId, status])
+  @@index([tenantId, status, expiresAt, createdAt])
   @@map("ride_queue_entries")
 }
 
 model SupplyWatch {
   id         String    @id @default(cuid())
+  // [REPORT-014 F-014-03] Watches are tenant-scoped: driver-demand counts and
+  // supply-recovery notifications must never read another tenant's watchers.
+  tenantId   String    @default("swift-default")
   customerId String
   pool       String // DRIVER | RIDER
   lat        Float
@@ -468,7 +526,17 @@ model AlertDelivery {
   subjectId      String // orderId
   recipientId    String // userId
   sentAt         DateTime  @default(now())
+  /// The recipient's client RENDERED the alert (offer card displayed) —
+  /// distinct from acknowledgedAt (the recipient ACTED). [danger #21] An
+  /// offer that times out with neither stamp is UNDELIVERABLE: the mover
+  /// provably never saw it, so it must not decay their acceptance rate.
+  seenAt         DateTime?
   acknowledgedAt DateTime?
+  /// [REPORT-014 F-014-04] Which offer ATTEMPT this row is evidence for. A
+  /// re-offer of the same order to the same mover is a NEW attempt; timeout
+  /// accounting must read exactly its own attempt's render proof, never an
+  /// older row's. Null on legacy rows and non-offer kinds.
+  offerAttemptId String?
 
   @@index([kind, sentAt])
   @@index([subjectId, recipientId])
@@ -621,6 +689,9 @@ model Rider {
   currentLat               Float?
   currentLng               Float?
   lastLocationUpdate       DateTime?
+  /// Session that most recently won GO. Prevents two signed-in phones from
+  /// alternately overwriting one mover's authoritative coordinates.
+  locationSessionId        String?
   currentOrderId           String?
   /// §7.1 liveness shift cache — a PASS is good for LIVENESS_SHIFT_HOURS; the
   /// go-online gate reads this, never the provider directly.
@@ -658,6 +729,12 @@ model Rider {
 
   @@index([isOnline])
   @@index([isOnline, isAvailable])
+  @@index([isAvailable])
+  @@index([locationSessionId])
+  // Readiness/cutover reverse-authority proof starts from the sparse live
+  // pointer set. Keep this represented in Prisma so the supporting migration
+  // cannot become an invisible, drift-only database index.
+  @@index([currentOrderId])
   @@map("riders")
 }
 
@@ -738,6 +815,9 @@ model Driver {
   currentLat               Float?
   currentLng               Float?
   lastLocationUpdate       DateTime?
+  /// Session that most recently won GO. Opaque on purpose: deleting an auth
+  /// session invalidates it without a cross-domain foreign-key cascade.
+  locationSessionId        String?
   currentRideId            String?
   /// §7.1 liveness shift cache — a PASS is good for LIVENESS_SHIFT_HOURS; the
   /// go-online gate reads this, never the provider directly.
@@ -771,6 +851,9 @@ model Driver {
   // ST_DWithin distance check (the GIST expression index lives in the
   // migration — mirrors riders_geo_gist).
   @@index([isOnline, isAvailable])
+  @@index([isAvailable])
+  @@index([locationSessionId])
+  @@index([currentRideId])
   @@map("drivers")
 }
 
@@ -855,6 +938,17 @@ model Vendor {
   categories              Category[]
   items                   Item[]
   isVerified              Boolean                  @default(false)
+  // [REPORT-013 F-013-06] The wall-clock bound of the document authority
+  // behind isVerified: min(expiresAt) over the checklist evidence, written
+  // by the activation projection. Null = no expiring evidence bounds it
+  // (legacy/grandfather or non-expiring docs). Checkout binds it in-tx so a
+  // lapse between daily sweeps stops sales at the next order, not the next
+  // sweep.
+  activationValidUntil    DateTime?
+  // [REPORT-013 F-013-07] WHO suspended the store: 'BILLING' (non-payment,
+  // reversible by payment) or 'ADMIN' (manual/safety — payment must NOT
+  // lift it). Reinstatement CAS-matches BILLING only.
+  suspensionSource        String?
   isFeatured              Boolean                  @default(false)
   averageRating           Float                    @default(5.0)
   totalRatings            Int                      @default(0)
@@ -1131,6 +1225,12 @@ model Order {
   courierSpeed              String?
   courierPayer              String?
   courierProofPhotoUrl      String?
+  // [REPORT-016 F-016-04] The proof object the SERVER issued for this order at
+  // /proof-photo, bound to the uploading rider. /proof requires an EXACT match
+  // (not a substring) so a crafted or foreign URL can never terminalize a
+  // delivery. Cleared implicitly once the order reaches DELIVERED.
+  courierProofIssuedUrl     String?
+  courierProofIssuedRiderId String?
   courierTrackingToken      String?      @unique
 
   taxiPickupAddress  String?
@@ -1162,6 +1262,10 @@ model Order {
   paymentMethod PaymentMethod
   paymentStatus PaymentStatus @default(PENDING)
   paymentId     String?
+  /// Immutable direct-payment destination committed under the vendor row lock.
+  /// Never fall back to the vendor's mutable profile URL for an existing order.
+  mmgPayUrlSnapshot       String?
+  mmgRecipientNameSnapshot String?
 
   estimatedPrepTime     Int?
   estimatedDeliveryTime Int?
@@ -1199,7 +1303,7 @@ model Order {
   /// QR growth engine: which client placed the order (null = pre-feature
   /// mobile). Stamped WEB by the web checkout; mobile stays null until the
   /// mobile client opts in. Never business logic — measurement only.
-  channel String?
+  channel             String?
   /// The QrCode a scanned customer arrived through (?c= param carried to
   /// checkout). "Orders from this QR" on the vendor dashboard reads this.
   attributionQrCodeId String?
@@ -1460,14 +1564,14 @@ model Rating {
   // --- rebuilt (divergence logged: the spec's fresh Rating shape maps here).
   /// ACTIVE counts; EXCLUDED = shielded/admin-excluded (kept, uncounted);
   /// REMOVED = moderation takedown (gone from public, kept for audit).
-  state       RatingState @default(ACTIVE)
+  state         RatingState @default(ACTIVE)
   /// SLA_SHIELD | PLATFORM_FAULT | FRAUD_BAN | ADMIN_<code> | MODERATION
-  stateReason String?
+  stateReason   String?
   /// Edit window closes here (RATING_WINDOW_DAYS); null = legacy row.
   editableUntil DateTime?
   /// Rides/jobs/courier contexts (orders keep orderId): RIDE | SERVICE_JOB…
-  contextType String?
-  contextId   String?
+  contextType   String?
+  contextId     String?
 
   @@unique([orderId, raterId, type], map: "ratings_one_per_context")
   @@index([visibleAt])
@@ -1612,6 +1716,9 @@ model ServiceQualification {
   id              String              @id @default(cuid())
   providerId      String
   provider        ServiceProvider     @relation(fields: [providerId], references: [id], onDelete: Cascade)
+  /// Canonical service-trade ID at submission/review time. Null identifies a
+  /// legacy credential with no trustworthy trade provenance; it cannot badge.
+  trade           String?
   type            QualificationType
   referenceNumber String?
   status          QualificationStatus @default(PENDING)
@@ -1619,6 +1726,7 @@ model ServiceQualification {
   createdAt       DateTime            @default(now())
 
   @@index([providerId])
+  @@index([providerId, trade, status])
   @@map("service_qualifications")
 }
 
@@ -2024,9 +2132,9 @@ model SubscriptionPayment {
   /// Swift's correlation id, sent to the provider as the merchant reference —
   /// the retry-safe key that survives even when the provider's own id never
   /// came back (initiate timeout → UNKNOWN with clientKey, no externalRef).
-  clientKey      String?              @unique
+  clientKey      String?   @unique
   /// WEEKLY_FEE | PREPAY | REINSTATE
-  purpose        String               @default("WEEKLY_FEE")
+  purpose        String    @default("WEEKLY_FEE")
   /// Normalized failure taxonomy [tollgate 5.2] — dunning branches on THIS,
   /// never on provider-native strings.
   failureCode    String?
@@ -2035,7 +2143,7 @@ model SubscriptionPayment {
   /// answer replaces the default, not the mechanism).
   expiresAt      DateTime?
   lastPolledAt   DateTime?
-  pollBackoffSec Int                  @default(30)
+  pollBackoffSec Int       @default(30)
 
   @@index([status, lastPolledAt])
   @@map("subscription_payments")
@@ -2166,7 +2274,9 @@ model DeliveryCashSettlement {
   rider            Rider                @relation(fields: [riderId], references: [id])
   vendorId         String
   vendor           Vendor               @relation(fields: [vendorId], references: [id])
-  /// Delivery fee the store owes the rider (GYD).
+  /// Delivery pay the store owes the rider (GYD): delivery fee PLUS any
+  /// prepaid tip — the customer's MMG payment landed both in the store's
+  /// wallet [REPORT-005/006 carryover: "fee" alone under-describes the debt].
   amount           Decimal              @db.Decimal(10, 2)
   status           CashSettlementStatus @default(OWED)
   riderConfirmedAt DateTime?
@@ -3141,6 +3251,32 @@ enum AdDestinationType {
   DEEPLINK
 }
 
+enum AdRefundReason {
+  AUTO_CANCEL_UNAPPROVED
+  ADVERTISER_CANCEL
+  ADMIN_KILL
+  LATE_APPROVAL
+  PLACEMENT_DOWN
+}
+
+enum AdRefundIntentStatus {
+  PENDING
+  PROCESSING
+  MANUAL_REQUIRED
+  SUCCEEDED
+  FAILED
+}
+
+enum AdRefundItemKind {
+  REFUND
+  CREDIT
+}
+
+enum AdRefundPayoutRail {
+  PROVIDER
+  MANUAL
+}
+
 model Advertiser {
   id              String             @id @default(cuid())
   tenantId        String             @default("swift-default")
@@ -3236,7 +3372,9 @@ model AdCampaign {
   creatives        AdCreative[]
   bookings         AdBooking[]
   invoices         AdInvoice[]
+  refundIntents    AdRefundIntent[]
 
+  @@unique([id, tenantId], map: "ad_campaigns_id_tenantId_key")
   @@index([tenantId, status])
   @@index([placementId, status])
   @@index([advertiserId, status])
@@ -3279,8 +3417,10 @@ model AdBooking {
   status        AdBookingStatus @default(RESERVED)
   reservedUntil DateTime?
   campaign      AdCampaign      @relation(fields: [campaignId], references: [id])
+  refundItems   AdRefundItem[]
 
   @@unique([campaignId, placementId, city, weekStart])
+  @@unique([id, campaignId], map: "ad_bookings_id_campaignId_key")
   @@index([placementId, city, weekStart, status])
   @@index([status, reservedUntil])
   @@map("ad_bookings")
@@ -3303,10 +3443,106 @@ model AdInvoice {
   createdAt      DateTime        @default(now())
   advertiser     Advertiser      @relation(fields: [advertiserId], references: [id])
   campaign       AdCampaign      @relation(fields: [campaignId], references: [id])
+  refundIntents  AdRefundIntent[]
 
+  @@unique([id, tenantId, campaignId, currency], map: "ad_invoices_id_tenantId_campaignId_currency_key")
   @@index([tenantId, status])
   @@index([providerRef])
   @@map("ad_invoices")
+}
+
+/// Durable, replay-safe record of money Swift owes for one ads refund plan.
+/// Policy inputs and the exact minor-unit total are immutable in PostgreSQL;
+/// only payout lifecycle/proof fields may advance after creation.
+model AdRefundIntent {
+  id                  String               @id @default(cuid())
+  tenantId            String
+  invoiceId           String
+  campaignId          String
+  idempotencyKey      String               @unique(map: "ad_refund_intents_idempotencyKey_key")
+  reason              AdRefundReason
+  status              AdRefundIntentStatus @default(PENDING)
+  amountMinor         BigInt
+  currency            String
+  payoutRail          AdRefundPayoutRail?
+  provider            String?
+  providerRefundRef   String?
+  /// Partial unique index lives in the migration because Prisma cannot model
+  /// `WHERE manualPayoutRef IS NOT NULL`.
+  manualPayoutRef     String?
+  correlationId       String
+  requestedByUserId   String?
+  failureCode         String?
+  failureDetail       String?
+  processingStartedAt DateTime?
+  completedAt         DateTime?
+  createdAt           DateTime             @default(now())
+  updatedAt           DateTime             @updatedAt
+  tenant              Tenant               @relation(fields: [tenantId], references: [id], onDelete: Restrict)
+  invoice             AdInvoice            @relation(fields: [invoiceId, tenantId, campaignId, currency], references: [id, tenantId, campaignId, currency], onDelete: Restrict, map: "ad_refund_intents_invoice_tenant_campaign_currency_fkey")
+  campaign            AdCampaign           @relation(fields: [campaignId, tenantId], references: [id, tenantId], onDelete: Restrict, map: "ad_refund_intents_campaign_tenant_fkey")
+  items               AdRefundItem[]
+  outbox              AdRefundOutbox?
+
+  @@unique([id, tenantId], map: "ad_refund_intents_id_tenantId_key")
+  @@unique([id, tenantId, campaignId], map: "ad_refund_intents_id_tenantId_campaignId_key")
+  @@index([tenantId, status, createdAt])
+  @@index([invoiceId])
+  @@index([campaignId, status])
+  @@map("ad_refund_intents")
+}
+
+/// Immutable allocation evidence. Corrections require a new compensating
+/// intent; UPDATE and DELETE are rejected by database triggers.
+model AdRefundItem {
+  id             String           @id @default(cuid())
+  tenantId       String
+  refundIntentId String
+  campaignId     String
+  bookingId      String
+  kind           AdRefundItemKind
+  amountMinor    BigInt
+  createdAt      DateTime         @default(now())
+  tenant         Tenant           @relation(fields: [tenantId], references: [id], onDelete: Restrict)
+  refundIntent   AdRefundIntent   @relation(fields: [refundIntentId, tenantId, campaignId], references: [id, tenantId, campaignId], onDelete: Restrict, map: "ad_refund_items_intent_tenant_campaign_fkey")
+  booking        AdBooking        @relation(fields: [bookingId, campaignId], references: [id, campaignId], onDelete: Restrict, map: "ad_refund_items_booking_campaign_fkey")
+
+  @@unique([refundIntentId, bookingId, kind], map: "ad_refund_items_intent_booking_kind_key")
+  @@index([tenantId, refundIntentId])
+  @@index([bookingId])
+  @@map("ad_refund_items")
+}
+
+/// Transactional payout outbox. A worker claims rows with an expiring token;
+/// stale workers cannot complete another worker's lease. One row per intent,
+/// globally deduped, and dead letters remain durable for reconciliation.
+model AdRefundOutbox {
+  id             String         @id @default(cuid())
+  tenantId       String
+  refundIntentId String         @unique(map: "ad_refund_outbox_refundIntentId_key")
+  dedupeKey      String         @unique(map: "ad_refund_outbox_dedupeKey_key")
+  eventType      String         @default("ad_refund.execute")
+  eventVersion   Int            @default(1)
+  payload        Json
+  correlationId  String
+  availableAt    DateTime       @default(now())
+  leaseOwner     String?
+  leaseToken     String?
+  leaseExpiresAt DateTime?
+  attempts       Int            @default(0)
+  maxAttempts    Int            @default(12)
+  lastError      String?
+  processedAt    DateTime?
+  deadLetteredAt DateTime?
+  createdAt      DateTime       @default(now())
+  updatedAt      DateTime       @updatedAt
+  tenant         Tenant         @relation(fields: [tenantId], references: [id], onDelete: Restrict)
+  refundIntent   AdRefundIntent @relation(fields: [refundIntentId, tenantId], references: [id, tenantId], onDelete: Restrict, map: "ad_refund_outbox_intent_tenant_fkey")
+
+  @@unique([refundIntentId, tenantId], map: "ad_refund_outbox_refundIntentId_tenantId_key")
+  @@index([tenantId, processedAt, deadLetteredAt, availableAt], map: "ad_refund_outbox_tenant_pending_idx")
+  @@index([leaseExpiresAt])
+  @@map("ad_refund_outbox")
 }
 
 model AdEvent {

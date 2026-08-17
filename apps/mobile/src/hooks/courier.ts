@@ -2,6 +2,11 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { courierApi } from '../services/api';
 import { useMoverPreview } from '../stores/moverPreview';
 import { previewMutation } from '../lib/moverPreviewData';
+import type { AuthSessionSnapshot } from '../lib/authSession';
+import {
+  requireAuthSessionForPrincipal,
+  requireAuthSessionSnapshot,
+} from '../stores/authStore';
 
 type Point = { lat: number; lng: number };
 type Size = 'SMALL' | 'MEDIUM' | 'LARGE' | 'EXTRA_LARGE';
@@ -38,17 +43,24 @@ export function useCourierProof() {
   const pv = useMoverPreview((s) => s.preview);
   const qc = useQueryClient();
   const m = useMutation({
-    mutationFn: async ({ orderId, uri }: { orderId: string; uri: string }) => {
+    mutationFn: async ({ orderId, uri, authSession }: {
+      orderId: string;
+      uri: string;
+      authSession?: AuthSessionSnapshot;
+    }) => {
+      const owner = authSession ?? requireAuthSessionSnapshot();
+      const initial = requireAuthSessionForPrincipal(owner);
       const form = new FormData();
       form.append('file', { uri, name: 'proof.jpg', type: 'image/jpeg' } as unknown as Blob);
-      const up = await courierApi.uploadProof(orderId, form);
+      const up = await courierApi.uploadProof(orderId, form, initial);
+      const current = requireAuthSessionForPrincipal(owner);
       const url = (up as any)?.data?.data?.url as string;
       if (!url) throw new Error('upload failed');
-      return unwrap(courierApi.proof(orderId, url));
-    },
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ['courier', 'orders'] });
-      qc.invalidateQueries({ queryKey: ['mover'] });
+      const result = await unwrap(courierApi.proof(orderId, url, current));
+      requireAuthSessionForPrincipal(owner);
+      void qc.invalidateQueries({ queryKey: ['courier', 'orders'] });
+      void qc.invalidateQueries({ queryKey: ['mover'] });
+      return result;
     },
   });
   return pv ? previewMutation() : m;

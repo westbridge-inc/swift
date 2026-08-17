@@ -326,8 +326,32 @@ export class AgentService {
       case 'request_cancel': {
         // The ONLY money-adjacent action — reaches here exclusively via human
         // approval (or explicit AGENT_MODE=auto policy). The state machine's
-        // CAS + centralized side effects (mover freed, sockets) do the work.
+        // CAS + centralized side effects (mover freed, sockets, the central
+        // UNATTESTED status-log marker) do the work.
+        const fresh = await this.prisma.order.findUnique({
+          where: { id: orderId },
+          select: { paymentMethod: true, paymentStatus: true },
+        });
         await this.orders.updateStatus(orderId, 'CANCELLED', 'agent', decision?.likelyCause ?? 'Cancelled after ops-agent review');
+        // [REPORT-011 F-01 → REPORT-012 F-012-04] Both money parties, through
+        // the ONE publication seam: the CUSTOMER gets the direct-refund
+        // guidance, and the STORE gets the durable liability notice — it may
+        // be holding the customer's unconfirmed transfer and is the only rail
+        // that can send it back.
+        if (fresh?.paymentMethod === 'MOBILE_MONEY' && fresh.paymentStatus === 'PENDING') {
+          const { publishUnattestedMmgCancellation } = await import('../order/order.service');
+          await publishUnattestedMmgCancellation(this.prisma, this.notifications, {
+            orderId,
+            orderNumber: order.orderNumber,
+            vendorId: order.vendor?.id ?? null,
+            customer: {
+              userId: order.customerId,
+              title: 'Order cancelled',
+              body: `Order #${order.orderNumber} was cancelled after review. If you already sent the MMG payment, the store refunds you directly.`,
+              data: { kind: 'agent_cancel' },
+            },
+          });
+        }
         return;
       }
       default:

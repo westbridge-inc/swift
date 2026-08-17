@@ -8,6 +8,7 @@ import { authPlugin } from '../plugins/auth';
 import { socketPlugin } from '../plugins/socket';
 import { driverRoutes } from '../modules/driver/driver.routes';
 import { registerErrorHandler } from '../middleware/error-handler';
+import { AuthService } from '../modules/auth/auth.service';
 
 // ---------------------------------------------------------------------------
 // Taxi ride PIN gate. The customer reads a 6-digit PIN to the driver; the
@@ -40,7 +41,7 @@ async function makeUserWithSession(roles: UserRole[], activeRole: UserRole) {
   });
   createdUserIds.push(user.id);
   const token = app.jwt.sign({ userId: user.id, role: activeRole, jti: nanoid(8) });
-  await app.prisma.session.create({
+  const session = await app.prisma.session.create({
     data: {
       userId: user.id,
       token,
@@ -50,7 +51,7 @@ async function makeUserWithSession(roles: UserRole[], activeRole: UserRole) {
       expiresAt: new Date(Date.now() + DAY),
     },
   });
-  return { userId: user.id, token };
+  return { userId: user.id, token, sessionId: session.id };
 }
 
 async function makeDriver() {
@@ -96,7 +97,7 @@ async function makeArrivedRide(driverId: string, customerId: string, pin: string
   return order;
 }
 
-function inject(method: 'PUT', url: string, payload: unknown, token: string) {
+function inject(method: 'PUT' | 'POST', url: string, payload: unknown, token: string) {
   return app.inject({
     method,
     url,
@@ -201,6 +202,72 @@ describe('Taxi PIN verification — PUT /driver/rides/:id/verify-pin', () => {
 
     const after = await app.prisma.order.findUniqueOrThrow({ where: { id: ride.id } });
     expect(after.ridePinVerified).toBe(false);
+  });
+
+  it('serializes PIN verification against driver release with no verified PENDING state', async () => {
+    const driver = await makeDriver();
+    const ride = await makeArrivedRide(driver.driverId, customer.userId, '314159');
+    await app.prisma.driver.update({
+      where: { id: driver.driverId },
+      data: { currentRideId: ride.id, isOnline: true, isAvailable: false },
+    });
+
+    const [verify, cancel] = await Promise.all([
+      inject('PUT', `/api/v1/driver/rides/${ride.id}/verify-pin`, { pin: '314159' }, driver.token),
+      inject('POST', `/api/v1/driver/rides/${ride.id}/cancel`, { reason: 'vehicle problem' }, driver.token),
+    ]);
+    expect([verify.statusCode, cancel.statusCode].filter((code) => code === 200)).toHaveLength(1);
+    expect([verify.statusCode, cancel.statusCode].filter((code) => code >= 400)).toHaveLength(1);
+
+    const after = await app.prisma.order.findUniqueOrThrow({ where: { id: ride.id } });
+    if (after.status === 'PENDING') {
+      expect({
+        driverId: after.driverId,
+        ridePinVerified: after.ridePinVerified,
+        ridePinVerifiedAt: after.ridePinVerifiedAt,
+      }).toEqual({ driverId: null, ridePinVerified: false, ridePinVerifiedAt: null });
+    } else {
+      expect(after.status).toBe('DRIVER_ARRIVED');
+      expect(after.driverId).toBe(driver.driverId);
+      expect(after.ridePinVerified).toBe(true);
+      expect(after.ridePinVerifiedAt).not.toBeNull();
+    }
+  });
+
+  it('serializes ride start against session revocation without releasing custody', async () => {
+    const driver = await makeDriver();
+    const ride = await makeArrivedRide(driver.driverId, customer.userId, '271828');
+    await app.prisma.driver.update({
+      where: { id: driver.driverId },
+      data: {
+        currentRideId: ride.id,
+        isOnline: true,
+        isAvailable: false,
+        locationSessionId: driver.sessionId,
+      },
+    });
+    const verified = await inject('PUT', `/api/v1/driver/rides/${ride.id}/verify-pin`, { pin: '271828' }, driver.token);
+    expect(verified.statusCode).toBe(200);
+    const opsKey = `ops_page:mover_session_ended:${ride.id}`;
+    await app.redis.del(opsKey);
+
+    const [start] = await Promise.all([
+      inject('PUT', `/api/v1/driver/rides/${ride.id}/start`, {}, driver.token),
+      new AuthService(app).logout(driver.sessionId, driver.userId),
+    ]);
+    expect([200, 401]).toContain(start.statusCode);
+
+    const [after, profile] = await Promise.all([
+      app.prisma.order.findUniqueOrThrow({ where: { id: ride.id } }),
+      app.prisma.driver.findUniqueOrThrow({ where: { id: driver.driverId } }),
+    ]);
+    expect(['DRIVER_ARRIVED', 'RIDE_IN_PROGRESS']).toContain(after.status);
+    expect(after.driverId).toBe(driver.driverId);
+    expect(after.ridePinVerified).toBe(true);
+    expect(after.ridePinVerifiedAt).not.toBeNull();
+    expect(profile.currentRideId).toBe(ride.id);
+    expect(profile.locationSessionId).toBeNull();
+    await app.redis.del(opsKey);
   });
 });
 

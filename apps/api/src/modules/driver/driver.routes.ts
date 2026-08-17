@@ -9,6 +9,7 @@ import { VerificationService } from '../verification/verification.service';
 import { makeDispatchService } from '../dispatch/dispatch.service';
 import { TAXI_DEMAND_WINDOW_MIN } from '../dispatch/demand.service';
 import { classesAtOrAbove, classesAtOrBelow } from '../rides/fare.service';
+import { freshRidePinReset } from '../rides/ride-pin';
 import { getKycProvider } from '../../providers/kyc/kyc-provider';
 import { assertShiftLiveness } from '../safety/liveness.service';
 import { assertNotSafetySuspended } from '../safety/incident.service';
@@ -21,12 +22,24 @@ import { tenantCacheKey } from '../../utils/tenant-cache';
 import { AppError, NotFoundError } from '../../utils/errors';
 import { handoverAttemptState, HANDOVER_SECRETS_OMIT } from '../handover/handover-security';
 import { throwForMissingProfile } from '../../utils/role-gate';
-import { clampDriverFare } from '../../utils/markup';
 import { ALLOWED_IMAGE_TYPES, looksLikeImage } from '../../utils/images';
 import { getStorageProvider } from '../../providers/storage/storage-provider';
 import { refreshLegEta, cachedLegEta } from '../dispatch/live-eta';
 import { startOfDayGY, startOfWeekGY, startOfMonthGY } from '../../utils/time-gy';
 import { dailyEarnings } from '../order/daily-earnings';
+import {
+  assertMoverRoleAuthority,
+  assertActiveMoverAccount,
+  lockAndRetireRiderSupply,
+  lockUserRoleAuthority,
+  staleMoverAuthorityError,
+} from '../mover-authority';
+import { closeOnlineSession } from '../rider/online-hours';
+import {
+  hasTaxiPassengerCustody,
+  lockTaxiOrderForCustodyDecision,
+} from '../rides/passenger-custody';
+import { mmgPayUrlForWrite, safeMmgPayUrl } from '../../utils/mmg-pay-url';
 
 const updateDriverProfileSchema = z.object({
   vehicleMake: z.string().max(50).optional(),
@@ -50,6 +63,8 @@ const driverLocationSchema = z.object({
   longitude: z.number().min(-180).max(180),
   heading: z.number().optional(),
 });
+
+const driverGoOnlineSchema = driverLocationSchema.pick({ latitude: true, longitude: true });
 
 const verifyPinSchema = z.object({
   pin: z.string().min(1).max(10),
@@ -108,17 +123,34 @@ export async function driverRoutes(app: FastifyInstance) {
     const driver = await app.prisma.driver.findUnique({
       where: { userId: request.user.userId },
       include: {
-        user: { select: { id: true, firstName: true, lastName: true, phone: true, email: true, avatar: true } },
+        user: {
+          select: {
+            id: true,
+            firstName: true,
+            lastName: true,
+            phone: true,
+            email: true,
+            avatar: true,
+            activeRole: true,
+            lastMoverRole: true,
+          },
+        },
         subscription: true,
       },
     });
     if (!driver) await throwForMissingProfile(app, request.user.userId, 'MOVER', 'Driver');
-    return { success: true, data: driver };
+    return {
+      success: true,
+      data: driver ? { ...driver, mmgPayUrl: safeMmgPayUrl(driver.mmgPayUrl) } : driver,
+    };
   });
 
   app.put('/profile', { preHandler: [app.authenticate] }, async (request) => {
     await getDriver(request.user.userId); // authz before validation
     const body = updateDriverProfileSchema.parse(request.body);
+    const mmgPayUrl = body.mmgPayUrl === undefined
+      ? undefined
+      : mmgPayUrlForWrite(body.mmgPayUrl);
 
     const driver = await app.prisma.driver.update({
       where: { userId: request.user.userId },
@@ -128,16 +160,32 @@ export async function driverRoutes(app: FastifyInstance) {
         ...(body.vehicleYear !== undefined && { vehicleYear: body.vehicleYear }),
         ...(body.vehicleColor !== undefined && { vehicleColor: body.vehicleColor }),
         ...(body.licensePlate !== undefined && { licensePlate: body.licensePlate }),
-        ...(body.vehicleCapacity !== undefined && { vehicleCapacity: body.vehicleCapacity }),
-        ...(body.rideClass !== undefined && { rideClass: body.rideClass }),
+        // [REPORT-014 F-014-01] rideClass and vehicleCapacity are TAXONOMY
+        // authority (derived from the verified vehicle type at provisioning/
+        // admin verification), never self-serve: an online driver could
+        // otherwise tag a 4-seat car GROUP and receive 14-passenger work.
+        // The fields remain accepted-and-ignored so legacy clients don't 400.
         ...(body.profilePhotoUrl !== undefined && { profilePhotoUrl: body.profilePhotoUrl }),
         ...(body.nationalIdUrl !== undefined && { nationalIdUrl: body.nationalIdUrl }),
         ...(body.driverLicenseUrl !== undefined && { driverLicenseUrl: body.driverLicenseUrl }),
         ...(body.vehicleInsuranceUrl !== undefined && { vehicleInsuranceUrl: body.vehicleInsuranceUrl }),
         ...(body.vehicleInspectionUrl !== undefined && { vehicleInspectionUrl: body.vehicleInspectionUrl }),
-        ...(body.mmgPayUrl !== undefined && { mmgPayUrl: body.mmgPayUrl || null }),
+        ...(mmgPayUrl !== undefined && { mmgPayUrl }),
       },
-      include: { user: { select: { id: true, firstName: true, lastName: true, phone: true, email: true, avatar: true } } },
+      include: {
+        user: {
+          select: {
+            id: true,
+            firstName: true,
+            lastName: true,
+            phone: true,
+            email: true,
+            avatar: true,
+            activeRole: true,
+            lastMoverRole: true,
+          },
+        },
+      },
     });
     return { success: true, data: driver };
   });
@@ -177,6 +225,10 @@ export async function driverRoutes(app: FastifyInstance) {
 
   app.post('/go-online', { preHandler: [app.authenticate] }, async (request) => {
     const driver = await getDriver(request.user.userId);
+    const locationSessionId = request.authSessionId;
+    if (!locationSessionId) {
+      throw new AppError(401, 'UNAUTHORIZED', 'This device session is no longer active');
+    }
 
     // Universal signup selfie (master plan §3): riders see the driver's photo
     // on acceptance, so a live profile photo is required before going online.
@@ -187,8 +239,11 @@ export async function driverRoutes(app: FastifyInstance) {
     // Live-operation gate (spec §3.4): the taxi checklist must be approved AND a
     // current, hire-class motor insurance confirmed before carrying passengers.
     // The legacy documentsVerified flag only grandfathers the base documents.
+    // [STRAND-3 / EV-ACT-17] The checklist is the PERSISTED vehicle class's,
+    // not a hard-coded CAR: a BUS must present its commercial documents
+    // (road_service_licence) at GO, exactly as status/expiry evaluate it.
     const live = await verification.getLiveOperationStatus(request.user.userId, {
-      vehicleType: 'CAR',
+      vehicleType: driver.vehicleType,
       legacyVerified: driver.documentsVerified,
     });
     if (!live.allowed) {
@@ -214,15 +269,92 @@ export async function driverRoutes(app: FastifyInstance) {
     assertShiftLiveness(driver);
     // §8.3 — an interim safety suspension blocks go-online until ops lifts it.
     assertNotSafetySuspended(driver);
+    const location = driverGoOnlineSchema.parse(request.body ?? {});
 
-    // A driver already on a ride who re-opens the app and taps GO must NOT be
-    // advertised as free supply — otherwise dispatch offers them a second ride
-    // mid-trip (phantom supply). Mirror the rider guard [SWIFT-066]: online,
-    // yes; available only if not mid-ride. Availability returns on completion.
-    const updated = await app.prisma.driver.update({
-      where: { id: driver.id },
-      data: { isOnline: true, isAvailable: !driver.currentRideId },
+    // Serialize GO against role switching and compare the profile generation
+    // captured before the slower verification gates. If an accept/offline/
+    // switch wins meanwhile, this request must not resurrect stale supply.
+    const { updated, retiredRiderId } = await app.prisma.$transaction(async (tx) => {
+      const authority = await lockUserRoleAuthority(tx, request.user.userId);
+      assertActiveMoverAccount(authority.status);
+      assertMoverRoleAuthority(authority.activeRole, 'DRIVER');
+
+      // Revalidate the exact authenticated session under the User lock. A
+      // logout/reuse-revocation that completed during the slower gates must
+      // prevent this stale request from becoming the new GPS owner.
+      const sessions = await tx.$queryRaw<Array<{ id: string }>>`
+        SELECT "id"
+        FROM "sessions"
+        WHERE "id" = ${locationSessionId}
+          AND "userId" = ${request.user.userId}
+          AND "expiresAt" > NOW()
+        FOR SHARE
+      `;
+      if (!sessions[0]) {
+        throw new AppError(401, 'UNAUTHORIZED', 'This device session is no longer active');
+      }
+      const retiredRiderId = await lockAndRetireRiderSupply(tx, request.user.userId);
+
+      // Lock and re-read the profile after the User lock. This makes the active
+      // pointer/availability decision atomic even if a claimant does not rely on
+      // Prisma's @updatedAt behavior.
+      const snapshots = await tx.$queryRaw<Array<{ currentRideId: string | null; documentsVerified: boolean; updatedAt: Date }>>`
+        SELECT "currentRideId", "documentsVerified", "updatedAt"
+        FROM "drivers"
+        WHERE "id" = ${driver.id}
+        FOR UPDATE
+      `;
+      const snapshot = snapshots[0];
+      if (!snapshot || snapshot.updatedAt.getTime() !== driver.updatedAt.getTime()) {
+        throw staleMoverAuthorityError();
+      }
+
+      // [EV-ACT-17 TOCTOU] Re-derive the live-operation verdict UNDER the same
+      // User lock document decisions take — an expiry/rejection committing
+      // after the route's preview can no longer write stale supply online.
+      // Persisted vehicle class; legacy flag from the LOCKED snapshot.
+      const liveGate = await verification.getLiveOperationStatus(request.user.userId, {
+        vehicleType: driver.vehicleType,
+        legacyVerified: snapshot.documentsVerified,
+      }, tx);
+      if (!liveGate.allowed) {
+        throw liveGate.reason === 'insurance'
+          ? new AppError(403, 'INSURANCE_HIRE_CLASS_REQUIRED', 'A current hire-class motor insurance must be verified before you can carry passengers')
+          : new AppError(403, 'VERIFICATION_REQUIRED', 'Your documents must be verified before going online');
+      }
+
+      const activated = await tx.driver.update({
+        where: { id: driver.id },
+        data: {
+          isOnline: true,
+          isAvailable: !snapshot.currentRideId,
+          currentLat: location.latitude,
+          currentLng: location.longitude,
+          lastLocationUpdate: new Date(),
+          locationSessionId,
+        },
+      });
+      await tx.user.update({
+        where: { id: request.user.userId },
+        data: { lastMoverRole: 'DRIVER' },
+      });
+      return { updated: activated, retiredRiderId };
     });
+
+    // PostgreSQL is authoritative. Redis only debounces later GPS writes; a
+    // cache outage must not turn a committed GO into a client-visible failure
+    // that prevents the phone from starting its location stream.
+    await app.redis
+      .set(`driver:location_db_ts:${driver.id}`, Date.now().toString())
+      .catch((error) => request.log.warn({ err: error, driverId: driver.id }, 'driver go-online Redis bookkeeping failed'));
+
+    if (retiredRiderId) {
+      await dispatch
+        .releaseHeldOffer(retiredRiderId)
+        .catch((error) => request.log.warn({ err: error, riderId: retiredRiderId }, 'driver GO sibling rider offer cleanup failed'));
+      await closeOnlineSession(app.redis, retiredRiderId)
+        .catch((error) => request.log.warn({ err: error, riderId: retiredRiderId }, 'driver GO sibling online-hours close failed'));
+    }
 
     return { success: true, data: updated };
   });
@@ -234,16 +366,26 @@ export async function driverRoutes(app: FastifyInstance) {
       throw new AppError(400, 'ACTIVE_RIDE', 'You cannot go offline while you have an active ride');
     }
 
-    // A driver holding a live offer (not yet accepted) is still isAvailable and
-    // passes the guard above. Release that offer NOW so the ride re-dispatches
-    // immediately instead of the passenger's countdown burning on a driver who
-    // quit — and so the reconciler isn't blinded by a zombie offer key.
-    await dispatch.releaseHeldOffer(driver.id);
-
-    const updated = await app.prisma.driver.update({
-      where: { id: driver.id },
-      data: { isOnline: false, isAvailable: false },
+    // Database authority goes first. A concurrent accept and this CAS cannot
+    // both win: if the ride pointer appears, GO OFFLINE conflicts and the phone
+    // keeps tracking the newly assigned job.
+    const updated = await app.prisma.$transaction(async (tx) => {
+      const stopped = await tx.driver.updateMany({
+        where: { id: driver.id, currentRideId: null },
+        data: { isOnline: false, isAvailable: false, locationSessionId: null },
+      });
+      if (stopped.count !== 1) {
+        throw new AppError(400, 'ACTIVE_RIDE', 'You cannot go offline while you have an active ride');
+      }
+      return tx.driver.findUniqueOrThrow({ where: { id: driver.id } });
     });
+
+    // Once DB authority is offline, an offer can no longer be accepted because
+    // claimOrder CASes isAvailable=true. Redis cleanup is immediate when healthy
+    // and safely degrades to the short offer TTL during an outage.
+    await dispatch
+      .releaseHeldOffer(driver.id)
+      .catch((error) => request.log.warn({ err: error, driverId: driver.id }, 'driver go-offline offer cleanup failed'));
 
     return { success: true, data: updated };
   });
@@ -254,46 +396,174 @@ export async function driverRoutes(app: FastifyInstance) {
     const found = await app.prisma.driver.findUnique({ where: { userId: request.user.userId } });
     if (!found) await throwForMissingProfile(app, request.user.userId, 'MOVER', 'Driver');
     const driver = found!;
+    const locationSessionId = request.authSessionId;
+    if (!locationSessionId) {
+      throw new AppError(401, 'UNAUTHORIZED', 'This device session is no longer active');
+    }
 
     const { latitude, longitude, heading } = driverLocationSchema.parse(request.body);
+
+    // A queued native callback after GO OFFLINE is a normal race. Treat it as
+    // an accepted no-op so clients do not retry; active rides remain authorized
+    // even if safety/recovery has force-offlined their driver.
+    if (!driver.isOnline && !driver.currentRideId) {
+      return { success: true, data: { accepted: false, reason: 'OFFLINE' } };
+    }
+
+    // Existing online rows from the additive migration have no owner. Exactly
+    // one authenticated device may claim that null generation; every explicit
+    // GO above rotates ownership to the device that performed it.
+    if (!driver.locationSessionId) {
+      await app.prisma.$transaction(async (tx) => {
+        const users = await tx.$queryRaw<Array<{ id: string }>>`
+          SELECT "id"
+          FROM "users"
+          WHERE "id" = ${request.user.userId}
+          FOR SHARE
+        `;
+        if (!users[0]) return;
+        const sessions = await tx.$queryRaw<Array<{ id: string }>>`
+          SELECT "id"
+          FROM "sessions"
+          WHERE "id" = ${locationSessionId}
+            AND "userId" = ${request.user.userId}
+            AND "expiresAt" > NOW()
+          FOR SHARE
+        `;
+        if (!sessions[0]) return;
+        await tx.driver.updateMany({
+          where: {
+            id: driver.id,
+            locationSessionId: null,
+            OR: [{ isOnline: true }, { currentRideId: { not: null } }],
+          },
+          data: { locationSessionId },
+        });
+      });
+    }
+    const authorized = await app.prisma.driver.findFirst({
+      where: {
+        id: driver.id,
+        locationSessionId,
+        OR: [{ isOnline: true }, { currentRideId: { not: null } }],
+      },
+    });
+    if (!authorized) {
+      const owner = await app.prisma.driver.findUnique({
+        where: { id: driver.id },
+        select: { locationSessionId: true, isOnline: true, currentRideId: true },
+      });
+      const reason = owner?.isOnline || owner?.currentRideId ? 'SESSION_REPLACED' : 'OFFLINE';
+      return { success: true, data: { accepted: false, reason } };
+    }
 
     // DB write debounced to ≥10 s (same policy as the rider route): dispatch
     // reads the persisted fix, and a <10 s-stale point is noise at ride speeds —
     // this keeps a busy fleet from hitting PG on every ping.
-    const lastDbWrite = await app.redis.get(`driver:location_db_ts:${driver.id}`);
+    const lastDbWrite = await app.redis
+      .get(`driver:location_db_ts:${driver.id}`)
+      .catch((error) => {
+        request.log.warn({ err: error, driverId: driver.id }, 'driver location Redis debounce read failed');
+        return null;
+      });
     const shouldWriteDb = !lastDbWrite || Date.now() - parseInt(lastDbWrite, 10) > 10_000;
     if (shouldWriteDb) {
-      await app.prisma.driver.update({
-        where: { id: driver.id },
+      const persisted = await app.prisma.driver.updateMany({
+        where: {
+          id: driver.id,
+          locationSessionId,
+          OR: [{ isOnline: true }, { currentRideId: { not: null } }],
+        },
         data: {
           currentLat: latitude,
           currentLng: longitude,
           lastLocationUpdate: new Date(),
         },
       });
-      await app.redis.set(`driver:location_db_ts:${driver.id}`, Date.now().toString());
+      if (persisted.count === 0) {
+        const owner = await app.prisma.driver.findUnique({
+          where: { id: driver.id },
+          select: { locationSessionId: true, isOnline: true, currentRideId: true },
+        });
+        const reason = owner?.isOnline || owner?.currentRideId ? 'SESSION_REPLACED' : 'OFFLINE';
+        return { success: true, data: { accepted: false, reason } };
+      }
+      await app.redis
+        .set(`driver:location_db_ts:${driver.id}`, Date.now().toString())
+        .catch((error) => request.log.warn({ err: error, driverId: driver.id }, 'driver location Redis debounce write failed'));
     }
 
     // (No Redis geo set here — dispatch queries the persisted PostGIS point;
     // a parallel geo index nobody reads is a bug waiting to disagree.)
 
     // Broadcast location to anyone tracking this ride
-    if (driver.currentRideId) {
+    if (authorized.currentRideId) {
       // Live-leg ETA [SWIFT-UG-RT-01]: pickup ETA while en route to the
       // passenger, dropoff ETA once the ride is in progress — refreshed on
       // the throttled branch, cached in between (same policy as the rider).
       const etaMinutes = shouldWriteDb
-        ? await refreshLegEta(app, driver.currentRideId, { lat: latitude, lng: longitude })
-        : await cachedLegEta(app, driver.currentRideId);
-      app.io.to(`order:${driver.currentRideId}`).emit('driver:location', {
-        driverId: driver.id,
-        orderId: driver.currentRideId,
-        latitude,
-        longitude,
-        heading: heading || null,
-        etaMinutes,
-        timestamp: new Date().toISOString(),
+        ? await refreshLegEta(app, authorized.currentRideId, { lat: latitude, lng: longitude })
+        : await cachedLegEta(app, authorized.currentRideId);
+
+      // ETA work yields long enough for a second device to rotate GO. Take a
+      // short shared row lock only around the final authority check +
+      // synchronous socket publication. Concurrent pings do not block one
+      // another, but no old-generation sample can emit after a GO commits.
+      const publication = await app.prisma.$transaction(async (tx) => {
+        const users = await tx.$queryRaw<Array<{ id: string }>>`
+          SELECT "id"
+          FROM "users"
+          WHERE "id" = ${request.user.userId}
+          FOR SHARE
+        `;
+        const sessions = await tx.$queryRaw<Array<{ id: string }>>`
+          SELECT "id"
+          FROM "sessions"
+          WHERE "id" = ${locationSessionId}
+            AND "userId" = ${request.user.userId}
+            AND "expiresAt" > NOW()
+          FOR SHARE
+        `;
+        const rows = await tx.$queryRaw<Array<{
+          locationSessionId: string | null;
+          isOnline: boolean;
+          currentRideId: string | null;
+        }>>`
+          SELECT "locationSessionId", "isOnline", "currentRideId"
+          FROM "drivers"
+          WHERE "id" = ${driver.id}
+          FOR SHARE
+        `;
+        const current = rows[0];
+        if (
+          !users[0]
+          || !sessions[0]
+          || !current
+          || current.locationSessionId !== locationSessionId
+          || (!current.isOnline && !current.currentRideId)
+        ) {
+          return {
+            accepted: false as const,
+            reason: current?.isOnline || current?.currentRideId ? 'SESSION_REPLACED' as const : 'OFFLINE' as const,
+          };
+        }
+
+        if (current.currentRideId === authorized.currentRideId) {
+          app.io.to(`order:${authorized.currentRideId}`).emit('driver:location', {
+            driverId: driver.id,
+            orderId: authorized.currentRideId,
+            latitude,
+            longitude,
+            heading: heading || null,
+            etaMinutes,
+            timestamp: new Date().toISOString(),
+          });
+        }
+        return { accepted: true as const };
       });
+      if (!publication.accepted) {
+        return { success: true, data: publication };
+      }
     }
 
     return { success: true };
@@ -304,7 +574,7 @@ export async function driverRoutes(app: FastifyInstance) {
   app.get('/rides/available', { preHandler: [app.authenticate] }, async (request) => {
     const driver = await getDriver(request.user.userId);
 
-    if (!driver.isOnline || !driver.isAvailable) {
+    if (!driver.isOnline || !driver.isAvailable || !driver.locationSessionId) {
       return { success: true, data: [] };
     }
 
@@ -317,6 +587,7 @@ export async function driverRoutes(app: FastifyInstance) {
     const freshSince = new Date(Date.now() - TAXI_DEMAND_WINDOW_MIN * 60_000);
     const orders = await app.prisma.order.findMany({
       where: {
+        customerId: { not: request.user.userId },
         orderType: 'TAXI',
         status: 'PENDING',
         driverId: null,
@@ -329,6 +600,14 @@ export async function driverRoutes(app: FastifyInstance) {
           { rideClass: { in: classesAtOrBelow(driver.rideClass ?? 'ECONOMY') } },
           { rideClass: null },
         ],
+        // [REPORT-014 F-014-01] Physical seats too: a 14-passenger GROUP
+        // request never surfaces to a 9-seat bus (class alone can't tell).
+        AND: [{
+          OR: [
+            { taxiPassengerCount: null },
+            { taxiPassengerCount: { lte: driver.vehicleCapacity ?? 4 } },
+          ],
+        }],
       },
       include: {
         customer: { select: { id: true, firstName: true, avatar: true } },
@@ -411,10 +690,13 @@ export async function driverRoutes(app: FastifyInstance) {
   // 1. Accept ride
   app.post('/rides/:id/accept', { preHandler: [app.authenticate] }, async (request) => {
     const { id } = request.params as { id: string };
-    const { fare } = z.object({ fare: zMoneyMinor.optional() }).parse(request.body ?? {});
+    // [REPORT-011 F-04] fare 0 = "no choice", never the 60% floor (a
+    // forged/legacy client must not clamp the driver's own fare down).
+    const { fare: rawFare } = z.object({ fare: zMoneyMinor.optional() }).parse(request.body ?? {});
+    const fare = rawFare && rawFare > 0 ? rawFare : undefined;
     const driver = await getDriver(request.user.userId);
 
-    if (!driver.isOnline) {
+    if (!driver.isOnline || !driver.locationSessionId) {
       throw new AppError(400, 'OFFLINE', 'You must be online to accept rides');
     }
     if (!driver.isAvailable || driver.currentRideId) {
@@ -427,6 +709,9 @@ export async function driverRoutes(app: FastifyInstance) {
     const order = await app.prisma.order.findFirst({ where: { id } });
     if (!order) throw new NotFoundError('Ride', id);
     if (order.orderType !== 'TAXI') throw new AppError(400, 'INVALID_TYPE', 'This is not a taxi ride');
+    if (order.customerId === request.user.userId) {
+      throw new AppError(409, 'SELF_OWN_ORDER', 'You cannot accept a taxi request created by your own account');
+    }
 
     // SWIFT-063: the accept path enforces ride class too — the board filter is a
     // convenience, this is the barrier. An Economy driver cannot claim an XL ride
@@ -435,46 +720,46 @@ export async function driverRoutes(app: FastifyInstance) {
     if (!classesAtOrAbove(rideClass).includes(driver.rideClass ?? 'ECONOMY')) {
       throw new AppError(400, 'WRONG_RIDE_CLASS', `This is a ${rideClass} ride; your ${driver.rideClass ?? 'ECONOMY'} vehicle can't serve it.`);
     }
+    // [REPORT-014 F-014-01] Friendly pre-check; the locked claim re-proves it.
+    if (order.taxiPassengerCount != null && (driver.vehicleCapacity ?? 0) < order.taxiPassengerCount) {
+      throw new AppError(400, 'CAPACITY_EXCEEDED',
+        `This ride needs ${order.taxiPassengerCount} seats; your vehicle seats ${driver.vehicleCapacity ?? 0}.`);
+    }
 
     // Shared claim: the DB compare-and-set means two drivers tapping
     // accept at the same instant resolve to exactly one winner — the old
     // check-then-update here could double-assign.
-    const updatedOrder = await dispatch.claimOrder(id, driver.id, 'DRIVER');
+    // Assignment, mover reservation, immutable evidence, and the driver's
+    // server-clamped fare share one commit. A crash cannot leave a durable
+    // winner carrying the old fare (or a fare write on an unassigned ride).
+    const responseOrder = await dispatch.claimOrder(id, driver.id, 'DRIVER', { requestedFare: fare });
 
-    // Driver-set price, capped at the market rate Swift computed (taxiFareTotal).
-    // The driver charges UP TO market and no more — Swift never sets the final price.
-    let responseOrder: any = updatedOrder;
-    if (fare != null) {
-      const chosen = clampDriverFare(fare, Number(order.taxiFareTotal));
-      if (chosen !== Number(order.taxiFareTotal)) {
-        await app.prisma.order.update({
-          where: { id },
-          data: { taxiFareTotal: chosen, totalAmount: chosen },
-        });
-        responseOrder = { ...updatedOrder, taxiFareTotal: chosen, totalAmount: chosen };
-      }
+    // Customer-facing publication is after the canonical claim and therefore
+    // best-effort. A socket/push outage cannot tell the driver a durable winner
+    // failed (a retry would only meet their already-owned ride).
+    try {
+      app.io.to(`order:${id}`).emit('order:status_changed', {
+        orderId: id,
+        status: 'DRIVER_ASSIGNED',
+        driver: {
+          id: driver.id,
+          firstName: driver.user.firstName,
+          lastName: driver.user.lastName,
+          phone: driver.user.phone,
+          avatar: driver.user.avatar,
+          vehicleMake: driver.vehicleMake,
+          vehicleModel: driver.vehicleModel,
+          vehicleColor: driver.vehicleColor,
+          licensePlate: driver.licensePlate,
+          vehiclePhotoUrl: driver.vehiclePhotoUrl,
+          rating: driver.averageRating,
+          currentLat: driver.currentLat,
+          currentLng: driver.currentLng,
+        },
+      });
+    } catch (error) {
+      request.log.warn({ err: error, orderId: id }, 'direct taxi assignment socket publication failed after commit');
     }
-
-    // Notify customer
-    app.io.to(`order:${id}`).emit('order:status_changed', {
-      orderId: id,
-      status: 'DRIVER_ASSIGNED',
-      driver: {
-        id: driver.id,
-        firstName: driver.user.firstName,
-        lastName: driver.user.lastName,
-        phone: driver.user.phone,
-        avatar: driver.user.avatar,
-        vehicleMake: driver.vehicleMake,
-        vehicleModel: driver.vehicleModel,
-        vehicleColor: driver.vehicleColor,
-        licensePlate: driver.licensePlate,
-        vehiclePhotoUrl: driver.vehiclePhotoUrl,
-        rating: driver.averageRating,
-        currentLat: driver.currentLat,
-        currentLng: driver.currentLng,
-      },
-    });
 
     await notifications.send({
       userId: order.customerId,
@@ -482,7 +767,7 @@ export async function driverRoutes(app: FastifyInstance) {
       title: 'Driver Found!',
       body: `${driver.user.firstName} is heading to pick you up in a ${driver.vehicleColor} ${driver.vehicleMake} ${driver.vehicleModel} (${driver.licensePlate}).`,
       data: { orderId: id, status: 'DRIVER_ASSIGNED' },
-    });
+    }).catch((error) => request.log.warn({ err: error, orderId: id }, 'direct taxi assignment notification failed after commit'));
 
     return { success: true, data: responseOrder };
   });
@@ -493,8 +778,11 @@ export async function driverRoutes(app: FastifyInstance) {
    *  a driver tapping Decline only dismissed the card locally.) */
   app.post('/offers/decline', { preHandler: [app.authenticate] }, async (request) => {
     await getDriver(request.user.userId); // authz before validation
-    const { orderId } = z.object({ orderId: z.string().min(1).max(64) }).parse(request.body);
-    await dispatch.declineOffer(orderId, request.user.userId);
+    const { orderId, offerAttemptId } = z.object({
+      orderId: z.string().min(1).max(64),
+      offerAttemptId: z.string().min(1).max(64).optional(), // [F-014-04]
+    }).parse(request.body);
+    await dispatch.declineOffer(orderId, request.user.userId, offerAttemptId);
     return { success: true, data: { message: 'Offer declined' } };
   });
 
@@ -506,23 +794,36 @@ export async function driverRoutes(app: FastifyInstance) {
    *  quietly decayed by the un-acked offer's timeout.) */
   app.post('/offers/accept', { preHandler: [app.authenticate] }, async (request) => {
     await getDriver(request.user.userId); // authz before validation
-    const { orderId, fare } = z.object({
+    const { orderId, fare, offerAttemptId } = z.object({
       orderId: z.string().min(1).max(64),
       fare: zMoneyMinor.optional(),
+      offerAttemptId: z.string().min(1).max(64).optional(), // [F-014-04]
     }).parse(request.body);
-    const order = await dispatch.acceptOffer(orderId, request.user.userId);
-    // Driver-set price, capped at the market fare — applied after the claim,
-    // matching /rides/:id/accept.
-    if (fare != null) {
-      const chosen = clampDriverFare(fare, Number(order.taxiFareTotal));
-      if (chosen !== Number(order.taxiFareTotal)) {
-        await app.prisma.order.update({
-          where: { id: orderId },
-          data: { taxiFareTotal: chosen, totalAmount: chosen },
-        });
-      }
-    }
+    // [REPORT-010 F-07] fare 0 is never a legitimate choice — a recovered
+    // card missing its board row must not silently clamp pay to the 60%
+    // floor. Zero means "no choice"; the market fare applies.
+    const order = await dispatch.acceptOffer(orderId, request.user.userId, fare && fare > 0 ? fare : undefined, offerAttemptId);
     return { success: true, data: { orderId: order.id, status: order.status, orderNumber: order.orderNumber } };
+  });
+
+  /** GET /offers/current — [E27 / danger #37] recover the live exclusive
+   *  offer after a socket drop/app restart (parity with the rider route). */
+  app.get('/offers/current', { preHandler: [app.authenticate] }, async (request) => {
+    const driver = await getDriver(request.user.userId);
+    const offer = await dispatch.currentOfferFor(driver.id);
+    return { success: true, data: { offer } };
+  });
+
+  /** POST /offers/seen — [danger #21] render proof for honest timeout
+   *  accounting (parity with the rider route). */
+  app.post('/offers/seen', { preHandler: [app.authenticate] }, async (request) => {
+    await getDriver(request.user.userId); // authz before validation
+    const { orderId, offerAttemptId } = z.object({
+      orderId: z.string().min(1).max(64),
+      offerAttemptId: z.string().min(1).max(64).optional(), // [F-014-04]
+    }).parse(request.body);
+    await dispatch.markOfferSeen(orderId, request.user.userId, offerAttemptId);
+    return { success: true, data: { seen: true } };
   });
 
   /** POST /rides/:id/rate-customer — post-trip rating goes both ways (§4.2). */
@@ -575,9 +876,9 @@ export async function driverRoutes(app: FastifyInstance) {
     const order = await getDriverRide(driver.id, id);
 
     const cancellable: OrderStatus[] = ['DRIVER_ASSIGNED', 'DRIVER_EN_ROUTE', 'DRIVER_ARRIVED'];
-    if (!cancellable.includes(order.status)) {
+    if (!cancellable.includes(order.status) || hasTaxiPassengerCustody(order)) {
       throw new AppError(400, 'INVALID_STATUS',
-        order.status === 'RIDE_IN_PROGRESS'
+        hasTaxiPassengerCustody(order)
           ? 'You cannot cancel once the trip has started — end the trip instead.'
           : `Cannot cancel a ride in ${order.status} status`);
     }
@@ -586,12 +887,26 @@ export async function driverRoutes(app: FastifyInstance) {
     // free the driver together. The order becomes re-dispatchable; the driver is
     // un-trapped. A concurrent transition (customer cancel, complete) makes the
     // CAS miss and we 409 cleanly.
-    const released = await app.prisma.$transaction(async (tx) => {
-      const cas = await tx.order.updateMany({
-        where: { id, driverId: driver.id, status: { in: cancellable } },
-        data: { status: 'PENDING', driverId: null, acceptedAt: null },
+    const release = await app.prisma.$transaction(async (tx) => {
+      await lockTaxiOrderForCustodyDecision(tx, id);
+      const current = await tx.order.findFirst({
+        where: { id, driverId: driver.id, orderType: 'TAXI' },
+        select: {
+          status: true,
+          ridePinVerified: true,
+          ridePinVerifiedAt: true,
+        },
       });
-      if (cas.count === 0) return false;
+      if (!current) return { released: false, custody: false };
+      if (hasTaxiPassengerCustody(current)) return { released: false, custody: true };
+      if (!cancellable.includes(current.status)) return { released: false, custody: false };
+      await tx.order.update({
+        where: { id },
+        // [REPORT-014 F-014-12] Fresh PIN + zeroed attempt budget: a driver
+        // who burned all 5 attempts before cancelling cannot leave the next
+        // driver locked out or brute-force the (now-rotated) PIN.
+        data: { status: 'PENDING', driverId: null, acceptedAt: null, ...freshRidePinReset() },
+      });
       await tx.driver.updateMany({
         where: { id: driver.id, currentRideId: id },
         data: { isAvailable: true, currentRideId: null },
@@ -604,9 +919,12 @@ export async function driverRoutes(app: FastifyInstance) {
       await tx.orderStatusLog.create({
         data: { orderId: id, status: 'PENDING', changedBy: request.user.userId, note: `Driver cancelled: ${reason}` },
       });
-      return true;
+      return { released: true, custody: false };
     });
-    if (!released) throw new AppError(409, 'INVALID_STATUS', 'This ride can no longer be cancelled');
+    if (release.custody) {
+      throw new AppError(400, 'INVALID_STATUS', 'You cannot cancel once the trip has started — end the trip instead.');
+    }
+    if (!release.released) throw new AppError(409, 'INVALID_STATUS', 'This ride can no longer be cancelled');
 
     // Tell the rider honestly, then re-dispatch so their ride survives.
     app.io.to(`order:${id}`).emit('order:status_changed', { orderId: id, status: 'PENDING', reason: 'driver_cancelled' });
@@ -712,43 +1030,61 @@ export async function driverRoutes(app: FastifyInstance) {
     const { id } = request.params as { id: string };
     const driver = await getDriver(request.user.userId); // authz before validation
     const { pin } = verifyPinSchema.parse(request.body);
-    const order = await getDriverRide(driver.id, id);
+    await getDriverRide(driver.id, id); // fast ownership check; lock below is authoritative
 
-    if (order.status !== 'DRIVER_ARRIVED') {
-      throw new AppError(400, 'INVALID_STATUS', 'Driver must be at pickup location to verify PIN');
-    }
+    // The attempt, secret comparison, and custody marker share the order lock.
+    // A watchdog/logout/cancel can therefore only release the ride before this
+    // commit, or observe custody afterwards — never between PIN success and the
+    // durable handoff evidence.
+    const verification = await app.prisma.$transaction(async (tx) => {
+      await lockTaxiOrderForCustodyDecision(tx, id);
+      const current = await tx.order.findFirst({
+        where: { id, driverId: driver.id, orderType: 'TAXI' },
+        select: {
+          status: true,
+          ridePin: true,
+          ridePinAttempts: true,
+          ridePinVerified: true,
+          ridePinVerifiedAt: true,
+        },
+      });
+      if (!current) throw new NotFoundError('Ride', id);
+      if (current.status !== 'DRIVER_ARRIVED') {
+        throw new AppError(400, 'INVALID_STATUS', 'Driver must be at pickup location to verify PIN');
+      }
+      if (hasTaxiPassengerCustody(current)) {
+        throw new AppError(400, 'ALREADY_VERIFIED', 'Ride PIN has already been verified');
+      }
 
-    if (order.ridePinVerified) {
-      throw new AppError(400, 'ALREADY_VERIFIED', 'Ride PIN has already been verified');
-    }
+      // HND-004: the SAME lockout rule the pickup code uses (one handover engine).
+      const { locked, remaining } = handoverAttemptState(current.ridePinAttempts);
+      if (locked) {
+        throw new AppError(400, 'MAX_ATTEMPTS', 'Maximum PIN verification attempts exceeded. Please contact support.');
+      }
+      if (current.ridePin !== pin) {
+        await tx.order.update({
+          where: { id },
+          data: { ridePinAttempts: { increment: 1 } },
+        });
+        return { kind: 'INVALID_PIN' as const, remaining };
+      }
 
-    // HND-004: the SAME lockout rule the pickup code uses (one handover engine).
-    const { locked, remaining } = handoverAttemptState(order.ridePinAttempts);
-    if (locked) {
-      throw new AppError(400, 'MAX_ATTEMPTS', 'Maximum PIN verification attempts exceeded. Please contact support.');
-    }
-
-    // Increment attempts
-    await app.prisma.order.update({
-      where: { id },
-      data: { ridePinAttempts: { increment: 1 } },
+      const updatedOrder = await tx.order.update({
+        where: { id },
+        data: {
+          ridePinAttempts: { increment: 1 },
+          ridePinVerified: true,
+          ridePinVerifiedAt: new Date(),
+        },
+        // [F-0011] Confirm the PIN matched without ever echoing it.
+        omit: HANDOVER_SECRETS_OMIT,
+      });
+      return { kind: 'VERIFIED' as const, order: updatedOrder };
     });
-
-    // [F-0011] Read the secret ONLY here, where it is actually compared — the
-    // shared ride object the driver receives never carries it (see getDriverRide).
-    // Same shape as the vendor's complete-pickup path.
-    const secret = await app.prisma.order.findUnique({ where: { id }, select: { ridePin: true } });
-    if (secret?.ridePin !== pin) {
-      throw new AppError(400, 'INVALID_PIN', `Incorrect PIN. ${remaining} attempt(s) remaining.`);
+    if (verification.kind === 'INVALID_PIN') {
+      throw new AppError(400, 'INVALID_PIN', `Incorrect PIN. ${verification.remaining} attempt(s) remaining.`);
     }
-
-    // PIN matches
-    const updatedOrder = await app.prisma.order.update({
-      where: { id },
-      data: { ridePinVerified: true, ridePinVerifiedAt: new Date() },
-      // [F-0011] Even on the success path: confirm the PIN matched, never echo it.
-      omit: HANDOVER_SECRETS_OMIT,
-    });
+    const updatedOrder = verification.order;
 
     app.io.to(`order:${id}`).emit('ride:pin_verified', { orderId: id });
 
@@ -759,36 +1095,45 @@ export async function driverRoutes(app: FastifyInstance) {
   app.put('/rides/:id/start', { preHandler: [app.authenticate] }, async (request) => {
     const { id } = request.params as { id: string };
     const driver = await getDriver(request.user.userId);
-    const order = await getDriverRide(driver.id, id);
+    await getDriverRide(driver.id, id); // fast ownership check; lock below is authoritative
 
-    if (order.status !== 'DRIVER_ARRIVED') {
-      throw new AppError(400, 'INVALID_STATUS', `Cannot start ride from status ${order.status}`);
-    }
-
-    if (!order.ridePinVerified) {
-      throw new AppError(400, 'PIN_REQUIRED', 'Ride PIN must be verified before starting the ride');
-    }
-
-    const claimed = await app.prisma.order.updateMany({
-      where: { id, status: 'DRIVER_ARRIVED' },
-      data: { status: 'RIDE_IN_PROGRESS', pickedUpAt: new Date() },
+    const { order, previous } = await app.prisma.$transaction(async (tx) => {
+      await lockTaxiOrderForCustodyDecision(tx, id);
+      const current = await tx.order.findFirst({
+        where: { id, driverId: driver.id, orderType: 'TAXI' },
+        omit: HANDOVER_SECRETS_OMIT,
+      });
+      if (!current) throw new NotFoundError('Ride', id);
+      if (current.status !== 'DRIVER_ARRIVED') {
+        throw new AppError(400, 'INVALID_STATUS', `Cannot start ride from status ${current.status}`);
+      }
+      if (!hasTaxiPassengerCustody(current)) {
+        throw new AppError(400, 'PIN_REQUIRED', 'Ride PIN must be verified before starting the ride');
+      }
+      const updated = await tx.order.update({
+        where: { id },
+        data: { status: 'RIDE_IN_PROGRESS', pickedUpAt: new Date() },
+        omit: HANDOVER_SECRETS_OMIT,
+      });
+      await tx.orderStatusLog.create({
+        data: { orderId: id, status: 'RIDE_IN_PROGRESS', changedBy: request.user.userId, note: 'Ride started' },
+      });
+      return { order: updated, previous: current };
     });
-    if (claimed.count === 0) throw new AppError(409, 'INVALID_STATUS', `Cannot start ride from status ${order.status}`);
-    await app.prisma.orderStatusLog.create({ data: { orderId: id, status: 'RIDE_IN_PROGRESS', changedBy: request.user.userId, note: 'Ride started' } });
-    const updatedOrder = await app.prisma.order.findUniqueOrThrow({ where: { id }, omit: HANDOVER_SECRETS_OMIT });
+    const updatedOrder = order;
 
     app.io.to(`order:${id}`).emit('order:status_changed', {
       orderId: id,
       status: 'RIDE_IN_PROGRESS',
-      estimatedDuration: order.taxiDuration,
+      estimatedDuration: previous.taxiDuration,
     });
 
     await notifications.send({
-      userId: order.customerId,
+      userId: previous.customerId,
       type: 'ORDER_UPDATE',
       title: 'Ride Started',
-      body: order.taxiDuration
-        ? `Your ride has started. Estimated arrival in ~${order.taxiDuration} minutes.`
+      body: previous.taxiDuration
+        ? `Your ride has started. Estimated arrival in ~${previous.taxiDuration} minutes.`
         : 'Your ride has started. Enjoy the trip!',
       data: { orderId: id, status: 'RIDE_IN_PROGRESS' },
     });
@@ -811,39 +1156,37 @@ export async function driverRoutes(app: FastifyInstance) {
       ? Math.round((Date.now() - order.pickedUpAt.getTime()) / 60000)
       : order.taxiDuration;
 
-    // Compare-and-set so two concurrent completes can't both increment
-    // totalRides / double-free the driver (earnings are separately idempotent).
-    const claimed = await app.prisma.order.updateMany({
-      where: { id, status: 'RIDE_IN_PROGRESS' },
-      data: { status: 'DELIVERED', deliveredAt: new Date(), actualDeliveryTime: actualDuration },
-    });
-    if (claimed.count === 0) throw new AppError(409, 'INVALID_STATUS', `Cannot complete ride from status ${order.status}`);
-    // Only the winner frees the driver + counts the ride (guarded on this ride).
-    // A completed ride decays the cancellationRate EMA toward 0 (multiply 0.8,
-    // the event=0 case), so a driver who cancelled once recovers by finishing
-    // trips instead of being penalised forever.
-    await app.prisma.driver.updateMany({
-      where: { id: driver.id, currentRideId: id },
-      data: { isAvailable: true, currentRideId: null, totalRides: { increment: 1 }, cancellationRate: { multiply: 0.8 } },
-    });
-    await app.prisma.orderStatusLog.create({ data: { orderId: id, status: 'DELIVERED', changedBy: request.user.userId, note: 'Ride completed' } });
-    const updatedOrder = await app.prisma.order.findUniqueOrThrow({ where: { id }, omit: HANDOVER_SECRETS_OMIT, include: { customer: { select: { id: true, firstName: true } } } });
-
-    // Create earnings (idempotent via @@unique([orderId, type]))
-    await orderService.createEarnings(id);
-
-    app.io.to(`order:${id}`).emit('order:status_changed', {
+    // The terminal fact is one PostgreSQL commit: status/timestamp + actual
+    // duration + driver release/count/rate rehabilitation + earnings + log.
+    // Injected failures in any staged write roll the entire ride back to
+    // RIDE_IN_PROGRESS, so a retry is safe and cannot double-pay/count.
+    const { order: updatedOrder } = await orderService.transitionOrderAtomically({
       orderId: id,
-      status: 'DELIVERED',
-      fare: {
-        base: order.taxiFareBase,
-        perKm: order.taxiFarePerKm,
-        perMin: order.taxiFarePerMin,
-        surge: order.taxiFareSurge,
-        total: order.taxiFareTotal,
-      },
-      actualDuration,
+      target: 'DELIVERED',
+      allowedFrom: ['RIDE_IN_PROGRESS'],
+      changedBy: request.user.userId,
+      note: 'Ride completed',
+      terminalMetadata: { actualDeliveryTime: actualDuration },
+      decayDriverCancellationRate: true,
+      invalidStatus: (current) => new AppError(409, 'INVALID_STATUS', `Cannot complete ride from status ${current}`),
     });
+
+    try {
+      app.io.to(`order:${id}`).emit('order:status_changed', {
+        orderId: id,
+        status: 'DELIVERED',
+        fare: {
+          base: order.taxiFareBase,
+          perKm: order.taxiFarePerKm,
+          perMin: order.taxiFarePerMin,
+          surge: order.taxiFareSurge,
+          total: order.taxiFareTotal,
+        },
+        actualDuration,
+      });
+    } catch (error) {
+      request.log.warn({ err: error, orderId: id }, 'taxi completion socket publication failed after commit');
+    }
 
     await notifications.send({
       userId: order.customerId,
@@ -851,7 +1194,7 @@ export async function driverRoutes(app: FastifyInstance) {
       title: 'Ride Complete',
       body: `You have arrived at your destination. Total fare: $${Number(order.taxiFareTotal || order.totalAmount).toLocaleString()} GYD.`,
       data: { orderId: id, status: 'DELIVERED' },
-    });
+    }).catch((error) => request.log.warn({ err: error, orderId: id }, 'taxi completion notification failed after commit'));
 
     return { success: true, data: updatedOrder };
   });

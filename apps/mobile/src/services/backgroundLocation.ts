@@ -1,6 +1,19 @@
 import * as Location from 'expo-location';
+import * as SecureStore from 'expo-secure-store';
 import { riderApi, driverApi } from './api';
-import type { MoverKind } from '../hooks/mover';
+import {
+  requestUsableMoverBackgroundPermission,
+  type MoverKind,
+} from '../lib/moverLocation';
+import { queryClient } from '../lib/queryClient';
+import { initSecureStorage, zustandStorage } from '../lib/storage';
+import { getAuthSessionSnapshot, useAuthStore } from '../stores/authStore';
+import type { AuthPrincipalBoundary, AuthSessionSnapshot } from '../lib/authSession';
+import { createMoverBackgroundLocationRuntime } from '../lib/moverBackgroundRuntime';
+import {
+  createMoverLocationDurableStorage,
+  MOVER_LOCATION_LEGACY_SECURE_STORE_KEY,
+} from '../lib/moverLocationStorage';
 
 // expo-task-manager is a NATIVE module: importing it runs requireNativeModule
 // at bundle-eval time, which THROWS on a binary built before this dependency
@@ -25,63 +38,98 @@ try {
 // falls back to the foreground watcher — no regression.
 
 export const MOVER_LOCATION_TASK = 'swift-mover-location';
+const locationStorage = createMoverLocationDurableStorage({
+  initialize: initSecureStorage,
+  getValue: (key) => zustandStorage.getItem(key),
+  setValue: (key, value) => zustandStorage.setItem(key, value),
+  removeValue: (key) => zustandStorage.removeItem(key),
+  readLegacy: () => SecureStore.getItemAsync(MOVER_LOCATION_LEGACY_SECURE_STORE_KEY),
+  deleteLegacy: () => SecureStore.deleteItemAsync(MOVER_LOCATION_LEGACY_SECURE_STORE_KEY),
+});
 
-// The task runs in a headless JS context with no React — read the kind from a
-// module singleton set when we start (same runtime, so this survives
-// backgrounding).
-let activeKind: MoverKind | null = null;
+const runtime = createMoverBackgroundLocationRuntime({
+  now: Date.now,
+  getAuthSession: getAuthSessionSnapshot,
+  initializeAuthStorage: initSecureStorage,
+  rehydrateAuth: async () => {
+    await useAuthStore.persist.rehydrate();
+  },
+  readPersistedSession: locationStorage.read,
+  writePersistedSession: locationStorage.write,
+  deletePersistedSession: locationStorage.delete,
+  hasForegroundPermission: async () => (
+    (await Location.getForegroundPermissionsAsync()).status === 'granted'
+  ),
+  hasBackgroundPermission: async () => (
+    (await Location.getBackgroundPermissionsAsync()).status === 'granted'
+  ),
+  isNativeRunning: () => Location.hasStartedLocationUpdatesAsync(MOVER_LOCATION_TASK),
+  startNative: () => Location.startLocationUpdatesAsync(MOVER_LOCATION_TASK, {
+    accuracy: Location.Accuracy.Balanced,
+    // iOS distance filters do not emit a dependable stationary heartbeat.
+    // Keep native fixes flowing; the runtime authority-checks and throttles.
+    distanceInterval: 0,
+    timeInterval: 8000,
+    pausesUpdatesAutomatically: false,
+    showsBackgroundLocationIndicator: true,
+    foregroundService: {
+      notificationTitle: 'Swift is sharing your location',
+      notificationBody: 'Customers can see you on the way. Go offline to stop.',
+    },
+  }),
+  stopNative: () => Location.stopLocationUpdatesAsync(MOVER_LOCATION_TASK),
+  publish: async (kind, sample, session) => {
+    const service = kind === 'DRIVER' ? driverApi : riderApi;
+    const response = await service.location(sample.latitude, sample.longitude, session);
+    return { accepted: response?.data?.data?.accepted };
+  },
+  invalidateMoverQueries: () => {
+    void queryClient.invalidateQueries({ queryKey: ['mover'] });
+  },
+});
 
 TaskManager?.defineTask(MOVER_LOCATION_TASK, async ({ data, error }) => {
-  if (error || !activeKind) return;
-  const locations = (data as { locations?: Location.LocationObject[] })?.locations ?? [];
-  const last = locations[locations.length - 1];
-  if (!last) return;
-  const svc = activeKind === 'DRIVER' ? driverApi : riderApi;
-  // Best-effort: a failed send just means one skipped marker update.
-  await svc.location(last.coords.latitude, last.coords.longitude).catch(() => {});
+  const locations = (data as { locations?: Location.LocationObject[] } | undefined)?.locations;
+  await runtime.handleTask({
+    error,
+    locations: locations?.map((location) => ({
+      latitude: location.coords.latitude,
+      longitude: location.coords.longitude,
+      timestamp: location.timestamp,
+    })),
+  });
 });
 
 /** Start background GPS streaming for an online mover. Returns true only if
  *  background updates actually started; false means the caller should use the
  *  foreground watcher instead. Never throws. */
-export async function startMoverLocation(kind: MoverKind): Promise<boolean> {
-  if (!TaskManager) return false; // native module absent — use foreground watch
-  try {
-    const fg = await Location.requestForegroundPermissionsAsync();
-    if (fg.status !== 'granted') return false;
-    const bg = await Location.requestBackgroundPermissionsAsync();
-    if (bg.status !== 'granted') return false; // fall back to foreground watch
-
-    activeKind = kind;
-    const already = await Location.hasStartedLocationUpdatesAsync(MOVER_LOCATION_TASK).catch(() => false);
-    if (already) return true;
-
-    await Location.startLocationUpdatesAsync(MOVER_LOCATION_TASK, {
-      accuracy: Location.Accuracy.Balanced,
-      distanceInterval: 25, // metres — a parked mover doesn't spam
-      timeInterval: 8000,
-      pausesUpdatesAutomatically: false,
-      showsBackgroundLocationIndicator: true,
-      foregroundService: {
-        notificationTitle: 'Swift is sharing your location',
-        notificationBody: 'Customers can see you on the way. Go offline to stop.',
-      },
-    });
-    return true;
-  } catch {
-    // expo-task-manager not in this native build yet, or a runtime error —
-    // caller uses the foreground watcher. No regression vs before.
-    activeKind = null;
-    return false;
-  }
+export function startMoverLocation(
+  kind: MoverKind,
+  isAuthorized: () => boolean,
+): Promise<boolean> {
+  return runtime.start(kind, isAuthorized, TaskManager !== null);
 }
 
-export async function stopMoverLocation(): Promise<void> {
-  activeKind = null;
-  try {
-    const running = await Location.hasStartedLocationUpdatesAsync(MOVER_LOCATION_TASK).catch(() => false);
-    if (running) await Location.stopLocationUpdatesAsync(MOVER_LOCATION_TASK);
-  } catch {
-    // nothing to stop
-  }
+/** Foreground and TaskManager fixes converge on the same principal-bound,
+ * distance-aware durable publication gate. */
+export function publishMoverLocation(
+  kind: MoverKind,
+  sample: { latitude: number; longitude: number },
+  session: AuthSessionSnapshot,
+) {
+  return runtime.publishForeground(kind, sample, session);
+}
+
+/** Explicit GO-only background upgrade. Restored online sessions never call
+ * this function; they silently use an existing grant or foreground fallback. */
+export async function requestMoverBackgroundPermission(): Promise<boolean> {
+  return requestUsableMoverBackgroundPermission({
+    taskManagerAvailable: TaskManager !== null,
+    getForegroundPermission: Location.getForegroundPermissionsAsync,
+    requestBackgroundPermission: Location.requestBackgroundPermissionsAsync,
+  });
+}
+
+export function stopMoverLocation(expectedOwner?: AuthPrincipalBoundary): Promise<boolean> {
+  return runtime.stop(expectedOwner);
 }

@@ -4,7 +4,7 @@ import { Modal, Pressable, ScrollView, Share, View, useWindowDimensions } from '
 import { Feather } from '@expo/vector-icons';
 import { color, radius, space } from '@swift/ui';
 import { SvgXml } from 'react-native-svg';
-import { Card, Chip, ErrorState, LinkText, LoadingBlock, PillButton, PopupCard, Screen, SettingsRow, T, TonePill } from '../../../kit';
+import { Card, Chip, ErrorState, LinkText, LoadingBlock, PillButton, PopupCard, PopupTitle, Screen, SettingsRow, T, TonePill } from '../../../kit';
 import { useDeactivateQr, useRegenerateQr, useVendorQr, useVendorQrAnalytics, type QrAnalytics } from '../../../hooks/vendorops';
 import { GUTTER, SubHeader } from '../shared';
 
@@ -238,9 +238,9 @@ export function VendorMyQrScreen({ navigation }: any) {
 
       {/* Regenerate confirm (Part 14 copy, grace from config) */}
       <PopupCard visible={confirming === 'regenerate'} onClose={() => setConfirming(null)}>
-        <T variant="body" weight="bold" center>
+        <PopupTitle variant="body" weight="bold" center>
           Replace your QR code?
-        </T>
+        </PopupTitle>
         <T variant="caption" tone="muted" center style={{ marginTop: space.sm, marginBottom: space.lg }}>
           Your current code keeps working for {qr.graceDays} more days so printed materials don't break. New downloads use the new code.
         </T>
@@ -255,9 +255,9 @@ export function VendorMyQrScreen({ navigation }: any) {
 
       {/* Deactivate confirm (destructive) */}
       <PopupCard visible={confirming === 'deactivate'} onClose={() => setConfirming(null)}>
-        <T variant="body" weight="bold" center>
+        <PopupTitle variant="body" weight="bold" center>
           Turn off this QR code?
-        </T>
+        </PopupTitle>
         <T variant="caption" tone="muted" center style={{ marginTop: space.sm, marginBottom: space.lg }}>
           It stops working immediately. Anything printed with it will show a retired notice.
         </T>

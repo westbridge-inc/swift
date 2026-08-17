@@ -266,7 +266,7 @@ describe('MMG double-charge guard [SWIFT-004]', () => {
     });
     // The payer approved AFTER we synthetically gave up: the row is FAILED, but
     // its MMG lookup now reports approved (no "pending" marker → sandbox approves).
-    const approvedRef = `mmgtx_heal_${nanoid(8)}`;
+    const approvedRef = `mmgtx_heal_amt1200000_${nanoid(8)}`;
     await app.prisma.subscriptionPayment.create({
       data: {
         subscriptionId: subId, amount: 12000, status: 'FAILED', paymentMethod: 'MOBILE_MONEY',

@@ -1,6 +1,7 @@
+import { Prisma } from '@prisma/client';
 import type { PrismaClient, OrderStatus, FulfillmentType } from '@prisma/client';
 import type { Server } from 'socket.io';
-import { deliveryFeeFromRates, expressDeliveryFee, generateOrderNumber, type DeliveryRates } from '../../utils/markup';
+import { clampDriverFare, deliveryFeeFromRates, expressDeliveryFee, generateOrderNumber, type DeliveryRates } from '../../utils/markup';
 import { estimateDeliveryMinutes } from '../../utils/distance';
 import { getMapsProvider, type MapsProvider } from '../../providers/maps/maps-provider';
 import { FREE_CANCEL_WINDOW_MIN, LATE_CANCEL_FEE } from './cancel-policy';
@@ -12,9 +13,17 @@ import { resolveSelectedOptions, optionsUnitPrice, type ResolvedOption } from '.
 import { isKitchenAtCapacity, KITCHEN_ACTIVE_STATUSES } from '../fulfillment/kitchen-capacity';
 import { log } from '../../utils/logger';
 import { FloatService } from '../dispatch/float.service';
-import { AppError } from '../../utils/errors';
+import { AppError, ConflictError } from '../../utils/errors';
 import { dispatchSearchesCounter } from '../../plugins/observability';
 import { randomInt } from 'node:crypto';
+import { HANDOVER_SECRETS_OMIT } from '../handover/handover-security';
+import {
+  hasTaxiPassengerCustody,
+  lockTaxiOrderForCustodyDecision,
+} from '../rides/passenger-custody';
+import { validateMmgPayUrl } from '../../utils/mmg-pay-url';
+import { subscriptionOperability } from '../subscription/operate-gate';
+import { lockActiveOrderCustomer } from './order-creation-authority';
 
 interface CheckoutInput {
   userId: string;
@@ -34,6 +43,74 @@ interface CheckoutInput {
   appointments?: Array<{ itemId: string; slotStart: Date; mode?: 'AT_BUSINESS' | 'MOBILE' }>;
   /** Injectable clock so the risk heuristic is testable */
   now?: Date;
+  /** Test seam [REPORT-013 F-013-01/06]: runs after pre-transaction pricing
+   *  and before the atomic commit, so interleaving proofs (a tip mutation, a
+   *  suspension, an item going dark) can be driven deterministically into the
+   *  exact window the in-transaction barriers close. Never set in routes. */
+  beforeTransaction?: () => Promise<void>;
+  /** Test seam [REPORT-017B F-016-01]: runs INSIDE the checkout transaction,
+   *  right after the cart + cart-item rows are FOR UPDATE-locked, so an
+   *  interleaving proof can attempt a concurrent child mutation and observe it
+   *  block against the held lock. Never set in routes. */
+  afterCartLock?: () => Promise<void>;
+}
+
+function requireCheckoutMmgPayUrl(rawUrl: string | null | undefined, vendorName: string): string {
+  const checked = validateMmgPayUrl(rawUrl);
+  if (checked.valid) return checked.url;
+  if (checked.reason === 'MISSING') {
+    throw new AppError(400, 'MMG_NOT_AVAILABLE', `${vendorName} isn't set up for MMG yet — choose cash instead.`);
+  }
+  if (checked.reason === 'ALLOWLIST_NOT_CONFIGURED' || checked.reason === 'ALLOWLIST_INVALID') {
+    throw new AppError(503, 'MMG_PAY_LINKS_NOT_CONFIGURED', 'MMG pay links are not configured for this environment yet — choose cash instead.');
+  }
+  throw new AppError(400, 'MMG_LINK_INVALID', `${vendorName}'s MMG pay link cannot be used safely right now — choose cash instead.`);
+}
+
+/** [REPORT-012 F-012-04] THE post-commit publication policy for cancelling an
+ *  order whose MMG payment was never attested (MOBILE_MONEY + PENDING).
+ *  Whoever the terminal actor is — the customer, the vendor-timeout job, an
+ *  ops agent, an admin — the STORE gets the same durable liability notice:
+ *  it holds the only rail that can make an already-paid customer whole.
+ *  Optional customer guidance rides the same seam so a new cancel path can
+ *  never ship with half the policy. Call AFTER the canonical CANCELLED
+ *  commit; per-source wording arrives via the overrides, the policy doesn't
+ *  fork. */
+export async function publishUnattestedMmgCancellation(
+  prisma: PrismaClient,
+  notifications: Pick<NotificationService, 'send'>,
+  input: {
+    orderId: string;
+    orderNumber: string;
+    vendorId: string | null;
+    storeBody?: string;
+    customer?: { userId: string; title: string; body: string; data?: Record<string, unknown> };
+  },
+): Promise<void> {
+  if (input.customer) {
+    await notifications.send({
+      userId: input.customer.userId,
+      type: 'ORDER_UPDATE',
+      title: input.customer.title,
+      body: input.customer.body,
+      data: { orderId: input.orderId, status: 'CANCELLED', ...(input.customer.data ?? {}) },
+    }).catch(() => {});
+  }
+  if (!input.vendorId) return;
+  const vendor = await prisma.vendor
+    .findUnique({ where: { id: input.vendorId }, select: { owner: { select: { userId: true } } } })
+    .catch(() => null);
+  if (!vendor?.owner) return;
+  await notifications.send({
+    userId: vendor.owner.userId,
+    type: 'ORDER_UPDATE',
+    title: 'Cancelled order may hold an MMG payment',
+    body:
+      input.storeBody
+      ?? `Order ${input.orderNumber} was cancelled before its MMG payment was confirmed. If the customer's transfer arrived in your MMG, refund them directly.`,
+    audience: 'business',
+    data: { orderId: input.orderId, kind: 'mmg_unattested_cancellation' },
+  }).catch(() => {});
 }
 
 // ---------------------------------------------------------------------------
@@ -86,6 +163,82 @@ export const ORDER_TRANSITIONS: Record<OrderStatus, OrderStatus[]> = {
 
 /** States where the order is physically with the mover — no cancellation. */
 const IN_TRANSIT: OrderStatus[] = ['PICKED_UP', 'EN_ROUTE_DELIVERY', 'ARRIVED', 'RIDE_IN_PROGRESS'];
+const TERMINAL_ORDER_STATUSES: OrderStatus[] = ['DELIVERED', 'COMPLETED', 'CANCELLED', 'REFUNDED', 'FAILED'];
+
+// ---------------------------------------------------------------------------
+// [SPS-F-0016 / LB-015] The MMG payment-first law. An MMG marketplace order is
+// paid customer→store OUTSIDE Swift, and only the store can attest the money
+// landed (vendor confirm-payment → paymentStatus CAPTURED). Until then the
+// order may not move through fulfilment: not accepted, prepared, readied,
+// claimed/assigned, taken into custody, delivered, self-delivered, or
+// pickup-completed. The negative paths (CANCELLED / REFUNDED / FAILED) stay
+// open, and the store's confirm-payment action never passes through here — it
+// IS the capture. TAXI is out of scope: fares settle driver-direct at the kerb.
+// ---------------------------------------------------------------------------
+const MMG_GATED_TARGETS: ReadonlySet<OrderStatus> = new Set([
+  'ACCEPTED', 'PREPARING', 'READY_FOR_PICKUP',
+  'RIDER_ASSIGNED', 'RIDER_EN_ROUTE_PICKUP', 'RIDER_ARRIVED_PICKUP',
+  'PICKED_UP', 'EN_ROUTE_DELIVERY', 'ARRIVED',
+  'DELIVERED', 'COMPLETED',
+]);
+
+/**
+ * [SPS-F-0022] CASH platform-delivery discounts have NO sponsoring rail: the
+ * rider fronts the vendor the FULL goods value (subtotalBase — float gate and
+ * pickup handover know nothing of promos) and collects the DISCOUNTED total,
+ * so every promo dollar would come out of the rider's delivery fee. Every
+ * other combination is naturally vendor-funded (MMG: customer pays the
+ * discounted total to the store; PICKUP/self-delivery: the store collects its
+ * own discounted amount). Fail closed on the one broken combination until the
+ * vendor-funded fronting rail (front = goods − discount, with cancel/refund
+ * coherence) is built and founder-approved.
+ */
+export function assertCashDiscountSponsored(args: {
+  paymentMethod: string;
+  discount: number;
+  fulfillments: string[];
+}): void {
+  if (args.discount <= 0) return;
+  if (args.paymentMethod !== 'CASH') return;
+  if (!args.fulfillments.includes('DELIVERY')) return;
+  throw new AppError(
+    409,
+    'PROMO_UNAVAILABLE_CASH_DELIVERY',
+    'Promo codes aren’t available on cash delivery orders yet — pay the store directly by MMG, switch to pickup, or check out without the code.',
+  );
+}
+
+export function assertMmgFulfilmentAllowed(
+  order: { paymentMethod: string | null; paymentStatus: string; orderType: string | null },
+  target: OrderStatus,
+): void {
+  if (order.paymentMethod !== 'MOBILE_MONEY') return;
+  if (order.orderType === 'TAXI') return;
+  if (!MMG_GATED_TARGETS.has(target)) return;
+  if (order.paymentStatus !== 'CAPTURED') {
+    throw new AppError(
+      409,
+      'MMG_PAYMENT_PENDING',
+      'This MMG order can move only after the store confirms the payment landed in its MMG wallet.',
+    );
+  }
+}
+
+/**
+ * REFUNDED is intentionally overloaded in the current order model.  The
+ * normal state machine uses it after CANCELLED/DELIVERED/COMPLETED as a
+ * financial/accounting transition.  The admin cancellation override may use
+ * it directly from an active state, where it is operationally a cancellation:
+ * it closes dispatch and releases the assigned mover.
+ *
+ * Only the latter is a new terminalization.  Keeping this distinction here
+ * lets a completed trip be refunded without allowing an active taxi with a
+ * passenger aboard to be disguised as REFUNDED and made dispatchable again.
+ */
+function isCancellationTerminalization(sourceStatus: OrderStatus, target: OrderStatus): boolean {
+  return target === 'CANCELLED'
+    || (target === 'REFUNDED' && !ORDER_TRANSITIONS.REFUNDED.includes(sourceStatus));
+}
 
 // ---------------------------------------------------------------------------
 // LIFECYCLE_V2 hold (spec Part A). While holdExpiresAt is in the FUTURE the
@@ -112,6 +265,113 @@ export function isHeld(order: { holdExpiresAt: Date | null }, now = new Date()):
   return order.holdExpiresAt != null && order.holdExpiresAt > now;
 }
 
+const RIDER_ASSIGNMENT_SNAPSHOT_SELECT = {
+  id: true,
+  orderNumber: true,
+  status: true,
+  customerId: true,
+  vendorId: true,
+  pickupAddress: true,
+  deliveryAddress: true,
+  deliveryFee: true,
+  tipAmount: true,
+  // [REPORT-006] Locked-row money facts: the board-accept route commits CASH
+  // float from THIS snapshot (never its pre-lock preview), so the amount
+  // matches what picking/refunds may have changed before the lock was taken.
+  paymentMethod: true,
+  subtotalBase: true,
+  rider: { select: { user: { select: { firstName: true } } } },
+} as const satisfies Prisma.OrderSelect;
+
+type RiderAssignmentSnapshot = Prisma.OrderGetPayload<{
+  select: typeof RIDER_ASSIGNMENT_SNAPSHOT_SELECT;
+}>;
+
+const CANONICAL_TRANSITION_INCLUDE = {
+  vendor: { select: { name: true, ownerId: true } },
+  customer: { select: { id: true, firstName: true } },
+  rider: {
+    select: {
+      userId: true,
+      totalDeliveries: true,
+      user: { select: { firstName: true } },
+    },
+  },
+} as const satisfies Prisma.OrderInclude;
+
+type CanonicalTransitionOrder = Prisma.OrderGetPayload<{
+  include: typeof CANONICAL_TRANSITION_INCLUDE;
+  omit: typeof HANDOVER_SECRETS_OMIT;
+}>;
+
+type EarningNotice = {
+  userId: string;
+  amount: number;
+  type: 'DELIVERY_FEE' | 'COURIER_FEE' | 'TAXI_FARE' | 'TIP';
+};
+
+export interface CanonicalOrderTransitionInput {
+  orderId: string;
+  target: OrderStatus;
+  allowedFrom: readonly OrderStatus[];
+  /** Null denotes an automated system transition, never a customer action. */
+  changedBy: string | null;
+  note?: string;
+  /** Cancellation metadata is route-specific; cleanup is derived centrally
+   * from the target + the fresh, locked source state. */
+  cancellation?: {
+    /** Null keeps system cancellations out of customer-risk attribution. */
+    by: string | null;
+    reason: string;
+    lateFeeDue?: number;
+  };
+  /** Route-specific terminal facts that must commit with the state machine.
+   * Deliberately whitelisted so callers cannot overwrite ownership, money, or
+   * status outside the canonical transition rules. */
+  terminalMetadata?: {
+    actualDeliveryTime?: number | null;
+    courierProofPhotoUrl?: string;
+  };
+  /** A successfully completed taxi trip rehabilitates the driver's rolling
+   * cancellation-rate signal in the same commit that counts the ride. */
+  decayDriverCancellationRate?: boolean;
+  /** Queue-only guard: the worker may cancel PENDING work only after its
+   * checkout hold has elapsed. Revalidated from the locked source row. */
+  requireHoldExpired?: boolean;
+  /** [REPORT-014 F-014-02] Actor bind ON THE LOCKED ROW: the transition
+   * commits only while this rider still owns the order. A route-level
+   * ownership pre-read cannot survive a watchdog release or reassignment
+   * committing before the lock — this can. */
+  expectedRiderId?: string;
+  /** Legacy cancel routes historically healed null/dangling mover pointers.
+   * Strict state-machine completions leave every different pointer untouched. */
+  releaseStaleMoverPointer?: boolean;
+  /** [REPORT-007-v4 F-05] Route-specific work that must share the canonical
+   * Order-lock commit (e.g. the appointment slot reservation at vendor
+   * acceptance). Runs AFTER the status write and cleanup on the same locked
+   * row; a throw rolls the whole transition back. Must not publish. */
+  withinTransaction?: (tx: Prisma.TransactionClient) => Promise<void>;
+  /** Admin's explicit action evidence belongs in the same commit as the order
+   * state. The generic after-response route audit remains defence in depth. */
+  operatorAudit?: {
+    userId: string;
+    action: string;
+    entity: string;
+    entityId: string;
+    changes?: (sourceStatus: OrderStatus) => Prisma.InputJsonValue;
+    ipAddress?: string;
+    userAgent?: string;
+  };
+  invalidStatus?: (current: OrderStatus) => AppError;
+}
+
+export interface CanonicalOrderTransitionResult {
+  order: CanonicalTransitionOrder;
+  sourceStatus: OrderStatus;
+  cancelledSearches: number;
+  earningNotices: EarningNotice[];
+}
+
 const RISK_NEW_ACCOUNT_HOURS = 72;
 /** Guyana is UTC-4 year-round */
 const GUYANA_UTC_OFFSET_HOURS = -4;
@@ -136,6 +396,154 @@ export class OrderService {
     this.booking = new BookingService(prisma, io);
   }
 
+  /**
+   * Direct board-grab persistence boundary. The caller must invoke this inside
+   * the SAME interactive transaction that reserved cash float and locked the
+   * user's mover authority. Order ownership/status, the one-live-job Rider
+   * pointer, and the immutable status evidence either all commit or all roll
+   * back. Network side effects deliberately do not happen here.
+   */
+  async stageDirectRiderAssignment(
+    tx: Prisma.TransactionClient,
+    input: {
+      orderId: string;
+      riderId: string;
+      changedBy: string;
+      note?: string;
+      /** Rider-chosen delivery fee (CASH rail only) — the seam derives the
+       *  clamp and the total delta from the LOCKED row, never from a route
+       *  preview [REPORT-005 F-005-01]. */
+      requestedFee?: number;
+      moverUserId: string;
+    },
+  ): Promise<RiderAssignmentSnapshot> {
+    // [SPS-F-0016] Direct claims (boards / dispatch accept) don't pass the
+    // canonical transition seam, so the MMG payment-first gate is re-checked
+    // here — inside the same transaction, before the CAS — covering legacy
+    // in-flight rows that predate the gate.
+    // [REPORT-006 F-006-03] A real row lock, not a plain read: a concurrent
+    // CASH convert-to-pickup could commit between a snapshot read and the CAS,
+    // leaving the fare delta derived from a fee the conversion already zeroed
+    // (total below the goods subtotal) and a rider assigned to a PICKUP order.
+    // Both writers serialize on the orders row; the CAS below additionally
+    // binds fulfillment:'DELIVERY' as the belt.
+    await tx.$queryRaw`SELECT id FROM "orders" WHERE id = ${input.orderId} FOR UPDATE`;
+    const paymentGate = await tx.order.findUnique({
+      where: { id: input.orderId },
+      select: { paymentMethod: true, paymentStatus: true, orderType: true, deliveryFee: true, fulfillment: true },
+    });
+    if (paymentGate) {
+      assertMmgFulfilmentAllowed(paymentGate, 'RIDER_ASSIGNED');
+      if (paymentGate.fulfillment !== 'DELIVERY') {
+        throw new ConflictError('This order no longer needs a rider — the customer switched it to pickup');
+      }
+    }
+
+    // [REPORT-005 F-005-01] Rider price choice is a CASH feature: the customer
+    // pays the (lower) total at the door. An MMG total was already paid — or
+    // externally instructed — at checkout; repricing after capture rewrites
+    // money the store received. Fee applied as an atomic delta off the locked
+    // row so a stale preview can never smuggle in an absolute total.
+    let repricing: Prisma.OrderUncheckedUpdateManyInput = {};
+    if (input.requestedFee != null && paymentGate) {
+      const marketFee = Number(paymentGate.deliveryFee);
+      const chosenFee = clampDriverFare(input.requestedFee, marketFee);
+      if (chosenFee !== marketFee) {
+        if (paymentGate.paymentMethod !== 'CASH') {
+          throw new AppError(
+            409,
+            'MMG_PRICE_LOCKED',
+            'The delivery price can’t change on an MMG order — the customer already paid the checkout total to the store.',
+          );
+        }
+        repricing = { deliveryFee: chosenFee, totalAmount: { decrement: marketFee - chosenFee } };
+      }
+    }
+
+    const claimed = await tx.order.updateMany({
+      where: {
+        id: input.orderId,
+        customerId: { not: input.moverUserId },
+        riderId: null,
+        status: { in: ORDER_TRANSITIONS.RIDER_ASSIGNED },
+        // [REPORT-006 F-006-03] Riders are assigned to DELIVERY work only —
+        // a converted (PICKUP) or appointment order matches nothing here.
+        fulfillment: 'DELIVERY',
+      },
+      data: {
+        riderId: input.riderId,
+        status: 'RIDER_ASSIGNED',
+        ...repricing,
+      },
+    });
+    if (claimed.count === 0) {
+      throw new ConflictError('This order was just claimed by another rider, or is no longer available');
+    }
+
+    const reserved = await tx.rider.updateMany({
+      where: {
+        id: input.riderId,
+        isOnline: true,
+        isAvailable: true,
+        currentOrderId: null,
+        user: { status: 'ACTIVE', activeRole: { in: ['MOVER', 'RIDER'] } },
+      },
+      data: { isAvailable: false, currentOrderId: input.orderId },
+    });
+    if (reserved.count === 0) {
+      throw new ConflictError('You must be online and free before taking another order.');
+    }
+
+    await tx.orderStatusLog.create({
+      data: {
+        orderId: input.orderId,
+        status: 'RIDER_ASSIGNED',
+        changedBy: input.changedBy,
+        note: input.note,
+      },
+    });
+
+    return tx.order.findUniqueOrThrow({
+      where: { id: input.orderId },
+      select: RIDER_ASSIGNMENT_SNAPSHOT_SELECT,
+    });
+  }
+
+  /** Publish live/customer hints only after the assignment transaction commits.
+   * Canonical state is already durable, so a transient socket/push failure must
+   * never turn a successful board grab into a misleading HTTP failure. */
+  async publishCommittedRiderAssignment(
+    order: RiderAssignmentSnapshot,
+    changedBy: string,
+  ): Promise<void> {
+    log().info({
+      orderId: order.id,
+      orderNumber: order.orderNumber,
+      status: 'RIDER_ASSIGNED',
+      changedBy,
+      vendorId: order.vendorId,
+    }, 'order: status changed');
+
+    const statusEvent = {
+      orderId: order.id,
+      status: 'RIDER_ASSIGNED',
+      timestamp: new Date().toISOString(),
+    };
+    try {
+      this.io.to(`order:${order.id}`).emit('order:status_changed', statusEvent);
+      if (order.vendorId) {
+        this.io.to(`vendor:${order.vendorId}`).emit('order:status_changed', statusEvent);
+      }
+    } catch (err) {
+      log().warn({ err, orderId: order.id }, 'rider assignment socket publication failed');
+    }
+
+    const riderName = order.rider?.user.firstName || 'Your rider';
+    await this.notifications
+      .riderAssigned(order.customerId, order.orderNumber, riderName, order.id)
+      .catch((err) => log().warn({ err, orderId: order.id }, 'rider assignment notification failed'));
+  }
+
   async checkout(input: CheckoutInput) {
     const now = input.now ?? new Date();
 
@@ -149,7 +557,7 @@ export class OrderService {
 
     const user = await this.prisma.user.findUniqueOrThrow({
       where: { id: input.userId },
-      select: { trustLevel: true, countryCode: true, createdAt: true, selfieCapturedAt: true },
+      select: { tenantId: true, trustLevel: true, countryCode: true, createdAt: true, selfieCapturedAt: true },
     });
 
     // Strike consequences: repeated failed cash handovers
@@ -174,6 +582,14 @@ export class OrderService {
       const list = groups.get(ci.item.vendorId) ?? [];
       list.push(ci);
       groups.set(ci.item.vendorId, list);
+    }
+
+    if (input.paymentMethod === 'MOBILE_MONEY' && groups.size !== 1) {
+      throw new AppError(
+        400,
+        'MMG_MULTI_VENDOR_UNSUPPORTED',
+        'MMG checkout currently supports one business at a time — choose cash or place separate orders.',
+      );
     }
 
     const requestedSlots = new Map((input.appointments ?? []).map((a) => [a.itemId, a.slotStart]));
@@ -213,6 +629,21 @@ export class OrderService {
       if (!vendor.isCurrentlyOpen || !vendor.acceptingOrders || vendor.status !== 'ACTIVE') {
         throw new AppError(400, 'VENDOR_CLOSED', `${vendor.name} is currently not accepting orders`);
       }
+      // [REPORT-012 F-012-05] The derived vendor flags are not the whole
+      // authority: checkout re-evaluates SUBSCRIPTION operability live. This
+      // closes the split-commit residue (a suspension whose vendor write
+      // hasn't landed) AND the pure-wall-clock case — a PAST_DUE store whose
+      // grace lapsed a minute ago stops selling NOW, not at the next sweep,
+      // even from a cart opened while it was still operable.
+      const vendorSub = await this.prisma.subscription.findFirst({
+        where: { vendorId: vendor.id },
+        orderBy: { createdAt: 'desc' },
+        select: { status: true, gracePeriodEnd: true },
+      });
+      const vendorOperability = subscriptionOperability(vendorSub, { missingRow: 'GRANDFATHER' });
+      if (!vendorOperability.operable) {
+        throw new AppError(400, 'VENDOR_CLOSED', `${vendor.name} is currently not accepting orders`);
+      }
       // FUL-007: kitchen-capacity guard (Part 5D). A vendor can cap how many
       // orders it holds in the kitchen at once so a small shop isn't drowned.
       // Best-effort early check (like the inventory early-check below): a rare
@@ -228,10 +659,11 @@ export class OrderService {
             `${vendor.name} is at capacity right now — please try again in a few minutes`);
         }
       }
-      // MMG direct-pay: only offer it for a vendor who attached their own MMG
-      // link (the customer pays them directly). Otherwise stay on cash.
-      if (input.paymentMethod === 'MOBILE_MONEY' && !vendor.mmgPayUrl) {
-        throw new AppError(400, 'MMG_NOT_AVAILABLE', `${vendor.name} isn't set up for MMG yet — choose cash instead.`);
+      // Friendly preflight. The same destination is re-read and validated under
+      // a vendor row lock in the commit transaction, so a concurrent profile
+      // edit cannot swap/remove the payment target after this decision.
+      if (input.paymentMethod === 'MOBILE_MONEY') {
+        requireCheckoutMmgPayUrl(vendor.mmgPayUrl, vendor.name);
       }
 
       // Inventory (§4.2): a tracked item can't be ordered beyond the shelf.
@@ -377,7 +809,19 @@ export class OrderService {
       plans.push({ vendor, fulfillment, appointmentSlot, distanceKm, deliveryFee, subtotal, orderItems });
     }
 
-    const tip = input.tipAmount || Number(cart.tipAmount) || 0;
+    // [REPORT-012 F-012-01] Presence, not truthiness: an explicit
+    // `tipAmount: 0` from checkout means "NO tip", and must NOT fall through
+    // (`||`) to a positive tip persisted on the cart by another surface/
+    // session — that silently charged a tip the customer just zeroed. Only an
+    // ABSENT client tip inherits the cart's stored value.
+    const tip = input.tipAmount != null ? input.tipAmount : (Number(cart.tipAmount) || 0);
+    // [REPORT-012 F-012-01] "Tip your rider" is delivery money. A basket with
+    // no DELIVERY plan (pickup / appointment-only) has no rider, so no order
+    // carries the tip — and it must not inflate grandTotal either: that figure
+    // feeds the ID gate and customer.totalSpent, and a phantom tip there
+    // corrupts threshold and accounting evidence.
+    const tipPlanIndex = plans.findIndex((p) => p.fulfillment === 'DELIVERY');
+    const effectiveTip = tipPlanIndex >= 0 ? tip : 0;
 
     let discount = 0;
     let promoCodeId: string | null = null;
@@ -393,7 +837,13 @@ export class OrderService {
       promoVendorId = promo.vendorId;
     }
 
-    const grandTotal = plans.reduce((s, p) => s + p.subtotal + p.deliveryFee, 0) + tip - discount;
+    assertCashDiscountSponsored({
+      paymentMethod: input.paymentMethod,
+      discount,
+      fulfillments: plans.map((p) => p.fulfillment),
+    });
+
+    const grandTotal = plans.reduce((s, p) => s + p.subtotal + p.deliveryFee, 0) + effectiveTip - discount;
 
     // The ID-gate (locked model): at or above the country's USD-equivalent
     // threshold, an L1 account must verify identity first. L2/L3 flow through.
@@ -437,12 +887,112 @@ export class OrderService {
     // commits (notifications are best-effort and never roll an order back).
     const stockEventsByVendor = new Map<string, Array<{ itemId: string; name: string; remaining: number; kind: 'low' | 'out' }>>();
 
+    if (input.beforeTransaction) await input.beforeTransaction();
+
     // Atomic: all orders, stock movements, stats, and the cart deletion commit together
-    const orders = await this.prisma.$transaction(async (tx) => {
+    const checkoutCommit = await this.prisma.$transaction(async (tx) => {
+      // Global creation lock order starts with User. Account deletion takes the
+      // same row lock before counting live orders, closing the authenticate →
+      // delete → insert race for every order produced by this checkout.
+      await lockActiveOrderCustomer(tx, input.userId, user.tenantId);
+
       // Serialize concurrent checkouts of one cart: the row lock makes a rapid
       // double-submit deterministic (the loser waits, then rolls back on the
       // now-deleted cart) instead of leaning on the delete's P2025 by accident.
       await tx.$queryRaw`SELECT id FROM "carts" WHERE id = ${cart.id} FOR UPDATE`;
+      // [REPORT-017B F-016-01] Lock the CHILD rows too. The parent-cart lock
+      // alone did not serialize a `cartItem.delete`/quantity update — those
+      // never touch the parent row — so a delete could commit AFTER the
+      // signature check below and BEFORE order creation, ordering a removed
+      // item. FOR UPDATE on every current child makes any concurrent
+      // delete/update of them block until this checkout commits (by which
+      // point the cart+items are gone), while the signature read below sees a
+      // stable set. A concurrent ADD (a NEW row) is not money-dangerous — an
+      // item not in the priced snapshot is simply never charged.
+      await tx.$queryRaw`SELECT id FROM "cart_items" WHERE "cartId" = ${cart.id} FOR UPDATE`;
+      if (input.afterCartLock) await input.afterCartLock();
+
+      // [REPORT-013 F-013-01 / REPORT-016 F-016-01] Bind the priced snapshot
+      // to the LOCKED cart AGGREGATE, not the parent timestamp. Pricing, the
+      // ID gate, and promo math all ran on a pre-transaction read; any cart
+      // mutation that committed since makes that math a lie about a different
+      // basket. `Cart.updatedAt` was an INCOMPLETE token — deleting a
+      // CartItem while others remain never touches the parent row, so a
+      // removed item could still be ordered. The authoritative generation is
+      // the item set (id + quantity) plus the tip; re-read it under the lock
+      // and refuse on any drift.
+      const cartSignature = (
+        items: Array<{ id: string; quantity: number }>,
+        tipAmount: Prisma.Decimal | number,
+      ) =>
+        JSON.stringify({
+          items: items.map((i) => [i.id, i.quantity]).sort((a, b) => (a[0]! < b[0]! ? -1 : 1)),
+          tip: Number(tipAmount),
+        });
+      const lockedCart = await tx.cart.findUnique({
+        where: { id: cart.id },
+        select: { tipAmount: true, items: { select: { id: true, quantity: true } } },
+      });
+      if (!lockedCart || cartSignature(lockedCart.items, lockedCart.tipAmount) !== cartSignature(cart.items, cart.tipAmount)) {
+        throw new AppError(409, 'CART_CHANGED', 'Your cart just changed — review it and place the order again.');
+      }
+
+      // [REPORT-013 F-013-06] Authority is proven WHERE IT COMMITS: every
+      // participating vendor row is locked (deterministic id order), then
+      // lifecycle/ordering flags, subscription operability, the document
+      // authority's wall-clock bound (activationValidUntil), and live item
+      // availability are re-read on THIS transaction. The pre-transaction
+      // checks above remain the friendly fast-fail; they authorize nothing.
+      const planVendorIds = [...new Set(plans.map((p) => p.vendor.id))].sort();
+      await tx.$queryRaw`SELECT id FROM "vendors" WHERE id IN (${Prisma.join(planVendorIds)}) ORDER BY id FOR UPDATE`;
+      for (const planVendorId of planVendorIds) {
+        const lockedVendor = await tx.vendor.findUniqueOrThrow({
+          where: { id: planVendorId },
+          select: { name: true, status: true, isCurrentlyOpen: true, acceptingOrders: true, activationValidUntil: true },
+        });
+        if (
+          lockedVendor.status !== 'ACTIVE'
+          || !lockedVendor.isCurrentlyOpen
+          || !lockedVendor.acceptingOrders
+          || (lockedVendor.activationValidUntil != null && lockedVendor.activationValidUntil <= now)
+        ) {
+          throw new AppError(400, 'VENDOR_CLOSED', `${lockedVendor.name} is currently not accepting orders`);
+        }
+        const lockedSub = await tx.subscription.findFirst({
+          where: { vendorId: planVendorId },
+          orderBy: { createdAt: 'desc' },
+          select: { status: true, gracePeriodEnd: true },
+        });
+        const lockedOperability = subscriptionOperability(lockedSub, { missingRow: 'GRANDFATHER' });
+        if (!lockedOperability.operable) {
+          throw new AppError(400, 'VENDOR_CLOSED', `${lockedVendor.name} is currently not accepting orders`);
+        }
+      }
+      const basketItemIds = plans.flatMap((p) => p.orderItems.map((oi) => oi.itemId));
+      const darkItem = await tx.item.findFirst({
+        where: { id: { in: basketItemIds }, isAvailable: false },
+        select: { name: true },
+      });
+      if (darkItem) {
+        // 409, not 400: the request was well-formed — the world changed under
+        // it (a racer took the last unit and auto-hide flipped the item dark).
+        // Same code+status as the pre-lock ITEM_UNAVAILABLE path, so a race
+        // loser reads identically wherever the race is caught.
+        throw new AppError(409, 'ITEM_UNAVAILABLE', `${darkItem.name} just became unavailable — remove it and try again.`);
+      }
+
+      let committedMmgPayUrl: string | null = null;
+      let committedMmgRecipientName: string | null = null;
+      if (input.paymentMethod === 'MOBILE_MONEY') {
+        const paymentPlan = plans[0]!; // multi-vendor MMG was rejected above
+        await tx.$queryRaw`SELECT id FROM "vendors" WHERE id = ${paymentPlan.vendor.id} FOR UPDATE`;
+        const currentVendor = await tx.vendor.findUniqueOrThrow({
+          where: { id: paymentPlan.vendor.id },
+          select: { name: true, mmgPayUrl: true },
+        });
+        committedMmgPayUrl = requireCheckoutMmgPayUrl(currentVendor.mmgPayUrl, currentVendor.name);
+        committedMmgRecipientName = currentVendor.name;
+      }
 
       // Serialize promo redemption (pre-launch audit H11). validatePromoCode
       // ran BEFORE this transaction, so two concurrent checkouts of the SAME
@@ -486,8 +1036,7 @@ export class OrderService {
       // "Tip your rider" is delivery money: it rides the first DELIVERY plan.
       // A pickup or appointment has no rider — a lingering cart tip must never
       // be charged there (founder screenshot 2026-07-15: haircut w/ rider tip).
-      const tipPlanIndex = plans.findIndex((p) => p.fulfillment === 'DELIVERY');
-      const planTipFor = (i: number) => (i === tipPlanIndex ? tip : 0);
+      const planTipFor = (i: number) => (i === tipPlanIndex ? effectiveTip : 0);
 
       // Spread the discount across orders so it's never swallowed by a per-order
       // Math.max(0,…) clamp. A platform code larger than the first vendor's order
@@ -516,6 +1065,7 @@ export class OrderService {
 
         const order = await tx.order.create({
           data: {
+            tenantId: user.tenantId,
             orderNumber: generateOrderNumber(sequence),
             orderType: plan.vendor.vendorType === 'SUPERMARKET' ? 'GROCERY_DELIVERY' : 'FOOD_DELIVERY',
             customerId: input.userId,
@@ -550,6 +1100,11 @@ export class OrderService {
             discount: planDiscount,
             totalAmount,
             paymentMethod: input.paymentMethod as 'CASH' | 'MOBILE_MONEY' | 'BANK_TRANSFER' | 'CARD' | 'WALLET',
+            // The payment instruction is part of the order contract. Snapshot
+            // both fields while the vendor row is locked so a later profile
+            // edit cannot redirect an already-placed order or relabel its payee.
+            mmgPayUrlSnapshot: input.paymentMethod === 'MOBILE_MONEY' ? committedMmgPayUrl : null,
+            mmgRecipientNameSnapshot: input.paymentMethod === 'MOBILE_MONEY' ? committedMmgRecipientName : null,
             estimatedPrepTime: plan.vendor.estimatedPrepTime,
             estimatedDeliveryTime: plan.fulfillment === 'DELIVERY'
               ? estimateDeliveryMinutes(plan.distanceKm) + (plan.vendor.estimatedPrepTime || 30)
@@ -590,7 +1145,7 @@ export class OrderService {
               create: { status: 'PENDING', changedBy: input.userId, note: 'Order placed' },
             },
           },
-          include: { items: true, vendor: { select: { id: true, name: true, ownerId: true, mmgPayUrl: true } } },
+          include: { items: true, vendor: { select: { id: true, name: true, ownerId: true } } },
         });
 
         await tx.vendor.update({
@@ -652,8 +1207,22 @@ export class OrderService {
       });
       await tx.cart.delete({ where: { id: cart.id } });
 
-      return created;
+      const paymentAction = committedMmgPayUrl
+        ? {
+            kind: 'OPEN_EXTERNAL_URL' as const,
+            method: 'MOBILE_MONEY' as const,
+            provider: 'MMG' as const,
+            fundsFlow: 'DIRECT_TO_VENDOR' as const,
+            orderId: created[0]!.id,
+            recipientName: committedMmgRecipientName!,
+            amount: Number(created[0]!.totalAmount),
+            url: committedMmgPayUrl,
+          }
+        : null;
+
+      return { orders: created, paymentAction };
     });
+    const { orders, paymentAction } = checkoutCommit;
 
     // Post-transaction: emit and notify per vendor (best-effort). The socket
     // event goes to that vendor's room only — a global emit would fan out to
@@ -723,6 +1292,7 @@ export class OrderService {
       order: summaries[0]!,
       orders: summaries,
       grandTotal,
+      paymentAction,
       message: orders.length > 1
         ? `${orders.length} orders placed — each vendor will confirm shortly.`
         : input.scheduledFor
@@ -741,22 +1311,32 @@ export class OrderService {
   /** Put tracked stock back on the shelf for a cancelled order. Public: the
    *  vendor reject route does its own status write (for reason fields) and
    *  must restock too — goods never left the store either way. */
-  async restockCancelledOrder(orderId: string) {
-    const items = await this.prisma.orderItem.findMany({
+  async restockCancelledOrder(
+    orderId: string,
+    db: PrismaClient | Prisma.TransactionClient = this.prisma,
+  ) {
+    const items = await db.orderItem.findMany({
       where: { orderId },
-      select: { itemId: true, quantity: true },
+      select: { itemId: true, quantity: true, subStatus: true, substituteItemId: true },
     });
     for (const oi of items) {
-      if (!oi.itemId) continue;
-      const restocked = await this.prisma.item.updateMany({
+      // [REPORT-006 F-006-05] Picking already restocked refunded/rejected
+      // lines when it closed them — restocking again here doubles stock. An
+      // APPROVED substitution's reserved goods are the SUBSTITUTE item (the
+      // original went back on the shelf at approval), so the substitute is
+      // what a cancellation must return.
+      if (oi.subStatus === 'REFUNDED' || oi.subStatus === 'REJECTED') continue;
+      const restockItemId = oi.subStatus === 'APPROVED' ? oi.substituteItemId : oi.itemId;
+      if (!restockItemId) continue;
+      const restocked = await db.item.updateMany({
         // Only items still tracking stock — a vendor may have stopped tracking
         // since the order was placed, and null must stay null.
-        where: { id: oi.itemId, stockQuantity: { not: null } },
+        where: { id: restockItemId, stockQuantity: { not: null } },
         data: { stockQuantity: { increment: oi.quantity } },
       });
       if (restocked.count > 0) {
-        await this.prisma.item.updateMany({
-          where: { id: oi.itemId, autoHiddenAt: { not: null }, stockQuantity: { gt: 0 } },
+        await db.item.updateMany({
+          where: { id: restockItemId, autoHiddenAt: { not: null }, stockQuantity: { gt: 0 } },
           data: { isAvailable: true, autoHiddenAt: null },
         });
       }
@@ -777,20 +1357,16 @@ export class OrderService {
   }
 
   /**
-   * The terminal side-effects EVERY cancel/reject path must run once it has WON
-   * the status compare-and-set: put tracked stock back (when the goods are still
-   * in the store), return a CASH rider's committed float, and free the assigned
-   * mover. The customer cancelOrder inlines this; the vendor-reject and
-   * admin-cancel paths do their own status write (for reason/refund fields) and
-   * MUST call this or they leak stock AND float. Call ONLY as the CAS winner so
-   * restock and the float release each run exactly once.
+   * Legacy cleanup used by the no-response queue after its guarded PENDING
+   * cancellation. Interactive customer/vendor/admin paths use transactional
+   * boundaries below. Call ONLY as the CAS winner so restock and float release
+   * each run exactly once.
    */
   async applyCancellationSideEffects(
     order: { id: string; paymentMethod: string; riderId: string | null; driverId: string | null; subtotalBase: number },
     opts: { restock: boolean },
   ): Promise<void> {
-    // Mirrors the customer cancelOrder path exactly (rider freed by id; driver
-    // CAS'd on currentRideId) so all three cancel routes behave identically.
+    // Mirrors the cancellation cleanup rules for the legacy queue path.
     // ONE-SLOT-ONE-PERSON (scheduling spec 2.3): every order death frees its
     // appointment slot — found live: vendor reject and the no-response
     // auto-cancel left bookings CONFIRMED forever, permanently blocking the
@@ -818,8 +1394,318 @@ export class OrderService {
     }
   }
 
+  /** Free the rider when this order owns the pointer. Legacy cancellation paths
+   * may also heal a null/provably stale pointer; a real newer job is untouched. */
+  private async stageRiderRelease(
+    tx: Prisma.TransactionClient,
+    riderId: string,
+    orderId: string,
+    countDelivery: boolean,
+    releaseStalePointer: boolean,
+  ): Promise<void> {
+    await tx.$queryRaw`SELECT id FROM "riders" WHERE id = ${riderId} FOR UPDATE`;
+    const rider = await tx.rider.findUnique({ where: { id: riderId }, select: { currentOrderId: true } });
+    if (!rider) return;
+    let safeToFree = rider.currentOrderId === orderId
+      || (releaseStalePointer && rider.currentOrderId == null);
+    if (!safeToFree && releaseStalePointer && rider.currentOrderId != null) {
+      const newerLiveJob = await tx.order.findFirst({
+        where: {
+          id: rider.currentOrderId!,
+          riderId,
+          status: { notIn: TERMINAL_ORDER_STATUSES },
+        },
+        select: { id: true },
+      });
+      safeToFree = newerLiveJob == null;
+    }
+    if (!safeToFree) return;
+    await tx.rider.update({
+      where: { id: riderId },
+      data: {
+        isAvailable: true,
+        currentOrderId: null,
+        ...(countDelivery ? { totalDeliveries: { increment: 1 } } : {}),
+      },
+    });
+  }
+
+  /** Driver equivalent of stageRiderRelease (currentRideId is the authority). */
+  private async stageDriverRelease(
+    tx: Prisma.TransactionClient,
+    driverId: string,
+    orderId: string,
+    countRide: boolean,
+    releaseStalePointer: boolean,
+    decayCancellationRate = false,
+  ): Promise<void> {
+    await tx.$queryRaw`SELECT id FROM "drivers" WHERE id = ${driverId} FOR UPDATE`;
+    const driver = await tx.driver.findUnique({ where: { id: driverId }, select: { currentRideId: true } });
+    if (!driver) return;
+    let safeToFree = driver.currentRideId === orderId
+      || (releaseStalePointer && driver.currentRideId == null);
+    if (!safeToFree && releaseStalePointer && driver.currentRideId != null) {
+      const newerLiveRide = await tx.order.findFirst({
+        where: {
+          id: driver.currentRideId!,
+          driverId,
+          status: { notIn: TERMINAL_ORDER_STATUSES },
+        },
+        select: { id: true },
+      });
+      safeToFree = newerLiveRide == null;
+    }
+    if (!safeToFree) return;
+    await tx.driver.update({
+      where: { id: driverId },
+      data: {
+        isAvailable: true,
+        currentRideId: null,
+        ...(countRide ? { totalRides: { increment: 1 } } : {}),
+        ...(decayCancellationRate ? { cancellationRate: { multiply: 0.8 } } : {}),
+      },
+    });
+  }
+
+  /**
+   * The canonical DB half of every order transition. This method is public only
+   * so deterministic tests can inject a failure after all writes are staged and
+   * prove PostgreSQL rolls the whole boundary back; callers should use
+   * transitionOrderAtomically(), which owns retries and post-commit publication.
+   */
+  async stageCanonicalOrderTransition(
+    tx: Prisma.TransactionClient,
+    input: CanonicalOrderTransitionInput,
+  ): Promise<CanonicalOrderTransitionResult> {
+    await tx.$queryRaw`SELECT id FROM "orders" WHERE id = ${input.orderId} FOR UPDATE`;
+    const source = await tx.order.findUnique({ where: { id: input.orderId } });
+    if (!source) throw new AppError(404, 'NOT_FOUND', 'Order not found');
+    if (!input.allowedFrom.includes(source.status)) {
+      throw input.invalidStatus?.(source.status)
+        ?? new AppError(409, 'INVALID_TRANSITION', `Cannot move order from ${source.status} to ${input.target}`);
+    }
+    // [REPORT-014 F-014-02] The acting rider must own the LOCKED row — a
+    // release/reassignment that committed after the route's ownership
+    // pre-read loses here, not after a fabricated DELIVERED terminal.
+    if (input.expectedRiderId !== undefined && source.riderId !== input.expectedRiderId) {
+      throw new AppError(409, 'ACTOR_NOT_ASSIGNED',
+        'This job is no longer assigned to you — it was released or reassigned.');
+    }
+    // [SPS-F-0016] Every canonical transition passes this seam (vendor accept/
+    // prep/ready/self-deliver/pickup-complete, rider legs, /delivered), so the
+    // MMG payment-first gate lives here, on the freshly locked row.
+    assertMmgFulfilmentAllowed(source, input.target);
+    // Defense in depth for every generic/ops caller (including the approved
+    // agent, admin-refund, and courier-sender actions): neither a physical
+    // delivery handoff nor a verified taxi handoff can be terminalized through
+    // the canonical transition seam.  The row was locked and freshly read
+    // above, so pickup/PIN/start/refund races serialize here.  A standard
+    // post-terminal REFUNDED transition remains financial accounting and is
+    // deliberately not treated as a fresh cancellation.
+    const operationalCancellation = isCancellationTerminalization(source.status, input.target);
+    if (
+      operationalCancellation
+      && (
+        IN_TRANSIT.includes(source.status)
+        || (source.orderType === 'TAXI' && hasTaxiPassengerCustody(source))
+      )
+    ) {
+      throw input.invalidStatus?.(source.status)
+        ?? (source.orderType === 'TAXI'
+          ? new AppError(409, 'PASSENGER_IN_CUSTODY', 'A ride cannot be cancelled after passenger handoff. Use the safety or trip-completion flow.')
+          : new AppError(409, 'ORDER_IN_CUSTODY', 'An order cannot be cancelled after pickup. Use the return-to-sender or delivery recovery flow.'));
+    }
+    // [REPORT-006 F-006-01] No negative terminal on captured MMG money: the
+    // store already holds the customer's payment and no refund-obligation rail
+    // exists yet (founder-gated), so CANCELLED/REFUNDED + CAPTURED would record
+    // closed money with no owed path back. Every negative terminalizer shares
+    // this locked seam (vendor reject, admin/ops cancel, no-response
+    // auto-cancel) or the customer-cancel lock, and capture takes the same row
+    // lock — the pair {capture, cancel} is serialized in both commit orders.
+    // The store settles a cancellation of paid MMG money with the customer
+    // directly; the order then completes or stays live for support.
+    if (
+      operationalCancellation
+      && source.paymentMethod === 'MOBILE_MONEY'
+      && source.paymentStatus === 'CAPTURED'
+    ) {
+      throw new AppError(
+        409,
+        'MMG_CANCEL_UNAVAILABLE',
+        'This order is already paid by MMG to the store. The store cancels and refunds you directly — Swift never holds the money.',
+      );
+    }
+
+    const now = new Date();
+    if (input.requireHoldExpired && source.holdExpiresAt && source.holdExpiresAt > now) {
+      throw input.invalidStatus?.(source.status)
+        ?? new AppError(409, 'INVALID_TRANSITION', 'Order is still within its checkout hold');
+    }
+    const data: Prisma.OrderUncheckedUpdateInput = { status: input.target };
+    const timestampField: Partial<Record<OrderStatus, keyof Prisma.OrderUncheckedUpdateInput>> = {
+      ACCEPTED: 'acceptedAt',
+      PREPARING: 'preparingAt',
+      READY_FOR_PICKUP: 'readyAt',
+      PICKED_UP: 'pickedUpAt',
+      DELIVERED: 'deliveredAt',
+      CANCELLED: 'cancelledAt',
+    };
+    const timestamp = timestampField[input.target];
+    if (timestamp) (data as Record<string, unknown>)[timestamp] = now;
+    if (input.cancellation) {
+      data.cancelledAt = now;
+      data.cancelledBy = input.cancellation.by;
+      data.cancellationReason = input.cancellation.reason;
+      if (input.cancellation.lateFeeDue !== undefined) {
+        data.lateCancelFeeDue = input.cancellation.lateFeeDue;
+      }
+    }
+    if (input.terminalMetadata?.actualDeliveryTime !== undefined) {
+      data.actualDeliveryTime = input.terminalMetadata.actualDeliveryTime;
+    }
+    if (input.terminalMetadata?.courierProofPhotoUrl !== undefined) {
+      data.courierProofPhotoUrl = input.terminalMetadata.courierProofPhotoUrl;
+    }
+    await tx.order.update({ where: { id: input.orderId }, data });
+
+    // A REFUNDED transition after CANCELLED/DELIVERED/COMPLETED is accounting
+    // only. Replaying operational cleanup here could cancel historical booking
+    // evidence, close a newer search, or release cash float now committed to a
+    // different order owned by the same mover.
+    const cancellationLike = operationalCancellation;
+    let cancelledSearches = 0;
+    if (cancellationLike) {
+      await tx.booking.updateMany({
+        where: { orderId: input.orderId, status: { not: 'CANCELLED' } },
+        data: { status: 'CANCELLED' },
+      });
+      const searches = await tx.dispatchSearch.updateMany({
+        where: { subjectId: input.orderId, status: { in: ['SEARCHING', 'EXHAUSTED'] } },
+        data: { status: 'CANCELLED', resolution: 'CANCELLED' },
+      });
+      cancelledSearches = searches.count;
+      if (OrderService.restocksOnCancel(source.status)) {
+        await this.restockCancelledOrder(input.orderId, tx);
+      }
+    }
+
+    const releasesMover = input.target === 'DELIVERED'
+      || input.target === 'CANCELLED'
+      || input.target === 'FAILED'
+      || (input.target === 'REFUNDED' && operationalCancellation);
+    if (releasesMover && source.riderId) {
+      if (source.paymentMethod === 'CASH') {
+        await new FloatService(tx).release(tx, source.riderId, Number(source.subtotalBase));
+      }
+      await this.stageRiderRelease(
+        tx,
+        source.riderId,
+        input.orderId,
+        input.target === 'DELIVERED',
+        input.releaseStaleMoverPointer ?? false,
+      );
+    }
+    if (releasesMover && source.driverId) {
+      await this.stageDriverRelease(
+        tx,
+        source.driverId,
+        input.orderId,
+        input.target === 'DELIVERED',
+        input.releaseStaleMoverPointer ?? false,
+        input.target === 'DELIVERED' && (input.decayDriverCancellationRate ?? false),
+      );
+    }
+
+    // The mover's money is canonical state too. Any later failure (including
+    // the immutable status log) rolls earnings and the order back together.
+    const earningNotices = input.target === 'DELIVERED'
+      ? await this.createEarnings(input.orderId, tx, false)
+      : [];
+
+    // [REPORT-008 F-03 tail] EVERY operational negative terminal of an
+    // unattested MMG order carries the ambiguity marker centrally — vendor
+    // reject, agent cancel, admin cancel, and auto-cancel share this seam, so
+    // none of them can close possibly-paid external money without the
+    // immutable evidence the customer-cancel path writes.
+    const mmgUnattestedTerminal = operationalCancellation
+      && source.paymentMethod === 'MOBILE_MONEY'
+      && source.paymentStatus === 'PENDING';
+    await tx.orderStatusLog.create({
+      data: {
+        orderId: input.orderId,
+        status: input.target,
+        changedBy: input.changedBy,
+        note: mmgUnattestedTerminal
+          ? `${input.note ?? 'Cancelled'} — MMG payment UNATTESTED at cancellation: if the customer already paid, the store refunds directly`
+          : input.note,
+      },
+    });
+
+    if (input.operatorAudit) {
+      const changes = input.operatorAudit.changes?.(source.status);
+      await tx.auditLog.create({
+        data: {
+          userId: input.operatorAudit.userId,
+          action: input.operatorAudit.action,
+          entity: input.operatorAudit.entity,
+          entityId: input.operatorAudit.entityId,
+          ...(changes !== undefined ? { changes } : {}),
+          ipAddress: input.operatorAudit.ipAddress,
+          userAgent: input.operatorAudit.userAgent,
+        },
+      });
+    }
+
+    if (input.withinTransaction) await input.withinTransaction(tx);
+
+    const order = await tx.order.findUniqueOrThrow({
+      where: { id: input.orderId },
+      omit: HANDOVER_SECRETS_OMIT,
+      include: CANONICAL_TRANSITION_INCLUDE,
+    });
+    return { order, sourceStatus: source.status, cancelledSearches, earningNotices };
+  }
+
+  /** Serialize a transition on the canonical Order lock, then publish only
+   * after commit. [REPORT-006/007-v4] Every claim entrance now acquires
+   * User → Order → Rider, so the historical Rider→Order inversion is gone;
+   * the P2034 retry below is retained purely as a belt against future
+   * writer drift. Socket/order-status pushes remain owned by each route. */
+  async transitionOrderAtomically(
+    input: CanonicalOrderTransitionInput,
+  ): Promise<CanonicalOrderTransitionResult> {
+    let committed: CanonicalOrderTransitionResult | undefined;
+    for (let attempt = 1; attempt <= 3; attempt += 1) {
+      try {
+        committed = await this.prisma.$transaction((tx) => this.stageCanonicalOrderTransition(tx, input));
+        break;
+      } catch (error) {
+        const retryable = typeof error === 'object'
+          && error !== null
+          && 'code' in error
+          && error.code === 'P2034';
+        if (!retryable || attempt === 3) throw error;
+      }
+    }
+    if (!committed) throw new Error('Order transition transaction did not produce a result');
+
+    if (committed.cancelledSearches > 0) {
+      dispatchSearchesCounter.inc({ status: 'cancelled' }, committed.cancelledSearches);
+    }
+    for (const notice of committed.earningNotices) {
+      await this.notifications
+        .earningAvailable(notice.userId, notice.amount, notice.type)
+        .catch((err) => log().warn({ err, orderId: input.orderId }, 'earning notification failed after order commit'));
+    }
+    return committed;
+  }
+
   async cancelOrder(orderId: string, userId: string, reason?: string) {
-    const order = await this.prisma.order.findFirst({
+    // Fast authorization/existence read. The transaction below deliberately
+    // re-locks and re-reads the order: a direct rider assignment may commit
+    // between these two reads, and cancellation must release THAT fresh
+    // assignment rather than acting on this preview.
+    const preview = await this.prisma.order.findFirst({
       where: { id: orderId, customerId: userId },
       include: {
         vendor: { select: { name: true, ownerId: true } },
@@ -827,95 +1713,173 @@ export class OrderService {
       },
     });
 
-    if (!order) throw new AppError(404, 'NOT_FOUND', 'Order not found');
+    if (!preview) throw new AppError(404, 'NOT_FOUND', 'Order not found');
 
-    if (IN_TRANSIT.includes(order.status)) {
+    if (
+      IN_TRANSIT.includes(preview.status)
+      || (
+        preview.orderType === 'TAXI'
+        && ORDER_TRANSITIONS.CANCELLED.includes(preview.status)
+        && hasTaxiPassengerCustody(preview)
+      )
+    ) {
       throw new AppError(400, 'IN_TRANSIT', 'Order is already on its way and cannot be cancelled');
     }
 
-    const minutesSincePlaced = (Date.now() - order.placedAt.getTime()) / 60000;
-    // LIFECYCLE_V2: the hold IS the free window — nothing was committed to a
-    // vendor or mover yet, so cancelling a held order can never cost anything.
-    const heldNow = isHeld(order) && !order.riderId && !order.driverId;
-    const freeCancellation = heldNow || (minutesSincePlaced <= FREE_CANCEL_WINDOW_MIN && order.status === 'PENDING');
-    const cancellationFee = freeCancellation ? 0 : LATE_CANCEL_FEE;
+    type CancellationOrder = NonNullable<typeof preview>;
+    let committed: {
+      order: CancellationOrder;
+      heldNow: boolean;
+      freeCancellation: boolean;
+      cancellationFee: number;
+      cancelledSearches: number;
+    } | undefined;
 
-    // Same compare-and-set machinery as every other transition: if the order
-    // moved (e.g. the vendor accepted into a non-cancellable state, or it was
-    // already cancelled) this throws instead of silently overwriting.
-    const applied = await this.prisma.order.updateMany({
-      where: { id: orderId, status: { in: ORDER_TRANSITIONS.CANCELLED } },
-      data: {
-        status: 'CANCELLED',
-        cancelledAt: new Date(),
-        cancelledBy: userId,
-        cancellationReason: reason,
-        // Founder decision #5: the announced fee is RECORDED as a marker
-        // (cash-only — never collected). Feeds the risk score's late-cancel
-        // signal and admin visibility; 0 on free cancels.
-        lateCancelFeeDue: cancellationFee,
-      },
-    });
-    if (applied.count === 0) {
-      const current = await this.prisma.order.findUnique({ where: { id: orderId }, select: { status: true } });
-      throw new AppError(400, 'INVALID_STATUS', `This order is ${current?.status ?? 'gone'} and cannot be cancelled`);
-    }
+    // Every claim entrance now locks User → Order → Rider [REPORT-006], the
+    // same Order→Rider suffix as this path — the historical inversion is
+    // gone. The retry loop stays as a belt against future writer drift: this
+    // idempotent cancellation boundary must never surface a spurious 500.
+    // (Historical rationale: direct CASH assignment once locked Rider before
+    // Order and PostgreSQL resolved the opposing interleaving by aborting one
+    // transaction.)
+    for (let attempt = 1; attempt <= 3; attempt += 1) {
+      try {
+        committed = await this.prisma.$transaction(async (tx) => {
+          await lockTaxiOrderForCustodyDecision(tx, orderId);
+          const order = await tx.order.findFirst({
+            where: { id: orderId, customerId: userId },
+            include: {
+              vendor: { select: { name: true, ownerId: true } },
+              driver: { select: { userId: true } },
+            },
+          });
+          if (!order) throw new AppError(404, 'NOT_FOUND', 'Order not found');
+          if (
+            IN_TRANSIT.includes(order.status)
+            || (
+              order.orderType === 'TAXI'
+              && ORDER_TRANSITIONS.CANCELLED.includes(order.status)
+              && hasTaxiPassengerCustody(order)
+            )
+          ) {
+            throw new AppError(400, 'IN_TRANSIT', 'Order is already on its way and cannot be cancelled');
+          }
+          if (!ORDER_TRANSITIONS.CANCELLED.includes(order.status)) {
+            throw new AppError(400, 'INVALID_STATUS', `This order is ${order.status} and cannot be cancelled`);
+          }
+          // [REPORT-006 F-006-01] Checked from the LOCKED row: a vendor
+          // capture serializes on this same orders lock, so cancel-after-
+          // capture refuses here and capture-after-cancel refuses in the
+          // capture CAS — CANCELLED+CAPTURED can no longer be minted in
+          // either commit order. PENDING MMG stays cancellable (the only
+          // exit from an unpaid MMG order); if external money landed
+          // unattested, the capture path's closed-order refusal directs the
+          // store to refund directly.
+          if (order.paymentMethod === 'MOBILE_MONEY' && order.paymentStatus === 'CAPTURED') {
+            throw new AppError(
+              409,
+              'MMG_CANCEL_UNAVAILABLE',
+              'This order is already paid by MMG to the store. The store cancels and refunds you directly — Swift never holds the money.',
+            );
+          }
 
-    // Cancelling an accepted appointment frees its slot
-    await this.prisma.booking.updateMany({
-      where: { orderId, status: { not: 'CANCELLED' } },
-      data: { status: 'CANCELLED' },
-    });
+          const now = new Date();
+          const minutesSincePlaced = (now.getTime() - order.placedAt.getTime()) / 60000;
+          // LIFECYCLE_V2: the hold IS the free window — nothing was committed to
+          // a vendor or mover yet, so cancelling a held order is always free.
+          const heldNow = isHeld(order, now) && !order.riderId && !order.driverId;
+          const freeCancellation = heldNow
+            || (minutesSincePlaced <= FREE_CANCEL_WINDOW_MIN && order.status === 'PENDING');
+          const cancellationFee = freeCancellation ? 0 : LATE_CANCEL_FEE;
 
-    // Search journal (availability spec §3): a live search dies with its order.
-    await this.prisma.dispatchSearch
-      .updateMany({
-        where: { subjectId: orderId, status: { in: ['SEARCHING', 'EXHAUSTED'] } },
-        data: { status: 'CANCELLED', resolution: 'CANCELLED' },
-      })
-      .then((r) => {
-        if (r.count > 0) dispatchSearchesCounter.inc({ status: 'cancelled' });
-      })
-      .catch(() => {});
+          // The row lock makes this update and every dependent release below one
+          // canonical state transition. No stale riderId/driverId can escape.
+          await tx.order.update({
+            where: { id: orderId },
+            data: {
+              status: 'CANCELLED',
+              cancelledAt: now,
+              cancelledBy: userId,
+              cancellationReason: reason,
+              // Founder decision #5: recorded cash-only marker, never collected.
+              lateCancelFeeDue: cancellationFee,
+            },
+          });
 
-    // The goods never left the store — tracked stock goes back on the shelf
-    await this.restockCancelledOrder(orderId);
+          await tx.booking.updateMany({
+            where: { orderId, status: { not: 'CANCELLED' } },
+            data: { status: 'CANCELLED' },
+          });
 
-    await this.prisma.orderStatusLog.create({
-      data: { orderId, status: 'CANCELLED', changedBy: userId, note: reason || 'Cancelled by customer' },
-    });
+          const searches = await tx.dispatchSearch.updateMany({
+            where: { subjectId: orderId, status: { in: ['SEARCHING', 'EXHAUSTED'] } },
+            data: { status: 'CANCELLED', resolution: 'CANCELLED' },
+          });
 
-    // Free up assigned rider — and give back the float they committed for a
-    // CASH order (this path does its own CAS and never reaches updateStatus).
-    if (order.riderId) {
-      if (order.paymentMethod === 'CASH') {
-        await new FloatService(this.prisma).release(this.prisma, order.riderId, Number(order.subtotalBase));
-      }
-      await this.prisma.rider.update({
-        where: { id: order.riderId },
-        data: { isAvailable: true, currentOrderId: null },
-      });
-    }
+          // Stock, immutable status evidence, float, and mover availability are
+          // part of the same commit as CANCELLED — never compensating writes.
+          await this.restockCancelledOrder(orderId, tx);
+          // [REPORT-007-v4 F-02] A PENDING-MMG cancellation is AMBIGUOUS money:
+          // the customer may have completed the external transfer before the
+          // store attested. Record that ambiguity in the immutable evidence in
+          // the SAME commit — the platform's durable acknowledgement that a
+          // direct store refund may be owed (the full amount-bearing
+          // obligation rail is a registered founder decision).
+          const mmgUnattested = order.paymentMethod === 'MOBILE_MONEY' && order.paymentStatus === 'PENDING';
+          await tx.orderStatusLog.create({
+            data: {
+              orderId,
+              status: 'CANCELLED',
+              changedBy: userId,
+              note: `${reason || 'Cancelled by customer'}${mmgUnattested ? ' — MMG payment UNATTESTED at cancellation: if the customer already paid, the store refunds directly' : ''}`,
+            },
+          });
 
-    // A taxi cancelled after assignment frees its driver the same way.
-    if (order.driverId) {
-      await this.prisma.driver.updateMany({
-        where: { id: order.driverId, currentRideId: orderId },
-        data: { isAvailable: true, currentRideId: null },
-      });
-      // The socket room only reaches a foregrounded app that subscribed to this
-      // ride. A driver already en route with the app backgrounded would keep
-      // driving to a pickup the rider abandoned — push them to stop. Best-effort:
-      // NotificationService.send never throws, but a null userId shouldn't try.
-      if (order.driver?.userId) {
-        await this.notifications.send({
-          userId: order.driver.userId,
-          type: 'ORDER_UPDATE',
-          title: 'Ride cancelled',
-          body: 'The passenger cancelled this ride. You can stop and go back online.',
-          data: { orderId, status: 'CANCELLED' },
+          if (order.riderId) {
+            if (order.paymentMethod === 'CASH') {
+              await new FloatService(tx).release(tx, order.riderId, Number(order.subtotalBase));
+            }
+            await this.stageRiderRelease(tx, order.riderId, orderId, false, true);
+          }
+
+          if (order.driverId) {
+            await this.stageDriverRelease(tx, order.driverId, orderId, false, true);
+          }
+
+          return {
+            order,
+            heldNow,
+            freeCancellation,
+            cancellationFee,
+            cancelledSearches: searches.count,
+          };
         });
+        break;
+      } catch (error) {
+        const retryable = typeof error === 'object'
+          && error !== null
+          && 'code' in error
+          && error.code === 'P2034';
+        if (!retryable || attempt === 3) throw error;
       }
+    }
+
+    if (!committed) throw new Error('Cancellation transaction did not produce a result');
+    const { order, heldNow, freeCancellation, cancellationFee, cancelledSearches } = committed;
+    if (cancelledSearches > 0) dispatchSearchesCounter.inc({ status: 'cancelled' }, cancelledSearches);
+
+    // The socket room only reaches a foregrounded app that subscribed to this
+    // ride. A driver already en route with the app backgrounded would keep
+    // driving to a pickup the rider abandoned — push them to stop. This network
+    // side effect starts only after the canonical cancellation commits.
+    if (order.driver?.userId) {
+      await this.notifications.send({
+        userId: order.driver.userId,
+        type: 'ORDER_UPDATE',
+        title: 'Ride cancelled',
+        body: 'The passenger cancelled this ride. You can stop and go back online.',
+        data: { orderId, status: 'CANCELLED' },
+      });
     }
 
     this.io.to(`order:${orderId}`).emit('order:status_changed', { orderId, status: 'CANCELLED' });
@@ -924,111 +1888,61 @@ export class OrderService {
     if (order.vendorId && !heldNow) {
       this.io.to(`vendor:${order.vendorId}`).emit('order:status_changed', { orderId, status: 'CANCELLED' });
     }
+    // [REPORT-007-v4 F-02 / REPORT-008 F-02] The store must LEARN a
+    // possibly-paid MMG order was cancelled — it holds the only rail that can
+    // make the customer whole. HELD orders are NOT exempt: the pay link went
+    // live at checkout (mobile auto-opens it), so money can be in flight
+    // during the exact window the vendor board hides the order — this
+    // liability notice is how the otherwise-unaware store finds out.
+    if (order.paymentMethod === 'MOBILE_MONEY' && order.paymentStatus === 'PENDING' && order.vendorId) {
+      await publishUnattestedMmgCancellation(this.prisma, this.notifications, {
+        orderId,
+        orderNumber: order.orderNumber,
+        vendorId: order.vendorId,
+        storeBody: `Order ${order.orderNumber} was cancelled before you confirmed its MMG payment. If the customer's transfer arrived in your MMG, refund them directly.`,
+      });
+    }
 
+    // [REPORT-007-v4 F-02] Never assert "no charge" on an MMG order: PENDING
+    // is absence of the store's attestation, not proof the customer's external
+    // transfer didn't happen. The platform cannot know, so it says what is
+    // true and points at the party who holds the money.
+    if (order.paymentMethod === 'MOBILE_MONEY') {
+      return {
+        message: 'Order cancelled. If you already sent the MMG payment, the store refunds you directly.',
+        cancellationFee,
+      };
+    }
     return { message: freeCancellation ? 'Order cancelled — no charge' : 'Order cancelled', cancellationFee };
   }
 
-  async updateStatus(orderId: string, status: string, changedBy: string, note?: string) {
+  async updateStatus(
+    orderId: string,
+    status: string,
+    changedBy: string,
+    note?: string,
+    opts?: { withinTransaction?: (tx: Prisma.TransactionClient) => Promise<void> },
+  ) {
     const target = status as OrderStatus;
     const allowedFrom = ORDER_TRANSITIONS[target];
     if (!allowedFrom || allowedFrom.length === 0) {
       throw new AppError(409, 'INVALID_TRANSITION', `No order may transition into ${status}`);
     }
 
-    const statusTimestamps: Record<string, string> = {
-      ACCEPTED: 'acceptedAt',
-      PREPARING: 'preparingAt',
-      READY_FOR_PICKUP: 'readyAt',
-      PICKED_UP: 'pickedUpAt',
-      DELIVERED: 'deliveredAt',
-      CANCELLED: 'cancelledAt',
-    };
-
-    const updateData: Record<string, unknown> = { status: target };
-    const tsField = statusTimestamps[status];
-    if (tsField) updateData[tsField] = new Date();
-
-    // Compare-and-set: the transition only lands if the order is still in an
-    // allowed source state. Concurrent racers (vendor accepting vs customer
-    // cancelling) resolve to exactly one winner at the database.
-    const applied = await this.prisma.order.updateMany({
-      where: { id: orderId, status: { in: allowedFrom } },
-      data: updateData,
-    });
-
-    if (applied.count === 0) {
-      const current = await this.prisma.order.findUnique({ where: { id: orderId }, select: { status: true } });
-      if (!current) throw new AppError(404, 'NOT_FOUND', 'Order not found');
-      throw new AppError(409, 'INVALID_TRANSITION', `Cannot move order from ${current.status} to ${status}`);
-    }
-
-    const order = await this.prisma.order.findUniqueOrThrow({
-      where: { id: orderId },
-      include: {
-        vendor: { select: { name: true, ownerId: true } },
-        rider: { include: { user: { select: { firstName: true } } } },
-      },
-    });
-
-    // D.3 — release the rider's committed float on a terminal CASH transition.
-    // FAILED is terminal too (no_show/refused handover) — the cash never left
-    // the rider's float, so it must come back.
-    const terminal = status === 'DELIVERED' || status === 'CANCELLED' || status === 'FAILED';
-    if (terminal && order.riderId && order.paymentMethod === 'CASH') {
-      await new FloatService(this.prisma).release(this.prisma, order.riderId, Number(order.subtotalBase));
-    }
-
-    // Free the mover on ANY terminal transition. Guarded on currentOrderId /
-    // currentRideId so it is idempotent with route-level freeing and never
-    // clobbers a mover who already moved on to a new job. Without this, a
-    // delivery completed through the cash handover left the rider invisible
-    // to dispatch forever (isAvailable=false, currentOrderId stuck).
-    if (terminal) {
-      if (order.riderId) {
-        await this.prisma.rider.updateMany({
-          where: { id: order.riderId, currentOrderId: orderId },
-          data: {
-            isAvailable: true,
-            currentOrderId: null,
-            ...(status === 'DELIVERED' ? { totalDeliveries: { increment: 1 } } : {}),
-          },
-        });
-      }
-      if (order.driverId) {
-        await this.prisma.driver.updateMany({
-          where: { id: order.driverId, currentRideId: orderId },
-          data: {
-            isAvailable: true,
-            currentRideId: null,
-            ...(status === 'DELIVERED' ? { totalRides: { increment: 1 } } : {}),
-          },
-        });
-      }
-
-      // [F-0028] Pay the mover HERE, on the transition itself, not at the call
-      // site. Four routes used to do `updateStatus(DELIVERED)` then
-      // `createEarnings(id)` as two separate statements, so a crash in between
-      // lost the rider's fee and tip permanently — and the withIdempotency
-      // retry could not heal it, because re-running the closure hits
-      // INVALID_TRANSITION (the order is no longer in an allowed source state)
-      // and never reaches the earnings call. Earnings now have exactly one
-      // owner: whoever moves an order to DELIVERED pays for it. Idempotent via
-      // @@unique([orderId, type]) + skipDuplicates, so the reconciler below and
-      // any remaining explicit call are safe no-ops.
-      if (status === 'DELIVERED') {
-        await this.createEarnings(orderId);
-      }
-    }
-
-    // Every CANCELLED source state precedes handover — restock tracked items.
-    // Exactly-once: only the CAS winner above reaches this line.
-    if (status === 'CANCELLED') {
-      await this.restockCancelledOrder(orderId);
-    }
-
-    // Append-only event log — every transition leaves evidence
-    await this.prisma.orderStatusLog.create({
-      data: { orderId, status: target, changedBy, note },
+    // Status, timestamps, terminal mover/float release, stock, earnings, and
+    // append-only evidence share one commit. Only sockets/push happen below.
+    const { order } = await this.transitionOrderAtomically({
+      orderId,
+      target,
+      allowedFrom,
+      changedBy,
+      note,
+      ...(opts?.withinTransaction ? { withinTransaction: opts.withinTransaction } : {}),
+      invalidStatus: (current) => new AppError(
+        409,
+        'INVALID_TRANSITION',
+        `Cannot move order from ${current} to ${status}`,
+      ),
     });
 
     log().info({ orderId, orderNumber: order.orderNumber, status, changedBy, vendorId: order.vendorId }, 'order: status changed');
@@ -1152,20 +2066,36 @@ export class OrderService {
     return { released };
   }
 
-  async createEarnings(orderId: string) {
-    const order = await this.prisma.order.findUnique({
+  async createEarnings(
+    orderId: string,
+    db: PrismaClient | Prisma.TransactionClient = this.prisma,
+    notify = true,
+  ): Promise<EarningNotice[]> {
+    const order = await db.order.findUnique({
       where: { id: orderId },
-      select: { riderId: true, driverId: true, deliveryFee: true, tipAmount: true, orderType: true, taxiFareTotal: true, paymentMethod: true, vendorId: true },
+      select: {
+        riderId: true, driverId: true, deliveryFee: true, tipAmount: true,
+        orderType: true, taxiFareTotal: true, paymentMethod: true,
+        paymentStatus: true, vendorId: true,
+      },
     });
-    if (!order) return;
+    if (!order) return [];
+    // [SPS-F-0016 / REPORT-004 F-004-03] Earnings are downstream of money
+    // actually confirmed. An unpaid MMG order must never mint AVAILABLE
+    // earnings or a vendor debt — not from a route, and not from the scheduled
+    // reconciler sweeping legacy DELIVERED rows.
+    assertMmgFulfilmentAllowed(order, 'DELIVERED');
 
-    // MMG direct-pay: the customer paid the STORE (not the rider), so the store
-    // owes the rider the delivery fee IN CASH. Record the debt for the dual-
-    // confirm ledger (idempotent — orderId is unique). Swift moves no money.
-    if (order.paymentMethod === 'MOBILE_MONEY' && order.riderId && order.vendorId && Number(order.deliveryFee) > 0) {
-      await this.prisma.deliveryCashSettlement.upsert({
+    // MMG direct-pay: the customer paid the STORE (not the rider), and the
+    // order total the store received INCLUDES the rider's tip — so the store
+    // owes the rider the delivery fee PLUS the tip in cash [SPS-F-0016b].
+    // A zero-fee promo with a tip still owes the tip. Record the debt for the
+    // dual-confirm ledger (idempotent — orderId is unique). Swift moves no money.
+    const settlementDue = Number(order.deliveryFee) + Number(order.tipAmount);
+    if (order.paymentMethod === 'MOBILE_MONEY' && order.riderId && order.vendorId && settlementDue > 0) {
+      await db.deliveryCashSettlement.upsert({
         where: { orderId },
-        create: { orderId, riderId: order.riderId, vendorId: order.vendorId, amount: Number(order.deliveryFee) },
+        create: { orderId, riderId: order.riderId, vendorId: order.vendorId, amount: settlementDue },
         update: {},
       });
     }
@@ -1223,82 +2153,63 @@ export class OrderService {
       }
     }
 
+    const notices: EarningNotice[] = [];
     if (earnings.length > 0) {
       // skipDuplicates + the @@unique([orderId, type]) index makes this
       // idempotent: a concurrent second completion of the same order inserts
       // nothing rather than double-paying the mover.
-      await this.prisma.earning.createMany({ data: earnings, skipDuplicates: true });
+      const created = await db.earning.createMany({ data: earnings, skipDuplicates: true });
+      // Explicit legacy createEarnings() calls still follow some DELIVERED
+      // routes. The canonical transition already inserted the rows, so a fully
+      // duplicate call must not send the mover a second "earning available"
+      // notification for the same money.
+      if (created.count === 0) return [];
 
-      // Notify rider/driver
+      // Resolve recipients while still on the caller's DB boundary. The actual
+      // network/push publication is optional and, for a canonical transition,
+      // runs only after its transaction commits.
       for (const earning of earnings) {
         const userId = earning.riderId || earning.driverId;
         if (userId) {
           const entity = earning.riderId
-            ? await this.prisma.rider.findUnique({ where: { id: userId }, select: { userId: true } })
-            : await this.prisma.driver.findUnique({ where: { id: userId }, select: { userId: true } });
+            ? await db.rider.findUnique({ where: { id: userId }, select: { userId: true } })
+            : await db.driver.findUnique({ where: { id: userId }, select: { userId: true } });
           if (entity) {
-            await this.notifications.earningAvailable(entity.userId, earning.amount, earning.type);
+            notices.push({ userId: entity.userId, amount: earning.amount, type: earning.type });
           }
         }
       }
     }
+    if (notify) {
+      for (const notice of notices) {
+        await this.notifications.earningAvailable(notice.userId, notice.amount, notice.type);
+      }
+    }
+    return notices;
   }
 
-  /** Post-delivery tip. Uber-style: the customer can tip AFTER the job, not
-   *  only at checkout. Rules (migration-free + abuse-safe): the order must be
-   *  the caller's, delivered/completed within the last 7 days, have a mover,
-   *  and carry NO tip yet (tip at checkout OR after, once). The tip becomes an
-   *  AVAILABLE TIP earning for the mover — 100% theirs, like every fee. */
+  /** [SPS-F-0016c / LB-015] Post-delivery tipping FAILS CLOSED. No rail
+   *  COLLECTS a tip after the job: a cash customer has already left, and an
+   *  MMG customer paid the store directly at checkout. The previous behaviour
+   *  minted an AVAILABLE TIP earning (and grew the order total) from money
+   *  nobody collected — a debt with no sponsor. The route stays mounted
+   *  (shipped apps still call it) but refuses until a real collection/
+   *  authorization/capture path exists — founder-gated. Ownership is checked
+   *  FIRST so a stranger still sees 404, never this 409. Tips chosen at
+   *  checkout are collected with the order total and are untouched
+   *  (createEarnings + the MMG settlement ledger). */
   async addPostDeliveryTip(orderId: string, userId: string, amount: number) {
     if (amount <= 0 || amount > 50_000) throw new AppError(400, 'INVALID_TIP', 'Enter a tip between 1 and 50,000.');
     const order = await this.prisma.order.findFirst({
       where: { id: orderId, customerId: userId },
-      select: { id: true, status: true, deliveredAt: true, tipAmount: true, riderId: true, driverId: true, orderType: true },
+      select: { id: true },
     });
     if (!order) throw new AppError(404, 'NOT_FOUND', 'Order not found');
-    if (!['DELIVERED', 'COMPLETED'].includes(order.status)) {
-      throw new AppError(400, 'NOT_TIPPABLE', 'You can only tip a completed order.');
-    }
-    if (!order.riderId && !order.driverId) {
-      throw new AppError(400, 'NO_MOVER', 'This order had no rider or driver to tip.');
-    }
-    if (Number(order.tipAmount) > 0) {
-      throw new AppError(409, 'ALREADY_TIPPED', 'A tip was already added to this order.');
-    }
-    const deliveredAt = order.deliveredAt?.getTime() ?? 0;
-    if (deliveredAt && Date.now() - deliveredAt > 7 * 24 * 60 * 60 * 1000) {
-      throw new AppError(400, 'TIP_WINDOW_CLOSED', 'Tips can be added for up to 7 days after delivery.');
-    }
-
-    // Serialize on the order row so two taps can't both create a tip.
-    await this.prisma.$transaction(async (tx) => {
-      await tx.$queryRaw`SELECT id FROM "orders" WHERE id = ${orderId} FOR UPDATE`;
-      const fresh = await tx.order.findUniqueOrThrow({ where: { id: orderId }, select: { tipAmount: true } });
-      if (Number(fresh.tipAmount) > 0) throw new AppError(409, 'ALREADY_TIPPED', 'A tip was already added to this order.');
-      // The tip is part of what the customer pays, so it must land in BOTH
-      // tipAmount AND the grand total — otherwise the receipt lines (which
-      // include the tip) no longer sum to the printed total, and admin GMV
-      // undercounts every post-delivery tip. (The rider is paid correctly either
-      // way via the earnings ledger below; this fixes the customer-facing total.)
-      await tx.order.update({ where: { id: orderId }, data: { tipAmount: amount, totalAmount: { increment: amount } } });
-      await tx.earning.create({
-        data: {
-          ...(order.riderId ? { riderId: order.riderId } : { driverId: order.driverId }),
-          orderId,
-          type: 'TIP',
-          amount,
-          status: 'AVAILABLE',
-        },
-      });
-    });
-
-    const moverEntity = order.riderId
-      ? await this.prisma.rider.findUnique({ where: { id: order.riderId }, select: { userId: true } })
-      : await this.prisma.driver.findUnique({ where: { id: order.driverId! }, select: { userId: true } });
-    if (moverEntity) await this.notifications.earningAvailable(moverEntity.userId, amount, 'TIP');
-
-    log().info({ orderId, userId, amount }, 'order: post-delivery tip added');
-    return { orderId, tipAmount: amount };
+    throw new AppError(
+      409,
+      'TIP_COLLECTION_UNAVAILABLE',
+      'Tips after delivery aren’t available yet — tips added at checkout still go to your mover in full.',
+    );
   }
 
   async reorder(userId: string, orderId: string) {
@@ -1475,6 +2386,17 @@ export async function reconcileMissingEarnings(
       // Only a mover earns. Pickup and appointment orders have neither and are
       // correctly absent from this sweep.
       OR: [{ riderId: { not: null } }, { driverId: { not: null } }],
+      // [SPS-F-0016 / REPORT-004 F-004-03] Never sweep unconfirmed MMG money
+      // into earnings: a legacy delivered-but-unpaid MMG row stays unhealed
+      // (and un-debted) until the store confirms the capture. TAXI settles
+      // driver-direct and is exempt, mirroring assertMmgFulfilmentAllowed.
+      AND: [{
+        OR: [
+          { paymentMethod: { not: 'MOBILE_MONEY' } },
+          { orderType: 'TAXI' },
+          { paymentStatus: 'CAPTURED' },
+        ],
+      }],
     },
     select: { id: true },
     orderBy: { deliveredAt: 'asc' },

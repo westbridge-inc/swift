@@ -1,0 +1,5 @@
+# Fingerprint allowlist — verified NON-secrets only. Format: <commit>:<file>:<rule>:<line>
+# boot-config.test.ts asserts the OTP secret VALIDATOR accepts a >=32-char value; the
+# fixture string is literally named "dedicated-otp-secret-at-least-32-chars" and guards
+# real config hygiene. Verified false positive 2026-08-15 (baseline scan) + 2026-08-17.
+a9098c8ff4db34dd95f2d334f674d9c564452b60:apps/api/src/__tests__/boot-config.test.ts:generic-api-key:57

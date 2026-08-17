@@ -1,0 +1,20 @@
+appId: gy.swift.app
+name: Local iOS smoke - role picker
+tags:
+  - local-smoke
+---
+- runFlow: ../subflows/reset-to-role-picker.yaml
+- assertVisible:
+    id: role-picker-customer
+- assertVisible:
+    id: role-picker-mover
+- assertVisible:
+    id: role-picker-vendor
+- assertVisible:
+    id: role-picker-sign-in
+- assertVisible:
+    id: role-picker-preview-driver
+- assertVisible:
+    id: role-picker-preview-business
+- assertVisible:
+    id: role-picker-advertiser

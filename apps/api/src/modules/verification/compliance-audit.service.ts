@@ -45,14 +45,18 @@ export class ComplianceAuditService {
       }),
       this.prisma.rider.findMany({
         where: { isOnline: true },
-        select: { userId: true, vehicleType: true },
+        select: { userId: true, documentsVerified: true, vehicleType: true },
       }),
     ]);
 
     type Subject = { userId: string; moverKind: 'DRIVER' | 'RIDER'; vehicleType: VehicleType; legacyVerified?: boolean };
+    // [EV-ACT-18] SAME authority as GO for BOTH pools: rider GO honours the
+    // legacy documentsVerified grandfather, so the audit must too — the old
+    // asymmetry let a legacy-only rider go online and then yanked them on the
+    // next daily sweep for evidence GO never required. One evaluator, one law.
     const subjects: Subject[] = [
       ...drivers.map((d) => ({ userId: d.userId, moverKind: 'DRIVER' as const, vehicleType: d.vehicleType, legacyVerified: d.documentsVerified })),
-      ...riders.map((r) => ({ userId: r.userId, moverKind: 'RIDER' as const, vehicleType: r.vehicleType })),
+      ...riders.map((r) => ({ userId: r.userId, moverKind: 'RIDER' as const, vehicleType: r.vehicleType, legacyVerified: r.documentsVerified })),
     ];
 
     let violations = 0;

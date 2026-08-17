@@ -1,6 +1,12 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { servicesApi } from '../services/api';
 import { track } from '../lib/analytics';
+import { unwrapOptionalServiceProviderProfile } from '../lib/serviceProviderProfile';
+import {
+  requireAuthSessionForPrincipal,
+  requireAuthSessionSnapshot,
+  useAuthStore,
+} from '../stores/authStore';
 
 async function unwrap<T = any>(p: Promise<any>): Promise<T> {
   const r = await p;
@@ -12,6 +18,63 @@ export function useServiceProviders<T = any>(trade?: string) {
     queryKey: ['services', 'providers', trade],
     queryFn: () => unwrap<T>(servicesApi.providers(trade as string)),
     enabled: !!trade,
+  });
+}
+
+/** A 404 is the valid "start onboarding" state. Auth, network, and 5xx
+ * failures remain visible errors so the app never invents an empty profile. */
+export function useServiceProviderProfile<T = any>() {
+  const userId = useAuthStore((state) => state.user?.id);
+  return useQuery<T | null>({
+    queryKey: ['services', 'provider-me', userId],
+    queryFn: async () => {
+      const owner = requireAuthSessionSnapshot();
+      const provider = await unwrapOptionalServiceProviderProfile<T>(servicesApi.providerMe(owner));
+      requireAuthSessionForPrincipal(owner);
+      return provider;
+    },
+    enabled: !!userId,
+    retry: 2,
+    retryDelay: (attempt) => Math.min(500 * (2 ** attempt), 2_000),
+    // Approval updates ServiceProvider.isVerified server-side. Poll only while
+    // an existing profile is waiting so public-listability state catches up.
+    refetchInterval: (query) => {
+      const provider = query.state.data as { isVerified?: boolean } | null | undefined;
+      return provider && !provider.isVerified ? 15_000 : false;
+    },
+  });
+}
+
+export function useSaveServiceProvider() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async (data: { trade: string; bio?: string; portfolioPhotos?: string[] }) => {
+      const owner = requireAuthSessionSnapshot();
+      const result = await unwrap(servicesApi.saveProvider(data, owner));
+      requireAuthSessionForPrincipal(owner);
+      return result;
+    },
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: ['services', 'provider-me'] });
+      void qc.invalidateQueries({ queryKey: ['services', 'providers'] });
+      void qc.invalidateQueries({ queryKey: ['verification', 'SERVICE_PROVIDER'] });
+    },
+  });
+}
+
+export function useAddServiceQualification() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async (data: {
+      type: 'GEI_LICENCE' | 'CVQ' | 'GTEE' | 'CITY_AND_GUILDS' | 'OTHER';
+      referenceNumber?: string;
+    }) => {
+      const owner = requireAuthSessionSnapshot();
+      const result = await unwrap(servicesApi.addQualification(data, owner));
+      requireAuthSessionForPrincipal(owner);
+      return result;
+    },
+    onSuccess: () => void qc.invalidateQueries({ queryKey: ['services', 'provider-me'] }),
   });
 }
 

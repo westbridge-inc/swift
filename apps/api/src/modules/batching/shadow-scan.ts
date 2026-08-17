@@ -47,10 +47,16 @@ export async function runShadowScan(prisma: PrismaClient, now = new Date()): Pro
     select: {
       id: true, orderType: true, courierPackageSize: true, totalAmount: true, paymentMethod: true,
       pickupLat: true, pickupLng: true, deliveryLat: true, deliveryLng: true, vendorId: true,
+      tenantId: true,
     },
     orderBy: { createdAt: 'asc' },
     take: 60, // 60 orders → ≤1,770 raw pairs; the eval cap bounds the work
   });
+  // [REPORT-014 F-014-03 S2] A run can NEVER pair across operators: tenant is
+  // part of pair identity, and every evaluation row is attributed to the
+  // pair's own tenant (settings remain the default-tenant config for now —
+  // per-tenant batching settings ride the multi-tenant config track).
+  const tenantOf = new Map(waiting.map((o) => [o.id, o.tenantId]));
   if (waiting.length < 2) return { evaluated: 0, wouldBatch: 0, capped: false };
 
   const toCandidate = (o: (typeof waiting)[number]): CandidateOrder | null => {
@@ -90,6 +96,7 @@ export async function runShadowScan(prisma: PrismaClient, now = new Date()): Pro
       }
       const a = candidates[i]!;
       const b = candidates[j]!;
+      if (tenantOf.get(a.orderId) !== tenantOf.get(b.orderId)) continue; // never cross-tenant
       const pairKey = [a.orderId, b.orderId].sort().join('|');
       if (seenPairs.has(pairKey)) continue;
       evaluated += 1;
@@ -107,6 +114,7 @@ export async function runShadowScan(prisma: PrismaClient, now = new Date()): Pro
         wouldBatch += 1;
         await prisma.batchEvaluation.create({
           data: {
+            tenantId: tenantOf.get(a.orderId)!,
             orderId: a.orderId,
             decision: 'SHADOW_WOULD_BATCH',
             rulesChecked: rules as never,

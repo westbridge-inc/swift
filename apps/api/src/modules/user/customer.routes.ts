@@ -15,7 +15,7 @@ import { computeDaySlots, fmtSlotTime } from '../booking/availability';
 import { seedRatingTags, tagsForRole } from '../rating/tag-taxonomy.seed';
 import { RATING_MAX_TAGS } from '../rating/rating-math';
 import { ratingSurfaces, NEW_ACTOR_SURFACE } from '../rating/rating-surface';
-import { randomInt } from 'node:crypto';
+import { createHash, randomInt } from 'node:crypto';
 import { OrderService } from '../order/order.service';
 import { PickingService } from '../order/picking.service';
 import { dispatchSearchesCounter } from '../../plugins/observability';
@@ -24,6 +24,8 @@ import { RatingService } from '../rating/rating.service';
 import { NotificationService } from '../notification/notification.service';
 import { SupportService } from '../support/support.service';
 import { AccountService } from './account.service';
+import { transitionUserRoleAuthority } from '../mover-authority';
+import { safeMmgPayUrl, validateMmgPayUrl } from '../../utils/mmg-pay-url';
 
 // ---------------------------------------------------------------------------
 // Input schemas
@@ -98,10 +100,15 @@ const cartInstructionsSchema = z.object({
   instructions: z.string().max(500),
 });
 
+// [REPORT-013 F-013-02] The tip ceiling binds at EVERY tip entrance: the
+// cart endpoint enforced 50,000 while direct checkout accepted the generic
+// 99,999,999 storage ceiling — the same value the cart rejected.
+const MAX_TIP_GYD = 50_000;
+
 const checkoutSchema = z.object({
   paymentMethod: z.string().max(30).optional(),
   deliveryInstructions: z.string().max(500).optional(),
-  tipAmount: zMoneyMinor.optional(),
+  tipAmount: zMoneyMinor.max(MAX_TIP_GYD).optional(),
   scheduledFor: z.string().max(40).optional(),
   promoCode: z.string().max(40).optional(),
   // Per-vendor DELIVERY|PICKUP choice for multi-vendor carts
@@ -191,7 +198,6 @@ const MAX_ADDRESSES = 10;
 // lossless at launch scale; the large-scale path is a geo-bounded (PostGIS)
 // fetch of the nearest N, tracked separately.
 const HOME_DISCOVERY_SCAN_CAP = 500;
-const MAX_TIP_GYD = 50_000;
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -249,6 +255,45 @@ async function buildCartResponse(
   if (!cart || cart.items.length === 0) {
     return null;
   }
+
+  // PU-05: payment capability belongs to the WHOLE cart, not cart.vendor
+  // (which only tracks the most recently added vendor). MMG stays launch-safe
+  // and coherent: exactly one unique vendor, with one currently valid direct-
+  // pay destination. The raw destination is intentionally absent here.
+  const paymentVendorIds = [...new Set(cart.items.map((item) => item.item.vendorId))].sort();
+  const paymentVendors = await app.prisma.vendor.findMany({
+    where: { id: { in: paymentVendorIds } },
+    select: { id: true, mmgPayUrl: true },
+    orderBy: { id: 'asc' },
+  });
+  const singlePaymentVendor = paymentVendorIds.length === 1 && paymentVendors.length === 1
+    ? paymentVendors[0]!
+    : null;
+  const mmgValidation = singlePaymentVendor
+    ? validateMmgPayUrl(singlePaymentVendor.mmgPayUrl)
+    : null;
+  const mmgAvailable = mmgValidation?.valid === true;
+  const mmgUnavailableReason = paymentVendorIds.length !== 1
+    ? 'MULTI_VENDOR_UNSUPPORTED' as const
+    : !singlePaymentVendor?.mmgPayUrl
+      ? 'VENDOR_NOT_CONFIGURED' as const
+      : mmgAvailable
+        ? null
+        : 'VENDOR_LINK_INVALID' as const;
+  // Opaque, non-secret scope: a method selection is valid only for this exact
+  // vendor set + destination state. A previous cart's MMG choice cannot revive
+  // when another MMG-capable vendor appears.
+  const paymentScope = createHash('sha256')
+    .update(JSON.stringify({
+      cartId: cart.id,
+      vendors: paymentVendors.map((vendor) => {
+        const checked = validateMmgPayUrl(vendor.mmgPayUrl);
+        return [vendor.id, checked.valid ? checked.url : checked.reason];
+      }),
+      expectedVendorIds: paymentVendorIds,
+    }))
+    .digest('hex')
+    .slice(0, 24);
 
   // Fetch related address and promo code separately (no direct relations on
   // Cart). Same resolution as checkout: the cart's chosen address, else the
@@ -402,6 +447,16 @@ async function buildCartResponse(
     meetsMinimum,
     minimumOrderAmount: minOrder,
     lastActivityAt: cart.lastActivityAt,
+    paymentCapabilities: {
+      scope: paymentScope,
+      cash: { available: true as const, fundsFlow: 'DIRECT_AT_HANDOVER' as const },
+      mmg: {
+        available: mmgAvailable,
+        provider: 'MMG' as const,
+        fundsFlow: 'DIRECT_TO_VENDOR' as const,
+        unavailableReason: mmgUnavailableReason,
+      },
+    },
   };
 }
 
@@ -576,6 +631,8 @@ export async function customerRoutes(app: FastifyInstance) {
         avatar: user.avatar,
         selfieCapturedAt: user.selfieCapturedAt,
         role: user.activeRole,
+        activeRole: user.activeRole,
+        lastMoverRole: user.lastMoverRole,
         roles: user.roles,
         customer: {
           id: customer.id,
@@ -614,7 +671,7 @@ export async function customerRoutes(app: FastifyInstance) {
       },
       select: {
         id: true, phone: true, firstName: true, lastName: true,
-        email: true, avatar: true, activeRole: true, updatedAt: true,
+        email: true, avatar: true, activeRole: true, lastMoverRole: true, updatedAt: true,
       },
     });
 
@@ -1844,6 +1901,7 @@ export async function customerRoutes(app: FastifyInstance) {
       },
     });
     if (!order) throw new NotFoundError('Order', id);
+
     if (!['DELIVERED', 'COMPLETED'].includes(order.status)) {
       throw new AppError(400, 'ORDER_NOT_COMPLETE', 'Receipts are issued once the order completes.');
     }
@@ -1863,9 +1921,6 @@ export async function customerRoutes(app: FastifyInstance) {
           select: {
             id: true, name: true, slug: true, logoUrl: true, coverImageUrl: true,
             vendorType: true, phone: true, latitude: true, longitude: true,
-            // MMG direct-pay: the pay/track screen opens this to let the customer
-            // pay the vendor (only present when the vendor opted in).
-            mmgPayUrl: true,
           },
         },
         items: {
@@ -1889,6 +1944,31 @@ export async function customerRoutes(app: FastifyInstance) {
 
     if (!order) throw new NotFoundError('Order', id);
 
+    // Existing orders use only the immutable destination committed at checkout.
+    // A legacy/null/unsafe snapshot fails closed; the mutable vendor profile is
+    // never a fallback because it may now point at a different recipient.
+    // [REPORT-007-v4 F-02] Lifecycle-bound: a closed order must never hand a
+    // client a live pay URL — the money would land on a dead order the store
+    // can only refund directly. (An already-opened link can't be revoked; this
+    // is defense in depth, not the whole containment.)
+    const validatedOrderMmgUrl = order.paymentMethod === 'MOBILE_MONEY'
+      && order.paymentStatus === 'PENDING'
+      && !['CANCELLED', 'REFUNDED', 'FAILED'].includes(order.status)
+      ? safeMmgPayUrl(order.mmgPayUrlSnapshot)
+      : null;
+    const paymentAction = validatedOrderMmgUrl && order.mmgRecipientNameSnapshot
+      ? {
+          kind: 'OPEN_EXTERNAL_URL' as const,
+          method: 'MOBILE_MONEY' as const,
+          provider: 'MMG' as const,
+          fundsFlow: 'DIRECT_TO_VENDOR' as const,
+          orderId: order.id,
+          recipientName: order.mmgRecipientNameSnapshot,
+          amount: Number(order.totalAmount),
+          url: validatedOrderMmgUrl,
+        }
+      : null;
+
     // R8.4: the live-order card shows "{Rider} · {display}★" from the ONE mapper.
     const riderSurface = order.rider?.userId
       ? (await ratingSurfaces(app.prisma, 'RIDER', [order.rider.userId])).get(order.rider.userId)
@@ -1896,7 +1976,11 @@ export async function customerRoutes(app: FastifyInstance) {
 
     // Delivery progress info
     const hasBeenRated = orderRatings.length > 0;
-    const canCancel = !['DELIVERED', 'COMPLETED', 'CANCELLED', 'REFUNDED', 'PICKED_UP', 'EN_ROUTE_DELIVERY', 'ARRIVED'].includes(order.status);
+    // [REPORT-006 F-006-01] Captured MMG orders can't cancel in-app (the store
+    // holds the money and settles refunds directly) — the button must not
+    // offer what the locked cancel path will refuse.
+    const canCancel = !['DELIVERED', 'COMPLETED', 'CANCELLED', 'REFUNDED', 'PICKED_UP', 'EN_ROUTE_DELIVERY', 'ARRIVED'].includes(order.status)
+      && !(order.paymentMethod === 'MOBILE_MONEY' && order.paymentStatus === 'CAPTURED');
     const minutesSincePlaced = (Date.now() - order.placedAt.getTime()) / 60000;
     // LIFECYCLE_V2: while held, the store hasn't seen the order — cancelling
     // is free by construction, whatever the legacy 5-minute clock says.
@@ -1940,6 +2024,7 @@ export async function customerRoutes(app: FastifyInstance) {
         // MMG: PENDING → CAPTURED when the vendor confirms they received it, so
         // the pay/track screen can flip from Awaiting to Paid.
         paymentStatus: order.paymentStatus,
+        paymentAction,
         fulfillment: order.fulfillment,
         // Takeaway handover gate — the customer PRESENTS this code at the
         // counter. It was only in the checkout response before, so it
@@ -2021,12 +2106,33 @@ export async function customerRoutes(app: FastifyInstance) {
       select: {
         id: true, status: true, fulfillment: true, riderId: true, vendorId: true,
         deliveryFee: true, tipAmount: true, totalAmount: true, orderNumber: true,
+        paymentMethod: true, paymentStatus: true,
         vendor: { select: { name: true, ownerId: true } },
       },
     });
     if (!order) throw new NotFoundError('Order', id);
     if (order.fulfillment !== 'DELIVERY' || !order.vendorId) {
       throw new AppError(400, 'NOT_A_DELIVERY', 'Only delivery orders can switch to pickup.');
+    }
+    // [SPS-F-0016 / REPORT-005 F-005-03] NO MMG order converts — any status.
+    // CAPTURED: the store confirmed the original total landed; rewriting it
+    // records less than money received with no refund rail. PENDING is not
+    // proof funds haven't moved on this EXTERNAL direct-pay rail — the
+    // customer may have followed the payment link before the store attests.
+    // And a preview check alone is a TOCTOU: capture can commit between the
+    // read and the conversion CAS. Fail closed until a vendor-confirmed
+    // cancellation/refund workflow records the money outcome (founder-gated).
+    if (order.paymentMethod === 'MOBILE_MONEY') {
+      // [REPORT-007-v4 F-03] Copy must not promise a cancel that the captured
+      // gate refuses: unpaid MMG can cancel and re-order; paid MMG settles
+      // with the store directly.
+      throw new AppError(
+        409,
+        'MMG_REFUND_UNAVAILABLE',
+        order.paymentStatus === 'CAPTURED'
+          ? 'A pickup switch isn’t available on MMG orders — this one is already paid, so the store settles any change with you directly.'
+          : 'A pickup switch isn’t available on MMG orders yet — if you haven’t paid, cancel and re-order for pickup.',
+      );
     }
     if (order.riderId) {
       throw new AppError(409, 'RIDER_ALREADY_ASSIGNED', 'A rider already has this order — it is on its way.');
@@ -2035,32 +2141,64 @@ export async function customerRoutes(app: FastifyInstance) {
       throw new AppError(400, 'INVALID_STATUS', `Cannot switch a ${order.status} order to pickup.`);
     }
 
-    const fee = Number(order.deliveryFee ?? 0);
-    const tip = Number(order.tipAmount ?? 0);
     const pickupCode = String(randomInt(100000, 1000000));
 
-    // CAS: only convert while STILL unassigned and still a delivery.
-    const converted = await app.prisma.order.updateMany({
-      where: { id: order.id, riderId: null, fulfillment: 'DELIVERY' },
-      data: {
-        fulfillment: 'PICKUP',
-        deliveryFee: 0,
-        tipAmount: 0,
-        totalAmount: Math.max(0, Number(order.totalAmount) - fee - tip),
-        pickupCode,
-      },
-    });
-    if (converted.count === 0) {
-      throw new AppError(409, 'RIDER_ALREADY_ASSIGNED', 'A rider just took this order — it is on its way.');
-    }
-
-    await app.prisma.orderStatusLog.create({
-      data: {
-        orderId: order.id,
-        status: order.status,
-        changedBy: userId,
-        note: `Customer switched to pickup (no rider found) — delivery fee $${fee.toLocaleString()} and tip $${tip.toLocaleString()} removed`,
-      },
+    // [REPORT-006 F-006-06] The conversion is an Order-locked transaction, and
+    // the money write is an atomic DECREMENT of the fee+tip read from the
+    // LOCKED row — never an absolute total computed from a route preview. The
+    // old absolute write could overwrite a concurrent picking adjustment
+    // (stale-total resurrection) or mutate a cancelled order; both rider-claim
+    // seams and this conversion now serialize on the same orders row lock, and
+    // the CAS binds lifecycle + rail + fulfillment as the belt.
+    const { statusAtConvert } = await app.prisma.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT id FROM "orders" WHERE id = ${order.id} FOR UPDATE`;
+      const locked = await tx.order.findFirst({
+        where: { id: order.id, customerId: userId },
+        select: { status: true, fulfillment: true, riderId: true, paymentMethod: true, deliveryFee: true, tipAmount: true, totalAmount: true },
+      });
+      if (!locked) throw new NotFoundError('Order', order.id);
+      if (locked.riderId) {
+        throw new AppError(409, 'RIDER_ALREADY_ASSIGNED', 'A rider just took this order — it is on its way.');
+      }
+      if (locked.fulfillment !== 'DELIVERY' || locked.paymentMethod !== 'CASH') {
+        throw new AppError(409, 'RIDER_ALREADY_ASSIGNED', 'This order can no longer switch to pickup.');
+      }
+      if (!['PENDING', 'ACCEPTED', 'PREPARING', 'READY_FOR_PICKUP'].includes(locked.status)) {
+        throw new AppError(400, 'INVALID_STATUS', `Cannot switch a ${locked.status} order to pickup.`);
+      }
+      const lockedFee = Number(locked.deliveryFee ?? 0);
+      const lockedTip = Number(locked.tipAmount ?? 0);
+      // Clamp like the old floor-at-zero: never decrement past the live total.
+      const moneyOff = Math.min(lockedFee + lockedTip, Number(locked.totalAmount));
+      const converted = await tx.order.updateMany({
+        where: {
+          id: order.id,
+          riderId: null,
+          fulfillment: 'DELIVERY',
+          paymentMethod: 'CASH',
+          status: { in: ['PENDING', 'ACCEPTED', 'PREPARING', 'READY_FOR_PICKUP'] },
+        },
+        data: {
+          fulfillment: 'PICKUP',
+          deliveryFee: 0,
+          tipAmount: 0,
+          totalAmount: { decrement: moneyOff },
+          pickupCode,
+        },
+      });
+      if (converted.count === 0) {
+        throw new AppError(409, 'RIDER_ALREADY_ASSIGNED', 'A rider just took this order — it is on its way.');
+      }
+      // Evidence rides the same commit as the money it describes.
+      await tx.orderStatusLog.create({
+        data: {
+          orderId: order.id,
+          status: locked.status,
+          changedBy: userId,
+          note: `Customer switched to pickup (no rider found) — delivery fee $${lockedFee.toLocaleString()} and tip $${lockedTip.toLocaleString()} removed`,
+        },
+      });
+      return { fee: lockedFee, tip: lockedTip, statusAtConvert: locked.status };
     });
 
     // Search journal (§3): the search is over — the customer solved it.
@@ -2076,7 +2214,7 @@ export async function customerRoutes(app: FastifyInstance) {
 
     // Both sides hear it now.
     app.io.to(`order:${order.id}`).emit('order:status_changed', {
-      orderId: order.id, status: order.status, fulfillment: 'PICKUP',
+      orderId: order.id, status: statusAtConvert, fulfillment: 'PICKUP',
     });
     if (order.vendor) {
       const owner = await app.prisma.vendorOwner.findUnique({ where: { id: order.vendor.ownerId } });
@@ -2253,8 +2391,10 @@ export async function customerRoutes(app: FastifyInstance) {
     return { success: true, data: report };
   });
 
-  /** POST /orders/:id/tip — add a tip AFTER delivery (Uber-style). 100% to the
-   *  mover; allowed once, within 7 days, only if not already tipped. */
+  /** POST /orders/:id/tip — post-delivery tipping FAILS CLOSED
+   *  [SPS-F-0016c]: no rail collects a tip after the job, so the service
+   *  refuses with TIP_COLLECTION_UNAVAILABLE (ownership 404 first). The route
+   *  stays mounted for shipped clients; checkout tips are unaffected. */
   app.post('/orders/:id/tip', async (request: AuthRequest) => {
     const { id } = request.params as { id: string };
     const { amount } = z.object({ amount: z.number().positive().max(50_000) }).parse(request.body);
@@ -2394,13 +2534,13 @@ export async function customerRoutes(app: FastifyInstance) {
 
     // Public role names map to internal UserRole values: the locked model's
     // VENDOR is stored as VENDOR_OWNER (the old direct check could never pass).
-    const internalRole: import('@prisma/client').UserRole = role === 'VENDOR' ? 'VENDOR_OWNER' : role;
-
     const user = await app.prisma.user.findUnique({
       where: { id: userId },
       select: { roles: true },
     });
     if (!user) throw new NotFoundError('User');
+
+    const internalRole: import('@prisma/client').UserRole = role === 'VENDOR' ? 'VENDOR_OWNER' : role;
 
     if (!user.roles.includes(internalRole)) {
       throw new ForbiddenError(`You do not have the ${role} role. Available roles: ${user.roles.join(', ')}`);
@@ -2422,12 +2562,16 @@ export async function customerRoutes(app: FastifyInstance) {
       if (!driver) throw new ForbiddenError('No driver account associated with your profile');
     }
 
-    await app.prisma.user.update({ where: { id: userId }, data: { activeRole: internalRole } });
+    // Generic MOVER -> remembered Rider/Driver resolution intentionally happens
+    // inside this transition's User FOR UPDATE lock, never in the preflight read.
+    const authority = await transitionUserRoleAuthority(app, userId, internalRole);
 
     return {
       success: true,
       data: {
         role,
+        activeRole: authority.activeRole,
+        lastMoverRole: authority.lastMoverRole,
         message: `Switched to ${role.toLowerCase()} mode`,
       },
     };

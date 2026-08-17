@@ -39,13 +39,16 @@ const BASE_RADIUS_KM = 8;
 export async function getSupplySnapshot(
   prisma: PrismaClient,
   point: { lat: number; lng: number },
+  tenantId: string,
 ): Promise<{ online: number; busy: number }> {
   const rows = await prisma.$queryRaw<{ online: bigint; busy: bigint }[]>(Prisma.sql`
     SELECT
       COUNT(*) FILTER (WHERE d."isOnline")                          AS online,
       COUNT(*) FILTER (WHERE d."isOnline" AND NOT d."isAvailable")  AS busy
     FROM drivers d
-    WHERE d."currentLat" IS NOT NULL
+    JOIN users u ON u."id" = d."userId"
+    WHERE u."tenantId" = ${tenantId}
+      AND d."currentLat" IS NOT NULL
       AND d."currentLng" IS NOT NULL
       AND (
         6371 * acos(
@@ -75,9 +78,18 @@ export async function queueStatusFor(
   suppliersBusy: number;
 }> {
   const ahead = await prisma.rideQueueEntry.count({
-    where: { status: 'WAITING', expiresAt: { gt: new Date() }, createdAt: { lt: entry.createdAt } },
+    where: {
+      tenantId: entry.tenantId,
+      status: 'WAITING',
+      expiresAt: { gt: new Date() },
+      createdAt: { lt: entry.createdAt },
+    },
   });
-  const snapshot = await getSupplySnapshot(prisma, { lat: entry.pickupLat, lng: entry.pickupLng });
+  const snapshot = await getSupplySnapshot(
+    prisma,
+    { lat: entry.pickupLat, lng: entry.pickupLng },
+    entry.tenantId,
+  );
   return {
     id: entry.id,
     position: ahead + 1,
@@ -95,7 +107,7 @@ export async function queueStatusFor(
  * 2) MATCH sweep: WAITING, FIFO; per entry, the availability read dispatch
  *    itself uses; supply present → CAS-claim WAITING→MATCHED, then create the
  *    ride through the real request core. Failure rolls the claim back
- *    (except RIDE_IN_PROGRESS — they already have a ride → LEFT).
+ *    (except an existing ride or changed tenant — the entry is obsolete → LEFT).
  */
 export async function scanRideQueue(
   app: RideRequestApp,
@@ -117,7 +129,7 @@ export async function scanRideQueue(
   });
   for (const e of dead) {
     const claimed = await prisma.rideQueueEntry.updateMany({
-      where: { id: e.id, status: 'WAITING' },
+      where: { id: e.id, tenantId: e.tenantId, status: 'WAITING' },
       data: { status: 'EXPIRED', expiredNotifiedAt: now },
     });
     if (claimed.count === 0) continue;
@@ -158,17 +170,22 @@ export async function scanRideQueue(
   for (const e of waiting) {
     if (matched >= SCAN_AUTO_REQUEST_CAP) break;
 
-    const cell = cellOf(e.pickupLat, e.pickupLng);
+    const cell = `${e.tenantId}:${cellOf(e.pickupLat, e.pickupLng)}`;
     if ((cellBudget.get(cell) ?? 1) <= 0) continue;
 
-    const supply = await dispatch.getAvailability('DRIVER', { lat: e.pickupLat, lng: e.pickupLng });
+    const supply = await dispatch.getAvailability(
+      'DRIVER',
+      { lat: e.pickupLat, lng: e.pickupLng },
+      0,
+      e.tenantId,
+    );
     if (supply.level === 'NONE') continue;
     if (!cellBudget.has(cell)) cellBudget.set(cell, supply.level === 'GOOD' ? 3 : 1);
     if ((cellBudget.get(cell) ?? 0) <= 0) continue;
 
     // Claim FIRST (CAS) so a racing scan can't double-request the same entry.
     const claimed = await prisma.rideQueueEntry.updateMany({
-      where: { id: e.id, status: 'WAITING' },
+      where: { id: e.id, tenantId: e.tenantId, status: 'WAITING' },
       data: { status: 'MATCHED' },
     });
     if (claimed.count === 0) continue;
@@ -188,8 +205,12 @@ export async function scanRideQueue(
           rideClass: e.rideClass as RideClass,
         },
         false, // the scan just read supply — no availability pre-check race
+        e.tenantId,
       );
-      await prisma.rideQueueEntry.update({ where: { id: e.id }, data: { matchedOrderId: order.id } });
+      await prisma.rideQueueEntry.updateMany({
+        where: { id: e.id, tenantId: e.tenantId, status: 'MATCHED' },
+        data: { matchedOrderId: order.id },
+      });
       matched += 1;
       cellBudget.set(cell, (cellBudget.get(cell) ?? 1) - 1);
       await notifications
@@ -207,16 +228,28 @@ export async function scanRideQueue(
         .catch(() => {});
     } catch (err) {
       const code = (err as { code?: string }).code;
-      if (code === 'RIDE_IN_PROGRESS') {
-        // They already have a ride — the queue entry is obsolete, not failed.
+      if (
+        code === 'RIDE_IN_PROGRESS'
+        || code === 'RIDE_QUEUE_TENANT_CHANGED'
+        || code === 'CUSTOMER_TENANT_CHANGED'
+        || code === 'ACCOUNT_INACTIVE'
+      ) {
+        // They already have a ride or changed operators — this queue snapshot
+        // is obsolete, not a retryable dispatch failure.
         await prisma.rideQueueEntry
-          .updateMany({ where: { id: e.id, status: 'MATCHED' }, data: { status: 'LEFT' } })
+          .updateMany({
+            where: { id: e.id, tenantId: e.tenantId, status: 'MATCHED' },
+            data: { status: 'LEFT' },
+          })
           .catch(() => {});
       } else {
         // Anything else (fare hiccup, gate change, supply flap): roll the
         // claim back and let the next scan retry until TTL says stop.
         await prisma.rideQueueEntry
-          .updateMany({ where: { id: e.id, status: 'MATCHED' }, data: { status: 'WAITING' } })
+          .updateMany({
+            where: { id: e.id, tenantId: e.tenantId, status: 'MATCHED' },
+            data: { status: 'WAITING' },
+          })
           .catch(() => {});
         log().warn({ entryId: e.id, code }, 'ride queue: auto-request failed, entry back to WAITING');
       }
@@ -253,11 +286,14 @@ function jitter(id: string, now = Date.now()): { dLat: number; dLng: number } {
 export async function presenceNear(
   prisma: PrismaClient,
   point: { lat: number; lng: number },
+  tenantId: string,
 ): Promise<{ lat: number; lng: number }[]> {
   const rows = await prisma.$queryRaw<{ id: string; lat: number; lng: number }[]>(Prisma.sql`
     SELECT d."id", d."currentLat" AS lat, d."currentLng" AS lng
     FROM drivers d
-    WHERE d."isOnline" AND d."isAvailable"
+    JOIN users u ON u."id" = d."userId"
+    WHERE u."tenantId" = ${tenantId}
+      AND d."isOnline" AND d."isAvailable"
       AND d."currentLat" IS NOT NULL AND d."currentLng" IS NOT NULL
       AND (
         6371 * acos(

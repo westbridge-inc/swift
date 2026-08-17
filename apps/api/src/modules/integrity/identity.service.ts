@@ -1,6 +1,7 @@
 import type { PrismaClient, Prisma, IdentitySignalType, SignalStrength } from '@prisma/client';
 import { hashSignal } from './normalize';
 import { log } from '../../utils/logger';
+import { runWithoutTenant } from '../../plugins/tenant-context';
 
 // The identity-resolution engine (trial-integrity spec §2). Signals are
 // captured SILENTLY (zero UX change); HARD/STRONG matches union clusters
@@ -32,7 +33,6 @@ export const SIGNAL_STRENGTH: Record<IdentitySignalType, SignalStrength> = {
 
 export interface CaptureInput {
   accountId: string;
-  tenantId: string;
   actorRole: string;
   type: IdentitySignalType;
   /** ALREADY-NORMALIZED value (callers use the normalize.ts helpers). */
@@ -73,18 +73,48 @@ export class IdentityService {
     const strength = SIGNAL_STRENGTH[input.type];
     const valueHash = hashSignal(input.normalizedValue);
     try {
-      return await this.prisma.$transaction(async (tx) => {
+      // Identity matching and union reconciliation is the single sanctioned
+      // cross-tenant subsystem. It must never inherit a request's tenant ORM
+      // predicate: doing so can re-point global cluster membership while
+      // leaving another tenant's TrialGrant stranded on the tombstoned loser.
+      // The account row is also the authority for capture provenance; callers
+      // cannot accidentally (or deliberately) stamp a foreign/default tenant.
+      return await runWithoutTenant(() => this.prisma.$transaction(async (tx) => {
+        // Serialize the first capture of one normalized signal across every
+        // API node. Without this lock, two simultaneous accounts can each
+        // insert an uncommitted key, miss the other in their peer query, and
+        // both begin trials before a later recapture finally merges them.
+        await tx.$queryRaw<Array<{ locked: string }>>`
+          SELECT pg_advisory_xact_lock(
+            hashtextextended(${`identity:${input.type}:${valueHash}`}, 0)
+          )::text AS locked
+        `;
+
+        const account = await tx.user.findUnique({
+          where: { id: input.accountId },
+          select: { tenantId: true },
+        });
+        if (!account) throw new Error(`Identity capture account not found: ${input.accountId}`);
+
         // Idempotent per (account, type, hash) — recaptures are no-ops.
         const existing = await tx.identityKey.findFirst({
           where: { accountId: input.accountId, type: input.type, valueHash },
-          select: { id: true },
+          select: { id: true, tenantId: true },
         });
         if (!existing) {
           await tx.identityKey.create({
             data: {
               type: input.type, valueHash, accountId: input.accountId,
-              tenantId: input.tenantId, actorRole: input.actorRole, source: input.source,
+              tenantId: account.tenantId, actorRole: input.actorRole, source: input.source,
             },
+          });
+        } else if (existing.tenantId !== account.tenantId) {
+          // Repair rows written by the former hard-coded swift-default caller.
+          // User tenant ownership is the authority for this capture-provenance
+          // field; the graph itself remains platform-global.
+          await tx.identityKey.update({
+            where: { id: existing.id },
+            data: { tenantId: account.tenantId },
           });
         }
 
@@ -117,7 +147,7 @@ export class IdentityService {
           }
         }
         return { strength, matchedAccountIds, merged: true, clusterId: rootId };
-      });
+      }));
     } catch (err) {
       log().error({ err, accountId: input.accountId, type: input.type }, 'identity capture failed — signal dropped, flow unaffected');
       return { strength, matchedAccountIds: [], merged: false, clusterId: null };

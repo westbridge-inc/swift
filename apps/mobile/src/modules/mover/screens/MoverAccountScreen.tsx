@@ -12,13 +12,20 @@ import { driverApi } from '../../../services/api';
 import { Stars } from '../../../kit/controls';
 import { useMoverKind, useVerificationStatus, useEarningsSummary, useMoverSubscription, useUploadVehiclePhoto, useMoverStanding } from '../../../hooks';
 import { StandingCard } from '../../../components/StandingCard';
-import { useAuthStore } from '../../../stores/authStore';
+import {
+  AuthSessionBoundaryError,
+  requireAuthSessionForPrincipal,
+  requireAuthSessionSnapshot,
+  useAuthStore,
+} from '../../../stores/authStore';
 import { RoleSwitcherSheet } from '../../../components/RoleSwitcherSheet';
 import { money } from '../../../lib/money';
 import { mediaUrl } from '../../../lib/images';
 import { BillingStatusBlock } from '../../../components/billing/BillingSurfaces';
+import { useMoverPreview } from '../../../stores/moverPreview';
 
 export function MoverAccountScreen({ navigation }: any) {
+  const preview = useMoverPreview((state) => state.preview);
   const { user, logout } = useAuthStore();
   const [switcherOpen, setSwitcherOpen] = React.useState(false);
   const { kind, profile } = useMoverKind();
@@ -54,12 +61,24 @@ export function MoverAccountScreen({ navigation }: any) {
           : { label: String(sub.status ?? '').toLowerCase() || 'Inactive', tone: 'neutral' as const };
 
   const pickVehiclePhoto = async () => {
-    const perm = await ImagePicker.requestMediaLibraryPermissionsAsync();
-    if (!perm.granted) return;
-    const res = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ImagePicker.MediaTypeOptions.Images, quality: 0.8 });
-    if (res.canceled || !res.assets?.[0]) return;
-    const a = res.assets[0];
-    uploadVehiclePhoto.mutate({ uri: a.uri, name: a.fileName ?? 'vehicle.jpg', type: a.mimeType ?? 'image/jpeg' });
+    try {
+      const owner = preview ? null : requireAuthSessionSnapshot();
+      const perm = await ImagePicker.requestMediaLibraryPermissionsAsync();
+      if (owner) requireAuthSessionForPrincipal(owner);
+      if (!perm.granted) return;
+      const res = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ImagePicker.MediaTypeOptions.Images, quality: 0.8 });
+      if (owner) requireAuthSessionForPrincipal(owner);
+      if (res.canceled || !res.assets?.[0]) return;
+      const a = res.assets[0];
+      uploadVehiclePhoto.mutate({
+        uri: a.uri,
+        name: a.fileName ?? 'vehicle.jpg',
+        type: a.mimeType ?? 'image/jpeg',
+        authSession: owner ?? undefined,
+      });
+    } catch (photoError) {
+      if (!(photoError instanceof AuthSessionBoundaryError)) throw photoError;
+    }
   };
 
   return (
