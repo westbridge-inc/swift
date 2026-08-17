@@ -343,9 +343,30 @@ export class DispatchService {
    *  deliberately SHORT (10s): it dedups a concurrent burst without ever
    *  eating a legitimate later cycle (taxi re-sweeps are >=15s apart,
    *  redispatch delays >=45s — a suppressed cycle there would break the
-   *  re-arm chain and strand the order). */
-  private async acquireExhaustLock(orderId: string): Promise<boolean> {
-    return (await this.redis.set(exhaustLockKey(orderId), '1', 'EX', 10, 'NX')) === 'OK';
+   *  re-arm chain and strand the order). [REPORT-021 F-021-03] The lock is
+   *  OWNER-TOKENED and released on exhaust FAILURE: BullMQ retries a failed
+   *  dispatch job in ~5s, inside the lock window — a surviving lock made the
+   *  retry a silent no-op and the reconciler then skipped the order for the
+   *  whole terminal window. Compare-delete: only the failing owner's own
+   *  token is ever released, never a concurrent invocation's lock. */
+  private async acquireExhaustLock(orderId: string): Promise<string | null> {
+    const token = randomUUID();
+    const ok = (await this.redis.set(exhaustLockKey(orderId), token, 'EX', 10, 'NX')) === 'OK';
+    return ok ? token : null;
+  }
+
+  private async releaseExhaustLock(orderId: string, token: string): Promise<void> {
+    await this.redis.eval(
+      `
+        if redis.call('GET', KEYS[1]) == ARGV[1] then
+          redis.call('DEL', KEYS[1])
+        end
+        return 1
+      `,
+      1,
+      exhaustLockKey(orderId),
+      token,
+    ).catch(() => {});
   }
 
   /** [REPORT-014 F-014-05] Offer installation is ONE atomic dual-key
@@ -841,8 +862,16 @@ export class DispatchService {
       // NX lock collapses a concurrent burst (route retry + queue job + two
       // instances) to ONE attempt-counter tick, notice set, and re-sweep
       // schedule. Losers still answer exhausted=true honestly.
-      if (await this.acquireExhaustLock(orderId)) {
-        await this.exhaust(order);
+      const exhaustToken = await this.acquireExhaustLock(orderId);
+      if (exhaustToken) {
+        try {
+          await this.exhaust(order);
+        } catch (err) {
+          // [F-021-03] A failed exhaust (queue add threw) must not leave the
+          // lock standing — the job retry needs to run the real thing.
+          await this.releaseExhaustLock(orderId, exhaustToken);
+          throw err;
+        }
       }
       return { exhausted: true };
     }
@@ -1116,7 +1145,12 @@ export class DispatchService {
   async retryDispatch(orderId: string) {
     const live = await this.redis.get(offerKey(orderId));
     if (live) return { offered: parseOfferValue(live).id };
-    await this.redis.del(declinedKey(orderId), roundKey(orderId), exhaustKey(orderId), exhaustLockKey(orderId));
+    // [F-021-03] The exhaust LOCK is deliberately NOT cleared here: it is
+    // owner-tokened, ~10s, and deleting it could erase a concurrent
+    // invocation's single-flight guard (double notices, double attempt
+    // burn). A manual retry that re-exhausts inside that window simply
+    // skips a duplicate of the notices that just went out.
+    await this.redis.del(declinedKey(orderId), roundKey(orderId), exhaustKey(orderId));
     return this.dispatchOrder(orderId);
   }
 
@@ -1493,8 +1527,19 @@ export class DispatchService {
     // expire and let a permanently-stranded order re-cascade + re-page admins
     // every hour, forever. Now attempts accumulate up to EXHAUST_CAP and the
     // reconciler (which skips any order with a live exhaustKey) leaves it alone.
-    const attempts = await this.redis.incr(exhaustKey(order.id));
-    await this.redis.expire(exhaustKey(order.id), EXHAUST_TERMINAL_TTL_SECONDS);
+    // [F-021-03] One script: the attempt counter can never exist WITHOUT its
+    // terminal TTL (a naked INCR whose EXPIRE failed would make the
+    // reconciler skip this order until a manual retry, forever).
+    const attempts = Number(await this.redis.eval(
+      `
+        local n = redis.call('INCR', KEYS[1])
+        redis.call('EXPIRE', KEYS[1], ARGV[1])
+        return n
+      `,
+      1,
+      exhaustKey(order.id),
+      String(EXHAUST_TERMINAL_TTL_SECONDS),
+    ));
     if (attempts < EXHAUST_CAP && this.scheduleRedispatch) {
       const retryDelay = order.isExpress ? EXPRESS_REDISPATCH_DELAY_MS : REDISPATCH_DELAY_MS;
       if (await this.scheduleRedispatch(order.id, retryDelay)) {

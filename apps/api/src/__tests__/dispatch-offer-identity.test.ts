@@ -407,6 +407,28 @@ describe('offer attempt identity [REPORT-014 F-014-04]', () => {
     expect((await app.redis.get(offerKey(o2.id)))!.split(':')[0]).toBe(b.riderId);      // O2 offer INTACT
   });
 
+  it('a redispatch scheduling failure releases the exhaust lock so the queue retry can finish the job [REPORT-021 F-021-03]', async () => {
+    await parkAllRiders();
+    const order = await makeOrder();
+    let calls = 0;
+    const svc = new DispatchService(
+      app.prisma, app.redis, app.io, new HaversineMapsProvider(),
+      async () => {},
+      async () => { calls += 1; if (calls === 1) throw new Error('queue down'); return true; },
+    );
+
+    await expect(svc.dispatchOrder(order.id)).rejects.toThrow('queue down');
+    // The single-flight lock must NOT survive the failure: BullMQ retries the
+    // job in ~5s and that retry must be able to run the exhaust for real —
+    // a surviving lock turned one transient enqueue error into an order the
+    // reconciler skips for the whole terminal window.
+    expect(await app.redis.get(`dispatch:exhaust-lock:${order.id}`)).toBeNull();
+
+    const retry = await svc.dispatchOrder(order.id);
+    expect(retry.exhausted).toBe(true);
+    expect(calls).toBe(2); // the retry really scheduled the re-sweep
+  });
+
   it('legacy bare Redis values (pre-attempt deploys) still time out and advance', async () => {
     await parkAllRiders();
     const a = await makeRider();
