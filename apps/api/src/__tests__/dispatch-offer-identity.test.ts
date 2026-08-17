@@ -266,6 +266,30 @@ describe('offer attempt identity [REPORT-014 F-014-04]', () => {
     expect((await app.redis.get(moverOfferKey(m.riderId)))!.split(':')[0]).toBe(o1.id);
   });
 
+  it('concurrent empty-pool dispatches exhaust exactly ONCE [REPORT-014 F-014-06]', async () => {
+    await parkAllRiders();
+    const order = await makeOrder();
+
+    const [a, b] = await Promise.all([
+      dispatch.dispatchOrder(order.id),
+      dispatch.dispatchOrder(order.id),
+    ]);
+    expect(a.exhausted).toBe(true);
+    expect(b.exhausted).toBe(true);
+
+    // One logical search consumed ONE lifecycle attempt, not two.
+    expect(await app.redis.get(`dispatch:exhausts:${order.id}`)).toBe('1');
+    // And the customer was told exactly once.
+    const notices = await app.prisma.notification.findMany({
+      where: { userId: customerId },
+    });
+    const mine = notices.filter((n) => {
+      const d = n.data as { kind?: string; orderId?: string } | null;
+      return d?.kind === 'dispatch_exhausted' && d?.orderId === order.id;
+    });
+    expect(mine).toHaveLength(1);
+  });
+
   it('legacy bare Redis values (pre-attempt deploys) still time out and advance', async () => {
     await parkAllRiders();
     const a = await makeRider();

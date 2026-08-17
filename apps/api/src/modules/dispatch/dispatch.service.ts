@@ -159,6 +159,8 @@ const moverOfferKey = (moverId: string) => `dispatch:mover-offer:${moverId}`;
 const roundKey = (orderId: string) => `dispatch:round:${orderId}`;
 const exhaustKey = (orderId: string) => `dispatch:exhausts:${orderId}`;
 const reconciledKey = (orderId: string) => `dispatch:reconciled:${orderId}`;
+/** [F-014-06] Short single-flight lock around exhaust() side effects. */
+const exhaustLockKey = (orderId: string) => `dispatch:exhaust-lock:${orderId}`;
 
 /** A committed claim must never be surfaced as failed, even if the logger's
  * destination is itself unhealthy while reporting a best-effort side effect. */
@@ -316,6 +318,15 @@ export class DispatchService {
       attemptId ?? '',
     );
     return Number(removed) === 1;
+  }
+
+  /** [REPORT-014 F-014-06] Exhaustion is single-flight. The lock is
+   *  deliberately SHORT (10s): it dedups a concurrent burst without ever
+   *  eating a legitimate later cycle (taxi re-sweeps are >=15s apart,
+   *  redispatch delays >=45s — a suppressed cycle there would break the
+   *  re-arm chain and strand the order). */
+  private async acquireExhaustLock(orderId: string): Promise<boolean> {
+    return (await this.redis.set(exhaustLockKey(orderId), '1', 'EX', 10, 'NX')) === 'OK';
   }
 
   /** [REPORT-014 F-014-05] Offer installation is ONE atomic dual-key
@@ -616,176 +627,176 @@ export class DispatchService {
      *  stale/malformed job cannot dispatch an ID from a different tenant. */
     expectedTenantId?: string,
   ): Promise<{ offered?: string; exhausted?: boolean }> {
-    const order = await this.prisma.order.findUnique({
-      where: { id: orderId },
-      select: {
-        id: true, status: true, riderId: true, driverId: true, orderType: true,
-        fulfillment: true, orderNumber: true, rideClass: true, isExpress: true, courierPackageSize: true,
-        customerId: true, pickupLat: true, pickupLng: true, taxiPassengerCount: true,
-        subtotalBase: true, paymentMethod: true, tenantId: true,
-        vendor: { select: { name: true, owner: { select: { userId: true } } } },
-        items: { select: { quantity: true } },
-      },
-    });
-    if (!order) throw new NotFoundError('Order', orderId);
-    if (expectedTenantId && order.tenantId !== expectedTenantId) {
-      throw new AppError(409, 'DISPATCH_TENANT_MISMATCH', 'Dispatch job tenant does not own this order');
-    }
-
-    const pool = poolForOrder(order);
-    if (pool === 'RIDER') {
-      if (order.riderId || order.fulfillment !== 'DELIVERY') return {};
-      if (!['ACCEPTED', 'PREPARING', 'READY_FOR_PICKUP'].includes(order.status)) return {};
-    } else {
-      if (order.driverId) return {};
-      if (order.status !== 'PENDING') return {};
-    }
-    if (order.pickupLat == null || order.pickupLng == null) return {};
-
-    // One live offer at a time
-    const existing = await this.redis.get(offerKey(orderId));
-    if (existing) return { offered: parseOfferValue(existing).id };
-
-    const round = Number((await this.redis.get(roundKey(orderId))) ?? 0);
-    const radius = BASE_RADIUS_KM + round * RADIUS_STEP_KM;
-    // Search journal (§3): open/refresh the record BESIDE the state machine —
-    // fire-and-caught, never load-bearing for the cascade itself.
-    await this.journalOpenSearch(order, round, radius);
-    // D.3 — a rider must have enough free float to front this order's vendor-cash (CASH deliveries only).
-    const floatRequired = pool === 'RIDER' && order.paymentMethod === 'CASH' ? Number(order.subtotalBase) : 0;
-    const candidates = await this.findCandidates(orderId, { lat: order.pickupLat, lng: order.pickupLng }, radius, pool, floatRequired, order.rideClass, order.tenantId, order.courierPackageSize, order.customerId, order.taxiPassengerCount);
-
-    if (candidates.length === 0) {
-      if (round + 1 < MAX_ROUNDS) {
-        // Widen and retry immediately — distance beats waiting
-        await this.redis.set(roundKey(orderId), String(round + 1), 'EX', 3600);
-        return this.dispatchOrder(orderId, order.tenantId);
-      }
-      log().warn({ orderId, orderNumber: order.orderNumber, pool, rounds: MAX_ROUNDS }, 'dispatch: exhausted — no movers found');
-      await this.exhaust(order);
-      return { exhausted: true };
-    }
-
-    const timeoutSeconds = order.isExpress ? EXPRESS_OFFER_TIMEOUT_SECONDS : OFFER_TIMEOUT_SECONDS;
-    // [F-014-05] Walk the ranked candidates: the FIRST who can atomically
-    // reserve BOTH the order and themselves gets the card. A mover already
-    // holding a live offer elsewhere is skipped, not declined — they did
-    // nothing wrong; they simply are not free this instant.
-    for (const top of candidates) {
-      // [F-014-04] Mint this attempt's identity. It lives in both Redis values,
-      // the timeout job, the socket/push/recovery payloads, and the evidence row.
-      const attemptId = randomUUID();
-      // [E29 / danger #18 + F-014-05] The offer install IS the mutual
-      // exclusion — now for BOTH parties. Concurrent triggers for one order
-      // (route retry + queue job, double webhook, two instances) resolve to
-      // exactly one owner and losers emit nothing; and one mover can never
-      // hold two live offers at once. One Lua script; no partial writes.
-      const installed = await this.installOfferPair(orderId, top.riderId, attemptId, timeoutSeconds + 10);
-      if (installed === 'ORDER_TAKEN') {
-        const winner = await this.redis.get(offerKey(orderId));
-        return winner ? { offered: parseOfferValue(winner).id } : {};
-      }
-      if (installed === 'MOVER_BUSY') continue;
-
-      // Candidate discovery and offer installation straddle PostgreSQL + Redis.
-      // Revalidate after both pointers exist so either role-switch ordering is
-      // safe: switch-before-install is caught here; install-before-switch is
-      // removed by the switch's releaseHeldOffer call. Never emit to stale supply.
-      if (!(await this.canReceiveOffer(pool, top.riderId))) {
-        const removed = await this.removeOfferIfOwned(orderId, top.riderId, attemptId);
-        if (removed) {
-          await this.redis.sadd(declinedKey(orderId), top.riderId);
-          await this.redis.expire(declinedKey(orderId), 3600);
-          log().info({ orderId, moverId: top.riderId, pool }, 'dispatch: withdrew offer after authority changed');
-          return this.dispatchOrder(orderId, order.tenantId);
-        }
-        // Another release already advanced the cascade; do not touch its offer.
-        return {};
-      }
-
-      // §4d: on a CASH job the mover fronts real money — show them WHO they're
-      // fronting it for (trust level, completed orders, strikes) before accept.
-      const trust = (await customerTrustSummaries(this.prisma, [order.customerId])).get(order.customerId);
-
-      // §7: a mover judges a big grocery order BEFORE accepting.
-      const totalUnits = order.items.reduce((s, i) => s + i.quantity, 0);
-
-      this.io.to(`user:${top.userId}`).emit('dispatch:offer', {
-        orderId,
-        // [F-014-04] The client echoes this back on accept/decline/seen so those
-        // actions bind to exactly this generation (optional — older clients omit it).
-        offerAttemptId: attemptId,
-        orderNumber: order.orderNumber,
-        vendorName: order.vendor?.name,
-        // Express = bigger fee for the mover; badge it so they know why.
-        isExpress: order.isExpress,
-        expiresInSeconds: timeoutSeconds,
-        etaMinutes: Math.round(top.etaMinutes),
-        paymentMethod: order.paymentMethod,
-        customerTrust: trust ?? null,
-        itemCount: order.items.length,
-        estLoad: order.items.length > 0 ? estimateLoad(totalUnits) : null,
+    // [F-014-06] The old widen/withdraw recursion is one flat loop: every
+    // pass re-reads order authority (status can change mid-cascade), and the
+    // terminal exhaust below is SINGLE-FLIGHT so concurrent triggers of one
+    // logical search can't burn several lifecycle attempts or double-notify.
+    dispatchRound: for (;;) {
+      const order = await this.prisma.order.findUnique({
+        where: { id: orderId },
+        select: {
+          id: true, status: true, riderId: true, driverId: true, orderType: true,
+          fulfillment: true, orderNumber: true, rideClass: true, isExpress: true, courierPackageSize: true,
+          customerId: true, pickupLat: true, pickupLng: true, taxiPassengerCount: true,
+          subtotalBase: true, paymentMethod: true, tenantId: true,
+          vendor: { select: { name: true, owner: { select: { userId: true } } } },
+          items: { select: { quantity: true } },
+        },
       });
+      if (!order) throw new NotFoundError('Order', orderId);
+      if (expectedTenantId && order.tenantId !== expectedTenantId) {
+        throw new AppError(409, 'DISPATCH_TENANT_MISMATCH', 'Dispatch job tenant does not own this order');
+      }
 
-      // Alert-delivery tracking (§A4): every offer gets a row; the mover's
-      // accept/decline stamps acknowledgedAt. Fire-and-caught. The attempt id
-      // makes the row evidence about THIS generation only [F-014-04].
-      await this.prisma.alertDelivery
-        .create({ data: { kind: 'MOVER_OFFER', subjectId: orderId, recipientId: top.userId, offerAttemptId: attemptId } })
-        .catch(() => {});
+      const pool = poolForOrder(order);
+      if (pool === 'RIDER') {
+        if (order.riderId || order.fulfillment !== 'DELIVERY') return {};
+        if (!['ACCEPTED', 'PREPARING', 'READY_FOR_PICKUP'].includes(order.status)) return {};
+      } else {
+        if (order.driverId) return {};
+        if (order.status !== 'PENDING') return {};
+      }
+      if (order.pickupLat == null || order.pickupLng == null) return {};
 
-      // Journal (§3): who this wave actually tried — cooldown + "everyone
-      // declined" proof for Live Ops.
-      await this.prisma.dispatchSearch
-        .updateMany({
-          where: { subjectId: orderId, status: 'SEARCHING' },
-          data: { candidatesTried: { push: top.riderId } },
-        })
-        .catch(() => {});
+      // One live offer at a time
+      const existing = await this.redis.get(offerKey(orderId));
+      if (existing) return { offered: parseOfferValue(existing).id };
 
-      // Loud alerts (alerts spec §A2/§A3, flag-gated): the socket only reaches a
-      // FOREGROUNDED app — a mover with the phone in their pocket would sleep
-      // through a 30s offer. notifications.send fans out to Expo push (and the
-      // notification row survives the offer). Never let alert plumbing fail the
-      // offer itself. expiresAt rides along so a late-opening client can drop
-      // stale offers instead of showing ghosts.
-      if (process.env['ALERTS_LOUD'] === '1') {
-        const isTaxi = pool === 'DRIVER';
-        await this.notifications
-          .send({
-            userId: top.userId,
-            type: 'ORDER_UPDATE',
-            title: isTaxi ? '\u{1F695} Someone nearby needs a pickup' : '\u{1F6F5} Order available nearby',
-            body: isTaxi
-              ? `~${Math.round(top.etaMinutes)} min away · ${timeoutSeconds}s to accept`
-              : `${order.vendor?.name ?? 'A store'} · ~${Math.round(top.etaMinutes)} min away · ${timeoutSeconds}s to accept`,
-            audience: 'earner',
-            data: {
-              kind: 'dispatch_offer',
-              orderId,
-              offerAttemptId: attemptId,
-              expiresAt: new Date(Date.now() + timeoutSeconds * 1000).toISOString(),
-            },
+      const round = Number((await this.redis.get(roundKey(orderId))) ?? 0);
+      const radius = BASE_RADIUS_KM + round * RADIUS_STEP_KM;
+      // Search journal (§3): open/refresh the record BESIDE the state machine —
+      // fire-and-caught, never load-bearing for the cascade itself.
+      await this.journalOpenSearch(order, round, radius);
+      // D.3 — a rider must have enough free float to front this order's vendor-cash (CASH deliveries only).
+      const floatRequired = pool === 'RIDER' && order.paymentMethod === 'CASH' ? Number(order.subtotalBase) : 0;
+      const candidates = await this.findCandidates(orderId, { lat: order.pickupLat, lng: order.pickupLng }, radius, pool, floatRequired, order.rideClass, order.tenantId, order.courierPackageSize, order.customerId, order.taxiPassengerCount);
+
+      const timeoutSeconds = order.isExpress ? EXPRESS_OFFER_TIMEOUT_SECONDS : OFFER_TIMEOUT_SECONDS;
+      // [F-014-05] Walk the ranked candidates: the FIRST who can atomically
+      // reserve BOTH the order and themselves gets the card. A mover already
+      // holding a live offer elsewhere is skipped, not declined — they did
+      // nothing wrong; they simply are not free this instant.
+      for (const top of candidates) {
+        // [F-014-04] Mint this attempt's identity. It lives in both Redis values,
+        // the timeout job, the socket/push/recovery payloads, and the evidence row.
+        const attemptId = randomUUID();
+        // [E29 / danger #18 + F-014-05] The offer install IS the mutual
+        // exclusion — now for BOTH parties. Concurrent triggers for one order
+        // (route retry + queue job, double webhook, two instances) resolve to
+        // exactly one owner and losers emit nothing; and one mover can never
+        // hold two live offers at once. One Lua script; no partial writes.
+        const installed = await this.installOfferPair(orderId, top.riderId, attemptId, timeoutSeconds + 10);
+        if (installed === 'ORDER_TAKEN') {
+          const winner = await this.redis.get(offerKey(orderId));
+          return winner ? { offered: parseOfferValue(winner).id } : {};
+        }
+        if (installed === 'MOVER_BUSY') continue;
+
+        // Candidate discovery and offer installation straddle PostgreSQL + Redis.
+        // Revalidate after both pointers exist so either role-switch ordering is
+        // safe: switch-before-install is caught here; install-before-switch is
+        // removed by the switch's releaseHeldOffer call. Never emit to stale supply.
+        if (!(await this.canReceiveOffer(pool, top.riderId))) {
+          const removed = await this.removeOfferIfOwned(orderId, top.riderId, attemptId);
+          if (removed) {
+            await this.redis.sadd(declinedKey(orderId), top.riderId);
+            await this.redis.expire(declinedKey(orderId), 3600);
+            log().info({ orderId, moverId: top.riderId, pool }, 'dispatch: withdrew offer after authority changed');
+            continue dispatchRound; // fresh ring — the declined set now excludes them
+          }
+          // Another release already advanced the cascade; do not touch its offer.
+          return {};
+        }
+
+        // §4d: on a CASH job the mover fronts real money — show them WHO they're
+        // fronting it for (trust level, completed orders, strikes) before accept.
+        const trust = (await customerTrustSummaries(this.prisma, [order.customerId])).get(order.customerId);
+
+        // §7: a mover judges a big grocery order BEFORE accepting.
+        const totalUnits = order.items.reduce((s, i) => s + i.quantity, 0);
+
+        this.io.to(`user:${top.userId}`).emit('dispatch:offer', {
+          orderId,
+          // [F-014-04] The client echoes this back on accept/decline/seen so those
+          // actions bind to exactly this generation (optional — older clients omit it).
+          offerAttemptId: attemptId,
+          orderNumber: order.orderNumber,
+          vendorName: order.vendor?.name,
+          // Express = bigger fee for the mover; badge it so they know why.
+          isExpress: order.isExpress,
+          expiresInSeconds: timeoutSeconds,
+          etaMinutes: Math.round(top.etaMinutes),
+          paymentMethod: order.paymentMethod,
+          customerTrust: trust ?? null,
+          itemCount: order.items.length,
+          estLoad: order.items.length > 0 ? estimateLoad(totalUnits) : null,
+        });
+
+        // Alert-delivery tracking (§A4): every offer gets a row; the mover's
+        // accept/decline stamps acknowledgedAt. Fire-and-caught. The attempt id
+        // makes the row evidence about THIS generation only [F-014-04].
+        await this.prisma.alertDelivery
+          .create({ data: { kind: 'MOVER_OFFER', subjectId: orderId, recipientId: top.userId, offerAttemptId: attemptId } })
+          .catch(() => {});
+
+        // Journal (§3): who this wave actually tried — cooldown + "everyone
+        // declined" proof for Live Ops.
+        await this.prisma.dispatchSearch
+          .updateMany({
+            where: { subjectId: orderId, status: 'SEARCHING' },
+            data: { candidatesTried: { push: top.riderId } },
           })
           .catch(() => {});
+
+        // Loud alerts (alerts spec §A2/§A3, flag-gated): the socket only reaches a
+        // FOREGROUNDED app — a mover with the phone in their pocket would sleep
+        // through a 30s offer. notifications.send fans out to Expo push (and the
+        // notification row survives the offer). Never let alert plumbing fail the
+        // offer itself. expiresAt rides along so a late-opening client can drop
+        // stale offers instead of showing ghosts.
+        if (process.env['ALERTS_LOUD'] === '1') {
+          const isTaxi = pool === 'DRIVER';
+          await this.notifications
+            .send({
+              userId: top.userId,
+              type: 'ORDER_UPDATE',
+              title: isTaxi ? '\u{1F695} Someone nearby needs a pickup' : '\u{1F6F5} Order available nearby',
+              body: isTaxi
+                ? `~${Math.round(top.etaMinutes)} min away · ${timeoutSeconds}s to accept`
+                : `${order.vendor?.name ?? 'A store'} · ~${Math.round(top.etaMinutes)} min away · ${timeoutSeconds}s to accept`,
+              audience: 'earner',
+              data: {
+                kind: 'dispatch_offer',
+                orderId,
+                offerAttemptId: attemptId,
+                expiresAt: new Date(Date.now() + timeoutSeconds * 1000).toISOString(),
+              },
+            })
+            .catch(() => {});
+        }
+
+        log().info({ orderId, orderNumber: order.orderNumber, moverId: top.riderId, pool, round, attemptId, etaMinutes: Math.round(top.etaMinutes), candidates: candidates.length }, 'dispatch: offer sent');
+        await this.scheduleTimeout(orderId, top.riderId, timeoutSeconds * 1000, attemptId);
+        return { offered: top.riderId };
       }
 
-      log().info({ orderId, orderNumber: order.orderNumber, moverId: top.riderId, pool, round, attemptId, etaMinutes: Math.round(top.etaMinutes), candidates: candidates.length }, 'dispatch: offer sent');
-      await this.scheduleTimeout(orderId, top.riderId, timeoutSeconds * 1000, attemptId);
-      return { offered: top.riderId };
+      // Empty ring, or every candidate holds a live offer elsewhere [F-014-05]:
+      // widen and retry immediately — distance beats waiting, and reserved
+      // movers' offers resolve in seconds.
+      if (round + 1 < MAX_ROUNDS) {
+        await this.redis.set(roundKey(orderId), String(round + 1), 'EX', 3600);
+        continue;
+      }
+      log().warn({ orderId, orderNumber: order.orderNumber, pool, rounds: MAX_ROUNDS, candidatesInRange: candidates.length }, 'dispatch: exhausted — no offerable movers');
+      // [F-014-06] Exhaustion side effects run once per logical search: the
+      // NX lock collapses a concurrent burst (route retry + queue job + two
+      // instances) to ONE attempt-counter tick, notice set, and re-sweep
+      // schedule. Losers still answer exhausted=true honestly.
+      if (await this.acquireExhaustLock(orderId)) {
+        await this.exhaust(order);
+      }
+      return { exhausted: true };
     }
-
-    // Every candidate in range currently holds a live offer for another order
-    // [F-014-05]. Treat it like an empty ring: widen — their offers resolve in
-    // seconds and a wider pass may find free supply — and past the last round
-    // exhaust honestly; the automatic re-sweep picks the order back up.
-    if (round + 1 < MAX_ROUNDS) {
-      await this.redis.set(roundKey(orderId), String(round + 1), 'EX', 3600);
-      return this.dispatchOrder(orderId, order.tenantId);
-    }
-    log().warn({ orderId, orderNumber: order.orderNumber, pool, rounds: MAX_ROUNDS }, 'dispatch: exhausted — every candidate holds a live offer');
-    await this.exhaust(order);
-    return { exhausted: true };
   }
 
   /**
@@ -1028,7 +1039,7 @@ export class DispatchService {
   async retryDispatch(orderId: string) {
     const live = await this.redis.get(offerKey(orderId));
     if (live) return { offered: parseOfferValue(live).id };
-    await this.redis.del(declinedKey(orderId), roundKey(orderId), exhaustKey(orderId));
+    await this.redis.del(declinedKey(orderId), roundKey(orderId), exhaustKey(orderId), exhaustLockKey(orderId));
     return this.dispatchOrder(orderId);
   }
 
@@ -1650,8 +1661,19 @@ export async function reconcileStuckDispatch(
       redis.get(reconciledKey(id)),
     ]);
     if (offer || exhausted || already) continue;
-    await redis.set(reconciledKey(id), '1', 'EX', RECONCILE_COOLDOWN_SECONDS);
-    await enqueue(id);
+    // [F-014-06] The cooldown claim is NX: two overlapping sweeps can both
+    // pass the read above, but exactly one owns the repair. Claimed BEFORE
+    // enqueue; released on enqueue failure so a broken queue suppresses
+    // nothing — the next sweep simply tries again.
+    const claimed = await redis.set(reconciledKey(id), '1', 'EX', RECONCILE_COOLDOWN_SECONDS, 'NX');
+    if (claimed !== 'OK') continue;
+    try {
+      await enqueue(id);
+    } catch (err) {
+      await redis.del(reconciledKey(id)).catch(() => {});
+      log().warn({ err, orderId: id }, 'dispatch reconcile: enqueue failed — claim released for the next sweep');
+      continue;
+    }
     recovered.push(id);
   }
   return { recovered };
