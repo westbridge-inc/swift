@@ -1,3 +1,7 @@
+/* eslint-disable no-restricted-syntax -- this unit test MOCKS the @swift/ui
+   token module itself; the mock's placeholder hex values are the tokens, not
+   screen colour usage, so the design-100x no-literal-colour screens law does
+   not apply here. */
 import React from 'react';
 import { describe, expect, it, vi } from 'vitest';
 import type { CartPaymentCapabilities } from '@swift/types';
