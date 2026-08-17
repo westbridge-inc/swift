@@ -24,11 +24,17 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - uses: pnpm/action-setup@v6
       - uses: actions/setup-node@v7
         with:
           node-version: 20
-          cache: pnpm
+      # corepack-managed pnpm (from the packageManager field). The
+      # pnpm/action-setup standalone wrapper hits a deterministic linker
+      # ENOENT on this workspace (see pnpm/pnpm#9249 + the probe runs:
+      # apps/api exists before AND after, yet its node_modules mkdir
+      # 'fails') — the identical install passes with corepack pnpm on
+      # macOS and Linux-docker. No pnpm caches existed, so `cache: pnpm`
+      # is dropped with nothing lost.
+      - run: corepack enable && corepack prepare --activate
 
       - run: pnpm install --frozen-lockfile
 
