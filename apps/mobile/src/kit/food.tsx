@@ -6,6 +6,7 @@ import { Feather } from '@expo/vector-icons';
 import { color, radius, space } from '@swift/ui';
 import { DARK_BLURHASH } from '../lib/images';
 import { Card } from './card';
+import { Pictogram, type PictogramName } from './pictograms';
 import { HeartBadge, Stars } from './controls';
 import { PillButton } from './button';
 import { T } from './text';
@@ -201,14 +202,39 @@ export function PromoBanner({
   sub,
   cta,
   image,
+  variant = 'photo',
+  pictogram = 'orders',
   onPress,
 }: {
   title: string;
   sub: string;
   cta: string;
   image?: string;
+  /** 'tint' = on-language house promo: brand-50 card led by our own
+   *  pictogram, no stock photography [design-100x critique gate — the photo
+   *  right-slot was the most templated element on Home]. */
+  variant?: 'photo' | 'tint';
+  pictogram?: PictogramName;
   onPress?: () => void;
 }) {
+  if (variant === 'tint') {
+    return (
+      <Card pad={false} style={{ flexDirection: 'row', overflow: 'hidden', backgroundColor: color.brand[50] }}>
+        <View style={{ flex: 1, padding: space.xl, gap: space.xs }}>
+          <T variant="title">{title}</T>
+          <T variant="label" tone="muted">
+            {sub}
+          </T>
+          <PillButton label={cta} variant="dark" size="sm" onPress={onPress} style={{ alignSelf: 'flex-start', marginTop: space.md }} />
+        </View>
+        <View style={{ width: 108, alignItems: 'center', justifyContent: 'center' }}>
+          <View style={{ width: 72, height: 72, borderRadius: radius.lg, backgroundColor: color.brand[100], alignItems: 'center', justifyContent: 'center' }}>
+            <Pictogram name={pictogram} size={40} color={color.brand[600]} />
+          </View>
+        </View>
+      </Card>
+    );
+  }
   return (
     <Card pad={false} style={{ flexDirection: 'row', overflow: 'hidden' }}>
       <View style={{ flex: 1, padding: space.xl, gap: space.xs }}>
