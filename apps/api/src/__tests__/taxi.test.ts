@@ -556,6 +556,43 @@ describe('Stranded-taxi watchdog — driver goes GPS-dark after accepting', () =
     await app.prisma.driver.update({ where: { id: driver.driverId }, data: { lastLocationUpdate: null } });
   });
 
+  it('a pre-custody release rotates the PIN and zeroes the attempt budget — a burned budget never traps the next driver [REPORT-014 F-014-12]', async () => {
+    await app.prisma.driver.updateMany({ data: { isOnline: false, isAvailable: false } });
+    const customer = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
+    const first = await makeDriver();
+    const res = await inject('POST', '/api/v1/rides/request', {
+      pickup: CENTRAL, dropoff: SOUTH, pickupAddress: 'Pin A', dropoffAddress: 'Pin B',
+    }, customer.token);
+    const ride = res.json().data.ride;
+    const originalPin = (await app.prisma.order.findUniqueOrThrow({ where: { id: ride.id }, select: { ridePin: true } })).ridePin;
+    await inject('POST', `/api/v1/driver/rides/${ride.id}/accept`, {}, first.token);
+    // The first driver burns the entire PIN budget at ARRIVED, then cancels
+    // (still pre-custody — no passenger aboard).
+    await inject('PUT', `/api/v1/driver/rides/${ride.id}/en-route`, {}, first.token).catch(() => {});
+    await inject('PUT', `/api/v1/driver/rides/${ride.id}/arrived`, {}, first.token).catch(() => {});
+    await app.prisma.order.update({ where: { id: ride.id }, data: { status: 'DRIVER_ARRIVED', ridePinAttempts: 5 } });
+    const cancel = await inject('POST', `/api/v1/driver/rides/${ride.id}/cancel`, { reason: 'malicious budget burn' }, first.token);
+    expect(cancel.statusCode).toBe(200);
+
+    const afterRelease = await app.prisma.order.findUniqueOrThrow({
+      where: { id: ride.id },
+      select: { status: true, ridePin: true, ridePinAttempts: true, ridePinVerified: true },
+    });
+    expect(afterRelease.status).toBe('PENDING');
+    expect(afterRelease.ridePinAttempts).toBe(0); // fresh budget for the next driver
+    expect(afterRelease.ridePin).not.toBe(originalPin); // rotated — the burned PIN is dead
+    expect(afterRelease.ridePinVerified).toBe(false);
+
+    // The next driver has a real, usable window: the rotated PIN verifies.
+    const second = await makeDriver();
+    await inject('POST', `/api/v1/driver/rides/${ride.id}/accept`, {}, second.token);
+    await inject('PUT', `/api/v1/driver/rides/${ride.id}/en-route`, {}, second.token).catch(() => {});
+    await inject('PUT', `/api/v1/driver/rides/${ride.id}/arrived`, {}, second.token).catch(() => {});
+    const verify = await inject('PUT', `/api/v1/driver/rides/${ride.id}/verify-pin`, { pin: afterRelease.ridePin }, second.token);
+    expect(verify.statusCode).toBe(200); // NOT locked out by the first driver's burn
+    await app.prisma.driver.update({ where: { id: second.driverId }, data: { lastLocationUpdate: null, currentRideId: null } });
+  });
+
   it('recovers a ride whose driver has a NULL location timestamp, not just a stale one [REPORT-014 F-014-11]', async () => {
     await app.prisma.driver.updateMany({ data: { isOnline: false, isAvailable: false } });
     const customer = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');

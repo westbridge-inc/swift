@@ -15,6 +15,7 @@ import { estimateLoad } from '../../utils/load';
 import { HANDOVER_SECRETS_OMIT } from '../handover/handover-security';
 import { notSelfDeliveredFilter } from '../fulfillment/fulfillment-mode';
 import { vehicleTypesForPackageSize, VEHICLE_CLASSES } from '../../config/vehicle-classes';
+import { freshRidePinReset } from '../rides/ride-pin';
 import { log } from '../../utils/logger';
 import { dispatchSearchesCounter, dispatchTimeToAssign } from '../../plugins/observability';
 import { getTenantId } from '../../plugins/tenant-context';
@@ -1603,7 +1604,9 @@ export async function recoverStrandedTaxiRides(
       // so no custody marker can appear between this decision and release.
       await tx.order.update({
         where: { id: orderId },
-        data: { status: 'PENDING', driverId: null, acceptedAt: null },
+        // [REPORT-014 F-014-12] Fresh PIN + zeroed attempt budget on release —
+        // the next driver's window is untouched and the old PIN is dead.
+        data: { status: 'PENDING', driverId: null, acceptedAt: null, ...freshRidePinReset() },
       });
       await tx.driver.updateMany({
         where: { id: d.id, currentRideId: orderId },

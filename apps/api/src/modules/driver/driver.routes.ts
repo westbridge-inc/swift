@@ -9,6 +9,7 @@ import { VerificationService } from '../verification/verification.service';
 import { makeDispatchService } from '../dispatch/dispatch.service';
 import { TAXI_DEMAND_WINDOW_MIN } from '../dispatch/demand.service';
 import { classesAtOrAbove, classesAtOrBelow } from '../rides/fare.service';
+import { freshRidePinReset } from '../rides/ride-pin';
 import { getKycProvider } from '../../providers/kyc/kyc-provider';
 import { assertShiftLiveness } from '../safety/liveness.service';
 import { assertNotSafetySuspended } from '../safety/incident.service';
@@ -894,7 +895,10 @@ export async function driverRoutes(app: FastifyInstance) {
       if (!cancellable.includes(current.status)) return { released: false, custody: false };
       await tx.order.update({
         where: { id },
-        data: { status: 'PENDING', driverId: null, acceptedAt: null },
+        // [REPORT-014 F-014-12] Fresh PIN + zeroed attempt budget: a driver
+        // who burned all 5 attempts before cancelling cannot leave the next
+        // driver locked out or brute-force the (now-rotated) PIN.
+        data: { status: 'PENDING', driverId: null, acceptedAt: null, ...freshRidePinReset() },
       });
       await tx.driver.updateMany({
         where: { id: driver.id, currentRideId: id },

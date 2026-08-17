@@ -1,8 +1,8 @@
 import type { FastifyInstance } from 'fastify';
 import type { PrismaClient } from '@prisma/client';
 import { RideClass } from '@prisma/client';
-import { randomInt } from 'node:crypto';
 import { FareService } from './fare.service';
+import { newRidePin } from './ride-pin';
 import type { DispatchService } from '../dispatch/dispatch.service';
 import { orderingRestriction } from '../cash/cash-rules.service';
 import { generateOrderNumber } from '../../utils/markup';
@@ -186,7 +186,7 @@ export async function createRideRequest(
   // PIN is verified by the driver at pickup (mandatory for taxi)
   // 6-digit identity PIN from a CSPRNG (not Math.random) — verified by the
   // driver and attempt-capped (driver.routes MAX_PIN_ATTEMPTS).
-  const ridePin = String(randomInt(100000, 1000000));
+  const ridePin = newRidePin();
 
   const order = await app.prisma.$transaction(async (tx) => {
     await lockActiveOrderCustomer(tx, user.id, orderTenantId);
