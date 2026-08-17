@@ -114,6 +114,11 @@ export function CartScreen() {
   const c = cart.data; // null = empty cart
   const items: any[] = c?.items ?? [];
 
+  // PU-05: the MMG row is an opt-in fact from the cart, not a default — and a
+  // lingering MMG selection from a previous cart degrades safely to cash.
+  const acceptsMmg = !!c?.vendor?.acceptsMmg;
+  const effectivePay: 'CASH' | 'MMG' = acceptsMmg ? payMethod : 'CASH';
+
   // Appointment lines need their chosen slot (picked on the service screen)
   // before checkout — the API rejects slotless bookings with SLOT_REQUIRED.
   const bookingItems = items.filter((i) => i.fulfillment === 'APPOINTMENT');
@@ -152,7 +157,7 @@ export function CartScreen() {
     const asPickup = pickup && !!c?.vendor?.id;
     placeOrder.mutate(
       {
-        paymentMethod: payMethod === 'MMG' ? 'MOBILE_MONEY' : 'CASH',
+        paymentMethod: effectivePay === 'MMG' ? 'MOBILE_MONEY' : 'CASH',
         ...(express && !pickup ? { express: true } : {}),
         ...(apptPayload.length ? { appointments: apptPayload } : {}),
         ...(instructions.trim() && !pickup ? { deliveryInstructions: instructions.trim() } : {}),
@@ -172,7 +177,7 @@ export function CartScreen() {
           // [first-open SO-5]; primes once, never at boot.
           maybePrimeNotifications('customer_order');
           // MMG: take the customer straight to the store's own MMG link, in-app.
-          if (payMethod === 'MMG') void openPayLink(first?.vendor?.mmgPayUrl);
+          if (effectivePay === 'MMG') void openPayLink(first?.vendor?.mmgPayUrl);
         },
         onError: (err: any) => {
           // Store isn't set up for MMG → fall back to cash so they can proceed.
@@ -436,14 +441,15 @@ export function CartScreen() {
                     ? 'Cash when you collect your order.'
                     : 'Pay the rider when your order arrives.',
               },
-              {
+              // PU-05: the MMG row renders only where the vendor opted in.
+              ...(acceptsMmg ? [{
                 key: 'MMG' as const,
                 icon: 'smartphone' as const,
                 title: 'Pay with MMG',
                 sub: 'Pay the business directly on their MMG — opens right in the app.',
-              },
+              }] : []),
             ]).map((o) => {
-              const active = payMethod === o.key;
+              const active = effectivePay === o.key;
               return (
                 <Pressable key={o.key} onPress={() => setPayMethod(o.key)}>
                   <View

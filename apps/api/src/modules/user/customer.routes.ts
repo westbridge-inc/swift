@@ -227,6 +227,7 @@ async function buildCartResponse(
           estimatedPrepTime: true, minOrderAmount: true,
           latitude: true, longitude: true, deliveryRadius: true,
           isCurrentlyOpen: true, acceptingOrders: true, logoUrl: true,
+          mmgPayUrl: true,
         },
       },
       items: {
@@ -370,10 +371,13 @@ async function buildCartResponse(
 
   return {
     id: cart.id,
-    vendor: cart.vendor ? {
-      ...cart.vendor,
+    // PU-05: the MMG row is an opt-in fact, not a default — the cart carries
+    // only that fact; the pay link itself is handed out at checkout, never before.
+    vendor: cart.vendor ? (({ mmgPayUrl, ...vendorPublic }) => ({
+      ...vendorPublic,
+      acceptsMmg: !!mmgPayUrl,
       distanceKm: Math.round(distanceKm * 10) / 10,
-    } : null,
+    }))(cart.vendor) : null,
     items: itemDetails,
     itemCount: cart.items.reduce((sum, ci) => sum + ci.quantity, 0),
     unavailableItemIds,

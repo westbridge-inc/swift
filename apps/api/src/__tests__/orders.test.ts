@@ -177,6 +177,9 @@ beforeAll(async () => {
 afterAll(async () => {
   await app.prisma.order.deleteMany({ where: { id: { in: createdOrderIds } } });
   if (createdUserIds.length) {
+    // A mid-test failure can strand a cart; it blocks user deletion (FK) and
+    // poisons the NEXT run with phone collisions — sweep carts first.
+    await app.prisma.cart.deleteMany({ where: { customerId: { in: createdUserIds } } });
     await app.prisma.notification.deleteMany({ where: { userId: { in: createdUserIds } } });
     const orders = await app.prisma.order.findMany({ where: { customerId: { in: createdUserIds } }, select: { id: true } });
     const ids = orders.map((o) => o.id);
@@ -349,6 +352,28 @@ describe('Checkout — ID gate, multi-vendor split, fulfillment', () => {
     expect(got.json().data.paymentStatus).toBe('PENDING');
     expect(got.json().data.vendor.mmgPayUrl).toBe('https://mmg.gy/pay/x');
     await app.prisma.vendor.update({ where: { id: restaurant.vendorId }, data: { mmgPayUrl: null } });
+  });
+
+  it('PU-05: the cart states the MMG opt-in fact — never the raw pay link', async () => {
+    // No link → the cart says the vendor does not take MMG, so the app never
+    // shows the row. The link itself is only handed out at checkout.
+    await addToCart(customer.token, restaurant.vendorId, burgerId, 1);
+    const before = await inject('GET', '/api/v1/customer/cart', undefined, customer.token);
+    expect(before.statusCode).toBe(200);
+    expect(before.json().data.vendor.acceptsMmg).toBe(false);
+    expect(before.json().data.vendor).not.toHaveProperty('mmgPayUrl');
+    await app.prisma.cart.deleteMany({ where: { customerId: customer.userId } });
+
+    // Vendor opts in → the fact flips; the raw link still never rides the cart.
+    await app.prisma.vendor.update({ where: { id: restaurant.vendorId }, data: { mmgPayUrl: 'https://mmg.gy/pay/x' } });
+    await addToCart(customer.token, restaurant.vendorId, burgerId, 1);
+    const after = await inject('GET', '/api/v1/customer/cart', undefined, customer.token);
+    expect(after.statusCode).toBe(200);
+    expect(after.json().data.vendor.acceptsMmg).toBe(true);
+    expect(after.json().data.vendor).not.toHaveProperty('mmgPayUrl');
+
+    await app.prisma.vendor.update({ where: { id: restaurant.vendorId }, data: { mmgPayUrl: null } });
+    await app.prisma.cart.deleteMany({ where: { customerId: customer.userId } });
   });
 
   it('express charges exactly 1.5x the delivery fee and flags the order — pickup ignores it', async () => {
