@@ -37,7 +37,11 @@ jobs:
           ls -la apps/
           ls apps/api | head -5
           stat -c '%F %n' apps apps/api
-      - run: pnpm install --frozen-lockfile
+      # pnpm 9.15.x has a racy linker ENOENT (pnpm/pnpm#9249: "trying to
+      # create the parent directory for the symlink target" while the dir
+      # provably exists — see the probe above). 9.15.9 carries the 9.x
+      # linker fixes; the retry heals any residual raciness (idempotent).
+      - run: pnpm install --frozen-lockfile || pnpm install --frozen-lockfile
       - name: Probe after install
         if: always()
         run: |
@@ -83,7 +87,7 @@ jobs:
         with:
           node-version: 20
           cache: pnpm
-      - run: pnpm install --frozen-lockfile
+      - run: pnpm install --frozen-lockfile || pnpm install --frozen-lockfile
       - run: cd apps/api && npx prisma generate
       - name: Run database migrations
         run: cd apps/api && npx prisma db push --skip-generate
@@ -141,7 +145,7 @@ jobs:
         with:
           node-version: 20
           cache: pnpm
-      - run: pnpm install --frozen-lockfile
+      - run: pnpm install --frozen-lockfile || pnpm install --frozen-lockfile
       - run: cd apps/api && npx prisma generate
       - run: pnpm --filter @swift/api build
 
@@ -156,7 +160,7 @@ jobs:
         with:
           node-version: 20
           cache: pnpm
-      - run: pnpm install --frozen-lockfile
+      - run: pnpm install --frozen-lockfile || pnpm install --frozen-lockfile
       - run: pnpm --filter @swift/admin build
 
   web-build:
@@ -170,7 +174,7 @@ jobs:
         with:
           node-version: 20
           cache: pnpm
-      - run: pnpm install --frozen-lockfile
+      - run: pnpm install --frozen-lockfile || pnpm install --frozen-lockfile
       - run: pnpm --filter @swift/web build
 
   desktop-build:
@@ -186,7 +190,7 @@ jobs:
         with:
           node-version: 20
           cache: pnpm
-      - run: pnpm install --frozen-lockfile
+      - run: pnpm install --frozen-lockfile || pnpm install --frozen-lockfile
       - run: pnpm --filter @swift/desktop build
 
   # Broken or drifted migrations must fail CI, not the deploy: replay every
@@ -218,7 +222,7 @@ jobs:
         with:
           node-version: 20
           cache: pnpm
-      - run: pnpm install --frozen-lockfile
+      - run: pnpm install --frozen-lockfile || pnpm install --frozen-lockfile
       - name: Replay all migrations on a clean database
         run: cd apps/api && npx prisma migrate deploy
         env:
