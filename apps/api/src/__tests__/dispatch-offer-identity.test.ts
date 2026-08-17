@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { nanoid } from 'nanoid';
 import type { UserRole } from '@prisma/client';
@@ -23,6 +23,7 @@ const PICKUP = { lat: 6.8, lng: -58.15 };
 let app: FastifyInstance;
 let dispatch: DispatchService;
 const scheduled: Array<{ orderId: string; riderId: string; delayMs: number; attemptId?: string }> = [];
+let failNextSchedule = false; // [F-014-10] simulates a BullMQ add failure
 
 const createdUserIds: string[] = [];
 let customerId: string;
@@ -141,6 +142,10 @@ beforeAll(async () => {
     app.io,
     new HaversineMapsProvider(),
     async (orderId, riderId, delayMs, attemptId?: string) => {
+      if (failNextSchedule) {
+        failNextSchedule = false;
+        throw new Error('bullmq down');
+      }
       scheduled.push({ orderId, riderId, delayMs, attemptId });
     },
   );
@@ -288,6 +293,71 @@ describe('offer attempt identity [REPORT-014 F-014-04]', () => {
       return d?.kind === 'dispatch_exhausted' && d?.orderId === order.id;
     });
     expect(mine).toHaveLength(1);
+  });
+
+  it('a timeout with NO evidence row spares the acceptance rate — absence is not proof of delivery [REPORT-014 F-014-10]', async () => {
+    await parkAllRiders();
+    const r = await makeRider();
+    const order = await makeOrder();
+
+    const res = await dispatch.dispatchOrder(order.id);
+    expect(res.offered).toBe(r.riderId);
+    const job = scheduled[scheduled.length - 1]!;
+
+    // The fire-and-caught evidence insert "failed": no row exists for this attempt.
+    await app.prisma.alertDelivery.deleteMany({ where: { subjectId: order.id } });
+
+    await dispatch.handleOfferTimeout(order.id, r.riderId, job.attemptId);
+
+    const after = await app.prisma.rider.findUniqueOrThrow({ where: { id: r.riderId } });
+    expect(Number(after.acceptanceRate)).toBe(100); // spared — no render proof
+    // The cascade still advanced honestly.
+    expect(await app.redis.sismember(`dispatch:declined:${order.id}`, r.riderId)).toBe(1);
+  });
+
+  it('a release racing the publish tail retires the attempt: no ghost card, no stale timeout, no unfair miss [REPORT-014 F-014-10]', async () => {
+    await parkAllRiders();
+    const r = await makeRider();
+    const order = await makeOrder();
+
+    // The mover goes offline in the window between offer install and the
+    // publish tail (the awaited trust read). The publish must observe the
+    // retirement and emit/schedule NOTHING.
+    const svc = dispatch as unknown as { canReceiveOffer: (...args: unknown[]) => Promise<boolean> };
+    const original = svc.canReceiveOffer.bind(dispatch);
+    vi.spyOn(svc, 'canReceiveOffer').mockImplementationOnce(async (...args: unknown[]) => {
+      const ok = await original(...args);
+      await dispatch.releaseHeldOffer(r.riderId);
+      return ok;
+    });
+
+    const res = await dispatch.dispatchOrder(order.id);
+    expect(res).toEqual({}); // the retiring path owns the cascade now
+
+    // No stale timeout was armed for the retired attempt...
+    expect(scheduled.filter((j) => j.orderId === order.id)).toHaveLength(0);
+    // ...no evidence row was written for a card that never rendered...
+    expect(await app.prisma.alertDelivery.count({ where: { subjectId: order.id } })).toBe(0);
+    // ...and the mover was NOT charged a miss for it (no render proof).
+    const after = await app.prisma.rider.findUniqueOrThrow({ where: { id: r.riderId } });
+    expect(Number(after.acceptanceRate)).toBe(100);
+  });
+
+  it('a timeout-scheduling failure rolls the install back instead of stranding a card with no cascade [REPORT-014 F-014-10]', async () => {
+    await parkAllRiders();
+    const r = await makeRider();
+    const order = await makeOrder();
+
+    failNextSchedule = true;
+    const res = await dispatch.dispatchOrder(order.id);
+
+    expect(res).toEqual({}); // honest: no offer stands
+    expect(await app.redis.get(offerKey(order.id))).toBeNull();
+    expect(await app.redis.get(moverOfferKey(r.riderId))).toBeNull();
+    // The mover did nothing wrong: not declined, not decayed.
+    expect(await app.redis.sismember(`dispatch:declined:${order.id}`, r.riderId)).toBe(0);
+    const after = await app.prisma.rider.findUniqueOrThrow({ where: { id: r.riderId } });
+    expect(Number(after.acceptanceRate)).toBe(100);
   });
 
   it('legacy bare Redis values (pre-attempt deploys) still time out and advance', async () => {

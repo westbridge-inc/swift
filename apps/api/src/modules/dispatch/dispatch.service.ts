@@ -715,22 +715,41 @@ export class DispatchService {
         // §7: a mover judges a big grocery order BEFORE accepting.
         const totalUnits = order.items.reduce((s, i) => s + i.quantity, 0);
 
-        this.io.to(`user:${top.userId}`).emit('dispatch:offer', {
-          orderId,
-          // [F-014-04] The client echoes this back on accept/decline/seen so those
-          // actions bind to exactly this generation (optional — older clients omit it).
-          offerAttemptId: attemptId,
-          orderNumber: order.orderNumber,
-          vendorName: order.vendor?.name,
-          // Express = bigger fee for the mover; badge it so they know why.
-          isExpress: order.isExpress,
-          expiresInSeconds: timeoutSeconds,
-          etaMinutes: Math.round(top.etaMinutes),
-          paymentMethod: order.paymentMethod,
-          customerTrust: trust ?? null,
-          itemCount: order.items.length,
-          estLoad: order.items.length > 0 ? estimateLoad(totalUnits) : null,
-        });
+        // [F-014-10] FINAL conditional publish proof: the awaited trust/load
+        // reads above leave a window where a go-offline release or a role
+        // switch retires this exact attempt. Publishing anyway would render a
+        // ghost card, write false evidence, and arm a stale timeout. One last
+        // ownership read closes the window to ~zero — and the attempt token
+        // [F-014-04] makes anything that still slips through a no-op.
+        if ((await this.redis.get(offerKey(orderId))) !== offerValue(top.riderId, attemptId)) {
+          return {}; // whoever retired it already owns the cascade
+        }
+
+        try {
+          this.io.to(`user:${top.userId}`).emit('dispatch:offer', {
+            orderId,
+            // [F-014-04] The client echoes this back on accept/decline/seen so
+            // those actions bind to exactly this generation (optional — older
+            // clients omit it).
+            offerAttemptId: attemptId,
+            orderNumber: order.orderNumber,
+            vendorName: order.vendor?.name,
+            // Express = bigger fee for the mover; badge it so they know why.
+            isExpress: order.isExpress,
+            expiresInSeconds: timeoutSeconds,
+            etaMinutes: Math.round(top.etaMinutes),
+            paymentMethod: order.paymentMethod,
+            customerTrust: trust ?? null,
+            itemCount: order.items.length,
+            estLoad: order.items.length > 0 ? estimateLoad(totalUnits) : null,
+          });
+        } catch (err) {
+          // [F-014-10] A socket-layer throw must not strand the installed
+          // pair half-published: evidence + timeout below still run, the
+          // flag-gated push still fires, and the mover can recover the card
+          // via /offers/current.
+          log().warn({ err, orderId, moverId: top.riderId }, 'dispatch: offer socket emit failed — evidence/timeout continue');
+        }
 
         // Alert-delivery tracking (§A4): every offer gets a row; the mover's
         // accept/decline stamps acknowledgedAt. Fire-and-caught. The attempt id
@@ -776,7 +795,18 @@ export class DispatchService {
         }
 
         log().info({ orderId, orderNumber: order.orderNumber, moverId: top.riderId, pool, round, attemptId, etaMinutes: Math.round(top.etaMinutes), candidates: candidates.length }, 'dispatch: offer sent');
-        await this.scheduleTimeout(orderId, top.riderId, timeoutSeconds * 1000, attemptId);
+        try {
+          await this.scheduleTimeout(orderId, top.riderId, timeoutSeconds * 1000, attemptId);
+        } catch (err) {
+          // [F-014-10] No timeout job = a card whose cascade would silently
+          // hang until TTL + reconciler while the customer waits on a mover
+          // who may never answer. Retire OUR OWN attempt (strict token) and
+          // report no offer — the reconciler re-drives the order. The mover
+          // is neither declined nor decayed: they did nothing.
+          log().error({ err, orderId, moverId: top.riderId, attemptId }, 'dispatch: timeout scheduling failed — offer rolled back');
+          await this.removeOfferIfOwned(orderId, top.riderId, attemptId).catch(() => {});
+          return {};
+        }
         return { offered: top.riderId };
       }
 
@@ -940,6 +970,31 @@ export class DispatchService {
     });
   }
 
+  /** [danger #21 + REPORT-014 F-014-10] Render-proof lookup for ONE offer
+   *  generation. True only when the mover provably SAW (seenAt) or ACTED ON
+   *  (acknowledgedAt) the card, read from the attempt's own evidence row. A
+   *  MISSING row — the fire-and-caught insert failed, or the attempt never
+   *  reached publication — is NOT proof of delivery: absence spares the
+   *  rate. That is the fail-fair direction; the declined-set keeps cascade
+   *  progress honest either way. */
+  private async offerWasDeliverable(orderId: string, moverId: string, pool: DispatchPool, attemptId?: string): Promise<boolean> {
+    const mover = pool === 'DRIVER'
+      ? await this.prisma.driver.findUnique({ where: { id: moverId }, select: { userId: true } })
+      : await this.prisma.rider.findUnique({ where: { id: moverId }, select: { userId: true } });
+    if (!mover) return false;
+    const ping = await this.prisma.alertDelivery.findFirst({
+      where: {
+        kind: 'MOVER_OFFER',
+        subjectId: orderId,
+        recipientId: mover.userId,
+        ...(attemptId ? { offerAttemptId: attemptId } : {}),
+      },
+      orderBy: { sentAt: 'desc' },
+      select: { seenAt: true, acknowledgedAt: true },
+    });
+    return !!ping && (ping.seenAt !== null || ping.acknowledgedAt !== null);
+  }
+
   /** Timeout: the offer lapsed unanswered — penalise softly and move on.
    *  [F-014-04] attemptId (present on every job armed after the cutover)
    *  binds the whole consequence chain — removal, decline mark, decay,
@@ -953,34 +1008,15 @@ export class DispatchService {
     await this.redis.sadd(declinedKey(orderId), moverId);
     await this.redis.expire(declinedKey(orderId), 3600);
     // [danger #21] Only an offer the mover's client provably RENDERED (or one
-    // they acted on) may decay their acceptance rate. A ping the network ate
-    // — no socket, push asleep, app killed before the recovery read — is
-    // UNDELIVERABLE: the cascade still advances (declined-set above keeps
-    // progress honest), but the mover is not punished for a card they never
-    // saw. Legacy rows predating seenAt have both stamps null and are spared;
-    // that is the fail-fair direction. [F-014-04] With an attempt id, the
-    // evidence read is scoped to THIS generation's row — an older attempt's
-    // render can never stand in as proof this one arrived.
-    const mover = pool === 'DRIVER'
-      ? await this.prisma.driver.findUnique({ where: { id: moverId }, select: { userId: true } })
-      : await this.prisma.rider.findUnique({ where: { id: moverId }, select: { userId: true } });
-    const ping = mover
-      ? await this.prisma.alertDelivery.findFirst({
-          where: {
-            kind: 'MOVER_OFFER',
-            subjectId: orderId,
-            recipientId: mover.userId,
-            ...(attemptId ? { offerAttemptId: attemptId } : {}),
-          },
-          orderBy: { sentAt: 'desc' },
-          select: { seenAt: true, acknowledgedAt: true },
-        })
-      : null;
-    const undeliverable = !!ping && ping.seenAt === null && ping.acknowledgedAt === null;
-    if (undeliverable) {
-      log().info({ orderId, moverId, pool, attemptId }, 'dispatch: offer timeout UNDELIVERABLE — no render proof, acceptance rate spared');
-    } else {
+    // they acted on) may decay their acceptance rate — the cascade still
+    // advances (declined-set above), but the mover is not punished for a card
+    // they never saw. [F-014-04] The evidence read is scoped to THIS
+    // generation's row; [F-014-10] a MISSING row (the fire-and-caught insert
+    // failed) is absence of proof, not proof of delivery — spared too.
+    if (await this.offerWasDeliverable(orderId, moverId, pool, attemptId)) {
       await this.recordOfferOutcome(moverId, false, pool);
+    } else {
+      log().info({ orderId, moverId, pool, attemptId }, 'dispatch: offer timeout UNDELIVERABLE — no render proof, acceptance rate spared');
     }
 
     await this.dispatchOrder(orderId);
@@ -1007,7 +1043,14 @@ export class DispatchService {
     const pool = await this.poolOf(orderId);
     await this.redis.sadd(declinedKey(orderId), moverId);
     await this.redis.expire(declinedKey(orderId), 3600);
-    await this.recordOfferOutcome(moverId, false, pool);
+    // [F-014-10] Same fail-fair law as the timeout: a release racing the
+    // publish tail — before the socket emit ever ran — must not charge the
+    // mover a miss for a card that never reached a screen.
+    if (await this.offerWasDeliverable(orderId, moverId, pool, attemptId)) {
+      await this.recordOfferOutcome(moverId, false, pool);
+    } else {
+      log().info({ orderId, moverId, pool, attemptId }, 'dispatch: released offer had no render proof — acceptance rate spared');
+    }
     await this.dispatchOrder(orderId);
   }
 
