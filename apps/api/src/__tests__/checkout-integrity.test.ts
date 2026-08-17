@@ -303,7 +303,7 @@ describe('checkout money math', () => {
         beforeTransaction: async () => {
           await app.prisma.item.update({ where: { id: itemId }, data: { isAvailable: false } });
         },
-      })).rejects.toMatchObject({ statusCode: 400, code: 'ITEM_UNAVAILABLE' });
+      })).rejects.toMatchObject({ statusCode: 409, code: 'ITEM_UNAVAILABLE' }); // conflict, matching the pre-lock path
     } finally {
       await app.prisma.item.update({ where: { id: itemId }, data: { isAvailable: true } });
     }

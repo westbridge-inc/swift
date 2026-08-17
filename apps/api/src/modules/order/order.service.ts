@@ -974,7 +974,11 @@ export class OrderService {
         select: { name: true },
       });
       if (darkItem) {
-        throw new AppError(400, 'ITEM_UNAVAILABLE', `${darkItem.name} just became unavailable — remove it and try again.`);
+        // 409, not 400: the request was well-formed — the world changed under
+        // it (a racer took the last unit and auto-hide flipped the item dark).
+        // Same code+status as the pre-lock ITEM_UNAVAILABLE path, so a race
+        // loser reads identically wherever the race is caught.
+        throw new AppError(409, 'ITEM_UNAVAILABLE', `${darkItem.name} just became unavailable — remove it and try again.`);
       }
 
       let committedMmgPayUrl: string | null = null;

@@ -33,26 +33,14 @@ jobs:
       # macOS and Linux-docker. No pnpm caches existed, so `cache: pnpm`
       # is dropped with nothing lost.
       - run: corepack enable && corepack prepare --activate
-      # TEMPORARY diagnostic (remove after the apps/api ENOENT is solved):
-      # the frozen-lock check proves apps/api exists at install START, yet
-      # linking fails mkdir'ing apps/api/node_modules seconds later.
-      - name: Probe checkout state
-        run: |
-          pwd; node -v; pnpm -v; df -h . | tail -1
-          ls -la
-          ls -la apps/
-          ls apps/api | head -5
-          stat -c '%F %n' apps apps/api
-      # pnpm 9.15.x has a racy linker ENOENT (pnpm/pnpm#9249: "trying to
-      # create the parent directory for the symlink target" while the dir
-      # provably exists — see the probe above). 9.15.9 carries the 9.x
-      # linker fixes; the retry heals any residual raciness (idempotent).
+      # The retry is a cheap belt for transient registry/link hiccups. (The
+      # 10-day deterministic install failure here was a COMMITTED
+      # apps/api/node_modules symlink — dangling on a fresh checkout, and
+      # node's recursive mkdir reports a dangling-symlink target as the
+      # misleading ENOENT. Fixed by de-indexing it; the .gitignore pattern
+      # is now 'node_modules' without the slash so a symlink can never
+      # sneak back in.)
       - run: pnpm install --frozen-lockfile || pnpm install --frozen-lockfile
-      - name: Probe after install
-        if: always()
-        run: |
-          ls -la apps/ || true
-          stat -c '%F %n' apps apps/api || true
       - run: cd apps/api && npx prisma generate
       - run: pnpm lint
       - run: pnpm type-check
