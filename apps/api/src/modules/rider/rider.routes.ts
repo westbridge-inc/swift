@@ -76,6 +76,9 @@ const riderHistoryQuerySchema = z.object({
 
 const offerActionSchema = z.object({
   orderId: z.string().min(1),
+  /** [F-014-04] Optional echo of the offer card's generation; binds
+   *  accept/decline/seen to exactly that attempt. Older clients omit it. */
+  offerAttemptId: z.string().min(1).max(64).optional(),
 });
 
 /** Golden-rule handover: GPS is mandatory — a claim is impossible without it. */
@@ -186,7 +189,7 @@ export async function riderRoutes(app: FastifyInstance) {
    *  acceptance — unlike the board-grab entrance, which is for the open list. */
   app.post('/offers/accept', { preHandler: [app.authenticate] }, async (request) => {
     await getRider(app, request.user.userId); // authz before validation
-    const { orderId, fare } = offerActionSchema.extend({ fare: zMoneyMinor.optional() }).parse(request.body);
+    const { orderId, fare, offerAttemptId } = offerActionSchema.extend({ fare: zMoneyMinor.optional() }).parse(request.body);
     // Rider-set delivery fee (CASH only) rides INSIDE the locked claim
     // transaction [REPORT-005 F-005-01]: assignment, price, float, and audit
     // commit or roll back together — never a post-assignment second commit
@@ -197,15 +200,15 @@ export async function riderRoutes(app: FastifyInstance) {
     // MMG it consumed the offer with MMG_PRICE_LOCKED. Zero means "no
     // choice"; the market rate applies.
     const chosenFare = fare && fare > 0 ? fare : undefined;
-    const order = await dispatch.acceptOffer(orderId, request.user.userId, chosenFare);
+    const order = await dispatch.acceptOffer(orderId, request.user.userId, chosenFare, offerAttemptId);
     return { success: true, data: { orderId: order.id, status: order.status, orderNumber: order.orderNumber } };
   });
 
   /** POST /offers/decline — pass; the cascade moves to the next mover. */
   app.post('/offers/decline', { preHandler: [app.authenticate] }, async (request) => {
     await getRider(app, request.user.userId); // authz before validation
-    const { orderId } = offerActionSchema.parse(request.body);
-    await dispatch.declineOffer(orderId, request.user.userId);
+    const { orderId, offerAttemptId } = offerActionSchema.parse(request.body);
+    await dispatch.declineOffer(orderId, request.user.userId, offerAttemptId);
     return { success: true, data: { message: 'Offer declined' } };
   });
 
@@ -224,8 +227,8 @@ export async function riderRoutes(app: FastifyInstance) {
    *  ping never decays the acceptance rate. Fire-and-forget from the client. */
   app.post('/offers/seen', { preHandler: [app.authenticate] }, async (request) => {
     await getRider(app, request.user.userId); // authz before validation
-    const { orderId } = offerActionSchema.parse(request.body);
-    await dispatch.markOfferSeen(orderId, request.user.userId);
+    const { orderId, offerAttemptId } = offerActionSchema.parse(request.body);
+    await dispatch.markOfferSeen(orderId, request.user.userId, offerAttemptId);
     return { success: true, data: { seen: true } };
   });
 

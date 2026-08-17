@@ -1,0 +1,249 @@
+import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import Fastify, { type FastifyInstance } from 'fastify';
+import { nanoid } from 'nanoid';
+import type { UserRole } from '@prisma/client';
+import { prismaPlugin } from '../plugins/prisma';
+import { redisPlugin } from '../plugins/redis';
+import { authPlugin } from '../plugins/auth';
+import { socketPlugin } from '../plugins/socket';
+import { registerErrorHandler } from '../middleware/error-handler';
+import { DispatchService } from '../modules/dispatch/dispatch.service';
+import { HaversineMapsProvider } from '../providers/maps/maps-provider';
+
+// ---------------------------------------------------------------------------
+// [REPORT-014 F-014-04/05/06/10] Offer ATTEMPT identity. The Redis offer pair,
+// the delayed timeout job, and the delivery-evidence row all carry an opaque
+// attempt id, so a stale generation-1 actor can never destroy, decline, or
+// decay a later attempt that serializes to the same (order, mover) pair.
+// ---------------------------------------------------------------------------
+
+const DAY = 24 * 60 * 60 * 1000;
+const PICKUP = { lat: 6.8, lng: -58.15 };
+
+let app: FastifyInstance;
+let dispatch: DispatchService;
+const scheduled: Array<{ orderId: string; riderId: string; delayMs: number; attemptId?: string }> = [];
+
+const createdUserIds: string[] = [];
+let customerId: string;
+let vendorId: string;
+
+async function purgeFixtures() {
+  const users = await app.prisma.user.findMany({
+    where: { phone: { startsWith: '+59200087' } },
+    select: { id: true },
+  });
+  const ids = users.map((u) => u.id);
+  if (ids.length === 0) return;
+  const orders = await app.prisma.order.findMany({
+    where: { OR: [{ customerId: { in: ids } }, { rider: { userId: { in: ids } } }] },
+    select: { id: true },
+  });
+  await app.prisma.order.deleteMany({ where: { id: { in: orders.map((o) => o.id) } } });
+  await app.prisma.notification.deleteMany({ where: { userId: { in: ids } } });
+  await app.prisma.cart.deleteMany({ where: { customerId: { in: ids } } });
+  await app.prisma.user.deleteMany({ where: { id: { in: ids } } });
+}
+
+let seq = 0;
+async function makeRider(opts: { lat?: number; lng?: number } = {}) {
+  seq += 1;
+  const user = await app.prisma.user.create({
+    data: {
+      phone: `+59200087${String(seq).padStart(3, '0')}`,
+      firstName: 'Attempt',
+      lastName: `Rider${seq}`,
+      roles: ['RIDER' as UserRole, 'CUSTOMER' as UserRole],
+      activeRole: 'RIDER' as UserRole,
+      isPhoneVerified: true,
+      selfieCapturedAt: new Date(),
+    },
+  });
+  createdUserIds.push(user.id);
+  const rider = await app.prisma.rider.create({
+    data: {
+      userId: user.id,
+      riderType: 'DELIVERY',
+      vehicleType: 'MOTORCYCLE',
+      documentsVerified: true,
+      floatLimit: 1_000_000,
+      isOnline: true,
+      isAvailable: true,
+      currentLat: opts.lat ?? PICKUP.lat,
+      currentLng: opts.lng ?? PICKUP.lng,
+      lastLocationUpdate: new Date(),
+      averageRating: 5,
+      acceptanceRate: 100,
+      currentOrderId: null,
+    },
+  });
+  const token = app.jwt.sign({ userId: user.id, role: 'RIDER', jti: nanoid(8) });
+  const session = await app.prisma.session.create({
+    data: {
+      userId: user.id, token, refreshToken: nanoid(48),
+      deviceId: 'attempt-test', deviceType: 'test', expiresAt: new Date(Date.now() + DAY),
+    },
+  });
+  await app.prisma.rider.update({ where: { id: rider.id }, data: { locationSessionId: session.id } });
+  return { userId: user.id, riderId: rider.id };
+}
+
+async function makeOrder() {
+  const order = await app.prisma.order.create({
+    data: {
+      orderNumber: `AI-${nanoid(10)}`,
+      orderType: 'FOOD_DELIVERY',
+      customerId,
+      vendorId,
+      status: 'READY_FOR_PICKUP',
+      fulfillment: 'DELIVERY',
+      pickupAddress: 'Vendor HQ',
+      pickupLat: PICKUP.lat,
+      pickupLng: PICKUP.lng,
+      deliveryAddress: 'Customer place',
+      deliveryLat: PICKUP.lat + 0.01,
+      deliveryLng: PICKUP.lng + 0.01,
+      subtotalBase: 2000, subtotalMarkup: 0, subtotalCustomer: 2000,
+      deliveryFee: 500, totalAmount: 2500, paymentMethod: 'CASH',
+    },
+  });
+  return order;
+}
+
+const offerKey = (orderId: string) => `dispatch:offer:${orderId}`;
+const moverOfferKey = (moverId: string) => `dispatch:mover-offer:${moverId}`;
+
+/** Each test works with exactly the riders it creates: park everyone else so
+ *  a cascade can never wander onto a previous test's leftover supply. */
+async function parkAllRiders() {
+  await app.prisma.rider.updateMany({
+    where: { user: { phone: { startsWith: '+59200087' } } },
+    data: { isOnline: false, isAvailable: false },
+  });
+}
+
+beforeAll(async () => {
+  process.env['NODE_ENV'] = 'development';
+  process.env['DATABASE_URL'] = process.env['DATABASE_URL'] || 'postgresql://swift:swift@localhost:5434/swift';
+  process.env['REDIS_URL'] = process.env['REDIS_URL'] || 'redis://localhost:6382';
+
+  app = Fastify({ logger: false });
+  registerErrorHandler(app);
+  await app.register(prismaPlugin);
+  await app.register(redisPlugin);
+  await app.register(authPlugin);
+  await app.register(socketPlugin);
+  await app.ready();
+
+  dispatch = new DispatchService(
+    app.prisma,
+    app.redis,
+    app.io,
+    new HaversineMapsProvider(),
+    async (orderId, riderId, delayMs, attemptId?: string) => {
+      scheduled.push({ orderId, riderId, delayMs, attemptId });
+    },
+  );
+
+  await purgeFixtures();
+
+  const customer = await app.prisma.user.create({
+    data: {
+      phone: '+5920008790', firstName: 'Attempt', lastName: 'Customer',
+      roles: ['CUSTOMER'], activeRole: 'CUSTOMER', isPhoneVerified: true, selfieCapturedAt: new Date(),
+      customer: { create: {} },
+    },
+  });
+  createdUserIds.push(customer.id);
+  customerId = customer.id;
+
+  const ownerUser = await app.prisma.user.create({
+    data: {
+      phone: '+5920008791', firstName: 'Attempt', lastName: 'Vendor',
+      roles: ['VENDOR_OWNER'], activeRole: 'VENDOR_OWNER', isPhoneVerified: true, selfieCapturedAt: new Date(),
+    },
+  });
+  createdUserIds.push(ownerUser.id);
+  const owner = await app.prisma.vendorOwner.create({ data: { userId: ownerUser.id } });
+  const vendor = await app.prisma.vendor.create({
+    data: {
+      ownerId: owner.id, name: 'Attempt Diner', slug: `attempt-diner-${nanoid(6)}`,
+      vendorType: 'RESTAURANT', phone: '+5920008792',
+      addressLine1: '1 Attempt Alley', city: 'Georgetown', region: 'Demerara-Mahaica',
+      latitude: PICKUP.lat, longitude: PICKUP.lng,
+      status: 'ACTIVE', acceptingOrders: true, isCurrentlyOpen: true, isVerified: true,
+    },
+  });
+  vendorId = vendor.id;
+});
+
+afterAll(async () => {
+  await purgeFixtures();
+  await app.close();
+});
+
+describe('offer attempt identity [REPORT-014 F-014-04]', () => {
+  it('a stale generation-1 timeout never destroys the live generation-2 offer for the same (order, mover)', async () => {
+    await parkAllRiders();
+    const a = await makeRider();
+    const order = await makeOrder();
+
+    // Generation 1: offer lands on A; its delayed timeout is captured.
+    const g1 = await dispatch.dispatchOrder(order.id);
+    expect(g1.offered).toBe(a.riderId);
+    const j1 = scheduled[scheduled.length - 1]!;
+    expect(j1.orderId).toBe(order.id);
+
+    // A declines; the cascade exhausts (A was the only candidate).
+    await dispatch.declineOffer(order.id, a.userId);
+
+    // Vendor retry wipes cascade memory and re-offers the SAME order to the
+    // SAME mover: generation 2.
+    const g2 = await dispatch.retryDispatch(order.id);
+    expect(g2.offered).toBe(a.riderId);
+
+    // The old generation-1 timeout job fires late. It must be a NO-OP: the
+    // authoritative pair still belongs to generation 2.
+    await dispatch.handleOfferTimeout(order.id, a.riderId, j1.attemptId);
+
+    const recovered = await dispatch.currentOfferFor(a.riderId);
+    expect(recovered).not.toBeNull();
+    expect(recovered!.orderId).toBe(order.id);
+    // And generation 2 was not marked declined by the stale job.
+    const declined = await app.redis.smembers(`dispatch:declined:${order.id}`);
+    expect(declined).not.toContain(a.riderId);
+  });
+
+  it('offer recovery carries the attempt id of the live generation', async () => {
+    await parkAllRiders();
+    const a = await makeRider();
+    const order = await makeOrder();
+
+    const res = await dispatch.dispatchOrder(order.id);
+    expect(res.offered).toBe(a.riderId);
+    const job = scheduled[scheduled.length - 1]!;
+    expect(job.attemptId).toBeTruthy();
+
+    const recovered = await dispatch.currentOfferFor(a.riderId);
+    expect(recovered).not.toBeNull();
+    expect((recovered as { offerAttemptId?: string }).offerAttemptId).toBe(job.attemptId);
+  });
+
+  it('legacy bare Redis values (pre-attempt deploys) still time out and advance', async () => {
+    await parkAllRiders();
+    const a = await makeRider();
+    const order = await makeOrder();
+
+    // Simulate an offer installed by a PRE-ATTEMPT deploy: bare ids, no token.
+    await app.redis.set(offerKey(order.id), a.riderId, 'EX', 30);
+    await app.redis.set(moverOfferKey(a.riderId), order.id, 'EX', 30);
+
+    // A legacy delayed job (no attemptId) fires: wildcard removal must work.
+    await dispatch.handleOfferTimeout(order.id, a.riderId);
+
+    expect(await app.redis.get(offerKey(order.id))).toBeNull();
+    expect(await app.redis.get(moverOfferKey(a.riderId))).toBeNull();
+    const declined = await app.redis.smembers(`dispatch:declined:${order.id}`);
+    expect(declined).toContain(a.riderId);
+  });
+});

@@ -778,8 +778,11 @@ export async function driverRoutes(app: FastifyInstance) {
    *  a driver tapping Decline only dismissed the card locally.) */
   app.post('/offers/decline', { preHandler: [app.authenticate] }, async (request) => {
     await getDriver(request.user.userId); // authz before validation
-    const { orderId } = z.object({ orderId: z.string().min(1).max(64) }).parse(request.body);
-    await dispatch.declineOffer(orderId, request.user.userId);
+    const { orderId, offerAttemptId } = z.object({
+      orderId: z.string().min(1).max(64),
+      offerAttemptId: z.string().min(1).max(64).optional(), // [F-014-04]
+    }).parse(request.body);
+    await dispatch.declineOffer(orderId, request.user.userId, offerAttemptId);
     return { success: true, data: { message: 'Offer declined' } };
   });
 
@@ -791,14 +794,15 @@ export async function driverRoutes(app: FastifyInstance) {
    *  quietly decayed by the un-acked offer's timeout.) */
   app.post('/offers/accept', { preHandler: [app.authenticate] }, async (request) => {
     await getDriver(request.user.userId); // authz before validation
-    const { orderId, fare } = z.object({
+    const { orderId, fare, offerAttemptId } = z.object({
       orderId: z.string().min(1).max(64),
       fare: zMoneyMinor.optional(),
+      offerAttemptId: z.string().min(1).max(64).optional(), // [F-014-04]
     }).parse(request.body);
     // [REPORT-010 F-07] fare 0 is never a legitimate choice — a recovered
     // card missing its board row must not silently clamp pay to the 60%
     // floor. Zero means "no choice"; the market fare applies.
-    const order = await dispatch.acceptOffer(orderId, request.user.userId, fare && fare > 0 ? fare : undefined);
+    const order = await dispatch.acceptOffer(orderId, request.user.userId, fare && fare > 0 ? fare : undefined, offerAttemptId);
     return { success: true, data: { orderId: order.id, status: order.status, orderNumber: order.orderNumber } };
   });
 
@@ -814,8 +818,11 @@ export async function driverRoutes(app: FastifyInstance) {
    *  accounting (parity with the rider route). */
   app.post('/offers/seen', { preHandler: [app.authenticate] }, async (request) => {
     await getDriver(request.user.userId); // authz before validation
-    const { orderId } = z.object({ orderId: z.string().min(1).max(64) }).parse(request.body);
-    await dispatch.markOfferSeen(orderId, request.user.userId);
+    const { orderId, offerAttemptId } = z.object({
+      orderId: z.string().min(1).max(64),
+      offerAttemptId: z.string().min(1).max(64).optional(), // [F-014-04]
+    }).parse(request.body);
+    await dispatch.markOfferSeen(orderId, request.user.userId, offerAttemptId);
     return { success: true, data: { seen: true } };
   });
 

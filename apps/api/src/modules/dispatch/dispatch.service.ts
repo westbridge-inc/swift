@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import type { PrismaClient, RideClass, OrderStatus, VehicleType } from '@prisma/client';
 import { Prisma } from '@prisma/client';
 import type { Server } from 'socket.io';
@@ -134,6 +135,21 @@ function verticalForOrder(order: { orderType: string }): string {
 
 const offerKey = (orderId: string) => `dispatch:offer:${orderId}`;
 const declinedKey = (orderId: string) => `dispatch:declined:${orderId}`;
+/**
+ * [REPORT-014 F-014-04] Offer ATTEMPT identity. Both Redis pointers store a
+ * composite `<id>:<attemptId>` value (ids are cuids/uuids — no ':' inside), so
+ * a re-offer of the same order to the same mover is a DIFFERENT value. Every
+ * destructive consumer (timeout job, go-offline release, withdraw) compares
+ * the attempt it was armed for; a stale generation-1 job firing while
+ * generation 2 is live matches nothing and is a no-op. Values written by
+ * pre-attempt deploys are bare ids; wildcard-mode compares accept them so
+ * in-flight offers survive the cutover.
+ */
+function parseOfferValue(value: string): { id: string; attemptId?: string } {
+  const i = value.indexOf(':');
+  return i === -1 ? { id: value } : { id: value.slice(0, i), attemptId: value.slice(i + 1) };
+}
+const offerValue = (id: string, attemptId: string) => `${id}:${attemptId}`;
 // Advisory reverse index: which order (if any) a mover currently holds an offer
 // for. Set beside offerKey with the same TTL so it self-expires; ALWAYS
 // re-validated against the authoritative offerKey before use, so a stale
@@ -160,8 +176,10 @@ export const RECONCILE_STUCK_MINUTES = 3;
 /** Don't reconcile the same order more than once per this window (anti-spam). */
 const RECONCILE_COOLDOWN_SECONDS = 600;
 
-/** How the production wiring schedules the timeout check (BullMQ delayed job). */
-export type TimeoutScheduler = (orderId: string, riderId: string, delayMs: number) => Promise<void>;
+/** How the production wiring schedules the timeout check (BullMQ delayed job).
+ *  [F-014-04] attemptId rides the job so the timeout can only consume the
+ *  exact offer generation it was armed for. */
+export type TimeoutScheduler = (orderId: string, riderId: string, delayMs: number, attemptId?: string) => Promise<void>;
 
 /** Schedules a delayed full re-dispatch. Returns false when no queue is up
  *  (tests, degraded boot) so exhaustion falls through to the honest "no
@@ -255,17 +273,37 @@ export class DispatchService {
       .catch((err) => warnAfterClaimCommit({ err, orderId, moverId, pool: 'RIDER' }, 'board-grab Redis cleanup failed'));
   }
 
-  private async removeOfferIfOwned(orderId: string, moverId: string): Promise<boolean> {
+  /** [F-014-04] Two compare modes. STRICT (attemptId given — timeout jobs,
+   *  go-offline release, install-withdraw): only the exact
+   *  `mover:attempt` / `order:attempt` generation is consumed; a stale job
+   *  can never delete (or stale-clean the reverse pointer of) a later
+   *  generation. WILDCARD (no attemptId — client accept/decline, legacy
+   *  in-flight jobs): any generation OWNED BY THIS MOVER matches, including
+   *  pre-attempt bare values; safe because the caller is bound to the
+   *  authenticated mover, who can only ever consume their own offer. */
+  private async removeOfferIfOwned(orderId: string, moverId: string, attemptId?: string): Promise<boolean> {
     const removed = await this.redis.eval(
       `
-        if redis.call('GET', KEYS[1]) ~= ARGV[1] then
-          if redis.call('GET', KEYS[2]) == ARGV[2] then
+        local offer = redis.call('GET', KEYS[1])
+        local reverse = redis.call('GET', KEYS[2])
+        local mine, reverseMine
+        if ARGV[3] ~= '' then
+          mine = offer == (ARGV[1] .. ':' .. ARGV[3])
+          reverseMine = reverse == (ARGV[2] .. ':' .. ARGV[3])
+        else
+          mine = (offer == ARGV[1])
+            or (offer and string.sub(offer, 1, string.len(ARGV[1]) + 1) == (ARGV[1] .. ':'))
+          reverseMine = (reverse == ARGV[2])
+            or (reverse and string.sub(reverse, 1, string.len(ARGV[2]) + 1) == (ARGV[2] .. ':'))
+        end
+        if not mine then
+          if reverseMine then
             redis.call('DEL', KEYS[2])
           end
           return 0
         end
         redis.call('DEL', KEYS[1])
-        if redis.call('GET', KEYS[2]) == ARGV[2] then
+        if reverseMine then
           redis.call('DEL', KEYS[2])
         end
         return 1
@@ -275,6 +313,7 @@ export class DispatchService {
       moverOfferKey(moverId),
       moverId,
       orderId,
+      attemptId ?? '',
     );
     return Number(removed) === 1;
   }
@@ -568,7 +607,7 @@ export class DispatchService {
 
     // One live offer at a time
     const existing = await this.redis.get(offerKey(orderId));
-    if (existing) return { offered: existing };
+    if (existing) return { offered: parseOfferValue(existing).id };
 
     const round = Number((await this.redis.get(roundKey(orderId))) ?? 0);
     const radius = BASE_RADIUS_KM + round * RADIUS_STEP_KM;
@@ -592,27 +631,30 @@ export class DispatchService {
 
     const top = candidates[0]!;
     const timeoutSeconds = order.isExpress ? EXPRESS_OFFER_TIMEOUT_SECONDS : OFFER_TIMEOUT_SECONDS;
+    // [F-014-04] Mint this attempt's identity. It lives in both Redis values,
+    // the timeout job, the socket/push/recovery payloads, and the evidence row.
+    const attemptId = randomUUID();
     // [E29 / danger #18] The offer install IS the mutual exclusion: two
     // concurrent triggers (route retry-dispatch + queue job, double webhook,
     // two instances) could both pass the GET above and the old plain SET let
     // the second silently STEAL the first mover's offer — duplicate cards,
     // pushes, journal rows, and a timeout penalty against a mover whose card
     // vanished. NX makes exactly one trigger the owner; losers emit nothing.
-    const installed = await this.redis.set(offerKey(orderId), top.riderId, 'EX', timeoutSeconds + 10, 'NX');
+    const installed = await this.redis.set(offerKey(orderId), offerValue(top.riderId, attemptId), 'EX', timeoutSeconds + 10, 'NX');
     if (installed !== 'OK') {
       const winner = await this.redis.get(offerKey(orderId));
-      return winner ? { offered: winner } : {};
+      return winner ? { offered: parseOfferValue(winner).id } : {};
     }
     // Reverse pointer so go-offline can find this offer by mover (advisory —
     // re-validated against offerKey on read). Same TTL: it dies with the offer.
-    await this.redis.set(moverOfferKey(top.riderId), orderId, 'EX', timeoutSeconds + 10);
+    await this.redis.set(moverOfferKey(top.riderId), offerValue(orderId, attemptId), 'EX', timeoutSeconds + 10);
 
     // Candidate discovery and offer installation straddle PostgreSQL + Redis.
     // Revalidate after both pointers exist so either role-switch ordering is
     // safe: switch-before-install is caught here; install-before-switch is
     // removed by the switch's releaseHeldOffer call. Never emit to stale supply.
     if (!(await this.canReceiveOffer(pool, top.riderId))) {
-      const removed = await this.removeOfferIfOwned(orderId, top.riderId);
+      const removed = await this.removeOfferIfOwned(orderId, top.riderId, attemptId);
       if (removed) {
         await this.redis.sadd(declinedKey(orderId), top.riderId);
         await this.redis.expire(declinedKey(orderId), 3600);
@@ -632,6 +674,9 @@ export class DispatchService {
 
     this.io.to(`user:${top.userId}`).emit('dispatch:offer', {
       orderId,
+      // [F-014-04] The client echoes this back on accept/decline/seen so those
+      // actions bind to exactly this generation (optional — older clients omit it).
+      offerAttemptId: attemptId,
       orderNumber: order.orderNumber,
       vendorName: order.vendor?.name,
       // Express = bigger fee for the mover; badge it so they know why.
@@ -645,9 +690,10 @@ export class DispatchService {
     });
 
     // Alert-delivery tracking (§A4): every offer gets a row; the mover's
-    // accept/decline stamps acknowledgedAt. Fire-and-caught.
+    // accept/decline stamps acknowledgedAt. Fire-and-caught. The attempt id
+    // makes the row evidence about THIS generation only [F-014-04].
     await this.prisma.alertDelivery
-      .create({ data: { kind: 'MOVER_OFFER', subjectId: orderId, recipientId: top.userId } })
+      .create({ data: { kind: 'MOVER_OFFER', subjectId: orderId, recipientId: top.userId, offerAttemptId: attemptId } })
       .catch(() => {});
 
     // Journal (§3): who this wave actually tried — cooldown + "everyone
@@ -679,14 +725,15 @@ export class DispatchService {
           data: {
             kind: 'dispatch_offer',
             orderId,
+            offerAttemptId: attemptId,
             expiresAt: new Date(Date.now() + timeoutSeconds * 1000).toISOString(),
           },
         })
         .catch(() => {});
     }
 
-    log().info({ orderId, orderNumber: order.orderNumber, moverId: top.riderId, pool, round, etaMinutes: Math.round(top.etaMinutes), candidates: candidates.length }, 'dispatch: offer sent');
-    await this.scheduleTimeout(orderId, top.riderId, timeoutSeconds * 1000);
+    log().info({ orderId, orderNumber: order.orderNumber, moverId: top.riderId, pool, round, attemptId, etaMinutes: Math.round(top.etaMinutes), candidates: candidates.length }, 'dispatch: offer sent');
+    await this.scheduleTimeout(orderId, top.riderId, timeoutSeconds * 1000, attemptId);
     return { offered: top.riderId };
   }
 
@@ -702,6 +749,8 @@ export class DispatchService {
    */
   async currentOfferFor(moverId: string): Promise<{
     orderId: string;
+    /** [F-014-04] The live generation's identity — echoed on accept/decline/seen. */
+    offerAttemptId: string | null;
     orderNumber: string;
     vendorName: string | null;
     isExpress: boolean;
@@ -719,10 +768,15 @@ export class DispatchService {
     pickupAddress: string | null;
     deliveryAddress: string | null;
   } | null> {
-    const orderId = await this.redis.get(moverOfferKey(moverId));
-    if (!orderId) return null;
+    const reverse = await this.redis.get(moverOfferKey(moverId));
+    if (!reverse) return null;
+    const { id: orderId, attemptId } = parseOfferValue(reverse);
     const owner = await this.redis.get(offerKey(orderId));
-    if (owner !== moverId) return null;
+    // [F-014-04] The pair must agree on the GENERATION, not just the ids: a
+    // stale reverse pointer naming attempt 1 while attempt 2 is live (or a
+    // legacy/composite mismatch) is not this mover's recoverable card.
+    const expectedOwner = attemptId ? offerValue(moverId, attemptId) : moverId;
+    if (owner !== expectedOwner) return null;
     const ttl = await this.redis.ttl(offerKey(orderId));
     // Keys carry timeout+10s; the last 10s are the timeout worker's grace
     // tail. Under ~3s of card time isn't actionable — report gone.
@@ -742,6 +796,7 @@ export class DispatchService {
     const totalUnits = order.items.reduce((s, i) => s + i.quantity, 0);
     return {
       orderId,
+      offerAttemptId: attemptId ?? null,
       orderNumber: order.orderNumber,
       vendorName: order.vendor?.name ?? null,
       isExpress: order.isExpress,
@@ -798,16 +853,38 @@ export class DispatchService {
    *  (acted); the timeout below uses it to tell an IGNORED offer apart from
    *  one the network ate. Scoped to the caller's own row — no cross-user
    *  effect — and idempotent (first render wins). */
-  async markOfferSeen(orderId: string, moverUserId: string): Promise<void> {
+  async markOfferSeen(orderId: string, moverUserId: string, offerAttemptId?: string): Promise<void> {
+    // [F-014-04] Render proof is evidence about ONE generation. Prefer the
+    // client's echoed attempt id; otherwise resolve the live attempt from the
+    // authoritative offer key so a late render of an old card can't stamp a
+    // newer attempt it never showed. The recipientId scope means a forged or
+    // foreign attempt id can only ever match the caller's own row.
+    let attemptId = offerAttemptId;
+    if (!attemptId) {
+      const live = await this.redis.get(offerKey(orderId));
+      attemptId = live ? parseOfferValue(live).attemptId : undefined;
+    }
     await this.prisma.alertDelivery.updateMany({
-      where: { kind: 'MOVER_OFFER', subjectId: orderId, recipientId: moverUserId, seenAt: null },
+      where: {
+        kind: 'MOVER_OFFER',
+        subjectId: orderId,
+        recipientId: moverUserId,
+        seenAt: null,
+        // Legacy shape (pre-attempt row + pre-attempt client + no live
+        // composite offer): fall back to the old unscoped stamp.
+        ...(attemptId ? { offerAttemptId: attemptId } : {}),
+      },
       data: { seenAt: new Date() },
     });
   }
 
-  /** Timeout: the offer lapsed unanswered — penalise softly and move on. */
-  async handleOfferTimeout(orderId: string, moverId: string): Promise<void> {
-    const removed = await this.removeOfferIfOwned(orderId, moverId);
+  /** Timeout: the offer lapsed unanswered — penalise softly and move on.
+   *  [F-014-04] attemptId (present on every job armed after the cutover)
+   *  binds the whole consequence chain — removal, decline mark, decay,
+   *  redispatch — to the exact generation this job was scheduled for. A
+   *  stale generation-1 job firing while generation 2 is live is a no-op. */
+  async handleOfferTimeout(orderId: string, moverId: string, attemptId?: string): Promise<void> {
+    const removed = await this.removeOfferIfOwned(orderId, moverId, attemptId);
     if (!removed) return; // answered or superseded — never delete the new offer
 
     const pool = await this.poolOf(orderId);
@@ -819,20 +896,27 @@ export class DispatchService {
     // UNDELIVERABLE: the cascade still advances (declined-set above keeps
     // progress honest), but the mover is not punished for a card they never
     // saw. Legacy rows predating seenAt have both stamps null and are spared;
-    // that is the fail-fair direction.
+    // that is the fail-fair direction. [F-014-04] With an attempt id, the
+    // evidence read is scoped to THIS generation's row — an older attempt's
+    // render can never stand in as proof this one arrived.
     const mover = pool === 'DRIVER'
       ? await this.prisma.driver.findUnique({ where: { id: moverId }, select: { userId: true } })
       : await this.prisma.rider.findUnique({ where: { id: moverId }, select: { userId: true } });
     const ping = mover
       ? await this.prisma.alertDelivery.findFirst({
-          where: { kind: 'MOVER_OFFER', subjectId: orderId, recipientId: mover.userId },
+          where: {
+            kind: 'MOVER_OFFER',
+            subjectId: orderId,
+            recipientId: mover.userId,
+            ...(attemptId ? { offerAttemptId: attemptId } : {}),
+          },
           orderBy: { sentAt: 'desc' },
           select: { seenAt: true, acknowledgedAt: true },
         })
       : null;
     const undeliverable = !!ping && ping.seenAt === null && ping.acknowledgedAt === null;
     if (undeliverable) {
-      log().info({ orderId, moverId, pool }, 'dispatch: offer timeout UNDELIVERABLE — no render proof, acceptance rate spared');
+      log().info({ orderId, moverId, pool, attemptId }, 'dispatch: offer timeout UNDELIVERABLE — no render proof, acceptance rate spared');
     } else {
       await this.recordOfferOutcome(moverId, false, pool);
     }
@@ -850,9 +934,13 @@ export class DispatchService {
    *  (offer already moved on) is a no-op — we never yank an offer that is now
    *  someone else's. Safe to call unconditionally on every go-offline. */
   async releaseHeldOffer(moverId: string): Promise<void> {
-    const orderId = await this.redis.get(moverOfferKey(moverId));
-    if (!orderId) return;
-    const removed = await this.removeOfferIfOwned(orderId, moverId);
+    const reverse = await this.redis.get(moverOfferKey(moverId));
+    if (!reverse) return;
+    const { id: orderId, attemptId } = parseOfferValue(reverse);
+    // [F-014-04] Strict-generation release: if a NEWER attempt installed
+    // between the read above and this consume, the compare misses and we
+    // touch nothing — the newer offer's own lifecycle owns it.
+    const removed = await this.removeOfferIfOwned(orderId, moverId, attemptId);
     if (!removed) return;
     const pool = await this.poolOf(orderId);
     await this.redis.sadd(declinedKey(orderId), moverId);
@@ -861,13 +949,16 @@ export class DispatchService {
     await this.dispatchOrder(orderId);
   }
 
-  /** Explicit decline from the mover app. */
-  async declineOffer(orderId: string, moverUserId: string): Promise<void> {
+  /** Explicit decline from the mover app. [F-014-04] The echoed attempt id
+   *  (when the client sends one) pins the decline to the card generation the
+   *  mover actually saw; without it, wildcard mode still only ever consumes
+   *  this authenticated mover's own live offer. */
+  async declineOffer(orderId: string, moverUserId: string, offerAttemptId?: string): Promise<void> {
     const { acknowledgeAlert } = await import('../notification/notification.service');
     await acknowledgeAlert(this.prisma, 'MOVER_OFFER', orderId, moverUserId).catch(() => {});
     const pool = await this.poolOf(orderId);
     const mover = await this.requireMover(moverUserId, pool);
-    const removed = await this.removeOfferIfOwned(orderId, mover.id);
+    const removed = await this.removeOfferIfOwned(orderId, mover.id, offerAttemptId);
     if (!removed) {
       throw new AppError(409, 'OFFER_EXPIRED', 'This offer is no longer yours to decline');
     }
@@ -885,7 +976,7 @@ export class DispatchService {
    *  mid-cascade would yank the countdown out from under a mover. */
   async retryDispatch(orderId: string) {
     const live = await this.redis.get(offerKey(orderId));
-    if (live) return { offered: live };
+    if (live) return { offered: parseOfferValue(live).id };
     await this.redis.del(declinedKey(orderId), roundKey(orderId), exhaustKey(orderId));
     return this.dispatchOrder(orderId);
   }
@@ -899,7 +990,7 @@ export class DispatchService {
    * guarded update) is the real lock — Redis only routes the offer. Even if
    * every rider in town calls this at once, exactly one wins.
    */
-  async acceptOffer(orderId: string, moverUserId: string, requestedFare?: number) {
+  async acceptOffer(orderId: string, moverUserId: string, requestedFare?: number, offerAttemptId?: string) {
     const { acknowledgeAlert } = await import('../notification/notification.service');
     await acknowledgeAlert(this.prisma, 'MOVER_OFFER', orderId, moverUserId).catch(() => {});
     const pool = await this.poolOf(orderId);
@@ -927,7 +1018,9 @@ export class DispatchService {
     // Consume the offer atomically before claiming. A late accept can no longer
     // pass GET and then claim after timeout/offline has offered the job to the
     // next mover. If the DB claim loses, advance the cascade below.
-    const consumed = await this.removeOfferIfOwned(orderId, mover.id);
+    // [F-014-04] With a client-echoed attempt id this binds to the exact card
+    // generation; wildcard is still mover-safe (own offer only).
+    const consumed = await this.removeOfferIfOwned(orderId, mover.id, offerAttemptId);
     if (!consumed) {
       throw new AppError(409, 'OFFER_EXPIRED', 'This offer has expired or went to another mover');
     }
@@ -1422,9 +1515,9 @@ export class DispatchService {
 
 /** Route-side construction: timeouts ride the BullMQ queue when it exists. */
 export function makeDispatchService(app: FastifyInstance): DispatchService {
-  const scheduler: TimeoutScheduler = async (orderId, riderId, delayMs) => {
+  const scheduler: TimeoutScheduler = async (orderId, riderId, delayMs, attemptId) => {
     if (!app.dispatchQueue) return; // tests drive timeouts manually
-    await app.dispatchQueue.add('offer-timeout', { orderId, riderId }, {
+    await app.dispatchQueue.add('offer-timeout', { orderId, riderId, attemptId }, {
       delay: delayMs,
       removeOnComplete: 100,
       removeOnFail: 50,

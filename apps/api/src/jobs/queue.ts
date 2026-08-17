@@ -663,8 +663,8 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
           ctx.redis,
           ctx.io,
           getMapsProvider(),
-          async (orderId, moverId, delayMs) => {
-            await queues.dispatchQueue.add('offer-timeout', { orderId, riderId: moverId }, {
+          async (orderId, moverId, delayMs, attemptId) => {
+            await queues.dispatchQueue.add('offer-timeout', { orderId, riderId: moverId, attemptId }, {
               delay: delayMs,
               removeOnComplete: 100,
               removeOnFail: 50,
@@ -1151,8 +1151,8 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
         ctx.redis,
         ctx.io,
         getMapsProvider(),
-        async (orderId, riderId, delayMs) => {
-          await queues.dispatchQueue.add('offer-timeout', { orderId, riderId }, {
+        async (orderId, riderId, delayMs, attemptId) => {
+          await queues.dispatchQueue.add('offer-timeout', { orderId, riderId, attemptId }, {
             delay: delayMs,
             removeOnComplete: 100,
             removeOnFail: 50,
@@ -1171,7 +1171,7 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
       if (job.name === 'dispatch-order') {
         await dispatch.dispatchOrder(job.data.orderId, job.data.tenantId);
       } else if (job.name === 'offer-timeout') {
-        await dispatch.handleOfferTimeout(job.data.orderId, job.data.riderId);
+        await dispatch.handleOfferTimeout(job.data.orderId, job.data.riderId, job.data.attemptId);
       } else if (job.name === 'supply-watch-scan') {
           // Availability spec §5: tell waiting customers when supply returns.
           const { scanSupplyWatches, scanStrugglingDeliveries } = await import('../modules/dispatch/supply-watch.service');

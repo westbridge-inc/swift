@@ -881,7 +881,7 @@ describe('The offer cascade', () => {
     // 2) A declines -> B is offered; A's acceptance EMA dropped
     await dispatch.declineOffer(order.id, a.userId);
     const offerNow = await app.redis.get(`dispatch:offer:${order.id}`);
-    expect(offerNow).toBe(b.riderId);
+    expect(offerNow!.split(':')[0]).toBe(b.riderId); // value is `<mover>:<attemptId>` [F-014-04]
     const aAfter = await app.prisma.rider.findUniqueOrThrow({ where: { id: a.riderId } });
     expect(aAfter.acceptanceRate).toBeLessThan(100);
 
@@ -1048,7 +1048,7 @@ describe('The offer cascade', () => {
 
     // Timeout fires with the WRONG rider id (offer already superseded)
     await dispatch.handleOfferTimeout(order.id, 'some-other-rider');
-    expect(await app.redis.get(`dispatch:offer:${order.id}`)).toBe(a.riderId);
+    expect((await app.redis.get(`dispatch:offer:${order.id}`))!.split(':')[0]).toBe(a.riderId);
 
     await app.prisma.rider.update({ where: { id: a.riderId }, data: { isOnline: false } });
   });
@@ -1089,7 +1089,7 @@ describe('The offer cascade', () => {
 
     const first = await dispatch.dispatchOrder(order.id);
     expect(first.offered).toBe(a.riderId);
-    expect(await app.redis.get(`dispatch:mover-offer:${a.riderId}`)).toBe(order.id); // reverse index set
+    expect((await app.redis.get(`dispatch:mover-offer:${a.riderId}`))!.split(':')[0]).toBe(order.id); // reverse index set [F-014-04 composite]
 
     // A taps "Go offline" through the REAL route while still holding the live offer.
     const res = await app.inject({
@@ -1101,7 +1101,7 @@ describe('The offer cascade', () => {
 
     // RED before the fix: the offer key stayed pinned on A until the 20 s BullMQ
     // timeout — the cascade never advanced and A's acceptance was never dinged.
-    expect(await app.redis.get(`dispatch:offer:${order.id}`)).toBe(b.riderId); // advanced to next mover
+    expect((await app.redis.get(`dispatch:offer:${order.id}`))!.split(':')[0]).toBe(b.riderId); // advanced to next mover
     expect(await app.redis.get(`dispatch:mover-offer:${a.riderId}`)).toBeNull(); // reverse index cleared
     expect(await app.redis.sismember(`dispatch:declined:${order.id}`, a.riderId)).toBe(1); // won't re-offer A
     const aAfter = await app.prisma.rider.findUniqueOrThrow({ where: { id: a.riderId } });
@@ -1395,7 +1395,7 @@ describe('Atomic acceptance — the concurrency proof', () => {
       select: { riderId: true, status: true },
     });
     expect(after).toEqual({ riderId: null, status: 'ACCEPTED' });
-    expect(await app.redis.get(`dispatch:offer:${order.id}`)).toBe(b.riderId);
+    expect((await app.redis.get(`dispatch:offer:${order.id}`))!.split(':')[0]).toBe(b.riderId);
 
     await app.prisma.rider.updateMany({
       where: { id: { in: [a.riderId, b.riderId] } },
@@ -1840,12 +1840,13 @@ describe('Atomic acceptance — the concurrency proof', () => {
     // same owner (the loser returns the winner's offer, never a second card).
     const owner = await app.redis.get(`dispatch:offer:${order.id}`);
     expect(owner).toBeTruthy();
-    expect(a.offered).toBe(owner);
-    expect(b.offered).toBe(owner);
+    const ownerId = owner!.split(':')[0]; // `<mover>:<attemptId>` [F-014-04]
+    expect(a.offered).toBe(ownerId);
+    expect(b.offered).toBe(ownerId);
     // Exactly one alert-delivery row: the loser emitted nothing.
     const pings = await app.prisma.alertDelivery.count({ where: { subjectId: order.id, kind: 'MOVER_OFFER' } });
     expect(pings).toBe(1);
-    await app.redis.del(`dispatch:offer:${order.id}`, `dispatch:mover-offer:${owner}`);
+    await app.redis.del(`dispatch:offer:${order.id}`, `dispatch:mover-offer:${ownerId}`);
     for (const r of [r1, r2]) {
       await app.prisma.rider.update({ where: { id: r.riderId }, data: { isOnline: false, isAvailable: true, currentOrderId: null } });
     }

@@ -532,6 +532,11 @@ model AlertDelivery {
   /// provably never saw it, so it must not decay their acceptance rate.
   seenAt         DateTime?
   acknowledgedAt DateTime?
+  /// [REPORT-014 F-014-04] Which offer ATTEMPT this row is evidence for. A
+  /// re-offer of the same order to the same mover is a NEW attempt; timeout
+  /// accounting must read exactly its own attempt's render proof, never an
+  /// older row's. Null on legacy rows and non-offer kinds.
+  offerAttemptId String?
 
   @@index([kind, sentAt])
   @@index([subjectId, recipientId])
