@@ -18,6 +18,9 @@ import { haversineKm, streetEtaMin } from '../../../lib/geo';
 import { jobAmount, RoutePair } from '../shared';
 import { haptic } from '../../../lib/haptics';
 import { dk, withAlpha, DCard } from '../dark';
+
+/** [F-213] Every driver handover PIN is 6 digits (api ride-pin.ts). */
+const RIDE_PIN_LENGTH = 6;
 import {
   AuthSessionBoundaryError,
   requireAuthSessionForPrincipal,
@@ -402,13 +405,13 @@ export function ActiveJobScreen({ navigation }: any) {
                 <>
                   {step.pin ? (
                     <View style={{ marginBottom: space.md }}>
-                      <CodeInput value={pin} onChange={setPin} length={6} error={driverAct.isError} autoFocus={false} />
+                      <CodeInput value={pin} onChange={setPin} length={RIDE_PIN_LENGTH} error={driverAct.isError} autoFocus={false} />
                       <T variant="caption" center style={{ color: dk.muted, marginTop: space.sm }}>
                         The passenger has this code in their app — it proves you picked up the right person.
                       </T>
                     </View>
                   ) : null}
-                  {bigButton(step.label, runDriverStep, { loading: busy, disabled: busy || (!!step.pin && pin.length < 4) })}
+                  {bigButton(step.label, runDriverStep, { loading: busy, disabled: busy || (!!step.pin && pin.length < RIDE_PIN_LENGTH) })}
                 </>
               ) : (
                 <T variant="label" center style={{ color: dk.muted, paddingVertical: space.md }}>
