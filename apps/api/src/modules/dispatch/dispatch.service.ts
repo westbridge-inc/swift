@@ -1540,7 +1540,15 @@ export async function recoverStrandedTaxiRides(
 ): Promise<{ recovered: string[]; flagged: string[] }> {
   const cutoff = new Date(Date.now() - staleMinutes * 60_000);
   const stale = await prisma.driver.findMany({
-    where: { currentRideId: { not: null }, lastLocationUpdate: { lt: cutoff } },
+    // [REPORT-014 F-014-11] Include the NULL-timestamp shape, exactly as
+    // sweepStaleMovers and the delivery watchdog do. A busy driver who never
+    // sent a fix (or whose timestamp was cleared) is forced offline by the
+    // sweep but their in-custody ride was never released/flagged — the ride
+    // hung forever because this recovery query only matched `lt cutoff`.
+    where: {
+      currentRideId: { not: null },
+      OR: [{ lastLocationUpdate: { lt: cutoff } }, { lastLocationUpdate: null }],
+    },
     select: { id: true, currentRideId: true },
   });
   if (stale.length === 0) return { recovered: [], flagged: [] };

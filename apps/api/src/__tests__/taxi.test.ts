@@ -556,6 +556,33 @@ describe('Stranded-taxi watchdog — driver goes GPS-dark after accepting', () =
     await app.prisma.driver.update({ where: { id: driver.driverId }, data: { lastLocationUpdate: null } });
   });
 
+  it('recovers a ride whose driver has a NULL location timestamp, not just a stale one [REPORT-014 F-014-11]', async () => {
+    await app.prisma.driver.updateMany({ data: { isOnline: false, isAvailable: false } });
+    const customer = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
+    const driver = await makeDriver();
+    const res = await inject('POST', '/api/v1/rides/request', {
+      pickup: CENTRAL, dropoff: SOUTH, pickupAddress: 'Null-TS A', dropoffAddress: 'Null-TS B',
+    }, customer.token);
+    const ride = res.json().data.ride;
+    await inject('POST', `/api/v1/driver/rides/${ride.id}/accept`, {}, driver.token);
+    await app.prisma.order.update({ where: { id: ride.id }, data: { status: 'DRIVER_ASSIGNED' } });
+    // The driver NEVER sent a fix (or the sweep cleared it): lastLocationUpdate
+    // is NULL, currentRideId is set. The old watchdog query (`lt cutoff` only)
+    // skipped this shape, so the ride hung forever.
+    await app.prisma.driver.update({ where: { id: driver.driverId }, data: { lastLocationUpdate: null, currentRideId: ride.id } });
+
+    const enqueued: string[] = [];
+    const out = await recoverStrandedTaxiRides(app.prisma, app.redis, app.io, async (id) => { enqueued.push(id); });
+
+    expect(out.recovered).toContain(ride.id);
+    const order = await app.prisma.order.findUniqueOrThrow({ where: { id: ride.id } });
+    expect(order.status).toBe('PENDING');
+    expect(order.driverId).toBeNull();
+    const d = await app.prisma.driver.findUniqueOrThrow({ where: { id: driver.driverId } });
+    expect(d.currentRideId).toBeNull();
+    expect(enqueued).toContain(ride.id);
+  });
+
   it('NEVER auto-cancels an IN-PROGRESS ride: passenger aboard → ride kept, ops paged, rider warned', async () => {
     await app.prisma.driver.updateMany({ data: { isOnline: false, isAvailable: false } });
     const customer = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
