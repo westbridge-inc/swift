@@ -11,24 +11,31 @@ import { T } from './text';
  *  as they are elevated; when the register empties, lg becomes the default. */
 export function SectionHeader({
   title,
+  eyebrow,
   onSeeAll,
   style,
   size = 'md',
 }: {
   title: string;
+  /** Structure-as-information [design-100x 1.5]: the eyebrow states something
+   *  TRUE about the section ("From your orders", "Open now") — never set one
+   *  as decoration. */
+  eyebrow?: string;
   onSeeAll?: () => void;
   style?: ViewStyle;
   size?: 'md' | 'lg';
 }) {
   return (
-    <View
-      style={[
-        { flexDirection: 'row', alignItems: 'baseline', justifyContent: 'space-between' },
-        style,
-      ]}
-    >
-      <T variant={size === 'lg' ? 'title' : 'heading'}>{title}</T>
-      {onSeeAll ? <LinkText label="See all" onPress={onSeeAll} tone="muted" /> : null}
+    <View style={style}>
+      {eyebrow ? (
+        <T variant="micro" tone="faint" style={{ marginBottom: 2 }}>
+          {eyebrow.toUpperCase()}
+        </T>
+      ) : null}
+      <View style={{ flexDirection: 'row', alignItems: 'baseline', justifyContent: 'space-between' }}>
+        <T variant={size === 'lg' ? 'title' : 'heading'}>{title}</T>
+        {onSeeAll ? <LinkText label="See all" onPress={onSeeAll} tone="muted" /> : null}
+      </View>
     </View>
   );
 }
