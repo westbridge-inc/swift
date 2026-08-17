@@ -1402,28 +1402,21 @@ export class DispatchService {
 
   /** Acceptance history feeds future scoring — abandoners drift down the list. */
   private async recordOfferOutcome(moverId: string, accepted: boolean, pool: DispatchPool = 'RIDER') {
-    // Exponential moving average: recent behaviour dominates
+    // [REPORT-014 F-014-14] Exponential moving average as ONE atomic write —
+    // recent behaviour dominates. The old read-then-write lost concurrent
+    // outcomes: two misses from 100 both read 100 and both wrote 80 (should
+    // serialize to 64). Raw SQL applies the EMA against the row's CURRENT
+    // value under Postgres's row lock, exactly like the cancellationRate EMA.
+    const target = accepted ? 100 : 0;
     if (pool === 'DRIVER') {
-      const driver = await this.prisma.driver.findUnique({
-        where: { id: moverId },
-        select: { acceptanceRate: true },
-      });
-      if (!driver) return;
-      await this.prisma.driver.update({
-        where: { id: moverId },
-        data: { acceptanceRate: driver.acceptanceRate * 0.8 + (accepted ? 100 : 0) * 0.2 },
-      });
+      await this.prisma.$executeRaw`
+        UPDATE "drivers" SET "acceptanceRate" = "acceptanceRate" * 0.8 + ${target} * 0.2
+        WHERE "id" = ${moverId}`;
       return;
     }
-    const rider = await this.prisma.rider.findUnique({
-      where: { id: moverId },
-      select: { acceptanceRate: true },
-    });
-    if (!rider) return;
-    await this.prisma.rider.update({
-      where: { id: moverId },
-      data: { acceptanceRate: rider.acceptanceRate * 0.8 + (accepted ? 100 : 0) * 0.2 },
-    });
+    await this.prisma.$executeRaw`
+      UPDATE "riders" SET "acceptanceRate" = "acceptanceRate" * 0.8 + ${target} * 0.2
+      WHERE "id" = ${moverId}`;
   }
 }
 

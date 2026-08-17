@@ -911,6 +911,18 @@ describe('The offer cascade', () => {
     await app.prisma.rider.updateMany({ where: { id: { in: [a.riderId, b.riderId] } }, data: { isOnline: false } });
   });
 
+  it('two concurrent offer outcomes serialize under the row lock — neither is lost [REPORT-014 F-014-14]', async () => {
+    const rider = await makeRider({ lat: PICKUP.lat + 0.02, acceptance: 100 });
+    // Two misses land at the same instant. The old read-modify-write let both
+    // read 100 and write 80 (a lost update); the atomic EMA serializes to
+    // 100 → 80 → 64. (recordOfferOutcome is private; runtime-erased.)
+    const record = (dispatch as unknown as { recordOfferOutcome: (id: string, ok: boolean, pool: string) => Promise<void> }).recordOfferOutcome.bind(dispatch);
+    await Promise.all([record(rider.riderId, false, 'RIDER'), record(rider.riderId, false, 'RIDER')]);
+    const after = await app.prisma.rider.findUniqueOrThrow({ where: { id: rider.riderId } });
+    expect(Number(after.acceptanceRate)).toBeCloseTo(64, 5); // NOT 80 (would be a lost update)
+    await app.prisma.rider.update({ where: { id: rider.riderId }, data: { isOnline: false } });
+  });
+
   it('SWIFT-016: accepting via /offers/accept claims, applies the fare, and never a timeout penalty', async () => {
     await app.prisma.rider.updateMany({ data: { isOnline: false } });
     const rider = await makeRider({ lat: PICKUP.lat + 0.002, acceptance: 100 });
