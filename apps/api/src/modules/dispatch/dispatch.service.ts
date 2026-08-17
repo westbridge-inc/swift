@@ -318,6 +318,43 @@ export class DispatchService {
     return Number(removed) === 1;
   }
 
+  /** [REPORT-014 F-014-05] Offer installation is ONE atomic dual-key
+   *  reservation: the per-order key (exactly one live offer per order — the
+   *  E29 mutual exclusion) AND the per-mover reverse key (exactly one live
+   *  offer per mover) are checked and written inside a single Lua script.
+   *  The old plain reverse SET let one mover own several order keys while
+   *  the singular reverse pointer named only the last — the first card was
+   *  unrecoverable by release/recovery yet its timeout still decayed the
+   *  mover. No partial state: a taken order or a busy mover leaves both
+   *  keys untouched. */
+  private async installOfferPair(
+    orderId: string,
+    moverId: string,
+    attemptId: string,
+    ttlSeconds: number,
+  ): Promise<'OK' | 'ORDER_TAKEN' | 'MOVER_BUSY'> {
+    const res = await this.redis.eval(
+      `
+        if redis.call('EXISTS', KEYS[1]) == 1 then
+          return 'ORDER_TAKEN'
+        end
+        if redis.call('EXISTS', KEYS[2]) == 1 then
+          return 'MOVER_BUSY'
+        end
+        redis.call('SET', KEYS[1], ARGV[1], 'EX', ARGV[3])
+        redis.call('SET', KEYS[2], ARGV[2], 'EX', ARGV[3])
+        return 'OK'
+      `,
+      2,
+      offerKey(orderId),
+      moverOfferKey(moverId),
+      offerValue(moverId, attemptId),
+      offerValue(orderId, attemptId),
+      String(ttlSeconds),
+    );
+    return res as 'OK' | 'ORDER_TAKEN' | 'MOVER_BUSY';
+  }
+
   // -------------------------------------------------------------------------
   // Candidate discovery — PostGIS over the live rider positions
   // -------------------------------------------------------------------------
@@ -629,112 +666,126 @@ export class DispatchService {
       return { exhausted: true };
     }
 
-    const top = candidates[0]!;
     const timeoutSeconds = order.isExpress ? EXPRESS_OFFER_TIMEOUT_SECONDS : OFFER_TIMEOUT_SECONDS;
-    // [F-014-04] Mint this attempt's identity. It lives in both Redis values,
-    // the timeout job, the socket/push/recovery payloads, and the evidence row.
-    const attemptId = randomUUID();
-    // [E29 / danger #18] The offer install IS the mutual exclusion: two
-    // concurrent triggers (route retry-dispatch + queue job, double webhook,
-    // two instances) could both pass the GET above and the old plain SET let
-    // the second silently STEAL the first mover's offer — duplicate cards,
-    // pushes, journal rows, and a timeout penalty against a mover whose card
-    // vanished. NX makes exactly one trigger the owner; losers emit nothing.
-    const installed = await this.redis.set(offerKey(orderId), offerValue(top.riderId, attemptId), 'EX', timeoutSeconds + 10, 'NX');
-    if (installed !== 'OK') {
-      const winner = await this.redis.get(offerKey(orderId));
-      return winner ? { offered: parseOfferValue(winner).id } : {};
-    }
-    // Reverse pointer so go-offline can find this offer by mover (advisory —
-    // re-validated against offerKey on read). Same TTL: it dies with the offer.
-    await this.redis.set(moverOfferKey(top.riderId), offerValue(orderId, attemptId), 'EX', timeoutSeconds + 10);
-
-    // Candidate discovery and offer installation straddle PostgreSQL + Redis.
-    // Revalidate after both pointers exist so either role-switch ordering is
-    // safe: switch-before-install is caught here; install-before-switch is
-    // removed by the switch's releaseHeldOffer call. Never emit to stale supply.
-    if (!(await this.canReceiveOffer(pool, top.riderId))) {
-      const removed = await this.removeOfferIfOwned(orderId, top.riderId, attemptId);
-      if (removed) {
-        await this.redis.sadd(declinedKey(orderId), top.riderId);
-        await this.redis.expire(declinedKey(orderId), 3600);
-        log().info({ orderId, moverId: top.riderId, pool }, 'dispatch: withdrew offer after authority changed');
-        return this.dispatchOrder(orderId, order.tenantId);
+    // [F-014-05] Walk the ranked candidates: the FIRST who can atomically
+    // reserve BOTH the order and themselves gets the card. A mover already
+    // holding a live offer elsewhere is skipped, not declined — they did
+    // nothing wrong; they simply are not free this instant.
+    for (const top of candidates) {
+      // [F-014-04] Mint this attempt's identity. It lives in both Redis values,
+      // the timeout job, the socket/push/recovery payloads, and the evidence row.
+      const attemptId = randomUUID();
+      // [E29 / danger #18 + F-014-05] The offer install IS the mutual
+      // exclusion — now for BOTH parties. Concurrent triggers for one order
+      // (route retry + queue job, double webhook, two instances) resolve to
+      // exactly one owner and losers emit nothing; and one mover can never
+      // hold two live offers at once. One Lua script; no partial writes.
+      const installed = await this.installOfferPair(orderId, top.riderId, attemptId, timeoutSeconds + 10);
+      if (installed === 'ORDER_TAKEN') {
+        const winner = await this.redis.get(offerKey(orderId));
+        return winner ? { offered: parseOfferValue(winner).id } : {};
       }
-      // Another release already advanced the cascade; do not touch its offer.
-      return {};
-    }
+      if (installed === 'MOVER_BUSY') continue;
 
-    // §4d: on a CASH job the mover fronts real money — show them WHO they're
-    // fronting it for (trust level, completed orders, strikes) before accept.
-    const trust = (await customerTrustSummaries(this.prisma, [order.customerId])).get(order.customerId);
+      // Candidate discovery and offer installation straddle PostgreSQL + Redis.
+      // Revalidate after both pointers exist so either role-switch ordering is
+      // safe: switch-before-install is caught here; install-before-switch is
+      // removed by the switch's releaseHeldOffer call. Never emit to stale supply.
+      if (!(await this.canReceiveOffer(pool, top.riderId))) {
+        const removed = await this.removeOfferIfOwned(orderId, top.riderId, attemptId);
+        if (removed) {
+          await this.redis.sadd(declinedKey(orderId), top.riderId);
+          await this.redis.expire(declinedKey(orderId), 3600);
+          log().info({ orderId, moverId: top.riderId, pool }, 'dispatch: withdrew offer after authority changed');
+          return this.dispatchOrder(orderId, order.tenantId);
+        }
+        // Another release already advanced the cascade; do not touch its offer.
+        return {};
+      }
 
-    // §7: a mover judges a big grocery order BEFORE accepting.
-    const totalUnits = order.items.reduce((s, i) => s + i.quantity, 0);
+      // §4d: on a CASH job the mover fronts real money — show them WHO they're
+      // fronting it for (trust level, completed orders, strikes) before accept.
+      const trust = (await customerTrustSummaries(this.prisma, [order.customerId])).get(order.customerId);
 
-    this.io.to(`user:${top.userId}`).emit('dispatch:offer', {
-      orderId,
-      // [F-014-04] The client echoes this back on accept/decline/seen so those
-      // actions bind to exactly this generation (optional — older clients omit it).
-      offerAttemptId: attemptId,
-      orderNumber: order.orderNumber,
-      vendorName: order.vendor?.name,
-      // Express = bigger fee for the mover; badge it so they know why.
-      isExpress: order.isExpress,
-      expiresInSeconds: timeoutSeconds,
-      etaMinutes: Math.round(top.etaMinutes),
-      paymentMethod: order.paymentMethod,
-      customerTrust: trust ?? null,
-      itemCount: order.items.length,
-      estLoad: order.items.length > 0 ? estimateLoad(totalUnits) : null,
-    });
+      // §7: a mover judges a big grocery order BEFORE accepting.
+      const totalUnits = order.items.reduce((s, i) => s + i.quantity, 0);
 
-    // Alert-delivery tracking (§A4): every offer gets a row; the mover's
-    // accept/decline stamps acknowledgedAt. Fire-and-caught. The attempt id
-    // makes the row evidence about THIS generation only [F-014-04].
-    await this.prisma.alertDelivery
-      .create({ data: { kind: 'MOVER_OFFER', subjectId: orderId, recipientId: top.userId, offerAttemptId: attemptId } })
-      .catch(() => {});
+      this.io.to(`user:${top.userId}`).emit('dispatch:offer', {
+        orderId,
+        // [F-014-04] The client echoes this back on accept/decline/seen so those
+        // actions bind to exactly this generation (optional — older clients omit it).
+        offerAttemptId: attemptId,
+        orderNumber: order.orderNumber,
+        vendorName: order.vendor?.name,
+        // Express = bigger fee for the mover; badge it so they know why.
+        isExpress: order.isExpress,
+        expiresInSeconds: timeoutSeconds,
+        etaMinutes: Math.round(top.etaMinutes),
+        paymentMethod: order.paymentMethod,
+        customerTrust: trust ?? null,
+        itemCount: order.items.length,
+        estLoad: order.items.length > 0 ? estimateLoad(totalUnits) : null,
+      });
 
-    // Journal (§3): who this wave actually tried — cooldown + "everyone
-    // declined" proof for Live Ops.
-    await this.prisma.dispatchSearch
-      .updateMany({
-        where: { subjectId: orderId, status: 'SEARCHING' },
-        data: { candidatesTried: { push: top.riderId } },
-      })
-      .catch(() => {});
+      // Alert-delivery tracking (§A4): every offer gets a row; the mover's
+      // accept/decline stamps acknowledgedAt. Fire-and-caught. The attempt id
+      // makes the row evidence about THIS generation only [F-014-04].
+      await this.prisma.alertDelivery
+        .create({ data: { kind: 'MOVER_OFFER', subjectId: orderId, recipientId: top.userId, offerAttemptId: attemptId } })
+        .catch(() => {});
 
-    // Loud alerts (alerts spec §A2/§A3, flag-gated): the socket only reaches a
-    // FOREGROUNDED app — a mover with the phone in their pocket would sleep
-    // through a 30s offer. notifications.send fans out to Expo push (and the
-    // notification row survives the offer). Never let alert plumbing fail the
-    // offer itself. expiresAt rides along so a late-opening client can drop
-    // stale offers instead of showing ghosts.
-    if (process.env['ALERTS_LOUD'] === '1') {
-      const isTaxi = pool === 'DRIVER';
-      await this.notifications
-        .send({
-          userId: top.userId,
-          type: 'ORDER_UPDATE',
-          title: isTaxi ? '\u{1F695} Someone nearby needs a pickup' : '\u{1F6F5} Order available nearby',
-          body: isTaxi
-            ? `~${Math.round(top.etaMinutes)} min away · ${timeoutSeconds}s to accept`
-            : `${order.vendor?.name ?? 'A store'} · ~${Math.round(top.etaMinutes)} min away · ${timeoutSeconds}s to accept`,
-          audience: 'earner',
-          data: {
-            kind: 'dispatch_offer',
-            orderId,
-            offerAttemptId: attemptId,
-            expiresAt: new Date(Date.now() + timeoutSeconds * 1000).toISOString(),
-          },
+      // Journal (§3): who this wave actually tried — cooldown + "everyone
+      // declined" proof for Live Ops.
+      await this.prisma.dispatchSearch
+        .updateMany({
+          where: { subjectId: orderId, status: 'SEARCHING' },
+          data: { candidatesTried: { push: top.riderId } },
         })
         .catch(() => {});
+
+      // Loud alerts (alerts spec §A2/§A3, flag-gated): the socket only reaches a
+      // FOREGROUNDED app — a mover with the phone in their pocket would sleep
+      // through a 30s offer. notifications.send fans out to Expo push (and the
+      // notification row survives the offer). Never let alert plumbing fail the
+      // offer itself. expiresAt rides along so a late-opening client can drop
+      // stale offers instead of showing ghosts.
+      if (process.env['ALERTS_LOUD'] === '1') {
+        const isTaxi = pool === 'DRIVER';
+        await this.notifications
+          .send({
+            userId: top.userId,
+            type: 'ORDER_UPDATE',
+            title: isTaxi ? '\u{1F695} Someone nearby needs a pickup' : '\u{1F6F5} Order available nearby',
+            body: isTaxi
+              ? `~${Math.round(top.etaMinutes)} min away · ${timeoutSeconds}s to accept`
+              : `${order.vendor?.name ?? 'A store'} · ~${Math.round(top.etaMinutes)} min away · ${timeoutSeconds}s to accept`,
+            audience: 'earner',
+            data: {
+              kind: 'dispatch_offer',
+              orderId,
+              offerAttemptId: attemptId,
+              expiresAt: new Date(Date.now() + timeoutSeconds * 1000).toISOString(),
+            },
+          })
+          .catch(() => {});
+      }
+
+      log().info({ orderId, orderNumber: order.orderNumber, moverId: top.riderId, pool, round, attemptId, etaMinutes: Math.round(top.etaMinutes), candidates: candidates.length }, 'dispatch: offer sent');
+      await this.scheduleTimeout(orderId, top.riderId, timeoutSeconds * 1000, attemptId);
+      return { offered: top.riderId };
     }
 
-    log().info({ orderId, orderNumber: order.orderNumber, moverId: top.riderId, pool, round, attemptId, etaMinutes: Math.round(top.etaMinutes), candidates: candidates.length }, 'dispatch: offer sent');
-    await this.scheduleTimeout(orderId, top.riderId, timeoutSeconds * 1000, attemptId);
-    return { offered: top.riderId };
+    // Every candidate in range currently holds a live offer for another order
+    // [F-014-05]. Treat it like an empty ring: widen — their offers resolve in
+    // seconds and a wider pass may find free supply — and past the last round
+    // exhaust honestly; the automatic re-sweep picks the order back up.
+    if (round + 1 < MAX_ROUNDS) {
+      await this.redis.set(roundKey(orderId), String(round + 1), 'EX', 3600);
+      return this.dispatchOrder(orderId, order.tenantId);
+    }
+    log().warn({ orderId, orderNumber: order.orderNumber, pool, rounds: MAX_ROUNDS }, 'dispatch: exhausted — every candidate holds a live offer');
+    await this.exhaust(order);
+    return { exhausted: true };
   }
 
   /**

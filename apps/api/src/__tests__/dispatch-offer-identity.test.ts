@@ -229,6 +229,43 @@ describe('offer attempt identity [REPORT-014 F-014-04]', () => {
     expect((recovered as { offerAttemptId?: string }).offerAttemptId).toBe(job.attemptId);
   });
 
+  it('one mover never holds two live offers — the second order cascades to the next candidate [REPORT-014 F-014-05]', async () => {
+    await parkAllRiders();
+    const m = await makeRider(); // closest — would be top for BOTH orders
+    const n = await makeRider({ lat: PICKUP.lat + 0.01 }); // backup ~1.1 km out
+    const o1 = await makeOrder();
+    const o2 = await makeOrder();
+
+    const r1 = await dispatch.dispatchOrder(o1.id);
+    expect(r1.offered).toBe(m.riderId);
+
+    // M is reserved by o1's live offer: o2 must skip M without declining them
+    // and land on N.
+    const r2 = await dispatch.dispatchOrder(o2.id);
+    expect(r2.offered).toBe(n.riderId);
+    expect(await app.redis.sismember(`dispatch:declined:${o2.id}`, m.riderId)).toBe(0);
+
+    // The singular reverse pointer still names M's ONE live offer (o1).
+    expect((await app.redis.get(moverOfferKey(m.riderId)))!.split(':')[0]).toBe(o1.id);
+    expect((await app.redis.get(offerKey(o2.id)))!.split(':')[0]).toBe(n.riderId);
+  });
+
+  it('with every candidate reserved, the cascade exhausts honestly instead of double-carding [REPORT-014 F-014-05]', async () => {
+    await parkAllRiders();
+    const m = await makeRider();
+    const o1 = await makeOrder();
+    const o2 = await makeOrder();
+
+    await dispatch.dispatchOrder(o1.id); // M reserved by o1
+    const r2 = await dispatch.dispatchOrder(o2.id);
+
+    expect(r2.offered).toBeUndefined();
+    expect(r2.exhausted).toBe(true);
+    // No partial install: o2 has no offer key, and M's reservation is intact.
+    expect(await app.redis.get(offerKey(o2.id))).toBeNull();
+    expect((await app.redis.get(moverOfferKey(m.riderId)))!.split(':')[0]).toBe(o1.id);
+  });
+
   it('legacy bare Redis values (pre-attempt deploys) still time out and advance', async () => {
     await parkAllRiders();
     const a = await makeRider();
