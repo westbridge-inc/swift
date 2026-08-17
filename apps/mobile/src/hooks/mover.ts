@@ -362,7 +362,7 @@ export function useAcceptJob(kind: MoverKind) {
 export function useAcceptOffer(kind: MoverKind) {
   const pv = usePreview();
   const qc = useQueryClient();
-  const m = useMutation({ mutationFn: ({ orderId, fare }: { orderId: string; fare?: number }) => unwrap(svc(kind).acceptOffer(orderId, fare)), onSuccess: () => qc.invalidateQueries({ queryKey: ['mover'] }) });
+  const m = useMutation({ mutationFn: ({ orderId, fare, offerAttemptId }: { orderId: string; fare?: number; offerAttemptId?: string }) => unwrap(svc(kind).acceptOffer(orderId, fare, offerAttemptId)), onSuccess: () => qc.invalidateQueries({ queryKey: ['mover'] }) });
   return pv ? PV.previewMutation() : m;
 }
 /** Explicit pass on a dispatch offer — tells the cascade to move to the next
@@ -371,7 +371,7 @@ export function useAcceptOffer(kind: MoverKind) {
 export function useDeclineOffer(kind: MoverKind) {
   const pv = usePreview();
   const m = useMutation({
-    mutationFn: (orderId: string) => svc(kind).declineOffer(orderId).catch(() => null),
+    mutationFn: ({ orderId, offerAttemptId }: { orderId: string; offerAttemptId?: string }) => svc(kind).declineOffer(orderId, offerAttemptId).catch(() => null),
     onSuccess: () => track('offer_declined', { kind }),
   });
   return pv ? PV.previewMutation() : m;
@@ -674,6 +674,7 @@ export interface BoardJob {
 
 export interface DispatchOffer {
   orderId: string;
+  offerAttemptId?: string;
   orderNumber?: string;
   vendorName?: string;
   expiresInSeconds?: number;
@@ -692,6 +693,10 @@ export interface DispatchOffer {
   pickupAddress?: string | null;
   deliveryAddress?: string | null;
 }
+
+type RecoveredDispatchOffer = Omit<DispatchOffer, 'offerAttemptId'> & {
+  offerAttemptId: string | null;
+};
 
 /**
  * Real-time dispatch offers. The backend emits `dispatch:offer` to the mover's
@@ -716,10 +721,10 @@ export function useDispatchOffers(kind: MoverKind | null, online: boolean) {
     // [danger #21] Render proof: the moment the card exists on this device,
     // tell the server — a timeout WITHOUT this stamp is UNDELIVERABLE and
     // never decays the acceptance rate. Fire-and-forget garnish.
-    const markSeen = (orderId: string) => { void api.offerSeen(orderId).catch(() => {}); };
+    const markSeen = (orderId: string, offerAttemptId?: string) => { void api.offerSeen(orderId, offerAttemptId).catch(() => {}); };
     const onOffer = (data: DispatchOffer) => {
       setOffer(data);
-      markSeen(data.orderId);
+      markSeen(data.orderId, data.offerAttemptId);
       qc.invalidateQueries({ queryKey: ['mover', 'available', kind] });
     };
     s.on('dispatch:offer', onOffer);
@@ -733,10 +738,14 @@ export function useDispatchOffers(kind: MoverKind | null, online: boolean) {
     let gone = false;
     const recover = async () => {
       try {
-        const data = await unwrap<{ offer: DispatchOffer | null }>(api.currentOffer());
+        const data = await unwrap<{ offer: RecoveredDispatchOffer | null }>(api.currentOffer());
         if (!gone && data?.offer?.orderId) {
-          setOffer(data.offer);
-          markSeen(data.offer.orderId);
+          const recoveredOffer: DispatchOffer = {
+            ...data.offer,
+            offerAttemptId: data.offer.offerAttemptId ?? undefined,
+          };
+          setOffer(recoveredOffer);
+          markSeen(recoveredOffer.orderId, recoveredOffer.offerAttemptId);
           qc.invalidateQueries({ queryKey: ['mover', 'available', kind] });
         }
       } catch { /* recovery only — never surface */ }

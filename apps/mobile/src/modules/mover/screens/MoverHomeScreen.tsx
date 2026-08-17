@@ -816,11 +816,11 @@ export function MoverHomeScreen({ navigation }: any) {
           job={jobs.find((j) => j.id === offer.orderId)}
           kind={k}
           accepting={acceptOffer.isPending}
-          onAccept={(fare) => acceptOffer.mutate({ orderId: offer.orderId, fare }, { onSuccess: dismiss })}
+          onAccept={(fare) => acceptOffer.mutate({ orderId: offer.orderId, fare, offerAttemptId: offer.offerAttemptId }, { onSuccess: dismiss })}
           // Tell the server too — the cascade re-offers the next mover NOW
           // instead of waiting out the 20s timeout on a card nobody wants.
           onDecline={() => {
-            decline.mutate(offer.orderId);
+            decline.mutate({ orderId: offer.orderId, offerAttemptId: offer.offerAttemptId });
             dismiss();
           }}
         />

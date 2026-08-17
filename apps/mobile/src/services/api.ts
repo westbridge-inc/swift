@@ -557,7 +557,7 @@ export const riderApi = {
   profile: () => api.get('/rider/profile'),
   standing: () => api.get('/rider/standing'),
   currentOffer: () => api.get('/rider/offers/current'),
-  offerSeen: (orderId: string) => api.post('/rider/offers/seen', { orderId }),
+  offerSeen: (orderId: string, offerAttemptId?: string) => api.post('/rider/offers/seen', { orderId, ...(offerAttemptId ? { offerAttemptId } : {}) }),
   goOnline: (latitude: number, longitude: number, session?: AuthSessionSnapshot) =>
     api.post('/rider/go-online', { latitude, longitude }, capturedAuthConfig(session)),
   goOffline: () => api.post('/rider/go-offline'),
@@ -568,8 +568,8 @@ export const riderApi = {
   accept: (id: string, fare?: number) => api.post(`/rider/orders/${id}/accept`, { fare }),
   // Accepting a dispatch OFFER (the offer card) vs grabbing from the open board:
   // this path acks the offer so it's never scored as a timeout [SWIFT-016].
-  acceptOffer: (orderId: string, fare?: number) => api.post('/rider/offers/accept', { orderId, fare }),
-  declineOffer: (orderId: string) => api.post('/rider/offers/decline', { orderId }),
+  acceptOffer: (orderId: string, fare?: number, offerAttemptId?: string) => api.post('/rider/offers/accept', { orderId, fare, ...(offerAttemptId ? { offerAttemptId } : {}) }),
+  declineOffer: (orderId: string, offerAttemptId?: string) => api.post('/rider/offers/decline', { orderId, ...(offerAttemptId ? { offerAttemptId } : {}) }),
   // Golden-rule handover: GPS is mandatory server-side (claims are impossible
   // without it) — an empty body 400s.
   handover: (
@@ -611,7 +611,7 @@ export const driverApi = {
   profile: () => api.get('/driver/profile'),
   standing: () => api.get('/driver/standing'),
   currentOffer: () => api.get('/driver/offers/current'),
-  offerSeen: (orderId: string) => api.post('/driver/offers/seen', { orderId }),
+  offerSeen: (orderId: string, offerAttemptId?: string) => api.post('/driver/offers/seen', { orderId, ...(offerAttemptId ? { offerAttemptId } : {}) }),
   updateProfile: (data: { mmgPayUrl?: string | null }) => api.put('/driver/profile', data),
   goOnline: (latitude: number, longitude: number, session?: AuthSessionSnapshot) =>
     api.post('/driver/go-online', { latitude, longitude }, capturedAuthConfig(session)),
@@ -622,8 +622,8 @@ export const driverApi = {
   active: () => api.get('/driver/rides/active'),
   accept: (id: string, fare?: number) => api.post(`/driver/rides/${id}/accept`, { fare }),
   // Offer-card accept (acks the offer, no timeout penalty) vs board-grab [SWIFT-016].
-  acceptOffer: (orderId: string, fare?: number) => api.post('/driver/offers/accept', { orderId, fare }),
-  declineOffer: (orderId: string) => api.post('/driver/offers/decline', { orderId }),
+  acceptOffer: (orderId: string, fare?: number, offerAttemptId?: string) => api.post('/driver/offers/accept', { orderId, fare, ...(offerAttemptId ? { offerAttemptId } : {}) }),
+  declineOffer: (orderId: string, offerAttemptId?: string) => api.post('/driver/offers/decline', { orderId, ...(offerAttemptId ? { offerAttemptId } : {}) }),
   enRoute: (id: string) => api.put(`/driver/rides/${id}/en-route`),
   arrived: (id: string) => api.put(`/driver/rides/${id}/arrived`),
   verifyPin: (id: string, pin: string) => api.put(`/driver/rides/${id}/verify-pin`, { pin }),
