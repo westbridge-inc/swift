@@ -251,7 +251,7 @@ describe('Ride request — fare shown first, dispatch shared, PIN issued', () =>
 
     // Dispatch went to the DRIVER pool — the offer is live for our driver
     const offer = await app.redis.get(`dispatch:offer:${ride.id}`);
-    expect(offer).toBe(driver.driverId);
+    expect(offer!.split(':')[0]).toBe(driver.driverId); // value is `<mover>:<attemptId>` [F-014-04]
 
     // Driver accepts through the shared atomic claim
     const accept = await inject('POST', `/api/v1/driver/rides/${ride.id}/accept`, {}, driver.token);
@@ -466,8 +466,12 @@ describe('Ride request — fare shown first, dispatch shared, PIN issued', () =>
     }, customer.token);
     const ride = res.json().data.ride;
     // Offer is live for our (sole) driver, not yet accepted.
-    expect(await app.redis.get(`dispatch:offer:${ride.id}`)).toBe(driver.driverId);
+    expect((await app.redis.get(`dispatch:offer:${ride.id}`))!.split(':')[0]).toBe(driver.driverId); // [F-014-04 composite]
     const before = (await app.prisma.driver.findUniqueOrThrow({ where: { id: driver.driverId } })).acceptanceRate;
+    // The card RENDERED (the app stamps seen on render) — quitting now is a
+    // dodge and must cost. An unrendered card is spared [F-014-10].
+    const seen = await inject('POST', '/api/v1/driver/offers/seen', { orderId: ride.id }, driver.token);
+    expect(seen.statusCode).toBe(200);
 
     const off = await inject('POST', '/api/v1/driver/go-offline', {}, driver.token);
     expect(off.statusCode).toBe(200);

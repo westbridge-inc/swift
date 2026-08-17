@@ -381,6 +381,32 @@ describe('offer attempt identity [REPORT-014 F-014-04]', () => {
     expect(await dispatch.currentOfferFor(a.riderId)).toBeNull();
   });
 
+  it("board retirement removes the OFFERED mover's pair and never the winner's unrelated offer [REPORT-019 F-019-01]", async () => {
+    await parkAllRiders();
+    const a = await makeRider();                        // will hold O1's offer
+    const b = await makeRider({ lat: PICKUP.lat + 0.2 }); // far away — gets O2 only
+    const o1 = await makeOrder();
+    const o2 = await makeOrder();
+
+    // O1's cascade offers to A (B is out of ring at 5 km).
+    expect((await dispatch.dispatchOrder(o1.id)).offered).toBe(a.riderId);
+    // B holds a live offer for the UNRELATED order O2 (seeded at B's location).
+    await app.prisma.order.update({
+      where: { id: o2.id },
+      data: { pickupLat: PICKUP.lat + 0.2, pickupLng: PICKUP.lng },
+    });
+    expect((await dispatch.dispatchOrder(o2.id)).offered).toBe(b.riderId);
+
+    // B grabs O1 off the open board (bypassing A's offer): retirement must
+    // retire A's pair — and must NOT touch B's reverse pointer for O2.
+    await dispatch.retireAfterAssignment(o1.id, b.riderId);
+
+    expect(await app.redis.get(offerKey(o1.id))).toBeNull();          // O1 offer gone
+    expect(await app.redis.get(moverOfferKey(a.riderId))).toBeNull(); // A's pointer gone (was dangling before)
+    expect((await app.redis.get(moverOfferKey(b.riderId)))!.split(':')[0]).toBe(o2.id); // B's O2 pointer INTACT
+    expect((await app.redis.get(offerKey(o2.id)))!.split(':')[0]).toBe(b.riderId);      // O2 offer INTACT
+  });
+
   it('legacy bare Redis values (pre-attempt deploys) still time out and advance', async () => {
     await parkAllRiders();
     const a = await makeRider();

@@ -268,11 +268,30 @@ export class DispatchService {
     } catch (err) {
       warnAfterClaimCommit({ err, orderId, moverId, pool: 'RIDER' }, 'board-grab journal finalization failed');
     }
-    // Retire the Redis offer for this order + this mover's reverse pointer, and
-    // the cascade state, exactly as claimOrder does.
-    await this.redis
-      .del(offerKey(orderId), moverOfferKey(moverId), declinedKey(orderId), roundKey(orderId), exhaustKey(orderId))
-      .catch((err) => warnAfterClaimCommit({ err, orderId, moverId, pool: 'RIDER' }, 'board-grab Redis cleanup failed'));
+    // [REPORT-019 F-019-01] Retire whatever offer generation is still LIVE
+    // for this order — which may belong to a DIFFERENT mover than the board
+    // winner (the grab bypasses the offer). The old delete keyed on the
+    // winner erased THEIR reverse pointer (possibly naming an unrelated live
+    // offer, breaking its prompt release) while leaving the actually-offered
+    // mover's pointer dangling. Parse the live owner from the forward value
+    // and strict-remove exactly that generation pair. A fresh install can't
+    // race in behind us: dispatchOrder re-reads the assigned order first.
+    await this.retireLiveOfferPair(orderId, moverId, 'RIDER');
+  }
+
+  /** Owner-aware post-assignment Redis retirement, shared by the board grab
+   *  and claimOrder's own cleanup. Best-effort (assignment already durable). */
+  private async retireLiveOfferPair(orderId: string, assignedMoverId: string, pool: DispatchPool): Promise<void> {
+    try {
+      const live = await this.redis.get(offerKey(orderId));
+      if (live) {
+        const { id: ownerMoverId, attemptId } = parseOfferValue(live);
+        await this.removeOfferIfOwned(orderId, ownerMoverId, attemptId);
+      }
+      await this.redis.del(declinedKey(orderId), roundKey(orderId), exhaustKey(orderId));
+    } catch (err) {
+      warnAfterClaimCommit({ err, orderId, moverId: assignedMoverId, pool }, 'post-assignment Redis retirement failed');
+    }
   }
 
   /** [F-014-04] Two compare modes. STRICT (attemptId given — timeout jobs,
@@ -1413,9 +1432,11 @@ export class DispatchService {
       warnAfterClaimCommit({ err, orderId, moverId, pool }, 'dispatch journal finalization failed after claim commit');
     }
 
-    await this.redis
-      .del(offerKey(orderId), declinedKey(orderId), roundKey(orderId), exhaustKey(orderId))
-      .catch((err) => warnAfterClaimCommit({ err, orderId, moverId, pool }, 'dispatch Redis cleanup failed after claim commit'));
+    // [REPORT-019 F-019-01 / F-014-09] Owner-aware retirement: entrances that
+    // do not pre-consume (taxi direct accept, any future direct claim) leave
+    // the OFFERED mover's pair live here — possibly a different mover than
+    // the winner. Remove exactly that generation, never a bystander pointer.
+    await this.retireLiveOfferPair(orderId, moverId, pool);
 
     const assignedEvent = { orderId, status: assignedStatus, timestamp: new Date().toISOString() };
     try {
