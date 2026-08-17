@@ -47,7 +47,7 @@ to be"). Audit against the spec's own bar agreed with him:
    ```
    ┌──────────────────────────────┐
    │  DELIVER TO ▾        🔔  ◯  │   wash 500 …
-   │  Good afternoon, Mayur       │   … deepening …
+   │  Good afternoon, Devon       │   … deepening …
    │  [ 🔍 search pill 52dp ]     │   … to 600
    ╰◡◡◡◡◡◡◡◡◡◡◡◡◡◡◡◡◡◡◡◡◡◡◡◡◡◡◡◡╯   ← the awning hem
       ┌────────────────────────┐
@@ -81,7 +81,7 @@ to be"). Audit against the spec's own bar agreed with him:
 8. **Copy (current → new).**
    | Current | New |
    |---|---|
-   | (no greeting) | "Good afternoon, Mayur" (time-aware, name only when signed in) |
+   | (no greeting) | "Good afternoon, Devon" (time-aware, name only when signed in) |
    | "0% fees" / "No markups — pay cash on delivery." | "0% fees, always" / "Swift never marks up your order. Pay cash when it arrives." |
    | everything else | unchanged — already glossary-true |
 
