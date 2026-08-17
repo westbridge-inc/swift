@@ -879,11 +879,26 @@ export class DispatchService {
         orderNumber: true, isExpress: true, paymentMethod: true, customerId: true,
         deliveryFee: true, tipAmount: true, taxiFareTotal: true,
         pickupAddress: true, deliveryAddress: true,
+        status: true, riderId: true, driverId: true, fulfillment: true, orderType: true,
         vendor: { select: { name: true } },
         items: { select: { quantity: true } },
       },
     });
     if (!order) return null;
+    // [REPORT-014 F-014-09] The Redis pair is a routing cache; PostgreSQL is
+    // the assignment authority. A board/direct grab can commit a winner while
+    // this pair lingers — resurrecting the card then invites an accept that
+    // can only end ALREADY_TAKEN (and a stale countdown on a dead job). An
+    // order that is no longer offerable recovers NOTHING.
+    if (order.orderType === 'TAXI') {
+      if (order.driverId || order.status !== 'PENDING') return null;
+    } else {
+      if (
+        order.riderId
+        || order.fulfillment !== 'DELIVERY'
+        || !['ACCEPTED', 'PREPARING', 'READY_FOR_PICKUP'].includes(order.status)
+      ) return null;
+    }
     const trust = (await customerTrustSummaries(this.prisma, [order.customerId])).get(order.customerId);
     const totalUnits = order.items.reduce((s, i) => s + i.quantity, 0);
     return {

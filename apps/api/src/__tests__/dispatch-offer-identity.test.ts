@@ -360,6 +360,27 @@ describe('offer attempt identity [REPORT-014 F-014-04]', () => {
     expect(Number(after.acceptanceRate)).toBe(100);
   });
 
+  it('recovery refuses a card whose order is already assigned in the database [REPORT-014 F-014-09]', async () => {
+    await parkAllRiders();
+    const a = await makeRider();
+    const b = await makeRider({ lat: PICKUP.lat + 0.01 });
+    const order = await makeOrder();
+
+    const res = await dispatch.dispatchOrder(order.id);
+    expect(res.offered).toBe(a.riderId);
+
+    // The board/direct seam assigned rider B while A's Redis pair lingers
+    // (the exact canonical-vs-cache divergence of F-014-09).
+    await app.prisma.order.update({
+      where: { id: order.id },
+      data: { riderId: b.riderId, status: 'RIDER_ASSIGNED' },
+    });
+
+    // A's recovery must NOT resurrect the card — PostgreSQL already has a
+    // winner; acting on the recovered card could only end in ALREADY_TAKEN.
+    expect(await dispatch.currentOfferFor(a.riderId)).toBeNull();
+  });
+
   it('legacy bare Redis values (pre-attempt deploys) still time out and advance', async () => {
     await parkAllRiders();
     const a = await makeRider();
