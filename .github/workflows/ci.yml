@@ -27,7 +27,22 @@ jobs:
         with:
           node-version: 20
           cache: pnpm
+      # TEMPORARY diagnostic (remove after the apps/api ENOENT is solved):
+      # the frozen-lock check proves apps/api exists at install START, yet
+      # linking fails mkdir'ing apps/api/node_modules seconds later.
+      - name: Probe checkout state
+        run: |
+          pwd; node -v; pnpm -v; df -h . | tail -1
+          ls -la
+          ls -la apps/
+          ls apps/api | head -5
+          stat -c '%F %n' apps apps/api
       - run: pnpm install --frozen-lockfile
+      - name: Probe after install
+        if: always()
+        run: |
+          ls -la apps/ || true
+          stat -c '%F %n' apps apps/api || true
       - run: cd apps/api && npx prisma generate
       - run: pnpm lint
       - run: pnpm type-check
