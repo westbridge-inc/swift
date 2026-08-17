@@ -1638,6 +1638,37 @@ describe('Atomic acceptance — the concurrency proof', () => {
     });
   });
 
+  it('a BOARD grab retires the live Redis offer and finalizes the search journal [REPORT-014 F-014-09]', async () => {
+    const r = await makeRider({ lat: PICKUP.lat + 0.013 });
+    const order = await makeDeliveryOrder('READY_FOR_PICKUP');
+    // Simulate the state left when this order also had a live offer out and a
+    // SEARCHING journal open — the board grab used to leave both alive.
+    await app.redis.set(`dispatch:offer:${order.id}`, r.riderId, 'EX', 40);
+    await app.redis.set(`dispatch:mover-offer:${r.riderId}`, order.id, 'EX', 40);
+    await app.prisma.dispatchSearch.create({
+      data: { subjectId: order.id, subjectType: 'ORDER', status: 'SEARCHING', startedAt: new Date(), vertical: 'DELIVERY', radiusKm: 3 },
+    });
+
+    const res = await app.inject({
+      method: 'POST', url: `/api/v1/rider/orders/${order.id}/accept`,
+      headers: { authorization: `Bearer ${r.token}`, 'content-type': 'application/json' },
+      payload: {},
+    });
+    expect(res.statusCode).toBe(200);
+
+    // Redis offer pair retired → a stale timeout can no longer penalize the rider.
+    expect(await app.redis.get(`dispatch:offer:${order.id}`)).toBeNull();
+    expect(await app.redis.get(`dispatch:mover-offer:${r.riderId}`)).toBeNull();
+    // Journal resolved, not left SEARCHING forever.
+    const journal = await app.prisma.dispatchSearch.findFirst({ where: { subjectId: order.id }, orderBy: { startedAt: 'desc' } });
+    expect(journal?.status).toBe('ASSIGNED');
+    expect(journal?.assignedTo).toBe(r.riderId);
+
+    await app.prisma.dispatchSearch.deleteMany({ where: { subjectId: order.id } });
+    await app.prisma.order.update({ where: { id: order.id }, data: { riderId: null, status: 'READY_FOR_PICKUP' } });
+    await app.prisma.rider.update({ where: { id: r.riderId }, data: { isOnline: false, isAvailable: true, currentOrderId: null, committedFloat: 0 } });
+  });
+
   it('the BOARD accept route also rejects fare 0 as a floor-clamp — market rate applies [REPORT-011 F-04]', async () => {
     const r = await makeRider({ lat: PICKUP.lat + 0.011 });
     const order = await makeDeliveryOrder('READY_FOR_PICKUP');

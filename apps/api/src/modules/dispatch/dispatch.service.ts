@@ -222,6 +222,39 @@ export class DispatchService {
    * Compare-and-delete both Redis offer pointers. A plain GET followed by DEL
    * can erase a newer mover's offer when a role switch and cascade overlap.
    */
+  /** [REPORT-014 F-014-09] Post-commit retirement for the RIDER BOARD-GRAB
+   *  entrance, which stages its own assignment (stageDirectRiderAssignment)
+   *  instead of going through claimOrder — and therefore never finalized the
+   *  DispatchSearch journal or retired the Redis offer pair. A live offer left
+   *  behind lets a scheduled timeout later decline/penalize a mover for a job
+   *  already assigned, and a recoverable ghost offer survives. This mirrors
+   *  claimOrder's post-commit cleanup exactly; all steps fire-and-caught (the
+   *  assignment already committed). */
+  async retireAfterAssignment(orderId: string, moverId: string): Promise<void> {
+    try {
+      const open = await this.prisma.dispatchSearch.findFirst({
+        where: { subjectId: orderId, status: 'SEARCHING' },
+        select: { id: true, startedAt: true },
+      });
+      if (open) {
+        const assignedAt = new Date();
+        await this.prisma.dispatchSearch.update({
+          where: { id: open.id },
+          data: { status: 'ASSIGNED', assignedTo: moverId, assignedAt },
+        });
+        dispatchSearchesCounter.inc({ status: 'assigned' });
+        dispatchTimeToAssign.observe((assignedAt.getTime() - open.startedAt.getTime()) / 1000);
+      }
+    } catch (err) {
+      warnAfterClaimCommit({ err, orderId, moverId, pool: 'RIDER' }, 'board-grab journal finalization failed');
+    }
+    // Retire the Redis offer for this order + this mover's reverse pointer, and
+    // the cascade state, exactly as claimOrder does.
+    await this.redis
+      .del(offerKey(orderId), moverOfferKey(moverId), declinedKey(orderId), roundKey(orderId), exhaustKey(orderId))
+      .catch((err) => warnAfterClaimCommit({ err, orderId, moverId, pool: 'RIDER' }, 'board-grab Redis cleanup failed'));
+  }
+
   private async removeOfferIfOwned(orderId: string, moverId: string): Promise<boolean> {
     const removed = await this.redis.eval(
       `

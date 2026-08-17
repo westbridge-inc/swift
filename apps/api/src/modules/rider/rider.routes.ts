@@ -1052,6 +1052,12 @@ export async function riderRoutes(app: FastifyInstance) {
       return staged;
     });
 
+    // [REPORT-014 F-014-09] Board grab stages its own assignment, so retire the
+    // Redis offer pair + finalize the search journal here (claimOrder does this
+    // for the offer/direct entrances). Without it a live offer's timeout could
+    // later penalize a mover for this already-assigned job, and the SEARCHING
+    // journal never closes. Fire-and-caught — the assignment already committed.
+    await dispatch.retireAfterAssignment(id, rider.id);
     await orderService.publishCommittedRiderAssignment(updatedOrder, request.user.userId);
 
     return {
