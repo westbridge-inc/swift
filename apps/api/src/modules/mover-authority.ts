@@ -1,4 +1,5 @@
 import { Prisma, type MoverRole, type OrderStatus, type UserRole, type UserStatus } from '@prisma/client';
+import { freshRidePinReset } from './rides/ride-pin';
 import type { FastifyInstance } from 'fastify';
 import { AppError, ConflictError, NotFoundError } from '../utils/errors';
 import { makeDispatchService } from './dispatch/dispatch.service';
@@ -481,7 +482,10 @@ export async function retireMoverSessionAuthorityInTransaction(
       ) {
         await tx.order.update({
           where: { id: order.id },
-          data: { driverId: null, status: 'PENDING', acceptedAt: null },
+          // [REPORT-014 F-014-12] Fresh PIN + zeroed attempt budget on every
+          // pre-custody release — the revoked driver's knowledge/burn must
+          // never bind the replacement's handover window.
+          data: { driverId: null, status: 'PENDING', acceptedAt: null, ...freshRidePinReset() },
         });
         await tx.driver.update({
           where: { id: driver.id },

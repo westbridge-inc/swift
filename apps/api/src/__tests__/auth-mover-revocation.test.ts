@@ -252,6 +252,9 @@ describe('session revocation retires mover supply without stranding physical cus
       acceptedAt: new Date(Date.now() - 5_000),
     });
     await app.prisma.driver.update({ where: { id: driver.id }, data: { currentRideId: order.id } });
+    // The outgoing driver burned the whole PIN budget before revocation — the
+    // release must rotate the PIN and zero the budget [REPORT-014 F-014-12].
+    await app.prisma.order.update({ where: { id: order.id }, data: { ridePin: '999111', ridePinAttempts: 5 } });
     const redispatch = vi.spyOn(DispatchService.prototype, 'retryDispatch').mockResolvedValue({});
 
     await new AuthService(app).logout(mover.session.id, mover.user.id);
@@ -271,6 +274,10 @@ describe('session revocation retires mover supply without stranding physical cus
     }).toEqual({ currentRideId: null, online: false, available: false, owner: null });
     expect(log?.status).toBe('PENDING');
     expect(redispatch).toHaveBeenCalledWith(order.id);
+    // Fresh PIN, fresh budget: the old driver's knowledge/burn cannot bind
+    // the replacement driver's handover window [F-014-12].
+    expect(freshOrder.ridePin).not.toBe('999111');
+    expect(freshOrder.ridePinAttempts).toBe(0);
   });
 
   it('preserves DRIVER_ARRIVED after verified handoff during the start window', async () => {

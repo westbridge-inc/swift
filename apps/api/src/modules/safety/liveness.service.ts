@@ -8,6 +8,7 @@ import {
   hasTaxiPassengerCustody,
   lockTaxiOrderForCustodyDecision,
 } from '../rides/passenger-custody';
+import { freshRidePinReset } from '../rides/ride-pin';
 
 // Identity Assurance (safety spec §7) — "is the person driving the account's
 // approved human?" A fresh shift selfie is face-matched against the signup
@@ -372,7 +373,9 @@ export class LivenessService {
       }
       await tx.order.update({
         where: { id: current.id },
-        data: { status: 'PENDING', driverId: null, acceptedAt: null },
+        // [REPORT-014 F-014-12] Fresh PIN + zeroed attempt budget: the flagged
+        // driver's knowledge/burn must never bind the replacement's window.
+        data: { status: 'PENDING', driverId: null, acceptedAt: null, ...freshRidePinReset() },
       });
       await tx.driver.updateMany({
         where: { id: current.driverId },

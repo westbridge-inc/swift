@@ -174,6 +174,9 @@ describe('§7.3 "this isn\'t my driver"', () => {
     const d = await makeDriver();
     const ride = await makeRide(d.driver.id, passenger.userId, 'DRIVER_ARRIVED');
     await app.prisma.driver.update({ where: { id: d.driver.id }, data: { currentRideId: ride.id } });
+    // The impostor-flagged driver burned the PIN budget — release must rotate
+    // + zero it for the replacement [REPORT-014 F-014-12].
+    await app.prisma.order.update({ where: { id: ride.id }, data: { ridePin: '999111', ridePinAttempts: 5 } });
 
     const enqueued: string[] = [];
     const result = await svc().reportNotMyDriver(passenger.userId, ride.id, async (id) => { enqueued.push(id) });
@@ -183,6 +186,8 @@ describe('§7.3 "this isn\'t my driver"', () => {
     const order = await app.prisma.order.findUniqueOrThrow({ where: { id: ride.id } });
     expect(order.status).toBe('PENDING');
     expect(order.driverId).toBeNull();
+    expect(order.ridePin).not.toBe('999111'); // rotated [F-014-12]
+    expect(order.ridePinAttempts).toBe(0);
     const driver = await driverRow(d.driver.id);
     expect(driver.livenessLockedAt).not.toBeNull(); // the kill shot
     expect(driver.isOnline).toBe(false);
