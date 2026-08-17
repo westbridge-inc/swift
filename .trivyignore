@@ -20,3 +20,12 @@ CVE-2026-14257
 # image-size (check `pnpm why image-size` after expo/metro upgrades).
 CVE-2025-71329
 CVE-2025-71330
+
+# CVE-2026-40345 — deepmerge-ts@7.1.5 stack exhaustion on recursive object graphs
+# (fixed in 8.0.0). Sole dependency path: @prisma/config@6.19.2 — Prisma's own CLI
+# config tooling, which merges OUR checked-in config during `prisma generate`/
+# `migrate`, never attacker-controlled recursive objects, and never at app runtime.
+# Forcing a transitive MAJOR under Prisma's CLI risks breaking codegen for an
+# unreachable vuln. Added 2026-08-18; drop when Prisma bumps its own dependency
+# (check `pnpm why deepmerge-ts` after Prisma upgrades).
+CVE-2026-40345

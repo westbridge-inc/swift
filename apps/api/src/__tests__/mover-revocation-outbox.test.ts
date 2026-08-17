@@ -431,10 +431,21 @@ describe('durable mover revocation outbox', () => {
     expect(Date.now() - startedAt).toBeLessThan(1_000);
     expect(await app.prisma.session.findUnique({ where: { id: mover.session.id } })).toBeNull();
 
-    await new Promise((resolve) => setTimeout(resolve, 250));
-    const outbox = await app.prisma.moverRevocationOutbox.findFirstOrThrow({
+    // Wait on the CONDITION, not the clock: the 150ms effect-timeout must
+    // fire AND its lease-preserving UPDATE must commit. A fixed 250ms sleep
+    // left ~100ms of slack, which a loaded CI runner blows through — the row
+    // was then read mid-flight (claimed, not yet re-armed) and the fence
+    // assertion below lost by the enqueue→claim clock gap.
+    const deadline = Date.now() + 5_000;
+    let outbox = await app.prisma.moverRevocationOutbox.findFirstOrThrow({
       where: { userId: mover.user.id },
     });
+    while (outbox.lastError === null && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      outbox = await app.prisma.moverRevocationOutbox.findFirstOrThrow({
+        where: { userId: mover.user.id },
+      });
+    }
     expect(outbox).toMatchObject({ processedAt: null, attempts: 1 });
     expect(outbox.claimedAt).not.toBeNull();
     expect(outbox.availableAt.getTime()).toBeGreaterThan(outbox.claimedAt!.getTime());
