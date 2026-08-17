@@ -1638,6 +1638,43 @@ describe('Atomic acceptance — the concurrency proof', () => {
     });
   });
 
+  it('a DELIVERY-only rider cannot board-grab a COURIER parcel; a BOTH rider can [REPORT-014 F-014-08]', async () => {
+    const courier = await app.prisma.order.create({
+      data: {
+        orderNumber: `SVC-${nanoid(10)}`, orderType: 'COURIER', customerId, status: 'READY_FOR_PICKUP',
+        fulfillment: 'DELIVERY', courierPackageSize: 'SMALL',
+        pickupAddress: 'x', pickupLat: PICKUP.lat, pickupLng: PICKUP.lng,
+        deliveryAddress: 'y', deliveryLat: PICKUP.lat + 0.01, deliveryLng: PICKUP.lng + 0.01,
+        subtotalBase: 0, subtotalMarkup: 0, subtotalCustomer: 0, deliveryFee: 700, totalAmount: 700, paymentMethod: 'CASH',
+      },
+    });
+    createdOrderIds.push(courier.id);
+
+    const deliveryOnly = await makeRider({ lat: PICKUP.lat + 0.002 }); // riderType DELIVERY
+    const refused = await app.inject({
+      method: 'POST', url: `/api/v1/rider/orders/${courier.id}/accept`,
+      headers: { authorization: `Bearer ${deliveryOnly.token}`, 'content-type': 'application/json' },
+      payload: {},
+    });
+    expect(refused.statusCode).toBe(400);
+    expect(refused.json().error.code).toBe('WRONG_SERVICE_TYPE');
+    expect((await app.prisma.order.findUniqueOrThrow({ where: { id: courier.id } })).riderId).toBeNull();
+
+    // A BOTH rider serves it.
+    const both = await makeRider({ lat: PICKUP.lat + 0.003 });
+    await app.prisma.rider.update({ where: { id: both.riderId }, data: { riderType: 'BOTH' } });
+    const ok = await app.inject({
+      method: 'POST', url: `/api/v1/rider/orders/${courier.id}/accept`,
+      headers: { authorization: `Bearer ${both.token}`, 'content-type': 'application/json' },
+      payload: {},
+    });
+    expect(ok.statusCode).toBe(200);
+    await app.prisma.order.update({ where: { id: courier.id }, data: { riderId: null, status: 'READY_FOR_PICKUP' } });
+    for (const rid of [deliveryOnly.riderId, both.riderId]) {
+      await app.prisma.rider.update({ where: { id: rid }, data: { isOnline: false, isAvailable: true, currentOrderId: null, committedFloat: 0 } });
+    }
+  });
+
   it('a BOARD grab retires the live Redis offer and finalizes the search journal [REPORT-014 F-014-09]', async () => {
     const r = await makeRider({ lat: PICKUP.lat + 0.013 });
     const order = await makeDeliveryOrder('READY_FOR_PICKUP');

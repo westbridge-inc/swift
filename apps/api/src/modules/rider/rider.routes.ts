@@ -970,6 +970,17 @@ export async function riderRoutes(app: FastifyInstance) {
     if (order.orderType === 'COURIER' && order.courierPackageSize && !vehicleCanCarry(rider.vehicleType, order.courierPackageSize)) {
       throw new AppError(400, 'VEHICLE_TOO_SMALL', `A ${order.courierPackageSize.toLowerCase().replace(/_/g, ' ')} parcel needs a bigger vehicle than your ${rider.vehicleType.toLowerCase()}.`);
     }
+    // [REPORT-014 F-014-08] Service authorization, mirroring the candidate SQL
+    // filter: a COURIER job needs a courier-serving rider, a food/grocery
+    // DELIVERY a delivery rider. A forged/legacy board grab by the wrong
+    // service type is refused here (the cascade filter is the offer barrier).
+    const needsCourier = order.orderType === 'COURIER';
+    const servesCourier = rider.riderType === 'COURIER' || rider.riderType === 'BOTH';
+    const servesDelivery = rider.riderType === 'DELIVERY' || rider.riderType === 'BOTH';
+    if ((needsCourier && !servesCourier) || (!needsCourier && !servesDelivery)) {
+      throw new AppError(400, 'WRONG_SERVICE_TYPE',
+        `This ${needsCourier ? 'courier parcel' : 'delivery'} needs a ${needsCourier ? 'courier' : 'delivery'} rider — your account isn't set up for it.`);
+    }
 
     // Rider-set delivery fee, capped at the market rate (deliveryFee) — CASH
     // only [REPORT-005 F-005-01]: on CASH the customer simply pays less at the

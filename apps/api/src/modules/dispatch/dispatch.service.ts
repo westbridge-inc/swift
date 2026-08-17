@@ -350,6 +350,16 @@ export class DispatchService {
     const vehicleFilter = packageSize
       ? Prisma.sql`AND r."vehicleType"::text = ANY(${capableVehicles})`
       : Prisma.empty;
+    // [REPORT-014 F-014-08] Service authorization, not just vehicle capability:
+    // a COURIER order (packageSize set) may only go to a rider whose riderType
+    // serves courier work, and a food/grocery DELIVERY only to a delivery
+    // rider — a DELIVERY-only rider must never be offered/claim a parcel and
+    // vice versa. BOTH serves either. (Drivers are the taxi pool — N/A here.)
+    const riderTypeFilter = pool === 'RIDER'
+      ? (packageSize
+          ? Prisma.sql`AND r."riderType"::text = ANY(ARRAY['COURIER','BOTH'])`
+          : Prisma.sql`AND r."riderType"::text = ANY(ARRAY['DELIVERY','BOTH'])`)
+      : Prisma.empty;
 
     // A driver's rideClass is the TOP tier their vehicle serves, so only drivers
     // at or above the order's tier are eligible (an XL request never offers to a
@@ -423,6 +433,7 @@ export class DispatchService {
             ${tenantFilter}
             ${selfFilter}
             ${vehicleFilter}
+            ${riderTypeFilter}
             AND (r."floatLimit" - r."committedFloat") >= ${floatRequired}
             AND r."currentLat" IS NOT NULL
             AND r."currentLng" IS NOT NULL
