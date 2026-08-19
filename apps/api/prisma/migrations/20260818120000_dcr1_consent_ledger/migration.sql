@@ -8,7 +8,7 @@ CREATE TABLE "legal_documents" (
   "publishedAt" TIMESTAMP(3),
   "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
-CREATE UNIQUE INDEX "legal_documents_type_version_locale_key"
+CREATE UNIQUE INDEX "legal_documents_documentType_version_locale_key"
   ON "legal_documents"("documentType", "version", "locale");
 
 CREATE TABLE "consent_records" (
@@ -26,7 +26,7 @@ CREATE TABLE "consent_records" (
   "appVersion" TEXT,
   "evidence" JSONB NOT NULL DEFAULT '{}'
 );
-CREATE INDEX "consent_records_subject_doc_time_idx"
+CREATE INDEX "consent_records_subjectType_subjectId_documentType_captured_idx"
   ON "consent_records"("subjectType", "subjectId", "documentType", "capturedAt");
 
 -- INV-NR1c: append-only under privilege. Belt (revoke) AND suspenders (trigger):

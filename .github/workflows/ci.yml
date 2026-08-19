@@ -297,6 +297,14 @@ jobs:
             if [ "$found" != "1" ]; then echo "::error::MISSING ledger trigger: $t (raw-SQL migration did not apply)"; exit 1; fi
             echo "ok: $t present"
           done
+      # DCR-1 NR-1: the consent ledger's append-only trigger is raw SQL too —
+      # consent history silently becoming rewritable must go RED.
+      - name: Consent append-only trigger exists
+        run: |
+          DB="postgresql://swift:swift@localhost:5432/swift_migrate"
+          found=$(psql "$DB" -tAc "SELECT 1 FROM pg_trigger WHERE tgname='consent_records_no_mutation'")
+          if [ "$found" != "1" ]; then echo "::error::MISSING consent trigger: consent_records_no_mutation (raw-SQL migration did not apply)"; exit 1; fi
+          echo "ok: consent_records_no_mutation present"
       - name: Schema matches migration state
         run: >
           cd apps/api && npx prisma migrate diff

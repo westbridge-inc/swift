@@ -20,6 +20,27 @@ beforeAll(async () => {
   registerErrorHandler(app);
   await app.register(prismaPlugin);
   await app.ready();
+
+  // CI provisions the test DB with `prisma db push`, which only knows
+  // schema.prisma — the append-only guard is raw SQL living in the migration.
+  // Install it idempotently here (the exact DDL the migration carries), the
+  // same pattern billing-ledger.test.ts uses for the ledger triggers. The
+  // Migration Replay CI job separately asserts the migration itself creates it.
+  await app.prisma.$executeRawUnsafe(`
+    CREATE OR REPLACE FUNCTION consent_records_block_mutation() RETURNS trigger AS $$
+    BEGIN
+      RAISE EXCEPTION 'consent_records is append-only (DCR-1 NR-1). Withdrawals are new rows.';
+    END; $$ LANGUAGE plpgsql`);
+  await app.prisma.$executeRawUnsafe(
+    `DROP TRIGGER IF EXISTS consent_records_no_mutation ON "consent_records"`,
+  );
+  await app.prisma.$executeRawUnsafe(`
+    CREATE TRIGGER consent_records_no_mutation
+      BEFORE UPDATE OR DELETE ON "consent_records"
+      FOR EACH ROW EXECUTE FUNCTION consent_records_block_mutation()`);
+  await app.prisma.$executeRawUnsafe(
+    `REVOKE UPDATE, DELETE ON "consent_records" FROM PUBLIC`,
+  );
 });
 
 // No row cleanup: the table is append-only BY DESIGN — the trigger this suite
