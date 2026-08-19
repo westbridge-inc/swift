@@ -25,7 +25,8 @@ export type ConsentDocumentType =
   | 'marketing_consent'
   | 'location_bg_consent';
 export type ConsentAction = 'granted' | 'withdrawn' | 're_granted';
-export type ConsentSurface = 'ios' | 'android' | 'web' | 'vendor_web' | 'admin' | 'support_ticket';
+/** 'mobile' = the RN app when the platform isn't client-attested (signup). */
+export type ConsentSurface = 'ios' | 'android' | 'mobile' | 'web' | 'vendor_web' | 'admin' | 'support_ticket';
 
 /** The document set each subject type must grant at account creation (INV-NR1a). */
 export const REQUIRED_CONSENTS: Record<ConsentSubjectType, ConsentDocumentType[]> = {

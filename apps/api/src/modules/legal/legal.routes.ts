@@ -35,7 +35,7 @@ ${body}
 </main></body></html>`;
 }
 
-const TERMS = page(
+export const TERMS = page(
   'Terms of Service',
   `
 <p>These terms govern your use of the Swift app and platform, operated in Guyana and other Caribbean markets ("Swift", "we"). By creating an account or using Swift you agree to them.</p>
@@ -72,7 +72,7 @@ const TERMS = page(
 `,
 );
 
-const PRIVACY = page(
+export const PRIVACY = page(
   'Privacy Policy',
   `
 <p>This policy explains what Swift collects, why, and what control you have. We collect the minimum needed to run a delivery, ride and marketplace platform — and we never sell your data.</p>
