@@ -92,9 +92,16 @@ export class IdentityService {
 
         const account = await tx.user.findUnique({
           where: { id: input.accountId },
-          select: { tenantId: true },
+          select: { tenantId: true, status: true },
         });
         if (!account) throw new Error(`Identity capture account not found: ${input.accountId}`);
+        // [NR-3 census gap 3] Deletion write barrier: identity keys/cluster
+        // membership must never be recreated for a deactivated account — the
+        // deletion sweep runs once, and a late capture would silently rebind
+        // the erased person to the graph.
+        if (account.status !== 'ACTIVE') {
+          return { strength: 'SOFT', matchedAccountIds: [], merged: false, clusterId: null } as CaptureResult;
+        }
 
         // Idempotent per (account, type, hash) — recaptures are no-ops.
         const existing = await tx.identityKey.findFirst({

@@ -199,6 +199,20 @@ export class AccountService {
     // 3. Drop precise saved locations (home/work) outright.
     await prisma.address.deleteMany({ where: { userId } });
 
+    // 3b. [NR-3 census gap 6] Ephemeral high-risk rows go WITH the account —
+    //     recovery ID/selfie pointers, biometric liveness rows, public trip
+    //     shares, third-party emergency contacts, exact-location queue/watch
+    //     rows, and the cart. None has a continuing purpose once the person
+    //     leaves; case-bound safety evidence lives elsewhere under its own
+    //     hold rules.
+    await prisma.accountRecovery.deleteMany({ where: { userId } });
+    await prisma.livenessCheck.deleteMany({ where: { userId } });
+    await prisma.tripShareToken.deleteMany({ where: { createdByUserId: userId } });
+    await prisma.emergencyContact.deleteMany({ where: { userId } });
+    await prisma.rideQueueEntry.deleteMany({ where: { customerId: userId } });
+    await prisma.supplyWatch.deleteMany({ where: { customerId: userId } });
+    await prisma.cart.deleteMany({ where: { customerId: userId } });
+
     // 4. De-identify the account row. It stays (orders/ratings reference it for
     //    the legal retention window) but the person is stripped from it. The
     //    phone becomes a non-PII tombstone that keeps the unique constraint and

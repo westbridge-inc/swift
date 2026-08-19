@@ -120,9 +120,16 @@ export class VerificationService {
   ) {
     const user = await this.prisma.user.findUnique({
       where: { id: userId },
-      select: { id: true, countryCode: true, avatar: true, selfieCapturedAt: true },
+      select: { id: true, countryCode: true, avatar: true, selfieCapturedAt: true, status: true },
     });
     if (!user) throw new NotFoundError('User', userId);
+    // [NR-3 census gap 3] Deletion write barrier: a DEACTIVATED account must
+    // never grow NEW identity documents — an in-flight submit racing the
+    // erasure would otherwise resurrect exactly the data the person asked us
+    // to destroy.
+    if (user.status !== 'ACTIVE') {
+      throw new AppError(409, 'ACCOUNT_INACTIVE', 'This account is not active — documents cannot be submitted.');
+    }
 
     // Movers (riders + taxi drivers) may submit any doc required for a vehicle
     // class they actually hold; other roles validate against their named
