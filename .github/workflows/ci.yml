@@ -305,6 +305,16 @@ jobs:
           found=$(psql "$DB" -tAc "SELECT 1 FROM pg_trigger WHERE tgname='consent_records_no_mutation'")
           if [ "$found" != "1" ]; then echo "::error::MISSING consent trigger: consent_records_no_mutation (raw-SQL migration did not apply)"; exit 1; fi
           echo "ok: consent_records_no_mutation present"
+      # ELV-1 W-201: the database tenant wall — RLS enabled + tenant_isolation
+      # policy on every tenant-bearing table. The wall silently shrinking must
+      # go RED. Keep the expected count in lockstep with TENANT_TABLES
+      # (src/lib/tenant-rls.ts); the suite's census test guards the list itself.
+      - name: Tenant RLS wall is complete
+        run: |
+          DB="postgresql://swift:swift@localhost:5432/swift_migrate"
+          n=$(psql "$DB" -tAc "SELECT count(*) FROM pg_class c JOIN pg_namespace ns ON ns.oid=c.relnamespace JOIN pg_policy p ON p.polrelid=c.oid AND p.polname='tenant_isolation' WHERE ns.nspname='public' AND c.relrowsecurity")
+          if [ "$n" != "51" ]; then echo "::error::Tenant RLS wall incomplete: $n of 51 tables walled"; exit 1; fi
+          echo "ok: 51 tables walled"
       - name: Schema matches migration state
         run: >
           cd apps/api && npx prisma migrate diff
