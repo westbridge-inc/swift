@@ -6,6 +6,7 @@ import { registerErrorHandler } from '../middleware/error-handler';
 import {
   RETENTION_DEFAULTS, seedRetentionDefaults, runRetentionSweep,
 } from '../modules/compliance/retention.service';
+import { installDdl } from './helpers/install-ddl';
 
 // [DCR-1 NR-2] Retention clocks: the registry declares each window as data,
 // the sweep enforces it by the class's own timestamp, and every enforcement
@@ -25,6 +26,38 @@ beforeAll(async () => {
   registerErrorHandler(app);
   await app.register(prismaPlugin);
   await app.ready();
+  // CI provisions with db push — raw-SQL guards live in migrations, so the
+  // suite installs them idempotently (billing-ledger pattern), serialized
+  // behind the global DDL advisory lock so parallel test files can't deadlock
+  // against app-path transactions.
+  await installDdl(app.prisma, [
+    `DO $$ BEGIN
+      IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'retention_policies_min_window') THEN
+        ALTER TABLE "retention_policies" ADD CONSTRAINT "retention_policies_min_window" CHECK ("retainDays" >= 7);
+      END IF;
+    END $$`,
+    `CREATE OR REPLACE FUNCTION legal_documents_guard() RETURNS trigger AS $$
+    BEGIN
+      IF TG_OP = 'DELETE' THEN
+        RAISE EXCEPTION 'legal_documents rows are permanent evidence (DCR-1 NR-1).';
+      END IF;
+      IF OLD."publishedAt" IS NOT NULL AND (
+           NEW."contentHash" IS DISTINCT FROM OLD."contentHash"
+        OR NEW."documentType" IS DISTINCT FROM OLD."documentType"
+        OR NEW."version"      IS DISTINCT FROM OLD."version"
+        OR NEW."locale"       IS DISTINCT FROM OLD."locale"
+        OR (OLD."renderedText" IS NOT NULL AND NEW."renderedText" IS DISTINCT FROM OLD."renderedText")
+      ) THEN
+        RAISE EXCEPTION 'published legal_documents are immutable (DCR-1 NR-1): publish a NEW version.';
+      END IF;
+      RETURN NEW;
+    END; $$ LANGUAGE plpgsql`,
+    `DROP TRIGGER IF EXISTS legal_documents_immutable ON "legal_documents"`,
+    `CREATE TRIGGER legal_documents_immutable
+      BEFORE UPDATE OR DELETE ON "legal_documents"
+      FOR EACH ROW EXECUTE FUNCTION legal_documents_guard()`,
+  ]);
+
   const user = await app.prisma.user.create({
     data: {
       phone: `+59200RET${nanoid(6)}`, firstName: 'Clock', lastName: 'Subject',
