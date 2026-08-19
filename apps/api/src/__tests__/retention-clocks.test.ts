@@ -144,16 +144,44 @@ describe('retention clocks [DCR-1 NR-2]', () => {
     }
   });
 
-  it('a registry row without an enforcer is surfaced as a coverage gap, not silently ignored', async () => {
+  it('[F-021-18] an ENABLED policy without an enforcer FAILS the sweep — durable, paged, never green', async () => {
     const ghost = `ghost.${nanoid(6)}`;
     await app.prisma.retentionPolicy.create({
-      data: { dataClass: ghost, description: 'x', retainDays: 1, legalBasis: 'x' },
+      data: { dataClass: ghost, description: 'x', retainDays: 30, legalBasis: 'x' },
     });
     try {
-      const results = await runRetentionSweep(app.prisma);
-      expect(results.find((r) => r.dataClass === ghost)?.skipped).toBe('no-enforcer');
+      await expect(runRetentionSweep(app.prisma)).rejects.toThrow(/coverage failure.*no-enforcer/);
     } finally {
       await app.prisma.retentionPolicy.delete({ where: { dataClass: ghost } });
+    }
+  });
+
+  it('[F-021-14] an unsafe window is refused twice: DB CHECK floors it, and enforcement skips+fails', async () => {
+    // The DB CHECK refuses the catastrophic typo outright.
+    await expect(app.prisma.retentionPolicy.update({
+      where: { dataClass: 'signup_attempts' }, data: { retainDays: -1 },
+    })).rejects.toThrow(/retention_policies_min_window|constraint/i);
+  });
+
+  it('[F-021-12] SAFETY notifications are due-process evidence — the generic clock never touches them', async () => {
+    const old = await app.prisma.notification.create({
+      data: { userId, type: 'SAFETY', title: 'incident notice', body: 'x', createdAt: daysAgo(400) },
+      select: { id: true },
+    });
+    await runRetentionSweep(app.prisma);
+    expect(await app.prisma.notification.findUnique({ where: { id: old.id } })).not.toBeNull();
+    await app.prisma.notification.delete({ where: { id: old.id } });
+  });
+
+  it('[F-021-24] published legal documents are immutable at the database and retain the exact words', async () => {
+    const doc = await app.prisma.legalDocument.findFirst({ where: { publishedAt: { not: null } } });
+    if (doc) {
+      await expect(app.prisma.$executeRawUnsafe(
+        `UPDATE legal_documents SET "contentHash" = 'tampered' WHERE id = $1`, doc.id,
+      )).rejects.toThrow(/immutable/);
+      await expect(app.prisma.$executeRawUnsafe(
+        `DELETE FROM legal_documents WHERE id = $1`, doc.id,
+      )).rejects.toThrow(/permanent evidence/);
     }
   });
 });

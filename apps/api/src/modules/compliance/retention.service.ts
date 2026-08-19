@@ -1,4 +1,4 @@
-import type { PrismaClient } from '@prisma/client';
+import { Prisma, type PrismaClient } from '@prisma/client';
 
 /**
  * [DCR-1 NR-2] Retention clocks — stage 1.
@@ -56,24 +56,50 @@ export async function seedRetentionDefaults(prisma: PrismaClient): Promise<void>
   }
 }
 
-type Enforcer = (prisma: PrismaClient, cutoff: Date) => Promise<number>;
+/** [F-021-14] The registry is a privileged control path, but a sign/zero typo
+ *  must not become an erase-everything cutoff: windows below this floor are
+ *  refused at enforcement time (and by a DB CHECK).  */
+export const MIN_RETAIN_DAYS = 7;
 
-/** Every enforcer deletes ONLY rows strictly older than the cutoff, by the
- *  class's own clock field, and must be safe to re-run (idempotent). */
+/** [F-021-15] Enforcers run INSIDE the receipt transaction — the deletion and
+ *  its evidence commit together or not at all, so a retry can never replace
+ *  the true count with a fabricated zero. [F-021-20] Deletes are batched
+ *  (bounded id-subquery) so a backlog cannot pin the compliance worker. */
+type Enforcer = (tx: Prisma.TransactionClient, cutoff: Date) => Promise<number>;
+
+const BATCH = 10_000;
+/** Statement templates are STATIC (no dynamic identifiers — the SQL-safety
+ *  census holds); only values are parameterized. Each loops until drained. */
+async function drain(step: () => Promise<number>): Promise<number> {
+  let total = 0;
+  for (;;) {
+    const n = await step();
+    total += n;
+    if (n < BATCH) return total;
+  }
+}
+
 const ENFORCERS: Record<string, Enforcer> = {
-  'sessions.expired': async (prisma, cutoff) =>
-    (await prisma.session.deleteMany({ where: { expiresAt: { lt: cutoff } } })).count,
-  'signup_attempts': async (prisma, cutoff) =>
-    (await prisma.signupAttempt.deleteMany({ where: { createdAt: { lt: cutoff } } })).count,
-  'notifications.old': async (prisma, cutoff) =>
-    (await prisma.notification.deleteMany({ where: { createdAt: { lt: cutoff } } })).count,
+  'sessions.expired': (tx, cutoff) => drain(() => tx.$executeRaw(Prisma.sql`
+    DELETE FROM sessions WHERE id IN (
+      SELECT id FROM sessions WHERE "expiresAt" < ${cutoff} LIMIT ${BATCH})`)),
+  'signup_attempts': (tx, cutoff) => drain(() => tx.$executeRaw(Prisma.sql`
+    DELETE FROM signup_attempts WHERE id IN (
+      SELECT id FROM signup_attempts WHERE "createdAt" < ${cutoff} LIMIT ${BATCH})`)),
+  // [F-021-12] SAFETY notices are due-process evidence tied to incident cases
+  // and legal holds — they are NOT covered by this generic clock. Their
+  // lifecycle belongs to the case-based retention of NR-3 (legal hold aware).
+  'notifications.old': (tx, cutoff) => drain(() => tx.$executeRaw(Prisma.sql`
+    DELETE FROM notifications WHERE id IN (
+      SELECT id FROM notifications
+      WHERE "createdAt" < ${cutoff} AND type <> 'SAFETY' LIMIT ${BATCH})`)),
 };
 
 export interface SweepResult {
   dataClass: string;
   deleted: number;
   cutoff: Date;
-  skipped?: 'disabled' | 'no-enforcer';
+  skipped?: 'disabled' | 'no-enforcer' | 'unsafe-window';
 }
 
 /** Run every enabled policy once; one receipt per enforced policy. A policy
@@ -96,12 +122,30 @@ export async function runRetentionSweep(
       results.push({ dataClass: policy.dataClass, deleted: 0, cutoff, skipped: 'no-enforcer' });
       continue;
     }
+    if (policy.retainDays < MIN_RETAIN_DAYS) {
+      results.push({ dataClass: policy.dataClass, deleted: 0, cutoff, skipped: 'unsafe-window' });
+      continue;
+    }
     const started = Date.now();
-    const deleted = await enforcer(prisma, cutoff);
-    await prisma.retentionSweepReceipt.create({
-      data: { dataClass: policy.dataClass, cutoff, deleted, durationMs: Date.now() - started },
-    });
+    // [F-021-15] deletion + receipt commit atomically.
+    const deleted = await prisma.$transaction(async (tx) => {
+      const n = await enforcer(tx, cutoff);
+      await tx.retentionSweepReceipt.create({
+        data: { dataClass: policy.dataClass, cutoff, deleted: n, durationMs: Date.now() - started },
+      });
+      return n;
+    }, { timeout: 120_000 });
     results.push({ dataClass: policy.dataClass, deleted, cutoff });
+  }
+  // [F-021-18] An ENABLED policy the sweep cannot enforce (or refuses as
+  // unsafe) is a COVERAGE FAILURE, not a green run: fail the job so the
+  // worker's failed-handler pages it durably. Enforced receipts above have
+  // already committed — failing here loses nothing.
+  const gaps = results.filter((r) => r.skipped === 'no-enforcer' || r.skipped === 'unsafe-window');
+  if (gaps.length > 0) {
+    throw new Error(
+      `[DCR-1 NR-2] retention coverage failure: ${gaps.map((g) => `${g.dataClass}(${g.skipped})`).join(', ')}`,
+    );
   }
   return results;
 }

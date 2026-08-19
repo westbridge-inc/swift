@@ -170,6 +170,7 @@ model Session {
   createdAt            DateTime  @default(now())
 
   @@map("sessions")
+  @@index([expiresAt]) // retention sweep cutoff [F-021-20]
 }
 
 enum SessionAuthMethod {
@@ -591,6 +592,9 @@ model LegalDocument {
   locale       String   @default("en-GY")
   /// sha256 of the exact rendered text served to users at this version.
   contentHash  String
+  /// [F-021-24] The EXACT text itself — the hash alone cannot answer
+  /// "which words" years later if the constant leaves the codebase.
+  renderedText String?
   /// NULL = draft. Consent may never reference a draft (INV-NR1b).
   publishedAt  DateTime?
   createdAt    DateTime @default(now())
@@ -2463,6 +2467,7 @@ model Notification {
 
   @@index([userId, isRead])
   @@map("notifications")
+  @@index([createdAt]) // retention sweep cutoff [F-021-20]
 }
 
 enum NotificationType {
@@ -3890,6 +3895,7 @@ model SignupAttempt {
   @@index([ipHash, createdAt])
   @@index([phoneHash, createdAt])
   @@map("signup_attempts")
+  @@index([createdAt]) // retention sweep cutoff [F-021-20]
 }
 
 model IntegritySettings {

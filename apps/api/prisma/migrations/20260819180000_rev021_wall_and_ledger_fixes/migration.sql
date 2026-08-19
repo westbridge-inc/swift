@@ -1,3 +1,5 @@
+-- [F-021-25] bounded lock waits: RLS DDL must never queue unboundedly behind traffic.
+SET lock_timeout = '10s';
 -- [REPORT-021 F-021-11] The bypass must be a ROLE CAPABILITY, not a GUC any
 -- constrained role can set on itself. swift_bypass_rls is NOLOGIN, granted
 -- ONLY to the owner-side maintenance identity (never to swift_app); the
