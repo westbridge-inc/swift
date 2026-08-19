@@ -543,6 +543,42 @@ model AlertDelivery {
   @@map("alert_deliveries")
 }
 
+/// [DCR-1 NR-2] A retention rule: rows of one data class may not outlive
+/// their window. The registry is DATA, not code — the sweep reads it, the
+/// registration pack compiles it, and changing a window is an auditable row
+/// update, not a deploy.
+model RetentionPolicy {
+  id          String   @id @default(cuid())
+  /// e.g. sessions.expired | signup_attempts | notifications.old
+  dataClass   String   @unique
+  description String
+  /// The clock: rows older than this many days (per the class's own
+  /// timestamp) are due for deletion on the next sweep.
+  retainDays  Int
+  /// Why this window is lawful/needed — cited in the registration pack.
+  legalBasis  String
+  enabled     Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@map("retention_policies")
+}
+
+/// [DCR-1 NR-2] Sweep receipts — the demonstrable-compliance trail that the
+/// clocks actually run. One row per (policy, sweep run).
+model RetentionSweepReceipt {
+  id         String   @id @default(cuid())
+  dataClass  String
+  /// Rows strictly older than this instant were in scope.
+  cutoff     DateTime
+  deleted    Int
+  durationMs Int
+  ranAt      DateTime @default(now())
+
+  @@index([dataClass, ranAt])
+  @@map("retention_sweep_receipts")
+}
+
 /// [DCR-1 NR-1] The consent ledger. Guyana's DPA is enacted but not in force;
 /// consent for accounts created in the gap cannot be manufactured on commencement
 /// day, so it is captured now, hash-anchored to the exact text the user saw.
