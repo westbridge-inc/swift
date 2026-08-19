@@ -89,6 +89,26 @@ export async function publishLegalDocument(
   return { contentHash };
 }
 
+/** Per-process memoized publish — call sites that anchor consents at runtime
+ *  (signup, the marketing toggle) pay the lookup once, and a failure is
+ *  retried on the next call instead of being cached forever. */
+const publishOnce = new Map<string, Promise<{ contentHash: string }>>();
+export function publishLegalDocumentOnce(
+  prisma: PrismaClient,
+  input: { documentType: ConsentDocumentType; version: string; locale?: string; renderedText: string },
+): Promise<{ contentHash: string }> {
+  const key = `${input.documentType}@${input.version}/${input.locale ?? 'en-GY'}`;
+  let pending = publishOnce.get(key);
+  if (!pending) {
+    pending = publishLegalDocument(prisma, input).catch((err) => {
+      publishOnce.delete(key);
+      throw err;
+    });
+    publishOnce.set(key, pending);
+  }
+  return pending;
+}
+
 /**
  * Record consent. MUST be called with the same transaction client that creates
  * the account row (INV-NR1a) — an account without its consent rows is exactly

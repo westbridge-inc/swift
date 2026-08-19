@@ -254,6 +254,11 @@ export const customerApi = {
     data: { firstName?: string; lastName?: string; email?: string },
     session?: AuthSessionSnapshot,
   ) => api.put('/customer/profile', data, capturedAuthConfig(session)),
+  // [DCR-1 NR1-03] Consent surface: read current states; grant/withdraw
+  // marketing. Every change is an append-only ledger row server-side.
+  getConsent: () => api.get('/customer/consent'),
+  setMarketingConsent: (granted: boolean, session?: AuthSessionSnapshot) =>
+    api.post('/customer/consent/marketing', { granted }, capturedAuthConfig(session)),
   // DPA-2023 self-serve rights (D9-05): export your data; erase your account.
   exportAccount: (session?: AuthSessionSnapshot) =>
     api.get('/customer/account/export', capturedAuthConfig(session)),
