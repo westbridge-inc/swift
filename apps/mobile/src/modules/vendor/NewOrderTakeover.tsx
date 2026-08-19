@@ -1,7 +1,7 @@
 import React, { useEffect } from 'react';
 import { Modal, ScrollView, Vibration, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import Animated, { useAnimatedStyle, useSharedValue, withSequence, withTiming } from 'react-native-reanimated';
+import Animated, { ReduceMotion, useAnimatedStyle, useSharedValue, withSequence, withTiming } from 'react-native-reanimated';
 import { Feather } from '@expo/vector-icons';
 import { color, motion, radius, space } from '@swift/ui';
 import { T, Money, PillButton } from '../../kit';
@@ -37,11 +37,14 @@ export function NewOrderTakeover({
     if (!orderId) return;
     const beat = () => {
       Vibration.vibrate([0, 400, 200, 400]);
+      // [design-100x Flow-13] The VIBRATION alarm stays on its beat — a missed
+      // order is money, and a kitchen bell is functional alerting. The VISUAL
+      // pulse honours Reduce Motion (the screen stays still; the buzz carries).
       pulse.value = withSequence(
-        withTiming(1.12, { duration: motion.duration.fast }),
-        withTiming(1, { duration: motion.duration.base }),
-        withTiming(1.12, { duration: motion.duration.fast }),
-        withTiming(1, { duration: motion.duration.base }),
+        withTiming(1.12, { duration: motion.duration.fast, reduceMotion: ReduceMotion.System }),
+        withTiming(1, { duration: motion.duration.base, reduceMotion: ReduceMotion.System }),
+        withTiming(1.12, { duration: motion.duration.fast, reduceMotion: ReduceMotion.System }),
+        withTiming(1, { duration: motion.duration.base, reduceMotion: ReduceMotion.System }),
       );
     };
     beat();

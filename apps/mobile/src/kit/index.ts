@@ -12,6 +12,7 @@ export * from './button';
 export * from './card';
 export * from './controls';
 export * from './masthead';
+export { DocketEdge } from './docket';
 export * from './input';
 export * from './rows';
 export * from './states';
