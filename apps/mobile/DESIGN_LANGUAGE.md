@@ -55,3 +55,9 @@ invite. Sentence case everywhere. Money via the shared formatter only.
 holes in the page colour, closing a queue card the way a kitchen docket ends.
 Use ONLY on live work-queue cards (vendor orders); pairs with a Card whose
 bottom radii are zeroed. Sibling of AwningEdge in the "commerce edges" family.
+
+### TrustHalo (signature · profile)
+`ProfileScreen.tsx` (promote to kit when a second consumer appears). A
+segmented ring around the avatar; each segment is a REAL account fact — never
+decoration. Unlit segments are the honest to-do list; the caption names the
+next one. Success-green on brand-100 track, round caps, 8px gaps.
