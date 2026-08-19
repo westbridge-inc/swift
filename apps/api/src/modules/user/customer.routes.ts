@@ -26,6 +26,10 @@ import { SupportService } from '../support/support.service';
 import { AccountService } from './account.service';
 import { transitionUserRoleAuthority } from '../mover-authority';
 import { safeMmgPayUrl, validateMmgPayUrl } from '../../utils/mmg-pay-url';
+import {
+  currentConsent, recordConsent, publishLegalDocumentOnce, type ConsentAction,
+} from '../legal/consent.service';
+import { LEGAL_VERSION, MARKETING_CONSENT } from '../legal/legal.routes';
 
 // ---------------------------------------------------------------------------
 // Input schemas
@@ -2474,6 +2478,43 @@ export async function customerRoutes(app: FastifyInstance) {
       data: { notificationPrefs: merged },
     });
     return { success: true, data: merged };
+  });
+
+  /** [DCR-1 NR1-03] GET /consent — this subject's current consent states,
+   *  straight from the append-only ledger (latest row per document wins). */
+  app.get('/consent', async (request: AuthRequest) => {
+    const documentTypes = ['privacy_policy', 'terms_of_service', 'marketing_consent'] as const;
+    const consents = await Promise.all(documentTypes.map(async (documentType) => ({
+      documentType,
+      state: await currentConsent(app.prisma, 'customer', request.user.userId, documentType),
+    })));
+    return { success: true, data: { consents, servedVersion: LEGAL_VERSION } };
+  });
+
+  /** [DCR-1 NR1-03] POST /consent/marketing { granted } — grant or withdraw
+   *  marketing consent. Withdrawal is a NEW ledger row (append-only), takes
+   *  effect immediately, and repeating the current state writes nothing. */
+  app.post('/consent/marketing', async (request: AuthRequest) => {
+    const { granted } = z.object({ granted: z.boolean() }).parse(request.body);
+    const userId = request.user.userId;
+    const prior = await currentConsent(app.prisma, 'customer', userId, 'marketing_consent');
+    const effective = prior === 'granted' || prior === 're_granted';
+    if (granted === effective) {
+      return { success: true, data: { marketing: effective, changed: false } };
+    }
+    const action: ConsentAction = granted ? (prior === 'withdrawn' ? 're_granted' : 'granted') : 'withdrawn';
+    await publishLegalDocumentOnce(app.prisma, {
+      documentType: 'marketing_consent', version: LEGAL_VERSION, renderedText: MARKETING_CONSENT,
+    });
+    await app.prisma.$transaction(async (tx) => {
+      await recordConsent(tx, {
+        subjectType: 'customer', subjectId: userId,
+        documentType: 'marketing_consent', version: LEGAL_VERSION,
+        action, surface: 'mobile', ip: request.ip,
+        evidence: { control: 'marketing_toggle', path: 'consent/marketing' },
+      });
+    });
+    return { success: true, data: { marketing: granted, changed: true } };
   });
 
   /** POST /notifications/devices — register this device for push. Upsert on
