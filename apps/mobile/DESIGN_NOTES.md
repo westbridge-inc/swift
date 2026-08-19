@@ -164,3 +164,19 @@ broken → fixed → verified on-device). REGISTERED: **HOME-P1** scrolled
 content collides with the clock (no status-bar scrim/compact-pin on scroll);
 **RIG-1** baseline-harness "ELV1 Mains" category visible in dev data (cosmetic,
 dev-only). Vendor board + remaining flows: next visual round.
+
+## Flow 8 — Profile · stage 1 (2026-08-19, built AND verified on-device)
+**From the scored register (9/20, tied-worst):** generic double-header, dead
+camera badge, ten same-weight rows. Shipped: identity masthead (PROFILE
+eyebrow · name · "With Swift since {year} · N orders") over the awning hem;
+**THE TRUST HALO** (registered signature) — segmented ring around the avatar
+where every lit segment is a REAL fact (phone verified · selfie on file ·
+first order placed), unlit = the honest to-do, caption names the next step;
+camera chip is now a real ≥44 action → Personal data; rows regrouped into
+sunken-band Cards under true micro eyebrows (YOUR ACCOUNT · PRIVACY · HELP),
+sentence-cased; Switch-app separated (it changes WHO you are); LoadingBlock/
+ErrorState on the profile query; FadeInDown entrance with ReduceMotion.
+Avatar dead-URL fallback added here too (found live: blank circle → M).
+Verified in the simulator: halo 2-of-3 lit for the test account, exactly
+honest. **Stage 2 (8b):** PersonalData flex-hole + pinned dock, cluster
+headers → masthead variants, IdentityVerification off legacy components.

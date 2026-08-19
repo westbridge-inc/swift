@@ -1,13 +1,15 @@
 /** @jsxImportSource react */
 import React, { useState } from 'react';
-import { ScrollView, View } from 'react-native';
+import { Pressable, ScrollView, View } from 'react-native';
 import { Image } from 'expo-image';
 import { Feather } from '@expo/vector-icons';
 import { useNavigation } from '@react-navigation/native';
 import { color, space } from '@swift/ui';
 import { useMyRating, useProfile } from '../../../hooks/customer';
 import { useAuthStore } from '../../../stores/authStore';
-import { EmptyState, IconChip, PillButton, PopupCard, PopupTitle, Screen, SettingsRow, T } from '../../../kit';
+import { AwningEdge, Card, EmptyState, ErrorState, GradientMasthead, IconChip, LoadingBlock, PillButton, PopupCard, PopupTitle, Screen, SettingsRow, T } from '../../../kit';
+import Svg, { Circle } from 'react-native-svg';
+import Animated, { FadeInDown, ReduceMotion } from 'react-native-reanimated';
 import { RoleSwitcherSheet } from '../../../components/RoleSwitcherSheet';
 import { API_URL, customerApi } from '../../../services/api';
 import { openPayLink } from '../../../lib/payLink';
@@ -19,6 +21,40 @@ const GUTTER = space['2xl'];
 // Kit Profile (49) + logout popup (51). Sections in the kit's icon-chip row
 // language; every row lands on a real screen/flow. Dark mode (kit "Dart
 // Mode") is omitted — the app ships light-only.
+/** [design-100x Flow-8 signature] THE TRUST HALO — a segmented ring around
+ *  the avatar where every lit segment is a REAL account fact (phone verified ·
+ *  selfie on file · first order placed). Never decorative: unlit segments are
+ *  the honest to-do list, and the caption names the next one. */
+function TrustHalo({ size, stroke, facts, children }: {
+  size: number; stroke: number; facts: boolean[]; children: React.ReactNode;
+}) {
+  const r = (size - stroke) / 2;
+  const c = 2 * Math.PI * r;
+  const seg = c / facts.length;
+  const gap = 8;
+  return (
+    <View style={{ width: size, height: size, alignItems: 'center', justifyContent: 'center' }}>
+      <Svg width={size} height={size} style={{ position: 'absolute', transform: [{ rotate: '-90deg' }] }}>
+        {facts.map((on, i) => (
+          <Circle
+            key={i}
+            cx={size / 2}
+            cy={size / 2}
+            r={r}
+            stroke={on ? color.success : color.brand[100]}
+            strokeWidth={stroke}
+            strokeLinecap="round"
+            fill="none"
+            strokeDasharray={`${seg - gap} ${c - seg + gap}`}
+            strokeDashoffset={-i * seg}
+          />
+        ))}
+      </Svg>
+      {children}
+    </View>
+  );
+}
+
 /** [DCR-1 NR1-03] Marketing messages toggle — the row the served consent
  *  text promises ("Account -> Marketing messages"). The switch reflects the
  *  ledger's current state; a flip is a new append-only consent row. */
@@ -62,6 +98,7 @@ export function ProfileScreen() {
   const [confirmLogout, setConfirmLogout] = useState(false);
   const [switcherOpen, setSwitcherOpen] = useState(false);
   const [ratingInfo, setRatingInfo] = useState(false);
+  const [avatarBroken, setAvatarBroken] = useState(false);
 
   if (!isAuthenticated) {
     // A guest is never trapped [first-open 2.2 / SPS-F-0024]: every other
@@ -100,125 +137,150 @@ export function ProfileScreen() {
     );
   }
 
+  if (profile.isLoading) {
+    return (
+      <Screen>
+        <LoadingBlock />
+      </Screen>
+    );
+  }
+  if (profile.isError) {
+    return (
+      <Screen>
+        <ErrorState onRetry={() => profile.refetch()} />
+      </Screen>
+    );
+  }
+
   const p = profile.data;
   const name = `${p?.firstName ?? user?.firstName ?? ''} ${p?.lastName ?? user?.lastName ?? ''}`.trim() || 'Swift member';
   const avatar = p?.avatar ?? user?.avatar;
   const orders = p?.customer?.totalOrders ?? 0;
   const unread = p?.unreadNotifications ?? 0;
+  const memberSince = p?.createdAt ? new Date(p.createdAt).getFullYear() : null;
+  // THE TRUST HALO's facts — every segment is real, unlit = the honest to-do.
+  const facts: { on: boolean; label: string }[] = [
+    { on: true, label: 'Phone verified' },
+    { on: !!p?.selfieCapturedAt, label: 'Selfie on file' },
+    { on: orders > 0, label: 'First order placed' },
+  ];
+  const nextFact = facts.find((f) => !f.on);
 
   return (
-    <Screen>
-      <View style={{ height: 56, alignItems: 'center', justifyContent: 'center' }}>
-        <T variant="heading">Profile</T>
-      </View>
-      <ScrollView contentContainerStyle={{ paddingHorizontal: GUTTER, paddingBottom: space['3xl'] }}>
-        {/* Centered identity (kit 49) */}
-        <View style={{ alignItems: 'center', marginTop: space.md }}>
-          <View>
-            {avatar ? (
-              <Image source={{ uri: avatar }} style={{ width: 120, height: 120, borderRadius: 60 }} />
-            ) : (
-              <View
-                style={{
-                  width: 120,
-                  height: 120,
-                  borderRadius: 60,
-                  backgroundColor: color.brand[50],
-                  alignItems: 'center',
-                  justifyContent: 'center',
-                }}
-              >
-                <T variant="display" tone="brand">
-                  {(name[0] ?? 'S').toUpperCase()}
-                </T>
-              </View>
-            )}
-            <View
-              style={{
-                position: 'absolute',
-                right: 0,
-                bottom: 0,
-                width: 36,
-                height: 36,
-                borderRadius: 18,
-                backgroundColor: color.brand[500],
-                alignItems: 'center',
-                justifyContent: 'center',
-                borderWidth: 3,
-                borderColor: color.surface.subtle,
-              }}
-            >
-              <Feather name="camera" size={15} color={color.white} />
-            </View>
-          </View>
-          <T variant="title" center style={{ marginTop: space.lg }}>
+    <Screen bleed>
+      <ScrollView contentContainerStyle={{ paddingBottom: space['3xl'] }} showsVerticalScrollIndicator={false}>
+        {/* [Flow-8] Identity masthead: the person, grounded in the brand wash. */}
+        <GradientMasthead style={{ paddingTop: 64, paddingBottom: space['3xl'] + 44, paddingHorizontal: GUTTER }}>
+          <T variant="micro" tone="onBrand">PROFILE</T>
+          <T variant="title" tone="onBrand" numberOfLines={1} style={{ marginTop: 2 }}>
             {name}
           </T>
-          <T variant="label" tone="muted" center style={{ marginTop: 2 }}>
-            {orders} order{orders === 1 ? '' : 's'} with Swift
+          {memberSince ? (
+            <T variant="caption" tone="onBrand" style={{ marginTop: 2 }}>
+              With Swift since {memberSince} · {orders} order{orders === 1 ? '' : 's'}
+            </T>
+          ) : null}
+        </GradientMasthead>
+        <AwningEdge />
+
+        {/* Avatar + trust halo, overlapping the hem. The camera chip is a REAL
+            action (>=44 hit target) — it opens Personal data. */}
+        <Animated.View
+          entering={FadeInDown.duration(320).reduceMotion(ReduceMotion.System)}
+          style={{ alignItems: 'center', marginTop: -64 }}
+        >
+          <TrustHalo size={128} stroke={5} facts={facts.map((f) => f.on)}>
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel="Edit your photo and personal data"
+              hitSlop={12}
+              onPress={() => navigation.navigate('PersonalData')}
+            >
+              {avatar && !avatarBroken ? (
+                <Image
+                  source={{ uri: avatar }}
+                  onError={() => setAvatarBroken(true)}
+                  style={{ width: 104, height: 104, borderRadius: 52, backgroundColor: color.brand[50] }}
+                />
+              ) : (
+                <View style={{ width: 104, height: 104, borderRadius: 52, backgroundColor: color.brand[50], alignItems: 'center', justifyContent: 'center' }}>
+                  <T variant="display" tone="brand">{(name[0] ?? 'S').toUpperCase()}</T>
+                </View>
+              )}
+              <View style={{ position: 'absolute', right: -2, bottom: -2, width: 34, height: 34, borderRadius: 17, backgroundColor: color.brand[500], alignItems: 'center', justifyContent: 'center', borderWidth: 3, borderColor: color.surface.subtle }}>
+                <Feather name="camera" size={14} color={color.white} />
+              </View>
+            </Pressable>
+          </TrustHalo>
+          <T variant="caption" tone="muted" style={{ marginTop: space.sm }}>
+            {nextFact ? `${facts.filter((f) => f.on).length} of ${facts.length} — next: ${nextFact.label.toLowerCase()}` : 'Account complete'}
           </T>
-        </View>
+        </Animated.View>
 
-        {/* Profile section */}
-        <T variant="label" tone="muted" style={{ marginTop: space['3xl'] }}>
-          Profile
-        </T>
-        <View style={{ marginTop: space.sm }}>
-          <SettingsRow icon="user" label="Personal Data" onPress={() => navigation.navigate('PersonalData')} />
-          <SettingsRow icon="clipboard" label="My Orders" onPress={() => navigation.navigate('OrdersHistory')} />
-          <SettingsRow icon="heart" label="Favorites" onPress={() => navigation.navigate('Favorites')} />
-          <SettingsRow icon="map-pin" label="My Addresses" onPress={() => navigation.navigate('Addresses')} />
-          <SettingsRow
-            icon="shield"
-            label="Identity Verification"
-            sub="Unlocks bigger orders and rides"
-            onPress={() => navigation.navigate('IdentityVerification')}
-          />
-          {/* Movement R9 — the customer's own aggregate (respect runs both ways) */}
-          <SettingsRow
-            icon="star"
-            label="Your rating"
-            sub={
-              myRating.data?.displayRating != null
-                ? `${myRating.data.displayRating.toFixed(1)} ${myRating.data.ratingBucket}`
-                : 'New — builds as you order and ride'
-            }
-            onPress={() => setRatingInfo(true)}
+        <View style={{ paddingHorizontal: GUTTER }}>
+          {/* YOUR ACCOUNT */}
+          <T variant="micro" tone="muted" style={{ marginTop: space['2xl'], marginBottom: space.sm }}>YOUR ACCOUNT</T>
+          <Card>
+            <SettingsRow icon="user" label="Personal data" onPress={() => navigation.navigate('PersonalData')} />
+            <SettingsRow icon="clipboard" label="My orders" onPress={() => navigation.navigate('OrdersHistory')} />
+            <SettingsRow icon="heart" label="Favourites" onPress={() => navigation.navigate('Favorites')} />
+            <SettingsRow icon="map-pin" label="My addresses" onPress={() => navigation.navigate('Addresses')} />
+            <SettingsRow
+              icon="shield"
+              label="Identity verification"
+              sub="Unlocks bigger orders and rides"
+              onPress={() => navigation.navigate('IdentityVerification')}
+            />
+            <SettingsRow
+              icon="star"
+              label="Your rating"
+              sub={myRating.data?.displayRating != null
+                ? `${myRating.data.displayRating.toFixed(1)} · ${myRating.data.ratingBucket}`
+                : 'No rating yet'}
+              onPress={() => setRatingInfo(true)}
+            />
+          </Card>
+
+          {/* PRIVACY */}
+          <T variant="micro" tone="muted" style={{ marginTop: space.xl, marginBottom: space.sm }}>PRIVACY</T>
+          <Card>
+            <MarketingConsentRow />
+            <SettingsRow icon="file-text" label="Terms of service" onPress={() => openPayLink(`${API_URL}/legal/terms`)} />
+            <SettingsRow icon="shield" label="Privacy policy" onPress={() => openPayLink(`${API_URL}/legal/privacy`)} />
+          </Card>
+
+          {/* HELP */}
+          <T variant="micro" tone="muted" style={{ marginTop: space.xl, marginBottom: space.sm }}>HELP</T>
+          <Card>
+            <SettingsRow
+              icon="bell"
+              label="Notifications"
+              sub={unread > 0 ? `${unread} unread` : undefined}
+              onPress={() => navigation.navigate('Notifications')}
+            />
+            <SettingsRow icon="user-plus" label="Invite friends" onPress={() => navigation.navigate('InviteFriends')} />
+            <SettingsRow icon="help-circle" label="FAQ" onPress={() => navigation.navigate('Faq')} />
+            <SettingsRow icon="phone" label="Contact us" onPress={() => navigation.navigate('ContactUs')} />
+          </Card>
+
+          {/* Role switching sits apart from support — it changes WHO you are here. */}
+          <Card style={{ marginTop: space.xl }}>
+            <SettingsRow
+              icon="refresh-ccw"
+              label="Switch app"
+              sub="Swift Driver · Swift Business"
+              onPress={() => setSwitcherOpen(true)}
+            />
+          </Card>
+
+          <PillButton
+            label="Log out"
+            icon="log-out"
+            variant="soft"
+            onPress={() => setConfirmLogout(true)}
+            style={{ marginTop: space['2xl'] }}
           />
         </View>
-
-        {/* Support section */}
-        <T variant="label" tone="muted" style={{ marginTop: space['2xl'] }}>
-          Support
-        </T>
-        <View style={{ marginTop: space.sm }}>
-          <SettingsRow
-            icon="bell"
-            label="Notification"
-            sub={unread > 0 ? `${unread} unread` : undefined}
-            onPress={() => navigation.navigate('Notifications')}
-          />
-          <SettingsRow icon="user-plus" label="Invite Friends" onPress={() => navigation.navigate('InviteFriends')} />
-          <SettingsRow icon="help-circle" label="FAQ" onPress={() => navigation.navigate('Faq')} />
-          <SettingsRow icon="phone" label="Contact Us" onPress={() => navigation.navigate('ContactUs')} />
-          <SettingsRow icon="file-text" label="Terms of Service" onPress={() => openPayLink(`${API_URL}/legal/terms`)} />
-          <SettingsRow icon="shield" label="Privacy Policy" onPress={() => openPayLink(`${API_URL}/legal/privacy`)} />
-          <MarketingConsentRow />
-          <SettingsRow
-            icon="refresh-ccw"
-            label="Switch app"
-            sub="Swift Driver · Swift Business"
-            onPress={() => setSwitcherOpen(true)}
-          />
-        </View>
-
-        <PillButton
-          label="Log Out"
-          icon="log-out"
-          variant="soft"
-          onPress={() => setConfirmLogout(true)}
-          style={{ marginTop: space['2xl'] }}
-        />
       </ScrollView>
 
       {/* Logout confirm (kit 51) */}
