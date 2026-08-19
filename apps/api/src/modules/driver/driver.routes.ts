@@ -67,7 +67,10 @@ const driverLocationSchema = z.object({
 const driverGoOnlineSchema = driverLocationSchema.pick({ latitude: true, longitude: true });
 
 const verifyPinSchema = z.object({
-  pin: z.string().min(1).max(10),
+  // [REPORT-021 F-021-01] Every handover PIN is exactly 6 digits — a
+  // malformed submission is rejected at the SHAPE, before the custody
+  // decision, so it can never burn one of the five verification attempts.
+  pin: z.string().regex(/^\d{6}$/, 'The pickup code is 6 digits'),
 });
 
 const ridesQuerySchema = z.object({

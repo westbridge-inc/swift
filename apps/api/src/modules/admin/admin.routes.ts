@@ -195,6 +195,11 @@ const broadcastSchema = z.object({
   body: z.string().trim().min(1).max(1000),
   role: z.nativeEnum(UserRole).optional(),
   data: z.record(z.unknown()).optional(),
+  /** [REPORT-021 F-021-03] Every broadcast declares its PURPOSE. 'service'
+   *  = operational notices (goes to everyone); 'marketing' = offers/promos —
+   *  delivered ONLY to subjects whose marketing consent is granted at the
+   *  CURRENT legal version. */
+  category: z.enum(['service', 'marketing']),
 });
 
 const topUpSchema = z.object({
@@ -2319,7 +2324,7 @@ export async function adminRoutes(app: FastifyInstance) {
   // ─── Notifications / Broadcast ─────────────────────────────────────────
 
   app.post('/notifications/broadcast', { preHandler: [adminGuard] }, async (request) => {
-    const { title, body, role, data } = broadcastSchema.parse(request.body);
+    const { title, body, role, data, category } = broadcastSchema.parse(request.body);
 
     const where: any = {
       status: 'ACTIVE',
@@ -2331,7 +2336,25 @@ export async function adminRoutes(app: FastifyInstance) {
       select: { id: true },
     });
 
-    const userIds = users.map((u) => u.id);
+    let userIds = users.map((u) => u.id);
+
+    // [F-021-03] Marketing broadcasts pass through the consent ledger: only
+    // subjects whose LATEST marketing row is granted/re_granted AT THE
+    // CURRENT legal version receive anything. Withdrawn means zero sends.
+    if (category === 'marketing' && userIds.length > 0) {
+      const { LEGAL_VERSION } = await import('../legal/legal.routes');
+      const consented = await app.prisma.$queryRaw<{ subjectId: string }[]>`
+        SELECT DISTINCT ON ("subjectId") "subjectId", action, "documentVersion"
+        FROM consent_records
+        WHERE "subjectType" = 'customer' AND "documentType" = 'marketing_consent'
+        ORDER BY "subjectId", "capturedAt" DESC`;
+      const allowed = new Set(
+        consented
+          .filter((r: any) => (r.action === 'granted' || r.action === 're_granted') && r.documentVersion === LEGAL_VERSION)
+          .map((r) => r.subjectId),
+      );
+      userIds = userIds.filter((id) => allowed.has(id));
+    }
 
     if (userIds.length === 0) {
       return { success: true, data: { sent: 0 } };

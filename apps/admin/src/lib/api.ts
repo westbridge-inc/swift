@@ -220,7 +220,7 @@ export const fetchReturns = (status?: string) =>
   apiFetch(`/api/v1/admin/returns?limit=50${status ? `&status=${status}` : ''}`);
 export const resolveReturn = (id: string, status: 'APPROVED' | 'REJECTED' | 'REFUNDED', note?: string) =>
   apiFetch(`/api/v1/admin/returns/${id}/resolve`, { method: 'PUT', body: JSON.stringify({ status, note }) });
-export const broadcastNotification = (body: { title: string; body: string; role?: string }) =>
+export const broadcastNotification = (body: { title: string; body: string; role?: string; category: 'service' | 'marketing' }) =>
   apiFetch('/api/v1/admin/notifications/broadcast', { method: 'POST', body: JSON.stringify(body) });
 
 // ─── Live ops + markets ──────────────────────────────────────────
