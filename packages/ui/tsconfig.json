@@ -8,7 +8,7 @@
     // (tsx) and mobile (metro) keep consuming ./src directly — see the
     // exports map in package.json. [deploy]
     "module": "CommonJS",
-    "moduleResolution": "node",
+    "moduleResolution": "bundler",
     "declaration": true,
     "noEmit": false
   },
