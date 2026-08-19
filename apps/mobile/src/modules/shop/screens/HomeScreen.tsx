@@ -1,5 +1,5 @@
 /** @jsxImportSource react */
-import React from 'react';
+import React, { useState } from 'react';
 import { Dimensions, FlatList, Pressable, RefreshControl, ScrollView, View } from 'react-native';
 import Animated, { FadeInDown, ReduceMotion } from 'react-native-reanimated';
 import { Image } from 'expo-image';
@@ -120,6 +120,7 @@ function ServiceTile({ item, index, navigation }: { item: (typeof SERVICES)[numb
 }
 
 export function HomeScreen() {
+  const [avatarBroken, setAvatarBroken] = useState(false);
   const navigation = useNavigation<any>();
   const insets = useSafeAreaInsets();
   const { user, isAuthenticated, promptLogin } = useAuthStore();
@@ -207,9 +208,12 @@ export function HomeScreen() {
                 </View>
               </Pressable>
               <Pressable onPress={() => navigation.navigate('Tabs', { screen: 'Profile' })}>
-                {user?.avatar ? (
+                {user?.avatar && !avatarBroken ? (
                   <Image
                     source={{ uri: user.avatar }}
+                    // A dead/expired avatar URL must never leave a nameless
+                    // blank circle — fall back to the monogram [visual pass 08-19].
+                    onError={() => setAvatarBroken(true)}
                     style={{ width: 40, height: 40, borderRadius: 20, backgroundColor: color.brand[50] }}
                   />
                 ) : (

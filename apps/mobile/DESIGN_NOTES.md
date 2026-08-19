@@ -154,3 +154,13 @@ functional alerting, not decoration — but the VISUAL pulse now honours
 `ReduceMotion.System` (screen still; buzz carries). **Stage 2 (13b,
 registered):** virtualization, 44dp sweep across sub-screens, menu/history
 error states, icon-set unification, danger-variant deletes.
+
+## Visual pass (simulator, 2026-08-19) — first live critique round
+Booted the real stack (API + Metro + iPhone 17 Pro sim) and LOOKED. The
+elevated Home renders as designed: awning hem crisp, greeting time-aware,
+tiles/commercial band correct. Fixed live: a dead/expired avatar URL left a
+nameless pink circle — Image onError now falls back to the monogram (seen
+broken → fixed → verified on-device). REGISTERED: **HOME-P1** scrolled
+content collides with the clock (no status-bar scrim/compact-pin on scroll);
+**RIG-1** baseline-harness "ELV1 Mains" category visible in dev data (cosmetic,
+dev-only). Vendor board + remaining flows: next visual round.
