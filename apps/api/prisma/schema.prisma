@@ -543,6 +543,53 @@ model AlertDelivery {
   @@map("alert_deliveries")
 }
 
+/// [DCR-1 NR-1] The consent ledger. Guyana's DPA is enacted but not in force;
+/// consent for accounts created in the gap cannot be manufactured on commencement
+/// day, so it is captured now, hash-anchored to the exact text the user saw.
+model LegalDocument {
+  id           String   @id @default(cuid())
+  /// privacy_policy | terms_of_service | driver_agreement | vendor_agreement
+  /// | marketing_consent | location_bg_consent
+  documentType String
+  version      String
+  locale       String   @default("en-GY")
+  /// sha256 of the exact rendered text served to users at this version.
+  contentHash  String
+  /// NULL = draft. Consent may never reference a draft (INV-NR1b).
+  publishedAt  DateTime?
+  createdAt    DateTime @default(now())
+
+  @@unique([documentType, version, locale])
+  @@map("legal_documents")
+}
+
+/// APPEND-ONLY (INV-NR1c): withdrawals and re-grants are NEW ROWS, never updates.
+/// Enforced by a database trigger + revoked privileges, not by convention.
+model ConsentRecord {
+  id                  String   @id @default(cuid())
+  /// customer | driver | vendor_user | admin
+  subjectType         String
+  subjectId           String
+  documentType        String
+  documentVersion     String
+  /// Must equal the published LegalDocument.contentHash for that version.
+  documentContentHash String
+  /// granted | withdrawn | re_granted
+  action              String
+  /// ios | android | web | vendor_web | admin | support_ticket
+  surface             String
+  locale              String   @default("en-GY")
+  capturedAt          DateTime @default(now())
+  /// HMAC-SHA256(ip, CONSENT_IP_PEPPER) — the raw IP is never stored here.
+  ipHmac              String?
+  appVersion          String?
+  /// {"control":"checkbox","control_id":"pp_v1_signup","screen":"..."}
+  evidence            Json     @default("{}")
+
+  @@index([subjectType, subjectId, documentType, capturedAt])
+  @@map("consent_records")
+}
+
 enum ComplianceReviewStatus {
   OPEN
   PASSED
