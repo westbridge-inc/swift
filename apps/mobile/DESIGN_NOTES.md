@@ -180,3 +180,17 @@ Avatar dead-URL fallback added here too (found live: blank circle → M).
 Verified in the simulator: halo 2-of-3 lit for the test account, exactly
 honest. **Stage 2 (8b):** PersonalData flex-hole + pinned dock, cluster
 headers → masthead variants, IdentityVerification off legacy components.
+
+## Flow 7 — Orders history · stage 1 (2026-08-19, verified on-device)
+**From the register (10/20):** generic strip header, one undifferentiated
+stream, 38dp actions (hard floor fail), local status capsules. Shipped:
+activity masthead (ORDERS & RIDES · Your activity) ending in **the
+ReceiptEdge** (registered signature — a till slip's torn teeth close the
+ledger; third member of the commerce-edges family after AwningEdge and
+DocketEdge); live journeys lifted into a sunken IN PROGRESS band above the
+ledger; completed rows grouped under truthful date eyebrows (TODAY ·
+YESTERDAY · 12 AUG); status capsules → kit TonePill (gained warning/info
+tones); every action raised to md (44dp); first six rows stagger with
+ReduceMotion.System; empty copy rewritten honestly ("Orders and rides will
+show here." · "Browse Swift"). Verified in the simulator: masthead + tear +
+empty state render exactly as designed.

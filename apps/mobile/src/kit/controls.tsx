@@ -239,18 +239,22 @@ export function Chip({
 }
 
 /** Soft status pill — order/job states. Tint per tone, never color alone. */
-export function TonePill({ label, tone = 'neutral', dark }: { label: string; tone?: 'brand' | 'success' | 'neutral' | 'error'; dark?: boolean }) {
+export function TonePill({ label, tone = 'neutral', dark }: { label: string; tone?: 'brand' | 'success' | 'neutral' | 'error' | 'warning' | 'info'; dark?: boolean }) {
   const c = (dark
     ? {
         brand: { bg: 'rgba(128,59,59,0.35)', fg: '#E9B9B9' },
         success: { bg: 'rgba(47,191,113,0.18)', fg: '#5AD695' },
         error: { bg: 'rgba(224,82,82,0.2)', fg: '#F09A9A' },
+        warning: { bg: 'rgba(232,168,56,0.2)', fg: '#F0C070' },
+        info: { bg: 'rgba(74,144,217,0.2)', fg: '#8FB8E8' },
         neutral: { bg: 'rgba(255,255,255,0.1)', fg: 'rgba(255,255,255,0.7)' },
       }
     : {
         brand: { bg: color.brand[50], fg: color.brand[600] },
         success: { bg: color.soft.success, fg: color.success },
         error: { bg: color.soft.danger, fg: color.error },
+        warning: { bg: color.soft.warning, fg: color.warning },
+        info: { bg: color.soft.info, fg: color.info },
         neutral: { bg: color.border.subtle, fg: color.text.secondary },
       })[tone];
   return (
