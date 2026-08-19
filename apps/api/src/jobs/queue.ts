@@ -525,6 +525,20 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
   const verificationWorker = buildWorker(
     QUEUE_NAMES.VERIFICATION,
     async (job: Job) => {
+      // [DCR-1 NR-2] Daily retention sweep: enforce every enabled policy in
+      // the registry and write receipts. Failures surface via the worker's
+      // failed-handler like every other job.
+      if (job.name === 'retention-sweep') {
+        const { seedRetentionDefaults, runRetentionSweep } = await import('../modules/compliance/retention.service');
+        await seedRetentionDefaults(ctx.prisma);
+        const results = await runRetentionSweep(ctx.prisma);
+        const enforced = results.filter((r) => !r.skipped);
+        ctx.log.info(
+          { enforced: enforced.map((r) => ({ c: r.dataClass, n: r.deleted })), skipped: results.filter((r) => r.skipped).length },
+          'retention sweep complete',
+        );
+        return;
+      }
       if (job.name === 'expiry-sweep') {
         const { VerificationService } = await import('../modules/verification/verification.service');
         const { NotificationService } = await import('../modules/notification/notification.service');
@@ -1363,6 +1377,13 @@ export async function scheduleRecurringJobs(queues: ReturnType<typeof createQueu
   // Verification document expiry sweep + reminders: daily at 06:00
   await queues.verificationQueue.add('expiry-sweep', {}, {
     repeat: { pattern: '0 6 * * *' },
+    removeOnComplete: 30,
+    removeOnFail: 30,
+  });
+
+  // [DCR-1 NR-2] Retention clocks: daily at 04:10, before the day starts.
+  await queues.verificationQueue.add('retention-sweep', {}, {
+    repeat: { pattern: '10 4 * * *' },
     removeOnComplete: 30,
     removeOnFail: 30,
   });
