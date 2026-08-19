@@ -66,6 +66,11 @@ export async function publishLegalDocument(
     },
   });
   if (existing) {
+    if (existing.renderedText === null && existing.contentHash === contentHash) {
+      await prisma.legalDocument.update({
+        where: { id: existing.id }, data: { renderedText: input.renderedText },
+      });
+    }
     if (existing.contentHash !== contentHash) {
       throw new Error(
         `[DCR-1 NR-1] ${input.documentType}@${input.version} (${locale}) already published with different text. `
@@ -84,6 +89,9 @@ export async function publishLegalDocument(
         version: input.version,
         locale,
         contentHash,
+        // [F-021-24] the exact words ARE the evidence — the hash alone can't
+        // answer "which words" if the constant ever leaves the codebase.
+        renderedText: input.renderedText,
         publishedAt: new Date(),
       },
     });

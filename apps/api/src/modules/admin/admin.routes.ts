@@ -2895,8 +2895,22 @@ export async function adminRoutes(app: FastifyInstance) {
    *  re-read after each friction fix lands. */
   app.get('/integrity/kpis', { preHandler: [platformControlGuard] }, async (request) => {
     const { days } = z.object({ days: z.coerce.number().int().min(1).max(365).default(30) }).parse(request.query ?? {});
+    // [REPORT-021 F-021-17] signup_attempts retains 90d (retention registry):
+    // a wider ask silently mixing full-window counters with 90d-truncated
+    // inputs would falsify the KPI. Cap and SAY SO in the response.
+    const effectiveDays = Math.min(days, 90);
     const { frictionKpis } = await import('../integrity/friction-metrics');
-    return { success: true, data: await frictionKpis(tenantPrisma, days) };
+    const kpis = await frictionKpis(tenantPrisma, effectiveDays);
+    return {
+      success: true,
+      data: {
+        ...kpis,
+        windowDays: effectiveDays,
+        ...(days > effectiveDays
+          ? { windowCapped: true, requestedDays: days, cappedBy: 'retention:signup_attempts(90d)' }
+          : {}),
+      },
+    };
   });
 
   // ── Batching System 1 (shadow phase) — evidence read + config ─────────────

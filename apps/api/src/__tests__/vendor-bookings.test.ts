@@ -14,6 +14,14 @@ import { registerErrorHandler } from '../middleware/error-handler';
 // vendor's booking never leaks; out-of-window is excluded; from/to narrows.
 
 const HOUR = 3600_000;
+// FLAKE-KILL (CI 2026-08-19): Math.random()*900 gave this file a 900-value
+// phone space — two creates in one run (or residue from a prior local run)
+// could collide on users.phone (P2002, file-level death). Monotonic seq +
+// per-process entropy makes collisions structurally impossible.
+let phoneSeq = 0;
+const PHONE_SALT = String(Date.now() % 9000 + 1000);
+const uniquePhone = () => `+59200909${PHONE_SALT}${String(++phoneSeq).padStart(3, '0')}`;
+
 let app: FastifyInstance;
 const userIds: string[] = [];
 const createdVendorIds: string[] = [];
@@ -25,7 +33,7 @@ let customerId = '';
 
 async function makeVendor(name: string): Promise<{ vendorId: string; itemId: string; token: string }> {
   const u = await app.prisma.user.create({
-    data: { phone: `+59200909${String(Math.floor(Math.random() * 900) + 100)}`, firstName: name, lastName: 'Owner', roles: ['VENDOR_OWNER'] as UserRole[], activeRole: 'VENDOR_OWNER', isPhoneVerified: true },
+    data: { phone: uniquePhone(), firstName: name, lastName: 'Owner', roles: ['VENDOR_OWNER'] as UserRole[], activeRole: 'VENDOR_OWNER', isPhoneVerified: true },
   });
   userIds.push(u.id);
   const token = app.jwt.sign({ userId: u.id, role: 'VENDOR_OWNER', jti: nanoid(8) });
@@ -60,7 +68,7 @@ beforeAll(async () => {
   otherItemId = other.itemId;
 
   const cust = await app.prisma.user.create({
-    data: { phone: `+59200909${String(Math.floor(Math.random() * 900) + 100)}`, firstName: 'Nia', lastName: 'Client', roles: ['CUSTOMER'] as UserRole[], activeRole: 'CUSTOMER', isPhoneVerified: true, customer: { create: {} } },
+    data: { phone: uniquePhone(), firstName: 'Nia', lastName: 'Client', roles: ['CUSTOMER'] as UserRole[], activeRole: 'CUSTOMER', isPhoneVerified: true, customer: { create: {} } },
   });
   userIds.push(cust.id);
   customerId = cust.id;

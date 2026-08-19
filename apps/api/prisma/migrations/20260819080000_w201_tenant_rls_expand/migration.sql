@@ -1,3 +1,5 @@
+-- [F-021-25] bounded lock waits: RLS DDL must never queue unboundedly behind traffic.
+SET lock_timeout = '10s';
 -- [ELV-1 W-201 stage 1: EXPAND] RLS policies on all 51 tenant-bearing tables.
 -- ENABLE (not FORCE): the app connects as table owner and is unaffected until
 -- the deliberate CONTRACT stage. Predicate fails CLOSED without tenant context.

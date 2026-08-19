@@ -5,6 +5,7 @@ import { nanoid } from 'nanoid';
 import { prismaPlugin } from '../plugins/prisma';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { TENANT_TABLES, allRlsDdl, appRoleDdl } from '../lib/tenant-rls';
+import { installDdl } from './helpers/install-ddl';
 
 // [ELV-1 W-201 stage 1] The database tenant wall, VERIFIED. A NOBYPASSRLS
 // probe role stands in for the future app role (CONTRACT stage): through it,
@@ -49,39 +50,30 @@ beforeAll(async () => {
     JOIN pg_namespace n2 ON n2.oid = c.relnamespace
     JOIN pg_policy p ON p.polrelid = c.oid AND p.polname = 'tenant_isolation'
     WHERE n2.nspname = 'public' AND c.relrowsecurity AND c.relname = ANY(${[...TENANT_TABLES]})`);
-  if (Number(walled[0]!.n) !== TENANT_TABLES.length) {
-    for (const ddl of allRlsDdl()) {
-      await app.prisma.$executeRawUnsafe(ddl);
-    }
-  }
+  const setup: string[] = [];
+  if (Number(walled[0]!.n) !== TENANT_TABLES.length) setup.push(...allRlsDdl());
   // [W-201b] The real future app role + grants (idempotent, heals db-push envs).
-  for (const ddl of appRoleDdl()) {
-    await app.prisma.$executeRawUnsafe(ddl);
-  }
+  setup.push(...appRoleDdl());
+  await installDdl(app.prisma, setup);
 
-  // The probe role: NOBYPASSRLS, not the table owner — the future app role's
-  // stand-in. NOLOGIN on purpose; the suite reaches it via SET LOCAL ROLE.
-  await app.prisma.$executeRawUnsafe(`
-    DO $$ BEGIN
+  // The probe roles ride the same serialized installer: NOBYPASSRLS
+  // stand-ins for the future app role, plus one that HOLDS the bypass
+  // capability (role membership) for the sanctioned cross-tenant proof.
+  await installDdl(app.prisma, [
+    `DO $$ BEGIN
       IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '${PROBE_ROLE}') THEN
         CREATE ROLE ${PROBE_ROLE} NOLOGIN NOBYPASSRLS;
       END IF;
-    END $$`);
-  await app.prisma.$executeRawUnsafe(
+    END $$`,
     `GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO ${PROBE_ROLE}`,
-  );
-  // A second probe that HOLDS the bypass capability (role membership) —
-  // the sanctioned cross-tenant identity for system/admin work.
-  await app.prisma.$executeRawUnsafe(`
-    DO $$ BEGIN
+    `DO $$ BEGIN
       IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'swift_rls_probe_bypass') THEN
         CREATE ROLE swift_rls_probe_bypass NOLOGIN NOBYPASSRLS;
       END IF;
-    END $$`);
-  await app.prisma.$executeRawUnsafe(
+    END $$`,
     `GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO swift_rls_probe_bypass`,
-  );
-  await app.prisma.$executeRawUnsafe(`GRANT swift_bypass_rls TO swift_rls_probe_bypass`);
+    `GRANT swift_bypass_rls TO swift_rls_probe_bypass`,
+  ]);
 
   // Two synthetic tenants (tenantId is a real FK), then a user in each —
   // seeded as the owner, which bypasses ENABLEd RLS: stage 1 leaves the app
