@@ -61,3 +61,8 @@ bottom radii are zeroed. Sibling of AwningEdge in the "commerce edges" family.
 segmented ring around the avatar; each segment is a REAL account fact — never
 decoration. Unlit segments are the honest to-do list; the caption names the
 next one. Success-green on brand-100 track, round caps, 8px gaps.
+
+### ReceiptEdge (signature · activity)
+`kit/docket.tsx`. Triangular till-slip teeth closing the activity masthead —
+the ledger of orders and rides ends the way a receipt does. Commerce-edges
+family: AwningEdge (shopfront) · DocketEdge (kitchen) · ReceiptEdge (ledger).
