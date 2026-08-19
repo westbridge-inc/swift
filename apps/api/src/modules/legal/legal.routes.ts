@@ -35,7 +35,7 @@ ${body}
 </main></body></html>`;
 }
 
-const TERMS = page(
+export const TERMS = page(
   'Terms of Service',
   `
 <p>These terms govern your use of the Swift app and platform, operated in Guyana and other Caribbean markets ("Swift", "we"). By creating an account or using Swift you agree to them.</p>
@@ -72,7 +72,7 @@ const TERMS = page(
 `,
 );
 
-const PRIVACY = page(
+export const PRIVACY = page(
   'Privacy Policy',
   `
 <p>This policy explains what Swift collects, why, and what control you have. We collect the minimum needed to run a delivery, ride and marketplace platform — and we never sell your data.</p>
@@ -119,6 +119,21 @@ const PRIVACY = page(
 // standards page, provide an in-app way to report CSAE, and name a point of
 // contact. This page states the standard and links it to the STORE-001 report
 // mechanism (in-app report → CSAE) and a dedicated contact.
+/** [DCR-1 NR1-03] Marketing is a PURPOSE consent — never bundled into the
+ *  terms. This is the exact text a grant anchors to in the consent ledger. */
+export const MARKETING_CONSENT = page(
+  'Marketing Messages',
+  `
+<p>If you say yes, Swift may send you offers, promotions, and news about Swift services by push notification, SMS, or email. This is optional — saying no never affects your orders, rides, deliveries, or account.</p>
+
+<h2>What you are agreeing to</h2>
+<p>We may use your name, your order history, and your app activity to choose which offers we show you. We never sell your personal information, and we never share it with advertisers to market to you off Swift.</p>
+
+<h2>Changing your mind</h2>
+<p>You can withdraw this consent at any time in the app under Account → Marketing messages, and marketing stops. Service messages about your active orders (receipts, delivery updates, safety notices) are not marketing and continue either way.</p>
+`,
+);
+
 const CHILD_SAFETY = page(
   'Child Safety Standards',
   `
@@ -149,6 +164,10 @@ export async function legalRoutes(app: FastifyInstance) {
   app.get('/privacy', async (_request, reply) => {
     reply.header('content-type', 'text/html; charset=utf-8');
     return PRIVACY;
+  });
+  app.get('/marketing', async (_request, reply) => {
+    reply.header('content-type', 'text/html; charset=utf-8');
+    return MARKETING_CONSENT;
   });
   app.get('/child-safety', async (_request, reply) => {
     reply.header('content-type', 'text/html; charset=utf-8');

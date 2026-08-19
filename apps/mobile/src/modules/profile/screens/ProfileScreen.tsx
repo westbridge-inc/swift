@@ -9,14 +9,51 @@ import { useMyRating, useProfile } from '../../../hooks/customer';
 import { useAuthStore } from '../../../stores/authStore';
 import { EmptyState, IconChip, PillButton, PopupCard, PopupTitle, Screen, SettingsRow, T } from '../../../kit';
 import { RoleSwitcherSheet } from '../../../components/RoleSwitcherSheet';
-import { API_URL } from '../../../services/api';
+import { API_URL, customerApi } from '../../../services/api';
 import { openPayLink } from '../../../lib/payLink';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { BrandSwitch } from '../../../kit/controls';
 
 const GUTTER = space['2xl'];
 
 // Kit Profile (49) + logout popup (51). Sections in the kit's icon-chip row
 // language; every row lands on a real screen/flow. Dark mode (kit "Dart
 // Mode") is omitted — the app ships light-only.
+/** [DCR-1 NR1-03] Marketing messages toggle — the row the served consent
+ *  text promises ("Account -> Marketing messages"). The switch reflects the
+ *  ledger's current state; a flip is a new append-only consent row. */
+function MarketingConsentRow() {
+  const qc = useQueryClient();
+  const consent = useQuery({
+    queryKey: ['consent'],
+    queryFn: async () => (await customerApi.getConsent()).data.data as {
+      consents: { documentType: string; state: string | null }[];
+    },
+    staleTime: 60_000,
+  });
+  const marketingState = consent.data?.consents.find((c) => c.documentType === 'marketing_consent')?.state;
+  const granted = marketingState === 'granted' || marketingState === 're_granted';
+  const toggle = useMutation({
+    mutationFn: (next: boolean) => customerApi.setMarketingConsent(next),
+    onSettled: () => qc.invalidateQueries({ queryKey: ['consent'] }),
+  });
+  return (
+    <SettingsRow
+      icon="gift"
+      label="Marketing messages"
+      sub={granted ? 'On — offers and promos' : 'Off — service messages only'}
+      onPress={() => openPayLink(`${API_URL}/legal/marketing`)}
+      right={
+        <BrandSwitch
+          value={toggle.isPending ? !granted : granted}
+          disabled={consent.isLoading || toggle.isPending}
+          onChange={(next) => toggle.mutate(next)}
+        />
+      }
+    />
+  );
+}
+
 export function ProfileScreen() {
   const navigation = useNavigation<any>();
   const { isAuthenticated, promptLogin, logout, user, setIntent } = useAuthStore();
@@ -166,6 +203,7 @@ export function ProfileScreen() {
           <SettingsRow icon="phone" label="Contact Us" onPress={() => navigation.navigate('ContactUs')} />
           <SettingsRow icon="file-text" label="Terms of Service" onPress={() => openPayLink(`${API_URL}/legal/terms`)} />
           <SettingsRow icon="shield" label="Privacy Policy" onPress={() => openPayLink(`${API_URL}/legal/privacy`)} />
+          <MarketingConsentRow />
           <SettingsRow
             icon="refresh-ccw"
             label="Switch app"
