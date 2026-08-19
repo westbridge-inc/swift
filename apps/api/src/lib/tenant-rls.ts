@@ -43,12 +43,13 @@ export const TENANT_TABLES = [
 
 export const TENANT_POLICY_NAME = 'tenant_isolation';
 
-/** The row predicate: the request's tenant, or the sanctioned bypass for
- *  cross-tenant system work. current_setting(..., true) returns NULL (not an
- *  error) when unset, so a connection with NO tenant context matches nothing
- *  — fail closed. */
+/** The row predicate: the request's tenant, or membership in the
+ *  swift_bypass_rls role — a ROLE CAPABILITY, not a GUC, because a GUC is
+ *  settable by the very role the wall constrains [REPORT-021 F-021-11].
+ *  current_setting(..., true) returns NULL (not an error) when unset, so a
+ *  connection with NO tenant context matches nothing — fail closed. */
 const POLICY_PREDICATE = `("tenantId" = current_setting('app.current_tenant', true)
-      OR current_setting('app.bypass_tenant', true) = 'on')`;
+      OR pg_has_role(current_user, 'swift_bypass_rls', 'MEMBER'))`;
 
 /** Idempotent DDL for one table. Also used by the test installer so db-push
  *  provisioned environments (CI API tests) carry the wall too. */
@@ -71,6 +72,11 @@ export function allRlsDdl(): string[] {
  *  no credentials in a public repo; deploy provisions LOGIN out-of-band. */
 export function appRoleDdl(): string[] {
   return [
+    `DO $$ BEGIN
+      IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'swift_bypass_rls') THEN
+        CREATE ROLE swift_bypass_rls NOLOGIN NOBYPASSRLS;
+      END IF;
+    END $$`,
     `DO $$ BEGIN
       IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'swift_app') THEN
         CREATE ROLE swift_app NOLOGIN NOBYPASSRLS;

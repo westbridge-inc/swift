@@ -94,7 +94,10 @@ export async function authRoutes(app: FastifyInstance) {
     const body = registerSchema.parse(request.body);
     // Read at request time so the flag flips without a restart (tsx watch) and
     // tests can exercise both modes.
-    if (process.env['CONSENT_REQUIRED'] === '1' && body.acceptTerms !== true) {
+    // [REPORT-021 F-021-05] Fail CLOSED: consent is required unless the
+    // compat kill-switch is EXPLICITLY thrown (CONSENT_REQUIRED=0) for a
+    // staged old-client window. Missing/typo'd config = enforcement ON.
+    if (process.env['CONSENT_REQUIRED'] !== '0' && body.acceptTerms !== true) {
       throw new AppError(400, 'CONSENT_REQUIRED', 'You must accept the Terms of Service and Privacy Policy to create an account');
     }
     const result = await authService.register({

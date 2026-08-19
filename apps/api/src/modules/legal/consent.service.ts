@@ -77,15 +77,30 @@ export async function publishLegalDocument(
     }
     return { contentHash };
   }
-  await prisma.legalDocument.create({
-    data: {
-      documentType: input.documentType,
-      version: input.version,
-      locale,
-      contentHash,
-      publishedAt: new Date(),
-    },
-  });
+  try {
+    await prisma.legalDocument.create({
+      data: {
+        documentType: input.documentType,
+        version: input.version,
+        locale,
+        contentHash,
+        publishedAt: new Date(),
+      },
+    });
+  } catch (err) {
+    // Two replicas can race the first publication of a version; the loser
+    // re-reads the winner and hash-validates it [REPORT-021 F-021-08].
+    const isUnique = typeof err === 'object' && err !== null && (err as { code?: string }).code === 'P2002';
+    if (!isUnique) throw err;
+    const winner = await prisma.legalDocument.findUnique({
+      where: { documentType_version_locale: { documentType: input.documentType, version: input.version, locale } },
+    });
+    if (!winner || winner.contentHash !== contentHash) {
+      throw new Error(
+        `[DCR-1 NR-1] concurrent publication of ${input.documentType}@${input.version} (${locale}) with different text.`,
+      );
+    }
+  }
   return { contentHash };
 }
 
@@ -161,6 +176,22 @@ export async function recordConsent(
   });
 }
 
+/** The latest row's action AND version — consent to old words is not
+ *  consent to the current words [REPORT-021 F-021-02]. */
+export async function currentConsentDetailed(
+  prisma: PrismaClient | Prisma.TransactionClient,
+  subjectType: ConsentSubjectType,
+  subjectId: string,
+  documentType: ConsentDocumentType,
+): Promise<{ action: ConsentAction; version: string } | null> {
+  const row = await prisma.consentRecord.findFirst({
+    where: { subjectType, subjectId, documentType },
+    orderBy: { capturedAt: 'desc' },
+    select: { action: true, documentVersion: true },
+  });
+  return row ? { action: row.action as ConsentAction, version: row.documentVersion } : null;
+}
+
 /** The current state of one consent — the latest row wins (view-equivalent). */
 export async function currentConsent(
   prisma: PrismaClient | Prisma.TransactionClient,
@@ -176,12 +207,16 @@ export async function currentConsent(
   return (row?.action as ConsentAction | undefined) ?? null;
 }
 
-/** INV-NR1d: withdrawn marketing consent means zero marketing sends. */
+/** INV-NR1d: withdrawn marketing consent means zero marketing sends — and a
+ *  grant to an OLD document version does not authorize sends under the new
+ *  words [F-021-02]: marketing auto-pauses on a version bump until re-grant. */
 export async function mayReceiveMarketing(
   prisma: PrismaClient,
   subjectType: ConsentSubjectType,
   subjectId: string,
+  currentVersion: string,
 ): Promise<boolean> {
-  const state = await currentConsent(prisma, subjectType, subjectId, 'marketing_consent');
-  return state === 'granted' || state === 're_granted';
+  const state = await currentConsentDetailed(prisma, subjectType, subjectId, 'marketing_consent');
+  return !!state && (state.action === 'granted' || state.action === 're_granted')
+    && state.version === currentVersion;
 }

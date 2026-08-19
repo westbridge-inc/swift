@@ -74,7 +74,7 @@ function inject(method: 'GET' | 'POST' | 'PUT', url: string, payload?: unknown, 
 
 async function signup(phone: string, role: 'CUSTOMER' | 'MOVER' | 'VENDOR') {
   await loginWithOtp(app, phone);
-  const res = await inject('POST', '/api/v1/auth/register', {
+  const res = await inject('POST', '/api/v1/auth/register', { acceptTerms: true,
     phone,
     firstName: 'Step4',
     lastName: role,

@@ -129,7 +129,7 @@ describe('consent ledger [DCR-1 NR-1]', () => {
         version, action: 'granted', surface: 'ios',
       });
     });
-    expect(await mayReceiveMarketing(app.prisma, 'customer', subjectId)).toBe(true);
+    expect(await mayReceiveMarketing(app.prisma, 'customer', subjectId, version)).toBe(true);
 
     await new Promise((r) => setTimeout(r, 5)); // distinct capturedAt
     await app.prisma.$transaction(async (tx) => {
@@ -139,7 +139,7 @@ describe('consent ledger [DCR-1 NR-1]', () => {
       });
     });
     expect(await currentConsent(app.prisma, 'customer', subjectId, 'marketing_consent')).toBe('withdrawn');
-    expect(await mayReceiveMarketing(app.prisma, 'customer', subjectId)).toBe(false);
+    expect(await mayReceiveMarketing(app.prisma, 'customer', subjectId, version)).toBe(false);
     // History is intact — both rows survive.
     expect(await app.prisma.consentRecord.count({ where: { subjectId } })).toBe(2);
   });

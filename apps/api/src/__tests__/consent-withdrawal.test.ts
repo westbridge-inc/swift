@@ -7,7 +7,7 @@ import { authPlugin } from '../plugins/auth';
 import { socketPlugin } from '../plugins/socket';
 import { customerRoutes } from '../modules/user/customer.routes';
 import { registerErrorHandler } from '../middleware/error-handler';
-import { mayReceiveMarketing } from '../modules/legal/consent.service';
+import { mayReceiveMarketing, publishLegalDocument, recordConsent } from '../modules/legal/consent.service';
 import { LEGAL_VERSION } from '../modules/legal/legal.routes';
 
 // [DCR-1 NR1-03] The withdrawal surface: marketing consent is a purpose
@@ -79,17 +79,17 @@ describe('marketing consent surface [DCR-1 NR1-03]', () => {
     const { userId, token } = await makeCustomer();
 
     // Default: no consent, no marketing.
-    expect(await mayReceiveMarketing(app.prisma, 'customer', userId)).toBe(false);
+    expect(await mayReceiveMarketing(app.prisma, 'customer', userId, LEGAL_VERSION)).toBe(false);
 
     const grant = await post(token, true);
     expect(grant.statusCode).toBe(200);
     expect(grant.json().data).toEqual({ marketing: true, changed: true });
-    expect(await mayReceiveMarketing(app.prisma, 'customer', userId)).toBe(true);
+    expect(await mayReceiveMarketing(app.prisma, 'customer', userId, LEGAL_VERSION)).toBe(true);
 
     await new Promise((r) => setTimeout(r, 5));
     const withdraw = await post(token, false);
     expect(withdraw.json().data).toEqual({ marketing: false, changed: true });
-    expect(await mayReceiveMarketing(app.prisma, 'customer', userId)).toBe(false);
+    expect(await mayReceiveMarketing(app.prisma, 'customer', userId, LEGAL_VERSION)).toBe(false);
 
     await new Promise((r) => setTimeout(r, 5));
     const regrant = await post(token, true);
@@ -136,6 +136,42 @@ describe('marketing consent surface [DCR-1 NR1-03]', () => {
     expect(byType['marketing_consent']).toBe('granted');
     // Created directly (not via /register), so no signup consents exist.
     expect(byType['privacy_policy']).toBeNull();
+  });
+
+  it('[F-021-02] a grant to OLD words is not current: version bump pauses marketing and re-grant writes new evidence', async () => {
+    const { userId, token } = await makeCustomer();
+    const oldVersion = `old-${nanoid(6)}`;
+    await publishLegalDocument(app.prisma, {
+      documentType: 'marketing_consent', version: oldVersion, renderedText: 'the old marketing words',
+    });
+    await app.prisma.$transaction(async (tx) => {
+      await recordConsent(tx, {
+        subjectType: 'customer', subjectId: userId, documentType: 'marketing_consent',
+        version: oldVersion, action: 'granted', surface: 'mobile',
+      });
+    });
+    // Old-version grant: NOT effective at the current version — no sends.
+    expect(await mayReceiveMarketing(app.prisma, 'customer', userId, LEGAL_VERSION)).toBe(false);
+    // And the toggle must NOT no-op: it re-grants at the CURRENT version.
+    const res = await post(token, true);
+    expect(res.json().data).toEqual({ marketing: true, changed: true });
+    const latest = await app.prisma.consentRecord.findFirstOrThrow({
+      where: { subjectType: 'customer', subjectId: userId, documentType: 'marketing_consent' },
+      orderBy: { capturedAt: 'desc' },
+    });
+    expect(latest.documentVersion).toBe(LEGAL_VERSION);
+    expect(latest.action).toBe('re_granted');
+    expect(await mayReceiveMarketing(app.prisma, 'customer', userId, LEGAL_VERSION)).toBe(true);
+    // Withdrawing an OLD-version grant must also always be recordable.
+    const { userId: u3, token: t3 } = await makeCustomer();
+    await app.prisma.$transaction(async (tx) => {
+      await recordConsent(tx, {
+        subjectType: 'customer', subjectId: u3, documentType: 'marketing_consent',
+        version: oldVersion, action: 'granted', surface: 'mobile',
+      });
+    });
+    const w = await post(t3, false);
+    expect(w.json().data).toEqual({ marketing: false, changed: true });
   });
 
   it('rejects unauthenticated access', async () => {

@@ -15,10 +15,11 @@ export default function BroadcastPage() {
   const [title, setTitle] = useState('');
   const [body, setBody] = useState('');
   const [role, setRole] = useState('');
+  const [category, setCategory] = useState<'service' | 'marketing'>('service');
   const [lastSent, setLastSent] = useState<number | null>(null);
 
   const send = useMutation({
-    mutationFn: () => broadcastNotification({ title: title.trim(), body: body.trim(), ...(role ? { role } : {}) }),
+    mutationFn: () => broadcastNotification({ title: title.trim(), body: body.trim(), category, ...(role ? { role } : {}) }),
     onSuccess: (res: any) => {
       setLastSent(res?.data?.sent ?? 0);
       setTitle('');
@@ -50,6 +51,20 @@ export default function BroadcastPage() {
               </option>
             ))}
           </select>
+        </div>
+        <div>
+          <label className="block text-xs text-[#8E8E93] mb-1.5">Purpose</label>
+          <select
+            value={category}
+            onChange={(e) => setCategory(e.target.value as 'service' | 'marketing')}
+            className="w-full bg-[#2C2C2E] text-white px-3 py-2 rounded-lg text-sm border border-[#38383A] focus:border-[#E8192C] focus:outline-none"
+          >
+            <option value="service">Service notice — operational, goes to everyone</option>
+            <option value="marketing">Marketing — offers/promos, ONLY to people who said yes</option>
+          </select>
+          <p className="text-[11px] text-[#8E8E93] mt-1">
+            Marketing sends pass through the consent ledger: anyone who withdrew, or never opted in, is skipped.
+          </p>
         </div>
         <div>
           <label className="block text-xs text-[#8E8E93] mb-1.5">Title (max 150)</label>

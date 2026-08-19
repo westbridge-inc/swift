@@ -70,6 +70,18 @@ beforeAll(async () => {
   await app.prisma.$executeRawUnsafe(
     `GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO ${PROBE_ROLE}`,
   );
+  // A second probe that HOLDS the bypass capability (role membership) —
+  // the sanctioned cross-tenant identity for system/admin work.
+  await app.prisma.$executeRawUnsafe(`
+    DO $$ BEGIN
+      IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'swift_rls_probe_bypass') THEN
+        CREATE ROLE swift_rls_probe_bypass NOLOGIN NOBYPASSRLS;
+      END IF;
+    END $$`);
+  await app.prisma.$executeRawUnsafe(
+    `GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO swift_rls_probe_bypass`,
+  );
+  await app.prisma.$executeRawUnsafe(`GRANT swift_bypass_rls TO swift_rls_probe_bypass`);
 
   // Two synthetic tenants (tenantId is a real FK), then a user in each —
   // seeded as the owner, which bypasses ENABLEd RLS: stage 1 leaves the app
@@ -124,8 +136,19 @@ describe('database tenant wall [W-201 / F-201]', () => {
     expect(await probeCount({})).toBe(0);
   });
 
-  it('the sanctioned bypass GUC sees everything (system/admin work)', async () => {
-    expect(await probeCount({ 'app.bypass_tenant': 'on' })).toBe(2);
+  it('[F-021-11] the bypass is a ROLE, not a GUC — a constrained role cannot self-bypass', async () => {
+    // The old GUC hole: any role could SET app.bypass_tenant itself. Now it
+    // does nothing — the probe stays walled.
+    expect(await probeCount({ 'app.bypass_tenant': 'on' })).toBe(0);
+    // Membership in swift_bypass_rls is the only bypass.
+    const n = await app.prisma.$transaction(async (tx) => {
+      await tx.$executeRawUnsafe(`SET LOCAL ROLE swift_rls_probe_bypass`);
+      const rows = await tx.$queryRaw<{ n: bigint }[]>(
+        Prisma.sql`SELECT count(*)::bigint AS n FROM users WHERE "tenantId" IN (${A}, ${B})`,
+      );
+      return Number(rows[0]!.n);
+    });
+    expect(n).toBe(2);
   });
 
   it('writes are walled too: A cannot touch B rows, and cannot INSERT into B', async () => {
@@ -202,6 +225,16 @@ describe('CONTRACT readiness: the swift_app role [W-201b]', () => {
     } finally {
       await app.prisma.$executeRawUnsafe(`DROP TABLE "${scratch}"`);
     }
+  });
+
+  it('[F-021-11] swift_app cannot self-bypass via the GUC — the wall holds against the app role itself', async () => {
+    const n = await asApp({ 'app.bypass_tenant': 'on' }, async (tx) => {
+      const rows = await tx.$queryRaw<{ n: bigint }[]>(
+        Prisma.sql`SELECT count(*)::bigint AS n FROM users WHERE "tenantId" IN (${A}, ${B})`,
+      );
+      return Number(rows[0]!.n);
+    });
+    expect(n).toBe(0);
   });
 
   it('swift_app cannot bypass RLS and cannot ALTER tables — least privilege holds', async () => {

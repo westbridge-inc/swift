@@ -1,6 +1,6 @@
 import type { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 import { z } from 'zod';
-import { VendorType, OrderStatus, NotificationType } from '@prisma/client';
+import { Prisma, VendorType, OrderStatus, NotificationType } from '@prisma/client';
 import { calculateDeliveryFee, deliveryFeeFromRates, expressDeliveryFee } from '../../utils/markup';
 import { CountryConfigService } from '../country/country-config.service';
 import { estimateDrivingDistance, estimateDeliveryMinutes } from '../../utils/distance';
@@ -27,7 +27,7 @@ import { AccountService } from './account.service';
 import { transitionUserRoleAuthority } from '../mover-authority';
 import { safeMmgPayUrl, validateMmgPayUrl } from '../../utils/mmg-pay-url';
 import {
-  currentConsent, recordConsent, publishLegalDocumentOnce, type ConsentAction,
+  currentConsentDetailed, recordConsent, publishLegalDocumentOnce, type ConsentAction,
 } from '../legal/consent.service';
 import { LEGAL_VERSION, MARKETING_CONSENT } from '../legal/legal.routes';
 
@@ -2484,37 +2484,53 @@ export async function customerRoutes(app: FastifyInstance) {
    *  straight from the append-only ledger (latest row per document wins). */
   app.get('/consent', async (request: AuthRequest) => {
     const documentTypes = ['privacy_policy', 'terms_of_service', 'marketing_consent'] as const;
-    const consents = await Promise.all(documentTypes.map(async (documentType) => ({
-      documentType,
-      state: await currentConsent(app.prisma, 'customer', request.user.userId, documentType),
-    })));
+    const consents = await Promise.all(documentTypes.map(async (documentType) => {
+      const detail = await currentConsentDetailed(app.prisma, 'customer', request.user.userId, documentType);
+      return {
+        documentType,
+        state: detail?.action ?? null,
+        version: detail?.version ?? null,
+        // Consent to old words is not consent to the current words.
+        current: !!detail && detail.version === LEGAL_VERSION,
+      };
+    }));
     return { success: true, data: { consents, servedVersion: LEGAL_VERSION } };
   });
 
   /** [DCR-1 NR1-03] POST /consent/marketing { granted } — grant or withdraw
-   *  marketing consent. Withdrawal is a NEW ledger row (append-only), takes
-   *  effect immediately, and repeating the current state writes nothing. */
+   *  marketing consent. Withdrawal is a NEW ledger row (append-only) and takes
+   *  effect immediately. The decision and the append happen in ONE serialized
+   *  transaction (per-subject advisory lock) so a success response is an
+   *  authority boundary [REPORT-021 F-021-04]; effectiveness is VERSION-AWARE
+   *  — a grant to old words never suppresses re-consent to the current words
+   *  [F-021-02]. */
   app.post('/consent/marketing', async (request: AuthRequest) => {
     const { granted } = z.object({ granted: z.boolean() }).parse(request.body);
     const userId = request.user.userId;
-    const prior = await currentConsent(app.prisma, 'customer', userId, 'marketing_consent');
-    const effective = prior === 'granted' || prior === 're_granted';
-    if (granted === effective) {
-      return { success: true, data: { marketing: effective, changed: false } };
-    }
-    const action: ConsentAction = granted ? (prior === 'withdrawn' ? 're_granted' : 'granted') : 'withdrawn';
     await publishLegalDocumentOnce(app.prisma, {
       documentType: 'marketing_consent', version: LEGAL_VERSION, renderedText: MARKETING_CONSENT,
     });
-    await app.prisma.$transaction(async (tx) => {
+    const outcome = await app.prisma.$transaction(async (tx) => {
+      await tx.$executeRaw(Prisma.sql`
+        SELECT pg_advisory_xact_lock(hashtextextended(${`consent:marketing:${userId}`}, 0))`);
+      const prior = await currentConsentDetailed(tx, 'customer', userId, 'marketing_consent');
+      const effectiveAtCurrent = !!prior
+        && (prior.action === 'granted' || prior.action === 're_granted')
+        && prior.version === LEGAL_VERSION;
+      const effectiveAtAny = !!prior && (prior.action === 'granted' || prior.action === 're_granted');
+      if (granted === effectiveAtCurrent && (granted || !effectiveAtAny)) {
+        return { marketing: effectiveAtCurrent, changed: false };
+      }
+      const action: ConsentAction = granted ? (prior ? 're_granted' : 'granted') : 'withdrawn';
       await recordConsent(tx, {
         subjectType: 'customer', subjectId: userId,
         documentType: 'marketing_consent', version: LEGAL_VERSION,
         action, surface: 'mobile', ip: request.ip,
         evidence: { control: 'marketing_toggle', path: 'consent/marketing' },
       });
+      return { marketing: granted, changed: true };
     });
-    return { success: true, data: { marketing: granted, changed: true } };
+    return { success: true, data: outcome };
   });
 
   /** POST /notifications/devices — register this device for push. Upsert on

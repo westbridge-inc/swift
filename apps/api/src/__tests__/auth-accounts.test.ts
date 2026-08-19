@@ -136,7 +136,7 @@ async function ensureMoverProfiles(userId: string) {
 /** Full signup: OTP flow then register with role + country. */
 async function signup(phone: string, role: 'CUSTOMER' | 'MOVER' | 'VENDOR', countryCode = 'GY') {
   await loginWithOtp(app, phone); // unknown phone -> isNewUser + registration window
-  return inject('POST', '/api/v1/auth/register', {
+  return inject('POST', '/api/v1/auth/register', { acceptTerms: true,
     phone,
     firstName: 'Step3',
     lastName: role,
@@ -156,7 +156,7 @@ describe('Country picker', () => {
 
 describe('Signup — OTP mandatory, role + country aware', () => {
   it('rejects registration without a verified OTP', async () => {
-    const res = await inject('POST', '/api/v1/auth/register', {
+    const res = await inject('POST', '/api/v1/auth/register', { acceptTerms: true,
       phone: MOVER_PHONE,
       firstName: 'No',
       lastName: 'Otp',
@@ -168,7 +168,7 @@ describe('Signup — OTP mandatory, role + country aware', () => {
 
   it('rejects signup for a market Swift is not in (whole Caribbean IS live)', async () => {
     await loginWithOtp(app, WAITLIST_PHONE);
-    const res = await inject('POST', '/api/v1/auth/register', {
+    const res = await inject('POST', '/api/v1/auth/register', { acceptTerms: true,
       phone: WAITLIST_PHONE, // UK prefix — derives no Caribbean market
       firstName: 'Wait',
       lastName: 'List',
@@ -205,7 +205,7 @@ describe('Signup — OTP mandatory, role + country aware', () => {
 
   it('the registration window is single-use', async () => {
     // MOVER_PHONE's window was consumed by the successful signup
-    const res = await inject('POST', '/api/v1/auth/register', {
+    const res = await inject('POST', '/api/v1/auth/register', { acceptTerms: true,
       phone: MOVER_PHONE,
       firstName: 'Replay',
       lastName: 'Attempt',

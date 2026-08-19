@@ -193,7 +193,7 @@ describe('Auth Routes', () => {
     it('creates a new user and returns tokens', async () => {
       // OTP at signup is mandatory — prove phone ownership first
       await loginWithOtp(app, testPhone);
-      const res = await inject('POST', '/api/v1/auth/register', {
+      const res = await inject('POST', '/api/v1/auth/register', { acceptTerms: true,
         phone: testPhone,
         firstName: 'Test',
         lastName: 'User',
@@ -210,7 +210,7 @@ describe('Auth Routes', () => {
     });
 
     it('rejects duplicate phone', async () => {
-      const res = await inject('POST', '/api/v1/auth/register', {
+      const res = await inject('POST', '/api/v1/auth/register', { acceptTerms: true,
         phone: '+5926003000', // Existing test customer
         firstName: 'Dup',
         lastName: 'User',
@@ -275,21 +275,36 @@ describe('Auth Routes', () => {
         expect(tos.publishedAt).toBeInstanceOf(Date);
       });
 
-      it('still registers old clients that send no consent field — and stamps nothing', async () => {
+      it('[F-021-05] consent is required BY DEFAULT — a consent-less registration is refused', async () => {
         await loginWithOtp(app, noConsentPhone);
         const res = await inject('POST', '/api/v1/auth/register', {
           phone: noConsentPhone,
           firstName: 'Old',
           lastName: 'Client',
         });
-        expect(res.statusCode).toBe(201);
-        const row = await app.prisma.user.findUnique({ where: { phone: noConsentPhone } });
-        expect(row?.acceptedTermsAt).toBeNull();
-        expect(row?.tosVersion).toBeNull();
-        // No consent claimed → no ledger rows fabricated.
-        expect(await app.prisma.consentRecord.count({
-          where: { subjectType: 'customer', subjectId: row!.id },
-        })).toBe(0);
+        expect(res.statusCode).toBe(400);
+        expect(res.json().error.code).toBe('CONSENT_REQUIRED');
+      });
+
+      it('the compat kill-switch (CONSENT_REQUIRED=0) admits old clients and fabricates nothing', async () => {
+        process.env['CONSENT_REQUIRED'] = '0';
+        try {
+          const res = await inject('POST', '/api/v1/auth/register', {
+            phone: noConsentPhone,
+            firstName: 'Old',
+            lastName: 'Client',
+          });
+          expect(res.statusCode).toBe(201);
+          const row = await app.prisma.user.findUnique({ where: { phone: noConsentPhone } });
+          expect(row?.acceptedTermsAt).toBeNull();
+          expect(row?.tosVersion).toBeNull();
+          // No consent claimed → no ledger rows fabricated.
+          expect(await app.prisma.consentRecord.count({
+            where: { subjectType: 'customer', subjectId: row!.id },
+          })).toBe(0);
+        } finally {
+          delete process.env['CONSENT_REQUIRED'];
+        }
       });
 
       it('CONSENT_REQUIRED=1 refuses a consent-less registration', async () => {
@@ -333,7 +348,7 @@ describe('Auth Routes', () => {
       const phone = '+5929998866';
       try {
         await loginWithOtp(app, phone);
-        const res = await inject('POST', '/api/v1/auth/register', {
+        const res = await inject('POST', '/api/v1/auth/register', { acceptTerms: true,
           phone,
           firstName: 'Sanitize',
           lastName: 'Check',

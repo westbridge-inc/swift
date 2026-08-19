@@ -104,7 +104,7 @@ describe('signup lands in the phone country', () => {
     // open the registration window the way verify-otp does
     await app.redis.set(`otp_verified:${phone}`, '1', 'EX', 600);
 
-    const res = await inject('POST', '/api/v1/auth/register', {
+    const res = await inject('POST', '/api/v1/auth/register', { acceptTerms: true,
       phone,
       firstName: 'Port',
       lastName: 'OfSpain',
@@ -119,7 +119,7 @@ describe('signup lands in the phone country', () => {
   it('a Guyana number stays GY', async () => {
     const phone = `+592655${String(Math.floor(Math.random() * 9000) + 1000)}`;
     await app.redis.set(`otp_verified:${phone}`, '1', 'EX', 600);
-    const res = await inject('POST', '/api/v1/auth/register', {
+    const res = await inject('POST', '/api/v1/auth/register', { acceptTerms: true,
       phone,
       firstName: 'George',
       lastName: 'Town',
