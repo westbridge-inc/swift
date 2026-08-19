@@ -49,3 +49,9 @@ only for the active tab. Never emoji, never mixed families on one surface.
 Glossary verbs per the spec Part 11 (Place order · Track order · Go online
 · Accept/Decline …). Errors = what happened + what to do. Empty states
 invite. Sentence case everywhere. Money via the shared formatter only.
+
+### DocketEdge (signature · vendor queue)
+`kit/docket.tsx`. The docket tear-line: card-coloured strip with punched
+holes in the page colour, closing a queue card the way a kitchen docket ends.
+Use ONLY on live work-queue cards (vendor orders); pairs with a Card whose
+bottom radii are zeroed. Sibling of AwningEdge in the "commerce edges" family.

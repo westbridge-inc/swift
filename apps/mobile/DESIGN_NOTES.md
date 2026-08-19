@@ -135,3 +135,22 @@ INTENDED DIFF: Home only — masthead wash+hem+greeting, tile stagger, section
 REMOVED ACCESSORY: the promo's stock food photo
 FOUNDER DECISIONS / BLOCKED: none
 ```
+
+## Flow 13 — Vendor dashboard · stage 1 (2026-08-19)
+**Pass A (from the scored register, 9/20, worst in the app):** the operator's
+live queue was buried beneath eight management sections. Moves shipped:
+(1) THE DOCKET RAIL — New/In-progress orders now sit directly under the
+header; every queue card ends in the **DocketEdge tear-line** (registered
+signature: Georgetown kitchens run on paper dockets; the card ends the way a
+docket does). (2) THE SHIFT STRIP — one `surface.sunken` band answering the
+operator's first three questions (today's money · open/paused · what's
+waiting) with true `micro` eyebrow + `numL` money; replaces the hero card,
+KPI tiles, and mid-board pitch. (3) Controls (open/pause, self-delivery,
+manage links) moved BELOW the queue; the keep-100% pitch line to the bottom.
+**Deviation from the audit's motion note (recorded honestly):** the audit
+asked the new-order takeover be reduced to one ≤900ms entry moment. The
+VIBRATION alarm beat stays — a missed order is money and the bell is
+functional alerting, not decoration — but the VISUAL pulse now honours
+`ReduceMotion.System` (screen still; buzz carries). **Stage 2 (13b,
+registered):** virtualization, 44dp sweep across sub-screens, menu/history
+error states, icon-set unification, danger-variant deletes.

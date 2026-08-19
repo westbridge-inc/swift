@@ -26,6 +26,7 @@ import {
   SettingsRow,
   T,
   TonePill,
+  DocketEdge,
 } from '../../kit';
 import { BrandSwitch } from '../../kit/controls';
 import {
@@ -306,6 +307,13 @@ function BusinessSetup() {
           </T>
         ) : null}
         <PillButton label="Create store" loading={become.isPending} disabled={!valid} style={{ marginTop: space.lg }} onPress={submit} />
+        {/* The model line lives BELOW the work — the queue is the job. */}
+        <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.sm, borderRadius: radius.lg, backgroundColor: color.brand[50], paddingHorizontal: space.md, paddingVertical: space.sm, marginTop: space.md }}>
+          <MaterialCommunityIcons name="check-decagram" size={15} color={color.success} />
+          <T variant="caption" weight="semibold" tone="deep" style={{ flex: 1 }}>
+            You keep 100% of every sale — Swift charges a flat weekly fee, never commission.
+          </T>
+        </View>
       </ScrollView>
     </Screen>
   );
@@ -343,12 +351,15 @@ const VendorOrderCard = React.memo(function VendorOrderCard({
   onOpen,
   busy,
   showStore,
+  docket,
 }: {
   order: any;
   onAction: (action: VendorOrderActionKind) => void;
   onOpen?: () => void;
   busy: boolean;
   showStore?: boolean;
+  /** Queue presentation: the card ends in the docket tear-line signature. */
+  docket?: boolean;
 }) {
   const actions = orderActions(order);
   const isMmg = order.paymentMethod === 'MOBILE_MONEY';
@@ -363,7 +374,8 @@ const VendorOrderCard = React.memo(function VendorOrderCard({
   return (
     <Pressable onPress={onOpen} disabled={!onOpen}>
       {({ pressed }) => (
-    <Card style={{ marginBottom: space.md, opacity: pressed && onOpen ? 0.88 : 1 }}>
+    <View style={{ marginBottom: space.md, opacity: pressed && onOpen ? 0.88 : 1 }}>
+    <Card style={docket ? { borderBottomLeftRadius: 0, borderBottomRightRadius: 0 } : undefined}>
       <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
         <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.md }}>
           <T variant="body" weight="bold">
@@ -496,10 +508,12 @@ const VendorOrderCard = React.memo(function VendorOrderCard({
         </View>
       ) : null}
     </Card>
+    {docket ? <DocketEdge inset={GUTTER} /> : null}
+    </View>
       )}
     </Pressable>
   );
-}, (prev, next) => prev.order === next.order && prev.busy === next.busy && prev.showStore === next.showStore);
+}, (prev, next) => prev.order === next.order && prev.busy === next.busy && prev.showStore === next.showStore && prev.docket === next.docket);
 
 function VendorOps({ store, navigation }: any) {
   const toggleOpen = useToggleOpen();
@@ -521,7 +535,6 @@ function VendorOps({ store, navigation }: any) {
   const setPreviewType = useVendorPreview((s) => s.setPreviewType);
   const setPreviewIntent = useAuthStore((s) => s.setIntent);
   const cat = catalogueMeta(store.vendorType); // R1: name the catalogue per type
-  const isService = store.vendorType === 'SERVICE';
   // Only fetched to NAME the failing document in the suspension banner.
   const vstatus = useVerificationStatus<any>(store.vendorType);
   // §B5 progress: N of M checklist documents currently approved (unexpired).
@@ -652,25 +665,91 @@ function VendorOps({ store, navigation }: any) {
           </Pressable>
         ) : null}
 
-        {/* Today's sales — Eats-Manager hero. MANAGER+ only: the /analytics
-            endpoint 403s STAFF, so a staff board would render a false GYD 0. */}
-        {surface.canSeeMoney ? (
-          <Card style={{ marginBottom: space.lg }}>
-            <T variant="caption" weight="bold" tone="muted">
-              TODAY&apos;S SALES
+        {/* [design-100x Flow-13] THE SHIFT STRIP — one sunken band that answers
+            the operator's first three questions (how's today · am I open ·
+            what's waiting) before anything else. Money is MANAGER-only (the
+            /analytics read 403s STAFF). */}
+        <View
+          style={{
+            borderRadius: radius.lg,
+            backgroundColor: color.surface.sunken,
+            padding: space.lg,
+            marginBottom: space.lg,
+            flexDirection: 'row',
+            alignItems: 'flex-end',
+            justifyContent: 'space-between',
+          }}
+        >
+          <View style={{ flex: 1, paddingRight: space.md }}>
+            <T variant="micro" tone="muted">TODAY</T>
+            {surface.canSeeMoney ? (
+              <T variant="numL" style={{ marginTop: 2 }}>{money(today.revenue ?? 0)}</T>
+            ) : (
+              <T variant="numL" style={{ marginTop: 2 }}>{String(orders.length)}</T>
+            )}
+            <T variant="caption" tone="muted" style={{ marginTop: 2 }}>
+              {surface.canSeeMoney
+                ? `${today.orders ?? 0} order${(today.orders ?? 0) === 1 ? '' : 's'} today`
+                : 'orders on the board'}
             </T>
-            <T variant="display" style={{ marginTop: 2 }}>
-              {money(today.revenue ?? 0)}
-            </T>
-            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4, marginTop: 4 }}>
-              <MaterialCommunityIcons name="check-decagram" size={14} color={color.success} />
-              <T variant="caption" weight="semibold" tone="muted">
-                100% yours · {today.orders ?? 0} order{(today.orders ?? 0) === 1 ? '' : 's'} today
+          </View>
+          <View style={{ alignItems: 'flex-end', gap: 4 }}>
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.xs }}>
+              <View style={{ width: 8, height: 8, borderRadius: 4, backgroundColor: !inPreview && open && accepting ? color.success : color.text.muted }} />
+              <T variant="label" weight="bold">
+                {inPreview ? 'Preview' : !open ? 'Closed' : accepting ? 'Open' : 'Paused'}
               </T>
             </View>
-          </Card>
-        ) : null}
+            <T variant="caption" tone="muted">
+              {orders.length} active{surface.canSeeMoney ? ` · ${money(queueValue)} in queue` : ''}
+            </T>
+          </View>
+        </View>
 
+        {/* New orders */}
+        <T variant="heading" style={{ marginBottom: space.md }}>
+          {newOrders.length ? `New orders · ${newOrders.length}` : 'New orders'}
+        </T>
+        {ordersQ.isLoading ? (
+          <LoadingBlock />
+        ) : newOrders.length === 0 ? (
+          <View style={{ alignItems: 'center', borderRadius: radius.lg, backgroundColor: color.brand[50], paddingVertical: space.xl, marginBottom: space.xl }}>
+            <MaterialCommunityIcons name="check-circle-outline" size={28} color={color.text.muted} />
+            <T variant="label" tone="muted" style={{ marginTop: space.sm }}>
+              You are all caught up
+            </T>
+          </View>
+        ) : (
+          newOrders.map((o) => (
+            <VendorOrderCard
+              key={o.id}
+              order={o}
+              docket
+              busy={busy}
+              onAction={(action) => orderAction.mutate({ id: o.id, action })}
+              onOpen={() => navigation.navigate('VendorOrderDetail', { orderId: o.id, orderNumber: o.orderNumber })}
+            />
+          ))
+        )}
+
+        {/* In progress */}
+        {inProgress.length > 0 ? (
+          <>
+            <T variant="heading" style={{ marginTop: space.lg, marginBottom: space.md }}>
+              In progress
+            </T>
+            {inProgress.map((o) => (
+              <VendorOrderCard
+                key={o.id}
+                order={o}
+                docket
+                busy={busy}
+                onAction={(action) => orderAction.mutate({ id: o.id, action })}
+                onOpen={() => navigation.navigate('VendorOrderDetail', { orderId: o.id, orderNumber: o.orderNumber })}
+              />
+            ))}
+          </>
+        ) : null}
         {/* Store status. In §B preview the controls are honestly locked — the
             server refuses commerce-on for an unverified business anyway. */}
         <Card style={{ marginBottom: space.lg }}>
@@ -741,38 +820,6 @@ function VendorOps({ store, navigation }: any) {
           </Card>
         ) : null}
 
-        {/* KPIs */}
-        <View style={{ flexDirection: 'row', gap: space.md, marginBottom: space.lg }}>
-          <KpiTile icon="receipt" value={String(orders.length)} label={isService ? 'Appointments' : 'Active orders'} />
-          {/* Money tiles are MANAGER-only (the /analytics read 403s STAFF). */}
-          {surface.canSeeMoney ? <KpiTile icon="cash" value={money(queueValue)} label="In queue" /> : null}
-          {/* Prep time is a kitchen concept — appointments have no prep. */}
-          {isService ? (
-            surface.canSeeMoney ? <KpiTile icon="check-circle-outline" value={money((today?.total) ?? 0)} label="Today" /> : null
-          ) : (
-            <KpiTile icon="timer-outline" value={`${store.estimatedPrepTime ?? 30}m`} label="Prep time" />
-          )}
-        </View>
-
-        {/* The Swift model — you keep everything */}
-        <View
-          style={{
-            flexDirection: 'row',
-            alignItems: 'center',
-            gap: space.sm,
-            borderRadius: radius.lg,
-            backgroundColor: color.brand[50],
-            paddingHorizontal: space.md,
-            paddingVertical: space.sm,
-            marginBottom: space.lg,
-          }}
-        >
-          <MaterialCommunityIcons name="check-decagram" size={15} color={color.success} />
-          <T variant="caption" weight="semibold" tone="deep" style={{ flex: 1 }}>
-            You keep 100% of every sale — Swift charges a flat weekly fee, never commission.
-          </T>
-        </View>
-
         {/* The Menu tab isn't registered for STAFF — don't show a door that goes nowhere. */}
         <View style={{ flexDirection: 'row', gap: space.md, marginBottom: space.xl }}>
           {myRole !== 'STAFF' ? (
@@ -781,48 +828,6 @@ function VendorOps({ store, navigation }: any) {
           <PillButton label="Order history" variant="outline" size="md" style={{ flex: 1 }} onPress={() => navigation.navigate('VendorOrderHistory')} />
         </View>
 
-        {/* New orders */}
-        <T variant="heading" style={{ marginBottom: space.md }}>
-          {newOrders.length ? `New orders · ${newOrders.length}` : 'New orders'}
-        </T>
-        {ordersQ.isLoading ? (
-          <LoadingBlock />
-        ) : newOrders.length === 0 ? (
-          <View style={{ alignItems: 'center', borderRadius: radius.lg, backgroundColor: color.brand[50], paddingVertical: space.xl, marginBottom: space.xl }}>
-            <MaterialCommunityIcons name="check-circle-outline" size={28} color={color.text.muted} />
-            <T variant="label" tone="muted" style={{ marginTop: space.sm }}>
-              You are all caught up
-            </T>
-          </View>
-        ) : (
-          newOrders.map((o) => (
-            <VendorOrderCard
-              key={o.id}
-              order={o}
-              busy={busy}
-              onAction={(action) => orderAction.mutate({ id: o.id, action })}
-              onOpen={() => navigation.navigate('VendorOrderDetail', { orderId: o.id, orderNumber: o.orderNumber })}
-            />
-          ))
-        )}
-
-        {/* In progress */}
-        {inProgress.length > 0 ? (
-          <>
-            <T variant="heading" style={{ marginTop: space.lg, marginBottom: space.md }}>
-              In progress
-            </T>
-            {inProgress.map((o) => (
-              <VendorOrderCard
-                key={o.id}
-                order={o}
-                busy={busy}
-                onAction={(action) => orderAction.mutate({ id: o.id, action })}
-                onOpen={() => navigation.navigate('VendorOrderDetail', { orderId: o.id, orderNumber: o.orderNumber })}
-              />
-            ))}
-          </>
-        ) : null}
       </ScrollView>
     </Screen>
   );
