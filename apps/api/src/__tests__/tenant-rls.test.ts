@@ -4,7 +4,7 @@ import { Prisma } from '@prisma/client';
 import { nanoid } from 'nanoid';
 import { prismaPlugin } from '../plugins/prisma';
 import { registerErrorHandler } from '../middleware/error-handler';
-import { TENANT_TABLES, allRlsDdl } from '../lib/tenant-rls';
+import { TENANT_TABLES, allRlsDdl, appRoleDdl } from '../lib/tenant-rls';
 
 // [ELV-1 W-201 stage 1] The database tenant wall, VERIFIED. A NOBYPASSRLS
 // probe role stands in for the future app role (CONTRACT stage): through it,
@@ -54,6 +54,11 @@ beforeAll(async () => {
       await app.prisma.$executeRawUnsafe(ddl);
     }
   }
+  // [W-201b] The real future app role + grants (idempotent, heals db-push envs).
+  for (const ddl of appRoleDdl()) {
+    await app.prisma.$executeRawUnsafe(ddl);
+  }
+
   // The probe role: NOBYPASSRLS, not the table owner — the future app role's
   // stand-in. NOLOGIN on purpose; the suite reaches it via SET LOCAL ROLE.
   await app.prisma.$executeRawUnsafe(`
@@ -151,5 +156,61 @@ describe('database tenant wall [W-201 / F-201]', () => {
   it('stage 1 leaves the OWNER (today\'s app role) unaffected — no behavior change until CONTRACT', async () => {
     const both = await app.prisma.user.count({ where: { tenantId: { in: [A, B] } } });
     expect(both).toBe(2);
+  });
+});
+
+describe('CONTRACT readiness: the swift_app role [W-201b]', () => {
+  // The classic contract-day failure is a missing GRANT discovered in
+  // production. These proofs run the app's core query shapes AS swift_app
+  // (no test-side grants — the migration's grants must be complete).
+  async function asApp<T>(guc: Record<string, string>, fn: (tx: Parameters<Parameters<FastifyInstance['prisma']['$transaction']>[0]>[0]) => Promise<T>): Promise<T> {
+    return app.prisma.$transaction(async (tx) => {
+      await tx.$executeRawUnsafe(`SET LOCAL ROLE swift_app`);
+      for (const [k, v] of Object.entries(guc)) {
+        await tx.$executeRawUnsafe(`SET LOCAL ${k} = '${v}'`);
+      }
+      return fn(tx);
+    });
+  }
+
+  it('can run the core read/write shapes under the tenant GUC — grants are complete', async () => {
+    const n = await asApp({ 'app.current_tenant': A }, async (tx) => {
+      const users = await tx.$queryRaw<{ id: string }[]>(
+        Prisma.sql`SELECT id FROM users WHERE "tenantId" IN (${A}, ${B})`,
+      );
+      // Walled AND readable: exactly tenant A's row.
+      if (users.length !== 1) throw new Error(`expected 1 visible user, got ${users.length}`);
+      await tx.$executeRaw(Prisma.sql`
+        INSERT INTO notifications (id, "userId", type, title, body, "createdAt")
+        VALUES (${`w201b-${nanoid(8)}`}, ${users[0]!.id}, 'SYSTEM_ANNOUNCEMENT'::"NotificationType", 'grant-probe', 'x', now())`);
+      const del = await tx.$executeRaw(Prisma.sql`
+        DELETE FROM notifications WHERE title = 'grant-probe' AND "userId" = ${users[0]!.id}`);
+      return del;
+    });
+    expect(n).toBe(1);
+  });
+
+  it('a table created AFTER the grants is auto-granted (default privileges) — future tables cannot dodge', async () => {
+    const scratch = `w201b_scratch_${nanoid(6).toLowerCase().replace(/[^a-z0-9]/g, 'x')}`;
+    await app.prisma.$executeRawUnsafe(`CREATE TABLE "${scratch}" (id TEXT PRIMARY KEY, note TEXT)`);
+    try {
+      await app.prisma.$executeRawUnsafe(`INSERT INTO "${scratch}" VALUES ('a', 'seeded-by-owner')`);
+      const rows = await asApp({}, async (tx) =>
+        tx.$queryRawUnsafe<{ id: string }[]>(`SELECT id FROM "${scratch}"`),
+      );
+      expect(rows.length).toBe(1);
+    } finally {
+      await app.prisma.$executeRawUnsafe(`DROP TABLE "${scratch}"`);
+    }
+  });
+
+  it('swift_app cannot bypass RLS and cannot ALTER tables — least privilege holds', async () => {
+    await expect(asApp({}, async (tx) => {
+      await tx.$executeRawUnsafe(`ALTER TABLE users DISABLE ROW LEVEL SECURITY`);
+    })).rejects.toThrow(/must be owner/);
+    const role = await app.prisma.$queryRaw<{ rolbypassrls: boolean }[]>(
+      Prisma.sql`SELECT rolbypassrls FROM pg_roles WHERE rolname = 'swift_app'`,
+    );
+    expect(role[0]!.rolbypassrls).toBe(false);
   });
 });

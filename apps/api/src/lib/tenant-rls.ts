@@ -65,3 +65,23 @@ export function rlsDdlFor(table: string): string[] {
 export function allRlsDdl(): string[] {
   return TENANT_TABLES.flatMap((t) => rlsDdlFor(t));
 }
+
+/** [W-201b] The future app role + grants, idempotent (mirrors migration
+ *  20260819150000; the test installer heals db-push environments). NOLOGIN —
+ *  no credentials in a public repo; deploy provisions LOGIN out-of-band. */
+export function appRoleDdl(): string[] {
+  return [
+    `DO $$ BEGIN
+      IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'swift_app') THEN
+        CREATE ROLE swift_app NOLOGIN NOBYPASSRLS;
+      END IF;
+    END $$`,
+    `GRANT USAGE ON SCHEMA public TO swift_app`,
+    `GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO swift_app`,
+    `GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO swift_app`,
+    `GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA public TO swift_app`,
+    `ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO swift_app`,
+    `ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT USAGE, SELECT ON SEQUENCES TO swift_app`,
+    `ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT EXECUTE ON FUNCTIONS TO swift_app`,
+  ];
+}
