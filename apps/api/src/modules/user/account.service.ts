@@ -1,7 +1,8 @@
 import type { FastifyInstance } from 'fastify';
-import type { OrderStatus } from '@prisma/client';
+import type { OrderStatus, ServiceJobStatus } from '@prisma/client';
 import { AppError } from '../../utils/errors';
 import { getStorageProvider } from '../../providers/storage/storage-provider';
+import { disconnectUserSockets } from '../../utils/socket-revocation';
 
 // ---------------------------------------------------------------------------
 // SWIFT-AUD-D9-05 — the DPA-2023 rights of access, portability and erasure,
@@ -21,6 +22,7 @@ import { getStorageProvider } from '../../providers/storage/storage-provider';
 // A closed order is safe to leave behind; anything else is in-flight and must
 // finish (or be cancelled) before the customer can erase themselves.
 const TERMINAL_ORDER: OrderStatus[] = ['DELIVERED', 'COMPLETED', 'CANCELLED', 'REFUNDED', 'FAILED'];
+const TERMINAL_SERVICE_JOB: ServiceJobStatus[] = ['COMPLETED', 'CANCELLED'];
 
 export class AccountService {
   constructor(private app: FastifyInstance) {}
@@ -38,6 +40,7 @@ export class AccountService {
         lastName: true,
         roles: true,
         activeRole: true,
+        lastMoverRole: true,
         countryCode: true,
         trustLevel: true,
         isPhoneVerified: true,
@@ -87,24 +90,73 @@ export class AccountService {
   /** DPA right to erasure. Idempotent guards; crypto-shred is irreversible. */
   async deleteAccount(userId: string) {
     const prisma = this.app.prisma;
-    const user = await prisma.user.findUnique({ where: { id: userId }, select: { id: true, roles: true, status: true } });
-    if (!user) throw new AppError(404, 'NOT_FOUND', 'Account not found');
-    if (user.status === 'DEACTIVATED') throw new AppError(409, 'ALREADY_CLOSED', 'This account is already closed');
+    const preflight = await prisma.$transaction(async (tx) => {
+      // Service-job creation, provider profile changes and verification events
+      // use this same authority row. Therefore either the active job commits
+      // first and blocks deletion, or deletion deactivates the account/profile
+      // first and the hire fails its live re-check.
+      const locked = await tx.$queryRaw<Array<{ id: string }>>`
+        SELECT "id" FROM "users"
+        WHERE "id" = ${userId}
+        FOR UPDATE /* account-deletion-provider-authority */
+      `;
+      if (!locked[0]) throw new AppError(404, 'NOT_FOUND', 'Account not found');
+      const user = await tx.user.findUniqueOrThrow({
+        where: { id: userId },
+        select: { id: true, phone: true, roles: true, status: true },
+      });
+      if (user.status === 'DEACTIVATED' && user.phone.startsWith('deleted:')) {
+        return { alreadyComplete: true };
+      }
+      if (user.status !== 'ACTIVE' && user.status !== 'DEACTIVATED') {
+        throw new AppError(409, 'ACCOUNT_INACTIVE', 'This account is not active and must be closed through Support.');
+      }
 
-    // Partner accounts (mover/vendor) close through Support — see note above.
-    const partnerRoles = user.roles.filter((r) => r !== 'CUSTOMER');
-    if (partnerRoles.length > 0) {
-      throw new AppError(
-        409,
-        'PARTNER_ACCOUNT',
-        'Mover and vendor accounts are closed through Support, so payouts and listings are handled correctly. Please contact support to proceed.',
-      );
-    }
+      // Partner accounts (mover/vendor) close through Support — see note above.
+      const partnerRoles = user.roles.filter((role) => role !== 'CUSTOMER');
+      if (partnerRoles.length > 0) {
+        throw new AppError(
+          409,
+          'PARTNER_ACCOUNT',
+          'Mover and vendor accounts are closed through Support, so payouts and listings are handled correctly. Please contact support to proceed.',
+        );
+      }
 
-    // Can't erase yourself mid-delivery.
-    const inFlight = await prisma.order.count({ where: { customerId: userId, status: { notIn: TERMINAL_ORDER } } });
-    if (inFlight > 0) {
-      throw new AppError(409, 'ACTIVE_ORDERS', 'Finish or cancel your active orders before deleting your account.');
+      const [inFlightOrders, inFlightServiceJobs] = await Promise.all([
+        tx.order.count({ where: { customerId: userId, status: { notIn: TERMINAL_ORDER } } }),
+        tx.serviceJob.count({
+          where: {
+            status: { notIn: TERMINAL_SERVICE_JOB },
+            OR: [{ customerId: userId }, { provider: { userId } }],
+          },
+        }),
+      ]);
+      if (inFlightOrders > 0) {
+        throw new AppError(409, 'ACTIVE_ORDERS', 'Finish or cancel your active orders before deleting your account.');
+      }
+      if (inFlightServiceJobs > 0) {
+        throw new AppError(409, 'ACTIVE_SERVICE_JOBS', 'Finish or cancel your active service jobs before deleting your account.');
+      }
+
+      // Cut public/action authority before any fallible retention work. The
+      // relational ACTIVE check is authoritative; the profile flag is a second
+      // fail-closed barrier for old clients and background consumers.
+      await tx.serviceProvider.updateMany({ where: { userId }, data: { isVerified: false } });
+      await tx.user.update({ where: { id: userId }, data: { status: 'DEACTIVATED' } });
+      return { alreadyComplete: false };
+    });
+    if (preflight.alreadyComplete) return { deleted: true };
+
+    // The status commit above is the authority cut-off. Evict every already-
+    // open realtime transport immediately after that commit so a deleted user
+    // cannot keep receiving order/chat/vendor events while the retention purge
+    // continues. Production's Redis adapter propagates this across API nodes;
+    // the socket expiry timer remains the fail-closed upper bound if transport
+    // cleanup itself is temporarily unavailable.
+    try {
+      disconnectUserSockets(this.app.io, userId);
+    } catch (error) {
+      this.app.log.warn({ err: error, userId }, 'account deletion socket cleanup failed');
     }
 
     // 1. Crypto-shred every verification document: delete the object, null the

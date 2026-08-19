@@ -29,6 +29,16 @@ export class AdCheckoutService {
   /** §8.1 — reserve (if not already) + issue the invoice. Idempotent: an
    *  existing UNPAID invoice for the campaign is returned rather than forked. */
   async checkout(campaignId: string, provider: AdPaymentProvider, reservationMinutes = 20): Promise<{ invoice: AdInvoice; reservedUntil: Date | null }> {
+    // The hosted MMG/PowerTranz checkout adapters are not implemented here yet;
+    // MANUAL is the honest production invoice path. Fail before reading or
+    // reserving inventory so a synthetic provider cannot mutate production.
+    if (process.env['NODE_ENV'] === 'production' && provider !== 'MANUAL') {
+      throw new AppError(
+        503,
+        'ADS_PAYMENT_PROVIDER_UNAVAILABLE',
+        'Only audited manual invoice payment is available for ads right now.',
+      );
+    }
     const campaign = await this.prisma.adCampaign.findUnique({
       where: { id: campaignId },
       include: { advertiser: { select: { status: true } } },

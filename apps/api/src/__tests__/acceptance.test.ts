@@ -106,10 +106,23 @@ async function makeRiderUser() {
       isPhoneVerified: true, selfieCapturedAt: new Date(), countryCode: 'GY',
     },
   });
+  const token = app.jwt.sign({ userId: u.id, role: 'RIDER', jti: nanoid(8) });
+  const session = await app.prisma.session.create({
+    data: {
+      userId: u.id,
+      token,
+      refreshToken: nanoid(48),
+      deviceId: 'acceptance-rider',
+      deviceType: 'test',
+      expiresAt: new Date(Date.now() + DAY),
+    },
+  });
   const rider = await app.prisma.rider.create({
     data: {
       userId: u.id, riderType: 'DELIVERY', vehicleType: 'MOTORCYCLE',
       documentsVerified: true, isOnline: true, currentLat: GPS.lat, currentLng: GPS.lng,
+      lastLocationUpdate: new Date(),
+      locationSessionId: session.id,
     },
   });
   return { userId: u.id, riderId: rider.id };
@@ -224,6 +237,17 @@ describe('Spec §I — acceptance conformance baseline', () => {
     const pickup = { lat: 6.8013, lng: -58.1551 };
     const mkRider = async (phone: string, floatLimit: number, committedFloat: number) => {
       const u = await makeUser(phone);
+      const token = app.jwt.sign({ userId: u.id, role: 'RIDER', jti: nanoid(8) });
+      const session = await app.prisma.session.create({
+        data: {
+          userId: u.id,
+          token,
+          refreshToken: nanoid(48),
+          deviceId: `acceptance-float-${nanoid(6)}`,
+          deviceType: 'test',
+          expiresAt: new Date(Date.now() + DAY),
+        },
+      });
       return app.prisma.rider.create({
         data: {
           userId: u.id,
@@ -233,6 +257,8 @@ describe('Spec §I — acceptance conformance baseline', () => {
           isAvailable: true,
           currentLat: pickup.lat,
           currentLng: pickup.lng,
+          lastLocationUpdate: new Date(),
+          locationSessionId: session.id,
           floatLimit,
           committedFloat,
         },
@@ -241,8 +267,11 @@ describe('Spec §I — acceptance conformance baseline', () => {
     const low = await mkRider(PHONES[3]!, 8000, 7000); // availableFloat = 1000
     const funded = await mkRider(PHONES[4]!, 8000, 0); // availableFloat = 8000
 
-    // findCandidates only calls maps.etaMinutes — a tiny stub suffices.
-    const maps = { etaMinutes: async (_p: unknown, pts: unknown[]) => pts.map(() => 5) };
+    // findCandidates ranks mover→pickup via etaMinutesFrom — a tiny stub suffices.
+    const maps = {
+      etaMinutes: async (_p: unknown, pts: unknown[]) => pts.map(() => 5),
+      etaMinutesFrom: async (origins: unknown[], _d: unknown) => origins.map(() => 5),
+    };
     const dispatch = new DispatchService(
       app.prisma,
       app.redis,

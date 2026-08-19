@@ -7,6 +7,7 @@
     "android": "expo run:android",
     "ios": "expo run:ios",
     "export": "expo export",
+    "e2e:ios:smoke": "bash .maestro/run-ios-smoke.sh",
     "lint": "eslint 'src/**/*.{ts,tsx}'",
     "type-check": "tsc --noEmit",
     "test": "vitest run"

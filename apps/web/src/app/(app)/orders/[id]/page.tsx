@@ -13,6 +13,9 @@ export default function OrderDetailPage() {
   const { id } = useParams<{ id: string }>();
   const [o, setO] = useState<any | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [cancelResult, setCancelResult] = useState<string | null>(null);
+  const [cancelFee, setCancelFee] = useState<number | null>(null);
+  const [confirmingCancel, setConfirmingCancel] = useState(false);
 
   const load = useCallback(async () => { try { setO(await getOrder(id)); } catch (e: any) { setError(e.message); } }, [id]);
   useEffect(() => {
@@ -24,7 +27,11 @@ export default function OrderDetailPage() {
   if (error) return <p className="text-[var(--swift-muted)]">{error}</p>;
   if (!o) return <div className="h-64 animate-pulse rounded-2xl bg-[var(--swift-subtle)]" />;
 
-  const cancelled = o.status === 'CANCELLED';
+  const cancelled = o.status === 'CANCELLED' || o.status === 'REFUNDED';
+  // [REPORT-010 F-03] PENDING on MMG is only "the store hasn't confirmed" —
+  // the customer may have ALREADY paid via the external link. Every cancel
+  // surface says the true thing; nothing promises "free".
+  const mmgAmbiguous = o.paymentMethod === 'MOBILE_MONEY' && o.paymentStatus === 'PENDING';
   const idx = STEPS.indexOf(o.status);
   const isPickup = o.fulfillment === 'PICKUP';
 
@@ -49,7 +56,19 @@ export default function OrderDetailPage() {
           </ol>
         </div>
       )}
-      {cancelled && <p className="rounded-2xl border border-dashed border-black/10 p-4 text-center font-semibold text-[var(--swift-red)]">This order was cancelled.</p>}
+      {cancelled && (
+        <div className="rounded-2xl border border-dashed border-black/10 p-4 text-center font-semibold text-[var(--swift-red)]">
+          <p>
+            {cancelResult ?? (mmgAmbiguous
+              ? 'This order was cancelled. If you already sent the MMG payment, the store refunds you directly.'
+              : 'This order was cancelled.')}
+          </p>
+          {typeof cancelFee === 'number' && cancelFee > 0 && (
+            <p className="mt-1">Late-cancellation fee recorded: {money(cancelFee)} — not collected by Swift.</p>
+          )}
+          {cancelFee === 0 && <p className="mt-1">No cancellation fee.</p>}
+        </div>
+      )}
 
       <div className="rounded-2xl border border-black/5 bg-white p-5">
         <p className="mb-2 font-bold">Order</p>
@@ -60,8 +79,33 @@ export default function OrderDetailPage() {
         <p className="mt-2 text-xs text-[var(--swift-muted)]">{o.paymentMethod === 'MOBILE_MONEY' ? 'Pay the business via MMG' : 'Cash on delivery'} · {o.deliveryAddress}</p>
       </div>
 
-      {['PENDING'].includes(o.status) && (
-        <button onClick={async () => { await cancelOrder(id, 'changed my mind').then(load).catch((e) => setError(e.message)); }} className="w-full rounded-full border border-[var(--swift-red)] py-2.5 font-bold text-[var(--swift-red)]">Cancel order</button>
+      {o.canCancel !== false && ['PENDING'].includes(o.status) && !confirmingCancel && (
+        <button onClick={() => setConfirmingCancel(true)} className="w-full rounded-full border border-[var(--swift-red)] py-2.5 font-bold text-[var(--swift-red)]">Cancel order</button>
+      )}
+      {confirmingCancel && !cancelled && (
+        <div className="rounded-2xl border border-black/10 bg-white p-4 text-center">
+          <p className="text-sm text-[var(--swift-muted)]">
+            {mmgAmbiguous
+              ? 'Cancelling stops fulfilment. If you already sent the MMG payment, the store refunds you directly.'
+              : 'The server confirms the final cost the moment you cancel.'}
+          </p>
+          <div className="mt-3 flex gap-2">
+            <button
+              onClick={async () => {
+                try {
+                  const res: any = await cancelOrder(id, 'changed my mind');
+                  const payload = res?.data?.data ?? res?.data ?? res;
+                  setCancelResult(payload?.message ?? null);
+                  setCancelFee(typeof payload?.cancellationFee === 'number' ? payload.cancellationFee : null);
+                  setConfirmingCancel(false);
+                  await load();
+                } catch (e: any) { setError(e.message); }
+              }}
+              className="flex-1 rounded-full bg-[var(--swift-red)] py-2.5 font-bold text-white"
+            >Yes, cancel it</button>
+            <button onClick={() => setConfirmingCancel(false)} className="flex-1 rounded-full border border-black/10 py-2.5 font-bold">Keep order</button>
+          </div>
+        </div>
       )}
       <Link href="/orders" className="block text-center text-sm font-semibold text-[var(--swift-muted)]">All orders</Link>
     </div>

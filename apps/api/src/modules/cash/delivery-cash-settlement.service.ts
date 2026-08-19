@@ -6,9 +6,11 @@ import type { NotificationService } from '../notification/notification.service';
 /**
  * MMG direct-pay cash ledger (store ⇄ rider).
  *
- * For an MMG-paid DELIVERY the customer paid the STORE, so the store owes the
- * rider the delivery fee in cash (normally handed over at pickup). Swift moves
- * no money — this ledger only tracks the debt until BOTH sides confirm:
+ * For an MMG-paid DELIVERY the customer paid the STORE — and the total the
+ * store received includes the rider's checkout tip — so the store owes the
+ * rider the delivery fee PLUS the tip in cash (normally handed over at
+ * pickup) [SPS-F-0016b]. Swift moves no money — this ledger only tracks the
+ * debt until BOTH sides confirm:
  *
  *   OWED ──rider──▶ RIDER_CONFIRMED ──store──▶ SETTLED
  *   OWED ──store──▶ STORE_CONFIRMED ──rider──▶ SETTLED
@@ -144,15 +146,15 @@ export class DeliveryCashSettlementService {
       await this.notifications.send({
         ...base,
         userId: row.vendor.owner.userId,
-        title: 'Delivery fee handover confirmed',
-        body: `Your rider confirmed receiving the ${amount} delivery fee for ${orderRef}. Tap to mark it paid and close it out.`,
+        title: 'Delivery pay handover confirmed',
+        body: `Your rider confirmed receiving the ${amount} delivery pay for ${orderRef}. Tap to mark it paid and close it out.`,
       });
     } else if (row.status === 'STORE_CONFIRMED') {
       // Store says it paid → rider confirms receipt.
       await this.notifications.send({
         ...base,
         userId: row.rider.userId,
-        title: `${row.vendor.name} marked your delivery fee paid`,
+        title: `${row.vendor.name} marked your delivery pay paid`,
         body: `${row.vendor.name} says they handed you ${amount} for ${orderRef}. Confirm you received it.`,
       });
     } else if (row.status === 'SETTLED') {
@@ -164,8 +166,8 @@ export class DeliveryCashSettlementService {
       await this.notifications.send({
         ...base,
         userId: firstConfirmer,
-        title: 'Delivery fee settled',
-        body: `The ${amount} delivery fee for ${orderRef} is confirmed by both sides. All square.`,
+        title: 'Delivery pay settled',
+        body: `The ${amount} delivery pay for ${orderRef} is confirmed by both sides. All square.`,
       });
     }
   }

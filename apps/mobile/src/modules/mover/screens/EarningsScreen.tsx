@@ -8,9 +8,13 @@ import { useMoverKind, useMoverStats, useMoverSubscription, useEarningsSummary, 
 import { money } from '../../../lib/money';
 import { dateLabel } from '../shared';
 import { useMutation } from '@tanstack/react-query';
-import { api, API_URL } from '../../../services/api';
+import { API_URL, driverApi, riderApi } from '../../../services/api';
 import { openPayLink } from '../../../lib/payLink';
 import { BillingStatusBlock } from '../../../components/billing/BillingSurfaces';
+import {
+  requireAuthSessionForPrincipal,
+  requireAuthSessionSnapshot,
+} from '../../../stores/authStore';
 
 function StatTile({ label, total, count, sub }: { label: string; total: number; count?: number; sub?: string }) {
   return (
@@ -140,9 +144,14 @@ export function EarningsScreen({ navigation }: any) {
   // Signed short-lived link (the JWT can't ride an in-app browser).
   const statement = useMutation({
     mutationFn: async () => {
-      const r = await api.get(`/${String(kind ?? 'RIDER').toLowerCase()}/earnings/statement`, { params: { link: 1 } });
+      const owner = requireAuthSessionSnapshot();
+      const r = await (kind === 'DRIVER'
+        ? driverApi.earningsStatement(owner)
+        : riderApi.earningsStatement(owner));
+      requireAuthSessionForPrincipal(owner);
       const path = r.data?.data?.path as string;
       if (path) await openPayLink(`${API_URL}${path}`);
+      requireAuthSessionForPrincipal(owner);
     },
   });
   const s: any = summaryQ.data ?? {};

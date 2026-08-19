@@ -5,6 +5,7 @@ import { useNavigation, useRoute } from '@react-navigation/native';
 import { color, space } from '@swift/ui';
 import { useDiscoveryCategories, useVendors } from '../../../hooks/customer';
 import { useLocationStore } from '../../../stores/locationStore';
+import { grantedLocationFix } from '../../../lib/deviceLocation';
 import { vendorImage } from '../../../lib/images';
 import { Chip, EmptyState, ErrorState, Header, LoadingBlock, RatingMeta, Screen, T, VendorRow } from '../../../kit';
 
@@ -20,13 +21,14 @@ export function CategoryFeedScreen() {
   const navigation = useNavigation<any>();
   const route = useRoute<any>();
   const { slug, name, emoji } = route.params as { slug: string; name: string; emoji: string };
-  const { latitude, longitude } = useLocationStore();
+  const { latitude, longitude, status } = useLocationStore();
+  const locationFix = grantedLocationFix(latitude, longitude, status);
 
   const vendorsQ = useVendors<any>({
     category: slug,
-    ...(latitude != null && longitude != null ? { lat: String(latitude), lng: String(longitude) } : {}),
+    ...(locationFix ? { lat: String(locationFix.latitude), lng: String(locationFix.longitude) } : {}),
   });
-  const rail = useDiscoveryCategories(latitude ?? undefined, longitude ?? undefined);
+  const rail = useDiscoveryCategories(locationFix?.latitude, locationFix?.longitude);
 
   const vendors: any[] = vendorsQ.data?.data ?? vendorsQ.data ?? [];
   const open = vendors.filter((v) => v.isCurrentlyOpen);
@@ -37,7 +39,14 @@ export function CategoryFeedScreen() {
     <VendorRow
       image={vendorImage(v)}
       name={v.name}
-      meta={<RatingMeta rating={v.displayRating ?? null} bucket={v.ratingBucket} topRated={v.topRated} extra={v.distanceKm != null ? `${v.distanceKm} km` : undefined} />}
+      meta={
+        <RatingMeta
+          rating={v.displayRating ?? null}
+          bucket={v.ratingBucket}
+          topRated={v.topRated}
+          extra={locationFix && v.distanceKm != null ? `${v.distanceKm} km` : undefined}
+        />
+      }
       sub={v.itemsInCategory ? `${v.itemsInCategory} ${name.toLowerCase()} items` : v.etaMin ? `~${v.etaMin} min delivery` : undefined}
       onPress={() => navigation.navigate('Restaurant', { vendorId: v.id })}
     />

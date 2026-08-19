@@ -16,6 +16,9 @@ const vendorIds: string[] = [];
 const ownerIds: string[] = [];
 let seq = 0;
 const phoneBase = 592_003_000_000 + Math.floor(Math.random() * 8_000_000);
+// A future reporting window isolates this characterization from unrelated
+// integration fixtures while still exercising the production DB queries.
+const KPI_AS_OF = new Date('2100-01-02T12:00:00.000Z');
 
 async function makeVendorSub() {
   seq += 1;
@@ -62,7 +65,7 @@ afterAll(async () => {
 
 describe('Part 7/10 KPIs — derived, never invented', () => {
   it('pairs suspension→reinstatement latency and computes the billing ratios', async () => {
-    const now = Date.now();
+    const now = KPI_AS_OF.getTime();
     const a = await makeVendorSub();
     const b = await makeVendorSub();
     // a: suspended, reinstated 120s later. b: suspended, reinstated 300s later.
@@ -77,7 +80,7 @@ describe('Part 7/10 KPIs — derived, never invented', () => {
     await ev(b.id, 'CHARGE_FAILED', new Date(now - 600_000));
     await ev(b.id, 'CHURNED', new Date(now - 300_000));
 
-    const kpis = await frictionKpis(prisma, 1);
+    const kpis = await frictionKpis(prisma, 1, KPI_AS_OF);
     const lat = kpis.friction.reinstatementLatencySeconds;
     expect(lat.count).toBeGreaterThanOrEqual(2);
     // Our two pairs are 120s and 300s; other residue can only ADD entries —
@@ -93,11 +96,11 @@ describe('Part 7/10 KPIs — derived, never invented', () => {
   });
 
   it('an exact-window latency check on a clean pair', async () => {
-    const base = Date.now() - 30_000;
+    const base = KPI_AS_OF.getTime() - 30_000;
     const c = await makeVendorSub();
     await ev(c.id, 'SUSPENDED', new Date(base));
     await ev(c.id, 'REINSTATED', new Date(base + 45_000));
-    const kpis = await frictionKpis(prisma, 1);
+    const kpis = await frictionKpis(prisma, 1, KPI_AS_OF);
     // 45s pair exists in the window's latency set.
     expect(kpis.friction.reinstatementLatencySeconds.count).toBeGreaterThanOrEqual(1);
   });

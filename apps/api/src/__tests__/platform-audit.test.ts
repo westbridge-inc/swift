@@ -49,13 +49,13 @@ async function makeUserWithSession(roles: UserRole[], activeRole: UserRole) {
   });
   createdUserIds.push(user.id);
   const token = app.jwt.sign({ userId: user.id, role: activeRole, jti: nanoid(8) });
-  await app.prisma.session.create({
+  const session = await app.prisma.session.create({
     data: {
       userId: user.id, token, refreshToken: nanoid(48),
       deviceId: 'platform-audit', deviceType: 'test', expiresAt: new Date(Date.now() + DAY),
     },
   });
-  return { userId: user.id, token };
+  return { userId: user.id, token, sessionId: session.id };
 }
 
 async function makeVendor() {
@@ -95,6 +95,8 @@ async function makeRider(opts: { online?: boolean } = {}) {
       isAvailable: true,
       currentLat: AT.lat,
       currentLng: AT.lng,
+      locationSessionId: owned.sessionId,
+      ...(opts.online ? { lastLocationUpdate: new Date() } : {}),
     },
   });
   return { ...owned, riderId: rider.id };
@@ -238,13 +240,18 @@ describe('courier terminal effects', () => {
   it('proof-of-delivery pays the COURIER_FEE, frees the rider, notifies the sender', async () => {
     const customer = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
     const rider = await makeRider();
+    const proofIssued = `https://x/courier-proof/x/proof.jpg`;
     const job = await makeOrder(customer.userId, null, 'PICKED_UP', { orderType: 'COURIER', riderId: rider.riderId });
+    await app.prisma.order.update({
+      where: { id: job.id },
+      data: { courierProofIssuedUrl: proofIssued, courierProofIssuedRiderId: rider.riderId },
+    });
     await app.prisma.rider.update({
       where: { id: rider.riderId },
       data: { isAvailable: false, currentOrderId: job.id },
     });
 
-    const res = await inject('POST', `/api/v1/courier/order/${job.id}/proof`, { proofPhotoUrl: 'https://x/proof.jpg' }, rider.token);
+    const res = await inject('POST', `/api/v1/courier/order/${job.id}/proof`, { proofPhotoUrl: proofIssued }, rider.token);
     expect(res.statusCode).toBe(200);
     expect(res.json().data.status).toBe('DELIVERED');
 
@@ -262,7 +269,7 @@ describe('courier terminal effects', () => {
     });
     expect(note).not.toBeNull();
     // second proof is refused — no double pay, no double count
-    const again = await inject('POST', `/api/v1/courier/order/${job.id}/proof`, { proofPhotoUrl: 'https://x/p2.jpg' }, rider.token);
+    const again = await inject('POST', `/api/v1/courier/order/${job.id}/proof`, { proofPhotoUrl: `https://x/courier-proof/${job.id}/p2.jpg` }, rider.token);
     expect(again.statusCode).toBe(400);
   });
 });

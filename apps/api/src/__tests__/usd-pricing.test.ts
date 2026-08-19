@@ -30,11 +30,14 @@ const phoneBase = 592_004_000_000 + Math.floor(Math.random() * 8_000_000);
 async function makeAdmin() {
   seq += 1;
   const user = await app.prisma.user.create({
-    data: { phone: `+${phoneBase + seq}`, firstName: 'Fx', lastName: `A${seq}`, roles: ['ADMIN'], activeRole: 'ADMIN', isPhoneVerified: true, admin: { create: { permissions: ['*'] } } },
+    // SUPER_ADMIN: FX/price-book governance is founder-only by design
+    // (platformControlGuard → assertFounderAccess) — a tenant-local ADMIN
+    // correctly gets 403 since the integrity-founder-guard work (#632).
+    data: { phone: `+${phoneBase + seq}`, firstName: 'Fx', lastName: `A${seq}`, roles: ['SUPER_ADMIN'], activeRole: 'SUPER_ADMIN', isPhoneVerified: true, admin: { create: { permissions: ['*'] } } },
   });
   userIds.push(user.id);
-  const token = app.jwt.sign({ userId: user.id, role: 'ADMIN', jti: nanoid(8) });
-  await app.prisma.session.create({ data: { userId: user.id, token, refreshToken: nanoid(48), deviceId: 'fx', deviceType: 'test', expiresAt: new Date(Date.now() + 86_400_000) } });
+  const token = app.jwt.sign({ userId: user.id, role: 'SUPER_ADMIN', jti: nanoid(8) });
+  await app.prisma.session.create({ data: { authMethod: 'OTP', userId: user.id, token, refreshToken: nanoid(48), deviceId: 'fx', deviceType: 'test', expiresAt: new Date(Date.now() + 86_400_000) } });
   return { token };
 }
 

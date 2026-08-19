@@ -25,6 +25,7 @@ function mockFetch(status: number, body: unknown) {
 
 afterEach(() => {
   delete process.env['PUSH_PROVIDER'];
+  delete process.env['PUSH_PROVIDER_TIMEOUT_MS'];
   vi.unstubAllGlobals();
   resetDevChannelLog();
 });
@@ -88,6 +89,27 @@ describe('ExpoPushProvider', () => {
   it('throws on non-2xx so the caller-side catch owns the failure', async () => {
     vi.stubGlobal('fetch', mockFetch(429, { errors: [{ code: 'RATE_LIMIT' }] }));
     await expect(new ExpoPushProvider().sendPush(['tok'], 'T', 'B')).rejects.toThrow(/Expo push failed \(429\)/);
+  });
+
+  it('aborts a hung provider request within the configured deadline', async () => {
+    process.env['PUSH_PROVIDER_TIMEOUT_MS'] = '20';
+    let observedSignal: AbortSignal | undefined;
+    vi.stubGlobal('fetch', vi.fn((_url: string, init?: { signal?: AbortSignal | null }) => {
+      observedSignal = init?.signal ?? undefined;
+      return new Promise<Response>((_resolve, reject) => {
+        observedSignal?.addEventListener(
+          'abort',
+          () => reject(new DOMException('aborted', 'AbortError')),
+          { once: true },
+        );
+      });
+    }));
+
+    const startedAt = Date.now();
+    await expect(new ExpoPushProvider().sendPush(['tok'], 'T', 'B'))
+      .rejects.toThrow(/Expo push request failed: timed out after 20ms/);
+    expect(observedSignal?.aborted).toBe(true);
+    expect(Date.now() - startedAt).toBeLessThan(1_000);
   });
 
   it('omits invalidTokens when every ticket is ok', async () => {

@@ -1,0 +1,21 @@
+appId: gy.swift.app
+name: Local iOS smoke - business preview round trip
+tags:
+  - local-smoke
+---
+- runFlow: ../subflows/reset-to-role-picker.yaml
+- tapOn:
+    id: role-picker-preview-business
+- extendedWaitUntil:
+    visible: Preview .* sample data, read-only
+    timeout: 30000
+- assertVisible:
+    id: vendor-preview-exit
+- assertVisible: Restaurant
+- tapOn:
+    id: vendor-preview-exit
+- extendedWaitUntil:
+    visible:
+      id: role-picker-screen
+    timeout: 15000
+- assertVisible: Welcome to Swift

@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { nanoid } from 'nanoid';
 import type { OrderStatus, UserRole } from '@prisma/client';
@@ -9,7 +9,9 @@ import { socketPlugin } from '../plugins/socket';
 import { customerRoutes } from '../modules/user/customer.routes';
 import { vendorRoutes } from '../modules/vendor/vendor.routes';
 import { registerErrorHandler } from '../middleware/error-handler';
-import { autoCancelUnresponsiveOrder } from '../jobs/queue';
+import { autoCancelUnresponsiveOrder, autoCompleteDeliveredOrder } from '../jobs/queue';
+import { OrderService } from '../modules/order/order.service';
+import { FloatService } from '../modules/dispatch/float.service';
 
 // ---------------------------------------------------------------------------
 // Cancellation & rejection lifecycle — the failure paths of an order, hit over
@@ -147,6 +149,55 @@ async function makeRider() {
   return { ...owned, riderId: rider.id };
 }
 
+async function makeTaxiDriver() {
+  const owned = await makeUserWithSession(['MOVER', 'CUSTOMER'], 'MOVER');
+  const driver = await app.prisma.driver.create({
+    data: {
+      userId: owned.userId,
+      vehicleMake: 'Toyota',
+      vehicleModel: 'Allion',
+      vehicleYear: 2020,
+      vehicleColor: 'Silver',
+      licensePlate: `CUST-${nanoid(6)}`,
+      driverLicenseUrl: 'storage://test/license',
+      vehicleInsuranceUrl: 'storage://test/insurance',
+      isOnline: true,
+      isAvailable: false,
+    },
+  });
+  return { ...owned, driverId: driver.id };
+}
+
+async function makeVerifiedArrivedTaxi(customerId: string, driverId: string) {
+  const order = await app.prisma.order.create({
+    data: {
+      orderNumber: `CX-TAXI-${nanoid(8)}`,
+      orderType: 'TAXI',
+      customerId,
+      driverId,
+      status: 'DRIVER_ARRIVED',
+      pickupAddress: 'Custody pickup',
+      pickupLat: 6.8,
+      pickupLng: -58.15,
+      deliveryAddress: 'Custody dropoff',
+      deliveryLat: 6.81,
+      deliveryLng: -58.16,
+      subtotalBase: 1500,
+      subtotalMarkup: 0,
+      subtotalCustomer: 1500,
+      deliveryFee: 0,
+      totalAmount: 1500,
+      taxiFareTotal: 1500,
+      paymentMethod: 'CASH',
+      ridePinVerified: true,
+      ridePinVerifiedAt: new Date(),
+    },
+  });
+  createdOrderIds.push(order.id);
+  await app.prisma.driver.update({ where: { id: driverId }, data: { currentRideId: order.id } });
+  return order;
+}
+
 function inject(method: 'GET' | 'POST' | 'PUT', url: string, payload?: unknown, token?: string) {
   return app.inject({
     method,
@@ -186,6 +237,7 @@ afterAll(async () => {
   await app.prisma.order.deleteMany({ where: { id: { in: createdOrderIds } } });
   if (createdUserIds.length) {
     await app.prisma.notification.deleteMany({ where: { userId: { in: createdUserIds } } });
+    await app.prisma.driver.deleteMany({ where: { userId: { in: createdUserIds } } });
     await app.prisma.rider.deleteMany({ where: { userId: { in: createdUserIds } } });
     await app.prisma.user.deleteMany({ where: { id: { in: createdUserIds } } });
   }
@@ -267,6 +319,127 @@ describe('Vendor rejects an order — PUT /vendor/orders/:id/reject', () => {
     expect(Number(freshRider.committedFloat)).toBe(0); // float released (was leaking → rider frozen out of CASH offers)
     expect(freshRider.currentOrderId).toBeNull();
     expect(freshRider.isAvailable).toBe(true);
+  });
+
+  it('rolls back reject status, stock, search, float, mover, and audit on a pre-commit fault', async () => {
+    const vendor = await makeVendor();
+    const item = await app.prisma.item.create({
+      data: { vendorId: vendor.vendorId, categoryId: vendor.categoryId, name: 'Fault Plate', basePrice: 1000, stockQuantity: 2, isAvailable: true },
+    });
+    const rider = await makeRider();
+    const order = await makeOrder(customer.userId, vendor.vendorId, 'ACCEPTED', {
+      riderId: rider.riderId,
+      itemId: item.id,
+      qty: 2,
+    });
+    await app.prisma.rider.update({
+      where: { id: rider.riderId },
+      data: { floatLimit: 100_000, committedFloat: 1000, currentOrderId: order.id, isAvailable: false },
+    });
+    const search = await app.prisma.dispatchSearch.create({
+      data: { vertical: 'DELIVERY', subjectId: order.id, status: 'SEARCHING', radiusKm: 5 },
+    });
+
+    const originalStage = OrderService.prototype.stageCanonicalOrderTransition;
+    const stageSpy = vi
+      .spyOn(OrderService.prototype, 'stageCanonicalOrderTransition')
+      .mockImplementationOnce(async function (this: OrderService, tx, input) {
+        await originalStage.call(this, tx, input);
+        throw new Error('forced vendor-reject pre-commit abort');
+      });
+    let response;
+    try {
+      response = await inject('PUT', `/api/v1/vendor/orders/${order.id}/reject`, { reason: 'fault' }, vendor.token);
+    } finally {
+      stageSpy.mockRestore();
+    }
+    expect(response!.statusCode).toBe(500);
+
+    const [afterOrder, afterItem, afterRider, afterSearch, auditCount] = await Promise.all([
+      app.prisma.order.findUniqueOrThrow({ where: { id: order.id }, select: { status: true } }),
+      app.prisma.item.findUniqueOrThrow({ where: { id: item.id }, select: { stockQuantity: true } }),
+      app.prisma.rider.findUniqueOrThrow({
+        where: { id: rider.riderId },
+        select: { isAvailable: true, currentOrderId: true, committedFloat: true },
+      }),
+      app.prisma.dispatchSearch.findUniqueOrThrow({ where: { id: search.id }, select: { status: true } }),
+      app.prisma.orderStatusLog.count({ where: { orderId: order.id, status: 'CANCELLED' } }),
+    ]);
+    expect(afterOrder.status).toBe('ACCEPTED');
+    expect(afterItem.stockQuantity).toBe(2);
+    expect(afterRider.isAvailable).toBe(false);
+    expect(afterRider.currentOrderId).toBe(order.id);
+    expect(Number(afterRider.committedFloat)).toBe(1000);
+    expect(afterSearch.status).toBe('SEARCHING');
+    expect(auditCount).toBe(0);
+    await app.prisma.dispatchSearch.delete({ where: { id: search.id } });
+  });
+
+  it('loses cleanly when a direct assignment commits while vendor reject is waiting', async () => {
+    const vendor = await makeVendor();
+    const rider = await makeRider();
+    await app.prisma.rider.update({
+      where: { id: rider.riderId },
+      data: { isOnline: true, isAvailable: true, floatLimit: 100_000, committedFloat: 0 },
+    });
+    const order = await makeOrder(customer.userId, vendor.vendorId, 'ACCEPTED');
+
+    let assignmentStaged!: () => void;
+    let resumeAssignment!: () => void;
+    let rejectTransitionStarted!: () => void;
+    const atAssignmentStage = new Promise<void>((resolve) => { assignmentStaged = resolve; });
+    const releaseAssignment = new Promise<void>((resolve) => { resumeAssignment = resolve; });
+    const atRejectTransition = new Promise<void>((resolve) => { rejectTransitionStarted = resolve; });
+    const orders = new OrderService(app.prisma, app.io);
+
+    const assignmentPending = app.prisma.$transaction(async (tx) => {
+      expect(await new FloatService(tx).commit(tx, rider.riderId, 1000)).toBe(true);
+      const staged = await orders.stageDirectRiderAssignment(tx, {
+        orderId: order.id,
+        riderId: rider.riderId,
+        changedBy: rider.userId,
+        moverUserId: rider.userId,
+        note: 'deterministic vendor race',
+      });
+      assignmentStaged();
+      await releaseAssignment;
+      return staged;
+    });
+    await atAssignmentStage;
+
+    const originalTerminalStage = OrderService.prototype.stageCanonicalOrderTransition;
+    const terminalSpy = vi
+      .spyOn(OrderService.prototype, 'stageCanonicalOrderTransition')
+      .mockImplementationOnce(async function (this: OrderService, tx, input) {
+        rejectTransitionStarted();
+        return originalTerminalStage.call(this, tx, input);
+      });
+    let rejection;
+    try {
+      const rejectPending = inject('PUT', `/api/v1/vendor/orders/${order.id}/reject`, { reason: 'too late' }, vendor.token);
+      await atRejectTransition;
+      resumeAssignment();
+      [, rejection] = await Promise.all([assignmentPending, rejectPending]);
+    } finally {
+      resumeAssignment();
+      terminalSpy.mockRestore();
+    }
+    expect(rejection!.statusCode).toBe(400);
+    expect(rejection!.json().error.code).toBe('INVALID_STATUS');
+
+    const [afterOrder, afterRider, cancelledLogs] = await Promise.all([
+      app.prisma.order.findUniqueOrThrow({ where: { id: order.id }, select: { status: true, riderId: true } }),
+      app.prisma.rider.findUniqueOrThrow({
+        where: { id: rider.riderId },
+        select: { isAvailable: true, currentOrderId: true, committedFloat: true },
+      }),
+      app.prisma.orderStatusLog.count({ where: { orderId: order.id, status: 'CANCELLED' } }),
+    ]);
+    expect(afterOrder).toEqual({ status: 'RIDER_ASSIGNED', riderId: rider.riderId });
+    expect(afterRider.isAvailable).toBe(false);
+    expect(afterRider.currentOrderId).toBe(order.id);
+    expect(Number(afterRider.committedFloat)).toBe(1000);
+    expect(cancelledLogs).toBe(0);
   });
 
   it('two concurrent rejects: exactly one wins, stock restocked once (no phantom stock)', async () => {
@@ -356,6 +529,26 @@ describe('Customer cancels an order — POST /customer/orders/:id/cancel', () =>
     expect(untouched.status).toBe('PICKED_UP');
   });
 
+  it('cannot cancel a taxi after PIN handoff while status is still DRIVER_ARRIVED', async () => {
+    const driver = await makeTaxiDriver();
+    const order = await makeVerifiedArrivedTaxi(customer.userId, driver.driverId);
+
+    const res = await inject('POST', `/api/v1/customer/orders/${order.id}/cancel`, {}, customer.token);
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error.code).toBe('IN_TRANSIT');
+    await expect(
+      new OrderService(app.prisma, app.io).updateStatus(order.id, 'CANCELLED', 'agent'),
+    ).rejects.toMatchObject({ code: 'INVALID_TRANSITION' });
+
+    const [untouched, profile] = await Promise.all([
+      app.prisma.order.findUniqueOrThrow({ where: { id: order.id } }),
+      app.prisma.driver.findUniqueOrThrow({ where: { id: driver.driverId } }),
+    ]);
+    expect({ status: untouched.status, driverId: untouched.driverId, verified: untouched.ridePinVerified })
+      .toEqual({ status: 'DRIVER_ARRIVED', driverId: driver.driverId, verified: true });
+    expect(profile.currentRideId).toBe(order.id);
+  });
+
   it('restocks a tracked item and frees the rider on cancellation', async () => {
     const vendor = await makeVendor();
     const rider = await makeRider();
@@ -419,6 +612,12 @@ describe('Vendor-no-response auto-cancel [SWIFT-021]', () => {
     });
     expect(note).not.toBeNull();
     expect(note!.body).toMatch(/didn.t respond|no response|in time/i);
+
+    const statusLog = await app.prisma.orderStatusLog.findFirstOrThrow({
+      where: { orderId: order.id, status: 'CANCELLED' },
+    });
+    expect(statusLog.changedBy).toBeNull();
+    expect(statusLog.note).toBe('Auto-cancelled: vendor did not respond');
   });
 
   it('does NOT cancel an order still within its hold window', async () => {
@@ -437,5 +636,118 @@ describe('Vendor-no-response auto-cancel [SWIFT-021]', () => {
     const did = await autoCancelUnresponsiveOrder(ctx(), order.id);
     expect(did).toBe(false);
     expect((await app.prisma.order.findUniqueOrThrow({ where: { id: order.id } })).status).toBe('ACCEPTED');
+  });
+
+  it('serializes concurrent worker deliveries: one cancel, one restock, one status record', async () => {
+    const vendor = await makeVendor();
+    const item = await app.prisma.item.create({
+      data: {
+        vendorId: vendor.vendorId,
+        categoryId: vendor.categoryId,
+        name: 'Auto-cancel Race Plate',
+        basePrice: 1000,
+        stockQuantity: 2,
+        isAvailable: true,
+      },
+    });
+    const order = await makeOrder(customer.userId, vendor.vendorId, 'PENDING', {
+      itemId: item.id,
+      qty: 2,
+    });
+    await app.prisma.item.update({ where: { id: item.id }, data: { stockQuantity: 0 } });
+
+    const results = await Promise.all([
+      autoCancelUnresponsiveOrder(ctx(), order.id),
+      autoCancelUnresponsiveOrder(ctx(), order.id),
+    ]);
+
+    expect(results.filter(Boolean)).toHaveLength(1);
+    const [afterOrder, afterItem, cancelledLogs] = await Promise.all([
+      app.prisma.order.findUniqueOrThrow({ where: { id: order.id }, select: { status: true } }),
+      app.prisma.item.findUniqueOrThrow({ where: { id: item.id }, select: { stockQuantity: true } }),
+      app.prisma.orderStatusLog.count({ where: { orderId: order.id, status: 'CANCELLED' } }),
+    ]);
+    expect(afterOrder.status).toBe('CANCELLED');
+    expect(afterItem.stockQuantity).toBe(2);
+    expect(cancelledLogs).toBe(1);
+  });
+
+  it('rolls back auto-cancel status, stock, search, and evidence on a pre-commit fault', async () => {
+    const vendor = await makeVendor();
+    const item = await app.prisma.item.create({
+      data: {
+        vendorId: vendor.vendorId,
+        categoryId: vendor.categoryId,
+        name: 'Auto-cancel Fault Plate',
+        basePrice: 1000,
+        stockQuantity: 2,
+        isAvailable: true,
+      },
+    });
+    const order = await makeOrder(customer.userId, vendor.vendorId, 'PENDING', {
+      itemId: item.id,
+      qty: 2,
+    });
+    // Checkout reserved both units before the worker was scheduled.
+    await app.prisma.item.update({ where: { id: item.id }, data: { stockQuantity: 0 } });
+    const search = await app.prisma.dispatchSearch.create({
+      data: { vertical: 'DELIVERY', subjectId: order.id, status: 'SEARCHING', radiusKm: 5 },
+    });
+
+    const originalStage = OrderService.prototype.stageCanonicalOrderTransition;
+    const stageSpy = vi
+      .spyOn(OrderService.prototype, 'stageCanonicalOrderTransition')
+      .mockImplementationOnce(async function (this: OrderService, tx, input) {
+        await originalStage.call(this, tx, input);
+        throw new Error('forced auto-cancel pre-commit abort');
+      });
+    try {
+      await expect(autoCancelUnresponsiveOrder(ctx(), order.id)).rejects.toThrow('forced auto-cancel pre-commit abort');
+    } finally {
+      stageSpy.mockRestore();
+    }
+
+    const [afterOrder, afterItem, afterSearch, cancelledLogs] = await Promise.all([
+      app.prisma.order.findUniqueOrThrow({ where: { id: order.id }, select: { status: true } }),
+      app.prisma.item.findUniqueOrThrow({ where: { id: item.id }, select: { stockQuantity: true } }),
+      app.prisma.dispatchSearch.findUniqueOrThrow({ where: { id: search.id }, select: { status: true } }),
+      app.prisma.orderStatusLog.count({ where: { orderId: order.id, status: 'CANCELLED' } }),
+    ]);
+    expect(afterOrder.status).toBe('PENDING');
+    expect(afterItem.stockQuantity).toBe(0);
+    expect(afterSearch.status).toBe('SEARCHING');
+    expect(cancelledLogs).toBe(0);
+    await app.prisma.dispatchSearch.delete({ where: { id: search.id } });
+  });
+});
+
+describe('Delivery-window auto-complete uses the canonical transaction', () => {
+  const ctx = () => ({ prisma: app.prisma, io: app.io, redis: app.redis, log: app.log });
+
+  it('rolls back status and evidence on a staged fault, then retries once idempotently', async () => {
+    const vendor = await makeVendor();
+    const order = await makeOrder(customer.userId, vendor.vendorId, 'DELIVERED');
+
+    const originalStage = OrderService.prototype.stageCanonicalOrderTransition;
+    const stageSpy = vi
+      .spyOn(OrderService.prototype, 'stageCanonicalOrderTransition')
+      .mockImplementationOnce(async function (this: OrderService, tx, input) {
+        await originalStage.call(this, tx, input);
+        throw new Error('forced auto-complete pre-commit abort');
+      });
+    try {
+      await expect(autoCompleteDeliveredOrder(ctx(), order.id))
+        .rejects.toThrow('forced auto-complete pre-commit abort');
+    } finally {
+      stageSpy.mockRestore();
+    }
+
+    expect((await app.prisma.order.findUniqueOrThrow({ where: { id: order.id } })).status).toBe('DELIVERED');
+    expect(await app.prisma.orderStatusLog.count({ where: { orderId: order.id, status: 'COMPLETED' } })).toBe(0);
+
+    expect(await autoCompleteDeliveredOrder(ctx(), order.id)).toBe(true);
+    expect(await autoCompleteDeliveredOrder(ctx(), order.id)).toBe(false);
+    expect((await app.prisma.order.findUniqueOrThrow({ where: { id: order.id } })).status).toBe('COMPLETED');
+    expect(await app.prisma.orderStatusLog.count({ where: { orderId: order.id, status: 'COMPLETED' } })).toBe(1);
   });
 });

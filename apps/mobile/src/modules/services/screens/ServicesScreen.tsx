@@ -4,7 +4,9 @@ import { ScrollView, TextInput, View } from 'react-native';
 import { Feather } from '@expo/vector-icons';
 import { color, radius, space } from '@swift/ui';
 import { useServiceProviders, useRequestJob } from '../../../hooks';
-import { Card, Chip, EmptyState, Header, IconChip, LinkText, LoadingBlock, PillButton, PopupCard, RatingMeta, Screen, T, TonePill } from '../../../kit';
+import { Card, Chip, DecorativeIcon, EmptyState, Header, IconChip, LinkText, LoadingBlock, PillButton, PopupCard, PopupTitle, RatingMeta, Screen, T, TonePill } from '../../../kit';
+import { useAuthStore } from '../../../stores/authStore';
+import { enterServiceProvider } from '../serviceProviderEntry';
 
 const TRADES = [
   'Electrician',
@@ -20,6 +22,8 @@ const TRADES = [
 ];
 
 export function ServicesScreen({ navigation }: any) {
+  const isAuthenticated = useAuthStore((state) => state.isAuthenticated);
+  const promptLogin = useAuthStore((state) => state.promptLogin);
   const [trade, setTrade] = useState<string | undefined>(undefined);
   const [selectedProviderId, setSelectedProviderId] = useState<string | undefined>(undefined);
   const [description, setDescription] = useState('');
@@ -58,6 +62,26 @@ export function ServicesScreen({ navigation }: any) {
         <T variant="body" tone="muted" style={{ marginTop: space.sm, marginBottom: space.lg }}>
           Verified tradespeople. Quote in chat, pay cash on completion.
         </T>
+
+        <Card style={{ flexDirection: 'row', alignItems: 'center', gap: space.md, marginBottom: space.xl }}>
+          <IconChip icon="briefcase" />
+          <View style={{ flex: 1 }}>
+            <T variant="label" weight="semibold">Offer your own services</T>
+            <T variant="caption" tone="muted" style={{ marginTop: 2 }}>
+              Set up your profile, verification, and provider jobs.
+            </T>
+          </View>
+          <PillButton
+            label="Open"
+            variant="soft"
+            size="sm"
+            onPress={() => enterServiceProvider({
+              isAuthenticated,
+              promptLogin,
+              navigate: (screen) => navigation?.navigate?.(screen),
+            })}
+          />
+        </Card>
 
         {/* Trade chips */}
         <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: space.md }}>
@@ -199,7 +223,7 @@ export function ServicesScreen({ navigation }: any) {
 
       {/* Kit success popup */}
       <PopupCard visible={sentPopup} onClose={() => setSentPopup(false)}>
-        <View
+        <DecorativeIcon
           style={{
             width: 72,
             height: 72,
@@ -210,10 +234,10 @@ export function ServicesScreen({ navigation }: any) {
           }}
         >
           <Feather name="check" size={34} color={color.white} />
-        </View>
-        <T variant="title" center style={{ marginTop: space.lg }}>
+        </DecorativeIcon>
+        <PopupTitle variant="title" center style={{ marginTop: space.lg }}>
           Request sent
-        </T>
+        </PopupTitle>
         <T variant="body" tone="muted" center style={{ marginTop: space.sm }}>
           The quote lands in My jobs — accept it there and pick a time. Pay cash on completion.
         </T>

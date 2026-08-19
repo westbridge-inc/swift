@@ -1,0 +1,20 @@
+appId: gy.swift.app
+name: Local iOS smoke - driver preview round trip
+tags:
+  - local-smoke
+---
+- runFlow: ../subflows/reset-to-role-picker.yaml
+- tapOn:
+    id: role-picker-preview-driver
+- extendedWaitUntil:
+    visible:
+      id: mover-preview-exit
+    timeout: 30000
+- assertVisible: Exit driver preview
+- tapOn:
+    id: mover-preview-exit
+- extendedWaitUntil:
+    visible:
+      id: role-picker-screen
+    timeout: 15000
+- assertVisible: Welcome to Swift

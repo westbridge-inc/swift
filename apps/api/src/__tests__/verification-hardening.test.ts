@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { nanoid } from 'nanoid';
 import { prismaPlugin } from '../plugins/prisma';
@@ -126,6 +126,89 @@ describe('electrician GEI gate (spec §3.5 — the one licensed trade)', () => {
 
     const provider = await app.prisma.serviceProvider.findUniqueOrThrow({ where: { userId: sparky.id } });
     expect(provider.isVerified).toBe(false);
+  });
+
+  it('projects approval before fallible side effects and repairs a terminal-review replay', async () => {
+    const sparky = await makeProvider('electrician', ['national_id', 'police_clearance']);
+    const doc = await app.prisma.verificationDocument.create({
+      data: {
+        userId: sparky.id, role: 'MOVER', docType: 'gei_electrical_licence',
+        fileUrl: `test/${marker}/gei-replay`, status: 'PENDING',
+      },
+    });
+    const notifications = new NotificationService(app.prisma, app.io);
+    vi.spyOn(notifications, 'send').mockRejectedValueOnce(new Error('injected post-projection notification failure'));
+    const failing = new VerificationService(app.prisma, notifications, getKycProvider());
+
+    await expect(failing.approveDocument(doc.id, 'admin-test'))
+      .rejects.toThrow('injected post-projection notification failure');
+    expect((await app.prisma.verificationDocument.findUniqueOrThrow({ where: { id: doc.id } })).status)
+      .toBe('APPROVED');
+    expect((await app.prisma.serviceProvider.findUniqueOrThrow({ where: { userId: sparky.id } })).isVerified)
+      .toBe(true);
+
+    // Simulate the exact stale projection left by the pre-fix crash window.
+    await app.prisma.serviceProvider.update({ where: { userId: sparky.id }, data: { isVerified: false } });
+    await expect(failing.approveDocument(doc.id, 'admin-test'))
+      .rejects.toMatchObject({ code: 'NOT_PENDING' });
+    expect((await app.prisma.serviceProvider.findUniqueOrThrow({ where: { userId: sparky.id } })).isVerified)
+      .toBe(true);
+  });
+
+  it('uses an ALREADY_APPROVED submission retry to repair provider projection drift', async () => {
+    const mason = await makeProvider('mason', ['national_id', 'police_clearance']);
+    expect((await app.prisma.serviceProvider.findUniqueOrThrow({ where: { userId: mason.id } })).isVerified)
+      .toBe(false);
+
+    await expect(svc.submitDocument(
+      mason.id,
+      'SERVICE_PROVIDER',
+      'national_id',
+      `test/${marker}/duplicate-national-id`,
+      'v1',
+    )).rejects.toMatchObject({ code: 'ALREADY_APPROVED' });
+
+    expect((await app.prisma.serviceProvider.findUniqueOrThrow({ where: { userId: mason.id } })).isVerified)
+      .toBe(true);
+  });
+
+  it('reconciles an already-expired provider after an interrupted expiry sweep', async () => {
+    const sparky = await makeProvider('electrician', ['national_id', 'police_clearance']);
+    const lapsed = await app.prisma.verificationDocument.create({
+      data: {
+        userId: sparky.id, role: 'MOVER', docType: 'gei_electrical_licence',
+        fileUrl: `test/${marker}/gei-expiry-replay`, status: 'APPROVED',
+        expiresAt: new Date(Date.now() - 60_000),
+      },
+    });
+    await app.prisma.serviceProvider.update({ where: { userId: sparky.id }, data: { isVerified: true } });
+    await app.prisma.rider.create({
+      data: {
+        userId: sparky.id, riderType: 'DELIVERY', vehicleType: 'MOTORCYCLE',
+        isOnline: true, isAvailable: true,
+      },
+    });
+
+    const notifications = new NotificationService(app.prisma, app.io);
+    const send = vi.spyOn(notifications, 'send').mockImplementation(async (payload) => {
+      if (payload.userId === sparky.id) throw new Error('injected mover suspension failure');
+      return '';
+    });
+    const failing = new VerificationService(app.prisma, notifications, getKycProvider());
+    await expect(failing.expireLapsedDocuments())
+      .rejects.toThrow('injected mover suspension failure');
+    expect((await app.prisma.verificationDocument.findUniqueOrThrow({ where: { id: lapsed.id } })).status)
+      .toBe('EXPIRED');
+    expect((await app.prisma.serviceProvider.findUniqueOrThrow({ where: { userId: sparky.id } })).isVerified)
+      .toBe(false);
+
+    // An interrupted old deployment could leave this terminal row stale. The
+    // next sweep must repair it even though EXPIRED rows are no longer selected.
+    await app.prisma.serviceProvider.update({ where: { userId: sparky.id }, data: { isVerified: true } });
+    send.mockRestore();
+    await failing.expireLapsedDocuments();
+    expect((await app.prisma.serviceProvider.findUniqueOrThrow({ where: { userId: sparky.id } })).isVerified)
+      .toBe(false);
   });
 });
 

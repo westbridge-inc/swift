@@ -352,7 +352,10 @@ describe('Order Flow — Full Lifecycle', () => {
   // -----------------------------------------------------------------------
 
   it('Step 9: Rider goes online', async () => {
-    const res = await inject('POST', '/api/v1/rider/go-online', riderToken);
+    const res = await inject('POST', '/api/v1/rider/go-online', riderToken, {
+      latitude: 6.8013,
+      longitude: -58.1551,
+    });
     const body = res.json();
     expect(res.statusCode).toBe(200);
     expect(body.success).toBe(true);

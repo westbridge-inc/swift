@@ -1,5 +1,16 @@
 {
   "extends": "../../tsconfig.base.json",
-  "compilerOptions": { "outDir": "./dist", "rootDir": "./src" },
+  "compilerOptions": {
+    "outDir": "./dist",
+    "rootDir": "./src",
+    // Emit CommonJS + type declarations: the compiled Swift API is CJS and
+    // `require`s @swift/ui via the package's "require" export condition. Dev
+    // (tsx) and mobile (metro) keep consuming ./src directly — see the
+    // exports map in package.json. [deploy]
+    "module": "CommonJS",
+    "moduleResolution": "node",
+    "declaration": true,
+    "noEmit": false
+  },
   "include": ["src"]
 }

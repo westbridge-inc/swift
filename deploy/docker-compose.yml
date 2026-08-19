@@ -1,0 +1,128 @@
+# ===========================================================================
+# Swift — self-host / STAGING stack. One command stands up the whole platform:
+#     cd deploy && cp .env.deploy.example .env && docker compose up -d
+#
+# This is the SAFE hosting path: a single-host deployment for staging, demos,
+# and pre-launch validation. It is NOT the production cutover — that path is
+# intentionally gated (see deploy/README.md "Production" and the
+# MOVER-AUTHORITY-CUTOVER-RUNBOOK). Everything here is data-safe to run.
+#
+# Services: postgres (PostGIS), redis, meilisearch, the API, and a dedicated
+# BullMQ worker (so N API replicas never process a job N times).
+# ===========================================================================
+name: swift
+
+services:
+  postgres:
+    image: postgis/postgis:16-3.4
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-swift}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: ${POSTGRES_DB:-swift}
+    volumes:
+      - swift-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-swift} -d ${POSTGRES_DB:-swift}"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+    # No published port by default — the API reaches it on the private network.
+    # Uncomment to inspect from the host: ports: ["5432:5432"]
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes", "--maxmemory-policy", "noeviction"]
+    volumes:
+      - swift-redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+  meilisearch:
+    image: getmeili/meilisearch:v1.9
+    restart: unless-stopped
+    environment:
+      MEILI_MASTER_KEY: ${MEILISEARCH_KEY:?set MEILISEARCH_KEY in .env}
+      MEILI_ENV: production
+      MEILI_NO_ANALYTICS: "true"
+    volumes:
+      - swift-meilidata:/meili_data
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:7700/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
+  # One-shot: apply migrations before the API/worker boot. Compose waits on its
+  # completion via service_completed_successfully.
+  migrate:
+    build:
+      context: ..
+      dockerfile: apps/api/Dockerfile
+    image: swift-api:${SWIFT_TAG:-local}
+    # Invoke the Prisma binary directly — NOT `pnpm exec` (which re-triggers
+    # corepack and pulls a newer pnpm needing Node 22). The runtime image
+    # already carries the CLI and the generated engine.
+    command: ["node", "node_modules/prisma/build/index.js", "migrate", "deploy"]
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-swift}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-swift}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  api:
+    build:
+      context: ..
+      dockerfile: apps/api/Dockerfile
+    image: swift-api:${SWIFT_TAG:-local}
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      # Staging with the bundled mock providers runs in development mode — the
+      # app's production guard (correctly) REFUSES mock KYC/MMG/card rails when
+      # NODE_ENV=production (SPS-F-0011). Flip to production ONLY once every
+      # provider in .env is a real credential (that's the LB-010 boundary).
+      NODE_ENV: ${NODE_ENV:-development}
+      HOST: 0.0.0.0
+      PORT: "3000"
+      DATABASE_URL: postgresql://${POSTGRES_USER:-swift}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-swift}
+      REDIS_URL: redis://redis:6379
+      MEILISEARCH_URL: http://meilisearch:7700
+      # The API process serves HTTP only; the worker service below owns jobs.
+      RUN_WORKERS: "0"
+    ports:
+      - "${API_PORT:-3000}:3000"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+      meilisearch:
+        condition: service_healthy
+
+  worker:
+    image: swift-api:${SWIFT_TAG:-local}
+    restart: unless-stopped
+    env_file: .env
+    command: ["node", "dist/worker.js"]
+    environment:
+      NODE_ENV: ${NODE_ENV:-development}
+      DATABASE_URL: postgresql://${POSTGRES_USER:-swift}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-swift}
+      REDIS_URL: redis://redis:6379
+      MEILISEARCH_URL: http://meilisearch:7700
+      RUN_WORKERS: "1"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+
+volumes:
+  swift-pgdata:
+  swift-redisdata:
+  swift-meilidata:

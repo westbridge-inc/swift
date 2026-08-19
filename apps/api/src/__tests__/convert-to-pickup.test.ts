@@ -156,3 +156,86 @@ describe('POST /orders/:id/convert-to-pickup', () => {
     expect(Number(untouched.totalAmount)).toBe(4900);
   });
 });
+
+describe('conversion and rider claims are mutually exclusive on one locked money generation [REPORT-006 F-006-03/06]', () => {
+  it('a concurrent goods decrement composes — the conversion write is additive, never a stale absolute total', async () => {
+    process.env['DISPATCH_EXHAUSTION'] = '1';
+    // A picking refund shrinks the goods while the customer converts. Both
+    // writers are atomic decrements on the locked row, so the arithmetic
+    // composes in EITHER commit order: 4900 − 600 (goods) − 900 (fee+tip).
+    // The old absolute-total write could resurrect the preview total and
+    // silently erase the picking adjustment.
+    for (let round = 0; round < 3; round += 1) {
+      const order = await makeOrder();
+      const [res] = await Promise.all([
+        convert(order.id),
+        app.prisma.order.updateMany({
+          where: { id: order.id },
+          data: { subtotalBase: { decrement: 600 }, subtotalCustomer: { decrement: 600 }, totalAmount: { decrement: 600 } },
+        }),
+      ]);
+      expect(res.statusCode).toBe(200);
+      const fresh = await app.prisma.order.findUniqueOrThrow({ where: { id: order.id } });
+      expect(Number(fresh.totalAmount)).toBe(3400);
+      expect(Number(fresh.subtotalBase)).toBe(3400);
+    }
+  });
+
+  it('cancel-then-convert: a dead order cannot convert (status bound under the lock)', async () => {
+    process.env['DISPATCH_EXHAUSTION'] = '1';
+    const order = await makeOrder();
+    const cancel = await app.inject({
+      method: 'POST',
+      url: `/api/v1/customer/orders/${order.id}/cancel`,
+      headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+      payload: { reason: 'nvm' },
+    });
+    expect(cancel.statusCode).toBe(200);
+    const res = await convert(order.id);
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error.code).toBe('INVALID_STATUS');
+    const fresh = await app.prisma.order.findUniqueOrThrow({ where: { id: order.id } });
+    expect(fresh.fulfillment).toBe('DELIVERY');
+    expect(fresh.pickupCode).toBeNull();
+  });
+
+  it('convert racing a fare-undercut board claim: exactly one wins and totals never fall below the goods', async () => {
+    process.env['DISPATCH_EXHAUSTION'] = '1';
+    const { OrderService } = await import('../modules/order/order.service');
+    const orders = new OrderService(app.prisma, app.io);
+    const moverUserId = (await app.prisma.rider.findUniqueOrThrow({ where: { id: riderId }, select: { userId: true } })).userId;
+    for (let round = 0; round < 4; round += 1) {
+      await app.prisma.rider.update({
+        where: { id: riderId },
+        data: { isOnline: true, isAvailable: true, currentOrderId: null },
+      });
+      const order = await makeOrder();
+      const claim = app.prisma
+        .$transaction(async (tx) => orders.stageDirectRiderAssignment(tx, {
+          orderId: order.id, riderId, changedBy: moverUserId, moverUserId, requestedFee: 100, note: 'race',
+        }))
+        .then(() => 'claimed' as const)
+        .catch(() => 'refused' as const);
+      const [conv, claimOutcome] = await Promise.all([convert(order.id), claim]);
+      const fresh = await app.prisma.order.findUniqueOrThrow({ where: { id: order.id } });
+      // THE F-006-03 invariants: no rider ever owns a PICKUP order, and the
+      // total never drops below the goods subtotal (the reported corruption
+      // was PICKUP + RIDER_ASSIGNED at 3,760 on 4,000 of goods).
+      expect(fresh.fulfillment === 'PICKUP' && fresh.riderId !== null).toBe(false);
+      expect(Number(fresh.totalAmount)).toBeGreaterThanOrEqual(Number(fresh.subtotalBase));
+      if (fresh.fulfillment === 'PICKUP') {
+        expect(conv.statusCode).toBe(200);
+        expect(claimOutcome).toBe('refused');
+        expect(Number(fresh.totalAmount)).toBe(4000);
+        expect(fresh.riderId).toBeNull();
+      } else {
+        expect(claimOutcome).toBe('claimed');
+        expect(conv.statusCode).toBe(409);
+        expect(fresh.riderId).toBe(riderId);
+        // Fee clamped from the LOCKED row: market 600, floor 360 → 4900 − 240.
+        expect(Number(fresh.totalAmount)).toBe(4660);
+        expect(fresh.status).toBe('RIDER_ASSIGNED');
+      }
+    }
+  });
+});

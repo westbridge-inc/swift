@@ -17,6 +17,7 @@ const CAR_PHONE = '+59200199002';
 const VENDOR_PHONE = '+59200199003';
 const BUS_PHONE = '+59200199004';
 const WAGON_PHONE = '+59200199005';
+const RACE_PHONE = '+59200199006';
 
 let app: FastifyInstance;
 let bikeToken = '';
@@ -24,9 +25,10 @@ let carToken = '';
 let vendorToken = '';
 let busToken = '';
 let wagonToken = '';
+let raceToken = '';
 
 async function cleanup() {
-  await app.prisma.user.deleteMany({ where: { phone: { in: [BIKE_PHONE, CAR_PHONE, VENDOR_PHONE, BUS_PHONE, WAGON_PHONE] } } });
+  await app.prisma.user.deleteMany({ where: { phone: { in: [BIKE_PHONE, CAR_PHONE, VENDOR_PHONE, BUS_PHONE, WAGON_PHONE, RACE_PHONE] } } });
 }
 
 async function signupCustomer(phone: string): Promise<string> {
@@ -76,7 +78,7 @@ beforeAll(async () => {
   await app.ready();
 
   await cleanup();
-  for (const p of [BIKE_PHONE, CAR_PHONE, VENDOR_PHONE, BUS_PHONE, WAGON_PHONE]) {
+  for (const p of [BIKE_PHONE, CAR_PHONE, VENDOR_PHONE, BUS_PHONE, WAGON_PHONE, RACE_PHONE]) {
     await app.redis.del(`otp:${p}`, `otp_rate:${p}`, `otp_attempt:${p}`, `otp_verified:${p}`);
   }
   bikeToken = await signupCustomer(BIKE_PHONE);
@@ -84,6 +86,7 @@ beforeAll(async () => {
   vendorToken = await signupCustomer(VENDOR_PHONE);
   busToken = await signupCustomer(BUS_PHONE);
   wagonToken = await signupCustomer(WAGON_PHONE);
+  raceToken = await signupCustomer(RACE_PHONE);
 });
 
 afterAll(async () => {
@@ -172,9 +175,126 @@ describe('partner provisioning — happy paths', () => {
 
   it('appends MOVER + RIDER roles exactly once', async () => {
     await post('/api/v1/partner/become', { role: 'MOVER', vehicleType: 'BICYCLE' }, bikeToken);
-    const user = await app.prisma.user.findUnique({ where: { phone: BIKE_PHONE }, select: { roles: true } });
+    const user = await app.prisma.user.findUnique({ where: { phone: BIKE_PHONE }, select: { roles: true, activeRole: true } });
     expect(user?.roles.filter((r) => r === 'MOVER')).toHaveLength(1);
     expect(user?.roles).toContain('RIDER');
+    expect(user?.activeRole).toBe('RIDER');
+  });
+
+  it('serializes concurrent identical and mixed partner joins without duplicate profiles or lost roles', async () => {
+    const bicycleResponses = await Promise.all(
+      Array.from({ length: 8 }, () => post(
+        '/api/v1/partner/become',
+        { role: 'MOVER', vehicleType: 'BICYCLE' },
+        raceToken,
+      )),
+    );
+    expect(bicycleResponses.filter((response) => response.statusCode === 201)).toHaveLength(1);
+    expect(bicycleResponses.every((response) => [200, 201].includes(response.statusCode))).toBe(true);
+    expect(bicycleResponses.map((response) => JSON.parse(response.body).data.id))
+      .toEqual(Array(8).fill(JSON.parse(bicycleResponses[0]!.body).data.id));
+
+    const mixed = await Promise.all([
+      post('/api/v1/partner/become', { role: 'MOVER', vehicleType: 'BICYCLE' }, raceToken),
+      post('/api/v1/partner/become', {
+        role: 'MOVER',
+        vehicleType: 'CAR',
+        vehicle: { make: 'Toyota', model: 'Axio', year: 2020, color: 'White', licensePlate: 'RACE 100' },
+      }, raceToken),
+    ]);
+    expect(mixed.every((response) => [200, 201].includes(response.statusCode))).toBe(true);
+
+    const business = {
+      name: 'Race Provision Store',
+      vendorType: 'STORE',
+      phone: '+5926007777',
+      addressLine1: '7 Serial Lane',
+      city: 'Georgetown',
+      latitude: 6.8013,
+      longitude: -58.1551,
+    };
+    const vendorResponses = await Promise.all(
+      Array.from({ length: 8 }, () => post(
+        '/api/v1/partner/become',
+        { role: 'VENDOR', business },
+        raceToken,
+      )),
+    );
+    expect(vendorResponses.filter((response) => response.statusCode === 201)).toHaveLength(1);
+    expect(vendorResponses.every((response) => [200, 201].includes(response.statusCode))).toBe(true);
+
+    const user = await app.prisma.user.findUniqueOrThrow({
+      where: { phone: RACE_PHONE },
+      select: {
+        roles: true,
+        rider: { select: { floatLimit: true } },
+        driver: { select: { id: true } },
+        vendorOwner: { select: { vendors: { select: { id: true } } } },
+      },
+    });
+    for (const role of ['CUSTOMER', 'MOVER', 'RIDER', 'DRIVER', 'VENDOR_OWNER'] as const) {
+      expect(user.roles.filter((candidate) => candidate === role)).toHaveLength(1);
+    }
+    expect(user.rider).not.toBeNull();
+    expect(Number(user.rider!.floatLimit)).toBeGreaterThan(0);
+    expect(user.driver).not.toBeNull();
+    expect(user.vendorOwner?.vendors).toHaveLength(1);
+  });
+
+  it('customer → join mover activates server authority so verified GO succeeds', async () => {
+    const user = await app.prisma.user.findUniqueOrThrow({ where: { phone: BIKE_PHONE } });
+    await app.prisma.user.update({ where: { id: user.id }, data: { selfieCapturedAt: new Date() } });
+    const rider = await app.prisma.rider.update({
+      where: { userId: user.id },
+      data: { documentsVerified: true, isOnline: false, isAvailable: false },
+    });
+
+    const online = await post('/api/v1/rider/go-online', {
+      latitude: 6.8013,
+      longitude: -58.1551,
+    }, bikeToken);
+    expect(online.statusCode).toBe(200);
+    const after = await app.prisma.rider.findUniqueOrThrow({ where: { id: rider.id } });
+    expect(after.isOnline).toBe(true);
+
+    await app.prisma.rider.update({
+      where: { id: rider.id },
+      data: { isOnline: false, isAvailable: false },
+    });
+  });
+
+  it('cannot provision-switch an active mover into Business and maroon the job', async () => {
+    const user = await app.prisma.user.findUniqueOrThrow({ where: { phone: BIKE_PHONE } });
+    const rider = await app.prisma.rider.update({
+      where: { userId: user.id },
+      data: { isOnline: true, isAvailable: false, currentOrderId: 'partner-active-job' },
+    });
+    const blocked = await post('/api/v1/partner/become', {
+      role: 'VENDOR',
+      business: {
+        name: 'Mover Side Store',
+        vendorType: 'STORE',
+        phone: '+5926001234',
+        addressLine1: '1 Authority Street',
+        city: 'Georgetown',
+        latitude: 6.8013,
+        longitude: -58.1551,
+      },
+    }, bikeToken);
+    expect(blocked.statusCode).toBe(409);
+    const [afterUser, afterRider] = await Promise.all([
+      app.prisma.user.findUniqueOrThrow({ where: { id: user.id } }),
+      app.prisma.rider.findUniqueOrThrow({ where: { id: rider.id } }),
+    ]);
+    expect(afterUser.activeRole).toBe('RIDER');
+    expect(afterRider.currentOrderId).toBe('partner-active-job');
+    expect(afterRider.isOnline).toBe(true);
+    expect(afterUser.roles).not.toContain('VENDOR_OWNER');
+    expect(await app.prisma.vendor.count({ where: { owner: { userId: user.id } } })).toBe(0);
+    await app.prisma.rider.update({
+      where: { id: rider.id },
+      data: { currentOrderId: null, isOnline: false, isAvailable: false },
+    });
   });
 });
 
@@ -200,8 +320,9 @@ describe('vendor provisioning', () => {
     expect(JSON.parse(res.body).data.kind).toBe('VENDOR');
     const vendor = await app.prisma.vendor.findFirst({ where: { owner: { user: { phone: VENDOR_PHONE } } } });
     expect(vendor?.status).toBe('PENDING_APPROVAL');
-    const user = await app.prisma.user.findUnique({ where: { phone: VENDOR_PHONE }, select: { roles: true } });
+    const user = await app.prisma.user.findUnique({ where: { phone: VENDOR_PHONE }, select: { roles: true, activeRole: true } });
     expect(user?.roles).toContain('VENDOR_OWNER');
+    expect(user?.activeRole).toBe('VENDOR_OWNER');
   });
 
   it('is idempotent — one store per owner', async () => {

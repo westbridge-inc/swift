@@ -91,6 +91,7 @@ beforeAll(async () => {
   process.env['NODE_ENV'] = 'development';
   process.env['DATABASE_URL'] = process.env['DATABASE_URL'] || 'postgresql://swift:swift@localhost:5434/swift';
   process.env['REDIS_URL'] = process.env['REDIS_URL'] || 'redis://localhost:6382';
+  process.env['MMG_PAY_URL_ALLOWED_HOSTS'] = 'pay.example.com';
 
   app = Fastify({ logger: false });
   registerErrorHandler(app);
@@ -120,7 +121,7 @@ afterAll(async () => {
 });
 
 describe('MMG pay link — vendor', () => {
-  const LINK = 'https://mmg.gy/pay/mmg-diner';
+  const LINK = 'https://pay.example.com/pay/mmg-diner';
 
   it('an owner attaches their MMG link and it comes back', async () => {
     const res = await inject('PUT', '/api/v1/vendor/profile', vendorOwner.token, { mmgPayUrl: LINK }, vendorId);
@@ -141,10 +142,31 @@ describe('MMG pay link — vendor', () => {
     const res = await app.inject({ method: 'PUT', url: '/api/v1/vendor/profile', payload: { mmgPayUrl: LINK }, headers: { 'content-type': 'application/json' } });
     expect(res.statusCode).toBe(401);
   });
+
+  it.each([
+    'http://pay.example.com/pay/mmg-diner',
+    'https://user:secret@pay.example.com/pay/mmg-diner',
+    'https://pay.example.com/pay/mmg-diner#confirmation',
+    'https://127.0.0.1/pay/mmg-diner',
+    'https://evil.example/pay/mmg-diner',
+    'not a url',
+  ])('rejects an unsafe or unapproved destination: %s', async (mmgPayUrl) => {
+    const res = await inject('PUT', '/api/v1/vendor/profile', vendorOwner.token, { mmgPayUrl }, vendorId);
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error.code).toBe('INVALID_MMG_PAY_URL');
+  });
+
+  it('redacts an unsafe legacy value at the owner profile read boundary', async () => {
+    await app.prisma.vendor.update({ where: { id: vendorId }, data: { mmgPayUrl: 'https://evil.example/pay/legacy' } });
+    const got = await inject('GET', '/api/v1/vendor/profile', vendorOwner.token, undefined, vendorId);
+    const v = got.json().data.vendors.find((x: any) => x.id === vendorId);
+    expect(v.mmgPayUrl).toBeNull();
+    await app.prisma.vendor.update({ where: { id: vendorId }, data: { mmgPayUrl: null } });
+  });
 });
 
 describe('MMG pay link — taxi driver', () => {
-  const LINK = 'https://mmg.gy/pay/driver42';
+  const LINK = 'https://pay.example.com/pay/driver42';
 
   it('a driver attaches + clears their MMG link', async () => {
     const set = await inject('PUT', '/api/v1/driver/profile', driver.token, { mmgPayUrl: LINK });
@@ -154,6 +176,17 @@ describe('MMG pay link — taxi driver', () => {
     const clear = await inject('PUT', '/api/v1/driver/profile', driver.token, { mmgPayUrl: '' });
     expect(clear.statusCode).toBe(200);
     expect(clear.json().data.mmgPayUrl).toBeNull();
+  });
+
+  it('rejects disallowed writes and redacts an unsafe legacy profile value', async () => {
+    const rejected = await inject('PUT', '/api/v1/driver/profile', driver.token, { mmgPayUrl: 'https://evil.example/pay/driver42' });
+    expect(rejected.statusCode).toBe(400);
+    expect(rejected.json().error.code).toBe('INVALID_MMG_PAY_URL');
+
+    await app.prisma.driver.update({ where: { userId: driver.userId }, data: { mmgPayUrl: 'https://evil.example/pay/legacy' } });
+    const profile = await inject('GET', '/api/v1/driver/profile', driver.token);
+    expect(profile.json().data.mmgPayUrl).toBeNull();
+    await app.prisma.driver.update({ where: { userId: driver.userId }, data: { mmgPayUrl: null } });
   });
 });
 

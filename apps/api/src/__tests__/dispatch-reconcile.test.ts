@@ -121,6 +121,31 @@ describe('reconcileStuckDispatch', () => {
     expect(enqueued).not.toContain(order.id);
   });
 
+  it('two overlapping sweeps repair a stranded order exactly ONCE [REPORT-014 F-014-06]', async () => {
+    const order = await makeStuckOrder('ACCEPTED');
+    const { enqueue, enqueued } = collector();
+    const [a, b] = await Promise.all([
+      reconcileStuckDispatch(app.prisma, app.redis, enqueue, NOW_STUCK),
+      reconcileStuckDispatch(app.prisma, app.redis, enqueue, NOW_STUCK),
+    ]);
+    expect(enqueued.filter((id) => id === order.id)).toHaveLength(1);
+    expect([...a.recovered, ...b.recovered].filter((id) => id === order.id)).toHaveLength(1);
+  });
+
+  it('an enqueue failure releases the cooldown claim so the NEXT sweep can repair [REPORT-014 F-014-06]', async () => {
+    const order = await makeStuckOrder('PREPARING');
+    const broken = async () => { throw new Error('queue down'); };
+    const r1 = await reconcileStuckDispatch(app.prisma, app.redis, broken, NOW_STUCK);
+    expect(r1.recovered).not.toContain(order.id);
+    // The claim was released — a dead queue must not suppress repair for 600s.
+    expect(await app.redis.get(`dispatch:reconciled:${order.id}`)).toBeNull();
+
+    const { enqueue, enqueued } = collector();
+    const r2 = await reconcileStuckDispatch(app.prisma, app.redis, enqueue, NOW_STUCK);
+    expect(enqueued).toContain(order.id);
+    expect(r2.recovered).toContain(order.id);
+  });
+
   it('SKIPS an order reconciled within the cooldown window', async () => {
     const order = await makeStuckOrder('ACCEPTED');
     await app.redis.set(`dispatch:reconciled:${order.id}`, '1', 'EX', 600);

@@ -32,6 +32,7 @@ export function PillButton({
   loading = false,
   disabled = false,
   style,
+  testID,
 }: {
   label: string;
   onPress?: () => void;
@@ -41,11 +42,13 @@ export function PillButton({
   loading?: boolean;
   disabled?: boolean;
   style?: ViewStyle;
+  testID?: string;
 }) {
   const v = BG[variant];
   const blocked = disabled || loading;
   return (
     <Pressable
+      testID={testID}
       onPress={blocked ? undefined : onPress}
       disabled={blocked}
       accessibilityRole="button"

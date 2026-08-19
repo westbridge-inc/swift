@@ -1,26 +1,39 @@
 import { MMKV } from 'react-native-mmkv';
 import { AppState, Linking } from 'react-native';
 import * as Crypto from 'expo-crypto';
-import { api } from '../services/api';
+import axios from 'axios';
+import { api, API_URL } from '../services/api';
+import {
+  getAdEventTrackingScope,
+  getAuthSessionSnapshot,
+} from '../stores/authStore';
 import {
   cacheUsable,
   cacheTrackable,
-  pruneQueue,
-  takeBatch,
-  applyVerdicts,
+  isAdEventScope,
+  sameAdEventScope,
   SERVE_TIMEOUT_MS,
   FLUSH_INTERVAL_MS,
   type AdServeResponse,
+  type AdEventScope,
   type AdEventType,
+  type AdEventVerdict,
   type QueuedAdEvent,
 } from './adsCore';
+import {
+  enqueueAdEvent,
+  hasQueuedAdEvents,
+  prepareAdEventBatch,
+  settleAdEventBatch,
+} from './adsQueue';
 
 // Ads runtime (spec §12.2/§13): one batched serve per home mount with an 800 ms
 // timeout and a ≤1 h cached fallback (home NEVER waits on ads, ads NEVER break
 // home); a persisted event queue that batches every 10 s and on app-background,
 // retries with backoff, and drops events older than 24 h. Ad content is public
-// data — the cache rides a plain MMKV store (the encrypted store is for auth);
-// no user identifier ever enters this file (the server derives userHash).
+// data — the cache rides a plain MMKV store (the encrypted store is for auth).
+// Queue ownership adds only a random per-login scope ID—never an account ID or
+// auth credential (the server still derives the daily userHash).
 
 // Guarded store creation: a stale binary without the native module must degrade
 // to "no cache, no queue persistence", never crash at import
@@ -33,7 +46,6 @@ try {
 }
 
 const CACHE_KEY = 'serve';
-const QUEUE_KEY = 'events';
 
 // One session id per app launch (§11.1) — random, never the user id.
 export const adsSessionId: string = (() => {
@@ -48,12 +60,15 @@ export interface AdsResult {
   data: AdServeResponse | null;
   /** false → display-only (TTL-expired cache): render, fire NO tracking. */
   trackable: boolean;
+  /** Exact serve-time owner. Never substitute the account current at callback. */
+  trackingScope: AdEventScope | null;
 }
 
 interface CachedServe {
   at: number;
   city: string;
   data: AdServeResponse;
+  trackingScope: AdEventScope;
 }
 
 function readCache(): CachedServe | null {
@@ -68,80 +83,151 @@ function readCache(): CachedServe | null {
 /** The §13 fetch: serve → cache; on timeout/failure → last-good ≤1 h (same
  *  city) marked display-only when past the serve ttl; else null (collapse). */
 export async function fetchAds(city: string, keys: string[]): Promise<AdsResult> {
+  const trackingScope = getAdEventTrackingScope();
+  const session = getAuthSessionSnapshot();
   try {
     const { data } = await api.get('/ads/serve', {
       params: { placements: keys.join(','), city, sessionId: adsSessionId },
       timeout: SERVE_TIMEOUT_MS,
+      ...(session ? { headers: { Authorization: `Bearer ${session.accessToken}` } } : {}),
     });
     const payload = (data?.data ?? null) as AdServeResponse | null;
     if (payload) {
       try {
-        store?.set(CACHE_KEY, JSON.stringify({ at: Date.now(), city, data: payload } satisfies CachedServe));
+        store?.set(CACHE_KEY, JSON.stringify({
+          at: Date.now(),
+          city,
+          data: payload,
+          trackingScope,
+        } satisfies CachedServe));
       } catch {
         /* cache write is best-effort */
       }
-      return { data: payload, trackable: true };
+      const stillCurrent = sameAdEventScope(trackingScope, getAdEventTrackingScope());
+      return {
+        data: payload,
+        trackable: stillCurrent,
+        trackingScope: stillCurrent ? trackingScope : null,
+      };
     }
-    return { data: null, trackable: false };
+    return { data: null, trackable: false, trackingScope: null };
   } catch {
     const cached = readCache();
-    if (!cached || cached.city !== city || !cacheUsable(cached.at, Date.now())) return { data: null, trackable: false };
+    if (!cached || cached.city !== city || !cacheUsable(cached.at, Date.now())) {
+      return { data: null, trackable: false, trackingScope: null };
+    }
     const ttl = Math.min(...Object.values(cached.data.placements).map((p) => p.ttlSeconds), 300);
-    return { data: cached.data, trackable: cacheTrackable(cached.at, ttl, Date.now()) };
+    const scopeMatches = isAdEventScope(cached.trackingScope)
+      && sameAdEventScope(cached.trackingScope, getAdEventTrackingScope());
+    const trackable = scopeMatches && cacheTrackable(cached.at, ttl, Date.now());
+    return {
+      data: cached.data,
+      trackable,
+      trackingScope: trackable ? cached.trackingScope : null,
+    };
   }
 }
 
 // ── Event queue (§12.2) ────────────────────────────────────────────────────────
 
-let queue: QueuedAdEvent[] = (() => {
-  try {
-    const raw = store?.getString(QUEUE_KEY);
-    return raw ? pruneQueue(JSON.parse(raw) as QueuedAdEvent[], Date.now()) : [];
-  } catch {
-    return [];
-  }
-})();
-
 let flushTimer: ReturnType<typeof setInterval> | null = null;
 let flushing = false;
 
-function persistQueue(): void {
+function newEventId(): string {
   try {
-    store?.set(QUEUE_KEY, JSON.stringify(queue));
+    return Crypto.randomUUID();
   } catch {
-    /* persistence is best-effort; the in-memory queue still flushes */
+    return `e-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}-${Math.random().toString(36).slice(2)}`;
   }
 }
 
-/** Record an ad event. Tokens come from the serve response; anonymous-safe. */
-export function trackAdEvent(token: string | undefined, eventType: AdEventType, meta?: Record<string, unknown>): void {
-  if (!token) return; // house ads carry no token — untracked by design (§11.1)
-  queue.push({ token, eventType, occurredAt: new Date().toISOString(), meta, attempts: 0, retryAt: 0 });
-  persistQueue();
+/** Record against the serve-time owner. Authenticated callbacks from a retired
+ * A boundary are ignored; explicit anonymous serves remain anonymous. */
+export function trackAdEvent(
+  token: string | undefined,
+  eventType: AdEventType,
+  trackingScope: AdEventScope | null,
+  meta?: Record<string, unknown>,
+): void {
+  if (!token || !trackingScope) return; // house/display-only ads are untracked
+  if (
+    trackingScope.kind === 'AUTHENTICATED'
+    && !sameAdEventScope(trackingScope, getAdEventTrackingScope())
+  ) return;
+  enqueueAdEvent({
+    id: newEventId(),
+    scope: trackingScope,
+    token,
+    eventType,
+    occurredAt: new Date().toISOString(),
+    meta,
+    attempts: 0,
+    retryAt: 0,
+  });
   startAdEventLoop();
+}
+
+function eventPayload(batch: QueuedAdEvent[]) {
+  return {
+    events: batch.map(({ token, eventType, occurredAt, meta }) => ({
+      token,
+      eventType,
+      occurredAt,
+      ...(meta ? { meta } : {}),
+    })),
+  };
+}
+
+async function postBatch(
+  batch: QueuedAdEvent[],
+  accessToken: string | null,
+): Promise<AdEventVerdict[] | null> {
+  try {
+    const response = accessToken
+      ? await api.post('/ads/events', eventPayload(batch), {
+          timeout: 5000,
+          headers: { Authorization: `Bearer ${accessToken}` },
+        })
+      : await axios.post(`${API_URL}/api/v1/ads/events`, eventPayload(batch), {
+          timeout: 5000,
+          headers: { 'Content-Type': 'application/json' },
+        });
+    return (response.data?.data?.results ?? null) as AdEventVerdict[] | null;
+  } catch {
+    return null;
+  }
 }
 
 export async function flushAdEvents(): Promise<void> {
   if (flushing) return;
   flushing = true;
   try {
-    const now = Date.now();
-    queue = pruneQueue(queue, now);
-    const batch = takeBatch(queue, now);
-    if (batch.length === 0) return;
-    let verdicts: Array<{ status: string }> | null = null;
-    try {
-      const { data } = await api.post(
-        '/ads/events',
-        { events: batch.map(({ token, eventType, occurredAt, meta }) => ({ token, eventType, occurredAt, ...(meta ? { meta } : {}) })) },
-        { timeout: 5000 },
-      );
-      verdicts = (data?.data?.results ?? null) as Array<{ status: string }> | null;
-    } catch {
-      verdicts = null; // transport failure → whole batch backs off
+    // Auth first: capture the freshest token and pin it explicitly. A later B
+    // login can never be substituted by the generic API interceptor.
+    const session = getAuthSessionSnapshot();
+    if (session?.adEventScopeId) {
+      const scope: AdEventScope = {
+        kind: 'AUTHENTICATED',
+        scopeId: session.adEventScopeId,
+        generation: session.generation,
+      };
+      const batch = prepareAdEventBatch(scope, Date.now());
+      if (batch.length > 0) {
+        const verdicts = await postBatch(batch, session.accessToken);
+        settleAdEventBatch(batch, verdicts, Date.now());
+      }
     }
-    queue = applyVerdicts(queue, batch, verdicts, Date.now());
-    persistQueue();
+
+    // Anonymous is a separate forced-no-auth request even while B is signed in.
+    const anonymousBatch = prepareAdEventBatch({
+      kind: 'ANONYMOUS',
+      scopeId: 'all-anonymous-scopes',
+      generation: 0,
+    }, Date.now());
+    if (anonymousBatch.length > 0) {
+      const verdicts = await postBatch(anonymousBatch, null);
+      settleAdEventBatch(anonymousBatch, verdicts, Date.now());
+    }
   } finally {
     flushing = false;
   }
@@ -157,6 +243,11 @@ export function startAdEventLoop(): void {
     if (state === 'background' || state === 'inactive') void flushAdEvents();
   });
 }
+
+// A cold restore may land directly in mover/vendor/advertiser UI and never
+// mount customer Home. Resume only when persisted work exists, avoiding an
+// idle polling timer for installations with an empty queue.
+if (hasQueuedAdEvents()) startAdEventLoop();
 
 // ── Destination (§13) — URL opens the in-app browser (guarded, same pattern as
 //    payLink), DEEPLINK goes through the router/Linking. Never throws. ─────────

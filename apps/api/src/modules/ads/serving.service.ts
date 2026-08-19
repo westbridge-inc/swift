@@ -1,6 +1,6 @@
 import type { PrismaClient } from '@prisma/client';
 import { mondayOf } from './ads-weeks';
-import { signImpressionToken } from './ads-token';
+import { signImpressionToken, userHash } from './ads-token';
 
 // Ad serving (ads-platform spec §11). One batched endpoint builds the home
 // screen's ad slots. The cardinal rule: ADS NEVER BREAK THE HOME SCREEN — empty
@@ -79,7 +79,9 @@ export class AdServingService {
     tenantId: string;
     city: string;
     sessionId: string;
-    userHash: string | null;
+    /** Server-authenticated principal. It is used only to derive pseudonymous
+     *  values and is never returned or persisted as a raw id. */
+    userId: string | null;
     keys: string[];
   }, now = new Date()): Promise<{ placements: Record<string, PlacementSlot>; _house: Record<string, boolean> }> {
     const week = mondayOf(now, 'America/Guyana');
@@ -87,6 +89,7 @@ export class AdServingService {
     const house: Record<string, boolean> = {};
     const dayBucket = now.toISOString().slice(0, 10);
     const hourBucket = now.toISOString().slice(0, 13);
+    const currentUserHash = input.userId ? userHash(input.userId, dayBucket) : null;
 
     for (const key of input.keys) {
       const placement = await this.prisma.adPlacement.findUnique({ where: { tenantId_key: { tenantId: input.tenantId, key } } });
@@ -108,8 +111,8 @@ export class AdServingService {
 
       // Frequency cap (viewable-impression based) — capped-out users fall to
       // house ads when nothing else remains.
-      if (!isHouse && placement.freqCapPerUserPerDay && input.userHash) {
-        items = await this.filterByFreqCap(items, input.userHash, key, dayBucket, placement.freqCapPerUserPerDay);
+      if (!isHouse && placement.freqCapPerUserPerDay && currentUserHash) {
+        items = await this.filterByFreqCap(items, currentUserHash, key, dayBucket, placement.freqCapPerUserPerDay);
         if (items.length === 0) {
           const houseFallback = await this.loadHouseAds(input.tenantId, placement.id);
           if (houseFallback.length > 0) { items = houseFallback; isHouse = true; }
@@ -117,10 +120,10 @@ export class AdServingService {
       }
 
       // Fairness: the start position varies per user per hour.
-      items = rotateStart(items, fnv1a(`${input.userHash ?? input.sessionId}:${hourBucket}`));
+      items = rotateStart(items, fnv1a(`${currentUserHash ?? input.sessionId}:${hourBucket}`));
 
       const maxItems = key === 'home_ad_bar' ? placement.slotsPerWeek : 1;
-      const shaped = items.slice(0, maxItems).map((it) => this.attachToken(it, key, input.sessionId, isHouse, now.getTime()));
+      const shaped = items.slice(0, maxItems).map((it) => this.attachToken(it, key, input.sessionId, input.userId, isHouse, now.getTime()));
 
       placements[key] = { rotationSeconds: placement.rotationSeconds ?? null, ttlSeconds: Math.floor(POOL_TTL_MS / 1000), items: shaped };
       if (isHouse) house[key] = true;
@@ -182,8 +185,8 @@ export class AdServingService {
     return items;
   }
 
-  private attachToken(item: ServeItem, placementKey: string, sessionId: string, isHouse: boolean, now: number): ServeItem {
+  private attachToken(item: ServeItem, placementKey: string, sessionId: string, userId: string | null, isHouse: boolean, now: number): ServeItem {
     if (isHouse) return item; // house ads are not tracked (§11.1)
-    return { ...item, impressionToken: signImpressionToken({ c: item.campaignId, r: item.creativeId, p: placementKey, s: sessionId }, now) };
+    return { ...item, impressionToken: signImpressionToken({ c: item.campaignId, r: item.creativeId, p: placementKey, s: sessionId }, userId, now) };
   }
 }

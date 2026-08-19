@@ -16,13 +16,15 @@ import { useActiveRide, useRideEstimate, useRequestRide, useCancelRide, useRideS
 import { connectSocket, getSocket, subscribeToOrder } from '../../../services/socket';
 import { RidePostTripSheet } from '../RidePostTripSheet';
 import { useLocationStore } from '../../../stores/locationStore';
-import { GEORGETOWN } from '../../../hooks/useDeviceLocation';
+import { useDeviceLocation } from '../../../hooks/useDeviceLocation';
+import { GEORGETOWN, pickupLocationContext } from '../../../lib/deviceLocation';
+import { LocationPrimerCard } from '../../../components/LocationPrimerCard';
 import { money } from '../../../lib/money';
 import { mediaUrl } from '../../../lib/images';
 import { streetEtaMin } from '../../../lib/geo';
 import { haptic } from '../../../lib/haptics';
 import { safetyApi, type RideClass, type TierEstimate } from '../../../services/api';
-import { Card, CircleChip, IconChip, LoadingBlock, Money, PillButton, Pictogram, type PictogramName, PinGlyph, PopupCard, Stars, T, VehicleRender, type VehicleBodyType, cardShadow } from '../../../kit';
+import { Card, CircleChip, IconChip, LoadingBlock, Money, PillButton, Pictogram, type PictogramName, PinGlyph, PopupCard, PopupTitle, Stars, T, VehicleRender, type VehicleBodyType, cardShadow } from '../../../kit';
 import type { PickedPlace } from './DestinationSearchScreen';
 
 const STATUS_LABEL: Record<string, string> = {
@@ -199,7 +201,9 @@ export function TaxiScreen({ navigation }: any) {
   const { height: winH } = useWindowDimensions();
   const scheme = useColorScheme();
   const insets = useSafeAreaInsets();
-  const { latitude, longitude, address } = useLocationStore();
+  const { latitude, longitude, address, status: locationStatus } = useLocationStore();
+  const { resolve: requestLocation } = useDeviceLocation({ refreshOnMount: false });
+  const locationContext = pickupLocationContext(latitude, longitude, locationStatus);
   const { data: activeRide, isLoading: loadingActive } = useActiveRide<any>(true);
   const requestRide = useRequestRide();
   const cancelRide = useCancelRide();
@@ -250,10 +254,13 @@ export function TaxiScreen({ navigation }: any) {
   const [dropoff, setDropoff] = useState<PickedPlace | undefined>();
   const [selectedClass, setSelectedClass] = useState<RideClass>('ECONOMY');
 
-  const livePickup =
-    latitude != null && longitude != null
-      ? { lat: latitude, lng: longitude, label: address || 'Current location' }
-      : undefined;
+  const livePickup = locationContext.devicePickup
+    ? {
+        lat: locationContext.devicePickup.latitude,
+        lng: locationContext.devicePickup.longitude,
+        label: address || locationContext.devicePickup.label,
+      }
+    : undefined;
   const pickup = pickupOverride ?? livePickup;
 
   const pickupPoint = pickup ? { lat: pickup.lat, lng: pickup.lng } : undefined;
@@ -290,8 +297,8 @@ export function TaxiScreen({ navigation }: any) {
 
   // ===== Request flow (idle → route chosen) =====
   const mapCenter = {
-    latitude: pickup?.lat ?? GEORGETOWN.latitude,
-    longitude: pickup?.lng ?? GEORGETOWN.longitude,
+    latitude: pickup?.lat ?? locationContext.center.latitude,
+    longitude: pickup?.lng ?? locationContext.center.longitude,
     latitudeDelta: 0.02,
     longitudeDelta: 0.02,
   };
@@ -349,7 +356,7 @@ export function TaxiScreen({ navigation }: any) {
         provider={PROVIDER_DEFAULT}
         style={{ flex: 1 }}
         region={routeRegion}
-        showsUserLocation
+        showsUserLocation={locationContext.showUserLocation}
         mapPadding={{ top: 0, left: 0, right: 0, bottom: Math.round(winH * 0.38) }}
         {...rideMapProps(scheme)}
       >
@@ -378,6 +385,15 @@ export function TaxiScreen({ navigation }: any) {
         handleIndicatorStyle={HANDLE_STYLE}
       >
         <BottomSheetScrollView contentContainerStyle={{ paddingHorizontal: space['2xl'], paddingBottom: space['3xl'] }}>
+          {!pickupOverride && locationContext.showPrimer ? (
+            <LocationPrimerCard
+              status={locationStatus}
+              onRequest={() => {
+                void requestLocation();
+              }}
+              style={{ marginBottom: space.lg }}
+            />
+          ) : null}
           <RouteCard
             pickupLabel={pickup?.label}
             dropoffLabel={dropoff?.label}
@@ -1094,9 +1110,9 @@ function ActiveRide({ navigation, ride, cancelRide, insets, rematching }: any) {
       {/* Kit confirm popup (kit 30-style) */}
       <PopupCard visible={confirmCancel} onClose={() => setConfirmCancel(false)}>
         <IconChip icon="x-circle" size={56} tone="error" />
-        <T variant="title" center style={{ marginTop: space.lg }}>
+        <PopupTitle variant="title" center style={{ marginTop: space.lg }}>
           Cancel this ride?
-        </T>
+        </PopupTitle>
         <T variant="body" tone="muted" center style={{ marginTop: space.sm }}>
           {d
             ? 'Your driver is already on the way. Cancelling now may charge a late-cancellation fee and lower your reliability rating.'
@@ -1120,11 +1136,11 @@ function ActiveRide({ navigation, ride, cancelRide, insets, rematching }: any) {
           then records the incident + pages ops AND dials local emergency. */}
       <PopupCard visible={sosConfirm} onClose={() => setSosConfirm(false)}>
         <IconChip icon="alert-triangle" size={56} tone="error" />
-        <T variant="title" center style={{ marginTop: space.lg }}>
+        <PopupTitle variant="title" center style={{ marginTop: space.lg }}>
           Get emergency help?
-        </T>
+        </PopupTitle>
         <T variant="body" tone="muted" center style={{ marginTop: space.sm }}>
-          This alerts Swift safety with your live location, then dials local emergency services. Use only in a real emergency.
+          This dials 911 — local emergency services — right away. Swift also saves the alert and your live location on this trip’s record. Use only in a real emergency.
         </T>
         <PillButton
           label="Yes — get help now"
@@ -1132,6 +1148,11 @@ function ActiveRide({ navigation, ride, cancelRide, insets, rematching }: any) {
           loading={sos.isPending}
           onPress={() => {
             setSosConfirm(false);
+            // 911 is THE action — dial first, never behind anything else. Swift
+            // records evidence; it is not an emergency responder and the copy
+            // must never imply a staffed safety desk [liability shield].
+            // Guyana launch emergency number; move to CountryConfig for other markets.
+            Linking.openURL('tel:911').catch(() => {});
             const coords =
               riderLoc.latitude != null && riderLoc.longitude != null
                 ? { lat: riderLoc.latitude, lng: riderLoc.longitude }
@@ -1139,8 +1160,6 @@ function ActiveRide({ navigation, ride, cancelRide, insets, rematching }: any) {
                   ? { lat: driverLoc.latitude, lng: driverLoc.longitude }
                   : undefined;
             sos.mutate({ id: ride.id, coords });
-            // Guyana launch emergency number; move to CountryConfig for other markets.
-            Linking.openURL('tel:911').catch(() => {});
           }}
         />
         <PillButton label="Close" variant="soft" style={{ alignSelf: 'stretch', marginTop: space.md }} onPress={() => setSosConfirm(false)} />
@@ -1151,9 +1170,9 @@ function ActiveRide({ navigation, ride, cancelRide, insets, rematching }: any) {
           re-dispatches the SAME trip, and locks the driver for review. */}
       <PopupCard visible={confirmNotMyDriver} onClose={() => setConfirmNotMyDriver(false)}>
         <IconChip icon="alert-triangle" size={56} tone="error" />
-        <T variant="title" center style={{ marginTop: space.lg }}>
+        <PopupTitle variant="title" center style={{ marginTop: space.lg }}>
           Not the person or car shown?
-        </T>
+        </PopupTitle>
         <T variant="body" tone="muted" center style={{ marginTop: space.sm }}>
           Don’t get in. We’ll cancel this pickup, alert Swift safety, and find you another driver — your trip stays exactly as it is.
         </T>
@@ -1180,9 +1199,9 @@ function ActiveRide({ navigation, ride, cancelRide, insets, rematching }: any) {
           two honest answers. NEED_HELP escalates server-side. */}
       <PopupCard visible={guardianPrompt} onClose={() => setGuardianPrompt(false)}>
         <IconChip icon="shield" size={56} />
-        <T variant="title" center style={{ marginTop: space.lg }}>
+        <PopupTitle variant="title" center style={{ marginTop: space.lg }}>
           Everything okay?
-        </T>
+        </PopupTitle>
         <T variant="body" tone="muted" center style={{ marginTop: space.sm }}>
           Swift’s Trip Guardian checks in when a trip pauses or changes route. Your driver can’t see your answer.
         </T>

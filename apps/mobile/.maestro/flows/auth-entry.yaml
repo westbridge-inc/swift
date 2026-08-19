@@ -1,0 +1,13 @@
+appId: gy.swift.app
+name: Local iOS smoke - auth entry shell
+tags:
+  - local-smoke
+---
+- runFlow: ../subflows/reset-to-role-picker.yaml
+- tapOn:
+    id: role-picker-sign-in
+- extendedWaitUntil:
+    visible: Sign in or sign up
+    timeout: 15000
+- assertVisible: Phone Number
+- assertVisible: Send Code

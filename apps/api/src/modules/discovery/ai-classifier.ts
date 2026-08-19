@@ -1,4 +1,5 @@
-import type { PrismaClient } from '@prisma/client';
+import { Prisma, type PrismaClient } from '@prisma/client';
+import { requireDiscoveryTenantId } from './tenant-boundary';
 
 // ---------------------------------------------------------------------------
 // Stage B — the AI classifier (spec Part 4). For items Stage A couldn't place
@@ -24,6 +25,15 @@ export interface CategoryClassifier {
 
 export const CAT_AI_DAILY_ITEMS = Math.max(1, Number(process.env['CAT_AI_DAILY_ITEMS'] ?? 500));
 const BATCH = 10;
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+/** UTC accounting window for the global model-cost budget. Both bounds are
+ * explicit so future-dated audit rows cannot consume today's allowance. */
+export function categorizerUtcDayWindow(now: Date): { start: Date; end: Date } {
+  const start = new Date(now);
+  start.setUTCHours(0, 0, 0, 0);
+  return { start, end: new Date(start.getTime() + DAY_MS) };
+}
 
 export function categorizerEnabled(classifier: CategoryClassifier): boolean {
   if (process.env['CATEGORIZER_AI_ENABLED'] === '0') return false;
@@ -43,16 +53,18 @@ export function catAiHallucinatedTotal(): number {
 export async function runAiClassifierBatch(
   prisma: PrismaClient,
   classifier: CategoryClassifier,
-  opts: { tenantId?: string; limit?: number; vendorId?: string } = {},
+  opts: { tenantId: string; limit?: number; vendorId?: string; now?: Date },
 ): Promise<{ scanned: number; suggested: number; dropped: number; budgetLeft: number }> {
-  const tenantId = opts.tenantId ?? 'swift-default';
+  const tenantId = requireDiscoveryTenantId(opts.tenantId);
   if (!categorizerEnabled(classifier)) return { scanned: 0, suggested: 0, dropped: 0, budgetLeft: 0 };
 
-  // Daily budget: audit rows are the persistent counter (exhausted = wait).
-  const dayStart = new Date();
-  dayStart.setUTCHours(0, 0, 0, 0);
+  // Daily budget is intentionally GLOBAL (model cost is platform-wide), while
+  // candidate reads remain tenant-scoped. Capture one clock value so the count
+  // window and every audit row agree even across midnight.
+  const now = opts.now ? new Date(opts.now) : new Date();
+  const window = categorizerUtcDayWindow(now);
   const usedToday = await prisma.agentAuditEvent.count({
-    where: { job: 'categorizer', at: { gte: dayStart } },
+    where: { job: 'categorizer', at: { gte: window.start, lt: window.end } },
   });
   const budgetLeft = Math.max(0, CAT_AI_DAILY_ITEMS - usedToday);
   if (budgetLeft === 0) return { scanned: 0, suggested: 0, dropped: 0, budgetLeft: 0 };
@@ -62,19 +74,22 @@ export async function runAiClassifierBatch(
   // Candidates: live items with NO suggestion rows and NO tags — exactly the
   // ground Stage A couldn't place and no human has touched (law C by query).
   // Raw SQL: Prisma can't express NOT EXISTS across relation-less tables.
-  const raw = await prisma.$queryRawUnsafe<Array<{ id: string; name: string; description: string | null }>>(
-    `SELECT i.id, i.name, i.description
+  const raw = await prisma.$queryRaw<Array<{ id: string; name: string; description: string | null }>>(
+    Prisma.sql`SELECT i.id, i.name, i.description
      FROM "items" i
-     JOIN "vendors" v ON v.id = i."vendorId" AND v.status = 'ACTIVE' AND v."tenantId" = $1
+     JOIN "vendors" v ON v.id = i."vendorId" AND v.status = 'ACTIVE' AND v."tenantId" = ${tenantId}
      WHERE i."isAvailable" = true
-       AND ($3::text IS NULL OR i."vendorId" = $3)
-       AND NOT EXISTS (SELECT 1 FROM "discovery_category_suggestions" s WHERE s."itemId" = i.id)
-       AND NOT EXISTS (SELECT 1 FROM "item_discovery_categories" t WHERE t."itemId" = i.id)
+       AND (${opts.vendorId ?? null}::text IS NULL OR i."vendorId" = ${opts.vendorId ?? null})
+       AND NOT EXISTS (
+         SELECT 1 FROM "discovery_category_suggestions" s
+         WHERE s."itemId" = i.id AND s."tenantId" = ${tenantId}
+       )
+       AND NOT EXISTS (
+         SELECT 1 FROM "item_discovery_categories" t
+         WHERE t."itemId" = i.id AND t."tenantId" = ${tenantId}
+       )
      ORDER BY i."createdAt" ASC
-     LIMIT $2`,
-    tenantId,
-    limit,
-    opts.vendorId ?? null,
+     LIMIT ${limit}`,
   );
   if (raw.length === 0) return { scanned: 0, suggested: 0, dropped: 0, budgetLeft };
 
@@ -112,10 +127,11 @@ export async function runAiClassifierBatch(
       }
       await prisma.agentAuditEvent.create({
         data: {
+          at: now,
           job: 'categorizer',
           subjectId: item.id,
           action: 'classify',
-          input: { name: item.name },
+          input: { tenantId, name: item.name },
           outcome: 'suggested',
           reasoning: kept.join(', ') || 'no placement',
         },

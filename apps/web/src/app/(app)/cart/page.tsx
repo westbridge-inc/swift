@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import { Trash2, MapPin } from 'lucide-react';
@@ -21,9 +21,17 @@ export default function CartPage() {
   const [addingAddr, setAddingAddr] = useState(false);
   const [newAddr, setNewAddr] = useState({ label: 'Home', addressLine1: '', city: 'Georgetown' });
 
+  // [REPORT-012 F-012-01] Show the tip the cart will actually charge: hydrate
+  // the selector ONCE from the persisted cart tip (it may have been set from
+  // another surface/session). Checkout always submits the selection
+  // explicitly, so what this screen displays is exactly what is charged —
+  // "No tip" selected means tipAmount: 0 goes to the server, which now
+  // honors an explicit zero.
+  const tipHydrated = useRef(false);
   async function refresh() {
     const [c, a] = await Promise.all([getCart(), getAddresses().catch(() => [])]);
     setCart(c); setAddresses(a);
+    if (!tipHydrated.current) { tipHydrated.current = true; setTip(Number(c?.tipAmount) || 0); }
     const def = a.find((x: any) => x.isDefault) ?? a[0];
     if (def) setAddrId(def.id);
   }

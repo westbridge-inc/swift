@@ -17,13 +17,14 @@ import { useNavigation, useRoute } from '@react-navigation/native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { color, motion, radius, space } from '@swift/ui';
 import { useMutation } from '@tanstack/react-query';
-import { useOrder, useTipOrder, useDecideSubstitution } from '../../../hooks/customer';
-import { toast } from '../../../components/ui/toast';
+import { useOrder, useDecideSubstitution } from '../../../hooks/customer';
 import { customerApi, courierApi } from '../../../services/api';
 import { connectSocket, getSocket, subscribeToOrder } from '../../../services/socket';
 import { money } from '../../../lib/money';
 import { haptic } from '../../../lib/haptics';
-import { CircleChip, ErrorState, IconChip, InfoRow, LoadingBlock, PillButton, PopupCard, T } from '../../../kit';
+import { openMmgPaymentAction, safeMmgPaymentActionUrl } from '../../../lib/payLink';
+import { holdRingActive, holdRingCaption } from './hold-ring';
+import { CircleChip, DecorativeIcon, ErrorState, IconChip, InfoRow, LoadingBlock, PillButton, PopupCard, PopupTitle, T } from '../../../kit';
 
 const { height: SCREEN_H } = Dimensions.get('window');
 const GUTTER = space['2xl'];
@@ -164,11 +165,21 @@ export function HoldRing({
   createdAt,
   vendorName,
   onExpire,
+  mmgAmbiguous,
+  hidden,
 }: {
   holdExpiresAt?: string | null;
   createdAt?: string | null;
   vendorName?: string;
   onExpire: () => void;
+  /** [REPORT-009 F-01 / REPORT-010 F-04] MOBILE_MONEY + PENDING: the pay link
+   *  opened at checkout, so "cancelling is free" may be FALSE. REQUIRED (no
+   *  default) so deleting the call-site wiring is a compile error, not a
+   *  silently restored defect. */
+  mmgAmbiguous: boolean;
+  /** A cancelled order keeps its future holdExpiresAt — never show a live
+   *  "you can still cancel" ring over the cancelled banner. REQUIRED. */
+  hidden: boolean;
 }) {
   const [, tick] = useState(0);
   const warned = useRef(false);
@@ -176,7 +187,7 @@ export function HoldRing({
   const totalMs = Math.max(1000, expiresMs - (createdAt ? new Date(createdAt).getTime() : expiresMs - 300_000));
   const remainingMs = Math.max(0, expiresMs - Date.now());
   const remaining = Math.floor(remainingMs / 1000);
-  const active = !!holdExpiresAt && remainingMs > 0;
+  const active = holdRingActive(holdExpiresAt, Date.now(), hidden);
   const warn = active && remaining <= 30;
 
   const progress = useSharedValue(Math.min(1, remainingMs / totalMs));
@@ -238,7 +249,7 @@ export function HoldRing({
         Your order goes to {vendorName ?? 'the store'} when the ring closes.
       </T>
       <T variant="caption" tone={warn ? 'warning' : 'muted'} center style={{ marginTop: 2 }}>
-        Changed your mind? Cancelling is free until then.
+        {holdRingCaption(mmgAmbiguous)}
       </T>
     </View>
   );
@@ -264,12 +275,25 @@ export function DeliveryScreen() {
   // freed AND told they're back in the dispatch pool (the generic order-cancel
   // frees the rider row but doesn't notify them). Everything else uses the
   // standard customer cancel with its free-window / fee logic.
+  // [REPORT-011 F-02] The SERVER owns the clock: the cancel result carries the
+  // authoritative message (and any late-cancel fee it actually charged). Keep
+  // it and show it, instead of discarding it and rendering a stale generic
+  // banner — a client-clock/preview "free" promise must never be the last word.
+  const [cancelMessage, setCancelMessage] = useState<string | null>(null);
+  const [cancelFee, setCancelFee] = useState<number | null>(null);
   const cancelOrder = useMutation({
     mutationFn: () =>
       order.data?.orderType === 'COURIER' ? courierApi.cancel(orderId) : customerApi.cancelOrder(orderId),
-    onSuccess: () => order.refetch(),
+    onSuccess: (res: any) => {
+      // customerApi.cancelOrder is unwrapped at the seam; the courier endpoint
+      // still returns the raw envelope — accept both shapes, never lose the
+      // message OR the numeric fee the server actually charged.
+      const payload = res?.data?.data ?? res?.data ?? res ?? {};
+      if (typeof payload.message === 'string') setCancelMessage(payload.message);
+      setCancelFee(typeof payload.cancellationFee === 'number' ? payload.cancellationFee : null);
+      order.refetch();
+    },
   });
-  const tip = useTipOrder(orderId);
   const decideSub = useDecideSubstitution(orderId);
 
   const o = order.data;
@@ -353,8 +377,14 @@ export function DeliveryScreen() {
 
   const stage = stageFor(o.status);
   const cancelled = o.status === 'CANCELLED' || o.status === 'REFUNDED';
+  // [REPORT-008 F-01] PENDING on MMG is only "the store hasn't confirmed yet"
+  // — the customer may have ALREADY paid through the external link, so the
+  // cancel surfaces must never promise "no charge"; they say what is true and
+  // point at the party who holds the money.
+  const mmgCancellationAmbiguous = o.paymentMethod === 'MOBILE_MONEY' && o.paymentStatus === 'PENDING';
   const rider = o.rider;
   const items: any[] = o.items ?? [];
+  const mmgPaymentAction = safeMmgPaymentActionUrl(o.paymentAction) ? o.paymentAction : null;
   const eta = o.estimatedDeliveryTime
     ? new Date(o.estimatedDeliveryTime).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })
     : null;
@@ -465,7 +495,7 @@ export function DeliveryScreen() {
         <ScrollView contentContainerStyle={{ padding: GUTTER, paddingBottom: insets.bottom + space['2xl'] }}>
           {/* LIFECYCLE_V2 hold — the store hasn't been told yet; cancelling is
               free until the countdown ends. Server clock decides; this is UI. */}
-          <HoldRing holdExpiresAt={o.holdExpiresAt} createdAt={o.createdAt} vendorName={o.vendor?.name} onExpire={() => order.refetch()} />
+          <HoldRing holdExpiresAt={o.holdExpiresAt} createdAt={o.createdAt} vendorName={o.vendor?.name} onExpire={() => order.refetch()} mmgAmbiguous={mmgCancellationAmbiguous} hidden={cancelled} />
 
           {/* Out-of-stock substitutions (§5.3) — the store asked; you decide. */}
           {items
@@ -589,9 +619,28 @@ export function DeliveryScreen() {
               }}
             >
               <Feather name="x-circle" size={18} color={color.error} />
-              <T variant="body" weight="semibold" tone="error">
-                This order was cancelled.
-              </T>
+              <View style={{ flex: 1 }}>
+                <T variant="body" weight="semibold" tone="error">
+                  {/* Server's authoritative result first — it knows the real
+                      final cost/refund outcome the client clock cannot. */}
+                  {cancelMessage
+                    ?? (mmgCancellationAmbiguous
+                      ? 'This order was cancelled. If you already sent the MMG payment, the store refunds you directly.'
+                      : 'This order was cancelled.')}
+                </T>
+                {/* [REPORT-012 F-012-03] The fee the server ACTUALLY charged —
+                    rendered from the committed result, never a preview. */}
+                {cancelFee != null ? (
+                  <T variant="caption" tone="error" style={{ marginTop: 2 }}>
+                    {/* [REPORT-013 F-013-03] The fee is a recorded deterrence
+                        marker on a cash platform — Swift never collects it;
+                        saying "charged" would be a false financial fact. */}
+                    {cancelFee > 0
+                      ? `Late-cancellation fee recorded: ${money(cancelFee)} (not collected by Swift).`
+                      : 'No cancellation fee.'}
+                  </T>
+                ) : null}
+              </View>
             </View>
           ) : (
             <>
@@ -708,31 +757,29 @@ export function DeliveryScreen() {
             <InfoRow label="Total" value={money(o.totalAmount ?? o.total)} strong />
           </View>
 
-          {/* Post-delivery tip — 100% to the rider. Shown once, after delivery,
-              only if they haven't tipped yet. */}
-          {stage === 3 && !cancelled && o.rider && Number(o.tipAmount ?? 0) === 0 ? (
-            <View style={{ borderRadius: radius.lg, backgroundColor: color.surface.subtle, padding: space.lg, marginTop: space.xl }}>
-              <T variant="body" weight="bold">
-                Add a tip for {o.rider?.firstName ?? 'your rider'}?
+          {mmgPaymentAction && o.paymentStatus === 'PENDING' && !cancelled ? (
+            <View style={{ borderRadius: radius.lg, backgroundColor: color.brand[50], padding: space.lg, marginTop: space.xl }}>
+              <T variant="body" weight="bold" tone="deep">
+                Payment is still awaiting confirmation
               </T>
               <T variant="caption" tone="muted" style={{ marginTop: 2 }}>
-                100% goes to them — Swift takes nothing.
+                Pay {mmgPaymentAction.recipientName} directly in MMG. Swift never holds this money.
               </T>
-              <View style={{ flexDirection: 'row', gap: space.sm, marginTop: space.md }}>
-                {[200, 500, 1000].map((amt) => (
-                  <PillButton
-                    key={amt}
-                    label={money(amt)}
-                    variant="soft"
-                    size="md"
-                    style={{ flex: 1 }}
-                    disabled={tip.isPending}
-                    onPress={() => tip.mutate(amt, { onSuccess: () => toast.success('Thanks!', `${money(amt)} tip sent to ${o.rider?.firstName ?? 'your rider'}.`) })}
-                  />
-                ))}
-              </View>
+              <PillButton
+                label="Pay business with MMG"
+                icon="external-link"
+                onPress={() => void openMmgPaymentAction(mmgPaymentAction)}
+                style={{ marginTop: space.md }}
+              />
             </View>
-          ) : stage === 3 && !cancelled && Number(o.tipAmount ?? 0) > 0 ? (
+          ) : null}
+
+          {/* [SPS-F-0023] The post-delivery tip prompt is GONE, not disabled:
+              the API fails closed (TIP_COLLECTION_UNAVAILABLE — no rail
+              collects money after the job), and a button that always errors is
+              a dead control (INV-12). Tips chosen at checkout still work and
+              still show the thanks line below. */}
+          {stage === 3 && !cancelled && Number(o.tipAmount ?? 0) > 0 ? (
             <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: space.xl }}>
               <Feather name="heart" size={14} color={color.success} />
               <T variant="caption" tone="muted">
@@ -762,7 +809,7 @@ export function DeliveryScreen() {
 
           {o.canCancel ? (
             <PillButton
-              label={o.freeCancellationWindow ? 'Cancel order (free)' : 'Cancel order'}
+              label="Cancel order"
               variant="soft"
               loading={cancelOrder.isPending}
               onPress={() => setConfirmCancel(true)}
@@ -775,17 +822,19 @@ export function DeliveryScreen() {
       {/* Cancel confirm */}
       <PopupCard visible={confirmCancel} onClose={() => setConfirmCancel(false)}>
         <IconChip icon="x-circle" size={56} tone="error" />
-        <T variant="heading" center style={{ marginTop: space.md }}>
+        <PopupTitle variant="heading" center style={{ marginTop: space.md }}>
           Cancel this order?
-        </T>
+        </PopupTitle>
         <T variant="label" tone="muted" center style={{ marginTop: space.sm }}>
           {o.orderType === 'COURIER'
             ? 'This cancels the pickup and puts the rider back in the dispatch pool. It can’t be undone.'
-            : o.freeCancellationWindow
-              ? 'You’re inside the free-cancellation window — no charge.'
-              : Number(o.cancellationFee) > 0
-                ? `The store may have started preparing it. Cancelling now costs ${money(o.cancellationFee)}.`
-                : 'The store may have already started preparing it.'}
+            : mmgCancellationAmbiguous
+              ? 'Cancelling stops fulfilment. If you already sent the MMG payment, the store refunds you directly.'
+              // [REPORT-012 F-012-03] No cached/device-clock promise survives
+              // here: a 15s-old "free window" snapshot can cross expiry
+              // between poll and tap. State the RULE; the committed server
+              // result (message + exact fee) is rendered after the cancel.
+              : 'If the store hasn’t started your order, cancelling is usually free; a late cancel can carry a small fee. The exact outcome is confirmed the moment you cancel.'}
         </T>
         <View style={{ alignSelf: 'stretch', gap: space.md, marginTop: space.xl }}>
           <PillButton
@@ -802,7 +851,7 @@ export function DeliveryScreen() {
 
       {/* Hooray popup (kit 39) */}
       <PopupCard visible={arrived} onClose={() => setArrived(false)}>
-        <View
+        <DecorativeIcon
           style={{
             width: 64,
             height: 64,
@@ -813,10 +862,10 @@ export function DeliveryScreen() {
           }}
         >
           <Feather name="check" size={30} color={color.white} />
-        </View>
-        <T variant="heading" center style={{ marginTop: space.md }}>
+        </DecorativeIcon>
+        <PopupTitle variant="heading" center style={{ marginTop: space.md }}>
           Your order has arrived
-        </T>
+        </PopupTitle>
         <View style={{ alignSelf: 'stretch', gap: space.md, marginTop: space.xl }}>
           <PillButton
             label="Rate this order"

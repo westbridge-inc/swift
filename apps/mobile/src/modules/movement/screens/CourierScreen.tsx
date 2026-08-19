@@ -8,7 +8,9 @@ import { Feather } from '@expo/vector-icons';
 import { color, radius, space } from '@swift/ui';
 import { useCourierEstimate, useCourierOrders, useSendCourier } from '../../../hooks';
 import { useLocationStore } from '../../../stores/locationStore';
-import { GEORGETOWN } from '../../../hooks/useDeviceLocation';
+import { useDeviceLocation } from '../../../hooks/useDeviceLocation';
+import { pickupLocationContext } from '../../../lib/deviceLocation';
+import { LocationPrimerCard } from '../../../components/LocationPrimerCard';
 import { money } from '../../../lib/money';
 import { PinGlyph, Card, CircleChip, IconChip, LabeledInput, PillButton, T, TonePill, cardShadow } from '../../../kit';
 import { RouteCard } from './TaxiScreen';
@@ -120,7 +122,9 @@ function OptionCard({
 export function CourierScreen({ navigation }: any) {
   const { height: winH } = useWindowDimensions();
   const insets = useSafeAreaInsets();
-  const { latitude, longitude, address } = useLocationStore();
+  const { latitude, longitude, address, status: locationStatus } = useLocationStore();
+  const { resolve: requestLocation } = useDeviceLocation({ refreshOnMount: false });
+  const locationContext = pickupLocationContext(latitude, longitude, locationStatus);
   const { data: recent } = useCourierOrders<any[]>();
   const send = useSendCourier();
 
@@ -132,10 +136,13 @@ export function CourierScreen({ navigation }: any) {
   const [recipientPhone, setRecipientPhone] = useState('');
   const [description, setDescription] = useState('');
 
-  const livePickup =
-    latitude != null && longitude != null
-      ? { lat: latitude, lng: longitude, label: address || 'Current location' }
-      : undefined;
+  const livePickup = locationContext.devicePickup
+    ? {
+        lat: locationContext.devicePickup.latitude,
+        lng: locationContext.devicePickup.longitude,
+        label: address || locationContext.devicePickup.label,
+      }
+    : undefined;
   const pickup = pickupOverride ?? livePickup;
   const pickupPoint = pickup ? { lat: pickup.lat, lng: pickup.lng } : undefined;
   const dropoffPoint = dropoff ? { lat: dropoff.lat, lng: dropoff.lng } : undefined;
@@ -155,8 +162,8 @@ export function CourierScreen({ navigation }: any) {
     pickupLL && dropoffLL
       ? regionFor([pickupLL, dropoffLL])
       : {
-          latitude: pickup?.lat ?? GEORGETOWN.latitude,
-          longitude: pickup?.lng ?? GEORGETOWN.longitude,
+          latitude: pickup?.lat ?? locationContext.center.latitude,
+          longitude: pickup?.lng ?? locationContext.center.longitude,
           latitudeDelta: 0.02,
           longitudeDelta: 0.02,
         };
@@ -190,7 +197,7 @@ export function CourierScreen({ navigation }: any) {
         provider={PROVIDER_DEFAULT}
         style={{ flex: 1 }}
         region={region}
-        showsUserLocation
+        showsUserLocation={locationContext.showUserLocation}
         // The sheet covers the lower half — keep pins framed in the visible top.
         mapPadding={{ top: 0, right: 0, bottom: Math.round(winH * 0.46), left: 0 }}
       >
@@ -232,6 +239,16 @@ export function CourierScreen({ navigation }: any) {
           <T variant="title" style={{ marginBottom: space.lg }}>
             Send a package
           </T>
+
+          {!pickupOverride && locationContext.showPrimer ? (
+            <LocationPrimerCard
+              status={locationStatus}
+              onRequest={() => {
+                void requestLocation();
+              }}
+              style={{ marginBottom: space.lg }}
+            />
+          ) : null}
 
           <RouteCard
             pickupTitle="From"

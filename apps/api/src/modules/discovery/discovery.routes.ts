@@ -1,4 +1,5 @@
 import type { FastifyInstance } from 'fastify';
+import { Prisma } from '@prisma/client';
 import { z } from 'zod';
 
 // ---------------------------------------------------------------------------
@@ -57,17 +58,15 @@ export async function discoveryRoutes(app: FastifyInstance) {
     // ACTIVE + verified + open now (+ within the vendor's own delivery radius
     // when the caller sent a location).
     const geoJoin = query.lat != null && query.lng != null
-      ? `AND (6371 * acos(least(1, cos(radians($1)) * cos(radians(v.latitude)) * cos(radians(v.longitude) - radians($2)) + sin(radians($1)) * sin(radians(v.latitude))))) <= v."deliveryRadius"`
-      : '';
-    const params: unknown[] = query.lat != null && query.lng != null ? [query.lat, query.lng] : [];
-    const rows = await app.prisma.$queryRawUnsafe<Array<{ categoryId: string; n: bigint }>>(
-      `SELECT vc."categoryId", COUNT(DISTINCT vc."vendorId") AS n
+      ? Prisma.sql`AND (6371 * acos(least(1, cos(radians(${query.lat})) * cos(radians(v.latitude)) * cos(radians(v.longitude) - radians(${query.lng})) + sin(radians(${query.lat})) * sin(radians(v.latitude))))) <= v."deliveryRadius"`
+      : Prisma.sql``;
+    const rows = await app.prisma.$queryRaw<Array<{ categoryId: string; n: bigint }>>(
+      Prisma.sql`SELECT vc."categoryId", COUNT(DISTINCT vc."vendorId") AS n
        FROM "vendor_discovery_categories" vc
        JOIN "vendors" v ON v.id = vc."vendorId"
          AND v.status = 'ACTIVE' AND v."isVerified" = true AND v."isCurrentlyOpen" = true
          ${geoJoin}
        GROUP BY vc."categoryId"`,
-      ...params,
     );
     const counts = new Map(rows.map((r) => [r.categoryId, Number(r.n)]));
 

@@ -8,7 +8,7 @@ import { T } from '../../kit';
 import { AdChip } from './AdChip';
 import { useAdViewability } from './useAdViewability';
 import { trackAdEvent, openAdDestination } from '../../lib/ads';
-import type { AdServeItem } from '../../lib/adsCore';
+import type { AdEventScope, AdServeItem } from '../../lib/adsCore';
 
 // Tier 1 — the hero video card (spec §13.1). Poster first; autoplay MUTED when
 // ≥50% on screen; pause when scrolled off (battery/data — the Caribbean device
@@ -32,7 +32,15 @@ const QUARTILES = [
   { at: 0.75, event: 'VIDEO_Q75' },
 ] as const;
 
-export function AdHeroVideo({ item, trackable }: { item: AdServeItem; trackable: boolean }) {
+export function AdHeroVideo({
+  item,
+  trackable,
+  trackingScope,
+}: {
+  item: AdServeItem;
+  trackable: boolean;
+  trackingScope: AdEventScope | null;
+}) {
   const track = trackable ? item.impressionToken : undefined;
   const [videoFailed, setVideoFailed] = useState(false);
   const [posterFailed, setPosterFailed] = useState(false);
@@ -43,8 +51,8 @@ export function AdHeroVideo({ item, trackable }: { item: AdServeItem; trackable:
   const visibleRef = useRef(0);
 
   useEffect(() => {
-    trackAdEvent(track, 'IMPRESSION');
-  }, [track]);
+    trackAdEvent(track, 'IMPRESSION', trackingScope);
+  }, [track, trackingScope]);
 
   const useVideo = item.kind === 'VIDEO' && !!videoModule && !videoFailed;
 
@@ -53,7 +61,7 @@ export function AdHeroVideo({ item, trackable }: { item: AdServeItem; trackable:
   const { ref } = useAdViewability({
     enabled: !!track || useVideo,
     keepMeasuring: useVideo,
-    onViewable: () => trackAdEvent(track, 'VIEWABLE_IMPRESSION'),
+    onViewable: () => trackAdEvent(track, 'VIEWABLE_IMPRESSION', trackingScope),
     onVisibility: (fraction) => {
       visibleRef.current = fraction;
       const player = playerRef.current;
@@ -63,7 +71,7 @@ export function AdHeroVideo({ item, trackable }: { item: AdServeItem; trackable:
           player.play();
           if (!startedRef.current) {
             startedRef.current = true;
-            trackAdEvent(track, 'VIDEO_START');
+            trackAdEvent(track, 'VIDEO_START', trackingScope);
           }
         } else if (fraction < 0.5 && player.playing) {
           player.pause();
@@ -75,7 +83,7 @@ export function AdHeroVideo({ item, trackable }: { item: AdServeItem; trackable:
   });
 
   const onPress = () => {
-    trackAdEvent(track, 'CLICK');
+    trackAdEvent(track, 'CLICK', trackingScope);
     void openAdDestination(item.destination);
   };
 
@@ -113,12 +121,12 @@ export function AdHeroVideo({ item, trackable }: { item: AdServeItem; trackable:
                 for (const q of QUARTILES) {
                   if (frac >= q.at && !firedQuartiles.current.has(q.event)) {
                     firedQuartiles.current.add(q.event);
-                    trackAdEvent(track, q.event);
+                    trackAdEvent(track, q.event, trackingScope);
                   }
                 }
                 if (frac >= 0.98 && !firedQuartiles.current.has('VIDEO_COMPLETE')) {
                   firedQuartiles.current.add('VIDEO_COMPLETE');
-                  trackAdEvent(track, 'VIDEO_COMPLETE');
+                  trackAdEvent(track, 'VIDEO_COMPLETE', trackingScope);
                 }
               }
             }}

@@ -7,7 +7,7 @@ import BottomSheet, { BottomSheetScrollView } from '@gorhom/bottom-sheet';
 import { color, radius, space } from '@swift/ui';
 import { haptic } from '../../../lib/haptics';
 import { Feather, MaterialCommunityIcons } from '@expo/vector-icons';
-import { Pictogram, TonePill, LoadingBlock, PillButton, Screen, T, cardShadow } from '../../../kit';
+import { ErrorState, Pictogram, TonePill, LoadingBlock, PillButton, Screen, T, cardShadow } from '../../../kit';
 import {
   useMoverKind,
   useMoverStats,
@@ -22,17 +22,27 @@ import {
   useAcceptJob,
   useAcceptOffer,
   useDeclineOffer,
-  useBroadcastLocation,
   useVerificationStatus,
+  useSelectMoverKind,
+  type BoardJob,
+  type DispatchOffer,
   type MoverKind,
 } from '../../../hooks';
 import { useLocationStore } from '../../../stores/locationStore';
-import { GEORGETOWN } from '../../../hooks/useDeviceLocation';
+import { requireAuthSessionSnapshot } from '../../../stores/authStore';
+import { GEORGETOWN, useDeviceLocation } from '../../../hooks/useDeviceLocation';
+import { createLiveDeviceLocationLease, grantedLocationFix } from '../../../lib/deviceLocation';
+import { prepareMoverOnline } from '../../../lib/moverLocation';
+import { requestMoverBackgroundPermission } from '../../../services/backgroundLocation';
+import { toast } from '../../../components/ui/toast';
 import { money } from '../../../lib/money';
 import { moverJobsToday } from '../../../lib/earnings';
 import { FareSlider } from '../../../components/FareSlider';
 import { GUTTER, RoutePair, jobAmount, CustomerTrustBadge } from '../shared';
 import { dk, withAlpha, DCard, DStat, DWeekBars } from '../dark';
+import { useMoverPreview } from '../../../stores/moverPreview';
+import { MoverHomeAccountButton } from './MoverHomeAccountButton';
+import { fareLockedFor, fareToSubmit } from './fare-locked';
 
 /**
  * The earner home (dashboard plan Phase B/C): dark, map-first, demand-aware.
@@ -55,11 +65,11 @@ export function DispatchOfferCard({
   onAccept,
   onDecline,
 }: {
-  offer: any;
-  job: any;
+  offer: DispatchOffer;
+  job: BoardJob | null | undefined;
   kind: MoverKind;
   accepting: boolean;
-  onAccept: (fare: number) => void;
+  onAccept: (fare: number | undefined) => void;
   onDecline: () => void;
 }) {
   const total: number = offer.expiresInSeconds ?? 0;
@@ -73,14 +83,25 @@ export function DispatchOfferCard({
 
   const isDriver = kind === 'DRIVER';
   const fare = job ? jobAmount(job) : null;
-  const pickup = job?.pickupAddress ?? offer.vendorName ?? 'Pickup nearby';
-  const dropoff = job?.deliveryAddress ?? job?.dropoffAddress;
+  // [REPORT-010 F-07] The RECOVERED offer payload carries the authoritative
+  // money/route facts, so a card rebuilt after a socket drop never depends on
+  // a separately-fetched board row for its price.
+  const pickup = job?.pickupAddress ?? offer.pickupAddress ?? offer.vendorName ?? 'Pickup nearby';
+  const dropoff = job?.deliveryAddress ?? job?.dropoffAddress ?? offer.deliveryAddress ?? undefined;
   const pct = total ? Math.max(0, secs / total) : 0;
 
   // Driver-set price: the slider runs from a floor up to the market max Swift
   // computed (ride fare for drivers, delivery fee for riders). Defaults at the
   // max — the mover lowers it to compete, never raises it. Server re-clamps.
-  const marketMax = isDriver ? Number(job?.fareTotal ?? job?.taxiFareTotal ?? 0) : Number(job?.deliveryFee ?? 0);
+  // Board row first, recovery payload second — NEVER an unanchored zero.
+  const marketMax = isDriver
+    ? Number(job?.fareTotal ?? job?.taxiFareTotal ?? offer.taxiFareTotal ?? 0)
+    : Number(job?.deliveryFee ?? offer.deliveryFee ?? 0);
+  // [REPORT-011 F-05] MMG money is LOCKED at the checkout total — the mover
+  // cannot undercut it. Hide the fare slider and NEVER submit a fare on MMG,
+  // so a recovered card can't consume the exclusive offer only to be rejected
+  // with MMG_PRICE_LOCKED (which burned that mover's offer).
+  const fareLocked = fareLockedFor(job, offer);
   const floor = marketMax > 0 ? Math.max(0, Math.ceil(marketMax * 0.6)) : 0;
   const [price, setPrice] = useState<number>(marketMax);
   useEffect(() => setPrice(marketMax), [offer.orderId, marketMax]);
@@ -147,7 +168,7 @@ export function DispatchOfferCard({
             )}
           </View>
 
-          {marketMax > floor ? (
+          {!fareLocked && marketMax > floor ? (
             <View style={{ marginTop: space.md }}>
               <FareSlider min={floor} max={marketMax} value={price} onChange={setPrice} />
               <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
@@ -172,7 +193,11 @@ export function DispatchOfferCard({
               loading={accepting}
               onPress={() => {
                 haptic.commit();
-                onAccept(price);
+                // [REPORT-010 F-07] Without a market anchor there is no
+                // legitimate price choice: send NO fare (= market rate).
+                // fare 0 used to clamp the mover's pay to the 60% floor on
+                // CASH and burn the offer on MMG.
+                onAccept(fareToSubmit(fareLocked, marketMax, price));
               }}
               style={{ flex: 1 }}
             />
@@ -216,16 +241,125 @@ function StoreBadge({ ready, soon }: { ready: number; soon: number }) {
   );
 }
 
+function MoverKindChoiceScreen({
+  pending,
+  selected,
+  error,
+  onSelect,
+}: {
+  pending: boolean;
+  selected?: MoverKind;
+  error: unknown;
+  onSelect: (kind: MoverKind) => void;
+}) {
+  const choices: Array<{
+    kind: MoverKind;
+    pictogram: 'send' | 'taxi';
+    title: string;
+    body: string;
+  }> = [
+    {
+      kind: 'RIDER',
+      pictogram: 'send',
+      title: 'Deliver orders',
+      body: 'Food, groceries and parcels',
+    },
+    {
+      kind: 'DRIVER',
+      pictogram: 'taxi',
+      title: 'Drive taxi rides',
+      body: 'Pick up passengers nearby',
+    },
+  ];
+
+  return (
+    <Screen style={{ paddingHorizontal: GUTTER, justifyContent: 'center' }}>
+      <View style={{ alignItems: 'center' }}>
+        <View style={{ width: 72, height: 72, borderRadius: radius.xl, backgroundColor: color.brand[50], alignItems: 'center', justifyContent: 'center' }}>
+          <Pictogram name="wheel" size={36} color={color.brand[600]} />
+        </View>
+        <T variant="title" center style={{ marginTop: space.xl }}>
+          How are you working today?
+        </T>
+        <T variant="body" tone="muted" center style={{ marginTop: space.sm, maxWidth: 310 }}>
+          This account can do both. Choose one so Swift never sends you into the wrong work app.
+        </T>
+      </View>
+
+      <View style={{ gap: space.md, marginTop: space['2xl'] }}>
+        {choices.map((choice) => (
+          <Pressable
+            key={choice.kind}
+            accessibilityRole="button"
+            accessibilityLabel={`${choice.title}. ${choice.body}`}
+            disabled={pending}
+            onPress={() => onSelect(choice.kind)}
+          >
+            {({ pressed }) => (
+              <View
+                style={[
+                  {
+                    flexDirection: 'row',
+                    alignItems: 'center',
+                    gap: space.md,
+                    padding: space.lg,
+                    borderRadius: radius.lg,
+                    borderWidth: 1,
+                    borderColor: selected === choice.kind ? color.brand[500] : color.border.subtle,
+                    backgroundColor: color.surface.base,
+                    opacity: pressed || (pending && selected !== choice.kind) ? 0.65 : 1,
+                  },
+                  cardShadow,
+                ]}
+              >
+                <View style={{ width: 48, height: 48, borderRadius: radius.md, backgroundColor: color.brand[50], alignItems: 'center', justifyContent: 'center' }}>
+                  <Pictogram name={choice.pictogram} size={25} color={color.brand[600]} />
+                </View>
+                <View style={{ flex: 1 }}>
+                  <T variant="body" weight="bold">{choice.title}</T>
+                  <T variant="caption" tone="muted" style={{ marginTop: 2 }}>{choice.body}</T>
+                </View>
+                {pending && selected === choice.kind ? (
+                  <T variant="label" tone="brand">Opening…</T>
+                ) : (
+                  <Feather name="chevron-right" size={20} color={color.text.muted} />
+                )}
+              </View>
+            )}
+          </Pressable>
+        ))}
+      </View>
+
+      {error ? (
+        <T variant="label" tone="error" center style={{ marginTop: space.lg }}>
+          We couldn’t switch work modes. Check your connection and try again.
+        </T>
+      ) : null}
+    </Screen>
+  );
+}
+
 export function MoverHomeScreen({ navigation }: any) {
+  const preview = useMoverPreview((state) => state.preview);
   const insets = useSafeAreaInsets();
-  const { kind, profile, loading } = useMoverKind();
-  const { latitude, longitude } = useLocationStore();
+  const {
+    kind,
+    profile,
+    loading,
+    error: moverProfileError,
+    ambiguous,
+    refetch: refetchMoverProfiles,
+  } = useMoverKind();
+  const { latitude, longitude, status: locationStatus } = useLocationStore();
+  const { resolve: resolveLocationForGo } = useDeviceLocation({ refreshOnMount: false });
+  const [preparingOnline, setPreparingOnline] = useState(false);
   const k: MoverKind = kind ?? 'RIDER';
   const goOnline = useGoOnline(k);
   const goOffline = useGoOffline(k);
   const accept = useAcceptJob(k);
   const acceptOffer = useAcceptOffer(k);
   const decline = useDeclineOffer(k);
+  const selectMoverKind = useSelectMoverKind();
   const earnings = useEarningsToday(kind);
   const daily = useDailyEarnings<any>(kind); // DASH-03: server-aggregated 7-day trend
   const stats = useMoverStats(kind);
@@ -234,9 +368,11 @@ export function MoverHomeScreen({ navigation }: any) {
   const online = !!profile?.isOnline;
   const available = useAvailableJobs(kind, online);
   const { offer, dismiss } = useDispatchOffers(kind, online);
-  useBroadcastLocation(kind, online);
 
-  const here = latitude != null && longitude != null ? { lat: latitude, lng: longitude } : undefined;
+  const liveLocation = grantedLocationFix(latitude, longitude, locationStatus);
+  const here = liveLocation
+    ? { lat: liveLocation.latitude, lng: liveLocation.longitude }
+    : undefined;
   const demand = useDemand<any>(kind, here);
 
   // DASH-03: last 7 days from the SERVER-aggregated daily endpoint — the old
@@ -253,10 +389,34 @@ export function MoverHomeScreen({ navigation }: any) {
     }));
   }, [daily.data]);
 
-  if (loading || !kind) {
+  if (loading) {
     return (
       <Screen>
         <LoadingBlock />
+      </Screen>
+    );
+  }
+
+  if (ambiguous) {
+    return (
+      <MoverKindChoiceScreen
+        pending={selectMoverKind.isPending}
+        selected={selectMoverKind.variables}
+        error={selectMoverKind.error}
+        onSelect={(nextKind) => selectMoverKind.mutate(nextKind)}
+      />
+    );
+  }
+
+  if (moverProfileError || !kind) {
+    return (
+      <Screen>
+        <ErrorState
+          message={moverProfileError
+            ? 'We couldn’t safely load your delivery and taxi profiles. Check your connection and try again.'
+            : 'Your mover profile isn’t ready yet. Refresh after completing setup, or contact Support if this keeps happening.'}
+          onRetry={() => void refetchMoverProfiles()}
+        />
       </Screen>
     );
   }
@@ -291,7 +451,40 @@ export function MoverHomeScreen({ navigation }: any) {
   const todayTotal = (earnings.data as any)?.total ?? (earnings.data as any)?.todayEarnings ?? 0;
   const tripsToday = moverJobsToday(earnings.data);
   const onlineHours = (stats.data as any)?.onlineHoursToday;
-  const busyToggle = goOnline.isPending || goOffline.isPending;
+  const busyToggle = preparingOnline || goOnline.isPending || goOffline.isPending;
+  const startOnline = async () => {
+    if (busyToggle) return;
+    setPreparingOnline(true);
+    try {
+      // Permission sheets and foreground fixes yield back to the app. Keep the
+      // eventual GO mutation owned by the account that tapped the control.
+      const owner = preview ? null : requireAuthSessionSnapshot();
+      const resolution = await prepareMoverOnline({
+        resolveForeground: resolveLocationForGo,
+        requestBackground: requestMoverBackgroundPermission,
+        getForegroundFix: () => {
+          if (!createLiveDeviceLocationLease()) return null;
+          const current = useLocationStore.getState();
+          return grantedLocationFix(current.latitude, current.longitude, current.status);
+        },
+        goOnline: (location) => goOnline.mutateAsync({
+          ...location,
+          authSession: owner ?? undefined,
+        }),
+      });
+      if (resolution.status !== 'granted') {
+        toast.error(
+          resolution.status === 'denied'
+            ? 'Location access is required to go online. Enable it and try again.'
+            : 'Couldn’t get your location. Try again.',
+        );
+      }
+    } catch {
+      // The mutation owns and renders its server error; avoid a duplicate toast.
+    } finally {
+      setPreparingOnline(false);
+    }
+  };
 
   // Camera sits slightly SOUTH of the earner so the location dot floats in
   // the upper map half, clear of the GO ring.
@@ -321,7 +514,7 @@ export function MoverHomeScreen({ navigation }: any) {
         provider={PROVIDER_DEFAULT}
         style={{ flex: 1 }}
         region={region}
-        showsUserLocation
+        showsUserLocation={liveLocation !== null}
       >
         {/* REAL demand on the map (Phase A): taxi pickups rounded ~300 m /
             stores with unassigned orders. Never customer identities. */}
@@ -375,19 +568,13 @@ export function MoverHomeScreen({ navigation }: any) {
             {isDriver ? 'Swift Driver' : 'Swift Rider'}
           </T>
         </View>
-        <Pressable onPress={() => navigation?.navigate?.('Account')} hitSlop={8}>
-          {({ pressed }) => (
-            <View style={[{ width: 36, height: 36, borderRadius: 18, alignItems: 'center', justifyContent: 'center', backgroundColor: dk.card, borderWidth: 1, borderColor: dk.line, opacity: pressed ? 0.7 : 1 }, cardShadow]}>
-              <Feather name="user" size={17} color={dk.text} />
-            </View>
-          )}
-        </Pressable>
+        <MoverHomeAccountButton onPress={() => navigation?.navigate?.('Account')} />
       </View>
 
       {/* The GO ring — the one big action when offline (reference language). */}
       {!online && !activeJob ? (
         <View style={{ pointerEvents: 'box-none', position: 'absolute', left: 0, right: 0, bottom: '38%', alignItems: 'center' }}>
-          <Pressable disabled={busyToggle} onPress={() => goOnline.mutate()}>
+          <Pressable disabled={busyToggle} onPress={() => void startOnline()}>
             {({ pressed }) => (
               <View style={{ width: 96, height: 96, borderRadius: 48, alignItems: 'center', justifyContent: 'center', backgroundColor: dk.accentGlow }}>
                 <View
@@ -629,11 +816,11 @@ export function MoverHomeScreen({ navigation }: any) {
           job={jobs.find((j) => j.id === offer.orderId)}
           kind={k}
           accepting={acceptOffer.isPending}
-          onAccept={(fare) => acceptOffer.mutate({ orderId: offer.orderId, fare }, { onSuccess: dismiss })}
+          onAccept={(fare) => acceptOffer.mutate({ orderId: offer.orderId, fare, offerAttemptId: offer.offerAttemptId }, { onSuccess: dismiss })}
           // Tell the server too — the cascade re-offers the next mover NOW
           // instead of waiting out the 20s timeout on a card nobody wants.
           onDecline={() => {
-            decline.mutate(offer.orderId);
+            decline.mutate({ orderId: offer.orderId, offerAttemptId: offer.offerAttemptId });
             dismiss();
           }}
         />

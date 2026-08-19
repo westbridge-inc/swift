@@ -13,6 +13,13 @@ export interface SmsProvider {
  *  login request that is awaiting it. */
 const SMS_TIMEOUT_MS = 8000;
 
+/** Per-request cap for Expo/APNs/FCM relay calls. Keep this below durable
+ * outbox leases so a dead provider cannot pin dispatch-worker concurrency. */
+const pushProviderTimeoutMs = () => {
+  const configured = Number(process.env['PUSH_PROVIDER_TIMEOUT_MS']);
+  return Number.isFinite(configured) && configured > 0 ? configured : 8_000;
+};
+
 export interface PushProvider {
   /** `invalidTokens` = tokens the provider says are dead (app uninstalled) —
    *  the caller deactivates them so we stop pushing at ghosts. */
@@ -140,11 +147,26 @@ export class ExpoPushProvider implements PushProvider {
 
     for (let i = 0; i < deviceTokens.length; i += ExpoPushProvider.CHUNK) {
       const chunk = deviceTokens.slice(i, i + ExpoPushProvider.CHUNK);
-      const res = await fetch(this.url, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
-        body: JSON.stringify(chunk.map((to) => ({ to, title, body, data, sound: 'default' }))),
-      });
+      const controller = new AbortController();
+      const timeoutMs = pushProviderTimeoutMs();
+      const timer = setTimeout(() => controller.abort(), timeoutMs);
+      timer.unref?.();
+      let res: Response;
+      try {
+        res = await fetch(this.url, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+          body: JSON.stringify(chunk.map((to) => ({ to, title, body, data, sound: 'default' }))),
+          signal: controller.signal,
+        });
+      } catch (error) {
+        const reason = controller.signal.aborted
+          ? `timed out after ${timeoutMs}ms`
+          : (error as Error).message;
+        throw new Error(`Expo push request failed: ${reason}`);
+      } finally {
+        clearTimeout(timer);
+      }
       if (!res.ok) {
         const detail = await res.text().catch(() => '');
         throw new Error(`Expo push failed (${res.status}): ${detail.slice(0, 200)}`);

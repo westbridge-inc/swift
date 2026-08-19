@@ -11,9 +11,15 @@ import { OrderService } from '../modules/order/order.service';
 import { registerErrorHandler } from '../middleware/error-handler';
 
 // ---------------------------------------------------------------------------
-// Post-delivery tipping (deferred pre-launch tranche): a customer can tip a
-// completed order; it becomes an AVAILABLE TIP earning for the mover (100%
-// theirs). Guards: completed only, once, within 7 days, own order.
+// [SPS-F-0016c / LB-015] Post-delivery tipping FAILS CLOSED. There is no rail
+// that COLLECTS a tip after delivery: a cash customer has already left, and an
+// MMG customer paid the store directly at checkout. The old behaviour minted an
+// AVAILABLE TIP earning from money nobody collected — inventing a debt with no
+// sponsor. Until a real collection/authorization/capture/refund path exists
+// (founder-gated), the endpoint refuses with TIP_COLLECTION_UNAVAILABLE and
+// mutates NOTHING. Ownership privacy is preserved: a stranger still sees 404,
+// never the 409. Tips chosen AT CHECKOUT are collected with the order total and
+// keep working (createEarnings), including their idempotency guarantee.
 // ---------------------------------------------------------------------------
 
 let app: FastifyInstance;
@@ -33,12 +39,18 @@ async function makeCustomer() {
 }
 
 async function makeOrder(customerId: string, status: OrderStatus, opts: { tipAmount?: number; deliveredAt?: Date } = {}) {
+  const tip = opts.tipAmount ?? 0;
   const order = await app.prisma.order.create({
     data: {
       orderNumber: `TIP-${nanoid(8)}`, orderType: 'FOOD_DELIVERY', customerId, riderId, status, fulfillment: 'DELIVERY',
       pickupAddress: 'a', pickupLat: 6.8, pickupLng: -58.15, deliveryAddress: 'b', deliveryLat: 6.81, deliveryLng: -58.16,
-      subtotalBase: 2000, subtotalMarkup: 0, subtotalCustomer: 2000, deliveryFee: 500, totalAmount: 2500, paymentMethod: 'CASH',
-      tipAmount: opts.tipAmount ?? 0, ...(opts.deliveredAt ? { deliveredAt: opts.deliveredAt } : {}),
+      // Honest fixture [REPORT-004]: the total INCLUDES the checkout tip
+      // (2000 + 500 fee + tip), and a delivered CASH order is CAPTURED — the
+      // rider collected the total, tip included, at the door. That is what
+      // makes the checkout-tip earning below genuinely collected money.
+      subtotalBase: 2000, subtotalMarkup: 0, subtotalCustomer: 2000, deliveryFee: 500,
+      totalAmount: 2500 + tip, paymentMethod: 'CASH', paymentStatus: 'CAPTURED',
+      tipAmount: tip, ...(opts.deliveredAt ? { deliveredAt: opts.deliveredAt } : {}),
     },
   });
   createdOrderIds.push(order.id);
@@ -78,56 +90,38 @@ afterAll(async () => {
   await app.close();
 });
 
-describe('post-delivery tip', () => {
-  it('adds a tip to a delivered order → AVAILABLE TIP earning for the rider', async () => {
+describe('post-delivery tip fails closed', () => {
+  it('refuses with TIP_COLLECTION_UNAVAILABLE and mutates nothing — no earning, no total change', async () => {
     const c = await makeCustomer();
     const order = await makeOrder(c.userId, 'DELIVERED', { deliveredAt: new Date() });
     const res = await inject(`/api/v1/customer/orders/${order.id}/tip`, { amount: 500 }, c.token);
-    expect(res.statusCode).toBe(200);
-    expect(res.json().data.tipAmount).toBe(500);
+    expect(res.statusCode).toBe(409);
+    expect(res.json().error?.code ?? res.json().code).toBe('TIP_COLLECTION_UNAVAILABLE');
 
+    const untouched = await app.prisma.order.findUniqueOrThrow({ where: { id: order.id } });
+    expect(Number(untouched.tipAmount)).toBe(0);
+    expect(Number(untouched.totalAmount)).toBe(2500);
     const earning = await app.prisma.earning.findFirst({ where: { orderId: order.id, type: 'TIP' } });
-    expect(earning).not.toBeNull();
-    expect(Number(earning!.amount)).toBe(500);
-    expect(earning!.status).toBe('AVAILABLE');
-    expect(earning!.riderId).toBe(riderId);
-
-    // D5-01: the tip must also land in the grand total, so the receipt lines
-    // (which itemize the tip) still sum to the printed total and admin GMV isn't
-    // undercounted. makeOrder starts at 2000 + 500 fee = 2500; +500 tip = 3000.
-    const updated = await app.prisma.order.findUniqueOrThrow({ where: { id: order.id } });
-    expect(Number(updated.tipAmount)).toBe(500);
-    expect(Number(updated.totalAmount)).toBe(3000);
-    expect(Number(updated.totalAmount)).toBe(Number(updated.subtotalCustomer) + Number(updated.deliveryFee) + Number(updated.tipAmount) - Number(updated.discount));
+    expect(earning).toBeNull();
   });
 
-  it('rejects a second tip on the same order', async () => {
+  it('a retry refuses identically — fail-closed is idempotent', async () => {
     const c = await makeCustomer();
     const order = await makeOrder(c.userId, 'DELIVERED', { deliveredAt: new Date() });
-    expect((await inject(`/api/v1/customer/orders/${order.id}/tip`, { amount: 300 }, c.token)).statusCode).toBe(200);
+    expect((await inject(`/api/v1/customer/orders/${order.id}/tip`, { amount: 300 }, c.token)).statusCode).toBe(409);
     expect((await inject(`/api/v1/customer/orders/${order.id}/tip`, { amount: 300 }, c.token)).statusCode).toBe(409);
   });
 
-  it('rejects tipping an order that isn’t delivered', async () => {
-    const c = await makeCustomer();
-    const order = await makeOrder(c.userId, 'PREPARING');
-    expect((await inject(`/api/v1/customer/orders/${order.id}/tip`, { amount: 300 }, c.token)).statusCode).toBe(400);
-  });
-
-  it('rejects tipping outside the 7-day window', async () => {
-    const c = await makeCustomer();
-    const order = await makeOrder(c.userId, 'DELIVERED', { deliveredAt: new Date(Date.now() - 8 * 24 * 60 * 60 * 1000) });
-    expect((await inject(`/api/v1/customer/orders/${order.id}/tip`, { amount: 300 }, c.token)).statusCode).toBe(400);
-  });
-
-  it('a stranger cannot tip someone else’s order', async () => {
+  it("a stranger still cannot probe someone else's order — 404 before the 409", async () => {
     const owner = await makeCustomer();
     const stranger = await makeCustomer();
     const order = await makeOrder(owner.userId, 'DELIVERED', { deliveredAt: new Date() });
     expect((await inject(`/api/v1/customer/orders/${order.id}/tip`, { amount: 300 }, stranger.token)).statusCode).toBe(404);
   });
+});
 
-  it('createEarnings is idempotent — two concurrent completions pay the mover once', async () => {
+describe('checkout tips are untouched by the fail-closed law', () => {
+  it('createEarnings still pays a checkout tip, exactly once under concurrency', async () => {
     const c = await makeCustomer();
     const order = await makeOrder(c.userId, 'DELIVERED', { tipAmount: 300, deliveredAt: new Date() });
     const orders = new OrderService(app.prisma, app.io);

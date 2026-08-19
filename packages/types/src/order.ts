@@ -51,6 +51,28 @@ export enum PaymentStatus {
   PARTIALLY_REFUNDED = 'PARTIALLY_REFUNDED',
 }
 
+/** The only order-payment action Swift may return: open the vendor's validated
+ * direct-pay destination. It is not a Swift payment intent and creates no
+ * wallet balance, custody, or settlement obligation for Swift. */
+export interface MmgDirectPaymentAction {
+  kind: 'OPEN_EXTERNAL_URL';
+  method: 'MOBILE_MONEY';
+  provider: 'MMG';
+  fundsFlow: 'DIRECT_TO_VENDOR';
+  orderId: string;
+  recipientName: string;
+  amount: number;
+  url: string;
+}
+
+export interface OrderCheckoutResult<TOrder = unknown> {
+  order: TOrder;
+  orders: TOrder[];
+  grandTotal: number;
+  message: string;
+  paymentAction: MmgDirectPaymentAction | null;
+}
+
 export interface Order {
   id: string;
   orderNumber: string;

@@ -1,6 +1,7 @@
 /** @jsxImportSource react */
 import React from 'react';
 import { Dimensions, FlatList, Pressable, RefreshControl, ScrollView, View } from 'react-native';
+import Animated, { FadeInDown, ReduceMotion } from 'react-native-reanimated';
 import { Image } from 'expo-image';
 import { Feather } from '@expo/vector-icons';
 import { useNavigation } from '@react-navigation/native';
@@ -10,16 +11,19 @@ import { useDiscoveryCategories, useHome, useToggleFavorite } from '../../../hoo
 import { useAds } from '../../../hooks/ads';
 import { AdHeroVideo, AdTopCard, AdBar } from '../../../components/ads';
 import { PressableScale } from '../../../components/ui';
+import { grantedLocationFix } from '../../../lib/deviceLocation';
 import { haptic } from '../../../lib/haptics';
 import { useAuthStore } from '../../../stores/authStore';
 import { useLocationStore } from '../../../stores/locationStore';
 import { CategoryRail, CAT_RAIL_MIN_CHIPS } from '../CategoryRail';
-import { vendorImage, FOOD_IMAGES } from '../../../lib/images';
+import { vendorImage } from '../../../lib/images';
 import {
+  AwningEdge,
   Card,
   Chip,
   ErrorState,
   FoodCard,
+  GradientMasthead,
   LoadingBlock,
   Pictogram,
   type PictogramName,
@@ -68,8 +72,23 @@ function kmLabel(km: unknown): string | undefined {
   return n < 1 ? '<1 km' : `${n} km`;
 }
 
-function ServiceTile({ item, navigation }: { item: (typeof SERVICES)[number]; navigation: any }) {
+/** The one display-face moment on Home [DESIGN_NOTES 2026-08-18]: a
+ *  time-aware greeting — Guyana is a single timezone, the device clock is
+ *  the honest source. */
+function greetingLine(hour: number): string {
+  if (hour < 12) return 'Good morning';
+  if (hour < 17) return 'Good afternoon';
+  return 'Good evening';
+}
+
+function ServiceTile({ item, index, navigation }: { item: (typeof SERVICES)[number]; index: number; navigation: any }) {
   return (
+    // First-paint stagger [design-100x 9.4 `gentle`]: opacity + a 4dp rise,
+    // once per mount, honoring the system reduced-motion setting.
+    <Animated.View
+      entering={FadeInDown.duration(320).delay(index * 40).reduceMotion(ReduceMotion.System)}
+      style={{ width: '25%' }}
+    >
     <PressableScale
       strong
       onPress={() => {
@@ -78,7 +97,7 @@ function ServiceTile({ item, navigation }: { item: (typeof SERVICES)[number]; na
       }}
       accessibilityRole="button"
       accessibilityLabel={item.label}
-      style={{ width: '25%', alignItems: 'center', marginTop: space.lg }}
+      style={{ width: '100%', alignItems: 'center', marginTop: space.lg }}
     >
       <View
         style={{
@@ -96,6 +115,7 @@ function ServiceTile({ item, navigation }: { item: (typeof SERVICES)[number]; na
         {item.label}
       </T>
     </PressableScale>
+    </Animated.View>
   );
 }
 
@@ -103,14 +123,15 @@ export function HomeScreen() {
   const navigation = useNavigation<any>();
   const insets = useSafeAreaInsets();
   const { user, isAuthenticated, promptLogin } = useAuthStore();
-  const { latitude, longitude, address } = useLocationStore();
+  const { latitude, longitude, address, status } = useLocationStore();
+  const locationFix = grantedLocationFix(latitude, longitude, status);
 
-  const home = useHome<any>(latitude ?? undefined, longitude ?? undefined);
+  const home = useHome<any>(locationFix?.latitude, locationFix?.longitude);
   const toggleFav = useToggleFavorite();
   // Category rail (#17): flag-gated server-side; when live it SUPERSEDES the
   // old "Find by category" section (one category system on Home, ever —
   // spec 6.2). Flag off → both absent/present exactly as before (CAT-G).
-  const discovery = useDiscoveryCategories(latitude ?? undefined, longitude ?? undefined);
+  const discovery = useDiscoveryCategories(locationFix?.latitude, locationFix?.longitude);
   const railLive = !!discovery.data?.enabled && (discovery.data?.categories.length ?? 0) >= CAT_RAIL_MIN_CHIPS;
 
   // Ads hydrate independently (§13.4): home content NEVER waits on this call,
@@ -119,6 +140,10 @@ export function HomeScreen() {
   const ads = useAds('*');
   const adSlots = ads.data?.data?.placements;
   const adTrackable = ads.data?.trackable ?? false;
+  const adTrackingScope = ads.data?.trackingScope ?? null;
+  const adTrackingKey = adTrackingScope
+    ? `${adTrackingScope.kind}:${adTrackingScope.scopeId}:${adTrackingScope.generation}`
+    : 'display-only';
   const heroAd = adSlots?.['home_hero_video']?.items[0];
   const topAd = adSlots?.['home_top_card']?.items[0];
   const barSlot = adSlots?.['home_ad_bar'];
@@ -133,7 +158,7 @@ export function HomeScreen() {
 
   const feed = home.data;
   const featured: any[] = feed?.featured ?? [];
-  const nearby: any[] = feed?.nearby ?? [];
+  const nearby: any[] = locationFix ? (feed?.nearby ?? []) : [];
   const orderAgain: any[] = feed?.orderAgain ?? [];
   const activeOrder = feed?.activeOrder;
   // Names repeat across stores ("Popular" everywhere) — one chip per name.
@@ -156,9 +181,10 @@ export function HomeScreen() {
           <RefreshControl refreshing={home.isRefetching} onRefresh={() => home.refetch()} tintColor={color.white} />
         }
       >
-        {/* Compact brand header: where + who, then search. No taglines — the
-            services below ARE the message (Grab anatomy). */}
-        <View style={{ backgroundColor: color.brand[500], paddingTop: insets.top + space.sm, paddingBottom: space.xl, paddingHorizontal: GUTTER }}>
+        {/* The masthead [DESIGN_NOTES 2026-08-18]: the brand wash deepens
+            500→600 and closes with the awning hem — Home's signature. Where +
+            who as the eyebrow, ONE display-face greeting, then search. */}
+        <GradientMasthead style={{ paddingTop: insets.top + space.sm, paddingBottom: space.xl, paddingHorizontal: GUTTER }}>
           <View style={{ flexDirection: 'row', alignItems: 'center' }}>
             <Pressable
               onPress={() => (isAuthenticated ? navigation.navigate('Addresses') : navigation.navigate('LocationPicker'))}
@@ -169,7 +195,7 @@ export function HomeScreen() {
               </T>
               <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4, marginTop: 2 }}>
                 <T variant="body" weight="semibold" tone="onBrand" numberOfLines={1} style={{ flexShrink: 1 }}>
-                  {address ?? 'Set your location'}
+                  {locationFix ? (address ?? 'Current location') : 'Set your location'}
                 </T>
                 <Feather name="chevron-down" size={16} color={color.white} />
               </View>
@@ -197,8 +223,13 @@ export function HomeScreen() {
             </View>
           </View>
 
+          <T variant="title" tone="onBrand" numberOfLines={1} style={{ marginTop: space.lg }}>
+            {greetingLine(new Date().getHours())}
+            {user?.firstName?.trim() ? `, ${user.firstName.trim()}` : ''}
+          </T>
+
           {/* Search — the front door on every super app */}
-          <Pressable onPress={() => navigation.navigate('Search')} style={{ marginTop: space.lg }}>
+          <Pressable onPress={() => navigation.navigate('Search')} style={{ marginTop: space.md }}>
             {({ pressed }) => (
               <View
                 style={{
@@ -219,13 +250,14 @@ export function HomeScreen() {
               </View>
             )}
           </Pressable>
-        </View>
+        </GradientMasthead>
+        <AwningEdge />
 
-        {/* THE services grid — first thing under the header, 4x2, drawn icons */}
+        {/* THE services grid — the shelf under the awning: 4x2, drawn icons */}
         <View
           style={{
             marginHorizontal: GUTTER,
-            marginTop: -space.md,
+            marginTop: space.sm,
             borderRadius: radius.xl,
             backgroundColor: color.surface.base,
             paddingBottom: space.lg,
@@ -235,8 +267,8 @@ export function HomeScreen() {
             ...elevation.card,
           }}
         >
-          {SERVICES.map((s) => (
-            <ServiceTile key={s.key} item={s} navigation={navigation} />
+          {SERVICES.map((s, i) => (
+            <ServiceTile key={s.key} item={s} index={i} navigation={navigation} />
           ))}
         </View>
 
@@ -278,7 +310,12 @@ export function HomeScreen() {
         {/* Tier 1 — hero video slot (§13.1). Present only when sold+live. */}
         {heroAd ? (
           <View style={{ paddingHorizontal: GUTTER, marginTop: space['2xl'] }}>
-            <AdHeroVideo item={heroAd} trackable={adTrackable} />
+            <AdHeroVideo
+              key={`hero:${adTrackingKey}`}
+              item={heroAd}
+              trackable={adTrackable}
+              trackingScope={adTrackingScope}
+            />
           </View>
         ) : null}
 
@@ -294,6 +331,7 @@ export function HomeScreen() {
                 <SectionHeader
                   size="lg"
                   title="Order again"
+                  eyebrow="From your orders"
                   onSeeAll={() => navigation.navigate('Tabs', { screen: 'Activity' })}
                   style={{ paddingHorizontal: GUTTER, marginTop: space['2xl'] }}
                 />
@@ -321,23 +359,34 @@ export function HomeScreen() {
               </>
             ) : null}
 
-            {/* Honest promo — 0% fees is the business model, not marketing */}
-            <View style={{ paddingHorizontal: GUTTER, marginTop: space['2xl'] }}>
-              <PromoBanner
-                title="0% fees"
-                sub="No markups — pay cash on delivery."
-                cta="Order now"
-                image={FOOD_IMAGES[2]}
-                onPress={() => navigation.navigate('Search')}
-              />
-            </View>
-
-            {/* Tier 2 — top card slot (§13.2), the widget-row area. */}
-            {topAd ? (
-              <View style={{ paddingHorizontal: GUTTER, marginTop: space['2xl'] }}>
-                <AdTopCard item={topAd} trackable={adTrackable} />
+            {/* The commercial band — house promo + sold placements grouped on
+                the sunken surface so the rhythm reads: yours, theirs, then
+                back to the food [DESIGN_NOTES 2026-08-18]. */}
+            <View style={{ backgroundColor: color.surface.sunken, paddingVertical: space['2xl'], marginTop: space['2xl'] }}>
+              {/* Honest promo — 0% fees is the business model, not marketing */}
+              <View style={{ paddingHorizontal: GUTTER }}>
+                <PromoBanner
+                  variant="tint"
+                  pictogram="orders"
+                  title="0% fees, always"
+                  sub="Swift never marks up your order. Pay cash when it arrives."
+                  cta="Order now"
+                  onPress={() => navigation.navigate('Search')}
+                />
               </View>
-            ) : null}
+
+              {/* Tier 2 — top card slot (§13.2), the widget-row area. */}
+              {topAd ? (
+                <View style={{ paddingHorizontal: GUTTER, marginTop: space['2xl'] }}>
+                  <AdTopCard
+                    key={`top:${adTrackingKey}`}
+                    item={topAd}
+                    trackable={adTrackable}
+                    trackingScope={adTrackingScope}
+                  />
+                </View>
+              ) : null}
+            </View>
 
             {/* Find by Category — superseded by the rail when it is live
                 (spec 6.2: one category system on Home, ever). */}
@@ -369,9 +418,11 @@ export function HomeScreen() {
             {barSlot && barSlot.items.length > 0 ? (
               <View style={{ paddingHorizontal: GUTTER, marginTop: space['2xl'] }}>
                 <AdBar
+                  key={`bar:${adTrackingKey}`}
                   items={barSlot.items}
                   rotationSeconds={barSlot.rotationSeconds}
                   trackable={adTrackable}
+                  trackingScope={adTrackingScope}
                   width={SCREEN_W - GUTTER * 2}
                 />
               </View>
@@ -381,6 +432,7 @@ export function HomeScreen() {
             <SectionHeader
               size="lg"
               title="Recommended for you"
+              eyebrow="Open now"
               onSeeAll={() => navigation.navigate('Recommended')}
               style={{ paddingHorizontal: GUTTER, marginTop: space['2xl'] }}
             />
@@ -403,7 +455,10 @@ export function HomeScreen() {
                     rating={v.displayRating ?? null}
                     ratingBucket={v.ratingBucket}
                     topRated={v.topRated}
-                    meta={[v.etaMin ? `${v.etaMin} min` : null, kmLabel(v.distanceKm)].filter(Boolean).join(' · ') || undefined}
+                    meta={[
+                      v.etaMin ? `${v.etaMin} min` : null,
+                      locationFix ? kmLabel(v.distanceKm) : null,
+                    ].filter(Boolean).join(' · ') || undefined}
                     favorite={v.isFavorite}
                     onToggleFavorite={() => onFavorite(v.id, !!v.isFavorite)}
                     onPress={() => navigation.navigate('Restaurant', { vendorId: v.id })}
@@ -432,7 +487,10 @@ export function HomeScreen() {
                           rating={v.displayRating ?? null}
                           bucket={v.ratingBucket}
                           topRated={v.topRated}
-                          extra={[v.etaMin ? `${v.etaMin} min` : null, kmLabel(v.distanceKm)].filter(Boolean).join(' · ') || undefined}
+                          extra={[
+                            v.etaMin ? `${v.etaMin} min` : null,
+                            locationFix ? kmLabel(v.distanceKm) : null,
+                          ].filter(Boolean).join(' · ') || undefined}
                         />
                       }
                       onPress={() => navigation.navigate('Restaurant', { vendorId: v.id })}

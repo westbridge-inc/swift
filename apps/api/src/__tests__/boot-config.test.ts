@@ -6,7 +6,25 @@ import { assertSafeBootConfig, assertProductionData } from '../utils/boot-config
 // without the OTP-bypass guard. Non-production is unaffected.
 
 const KEK = Buffer.alloc(32, 7).toString('base64'); // valid 32-byte base64
-const good: Record<string, string | undefined> = { NODE_ENV: 'production', MASTER_KEK: KEK, STORAGE_SIGNING_SECRET: 'a-real-secret', STORAGE_PROVIDER: 's3', NOTIFICATION_PROVIDER: 'twilio' };
+const good: Record<string, string | undefined> = {
+  NODE_ENV: 'production',
+  MASTER_KEK: KEK,
+  STORAGE_SIGNING_SECRET: 'a-real-secret',
+  STORAGE_PROVIDER: 's3',
+  NOTIFICATION_PROVIDER: 'twilio',
+  JWT_SECRET: 'test-jwt-secret-at-least-32-characters',
+  KYC_PROVIDER: 'didit',
+  DIDIT_API_KEY: 'didit-live-key',
+  PAYMENT_PROVIDER: 'stripe',
+  STRIPE_SECRET_KEY: 'sk_live_boot_config_test',
+  MMG_DRIVER: 'live',
+  MMG_API_URL: 'https://api.mmg.gy/olive/publisher/v1',
+  MMG_API_KEY: 'mmg-api-key',
+  MMG_MERCHANT_ID: '5926000000',
+  MMG_PASSWORD: 'mmg-password',
+  MMG_MKEY: 'mmg-mkey',
+  MMG_MSECRET: 'mmg-msecret',
+};
 
 describe('assertSafeBootConfig — fail-closed production secrets', () => {
   it('boots when every required secret is present', () => {
@@ -31,6 +49,39 @@ describe('assertSafeBootConfig — fail-closed production secrets', () => {
 
   it('still refuses DEV_OTP_BYPASS=1 in production', () => {
     expect(() => assertSafeBootConfig({ ...good, DEV_OTP_BYPASS: '1' })).toThrow(/DEV_OTP_BYPASS/);
+  });
+
+  it('requires a strong keyed-HMAC secret for OTP records', () => {
+    expect(() => assertSafeBootConfig({ ...good, JWT_SECRET: undefined })).toThrow(/OTP_HASH_SECRET|JWT_SECRET/);
+    expect(() => assertSafeBootConfig({ ...good, JWT_SECRET: 'too-short' })).toThrow(/32 characters/);
+    expect(() => assertSafeBootConfig({ ...good, JWT_SECRET: undefined, OTP_HASH_SECRET: 'dedicated-otp-secret-at-least-32-chars' })).not.toThrow();
+  });
+
+  it('refuses sandbox or unconfigured KYC in production', () => {
+    expect(() => assertSafeBootConfig({ ...good, KYC_PROVIDER: undefined })).toThrow(/KYC_PROVIDER/);
+    expect(() => assertSafeBootConfig({ ...good, KYC_PROVIDER: 'sandbox' })).toThrow(/KYC_PROVIDER/);
+    expect(() => assertSafeBootConfig({ ...good, DIDIT_API_KEY: undefined })).toThrow(/DIDIT_API_KEY/);
+    expect(() => assertSafeBootConfig({ ...good, KYC_PROVIDER: 'idanalyzer', ID_ANALYZER_API_KEY: undefined })).toThrow(/ID_ANALYZER_API_KEY/);
+  });
+
+  it('refuses sandbox/test subscription card processors in production', () => {
+    expect(() => assertSafeBootConfig({ ...good, PAYMENT_PROVIDER: undefined })).toThrow(/PAYMENT_PROVIDER/);
+    expect(() => assertSafeBootConfig({ ...good, PAYMENT_PROVIDER: 'sandbox' })).toThrow(/PAYMENT_PROVIDER/);
+    expect(() => assertSafeBootConfig({ ...good, STRIPE_SECRET_KEY: 'sk_test_not_money' })).toThrow(/live STRIPE_SECRET_KEY/);
+    expect(() => assertSafeBootConfig({
+      ...good,
+      PAYMENT_PROVIDER: 'powertranz',
+      PAYMENT_GATEWAY_KEY: 'id',
+      PAYMENT_GATEWAY_SECRET: 'secret',
+      POWERTRANZ_API_URL: 'https://staging.ptranz.com',
+    })).toThrow(/non-staging/);
+  });
+
+  it('refuses sandbox, UAT, or incomplete MMG collection in production', () => {
+    expect(() => assertSafeBootConfig({ ...good, MMG_DRIVER: undefined })).toThrow(/MMG_DRIVER/);
+    expect(() => assertSafeBootConfig({ ...good, MMG_DRIVER: 'sandbox' })).toThrow(/MMG_DRIVER/);
+    expect(() => assertSafeBootConfig({ ...good, MMG_MSECRET: undefined })).toThrow(/MMG_MSECRET/);
+    expect(() => assertSafeBootConfig({ ...good, MMG_API_URL: 'https://mwallet.mmgtest.net/olive/publisher/v1' })).toThrow(/non-UAT/);
   });
 
   it('SWIFT-012: refuses the dev (console) notification provider in production — OTP would never send', () => {

@@ -23,6 +23,7 @@ import {
   Money,
   PillButton,
   PopupCard,
+  PopupTitle,
   SectionHeader,
   T,
   TonePill,
@@ -672,9 +673,9 @@ export function RestaurantScreen() {
       {/* Operating hours (kit 17) */}
       <PopupCard visible={showHours} onClose={() => setShowHours(false)}>
         <IconChip icon="clock" size={56} />
-        <T variant="heading" style={{ marginTop: space.md }}>
+        <PopupTitle variant="heading" style={{ marginTop: space.md }}>
           Opening hours
-        </T>
+        </PopupTitle>
         <View style={{ alignSelf: 'stretch', marginTop: space.lg }}>
           {(v.operatingHours ?? [])
             .slice()
@@ -699,9 +700,9 @@ export function RestaurantScreen() {
       {/* Active promos */}
       <PopupCard visible={showPromos} onClose={() => setShowPromos(false)}>
         <IconChip icon="tag" size={56} />
-        <T variant="heading" style={{ marginTop: space.md }}>
+        <PopupTitle variant="heading" style={{ marginTop: space.md }}>
           Promos
-        </T>
+        </PopupTitle>
         <View style={{ alignSelf: 'stretch', marginTop: space.lg, gap: space.md }}>
           {promos.map((p: any) => (
             <View key={p.code} style={{ borderWidth: 1, borderColor: color.border.subtle, borderRadius: radius.md, padding: space.md }}>

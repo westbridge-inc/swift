@@ -10,6 +10,8 @@ const locationAlways =
   'Swift keeps your live position on the map while you are online for deliveries or rides.';
 const cameraPermission =
   'Swift uses the camera for your profile selfie and to photograph documents and deliveries.';
+const splashBackgroundColor = '#803B3B';
+const splashImage = './assets/icon.png';
 
 const config: ExpoConfig = {
   // Native project/module name — 'Swift' itself is reserved by Apple's
@@ -25,8 +27,11 @@ const config: ExpoConfig = {
   newArchEnabled: true,
   backgroundColor: '#FFFFFF',
   splash: {
-    // Kit splash = a full brand wash (Indian Red) while the app boots.
-    backgroundColor: '#803B3B',
+    // Keep the legacy manifest and the native config plugin on the same asset.
+    // A background-only native generation left a stale storyboard image name
+    // with no matching asset, producing `Could not load "SplashScreen"`.
+    backgroundColor: splashBackgroundColor,
+    image: splashImage,
     resizeMode: 'contain',
   },
   ios: {
@@ -77,7 +82,15 @@ const config: ExpoConfig = {
   },
   plugins: [
     'expo-font',
-    'expo-splash-screen',
+    [
+      'expo-splash-screen',
+      {
+        backgroundColor: splashBackgroundColor,
+        image: splashImage,
+        imageWidth: 140,
+        resizeMode: 'contain',
+      },
+    ],
     ['expo-notifications', { color: '#803B3B' }],
     'react-native-maps',
     'expo-image',

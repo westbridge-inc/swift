@@ -4,6 +4,13 @@ import type { PrismaClient } from '@prisma/client';
 import type { Server } from 'socket.io';
 import type { FastifyBaseLogger } from 'fastify';
 import { captureError } from '../plugins/observability';
+import { AppError } from '../utils/errors';
+import { closeResourcesBounded, idempotentAsync, positiveDurationMs } from '../utils/async-lifecycle';
+import { runWithTenant } from '../plugins/tenant-context';
+import {
+  requireActiveDiscoveryTenant,
+  runForActiveDiscoveryTenants,
+} from '../modules/discovery/tenant-boundary';
 
 export interface JobContext {
   prisma: PrismaClient;
@@ -70,19 +77,69 @@ export const DEFAULT_JOB_OPTIONS = {
   removeOnFail: 50,
 };
 
-export function createQueues(redis: Redis) {
+export type SwiftQueues = {
+  orderQueue: Queue;
+  subscriptionQueue: Queue;
+  settlementQueue: Queue;
+  notificationQueue: Queue;
+  verificationQueue: Queue;
+  dispatchQueue: Queue;
+  searchQueue: Queue;
+};
+
+export function createQueues(
+  redis: Redis,
+  log?: Pick<FastifyBaseLogger, 'error'>,
+): SwiftQueues {
   const connection = bullConnectionOpts(redis);
   const defaultJobOptions = DEFAULT_JOB_OPTIONS;
-
-  return {
-    orderQueue: new Queue(QUEUE_NAMES.ORDER, { connection, defaultJobOptions }),
-    subscriptionQueue: new Queue(QUEUE_NAMES.SUBSCRIPTION, { connection, defaultJobOptions }),
-    settlementQueue: new Queue(QUEUE_NAMES.SETTLEMENT, { connection, defaultJobOptions }),
-    notificationQueue: new Queue(QUEUE_NAMES.NOTIFICATION, { connection, defaultJobOptions }),
-    verificationQueue: new Queue(QUEUE_NAMES.VERIFICATION, { connection, defaultJobOptions }),
-    dispatchQueue: new Queue(QUEUE_NAMES.DISPATCH, { connection, defaultJobOptions }),
-    searchQueue: new Queue(QUEUE_NAMES.SEARCH, { connection, defaultJobOptions }),
+  const created: Queue[] = [];
+  const build = (name: string): Queue => {
+    const queue = new Queue(name, { connection, defaultJobOptions });
+    // EventEmitter treats an unobserved `error` as fatal. Every shared producer
+    // gets its listener at construction time, before its Redis connection can
+    // fail asynchronously during boot or reconnect.
+    queue.on('error', (err) => {
+      log?.error({ queue: name, err }, 'BullMQ queue error');
+      try {
+        captureError(err, { queue: name, component: 'bullmq-producer' });
+      } catch (captureFailure) {
+        log?.error({ queue: name, err: captureFailure }, 'Failed to capture BullMQ queue error');
+      }
+    });
+    created.push(queue);
+    return queue;
   };
+
+  try {
+    return {
+      orderQueue: build(QUEUE_NAMES.ORDER),
+      subscriptionQueue: build(QUEUE_NAMES.SUBSCRIPTION),
+      settlementQueue: build(QUEUE_NAMES.SETTLEMENT),
+      notificationQueue: build(QUEUE_NAMES.NOTIFICATION),
+      verificationQueue: build(QUEUE_NAMES.VERIFICATION),
+      dispatchQueue: build(QUEUE_NAMES.DISPATCH),
+      searchQueue: build(QUEUE_NAMES.SEARCH),
+    };
+  } catch (error) {
+    // Constructors are synchronous, but their Redis clients may already be
+    // connecting. Observe every close promise so partial construction cannot
+    // surface a later unhandled rejection while the caller fails boot.
+    void Promise.allSettled(created.map((queue) => Promise.resolve().then(() => queue.close())));
+    throw error;
+  }
+}
+
+export async function enqueueVendorAlertFollowup(
+  queues: Pick<SwiftQueues, 'notificationQueue'>,
+  orderId: string,
+): Promise<void> {
+  await queues.notificationQueue.add('vendor-alert-escalate', { orderId, level: 1 }, {
+    // §A1: SMS at +75s total when loud (30+45); default stays 60+60.
+    delay: process.env['ALERTS_LOUD'] === '1' ? 45_000 : 60_000,
+    removeOnComplete: 100,
+    removeOnFail: 50,
+  });
 }
 
 /** Weekly vendor settlement snapshot [SWIFT-AUD-D6-05 / D7-01].
@@ -196,47 +253,107 @@ export async function opsPageOnce(
 }
 
 /** Vendor-no-response auto-cancel [SWIFT-021]. Exported so tests drive it
- *  directly; the order worker delegates here. A CAS single-winner cancel of an
- *  order that is STILL PENDING and no longer HELD — the vendor had the hold
- *  window plus the response SLA and never accepted. Restocks (goods were
- *  reserved at checkout; a PENDING order has no rider/float), notifies the
- *  customer honestly, and — crucially — leaves `cancelledBy` unset, so this
+ *  directly; the order worker delegates here. The canonical locked transition
+ *  revalidates that the order is STILL PENDING and no longer HELD, then commits
+ *  cancellation, booking/search closure, restock, mover/float cleanup, and the
+ *  immutable status log in one boundary. It leaves `cancelledBy` unset, so this
  *  NEVER counts against the customer's risk score (the vendor was silent, not
  *  the customer; the risk query requires cancelledBy === the customer). */
 export async function autoCancelUnresponsiveOrder(ctx: JobContext, orderId: string): Promise<boolean> {
-  const cancelled = await ctx.prisma.order.updateMany({
-    where: {
-      id: orderId,
-      status: 'PENDING',
-      OR: [{ holdExpiresAt: null }, { holdExpiresAt: { lte: new Date() } }],
-    },
-    data: { status: 'CANCELLED', cancelledAt: new Date(), cancellationReason: 'Auto-cancelled: vendor did not respond' },
-  });
-  if (cancelled.count === 0) return false; // held, already accepted, or gone — no-op
-
-  const order = await ctx.prisma.order.findUniqueOrThrow({ where: { id: orderId } });
-  await ctx.prisma.orderStatusLog.create({
-    data: { orderId, status: 'CANCELLED', note: 'Auto-cancelled: vendor did not respond' },
-  });
-
   const { OrderService } = await import('../modules/order/order.service');
-  await new OrderService(ctx.prisma, ctx.io).applyCancellationSideEffects(
-    { id: order.id, paymentMethod: order.paymentMethod, riderId: order.riderId, driverId: order.driverId, subtotalBase: Number(order.subtotalBase) },
-    { restock: true },
-  );
+  const reason = 'Auto-cancelled: vendor did not respond';
+  // [REPORT-007-v4 F-02] Read the payment shape BEFORE the transition: an MMG
+  // order's customer may have paid externally without the store attesting, so
+  // the copy below must never claim "you were not charged" for MMG.
+  const paymentPreview = await ctx.prisma.order.findUnique({
+    where: { id: orderId },
+    select: { paymentMethod: true, paymentStatus: true },
+  });
+  const mmgAmbiguous = paymentPreview?.paymentMethod === 'MOBILE_MONEY';
+  let order: { vendorId: string | null; customerId: string; orderNumber: string };
+  try {
+    ({ order } = await new OrderService(ctx.prisma, ctx.io).transitionOrderAtomically({
+      orderId,
+      target: 'CANCELLED',
+      allowedFrom: ['PENDING'],
+      changedBy: null,
+      note: reason,
+      cancellation: { by: null, reason },
+      requireHoldExpired: true,
+      releaseStaleMoverPointer: true,
+      invalidStatus: () => new AppError(409, 'AUTO_CANCEL_NOT_ELIGIBLE', 'Order is held or no longer pending'),
+    }));
+  } catch (error) {
+    if (error instanceof AppError && (error.code === 'AUTO_CANCEL_NOT_ELIGIBLE' || error.code === 'NOT_FOUND')) {
+      return false; // held, already accepted, already cancelled, or gone — no-op
+    }
+    // [REPORT-006 F-006-01] A vendor who confirmed the MMG payment landed HAS
+    // responded — auto-cancelling would mint CANCELLED+CAPTURED with no refund
+    // rail. The canonical seam refuses; treat it as a clean no-op, not a
+    // BullMQ retry loop.
+    if (error instanceof AppError && error.code === 'MMG_CANCEL_UNAVAILABLE') {
+      return false;
+    }
+    throw error;
+  }
 
   ctx.io.to(`order:${orderId}`).emit('order:status_changed', { orderId, status: 'CANCELLED' });
   if (order.vendorId) ctx.io.to(`vendor:${order.vendorId}`).emit('order:status_changed', { orderId, status: 'CANCELLED' });
 
   const { NotificationService } = await import('../modules/notification/notification.service');
-  await new NotificationService(ctx.prisma, ctx.io).send({
+  const notifications = new NotificationService(ctx.prisma, ctx.io);
+  await notifications.send({
     userId: order.customerId,
     type: 'ORDER_UPDATE',
     title: 'Order cancelled — no response',
-    body: `We're sorry — the store didn't respond to order ${order.orderNumber} in time, so it was cancelled. You were not charged; please try another store.`,
+    body: mmgAmbiguous
+      ? `We're sorry — the store didn't respond to order ${order.orderNumber} in time, so it was cancelled. If you already sent the MMG payment, the store refunds you directly; please try another store.`
+      : `We're sorry — the store didn't respond to order ${order.orderNumber} in time, so it was cancelled. You were not charged; please try another store.`,
     data: { orderId, status: 'CANCELLED' },
   });
+  // [REPORT-007-v4 F-02 → REPORT-012 F-012-04] The store holds the only rail
+  // that can make an already-paid MMG customer whole — every operational
+  // cancellation flows through the ONE publication seam.
+  if (mmgAmbiguous && order.vendorId) {
+    const { publishUnattestedMmgCancellation } = await import('../modules/order/order.service');
+    await publishUnattestedMmgCancellation(ctx.prisma, notifications, {
+      orderId,
+      orderNumber: order.orderNumber,
+      vendorId: order.vendorId,
+      storeBody: `Order ${order.orderNumber} was auto-cancelled (no response) before its MMG payment was confirmed. If the customer's transfer arrived in your MMG, refund them directly.`,
+    });
+  }
   ctx.log.info({ orderId }, 'Order auto-cancelled (vendor no-response)');
+  return true;
+}
+
+/** Delivery-window auto-completion. COMPLETED and its immutable status log
+ * share the canonical row-lock transaction; retries after a committed attempt
+ * are a clean no-op, while an injected pre-commit failure leaves DELIVERED for
+ * BullMQ to retry. */
+export async function autoCompleteDeliveredOrder(ctx: JobContext, orderId: string): Promise<boolean> {
+  const { OrderService } = await import('../modules/order/order.service');
+  try {
+    await new OrderService(ctx.prisma, ctx.io).transitionOrderAtomically({
+      orderId,
+      target: 'COMPLETED',
+      allowedFrom: ['DELIVERED'],
+      changedBy: null,
+      note: 'Auto-completed after delivery window',
+      invalidStatus: () => new AppError(409, 'AUTO_COMPLETE_NOT_ELIGIBLE', 'Order is not awaiting auto-completion'),
+    });
+  } catch (error) {
+    if (error instanceof AppError && (error.code === 'AUTO_COMPLETE_NOT_ELIGIBLE' || error.code === 'NOT_FOUND')) {
+      return false;
+    }
+    throw error;
+  }
+
+  try {
+    ctx.log.info({ orderId }, 'Order auto-completed');
+  } catch {
+    // Logging cannot turn a committed terminal transition into a failed job.
+  }
   return true;
 }
 
@@ -261,11 +378,42 @@ export async function runCollusionAffinityScan(ctx: JobContext): Promise<{ flagg
   return { flaggedPairs: pairs.length };
 }
 
-export function createWorkers(ctx: JobContext) {
+export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
   const connection = bullConnectionOpts(ctx.redis);
+  const constructedWorkers: Worker[] = [];
+  const buildWorker = (
+    name: string,
+    processor: (job: Job) => Promise<void>,
+    options: { connection: ConnectionOptions; concurrency: number },
+  ): Worker => {
+    // Two-phase boot: constructing a Worker normally starts its processor
+    // immediately. Keep every consumer dormant until all seven connections and
+    // every recurring schedule are committed by initializeJobRuntime.
+    const worker = new Worker(name, processor, { ...options, autorun: false });
+    constructedWorkers.push(worker);
+    worker.on('failed', (job, err) => {
+      ctx.log.error({ queue: name, jobName: job?.name, jobId: job?.id, attempts: job?.attemptsMade, data: job?.data, err }, 'BullMQ job failed');
+      try {
+        captureError(err, { queue: name, jobName: job?.name, jobId: job?.id, attempts: job?.attemptsMade });
+      } catch (captureFailure) {
+        ctx.log.error({ queue: name, err: captureFailure }, 'Failed to capture BullMQ job failure');
+      }
+    });
+    worker.on('error', (err) => {
+      ctx.log.error({ queue: name, err }, 'BullMQ worker error');
+      try {
+        captureError(err, { queue: name });
+      } catch (captureFailure) {
+        ctx.log.error({ queue: name, err: captureFailure }, 'Failed to capture BullMQ worker error');
+      }
+    });
+    return worker;
+  };
+
+  try {
 
   // ORDER JOBS: auto-cancel, auto-complete
-  const orderWorker = new Worker(
+  const orderWorker = buildWorker(
     QUEUE_NAMES.ORDER,
     async (job: Job) => {
       switch (job.name) {
@@ -274,18 +422,7 @@ export function createWorkers(ctx: JobContext) {
           break;
         }
         case 'auto-complete': {
-          const { orderId } = job.data;
-          const order = await ctx.prisma.order.findUnique({ where: { id: orderId } });
-          if (order && order.status === 'DELIVERED') {
-            await ctx.prisma.order.update({
-              where: { id: orderId },
-              data: { status: 'COMPLETED' },
-            });
-            await ctx.prisma.orderStatusLog.create({
-              data: { orderId, status: 'COMPLETED', note: 'Auto-completed after delivery window' },
-            });
-            ctx.log.info({ orderId }, 'Order auto-completed');
-          }
+          await autoCompleteDeliveredOrder(ctx, job.data.orderId);
           break;
         }
       }
@@ -302,7 +439,7 @@ export function createWorkers(ctx: JobContext) {
   // the still-present dispatch-planner into claimOrder deliberately.)
 
   // SUBSCRIPTION BILLING — idempotent BillingService, never wallets
-  const subscriptionWorker = new Worker(
+  const subscriptionWorker = buildWorker(
     QUEUE_NAMES.SUBSCRIPTION,
     async (job: Job) => {
       const { BillingService } = await import('../modules/billing/billing.service');
@@ -375,7 +512,7 @@ export function createWorkers(ctx: JobContext) {
 
   // SETTLEMENT: weekly vendor payouts (logic lives in runWeeklySettlement so
   // tests can prove its idempotency without BullMQ plumbing)
-  const settlementWorker = new Worker(
+  const settlementWorker = buildWorker(
     QUEUE_NAMES.SETTLEMENT,
     async (job: Job) => {
       if (job.name !== 'process-settlements') return;
@@ -385,7 +522,7 @@ export function createWorkers(ctx: JobContext) {
   );
 
   // VERIFICATION: daily expiry sweep + 30-day reminders
-  const verificationWorker = new Worker(
+  const verificationWorker = buildWorker(
     QUEUE_NAMES.VERIFICATION,
     async (job: Job) => {
       if (job.name === 'expiry-sweep') {
@@ -495,7 +632,7 @@ export function createWorkers(ctx: JobContext) {
   );
 
   // NOTIFICATIONS: vendor-alert escalation — re-alert, then SMS
-  const notificationWorker = new Worker(
+  const notificationWorker = buildWorker(
     QUEUE_NAMES.NOTIFICATION,
     async (job: Job) => {
       if (job.name !== 'vendor-alert-escalate') return;
@@ -506,14 +643,7 @@ export function createWorkers(ctx: JobContext) {
       const outcome = await escalateVendorAlert(ctx.prisma, ctx.io, getChannels(), orderId, level);
 
       if (outcome === 'realerted') {
-        const queue = new Queue(QUEUE_NAMES.NOTIFICATION, { connection });
-        await queue.add('vendor-alert-escalate', { orderId, level: 1 }, {
-          // §A1: SMS at +75s total when loud (30+45); default stays 60+60.
-          delay: process.env['ALERTS_LOUD'] === '1' ? 45_000 : 60_000,
-          removeOnComplete: 100,
-          removeOnFail: 50,
-        });
-        await queue.close();
+        await enqueueVendorAlertFollowup(queues, orderId);
       }
     },
     { connection, concurrency: 5 },
@@ -521,11 +651,41 @@ export function createWorkers(ctx: JobContext) {
 
   // DISPATCH: offer cascade — start offers, enforce the 20s timeout, retry
   // an exhausted order once, and sweep ghost movers off the online pool.
-  const dispatchWorker = new Worker(
+  const dispatchWorker = buildWorker(
     QUEUE_NAMES.DISPATCH,
     async (job: Job) => {
       const { DispatchService, sweepStaleMovers, reconcileStuckDispatch, recoverStrandedTaxiRides } = await import('../modules/dispatch/dispatch.service');
       const { getMapsProvider } = await import('../providers/maps/maps-provider');
+
+      if (job.name === 'mover-revocation-outbox') {
+        const dispatch = new DispatchService(
+          ctx.prisma,
+          ctx.redis,
+          ctx.io,
+          getMapsProvider(),
+          async (orderId, moverId, delayMs, attemptId) => {
+            await queues.dispatchQueue.add('offer-timeout', { orderId, riderId: moverId, attemptId }, {
+              delay: delayMs,
+              removeOnComplete: 100,
+              removeOnFail: 50,
+            });
+          },
+          async (orderId, delayMs) => {
+            await queues.dispatchQueue.add('dispatch-order', { orderId }, {
+              delay: delayMs,
+              removeOnComplete: 100,
+              removeOnFail: 50,
+            });
+            return true;
+          },
+        );
+        const { processMoverRevocationOutboxBatch } = await import('../modules/mover-revocation-outbox');
+        const result = await processMoverRevocationOutboxBatch({ ...ctx, dispatch });
+        if (result.processed + result.failed > 0) {
+          ctx.log.info(result, 'mover revocation outbox sweep');
+        }
+        return;
+      }
 
       if (job.name === 'scheduler-heartbeat') {
         // Liveness beacon for the job scheduler (launch-readiness Phase 6). If
@@ -706,16 +866,20 @@ export function createWorkers(ctx: JobContext) {
         const { AiService } = await import('../modules/ai/ai.service');
         const { NotificationService } = await import('../modules/notification/notification.service');
         const notifications = new NotificationService(ctx.prisma, ctx.io);
-        const report = await runCategoryBackfill(ctx.prisma, new AiService(), {
-          notify: (userId) => notifications.send({
-            userId,
-            type: 'SYSTEM_ANNOUNCEMENT',
-            title: 'Your menu just got easier to find',
-            body: 'Review your categories — takes about 2 minutes.',
-            data: { kind: 'category_backfill_review' },
-          }).then(() => undefined),
-        });
-        ctx.log.info(report, 'discovery: backfill movement complete');
+        const tenantId = await requireActiveDiscoveryTenant(ctx.prisma, job.data);
+        const report = await runWithTenant(tenantId, () =>
+          runCategoryBackfill(ctx.prisma, new AiService(), {
+            tenantId,
+            notify: (userId) => notifications.send({
+              userId,
+              type: 'SYSTEM_ANNOUNCEMENT',
+              title: 'Your menu just got easier to find',
+              body: 'Review your categories — takes about 2 minutes.',
+              data: { kind: 'category_backfill_review' },
+            }).then(() => undefined),
+          }),
+        );
+        ctx.log.info({ tenantId, ...report }, 'discovery: backfill movement complete');
         return;
       }
 
@@ -724,8 +888,12 @@ export function createWorkers(ctx: JobContext) {
         // couldn't place. Budget exhausted or model down = silent wait.
         const { runAiClassifierBatch } = await import('../modules/discovery/ai-classifier');
         const { AiService } = await import('../modules/ai/ai.service');
-        const r = await runAiClassifierBatch(ctx.prisma, new AiService());
-        if (r.scanned > 0) ctx.log.info(r, 'discovery: AI classifier batch');
+        const results = await runForActiveDiscoveryTenants(ctx.prisma, (tenantId) =>
+          runAiClassifierBatch(ctx.prisma, new AiService(), { tenantId }),
+        );
+        for (const { tenantId, result } of results) {
+          if (result.scanned > 0) ctx.log.info({ tenantId, ...result }, 'discovery: AI classifier batch');
+        }
         return;
       }
 
@@ -733,8 +901,14 @@ export function createWorkers(ctx: JobContext) {
         // Stage-C nightly (category spec Part 4): recompute DERIVED store
         // memberships from live-item tags; chosen rows untouchable.
         const { reconcileAllDerived } = await import('../modules/discovery/derivation');
-        const r = await reconcileAllDerived(ctx.prisma);
-        if (r.added + r.removed > 0) ctx.log.info(r, 'discovery: derived memberships reconciled');
+        const results = await runForActiveDiscoveryTenants(ctx.prisma, (tenantId) =>
+          reconcileAllDerived(ctx.prisma, tenantId),
+        );
+        for (const { tenantId, result } of results) {
+          if (result.added + result.removed > 0) {
+            ctx.log.info({ tenantId, ...result }, 'discovery: derived memberships reconciled');
+          }
+        }
         return;
       }
 
@@ -875,16 +1049,21 @@ export function createWorkers(ctx: JobContext) {
         // isOnline, it never resolves the ride. Recover it so the customer isn't
         // stranded on a frozen map: release-and-re-dispatch before pickup, or
         // page ops + notify if the passenger is already aboard.
-        const watchQueue = new Queue(QUEUE_NAMES.DISPATCH, { connection });
-        try {
-          const { recovered, flagged } = await recoverStrandedTaxiRides(ctx.prisma, ctx.redis, ctx.io, async (orderId) => {
-            await watchQueue.add('dispatch-order', { orderId }, { removeOnComplete: 100, removeOnFail: 50 });
-          });
-          if (recovered.length + flagged.length > 0) {
-            ctx.log.error({ recovered, flagged }, 'Stranded-taxi watchdog: released pre-pickup rides / flagged in-progress driver drops');
-          }
-        } finally {
-          await watchQueue.close();
+        const { recovered, flagged } = await recoverStrandedTaxiRides(ctx.prisma, ctx.redis, ctx.io, async (orderId) => {
+          await queues.dispatchQueue.add('dispatch-order', { orderId }, { removeOnComplete: 100, removeOnFail: 50 });
+        });
+        if (recovered.length + flagged.length > 0) {
+          ctx.log.error({ recovered, flagged }, 'Stranded-taxi watchdog: released pre-pickup rides / flagged in-progress driver drops');
+        }
+        // [danger #32] The DELIVERY twin: a rider gone dark holding an
+        // assignment. Pre-custody → release + float back + re-dispatch;
+        // goods-in-hand → page ops + tell the customer, never auto-cancel.
+        const { recoverStrandedDeliveries } = await import('../modules/dispatch/delivery-watchdog');
+        const dw = await recoverStrandedDeliveries(ctx.prisma, ctx.redis, ctx.io, async (orderId) => {
+          await queues.dispatchQueue.add('dispatch-order', { orderId }, { removeOnComplete: 100, removeOnFail: 50 });
+        });
+        if (dw.recovered.length + dw.flagged.length > 0) {
+          ctx.log.error({ recovered: dw.recovered, flagged: dw.flagged }, 'Stranded-delivery watchdog: released pre-pickup orders / flagged goods-in-hand rider drops');
         }
         return;
       }
@@ -892,16 +1071,11 @@ export function createWorkers(ctx: JobContext) {
       if (job.name === 'reconcile-dispatch') {
         // Recover orders stranded by lost Redis state (offer key + timeout job
         // both live only in Redis). Re-drives them through the normal path.
-        const reconcileQueue = new Queue(QUEUE_NAMES.DISPATCH, { connection });
-        try {
-          const { recovered } = await reconcileStuckDispatch(ctx.prisma, ctx.redis, async (orderId) => {
-            await reconcileQueue.add('dispatch-order', { orderId }, { removeOnComplete: 100, removeOnFail: 50 });
-          });
-          if (recovered.length > 0) {
-            ctx.log.error({ recovered, count: recovered.length }, 'Dispatch reconciliation re-drove stranded orders — investigate Redis health');
-          }
-        } finally {
-          await reconcileQueue.close();
+        const { recovered } = await reconcileStuckDispatch(ctx.prisma, ctx.redis, async (orderId) => {
+          await queues.dispatchQueue.add('dispatch-order', { orderId }, { removeOnComplete: 100, removeOnFail: 50 });
+        });
+        if (recovered.length > 0) {
+          ctx.log.error({ recovered, count: recovered.length }, 'Dispatch reconciliation re-drove stranded orders — investigate Redis health');
         }
         return;
       }
@@ -936,17 +1110,12 @@ export function createWorkers(ctx: JobContext) {
         // (AGENT_ENABLED=0 disables); sensitive actions wait for a human in assist mode.
         const { AgentService, agentEnabled } = await import('../modules/agent/agent.service');
         if (!agentEnabled()) return;
-        const agentQueue = new Queue(QUEUE_NAMES.DISPATCH, { connection });
-        try {
-          const agent = new AgentService(ctx.prisma, ctx.io, async (orderId) => {
-            await agentQueue.add('dispatch-order', { orderId }, { removeOnComplete: 100, removeOnFail: 50 });
-          });
-          const result = await agent.runOpsScan();
-          if (result.scanned > 0) {
-            ctx.log.info(result, 'Agent ops scan complete');
-          }
-        } finally {
-          await agentQueue.close();
+        const agent = new AgentService(ctx.prisma, ctx.io, async (orderId) => {
+          await queues.dispatchQueue.add('dispatch-order', { orderId }, { removeOnComplete: 100, removeOnFail: 50 });
+        });
+        const result = await agent.runOpsScan();
+        if (result.scanned > 0) {
+          ctx.log.info(result, 'Agent ops scan complete');
         }
         return;
       }
@@ -956,52 +1125,41 @@ export function createWorkers(ctx: JobContext) {
         // become visible to the vendor + dispatchable. No-op while every order
         // is unheld (flag off ⇒ nothing ever matches).
         const { OrderService } = await import('../modules/order/order.service');
-        const releaseQueue = new Queue(QUEUE_NAMES.DISPATCH, { connection });
-        try {
-          const orders = new OrderService(ctx.prisma, ctx.io);
-          const { released } = await orders.releaseDueHeldOrders(async (orderId) => {
-            await releaseQueue.add('dispatch-order', { orderId }, { removeOnComplete: 100, removeOnFail: 50 });
-          });
-          if (released.length > 0) {
-            // A RELEASED order is the vendor's first sight of it — it deserves
-            // the same escalation ladder a fresh checkout gets (re-alert, then
-            // SMS). Previously only checkout enqueued this; a held order the
-            // vendor slept through escalated nowhere.
-            const notifQueue = new Queue(QUEUE_NAMES.NOTIFICATION, { connection });
-            try {
-              for (const orderId of released) {
-                await notifQueue.add('vendor-alert-escalate', { orderId, level: 0 }, {
-                  delay: process.env['ALERTS_LOUD'] === '1' ? 30_000 : 60_000,
-                  removeOnComplete: 100,
-                  removeOnFail: 50,
-                });
-              }
-            } finally {
-              await notifQueue.close();
-            }
-            ctx.log.info({ count: released.length }, 'Held orders released to vendors/dispatch (+escalation ladders armed)');
+        const orders = new OrderService(ctx.prisma, ctx.io);
+        const { released } = await orders.releaseDueHeldOrders(async (orderId) => {
+          await queues.dispatchQueue.add('dispatch-order', { orderId }, { removeOnComplete: 100, removeOnFail: 50 });
+        });
+        if (released.length > 0) {
+          // A RELEASED order is the vendor's first sight of it — it deserves
+          // the same escalation ladder a fresh checkout gets (re-alert, then
+          // SMS). Previously only checkout enqueued this; a held order the
+          // vendor slept through escalated nowhere.
+          for (const orderId of released) {
+            await queues.notificationQueue.add('vendor-alert-escalate', { orderId, level: 0 }, {
+              delay: process.env['ALERTS_LOUD'] === '1' ? 30_000 : 60_000,
+              removeOnComplete: 100,
+              removeOnFail: 50,
+            });
           }
-        } finally {
-          await releaseQueue.close();
+          ctx.log.info({ count: released.length }, 'Held orders released to vendors/dispatch (+escalation ladders armed)');
         }
         return;
       }
 
-      const dispatchQueue = new Queue(QUEUE_NAMES.DISPATCH, { connection });
       const dispatch = new DispatchService(
         ctx.prisma,
         ctx.redis,
         ctx.io,
         getMapsProvider(),
-        async (orderId, riderId, delayMs) => {
-          await dispatchQueue.add('offer-timeout', { orderId, riderId }, {
+        async (orderId, riderId, delayMs, attemptId) => {
+          await queues.dispatchQueue.add('offer-timeout', { orderId, riderId, attemptId }, {
             delay: delayMs,
             removeOnComplete: 100,
             removeOnFail: 50,
           });
         },
         async (orderId, delayMs) => {
-          await dispatchQueue.add('dispatch-order', { orderId }, {
+          await queues.dispatchQueue.add('dispatch-order', { orderId }, {
             delay: delayMs,
             removeOnComplete: 100,
             removeOnFail: 50,
@@ -1010,12 +1168,11 @@ export function createWorkers(ctx: JobContext) {
         },
       );
 
-      try {
-        if (job.name === 'dispatch-order') {
-          await dispatch.dispatchOrder(job.data.orderId);
-        } else if (job.name === 'offer-timeout') {
-          await dispatch.handleOfferTimeout(job.data.orderId, job.data.riderId);
-        } else if (job.name === 'supply-watch-scan') {
+      if (job.name === 'dispatch-order') {
+        await dispatch.dispatchOrder(job.data.orderId, job.data.tenantId);
+      } else if (job.name === 'offer-timeout') {
+        await dispatch.handleOfferTimeout(job.data.orderId, job.data.riderId, job.data.attemptId);
+      } else if (job.name === 'supply-watch-scan') {
           // Availability spec §5: tell waiting customers when supply returns.
           const { scanSupplyWatches, scanStrugglingDeliveries } = await import('../modules/dispatch/supply-watch.service');
           const { NotificationService } = await import('../modules/notification/notification.service');
@@ -1039,9 +1196,6 @@ export function createWorkers(ctx: JobContext) {
             const p = await scanStrugglingDeliveries(ctx.prisma, notifications);
             if (p > 0) ctx.log.info({ prompted: p }, 'struggling deliveries: options pushed');
           }
-        }
-      } finally {
-        await dispatchQueue.close();
       }
     },
     { connection, concurrency: 5 },
@@ -1050,7 +1204,7 @@ export function createWorkers(ctx: JobContext) {
   // SEARCH: debounced per-vendor index sync [SWIFT-UG-SRCH-01]. Best-effort —
   // a failure logs and waits for the next write or the boot reconciler; it
   // must never crash a worker or spam retries against a down Meili.
-  const searchWorker = new Worker(
+  const searchWorker = buildWorker(
     QUEUE_NAMES.SEARCH,
     async (job: Job) => {
       if (job.name !== 'sync-vendor') return;
@@ -1068,27 +1222,99 @@ export function createWorkers(ctx: JobContext) {
     { connection, concurrency: 1 },
   );
 
-  // A worker that throws otherwise drops the job into the failed set with NO
-  // log and NO alert — money jobs (billing, settlements) and dispatch could
-  // fail invisibly. Surface every terminal failure and worker error loudly so
-  // observability (Sentry, see server bootstrap) and ops actually see them.
-  // SWIFT-121: EVERY worker — including search, which was created after the old
-  // loop and silently had no handlers — is attached here, after all are built.
+  // Central collection drives readiness, activation, and bounded shutdown.
+  // Failure/error listeners were attached at construction time, before Redis
+  // connection activity can surface an EventEmitter `error`.
   const allWorkers: Record<string, Worker> = {
     order: orderWorker, subscription: subscriptionWorker,
     settlement: settlementWorker, verification: verificationWorker, dispatch: dispatchWorker,
     notification: notificationWorker, search: searchWorker,
   };
-  for (const [queue, worker] of Object.entries(allWorkers)) {
-    worker.on('failed', (job, err) => {
-      ctx.log.error({ queue, jobName: job?.name, jobId: job?.id, attempts: job?.attemptsMade, data: job?.data, err }, 'BullMQ job failed');
-      captureError(err, { queue, jobName: job?.name, jobId: job?.id, attempts: job?.attemptsMade });
-    });
-    worker.on('error', (err) => {
-      ctx.log.error({ queue, err }, 'BullMQ worker error');
-      captureError(err, { queue });
-    });
-  }
+
+  const workerResources = Object.entries(allWorkers).map(([name, worker]) => ({
+    name: `${name} worker`,
+    close: () => worker.close(),
+  }));
+  let activated = false;
+  let closing = false;
+  let loopFailed = false;
+  let startPromise: Promise<void> | undefined;
+  const workerLoops: Promise<void>[] = [];
+
+  const cleanup = idempotentAsync(async () => {
+    closing = true;
+    activated = false;
+    await closeResourcesBounded(
+      workerResources,
+      positiveDurationMs(process.env['QUEUE_SHUTDOWN_TIMEOUT_MS'], 10_000),
+    );
+  });
+
+  const start = (): Promise<void> => {
+    startPromise ??= (async () => {
+      if (closing) throw new Error('Cannot start BullMQ workers while closing');
+      if (Object.values(allWorkers).some((worker) => worker.isRunning() || worker.isPaused())) {
+        throw new Error('BullMQ worker activation preflight found an already active or paused worker');
+      }
+
+      // Calling run() enters each worker synchronously up to its first await.
+      // Start every loop together only after the runtime's pre-commit checks.
+      for (const [name, worker] of Object.entries(allWorkers)) {
+        const loop = worker.run();
+        workerLoops.push(loop);
+        void loop.then(() => {
+          if (closing) return;
+          loopFailed = true;
+          ctx.log.error({ queue: name }, 'BullMQ worker loop stopped unexpectedly');
+        }).catch((err) => {
+          if (closing) return;
+          loopFailed = true;
+          ctx.log.error({ queue: name, err }, 'BullMQ worker loop failed');
+          try {
+            captureError(err, { queue: name, component: 'bullmq-worker-loop' });
+          } catch (captureFailure) {
+            ctx.log.error({ queue: name, err: captureFailure }, 'Failed to capture BullMQ worker loop failure');
+          }
+        });
+      }
+
+      // Observe immediate run() rejections before declaring the commit live.
+      await Promise.resolve();
+      if (loopFailed || !Object.values(allWorkers).every((worker) => worker.isRunning())) {
+        throw new Error('One or more BullMQ workers failed to enter the running state');
+      }
+      activated = true;
+    })();
+    return startPromise;
+  };
+
+  const checkReady = async (): Promise<boolean> => {
+    if (!activated || closing || loopFailed) return false;
+    if (!Object.values(allWorkers).every((worker) => worker.isRunning() && !worker.isPaused())) {
+      return false;
+    }
+
+    try {
+      await Promise.all(Object.values(allWorkers).map(async (worker) => {
+        // Actively probe the worker's command connection. Its blocking client
+        // may legitimately be inside BZPOPMIN, so sending PING there would sit
+        // behind the blocking fetch and falsely mark an idle healthy worker
+        // down. isRunning/isPaused plus the observed lifetime promise above is
+        // the authoritative current-consumer state.
+        const commandClient = await worker.client;
+        if (commandClient.status !== 'ready') {
+          throw new Error(`BullMQ worker ${worker.name} is ${commandClient.status}`);
+        }
+        const commandPong = await commandClient.ping();
+        if (commandPong !== 'PONG') {
+          throw new Error(`BullMQ worker ${worker.name} ping failed`);
+        }
+      }));
+      return activated && !closing && !loopFailed;
+    } catch {
+      return false;
+    }
+  };
 
   return {
     orderWorker,
@@ -1098,18 +1324,25 @@ export function createWorkers(ctx: JobContext) {
     dispatchWorker,
     notificationWorker,
     searchWorker,
-    cleanup: async () => {
-      await Promise.all([
-        orderWorker.close(),
-        subscriptionWorker.close(),
-        settlementWorker.close(),
-        verificationWorker.close(),
-        dispatchWorker.close(),
-        notificationWorker.close(),
-        searchWorker.close(),
-      ]);
-    },
+    waitUntilReady: () => Promise.all(Object.values(allWorkers).map((worker) => worker.waitUntilReady())),
+    start,
+    checkReady,
+    cleanup,
   };
+  } catch (error) {
+    try {
+      await closeResourcesBounded(
+        constructedWorkers.map((worker, index) => ({
+          name: `partially initialized worker ${index}`,
+          close: () => worker.close(),
+        })),
+        positiveDurationMs(process.env['QUEUE_SHUTDOWN_TIMEOUT_MS'], 10_000),
+      );
+    } catch (cleanupError) {
+      ctx.log.error({ err: cleanupError }, 'BullMQ partial worker construction cleanup failed');
+    }
+    throw error;
+  }
 }
 
 export async function scheduleRecurringJobs(queues: ReturnType<typeof createQueues>) {
@@ -1312,6 +1545,17 @@ export async function scheduleRecurringJobs(queues: ReturnType<typeof createQueu
     repeat: { every: 60_000 },
     removeOnComplete: 5,
     removeOnFail: 5,
+  });
+
+  // Durable mover-session revocations: low-latency callers attempt delivery
+  // immediately, while this sweep reclaims process-death leases and retries
+  // Redis cleanup, online-hours closure, redispatch and realtime fan-out.
+  await queues.dispatchQueue.add('mover-revocation-outbox', {}, {
+    repeat: {
+      every: Math.max(1_000, Number(process.env['MOVER_REVOCATION_SWEEP_MS']) || 10_000),
+    },
+    removeOnComplete: 20,
+    removeOnFail: 20,
   });
 
   // Ghost-mover sweep: force-offline anyone whose GPS went silent, every 5

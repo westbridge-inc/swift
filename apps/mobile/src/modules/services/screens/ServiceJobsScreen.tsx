@@ -5,7 +5,7 @@ import { color, radius, space } from '@swift/ui';
 import { useServiceJobs, useScheduleJob, useCancelJob, useRateJob, useQuoteJob, useConfirmJob, useDeclineSlot, useCompleteJob } from '../../../hooks';
 import { useAuthStore } from '../../../stores/authStore';
 import { money } from '../../../lib/money';
-import { Card, Chip, EmptyState, Header, IconChip, LoadingBlock, PillButton, PopupCard, Screen, Stars, T, TonePill } from '../../../kit';
+import { Card, Chip, EmptyState, Header, IconChip, LoadingBlock, PillButton, PopupCard, PopupTitle, Screen, Stars, T, TonePill } from '../../../kit';
 
 const STATUS_LABEL: Record<string, { label: string; tone: 'brand' | 'success' | 'neutral' }> = {
   REQUESTED: { label: 'Waiting for quote', tone: 'neutral' },
@@ -259,9 +259,9 @@ function JobCard({ job, navigation }: { job: any; navigation: any }) {
       {/* Kit confirm popup */}
       <PopupCard visible={confirmCancel} onClose={() => setConfirmCancel(false)}>
         <IconChip icon="x-circle" size={56} tone="error" />
-        <T variant="title" center style={{ marginTop: space.lg }}>
+        <PopupTitle variant="title" center style={{ marginTop: space.lg }}>
           Cancel request?
-        </T>
+        </PopupTitle>
         <T variant="body" tone="muted" center style={{ marginTop: space.sm }}>
           This withdraws the job request.
         </T>

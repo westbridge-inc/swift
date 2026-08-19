@@ -7,8 +7,13 @@ import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { color, space } from '@swift/ui';
 import { customerApi } from '../../../services/api';
 import { useProfile } from '../../../hooks/customer';
-import { useAuthStore } from '../../../stores/authStore';
-import { ErrorState, Header, IconChip, LabeledInput, LoadingBlock, PillButton, PopupCard, Screen, SettingsRow, T } from '../../../kit';
+import {
+  AuthSessionBoundaryError,
+  requireAuthSessionForPrincipal,
+  requireAuthSessionSnapshot,
+  useAuthStore,
+} from '../../../stores/authStore';
+import { ErrorState, Header, IconChip, LabeledInput, LoadingBlock, PillButton, PopupCard, PopupTitle, Screen, SettingsRow, T } from '../../../kit';
 import { toast } from '../../../components/ui/toast';
 
 const GUTTER = space['2xl'];
@@ -18,9 +23,8 @@ const GUTTER = space['2xl'];
 export function PersonalDataScreen() {
   const qc = useQueryClient();
   const profile = useProfile<any>();
-  const setUser = useAuthStore((s) => s.setUser);
-  const user = useAuthStore((s) => s.user);
-  const logout = useAuthStore((s) => s.logout);
+  const setUserIfCurrent = useAuthStore((s) => s.setUserIfCurrent);
+  const logoutIfCurrent = useAuthStore((s) => s.logoutIfCurrent);
 
   const [firstName, setFirstName] = useState('');
   const [lastName, setLastName] = useState('');
@@ -38,44 +42,68 @@ export function PersonalDataScreen() {
   }, [p]);
 
   const save = useMutation({
-    mutationFn: () =>
-      customerApi.updateProfile({
+    mutationFn: async () => {
+      const owner = requireAuthSessionSnapshot();
+      const operationUser = useAuthStore.getState().user;
+      if (!operationUser || operationUser.id !== owner.userId) {
+        throw new AuthSessionBoundaryError();
+      }
+      const res = await customerApi.updateProfile({
         firstName: firstName.trim(),
         lastName: lastName.trim(),
         ...(email.trim() ? { email: email.trim() } : {}),
-      }),
-    onSuccess: (res) => {
+      }, owner);
+      requireAuthSessionForPrincipal(owner);
       const updated = res.data?.data;
-      if (updated && user) setUser({ ...user, firstName: updated.firstName, lastName: updated.lastName });
-      qc.invalidateQueries({ queryKey: ['customer', 'profile'] });
+      if (updated && !setUserIfCurrent(owner, {
+        ...operationUser,
+        firstName: updated.firstName,
+        lastName: updated.lastName,
+      })) throw new AuthSessionBoundaryError();
+      requireAuthSessionForPrincipal(owner);
+      void qc.invalidateQueries({ queryKey: ['customer', 'profile'] });
       setSavedFlash(true);
       setTimeout(() => setSavedFlash(false), 2500);
+      return res;
     },
   });
 
   // DPA right of access + portability: hand the user their own data as JSON
   // through the native share sheet (save to Files, mail to themselves, etc.).
   const exportData = useMutation({
-    mutationFn: () => customerApi.exportAccount(),
-    onSuccess: async (res) => {
+    mutationFn: async () => {
+      const owner = requireAuthSessionSnapshot();
+      const res = await customerApi.exportAccount(owner);
+      requireAuthSessionForPrincipal(owner);
       const bundle = res.data?.data ?? res.data;
       await Share.share({ title: 'My Swift data', message: JSON.stringify(bundle, null, 2) });
+      requireAuthSessionForPrincipal(owner);
+      return res;
     },
-    onError: () => toast.error('Couldn’t prepare your data. Try again.'),
+    onError: (error) => {
+      if (!(error instanceof AuthSessionBoundaryError)) {
+        toast.error('Couldn’t prepare your data. Try again.');
+      }
+    },
   });
 
   // DPA right to erasure. Server crypto-shreds documents, revokes every session
   // and de-identifies the account; we then drop the local session.
   const deleteAccount = useMutation({
-    mutationFn: () => customerApi.deleteAccount(),
-    onSuccess: () => {
+    mutationFn: async () => {
+      const owner = requireAuthSessionSnapshot();
+      const res = await customerApi.deleteAccount(owner);
+      const current = requireAuthSessionForPrincipal(owner);
       setConfirmDelete(false);
       toast.success('Your account has been deleted.');
-      logout();
+      logoutIfCurrent(current);
+      return res;
     },
     onError: (e: any) => {
       setConfirmDelete(false);
-      toast.error(e?.response?.data?.error?.message ?? 'Couldn’t delete the account. Try again.');
+      if (!(e instanceof AuthSessionBoundaryError)) {
+        toast.error(e?.response?.data?.error?.message ?? 'Couldn’t delete the account. Try again.');
+      }
     },
   });
 
@@ -172,9 +200,9 @@ export function PersonalDataScreen() {
 
       <PopupCard visible={confirmDelete} onClose={() => setConfirmDelete(false)}>
         <IconChip icon="alert-triangle" size={56} tone="error" />
-        <T variant="heading" center style={{ marginTop: space.md }}>
+        <PopupTitle variant="heading" center style={{ marginTop: space.md }}>
           Delete your account?
-        </T>
+        </PopupTitle>
         <T variant="label" tone="muted" center style={{ marginTop: space.sm }}>
           This erases your profile, saved addresses and verification documents for good — it can’t be undone. Past orders
           are kept in de-identified form only where the law requires it.

@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { prismaPlugin } from '../plugins/prisma';
 import { redisPlugin } from '../plugins/redis';
@@ -252,6 +252,27 @@ describe('Auth Routes', () => {
         const row = await app.prisma.user.findUnique({ where: { phone: consentPhone } });
         expect(row?.acceptedTermsAt).toBeInstanceOf(Date);
         expect(row?.tosVersion).toBe(LEGAL_VERSION);
+
+        // [DCR-1 NR1-02] The same transaction wrote the LEDGER rows: one per
+        // required document, anchored to the sha256 of the exact served text.
+        const ledger = await app.prisma.consentRecord.findMany({
+          where: { subjectType: 'customer', subjectId: row!.id },
+          orderBy: { documentType: 'asc' },
+        });
+        expect(ledger.map((r) => [r.documentType, r.action, r.documentVersion])).toEqual([
+          ['privacy_policy', 'granted', LEGAL_VERSION],
+          ['terms_of_service', 'granted', LEGAL_VERSION],
+        ]);
+        const tos = await app.prisma.legalDocument.findUniqueOrThrow({
+          where: {
+            documentType_version_locale: {
+              documentType: 'terms_of_service', version: LEGAL_VERSION, locale: 'en-GY',
+            },
+          },
+        });
+        expect(ledger.find((r) => r.documentType === 'terms_of_service')?.documentContentHash)
+          .toBe(tos.contentHash);
+        expect(tos.publishedAt).toBeInstanceOf(Date);
       });
 
       it('still registers old clients that send no consent field — and stamps nothing', async () => {
@@ -265,6 +286,10 @@ describe('Auth Routes', () => {
         const row = await app.prisma.user.findUnique({ where: { phone: noConsentPhone } });
         expect(row?.acceptedTermsAt).toBeNull();
         expect(row?.tosVersion).toBeNull();
+        // No consent claimed → no ledger rows fabricated.
+        expect(await app.prisma.consentRecord.count({
+          where: { subjectType: 'customer', subjectId: row!.id },
+        })).toBe(0);
       });
 
       it('CONSENT_REQUIRED=1 refuses a consent-less registration', async () => {
@@ -397,6 +422,36 @@ describe('Auth Routes', () => {
       }
     });
 
+    it('keeps the uniform 401 and revoked state when the reuse audit sink fails', async () => {
+      const prevGrace = process.env['REFRESH_REUSE_GRACE_MS'];
+      process.env['REFRESH_REUSE_GRACE_MS'] = '0';
+      const auditWrite = vi.spyOn(app.prisma.auditLog, 'create')
+        .mockRejectedValueOnce(new Error('simulated audit sink outage'));
+      try {
+        const loginRes = await loginWithOtp(app, '+5926002000');
+        const firstRefresh = loginRes.json().data.tokens.refreshToken as string;
+        const rotate = await inject('POST', '/api/v1/auth/refresh', { refreshToken: firstRefresh });
+        expect(rotate.statusCode).toBe(200);
+        const currentRefresh = rotate.json().data.refreshToken as string;
+
+        const replay = await inject('POST', '/api/v1/auth/refresh', { refreshToken: firstRefresh });
+        expect(replay.statusCode).toBe(401);
+        expect(replay.json().error.code).toBe('INVALID_TOKEN');
+
+        // The already-committed security action is not undone or hidden behind
+        // a 500 merely because its audit delivery failed.
+        const currentAfterAuditFailure = await inject('POST', '/api/v1/auth/refresh', {
+          refreshToken: currentRefresh,
+        });
+        expect(currentAfterAuditFailure.statusCode).toBe(401);
+        expect(auditWrite).toHaveBeenCalledTimes(1);
+      } finally {
+        auditWrite.mockRestore();
+        if (prevGrace === undefined) delete process.env['REFRESH_REUSE_GRACE_MS'];
+        else process.env['REFRESH_REUSE_GRACE_MS'] = prevGrace;
+      }
+    });
+
     it('concurrent double-fire within the grace window is idempotent, not theft', async () => {
       // The mobile interceptor can legitimately re-send the same refresh token
       // when two requests 401 at once — that must return the already-rotated
@@ -404,12 +459,16 @@ describe('Auth Routes', () => {
       const loginRes = await loginWithOtp(app, '+5926002000');
       const r1 = loginRes.json().data.tokens.refreshToken;
 
-      const first = await inject('POST', '/api/v1/auth/refresh', { refreshToken: r1 });
+      // Start both requests before awaiting either result. This forces the two
+      // refresh transactions to contend for the same locked Session row rather
+      // than merely exercising a sequential grace-window replay.
+      const [first, retry] = await Promise.all([
+        inject('POST', '/api/v1/auth/refresh', { refreshToken: r1 }),
+        inject('POST', '/api/v1/auth/refresh', { refreshToken: r1 }),
+      ]);
       expect(first.statusCode).toBe(200);
-      const pair = first.json().data;
-
-      const retry = await inject('POST', '/api/v1/auth/refresh', { refreshToken: r1 });
       expect(retry.statusCode).toBe(200);
+      const pair = first.json().data;
       expect(retry.json().data.refreshToken).toBe(pair.refreshToken);
       expect(retry.json().data.accessToken).toBe(pair.accessToken);
 

@@ -25,6 +25,15 @@ export function destinationFor(data: Record<string, unknown> | null | undefined)
     return { screen: 'Taxi' };
   }
 
+  // [E36 / danger #22] An OFFER ping is for the EARNER: their role-resolved
+  // Main IS the mover home where the live offer card (and its countdown)
+  // renders. The generic orderId branch below would have dropped them on the
+  // CUSTOMER Delivery screen — a dead end with the clock running.
+  if (kind === 'dispatch_offer') return { screen: 'Main' };
+  // A store told "a cancelled order may hold an MMG payment" runs a business:
+  // their Main is the vendor dashboard, not a customer tracking screen.
+  if (kind === 'mmg_unattested_cancellation') return { screen: 'Main' };
+
   // Orders: any payload carrying an orderId lands on that order's tracking
   // screen — covers status updates, prep_ready, substitutions, pickup READY.
   if (orderId) return { screen: 'Delivery', params: { orderId } };

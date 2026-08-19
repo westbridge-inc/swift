@@ -46,6 +46,21 @@ describe('MMG sandbox provider — merchant-initiated loop', () => {
     if (prev !== undefined) process.env['MMG_DRIVER'] = prev;
   });
 
+  it('the factory never permits the sandbox in production', () => {
+    const previousNodeEnv = process.env['NODE_ENV'];
+    const previousDriver = process.env['MMG_DRIVER'];
+    process.env['NODE_ENV'] = 'production';
+    delete process.env['MMG_DRIVER'];
+    try {
+      expect(() => getMmgProvider()).toThrow(/sandbox.*forbidden/i);
+    } finally {
+      if (previousNodeEnv === undefined) delete process.env['NODE_ENV'];
+      else process.env['NODE_ENV'] = previousNodeEnv;
+      if (previousDriver === undefined) delete process.env['MMG_DRIVER'];
+      else process.env['MMG_DRIVER'] = previousDriver;
+    }
+  });
+
   it('the factory refuses a half-configured live driver, naming the gaps', () => {
     const prev = { ...process.env };
     process.env['MMG_DRIVER'] = 'live';

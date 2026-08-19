@@ -18,9 +18,11 @@ import Redis from 'ioredis';
 import { PrismaClient } from '@prisma/client';
 import { Server } from 'socket.io';
 import { pino } from 'pino';
-import { createQueues, createWorkers, scheduleRecurringJobs } from './jobs/queue';
+import { initializeJobRuntime, type JobRuntime } from './jobs/runtime';
 import { assertSafeBootConfig } from './utils/boot-config';
 import { initSentry } from './plugins/observability';
+import { closeResourcesBounded, idempotentAsync, positiveDurationMs, withTimeout } from './utils/async-lifecycle';
+import { installProcessLifecycle } from './utils/process-lifecycle';
 
 async function main() {
   assertSafeBootConfig();
@@ -35,52 +37,111 @@ async function main() {
     maxRetriesPerRequest: null,
   });
   const prisma = new PrismaClient();
+  redis.on('error', (err) => log.error({ err }, 'Worker Redis connection error'));
 
   const io = new Server();
   const adapterConns: Redis[] = [];
-  if (process.env['NODE_ENV'] === 'production') {
-    const { createAdapter } = await import('@socket.io/redis-adapter');
-    const pub = redis.duplicate();
-    const sub = redis.duplicate();
-    adapterConns.push(pub, sub);
-    io.adapter(createAdapter(pub, sub));
-  }
-
-  const queues = createQueues(redis);
-  const workers = createWorkers({ prisma, io, redis, log });
-  await scheduleRecurringJobs(queues);
-  log.info('Worker process up — recurring jobs scheduled, workers consuming');
-
-  let shuttingDown = false;
-  const shutdown = async (signal: string) => {
-    if (shuttingDown) return;
-    shuttingDown = true;
-    log.info({ signal }, 'Worker shutting down');
-    try {
-      await workers.cleanup();
-      await Promise.all(Object.values(queues).map((q) => q.close()));
-      // NOT io.close() — this broadcast-only handle never attached an HTTP
-      // server, and Server.close() assumes one (throws). Quit the adapter's
-      // pub/sub connections instead; process exit reaps the rest.
-      await Promise.all(adapterConns.map((c) => c.quit()));
-      await redis.quit();
-      await prisma.$disconnect();
-      process.exit(0);
-    } catch (err) {
-      log.error({ err }, 'Worker shutdown error');
-      process.exit(1);
+  let runtime: JobRuntime | undefined;
+  const shutdownTimeoutMs = positiveDurationMs(process.env['QUEUE_SHUTDOWN_TIMEOUT_MS'], 10_000);
+  const cleanup = idempotentAsync(async () => {
+    const errors: unknown[] = [];
+    if (runtime) {
+      try {
+        await runtime.cleanup();
+      } catch (error) {
+        errors.push(error);
+      }
     }
-  };
-  for (const signal of ['SIGINT', 'SIGTERM'] as const) {
-    process.on(signal, () => void shutdown(signal));
+    try {
+      await closeResourcesBounded(
+        adapterConns.map((connection, index) => ({
+          name: `Socket.IO Redis adapter ${index}`,
+          close: async () => {
+            if (connection.status === 'end') return;
+            try {
+              await connection.quit();
+            } catch {
+              connection.disconnect(false);
+            }
+          },
+        })),
+        shutdownTimeoutMs,
+      );
+    } catch (error) {
+      errors.push(error);
+    }
+    try {
+      if (redis.status !== 'end') {
+        try {
+          await withTimeout(redis.quit(), shutdownTimeoutMs, 'Worker Redis shutdown');
+        } catch (error) {
+          redis.disconnect(false);
+          throw error;
+        }
+      }
+    } catch (error) {
+      errors.push(error);
+    }
+    try {
+      await withTimeout(prisma.$disconnect(), shutdownTimeoutMs, 'Worker database shutdown');
+    } catch (error) {
+      errors.push(error);
+    }
+    if (errors.length > 0) throw new AggregateError(errors, 'Worker shutdown failed');
+  });
+  installProcessLifecycle({
+    cleanup,
+    markNotReady: () => {
+      runtime?.markNotReady();
+    },
+    exit: (code) => process.exit(code),
+    onSignal: (signal) => {
+      log.info({ signal }, 'Worker shutdown signal received');
+    },
+    onFatal: (event, error) => {
+      const message = event === 'unhandledRejection'
+        ? 'UNHANDLED PROMISE REJECTION (worker) — draining process'
+        : 'UNCAUGHT EXCEPTION (worker) — draining process';
+      log.fatal({ err: error, event }, message);
+    },
+    onCleanupError: (error) => {
+      log.fatal({ err: error }, 'Worker bounded shutdown failed');
+    },
+  });
+
+  try {
+    const startupTimeoutMs = positiveDurationMs(process.env['QUEUE_STARTUP_TIMEOUT_MS'], 15_000);
+    await withTimeout(redis.ping(), startupTimeoutMs, 'Worker Redis startup');
+    if (process.env['NODE_ENV'] === 'production') {
+      const { createAdapter } = await import('@socket.io/redis-adapter');
+      const pub = redis.duplicate();
+      const sub = redis.duplicate();
+      adapterConns.push(pub, sub);
+      for (const [kind, connection] of [['publish', pub], ['subscribe', sub]] as const) {
+        connection.on('error', (err) => log.error({ err, kind }, 'Socket.IO Redis adapter error'));
+      }
+      await withTimeout(
+        Promise.all(adapterConns.map((connection) => connection.ping())),
+        startupTimeoutMs,
+        'Socket.IO Redis adapter startup',
+      );
+      io.adapter(createAdapter(pub, sub));
+    }
+
+    runtime = await initializeJobRuntime({ prisma, io, redis, log }, { runWorkers: true });
+    log.info(
+      { maxClockSkewMs: Math.round(runtime.clock.maxSkewMs) },
+      'Worker process up — recurring jobs scheduled, workers consuming',
+    );
+  } catch (error) {
+    try {
+      await cleanup();
+    } catch (cleanupError) {
+      log.error({ err: cleanupError }, 'Worker partial initialization cleanup failed');
+    }
+    throw error;
   }
 
-  process.on('unhandledRejection', (reason) => {
-    log.error({ err: reason }, 'UNHANDLED PROMISE REJECTION (worker)');
-  });
-  process.on('uncaughtException', (err) => {
-    log.fatal({ err }, 'UNCAUGHT EXCEPTION (worker)');
-  });
 }
 
 main().catch((err) => {

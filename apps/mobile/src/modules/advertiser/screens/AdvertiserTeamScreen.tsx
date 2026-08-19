@@ -3,10 +3,19 @@ import React, { useState } from 'react';
 import { ScrollView, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { color, space } from '@swift/ui';
-import { Card, LabeledInput, LoadingBlock, PillButton, T, TonePill } from '../../../kit';
+import {
+  Card,
+  LabeledInput,
+  LoadingBlock,
+  PillButton,
+  SettingsRow,
+  T,
+  TonePill,
+} from '../../../kit';
 import { useMyAdvertisers, useAdvertiserMembers, useAdvertiserActions } from '../../../hooks/advertiser';
 import { useAuthStore } from '../../../stores/authStore';
 import { errorMessage } from '../../../lib/apiError';
+import { AdvertiserExitDialog } from '../AdvertiserExitDialog';
 
 // §14.6 — team. OWNER invites MANAGER (runs campaigns) / ANALYST (reads
 // stats) by phone; the invitee must already hold a Swift account. The server
@@ -15,7 +24,7 @@ import { errorMessage } from '../../../lib/apiError';
 
 export function AdvertiserTeamScreen() {
   const insets = useSafeAreaInsets();
-  const { user } = useAuthStore();
+  const user = useAuthStore((state) => state.user);
   const me = useMyAdvertisers();
   const advertiser = (me.data ?? [])[0];
   const members = useAdvertiserMembers(advertiser?.id);
@@ -23,6 +32,7 @@ export function AdvertiserTeamScreen() {
   const [phone, setPhone] = useState('+592');
   const [role, setRole] = useState<'MANAGER' | 'ANALYST'>('MANAGER');
   const [error, setError] = useState<string | null>(null);
+  const [confirmSwitch, setConfirmSwitch] = useState(false);
 
   const rows = members.data ?? [];
   const myRole = rows.find((m: any) => m.userId === (user as any)?.id)?.role;
@@ -42,9 +52,13 @@ export function AdvertiserTeamScreen() {
   return (
     <View style={{ flex: 1, backgroundColor: color.surface.subtle, paddingTop: insets.top }}>
       <T variant="title" style={{ paddingHorizontal: space['2xl'], paddingTop: space.lg }}>
-        Team
+        Account &amp; team
       </T>
-      <ScrollView contentContainerStyle={{ padding: space['2xl'], paddingBottom: space['3xl'] }} keyboardShouldPersistTaps="handled">
+      <ScrollView
+        contentContainerStyle={{ padding: space['2xl'], paddingBottom: space['3xl'] + insets.bottom }}
+        keyboardShouldPersistTaps="handled"
+        showsVerticalScrollIndicator={false}
+      >
         {members.isLoading ? (
           <LoadingBlock style={{ paddingTop: 64 }} />
         ) : (
@@ -88,7 +102,21 @@ export function AdvertiserTeamScreen() {
             <PillButton label="Add member" loading={actions.addMember.isPending} onPress={add} />
           </Card>
         ) : null}
+
+        <T variant="label" tone="muted" style={{ marginTop: space['2xl'], marginBottom: space.sm }}>
+          Swift experience
+        </T>
+        <Card style={{ paddingVertical: space.sm }}>
+          <SettingsRow
+            icon="log-out"
+            label="Log out and switch experience"
+            sub="Return to Customer, Driver, Vendor, and other Swift options"
+            onPress={() => setConfirmSwitch(true)}
+          />
+        </Card>
       </ScrollView>
+
+      <AdvertiserExitDialog visible={confirmSwitch} onClose={() => setConfirmSwitch(false)} />
     </View>
   );
 }

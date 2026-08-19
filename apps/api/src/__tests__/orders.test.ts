@@ -144,6 +144,7 @@ beforeAll(async () => {
   process.env['NODE_ENV'] = 'development';
   process.env['DATABASE_URL'] = process.env['DATABASE_URL'] || 'postgresql://swift:swift@localhost:5434/swift';
   process.env['REDIS_URL'] = process.env['REDIS_URL'] || 'redis://localhost:6382';
+  process.env['MMG_PAY_URL_ALLOWED_HOSTS'] = 'pay.example.com';
 
   app = Fastify({ logger: false });
   registerErrorHandler(app);
@@ -177,6 +178,9 @@ beforeAll(async () => {
 afterAll(async () => {
   await app.prisma.order.deleteMany({ where: { id: { in: createdOrderIds } } });
   if (createdUserIds.length) {
+    // A mid-test failure can strand a cart; it blocks user deletion (FK) and
+    // poisons the next run with phone collisions. Sweep owned carts first.
+    await app.prisma.cart.deleteMany({ where: { customerId: { in: createdUserIds } } });
     await app.prisma.notification.deleteMany({ where: { userId: { in: createdUserIds } } });
     const orders = await app.prisma.order.findMany({ where: { customerId: { in: createdUserIds } }, select: { id: true } });
     const ids = orders.map((o) => o.id);
@@ -327,28 +331,141 @@ describe('Checkout — ID gate, multi-vendor split, fulfillment', () => {
     expect(order.pickupCode).toMatch(/^\d{6}$/);
   });
 
-  it('MMG checkout needs the vendor to have a link, and makes an unpaid MMG order', async () => {
-    // No link yet → MMG is refused (stay on cash).
+  it('PU-05: derives one cart-level MMG capability without exposing the raw link', async () => {
     await addToCart(customer.token, restaurant.vendorId, burgerId, 1);
-    const noLink = await inject('POST', '/api/v1/customer/checkout', { paymentMethod: 'MOBILE_MONEY' }, customer.token);
-    expect(noLink.statusCode).toBe(400);
-    expect(noLink.json().error.code).toBe('MMG_NOT_AVAILABLE');
+    const withoutLink = await inject('GET', '/api/v1/customer/cart', undefined, customer.token);
+    expect(withoutLink.statusCode).toBe(200);
+    expect(withoutLink.json().data.paymentCapabilities).toMatchObject({
+      cash: { available: true, fundsFlow: 'DIRECT_AT_HANDOVER' },
+      mmg: {
+        available: false,
+        provider: 'MMG',
+        fundsFlow: 'DIRECT_TO_VENDOR',
+        unavailableReason: 'VENDOR_NOT_CONFIGURED',
+      },
+    });
+    expect(withoutLink.json().data.paymentCapabilities.scope).toMatch(/^[a-f0-9]{24}$/);
+    expect(withoutLink.json().data.vendor).not.toHaveProperty('mmgPayUrl');
     await app.prisma.cart.deleteMany({ where: { customerId: customer.userId } });
 
-    // Vendor attaches a link → the MMG order is created UNPAID and the pay
-    // screen can read the vendor's link to open it.
-    await app.prisma.vendor.update({ where: { id: restaurant.vendorId }, data: { mmgPayUrl: 'https://mmg.gy/pay/x' } });
+    const rawLink = 'https://pay.example.com/pay/x?merchant=restaurant';
+    await app.prisma.vendor.update({ where: { id: restaurant.vendorId }, data: { mmgPayUrl: rawLink } });
     await addToCart(customer.token, restaurant.vendorId, burgerId, 1);
+    const withLink = await inject('GET', '/api/v1/customer/cart', undefined, customer.token);
+    expect(withLink.statusCode).toBe(200);
+    expect(withLink.json().data.paymentCapabilities.mmg).toMatchObject({
+      available: true,
+      unavailableReason: null,
+      fundsFlow: 'DIRECT_TO_VENDOR',
+    });
+    expect(withLink.json().data.vendor).not.toHaveProperty('mmgPayUrl');
+    expect(JSON.stringify(withLink.json().data)).not.toContain(rawLink);
+    await app.prisma.vendor.update({ where: { id: restaurant.vendorId }, data: { mmgPayUrl: null } });
+    await app.prisma.cart.deleteMany({ where: { customerId: customer.userId } });
+  });
+
+  it('PU-05: rejects MMG for a mixed-vendor cart before creating any order', async () => {
+    await app.prisma.vendor.updateMany({
+      where: { id: { in: [restaurant.vendorId, supermarket.vendorId] } },
+      data: { mmgPayUrl: 'https://pay.example.com/pay/vendor' },
+    });
+    await addToCart(customer.token, restaurant.vendorId, burgerId, 1);
+    await addToCart(customer.token, supermarket.vendorId, riceId, 1);
+
+    const cart = await inject('GET', '/api/v1/customer/cart', undefined, customer.token);
+    expect(cart.json().data.paymentCapabilities.mmg).toMatchObject({
+      available: false,
+      unavailableReason: 'MULTI_VENDOR_UNSUPPORTED',
+    });
+    expect(JSON.stringify(cart.json().data)).not.toContain('pay.example.com');
+    const before = await app.prisma.order.count({ where: { customerId: customer.userId } });
+    const rejected = await inject('POST', '/api/v1/customer/checkout', { paymentMethod: 'MOBILE_MONEY' }, customer.token);
+    expect(rejected.statusCode).toBe(400);
+    expect(rejected.json().error.code).toBe('MMG_MULTI_VENDOR_UNSUPPORTED');
+    expect(await app.prisma.order.count({ where: { customerId: customer.userId } })).toBe(before);
+
+    await app.prisma.vendor.updateMany({
+      where: { id: { in: [restaurant.vendorId, supermarket.vendorId] } },
+      data: { mmgPayUrl: null },
+    });
+    await app.prisma.cart.deleteMany({ where: { customerId: customer.userId } });
+  });
+
+  it('PU-05: rejects absent, malformed, and disallowed legacy MMG destinations server-side', async () => {
+    for (const legacyValue of [null, 'not a URL', 'http://pay.example.com/pay/x', 'https://evil.example/pay/x']) {
+      await app.prisma.vendor.update({ where: { id: restaurant.vendorId }, data: { mmgPayUrl: legacyValue } });
+      await addToCart(customer.token, restaurant.vendorId, burgerId, 1);
+      const refused = await inject('POST', '/api/v1/customer/checkout', { paymentMethod: 'MOBILE_MONEY' }, customer.token);
+      expect(refused.statusCode).toBe(400);
+      expect(refused.json().error.code).toBe(legacyValue === null ? 'MMG_NOT_AVAILABLE' : 'MMG_LINK_INVALID');
+      await app.prisma.cart.deleteMany({ where: { customerId: customer.userId } });
+    }
+    await app.prisma.vendor.update({ where: { id: restaurant.vendorId }, data: { mmgPayUrl: null } });
+  });
+
+  it('PU-05: returns only a validated post-order action and creates no Swift-held funds', async () => {
+    const rawLink = 'https://pay.example.com/pay/x?merchant=restaurant';
+    const restaurantName = (await app.prisma.vendor.findUniqueOrThrow({
+      where: { id: restaurant.vendorId },
+      select: { name: true },
+    })).name;
+    await app.prisma.vendor.update({ where: { id: restaurant.vendorId }, data: { mmgPayUrl: rawLink } });
+    await addToCart(customer.token, restaurant.vendorId, burgerId, 1);
+    const transactionsBefore = await app.prisma.transaction.count();
     const ok = await inject('POST', '/api/v1/customer/checkout', { paymentMethod: 'MOBILE_MONEY' }, customer.token);
     expect(ok.statusCode).toBe(200);
     const mmgOrder = ok.json().data.order ?? ok.json().data.orders[0];
     createdOrderIds.push(mmgOrder.id);
     expect(mmgOrder.paymentMethod).toBe('MOBILE_MONEY');
+    expect(mmgOrder).not.toHaveProperty('vendor.mmgPayUrl');
+    expect(ok.json().data.paymentAction).toEqual({
+      kind: 'OPEN_EXTERNAL_URL',
+      method: 'MOBILE_MONEY',
+      provider: 'MMG',
+      fundsFlow: 'DIRECT_TO_VENDOR',
+      orderId: mmgOrder.id,
+      recipientName: expect.any(String),
+      amount: mmgOrder.total,
+      url: rawLink,
+    });
+    expect(await app.prisma.transaction.count()).toBe(transactionsBefore);
+    const persisted = await app.prisma.order.findUniqueOrThrow({ where: { id: mmgOrder.id } });
+    expect(persisted.paymentStatus).toBe('PENDING');
+    expect(persisted.paymentId).toBeNull();
+    expect(persisted.mmgPayUrlSnapshot).toBe(rawLink);
+    expect(persisted.mmgRecipientNameSnapshot).toBe(restaurantName);
+
+    // The order contract is immutable: changing the profile after checkout
+    // must not redirect this already-placed payment or relabel its recipient.
+    await app.prisma.vendor.update({
+      where: { id: restaurant.vendorId },
+      data: { name: 'Renamed after checkout', mmgPayUrl: 'https://pay.example.com/pay/different-recipient' },
+    });
 
     const got = await inject('GET', `/api/v1/customer/orders/${mmgOrder.id}`, undefined, customer.token);
     expect(got.json().data.paymentStatus).toBe('PENDING');
-    expect(got.json().data.vendor.mmgPayUrl).toBe('https://mmg.gy/pay/x');
-    await app.prisma.vendor.update({ where: { id: restaurant.vendorId }, data: { mmgPayUrl: null } });
+    expect(got.json().data.vendor).not.toHaveProperty('mmgPayUrl');
+    expect(got.json().data.paymentAction).toMatchObject({
+      orderId: mmgOrder.id,
+      fundsFlow: 'DIRECT_TO_VENDOR',
+      recipientName: restaurantName,
+      url: rawLink,
+    });
+
+    // Even a corrupted legacy row fails closed; never fall back to today's
+    // mutable vendor URL when the committed destination is absent or unsafe.
+    await app.prisma.order.update({
+      where: { id: mmgOrder.id },
+      data: { mmgPayUrlSnapshot: 'https://evil.example/redirect' },
+    });
+    const unsafe = await inject('GET', `/api/v1/customer/orders/${mmgOrder.id}`, undefined, customer.token);
+    expect(unsafe.statusCode).toBe(200);
+    expect(unsafe.json().data.paymentAction).toBeNull();
+    expect(JSON.stringify(unsafe.json().data)).not.toContain('different-recipient');
+    await app.prisma.vendor.update({
+      where: { id: restaurant.vendorId },
+      data: { name: restaurantName, mmgPayUrl: null },
+    });
   });
 
   it('express charges exactly 1.5x the delivery fee and flags the order — pickup ignores it', async () => {
@@ -601,6 +718,28 @@ describe('Appointments — booked at acceptance, never double-held', () => {
 
     const db = await app.prisma.order.findUniqueOrThrow({ where: { id: order.id }, select: { status: true } });
     expect(db.status).toBe('PENDING');
+  });
+
+  it('cancel-then-accept leaves NO booking behind — the reservation rides the accept transaction [REPORT-007-v4 F-05]', async () => {
+    const cust = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
+    const raceSlot = new Date(slot.getTime() + 4 * 60 * 60_000); // 15:00 — inside the 09:00–17:00 window
+    const res = await checkoutAppointment(cust, raceSlot);
+    expect(res.statusCode).toBe(200);
+    const order = res.json().data.order;
+    createdOrderIds.push(order.id);
+
+    // Deterministic shape of the race: the cancellation commits first.
+    const cancel = await inject('POST', `/api/v1/customer/orders/${order.id}/cancel`, { reason: 'changed plans' }, cust.token);
+    expect(cancel.statusCode).toBe(200);
+
+    const accept = await inject('PUT', `/api/v1/vendor/orders/${order.id}/accept`, {}, service.token);
+    expect(accept.statusCode).toBeGreaterThanOrEqual(400);
+    // Pre-fix, reserveSlot ran BEFORE the locked transition and the lost race
+    // left an orphan CONFIRMED booking blocking the chair forever. The
+    // reservation now rides the same Order-lock transaction, so the refusal
+    // rolls it back too.
+    const bookings = await app.prisma.booking.count({ where: { orderId: order.id, status: { not: 'CANCELLED' } } });
+    expect(bookings).toBe(0);
   });
 
   it('a lingering cart tip is never charged on a booking (no rider to tip)', async () => {

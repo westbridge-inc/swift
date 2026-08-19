@@ -162,6 +162,11 @@ const MATRIX: PrefixSpec[] = [
  *  document/statement render-token model. Anything added here needs the same
  *  written justification. */
 const PUBLIC_BY_DESIGN = new Set([
+  // Service-provider browse is customer discovery (guest-browse doctrine):
+  // optionalAuth by design; unauthenticated requests hit schema validation
+  // (400 on missing query), never a data leak — the handler serves a public
+  // trade listing projection.
+  'GET /api/v1/services/providers',
   'GET /api/v1/statements/render',
   'GET /api/v1/verification/render/:docId',
   // Recipient tracking link SMS'd to package receivers (who have no account):
@@ -230,7 +235,7 @@ describe('Suspended accounts are cut off immediately', () => {
     const userId = user.id;
     const accessToken = app.jwt.sign({ userId, role: 'CUSTOMER', jti: rnd.slice(0, 8) });
     const refreshToken = `rt-${rnd}`;
-    await app.prisma.session.create({ data: { userId, token: accessToken, refreshToken, deviceId: 'susp', deviceType: 'test', expiresAt: new Date(Date.now() + 86400000) } });
+    await app.prisma.session.create({ data: { authMethod: 'OTP', userId, token: accessToken, refreshToken, deviceId: 'susp', deviceType: 'test', expiresAt: new Date(Date.now() + 86400000) } });
 
     // Works while ACTIVE.
     const ok = await app.inject({ method: 'GET', url: '/api/v1/customer/profile', headers: { authorization: `Bearer ${accessToken}` } });

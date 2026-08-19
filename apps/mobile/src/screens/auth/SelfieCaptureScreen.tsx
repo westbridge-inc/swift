@@ -1,4 +1,4 @@
-import { useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { View, Linking, Image } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { CameraView, useCameraPermissions } from 'expo-camera';
@@ -7,7 +7,12 @@ import { color } from '@swift/ui';
 import { withAlpha } from '../../modules/mover/dark';
 import { SwiftMark } from '../../components/SwiftLogo';
 import { authApi } from '../../services/api';
-import { useAuthStore } from '../../stores/authStore';
+import {
+  AuthSessionBoundaryError,
+  requireAuthSessionForPrincipal,
+  requireAuthSessionSnapshot,
+  useAuthStore,
+} from '../../stores/authStore';
 import { Text, Heading, Button, PressableScale } from '../../components/ui';
 
 const FRAME = 260;
@@ -21,24 +26,45 @@ const FRAME = 260;
  */
 export function SelfieCaptureScreen() {
   const cameraRef = useRef<CameraView>(null);
+  const captureAttemptRef = useRef(0);
   const [permission, requestPermission] = useCameraPermissions();
   const [photoUri, setPhotoUri] = useState<string | null>(null);
   const [capturing, setCapturing] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const { user, setUser, logout } = useAuthStore();
+  const { setUserIfCurrent, logout } = useAuthStore();
+  const sessionGeneration = useAuthStore((state) => state.sessionGeneration);
+
+  // The navigator can keep this same screen instance mounted when account A
+  // signs out and account B also needs a selfie. Never carry A's captured
+  // image or pending UI state across that authentication boundary.
+  useEffect(() => {
+    captureAttemptRef.current += 1;
+    setPhotoUri(null);
+    setCapturing(false);
+    setUploading(false);
+    setError(null);
+  }, [sessionGeneration]);
 
   const capture = async () => {
     if (!cameraRef.current || capturing) return;
+    const attempt = ++captureAttemptRef.current;
     setCapturing(true);
     setError(null);
     try {
+      const owner = requireAuthSessionSnapshot();
       const photo = await cameraRef.current.takePictureAsync({ quality: 0.7 });
+      if (captureAttemptRef.current !== attempt) return;
+      requireAuthSessionForPrincipal(owner);
       if (photo?.uri) setPhotoUri(photo.uri);
-    } catch {
+    } catch (captureError) {
+      if (
+        captureAttemptRef.current !== attempt
+        || captureError instanceof AuthSessionBoundaryError
+      ) return;
       setError('Couldn’t take the photo. Try again.');
     } finally {
-      setCapturing(false);
+      if (captureAttemptRef.current === attempt) setCapturing(false);
     }
   };
 
@@ -47,14 +73,23 @@ export function SelfieCaptureScreen() {
     setUploading(true);
     setError(null);
     try {
+      const owner = requireAuthSessionSnapshot();
+      const operationUser = useAuthStore.getState().user;
+      if (!operationUser || operationUser.id !== owner.userId) {
+        throw new AuthSessionBoundaryError();
+      }
       const form = new FormData();
       form.append('file', { uri: photoUri, name: 'selfie.jpg', type: 'image/jpeg' } as never);
-      const { data } = await authApi.uploadSelfie(form);
+      const { data } = await authApi.uploadSelfie(form, owner);
+      requireAuthSessionForPrincipal(owner);
       const updated = data.data.user;
       // Merge — the endpoint returns the core identity fields; anything extra
       // already in the store (e.g. wallet) must survive.
-      setUser({ ...(user as object), ...updated } as never);
-    } catch {
+      if (!setUserIfCurrent(owner, { ...operationUser, ...updated } as never)) {
+        throw new AuthSessionBoundaryError();
+      }
+    } catch (uploadError) {
+      if (uploadError instanceof AuthSessionBoundaryError) return;
       setError('Upload failed. Check your connection and try again.');
       setUploading(false);
     }

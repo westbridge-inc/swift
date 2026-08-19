@@ -25,7 +25,7 @@ const Tabs = createBottomTabNavigator();
 const TAB_ICON: Record<string, React.ComponentProps<typeof Feather>['name']> = {
   AdvHome: 'home',
   AdvBilling: 'file-text',
-  AdvTeam: 'users',
+  AdvTeam: 'user',
 };
 
 function AdvertiserTabs() {
@@ -40,7 +40,7 @@ function AdvertiserTabs() {
     >
       <Tabs.Screen name="AdvHome" component={AdvertiserHomeScreen} options={{ title: 'Campaigns' }} />
       <Tabs.Screen name="AdvBilling" component={AdvertiserBillingScreen} options={{ title: 'Billing' }} />
-      <Tabs.Screen name="AdvTeam" component={AdvertiserTeamScreen} options={{ title: 'Team' }} />
+      <Tabs.Screen name="AdvTeam" component={AdvertiserTeamScreen} options={{ title: 'Account' }} />
     </Tabs.Navigator>
   );
 }

@@ -39,7 +39,7 @@ async function makeUser(roles: UserRole[], activeRole: UserRole) {
   createdUserIds.push(u.id);
   const token = app.jwt.sign({ userId: u.id, role: activeRole, jti: nanoid(8) });
   await app.prisma.session.create({
-    data: { userId: u.id, token, refreshToken: nanoid(48), deviceId: 'mod-test', deviceType: 'test', expiresAt: new Date(Date.now() + DAY) },
+    data: { authMethod: 'OTP', userId: u.id, token, refreshToken: nanoid(48), deviceId: 'mod-test', deviceType: 'test', expiresAt: new Date(Date.now() + DAY) },
   });
   return { userId: u.id, token };
 }

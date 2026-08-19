@@ -7,19 +7,56 @@ import { useNavigation } from '@react-navigation/native';
 import { color, space } from '@swift/ui';
 import { useMyRating, useProfile } from '../../../hooks/customer';
 import { useAuthStore } from '../../../stores/authStore';
-import { EmptyState, IconChip, PillButton, PopupCard, Screen, SettingsRow, T } from '../../../kit';
+import { EmptyState, IconChip, PillButton, PopupCard, PopupTitle, Screen, SettingsRow, T } from '../../../kit';
 import { RoleSwitcherSheet } from '../../../components/RoleSwitcherSheet';
-import { API_URL } from '../../../services/api';
+import { API_URL, customerApi } from '../../../services/api';
 import { openPayLink } from '../../../lib/payLink';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { BrandSwitch } from '../../../kit/controls';
 
 const GUTTER = space['2xl'];
 
 // Kit Profile (49) + logout popup (51). Sections in the kit's icon-chip row
 // language; every row lands on a real screen/flow. Dark mode (kit "Dart
 // Mode") is omitted — the app ships light-only.
+/** [DCR-1 NR1-03] Marketing messages toggle — the row the served consent
+ *  text promises ("Account -> Marketing messages"). The switch reflects the
+ *  ledger's current state; a flip is a new append-only consent row. */
+function MarketingConsentRow() {
+  const qc = useQueryClient();
+  const consent = useQuery({
+    queryKey: ['consent'],
+    queryFn: async () => (await customerApi.getConsent()).data.data as {
+      consents: { documentType: string; state: string | null }[];
+    },
+    staleTime: 60_000,
+  });
+  const marketingState = consent.data?.consents.find((c) => c.documentType === 'marketing_consent')?.state;
+  const granted = marketingState === 'granted' || marketingState === 're_granted';
+  const toggle = useMutation({
+    mutationFn: (next: boolean) => customerApi.setMarketingConsent(next),
+    onSettled: () => qc.invalidateQueries({ queryKey: ['consent'] }),
+  });
+  return (
+    <SettingsRow
+      icon="gift"
+      label="Marketing messages"
+      sub={granted ? 'On — offers and promos' : 'Off — service messages only'}
+      onPress={() => openPayLink(`${API_URL}/legal/marketing`)}
+      right={
+        <BrandSwitch
+          value={toggle.isPending ? !granted : granted}
+          disabled={consent.isLoading || toggle.isPending}
+          onChange={(next) => toggle.mutate(next)}
+        />
+      }
+    />
+  );
+}
+
 export function ProfileScreen() {
   const navigation = useNavigation<any>();
-  const { isAuthenticated, promptLogin, logout, user } = useAuthStore();
+  const { isAuthenticated, promptLogin, logout, user, setIntent } = useAuthStore();
   const profile = useProfile<any>();
   const myRating = useMyRating();
   const [confirmLogout, setConfirmLogout] = useState(false);
@@ -27,6 +64,11 @@ export function ProfileScreen() {
   const [ratingInfo, setRatingInfo] = useState(false);
 
   if (!isAuthenticated) {
+    // A guest is never trapped [first-open 2.2 / SPS-F-0024]: every other
+    // surface can leave (MoverStack, VendorStack, advertiserExit all
+    // setIntent(null)) — the customer surface must too. "Back to the welcome
+    // screen" re-opens the trio; "Switch app" is the same sheet members get,
+    // whose un-owned cards read as join invitations.
     return (
       <Screen>
         <View style={{ height: 56, alignItems: 'center', justifyContent: 'center' }}>
@@ -39,6 +81,21 @@ export function ProfileScreen() {
           actionLabel="Sign In"
           onAction={promptLogin}
         />
+        <View style={{ paddingHorizontal: GUTTER, paddingBottom: space['3xl'] }}>
+          <SettingsRow
+            icon="refresh-ccw"
+            label="Switch app"
+            sub="Swift Driver · Swift Business"
+            onPress={() => setSwitcherOpen(true)}
+          />
+          <SettingsRow
+            icon="arrow-left"
+            label="Back to the welcome screen"
+            sub="Choose again how you’ll use Swift"
+            onPress={() => setIntent(null)}
+          />
+        </View>
+        <RoleSwitcherSheet visible={switcherOpen} current="customer" onClose={() => setSwitcherOpen(false)} />
       </Screen>
     );
   }
@@ -146,6 +203,7 @@ export function ProfileScreen() {
           <SettingsRow icon="phone" label="Contact Us" onPress={() => navigation.navigate('ContactUs')} />
           <SettingsRow icon="file-text" label="Terms of Service" onPress={() => openPayLink(`${API_URL}/legal/terms`)} />
           <SettingsRow icon="shield" label="Privacy Policy" onPress={() => openPayLink(`${API_URL}/legal/privacy`)} />
+          <MarketingConsentRow />
           <SettingsRow
             icon="refresh-ccw"
             label="Switch app"
@@ -167,9 +225,9 @@ export function ProfileScreen() {
       {/* Movement R9 — why customers have a rating (aggregate-only honesty) */}
       <PopupCard visible={ratingInfo} onClose={() => setRatingInfo(false)}>
         <IconChip icon="star" size={56} />
-        <T variant="heading" center style={{ marginTop: space.md }}>
+        <PopupTitle variant="heading" center style={{ marginTop: space.md }}>
           {myRating.data?.displayRating != null ? `${myRating.data.displayRating.toFixed(1)} ${myRating.data.ratingBucket}` : 'No rating yet'}
-        </T>
+        </PopupTitle>
         <T variant="label" tone="muted" center style={{ marginTop: space.sm }}>
           Drivers and riders rate their trips with you, the same way you rate them — respect runs both ways.
           Swift only ever shows the average, never who rated what.
@@ -181,9 +239,9 @@ export function ProfileScreen() {
 
       <PopupCard visible={confirmLogout} onClose={() => setConfirmLogout(false)}>
         <IconChip icon="log-out" size={56} />
-        <T variant="heading" center style={{ marginTop: space.md }}>
+        <PopupTitle variant="heading" center style={{ marginTop: space.md }}>
           Log out of Swift?
-        </T>
+        </PopupTitle>
         <T variant="label" tone="muted" center style={{ marginTop: space.sm }}>
           Your cart and session leave this device; your account keeps everything.
         </T>

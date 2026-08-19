@@ -6,6 +6,7 @@ import { space } from '@swift/ui';
 import { useHome, useToggleFavorite } from '../../../hooks/customer';
 import { useAuthStore } from '../../../stores/authStore';
 import { useLocationStore } from '../../../stores/locationStore';
+import { grantedLocationFix } from '../../../lib/deviceLocation';
 import { vendorImage } from '../../../lib/images';
 import { EmptyState, ErrorState, FoodCard, Header, LoadingBlock, Screen } from '../../../kit';
 
@@ -17,8 +18,9 @@ const CARD_W = (SCREEN_W - GUTTER * 2 - space.lg) / 2;
 export function RecommendedScreen() {
   const navigation = useNavigation<any>();
   const { isAuthenticated, promptLogin } = useAuthStore();
-  const { latitude, longitude } = useLocationStore();
-  const home = useHome<any>(latitude ?? undefined, longitude ?? undefined);
+  const { latitude, longitude, status } = useLocationStore();
+  const locationFix = grantedLocationFix(latitude, longitude, status);
+  const home = useHome<any>(locationFix?.latitude, locationFix?.longitude);
   const toggleFav = useToggleFavorite();
 
   const featured: any[] = home.data?.featured ?? [];

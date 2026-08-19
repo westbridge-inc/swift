@@ -121,7 +121,7 @@ beforeAll(async () => {
   });
   userIds.push(admin.id);
   adminToken = app.jwt.sign({ userId: admin.id, role: 'ADMIN', jti: nanoid(8) });
-  await app.prisma.session.create({ data: { userId: admin.id, token: adminToken, refreshToken: nanoid(48), deviceId: 'sla', deviceType: 'test', expiresAt: new Date(Date.now() + 86_400_000) } });
+  await app.prisma.session.create({ data: { authMethod: 'OTP', userId: admin.id, token: adminToken, refreshToken: nanoid(48), deviceId: 'sla', deviceType: 'test', expiresAt: new Date(Date.now() + 86_400_000) } });
 
   const owner = await app.prisma.user.create({ data: { phone: `+59200813${nanoid(4)}`, firstName: 'Sla', lastName: 'Owner', roles: ['VENDOR_OWNER'] as UserRole[], activeRole: 'VENDOR_OWNER' as UserRole, isPhoneVerified: true } });
   userIds.push(owner.id);

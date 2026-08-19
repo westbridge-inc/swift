@@ -11,9 +11,13 @@ import { z } from 'zod';
  * minor-units invariant holds by construction and new money inputs can't
  * silently reintroduce float drift.
  */
-// 100,000,000 minor units ≈ GYD 100M (~USD 478k) — far above any real order,
-// fare, or tip, but a hard ceiling against overflow / absurd injection.
-export const MONEY_MAX_MINOR = 100_000_000;
+// ~GYD 100M (~USD 478k) — far above any real order, fare, or tip, but a hard
+// ceiling against overflow / absurd injection. [REPORT-006 carryover] One
+// minor unit BELOW the smallest money sink: Earning.amount and
+// DeliveryCashSettlement.amount are Decimal(10,2) whose ceiling is
+// 99,999,999.99 — an accepted 100,000,000 would overflow the settlement row
+// it later creates.
+export const MONEY_MAX_MINOR = 99_999_999;
 
 /** Non-negative integer minor units, bounded. */
 export const zMoneyMinor = z.number().int().min(0).max(MONEY_MAX_MINOR);

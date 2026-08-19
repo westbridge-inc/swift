@@ -1,4 +1,4 @@
-import type { PrismaClient, Subscription, Prisma } from '@prisma/client';
+import type { PrismaClient, Subscription, Prisma, SubscriptionStatus } from '@prisma/client';
 import { AppError, NotFoundError } from '../../utils/errors';
 import { NotificationService, notifyAdmins } from '../notification/notification.service';
 import { getChannels } from '../../providers/notifications/channels';
@@ -168,6 +168,25 @@ export class BillingService {
       });
     } catch (error) {
       if ((error as Prisma.PrismaClientKnownRequestError).code === 'P2002') {
+        // [REPORT-013 F-013-09] A duplicate attempt key is NOT always
+        // "already handled": a crash between the durable CHARGE_FAILED
+        // record and its outcome application leaves failedAttempts at the
+        // recorded level forever — every later run collides on the same key
+        // and skipping here would suppress retries AND the suspension
+        // permanently. If the failure record exists while its outcome never
+        // landed, RESUME the outcome instead of skipping past it. (A fully
+        // applied failure advanced failedAttempts, so its next key differs
+        // and this branch is unreachable for it.)
+        const failedKey = `failed:${sub.id}:${periodKey}:a${sub.failedAttempts}`;
+        const recordedFailure = await this.prisma.billingEvent.findUnique({
+          where: { idempotencyKey: failedKey },
+          select: { note: true },
+        });
+        if (recordedFailure) {
+          return this.applyRecordedFailureOutcome(
+            sub, recordedFailure.note ?? 'Charge failed (outcome resumed after interruption)', now, periodKey,
+          );
+        }
         return 'skipped'; // someone (or a concurrent run) already attempted this
       }
       throw error;
@@ -694,20 +713,23 @@ export class BillingService {
 
       let status: string;
       let reportedMinor = 0;
+      let reportedCurrency = '';
       try {
         const lookup = await mmg.transactionLookup({ transactionId: payment.externalRef });
         status = lookup.status;
         reportedMinor = lookup.amountMinor ?? 0;
+        reportedCurrency = String(lookup.currencyCode ?? '').toUpperCase();
       } catch {
         out.stillPending += 1; // transport hiccup — the next tick retries
         continue;
       }
 
       // USD pricing Part 10 rule 3 / SO-6 posture: the settled amount must
-      // match OUR amount exactly. A mismatch is NEVER silently absorbed and
-      // never auto-settled — flag once for the founder and hold the row.
-      // (reportedMinor 0 = provider didn't echo an amount; nothing to check.)
-      if (status === 'approved' && reportedMinor > 0 && reportedMinor !== Math.round(Number(payment.amount) * 100)) {
+      // match OUR amount and currency exactly. Missing/zero provider amounts
+      // are mismatches too; approval alone is never proof of the right funds.
+      const expectedMinor = Math.round(Number(payment.amount) * 100);
+      const expectedCurrency = sub.currencyCode.toUpperCase();
+      if (status === 'approved' && (reportedMinor !== expectedMinor || reportedCurrency !== expectedCurrency)) {
         try {
           await this.prisma.subscriptionPayment.updateMany({
             where: { id: payment.id, status: { in: ['PENDING', 'UNKNOWN'] } },
@@ -719,12 +741,12 @@ export class BillingService {
               type: 'REMINDER',
               currencyCode: sub.currencyCode,
               idempotencyKey: `mismatch:${payment.id}`,
-              note: `RECONCILE_MISMATCH: MMG reports ${(reportedMinor / 100).toFixed(2)} vs our ${Number(payment.amount).toFixed(2)} (payment ${payment.id})`,
+              note: `RECONCILE_MISMATCH: MMG reports ${(reportedMinor / 100).toFixed(2)} ${reportedCurrency || '(missing currency)'} vs our ${Number(payment.amount).toFixed(2)} ${expectedCurrency} (payment ${payment.id})`,
             },
           });
           await notifyAdmins(this.prisma, this.notifications, {
-            title: '⚠️ Payment amount mismatch — held for review',
-            body: `MMG reports a different amount than we requested on a weekly-fee payment. It is NOT settled. Payment ${payment.id}.`,
+            title: '⚠️ Payment settlement mismatch — held for review',
+            body: `MMG did not confirm the exact amount and currency requested for a weekly-fee payment. It is NOT settled. Payment ${payment.id}.`,
             data: { kind: 'reconcile_mismatch', paymentId: payment.id, subscriptionId: sub.id },
           });
         } catch {
@@ -863,9 +885,6 @@ export class BillingService {
     now: Date,
     periodKey: string,
   ): Promise<'failed' | 'suspended'> {
-    const attempts = sub.failedAttempts + 1;
-    const willSuspend = attempts >= MAX_FAILED_ATTEMPTS && sub.autoSuspendEnabled;
-
     await this.prisma.billingEvent.create({
       data: {
         subscriptionId: sub.id,
@@ -876,24 +895,50 @@ export class BillingService {
         note: reason,
       },
     });
+    return this.applyRecordedFailureOutcome(sub, reason, now, periodKey);
+  }
+
+  /** [REPORT-013 F-013-09] The APPLICATION half of a failed charge —
+   *  subscription state, access revocation, and dunning notices — separated
+   *  from the durable CHARGE_FAILED record so a crash between the two is
+   *  RESUMABLE: billSubscription's duplicate-attempt path re-enters here
+   *  when it finds a recorded failure whose outcome never landed
+   *  (failedAttempts still at the recorded level). */
+  private async applyRecordedFailureOutcome(
+    sub: SubWithRelations,
+    reason: string,
+    now: Date,
+    periodKey: string,
+  ): Promise<'failed' | 'suspended'> {
+    const attempts = sub.failedAttempts + 1;
+    const willSuspend = attempts >= MAX_FAILED_ATTEMPTS && sub.autoSuspendEnabled;
 
     const nextRetryAt = new Date(now.getTime() + RETRY_HOURS * 60 * 60 * 1000);
-    await this.prisma.subscription.update({
-      where: { id: sub.id },
-      data: {
-        status: willSuspend ? 'SUSPENDED' : 'PAST_DUE',
-        failedAttempts: attempts,
-        nextRetryAt,
-        isInGracePeriod: !willSuspend,
-        gracePeriodEnd: willSuspend ? null : nextRetryAt,
-        ...(willSuspend ? { suspendedAt: now } : {}),
-      },
-    });
+    const subscriptionData = {
+      status: (willSuspend ? 'SUSPENDED' : 'PAST_DUE') as SubscriptionStatus,
+      failedAttempts: attempts,
+      nextRetryAt,
+      isInGracePeriod: !willSuspend,
+      gracePeriodEnd: willSuspend ? null : nextRetryAt,
+      ...(willSuspend ? { suspendedAt: now } : {}),
+    };
 
     if (willSuspend) {
-      await this.suspendAccess(sub, periodKey);
+      // [REPORT-012 F-012-05] Suspension is ONE authority generation: the
+      // subscription status and every derived operating row (vendor
+      // lifecycle/ordering, mover availability) commit together or not at
+      // all. The old shape committed the subscription first and the derived
+      // rows in later writes — a crash between them left a SUSPENDED
+      // subscription behind a still-ACTIVE, still-accepting store.
+      await this.prisma.$transaction(async (tx) => {
+        await tx.subscription.update({ where: { id: sub.id }, data: subscriptionData });
+        await this.suspendAccessRows(tx, sub, periodKey);
+      });
+      await this.suspendAccessNotices(sub);
       return 'suspended';
     }
+
+    await this.prisma.subscription.update({ where: { id: sub.id }, data: subscriptionData });
 
     // §11 dunning depth: the LAST retry before suspension escalates —
     // final-warning copy that NAMES the suspension moment, an SMS (the
@@ -935,29 +980,31 @@ export class BillingService {
   // Suspend / reinstate
   // -------------------------------------------------------------------------
 
-  /** Suspension removes the payer from the platform until they pay. */
-  private async suspendAccess(sub: SubWithRelations, periodKey: string) {
+  /** Suspension row writes — MUST run on the same transaction that flips the
+   *  subscription status, so the authority is one generation [REPORT-012
+   *  F-012-05]. Notifications live in suspendAccessNotices (post-commit). */
+  private async suspendAccessRows(tx: Prisma.TransactionClient, sub: SubWithRelations, periodKey: string) {
     if (sub.vendor) {
       // SUSPENDED vendors vanish from customer browse (which filters ACTIVE)
-      await this.prisma.vendor.update({
+      await tx.vendor.update({
         where: { id: sub.vendor.id },
-        data: { status: 'SUSPENDED', acceptingOrders: false },
+        data: { status: 'SUSPENDED', acceptingOrders: false, suspensionSource: 'BILLING' },
       });
     }
     if (sub.rider) {
-      await this.prisma.rider.updateMany({
+      await tx.rider.updateMany({
         where: { userId: sub.rider.userId },
         data: { isOnline: false, isAvailable: false },
       });
     }
     if (sub.driver) {
-      await this.prisma.driver.updateMany({
+      await tx.driver.updateMany({
         where: { userId: sub.driver.userId },
         data: { isOnline: false, isAvailable: false },
       });
     }
 
-    await this.prisma.billingEvent.create({
+    await tx.billingEvent.create({
       data: {
         subscriptionId: sub.id,
         type: 'SUSPENDED',
@@ -966,7 +1013,10 @@ export class BillingService {
         note: `Auto-suspended after ${MAX_FAILED_ATTEMPTS} failed charges`,
       },
     });
+  }
 
+  /** Post-commit suspension side effects (push + SMS). */
+  private async suspendAccessNotices(sub: SubWithRelations) {
     await this.notifications.send({
       userId: this.payerUserId(sub),
       type: 'SYSTEM_ANNOUNCEMENT',
@@ -984,9 +1034,27 @@ export class BillingService {
 
   private async reinstate(sub: SubWithRelations, periodKey: string) {
     if (sub.vendor) {
-      await this.prisma.vendor.update({
-        where: { id: sub.vendor.id },
-        data: { status: 'ACTIVE', acceptingOrders: true },
+      // [REPORT-013 F-013-07] Payment restores ONLY what billing took. The
+      // lifecycle CAS matches a billing-caused suspension exclusively — an
+      // admin/safety suspension survives payment. Commerce reopens only
+      // where the projection-maintained document truth (isVerified, kept
+      // in-generation by every evidence path since v10) still stands: a
+      // store whose documents died mid-suspension comes back ACTIVE but
+      // closed, never a blind acceptingOrders=true.
+      // Transition rule: a pre-migration suspension has a null source; the
+      // only AUTOMATED suspender has always been billing, so null lifts with
+      // payment (an admin can always re-suspend, which stamps ADMIN).
+      await this.prisma.vendor.updateMany({
+        where: {
+          id: sub.vendor.id,
+          status: 'SUSPENDED',
+          OR: [{ suspensionSource: 'BILLING' }, { suspensionSource: null }],
+        },
+        data: { status: 'ACTIVE', suspensionSource: null },
+      });
+      await this.prisma.vendor.updateMany({
+        where: { id: sub.vendor.id, status: 'ACTIVE', isVerified: true },
+        data: { acceptingOrders: true },
       });
     }
 
@@ -1120,9 +1188,50 @@ export class BillingService {
   // Prepaid top-ups (manual confirm in admin for now)
   // -------------------------------------------------------------------------
 
-  async recordTopUp(subscriptionId: string, amount: number, recordedBy: string, reference?: string, clientKey?: string) {
-    if (amount <= 0) throw new AppError(400, 'INVALID_AMOUNT', 'Top-up must be positive');
+  /**
+   * Transaction-attached wallet credit. Money-rail callers that also own an
+   * inbound payment row use this seam so the immutable billing event, receipt,
+   * balanced ledger posting, wallet balance, and payment-state CAS commit as
+   * one database operation. It deliberately performs no notification or
+   * re-bill; those are post-commit effects handled by afterTopUpCommitted().
+   */
+  async recordTopUpInTransaction(
+    tx: Prisma.TransactionClient,
+    input: {
+      subscriptionId: string;
+      amount: number;
+      recordedBy: string;
+      reference?: string;
+      /** Globally unique for the real-world payment, not the destination. */
+      eventKey: string;
+    },
+  ) {
+    if (input.amount <= 0) throw new AppError(400, 'INVALID_AMOUNT', 'Top-up must be positive');
+    const sub = await tx.subscription.findUnique({
+      where: { id: input.subscriptionId },
+      select: { id: true, currencyCode: true },
+    });
+    if (!sub) throw new NotFoundError('Subscription', input.subscriptionId);
 
+    return this.creditWalletInTx(tx, {
+      subscriptionId: input.subscriptionId,
+      amount: input.amount,
+      currencyCode: sub.currencyCode,
+      eventKey: input.eventKey,
+      note: input.reference
+        ? `ref: ${input.reference} (by ${input.recordedBy})`
+        : `recorded by ${input.recordedBy}`,
+      channel: input.recordedBy.startsWith('agent-cash:')
+        ? input.recordedBy.slice('agent-cash:'.length)
+        : 'ADMIN_TOPUP',
+      mmgRef: input.reference,
+    });
+  }
+
+  /** Post-commit effects for a durable top-up. A caller may safely retry this
+   * method: it moves no money; the billing engine's own event keys make an
+   * immediate re-bill idempotent. */
+  async afterTopUpCommitted(subscriptionId: string, amount: number): Promise<void> {
     const sub = await this.prisma.subscription.findUnique({
       where: { id: subscriptionId },
       include: {
@@ -1132,38 +1241,6 @@ export class BillingService {
       },
     });
     if (!sub) throw new NotFoundError('Subscription', subscriptionId);
-
-    // Idempotency [SWIFT-030]: this is the only live collection path, so a retry
-    // (network retry, admin double-tap) MUST NOT credit twice. A client-supplied
-    // Idempotency-Key makes the retry a no-op; without one we fall back to a
-    // time-based key (the caller opted out of dedup). The BillingEvent's unique
-    // idempotencyKey is the DB-level guard — created FIRST inside the transaction,
-    // so a replay rolls the whole thing back before the balance is ever touched.
-    const eventKey = clientKey
-      ? `topup:${subscriptionId}:${clientKey}`
-      : `topup:${subscriptionId}:${Date.now()}:${recordedBy}`;
-
-    let balance;
-    try {
-      balance = await this.prisma.$transaction(async (tx) =>
-        this.creditWalletInTx(tx, {
-          subscriptionId,
-          amount,
-          currencyCode: sub.currencyCode,
-          eventKey,
-          note: reference ? `ref: ${reference} (by ${recordedBy})` : `recorded by ${recordedBy}`,
-          channel: recordedBy.startsWith('agent-cash:') ? recordedBy.slice('agent-cash:'.length) : 'ADMIN_TOPUP',
-          mmgRef: reference,
-        }),
-      );
-    } catch (error) {
-      if ((error as Prisma.PrismaClientKnownRequestError).code === 'P2002') {
-        // Replay of an already-recorded top-up: return the current balance
-        // without crediting again, notifying, or re-billing.
-        return this.prisma.prepaidBalance.findUniqueOrThrow({ where: { subscriptionId } });
-      }
-      throw error;
-    }
 
     await this.notifications.send({
       userId: this.payerUserId(sub as SubWithRelations),
@@ -1178,16 +1255,44 @@ export class BillingService {
     // reinstates immediately, no waiting for the next cycle. CHURNED included:
     // churn is terminal for DUNNING, never for the door back in (§11).
     if (sub.status === 'PAST_DUE' || sub.status === 'SUSPENDED' || sub.status === 'CHURNED') {
-      const fresh = await this.prisma.subscription.findUniqueOrThrow({
-        where: { id: subscriptionId },
-        include: {
-          rider: { select: { userId: true } },
-          driver: { select: { userId: true } },
-          vendor: { select: { id: true, owner: { select: { userId: true } } } },
-        },
-      });
-      await this.billSubscription(fresh as SubWithRelations);
+      await this.billSubscription(sub as SubWithRelations);
     }
+  }
+
+  async recordTopUp(subscriptionId: string, amount: number, recordedBy: string, reference?: string, clientKey?: string) {
+    if (amount <= 0) throw new AppError(400, 'INVALID_AMOUNT', 'Top-up must be positive');
+
+    // Idempotency [SWIFT-030]: this is the only live collection path, so a retry
+    // (network retry, admin double-tap) MUST NOT credit twice. A client-supplied
+    // Idempotency-Key makes the retry a no-op; without one we fall back to a
+    // time-based key (the caller opted out of dedup). The BillingEvent's unique
+    // idempotencyKey is the DB-level guard — created FIRST inside the transaction,
+    // so a replay rolls the whole thing back before the balance is ever touched.
+    const eventKey = clientKey
+      ? `topup:${subscriptionId}:${clientKey}`
+      : `topup:${subscriptionId}:${Date.now()}:${recordedBy}`;
+
+    let balance;
+    try {
+      balance = await this.prisma.$transaction(async (tx) =>
+        this.recordTopUpInTransaction(tx, {
+          subscriptionId,
+          amount,
+          recordedBy,
+          reference,
+          eventKey,
+        }),
+      );
+    } catch (error) {
+      if ((error as Prisma.PrismaClientKnownRequestError).code === 'P2002') {
+        // Replay of an already-recorded top-up: return the current balance
+        // without crediting again, notifying, or re-billing.
+        return this.prisma.prepaidBalance.findUniqueOrThrow({ where: { subscriptionId } });
+      }
+      throw error;
+    }
+
+    await this.afterTopUpCommitted(subscriptionId, amount);
 
     return balance;
   }
@@ -1210,6 +1315,21 @@ export class BillingService {
 
     let sent = 0;
     for (const sub of upcoming) {
+      // A malformed legacy row must not stop every healthy payer's reminder
+      // run. Resolve the recipient before writing the immutable REMINDER
+      // evidence; otherwise an orphan can acquire the idempotency key without
+      // any notification ever being deliverable.
+      let payerUserId: string;
+      try {
+        payerUserId = this.payerUserId(sub as SubWithRelations);
+      } catch (error) {
+        if (error instanceof AppError && error.code === 'ORPHAN_SUBSCRIPTION') {
+          log().error({ subscriptionId: sub.id }, 'billing reminder skipped for orphan subscription');
+          continue;
+        }
+        throw error;
+      }
+
       const periodKey = sub.nextBillingDate.toISOString().slice(0, 10);
       try {
         await this.prisma.billingEvent.create({
@@ -1227,7 +1347,7 @@ export class BillingService {
       }
 
       await this.notifications.send({
-        userId: this.payerUserId(sub as SubWithRelations),
+        userId: payerUserId,
         type: 'SYSTEM_ANNOUNCEMENT',
         title: 'Subscription due tomorrow',
         body: `Your weekly fee of $${Number(this.amountFor(sub)).toLocaleString()} ${sub.currencyCode} is due tomorrow.`,

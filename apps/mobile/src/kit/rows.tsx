@@ -1,6 +1,6 @@
 /** @jsxImportSource react */
 import React from 'react';
-import { Pressable, View, type ViewStyle } from 'react-native';
+import { Pressable, View, type ViewProps, type ViewStyle } from 'react-native';
 import { Feather } from '@expo/vector-icons';
 import { color, radius, space } from '@swift/ui';
 import { LinkText } from './button';
@@ -11,24 +11,46 @@ import { T } from './text';
  *  as they are elevated; when the register empties, lg becomes the default. */
 export function SectionHeader({
   title,
+  eyebrow,
   onSeeAll,
   style,
   size = 'md',
 }: {
   title: string;
+  /** Structure-as-information [design-100x 1.5]: the eyebrow states something
+   *  TRUE about the section ("From your orders", "Open now") — never set one
+   *  as decoration. */
+  eyebrow?: string;
   onSeeAll?: () => void;
   style?: ViewStyle;
   size?: 'md' | 'lg';
 }) {
   return (
+    <View style={style}>
+      {eyebrow ? (
+        <T variant="micro" tone="faint" style={{ marginBottom: 2 }}>
+          {eyebrow.toUpperCase()}
+        </T>
+      ) : null}
+      <View style={{ flexDirection: 'row', alignItems: 'baseline', justifyContent: 'space-between' }}>
+        <T variant={size === 'lg' ? 'title' : 'heading'}>{title}</T>
+        {onSeeAll ? <LinkText label="See all" onPress={onSeeAll} tone="muted" /> : null}
+      </View>
+    </View>
+  );
+}
+
+/** Hides purely visual artwork from assistive technology and keyboard focus. */
+export function DecorativeIcon({ children, ...rest }: ViewProps) {
+  return (
     <View
-      style={[
-        { flexDirection: 'row', alignItems: 'baseline', justifyContent: 'space-between' },
-        style,
-      ]}
+      {...rest}
+      accessible={false}
+      accessibilityElementsHidden
+      focusable={false}
+      importantForAccessibility="no-hide-descendants"
     >
-      <T variant={size === 'lg' ? 'title' : 'heading'}>{title}</T>
-      {onSeeAll ? <LinkText label="See all" onPress={onSeeAll} tone="muted" /> : null}
+      {children}
     </View>
   );
 }
@@ -46,7 +68,10 @@ export function IconChip({
   const fg = tone === 'error' ? color.error : color.brand[600];
   const bg = tone === 'error' ? color.soft.danger : color.brand[50];
   return (
-    <View
+    <DecorativeIcon
+      // IconChip always accompanies visible text (row label, state title, or
+      // dialog heading), so exposing the font glyph only adds noise such as
+      // “log-out character” to VoiceOver/TalkBack.
       style={{
         width: size,
         height: size,
@@ -57,7 +82,7 @@ export function IconChip({
       }}
     >
       <Feather name={icon} size={size * 0.45} color={fg} />
-    </View>
+    </DecorativeIcon>
   );
 }
 

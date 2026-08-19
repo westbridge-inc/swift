@@ -2,7 +2,7 @@ import type { PrismaClient, ReimbursementClaim } from '@prisma/client';
 import { AppError, NotFoundError } from '../../utils/errors';
 import { NotificationService } from '../notification/notification.service';
 import { CountryConfigService } from '../country/country-config.service';
-import { OrderService } from '../order/order.service';
+import { OrderService, assertMmgFulfilmentAllowed } from '../order/order.service';
 import { FloatService } from '../dispatch/float.service';
 import { haversineDistance } from '../../utils/distance';
 
@@ -167,6 +167,19 @@ export class CashRulesService {
       include: { customer: { select: { id: true, phone: true, countryCode: true, trustLevel: true, createdAt: true } } },
     });
     if (!order) throw new NotFoundError('Order', orderId);
+
+    // [SPS-F-0016 / REPORT-004 F-004-02] Ownership stays first (404 above).
+    // This endpoint is the CASH golden-rule enforcement point and nothing
+    // else: a rider must never self-attest an MMG payment (only the store's
+    // confirm-payment may capture MMG), and the failure branch must never
+    // strike a customer or mint a company-guarantee ReimbursementClaim for a
+    // rail this endpoint does not govern. Pending MMG paid-at-door gets the
+    // package's one payment-pending error; any other non-cash use is simply
+    // the wrong endpoint.
+    if (input.outcome === 'paid') assertMmgFulfilmentAllowed(order, 'DELIVERED');
+    if (order.paymentMethod !== 'CASH') {
+      throw new AppError(409, 'CASH_HANDOVER_ONLY', 'Customer cash handover is available only for cash orders.');
+    }
 
     if (!HANDOVER_STATES.includes(order.status as (typeof HANDOVER_STATES)[number])) {
       throw new AppError(409, 'NOT_AT_DOOR', `Handover is only available at the delivery point (order is ${order.status})`);

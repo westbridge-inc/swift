@@ -7,10 +7,12 @@ import { createHmac, createHash, timingSafeEqual } from 'node:crypto';
 // (server-only, never in the client bundle).
 
 export interface AdTokenPayload {
+  v: 1; // token schema version — legacy unscoped tokens are not billable
   c: string; // campaignId
   r: string; // creativeId
   p: string; // placementKey
   s: string; // sessionId
+  a: string; // signed serve-time principal scope (guest or pseudonymous user)
   e: number; // expiry (epoch ms)
 }
 
@@ -29,9 +31,47 @@ function sign(payloadB64: string): string {
   return createHmac('sha256', secret()).update(payloadB64).digest('base64url');
 }
 
+/** A guest token is deliberately usable only by a request with no valid auth.
+ *  Authenticated markers are HMACs scoped to the client app session: they do
+ *  not expose a raw user id and cannot be joined across app sessions. */
+export function adPrincipalScope(userId: string | null, appSessionId: string): string {
+  if (!userId) return 'g';
+  const digest = createHmac('sha256', secret())
+    .update('swift-ad-principal-v1\0')
+    .update(userId)
+    .update('\0')
+    .update(appSessionId)
+    .digest('base64url');
+  return `u.${digest}`;
+}
+
+/** Constant-time comparison between the token's serve-time principal and the
+ *  current request principal. The signed app session is used for recomputing
+ *  the marker, so access-token/session rotation for the same user is safe. */
+export function adTokenMatchesPrincipal(payload: AdTokenPayload, userId: string | null, authPresented: boolean): boolean {
+  // Optional-auth routes intentionally degrade invalid credentials to a guest
+  // principal. A guest ad event is nevertheless valid only when the client
+  // explicitly omitted Authorization, never when it presented stale/invalid
+  // credentials that happened to fail authentication.
+  if (!userId && authPresented) return false;
+  const expected = Buffer.from(adPrincipalScope(userId, payload.s), 'utf8');
+  const actual = Buffer.from(payload.a, 'utf8');
+  return expected.length === actual.length && timingSafeEqual(expected, actual);
+}
+
 /** Mint a token for a served creative. `ttlMinutes` default 15 (§11.3). */
-export function signImpressionToken(payload: Omit<AdTokenPayload, 'e'>, now = Date.now(), ttlMinutes = 15): string {
-  const full: AdTokenPayload = { ...payload, e: now + ttlMinutes * 60_000 };
+export function signImpressionToken(
+  payload: Omit<AdTokenPayload, 'v' | 'a' | 'e'>,
+  userId: string | null,
+  now = Date.now(),
+  ttlMinutes = 15,
+): string {
+  const full: AdTokenPayload = {
+    v: 1,
+    ...payload,
+    a: adPrincipalScope(userId, payload.s),
+    e: now + ttlMinutes * 60_000,
+  };
   const payloadB64 = b64url(Buffer.from(JSON.stringify(full), 'utf8'));
   return `${payloadB64}.${sign(payloadB64)}`;
 }
@@ -49,14 +89,28 @@ export function verifyImpressionToken(token: string, now = Date.now()): TokenVer
   const a = Buffer.from(sig);
   const b = Buffer.from(expected);
   if (a.length !== b.length || !timingSafeEqual(a, b)) return { ok: false, reason: 'BAD_SIGNATURE' };
-  let payload: AdTokenPayload;
+  let payload: unknown;
   try {
     payload = JSON.parse(Buffer.from(payloadB64, 'base64url').toString('utf8'));
   } catch {
     return { ok: false, reason: 'MALFORMED' };
   }
-  if (typeof payload.e !== 'number' || now > payload.e) return { ok: false, reason: 'EXPIRED' };
-  return { ok: true, payload };
+  if (
+    typeof payload !== 'object'
+    || payload === null
+    || (payload as Partial<AdTokenPayload>).v !== 1
+    || typeof (payload as Partial<AdTokenPayload>).c !== 'string'
+    || typeof (payload as Partial<AdTokenPayload>).r !== 'string'
+    || typeof (payload as Partial<AdTokenPayload>).p !== 'string'
+    || typeof (payload as Partial<AdTokenPayload>).s !== 'string'
+    || typeof (payload as Partial<AdTokenPayload>).a !== 'string'
+    || typeof (payload as Partial<AdTokenPayload>).e !== 'number'
+  ) {
+    return { ok: false, reason: 'MALFORMED' };
+  }
+  const typed = payload as AdTokenPayload;
+  if (now > typed.e) return { ok: false, reason: 'EXPIRED' };
+  return { ok: true, payload: typed };
 }
 
 /** sha256(userId + rotating daily salt) — the pseudonymous user key for

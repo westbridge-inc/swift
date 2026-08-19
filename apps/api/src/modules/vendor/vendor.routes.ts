@@ -1,7 +1,7 @@
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { OrderStatus, OrderType, SettlementStatus } from '@prisma/client';
-import { OrderService, notHeldFilter } from '../order/order.service';
+import { OrderService, assertMmgFulfilmentAllowed, notHeldFilter } from '../order/order.service';
 import { VendorAnalyticsService } from './vendor-analytics.service';
 import { VendorMenuService } from './vendor-menu.service';
 import { PickingService } from '../order/picking.service';
@@ -34,6 +34,7 @@ import { QrAnalyticsService } from '../qr/qr-analytics.service';
 import { cachedRender, renderQrPng, renderQrSvg, renderTemplatePdf } from '../qr/qr-assets.service';
 import { publicWebBase } from '../qr/qr-codes';
 import { processReviewText } from '../rating/review-scrub';
+import { mmgPayUrlForWrite, safeMmgPayUrl } from '../../utils/mmg-pay-url';
 
 // ---------------------------------------------------------------------------
 // Input schemas
@@ -784,9 +785,15 @@ export async function vendorRoutes(app: FastifyInstance) {
         _count: { select: { orders: true, items: true } },
       },
     });
+    // Legacy rows predate the MMG destination validator. Never reflect an
+    // invalid stored value back into an app where it could be opened.
+    const safeVendors = vendors.map((vendor) => ({
+      ...vendor,
+      mmgPayUrl: safeMmgPayUrl(vendor.mmgPayUrl),
+    }));
     const visible = access.role === 'OWNER'
-      ? vendors
-      : vendors.map((v) => ({ ...v, subscription: undefined }));
+      ? safeVendors
+      : safeVendors.map((v) => ({ ...v, subscription: undefined }));
     return {
       success: true,
       data: { id: access.ownerId, userId: request.user.userId, vendors: visible, myRole: access.role },
@@ -876,6 +883,9 @@ export async function vendorRoutes(app: FastifyInstance) {
   app.put('/profile', auth, async (request) => {
     const { vendorId } = await requireVendor(app, request, 'MANAGER');
     const body = updateVendorProfileSchema.parse(request.body);
+    const mmgPayUrl = body.mmgPayUrl === undefined
+      ? undefined
+      : mmgPayUrlForWrite(body.mmgPayUrl);
 
     const vendor = await app.prisma.vendor.update({
       where: { id: vendorId },
@@ -899,7 +909,7 @@ export async function vendorRoutes(app: FastifyInstance) {
         ...(body.estimatedPrepTime !== undefined && { estimatedPrepTime: body.estimatedPrepTime }),
         ...(body.selfDeliveryEnabled !== undefined && { selfDeliveryEnabled: body.selfDeliveryEnabled }),
         ...(body.maxConcurrentOrders !== undefined && { maxConcurrentOrders: body.maxConcurrentOrders }),
-        ...(body.mmgPayUrl !== undefined && { mmgPayUrl: body.mmgPayUrl || null }),
+        ...(mmgPayUrl !== undefined && { mmgPayUrl }),
       },
       include: { operatingHours: { orderBy: { dayOfWeek: 'asc' } } },
     });
@@ -919,17 +929,44 @@ export async function vendorRoutes(app: FastifyInstance) {
     const { vendorId } = await requireVendor(app, request, 'MANAGER');
     const vendor = await app.prisma.vendor.findUniqueOrThrow({ where: { id: vendorId } });
 
-    const updated = await app.prisma.vendor.update({
-      where: { id: vendorId },
+    // [EV-ACT-14] OPENING needs a live store: a suspended/pending business
+    // flipping this switch is invisible to customers anyway (public browse
+    // requires ACTIVE) — refuse honestly instead of silently doing nothing
+    // visible. CLOSING is always allowed.
+    if (!vendor.isCurrentlyOpen && vendor.status !== 'ACTIVE') {
+      throw new AppError(409, 'VENDOR_NOT_ACTIVE', 'Your store isn’t live yet — it opens to customers once it’s approved and active.');
+    }
+
+    // [EV-ACT-14 / REPORT-010 F-06] Atomic flip bound to the OBSERVED value
+    // AND — when turning ON — the lifecycle authority that approved it: a
+    // suspension committing between the preview and this write must beat the
+    // stale request, not lose to it. Racing same-value taps still have one
+    // winner.
+    const flipped = await app.prisma.vendor.updateMany({
+      where: {
+        id: vendorId,
+        isCurrentlyOpen: vendor.isCurrentlyOpen,
+        ...(vendor.isCurrentlyOpen ? {} : { status: 'ACTIVE' }),
+      },
       data: { isCurrentlyOpen: !vendor.isCurrentlyOpen },
     });
+    if (flipped.count === 0 && !vendor.isCurrentlyOpen) {
+      const fresh = await app.prisma.vendor.findUniqueOrThrow({ where: { id: vendorId }, select: { status: true } });
+      if (fresh.status !== 'ACTIVE') {
+        throw new AppError(409, 'VENDOR_NOT_ACTIVE', 'Your store isn’t live right now — approval or reinstatement reopens it.');
+      }
+    }
 
     // SWIFT-102: was a GLOBAL io.emit('vendor:status') to EVERY connected socket
     // with zero listeners — noise + a privacy smell, no consumer. Deleted (rule
     // 17); a storefront-watch feature would emit to a `vendor:<id>` room instead.
 
-    scheduleVendorSearchSync(app, vendorId);
+    if (flipped.count > 0) scheduleVendorSearchSync(app, vendorId);
 
+    const updated = await app.prisma.vendor.findUniqueOrThrow({
+      where: { id: vendorId },
+      select: { isCurrentlyOpen: true, acceptingOrders: true },
+    });
     return { success: true, data: { isCurrentlyOpen: updated.isCurrentlyOpen, acceptingOrders: updated.acceptingOrders } };
   });
 
@@ -938,20 +975,65 @@ export async function vendorRoutes(app: FastifyInstance) {
     const { vendorId } = await resolveVendor(app, request.user.userId, selectedVendorId(request));
     const vendor = await app.prisma.vendor.findUniqueOrThrow({ where: { id: vendorId } });
 
-    // Turning commerce ON requires a verified business (same gate as listing
-    // items; the checklist belongs to the owner). Turning OFF is always allowed.
-    if (!vendor.acceptingOrders) {
-      const verified = vendor.isVerified
-        || await verification.isRoleVerified(await vendorOwnerUserId(app, vendorId), vendor.vendorType);
-      if (!verified) {
+    // Turning OFF is always allowed and needs no authority — a fast atomic flip.
+    if (vendor.acceptingOrders) {
+      await app.prisma.vendor.updateMany({
+        where: { id: vendorId, acceptingOrders: true },
+        data: { acceptingOrders: false },
+      });
+      const off = await app.prisma.vendor.findUniqueOrThrow({ where: { id: vendorId }, select: { isCurrentlyOpen: true, acceptingOrders: true } });
+      return { success: true, data: { isCurrentlyOpen: off.isCurrentlyOpen, acceptingOrders: off.acceptingOrders } };
+    }
+
+    // [EV-ACT-14 / REPORT-011 F-03] Turning commerce ON authorizes from THREE
+    // facts (ACTIVE lifecycle, verified documents, operable subscription) —
+    // all three must be bound at the write's linearization point, not merely
+    // checked before it. A concurrent admin/billing suspension, a document
+    // revocation, or a grace lapse committing after the preview must beat the
+    // stale request. The vendor row lock is the serialization point: the
+    // competing suspend writers touch this same row, so either they land
+    // first (this re-read sees the loss and refuses) or this ON write commits
+    // first (they simply win afterward).
+    const verified = vendor.isVerified
+      || await verification.isRoleVerified(await vendorOwnerUserId(app, vendorId), vendor.vendorType);
+    if (!verified) {
+      throw new AppError(403, 'VERIFICATION_REQUIRED',
+        'Your store can take orders once its documents are verified. Check Documents for anything missing or expired.');
+    }
+
+    let staleVerifiedToHeal = false;
+    await app.prisma.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT id FROM "vendors" WHERE id = ${vendorId} FOR UPDATE`;
+      // Re-read the authority generation UNDER the lock — every fact fresh.
+      const locked = await tx.vendor.findUniqueOrThrow({
+        where: { id: vendorId },
+        select: { status: true, isVerified: true, acceptingOrders: true, vendorType: true },
+      });
+      if (locked.acceptingOrders) return; // a concurrent ON already won — idempotent
+      if (locked.status !== 'ACTIVE') {
+        throw new AppError(409, 'VENDOR_NOT_ACTIVE',
+          'Your store isn’t active right now, so it can’t take orders. Approval or reinstatement switches it back on.');
+      }
+      // [REPORT-012 F-012-05 / REPORT-013 F-013-08] Turning commerce ON
+      // evaluates LIVE document truth on THIS transaction — the cached
+      // isVerified flag can be stale-true when evidence was invalidated by a
+      // path whose projection hasn't landed. NO implicit grandfather: the
+      // zero-evidence-rows carve-out was rejected in review (the daily
+      // reconciler revokes exactly that state, the predicate wasn't
+      // serialized against first-document insertion, and absence proves no
+      // grant). Until the founder's slice-2d explicit grandfather records
+      // exist, this fails CLOSED — consistent with the reconciler's law.
+      // A discovered stale-true is healed post-rollback (a write inside
+      // this refusing transaction would roll back with it).
+      const toggleOwnerUserId = await vendorOwnerUserId(app, vendorId);
+      const verifiedOk = await verification.isRoleVerified(toggleOwnerUserId, locked.vendorType, tx);
+      if (!verifiedOk) {
+        if (locked.isVerified) staleVerifiedToHeal = true;
         throw new AppError(403, 'VERIFICATION_REQUIRED',
           'Your store can take orders once its documents are verified. Check Documents for anything missing or expired.');
       }
-      // A suspended / cancelled subscription must not be able to re-open the store
-      // for orders (checkout already blocks new orders to a non-ACTIVE vendor, but
-      // the toggle is the front door — gate it too). THE canOperate rule
-      // (operate-gate.ts) decides, grace-lapse included.
-      const sub = await app.prisma.subscription.findFirst({ where: { vendorId }, orderBy: { createdAt: 'desc' } });
+      // Subscription re-evaluated under the same lock (grace lapse included).
+      const sub = await tx.subscription.findFirst({ where: { vendorId }, orderBy: { createdAt: 'desc' } });
       const toggleOperability = subscriptionOperability(sub, { missingRow: 'GRANDFATHER' });
       if (!toggleOperability.operable) {
         if (toggleOperability.why === 'GRACE_LAPSED') {
@@ -961,15 +1043,48 @@ export async function vendorRoutes(app: FastifyInstance) {
         throw new AppError(403, 'SUBSCRIPTION_INACTIVE',
           'Your subscription must be active to accept orders. Renew from Account to reopen your store.');
       }
-    }
-
-    const updated = await app.prisma.vendor.update({
-      where: { id: vendorId },
-      data: { acceptingOrders: !vendor.acceptingOrders },
+      // Bind the observed generation in the write: status ACTIVE + the exact
+      // verified value re-read above. A suspension or de-verify racing us
+      // matches nothing (it changed one of these) — but it cannot, because it
+      // waits on the FOR UPDATE lock this transaction holds.
+      const won = await tx.vendor.updateMany({
+        where: { id: vendorId, acceptingOrders: false, status: 'ACTIVE', isVerified: locked.isVerified },
+        data: { acceptingOrders: true },
+      });
+      if (won.count === 0) {
+        throw new AppError(409, 'VENDOR_NOT_ACTIVE',
+          'Your store’s status just changed — refresh and try again.');
+      }
+    }).catch(async (err) => {
+      if (staleVerifiedToHeal) {
+        // The refusal rolled its transaction back — heal the stale cached
+        // flag in its own atomic write, re-proving documents under a fresh
+        // lock so a legitimate re-verification racing us is never clobbered.
+        await app.prisma.$transaction(async (tx) => {
+          await tx.$queryRaw`SELECT id FROM "vendors" WHERE id = ${vendorId} FOR UPDATE`;
+          const still = await tx.vendor.findUniqueOrThrow({
+            where: { id: vendorId }, select: { isVerified: true, vendorType: true },
+          });
+          if (!still.isVerified) return;
+          const nowVerified = await verification.isRoleVerified(
+            await vendorOwnerUserId(app, vendorId), still.vendorType, tx);
+          if (!nowVerified) {
+            await tx.vendor.updateMany({
+              where: { id: vendorId, isVerified: true },
+              data: { isVerified: false, acceptingOrders: false },
+            });
+          }
+        }).catch(() => {});
+      }
+      throw err;
     });
 
     // SWIFT-102: global vendor:status emit deleted (zero listeners) — see above.
 
+    const updated = await app.prisma.vendor.findUniqueOrThrow({
+      where: { id: vendorId },
+      select: { isCurrentlyOpen: true, acceptingOrders: true },
+    });
     return { success: true, data: { isCurrentlyOpen: updated.isCurrentlyOpen, acceptingOrders: updated.acceptingOrders } };
   });
 
@@ -1064,25 +1179,39 @@ export async function vendorRoutes(app: FastifyInstance) {
     if (order.status !== 'PENDING') {
       throw new AppError(400, 'INVALID_STATUS', `Cannot accept order in ${order.status} status`);
     }
+    // [SPS-F-0016] Payment-first: an MMG order is accepted only after the store
+    // confirmed the payment landed (its Confirm-payment action stays available
+    // while pending — it IS the capture). Early gate so the appointment slot
+    // below is never reserved for an order that cannot proceed; the canonical
+    // transition seam re-checks on the locked row.
+    assertMmgFulfilmentAllowed(order, 'ACCEPTED');
     const body = acceptOrderSchema.parse(request.body ?? {});
 
     // Appointment orders book their slot AT ACCEPTANCE (locked model). If the
     // slot was taken since checkout, this 409s and the order stays PENDING —
     // the customer picks a new time instead of holding a phantom booking.
-    if (order.fulfillment === 'APPOINTMENT' && order.appointmentSlot) {
-      const serviceItem = order.items[0];
-      if (serviceItem?.itemId) {
-        await bookingService.reserveSlot(serviceItem.itemId, order.customerId, order.appointmentSlot, order.id);
-      }
-    }
-
-    if (body.estimatedPrepTime) {
-      await app.prisma.order.update({
-        where: { id: order.id },
-        data: { estimatedPrepTime: body.estimatedPrepTime },
-      });
-    }
-    const updated = await orderService.updateStatus(order.id, 'ACCEPTED', request.user.userId, 'Accepted by vendor');
+    // [REPORT-007-v4 F-05] The reservation and prep-time write ride the SAME
+    // Order-lock transaction as the ACCEPTED transition: a concurrent
+    // cancellation serializes on that lock, so acceptance can no longer lose
+    // the race yet leave behind a CONFIRMED slot-blocking booking (its throw
+    // rolls the booking back with the transition).
+    const appointmentItemId = order.fulfillment === 'APPOINTMENT' && order.appointmentSlot
+      ? order.items[0]?.itemId ?? null
+      : null;
+    const updated = await orderService.updateStatus(order.id, 'ACCEPTED', request.user.userId, 'Accepted by vendor', {
+      withinTransaction: async (tx) => {
+        if (appointmentItemId && order.appointmentSlot) {
+          await bookingService.reserveSlot(appointmentItemId, order.customerId, order.appointmentSlot, order.id, tx);
+        }
+        if (body.estimatedPrepTime) {
+          await tx.order.update({
+            where: { id: order.id },
+            data: { estimatedPrepTime: body.estimatedPrepTime },
+          });
+        }
+      },
+    });
+    if (appointmentItemId) await bookingService.nudgeForItem(appointmentItemId).catch(() => {});
     await ackVendorAlert(app, request.user.userId, order.id); // accepting acknowledges the alert
 
     // acceptance of a DELIVERY order starts the dispatch cascade (PICKUP and
@@ -1108,10 +1237,18 @@ export async function vendorRoutes(app: FastifyInstance) {
   const COURIER_ACTIVE: string[] = ['RIDER_ASSIGNED', 'RIDER_EN_ROUTE_PICKUP', 'RIDER_ARRIVED_PICKUP'];
 
   async function recordPrepProgress(
-    order: { id: string; status: OrderStatus; vendorId: string | null; riderId: string | null; orderNumber: string; preparingAt: Date | null },
+    order: {
+      id: string; status: OrderStatus; vendorId: string | null; riderId: string | null;
+      orderNumber: string; preparingAt: Date | null; paymentMethod: string | null;
+      paymentStatus: string; orderType: string | null;
+    },
     phase: 'PREPARING' | 'READY',
     userId: string,
   ) {
+    // [SPS-F-0016 / REPORT-004 F-004-05] Milestone timestamps are the ALTERNATE
+    // representation of preparing/ready when a rider owns the status lane — the
+    // payment-first law applies to them exactly as it does to the transitions.
+    assertMmgFulfilmentAllowed(order, phase === 'PREPARING' ? 'PREPARING' : 'READY_FOR_PICKUP');
     const now = new Date();
     // Marking READY implies preparing happened — backfill it for the timeline.
     const data: Record<string, Date> = phase === 'PREPARING'
@@ -1319,22 +1456,71 @@ export async function vendorRoutes(app: FastifyInstance) {
     if (order.paymentMethod !== 'MOBILE_MONEY') {
       throw new AppError(400, 'NOT_MMG', 'Only MMG orders are confirmed here — cash is handled at handover.');
     }
+    // [REPORT-005 F-005-03 tail / REPORT-006 F-006-01] A capture needs a live
+    // order to attach to: confirming "the money landed" on a cancelled/
+    // refunded/failed order would mint a CAPTURED row with no fulfilment and
+    // no refund obligation. The store keeps the customer whole directly on its
+    // own rail. Checked BEFORE the idempotent fast path — a legacy
+    // CAPTURED+closed row must answer with this refusal, never a success —
+    // and re-checked from the LOCKED row inside the transaction (this preview
+    // is UX-only; the lock is the authority).
+    const ORDER_CLOSED_STATUSES = ['CANCELLED', 'REFUNDED', 'FAILED'];
+    const orderClosedError = () => new AppError(
+      409,
+      'ORDER_CLOSED',
+      'This order is closed — if the customer already paid by MMG, refund them directly from your MMG.',
+    );
+    if (ORDER_CLOSED_STATUSES.includes(order.status)) throw orderClosedError();
     if (order.paymentStatus === 'CAPTURED') {
       return { success: true, data: order }; // double-tap safe (fast path)
     }
-    // Compare-and-set the capture so two concurrent confirm taps by store staff
-    // don't both send the customer a "Payment received" push. Record-only (no
-    // money moves), so a lost race is a benign idempotent success.
-    const claimed = await app.prisma.order.updateMany({
-      where: { id: order.id, paymentStatus: { not: 'CAPTURED' } },
-      data: { paymentStatus: 'CAPTURED' },
+    // Serialize the capture on the SAME orders row lock every negative
+    // terminalizer takes (customer cancel, vendor reject, admin cancel,
+    // auto-cancel) [REPORT-006 F-006-01]: cancel-first → the locked fresh read
+    // below sees CANCELLED and refuses; capture-first → the cancel paths see
+    // CAPTURED under their lock and refuse. The CAS keeps lifecycle + payment
+    // predicates as defense in depth, and two concurrent confirm taps by store
+    // staff still have exactly one winner (no duplicate push).
+    const capture = await app.prisma.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT id FROM "orders" WHERE id = ${order.id} FOR UPDATE`;
+      // [REPORT-005 F-005-04] The vendor is the pickup-code VERIFIER: every
+      // read here must omit handover secrets exactly like resolveOwnedOrder,
+      // or this response hands the verifier the code (and the ride PIN).
+      const locked = await tx.order.findUniqueOrThrow({
+        where: { id: order.id },
+        omit: HANDOVER_SECRETS_OMIT,
+      });
+      if (ORDER_CLOSED_STATUSES.includes(locked.status)) throw orderClosedError();
+      if (locked.paymentStatus === 'CAPTURED') {
+        return { won: false, order: locked }; // idempotent under the lock
+      }
+      const cas = await tx.order.updateMany({
+        where: {
+          id: order.id,
+          paymentStatus: { not: 'CAPTURED' },
+          status: { notIn: ORDER_CLOSED_STATUSES as OrderStatus[] },
+        },
+        data: { paymentStatus: 'CAPTURED' },
+      });
+      // [LB-015 / REPORT-004 F-004-08] The capture and its evidence row commit
+      // or vanish together, the evidence records the FRESH lifecycle status
+      // (never a pre-transaction preview), and both the CAS winner and a
+      // concurrent double-tap loser answer with the fresh row — a loser must
+      // not report stale PENDING after the database says CAPTURED.
+      const fresh = await tx.order.findUniqueOrThrow({
+        where: { id: order.id },
+        omit: HANDOVER_SECRETS_OMIT,
+      });
+      if (cas.count > 0) {
+        await tx.orderStatusLog.create({
+          data: { orderId: order.id, status: fresh.status, changedBy: request.user.userId, note: 'MMG payment confirmed received by vendor' },
+        });
+      }
+      return { won: cas.count > 0, order: fresh };
     });
-    if (claimed.count === 0) return { success: true, data: order };
-    const updated = await app.prisma.order.findUniqueOrThrow({ where: { id: order.id } });
-    await app.prisma.orderStatusLog.create({
-      data: { orderId: order.id, status: order.status, changedBy: request.user.userId, note: 'MMG payment confirmed received by vendor' },
-    });
-    app.io.to(`order:${order.id}`).emit('order:status_changed', { orderId: order.id, status: order.status, paymentStatus: 'CAPTURED' });
+    if (!capture.won) return { success: true, data: capture.order };
+    const updated = capture.order;
+    app.io.to(`order:${order.id}`).emit('order:status_changed', { orderId: order.id, status: updated.status, paymentStatus: 'CAPTURED' });
     // The socket covers an open order screen; the notification survives it.
     await notifications.send({
       userId: order.customerId,
@@ -1346,10 +1532,11 @@ export async function vendorRoutes(app: FastifyInstance) {
     return { success: true, data: updated };
   });
 
-  /** GET /cash-settlements — MMG direct-pay ledger: delivery fees this store
-   *  owes riders in cash (the customer's MMG payment landed in the store's
-   *  wallet, fee included). Scoped like the order board: selected store, else
-   *  all. Distinct from /settlements, the weekly billing history. */
+  /** GET /cash-settlements — MMG direct-pay ledger: delivery pay (fee + tip)
+   *  this store owes riders in cash (the customer's MMG payment landed in the
+   *  store's wallet, fee and tip included). Scoped like the order board:
+   *  selected store, else all. Distinct from /settlements, the weekly billing
+   *  history. */
   app.get('/cash-settlements', auth, async (request) => {
     const requested = selectedVendorId(request);
     const access = await resolveVendor(app, request.user.userId, requested);
@@ -1485,51 +1672,25 @@ export async function vendorRoutes(app: FastifyInstance) {
     const reason = body.reason || 'Rejected by vendor';
     await ackVendorAlert(app, request.user.userId, order.id); // rejecting acknowledges too
 
-    // Compare-and-set: exactly one reject wins. A double-tap (or a reject racing
-    // the customer's cancel) would otherwise both pass the status pre-check and
-    // both run the non-idempotent restock → phantom stock. The loser gets 400.
-    const claimed = await app.prisma.order.updateMany({
-      where: { id: order.id, status: { in: rejectableStatuses as OrderStatus[] } },
-      data: {
-        status: 'CANCELLED',
-        cancelledAt: new Date(),
-        cancelledBy: request.user.userId,
-        cancellationReason: reason,
-      },
+    // The locked transition re-reads the current status, then commits status,
+    // stock, booking/search closure, float/mover release, and immutable evidence
+    // together. A direct assignment that wins first changes the source to
+    // RIDER_ASSIGNED, so this reject loses cleanly instead of acting on stale
+    // riderId state; a double-tap still has exactly one winner.
+    await orderService.transitionOrderAtomically({
+      orderId: order.id,
+      target: 'CANCELLED',
+      allowedFrom: rejectableStatuses as OrderStatus[],
+      changedBy: request.user.userId,
+      note: reason,
+      cancellation: { by: request.user.userId, reason },
+      releaseStaleMoverPointer: true,
+      invalidStatus: () => new AppError(400, 'INVALID_STATUS', 'This order can no longer be rejected'),
     });
-    if (claimed.count === 0) {
-      throw new AppError(400, 'INVALID_STATUS', 'This order can no longer be rejected');
-    }
     const updated = await app.prisma.order.findUniqueOrThrow({
       where: { id: order.id },
       include: { customer: { select: { id: true, firstName: true } } },
     });
-
-    await app.prisma.orderStatusLog.create({
-      data: {
-        orderId: order.id,
-        status: 'CANCELLED',
-        changedBy: request.user.userId,
-        note: reason,
-      },
-    });
-
-    // Restock (goods never left the store — reject is only from pre-pickup
-    // states), return the CASH rider's committed float, and free the mover.
-    // (Found live: reject left sold-out items sold out forever AND, separately,
-    // never released the rider's float → the rider silently stopped getting
-    // CASH offers.)
-    await orderService.applyCancellationSideEffects(
-      { id: order.id, paymentMethod: order.paymentMethod, riderId: order.riderId, driverId: order.driverId, subtotalBase: Number(order.subtotalBase) },
-      { restock: true },
-    );
-
-    // Close any open dispatch-search journal for this order — parity with the
-    // customer-cancel path so ops dashboards don't show a phantom search that
-    // outlives a rejected order. Best-effort (journal is analytics, not load-bearing).
-    await app.prisma.dispatchSearch
-      .updateMany({ where: { subjectId: order.id, status: { in: ['SEARCHING', 'EXHAUSTED'] } }, data: { status: 'CANCELLED', resolution: 'CANCELLED' } })
-      .catch(() => {});
 
     const rejectEvent = { orderId: order.id, status: 'CANCELLED', reason, timestamp: new Date().toISOString() };
     app.io.to(`order:${order.id}`).emit('order:status_changed', rejectEvent);
@@ -1541,11 +1702,16 @@ export async function vendorRoutes(app: FastifyInstance) {
     // [SWIFT-024]. The socket event only reaches a client already on the order
     // screen; a customer whose app is closed or elsewhere would otherwise never
     // learn their order was declined (it just silently vanished).
+    // [REPORT-010 F-03] An unattested-MMG decline carries the refund guidance
+    // — the customer may have already paid the store's link.
+    const mmgGuidance = order.paymentMethod === 'MOBILE_MONEY' && order.paymentStatus === 'PENDING'
+      ? ' If you already sent the MMG payment, the store refunds you directly.'
+      : '';
     await notifications.send({
       userId: updated.customer.id,
       type: 'ORDER_UPDATE',
       title: 'Order declined',
-      body: `Your order ${updated.orderNumber} was declined by the store. ${reason}`.trim(),
+      body: `Your order ${updated.orderNumber} was declined by the store. ${reason}${mmgGuidance}`.trim(),
       data: { orderId: order.id, status: 'CANCELLED' },
     });
 

@@ -174,6 +174,9 @@ describe('§7.3 "this isn\'t my driver"', () => {
     const d = await makeDriver();
     const ride = await makeRide(d.driver.id, passenger.userId, 'DRIVER_ARRIVED');
     await app.prisma.driver.update({ where: { id: d.driver.id }, data: { currentRideId: ride.id } });
+    // The impostor-flagged driver burned the PIN budget — release must rotate
+    // + zero it for the replacement [REPORT-014 F-014-12].
+    await app.prisma.order.update({ where: { id: ride.id }, data: { ridePin: '999111', ridePinAttempts: 5 } });
 
     const enqueued: string[] = [];
     const result = await svc().reportNotMyDriver(passenger.userId, ride.id, async (id) => { enqueued.push(id) });
@@ -183,6 +186,8 @@ describe('§7.3 "this isn\'t my driver"', () => {
     const order = await app.prisma.order.findUniqueOrThrow({ where: { id: ride.id } });
     expect(order.status).toBe('PENDING');
     expect(order.driverId).toBeNull();
+    expect(order.ridePin).not.toBe('999111'); // rotated [F-014-12]
+    expect(order.ridePinAttempts).toBe(0);
     const driver = await driverRow(d.driver.id);
     expect(driver.livenessLockedAt).not.toBeNull(); // the kill shot
     expect(driver.isOnline).toBe(false);
@@ -210,12 +215,22 @@ describe('§7.3 "this isn\'t my driver"', () => {
     expect(again.alreadyHandled).toBe(true);
   });
 
-  it('aboard the vehicle is SOS territory; strangers see nothing', async () => {
+  it('in-progress or PIN-verified custody is SOS territory; strangers see nothing', async () => {
     const passenger = await makeUser(['CUSTOMER']);
     const stranger = await makeUser(['CUSTOMER']);
     const d = await makeDriver();
     const aboard = await makeRide(d.driver.id, passenger.userId, 'RIDE_IN_PROGRESS');
     await expect(svc().reportNotMyDriver(passenger.userId, aboard.id)).rejects.toThrow(/SOS/i);
     await expect(svc().reportNotMyDriver(stranger.userId, aboard.id)).rejects.toThrow(/not found/i);
+
+    const verified = await makeRide(d.driver.id, passenger.userId, 'DRIVER_ARRIVED');
+    await app.prisma.order.update({
+      where: { id: verified.id },
+      data: { ridePinVerified: true, ridePinVerifiedAt: new Date() },
+    });
+    await expect(svc().reportNotMyDriver(passenger.userId, verified.id)).rejects.toThrow(/SOS/i);
+    const untouched = await app.prisma.order.findUniqueOrThrow({ where: { id: verified.id } });
+    expect({ status: untouched.status, driverId: untouched.driverId })
+      .toEqual({ status: 'DRIVER_ARRIVED', driverId: d.driver.id });
   });
 });

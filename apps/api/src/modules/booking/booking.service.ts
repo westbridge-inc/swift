@@ -89,12 +89,24 @@ export class BookingService {
    * Reserve a slot. Throws 409 SLOT_TAKEN when someone else got there first.
    * With an orderId (vendor acceptance), the booking is CONFIRMED directly.
    */
-  async reserveSlot(itemId: string, customerId: string, slotStart: Date, orderId?: string) {
+  /** [REPORT-007-v4 F-05] Accepts a transaction client so appointment
+   *  acceptance can reserve its slot INSIDE the canonical Order-lock commit —
+   *  the old pre-transaction reservation could leave Order=CANCELLED with a
+   *  freshly-minted CONFIRMED slot-blocking booking when acceptance lost the
+   *  race to a cancellation. When a tx is supplied the nudge is skipped
+   *  (publications never ride a transaction); callers nudge after commit. */
+  async reserveSlot(
+    itemId: string,
+    customerId: string,
+    slotStart: Date,
+    orderId?: string,
+    db?: Prisma.TransactionClient,
+  ) {
     const config = await this.validateSlot(itemId, slotStart);
     const slotEnd = new Date(slotStart.getTime() + config.durationMinutes * 60_000);
 
     try {
-      const booking = await this.prisma.booking.create({
+      const booking = await (db ?? this.prisma).booking.create({
         data: {
           itemId,
           customerId,
@@ -104,7 +116,7 @@ export class BookingService {
           status: orderId ? 'CONFIRMED' : 'RESERVED',
         },
       });
-      await this.nudgeForItem(itemId);
+      if (!db) await this.nudgeForItem(itemId);
       return booking;
     } catch (error) {
       if ((error as Prisma.PrismaClientKnownRequestError).code === 'P2002') {
@@ -189,7 +201,9 @@ export class BookingService {
     }
   }
 
-  private async nudgeForItem(itemId: string): Promise<void> {
+  /** Public: transactional reserveSlot callers nudge AFTER their commit —
+   *  publications never ride a transaction [REPORT-007-v4 F-05]. */
+  async nudgeForItem(itemId: string): Promise<void> {
     if (!this.io) return;
     const item = await this.prisma.item.findUnique({ where: { id: itemId }, select: { vendorId: true } });
     if (item) this.nudge(item.vendorId, itemId);

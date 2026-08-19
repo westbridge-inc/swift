@@ -229,4 +229,55 @@ describe('approvals', () => {
     // Deciding twice is refused
     await expect(agent.decideRequest(reqA.id, 'admin-user', true)).rejects.toThrow();
   });
+
+  it('an approved cancel on an unattested-MMG order notifies BOTH parties through the one seam [REPORT-012 F-012-04]', async () => {
+    // The store notice needs a real vendor+owner behind the order.
+    seq += 1;
+    const ownerUser = await app.prisma.user.create({
+      data: {
+        phone: `+${phoneBase + seq}`, firstName: 'Agent', lastName: `V${seq}`,
+        roles: ['VENDOR_OWNER'], activeRole: 'VENDOR_OWNER', isPhoneVerified: true,
+      },
+    });
+    userIds.push(ownerUser.id);
+    const vo = await app.prisma.vendorOwner.create({ data: { userId: ownerUser.id } });
+    const vendor = await app.prisma.vendor.create({
+      data: {
+        ownerId: vo.id, name: 'Agent Seam Store', slug: `agnt-${nanoid(6).toLowerCase()}`,
+        vendorType: 'RESTAURANT', phone: `+${phoneBase + seq}9`, addressLine1: 'x',
+        city: 'Georgetown', region: 'Demerara-Mahaica', latitude: 6.8, longitude: -58.15,
+        status: 'ACTIVE',
+      },
+    });
+    const order = await makeStuckOrder({ status: 'PENDING', minutesAgo: 70 });
+    await app.prisma.order.update({
+      where: { id: order.id },
+      data: { vendorId: vendor.id, paymentMethod: 'MOBILE_MONEY', paymentStatus: 'PENDING' },
+    });
+    const agent = makeAgent({ likelyCause: 'vendor dark', recommendedAction: 'request_cancel', urgency: 'high', rationale: 'r' });
+    await agent.runOpsScan();
+    const req = await app.prisma.agentActionRequest.findFirstOrThrow({ where: { orderId: order.id } });
+    await agent.decideRequest(req.id, 'admin-user', true);
+
+    // The CUSTOMER learns the direct-refund rail…
+    const customerNote = await app.prisma.notification.findFirst({
+      where: { userId: order.customerId, body: { contains: 'the store refunds you directly' } },
+    });
+    expect(customerNote).not.toBeNull();
+    // …and the STORE gets the durable liability notice. Before F-012-04 the
+    // agent path told only the customer; the store — the party possibly
+    // holding the money — learned nothing.
+    const storeNote = await app.prisma.notification.findFirst({
+      where: {
+        userId: ownerUser.id,
+        title: 'Cancelled order may hold an MMG payment',
+        body: { contains: order.orderNumber },
+      },
+    });
+    expect(storeNote).not.toBeNull();
+
+    await app.prisma.order.update({ where: { id: order.id }, data: { vendorId: null } });
+    await app.prisma.vendor.delete({ where: { id: vendor.id } });
+    await app.prisma.vendorOwner.delete({ where: { id: vo.id } });
+  });
 });

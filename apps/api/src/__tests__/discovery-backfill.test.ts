@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { PrismaClient } from '@prisma/client';
 import { nanoid } from 'nanoid';
-import { runCategoryBackfill } from '../modules/discovery/backfill';
+import { categoryBackfillNotifiedMarker, runCategoryBackfill } from '../modules/discovery/backfill';
 import { seedDiscoveryTaxonomy } from '../modules/discovery/taxonomy.seed';
 import type { CategoryClassifier } from '../modules/discovery/ai-classifier';
 
@@ -20,6 +20,8 @@ const createdUserIds: string[] = [];
 const createdVendorIds: string[] = [];
 let seq = 0;
 const phoneBase = 592_750_000_000 + Math.floor(Math.random() * 9_000_000);
+const tenantId = `test-discovery-backfill-${nanoid(8).toLowerCase()}`;
+const TEST_NOW = new Date('2084-07-16T08:00:00.000Z');
 
 async function makeVendorWithMenu(names: string[]) {
   seq += 1;
@@ -27,6 +29,7 @@ async function makeVendorWithMenu(names: string[]) {
     data: {
       phone: `+${phoneBase + seq}`, firstName: 'Bf', lastName: `U${seq}`,
       roles: ['VENDOR_OWNER'], activeRole: 'VENDOR_OWNER', isPhoneVerified: true,
+      tenantId,
     },
   });
   createdUserIds.push(user.id);
@@ -37,7 +40,7 @@ async function makeVendorWithMenu(names: string[]) {
       name: `Bf Vendor ${seq}`, slug: `bf-vendor-${nanoid(8).toLowerCase()}`,
       vendorType: 'RESTAURANT', phone: `+${phoneBase + 500_000 + seq}`,
       addressLine1: '1 Backfill Street', city: 'Georgetown', region: 'Demerara-Mahaica',
-      latitude: 6.8, longitude: -58.15, status: 'ACTIVE', isVerified: true,
+      latitude: 6.8, longitude: -58.15, status: 'ACTIVE', isVerified: true, tenantId,
     },
   });
   createdVendorIds.push(vendor.id);
@@ -62,12 +65,12 @@ const fakeAi = (map: Record<string, Array<{ slug: string; confidence: number }>>
 
 beforeAll(async () => {
   await prisma.$connect();
-  await seedDiscoveryTaxonomy(prisma);
-  await prisma.platformConfig.deleteMany({ where: { key: 'categories.backfill.notified' } });
+  await prisma.tenant.create({ data: { id: tenantId, name: 'Discovery Backfill Test', slug: tenantId } });
+  await seedDiscoveryTaxonomy(prisma, tenantId);
 });
 
 afterAll(async () => {
-  await prisma.platformConfig.deleteMany({ where: { key: 'categories.backfill.notified' } });
+  await prisma.platformConfig.deleteMany({ where: { key: categoryBackfillNotifiedMarker(tenantId) } });
   const itemIds = (await prisma.item.findMany({ where: { vendorId: { in: createdVendorIds } }, select: { id: true } })).map((i) => i.id);
   await prisma.agentAuditEvent.deleteMany({ where: { job: 'categorizer', subjectId: { in: itemIds } } });
   await prisma.discoveryCategorySuggestion.deleteMany({ where: { itemId: { in: itemIds } } });
@@ -78,6 +81,8 @@ afterAll(async () => {
   await prisma.vendor.deleteMany({ where: { id: { in: createdVendorIds } } });
   await prisma.vendorOwner.deleteMany({ where: { userId: { in: createdUserIds } } });
   await prisma.user.deleteMany({ where: { id: { in: createdUserIds } } });
+  await prisma.discoveryCategory.deleteMany({ where: { tenantId } });
+  await prisma.tenant.delete({ where: { id: tenantId } });
   await prisma.$disconnect();
 });
 
@@ -91,14 +96,18 @@ describe('CAT-I: the backfill movement', () => {
     ]);
     const notified: string[] = [];
     const opts = {
+      tenantId,
+      now: TEST_NOW,
       notify: async (userId: string) => { notified.push(userId); },
     };
     const ai = fakeAi({ 'The Thursday Thing': [{ slug: 'local-creole', confidence: 0.7 }] });
 
     const first = await runCategoryBackfill(prisma, ai, opts);
-    expect(first.itemsScanned).toBeGreaterThanOrEqual(3);
+    expect(first.itemsScanned).toBe(3);
     expect(first.matcherSuggestionsWritten).toBeGreaterThanOrEqual(2);
-    expect(first.aiSuggested).toBeGreaterThanOrEqual(1);
+    expect(first.aiScanned).toBe(1);
+    expect(first.aiSuggested).toBe(1);
+    expect(first.vendorsNotified).toBe(1);
     expect(notified).toContain(shop.ownerUserId);
     const firstNotifiedCount = notified.length;
 

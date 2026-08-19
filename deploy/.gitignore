@@ -1,0 +1,6 @@
+# Never commit a filled-in deploy env — it holds live secrets.
+.env
+.env.*
+!.env.deploy.example
+# Store submission key (Play Console service account).
+google-play-service-account.json
