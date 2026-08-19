@@ -544,6 +544,43 @@ model AlertDelivery {
   @@map("alert_deliveries")
 }
 
+/// [DCR-1 CW] One Commencement-Watch scan of one source. The watch OBSERVES
+/// and alerts — it never moves legal state (only the founder CLI does).
+model CwRun {
+  id          String   @id @default(cuid())
+  sourceId    String
+  httpStatus  Int?
+  listingHash String?
+  entriesSeen Int      @default(0)
+  hits        Int      @default(0)
+  error       String?
+  ranAt       DateTime @default(now())
+
+  @@index([sourceId, ranAt])
+  @@map("cw_runs")
+}
+
+/// [DCR-1 CW] A detected event. content_hash dedupes across scans; the big
+/// three re-notify daily until a human acknowledges.
+model CwAlert {
+  id             String    @id @default(cuid())
+  /// COMMENCEMENT | REGULATIONS | OFFICE_NEWS | REGISTRATION_OPEN | WATCH_DEGRADED
+  eventType      String
+  /// CONFIRMED-CANDIDATE | SIGNAL | SYSTEM
+  confidence     String
+  sourceId       String
+  matchedRule    String
+  entryTitle     String
+  entryUrl       String?
+  contentHash    String    @unique
+  firstSeenAt    DateTime  @default(now())
+  notifiedAt     DateTime?
+  acknowledgedBy String?
+
+  @@index([eventType, acknowledgedBy])
+  @@map("cw_alerts")
+}
+
 /// [DCR-1 NR-2] A retention rule: rows of one data class may not outlive
 /// their window. The registry is DATA, not code — the sweep reads it, the
 /// registration pack compiles it, and changing a window is an auditable row

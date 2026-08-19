@@ -525,6 +525,29 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
   const verificationWorker = buildWorker(
     QUEUE_NAMES.VERIFICATION,
     async (job: Job) => {
+      // [DCR-1 CW] Commencement Watch: scan the Gazette/parliament sources,
+      // dedupe alerts, notify the founder channels. Observes and alerts ONLY.
+      if (job.name === 'cw-scan') {
+        const cw = await import('../modules/compliance/commencement-watch');
+        const { NotificationService } = await import('../modules/notification/notification.service');
+        const notifications = new NotificationService(ctx.prisma, ctx.io);
+        const summaries = await cw.runScan(ctx.prisma, globalThis.fetch as unknown as import('../modules/compliance/commencement-watch').FetchLike);
+        const notified = await cw.notifyPending(
+          ctx.prisma,
+          cw.channelsFromEnv(async (title, body) => {
+            const admins = await ctx.prisma.user.findMany({
+              where: { roles: { hasSome: ['ADMIN', 'SUPER_ADMIN'] }, status: 'ACTIVE' },
+              select: { id: true },
+            });
+            for (const a of admins) {
+              await notifications.send({ userId: a.id, type: 'SYSTEM_ANNOUNCEMENT', title, body: body.slice(0, 900) });
+            }
+          }),
+          globalThis.fetch as unknown as import('../modules/compliance/commencement-watch').FetchLike,
+        );
+        ctx.log.info({ summaries, notified }, 'commencement watch scan complete');
+        return;
+      }
       // [DCR-1 NR-2] Daily retention sweep: enforce every enabled policy in
       // the registry and write receipts. Failures surface via the worker's
       // failed-handler like every other job.
@@ -1384,6 +1407,13 @@ export async function scheduleRecurringJobs(queues: ReturnType<typeof createQueu
   // [DCR-1 NR-2] Retention clocks: daily at 04:10, before the day starts.
   await queues.verificationQueue.add('retention-sweep', {}, {
     repeat: { pattern: '10 4 * * *' },
+    removeOnComplete: 30,
+    removeOnFail: 30,
+  });
+
+  // [DCR-1 CW] Commencement Watch: every 6 hours. Zero channels → RED.
+  await queues.verificationQueue.add('cw-scan', {}, {
+    repeat: { pattern: '0 */6 * * *' },
     removeOnComplete: 30,
     removeOnFail: 30,
   });
