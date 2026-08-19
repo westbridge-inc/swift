@@ -119,6 +119,56 @@ describe('D9-05 — account deletion (erasure)', () => {
     expect(purged?.purgedAt).not.toBeNull();
   });
 
+  it('[NR-3 gap 6] ephemeral high-risk rows go with the account', async () => {
+    const u = await makeUser(['CUSTOMER']);
+    const vendor = await app.prisma.vendor.findFirst({ select: { id: true } });
+    await app.prisma.accountRecovery.create({ data: { userId: u.userId, method: 'IDENTITY_VERIFICATION', expiresAt: new Date(Date.now() + 86_400_000) } });
+    await app.prisma.livenessCheck.create({ data: { userId: u.userId, profile: 'DRIVER', selfieUrl: 'liveness/x.jpg', outcome: 'PASS' } });
+    await app.prisma.emergencyContact.create({ data: { userId: u.userId, name: 'Sis', phoneE164: '+5926000001' } });
+    await app.prisma.supplyWatch.create({ data: { customerId: u.userId, pool: 'RIDE', lat: 6.8, lng: -58.1, expiresAt: new Date(Date.now() + 3_600_000) } });
+    if (vendor) {
+      await app.prisma.cart.create({ data: { customerId: u.userId, vendorId: vendor.id } });
+    }
+
+    const res = await inject('DELETE', '/api/v1/customer/account', u.token);
+    expect(res.statusCode).toBe(200);
+
+    expect(await app.prisma.accountRecovery.count({ where: { userId: u.userId } })).toBe(0);
+    expect(await app.prisma.livenessCheck.count({ where: { userId: u.userId } })).toBe(0);
+    expect(await app.prisma.emergencyContact.count({ where: { userId: u.userId } })).toBe(0);
+    expect(await app.prisma.supplyWatch.count({ where: { customerId: u.userId } })).toBe(0);
+    expect(await app.prisma.cart.count({ where: { customerId: u.userId } })).toBe(0);
+  });
+
+  it('[NR-3 gap 3] the deletion write barrier: a deactivated account cannot grow identity data back', async () => {
+    const u = await makeUser(['CUSTOMER']);
+    const res = await inject('DELETE', '/api/v1/customer/account', u.token);
+    expect(res.statusCode).toBe(200);
+
+    // Verification submit is refused outright.
+    const { VerificationService } = await import('../modules/verification/verification.service');
+    const { NotificationService } = await import('../modules/notification/notification.service');
+    const { getKycProvider } = await import('../providers/kyc/kyc-provider');
+    const verification = new VerificationService(
+      app.prisma,
+      new NotificationService(app.prisma, { to: () => ({ emit: () => {} }), emit: () => {} } as never),
+      getKycProvider(),
+    );
+    await expect(
+      verification.submitDocument(u.userId, 'MOVER', 'ID_CARD', 'verif/late.jpg', '2026-08-16'),
+    ).rejects.toThrow(/not active/i);
+
+    // Identity capture silently refuses to rebind the erased person.
+    const { IdentityService } = await import('../modules/integrity/identity.service');
+    const identity = new IdentityService(app.prisma);
+    const out = await identity.capture({
+      accountId: u.userId, actorRole: 'CUSTOMER', type: 'PHONE',
+      normalizedValue: `5920099${String(Date.now()).slice(-6)}`, source: 'test-late-capture',
+    });
+    expect(out.merged).toBe(false);
+    expect(await app.prisma.identityKey.count({ where: { accountId: u.userId } })).toBe(0);
+  });
+
   it('refuses a partner (mover) account — those close through Support', async () => {
     const u = await makeUser(['CUSTOMER', 'MOVER']);
     const res = await inject('DELETE', '/api/v1/customer/account', u.token);
