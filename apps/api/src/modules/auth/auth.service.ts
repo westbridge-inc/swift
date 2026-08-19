@@ -8,7 +8,8 @@ import { generateOtp, storeOtp, verifyOtp, checkOtpRateLimit } from '../../utils
 import { checkOtpDailyBudget } from '../../utils/sms-budget';
 import { CountryConfigService } from '../country/country-config.service';
 import { getChannels } from '../../providers/notifications/channels';
-import { LEGAL_VERSION } from '../legal/legal.routes';
+import { LEGAL_VERSION, TERMS, PRIVACY } from '../legal/legal.routes';
+import { publishLegalDocument, recordConsent } from '../legal/consent.service';
 import {
   completeMoverSessionRevocation,
   emptyMoverSessionRevocationCleanup,
@@ -165,6 +166,24 @@ export class AuthService {
     return { isNewUser: false, user: sanitizeUser(user), tokens };
   }
 
+  /** Once per process: anchor the served terms/privacy texts at LEGAL_VERSION
+   *  so signup consent rows always have a published document to bind to. */
+  private signupDocsPublished: Promise<void> | null = null;
+  private ensureSignupDocsPublished(): Promise<void> {
+    this.signupDocsPublished ??= (async () => {
+      await publishLegalDocument(this.app.prisma, {
+        documentType: 'terms_of_service', version: LEGAL_VERSION, renderedText: TERMS,
+      });
+      await publishLegalDocument(this.app.prisma, {
+        documentType: 'privacy_policy', version: LEGAL_VERSION, renderedText: PRIVACY,
+      });
+    })().catch((err) => {
+      this.signupDocsPublished = null; // next signup retries rather than caching failure
+      throw err;
+    });
+    return this.signupDocsPublished;
+  }
+
   async register(data: {
     phone: string;
     firstName: string;
@@ -215,23 +234,47 @@ export class AuthService {
     };
     const { roles, activeRole } = roleSetup[signupRole];
 
-    const user = await this.app.prisma.user.create({
-      data: {
-        phone: data.phone,
-        firstName: data.firstName,
-        lastName: data.lastName,
-        email: data.email,
-        roles,
-        activeRole,
-        countryCode,
-        isPhoneVerified: true,
-        // SWIFT-AUD-D9-03: consent is recorded with the version it covered —
-        // demonstrable under DPA 2023, not just a client-side checkbox.
-        ...(data.acceptTerms === true && { acceptedTermsAt: new Date(), tosVersion: LEGAL_VERSION }),
-        customer: { create: {} },
-        ...(signupRole === 'VENDOR' && { vendorOwner: { create: {} } }),
-      },
-      include: { customer: true, vendorOwner: true },
+    // [DCR-1 NR1-02] Consent is captured in the SAME transaction that creates
+    // the account — an account without its ledger rows is the un-fixable gap
+    // the consent gate exists to prevent. The served legal texts are published
+    // (hash-anchored, idempotent) before the transaction so the rows always
+    // anchor to the exact words /legal/terms and /legal/privacy render.
+    const consented = data.acceptTerms === true;
+    if (consented) await this.ensureSignupDocsPublished();
+    const user = await this.app.prisma.$transaction(async (tx) => {
+      const created = await tx.user.create({
+        data: {
+          phone: data.phone,
+          firstName: data.firstName,
+          lastName: data.lastName,
+          email: data.email,
+          roles,
+          activeRole,
+          countryCode,
+          isPhoneVerified: true,
+          // SWIFT-AUD-D9-03: consent is recorded with the version it covered —
+          // demonstrable under DPA 2023, not just a client-side checkbox.
+          ...(consented && { acceptedTermsAt: new Date(), tosVersion: LEGAL_VERSION }),
+          customer: { create: {} },
+          ...(signupRole === 'VENDOR' && { vendorOwner: { create: {} } }),
+        },
+        include: { customer: true, vendorOwner: true },
+      });
+      if (consented) {
+        for (const documentType of ['privacy_policy', 'terms_of_service'] as const) {
+          await recordConsent(tx, {
+            subjectType: 'customer',
+            subjectId: created.id,
+            documentType,
+            version: LEGAL_VERSION,
+            action: 'granted',
+            surface: 'mobile',
+            ip: data.ipAddress,
+            evidence: { control: 'accept_terms_checkbox', path: 'auth/register', role: signupRole },
+          });
+        }
+      }
+      return created;
     });
 
     // Single-use registration window

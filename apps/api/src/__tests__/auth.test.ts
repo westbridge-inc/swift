@@ -252,6 +252,27 @@ describe('Auth Routes', () => {
         const row = await app.prisma.user.findUnique({ where: { phone: consentPhone } });
         expect(row?.acceptedTermsAt).toBeInstanceOf(Date);
         expect(row?.tosVersion).toBe(LEGAL_VERSION);
+
+        // [DCR-1 NR1-02] The same transaction wrote the LEDGER rows: one per
+        // required document, anchored to the sha256 of the exact served text.
+        const ledger = await app.prisma.consentRecord.findMany({
+          where: { subjectType: 'customer', subjectId: row!.id },
+          orderBy: { documentType: 'asc' },
+        });
+        expect(ledger.map((r) => [r.documentType, r.action, r.documentVersion])).toEqual([
+          ['privacy_policy', 'granted', LEGAL_VERSION],
+          ['terms_of_service', 'granted', LEGAL_VERSION],
+        ]);
+        const tos = await app.prisma.legalDocument.findUniqueOrThrow({
+          where: {
+            documentType_version_locale: {
+              documentType: 'terms_of_service', version: LEGAL_VERSION, locale: 'en-GY',
+            },
+          },
+        });
+        expect(ledger.find((r) => r.documentType === 'terms_of_service')?.documentContentHash)
+          .toBe(tos.contentHash);
+        expect(tos.publishedAt).toBeInstanceOf(Date);
       });
 
       it('still registers old clients that send no consent field — and stamps nothing', async () => {
@@ -265,6 +286,10 @@ describe('Auth Routes', () => {
         const row = await app.prisma.user.findUnique({ where: { phone: noConsentPhone } });
         expect(row?.acceptedTermsAt).toBeNull();
         expect(row?.tosVersion).toBeNull();
+        // No consent claimed → no ledger rows fabricated.
+        expect(await app.prisma.consentRecord.count({
+          where: { subjectType: 'customer', subjectId: row!.id },
+        })).toBe(0);
       });
 
       it('CONSENT_REQUIRED=1 refuses a consent-less registration', async () => {
