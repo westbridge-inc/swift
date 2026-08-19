@@ -29,7 +29,9 @@ const registerSchema = z.object({
 });
 
 const refreshSchema = z.object({
-  refreshToken: z.string().min(1),
+  // [NR5-01] bounded: refresh tokens are issued at a fixed length — an
+  // unbounded string here was the census's uncapped-credential finding.
+  refreshToken: z.string().min(1).max(512),
 });
 
 const logoutSchema = z.object({

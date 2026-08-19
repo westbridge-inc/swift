@@ -107,10 +107,6 @@ const cartTipSchema = z.object({
   amount: zMoneyMinor,
 });
 
-const cartInstructionsSchema = z.object({
-  instructions: z.string().max(500),
-});
-
 // [REPORT-013 F-013-02] The tip ceiling binds at EVERY tip entrance: the
 // cart endpoint enforced 50,000 while direct checkout accepted the generic
 // 99,999,999 storage ceiling — the same value the cart rejected.
@@ -1693,21 +1689,10 @@ export async function customerRoutes(app: FastifyInstance) {
     return { success: true, data: { cart: updatedCart, message: 'Tip updated' } };
   });
 
-  app.put('/cart/instructions', async (request: AuthRequest) => {
-    const { userId } = request.user;
-    const { instructions } = cartInstructionsSchema.parse(request.body);
-
-    const cart = await app.prisma.cart.findUnique({ where: { customerId: userId } });
-    if (!cart) throw new AppError(400, 'NO_CART', 'No active cart');
-
-    await app.prisma.cart.update({
-      where: { id: cart.id },
-      data: { specialInstructions: instructions || null, lastActivityAt: new Date() },
-    });
-    await app.redis.del(`cart:${userId}`).catch(() => {});
-
-    return { success: true, data: { message: 'Instructions updated' } };
-  });
+  // [DCR-1 NR5-01] PUT /cart/instructions REMOVED: the ingress census proved
+  // it purpose-free — stored and echoed, but checkout persists only
+  // deliveryInstructions, and no client ever called it. Minimisation at
+  // capture: an ingress with no purpose does not get to exist.
 
   // ========================================================================
   // 7. CHECKOUT
