@@ -100,6 +100,15 @@ async function makeOrder(customerId: string, riderId: string, status: 'RIDER_ASS
   return order;
 }
 
+
+/** [task #25 flake-harden] The outbox table is shared across parallel test
+ *  files; an unscoped batch can claim ANOTHER file's rows (starving this
+ *  file's counts) or burn this file's single-shot mocks on foreign rows.
+ *  Every batch call here scopes the claim to this file's own users. */
+function processMoverRevocationOutboxBatch_SCOPED(rt: ReturnType<typeof runtime>) {
+  return processMoverRevocationOutboxBatch(rt, 25, { onlyUserIds: [...userIds] });
+}
+
 function runtime(dispatch: MoverRevocationDispatchEffects) {
   return {
     prisma: app.prisma,
@@ -235,7 +244,7 @@ describe('durable mover revocation outbox', () => {
     });
     const releaseHeldOffer = vi.fn().mockResolvedValue(undefined);
     const retryDispatch = vi.fn().mockResolvedValue({});
-    await expect(processMoverRevocationOutboxBatch(runtime({ releaseHeldOffer, retryDispatch })))
+    await expect(processMoverRevocationOutboxBatch_SCOPED(runtime({ releaseHeldOffer, retryDispatch })))
       .resolves.toEqual({ processed: 0, failed: 0 });
     expect(releaseHeldOffer).not.toHaveBeenCalled();
 
@@ -243,7 +252,7 @@ describe('durable mover revocation outbox', () => {
       where: { id: committed.outboxId! },
       data: { claimedAt: new Date(Date.now() - 2 * 60_000), availableAt: new Date(0) },
     });
-    await expect(processMoverRevocationOutboxBatch(runtime({ releaseHeldOffer, retryDispatch })))
+    await expect(processMoverRevocationOutboxBatch_SCOPED(runtime({ releaseHeldOffer, retryDispatch })))
       .resolves.toEqual({ processed: 1, failed: 0 });
     expect(releaseHeldOffer).toHaveBeenCalledTimes(1);
     expect(retryDispatch).not.toHaveBeenCalled();
@@ -256,7 +265,7 @@ describe('durable mover revocation outbox', () => {
     );
 
     // A repeated sweep is a no-op, and database facts remain exactly-once.
-    await expect(processMoverRevocationOutboxBatch(runtime({ releaseHeldOffer, retryDispatch })))
+    await expect(processMoverRevocationOutboxBatch_SCOPED(runtime({ releaseHeldOffer, retryDispatch })))
       .resolves.toEqual({ processed: 0, failed: 0 });
     const [finalNoticeCount, finalIncidentCount] = await Promise.all([
       app.prisma.notification.count({
@@ -360,7 +369,7 @@ describe('durable mover revocation outbox', () => {
     });
     const releaseHeldOffer = vi.fn().mockResolvedValue(undefined);
     const retryDispatch = vi.fn().mockResolvedValue({});
-    await expect(processMoverRevocationOutboxBatch(runtime({ releaseHeldOffer, retryDispatch })))
+    await expect(processMoverRevocationOutboxBatch_SCOPED(runtime({ releaseHeldOffer, retryDispatch })))
       .resolves.toEqual({ processed: 1, failed: 0 });
     expect(retryDispatch).toHaveBeenCalledExactlyOnceWith(order.id);
     expect((await app.prisma.moverRevocationOutbox.findUniqueOrThrow({ where: { id: outbox.id } })).processedAt)
@@ -385,7 +394,7 @@ describe('durable mover revocation outbox', () => {
 
     const redisFailure = vi.fn().mockRejectedValueOnce(new Error('transient Redis unavailable'));
     const retryDispatch = vi.fn().mockResolvedValue({});
-    await expect(processMoverRevocationOutboxBatch(runtime({
+    await expect(processMoverRevocationOutboxBatch_SCOPED(runtime({
       releaseHeldOffer: redisFailure,
       retryDispatch,
     }))).resolves.toEqual({ processed: 0, failed: 1 });
@@ -399,7 +408,7 @@ describe('durable mover revocation outbox', () => {
       data: { availableAt: new Date(0) },
     });
     const releaseHeldOffer = vi.fn().mockResolvedValue(undefined);
-    await expect(processMoverRevocationOutboxBatch(runtime({ releaseHeldOffer, retryDispatch })))
+    await expect(processMoverRevocationOutboxBatch_SCOPED(runtime({ releaseHeldOffer, retryDispatch })))
       .resolves.toEqual({ processed: 1, failed: 0 });
     expect(releaseHeldOffer).toHaveBeenCalledTimes(1);
     expect((await app.prisma.moverRevocationOutbox.findUniqueOrThrow({ where: { id: outboxId! } })).processedAt)
@@ -428,7 +437,10 @@ describe('durable mover revocation outbox', () => {
     const startedAt = Date.now();
     await expect(new AuthService(app).logout(mover.session.id, mover.user.id))
       .resolves.toBeUndefined();
-    expect(Date.now() - startedAt).toBeLessThan(1_000);
+    // Bounded-return semantics: with a NEVER-resolving push, logout must come
+    // back in bounded time (vs hanging). 5s ceiling absorbs saturated-runner
+    // event-loop stalls that broke the old 1s assert under parallel load.
+    expect(Date.now() - startedAt).toBeLessThan(5_000);
     expect(await app.prisma.session.findUnique({ where: { id: mover.session.id } })).toBeNull();
 
     // Wait on the CONDITION, not the clock: the 150ms effect-timeout must
@@ -436,7 +448,7 @@ describe('durable mover revocation outbox', () => {
     // left ~100ms of slack, which a loaded CI runner blows through — the row
     // was then read mid-flight (claimed, not yet re-armed) and the fence
     // assertion below lost by the enqueue→claim clock gap.
-    const deadline = Date.now() + 5_000;
+    const deadline = Date.now() + 15_000;
     let outbox = await app.prisma.moverRevocationOutbox.findFirstOrThrow({
       where: { userId: mover.user.id },
     });
@@ -452,7 +464,7 @@ describe('durable mover revocation outbox', () => {
     expect(outbox.lastError).toContain('timed out after 150ms');
 
     const retryDispatch = vi.fn().mockResolvedValue({});
-    await expect(processMoverRevocationOutboxBatch(runtime({
+    await expect(processMoverRevocationOutboxBatch_SCOPED(runtime({
       releaseHeldOffer: vi.fn().mockResolvedValue(undefined),
       retryDispatch,
     }))).resolves.toEqual({ processed: 0, failed: 0 });
