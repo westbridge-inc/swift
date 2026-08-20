@@ -1,4 +1,4 @@
-import type { PrismaClient, Prisma, IdentitySignalType, SignalStrength } from '@prisma/client';
+import { Prisma, type PrismaClient, type IdentitySignalType, type SignalStrength } from '@prisma/client';
 import { hashSignal } from './normalize';
 import { log } from '../../utils/logger';
 import { runWithoutTenant } from '../../plugins/tenant-context';
@@ -45,6 +45,9 @@ export interface CaptureResult {
   matchedAccountIds: string[];
   merged: boolean;
   clusterId: string | null;
+  /** [F-022-14] true when the write barrier refused the capture (deletion-
+   *  terminal account) — distinct from a genuine empty-match result. */
+  dropped?: boolean;
 }
 
 /** All account ids sharing the caller's identity cluster (self included; just
@@ -90,17 +93,20 @@ export class IdentityService {
           )::text AS locked
         `;
 
-        const account = await tx.user.findUnique({
-          where: { id: input.accountId },
-          select: { tenantId: true, status: true },
-        });
+        // [NR-3 gap 3, REPORT-022 F-022-10] The account read takes FOR SHARE so
+        // this capture SERIALIZES against deletion's FOR UPDATE row lock — a
+        // capture that observed ACTIVE cannot insert after the purge commits.
+        const locked = await tx.$queryRaw<{ tenantId: string; status: string }[]>(
+          Prisma.sql`SELECT "tenantId", status FROM users WHERE id = ${input.accountId} FOR SHARE`,
+        );
+        const account = locked[0];
         if (!account) throw new Error(`Identity capture account not found: ${input.accountId}`);
-        // [NR-3 census gap 3] Deletion write barrier: identity keys/cluster
-        // membership must never be recreated for a deactivated account — the
-        // deletion sweep runs once, and a late capture would silently rebind
-        // the erased person to the graph.
-        if (account.status !== 'ACTIVE') {
-          return { strength: 'SOFT', matchedAccountIds: [], merged: false, clusterId: null } as CaptureResult;
+        // Deny-list, not ACTIVE-only: PENDING_VERIFICATION captures are the
+        // point of onboarding [F-022-13].
+        if (['DEACTIVATED', 'BANNED', 'SUSPENDED'].includes(account.status)) {
+          // Honest refusal — callers can tell a dropped capture from a real
+          // no-match [F-022-14].
+          return { strength, matchedAccountIds: [], merged: false, clusterId: null, dropped: true } as CaptureResult;
         }
 
         // Idempotent per (account, type, hash) — recaptures are no-ops.

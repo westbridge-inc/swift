@@ -106,7 +106,10 @@ export class AccountService {
         select: { id: true, phone: true, roles: true, status: true },
       });
       if (user.status === 'DEACTIVATED' && user.phone.startsWith('deleted:')) {
-        return { alreadyComplete: true };
+        // [REPORT-022 F-022-11/21] A completed-looking deletion is NOT proof no
+        // late write landed — fall through and RE-SWEEP (every purge step is
+        // idempotent), instead of short-circuiting on the marker.
+        return { alreadyComplete: false, resweep: true };
       }
       if (user.status !== 'ACTIVE' && user.status !== 'DEACTIVATED') {
         throw new AppError(409, 'ACCOUNT_INACTIVE', 'This account is not active and must be closed through Support.');
@@ -146,6 +149,9 @@ export class AccountService {
       return { alreadyComplete: false };
     });
     if (preflight.alreadyComplete) return { deleted: true };
+    if ((preflight as { resweep?: boolean }).resweep) {
+      this.app.log.info({ userId }, 'account deletion re-sweep: purging any late writes');
+    }
 
     // The status commit above is the authority cut-off. Evict every already-
     // open realtime transport immediately after that commit so a deleted user

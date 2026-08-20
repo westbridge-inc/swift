@@ -6,6 +6,7 @@ import { Image } from 'expo-image';
 import { Feather } from '@expo/vector-icons';
 import { useNavigation } from '@react-navigation/native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { API_URL } from '../../../services/api';
 import { color, elevation, radius, space } from '@swift/ui';
 import { useDiscoveryCategories, useHome, useToggleFavorite } from '../../../hooks/customer';
 import { useAds } from '../../../hooks/ads';
@@ -124,6 +125,8 @@ export function HomeScreen() {
   const navigation = useNavigation<any>();
   const insets = useSafeAreaInsets();
   const { user, isAuthenticated, promptLogin } = useAuthStore();
+  // [REPORT-022 F-022-18] clear the failure latch when the URL changes.
+  React.useEffect(() => { setAvatarBroken(false); }, [user?.avatar]);
   const { latitude, longitude, address, status } = useLocationStore();
   const locationFix = grantedLocationFix(latitude, longitude, status);
 
@@ -210,7 +213,7 @@ export function HomeScreen() {
               <Pressable onPress={() => navigation.navigate('Tabs', { screen: 'Profile' })}>
                 {user?.avatar && !avatarBroken ? (
                   <Image
-                    source={{ uri: user.avatar }}
+                    source={{ uri: /^https?:\/\//.test(user.avatar) ? user.avatar : `${API_URL}${user.avatar}` }}
                     // A dead/expired avatar URL must never leave a nameless
                     // blank circle — fall back to the monogram [visual pass 08-19].
                     onError={() => setAvatarBroken(true)}

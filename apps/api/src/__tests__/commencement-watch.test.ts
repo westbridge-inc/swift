@@ -33,7 +33,7 @@ function fetchReturning(map: Record<string, { status: number; body: string }>): 
 
 beforeAll(async () => {
   process.env['NODE_ENV'] = 'development';
-  process.env['DATABASE_URL'] = process.env['DATABASE_URL'] || 'postgresql://swift:swift@localhost:5434/swift';
+  process.env['DATABASE_URL'] = process.env['DATABASE_URL'] || 'postgresql://swift:swift@localhost:5434/swift_test';
   app = Fastify({ logger: false });
   registerErrorHandler(app);
   await app.register(prismaPlugin);
@@ -111,7 +111,7 @@ describe('commencement watch [DCR-1 CW]', () => {
     const sent: string[] = [];
     const channels: NotifyChannels = {
       webhookUrl: null, emails: [],
-      notifyAdmins: async (title) => { sent.push(title); },
+      notifyAdmins: async (title) => { sent.push(title); return 1; },
     };
     const n = await notifyPending(app.prisma, channels, fetchReturning({}));
     expect(n).toBeGreaterThanOrEqual(1);
@@ -122,6 +122,29 @@ describe('commencement watch [DCR-1 CW]', () => {
     expect(unnotified).toBe(0);
     // Second notify with nothing new and nothing older than a day → nothing.
     expect(await notifyPending(app.prisma, channels, fetchReturning({}))).toBe(0);
+  });
+
+
+  it('[F-022-03] a channel that reaches NO human never stamps notifiedAt — and an all-fail cycle goes RED', async () => {
+    const s = { id: `s1n-${runId}`, url: 'https://gazette.test/n', trust: 'S1' as const };
+    await runScan(app.prisma, fetchReturning({
+      [s.url]: { status: 200, body: page([`Order No. 44 of 2027 - The Data Protection Act 2023 (Fees) Order ${runId}`, 'A', 'B', 'C', 'D']) },
+    }), [s]);
+    const zeroReach: NotifyChannels = {
+      webhookUrl: null, emails: [],
+      notifyAdmins: async () => 0, // adapter found no admins
+    };
+    await expect(notifyPending(app.prisma, zeroReach, fetchReturning({}))).rejects.toThrow(/NO channel delivered/);
+    const still = await app.prisma.cwAlert.findFirst({ where: { sourceId: s.id } });
+    expect(still?.notifiedAt).toBeNull();
+  });
+
+  it('[F-022-01] a page with only nav scraps is PARSE_THIN, never a healthy zero-hit scan', async () => {
+    const s = { id: `s1t-${runId}`, url: 'https://gazette.test/thin', trust: 'S1' as const, minEntries: 5 };
+    const out = await runScan(app.prisma, fetchReturning({
+      [s.url]: { status: 200, body: page(['Home page', 'Contact us']) },
+    }), [s]);
+    expect(out[0]!.error).toMatch(/PARSE_THIN/);
   });
 
   it('parseEntries survives markup inside anchors', () => {

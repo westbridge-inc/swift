@@ -539,9 +539,14 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
               where: { roles: { hasSome: ['ADMIN', 'SUPER_ADMIN'] }, status: 'ACTIVE' },
               select: { id: true },
             });
+            let reached = 0;
             for (const a of admins) {
-              await notifications.send({ userId: a.id, type: 'SYSTEM_ANNOUNCEMENT', title, body: body.slice(0, 900) });
+              try {
+                await notifications.send({ userId: a.id, type: 'SYSTEM_ANNOUNCEMENT', title, body: body.slice(0, 900) });
+                reached += 1;
+              } catch { /* one failed admin must not hide the others */ }
             }
+            return reached; // [F-022-03] delivery-proven, not assumed
           }),
           globalThis.fetch as unknown as import('../modules/compliance/commencement-watch').FetchLike,
         );
