@@ -292,10 +292,15 @@ function parsePayload(value: Prisma.JsonValue): MoverRevocationOutboxPayload {
 
 async function claimNextOutboxRow(
   prisma: PrismaClient,
-  options: { id?: string; claimLeaseMs?: number } = {},
+  options: { id?: string; claimLeaseMs?: number; onlyUserIds?: string[] } = {},
 ): Promise<ClaimedOutboxRow | null> {
   const leaseMs = Math.max(1_000, options.claimLeaseMs ?? claimLeaseMs());
   const idFilter = options.id ? Prisma.sql`AND "id" = ${options.id}` : Prisma.empty;
+  // Deterministic-test seam (parallel suites share this table): scope the
+  // claim to named users. Production callers never pass it.
+  const userFilter = options.onlyUserIds?.length
+    ? Prisma.sql`AND "userId" = ANY(${options.onlyUserIds})`
+    : Prisma.empty;
   const rows = await prisma.$queryRaw<ClaimedOutboxRow[]>(Prisma.sql`
     WITH candidate AS (
       SELECT "id"
@@ -307,6 +312,7 @@ async function claimNextOutboxRow(
           OR "claimedAt" < CURRENT_TIMESTAMP - (${leaseMs} * INTERVAL '1 millisecond')
         )
         ${idFilter}
+        ${userFilter}
       ORDER BY "createdAt" ASC
       FOR UPDATE SKIP LOCKED
       LIMIT 1
@@ -605,11 +611,12 @@ export async function processMoverRevocationOutboxById(
 export async function processMoverRevocationOutboxBatch(
   runtime: MoverRevocationOutboxRuntime,
   limit = 25,
+  options: { onlyUserIds?: string[] } = {},
 ): Promise<{ processed: number; failed: number }> {
   let processed = 0;
   let failed = 0;
   for (let i = 0; i < Math.max(1, limit); i += 1) {
-    const row = await claimNextOutboxRow(runtime.prisma);
+    const row = await claimNextOutboxRow(runtime.prisma, { onlyUserIds: options.onlyUserIds });
     if (!row) break;
     try {
       if (await processClaimedOutboxRow(runtime, row)) processed += 1;
