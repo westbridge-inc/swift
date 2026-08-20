@@ -447,7 +447,6 @@ async function buildCartResponse(
       city: deliveryAddr.city,
     } : null,
     scheduledFor: cart.scheduledFor,
-    specialInstructions: cart.specialInstructions,
     estimatedPrepMin: prepMin,
     estimatedDeliveryMin: deliveryMin,
     estimatedTotalMin: etaMin,
@@ -669,13 +668,21 @@ export async function customerRoutes(app: FastifyInstance) {
       }
     }
 
-    const user = await app.prisma.user.update({
-      where: { id: userId },
+    // [REPORT-022 F-022-21] conditional write: a deletion that finished
+    // between auth and here cannot be re-personalized.
+    const updated = await app.prisma.user.updateMany({
+      where: { id: userId, status: { notIn: ['DEACTIVATED', 'BANNED', 'SUSPENDED'] } },
       data: {
         ...(body.firstName !== undefined && { firstName: body.firstName }),
         ...(body.lastName !== undefined && { lastName: body.lastName }),
         ...(body.email !== undefined && { email: body.email }),
       },
+    });
+    if (updated.count === 0) {
+      throw new AppError(409, 'ACCOUNT_INACTIVE', 'This account is not active.');
+    }
+    const user = await app.prisma.user.findUniqueOrThrow({
+      where: { id: userId },
       select: {
         id: true, phone: true, firstName: true, lastName: true,
         email: true, avatar: true, activeRole: true, lastMoverRole: true, updatedAt: true,

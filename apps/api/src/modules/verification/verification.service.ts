@@ -111,6 +111,24 @@ export class VerificationService {
   // Submission
   // -------------------------------------------------------------------------
 
+
+  /** [REPORT-022 F-022-09] The write-side of the deletion barrier: a FOR SHARE
+   *  read of the User row inside the same transaction as a PII insert blocks
+   *  against deletion's FOR UPDATE — so a request that observed ACTIVE, then
+   *  paused (KYC latency), cannot land new PII after the purge committed. */
+  private async createDocumentLively(data: Prisma.VerificationDocumentUncheckedCreateInput) {
+    return this.prisma.$transaction(async (tx) => {
+      const alive = await tx.$queryRaw<{ status: string }[]>(
+        Prisma.sql`SELECT status FROM users WHERE id = ${data.userId} FOR SHARE`,
+      );
+      const status = alive[0]?.status;
+      if (!status || ['DEACTIVATED', 'BANNED', 'SUSPENDED'].includes(status)) {
+        throw new AppError(409, 'ACCOUNT_INACTIVE', 'This account is not active — documents cannot be submitted.');
+      }
+      return tx.verificationDocument.create({ data });
+    });
+  }
+
   async submitDocument(
     userId: string,
     roleKey: ChecklistRole,
@@ -123,11 +141,11 @@ export class VerificationService {
       select: { id: true, countryCode: true, avatar: true, selfieCapturedAt: true, status: true },
     });
     if (!user) throw new NotFoundError('User', userId);
-    // [NR-3 census gap 3] Deletion write barrier: a DEACTIVATED account must
-    // never grow NEW identity documents — an in-flight submit racing the
-    // erasure would otherwise resurrect exactly the data the person asked us
-    // to destroy.
-    if (user.status !== 'ACTIVE') {
+    // [NR-3 gap 3, REPORT-022 F-022-13] Deletion write barrier as a DENY-LIST:
+    // deletion-terminal states never grow identity documents, but
+    // PENDING_VERIFICATION is exactly the state that MUST submit documents —
+    // the same set auth.ts cuts off, nothing more.
+    if (['DEACTIVATED', 'BANNED', 'SUSPENDED'].includes(user.status)) {
       throw new AppError(409, 'ACCOUNT_INACTIVE', 'This account is not active — documents cannot be submitted.');
     }
 
@@ -187,8 +205,7 @@ export class VerificationService {
     }
 
     const autoExpiryDays = AUTO_APPROVE_EXPIRY_DAYS[docType];
-    const doc = await this.prisma.verificationDocument.create({
-      data: {
+    const doc = await this.createDocumentLively({
         userId,
         role: this.roleKeyToUserRole(roleKey),
         docType,
@@ -208,7 +225,6 @@ export class VerificationService {
           ...(autoExpiryDays && { expiresAt: new Date(Date.now() + autoExpiryDays * 24 * 60 * 60 * 1000) }),
         }),
         ...(result.status === 'rejected' && { reviewedBy: 'kyc:auto', reviewedAt: new Date(), reviewNote: result.reason }),
-      },
     });
 
     // Provider listability is the first post-document projection. Everything
@@ -270,8 +286,7 @@ export class VerificationService {
       }
     }
 
-    const doc = await this.prisma.verificationDocument.create({
-      data: {
+    const doc = await this.createDocumentLively({
         userId,
         role: 'CUSTOMER',
         docType: IDENTITY_DOC_TYPE,
@@ -285,7 +300,6 @@ export class VerificationService {
           : 'PENDING',
         ...(result.status !== 'pending_manual' && { reviewedBy: 'kyc:auto', reviewedAt: new Date() }),
         ...(result.status === 'rejected' && { reviewNote: result.reason }),
-      },
     });
 
     await this.recordDecision(userId, doc.id, IDENTITY_DOC_TYPE, doc.status, result.reason);

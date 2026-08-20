@@ -4,6 +4,7 @@ import { Pressable, ScrollView, View } from 'react-native';
 import { Image } from 'expo-image';
 import { Feather } from '@expo/vector-icons';
 import { useNavigation } from '@react-navigation/native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { color, space } from '@swift/ui';
 import { useMyRating, useProfile } from '../../../hooks/customer';
 import { useAuthStore } from '../../../stores/authStore';
@@ -91,6 +92,7 @@ function MarketingConsentRow() {
 }
 
 export function ProfileScreen() {
+  const insets = useSafeAreaInsets();
   const navigation = useNavigation<any>();
   const { isAuthenticated, promptLogin, logout, user, setIntent } = useAuthStore();
   const profile = useProfile<any>();
@@ -99,6 +101,9 @@ export function ProfileScreen() {
   const [switcherOpen, setSwitcherOpen] = useState(false);
   const [ratingInfo, setRatingInfo] = useState(false);
   const [avatarBroken, setAvatarBroken] = useState(false);
+  // [F-022-18] a failure latch must clear when the URL changes (new selfie).
+  const avatarKey = (profile.data as { avatar?: string } | undefined)?.avatar ?? user?.avatar ?? '';
+  React.useEffect(() => { setAvatarBroken(false); }, [avatarKey]);
 
   if (!isAuthenticated) {
     // A guest is never trapped [first-open 2.2 / SPS-F-0024]: every other
@@ -145,16 +150,35 @@ export function ProfileScreen() {
     );
   }
   if (profile.isError) {
+    // [REPORT-022 F-022-19] An API failure must never trap the session: the
+    // account controls that don't depend on profile data stay reachable.
     return (
       <Screen>
         <ErrorState onRetry={() => profile.refetch()} />
+        <View style={{ paddingHorizontal: GUTTER, paddingBottom: space['3xl'], gap: space.md }}>
+          <PillButton label="Switch app" variant="soft" onPress={() => setSwitcherOpen(true)} />
+          <PillButton label="Log out" icon="log-out" variant="soft" onPress={() => setConfirmLogout(true)} />
+        </View>
+        <RoleSwitcherSheet visible={switcherOpen} current="customer" onClose={() => setSwitcherOpen(false)} />
+        <PopupCard visible={confirmLogout} onClose={() => setConfirmLogout(false)}>
+          <IconChip icon="log-out" size={56} />
+          <PopupTitle variant="heading" center style={{ marginTop: space.md }}>
+            Log out of Swift?
+          </PopupTitle>
+          <View style={{ alignSelf: 'stretch', gap: space.md, marginTop: space.xl }}>
+            <PillButton label="Log out" size="md" onPress={() => { setConfirmLogout(false); logout(); }} />
+            <PillButton label="Stay signed in" variant="soft" size="md" onPress={() => setConfirmLogout(false)} />
+          </View>
+        </PopupCard>
       </Screen>
     );
   }
 
   const p = profile.data;
   const name = `${p?.firstName ?? user?.firstName ?? ''} ${p?.lastName ?? user?.lastName ?? ''}`.trim() || 'Swift member';
-  const avatar = p?.avatar ?? user?.avatar;
+  const rawAvatar = p?.avatar ?? user?.avatar;
+  // [F-022-17] the API may return a relative path — normalize before Image.
+  const avatar = rawAvatar && !/^https?:\/\//.test(rawAvatar) ? `${API_URL}${rawAvatar}` : rawAvatar;
   const orders = p?.customer?.totalOrders ?? 0;
   const unread = p?.unreadNotifications ?? 0;
   const memberSince = p?.createdAt ? new Date(p.createdAt).getFullYear() : null;
@@ -170,7 +194,7 @@ export function ProfileScreen() {
     <Screen bleed>
       <ScrollView contentContainerStyle={{ paddingBottom: space['3xl'] }} showsVerticalScrollIndicator={false}>
         {/* [Flow-8] Identity masthead: the person, grounded in the brand wash. */}
-        <GradientMasthead style={{ paddingTop: 64, paddingBottom: space['3xl'] + 44, paddingHorizontal: GUTTER }}>
+        <GradientMasthead style={{ paddingTop: insets.top + space.lg, paddingBottom: space['3xl'] + 44, paddingHorizontal: GUTTER }}>
           <T variant="micro" tone="onBrand">PROFILE</T>
           <T variant="title" tone="onBrand" numberOfLines={1} style={{ marginTop: 2 }}>
             {name}

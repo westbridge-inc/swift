@@ -160,9 +160,19 @@ export async function authRoutes(app: FastifyInstance) {
       folder: `avatars/${request.user.userId}`,
     });
 
-    const user = await app.prisma.user.update({
-      where: { id: request.user.userId },
+    // [REPORT-022 F-022-21] conditional write: a deletion finishing between
+    // auth and this point cannot re-personalize the tombstone with a fresh
+    // selfie/avatar.
+    const selfieWrite = await app.prisma.user.updateMany({
+      where: { id: request.user.userId, status: { notIn: ['DEACTIVATED', 'BANNED', 'SUSPENDED'] } },
       data: { avatar: url, selfieCapturedAt: new Date() },
+    });
+    if (selfieWrite.count === 0) {
+      await getStorageProvider().delete(url).catch(() => {});
+      throw new AppError(409, 'ACCOUNT_INACTIVE', 'This account is not active.');
+    }
+    const user = await app.prisma.user.findUniqueOrThrow({
+      where: { id: request.user.userId },
       select: {
         id: true, phone: true, email: true, firstName: true, lastName: true,
         avatar: true, selfieCapturedAt: true, roles: true, activeRole: true, lastMoverRole: true,

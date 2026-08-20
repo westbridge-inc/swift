@@ -18,6 +18,9 @@ export interface WatchSource {
   url: string;
   /** Only S1 (the Gazette itself) can mint CONFIRMED-CANDIDATE. */
   trust: 'S1' | 'S2' | 'S3';
+  /** [F-022-01] A listing page that "succeeds" with fewer real entries than
+   *  this floor is PARSE_THIN — nav-link scraps must never count as sight. */
+  minEntries?: number;
 }
 
 export interface GazetteEntry {
@@ -135,7 +138,9 @@ export async function runScan(
           const html = await res.text();
           listingHash = createHash('sha256').update(html).digest('hex');
           entries = parseEntries(html);
+          const floor = source.minEntries ?? 5;
           if (entries.length === 0) error = 'PARSE_EMPTY';
+          else if (entries.length < floor) error = `PARSE_THIN:${entries.length}<${floor}`;
         }
       } finally {
         clearTimeout(timer);
@@ -197,9 +202,12 @@ async function maybeRaiseDegradation(prisma: PrismaClient, sourceId: string): Pr
 
 export interface NotifyChannels {
   webhookUrl: string | null;
+  /** Parsed for forward-compat; NOT yet a delivery channel — email sending is
+   *  unimplemented, so configured emails alone do NOT satisfy has-channel
+   *  [F-022-03 honesty]. */
   emails: string[];
-  /** In-app admin notify (NotificationService adapter). */
-  notifyAdmins: ((title: string, body: string) => Promise<void>) | null;
+  /** In-app admin notify — must RESOLVE TO THE NUMBER OF HUMANS REACHED. */
+  notifyAdmins: ((title: string, body: string) => Promise<number>) | null;
 }
 
 export function channelsFromEnv(notifyAdmins: NotifyChannels['notifyAdmins']): NotifyChannels {
@@ -220,7 +228,8 @@ export async function notifyPending(
   channels: NotifyChannels,
   fetchImpl: FetchLike,
 ): Promise<number> {
-  const hasChannel = !!channels.webhookUrl || channels.emails.length > 0 || !!channels.notifyAdmins;
+  // Only channels that can actually DELIVER count (emails: parsed, not sent).
+  const hasChannel = !!channels.webhookUrl || !!channels.notifyAdmins;
   if (!hasChannel) {
     const dayBucket = new Date().toISOString().slice(0, 10);
     await prisma.cwAlert.createMany({
@@ -248,29 +257,43 @@ export async function notifyPending(
     },
     orderBy: { firstSeenAt: 'asc' },
   });
+  let undelivered = 0;
   for (const alert of pending) {
     const title = `[DPA WATCH · ${alert.confidence}] ${alert.eventType}`;
     const body = `${alert.entryTitle}${alert.entryUrl ? ` — ${alert.entryUrl}` : ''} (rule ${alert.matchedRule}, source ${alert.sourceId})`;
+    // [F-022-03] notifiedAt is stamped only on PROVEN delivery: a 2xx webhook
+    // response, or ≥1 admin recipient actually notified. Anything less leaves
+    // the alert pending for the next cycle — and an all-fail cycle goes RED.
+    let delivered = false;
     if (channels.webhookUrl) {
       try {
         const controller = new AbortController();
         const timer = setTimeout(() => controller.abort(), 10_000);
         try {
-          await fetchImpl(channels.webhookUrl, {
+          const res = await fetchImpl(channels.webhookUrl, {
             signal: controller.signal,
             headers: { 'content-type': 'application/json' },
             // @ts-expect-error minimal fetch-like: POST body tolerated by real fetch
             method: 'POST', body: JSON.stringify({ title, body, alertId: alert.id }),
           });
+          if (res.status >= 200 && res.status < 300) delivered = true;
         } finally {
           clearTimeout(timer);
         }
       } catch { /* webhook failure must not block the in-app channel */ }
     }
     if (channels.notifyAdmins) {
-      await channels.notifyAdmins(title, body).catch(() => {});
+      const reached = await channels.notifyAdmins(title, body).catch(() => 0);
+      if (reached > 0) delivered = true;
     }
-    await prisma.cwAlert.update({ where: { id: alert.id }, data: { notifiedAt: new Date() } });
+    if (delivered) {
+      await prisma.cwAlert.update({ where: { id: alert.id }, data: { notifiedAt: new Date() } });
+    } else {
+      undelivered += 1;
+    }
   }
-  return pending.length;
+  if (pending.length > 0 && undelivered === pending.length) {
+    throw new Error(`[DCR-1 CW] ${undelivered} alert(s) pending and NO channel delivered — the watch is not reaching a human`);
+  }
+  return pending.length - undelivered;
 }
