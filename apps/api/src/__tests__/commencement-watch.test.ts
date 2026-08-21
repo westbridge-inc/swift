@@ -107,11 +107,31 @@ describe('commencement watch [DCR-1 CW]', () => {
     await expect(notifyPending(app.prisma, none, fetchReturning({}))).rejects.toThrow(/zero alert channels/);
   });
 
+  it('[F-024-04] a notifyAdmins channel whose probe reaches ZERO admins goes RED even with NO pending alerts', async () => {
+    // The months-silent case: function present, admin table empty, nothing
+    // pending — the old presence-of-function check returned 0 green forever.
+    const zeroAdmins: NotifyChannels = {
+      webhookUrl: null, emails: [],
+      notifyAdmins: async () => 0,
+      probeAdmins: async () => 0,
+    };
+    await expect(notifyPending(app.prisma, zeroAdmins, fetchReturning({}))).rejects.toThrow(/zero active admins/);
+    const degraded = await app.prisma.cwAlert.findFirst({
+      where: { eventType: 'WATCH_DEGRADED', matchedRule: 'NO_REACHABLE_ADMIN' },
+      orderBy: { firstSeenAt: 'desc' },
+    });
+    expect(degraded).not.toBeNull();
+    // (The probe-positive and webhook-alive paths are exercised by the
+    // delivery test below — this test must stay non-consuming: it throws
+    // before the pending loop, leaving the queue for later tests.)
+  });
+
   it('notify delivers pending alerts in-app and stamps notifiedAt; ack stops re-notify', async () => {
     const sent: string[] = [];
     const channels: NotifyChannels = {
       webhookUrl: null, emails: [],
       notifyAdmins: async (title) => { sent.push(title); return 1; },
+      probeAdmins: async () => 1, // [F-024-04] probe-positive path
     };
     const n = await notifyPending(app.prisma, channels, fetchReturning({}));
     expect(n).toBeGreaterThanOrEqual(1);

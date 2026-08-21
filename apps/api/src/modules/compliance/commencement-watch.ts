@@ -208,14 +208,24 @@ export interface NotifyChannels {
   emails: string[];
   /** In-app admin notify — must RESOLVE TO THE NUMBER OF HUMANS REACHED. */
   notifyAdmins: ((title: string, body: string) => Promise<number>) | null;
+  /** [F-024-04] How many humans the notifyAdmins channel COULD reach right
+   *  now (active admin count), without sending. The function's mere presence
+   *  is not a channel: with zero active admins and no pending alerts the old
+   *  check stayed green for months while the watch reached nobody. Optional
+   *  for callers that predate it (absence = presence-of-function semantics). */
+  probeAdmins?: (() => Promise<number>) | null;
 }
 
-export function channelsFromEnv(notifyAdmins: NotifyChannels['notifyAdmins']): NotifyChannels {
+export function channelsFromEnv(
+  notifyAdmins: NotifyChannels['notifyAdmins'],
+  probeAdmins?: NotifyChannels['probeAdmins'],
+): NotifyChannels {
   const emails = (process.env['CW_ALERT_EMAILS'] ?? '').split(',').map((e) => e.trim()).filter(Boolean);
   return {
     webhookUrl: process.env['CW_ALERT_WEBHOOK_URL'] || null,
     emails,
     notifyAdmins,
+    probeAdmins: probeAdmins ?? null,
   };
 }
 
@@ -229,18 +239,33 @@ export async function notifyPending(
   fetchImpl: FetchLike,
 ): Promise<number> {
   // Only channels that can actually DELIVER count (emails: parsed, not sent).
-  const hasChannel = !!channels.webhookUrl || !!channels.notifyAdmins;
+  // [F-024-04] The in-app channel counts only if it can reach ≥1 active admin
+  // RIGHT NOW — probed every cycle, so a zero-admin deployment goes RED on the
+  // next run even with no pending alerts, instead of sitting green for months.
+  const adminReachable = channels.notifyAdmins
+    ? channels.probeAdmins
+      ? await channels.probeAdmins().catch(() => 0)
+      : 1 // no probe supplied (legacy caller): keep presence-of-function semantics
+    : 0;
+  const hasChannel = !!channels.webhookUrl || adminReachable > 0;
   if (!hasChannel) {
+    const noAdmins = !!channels.notifyAdmins && adminReachable === 0;
+    const rule = noAdmins ? 'NO_REACHABLE_ADMIN' : 'NO_CHANNEL';
     const dayBucket = new Date().toISOString().slice(0, 10);
     await prisma.cwAlert.createMany({
       data: [{
         eventType: 'WATCH_DEGRADED', confidence: 'SYSTEM', sourceId: 'notify',
-        matchedRule: 'NO_CHANNEL', entryTitle: 'CW has ZERO alert channels configured — alerts cannot reach a human',
-        entryUrl: null, contentHash: createHash('sha256').update(`nochannel|${dayBucket}`).digest('hex'),
+        matchedRule: rule,
+        entryTitle: noAdmins
+          ? 'CW in-app channel reaches ZERO active admins and no webhook is configured — alerts cannot reach a human'
+          : 'CW has ZERO alert channels configured — alerts cannot reach a human',
+        entryUrl: null, contentHash: createHash('sha256').update(`${rule.toLowerCase()}|${dayBucket}`).digest('hex'),
       }],
       skipDuplicates: true,
     });
-    throw new Error('[DCR-1 CW] zero alert channels configured (CW_ALERT_WEBHOOK_URL / CW_ALERT_EMAILS) — the watch cannot reach a human');
+    throw new Error(noAdmins
+      ? '[DCR-1 CW] the in-app channel reaches zero active admins and no webhook is configured — the watch cannot reach a human'
+      : '[DCR-1 CW] zero alert channels configured (CW_ALERT_WEBHOOK_URL / CW_ALERT_EMAILS) — the watch cannot reach a human');
   }
 
   const reNotifyBefore = new Date(Date.now() - DAY_MS);
