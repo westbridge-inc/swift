@@ -1,7 +1,8 @@
 /** @jsxImportSource react */
 import React from 'react';
-import { Text as RNText, type TextProps, type TextStyle } from 'react-native';
+import { Text as RNText, useWindowDimensions, type TextProps, type TextStyle } from 'react-native';
 import { color, font, typeScale } from '@swift/ui';
+import { scaleLineHeight } from './text-scale';
 
 // RN selects fonts by family name, so each weight is its own family
 // (registered in App.tsx). Never set fontWeight — always a family.
@@ -64,11 +65,14 @@ export interface TP extends TextProps, TTone {
 const DISPLAY_FACE = new Set(['displayXl', 'display', 'title', 'numL', 'numM']);
 
 export function T({ variant = 'body', tone = 'ink', weight, center, style, ...rest }: TP) {
+  // useWindowDimensions (not PixelRatio.getFontScale) so a font-scale change
+  // while the app is open re-renders instead of keeping a stale box.
+  const { fontScale } = useWindowDimensions();
   return (
     <RNText
       {...rest}
       style={[
-        VARIANT[variant],
+        scaleLineHeight(VARIANT[variant]!, fontScale),
         { color: TONE[tone] },
         weight && !DISPLAY_FACE.has(variant) ? { fontFamily: FAMILY[weight] } : null,
         center ? { textAlign: 'center' } : null,
