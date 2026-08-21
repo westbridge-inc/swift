@@ -1,3 +1,4 @@
+import { timingSafeEqual } from 'node:crypto';
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { AppError } from '../../utils/errors';
@@ -31,8 +32,14 @@ export async function statementRoutes(app: FastifyInstance) {
     if (q.expires < Math.floor(Date.now() / 1000)) {
       throw new AppError(410, 'LINK_EXPIRED', 'This statement link has expired — open a fresh one from the app.');
     }
-    const expected = signStatementToken(q.kind as StatementKind, q.actor, q.from, q.to, q.expires);
-    if (expected !== q.sig) {
+    // [F-249] Constant-time, like every other signature check in the codebase
+    // (envelope.ts verifyRenderToken, the agent-cash webhook). `!==` on strings
+    // short-circuits at the first differing byte, leaking through response
+    // timing how much of the HMAC an attacker has guessed — and the signature
+    // IS the authorization for someone's earnings statement.
+    const expected = Buffer.from(signStatementToken(q.kind as StatementKind, q.actor, q.from, q.to, q.expires));
+    const provided = Buffer.from(q.sig);
+    if (provided.length !== expected.length || !timingSafeEqual(provided, expected)) {
       throw new AppError(403, 'BAD_SIGNATURE', 'This statement link is not valid.');
     }
 
