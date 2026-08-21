@@ -52,7 +52,19 @@ export function ToastHost() {
     >
       {toasts.map((t) => (
         <Animated.View key={t.id} entering={FadeInDown.duration(180)} exiting={FadeOutUp.duration(140)} style={{ marginBottom: 8 }}>
-          <Pressable onPress={() => dismiss(t.id)}>
+          {/* [F-243] A toast is how most of the app reports failure, so it has
+              to reach a screen-reader user too: announce it as an alert (an
+              error assertively, the rest politely — the OfflineBanner pattern)
+              and label the tap so "dismiss" is discoverable rather than a
+              mystery press on unlabelled text. */}
+          <Pressable
+            onPress={() => dismiss(t.id)}
+            accessible
+            accessibilityRole="alert"
+            accessibilityLiveRegion={t.tone === 'error' ? 'assertive' : 'polite'}
+            accessibilityLabel={t.description ? `${t.title}. ${t.description}` : t.title}
+            accessibilityHint="Double tap to dismiss"
+          >
             <View
               style={[
                 {
@@ -69,10 +81,13 @@ export function ToastHost() {
               ]}
             >
               <MaterialCommunityIcons name={ICON[t.tone].name} size={20} color={ICON[t.tone].tint} />
-              <View style={{ flex: 1, marginLeft: 10 }}>
-                <Text className="text-sm font-bold text-text-primary" numberOfLines={1}>{t.title}</Text>
+              <View style={{ flex: 1, marginLeft: 10, flexShrink: 1 }}>
+                {/* The description carries the REASON a thing failed. Clipping
+                    it to one line threw that away — worst at a large font
+                    scale. Two lines, and shrink rather than a fixed box. */}
+                <Text className="text-sm font-bold text-text-primary" numberOfLines={2}>{t.title}</Text>
                 {t.description ? (
-                  <Text className="text-xs text-text-secondary" numberOfLines={1}>{t.description}</Text>
+                  <Text className="text-xs text-text-secondary" numberOfLines={3}>{t.description}</Text>
                 ) : null}
               </View>
             </View>
