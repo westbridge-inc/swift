@@ -1,0 +1,25 @@
+{
+  // [F-026-32] The baseline scenarios (scripts/baseline/b*.ts) are the
+  // no-regression contract for the whole product — and they sat OUTSIDE every
+  // gate: the main tsconfig includes only "src", so a type error in a
+  // baseline surfaced solely when a human happened to run it. The scripts
+  // that guard the product were themselves unguarded.
+  //
+  // A separate project rather than widening the build: the main config emits
+  // to dist/ with rootDir src, and adding scripts/ there would reshape the
+  // published output. This one only type-checks.
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "module": "CommonJS",
+    "moduleResolution": "bundler",
+    "target": "ES2022",
+    "lib": ["ES2022"],
+    "types": ["node"]
+  },
+  // src is included so the `declare module 'fastify'` augmentations in
+  // src/plugins/* merge exactly as they do in the main build — two scripts
+  // import from src, and without them FastifyInstance loses .jwt/.io.
+  "include": ["scripts", "src"],
+  "exclude": ["node_modules", "dist"]
+}

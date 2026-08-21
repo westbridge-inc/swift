@@ -9,8 +9,8 @@
     "start": "node dist/server.js",
     "start:worker": "node dist/worker.js",
     "worker": "tsx watch src/worker.ts",
-    "type-check": "tsc --noEmit",
-    "lint": "eslint 'src/**/*.{ts,tsx}'",
+    "type-check": "tsc --noEmit && tsc -p tsconfig.scripts.json",
+    "lint": "eslint 'src/**/*.{ts,tsx}' 'scripts/**/*.ts'",
     "clean": "rm -rf dist",
     "test": "vitest run",
     "test:watch": "vitest"

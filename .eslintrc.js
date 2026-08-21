@@ -14,6 +14,14 @@ module.exports = {
   ignorePatterns: ['dist/', 'node_modules/', '.next/', '.turbo/'],
   overrides: [
     {
+      // [F-026-32] The baseline scenarios are operator-facing CLI tools whose
+      // entire output IS console logging — that is the evidence they produce.
+      // They are now inside the lint gate; console is the one rule that would
+      // be pure noise there.
+      files: ['apps/api/scripts/**/*.ts'],
+      rules: { 'no-console': 'off' },
+    },
+    {
       // DESIGN-100× no-literal-colour law: screen AND component code uses
       // tokens, never raw hexes/rgba. Only src/kit is exempt — it is where
       // the tokens' consumers are defined. The debt ledger that once lived
