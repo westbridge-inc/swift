@@ -120,7 +120,10 @@ async function main() {
       await new Promise((r) => setTimeout(r, 5000));
     }
   } else {
-    log('NOTE rig places without hold — LOUD check direct');
+    // [F-024-05] The hold IS part of the cash spine on this rig (LIFECYCLE_V2
+    // on; B6/B13 prove it live). A checkout that lands with no hold is a
+    // regression, not a legacy mode to note-and-continue past.
+    throw new Error(`FAIL: order placed WITHOUT a hold window (holdExpiresAt=${String(o0.holdExpiresAt)})`);
   }
 
   // ── 3. vendor works the board: accept → preparing → READY ────────────────
@@ -141,8 +144,12 @@ async function main() {
     await new Promise((r) => setTimeout(r, 3000));
   }
   if (!offer) throw new Error('FAIL: offer never reached the rider');
-  log('EVIDENCE offer', { orderId: offer.orderId, offerAttemptId: offer.offerAttemptId ?? null });
-  const acceptOffer = await http('POST', '/rider/offers/accept', { orderId, ...(offer.offerAttemptId ? { offerAttemptId: offer.offerAttemptId } : {}) }, riderToken);
+  // [F-024-05 / F-220] The attempt identity is part of the offer contract —
+  // dispatch mints one per generation and the recovery read must echo it. A
+  // null here silently downgrades accept to the legacy wildcard path.
+  if (!offer.offerAttemptId) throw new Error('FAIL F-220: /rider/offers/current echoed offerAttemptId null — attempt identity lost on the recovery path');
+  log('EVIDENCE offer', { orderId: offer.orderId, offerAttemptId: offer.offerAttemptId });
+  const acceptOffer = await http('POST', '/rider/offers/accept', { orderId, offerAttemptId: offer.offerAttemptId }, riderToken);
   if (acceptOffer.status >= 300) throw new Error(`offer accept ${acceptOffer.status}: ${JSON.stringify(acceptOffer.json).slice(0, 200)}`);
   const oAssigned = await prisma.order.findUniqueOrThrow({ where: { id: orderId }, select: { status: true, riderId: true } });
   if (oAssigned.riderId !== rider.id) throw new Error(`FAIL: order assigned to ${oAssigned.riderId}, expected ${rider.id}`);
@@ -160,21 +167,38 @@ async function main() {
     outcome: 'paid', gps: { lat: 6.81, lng: -58.16 },
   }, riderToken, { 'idempotency-key': `b1-${orderId}` });
   if (hand.status >= 300) throw new Error(`FAIL handover: ${hand.status} ${JSON.stringify(hand.json).slice(0, 300)}`);
-  // idempotency: replay must not double-settle
+  // [F-024-05] idempotency ASSERTED, not logged: the replay must succeed, be
+  // MARKED as a replay by the server, and return the original result — a
+  // 409/500 or a silently re-executed second handover both fail here.
+  if (hand.json?.replayed === true) throw new Error('FAIL: FIRST handover reported replayed=true');
   const replay = await http('POST', `/rider/orders/${orderId}/handover`, {
     outcome: 'paid', gps: { lat: 6.81, lng: -58.16 },
   }, riderToken, { 'idempotency-key': `b1-${orderId}` });
-  log('EVIDENCE handover + idempotent replay', { first: hand.status, replay: replay.status });
+  if (replay.status >= 300) throw new Error(`FAIL replay: ${replay.status} ${JSON.stringify(replay.json).slice(0, 200)}`);
+  if (replay.json?.replayed !== true) throw new Error(`FAIL: replay not marked replayed (got ${JSON.stringify(replay.json?.replayed)})`);
+  if (JSON.stringify(replay.json?.data ?? null) !== JSON.stringify(hand.json?.data ?? null)) throw new Error('FAIL: replay returned a DIFFERENT result than the original handover');
+  log('EVIDENCE handover + idempotent replay', { first: hand.status, replay: replay.status, replayedFlag: replay.json?.replayed });
 
   // ── 7. settlement evidence ────────────────────────────────────────────────
   const oFinal = await prisma.order.findUniqueOrThrow({ where: { id: orderId }, select: { status: true, deliveredAt: true } });
   if (!['DELIVERED', 'COMPLETED'].includes(oFinal.status)) throw new Error(`FAIL final status ${oFinal.status}`);
+  if (!oFinal.deliveredAt) throw new Error('FAIL: DELIVERED order carries no deliveredAt timestamp');
+  // [F-024-05] Money integrity ASSERTED exactly: one DELIVERY_FEE earning for
+  // THIS rider at THIS order's fee, AVAILABLE — and for a CASH order, NO
+  // DeliveryCashSettlement row (that row is the MMG-only VENDOR_OWES_RIDER
+  // obligation; cash settles implicitly at handover — F-221 CLOSED-VERIFIED).
+  const feeMinor = Math.round(Number(o0.deliveryFee ?? 0) * 100);
   const earnings = await prisma.earning.findMany({ where: { orderId }, select: { type: true, amount: true, riderId: true, status: true } });
-  if (earnings.length === 0) throw new Error('FAIL: no earning rows');
+  const feeRows = earnings.filter((e) => e.type === 'DELIVERY_FEE');
+  if (feeRows.length !== 1) throw new Error(`FAIL: ${feeRows.length} DELIVERY_FEE earnings, expected exactly 1`);
+  if (feeRows[0]!.riderId !== rider.id) throw new Error(`FAIL: earning credited to ${feeRows[0]!.riderId}, expected ${rider.id}`);
+  if (Math.round(Number(feeRows[0]!.amount) * 100) !== feeMinor) throw new Error(`FAIL: earning ${String(feeRows[0]!.amount)} != deliveryFee ${String(o0.deliveryFee)}`);
+  if (feeRows[0]!.status !== 'AVAILABLE') throw new Error(`FAIL: earning status ${feeRows[0]!.status}, expected AVAILABLE`);
   const dup = await prisma.earning.groupBy({ by: ['type'], where: { orderId }, _count: true }).then((g) => g.filter((x) => x._count > 1));
   if (dup.length > 0) throw new Error(`FAIL: duplicated earnings after replay: ${JSON.stringify(dup)}`);
   const settlement = await prisma.deliveryCashSettlement.findFirst({ where: { orderId } });
-  log('EVIDENCE settlement', { finalStatus: oFinal.status, earnings, cashSettlement: settlement ? { id: settlement.id, status: (settlement as any).status ?? 'row-exists' } : null });
+  if (settlement) throw new Error(`FAIL: CASH order minted a DeliveryCashSettlement row (${settlement.id}) — that obligation is MMG-only`);
+  log('EVIDENCE settlement', { finalStatus: oFinal.status, deliveredAt: oFinal.deliveredAt, earnings, cashSettlement: null });
 
   log('B1 COMPLETE — CASH SPINE PROVEN END-TO-END');
 }
