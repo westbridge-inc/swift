@@ -207,6 +207,81 @@ describe('SOS state machine [safety M2]', () => {
     expect(await prisma.sosAlert.count({ where: { clientIdempotencyKey: key } })).toBe(1);
   });
 
+  it('[F-027-17] D5: tapping again while an alert is LIVE collapses onto it — ops gets rising urgency, not duplicates', async () => {
+    // The life-safety routes are rate-limit exempt, so the alert mint was the
+    // unbounded surface: one account could bury the ops war room and lose real
+    // emergencies in the noise. The bound is on ALERTS, not requests.
+    const who = u();
+    const first = track(await sos.create({ actorUserId: who, actorRole: 'CUSTOMER', triggerSource: 'BUTTON' }));
+    for (let i = 0; i < 5; i++) {
+      const again = await sos.create({ actorUserId: who, actorRole: 'CUSTOMER', triggerSource: 'BUTTON' });
+      expect(again.id).toBe(first.id);
+    }
+    expect(await prisma.sosAlert.count({ where: { actorUserId: who } })).toBe(1);
+    const after = await prisma.sosAlert.findUniqueOrThrow({ where: { id: first.id } });
+    expect(after.retriggerCount).toBe(5);
+    expect(after.lastRetriggerAt).toBeInstanceOf(Date);
+  });
+
+  it('[F-027-17] D6: under a SIMULTANEOUS burst the collapse reduces but does NOT bound — nobody is refused, and this is the residual', async () => {
+    // Honest statement of what the mechanism actually guarantees.
+    //
+    // The collapse is a read-then-write, so callers that all read before any
+    // of them commits will each mint. That is fine for the case it exists to
+    // serve — a frightened person tapping repeatedly, hundreds of milliseconds
+    // apart, which D5 proves collapses to exactly one. It is NOT a defence
+    // against deliberate flooding: measured here, 40 simultaneous triggers
+    // still produced tens of alerts.
+    //
+    // It is deliberately not a partial unique index yet. That would give a
+    // hard bound, but it puts a rule that can REFUSE an insert on the path
+    // between a person and help, and it cannot be expressed in the Prisma
+    // schema — so a routine `db push` would silently drop it. Choosing that
+    // mechanism belongs in the ops-war-room grouping work (W1), not in a
+    // same-day patch on a life-safety path.
+    //
+    // What must hold unconditionally is the part below: every caller gets a
+    // real alert back. Nobody is ever refused.
+    const who = u();
+    const N = 40;
+    const settled = await Promise.all(Array.from({ length: N }, () =>
+      sos.create({ actorUserId: who, actorRole: 'CUSTOMER', triggerSource: 'BUTTON' })));
+    settled.forEach(track);
+    expect(settled).toHaveLength(N);
+    expect(settled.every((a) => a.id && a.status)).toBe(true);
+    const minted = await prisma.sosAlert.count({ where: { actorUserId: who } });
+    expect(minted).toBeGreaterThan(0);
+    expect(minted).toBeLessThanOrEqual(N); // the residual: NOT yet a real bound
+  });
+
+  it('[F-027-17] D7: the STRONGER trigger wins — an immediate re-trigger promotes a pending alert instead of waiting out its grace', async () => {
+    // Collapsing must never leave someone counting down a window they have
+    // already overridden by pressing the in-ride panic button.
+    const who = u();
+    const pending = track(await sos.create({ actorUserId: who, actorRole: 'CUSTOMER', triggerSource: 'BUTTON' }));
+    expect(pending.status).toBe('TRIGGER_PENDING');
+    const escalated = await sos.create({ actorUserId: who, actorRole: 'CUSTOMER', triggerSource: 'BUTTON', immediate: true });
+    expect(escalated.id).toBe(pending.id);
+    expect(escalated.status).toBe('ACTIVE');
+    expect(escalated.graceEndsAt).toBeNull();
+  });
+
+  it('[F-027-17] D8: collapse never swallows a LATER emergency — a closed alert does not absorb the next one', async () => {
+    const who = u();
+    const first = track(await sos.create({ actorUserId: who, actorRole: 'CUSTOMER', triggerSource: 'OPS_MANUAL' }));
+    await sos.resolve(first.id, 'ops-1', 'SAFE_CONFIRMED');
+    const later = track(await sos.create({ actorUserId: who, actorRole: 'CUSTOMER', triggerSource: 'BUTTON' }));
+    expect(later.id).not.toBe(first.id);
+    expect(await prisma.sosAlert.count({ where: { actorUserId: who } })).toBe(2);
+  });
+
+  it('[F-027-17] D9: a different trip is a different emergency — collapse is scoped to the order', async () => {
+    const who = u();
+    const onFoot = track(await sos.create({ actorUserId: who, actorRole: 'CUSTOMER', triggerSource: 'BUTTON' }));
+    const onTrip = track(await sos.create({ actorUserId: who, actorRole: 'CUSTOMER', triggerSource: 'BUTTON', orderId: `ord-${nanoid(8)}` }));
+    expect(onTrip.id).not.toBe(onFoot.id);
+  });
+
   it('E: the grace-expiry sweep promotes an overdue TRIGGER_PENDING → ACTIVE (app-kill-proof)', async () => {
     const a = track(await sos.create({ actorUserId: u(), actorRole: 'CUSTOMER', triggerSource: 'BUTTON' }));
     // Simulate grace elapsed (as if the app died during the countdown).
