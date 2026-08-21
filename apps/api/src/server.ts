@@ -204,6 +204,8 @@ async function buildApp() {
       const { notifyAdmins, NotificationService } = await import('./modules/notification/notification.service');
       try {
         await notifyAdmins(app.prisma, new NotificationService(app.prisma, app.io), {
+        // Boot/infra failure — platform-wide by nature [NOC-A F45].
+        tenantId: null,
           title: neverBooted ? 'Job scheduler never started' : 'Job scheduler stalled',
           body: neverBooted
             ? `No scheduler heartbeat since boot (${mins} min) — the worker fleet never started (crash or RUN_WORKERS misconfigured). Holds, expiry sweeps, billing and settlements have NEVER run. Start the worker.`

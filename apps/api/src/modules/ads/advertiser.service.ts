@@ -70,6 +70,7 @@ export class AdvertiserService {
     });
 
     await notifyAdmins(this.prisma, this.notifications, {
+      tenantId: advertiser.tenantId ?? null,
       title: 'New advertiser application',
       body: `${input.companyName} (${input.industry}) applied to advertise on Swift. Review in the advertiser queue.`,
       data: { kind: 'advertiser_application', advertiserId: advertiser.id, companyName: input.companyName },

@@ -3226,6 +3226,8 @@ export async function adminRoutes(app: FastifyInstance) {
     if (report.trailerMismatch) {
       const { notifyAdmins } = await import('../notification/notification.service');
       await notifyAdmins(app.prisma, notifications, {
+        // Settlement ops act inside the caller's tenant [NOC-A F45].
+        tenantId: getTenantId() ?? null,
         title: 'Settlement file trailer mismatch',
         body: `File "${body.source}": rows sum GY$${report.totalGyd.toLocaleString()} but the trailer claims GY$${(report.trailerTotalGyd ?? 0).toLocaleString()}. Reconcile with MMG before trusting this file.`,
         data: { kind: 'settlement_trailer_mismatch', source: body.source },
@@ -3420,6 +3422,8 @@ export async function adminRoutes(app: FastifyInstance) {
     if (result.status === 'MISMATCH') {
       const { notifyAdmins } = await import('../notification/notification.service');
       await notifyAdmins(app.prisma, notifications, {
+        // Settlement ops act inside the caller's tenant [NOC-A F45].
+        tenantId: getTenantId() ?? null,
         title: 'Settlement deposit mismatch',
         body: `A bank deposit is off the expected net by GY$${result.deltaGyd.toLocaleString()}. Reconcile with MMG — drill into the batch in Command.`,
         data: { kind: 'settlement_deposit_mismatch', batchId: id, deltaGyd: result.deltaGyd },

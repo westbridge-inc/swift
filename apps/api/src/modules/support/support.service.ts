@@ -1,6 +1,6 @@
 import type { PrismaClient, SupportCategory, SupportStatus } from '@prisma/client';
 import { AppError, NotFoundError } from '../../utils/errors';
-import { NotificationService, notifyAdmins } from '../notification/notification.service';
+import { NotificationService, notifyAdmins, tenantOfUser } from '../notification/notification.service';
 import { log } from '../../utils/logger';
 
 // ---------------------------------------------------------------------------
@@ -56,6 +56,8 @@ export class SupportService {
 
     log().warn({ ticketId: ticket.id, userId, category: input.category, orderId: input.orderId }, 'support: ticket opened');
     await notifyAdmins(this.prisma, this.notifications, {
+      // The ticket belongs to the person who opened it [NOC-A F45].
+      tenantId: await tenantOfUser(this.prisma, userId),
       title: 'New support ticket',
       body: `${input.category.replace(/_/g, ' ').toLowerCase()}: ${input.subject}`,
       data: { kind: 'support_ticket', ticketId: ticket.id, orderId: input.orderId },

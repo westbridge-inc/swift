@@ -109,6 +109,8 @@ export class AdsRefundService {
     // The manual payout task — computed here, executed by a human (§8.4).
     if (refundedTotal + creditedTotal > 0) {
       await notifyAdmins(this.prisma, this.notifications, {
+        // Scoped to the campaign's tenant [NOC-A F45].
+        tenantId: campaign.tenantId ?? null,
         title: 'Ad refund — manual payout needed',
         body: `Campaign ${campaign.name}: refund $${refundedTotal.toLocaleString()} + credit $${creditedTotal.toLocaleString()} (${reason}). Pay the advertiser via MMG/bank and mark done.`,
         data: { kind: 'ad_refund_payout_task', campaignId, advertiserId: campaign.advertiserId, refundedTotal, creditedTotal, reason },

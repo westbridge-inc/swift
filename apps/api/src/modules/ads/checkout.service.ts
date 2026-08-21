@@ -137,6 +137,8 @@ export class AdCheckoutService {
 
     log().info({ invoiceId, campaignId: invoice.campaignId, via: opts.adminUserId ? 'admin' : 'provider' }, 'ad invoice paid — campaign → PENDING_REVIEW');
     await notifyAdmins(this.prisma, this.notifications, {
+      // Scoped to the subject's tenant [NOC-A F45].
+      tenantId: invoice.tenantId ?? null,
       title: 'Ad campaign paid — ready for creative review',
       body: `Invoice ${invoice.number} is paid. Its campaign is now in the creative review queue.`,
       data: { kind: 'ad_campaign_paid', campaignId: invoice.campaignId, invoiceNumber: invoice.number },

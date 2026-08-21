@@ -245,6 +245,8 @@ export class IncidentService {
     // AUDIT-FIX (siren note): read the FINAL severity, not the pre-hook local.
     const siren = kase.severity === 'S0' || kase.severity === 'S1' ? '🚨 ' : '';
     await notifyAdmins(this.prisma, this.notifications, {
+      // Scoped to the case's tenant [NOC-A F45].
+      tenantId: kase.tenantId ?? null,
       title: `${siren}Safety case ${kase.caseNumber} (${kase.severity})`,
       body: `${this.categoryLabel(kase.category)} — ${input.summary.slice(0, 140)}. Ack by ${kase.slaAckBy.toISOString()}.`,
       data: { kind: 'incident_new', caseId: kase.id, caseNumber: kase.caseNumber, severity: kase.severity, category: kase.category },

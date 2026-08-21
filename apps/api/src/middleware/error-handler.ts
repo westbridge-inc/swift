@@ -84,6 +84,9 @@ export function registerErrorHandler(app: FastifyInstance) {
       const { notifyAdmins, NotificationService } = await import('../modules/notification/notification.service');
       try {
         await notifyAdmins(app.prisma, new NotificationService(app.prisma, app.io), {
+          // A 5xx SPIKE is an aggregate infra signal, single-flighted across
+          // the whole API — not one tenant's event [NOC-A F45].
+          tenantId: null,
           title: 'Server error spike',
           body: `${threshold}+ unhandled 500s in the last minute. Check Sentry / the API logs now.`,
           data: { kind: 'ops_error_spike', perMinute: threshold },

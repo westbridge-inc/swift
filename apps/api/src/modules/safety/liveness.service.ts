@@ -2,7 +2,7 @@ import type { PrismaClient, LivenessOutcome, LivenessPurpose } from '@prisma/cli
 import type { Server } from 'socket.io';
 import { AppError, NotFoundError } from '../../utils/errors';
 import { getKycProvider, type KycProvider } from '../../providers/kyc/kyc-provider';
-import { NotificationService, notifyAdmins } from '../notification/notification.service';
+import { NotificationService, notifyAdmins, tenantOfUser } from '../notification/notification.service';
 import { log } from '../../utils/logger';
 import {
   hasTaxiPassengerCustody,
@@ -132,6 +132,8 @@ export class LivenessService {
       outcome = outagePolicy() === 'FAIL_CLOSED' ? 'ERROR_FAIL_CLOSED' : 'ERROR_FAIL_OPEN';
       log().error({ err, userId: input.userId, policy: outagePolicy() }, 'liveness analyzer outage — applying tenant outage policy');
       await notifyAdmins(this.prisma, this.notifications, {
+        // Scoped to the person being checked [NOC-A F45].
+        tenantId: await tenantOfUser(this.prisma, input.userId),
         title: 'Liveness analyzer outage',
         body: `Face-match provider errored during a ${purpose} check. Policy applied: ${outagePolicy()}. Investigate the provider.`,
         data: { kind: 'liveness_outage', userId: input.userId, policy: outagePolicy() },
@@ -161,6 +163,7 @@ export class LivenessService {
             ? 'Analyzer outage fail-open — retroactively review this shift selfie.'
             : 'A rider reported "this isn\'t my driver" — review immediately.';
       await notifyAdmins(this.prisma, this.notifications, {
+        tenantId: await tenantOfUser(this.prisma, input.userId),
         title: 'Liveness review needed',
         body: why,
         data: { kind: 'liveness_review', livenessCheckId: check.id, userId: input.userId, outcome },
@@ -190,6 +193,7 @@ export class LivenessService {
         if (input.profile === 'DRIVER') await this.prisma.driver.update({ where: { id: row.id }, data });
         else await this.prisma.rider.update({ where: { id: row.id }, data });
         await notifyAdmins(this.prisma, this.notifications, {
+          tenantId: await tenantOfUser(this.prisma, input.userId),
           title: 'Liveness lock — repeated face-match failures',
           body: `A ${input.profile.toLowerCase()} failed ${consecutive} consecutive identity checks and is locked from going online. Review the check history before clearing.`,
           data: { kind: 'liveness_locked', userId: input.userId, livenessCheckId: check.id },

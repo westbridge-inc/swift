@@ -259,6 +259,8 @@ export class AgentService {
       }
       await this.audit('ops', snapshot.orderId, action, input, 'pending_approval', decision.rationale);
       await notifyAdmins(this.prisma, this.notifications, {
+        // Scoped to the order the agent is acting on [NOC-A F45].
+        tenantId: (await this.prisma.order.findUnique({ where: { id: snapshot.orderId }, select: { tenantId: true } }).catch(() => null))?.tenantId ?? null,
         title: 'Ops agent needs a decision',
         body: `${decision.likelyCause} — review the ${action.replaceAll('_', ' ')} request in the approval queue.`,
         data: { orderId: snapshot.orderId, kind: 'agent_approval_needed' },
@@ -317,6 +319,8 @@ export class AgentService {
       }
       case 'ops_alert': {
         await notifyAdmins(this.prisma, this.notifications, {
+          // Scoped to the flagged order [NOC-A F45].
+          tenantId: order.tenantId ?? null,
           title: `Ops attention: order #${order.orderNumber}`,
           body: decision?.likelyCause ?? 'The agent flagged this order for a human look.',
           data: { orderId, kind: 'agent_ops_alert' },

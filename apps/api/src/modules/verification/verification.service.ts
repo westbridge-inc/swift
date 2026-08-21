@@ -2,7 +2,7 @@ import { Prisma, type PrismaClient, type VerificationDocument, type UserRole, ty
 import { AppError, NotFoundError } from '../../utils/errors';
 import { CountryConfigService } from '../country/country-config.service';
 import { isPassengerVehicle } from '../../config/vehicle-classes';
-import { NotificationService, notifyAdmins } from '../notification/notification.service';
+import { NotificationService, notifyAdmins, tenantOfUser } from '../notification/notification.service';
 import type { KycProvider } from '../../providers/kyc/kyc-provider';
 import { getStorageProvider } from '../../providers/storage/storage-provider';
 import { FloatService } from '../dispatch/float.service';
@@ -255,6 +255,8 @@ export class VerificationService {
     // it — found live: documents (and whole onboardings) sat PENDING for weeks.
     if (doc.status === 'PENDING') {
       await notifyAdmins(this.prisma, this.notifications, {
+        // Follows the submitter [NOC-A F45].
+        tenantId: await tenantOfUser(this.prisma, userId),
         title: 'Verification review needed',
         body: `A ${docType.replace(/_/g, ' ')} (${roleKey}) is waiting in the review queue.`,
         data: { kind: 'verification_pending', docId: doc.id },
@@ -318,6 +320,8 @@ export class VerificationService {
     if (doc.status === 'REJECTED') await this.notifyRejection(userId, 'identity', result.reason);
     if (doc.status === 'PENDING') {
       await notifyAdmins(this.prisma, this.notifications, {
+        // Follows the submitter [NOC-A F45].
+        tenantId: await tenantOfUser(this.prisma, userId),
         title: 'Verification review needed',
         body: 'An identity check (L2) is waiting in the review queue.',
         data: { kind: 'verification_pending', docId: doc.id },
@@ -496,6 +500,8 @@ export class VerificationService {
     if (breached === 0) return 0;
     const oldestHours = oldest ? Math.floor((Date.now() - oldest.createdAt.getTime()) / 3600_000) : slaHours;
     await notifyAdmins(this.prisma, this.notifications, {
+      // An aggregate queue-health sweep — platform-wide [NOC-A F45].
+      tenantId: null,
       title: 'Verification queue is breaching SLA',
       body: `${breached} document${breached === 1 ? '' : 's'} have waited over ${slaHours}h for review (oldest ${oldestHours}h). People cannot work until these are decided.`,
       data: { kind: 'verification_sla_breach', breached, slaHours },

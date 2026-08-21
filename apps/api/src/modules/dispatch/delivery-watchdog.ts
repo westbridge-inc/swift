@@ -59,6 +59,7 @@ export async function recoverStrandedDeliveries(
       const order = await tx.order.findUnique({
         where: { id: orderId },
         select: {
+          tenantId: true, // the ops page follows the order's tenant [NOC-A F45]
           id: true, status: true, orderType: true, customerId: true, orderNumber: true,
           riderId: true, paymentMethod: true, subtotalBase: true,
           preparingAt: true, readyAt: true, vendorId: true,
@@ -119,6 +120,8 @@ export async function recoverStrandedDeliveries(
       if (claimed === 'OK') {
         try {
           await notifyAdmins(prisma, notifications, {
+            // Scoped to the order [NOC-A F45].
+            tenantId: order.tenantId ?? null,
             title: 'Delivery rider lost signal with the goods',
             body: `Order ${order.orderNumber}: the rider's GPS went dark AFTER pickup — they hold the goods${order.paymentMethod === 'CASH' ? ' and fronted the vendor cash' : ''}. Contact both parties — do NOT auto-cancel.`,
             data: { kind: 'ops_delivery_rider_dropped', orderId },

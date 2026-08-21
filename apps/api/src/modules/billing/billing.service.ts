@@ -1,6 +1,6 @@
 import type { PrismaClient, Subscription, Prisma, SubscriptionStatus } from '@prisma/client';
 import { AppError, NotFoundError } from '../../utils/errors';
-import { NotificationService, notifyAdmins } from '../notification/notification.service';
+import { NotificationService, notifyAdmins, tenantOfUser, tenantOfSubscription } from '../notification/notification.service';
 import { getChannels } from '../../providers/notifications/channels';
 import { CountryConfigService } from '../country/country-config.service';
 import type { PaymentProvider } from '../../providers/payment/payment-provider';
@@ -745,6 +745,8 @@ export class BillingService {
             },
           });
           await notifyAdmins(this.prisma, this.notifications, {
+            // Scoped to the payer's tenant [NOC-A F45].
+            tenantId: await tenantOfSubscription(this.prisma, payment.subscriptionId),
             title: '⚠️ Payment settlement mismatch — held for review',
             body: `MMG did not confirm the exact amount and currency requested for a weekly-fee payment. It is NOT settled. Payment ${payment.id}.`,
             data: { kind: 'reconcile_mismatch', paymentId: payment.id, subscriptionId: sub.id },
@@ -959,6 +961,8 @@ export class BillingService {
         .smsPayer(sub, `Swift: your weekly fee is unpaid. Your account will be suspended at ${when} unless you pay. Open the app to pay now.`)
         .catch(() => {});
       await notifyAdmins(this.prisma, this.notifications, {
+        // Scoped to the subscriber [NOC-A F45].
+        tenantId: await tenantOfUser(this.prisma, sub.rider?.userId ?? sub.driver?.userId ?? sub.vendor?.owner.userId ?? null),
         title: 'Dunning — final warning issued',
         body: `Subscription ${sub.id} suspends at ${when} (attempt ${attempts}/${MAX_FAILED_ATTEMPTS}). Contact the payer directly before access is cut.`,
         data: { kind: 'billing_dunning_ops_task', subscriptionId: sub.id, suspendsAt: nextRetryAt.toISOString() },
