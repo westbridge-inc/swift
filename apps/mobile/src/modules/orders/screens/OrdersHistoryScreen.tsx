@@ -39,10 +39,13 @@ const STATUS_TONE: Record<string, { label: string; tone: PillTone }> = {
   FAILED: { label: 'Failed', tone: 'error' },
 };
 
-const ACTIVE = new Set([
-  'PENDING', 'ACCEPTED', 'PREPARING', 'READY', 'RIDER_ASSIGNED', 'PICKED_UP',
-  'DRIVER_ASSIGNED', 'DRIVER_EN_ROUTE', 'DRIVER_ARRIVED', 'RIDE_IN_PROGRESS',
-]);
+// Partition by the CLOSED set: a status is history only when the server says
+// the order is over. Enumerating live states here instead once dropped five
+// real ones (READY_FOR_PICKUP, both pickup-leg rider states, EN_ROUTE_DELIVERY,
+// ARRIVED) into "completed" and hid Track order on live deliveries — a new
+// enum member must default to the live (recoverable) side, never to history.
+const TERMINAL = new Set(['DELIVERED', 'COMPLETED', 'CANCELLED', 'REFUNDED', 'FAILED']);
+const isLive = (status: string) => !TERMINAL.has(status);
 
 /** Truthful date eyebrow for a completed row. */
 function dateEyebrow(iso: string | undefined): string {
@@ -95,8 +98,8 @@ export function OrdersHistoryScreen() {
   }
 
   const rows: any[] = orders.data?.pages.flatMap((p: any) => p.items) ?? [];
-  const live = rows.filter((o) => ACTIVE.has(o.status));
-  const done = rows.filter((o) => !ACTIVE.has(o.status));
+  const live = rows.filter((o) => isLive(o.status));
+  const done = rows.filter((o) => !isLive(o.status));
   const ledger: LedgerItem[] = [];
   let lastEyebrow = '';
   let rowIndex = 0;
@@ -112,7 +115,7 @@ export function OrdersHistoryScreen() {
 
   const renderOrder = (o: any, index: number, sunken: boolean) => {
     const st = STATUS_TONE[o.status] ?? { label: o.status, tone: 'neutral' as PillTone };
-    const active = ACTIVE.has(o.status);
+    const active = isLive(o.status);
     const isRide = o.orderType === 'TAXI';
     const inner = (
       <Card style={{ padding: space.md, ...(sunken ? {} : {}) }}>

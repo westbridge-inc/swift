@@ -434,13 +434,23 @@ describe('durable mover revocation outbox', () => {
     const sendPush = vi.spyOn(ExpoPushProvider.prototype, 'sendPush')
       .mockImplementation(() => new Promise(() => undefined));
 
-    const startedAt = Date.now();
-    await expect(new AuthService(app).logout(mover.session.id, mover.user.id))
-      .resolves.toBeUndefined();
     // Bounded-return semantics: with a NEVER-resolving push, logout must come
-    // back in bounded time (vs hanging). 5s ceiling absorbs saturated-runner
-    // event-loop stalls that broke the old 1s assert under parallel load.
-    expect(Date.now() - startedAt).toBeLessThan(5_000);
+    // back rather than hang. Raced against a sentinel timer sized from the
+    // configured budgets (50ms immediate + 150ms effect) rather than asserted
+    // on wall-clock ms: a saturated runner delays the sentinel and the logout
+    // equally, so this stays honest under parallel load where a bare
+    // `Date.now()` ceiling had to be inflated past the real bound to pass.
+    const HANG_SENTINEL_MS = 2_000; // 10x the 200ms of configured budget
+    const sentinel = new Promise<'hung'>((resolve) => {
+      const t = setTimeout(() => resolve('hung'), HANG_SENTINEL_MS);
+      t.unref?.();
+    });
+    await expect(
+      Promise.race([
+        new AuthService(app).logout(mover.session.id, mover.user.id).then(() => 'returned' as const),
+        sentinel,
+      ]),
+    ).resolves.toBe('returned');
     expect(await app.prisma.session.findUnique({ where: { id: mover.session.id } })).toBeNull();
 
     // Wait on the CONDITION, not the clock: the 150ms effect-timeout must
