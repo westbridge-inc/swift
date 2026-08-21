@@ -80,6 +80,18 @@ export function assertSafeBootConfig(env: Record<string, string | undefined> = p
     throw new Error('FATAL: NOTIFICATION_PROVIDER is dev (console) in production — OTP SMS would never be delivered, so no one can sign up or log in. Set NOTIFICATION_PROVIDER=twilio with the TWILIO_* credentials. Refusing to start.');
   }
 
+  // [NOC-A F1/F2] The SAME trap, one door over, and it was unguarded: push
+  // selection is orthogonal to SMS and also defaults to 'dev', whose provider
+  // appends to an in-memory array and reports success. A production deploy
+  // with SMS configured and PUSH_PROVIDER unset delivers ZERO pushes — no
+  // order alerts, no dispatch offers, no safety pings — while every metric
+  // and every log line reads healthy. The shipped deploy template even set
+  // it to dev. Fail closed here too.
+  const pusher = env['PUSH_PROVIDER'] ?? 'dev';
+  if (pusher === 'dev') {
+    throw new Error('FATAL: PUSH_PROVIDER is dev (in-memory) in production — every push would be silently swallowed while reporting success: no new-order alerts, no dispatch offers, no safety pings. Set PUSH_PROVIDER=expo. Refusing to start.');
+  }
+
   // Verification documents are envelope-encrypted at rest ONLY when MASTER_KEK
   // is set; unset silently stores KYC PII in the clear (plaintext on disk with
   // the default local storage provider). Fail closed.
