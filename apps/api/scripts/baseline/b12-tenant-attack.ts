@@ -148,24 +148,15 @@ async function main() {
   assertRefused('GET /vendor/orders (list must not contain B)', await http('GET', '/vendor/orders?limit=50', undefined, aOwnerToken), secrets, leaks);
 
   // ── 3. public/browse class: the UNAUTHENTICATED catalog ─────────────────
-  // The public storefront surface is tenant-BLIND by construction (guests
-  // carry no tenant; the queries filter on ACTIVE+verified only). Today's rig
-  // has ONE tenant, so nothing leaks in production — but the moment a second
-  // tenant exists, its stores appear in every tenant's public directory and
-  // SEO pages. That is an ARCHITECTURE DECISION (global SEO directory vs
-  // per-tenant catalog), not a bug to silently patch, so it is reported as a
-  // registered gap (F-226) rather than folded into the breach list.
-  log('ATTACK CLASS 3 — public browse (tenant-blind by construction)');
-  const publicGaps: string[] = [];
-  const dir = await http('GET', '/public/storefronts?limit=50');
-  if (dir.status === 200 && secrets.some((s) => s && dir.raw.includes(s))) {
-    publicGaps.push('public directory lists another tenant\'s storefront');
-  }
-  const direct = await http('GET', `/public/storefronts/${bVendorSlug}`);
-  if (direct.status === 200 && secrets.some((s) => s && direct.raw.includes(s))) {
-    publicGaps.push('public storefront detail resolves another tenant\'s slug');
-  }
-  log(publicGaps.length === 0 ? '  ok public surface is tenant-scoped' : '  GAP F-226 — public catalog is tenant-blind', { gaps: publicGaps });
+  // A guest carries no tenant, so these were the only tenant-owned queries
+  // running unscoped. That is now closed [F-226 / F-026-10]: public requests
+  // resolve a tenant and scope to it, failing CLOSED when a multi-tenant
+  // deployment has no rule. A leak here is a BREACH like any other — the
+  // earlier verdict that treated it as a registered design choice was too
+  // generous, and the adversarial review was right to say so.
+  log('ATTACK CLASS 3 — public browse');
+  assertRefused('GET /public/storefronts (directory)', await http('GET', '/public/storefronts?limit=50'), secrets, leaks);
+  assertRefused('GET /public/storefronts/:bSlug (direct link)', await http('GET', `/public/storefronts/${bVendorSlug}`), secrets, leaks);
 
   // ── 4. unauthenticated + junk-token class ───────────────────────────────
   log('ATTACK CLASS 4 — tokenless / junk token');
@@ -195,14 +186,9 @@ async function main() {
   if (bStillThere.status !== 'PENDING') throw new Error(`FAIL: an attack MUTATED tenant B's order (status ${bStillThere.status})`);
   log('EVIDENCE tenant B intact and unmutated', bStillThere);
 
-  // A leak on an AUTHENTICATED/tokenless/concurrent class is a hard breach of
-  // the wall — the scenario fails outright.
+  // A leak on ANY class is a hard breach of the wall — the scenario fails.
   if (leaks.length > 0) throw new Error(`FAIL TENANT WALL:\n  - ${leaks.join('\n  - ')}`);
-  log('EVIDENCE authenticated + tokenless + concurrent classes ALL refused — zero leaks');
-  if (publicGaps.length > 0) {
-    log('B12 PARTIAL — authenticated wall holds; public catalog gap registered as F-226', { publicGaps });
-    throw new Error(`B12 PARTIAL (F-226): ${publicGaps.join(' · ')}`);
-  }
+  log('EVIDENCE authenticated + tokenless + concurrent + public classes ALL refused — zero leaks');
   log('B12 COMPLETE — EVERY CROSS-TENANT ROUTE CLASS REFUSED, INCLUDING UNDER LOAD');
 }
 
