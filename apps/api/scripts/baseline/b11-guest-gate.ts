@@ -42,10 +42,22 @@ async function main() {
     if (r.status !== 200) throw new Error(`FAIL guest browse ${name}: ${r.status}`);
     log(`EVIDENCE guest ${name}`, { status: r.status });
   }
-  if (first?.slug) {
-    const detail = await http('GET', `/public/storefronts/${first.slug}`);
-    if (detail.status !== 200) throw new Error(`FAIL guest storefront detail: ${detail.status}`);
-    log('EVIDENCE guest storefront detail', { slug: first.slug, status: detail.status });
+  // [F-024-02] Detail is MANDATORY: an empty/malformed storefront list used to
+  // silently skip this leg and still print COMPLETE.
+  if (!first?.slug) throw new Error('FAIL: storefront list returned no slugged storefront — the detail leg cannot be skipped');
+  const detail = await http('GET', `/public/storefronts/${first.slug}`);
+  if (detail.status !== 200) throw new Error(`FAIL guest storefront detail: ${detail.status}`);
+  log('EVIDENCE guest storefront detail', { slug: first.slug, status: detail.status });
+
+  // [F-024-02] The claimed SEARCH leg, actually exercised. The B11 law says
+  // tokenless search browses open; the register tracks reality if it 401s.
+  const failures: string[] = [];
+  const search = await http('GET', '/search?q=pepperpot');
+  if (search.status === 200) {
+    log('EVIDENCE guest search open', { status: search.status });
+  } else {
+    failures.push(`guest search: expected 200 tokenless, got ${search.status} (F-225 — search sits behind auth; the browse wall is too early for search)`);
+    log('LEG FAILED — guest search walled', { status: search.status });
   }
 
   // ── 2. the wall sits at ORDERING: mutations 401 tokenless ────────────────
@@ -66,7 +78,40 @@ async function main() {
   if (garbage.status !== 200) throw new Error(`FAIL: browse rejected a bad token (${garbage.status}) — a wall where none belongs`);
   log('EVIDENCE browse ignores junk tokens (no wall)', { status: garbage.status });
 
-  log('B11 COMPLETE — GUEST BROWSE OPEN, ORDER GATE SERVER-SIDE');
+  // ── 4. [F-024-02] the tier gate is SERVER-side at order creation ─────────
+  // An authenticated-but-tierless probe account (synthetic, L1, no ride
+  // trust) requests a taxi: the SERVER must refuse with a machine code —
+  // proof the gate is not a client hint.
+  const PROBE_PHONE = '+5925566009';
+  // Register through the REAL signup flow (idempotent: an existing account
+  // just fails registration and logs in), then OTP login.
+  await http('POST', '/auth/register', {
+    phone: PROBE_PHONE, firstName: 'ELV1', lastName: 'TierProbe', role: 'CUSTOMER', countryCode: 'GY', acceptTerms: true,
+  });
+  let probeToken: string | undefined;
+  for (let attempt = 1; attempt <= 6 && !probeToken; attempt++) {
+    await http('POST', '/auth/send-otp', { phone: PROBE_PHONE });
+    const v = await http('POST', '/auth/verify-otp', { phone: PROBE_PHONE, code: '000000' });
+    probeToken = v.json?.data?.tokens?.accessToken ?? v.json?.data?.token;
+    if (!probeToken && attempt < 6) await new Promise((r) => setTimeout(r, 8000));
+  }
+  if (!probeToken) throw new Error('FAIL: could not authenticate the tierless probe account');
+  const tierProbe = await http('POST', '/rides/request', {
+    pickup: { lat: 6.8, lng: -58.15 }, dropoff: { lat: 6.82, lng: -58.17 },
+    pickupAddress: 'ELV1 tier probe pickup', dropoffAddress: 'ELV1 tier probe dropoff',
+    passengerCount: 1, rideClass: 'ECONOMY',
+  }, probeToken);
+  const tierCode = tierProbe.json?.error?.code ?? tierProbe.json?.code;
+  if (tierProbe.status !== 403 || !['SELFIE_REQUIRED', 'ID_VERIFICATION_REQUIRED'].includes(tierCode)) {
+    throw new Error(`FAIL tier gate: expected server 403 SELFIE_REQUIRED/ID_VERIFICATION_REQUIRED, got ${tierProbe.status} ${tierCode}`);
+  }
+  log('EVIDENCE tier gate is server-side at order creation', { status: tierProbe.status, code: tierCode });
+
+  if (failures.length > 0) {
+    log('B11 PARTIAL — registered leg failures', { failures });
+    throw new Error(`B11 PARTIAL: ${failures.join(' · ')}`);
+  }
+  log('B11 COMPLETE — GUEST BROWSE OPEN, ORDER GATE SERVER-SIDE, TIER GATE SERVER-SIDE');
 }
 
 main().catch((e) => { console.error('B11 FAILED:', e.message); process.exitCode = 1; });

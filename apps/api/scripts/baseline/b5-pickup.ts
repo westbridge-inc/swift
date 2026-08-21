@@ -139,7 +139,18 @@ async function main() {
   if (bad.status < 400) throw new Error('FAIL: wrong code accepted');
   const afterBad = await prisma.order.findUniqueOrThrow({ where: { id: orderId }, select: { pickupCodeAttempts: true } });
   if (afterBad.pickupCodeAttempts !== 1) throw new Error(`FAIL: attempts ${afterBad.pickupCodeAttempts} after wrong code`);
-  const good = await http('PUT', `/vendor/orders/${orderId}/complete-pickup`, { code: o0.pickupCode }, ownerToken);
+  // [F-024-16] The customer must be able to SEE their pickup code — read it
+  // from the authenticated customer contract and hand THAT value over. Reading
+  // the secret straight from the DB would pass even if the customer-facing
+  // surface never exposed it, stranding real pickups.
+  const custView = await http('GET', `/customer/orders/${orderId}`, undefined, customerToken);
+  if (custView.status !== 200) throw new Error(`FAIL: customer order read ${custView.status} — the customer cannot see their own pickup code`);
+  const custBody = custView.json?.data ?? custView.json;
+  const customerCode: string | undefined = custBody?.pickupCode ?? custBody?.order?.pickupCode;
+  if (!customerCode) throw new Error('FAIL HND: the customer contract does not expose the pickup code — pickup would strand');
+  if (customerCode !== o0.pickupCode) throw new Error(`FAIL: customer-visible code ${customerCode} != minted code`);
+  log('EVIDENCE customer can read their own pickup code', { status: custView.status, matchesMinted: true });
+  const good = await http('PUT', `/vendor/orders/${orderId}/complete-pickup`, { code: customerCode }, ownerToken);
   if (good.status >= 300) throw new Error(`FAIL: right code refused ${good.status}: ${JSON.stringify(good.json).slice(0, 200)}`);
   const oF = await prisma.order.findUniqueOrThrow({ where: { id: orderId }, select: { status: true } });
   if (oF.status !== 'COMPLETED') throw new Error(`FAIL: final status ${oF.status}`);

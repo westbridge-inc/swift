@@ -76,6 +76,13 @@ async function ensureMart() {
   for (const [name, price, stock] of wantItems) {
     let it = await prisma.item.findFirst({ where: { vendorId: vendor.id, name } });
     if (!it) it = await prisma.item.create({ data: { vendorId: vendor.id, categoryId: cat.id, name, basePrice: price, isAvailable: true, stockQuantity: stock } });
+    // [F-024-17] RERUN SAFETY: checkout decrements BOTH lines but only the
+    // refunded one is restocked, so the surviving line was consumed on every
+    // clean run — the fixture depleted itself after ~10 runs and B4 would fail
+    // on its own roster. Top the synthetic stock back up each run.
+    else if ((it.stockQuantity ?? 0) < stock) {
+      it = await prisma.item.update({ where: { id: it.id }, data: { stockQuantity: stock, isAvailable: true } });
+    }
     items.push(it);
   }
   return { vendor, items };
