@@ -18,14 +18,18 @@
  *      closure (status stays ACTIVE).
  *   6. SOS IS EXEMPT FROM RATE LIMITS (LHC-1 K2) — rapid repeat triggers are
  *      all accepted; a limiter must never stand between a person and help.
- *   7. REPLAY IS ONE ALERT — the same clientIdempotencyKey returns the
- *      original, never a second alert.
+ *   7. REPLAY IS ONE ALERT, PER PERSON — the same clientIdempotencyKey
+ *      returns the original; the SAME key from a second person raises THEIR
+ *      OWN alert (never a handback of the first person's); and concurrent
+ *      retries from one device settle on one alert with no error.
  *   8. SOMEONE ELSE'S ALERT IS NOT YOURS — read/confirm/cancel by another
- *      authenticated user is refused.
+ *      authenticated user is refused with an explicit 403/404, and the alert
+ *      is unmoved afterwards.
  *   9. TRIP SHARE — a minted share is publicly viewable WITHOUT auth, the
  *      payload is under the 300KB budget, and revoking it 404s.
  *
- * Every alert this script raises is CLOSED (resolved/cancelled) before exit.
+ * Every alert AND ride this script raises is closed before exit, from the
+ * finally path, and a teardown that cannot verify itself fails the run.
  *
  * Run: BASELINE_API=http://localhost:3020/api/v1 \
  *      DATABASE_URL=postgresql://swift:swift@localhost:5434/swift \
@@ -88,15 +92,26 @@ async function reachOf(alertId: string): Promise<{ notices: number; receipts: un
 }
 
 const raised: string[] = [];
+/** [F-026-19] Rides raised by this run, torn down from the finally path. */
+const rides: string[] = [];
+/** The owner token, published for the finally-path teardown so it can use the
+ *  product cancel rather than only a raw force-close. */
+let teardownToken: string | undefined;
 
 async function main() {
   const h = await fetch(HEALTH).then((r) => r.status).catch(() => 0);
   if (h !== 200) throw new Error(`rig not healthy (${h})`);
 
   const customer = await prisma.user.findFirstOrThrow({ where: { phone: CUSTOMER_PHONE } });
+  const other = await prisma.user.findFirstOrThrow({ where: { phone: OTHER_PHONE } });
   const token = await loginByOtp(CUSTOMER_PHONE);
-  const otherToken = await loginByOtp(OTHER_PHONE).catch(() => undefined);
-  log('actors ready', { customer: customer.id, otherActor: !!otherToken });
+  teardownToken = token;
+  // [F-026-18] The second actor is a MANDATORY fixture, not a nice-to-have.
+  // Swallowing its login turned the entire authorization leg into a logged
+  // note that still reached COMPLETE — an unavailable probe account is not
+  // evidence that strangers cannot read your emergency.
+  const otherToken = await loginByOtp(OTHER_PHONE);
+  log('actors ready', { customer: customer.id, otherActor: other.id });
 
   // ── 1. grace is honest: pending, and NOBODY paged yet ────────────────────
   const t1 = await http('POST', '/safety/sos', { lat: 6.8, lng: -58.15, source: 'BUTTON' }, token);
@@ -170,19 +185,35 @@ async function main() {
   // response to be a real, well-formed alert.
   const CEILING = Number(process.env['RATE_LIMIT_MAX'] ?? 200);
   const burstSize = CEILING + 20;
-  // [F-026-16] Record each id AS IT ARRIVES. Collecting them after the whole
-  // batch settled meant one rejected sibling could hide every successful
-  // alert from teardown — leaving live SOS rows behind on a "green" run.
-  const burst = await Promise.all(Array.from({ length: burstSize }, () =>
-    http('POST', '/safety/sos', { lat: 6.8, lng: -58.15, source: 'BUTTON' }, token)
-      .then((r) => { if (r.json?.data?.id) raised.push(r.json.data.id); return r; })));
+  // The rate limiter counts REQUESTS PER MINUTE, so exceeding the ceiling
+  // inside the window is what proves the exemption — firing all 220 at the
+  // same instant additionally saturates the connection pool and turns this
+  // leg into a database stress test whose red says nothing about limiting.
+  // Waves keep the claim honest and the measurement on its own subject.
+  const WAVE = 20;
+  const burst: Array<{ status: number; json: any; bytes: number }> = [];
+  for (let i = 0; i < burstSize; i += WAVE) {
+    // [F-026-16] Record each id AS IT ARRIVES. Collecting them after the whole
+    // batch settled meant one rejected sibling could hide every successful
+    // alert from teardown — leaving live SOS rows behind on a "green" run.
+    burst.push(...await Promise.all(Array.from({ length: Math.min(WAVE, burstSize - i) }, () =>
+      http('POST', '/safety/sos', { lat: 6.8, lng: -58.15, source: 'BUTTON' }, token)
+        .then((r) => { if (r.json?.data?.id) raised.push(r.json.data.id); return r; }))));
+  }
   const limited = burst.filter((r) => r.status === 429);
   if (limited.length > 0) throw new Error(`FAIL K2: ${limited.length}/${burstSize} SOS triggers were RATE-LIMITED past the ${CEILING}/min ceiling — a limiter must never stand between a person and help`);
+  // [F-250] A burst that comes back 401 is the OTHER way to lock someone out
+  // of help: the session store fell over and the API called it a credential
+  // problem. Name it separately so the failure text points at the real system.
+  const lied = burst.filter((r) => r.status === 401);
+  if (lied.length > 0) throw new Error(`FAIL F-250: ${lied.length}/${burstSize} triggers answered 401 "invalid or expired token" with a VALID token — an outage reported as a credential verdict`);
+  const unavailable = burst.filter((r) => r.status === 503);
+  if (unavailable.length > 0) throw new Error(`FAIL: ${unavailable.length}/${burstSize} triggers were 503 — the rig could not serve the burst, so this leg proves nothing about rate limiting (honest error, wrong subject)`);
   const malformed = burst.filter((r) => r.status !== 200 || !r.json?.data?.id || !r.json?.data?.status);
   if (malformed.length > 0) throw new Error(`FAIL: ${malformed.length}/${burstSize} triggers did not return a well-formed alert (first: ${malformed[0]!.status} ${JSON.stringify(malformed[0]!.json).slice(0, 160)})`);
-  log('EVIDENCE SOS exempt from rate limits ABOVE the global ceiling', { triggers: burstSize, ceiling: CEILING, rateLimited: 0, allWellFormed: true });
+  log('EVIDENCE SOS exempt from rate limits ABOVE the global ceiling', { triggers: burstSize, ceiling: CEILING, waveSize: WAVE, rateLimited: 0, unauthorized: 0, allWellFormed: true });
 
-  // ── 7. replay is ONE alert ──────────────────────────────────────────────
+  // ── 7. replay is ONE alert — and ONLY for the person who sent it ────────
   const key = `b14-${randomInt(100000, 999999)}`;
   const r1 = await http('POST', '/safety/sos', { lat: 6.8, lng: -58.15, clientIdempotencyKey: key }, token);
   const r2 = await http('POST', '/safety/sos', { lat: 6.8, lng: -58.15, clientIdempotencyKey: key }, token);
@@ -190,16 +221,55 @@ async function main() {
   if (r1.json.data.id !== r2.json.data.id) throw new Error(`FAIL: replay minted a SECOND alert (${r1.json.data.id} vs ${r2.json.data.id})`);
   log('EVIDENCE replayed trigger returns the original alert', { id: r1.json.data.id });
 
+  // [F-026-17] 7b — the SAME key from a DIFFERENT person is a DIFFERENT
+  // emergency. The old lookup was by key alone, so the second caller was
+  // handed the first caller's alert id and status: their phone showed "help
+  // is coming" while nobody had been paged for them at all.
+  const stolen = await http('POST', '/safety/sos', { lat: 6.8, lng: -58.15, clientIdempotencyKey: key }, otherToken);
+  if (stolen.status >= 300) throw new Error(`FAIL: the other actor's SOS was REFUSED (${stolen.status}) because someone else used their key: ${JSON.stringify(stolen.json).slice(0, 200)}`);
+  raised.push(stolen.json.data.id);
+  if (stolen.json.data.id === r1.json.data.id) throw new Error('FAIL: a second person reusing the key was handed the FIRST person\'s alert — their own emergency was never raised');
+  const stolenRow = await prisma.sosAlert.findUniqueOrThrow({ where: { id: stolen.json.data.id }, select: { actorUserId: true } });
+  if (stolenRow.actorUserId !== other.id) throw new Error(`FAIL: the second actor's alert is filed against ${stolenRow.actorUserId}, not them`);
+  log('EVIDENCE a reused key raises the SECOND person\'s own alert', { mine: r1.json.data.id, theirs: stolen.json.data.id });
+
+  // [F-026-17] 7c — CONCURRENT retries from one device. read-then-create is
+  // not atomic: both can miss the read and one loses on the unique index. The
+  // loser must receive the winner, never a 500 to someone mid-emergency.
+  const raceKey = `b14-race-${randomInt(100000, 999999)}`;
+  const raceBody = { lat: 6.8, lng: -58.15, clientIdempotencyKey: raceKey };
+  const race = await Promise.all([
+    http('POST', '/safety/sos', raceBody, token),
+    http('POST', '/safety/sos', raceBody, token),
+    http('POST', '/safety/sos', raceBody, token),
+  ]);
+  race.forEach((r) => { if (r.json?.data?.id) raised.push(r.json.data.id); });
+  const raceErrors = race.filter((r) => r.status !== 200);
+  if (raceErrors.length > 0) throw new Error(`FAIL: ${raceErrors.length}/3 concurrent retries errored (first ${raceErrors[0]!.status}: ${JSON.stringify(raceErrors[0]!.json).slice(0, 200)})`);
+  const raceIds = new Set(race.map((r) => r.json.data.id as string));
+  if (raceIds.size !== 1) throw new Error(`FAIL: concurrent retries minted ${raceIds.size} alerts, not 1 (${[...raceIds].join(', ')})`);
+  const raceRows = await prisma.sosAlert.count({ where: { clientIdempotencyKey: `client:${raceKey}` } });
+  if (raceRows !== 1) throw new Error(`FAIL: ${raceRows} rows carry the raced key — exactly-once did not hold in the DATABASE`);
+  log('EVIDENCE concurrent retries settle on ONE alert with no error', { id: [...raceIds][0], rows: raceRows });
+
   // ── 8. someone else's alert is not yours ────────────────────────────────
-  if (otherToken) {
-    const peek = await http('GET', `/safety/sos/${a2.id}`, undefined, otherToken);
-    if (peek.status < 400) throw new Error(`FAIL: another user READ this alert (${peek.status})`);
-    const hijack = await http('POST', `/safety/sos/${a2.id}/confirm`, {}, otherToken);
-    if (hijack.status < 400) throw new Error(`FAIL: another user CONFIRMED this alert (${hijack.status})`);
-    log('EVIDENCE cross-user alert access refused', { read: peek.status, confirm: hijack.status });
-  } else {
-    log('NOTE cross-user leg skipped — probe account unavailable');
-  }
+  // [F-026-18] Assert the EXACT refusal. `< 400` accepted a 500 or a
+  // connection-level failure as proof of authorization, which is the opposite
+  // of what it claims: an outage is not a permission check. And the promised
+  // cross-user CANCEL was never attempted at all.
+  const DENIED = [403, 404];
+  const denialOf = (label: string, r: { status: number; json: unknown }) => {
+    if (!DENIED.includes(r.status)) {
+      throw new Error(`FAIL: another user's ${label} on this alert returned ${r.status} — expected an explicit refusal (${DENIED.join('/')}), and a server error is NOT a denial: ${JSON.stringify(r.json).slice(0, 200)}`);
+    }
+    return r.status;
+  };
+  const peek = denialOf('READ', await http('GET', `/safety/sos/${a2.id}`, undefined, otherToken));
+  const hijack = denialOf('CONFIRM', await http('POST', `/safety/sos/${a2.id}/confirm`, {}, otherToken));
+  const kill = denialOf('CANCEL', await http('POST', `/safety/sos/${a2.id}/cancel`, {}, otherToken));
+  const untouched = await prisma.sosAlert.findUniqueOrThrow({ where: { id: a2.id }, select: { status: true } });
+  if (untouched.status !== 'ACTIVE') throw new Error(`FAIL: the refused cross-user calls still moved the alert to ${untouched.status}`);
+  log('EVIDENCE cross-user read/confirm/cancel all refused, alert untouched', { read: peek, confirm: hijack, cancel: kill, status: untouched.status });
 
   // ── 9. trip share: public, small, revocable ─────────────────────────────
   // A share is only mintable on a LIVE trip (terminal trips 409 TRIP_OVER —
@@ -211,38 +281,51 @@ async function main() {
     pickupAddress: 'ELV2 B14 share pickup', dropoffAddress: 'ELV2 B14 share dropoff',
     passengerCount: 1, rideClass: 'ECONOMY',
   }, token);
-  const order = rideReq.status === 201 ? { id: rideReq.json.data.ride.id as string } : null;
-  if (!order) log('NOTE could not raise a live trip for the share leg', { status: rideReq.status, body: JSON.stringify(rideReq.json).slice(0, 160) });
-  if (order) {
-    const mint = await http('POST', `/safety/trips/${order.id}/share`, {}, token);
-    if (mint.status >= 300) throw new Error(`share mint ${mint.status}: ${JSON.stringify(mint.json).slice(0, 200)}`);
-    const shareToken = mint.json?.data?.token ?? mint.json?.data?.shareToken;
-    if (!shareToken) throw new Error('FAIL: share mint returned no token');
-    const view = await http('GET', `/safety/public/trip/${shareToken}`);
-    if (view.status !== 200) throw new Error(`FAIL: public trip view ${view.status} — a shared trip must load WITHOUT auth`);
-    if (view.bytes > 300_000) throw new Error(`FAIL: trip-share payload ${view.bytes}B exceeds the 300KB budget`);
-    const revoke = await http('DELETE', `/safety/share/${shareToken}`, undefined, token);
-    if (revoke.status >= 300) throw new Error(`revoke ${revoke.status}`);
-    const after = await http('GET', `/safety/public/trip/${shareToken}`);
-    if (after.status !== 404) throw new Error(`FAIL: a REVOKED share still resolves (${after.status})`);
-    log('EVIDENCE trip share public, within budget, revocable', { payloadBytes: view.bytes, afterRevoke: after.status });
-    await http('POST', `/rides/${order.id}/cancel`, { reason: 'ELV2 B14 teardown' }, token);
-    await prisma.order.updateMany({ where: { id: order.id, status: { notIn: ['CANCELLED', 'COMPLETED', 'DELIVERED', 'REFUNDED'] } }, data: { status: 'CANCELLED' } });
-  }
+  // [F-026-18] The trip is a MANDATORY fixture. Turning an unraisable ride
+  // into a note meant the whole share claim — public view, payload budget,
+  // revocation — could be skipped on a run that still printed COMPLETE.
+  if (rideReq.status !== 201) throw new Error(`FAIL: could not raise the live trip the share leg REQUIRES (${rideReq.status}): ${JSON.stringify(rideReq.json).slice(0, 200)}`);
+  const rideId = rideReq.json.data.ride.id as string;
+  // [F-026-19] Registered BEFORE the first fallible call, so the finally-path
+  // teardown owns it no matter where the leg dies.
+  rides.push(rideId);
+  const mint = await http('POST', `/safety/trips/${rideId}/share`, {}, token);
+  if (mint.status >= 300) throw new Error(`share mint ${mint.status}: ${JSON.stringify(mint.json).slice(0, 200)}`);
+  const shareToken = mint.json?.data?.token ?? mint.json?.data?.shareToken;
+  if (!shareToken) throw new Error('FAIL: share mint returned no token');
+  const view = await http('GET', `/safety/public/trip/${shareToken}`);
+  if (view.status !== 200) throw new Error(`FAIL: public trip view ${view.status} — a shared trip must load WITHOUT auth`);
+  if (view.bytes > 300_000) throw new Error(`FAIL: trip-share payload ${view.bytes}B exceeds the 300KB budget`);
+  // A size ceiling alone is satisfied by an EMPTY body. The point of the share
+  // is that whoever is watching can see the trip, so require it to actually
+  // carry one: a rendered status and the person being tracked.
+  const shared = view.json?.data;
+  if (!shared || typeof shared.status !== 'string' || shared.status.length === 0) throw new Error(`FAIL: the share page carries no trip status — a 200 under the size budget is not a viewable trip: ${JSON.stringify(view.json).slice(0, 200)}`);
+  if (!shared.passengerFirstName) throw new Error(`FAIL: the share page names nobody — the watcher cannot tell whose trip this is: ${JSON.stringify(view.json).slice(0, 200)}`);
+  const revoke = await http('DELETE', `/safety/share/${shareToken}`, undefined, token);
+  if (revoke.status >= 300) throw new Error(`revoke ${revoke.status}`);
+  const after = await http('GET', `/safety/public/trip/${shareToken}`);
+  if (after.status !== 404) throw new Error(`FAIL: a REVOKED share still resolves (${after.status})`);
+  log('EVIDENCE trip share public, carries the trip, within budget, revocable', { payloadBytes: view.bytes, status: shared.status, watching: shared.passengerFirstName, afterRevoke: after.status });
 
   // [F-026-16] Teardown BEFORE the completion line, and its failure fails the
   // run: a life-safety baseline must not print COMPLETE over live alerts.
-  await closeRaisedAlerts();
+  await closeRaised(token);
   log('B14 COMPLETE — SAFETY STATUS STATES ONLY WHAT ACTUALLY HAPPENED (teardown verified clean)');
 }
 
-/** Never leave a live SOS on the rig — and never CLAIM to have closed one.
+/** Never leave a live SOS or a live ride on the rig — and never CLAIM to have
+ *  closed one.
  *  [F-026-16] This is a force-close through raw Prisma: it deliberately
  *  bypasses the ops actor, resolution code, transition table and all-clear
  *  fan-out, because it is rig hygiene, not a real resolution. So it verifies
  *  the END STATE afterwards and throws if anything survived — a swallowed
- *  cleanup error must never ride out on a green exit. */
-async function closeRaisedAlerts() {
+ *  cleanup error must never ride out on a green exit.
+ *  [F-026-19] Rides are torn down HERE, from the finally path, rather than
+ *  inline at the end of the happy leg where any earlier throw skipped them. */
+async function closeRaised(token?: string) {
+  const problems: string[] = [];
+
   const LIVE = ['TRIGGER_PENDING', 'ACTIVE', 'ACKNOWLEDGED'] as const;
   const open = await prisma.sosAlert.findMany({
     where: { id: { in: raised }, status: { in: LIVE as never } },
@@ -256,7 +339,27 @@ async function closeRaisedAlerts() {
     log('teardown: force-closed raised alerts', { closed: open.length });
   }
   const survivors = await prisma.sosAlert.count({ where: { id: { in: raised }, status: { in: LIVE as never } } });
-  if (survivors > 0) throw new Error(`TEARDOWN FAILED: ${survivors} SOS alert(s) left LIVE on the rig`);
+  if (survivors > 0) problems.push(`${survivors} SOS alert(s) left LIVE on the rig`);
+
+  if (rides.length > 0) {
+    // Product cancel first (the honest path); raw force-close only for
+    // whatever it could not move.
+    if (token) {
+      for (const id of rides) await http('POST', `/rides/${id}/cancel`, { reason: 'ELV2 B14 teardown' }, token).catch(() => undefined);
+    }
+    // [F-026-19] FAILED is terminal too. Omitting it meant teardown rewrote a
+    // genuinely-failed order to CANCELLED — mutating a terminal record and
+    // destroying the very outcome a later run would need to read.
+    const TERMINAL = ['CANCELLED', 'COMPLETED', 'DELIVERED', 'REFUNDED', 'FAILED'] as const;
+    await prisma.order.updateMany({
+      where: { id: { in: rides }, status: { notIn: TERMINAL as never } },
+      data: { status: 'CANCELLED' },
+    });
+    const liveRides = await prisma.order.count({ where: { id: { in: rides }, status: { notIn: TERMINAL as never } } });
+    if (liveRides > 0) problems.push(`${liveRides} ride(s) left LIVE on the rig`);
+  }
+
+  if (problems.length > 0) throw new Error(`TEARDOWN FAILED: ${problems.join('; ')}`);
 }
 
 main()
@@ -264,7 +367,7 @@ main()
   .finally(async () => {
     // Safety net for the FAILURE path (the happy path already tore down and
     // verified above). A failure here is itself a failure of the run.
-    await closeRaisedAlerts().catch((e) => {
+    await closeRaised(teardownToken).catch((e) => {
       console.error('B14 TEARDOWN FAILED:', e.message);
       process.exitCode = 1;
     });

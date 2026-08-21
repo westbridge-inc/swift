@@ -175,7 +175,11 @@ describe('the full ladder climb — deviation → L2 → L3 → L4 auto-SOS (§1
     s = await session(ride.id);
     expect(s.status).toBe('CLOSED');
     expect(s.closeReason).toBe('ESCALATED');
-    const alert = await app.prisma.sosAlert.findUniqueOrThrow({ where: { clientIdempotencyKey: `guardian:${s.id}` } });
+    const alert = await app.prisma.sosAlert.findUniqueOrThrow({
+      // [F-026-17] the key is unique PER ACTOR now — the guardian escalation
+      // belongs to the passenger whose check-in lapsed.
+      where: { actorUserId_clientIdempotencyKey: { actorUserId: passenger.userId, clientIdempotencyKey: `guardian:${s.id}` } },
+    });
     expect(s.escalatedToSosId).toBe(alert.id);
     expect(alert.status).toBe('ACTIVE'); // immediate — no grace on a server-decided emergency
     expect(alert.triggerSource).toBe('CHECKIN_TIMEOUT');

@@ -1,4 +1,5 @@
 import type { PrismaClient, SosStatus, SosTriggerSource, SosResolutionCode, OrderType } from '@prisma/client';
+import { Prisma } from '@prisma/client';
 import type { Server } from 'socket.io';
 import { AppError, NotFoundError } from '../../utils/errors';
 import { NotificationService, notifyAdmins } from '../notification/notification.service';
@@ -23,6 +24,9 @@ export const SOS_TRANSITIONS: Record<SosStatus, SosStatus[]> = {
 };
 
 const GRACE_SECONDS = Math.min(5, Math.max(0, Number(process.env['SOS_CANCEL_GRACE_SECONDS'] ?? 3)));
+
+const isUniqueViolation = (e: unknown) =>
+  e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2002';
 
 export interface SosCreateInput {
   actorUserId: string;
@@ -50,12 +54,24 @@ export class SosService {
     this.notifications = new NotificationService(prisma, io);
   }
 
-  /** Raise an alert. Idempotent on clientIdempotencyKey so a retried offline
-   *  trigger yields exactly one alert. Ops-raised alerts skip the grace window
-   *  (a human already decided); user triggers open a short slide-to-cancel grace. */
+  /** Raise an alert. Idempotent on (actor, clientIdempotencyKey) so a retried
+   *  offline trigger yields exactly one alert. Ops-raised alerts skip the grace
+   *  window (a human already decided); user triggers open a short
+   *  slide-to-cancel grace.
+   *
+   *  [F-026-17] The replay lookup is scoped to the ACTOR. When the key alone
+   *  decided, a second caller reusing it was handed the first caller's alert
+   *  and never raised their own — and claiming a key FIRST suppressed its
+   *  rightful owner's later escalation. A key can only ever collapse a
+   *  person's trigger into their own earlier one.
+   */
   async create(input: SosCreateInput) {
-    if (input.clientIdempotencyKey) {
-      const existing = await this.prisma.sosAlert.findUnique({ where: { clientIdempotencyKey: input.clientIdempotencyKey } });
+    const key = input.clientIdempotencyKey ?? null;
+    const replayWhere = key
+      ? { actorUserId_clientIdempotencyKey: { actorUserId: input.actorUserId, clientIdempotencyKey: key } }
+      : null;
+    if (replayWhere) {
+      const existing = await this.prisma.sosAlert.findUnique({ where: replayWhere });
       if (existing) return existing; // replay → the original alert, never a second
     }
     const source = input.triggerSource ?? 'BUTTON';
@@ -64,24 +80,36 @@ export class SosService {
     const skipGrace = opsRaised || input.immediate === true || GRACE_SECONDS === 0;
     const grace = skipGrace ? null : new Date(now.getTime() + GRACE_SECONDS * 1000);
 
-    const alert = await this.prisma.sosAlert.create({
-      data: {
-        actorUserId: input.actorUserId,
-        actorRole: input.actorRole,
-        orderId: input.orderId ?? null,
-        orderType: input.orderType ?? null,
-        counterpartyUserId: input.counterpartyUserId ?? null,
-        triggerSource: source,
-        status: grace ? 'TRIGGER_PENDING' : 'ACTIVE',
-        graceEndsAt: grace,
-        triggerLat: input.lat ?? null,
-        triggerLng: input.lng ?? null,
-        triggerAccuracyM: input.accuracyM ?? null,
-        triggerAddressText: input.addressText ?? null,
-        clientCreatedAt: input.clientCreatedAt ?? null,
-        clientIdempotencyKey: input.clientIdempotencyKey ?? null,
-      },
-    });
+    let alert;
+    try {
+      alert = await this.prisma.sosAlert.create({
+        data: {
+          actorUserId: input.actorUserId,
+          actorRole: input.actorRole,
+          orderId: input.orderId ?? null,
+          orderType: input.orderType ?? null,
+          counterpartyUserId: input.counterpartyUserId ?? null,
+          triggerSource: source,
+          status: grace ? 'TRIGGER_PENDING' : 'ACTIVE',
+          graceEndsAt: grace,
+          triggerLat: input.lat ?? null,
+          triggerLng: input.lng ?? null,
+          triggerAccuracyM: input.accuracyM ?? null,
+          triggerAddressText: input.addressText ?? null,
+          clientCreatedAt: input.clientCreatedAt ?? null,
+          clientIdempotencyKey: key,
+        },
+      });
+    } catch (err) {
+      // [F-026-17] read-then-create is not atomic: two genuine retries from the
+      // same device can both miss the read. The loser must return the WINNER,
+      // not a 500 to someone who is mid-emergency — and must not fan out again.
+      if (replayWhere && isUniqueViolation(err)) {
+        const winner = await this.prisma.sosAlert.findUnique({ where: replayWhere });
+        if (winner) return winner;
+      }
+      throw err;
+    }
     if (!grace) await this.fanOut(alert.id); // already ACTIVE (ops-raised / immediate / no-grace tenant)
     return alert;
   }

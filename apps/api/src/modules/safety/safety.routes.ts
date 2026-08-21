@@ -100,7 +100,12 @@ export async function safetyRoutes(app: FastifyInstance) {
       accuracyM: body.accuracyM ?? null,
       addressText: body.addressText ?? null,
       clientCreatedAt: body.clientCreatedAt ? new Date(body.clientCreatedAt) : null,
-      clientIdempotencyKey: body.clientIdempotencyKey ?? null,
+      // [F-026-17] Namespace the wire-supplied key. Server-derived keys live in
+      // their own prefixes ("guardian:<sessionId>"), and a client that could
+      // write into one could pre-claim — and so suppress — an escalation the
+      // server raises on that person's behalf. Same doctrine as §4.1: a
+      // coerced tap must never be able to switch help off.
+      clientIdempotencyKey: body.clientIdempotencyKey ? `client:${body.clientIdempotencyKey}` : null,
     });
     return { success: true, data: { id: alert.id, status: alert.status, graceEndsAt: alert.graceEndsAt } };
   });
