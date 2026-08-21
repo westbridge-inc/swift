@@ -2240,7 +2240,12 @@ export async function customerRoutes(app: FastifyInstance) {
       type: 'ORDER_UPDATE',
       title: 'Switched to pickup',
       body: `Show ${order.vendor?.name ?? 'the store'} your pickup code when you arrive.`,
-      data: { orderId: order.id, kind: 'converted_to_pickup', pickupCode },
+      // [NOC-A F48] The pickup code is a handover SECRET — the same class the
+      // verifier is never allowed to read (HND-003). A push payload transits
+      // Google/Apple and is then persisted in notifications.data for 180 days,
+      // so it must carry the order id and generic copy only; the customer's
+      // app reads the code over the authenticated order API after tapping.
+      data: { orderId: order.id, kind: 'converted_to_pickup' },
     });
 
     const updated = await app.prisma.order.findUniqueOrThrow({

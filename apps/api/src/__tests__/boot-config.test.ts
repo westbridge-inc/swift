@@ -12,6 +12,7 @@ const good: Record<string, string | undefined> = {
   STORAGE_SIGNING_SECRET: 'a-real-secret',
   STORAGE_PROVIDER: 's3',
   NOTIFICATION_PROVIDER: 'twilio',
+  PUSH_PROVIDER: 'expo',
   JWT_SECRET: 'test-jwt-secret-at-least-32-characters',
   KYC_PROVIDER: 'didit',
   DIDIT_API_KEY: 'didit-live-key',
@@ -91,6 +92,16 @@ describe('assertSafeBootConfig — fail-closed production secrets', () => {
 
   it('SWIFT-012: accepts a real notification provider (twilio)', () => {
     expect(() => assertSafeBootConfig({ ...good, NOTIFICATION_PROVIDER: 'twilio' })).not.toThrow();
+  });
+
+  it('[NOC-A F1] refuses to boot production on the in-memory push provider', () => {
+    // The same trap as NOTIFICATION_PROVIDER, one door over: PUSH_PROVIDER
+    // also defaults to 'dev', whose provider appends to an array and reports
+    // success — so production would swallow every order alert, dispatch offer
+    // and safety ping while looking healthy.
+    expect(() => assertSafeBootConfig({ ...good, PUSH_PROVIDER: 'dev' })).toThrow(/PUSH_PROVIDER/);
+    expect(() => assertSafeBootConfig({ ...good, PUSH_PROVIDER: undefined })).toThrow(/PUSH_PROVIDER/);
+    expect(() => assertSafeBootConfig({ ...good, PUSH_PROVIDER: 'expo' })).not.toThrow();
   });
 
   // SWIFT-AUD-D6-06: the default 'local' storage provider writes uploads/KYC
