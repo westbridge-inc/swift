@@ -137,12 +137,20 @@ async function main() {
   log('EVIDENCE I-am-safe flags but never resolves', { status: safe.json.data.status, flaggedAt: safe.json.data.userSafeFlaggedAt });
 
   // ── 6. SOS is exempt from rate limiting (LHC-1 K2) ──────────────────────
-  const burst = await Promise.all(Array.from({ length: 5 }, () =>
+  // [F-026-13] Five requests proved nothing: the global ceiling is 200/min, so
+  // a five-shot burst never reaches it, and "not 429" would also be satisfied
+  // by five 401s or 500s. Fire ABOVE the configured ceiling and require every
+  // response to be a real, well-formed alert.
+  const CEILING = Number(process.env['RATE_LIMIT_MAX'] ?? 200);
+  const burstSize = CEILING + 20;
+  const burst = await Promise.all(Array.from({ length: burstSize }, () =>
     http('POST', '/safety/sos', { lat: 6.8, lng: -58.15, source: 'BUTTON' }, token)));
-  const limited = burst.filter((r) => r.status === 429);
   burst.forEach((r) => { if (r.json?.data?.id) raised.push(r.json.data.id); });
-  if (limited.length > 0) throw new Error(`FAIL K2: ${limited.length}/5 rapid SOS triggers were RATE-LIMITED — a limiter must never stand between a person and help`);
-  log('EVIDENCE SOS exempt from rate limits', { triggers: burst.length, rateLimited: limited.length });
+  const limited = burst.filter((r) => r.status === 429);
+  if (limited.length > 0) throw new Error(`FAIL K2: ${limited.length}/${burstSize} SOS triggers were RATE-LIMITED past the ${CEILING}/min ceiling — a limiter must never stand between a person and help`);
+  const malformed = burst.filter((r) => r.status !== 200 || !r.json?.data?.id || !r.json?.data?.status);
+  if (malformed.length > 0) throw new Error(`FAIL: ${malformed.length}/${burstSize} triggers did not return a well-formed alert (first: ${malformed[0]!.status} ${JSON.stringify(malformed[0]!.json).slice(0, 160)})`);
+  log('EVIDENCE SOS exempt from rate limits ABOVE the global ceiling', { triggers: burstSize, ceiling: CEILING, rateLimited: 0, allWellFormed: true });
 
   // ── 7. replay is ONE alert ──────────────────────────────────────────────
   const key = `b14-${randomInt(100000, 999999)}`;
