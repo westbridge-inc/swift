@@ -26,7 +26,7 @@ import { SupportService } from '../support/support.service';
 import { AccountService } from './account.service';
 import { transitionUserRoleAuthority } from '../mover-authority';
 import { safeMmgPayUrl, validateMmgPayUrl } from '../../utils/mmg-pay-url';
-import { resolveAvatarUrl } from '../../utils/avatar-url';
+import { resolveAvatarUrl, resolveAvatarUrls } from '../../utils/avatar-url';
 import {
   currentConsentDetailed, recordConsent, publishLegalDocumentOnce, type ConsentAction,
 } from '../legal/consent.service';
@@ -1854,6 +1854,10 @@ export async function customerRoutes(app: FastifyInstance) {
       app.prisma.order.count({ where }),
     ]);
 
+    // [F-026-01] Rider avatars on this list were raw private keys. Resolve
+    // every distinct one first (signing is local, and duplicates collapse),
+    // then map — one pass, no per-row await.
+    const riderAvatars = await resolveAvatarUrls(orders.map((o) => o.rider?.user?.avatar));
     const enrichedOrders = orders.map((o) => ({
       id: o.id,
       orderNumber: o.orderNumber,
@@ -1882,7 +1886,7 @@ export async function customerRoutes(app: FastifyInstance) {
       pickupAddress: o.pickupAddress,
       deliveryAddress: o.deliveryAddress,
       taxiFareTotal: o.taxiFareTotal != null ? Number(o.taxiFareTotal) : null,
-      rider: o.rider ? { firstName: o.rider.user?.firstName, avatar: o.rider.user?.avatar } : null,
+      rider: o.rider ? { firstName: o.rider.user?.firstName, avatar: o.rider.user?.avatar ? riderAvatars.get(o.rider.user.avatar) ?? null : null } : null,
       placedAt: o.placedAt,
       deliveredAt: o.deliveredAt,
       scheduledFor: o.scheduledFor,
@@ -2049,7 +2053,7 @@ export async function customerRoutes(app: FastifyInstance) {
           firstName: order.rider.user?.firstName,
           lastName: order.rider.user?.lastName,
           phone: order.rider.user?.phone,
-          avatar: order.rider.user?.avatar,
+          avatar: await resolveAvatarUrl(order.rider.user?.avatar), // [F-026-01]
           displayRating: riderSurface?.displayRating ?? null,
           // Trust visibility (master plan §5): the customer sees who and what
           // is coming — vehicle, plate, and its photo.

@@ -75,18 +75,29 @@ export function parseEntries(html: string): GazetteEntry[] {
   return out;
 }
 
-/** [F-024-07] Does an anchor title look like a gazette PUBLICATION rather than
- *  site chrome? A login page or redesign with five ordinary navigation links
- *  ("About our services", "Contact the department", …) used to pass the
- *  PARSE_THIN health floor as a healthy feed. Health is now measured against
- *  publication-shaped entries only: legal-instrument vocabulary, an
- *  instrument number, or a year. Classification still scans EVERY anchor —
- *  this gates health, not detection. */
+/** [F-024-07 → F-026-03] Does an anchor title look like a gazette PUBLICATION
+ *  rather than site chrome?
+ *
+ *  The first attempt accepted any ONE of: a legal word, an instrument number,
+ *  or a year. That was still trivially gameable, because on a LEGAL site the
+ *  nav bar is made of exactly those words — "Acts", "Bills", "Notices",
+ *  "Regulations", "Official Gazette" — so five category links cleared the
+ *  floor with zero publications behind them.
+ *
+ *  A real instrument is SPECIFIC: it names its kind AND identifies itself,
+ *  by number or by year ("Order No. 12 of 2026", "The Fisheries (Amendment)
+ *  Act 2026", "Legal Supplement B — 14 August 2026"). A category label names
+ *  the kind and stops. So both signals are required.
+ *
+ *  Deliberately biased toward UNDER-counting: missing a title that omits both
+ *  a number and a year costs a false PARSE_THIN (noisy, visible, harmless),
+ *  while over-counting costs a false clean bill of health on a dead feed —
+ *  which is the failure this gate exists to prevent. */
 export function looksLikePublication(title: string): boolean {
   const t = normalizeTitle(title);
-  return /\b(act|order|bill|notice|regulation|regulations|gazette|supplement|extraordinary|proclamation|resolution)\b/.test(t)
-    || /\bno\.?\s*\d+/.test(t)
-    || /\b(19|20)\d\d\b/.test(t);
+  const namesAnInstrument = /\b(act|order|bill|notice|regulation|regulations|gazette|supplement|extraordinary|proclamation|resolution)\b/.test(t);
+  const identifiesItself = /\bno\.?\s*\d+/.test(t) || /\b(19|20)\d\d\b/.test(t);
+  return namesAnInstrument && identifiesItself;
 }
 
 export function classify(entry: GazetteEntry, trust: WatchSource['trust']): WatchHit | null {
