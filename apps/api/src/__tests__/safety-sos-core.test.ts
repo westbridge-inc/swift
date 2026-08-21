@@ -73,6 +73,54 @@ describe('SOS state machine [safety M2]', () => {
     }
   });
 
+  it('[F-027-18] an alert raised with NO request context is filed to the ACTOR\'s tenant, and pages THEM', async () => {
+    // The bug this replaces: nothing set tenantId here, so it came from the
+    // request-scoped Prisma extension — which stamps nothing in a background
+    // sweep. The guardian check-in-timeout ladder and the grace-expiry
+    // backstop both run there, so those alerts silently took the schema
+    // default, `swift-default`. Since F-026-15 the ops page follows
+    // alert.tenantId, so a tenant-B customer's auto-escalated alert paged
+    // swift-default's admins and NOBODY IN TENANT B WAS EVER TOLD. The
+    // server-guessed emergency — raised precisely because the person stopped
+    // answering — went to the wrong room.
+    const tenantB = `sos-t-${nanoid(6)}`;
+    await prisma.tenant.create({ data: { id: tenantB, name: 'SOS tenant B', slug: tenantB, isActive: true } });
+    const victimB = await prisma.user.create({
+      data: {
+        phone: `+59278${Math.floor(Math.random() * 900000) + 100000}`,
+        firstName: 'Victim', lastName: 'B',
+        roles: ['CUSTOMER'] as never[], activeRole: 'CUSTOMER' as never,
+        isPhoneVerified: true, status: 'ACTIVE', tenantId: tenantB,
+      },
+    });
+    const adminB = await prisma.user.create({
+      data: {
+        phone: `+59279${Math.floor(Math.random() * 900000) + 100000}`,
+        firstName: 'Responder', lastName: 'B',
+        roles: ['ADMIN'] as never[], activeRole: 'ADMIN' as never,
+        isPhoneVerified: true, status: 'ACTIVE', tenantId: tenantB,
+      },
+    });
+    try {
+      // No request context — exactly how the guardian sweep raises one.
+      const a = track(await sos.create({
+        actorUserId: victimB.id, actorRole: 'CUSTOMER',
+        triggerSource: 'CHECKIN_TIMEOUT', immediate: true,
+        clientIdempotencyKey: `guardian:${nanoid(10)}`,
+      }));
+      expect(a.tenantId, 'the alert was filed under the wrong tenant').toBe(tenantB);
+      const pagedB = await prisma.notification.count({
+        where: { userId: adminB.id, data: { path: ['sosAlertId'], equals: a.id } as never },
+      });
+      expect(pagedB, "tenant B's own responder was not paged about their own customer's SOS").toBeGreaterThan(0);
+    } finally {
+      await prisma.notification.deleteMany({ where: { userId: { in: [adminB.id, victimB.id] } } });
+      await prisma.sosAlert.deleteMany({ where: { actorUserId: victimB.id } });
+      await prisma.user.deleteMany({ where: { id: { in: [adminB.id, victimB.id] } } });
+      await prisma.tenant.delete({ where: { id: tenantB } });
+    }
+  });
+
   it('[F-026-12] the grace deadline closes on the CLOCK, not on the sweep tick', async () => {
     // promoteExpiredGrace is what flips TRIGGER_PENDING -> ACTIVE, so between
     // graceEndsAt passing and the next sweep run the row is still

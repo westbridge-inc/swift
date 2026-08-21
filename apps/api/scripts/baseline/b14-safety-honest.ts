@@ -87,7 +87,19 @@ async function reachOf(alertId: string): Promise<{ notices: number; receipts: un
     prisma.sosAlert.findUnique({ where: { id: alertId }, select: { deliveryReceipts: true } }),
   ]);
   const receipts = (alert?.deliveryReceipts ?? null) as Record<string, unknown> | null;
-  const anyChannel = notices > 0 || (receipts != null && Object.keys(receipts).length > 0);
+  // [F-027-16] "The receipts object has ANY key" was not evidence of reach —
+  // it was evidence that fan-out RAN. A total failure writes
+  // {opsPaged: 0, socketListeners: 0, contacts: ...}, which is nonempty, so
+  // the old oracle accepted an ACTIVE alert that reached nobody as proof that
+  // help was coming. Only POSITIVE, per-channel evidence counts now.
+  const positive = (v: unknown): boolean => {
+    if (typeof v === 'number') return v > 0;
+    if (typeof v === 'boolean') return v;
+    if (Array.isArray(v)) return v.length > 0;
+    // A string receipt is a REASON, not a delivery ("skipped:guardian-default").
+    return false;
+  };
+  const anyChannel = notices > 0 || (receipts != null && Object.values(receipts).some(positive));
   return { notices, receipts, anyChannel };
 }
 
@@ -113,6 +125,29 @@ async function main() {
   const otherToken = await loginByOtp(OTHER_PHONE);
   log('actors ready', { customer: customer.id, otherActor: other.id });
 
+  // [F-027-17 follow-on] PREFLIGHT: these actors must start with no live
+  // alert. Repeat triggers now collapse onto an open alert, so a single stray
+  // one — left by a crashed run, or raised by the guardian sweep against a
+  // ride this script created earlier — silently turns leg 1's fresh trigger
+  // into someone else's ACTIVE alert and the whole run reports nonsense.
+  // Closed LOUDLY, never silently: a rig accumulating live SOS rows is itself
+  // worth seeing.
+  const strays = await prisma.sosAlert.findMany({
+    where: { actorUserId: { in: [customer.id, other.id] }, status: { in: ['TRIGGER_PENDING', 'ACTIVE', 'ACKNOWLEDGED'] } },
+    select: { id: true, status: true, triggerSource: true, triggeredAt: true },
+  });
+  if (strays.length > 0) {
+    log('PREFLIGHT closing stray live alerts left on the rig', strays);
+    await prisma.sosAlert.updateMany({
+      where: { id: { in: strays.map((s) => s.id) } },
+      data: { status: 'RESOLVED', resolvedAt: new Date(), resolutionNotes: 'ELV2 B14 preflight (force-close, not an ops resolution)' },
+    });
+    const left = await prisma.sosAlert.count({
+      where: { actorUserId: { in: [customer.id, other.id] }, status: { in: ['TRIGGER_PENDING', 'ACTIVE', 'ACKNOWLEDGED'] } },
+    });
+    if (left > 0) throw new Error(`PREFLIGHT FAILED: ${left} live alert(s) survived — this run cannot tell its own alerts apart from them`);
+  }
+
   // ── 1. grace is honest: pending, and NOBODY paged yet ────────────────────
   const t1 = await http('POST', '/safety/sos', { lat: 6.8, lng: -58.15, source: 'BUTTON' }, token);
   if (t1.status >= 300) throw new Error(`sos ${t1.status}: ${JSON.stringify(t1.json).slice(0, 250)}`);
@@ -122,19 +157,49 @@ async function main() {
   if (!a1.graceEndsAt || new Date(a1.graceEndsAt) <= new Date()) throw new Error('FAIL: no live grace window returned — the countdown strip would be a fiction');
   // [F-026-11] Sample ACROSS the window rather than once immediately: a late
   // or delayed page would slip past a single instantaneous check.
+  // [F-027-16] Sample the WHOLE window. Stopping 200ms short left the final
+  // slice — the one immediately before escalation, where an off-by-one page is
+  // most likely — unobserved, while the log claimed "across the WHOLE window".
+  //
+  // The margin is gone entirely. Instead of guessing how close to the deadline
+  // is safe, the oracle asks the right question: reach is a VIOLATION only
+  // while the alert is still TRIGGER_PENDING. A page at or after the deadline
+  // is the escalation working, not a leak — so a late sample that finds the
+  // alert already ACTIVE proves nothing either way and must not fail the run.
   const graceEnds = new Date(a1.graceEndsAt).getTime();
   let graceReach = await reachOf(a1.id);
-  while (Date.now() < graceEnds - 200) {
-    if (graceReach.anyChannel) break;
-    await new Promise((r) => setTimeout(r, 250));
+  let stillPending = true;
+  while (Date.now() <= graceEnds && !graceReach.anyChannel) {
+    await new Promise((r) => setTimeout(r, 100));
     graceReach = await reachOf(a1.id);
+    stillPending = (await prisma.sosAlert.findUniqueOrThrow({ where: { id: a1.id }, select: { status: true } })).status === 'TRIGGER_PENDING';
+    if (!stillPending) break; // the deadline passed and it escalated — correct
   }
-  if (graceReach.anyChannel) throw new Error(`FAIL: the alert reached someone DURING the grace window (notices=${graceReach.notices}, receipts=${JSON.stringify(graceReach.receipts)}) — it has not been confirmed`);
+  if (graceReach.anyChannel && stillPending) throw new Error(`FAIL: the alert reached someone while STILL TRIGGER_PENDING (notices=${graceReach.notices}, receipts=${JSON.stringify(graceReach.receipts)}) — it has not been confirmed`);
   log('EVIDENCE grace is honest across the WHOLE window', { status: a1.status, graceEndsAt: a1.graceEndsAt, notices: 0, receipts: null });
 
+  // ── 1b. the collapse, proven at the WIRE ────────────────────────────────
+  // [F-027-17] Leg 2 needs a FRESH alert, and it can no longer just ask for
+  // one: while an alert is live, a repeat trigger deliberately collapses onto
+  // it so a burst cannot bury the ops desk. Prove that on the real route
+  // before working around it — the unit tests exercise the service, this
+  // exercises what a tapping thumb actually reaches.
+  const collapse = await http('POST', '/safety/sos', { lat: 6.8, lng: -58.15, source: 'BUTTON' }, token);
+  if (collapse.status !== 200) throw new Error(`FAIL: a repeat trigger was REFUSED (${collapse.status}) — collapsing must never mean rejecting`);
+  if (collapse.json.data.id !== a1.id) throw new Error(`FAIL: a repeat trigger minted a SECOND alert (${collapse.json.data.id} vs ${a1.id}) — a burst can still bury ops`);
+  const collapsed = await prisma.sosAlert.findUniqueOrThrow({ where: { id: a1.id }, select: { retriggerCount: true } });
+  if (collapsed.retriggerCount < 1) throw new Error('FAIL: the repeat trigger left no trace — ops cannot see rising urgency');
+  log('EVIDENCE a repeat trigger collapses onto the live alert and records urgency', { id: a1.id, retriggerCount: collapsed.retriggerCount });
+
   // ── 2. cancel in grace: nothing happened, and it still says nothing ──────
-  // A FRESH alert: leg 1 deliberately spends its whole window sampling, and
-  // cancelling after the deadline is now correctly refused (the F-026-12 fix).
+  // A FRESH alert is required, and leg 1's is now past its deadline (it spent
+  // the whole window sampling), so cancelling it is correctly refused by the
+  // F-026-12 clock guard. Close it as RIG HYGIENE — explicitly not an ops
+  // resolution — so the next trigger is genuinely new rather than a collapse.
+  await prisma.sosAlert.updateMany({
+    where: { id: a1.id, status: { in: ['TRIGGER_PENDING', 'ACTIVE', 'ACKNOWLEDGED'] } },
+    data: { status: 'RESOLVED', resolvedAt: new Date(), resolutionNotes: 'ELV2 B14 leg-1 close (force-close, not an ops resolution)' },
+  });
   const t1b = await http('POST', '/safety/sos', { lat: 6.8, lng: -58.15, source: 'BUTTON' }, token);
   const a1b = t1b.json.data;
   raised.push(a1b.id);
@@ -178,6 +243,29 @@ async function main() {
   if (safe.json.data.status !== 'ACTIVE') throw new Error(`FAIL: "I'm safe" RESOLVED the alert (${safe.json.data.status}) — only ops may close it`);
   log('EVIDENCE I-am-safe flags but never resolves', { status: safe.json.data.status, flaggedAt: safe.json.data.userSafeFlaggedAt });
 
+  // ── 5b. someone else's alert is not yours ───────────────────────────────
+  // Runs here, while a2 is freshly ACTIVE and before the burst and the
+  // idempotency legs mutate the actor's live-alert state — those legs need
+  // NO live alert, this one needs exactly this one.
+  // [F-026-18] Assert the EXACT refusal. `< 400` accepted a 500 or a
+  // connection-level failure as proof of authorization, which is the opposite
+  // of what it claims: an outage is not a permission check. And the promised
+  // cross-user CANCEL was never attempted at all.
+  const DENIED = [403, 404];
+  const denialOf = (label: string, r: { status: number; json: unknown }) => {
+    if (!DENIED.includes(r.status)) {
+      throw new Error(`FAIL: another user's ${label} on this alert returned ${r.status} — expected an explicit refusal (${DENIED.join('/')}), and a server error is NOT a denial: ${JSON.stringify(r.json).slice(0, 200)}`);
+    }
+    return r.status;
+  };
+  const peek = denialOf('READ', await http('GET', `/safety/sos/${a2.id}`, undefined, otherToken));
+  const hijack = denialOf('CONFIRM', await http('POST', `/safety/sos/${a2.id}/confirm`, {}, otherToken));
+  const kill = denialOf('CANCEL', await http('POST', `/safety/sos/${a2.id}/cancel`, {}, otherToken));
+  const untouched = await prisma.sosAlert.findUniqueOrThrow({ where: { id: a2.id }, select: { status: true } });
+  if (untouched.status !== 'ACTIVE') throw new Error(`FAIL: the refused cross-user calls still moved the alert to ${untouched.status}`);
+  log('EVIDENCE cross-user read/confirm/cancel all refused, alert untouched', { read: peek, confirm: hijack, cancel: kill, status: untouched.status });
+
+
   // ── 6. SOS is exempt from rate limiting (LHC-1 K2) ──────────────────────
   // [F-026-13] Five requests proved nothing: the global ceiling is 200/min, so
   // a five-shot burst never reaches it, and "not 429" would also be satisfied
@@ -211,7 +299,15 @@ async function main() {
   if (unavailable.length > 0) throw new Error(`FAIL: ${unavailable.length}/${burstSize} triggers were 503 — the rig could not serve the burst, so this leg proves nothing about rate limiting (honest error, wrong subject)`);
   const malformed = burst.filter((r) => r.status !== 200 || !r.json?.data?.id || !r.json?.data?.status);
   if (malformed.length > 0) throw new Error(`FAIL: ${malformed.length}/${burstSize} triggers did not return a well-formed alert (first: ${malformed[0]!.status} ${JSON.stringify(malformed[0]!.json).slice(0, 160)})`);
-  log('EVIDENCE SOS exempt from rate limits ABOVE the global ceiling', { triggers: burstSize, ceiling: CEILING, waveSize: WAVE, rateLimited: 0, unauthorized: 0, allWellFormed: true });
+  // [F-027-17] The same burst measures the OTHER half of the trade: an exempt
+  // route must not become an unbounded alert mint that buries the ops desk.
+  // Over HTTP — closer to production than an in-process test — count what the
+  // burst actually created. The assertion is what the mechanism truly
+  // guarantees (far below one-per-request), not the exact-once bound the
+  // read-then-write collapse cannot promise under simultaneity.
+  const burstAlerts = new Set(burst.map((r) => r.json?.data?.id as string).filter(Boolean));
+  if (burstAlerts.size >= burstSize / 4) throw new Error(`FAIL: ${burstSize} triggers minted ${burstAlerts.size} distinct alerts — the exempt route is still close to an unbounded mint`);
+  log('EVIDENCE SOS exempt from rate limits ABOVE the global ceiling, and the burst does NOT bury ops', { triggers: burstSize, ceiling: CEILING, waveSize: WAVE, rateLimited: 0, unauthorized: 0, allWellFormed: true, distinctAlertsMinted: burstAlerts.size });
 
   // ── 7. replay is ONE alert — and ONLY for the person who sent it ────────
   const key = `b14-${randomInt(100000, 999999)}`;
@@ -236,6 +332,18 @@ async function main() {
   // [F-026-17] 7c — CONCURRENT retries from one device. read-then-create is
   // not atomic: both can miss the read and one loses on the unique index. The
   // loser must receive the winner, never a 500 to someone mid-emergency.
+  // The live-alert collapse (F-027-17) runs BEFORE the key lookup, so with an
+  // open alert these retries would collapse onto it and never exercise the
+  // idempotency path at all — the test would pass while proving nothing.
+  // Close what is live first, as rig hygiene, so the race reaches the code it
+  // claims to test.
+  // Everything live for this actor, including leg 7's own replay alert. The
+  // cross-user leg that needed a2 ACTIVE now runs earlier (5b), precisely so
+  // this one can start from a clean slate.
+  await prisma.sosAlert.updateMany({
+    where: { actorUserId: customer.id, status: { in: ['TRIGGER_PENDING', 'ACTIVE', 'ACKNOWLEDGED'] } },
+    data: { status: 'RESOLVED', resolvedAt: new Date(), resolutionNotes: 'ELV2 B14 pre-race close (force-close, not an ops resolution)' },
+  });
   const raceKey = `b14-race-${randomInt(100000, 999999)}`;
   const raceBody = { lat: 6.8, lng: -58.15, clientIdempotencyKey: raceKey };
   const race = await Promise.all([
@@ -251,25 +359,6 @@ async function main() {
   const raceRows = await prisma.sosAlert.count({ where: { clientIdempotencyKey: `client:${raceKey}` } });
   if (raceRows !== 1) throw new Error(`FAIL: ${raceRows} rows carry the raced key — exactly-once did not hold in the DATABASE`);
   log('EVIDENCE concurrent retries settle on ONE alert with no error', { id: [...raceIds][0], rows: raceRows });
-
-  // ── 8. someone else's alert is not yours ────────────────────────────────
-  // [F-026-18] Assert the EXACT refusal. `< 400` accepted a 500 or a
-  // connection-level failure as proof of authorization, which is the opposite
-  // of what it claims: an outage is not a permission check. And the promised
-  // cross-user CANCEL was never attempted at all.
-  const DENIED = [403, 404];
-  const denialOf = (label: string, r: { status: number; json: unknown }) => {
-    if (!DENIED.includes(r.status)) {
-      throw new Error(`FAIL: another user's ${label} on this alert returned ${r.status} — expected an explicit refusal (${DENIED.join('/')}), and a server error is NOT a denial: ${JSON.stringify(r.json).slice(0, 200)}`);
-    }
-    return r.status;
-  };
-  const peek = denialOf('READ', await http('GET', `/safety/sos/${a2.id}`, undefined, otherToken));
-  const hijack = denialOf('CONFIRM', await http('POST', `/safety/sos/${a2.id}/confirm`, {}, otherToken));
-  const kill = denialOf('CANCEL', await http('POST', `/safety/sos/${a2.id}/cancel`, {}, otherToken));
-  const untouched = await prisma.sosAlert.findUniqueOrThrow({ where: { id: a2.id }, select: { status: true } });
-  if (untouched.status !== 'ACTIVE') throw new Error(`FAIL: the refused cross-user calls still moved the alert to ${untouched.status}`);
-  log('EVIDENCE cross-user read/confirm/cancel all refused, alert untouched', { read: peek, confirm: hijack, cancel: kill, status: untouched.status });
 
   // ── 9. trip share: public, small, revocable ─────────────────────────────
   // A share is only mintable on a LIVE trip (terminal trips 409 TRIP_OVER —

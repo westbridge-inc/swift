@@ -189,7 +189,11 @@ describe('the full ladder climb — deviation → L2 → L3 → L4 auto-SOS (§1
     // contacts are NOT auto-SMSed by default (false alarms erode the feature).
     expect(devChannelLog.filter((e) => e.channel === 'sms')).toHaveLength(0);
     expect((alert.deliveryReceipts as Record<string, unknown>)['contacts']).toBe('skipped:guardian-default');
-    expect(emits.find((e) => e.event === 'sos:active')?.room).toBe('ops:war-room');
+    // [F-027-16/18] Published to the alert's OWN tenant room plus the
+    // platform room (SUPER_ADMIN only) — never a bare shared room that would
+    // hand another tenant's admins this person's role, order and coordinates.
+    expect(emits.find((e) => e.event === 'sos:active')?.room)
+      .toEqual([`ops:war-room:${alert.tenantId}`, 'ops:war-room']);
 
     // Crash-retry idempotency: a tick that died mid-escalation re-runs it —
     // the idempotency key pins exactly ONE alert, the session re-closes.
