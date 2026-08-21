@@ -25,3 +25,16 @@ export async function resolveAvatarUrl(raw: string | null | undefined): Promise<
     return null;
   }
 }
+
+/** List-safe variant. [F-026-01] The single resolver closed one screen but
+ *  not the API contract: order lists and cross-user surfaces still emitted
+ *  raw private keys. Signing is local computation for both providers — an
+ *  HMAC for local storage, a presign for S3/R2 with no network round trip —
+ *  so resolving a page of rows is cheap, and identical keys are resolved once.
+ */
+export async function resolveAvatarUrls(raws: (string | null | undefined)[]): Promise<Map<string, string | null>> {
+  const unique = [...new Set(raws.filter((r): r is string => !!r))];
+  const out = new Map<string, string | null>();
+  await Promise.all(unique.map(async (raw) => { out.set(raw, await resolveAvatarUrl(raw)); }));
+  return out;
+}

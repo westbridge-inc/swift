@@ -2,6 +2,7 @@ import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { AuthService } from './auth.service';
 import { TRIAL_DAYS } from '../subscription/subscription.service';
+import { resolveAvatarUrl } from '../../utils/avatar-url';
 import { AppError } from '../../utils/errors';
 import { zPhone } from '../../utils/phone';
 import { ALLOWED_IMAGE_TYPES, looksLikeImage } from '../../utils/images';
@@ -194,7 +195,10 @@ export async function authRoutes(app: FastifyInstance) {
       },
     });
 
-    return reply.send({ success: true, data: { user } });
+    // [F-026-01] The upload response is the FIRST place a client sees the new
+    // avatar — returning the raw S3/R2 key here hands back something it
+    // cannot render, moments after a successful upload.
+    return reply.send({ success: true, data: { user: { ...user, avatar: await resolveAvatarUrl(user.avatar) } } });
   });
 
   // ── Email + password (secondary to phone OTP) ──────────────────────────
