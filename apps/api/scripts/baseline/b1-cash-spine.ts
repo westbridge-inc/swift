@@ -64,6 +64,18 @@ async function main() {
   const riderUser = await prisma.user.findFirstOrThrow({ where: { phone: RIDER_PHONE } });
   const rider = await prisma.rider.findFirstOrThrow({ where: { userId: riderUser.id } });
   const ownerUserId = (await prisma.vendorOwner.findUniqueOrThrow({ where: { id: vendor.ownerId }, select: { userId: true } })).userId;
+  // [F-024-06] Never make an ASSIGNED rider dispatch-eligible by clearing only
+  // the pointer — the abandoned order would sit live with a rider the pool
+  // believes is free. Close the stranded synthetic orders FIRST (same rig-tidy
+  // class as the holdExpiresAt fast-forward), then reset the rider.
+  const tidied = await prisma.order.updateMany({
+    where: {
+      vendor: { name: { startsWith: 'ELV1 Baseline' } },
+      status: { in: ['PENDING', 'ACCEPTED', 'PREPARING', 'READY_FOR_PICKUP', 'RIDER_ASSIGNED', 'RIDER_EN_ROUTE_PICKUP', 'RIDER_ARRIVED_PICKUP', 'PICKED_UP', 'EN_ROUTE_DELIVERY', 'ARRIVED'] },
+    },
+    data: { status: 'CANCELLED' },
+  });
+  if (tidied.count > 0) log('tidied stranded synthetic orders', { cancelled: tidied.count });
   await prisma.rider.update({
     where: { id: rider.id },
     data: { isOnline: true, isAvailable: true, currentOrderId: null, currentLat: 6.8, currentLng: -58.15, lastLocationUpdate: new Date() },

@@ -167,6 +167,35 @@ describe('commencement watch [DCR-1 CW]', () => {
     expect(out[0]!.error).toMatch(/PARSE_THIN/);
   });
 
+  it('[F-024-07] FIVE ordinary navigation links do NOT pass as a healthy gazette feed', async () => {
+    // The bypass: each title is ≥8 chars, so the old anchor-count floor saw a
+    // healthy 5-entry feed on a login/redesign page. Health now demands
+    // publication-SHAPED entries (instrument vocabulary / number / year).
+    const s = { id: `s1nav-${runId}`, url: 'https://gazette.test/nav', trust: 'S1' as const, minEntries: 5 };
+    const out = await runScan(app.prisma, fetchReturning({
+      [s.url]: {
+        status: 200,
+        body: page(['About our services', 'Contact the department', 'Privacy statement', 'Accessibility help', 'Sign in to continue']),
+      },
+    }), [s]);
+    expect(out[0]!.error).toMatch(/PARSE_THIN:0<5/);
+    // And a real listing of five instruments stays healthy.
+    const s2 = { id: `s1pub-${runId}`, url: 'https://gazette.test/pub', trust: 'S1' as const, minEntries: 5 };
+    const out2 = await runScan(app.prisma, fetchReturning({
+      [s2.url]: {
+        status: 200,
+        body: page([
+          `Order No. 12 of 2026 — Municipal Fees ${runId}`,
+          'The Fisheries (Amendment) Act 2026',
+          'Notice No. 88 of 2026 — Road Closures',
+          'The Income Tax Regulations 2026',
+          'Legal Supplement B — 14 August 2026',
+        ]),
+      },
+    }), [s2]);
+    expect(out2[0]!.error).toBeNull();
+  });
+
   it('parseEntries survives markup inside anchors', () => {
     const entries = parseEntries('<a href="/x"><b>The Data</b> Protection Act 2023 (Commencement) Order</a>');
     expect(entries[0]!.title).toContain('Protection Act');

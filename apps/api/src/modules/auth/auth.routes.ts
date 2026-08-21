@@ -162,13 +162,26 @@ export async function authRoutes(app: FastifyInstance) {
 
     // [REPORT-022 F-022-21] conditional write: a deletion finishing between
     // auth and this point cannot re-personalize the tombstone with a fresh
-    // selfie/avatar.
-    const selfieWrite = await app.prisma.user.updateMany({
-      where: { id: request.user.userId, status: { notIn: ['DEACTIVATED', 'BANNED', 'SUSPENDED'] } },
-      data: { avatar: url, selfieCapturedAt: new Date() },
-    });
+    // selfie/avatar. [F-024-08] The object uploads BEFORE this write, so every
+    // failure path here must unwind it — a thrown update used to leave an
+    // unreferenced personal-data object no sweep could rediscover. Cleanup
+    // failures are LOGGED (an orphan must be discoverable, never silent).
+    let selfieWrite: { count: number };
+    try {
+      selfieWrite = await app.prisma.user.updateMany({
+        where: { id: request.user.userId, status: { notIn: ['DEACTIVATED', 'BANNED', 'SUSPENDED'] } },
+        data: { avatar: url, selfieCapturedAt: new Date() },
+      });
+    } catch (err) {
+      await getStorageProvider().delete(url).catch((cleanupErr) => {
+        app.log.error({ err: cleanupErr, userId: request.user.userId, key: url }, '[F-024-08] selfie cleanup after failed write also failed — orphaned key');
+      });
+      throw err;
+    }
     if (selfieWrite.count === 0) {
-      await getStorageProvider().delete(url).catch(() => {});
+      await getStorageProvider().delete(url).catch((cleanupErr) => {
+        app.log.error({ err: cleanupErr, userId: request.user.userId, key: url }, '[F-024-08] selfie cleanup after inactive-account refusal failed — orphaned key');
+      });
       throw new AppError(409, 'ACCOUNT_INACTIVE', 'This account is not active.');
     }
     const user = await app.prisma.user.findUniqueOrThrow({

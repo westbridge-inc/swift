@@ -75,6 +75,20 @@ export function parseEntries(html: string): GazetteEntry[] {
   return out;
 }
 
+/** [F-024-07] Does an anchor title look like a gazette PUBLICATION rather than
+ *  site chrome? A login page or redesign with five ordinary navigation links
+ *  ("About our services", "Contact the department", …) used to pass the
+ *  PARSE_THIN health floor as a healthy feed. Health is now measured against
+ *  publication-shaped entries only: legal-instrument vocabulary, an
+ *  instrument number, or a year. Classification still scans EVERY anchor —
+ *  this gates health, not detection. */
+export function looksLikePublication(title: string): boolean {
+  const t = normalizeTitle(title);
+  return /\b(act|order|bill|notice|regulation|regulations|gazette|supplement|extraordinary|proclamation|resolution)\b/.test(t)
+    || /\bno\.?\s*\d+/.test(t)
+    || /\b(19|20)\d\d\b/.test(t);
+}
+
 export function classify(entry: GazetteEntry, trust: WatchSource['trust']): WatchHit | null {
   const t = normalizeTitle(entry.title);
   for (const rule of RULES) {
@@ -139,8 +153,11 @@ export async function runScan(
           listingHash = createHash('sha256').update(html).digest('hex');
           entries = parseEntries(html);
           const floor = source.minEntries ?? 5;
+          // [F-024-07] the health floor counts PUBLICATION-shaped entries, not
+          // raw anchors — nav-link-only pages are an unhealthy feed.
+          const publicationShaped = entries.filter((e) => looksLikePublication(e.title)).length;
           if (entries.length === 0) error = 'PARSE_EMPTY';
-          else if (entries.length < floor) error = `PARSE_THIN:${entries.length}<${floor}`;
+          else if (publicationShaped < floor) error = `PARSE_THIN:${publicationShaped}<${floor}`;
         }
       } finally {
         clearTimeout(timer);

@@ -332,7 +332,7 @@ describe('durable mover revocation outbox', () => {
         retryDispatch: vi.fn().mockResolvedValue({}),
       }),
       io: io as never,
-    })).resolves.toEqual({ processed: 1, failed: 0 });
+    }, 25, { onlyUserIds: [...userIds] })).resolves.toEqual({ processed: 1, failed: 0 });
 
     const incident = await app.prisma.incidentCase.findFirstOrThrow({
       where: { subjectUserId: mover.user.id, orderId: order.id, category: 'MOVER_SESSION_LOST_IN_CUSTODY' },
@@ -523,12 +523,12 @@ describe('durable mover revocation outbox', () => {
     };
     process.env['MOVER_REVOCATION_EFFECT_TIMEOUT_MS'] = '50';
 
-    await expect(processMoverRevocationOutboxBatch(withDeferredPush))
+    await expect(processMoverRevocationOutboxBatch(withDeferredPush, 25, { onlyUserIds: [...userIds] }))
       .resolves.toEqual({ processed: 0, failed: 1 });
     const timedOut = await app.prisma.moverRevocationOutbox.findUniqueOrThrow({ where: { id: outboxId! } });
     expect(timedOut.claimedAt).not.toBeNull();
 
-    await expect(processMoverRevocationOutboxBatch(withDeferredPush))
+    await expect(processMoverRevocationOutboxBatch(withDeferredPush, 25, { onlyUserIds: [...userIds] }))
       .resolves.toEqual({ processed: 0, failed: 0 });
     expect(retryDispatch).toHaveBeenCalledTimes(1);
     expect(push).toHaveBeenCalledTimes(1);
@@ -605,7 +605,7 @@ describe('durable mover revocation outbox', () => {
     };
     const withPush = { ...runtime(dispatch), channels: { push: { sendPush: push } } };
 
-    await expect(processMoverRevocationOutboxBatch(withPush))
+    await expect(processMoverRevocationOutboxBatch(withPush, 25, { onlyUserIds: [...userIds] }))
       .resolves.toEqual({ processed: 0, failed: 1 });
     expect(await app.prisma.notification.count({
       where: { userId: customer.user.id, data: { path: ['eventId'], string_starts_with: outboxId! } },
@@ -615,7 +615,7 @@ describe('durable mover revocation outbox', () => {
       where: { id: outboxId! },
       data: { availableAt: new Date(0) },
     });
-    await expect(processMoverRevocationOutboxBatch(withPush))
+    await expect(processMoverRevocationOutboxBatch(withPush, 25, { onlyUserIds: [...userIds] }))
       .resolves.toEqual({ processed: 1, failed: 0 });
     expect(push).toHaveBeenCalledTimes(2);
     expect(push.mock.calls[0]?.[3]).toMatchObject({
