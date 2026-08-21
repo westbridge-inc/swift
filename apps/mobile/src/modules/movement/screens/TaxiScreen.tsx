@@ -942,14 +942,22 @@ function ActiveRide({ navigation, ride, cancelRide, insets, rematching }: any) {
               <T variant="label" weight="semibold" center style={{ marginTop: space.sm }}>
                 Check the plate before you get in
               </T>
-              <T
-                variant="caption"
-                center
-                style={{ marginTop: space.sm, color: color.error, textDecorationLine: 'underline' }}
+              {/* [F-243/F-244] The wrong-car escape hatch. As a bare <T
+                  onPress> a screen reader announced it as static text and the
+                  tap area was the ~18pt line box — the least reachable control
+                  in the app, on the one screen where reaching it matters. */}
+              <Pressable
                 onPress={() => setConfirmNotMyDriver(true)}
+                accessibilityRole="button"
+                accessibilityLabel="This isn’t my driver"
+                accessibilityHint="Reports that the car at the kerb does not match your ride"
+                hitSlop={12}
+                style={{ marginTop: space.sm, minHeight: 44, justifyContent: 'center' }}
               >
-                This isn’t my driver
-              </T>
+                <T variant="caption" center style={{ color: color.error, textDecorationLine: 'underline' }}>
+                  This isn’t my driver
+                </T>
+              </Pressable>
             </View>
           ) : ride.ridePin ? (
             <View

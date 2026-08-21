@@ -42,10 +42,29 @@ export function FareSlider({
 
   const pct = max > min ? Math.max(0, Math.min(1, (value - min) / (max - min))) : 1;
 
+  // [F-242] A PanResponder is invisible to assistive tech: drag is the only
+  // way to move it, and a screen reader announced nothing at all — so a blind
+  // driver could not set a fare. `adjustable` + accessibilityValue makes the
+  // current price readable, and the increment/decrement actions give a
+  // gesture-free way to change it. Step is 1% of the band (min 1), so the
+  // range is crossable in a sane number of swipes at any fare size.
+  const step = Math.max(1, Math.round((max - min) / 100));
+  const clamp = (v: number) => Math.max(min, Math.min(max, v));
+
   return (
     <View
       onLayout={(e) => setW(e.nativeEvent.layout.width)}
       {...pan.panHandlers}
+      accessible
+      accessibilityRole="adjustable"
+      accessibilityLabel="Your fare"
+      accessibilityHint={`Swipe up or down to change your fare between ${min} and ${max} Guyanese dollars`}
+      accessibilityValue={{ min, max, now: value, text: `${value} Guyanese dollars` }}
+      accessibilityActions={[{ name: 'increment' }, { name: 'decrement' }]}
+      onAccessibilityAction={(e) => {
+        if (e.nativeEvent.actionName === 'increment') onChange(clamp(value + step));
+        if (e.nativeEvent.actionName === 'decrement') onChange(clamp(value - step));
+      }}
       style={{ height: 44, justifyContent: 'center' }}
     >
       {/* track */}
