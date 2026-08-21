@@ -64,24 +64,54 @@ const PUBLIC_WHERE = { status: 'ACTIVE' as const, isVerified: true };
  * Cached briefly because it is per-request on a hot public path; a new tenant
  * becomes visible within the TTL.
  */
-const TENANT_RESOLVE_TTL_MS = 60_000;
-let tenantCache: { id: string | null; at: number; count: number } | null = null;
-
+/**
+ * [F-027-13] Two corrections to the first version of this, both of which the
+ * cache caused.
+ *
+ * 1. PUBLIC_TENANT_ID was trusted on sight. Public visibility is decided by
+ *    the VENDOR's status alone, so an explicitly configured tenant that had
+ *    since been DEACTIVATED kept its still-ACTIVE vendors publicly listable
+ *    and orderable — deactivating an operator did not take their storefront
+ *    off the internet. And an id pointing at nothing produced a silent empty
+ *    directory rather than naming the broken deployment. It is now verified
+ *    against the database like any other input, and both failures are loud.
+ *
+ * 2. THE CACHE IS GONE, not tuned. It stored a TOPOLOGY CONCLUSION for 60
+ *    seconds, so: a second tenant activating kept serving the first instead
+ *    of refusing; a deactivated tenant kept serving; a corrected deployment
+ *    stayed broken for a minute after the fix; and concurrent misses were not
+ *    coalesced, so an older one-tenant answer could overwrite a newer
+ *    two-tenant one. Every one of those is the cache, not the rule.
+ *
+ *    What it bought was one indexed `SELECT id FROM tenants WHERE isActive
+ *    LIMIT 2` per public request — next to nothing beside the vendor query
+ *    these routes already run. On a tenant boundary, correctness outranks
+ *    that. If profiling ever says otherwise the answer is invalidation on
+ *    tenant writes, not a TTL guess.
+ */
 async function resolvePublicTenantId(app: FastifyInstance): Promise<string> {
   const explicit = process.env['PUBLIC_TENANT_ID'];
-  if (explicit) return explicit;
-
-  const now = Date.now();
-  if (!tenantCache || now - tenantCache.at > TENANT_RESOLVE_TTL_MS) {
-    const active = await app.prisma.tenant.findMany({
-      where: { isActive: true },
-      select: { id: true },
-      take: 2, // two is all it takes to know the rule is needed
+  if (explicit) {
+    const configured = await app.prisma.tenant.findUnique({
+      where: { id: explicit },
+      select: { id: true, isActive: true },
     });
-    tenantCache = { id: active[0]?.id ?? null, at: now, count: active.length };
+    if (!configured) {
+      throw new AppError(503, 'PUBLIC_TENANT_UNRESOLVED', 'PUBLIC_TENANT_ID names a tenant that does not exist — the deployment is misconfigured.');
+    }
+    if (!configured.isActive) {
+      throw new AppError(503, 'PUBLIC_TENANT_UNRESOLVED', 'PUBLIC_TENANT_ID names an INACTIVE tenant — its storefronts are not public.');
+    }
+    return configured.id;
   }
-  if (tenantCache.count === 1 && tenantCache.id) return tenantCache.id;
-  if (tenantCache.count === 0) throw new NotFoundError('Storefront');
+
+  const active = await app.prisma.tenant.findMany({
+    where: { isActive: true },
+    select: { id: true },
+    take: 2, // two is all it takes to know the rule is needed
+  });
+  if (active.length === 1) return active[0]!.id;
+  if (active.length === 0) throw new NotFoundError('Storefront');
   throw new AppError(
     503,
     'PUBLIC_TENANT_UNRESOLVED',

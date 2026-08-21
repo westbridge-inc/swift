@@ -3,6 +3,7 @@
 import { useEffect, useState } from 'react';
 import { MapPin, Plus } from 'lucide-react';
 import { getAddresses, addAddress } from '@/lib/customer';
+import { currentCoords } from '@/lib/geolocate';
 
 export default function LocationPage() {
   const [addresses, setAddresses] = useState<any[]>([]);
@@ -21,18 +22,10 @@ export default function LocationPage() {
       // route and the courier's destination all come from them. Falling back
       // to a city-centre guess when the browser refuses would save an address
       // that quietly points somewhere else — so we refuse instead of guessing.
-      const coords = await new Promise<{ lat: number; lng: number }>((res, rej) => {
-        if (!navigator.geolocation) return rej(new Error('This browser can’t share your location, so we can’t place this address on the map. Add it from the Swift app instead.'));
-        navigator.geolocation.getCurrentPosition(
-          (p) => res({ lat: p.coords.latitude, lng: p.coords.longitude }),
-          (err) => rej(new Error(
-            err.code === err.PERMISSION_DENIED
-              ? 'We need your location to place this address on the map — allow location access and try again.'
-              : 'We couldn’t get your location just now. Move somewhere with a clearer signal and try again.',
-          )),
-          { timeout: 5000 },
-        );
-      });
+      // [F-027-02] Was an inline copy of this logic; three other pages kept
+      // their own copies WITH the fallback, and fixing this one did not fix
+      // them. One implementation now.
+      const coords = await currentCoords('place this address on the map');
       await addAddress({ ...form, region: 'Demerara-Mahaica', latitude: coords.lat, longitude: coords.lng, isDefault: addresses.length === 0 });
       setAdding(false); setForm({ label: 'Home', addressLine1: '', city: 'Georgetown' }); refresh();
     } catch (e: any) { setError(e.message); }

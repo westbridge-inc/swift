@@ -5,6 +5,7 @@ import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import { Trash2, MapPin } from 'lucide-react';
 import { getCart, updateCartLine, removeCartLine, getAddresses, addAddress, setCartAddress, checkout, getPendingAppointments, clearPendingAppointments, money, type Cart } from '@/lib/customer';
+import { currentCoords } from '@/lib/geolocate';
 
 const TIPS = [0, 200, 500, 1000];
 
@@ -49,14 +50,12 @@ export default function CartPage() {
   async function saveAddress() {
     setBusy(true); setError(null);
     try {
-      const coords = await new Promise<{ lat: number; lng: number }>((res) => {
-        if (!navigator.geolocation) return res({ lat: 6.8013, lng: -58.1551 });
-        navigator.geolocation.getCurrentPosition(
-          (p) => res({ lat: p.coords.latitude, lng: p.coords.longitude }),
-          () => res({ lat: 6.8013, lng: -58.1551 }), // Georgetown fallback
-          { timeout: 5000 },
-        );
-      });
+      // [F-027-02] A saved address IS its coordinates — the delivery fee, the
+      // rider's route and the courier's destination all come from them. The
+      // Georgetown fallback that used to sit here saved a city-centre guess
+      // as this customer's real address. Refuse instead; setError below shows
+      // the reason.
+      const coords = await currentCoords('put this address on the map');
       const a = await addAddress({ ...newAddr, region: 'Demerara-Mahaica', latitude: coords.lat, longitude: coords.lng, isDefault: addresses.length === 0 });
       setAddingAddr(false);
       await refresh();

@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, afterEach } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { nanoid } from 'nanoid';
 import { prismaPlugin } from '../plugins/prisma';
@@ -144,5 +144,70 @@ describe('public storefront page', () => {
     expect(pending.statusCode).toBe(404);
     const unknown = await app.inject({ method: 'GET', url: `/api/v1/public/storefronts/never-existed-${marker}` });
     expect(unknown.statusCode).toBe(404);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// [F-027-13] PUBLIC_TENANT_ID is an input, not a fact.
+//
+// It used to be returned on sight. Public visibility is decided by the
+// VENDOR's status alone, so an explicitly configured tenant that had since
+// been DEACTIVATED kept its still-ACTIVE vendors publicly listable and
+// orderable — deactivating an operator did not take their storefront off the
+// internet. An id pointing at nothing produced a silent empty directory
+// instead of naming the broken deployment.
+//
+// These run last and always restore the env var: everything above depends on
+// the unset (single-active-tenant) path.
+// ---------------------------------------------------------------------------
+describe('[F-027-13] the configured public tenant is verified, and failures are loud', () => {
+  const restore = process.env['PUBLIC_TENANT_ID'];
+  afterEach(() => {
+    if (restore === undefined) delete process.env['PUBLIC_TENANT_ID'];
+    else process.env['PUBLIC_TENANT_ID'] = restore;
+  });
+
+  it('an INACTIVE configured tenant serves nothing — deactivating an operator takes their storefront off the internet', async () => {
+    const dead = `pub-dead-${nanoid(6)}`;
+    await app.prisma.tenant.create({ data: { id: dead, name: 'Deactivated operator', slug: dead, isActive: false } });
+    try {
+      process.env['PUBLIC_TENANT_ID'] = dead;
+      const list = await app.inject({ method: 'GET', url: '/api/v1/public/storefronts' });
+      expect(list.statusCode).toBe(503);
+      expect(list.json().error.code).toBe('PUBLIC_TENANT_UNRESOLVED');
+      expect(list.json().error.message).toMatch(/INACTIVE/);
+      // and the detail page cannot be used to walk around the directory
+      const page = await app.inject({ method: 'GET', url: `/api/v1/public/storefronts/${liveSlug}` });
+      expect(page.statusCode).toBe(503);
+    } finally {
+      await app.prisma.tenant.deleteMany({ where: { id: dead } });
+    }
+  });
+
+  it('a configured tenant that does not exist NAMES the misconfiguration instead of serving an empty catalog', async () => {
+    process.env['PUBLIC_TENANT_ID'] = `pub-ghost-${nanoid(6)}`;
+    const list = await app.inject({ method: 'GET', url: '/api/v1/public/storefronts' });
+    // A silent empty directory reads as "no stores yet" — indistinguishable
+    // from a healthy launch day, and nobody investigates it.
+    expect(list.statusCode).toBe(503);
+    expect(list.json().error.message).toMatch(/does not exist/);
+  });
+
+  it('a correction takes effect on the NEXT request — no cache pins a broken deployment', async () => {
+    // The old 60s cache stored a topology CONCLUSION, so a corrected
+    // deployment stayed broken for up to a minute after the fix.
+    process.env['PUBLIC_TENANT_ID'] = `pub-ghost-${nanoid(6)}`;
+    expect((await app.inject({ method: 'GET', url: '/api/v1/public/storefronts' })).statusCode).toBe(503);
+    delete process.env['PUBLIC_TENANT_ID'];
+    const fixed = await app.inject({ method: 'GET', url: '/api/v1/public/storefronts' });
+    expect(fixed.statusCode).toBe(200);
+  });
+
+  it('an ACTIVE configured tenant still serves normally', async () => {
+    const mine = await app.prisma.vendor.findUniqueOrThrow({ where: { slug: liveSlug }, select: { tenantId: true } });
+    process.env['PUBLIC_TENANT_ID'] = mine.tenantId;
+    const list = await app.inject({ method: 'GET', url: '/api/v1/public/storefronts' });
+    expect(list.statusCode).toBe(200);
+    expect(list.json().data.some((v: { slug: string }) => v.slug === liveSlug)).toBe(true);
   });
 });

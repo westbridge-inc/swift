@@ -635,6 +635,9 @@ function ActiveRide({ navigation, ride, cancelRide, insets, rematching }: any) {
   const [guardianBusy, setGuardianBusy] = useState(false);
   const [confirmNotMyDriver, setConfirmNotMyDriver] = useState(false);
   const [notMyDriverBusy, setNotMyDriverBusy] = useState(false);
+  /** [F-027-04] Non-null when the release did NOT go through. The sheet stays
+   *  open on it, because the person is standing next to the wrong car. */
+  const [notMyDriverError, setNotMyDriverError] = useState<string | null>(null);
   const [liveDriver, setLiveDriver] = useState<LatLng | null>(null);
   // Server-computed active-leg ETA riding the same stream [SWIFT-UG-RT-01].
   const [liveEtaMin, setLiveEtaMin] = useState<number | null>(null);
@@ -1184,19 +1187,38 @@ function ActiveRide({ navigation, ride, cancelRide, insets, rematching }: any) {
         <T variant="body" tone="muted" center style={{ marginTop: space.sm }}>
           Don’t get in. We’ll cancel this pickup, alert Swift safety, and find you another driver — your trip stays exactly as it is.
         </T>
+        {/* [F-027-04] The failure has to be visible. This used to swallow every
+            error and close the sheet, so an offline phone, an expired session
+            or a 5xx all looked exactly like success: the suspect driver stayed
+            assigned while the customer — standing at the kerb next to the
+            wrong car — was told we had cancelled and were finding another.
+            "The poll reconciles either way" is only true when the server
+            already committed and the response was lost. */}
+        {notMyDriverError ? (
+          <T variant="body" tone="error" center style={{ marginTop: space.lg }} accessibilityLiveRegion="assertive">
+            {notMyDriverError}
+          </T>
+        ) : null}
         <PillButton
-          label="Confirm — this isn’t my driver"
+          label={notMyDriverError ? 'Try again' : 'Confirm — this isn’t my driver'}
           variant="destructive"
-          style={{ alignSelf: 'stretch', marginTop: space['2xl'] }}
+          style={{ alignSelf: 'stretch', marginTop: notMyDriverError ? space.lg : space['2xl'] }}
           loading={notMyDriverBusy}
           onPress={async () => {
             setNotMyDriverBusy(true);
+            setNotMyDriverError(null);
             try {
               await safetyApi.notMyDriver(ride.id);
               haptic.warn();
-            } catch { /* the active-ride poll reconciles either way */ }
-            setNotMyDriverBusy(false);
-            setConfirmNotMyDriver(false);
+              setNotMyDriverBusy(false);
+              setConfirmNotMyDriver(false);
+            } catch {
+              // Stay open, stay explicit, and keep the instruction on screen.
+              setNotMyDriverBusy(false);
+              // Names a control that actually exists: "Emergency — get help
+              // now" sits on the trip screen behind this sheet.
+              setNotMyDriverError('We could NOT reach Swift — this driver has not been cancelled. Do not get in. Try again, or close this and use Emergency.');
+            }
           }}
         />
         <PillButton label="Close" variant="soft" style={{ alignSelf: 'stretch', marginTop: space.md }} onPress={() => setConfirmNotMyDriver(false)} />

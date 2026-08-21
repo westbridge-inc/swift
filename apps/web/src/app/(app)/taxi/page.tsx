@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { MapPin, Navigation, Search } from 'lucide-react';
 import { rideAvailability, rideEstimate, requestRide, activeRide, watchRide, placesAutocomplete, placeDetails, money, type Place } from '@/lib/customer';
+import { currentCoords } from '@/lib/geolocate';
 
 type Pt = { lat: number; lng: number; label: string };
 
@@ -18,13 +19,27 @@ export default function TaxiPage() {
   const [busy, setBusy] = useState(false);
   const [watching, setWatching] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  /** [F-027-02] Why there is no pickup. Without this the page just sits with
+   *  a dead "Request" button and no explanation. */
+  const [pickupError, setPickupError] = useState<string | null>(null);
   const debounce = useRef<any>(null);
 
-  // Pickup = device location; Georgetown fallback.
+  // [F-027-02] Pickup = device location, or NO pickup.
+  //
+  // This fell back to the Georgetown city centre and labelled it "Current
+  // location", then submitted it to dispatch. That sends a real driver to a
+  // kerb the passenger is not standing on, starts a fare from the wrong
+  // place, and tells them it was their current location. Of the three
+  // fabricated-coordinate paths this was the worst, because it reaches a
+  // human being who then drives somewhere.
+  //
+  // With no fallback, a denied prompt means no pickup and therefore no ride
+  // from the web app — a real gap, and the honest one. The message says so.
+  // (A manual pickup search belongs to MAP-EX-1; it is a feature, not a fix.)
   useEffect(() => {
-    const set = (lat: number, lng: number) => setPickup({ lat, lng, label: 'Current location' });
-    if (navigator.geolocation) navigator.geolocation.getCurrentPosition((p) => set(p.coords.latitude, p.coords.longitude), () => set(6.8013, -58.1551), { timeout: 5000 });
-    else set(6.8013, -58.1551);
+    currentCoords('set your pickup')
+      .then(({ lat, lng }) => { setPickup({ lat, lng, label: 'Current location' }); setPickupError(null); })
+      .catch((e: Error) => { setPickup(null); setPickupError(e.message); });
     activeRide().then((r) => { if (r?.id) router.push(`/orders/${r.id}`); }).catch(() => {});
   }, [router]);
 
@@ -73,8 +88,16 @@ export default function TaxiPage() {
         <div className="flex items-center gap-2 border-b border-black/5 pb-3">
           <MapPin className="h-4 w-4 text-[var(--swift-red)]" />
           <span className="text-sm text-[var(--swift-muted)]">Pickup</span>
-          <span className="ml-auto font-semibold">{pickup?.label ?? 'Locating…'}</span>
+          <span className="ml-auto font-semibold">{pickup?.label ?? (pickupError ? 'Not set' : 'Locating…')}</span>
         </div>
+        {/* [F-027-02] Say why there is no pickup. The alternative this
+            replaces was labelling a hardcoded city-centre point "Current
+            location" and dispatching a driver to it. */}
+        {pickupError && (
+          <p role="alert" className="pt-3 text-sm font-semibold text-[var(--swift-red)]">
+            {pickupError} Without it we can’t send a driver to the right place.
+          </p>
+        )}
         <div className="relative pt-3">
           <div className="flex items-center gap-2">
             <Search className="h-4 w-4 text-[var(--swift-muted)]" />
