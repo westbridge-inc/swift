@@ -137,17 +137,24 @@ async function main() {
   const rideId: string = req.json.data.ride.id;
   log('ride requested at zero supply', { rideId, message: req.json.data.message });
 
-  // Ops drought page (SWIFT-AUD-D7-02): record presence honestly, don't gate on it.
+  // Ops drought page (SWIFT-AUD-D7-02). TIMING MATTERS — and getting it wrong
+  // once produced a false finding (F-224, retracted): exhaust() returns early
+  // while attempts < EXHAUST_CAP (3) at REDISPATCH_DELAY_MS (90s), so the taxi
+  // slow lane that owns the ops page is only reached on the THIRD exhaust,
+  // ~4.5min+ in. Wait past when the page is DUE, computed from the constants,
+  // before concluding anything about its absence.
+  const OPS_PAGE_DUE_MS = 3 * 90_000 + 60_000; // EXHAUST_CAP × delay + slack
   let opsPages = 0;
-  const opsDeadline = Date.now() + 90_000;
+  const opsDeadline = Date.now() + OPS_PAGE_DUE_MS;
   while (Date.now() < opsDeadline) {
     opsPages = await prisma.notification.count({
       where: { data: { path: ['orderId'], equals: rideId } as any, NOT: { userId: customer.id } },
     });
     if (opsPages > 0) break;
-    await new Promise((r) => setTimeout(r, 5000));
+    await new Promise((r) => setTimeout(r, 10_000));
   }
-  log(opsPages > 0 ? 'EVIDENCE ops drought page fired' : 'OBSERVATION: no ops page within 90s (finding candidate)', { opsPages });
+  if (opsPages === 0) throw new Error(`FAIL: no ops page after ${Math.round(OPS_PAGE_DUE_MS / 1000)}s — a fully-exhausted dispatch must reach an admin (SWIFT-AUD-D7-02)`);
+  log('EVIDENCE ops drought page fired', { opsPages, waitedSec: Math.round((Date.now() - (opsDeadline - OPS_PAGE_DUE_MS)) / 1000) });
 
   await prisma.order.update({ where: { id: rideId }, data: { placedAt: new Date(Date.now() - 31 * 60_000) } });
   log('placedAt fast-forwarded past the 30-min wait limit');
