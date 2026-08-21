@@ -99,8 +99,14 @@ export class SosService {
 
   /** Slide-to-cancel — ONLY during the grace window. After ACTIVE it is impossible. */
   async cancel(id: string, reason: 'SLIDE_CANCEL' = 'SLIDE_CANCEL') {
+    // [F-026-12] The window closes on the CLOCK, not on the sweep's cadence.
+    // Status alone was not enough: promoteExpiredGrace is what flips
+    // TRIGGER_PENDING → ACTIVE, so between graceEndsAt passing and the next
+    // sweep tick an alert that should already be escalating was still
+    // cancellable. Requiring graceEndsAt in the future makes the deadline
+    // authoritative the instant it passes, whatever the sweep is doing.
     const moved = await this.prisma.sosAlert.updateMany({
-      where: { id, status: 'TRIGGER_PENDING' },
+      where: { id, status: 'TRIGGER_PENDING', graceEndsAt: { gt: new Date() } },
       data: { status: 'CANCELLED', cancelledAt: new Date(), cancelReason: reason },
     });
     if (moved.count === 0) throw new AppError(409, 'SOS_NOT_CANCELLABLE', 'This alert can no longer be cancelled — help is being reached.');

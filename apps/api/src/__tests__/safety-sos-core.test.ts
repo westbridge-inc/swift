@@ -42,6 +42,27 @@ describe('SOS state machine [safety M2]', () => {
     expect(a.graceEndsAt!.getTime()).toBeGreaterThan(a.triggeredAt.getTime());
   });
 
+  it('[F-026-12] the grace deadline closes on the CLOCK, not on the sweep tick', async () => {
+    // promoteExpiredGrace is what flips TRIGGER_PENDING -> ACTIVE, so between
+    // graceEndsAt passing and the next sweep run the row is still
+    // TRIGGER_PENDING. Cancel must refuse anyway: an alert whose window has
+    // elapsed is already escalating, whatever the sweep is doing.
+    const a = track(await sos.create({ actorUserId: u(), actorRole: 'CUSTOMER', triggerSource: 'BUTTON' }));
+    expect(a.status).toBe('TRIGGER_PENDING');
+    await prisma.sosAlert.update({ where: { id: a.id }, data: { graceEndsAt: new Date(Date.now() - 1000) } });
+    // Deliberately do NOT run the sweep — this is the gap the old check left.
+    await expect(sos.cancel(a.id)).rejects.toThrow(/no longer be cancelled/);
+    const after = await prisma.sosAlert.findUniqueOrThrow({ where: { id: a.id } });
+    expect(after.status).toBe('TRIGGER_PENDING');
+    expect(after.cancelledAt).toBeNull();
+  });
+
+  it('cancel still works INSIDE the window (the fix must not close the door early)', async () => {
+    const a = track(await sos.create({ actorUserId: u(), actorRole: 'CUSTOMER', triggerSource: 'BUTTON' }));
+    const c = await sos.cancel(a.id);
+    expect(c.status).toBe('CANCELLED');
+  });
+
   it('an ops-raised alert skips grace and is ACTIVE immediately', async () => {
     const a = track(await sos.create({ actorUserId: u(), actorRole: 'ADMIN', triggerSource: 'OPS_MANUAL' }));
     expect(a.status).toBe('ACTIVE');

@@ -127,6 +127,27 @@ afterAll(async () => {
 });
 
 describe('canonical request role authority', () => {
+  it('[F-026-14] a non-ops caller cannot claim OPS_MANUAL to skip grace or forge provenance', async () => {
+    // OPS_MANUAL both skips the reconsider window AND asserts "ops raised this
+    // on the person's behalf" on the highest-stakes record the system keeps.
+    // A client asserting it would bypass the barrier and write a false origin.
+    const actor = await makeUser(['CUSTOMER']);
+    const response = await app.inject({
+      method: 'POST',
+      url: '/api/v1/safety/sos',
+      payload: { source: 'OPS_MANUAL', clientIdempotencyKey: `ops-claim-${nanoid(12)}` },
+      headers: { authorization: `Bearer ${actor.token}`, 'content-type': 'application/json' },
+    });
+    expect(response.statusCode).toBe(200);
+    const alertId = response.json().data.id as string;
+    const alert = await app.prisma.sosAlert.findUniqueOrThrow({ where: { id: alertId } });
+    // Downgraded to a BUTTON press: honest provenance, and the grace barrier holds.
+    expect(alert.triggerSource).toBe('BUTTON');
+    expect(alert.status).toBe('TRIGGER_PENDING');
+    expect(alert.graceEndsAt).not.toBeNull();
+    await app.prisma.sosAlert.delete({ where: { id: alertId } });
+  });
+
   it('records SOS under the live activeRole instead of the stale JWT claim', async () => {
     const actor = await makeUser(['SUPER_ADMIN', 'CUSTOMER']);
     await app.prisma.user.update({
