@@ -175,7 +175,10 @@ describe('commencement watch [DCR-1 CW]', () => {
     const out = await runScan(app.prisma, fetchReturning({
       [s.url]: {
         status: 200,
-        body: page(['About our services', 'Contact the department', 'Privacy statement', 'Accessibility help', 'Sign in to continue']),
+        // [F-026-03] The REALISTIC bypass, not a strawman: on a LEGAL site the
+        // nav bar IS legal vocabulary. My first fixture avoided those words
+        // entirely, so it never exercised the hole the reviewer named.
+        body: page(['Acts of Parliament', 'Bills before the House', 'Statutory Instruments and Regulations', 'Official Gazette archive', 'Public Notices index']),
       },
     }), [s]);
     expect(out[0]!.error).toMatch(/PARSE_THIN:0<5/);
