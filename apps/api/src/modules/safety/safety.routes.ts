@@ -69,13 +69,20 @@ export async function safetyRoutes(app: FastifyInstance) {
       counterpartyUserId = [order.customerId, order.driver?.userId, order.rider?.userId].find((u) => u && u !== request.user.userId) ?? null;
     }
 
+    // [F-026-14] OPS_MANUAL is a PROVENANCE claim ("ops raised this on the
+    // person's behalf") and it skips the grace barrier. A client must not be
+    // able to assert it: doing so both bypasses the reconsider window and
+    // writes a false origin onto the highest-stakes record the system keeps.
+    // Only a real ops caller may claim it; everyone else is a BUTTON press.
+    const claimedSource = body.source === 'OPS_MANUAL' && isOps(request.user.role) ? 'OPS_MANUAL' : 'BUTTON';
+
     const alert = await sos.create({
       actorUserId: request.user.userId,
       actorRole: request.user.role,
       orderId: body.orderId ?? null,
       orderType,
       counterpartyUserId,
-      triggerSource: body.source ?? 'BUTTON',
+      triggerSource: claimedSource,
       lat: body.lat ?? null,
       lng: body.lng ?? null,
       accuracyM: body.accuracyM ?? null,
