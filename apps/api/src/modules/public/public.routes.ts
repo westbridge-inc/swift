@@ -1,6 +1,6 @@
 import { FastifyInstance } from 'fastify';
 import { z } from 'zod';
-import { NotFoundError } from '../../utils/errors';
+import { NotFoundError, AppError } from '../../utils/errors';
 
 /**
  * Public storefronts — the ONLY unauthenticated catalog surface.
@@ -43,12 +43,62 @@ const PUBLIC_VENDOR_SELECT = {
 /** Public visibility rule in one place: live commerce only. */
 const PUBLIC_WHERE = { status: 'ACTIVE' as const, isVerified: true };
 
+/**
+ * [F-226 / F-026-10] These are the only tenant-owned queries in the codebase
+ * that run with NO tenant context: a guest has not authenticated, so the
+ * Prisma tenant-scope extension leaves them unscoped. With one live tenant
+ * that is invisible; the moment a second exists, one tenant's stores would
+ * surface in another's public directory and in its SEO pages — silently, and
+ * indexed.
+ *
+ * Whether the public catalog is ONE global Swift directory or per-tenant is a
+ * product decision that is still open (registered as F-226). This does not
+ * decide it. It only makes the undecided state fail CLOSED: resolve which
+ * tenant a public request speaks for, and scope the query to it.
+ *
+ *   1. PUBLIC_TENANT_ID, when the deployment states it outright.
+ *   2. Otherwise the single active tenant — today's behaviour, byte-identical.
+ *   3. Two or more active tenants and no rule: refuse loudly. That combination
+ *      is exactly the state that must never quietly serve everything.
+ *
+ * Cached briefly because it is per-request on a hot public path; a new tenant
+ * becomes visible within the TTL.
+ */
+const TENANT_RESOLVE_TTL_MS = 60_000;
+let tenantCache: { id: string | null; at: number; count: number } | null = null;
+
+async function resolvePublicTenantId(app: FastifyInstance): Promise<string> {
+  const explicit = process.env['PUBLIC_TENANT_ID'];
+  if (explicit) return explicit;
+
+  const now = Date.now();
+  if (!tenantCache || now - tenantCache.at > TENANT_RESOLVE_TTL_MS) {
+    const active = await app.prisma.tenant.findMany({
+      where: { isActive: true },
+      select: { id: true },
+      take: 2, // two is all it takes to know the rule is needed
+    });
+    tenantCache = { id: active[0]?.id ?? null, at: now, count: active.length };
+  }
+  if (tenantCache.count === 1 && tenantCache.id) return tenantCache.id;
+  if (tenantCache.count === 0) throw new NotFoundError('Storefront');
+  throw new AppError(
+    503,
+    'PUBLIC_TENANT_UNRESOLVED',
+    'The public catalog is not configured for a multi-tenant deployment — set PUBLIC_TENANT_ID.',
+  );
+}
+
 export async function publicRoutes(app: FastifyInstance) {
   /** GET /storefronts — the public directory. */
   app.get('/storefronts', async (request) => {
     const query = listQuerySchema.parse(request.query);
     // Empty stores stay out of the public directory (a direct /storefronts/:slug link still resolves).
-    const where: Record<string, unknown> = { ...PUBLIC_WHERE, items: { some: { isAvailable: true } } };
+    const where: Record<string, unknown> = {
+      ...PUBLIC_WHERE,
+      tenantId: await resolvePublicTenantId(app),
+      items: { some: { isAvailable: true } },
+    };
     if (query.type) where['vendorType'] = query.type;
     if (query.city) where['city'] = { equals: query.city, mode: 'insensitive' };
     if (query.q) where['name'] = { contains: query.q, mode: 'insensitive' };
@@ -69,7 +119,7 @@ export async function publicRoutes(app: FastifyInstance) {
   /** GET /storefronts/:slug — one store's public page: profile + hours + menu. */
   app.get<{ Params: { slug: string } }>('/storefronts/:slug', async (request) => {
     const vendor = await app.prisma.vendor.findFirst({
-      where: { slug: request.params.slug, ...PUBLIC_WHERE },
+      where: { slug: request.params.slug, ...PUBLIC_WHERE, tenantId: await resolvePublicTenantId(app) },
       select: {
         ...PUBLIC_VENDOR_SELECT,
         // The app already shows guests the street address (pickup needs it);
