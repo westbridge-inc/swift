@@ -21,6 +21,7 @@ import {
   socketAuthUserRoom,
 } from '../utils/socket-revocation';
 import { guardRedisCommandPromises } from '../utils/redis-command-guard';
+import { warRoomsForSocket } from '../modules/safety/war-room';
 
 // Socket payloads come straight off the wire from any authenticated client —
 // validate them like request bodies. cuid ids are 25 chars; 64 is headroom.
@@ -647,6 +648,18 @@ export const socketPlugin = fp(async (app: FastifyInstance) => {
         socket.data.role = authority.role;
         socket.data.authorizationExpiresAtMs = authority.authorizationExpiresAtMs;
         await socket.join([`user:${userId}`, `session:${authSessionId}`]);
+        // [F-027-16] The ops war room had seven emit producers and NO join.
+        // Every live emergency — SOS activations, incidents, "not my driver"
+        // releases — went into an empty room, and because emitting into an
+        // empty room does not throw, the delivery receipt said it landed.
+        // Role-gated and tenant-scoped: a tenant's ADMIN joins only their own
+        // room, because these payloads carry another person's role, order id
+        // and coordinates (the leak F-026-15 closed on the push channel).
+        const warRooms = warRoomsForSocket(authority.role, tenantId);
+        if (warRooms.length > 0) {
+          await socket.join(warRooms);
+          app.log.info({ socketId: socket.id, userId, role: authority.role, warRooms }, 'ops socket joined the war room');
+        }
         if (!socket.connected) throw new Error('Socket revoked during connection');
 
         const expiryDelayMs = authority.authorizationExpiresAtMs - Date.now();

@@ -2,7 +2,8 @@ import type { PrismaClient, SosStatus, SosTriggerSource, SosResolutionCode, Orde
 import { Prisma } from '@prisma/client';
 import type { Server } from 'socket.io';
 import { AppError, NotFoundError } from '../../utils/errors';
-import { NotificationService, notifyAdmins } from '../notification/notification.service';
+import { NotificationService, notifyAdmins, tenantOfUser } from '../notification/notification.service';
+import { warRoomsFor } from './war-room';
 import { log } from '../../utils/logger';
 
 // SOS engine — the life-safety state machine (safety spec §4). Server-owned,
@@ -120,10 +121,35 @@ export class SosService {
       return this.prisma.sosAlert.findUniqueOrThrow({ where: { id: live.id } });
     }
 
+    // [F-027-18] Resolve the tenant from the PERSON IN DANGER, explicitly.
+    //
+    // Nothing set tenantId here, so it came from whichever of two accidents
+    // applied: the request-scoped Prisma extension stamped it when an alert
+    // was raised on an HTTP request, and NOTHING stamped it when one was
+    // raised from a background sweep — the guardian check-in-timeout ladder,
+    // the grace-expiry backstop — because those carry no request context. Those
+    // alerts silently took the schema default, `swift-default`.
+    //
+    // Since F-026-15 the ops page follows alert.tenantId, so a tenant-B
+    // customer's auto-escalated alert paged swift-default's admins and NOBODY
+    // IN TENANT B WAS EVER TOLD. The server-guessed emergency — the one raised
+    // precisely because the person stopped answering — was the one that went
+    // to the wrong room.
+    const tenantId = (await tenantOfUser(this.prisma, input.actorUserId))
+      ?? (input.orderId
+        ? (await this.prisma.order.findUnique({ where: { id: input.orderId }, select: { tenantId: true } }))?.tenantId ?? null
+        : null);
+    if (!tenantId) {
+      // Never silently platform-wide on a life-safety row: an alert nobody can
+      // route is worse than a loud one.
+      log().error({ actorUserId: input.actorUserId, orderId: input.orderId }, '[F-027-18] could not resolve a tenant for an SOS actor — falling back to the platform tenant');
+    }
+
     let alert;
     try {
       alert = await this.prisma.sosAlert.create({
         data: {
+          ...(tenantId ? { tenantId } : {}),
           actorUserId: input.actorUserId,
           actorRole: input.actorRole,
           orderId: input.orderId ?? null,
@@ -270,10 +296,23 @@ export class SosService {
       log().error({ err: e, sosAlertId: id }, 'SOS fan-out: ops page failed');
     }
     try {
-      this.io.to('ops:war-room').emit('sos:active', { sosAlertId: id, actorRole: alert.actorRole, orderId: alert.orderId, lat: alert.triggerLat, lng: alert.triggerLng, triggeredAt: alert.triggeredAt });
-      receipts['socket'] = true;
-    } catch {
-      receipts['socket'] = false;
+      // [F-027-16] `socket: true` recorded that we CALLED emit, not that
+      // anyone received it — and emitting into an empty room never throws, so
+      // the receipt read "delivered" for a room that, until this batch, had
+      // seven producers and no subscriber anywhere in the codebase. Count the
+      // sockets actually in the room: a silence receipt has to be able to say
+      // zero. fetchSockets() is adapter-aware, so this is the cluster-wide
+      // count, not just this node's.
+      const rooms = warRoomsFor(alert.tenantId);
+      this.io.to(rooms).emit('sos:active', { sosAlertId: id, tenantId: alert.tenantId, actorRole: alert.actorRole, orderId: alert.orderId, lat: alert.triggerLat, lng: alert.triggerLng, triggeredAt: alert.triggeredAt });
+      const listeners = await this.io.in(rooms).fetchSockets();
+      receipts['socketListeners'] = listeners.length;
+      if (listeners.length === 0) {
+        log().error({ sosAlertId: id, tenantId: alert.tenantId, rooms }, 'SOS fan-out: war-room emit reached ZERO sockets — nobody is watching the live feed');
+      }
+    } catch (e) {
+      receipts['socketListeners'] = 0;
+      log().error({ err: e, sosAlertId: id }, 'SOS fan-out: war-room emit failed');
     }
 
     // Guardian §5.3 L4: an alert born from an UNANSWERED check-in timeout is
