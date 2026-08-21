@@ -71,10 +71,20 @@ async function loginByOtp(phone: string): Promise<string> {
   throw new Error('unreachable');
 }
 
-/** Every notification row this alert caused — the ONLY proof a page happened.
- *  The fan-out stamps `data.sosAlertId` (sos.service fanOut). */
-async function pagesFor(alertId: string): Promise<number> {
-  return prisma.notification.count({ where: { data: { path: ['sosAlertId'], equals: alertId } as never } });
+/** Everything the fan-out could possibly have done, not just the inbox rows.
+ *  [F-026-11] Counting Notification rows alone was NOT "the only proof a page
+ *  happened": production also emits straight to the war-room socket and SMSs
+ *  verified emergency contacts, neither of which writes one. The alert's own
+ *  deliveryReceipts is the durable record of EVERY channel (opsPaged, socket,
+ *  contacts), so silence has to mean silence there too. */
+async function reachOf(alertId: string): Promise<{ notices: number; receipts: unknown; anyChannel: boolean }> {
+  const [notices, alert] = await Promise.all([
+    prisma.notification.count({ where: { data: { path: ['sosAlertId'], equals: alertId } as never } }),
+    prisma.sosAlert.findUnique({ where: { id: alertId }, select: { deliveryReceipts: true } }),
+  ]);
+  const receipts = (alert?.deliveryReceipts ?? null) as Record<string, unknown> | null;
+  const anyChannel = notices > 0 || (receipts != null && Object.keys(receipts).length > 0);
+  return { notices, receipts, anyChannel };
 }
 
 const raised: string[] = [];
@@ -95,17 +105,34 @@ async function main() {
   raised.push(a1.id);
   if (a1.status !== 'TRIGGER_PENDING') throw new Error(`FAIL: expected TRIGGER_PENDING, got ${a1.status}`);
   if (!a1.graceEndsAt || new Date(a1.graceEndsAt) <= new Date()) throw new Error('FAIL: no live grace window returned — the countdown strip would be a fiction');
-  const pagesDuringGrace = await pagesFor(a1.id);
-  if (pagesDuringGrace !== 0) throw new Error(`FAIL: ${pagesDuringGrace} page(s) sent DURING the grace window — the alert has not been confirmed`);
-  log('EVIDENCE grace is honest', { status: a1.status, graceEndsAt: a1.graceEndsAt, pages: pagesDuringGrace });
+  // [F-026-11] Sample ACROSS the window rather than once immediately: a late
+  // or delayed page would slip past a single instantaneous check.
+  const graceEnds = new Date(a1.graceEndsAt).getTime();
+  let graceReach = await reachOf(a1.id);
+  while (Date.now() < graceEnds - 200) {
+    if (graceReach.anyChannel) break;
+    await new Promise((r) => setTimeout(r, 250));
+    graceReach = await reachOf(a1.id);
+  }
+  if (graceReach.anyChannel) throw new Error(`FAIL: the alert reached someone DURING the grace window (notices=${graceReach.notices}, receipts=${JSON.stringify(graceReach.receipts)}) — it has not been confirmed`);
+  log('EVIDENCE grace is honest across the WHOLE window', { status: a1.status, graceEndsAt: a1.graceEndsAt, notices: 0, receipts: null });
 
   // ── 2. cancel in grace: nothing happened, and it still says nothing ──────
-  const c1 = await http('POST', `/safety/sos/${a1.id}/cancel`, {}, token);
-  if (c1.status >= 300) throw new Error(`cancel ${c1.status}`);
+  // A FRESH alert: leg 1 deliberately spends its whole window sampling, and
+  // cancelling after the deadline is now correctly refused (the F-026-12 fix).
+  const t1b = await http('POST', '/safety/sos', { lat: 6.8, lng: -58.15, source: 'BUTTON' }, token);
+  const a1b = t1b.json.data;
+  raised.push(a1b.id);
+  const c1 = await http('POST', `/safety/sos/${a1b.id}/cancel`, {}, token);
+  if (c1.status >= 300) throw new Error(`cancel ${c1.status}: ${JSON.stringify(c1.json).slice(0, 200)}`);
   if (c1.json.data.status !== 'CANCELLED') throw new Error(`FAIL: cancel left status ${c1.json.data.status}`);
-  const pagesAfterCancel = await pagesFor(a1.id);
-  if (pagesAfterCancel !== 0) throw new Error(`FAIL: a CANCELLED alert produced ${pagesAfterCancel} page(s)`);
-  log('EVIDENCE cancelled-in-grace pages nobody', { status: c1.json.data.status, pages: pagesAfterCancel });
+  // Wait past the moment it WOULD have escalated before declaring silence.
+  const cancelWindowEnds = new Date(a1b.graceEndsAt).getTime();
+  const waitPastWindow = cancelWindowEnds + 1_500 - Date.now();
+  if (waitPastWindow > 0) await new Promise((r) => setTimeout(r, waitPastWindow));
+  const cancelReach = await reachOf(a1b.id);
+  if (cancelReach.anyChannel) throw new Error(`FAIL: a CANCELLED alert reached someone (notices=${cancelReach.notices}, receipts=${JSON.stringify(cancelReach.receipts)})`);
+  log('EVIDENCE cancelled-in-grace pages nobody, even past its own deadline', { status: c1.json.data.status, notices: 0, receipts: null });
 
   // ── 3. confirm makes "help is coming" TRUE ──────────────────────────────
   const t2 = await http('POST', '/safety/sos', { lat: 6.8, lng: -58.15, source: 'BUTTON' }, token);
@@ -114,13 +141,13 @@ async function main() {
   const conf = await http('POST', `/safety/sos/${a2.id}/confirm`, {}, token);
   if (conf.status >= 300) throw new Error(`confirm ${conf.status}`);
   if (conf.json.data.status !== 'ACTIVE') throw new Error(`FAIL: confirm left status ${conf.json.data.status}`);
-  let pagesAfterConfirm = 0;
-  for (let i = 0; i < 20 && pagesAfterConfirm === 0; i++) {
-    pagesAfterConfirm = await pagesFor(a2.id);
-    if (pagesAfterConfirm === 0) await new Promise((r) => setTimeout(r, 500));
+  let confirmReach = await reachOf(a2.id);
+  for (let i = 0; i < 20 && !confirmReach.anyChannel; i++) {
+    await new Promise((r) => setTimeout(r, 500));
+    confirmReach = await reachOf(a2.id);
   }
-  if (pagesAfterConfirm === 0) throw new Error('FAIL: an ACTIVE alert paged NOBODY — the strip would claim a rescue that never started');
-  log('EVIDENCE confirmed alert really fans out', { status: conf.json.data.status, pages: pagesAfterConfirm });
+  if (!confirmReach.anyChannel) throw new Error('FAIL: an ACTIVE alert reached NOBODY — the strip would claim a rescue that never started');
+  log('EVIDENCE confirmed alert really fans out', { status: conf.json.data.status, notices: confirmReach.notices, receipts: confirmReach.receipts });
 
   // ── 4. after ACTIVE, cancel is impossible — and says so honestly ─────────
   const lateCancel = await http('POST', `/safety/sos/${a2.id}/cancel`, {}, token);
@@ -137,12 +164,23 @@ async function main() {
   log('EVIDENCE I-am-safe flags but never resolves', { status: safe.json.data.status, flaggedAt: safe.json.data.userSafeFlaggedAt });
 
   // ── 6. SOS is exempt from rate limiting (LHC-1 K2) ──────────────────────
-  const burst = await Promise.all(Array.from({ length: 5 }, () =>
-    http('POST', '/safety/sos', { lat: 6.8, lng: -58.15, source: 'BUTTON' }, token)));
+  // [F-026-13] Five requests proved nothing: the global ceiling is 200/min, so
+  // a five-shot burst never reaches it, and "not 429" would also be satisfied
+  // by five 401s or 500s. Fire ABOVE the configured ceiling and require every
+  // response to be a real, well-formed alert.
+  const CEILING = Number(process.env['RATE_LIMIT_MAX'] ?? 200);
+  const burstSize = CEILING + 20;
+  // [F-026-16] Record each id AS IT ARRIVES. Collecting them after the whole
+  // batch settled meant one rejected sibling could hide every successful
+  // alert from teardown — leaving live SOS rows behind on a "green" run.
+  const burst = await Promise.all(Array.from({ length: burstSize }, () =>
+    http('POST', '/safety/sos', { lat: 6.8, lng: -58.15, source: 'BUTTON' }, token)
+      .then((r) => { if (r.json?.data?.id) raised.push(r.json.data.id); return r; })));
   const limited = burst.filter((r) => r.status === 429);
-  burst.forEach((r) => { if (r.json?.data?.id) raised.push(r.json.data.id); });
-  if (limited.length > 0) throw new Error(`FAIL K2: ${limited.length}/5 rapid SOS triggers were RATE-LIMITED — a limiter must never stand between a person and help`);
-  log('EVIDENCE SOS exempt from rate limits', { triggers: burst.length, rateLimited: limited.length });
+  if (limited.length > 0) throw new Error(`FAIL K2: ${limited.length}/${burstSize} SOS triggers were RATE-LIMITED past the ${CEILING}/min ceiling — a limiter must never stand between a person and help`);
+  const malformed = burst.filter((r) => r.status !== 200 || !r.json?.data?.id || !r.json?.data?.status);
+  if (malformed.length > 0) throw new Error(`FAIL: ${malformed.length}/${burstSize} triggers did not return a well-formed alert (first: ${malformed[0]!.status} ${JSON.stringify(malformed[0]!.json).slice(0, 160)})`);
+  log('EVIDENCE SOS exempt from rate limits ABOVE the global ceiling', { triggers: burstSize, ceiling: CEILING, rateLimited: 0, allWellFormed: true });
 
   // ── 7. replay is ONE alert ──────────────────────────────────────────────
   const key = `b14-${randomInt(100000, 999999)}`;
@@ -192,24 +230,43 @@ async function main() {
     await prisma.order.updateMany({ where: { id: order.id, status: { notIn: ['CANCELLED', 'COMPLETED', 'DELIVERED', 'REFUNDED'] } }, data: { status: 'CANCELLED' } });
   }
 
-  log('B14 COMPLETE — SAFETY STATUS STATES ONLY WHAT ACTUALLY HAPPENED');
+  // [F-026-16] Teardown BEFORE the completion line, and its failure fails the
+  // run: a life-safety baseline must not print COMPLETE over live alerts.
+  await closeRaisedAlerts();
+  log('B14 COMPLETE — SAFETY STATUS STATES ONLY WHAT ACTUALLY HAPPENED (teardown verified clean)');
 }
 
+/** Never leave a live SOS on the rig — and never CLAIM to have closed one.
+ *  [F-026-16] This is a force-close through raw Prisma: it deliberately
+ *  bypasses the ops actor, resolution code, transition table and all-clear
+ *  fan-out, because it is rig hygiene, not a real resolution. So it verifies
+ *  the END STATE afterwards and throws if anything survived — a swallowed
+ *  cleanup error must never ride out on a green exit. */
 async function closeRaisedAlerts() {
-  // Never leave a live SOS on the rig.
+  const LIVE = ['TRIGGER_PENDING', 'ACTIVE', 'ACKNOWLEDGED'] as const;
   const open = await prisma.sosAlert.findMany({
-    where: { id: { in: raised }, status: { in: ['TRIGGER_PENDING', 'ACTIVE', 'ACKNOWLEDGED'] } },
+    where: { id: { in: raised }, status: { in: LIVE as never } },
     select: { id: true },
   });
   if (open.length > 0) {
     await prisma.sosAlert.updateMany({
       where: { id: { in: open.map((o) => o.id) } },
-      data: { status: 'RESOLVED', resolvedAt: new Date(), resolutionNotes: 'ELV2 B14 baseline teardown' },
+      data: { status: 'RESOLVED', resolvedAt: new Date(), resolutionNotes: 'ELV2 B14 baseline teardown (force-close, not an ops resolution)' },
     });
-    log('teardown: closed raised alerts', { closed: open.length });
+    log('teardown: force-closed raised alerts', { closed: open.length });
   }
+  const survivors = await prisma.sosAlert.count({ where: { id: { in: raised }, status: { in: LIVE as never } } });
+  if (survivors > 0) throw new Error(`TEARDOWN FAILED: ${survivors} SOS alert(s) left LIVE on the rig`);
 }
 
 main()
   .catch((e) => { console.error('B14 FAILED:', e.message); process.exitCode = 1; })
-  .finally(async () => { await closeRaisedAlerts().catch((e) => console.error('teardown error:', e.message)); await prisma.$disconnect(); });
+  .finally(async () => {
+    // Safety net for the FAILURE path (the happy path already tore down and
+    // verified above). A failure here is itself a failure of the run.
+    await closeRaisedAlerts().catch((e) => {
+      console.error('B14 TEARDOWN FAILED:', e.message);
+      process.exitCode = 1;
+    });
+    await prisma.$disconnect();
+  });

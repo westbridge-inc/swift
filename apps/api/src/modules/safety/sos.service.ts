@@ -123,6 +123,8 @@ export class SosService {
       title: 'SOS — user marked safe (verify)',
       body: `The user on alert ${id} tapped "I'm safe". This does NOT close the case — call back to verify before resolving.`,
       data: { kind: 'sos_marked_safe', sosAlertId: id },
+      // [F-026-15] scope the page to the alert's own tenant — see fanOut.
+      tenantId: alert.tenantId,
     }).catch(() => {});
     return updated;
   }
@@ -182,7 +184,14 @@ export class SosService {
     if (!alert || alert.status !== 'ACTIVE') return;
     const receipts: Record<string, unknown> = {};
     try {
+      // [F-026-15] The grace-expiry backstop runs in a BACKGROUND WORKER,
+      // which carries no request tenant context — and notifyAdmins without a
+      // tenantId deliberately falls back to paging every active admin. So an
+      // alert in one tenant paged every tenant's admins with its role, order
+      // id and COORDINATES. Same class as REPORT-014 F-014-03, which the
+      // dispatch ops-page already fixed by passing the row's own tenantId.
       const n = await notifyAdmins(this.prisma, this.notifications, {
+        tenantId: alert.tenantId,
         title: '🚨 SOS ACTIVE — respond now',
         body: `${alert.actorRole} raised an SOS${alert.orderId ? ` on order ${alert.orderId}` : ''}. Location on the war-room map. Ack immediately.`,
         data: { kind: 'sos_active', sosAlertId: id, orderId: alert.orderId, lat: alert.triggerLat, lng: alert.triggerLng },

@@ -49,8 +49,20 @@ export async function safetyRoutes(app: FastifyInstance) {
     return a;
   }
 
+  /**
+   * [F-026-13 / LHC-1 K2] A limiter must NEVER stand between a person and
+   * help. These routes were covered only by the global 200/min ceiling with
+   * no exemption, so a burst — a panicking person tapping repeatedly, or a
+   * session whose budget was already spent on ordinary traffic — could be
+   * answered with 429 at the exact moment it mattered. Authentication still
+   * applies; only the throttle is lifted, and the trigger is idempotent on
+   * clientIdempotencyKey so repeats collapse into one alert rather than
+   * flooding ops.
+   */
+  const lifeSafety = { preHandler: [app.authenticate], config: { rateLimit: false as const } };
+
   /** POST /sos — raise an alert (grace window opens unless ops-raised). */
-  app.post('/sos', auth, async (request) => {
+  app.post('/sos', lifeSafety, async (request) => {
     const body = createSchema.parse(request.body ?? {});
 
     let counterpartyUserId: string | null = null;
@@ -93,19 +105,19 @@ export async function safetyRoutes(app: FastifyInstance) {
     return { success: true, data: { id: alert.id, status: alert.status, graceEndsAt: alert.graceEndsAt } };
   });
 
-  app.post<{ Params: { id: string } }>('/sos/:id/confirm', auth, async (request) => {
+  app.post<{ Params: { id: string } }>('/sos/:id/confirm', lifeSafety, async (request) => {
     await ownedAlert(request.params.id, request.user.userId);
     const a = await sos.confirm(request.params.id);
     return { success: true, data: { id: a.id, status: a.status } };
   });
 
-  app.post<{ Params: { id: string } }>('/sos/:id/cancel', auth, async (request) => {
+  app.post<{ Params: { id: string } }>('/sos/:id/cancel', lifeSafety, async (request) => {
     await ownedAlert(request.params.id, request.user.userId);
     const a = await sos.cancel(request.params.id);
     return { success: true, data: { id: a.id, status: a.status } };
   });
 
-  app.post<{ Params: { id: string } }>('/sos/:id/mark-safe', auth, async (request) => {
+  app.post<{ Params: { id: string } }>('/sos/:id/mark-safe', lifeSafety, async (request) => {
     await ownedAlert(request.params.id, request.user.userId);
     const a = await sos.markSafe(request.params.id);
     return { success: true, data: { id: a.id, status: a.status, userSafeFlaggedAt: a.userSafeFlaggedAt } };
