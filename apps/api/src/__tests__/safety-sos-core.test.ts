@@ -42,6 +42,37 @@ describe('SOS state machine [safety M2]', () => {
     expect(a.graceEndsAt!.getTime()).toBeGreaterThan(a.triggeredAt.getTime());
   });
 
+  it('[F-026-15] the ACTIVE fan-out pages ONLY the alert tenant\'s admins', async () => {
+    // The grace-expiry backstop runs in a background worker with NO request
+    // tenant context, and notifyAdmins without a tenantId deliberately pages
+    // every active admin. An alert in one tenant was therefore paging every
+    // tenant's admins with its role, order id and coordinates.
+    const tenantB = `sos-t-${nanoid(6)}`;
+    await prisma.tenant.create({ data: { id: tenantB, name: 'SOS tenant B', slug: tenantB, isActive: true } });
+    const adminB = await prisma.user.create({
+      data: {
+        phone: `+59277${Math.floor(Math.random() * 900000) + 100000}`,
+        firstName: 'Other', lastName: 'Admin',
+        roles: ['ADMIN'] as never[], activeRole: 'ADMIN' as never,
+        isPhoneVerified: true, status: 'ACTIVE', tenantId: tenantB,
+      },
+    });
+    try {
+      // An alert in the DEFAULT tenant, promoted the way the worker does it.
+      const a = track(await sos.create({ actorUserId: u(), actorRole: 'CUSTOMER', triggerSource: 'BUTTON', lat: 6.8, lng: -58.15 }));
+      await prisma.sosAlert.update({ where: { id: a.id }, data: { graceEndsAt: new Date(Date.now() - 1000) } });
+      await sos.promoteExpiredGrace();
+      const leaked = await prisma.notification.count({
+        where: { userId: adminB.id, data: { path: ['sosAlertId'], equals: a.id } as never },
+      });
+      expect(leaked, 'a tenant-B admin was paged about a tenant-A SOS').toBe(0);
+    } finally {
+      await prisma.notification.deleteMany({ where: { userId: adminB.id } });
+      await prisma.user.delete({ where: { id: adminB.id } });
+      await prisma.tenant.delete({ where: { id: tenantB } });
+    }
+  });
+
   it('[F-026-12] the grace deadline closes on the CLOCK, not on the sweep tick', async () => {
     // promoteExpiredGrace is what flips TRIGGER_PENDING -> ACTIVE, so between
     // graceEndsAt passing and the next sweep run the row is still
