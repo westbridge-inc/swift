@@ -434,23 +434,34 @@ describe('durable mover revocation outbox', () => {
     const sendPush = vi.spyOn(ExpoPushProvider.prototype, 'sendPush')
       .mockImplementation(() => new Promise(() => undefined));
 
-    // Bounded-return semantics: with a NEVER-resolving push, logout must come
-    // back rather than hang. Raced against a sentinel timer sized from the
-    // configured budgets (50ms immediate + 150ms effect) rather than asserted
-    // on wall-clock ms: a saturated runner delays the sentinel and the logout
-    // equally, so this stays honest under parallel load where a bare
-    // `Date.now()` ceiling had to be inflated past the real bound to pass.
-    const HANG_SENTINEL_MS = 2_000; // 10x the 200ms of configured budget
+    // Bounded-return semantics, asserted TWICE because they are two different
+    // claims and only one of them is stall-proof [F-024-01 → F-026-04]:
+    //
+    //  1. STRUCTURE — with a NEVER-resolving push, logout must come back at
+    //     all. The sentinel race decides this deterministically: a saturated
+    //     runner delays the timer and the logout equally, so ordering holds
+    //     under any load. This is the hang detector, not the budget.
+    //  2. BUDGET — logout must also return promptly, within the ceiling this
+    //     test has always claimed. A wall clock is the only way to state that,
+    //     and inflating it to swallow runner stalls is how the real bound got
+    //     lost the first time. It stays at the original 1s: 5x the 200ms of
+    //     configured budget (50ms immediate + 150ms effect) is generous for a
+    //     loaded runner while still failing on a genuine regression.
+    const CONFIGURED_BUDGET_MS = 200; // 50 immediate + 150 effect, set above
+    const BUDGET_CEILING_MS = 5 * CONFIGURED_BUDGET_MS;
+    const HANG_SENTINEL_MS = 2_000;
     const sentinel = new Promise<'hung'>((resolve) => {
       const t = setTimeout(() => resolve('hung'), HANG_SENTINEL_MS);
       t.unref?.();
     });
+    const startedAt = Date.now();
     await expect(
       Promise.race([
         new AuthService(app).logout(mover.session.id, mover.user.id).then(() => 'returned' as const),
         sentinel,
       ]),
     ).resolves.toBe('returned');
+    expect(Date.now() - startedAt).toBeLessThan(BUDGET_CEILING_MS);
     expect(await app.prisma.session.findUnique({ where: { id: mover.session.id } })).toBeNull();
 
     // Wait on the CONDITION, not the clock: the 150ms effect-timeout must
