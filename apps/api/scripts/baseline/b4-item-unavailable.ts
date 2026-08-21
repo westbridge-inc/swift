@@ -8,7 +8,7 @@
  * Run: DATABASE_URL=postgresql://swift:swift@localhost:5434/swift \
  *      npx tsx scripts/baseline/b4-item-unavailable.ts
  */
-import { PrismaClient } from '@prisma/client';
+import { Prisma, PrismaClient } from '@prisma/client';
 
 const API = process.env['BASELINE_API'] ?? 'http://localhost:3000/api/v1';
 const prisma = new PrismaClient();
@@ -98,7 +98,10 @@ async function main() {
   const co = await http('POST', '/customer/checkout', { paymentMethod: 'CASH', fulfillmentSelections: { [vendor.id]: 'PICKUP' } }, customerToken);
   if (co.status !== 200) throw new Error(`checkout ${co.status}: ${JSON.stringify(co.json).slice(0, 300)}`);
   const orderId: string = co.json.data.orders?.[0]?.id ?? co.json.data.order?.id ?? co.json.data.id;
-  const o0 = await prisma.order.findUniqueOrThrow({ where: { id: orderId }, select: { totalAmount: true, holdExpiresAt: true } });
+  const o0 = await prisma.order.findUniqueOrThrow({
+    where: { id: orderId },
+    select: { totalAmount: true, holdExpiresAt: true, subtotalBase: true, subtotalCustomer: true },
+  });
   log('EVIDENCE placed 2 lines', { orderId, total: String(o0.totalAmount) });
 
   // ── 2. hold ff → vendor accepts ───────────────────────────────────────────
@@ -119,20 +122,48 @@ async function main() {
   if (lines.length !== 2) throw new Error(`expected 2 lines, got ${lines.length}`);
   const victim = lines.find((l) => l.name === 'ELV1 Milk 1L') ?? lines[1]!;
   const stockBefore = (await prisma.item.findUniqueOrThrow({ where: { id: victim.itemId! }, select: { stockQuantity: true } })).stockQuantity;
-  const notifBefore = await prisma.notification.count({ where: { userId: customer.id } });
+  const refundStartedAt = new Date();
   const rf = await http('POST', `/vendor/orders/${orderId}/items/${victim.id}/refund-line`, {}, ownerToken);
   if (rf.status >= 300) throw new Error(`refund-line ${rf.status}: ${JSON.stringify(rf.json).slice(0,250)}`);
 
   // ── 4. evidence: totals shrink · stock restored · customer told ───────────
-  const o1 = await prisma.order.findUniqueOrThrow({ where: { id: orderId }, select: { totalAmount: true } });
-  const expectedDrop = Number(victim.totalCustomer);
-  const actualDrop = Number(o0.totalAmount) - Number(o1.totalAmount);
-  if (actualDrop !== expectedDrop) throw new Error(`FAIL recompute: dropped ${actualDrop}, expected ${expectedDrop}`);
+  // [F-024-14] EXACT money: Prisma Decimals compared as scaled integers (minor
+  // units), never JS floats, and EVERY affected column — a component total can
+  // be corrupted while the grand total happens to land right.
+  const o1 = await prisma.order.findUniqueOrThrow({
+    where: { id: orderId },
+    select: { totalAmount: true, subtotalBase: true, subtotalCustomer: true },
+  });
+  const minor = (d: unknown) => BigInt(new Prisma.Decimal(d as never).times(100).toFixed(0));
+  const expectedDrop = minor(victim.totalCustomer);
+  const actualDrop = minor(o0.totalAmount) - minor(o1.totalAmount);
+  if (actualDrop !== expectedDrop) throw new Error(`FAIL recompute: dropped ${actualDrop}, expected ${expectedDrop} (minor units)`);
+  const subCustomerDrop = minor(o0.subtotalCustomer) - minor(o1.subtotalCustomer);
+  if (subCustomerDrop !== expectedDrop) throw new Error(`FAIL component: subtotalCustomer dropped ${subCustomerDrop}, expected ${expectedDrop}`);
+  const subBaseDrop = minor(o0.subtotalBase) - minor(o1.subtotalBase);
+  if (subBaseDrop <= 0n || subBaseDrop > expectedDrop) throw new Error(`FAIL component: subtotalBase dropped ${subBaseDrop} (expected >0 and ≤ ${expectedDrop})`);
+  const victimAfter = await prisma.orderItem.findUniqueOrThrow({ where: { id: victim.id }, select: { subStatus: true } });
+  if (victimAfter.subStatus !== 'REFUNDED') throw new Error(`FAIL: refunded line is ${victimAfter.subStatus}, expected REFUNDED`);
   const stockAfter = (await prisma.item.findUniqueOrThrow({ where: { id: victim.itemId! }, select: { stockQuantity: true } })).stockQuantity;
   if ((stockAfter ?? 0) !== (stockBefore ?? 0) + 1) throw new Error(`FAIL restock: ${stockBefore} → ${stockAfter}`);
-  const notifAfter = await prisma.notification.count({ where: { userId: customer.id } });
-  if (notifAfter <= notifBefore) throw new Error('FAIL: customer never notified of the removed line');
-  log('EVIDENCE line refunded', { drop: actualDrop, stock: `${stockBefore}→${stockAfter}`, customerNotified: notifAfter - notifBefore });
+  // [F-024-13] The notification must be THE line-refund one — correlated by
+  // customer, type, orderId, kind and lineId. A count delta accepts any
+  // unrelated notice that happened to land in the window.
+  const refundNotices = await prisma.notification.count({
+    where: {
+      userId: customer.id, type: 'ORDER_UPDATE', createdAt: { gte: refundStartedAt },
+      AND: [
+        { data: { path: ['kind'], equals: 'line_refunded' } as never },
+        { data: { path: ['orderId'], equals: orderId } as never },
+        { data: { path: ['lineId'], equals: victim.id } as never },
+      ],
+    },
+  });
+  if (refundNotices !== 1) throw new Error(`FAIL: ${refundNotices} correlated line_refunded notices for this line, expected exactly 1`);
+  log('EVIDENCE line refunded', {
+    dropMinor: String(actualDrop), subtotalCustomerDropMinor: String(subCustomerDrop), subtotalBaseDropMinor: String(subBaseDrop),
+    lineSubStatus: victimAfter.subStatus, stock: `${stockBefore}→${stockAfter}`, correlatedNotices: refundNotices,
+  });
 
   // ── 5. the remainder proceeds: pick the surviving line → ready → code done ─
   const survivor = lines.find((l) => l.id !== victim.id)!;
@@ -146,6 +177,11 @@ async function main() {
   const done = await http('PUT', `/vendor/orders/${orderId}/complete-pickup`, { code }, ownerToken);
   if (done.status >= 300) throw new Error(`complete ${done.status}: ${JSON.stringify(done.json).slice(0,200)}`);
   const oF = await prisma.order.findUniqueOrThrow({ where: { id: orderId }, select: { status: true, totalAmount: true } });
+  // [F-024-15] A 2xx completion response is not completion — assert the
+  // terminal state, or a regression that 200s while leaving the order open
+  // still prints "B4 COMPLETE".
+  if (oF.status !== 'COMPLETED') throw new Error(`FAIL: remainder ended in ${oF.status}, expected COMPLETED`);
+  if (minor(oF.totalAmount) !== minor(o1.totalAmount)) throw new Error(`FAIL: total moved after the refund (${String(o1.totalAmount)} → ${String(oF.totalAmount)})`);
   log('EVIDENCE remainder completed', { status: oF.status, finalTotal: String(oF.totalAmount) });
 
   log('B4 COMPLETE — LINE REFUND RECOMPUTES, RESTOCKS, NOTIFIES; REMAINDER PROCEEDS');

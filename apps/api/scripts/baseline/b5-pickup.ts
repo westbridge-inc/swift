@@ -53,10 +53,21 @@ async function main() {
   const vendor = await prisma.vendor.findFirstOrThrow({ where: { name: VENDOR_MARK } });
   const item = await prisma.item.findFirstOrThrow({ where: { vendorId: vendor.id, name: 'ELV1 Pepperpot' } });
   const customer = await prisma.user.findFirstOrThrow({ where: { phone: CUSTOMER_PHONE } });
+  const riderUser = await prisma.user.findFirstOrThrow({ where: { phone: '+5925566002' } });
+  const rider = await prisma.rider.findFirstOrThrow({ where: { userId: riderUser.id } });
   const customerToken = await loginByOtp(CUSTOMER_PHONE);
   const ownerToken = await loginByOtp(OWNER_PHONE);
+  const riderToken = await loginByOtp('+5925566002');
   const address = await prisma.address.findFirstOrThrow({ where: { userId: customer.id } });
-  const riderBefore = await prisma.rider.findFirst({ where: { user: { phone: '+5925566002' } }, select: { id: true, currentOrderId: true } });
+
+  // [F-024-11] The "no dispatch" proof is only meaningful against FRESH,
+  // ELIGIBLE supply — a missing/stale rider makes the negative vacuous. Put a
+  // real online rider in range so a regression that DID offer this pickup
+  // would leave detectable evidence.
+  const on = await http('POST', '/rider/go-online', { latitude: 6.8, longitude: -58.15 }, riderToken);
+  if (on.status >= 300) throw new Error(`rider go-online ${on.status}: ${JSON.stringify(on.json).slice(0, 200)}`);
+  await prisma.rider.update({ where: { id: rider.id }, data: { isOnline: true, isAvailable: true, currentOrderId: null, currentLat: 6.8, currentLng: -58.15, lastLocationUpdate: new Date() } });
+  const riderBefore = { id: rider.id, currentOrderId: null as string | null };
 
   // ── 1. PICKUP checkout ────────────────────────────────────────────────────
   await http('POST', '/customer/cart/items', { vendorId: vendor.id, itemId: item.id, quantity: 1 }, customerToken);
@@ -94,13 +105,33 @@ async function main() {
   const o1 = await prisma.order.findUniqueOrThrow({ where: { id: orderId }, select: { status: true, riderId: true } });
   if (o1.status !== 'READY_FOR_PICKUP') throw new Error(`FAIL: status ${o1.status} after ready`);
   if (o1.riderId) throw new Error(`FAIL: a rider was dispatched to a PICKUP order (${o1.riderId})`);
-  log('EVIDENCE ready, NO dispatch', o1);
+  // [F-024-11] Assignment pointers move only on ACCEPTANCE — a regression that
+  // OFFERS a pickup and is simply never accepted would pass a pointer-only
+  // check. Assert the offer never existed: no live offer key in redis and no
+  // MOVER_OFFER delivery row correlated to this order. Give the cascade a
+  // window to have fired before declaring absence.
+  await new Promise((r) => setTimeout(r, 8000));
+  const offerRows = await prisma.alertDelivery.count({ where: { kind: 'MOVER_OFFER', subjectId: orderId } });
+  if (offerRows !== 0) throw new Error(`FAIL: ${offerRows} MOVER_OFFER delivery row(s) for a PICKUP order`);
+  const riderMid = await prisma.rider.findUniqueOrThrow({ where: { id: rider.id }, select: { currentOrderId: true, isAvailable: true } });
+  if (riderMid.currentOrderId) throw new Error('FAIL: rider bound to a pickup order');
+  log('EVIDENCE ready, NO dispatch (no offer rows, eligible rider present + free)', { ...o1, offerRows, riderAvailable: riderMid.isAvailable });
 
   // ── 3. verifier-blind: the vendor's own order read must NOT carry the code ─
+  // [F-024-12] A 401/404/500/garbage body would trivially "not contain" the
+  // code — require a real 200 carrying THIS order before reading the absence
+  // of the secret as evidence.
   const vendorView = await http('GET', `/vendor/orders/${orderId}`, undefined, ownerToken);
+  if (vendorView.status !== 200) throw new Error(`FAIL: vendor order read ${vendorView.status} — cannot prove verifier-blindness from a failed request`);
+  const viewed = vendorView.json?.data ?? vendorView.json;
+  const viewedId = viewed?.id ?? viewed?.order?.id;
+  if (viewedId !== orderId) throw new Error(`FAIL: vendor view returned order ${viewedId ?? 'none'}, expected ${orderId}`);
   const flat = JSON.stringify(vendorView.json ?? {});
   if (flat.includes(o0.pickupCode)) throw new Error('FAIL HND-003: pickup code visible to the verifier');
-  log('EVIDENCE verifier-blind vendor view', { status: vendorView.status, containsCode: false });
+  for (const secret of ['pickupCode', 'ridePin', 'handoverCode']) {
+    if (new RegExp(`"${secret}"\\s*:\\s*"[^"]`).test(flat)) throw new Error(`FAIL HND-003: vendor view carries a populated ${secret} field`);
+  }
+  log('EVIDENCE verifier-blind vendor view (200, right order, no secret fields)', { status: vendorView.status, orderMatched: true });
 
   // ── 4. wrong code burns an attempt; right code completes ──────────────────
   const wrong = String(Number(o0.pickupCode) === 999999 ? 111111 : 999999);

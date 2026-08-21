@@ -183,6 +183,23 @@ export class AccountService {
       await prisma.verificationDocument.update({ where: { id: doc.id }, data: { purgedAt: new Date(), fileUrl: '' } });
     }
 
+    // 1a. [F-024-08] The mandatory signup selfie lives in the avatar object,
+    //     which is PUBLIC for the local provider. Nulling the column (step 4)
+    //     leaves the object reachable — a DPA deletion-barrier breach. Delete
+    //     the object here, before the column is cleared, so the census still
+    //     knows the key. Absolute-URL / signed-URL legacy values aren't our
+    //     keys to delete; bare keys and /uploads paths are. A failure is
+    //     LOGGED (not silently swallowed) so an orphan is discoverable.
+    const avatarRow = await prisma.user.findUnique({ where: { id: userId }, select: { avatar: true } });
+    const rawAvatar = avatarRow?.avatar;
+    if (rawAvatar && !rawAvatar.startsWith('http://') && !rawAvatar.startsWith('https://')) {
+      // Pass the stored value as-is: the provider's resolveKey normalises the
+      // "/uploads/" prefix and refuses path escapes (same call the doc loop uses).
+      await storage.delete(rawAvatar).catch((err) => {
+        this.app.log.error({ err, userId, key: rawAvatar }, '[F-024-08] avatar object delete failed on account deletion — orphaned key');
+      });
+    }
+
     // 1b. Identity-integrity purge (trial-integrity spec Part 8, DPA 2023):
     //     the account's identity signals — hashed keys, cluster membership,
     //     and the biometric face template — are erased with the person.
