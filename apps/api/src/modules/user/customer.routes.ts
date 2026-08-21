@@ -26,6 +26,7 @@ import { SupportService } from '../support/support.service';
 import { AccountService } from './account.service';
 import { transitionUserRoleAuthority } from '../mover-authority';
 import { safeMmgPayUrl, validateMmgPayUrl } from '../../utils/mmg-pay-url';
+import { resolveAvatarUrl } from '../../utils/avatar-url';
 import {
   currentConsentDetailed, recordConsent, publishLegalDocumentOnce, type ConsentAction,
 } from '../legal/consent.service';
@@ -634,7 +635,9 @@ export async function customerRoutes(app: FastifyInstance) {
         firstName: user.firstName,
         lastName: user.lastName,
         email: user.email,
-        avatar: user.avatar,
+        // [F-024-09] bare S3/R2 keys become short-lived signed URLs at read
+        // time — a private object's key is unrenderable by any client.
+        avatar: await resolveAvatarUrl(user.avatar),
         selfieCapturedAt: user.selfieCapturedAt,
         role: user.activeRole,
         activeRole: user.activeRole,
@@ -689,7 +692,7 @@ export async function customerRoutes(app: FastifyInstance) {
       },
     });
 
-    return { success: true, data: user };
+    return { success: true, data: { ...user, avatar: await resolveAvatarUrl(user.avatar) } };
   });
 
   /** GET /account/export — DPA right of access + portability: the customer's own

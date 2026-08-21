@@ -534,20 +534,31 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
         const summaries = await cw.runScan(ctx.prisma, globalThis.fetch as unknown as import('../modules/compliance/commencement-watch').FetchLike);
         const notified = await cw.notifyPending(
           ctx.prisma,
-          cw.channelsFromEnv(async (title, body) => {
-            const admins = await ctx.prisma.user.findMany({
+          cw.channelsFromEnv(
+            async (title, body) => {
+              const admins = await ctx.prisma.user.findMany({
+                where: { roles: { hasSome: ['ADMIN', 'SUPER_ADMIN'] }, status: 'ACTIVE' },
+                select: { id: true },
+              });
+              let reached = 0;
+              for (const a of admins) {
+                try {
+                  // [F-024-04] send() is best-effort and resolves '' when the
+                  // inbox row failed to persist — only a truthy id is a human
+                  // actually reachable. Counting bare resolution stamped
+                  // notifiedAt on alerts that produced no inbox row.
+                  const id = await notifications.send({ userId: a.id, type: 'SYSTEM_ANNOUNCEMENT', title, body: body.slice(0, 900) });
+                  if (id) reached += 1;
+                } catch { /* one failed admin must not hide the others */ }
+              }
+              return reached; // [F-022-03] delivery-proven, not assumed
+            },
+            // [F-024-04] per-cycle reachability probe: zero active admins and
+            // no webhook must go RED even when no alerts are pending.
+            () => ctx.prisma.user.count({
               where: { roles: { hasSome: ['ADMIN', 'SUPER_ADMIN'] }, status: 'ACTIVE' },
-              select: { id: true },
-            });
-            let reached = 0;
-            for (const a of admins) {
-              try {
-                await notifications.send({ userId: a.id, type: 'SYSTEM_ANNOUNCEMENT', title, body: body.slice(0, 900) });
-                reached += 1;
-              } catch { /* one failed admin must not hide the others */ }
-            }
-            return reached; // [F-022-03] delivery-proven, not assumed
-          }),
+            }),
+          ),
           globalThis.fetch as unknown as import('../modules/compliance/commencement-watch').FetchLike,
         );
         ctx.log.info({ summaries, notified }, 'commencement watch scan complete');
