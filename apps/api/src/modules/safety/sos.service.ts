@@ -80,6 +80,46 @@ export class SosService {
     const skipGrace = opsRaised || input.immediate === true || GRACE_SECONDS === 0;
     const grace = skipGrace ? null : new Date(now.getTime() + GRACE_SECONDS * 1000);
 
+    // [F-027-17] Repeat triggers COLLAPSE onto the caller's live alert.
+    //
+    // The life-safety routes are exempt from the rate limiter — a throttle
+    // must never stand between a person and help — which left the alert mint
+    // itself unbounded: one account could raise an unlimited series of
+    // distinct alerts and bury the ops war room, losing real emergencies in
+    // the noise. That is the same life-safety failure from the other end.
+    //
+    // So the bound is on ALERTS, not requests. Someone tapping twenty times
+    // raises one incident whose urgency is visibly rising, which is strictly
+    // more information for ops than twenty rows — and they are never refused.
+    //
+    // Deliberately best-effort rather than a partial unique index: a database
+    // constraint that can REFUSE an insert is the limiter's hazard in a new
+    // coat. Under a true burst a handful may still slip through the read, and
+    // a handful is the point — it is bounded, not zero.
+    const live = await this.prisma.sosAlert.findFirst({
+      where: {
+        actorUserId: input.actorUserId,
+        orderId: input.orderId ?? null,
+        status: { in: ['TRIGGER_PENDING', 'ACTIVE', 'ACKNOWLEDGED'] },
+      },
+      orderBy: { triggeredAt: 'desc' },
+    });
+    if (live) {
+      await this.prisma.sosAlert.update({
+        where: { id: live.id },
+        data: { retriggerCount: { increment: 1 }, lastRetriggerAt: now },
+      });
+      try {
+        this.io.to('ops:war-room').emit('sos:retrigger', { sosAlertId: live.id, actorUserId: live.actorUserId, orderId: live.orderId, at: now });
+      } catch { /* the war-room nudge is best-effort; the row is the record */ }
+      // The STRONGER trigger wins. If they had a countdown running and have
+      // now pressed something that skips it (the in-ride panic button, a
+      // guardian escalation, ops acting on their behalf), collapsing must not
+      // leave them waiting out a grace window they have already overridden.
+      if (skipGrace && live.status === 'TRIGGER_PENDING') return this.confirm(live.id);
+      return this.prisma.sosAlert.findUniqueOrThrow({ where: { id: live.id } });
+    }
+
     let alert;
     try {
       alert = await this.prisma.sosAlert.create({

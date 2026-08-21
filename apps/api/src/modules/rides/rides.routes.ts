@@ -350,7 +350,11 @@ export async function ridesRoutes(app: FastifyInstance) {
    *  lights up, and the incident carries a full ack/resolve lifecycle + evidence
    *  trail — which ride-hailing safety requires (pre-launch audit: no SOS was a
    *  rides blocker). */
-  app.post<{ Params: { id: string } }>('/:id/sos', auth, async (request) => {
+  // [F-027-17] Rate-limit exempt, like every other route through which a
+  // person asks for help (LHC-1 K2). This one was missed when /safety/sos was
+  // exempted: it is the in-ride panic button, the single most urgent request
+  // the product accepts, and it sat behind the ordinary 200/min ceiling.
+  app.post<{ Params: { id: string } }>('/:id/sos', { preHandler: [app.authenticate], config: { rateLimit: false as const } }, async (request) => {
     const { id } = request.params;
     const body = z.object({
       lat: z.number().min(-90).max(90).optional(),

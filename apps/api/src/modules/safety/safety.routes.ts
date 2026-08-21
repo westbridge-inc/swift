@@ -237,12 +237,17 @@ export async function safetyRoutes(app: FastifyInstance) {
   // deadline, auto-SOS) lives in the guardian sweep.
   const guardian = new GuardianService(app.prisma, app.io);
 
-  app.post('/guardian/checkin', auth, async (request) => {
+  // [F-027-17] These are life-safety routes too, and the exemption missed
+  // them. A NEED_HELP check-in response mints an immediate ACTIVE SOS — it IS
+  // the emergency button, wearing a check-in's clothes — so a person whose
+  // ordinary request allowance was already spent could be answered 429 at the
+  // exact moment they said they were in trouble.
+  app.post('/guardian/checkin', lifeSafety, async (request) => {
     const { response } = z.object({ response: z.enum(['OK', 'NEED_HELP']) }).parse(request.body ?? {});
     return { success: true, data: await guardian.respondToCheckin(request.user.userId, response) };
   });
 
-  app.post('/guardian/driver-confirm', auth, async (request) => {
+  app.post('/guardian/driver-confirm', lifeSafety, async (request) => {
     return { success: true, data: await guardian.driverConfirm(request.user.userId) };
   });
 

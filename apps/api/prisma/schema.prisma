@@ -2971,6 +2971,12 @@ model SosAlert {
   triggerAddressText   String? // reverse-geocoded, for the on-screen 911 script
   clientCreatedAt      DateTime? // device clock — offline reconciliation
   clientIdempotencyKey String? // one alert per trigger PER ACTOR, even on retry — see @@unique below
+  /// [F-027-17] How many times this person asked for help again while this
+  /// alert was still live. Repeat triggers COLLAPSE onto the open alert rather
+  /// than minting new rows, so a panicking person tapping twenty times raises
+  /// one escalating incident instead of burying the ops desk in twenty.
+  retriggerCount       Int                @default(0)
+  lastRetriggerAt      DateTime?
   deliveryReceipts     Json? // per-channel fan-out receipts {opsPage, contactSms:[...], socket}
   createdAt            DateTime           @default(now())
   updatedAt            DateTime           @updatedAt
@@ -2984,6 +2990,7 @@ model SosAlert {
   @@unique([actorUserId, clientIdempotencyKey])
   @@index([tenantId, status, triggeredAt])
   @@index([actorUserId])
+  @@index([actorUserId, status]) // [F-027-17] the live-alert lookup on every trigger
   @@index([orderId])
 }
 

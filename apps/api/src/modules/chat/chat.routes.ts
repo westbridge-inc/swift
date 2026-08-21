@@ -1,6 +1,7 @@
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { detectOffPlatformContact, OFF_PLATFORM_WARNING } from './off-platform';
+import { redactOrderSecrets, SECRET_REDACTED_WARNING } from './secret-guard';
 import { NotificationService } from '../notification/notification.service';
 import { NotFoundError, ForbiddenError } from '../../utils/errors';
 
@@ -91,11 +92,25 @@ export async function chatRoutes(app: FastifyInstance) {
     // never censorship.
     const offPlatform = detectOffPlatformContact(message);
 
+    // [F-027-12] ...with exactly one exception. The order's pickup/ride code is
+    // not content to moderate, it is the proof that the driver physically met
+    // the customer. Chat puts the driver in the room and copies message text
+    // verbatim into the other participants' PUSH bodies, so an unguarded room
+    // both defeats the control and lands the secret on a lock screen. Strip it
+    // BEFORE the row is written, the socket fires, or a push is built — a
+    // stored original is its own disclosure channel.
+    const room = await app.prisma.chatRoom.findUnique({ where: { id: roomId }, select: { orderId: true } });
+    const secrets = room?.orderId
+      ? await app.prisma.order.findUnique({ where: { id: room.orderId }, select: { ridePin: true, pickupCode: true } })
+      : null;
+    const guarded = redactOrderSecrets(message, secrets ?? {});
+    const body = guarded.text;
+
     const msg = await app.prisma.chatMessage.create({
       data: {
         chatRoomId: roomId,
         senderId: request.user.userId,
-        message,
+        message: body,
         messageType,
         mediaUrl,
         offPlatformFlag: offPlatform,
@@ -130,7 +145,7 @@ export async function chatRoutes(app: FastifyInstance) {
         userId: p.userId,
         type: 'CHAT_MESSAGE',
         title: `Message from ${sender?.firstName || 'Someone'}`,
-        body: message.substring(0, 100),
+        body: body.substring(0, 100),
         data: { roomId, messageId: msg.id },
       });
     }
@@ -138,7 +153,12 @@ export async function chatRoutes(app: FastifyInstance) {
     return {
       success: true,
       data: msg,
-      ...(offPlatform ? { warning: OFF_PLATFORM_WARNING } : {}),
+      // [F-027-12] The redaction warning wins: silently mangling someone's
+      // text is worse than the nudge it would have replaced, and this is the
+      // one they need to read.
+      ...(guarded.redacted
+        ? { warning: SECRET_REDACTED_WARNING }
+        : offPlatform ? { warning: OFF_PLATFORM_WARNING } : {}),
     };
   });
 
