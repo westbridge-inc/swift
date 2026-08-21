@@ -17,9 +17,21 @@ export default function LocationPage() {
   async function save() {
     setBusy(true); setError(null);
     try {
-      const coords = await new Promise<{ lat: number; lng: number }>((res) => {
-        if (!navigator.geolocation) return res({ lat: 6.8013, lng: -58.1551 });
-        navigator.geolocation.getCurrentPosition((p) => res({ lat: p.coords.latitude, lng: p.coords.longitude }), () => res({ lat: 6.8013, lng: -58.1551 }), { timeout: 5000 });
+      // A saved address IS its coordinates: the delivery fee, the rider's
+      // route and the courier's destination all come from them. Falling back
+      // to a city-centre guess when the browser refuses would save an address
+      // that quietly points somewhere else — so we refuse instead of guessing.
+      const coords = await new Promise<{ lat: number; lng: number }>((res, rej) => {
+        if (!navigator.geolocation) return rej(new Error('This browser can’t share your location, so we can’t place this address on the map. Add it from the Swift app instead.'));
+        navigator.geolocation.getCurrentPosition(
+          (p) => res({ lat: p.coords.latitude, lng: p.coords.longitude }),
+          (err) => rej(new Error(
+            err.code === err.PERMISSION_DENIED
+              ? 'We need your location to place this address on the map — allow location access and try again.'
+              : 'We couldn’t get your location just now. Move somewhere with a clearer signal and try again.',
+          )),
+          { timeout: 5000 },
+        );
       });
       await addAddress({ ...form, region: 'Demerara-Mahaica', latitude: coords.lat, longitude: coords.lng, isDefault: addresses.length === 0 });
       setAdding(false); setForm({ label: 'Home', addressLine1: '', city: 'Georgetown' }); refresh();
@@ -42,7 +54,7 @@ export default function LocationPage() {
           <input placeholder="Street + number" value={form.addressLine1} onChange={(e) => setForm({ ...form, addressLine1: e.target.value })} className="w-full rounded-xl border border-black/10 px-3 py-2" />
           <input placeholder="City" value={form.city} onChange={(e) => setForm({ ...form, city: e.target.value })} className="w-full rounded-xl border border-black/10 px-3 py-2" />
           {error && <p className="text-sm font-semibold text-[var(--swift-red)]">{error}</p>}
-          <button onClick={save} disabled={busy || !form.addressLine1} className="w-full rounded-full bg-[var(--swift-red)] py-2.5 font-bold text-white disabled:opacity-60">{busy ? 'Saving…' : 'Save (uses your location)'}</button>
+          <button onClick={save} disabled={busy || !form.addressLine1} className="w-full rounded-full bg-[var(--swift-red)] py-2.5 font-bold text-white disabled:opacity-60">{busy ? 'Getting your location…' : 'Save with my current location'}</button>
         </div>
       ) : (
         <button onClick={() => setAdding(true)} className="flex w-full items-center justify-center gap-2 rounded-2xl border border-[var(--swift-red)] py-3 font-bold text-[var(--swift-red)]"><Plus className="h-4 w-4" /> Add an address</button>
