@@ -166,6 +166,47 @@ describe('SOS state machine [safety M2]', () => {
     expect(count).toBe(1);
   });
 
+  it('[F-026-17] D2: the same key from ANOTHER person raises THEIR OWN alert, never a handback of mine', async () => {
+    // The defect: the lookup was by key alone, so whoever asked second was
+    // told "you already have an alert" and pointed at a stranger's — while
+    // nobody was ever paged for them. Reusing or guessing a key must never
+    // decide whether someone else's emergency exists.
+    const key = 'idem-shared-' + nanoid(12);
+    const mine = track(await sos.create({ actorUserId: 'off-a', actorRole: 'CUSTOMER', triggerSource: 'BUTTON', clientIdempotencyKey: key }));
+    const theirs = track(await sos.create({ actorUserId: 'off-b', actorRole: 'CUSTOMER', triggerSource: 'BUTTON', clientIdempotencyKey: key }));
+    expect(theirs.id).not.toBe(mine.id);
+    expect(theirs.actorUserId).toBe('off-b');
+    expect(await prisma.sosAlert.count({ where: { clientIdempotencyKey: key } })).toBe(2);
+  });
+
+  it('[F-026-17] D3: a key claimed FIRST by a stranger cannot suppress the rightful owner\'s escalation', async () => {
+    // The server derives keys for the escalations it raises on someone's
+    // behalf ("guardian:<sessionId>"). Before the fix, anyone who wrote that
+    // string first owned it, and the real escalation silently returned the
+    // squatter's row instead of paging for the person in danger.
+    const derived = `guardian:${nanoid(12)}`;
+    const squatter = track(await sos.create({ actorUserId: 'off-squat', actorRole: 'CUSTOMER', triggerSource: 'BUTTON', clientIdempotencyKey: derived }));
+    const victim = track(await sos.create({ actorUserId: 'off-victim', actorRole: 'CUSTOMER', triggerSource: 'CHECKIN_TIMEOUT', immediate: true, clientIdempotencyKey: derived }));
+    expect(victim.id).not.toBe(squatter.id);
+    expect(victim.actorUserId).toBe('off-victim');
+    expect(victim.status).toBe('ACTIVE'); // the escalation actually happened
+  });
+
+  it('[F-026-17] D4: two CONCURRENT retries from one device settle on one alert — the loser gets the winner, not a 500', async () => {
+    // read-then-create is not atomic. Both callers can miss the read; one
+    // loses on the unique index. A person mid-emergency must not receive an
+    // error because their phone retried a request that already succeeded.
+    const key = 'idem-race-' + nanoid(12);
+    const settled = await Promise.all([
+      sos.create({ actorUserId: 'off-race', actorRole: 'CUSTOMER', triggerSource: 'BUTTON', clientIdempotencyKey: key }),
+      sos.create({ actorUserId: 'off-race', actorRole: 'CUSTOMER', triggerSource: 'BUTTON', clientIdempotencyKey: key }),
+      sos.create({ actorUserId: 'off-race', actorRole: 'CUSTOMER', triggerSource: 'BUTTON', clientIdempotencyKey: key }),
+    ]);
+    settled.forEach(track);
+    expect(new Set(settled.map((a) => a.id)).size).toBe(1); // all three name the SAME alert
+    expect(await prisma.sosAlert.count({ where: { clientIdempotencyKey: key } })).toBe(1);
+  });
+
   it('E: the grace-expiry sweep promotes an overdue TRIGGER_PENDING → ACTIVE (app-kill-proof)', async () => {
     const a = track(await sos.create({ actorUserId: u(), actorRole: 'CUSTOMER', triggerSource: 'BUTTON' }));
     // Simulate grace elapsed (as if the app died during the countdown).

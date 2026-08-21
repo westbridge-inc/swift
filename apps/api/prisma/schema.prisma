@@ -2970,11 +2970,18 @@ model SosAlert {
   triggerAccuracyM     Float?
   triggerAddressText   String? // reverse-geocoded, for the on-screen 911 script
   clientCreatedAt      DateTime? // device clock — offline reconciliation
-  clientIdempotencyKey String?            @unique // one alert per trigger, even on retry
+  clientIdempotencyKey String? // one alert per trigger PER ACTOR, even on retry — see @@unique below
   deliveryReceipts     Json? // per-channel fan-out receipts {opsPage, contactSms:[...], socket}
   createdAt            DateTime           @default(now())
   updatedAt            DateTime           @updatedAt
 
+  // [F-026-17] Scoped to the ACTOR, never global. A globally unique key made
+  // one person's emergency addressable by anyone who could guess or reuse the
+  // string: the second caller was handed the first caller's alert and their
+  // own was never raised — and a key claimed FIRST suppressed the real owner's
+  // later escalation. Uniqueness that decides whether a life-safety alert
+  // exists must be scoped to whose life it is.
+  @@unique([actorUserId, clientIdempotencyKey])
   @@index([tenantId, status, triggeredAt])
   @@index([actorUserId])
   @@index([orderId])
