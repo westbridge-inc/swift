@@ -368,6 +368,9 @@ export async function runCollusionAffinityScan(ctx: JobContext): Promise<{ flagg
     const { notifyAdmins, NotificationService } = await import('../modules/notification/notification.service');
     await opsPageOnce(ctx, 'vendor-rider-collusion', 6 * 3600, () =>
       notifyAdmins(ctx.prisma, new NotificationService(ctx.prisma, ctx.io), {
+        // Platform-wide ops page: an aggregate scan or infra alarm, not one
+        // tenant's event. Explicitly null so it reads as a decision [NOC-A F45].
+        tenantId: null,
         title: 'Possible vendor–rider collusion',
         body: `${pairs.length} vendor–rider pair(s) show an unusual concentration of guarantee claims. Review the claims dashboard before the next settlement.`,
         data: { kind: 'ops_collusion_affinity', pairs: pairs.slice(0, 20) },
@@ -478,6 +481,9 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
             const { notifyAdmins } = await import('../modules/notification/notification.service');
             await opsPageOnce(ctx, 'billing-failures', 3600, () =>
               notifyAdmins(ctx.prisma, new NotificationService(ctx.prisma, ctx.io), {
+                // Platform-wide ops page: an aggregate scan or infra alarm, not one
+                // tenant's event. Explicitly null so it reads as a decision [NOC-A F45].
+                tenantId: null,
                 title: 'Billing failures spiking',
                 body: `${troubled} subscriptions failed, errored, or suspended this cycle (threshold ${threshold}). Check the billing dashboard before partners start calling.`,
                 data: { kind: 'ops_billing_failures', failed: result.failed, errors: result.errors, suspended: result.suspended },
@@ -650,6 +656,9 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
           const { notifyAdmins, NotificationService: NS } = await import('../modules/notification/notification.service');
           await opsPageOnce(ctx, 'incident-pattern-scan', 20 * 3600, () =>
             notifyAdmins(ctx.prisma, new NS(ctx.prisma, ctx.io), {
+              // Platform-wide ops page: an aggregate scan or infra alarm, not one
+              // tenant's event. Explicitly null so it reads as a decision [NOC-A F45].
+              tenantId: null,
               title: 'PATTERN — repeat-report subjects',
               body: `${flagged.length} subject(s) now have ≥3 distinct reporters inside 365 days. Review their case history before their next shift.`,
               data: { kind: 'incident_pattern_cross_reporter', flagged: flagged.slice(0, 10) },
@@ -664,6 +673,9 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
         const digest = await new IncidentService(ctx.prisma, ctx.io).weeklyDigest();
         const { notifyAdmins, NotificationService: NS } = await import('../modules/notification/notification.service');
         await notifyAdmins(ctx.prisma, new NS(ctx.prisma, ctx.io), {
+          // Platform-wide ops page: an aggregate scan or infra alarm, not one
+          // tenant's event. Explicitly null so it reads as a decision [NOC-A F45].
+          tenantId: null,
           title: '🛡️ Weekly safety digest',
           body: digest.lines.join(' · '),
           data: { kind: 'incident_weekly_digest', open: digest.open, breaches: digest.breaches, patterns: digest.patternsThisWeek },
@@ -756,6 +768,9 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
             const { notifyAdmins, NotificationService } = await import('../modules/notification/notification.service');
             await opsPageOnce(ctx, 'db-pool-saturation', 1800, () =>
               notifyAdmins(ctx.prisma, new NotificationService(ctx.prisma, ctx.io), {
+                // Platform-wide ops page: an aggregate scan or infra alarm, not one
+                // tenant's event. Explicitly null so it reads as a decision [NOC-A F45].
+                tenantId: null,
                 title: 'Database pool saturated',
                 body: `${waiting} queries are waiting for a database connection. Find the slow query or raise connection_limit.`,
                 data: { kind: 'ops_pool_saturation', waiting },
@@ -808,6 +823,9 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
           for (const cr of atRisk) {
             await opsPageOnce(ctx, `ads-review-sla:${cr.id}`, 6 * 3600, () =>
               notifyAdmins(ctx.prisma, new NS(ctx.prisma, ctx.io), {
+                // Platform-wide ops page: an aggregate scan or infra alarm, not one
+                // tenant's event. Explicitly null so it reads as a decision [NOC-A F45].
+                tenantId: null,
                 title: `⏰ Ad creative review SLA at risk — ${cr.campaign.name}`,
                 body: 'A creative has been waiting for review for over 75% of the SLA window. Review it now.',
                 data: { kind: 'ad_review_sla_risk', creativeId: cr.id, campaignId: cr.campaignId },
@@ -987,6 +1005,9 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
           const { notifyAdmins, NotificationService } = await import('../modules/notification/notification.service');
           await opsPageOnce(ctx, 'billing-invariants', 12 * 3600, () =>
             notifyAdmins(ctx.prisma, new NotificationService(ctx.prisma, ctx.io), {
+              // Platform-wide ops page: an aggregate scan or infra alarm, not one
+              // tenant's event. Explicitly null so it reads as a decision [NOC-A F45].
+              tenantId: null,
               title: 'Billing invariant failures',
               body: `${report.walletMismatches.length} wallet mismatch(es), ${report.wrongfulSuspensions.length} wrongful suspension(s) auto-healed, ${report.enforcementLeaks.length} enforcement leak(s), ${report.receiptGaps.length} receipt gap(s), ${report.ledgerWalletMismatches.length} ledger-wallet drift(s)${report.ledgerTrialImbalance ? ', LEDGER TRIAL BALANCE BROKEN' : ''}.`,
               data: { kind: 'billing_invariants', report: { ...report, walletsChecked: report.walletsChecked } },
@@ -1008,6 +1029,9 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
           const { notifyAdmins, NotificationService } = await import('../modules/notification/notification.service');
           await opsPageOnce(ctx, 'agent-cash-unmatched-sla', 6 * 3600, () =>
             notifyAdmins(ctx.prisma, new NotificationService(ctx.prisma, ctx.io), {
+              // Platform-wide ops page: an aggregate scan or infra alarm, not one
+              // tenant's event. Explicitly null so it reads as a decision [NOC-A F45].
+              tenantId: null,
               title: 'Agent payment stuck unmatched > 24h',
               body: `${stale} cash payment(s) are sitting unresolved — someone may be paid but still paused. Command → Billing → Unmatched.`,
               data: { kind: 'agent_cash_sla', stale },
@@ -1024,6 +1048,9 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
           const { notifyAdmins, NotificationService } = await import('../modules/notification/notification.service');
           await opsPageOnce(ctx, 'billing-unknown-intents-sla', 6 * 3600, () =>
             notifyAdmins(ctx.prisma, new NotificationService(ctx.prisma, ctx.io), {
+              // Platform-wide ops page: an aggregate scan or infra alarm, not one
+              // tenant's event. Explicitly null so it reads as a decision [NOC-A F45].
+              tenantId: null,
               title: 'UNKNOWN payment intents aging > 72h',
               body: `${unknownAged} MMG request(s) may have moved money without confirmation. Verify each in the MMG portal, then resolve from the billing intents queue.`,
               data: { kind: 'billing_unknown_intents_sla', unknownAged },
@@ -1069,6 +1096,9 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
           for (const b of breaches) {
             await opsPageOnce(ctx, `inc-sla:${b.id}:${b.kind}`, 6 * 3600, () =>
               notifyAdmins(ctx.prisma, new NS(ctx.prisma, ctx.io), {
+                // Platform-wide ops page: an aggregate scan or infra alarm, not one
+                // tenant's event. Explicitly null so it reads as a decision [NOC-A F45].
+                tenantId: null,
                 title: `⏰ SLA breached — case ${b.caseNumber} (${b.severity})`,
                 body: `The ${b.kind === 'ACK' ? 'acknowledge' : 'decide'} clock has blown. Work the case now.`,
                 data: { kind: 'incident_sla_breach', caseId: b.id, breach: b.kind, severity: b.severity },
@@ -1148,6 +1178,9 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
           const { notifyAdmins, NotificationService: NS } = await import('../modules/notification/notification.service');
           await opsPageOnce(ctx, 'earnings-missing', 6 * 3600, () =>
             notifyAdmins(ctx.prisma, new NS(ctx.prisma, ctx.io), {
+              // Platform-wide ops page: an aggregate scan or infra alarm, not one
+              // tenant's event. Explicitly null so it reads as a decision [NOC-A F45].
+              tenantId: null,
               title: '💸 Movers were paid late by the reconciler',
               body: `${healed.length} delivered order(s) had no earnings row and were healed. A completion path is losing the earnings write — investigate before a mover notices first.`,
               data: { kind: 'earnings_missing', count: healed.length },

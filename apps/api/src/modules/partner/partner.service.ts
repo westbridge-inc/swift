@@ -204,6 +204,9 @@ export class PartnerService {
     // External notification work happens only after the DB transaction commits;
     // a rolled-back or losing concurrent provisioning attempt emits nothing.
     await notifyAdmins(this.prisma, this.notifications, {
+      // Follows the vendor just provisioned [NOC-A F45]: afterCommit sees the
+      // provisioning RESULT, and result.id is the vendor that carries the tenant.
+      tenantId: (await this.prisma.vendor.findUnique({ where: { id: result.id }, select: { tenantId: true } }).catch(() => null))?.tenantId ?? null,
       title: 'New business awaiting approval',
       body: `${input.business.name} (${input.business.vendorType.toLowerCase()}) just signed up and is waiting for review.`,
       data: { kind: 'vendor_pending', vendorId: result.id },

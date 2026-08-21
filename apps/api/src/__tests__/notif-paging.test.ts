@@ -85,10 +85,56 @@ describe('template guard [SWIFT-UG-NOTIF-02]', () => {
   });
 });
 
+describe('notifyAdmins tenancy [NOC-A F45]', () => {
+  it('a tenant-scoped page reaches that tenant\'s admins and NOT another tenant\'s', async () => {
+    const svc = new NotificationService(app.prisma, ioStub);
+    const otherTenant = `noc-t-${Math.random().toString(36).slice(2, 8)}`;
+    await app.prisma.tenant.create({ data: { id: otherTenant, name: 'Other', slug: otherTenant, isActive: true } });
+    const foreignAdmin = await app.prisma.user.create({
+      data: {
+        phone: `+59278${Math.floor(Math.random() * 900000) + 100000}`,
+        firstName: 'Foreign', lastName: 'Admin',
+        roles: ['ADMIN'] as never[], activeRole: 'ADMIN' as never,
+        isPhoneVerified: true, status: 'ACTIVE', tenantId: otherTenant,
+      },
+    });
+    try {
+      await notifyAdmins(app.prisma, svc, {
+        tenantId: 'swift-default',
+        title: 'Scoped page',
+        body: 'Only the default tenant should see this.',
+        data: { kind: 'ops_tenancy_probe' },
+      });
+      const leaked = await app.prisma.notification.count({
+        where: { userId: foreignAdmin.id, data: { path: ['kind'], equals: 'ops_tenancy_probe' } as never },
+      });
+      expect(leaked, "a foreign tenant's admin was paged").toBe(0);
+
+      // ...and an explicit platform-wide page still reaches everyone.
+      await notifyAdmins(app.prisma, svc, {
+        tenantId: null,
+        title: 'Platform page',
+        body: 'Everyone should see this.',
+        data: { kind: 'ops_tenancy_probe_global' },
+      });
+      const global = await app.prisma.notification.count({
+        where: { userId: foreignAdmin.id, data: { path: ['kind'], equals: 'ops_tenancy_probe_global' } as never },
+      });
+      expect(global, 'an explicit platform-wide page must still be global').toBeGreaterThanOrEqual(1);
+    } finally {
+      await app.prisma.notification.deleteMany({ where: { userId: foreignAdmin.id } });
+      await app.prisma.alertDelivery.deleteMany({ where: { recipientId: foreignAdmin.id } });
+      await app.prisma.user.delete({ where: { id: foreignAdmin.id } });
+      await app.prisma.tenant.delete({ where: { id: otherTenant } });
+    }
+  });
+});
+
 describe('notifyAdmins ack-tracking [SWIFT-AUD-D7-03]', () => {
   it('an ops page lands in alert_deliveries as ADMIN_OPS with the condition as subject', async () => {
     const svc = new NotificationService(app.prisma, ioStub);
     const notified = await notifyAdmins(app.prisma, svc, {
+      tenantId: null,
       title: 'Test ops page',
       body: 'Something needs eyes.',
       data: { kind: 'ops_test_condition' },

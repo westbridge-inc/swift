@@ -128,17 +128,51 @@ export async function acknowledgeAlert(
   });
 }
 
+/** Resolve the tenant an admin page belongs to from the person it is about.
+ *  [NOC-A F45] Most domain events name a user (a ticket opener, a document
+ *  submitter, a partner being onboarded) rather than carrying a tenantId of
+ *  their own, and the page must follow the SUBJECT's tenant. Returns null —
+ *  i.e. deliberately platform-wide — when the user cannot be resolved, which
+ *  is the same behaviour as before this parameter existed. */
+export async function tenantOfUser(prisma: PrismaClient, userId: string | null | undefined): Promise<string | null> {
+  if (!userId) return null;
+  const u = await prisma.user.findUnique({ where: { id: userId }, select: { tenantId: true } }).catch(() => null);
+  return u?.tenantId ?? null;
+}
+
+/** Same idea for billing: a Subscription carries no tenantId of its own — it
+ *  inherits one from the actor it belongs to (rider, driver, or vendor owner).
+ *  [NOC-A F45] */
+export async function tenantOfSubscription(prisma: PrismaClient, subscriptionId: string | null | undefined): Promise<string | null> {
+  if (!subscriptionId) return null;
+  const sub = await prisma.subscription.findUnique({
+    where: { id: subscriptionId },
+    select: { rider: { select: { userId: true } }, driver: { select: { userId: true } }, vendor: { select: { owner: { select: { userId: true } } } } },
+  }).catch(() => null);
+  return tenantOfUser(prisma, sub?.rider?.userId ?? sub?.driver?.userId ?? sub?.vendor?.owner.userId ?? null);
+}
+
 export async function notifyAdmins(
   prisma: PrismaClient,
   notifications: NotificationService,
-  input: { title: string; body: string; data?: Record<string, unknown>; tenantId?: string },
+  /** `tenantId` is REQUIRED — pass the subject's tenant, or an explicit
+   *  `null` for a genuinely platform-wide notice. See the note below. */
+  input: { title: string; body: string; data?: Record<string, unknown>; tenantId: string | null },
 ): Promise<number> {
   // [REPORT-014 F-014-03] Background workers carry no tenant ALS, so a
   // tenant-A event used to page tenant-B admins with A's order evidence.
   // With a tenantId, ordinary admins are scoped to it; SUPER_ADMIN (the
   // founder god's-eye) is always paged — cross-tenant visibility is that
-  // role's sanctioned privilege. No tenantId keeps the legacy global page
-  // for genuinely platform-wide notices.
+  // role's sanctioned privilege.
+  //
+  // [NOC-A F45] That fix existed for months and was passed by FOUR of
+  // forty-two callers. Optional meant forgettable, and forgetting was
+  // silent: the other thirty-eight paged every ADMIN in every tenant with
+  // another tenant's order ids, campaign ids, vendor names and amounts.
+  // So the parameter is now REQUIRED and nullable: every caller has to make
+  // the tenancy decision, and `null` is a deliberate, greppable statement
+  // that a notice really is platform-wide (boot failures, DPA gazette
+  // events) rather than an omission the compiler let slide.
   const admins = await prisma.user.findMany({
     where: {
       roles: { hasSome: ['ADMIN', 'SUPER_ADMIN'] },

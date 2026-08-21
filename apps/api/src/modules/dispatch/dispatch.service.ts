@@ -1902,6 +1902,7 @@ export async function recoverStrandedTaxiRides(
           driverId: true,
           ridePinVerified: true,
           ridePinVerifiedAt: true,
+          tenantId: true, // the ops page follows the ride's tenant [NOC-A F45]
         },
       });
 
@@ -1952,6 +1953,8 @@ export async function recoverStrandedTaxiRides(
       const { opsPageOnce } = await import('../../jobs/queue');
       await opsPageOnce({ redis }, `taxi_driver_dropped:${orderId}`, 1800, () =>
         notifyAdmins(prisma, notifications, {
+          // Scoped to the ride [NOC-A F45].
+          tenantId: order.tenantId ?? null,
           title: 'Taxi driver lost signal mid-trip',
           body: `Order ${order.orderNumber}: the driver's GPS went dark with a passenger aboard. Contact both parties — do NOT auto-cancel.`,
           data: { kind: 'ops_taxi_driver_dropped', orderId },

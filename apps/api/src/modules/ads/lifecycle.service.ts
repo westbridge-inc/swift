@@ -91,6 +91,7 @@ export class AdsLifecycleService {
     if (notice) await this.notifyOwners(before.advertiserId, notice.title, notice.body, notice.kind, campaignId).catch(() => {});
     if (event === 'kill') {
       await notifyAdmins(this.prisma, this.notifications, {
+        tenantId: before.tenantId ?? null,
         title: 'Ad campaign killed',
         body: `A campaign was killed${reason ? `: ${reason}` : ''}. Refunds per policy.`,
         data: { kind: 'ad_campaign_killed_ops', campaignId, reason },

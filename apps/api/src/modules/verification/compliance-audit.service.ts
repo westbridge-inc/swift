@@ -106,6 +106,8 @@ export class ComplianceAuditService {
     if (violations > 0) {
       // A violation is an incident, not a dashboard line someone might read.
       await notifyAdmins(this.prisma, this.notifications, {
+        // An aggregate sweep across all online movers — platform-wide [NOC-A F45].
+        tenantId: null,
         title: 'Compliance audit: movers forced offline',
         body: `${violations} of ${subjects.length} online movers failed the document check and were pulled offline. Review them in Compliance.`,
         data: { kind: 'compliance_violation', runId: run.id },

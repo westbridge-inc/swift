@@ -2,7 +2,7 @@ import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { VehicleType } from '@prisma/client';
 import { VerificationService } from './verification.service';
-import { NotificationService, notifyAdmins } from '../notification/notification.service';
+import { NotificationService, notifyAdmins, tenantOfUser } from '../notification/notification.service';
 import { getKycProvider } from '../../providers/kyc/kyc-provider';
 import { getStorageProvider } from '../../providers/storage/storage-provider';
 import { decryptBuffer, encryptBuffer, generateDek, getKeyProvider, verifyRenderToken } from '../../providers/storage/envelope';
@@ -65,6 +65,8 @@ export async function verificationRoutes(app: FastifyInstance) {
       throw new AppError(404, 'NOTHING_TO_APPEAL', 'There is no decision on your account to appeal.');
     }
     await notifyAdmins(app.prisma, new NotificationService(app.prisma, app.io), {
+      // Follows the appellant [NOC-A F45].
+      tenantId: await tenantOfUser(app.prisma, request.user.userId),
       title: 'Trial-integrity appeal opened',
       body: 'A user says an enforcement decision is a mistake. Review it with the identity panel — 24h clock.',
       data: { kind: 'integrity_appeal', enforcementId: opened.id, accountId: request.user.userId },
@@ -144,6 +146,8 @@ export async function verificationRoutes(app: FastifyInstance) {
       if (dup) {
         // The hash, not the document, goes to admins — never the PII itself.
         await notifyAdmins(app.prisma, notifications, {
+          // Follows the uploader [NOC-A F45].
+          tenantId: await tenantOfUser(app.prisma, request.user.userId),
           title: 'Duplicate verification document',
           body: 'A document just uploaded is byte-identical to one already on another account. Review both before approving — possible multi-accounting or a reused/forged document.',
           data: { kind: 'dup_doc', sha256, uploader: request.user.userId, matchesUser: dup.createdBy },
