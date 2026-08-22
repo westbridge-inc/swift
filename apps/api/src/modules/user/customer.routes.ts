@@ -31,7 +31,7 @@ import {
   currentConsentDetailed, recordConsent, publishLegalDocumentOnce, type ConsentAction,
 } from '../legal/consent.service';
 import { LEGAL_VERSION, MARKETING_CONSENT } from '../legal/legal.routes';
-import { riderCounterpartySelect } from '../../utils/counterparty';
+import { liveLocationVisible, riderCounterpartySelect } from '../../utils/counterparty';
 
 /** [F-021-21] Consent surface from the client's own attestation header,
  *  constrained to the known set — never a hardcoded guess. */
@@ -1941,11 +1941,18 @@ export async function customerRoutes(app: FastifyInstance) {
           },
         },
         statusHistory: { orderBy: { createdAt: 'asc' } },
-        rider: {
-          include: {
-            user: { select: { firstName: true, lastName: true, phone: true, avatar: true } },
-          },
-        },
+        // [F-027-07 / F-028-11] Was a whole-relation `include`, which pulls
+        // every Rider column — KYC document URLs, enforcement state, float —
+        // into memory. The response below hand-projects, so nothing leaked,
+        // but fetching them at all is one refactor away from leaking them.
+        // This IS the legitimate live-tracking consumer, so it opts INTO the
+        // live position explicitly; the projection then gates it on the order
+        // still being in flight.
+        // userId is needed INTERNALLY here (the rider-surface/display-rating
+        // lookup below) and is not returned. Added at this call site rather
+        // than to the shared allow-list, so surfaces that return the select
+        // wholesale do not gain an identifier they have no use for.
+        rider: { select: { ...riderCounterpartySelect({ withPhone: true, withLiveLocation: true }), userId: true } },
       },
     });
 
@@ -2067,8 +2074,12 @@ export async function customerRoutes(app: FastifyInstance) {
           vehiclePhotoUrl: order.rider.vehiclePhotoUrl,
           // Last-known position seeds the tracking marker instantly; the
           // socket stream (rider:location) takes over from the first event.
-          currentLat: order.rider.currentLat,
-          currentLng: order.rider.currentLng,
+          // [F-028-11] ...but only while this delivery is actually in flight.
+          // These are the mover's PROFILE coordinates — they keep updating on
+          // every later job — so a settled order must not keep showing where
+          // that person is now.
+          currentLat: liveLocationVisible(order.status) ? order.rider.currentLat : null,
+          currentLng: liveLocationVisible(order.status) ? order.rider.currentLng : null,
         } : null,
         timeline,
         placedAt: order.placedAt,
