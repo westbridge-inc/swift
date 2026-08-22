@@ -27,6 +27,7 @@ import {
   hasTaxiPassengerCustody,
   lockTaxiOrderForCustodyDecision,
 } from '../rides/passenger-custody';
+import { riderCounterpartySelect } from '../../utils/counterparty';
 
 declare module 'fastify' {
   interface FastifyInstance {
@@ -1434,7 +1435,8 @@ export class DispatchService {
         // taxi accept route. The mover VERIFIES the ride PIN — they must not read it.
         omit: HANDOVER_SECRETS_OMIT,
         include: {
-          rider: { include: { user: { select: { firstName: true } } } },
+          // [F-027-07] allow-list, not `include` — see utils/counterparty.
+          rider: { select: riderCounterpartySelect({ withPhone: false }) },
           driver: { include: { user: { select: { firstName: true } } } },
         },
       });

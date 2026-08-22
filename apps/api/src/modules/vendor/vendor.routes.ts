@@ -35,6 +35,7 @@ import { cachedRender, renderQrPng, renderQrSvg, renderTemplatePdf } from '../qr
 import { publicWebBase } from '../qr/qr-codes';
 import { processReviewText } from '../rating/review-scrub';
 import { mmgPayUrlForWrite, safeMmgPayUrl } from '../../utils/mmg-pay-url';
+import { riderCounterpartySelect } from '../../utils/counterparty';
 
 // ---------------------------------------------------------------------------
 // Input schemas
@@ -471,7 +472,8 @@ async function resolveOwnedOrder(app: FastifyInstance, userId: string, orderId: 
       items: true,
       statusHistory: { orderBy: { createdAt: 'desc' } },
       customer: { select: { id: true, firstName: true, lastName: true, phone: true } },
-      rider: { include: { user: { select: { firstName: true, lastName: true, phone: true } } } },
+      // [F-027-07] allow-list, not `include` — see utils/counterparty.
+      rider: { select: riderCounterpartySelect({ withPhone: true }) },
       // vendorType drives the pick-list UI (grocery/goods shelf-pick §5.3).
       vendor: { select: { vendorType: true, selfDeliveryEnabled: true } },
     },
@@ -1148,7 +1150,8 @@ export async function vendorRoutes(app: FastifyInstance) {
         include: {
           items: true,
           customer: { select: { id: true, firstName: true, lastName: true, avatar: true } },
-          rider: { include: { user: { select: { firstName: true, lastName: true, phone: true } } } },
+          // [F-027-07] allow-list, not `include` — see utils/counterparty.
+          rider: { select: riderCounterpartySelect({ withPhone: true }) },
           // Franchise roll-up: the board aggregates every store the owner has, so each
           // order needs to say which store it belongs to.
           vendor: { select: { id: true, name: true, selfDeliveryEnabled: true } },
