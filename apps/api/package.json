@@ -9,6 +9,7 @@
     "start": "node dist/server.js",
     "start:worker": "node dist/worker.js",
     "worker": "tsx watch src/worker.ts",
+    "dpa:readiness": "tsx scripts/dpa-readiness.ts",
     "type-check": "tsc --noEmit && tsc -p tsconfig.scripts.json",
     "lint": "eslint 'src/**/*.{ts,tsx}' 'scripts/**/*.ts'",
     "clean": "rm -rf dist",
