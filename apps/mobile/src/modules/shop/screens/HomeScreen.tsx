@@ -19,7 +19,9 @@ import { haptic } from '../../../lib/haptics';
 import { useAuthStore } from '../../../stores/authStore';
 import { useLocationStore } from '../../../stores/locationStore';
 import { CategoryRail, CAT_RAIL_MIN_CHIPS } from '../CategoryRail';
-import { itemImage, vendorImage } from '../../../lib/images';
+// [F-264] itemPhoto/vendorPhoto return null rather than inventing a stock
+// photo. `itemImage` used to hand "Mauby" a picture of a cheeseburger.
+import { itemPhoto, vendorPhoto } from '../../../lib/images';
 import { money } from '../../../lib/money';
 import {
   AwningEdge,
@@ -334,7 +336,7 @@ export function HomeScreen() {
               renderItem={({ item: it }) => (
                 <FoodCard
                   width={RAIL_CARD_W}
-                  image={itemImage(it)}
+                  image={itemPhoto(it)}
                   name={it.name}
                   priceLabel={money(it.price)}
                   meta={it.vendorName}
@@ -417,7 +419,7 @@ export function HomeScreen() {
                   renderItem={({ item: v }) => (
                     <FoodCard
                       width={RAIL_CARD_W}
-                      image={vendorImage(v)}
+                      image={vendorPhoto(v)}
                       name={v.name}
                       rating={v.displayRating ?? null}
                       ratingBucket={v.ratingBucket}
@@ -523,7 +525,7 @@ export function HomeScreen() {
                 renderItem={({ item: v }) => (
                   <MerchantCard
                     width={HERO_CARD_W}
-                    image={vendorImage(v)}
+                    image={vendorPhoto(v)}
                     name={v.name}
                     rating={v.displayRating ?? null}
                     ratingBucket={v.ratingBucket}
@@ -590,7 +592,7 @@ export function HomeScreen() {
                   {nearby.slice(0, 4).map((v) => (
                     <VendorRow
                       key={v.id}
-                      image={vendorImage(v)}
+                      image={vendorPhoto(v)}
                       name={v.name}
                       meta={
                         <RatingMeta
@@ -633,7 +635,7 @@ export function HomeScreen() {
                     renderItem={({ item: v }) => (
                       <FoodCard
                         width={RAIL_CARD_W}
-                        image={vendorImage(v)}
+                        image={vendorPhoto(v)}
                         name={v.name}
                         rating={v.displayRating ?? null}
                         ratingBucket={v.ratingBucket}
@@ -674,7 +676,7 @@ export function HomeScreen() {
                       <VendorRow
                         key={v.id}
                         closed
-                        image={vendorImage(v)}
+                        image={vendorPhoto(v)}
                         name={v.name}
                         meta={
                           <RatingMeta
