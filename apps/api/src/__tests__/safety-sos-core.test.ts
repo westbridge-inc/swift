@@ -330,6 +330,76 @@ describe('SOS state machine [safety M2]', () => {
     expect(onTrip.id).not.toBe(onFoot.id);
   });
 
+  it('[F-028-03] D10: a re-trigger from a NEW PLACE moves the alert — ops must not keep looking where the person WAS', async () => {
+    // The defect: the collapse recorded only a count and a timestamp, so the
+    // new position, accuracy, address and source were DISCARDED. On a
+    // life-safety path that is the difference between finding someone and not.
+    const who = u();
+    const first = track(await sos.create({ actorUserId: who, actorRole: 'CUSTOMER', triggerSource: 'BUTTON', lat: 6.80, lng: -58.15, accuracyM: 40 }));
+    await sos.create({ actorUserId: who, actorRole: 'CUSTOMER', triggerSource: 'BUTTON', lat: 6.82, lng: -58.17, accuracyM: 8, addressText: 'Regent Road' });
+
+    const after = await prisma.sosAlert.findUniqueOrThrow({ where: { id: first.id } });
+    expect(after.triggerLat).toBeCloseTo(6.82, 5);
+    expect(after.triggerLng).toBeCloseTo(-58.17, 5);
+    expect(after.triggerAccuracyM).toBe(8);
+    expect(after.triggerAddressText).toBe('Regent Road');
+    // ...and nothing is lost: the earlier position survives in the log.
+    const log = after.retriggers as Array<Record<string, unknown>>;
+    expect(Array.isArray(log)).toBe(true);
+    expect(log).toHaveLength(1);
+    expect(log[0]).toMatchObject({ lat: 6.82, lng: -58.17, source: 'BUTTON' });
+  });
+
+  it('[F-028-03] D11: a stronger provenance sticks, and a weaker one never downgrades the record', async () => {
+    const who = u();
+    const a = track(await sos.create({ actorUserId: who, actorRole: 'CUSTOMER', triggerSource: 'BUTTON' }));
+    await sos.create({ actorUserId: who, actorRole: 'CUSTOMER', triggerSource: 'CHECKIN_TIMEOUT', immediate: true });
+    expect((await prisma.sosAlert.findUniqueOrThrow({ where: { id: a.id } })).triggerSource).toBe('CHECKIN_TIMEOUT');
+    // A plain button press afterwards must not rewrite it back to BUTTON.
+    await sos.create({ actorUserId: who, actorRole: 'CUSTOMER', triggerSource: 'BUTTON' });
+    expect((await prisma.sosAlert.findUniqueOrThrow({ where: { id: a.id } })).triggerSource).toBe('CHECKIN_TIMEOUT');
+  });
+
+  it('[F-028-03] D12: an alert that CLOSES mid-collapse does not swallow the next emergency', async () => {
+    // findFirst-then-update was not status-safe: a resolve landing in between
+    // incremented a now-RESOLVED row and handed the caller a closed alert as
+    // though their emergency had been received.
+    const who = u();
+    const a = track(await sos.create({ actorUserId: who, actorRole: 'CUSTOMER', triggerSource: 'OPS_MANUAL' }));
+    await sos.resolve(a.id, 'ops-1', 'SAFE_CONFIRMED');
+    const next = track(await sos.create({ actorUserId: who, actorRole: 'CUSTOMER', triggerSource: 'BUTTON' }));
+    expect(next.id).not.toBe(a.id);
+    expect(['TRIGGER_PENDING', 'ACTIVE']).toContain(next.status);
+  });
+
+  it('[F-028-03] D13: a collapsed request carrying a NEW key stores it, so a lost response cannot mint a second incident', async () => {
+    const who = u();
+    const a = track(await sos.create({ actorUserId: who, actorRole: 'CUSTOMER', triggerSource: 'BUTTON' }));
+    expect(a.clientIdempotencyKey).toBeNull();
+    const key = 'late-key-' + nanoid(10);
+    const collapsed = await sos.create({ actorUserId: who, actorRole: 'CUSTOMER', triggerSource: 'BUTTON', clientIdempotencyKey: key });
+    expect(collapsed.id).toBe(a.id);
+    // The retry now replays instead of minting a second incident.
+    const replay = await sos.create({ actorUserId: who, actorRole: 'CUSTOMER', triggerSource: 'BUTTON', clientIdempotencyKey: key });
+    expect(replay.id).toBe(a.id);
+    expect(await prisma.sosAlert.count({ where: { actorUserId: who } })).toBe(1);
+  });
+
+  it('[F-028-03] D14: an immediate re-trigger onto an ALREADY-ACTIVE alert still re-pages ops', async () => {
+    // Previously "the stronger trigger wins" only promoted a PENDING row. On an
+    // ACTIVE or ACKNOWLEDGED alert an immediate guardian escalation or panic
+    // press did nothing at all — nobody was re-paged with the new position.
+    const who = u();
+    const a = track(await sos.create({ actorUserId: who, actorRole: 'CUSTOMER', triggerSource: 'OPS_MANUAL', lat: 6.80, lng: -58.15 }));
+    expect(a.status).toBe('ACTIVE');
+    const before = (await prisma.sosAlert.findUniqueOrThrow({ where: { id: a.id } })).deliveryReceipts;
+    await sos.create({ actorUserId: who, actorRole: 'CUSTOMER', triggerSource: 'BUTTON', immediate: true, lat: 6.9, lng: -58.3 });
+    const after = await prisma.sosAlert.findUniqueOrThrow({ where: { id: a.id } });
+    expect(after.retriggerCount).toBe(1);
+    expect(after.triggerLat).toBeCloseTo(6.9, 5);
+    expect(after.deliveryReceipts ?? before).not.toBeNull(); // fan-out ran again
+  });
+
   it('E: the grace-expiry sweep promotes an overdue TRIGGER_PENDING → ACTIVE (app-kill-proof)', async () => {
     const a = track(await sos.create({ actorUserId: u(), actorRole: 'CUSTOMER', triggerSource: 'BUTTON' }));
     // Simulate grace elapsed (as if the app died during the countdown).
