@@ -29,6 +29,7 @@ import {
   FoodCard,
   GradientMasthead,
   LoadingBlock,
+  MerchantCard,
   Pictogram,
   type PictogramName,
   PillButton,
@@ -38,10 +39,20 @@ import {
   T,
   VendorRow,
 } from '../../../kit';
+// Per-vertical identity colour lives in the KIT [F-263] — it was a local hex
+// map here once and the no-literal-hex-in-screens rule cleaned it away, which
+// is how the grid ended up as eight identical squares.
+import { VERTICAL_TINT } from '../../../kit/vertical-tint';
 
 const SCREEN_W = Dimensions.get('window').width;
 const GUTTER = space['2xl'];
 const RAIL_CARD_W = Math.round(SCREEN_W * 0.44);
+// The featured MERCHANT rail is deliberately larger than the dish rail
+// [F-263]. Both were 44% wide, so a whole restaurant read exactly like one
+// plate of food and the eye had nothing to rank. Wide enough that the next
+// card peeks and the rail reads as scrollable without a carousel indicator.
+const HERO_CARD_W = Math.round(SCREEN_W * 0.72);
+
 
 // The super-app grid (Grab anatomy): every service one tap from the top of
 // Home. Icons are the Swift pictogram set (design-100× 9.6) — one hand, never
@@ -86,6 +97,9 @@ function greetingLine(hour: number): string {
 }
 
 function ServiceTile({ item, index, navigation }: { item: (typeof SERVICES)[number]; index: number; navigation: any }) {
+  // Falls back to the house red rather than crashing if a tile is added
+  // without an identity colour — a missing hue is a design gap, not a defect.
+  const tint = VERTICAL_TINT[item.key] ?? { bg: color.brand[50], ink: color.brand[600] };
   return (
     // First-paint stagger [design-100x 9.4 `gentle`]: opacity + a 4dp rise,
     // once per mount, honoring the system reduced-motion setting.
@@ -105,15 +119,15 @@ function ServiceTile({ item, index, navigation }: { item: (typeof SERVICES)[numb
     >
       <View
         style={{
-          width: 46,
-          height: 46,
+          width: 56,
+          height: 56,
           borderRadius: radius.lg,
-          backgroundColor: color.brand[50],
+          backgroundColor: tint.bg,
           alignItems: 'center',
           justifyContent: 'center',
         }}
       >
-        <Pictogram name={item.key} size={25} color={color.brand[600]} />
+        <Pictogram name={item.key} size={28} color={tint.ink} />
       </View>
       <T variant="label" style={{ marginTop: 6 }}>
         {item.label}
@@ -204,14 +218,23 @@ export function HomeScreen() {
               onPress={() => (isAuthenticated ? navigation.navigate('Addresses') : navigation.navigate('LocationPicker'))}
               style={{ flex: 1, paddingRight: space.md }}
             >
-              <T variant="micro" tone="onBrand" style={{ opacity: 0.72 }}>
-                Deliver to
+              {/* [F-263] The masthead was THREE stacked rows — a "DELIVER TO"
+                  label, the address, then the greeting on its own line — so a
+                  flat maroon slab held about a fifth of the display and the
+                  marketplace started below it. The greeting keeps its display
+                  moment (it is Home's one display-face line) and the address
+                  becomes its subline with a pin, which also stops "Set your
+                  location" reading as a filled-in field. Two rows, not three. */}
+              <T variant="heading" tone="onBrand" numberOfLines={1}>
+                {greetingLine(new Date().getHours())}
+                {user?.firstName?.trim() ? `, ${user.firstName.trim()}` : ''}
               </T>
               <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4, marginTop: 2 }}>
-                <T variant="body" weight="semibold" tone="onBrand" numberOfLines={1} style={{ flexShrink: 1 }}>
+                <Feather name="map-pin" size={13} color={color.white} style={{ opacity: 0.8 }} />
+                <T variant="label" weight="semibold" tone="onBrand" numberOfLines={1} style={{ flexShrink: 1, opacity: 0.92 }}>
                   {locationFix ? (address ?? 'Current location') : 'Set your location'}
                 </T>
-                <Feather name="chevron-down" size={16} color={color.white} />
+                <Feather name="chevron-down" size={15} color={color.white} style={{ opacity: 0.8 }} />
               </View>
             </Pressable>
             <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.md }}>
@@ -240,10 +263,6 @@ export function HomeScreen() {
             </View>
           </View>
 
-          <T variant="heading" tone="onBrand" numberOfLines={1} style={{ marginTop: space.md }}>
-            {greetingLine(new Date().getHours())}
-            {user?.firstName?.trim() ? `, ${user.firstName.trim()}` : ''}
-          </T>
 
           {/* Search — the front door on every super app */}
           <Pressable onPress={() => navigation.navigate('Search')} style={{ marginTop: space.md }}>
@@ -502,8 +521,8 @@ export function HomeScreen() {
                 keyExtractor={(v: any) => v.id}
                 contentContainerStyle={{ paddingHorizontal: GUTTER, gap: space.lg, paddingTop: space.lg }}
                 renderItem={({ item: v }) => (
-                  <FoodCard
-                    width={RAIL_CARD_W}
+                  <MerchantCard
+                    width={HERO_CARD_W}
                     image={vendorImage(v)}
                     name={v.name}
                     rating={v.displayRating ?? null}

@@ -3,10 +3,11 @@ import React from 'react';
 import { Pressable, View, type ViewStyle } from 'react-native';
 import { Image } from 'expo-image';
 import { Feather } from '@expo/vector-icons';
-import { color, radius, space } from '@swift/ui';
+import { color, radius, space, withAlpha } from '@swift/ui';
 import { DARK_BLURHASH } from '../lib/images';
 import { Card } from './card';
 import { Pictogram, type PictogramName } from './pictograms';
+import { Scrim } from '../components/ui/scrim';
 import { HeartBadge, Stars } from './controls';
 import { PillButton } from './button';
 import { T } from './text';
@@ -254,5 +255,89 @@ export function PromoBanner({
         />
       ) : null}
     </Card>
+  );
+}
+
+/**
+ * The editorial merchant card [F-263] — the hero of a discovery rail.
+ *
+ * Featured merchants and popular dishes were rendering through the SAME
+ * 44%-wide FoodCard, so a whole restaurant carried exactly the visual weight of
+ * one plate of food and the rail had no hierarchy to read. This is the card
+ * that was here before the design drifted clean: a wide 16:9 photograph, the
+ * name set in the display face ON the image over a real scrim, rating and ETA
+ * as pills on the photo rather than as a grey line beneath it.
+ *
+ * The standing lever on this product is GO RICHER, NOT CLEANER — clean-minimal
+ * is precisely what made it read as basic. Photography is the colour here; the
+ * palette stays restrained underneath it.
+ */
+export function MerchantCard({
+  image,
+  name,
+  meta,
+  rating,
+  ratingBucket,
+  topRated,
+  favorite,
+  onToggleFavorite,
+  onPress,
+  width,
+}: {
+  image: string;
+  name: string;
+  meta?: string;
+  rating?: number | null;
+  ratingBucket?: string;
+  topRated?: boolean;
+  favorite?: boolean;
+  onToggleFavorite?: () => void;
+  onPress?: () => void;
+  width: number;
+}) {
+  return (
+    <Pressable onPress={onPress} accessibilityRole="button" accessibilityLabel={meta ? `${name}. ${meta}` : name}>
+      {({ pressed }) => (
+        <Card pad={false} style={{ width, opacity: pressed ? 0.85 : 1, overflow: 'hidden' }}>
+          <View>
+            <Image
+              source={{ uri: image }}
+              placeholder={{ blurhash: DARK_BLURHASH }}
+              transition={150}
+              style={{ width: '100%', aspectRatio: 16 / 9 }}
+              contentFit="cover"
+            />
+            {/* A real gradient, not a flat overlay — a hard band across a photo
+                is the thing that reads as cheap. */}
+            <Scrim height={110} />
+            {onToggleFavorite ? (
+              <View style={{ position: 'absolute', top: space.md, right: space.md }}>
+                <HeartBadge active={!!favorite} onPress={onToggleFavorite} />
+              </View>
+            ) : null}
+            <View style={{ position: 'absolute', left: space.lg, right: space.lg, bottom: space.md, gap: 4 }}>
+              <T variant="title" tone="onBrand" numberOfLines={1}>
+                {name}
+              </T>
+              <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.sm }}>
+                {rating !== undefined ? (
+                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: 3, backgroundColor: withAlpha(color.white, 0.92), paddingHorizontal: 7, paddingVertical: 2, borderRadius: radius.full }}>
+                    <Feather name="star" size={11} color={color.star} />
+                    <T variant="micro" weight="bold">
+                      {rating == null ? (topRated ? 'Top rated' : (ratingBucket ?? 'New')) : rating.toFixed(1)}
+                    </T>
+                  </View>
+                ) : null}
+                {meta ? (
+                  <View style={{ backgroundColor: withAlpha(color.white, 0.92), paddingHorizontal: 7, paddingVertical: 2, borderRadius: radius.full }}>
+                    <T variant="micro" weight="semibold">{meta}</T>
+                  </View>
+                ) : null}
+              </View>
+            </View>
+          </View>
+        </Card>
+      )}
+    </Pressable>
   );
 }
