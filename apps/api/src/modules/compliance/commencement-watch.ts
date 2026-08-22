@@ -84,20 +84,61 @@ export function parseEntries(html: string): GazetteEntry[] {
  *  "Regulations", "Official Gazette" — so five category links cleared the
  *  floor with zero publications behind them.
  *
- *  A real instrument is SPECIFIC: it names its kind AND identifies itself,
- *  by number or by year ("Order No. 12 of 2026", "The Fisheries (Amendment)
- *  Act 2026", "Legal Supplement B — 14 August 2026"). A category label names
- *  the kind and stops. So both signals are required.
+ *  The second attempt required an instrument word AND (a number OR a year).
+ *  "Act Archive 2026", "Bill Tracker 2026", "Regulation Index 2026" — five
+ *  plausible year-scoped category links on any Gazette site — cleared it with
+ *  zero publications behind them. [F-027-01]
  *
- *  Deliberately biased toward UNDER-counting: missing a title that omits both
- *  a number and a year costs a false PARSE_THIN (noisy, visible, harmless),
- *  while over-counting costs a false clean bill of health on a dead feed —
- *  which is the failure this gate exists to prevent. */
+ *  Third shape, and a different one rather than another conjunct:
+ *    · CATEGORY VOCABULARY DISQUALIFIES. Archive/index/tracker/directory names
+ *      a place where publications are kept, not a publication.
+ *    · A number or a full date IS identity.
+ *    · A bare year — the signal navigation reaches for — counts only on a
+ *      title long enough to be a real instrument name.
+ *
+ *  Honest about what this is: still a heuristic on a short string, and two
+ *  previous versions looked airtight to me too. So the test for it is no
+ *  longer one chosen vocabulary set — it GENERATES the navigation space
+ *  (instrument word × category word × year/number) and requires that none of
+ *  it passes. That is the claim the reviewer actually asked for.
+ *
+ *  Deliberately biased toward UNDER-counting: a false PARSE_THIN is noisy,
+ *  visible and harmless, while over-counting is a false clean bill of health
+ *  on a dead feed — the exact failure this gate exists to prevent. The real
+ *  backstop is not this predicate: it is WATCH_DEGRADED plus the founder's
+ *  weekly Gazette calendar check. */
+/** Words that describe a PLACE WHERE publications are kept, not a publication.
+ *  Any one of them makes a title navigation, whatever else it contains: this is
+ *  what defeated attempt two, where "Act Archive 2026" cleared a floor built
+ *  from "instrument word AND (number OR year)" — one instrument token, one
+ *  year, zero publications. Year-scoped category links are the natural
+ *  navigation of a legal site, so the vocabulary of CATEGORIES has to be a
+ *  disqualifier in its own right. */
+const NAVIGATION_WORDS = /\b(archive|archives|index|indexes|tracker|listing|listings|browse|search|home|contact|about|category|categories|section|sections|library|collection|collections|database|records|resources|downloads|papers|portal|menu|navigation|nav|overview|directory|catalogue|catalog|repository|bulletin\s?board|all\b|more\b|page|pages|latest|recent|archive\s?index)\b/;
+
+/** Publications carry an identity a category never does. Either an explicit
+ *  instrument number, or a full date — or a year attached to a title long
+ *  enough to be a real instrument name rather than a two-word label. */
+const HAS_NUMBER = /\bno\.?\s*\d+/;
+const HAS_FULL_DATE = /\b\d{1,2}\s+(january|february|march|april|may|june|july|august|september|october|november|december)\s+(19|20)\d\d\b/;
+const HAS_YEAR = /\b(19|20)\d\d\b/;
+const NAMES_AN_INSTRUMENT = /\b(act|order|bill|notice|regulation|regulations|gazette|supplement|extraordinary|proclamation|resolution)\b/;
+
 export function looksLikePublication(title: string): boolean {
   const t = normalizeTitle(title);
-  const namesAnInstrument = /\b(act|order|bill|notice|regulation|regulations|gazette|supplement|extraordinary|proclamation|resolution)\b/.test(t);
-  const identifiesItself = /\bno\.?\s*\d+/.test(t) || /\b(19|20)\d\d\b/.test(t);
-  return namesAnInstrument && identifiesItself;
+
+  // A category label is navigation no matter how legal its other words are.
+  if (NAVIGATION_WORDS.test(t)) return false;
+  if (!NAMES_AN_INSTRUMENT.test(t)) return false;
+
+  // An explicit number or a full date is identity on its own.
+  if (HAS_NUMBER.test(t) || HAS_FULL_DATE.test(t)) return true;
+
+  // A bare year is the weakest signal and the one navigation reaches for, so
+  // it only counts on a title with the substance of a real instrument name
+  // ("The Fisheries (Amendment) Act 2026" — not "Bill Tracker 2026").
+  const words = t.split(/\s+/).filter((w) => /[a-z0-9]/.test(w));
+  return HAS_YEAR.test(t) && words.length >= 5;
 }
 
 export function classify(entry: GazetteEntry, trust: WatchSource['trust']): WatchHit | null {

@@ -131,12 +131,22 @@ export async function acknowledgeAlert(
 /** Resolve the tenant an admin page belongs to from the person it is about.
  *  [NOC-A F45] Most domain events name a user (a ticket opener, a document
  *  submitter, a partner being onboarded) rather than carrying a tenantId of
- *  their own, and the page must follow the SUBJECT's tenant. Returns null —
- *  i.e. deliberately platform-wide — when the user cannot be resolved, which
- *  is the same behaviour as before this parameter existed. */
+ *  their own, and the page must follow the SUBJECT's tenant.
+ *
+ *  [F-027-20] It still returns null when it cannot resolve one, but that null
+ *  no longer means "broadcast to every tenant" — since this batch it routes to
+ *  platform operators only, so an unresolvable subject fails CLOSED. What it
+ *  must not do is fail closed SILENTLY: a lookup that throws is an outage, and
+ *  an outage that quietly redirects a tenant's pages away from that tenant's
+ *  own responders is exactly the kind of thing nobody notices for months. */
 export async function tenantOfUser(prisma: PrismaClient, userId: string | null | undefined): Promise<string | null> {
   if (!userId) return null;
-  const u = await prisma.user.findUnique({ where: { id: userId }, select: { tenantId: true } }).catch(() => null);
+  const u = await prisma.user
+    .findUnique({ where: { id: userId }, select: { tenantId: true } })
+    .catch((err) => {
+      log().error({ err, userId }, '[F-027-20] could not resolve a tenant for an admin page — it will reach PLATFORM OPERATORS ONLY, not this subject’s own admins');
+      return null;
+    });
   return u?.tenantId ?? null;
 }
 
@@ -173,14 +183,35 @@ export async function notifyAdmins(
   // the tenancy decision, and `null` is a deliberate, greppable statement
   // that a notice really is platform-wide (boot failures, DPA gazette
   // events) rather than an omission the compiler let slide.
+  //
+  // [F-027-20] ...and then twelve of the fifteen callers that had to choose
+  // chose WRONG, because `null` still meant "remove every tenant predicate" —
+  // i.e. page every ACTIVE admin in every tenant. Collusion pairs, billing
+  // invariant reports with subscription ids and balances, incident patterns
+  // with subject ids, ads campaign ids, safety SLA breaches: all of it went
+  // to every operator's admins. Requiring a decision does not help if the
+  // wrong answer is still catastrophic and the right one is indistinguishable
+  // from a resolver that failed.
+  //
+  // So `null` no longer means EVERYONE. It means PLATFORM OPERATORS —
+  // SUPER_ADMIN, the role whose cross-tenant visibility is already
+  // sanctioned. That inverts the failure mode: a caller that gets tenancy
+  // wrong, or a resolver that could not determine a tenant, now UNDER-notifies
+  // (a tenant's own admins miss an event they should have had) instead of
+  // disclosing one tenant's data to another. Under-notifying is a bug;
+  // disclosing is a breach.
+  //
+  // Remaining work, registered not hidden: the twelve genuinely per-tenant
+  // callers should fan out per tenant so each operator hears about their own
+  // rows. Until they do, those events reach platform operators only.
   const admins = await prisma.user.findMany({
-    where: {
-      roles: { hasSome: ['ADMIN', 'SUPER_ADMIN'] },
-      status: 'ACTIVE',
-      ...(input.tenantId
-        ? { OR: [{ tenantId: input.tenantId }, { roles: { has: 'SUPER_ADMIN' } }] }
-        : {}),
-    },
+    where: input.tenantId
+      ? {
+        status: 'ACTIVE',
+        roles: { hasSome: ['ADMIN', 'SUPER_ADMIN'] },
+        OR: [{ tenantId: input.tenantId }, { roles: { has: 'SUPER_ADMIN' } }],
+      }
+      : { status: 'ACTIVE', roles: { has: 'SUPER_ADMIN' } },
     select: { id: true },
   });
   for (const admin of admins) {
