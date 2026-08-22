@@ -108,6 +108,8 @@ afterAll(async () => {
   await prisma.customer.deleteMany({ where: { userId: { in: userIds } } });
   await prisma.user.deleteMany({ where: { id: { in: userIds } } });
   await prisma.$disconnect();
+  // The cross-suite tenant row must not outlive this file.
+  await prisma.tenant.deleteMany({ where: { id: 'guardian-tenant-b' } });
 });
 
 describe('Guardian sweep — session lifecycle [§5]', () => {
@@ -148,7 +150,12 @@ describe('Guardian sweep — session lifecycle [§5]', () => {
     const other = await prisma.tenant.upsert({
       where: { id: 'guardian-tenant-b' },
       update: {},
-      create: { id: 'guardian-tenant-b', name: 'Guardian Tenant B', slug: 'guardian-tenant-b' },
+      // INACTIVE on purpose: a second ACTIVE tenant makes resolvePublicTenantId
+      // (public.routes) refuse with 503 "set PUBLIC_TENANT_ID" for every OTHER
+      // suite sharing this database — this test broke public-storefronts and
+      // preview-drafts in CI before learning that. Activity is irrelevant here;
+      // only the FK and the stamp are under test.
+      create: { id: 'guardian-tenant-b', name: 'Guardian Tenant B', slug: 'guardian-tenant-b', isActive: false },
     });
     await prisma.order.update({ where: { id: ride.id }, data: { tenantId: other.id } });
 
