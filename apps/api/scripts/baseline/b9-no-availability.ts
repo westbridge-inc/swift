@@ -20,6 +20,50 @@
  *      npx tsx scripts/baseline/b9-no-availability.ts
  */
 import { PrismaClient } from '@prisma/client';
+import { EXHAUST_CAP, REDISPATCH_DELAY_MS } from '../../src/modules/dispatch/dispatch.service';
+
+/**
+ * [F-027-09] An EXECUTABLE containment barrier, not a comment.
+ *
+ * This scenario's premise is an empty market, so it takes every rider and
+ * driver offline with an unscoped updateMany. Against a shared or
+ * multi-tenant database that poisons the supply of tenants with nothing to do
+ * with this test — and the baselines are CI-gated now, so "only run it on the
+ * rig" as prose is not a barrier. Refuse anything that is not a known
+ * disposable rig database unless an operator says otherwise out loud.
+ */
+const DISPOSABLE_DBS = ['swift', 'swift_test', 'swift_test2', 'swift_test3'];
+function assertDisposableRig(): void {
+  if (process.env['BASELINE_ALLOW_DESTRUCTIVE'] === '1') return;
+  const url = process.env['DATABASE_URL'] ?? '';
+  const name = url.split('/').pop()?.split('?')[0] ?? '';
+  const host = /@([^:/]+)/.exec(url)?.[1] ?? '';
+  const localish = host === 'localhost' || host === '127.0.0.1' || host === 'db' || host === '';
+  if (!localish || !DISPOSABLE_DBS.includes(name)) {
+    throw new Error(
+      `REFUSING TO RUN: B9 takes EVERY rider and driver offline, and "${name || url}" on host "${host || 'unknown'}" is not a known disposable local rig `
+      + `(${DISPOSABLE_DBS.join(', ')}). Set BASELINE_ALLOW_DESTRUCTIVE=1 only if you genuinely mean to empty this database's supply pools.`,
+    );
+  }
+}
+
+/** Prior online/available state, captured before the pools are emptied. */
+const onlineBefore: {
+  riders: Array<{ id: string; isOnline: boolean; isAvailable: boolean }>;
+  drivers: Array<{ id: string; isOnline: boolean; isAvailable: boolean }>;
+} = { riders: [], drivers: [] };
+
+/** [F-027-09] Put the supply back on EVERY exit path. */
+async function restoreSupply(): Promise<void> {
+  if (onlineBefore.riders.length === 0 && onlineBefore.drivers.length === 0) return;
+  for (const r of onlineBefore.riders) {
+    await prisma.rider.updateMany({ where: { id: r.id }, data: { isOnline: r.isOnline, isAvailable: r.isAvailable } });
+  }
+  for (const d of onlineBefore.drivers) {
+    await prisma.driver.updateMany({ where: { id: d.id }, data: { isOnline: d.isOnline, isAvailable: d.isAvailable } });
+  }
+  console.log(`${new Date().toISOString()} · teardown: supply restored`, JSON.stringify({ riders: onlineBefore.riders.length, drivers: onlineBefore.drivers.length }));
+}
 
 const A = process.env['BASELINE_API'] ?? 'http://localhost:3000/api/v1';
 const HEALTH = A.replace('/api/v1', '') + '/health';
@@ -58,6 +102,12 @@ async function loginByOtp(phone: string): Promise<string> {
 }
 
 async function main() {
+  // [F-027-09] FIRST, before any database or network access. A containment
+  // barrier that runs after the connection is already open is not a barrier —
+  // the first probe of this put it after the fixture lookups, so a wrong
+  // DATABASE_URL failed with a Prisma connection error instead of the refusal
+  // that explains what this script would have done.
+  assertDisposableRig();
   const h = await fetch(HEALTH).then((r) => r.status).catch(() => 0);
   if (h !== 200) throw new Error(`rig not healthy (${h})`);
 
@@ -68,8 +118,16 @@ async function main() {
   // Rig prep: EVERY pool offline (the scenario IS the empty market), stranded
   // synthetic orders tidied, and the synthetic customer at L2 (taxi trust gate
   // — roster prep, same class as roster creation).
+  // [F-027-09] This takes EVERY pool offline, unscoped, and used to never put
+  // them back. On any shared or multi-tenant database that poisons the supply
+  // of tenants with nothing to do with this scenario — and the script is now
+  // CI-gated, so "only run it on the rig" as a code comment is not a barrier.
+  // Two changes: an executable guard, and an actual restore.
+  onlineBefore.riders = (await prisma.rider.findMany({ where: { OR: [{ isOnline: true }, { isAvailable: true }] }, select: { id: true, isOnline: true, isAvailable: true } }));
+  onlineBefore.drivers = (await prisma.driver.findMany({ where: { OR: [{ isOnline: true }, { isAvailable: true }] }, select: { id: true, isOnline: true, isAvailable: true } }));
   const riders = await prisma.rider.updateMany({ where: {}, data: { isOnline: false, isAvailable: false } });
   const drivers = await prisma.driver.updateMany({ where: {}, data: { isOnline: false, isAvailable: false } });
+  log('rig prep: pools taken offline, prior state captured for restore', { willRestoreRiders: onlineBefore.riders.length, willRestoreDrivers: onlineBefore.drivers.length });
   const tidied = await prisma.order.updateMany({
     where: { vendor: { name: { startsWith: 'ELV1 Baseline' } }, status: { in: ['PENDING', 'ACCEPTED', 'PREPARING', 'READY_FOR_PICKUP'] } },
     data: { status: 'CANCELLED' },
@@ -143,7 +201,14 @@ async function main() {
   // slow lane that owns the ops page is only reached on the THIRD exhaust,
   // ~4.5min+ in. Wait past when the page is DUE, computed from the constants,
   // before concluding anything about its absence.
-  const OPS_PAGE_DUE_MS = 3 * 90_000 + 60_000; // EXHAUST_CAP × delay + slack
+  // [F-027-03] DERIVED, not hardcoded. This claimed to be "computed from the
+  // constants" while spelling out 3 * 90_000 — so a change to either constant
+  // (both are env-tunable) would silently make the gate wrong: too short and
+  // B9 concludes "no page" before the page is due, which is exactly the false
+  // finding F-224 was. It was also one interval too long: attempts 1..CAP-1
+  // schedule a re-sweep and the CAP-th is terminal, so the page is due after
+  // (CAP - 1) intervals, not CAP.
+  const OPS_PAGE_DUE_MS = (EXHAUST_CAP - 1) * REDISPATCH_DELAY_MS + 90_000; // + slack
   let opsPages = 0;
   const opsDeadline = Date.now() + OPS_PAGE_DUE_MS;
   while (Date.now() < opsDeadline) {
@@ -181,4 +246,12 @@ async function main() {
 
 main()
   .catch((e) => { console.error('B9 FAILED:', e.message); process.exitCode = 1; })
-  .finally(() => prisma.$disconnect());
+  .finally(async () => {
+    // [F-027-09] Put the supply back, on EVERY exit path. A scenario whose
+    // whole premise is "the market is empty" must not leave it that way.
+    await restoreSupply().catch((e) => {
+      console.error('B9 SUPPLY RESTORE FAILED:', e.message);
+      process.exitCode = 1;
+    });
+    await prisma.$disconnect();
+  });
