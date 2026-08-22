@@ -2,6 +2,7 @@ import Fastify from 'fastify';
 import { prismaPlugin } from '../src/plugins/prisma';
 import { redisPlugin } from '../src/plugins/redis';
 import { AuthService } from '../src/modules/auth/auth.service';
+import { assertSafeBootConfig } from '../src/utils/boot-config';
 
 const CONFIRMATION = 'REVOKE_NON_OTP_PRIVILEGED_SESSIONS';
 const BATCH_SIZE = 500;
@@ -18,6 +19,10 @@ function requireAuthorization(): void {
 
 async function main(): Promise<void> {
   requireAuthorization();
+  // [F-027-15] This script is documented to run against PRODUCTION, and it
+  // constructs Fastify plus AuthService directly — outside the boot barrier
+  // that server.ts and worker.ts pass through. Same barrier, same refusal.
+  assertSafeBootConfig();
   const app = Fastify({ logger: true });
   await app.register(prismaPlugin);
   await app.register(redisPlugin);

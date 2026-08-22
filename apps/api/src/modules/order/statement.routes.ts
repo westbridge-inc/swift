@@ -25,7 +25,13 @@ export async function statementRoutes(app: FastifyInstance) {
         from: z.string().min(1),
         to: z.string().min(1),
         expires: z.coerce.number().int(),
-        sig: z.string().length(32),
+        // [F-027-10] The exact alphabet, not just the length. `.length(32)`
+        // counts UTF-16 code units while Buffer.from() produces UTF-8 bytes,
+        // so 32 'é' characters passed the schema as a 64-BYTE buffer — and the
+        // byte-length comparison below then returned before timingSafeEqual
+        // ever ran. Pinning the charset makes every accepted signature exactly
+        // 32 bytes, so the constant-time path is the only path.
+        sig: z.string().regex(/^[0-9a-f]{32}$/),
       })
       .parse(request.query);
 
@@ -37,8 +43,12 @@ export async function statementRoutes(app: FastifyInstance) {
     // short-circuits at the first differing byte, leaking through response
     // timing how much of the HMAC an attacker has guessed — and the signature
     // IS the authorization for someone's earnings statement.
-    const expected = Buffer.from(signStatementToken(q.kind as StatementKind, q.actor, q.from, q.to, q.expires));
-    const provided = Buffer.from(q.sig);
+    // [F-027-10] Both buffers are now guaranteed 32 bytes — `expected` is 32
+    // hex chars by construction, `provided` by the schema above — so the
+    // length guard is a belt-and-braces impossibility rather than a branch an
+    // attacker can steer into.
+    const expected = Buffer.from(signStatementToken(q.kind as StatementKind, q.actor, q.from, q.to, q.expires), 'utf8');
+    const provided = Buffer.from(q.sig, 'utf8');
     if (provided.length !== expected.length || !timingSafeEqual(provided, expected)) {
       throw new AppError(403, 'BAD_SIGNATURE', 'This statement link is not valid.');
     }

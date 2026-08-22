@@ -194,6 +194,21 @@ export function getPushProvider(): PushProvider {
   const provider = process.env['PUSH_PROVIDER'] ?? 'dev';
   switch (provider) {
     case 'dev':
+      // [F-027-15] The boot guard for this lives in assertSafeBootConfig, and
+      // assertSafeBootConfig is called by exactly two entry points — the
+      // server and the worker. The repo also ships a production-targeted
+      // cutover script that constructs Fastify and AuthService directly, so it
+      // selected DevPush in production with nothing to stop it, and any future
+      // script would have done the same. A guard you have to remember to call
+      // is a guard that eventually is not called.
+      //
+      // So the refusal also lives HERE, at the hazard itself: DevPush drops
+      // every notification on the floor while reporting success, which is the
+      // worst possible production behaviour for dispatch offers and safety
+      // pings. No construction path can reach it in production, now or later.
+      if (process.env['NODE_ENV'] === 'production') {
+        throw new Error('FATAL: PUSH_PROVIDER is dev (in-memory) in production — every push would be silently swallowed while reporting success. Set PUSH_PROVIDER=expo.');
+      }
       return new DevPush();
     case 'expo':
       return new ExpoPushProvider();

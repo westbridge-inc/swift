@@ -10,6 +10,7 @@ import { registerEmptyJsonBodyParser } from '../plugins/empty-json';
 import { riderRoutes } from '../modules/rider/rider.routes';
 import { vendorRoutes } from '../modules/vendor/vendor.routes';
 import { statementRoutes } from '../modules/order/statement.routes';
+import { signStatementToken } from '../modules/order/statement';
 
 // ---------------------------------------------------------------------------
 // Statements (marketplace §12, the receipt's siblings): earner earnings and
@@ -205,10 +206,52 @@ describe('signed statement links (share/print)', () => {
     });
     const path: string = mint.json().data.path;
 
-    const tampered = path.replace(/sig=./, 'sig=x');
+    // [F-027-10] The tamper must stay INSIDE the hex alphabet, or the schema
+    // rejects it before the signature check and the test stops proving that
+    // the signature is what refuses it.
+    const tampered = path.replace(/sig=([0-9a-f])/, (_m, c: string) => `sig=${c === '0' ? '1' : '0'}`);
+    expect(tampered).not.toBe(path);
     expect((await app.inject({ method: 'GET', url: tampered })).statusCode).toBe(403);
 
     const expired = path.replace(/expires=\d+/, 'expires=1000000000');
     expect((await app.inject({ method: 'GET', url: expired })).statusCode).toBe(410);
+  });
+
+  // -------------------------------------------------------------------------
+  // [F-027-10] The signature protocol itself.
+  // -------------------------------------------------------------------------
+  it('a 32-CHARACTER but 64-BYTE signature is refused — the constant-time path cannot be steered around', async () => {
+    // `.length(32)` counted UTF-16 code units while Buffer.from() produces
+    // UTF-8 bytes, so 32 'é' passed the schema as a 64-byte buffer and the
+    // byte-length guard returned before timingSafeEqual ever ran. The accepted
+    // input domain is now exactly 32 hex characters, i.e. exactly 32 bytes.
+    const mint = await app.inject({
+      method: 'GET', url: '/api/v1/rider/earnings/statement?link=1',
+      headers: { authorization: `Bearer ${riderToken}` },
+    });
+    const path: string = mint.json().data.path;
+    const wideChars = path.replace(/sig=[0-9a-f]{32}/, `sig=${'é'.repeat(32)}`);
+    const res = await app.inject({ method: 'GET', url: wideChars });
+    expect(res.statusCode).toBeGreaterThanOrEqual(400);
+    expect(res.statusCode).not.toBe(200);
+  });
+
+  it('the signed material is UNAMBIGUOUS — two tuples that used to collide now sign differently', () => {
+    // Plain colon concatenation signed `statement:rider:A:B:C:D:1` for BOTH
+    // (actor="A:B", from="C", to="D") and (actor="A", from="B:C", to="D").
+    // Length-prefixing each field makes that impossible to parse two ways.
+    const a = signStatementToken('rider', 'A:B', 'C', 'D', 1);
+    const b = signStatementToken('rider', 'A', 'B:C', 'D', 1);
+    expect(a).not.toBe(b);
+
+    // And a few more shapes, so this is a property rather than one example.
+    expect(signStatementToken('rider', '', 'A:B', 'C', 1)).not.toBe(signStatementToken('rider', 'A', 'B', 'C', 1));
+    expect(signStatementToken('rider', 'A:', 'B', 'C', 1)).not.toBe(signStatementToken('rider', 'A', ':B', 'C', 1));
+  });
+
+  it('signatures are still deterministic and exactly 32 hex characters', () => {
+    const sig = signStatementToken('driver', 'actor-1', '2026-01-01', '2026-01-31', 1735689600);
+    expect(sig).toBe(signStatementToken('driver', 'actor-1', '2026-01-01', '2026-01-31', 1735689600));
+    expect(sig).toMatch(/^[0-9a-f]{32}$/);
   });
 });

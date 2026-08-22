@@ -226,10 +226,25 @@ const statementSecret = () => process.env['STORAGE_SIGNING_SECRET'] ?? 'dev-sign
 
 export type StatementKind = 'rider' | 'driver' | 'vendor';
 
+/**
+ * [F-027-10] Length-prefix every field so the signed material is UNAMBIGUOUS.
+ *
+ * Plain colon concatenation meant two different tuples could sign the same
+ * bytes: (actor="A:B", from="C") and (actor="A", from="B:C") both produced
+ * `statement:rider:A:B:C:...`. Server-generated ids and ISO dates make that
+ * hard to reach today, but the render route accepts arbitrary non-empty
+ * components, and a signature protocol should not depend on its inputs
+ * happening not to contain the delimiter.
+ *
+ * Declaring each field's byte length first makes collision impossible: the
+ * verifier can only parse the material one way.
+ */
+const field = (s: string) => `${Buffer.byteLength(s, 'utf8')}:${s}`;
+
 export function signStatementToken(kind: StatementKind, actorId: string, from: string, to: string, expires: number): string {
   return crypto
     .createHmac('sha256', statementSecret())
-    .update(`statement:${kind}:${actorId}:${from}:${to}:${expires}`)
+    .update(`statement:v2:${field(kind)}${field(actorId)}${field(from)}${field(to)}${field(String(expires))}`)
     .digest('hex')
     .slice(0, 32);
 }
