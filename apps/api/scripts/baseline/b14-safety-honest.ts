@@ -28,8 +28,11 @@
  *   9. TRIP SHARE — a minted share is publicly viewable WITHOUT auth, the
  *      payload is under the 300KB budget, and revoking it 404s.
  *
- * Every alert AND ride this script raises is closed before exit, from the
- * finally path, and a teardown that cannot verify itself fails the run.
+ * Every alert this script raises is DELETED before exit (never force-resolved
+ * — a RESOLVED row with no ops actor is a closure the product could not have
+ * produced), swept by actor as well as by tracked id so a lost response cannot
+ * strand one, from the finally path; rides are cancelled the same way. A
+ * teardown that cannot verify itself fails the run.
  *
  * Run: BASELINE_API=http://localhost:3020/api/v1 \
  *      DATABASE_URL=postgresql://swift:swift@localhost:5434/swift \
@@ -104,6 +107,10 @@ async function reachOf(alertId: string): Promise<{ notices: number; receipts: un
 }
 
 const raised: string[] = [];
+/** [F-027-19] The two test actors. Teardown sweeps by ACTOR as well as by
+ *  tracked id, so an alert whose POST committed but whose response was lost —
+ *  and therefore never entered `raised` — cannot be stranded on the rig. */
+const actorIds: string[] = [];
 /** [F-026-19] Rides raised by this run, torn down from the finally path. */
 const rides: string[] = [];
 /** The owner token, published for the finally-path teardown so it can use the
@@ -123,6 +130,7 @@ async function main() {
   // note that still reached COMPLETE — an unavailable probe account is not
   // evidence that strangers cannot read your emergency.
   const otherToken = await loginByOtp(OTHER_PHONE);
+  actorIds.push(customer.id, other.id);
   log('actors ready', { customer: customer.id, otherActor: other.id });
 
   // [F-027-17 follow-on] PREFLIGHT: these actors must start with no live
@@ -137,11 +145,12 @@ async function main() {
     select: { id: true, status: true, triggerSource: true, triggeredAt: true },
   });
   if (strays.length > 0) {
-    log('PREFLIGHT closing stray live alerts left on the rig', strays);
-    await prisma.sosAlert.updateMany({
-      where: { id: { in: strays.map((s) => s.id) } },
-      data: { status: 'RESOLVED', resolvedAt: new Date(), resolutionNotes: 'ELV2 B14 preflight (force-close, not an ops resolution)' },
-    });
+    // [F-027-19] Deleted, not force-RESOLVED: a RESOLVED row with no ops
+    // actor and no resolution code is a closure the product could never have
+    // produced, and leaving one behind is exactly the fabricated evidence
+    // this baseline exists to refuse.
+    log('PREFLIGHT deleting stray live alerts left on the rig', strays);
+    await prisma.sosAlert.deleteMany({ where: { id: { in: strays.map((s) => s.id) } } });
     const left = await prisma.sosAlert.count({
       where: { actorUserId: { in: [customer.id, other.id] }, status: { in: ['TRIGGER_PENDING', 'ACTIVE', 'ACKNOWLEDGED'] } },
     });
@@ -312,8 +321,11 @@ async function main() {
   // ── 7. replay is ONE alert — and ONLY for the person who sent it ────────
   const key = `b14-${randomInt(100000, 999999)}`;
   const r1 = await http('POST', '/safety/sos', { lat: 6.8, lng: -58.15, clientIdempotencyKey: key }, token);
+  // [F-027-19] Track r1 BEFORE the second call. It used to be pushed after
+  // awaiting r2, so a throw in r2 left r1 untracked — and the id-only cleanup
+  // then stranded a live alert on the rig even though the run exited red.
+  if (r1.json?.data?.id) raised.push(r1.json.data.id);
   const r2 = await http('POST', '/safety/sos', { lat: 6.8, lng: -58.15, clientIdempotencyKey: key }, token);
-  raised.push(r1.json.data.id);
   if (r1.json.data.id !== r2.json.data.id) throw new Error(`FAIL: replay minted a SECOND alert (${r1.json.data.id} vs ${r2.json.data.id})`);
   log('EVIDENCE replayed trigger returns the original alert', { id: r1.json.data.id });
 
@@ -415,20 +427,37 @@ async function main() {
 async function closeRaised(token?: string) {
   const problems: string[] = [];
 
+  // [F-027-19] DELETE, do not forge a resolution.
+  //
+  // This used to write every raised alert straight to RESOLVED with a note and
+  // no ops actor, no resolution code, no all-clear — a row the product itself
+  // could never produce. Its own proof then only checked that no LIVE status
+  // remained, so the run could print COMPLETE over semantically invalid,
+  // FALSELY RESOLVED alerts sitting in the rig for anything downstream to read
+  // as real closures. These are synthetic rows a script invented; the honest
+  // end state is that they do not exist, which also makes the check exact
+  // (zero rows) instead of an enum test that fabricated data satisfies.
+  //
+  // Scoped by ACTOR as well as by tracked id: an alert whose POST committed
+  // but whose response was lost never enters `raised`, so an id-only sweep
+  // would strand it. The two test actors own nothing else on this rig.
   const LIVE = ['TRIGGER_PENDING', 'ACTIVE', 'ACKNOWLEDGED'] as const;
-  const open = await prisma.sosAlert.findMany({
-    where: { id: { in: raised }, status: { in: LIVE as never } },
-    select: { id: true },
-  });
-  if (open.length > 0) {
-    await prisma.sosAlert.updateMany({
-      where: { id: { in: open.map((o) => o.id) } },
-      data: { status: 'RESOLVED', resolvedAt: new Date(), resolutionNotes: 'ELV2 B14 baseline teardown (force-close, not an ops resolution)' },
+  const mine = { OR: [{ id: { in: raised } }, ...(actorIds.length ? [{ actorUserId: { in: actorIds } }] : [])] };
+  const doomed = await prisma.sosAlert.findMany({ where: mine, select: { id: true, status: true } });
+  if (doomed.length > 0) {
+    const ids = doomed.map((d) => d.id);
+    // Soft references (no FK): clear them first so nothing points at a row
+    // that is about to vanish.
+    await prisma.evidenceBundle.deleteMany({ where: { sosAlertId: { in: ids } } }).catch(() => undefined);
+    await prisma.incidentCase.updateMany({ where: { sosAlertId: { in: ids } }, data: { sosAlertId: null } }).catch(() => undefined);
+    await prisma.sosAlert.deleteMany({ where: { id: { in: ids } } });
+    log('teardown: deleted the alerts this run raised', {
+      deleted: doomed.length,
+      wereLive: doomed.filter((d) => (LIVE as readonly string[]).includes(d.status)).length,
     });
-    log('teardown: force-closed raised alerts', { closed: open.length });
   }
-  const survivors = await prisma.sosAlert.count({ where: { id: { in: raised }, status: { in: LIVE as never } } });
-  if (survivors > 0) problems.push(`${survivors} SOS alert(s) left LIVE on the rig`);
+  const survivors = await prisma.sosAlert.count({ where: mine });
+  if (survivors > 0) problems.push(`${survivors} SOS alert(s) from this run survived teardown`);
 
   if (rides.length > 0) {
     // Product cancel first (the honest path); raw force-close only for
