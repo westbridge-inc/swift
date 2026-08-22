@@ -315,8 +315,15 @@ export function CourierScreen({ navigation }: any) {
                     </T>
                     <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4, marginTop: 4 }}>
                       <Feather name="dollar-sign" size={13} color={color.success} />
+                      {/* "No fees · pay cash" named Swift's cut and never named
+                          the PAYER, on the one flow where that is a real
+                          question: the API takes `payer: SENDER | RECIPIENT`
+                          and this screen hardcodes SENDER, so today it is
+                          always you [F-262]. Say so rather than leaving a
+                          sender to wonder whether the parcel is cash-on-
+                          delivery for whoever receives it. */}
                       <T variant="caption" weight="semibold" tone="muted">
-                        No fees · pay cash
+                        You pay cash · no Swift fee
                       </T>
                     </View>
                   </View>
