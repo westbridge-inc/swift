@@ -629,6 +629,49 @@ export function HomeScreen() {
                 </>
               );
             })()}
+
+            {/* Closed now — the server computes and ships up to 10 of these and
+                Home used to DISCARD them (F-256), which is why the marketplace
+                looked thin off-hours: Georgetown late night and Sunday are a
+                large share of the week, and hiding every shut merchant makes a
+                real catalogue read as an empty one. Shown last, dimmed, never
+                mixed into the orderable rails — VendorRow's `closed` state
+                already says "Closed right now" and labels it for screen
+                readers. Tapping still opens the store: hours, menu and
+                favouriting are all worth having before it opens. */}
+            {(() => {
+              const closedVendors: any[] = feed?.closedVendors ?? [];
+              if (closedVendors.length === 0) return null;
+              return (
+                <>
+                  <SectionHeader
+                    size="lg"
+                    title="Closed now"
+                    eyebrow="Browse ahead"
+                    style={{ paddingHorizontal: GUTTER, marginTop: space['2xl'] }}
+                  />
+                  <View style={{ paddingHorizontal: GUTTER, paddingTop: space.lg, gap: space.md }}>
+                    {closedVendors.slice(0, 4).map((v: any) => (
+                      <VendorRow
+                        key={v.id}
+                        closed
+                        image={vendorImage(v)}
+                        name={v.name}
+                        meta={
+                          <RatingMeta
+                            rating={v.displayRating ?? null}
+                            bucket={v.ratingBucket}
+                            topRated={v.topRated}
+                            extra={locationFix ? kmLabel(v.distanceKm) : undefined}
+                          />
+                        }
+                        onPress={() => navigation.navigate('Restaurant', { vendorId: v.id })}
+                      />
+                    ))}
+                  </View>
+                </>
+              );
+            })()}
           </>
         )}
       </ScrollView>

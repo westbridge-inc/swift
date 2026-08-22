@@ -43,6 +43,7 @@ import { dk, withAlpha, DCard, DStat, DWeekBars } from '../dark';
 import { useMoverPreview } from '../../../stores/moverPreview';
 import { MoverHomeAccountButton } from './MoverHomeAccountButton';
 import { fareLockedFor, fareToSubmit } from './fare-locked';
+import { offerEarnings } from './offer-earnings';
 
 /**
  * The earner home (dashboard plan Phase B/C): dark, map-first, demand-aware.
@@ -105,6 +106,9 @@ export function DispatchOfferCard({
   const floor = marketMax > 0 ? Math.max(0, Math.ceil(marketMax * 0.6)) : 0;
   const [price, setPrice] = useState<number>(marketMax);
   useEffect(() => setPrice(marketMax), [offer.orderId, marketMax]);
+  // Tips are proven to be the mover's on DELIVERIES only; taxi driver earnings
+  // accrue in an Earning table, so a ride tip stays unclaimed here [F-257].
+  const earnings = offerEarnings(price, offer.tipAmount, !isDriver);
 
   return (
     <View style={{ position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, zIndex: 30, justifyContent: 'flex-end', backgroundColor: color.scrim }}>
@@ -150,6 +154,17 @@ export function DispatchOfferCard({
                     100% yours · cash
                   </T>
                 </View>
+                {/* The tip is fixed at checkout and is the mover's on top of
+                    the fare (`deliveryFee + tipAmount` — rider.routes, four
+                    sites). It rode the offer payload and was never drawn, so
+                    the accept/decline decision was made against a number
+                    smaller than the pay [F-257]. The fare keeps the big type
+                    because the slider governs it; the total is what lands. */}
+                {earnings.showTip ? (
+                  <T variant="caption" weight="semibold" tone="success" style={{ marginTop: 2 }}>
+                    + {money(earnings.tip)} tip · you get {money(earnings.total)}
+                  </T>
+                ) : null}
                 {/* Who you'd front cash for — decide BEFORE you ride */}
                 <CustomerTrustBadge trust={offer.customerTrust} cash={offer.paymentMethod === 'CASH'} />
                 {/* Judge the bag before you commit (grocery runs get big) */}
