@@ -2946,7 +2946,16 @@ enum SosResolutionCode {
 
 model SosAlert {
   id                   String             @id @default(cuid())
-  tenantId             String             @default("swift-default")
+  // [F-028-04] NULLABLE ON PURPOSE. When neither the actor nor an order can
+  // name a tenant, the row must say "unknown" — not silently take the
+  // `swift-default` default, which is a REAL tenant with REAL admins. A
+  // mislabelled emergency pages the wrong operator's admins with the
+  // endangered person's location while their own admins are never told.
+  // NULL routes to platform operators and the platform war room only, and
+  // the RLS predicate (`tenantId = current_setting(...)`) is never true for
+  // NULL, so no tenant's admins can read it either. The default stays for
+  // every ordinary insert; the service writes an explicit null to override it.
+  tenantId             String?            @default("swift-default")
   actorUserId          String // who triggered
   actorRole            String // activeRole snapshot: CUSTOMER / MOVER / VENDOR_OWNER
   orderId              String? // the ride/order (rides = orderType TAXI); null for a vendor store-panic

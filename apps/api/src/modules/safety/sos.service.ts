@@ -193,14 +193,31 @@ export class SosService {
         ? (await this.prisma.order.findUnique({ where: { id: input.orderId }, select: { tenantId: true } }))?.tenantId ?? null
         : null);
     if (!tenantId) {
-      log().error({ actorUserId: input.actorUserId, orderId: input.orderId }, '[F-027-18] could not resolve a tenant for an SOS actor — falling back to the platform tenant');
+      // [F-028-04] This used to say "falling back to the platform tenant" while
+      // the insert OMITTED the column — so the row took the schema default and
+      // came out belonging to `swift-default`, a real tenant with real admins.
+      // fanOut then paged THOSE admins with this person's order and location,
+      // and the tenant whose customer was actually in danger heard nothing. The
+      // log was describing an intent the code did not carry out.
+      log().error(
+        { actorUserId: input.actorUserId, orderId: input.orderId },
+        '[F-028-04] could not resolve a tenant for an SOS actor — this alert is written with a NULL tenant and reaches PLATFORM OPERATORS ONLY, never a tenant admin',
+      );
     }
 
     let alert;
     try {
       alert = await this.prisma.sosAlert.create({
         data: {
-          ...(tenantId ? { tenantId } : {}),
+          // ALWAYS written, never omitted [F-028-04]. Omitting it let the
+          // `swift-default` column default decide the routing of a life-safety
+          // row. An explicit null overrides that default and says "unknown",
+          // which every consumer already reads correctly: warRoomsFor(null) is
+          // the platform war room alone, notifyAdmins(null) is SUPER_ADMIN
+          // only, and the RLS predicate is never true for NULL. (Under an HTTP
+          // request the tenant-scope extension still stamps the request's own
+          // tenant over this, which is the right answer when we have one.)
+          tenantId,
           actorUserId: input.actorUserId,
           actorRole: input.actorRole,
           orderId: input.orderId ?? null,
