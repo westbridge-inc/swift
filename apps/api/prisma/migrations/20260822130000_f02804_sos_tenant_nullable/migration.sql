@@ -1,0 +1,18 @@
+-- [F-028-04] An SOS whose tenant cannot be resolved must be able to say so.
+--
+-- `SosAlert.tenantId` was NOT NULL with a `swift-default` default, and
+-- SosService.create omitted the column when neither the actor nor an order
+-- could name a tenant. The row therefore did not come out platform-neutral —
+-- it came out belonging to `swift-default`, which is a real tenant with real
+-- admins. fanOut then paged THOSE admins with the endangered person's order
+-- and location, while the tenant whose customer was actually in danger was
+-- never told.
+--
+-- NULL now means "unknown", and every consumer already handles it correctly:
+-- warRoomsFor(null) returns the platform war room alone, notifyAdmins(null)
+-- reaches SUPER_ADMIN only, and the RLS predicate `tenantId = current_setting(...)`
+-- is never TRUE for NULL, so no tenant's admins can read the row either.
+--
+-- The column default is deliberately left in place: ordinary inserts are
+-- unaffected, and the service writes an explicit NULL to override it.
+ALTER TABLE "SosAlert" ALTER COLUMN "tenantId" DROP NOT NULL;
