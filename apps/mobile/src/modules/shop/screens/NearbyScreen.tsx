@@ -7,7 +7,7 @@ import { useHome } from '../../../hooks/customer';
 import { useLocationStore } from '../../../stores/locationStore';
 import { useDeviceLocation } from '../../../hooks/useDeviceLocation';
 import { grantedLocationFix } from '../../../lib/deviceLocation';
-import { vendorImage } from '../../../lib/images';
+import { vendorPhoto } from '../../../lib/images';
 import { EmptyState, ErrorState, Header, LoadingBlock, RatingMeta, Screen, VendorRow } from '../../../kit';
 
 // Kit frame 13 — "Nearby Restaurant" list. Real proximity only: without a
@@ -57,7 +57,7 @@ export function NearbyScreen() {
           contentContainerStyle={{ paddingHorizontal: space['2xl'], gap: space.md, paddingBottom: space['3xl'] }}
           renderItem={({ item: v }) => (
             <VendorRow
-              image={vendorImage(v)}
+              image={vendorPhoto(v)}
               name={v.name}
               meta={
                 <RatingMeta

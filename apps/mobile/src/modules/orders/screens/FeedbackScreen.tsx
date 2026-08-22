@@ -6,7 +6,7 @@ import { Feather } from '@expo/vector-icons';
 import { useNavigation, useRoute } from '@react-navigation/native';
 import { color, radius, space } from '@swift/ui';
 import { useItemFeedback, useOrder, useRateOrder, useRatingTags } from '../../../hooks/customer';
-import { DARK_BLURHASH, vendorImage } from '../../../lib/images';
+import { DARK_BLURHASH, vendorPhoto } from '../../../lib/images';
 import { Chip, ErrorState, Header, IconChip, LoadingBlock, PillButton, PopupCard, PopupTitle, Screen, Stars, T } from '../../../kit';
 
 const GUTTER = space['2xl'];
@@ -208,7 +208,7 @@ export function FeedbackScreen() {
         >
           {step === 0 ? (
             <RateBlock
-              image={vendorImage(o.vendor ?? {})}
+              image={vendorPhoto(o.vendor)}
               fallbackIcon="shopping-bag"
               name={o.vendor?.name ?? 'The store'}
               role="Your order"

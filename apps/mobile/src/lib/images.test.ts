@@ -4,7 +4,7 @@ import { describe, it, expect, vi } from 'vitest';
 // stub it so these stay pure-logic tests.
 vi.mock('../services/api', () => ({ API_URL: 'https://api.test' }));
 
-import { mediaUrl, kindForVendor, vendorImage, fallbackImage } from './images';
+import { mediaUrl, kindForVendor, itemPhoto, vendorPhoto } from './images';
 
 describe('mediaUrl', () => {
   it('returns null for empty input', () => {
@@ -34,18 +34,26 @@ describe('kindForVendor', () => {
   });
 });
 
-describe('vendorImage', () => {
-  it('prefers a real cover, then logo, then a deterministic fallback', () => {
-    expect(vendorImage({ coverImageUrl: 'c.png', logoUrl: 'l.png' })).toBe('c.png');
-    expect(vendorImage({ logoUrl: 'l.png' })).toBe('l.png');
-    const fb = vendorImage({ id: 'v1', vendorType: 'STORE' });
-    expect(typeof fb).toBe('string');
-    expect(fb.length).toBeGreaterThan(0);
+describe('vendorPhoto / itemPhoto — never invent a photograph [F-264]', () => {
+  it('prefers the cover, then the logo', () => {
+    expect(vendorPhoto({ coverImageUrl: 'c.png', logoUrl: 'l.png' })).toBe('c.png');
+    expect(vendorPhoto({ logoUrl: 'l.png' })).toBe('l.png');
+  });
+
+  it('returns NULL rather than a stock photo when there is none', () => {
+    // THE DEFECT THIS PINS: the removed `vendorImage`/`itemImage` returned a
+    // random stock image keyed off the row id, so an unphotographed dish was
+    // advertised with a stranger's dinner. On a marketplace the customer buys
+    // from the picture; inventing one misrepresents the goods.
+    expect(vendorPhoto({ id: 'v1', vendorType: 'STORE' } as never)).toBeNull();
+    expect(vendorPhoto(null)).toBeNull();
+    expect(vendorPhoto(undefined)).toBeNull();
+    expect(itemPhoto({ imageUrl: null })).toBeNull();
+    expect(itemPhoto({})).toBeNull();
+  });
+
+  it('passes a real url straight through', () => {
+    expect(itemPhoto({ imageUrl: 'https://cdn/x.jpg' })).toBe('https://cdn/x.jpg');
   });
 });
 
-describe('fallbackImage', () => {
-  it('is deterministic — the same seed always yields the same image', () => {
-    expect(fallbackImage('seed-1', 'food')).toBe(fallbackImage('seed-1', 'food'));
-  });
-});

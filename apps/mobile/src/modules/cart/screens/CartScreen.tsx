@@ -1,7 +1,6 @@
 /** @jsxImportSource react */
 import React, { useEffect, useMemo, useState } from 'react';
 import { Pressable, ScrollView, View } from 'react-native';
-import { Image } from 'expo-image';
 import { Feather } from '@expo/vector-icons';
 import { useNavigation } from '@react-navigation/native';
 import { color, radius, space } from '@swift/ui';
@@ -19,7 +18,7 @@ import { maybePrimeNotifications } from '../../../services/notification-priming'
 import { useAuthStore } from '../../../stores/authStore';
 import { useBookingStore } from '../../../stores/bookingStore';
 import { useLocationStore } from '../../../stores/locationStore';
-import { DARK_BLURHASH, itemImage } from '../../../lib/images';
+import { itemPhoto } from '../../../lib/images';
 import { money } from '../../../lib/money';
 import { openMmgPaymentAction } from '../../../lib/payLink';
 import { haptic } from '../../../lib/haptics';
@@ -27,6 +26,7 @@ import {
   AddMorph,
   Card,
   Chip,
+  Photo,
   CircleChip,
   DecorativeIcon,
   EmptyState,
@@ -414,9 +414,12 @@ export function CartScreen() {
           <View style={{ gap: space.md, marginTop: space.xl }}>
             {items.map((it) => (
               <Card key={it.id} style={{ flexDirection: 'row', alignItems: 'center', gap: space.md, padding: space.md }}>
-                <Image
-                  source={{ uri: itemImage(it) }}
-                  placeholder={{ blurhash: DARK_BLURHASH }}
+                {/* [F-264] A cart line is the last look someone gets before
+                    paying — it must show what they are actually buying, or
+                    nothing. */}
+                <Photo
+                  uri={itemPhoto(it)}
+                  label={it.name}
                   transition={150}
                   style={{ width: 76, height: 76, borderRadius: radius.md }}
                   contentFit="cover"

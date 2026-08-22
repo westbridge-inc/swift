@@ -6,7 +6,7 @@ import { color, space } from '@swift/ui';
 import { useDiscoveryCategories, useVendors } from '../../../hooks/customer';
 import { useLocationStore } from '../../../stores/locationStore';
 import { grantedLocationFix } from '../../../lib/deviceLocation';
-import { vendorImage } from '../../../lib/images';
+import { vendorPhoto } from '../../../lib/images';
 import { Chip, EmptyState, ErrorState, Header, LoadingBlock, RatingMeta, Screen, T, VendorRow } from '../../../kit';
 
 // ---------------------------------------------------------------------------
@@ -37,7 +37,7 @@ export function CategoryFeedScreen() {
 
   const row = (v: any) => (
     <VendorRow
-      image={vendorImage(v)}
+      image={vendorPhoto(v)}
       name={v.name}
       meta={
         <RatingMeta

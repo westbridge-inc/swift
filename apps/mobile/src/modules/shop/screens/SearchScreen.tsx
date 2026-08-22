@@ -7,7 +7,7 @@ import { useHome, useVendors } from '../../../hooks/customer';
 import { useAppStore } from '../../../stores/appStore';
 import { useLocationStore } from '../../../stores/locationStore';
 import { grantedLocationFix } from '../../../lib/deviceLocation';
-import { itemImage, vendorImage } from '../../../lib/images';
+import { itemPhoto, vendorPhoto } from '../../../lib/images';
 import {
   Chip,
   EmptyState,
@@ -190,7 +190,7 @@ export function SearchScreen() {
                 }
                 renderItem={({ item: v }) => (
                   <VendorRow
-                    image={vendorImage(v)}
+                    image={vendorPhoto(v)}
                     name={v.name}
                     meta={
                       <RatingMeta
@@ -277,7 +277,7 @@ export function SearchScreen() {
                 {popularItems.slice(0, 6).map((it) => (
                   <VendorRow
                     key={it.id}
-                    image={itemImage(it)}
+                    image={itemPhoto(it)}
                     name={it.name}
                     sub={it.vendorName}
                     trailing={<Money amount={it.price} tone="brand" />}

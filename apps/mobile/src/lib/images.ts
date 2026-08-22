@@ -48,25 +48,18 @@ export function categoryImage(key: string): string {
   return CATEGORY_IMAGES[key] ?? FOOD_IMAGES[0]!;
 }
 
+/**
+ * [F-264] `fallbackImage`, `itemImage` and `vendorImage` USED TO LIVE HERE and
+ * are deliberately gone. They returned a string unconditionally, inventing a
+ * random stock photograph keyed off the row id whenever a thing had none — so
+ * every call site silently advertised a stranger's food and no reviewer could
+ * see the lie at the call site. Use `itemPhoto`/`vendorPhoto` below, which
+ * return null, and let the card draw an honest placeholder. Deleting them
+ * rather than deprecating them is the point: a helper that CAN invent a photo
+ * will be used again.
+ */
 export type ImageKind = 'food' | 'grocery' | 'store' | 'service';
 
-const POOLS: Record<ImageKind, string[]> = {
-  food: FOOD_IMAGES,
-  grocery: GROCERY_IMAGES,
-  store: NEUTRAL_IMAGES,
-  service: NEUTRAL_IMAGES,
-};
-
-function hash(s: string): number {
-  let h = 0;
-  for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) >>> 0;
-  return h;
-}
-
-export function fallbackImage(seed?: string | null, kind: ImageKind = 'food'): string {
-  const pool = POOLS[kind] ?? FOOD_IMAGES;
-  return pool[hash(seed ?? '') % pool.length]!;
-}
 
 /** Map a vendor's type to the right fallback image pool. */
 export function kindForVendor(v?: { vendorType?: string | null } | null): ImageKind {
@@ -83,14 +76,6 @@ export function kindForVendor(v?: { vendorType?: string | null } | null): ImageK
 }
 
 /** A vendor's display image: real cover/logo, else a type-aware fallback. */
-export function vendorImage(v: {
-  coverImageUrl?: string | null;
-  logoUrl?: string | null;
-  id?: string;
-  vendorType?: string | null;
-}): string {
-  return v.coverImageUrl || v.logoUrl || fallbackImage(v.id, kindForVendor(v));
-}
 
 /** Absolute URL for a stored media path. A relative "/uploads/..." key (local
  *  storage provider) gets the API origin prefixed; absolute URLs pass through. */
@@ -101,9 +86,6 @@ export function mediaUrl(url?: string | null): string | null {
 }
 
 /** A menu item's display image: its own photo, else a deterministic food fallback. */
-export function itemImage(item: { imageUrl?: string | null; id?: string }): string {
-  return mediaUrl(item.imageUrl) || fallbackImage(item.id, 'food');
-}
 
 /**
  * The HONEST photo accessors [F-264].
