@@ -32,16 +32,34 @@ export default function DashboardPage() {
         </div>
       </div>
 
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-4">
         <MetricCard
           title="Weekly Revenue"
           value={stats ? `$${Number(stats.revenue?.weeklySubscriptionRevenue ?? 0).toLocaleString()}` : '—'}
           subtitle="GYD · subscriptions"
           loading={isLoading}
         />
+        {/* Placed alone is not a health signal [F-260]: 40 placed against 12
+            completed is a bad day that reads as a good one. The overview has
+            computed todayCompletedOrders all along and the card dropped it. */}
         <MetricCard
           title="Orders Today"
           value={stats?.todayOrders?.toString() ?? '—'}
+          subtitle={
+            stats?.todayCompletedOrders != null
+              ? `${stats.todayCompletedOrders} completed`
+              : undefined
+          }
+          loading={isLoading}
+        />
+        {/* Riders and drivers each had a card and MERCHANTS had none — on a
+            marketplace where merchants are the constrained side of supply.
+            activeVendors/totalVendors were computed and rendered nowhere in
+            the whole admin app [F-260]. */}
+        <MetricCard
+          title="Live Merchants"
+          value={stats?.activeVendors?.toString() ?? '—'}
+          subtitle={stats?.totalVendors != null ? `of ${stats.totalVendors} onboarded` : undefined}
           loading={isLoading}
         />
         <MetricCard

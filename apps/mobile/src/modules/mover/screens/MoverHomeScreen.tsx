@@ -37,6 +37,7 @@ import { requestMoverBackgroundPermission } from '../../../services/backgroundLo
 import { toast } from '../../../components/ui/toast';
 import { money } from '../../../lib/money';
 import { moverJobsToday } from '../../../lib/earnings';
+import { earningsSplit } from '../../../lib/earnings-breakdown';
 import { FareSlider } from '../../../components/FareSlider';
 import { GUTTER, RoutePair, jobAmount, CustomerTrustBadge } from '../shared';
 import { dk, withAlpha, DCard, DStat, DWeekBars } from '../dark';
@@ -475,6 +476,9 @@ export function MoverHomeScreen({ navigation }: any) {
   })();
   const todayTotal = (earnings.data as any)?.total ?? (earnings.data as any)?.todayEarnings ?? 0;
   const tripsToday = moverJobsToday(earnings.data);
+  // `breakdown` rode this payload and was never drawn, so tips were invisible
+  // to a mover at both ends of the day — deciding and counting [F-261].
+  const split = earningsSplit((earnings.data as any)?.breakdown);
   const onlineHours = (stats.data as any)?.onlineHoursToday;
   const busyToggle = preparingOnline || goOnline.isPending || goOffline.isPending;
   const startOnline = async () => {
@@ -701,6 +705,11 @@ export function MoverHomeScreen({ navigation }: any) {
                     100% yours — Swift takes 0% commission
                   </T>
                 </View>
+                {split.showTips ? (
+                  <T variant="caption" weight="semibold" style={{ marginTop: 2, color: dk.success }}>
+                    includes {money(split.tips)} in tips
+                  </T>
+                ) : null}
                 <View style={{ marginTop: space.lg }}>
                   <DWeekBars days={week} />
                 </View>
