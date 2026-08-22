@@ -72,7 +72,12 @@ function waitForDisconnect(candidate: Socket): Promise<void> {
 }
 
 beforeAll(async () => {
+  // [F-027-15] A production boot must also name a real push provider —
+  // getPushProvider now refuses the in-memory one outside dev/test, so a
+  // production-simulating test that omits it is simulating a boot the
+  // product would (correctly) refuse.
   process.env['NODE_ENV'] = 'production';
+  process.env['PUSH_PROVIDER'] = 'expo';
   process.env['CORS_ORIGIN'] = 'http://127.0.0.1';
   process.env['DATABASE_URL'] ||= 'postgresql://swift:swift@localhost:5434/swift_test';
   process.env['REDIS_URL'] ||= 'redis://localhost:6382';

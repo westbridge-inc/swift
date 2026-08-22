@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, afterEach } from 'vitest';
 import { assertSafeBootConfig, assertProductionData } from '../utils/boot-config';
 
 // SWIFT-AUD-D9-02 / D3-01: production must refuse to boot without the two
@@ -151,5 +151,57 @@ describe('assertProductionData — fail-closed empty-market guard', () => {
     await expect(assertProductionData(spy, { NODE_ENV: 'test' })).resolves.toBeUndefined();
     await expect(assertProductionData(spy, { NODE_ENV: 'development' })).resolves.toBeUndefined();
     expect(queried).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// [F-027-15] The refusal also lives at the HAZARD, not only at the boot gate.
+//
+// assertSafeBootConfig is called by exactly two entry points — the server and
+// the worker. The repo also ships a production-targeted session-assurance
+// cutover script that constructs Fastify and AuthService directly, so it
+// selected DevPush in production with nothing to stop it, and any future
+// script would have done the same. A guard you have to remember to call is a
+// guard that eventually is not called.
+//
+// DevPush drops every notification on the floor while reporting success. In
+// production that means no dispatch offers, no new-order alerts, no safety
+// pings — and nothing in the logs to say so.
+// ---------------------------------------------------------------------------
+describe('[F-027-15] getPushProvider refuses the in-memory provider in production', () => {
+  const restore = { env: process.env['NODE_ENV'], push: process.env['PUSH_PROVIDER'] };
+  afterEach(() => {
+    if (restore.env === undefined) delete process.env['NODE_ENV']; else process.env['NODE_ENV'] = restore.env;
+    if (restore.push === undefined) delete process.env['PUSH_PROVIDER']; else process.env['PUSH_PROVIDER'] = restore.push;
+  });
+
+  it('throws when PUSH_PROVIDER is explicitly dev in production', async () => {
+    const { getPushProvider } = await import('../providers/notifications/channels');
+    process.env['NODE_ENV'] = 'production';
+    process.env['PUSH_PROVIDER'] = 'dev';
+    expect(() => getPushProvider()).toThrow(/PUSH_PROVIDER is dev/);
+  });
+
+  it('throws when PUSH_PROVIDER is UNSET in production — the default is the hazard', async () => {
+    const { getPushProvider } = await import('../providers/notifications/channels');
+    process.env['NODE_ENV'] = 'production';
+    delete process.env['PUSH_PROVIDER'];
+    expect(() => getPushProvider()).toThrow(/PUSH_PROVIDER is dev/);
+  });
+
+  it('still returns the real provider in production when it is configured', async () => {
+    const { getPushProvider } = await import('../providers/notifications/channels');
+    process.env['NODE_ENV'] = 'production';
+    process.env['PUSH_PROVIDER'] = 'expo';
+    expect(() => getPushProvider()).not.toThrow();
+  });
+
+  it('leaves dev and test alone — the in-memory provider is correct there', async () => {
+    const { getPushProvider } = await import('../providers/notifications/channels');
+    for (const env of ['development', 'test']) {
+      process.env['NODE_ENV'] = env;
+      process.env['PUSH_PROVIDER'] = 'dev';
+      expect(() => getPushProvider(), env).not.toThrow();
+    }
   });
 });

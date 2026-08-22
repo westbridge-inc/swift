@@ -431,9 +431,6 @@ describe('durable mover revocation outbox', () => {
     process.env['PUSH_PROVIDER'] = 'expo';
     process.env['MOVER_REVOCATION_IMMEDIATE_BUDGET_MS'] = '50';
     process.env['MOVER_REVOCATION_EFFECT_TIMEOUT_MS'] = '150';
-    const sendPush = vi.spyOn(ExpoPushProvider.prototype, 'sendPush')
-      .mockImplementation(() => new Promise(() => undefined));
-
     // Bounded-return semantics, asserted TWICE because they are two different
     // claims and only one of them is stall-proof [F-024-01 → F-026-04]:
     //
@@ -441,15 +438,43 @@ describe('durable mover revocation outbox', () => {
     //     all. The sentinel race decides this deterministically: a saturated
     //     runner delays the timer and the logout equally, so ordering holds
     //     under any load. This is the hang detector, not the budget.
-    //  2. BUDGET — logout must also return promptly, within the ceiling this
-    //     test has always claimed. A wall clock is the only way to state that,
-    //     and inflating it to swallow runner stalls is how the real bound got
-    //     lost the first time. It stays at the original 1s: 5x the 200ms of
-    //     configured budget (50ms immediate + 150ms effect) is generous for a
-    //     loaded runner while still failing on a genuine regression.
-    const CONFIGURED_BUDGET_MS = 200; // 50 immediate + 150 effect, set above
-    const BUDGET_CEILING_MS = 5 * CONFIGURED_BUDGET_MS;
+    //  2. BUDGET — logout must also return promptly.
+    //
+    // [F-027-11] The budget half was measuring the wrong thing. It modelled
+    // the bound as 50ms + 150ms = 200ms and allowed 5x that, i.e. 1s. But the
+    // two timeouts are NESTED, not additive: the outer withTimeout races the
+    // WHOLE delivery at MOVER_REVOCATION_IMMEDIATE_BUDGET_MS, and the 150ms
+    // effect timeout lives inside it. The real bound on the hang is 50ms, so
+    // a logout taking 999ms passed while exceeding it ~20x. A regression
+    // detector that permits a 20x regression is not one.
+    //
+    // It is also measuring total wall time, which includes several real DB
+    // round-trips that have nothing to do with the hang and vary hugely with
+    // runner load — which is exactly what tempted the inflation.
+    //
+    // So: measure a CONTROL logout on this same runner, with the same code
+    // path and a push that resolves immediately, and bound the DIFFERENCE.
+    // That is the actual claim — "a hung push costs at most the immediate
+    // budget" — and it is self-calibrating, so a slow runner moves both
+    // numbers and the assertion still means what it says.
+    const OUTER_BUDGET_MS = Number(process.env['MOVER_REVOCATION_IMMEDIATE_BUDGET_MS']);
     const HANG_SENTINEL_MS = 2_000;
+
+    const control = await makeUser('MOVER');
+    const controlRider = await makeRider(control.user.id, control.session.id);
+    await makeOrder((await makeUser()).user.id, controlRider.id, 'RIDER_ASSIGNED');
+    const fastPush = vi.spyOn(ExpoPushProvider.prototype, 'sendPush').mockResolvedValue({ sent: 1 } as never);
+    const controlStartedAt = Date.now();
+    await new AuthService(app).logout(control.session.id, control.user.id);
+    const controlMs = Date.now() - controlStartedAt;
+    fastPush.mockRestore();
+
+    // Only NOW install the hang. Both spies target the same prototype method,
+    // so restoring the control's spy after installing this one would silently
+    // remove it — and the later "sendPush was called once" assertion would be
+    // asserting against a method nobody had stubbed.
+    const sendPush = vi.spyOn(ExpoPushProvider.prototype, 'sendPush')
+      .mockImplementation(() => new Promise(() => undefined));
     const sentinel = new Promise<'hung'>((resolve) => {
       const t = setTimeout(() => resolve('hung'), HANG_SENTINEL_MS);
       t.unref?.();
@@ -461,7 +486,21 @@ describe('durable mover revocation outbox', () => {
         sentinel,
       ]),
     ).resolves.toBe('returned');
-    expect(Date.now() - startedAt).toBeLessThan(BUDGET_CEILING_MS);
+    // [F-027-11] The hang must cost at most the immediate budget, plus a small
+    // fixed allowance for timer granularity and the extra work the abandoned
+    // delivery's catch path does. NOT a multiple of an invented total.
+    // Slack chosen from MEASUREMENT, not taste. Three local runs put the cost
+    // of the hang at 2ms, 4ms and 10ms over control — the abandoned delivery
+    // is raced away almost immediately. 100ms is 10-50x that headroom for a
+    // loaded CI runner, and still tight enough to fail if the outer budget is
+    // loosened: with the timeout at 20x, the inner 150ms effect deadline
+    // becomes the binding one and the cost jumps to ~150ms, over this ceiling.
+    const TIMER_SLACK_MS = 100;
+    const hungMs = Date.now() - startedAt;
+    expect(
+      hungMs - controlMs,
+      `a hung push cost ${hungMs - controlMs}ms over the ${controlMs}ms control — the immediate budget is ${OUTER_BUDGET_MS}ms`,
+    ).toBeLessThan(OUTER_BUDGET_MS + TIMER_SLACK_MS);
     expect(await app.prisma.session.findUnique({ where: { id: mover.session.id } })).toBeNull();
 
     // Wait on the CONDITION, not the clock: the 150ms effect-timeout must

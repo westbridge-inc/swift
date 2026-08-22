@@ -13,7 +13,12 @@ function deferred() {
 
 describe('production socket Redis readiness', () => {
   it('does not complete plugin readiness before both adapter subscriptions are acknowledged', async () => {
+    // [F-027-15] A production boot must also name a real push provider —
+    // getPushProvider now refuses the in-memory one outside dev/test, so a
+    // production-simulating test that omits it is simulating a boot the
+    // product would (correctly) refuse.
     process.env['NODE_ENV'] = 'production';
+    process.env['PUSH_PROVIDER'] = 'expo';
     process.env['CORS_ORIGIN'] = 'http://127.0.0.1';
     process.env['REDIS_URL'] ||= 'redis://localhost:6382';
     process.env['JWT_SECRET'] ||= 'socket-readiness-test-secret-at-least-32-characters';
@@ -87,7 +92,12 @@ describe('production socket Redis readiness', () => {
   });
 
   it('bounds duplicate-client connectivity and closes partial startup resources', async () => {
+    // [F-027-15] A production boot must also name a real push provider —
+    // getPushProvider now refuses the in-memory one outside dev/test, so a
+    // production-simulating test that omits it is simulating a boot the
+    // product would (correctly) refuse.
     process.env['NODE_ENV'] = 'production';
+    process.env['PUSH_PROVIDER'] = 'expo';
     process.env['CORS_ORIGIN'] = 'http://127.0.0.1';
     process.env['REDIS_URL'] ||= 'redis://localhost:6382';
     process.env['JWT_SECRET'] ||= 'socket-readiness-test-secret-at-least-32-characters';
