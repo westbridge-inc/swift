@@ -1,6 +1,6 @@
 /** @jsxImportSource react */
 import React, { useState } from 'react';
-import { Dimensions, FlatList, Pressable, RefreshControl, ScrollView, View } from 'react-native';
+import { Dimensions, FlatList, Linking, Pressable, RefreshControl, ScrollView, View } from 'react-native';
 import Animated, { FadeInDown, ReduceMotion } from 'react-native-reanimated';
 import { Image } from 'expo-image';
 import { Feather } from '@expo/vector-icons';
@@ -13,6 +13,8 @@ import { useAds } from '../../../hooks/ads';
 import { AdHeroVideo, AdTopCard, AdBar } from '../../../components/ads';
 import { PressableScale } from '../../../components/ui';
 import { grantedLocationFix } from '../../../lib/deviceLocation';
+import { locationPrimer } from '../../../lib/location-primer';
+import { useDeviceLocation } from '../../../hooks/useDeviceLocation';
 import { haptic } from '../../../lib/haptics';
 import { useAuthStore } from '../../../stores/authStore';
 import { useLocationStore } from '../../../stores/locationStore';
@@ -129,6 +131,9 @@ export function HomeScreen() {
   // [REPORT-022 F-022-18] clear the failure latch when the URL changes.
   React.useEffect(() => { setAvatarBroken(false); }, [user?.avatar]);
   const { latitude, longitude, address, status } = useLocationStore();
+  // refreshOnMount:false — App.tsx already owns the silent boot refresh; this
+  // hook is here ONLY to hand the primer its explicit, user-initiated request.
+  const { resolve: requestLocation } = useDeviceLocation({ refreshOnMount: false });
   const locationFix = grantedLocationFix(latitude, longitude, status);
 
   const home = useHome<any>(locationFix?.latitude, locationFix?.longitude);
@@ -165,6 +170,9 @@ export function HomeScreen() {
   const featured: any[] = feed?.featured ?? [];
   const popularItems: any[] = feed?.popularItems ?? [];
   const nearby: any[] = locationFix ? (feed?.nearby ?? []) : [];
+  // One tested table decides this (lib/location-primer) — the screen must not
+  // grow a second opinion about when it is legitimate to ask for location.
+  const primer = locationPrimer(locationFix !== null, status);
   const orderAgain: any[] = feed?.orderAgain ?? [];
   const activeOrder = feed?.activeOrder;
   // Names repeat across stores ("Popular" everywhere) — one chip per name.
@@ -512,6 +520,43 @@ export function HomeScreen() {
                 )}
               />
             )}
+
+            {/* No location ⇒ the marketplace has NO local dimension: `nearby`
+                comes back empty, distances are unknowable, and the only clue
+                used to be a passive "Set your location" label in the masthead.
+                On a hyperlocal marketplace that is the difference between
+                "what's open around me" and a catalogue. So the ask lives HERE,
+                in the gap it explains, priced in what the user gets — never a
+                boot-time OS dialog (BOOT_LOCATION_MODE stays 'silent') and
+                never a nag above content that works fine without it. */}
+            {primer.show ? (
+              <Card style={{ marginHorizontal: GUTTER, marginTop: space['2xl'], flexDirection: 'row', alignItems: 'center', gap: space.lg }}>
+                <View style={{ width: 44, height: 44, borderRadius: 22, backgroundColor: color.brand[50], alignItems: 'center', justifyContent: 'center' }}>
+                  <Feather name="map-pin" size={20} color={color.brand[600]} />
+                </View>
+                <View style={{ flex: 1, gap: 2 }}>
+                  <T variant="label" weight="semibold">
+                    {primer.action === 'settings' ? 'Location is off' : 'See what’s open around you'}
+                  </T>
+                  <T variant="micro" tone="muted">
+                    {primer.action === 'none'
+                      ? 'Finding you now — keep browsing while we look.'
+                      : 'Sorted by what’s closest to you. Browsing works without it.'}
+                  </T>
+                </View>
+                {primer.action === 'none' ? null : (
+                  <PillButton
+                    size="sm"
+                    label={primer.action === 'settings' ? 'Settings' : 'Use location'}
+                    onPress={() => {
+                      haptic.select();
+                      if (primer.action === 'settings') void Linking.openSettings();
+                      else void requestLocation();
+                    }}
+                  />
+                )}
+              </Card>
+            ) : null}
 
             {/* Nearby — only when location produced results (no fake proximity) */}
             {nearby.length > 0 ? (
