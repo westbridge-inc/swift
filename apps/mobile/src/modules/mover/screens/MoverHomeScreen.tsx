@@ -111,7 +111,13 @@ export function DispatchOfferCard({
       <View style={[{ margin: space.lg, borderRadius: radius.xl, overflow: 'hidden', backgroundColor: color.surface.base }, cardShadow]}>
         <View style={{ backgroundColor: color.brand[500] }}>
           {total ? (
-            <View style={{ height: 4, backgroundColor: color.surface.onBrand }}>
+            <View
+              style={{ height: 4, backgroundColor: color.surface.onBrand }}
+              accessible
+              accessibilityRole="progressbar"
+              accessibilityLabel="Time left to accept this offer"
+              accessibilityValue={{ min: 0, max: total, now: secs, text: `${secs} seconds left to accept` }}
+            >
               <View style={{ height: 4, width: `${pct * 100}%`, backgroundColor: color.white }} />
             </View>
           ) : null}
@@ -170,7 +176,11 @@ export function DispatchOfferCard({
 
           {!fareLocked && marketMax > floor ? (
             <View style={{ marginTop: space.md }}>
-              <FareSlider min={floor} max={marketMax} value={price} onChange={setPrice} />
+              {/* [F-027-08] secondsLeft makes the expiring server authority
+                  audible: it was a 4dp visual bar and nothing else, so a
+                  screen-reader user was never told the offer was vanishing
+                  underneath them while they adjusted the fare. */}
+              <FareSlider min={floor} max={marketMax} value={price} onChange={setPrice} secondsLeft={secs} />
               <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
                 <T variant="caption" tone="muted">
                   Slide to set your fare

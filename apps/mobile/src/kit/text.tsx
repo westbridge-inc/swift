@@ -1,6 +1,6 @@
 /** @jsxImportSource react */
 import React from 'react';
-import { Text as RNText, useWindowDimensions, type TextProps, type TextStyle } from 'react-native';
+import { StyleSheet, Text as RNText, useWindowDimensions, type TextProps, type TextStyle } from 'react-native';
 import { color, font, typeScale } from '@swift/ui';
 import { scaleLineHeight } from './text-scale';
 
@@ -64,6 +64,14 @@ export interface TP extends TextProps, TTone {
 // body-face weight, so it is ignored on these (face integrity beats the prop).
 const DISPLAY_FACE = new Set(['displayXl', 'display', 'title', 'numL', 'numM']);
 
+/** [F-027-05] A caller's own lineHeight still has to scale. */
+function scaleCallerLineHeight(style: TP['style'], fontScale: number): TP['style'] {
+  if (!style || fontScale === 1) return style;
+  const flat = StyleSheet.flatten(style) as TextStyle | undefined;
+  if (!flat?.lineHeight) return style;
+  return scaleLineHeight(flat, fontScale);
+}
+
 export function T({ variant = 'body', tone = 'ink', weight, center, style, ...rest }: TP) {
   // useWindowDimensions (not PixelRatio.getFontScale) so a font-scale change
   // while the app is open re-renders instead of keeping a stale box.
@@ -76,7 +84,12 @@ export function T({ variant = 'body', tone = 'ink', weight, center, style, ...re
         { color: TONE[tone] },
         weight && !DISPLAY_FACE.has(variant) ? { fontFamily: FAMILY[weight] } : null,
         center ? { textAlign: 'center' } : null,
-        style,
+        // [F-027-05] Caller style comes LAST, which is correct for
+        // precedence — and meant any caller that set an explicit lineHeight
+        // silently reinstated an UNSCALED one, overriding the scaled token.
+        // Scale theirs too, so overriding the value does not opt out of
+        // Dynamic Type.
+        scaleCallerLineHeight(style, fontScale),
       ]}
     />
   );

@@ -1,6 +1,6 @@
 /** @jsxImportSource react */
 import React, { useEffect, useRef } from 'react';
-import { Pressable, TextInput, View } from 'react-native';
+import { Pressable, TextInput, useWindowDimensions, View } from 'react-native';
 import Animated, { useAnimatedStyle, useSharedValue, withSequence, withTiming } from 'react-native-reanimated';
 import { color, motion, radius, space } from '@swift/ui';
 import { T } from './text';
@@ -26,6 +26,8 @@ export function CodeInput({
 }) {
   const input = useRef<TextInput>(null);
   const shake = useSharedValue(0);
+  // [F-027-05] The digit box has to grow with the digit.
+  const { fontScale } = useWindowDimensions();
 
   useEffect(() => {
     if (error) {
@@ -54,8 +56,14 @@ export function CodeInput({
               key={i}
               style={{
                 flex: 1,
-                maxWidth: 52,
-                height: 60,
+                // [F-027-05] The box must grow with the text inside it. A
+                // fixed 60dp height clipped the digit at the 2x Dynamic Type
+                // the F-241 test itself exercises — displayXl's 38dp line box
+                // becomes 76dp — and this is the OTP/PIN input, so clipping it
+                // is not a cosmetic defect: it is the door to the account.
+                maxWidth: 52 * Math.max(1, Math.min(fontScale, 2)),
+                minHeight: 60,
+                paddingVertical: space.xs,
                 borderRadius: radius.md,
                 borderWidth: isActive ? 2 : 1,
                 borderColor: error ? color.error : isActive ? color.brand[500] : color.border.strong,

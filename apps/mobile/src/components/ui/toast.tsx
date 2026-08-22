@@ -1,10 +1,11 @@
 import { create } from 'zustand';
-import { Pressable, View } from 'react-native';
+import { AccessibilityInfo, Pressable, View } from 'react-native';
 import Animated, { FadeInDown, FadeOutUp } from 'react-native-reanimated';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 import { color } from '@swift/ui';
 import { Text } from './text';
+import { toastDurationMs } from './toast-duration';
 import { elevation } from './elevation';
 
 /**
@@ -19,7 +20,15 @@ type ToastItem = { id: number; tone: Tone; title: string; description?: string }
 
 const useToastStore = create<{ toasts: ToastItem[] }>(() => ({ toasts: [] }));
 let seq = 0;
-const TOAST_MS = 2600;
+
+/**
+ * [F-027-06] Screen-reader awareness for the auto-dismiss timer. The duration
+ * policy itself lives in ./toast-duration so it can be tested without React
+ * Native, the same split as kit/text-scale.
+ */
+let screenReaderOn = false;
+AccessibilityInfo.isScreenReaderEnabled().then((on) => { screenReaderOn = on; }).catch(() => undefined);
+AccessibilityInfo.addEventListener('screenReaderChanged', (on) => { screenReaderOn = on; });
 
 function dismiss(id: number) {
   useToastStore.setState((s) => ({ toasts: s.toasts.filter((t) => t.id !== id) }));
@@ -28,7 +37,8 @@ function dismiss(id: number) {
 function push(tone: Tone, title: string, description?: string) {
   const id = ++seq;
   useToastStore.setState((s) => ({ toasts: [...s.toasts.slice(-1), { id, tone, title, description }] }));
-  setTimeout(() => dismiss(id), TOAST_MS);
+  const ms = toastDurationMs(tone, title, description, screenReaderOn);
+  if (ms != null) setTimeout(() => dismiss(id), ms);
 }
 
 export const toast = {
