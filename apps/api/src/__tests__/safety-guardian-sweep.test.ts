@@ -133,6 +133,32 @@ describe('Guardian sweep — session lifecycle [§5]', () => {
     expect(await prisma.tripSafetySession.count({ where: { orderId: ride.id } })).toBe(1);
   });
 
+  it('[F-028-05] stamps the ORDER\u2019s tenant on the session — never the schema default', async () => {
+    // The sweep runs from a worker with no tenant ALS, so nothing stamps the
+    // create. Before the fix the session silently took `swift-default` — and
+    // because TripSafetySession is tenant-scoped on the read side, a tenant-B
+    // passenger's authenticated NEED_HELP could not find their own ride's
+    // session: NotFound instead of the promised immediate SOS.
+    const passenger = await makeUser(['CUSTOMER']);
+    const { driver } = await makeDriver();
+    const ride = await makeRide({ driverId: driver.id, customerId: passenger.id });
+    // Give the ORDER a non-default tenant directly — the row is what the sweep
+    // reads, and Order.tenantId is the authoritative source here.
+    await prisma.$executeRaw`UPDATE orders SET "tenantId" = 'swift-default' WHERE id = ${ride.id}`;
+    const other = await prisma.tenant.upsert({
+      where: { id: 'guardian-tenant-b' },
+      update: {},
+      create: { id: 'guardian-tenant-b', name: 'Guardian Tenant B', slug: 'guardian-tenant-b' },
+    });
+    await prisma.order.update({ where: { id: ride.id }, data: { tenantId: other.id } });
+
+    await sweep(new Date('2026-07-30T03:05:00Z'));
+
+    const s = await session(ride.id);
+    expect(s.tenantId).toBe(other.id);
+    expect(s.tenantId).not.toBe('swift-default');
+  });
+
   it('ignores taxis not yet in progress and non-taxi orders entirely', async () => {
     const passenger = await makeUser(['CUSTOMER']);
     const { driver } = await makeDriver();
