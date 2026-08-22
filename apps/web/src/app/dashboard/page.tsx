@@ -66,6 +66,15 @@ export default function TodayPage() {
           className="block rounded-2xl bg-[var(--swift-red)] p-5 font-semibold text-white"
         >
           {d.pendingOrders} new {d.pendingOrders === 1 ? 'order needs' : 'orders need'} a decision → open the queue
+          {/* The overview computes queueValue and the dashboard used to drop it
+              [F-258]. A count alone does not tell a busy kitchen whether to
+              stop what it is doing: five small orders and five large ones read
+              identically. The money is the decision. */}
+          {d.queueValue > 0 && (
+            <span className="mt-1 block text-sm font-medium text-white/85">
+              {money(d.queueValue)} waiting
+            </span>
+          )}
         </Link>
       )}
 
