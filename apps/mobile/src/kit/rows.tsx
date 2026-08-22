@@ -87,6 +87,16 @@ export function IconChip({
 }
 
 /** Kit settings row: icon chip · label (+optional sub) · right slot or chevron. */
+/**
+ * A settings row.
+ *
+ * `plain` drops the icon chip [F-263]. The chip had become wallpaper: the same
+ * pale square marked "Terms of service" and "Switch app" alike, so a screen of
+ * seven rows had no hierarchy at all and nothing looked more important than
+ * anything else. An icon should mark an ACTION you take, not decorate a LABEL
+ * you read once. Reference and legal rows are plain; destinations keep the
+ * chip and, because fewer rows carry one, it means something again.
+ */
 export function SettingsRow({
   icon,
   label,
@@ -94,6 +104,7 @@ export function SettingsRow({
   right,
   onPress,
   tone = 'brand',
+  plain = false,
 }: {
   icon: React.ComponentProps<typeof Feather>['name'];
   label: string;
@@ -101,6 +112,7 @@ export function SettingsRow({
   right?: React.ReactNode;
   onPress?: () => void;
   tone?: 'brand' | 'error';
+  plain?: boolean;
 }) {
   return (
     <Pressable
@@ -119,7 +131,7 @@ export function SettingsRow({
           opacity: pressed ? 0.65 : 1,
         }}
       >
-        <IconChip icon={icon} tone={tone} />
+        {plain ? null : <IconChip icon={icon} tone={tone} />}
         <View style={{ flex: 1 }}>
           <T variant="body" weight="medium" tone={tone === 'error' ? 'error' : 'ink'}>
             {label}

@@ -5,7 +5,8 @@ import { Image } from 'expo-image';
 import { Feather } from '@expo/vector-icons';
 import { useNavigation } from '@react-navigation/native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { color, space } from '@swift/ui';
+import { color, radius, space } from '@swift/ui';
+import { haptic } from '../../../lib/haptics';
 import { useMyRating, useProfile } from '../../../hooks/customer';
 import { useAuthStore } from '../../../stores/authStore';
 import { AwningEdge, Card, EmptyState, ErrorState, GradientMasthead, IconChip, LoadingBlock, PillButton, PopupCard, PopupTitle, Screen, SettingsRow, T } from '../../../kit';
@@ -287,16 +288,37 @@ export function ProfileScreen() {
             <SettingsRow icon="phone" label="Contact us" onPress={() => navigation.navigate('ContactUs')} />
           </Card>
 
-          {/* Role switching sits apart from support — it changes WHO you are here. */}
-          <Card style={{ marginTop: space.xl }}>
-            <SettingsRow
-              icon="refresh-ccw"
-              label="Switch app"
-              sub="Swift Driver · Swift Business"
-              onPress={() => setSwitcherOpen(true)}
-            />
-          </Card>
+          {/* Role switching sits apart from support — it changes WHO you are
+              here. It was ONE MORE IDENTICAL ROW [F-263]: earning on Swift or
+              opening a business is the largest thing a person can do in this
+              app, and it read exactly like "FAQ". It gets the weight of the
+              decision it is. */}
+          <Pressable
+            onPress={() => { haptic.select(); setSwitcherOpen(true); }}
+            accessibilityRole="button"
+            accessibilityLabel="Switch app. Drive with Swift or sell on Swift."
+            style={{ marginTop: space.xl }}
+          >
+            {({ pressed }) => (
+              <Card style={{ flexDirection: 'row', alignItems: 'center', gap: space.lg, opacity: pressed ? 0.85 : 1 }}>
+                <View style={{ width: 48, height: 48, borderRadius: radius.lg, backgroundColor: color.brand[600], alignItems: 'center', justifyContent: 'center' }}>
+                  <Feather name="refresh-ccw" size={22} color={color.white} />
+                </View>
+                <View style={{ flex: 1, gap: 2 }}>
+                  <T variant="title">Earn with Swift</T>
+                  <T variant="caption" tone="muted">
+                    Drive, deliver, or sell — switch to Swift Driver or Swift Business.
+                  </T>
+                </View>
+                <Feather name="chevron-right" size={20} color={color.text.muted} />
+              </Card>
+            )}
+          </Pressable>
 
+          {/* Quiet [F-263]: a filled pill made LOG OUT the loudest element on
+              the whole screen — the one thing a person is least likely to want
+              and most likely to hit by accident. It is a way out, not an
+              invitation. The confirm sheet still carries the real decision. */}
           <PillButton
             label="Log out"
             icon="log-out"
