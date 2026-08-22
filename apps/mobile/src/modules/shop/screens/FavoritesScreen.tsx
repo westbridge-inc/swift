@@ -5,7 +5,7 @@ import { useNavigation } from '@react-navigation/native';
 import { space } from '@swift/ui';
 import { useFavorites, useToggleFavorite } from '../../../hooks/customer';
 import { useAuthStore } from '../../../stores/authStore';
-import { vendorImage } from '../../../lib/images';
+import { vendorPhoto } from '../../../lib/images';
 import { EmptyState, ErrorState, FoodCard, Header, LoadingBlock, Screen } from '../../../kit';
 
 const SCREEN_W = Dimensions.get('window').width;
@@ -54,7 +54,7 @@ export function FavoritesScreen() {
           renderItem={({ item: v }) => (
             <FoodCard
               width={CARD_W}
-              image={vendorImage(v)}
+              image={vendorPhoto(v)}
               name={v.name}
               rating={v.displayRating ?? null}
               ratingBucket={v.ratingBucket}

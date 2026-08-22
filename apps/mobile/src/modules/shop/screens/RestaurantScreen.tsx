@@ -1,14 +1,13 @@
 /** @jsxImportSource react */
 import React, { useMemo, useState } from 'react';
 import { Dimensions, FlatList, Pressable, ScrollView, Share, TextInput, View } from 'react-native';
-import { Image } from 'expo-image';
 import { Feather } from '@expo/vector-icons';
 import { useNavigation, useRoute } from '@react-navigation/native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { color, elevation, font, radius, space } from '@swift/ui';
 import { useAddToCart, useCart, useToggleFavorite, useUpdateCartItem, useVendor } from '../../../hooks/customer';
 import { useAuthStore } from '../../../stores/authStore';
-import { DARK_BLURHASH, itemImage, vendorImage } from '../../../lib/images';
+import { itemPhoto, vendorPhoto } from '../../../lib/images';
 import { money } from '../../../lib/money';
 import {
   AddMorph,
@@ -21,6 +20,7 @@ import {
   LoadingBlock,
   MenuRow,
   Money,
+  Photo,
   PillButton,
   PopupCard,
   PopupTitle,
@@ -106,9 +106,9 @@ function ProductTile({
   return (
     <View style={{ width: TILE_W }}>
       <Pressable onPress={onOpen}>
-        <Image
-          source={{ uri: itemImage(item) }}
-          placeholder={{ blurhash: DARK_BLURHASH }}
+        <Photo
+          uri={itemPhoto(item)}
+          label={item.name}
           transition={150}
           style={{ width: TILE_W, height: TILE_W, borderRadius: radius.md, backgroundColor: color.surface.base, opacity: out ? 0.5 : 1 }}
           contentFit="cover"
@@ -164,9 +164,9 @@ function ServiceRow({ item, onOpen }: { item: any; onOpen: () => void }) {
             padding: space.md,
           }}
         >
-          <Image
-            source={{ uri: itemImage(item) }}
-            placeholder={{ blurhash: DARK_BLURHASH }}
+          <Photo
+            uri={itemPhoto(item)}
+            label={item.name}
             style={{ width: 64, height: 64, borderRadius: radius.md }}
             contentFit="cover"
           />
@@ -284,7 +284,7 @@ export function RestaurantScreen() {
     <FoodCard
       key={item.id}
       width={width}
-      image={itemImage(item)}
+      image={itemPhoto(item)}
       name={item.name}
       priceLabel={money(item.customerPrice ?? item.basePrice)}
       onPress={() => openItem(item)}
@@ -306,9 +306,10 @@ export function RestaurantScreen() {
       >
         {/* Cover hero + floating chips */}
         <View>
-          <Image
-            source={{ uri: vendorImage(v) }}
-            placeholder={{ blurhash: DARK_BLURHASH }}
+          <Photo
+            uri={vendorPhoto(v)}
+            label={v.name}
+            glyph="shops"
             transition={200}
             style={{ width: SCREEN_W, height: 300 }}
             contentFit="cover"
@@ -604,7 +605,7 @@ export function RestaurantScreen() {
                           name={item.name}
                           description={item.description}
                           price={item.customerPrice ?? item.basePrice}
-                          image={item.imageUrl ? itemImage(item) : null}
+                          image={itemPhoto(item)}
                           soldOut={item.stockQuantity === 0}
                           qty={qty}
                           busy={addToCart.isPending || updateCartItem.isPending}

@@ -1,7 +1,6 @@
 /** @jsxImportSource react */
 import React, { useMemo, useState } from 'react';
 import { Dimensions, ScrollView, View } from 'react-native';
-import { Image } from 'expo-image';
 import { Feather } from '@expo/vector-icons';
 import { useNavigation, useRoute } from '@react-navigation/native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -9,9 +8,10 @@ import { color, radius, space } from '@swift/ui';
 import { useAddToCart, useItemSlots, useVendor } from '../../../hooks/customer';
 import { useAuthStore } from '../../../stores/authStore';
 import { useBookingStore, type ServiceVisitMode } from '../../../stores/bookingStore';
-import { DARK_BLURHASH, itemImage } from '../../../lib/images';
+import { itemPhoto } from '../../../lib/images';
 import { money } from '../../../lib/money';
 import {
+  Photo,
   Chip,
   CircleChip,
   ErrorState,
@@ -170,9 +170,9 @@ export function MenuItemScreen() {
       <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={{ paddingBottom: 140 }}>
         {/* Hero + floating header */}
         <View>
-          <Image
-            source={{ uri: itemImage(item) }}
-            placeholder={{ blurhash: DARK_BLURHASH }}
+          <Photo
+            uri={itemPhoto(item)}
+            label={item.name}
             transition={200}
             style={{ width: SCREEN_W, height: 340 }}
             contentFit="cover"

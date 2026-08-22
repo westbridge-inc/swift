@@ -1,15 +1,15 @@
 /** @jsxImportSource react */
 import React, { useEffect } from 'react';
 import { FlatList, RefreshControl, View } from 'react-native';
-import { Image } from 'expo-image';
 import { useNavigation, useIsFocused } from '@react-navigation/native';
 import Animated, { FadeInDown, ReduceMotion } from 'react-native-reanimated';
 
 import { color, radius, space } from '@swift/ui';
 import { useOrdersInfinite, useReorder } from '../../../hooks/customer';
 import { useAuthStore } from '../../../stores/authStore';
-import { DARK_BLURHASH, vendorImage } from '../../../lib/images';
+import { vendorPhoto } from '../../../lib/images';
 import {
+  Photo,
   Card, EmptyState, ErrorState, GradientMasthead, LoadingBlock, Money,
   Pictogram, PillButton, ReceiptEdge, Screen, T,
 } from '../../../kit';
@@ -126,9 +126,10 @@ export function OrdersHistoryScreen() {
               <Pictogram name="taxi" size={32} color={color.brand[600]} />
             </View>
           ) : (
-            <Image
-              source={{ uri: vendorImage(o.vendor ?? {}) }}
-              placeholder={{ blurhash: DARK_BLURHASH }}
+            <Photo
+              uri={vendorPhoto(o.vendor)}
+              label={o.vendor?.name}
+              glyph="shops"
               transition={150}
               style={{ width: 64, height: 64, borderRadius: radius.md }}
               contentFit="cover"

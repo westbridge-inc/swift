@@ -7,7 +7,7 @@ import { useHome, useToggleFavorite } from '../../../hooks/customer';
 import { useAuthStore } from '../../../stores/authStore';
 import { useLocationStore } from '../../../stores/locationStore';
 import { grantedLocationFix } from '../../../lib/deviceLocation';
-import { vendorImage } from '../../../lib/images';
+import { vendorPhoto } from '../../../lib/images';
 import { EmptyState, ErrorState, FoodCard, Header, LoadingBlock, Screen } from '../../../kit';
 
 const SCREEN_W = Dimensions.get('window').width;
@@ -47,7 +47,7 @@ export function RecommendedScreen() {
           renderItem={({ item: v }) => (
             <FoodCard
               width={CARD_W}
-              image={vendorImage(v)}
+              image={vendorPhoto(v)}
               name={v.name}
               rating={v.displayRating ?? null}
               ratingBucket={v.ratingBucket}

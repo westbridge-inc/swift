@@ -1,7 +1,9 @@
 /** @jsxImportSource react */
 import React from 'react';
 import { View, type ViewStyle } from 'react-native';
+import { Image } from 'expo-image';
 import { color, radius, space } from '@swift/ui';
+import { DARK_BLURHASH } from '../lib/images';
 import { T } from './text';
 import { Pictogram, type PictogramName } from './pictograms';
 
@@ -68,4 +70,43 @@ export function PhotoPlaceholder({
 /** Rounded square for row-sized slots (VendorRow, cart lines). */
 export function PhotoPlaceholderTile({ size = 84, ...rest }: { size?: number } & React.ComponentProps<typeof PhotoPlaceholder>) {
   return <PhotoPlaceholder {...rest} style={{ width: size, height: size, borderRadius: radius.md }} />;
+}
+
+/**
+ * A photograph, or an honest admission that there isn't one [F-264].
+ *
+ * The raw `<Image source={{ uri: itemImage(x) }}>` pattern is how invented
+ * photos spread: the helper always returned a string, so every call site
+ * silently rendered a stranger's food and no reviewer could see the lie at the
+ * call site. This makes the absence explicit and impossible to ignore — the
+ * `uri` is nullable, so a caller must decide what "no photo" looks like.
+ */
+export function Photo({
+  uri,
+  label,
+  glyph,
+  tint,
+  style,
+  contentFit = 'cover',
+  transition = 150,
+}: {
+  uri: string | null | undefined;
+  label?: string;
+  glyph?: PictogramName;
+  tint?: { bg: string; ink: string };
+  style?: ViewStyle;
+  contentFit?: 'cover' | 'contain';
+  transition?: number;
+}) {
+  if (!uri) return <PhotoPlaceholder label={label} glyph={glyph} tint={tint} style={style} />;
+  return (
+    <Image
+      source={{ uri }}
+      placeholder={{ blurhash: DARK_BLURHASH }}
+      transition={transition}
+      style={style as never}
+      contentFit={contentFit}
+      accessibilityLabel={label}
+    />
+  );
 }
