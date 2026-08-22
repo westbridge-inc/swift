@@ -1,9 +1,32 @@
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { detectOffPlatformContact, OFF_PLATFORM_WARNING } from './off-platform';
-import { redactOrderSecrets, SECRET_REDACTED_WARNING } from './secret-guard';
+import { digitRun, mediaUrlCarriesSecret, redactOrderSecrets, SECRET_REDACTED_WARNING } from './secret-guard';
+
 import { NotificationService } from '../notification/notification.service';
 import { NotFoundError, ForbiddenError } from '../../utils/errors';
+
+/** How far back the split-code check looks. Bounded on BOTH axes on purpose:
+ *  an unbounded scan of a long conversation would put an O(history) query on
+ *  the send path, which is a denial-of-service surface reachable by anyone who
+ *  can chat. Twelve messages inside ten minutes covers a code typed in pieces
+ *  without covering a day of ordinary conversation. */
+const SPLIT_CODE_LOOKBACK = 12;
+const SPLIT_CODE_WINDOW_MS = 10 * 60 * 1000;
+
+/** The digits this sender has recently put into this room, oldest first, so a
+ *  code delivered across several messages reads the way the RECIPIENT reads
+ *  it: in order, as one string. */
+async function recentSenderDigits(app: any, roomId: string, senderId: string): Promise<string> {
+  const since = new Date(Date.now() - SPLIT_CODE_WINDOW_MS);
+  const rows = await app.prisma.chatMessage.findMany({
+    where: { chatRoomId: roomId, senderId, createdAt: { gte: since } },
+    orderBy: { createdAt: 'desc' },
+    take: SPLIT_CODE_LOOKBACK,
+    select: { message: true },
+  });
+  return rows.reverse().map((r: { message: string }) => digitRun(r.message)).join('');
+}
 
 const createRoomSchema = z.object({
   orderId: z.string().min(1),
@@ -103,8 +126,23 @@ export async function chatRoutes(app: FastifyInstance) {
     const secrets = room?.orderId
       ? await app.prisma.order.findUnique({ where: { id: room.orderId }, select: { ridePin: true, pickupCode: true } })
       : null;
-    const guarded = redactOrderSecrets(message, secrets ?? {});
+    // [F-028-02] A code split across messages — "481" then "902" — arrives
+    // whole in the ordered transcript while each part looks innocent. Judge
+    // this message against the digits THIS sender has already put in THIS
+    // room recently, so the pieces are read the way the reader reads them.
+    // Bounded by count and by time: a guard that walks an entire conversation
+    // is a denial-of-service surface on the send path.
+    const priorDigits = secrets
+      ? await recentSenderDigits(app, roomId, request.user.userId)
+      : '';
+    const guarded = redactOrderSecrets(message, secrets ?? {}, priorDigits);
     const body = guarded.text;
+    // A mediaUrl is an arbitrary sender-supplied string that is stored and
+    // emitted to the other participant, so a path naming the code crosses
+    // untouched. There is nothing to preserve around a secret in a URL, so
+    // the attachment is dropped rather than mangled into a broken link.
+    const mediaBlocked = mediaUrlCarriesSecret(mediaUrl, secrets ?? {});
+    const safeMediaUrl = mediaBlocked ? undefined : mediaUrl;
 
     const msg = await app.prisma.chatMessage.create({
       data: {
@@ -112,7 +150,7 @@ export async function chatRoutes(app: FastifyInstance) {
         senderId: request.user.userId,
         message: body,
         messageType,
-        mediaUrl,
+        mediaUrl: safeMediaUrl,
         offPlatformFlag: offPlatform,
       },
     });
@@ -156,7 +194,10 @@ export async function chatRoutes(app: FastifyInstance) {
       // [F-027-12] The redaction warning wins: silently mangling someone's
       // text is worse than the nudge it would have replaced, and this is the
       // one they need to read.
-      ...(guarded.redacted
+      // A dropped attachment needs the same explanation as a redacted line —
+      // an image that silently fails to send reads as a broken app, and the
+      // sender never learns why [F-028-02].
+      ...(guarded.redacted || mediaBlocked
         ? { warning: SECRET_REDACTED_WARNING }
         : offPlatform ? { warning: OFF_PLATFORM_WARNING } : {}),
     };
@@ -187,7 +228,26 @@ export async function chatRoutes(app: FastifyInstance) {
       data: { lastReadAt: new Date() },
     });
 
-    return { success: true, data: messages.reverse() };
+    // [F-028-02] Rows written BEFORE the guard existed — or before it learned a
+    // vector — still hold the live code, and history is a disclosure channel
+    // like any other: the driver just scrolls up. Re-redact on the way out, so
+    // closing a hole closes it for the whole conversation and not only for
+    // messages sent from now on. Stored rows are deliberately left alone: an
+    // evidence trail that quietly rewrites itself is worse than one that
+    // carries a secret nobody can act on once the code has been used.
+    const historyRoom = await app.prisma.chatRoom.findUnique({ where: { id: roomId }, select: { orderId: true } });
+    const historySecrets = historyRoom?.orderId
+      ? await app.prisma.order.findUnique({ where: { id: historyRoom.orderId }, select: { ridePin: true, pickupCode: true } })
+      : null;
+    const visible = historySecrets
+      ? messages.map((m) => ({
+          ...m,
+          message: redactOrderSecrets(m.message, historySecrets).text,
+          mediaUrl: mediaUrlCarriesSecret(m.mediaUrl, historySecrets) ? null : m.mediaUrl,
+        }))
+      : messages;
+
+    return { success: true, data: visible.reverse() };
   });
 
   // Mark room as read

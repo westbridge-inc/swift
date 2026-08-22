@@ -9,7 +9,7 @@ import { socketPlugin } from '../plugins/socket';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { registerEmptyJsonBodyParser } from '../plugins/empty-json';
 import { chatRoutes } from '../modules/chat/chat.routes';
-import { redactOrderSecrets, SECRET_REDACTION } from '../modules/chat/secret-guard';
+import { digitRun, mediaUrlCarriesSecret, normaliseDigits, redactOrderSecrets, SECRET_REDACTION } from '../modules/chat/secret-guard';
 
 // ---------------------------------------------------------------------------
 // [F-027-12] The handover secret must never travel over chat.
@@ -140,12 +140,17 @@ describe('redactOrderSecrets', () => {
     expect(out.text).not.toContain(PICKUP_CODE);
   });
 
-  it('leaves a code that is part of a LONGER number alone', () => {
-    // A phone number or an order total that happens to contain the digits is
-    // not the secret being disclosed.
-    const out = redactOrderSecrets('call 5924819021 later', secrets);
-    expect(out.redacted).toBe(false);
-    expect(out.text).toBe('call 5924819021 later');
+  it('redacts a code HIDDEN INSIDE a longer number', () => {
+    // REVERSED BY F-028-02. This test previously required the opposite, and
+    // that requirement WAS the bypass: pad the code with one digit, add
+    // "ignore the first number", and the guard waved it through. The file's
+    // own cost asymmetry — a false positive costs one redacted line, a false
+    // negative costs the delivery — only ever pointed one way. A phone number
+    // that happens to contain the live code is now redacted, and that is the
+    // cheaper error by a wide margin.
+    const out = redactOrderSecrets(`call 592${PICKUP_CODE}1 later`, secrets);
+    expect(out.redacted).toBe(true);
+    expect(out.text).not.toContain(PICKUP_CODE);
   });
 
   it('leaves ordinary chat untouched', () => {
@@ -173,9 +178,106 @@ describe('redactOrderSecrets', () => {
     const ms = Number(process.hrtime.bigint() - started) / 1e6;
     expect(ms).toBeLessThan(500);
   });
+
+  // ── F-028-02: the vectors the first fix left open ───────────────────────
+  describe('F-028-02 — the bypasses the instance-fix left open', () => {
+    it('catches a code spelled out in words', () => {
+      // "four eight one nine zero two" is perfectly readable to a human and
+      // contains no digit at all. The whole body goes, because writing it
+      // this way is not an incidental remark.
+      const out = redactOrderSecrets('four eight one nine zero two', secrets);
+      expect(out.redacted).toBe(true);
+      expect(out.wholeMessage).toBe(true);
+      expect(out.text).toBe(SECRET_REDACTION);
+    });
+
+    it('catches "oh" as a spoken zero', () => {
+      const out = redactOrderSecrets('four eight one nine oh two', secrets);
+      expect(out.redacted).toBe(true);
+    });
+
+    it('catches full-width and Arabic-Indic digits', () => {
+      for (const written of ['４８１９０２', '٤٨١٩٠٢']) {
+        const out = redactOrderSecrets(`code ${written}`, secrets);
+        expect(out.redacted).toBe(true);
+      }
+    });
+
+    it('never invents a digit from a word that merely contains one', () => {
+      // The word-folding is whole-token only: "someone" must not become
+      // "some1", or ordinary chat starts triggering the guard.
+      expect(normaliseDigits('someone is waiting')).toBe('someone is waiting');
+      expect(normaliseDigits('tone of the note')).toBe('tone of the note');
+      expect(digitRun('someone is waiting')).toBe('');
+    });
+
+    it('catches a code SPLIT ACROSS MESSAGES', () => {
+      // "481" then "902" left both messages intact, and the verifier reads the
+      // ordered transcript. Prior digits from the same sender are now part of
+      // the judgement.
+      const first = redactOrderSecrets('481', secrets, '');
+      // Standalone "481" is not a code and stays — that is correct.
+      expect(first.redacted).toBe(false);
+      const second = redactOrderSecrets('902', secrets, digitRun('481'));
+      expect(second.redacted).toBe(true);
+      expect(second.text).toBe(SECRET_REDACTION);
+    });
+
+    it('does not fire on unrelated digits accumulating over a conversation', () => {
+      const prior = digitRun('I have 2 bags') + digitRun('apt 5');
+      const out = redactOrderSecrets('see you in 10', secrets, prior);
+      expect(out.redacted).toBe(false);
+    });
+
+    it('drops a mediaUrl whose path carries the code', () => {
+      expect(mediaUrlCarriesSecret(`https://cdn.example.com/${RIDE_PIN}.jpg`, secrets)).toBe(true);
+      expect(mediaUrlCarriesSecret('https://cdn.example.com/photo-abc.jpg', secrets)).toBe(false);
+      expect(mediaUrlCarriesSecret(undefined, secrets)).toBe(false);
+    });
+
+    it('does nothing at all when the order holds no live code', () => {
+      const out = redactOrderSecrets('four eight one nine zero two', {});
+      expect(out.redacted).toBe(false);
+      expect(mediaUrlCarriesSecret('https://x/481902.jpg', {})).toBe(false);
+    });
+
+    it('survives adversarial input without catastrophic backtracking', () => {
+      const started = Date.now();
+      redactOrderSecrets('4'.repeat(2000) + '-'.repeat(500) + '8'.repeat(2000), secrets);
+      expect(Date.now() - started).toBeLessThan(1000);
+    });
+  });
 });
 
 describe('the send path never stores, broadcasts or pushes a live code', () => {
+  it('re-redacts a code already sitting in HISTORY', async () => {
+    // A row written before the guard existed — or before it learned a vector —
+    // still holds the live code, and the driver only has to scroll up. Written
+    // straight to the DB to reproduce exactly that: a pre-guard row.
+    const stale = await app.prisma.chatMessage.create({
+      data: { chatRoomId: roomId, senderId: userId, message: `the code is ${RIDE_PIN}`, messageType: 'text' },
+    });
+    try {
+      const res = await app.inject({
+        method: 'GET',
+        url: `/api/v1/chat/rooms/${roomId}/messages`,
+        headers: { authorization: `Bearer ${token}` },
+      });
+      expect(res.statusCode).toBe(200);
+      const body = res.json().data as Array<{ id: string; message: string }>;
+      const row = body.find((m) => m.id === stale.id);
+      expect(row).toBeDefined();
+      expect(row!.message).not.toContain(RIDE_PIN);
+      expect(row!.message).toContain(SECRET_REDACTION);
+      // The STORED row is deliberately untouched: an evidence trail that
+      // quietly rewrites itself is worse than one holding a spent secret.
+      const onDisk = await app.prisma.chatMessage.findUnique({ where: { id: stale.id } });
+      expect(onDisk!.message).toContain(RIDE_PIN);
+    } finally {
+      await app.prisma.chatMessage.delete({ where: { id: stale.id } });
+    }
+  });
+
   it('the stored row, the socket payload and the push body are all redacted, and the sender is told why', async () => {
     const emitted: Array<Record<string, unknown>> = [];
     const emitSpy = vi.spyOn(app.io, 'to').mockImplementation(((room: string) => ({
