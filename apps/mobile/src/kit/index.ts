@@ -18,6 +18,7 @@ export * from './rows';
 export * from './states';
 export * from './food';
 export * from './placeholder';
+export * from './photo-placeholder';
 export * from './pictograms';
 export * from './glyphs';
 export * from './ride-sheet';

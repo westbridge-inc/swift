@@ -104,3 +104,27 @@ export function mediaUrl(url?: string | null): string | null {
 export function itemImage(item: { imageUrl?: string | null; id?: string }): string {
   return mediaUrl(item.imageUrl) || fallbackImage(item.id, 'food');
 }
+
+/**
+ * The HONEST photo accessors [F-264].
+ *
+ * `itemImage`/`vendorImage` above fall back to `fallbackImage()`, which hands
+ * out a RANDOM stock photo keyed off the row id. That is how "Mauby" — a
+ * Guyanese drink — came to be advertised on Home with a photograph of a
+ * cheeseburger. On a marketplace a customer chooses from the picture, so a
+ * picture of something they are not buying misrepresents the goods; and once
+ * any photo on a screen might be invented, the real ones stop being evidence.
+ *
+ * These return null instead of inventing one, so a card can render a designed
+ * placeholder that names the actual item. The older helpers are kept for the
+ * call sites not yet migrated rather than being changed underneath them — a
+ * silent signature change across twenty-one screens is its own defect.
+ */
+export function itemPhoto(item: { imageUrl?: string | null }): string | null {
+  return mediaUrl(item.imageUrl) || null;
+}
+
+export function vendorPhoto(v?: { coverImageUrl?: string | null; logoUrl?: string | null } | null): string | null {
+  if (!v) return null;
+  return v.coverImageUrl || v.logoUrl || null;
+}

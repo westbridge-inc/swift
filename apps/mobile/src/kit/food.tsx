@@ -6,6 +6,7 @@ import { Feather } from '@expo/vector-icons';
 import { color, radius, space, withAlpha } from '@swift/ui';
 import { DARK_BLURHASH } from '../lib/images';
 import { Card } from './card';
+import { PhotoPlaceholder } from './photo-placeholder';
 import { Pictogram, type PictogramName } from './pictograms';
 import { Scrim } from '../components/ui/scrim';
 import { HeartBadge, Stars } from './controls';
@@ -77,7 +78,9 @@ export function FoodCard({
   onPress,
   width,
 }: {
-  image: string;
+  /** null ⇒ this thing genuinely has no photo; draw the honest placeholder
+   *  rather than a stranger's dinner [F-264]. */
+  image: string | null;
   name: string;
   priceLabel?: string;
   /** number = show stars · null = the "New" face · undefined = no star line. */
@@ -95,13 +98,17 @@ export function FoodCard({
       {({ pressed }) => (
       <Card pad={false} style={{ width, opacity: pressed ? 0.85 : 1 }}>
         <View>
-          <Image
-            source={{ uri: image }}
-            placeholder={{ blurhash: DARK_BLURHASH }}
-            transition={150}
-            style={{ width: '100%', aspectRatio: 1 }}
-            contentFit="cover"
-          />
+          {image ? (
+            <Image
+              source={{ uri: image }}
+              placeholder={{ blurhash: DARK_BLURHASH }}
+              transition={150}
+              style={{ width: '100%', aspectRatio: 1 }}
+              contentFit="cover"
+            />
+          ) : (
+            <PhotoPlaceholder label={name} style={{ width: '100%', aspectRatio: 1 }} />
+          )}
           {onToggleFavorite ? (
             <View style={{ position: 'absolute', top: space.md, right: space.md }}>
               <HeartBadge active={!!favorite} onPress={onToggleFavorite} />
@@ -145,7 +152,8 @@ export function VendorRow({
   wide = false,
   closed = false,
 }: {
-  image: string;
+  /** null ⇒ no real photo; the placeholder names the merchant [F-264]. */
+  image: string | null;
   name: string;
   meta?: React.ReactNode;
   sub?: string;
@@ -163,18 +171,30 @@ export function VendorRow({
     >
       {({ pressed }) => (
       <Card style={[{ flexDirection: 'row', alignItems: 'center', gap: space.md, padding: space.md, opacity: pressed ? 0.85 : 1 }, style]}>
-        <Image
-          source={{ uri: image }}
-          placeholder={{ blurhash: DARK_BLURHASH }}
-          transition={150}
-          style={{
-            width: wide ? 96 : 84,
-            height: wide ? 60 : 84,
-            borderRadius: radius.md,
-            opacity: closed ? 0.45 : 1,
-          }}
-          contentFit="cover"
-        />
+        {image ? (
+          <Image
+            source={{ uri: image }}
+            placeholder={{ blurhash: DARK_BLURHASH }}
+            transition={150}
+            style={{
+              width: wide ? 96 : 84,
+              height: wide ? 60 : 84,
+              borderRadius: radius.md,
+              opacity: closed ? 0.45 : 1,
+            }}
+            contentFit="cover"
+          />
+        ) : (
+          <PhotoPlaceholder
+            glyph="shops"
+            style={{
+              width: wide ? 96 : 84,
+              height: wide ? 60 : 84,
+              borderRadius: radius.md,
+              opacity: closed ? 0.45 : 1,
+            }}
+          />
+        )}
         <View style={{ flex: 1, gap: 4 }}>
           <T variant="body" weight="semibold" tone={closed ? 'muted' : 'ink'} numberOfLines={1}>
             {name}
@@ -284,7 +304,8 @@ export function MerchantCard({
   onPress,
   width,
 }: {
-  image: string;
+  /** null ⇒ no real storefront photo; never invent one [F-264]. */
+  image: string | null;
   name: string;
   meta?: string;
   rating?: number | null;
@@ -300,13 +321,17 @@ export function MerchantCard({
       {({ pressed }) => (
         <Card pad={false} style={{ width, opacity: pressed ? 0.85 : 1, overflow: 'hidden' }}>
           <View>
-            <Image
-              source={{ uri: image }}
-              placeholder={{ blurhash: DARK_BLURHASH }}
-              transition={150}
-              style={{ width: '100%', aspectRatio: 16 / 9 }}
-              contentFit="cover"
-            />
+            {image ? (
+              <Image
+                source={{ uri: image }}
+                placeholder={{ blurhash: DARK_BLURHASH }}
+                transition={150}
+                style={{ width: '100%', aspectRatio: 16 / 9 }}
+                contentFit="cover"
+              />
+            ) : (
+              <PhotoPlaceholder glyph="shops" style={{ width: '100%', aspectRatio: 16 / 9 }} />
+            )}
             {/* A real gradient, not a flat overlay — a hard band across a photo
                 is the thing that reads as cheap. */}
             <Scrim height={110} />

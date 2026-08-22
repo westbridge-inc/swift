@@ -407,29 +407,20 @@ async function main() {
   // vendor-uploaded photo.
   const itemImages: Record<string, string> = {
     Pepperpot: '1544025162-d76694265947',
-    'Cook-Up Rice': '1516684732162-798a0062be99',
     'Fried Rice': '1603133872878-684f208fb84b',
     'Chow Mein': '1585032226651-759b368d7246',
     'Fresh Coconut Water': '1588413336019-dd5d3beddf55',
-    Mauby: '1541544537156-7627a7a4aa1c',
     'Chicken Curry & Roti': '1565557623262-b51c2513a641',
-    'Dhal Puri (2)': '1567620905732-2d1ec7ab7445',
     'Channa & Aloo': '1546069901-ba9599a7e63c',
     'BBQ Chicken Plate': '1504674900247-0877df9cc836',
-    'Pork Chops': '1608198093002-ad4e005484ec',
-    'Grilled Snapper': '1535140728325-a4d3707eee61',
     Margherita: '1565299624946-b28f40a0ae38',
     Pepperoni: '1513104890138-7c749659a591',
-    'Garlic Knots (6)': '1482049016688-2d3e1b311543',
     'Sweet & Sour Chicken': '1512058564366-18510be2db19',
     'Beef Lo Mein': '1585032226651-759b368d7246',
-    'Veg Spring Rolls (4)': '1546069901-ba9599a7e63c',
     'Garlic Butter Shrimp': '1563379926898-05f4575a45d8',
-    'Fish & Bakes': '1535140728325-a4d3707eee61',
     'Crab Curry': '1565557623262-b51c2513a641',
     'Pine Tart (3)': '1565958011703-44f9829ba187',
     'Black Cake Slice': '1486427944299-d1955d23e34d',
-    'Cheese Roll': '1567620905732-2d1ec7ab7445',
     'Buddha Bowl': '1512621776951-a57141f2eefd',
     'Avocado Toast': '1482049016688-2d3e1b311543',
     'Fresh Juice': '1613478223719-2ab802602423',
@@ -465,6 +456,33 @@ async function main() {
       data: { imageUrl: `https://images.unsplash.com/photo-${photo}?w=600&q=80` },
     });
   }
+
+  // [F-264] Nine of these were flatly the wrong food, verified by downloading
+  // every seeded photo and looking at it: Mauby (a Guyanese bark-brewed drink)
+  // was a CHEESEBURGER, Cook-Up Rice was Japanese white rice with miso soup,
+  // Pork Chops was a basket of baguettes, Grilled Snapper and Fish & Bakes
+  // shared one photo of a table of pastries, Cheese Roll and Dhal Puri shared
+  // a stack of syrup pancakes, Garlic Knots was avocado toast, Veg Spring
+  // Rolls was a buddha bowl.
+  //
+  // On a Guyanese marketplace that is not a cosmetic slip. The customer buys
+  // from the picture, so the wrong picture misrepresents the goods — and it is
+  // corrosive besides: once ANY photo might be invented, the real ones stop
+  // being evidence. It is also precisely why the app "looks fake" to anyone
+  // who knows the food.
+  //
+  // Removing them from the map above is not enough — dev databases already
+  // hold the bad URL — so they are actively nulled here and the honest
+  // PhotoPlaceholder names the dish instead. A verified photograph can be
+  // added later; a wrong one cannot be un-seen.
+  const UNVERIFIED_PHOTOS = [
+    'Mauby', 'Cook-Up Rice', 'Pork Chops', 'Grilled Snapper', 'Fish & Bakes',
+    'Cheese Roll', 'Dhal Puri (2)', 'Garlic Knots (6)', 'Veg Spring Rolls (4)',
+  ];
+  await prisma.item.updateMany({
+    where: { name: { in: UNVERIFIED_PHOTOS }, imageUrl: { startsWith: 'https://images.unsplash.com/' } },
+    data: { imageUrl: null },
+  });
 
   // Storefront covers for the demo stores. Without one, RestaurantScreen's hero
   // falls back to a type-pooled hash pick — the barbershop drew a clothing
