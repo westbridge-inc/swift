@@ -110,17 +110,51 @@ describe('notifyAdmins tenancy [NOC-A F45]', () => {
       });
       expect(leaked, "a foreign tenant's admin was paged").toBe(0);
 
-      // ...and an explicit platform-wide page still reaches everyone.
+      // [F-027-20] ...and an explicit platform-wide page reaches PLATFORM
+      // OPERATORS, not every tenant's admins.
+      //
+      // This assertion used to be the opposite, and that is what made the
+      // finding possible: `null` meant "drop every tenant predicate", so
+      // twelve callers that chose it — collusion pairs, billing invariant
+      // reports with subscription ids and balances, incident patterns with
+      // subject ids — disclosed one operator's data to all the others. A
+      // required parameter does not help when the wrong answer is still
+      // catastrophic. Now the wrong answer under-notifies instead.
       await notifyAdmins(app.prisma, svc, {
         tenantId: null,
         title: 'Platform page',
-        body: 'Everyone should see this.',
+        body: 'Platform operators should see this.',
         data: { kind: 'ops_tenancy_probe_global' },
       });
-      const global = await app.prisma.notification.count({
+      const leakedGlobal = await app.prisma.notification.count({
         where: { userId: foreignAdmin.id, data: { path: ['kind'], equals: 'ops_tenancy_probe_global' } as never },
       });
-      expect(global, 'an explicit platform-wide page must still be global').toBeGreaterThanOrEqual(1);
+      expect(leakedGlobal, "a platform page must NOT reach an ordinary tenant's admin").toBe(0);
+
+      const superAdmin = await app.prisma.user.create({
+        data: {
+          phone: `+59280${Math.floor(Math.random() * 900000) + 100000}`,
+          firstName: 'Platform', lastName: 'Operator',
+          roles: ['SUPER_ADMIN'] as never[], activeRole: 'SUPER_ADMIN' as never,
+          isPhoneVerified: true, status: 'ACTIVE', tenantId: otherTenant,
+        },
+      });
+      try {
+        await notifyAdmins(app.prisma, svc, {
+          tenantId: null,
+          title: 'Platform page 2',
+          body: 'Platform operators should see this.',
+          data: { kind: 'ops_tenancy_probe_super' },
+        });
+        const reached = await app.prisma.notification.count({
+          where: { userId: superAdmin.id, data: { path: ['kind'], equals: 'ops_tenancy_probe_super' } as never },
+        });
+        expect(reached, 'a platform page must reach a platform operator').toBeGreaterThanOrEqual(1);
+      } finally {
+        await app.prisma.notification.deleteMany({ where: { userId: superAdmin.id } });
+        await app.prisma.alertDelivery.deleteMany({ where: { recipientId: superAdmin.id } });
+        await app.prisma.user.delete({ where: { id: superAdmin.id } });
+      }
     } finally {
       await app.prisma.notification.deleteMany({ where: { userId: foreignAdmin.id } });
       await app.prisma.alertDelivery.deleteMany({ where: { recipientId: foreignAdmin.id } });
@@ -133,8 +167,14 @@ describe('notifyAdmins tenancy [NOC-A F45]', () => {
 describe('notifyAdmins ack-tracking [SWIFT-AUD-D7-03]', () => {
   it('an ops page lands in alert_deliveries as ADMIN_OPS with the condition as subject', async () => {
     const svc = new NotificationService(app.prisma, ioStub);
+    // [F-027-20] Scoped to this admin's own tenant. It used to pass `null`,
+    // which reached every admin everywhere; now `null` means platform
+    // operators only, and this fixture is an ordinary ADMIN — so a null page
+    // would (correctly) not reach them and the ack-tracking claim would be
+    // proven on the wrong delivery.
+    const admin = await app.prisma.user.findUniqueOrThrow({ where: { id: adminUserId }, select: { tenantId: true } });
     const notified = await notifyAdmins(app.prisma, svc, {
-      tenantId: null,
+      tenantId: admin.tenantId,
       title: 'Test ops page',
       body: 'Something needs eyes.',
       data: { kind: 'ops_test_condition' },

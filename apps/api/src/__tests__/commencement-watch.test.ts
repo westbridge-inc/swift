@@ -4,7 +4,7 @@ import { nanoid } from 'nanoid';
 import { prismaPlugin } from '../plugins/prisma';
 import { registerErrorHandler } from '../middleware/error-handler';
 import {
-  runScan, notifyPending, classify, parseEntries,
+  runScan, notifyPending, classify, parseEntries, looksLikePublication,
   type WatchSource, type FetchLike, type NotifyChannels,
 } from '../modules/compliance/commencement-watch';
 
@@ -197,6 +197,57 @@ describe('commencement watch [DCR-1 CW]', () => {
       },
     }), [s2]);
     expect(out2[0]!.error).toBeNull();
+  });
+
+  // [F-027-01] Two previous versions of the health floor were defeated by
+  // navigation I had not thought of, and each time the test proved only the
+  // one vocabulary set I happened to choose. So this one does not choose:
+  // it GENERATES the navigation space and requires that none of it passes.
+  describe('[F-027-01] navigation cannot satisfy the publication floor', () => {
+    const INSTRUMENTS = ['Act', 'Acts', 'Order', 'Orders', 'Bill', 'Bills', 'Notice', 'Notices', 'Regulation', 'Regulations', 'Gazette', 'Supplement', 'Proclamation', 'Resolution'];
+    const CATEGORIES = ['Archive', 'Archives', 'Index', 'Tracker', 'Listing', 'Listings', 'Library', 'Collection', 'Database', 'Records', 'Resources', 'Downloads', 'Papers', 'Portal', 'Directory', 'Catalogue', 'Repository', 'Overview', 'Search', 'Browse'];
+    const QUALIFIERS = ['', ' 2026', ' 2025', ' No. 1', ' — 2026', ' of 2026', ' 2019–2026', ' (2026)'];
+
+    it('no combination of instrument word × category word × year/number passes', () => {
+      const survivors: string[] = [];
+      for (const kind of INSTRUMENTS) {
+        for (const cat of CATEGORIES) {
+          for (const q of QUALIFIERS) {
+            // Both orders — "Act Archive 2026" and "Archive of Acts 2026".
+            for (const title of [`${kind} ${cat}${q}`, `${cat} of ${kind}${q}`, `${cat}: ${kind}${q}`]) {
+              if (looksLikePublication(title)) survivors.push(title);
+            }
+          }
+        }
+      }
+      expect(survivors, `navigation titles accepted as publications: ${survivors.slice(0, 10).join(' | ')}`).toEqual([]);
+    });
+
+    it('the exact five the reviewer supplied are all rejected', () => {
+      for (const nav of ['Act Archive 2026', 'Order Paper 2026', 'Bill Tracker 2026', 'Notice Archive 2026', 'Regulation Index 2026']) {
+        expect(looksLikePublication(nav), nav).toBe(false);
+      }
+    });
+
+    it('and REAL instruments are still accepted — the floor must not become unreachable', () => {
+      for (const real of [
+        'Order No. 12 of 2026 — Municipal Fees',
+        'The Fisheries (Amendment) Act 2026',
+        'Notice No. 88 of 2026 — Road Closures',
+        'The Income Tax Regulations 2026',
+        'Legal Supplement B — 14 August 2026',
+        'Order No. 73 of 2026 - The Digital Identity Card Act 2023 (Commencement) Order 2026',
+        'The Data Protection Act 2023 (Commencement) Order 2027',
+      ]) {
+        expect(looksLikePublication(real), real).toBe(true);
+      }
+    });
+
+    it('a bare instrument category with no identity at all is rejected', () => {
+      for (const bare of ['Acts of Parliament', 'Bills before the House', 'Statutory Instruments and Regulations', 'Notices', 'Orders']) {
+        expect(looksLikePublication(bare), bare).toBe(false);
+      }
+    });
   });
 
   it('parseEntries survives markup inside anchors', () => {
