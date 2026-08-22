@@ -17,7 +17,8 @@ import { haptic } from '../../../lib/haptics';
 import { useAuthStore } from '../../../stores/authStore';
 import { useLocationStore } from '../../../stores/locationStore';
 import { CategoryRail, CAT_RAIL_MIN_CHIPS } from '../CategoryRail';
-import { vendorImage } from '../../../lib/images';
+import { itemImage, vendorImage } from '../../../lib/images';
+import { money } from '../../../lib/money';
 import {
   AwningEdge,
   Card,
@@ -98,19 +99,19 @@ function ServiceTile({ item, index, navigation }: { item: (typeof SERVICES)[numb
       }}
       accessibilityRole="button"
       accessibilityLabel={item.label}
-      style={{ width: '100%', alignItems: 'center', marginTop: space.lg }}
+      style={{ width: '100%', alignItems: 'center', marginTop: space.md }}
     >
       <View
         style={{
-          width: 58,
-          height: 58,
+          width: 46,
+          height: 46,
           borderRadius: radius.lg,
           backgroundColor: color.brand[50],
           alignItems: 'center',
           justifyContent: 'center',
         }}
       >
-        <Pictogram name={item.key} size={28} color={color.brand[600]} />
+        <Pictogram name={item.key} size={25} color={color.brand[600]} />
       </View>
       <T variant="label" style={{ marginTop: 6 }}>
         {item.label}
@@ -162,6 +163,7 @@ export function HomeScreen() {
 
   const feed = home.data;
   const featured: any[] = feed?.featured ?? [];
+  const popularItems: any[] = feed?.popularItems ?? [];
   const nearby: any[] = locationFix ? (feed?.nearby ?? []) : [];
   const orderAgain: any[] = feed?.orderAgain ?? [];
   const activeOrder = feed?.activeOrder;
@@ -188,7 +190,7 @@ export function HomeScreen() {
         {/* The masthead [DESIGN_NOTES 2026-08-18]: the brand wash deepens
             500→600 and closes with the awning hem — Home's signature. Where +
             who as the eyebrow, ONE display-face greeting, then search. */}
-        <GradientMasthead style={{ paddingTop: insets.top + space.sm, paddingBottom: space.xl, paddingHorizontal: GUTTER }}>
+        <GradientMasthead style={{ paddingTop: insets.top, paddingBottom: space.md, paddingHorizontal: GUTTER }}>
           <View style={{ flexDirection: 'row', alignItems: 'center' }}>
             <Pressable
               onPress={() => (isAuthenticated ? navigation.navigate('Addresses') : navigation.navigate('LocationPicker'))}
@@ -230,7 +232,7 @@ export function HomeScreen() {
             </View>
           </View>
 
-          <T variant="title" tone="onBrand" numberOfLines={1} style={{ marginTop: space.lg }}>
+          <T variant="heading" tone="onBrand" numberOfLines={1} style={{ marginTop: space.md }}>
             {greetingLine(new Date().getHours())}
             {user?.firstName?.trim() ? `, ${user.firstName.trim()}` : ''}
           </T>
@@ -243,7 +245,7 @@ export function HomeScreen() {
                   flexDirection: 'row',
                   alignItems: 'center',
                   gap: space.sm,
-                  height: 52,
+                  height: 48,
                   borderRadius: 9999,
                   paddingHorizontal: space.lg,
                   backgroundColor: color.surface.base,
@@ -267,7 +269,7 @@ export function HomeScreen() {
             marginTop: space.sm,
             borderRadius: radius.xl,
             backgroundColor: color.surface.base,
-            paddingBottom: space.lg,
+            paddingBottom: space.md,
             paddingHorizontal: space.sm,
             flexDirection: 'row',
             flexWrap: 'wrap',
@@ -278,6 +280,43 @@ export function HomeScreen() {
             <ServiceTile key={s.key} item={s} index={i} navigation={navigation} />
           ))}
         </View>
+
+        {/* THE MARKETPLACE, above the fold.
+            Home used to open as a LAUNCHER: a masthead slab, eight identical
+            tiles, a promo and some text chips — with the first real merchant
+            content roughly a screen and a half down. Meanwhile /customer/home
+            already returns ten dishes with photography and prices, and this
+            screen fetched them and threw them away (only Search rendered
+            them). A marketplace has to look like one the moment it opens, so
+            the food goes first and the icon grid becomes what it always was:
+            navigation. */}
+        {popularItems.length > 0 ? (
+          <>
+            <SectionHeader
+              size="lg"
+              title="Popular right now"
+              eyebrow="Ordered today"
+              style={{ paddingHorizontal: GUTTER, marginTop: space.xl }}
+            />
+            <FlatList
+              horizontal
+              showsHorizontalScrollIndicator={false}
+              data={popularItems.slice(0, 10)}
+              keyExtractor={(it: any) => it.id}
+              contentContainerStyle={{ paddingHorizontal: GUTTER, gap: space.lg, paddingTop: space.lg }}
+              renderItem={({ item: it }) => (
+                <FoodCard
+                  width={RAIL_CARD_W}
+                  image={itemImage(it)}
+                  name={it.name}
+                  priceLabel={money(it.price)}
+                  meta={it.vendorName}
+                  onPress={() => navigation.navigate('MenuItem', { itemId: it.id, vendorId: it.vendorId })}
+                />
+              )}
+            />
+          </>
+        ) : null}
 
         {/* The category rail — the founder's X: below the tiles, above the
             promo banner. Absent entirely unless the flag is on AND ≥4 chips
