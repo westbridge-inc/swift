@@ -7,6 +7,7 @@ import { ShoppingBag, Store, Car, ChevronLeft } from 'lucide-react';
 import { sendOtp } from '@/lib/auth';
 import { verifyOtp, registerAccount, becomePartner } from '@/lib/customer';
 import { SwiftLogo } from '@/components/swift-logo';
+import { currentCoords } from '@/lib/geolocate';
 
 type Role = 'CUSTOMER' | 'VENDOR' | 'MOVER';
 type Step = 'role' | 'phone' | 'code' | 'name' | 'business' | 'vehicle';
@@ -17,12 +18,6 @@ const ROLES: { role: Role; title: string; desc: string; Icon: any }[] = [
   { role: 'MOVER', title: 'Drive & deliver', desc: 'Earn on your schedule', Icon: Car },
 ];
 
-function coords(): Promise<{ lat: number; lng: number }> {
-  return new Promise((res) => {
-    if (!navigator.geolocation) return res({ lat: 6.8013, lng: -58.1551 });
-    navigator.geolocation.getCurrentPosition((p) => res({ lat: p.coords.latitude, lng: p.coords.longitude }), () => res({ lat: 6.8013, lng: -58.1551 }), { timeout: 5000 });
-  });
-}
 
 export default function SignupPage() {
   const router = useRouter();
@@ -60,7 +55,11 @@ export default function SignupPage() {
     else setStep(role === 'VENDOR' ? 'business' : 'vehicle');
   });
   const doBusiness = () => wrap(async () => {
-    const c = await coords();
+    // [F-027-02] A business's coordinates are where customers are sent and
+    // where dispatch measures from. Registering a shop at the Georgetown city
+    // centre because a browser prompt was denied puts a real storefront on
+    // the map in the wrong place, durably. wrap() surfaces the refusal.
+    const c = await currentCoords('put your business on the map');
     await becomePartner({ role: 'VENDOR', business: { name: biz.name.trim(), vendorType: biz.vendorType, phone: phone.trim(), addressLine1: biz.addressLine1.trim(), city: biz.city, region: 'Demerara-Mahaica', latitude: c.lat, longitude: c.lng } });
     router.replace('/dashboard');
   });

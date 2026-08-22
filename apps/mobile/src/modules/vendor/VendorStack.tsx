@@ -247,9 +247,17 @@ function BusinessSetup() {
   const [phone, setPhone] = useState('');
   const [addr, setAddr] = useState('');
   const [city, setCity] = useState('Georgetown');
-  const valid = name.trim().length >= 2 && phone.trim().length >= 5 && addr.trim().length >= 3 && city.trim().length >= 2;
+  // [F-027-02] A store's coordinates are where customers are sent and where
+  // dispatch measures from. This used to submit `latitude ?? 6.8013` — pinning
+  // the shop at the Georgetown city centre whenever the device location was
+  // unknown, while the caption below told the owner we had used their current
+  // location. A fabricated pin AND a false statement about it. No location
+  // now means no submission, said out loud.
+  const hasPin = typeof latitude === 'number' && typeof longitude === 'number';
+  const valid = hasPin && name.trim().length >= 2 && phone.trim().length >= 5 && addr.trim().length >= 3 && city.trim().length >= 2;
 
   const submit = () => {
+    if (!hasPin) return; // guarded by `valid`, restated so the call site cannot fabricate
     become.mutate({
       role: 'VENDOR',
       business: {
@@ -258,8 +266,8 @@ function BusinessSetup() {
         phone: phone.trim(),
         addressLine1: addr.trim(),
         city: city.trim(),
-        latitude: latitude ?? 6.8013,
-        longitude: longitude ?? -58.1551,
+        latitude,
+        longitude,
       },
     });
   };
@@ -296,8 +304,10 @@ function BusinessSetup() {
           <LabeledInput value={phone} onChangeText={setPhone} placeholder="Business phone" keyboardType="phone-pad" />
           <LabeledInput value={addr} onChangeText={setAddr} placeholder="Street address" />
           <LabeledInput value={city} onChangeText={setCity} placeholder="City" />
-          <T variant="caption" tone="muted">
-            We&apos;ll use your current location as the store pin.
+          <T variant="caption" tone={hasPin ? 'muted' : 'error'}>
+            {hasPin
+              ? 'We\u2019ll use your current location as the store pin.'
+              : 'We need your location to pin your store on the map \u2014 turn location on for Swift, then come back. Customers are sent to this pin.'}
           </T>
         </Card>
 

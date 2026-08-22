@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { Search, Package } from 'lucide-react';
 import { placesAutocomplete, placeDetails, courierEstimate, requestCourier, money, type Place } from '@/lib/customer';
+import { currentCoords } from '@/lib/geolocate';
 
 type Pt = { lat: number; lng: number; label: string };
 const SIZES = [{ k: 'SMALL', l: 'Small', d: 'Envelope / phone' }, { k: 'MEDIUM', l: 'Medium', d: 'Shoebox' }, { k: 'LARGE', l: 'Large', d: 'Backpack' }, { k: 'EXTRA_LARGE', l: 'X-Large', d: 'Suitcase' }];
@@ -38,6 +39,7 @@ function LocationField({ label, value, onPick, near }: { label: string; value: P
 export default function CourierPage() {
   const router = useRouter();
   const [pickup, setPickup] = useState<Pt | null>(null);
+  const [pickupError, setPickupError] = useState<string | null>(null);
   const [dropoff, setDropoff] = useState<Pt | null>(null);
   const [size, setSize] = useState('SMALL');
   const [estimate, setEstimate] = useState<any>(null);
@@ -45,7 +47,12 @@ export default function CourierPage() {
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    if (navigator.geolocation) navigator.geolocation.getCurrentPosition((p) => setPickup({ lat: p.coords.latitude, lng: p.coords.longitude, label: 'Current location' }), () => {}, { timeout: 5000 });
+    // [F-027-02] This one never fabricated a coordinate — it just failed
+    // SILENTLY, leaving "Locating…" on screen forever with no way to know the
+    // prompt had been denied. Fail closed AND say so.
+    currentCoords('set your pickup')
+      .then(({ lat, lng }) => { setPickup({ lat, lng, label: 'Current location' }); setPickupError(null); })
+      .catch((e: Error) => { setPickup(null); setPickupError(e.message); });
   }, []);
   useEffect(() => { if (pickup && dropoff) courierEstimate({ pickup, dropoff, packageSize: size }).then(setEstimate).catch(() => setEstimate(null)); }, [pickup, dropoff, size]);
 
@@ -64,6 +71,9 @@ export default function CourierPage() {
     <div className="mx-auto max-w-lg space-y-4">
       <h1 className="flex items-center gap-2 text-2xl font-extrabold"><Package className="h-6 w-6 text-[var(--swift-red)]" /> Send a package</h1>
       <LocationField label="Pick up from" value={pickup} onPick={setPickup} near={pickup} />
+      {pickupError && !pickup && (
+        <p role="alert" className="-mt-2 text-sm font-semibold text-[var(--swift-red)]">{pickupError} You can search for it above instead.</p>
+      )}
       <LocationField label="Deliver to" value={dropoff} onPick={setDropoff} near={pickup} />
       <div>
         <p className="mb-2 font-bold">Package size</p>
