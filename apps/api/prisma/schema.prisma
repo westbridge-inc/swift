@@ -2977,6 +2977,10 @@ model SosAlert {
   /// one escalating incident instead of burying the ops desk in twenty.
   retriggerCount       Int                @default(0)
   lastRetriggerAt      DateTime?
+  /// [F-028-03] The FACTS of each repeat trigger, appended — not just a count.
+  /// A re-trigger carries a new position, source and time; recording only a
+  /// counter meant ops kept seeing where the person WAS, not where they are.
+  retriggers           Json?
   deliveryReceipts     Json? // per-channel fan-out receipts {opsPage, contactSms:[...], socket}
   createdAt            DateTime           @default(now())
   updatedAt            DateTime           @updatedAt

@@ -1,0 +1,12 @@
+-- [F-028-03] Repeat SOS triggers must not discard their own facts.
+--
+-- The collapse introduced in F-027-17 recorded only retriggerCount and a
+-- timestamp. A repeat trigger carries a NEW position, source, accuracy,
+-- address and time — so ops kept looking at where the person WAS when they
+-- first pressed, while the person had moved. On a life-safety path that is
+-- the difference between finding someone and not finding them.
+--
+-- This column stores the appended facts of every re-trigger, so collapsing to
+-- ONE incident (which is what stops a burst burying the war room) costs
+-- nothing in information.
+ALTER TABLE "SosAlert" ADD COLUMN "retriggers" JSONB;

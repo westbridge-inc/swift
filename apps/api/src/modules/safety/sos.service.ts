@@ -26,6 +26,10 @@ export const SOS_TRANSITIONS: Record<SosStatus, SosStatus[]> = {
 
 const GRACE_SECONDS = Math.min(5, Math.max(0, Number(process.env['SOS_CANCEL_GRACE_SECONDS'] ?? 3)));
 
+/** The states in which an alert is still someone's live emergency. A POSITIVE
+ *  list, so a status added to the enum later is NOT silently treated as live. */
+const LIVE_STATUSES: SosStatus[] = ['TRIGGER_PENDING', 'ACTIVE', 'ACKNOWLEDGED'];
+
 const isUniqueViolation = (e: unknown) =>
   e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2002';
 
@@ -101,47 +105,94 @@ export class SosService {
       where: {
         actorUserId: input.actorUserId,
         orderId: input.orderId ?? null,
-        status: { in: ['TRIGGER_PENDING', 'ACTIVE', 'ACKNOWLEDGED'] },
+        status: { in: LIVE_STATUSES },
       },
       orderBy: { triggeredAt: 'desc' },
     });
     if (live) {
-      await this.prisma.sosAlert.update({
-        where: { id: live.id },
-        data: { retriggerCount: { increment: 1 }, lastRetriggerAt: now },
+      // [F-028-03] Carry the NEW FACTS forward. The first version of this
+      // recorded only a count and a timestamp — so a person who pressed again
+      // from a different place had their new position, source, accuracy and
+      // address DISCARDED, and ops kept looking at where they were when they
+      // first pressed. On a life-safety path that is the difference between
+      // finding someone and not finding them. Collapsing to one incident is
+      // what stops a burst burying the war room; it must cost nothing in
+      // information.
+      const priorRetriggers = Array.isArray(live.retriggers) ? live.retriggers : [];
+      const thisRetrigger = {
+        at: now.toISOString(),
+        source,
+        lat: input.lat ?? null,
+        lng: input.lng ?? null,
+        accuracyM: input.accuracyM ?? null,
+        addressText: input.addressText ?? null,
+        counterpartyUserId: input.counterpartyUserId ?? null,
+        actorRole: input.actorRole,
+        clientCreatedAt: input.clientCreatedAt?.toISOString() ?? null,
+      };
+      const movedTo = input.lat != null && input.lng != null;
+
+      // [F-028-03] STATUS-SAFE. The old code did findFirst then an
+      // unconditional update({id}), so a resolve landing in between meant it
+      // incremented a now-RESOLVED row and handed the caller a closed alert as
+      // though their emergency had been received. updateMany with the status
+      // guard makes losing that race observable, and a loser FALLS THROUGH to
+      // mint a real alert rather than silently attaching to a corpse.
+      const merged = await this.prisma.sosAlert.updateMany({
+        where: { id: live.id, status: { in: LIVE_STATUSES } },
+        data: {
+          retriggerCount: { increment: 1 },
+          lastRetriggerAt: now,
+          retriggers: [...priorRetriggers, thisRetrigger] as never,
+          // The latest position IS the operative one.
+          ...(movedTo ? { triggerLat: input.lat ?? null, triggerLng: input.lng ?? null, triggerAccuracyM: input.accuracyM ?? null } : {}),
+          ...(input.addressText ? { triggerAddressText: input.addressText } : {}),
+          // A stronger provenance sticks; a weaker one never downgrades the record.
+          ...(source !== 'BUTTON' && live.triggerSource === 'BUTTON' ? { triggerSource: source } : {}),
+          // A collapsed request that carried a NEW key must store it, or a lost
+          // response plus a later retry mints a SECOND incident once this one
+          // closes. Only fills an empty slot — never overwrites the original.
+          ...(key && !live.clientIdempotencyKey ? { clientIdempotencyKey: key } : {}),
+        },
       });
-      try {
-        this.io.to('ops:war-room').emit('sos:retrigger', { sosAlertId: live.id, actorUserId: live.actorUserId, orderId: live.orderId, at: now });
-      } catch { /* the war-room nudge is best-effort; the row is the record */ }
-      // The STRONGER trigger wins. If they had a countdown running and have
-      // now pressed something that skips it (the in-ride panic button, a
-      // guardian escalation, ops acting on their behalf), collapsing must not
-      // leave them waiting out a grace window they have already overridden.
-      if (skipGrace && live.status === 'TRIGGER_PENDING') return this.confirm(live.id);
-      return this.prisma.sosAlert.findUniqueOrThrow({ where: { id: live.id } });
+
+      if (merged.count === 1) {
+        try {
+          this.io.to(warRoomsFor(live.tenantId)).emit('sos:retrigger', {
+            sosAlertId: live.id, actorUserId: live.actorUserId, orderId: live.orderId,
+            at: now, source, lat: input.lat ?? null, lng: input.lng ?? null,
+            retriggerCount: live.retriggerCount + 1,
+          });
+        } catch { /* the war-room nudge is best-effort; the row is the record */ }
+
+        // The STRONGER trigger wins — and "wins" has to mean something on an
+        // alert that is ALREADY active, not only on a pending one. Previously
+        // an immediate guardian escalation or panic press onto an ACTIVE or
+        // ACKNOWLEDGED alert did nothing at all: no confirm, no fan-out, so
+        // nobody was re-paged with the new position.
+        if (skipGrace && live.status === 'TRIGGER_PENDING') return this.confirm(live.id);
+        if (skipGrace || movedTo) await this.fanOut(live.id);
+        return this.prisma.sosAlert.findUniqueOrThrow({ where: { id: live.id } });
+      }
+      // Lost the race to a terminal transition — fall through and mint.
+      log().warn({ sosAlertId: live.id, actorUserId: input.actorUserId }, '[F-028-03] the live alert closed mid-collapse; raising a NEW alert rather than attaching to a closed one');
     }
 
     // [F-027-18] Resolve the tenant from the PERSON IN DANGER, explicitly.
     //
     // Nothing set tenantId here, so it came from whichever of two accidents
-    // applied: the request-scoped Prisma extension stamped it when an alert
-    // was raised on an HTTP request, and NOTHING stamped it when one was
-    // raised from a background sweep — the guardian check-in-timeout ladder,
-    // the grace-expiry backstop — because those carry no request context. Those
-    // alerts silently took the schema default, `swift-default`.
-    //
-    // Since F-026-15 the ops page follows alert.tenantId, so a tenant-B
-    // customer's auto-escalated alert paged swift-default's admins and NOBODY
-    // IN TENANT B WAS EVER TOLD. The server-guessed emergency — the one raised
-    // precisely because the person stopped answering — was the one that went
-    // to the wrong room.
+    // applied: the request-scoped Prisma extension stamped it on an HTTP-raised
+    // alert, and NOTHING stamped it when one was raised from a background
+    // sweep — the guardian check-in-timeout ladder, the grace-expiry backstop —
+    // because those carry no request context. Those alerts silently took the
+    // schema default, `swift-default`, and since F-026-15 the ops page follows
+    // alert.tenantId, so a tenant-B customer's auto-escalated alert paged
+    // swift-default's admins and NOBODY IN TENANT B WAS EVER TOLD.
     const tenantId = (await tenantOfUser(this.prisma, input.actorUserId))
       ?? (input.orderId
         ? (await this.prisma.order.findUnique({ where: { id: input.orderId }, select: { tenantId: true } }))?.tenantId ?? null
         : null);
     if (!tenantId) {
-      // Never silently platform-wide on a life-safety row: an alert nobody can
-      // route is worse than a loud one.
       log().error({ actorUserId: input.actorUserId, orderId: input.orderId }, '[F-027-18] could not resolve a tenant for an SOS actor — falling back to the platform tenant');
     }
 
