@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { Prisma } from '@prisma/client';
-import { RIDER_COUNTERPARTY_SELECT, riderCounterpartySelect } from '../utils/counterparty';
+import { RIDER_COUNTERPARTY_SELECT, liveLocationVisible, redactLiveLocation, riderCounterpartySelect } from '../utils/counterparty';
 
 // ---------------------------------------------------------------------------
 // [F-027-07] What one party to an order may see about the other.
@@ -64,7 +64,12 @@ describe('[F-027-07] the counterparty view of a mover', () => {
   });
 
   it('still carries what a counterparty actually needs — the fix must not blind the customer', () => {
-    for (const needed of ['vehicleMake', 'vehicleModel', 'vehicleColor', 'licensePlate', 'vehiclePhotoUrl', 'currentLat', 'currentLng', 'averageRating']) {
+    // [F-028-11] currentLat/currentLng USED to be asserted here as "needed".
+    // They are not: they are the mover's PROFILE position, unscoped to this
+    // order, and keeping them in the default view is what made every
+    // historical surface a tracking surface. Live position is opt-in and
+    // status-gated now — see the F-028-11 block below.
+    for (const needed of ['vehicleMake', 'vehicleModel', 'vehicleColor', 'licensePlate', 'vehiclePhotoUrl', 'averageRating']) {
       expect(Object.keys(RIDER_COUNTERPARTY_SELECT), needed).toContain(needed);
     }
   });
@@ -82,5 +87,68 @@ describe('[F-027-07] the counterparty view of a mover', () => {
     const exposed = new Set(Object.keys(RIDER_COUNTERPARTY_SELECT));
     const unexposed = riderFields.filter((f) => !exposed.has(f));
     expect(unexposed.length, 'every Rider column is exposed — the allow-list is not narrowing anything').toBeGreaterThan(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// [F-028-11] Live position is not part of the counterparty view.
+//
+// Rider.currentLat/currentLng is the mover's PROFILE position — it keeps
+// updating every ~10s whenever that person is online, on ANY later job. It is
+// not scoped to the order being viewed. Including it by default meant every
+// historical surface kept leaking it, and the worst was an unauthenticated
+// `/courier/track/:token` link with no expiry: a recipient who kept the link
+// from a parcel delivered months ago could watch that courier's day.
+//
+// Unlike the storage keys elsewhere in this class, these are the live
+// production values themselves — nothing has to be signed or fetched to use
+// them.
+// ---------------------------------------------------------------------------
+describe('[F-028-11] live mover position', () => {
+  it('is NOT in the default counterparty view', () => {
+    for (const f of ['currentLat', 'currentLng', 'lastLocationUpdate']) {
+      expect(Object.keys(RIDER_COUNTERPARTY_SELECT), f).not.toContain(f);
+    }
+  });
+
+  it('is opt-in, and only when the caller asks for it', () => {
+    expect(Object.keys(riderCounterpartySelect({ withPhone: false }))).not.toContain('currentLat');
+    expect(Object.keys(riderCounterpartySelect({ withPhone: false, withLiveLocation: true }))).toContain('currentLat');
+  });
+
+  it('is visible only while the handover is actually in flight', () => {
+    for (const live of ['RIDER_EN_ROUTE_PICKUP', 'PICKED_UP', 'EN_ROUTE_DELIVERY', 'RIDE_IN_PROGRESS', 'DRIVER_ARRIVED']) {
+      expect(liveLocationVisible(live), live).toBe(true);
+    }
+    for (const done of ['DELIVERED', 'COMPLETED', 'CANCELLED', 'REFUNDED', 'FAILED', 'PENDING']) {
+      expect(liveLocationVisible(done), done).toBe(false);
+    }
+    expect(liveLocationVisible(null)).toBe(false);
+    expect(liveLocationVisible(undefined)).toBe(false);
+  });
+
+  it('an UNKNOWN status is not trackable — new statuses default to closed', () => {
+    // The list is a positive allow-list of live states, so a status added to
+    // the enum later cannot silently become a tracking window.
+    expect(liveLocationVisible('SOME_FUTURE_STATUS')).toBe(false);
+  });
+
+  it('redacts the position on a settled order, and leaves a live one alone', () => {
+    const at = new Date();
+    const settled = redactLiveLocation({ status: 'DELIVERED', rider: { currentLat: 6.8, currentLng: -58.1, lastLocationUpdate: at, id: 'r1' } });
+    expect(settled.rider).toMatchObject({ currentLat: null, currentLng: null, lastLocationUpdate: null, id: 'r1' });
+
+    const inFlight = redactLiveLocation({ status: 'EN_ROUTE_DELIVERY', rider: { currentLat: 6.8, currentLng: -58.1, lastLocationUpdate: at } });
+    expect(inFlight.rider).toMatchObject({ currentLat: 6.8, currentLng: -58.1 });
+  });
+
+  it('redacts a DRIVER the same way — the rule is about the person, not the field name', () => {
+    const settled = redactLiveLocation({ status: 'COMPLETED', driver: { currentLat: 6.8, currentLng: -58.1 } });
+    expect(settled.driver).toMatchObject({ currentLat: null, currentLng: null });
+  });
+
+  it('survives a party that is absent or null', () => {
+    expect(() => redactLiveLocation({ status: 'DELIVERED' })).not.toThrow();
+    expect(() => redactLiveLocation({ status: 'DELIVERED', rider: null })).not.toThrow();
   });
 });

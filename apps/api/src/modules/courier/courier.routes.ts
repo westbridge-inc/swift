@@ -14,7 +14,7 @@ import { getStorageProvider } from '../../providers/storage/storage-provider';
 import { ALLOWED_IMAGE_TYPES, looksLikeImage } from '../../utils/images';
 import type { OrderStatus } from '@prisma/client';
 import { lockActiveOrderCustomer } from '../order/order-creation-authority';
-import { riderCounterpartySelect } from '../../utils/counterparty';
+import { redactLiveLocation, riderCounterpartySelect } from '../../utils/counterparty';
 
 // ---------------------------------------------------------------------------
 // Module C: Courier (spec §4.3) — send a parcel person-to-person. A non-cart
@@ -247,10 +247,12 @@ export default async function courierRoutes(app: FastifyInstance) {
       // [F-027-07] `include` on the Rider row handed the parcel SENDER the
       // mover's KYC document keys, safety-enforcement state and float
       // limits. An explicit allow-list instead.
-      include: { rider: { select: riderCounterpartySelect({ withPhone: true }) } },
+      include: { rider: { select: riderCounterpartySelect({ withPhone: true, withLiveLocation: true }) } },
     });
     if (!order) throw new NotFoundError('CourierOrder', id);
-    return { success: true, data: order };
+    // [F-028-11] Same rule for the sender: their own past parcel is not a
+    // licence to keep watching the courier.
+    return { success: true, data: redactLiveLocation(order) };
   });
 
   /** GET /track/:token — public recipient tracking link (no auth, opaque token). */
@@ -269,7 +271,13 @@ export default async function courierRoutes(app: FastifyInstance) {
       },
     });
     if (!order) throw new NotFoundError('CourierOrder', token);
-    return { success: true, data: order };
+    // [F-028-11] The token is opaque but it never expires and it is
+    // unauthenticated, so it outlives the parcel. Rider.currentLat/currentLng
+    // is the mover's PROFILE position — it keeps updating whenever they are
+    // online, on any later job — so a recipient who kept the link from a
+    // delivered parcel could watch that courier's day, indefinitely. The
+    // position is only anyone's business while THIS delivery is in flight.
+    return { success: true, data: redactLiveLocation(order) };
   });
 
   /** POST /order/:id/cancel — sender cancels before rider pickup. */
