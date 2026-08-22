@@ -31,6 +31,7 @@ import {
   currentConsentDetailed, recordConsent, publishLegalDocumentOnce, type ConsentAction,
 } from '../legal/consent.service';
 import { LEGAL_VERSION, MARKETING_CONSENT } from '../legal/legal.routes';
+import { riderCounterpartySelect } from '../../utils/counterparty';
 
 /** [F-021-21] Consent surface from the client's own attestation header,
  *  constrained to the known set — never a hardcoded guess. */
@@ -1845,7 +1846,8 @@ export async function customerRoutes(app: FastifyInstance) {
         include: {
           vendor: { select: { id: true, name: true, slug: true, logoUrl: true, coverImageUrl: true, vendorType: true } },
           items: { select: { id: true, name: true, quantity: true, totalCustomer: true } },
-          rider: { include: { user: { select: { firstName: true, avatar: true } } } },
+          // [F-027-07] allow-list, not `include` — see utils/counterparty.
+          rider: { select: riderCounterpartySelect({ withPhone: false }) },
         },
         orderBy: { placedAt: 'desc' },
         skip,

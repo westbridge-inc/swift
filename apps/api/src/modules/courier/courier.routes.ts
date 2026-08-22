@@ -14,6 +14,7 @@ import { getStorageProvider } from '../../providers/storage/storage-provider';
 import { ALLOWED_IMAGE_TYPES, looksLikeImage } from '../../utils/images';
 import type { OrderStatus } from '@prisma/client';
 import { lockActiveOrderCustomer } from '../order/order-creation-authority';
+import { riderCounterpartySelect } from '../../utils/counterparty';
 
 // ---------------------------------------------------------------------------
 // Module C: Courier (spec §4.3) — send a parcel person-to-person. A non-cart
@@ -243,7 +244,10 @@ export default async function courierRoutes(app: FastifyInstance) {
     const { id } = request.params as { id: string };
     const order = await app.prisma.order.findFirst({
       where: { id, customerId: request.user.userId, orderType: 'COURIER' },
-      include: { rider: { include: { user: { select: { firstName: true, lastName: true, phone: true } } } } },
+      // [F-027-07] `include` on the Rider row handed the parcel SENDER the
+      // mover's KYC document keys, safety-enforcement state and float
+      // limits. An explicit allow-list instead.
+      include: { rider: { select: riderCounterpartySelect({ withPhone: true }) } },
     });
     if (!order) throw new NotFoundError('CourierOrder', id);
     return { success: true, data: order };
