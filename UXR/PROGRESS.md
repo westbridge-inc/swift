@@ -26,3 +26,6 @@
 - [~] UXR-W-013: WR-004 claim payout evidence gate (server-required reference + UI) — shipping
 - [x] UXR-W-013 CLOSED: PR #730 MERGED (claim payout evidence gate)
 - [~] UXR-W-012: WR-005 residual — admin renders the real server message on order cancel/refund (list + detail + apiFetch message surface) — shipping
+- [x] UXR-W-012 CLOSED: PR #731 MERGED (order cancel/refund rejections visible; apiFetch surfaces real server messages)
+- ✅ ALL SEVEN REPORT-029 S0-family items CLOSED (W-007..W-013) — six PRs #723/#725/#726/#727/#729/#730/#731
+- REPORT-032 DELIVERED: MKT-1 Movement 0 done, verdict buildable-but-NOT-READY; 2 claims spot-verified (RLS not-forced staged rollout; one-mixed-cart schema). STOPPED at founder gate per the doc's own law
