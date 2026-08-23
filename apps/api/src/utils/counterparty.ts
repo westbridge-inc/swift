@@ -104,10 +104,24 @@ export function redactLiveLocation<T extends { status?: string | null; rider?: u
 
 /** The same, plus the contact details a live handover needs. Use the phone
  *  variant only where the parties are actually meeting. */
-export const riderCounterpartySelect = (opts: { withPhone: boolean; withLiveLocation?: boolean }) => ({
+export const riderCounterpartySelect = (opts: { withPhone: boolean; withLiveLocation?: boolean; withAvatar?: boolean }) => ({
   ...RIDER_COUNTERPARTY_SELECT,
   // [F-028-11] Opt-in, and the caller must pair it with a status check —
   // selecting it is not permission to return it.
   ...(opts.withLiveLocation ? RIDER_LIVE_LOCATION_SELECT : {}),
-  user: { select: { firstName: true, lastName: true, avatar: true, ...(opts.withPhone ? { phone: true } : {}) } },
+  // [F-028-20] `avatar` is OPT-IN for the same reason. Under the production
+  // private-storage contract it is a BARE OBJECT KEY, and the approved
+  // resolver (resolveAvatarUrl) exists precisely so a key is never the
+  // fallback — it returns a signed URL or null. Putting it in the shared
+  // shape handed courier, vendor and dispatch surfaces a raw key they never
+  // resolve. A caller that opts in is declaring it CALLS THE RESOLVER on the
+  // way out; customer order surfaces do (resolveAvatarUrl[s] at both sites).
+  user: {
+    select: {
+      firstName: true,
+      lastName: true,
+      ...(opts.withAvatar ? { avatar: true } : {}),
+      ...(opts.withPhone ? { phone: true } : {}),
+    },
+  },
 });
