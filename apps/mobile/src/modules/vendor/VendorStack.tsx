@@ -1500,7 +1500,11 @@ function VendorMenuScreen({ navigation }: any) {
 
           <LowStockCard categories={categories} navigation={navigation} catOptions={catOptions} />
 
-          {categories.length === 0 ? (
+          {menuQ.isError && !menuQ.data ? (
+            // [WR-032] An outage is not "Build your menu" — the catalogue may
+            // be full and merely unreachable.
+            <ErrorState message="We couldn't load your menu. Check your connection and try again." onRetry={() => menuQ.refetch()} />
+          ) : categories.length === 0 ? (
             <EmptyState icon="book-open" title="Build your menu" body="Add a category above, then start adding items." />
           ) : (
             categories.map((cat) => (
@@ -2369,6 +2373,10 @@ function VendorInsightsScreen() {
       >
         {q.isLoading ? (
           <LoadingBlock />
+        ) : q.isError && !q.data ? (
+          // [WR-032] Failed analytics must never render as zero KPIs — a zero
+          // is a business fact, not a connection state.
+          <ErrorState message="We couldn't load your numbers. Check your connection and try again." onRetry={() => q.refetch()} />
         ) : (
           <>
             {/* Live today, straight off the overview endpoint */}

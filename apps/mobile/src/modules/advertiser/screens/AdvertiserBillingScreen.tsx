@@ -3,7 +3,7 @@ import React from 'react';
 import { RefreshControl, ScrollView, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { color, space } from '@swift/ui';
-import { Card, EmptyState, LoadingBlock, T, TonePill } from '../../../kit';
+import { Card, EmptyState, ErrorState, LoadingBlock, T, TonePill } from '../../../kit';
 import { useMyAdvertisers, useAdvertiserInvoices } from '../../../hooks/advertiser';
 import { money } from './AdvertiserHomeScreen';
 
@@ -36,6 +36,9 @@ export function AdvertiserBillingScreen() {
       >
         {invoices.isLoading ? (
           <LoadingBlock style={{ paddingTop: 64 }} />
+        ) : (invoices.isError || me.isError) && rows.length === 0 ? (
+          // [WR-030] An outage is not "No invoices yet".
+          <ErrorState onRetry={() => { me.refetch(); invoices.refetch(); }} style={{ paddingTop: 48 }} />
         ) : rows.length === 0 ? (
           <EmptyState icon="file-text" title="No invoices yet" body="Invoices appear when you book a campaign." style={{ paddingTop: 48 }} />
         ) : (
