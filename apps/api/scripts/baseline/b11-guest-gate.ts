@@ -11,7 +11,10 @@
  * Run: DATABASE_URL=postgresql://swift:swift@localhost:5434/swift \
  *      npx tsx scripts/baseline/b11-guest-gate.ts
  */
+import { PrismaClient } from '@prisma/client';
+
 const API = process.env['BASELINE_API'] ?? 'http://localhost:3000/api/v1';
+const prisma = new PrismaClient();
 
 function log(step: string, detail: unknown = '') {
   console.log(`${new Date().toISOString()} · ${step}`, typeof detail === 'string' ? detail : JSON.stringify(detail));
@@ -96,16 +99,31 @@ async function main() {
     if (!probeToken && attempt < 6) await new Promise((r) => setTimeout(r, 8000));
   }
   if (!probeToken) throw new Error('FAIL: could not authenticate the tierless probe account');
+
+  // [F-026-20] The probe must actually REACH the tier gate. Ride creation
+  // checks the universal signup-selfie prerequisite FIRST — a fresh account
+  // with no selfie is refused SELFIE_REQUIRED and never touches assertL2, so
+  // accepting either code proved only "no photo is blocked", not the L2 gate.
+  // Stamp the selfie (legit rig prep — other baseline fixtures do the same)
+  // and pin the probe to L1, so the request clears the prerequisite and the
+  // ONLY thing left to refuse it is the tier gate. Then require its EXACT code.
+  const probeUser = await prisma.user.findFirst({ where: { phone: PROBE_PHONE }, select: { id: true, trustLevel: true } });
+  if (!probeUser) throw new Error('FAIL: tier probe account not found after signup');
+  await prisma.user.update({
+    where: { id: probeUser.id },
+    data: { selfieCapturedAt: new Date(), trustLevel: 'L1' as never },
+  });
+
   const tierProbe = await http('POST', '/rides/request', {
     pickup: { lat: 6.8, lng: -58.15 }, dropoff: { lat: 6.82, lng: -58.17 },
     pickupAddress: 'ELV1 tier probe pickup', dropoffAddress: 'ELV1 tier probe dropoff',
     passengerCount: 1, rideClass: 'ECONOMY',
   }, probeToken);
   const tierCode = tierProbe.json?.error?.code ?? tierProbe.json?.code;
-  if (tierProbe.status !== 403 || !['SELFIE_REQUIRED', 'ID_VERIFICATION_REQUIRED'].includes(tierCode)) {
-    throw new Error(`FAIL tier gate: expected server 403 SELFIE_REQUIRED/ID_VERIFICATION_REQUIRED, got ${tierProbe.status} ${tierCode}`);
+  if (tierProbe.status !== 403 || tierCode !== 'ID_VERIFICATION_REQUIRED') {
+    throw new Error(`FAIL tier gate: a selfie-complete L1 account must be refused by the L2 tier gate — expected 403 ID_VERIFICATION_REQUIRED, got ${tierProbe.status} ${tierCode}`);
   }
-  log('EVIDENCE tier gate is server-side at order creation', { status: tierProbe.status, code: tierCode });
+  log('EVIDENCE L2 tier gate is server-side at order creation (selfie prerequisite already satisfied)', { status: tierProbe.status, code: tierCode });
 
   if (failures.length > 0) {
     log('B11 PARTIAL — registered leg failures', { failures });
@@ -114,4 +132,6 @@ async function main() {
   log('B11 COMPLETE — GUEST BROWSE OPEN, ORDER GATE SERVER-SIDE, TIER GATE SERVER-SIDE');
 }
 
-main().catch((e) => { console.error('B11 FAILED:', e.message); process.exitCode = 1; });
+main()
+  .catch((e) => { console.error('B11 FAILED:', e.message); process.exitCode = 1; })
+  .finally(() => prisma.$disconnect());
