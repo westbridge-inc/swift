@@ -1,6 +1,6 @@
 /** @jsxImportSource react */
 import React from 'react';
-import { Linking, ScrollView, View } from 'react-native';
+import { ScrollView, View } from 'react-native';
 import { useNavigation } from '@react-navigation/native';
 import { space } from '@swift/ui';
 import { Header, Screen, SettingsRow, T } from '../../../kit';

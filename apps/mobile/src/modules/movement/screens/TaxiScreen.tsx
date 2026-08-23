@@ -1,6 +1,6 @@
 /** @jsxImportSource react */
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { Animated, Easing, Linking, Pressable, Share, View, useColorScheme, useWindowDimensions } from 'react-native';
+import { Animated, Easing, Pressable, Share, View, useColorScheme, useWindowDimensions } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import MapView, { Marker, MarkerAnimated, PROVIDER_DEFAULT, Polyline } from 'react-native-maps';
 import Reanimated from 'react-native-reanimated';
