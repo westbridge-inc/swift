@@ -10,3 +10,5 @@
 - [x] REPORT-029 harvested into register: W-007..W-014; all 7 S0s hostile-verified (WR-001+WR-002 CONFIRMED; WR-006/008/003/005 downgraded with residuals recorded; WR-004 evidence gap)
 - [x] REPORT-031 preserved: codex/admin-tests committed locally 6093ee8 (12 pass + 2 honest it.fails); blockers: lockfile regen, CI test cmd, MutationError restyle
 - [~] UXR-W-007 ACTIVE: WR-001 fix (delivery checkout blocks on failed address set)
+- [x] UXR-W-007 CLOSED: PR #723 MERGED (WR-001 delivery checkout blocks on failed address set)
+- [~] QR deep-links: app.config associatedDomains+intentFilters (swiftgy.com), web well-known AASA/assetlinks (404-honest until founder env), /s/:code prod proxy rewrite — shipping as its own PR
