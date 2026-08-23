@@ -23,6 +23,7 @@ import { money } from '../../../lib/money';
 import { mediaUrl } from '../../../lib/images';
 import { streetEtaMin } from '../../../lib/geo';
 import { haptic } from '../../../lib/haptics';
+import { toast } from '../../../components/ui/toast';
 import { safetyApi, type RideClass, type TierEstimate } from '../../../services/api';
 import { Card, CircleChip, IconChip, LoadingBlock, Money, PillButton, Pictogram, type PictogramName, PinGlyph, PopupCard, PopupTitle, Stars, T, VehicleRender, type VehicleBodyType, cardShadow } from '../../../kit';
 import type { PickedPlace } from './DestinationSearchScreen';
@@ -1251,7 +1252,13 @@ function ActiveRide({ navigation, ride, cancelRide, insets, rematching }: any) {
           loading={guardianBusy}
           onPress={async () => {
             setGuardianBusy(true);
-            try { await safetyApi.guardianCheckin('OK'); } catch { /* sweep re-prompts if unanswered */ }
+            try {
+              await safetyApi.guardianCheckin('OK');
+            } catch {
+              // [WR-006] The answer never reached the server — say so. The
+              // sweep re-prompts an unanswered check-in, so this stays true.
+              toast.show("Couldn't send that — Trip Guardian will check in again.");
+            }
             setGuardianBusy(false);
             setGuardianPrompt(false);
           }}
@@ -1263,9 +1270,21 @@ function ActiveRide({ navigation, ride, cancelRide, insets, rematching }: any) {
           loading={guardianBusy}
           onPress={async () => {
             setGuardianBusy(true);
-            try { await safetyApi.guardianCheckin('NEED_HELP'); haptic.warn(); } catch { /* escalation also rides the sweep */ }
+            let sent = true;
+            try {
+              await safetyApi.guardianCheckin('NEED_HELP');
+              haptic.warn();
+            } catch {
+              sent = false;
+            }
             setGuardianBusy(false);
             setGuardianPrompt(false);
+            if (!sent) {
+              // [WR-006] The distress answer did NOT reach the server. The
+              // sweep still escalates the unanswered check-in at its deadline,
+              // but never pretend it was sent — say so and lead with SOS.
+              toast.show("Your answer didn't send — if you need help, use SOS now.");
+            }
             setSosConfirm(true); // the full emergency path is one tap away
           }}
         />
