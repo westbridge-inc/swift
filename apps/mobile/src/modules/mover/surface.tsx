@@ -5,10 +5,21 @@ import { color, withAlpha } from '@swift/ui';
 import { T, cardShadow } from '../../kit';
 
 /**
- * The earner dashboard's surface language — SWIFT's own palette (founder
- * decision 2026-07-16: the earner app matches the rest of Swift — light with
- * the brand red; no second dark identity). The `dk` name survives from the
- * earlier dark iteration so the screens read unchanged.
+ * The earner DASHBOARD KIT — the surface language of the mover cockpit.
+ *
+ * [F-270 · RESOLVED] The audit asked: a real dark set, or drop the pretense?
+ * The pretense is dropped, because the founder already answered the palette
+ * question on 2026-07-16: the earner app wears SWIFT's own palette — light,
+ * with the brand red — and there is NO second dark identity to maintain.
+ *
+ * What was left was a lie in the code rather than on the screen: a module
+ * called `dark.tsx` exporting light-surface tokens, which read to every
+ * reviewer (twice now) as a broken dark theme. The file is `surface.tsx`, and
+ * `dk` / the `D*` components stand for DASHBOARD, not dark. Nothing about the
+ * rendered UI changed here — only the code stopped misdescribing itself.
+ *
+ * If a dark earner cockpit is ever wanted, it is a FOUNDER decision that
+ * starts with a real token ramp, not by re-aliasing these.
  */
 export { withAlpha } from '@swift/ui';
 

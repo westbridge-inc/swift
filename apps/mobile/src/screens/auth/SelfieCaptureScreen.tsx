@@ -4,7 +4,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { CameraView, useCameraPermissions } from 'expo-camera';
 import { Feather } from '@expo/vector-icons';
 import { color } from '@swift/ui';
-import { withAlpha } from '../../modules/mover/dark';
+import { withAlpha } from '../../modules/mover/surface';
 import { SwiftMark } from '../../components/SwiftLogo';
 import { authApi } from '../../services/api';
 import { toast } from '../../components/ui/toast';

@@ -2,7 +2,7 @@
 import React from 'react';
 import { View } from 'react-native';
 import { Feather } from '@expo/vector-icons';
-import { withAlpha } from './dark';
+import { withAlpha } from './surface';
 import { color, space } from '@swift/ui';
 import { T, TonePill } from '../../kit';
 import { money } from '../../lib/money';

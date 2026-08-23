@@ -3,7 +3,7 @@ import React from 'react';
 import { Pressable, View } from 'react-native';
 import { Feather } from '@expo/vector-icons';
 import { cardShadow } from '../../../kit';
-import { dk } from '../dark';
+import { dk } from '../surface';
 
 export function MoverHomeAccountButton({ onPress }: { onPress: () => void }) {
   return (
