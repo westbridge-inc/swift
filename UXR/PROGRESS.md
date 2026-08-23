@@ -20,3 +20,5 @@
 - [~] UXR-W-009 ACTIVE: WR-008 MMG open feedback (3 call sites) — edits done, gates green, committing next
 - [x] F-271 FOUND+FIXED+PROVEN: Android debug builds could never reach Metro (TLS-pinning netsec config blocked all cleartext). Plugin patched, APK rebuilt, app RENDERS ON ANDROID FOR THE FIRST TIME (role-picker screenshot). Stale 8-day Metro was the separate warm-hang cause — fresh Metro bundles android in 7s
 - [x] UXR-W-009 CLOSED: PR #727 MERGED (MMG open feedback at 3 call sites)
+- [x] UXR-W-006 ANDROID SMOKE PASSED (first ever): guest browse → item page → auth interrupt → OTP (000000, honest backoff) → 'Good morning, ELV1' Home + tile grid → Activity/Cart/Profile all render (Cart shows #720 unified masthead). Rig API restarted (8-day process, dead Redis → F-272 raw-error-copy finding). Screenshots in scratchpad.
+- [~] UXR-W-011: admin settlement copy aligned to digest truth (WR-003 residual) — shipping
