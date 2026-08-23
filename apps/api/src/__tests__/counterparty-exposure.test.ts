@@ -54,17 +54,19 @@ const FORBIDDEN: Record<string, string> = {
  *  decided" from a silent pass into a failure that demands the decision. */
 const UNREMARKABLE: Record<string, string> = {
   userId: 'internal linkage — selected per-call-site where needed, never wholesale',
-  status: 'lifecycle state — surfaces derive what they need',
   vehicleYear: 'harmless but unused by any counterparty surface',
-  vehicleRegistrationUrl: 'KYC-adjacent document — never exposed; forbidden in spirit, listed here only if classification moves',
   isAvailable: 'dispatch input, not counterparty information',
   isOnline: 'dispatch input, not counterparty information',
   currentLat: 'live position — exposed ONLY via the gated RIDER_LIVE_LOCATION_SELECT',
   currentLng: 'live position — exposed ONLY via the gated RIDER_LIVE_LOCATION_SELECT',
   lastLocationUpdate: 'live position freshness — same gate as the coordinates',
-  totalEarnings: 'the mover\u2019s money — never a counterparty concern',
   createdAt: 'row bookkeeping',
   updatedAt: 'row bookkeeping',
+  riderType: 'fleet segmentation — a counterparty sees the vehicle, not the contract',
+  documentsVerified: 'verification OUTCOME is implied by the mover being dispatched at all; the flag itself is internal',
+  documentsVerifiedAt: 'internal verification bookkeeping',
+  currentOrderId: 'another customer\u2019s order id — cross-customer linkage, never exposed',
+  totalCourierJobs: 'internal volume metric; totalDeliveries is the exposed figure',
 };
 
 describe('[F-027-07] the counterparty view of a mover', () => {
