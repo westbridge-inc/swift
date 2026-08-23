@@ -28,6 +28,8 @@ const prisma = new PrismaClient();
 const CUSTOMER_PHONE = '+5925566001';   // tenant A (swift-default)
 const OWNER_PHONE = '+5925566000';      // tenant A vendor owner
 const MARK = 'ELV2-B12';
+let plantedTenantId: string | null = null;
+let DATA_SECRETS: string[] = [];
 
 function log(step: string, detail: unknown = '') {
   console.log(`${new Date().toISOString()} · ${step}`, typeof detail === 'string' ? detail : JSON.stringify(detail));
@@ -59,22 +61,63 @@ async function loginByOtp(phone: string): Promise<string> {
   throw new Error('unreachable');
 }
 
-/** A refusal is any non-2xx. A 2xx is only safe if it carries NONE of B's ids. */
-function assertRefused(name: string, r: { status: number; raw: string }, secrets: string[], leaks: string[]) {
+// [F-026-08] The refusal contract is EXACT, not "any non-2xx". A 5xx is a
+// server fault, not a wall — it must fail the scenario. Allowed denials are
+// 400 (malformed / not-permitted write), 401 (no/junk token), 403
+// (authenticated but denied), 404 (existence hidden). A 2xx on a direct object
+// is ALWAYS a breach (even {success:true} means the op was allowed).
+//
+// On a correct-status denial the body may echo identifiers the attacker
+// SUPPLIED (a 404 "Order {id} not found" is harmless) — so the denial-body
+// check looks only for B's DATA that was never in any request: the order
+// NUMBER and the secret address. Cross-tenant WRITES are proven not to have
+// landed by the DB-state snapshot at the end, not by the response body.
+const OBJECT_DENIALS = [400, 401, 403, 404];
+
+function assertObjectRefused(
+  name: string, r: { status: number; raw: string }, dataSecrets: string[], leaks: string[],
+  allowed: number[] = OBJECT_DENIALS,
+) {
   if (r.status < 300) {
-    const leaked = secrets.filter((s) => s && r.raw.includes(s));
-    if (leaked.length > 0) {
-      leaks.push(`${name}: HTTP ${r.status} LEAKED ${leaked.length} tenant-B identifier(s)`);
-      return;
-    }
-    // 200 with an empty/scoped result is the correct "you have nothing here".
-    log(`  ok ${name}`, { status: r.status, note: 'scoped-empty (no B data)' });
+    leaks.push(`${name}: HTTP ${r.status} — a direct cross-tenant object access SUCCEEDED (body: ${r.raw.slice(0, 120)})`);
     return;
   }
+  if (!allowed.includes(r.status)) {
+    const why = r.status >= 500 ? 'server fault is not a wall' : 'outside the allowed denial contract';
+    leaks.push(`${name}: HTTP ${r.status} — ${why} (${allowed.join('/')})`);
+    return;
+  }
+  const leaked = dataSecrets.filter((s) => s && r.raw.includes(s));
+  if (leaked.length > 0) { leaks.push(`${name}: HTTP ${r.status} denial body LEAKED tenant-B data (${leaked.length})`); return; }
   log(`  ok ${name}`, { status: r.status });
 }
 
-async function main() {
+/** A LIST route may return 200 scoped-empty of B — checked for ANY B id in the
+ *  body. A non-2xx must obey the contract; explicitly-allowed codes (e.g. the
+ *  public catalog's 503 PUBLIC_TENANT_UNRESOLVED) pass BEFORE the generic 5xx
+ *  guard, so a known-correct 503 is not miscounted as a server fault. */
+function assertListScoped(
+  name: string, r: { status: number; raw: string }, secrets: string[], leaks: string[],
+  allowed: number[] = [401, 403, 404],
+) {
+  if (r.status < 300) {
+    const leaked = secrets.filter((s) => s && r.raw.includes(s));
+    if (leaked.length > 0) { leaks.push(`${name}: HTTP ${r.status} LEAKED ${leaked.length} tenant-B id(s)`); return; }
+    log(`  ok ${name}`, { status: r.status, note: 'scoped-empty (no B data)' });
+    return;
+  }
+  if (allowed.includes(r.status)) { log(`  ok ${name}`, { status: r.status }); return; }
+  const why = r.status >= 500 ? 'unexpected server fault' : 'outside the allowed contract';
+  leaks.push(`${name}: HTTP ${r.status} — ${why} (${allowed.join('/')})`);
+}
+
+/** Object-refusal shim: existing call sites pass the full secrets list; the
+ *  denial-body check uses only the pure-data subset. */
+function assertRefused(name: string, r: { status: number; raw: string }, _secrets: string[], leaks: string[]) {
+  assertObjectRefused(name, r, DATA_SECRETS, leaks);
+}
+
+async function main(): Promise<string> {
   const h = await fetch(HEALTH).then((r) => r.status).catch(() => 0);
   if (h !== 200) throw new Error(`rig not healthy (${h})`);
 
@@ -136,6 +179,8 @@ async function main() {
   const bCustomerToken = await loginByOtp(bCustomerPhone);
 
   const secrets = [bOrder.id, bVendor.id, bItem.id, bCustomerUser.id, bOrder.orderNumber, 'Tenant B secret address'];
+  // Pure B DATA that must never appear in ANY response — attacker never supplies these.
+  DATA_SECRETS = [bOrder.orderNumber, 'Tenant B secret address'];
   const leaks: string[] = [];
 
   // ── attacker: a REAL authenticated tenant-A customer + vendor owner ──────
@@ -146,7 +191,7 @@ async function main() {
   // ── 1. customer route class: read/act on B's order + vendor ──────────────
   log('ATTACK CLASS 1 — customer reads');
   assertRefused('GET /customer/orders/:bOrderId', await http('GET', `/customer/orders/${bOrder.id}`, undefined, aCustomerToken), secrets, leaks);
-  assertRefused('GET /customer/orders (list must not contain B)', await http('GET', '/customer/orders?limit=50', undefined, aCustomerToken), secrets, leaks);
+  assertListScoped('GET /customer/orders (list must not contain B)', await http('GET', '/customer/orders?limit=50', undefined, aCustomerToken), secrets, leaks);
   assertRefused('POST /customer/orders/:bOrderId/cancel', await http('POST', `/customer/orders/${bOrder.id}/cancel`, { reason: 'attack' }, aCustomerToken), secrets, leaks);
   assertRefused('POST /customer/cart/items (B vendor+item)', await http('POST', '/customer/cart/items', { vendorId: bVendor.id, itemId: bItem.id, quantity: 1 }, aCustomerToken), secrets, leaks);
   assertRefused('GET /customer/vendors/:bVendorId', await http('GET', `/customer/vendors/${bVendor.id}`, undefined, aCustomerToken), secrets, leaks);
@@ -156,7 +201,7 @@ async function main() {
   assertRefused('GET /vendor/orders/:bOrderId', await http('GET', `/vendor/orders/${bOrder.id}`, undefined, aOwnerToken), secrets, leaks);
   assertRefused('PUT /vendor/orders/:bOrderId/accept', await http('PUT', `/vendor/orders/${bOrder.id}/accept`, {}, aOwnerToken), secrets, leaks);
   assertRefused('PUT /vendor/items/:bItemId', await http('PUT', `/vendor/items/${bItem.id}`, { basePrice: 1 }, aOwnerToken), secrets, leaks);
-  assertRefused('GET /vendor/orders (list must not contain B)', await http('GET', '/vendor/orders?limit=50', undefined, aOwnerToken), secrets, leaks);
+  assertListScoped('GET /vendor/orders (list must not contain B)', await http('GET', '/vendor/orders?limit=50', undefined, aOwnerToken), secrets, leaks);
 
   // ── 3. public/browse class: the UNAUTHENTICATED catalog ─────────────────
   // A guest carries no tenant, so these were the only tenant-owned queries
@@ -166,8 +211,8 @@ async function main() {
   // earlier verdict that treated it as a registered design choice was too
   // generous, and the adversarial review was right to say so.
   log('ATTACK CLASS 3 — public browse');
-  assertRefused('GET /public/storefronts (directory)', await http('GET', '/public/storefronts?limit=50'), secrets, leaks);
-  assertRefused('GET /public/storefronts/:bSlug (direct link)', await http('GET', `/public/storefronts/${bVendorSlug}`), secrets, leaks);
+  assertListScoped('GET /public/storefronts (directory)', await http('GET', '/public/storefronts?limit=50'), secrets, leaks, [404, 503]);
+  assertListScoped('GET /public/storefronts/:bSlug (direct link)', await http('GET', `/public/storefronts/${bVendorSlug}`), secrets, leaks, [404, 503]);
 
   // ── 4. unauthenticated + junk-token class ───────────────────────────────
   log('ATTACK CLASS 4 — tokenless / junk token');
@@ -220,34 +265,51 @@ async function main() {
   if (!legitOk) leaks.push('concurrent: legitimate two-tenant traffic broke under load (isolation must not cost availability)');
   log('  concurrent sweep done', { requests: results.length, breaches: breaches.length, bLeakedToA: bLeakedToA.length, aLeakedToB: aLeakedToB.length, legitimateAllOk: legitOk });
 
-  // ── 6. the wall is real, not an empty rig: B's data EXISTS ──────────────
+  // ── 6. the wall is real, not an empty rig: B's data EXISTS and is UNWRITTEN.
+  // [F-026-08] A cross-tenant write can return {success:true} and slip past a
+  // body-only check — so verify the DATABASE, not the response. The item was
+  // attacked with basePrice:1; assert its price and B's order are unchanged.
   const bStillThere = await prisma.order.findUnique({ where: { id: bOrder.id }, select: { status: true, totalAmount: true } });
   if (!bStillThere) throw new Error('FAIL: the tenant-B fixture vanished — the attack proof would be vacuous');
   if (bStillThere.status !== 'PENDING') throw new Error(`FAIL: an attack MUTATED tenant B's order (status ${bStillThere.status})`);
-  log('EVIDENCE tenant B intact and unmutated', bStillThere);
+  if (Number(bStillThere.totalAmount) !== 1234) throw new Error(`FAIL: an attack MUTATED tenant B's order total (${bStillThere.totalAmount})`);
+  const bItemNow = await prisma.item.findUnique({ where: { id: bItem.id }, select: { basePrice: true } });
+  if (!bItemNow) throw new Error('FAIL: the tenant-B item fixture vanished');
+  if (Number(bItemNow.basePrice) !== 1234) throw new Error(`FAIL: the PUT /vendor/items attack MUTATED tenant B's item price to ${bItemNow.basePrice}`);
+  log('EVIDENCE tenant B intact and unmutated (order + item price verified in DB)', { order: bStillThere, itemPrice: Number(bItemNow.basePrice) });
 
   // A leak on ANY class is a hard breach of the wall — the scenario fails.
   if (leaks.length > 0) throw new Error(`FAIL TENANT WALL:\n  - ${leaks.join('\n  - ')}`);
   log('EVIDENCE authenticated + tokenless + concurrent + public classes ALL refused — zero leaks');
   log('B12 COMPLETE — EVERY CROSS-TENANT ROUTE CLASS REFUSED, INCLUDING UNDER LOAD');
+  return tenantBId;
 }
 
-async function teardown() {
-  // Own every row created (INV-14).
-  const tenants = await prisma.tenant.findMany({ where: { name: { startsWith: MARK } }, select: { id: true } });
-  for (const t of tenants) {
-    await prisma.order.deleteMany({ where: { tenantId: t.id } });
-    await prisma.item.deleteMany({ where: { vendor: { tenantId: t.id } } });
-    await prisma.category.deleteMany({ where: { vendor: { tenantId: t.id } } });
-    await prisma.vendor.deleteMany({ where: { tenantId: t.id } });
-    await prisma.vendorOwner.deleteMany({ where: { user: { tenantId: t.id } } });
-    await prisma.customer.deleteMany({ where: { user: { tenantId: t.id } } });
-    await prisma.user.deleteMany({ where: { tenantId: t.id } });
-    await prisma.tenant.delete({ where: { id: t.id } }).catch(() => {});
-  }
-  if (tenants.length > 0) log('teardown complete', { tenantsRemoved: tenants.length });
+// [F-026-09] Teardown owns exactly THIS run's tenant (by id, not a shared
+// marker prefix that could delete a concurrent run's fixtures), VERIFIES the
+// tenant is gone, and signals failure to the caller so a partial/FK-blocked
+// cleanup cannot exit green while fixtures linger.
+async function teardown(tenantBId: string): Promise<void> {
+  await prisma.order.deleteMany({ where: { tenantId: tenantBId } });
+  await prisma.item.deleteMany({ where: { vendor: { tenantId: tenantBId } } });
+  await prisma.category.deleteMany({ where: { vendor: { tenantId: tenantBId } } });
+  await prisma.vendor.deleteMany({ where: { tenantId: tenantBId } });
+  await prisma.vendorOwner.deleteMany({ where: { user: { tenantId: tenantBId } } });
+  await prisma.customer.deleteMany({ where: { user: { tenantId: tenantBId } } });
+  await prisma.user.deleteMany({ where: { tenantId: tenantBId } });
+  await prisma.tenant.delete({ where: { id: tenantBId } });
+  const survivor = await prisma.tenant.findUnique({ where: { id: tenantBId }, select: { id: true } });
+  if (survivor) throw new Error(`teardown INCOMPLETE — tenant ${tenantBId} still present`);
+  log('teardown complete', { tenantBId });
 }
 
 main()
+  .then((id) => { plantedTenantId = id; })
   .catch((e) => { console.error('B12 FAILED:', e.message); process.exitCode = 1; })
-  .finally(async () => { await teardown().catch((e) => console.error('teardown error:', e.message)); await prisma.$disconnect(); });
+  .finally(async () => {
+    if (plantedTenantId) {
+      // [F-026-09] A teardown failure FAILS the run — never green with residue.
+      await teardown(plantedTenantId).catch((e) => { console.error('B12 TEARDOWN FAILED:', e.message); process.exitCode = 1; });
+    }
+    await prisma.$disconnect();
+  });
