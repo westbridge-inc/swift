@@ -1,63 +1,48 @@
 /** @jsxImportSource react */
 import React, { useEffect, useState } from 'react';
-import { Pressable, View } from 'react-native';
+import { View } from 'react-native';
 import * as WebBrowser from 'expo-web-browser';
 import { color, radius, space } from '@swift/ui';
 import { money } from '../../lib/money';
-import { useRateOrder, useTipOrder } from '../../hooks/customer';
+import { useRateOrder } from '../../hooks/customer';
 import { IconChip, PillButton, PopupCard, PopupTitle, Stars, T } from '../../kit';
 import {
   AuthSessionBoundaryError,
-  requireAuthSessionForPrincipal,
   requireAuthSessionSnapshot,
 } from '../../stores/authStore';
 
-/** Round a suggested tip to a cash-friendly amount (nearest 100, min 100). */
-const roundCash = (n: number) => Math.max(100, Math.round(n / 100) * 100);
-
 /**
- * Post-trip closure for a completed ride: rate the driver + (optionally) add a
- * CASH tip. Rides are cash — a tip is recorded so the driver gets credit for it
- * and 100% is theirs; it's handed over in person, not processed in-app. Reuses
- * the same /rate + /tip endpoints as delivery orders (a taxi is an order).
+ * Post-trip closure for a completed ride: rate the driver. Tipping is CASH in
+ * person — [WR-009] the in-app tip recorder was removed because the server
+ * fails post-delivery tips closed (LB-015: no rail collects them; recording
+ * one minted an earning from money nobody collected). The sheet keeps the
+ * cash-tip suggestion as guidance only; checkout-time tips are untouched.
  */
 export function RidePostTripSheet({ ride, onDone }: { ride: any | null; onDone: () => void }) {
   const rate = useRateOrder(ride?.id ?? '');
-  const tip = useTipOrder(ride?.id ?? '');
   const [score, setScore] = useState(0);
-  const [tipAmt, setTipAmt] = useState<number | null>(null);
 
   // Reset when a new ride completes (the sheet is reused across rides).
   useEffect(() => {
     setScore(0);
-    setTipAmt(null);
   }, [ride?.id]);
 
   if (!ride) return null;
 
   const fare = Number(ride.taxiFareTotal ?? ride.totalAmount ?? 0);
   const driverName = ride.driver?.user?.firstName ?? 'your driver';
-  const presets = Array.from(new Set([0.1, 0.15, 0.2].map((p) => roundCash(fare * p)))).filter((v) => v > 0);
-  const busy = rate.isPending || tip.isPending;
+  const busy = rate.isPending;
 
   const submit = async () => {
-    // Fire whichever the rider chose; a plain "Done" with nothing picked just
-    // closes. Never block closing on a failed rating/tip — best-effort.
-    if (score <= 0 && (!tipAmt || tipAmt <= 0)) {
+    // A plain "Done" with nothing picked just closes. Never block closing on
+    // a failed rating — best-effort.
+    if (score <= 0) {
       onDone();
       return;
     }
     try {
       const owner = requireAuthSessionSnapshot();
-      let current = owner;
-      if (score > 0) {
-        await rate.mutateAsync({ driverScore: score, authSession: current });
-        current = requireAuthSessionForPrincipal(owner);
-      }
-      if (tipAmt && tipAmt > 0) {
-        await tip.mutateAsync({ amount: tipAmt, authSession: current });
-        requireAuthSessionForPrincipal(owner);
-      }
+      await rate.mutateAsync({ driverScore: score, authSession: owner });
     } catch (submitError) {
       if (submitError instanceof AuthSessionBoundaryError) return;
       // swallow — the ride is already over; don't trap the rider in the sheet
@@ -134,39 +119,22 @@ export function RidePostTripSheet({ ride, onDone }: { ride: any | null; onDone: 
         <Stars value={score} size={38} gap={10} onRate={setScore} />
       </View>
 
-      {presets.length ? (
-        <>
-          <T variant="label" tone="muted" center style={{ marginTop: space['2xl'] }}>
-            Add a cash tip for {driverName}? 100% theirs — hand it over at drop-off.
-          </T>
-          <View style={{ flexDirection: 'row', justifyContent: 'center', flexWrap: 'wrap', gap: space.sm, marginTop: space.md }}>
-            {presets.map((v) => {
-              const active = tipAmt === v;
-              return (
-                <Pressable key={v} onPress={() => setTipAmt(active ? null : v)}>
-                  <View
-                    style={{
-                      paddingHorizontal: space.lg,
-                      paddingVertical: space.sm,
-                      borderRadius: radius.full,
-                      borderWidth: 1.5,
-                      borderColor: active ? color.brand[500] : color.border.strong,
-                      backgroundColor: active ? color.brand[50] : color.surface.base,
-                    }}
-                  >
-                    <T variant="label" weight="semibold" tone={active ? 'brand' : 'ink'}>
-                      {money(v)}
-                    </T>
-                  </View>
-                </Pressable>
-              );
-            })}
-          </View>
-        </>
-      ) : null}
+      <View
+        style={{
+          marginTop: space['2xl'],
+          paddingHorizontal: space.lg,
+          paddingVertical: space.md,
+          borderRadius: radius.lg,
+          backgroundColor: color.brand[50],
+        }}
+      >
+        <T variant="label" tone="muted" center>
+          Want to tip {driverName}? Cash at drop-off — 100% theirs, straight to their hand.
+        </T>
+      </View>
 
       <PillButton
-        label={tipAmt ? `Submit · ${money(tipAmt)} tip` : 'Submit'}
+        label="Submit"
         style={{ alignSelf: 'stretch', marginTop: space['2xl'] }}
         loading={busy}
         onPress={submit}
