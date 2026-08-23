@@ -86,7 +86,14 @@ export default function ConfigPage() {
 
   return (
     <div>
-      <h1 className="text-2xl font-bold mb-6">Platform Configuration</h1>
+      <h1 className="text-2xl font-bold mb-1">Platform Configuration</h1>
+      {/* [WR-045] The server's own schema comment: "No key drives live
+          behaviour today — real config is CountryConfig." Saving here without
+          saying that made the page a placebo. */}
+      <p className="text-[var(--muted)] text-sm mb-6" style={{ color: 'var(--warn)' }}>
+        These values are recorded and audited, but do not drive live behaviour yet — operational limits come from
+        CountryConfig per market. They bind as each key is wired up.
+      </p>
 
       {isLoading ? (
         <div className="bg-[var(--panel)] rounded-xl border border-[var(--border)] p-8 text-center text-[var(--muted)]">

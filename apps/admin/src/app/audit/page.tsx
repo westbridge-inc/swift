@@ -2,6 +2,7 @@
 
 import { FileText } from 'lucide-react';
 import { useQuery } from '@tanstack/react-query';
+import { QueryFailed } from '@/components/MutationNotice';
 import { fetchAuditLogs } from '@/lib/api';
 
 interface AuditEntry {
@@ -15,7 +16,7 @@ interface AuditEntry {
 }
 
 export default function AuditPage() {
-  const { data, isLoading } = useQuery({
+  const { data, isLoading, isError, error, refetch } = useQuery({
     queryKey: ['audit-logs'],
     queryFn: () => fetchAuditLogs('limit=50'),
     refetchInterval: 30_000,
@@ -32,6 +33,8 @@ export default function AuditPage() {
       <div className="bg-[var(--panel)] rounded-xl border border-[var(--border)] overflow-hidden">
         {isLoading ? (
           <div className="p-12 text-center text-[var(--muted)] text-sm">Loading…</div>
+        ) : isError ? (
+          <QueryFailed error={error} what="the audit trail" onRetry={() => refetch()} />
         ) : entries.length === 0 ? (
           <div className="p-12 flex flex-col items-center justify-center text-center">
             <FileText size={48} className="text-[var(--muted)] mb-4" />

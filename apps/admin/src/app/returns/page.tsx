@@ -3,6 +3,7 @@
 import { useState } from 'react';
 import Link from 'next/link';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import { MutationNotice } from '@/components/MutationNotice';
 import { fetchReturns, resolveReturn } from '@/lib/api';
 import { StatusPill } from '@/components/detail';
 
@@ -24,6 +25,7 @@ export default function ReturnsPage() {
     <div>
       <div className="flex items-center justify-between mb-1">
         <h1 className="text-2xl font-bold">Retail returns</h1>
+        <MutationNotice errors={[resolve.error]} />
         <div className="flex gap-1">
           {FILTERS.map((f) => (
             <button

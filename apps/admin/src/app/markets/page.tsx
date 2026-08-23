@@ -1,6 +1,7 @@
 'use client';
 
 import { useQuery } from '@tanstack/react-query';
+import { QueryFailed } from '@/components/MutationNotice';
 import { fetchCountries } from '@/lib/api';
 
 /** Weekly tier prices live in subscriptionTiers JSON: { mover, smallVendor, largeVendor, ... }. */
@@ -10,7 +11,7 @@ function tier(c: any, key: string) {
 }
 
 export default function MarketsPage() {
-  const { data, isLoading } = useQuery({ queryKey: ['countries'], queryFn: fetchCountries });
+  const { data, isLoading, isError, error, refetch } = useQuery({ queryKey: ['countries'], queryFn: fetchCountries });
   const rows: any[] = data?.data ?? [];
 
   return (
@@ -38,6 +39,8 @@ export default function MarketsPage() {
           <tbody>
             {isLoading ? (
               <tr><td colSpan={8} className="p-8 text-center text-[var(--muted)]">Loading…</td></tr>
+            ) : isError ? (
+              <QueryFailed error={error} what="markets" onRetry={() => refetch()} />
             ) : rows.length === 0 ? (
               <tr><td colSpan={8} className="p-8 text-center text-[var(--muted)]">No markets configured.</td></tr>
             ) : (

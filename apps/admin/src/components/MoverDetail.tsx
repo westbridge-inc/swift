@@ -1,6 +1,7 @@
 'use client';
 
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import { MutationNotice } from '@/components/MutationNotice';
 import {
   fetchRiderDetail,
   fetchDriverDetail,
@@ -57,6 +58,7 @@ export function MoverDetail({ id, kind }: { id: string; kind: 'rider' | 'driver'
   return (
     <div>
       <BackLink href={listHref} label={listLabel} />
+      <MutationNotice errors={[verify.error, rideClass.error]} className="mt-3" />
 
       <div className="flex flex-wrap items-center gap-3 mb-6">
         <div className="w-12 h-12 rounded-full bg-[var(--accent)] flex items-center justify-center text-lg font-bold">
