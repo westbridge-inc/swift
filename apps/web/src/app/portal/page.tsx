@@ -1,6 +1,7 @@
 'use client';
 
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { MutationNotice } from '@/components/mutation-notice';
 import {
   confirmRiderSettlement, getDriverEarnings, getDriverProfile, getDriverSubscription,
   getRiderCashSettlements, getRiderProfile, getRiderSubscription, getRiderSummary,
@@ -92,6 +93,7 @@ export default function PortalHome() {
           <p className="mt-1 text-sm text-amber-800/80">
             When a customer pays the store&apos;s MMG, your fee lands in their wallet — collect it in cash and confirm here.
           </p>
+          <MutationNotice errors={[confirm.error]} className="mt-2" />
           <div className="mt-3 space-y-2">
             {owedRows.map((r) => {
               const id = String(r['id']);

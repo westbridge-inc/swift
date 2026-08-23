@@ -42,3 +42,5 @@
 - [~] W-014 rank 13 WR-012: trip-share initial-load failure says unreachable, never 'ended' — shipping
 - [x] W-014 rank 13 WR-012 CLOSED: PR #737 MERGED (trip-share first-load honesty)
 - [~] W-014 rank 14 WR-011: taxi watch promise only on server success — shipping
+- [x] W-014 rank 14 WR-011 CLOSED: PR #738 MERGED (watch promise honest)
+- [~] W-014: shipping visibility strips (WR-043 web onSettled set + WR-019 compliance + WR-020 health incl. Discard confirm)

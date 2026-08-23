@@ -47,6 +47,17 @@ export default function Compliance() {
         </button>
       </div>
 
+      {(run.error || decide.error) ? (
+        // [WR-019] A failed audit run or pass/fail decision must be seen —
+        // force-offline is a safety action; the refetch keeps the case open,
+        // and this line says why it is still there.
+        <p role="alert" className="text-sm font-semibold text-[var(--swift-red)]">
+          {run.error
+            ? `Audit run did not start: ${(run.error as Error).message}`
+            : `Decision did not record — the case is still open: ${(decide.error as Error).message}`}
+        </p>
+      ) : null}
+
       <section>
         <p className="text-xs font-bold uppercase tracking-wider text-neutral-400">
           Open violations · <span className={violations.length ? 'text-[var(--swift-red)]' : 'text-green-600'}>{violations.length}</span>

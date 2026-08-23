@@ -4,6 +4,7 @@ import { useMemo, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { RefreshCw } from 'lucide-react';
 import NewOrderTakeover from '@/components/NewOrderTakeover';
+import { MutationNotice } from '@/components/mutation-notice';
 import {
   acceptOrder, completePickup, confirmPayment, getItems, getOrder, getOrders,
   markPreparing, markReady, proposeSubstitution, refundLine, rejectOrder,
@@ -113,6 +114,7 @@ function PickList({ order, onBusy }: { order: VendorOrder; onBusy: boolean }) {
   return (
     <div className="mt-4 rounded-xl border border-black/5 bg-[var(--swift-subtle)] p-4">
       <p className="text-sm font-bold">{open === 0 ? 'All picked ✓' : `Shelf picking — ${open} to pick`}</p>
+      <MutationNotice errors={[pickedMut.error, subMut.error, refundMut.error]} className="mt-2" />
       <div className="mt-2 space-y-2">
         {order.items.map((it) => (
           <div key={it.id} className="rounded-lg bg-white p-3">

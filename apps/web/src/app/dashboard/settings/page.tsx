@@ -3,6 +3,7 @@
 import { useEffect, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { confirmSettlement, getCashSettlements, getHours, getProfile, getSubscription, putHours } from '@/lib/vendor-api';
+import { MutationNotice } from '@/components/mutation-notice';
 
 const money = (n: number) => `$${Math.round(Number(n)).toLocaleString()}`;
 const DAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
@@ -134,6 +135,7 @@ function SettlementsCard() {
   return (
     <div className="rounded-2xl border border-black/5 bg-white p-6">
       <h2 className="font-bold">Rider fees owed (MMG orders)</h2>
+      <MutationNotice errors={[confirm.error]} className="mt-2" />
       <p className="mt-1 text-sm text-[var(--swift-muted)]">
         When a customer pays your MMG, the delivery fee lands in your wallet — hand the rider their fee in cash and
         confirm here. Both sides confirm; then it{'’'}s settled.
