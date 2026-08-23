@@ -29,7 +29,10 @@ export function GradientMasthead({
 }: ViewProps & { slices?: number }) {
   const { from, to } = color.masthead;
   return (
-    <View style={[{ overflow: 'hidden' }, style]} {...rest}>
+    // [FOUNDER VETO 08-22] The awning scallop that used to close this panel is
+    // gone — "the bump under the search bar". The masthead now ends in a clean
+    // 28dp curve: one quiet, premium edge instead of a row of teeth.
+    <View style={[{ overflow: 'hidden', borderBottomLeftRadius: 28, borderBottomRightRadius: 28 }, style]} {...rest}>
       <View style={StyleSheet.absoluteFill}>
         {Array.from({ length: slices }, (_, i) => (
           <View

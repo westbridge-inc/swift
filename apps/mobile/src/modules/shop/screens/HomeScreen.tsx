@@ -12,6 +12,7 @@ import { useDiscoveryCategories, useHome, useToggleFavorite } from '../../../hoo
 import { useAds } from '../../../hooks/ads';
 import { AdHeroVideo, AdTopCard, AdBar } from '../../../components/ads';
 import { PressableScale } from '../../../components/ui';
+import { Scrim } from '../../../components/ui/scrim';
 import { grantedLocationFix } from '../../../lib/deviceLocation';
 import { locationPrimer } from '../../../lib/location-primer';
 import { useDeviceLocation } from '../../../hooks/useDeviceLocation';
@@ -21,17 +22,16 @@ import { useLocationStore } from '../../../stores/locationStore';
 import { CategoryRail, CAT_RAIL_MIN_CHIPS } from '../CategoryRail';
 // [F-264] itemPhoto/vendorPhoto return null rather than inventing a stock
 // photo. `itemImage` used to hand "Mauby" a picture of a cheeseburger.
-import { itemPhoto, vendorPhoto } from '../../../lib/images';
+import { categoryImage, itemPhoto, vendorPhoto } from '../../../lib/images';
 import { money } from '../../../lib/money';
 import {
-  AwningEdge,
   Card,
-  Chip,
   ErrorState,
   FoodCard,
   GradientMasthead,
   LoadingBlock,
   MerchantCard,
+  Photo,
   Pictogram,
   type PictogramName,
   PillButton,
@@ -214,7 +214,12 @@ export function HomeScreen() {
         {/* The masthead [DESIGN_NOTES 2026-08-18]: the brand wash deepens
             500→600 and closes with the awning hem — Home's signature. Where +
             who as the eyebrow, ONE display-face greeting, then search. */}
-        <GradientMasthead style={{ paddingTop: insets.top, paddingBottom: space.md, paddingHorizontal: GUTTER }}>
+        {/* FOUNDER VETO 08-22: the awning scallop ("the bump under the search
+            bar") is GONE — the register called it Home's signature; the
+            founder called it what it was. A clean 28dp sheet edge instead:
+            quieter, more premium, and the grid card below now visually docks
+            into the masthead. */}
+        <GradientMasthead style={{ paddingTop: insets.top, paddingBottom: space.xl, paddingHorizontal: GUTTER }}>
           <View style={{ flexDirection: 'row', alignItems: 'center' }}>
             <Pressable
               onPress={() => (isAuthenticated ? navigation.navigate('Addresses') : navigation.navigate('LocationPicker'))}
@@ -289,7 +294,6 @@ export function HomeScreen() {
             )}
           </Pressable>
         </GradientMasthead>
-        <AwningEdge />
 
         {/* THE services grid — the shelf under the awning: 4x2, drawn icons */}
         <View
@@ -480,10 +484,26 @@ export function HomeScreen() {
                   keyExtractor={(c) => c.id}
                   contentContainerStyle={{ paddingHorizontal: GUTTER, gap: space.md, paddingTop: space.lg }}
                   renderItem={({ item }) => (
-                    <Chip
-                      label={item.name}
+                    // [Founder 08-22] Bare outlined text pills were the last
+                    // clean-minimal islands on the screen. Categories are FOOD
+                    // — they get photography with a scrim and white label,
+                    // like every other band. Real menu categories from the
+                    // live feed; imagery keyed by name via categoryImage.
+                    <Pressable
                       onPress={() => navigation.navigate('Search', { q: item.name })}
-                    />
+                      accessibilityRole="button"
+                      accessibilityLabel={item.name}
+                    >
+                      {({ pressed }) => (
+                        <View style={{ width: 132, height: 84, borderRadius: radius.lg, overflow: 'hidden', opacity: pressed ? 0.85 : 1 }}>
+                          <Photo uri={categoryImage(item.name.toLowerCase())} label={item.name} style={{ width: '100%', height: '100%' }} />
+                          <Scrim height={84} cover />
+                          <View style={{ position: 'absolute', left: space.md, right: space.md, bottom: space.sm }}>
+                            <T variant="label" weight="semibold" tone="onBrand" numberOfLines={1}>{item.name}</T>
+                          </View>
+                        </View>
+                      )}
+                    </Pressable>
                   )}
                 />
               </>

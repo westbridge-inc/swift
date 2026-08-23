@@ -9,7 +9,7 @@ import { color, radius, space } from '@swift/ui';
 import { haptic } from '../../../lib/haptics';
 import { useMyRating, useProfile } from '../../../hooks/customer';
 import { useAuthStore } from '../../../stores/authStore';
-import { AwningEdge, Card, EmptyState, ErrorState, GradientMasthead, IconChip, LoadingBlock, PillButton, PopupCard, PopupTitle, Screen, SettingsRow, T } from '../../../kit';
+import { Card, EmptyState, ErrorState, GradientMasthead, IconChip, LoadingBlock, PillButton, PopupCard, PopupTitle, Screen, SettingsRow, T } from '../../../kit';
 import Svg, { Circle } from 'react-native-svg';
 import Animated, { FadeInDown, ReduceMotion } from 'react-native-reanimated';
 import { RoleSwitcherSheet } from '../../../components/RoleSwitcherSheet';
@@ -206,7 +206,6 @@ export function ProfileScreen() {
             </T>
           ) : null}
         </GradientMasthead>
-        <AwningEdge />
 
         {/* Avatar + trust halo, overlapping the hem. The camera chip is a REAL
             action (>=44 hit target) — it opens Personal data. */}
