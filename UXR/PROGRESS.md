@@ -66,3 +66,4 @@
 - [x] PR #747 MERGED (F-026-02/05/06/07) · PR #748 MERGED (F-026-08/09 b12 contract+teardown)
 - [x] F-026-17 VERIFIED CLOSED (prior session: actor-scoped SOS idempotency + P2002 recovery + b14 cross-user/concurrent pins + unit tests) — census predated the fix
 - [~] REPORT-026 batch: F-026-22 (b5 pickup-code redaction) + F-026-24 (b4 exact subtotalBase) + F-026-26 (b13 loser-lost-cleanly + verified cleanup) — shipping. b4/b5 live-run blocked on rig supply (no riders/mart closed); type+lint gated like F-026-06
+- [x] PR #749 MERGED (F-026-22/24/26 baseline hardening). REPORT-026 tail: 9 findings closed across #747/#748/#749 + F-026-17 verified-closed; remaining ~10 are baseline-script quality (F-026-20/21/23/25/27/28/29/30 + REPORT-022 tail)
