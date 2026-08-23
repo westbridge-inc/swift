@@ -83,7 +83,7 @@ export function registerErrorHandler(app: FastifyInstance) {
       if (claimed !== 'OK') return;
       const { notifyAdmins, NotificationService } = await import('../modules/notification/notification.service');
       try {
-        await notifyAdmins(app.prisma, new NotificationService(app.prisma, app.io), {
+        const paged = await notifyAdmins(app.prisma, new NotificationService(app.prisma, app.io), {
           // A 5xx SPIKE is an aggregate infra signal, single-flighted across
           // the whole API — not one tenant's event [NOC-A F45].
           tenantId: null,
@@ -91,6 +91,10 @@ export function registerErrorHandler(app: FastifyInstance) {
           body: `${threshold}+ unhandled 500s in the last minute. Check Sentry / the API logs now.`,
           data: { kind: 'ops_error_spike', perMinute: threshold },
         });
+        // [F-028-10] Zero recipients is not a delivered page. Holding the
+        // 15-minute dedup claim after reaching NOBODY kept the outage dark
+        // for the full window; release it so the next spike retries.
+        if (paged === 0) await redis.del('ops_page:error-spike').catch(() => {});
       } catch {
         // Release the dedup claim so the next spike re-pages rather than staying
         // dark for the window on a transient notify failure.

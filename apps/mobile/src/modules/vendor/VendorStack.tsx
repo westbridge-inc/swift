@@ -118,6 +118,7 @@ import {
 } from '../../stores/authStore';
 import { track } from '../../lib/analytics';
 import { useLocationStore } from '../../stores/locationStore';
+import { grantedLocationFix } from '../../lib/deviceLocation';
 import { useStoreSwitcher } from '../../stores/storeSwitcher';
 import { useVendorPreview } from '../../stores/vendorPreview';
 import { RoleSwitcherSheet } from '../../components/RoleSwitcherSheet';
@@ -241,7 +242,7 @@ function TabHeader({ title, onSwitch }: { title: string; onSwitch?: () => void }
 function BusinessSetup() {
   const become = useBecomePartner();
   const [switcherOpen, setSwitcherOpen] = useState(false);
-  const { latitude, longitude } = useLocationStore();
+  const { latitude, longitude, status: locationStatus } = useLocationStore();
   const [name, setName] = useState('');
   const [type, setType] = useState<'RESTAURANT' | 'SUPERMARKET' | 'STORE' | 'SERVICE'>('RESTAURANT');
   const [phone, setPhone] = useState('');
@@ -253,7 +254,13 @@ function BusinessSetup() {
   // unknown, while the caption below told the owner we had used their current
   // location. A fabricated pin AND a false statement about it. No location
   // now means no submission, said out loud.
-  const hasPin = typeof latitude === 'number' && typeof longitude === 'number';
+  // [F-028-08] Persisted numbers are only a last-known map centre; they are a
+  // STORE PIN — where customers are sent, where dispatch measures from — only
+  // when the grant is live. The old existence check submitted a pin while
+  // status was resolving/denied/unavailable, so a revoked permission could
+  // register a business at wherever the phone last was.
+  const pinFix = grantedLocationFix(latitude, longitude, locationStatus);
+  const hasPin = pinFix !== null;
   const valid = hasPin && name.trim().length >= 2 && phone.trim().length >= 5 && addr.trim().length >= 3 && city.trim().length >= 2;
 
   const submit = () => {
@@ -266,8 +273,8 @@ function BusinessSetup() {
         phone: phone.trim(),
         addressLine1: addr.trim(),
         city: city.trim(),
-        latitude,
-        longitude,
+        latitude: pinFix!.latitude,
+        longitude: pinFix!.longitude,
       },
     });
   };

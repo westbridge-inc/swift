@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
 import type { Server } from 'socket.io';
-import { prismaPlugin } from '../plugins/prisma';
+import { prismaPlugin, runWithTenant } from '../plugins/prisma';
 import { redisPlugin } from '../plugins/redis';
 import { withPushRetry, type PushProvider } from '../providers/notifications/channels';
 import { NotificationService, notifyAdmins } from '../modules/notification/notification.service';
@@ -160,6 +160,48 @@ describe('notifyAdmins tenancy [NOC-A F45]', () => {
       await app.prisma.alertDelivery.deleteMany({ where: { recipientId: foreignAdmin.id } });
       await app.prisma.user.delete({ where: { id: foreignAdmin.id } });
       await app.prisma.tenant.delete({ where: { id: otherTenant } });
+    }
+  });
+});
+
+describe('notifyAdmins under request tenant scope [F-028-10]', () => {
+  it('a platform page fired INSIDE a tenant request still reaches platform operators', async () => {
+    // `User` is an ALS-scoped model, so this lookup used to be silently
+    // intersected with the CALLER's tenant: notifyAdmins(null) inside an
+    // ordinary tenant-A request found only super-admins who themselves live
+    // in tenant A — in the ordinary deployment shape, ZERO. The 5xx-spike
+    // pager then counted the empty page as success and its 15-minute dedup
+    // window kept the outage dark. Paging operators is a sanctioned
+    // cross-tenant read; it must not depend on whose request it runs inside.
+    const svc = new NotificationService(app.prisma, ioStub);
+    const opsTenant = `f02810-${Math.random().toString(36).slice(2, 8)}`;
+    await app.prisma.tenant.create({ data: { id: opsTenant, name: 'Ops home', slug: opsTenant, isActive: false } });
+    const operator = await app.prisma.user.create({
+      data: {
+        phone: `+59281${Math.floor(Math.random() * 900000) + 100000}`,
+        firstName: 'Outage', lastName: 'Operator',
+        roles: ['SUPER_ADMIN'] as never[], activeRole: 'SUPER_ADMIN' as never,
+        isPhoneVerified: true, status: 'ACTIVE', tenantId: opsTenant,
+      },
+    });
+    try {
+      // The reproduction: the caller's request context is a DIFFERENT tenant.
+      const paged = await runWithTenant('swift-default', () =>
+        notifyAdmins(app.prisma, svc, {
+          tenantId: null,
+          title: 'Server error spike',
+          body: 'probe',
+          data: { kind: 'f02810_probe' },
+        }));
+      expect(paged, 'the platform operator outside the request tenant was not paged').toBeGreaterThanOrEqual(1);
+      const row = await app.prisma.notification.count({
+        where: { userId: operator.id, data: { path: ['kind'], equals: 'f02810_probe' } as never },
+      });
+      expect(row).toBe(1);
+    } finally {
+      await app.prisma.notification.deleteMany({ where: { userId: operator.id } });
+      await app.prisma.user.delete({ where: { id: operator.id } });
+      await app.prisma.tenant.delete({ where: { id: opsTenant } });
     }
   });
 });
