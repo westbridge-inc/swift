@@ -17,7 +17,7 @@ import { grantedLocationFix } from '../../../lib/deviceLocation';
 import { haversineKm, streetEtaMin } from '../../../lib/geo';
 import { jobAmount, RoutePair } from '../shared';
 import { haptic } from '../../../lib/haptics';
-import { dk, withAlpha, DCard } from '../dark';
+import { dk, withAlpha, DCard } from '../surface';
 import { openExternal } from '../../../lib/openExternal';
 
 /** [F-213] Every driver handover PIN is 6 digits (api ride-pin.ts). */

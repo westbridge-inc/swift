@@ -40,7 +40,7 @@ import { moverJobsToday } from '../../../lib/earnings';
 import { earningsSplit } from '../../../lib/earnings-breakdown';
 import { FareSlider } from '../../../components/FareSlider';
 import { GUTTER, RoutePair, jobAmount, CustomerTrustBadge } from '../shared';
-import { dk, withAlpha, DCard, DStat, DWeekBars } from '../dark';
+import { dk, withAlpha, DCard, DStat, DWeekBars } from '../surface';
 import { useMoverPreview } from '../../../stores/moverPreview';
 import { MoverHomeAccountButton } from './MoverHomeAccountButton';
 import { fareLockedFor, fareToSubmit } from './fare-locked';

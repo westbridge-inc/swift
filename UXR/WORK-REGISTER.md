@@ -19,7 +19,7 @@ Gluestack (recommendation to the contrary was made once and overruled).
 | UXR-W-006 | W4 | Android | dev-client bundle load → 5-flow smoke → findings pass | [x] | SMOKE PASSED 08-23: role picker · guest browse+item · OTP auth e2e · authed Home+grid · all 4 tabs; F-272 logged |
 | UXR-W-002 | W3 | Store/product | hero elevation (flow 3) | [ ] | — |
 | UXR-W-003 | W3 | Vendor kitchen | first-run/empty state (G3) | [ ] | — |
-| UXR-W-004 | W2 | Earner dark | F-270 decision | [ ] | — |
+| UXR-W-004 | W2 | Earner dark | F-270 decision | [x] | RESOLVED: founder already decided 07-16 (light, no 2nd identity) — dropped the naming pretense, dark.tsx→surface.tsx, dk=DASHBOARD |
 | UXR-W-005 | W2 | Kit | teeth+RideSheet deletion + LEGACY ChatScreen (screens/shared — WR-025 dead send; superseded by ConversationScreen, still routed via CustomerStack:129 name="Chat") → FG-2 candidates list | [~] | FG-2-CANDIDATES.md WRITTEN 08-23 — awaiting founder approval per row |
 
 REPORT-029 doctrine note: findings are STATIC (audited main@6337404; #721 delta read,
