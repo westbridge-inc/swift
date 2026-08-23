@@ -34,7 +34,11 @@ function Ticket({ t, onDone }: { t: SupportTicket; onDone: () => void }) {
 
       <div className="mt-3 flex items-center gap-2">
         <input
-          value={note} onChange={(e) => setNote(e.target.value)} placeholder="Reply / internal note (optional)"
+          // [WR-022] There IS no internal note on this rail: the server sends
+          // this text verbatim to the ticket owner. The old "Reply / internal
+          // note" label invited operators to type private remarks straight
+          // into a customer notification.
+          value={note} onChange={(e) => setNote(e.target.value)} placeholder="Reply to the customer — they will see this (optional)"
           className="min-w-0 flex-1 rounded-lg border border-neutral-200 bg-neutral-50 px-2 py-1.5 text-sm outline-none focus:border-[var(--swift-red)]"
         />
         <button

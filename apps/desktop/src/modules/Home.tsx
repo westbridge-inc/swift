@@ -94,14 +94,23 @@ export default function Home({ go }: { go: (m: ModuleKey) => void }) {
   const onRoad = (d.activeRiders ?? 0) + (d.activeDrivers ?? 0);
 
   const attentionTotal = (a.pendingVendors ?? 0) + (a.pastDueSubs ?? 0) + (a.unassignedOrders ?? 0) + stuckCount + reportsPending + ticketsOpen;
+  // [WR-023] The secondary feeds default to 0 on failure — with one of them
+  // down, a green "All systems normal" is a guess, not a fact. Degrade the
+  // claim whenever a feed is unreachable.
+  const degraded = stuck.isError || reports.isError || tickets.isError || revenue.isError;
+  const allClear = attentionTotal === 0 && !degraded;
 
   return (
     <div className="space-y-6">
       {/* status line */}
       <div className="flex items-center gap-3">
-        <span className={`inline-flex items-center gap-2 rounded-full px-3 py-1 text-xs font-semibold ${attentionTotal === 0 ? 'bg-green-100 text-green-700' : 'bg-[var(--swift-red)]/15 text-[var(--swift-red)]'}`}>
-          <span className={`h-2 w-2 rounded-full ${attentionTotal === 0 ? 'bg-green-400' : 'bg-[var(--swift-red)] animate-pulse'}`} />
-          {attentionTotal === 0 ? 'All systems normal' : `${attentionTotal} item${attentionTotal === 1 ? '' : 's'} need attention`}
+        <span className={`inline-flex items-center gap-2 rounded-full px-3 py-1 text-xs font-semibold ${allClear ? 'bg-green-100 text-green-700' : degraded && attentionTotal === 0 ? 'bg-amber-100 text-amber-700' : 'bg-[var(--swift-red)]/15 text-[var(--swift-red)]'}`}>
+          <span className={`h-2 w-2 rounded-full ${allClear ? 'bg-green-400' : degraded && attentionTotal === 0 ? 'bg-amber-400' : 'bg-[var(--swift-red)] animate-pulse'}`} />
+          {allClear
+            ? 'All systems normal'
+            : attentionTotal === 0
+              ? 'Partial picture — some feeds unreachable'
+              : `${attentionTotal}${degraded ? '+' : ''} item${attentionTotal === 1 && !degraded ? '' : 's'} need attention${degraded ? ' (some feeds unreachable)' : ''}`}
         </span>
         <span className="text-xs text-neutral-400">Live · refreshes every 30s · ⌘K to search</span>
       </div>
@@ -144,7 +153,11 @@ export default function Home({ go }: { go: (m: ModuleKey) => void }) {
       {/* needs attention — drill-down */}
       <div>
         <p className="mb-2 text-xs font-bold uppercase tracking-wide text-neutral-400">Needs attention</p>
-        {attentionTotal === 0 ? (
+        {attentionTotal === 0 && degraded ? (
+          <p className="rounded-xl border border-dashed border-amber-300 bg-amber-50 px-4 py-6 text-center text-sm text-amber-700">
+            Some feeds are unreachable — the quiet board may be incomplete. Counts return as the feeds recover.
+          </p>
+        ) : attentionTotal === 0 ? (
           <p className="rounded-xl border border-dashed border-neutral-200 px-4 py-6 text-center text-sm text-neutral-400">Nothing on fire. The agent and the auto-sweeps are keeping up. 🎉</p>
         ) : (
           <div className="grid grid-cols-2 gap-2">

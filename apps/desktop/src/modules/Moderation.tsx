@@ -55,7 +55,7 @@ function Row({ r, onResolved }: { r: ModerationReport; onResolved: () => void })
           onClick={() => mut.mutate('ACTIONED')} disabled={mut.isPending}
           className="rounded-lg bg-green-100 px-3 py-1.5 text-sm font-semibold text-green-700 hover:bg-green-200 disabled:opacity-50"
         >
-          Action taken
+          Mark handled
         </button>
         <button
           onClick={() => mut.mutate('DISMISSED')} disabled={mut.isPending}
@@ -64,6 +64,13 @@ function Row({ r, onResolved }: { r: ModerationReport; onResolved: () => void })
           Dismiss
         </button>
       </div>
+      {/* [WR-021 / VG-007] "Action taken" implied enforcement; the server only
+          records the decision. Say exactly what this does — especially on CSAE
+          rows, where implying content was removed would be dangerous. */}
+      <p className="mt-2 text-xs text-neutral-400">
+        Marking handled records your decision on the report — it does not remove content or suspend anyone. Do that
+        directly on the user/vendor first if the report warrants it.
+      </p>
       {error && <p className="mt-2 text-xs text-[var(--swift-red)]">{error}</p>}
     </div>
   );

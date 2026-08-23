@@ -6,7 +6,9 @@ import { fetchPaymentMix, fetchVendors } from '../lib/api';
 // Platform revenue = weekly subscriptions only; the payment mix shows how
 // customers pay STORES (cash vs MMG) — context, never Swift's money.
 
-const money = (n: unknown) => `$${Math.round(Number(n ?? 0)).toLocaleString()}`;
+// [VG-013] Explicit currency — Money.tsx says G$; a bare $ here made the two
+// finance surfaces drift.
+const money = (n: unknown) => `G$${Math.round(Number(n ?? 0)).toLocaleString()}`;
 
 export default function Vendors() {
   const [search, setSearch] = useState('');
@@ -21,13 +23,16 @@ export default function Vendors() {
     <div className="max-w-4xl space-y-5">
       {byMethod.length > 0 && (
         <div className="flex gap-4">
+          {/* [WR-017] The server sends {method,count,total} (same contract
+              Money.tsx consumes); this card was still reading the old Prisma
+              group-by shape and rendered "undefined" labels and $0 totals. */}
           {byMethod.map((m) => (
-            <div key={m.paymentMethod} className="rounded-2xl border border-neutral-200 bg-neutral-100 p-4">
+            <div key={m.method} className="rounded-2xl border border-neutral-200 bg-neutral-100 p-4">
               <p className="text-[11px] font-bold uppercase tracking-wider text-neutral-400">
-                {m.paymentMethod === 'MOBILE_MONEY' ? 'MMG · 30d' : `${m.paymentMethod} · 30d`}
+                {m.method === 'MOBILE_MONEY' ? 'MMG · 30d' : `${String(m.method).replaceAll('_', ' ')} · 30d`}
               </p>
-              <p className="mt-1 text-xl font-extrabold">{money(m._sum?.totalAmount)}</p>
-              <p className="text-xs text-neutral-400">{m._count} orders — customer→store money, not Swift's</p>
+              <p className="mt-1 text-xl font-extrabold">{money(m.total)}</p>
+              <p className="text-xs text-neutral-400">{m.count} order{m.count === 1 ? '' : 's'} — customer→store money, not Swift's</p>
             </div>
           ))}
           {typeof mix.data?.mmgUnconfirmed === 'number' && mix.data.mmgUnconfirmed > 0 && (

@@ -54,6 +54,25 @@ export async function clearSession() {
   await kcDelete('refresh');
 }
 
+/** [WR-018] Server-side revocation for sign-out. /auth/logout/refresh is
+ *  purpose-built for a locally-cleared client: no access-token auth, the
+ *  refresh credential names the session. Returns false when the server could
+ *  not be told — the caller says so instead of pretending. */
+export async function revokeSession(): Promise<boolean> {
+  const refreshToken = await kcGet('refresh');
+  if (!refreshToken) return false;
+  try {
+    const res = await fetch(`${API_URL}/api/v1/auth/logout/refresh`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ refreshToken }),
+    });
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
 async function tryRefresh(): Promise<string | null> {
   const refreshToken = await kcGet('refresh');
   if (!refreshToken) return null;

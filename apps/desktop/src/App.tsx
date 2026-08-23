@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import {
-  clearSession, globalSearch, loadSession, sendOtp, verifyAdminLogin,
+  clearSession, globalSearch, loadSession, revokeSession, sendOtp, verifyAdminLogin,
 } from './lib/api';
 import ReviewCenter from './modules/ReviewCenter';
 import LiveOps from './modules/LiveOps';
@@ -90,7 +90,8 @@ function Login({ onDone }: { onDone: () => void }) {
 
 // ─── ⌘K palette (global search over /admin/search) ──────────────────────────
 
-function CommandPalette({ open, onClose }: { open: boolean; onClose: () => void }) {
+// [WR-024] Result rows navigate — they were hover-styled inert divs.
+function CommandPalette({ open, onClose, onGo }: { open: boolean; onClose: () => void; onGo: (m: 'stuck' | 'people' | 'vendors') => void }) {
   const [q, setQ] = useState('');
   const search = useQuery({
     queryKey: ['cmdk', q],
@@ -104,21 +105,24 @@ function CommandPalette({ open, onClose }: { open: boolean; onClose: () => void 
 
   if (!open) return null;
   const d = search.data ?? {};
-  const groups: Array<{ title: string; rows: Array<{ id: string; label: string; sub: string }> }> = [
+  const groups: Array<{ title: string; to: 'stuck' | 'people' | 'vendors'; rows: Array<{ id: string; label: string; sub: string }> }> = [
     {
       title: 'Orders',
+      to: 'stuck',
       rows: (d.orders ?? []).map((o: any) => ({
         id: o.id, label: `#${o.orderNumber}`, sub: `${o.status} · ${o.orderType}`,
       })),
     },
     {
       title: 'People',
+      to: 'people',
       rows: (d.users ?? []).map((u: any) => ({
         id: u.id, label: [u.firstName, u.lastName].filter(Boolean).join(' ') || u.phone, sub: u.phone,
       })),
     },
     {
       title: 'Vendors',
+      to: 'vendors',
       rows: (d.vendors ?? []).map((v: any) => ({ id: v.id, label: v.name, sub: v.status })),
     },
   ];
@@ -145,10 +149,14 @@ function CommandPalette({ open, onClose }: { open: boolean; onClose: () => void 
               <div key={g.title} className="mb-2">
                 <p className="px-3 py-1 text-[11px] font-bold uppercase tracking-wider text-neutral-400">{g.title}</p>
                 {g.rows.map((r) => (
-                  <div key={r.id} className="rounded-lg px-3 py-2 hover:bg-neutral-100">
+                  <button
+                    key={r.id}
+                    onClick={() => { onGo(g.to); onClose(); }}
+                    className="block w-full rounded-lg px-3 py-2 text-left hover:bg-neutral-100"
+                  >
                     <p className="text-sm font-medium">{r.label}</p>
                     <p className="text-xs text-neutral-400">{r.sub}</p>
-                  </div>
+                  </button>
                 ))}
               </div>
             ),
@@ -183,7 +191,16 @@ export default function App() {
   }, []);
 
   const signOut = useMemo(
-    () => async () => { await clearSession(); setAuthed(false); },
+    () => async () => {
+      // [WR-018] Revoke server-side FIRST, then clear local secrets; a failed
+      // revoke is said out loud, never silently ignored.
+      const revoked = await revokeSession();
+      await clearSession();
+      setAuthed(false);
+      if (!revoked) {
+        alert('Signed out on this device, but the server session could not be revoked (offline?). It stays valid until it expires — sign in again later to rotate it.');
+      }
+    },
     [],
   );
 
@@ -235,7 +252,7 @@ export default function App() {
         {module === 'vendors' && <Vendors />}
         {module === 'health' && <Health />}
       </main>
-      <CommandPalette open={cmdk} onClose={() => setCmdk(false)} />
+      <CommandPalette open={cmdk} onClose={() => setCmdk(false)} onGo={setModule} />
     </div>
   );
 }

@@ -50,3 +50,5 @@
 - [~] Mobile silent-failure family (WR-033 statement opener throws · WR-034 photo toast · WR-027 upload error renders · WR-026 thumb rollback · WR-035 draft restore + honest chat empty) — shipping
 - [x] Silent-failure family CLOSED: PR #741 MERGED (WR-026/027/033/034/035)
 - [~] Mobile honesty trio (WR-028 courier quote · WR-031 campaign detail · WR-036 preview no-ops speak) — shipping
+- [x] Mobile honesty trio CLOSED: PR #742 MERGED (WR-028/031/036)
+- [~] Desktop command-surface truth pass (WR-017 payment contract + G$ · WR-018 sign-out revokes · WR-021 moderation honest label · WR-022 support label + service contract note · WR-023 degraded status line · WR-024 palette rows navigate) — shipping
