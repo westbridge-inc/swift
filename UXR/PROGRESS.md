@@ -32,3 +32,5 @@
 - [~] W-014 tail rank 8: WR-007 CONFIRMED+FIXED (hours editor seeds only from successful read; error card + retry; Save can't fire from fabrication) — shipping
 - [x] W-014 rank 8 WR-007 CLOSED: PR #732 MERGED (hours editor never seeds from a failed read)
 - [~] W-014 rank 9 WR-009: dead post-trip tip recorder REMOVED (server fails closed LB-015); cash-tip guidance stays — shipping
+- [x] W-014 rank 9 WR-009 CLOSED: PR #733 MERGED (dead tip recorder removed, honest cash guidance stays)
+- [~] W-014 rank 10 WR-016: vendor board outage honesty (error card + retry; header shows 'board unreachable'/'—' not fabricated zeros) — shipping
