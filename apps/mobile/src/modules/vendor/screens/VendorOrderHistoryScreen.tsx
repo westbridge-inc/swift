@@ -3,7 +3,7 @@ import React, { useEffect, useState } from 'react';
 import { Pressable, ScrollView, View } from 'react-native';
 import { Feather, MaterialCommunityIcons } from '@expo/vector-icons';
 import { color, space } from '@swift/ui';
-import { Card, Chip, EmptyState, LoadingBlock, PillButton, Screen, T } from '../../../kit';
+import { Card, Chip, EmptyState, ErrorState, LoadingBlock, PillButton, Screen, T } from '../../../kit';
 import { useVendorOrderHistory, useVendorProfile } from '../../../hooks/vendorops';
 import { money } from '../../../lib/money';
 import { GUTTER, InlineInput, OrderStatusPill, SubHeader, fmtWhen } from '../shared';
@@ -112,6 +112,9 @@ export function VendorOrderHistoryScreen({ navigation }: any) {
 
         {q.isLoading && rows.length === 0 ? (
           <LoadingBlock />
+        ) : q.isError && rows.length === 0 ? (
+          // [WR-032] An outage is not "No orders yet".
+          <ErrorState message="We couldn't load your history. Check your connection and try again." onRetry={() => q.refetch()} />
         ) : rows.length === 0 ? (
           <EmptyState
             icon="inbox"

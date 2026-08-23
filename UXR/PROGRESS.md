@@ -44,3 +44,5 @@
 - [~] W-014 rank 14 WR-011: taxi watch promise only on server success — shipping
 - [x] W-014 rank 14 WR-011 CLOSED: PR #738 MERGED (watch promise honest)
 - [~] W-014: shipping visibility strips (WR-043 web onSettled set + WR-019 compliance + WR-020 health incl. Discard confirm)
+- [x] Visibility strips CLOSED: PR #739 MERGED (WR-043+019+020)
+- [~] Mobile outage-honesty class (WR-029 + WR-032 menu/history/insights + WR-030 billing/campaigns/team): ErrorState with retry replaces mock-empty on failed reads — shipping

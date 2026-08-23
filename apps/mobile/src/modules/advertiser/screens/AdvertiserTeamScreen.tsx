@@ -3,7 +3,7 @@ import React, { useState } from 'react';
 import { ScrollView, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { color, space } from '@swift/ui';
-import {
+import { ErrorState,
   Card,
   LabeledInput,
   LoadingBlock,
@@ -61,6 +61,10 @@ export function AdvertiserTeamScreen() {
       >
         {members.isLoading ? (
           <LoadingBlock style={{ paddingTop: 64 }} />
+        ) : members.isError && rows.length === 0 ? (
+          // [WR-030] An outage must not render an empty team — owner controls
+          // depend on the member list being real.
+          <ErrorState onRetry={() => members.refetch()} style={{ paddingTop: 48 }} />
         ) : (
           <View style={{ gap: space.md }}>
             {rows.map((m: any) => (

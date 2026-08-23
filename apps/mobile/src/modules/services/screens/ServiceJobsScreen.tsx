@@ -5,7 +5,7 @@ import { color, radius, space } from '@swift/ui';
 import { useServiceJobs, useScheduleJob, useCancelJob, useRateJob, useQuoteJob, useConfirmJob, useDeclineSlot, useCompleteJob } from '../../../hooks';
 import { useAuthStore } from '../../../stores/authStore';
 import { money } from '../../../lib/money';
-import { Card, Chip, EmptyState, Header, IconChip, LoadingBlock, PillButton, PopupCard, PopupTitle, Screen, Stars, T, TonePill } from '../../../kit';
+import { Card, Chip, EmptyState, ErrorState, Header, IconChip, LoadingBlock, PillButton, PopupCard, PopupTitle, Screen, Stars, T, TonePill } from '../../../kit';
 
 const STATUS_LABEL: Record<string, { label: string; tone: 'brand' | 'success' | 'neutral' }> = {
   REQUESTED: { label: 'Waiting for quote', tone: 'neutral' },
@@ -293,6 +293,9 @@ export function ServiceJobsScreen({ navigation }: any) {
       >
         {q.isLoading ? (
           <LoadingBlock />
+        ) : q.isError && !q.data ? (
+          // [WR-029] An outage is not "No jobs yet" — active work may exist.
+          <ErrorState onRetry={() => q.refetch()} />
         ) : jobs.length === 0 ? (
           <EmptyState icon="tool" title="No jobs yet" body="Request a pro from Services and quotes land here." />
         ) : (

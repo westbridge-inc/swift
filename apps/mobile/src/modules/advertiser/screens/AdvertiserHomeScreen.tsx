@@ -5,7 +5,7 @@ import { useNavigation } from '@react-navigation/native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Feather } from '@expo/vector-icons';
 import { color, radius, space } from '@swift/ui';
-import { Card, EmptyState, LoadingBlock, PillButton, T, TonePill } from '../../../kit';
+import { Card, EmptyState, ErrorState, LoadingBlock, PillButton, T, TonePill } from '../../../kit';
 import { useMyAdvertisers, useAdvertiserCampaigns } from '../../../hooks/advertiser';
 
 // §14.1/§14.2 — onboarding status banner (gated-preview pattern) + the
@@ -74,6 +74,9 @@ export function AdvertiserHomeScreen() {
 
         {campaigns.isLoading ? (
           <LoadingBlock style={{ paddingTop: 64 }} />
+        ) : campaigns.isError && rows.length === 0 ? (
+          // [WR-030] An outage is not "No campaigns yet".
+          <ErrorState onRetry={() => campaigns.refetch()} style={{ paddingTop: 48 }} />
         ) : rows.length === 0 ? (
           <EmptyState
             icon="tv"
