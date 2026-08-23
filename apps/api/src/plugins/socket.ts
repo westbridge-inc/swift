@@ -386,6 +386,26 @@ export const socketPlugin = fp(async (app: FastifyInstance) => {
     }
   }
 
+  /** [F-028-01] A DECIDED credential verdict, as distinct from "the authority
+   *  store was unreachable". Mirrors auth.ts's AuthRefused (F-250): the class
+   *  marks decisions; everything else reaching a catch is infrastructure.
+   *  Collapsing the two into 'Invalid or expired token' made a database blip
+   *  read as a revoked login — and clients treat a credential verdict as
+   *  terminal (drop the token, log out) exactly as they should, which turned
+   *  an outage into a forced re-authentication. */
+  class SocketAuthRefused extends Error {}
+  const isSocketCredentialVerdict = (err: unknown): boolean => {
+    if (err instanceof SocketAuthRefused) return true;
+    // JWT verification failures are decided verdicts about the token. The
+    // HTTP path's jwtVerify() throws FST_JWT_* codes; the direct
+    // app.jwt.verify() used here throws the underlying fast-jwt FAST_JWT_*
+    // codes — a tampered token surfaces as FAST_JWT_MALFORMED. Both are
+    // decisions about the credential, not about our infrastructure.
+    const code = (err as { code?: unknown } | null)?.code;
+    return typeof code === 'string' && (code.startsWith('FST_JWT') || code.startsWith('FAST_JWT'));
+  };
+  /** Public message for an UNDECIDED failure: retryable, discloses nothing. */
+  const AUTH_UNAVAILABLE_MESSAGE = 'Authorization temporarily unavailable';
   const publicAuthorizationMessages = new Set([
     'Session revoked or expired',
     'Account not active',
@@ -401,7 +421,7 @@ export const socketPlugin = fp(async (app: FastifyInstance) => {
   }> {
     const payload = app.jwt.verify<{ userId: string; role: string; exp?: number }>(token);
     if (!Number.isSafeInteger(payload.exp)) {
-      throw new Error('Invalid or expired token');
+      throw new SocketAuthRefused('Invalid or expired token');
     }
 
     // A valid JWT is not enough: the exact session and account remain the
@@ -444,17 +464,19 @@ export const socketPlugin = fp(async (app: FastifyInstance) => {
       || authorizationExpiresAtMs <= Date.now()
       || session.user.id !== payload.userId
     ) {
-      throw new Error('Session revoked or expired');
+      throw new SocketAuthRefused('Session revoked or expired');
     }
     if (['SUSPENDED', 'BANNED', 'DEACTIVATED'].includes(session.user.status)) {
-      throw new Error('Account not active');
+      throw new SocketAuthRefused('Account not active');
     }
     if (
       requiresPrivilegedSessionAssurance(session.user.activeRole, session.user.roles)
       && !hasPrivilegedSessionAssurance(session.authMethod)
     ) {
-      await authService.logout(session.id, session.user.id);
-      throw new Error('Invalid or expired token');
+      // The assurance verdict is already DECIDED; a logout hiccup must not
+      // downgrade it to an infrastructure error.
+      await authService.logout(session.id, session.user.id).catch(() => {});
+      throw new SocketAuthRefused('Invalid or expired token');
     }
     return {
       userId: session.user.id,
@@ -480,10 +502,20 @@ export const socketPlugin = fp(async (app: FastifyInstance) => {
       socket.data.authorizationExpiresAtMs = authority.authorizationExpiresAtMs;
       next();
     } catch (error) {
-      const message = error instanceof Error && publicAuthorizationMessages.has(error.message)
-        ? error.message
-        : 'Invalid or expired token';
-      next(new Error(message));
+      // [F-028-01] Only a DECIDED verdict may say the credentials are bad. A
+      // pool-exhausted Prisma read landing here used to become 'Invalid or
+      // expired token' — the exact false credential decision F-250 removed
+      // from HTTP — so every connected client's reconnect during a database
+      // blip was told its login was dead. Infrastructure failures now say so,
+      // in a retryable message that discloses nothing.
+      if (isSocketCredentialVerdict(error)) {
+        const message = error instanceof Error && publicAuthorizationMessages.has(error.message)
+          ? error.message
+          : 'Invalid or expired token';
+        return next(new Error(message));
+      }
+      app.log.error({ err: error }, '[F-028-01] socket auth could not reach the authority store — refusing RETRYABLY, not as a credential verdict');
+      next(new Error(AUTH_UNAVAILABLE_MESSAGE));
     }
   });
 
@@ -630,7 +662,7 @@ export const socketPlugin = fp(async (app: FastifyInstance) => {
     // did not join exact-session authority rooms.
     void (async () => {
       try {
-        if (!token) throw new Error('Authentication required');
+        if (!token) throw new SocketAuthRefused('Authentication required');
         await socket.join([
           socketAuthUserRoom(userId),
           socketAuthSessionRoom(authSessionId),
@@ -642,7 +674,7 @@ export const socketPlugin = fp(async (app: FastifyInstance) => {
           || authority.authSessionId !== authSessionId
           || !socket.connected
         ) {
-          throw new Error('Socket authority changed during connection');
+          throw new SocketAuthRefused('Socket authority changed during connection');
         }
 
         socket.data.role = authority.role;
@@ -660,10 +692,10 @@ export const socketPlugin = fp(async (app: FastifyInstance) => {
           await socket.join(warRooms);
           app.log.info({ socketId: socket.id, userId, role: authority.role, warRooms }, 'ops socket joined the war room');
         }
-        if (!socket.connected) throw new Error('Socket revoked during connection');
+        if (!socket.connected) throw new SocketAuthRefused('Socket revoked during connection');
 
         const expiryDelayMs = authority.authorizationExpiresAtMs - Date.now();
-        if (expiryDelayMs <= 0) throw new Error('Socket authorization expired');
+        if (expiryDelayMs <= 0) throw new SocketAuthRefused('Socket authorization expired');
         authorizationExpiryTimer = setTimeout(() => {
           app.log.info(
             { socketId: socket.id, userId, authSessionId },
@@ -689,11 +721,26 @@ export const socketPlugin = fp(async (app: FastifyInstance) => {
         app.log.info(`Socket connected: ${socket.id} (user: ${userId})`);
       } catch (error) {
         failPendingPackets();
-        app.log.warn(
-          { err: error, socketId: socket.id, userId, authSessionId },
-          'Socket authority changed during connection; disconnecting transport',
-        );
-        if (socket.connected) socket.disconnect(true);
+        // [F-028-01] Two different failures were sharing disconnect(true) —
+        // which this file itself documents as "never reconnect". A DECIDED
+        // verdict (revoked, changed, expired) deserves that. A transient
+        // authority-store outage in the handshake window does not: it
+        // stranded a valid ops/SOS socket forever after the store recovered.
+        // Infra failures now take the same reconnectable transport close the
+        // recurring recheck already uses.
+        if (isSocketCredentialVerdict(error)) {
+          app.log.warn(
+            { err: error, socketId: socket.id, userId, authSessionId },
+            'Socket authority changed during connection; disconnecting transport',
+          );
+          if (socket.connected) socket.disconnect(true);
+        } else {
+          app.log.error(
+            { err: error, socketId: socket.id, userId, authSessionId },
+            '[F-028-01] authority store unreachable during socket registration — closing transport RECONNECTABLY',
+          );
+          closeForAuthorityStoreFailure(socket.id);
+        }
       }
     })();
   });
