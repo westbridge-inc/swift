@@ -4,12 +4,13 @@ import { Dimensions, FlatList, Pressable, ScrollView, Share, TextInput, View } f
 import { Feather } from '@expo/vector-icons';
 import { useNavigation, useRoute } from '@react-navigation/native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { color, elevation, font, radius, space } from '@swift/ui';
+import { color, elevation, font, radius, space, withAlpha } from '@swift/ui';
 import { useAddToCart, useCart, useToggleFavorite, useUpdateCartItem, useVendor } from '../../../hooks/customer';
 import { useAuthStore } from '../../../stores/authStore';
 import { itemPhoto, vendorPhoto } from '../../../lib/images';
 import { money } from '../../../lib/money';
 import { toast } from '../../../components/ui/toast';
+import { Scrim } from '../../../components/ui/scrim';
 import {
   AddMorph,
   Chip,
@@ -234,6 +235,14 @@ export function RestaurantScreen() {
   const promos: any[] = v?.activePromos ?? [];
   const isMart = v?.vendorType === 'SUPERMARKET' || v?.vendorType === 'STORE';
   const isServiceStore = v?.vendorType === 'SERVICE';
+  // Hero identity pill: the store's own words first (cuisineTypes is a String[]
+  // on the vendor), falling back to its type. Never invented.
+  const kindLabel: string | null = (() => {
+    const cuisines: unknown = v?.cuisineTypes;
+    const first = Array.isArray(cuisines) ? cuisines.find((c) => typeof c === 'string' && c.trim()) : null;
+    const raw = (first as string | undefined) ?? v?.vendorType;
+    return raw ? String(raw).replaceAll('_', ' ').toLowerCase() : null;
+  })();
   const martItems = useMemo(() => {
     const base = aisleId ? (categories.find((c: any) => c.id === aisleId)?.items ?? []) : allItems;
     const q = storeQuery.trim().toLowerCase();
@@ -305,7 +314,10 @@ export function RestaurantScreen() {
           }
         }}
       >
-        {/* Cover hero + floating chips */}
+        {/* Cover hero — the MerchantCard treatment at hero scale: a real
+            gradient (never a flat band), the store's identity riding its own
+            photograph, and frosted pills for the facts. Photography is the
+            colour; nothing here tints the image. */}
         <View>
           <Photo
             uri={vendorPhoto(v)}
@@ -315,6 +327,41 @@ export function RestaurantScreen() {
             style={{ width: SCREEN_W, height: 300 }}
             contentFit="cover"
           />
+          {/* Top: keeps the back/heart/share chips legible over a bright photo
+              — the exact case Scrim's `anchor="top"` was built for. */}
+          <Scrim anchor="top" height={insets.top + 76} to={withAlpha(color.text.primary, 0.45)} />
+          {/* Bottom: carries the name and pills, and softens the meeting point
+              with the sheet below. */}
+          <Scrim height={170} />
+          <View style={{ position: 'absolute', left: GUTTER, right: GUTTER, bottom: radius.xl + space.lg, gap: space.sm }}>
+            <T variant="title" tone="onBrand" numberOfLines={2}>
+              {v.name}
+            </T>
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.sm, flexWrap: 'wrap' }}>
+              {closed ? (
+                <View style={{ backgroundColor: color.brand[600], paddingHorizontal: 9, paddingVertical: 3, borderRadius: radius.full }}>
+                  <T variant="micro" weight="bold" tone="onBrand">
+                    Closed right now
+                  </T>
+                </View>
+              ) : null}
+              {v.displayRating != null || v.ratingBucket ? (
+                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 3, backgroundColor: withAlpha(color.white, 0.92), paddingHorizontal: 9, paddingVertical: 3, borderRadius: radius.full }}>
+                  <Feather name="star" size={11} color={color.star} />
+                  <T variant="micro" weight="bold">
+                    {v.displayRating != null ? Number(v.displayRating).toFixed(1) : (v.ratingBucket ?? 'New')}
+                  </T>
+                </View>
+              ) : null}
+              {kindLabel ? (
+                <View style={{ backgroundColor: withAlpha(color.white, 0.92), paddingHorizontal: 9, paddingVertical: 3, borderRadius: radius.full }}>
+                  <T variant="micro" weight="semibold">
+                    {kindLabel}
+                  </T>
+                </View>
+              ) : null}
+            </View>
+          </View>
           <View
             style={{
               position: 'absolute',
@@ -353,19 +400,10 @@ export function RestaurantScreen() {
             paddingTop: space['2xl'],
           }}
         >
-          <View style={{ paddingHorizontal: GUTTER, flexDirection: 'row', alignItems: 'center', gap: space.md }}>
-            <T variant="title" style={{ flex: 1 }} numberOfLines={2}>
-              {v.name}
-            </T>
-            {closed ? (
-              <T variant="micro" tone="faint">
-                Closed right now
-              </T>
-            ) : null}
-          </View>
-
+          {/* The name and status now ride the hero photograph (above), so the
+              sheet leads with the facts instead of repeating the title. */}
           {/* Info strip */}
-          <View style={{ flexDirection: 'row', paddingHorizontal: GUTTER, marginTop: space.xl }}>
+          <View style={{ flexDirection: 'row', paddingHorizontal: GUTTER }}>
             <StatCol
               icon="star"
               value={
