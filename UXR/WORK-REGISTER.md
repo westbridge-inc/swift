@@ -9,9 +9,9 @@ Gluestack (recommendation to the contrary was made once and overruled).
 |---|---|---|---|---|---|
 | UXR-W-001 | W1 | REPORT-028 tail | F-028-17 + F-028-18 + F-028-15 → S-count 0 | [x] | PR #722 MERGED |
 | UXR-W-007 | W1 | Web cart (S0) | WR-001 CONFIRMED: `setCartAddress(addrId).catch(()=>{})` swallows → checkout ships to stale/default. Fix: let it throw; outer catch renders | [x] | PR #723 MERGED |
-| UXR-W-008 | W1 | Taxi safety (S1↓) | WR-006 DOWNGRADED: sweep DOES escalate unanswered check-ins to SOS at deadline (guardian.service:690). Residual: failed NEED_HELP send is silent+delayed — honest failure + retry | [ ] | verified 08-23 |
+| UXR-W-008 | W1 | Taxi safety (S1↓) | WR-006 DOWNGRADED: sweep DOES escalate unanswered check-ins to SOS at deadline (guardian.service:690). Residual: failed NEED_HELP send is silent+delayed — honest failure + retry | [~] | verified 08-23 |
 | UXR-W-009 | W1 | Mobile pay (S2↓) | WR-008 DOWNGRADED: persistent "Pay business with MMG" button = durable manual path. Residual: opener false gives no feedback at any call site | [ ] | verified 08-23 |
-| UXR-W-010 | W1 | Admin money (S0) | WR-002 CONFIRMED: console sends no Idempotency-Key; recordTopUp comment says that = "opted out of dedup" → double-tap double-credits. Fix: UUID per action reused on retry + visible error | [~] | verified 08-23 |
+| UXR-W-010 | W1 | Admin money (S0) | WR-002 CONFIRMED: console sends no Idempotency-Key; recordTopUp comment says that = "opted out of dedup" → double-tap double-credits. Fix: UUID per action reused on retry + visible error | [x] | PR #725 MERGED |
 | UXR-W-011 | W1 | Admin money (S1↓) | WR-003 PARTIAL: server already digest-honest (SWIFT-031) + CAS guard. Residual: admin UI copy "once the money has moved" implies a payout rail that intentionally doesn't exist — align copy/semantics | [ ] | verified 08-23 |
 | UXR-W-012 | W1 | Admin money (S1↓) | WR-005 LARGELY OVERTURNED: MMG refund fail-closes 409 (REPORT-008 F-03, LB-019 pending). Residual: admin swallows the 409 — codex MutationError covers order detail; extend to list page | [ ] | verified 08-23 |
 | UXR-W-013 | W1 | Admin money (S1) | WR-004 PARTIAL: markClaimPaid is CAS (no double-pay) but paymentRef optional → PAID with zero evidence. Fix: require reference server+UI | [ ] | verified 08-23 |
