@@ -125,7 +125,7 @@ async function main() {
   if (acc.status >= 300) throw new Error(`accept ${acc.status}: ${JSON.stringify(acc.json).slice(0,200)}`);
 
   // ── 3. refund one line (out of stock) ─────────────────────────────────────
-  const lines = await prisma.orderItem.findMany({ where: { orderId }, select: { id: true, itemId: true, totalCustomer: true, name: true } });
+  const lines = await prisma.orderItem.findMany({ where: { orderId }, select: { id: true, itemId: true, totalCustomer: true, totalBase: true, name: true } });
   if (lines.length !== 2) throw new Error(`expected 2 lines, got ${lines.length}`);
   const victim = lines.find((l) => l.name === 'ELV1 Milk 1L') ?? lines[1]!;
   const stockBefore = (await prisma.item.findUniqueOrThrow({ where: { id: victim.itemId! }, select: { stockQuantity: true } })).stockQuantity;
@@ -147,8 +147,13 @@ async function main() {
   if (actualDrop !== expectedDrop) throw new Error(`FAIL recompute: dropped ${actualDrop}, expected ${expectedDrop} (minor units)`);
   const subCustomerDrop = minor(o0.subtotalCustomer) - minor(o1.subtotalCustomer);
   if (subCustomerDrop !== expectedDrop) throw new Error(`FAIL component: subtotalCustomer dropped ${subCustomerDrop}, expected ${expectedDrop}`);
+  // [F-026-24] subtotalBase must drop by the victim line's EXACT totalBase, not
+  // merely "some positive amount ≤ the customer drop" — a range check lets a
+  // component corruption pass while the grand/customer totals happen to be
+  // right. Compare to the line's own base total.
+  const expectedBaseDrop = minor(victim.totalBase);
   const subBaseDrop = minor(o0.subtotalBase) - minor(o1.subtotalBase);
-  if (subBaseDrop <= 0n || subBaseDrop > expectedDrop) throw new Error(`FAIL component: subtotalBase dropped ${subBaseDrop} (expected >0 and ≤ ${expectedDrop})`);
+  if (subBaseDrop !== expectedBaseDrop) throw new Error(`FAIL component: subtotalBase dropped ${subBaseDrop}, expected ${expectedBaseDrop} (the refunded line's totalBase, minor units)`);
   const victimAfter = await prisma.orderItem.findUniqueOrThrow({ where: { id: victim.id }, select: { subStatus: true } });
   if (victimAfter.subStatus !== 'REFUNDED') throw new Error(`FAIL: refunded line is ${victimAfter.subStatus}, expected REFUNDED`);
   const stockAfter = (await prisma.item.findUniqueOrThrow({ where: { id: victim.itemId! }, select: { stockQuantity: true } })).stockQuantity;

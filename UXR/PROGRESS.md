@@ -63,3 +63,6 @@
 - [x] GRAND SWEEP CLOSED: PR #746 MERGED — UXR-W-014 [x]. REPORT-029: all 51 WR + 16 VG rows merged, SPEC-routed, FG-2-routed, or HELD on the Gluestack gate
 - [~] REPORT-026 tail OPEN: F-026-05 b7/b8 restore + F-026-06 exact-Decimal proofs + F-026-02 StorageOrphan census (schema+migration+RLS+sites+opportunistic retry) — staged, tests next
 - [~] REPORT-026 opener: F-026-02 StorageOrphan census (scoped, RLS'd, migrated, 4 pins) + F-026-05 b7/b8 verified restore + F-026-06 exact-Decimal proofs — shipping
+- [x] PR #747 MERGED (F-026-02/05/06/07) · PR #748 MERGED (F-026-08/09 b12 contract+teardown)
+- [x] F-026-17 VERIFIED CLOSED (prior session: actor-scoped SOS idempotency + P2002 recovery + b14 cross-user/concurrent pins + unit tests) — census predated the fix
+- [~] REPORT-026 batch: F-026-22 (b5 pickup-code redaction) + F-026-24 (b4 exact subtotalBase) + F-026-26 (b13 loser-lost-cleanly + verified cleanup) — shipping. b4/b5 live-run blocked on rig supply (no riders/mart closed); type+lint gated like F-026-06

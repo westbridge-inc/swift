@@ -140,20 +140,34 @@ async function main() {
     http(A, 'POST', '/rider/offers/accept', payload, riderToken),
     http(B, 'POST', '/rider/offers/accept', payload, riderToken),
   ]);
+  // [F-026-26] Single-winner means ONE 200 AND the loser lost cleanly — a
+  // crashed loser (500/401/timeout) is NOT proof of a working race guard, it's
+  // an untested path masquerading as one. The loser must return the documented
+  // conflict (409 already-claimed, or 410/404 if the offer was consumed).
   const winners = [ra, rb].filter((r) => r.status === 200);
+  const losers = [ra, rb].filter((r) => r.status !== 200);
   log('EVIDENCE cross-instance accept race', { instanceA: ra.status, instanceB: rb.status });
-  if (winners.length !== 1) throw new Error(`FAIL single-winner: ${winners.length} winners`);
+  if (winners.length !== 1) throw new Error(`FAIL single-winner: ${winners.length} winners (statuses ${ra.status}/${rb.status})`);
+  const loserOk = losers.every((r) => [409, 410, 404].includes(r.status));
+  if (!loserOk) throw new Error(`FAIL: the losing instance did not lose CLEANLY — expected 409/410/404, got ${losers.map((r) => r.status).join(',')} (a 5xx is a crash, not a guarded conflict)`);
   const oAssigned = await prisma.order.findUniqueOrThrow({ where: { id: orderId }, select: { riderId: true, status: true } });
   if (oAssigned.riderId !== rider.id) throw new Error('FAIL: wrong assignment');
-  log('EVIDENCE assigned exactly once', oAssigned);
+  log('EVIDENCE assigned exactly once, loser refused cleanly', { ...oAssigned, loserStatuses: losers.map((r) => r.status) });
 
-  // tidy: run the delivery out so the roster stays reusable
+  // [F-026-26] Cleanup transitions are EVIDENCE, not fire-and-forget — a failed
+  // first leg used to leave an assigned order + occupied rider while the script
+  // exited green. Assert every leg is accepted.
   for (const step of ['en-route-pickup', 'arrived-pickup', 'picked-up', 'en-route-delivery', 'arrived']) {
-    await http(A, 'PUT', `/rider/orders/${orderId}/${step}`, {}, riderToken);
+    const r = await http(A, 'PUT', `/rider/orders/${orderId}/${step}`, {}, riderToken);
+    if (r.status >= 300) throw new Error(`FAIL cleanup: ${step} → ${r.status} (${JSON.stringify(r.json).slice(0, 160)})`);
   }
-  await http(A, 'POST', `/rider/orders/${orderId}/handover`, { outcome: 'paid', gps: { lat: 6.81, lng: -58.16 } }, riderToken);
+  const hnd = await http(A, 'POST', `/rider/orders/${orderId}/handover`, { outcome: 'paid', gps: { lat: 6.81, lng: -58.16 } }, riderToken);
+  if (hnd.status >= 300) throw new Error(`FAIL cleanup: handover → ${hnd.status}`);
+  // Verify the rig is actually reusable: the order is terminal and the rider is free.
+  const finalState = await prisma.order.findUniqueOrThrow({ where: { id: orderId }, select: { status: true } });
+  if (!['DELIVERED', 'COMPLETED'].includes(finalState.status)) throw new Error(`FAIL cleanup: order left in ${finalState.status}, not delivered`);
 
-  log('B13 COMPLETE — EXACTLY-ONCE RELEASE + SINGLE-WINNER ACROSS TWO INSTANCES');
+  log('B13 COMPLETE — EXACTLY-ONCE RELEASE + SINGLE-WINNER (loser refused cleanly) ACROSS TWO INSTANCES');
 }
 
 main()
