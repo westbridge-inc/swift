@@ -172,6 +172,11 @@ export class GuardianService {
       where: { orderType: 'TAXI', status: MONITORED_ORDER_STATUS, driverId: { not: null } },
       select: {
         id: true,
+        // [F-028-05] The sweep runs from a WORKER — no request context, so the
+        // tenant-scope extension stamps nothing. The order's own tenant is in
+        // hand and authoritative; fetch it or the session silently takes the
+        // schema default, `swift-default`.
+        tenantId: true,
         customerId: true,
         pickedUpAt: true,
         taxiDuration: true,
@@ -198,6 +203,15 @@ export class GuardianService {
       try {
         const session = await this.prisma.tripSafetySession.create({
           data: {
+            // [F-028-05] Stamped explicitly, because this create happens in a
+            // background sweep with no tenant ALS. Omitting it made every
+            // guardian session `swift-default` — and TripSafetySession is
+            // tenant-scoped on the READ side, so a tenant-B passenger's
+            // authenticated check-in could not find their own ride's session:
+            // NEED_HELP threw NotFound instead of raising the promised
+            // immediate SOS. A safety net that cannot be reached by the person
+            // it is protecting is not a safety net.
+            tenantId: order.tenantId,
             orderId: order.id,
             orderType: 'TAXI',
             passengerUserId: order.customerId,

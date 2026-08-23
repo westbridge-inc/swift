@@ -95,14 +95,32 @@ async function reachOf(alertId: string): Promise<{ notices: number; receipts: un
   // {opsPaged: 0, socketListeners: 0, contacts: ...}, which is nonempty, so
   // the old oracle accepted an ACTIVE alert that reached nobody as proof that
   // help was coming. Only POSITIVE, per-channel evidence counts now.
-  const positive = (v: unknown): boolean => {
+  // [F-028-06] Two direct false-positives corrected:
+  //  1. An ARRAY receipt was judged by length. Production records one
+  //     {ok:false} object per FAILED emergency-contact SMS, so an all-failed
+  //     contact list — every text bounced — read as a successful channel.
+  //     An array is evidence only if SOME entry actually succeeded.
+  //  2. `socketListeners` was judged like any number. It counts sockets IN
+  //     the war-room, but no shipped client — web, mobile, admin, OR the
+  //     desktop ops console (checked; desktop polls REST and has no socket
+  //     layer at all) — has a handler for sos:active/sos:retrigger/
+  //     incident:*. Membership without a listener is not delivery; a logged-in
+  //     socket can sit in the room while the app discards the event. It stays
+  //     in the receipts as telemetry and counts for NOTHING here until a real
+  //     consumer ships (registered follow-on: a socket client in the desktop
+  //     war room).
+  const positiveEntry = (v: unknown): boolean =>
+    typeof v === 'object' && v !== null && (v as { ok?: unknown }).ok === true;
+  const positive = (key: string, v: unknown): boolean => {
+    if (key === 'socketListeners') return false; // membership ≠ delivery
     if (typeof v === 'number') return v > 0;
     if (typeof v === 'boolean') return v;
-    if (Array.isArray(v)) return v.length > 0;
+    if (Array.isArray(v)) return v.some(positiveEntry);
     // A string receipt is a REASON, not a delivery ("skipped:guardian-default").
     return false;
   };
-  const anyChannel = notices > 0 || (receipts != null && Object.values(receipts).some(positive));
+  const anyChannel = notices > 0
+    || (receipts != null && Object.entries(receipts).some(([k, v]) => positive(k, v)));
   return { notices, receipts, anyChannel };
 }
 
