@@ -26,7 +26,6 @@ import {
   SettingsRow,
   T,
   TonePill,
-  DocketEdge,
 } from '../../kit';
 import { BrandSwitch } from '../../kit/controls';
 import {
@@ -525,7 +524,6 @@ const VendorOrderCard = React.memo(function VendorOrderCard({
         </View>
       ) : null}
     </Card>
-    {docket ? <DocketEdge inset={GUTTER} /> : null}
     </View>
       )}
     </Pressable>
