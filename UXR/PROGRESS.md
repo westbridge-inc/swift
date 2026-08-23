@@ -30,3 +30,5 @@
 - ✅ ALL SEVEN REPORT-029 S0-family items CLOSED (W-007..W-013) — six PRs #723/#725/#726/#727/#729/#730/#731
 - REPORT-032 DELIVERED: MKT-1 Movement 0 done, verdict buildable-but-NOT-READY; 2 claims spot-verified (RLS not-forced staged rollout; one-mixed-cart schema). STOPPED at founder gate per the doc's own law
 - [~] W-014 tail rank 8: WR-007 CONFIRMED+FIXED (hours editor seeds only from successful read; error card + retry; Save can't fire from fabrication) — shipping
+- [x] W-014 rank 8 WR-007 CLOSED: PR #732 MERGED (hours editor never seeds from a failed read)
+- [~] W-014 rank 9 WR-009: dead post-trip tip recorder REMOVED (server fails closed LB-015); cash-tip guidance stays — shipping
