@@ -210,6 +210,7 @@ export const topUpSubscription = (id: string, amount: number, reference?: string
     // network retry could credit twice.
     ...(idempotencyKey ? { headers: { 'Idempotency-Key': idempotencyKey } } : {}),
   });
+export const fetchZones = () => apiFetch('/api/v1/admin/zones');
 export const fetchBillingEvents = (id: string) => apiFetch(`/api/v1/admin/subscriptions/${id}/billing-events?limit=20`);
 export const fetchSettlements = (params?: string) => apiFetch(`/api/v1/admin/finance/settlements?${params || 'limit=50'}`);
 export const processSettlement = (id: string, reference?: string) =>

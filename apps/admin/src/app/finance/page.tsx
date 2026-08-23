@@ -65,7 +65,13 @@ function MmgSection() {
                   </span>
                 </div>
               ))}
-              {(mix?.byMethod ?? []).length === 0 && <p className="text-sm text-[var(--muted)]">No completed orders yet.</p>}
+              {mixQ.isError ? (
+                <p role="alert" className="text-sm" style={{ color: 'var(--bad)' }}>
+                  Couldn&apos;t load the payment mix: {(mixQ.error as Error).message}
+                </p>
+              ) : (mix?.byMethod ?? []).length === 0 ? (
+                <p className="text-sm text-[var(--muted)]">No completed orders yet.</p>
+              ) : null}
             </div>
           )}
         </div>

@@ -2,6 +2,7 @@
 
 import { useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import { QueryFailed } from '@/components/MutationNotice';
 import {
   fetchVerificationQueue,
   getDocSignedUrl,
@@ -34,7 +35,7 @@ export default function VerificationPage() {
   const [reason, setReason] = useState('');
   const [insurance, setInsurance] = useState<InsuranceCheck>(EMPTY_INSURANCE);
 
-  const { data, isLoading } = useQuery({
+  const { data, isLoading, isError: queueFailed, error: queueError, refetch: refetchQueue } = useQuery({
     queryKey: ['verification', status],
     queryFn: () => fetchVerificationQueue(status),
   });
@@ -123,6 +124,8 @@ export default function VerificationPage() {
             <tbody>
               {isLoading ? (
                 <tr><td colSpan={6} className="p-8 text-center text-[var(--muted)]">Loading...</td></tr>
+              ) : queueFailed ? (
+                <QueryFailed error={queueError} what="the verification queue" onRetry={() => refetchQueue()} />
               ) : rows.length === 0 ? (
                 <tr><td colSpan={6} className="p-8 text-center text-[var(--muted)]">No documents</td></tr>
               ) : (
