@@ -40,3 +40,5 @@
 - [~] W-014 rank 12 WR-013: HIRE insurance approval requires both reviewer confirmations; PRIVATE labeled honestly — shipping
 - [x] W-014 rank 12 WR-013 CLOSED: PR #736 MERGED (HIRE approval needs both reviewer checks)
 - [~] W-014 rank 13 WR-012: trip-share initial-load failure says unreachable, never 'ended' — shipping
+- [x] W-014 rank 13 WR-012 CLOSED: PR #737 MERGED (trip-share first-load honesty)
+- [~] W-014 rank 14 WR-011: taxi watch promise only on server success — shipping
