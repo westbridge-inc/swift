@@ -127,7 +127,20 @@ export default function TaxiPage() {
 
       {noDrivers ? (
         <div className="space-y-2 text-center">
-          <button onClick={async () => { if (pickup) { await watchRide(pickup).catch(() => {}); setWatching(true); } }} disabled={watching}
+          <button
+            // [WR-011] "We'll ping you" is a promise — only make it when the
+            // watch actually exists server-side; a failure shows the reason.
+            onClick={async () => {
+              if (!pickup) return;
+              try {
+                await watchRide(pickup);
+                setWatching(true);
+                setError(null);
+              } catch (e: any) {
+                setError(e?.message || "Couldn't set the alert — try again.");
+              }
+            }}
+            disabled={watching}
             className="w-full rounded-full bg-[var(--swift-red)] py-3.5 font-bold text-white disabled:opacity-70">
             {watching ? 'We’ll ping you — watching for drivers' : 'Notify me when a driver is available'}
           </button>
