@@ -92,6 +92,10 @@ export class SupportService {
     return { tickets, total, page, limit };
   }
 
+  /** CONTRACT [WR-022]: `adminNote` is CUSTOMER-FACING — it is stored on the
+   *  ticket AND sent verbatim as the notification body. There is no internal-
+   *  note field on this rail; consoles must label the input accordingly.
+   *  (A true internal-notes feature is a registered follow-on.) */
   async resolve(ticketId: string, adminId: string, input: { status: SupportStatus; adminNote?: string }) {
     const ticket = await this.prisma.supportTicket.findUnique({ where: { id: ticketId } });
     if (!ticket) throw new NotFoundError('SupportTicket', ticketId);
