@@ -89,13 +89,13 @@ export default function ConfigPage() {
       <h1 className="text-2xl font-bold mb-6">Platform Configuration</h1>
 
       {isLoading ? (
-        <div className="bg-[#1C1C1E] rounded-xl border border-[#38383A] p-8 text-center text-[#8E8E93]">
+        <div className="bg-[var(--panel)] rounded-xl border border-[var(--border)] p-8 text-center text-[var(--muted)]">
           Loading configuration...
         </div>
       ) : (
         <div className="space-y-6">
           {SECTIONS.map((section) => (
-            <div key={section.title} className="bg-[#1C1C1E] rounded-xl border border-[#38383A] p-6">
+            <div key={section.title} className="bg-[var(--panel)] rounded-xl border border-[var(--border)] p-6">
               <h2 className="text-lg font-semibold mb-4">{section.title}</h2>
               <div className="space-y-3">
                 {section.items.map((item) => (
@@ -109,7 +109,7 @@ export default function ConfigPage() {
                         setStatus(null);
                         setEdits((prev) => ({ ...prev, [item.key]: e.target.value }));
                       }}
-                      className="bg-[#2C2C2E] text-white px-3 py-1.5 rounded-lg text-sm border border-[#38383A] focus:border-[#E8192C] focus:outline-none w-32 text-right"
+                      className="bg-[var(--panel-2)] text-white px-3 py-1.5 rounded-lg text-sm border border-[var(--border)] focus:border-[var(--accent)] focus:outline-none w-32 text-right"
                     />
                   </div>
                 ))}
@@ -118,11 +118,11 @@ export default function ConfigPage() {
           ))}
 
           <div className="flex items-center justify-end gap-4">
-            {status && <span className="text-sm text-[#8E8E93]">{status}</span>}
+            {status && <span className="text-sm text-[var(--muted)]">{status}</span>}
             <button
               onClick={() => save.mutate()}
               disabled={!dirty || save.isPending}
-              className="px-6 py-2.5 bg-[#E8192C] text-white rounded-lg text-sm font-medium hover:bg-[#E8192C]/80 disabled:opacity-50"
+              className="px-6 py-2.5 bg-[var(--accent)] text-white rounded-lg text-sm font-medium hover:bg-[var(--accent)]/80 disabled:opacity-50"
             >
               {save.isPending ? 'Saving…' : 'Save Configuration'}
             </button>

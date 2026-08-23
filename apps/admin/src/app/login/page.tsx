@@ -39,32 +39,32 @@ export default function LoginPage() {
   }
 
   return (
-    <div className="min-h-screen flex items-center justify-center bg-[#0A0A0A] text-white p-4">
-      <div className="w-full max-w-sm bg-[#1C1C1E] rounded-2xl border border-[#38383A] p-8">
+    <div className="min-h-screen flex items-center justify-center bg-[var(--ink)] text-white p-4">
+      <div className="w-full max-w-sm bg-[var(--panel)] rounded-2xl border border-[var(--border)] p-8">
         <h1 className="text-2xl font-bold mb-1">
-          <span className="text-[#E8192C]">Swift</span> Admin
+          <span className="text-[var(--accent)]">Swift</span> Admin
         </h1>
-        <p className="text-[#8E8E93] text-sm mb-6">
+        <p className="text-[var(--muted)] text-sm mb-6">
           {step === 'phone' ? 'Sign in with your admin phone number.' : `Enter the code sent to ${phone}.`}
         </p>
 
         {step === 'phone' ? (
           <div className="space-y-4">
             <div>
-              <label className="text-xs text-[#8E8E93]">Phone</label>
+              <label className="text-xs text-[var(--muted)]">Phone</label>
               <input
                 type="tel"
                 value={phone}
                 onChange={(e) => setPhone(e.target.value)}
                 onKeyDown={(e) => e.key === 'Enter' && handleSend()}
                 placeholder="+592 600 1000"
-                className="mt-1 w-full bg-[#2C2C2E] text-white px-3 py-2.5 rounded-lg text-sm border border-[#38383A] focus:border-[#E8192C] focus:outline-none"
+                className="mt-1 w-full bg-[var(--panel-2)] text-white px-3 py-2.5 rounded-lg text-sm border border-[var(--border)] focus:border-[var(--accent)] focus:outline-none"
               />
             </div>
             <button
               onClick={handleSend}
               disabled={busy || phone.trim().length < 6}
-              className="w-full px-4 py-2.5 bg-[#E8192C] text-white rounded-lg text-sm font-medium hover:bg-[#E8192C]/80 disabled:opacity-50"
+              className="w-full px-4 py-2.5 bg-[var(--accent)] text-white rounded-lg text-sm font-medium hover:bg-[var(--accent)]/80 disabled:opacity-50"
             >
               {busy ? 'Sending…' : 'Send code'}
             </button>
@@ -72,7 +72,7 @@ export default function LoginPage() {
         ) : (
           <div className="space-y-4">
             <div>
-              <label className="text-xs text-[#8E8E93]">Verification code</label>
+              <label className="text-xs text-[var(--muted)]">Verification code</label>
               <input
                 type="text"
                 inputMode="numeric"
@@ -81,13 +81,13 @@ export default function LoginPage() {
                 onKeyDown={(e) => e.key === 'Enter' && handleVerify()}
                 placeholder="000000"
                 autoFocus
-                className="mt-1 w-full bg-[#2C2C2E] text-white px-3 py-2.5 rounded-lg text-sm tracking-[0.3em] text-center border border-[#38383A] focus:border-[#E8192C] focus:outline-none"
+                className="mt-1 w-full bg-[var(--panel-2)] text-white px-3 py-2.5 rounded-lg text-sm tracking-[0.3em] text-center border border-[var(--border)] focus:border-[var(--accent)] focus:outline-none"
               />
             </div>
             <button
               onClick={handleVerify}
               disabled={busy || code.trim().length < 4}
-              className="w-full px-4 py-2.5 bg-[#E8192C] text-white rounded-lg text-sm font-medium hover:bg-[#E8192C]/80 disabled:opacity-50"
+              className="w-full px-4 py-2.5 bg-[var(--accent)] text-white rounded-lg text-sm font-medium hover:bg-[var(--accent)]/80 disabled:opacity-50"
             >
               {busy ? 'Verifying…' : 'Sign in'}
             </button>
@@ -97,14 +97,14 @@ export default function LoginPage() {
                 setCode('');
                 setError(null);
               }}
-              className="w-full text-xs text-[#8E8E93] hover:text-white"
+              className="w-full text-xs text-[var(--muted)] hover:text-white"
             >
               ← Use a different number
             </button>
           </div>
         )}
 
-        {error && <p className="mt-4 text-sm text-[#E8192C]">{error}</p>}
+        {error && <p className="mt-4 text-sm text-[var(--accent)]">{error}</p>}
       </div>
     </div>
   );

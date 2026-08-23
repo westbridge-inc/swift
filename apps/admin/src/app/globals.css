@@ -1,27 +1,45 @@
 @import 'tailwindcss';
 
 :root {
-  /* Swift brand — aligned to the mobile app's red identity (#E8192C).
-     --swift-orange is kept as a legacy alias (now red) so existing
-     var(--swift-orange) usages across the admin rebrand instantly. */
-  --swift-red: #E8192C;
-  --swift-red-600: #BC1320;
-  --swift-red-50: #FFF2F3;
-  --swift-orange: #E8192C;
-  --swift-black: #0A0A0A;
-  --swift-white: #FAFAFA;
-  --swift-charcoal: #1C1C1E;
-  --swift-gray: #8E8E93;
+  /* SWIFT-DARK — the admin's own sheet, harmonised to the maroon system
+     (mobile @swift/ui brand 500 #803B3B family), replacing the iOS system
+     palette (var(--panel)/var(--muted)/var(--border)) that appeared nowhere in Swift's brand.
+     WS-D D1 [founder 08-22: "use claude design for all dashboards too"].
+     Warm ink, not blue-black: every neutral carries the maroon cast. */
+  --ink: #171214;         /* page ground */
+  --panel: #211A1C;       /* cards */
+  --panel-2: #2A2225;     /* nested / raised */
+  --border: #382D30;      /* hairlines */
+  --text: #F4EFEE;
+  --muted: #A79A9C;       /* warm grey — never the iOS var(--muted) */
+  --accent: #C86A73;      /* lifted maroon — links/active, reads on dark */
+  --accent-deep: #803B3B; /* fills, with white text */
+  --accent-soft: rgba(200, 106, 115, 0.14);
+  --good: #4CAF94;        /* viridian family, lifted for dark */
+  --warn: #D08B4C;        /* burnt amber, lifted */
+  --bad: #E5484D;
+
+  /* Legacy aliases — every existing var() usage rebrands instantly. */
+  --swift-red: #803B3B;
+  --swift-red-600: #5C2A2C;
+  --swift-red-50: rgba(200, 106, 115, 0.12);
+  --swift-orange: #803B3B;
+  --swift-black: #171214;
+  --swift-white: #F4EFEE;
+  --swift-charcoal: #211A1C;
+  --swift-gray: #A79A9C;
 
   /* Web foundation — elevation + motion, mirroring @swift/ui tokens so the
      admin sweep (5.1+) can lean on the same two-tier depth + timing. */
-  --swift-shadow-card: 0px 1px 3px rgba(0, 0, 0, 0.08);
-  --swift-shadow-raised: 0px 6px 16px rgba(0, 0, 0, 0.12);
+  --swift-shadow-card: 0px 1px 3px rgba(0, 0, 0, 0.32);
+  --swift-shadow-raised: 0px 6px 16px rgba(0, 0, 0, 0.45);
   --swift-motion-fast: 140ms;
   --swift-motion-base: 240ms;
   --swift-ease: cubic-bezier(0.2, 0.8, 0.2, 1);
 }
 
 body {
+  background: var(--ink);
+  color: var(--text);
   font-family: 'Inter', system-ui, -apple-system, sans-serif;
 }

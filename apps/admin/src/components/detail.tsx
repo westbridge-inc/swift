@@ -7,8 +7,8 @@ import { ArrowLeft } from 'lucide-react';
 
 export function Section({ title, children }: { title: string; children: React.ReactNode }) {
   return (
-    <div className="bg-[#1C1C1E] rounded-xl border border-[#38383A] p-6">
-      <h2 className="text-sm font-semibold text-[#8E8E93] tracking-widest mb-4">{title.toUpperCase()}</h2>
+    <div className="bg-[var(--panel)] rounded-xl border border-[var(--border)] p-6">
+      <h2 className="text-sm font-semibold text-[var(--muted)] tracking-widest mb-4">{title.toUpperCase()}</h2>
       {children}
     </div>
   );
@@ -18,9 +18,9 @@ export function Row({ label, value, href }: { label: string; value?: React.React
   if (value == null || value === '') return null;
   return (
     <div className="flex justify-between gap-4 text-sm">
-      <span className="text-[#8E8E93] shrink-0">{label}</span>
+      <span className="text-[var(--muted)] shrink-0">{label}</span>
       {href ? (
-        <Link href={href} className="text-right hover:text-[#E8192C] transition-colors">
+        <Link href={href} className="text-right hover:text-[var(--accent)] transition-colors">
           {value}
         </Link>
       ) : (
@@ -49,7 +49,7 @@ const PILL: Record<string, string> = {
 export function StatusPill({ value }: { value?: string | null }) {
   if (!value) return null;
   return (
-    <span className={`px-2.5 py-1 rounded-full text-xs ${PILL[value] ?? 'bg-white/10 text-[#8E8E93]'}`}>
+    <span className={`px-2.5 py-1 rounded-full text-xs ${PILL[value] ?? 'bg-white/10 text-[var(--muted)]'}`}>
       {value.replaceAll('_', ' ')}
     </span>
   );
@@ -57,7 +57,7 @@ export function StatusPill({ value }: { value?: string | null }) {
 
 export function BackLink({ href, label }: { href: string; label: string }) {
   return (
-    <Link href={href} className="inline-flex items-center gap-2 text-sm text-[#8E8E93] hover:text-white mb-4">
+    <Link href={href} className="inline-flex items-center gap-2 text-sm text-[var(--muted)] hover:text-white mb-4">
       <ArrowLeft size={16} /> {label}
     </Link>
   );
@@ -86,7 +86,7 @@ export function ActionButton({
       }}
       disabled={disabled}
       className={`px-4 py-2 rounded-lg text-sm disabled:opacity-50 transition-colors ${
-        danger ? 'bg-[#E8192C] hover:bg-[#E8192C]/80' : 'border border-[#38383A] hover:bg-white/10'
+        danger ? 'bg-[var(--accent)] hover:bg-[var(--accent)]/80' : 'border border-[var(--border)] hover:bg-white/10'
       }`}
     >
       {label}

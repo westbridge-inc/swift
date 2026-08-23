@@ -11,7 +11,7 @@ const OUTCOME_CLS: Record<string, string> = {
   auto_executed: 'text-emerald-400',
   pending_approval: 'text-amber-400',
   suggested: 'text-sky-400',
-  rejected: 'text-[#8E8E93]',
+  rejected: 'text-[var(--muted)]',
   error: 'text-red-400',
 };
 
@@ -39,29 +39,29 @@ export default function AgentPage() {
   return (
     <div>
       <h1 className="text-2xl font-bold mb-1">Ops agent</h1>
-      <p className="text-[#8E8E93] text-sm mb-6">
+      <p className="text-[var(--muted)] text-sm mb-6">
         The agent detects stuck orders and proposes fixes. Safe nudges run on their own; anything money-adjacent waits here for you.
       </p>
 
       <div className="space-y-3 mb-8">
         {approvalsQ.isLoading ? (
-          <div className="h-24 rounded-xl bg-[#1C1C1E] border border-[#38383A] animate-pulse" />
+          <div className="h-24 rounded-xl bg-[var(--panel)] border border-[var(--border)] animate-pulse" />
         ) : rows.length === 0 ? (
-          <div className="bg-[#1C1C1E] rounded-xl border border-[#38383A] p-8 text-center text-[#8E8E93]">
+          <div className="bg-[var(--panel)] rounded-xl border border-[var(--border)] p-8 text-center text-[var(--muted)]">
             Nothing waiting on you — the queue is clear.
           </div>
         ) : (
           rows.map((r: any) => (
-            <div key={r.id} className="bg-[#1C1C1E] rounded-xl border border-[#38383A] p-5">
+            <div key={r.id} className="bg-[var(--panel)] rounded-xl border border-[var(--border)] p-5">
               <div className="flex flex-wrap items-center gap-3">
                 <span className="font-semibold">{String(r.action).replaceAll('_', ' ')}</span>
                 <StatusPill value={r.status} />
-                <span className="text-xs text-[#8E8E93] ml-auto">{new Date(r.createdAt).toLocaleString()}</span>
+                <span className="text-xs text-[var(--muted)] ml-auto">{new Date(r.createdAt).toLocaleString()}</span>
               </div>
-              {r.reasoning ? <p className="text-sm text-[#8E8E93] mt-2">{r.reasoning}</p> : null}
+              {r.reasoning ? <p className="text-sm text-[var(--muted)] mt-2">{r.reasoning}</p> : null}
               <div className="flex items-center gap-4 mt-3">
                 {r.orderId ? (
-                  <Link href={`/orders/${r.orderId}`} className="text-sm text-[#8E8E93] hover:text-[#E8192C] transition-colors">
+                  <Link href={`/orders/${r.orderId}`} className="text-sm text-[var(--muted)] hover:text-[var(--accent)] transition-colors">
                     View order →
                   </Link>
                 ) : null}
@@ -72,7 +72,7 @@ export default function AgentPage() {
                         decide.mutate({ id: r.id, approve: false });
                     }}
                     disabled={decide.isPending}
-                    className="px-4 py-2 rounded-lg text-sm border border-[#38383A] hover:bg-white/10 disabled:opacity-50"
+                    className="px-4 py-2 rounded-lg text-sm border border-[var(--border)] hover:bg-white/10 disabled:opacity-50"
                   >
                     Reject
                   </button>
@@ -82,7 +82,7 @@ export default function AgentPage() {
                         decide.mutate({ id: r.id, approve: true });
                     }}
                     disabled={decide.isPending}
-                    className="px-4 py-2 rounded-lg text-sm bg-[#E8192C] hover:bg-[#E8192C]/80 disabled:opacity-50"
+                    className="px-4 py-2 rounded-lg text-sm bg-[var(--accent)] hover:bg-[var(--accent)]/80 disabled:opacity-50"
                   >
                     Approve & execute
                   </button>
@@ -93,21 +93,21 @@ export default function AgentPage() {
         )}
       </div>
 
-      <button onClick={() => setShowAudit((s) => !s)} className="text-sm text-[#8E8E93] hover:text-white mb-3">
+      <button onClick={() => setShowAudit((s) => !s)} className="text-sm text-[var(--muted)] hover:text-white mb-3">
         {showAudit ? 'Hide' : 'Show'} the agent&apos;s audit trail →
       </button>
       {showAudit && (
-        <div className="bg-[#1C1C1E] rounded-xl border border-[#38383A] p-4 space-y-1.5">
+        <div className="bg-[var(--panel)] rounded-xl border border-[var(--border)] p-4 space-y-1.5">
           {audit.length === 0 ? (
-            <p className="text-sm text-[#8E8E93] p-2">No agent activity yet.</p>
+            <p className="text-sm text-[var(--muted)] p-2">No agent activity yet.</p>
           ) : (
             audit.map((e: any) => (
               <div key={e.id} className="flex items-center gap-3 text-xs p-1.5">
-                <span className="text-[#8E8E93] w-36 shrink-0">{new Date(e.at).toLocaleString()}</span>
+                <span className="text-[var(--muted)] w-36 shrink-0">{new Date(e.at).toLocaleString()}</span>
                 <span className="font-mono">{String(e.action).replaceAll('_', ' ')}</span>
-                <span className={OUTCOME_CLS[e.outcome] ?? 'text-[#8E8E93]'}>{e.outcome.replaceAll('_', ' ')}</span>
+                <span className={OUTCOME_CLS[e.outcome] ?? 'text-[var(--muted)]'}>{e.outcome.replaceAll('_', ' ')}</span>
                 {e.subjectId ? (
-                  <Link href={`/orders/${e.subjectId}`} className="text-[#8E8E93] hover:text-[#E8192C] ml-auto shrink-0">
+                  <Link href={`/orders/${e.subjectId}`} className="text-[var(--muted)] hover:text-[var(--accent)] ml-auto shrink-0">
                     order →
                   </Link>
                 ) : null}

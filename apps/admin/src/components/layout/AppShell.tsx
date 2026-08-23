@@ -33,7 +33,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
 
   if (!ready) {
     return (
-      <div className="min-h-screen flex items-center justify-center bg-[#0A0A0A] text-[#8E8E93] text-sm">
+      <div className="min-h-screen flex items-center justify-center bg-[var(--ink)] text-[var(--muted)] text-sm">
         Loading…
       </div>
     );

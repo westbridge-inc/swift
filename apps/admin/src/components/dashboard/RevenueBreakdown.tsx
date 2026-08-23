@@ -24,12 +24,12 @@ interface RevenueBreakdownProps {
 
 export function RevenueBreakdown({ data, weeklyTotal }: RevenueBreakdownProps) {
   return (
-    <div className="bg-[#1C1C1E] rounded-xl p-6 border border-[#38383A]">
+    <div className="bg-[var(--panel)] rounded-xl p-6 border border-[var(--border)]">
       <h3 className="text-lg font-semibold mb-4">Subscription Revenue</h3>
       <div className="space-y-3">
         {data?.map((item) => (
           <div key={item.type} className="flex items-center justify-between text-sm">
-            <span className="text-[#8E8E93]">{LABELS[item.type] || item.type}</span>
+            <span className="text-[var(--muted)]">{LABELS[item.type] || item.type}</span>
             <span>
               {item.count} active ={' '}
               <span className="font-semibold text-white">
@@ -37,16 +37,16 @@ export function RevenueBreakdown({ data, weeklyTotal }: RevenueBreakdownProps) {
               </span>
             </span>
           </div>
-        )) || <p className="text-[#8E8E93] text-sm">No data</p>}
+        )) || <p className="text-[var(--muted)] text-sm">No data</p>}
       </div>
-      <div className="mt-4 pt-4 border-t border-[#38383A]">
+      <div className="mt-4 pt-4 border-t border-[var(--border)]">
         <div className="flex justify-between">
           <span className="font-semibold">Weekly Total</span>
-          <span className="text-[#E8192C] font-bold text-lg">
+          <span className="text-[var(--accent)] font-bold text-lg">
             ${weeklyTotal?.toLocaleString() || '0'} GYD
           </span>
         </div>
-        <div className="flex justify-between text-sm text-[#8E8E93] mt-1">
+        <div className="flex justify-between text-sm text-[var(--muted)] mt-1">
           <span>Monthly Projection</span>
           <span>${((weeklyTotal || 0) * 4.33).toLocaleString()} GYD</span>
         </div>

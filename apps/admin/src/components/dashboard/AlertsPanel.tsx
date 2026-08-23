@@ -20,11 +20,11 @@ export function AlertsPanel({ alerts }: { alerts?: Alerts }) {
   }
 
   return (
-    <div className="bg-[#1C1C1E] rounded-xl p-6 border border-[#38383A]">
+    <div className="bg-[var(--panel)] rounded-xl p-6 border border-[var(--border)]">
       <h3 className="text-lg font-semibold mb-4">Alerts & Issues</h3>
       <div className="space-y-2">
         {items.length === 0 ? (
-          <div className="flex items-center gap-3 p-3 rounded-lg bg-white/5 text-[#8E8E93]">
+          <div className="flex items-center gap-3 p-3 rounded-lg bg-white/5 text-[var(--muted)]">
             <CheckCircle2 size={16} className="text-green-400 shrink-0" />
             <span className="text-sm">All clear — no active alerts.</span>
           </div>
@@ -41,7 +41,7 @@ export function AlertsPanel({ alerts }: { alerts?: Alerts }) {
                 <AlertTriangle size={16} className="text-yellow-400 shrink-0" />
               )}
               <span className="text-sm flex-1">{alert.message}</span>
-              <ChevronRight size={15} className="text-[#8E8E93] group-hover:text-white transition-colors" />
+              <ChevronRight size={15} className="text-[var(--muted)] group-hover:text-white transition-colors" />
             </Link>
           ))
         )}

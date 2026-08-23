@@ -25,19 +25,19 @@ export function LiveOrderFeed() {
   });
 
   return (
-    <div className="bg-[#1C1C1E] rounded-xl p-6 border border-[#38383A]">
+    <div className="bg-[var(--panel)] rounded-xl p-6 border border-[var(--border)]">
       <h3 className="text-lg font-semibold mb-4">Live Order Feed</h3>
       <div className="space-y-2 max-h-80 overflow-auto">
         {data?.data?.map((order: any) => (
           <Link key={order.id} href={`/orders/${order.id}`} className="flex items-center gap-3 p-2 rounded-lg hover:bg-white/5 transition-colors">
             <span className={`w-2 h-2 rounded-full ${STATUS_COLORS[order.status] || 'bg-gray-500'}`} />
             <span className="text-sm font-mono">#{order.orderNumber}</span>
-            <span className="text-xs text-[#8E8E93]">{order.status}</span>
-            <span className="text-xs text-[#8E8E93] ml-auto">
+            <span className="text-xs text-[var(--muted)]">{order.status}</span>
+            <span className="text-xs text-[var(--muted)] ml-auto">
               ${Number(order.totalAmount).toLocaleString()}
             </span>
           </Link>
-        )) || <p className="text-[#8E8E93] text-sm">No recent orders</p>}
+        )) || <p className="text-[var(--muted)] text-sm">No recent orders</p>}
       </div>
     </div>
   );

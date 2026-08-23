@@ -9,15 +9,15 @@ import { statusClass } from '@/lib/status';
 // Leaflet touches `window` — client-only.
 const OpsMap = dynamic(() => import('@/components/ops/OpsMap'), {
   ssr: false,
-  loading: () => <div className="h-full w-full bg-[#1C1C1E] animate-pulse" />,
+  loading: () => <div className="h-full w-full bg-[var(--panel)] animate-pulse" />,
 });
 
 const LEGEND = [
   { color: '#34C759', label: 'Rider · available' },
-  { color: '#FF9F0A', label: 'Rider · on a job' },
-  { color: '#0A84FF', label: 'Driver · available' },
+  { color: 'var(--warn)', label: 'Rider · on a job' },
+  { color: 'var(--accent)', label: 'Driver · available' },
   { color: '#BF5AF2', label: 'Driver · on a trip' },
-  { color: '#8E8E93', label: 'Order pickup' },
+  { color: 'var(--muted)', label: 'Order pickup' },
 ];
 
 export default function OpsPage() {
@@ -34,18 +34,18 @@ export default function OpsPage() {
 
   return (
     <div className="flex flex-col h-full -m-6">
-      <div className="flex items-center gap-6 px-6 py-3 border-b border-[#38383A] bg-[#1C1C1E]">
+      <div className="flex items-center gap-6 px-6 py-3 border-b border-[var(--border)] bg-[var(--panel)]">
         <h1 className="text-lg font-bold">Live ops</h1>
-        <span className="text-sm text-[#8E8E93]">
+        <span className="text-sm text-[var(--muted)]">
           <span className="text-white font-semibold">{isLoading ? '—' : online}</span> movers online
         </span>
-        <span className="text-sm text-[#8E8E93]">
+        <span className="text-sm text-[var(--muted)]">
           <span className="text-white font-semibold">{isLoading ? '—' : busy}</span> on jobs
         </span>
-        <span className="text-sm text-[#8E8E93]">
+        <span className="text-sm text-[var(--muted)]">
           <span className="text-white font-semibold">{isLoading ? '—' : inFlight}</span> orders in flight
         </span>
-        <span className="text-xs text-[#8E8E93] ml-auto">
+        <span className="text-xs text-[var(--muted)] ml-auto">
           refreshes every 15s{dataUpdatedAt ? ` · updated ${new Date(dataUpdatedAt).toLocaleTimeString()}` : ''}
         </span>
       </div>
@@ -53,9 +53,9 @@ export default function OpsPage() {
       <div className="flex flex-1 min-h-0">
         <div className="flex-1 relative">
           <OpsMap data={ops} />
-          <div className="absolute bottom-4 left-4 z-[1000] rounded-lg bg-[#1C1C1E]/90 border border-[#38383A] p-3 space-y-1.5">
+          <div className="absolute bottom-4 left-4 z-[1000] rounded-lg bg-[var(--panel)]/90 border border-[var(--border)] p-3 space-y-1.5">
             {LEGEND.map((l) => (
-              <div key={l.label} className="flex items-center gap-2 text-xs text-[#8E8E93]">
+              <div key={l.label} className="flex items-center gap-2 text-xs text-[var(--muted)]">
                 <span className="w-3 h-3 rounded-full border border-white/60" style={{ background: l.color }} />
                 {l.label}
               </div>
@@ -63,12 +63,12 @@ export default function OpsPage() {
           </div>
         </div>
 
-        <aside className="w-80 border-l border-[#38383A] bg-[#1C1C1E] overflow-y-auto">
-          <p className="px-4 pt-4 pb-2 text-[10px] font-semibold tracking-widest text-[#8E8E93]">
+        <aside className="w-80 border-l border-[var(--border)] bg-[var(--panel)] overflow-y-auto">
+          <p className="px-4 pt-4 pb-2 text-[10px] font-semibold tracking-widest text-[var(--muted)]">
             IN FLIGHT ({inFlight})
           </p>
           {(ops?.activeOrders ?? []).length === 0 ? (
-            <p className="px-4 text-sm text-[#8E8E93]">Nothing moving right now.</p>
+            <p className="px-4 text-sm text-[var(--muted)]">Nothing moving right now.</p>
           ) : (
             <div className="px-2 pb-4 space-y-1">
               {ops!.activeOrders.map((o) => (

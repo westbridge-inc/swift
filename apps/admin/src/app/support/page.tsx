@@ -35,7 +35,7 @@ export default function SupportPage() {
               key={f}
               onClick={() => setFilter(f)}
               className={`px-2.5 py-1 rounded-lg text-xs ${
-                filter === f ? 'bg-white text-black font-semibold' : 'bg-white/5 text-[#8E8E93] hover:bg-white/10'
+                filter === f ? 'bg-white text-black font-semibold' : 'bg-white/5 text-[var(--muted)] hover:bg-white/10'
               }`}
             >
               {f.replaceAll('_', ' ').toLowerCase()}
@@ -43,34 +43,34 @@ export default function SupportPage() {
           ))}
         </div>
       </div>
-      <p className="text-[#8E8E93] text-sm mb-6">In-app tickets from customers, movers and vendors. Safety first.</p>
+      <p className="text-[var(--muted)] text-sm mb-6">In-app tickets from customers, movers and vendors. Safety first.</p>
 
       <div className="space-y-3">
         {isLoading ? (
-          <div className="h-24 rounded-xl bg-[#1C1C1E] border border-[#38383A] animate-pulse" />
+          <div className="h-24 rounded-xl bg-[var(--panel)] border border-[var(--border)] animate-pulse" />
         ) : tickets.length === 0 ? (
-          <div className="bg-[#1C1C1E] rounded-xl border border-[#38383A] p-8 text-center text-[#8E8E93]">
+          <div className="bg-[var(--panel)] rounded-xl border border-[var(--border)] p-8 text-center text-[var(--muted)]">
             No {filter.replaceAll('_', ' ').toLowerCase()} tickets.
           </div>
         ) : (
           tickets.map((t: any) => (
-            <div key={t.id} className="bg-[#1C1C1E] rounded-xl border border-[#38383A] p-5">
+            <div key={t.id} className="bg-[var(--panel)] rounded-xl border border-[var(--border)] p-5">
               <div className="flex flex-wrap items-center gap-3">
-                <span className={`px-2.5 py-1 rounded-full text-xs ${CATEGORY_CLS[t.category] ?? 'bg-white/10 text-[#8E8E93]'}`}>
+                <span className={`px-2.5 py-1 rounded-full text-xs ${CATEGORY_CLS[t.category] ?? 'bg-white/10 text-[var(--muted)]'}`}>
                   {String(t.category).replaceAll('_', ' ').toLowerCase()}
                 </span>
                 <span className="font-semibold">{t.subject}</span>
-                <span className="text-xs text-[#8E8E93] ml-auto">{new Date(t.createdAt).toLocaleString()}</span>
+                <span className="text-xs text-[var(--muted)] ml-auto">{new Date(t.createdAt).toLocaleString()}</span>
               </div>
-              <p className="text-sm text-[#8E8E93] mt-2 whitespace-pre-wrap">{t.message}</p>
-              <div className="flex flex-wrap items-center gap-4 mt-3 text-sm text-[#8E8E93]">
+              <p className="text-sm text-[var(--muted)] mt-2 whitespace-pre-wrap">{t.message}</p>
+              <div className="flex flex-wrap items-center gap-4 mt-3 text-sm text-[var(--muted)]">
                 {t.user ? (
-                  <Link href={`/users/${t.user.id}`} className="hover:text-[#E8192C] transition-colors">
+                  <Link href={`/users/${t.user.id}`} className="hover:text-[var(--accent)] transition-colors">
                     {[t.user.firstName, t.user.lastName].filter(Boolean).join(' ')} · {t.user.phone} →
                   </Link>
                 ) : null}
                 {t.orderId ? (
-                  <Link href={`/orders/${t.orderId}`} className="hover:text-[#E8192C] transition-colors">
+                  <Link href={`/orders/${t.orderId}`} className="hover:text-[var(--accent)] transition-colors">
                     View order →
                   </Link>
                 ) : null}
@@ -82,7 +82,7 @@ export default function SupportPage() {
                     <button
                       onClick={() => resolve.mutate({ id: t.id, status: 'IN_PROGRESS' })}
                       disabled={resolve.isPending}
-                      className="px-4 py-2 rounded-lg text-sm border border-[#38383A] hover:bg-white/10 disabled:opacity-50"
+                      className="px-4 py-2 rounded-lg text-sm border border-[var(--border)] hover:bg-white/10 disabled:opacity-50"
                     >
                       Take it
                     </button>
@@ -93,7 +93,7 @@ export default function SupportPage() {
                       resolve.mutate({ id: t.id, status: 'RESOLVED', note: note || undefined });
                     }}
                     disabled={resolve.isPending}
-                    className="px-4 py-2 rounded-lg text-sm bg-[#E8192C] hover:bg-[#E8192C]/80 disabled:opacity-50"
+                    className="px-4 py-2 rounded-lg text-sm bg-[var(--accent)] hover:bg-[var(--accent)]/80 disabled:opacity-50"
                   >
                     Resolve
                   </button>

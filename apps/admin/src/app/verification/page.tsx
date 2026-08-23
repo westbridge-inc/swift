@@ -78,7 +78,7 @@ export default function VerificationPage() {
   return (
     <div>
       <h1 className="text-2xl font-bold mb-2">Verification Center</h1>
-      <p className="text-[#8E8E93] mb-6 text-sm">
+      <p className="text-[var(--muted)] mb-6 text-sm">
         Review submitted documents. Drivers cannot carry passengers until a hire-class
         insurance is confirmed here.
       </p>
@@ -89,7 +89,7 @@ export default function VerificationPage() {
             key={s}
             onClick={() => { setStatus(s); setSelected(null); }}
             className={`px-3 py-1.5 rounded-lg text-xs ${
-              status === s ? 'bg-[#E8192C] text-white' : 'bg-[#1C1C1E] text-[#8E8E93] border border-[#38383A]'
+              status === s ? 'bg-[var(--accent)] text-white' : 'bg-[var(--panel)] text-[var(--muted)] border border-[var(--border)]'
             }`}
           >
             {s}
@@ -99,32 +99,32 @@ export default function VerificationPage() {
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
         {/* Queue */}
-        <div className="lg:col-span-2 bg-[#1C1C1E] rounded-xl border border-[#38383A] overflow-hidden">
+        <div className="lg:col-span-2 bg-[var(--panel)] rounded-xl border border-[var(--border)] overflow-hidden">
           <table className="w-full text-sm">
             <thead>
-              <tr className="border-b border-[#38383A]">
-                <th className="text-left p-4 text-[#8E8E93] font-medium">Applicant</th>
-                <th className="text-left p-4 text-[#8E8E93] font-medium">Role</th>
-                <th className="text-left p-4 text-[#8E8E93] font-medium">Document</th>
-                <th className="text-left p-4 text-[#8E8E93] font-medium">Country</th>
-                <th className="text-left p-4 text-[#8E8E93] font-medium">Status</th>
-                <th className="text-right p-4 text-[#8E8E93] font-medium">Action</th>
+              <tr className="border-b border-[var(--border)]">
+                <th className="text-left p-4 text-[var(--muted)] font-medium">Applicant</th>
+                <th className="text-left p-4 text-[var(--muted)] font-medium">Role</th>
+                <th className="text-left p-4 text-[var(--muted)] font-medium">Document</th>
+                <th className="text-left p-4 text-[var(--muted)] font-medium">Country</th>
+                <th className="text-left p-4 text-[var(--muted)] font-medium">Status</th>
+                <th className="text-right p-4 text-[var(--muted)] font-medium">Action</th>
               </tr>
             </thead>
             <tbody>
               {isLoading ? (
-                <tr><td colSpan={6} className="p-8 text-center text-[#8E8E93]">Loading...</td></tr>
+                <tr><td colSpan={6} className="p-8 text-center text-[var(--muted)]">Loading...</td></tr>
               ) : rows.length === 0 ? (
-                <tr><td colSpan={6} className="p-8 text-center text-[#8E8E93]">No documents</td></tr>
+                <tr><td colSpan={6} className="p-8 text-center text-[var(--muted)]">No documents</td></tr>
               ) : (
                 rows.map((doc) => (
                   <tr
                     key={doc.id}
-                    className={`border-b border-[#38383A] hover:bg-white/5 ${selected?.id === doc.id ? 'bg-white/5' : ''}`}
+                    className={`border-b border-[var(--border)] hover:bg-white/5 ${selected?.id === doc.id ? 'bg-white/5' : ''}`}
                   >
                     <td className="p-4">
                       <div className="font-medium">{doc.user?.firstName} {doc.user?.lastName}</div>
-                      <div className="text-xs text-[#8E8E93]">{doc.user?.phone}</div>
+                      <div className="text-xs text-[var(--muted)]">{doc.user?.phone}</div>
                     </td>
                     <td className="p-4">{doc.role}</td>
                     <td className="p-4">{String(doc.docType).replace(/_/g, ' ')}</td>
@@ -135,7 +135,7 @@ export default function VerificationPage() {
                     <td className="p-4 text-right">
                       <button
                         onClick={() => select(doc)}
-                        className="px-3 py-1 bg-[#2C2C2E] text-white rounded-lg text-xs hover:bg-[#3A3A3C]"
+                        className="px-3 py-1 bg-[var(--panel-2)] text-white rounded-lg text-xs hover:bg-[#3A3A3C]"
                       >
                         Review
                       </button>
@@ -148,48 +148,48 @@ export default function VerificationPage() {
         </div>
 
         {/* Detail panel */}
-        <div className="bg-[#1C1C1E] rounded-xl border border-[#38383A] p-4 h-fit">
+        <div className="bg-[var(--panel)] rounded-xl border border-[var(--border)] p-4 h-fit">
           {!selected ? (
-            <p className="text-[#8E8E93] text-sm">Select a document to review.</p>
+            <p className="text-[var(--muted)] text-sm">Select a document to review.</p>
           ) : (
             <div className="space-y-4">
               <div>
                 <div className="font-semibold">{selected.user?.firstName} {selected.user?.lastName}</div>
-                <div className="text-xs text-[#8E8E93]">{selected.user?.phone} · {selected.user?.countryCode}</div>
+                <div className="text-xs text-[var(--muted)]">{selected.user?.phone} · {selected.user?.countryCode}</div>
               </div>
 
               <div className="text-sm space-y-1">
-                <div><span className="text-[#8E8E93]">Document:</span> {String(selected.docType).replace(/_/g, ' ')}</div>
-                <div><span className="text-[#8E8E93]">Status:</span> {selected.status}</div>
-                <div><span className="text-[#8E8E93]">Consent:</span> {selected.consentAt ? `notice ${selected.privacyNoticeVersion ?? ''}` : 'none on file'}</div>
+                <div><span className="text-[var(--muted)]">Document:</span> {String(selected.docType).replace(/_/g, ' ')}</div>
+                <div><span className="text-[var(--muted)]">Status:</span> {selected.status}</div>
+                <div><span className="text-[var(--muted)]">Consent:</span> {selected.consentAt ? `notice ${selected.privacyNoticeVersion ?? ''}` : 'none on file'}</div>
               </div>
 
               <button
                 onClick={() => viewDocument(selected.id)}
-                className="w-full px-3 py-2 bg-[#2C2C2E] text-white rounded-lg text-sm hover:bg-[#3A3A3C]"
+                className="w-full px-3 py-2 bg-[var(--panel-2)] text-white rounded-lg text-sm hover:bg-[#3A3A3C]"
               >
                 View document (signed URL)
               </button>
 
               {isInsurance && (
-                <div className="space-y-2 border-t border-[#38383A] pt-3">
-                  <div className="text-xs font-medium text-[#8E8E93]">Insurance 5-point check</div>
+                <div className="space-y-2 border-t border-[var(--border)] pt-3">
+                  <div className="text-xs font-medium text-[var(--muted)]">Insurance 5-point check</div>
                   <input
                     placeholder="Insurer (e.g. GTM, GBTI)"
                     value={insurance.insurerName}
                     onChange={(e) => setInsurance({ ...insurance, insurerName: e.target.value })}
-                    className="w-full px-3 py-2 bg-[#2C2C2E] rounded-lg text-sm border border-[#38383A]"
+                    className="w-full px-3 py-2 bg-[var(--panel-2)] rounded-lg text-sm border border-[var(--border)]"
                   />
                   <input
                     placeholder="Policy number"
                     value={insurance.policyNumber}
                     onChange={(e) => setInsurance({ ...insurance, policyNumber: e.target.value })}
-                    className="w-full px-3 py-2 bg-[#2C2C2E] rounded-lg text-sm border border-[#38383A]"
+                    className="w-full px-3 py-2 bg-[var(--panel-2)] rounded-lg text-sm border border-[var(--border)]"
                   />
                   <select
                     value={insurance.coverageClass}
                     onChange={(e) => setInsurance({ ...insurance, coverageClass: e.target.value as 'HIRE' | 'PRIVATE' })}
-                    className="w-full px-3 py-2 bg-[#2C2C2E] rounded-lg text-sm border border-[#38383A]"
+                    className="w-full px-3 py-2 bg-[var(--panel-2)] rounded-lg text-sm border border-[var(--border)]"
                   >
                     <option value="HIRE">HIRE class</option>
                     <option value="PRIVATE">PRIVATE class</option>
@@ -214,11 +214,11 @@ export default function VerificationPage() {
               )}
 
               {selected.status === 'PENDING' && (
-                <div className="space-y-2 border-t border-[#38383A] pt-3">
+                <div className="space-y-2 border-t border-[var(--border)] pt-3">
                   <button
                     disabled={approveMutation.isPending || (isInsurance && !insuranceReady)}
                     onClick={() => approveMutation.mutate({ id: selected.id, body: isInsurance ? { insurance } : undefined })}
-                    className="w-full px-3 py-2 bg-[#E8192C] text-white rounded-lg text-sm hover:bg-[#E8192C]/80 disabled:opacity-40"
+                    className="w-full px-3 py-2 bg-[var(--accent)] text-white rounded-lg text-sm hover:bg-[var(--accent)]/80 disabled:opacity-40"
                   >
                     Approve
                   </button>
@@ -226,7 +226,7 @@ export default function VerificationPage() {
                     placeholder="Rejection reason"
                     value={reason}
                     onChange={(e) => setReason(e.target.value)}
-                    className="w-full px-3 py-2 bg-[#2C2C2E] rounded-lg text-sm border border-[#38383A]"
+                    className="w-full px-3 py-2 bg-[var(--panel-2)] rounded-lg text-sm border border-[var(--border)]"
                     rows={2}
                   />
                   <button
