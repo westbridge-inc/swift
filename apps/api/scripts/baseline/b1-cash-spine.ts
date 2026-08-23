@@ -135,8 +135,18 @@ async function main() {
   // ── 3. vendor works the board: accept → preparing → READY ────────────────
   const acc = await http('PUT', `/vendor/orders/${orderId}/accept`, {}, ownerToken);
   if (acc.status >= 300) throw new Error(`vendor accept ${acc.status}: ${JSON.stringify(acc.json).slice(0, 200)}`);
+  // [F-026-29] A failed leg must ASSERT, not become a note — a route crash or
+  // state-machine regression here used to be overwritten by the later ready
+  // call and end in the COMPLETE banner. The one legitimate non-2xx is "the
+  // order already advanced past PREPARING" (auto-advance), so tolerate a
+  // conflict ONLY when the DB proves the order really is at/past PREPARING.
   const prep = await http('PUT', `/vendor/orders/${orderId}/preparing`, {}, ownerToken);
-  if (prep.status >= 300) log('NOTE preparing step', `${prep.status} (may auto-advance)`);
+  if (prep.status >= 300) {
+    const st = (await prisma.order.findUniqueOrThrow({ where: { id: orderId }, select: { status: true } })).status;
+    const advanced = ['PREPARING', 'READY_FOR_PICKUP', 'READY', 'ASSIGNED', 'PICKED_UP', 'DELIVERED', 'COMPLETED'].includes(st);
+    if (!advanced) throw new Error(`FAIL preparing leg: ${prep.status} and the order is still ${st} — not an auto-advance (${JSON.stringify(prep.json).slice(0, 200)})`);
+    log('NOTE preparing step already advanced', { status: prep.status, orderStatus: st });
+  }
   const rdy = await http('PUT', `/vendor/orders/${orderId}/ready`, {}, ownerToken);
   if (rdy.status >= 300) throw new Error(`vendor ready ${rdy.status}: ${JSON.stringify(rdy.json).slice(0, 200)}`);
   log('EVIDENCE vendor board worked', { accept: acc.status, preparing: prep.status, ready: rdy.status });

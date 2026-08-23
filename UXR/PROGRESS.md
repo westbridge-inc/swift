@@ -70,3 +70,5 @@
 - [x] F-026-20 (b11 tier gate) FIXED + LIVE-VERIFIED: selfie-complete L1 probe now reaches assertL2 → exact 403 ID_VERIFICATION_REQUIRED (log confirms). Residual B11 PARTIAL = F-225 guest-search (founder-gated, pre-existing). Cleaned a stray active b12 tenant that was 503-ing the public catalog (proof F-026-09 verified-teardown was needed).
 - [x] F-026-20 CLOSED: PR #750 MERGED (b11 tier gate live-verified)
 - [~] F-026-23 (b5 stops overwriting go-online authority) + F-026-30 (b7/b8 safety unwind: a started ride is completed via the authorized path + Guardian verified closed) — shipping
+- [x] F-026-23 + F-026-30 CLOSED: PR #751 MERGED
+- [~] F-026-27 (b2 delivered-assert + recipient-correlated dual-confirm notices) + F-026-29 (b1/b4 preparing leg asserts, tolerating only a DB-proven auto-advance) — shipping

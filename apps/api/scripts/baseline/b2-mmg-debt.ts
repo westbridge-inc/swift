@@ -167,6 +167,10 @@ async function main() {
   const hand = await http('PUT', `/rider/orders/${orderId}/delivered`, pinRow.ridePin ? { ridePin: pinRow.ridePin } : {}, riderToken);
   if (hand.status >= 300) throw new Error(`delivered ${hand.status}: ${JSON.stringify(hand.json).slice(0, 200)}`);
   const oDone = await prisma.order.findUniqueOrThrow({ where: { id: orderId }, select: { status: true, deliveryFee: true, tipAmount: true } });
+  // [F-026-27] The delivered leg claimed a handover but only LOGGED the
+  // persisted status — a transition that silently didn't land would still
+  // reach COMPLETE. Require the terminal state.
+  if (!['DELIVERED', 'COMPLETED'].includes(oDone.status)) throw new Error(`FAIL delivered leg: order is ${oDone.status}, expected DELIVERED`);
   log('EVIDENCE delivered', { status: oDone.status });
 
   // ── 2. the debt row ──────────────────────────────────────────────────────
@@ -204,9 +208,18 @@ async function main() {
   const inHistory = (l: any) => !!l?.settled?.some((s: any) => s.id === debt.id);
   if (inOwed(rEnd) || inOwed(vEnd)) throw new Error('FAIL: settled row still in an OWED section');
   if (!inHistory(rEnd) || !inHistory(vEnd)) throw new Error('FAIL: settled row missing from history sections');
-  const nudges = await prisma.notification.count({ where: { data: { path: ['settlementId'], equals: debt.id } } as any });
-  if (nudges < 2) throw new Error(`FAIL: expected counterpart notifications for both confirms, got ${nudges}`);
-  log('EVIDENCE dual-confirm settled', { status: settled.status, counterpartNotices: nudges });
+  // [F-026-27] "Both counterparts notified" was a COUNT of any two rows bearing
+  // the settlement id — two duplicates from one side passed while the other
+  // side was never told. Correlate by RECIPIENT: each party must have at
+  // least one notice of their own.
+  const noticeTo = async (userId: string) => prisma.notification.count({
+    where: { userId, data: { path: ['settlementId'], equals: debt.id } } as any,
+  });
+  const [riderNotices, ownerNotices] = await Promise.all([noticeTo(riderUser.id), noticeTo(ownerUserId)]);
+  if (riderNotices < 1 || ownerNotices < 1) {
+    throw new Error(`FAIL counterpart notices: rider=${riderNotices}, store=${ownerNotices} — each side must be told of the other's confirm`);
+  }
+  log('EVIDENCE dual-confirm settled', { status: settled.status, riderNotices, ownerNotices });
 
   log('B2 COMPLETE — MMG GATE + VENDOR_OWES_RIDER LIFECYCLE PROVEN');
 }
