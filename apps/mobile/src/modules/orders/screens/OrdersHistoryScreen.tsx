@@ -80,7 +80,7 @@ export function OrdersHistoryScreen() {
 
   const masthead = (
     <>
-      <GradientMasthead style={{ paddingTop: 64, paddingBottom: space.lg, paddingHorizontal: space['2xl'] }}>
+      <GradientMasthead style={{ paddingTop: 76, paddingBottom: space.xl, paddingHorizontal: space['2xl'] }}>
         <T variant="micro" tone="onBrand">ORDERS & RIDES</T>
         <T variant="title" tone="onBrand" style={{ marginTop: 2 }}>Your activity</T>
       </GradientMasthead>

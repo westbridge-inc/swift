@@ -615,7 +615,10 @@ function TierRow({
               {meta.label} <T variant="label" tone="muted">· {tier.capacity} seats</T>
             </T>
             <T variant="caption" tone="muted" style={{ marginTop: 2 }}>
-              {meta.blurb} · ~{durationMin} min
+              {/* [F-268] "~0 min" with zero drivers online was a dishonest
+                  number on a money row. No estimate ⇒ say nothing; the
+                  "No drivers online" banner already carries the truth. */}
+              {meta.blurb}{durationMin > 0 ? ` · ~${durationMin} min` : ''}
             </T>
           </View>
           <Money amount={tier.fare} tone={selected ? 'brand' : 'ink'} />
