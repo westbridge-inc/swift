@@ -15,28 +15,28 @@ export default function RidersPage() {
   return (
     <div>
       <h1 className="text-2xl font-bold mb-6">Riders</h1>
-      <div className="bg-[#1C1C1E] rounded-xl border border-[#38383A] overflow-hidden">
+      <div className="bg-[var(--panel)] rounded-xl border border-[var(--border)] overflow-hidden">
         <table className="w-full text-sm">
           <thead>
-            <tr className="border-b border-[#38383A]">
-              <th className="text-left p-4 text-[#8E8E93] font-medium">Name</th>
-              <th className="text-left p-4 text-[#8E8E93] font-medium">Phone</th>
-              <th className="text-left p-4 text-[#8E8E93] font-medium">Type</th>
-              <th className="text-left p-4 text-[#8E8E93] font-medium">Status</th>
-              <th className="text-left p-4 text-[#8E8E93] font-medium">Documents</th>
-              <th className="text-left p-4 text-[#8E8E93] font-medium">Rating</th>
-              <th className="text-right p-4 text-[#8E8E93] font-medium">Actions</th>
+            <tr className="border-b border-[var(--border)]">
+              <th className="text-left p-4 text-[var(--muted)] font-medium">Name</th>
+              <th className="text-left p-4 text-[var(--muted)] font-medium">Phone</th>
+              <th className="text-left p-4 text-[var(--muted)] font-medium">Type</th>
+              <th className="text-left p-4 text-[var(--muted)] font-medium">Status</th>
+              <th className="text-left p-4 text-[var(--muted)] font-medium">Documents</th>
+              <th className="text-left p-4 text-[var(--muted)] font-medium">Rating</th>
+              <th className="text-right p-4 text-[var(--muted)] font-medium">Actions</th>
             </tr>
           </thead>
           <tbody>
             {isLoading ? (
-              <tr><td colSpan={7} className="p-8 text-center text-[#8E8E93]">Loading...</td></tr>
+              <tr><td colSpan={7} className="p-8 text-center text-[var(--muted)]">Loading...</td></tr>
             ) : data?.data?.length === 0 ? (
-              <tr><td colSpan={7} className="p-8 text-center text-[#8E8E93]">No riders found</td></tr>
+              <tr><td colSpan={7} className="p-8 text-center text-[var(--muted)]">No riders found</td></tr>
             ) : (
               data?.data?.map((rider: any) => (
-                <tr key={rider.id} className="border-b border-[#38383A] hover:bg-white/5">
-                  <td className="p-4 font-medium"><Link href={`/riders/${rider.id}`} className="hover:text-[#E8192C] transition-colors">{rider.user?.firstName} {rider.user?.lastName}</Link></td>
+                <tr key={rider.id} className="border-b border-[var(--border)] hover:bg-white/5">
+                  <td className="p-4 font-medium"><Link href={`/riders/${rider.id}`} className="hover:text-[var(--accent)] transition-colors">{rider.user?.firstName} {rider.user?.lastName}</Link></td>
                   <td className="p-4">{rider.user?.phone || '\u2014'}</td>
                   <td className="p-4">{rider.riderType}</td>
                   <td className="p-4">
@@ -54,7 +54,7 @@ export default function RidersPage() {
                     {!rider.documentsVerified && (
                       <button
                         onClick={() => verifyMutation.mutate(rider.id)}
-                        className="px-3 py-1 bg-[#E8192C] text-white rounded-lg text-xs hover:bg-[#E8192C]/80"
+                        className="px-3 py-1 bg-[var(--accent)] text-white rounded-lg text-xs hover:bg-[var(--accent)]/80"
                       >
                         Verify Docs
                       </button>

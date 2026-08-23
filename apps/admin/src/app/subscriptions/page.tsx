@@ -21,13 +21,13 @@ function holder(s: any): { name: string; kind: string; href?: string } {
 function BillingEvents({ id }: { id: string }) {
   const { data, isLoading } = useQuery({ queryKey: ['billing-events', id], queryFn: () => fetchBillingEvents(id) });
   const events: any[] = data?.data ?? [];
-  if (isLoading) return <p className="text-xs text-[#8E8E93] p-3">Loading billing trail…</p>;
-  if (events.length === 0) return <p className="text-xs text-[#8E8E93] p-3">No billing events.</p>;
+  if (isLoading) return <p className="text-xs text-[var(--muted)] p-3">Loading billing trail…</p>;
+  if (events.length === 0) return <p className="text-xs text-[var(--muted)] p-3">No billing events.</p>;
   return (
     <div className="p-3 space-y-1.5">
       {events.map((e: any) => (
         <div key={e.id} className="flex items-center gap-3 text-xs">
-          <span className="text-[#8E8E93] w-36 shrink-0">{new Date(e.createdAt).toLocaleString()}</span>
+          <span className="text-[var(--muted)] w-36 shrink-0">{new Date(e.createdAt).toLocaleString()}</span>
           <span>{String(e.type ?? e.kind ?? '').replaceAll('_', ' ').toLowerCase()}</span>
           {e.amount != null && <span className="ml-auto font-medium">{gyd(e.amount)}</span>}
         </div>
@@ -63,7 +63,7 @@ export default function SubscriptionsPage() {
               key={f}
               onClick={() => setFilter(f)}
               className={`px-2.5 py-1 rounded-lg text-xs ${
-                filter === f ? 'bg-white text-black font-semibold' : 'bg-white/5 text-[#8E8E93] hover:bg-white/10'
+                filter === f ? 'bg-white text-black font-semibold' : 'bg-white/5 text-[var(--muted)] hover:bg-white/10'
               }`}
             >
               {f === 'ALL' ? 'All' : f.replaceAll('_', ' ').toLowerCase()}
@@ -71,54 +71,54 @@ export default function SubscriptionsPage() {
           ))}
         </div>
       </div>
-      <p className="text-[#8E8E93] text-sm mb-6">
+      <p className="text-[var(--muted)] text-sm mb-6">
         The weekly flat fee is Swift&apos;s only revenue — this queue is the business.
       </p>
 
-      <div className="bg-[#1C1C1E] rounded-xl border border-[#38383A] overflow-hidden">
+      <div className="bg-[var(--panel)] rounded-xl border border-[var(--border)] overflow-hidden">
         <table className="w-full text-sm">
           <thead>
-            <tr className="border-b border-[#38383A]">
-              <th className="text-left p-4 text-[#8E8E93] font-medium">Holder</th>
-              <th className="text-left p-4 text-[#8E8E93] font-medium">Status</th>
-              <th className="text-right p-4 text-[#8E8E93] font-medium">Weekly</th>
-              <th className="text-left p-4 text-[#8E8E93] font-medium">Next bill / trial end</th>
-              <th className="text-right p-4 text-[#8E8E93] font-medium">Actions</th>
+            <tr className="border-b border-[var(--border)]">
+              <th className="text-left p-4 text-[var(--muted)] font-medium">Holder</th>
+              <th className="text-left p-4 text-[var(--muted)] font-medium">Status</th>
+              <th className="text-right p-4 text-[var(--muted)] font-medium">Weekly</th>
+              <th className="text-left p-4 text-[var(--muted)] font-medium">Next bill / trial end</th>
+              <th className="text-right p-4 text-[var(--muted)] font-medium">Actions</th>
             </tr>
           </thead>
           <tbody>
             {isLoading ? (
-              <tr><td colSpan={5} className="p-8 text-center text-[#8E8E93]">Loading…</td></tr>
+              <tr><td colSpan={5} className="p-8 text-center text-[var(--muted)]">Loading…</td></tr>
             ) : rows.length === 0 ? (
-              <tr><td colSpan={5} className="p-8 text-center text-[#8E8E93]">No subscriptions match.</td></tr>
+              <tr><td colSpan={5} className="p-8 text-center text-[var(--muted)]">No subscriptions match.</td></tr>
             ) : (
               rows.map((s: any) => {
                 const h = holder(s);
                 const when = s.isTrialActive && s.trialEndDate ? `trial → ${new Date(s.trialEndDate).toLocaleDateString()}` : s.nextBillingDate ? new Date(s.nextBillingDate).toLocaleDateString() : '—';
                 return (
                   <Fragment key={s.id}>
-                    <tr className="border-b border-[#38383A] hover:bg-white/5">
+                    <tr className="border-b border-[var(--border)] hover:bg-white/5">
                       <td className="p-4">
                         {h.href ? (
-                          <Link href={h.href} className="font-medium hover:text-[#E8192C] transition-colors">
+                          <Link href={h.href} className="font-medium hover:text-[var(--accent)] transition-colors">
                             {h.name}
                           </Link>
                         ) : (
                           <span className="font-medium">{h.name}</span>
                         )}
-                        <span className="text-xs text-[#8E8E93] ml-2">{h.kind}</span>
+                        <span className="text-xs text-[var(--muted)] ml-2">{h.kind}</span>
                       </td>
                       <td className="p-4">
                         <StatusPill value={s.status} />
                         {s.feeWaived ? <span className="ml-2 text-xs text-sky-400">fee waived</span> : null}
                       </td>
                       <td className="p-4 text-right">{gyd(s.customRate ?? s.weeklyRate)}</td>
-                      <td className="p-4 text-[#8E8E93]">{when}</td>
+                      <td className="p-4 text-[var(--muted)]">{when}</td>
                       <td className="p-4 text-right">
                         <div className="flex gap-2 justify-end">
                           <button
                             onClick={() => setOpenTrail(openTrail === s.id ? null : s.id)}
-                            className="px-3 py-1 rounded-lg text-xs border border-[#38383A] hover:bg-white/10"
+                            className="px-3 py-1 rounded-lg text-xs border border-[var(--border)] hover:bg-white/10"
                           >
                             {openTrail === s.id ? 'Hide trail' : 'Billing trail'}
                           </button>
@@ -129,7 +129,7 @@ export default function SubscriptionsPage() {
                               if (amt && Number.isFinite(n) && n > 0) topup.mutate({ id: s.id, amount: n });
                             }}
                             disabled={topup.isPending}
-                            className="px-3 py-1 rounded-lg text-xs border border-[#38383A] hover:bg-white/10 disabled:opacity-50"
+                            className="px-3 py-1 rounded-lg text-xs border border-[var(--border)] hover:bg-white/10 disabled:opacity-50"
                           >
                             Top up
                           </button>
@@ -139,7 +139,7 @@ export default function SubscriptionsPage() {
                                 if (window.confirm(`Waive this period's fee for ${h.name}?`)) waive.mutate(s.id);
                               }}
                               disabled={waive.isPending}
-                              className="px-3 py-1 rounded-lg text-xs border border-[#38383A] hover:bg-white/10 disabled:opacity-50"
+                              className="px-3 py-1 rounded-lg text-xs border border-[var(--border)] hover:bg-white/10 disabled:opacity-50"
                             >
                               Waive fee
                             </button>
@@ -148,7 +148,7 @@ export default function SubscriptionsPage() {
                       </td>
                     </tr>
                     {openTrail === s.id && (
-                      <tr className="border-b border-[#38383A] bg-black/20">
+                      <tr className="border-b border-[var(--border)] bg-black/20">
                         <td colSpan={5}>
                           <BillingEvents id={s.id} />
                         </td>

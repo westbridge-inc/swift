@@ -21,7 +21,7 @@ export default function DashboardPage() {
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-2xl font-bold">Dashboard</h1>
-          <p className="text-[#8E8E93] text-sm">
+          <p className="text-[var(--muted)] text-sm">
             {new Date().toLocaleDateString('en-US', {
               weekday: 'long',
               year: 'numeric',

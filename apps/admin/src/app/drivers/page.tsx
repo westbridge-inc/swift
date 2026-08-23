@@ -21,30 +21,30 @@ export default function DriversPage() {
   return (
     <div>
       <h1 className="text-2xl font-bold mb-6">Drivers</h1>
-      <div className="bg-[#1C1C1E] rounded-xl border border-[#38383A] overflow-hidden">
+      <div className="bg-[var(--panel)] rounded-xl border border-[var(--border)] overflow-hidden">
         <table className="w-full text-sm">
           <thead>
-            <tr className="border-b border-[#38383A]">
-              <th className="text-left p-4 text-[#8E8E93] font-medium">Name</th>
-              <th className="text-left p-4 text-[#8E8E93] font-medium">Phone</th>
-              <th className="text-left p-4 text-[#8E8E93] font-medium">Vehicle</th>
-              <th className="text-left p-4 text-[#8E8E93] font-medium">Tier</th>
-              <th className="text-left p-4 text-[#8E8E93] font-medium">Status</th>
-              <th className="text-left p-4 text-[#8E8E93] font-medium">Documents</th>
-              <th className="text-left p-4 text-[#8E8E93] font-medium">Rating</th>
-              <th className="text-left p-4 text-[#8E8E93] font-medium">Total Trips</th>
-              <th className="text-right p-4 text-[#8E8E93] font-medium">Actions</th>
+            <tr className="border-b border-[var(--border)]">
+              <th className="text-left p-4 text-[var(--muted)] font-medium">Name</th>
+              <th className="text-left p-4 text-[var(--muted)] font-medium">Phone</th>
+              <th className="text-left p-4 text-[var(--muted)] font-medium">Vehicle</th>
+              <th className="text-left p-4 text-[var(--muted)] font-medium">Tier</th>
+              <th className="text-left p-4 text-[var(--muted)] font-medium">Status</th>
+              <th className="text-left p-4 text-[var(--muted)] font-medium">Documents</th>
+              <th className="text-left p-4 text-[var(--muted)] font-medium">Rating</th>
+              <th className="text-left p-4 text-[var(--muted)] font-medium">Total Trips</th>
+              <th className="text-right p-4 text-[var(--muted)] font-medium">Actions</th>
             </tr>
           </thead>
           <tbody>
             {isLoading ? (
-              <tr><td colSpan={9} className="p-8 text-center text-[#8E8E93]">Loading...</td></tr>
+              <tr><td colSpan={9} className="p-8 text-center text-[var(--muted)]">Loading...</td></tr>
             ) : data?.data?.length === 0 ? (
-              <tr><td colSpan={9} className="p-8 text-center text-[#8E8E93]">No drivers found</td></tr>
+              <tr><td colSpan={9} className="p-8 text-center text-[var(--muted)]">No drivers found</td></tr>
             ) : (
               data?.data?.map((driver: any) => (
-                <tr key={driver.id} className="border-b border-[#38383A] hover:bg-white/5">
-                  <td className="p-4 font-medium"><Link href={`/drivers/${driver.id}`} className="hover:text-[#E8192C] transition-colors">{driver.user?.firstName} {driver.user?.lastName}</Link></td>
+                <tr key={driver.id} className="border-b border-[var(--border)] hover:bg-white/5">
+                  <td className="p-4 font-medium"><Link href={`/drivers/${driver.id}`} className="hover:text-[var(--accent)] transition-colors">{driver.user?.firstName} {driver.user?.lastName}</Link></td>
                   <td className="p-4">{driver.user?.phone || '—'}</td>
                   <td className="p-4">{driver.vehicleMake} {driver.vehicleModel}</td>
                   <td className="p-4">
@@ -52,7 +52,7 @@ export default function DriversPage() {
                       value={driver.rideClass ?? 'ECONOMY'}
                       disabled={rideClassMutation.isPending}
                       onChange={(e) => rideClassMutation.mutate({ id: driver.id, rideClass: e.target.value })}
-                      className="bg-[#2C2C2E] border border-[#38383A] rounded-lg px-2 py-1 text-xs text-white disabled:opacity-50"
+                      className="bg-[var(--panel-2)] border border-[var(--border)] rounded-lg px-2 py-1 text-xs text-white disabled:opacity-50"
                     >
                       {RIDE_CLASSES.map((c) => (
                         <option key={c} value={c}>{c}</option>
@@ -76,7 +76,7 @@ export default function DriversPage() {
                       <button
                         onClick={() => verifyMutation.mutate(driver.id)}
                         disabled={verifyMutation.isPending}
-                        className="px-3 py-1 bg-[#E8192C] text-white rounded-lg text-xs hover:bg-[#E8192C]/80 disabled:opacity-50"
+                        className="px-3 py-1 bg-[var(--accent)] text-white rounded-lg text-xs hover:bg-[var(--accent)]/80 disabled:opacity-50"
                       >
                         Verify Docs
                       </button>

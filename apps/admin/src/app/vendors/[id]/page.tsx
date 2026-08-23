@@ -21,12 +21,12 @@ export default function VendorDetailPage({ params }: { params: Promise<{ id: str
 
   const v: any = data?.data;
 
-  if (isLoading) return <div className="h-40 rounded-xl bg-[#1C1C1E] border border-[#38383A] animate-pulse" />;
+  if (isLoading) return <div className="h-40 rounded-xl bg-[var(--panel)] border border-[var(--border)] animate-pulse" />;
   if (!v) {
     return (
       <div>
         <BackLink href="/vendors" label="Vendors" />
-        <p className="text-[#8E8E93]">Vendor not found.</p>
+        <p className="text-[var(--muted)]">Vendor not found.</p>
       </div>
     );
   }
@@ -43,12 +43,12 @@ export default function VendorDetailPage({ params }: { params: Promise<{ id: str
       <div className="flex flex-wrap items-center gap-3 mb-6">
         <h1 className="text-2xl font-bold">{v.name}</h1>
         <StatusPill value={v.status} />
-        <span className="px-2.5 py-1 rounded-full text-xs bg-white/10 text-[#8E8E93]">{String(v.vendorType).toLowerCase()}</span>
+        <span className="px-2.5 py-1 rounded-full text-xs bg-white/10 text-[var(--muted)]">{String(v.vendorType).toLowerCase()}</span>
         {v.isFeatured ? <span className="px-2.5 py-1 rounded-full text-xs bg-amber-500/15 text-amber-400">featured</span> : null}
         {v.acceptingOrders ? (
           <span className="px-2.5 py-1 rounded-full text-xs bg-emerald-500/15 text-emerald-400">accepting orders</span>
         ) : (
-          <span className="px-2.5 py-1 rounded-full text-xs bg-white/10 text-[#8E8E93]">not accepting</span>
+          <span className="px-2.5 py-1 rounded-full text-xs bg-white/10 text-[var(--muted)]">not accepting</span>
         )}
         <div className="ml-auto flex gap-2">
           {v.status === 'PENDING_APPROVAL' && (
@@ -70,13 +70,13 @@ export default function VendorDetailPage({ params }: { params: Promise<{ id: str
         <div className="lg:col-span-2 space-y-4">
           <Section title="Recent orders">
             {(v.recentOrders ?? []).length === 0 ? (
-              <p className="text-sm text-[#8E8E93]">No orders yet.</p>
+              <p className="text-sm text-[var(--muted)]">No orders yet.</p>
             ) : (
               <div className="space-y-2">
                 {v.recentOrders.map((o: any) => (
                   <Link key={o.id} href={`/orders/${o.id}`} className="flex items-center gap-3 p-2.5 rounded-lg bg-white/5 hover:bg-white/10 transition-colors text-sm">
                     <span className="font-mono">{o.orderNumber}</span>
-                    <span className="text-[#8E8E93] text-xs">{o.paymentMethod === 'MOBILE_MONEY' ? 'MMG' : 'cash'}</span>
+                    <span className="text-[var(--muted)] text-xs">{o.paymentMethod === 'MOBILE_MONEY' ? 'MMG' : 'cash'}</span>
                     <span className={`ml-auto px-2 py-0.5 rounded-full text-xs ${statusClass(o.status)}`}>{o.status}</span>
                     <span className="font-medium">{gyd(o.totalAmount)}</span>
                   </Link>
@@ -91,7 +91,7 @@ export default function VendorDetailPage({ params }: { params: Promise<{ id: str
                 {siblings.map((s: any) => (
                   <Link key={s.id} href={`/vendors/${s.id}`} className="flex justify-between p-2.5 rounded-lg bg-white/5 hover:bg-white/10 transition-colors">
                     <span>{s.name}</span>
-                    <span className="text-[#8E8E93]">{String(s.status).toLowerCase().replaceAll('_', ' ')} →</span>
+                    <span className="text-[var(--muted)]">{String(s.status).toLowerCase().replaceAll('_', ' ')} →</span>
                   </Link>
                 ))}
               </div>
@@ -109,7 +109,7 @@ export default function VendorDetailPage({ params }: { params: Promise<{ id: str
                 <Row label="Account" value={owner.status?.toLowerCase()} />
               </div>
             ) : (
-              <p className="text-sm text-[#8E8E93]">—</p>
+              <p className="text-sm text-[var(--muted)]">—</p>
             )}
           </Section>
 
@@ -122,7 +122,7 @@ export default function VendorDetailPage({ params }: { params: Promise<{ id: str
                 {sub.nextBillingDate ? <Row label="Next bill" value={new Date(sub.nextBillingDate).toLocaleDateString()} /> : null}
               </div>
             ) : (
-              <p className="text-sm text-[#8E8E93]">No subscription yet (starts on approval).</p>
+              <p className="text-sm text-[var(--muted)]">No subscription yet (starts on approval).</p>
             )}
           </Section>
 

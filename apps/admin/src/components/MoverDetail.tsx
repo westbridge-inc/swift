@@ -38,12 +38,12 @@ export function MoverDetail({ id, kind }: { id: string; kind: 'rider' | 'driver'
   const listHref = isDriver ? '/drivers' : '/riders';
   const listLabel = isDriver ? 'Drivers' : 'Riders';
 
-  if (isLoading) return <div className="h-40 rounded-xl bg-[#1C1C1E] border border-[#38383A] animate-pulse" />;
+  if (isLoading) return <div className="h-40 rounded-xl bg-[var(--panel)] border border-[var(--border)] animate-pulse" />;
   if (!m) {
     return (
       <div>
         <BackLink href={listHref} label={listLabel} />
-        <p className="text-[#8E8E93]">Not found.</p>
+        <p className="text-[var(--muted)]">Not found.</p>
       </div>
     );
   }
@@ -59,12 +59,12 @@ export function MoverDetail({ id, kind }: { id: string; kind: 'rider' | 'driver'
       <BackLink href={listHref} label={listLabel} />
 
       <div className="flex flex-wrap items-center gap-3 mb-6">
-        <div className="w-12 h-12 rounded-full bg-[#E8192C] flex items-center justify-center text-lg font-bold">
+        <div className="w-12 h-12 rounded-full bg-[var(--accent)] flex items-center justify-center text-lg font-bold">
           {name.charAt(0).toUpperCase()}
         </div>
         <div>
           <h1 className="text-2xl font-bold">{name}</h1>
-          <p className="text-sm text-[#8E8E93]">{m.user?.phone}</p>
+          <p className="text-sm text-[var(--muted)]">{m.user?.phone}</p>
         </div>
         {m.documentsVerified ? (
           <span className="px-2.5 py-1 rounded-full text-xs bg-emerald-500/15 text-emerald-400">docs verified</span>
@@ -74,7 +74,7 @@ export function MoverDetail({ id, kind }: { id: string; kind: 'rider' | 'driver'
         {m.isOnline ? (
           <span className="px-2.5 py-1 rounded-full text-xs bg-emerald-500/15 text-emerald-400">online</span>
         ) : (
-          <span className="px-2.5 py-1 rounded-full text-xs bg-white/10 text-[#8E8E93]">offline</span>
+          <span className="px-2.5 py-1 rounded-full text-xs bg-white/10 text-[var(--muted)]">offline</span>
         )}
         {isDriver && m.rideClass ? (
           <span className="px-2.5 py-1 rounded-full text-xs bg-sky-500/15 text-sky-400">{m.rideClass}</span>
@@ -95,19 +95,19 @@ export function MoverDetail({ id, kind }: { id: string; kind: 'rider' | 'driver'
         <div className="lg:col-span-2 space-y-4">
           <Section title="Latest earnings">
             {earnings.length === 0 ? (
-              <p className="text-sm text-[#8E8E93]">No earnings yet.</p>
+              <p className="text-sm text-[var(--muted)]">No earnings yet.</p>
             ) : (
               <>
                 <div className="space-y-2">
                   {earnings.map((e: any) => (
                     <div key={e.id} className="flex items-center gap-3 p-2.5 rounded-lg bg-white/5 text-sm">
                       <span>{String(e.type).replaceAll('_', ' ').toLowerCase()}</span>
-                      <span className="text-xs text-[#8E8E93]">{new Date(e.createdAt).toLocaleDateString()}</span>
+                      <span className="text-xs text-[var(--muted)]">{new Date(e.createdAt).toLocaleDateString()}</span>
                       <span className="ml-auto font-medium">{gyd(e.amount)}</span>
                     </div>
                   ))}
                 </div>
-                <p className="text-xs text-[#8E8E93] mt-3">
+                <p className="text-xs text-[var(--muted)] mt-3">
                   Last {earnings.length} entries · {gyd(earned)} — 100% theirs, Swift only charges the weekly fee.
                 </p>
               </>
@@ -125,14 +125,14 @@ export function MoverDetail({ id, kind }: { id: string; kind: 'rider' | 'driver'
                     }}
                     disabled={rideClass.isPending}
                     className={`px-4 py-2 rounded-lg text-sm transition-colors disabled:opacity-50 ${
-                      m.rideClass === cls ? 'bg-[#E8192C] text-white' : 'border border-[#38383A] text-[#8E8E93] hover:bg-white/10'
+                      m.rideClass === cls ? 'bg-[var(--accent)] text-white' : 'border border-[var(--border)] text-[var(--muted)] hover:bg-white/10'
                     }`}
                   >
                     {cls}
                   </button>
                 ))}
               </div>
-              <p className="text-xs text-[#8E8E93] mt-3">
+              <p className="text-xs text-[var(--muted)] mt-3">
                 Class assignment is manual — confirm the vehicle matches before upgrading.
               </p>
             </Section>
@@ -159,7 +159,7 @@ export function MoverDetail({ id, kind }: { id: string; kind: 'rider' | 'driver'
                 {sub.nextBillingDate ? <Row label="Next bill" value={new Date(sub.nextBillingDate).toLocaleDateString()} /> : null}
               </div>
             ) : (
-              <p className="text-sm text-[#8E8E93]">No subscription yet (starts on verification).</p>
+              <p className="text-sm text-[var(--muted)]">No subscription yet (starts on verification).</p>
             )}
           </Section>
 

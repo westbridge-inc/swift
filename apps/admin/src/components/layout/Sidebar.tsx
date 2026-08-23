@@ -81,16 +81,16 @@ export function Sidebar() {
   const pathname = usePathname();
 
   return (
-    <aside className="w-64 bg-[#1C1C1E] border-r border-[#38383A] flex flex-col">
-      <div className="p-6 border-b border-[#38383A]">
+    <aside className="w-64 bg-[var(--panel)] border-r border-[var(--border)] flex flex-col">
+      <div className="p-6 border-b border-[var(--border)]">
         <h1 className="text-xl font-bold">
-          <span className="text-[#E8192C]">Swift</span> Admin
+          <span className="text-[var(--accent)]">Swift</span> Admin
         </h1>
       </div>
       <nav className="flex-1 p-4 space-y-4 overflow-y-auto">
         {NAV_SECTIONS.map((section) => (
           <div key={section.title}>
-            <p className="px-3 pb-1 text-[10px] font-semibold tracking-widest text-[#8E8E93]/70">
+            <p className="px-3 pb-1 text-[10px] font-semibold tracking-widest text-[var(--muted)]/70">
               {section.title.toUpperCase()}
             </p>
             <div className="space-y-1">
@@ -102,8 +102,8 @@ export function Sidebar() {
                     href={item.href}
                     className={`flex items-center gap-3 px-3 py-2 rounded-lg text-sm transition-colors ${
                       isActive
-                        ? 'bg-[#E8192C]/10 text-[#E8192C]'
-                        : 'text-[#8E8E93] hover:text-white hover:bg-white/5'
+                        ? 'bg-[var(--accent)]/10 text-[var(--accent)]'
+                        : 'text-[var(--muted)] hover:text-white hover:bg-white/5'
                     }`}
                   >
                     <item.icon size={18} />

@@ -19,10 +19,10 @@ function dot(color: string, ring = false) {
 }
 const ICONS = {
   riderFree: dot('#34C759'),
-  riderBusy: dot('#FF9F0A'),
-  driverFree: dot('#0A84FF'),
+  riderBusy: dot('var(--warn)'),
+  driverFree: dot('var(--accent)'),
   driverBusy: dot('#BF5AF2'),
-  pickup: dot('#8E8E93', true),
+  pickup: dot('var(--muted)', true),
 };
 
 export function OpsMap({ data }: { data?: LiveOps }) {
@@ -30,7 +30,7 @@ export function OpsMap({ data }: { data?: LiveOps }) {
   const orders = (data?.activeOrders ?? []).filter((o) => o.pickupLat != null && o.deliveryLat != null);
 
   return (
-    <MapContainer center={CENTER} zoom={13} style={{ height: '100%', width: '100%', background: '#0A0A0A' }} zoomControl={false}>
+    <MapContainer center={CENTER} zoom={13} style={{ height: '100%', width: '100%', background: 'var(--ink)' }} zoomControl={false}>
       {/* CARTO dark basemap keeps the console's night theme. */}
       <TileLayer
         url="https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png"
@@ -43,7 +43,7 @@ export function OpsMap({ data }: { data?: LiveOps }) {
             [o.pickupLat as number, o.pickupLng as number],
             [o.deliveryLat as number, o.deliveryLng as number],
           ]}
-          pathOptions={{ color: '#E8192C', weight: 1.5, opacity: 0.45, dashArray: '4 6' }}
+          pathOptions={{ color: 'var(--accent)', weight: 1.5, opacity: 0.45, dashArray: '4 6' }}
         />
       ))}
       {orders.map((o) =>

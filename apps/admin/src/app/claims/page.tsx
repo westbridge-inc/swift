@@ -39,28 +39,28 @@ export default function ClaimsPage() {
   return (
     <div>
       <h1 className="text-2xl font-bold mb-1">Guarantee claims</h1>
-      <p className="text-[#8E8E93] text-sm mb-6">
+      <p className="text-[var(--muted)] text-sm mb-6">
         Failed cash handovers under the company guarantee — GPS-evidenced, guardrail-flagged. Approve, reject, or mark the payout done.
       </p>
 
       {/* Founder cockpit numbers (cash-rules founderMetrics) */}
       <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
-        <div className="bg-[#1C1C1E] rounded-xl p-6 border border-[#38383A]">
-          <p className="text-[#8E8E93] text-sm">Failed-payment rate (30d)</p>
+        <div className="bg-[var(--panel)] rounded-xl p-6 border border-[var(--border)]">
+          <p className="text-[var(--muted)] text-sm">Failed-payment rate (30d)</p>
           <p className="text-3xl font-bold mt-1">
             {metricsQ.isLoading ? '—' : m.failedPaymentPct != null ? `${Number(m.failedPaymentPct).toFixed(1)}%` : '—'}
           </p>
-          <p className="text-[#8E8E93] text-xs mt-1">failed handovers vs completed</p>
+          <p className="text-[var(--muted)] text-xs mt-1">failed handovers vs completed</p>
         </div>
-        <div className="bg-[#1C1C1E] rounded-xl p-6 border border-[#38383A]">
-          <p className="text-[#8E8E93] text-sm">Guarantee payouts (7d)</p>
+        <div className="bg-[var(--panel)] rounded-xl p-6 border border-[var(--border)]">
+          <p className="text-[var(--muted)] text-sm">Guarantee payouts (7d)</p>
           <p className="text-3xl font-bold mt-1">{metricsQ.isLoading ? '—' : gyd(m.guaranteePayoutsThisWeek?.total ?? 0)}</p>
-          <p className="text-[#8E8E93] text-xs mt-1">{m.guaranteePayoutsThisWeek?.count ?? 0} approved claims</p>
+          <p className="text-[var(--muted)] text-xs mt-1">{m.guaranteePayoutsThisWeek?.count ?? 0} approved claims</p>
         </div>
-        <div className="bg-[#1C1C1E] rounded-xl p-6 border border-[#38383A]">
-          <p className="text-[#8E8E93] text-sm">Riders with claims (30d)</p>
+        <div className="bg-[var(--panel)] rounded-xl p-6 border border-[var(--border)]">
+          <p className="text-[var(--muted)] text-sm">Riders with claims (30d)</p>
           <p className="text-3xl font-bold mt-1">{metricsQ.isLoading ? '—' : Number((m.claimsByRider ?? []).length).toLocaleString()}</p>
-          <p className="text-[#8E8E93] text-xs mt-1">repeat filers surface first</p>
+          <p className="text-[var(--muted)] text-xs mt-1">repeat filers surface first</p>
         </div>
       </div>
 
@@ -70,7 +70,7 @@ export default function ClaimsPage() {
             key={f}
             onClick={() => setFilter(f)}
             className={`px-2.5 py-1 rounded-lg text-xs ${
-              filter === f ? 'bg-white text-black font-semibold' : 'bg-white/5 text-[#8E8E93] hover:bg-white/10'
+              filter === f ? 'bg-white text-black font-semibold' : 'bg-white/5 text-[var(--muted)] hover:bg-white/10'
             }`}
           >
             {f.replaceAll('_', ' ').toLowerCase()}
@@ -80,18 +80,18 @@ export default function ClaimsPage() {
 
       <div className="space-y-3">
         {isLoading ? (
-          <div className="h-24 rounded-xl bg-[#1C1C1E] border border-[#38383A] animate-pulse" />
+          <div className="h-24 rounded-xl bg-[var(--panel)] border border-[var(--border)] animate-pulse" />
         ) : rows.length === 0 ? (
-          <div className="bg-[#1C1C1E] rounded-xl border border-[#38383A] p-8 text-center text-[#8E8E93]">
+          <div className="bg-[var(--panel)] rounded-xl border border-[var(--border)] p-8 text-center text-[var(--muted)]">
             No {filter.replaceAll('_', ' ').toLowerCase()} claims.
           </div>
         ) : (
           rows.map((c: any) => (
-            <div key={c.id} className="bg-[#1C1C1E] rounded-xl border border-[#38383A] p-5">
+            <div key={c.id} className="bg-[var(--panel)] rounded-xl border border-[var(--border)] p-5">
               <div className="flex flex-wrap items-center gap-3">
                 <span className="text-xl font-bold">{gyd(c.amount)}</span>
                 <StatusPill value={c.status} />
-                <span className="px-2.5 py-1 rounded-full text-xs bg-white/10 text-[#8E8E93]">
+                <span className="px-2.5 py-1 rounded-full text-xs bg-white/10 text-[var(--muted)]">
                   {String(c.reason).replaceAll('_', ' ')}
                 </span>
                 {(c.flags ?? []).map((f: string) => (
@@ -99,10 +99,10 @@ export default function ClaimsPage() {
                     {f.replaceAll('_', ' ')}
                   </span>
                 ))}
-                <span className="text-xs text-[#8E8E93] ml-auto">{new Date(c.createdAt).toLocaleString()}</span>
+                <span className="text-xs text-[var(--muted)] ml-auto">{new Date(c.createdAt).toLocaleString()}</span>
               </div>
-              <div className="flex flex-wrap items-center gap-4 mt-3 text-sm text-[#8E8E93]">
-                <Link href={`/orders/${c.orderId}`} className="hover:text-[#E8192C] transition-colors">
+              <div className="flex flex-wrap items-center gap-4 mt-3 text-sm text-[var(--muted)]">
+                <Link href={`/orders/${c.orderId}`} className="hover:text-[var(--accent)] transition-colors">
                   View order →
                 </Link>
                 <a
@@ -125,7 +125,7 @@ export default function ClaimsPage() {
                           if (window.confirm(`Approve this ${gyd(c.amount)} claim?`)) approve.mutate(c.id);
                         }}
                         disabled={busy}
-                        className="px-4 py-2 rounded-lg text-sm border border-[#38383A] hover:bg-white/10 disabled:opacity-50"
+                        className="px-4 py-2 rounded-lg text-sm border border-[var(--border)] hover:bg-white/10 disabled:opacity-50"
                       >
                         Approve
                       </button>
@@ -135,7 +135,7 @@ export default function ClaimsPage() {
                           if (reason && reason.trim().length >= 3) reject.mutate({ id: c.id, reason: reason.trim() });
                         }}
                         disabled={busy}
-                        className="px-4 py-2 rounded-lg text-sm border border-[#38383A] hover:bg-white/10 disabled:opacity-50"
+                        className="px-4 py-2 rounded-lg text-sm border border-[var(--border)] hover:bg-white/10 disabled:opacity-50"
                       >
                         Reject
                       </button>
@@ -148,7 +148,7 @@ export default function ClaimsPage() {
                         if (window.confirm(`Mark this ${gyd(c.amount)} claim as PAID?`)) pay.mutate({ id: c.id, reference: ref || undefined });
                       }}
                       disabled={busy}
-                      className="px-4 py-2 rounded-lg text-sm bg-[#E8192C] hover:bg-[#E8192C]/80 disabled:opacity-50"
+                      className="px-4 py-2 rounded-lg text-sm bg-[var(--accent)] hover:bg-[var(--accent)]/80 disabled:opacity-50"
                     >
                       Mark paid
                     </button>

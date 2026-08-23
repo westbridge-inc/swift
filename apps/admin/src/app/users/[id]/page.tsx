@@ -21,12 +21,12 @@ export default function UserDetailPage({ params }: { params: Promise<{ id: strin
 
   const u: any = data?.data;
 
-  if (isLoading) return <div className="h-40 rounded-xl bg-[#1C1C1E] border border-[#38383A] animate-pulse" />;
+  if (isLoading) return <div className="h-40 rounded-xl bg-[var(--panel)] border border-[var(--border)] animate-pulse" />;
   if (!u) {
     return (
       <div>
         <BackLink href="/users" label="Users" />
-        <p className="text-[#8E8E93]">User not found.</p>
+        <p className="text-[var(--muted)]">User not found.</p>
       </div>
     );
   }
@@ -39,18 +39,18 @@ export default function UserDetailPage({ params }: { params: Promise<{ id: strin
       <BackLink href="/users" label="Users" />
 
       <div className="flex flex-wrap items-center gap-3 mb-6">
-        <div className="w-12 h-12 rounded-full bg-[#E8192C] flex items-center justify-center text-lg font-bold">
+        <div className="w-12 h-12 rounded-full bg-[var(--accent)] flex items-center justify-center text-lg font-bold">
           {name.charAt(0).toUpperCase()}
         </div>
         <div>
           <h1 className="text-2xl font-bold">{name}</h1>
-          <p className="text-sm text-[#8E8E93]">
+          <p className="text-sm text-[var(--muted)]">
             {u.phone}
             {u.email ? ` · ${u.email}` : ''}
           </p>
         </div>
         <StatusPill value={u.status} />
-        <span className="px-2.5 py-1 rounded-full text-xs bg-white/10 text-[#8E8E93]">
+        <span className="px-2.5 py-1 rounded-full text-xs bg-white/10 text-[var(--muted)]">
           {(u.roles ?? []).join(' · ').toLowerCase()}
         </span>
         {u.trustLevel ? (
@@ -72,13 +72,13 @@ export default function UserDetailPage({ params }: { params: Promise<{ id: strin
         <div className="lg:col-span-2 space-y-4">
           <Section title="Recent orders">
             {(u.orders ?? []).length === 0 ? (
-              <p className="text-sm text-[#8E8E93]">No orders.</p>
+              <p className="text-sm text-[var(--muted)]">No orders.</p>
             ) : (
               <div className="space-y-2">
                 {u.orders.map((o: any) => (
                   <Link key={o.id} href={`/orders/${o.id}`} className="flex items-center gap-3 p-2.5 rounded-lg bg-white/5 hover:bg-white/10 transition-colors text-sm">
                     <span className="font-mono">{o.orderNumber}</span>
-                    <span className="text-[#8E8E93] text-xs">{String(o.orderType).replaceAll('_', ' ').toLowerCase()}</span>
+                    <span className="text-[var(--muted)] text-xs">{String(o.orderType).replaceAll('_', ' ').toLowerCase()}</span>
                     <span className={`ml-auto px-2 py-0.5 rounded-full text-xs ${statusClass(o.status)}`}>{o.status}</span>
                     <span className="font-medium">{gyd(o.totalAmount)}</span>
                   </Link>
@@ -89,13 +89,13 @@ export default function UserDetailPage({ params }: { params: Promise<{ id: strin
 
           <Section title="Strikes">
             {(u.strikes ?? []).length === 0 ? (
-              <p className="text-sm text-[#8E8E93]">Clean record — no strikes.</p>
+              <p className="text-sm text-[var(--muted)]">Clean record — no strikes.</p>
             ) : (
               <div className="space-y-2">
                 {u.strikes.map((s: any) => (
                   <div key={s.id} className="p-2.5 rounded-lg bg-red-500/5 border border-red-500/20 text-sm">
                     <p className="text-red-400">{String(s.reason).replaceAll('_', ' ')}</p>
-                    <p className="text-xs text-[#8E8E93] mt-0.5">{new Date(s.createdAt).toLocaleString()}</p>
+                    <p className="text-xs text-[var(--muted)] mt-0.5">{new Date(s.createdAt).toLocaleString()}</p>
                   </div>
                 ))}
               </div>
@@ -109,23 +109,23 @@ export default function UserDetailPage({ params }: { params: Promise<{ id: strin
               {u.rider ? (
                 <Link href={`/riders/${u.rider.id}`} className="flex justify-between p-2.5 rounded-lg bg-white/5 hover:bg-white/10 transition-colors">
                   <span>Rider profile</span>
-                  <span className="text-[#8E8E93]">{u.rider.documentsVerified ? 'verified' : 'unverified'} →</span>
+                  <span className="text-[var(--muted)]">{u.rider.documentsVerified ? 'verified' : 'unverified'} →</span>
                 </Link>
               ) : null}
               {u.driver ? (
                 <Link href={`/drivers/${u.driver.id}`} className="flex justify-between p-2.5 rounded-lg bg-white/5 hover:bg-white/10 transition-colors">
                   <span>Driver profile</span>
-                  <span className="text-[#8E8E93]">{u.driver.documentsVerified ? 'verified' : 'unverified'} →</span>
+                  <span className="text-[var(--muted)]">{u.driver.documentsVerified ? 'verified' : 'unverified'} →</span>
                 </Link>
               ) : null}
               {(u.vendorOwner?.vendors ?? []).map((v: any) => (
                 <Link key={v.id} href={`/vendors/${v.id}`} className="flex justify-between p-2.5 rounded-lg bg-white/5 hover:bg-white/10 transition-colors">
                   <span>{v.name}</span>
-                  <span className="text-[#8E8E93]">{String(v.status).toLowerCase().replaceAll('_', ' ')} →</span>
+                  <span className="text-[var(--muted)]">{String(v.status).toLowerCase().replaceAll('_', ' ')} →</span>
                 </Link>
               ))}
               {!u.rider && !u.driver && (u.vendorOwner?.vendors ?? []).length === 0 && (
-                <p className="text-[#8E8E93]">Customer only.</p>
+                <p className="text-[var(--muted)]">Customer only.</p>
               )}
             </div>
           </Section>
@@ -142,12 +142,12 @@ export default function UserDetailPage({ params }: { params: Promise<{ id: strin
 
           <Section title="Addresses">
             {(u.addresses ?? []).length === 0 ? (
-              <p className="text-sm text-[#8E8E93]">None saved.</p>
+              <p className="text-sm text-[var(--muted)]">None saved.</p>
             ) : (
               <div className="space-y-2 text-sm">
                 {u.addresses.map((a: any) => (
                   <div key={a.id} className="p-2.5 rounded-lg bg-white/5">
-                    <p className="text-xs text-[#8E8E93]">{a.label}</p>
+                    <p className="text-xs text-[var(--muted)]">{a.label}</p>
                     <p>{[a.addressLine1, a.city].filter(Boolean).join(', ')}</p>
                   </div>
                 ))}

@@ -21,39 +21,39 @@ export default function UsersPage() {
   return (
     <div>
       <h1 className="text-2xl font-bold mb-6">Users</h1>
-      <div className="bg-[#1C1C1E] rounded-xl border border-[#38383A] overflow-hidden">
+      <div className="bg-[var(--panel)] rounded-xl border border-[var(--border)] overflow-hidden">
         <table className="w-full text-sm">
           <thead>
-            <tr className="border-b border-[#38383A]">
-              <th className="text-left p-4 text-[#8E8E93] font-medium">Name</th>
-              <th className="text-left p-4 text-[#8E8E93] font-medium">Email</th>
-              <th className="text-left p-4 text-[#8E8E93] font-medium">Phone</th>
-              <th className="text-left p-4 text-[#8E8E93] font-medium">Role</th>
-              <th className="text-left p-4 text-[#8E8E93] font-medium">Status</th>
-              <th className="text-right p-4 text-[#8E8E93] font-medium">Joined</th>
-              <th className="text-right p-4 text-[#8E8E93] font-medium">Actions</th>
+            <tr className="border-b border-[var(--border)]">
+              <th className="text-left p-4 text-[var(--muted)] font-medium">Name</th>
+              <th className="text-left p-4 text-[var(--muted)] font-medium">Email</th>
+              <th className="text-left p-4 text-[var(--muted)] font-medium">Phone</th>
+              <th className="text-left p-4 text-[var(--muted)] font-medium">Role</th>
+              <th className="text-left p-4 text-[var(--muted)] font-medium">Status</th>
+              <th className="text-right p-4 text-[var(--muted)] font-medium">Joined</th>
+              <th className="text-right p-4 text-[var(--muted)] font-medium">Actions</th>
             </tr>
           </thead>
           <tbody>
             {isLoading ? (
-              <tr><td colSpan={7} className="p-8 text-center text-[#8E8E93]">Loading...</td></tr>
+              <tr><td colSpan={7} className="p-8 text-center text-[var(--muted)]">Loading...</td></tr>
             ) : data?.data?.length === 0 ? (
-              <tr><td colSpan={7} className="p-8 text-center text-[#8E8E93]">No users found</td></tr>
+              <tr><td colSpan={7} className="p-8 text-center text-[var(--muted)]">No users found</td></tr>
             ) : (
               data?.data?.map((user: AdminUser) => (
-                <tr key={user.id} className="border-b border-[#38383A] hover:bg-white/5">
-                  <td className="p-4 font-medium"><Link href={`/users/${user.id}`} className="hover:text-[#E8192C] transition-colors">{user.firstName} {user.lastName}</Link></td>
+                <tr key={user.id} className="border-b border-[var(--border)] hover:bg-white/5">
+                  <td className="p-4 font-medium"><Link href={`/users/${user.id}`} className="hover:text-[var(--accent)] transition-colors">{user.firstName} {user.lastName}</Link></td>
                   <td className="p-4">{user.email}</td>
                   <td className="p-4">{user.phone || '\u2014'}</td>
                   <td className="p-4">
                     <span className="px-2 py-1 rounded-full text-xs bg-white/10">{(user.activeRole ?? '—').toLowerCase().replace(/_/g, ' ')}</span>
                   </td>
                   <td className="p-4">
-                    <span className={`px-2 py-1 rounded-full text-xs ${STATUS_CLASS[user.status] ?? 'bg-white/10 text-[#8E8E93]'}`}>
+                    <span className={`px-2 py-1 rounded-full text-xs ${STATUS_CLASS[user.status] ?? 'bg-white/10 text-[var(--muted)]'}`}>
                       {(user.status ?? 'UNKNOWN').toLowerCase()}
                     </span>
                   </td>
-                  <td className="p-4 text-right text-[#8E8E93]">
+                  <td className="p-4 text-right text-[var(--muted)]">
                     {new Date(user.createdAt).toLocaleDateString()}
                   </td>
                   <td className="p-4 text-right">
@@ -61,7 +61,7 @@ export default function UsersPage() {
                       <button
                         onClick={() => suspendMutation.mutate({ id: user.id, suspended: true })}
                         disabled={suspendMutation.isPending}
-                        className="px-3 py-1 rounded-lg text-xs border border-[#38383A] text-white hover:bg-white/10 disabled:opacity-50"
+                        className="px-3 py-1 rounded-lg text-xs border border-[var(--border)] text-white hover:bg-white/10 disabled:opacity-50"
                       >
                         Unsuspend
                       </button>
@@ -69,12 +69,12 @@ export default function UsersPage() {
                       <button
                         onClick={() => { if (window.confirm(`Suspend ${user.firstName} ${user.lastName}?`)) suspendMutation.mutate({ id: user.id, suspended: false }); }}
                         disabled={suspendMutation.isPending}
-                        className="px-3 py-1 rounded-lg text-xs bg-[#E8192C] text-white hover:bg-[#E8192C]/80 disabled:opacity-50"
+                        className="px-3 py-1 rounded-lg text-xs bg-[var(--accent)] text-white hover:bg-[var(--accent)]/80 disabled:opacity-50"
                       >
                         Suspend
                       </button>
                     ) : (
-                      <span className="text-[#8E8E93]">—</span>
+                      <span className="text-[var(--muted)]">—</span>
                     )}
                   </td>
                 </tr>

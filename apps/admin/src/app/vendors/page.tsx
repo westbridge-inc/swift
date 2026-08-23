@@ -15,25 +15,25 @@ export default function VendorsPage() {
   return (
     <div>
       <h1 className="text-2xl font-bold mb-6">Vendors</h1>
-      <div className="bg-[#1C1C1E] rounded-xl border border-[#38383A] overflow-hidden">
+      <div className="bg-[var(--panel)] rounded-xl border border-[var(--border)] overflow-hidden">
         <table className="w-full text-sm">
           <thead>
-            <tr className="border-b border-[#38383A]">
-              <th className="text-left p-4 text-[#8E8E93] font-medium">Name</th>
-              <th className="text-left p-4 text-[#8E8E93] font-medium">Type</th>
-              <th className="text-left p-4 text-[#8E8E93] font-medium">Status</th>
-              <th className="text-left p-4 text-[#8E8E93] font-medium">Rating</th>
-              <th className="text-left p-4 text-[#8E8E93] font-medium">Orders</th>
-              <th className="text-right p-4 text-[#8E8E93] font-medium">Actions</th>
+            <tr className="border-b border-[var(--border)]">
+              <th className="text-left p-4 text-[var(--muted)] font-medium">Name</th>
+              <th className="text-left p-4 text-[var(--muted)] font-medium">Type</th>
+              <th className="text-left p-4 text-[var(--muted)] font-medium">Status</th>
+              <th className="text-left p-4 text-[var(--muted)] font-medium">Rating</th>
+              <th className="text-left p-4 text-[var(--muted)] font-medium">Orders</th>
+              <th className="text-right p-4 text-[var(--muted)] font-medium">Actions</th>
             </tr>
           </thead>
           <tbody>
             {isLoading ? (
-              <tr><td colSpan={6} className="p-8 text-center text-[#8E8E93]">Loading...</td></tr>
+              <tr><td colSpan={6} className="p-8 text-center text-[var(--muted)]">Loading...</td></tr>
             ) : (
               data?.data?.map((vendor: any) => (
-                <tr key={vendor.id} className="border-b border-[#38383A] hover:bg-white/5">
-                  <td className="p-4 font-medium"><Link href={`/vendors/${vendor.id}`} className="hover:text-[#E8192C] transition-colors">{vendor.name}</Link></td>
+                <tr key={vendor.id} className="border-b border-[var(--border)] hover:bg-white/5">
+                  <td className="p-4 font-medium"><Link href={`/vendors/${vendor.id}`} className="hover:text-[var(--accent)] transition-colors">{vendor.name}</Link></td>
                   <td className="p-4">{vendor.vendorType}</td>
                   <td className="p-4">
                     <span className={`px-2 py-1 rounded-full text-xs ${
@@ -48,7 +48,7 @@ export default function VendorsPage() {
                     {vendor.status === 'PENDING_APPROVAL' && (
                       <button
                         onClick={() => approveMutation.mutate(vendor.id)}
-                        className="px-3 py-1 bg-[#E8192C] text-white rounded-lg text-xs hover:bg-[#E8192C]/80"
+                        className="px-3 py-1 bg-[var(--accent)] text-white rounded-lg text-xs hover:bg-[var(--accent)]/80"
                       >
                         Approve
                       </button>

@@ -83,7 +83,7 @@ export function GlobalSearch() {
 
   return (
     <div ref={boxRef} className="relative w-96">
-      <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-[#8E8E93]" size={18} />
+      <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-[var(--muted)]" size={18} />
       <input
         ref={inputRef}
         type="text"
@@ -94,29 +94,29 @@ export function GlobalSearch() {
         }}
         onFocus={() => setOpen(true)}
         placeholder="Search orders, users, vendors…"
-        className="w-full bg-[#2C2C2E] text-white pl-10 pr-12 py-2 rounded-lg text-sm border border-[#38383A] focus:border-[#E8192C] focus:outline-none"
+        className="w-full bg-[var(--panel-2)] text-white pl-10 pr-12 py-2 rounded-lg text-sm border border-[var(--border)] focus:border-[var(--accent)] focus:outline-none"
       />
-      <kbd className="absolute right-3 top-1/2 -translate-y-1/2 text-[10px] text-[#8E8E93] border border-[#38383A] rounded px-1.5 py-0.5">
+      <kbd className="absolute right-3 top-1/2 -translate-y-1/2 text-[10px] text-[var(--muted)] border border-[var(--border)] rounded px-1.5 py-0.5">
         ⌘K
       </kbd>
 
       {showPanel && (
-        <div className="absolute top-11 left-0 right-0 z-50 rounded-xl border border-[#38383A] bg-[#1C1C1E] shadow-2xl p-2 max-h-[70vh] overflow-auto">
+        <div className="absolute top-11 left-0 right-0 z-50 rounded-xl border border-[var(--border)] bg-[var(--panel)] shadow-2xl p-2 max-h-[70vh] overflow-auto">
           {isFetching && !hasResults ? (
-            <p className="px-3 py-2 text-sm text-[#8E8E93]">Searching…</p>
+            <p className="px-3 py-2 text-sm text-[var(--muted)]">Searching…</p>
           ) : !hasResults ? (
-            <p className="px-3 py-2 text-sm text-[#8E8E93]">Nothing matches “{debounced}”.</p>
+            <p className="px-3 py-2 text-sm text-[var(--muted)]">Nothing matches “{debounced}”.</p>
           ) : (
             <>
               {r!.orders.length > 0 && (
                 <div className="mb-1">
-                  <p className="px-3 pt-1 pb-1 text-[10px] font-semibold tracking-widest text-[#8E8E93]">ORDERS</p>
+                  <p className="px-3 pt-1 pb-1 text-[10px] font-semibold tracking-widest text-[var(--muted)]">ORDERS</p>
                   {r!.orders.map((o) => (
                     <button key={o.id} className={rowCls} onClick={() => go(`/orders/${o.id}`)}>
-                      <ShoppingCart size={15} className="text-[#8E8E93] shrink-0" />
+                      <ShoppingCart size={15} className="text-[var(--muted)] shrink-0" />
                       <span className="font-mono">{o.orderNumber}</span>
-                      <span className="text-[#8E8E93]">{o.orderType.replaceAll('_', ' ').toLowerCase()}</span>
-                      <span className="ml-auto flex items-center gap-2 text-[#8E8E93]">
+                      <span className="text-[var(--muted)]">{o.orderType.replaceAll('_', ' ').toLowerCase()}</span>
+                      <span className="ml-auto flex items-center gap-2 text-[var(--muted)]">
                         ${Number(o.totalAmount).toLocaleString()}
                         <span className={`w-1.5 h-1.5 rounded-full ${STATUS_DOT[o.status] ?? 'bg-sky-400'}`} />
                       </span>
@@ -126,13 +126,13 @@ export function GlobalSearch() {
               )}
               {r!.users.length > 0 && (
                 <div className="mb-1">
-                  <p className="px-3 pt-1 pb-1 text-[10px] font-semibold tracking-widest text-[#8E8E93]">USERS</p>
+                  <p className="px-3 pt-1 pb-1 text-[10px] font-semibold tracking-widest text-[var(--muted)]">USERS</p>
                   {r!.users.map((u) => (
                     <button key={u.id} className={rowCls} onClick={() => go(`/users/${u.id}`)}>
-                      <User size={15} className="text-[#8E8E93] shrink-0" />
+                      <User size={15} className="text-[var(--muted)] shrink-0" />
                       <span>{[u.firstName, u.lastName].filter(Boolean).join(' ')}</span>
-                      <span className="text-[#8E8E93]">{u.phone}</span>
-                      <span className="ml-auto flex items-center gap-2 text-[#8E8E93]">
+                      <span className="text-[var(--muted)]">{u.phone}</span>
+                      <span className="ml-auto flex items-center gap-2 text-[var(--muted)]">
                         {u.roles.join(' · ').toLowerCase()}
                         <span className={`w-1.5 h-1.5 rounded-full ${STATUS_DOT[u.status] ?? 'bg-sky-400'}`} />
                       </span>
@@ -142,12 +142,12 @@ export function GlobalSearch() {
               )}
               {r!.vendors.length > 0 && (
                 <div>
-                  <p className="px-3 pt-1 pb-1 text-[10px] font-semibold tracking-widest text-[#8E8E93]">VENDORS</p>
+                  <p className="px-3 pt-1 pb-1 text-[10px] font-semibold tracking-widest text-[var(--muted)]">VENDORS</p>
                   {r!.vendors.map((v) => (
                     <button key={v.id} className={rowCls} onClick={() => go(`/vendors/${v.id}`)}>
-                      <Store size={15} className="text-[#8E8E93] shrink-0" />
+                      <Store size={15} className="text-[var(--muted)] shrink-0" />
                       <span>{v.name}</span>
-                      <span className="text-[#8E8E93]">
+                      <span className="text-[var(--muted)]">
                         {v.vendorType.toLowerCase()}
                         {v.city ? ` · ${v.city}` : ''}
                       </span>

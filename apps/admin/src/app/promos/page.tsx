@@ -46,32 +46,32 @@ export default function PromosPage() {
         <h1 className="text-2xl font-bold">Promo Codes</h1>
         <button
           onClick={() => { setError(null); setOpen(true); }}
-          className="px-4 py-2 bg-[#E8192C] text-white rounded-lg text-sm hover:bg-[#E8192C]/80"
+          className="px-4 py-2 bg-[var(--accent)] text-white rounded-lg text-sm hover:bg-[var(--accent)]/80"
         >
           Create Promo
         </button>
       </div>
 
-      <div className="bg-[#1C1C1E] rounded-xl border border-[#38383A] overflow-hidden">
+      <div className="bg-[var(--panel)] rounded-xl border border-[var(--border)] overflow-hidden">
         <table className="w-full text-sm">
           <thead>
-            <tr className="border-b border-[#38383A]">
-              <th className="text-left p-4 text-[#8E8E93] font-medium">Code</th>
-              <th className="text-left p-4 text-[#8E8E93] font-medium">Type</th>
-              <th className="text-left p-4 text-[#8E8E93] font-medium">Discount</th>
-              <th className="text-left p-4 text-[#8E8E93] font-medium">Status</th>
-              <th className="text-left p-4 text-[#8E8E93] font-medium">Uses</th>
-              <th className="text-right p-4 text-[#8E8E93] font-medium">Expires</th>
+            <tr className="border-b border-[var(--border)]">
+              <th className="text-left p-4 text-[var(--muted)] font-medium">Code</th>
+              <th className="text-left p-4 text-[var(--muted)] font-medium">Type</th>
+              <th className="text-left p-4 text-[var(--muted)] font-medium">Discount</th>
+              <th className="text-left p-4 text-[var(--muted)] font-medium">Status</th>
+              <th className="text-left p-4 text-[var(--muted)] font-medium">Uses</th>
+              <th className="text-right p-4 text-[var(--muted)] font-medium">Expires</th>
             </tr>
           </thead>
           <tbody>
             {isLoading ? (
-              <tr><td colSpan={6} className="p-8 text-center text-[#8E8E93]">Loading...</td></tr>
+              <tr><td colSpan={6} className="p-8 text-center text-[var(--muted)]">Loading...</td></tr>
             ) : data?.data?.length === 0 ? (
-              <tr><td colSpan={6} className="p-8 text-center text-[#8E8E93]">No promo codes yet</td></tr>
+              <tr><td colSpan={6} className="p-8 text-center text-[var(--muted)]">No promo codes yet</td></tr>
             ) : (
               data?.data?.map((promo: Promo) => (
-                <tr key={promo.id} className="border-b border-[#38383A] hover:bg-white/5">
+                <tr key={promo.id} className="border-b border-[var(--border)] hover:bg-white/5">
                   <td className="p-4 font-mono font-medium">{promo.code}</td>
                   <td className="p-4">{promo.discountType}</td>
                   <td className="p-4">
@@ -87,7 +87,7 @@ export default function PromosPage() {
                     }`}>{promo.isActive ? 'Active' : 'Inactive'}</span>
                   </td>
                   <td className="p-4">{promo.currentUses} / {promo.maxUses || '∞'}</td>
-                  <td className="p-4 text-right text-[#8E8E93]">
+                  <td className="p-4 text-right text-[var(--muted)]">
                     {promo.validUntil ? new Date(promo.validUntil).toLocaleDateString() : 'Never'}
                   </td>
                 </tr>
@@ -99,7 +99,7 @@ export default function PromosPage() {
 
       {open && (
         <div className="fixed inset-0 bg-black/60 flex items-center justify-center p-4 z-50" onClick={() => setOpen(false)}>
-          <div className="w-full max-w-md bg-[#1C1C1E] rounded-2xl border border-[#38383A] p-6" onClick={(e) => e.stopPropagation()}>
+          <div className="w-full max-w-md bg-[var(--panel)] rounded-2xl border border-[var(--border)] p-6" onClick={(e) => e.stopPropagation()}>
             <h2 className="text-lg font-semibold mb-4">New Promo Code</h2>
             <div className="space-y-3">
               <Field label="Code">
@@ -140,11 +140,11 @@ export default function PromosPage() {
                 </Field>
               </div>
             </div>
-            {error && <p className="mt-3 text-sm text-[#E8192C]">{error}</p>}
+            {error && <p className="mt-3 text-sm text-[var(--accent)]">{error}</p>}
             <div className="flex justify-end gap-3 mt-5">
-              <button onClick={() => setOpen(false)} className="px-4 py-2 text-sm text-[#8E8E93] hover:text-white">Cancel</button>
+              <button onClick={() => setOpen(false)} className="px-4 py-2 text-sm text-[var(--muted)] hover:text-white">Cancel</button>
               <button onClick={() => create.mutate()} disabled={create.isPending || form.code.trim().length < 2 || !form.description.trim()}
-                className="px-5 py-2 bg-[#E8192C] text-white rounded-lg text-sm font-medium hover:bg-[#E8192C]/80 disabled:opacity-50">
+                className="px-5 py-2 bg-[var(--accent)] text-white rounded-lg text-sm font-medium hover:bg-[var(--accent)]/80 disabled:opacity-50">
                 {create.isPending ? 'Creating…' : 'Create'}
               </button>
             </div>
@@ -156,12 +156,12 @@ export default function PromosPage() {
 }
 
 const inputCls =
-  'mt-1 w-full bg-[#2C2C2E] text-white px-3 py-2 rounded-lg text-sm border border-[#38383A] focus:border-[#E8192C] focus:outline-none';
+  'mt-1 w-full bg-[var(--panel-2)] text-white px-3 py-2 rounded-lg text-sm border border-[var(--border)] focus:border-[var(--accent)] focus:outline-none';
 
 function Field({ label, children }: { label: string; children: React.ReactNode }) {
   return (
     <div>
-      <label className="text-xs text-[#8E8E93]">{label}</label>
+      <label className="text-xs text-[var(--muted)]">{label}</label>
       {children}
     </div>
   );
