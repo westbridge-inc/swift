@@ -366,12 +366,29 @@ export function useAcceptOffer(kind: MoverKind) {
   return pv ? PV.previewMutation() : m;
 }
 /** Explicit pass on a dispatch offer — tells the cascade to move to the next
- *  mover NOW instead of letting the 20s timeout burn. Best-effort: if the
- *  offer already expired server-side the decline 409s, which is fine. */
+ *  mover NOW instead of letting the 20s timeout burn.
+ *  [WR-010] A failed decline is NOT a success: dispatch keeps offering this
+ *  mover until the timeout burns, and the pass can be scored as a timeout
+ *  instead of a decline. An offer that's already gone server-side (409/404/
+ *  410) IS success — the cascade moved on. Everything else gets one retry,
+ *  then surfaces to the caller. */
 export function useDeclineOffer(kind: MoverKind) {
   const pv = usePreview();
   const m = useMutation({
-    mutationFn: ({ orderId, offerAttemptId }: { orderId: string; offerAttemptId?: string }) => svc(kind).declineOffer(orderId, offerAttemptId).catch(() => null),
+    mutationFn: async ({ orderId, offerAttemptId }: { orderId: string; offerAttemptId?: string }) => {
+      const gone = (e: unknown) => [404, 409, 410].includes(Number((e as { response?: { status?: number } })?.response?.status));
+      try {
+        return await svc(kind).declineOffer(orderId, offerAttemptId);
+      } catch (e) {
+        if (gone(e)) return null;
+        try {
+          return await svc(kind).declineOffer(orderId, offerAttemptId);
+        } catch (e2) {
+          if (gone(e2)) return null;
+          throw e2;
+        }
+      }
+    },
     onSuccess: () => track('offer_declined', { kind }),
   });
   return pv ? PV.previewMutation() : m;

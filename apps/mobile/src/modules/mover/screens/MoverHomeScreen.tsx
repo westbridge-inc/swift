@@ -865,7 +865,12 @@ export function MoverHomeScreen({ navigation }: any) {
           // Tell the server too — the cascade re-offers the next mover NOW
           // instead of waiting out the 20s timeout on a card nobody wants.
           onDecline={() => {
-            decline.mutate({ orderId: offer.orderId, offerAttemptId: offer.offerAttemptId });
+            // [WR-010] Dismiss immediately (never trap a mover on a card they
+            // refused) but be honest if dispatch never heard the decline.
+            decline.mutate(
+              { orderId: offer.orderId, offerAttemptId: offer.offerAttemptId },
+              { onError: () => toast.show("Couldn't tell dispatch — the offer will time out on its own.") },
+            );
             dismiss();
           }}
         />
