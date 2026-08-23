@@ -462,12 +462,36 @@ describe('durable mover revocation outbox', () => {
 
     const control = await makeUser('MOVER');
     const controlRider = await makeRider(control.user.id, control.session.id);
-    await makeOrder((await makeUser()).user.id, controlRider.id, 'RIDER_ASSIGNED');
+    const controlCustomer = await makeUser();
+    await makeOrder(controlCustomer.user.id, controlRider.id, 'RIDER_ASSIGNED');
+    // [F-028-13] The control's customer needs an active token, or the control
+    // logout has NO push recipient and the fast-push spy never runs — the two
+    // measurements would then be different code paths at exactly the effect
+    // being controlled, and the differential would compare a push-traversing
+    // hang against a push-skipping baseline.
+    await app.prisma.deviceToken.create({
+      data: {
+        userId: controlCustomer.user.id,
+        token: `outbox-control-push-${nanoid(24)}`,
+        platform: 'ios',
+        isActive: true,
+      },
+    });
     const fastPush = vi.spyOn(ExpoPushProvider.prototype, 'sendPush').mockResolvedValue({ sent: 1 } as never);
     const controlStartedAt = Date.now();
     await new AuthService(app).logout(control.session.id, control.user.id);
     const controlMs = Date.now() - controlStartedAt;
+    // Prove the control TRAVERSED the effect — a control that skips the push
+    // is not a control [F-028-13].
+    expect(fastPush.mock.calls.length, 'the control logout never reached sendPush — it is not measuring the same path').toBeGreaterThanOrEqual(1);
     fastPush.mockRestore();
+
+    // [F-028-13] The differential needs a floor under the control itself: a
+    // 1.8s control and a 1.9s hung logout would pass a 150ms differential
+    // with BOTH materially regressed. Half the hang sentinel is gross — DB
+    // round-trips on a loaded runner fit in it many times over — so tripping
+    // it means the base path itself regressed, which this test must not bless.
+    expect(controlMs, `the CONTROL logout took ${controlMs}ms — the base path has regressed independent of any hang`).toBeLessThan(HANG_SENTINEL_MS / 2);
 
     // Only NOW install the hang. Both spies target the same prototype method,
     // so restoring the control's spy after installing this one would silently
