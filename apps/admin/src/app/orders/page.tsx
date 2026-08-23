@@ -20,6 +20,14 @@ export default function OrdersPage() {
   return (
     <div>
       <h1 className="text-2xl font-bold mb-6">Orders</h1>
+      {cancelMutation.error ? (
+        // [WR-005] The server fail-closes MMG refunds (409 MMG_REFUND_UNAVAILABLE
+        // until LB-019) and rejects invalid transitions — the admin must SEE
+        // that, not watch the click vanish.
+        <p role="alert" className="text-xs mb-3" style={{ color: 'var(--bad)' }}>
+          Order action did not confirm: {(cancelMutation.error as Error).message}
+        </p>
+      ) : null}
       <div className="bg-[var(--panel)] rounded-xl border border-[var(--border)] overflow-hidden">
         <table className="w-full text-sm">
           <thead>

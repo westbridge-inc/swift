@@ -24,3 +24,5 @@
 - [~] UXR-W-011: admin settlement copy aligned to digest truth (WR-003 residual) — shipping
 - [x] UXR-W-011 CLOSED: PR #729 MERGED (settlements card = digest truth, no payout implication)
 - [~] UXR-W-013: WR-004 claim payout evidence gate (server-required reference + UI) — shipping
+- [x] UXR-W-013 CLOSED: PR #730 MERGED (claim payout evidence gate)
+- [~] UXR-W-012: WR-005 residual — admin renders the real server message on order cancel/refund (list + detail + apiFetch message surface) — shipping

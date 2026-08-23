@@ -57,8 +57,14 @@ async function apiFetch(path: string, options?: RequestInit) {
       throw new Error('Session expired. Please sign in again.');
     }
   }
-  if (!res.ok) throw new Error(`API error: ${res.status}`);
-  return res.json();
+  // [WR-005] Surface the server's real message (e.g. the MMG refund
+  // fail-closed 409) instead of a bare status code — the alert strips
+  // render this string to the operator.
+  const json = await res.json().catch(() => ({}) as Record<string, never>);
+  if (!res.ok || (json as { success?: boolean })?.success === false) {
+    throw new Error((json as { error?: { message?: string } })?.error?.message || `API error: ${res.status}`);
+  }
+  return json;
 }
 
 // ── Auth (public endpoints — no admin token) ────────────────────────────────
