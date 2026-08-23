@@ -13,6 +13,8 @@ radius. Approve rows individually.
 | 5 | `apps/mobile/src/modules/onboarding/OnboardingScreen.tsx` (REPORT-022 A2) | RE-VERIFIED 08-23: the only `OnboardingScreen` hits are **`MoverOnboardingScreen`**, a different live component (substring coincidence — exactly the trap to check). No importer of this file. Not an Expo file-based entry path. | None — pure removal. Confirm at approval time that no new consumer appeared. |
 | 6 | `packages/types/src/courier.ts` + `packages/types/src/rides.ts` (REPORT-022 A3/A4) | RE-VERIFIED 08-23: neither file appears in the package barrel (`packages/types/src/index.ts`) and neither has a direct/subpath importer. Type-only files. | None — pure removal, but they are the kind of file a future feature reaches for; deleting is cheap to reverse from git if MKT-1 wants them. |
 
+| 7 | `apps/mobile/src/components/ui/avatar.tsx` (shared `Avatar`) | FOUND 08-23 while working F-267: exported from the `components/ui` barrel but **zero** `<Avatar` usages and zero importers anywhere. Both real consumers (`HomeScreen`, `ProfileScreen`) hand-roll their own avatar with an `onError`→monogram fallback that this component lacks. | Either DELETE, or (better) consume it in those two screens first and give it the `onError` fallback — one avatar language instead of two copies. Founder picks which; do not polish an orphan. |
+
 REPORT-022's Tier B/C (dead exports inside live files, do-not-delete traps)
 are deliberately NOT proposed here: Tier B is symbol-level surgery inside
 files that are alive, and Tier C is explicitly "do not delete". Those want
