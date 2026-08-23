@@ -147,7 +147,7 @@ export function CourierScreen({ navigation }: any) {
   const pickupPoint = pickup ? { lat: pickup.lat, lng: pickup.lng } : undefined;
   const dropoffPoint = dropoff ? { lat: dropoff.lat, lng: dropoff.lng } : undefined;
 
-  const { data: estimate, isFetching: estimating } = useCourierEstimate<any>(pickupPoint, dropoffPoint, size, speed);
+  const { data: estimate, isFetching: estimating, isError: estimateFailed, refetch: refetchEstimate } = useCourierEstimate<any>(pickupPoint, dropoffPoint, size, speed);
 
   const valid =
     !!pickupPoint && !!dropoffPoint && recipientName.trim().length >= 2 && recipientPhone.trim().length >= 5 && !!estimate;
@@ -299,6 +299,15 @@ export function CourierScreen({ navigation }: any) {
                     Calculating fare…
                   </T>
                 </View>
+              ) : estimateFailed && !estimate ? (
+                // [WR-028] A failed quote must not blame the recipient fields
+                // (the CTA caption) or sit as a blank card.
+                <View>
+                  <T variant="body" tone="error">
+                    We couldn't price this trip.
+                  </T>
+                  <PillButton label="Retry" size="md" variant="soft" style={{ marginTop: space.sm, alignSelf: 'flex-start' }} onPress={() => refetchEstimate()} />
+                </View>
               ) : estimate ? (
                 <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
                   <View>
@@ -351,7 +360,9 @@ export function CourierScreen({ navigation }: any) {
           />
           {!valid && dropoffPoint ? (
             <T variant="caption" tone="muted" center style={{ marginTop: space.sm }}>
-              Add the recipient&apos;s name and phone to continue.
+              {estimateFailed && !estimate
+                ? 'Waiting on the price — retry the quote above.'
+                : "Add the recipient's name and phone to continue."}
             </T>
           ) : null}
 

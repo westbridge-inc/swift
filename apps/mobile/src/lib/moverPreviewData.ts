@@ -149,11 +149,21 @@ export function previewQuery<T>(data: T): any {
   };
 }
 
-/** A no-op useMutation result — read-only preview never writes server state. */
+/** A no-op useMutation result — read-only preview never writes server state.
+ *  [WR-036] The no-op now SAYS so: controls in preview look actionable, and a
+ *  silent nothing taught users the buttons were broken. Still writes nothing,
+ *  still never throws. */
 export function previewMutation(): any {
+  const explain = () => {
+    try {
+      // Lazy import keeps this lib dependency-free for pure logic tests.
+      // eslint-disable-next-line @typescript-eslint/no-var-requires
+      require('../components/ui/toast').toast.show('Preview is read-only — nothing was changed.');
+    } catch { /* non-UI context (tests) — stay a pure no-op */ }
+  };
   return {
-    mutate: () => {},
-    mutateAsync: async () => undefined,
+    mutate: () => explain(),
+    mutateAsync: async () => { explain(); return undefined; },
     isPending: false,
     isError: false,
     error: null,

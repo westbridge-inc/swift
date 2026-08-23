@@ -6,7 +6,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Feather } from '@expo/vector-icons';
 import { Pressable } from 'react-native';
 import { color, radius, space } from '@swift/ui';
-import { Card, LoadingBlock, PillButton, T, TonePill } from '../../../kit';
+import { ErrorState, Card, LoadingBlock, PillButton, T, TonePill } from '../../../kit';
 import { useMyAdvertisers, useAdvertiserCampaigns, useCampaignStats, useAdvertiserActions } from '../../../hooks/advertiser';
 import { adsApi } from '../../../services/api';
 import { errorMessage } from '../../../lib/apiError';
@@ -113,9 +113,18 @@ export function CampaignDetailScreen() {
   };
 
   if (!campaign) {
+    // [WR-031] A failed load spun forever; only a genuine in-flight fetch may.
+    const failed = (me.isError || campaigns.isError) && !campaigns.isFetching;
+    const loadedButMissing = campaigns.isSuccess && !campaigns.isFetching;
     return (
       <View style={{ flex: 1, backgroundColor: color.surface.subtle, paddingTop: insets.top }}>
-        <LoadingBlock style={{ paddingTop: 120 }} />
+        {failed ? (
+          <ErrorState style={{ paddingTop: 120 }} onRetry={() => { me.refetch(); campaigns.refetch(); }} />
+        ) : loadedButMissing ? (
+          <ErrorState style={{ paddingTop: 120 }} message="This campaign is no longer available." onRetry={() => navigation.goBack()} />
+        ) : (
+          <LoadingBlock style={{ paddingTop: 120 }} />
+        )}
       </View>
     );
   }
@@ -178,6 +187,11 @@ export function CampaignDetailScreen() {
               <StatCell label="CTR" value={`${(Number(totals.ctr) * 100).toFixed(1)}%`} />
               <StatCell label="Spend" value={money(totals.spend, campaign.currency)} />
             </View>
+          ) : stats.isError ? (
+            // [WR-031] A failed stats read is not "no numbers yet".
+            <T variant="caption" tone="error" style={{ marginTop: space.sm }}>
+              Couldn't load performance — pull to refresh or reopen this screen.
+            </T>
           ) : (
             <T variant="caption" tone="muted" style={{ marginTop: space.sm }}>
               Numbers appear after your first live day (rolled up nightly).

@@ -48,3 +48,5 @@
 - [~] Mobile outage-honesty class (WR-029 + WR-032 menu/history/insights + WR-030 billing/campaigns/team): ErrorState with retry replaces mock-empty on failed reads — shipping
 - [x] Mobile outage-honesty class CLOSED: PR #740 MERGED (WR-029/030/032)
 - [~] Mobile silent-failure family (WR-033 statement opener throws · WR-034 photo toast · WR-027 upload error renders · WR-026 thumb rollback · WR-035 draft restore + honest chat empty) — shipping
+- [x] Silent-failure family CLOSED: PR #741 MERGED (WR-026/027/033/034/035)
+- [~] Mobile honesty trio (WR-028 courier quote · WR-031 campaign detail · WR-036 preview no-ops speak) — shipping
