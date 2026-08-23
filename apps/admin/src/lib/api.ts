@@ -195,8 +195,15 @@ export const featureVendor = (id: string, featured: boolean) =>
 export const fetchSubscriptions = (params?: string) => apiFetch(`/api/v1/admin/subscriptions?${params || 'limit=50'}`);
 export const waiveSubscriptionFee = (id: string, reason?: string) =>
   apiFetch(`/api/v1/admin/subscriptions/${id}/waive-fee`, { method: 'PUT', body: JSON.stringify({ reason }) });
-export const topUpSubscription = (id: string, amount: number, reference?: string) =>
-  apiFetch(`/api/v1/admin/subscriptions/${id}/topup`, { method: 'POST', body: JSON.stringify({ amount, reference }) });
+export const topUpSubscription = (id: string, amount: number, reference?: string, idempotencyKey?: string) =>
+  apiFetch(`/api/v1/admin/subscriptions/${id}/topup`, {
+    method: 'POST',
+    body: JSON.stringify({ amount, reference }),
+    // [WR-002] Without this header the server falls back to a time-based key —
+    // its own comment calls that "opted out of dedup" — so a double-tap or
+    // network retry could credit twice.
+    ...(idempotencyKey ? { headers: { 'Idempotency-Key': idempotencyKey } } : {}),
+  });
 export const fetchBillingEvents = (id: string) => apiFetch(`/api/v1/admin/subscriptions/${id}/billing-events?limit=20`);
 export const fetchSettlements = (params?: string) => apiFetch(`/api/v1/admin/finance/settlements?${params || 'limit=50'}`);
 export const processSettlement = (id: string, reference?: string) =>

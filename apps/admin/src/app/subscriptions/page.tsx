@@ -47,7 +47,12 @@ export default function SubscriptionsPage() {
   const invalidate = () => qc.invalidateQueries({ queryKey: ['subscriptions'] });
   const waive = useMutation({ mutationFn: (id: string) => waiveSubscriptionFee(id, 'Waived by admin'), onSuccess: invalidate });
   const topup = useMutation({
-    mutationFn: ({ id, amount }: { id: string; amount: number }) => topUpSubscription(id, amount),
+    // [WR-002] The key identifies the REAL-WORLD payment: reference-derived
+    // when the admin supplies one (re-recording the same transfer is a no-op
+    // even across sessions), a per-action UUID otherwise (still collapses
+    // double-taps and in-flight retries).
+    mutationFn: ({ id, amount, reference, key }: { id: string; amount: number; reference?: string; key: string }) =>
+      topUpSubscription(id, amount, reference, key),
     onSuccess: invalidate,
   });
 
@@ -74,6 +79,14 @@ export default function SubscriptionsPage() {
       <p className="text-[var(--muted)] text-sm mb-6">
         The weekly flat fee is Swift&apos;s only revenue — this queue is the business.
       </p>
+
+      {(topup.error || waive.error) ? (
+        <p role="alert" className="text-xs mb-3" style={{ color: 'var(--bad)' }}>
+          {topup.error
+            ? `Top-up did not confirm: ${(topup.error as Error).message} — check the billing trail before recording it again.`
+            : `Waive did not confirm: ${(waive.error as Error).message}`}
+        </p>
+      ) : null}
 
       <div className="bg-[var(--panel)] rounded-xl border border-[var(--border)] overflow-hidden">
         <table className="w-full text-sm">
@@ -126,7 +139,14 @@ export default function SubscriptionsPage() {
                             onClick={() => {
                               const amt = window.prompt(`Record a cash/bank top-up for ${h.name} (GYD):`);
                               const n = Number(amt);
-                              if (amt && Number.isFinite(n) && n > 0) topup.mutate({ id: s.id, amount: n });
+                              if (!amt || !Number.isFinite(n) || n <= 0) return;
+                              const ref = window.prompt('Payment reference (bank/MMG ref — recommended; blank for cash):')?.trim();
+                              topup.mutate({
+                                id: s.id,
+                                amount: n,
+                                reference: ref || undefined,
+                                key: ref ? `topup:${s.id}:${ref}` : crypto.randomUUID(),
+                              });
                             }}
                             disabled={topup.isPending}
                             className="px-3 py-1 rounded-lg text-xs border border-[var(--border)] hover:bg-white/10 disabled:opacity-50"

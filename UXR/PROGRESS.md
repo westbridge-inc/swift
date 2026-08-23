@@ -12,3 +12,5 @@
 - [~] UXR-W-007 ACTIVE: WR-001 fix (delivery checkout blocks on failed address set)
 - [x] UXR-W-007 CLOSED: PR #723 MERGED (WR-001 delivery checkout blocks on failed address set)
 - [~] QR deep-links: app.config associatedDomains+intentFilters (swiftgy.com), web well-known AASA/assetlinks (404-honest until founder env), /s/:code prod proxy rewrite — shipping as its own PR
+- [x] QR deep-links SHIPPED: PR #724 MERGED (associatedDomains + intentFilters + AASA/assetlinks 404-honest + /s/:code prod proxy). Founder inputs open: Team ID, keystore SHA-256, VERCEL_TOKEN. iOS interception rides the F-254 native rebuild
+- [~] UXR-W-010 ACTIVE: WR-002 admin top-up idempotency (reference-derived key + honest failure)
