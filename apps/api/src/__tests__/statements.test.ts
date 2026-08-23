@@ -10,7 +10,7 @@ import { registerEmptyJsonBodyParser } from '../plugins/empty-json';
 import { riderRoutes } from '../modules/rider/rider.routes';
 import { vendorRoutes } from '../modules/vendor/vendor.routes';
 import { statementRoutes } from '../modules/order/statement.routes';
-import { signStatementToken } from '../modules/order/statement';
+import { signStatementToken, signStatementTokenV1 } from '../modules/order/statement';
 
 // ---------------------------------------------------------------------------
 // Statements (marketplace §12, the receipt's siblings): earner earnings and
@@ -253,5 +253,46 @@ describe('signed statement links (share/print)', () => {
     const sig = signStatementToken('driver', 'actor-1', '2026-01-01', '2026-01-31', 1735689600);
     expect(sig).toBe(signStatementToken('driver', 'actor-1', '2026-01-01', '2026-01-31', 1735689600));
     expect(sig).toMatch(/^[0-9a-f]{32}$/);
+  });
+
+  // -------------------------------------------------------------------------
+  // [F-028-15] Rolling-deploy dual verification: F-027-10 changed the signed
+  // material without versioning the URL, so mid-deploy a mixed fleet rejected
+  // each other's fresh 10-minute links.
+  // -------------------------------------------------------------------------
+  it('fresh links declare their protocol: the minted URL carries v=2 and verifies', async () => {
+    const mint = await app.inject({
+      method: 'GET', url: '/api/v1/rider/earnings/statement?link=1',
+      headers: { authorization: `Bearer ${riderToken}` },
+    });
+    const path: string = mint.json().data.path;
+    expect(path).toContain('v=2');
+    expect((await app.inject({ method: 'GET', url: path })).statusCode).toBe(200);
+  });
+
+  it('a VERSIONLESS link — an old instance\'s mint mid-deploy — verifies as v1', async () => {
+    const from = new Date(Date.now() - 30 * 24 * 3600 * 1000).toISOString();
+    const to = new Date().toISOString();
+    const expires = Math.floor(Date.now() / 1000) + 600;
+    const sig = signStatementTokenV1('rider', riderId, from, to, expires);
+    const q = new URLSearchParams({ kind: 'rider', actor: riderId, from, to, expires: String(expires), sig });
+    const res = await app.inject({ method: 'GET', url: `/api/v1/statements/render?${q.toString()}` });
+    expect(res.statusCode).toBe(200);
+    expect(res.body).toContain(`STM-${marker}`);
+  });
+
+  it('the v1 path is still a signature check — a wrong versionless signature 403s, and a v1 sig cannot ride v=2', async () => {
+    const from = new Date(Date.now() - 30 * 24 * 3600 * 1000).toISOString();
+    const to = new Date().toISOString();
+    const expires = Math.floor(Date.now() / 1000) + 600;
+    const sig = signStatementTokenV1('rider', riderId, from, to, expires);
+
+    const flipped = (sig.startsWith('0') ? '1' : '0') + sig.slice(1);
+    const bad = new URLSearchParams({ kind: 'rider', actor: riderId, from, to, expires: String(expires), sig: flipped });
+    expect((await app.inject({ method: 'GET', url: `/api/v1/statements/render?${bad.toString()}` })).statusCode).toBe(403);
+
+    // Cross-format: declaring v=2 makes the verifier demand the v2 material.
+    const crossed = new URLSearchParams({ v: '2', kind: 'rider', actor: riderId, from, to, expires: String(expires), sig });
+    expect((await app.inject({ method: 'GET', url: `/api/v1/statements/render?${crossed.toString()}` })).statusCode).toBe(403);
   });
 });

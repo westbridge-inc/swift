@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { fareStep, MAX_ACCESSIBLE_ACTIONS } from './fare-step';
+import { canAdjustFare, MIN_ADJUST_SECONDS, fareStep, MAX_ACCESSIBLE_ACTIONS } from './fare-step';
 
 // ---------------------------------------------------------------------------
 // [F-027-08] The accessible fare path has to be traversable before the offer
@@ -56,5 +56,29 @@ describe('fare slider step [F-027-08]', () => {
   it('rounds to a legible money increment on large bands, so the spoken value stays readable', () => {
     const { min, max } = bandFor(40_000);
     expect(fareStep(min, max) % 50).toBe(0);
+  });
+});
+
+describe('[F-028-18] canAdjustFare — a control that cannot finish is not offered', () => {
+  it('blocks adjustment on a short recovered card', () => {
+    // The recovery endpoint hands back cards with as little as 4 seconds of
+    // authority (TTL 14 minus the 10s worker tail). Ten gestures cannot
+    // traverse the band in 4 seconds — reachable-but-untraversable, the exact
+    // failure F-027-08 closed for fresh offers, reintroduced via recovery.
+    expect(canAdjustFare(4)).toBe(false);
+    expect(canAdjustFare(9)).toBe(false);
+  });
+
+  it('keeps adjustment on every fresh offer, including express', () => {
+    // Derivation: 10 gestures × ~0.8s + 2s to confirm = 10s. Express fresh
+    // cards carry 12s — the DESIGNED experience must survive the guard.
+    expect(canAdjustFare(12)).toBe(true);
+    expect(canAdjustFare(20)).toBe(true);
+    expect(canAdjustFare(MIN_ADJUST_SECONDS)).toBe(true);
+  });
+
+  it('does not degrade when no deadline is known', () => {
+    expect(canAdjustFare(null)).toBe(true);
+    expect(canAdjustFare(undefined)).toBe(true);
   });
 });

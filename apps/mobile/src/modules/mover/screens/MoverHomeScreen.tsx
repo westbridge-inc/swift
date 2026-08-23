@@ -45,6 +45,7 @@ import { useMoverPreview } from '../../../stores/moverPreview';
 import { MoverHomeAccountButton } from './MoverHomeAccountButton';
 import { fareLockedFor, fareToSubmit } from './fare-locked';
 import { offerEarnings } from './offer-earnings';
+import { canAdjustFare } from '../../../components/fare-step';
 
 /**
  * The earner home (dashboard plan Phase B/C): dark, map-first, demand-aware.
@@ -190,7 +191,13 @@ export function DispatchOfferCard({
             )}
           </View>
 
-          {!fareLocked && marketMax > floor ? (
+          {/* [F-028-18] A RECOVERED card can arrive with as little as 4s of
+              authority (TTL 14 minus the 10s worker tail) — ten adjust
+              gestures cannot traverse the band in that. With too little time
+              the slider is not offered at all: accepting needs ONE gesture
+              and stays instant; a control that cannot finish is worse than
+              its absence. */}
+          {!fareLocked && marketMax > floor && canAdjustFare(offer.expiresInSeconds) ? (
             <View style={{ marginTop: space.md }}>
               {/* [F-027-08] secondsLeft makes the expiring server authority
                   audible: it was a 4dp visual bar and nothing else, so a
@@ -206,6 +213,10 @@ export function DispatchOfferCard({
                 </T>
               </View>
             </View>
+          ) : !fareLocked && marketMax > floor ? (
+            <T variant="caption" tone="muted" style={{ marginTop: space.md, textAlign: 'center' }}>
+              No time left to adjust — accept at {money(marketMax)}
+            </T>
           ) : null}
 
           <View style={{ marginTop: space.lg }}>

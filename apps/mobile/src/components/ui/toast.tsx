@@ -27,8 +27,20 @@ let seq = 0;
  * Native, the same split as kit/text-scale.
  */
 let screenReaderOn = false;
-AccessibilityInfo.isScreenReaderEnabled().then((on) => { screenReaderOn = on; }).catch(() => undefined);
+// [F-028-18] The initial detection is async and the default is `false`, so a
+// toast fired at startup could take the SIGHTED timer while a reader was
+// already on. Keep the promise: the first timer decisions await it instead
+// of racing it. After it settles, the listener keeps the flag current.
+const srDetection: Promise<void> = AccessibilityInfo.isScreenReaderEnabled()
+  .then((on) => { screenReaderOn = on; })
+  .catch(() => undefined);
 AccessibilityInfo.addEventListener('screenReaderChanged', (on) => { screenReaderOn = on; });
+
+// [F-028-18] How many announceable toasts are still LIVE ahead of a new one.
+// A polite announcement queues behind everything speaking before it; sizing a
+// window by its own speech alone let a short "Saved" be removed while still
+// waiting its turn in the queue.
+let liveAnnouncements = 0;
 
 function dismiss(id: number) {
   useToastStore.setState((s) => ({ toasts: s.toasts.filter((t) => t.id !== id) }));
@@ -37,8 +49,20 @@ function dismiss(id: number) {
 function push(tone: Tone, title: string, description?: string) {
   const id = ++seq;
   useToastStore.setState((s) => ({ toasts: [...s.toasts.slice(-1), { id, tone, title, description }] }));
-  const ms = toastDurationMs(tone, title, description, screenReaderOn);
-  if (ms != null) setTimeout(() => dismiss(id), ms);
+  const queuedAhead = liveAnnouncements;
+  liveAnnouncements += 1;
+  // The timer DECISION waits for the initial reader detection (already
+  // resolved on every call after startup — this costs one microtask), so the
+  // first toast of a session cannot take the sighted window under a reader.
+  void srDetection.then(() => {
+    const ms = toastDurationMs(tone, title, description, screenReaderOn, queuedAhead);
+    if (ms != null) {
+      setTimeout(() => { liveAnnouncements = Math.max(0, liveAnnouncements - 1); dismiss(id); }, ms);
+    } else {
+      // Persistent (reader + error): it leaves the queue when DISMISSED.
+      liveAnnouncements = Math.max(0, liveAnnouncements - 1);
+    }
+  });
 }
 
 export const toast = {

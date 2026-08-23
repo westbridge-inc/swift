@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { toastDurationMs } from './toast-duration';
+import { TOAST_MS, QUEUE_ALLOWANCE_MS, toastDurationMs } from './toast-duration';
 
 // ---------------------------------------------------------------------------
 // [F-027-06] A screen reader needs longer than an eye does.
@@ -41,5 +41,31 @@ describe('toast duration [F-027-06]', () => {
     for (const title of ['', 'ok', 'Saved']) {
       expect(toastDurationMs('success', title, undefined, true)!).toBeGreaterThanOrEqual(VISUAL_MS);
     }
+  });
+});
+
+describe('[F-028-18] the polite queue is part of the window', () => {
+  it('a short success toast waits for what is queued AHEAD of it', () => {
+    // Production shape: two toasts land close together under a reader. The
+    // second's own speech is short, but it speaks only after the first — so
+    // its removal window must carry the wait, or "Saved" vanishes unheard.
+    const alone = toastDurationMs('success', 'Saved', undefined, true, 0)!;
+    const queued = toastDurationMs('success', 'Saved', undefined, true, 1)!;
+    // The allowance extends the SPEECH window (own speech + queue wait), not
+    // the floored display minimum — a short toast alone is floored at
+    // TOAST_MS, so the correct claim is: queued strictly exceeds alone, and
+    // by the queue wait measured from the speech time.
+    expect(queued).toBeGreaterThan(alone);
+    expect(queued - QUEUE_ALLOWANCE_MS).toBeLessThanOrEqual(alone);
+    const deepQueue = toastDurationMs('success', 'Saved', undefined, true, 3)!;
+    expect(deepQueue).toBe(queued + 2 * QUEUE_ALLOWANCE_MS);
+  });
+
+  it('sighted timing is untouched by the queue', () => {
+    expect(toastDurationMs('success', 'Saved', undefined, false, 3)).toBe(TOAST_MS);
+  });
+
+  it('errors persist regardless of queue depth', () => {
+    expect(toastDurationMs('error', 'Payment failed', 'Try again', true, 5)).toBeNull();
   });
 });

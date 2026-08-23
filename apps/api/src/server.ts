@@ -229,11 +229,18 @@ async function buildApp() {
     if (!showDetail) {
       return { status, timestamp: new Date().toISOString() };
     }
+    const { EXHAUST_CAP, REDISPATCH_DELAY_MS } = await import('./modules/dispatch/dispatch.service');
     return {
       status,
       timestamp: new Date().toISOString(),
       uptime: process.uptime(),
       checks,
+      // [F-028-17] THIS process's effective dispatch tuning. The baselines
+      // derive their wait math from these numbers, and a baseline shell can
+      // carry different env than the server it drives — a cap-3 shell judged
+      // a cap-5 API "late" before its page was even due. The server states
+      // its own truth; the harness pins to it. Detail-gated like the rest.
+      dispatch: { exhaustCap: EXHAUST_CAP, redispatchDelayMs: REDISPATCH_DELAY_MS },
     };
   });
 

@@ -25,16 +25,27 @@ const CHARS_PER_SECOND = 12;
 /**
  * @returns milliseconds to display, or `null` to persist until dismissed.
  */
+/** [F-028-18] What one queued-ahead announcement costs before ours starts.
+ *  A polite announcement waits for everything ahead of it; sizing our window
+ *  by our own speech length alone let a short "Saved" vanish while still
+ *  waiting its turn. Conservative: a queued item ≈ its own short sentence. */
+export const QUEUE_ALLOWANCE_MS = 2_000;
+
 export function toastDurationMs(
   tone: ToastTone,
   title: string,
   description?: string,
   srEnabled = false,
+  queuedAhead = 0,
 ): number | null {
   // Nothing changes for sighted users — this fix ships no visible difference.
   if (!srEnabled) return TOAST_MS;
   // An error nobody heard is the one that matters most.
   if (tone === 'error') return null;
   const chars = title.length + (description?.length ?? 0);
-  return Math.max(TOAST_MS, Math.ceil((chars / CHARS_PER_SECOND) * 1000) + 1500);
+  const own = Math.ceil((chars / CHARS_PER_SECOND) * 1000) + 1500;
+  // [F-028-18] ...plus the wait for whatever is queued AHEAD in the polite
+  // queue — our window starts at removal-eligibility, the speech starts when
+  // the queue reaches us.
+  return Math.max(TOAST_MS, own + Math.max(0, queuedAhead) * QUEUE_ALLOWANCE_MS);
 }

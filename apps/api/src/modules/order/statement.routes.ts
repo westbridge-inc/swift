@@ -7,6 +7,7 @@ import {
   buildRiderStatement,
   buildVendorStatement,
   signStatementToken,
+  signStatementTokenV1,
   type StatementKind,
 } from './statement';
 
@@ -20,6 +21,13 @@ export async function statementRoutes(app: FastifyInstance) {
   app.get('/render', async (request, reply) => {
     const q = z
       .object({
+        // [F-028-15] Signature-protocol version. Absent = a link minted by a
+        // pre-F-027-10 instance (v1 format) — during a rolling deploy both
+        // formats are in flight for up to the 10-minute TTL, so the verifier
+        // accepts both. Old instances still reject v2 links (their zod strips
+        // the unknown param and v1-verifies); unfixable from this side, and
+        // the TTL bounds the exposure.
+        v: z.enum(['1', '2']).optional(),
         kind: z.enum(['rider', 'driver', 'vendor']),
         actor: z.string().min(1),
         from: z.string().min(1),
@@ -47,7 +55,14 @@ export async function statementRoutes(app: FastifyInstance) {
     // hex chars by construction, `provided` by the schema above — so the
     // length guard is a belt-and-braces impossibility rather than a branch an
     // attacker can steer into.
-    const expected = Buffer.from(signStatementToken(q.kind as StatementKind, q.actor, q.from, q.to, q.expires), 'utf8');
+    // [F-028-15] Both formats emit 32 hex chars, so the schema, the length
+    // guard, and the constant-time compare are identical either way.
+    const expected = Buffer.from(
+      q.v === '2'
+        ? signStatementToken(q.kind as StatementKind, q.actor, q.from, q.to, q.expires)
+        : signStatementTokenV1(q.kind as StatementKind, q.actor, q.from, q.to, q.expires),
+      'utf8',
+    );
     const provided = Buffer.from(q.sig, 'utf8');
     if (provided.length !== expected.length || !timingSafeEqual(provided, expected)) {
       throw new AppError(403, 'BAD_SIGNATURE', 'This statement link is not valid.');
