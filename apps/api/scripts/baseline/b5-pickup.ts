@@ -12,9 +12,14 @@
  *      npx tsx scripts/baseline/b5-pickup.ts
  */
 import { Prisma, PrismaClient } from '@prisma/client';
+import Redis from 'ioredis';
 
 const API = process.env['BASELINE_API'] ?? 'http://localhost:3000/api/v1';
 const prisma = new PrismaClient();
+// [F-026-21] The 'no live offer' proof must READ REDIS. AlertDelivery is a
+// best-effort receipt production explicitly catches and discards, so a zero
+// SQL count can coexist with a real live offer key.
+const redis = new Redis(process.env['REDIS_URL'] ?? 'redis://localhost:6382');
 
 // [F-026-06] Money is proven with EXACT Decimal comparison, never a float
 // round-trip: Number() can equate distinct Decimals and mis-round; the
@@ -130,9 +135,16 @@ async function main() {
   await new Promise((r) => setTimeout(r, 8000));
   const offerRows = await prisma.alertDelivery.count({ where: { kind: 'MOVER_OFFER', subjectId: orderId } });
   if (offerRows !== 0) throw new Error(`FAIL: ${offerRows} MOVER_OFFER delivery row(s) for a PICKUP order`);
+  // [F-026-21] The authoritative check: dispatch's live offer key for THIS
+  // order, and the per-mover pointer for the eligible rider. Redis is where an
+  // offer actually lives; the SQL receipt above is best-effort corroboration.
+  const liveOfferKey = await redis.get(`dispatch:offer:${orderId}`);
+  const moverOfferKey = await redis.get(`dispatch:mover-offer:${rider.id}`);
+  if (liveOfferKey) throw new Error(`FAIL: a LIVE dispatch offer exists in Redis for a PICKUP order (dispatch:offer:${orderId})`);
+  if (moverOfferKey && moverOfferKey.includes(orderId)) throw new Error(`FAIL: the eligible rider holds a live offer pointer for this PICKUP order`);
   const riderMid = await prisma.rider.findUniqueOrThrow({ where: { id: rider.id }, select: { currentOrderId: true, isAvailable: true } });
   if (riderMid.currentOrderId) throw new Error('FAIL: rider bound to a pickup order');
-  log('EVIDENCE ready, NO dispatch (no offer rows, eligible rider present + free)', { ...o1, offerRows, riderAvailable: riderMid.isAvailable });
+  log('EVIDENCE ready, NO dispatch (no live Redis offer key, no offer rows, eligible rider present + free)', { ...o1, offerRows, liveOfferKey: liveOfferKey ?? null, riderAvailable: riderMid.isAvailable });
 
   // ── 3. verifier-blind: the vendor's own order read must NOT carry the code ─
   // [F-024-12] A 401/404/500/garbage body would trivially "not contain" the
@@ -189,4 +201,4 @@ async function main() {
 
 main()
   .catch((e) => { console.error('B5 FAILED:', e.message); process.exitCode = 1; })
-  .finally(() => prisma.$disconnect());
+  .finally(async () => { await prisma.$disconnect(); redis.disconnect(); });
