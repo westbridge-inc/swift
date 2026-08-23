@@ -239,19 +239,34 @@ export function PromoBanner({
   onPress?: () => void;
 }) {
   if (variant === 'tint') {
+    // [F-263 / founder 08-22] This was a washed brand-50 card with a BLACK
+    // pill — the palest, most anaemic block on the screen carrying the
+    // BIGGEST claim in the business ("0% fees" IS the model). A statement
+    // deserves the house's full voice: deep maroon ground, white display
+    // type, the pictogram as a watermark, a white pill. Rich, not louder —
+    // the one saturated panel between two photography bands.
     return (
-      <Card pad={false} style={{ flexDirection: 'row', overflow: 'hidden', backgroundColor: color.brand[50] }}>
-        <View style={{ flex: 1, padding: space.xl, gap: space.xs }}>
-          <T variant="title">{title}</T>
-          <T variant="label" tone="muted">
+      <Card pad={false} style={{ overflow: 'hidden', backgroundColor: color.brand[600] }}>
+        <View style={{ position: 'absolute', right: -14, bottom: -18, opacity: 0.14 }}>
+          <Pictogram name={pictogram} size={148} color={color.white} />
+        </View>
+        <View style={{ padding: space.xl, gap: space.xs, paddingRight: 96 }}>
+          <T variant="title" tone="onBrand">{title}</T>
+          <T variant="label" tone="onBrand" style={{ opacity: 0.85 }}>
             {sub}
           </T>
-          <PillButton label={cta} variant="dark" size="sm" onPress={onPress} style={{ alignSelf: 'flex-start', marginTop: space.md }} />
-        </View>
-        <View style={{ width: 108, alignItems: 'center', justifyContent: 'center' }}>
-          <View style={{ width: 72, height: 72, borderRadius: radius.lg, backgroundColor: color.brand[100], alignItems: 'center', justifyContent: 'center' }}>
-            <Pictogram name={pictogram} size={40} color={color.brand[600]} />
-          </View>
+          <Pressable
+            onPress={onPress}
+            accessibilityRole="button"
+            accessibilityLabel={cta}
+            style={({ pressed }) => ({
+              alignSelf: 'flex-start', marginTop: space.md,
+              backgroundColor: color.white, opacity: pressed ? 0.85 : 1,
+              paddingHorizontal: space.xl, paddingVertical: 10, borderRadius: radius.full,
+            })}
+          >
+            <T variant="label" weight="semibold" tone="brand">{cta}</T>
+          </Pressable>
         </View>
       </Card>
     );
