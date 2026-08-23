@@ -74,3 +74,5 @@
 - [~] F-026-27 (b2 delivered-assert + recipient-correlated dual-confirm notices) + F-026-29 (b1/b4 preparing leg asserts, tolerating only a DB-proven auto-advance) — shipping
 - [x] F-026-27 + F-026-29 CLOSED: PR #752 MERGED
 - [~] F-026-21 (b5 reads REDIS for the live-offer proof, not just the best-effort SQL receipt) + F-026-28 (b9 asserts the persisted WAITING queue row w/ full trip + correlates the release notice on kind ride_released_no_drivers) — shipping. That completes every REPORT-026 S1 tail finding.
+- [x] F-026-21 + F-026-28 CLOSED: PR #753 MERGED — REPORT-026 S1 TAIL COMPLETE (16 findings + F-026-17 verified). Only F-026-25 (b13 two-instance sweeper sync barrier) remains, registered as its own work.
+- [x] FG-2 extended: REPORT-022 Tier A candidates (#4 admin lib/utils · #5 mobile OnboardingScreen · #6 packages/types courier+rides) INDEPENDENTLY RE-VERIFIED zero-referrer on the live tree. Tier B/C deliberately NOT proposed (symbol surgery + do-not-delete).
