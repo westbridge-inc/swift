@@ -36,3 +36,5 @@
 - [~] W-014 rank 10 WR-016: vendor board outage honesty (error card + retry; header shows 'board unreachable'/'—' not fabricated zeros) — shipping
 - [x] W-014 rank 10 WR-016 CLOSED: PR #734 MERGED (board outage honesty)
 - [~] W-014 rank 11 WR-010: decline-offer failure no longer fakes success (gone-offer tolerated, one retry, honest toast) — shipping
+- [x] W-014 rank 11 WR-010 CLOSED: PR #735 MERGED (decline honesty)
+- [~] W-014 rank 12 WR-013: HIRE insurance approval requires both reviewer confirmations; PRIVATE labeled honestly — shipping
