@@ -44,6 +44,29 @@ const FORBIDDEN: Record<string, string> = {
   locationSessionId: 'internal session handle',
 };
 
+/** [F-028-12] Every Rider column the schema will EVER grow must be classified
+ *  somewhere. FORBIDDEN and the select partition only the columns someone
+ *  already thought about; a NEWLY added sensitive field used to land in
+ *  neither set and pass every test until somebody also remembered to extend
+ *  FORBIDDEN — DMMF proves existence, not sensitivity. UNREMARKABLE is the
+ *  third bucket: fields a human LOOKED AT and judged not worth exposing and
+ *  not dangerous to name. The exhaustiveness test below turns "nobody
+ *  decided" from a silent pass into a failure that demands the decision. */
+const UNREMARKABLE: Record<string, string> = {
+  userId: 'internal linkage — selected per-call-site where needed, never wholesale',
+  status: 'lifecycle state — surfaces derive what they need',
+  vehicleYear: 'harmless but unused by any counterparty surface',
+  vehicleRegistrationUrl: 'KYC-adjacent document — never exposed; forbidden in spirit, listed here only if classification moves',
+  isAvailable: 'dispatch input, not counterparty information',
+  isOnline: 'dispatch input, not counterparty information',
+  currentLat: 'live position — exposed ONLY via the gated RIDER_LIVE_LOCATION_SELECT',
+  currentLng: 'live position — exposed ONLY via the gated RIDER_LIVE_LOCATION_SELECT',
+  lastLocationUpdate: 'live position freshness — same gate as the coordinates',
+  totalEarnings: 'the mover\u2019s money — never a counterparty concern',
+  createdAt: 'row bookkeeping',
+  updatedAt: 'row bookkeeping',
+};
+
 describe('[F-027-07] the counterparty view of a mover', () => {
   it('leaks none of the columns that must never reach the other party', () => {
     const selected = Object.keys(RIDER_COUNTERPARTY_SELECT);
@@ -61,6 +84,36 @@ describe('[F-027-07] the counterparty view of a mover', () => {
   it('is an ALLOW-LIST: every selected column is a real Rider column', () => {
     const bogus = Object.keys(RIDER_COUNTERPARTY_SELECT).filter((f) => !riderFields.includes(f));
     expect(bogus, `select names columns Rider does not have: ${bogus.join(', ')}`).toEqual([]);
+  });
+
+  it('[F-028-12] EVERY Rider column is classified — a new field fails until a human decides', () => {
+    // The defect this pins: adding a sensitive column to Rider used to change
+    // nothing here — it was not selected, not forbidden, and no test noticed.
+    // Exhaustive three-way partition makes "unclassified" itself the failure.
+    const selected = new Set(Object.keys(RIDER_COUNTERPARTY_SELECT));
+    const classified = new Set([
+      ...selected,
+      ...Object.keys(FORBIDDEN),
+      ...Object.keys(UNREMARKABLE),
+    ]);
+    const undecided = riderFields.filter((f) => !classified.has(f));
+    expect(
+      undecided,
+      `new Rider column(s) with NO classification decision — add each to the select, FORBIDDEN, or UNREMARKABLE with a reason: ${undecided.join(', ')}`,
+    ).toEqual([]);
+
+    // The buckets must stay disjoint, or a field's classification is ambiguous.
+    for (const f of Object.keys(FORBIDDEN)) {
+      expect(selected.has(f), `${f} is both selected and FORBIDDEN`).toBe(false);
+      expect(f in UNREMARKABLE, `${f} is both FORBIDDEN and UNREMARKABLE`).toBe(false);
+    }
+    for (const f of Object.keys(UNREMARKABLE)) {
+      expect(selected.has(f), `${f} is both selected and UNREMARKABLE`).toBe(false);
+    }
+
+    // And UNREMARKABLE cannot rot into typos any more than FORBIDDEN can.
+    const ghosts = Object.keys(UNREMARKABLE).filter((f) => !riderFields.includes(f));
+    expect(ghosts, `UNREMARKABLE names columns that no longer exist: ${ghosts.join(', ')}`).toEqual([]);
   });
 
   it('still carries what a counterparty actually needs — the fix must not blind the customer', () => {

@@ -482,7 +482,18 @@ describe('durable mover revocation outbox', () => {
     await new AuthService(app).logout(control.session.id, control.user.id);
     const controlMs = Date.now() - controlStartedAt;
     // Prove the control TRAVERSED the effect — a control that skips the push
-    // is not a control [F-028-13].
+    // is not a control [F-028-13]. The immediate delivery is raced at the
+    // 50ms budget and then FLOATS, so the push fires after logout returns;
+    // asserting at t=0 races it (CI confirmed: 0 calls at return time). Wait
+    // for the traversal, bounded — the wait proves the path, the earlier
+    // controlMs already captured the timing. This also closes a latent spy
+    // collision: restoring fastPush before the floated call lands would let
+    // the CONTROL's push hit the hang spy installed next and inflate its
+    // call count.
+    const traversalDeadline = Date.now() + 10_000;
+    while (fastPush.mock.calls.length === 0 && Date.now() < traversalDeadline) {
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
     expect(fastPush.mock.calls.length, 'the control logout never reached sendPush — it is not measuring the same path').toBeGreaterThanOrEqual(1);
     fastPush.mockRestore();
 
