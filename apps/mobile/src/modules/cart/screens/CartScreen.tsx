@@ -26,6 +26,7 @@ import {
   AddMorph,
   Card,
   Chip,
+  GradientMasthead,
   Photo,
   CircleChip,
   DecorativeIcon,
@@ -136,10 +137,13 @@ export function CartScreen() {
 
   if (!isAuthenticated) {
     return (
-      <Screen>
-        <View style={{ height: 56, alignItems: 'center', justifyContent: 'center' }}>
-          <T variant="heading">Cart</T>
-        </View>
+      <Screen bleed>
+        {/* [F-265] Cart was the ONLY white-headed tab — Home, Activity and
+            Profile all open maroon. One app, one head. */}
+        <GradientMasthead style={{ paddingTop: 64, paddingBottom: space.lg, paddingHorizontal: GUTTER }}>
+          <T variant="micro" tone="onBrand">YOUR BASKET</T>
+          <T variant="title" tone="onBrand" style={{ marginTop: 2 }}>Cart</T>
+        </GradientMasthead>
         <EmptyState
           picto="groceries"
           title="Sign in to start a cart"
@@ -267,21 +271,18 @@ export function CartScreen() {
   };
 
   return (
-    <Screen>
-      {/* Tab header: centered title + overflow (clear cart) */}
-      <View
-        style={{
-          height: 56,
-          paddingHorizontal: GUTTER,
-          flexDirection: 'row',
-          alignItems: 'center',
-          justifyContent: 'space-between',
-        }}
-      >
-        <View style={{ width: 44 }} />
-        <T variant="heading">Cart</T>
-        <CircleChip icon="more-horizontal" onPress={() => setMenuOpen(true)} />
-      </View>
+    <Screen bleed>
+      {/* [F-265] The maroon masthead, same anatomy as the other tabs; the
+          overflow (clear cart) rides inside it. */}
+      <GradientMasthead style={{ paddingTop: 64, paddingBottom: space.lg, paddingHorizontal: GUTTER }}>
+        <View style={{ flexDirection: 'row', alignItems: 'flex-end', justifyContent: 'space-between' }}>
+          <View>
+            <T variant="micro" tone="onBrand">YOUR BASKET</T>
+            <T variant="title" tone="onBrand" style={{ marginTop: 2 }}>Cart</T>
+          </View>
+          <CircleChip icon="more-horizontal" onPress={() => setMenuOpen(true)} />
+        </View>
+      </GradientMasthead>
 
       {cart.isLoading ? (
         <LoadingBlock />

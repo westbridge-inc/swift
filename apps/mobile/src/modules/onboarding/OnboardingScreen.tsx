@@ -14,21 +14,28 @@ const { width: SCREEN_W, height: SCREEN_H } = Dimensions.get('window');
 // Kit onboarding (frames 2–4): full-bleed hero photo on white, two-line display
 // headline with an accented second line, muted body, pill dots, Skip/Next —
 // final slide swaps the footer for a full-width Get Started.
+// [F-266] Every hero below was DOWNLOADED AND LOOKED AT before shipping —
+// the previous three were two identical buddha-bowls and a soup, none of it
+// Guyana, on the first screens a new user ever sees. Slide 1: a full produce
+// market (the marketplace claim, demonstrated). Slide 2: a courier riding
+// with a red delivery pack (the live-tracking claim — and the pack happens to
+// echo the brand). Slide 3: a wall of plantains and bananas (cash-simple,
+// local, unmistakably ours).
 const SLIDES = [
   {
-    image: 'https://images.unsplash.com/photo-1546069901-ba9599a7e63c?w=1200&q=80',
+    image: 'https://images.unsplash.com/photo-1488459716781-31db52582fe9?w=1200&q=80',
     title: 'Your favorites,',
     accent: 'delivered.',
     body: 'Restaurants, groceries and shops across Guyana, brought to your door.',
   },
   {
-    image: 'https://images.unsplash.com/photo-1512621776951-a57141f2eefd?w=1200&q=80',
+    image: 'https://images.unsplash.com/photo-1526367790999-0150786686a2?w=1200&q=80',
     title: 'Follow every order,',
     accent: 'live.',
     body: 'Watch your rider move in real time, from the kitchen to your gate.',
   },
   {
-    image: 'https://images.unsplash.com/photo-1547592180-85f173990554?w=1200&q=80',
+    image: 'https://images.unsplash.com/photo-1603833665858-e61d17a86224?w=1200&q=80',
     title: 'You can order',
     accent: 'from anywhere.',
     body: 'Pay cash on delivery. No hidden fees, no markups — just Swift.',
