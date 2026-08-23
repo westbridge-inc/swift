@@ -126,6 +126,12 @@ export default function OrderDetailPage({ params }: { params: Promise<{ id: stri
         </div>
       </div>
 
+      {cancelMutation.error ? (
+        <p role="alert" className="text-xs mb-4" style={{ color: 'var(--bad)' }}>
+          Order action did not confirm: {(cancelMutation.error as Error).message}
+        </p>
+      ) : null}
+
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
         {/* Left column — what + who */}
         <div className="lg:col-span-2 space-y-4">

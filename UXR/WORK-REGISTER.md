@@ -13,8 +13,8 @@ Gluestack (recommendation to the contrary was made once and overruled).
 | UXR-W-009 | W1 | Mobile pay (S2↓) | WR-008 DOWNGRADED: persistent "Pay business with MMG" button = durable manual path. Residual: opener false gives no feedback at any call site | [x] | PR #727 MERGED |
 | UXR-W-010 | W1 | Admin money (S0) | WR-002 CONFIRMED: console sends no Idempotency-Key; recordTopUp comment says that = "opted out of dedup" → double-tap double-credits. Fix: UUID per action reused on retry + visible error | [x] | PR #725 MERGED |
 | UXR-W-011 | W1 | Admin money (S1↓) | WR-003 PARTIAL: server already digest-honest (SWIFT-031) + CAS guard. Residual: admin UI copy "once the money has moved" implies a payout rail that intentionally doesn't exist — align copy/semantics | [x] | PR #729 MERGED |
-| UXR-W-012 | W1 | Admin money (S1↓) | WR-005 LARGELY OVERTURNED: MMG refund fail-closes 409 (REPORT-008 F-03, LB-019 pending). Residual: admin swallows the 409 — codex MutationError covers order detail; extend to list page | [ ] | verified 08-23 |
-| UXR-W-013 | W1 | Admin money (S1) | WR-004 PARTIAL: markClaimPaid is CAS (no double-pay) but paymentRef optional → PAID with zero evidence. Fix: require reference server+UI | [~] | verified 08-23 |
+| UXR-W-012 | W1 | Admin money (S1↓) | WR-005 LARGELY OVERTURNED: MMG refund fail-closes 409 (REPORT-008 F-03, LB-019 pending). Residual: admin swallows the 409 — codex MutationError covers order detail; extend to list page | [~] | verified 08-23 |
+| UXR-W-013 | W1 | Admin money (S1) | WR-004 PARTIAL: markClaimPaid is CAS (no double-pay) but paymentRef optional → PAID with zero evidence. Fix: require reference server+UI | [x] | PR #730 MERGED |
 | UXR-W-014 | W2 | Cross-client | REPORT-029 S1/S2 tail worst-first (TOP-20 ranks 8–20, then WR-021..051 + VG rows) | [ ] | — |
 | UXR-W-006 | W4 | Android | dev-client bundle load → 5-flow smoke → findings pass | [x] | SMOKE PASSED 08-23: role picker · guest browse+item · OTP auth e2e · authed Home+grid · all 4 tabs; F-272 logged |
 | UXR-W-002 | W3 | Store/product | hero elevation (flow 3) | [ ] | — |
