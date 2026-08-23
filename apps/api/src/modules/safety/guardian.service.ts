@@ -754,6 +754,16 @@ export class GuardianService {
     if (!session) throw new NotFoundError('SafetyCheckin', driverUserId);
     const now = new Date();
     const state: DetectorState = (session.deviationState as DetectorState | null) ?? {};
+    // [F-028-19] A repeat confirm inside the window is the SAME fact — record
+    // it once. Without this, every call rewrote the session JSON and emitted a
+    // war-room event, so a stuck retry loop (or a hostile client) was an
+    // unbounded write/socket amplifier wearing a safety label. Sixty seconds
+    // is far inside any honest confirm cadence and does not delay a FIRST
+    // confirmation by a millisecond.
+    const last = state.driverConfirmedAtMs;
+    if (typeof last === 'number' && now.getTime() - last < 60_000) {
+      return { recorded: true };
+    }
     state.driverConfirmedAtMs = now.getTime();
     pushEvent(state, now, 'DRIVER_CONFIRMED');
     await this.prisma.tripSafetySession.update({ where: { id: session.id }, data: { deviationState: state as never } });

@@ -15,6 +15,31 @@ function requireAuthorization(): void {
   }
   if (!process.env['DATABASE_URL']) throw new Error('DATABASE_URL is required');
   if (!process.env['REDIS_URL']) throw new Error('REDIS_URL is required');
+
+  // [F-028-14] The FULL production posture, not just the confirmation value.
+  // Every downstream guard — getPushProvider's DevPush refusal,
+  // assertSafeBootConfig — defines "production" solely by the exact
+  // NODE_ENV string. This script is documented to run against the production
+  // database, and each logout it performs fans out push notifications; run
+  // with production targets but NODE_ENV absent or misspelled, the boot
+  // barrier waves it through, PUSH_PROVIDER defaults to 'dev', and every
+  // revocation notice is silently swallowed by an in-memory DevPush while
+  // reporting success. The operator typed the confirmation value; they have
+  // already declared this is production — so the environment must SAY so
+  // before AuthService is ever constructed.
+  if (process.env['NODE_ENV'] !== 'production') {
+    throw new Error(
+      'Refusing session revocation: the cutover confirmation is set but NODE_ENV is '
+      + `${JSON.stringify(process.env['NODE_ENV'] ?? '(unset)')} — this command targets production, so run it with `
+      + 'NODE_ENV=production or the DevPush/boot guards cannot see what you are doing.',
+    );
+  }
+  if ((process.env['PUSH_PROVIDER'] ?? 'dev') === 'dev') {
+    throw new Error(
+      'Refusing session revocation: PUSH_PROVIDER is dev (in-memory) — every revocation push this cutover '
+      + 'sends would be silently swallowed while reporting success. Set PUSH_PROVIDER=expo.',
+    );
+  }
 }
 
 async function main(): Promise<void> {
