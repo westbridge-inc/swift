@@ -18,3 +18,5 @@
 - [~] UXR-W-008 ACTIVE: WR-006 residual (NEED_HELP/OK honest send failure, TaxiScreen)
 - [x] UXR-W-008 CLOSED: PR #726 MERGED (Trip Guardian honest send failure both answers)
 - [~] UXR-W-009 ACTIVE: WR-008 MMG open feedback (3 call sites) — edits done, gates green, committing next
+- [x] F-271 FOUND+FIXED+PROVEN: Android debug builds could never reach Metro (TLS-pinning netsec config blocked all cleartext). Plugin patched, APK rebuilt, app RENDERS ON ANDROID FOR THE FIRST TIME (role-picker screenshot). Stale 8-day Metro was the separate warm-hang cause — fresh Metro bundles android in 7s
+- [x] UXR-W-009 CLOSED: PR #727 MERGED (MMG open feedback at 3 call sites)

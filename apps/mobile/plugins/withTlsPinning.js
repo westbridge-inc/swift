@@ -25,6 +25,17 @@ const NETWORK_SECURITY_CONFIG = `<?xml version="1.0" encoding="utf-8"?>
       <pin digest="SHA-256">diGVwiVYbubAI3RW4hB9xU8e/CH2GnkuvVFZE8zmgzI=</pin>
     </pin-set>
   </domain-config>
+  <!-- Declaring networkSecurityConfig REPLACES the platform default, and with
+       targetSdk >= 28 the implicit base blocks ALL cleartext — which silently
+       cut every debug build off from Metro (localhost/10.0.2.2), the reason
+       Android never loaded a bundle. These hosts are loopback/emulator-NAT
+       only and unreachable in production; the pin-set above is untouched. -->
+  <domain-config cleartextTrafficPermitted="true">
+    <domain includeSubdomains="false">localhost</domain>
+    <domain includeSubdomains="false">127.0.0.1</domain>
+    <domain includeSubdomains="false">10.0.2.2</domain>
+    <domain includeSubdomains="false">10.0.3.2</domain>
+  </domain-config>
 </network-security-config>
 `;
 
