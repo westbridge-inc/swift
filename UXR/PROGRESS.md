@@ -68,3 +68,5 @@
 - [~] REPORT-026 batch: F-026-22 (b5 pickup-code redaction) + F-026-24 (b4 exact subtotalBase) + F-026-26 (b13 loser-lost-cleanly + verified cleanup) — shipping. b4/b5 live-run blocked on rig supply (no riders/mart closed); type+lint gated like F-026-06
 - [x] PR #749 MERGED (F-026-22/24/26 baseline hardening). REPORT-026 tail: 9 findings closed across #747/#748/#749 + F-026-17 verified-closed; remaining ~10 are baseline-script quality (F-026-20/21/23/25/27/28/29/30 + REPORT-022 tail)
 - [x] F-026-20 (b11 tier gate) FIXED + LIVE-VERIFIED: selfie-complete L1 probe now reaches assertL2 → exact 403 ID_VERIFICATION_REQUIRED (log confirms). Residual B11 PARTIAL = F-225 guest-search (founder-gated, pre-existing). Cleaned a stray active b12 tenant that was 503-ing the public catalog (proof F-026-09 verified-teardown was needed).
+- [x] F-026-20 CLOSED: PR #750 MERGED (b11 tier gate live-verified)
+- [~] F-026-23 (b5 stops overwriting go-online authority) + F-026-30 (b7/b8 safety unwind: a started ride is completed via the authorized path + Guardian verified closed) — shipping

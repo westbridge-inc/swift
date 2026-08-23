@@ -27,6 +27,10 @@ import { PrismaClient } from '@prisma/client';
 const A = process.env['BASELINE_API'] ?? 'http://localhost:3000/api/v1';
 const HEALTH = A.replace('/api/v1', '') + '/health';
 const prisma = new PrismaClient();
+// [F-026-30] A started ride is a live Guardian-monitored trip; the finally
+// must bring any still-live one to a safe terminal state (complete — the
+// custody law refuses an in-trip cancel) rather than just disconnecting.
+let liveRide: { id: string; token: string } | null = null;
 const CUSTOMER_PHONE = '+5925566001';
 const D1_PHONE = '+5926005001';
 const D2_PHONE = '+5926005002';
@@ -95,6 +99,25 @@ async function restoreDrivers(tag: string): Promise<void> {
   console.log(`${new Date().toISOString()} · teardown: driver restore ${failures.length === 0 && stillOffline === 0 ? 'VERIFIED' : 'INCOMPLETE'}`,
     JSON.stringify({ drivers: driversBefore.length, failures, stillOffline }));
   if (failures.length > 0 || stillOffline > 0) { console.error(`${tag} DRIVER RESTORE INCOMPLETE`); process.exitCode = 1; }
+}
+
+// [F-026-30] Complete a started-but-unfinished ride via the authorized driver
+// path and verify Guardian closed with it — never leave a live monitored trip.
+async function unwindLiveRide(): Promise<void> {
+  if (!liveRide) return;
+  const { id, token } = liveRide;
+  const cur = await prisma.order.findUnique({ where: { id }, select: { status: true } });
+  const TERMINAL = ['DELIVERED', 'COMPLETED', 'CANCELLED'];
+  if (!cur || TERMINAL.includes(cur.status)) { liveRide = null; return; }
+  console.error(`B8 SAFETY UNWIND: ride ${id} left in ${cur.status} — completing via authorized path`);
+  await http('PUT', `/driver/rides/${id}/complete`, {}, token).catch(() => undefined);
+  const after = await prisma.order.findUnique({ where: { id }, select: { status: true } });
+  const openSession = await prisma.tripSafetySession.count({ where: { orderId: id, status: { in: ['MONITORING', 'CHECKIN_PENDING', 'ESCALATING'] } } }).catch(() => 0);
+  if (!after || !TERMINAL.includes(after.status) || openSession > 0) {
+    console.error(`B8 SAFETY UNWIND INCOMPLETE: status=${after?.status}, openGuardianSessions=${openSession}`);
+    process.exitCode = 1;
+  }
+  liveRide = null;
 }
 
 async function main() {
@@ -222,6 +245,7 @@ async function main() {
   if (vp.status >= 300) throw new Error(`verify rotated pin ${vp.status}`);
   const st = await http('PUT', `/driver/rides/${rideB}/start`, {}, secondToken);
   if (st.status >= 300) throw new Error(`start ${st.status}`);
+  liveRide = { id: rideB, token: secondToken }; // [F-026-30] armed
   const inTripCancel = await http('POST', `/driver/rides/${rideB}/cancel`, { reason: 'ELV2 B8 custody probe' }, secondToken);
   if (inTripCancel.status !== 400) throw new Error(`FAIL custody law: in-trip driver cancel returned ${inTripCancel.status}, expected 400`);
   log('EVIDENCE never-auto-cancel IN_PROGRESS (old pin dead, rotated pin works, in-trip cancel 400)');
@@ -229,6 +253,7 @@ async function main() {
   if (done.status >= 300) throw new Error(`complete ${done.status}`);
   const fin = await prisma.order.findUniqueOrThrow({ where: { id: rideB }, select: { status: true } });
   if (fin.status !== 'DELIVERED') throw new Error(`expected DELIVERED, got ${fin.status}`);
+  liveRide = null; // safely terminal
   log('EVIDENCE ride B completed after the drop-out chain', fin);
 
   log('B8 COMPLETE — DROP-OUT CASCADE + CUSTODY PROTECTION PROVEN');
@@ -237,6 +262,7 @@ async function main() {
 main()
   .catch((e) => { console.error('B8 FAILED:', e.message); process.exitCode = 1; })
   .finally(async () => {
+    await unwindLiveRide().catch((e) => { console.error('B8 SAFETY UNWIND FAILED:', e.message); process.exitCode = 1; });
     await restoreDrivers('B8').catch((e) => { console.error('B8 DRIVER RESTORE FAILED:', e.message); process.exitCode = 1; });
     await prisma.$disconnect();
   });

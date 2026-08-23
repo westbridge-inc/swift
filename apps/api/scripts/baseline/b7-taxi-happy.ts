@@ -23,6 +23,10 @@ import { Prisma, PrismaClient } from '@prisma/client';
 const A = process.env['BASELINE_API'] ?? 'http://localhost:3000/api/v1';
 const HEALTH = A.replace('/api/v1', '') + '/health';
 const prisma = new PrismaClient();
+// [F-026-30] A ride that has STARTED is a live, Guardian-monitored trip.
+// If any later step throws, the finally must bring it to a safe terminal
+// state via an authorized path — not just disconnect and leave it live.
+let liveRide: { id: string; token: string } | null = null;
 
 // [F-026-06] Money is proven with EXACT Decimal comparison, never a float
 // round-trip: Number() can equate distinct Decimals and mis-round; the
@@ -81,6 +85,29 @@ async function restoreDrivers(tag: string): Promise<void> {
   console.log(`${new Date().toISOString()} · teardown: driver restore ${failures.length === 0 && stillOffline === 0 ? 'VERIFIED' : 'INCOMPLETE'}`,
     JSON.stringify({ drivers: driversBefore.length, failures, stillOffline }));
   if (failures.length > 0 || stillOffline > 0) { console.error(`${tag} DRIVER RESTORE INCOMPLETE`); process.exitCode = 1; }
+}
+
+// [F-026-30] Bring a started-but-unfinished ride to a safe terminal state via
+// the authorized driver cancel path, and confirm Guardian/monitoring closed
+// with it — a failed baseline must never leave a live monitored trip.
+async function unwindLiveRide(): Promise<void> {
+  if (!liveRide) return;
+  const { id, token } = liveRide;
+  const cur = await prisma.order.findUnique({ where: { id }, select: { status: true } });
+  const TERMINAL = ['DELIVERED', 'COMPLETED', 'CANCELLED'];
+  if (!cur || TERMINAL.includes(cur.status)) { liveRide = null; return; }
+  // An IN_PROGRESS ride's authorized terminal is COMPLETE — the custody law
+  // (proven in B8) refuses an in-trip cancel, so completing the trip is the
+  // safe path that also closes Guardian with TRIP_COMPLETED.
+  console.error(`B7 SAFETY UNWIND: ride ${id} left in ${cur.status} — completing via authorized path`);
+  await http('PUT', `/driver/rides/${id}/complete`, {}, token).catch(() => undefined);
+  const after = await prisma.order.findUnique({ where: { id }, select: { status: true } });
+  const openSession = await prisma.tripSafetySession.count({ where: { orderId: id, status: { in: ['MONITORING', 'CHECKIN_PENDING', 'ESCALATING'] } } }).catch(() => 0);
+  if (!after || !TERMINAL.includes(after.status) || openSession > 0) {
+    console.error(`B7 SAFETY UNWIND INCOMPLETE: status=${after?.status}, openGuardianSessions=${openSession}`);
+    process.exitCode = 1;
+  }
+  liveRide = null;
 }
 
 async function main() {
@@ -162,6 +189,7 @@ async function main() {
   // ── 4. start → in-trip → complete → payment recorded ─────────────────────
   const start = await http('PUT', `/driver/rides/${rideId}/start`, {}, driverToken);
   if (start.status >= 300) throw new Error(`start ${start.status}: ${JSON.stringify(start.json).slice(0, 200)}`);
+  liveRide = { id: rideId, token: driverToken }; // [F-026-30] armed — a failure past here must unwind it
   const inTrip = await prisma.order.findUniqueOrThrow({ where: { id: rideId }, select: { status: true } });
   if (inTrip.status !== 'RIDE_IN_PROGRESS') throw new Error(`expected RIDE_IN_PROGRESS, got ${inTrip.status}`);
   const done = await http('PUT', `/driver/rides/${rideId}/complete`, {}, driverToken);
@@ -169,6 +197,7 @@ async function main() {
 
   const final = await prisma.order.findUniqueOrThrow({ where: { id: rideId }, select: { status: true, taxiFareTotal: true } });
   if (final.status !== 'DELIVERED') throw new Error(`expected DELIVERED, got ${final.status}`);
+  liveRide = null; // safely terminal — nothing to unwind
   if (!dec(final.taxiFareTotal).equals(quotedFare)) throw new Error(`FAIL fare drift: quoted ${quotedFare.toString()}, completed ${String(final.taxiFareTotal)}`);
   const earning = await prisma.earning.findFirst({ where: { orderId: rideId, driverId: driver.id, type: 'TAXI_FARE' } });
   if (!earning || !dec(earning.amount).equals(quotedFare)) throw new Error(`FAIL earning: ${earning ? String(earning.amount) : 'none'} != ${quotedFare.toString()}`);
@@ -184,6 +213,7 @@ async function main() {
 main()
   .catch((e) => { console.error('B7 FAILED:', e.message); process.exitCode = 1; })
   .finally(async () => {
+    await unwindLiveRide().catch((e) => { console.error('B7 SAFETY UNWIND FAILED:', e.message); process.exitCode = 1; });
     await restoreDrivers('B7').catch((e) => { console.error('B7 DRIVER RESTORE FAILED:', e.message); process.exitCode = 1; });
     await prisma.$disconnect();
   });

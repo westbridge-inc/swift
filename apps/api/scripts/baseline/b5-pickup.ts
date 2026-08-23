@@ -72,8 +72,19 @@ async function main() {
   // would leave detectable evidence.
   const on = await http('POST', '/rider/go-online', { latitude: 6.8, longitude: -58.15 }, riderToken);
   if (on.status >= 300) throw new Error(`rider go-online ${on.status}: ${JSON.stringify(on.json).slice(0, 200)}`);
-  await prisma.rider.update({ where: { id: rider.id }, data: { isOnline: true, isAvailable: true, currentOrderId: null, currentLat: 6.8, currentLng: -58.15, lastLocationUpdate: new Date() } });
-  const riderBefore = { id: rider.id, currentOrderId: null as string | null };
+  // [F-026-23] The go-online ROUTE is the authority on availability — it
+  // preserves currentOrderId and derives isAvailable from it. Force-setting
+  // isAvailable:true + currentOrderId:null right after would erase a live
+  // assignment and make the mover double-bookable — the exact corruption the
+  // hardening avoids. If the rig rider somehow already owns an order, that's a
+  // dirty precondition, not something to paper over; fail loudly. Otherwise
+  // only stamp LOCATION (which the route doesn't set from a fixture position).
+  const liveNow = await prisma.rider.findUniqueOrThrow({ where: { id: rider.id }, select: { currentOrderId: true, isOnline: true } });
+  if (liveNow.currentOrderId) throw new Error(`FAIL precondition: the rig rider already owns order ${liveNow.currentOrderId} — clear it before B5 rather than erasing the assignment`);
+  await prisma.rider.update({ where: { id: rider.id }, data: { currentLat: 6.8, currentLng: -58.15, lastLocationUpdate: new Date() } });
+  // Capture the REAL pre-state (the guard above proved currentOrderId is null),
+  // so the "rider untouched" proof compares against truth, not a hardcode.
+  const riderBefore = { id: rider.id, currentOrderId: liveNow.currentOrderId };
 
   // ── 1. PICKUP checkout ────────────────────────────────────────────────────
   await http('POST', '/customer/cart/items', { vendorId: vendor.id, itemId: item.id, quantity: 1 }, customerToken);
