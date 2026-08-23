@@ -420,10 +420,11 @@ describe('durable mover revocation outbox', () => {
     const mover = await makeUser('MOVER');
     const rider = await makeRider(mover.user.id, mover.session.id);
     await makeOrder(customer.user.id, rider.id, 'RIDER_ASSIGNED');
+    const hungCustomerToken = `outbox-hung-push-${nanoid(24)}`;
     await app.prisma.deviceToken.create({
       data: {
         userId: customer.user.id,
-        token: `outbox-hung-push-${nanoid(24)}`,
+        token: hungCustomerToken,
         platform: 'ios',
         isActive: true,
       },
@@ -462,12 +463,59 @@ describe('durable mover revocation outbox', () => {
 
     const control = await makeUser('MOVER');
     const controlRider = await makeRider(control.user.id, control.session.id);
-    await makeOrder((await makeUser()).user.id, controlRider.id, 'RIDER_ASSIGNED');
+    const controlCustomer = await makeUser();
+    await makeOrder(controlCustomer.user.id, controlRider.id, 'RIDER_ASSIGNED');
+    // [F-028-13] The control's customer needs an active token, or the control
+    // logout has NO push recipient and the fast-push spy never runs — the two
+    // measurements would then be different code paths at exactly the effect
+    // being controlled, and the differential would compare a push-traversing
+    // hang against a push-skipping baseline.
+    await app.prisma.deviceToken.create({
+      data: {
+        userId: controlCustomer.user.id,
+        token: `outbox-control-push-${nanoid(24)}`,
+        platform: 'ios',
+        isActive: true,
+      },
+    });
     const fastPush = vi.spyOn(ExpoPushProvider.prototype, 'sendPush').mockResolvedValue({ sent: 1 } as never);
     const controlStartedAt = Date.now();
     await new AuthService(app).logout(control.session.id, control.user.id);
     const controlMs = Date.now() - controlStartedAt;
+    // Prove the control TRAVERSED the effect — a control that skips the push
+    // is not a control [F-028-13]. The immediate delivery is raced at the
+    // 50ms budget and then FLOATS, so the push fires after logout returns;
+    // asserting at t=0 races it (CI confirmed: 0 calls at return time). Wait
+    // for the traversal, bounded — the wait proves the path, the earlier
+    // controlMs already captured the timing. This also closes a latent spy
+    // collision: restoring fastPush before the floated call lands would let
+    // the CONTROL's push hit the hang spy installed next and inflate its
+    // call count.
+    const traversalDeadline = Date.now() + 10_000;
+    while (fastPush.mock.calls.length === 0 && Date.now() < traversalDeadline) {
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    expect(fastPush.mock.calls.length, 'the control logout never reached sendPush — it is not measuring the same path').toBeGreaterThanOrEqual(1);
+    // ...and wait for the control's OUTBOX ROW to finish, or its floated
+    // delivery can outlive this spy, lose its lease on a slow runner, be
+    // re-delivered by the background worker, and land a SECOND call on the
+    // hang spy installed below (CI caught exactly that: expected 1, got 2).
+    const controlRowDeadline = Date.now() + 10_000;
+    for (;;) {
+      const row = await app.prisma.moverRevocationOutbox.findFirst({
+        where: { userId: control.user.id }, select: { processedAt: true },
+      });
+      if (row?.processedAt || Date.now() >= controlRowDeadline) break;
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
     fastPush.mockRestore();
+
+    // [F-028-13] The differential needs a floor under the control itself: a
+    // 1.8s control and a 1.9s hung logout would pass a 150ms differential
+    // with BOTH materially regressed. Half the hang sentinel is gross — DB
+    // round-trips on a loaded runner fit in it many times over — so tripping
+    // it means the base path itself regressed, which this test must not bless.
+    expect(controlMs, `the CONTROL logout took ${controlMs}ms — the base path has regressed independent of any hang`).toBeLessThan(HANG_SENTINEL_MS / 2);
 
     // Only NOW install the hang. Both spies target the same prototype method,
     // so restoring the control's spy after installing this one would silently
@@ -529,7 +577,11 @@ describe('durable mover revocation outbox', () => {
       retryDispatch,
     }))).resolves.toEqual({ processed: 0, failed: 0 });
     expect(retryDispatch).not.toHaveBeenCalled();
-    expect(sendPush).toHaveBeenCalledTimes(1);
+    // [F-028-13] Recipient-scoped, not a global count: only calls carrying
+    // the HUNG customer's token belong to the delivery under test — a control
+    // straggler must never satisfy or break this line.
+    const hungCalls = sendPush.mock.calls.filter((c) => JSON.stringify(c[0]).includes(hungCustomerToken));
+    expect(hungCalls.length, 'exactly one push attempt for the hung delivery').toBe(1);
     await app.prisma.moverRevocationOutbox.delete({ where: { id: outbox.id } });
   });
 
