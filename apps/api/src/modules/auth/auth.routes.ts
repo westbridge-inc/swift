@@ -3,6 +3,7 @@ import { z } from 'zod';
 import { AuthService } from './auth.service';
 import { TRIAL_DAYS } from '../subscription/subscription.service';
 import { resolveAvatarUrl } from '../../utils/avatar-url';
+import { recordStorageOrphan } from '../../lib/storage-orphans';
 import { AppError } from '../../utils/errors';
 import { zPhone } from '../../utils/phone';
 import { ALLOWED_IMAGE_TYPES, looksLikeImage } from '../../utils/images';
@@ -167,6 +168,13 @@ export async function authRoutes(app: FastifyInstance) {
     // failure path here must unwind it — a thrown update used to leave an
     // unreferenced personal-data object no sweep could rediscover. Cleanup
     // failures are LOGGED (an orphan must be discoverable, never silent).
+    // [F-026-02] Capture the PRIOR pointer before it is overwritten: the old
+    // selfie object must be purged (or censused) — a replacement upload used
+    // to strand it with no discoverable key.
+    const prior = await app.prisma.user.findUnique({
+      where: { id: request.user.userId },
+      select: { avatar: true, tenantId: true },
+    });
     let selfieWrite: { count: number };
     try {
       selfieWrite = await app.prisma.user.updateMany({
@@ -174,16 +182,28 @@ export async function authRoutes(app: FastifyInstance) {
         data: { avatar: url, selfieCapturedAt: new Date() },
       });
     } catch (err) {
-      await getStorageProvider().delete(url).catch((cleanupErr) => {
+      await getStorageProvider().delete(url).catch(async (cleanupErr) => {
         app.log.error({ err: cleanupErr, userId: request.user.userId, key: url }, '[F-024-08] selfie cleanup after failed write also failed — orphaned key');
+        // [F-026-02] A log line is not a census — the sweep needs the key.
+        await recordStorageOrphan(app.prisma, app.log, { key: url, reason: 'SELFIE_UNWIND_DELETE_FAILED', userId: request.user.userId, tenantId: prior?.tenantId });
       });
       throw err;
     }
     if (selfieWrite.count === 0) {
-      await getStorageProvider().delete(url).catch((cleanupErr) => {
+      await getStorageProvider().delete(url).catch(async (cleanupErr) => {
         app.log.error({ err: cleanupErr, userId: request.user.userId, key: url }, '[F-024-08] selfie cleanup after inactive-account refusal failed — orphaned key');
+        await recordStorageOrphan(app.prisma, app.log, { key: url, reason: 'SELFIE_UNWIND_DELETE_FAILED', userId: request.user.userId, tenantId: prior?.tenantId });
       });
       throw new AppError(409, 'ACCOUNT_INACTIVE', 'This account is not active.');
+    }
+    // [F-026-02] The write landed — purge the replaced selfie object. Same
+    // legacy-URL guard as account deletion: absolute URLs aren't our keys.
+    const oldKey = prior?.avatar;
+    if (oldKey && oldKey !== url && !oldKey.startsWith('http://') && !oldKey.startsWith('https://')) {
+      await getStorageProvider().delete(oldKey).catch(async (purgeErr) => {
+        app.log.error({ err: purgeErr, userId: request.user.userId, key: oldKey }, '[F-026-02] replaced selfie purge failed — censused');
+        await recordStorageOrphan(app.prisma, app.log, { key: oldKey, reason: 'REPLACED_SELFIE_DELETE_FAILED', userId: request.user.userId, tenantId: prior?.tenantId });
+      });
     }
     const user = await app.prisma.user.findUniqueOrThrow({
       where: { id: request.user.userId },

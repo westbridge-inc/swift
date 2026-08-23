@@ -14,10 +14,16 @@
  * Run: DATABASE_URL=postgresql://swift:swift@localhost:5434/swift \
  *      npx tsx scripts/baseline/b1-cash-spine.ts
  */
-import { PrismaClient } from '@prisma/client';
+import { Prisma, PrismaClient } from '@prisma/client';
 
 const API = process.env['BASELINE_API'] ?? 'http://localhost:3000/api/v1';
 const prisma = new PrismaClient();
+
+// [F-026-06] Money is proven with EXACT Decimal comparison, never a float
+// round-trip: Number() can equate distinct Decimals and mis-round; the
+// integer-money law applies to the proofs too.
+const dec = (v: unknown) => new Prisma.Decimal(String(v ?? 0));
+
 const CUSTOMER_PHONE = '+5925566001';
 const RIDER_PHONE = '+5925566002';
 const OWNER_PHONE = '+5925566000';
@@ -187,12 +193,12 @@ async function main() {
   // THIS rider at THIS order's fee, AVAILABLE — and for a CASH order, NO
   // DeliveryCashSettlement row (that row is the MMG-only VENDOR_OWES_RIDER
   // obligation; cash settles implicitly at handover — F-221 CLOSED-VERIFIED).
-  const feeMinor = Math.round(Number(o0.deliveryFee ?? 0) * 100);
+
   const earnings = await prisma.earning.findMany({ where: { orderId }, select: { type: true, amount: true, riderId: true, status: true } });
   const feeRows = earnings.filter((e) => e.type === 'DELIVERY_FEE');
   if (feeRows.length !== 1) throw new Error(`FAIL: ${feeRows.length} DELIVERY_FEE earnings, expected exactly 1`);
   if (feeRows[0]!.riderId !== rider.id) throw new Error(`FAIL: earning credited to ${feeRows[0]!.riderId}, expected ${rider.id}`);
-  if (Math.round(Number(feeRows[0]!.amount) * 100) !== feeMinor) throw new Error(`FAIL: earning ${String(feeRows[0]!.amount)} != deliveryFee ${String(o0.deliveryFee)}`);
+  if (!dec(feeRows[0]!.amount).equals(dec(o0.deliveryFee ?? 0))) throw new Error(`FAIL: earning ${String(feeRows[0]!.amount)} != deliveryFee ${String(o0.deliveryFee)}`);
   if (feeRows[0]!.status !== 'AVAILABLE') throw new Error(`FAIL: earning status ${feeRows[0]!.status}, expected AVAILABLE`);
   const dup = await prisma.earning.groupBy({ by: ['type'], where: { orderId }, _count: true }).then((g) => g.filter((x) => x._count > 1));
   if (dup.length > 0) throw new Error(`FAIL: duplicated earnings after replay: ${JSON.stringify(dup)}`);

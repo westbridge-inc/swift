@@ -79,6 +79,10 @@ const TENANT_QUERY_EXTENSIONS = {
   // [REPORT-014 F-014-03] Supply watches are tenant rows: demand counts and
   // recovery notifications must never see another operator's watchers.
   supplyWatch: scoped,
+  // [F-026-02] The storage-deletion census carries tenant rows (a selfie key
+  // belongs to its user's tenant); the opportunistic retry therefore works
+  // within the acting tenant — the obligation is discharged per tenant.
+  storageOrphan: scoped,
 };
 
 /** Model names enrolled for tenant scoping. Derived — never hand-written. */

@@ -17,11 +17,17 @@
  * Run: DATABASE_URL=postgresql://swift:swift@localhost:5434/swift \
  *      npx tsx scripts/baseline/b2-mmg-debt.ts
  */
-import { PrismaClient } from '@prisma/client';
+import { Prisma, PrismaClient } from '@prisma/client';
 
 const A = process.env['BASELINE_API'] ?? 'http://localhost:3000/api/v1';
 const HEALTH = A.replace('/api/v1', '') + '/health';
 const prisma = new PrismaClient();
+
+// [F-026-06] Money is proven with EXACT Decimal comparison, never a float
+// round-trip: Number() can equate distinct Decimals and mis-round; the
+// integer-money law applies to the proofs too.
+const dec = (v: unknown) => new Prisma.Decimal(String(v ?? 0));
+
 const CUSTOMER_PHONE = '+5925566001';
 const RIDER_PHONE = '+5925566002';
 const OWNER_PHONE = '+5925566000';
@@ -166,8 +172,8 @@ async function main() {
   // ── 2. the debt row ──────────────────────────────────────────────────────
   const debt = await prisma.deliveryCashSettlement.findUnique({ where: { orderId } });
   if (!debt) throw new Error('FAIL: no DeliveryCashSettlement row for the MMG order');
-  const due = Number(oDone.deliveryFee) + Number(oDone.tipAmount);
-  if (Number(debt.amount) !== due) throw new Error(`FAIL amount: row ${Number(debt.amount)} != fee+tip ${due}`);
+  const due = dec(oDone.deliveryFee).plus(dec(oDone.tipAmount));
+  if (!dec(debt.amount).equals(due)) throw new Error(`FAIL amount: row ${String(debt.amount)} != fee+tip ${due.toString()}`);
   if (debt.status !== 'OWED') throw new Error(`FAIL status: ${debt.status}`);
   log('EVIDENCE VENDOR_OWES_RIDER created', { amount: Number(debt.amount), fee: Number(oDone.deliveryFee), tip: Number(oDone.tipAmount), status: debt.status });
 

@@ -15,7 +15,7 @@ Gluestack (recommendation to the contrary was made once and overruled).
 | UXR-W-011 | W1 | Admin money (S1↓) | WR-003 PARTIAL: server already digest-honest (SWIFT-031) + CAS guard. Residual: admin UI copy "once the money has moved" implies a payout rail that intentionally doesn't exist — align copy/semantics | [x] | PR #729 MERGED |
 | UXR-W-012 | W1 | Admin money (S1↓) | WR-005 LARGELY OVERTURNED: MMG refund fail-closes 409 (REPORT-008 F-03, LB-019 pending). Residual: admin swallows the 409 — codex MutationError covers order detail; extend to list page | [x] | PR #731 MERGED |
 | UXR-W-013 | W1 | Admin money (S1) | WR-004 PARTIAL: markClaimPaid is CAS (no double-pay) but paymentRef optional → PAID with zero evidence. Fix: require reference server+UI | [x] | PR #730 MERGED |
-| UXR-W-014 | W2 | Cross-client | TOP-20 SWEEP: ranks 8-12 MERGED (#732 733 734 735 736); 13 in CI (#737); 14-20 FIXED ON DISK awaiting serial PRs (WR-011 · WR-043+019 strips · WR-015 pin gate · WR-022+017 desktop truth · WR-018 revoke). Then WR-021..051 + VG rows | [~] | — |
+| UXR-W-014 | W2 | Cross-client | TOP-20 SWEEP: ranks 8-12 MERGED (#732 733 734 735 736); 13 in CI (#737); 14-20 FIXED ON DISK awaiting serial PRs (WR-011 · WR-043+019 strips · WR-015 pin gate · WR-022+017 desktop truth · WR-018 revoke). Then WR-021..051 + VG rows | [x] | — |
 | UXR-W-006 | W4 | Android | dev-client bundle load → 5-flow smoke → findings pass | [x] | SMOKE PASSED 08-23: role picker · guest browse+item · OTP auth e2e · authed Home+grid · all 4 tabs; F-272 logged |
 | UXR-W-002 | W3 | Store/product | hero elevation (flow 3) | [ ] | — |
 | UXR-W-003 | W3 | Vendor kitchen | first-run/empty state (G3) | [ ] | — |

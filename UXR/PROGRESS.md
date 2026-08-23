@@ -60,3 +60,6 @@
 - SPEC note VG-009: desktop ReviewCenter's 'waited >= 24' breach threshold is a client-side magic number — route to config authority (CountryConfig/ops config) as a registered follow-on; not patched client-side by design
 - [x] WR-015 CLOSED: PR #745 MERGED (pin gate; FG-2 doc delivered)
 - [~] GRAND HONESTY SWEEP (WR-037 openExternal 9 sites+shares · WR-042 csv guard · VG-006 hours error · WR-049 dispatch-retry error · WR-050+VG-014 Money · WR-051 keychain awaits · VG-010 login labels) — final W-014 round, shipping
+- [x] GRAND SWEEP CLOSED: PR #746 MERGED — UXR-W-014 [x]. REPORT-029: all 51 WR + 16 VG rows merged, SPEC-routed, FG-2-routed, or HELD on the Gluestack gate
+- [~] REPORT-026 tail OPEN: F-026-05 b7/b8 restore + F-026-06 exact-Decimal proofs + F-026-02 StorageOrphan census (schema+migration+RLS+sites+opportunistic retry) — staged, tests next
+- [~] REPORT-026 opener: F-026-02 StorageOrphan census (scoped, RLS'd, migrated, 4 pins) + F-026-05 b7/b8 verified restore + F-026-06 exact-Decimal proofs — shipping
