@@ -154,7 +154,13 @@ async function main() {
   const custBody = custView.json?.data ?? custView.json;
   const customerCode: string | undefined = custBody?.pickupCode ?? custBody?.order?.pickupCode;
   if (!customerCode) throw new Error('FAIL HND: the customer contract does not expose the pickup code — pickup would strand');
-  if (customerCode !== o0.pickupCode) throw new Error(`FAIL: customer-visible code ${customerCode} != minted code`);
+  // [F-026-22] NEVER interpolate either pickup code — the top-level catch
+  // prints e.message while the order is still live, and handover codes must
+  // never reach a log, failure logs included. Report a redacted marker with
+  // safe run correlation instead.
+  if (customerCode !== o0.pickupCode) {
+    throw new Error(`FAIL: customer-visible pickup code does not match the minted code [orderId=${orderId}, lenSeen=${customerCode.length}, lenMinted=${o0.pickupCode.length}]`);
+  }
   log('EVIDENCE customer can read their own pickup code', { status: custView.status, matchesMinted: true });
   const good = await http('PUT', `/vendor/orders/${orderId}/complete-pickup`, { code: customerCode }, ownerToken);
   if (good.status >= 300) throw new Error(`FAIL: right code refused ${good.status}: ${JSON.stringify(good.json).slice(0, 200)}`);
