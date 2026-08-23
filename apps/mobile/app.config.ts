@@ -13,6 +13,14 @@ const cameraPermission =
 const splashBackgroundColor = '#803B3B';
 const splashImage = './assets/icon.png';
 
+// Universal Links (iOS) / App Links (Android) for the printed QR short links
+// ({APP_PUBLIC_URL}/s/{code}) and storefront links (/store/{slug}). The JS
+// router (services/deep-links.ts) already handles both; this is the native
+// interception half. The domain must serve
+// /.well-known/apple-app-site-association and /.well-known/assetlinks.json —
+// apps/web serves both, gated on APPLE_TEAM_ID / ANDROID_CERT_SHA256 env.
+const linkDomain = process.env['SWIFT_LINK_DOMAIN'] ?? 'swiftgy.com';
+
 const config: ExpoConfig = {
   // Native project/module name — 'Swift' itself is reserved by Apple's
   // standard library, so the Xcode target needs a distinct name. What users
@@ -37,6 +45,7 @@ const config: ExpoConfig = {
   ios: {
     bundleIdentifier: 'gy.swift.app',
     supportsTablet: true,
+    associatedDomains: [`applinks:${linkDomain}`, `applinks:www.${linkDomain}`],
     infoPlist: {
       CFBundleDisplayName: 'Swift',
       NSLocationWhenInUseUsageDescription: locationWhenInUse,
@@ -64,6 +73,19 @@ const config: ExpoConfig = {
   android: {
     package: 'gy.swift.app',
     adaptiveIcon: { backgroundColor: '#FFFFFF' },
+    intentFilters: [
+      {
+        action: 'VIEW',
+        autoVerify: true,
+        data: [
+          { scheme: 'https', host: linkDomain, pathPrefix: '/s' },
+          { scheme: 'https', host: `www.${linkDomain}`, pathPrefix: '/s' },
+          { scheme: 'https', host: linkDomain, pathPrefix: '/store' },
+          { scheme: 'https', host: `www.${linkDomain}`, pathPrefix: '/store' },
+        ],
+        category: ['BROWSABLE', 'DEFAULT'],
+      },
+    ],
     // iOS uses Apple Maps (PROVIDER_DEFAULT, no key). Android's react-native-maps
     // is always Google-backed and renders a BLANK map without a key — set
     // ANDROID_GOOGLE_MAPS_API_KEY in the build env (EAS secret / prebuild env,

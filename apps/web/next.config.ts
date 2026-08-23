@@ -34,6 +34,19 @@ const csp = [
 
 const nextConfig: NextConfig = {
   poweredByHeader: false,
+  // App Router ignores dot-prefixed folders, so the OS association files are
+  // route handlers under /well-known/* surfaced at their mandated paths here.
+  async rewrites() {
+    const api = process.env['NEXT_PUBLIC_API_URL'];
+    return [
+      { source: '/.well-known/apple-app-site-association', destination: '/well-known/apple-app-site-association' },
+      { source: '/.well-known/assetlinks.json', destination: '/well-known/assetlinks.json' },
+      // The printed QR URL is {APP_PUBLIC_URL}/s/{code}; the web domain
+      // proxies it to the API's public resolver (302 passes through). Only
+      // wired when the build knows its API — dev keeps the route local.
+      ...(api ? [{ source: '/s/:code', destination: `${api}/s/:code` }] : []),
+    ];
+  },
   async headers() {
     return [
       {
