@@ -20,21 +20,31 @@ export function LocationPickerScreen() {
   const initial = route.params?.initial as { latitude: number; longitude: number } | undefined;
   const returnTo: string = route.params?.returnTo ?? 'AddAddress';
 
+  // [WR-015] The Georgetown centre is a VIEW fallback, never a confirmable
+  // pin: without a real fix (param or device), Confirm stays off until the
+  // user has actually placed the pin themselves — an invented coordinate
+  // must not become a durable delivery address.
+  const hasRealFix = !!initial || (latitude != null && longitude != null);
+  const [touched, setTouched] = useState(false);
+
   const start: Region = {
     latitude: initial?.latitude ?? latitude ?? 6.8013,
-    longitude: initial?.longitude ?? longitude ?? -58.1551, // Georgetown fallback
+    longitude: initial?.longitude ?? longitude ?? -58.1551, // Georgetown fallback (view only)
     latitudeDelta: 0.01,
     longitudeDelta: 0.01,
   };
   const [region, setRegion] = useState<Region>(start);
   const mapRef = useRef<MapView>(null);
+  const confirmable = hasRealFix || touched;
 
-  const confirm = () =>
+  const confirm = () => {
+    if (!confirmable) return;
     navigation.navigate({
       name: returnTo,
       params: { picked: { latitude: region.latitude, longitude: region.longitude } },
       merge: true,
     });
+  };
 
   return (
     <View style={{ flex: 1 }}>
@@ -42,7 +52,13 @@ export function LocationPickerScreen() {
         ref={mapRef}
         style={{ flex: 1 }}
         initialRegion={start}
-        onRegionChangeComplete={setRegion}
+        onRegionChangeComplete={(r) => {
+          setRegion(r);
+          // Mount fires this once with the start region — only a real move counts.
+          if (Math.abs(r.latitude - start.latitude) > 1e-4 || Math.abs(r.longitude - start.longitude) > 1e-4) {
+            setTouched(true);
+          }
+        }}
         showsUserLocation={locationStatus === 'granted'}
       />
 
@@ -93,7 +109,22 @@ export function LocationPickerScreen() {
             {region.latitude.toFixed(5)}, {region.longitude.toFixed(5)}
           </T>
         </View>
-        <PillButton label="Confirm Pin" onPress={confirm} />
+        {!confirmable ? (
+          <View
+            style={{
+              alignSelf: 'center',
+              backgroundColor: color.surface.base,
+              borderRadius: 9999,
+              paddingHorizontal: space.lg,
+              paddingVertical: 6,
+            }}
+          >
+            <T variant="caption" tone="muted" center>
+              This is a city-centre starting point — move the map to your spot first.
+            </T>
+          </View>
+        ) : null}
+        <PillButton label={confirmable ? 'Confirm Pin' : 'Move the map to confirm'} disabled={!confirmable} onPress={confirm} />
       </View>
     </View>
   );

@@ -54,3 +54,6 @@
 - [~] Desktop command-surface truth pass (WR-017 payment contract + G$ · WR-018 sign-out revokes · WR-021 moderation honest label · WR-022 support label + service contract note · WR-023 degraded status line · WR-024 palette rows navigate) — shipping
 - [x] Desktop truth pass CLOSED: PR #743 MERGED (WR-017/018/021/022/023/024)
 - [~] Admin honesty batch (WR-045 config placebo labeled · WR-046 zones page reads REAL zones · WR-047 nine-page MutationNotice sweep · WR-048 QueryFailed on agent/audit/markets/verification/finance) — shipping
+- [x] Admin honesty batch CLOSED: PR #744 MERGED (WR-045..048)
+- [x] FG-2-CANDIDATES.md compiled (RideSheet orphan · legacy ChatScreen re-route+delete · teeth record) — founder approval pending
+- [~] WR-015 pin gate — shipping alone
