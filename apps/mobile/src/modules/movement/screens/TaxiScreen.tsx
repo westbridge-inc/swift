@@ -17,7 +17,7 @@ import { connectSocket, getSocket, subscribeToOrder } from '../../../services/so
 import { RidePostTripSheet } from '../RidePostTripSheet';
 import { useLocationStore } from '../../../stores/locationStore';
 import { useDeviceLocation } from '../../../hooks/useDeviceLocation';
-import { GEORGETOWN, pickupLocationContext } from '../../../lib/deviceLocation';
+import { grantedLocationFix, GEORGETOWN, pickupLocationContext } from '../../../lib/deviceLocation';
 import { LocationPrimerCard } from '../../../components/LocationPrimerCard';
 import { money } from '../../../lib/money';
 import { mediaUrl } from '../../../lib/images';
@@ -1164,12 +1164,19 @@ function ActiveRide({ navigation, ride, cancelRide, insets, rematching }: any) {
             // must never imply a staffed safety desk [liability shield].
             // Guyana launch emergency number; move to CountryConfig for other markets.
             Linking.openURL('tel:911').catch(() => {});
-            const coords =
-              riderLoc.latitude != null && riderLoc.longitude != null
-                ? { lat: riderLoc.latitude, lng: riderLoc.longitude }
-                : driverLoc
-                  ? { lat: driverLoc.latitude, lng: driverLoc.longitude }
-                  : undefined;
+            // [F-028-08] Only a GRANTED fix may speak for the passenger.
+            // The old existence check preferred persisted coordinates over
+            // the LIVE driver position, so after a permission refusal an SOS
+            // could page ops with wherever the phone last was — on the one
+            // payload where a wrong location sends help to the wrong place.
+            // Stale-but-granted beats nothing; live driver beats stale rider;
+            // an honest "unknown" beats both when that is the truth.
+            const riderFix = grantedLocationFix(riderLoc.latitude, riderLoc.longitude, riderLoc.status);
+            const coords = riderFix
+              ? { lat: riderFix.latitude, lng: riderFix.longitude }
+              : driverLoc
+                ? { lat: driverLoc.latitude, lng: driverLoc.longitude }
+                : undefined;
             sos.mutate({ id: ride.id, coords });
           }}
         />
