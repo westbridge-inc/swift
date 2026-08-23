@@ -247,7 +247,15 @@ export async function safetyRoutes(app: FastifyInstance) {
     return { success: true, data: await guardian.respondToCheckin(request.user.userId, response) };
   });
 
-  app.post('/guardian/driver-confirm', lifeSafety, async (request) => {
+  // [F-028-19] NOT lifeSafety. The exemption exists so a throttle can never
+  // stand between a person and HELP — SOS, and a passenger's NEED_HELP. This
+  // is the opposite message: a driver saying "I'm OK". Exempting an
+  // acknowledgement handed a compromised or buggy driver client an unlimited
+  // database-write + war-room-emit amplifier (every call rewrites the
+  // session's JSON and pages the ops feed). The standard limiter is generous
+  // beside any honest confirm cadence, and the service now short-circuits
+  // repeats besides.
+  app.post('/guardian/driver-confirm', { preHandler: [app.authenticate] }, async (request) => {
     return { success: true, data: await guardian.driverConfirm(request.user.userId) };
   });
 
