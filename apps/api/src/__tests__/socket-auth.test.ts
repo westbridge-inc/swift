@@ -239,6 +239,43 @@ describe('SEC-1 regression — Socket.IO authentication', () => {
     expect(socket.connected).toBe(false);
   });
 
+  it('[F-028-01] an authority-store OUTAGE is refused retryably — never as a credential verdict', async () => {
+    // A pool-exhausted or unreachable database landing in the middleware
+    // catch used to become 'Invalid or expired token' — the exact false
+    // credential decision F-250 removed from HTTP. Clients rightly treat a
+    // credential verdict as terminal (drop the token, log out), so a database
+    // blip force-logged-out every client that tried to reconnect during it.
+    const { token } = await makeSessionToken('ACTIVE');
+    const spy = vi.spyOn(app.prisma.session, 'findUnique').mockRejectedValueOnce(new Error('connection pool exhausted'));
+    try {
+      const { socket, error } = await connect({ token });
+      expect(error).toBeDefined();
+      expect(error!.message).toBe('Authorization temporarily unavailable');
+      expect(error!.message).not.toBe('Invalid or expired token');
+      expect(socket.connected).toBe(false);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('[F-028-01] ...and the SAME token connects fine once the store recovers', async () => {
+    // The point of the distinction: nothing about the credentials was decided,
+    // so recovery needs no re-login.
+    const { token, userId } = await makeSessionToken('ACTIVE');
+    const spy = vi.spyOn(app.prisma.session, 'findUnique').mockRejectedValueOnce(new Error('transient'));
+    try {
+      const first = await connect({ token });
+      expect(first.error?.message).toBe('Authorization temporarily unavailable');
+    } finally {
+      spy.mockRestore();
+    }
+    const second = await connect({ token });
+    expect(second.error).toBeUndefined();
+    expect(second.socket.connected).toBe(true);
+    expect(userId).toBeTruthy();
+    second.socket.disconnect();
+  });
+
   it('accepts a connection with a valid JWT + live session, joins the user room', async () => {
     const { userId, sessionId, token } = await makeSessionToken('ACTIVE');
     const { socket, error } = await connect({ token });
