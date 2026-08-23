@@ -216,7 +216,24 @@ async function main() {
   if (!qs || qs.position < 1 || !qs.expiresAt || qs.suppliersOnline !== 0) throw new Error(`FAIL queue status: ${JSON.stringify(qs).slice(0, 200)}`);
   const watchGone = await prisma.supplyWatch.count({ where: { customerId: customer.id, notifiedAt: null } });
   if (watchGone !== 0) throw new Error(`FAIL: queue join should supersede the bare watch (${watchGone} left)`);
-  log('EVIDENCE queue join stores the full trip and supersedes the watch', { status: qs.status, expiresAt: qs.expiresAt });
+  // [F-026-28] The claim is "the queue stores the FULL trip in WAITING" — so
+  // read the PERSISTED row, not just the response envelope. A response that
+  // echoes a position while nothing durable landed used to pass.
+  const qRow = await prisma.rideQueueEntry.findFirst({
+    where: { customerId: customer.id },
+    orderBy: { createdAt: 'desc' },
+    select: { status: true, pickupLat: true, pickupLng: true, dropoffLat: true, dropoffLng: true, pickupAddress: true, dropoffAddress: true, expiresAt: true },
+  });
+  if (!qRow) throw new Error('FAIL: queue join persisted no RideQueueEntry row');
+  if (qRow.status !== 'WAITING') throw new Error(`FAIL: queue row is ${qRow.status}, expected WAITING`);
+  if (qRow.pickupAddress !== trip.pickupAddress || qRow.dropoffAddress !== trip.dropoffAddress) {
+    throw new Error('FAIL: the queue row does not carry the full trip (addresses differ from the request)');
+  }
+  if (Number(qRow.pickupLat) !== trip.pickup.lat || Number(qRow.dropoffLng) !== trip.dropoff.lng) {
+    throw new Error('FAIL: the queue row does not carry the full trip (coordinates differ from the request)');
+  }
+  if (!qRow.expiresAt) throw new Error('FAIL: the queue row has no TTL');
+  log('EVIDENCE queue join stores the full trip and supersedes the watch', { rowStatus: qRow.status, expiresAt: qRow.expiresAt });
   const ql = await http('POST', '/rides/queue/leave', {}, customerToken);
   if (ql.status >= 300 || ql.json?.data?.left !== true) throw new Error(`queue leave ${ql.status}`);
   log('EVIDENCE queue leave honest one-tap', ql.json.data);
@@ -282,8 +299,17 @@ async function main() {
   const relDeadline2 = Date.now() + 240_000;
   let releasedNotice = 0;
   while (Date.now() < relDeadline2) {
+    // [F-026-28] Correlate on the RELEASE notification specifically — any
+    // earlier generic dispatch message bearing this ride id used to satisfy
+    // the "customer was told nothing to pay" claim.
     releasedNotice = await prisma.notification.count({
-      where: { userId: customer.id, createdAt: { gte: sinceRequest }, data: { path: ['orderId'], equals: rideId } as any },
+      where: {
+        userId: customer.id, createdAt: { gte: sinceRequest },
+        AND: [
+          { data: { path: ['orderId'], equals: rideId } as any },
+          { data: { path: ['kind'], equals: 'ride_released_no_drivers' } as any },
+        ],
+      },
     });
     const cur = await prisma.order.findUnique({ where: { id: rideId }, select: { status: true, cancellationReason: true } });
     if (cur?.status === 'CANCELLED' && releasedNotice > 0) {

@@ -72,3 +72,5 @@
 - [~] F-026-23 (b5 stops overwriting go-online authority) + F-026-30 (b7/b8 safety unwind: a started ride is completed via the authorized path + Guardian verified closed) — shipping
 - [x] F-026-23 + F-026-30 CLOSED: PR #751 MERGED
 - [~] F-026-27 (b2 delivered-assert + recipient-correlated dual-confirm notices) + F-026-29 (b1/b4 preparing leg asserts, tolerating only a DB-proven auto-advance) — shipping
+- [x] F-026-27 + F-026-29 CLOSED: PR #752 MERGED
+- [~] F-026-21 (b5 reads REDIS for the live-offer proof, not just the best-effort SQL receipt) + F-026-28 (b9 asserts the persisted WAITING queue row w/ full trip + correlates the release notice on kind ride_released_no_drivers) — shipping. That completes every REPORT-026 S1 tail finding.
