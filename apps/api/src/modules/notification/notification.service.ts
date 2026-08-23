@@ -2,6 +2,7 @@ import type { Notification, PrismaClient } from '@prisma/client';
 import type { Server } from 'socket.io';
 import { getChannels, type NotificationChannels } from '../../providers/notifications/channels';
 import { log } from '../../utils/logger';
+import { runWithoutTenant } from '../../plugins/tenant-context';
 import { notificationFailuresCounter } from '../../plugins/observability';
 
 /** Per-user channel switches; the vendor order alert ignores these. */
@@ -204,7 +205,16 @@ export async function notifyAdmins(
   // Remaining work, registered not hidden: the twelve genuinely per-tenant
   // callers should fan out per tenant so each operator hears about their own
   // rows. Until they do, those events reach platform operators only.
-  const admins = await prisma.user.findMany({
+  // [F-028-10] runWithoutTenant is LOAD-BEARING, not belt-and-braces. `User`
+  // is an ALS-scoped model, so inside an ordinary authenticated request this
+  // lookup was silently intersected with the CALLER's tenant — a
+  // notifyAdmins(null) from tenant-A's request found only super-admins who
+  // themselves live in tenant A, which in the ordinary deployment shape is
+  // ZERO. The 5xx-spike pager then counted that empty page as success and its
+  // dedup window kept the outage dark for 15 minutes. Paging operators is a
+  // sanctioned cross-tenant read; it must not depend on whose request it
+  // happens to run inside.
+  const admins = await runWithoutTenant(() => prisma.user.findMany({
     where: input.tenantId
       ? {
         status: 'ACTIVE',
@@ -213,7 +223,7 @@ export async function notifyAdmins(
       }
       : { status: 'ACTIVE', roles: { has: 'SUPER_ADMIN' } },
     select: { id: true },
-  });
+  }));
   for (const admin of admins) {
     await notifications.send({
       userId: admin.id,
