@@ -3736,7 +3736,9 @@ export async function adminRoutes(app: FastifyInstance) {
 
   app.put('/cash-rules/claims/:id/paid', { preHandler: [adminGuard] }, async (request) => {
     const { id } = request.params as { id: string };
-    const body = processSettlementSchema.parse(request.body ?? {});
+    // [WR-004] Unlike the settlements digest, this records a REAL payout on a
+    // manual rail — the reference is the evidence and is required.
+    const body = z.object({ reference: z.string().trim().min(1) }).parse(request.body ?? {});
     const claim = await cashRules.markClaimPaid(id, request.user.userId, body.reference);
     await audit(request.user.userId, 'PAY_CLAIM', 'ReimbursementClaim', id, { reference: body.reference }, request);
     return { success: true, data: claim };

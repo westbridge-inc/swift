@@ -398,7 +398,13 @@ export class CashRulesService {
     return updated;
   }
 
-  async markClaimPaid(claimId: string, adminId: string, paymentRef?: string) {
+  async markClaimPaid(claimId: string, adminId: string, paymentRef: string) {
+    // [WR-004] PAID is a money fact on a manual rail — the reference (bank/MMG
+    // ref, receipt number) IS the evidence. Without it the record attests a
+    // payout nobody can trace, so it is required, not optional.
+    if (!paymentRef?.trim()) {
+      throw new AppError(400, 'PAYMENT_REF_REQUIRED', 'A payment reference is required to record a claim payout.');
+    }
     // reviewedBy: keep the original reviewer if there was one; else stamp the payer.
     const existing = await this.prisma.reimbursementClaim.findUnique({ where: { id: claimId }, select: { reviewedBy: true } });
     const updated = await this.transitionClaim(claimId, ['AUTO_APPROVED', 'APPROVED'], {
