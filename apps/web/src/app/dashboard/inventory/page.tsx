@@ -5,6 +5,7 @@ import Link from 'next/link';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { FileUp, Search } from 'lucide-react';
 import { adjustStock, getCategories, getItems, setItemAvailability, updateItem, type CatalogItem } from '@/lib/vendor-api';
+import { MutationNotice } from '@/components/mutation-notice';
 
 const money = (n: number) => `$${Math.round(Number(n)).toLocaleString()}`;
 
@@ -111,6 +112,7 @@ export default function InventoryPage() {
 
   return (
     <div className="space-y-5">
+      <MutationNotice errors={[availMut.error]} />
       <div className="flex flex-wrap items-center justify-between gap-3">
         <h1 className="text-2xl font-extrabold">Inventory</h1>
         <Link

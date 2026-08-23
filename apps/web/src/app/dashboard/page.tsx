@@ -4,6 +4,7 @@ import Link from 'next/link';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { AlertTriangle, Star } from 'lucide-react';
 import { getLowStock, getOverview, toggleOpen, toggleOrders } from '@/lib/vendor-api';
+import { MutationNotice } from '@/components/mutation-notice';
 
 const money = (n: number) => `$${Math.round(n).toLocaleString()}`;
 
@@ -52,6 +53,7 @@ export default function TodayPage() {
 
   return (
     <div className="space-y-6">
+      <MutationNotice errors={[openMut.error, ordersMut.error]} />
       <div className="flex items-center justify-between">
         <h1 className="text-2xl font-extrabold">Today</h1>
         <div className="flex items-center gap-1 text-sm text-[var(--swift-muted)]">

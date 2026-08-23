@@ -84,6 +84,15 @@ export default function Health() {
             {(dlq.error as Error).message}
           </p>
         )}
+        {(requeue.error || discard.error) ? (
+          // [WR-020] A failed requeue/discard must be seen — the refetch puts
+          // the job row back and this line says why it is still there.
+          <p role="alert" className="mt-2 text-sm font-semibold text-[var(--swift-red)]">
+            {requeue.error
+              ? `Requeue did not go through: ${(requeue.error as Error).message}`
+              : `Discard did not go through: ${(discard.error as Error).message}`}
+          </p>
+        ) : null}
         <div className="mt-2 space-y-2">
           {jobs.length === 0 && !dlq.isError && (
             <p className="rounded-xl border border-dashed border-neutral-200 p-8 text-center text-sm text-neutral-400">
@@ -106,7 +115,12 @@ export default function Health() {
                     Requeue
                   </button>
                   <button
-                    onClick={() => discard.mutate({ queue: j.queue, id: j.id })}
+                    // [WR-020] Discard permanently drops the job — confirm it.
+                    onClick={() => {
+                      if (window.confirm(`Discard ${j.queue} job #${j.id} permanently? It will never run.`)) {
+                        discard.mutate({ queue: j.queue, id: j.id });
+                      }
+                    }}
                     disabled={discard.isPending}
                     className="rounded-lg bg-[var(--swift-red)] px-3 py-1.5 text-xs font-semibold disabled:opacity-40"
                   >
