@@ -11,13 +11,13 @@ import { vendorPhoto } from '../../../lib/images';
 import {
   Photo,
   Card, EmptyState, ErrorState, GradientMasthead, LoadingBlock, Money,
-  Pictogram, PillButton, ReceiptEdge, Screen, T,
+  Pictogram, PillButton, Screen, T,
 } from '../../../kit';
 import { TonePill } from '../../../kit/controls';
 
 // [design-100x Flow-7] The activity LEDGER: live journeys first on a sunken
 // band, then completed rows grouped under truthful date eyebrows. The
-// masthead ends in the ReceiptEdge — a till slip closes the ledger.
+// masthead ends in the kit's clean curve [founder veto 08-22: no toothed edges].
 
 type PillTone = 'brand' | 'success' | 'neutral' | 'error' | 'warning' | 'info';
 const STATUS_TONE: Record<string, { label: string; tone: PillTone }> = {
@@ -84,7 +84,6 @@ export function OrdersHistoryScreen() {
         <T variant="micro" tone="onBrand">ORDERS & RIDES</T>
         <T variant="title" tone="onBrand" style={{ marginTop: 2 }}>Your activity</T>
       </GradientMasthead>
-      <ReceiptEdge />
     </>
   );
 

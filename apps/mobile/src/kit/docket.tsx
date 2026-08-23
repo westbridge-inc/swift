@@ -1,3 +1,9 @@
+/** ⚠️ FOUNDER VETO 2026-08-22 — DO NOT RENDER THESE.
+ * The toothed-edge family (awning scallop, receipt teeth, docket teeth) was
+ * vetoed on sight: "this sucks, especially the bump under the search bar",
+ * then again on Activity's sawtooth. Every render site has been removed;
+ * mastheads end in the kit's clean 28dp curve. These components remain only
+ * until the orphan sweep deletes them. */
 import React from 'react';
 import { View, useWindowDimensions, type ViewProps } from 'react-native';
 import Svg, { Rect, Circle, Path } from 'react-native-svg';
