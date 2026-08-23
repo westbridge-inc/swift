@@ -56,6 +56,7 @@ function Login({ onDone }: { onDone: () => void }) {
             <input
               autoFocus value={phone} onChange={(e) => setPhone(e.target.value)}
               onKeyDown={(e) => e.key === 'Enter' && send()}
+              aria-label="Phone number"
               placeholder="+592 600 1000"
               className="w-full rounded-lg border border-neutral-200 bg-neutral-50 px-3 py-2.5 text-sm outline-none focus:border-[var(--swift-red)]"
             />
@@ -71,6 +72,7 @@ function Login({ onDone }: { onDone: () => void }) {
             <input
               autoFocus inputMode="numeric" value={code} onChange={(e) => setCode(e.target.value)}
               onKeyDown={(e) => e.key === 'Enter' && verify()}
+              aria-label="One-time code"
               placeholder="000000"
               className="w-full rounded-lg border border-neutral-200 bg-neutral-50 px-3 py-2.5 text-sm tracking-widest outline-none focus:border-[var(--swift-red)]"
             />

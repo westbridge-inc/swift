@@ -6,6 +6,7 @@ import { color, radius, space } from '@swift/ui';
 import { Card, Chip, IconChip, InfoRow, LoadingBlock, ErrorState, PillButton, PopupCard, PopupTitle, Screen, T } from '../../../kit';
 import { useOrderAction, useRetryDispatch, useVendorOrder, usePickingActions, useVendorMenu } from '../../../hooks/vendorops';
 import { money } from '../../../lib/money';
+import { openExternal } from '../../../lib/openExternal';
 import {
   FulfillmentTag,
   GUTTER,
@@ -81,7 +82,7 @@ function ContactCard({
           </T>
         </View>
         {phone ? (
-          <PillButton label="Call" variant="soft" size="sm" onPress={() => Linking.openURL(`tel:${phone}`).catch(() => {})} />
+          <PillButton label="Call" variant="soft" size="sm" onPress={() => void openExternal(`tel:${phone}`, "Couldn't start the call — dial the customer directly.")} />
         ) : null}
       </View>
       {(lines ?? []).filter(Boolean).map((l, i) => (

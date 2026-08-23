@@ -7,6 +7,7 @@ import { SvgXml } from 'react-native-svg';
 import { Card, Chip, ErrorState, LinkText, LoadingBlock, PillButton, PopupCard, PopupTitle, Screen, SettingsRow, T, TonePill } from '../../../kit';
 import { useDeactivateQr, useRegenerateQr, useVendorQr, useVendorQrAnalytics, type QrAnalytics } from '../../../hooks/vendorops';
 import { GUTTER, SubHeader } from '../shared';
+import { toast } from '../../../components/ui/toast';
 
 // ---------------------------------------------------------------------------
 // My Swift QR — the vendor's acquisition artifact (qr spec Part 5, copy Part
@@ -125,7 +126,7 @@ export function VendorMyQrScreen({ navigation }: any) {
   const qrSize = Math.min(width - GUTTER * 2 - space['2xl'] * 2, 264);
 
   const shareLink = () => {
-    void Share.share({ message: `Order from ${qr.vendorName} on Swift: ${qr.shortUrl}` });
+    void Share.share({ message: `Order from ${qr.vendorName} on Swift: ${qr.shortUrl}` }).catch(() => toast.show("Couldn't open the share sheet."));
   };
 
   return (

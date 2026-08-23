@@ -18,6 +18,7 @@ import { haversineKm, streetEtaMin } from '../../../lib/geo';
 import { jobAmount, RoutePair } from '../shared';
 import { haptic } from '../../../lib/haptics';
 import { dk, withAlpha, DCard } from '../dark';
+import { openExternal } from '../../../lib/openExternal';
 
 /** [F-213] Every driver handover PIN is 6 digits (api ride-pin.ts). */
 const RIDE_PIN_LENGTH = 6;
@@ -205,7 +206,7 @@ export function ActiveJobScreen({ navigation }: any) {
   const openNav = () => {
     if (!navTarget) return;
     const q = `${navTarget.latitude},${navTarget.longitude}`;
-    Linking.openURL(`maps://?daddr=${q}`).catch(() => Linking.openURL(`https://maps.google.com/?daddr=${q}`));
+    Linking.openURL(`maps://?daddr=${q}`).catch(() => openExternal(`https://maps.google.com/?daddr=${q}`, "Couldn't open maps on this phone."));
   };
   const step = isDriver && job ? driverStep(job) : null;
 
@@ -363,7 +364,7 @@ export function ActiveJobScreen({ navigation }: any) {
                   </T>
                 </View>
                 {cust.phone ? (
-                  <Pressable onPress={() => Linking.openURL(`tel:${cust.phone}`)} hitSlop={6}>
+                  <Pressable onPress={() => void openExternal(`tel:${cust.phone}`, "Couldn't start the call — dial the customer directly.")} hitSlop={6}>
                     {({ pressed }) => (
                       <View style={{ width: 40, height: 40, borderRadius: 20, alignItems: 'center', justifyContent: 'center', backgroundColor: dk.cardSoft, marginRight: space.sm, opacity: pressed ? 0.7 : 1 }}>
                         <Feather name="phone" size={17} color={dk.success} />
@@ -483,7 +484,7 @@ export function ActiveJobScreen({ navigation }: any) {
             // records evidence; it is not an emergency responder and the copy
             // must never imply a staffed safety desk [liability shield].
             // Guyana launch emergency number; move to CountryConfig for other markets.
-            Linking.openURL('tel:911').catch(() => {});
+            void openExternal('tel:911', "Couldn't start the call — dial 911 directly.");
             const coords = me ? { lat: me.latitude, lng: me.longitude } : undefined;
             if (job?.id) sos.mutate({ id: job.id, coords });
           }}

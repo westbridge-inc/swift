@@ -22,8 +22,11 @@ async function kcGet(key: string): Promise<string | null> {
   if (inTauri) { try { return (await invoke<string | null>('keychain_get', { key })) ?? null; } catch { return null; } }
   try { return localStorage.getItem(KC + key); } catch { return null; }
 }
-function kcSet(key: string, value: string): void {
-  if (inTauri) { invoke('keychain_set', { key, value }).catch(() => {}); return; }
+async function kcSet(key: string, value: string): Promise<void> {
+  // [WR-051] Await the write — sign-in used to enter the authed state before
+  // the keychain accepted the secret, so a denied prompt silently produced a
+  // session that vanished on restart.
+  if (inTauri) { await invoke('keychain_set', { key, value }).catch(() => {}); return; }
   try { localStorage.setItem(KC + key, value); } catch { /* ignore */ }
 }
 async function kcDelete(key: string): Promise<void> {
@@ -42,10 +45,10 @@ export async function loadSession(): Promise<boolean> {
   return !!accessToken;
 }
 
-function storeSession(access: string, refresh?: string | null) {
+async function storeSession(access: string, refresh?: string | null) {
   accessToken = access;
-  kcSet('access', access);
-  if (refresh) kcSet('refresh', refresh);
+  await kcSet('access', access);
+  if (refresh) await kcSet('refresh', refresh);
 }
 
 export async function clearSession() {
@@ -146,7 +149,7 @@ export async function verifyAdminLogin(phone: string, code: string) {
   if (!roles.some((r) => ADMIN_ROLES.includes(r))) {
     throw new Error('This account does not have admin access.');
   }
-  storeSession(data.tokens.accessToken, data.tokens.refreshToken);
+  await storeSession(data.tokens.accessToken, data.tokens.refreshToken);
   return data.user;
 }
 

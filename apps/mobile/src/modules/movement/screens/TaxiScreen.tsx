@@ -27,6 +27,7 @@ import { toast } from '../../../components/ui/toast';
 import { safetyApi, type RideClass, type TierEstimate } from '../../../services/api';
 import { Card, CircleChip, IconChip, LoadingBlock, Money, PillButton, Pictogram, type PictogramName, PinGlyph, PopupCard, PopupTitle, Stars, T, VehicleRender, type VehicleBodyType, cardShadow } from '../../../kit';
 import type { PickedPlace } from './DestinationSearchScreen';
+import { openExternal } from '../../../lib/openExternal';
 
 const STATUS_LABEL: Record<string, string> = {
   PENDING: 'Finding your driver…',
@@ -1058,7 +1059,7 @@ function ActiveRide({ navigation, ride, cancelRide, insets, rematching }: any) {
                     variant="soft"
                     size="sm"
                     icon="phone"
-                    onPress={() => Linking.openURL(`tel:${d.user.phone}`).catch(() => {})}
+                    onPress={() => void openExternal(`tel:${d.user.phone}`, "Couldn't start the call — dial your driver directly.")}
                   />
                 ) : null}
               </View>
@@ -1167,7 +1168,7 @@ function ActiveRide({ navigation, ride, cancelRide, insets, rematching }: any) {
             // records evidence; it is not an emergency responder and the copy
             // must never imply a staffed safety desk [liability shield].
             // Guyana launch emergency number; move to CountryConfig for other markets.
-            Linking.openURL('tel:911').catch(() => {});
+            void openExternal('tel:911', "Couldn't start the call — dial 911 directly.");
             // [F-028-08] Only a GRANTED fix may speak for the passenger.
             // The old existence check preferred persisted coordinates over
             // the LIVE driver position, so after a permission refusal an SOS

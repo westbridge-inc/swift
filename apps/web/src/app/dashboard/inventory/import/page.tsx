@@ -42,6 +42,12 @@ export default function ImportPage() {
     const res = await fetch(`${API_URL}/api/v1${templateUrl().replace('/api/v1', '')}`, {
       headers: { Authorization: `Bearer ${getToken()}`, ...(store ? { 'x-vendor-id': store } : {}) },
     });
+    // [WR-042] An error body must never download as a .csv the vendor opens
+    // in Excel and mistakes for the template.
+    if (!res.ok) {
+      setError(`Couldn't download the template (${res.status}) — try again.`);
+      return;
+    }
     const blob = await res.blob();
     const a = document.createElement('a');
     a.href = URL.createObjectURL(blob);

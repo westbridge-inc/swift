@@ -35,7 +35,22 @@ function HoursEditor() {
     onError: (e) => setError((e as Error).message),
   });
 
-  if (!rows) return <p className="text-sm text-[var(--swift-muted)]">Loading…</p>;
+  if (!rows) {
+    // [VG-006] A failed read used to leave "Loading…" forever.
+    if (hours.isError) {
+      return (
+        <div className="rounded-2xl border border-black/5 bg-white p-6">
+          <p role="alert" className="text-sm font-semibold text-[var(--swift-red)]">
+            Couldn&apos;t load your hours: {(hours.error as Error).message}
+          </p>
+          <button onClick={() => hours.refetch()} className="mt-3 rounded-lg border border-black/10 px-3 py-1.5 text-sm font-semibold">
+            Retry
+          </button>
+        </div>
+      );
+    }
+    return <p className="text-sm text-[var(--swift-muted)]">Loading…</p>;
+  }
 
   const set = (d: number, patch: Partial<DayRow>) =>
     setRows(rows.map((r) => (r.dayOfWeek === d ? { ...r, ...patch } : r)));
