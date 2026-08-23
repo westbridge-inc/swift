@@ -179,8 +179,14 @@ async function main() {
 
   // ── 5. the remainder proceeds: pick the surviving line → ready → code done ─
   const survivor = lines.find((l) => l.id !== victim.id)!;
+  // [F-026-29] Assert the leg; tolerate only a proven auto-advance.
   const prep = await http('PUT', `/vendor/orders/${orderId}/preparing`, {}, ownerToken);
-  if (prep.status >= 300) log('NOTE preparing', `${prep.status}`);
+  if (prep.status >= 300) {
+    const st = (await prisma.order.findUniqueOrThrow({ where: { id: orderId }, select: { status: true } })).status;
+    const advanced = ['PREPARING', 'READY_FOR_PICKUP', 'READY', 'ASSIGNED', 'PICKED_UP', 'DELIVERED', 'COMPLETED'].includes(st);
+    if (!advanced) throw new Error(`FAIL preparing leg: ${prep.status} and the order is still ${st} — not an auto-advance (${JSON.stringify(prep.json).slice(0, 200)})`);
+    log('NOTE preparing already advanced', { status: prep.status, orderStatus: st });
+  }
   const picked = await http('PUT', `/vendor/orders/${orderId}/items/${survivor.id}/picked`, { picked: true }, ownerToken);
   if (picked.status >= 300) throw new Error(`picked ${picked.status}: ${JSON.stringify(picked.json).slice(0,200)}`);
   const rdy = await http('PUT', `/vendor/orders/${orderId}/ready`, {}, ownerToken);
