@@ -4,6 +4,7 @@ import { Share, View } from 'react-native';
 import { color, space } from '@swift/ui';
 import { useProfile } from '../../../hooks/customer';
 import { Card, ErrorState, Header, IconChip, LoadingBlock, PillButton, Screen, T } from '../../../kit';
+import { toast } from '../../../components/ui/toast';
 
 const GUTTER = space['2xl'];
 
@@ -26,9 +27,9 @@ export function InviteFriendsScreen() {
   }
 
   const share = () =>
-    Share.share({
+    void Share.share({
       message: `Join me on Swift — food, groceries, taxis and more, cash on delivery. Use my code ${code} when you sign up!`,
-    });
+    }).catch(() => toast.show("Couldn't open the share sheet."));
 
   return (
     <Screen>

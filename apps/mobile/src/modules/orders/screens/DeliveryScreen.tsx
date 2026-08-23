@@ -1,9 +1,10 @@
 /** @jsxImportSource react */
 import React, { useEffect, useRef, useState } from 'react';
-import { Dimensions, Linking, Pressable, ScrollView, View } from 'react-native';
+import { Dimensions, Pressable, ScrollView, View } from 'react-native';
 import MapView, { Marker, Polyline } from 'react-native-maps';
 import { Image } from 'expo-image';
 import Svg, { Circle } from 'react-native-svg';
+import { openExternal } from '../../../lib/openExternal';
 import Animated, {
   Easing,
   useAnimatedProps,
@@ -591,7 +592,7 @@ export function DeliveryScreen() {
               </Pressable>
               {rider.phone ? (
                 <Pressable
-                  onPress={() => Linking.openURL(`tel:${rider.phone}`)}
+                  onPress={() => void openExternal(`tel:${rider.phone}`, "Couldn't start the call — dial your rider directly.")}
                   style={{
                     width: 44,
                     height: 44,
@@ -708,7 +709,7 @@ export function DeliveryScreen() {
                   <Pressable
                     onPress={() => {
                       const q = o.pickupLat != null && o.pickupLng != null ? `${o.pickupLat},${o.pickupLng}` : encodeURIComponent(o.pickupAddress);
-                      Linking.openURL(`https://maps.apple.com/?daddr=${q}`).catch(() => {});
+                      void openExternal(`https://maps.apple.com/?daddr=${q}`, "Couldn't open maps on this phone.");
                     }}
                   >
                     {({ pressed }) => (

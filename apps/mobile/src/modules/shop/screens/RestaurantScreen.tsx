@@ -9,6 +9,7 @@ import { useAddToCart, useCart, useToggleFavorite, useUpdateCartItem, useVendor 
 import { useAuthStore } from '../../../stores/authStore';
 import { itemPhoto, vendorPhoto } from '../../../lib/images';
 import { money } from '../../../lib/money';
+import { toast } from '../../../components/ui/toast';
 import {
   AddMorph,
   Chip,
@@ -336,7 +337,7 @@ export function RestaurantScreen() {
               />
               <CircleChip
                 icon="share-2"
-                onPress={() => Share.share({ message: `${v.name} is on Swift — ${v.description ?? 'order in the app'}` })}
+                onPress={() => void Share.share({ message: `${v.name} is on Swift — ${v.description ?? 'order in the app'}` }).catch(() => toast.show("Couldn't open the share sheet."))}
               />
             </View>
           </View>

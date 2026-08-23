@@ -7,6 +7,7 @@ import { color } from '@swift/ui';
 import { withAlpha } from '../../modules/mover/dark';
 import { SwiftMark } from '../../components/SwiftLogo';
 import { authApi } from '../../services/api';
+import { toast } from '../../components/ui/toast';
 import {
   AuthSessionBoundaryError,
   requireAuthSessionForPrincipal,
@@ -158,7 +159,7 @@ export function SelfieCaptureScreen() {
               <Text className="mb-sm text-center text-sm text-text-secondary">
                 Camera access is off. Enable it in Settings to continue.
               </Text>
-              <Button label="Open Settings" onPress={() => Linking.openSettings()} />
+              <Button label="Open Settings" onPress={() => void Linking.openSettings().catch(() => toast.show("Couldn't open Settings — enable the camera for Swift there."))} />
             </>
           ) : (
             <Button label="Allow camera" onPress={requestPermission} />

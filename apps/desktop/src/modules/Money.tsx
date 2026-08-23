@@ -45,7 +45,14 @@ export default function Money() {
       <div>
         <p className="mb-2 text-xs font-bold uppercase tracking-wide text-neutral-400">How customers paid (last 30 days)</p>
         <div className="space-y-1">
-          {byMethod.length === 0 && <p className="text-sm text-neutral-400">No completed orders yet.</p>}
+          {mix.isError ? (
+            // [WR-050] A failed mix read is not "no completed orders".
+            <p role="alert" className="text-sm font-semibold text-[var(--swift-red)]">
+              Couldn't load the payment mix: {(mix.error as Error).message}
+            </p>
+          ) : byMethod.length === 0 ? (
+            <p className="text-sm text-neutral-400">No completed orders yet.</p>
+          ) : null}
           {byMethod.map((m) => (
             <div key={m.method} className="flex items-center gap-3 rounded-lg border border-neutral-100 bg-neutral-50 px-3 py-2 text-sm">
               <span className="font-semibold">{m.method.replaceAll('_', ' ')}</span>
@@ -55,7 +62,11 @@ export default function Money() {
           ))}
         </div>
         {mmgUnconfirmed > 0 && (
-          <p className="mt-2 text-xs text-amber-700">{mmgUnconfirmed} mobile-money order(s) not yet confirmed captured — worth a look.</p>
+          // [VG-014] "Worth a look" pointed nowhere — name the place to look.
+          <p className="mt-2 text-xs text-amber-700">
+            {mmgUnconfirmed} mobile-money order(s) not yet confirmed captured — the stores haven't tapped
+            &ldquo;payment received&rdquo;. The per-order list lives in Vendors &amp; Billing.
+          </p>
         )}
       </div>
     </div>

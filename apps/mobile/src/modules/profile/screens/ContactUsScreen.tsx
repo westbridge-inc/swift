@@ -1,9 +1,10 @@
 /** @jsxImportSource react */
 import React from 'react';
-import { Linking, ScrollView, View } from 'react-native';
+import { ScrollView, View } from 'react-native';
 import { useNavigation } from '@react-navigation/native';
 import { space } from '@swift/ui';
 import { Header, Screen, SettingsRow, T } from '../../../kit';
+import { openExternal } from '../../../lib/openExternal';
 
 // Kit Contact Us (55). Channels below are the launch support set —
 // TODO(SWIFT-117): confirm the final support phone/handles before release.
@@ -36,7 +37,7 @@ export function ContactUsScreen() {
             icon="mail"
             label="Email support"
             sub={SUPPORT_EMAIL}
-            onPress={() => Linking.openURL(`mailto:${SUPPORT_EMAIL}`)}
+            onPress={() => void openExternal(`mailto:${SUPPORT_EMAIL}`, `Couldn't open your mail app — write to ${SUPPORT_EMAIL}.`)}
           />
           <SettingsRow
             icon="help-circle"

@@ -25,6 +25,12 @@ function Row({ b, onActed }: { b: SlaBreach; onActed: () => void }) {
       <div className="min-w-0 flex-1">
         <p className="text-sm font-semibold">#{b.orderNumber} <span className="ml-1 text-xs font-normal text-neutral-400">{b.status}</span></p>
         <p className="text-xs text-neutral-500">{b.openStage ? STAGE_LABEL[b.openStage] ?? b.openStage : 'stalled'}</p>
+        {mut.isError ? (
+          // [WR-049] A failed re-dispatch on a stuck order must be seen.
+          <p role="alert" className="text-xs font-semibold text-[var(--swift-red)]">
+            Dispatch retry failed: {(mut.error as Error).message}
+          </p>
+        ) : null}
       </div>
       <span className="rounded-md bg-[var(--swift-red)]/15 px-2 py-1 text-xs font-bold text-[var(--swift-red)]">
         +{overMin(b.worstOverMs)} min over

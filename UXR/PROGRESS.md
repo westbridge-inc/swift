@@ -57,3 +57,6 @@
 - [x] Admin honesty batch CLOSED: PR #744 MERGED (WR-045..048)
 - [x] FG-2-CANDIDATES.md compiled (RideSheet orphan · legacy ChatScreen re-route+delete · teeth record) — founder approval pending
 - [~] WR-015 pin gate — shipping alone
+- SPEC note VG-009: desktop ReviewCenter's 'waited >= 24' breach threshold is a client-side magic number — route to config authority (CountryConfig/ops config) as a registered follow-on; not patched client-side by design
+- [x] WR-015 CLOSED: PR #745 MERGED (pin gate; FG-2 doc delivered)
+- [~] GRAND HONESTY SWEEP (WR-037 openExternal 9 sites+shares · WR-042 csv guard · VG-006 hours error · WR-049 dispatch-retry error · WR-050+VG-014 Money · WR-051 keychain awaits · VG-010 login labels) — final W-014 round, shipping
