@@ -23,6 +23,7 @@ import { connectSocket, getSocket, subscribeToOrder } from '../../../services/so
 import { money } from '../../../lib/money';
 import { haptic } from '../../../lib/haptics';
 import { openMmgPaymentAction, safeMmgPaymentActionUrl } from '../../../lib/payLink';
+import { toast } from '../../../components/ui/toast';
 import { holdRingActive, holdRingCaption } from './hold-ring';
 import { CircleChip, DecorativeIcon, ErrorState, IconChip, InfoRow, LoadingBlock, PillButton, PopupCard, PopupTitle, T } from '../../../kit';
 
@@ -768,7 +769,12 @@ export function DeliveryScreen() {
               <PillButton
                 label="Pay business with MMG"
                 icon="external-link"
-                onPress={() => void openMmgPaymentAction(mmgPaymentAction)}
+                onPress={async () => {
+                  // [WR-008] A launch that does nothing must say so.
+                  if (!(await openMmgPaymentAction(mmgPaymentAction))) {
+                    toast.show(`Couldn't open MMG — open the MMG app and pay ${mmgPaymentAction.recipientName} directly.`);
+                  }
+                }}
                 style={{ marginTop: space.md }}
               />
             </View>

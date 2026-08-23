@@ -22,6 +22,7 @@ import { itemPhoto } from '../../../lib/images';
 import { money } from '../../../lib/money';
 import { openMmgPaymentAction } from '../../../lib/payLink';
 import { haptic } from '../../../lib/haptics';
+import { toast } from '../../../components/ui/toast';
 import {
   AddMorph,
   Card,
@@ -244,7 +245,15 @@ export function CartScreen() {
           maybePrimeNotifications('customer_order');
           // The raw vendor field is never trusted/opened. Only the explicit,
           // validated post-checkout action can leave the app for MMG.
-          if (paymentAction) void openMmgPaymentAction(paymentAction);
+          // [WR-008] The auto-open used to discard failure — the order is
+          // already committed, so a launch that silently does nothing left
+          // the customer with no cue. The confirmation card's Pay button is
+          // the durable path; point at it.
+          if (paymentAction) {
+            void openMmgPaymentAction(paymentAction).then((opened) => {
+              if (!opened) toast.show("Couldn't open MMG — use the Pay button below.");
+            });
+          }
         },
         onError: (err: any) => {
           // Any server-side capability revalidation failure permanently
@@ -708,7 +717,11 @@ export function CartScreen() {
             label="Pay business with MMG"
             icon="external-link"
             size="md"
-            onPress={() => void openMmgPaymentAction(placedPaymentAction)}
+            onPress={async () => {
+              if (!(await openMmgPaymentAction(placedPaymentAction))) {
+                toast.show(`Couldn't open MMG — open the MMG app and pay ${placedPaymentAction.recipientName} directly.`);
+              }
+            }}
             style={{ alignSelf: 'stretch', marginTop: space.xl }}
           />
         ) : null}

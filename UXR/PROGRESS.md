@@ -16,3 +16,5 @@
 - [~] UXR-W-010 ACTIVE: WR-002 admin top-up idempotency (reference-derived key + honest failure)
 - [x] UXR-W-010 CLOSED: PR #725 MERGED (WR-002 top-up idempotency + visible money-mutation failures)
 - [~] UXR-W-008 ACTIVE: WR-006 residual (NEED_HELP/OK honest send failure, TaxiScreen)
+- [x] UXR-W-008 CLOSED: PR #726 MERGED (Trip Guardian honest send failure both answers)
+- [~] UXR-W-009 ACTIVE: WR-008 MMG open feedback (3 call sites) — edits done, gates green, committing next
