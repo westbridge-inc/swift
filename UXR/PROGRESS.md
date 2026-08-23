@@ -46,3 +46,5 @@
 - [~] W-014: shipping visibility strips (WR-043 web onSettled set + WR-019 compliance + WR-020 health incl. Discard confirm)
 - [x] Visibility strips CLOSED: PR #739 MERGED (WR-043+019+020)
 - [~] Mobile outage-honesty class (WR-029 + WR-032 menu/history/insights + WR-030 billing/campaigns/team): ErrorState with retry replaces mock-empty on failed reads — shipping
+- [x] Mobile outage-honesty class CLOSED: PR #740 MERGED (WR-029/030/032)
+- [~] Mobile silent-failure family (WR-033 statement opener throws · WR-034 photo toast · WR-027 upload error renders · WR-026 thumb rollback · WR-035 draft restore + honest chat empty) — shipping

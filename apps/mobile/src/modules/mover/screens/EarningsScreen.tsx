@@ -150,8 +150,13 @@ export function EarningsScreen({ navigation }: any) {
         : riderApi.earningsStatement(owner));
       requireAuthSessionForPrincipal(owner);
       const path = r.data?.data?.path as string;
-      if (path) await openPayLink(`${API_URL}${path}`);
+      // [WR-033] A mint that returns no path, or a link that can't open on
+      // this phone, must FAIL the mutation — the error line below is the
+      // honest signal; success used to be claimed silently either way.
+      if (!path) throw new Error('Statement link missing from the response.');
+      const opened = await openPayLink(`${API_URL}${path}`);
       requireAuthSessionForPrincipal(owner);
+      if (opened === false) throw new Error("Couldn't open the statement on this phone.");
     },
   });
   const s: any = summaryQ.data ?? {};
