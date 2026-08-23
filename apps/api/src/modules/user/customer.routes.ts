@@ -864,7 +864,11 @@ export async function customerRoutes(app: FastifyInstance) {
       // with nothing available dead-ends when tapped; favorites and direct
       // links still resolve their storefront)
       app.prisma.vendor.findMany({
-        where: { status: 'ACTIVE', isVerified: true, items: { some: { isAvailable: true } } },
+        // [F-028-07] `tenant: { isActive: true }` is load-bearing: a guest has
+        // no tenant context, which the Prisma extension defines as an UNSCOPED
+        // query — so without the relational predicate a deactivated operator's
+        // whole catalog kept serving here after the platform shut them off.
+        where: { status: 'ACTIVE', isVerified: true, tenant: { isActive: true }, items: { some: { isAvailable: true } } },
         include: {
           categories: { select: { id: true, name: true }, take: 5 },
         },
@@ -1007,7 +1011,8 @@ export async function customerRoutes(app: FastifyInstance) {
     const { type, cuisine, search, lat, lng, open, sort, minRating, category } = vendorsBrowseQuerySchema.parse(request.query);
 
     // Require ≥1 orderable item so empty stores don't clutter browse / dead-end on tap.
-    const where: Record<string, unknown> = { status: 'ACTIVE', isVerified: true, items: { some: { isAvailable: true } } };
+    // [F-028-07] tenant.isActive rides every public browse — see /home.
+    const where: Record<string, unknown> = { status: 'ACTIVE', isVerified: true, tenant: { isActive: true }, items: { some: { isAvailable: true } } };
     if (type) where['vendorType'] = type;
 
     // Category feed (#17): membership = chosen + derived rows. A MERGED slug
@@ -1154,8 +1159,15 @@ export async function customerRoutes(app: FastifyInstance) {
     const { id } = request.params as { id: string };
     const { lat, lng } = latLngQuerySchema.parse(request.query);
 
-    const vendor = await app.prisma.vendor.findUnique({
-      where: { id },
+    // [F-028-07] findFirst with a RELATIONAL tenant predicate, not
+    // findUnique(id): a guest who knew an id could retrieve a store whose
+    // TENANT the platform had deactivated — address, menu, hours. Vendor-level
+    // status is deliberately NOT enforced here (the documented decision above:
+    // favourites and direct links still resolve a paused store, and the client
+    // renders its closed state); tenant deactivation is the operator-level
+    // kill switch and nothing of a dead tenant may serve.
+    const vendor = await app.prisma.vendor.findFirst({
+      where: { id, tenant: { isActive: true } },
       include: {
         categories: {
           orderBy: { sortOrder: 'asc' },

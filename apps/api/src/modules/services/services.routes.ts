@@ -61,12 +61,21 @@ export async function servicesRoutes(app: FastifyInstance) {
     return tenantId;
   }
 
-  function browseTenant(hasSession: boolean): string {
+  async function browseTenant(hasSession: boolean): Promise<string> {
     const tenantId = getTenantId();
     // A valid session must always carry its live User tenant; fail closed if
     // that invariant breaks. A true guest gets exactly one public marketplace.
     if (hasSession && !tenantId) {
       throw new AppError(401, 'UNAUTHORIZED', 'No authenticated tenant is bound to this request');
+    }
+    if (!tenantId) {
+      // [F-028-07] The guest fallback chose 'swift-default' without ever
+      // asking whether that tenant still EXISTS or remains active — a
+      // deactivated operator's service catalog kept serving to the world.
+      // One indexed read per guest browse; correctness on a tenant boundary
+      // outranks it (same doctrine as public.routes' resolver).
+      const t = await app.prisma.tenant.findUnique({ where: { id: 'swift-default' }, select: { isActive: true } });
+      if (!t?.isActive) throw new NotFoundError('ServiceCatalog');
     }
     return tenantId ?? 'swift-default';
   }
@@ -218,7 +227,7 @@ export async function servicesRoutes(app: FastifyInstance) {
   app.get('/providers', optionalAuth, async (request) => {
     const query = browseSchema.parse(request.query);
     const trade = requireCanonicalServiceTrade(query.trade);
-    const tenantId = browseTenant(request.authSessionId !== null);
+    const tenantId = await browseTenant(request.authSessionId !== null);
     const afterId = query.cursor ? decodeProviderCursor(query.cursor, { tenantId, trade }) : undefined;
     const candidates = await app.prisma.serviceProvider.findMany({
       where: {
