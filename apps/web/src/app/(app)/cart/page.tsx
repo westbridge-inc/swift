@@ -68,7 +68,14 @@ export default function CartPage() {
     if (!cart?.items?.length) return;
     setBusy(true); setError(null); setNoRiders(false);
     try {
-      if (addrId) await setCartAddress(addrId).catch(() => {});
+      // [WR-001] A failed address set must BLOCK delivery checkout — swallowing
+      // it let the server fall back to the stale/default cart address and the
+      // order shipped to the wrong place. Pickup keeps the old tolerance: the
+      // delivery address is irrelevant to it.
+      if (addrId) {
+        if (asPickup) await setCartAddress(addrId).catch(() => {});
+        else await setCartAddress(addrId);
+      }
       const body: any = { paymentMethod: pay, tipAmount: tip };
       if (asPickup && cart.vendor?.id) {
         body.fulfillmentSelections = { [cart.vendor.id]: 'PICKUP' };
