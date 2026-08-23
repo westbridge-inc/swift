@@ -420,10 +420,11 @@ describe('durable mover revocation outbox', () => {
     const mover = await makeUser('MOVER');
     const rider = await makeRider(mover.user.id, mover.session.id);
     await makeOrder(customer.user.id, rider.id, 'RIDER_ASSIGNED');
+    const hungCustomerToken = `outbox-hung-push-${nanoid(24)}`;
     await app.prisma.deviceToken.create({
       data: {
         userId: customer.user.id,
-        token: `outbox-hung-push-${nanoid(24)}`,
+        token: hungCustomerToken,
         platform: 'ios',
         isActive: true,
       },
@@ -495,6 +496,18 @@ describe('durable mover revocation outbox', () => {
       await new Promise((resolve) => setTimeout(resolve, 25));
     }
     expect(fastPush.mock.calls.length, 'the control logout never reached sendPush — it is not measuring the same path').toBeGreaterThanOrEqual(1);
+    // ...and wait for the control's OUTBOX ROW to finish, or its floated
+    // delivery can outlive this spy, lose its lease on a slow runner, be
+    // re-delivered by the background worker, and land a SECOND call on the
+    // hang spy installed below (CI caught exactly that: expected 1, got 2).
+    const controlRowDeadline = Date.now() + 10_000;
+    for (;;) {
+      const row = await app.prisma.moverRevocationOutbox.findFirst({
+        where: { userId: control.user.id }, select: { processedAt: true },
+      });
+      if (row?.processedAt || Date.now() >= controlRowDeadline) break;
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
     fastPush.mockRestore();
 
     // [F-028-13] The differential needs a floor under the control itself: a
@@ -564,7 +577,11 @@ describe('durable mover revocation outbox', () => {
       retryDispatch,
     }))).resolves.toEqual({ processed: 0, failed: 0 });
     expect(retryDispatch).not.toHaveBeenCalled();
-    expect(sendPush).toHaveBeenCalledTimes(1);
+    // [F-028-13] Recipient-scoped, not a global count: only calls carrying
+    // the HUNG customer's token belong to the delivery under test — a control
+    // straggler must never satisfy or break this line.
+    const hungCalls = sendPush.mock.calls.filter((c) => JSON.stringify(c[0]).includes(hungCustomerToken));
+    expect(hungCalls.length, 'exactly one push attempt for the hung delivery').toBe(1);
     await app.prisma.moverRevocationOutbox.delete({ where: { id: outbox.id } });
   });
 
