@@ -152,5 +152,12 @@ export function previewQuery<T>(data: T): any {
 }
 
 export function previewMutation(): any {
-  return { mutate: () => {}, mutateAsync: async () => undefined, isPending: false, isError: false, error: null, isSuccess: false, reset: () => {}, data: undefined };
+  // [WR-036] Same honest no-op as the mover preview: say it, change nothing.
+  const explain = () => {
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-var-requires
+      require('../components/ui/toast').toast.show('Preview is read-only — nothing was changed.');
+    } catch { /* non-UI context (tests) */ }
+  };
+  return { mutate: () => explain(), mutateAsync: async () => { explain(); return undefined; }, isPending: false, isError: false, error: null, isSuccess: false, reset: () => {}, data: undefined };
 }
