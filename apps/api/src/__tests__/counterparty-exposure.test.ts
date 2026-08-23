@@ -118,6 +118,18 @@ describe('[F-027-07] the counterparty view of a mover', () => {
     expect(ghosts, `UNREMARKABLE names columns that no longer exist: ${ghosts.join(', ')}`).toEqual([]);
   });
 
+  it('[F-028-20] the default user shape carries NO raw avatar key', () => {
+    // Under the production private-storage contract `avatar` is a bare object
+    // key; resolveAvatarUrl exists precisely so a key is never the fallback.
+    // The shared select handed courier, vendor and dispatch surfaces a raw
+    // key none of them resolve — avatar is opt-in now, and opting in is a
+    // declaration that the caller runs the resolver on the way out.
+    const base = riderCounterpartySelect({ withPhone: true }) as { user: { select: Record<string, unknown> } };
+    expect('avatar' in base.user.select).toBe(false);
+    const optIn = riderCounterpartySelect({ withPhone: false, withAvatar: true }) as { user: { select: Record<string, unknown> } };
+    expect('avatar' in optIn.user.select).toBe(true);
+  });
+
   it('still carries what a counterparty actually needs — the fix must not blind the customer', () => {
     // [F-028-11] currentLat/currentLng USED to be asserted here as "needed".
     // They are not: they are the mover's PROFILE position, unscoped to this

@@ -1859,7 +1859,7 @@ export async function customerRoutes(app: FastifyInstance) {
           vendor: { select: { id: true, name: true, slug: true, logoUrl: true, coverImageUrl: true, vendorType: true } },
           items: { select: { id: true, name: true, quantity: true, totalCustomer: true } },
           // [F-027-07] allow-list, not `include` — see utils/counterparty.
-          rider: { select: riderCounterpartySelect({ withPhone: false }) },
+          rider: { select: riderCounterpartySelect({ withPhone: false, withAvatar: true }) },
         },
         orderBy: { placedAt: 'desc' },
         skip,
@@ -1964,7 +1964,7 @@ export async function customerRoutes(app: FastifyInstance) {
         // lookup below) and is not returned. Added at this call site rather
         // than to the shared allow-list, so surfaces that return the select
         // wholesale do not gain an identifier they have no use for.
-        rider: { select: { ...riderCounterpartySelect({ withPhone: true, withLiveLocation: true }), userId: true } },
+        rider: { select: { ...riderCounterpartySelect({ withPhone: true, withLiveLocation: true, withAvatar: true }), userId: true } },
       },
     });
 
