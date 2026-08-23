@@ -78,7 +78,11 @@ function QuietRow({
       testID={testID}
       onPress={onPress}
       style={{
-        minHeight: 52,
+        // 44 is the floor, not the look: the row sits at 52 for the card's
+        // rhythm and never below the touch-target minimum.
+        minHeight: 44,
+        height: 52,
+        maxWidth: '100%',
         justifyContent: 'center',
         paddingHorizontal: space.lg,
         borderTopWidth: first ? 0 : 1,
@@ -102,7 +106,7 @@ function QuietRow({
           >
             <Feather name={icon} size={15} color={color.brand[600]} />
           </View>
-          <T variant="label" weight="semibold" style={{ flex: 1 }}>
+          <T variant="label" weight="semibold" style={{ flex: 1, flexShrink: 1 }}>
             {label}
           </T>
           <Feather name="chevron-right" size={17} color={color.text.muted} />
