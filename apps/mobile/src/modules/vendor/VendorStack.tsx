@@ -2469,6 +2469,11 @@ function VendorAccountScreen() {
 
   const [days, setDays] = useState<DayHours[]>([]);
   useEffect(() => {
+    // [WR-007] Seed the editor ONLY from a successful read. A failed fetch
+    // used to fabricate seven 08:00–22:00 days here — and Save would then
+    // delete/recreate the store's REAL schedule from the fabrication. The
+    // default seed is legitimate only for a first-run vendor with no rows.
+    if (!hoursQ.isSuccess) return;
     const byDay = new Map<number, DayHours>();
     for (const h of hoursQ.data ?? []) {
       if (!byDay.has(h.dayOfWeek)) {
@@ -2481,7 +2486,7 @@ function VendorAccountScreen() {
       }
     }
     setDays(Array.from({ length: 7 }, (_, d) => byDay.get(d) ?? { dayOfWeek: d, openTime: '08:00', closeTime: '22:00', isClosed: false }));
-  }, [hoursQ.data]);
+  }, [hoursQ.isSuccess, hoursQ.data]);
 
   const setDay = (d: number, patch: Partial<DayHours>) =>
     setDays((prev) => prev.map((x) => (x.dayOfWeek === d ? { ...x, ...patch } : x)));
@@ -2547,6 +2552,13 @@ function VendorAccountScreen() {
             </T>
             {hoursQ.isLoading ? (
               <LoadingBlock />
+            ) : hoursQ.isError ? (
+              <Card style={{ marginBottom: space.lg }}>
+                <T variant="label" tone="muted">
+                  Couldn&apos;t load your hours. Editing stays off so a guess never overwrites your real schedule.
+                </T>
+                <PillButton label="Retry" size="md" variant="soft" style={{ marginTop: space.sm }} onPress={() => hoursQ.refetch()} />
+              </Card>
             ) : (
               <Card style={{ marginBottom: space.lg }}>
                 {days.map((d) => (
