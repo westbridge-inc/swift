@@ -38,3 +38,5 @@
 - [~] W-014 rank 11 WR-010: decline-offer failure no longer fakes success (gone-offer tolerated, one retry, honest toast) — shipping
 - [x] W-014 rank 11 WR-010 CLOSED: PR #735 MERGED (decline honesty)
 - [~] W-014 rank 12 WR-013: HIRE insurance approval requires both reviewer confirmations; PRIVATE labeled honestly — shipping
+- [x] W-014 rank 12 WR-013 CLOSED: PR #736 MERGED (HIRE approval needs both reviewer checks)
+- [~] W-014 rank 13 WR-012: trip-share initial-load failure says unreachable, never 'ended' — shipping

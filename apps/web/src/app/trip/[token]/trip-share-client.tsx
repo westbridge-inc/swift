@@ -78,11 +78,21 @@ export function TripShareClient({ token }: { token: string }) {
       <div className="mx-auto max-w-md px-4 pb-12">
         {loading ? (
           <p className="pt-16 text-center text-sm text-[#786C6C]">Loading trip…</p>
-        ) : gone || !view ? (
+        ) : gone ? (
           <div className="pt-16 text-center">
             <p className="text-lg font-semibold">This trip share is no longer available</p>
             <p className="mt-2 text-sm text-[#786C6C]">
               Shares end shortly after a trip finishes, or when the sharer turns them off.
+            </p>
+          </div>
+        ) : !view ? (
+          // [WR-012] Only a real 404 proves revocation. A failed FIRST load is
+          // a connectivity problem on a safety surface — say that, keep
+          // polling (the interval is still running), never dress it as "ended".
+          <div className="pt-16 text-center">
+            <p className="text-lg font-semibold">Can&apos;t reach this trip right now</p>
+            <p className="mt-2 text-sm text-[#786C6C]">
+              Check your connection — this page keeps retrying on its own.
             </p>
           </div>
         ) : (
