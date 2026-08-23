@@ -71,7 +71,16 @@ export default function VerificationPage() {
   };
 
   const isInsurance = selected?.docType === 'vehicle_insurance';
-  const insuranceReady = insurance.insurerName.trim() !== '' && insurance.policyNumber.trim() !== '';
+  // [WR-013] Approving HIRE cover without the two reviewer confirmations
+  // created a contradiction: the document read APPROVED while the operation
+  // gate silently kept the driver off passenger work (it requires BOTH
+  // booleans). HIRE approval now demands them; PRIVATE never needs them —
+  // the gate refuses PRIVATE for passengers regardless, which the picker
+  // makes an explicit, visible choice.
+  const insuranceReady =
+    insurance.insurerName.trim() !== '' &&
+    insurance.policyNumber.trim() !== '' &&
+    (insurance.coverageClass !== 'HIRE' || (insurance.hireClassConfirmed && insurance.plateCrossChecked));
 
   const rows: any[] = data?.data ?? [];
 
@@ -210,6 +219,16 @@ export default function VerificationPage() {
                     />
                     Cross-checked against the H-plate
                   </label>
+                  {insurance.coverageClass === 'HIRE' && !(insurance.hireClassConfirmed && insurance.plateCrossChecked) ? (
+                    <p className="text-xs" style={{ color: 'var(--warn)' }}>
+                      Both checks are required to approve HIRE cover — without them the driver stays blocked from passenger rides.
+                    </p>
+                  ) : null}
+                  {insurance.coverageClass === 'PRIVATE' ? (
+                    <p className="text-xs text-[var(--muted)]">
+                      PRIVATE cover never qualifies for passenger rides — cargo work only.
+                    </p>
+                  ) : null}
                 </div>
               )}
 
