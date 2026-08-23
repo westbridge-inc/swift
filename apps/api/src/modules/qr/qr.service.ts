@@ -17,8 +17,10 @@ export const QR_GRACE_DEFAULT_DAYS = 30;
 /** The resolver's row-4 liveness rule — the SAME predicate the public
  *  storefront surface uses (public.routes.ts PUBLIC_WHERE): live commerce only,
  *  and a scan of anything else explains nothing (no suspension leakage). */
-const publiclyLive = (vendor: { status: string; isVerified: boolean }): boolean =>
-  vendor.status === 'ACTIVE' && vendor.isVerified;
+// [F-028-07] tenant.isActive is part of the rule: a scan of a code whose
+// OPERATOR the platform deactivated used to classify as a live destination.
+const publiclyLive = (vendor: { status: string; isVerified: boolean; tenant?: { isActive: boolean } | null }): boolean =>
+  vendor.status === 'ACTIVE' && vendor.isVerified && vendor.tenant?.isActive === true;
 
 export type QrLookupRow = QrLookup & { id: string; tenantId: string; version: number; entityId: string };
 
@@ -45,7 +47,7 @@ export class QrService {
     if (!qr) return null;
     const vendor = await this.prisma.vendor.findUnique({
       where: { id: qr.entityId },
-      select: { slug: true, status: true, isVerified: true },
+      select: { slug: true, status: true, isVerified: true, tenant: { select: { isActive: true } } },
     });
     return {
       id: qr.id,

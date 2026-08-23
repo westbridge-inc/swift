@@ -133,8 +133,12 @@ export async function publicRoutes(app: FastifyInstance) {
     if (query.city) where['city'] = { equals: query.city, mode: 'insensitive' };
     if (query.q) where['name'] = { contains: query.q, mode: 'insensitive' };
 
+    // [F-028-07] The tenant-activity check above and this fetch were two
+    // queries — a deactivation between them served one more response, and the
+    // web's 300s fetch cache stretched that race into a real stale window.
+    // The relational predicate makes liveness part of the SAME read.
     const vendors = await app.prisma.vendor.findMany({
-      where,
+      where: { ...where, tenant: { isActive: true } },
       select: PUBLIC_VENDOR_SELECT,
       orderBy: [{ isFeatured: 'desc' }, { averageRating: 'desc' }, { totalRatings: 'desc' }],
       take: 200,
@@ -149,7 +153,7 @@ export async function publicRoutes(app: FastifyInstance) {
   /** GET /storefronts/:slug — one store's public page: profile + hours + menu. */
   app.get<{ Params: { slug: string } }>('/storefronts/:slug', async (request) => {
     const vendor = await app.prisma.vendor.findFirst({
-      where: { slug: request.params.slug, ...PUBLIC_WHERE, tenantId: await resolvePublicTenantId(app) },
+      where: { slug: request.params.slug, ...PUBLIC_WHERE, tenantId: await resolvePublicTenantId(app), tenant: { isActive: true } },
       select: {
         ...PUBLIC_VENDOR_SELECT,
         // The app already shows guests the street address (pickup needs it);

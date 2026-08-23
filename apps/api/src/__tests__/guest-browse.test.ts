@@ -109,6 +109,50 @@ describe('guest browsing (no account)', () => {
   it('lets guests open a vendor (menu)', async () => {
     expect((await get(`/api/v1/customer/vendors/${vendorId}`)).statusCode).toBe(200);
   });
+
+  it('[F-028-07] a DEACTIVATED TENANT vanishes from every guest surface — list, home, and direct id', async () => {
+    // A guest carries no tenant context, which the Prisma extension defines as
+    // an UNSCOPED query — so before the relational predicate, a deactivated
+    // operator's whole catalog kept serving here, and a guest who knew an id
+    // could still pull the store's address and menu. Tenant deactivation is
+    // the platform's kill switch; nothing of a dead tenant may serve.
+    const dead = `dead-${nanoid(8).toLowerCase()}`;
+    await app.prisma.tenant.create({ data: { id: dead, name: 'Dead operator', slug: dead, isActive: false } });
+    const owner = await app.prisma.user.create({
+      data: {
+        phone: `+5926360${String(Math.floor(Math.random() * 9000) + 1000)}`,
+        firstName: 'Dead', lastName: 'Owner', tenantId: dead,
+        roles: ['VENDOR_OWNER'] as never[], activeRole: 'VENDOR_OWNER' as never, isPhoneVerified: true,
+      },
+    });
+    const vo = await app.prisma.vendorOwner.create({ data: { userId: owner.id } });
+    const v = await app.prisma.vendor.create({
+      data: {
+        tenantId: dead, ownerId: vo.id, name: 'Dead Tenant Store', slug: `dead-store-${nanoid(6).toLowerCase()}`,
+        vendorType: 'RESTAURANT' as never, status: 'ACTIVE', isVerified: true,
+        addressLine1: '1 Gone St', city: 'Georgetown', region: 'Demerara-Mahaica', phone: owner.phone,
+        latitude: 6.8, longitude: -58.15,
+      },
+    });
+    try {
+      // Direct id — the sharpest edge: ACTIVE + verified vendor, dead tenant.
+      expect((await get(`/api/v1/customer/vendors/${v.id}`)).statusCode).toBe(404);
+      // And the enumerating surfaces never list it.
+      const list = (await get('/api/v1/customer/vendors?limit=100')).json();
+      expect((list.data as Array<{ id: string }>).some((row) => row.id === v.id)).toBe(false);
+      const home = (await get('/api/v1/customer/home')).json();
+      const homeVendors = [
+        ...(home.data.openVendors ?? []), ...(home.data.closedVendors ?? []),
+        ...(home.data.featured ?? []), ...(home.data.nearby ?? []),
+      ] as Array<{ id: string }>;
+      expect(homeVendors.some((row) => row.id === v.id)).toBe(false);
+    } finally {
+      await app.prisma.vendor.delete({ where: { id: v.id } });
+      await app.prisma.vendorOwner.delete({ where: { id: vo.id } });
+      await app.prisma.user.delete({ where: { id: owner.id } });
+      await app.prisma.tenant.delete({ where: { id: dead } });
+    }
+  });
   it('treats suspended, banned, and deactivated browse tokens as guests', async () => {
     const nonce = nanoid(12);
     const user = await app.prisma.user.create({
