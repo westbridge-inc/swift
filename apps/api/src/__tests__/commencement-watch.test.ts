@@ -243,6 +243,43 @@ describe('commencement watch [DCR-1 CW]', () => {
       }
     });
 
+    it('[F-028-09] the CLASS: instrument-mid-sentence titles reject, whatever their vocabulary', () => {
+      // Round three of this predicate falling to vocabulary outside its
+      // blocklist. These are the review's exact five — five words, an
+      // instrument token, a year, and not one blocked word:
+      for (const nav of [
+        'Official Gazette Publications for the Year 2026',
+        'Legal Supplement Issues Published During 2026',
+        'Bill Status in the National Assembly 2026',
+        'Notice Board for Public Authorities 2026',
+        'Regulations Issued by the Ministry During 2026',
+      ]) {
+        expect(looksLikePublication(nav), nav).toBe(false);
+      }
+    });
+
+    it('[F-028-09] ...and a GENERATIVE out-of-vocabulary set proves it is not a new word list', () => {
+      // Built from nouns the predicate has never seen. The structural rule —
+      // a citation ends its instrument token in qualifiers; a sentence
+      // continues in prose — must hold for vocabulary invented after the
+      // predicate shipped, or it is another finite list waiting to lose.
+      const NOVEL_NOUNS = ['Compendium', 'Chronicle', 'Digest', 'Ledger', 'Register', 'Almanac', 'Gateway', 'Hub', 'Vault', 'Atlas'];
+      const CONNECTORS = ['for the Year', 'Published During', 'Issued Throughout', 'Maintained Since', 'Covering'];
+      const survivors: string[] = [];
+      for (const noun of NOVEL_NOUNS) {
+        for (const conn of CONNECTORS) {
+          for (const title of [
+            `Gazette ${noun} ${conn} 2026`,
+            `${noun} of Notices ${conn} 2026`,
+            `Regulations ${noun} ${conn} 2026`,
+          ]) {
+            if (looksLikePublication(title)) survivors.push(title);
+          }
+        }
+      }
+      expect(survivors, `out-of-vocabulary navigation accepted: ${survivors.slice(0, 8).join(' | ')}`).toEqual([]);
+    });
+
     it('a bare instrument category with no identity at all is rejected', () => {
       for (const bare of ['Acts of Parliament', 'Bills before the House', 'Statutory Instruments and Regulations', 'Notices', 'Orders']) {
         expect(looksLikePublication(bare), bare).toBe(false);

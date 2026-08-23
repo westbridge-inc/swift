@@ -124,12 +124,55 @@ const HAS_FULL_DATE = /\b\d{1,2}\s+(january|february|march|april|may|june|july|a
 const HAS_YEAR = /\b(19|20)\d\d\b/;
 const NAMES_AN_INSTRUMENT = /\b(act|order|bill|notice|regulation|regulations|gazette|supplement|extraordinary|proclamation|resolution)\b/;
 
+/** [F-028-09] What may follow the LAST instrument token in a real citation:
+ *  numbers, dates, years, parentheticals, punctuation — QUALIFIERS, never
+ *  prose. "The Fisheries (Amendment) Act 2026" ends in qualifiers; "Bill
+ *  Status in the National Assembly 2026" continues in prose. */
+const CITATION_TAIL = new RegExp(
+  '^(?:\\s*(?:\\(.*?\\)|no\\.?\\s*\\d+[a-z]?|[a-z]\\b|of\\s+(?:19|20)\\d\\d|(?:19|20)\\d\\d(?:[\u2013-](?:19|20)?\\d{1,4})?|' +
+  '\\d{1,2}\\s+(?:january|february|march|april|may|june|july|august|september|october|november|december)(?:\\s+(?:19|20)\\d\\d)?|' +
+  '[,;:.\u2014\u2013-]))*\\s*$',
+);
+
+const INSTRUMENT_TOKEN = /\b(act|order|bill|notice|regulation|regulations|gazette|supplement|extraordinary|proclamation|resolution)\b/g;
+
 export function looksLikePublication(title: string): boolean {
   const t = normalizeTitle(title);
 
   // A category label is navigation no matter how legal its other words are.
   if (NAVIGATION_WORDS.test(t)) return false;
   if (!NAMES_AN_INSTRUMENT.test(t)) return false;
+
+  // [F-028-09] THE CLASS FIX. Three rounds of this predicate fell to the same
+  // shape: a vocabulary blocklist, defeated by vocabulary outside it ("Bill
+  // Status in the National Assembly 2026" — five words, an instrument token,
+  // a year, no blocked word). Word lists cannot win that game, so the rule is
+  // now STRUCTURAL: a real title is a CITATION — a name, then its instrument
+  // token, then nothing but qualifiers (a number, a date, a year, brackets).
+  // A navigation title is a SENTENCE — its instrument token sits mid-prose
+  // ("Regulations Issued BY the Ministry DURING 2026"), so something other
+  // than a qualifier follows it. Position and grammar, not vocabulary: a new
+  // noun cannot fake a citation tail, whatever it is.
+  //
+  // The deliberate cost: an inverted citation ("Act No. 5 of 2026 — Fisheries
+  // Amendment") is rejected. The floor counts entries across a whole feed, so
+  // a rare miss UNDERCOUNTS — and an undercount trips WATCH_DEGRADED, which a
+  // human reads. Failing loud beats a nav shell counting as a healthy scan.
+  // Dashes join a citation to its descriptive half ("Order No. 12 of 2026 —
+  // Municipal Fees", "No. 73 of 2026 - The ... Order 2026"): ANY segment being
+  // a well-formed citation is enough, because the identity is established
+  // there and the rest is its label. A navigation sentence has no such
+  // segment — its instrument token continues into prose on every side of any
+  // dash it contains.
+  const segments = t.split(/\s+[\u2014\u2013-]\s+/);
+  const isCitationSegment = (seg: string): boolean => {
+    INSTRUMENT_TOKEN.lastIndex = 0;
+    let lastEnd = -1;
+    for (let m = INSTRUMENT_TOKEN.exec(seg); m; m = INSTRUMENT_TOKEN.exec(seg)) lastEnd = m.index + m[0].length;
+    if (lastEnd < 0) return false;
+    return CITATION_TAIL.test(seg.slice(lastEnd));
+  };
+  if (!segments.some(isCitationSegment)) return false;
 
   // An explicit number or a full date is identity on its own.
   if (HAS_NUMBER.test(t) || HAS_FULL_DATE.test(t)) return true;
