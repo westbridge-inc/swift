@@ -323,7 +323,23 @@ describe('The guarantee — honest claim pays, guardrails catch patterns', () =>
     expect(final.status).toBe('PAID');
 
     // A later attempt on an already-PAID claim is a clean 400, never another payout.
-    await expect(cash.markClaimPaid(claim.id, 'admin-c')).rejects.toThrow(/PAID/);
+    await expect(cash.markClaimPaid(claim.id, 'admin-c', 'ref-c')).rejects.toThrow(/PAID/);
+  });
+
+  it('[WR-004] a claim payout without a payment reference is refused — PAID needs evidence', async () => {
+    const customer = await makeUser(['CUSTOMER'], 'CUSTOMER');
+    const rider = await makeRider();
+    const claim = await plantClaim(rider.riderId, customer.userId, 0); // AUTO_APPROVED
+
+    await expect(cash.markClaimPaid(claim.id, 'admin-a', '')).rejects.toThrow(/reference/i);
+    await expect(cash.markClaimPaid(claim.id, 'admin-a', '   ')).rejects.toThrow(/reference/i);
+
+    // The refusal changed nothing: the claim is still payable with evidence.
+    const still = await app.prisma.reimbursementClaim.findUniqueOrThrow({ where: { id: claim.id } });
+    expect(still.status).toBe('AUTO_APPROVED');
+    const paid = await cash.markClaimPaid(claim.id, 'admin-a', 'BANK-REF-1');
+    expect(paid.status).toBe('PAID');
+    expect(paid.paymentRef).toBe('BANK-REF-1');
   });
 
   it('orders at/over the USD gate are not auto-covered (strike still recorded)', async () => {

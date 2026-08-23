@@ -28,7 +28,7 @@ export default function ClaimsPage() {
     onSuccess: invalidate,
   });
   const pay = useMutation({
-    mutationFn: ({ id, reference }: { id: string; reference?: string }) => payClaim(id, reference),
+    mutationFn: ({ id, reference }: { id: string; reference: string }) => payClaim(id, reference),
     onSuccess: invalidate,
   });
 
@@ -42,6 +42,16 @@ export default function ClaimsPage() {
       <p className="text-[var(--muted)] text-sm mb-6">
         Failed cash handovers under the company guarantee — GPS-evidenced, guardrail-flagged. Approve, reject, or mark the payout done.
       </p>
+
+      {(pay.error || approve.error || reject.error) ? (
+        <p role="alert" className="text-xs mb-3" style={{ color: 'var(--bad)' }}>
+          {pay.error
+            ? `Payout did not record: ${(pay.error as Error).message}`
+            : approve.error
+              ? `Approve did not confirm: ${(approve.error as Error).message}`
+              : `Reject did not confirm: ${(reject.error as Error).message}`}
+        </p>
+      ) : null}
 
       {/* Founder cockpit numbers (cash-rules founderMetrics) */}
       <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
@@ -144,8 +154,11 @@ export default function ClaimsPage() {
                   {(c.status === 'APPROVED' || c.status === 'AUTO_APPROVED') && (
                     <button
                       onClick={() => {
-                        const ref = window.prompt('Payment reference (optional):') ?? undefined;
-                        if (window.confirm(`Mark this ${gyd(c.amount)} claim as PAID?`)) pay.mutate({ id: c.id, reference: ref || undefined });
+                        // [WR-004] PAID needs evidence on a manual rail — the
+                        // reference is required, server-enforced too.
+                        const ref = window.prompt('Payment reference (bank/MMG ref or receipt no. — required):')?.trim();
+                        if (!ref) return;
+                        if (window.confirm(`Mark this ${gyd(c.amount)} claim as PAID (ref: ${ref})?`)) pay.mutate({ id: c.id, reference: ref });
                       }}
                       disabled={busy}
                       className="px-4 py-2 rounded-lg text-sm bg-[var(--accent)] hover:bg-[var(--accent)]/80 disabled:opacity-50"

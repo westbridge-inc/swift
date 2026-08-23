@@ -22,3 +22,5 @@
 - [x] UXR-W-009 CLOSED: PR #727 MERGED (MMG open feedback at 3 call sites)
 - [x] UXR-W-006 ANDROID SMOKE PASSED (first ever): guest browse → item page → auth interrupt → OTP (000000, honest backoff) → 'Good morning, ELV1' Home + tile grid → Activity/Cart/Profile all render (Cart shows #720 unified masthead). Rig API restarted (8-day process, dead Redis → F-272 raw-error-copy finding). Screenshots in scratchpad.
 - [~] UXR-W-011: admin settlement copy aligned to digest truth (WR-003 residual) — shipping
+- [x] UXR-W-011 CLOSED: PR #729 MERGED (settlements card = digest truth, no payout implication)
+- [~] UXR-W-013: WR-004 claim payout evidence gate (server-required reference + UI) — shipping

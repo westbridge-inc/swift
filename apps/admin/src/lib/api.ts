@@ -214,7 +214,7 @@ export const approveClaim = (id: string, reason?: string) =>
   apiFetch(`/api/v1/admin/cash-rules/claims/${id}/approve`, { method: 'PUT', body: JSON.stringify({ reason }) });
 export const rejectClaim = (id: string, reason: string) =>
   apiFetch(`/api/v1/admin/cash-rules/claims/${id}/reject`, { method: 'PUT', body: JSON.stringify({ reason }) });
-export const payClaim = (id: string, reference?: string) =>
+export const payClaim = (id: string, reference: string) =>
   apiFetch(`/api/v1/admin/cash-rules/claims/${id}/paid`, { method: 'PUT', body: JSON.stringify({ reference }) });
 export const fetchCashMetrics = () => apiFetch('/api/v1/admin/cash-rules/metrics');
 
