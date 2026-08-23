@@ -698,13 +698,18 @@ function VendorOps({ store, navigation }: any) {
           <View style={{ flex: 1, paddingRight: space.md }}>
             <T variant="micro" tone="muted">TODAY</T>
             {surface.canSeeMoney ? (
-              <T variant="numL" style={{ marginTop: 2 }}>{money(today.revenue ?? 0)}</T>
+              // [WR-016] A failed analytics read shows "—", never a fabricated G$0.
+              <T variant="numL" style={{ marginTop: 2 }}>
+                {analyticsQ.isError && !analyticsQ.data ? '—' : money(today.revenue ?? 0)}
+              </T>
             ) : (
               <T variant="numL" style={{ marginTop: 2 }}>{String(orders.length)}</T>
             )}
             <T variant="caption" tone="muted" style={{ marginTop: 2 }}>
               {surface.canSeeMoney
-                ? `${today.orders ?? 0} order${(today.orders ?? 0) === 1 ? '' : 's'} today`
+                ? analyticsQ.isError && !analyticsQ.data
+                  ? 'numbers unavailable'
+                  : `${today.orders ?? 0} order${(today.orders ?? 0) === 1 ? '' : 's'} today`
                 : 'orders on the board'}
             </T>
           </View>
@@ -716,7 +721,9 @@ function VendorOps({ store, navigation }: any) {
               </T>
             </View>
             <T variant="caption" tone="muted">
-              {orders.length} active{surface.canSeeMoney ? ` · ${money(queueValue)} in queue` : ''}
+              {ordersQ.isError && !ordersQ.data
+                ? 'board unreachable'
+                : `${orders.length} active${surface.canSeeMoney ? ` · ${money(queueValue)} in queue` : ''}`}
             </T>
           </View>
         </View>
@@ -727,6 +734,16 @@ function VendorOps({ store, navigation }: any) {
         </T>
         {ordersQ.isLoading ? (
           <LoadingBlock />
+        ) : ordersQ.isError && !ordersQ.data ? (
+          // [WR-016] An outage must never wear the "caught up" costume: with no
+          // data at all, say so and offer retry — orders may be waiting.
+          <View style={{ alignItems: 'center', borderRadius: radius.lg, backgroundColor: color.brand[50], paddingVertical: space.xl, marginBottom: space.xl }}>
+            <MaterialCommunityIcons name="wifi-off" size={28} color={color.text.muted} />
+            <T variant="label" tone="muted" style={{ marginTop: space.sm }}>
+              Can&apos;t reach the order board — orders may be waiting.
+            </T>
+            <PillButton label="Retry" size="md" variant="soft" style={{ marginTop: space.md }} onPress={() => ordersQ.refetch()} />
+          </View>
         ) : newOrders.length === 0 ? (
           <View style={{ alignItems: 'center', borderRadius: radius.lg, backgroundColor: color.brand[50], paddingVertical: space.xl, marginBottom: space.xl }}>
             <MaterialCommunityIcons name="check-circle-outline" size={28} color={color.text.muted} />
