@@ -76,6 +76,27 @@ async function waitOffer(driverId: string, token: string, orderId: string, ms: n
   return null;
 }
 
+
+/** [F-026-05] Prior driver state, captured before the pool is emptied — the
+ *  "no drivers" premise must not outlive the run. Same restore-and-VERIFY
+ *  discipline as b9 (F-028-17): per-row attempts, named failures, re-read
+ *  verification, non-zero exit when the rig wasn't put back. */
+const driversBefore: Array<{ id: string; isOnline: boolean; isAvailable: boolean }> = [];
+async function restoreDrivers(tag: string): Promise<void> {
+  const failures: string[] = [];
+  for (const d of driversBefore) {
+    try {
+      await prisma.driver.updateMany({ where: { id: d.id }, data: { isOnline: d.isOnline, isAvailable: d.isAvailable } });
+    } catch (e) { failures.push(`driver ${d.id}: ${(e as Error).message}`); }
+  }
+  const stillOffline = driversBefore.length === 0 ? 0 : await prisma.driver.count({
+    where: { id: { in: driversBefore.filter((d) => d.isOnline).map((d) => d.id) }, isOnline: false },
+  });
+  console.log(`${new Date().toISOString()} · teardown: driver restore ${failures.length === 0 && stillOffline === 0 ? 'VERIFIED' : 'INCOMPLETE'}`,
+    JSON.stringify({ drivers: driversBefore.length, failures, stillOffline }));
+  if (failures.length > 0 || stillOffline > 0) { console.error(`${tag} DRIVER RESTORE INCOMPLETE`); process.exitCode = 1; }
+}
+
 async function main() {
   const h = await fetch(HEALTH).then((r) => r.status).catch(() => 0);
   if (h !== 200) throw new Error(`rig not healthy (${h})`);
@@ -86,6 +107,7 @@ async function main() {
   const d1 = await prisma.driver.findFirstOrThrow({ where: { userId: d1User.id } });
   const d2 = await prisma.driver.findFirstOrThrow({ where: { userId: d2User.id } });
 
+  driversBefore.push(...await prisma.driver.findMany({ where: { OR: [{ isOnline: true }, { isAvailable: true }] }, select: { id: true, isOnline: true, isAvailable: true } }));
   await prisma.driver.updateMany({ where: {}, data: { isOnline: false, isAvailable: false } });
   await prisma.order.updateMany({ where: { customerId: customer.id, orderType: 'TAXI', status: 'PENDING' }, data: { status: 'CANCELLED' } });
 
@@ -214,4 +236,7 @@ async function main() {
 
 main()
   .catch((e) => { console.error('B8 FAILED:', e.message); process.exitCode = 1; })
-  .finally(() => prisma.$disconnect());
+  .finally(async () => {
+    await restoreDrivers('B8').catch((e) => { console.error('B8 DRIVER RESTORE FAILED:', e.message); process.exitCode = 1; });
+    await prisma.$disconnect();
+  });

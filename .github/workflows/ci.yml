@@ -313,8 +313,8 @@ jobs:
         run: |
           DB="postgresql://swift:swift@localhost:5432/swift_migrate"
           n=$(psql "$DB" -tAc "SELECT count(*) FROM pg_class c JOIN pg_namespace ns ON ns.oid=c.relnamespace JOIN pg_policy p ON p.polrelid=c.oid AND p.polname='tenant_isolation' WHERE ns.nspname='public' AND c.relrowsecurity")
-          if [ "$n" != "51" ]; then echo "::error::Tenant RLS wall incomplete: $n of 51 tables walled"; exit 1; fi
-          echo "ok: 51 tables walled"
+          if [ "$n" != "52" ]; then echo "::error::Tenant RLS wall incomplete: $n of 52 tables walled"; exit 1; fi
+          echo "ok: 52 tables walled"
       - name: Schema matches migration state
         run: >
           cd apps/api && npx prisma migrate diff

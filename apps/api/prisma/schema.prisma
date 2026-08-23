@@ -2146,6 +2146,23 @@ model SanTombstone {
   @@map("san_tombstones")
 }
 
+/// [F-026-02] Durable census of storage objects still owed a deletion —
+/// failed unwind/account-deletion deletes and replaced selfie pointers.
+/// One open row per key (upsert re-opens); purgedAt closes it. Retried
+/// opportunistically at account deletion; IDV-1 Phase 2 owns the sweeper.
+model StorageOrphan {
+  id        String    @id @default(cuid())
+  tenantId  String    @default("swift-default")
+  key       String    @unique
+  reason    String
+  userId    String?
+  createdAt DateTime  @default(now())
+  purgedAt  DateTime?
+
+  @@index([tenantId, purgedAt])
+  @@map("storage_orphans")
+}
+
 /// Prepaid path for cash payers: agents/bank-transfer top-ups recorded by
 /// admin; the weekly billing job deducts from here before suspending.
 /// Floor-at-zero CHECK lives in raw migration SQL [tollgate 3.1].

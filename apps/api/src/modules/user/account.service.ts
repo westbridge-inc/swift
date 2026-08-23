@@ -1,3 +1,4 @@
+import { recordStorageOrphan, retryStorageOrphans } from '../../lib/storage-orphans';
 import type { FastifyInstance } from 'fastify';
 import type { OrderStatus, ServiceJobStatus } from '@prisma/client';
 import { AppError } from '../../utils/errors';
@@ -190,13 +191,21 @@ export class AccountService {
     //     knows the key. Absolute-URL / signed-URL legacy values aren't our
     //     keys to delete; bare keys and /uploads paths are. A failure is
     //     LOGGED (not silently swallowed) so an orphan is discoverable.
-    const avatarRow = await prisma.user.findUnique({ where: { id: userId }, select: { avatar: true } });
+    // [F-026-02] Opportunistic retry of earlier orphans — account deletion is
+    // a natural, already-privileged moment to work the census down without a
+    // dedicated worker (IDV-1's sweeper takes standing ownership later).
+    await retryStorageOrphans(prisma, storage, this.app.log).catch(() => undefined);
+
+    const avatarRow = await prisma.user.findUnique({ where: { id: userId }, select: { avatar: true, tenantId: true } });
     const rawAvatar = avatarRow?.avatar;
     if (rawAvatar && !rawAvatar.startsWith('http://') && !rawAvatar.startsWith('https://')) {
       // Pass the stored value as-is: the provider's resolveKey normalises the
       // "/uploads/" prefix and refuses path escapes (same call the doc loop uses).
-      await storage.delete(rawAvatar).catch((err) => {
+      await storage.delete(rawAvatar).catch(async (err) => {
         this.app.log.error({ err, userId, key: rawAvatar }, '[F-024-08] avatar object delete failed on account deletion — orphaned key');
+        // [F-026-02] Nulling the column erases the only pointer — census it
+        // durably so the deletion barrier survives this failure.
+        await recordStorageOrphan(prisma, this.app.log, { key: rawAvatar, reason: 'ACCOUNT_DELETION_DELETE_FAILED', userId, tenantId: avatarRow?.tenantId });
       });
     }
 

@@ -18,11 +18,17 @@
  *      DATABASE_URL=postgresql://swift:swift@localhost:5434/swift \
  *      npx tsx scripts/baseline/b7-taxi-happy.ts
  */
-import { PrismaClient } from '@prisma/client';
+import { Prisma, PrismaClient } from '@prisma/client';
 
 const A = process.env['BASELINE_API'] ?? 'http://localhost:3000/api/v1';
 const HEALTH = A.replace('/api/v1', '') + '/health';
 const prisma = new PrismaClient();
+
+// [F-026-06] Money is proven with EXACT Decimal comparison, never a float
+// round-trip: Number() can equate distinct Decimals and mis-round; the
+// integer-money law applies to the proofs too.
+const dec = (v: unknown) => new Prisma.Decimal(String(v ?? 0));
+
 const CUSTOMER_PHONE = '+5925566001';
 const DRIVER_PHONE = '+5926005001';
 
@@ -56,6 +62,27 @@ async function loginByOtp(phone: string): Promise<string> {
   throw new Error('unreachable');
 }
 
+
+/** [F-026-05] Prior driver state, captured before the pool is emptied — the
+ *  "no drivers" premise must not outlive the run. Same restore-and-VERIFY
+ *  discipline as b9 (F-028-17): per-row attempts, named failures, re-read
+ *  verification, non-zero exit when the rig wasn't put back. */
+const driversBefore: Array<{ id: string; isOnline: boolean; isAvailable: boolean }> = [];
+async function restoreDrivers(tag: string): Promise<void> {
+  const failures: string[] = [];
+  for (const d of driversBefore) {
+    try {
+      await prisma.driver.updateMany({ where: { id: d.id }, data: { isOnline: d.isOnline, isAvailable: d.isAvailable } });
+    } catch (e) { failures.push(`driver ${d.id}: ${(e as Error).message}`); }
+  }
+  const stillOffline = driversBefore.length === 0 ? 0 : await prisma.driver.count({
+    where: { id: { in: driversBefore.filter((d) => d.isOnline).map((d) => d.id) }, isOnline: false },
+  });
+  console.log(`${new Date().toISOString()} · teardown: driver restore ${failures.length === 0 && stillOffline === 0 ? 'VERIFIED' : 'INCOMPLETE'}`,
+    JSON.stringify({ drivers: driversBefore.length, failures, stillOffline }));
+  if (failures.length > 0 || stillOffline > 0) { console.error(`${tag} DRIVER RESTORE INCOMPLETE`); process.exitCode = 1; }
+}
+
 async function main() {
   const h = await fetch(HEALTH).then((r) => r.status).catch(() => 0);
   if (h !== 200) throw new Error(`rig not healthy (${h})`);
@@ -66,6 +93,7 @@ async function main() {
 
   // Deterministic market: ONLY Anil online; stranded PENDING taxi requests
   // from this synthetic customer cancelled (offer competition).
+  driversBefore.push(...await prisma.driver.findMany({ where: { OR: [{ isOnline: true }, { isAvailable: true }] }, select: { id: true, isOnline: true, isAvailable: true } }));
   await prisma.driver.updateMany({ where: {}, data: { isOnline: false, isAvailable: false } });
   const tidied = await prisma.order.updateMany({
     where: { customerId: customer.id, orderType: 'TAXI', status: 'PENDING' },
@@ -92,10 +120,11 @@ async function main() {
   const req = await http('POST', '/rides/request', trip, customerToken);
   if (req.status !== 201) throw new Error(`request ${req.status}: ${JSON.stringify(req.json).slice(0, 250)}`);
   const rideId: string = req.json.data.ride.id;
-  const quotedFare: number = Number(req.json.data.ride.fare);
+  // Keep the quote as an exact Decimal — the frozen-fare proof is exact.
+  const quotedFare = dec(req.json.data.ride.fare);
   const ridePin: string | undefined = req.json.data.ride.ridePin;
   if (!ridePin) throw new Error('no ridePin returned to the customer — the start-code handshake needs it');
-  if (!(quotedFare > 0)) throw new Error(`quoted fare not positive: ${quotedFare}`);
+  if (!quotedFare.greaterThan(0)) throw new Error(`quoted fare not positive: ${quotedFare.toString()}`);
   log('EVIDENCE ride requested w/ frozen quote + customer-held PIN', { rideId, quotedFare });
 
   // ── 2. nearest-driver offer → single accept ──────────────────────────────
@@ -140,9 +169,9 @@ async function main() {
 
   const final = await prisma.order.findUniqueOrThrow({ where: { id: rideId }, select: { status: true, taxiFareTotal: true } });
   if (final.status !== 'DELIVERED') throw new Error(`expected DELIVERED, got ${final.status}`);
-  if (Number(final.taxiFareTotal) !== quotedFare) throw new Error(`FAIL fare drift: quoted ${quotedFare}, completed ${Number(final.taxiFareTotal)}`);
+  if (!dec(final.taxiFareTotal).equals(quotedFare)) throw new Error(`FAIL fare drift: quoted ${quotedFare.toString()}, completed ${String(final.taxiFareTotal)}`);
   const earning = await prisma.earning.findFirst({ where: { orderId: rideId, driverId: driver.id, type: 'TAXI_FARE' } });
-  if (!earning || Number(earning.amount) !== quotedFare) throw new Error(`FAIL earning: ${earning ? Number(earning.amount) : 'none'} != ${quotedFare}`);
+  if (!earning || !dec(earning.amount).equals(quotedFare)) throw new Error(`FAIL earning: ${earning ? String(earning.amount) : 'none'} != ${quotedFare.toString()}`);
   const earnCount = await prisma.earning.count({ where: { orderId: rideId } });
   if (earnCount !== 1) throw new Error(`FAIL: ${earnCount} earning rows for one ride`);
   const freed = await prisma.driver.findUniqueOrThrow({ where: { id: driver.id }, select: { currentRideId: true, isAvailable: true } });
@@ -154,4 +183,7 @@ async function main() {
 
 main()
   .catch((e) => { console.error('B7 FAILED:', e.message); process.exitCode = 1; })
-  .finally(() => prisma.$disconnect());
+  .finally(async () => {
+    await restoreDrivers('B7').catch((e) => { console.error('B7 DRIVER RESTORE FAILED:', e.message); process.exitCode = 1; });
+    await prisma.$disconnect();
+  });

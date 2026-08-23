@@ -11,10 +11,16 @@
  * Run: DATABASE_URL=postgresql://swift:swift@localhost:5434/swift \
  *      npx tsx scripts/baseline/b5-pickup.ts
  */
-import { PrismaClient } from '@prisma/client';
+import { Prisma, PrismaClient } from '@prisma/client';
 
 const API = process.env['BASELINE_API'] ?? 'http://localhost:3000/api/v1';
 const prisma = new PrismaClient();
+
+// [F-026-06] Money is proven with EXACT Decimal comparison, never a float
+// round-trip: Number() can equate distinct Decimals and mis-round; the
+// integer-money law applies to the proofs too.
+const dec = (v: unknown) => new Prisma.Decimal(String(v ?? 0));
+
 const CUSTOMER_PHONE = '+5925566001';
 const OWNER_PHONE = '+5925566000';
 const VENDOR_MARK = 'ELV1 Baseline Diner';
@@ -84,7 +90,7 @@ async function main() {
   });
   if (o0.fulfillment !== 'PICKUP') throw new Error(`FAIL: fulfillment ${o0.fulfillment}`);
   if (!o0.pickupCode) throw new Error('FAIL: no pickup code minted');
-  if (Number(o0.deliveryFee ?? 0) !== 0) throw new Error(`FAIL: pickup carries deliveryFee ${o0.deliveryFee}`);
+  if (!dec(o0.deliveryFee ?? 0).isZero()) throw new Error(`FAIL: pickup carries deliveryFee ${o0.deliveryFee}`);
   log('EVIDENCE pickup order', { orderId, fulfillment: o0.fulfillment, fee: String(o0.deliveryFee), codeLen: o0.pickupCode.length });
 
   // ── 2. fast-forward hold (synthetic), vendor works to READY ───────────────

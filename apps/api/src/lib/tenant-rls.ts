@@ -36,7 +36,7 @@ export const TENANT_TABLES = [
   'mmg_agent_payments', 'orders', 'pending_attributions', 'qr_codes',
   'rating_reports', 'rating_tag_defs', 'receipt_counters',
   'ride_queue_entries', 'san_tombstones', 'scan_daily_rollups', 'scan_events',
-  'settlement_batches', 'slug_redirects', 'supply_watches',
+  'settlement_batches', 'slug_redirects', 'storage_orphans', 'supply_watches',
   'tenant_billing_currency', 'trial_grants', 'trip_share_tokens', 'users',
   'vendor_discovery_categories', 'vendors',
 ] as const;

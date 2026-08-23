@@ -104,9 +104,15 @@ async function main() {
   const bItem = await prisma.item.create({
     data: { vendorId: bVendor.id, categoryId: bCat.id, name: `${MARK} Secret Dish`, basePrice: 1234, isAvailable: true, stockQuantity: 5 },
   });
+  // [F-026-07] Tenant B's customer must be AUTHENTICABLE — the ALS cross-
+  // request race can only be proven if B actually makes requests concurrently
+  // with A. A random +59255… number can collide with the synthetic roster and
+  // isn't in the dev OTP bypass set, so use a unique +59277… number and log
+  // in through the same OTP path A uses.
+  const bCustomerPhone = `+59277${randomInt(100000, 999999)}`;
   const bCustomerUser = await prisma.user.create({
     data: {
-      phone: `+59255${randomInt(100000, 999999)}`, firstName: MARK, lastName: 'Customer',
+      phone: bCustomerPhone, firstName: MARK, lastName: 'Customer',
       roles: ['CUSTOMER'] as never[], activeRole: 'CUSTOMER' as never,
       isPhoneVerified: true, selfieCapturedAt: new Date(), tenantId: tenantBId,
       customer: { create: {} },
@@ -123,6 +129,11 @@ async function main() {
     },
   });
   log('tenant B planted', { tenantBId, vendor: bVendor.id, order: bOrder.id, item: bItem.id });
+
+  // [F-026-07] Authenticate tenant B — now the concurrency phase interleaves
+  // two DIFFERENT tenant contexts through AsyncLocalStorage, which is the race
+  // the load phase claims to test (the prior version only ever used A tokens).
+  const bCustomerToken = await loginByOtp(bCustomerPhone);
 
   const secrets = [bOrder.id, bVendor.id, bItem.id, bCustomerUser.id, bOrder.orderNumber, 'Tenant B secret address'];
   const leaks: string[] = [];
@@ -167,18 +178,47 @@ async function main() {
   // An isolation bug that only shows under contention is still a breach: the
   // tenant store is per-request (AsyncLocalStorage), so overlapping requests
   // from two tenants are exactly the race worth proving.
+  // [F-026-07] Capture A's real order numbers once, so the interleave can
+  // assert in BOTH directions: B must never see any of these under load.
+  const aListBefore = await http('GET', '/customer/orders?limit=5', undefined, aCustomerToken);
+  const aOrderNumbers: string[] = Array.isArray(aListBefore.json?.data)
+    ? aListBefore.json.data.map((o: any) => o?.orderNumber).filter(Boolean)
+    : [];
+
   log('ATTACK CLASS 5 — 60 concurrent cross-tenant attacks interleaved with legitimate A traffic');
   const attacks = Array.from({ length: 30 }, () => [
     () => http('GET', `/customer/orders/${bOrder.id}`, undefined, aCustomerToken),
     () => http('GET', `/vendor/orders/${bOrder.id}`, undefined, aOwnerToken),
   ]).flat();
-  const legit = Array.from({ length: 20 }, () => () => http('GET', '/customer/orders?limit=5', undefined, aCustomerToken));
-  const results = await Promise.all([...attacks, ...legit].map((f) => f()));
-  const breaches = results.filter((r) => r.status < 300 && secrets.some((s) => s && r.raw.includes(s)));
-  if (breaches.length > 0) leaks.push(`concurrent: ${breaches.length}/${results.length} responses carried tenant-B data`);
-  const legitOk = results.slice(attacks.length).every((r) => r.status === 200);
-  if (!legitOk) leaks.push('concurrent: legitimate tenant-A traffic broke under load (isolation must not cost availability)');
-  log('  concurrent sweep done', { requests: results.length, breaches: breaches.length, legitimateAllOk: legitOk });
+  // [F-026-07] Legit traffic from BOTH tenants, interleaved: A reading its own
+  // list and B reading its own list at the same moment is exactly the ALS race
+  // — if a request ever resolved another tenant's context, B would see A's
+  // data or A would see B's. Each is tagged so a cross-context leak is caught
+  // in EITHER direction, not just A-reads-B.
+  const legitA = Array.from({ length: 20 }, () => () =>
+    http('GET', '/customer/orders?limit=5', undefined, aCustomerToken).then((r) => ({ ...r, who: 'A' as const })));
+  const legitB = Array.from({ length: 20 }, () => () =>
+    http('GET', '/customer/orders?limit=5', undefined, bCustomerToken).then((r) => ({ ...r, who: 'B' as const })));
+  const attackTagged = attacks.map((f) => () => f().then((r) => ({ ...r, who: 'attack' as const })));
+  // Shuffle so A, B and attack requests actually overlap rather than run in blocks.
+  const mixed = [...attackTagged, ...legitA, ...legitB]
+    .map((f) => ({ f, k: randomInt(0, 1_000_000) }))
+    .sort((x, y) => x.k - y.k)
+    .map((x) => x.f);
+  const results = await Promise.all(mixed.map((f) => f()));
+  // Now that tenant B authenticates and reads its OWN data, exclude B's own
+  // responses from the blanket secrets check — B seeing B's order is correct,
+  // not a leak. The directional checks below are the precise cross-tenant test.
+  const breaches = results.filter((r) => r.who !== 'B' && r.status < 300 && secrets.some((s) => s && r.raw.includes(s)));
+  if (breaches.length > 0) leaks.push(`concurrent: ${breaches.length}/${results.length} non-B responses carried tenant-B data`);
+  // A must never see B's order number and vice-versa — check both directions.
+  const bLeakedToA = results.filter((r) => r.who === 'A' && r.raw.includes(bOrder.orderNumber));
+  const aLeakedToB = results.filter((r) => r.who === 'B' && aOrderNumbers.some((n) => n && r.raw.includes(n)));
+  if (bLeakedToA.length > 0) leaks.push(`concurrent: ${bLeakedToA.length} tenant-A responses carried tenant-B's order under load (ALS race)`);
+  if (aLeakedToB.length > 0) leaks.push(`concurrent: ${aLeakedToB.length} tenant-B responses carried tenant-A data under load (ALS race)`);
+  const legitOk = results.filter((r) => r.who !== 'attack').every((r) => r.status === 200);
+  if (!legitOk) leaks.push('concurrent: legitimate two-tenant traffic broke under load (isolation must not cost availability)');
+  log('  concurrent sweep done', { requests: results.length, breaches: breaches.length, bLeakedToA: bLeakedToA.length, aLeakedToB: aLeakedToB.length, legitimateAllOk: legitOk });
 
   // ── 6. the wall is real, not an empty rig: B's data EXISTS ──────────────
   const bStillThere = await prisma.order.findUnique({ where: { id: bOrder.id }, select: { status: true, totalAmount: true } });
