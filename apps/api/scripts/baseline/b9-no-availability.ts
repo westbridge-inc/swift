@@ -36,9 +36,19 @@ const DISPOSABLE_DBS = ['swift', 'swift_test', 'swift_test2', 'swift_test3'];
 function assertDisposableRig(): void {
   if (process.env['BASELINE_ALLOW_DESTRUCTIVE'] === '1') return;
   const url = process.env['DATABASE_URL'] ?? '';
-  const name = url.split('/').pop()?.split('?')[0] ?? '';
-  const host = /@([^:/]+)/.exec(url)?.[1] ?? '';
-  const localish = host === 'localhost' || host === '127.0.0.1' || host === 'db' || host === '';
+  // [F-028-17] Parse with the URL class, not a regex keyed on '@'. PostgreSQL
+  // userinfo is OPTIONAL, so postgresql://production.example/swift used to
+  // yield host '' — and '' was treated as LOCAL, letting B9 take every rider
+  // and driver offline against a remote target. Unknown is now REFUSED:
+  // a guard that cannot name the host has no business trusting it.
+  let host = '';
+  let name = '';
+  try {
+    const parsed = new URL(url);
+    host = parsed.hostname;
+    name = parsed.pathname.replace(/^\//, '').split('?')[0] ?? '';
+  } catch { /* unparseable → host stays '', refused below */ }
+  const localish = host === 'localhost' || host === '127.0.0.1' || host === '::1' || host === 'db';
   if (!localish || !DISPOSABLE_DBS.includes(name)) {
     throw new Error(
       `REFUSING TO RUN: B9 takes EVERY rider and driver offline, and "${name || url}" on host "${host || 'unknown'}" is not a known disposable local rig `
@@ -53,16 +63,41 @@ const onlineBefore: {
   drivers: Array<{ id: string; isOnline: boolean; isAvailable: boolean }>;
 } = { riders: [], drivers: [] };
 
-/** [F-027-09] Put the supply back on EVERY exit path. */
+/** [F-027-09 → F-028-17] Put the supply back on EVERY exit path — and keep
+ *  going when one row fails. The serial version threw out of the loop on the
+ *  first failed Rider update, skipped every later Rider and ALL Drivers, and
+ *  the finalizer swallowed it: the next run inherited a partially emptied
+ *  rig while this one had already printed COMPLETE. Every row is now its own
+ *  attempt, failures are counted and named, and the restore VERIFIES itself
+ *  by re-reading the rows it claims to have restored. */
+let trustBefore: { customerId: string; trustLevel: string } | null = null;
 async function restoreSupply(): Promise<void> {
-  if (onlineBefore.riders.length === 0 && onlineBefore.drivers.length === 0) return;
+  const failures: string[] = [];
   for (const r of onlineBefore.riders) {
-    await prisma.rider.updateMany({ where: { id: r.id }, data: { isOnline: r.isOnline, isAvailable: r.isAvailable } });
+    try {
+      await prisma.rider.updateMany({ where: { id: r.id }, data: { isOnline: r.isOnline, isAvailable: r.isAvailable } });
+    } catch (e) { failures.push(`rider ${r.id}: ${(e as Error).message}`); }
   }
   for (const d of onlineBefore.drivers) {
-    await prisma.driver.updateMany({ where: { id: d.id }, data: { isOnline: d.isOnline, isAvailable: d.isAvailable } });
+    try {
+      await prisma.driver.updateMany({ where: { id: d.id }, data: { isOnline: d.isOnline, isAvailable: d.isAvailable } });
+    } catch (e) { failures.push(`driver ${d.id}: ${(e as Error).message}`); }
   }
-  console.log(`${new Date().toISOString()} · teardown: supply restored`, JSON.stringify({ riders: onlineBefore.riders.length, drivers: onlineBefore.drivers.length }));
+  // [F-028-17] The rig-prep trust promotion was PERMANENT — every run
+  // ratcheted the fixture customer to L2 and never put it back, so later
+  // runs could not exercise the L1 gates. Restore what was captured.
+  if (trustBefore) {
+    try {
+      await prisma.user.update({ where: { id: trustBefore.customerId }, data: { trustLevel: trustBefore.trustLevel as never } });
+    } catch (e) { failures.push(`trust restore: ${(e as Error).message}`); }
+  }
+  // Verify, never assume: re-read what we claim to have restored.
+  const stillOffline = onlineBefore.riders.length === 0 ? 0 : await prisma.rider.count({
+    where: { id: { in: onlineBefore.riders.filter((r) => r.isOnline).map((r) => r.id) }, isOnline: false },
+  });
+  console.log(`${new Date().toISOString()} · teardown: supply restore ${failures.length === 0 && stillOffline === 0 ? 'VERIFIED' : 'INCOMPLETE'}`,
+    JSON.stringify({ riders: onlineBefore.riders.length, drivers: onlineBefore.drivers.length, failures, stillOffline }));
+  if (failures.length > 0 || stillOffline > 0) process.exitCode = 1;
 }
 
 const A = process.env['BASELINE_API'] ?? 'http://localhost:3000/api/v1';
@@ -133,8 +168,9 @@ async function main() {
     data: { status: 'CANCELLED' },
   });
   if ((customer as any).trustLevel === 'L1') {
+    trustBefore = { customerId: customer.id, trustLevel: 'L1' };
     await prisma.user.update({ where: { id: customer.id }, data: { trustLevel: 'L2' } });
-    log('rig prep: synthetic customer raised to L2 for the taxi gates');
+    log('rig prep: synthetic customer raised to L2 for the taxi gates (restored at teardown)');
   }
   log('market emptied', { ridersOffline: riders.count, driversOffline: drivers.count, tidied: tidied.count });
 
@@ -208,7 +244,26 @@ async function main() {
   // finding F-224 was. It was also one interval too long: attempts 1..CAP-1
   // schedule a re-sweep and the CAP-th is terminal, so the page is due after
   // (CAP - 1) intervals, not CAP.
-  const OPS_PAGE_DUE_MS = (EXHAUST_CAP - 1) * REDISPATCH_DELAY_MS + 90_000; // + slack
+  // [F-028-17/F-027-03] Pin to the SERVER's effective tuning, not this
+  // shell's env: /health (detail view) states the running API's own
+  // exhaustCap/redispatchDelayMs. Fall back to the imported constants ONLY
+  // when the server predates the field — and say so, because in that case
+  // the wait math is an assumption again.
+  let serverCap = EXHAUST_CAP;
+  let serverDelay = REDISPATCH_DELAY_MS;
+  try {
+    const h = await (await fetch(HEALTH)).json() as { dispatch?: { exhaustCap?: number; redispatchDelayMs?: number } };
+    if (h.dispatch?.exhaustCap && h.dispatch?.redispatchDelayMs) {
+      serverCap = h.dispatch.exhaustCap;
+      serverDelay = h.dispatch.redispatchDelayMs;
+      log('wait math pinned to the SERVER\u2019s effective tuning', { serverCap, serverDelay });
+    } else {
+      log('WARNING: server /health does not state dispatch tuning — wait math is this shell\u2019s ASSUMPTION', { EXHAUST_CAP, REDISPATCH_DELAY_MS });
+    }
+  } catch {
+    log('WARNING: could not read /health for dispatch tuning — wait math is this shell\u2019s ASSUMPTION');
+  }
+  const OPS_PAGE_DUE_MS = (serverCap - 1) * serverDelay + 90_000; // + slack
   let opsPages = 0;
   const opsDeadline = Date.now() + OPS_PAGE_DUE_MS;
   while (Date.now() < opsDeadline) {

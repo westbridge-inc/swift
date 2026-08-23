@@ -72,7 +72,12 @@ export function CodeInput({
                 justifyContent: 'center',
               }}
             >
-              <T variant="displayXl" tone={error ? 'error' : 'ink'}>
+              {/* [F-028-18] The BOX's width growth caps at 2× (above), but the
+                  glyph kept scaling past it — at accessibility scales >2× the
+                  digit overflowed or clipped inside the door-to-the-account
+                  input. The glyph now caps exactly where its box does; the
+                  surrounding screen text still scales fully. */}
+              <T variant="displayXl" tone={error ? 'error' : 'ink'} maxFontSizeMultiplier={2}>
                 {filled ? digits[i] : ''}
               </T>
             </View>

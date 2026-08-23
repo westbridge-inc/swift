@@ -241,6 +241,23 @@ export type StatementKind = 'rider' | 'driver' | 'vendor';
  */
 const field = (s: string) => `${Buffer.byteLength(s, 'utf8')}:${s}`;
 
+/** [F-028-15] The PRE-F-027-10 signature, kept ONLY for verification during a
+ *  rolling deployment: v2 landed without a protocol version in the URL, so a
+ *  mixed fleet had new instances rejecting old links and old instances
+ *  rejecting new ones — for links that live ten minutes. New links are v2 and
+ *  say so (`v=2`); a versionless link is verified as v1 so an old instance's
+ *  mint survives the roll. SUNSET: delete this and the v1 branch one release
+ *  after every instance signs v2 — the format's delimiter weakness is exactly
+ *  why v2 exists, and verification-only is the largest surface it may keep.
+ */
+export function signStatementTokenV1(kind: StatementKind, actorId: string, from: string, to: string, expires: number): string {
+  return crypto
+    .createHmac('sha256', statementSecret())
+    .update(`statement:${kind}:${actorId}:${from}:${to}:${expires}`)
+    .digest('hex')
+    .slice(0, 32);
+}
+
 export function signStatementToken(kind: StatementKind, actorId: string, from: string, to: string, expires: number): string {
   return crypto
     .createHmac('sha256', statementSecret())
@@ -260,6 +277,6 @@ export function mintStatementPath(
   const to = period.to.toISOString();
   const expires = Math.floor(Date.now() / 1000) + ttlSeconds;
   const sig = signStatementToken(kind, actorId, from, to, expires);
-  const q = new URLSearchParams({ kind, actor: actorId, from, to, expires: String(expires), sig });
+  const q = new URLSearchParams({ v: '2', kind, actor: actorId, from, to, expires: String(expires), sig });
   return { path: `/api/v1/statements/render?${q.toString()}`, expiresInSeconds: ttlSeconds };
 }

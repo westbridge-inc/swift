@@ -28,3 +28,26 @@ export function fareStep(min: number, max: number): number {
   if (raw <= 0) return 1;
   return Math.max(1, raw >= 100 ? Math.round(raw / 50) * 50 : Math.round(raw));
 }
+
+/**
+ * [F-028-18] Can this offer's remaining authority actually be ADJUSTED, or
+ * only accepted?
+ *
+ * The recovery endpoint hands back cards with as little as 4 seconds of
+ * authority (Redis TTL 14 minus the 10-second worker tail). Ten adjust
+ * gestures cannot traverse the band in 4 seconds — the slider becomes
+ * reachable-but-untraversable again, this time only on recovered cards,
+ * which is the exact failure F-027-08 closed for fresh ones.
+ *
+ * Accepting needs ONE gesture; adjusting needs up to MAX_ACCESSIBLE_ACTIONS
+ * plus a moment to confirm the number. Derivation, not taste:
+ * 10 gestures × ~0.8s each + 2s to read and commit = 10s. A fresh express
+ * offer (12s) clears it; a short recovered card does not, and the card says
+ * so instead of offering a control that cannot finish.
+ */
+export const MIN_ADJUST_SECONDS = 10;
+
+export function canAdjustFare(expiresInSeconds: number | null | undefined): boolean {
+  if (expiresInSeconds == null) return true; // no deadline known — do not degrade
+  return expiresInSeconds >= MIN_ADJUST_SECONDS;
+}
