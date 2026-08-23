@@ -149,7 +149,10 @@ async function main() {
     // produced, and leaving one behind is exactly the fabricated evidence
     // this baseline exists to refuse.
     log('PREFLIGHT deleting stray live alerts left on the rig', strays);
-    await prisma.sosAlert.deleteMany({ where: { id: { in: strays.map((s) => s.id) } } });
+    // [F-028-16] Through the evidence-first helper: a crashed run's alert may
+    // own an evidence bundle, and deleting around it strands rows no
+    // alert-based sweep can find again.
+    await deleteSyntheticAlerts(strays.map((s) => s.id));
     const left = await prisma.sosAlert.count({
       where: { actorUserId: { in: [customer.id, other.id] }, status: { in: ['TRIGGER_PENDING', 'ACTIVE', 'ACKNOWLEDGED'] } },
     });
@@ -202,12 +205,14 @@ async function main() {
   // ── 2. cancel in grace: nothing happened, and it still says nothing ──────
   // A FRESH alert is required, and leg 1's is now past its deadline (it spent
   // the whole window sampling), so cancelling it is correctly refused by the
-  // F-026-12 clock guard. Close it as RIG HYGIENE — explicitly not an ops
-  // resolution — so the next trigger is genuinely new rather than a collapse.
-  await prisma.sosAlert.updateMany({
-    where: { id: a1.id, status: { in: ['TRIGGER_PENDING', 'ACTIVE', 'ACKNOWLEDGED'] } },
-    data: { status: 'RESOLVED', resolvedAt: new Date(), resolutionNotes: 'ELV2 B14 leg-1 close (force-close, not an ops resolution)' },
-  });
+  // F-026-12 clock guard. [F-028-16] DELETED, not force-RESOLVED: labelling
+  // the write "not an ops resolution" documented the fabrication without
+  // making the row valid — a RESOLVED alert with no ops actor, no resolution
+  // code and no all-clear is a closure the product could never produce, and a
+  // crash right after the write left it for anything downstream to read as a
+  // real one. This is the run's own synthetic alert; the honest end state is
+  // that it does not exist.
+  await deleteSyntheticAlerts([a1.id]);
   const t1b = await http('POST', '/safety/sos', { lat: 6.8, lng: -58.15, source: 'BUTTON' }, token);
   const a1b = t1b.json.data;
   raised.push(a1b.id);
@@ -351,10 +356,12 @@ async function main() {
   // Everything live for this actor, including leg 7's own replay alert. The
   // cross-user leg that needed a2 ACTIVE now runs earlier (5b), precisely so
   // this one can start from a clean slate.
-  await prisma.sosAlert.updateMany({
+  // [F-028-16] Deleted, not force-RESOLVED — same reasoning as leg 1's close.
+  const preRaceLive = await prisma.sosAlert.findMany({
     where: { actorUserId: customer.id, status: { in: ['TRIGGER_PENDING', 'ACTIVE', 'ACKNOWLEDGED'] } },
-    data: { status: 'RESOLVED', resolvedAt: new Date(), resolutionNotes: 'ELV2 B14 pre-race close (force-close, not an ops resolution)' },
+    select: { id: true },
   });
+  await deleteSyntheticAlerts(preRaceLive.map((r) => r.id));
   const raceKey = `b14-race-${randomInt(100000, 999999)}`;
   const raceBody = { lat: 6.8, lng: -58.15, clientIdempotencyKey: raceKey };
   const race = await Promise.all([
@@ -423,6 +430,21 @@ async function main() {
  *  cleanup error must never ride out on a green exit.
  *  [F-026-19] Rides are torn down HERE, from the finally path, rather than
  *  inline at the end of the happy leg where any earlier throw skipped them. */
+/** [F-028-16] The ONE way a synthetic alert leaves this rig: its evidence
+ *  first, its incident soft-references next, the row itself LAST — and any
+ *  failure aborts BEFORE the alert vanishes. The previous order (swallow the
+ *  cleanup errors, delete the alert anyway) orphaned evidence bundles and
+ *  dangling incident references that no later alert-based sweep could ever
+ *  find again, so a future run misread both rig safety state and retained
+ *  evidence. If cleanup fails the alert STAYS, discoverable, and the run
+ *  reports the failure instead of hiding it. */
+async function deleteSyntheticAlerts(ids: string[]): Promise<void> {
+  if (ids.length === 0) return;
+  await prisma.evidenceBundle.deleteMany({ where: { sosAlertId: { in: ids } } });
+  await prisma.incidentCase.updateMany({ where: { sosAlertId: { in: ids } }, data: { sosAlertId: null } });
+  await prisma.sosAlert.deleteMany({ where: { id: { in: ids } } });
+}
+
 async function closeRaised(token?: string) {
   const problems: string[] = [];
 
@@ -445,11 +467,16 @@ async function closeRaised(token?: string) {
   const doomed = await prisma.sosAlert.findMany({ where: mine, select: { id: true, status: true } });
   if (doomed.length > 0) {
     const ids = doomed.map((d) => d.id);
-    // Soft references (no FK): clear them first so nothing points at a row
-    // that is about to vanish.
-    await prisma.evidenceBundle.deleteMany({ where: { sosAlertId: { in: ids } } }).catch(() => undefined);
-    await prisma.incidentCase.updateMany({ where: { sosAlertId: { in: ids } }, data: { sosAlertId: null } }).catch(() => undefined);
-    await prisma.sosAlert.deleteMany({ where: { id: { in: ids } } });
+    // [F-028-16] No swallowed failures: the old catch-and-continue deleted the
+    // alert even when its evidence cleanup had failed, orphaning bundles and
+    // dangling incident references beyond any later alert-based sweep. The
+    // helper deletes evidence FIRST and throws before the alert vanishes, so
+    // a failure leaves everything discoverable and lands in `problems`.
+    try {
+      await deleteSyntheticAlerts(ids);
+    } catch (err) {
+      problems.push(`alert cleanup failed BEFORE deletion — rows left discoverable: ${(err as Error).message}`);
+    }
     log('teardown: deleted the alerts this run raised', {
       deleted: doomed.length,
       wereLive: doomed.filter((d) => (LIVE as readonly string[]).includes(d.status)).length,
