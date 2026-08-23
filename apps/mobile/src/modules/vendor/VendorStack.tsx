@@ -54,6 +54,7 @@ import { MmgPayLinkCard } from '../../components/MmgPayLinkCard';
 import { StandingCard } from '../../components/StandingCard';
 import { API_URL, vendorApi } from '../../services/api';
 import { openPayLink } from '../../lib/payLink';
+import { toast } from '../../components/ui/toast';
 import { useWentLive, WentLivePopup } from '../../components/onboarding/WentLive';
 import { docLabel } from '../../components/onboarding/DocumentUploadCard';
 import { useBecomePartner, useVerificationStatus } from '../../hooks/verification';
@@ -1639,7 +1640,9 @@ function VendorItemEditorScreen({ navigation, route }: any) {
         });
       } catch (uploadError) {
         if (uploadError instanceof AuthSessionBoundaryError) throw uploadError;
-        // The item itself is durable; the vendor can retry only the photo.
+        // [WR-034] The item is durable but the vendor must KNOW the photo
+        // didn't make it — a silent miss ships a photo-less listing.
+        toast.show("Item saved, but the photo didn't upload — open the item and add it again.");
       }
       current = requireAuthSessionForPrincipal(owner);
     }
@@ -2335,8 +2338,13 @@ function VendorInsightsScreen() {
       const r = await vendorApi.salesStatement(owner);
       requireAuthSessionForPrincipal(owner);
       const path = r.data?.data?.path as string;
-      if (path) await openPayLink(`${API_URL}${path}`);
+      // [WR-033] A mint that returns no path, or a link that can't open on
+      // this phone, must FAIL the mutation — the error line below is the
+      // honest signal; success used to be claimed silently either way.
+      if (!path) throw new Error('Statement link missing from the response.');
+      const opened = await openPayLink(`${API_URL}${path}`);
       requireAuthSessionForPrincipal(owner);
+      if (opened === false) throw new Error("Couldn't open the statement on this phone.");
     },
   });
   // Fetch double the window so "vs the previous N days" comes from the same

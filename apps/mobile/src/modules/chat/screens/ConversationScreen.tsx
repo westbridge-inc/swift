@@ -37,7 +37,9 @@ export function ConversationScreen() {
     const text = draft.trim();
     if (!text || send.isPending) return;
     setDraft('');
-    send.mutate(text);
+    // [WR-035] A failed send restores the draft (unless they typed anew) —
+    // clearing it optimistically must never eat the message.
+    send.mutate(text, { onError: () => setDraft((cur) => (cur.trim() ? cur : text)) });
   };
 
   return (
@@ -58,11 +60,16 @@ export function ConversationScreen() {
             keyExtractor={(m, i) => m.id ?? String(i)}
             contentContainerStyle={{ padding: GUTTER, gap: space.md, flexGrow: 1 }}
             ListEmptyComponent={
-              <View style={{ flex: 1, alignItems: 'center', justifyContent: 'center' }}>
-                <T variant="label" tone="muted">
-                  Say hi — messages stay on this order.
-                </T>
-              </View>
+              messages.isError ? (
+                // [WR-035] A failed history load is not an empty thread.
+                <ErrorState onRetry={() => messages.refetch()} message="Couldn't load this conversation." />
+              ) : (
+                <View style={{ flex: 1, alignItems: 'center', justifyContent: 'center' }}>
+                  <T variant="label" tone="muted">
+                    Say hi — messages stay on this order.
+                  </T>
+                </View>
+              )
             }
             renderItem={({ item: m }) => {
               const mine = m.senderId === user?.id;

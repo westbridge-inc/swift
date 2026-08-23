@@ -260,8 +260,15 @@ export function FeedbackScreen() {
                         <Pressable
                           key={v}
                           onPress={() => {
+                            // [WR-026] Optimistic color, but roll it back if
+                            // the upsert fails — a stuck thumb claims saved
+                            // feedback that never landed.
+                            const prev = thumbs[line.itemId];
                             setThumbs((cur) => ({ ...cur, [line.itemId]: v }));
-                            itemFeedback.mutate({ itemId: line.itemId, verdict: v });
+                            itemFeedback.mutate(
+                              { itemId: line.itemId, verdict: v },
+                              { onError: () => setThumbs((cur) => ({ ...cur, [line.itemId]: prev })) },
+                            );
                           }}
                           hitSlop={8}
                           style={{ paddingHorizontal: space.sm }}

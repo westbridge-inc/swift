@@ -106,6 +106,10 @@ export function IdentityVerificationScreen({ navigation }: any) {
         <UploadRow title="Government ID" done={!!idUrl} busy={picking === 'id'} onPress={() => pick('id')} />
         <UploadRow title="Selfie" done={!!selfieUrl} busy={picking === 'selfie'} onPress={() => pick('selfie')} />
 
+        {/* [WR-027] The catch above says "surfaced below" — this is that
+            surface. Only the submit error rendered; a failed photo UPLOAD was
+            silent and the row simply stayed empty. */}
+        {upload.isError ? <Text className="mt-sm text-center text-sm text-error">That photo didn&apos;t upload — tap the card and try again.</Text> : null}
         {submit.isError ? <Text className="mt-sm text-center text-sm text-error">Couldn&apos;t submit. Please try again.</Text> : null}
 
         <Button
