@@ -127,6 +127,7 @@ import { useStoreSwitcher } from '../../stores/storeSwitcher';
 import { useVendorPreview } from '../../stores/vendorPreview';
 import { RoleSwitcherSheet } from '../../components/RoleSwitcherSheet';
 import { money } from '../../lib/money';
+import { payScreenState, type PayBandTone } from '../../lib/billing';
 import { vendorSurfaceForRole } from '../../lib/vendorRbac';
 import { inventorySummary } from '../../lib/vendorInventory';
 import { mediaUrl } from '../../lib/images';
@@ -1092,17 +1093,28 @@ function VendorBillingNotice({ sub, onPay }: { sub: any; onPay: () => void }) {
   );
 }
 
+/** The tone of the state band — one 8px dot and one coloured word, never a
+ *  filled tint card [Swift Pay §1a, "Colour budget"]. Viridian for covered,
+ *  burnt amber for owed, ink for paused. Nothing on this screen turns red:
+ *  being behind on a bill is not an error state, it is a Tuesday. */
+const PAY_BAND_INK: Record<PayBandTone, string> = {
+  covered: color.success,
+  owed: color.warning,
+  paused: color.text.primary,
+};
+
 function VendorSwiftNumberScreen({ navigation }: any) {
   const q = useVendorSubscription();
   const sub: any = q.data;
   const swiftNumber = String(sub?.sanFormatted ?? sub?.san ?? '');
-  const weeklyFee = numericFact(sub?.weeklyFeeGyd ?? sub?.customRate ?? sub?.weeklyRate);
-  const due = numericFact(sub?.amountDueGyd);
   const steps: string[] = Array.isArray(sub?.payCashSteps) ? sub.payCashSteps : [];
+  const state = payScreenState(sub);
+  const bandInk = PAY_BAND_INK[state.tone];
+  const activationCopy = typeof sub?.activationCopy === 'string' ? sub.activationCopy : '';
 
   return (
     <Screen>
-      <SubHeader title="My Swift Number" navigation={navigation} />
+      <SubHeader title="Weekly fee" navigation={navigation} />
       {q.isLoading ? (
         <LoadingBlock />
       ) : q.isError && !sub ? (
@@ -1118,23 +1130,61 @@ function VendorSwiftNumberScreen({ navigation }: any) {
               Showing the last loaded billing details — refresh did not complete.
             </T>
           ) : null}
+          {/* THE AMOUNT. The most readable thing we can put on a cheap screen in
+              sunlight — near-black ink on paper, not brand, not a tint card. A
+              vendor checking whether they owe anything should need one glance. */}
+          <View style={{ paddingTop: space.lg, paddingBottom: space.md }}>
+            <T variant="micro" tone="muted">
+              {state.eyebrow}
+            </T>
+            <T variant="displayXl" style={{ marginTop: space.xs }}>
+              {money(state.amountGyd)}
+            </T>
+            {state.covers ? (
+              <T variant="caption" tone="muted" style={{ marginTop: space.xs }}>
+                {state.covers}
+              </T>
+            ) : null}
+          </View>
+
+          {/* THE BAND. One dot, one coloured word, one line of copy. The four
+              states differ only here — the rest of the screen never moves. */}
+          <View style={{ marginBottom: space.lg }}>
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.sm }}>
+              <View style={{ width: 8, height: 8, borderRadius: radius.full, backgroundColor: bandInk }} />
+              <T variant="label" weight="semibold" style={{ color: bandInk }}>
+                {state.title}
+              </T>
+            </View>
+            <T variant="caption" tone="muted" style={{ marginTop: space.xs }}>
+              {state.body}
+            </T>
+            {state.extra ? (
+              // PINV-8, in the vendor's own words. Proven server-side by
+              // api/src/__tests__/billing-suspension-retention.test.ts.
+              <T variant="caption" tone="muted" style={{ marginTop: space.sm }}>
+                {state.extra}
+              </T>
+            ) : null}
+          </View>
+
+          {/* DOOR 2 — the account number. Door 1 (card) is not built: it needs
+              WiPay, and WiPay's GYD support is still an open question
+              (PAY-1 BLOCKER-1). Showing a dead "Pay by card" button would be
+              the screen lying about a door that does not open, so there is
+              exactly one door here until that answer arrives. */}
           <Card style={{ alignItems: 'center', padding: space.xl, marginBottom: space.md }}>
             <IconChip icon="hash" size={56} />
             <T variant="micro" tone="muted" style={{ marginTop: space.lg }}>
-              YOUR SWIFT NUMBER
+              ACCOUNT NUMBER
             </T>
             <T variant="displayXl" center selectable style={{ marginTop: space.sm }}>
               {swiftNumber || '—'}
             </T>
             <T variant="caption" tone="muted" center style={{ marginTop: space.sm }}>
-              Give this number to an MMG agent when paying the store’s weekly fee. It never changes.
+              MMG app, or cash at any agent. Give this to the agent — it never changes.
             </T>
           </Card>
-
-          <View style={{ flexDirection: 'row', gap: space.sm, marginBottom: space.md }}>
-            <HubFact label="WEEKLY FEE" value={weeklyFee == null ? '—' : money(weeklyFee)} detail="cash at an MMG agent" />
-            <HubFact label="DUE NOW" value={due == null ? '—' : money(due)} detail="server-reported amount" />
-          </View>
 
           <Card style={{ marginBottom: space.lg }}>
             <T variant="heading">How to pay</T>
@@ -1169,7 +1219,18 @@ function VendorSwiftNumberScreen({ navigation }: any) {
             )}
           </Card>
 
+          {/* The waiting state, said plainly. A vendor who has just handed cash
+              to an agent is standing there wondering what to do next, and the
+              honest answer is "nothing" — the rail is a push, we watch for it. */}
+          <T variant="caption" tone="muted" style={{ marginBottom: space.md }}>
+            {activationCopy ? `${activationCopy} ` : ''}There is nothing to type here — we watch for the payment and update this screen ourselves.
+          </T>
+
           <T variant="caption" tone="muted" center>
+            The weekly fee is Swift’s only charge — you keep everything you earn.
+          </T>
+
+          <T variant="caption" tone="faint" center style={{ marginTop: space.sm }}>
             Confirmation clears a billing hold. Any separate verification hold remains until its own issue is fixed.
           </T>
         </ScrollView>
