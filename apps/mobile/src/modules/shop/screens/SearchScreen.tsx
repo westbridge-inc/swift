@@ -2,21 +2,25 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { FlatList, Pressable, ScrollView, View } from 'react-native';
 import { useNavigation, useRoute } from '@react-navigation/native';
-import { color, space } from '@swift/ui';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { Feather } from '@expo/vector-icons';
+import { color, radius, space } from '@swift/ui';
 import { useHome, useVendors } from '../../../hooks/customer';
+import { ActionSheet } from '../../../components/ui/action-sheet';
+import { VERTICAL_TINT } from '../../../kit/vertical-tint';
 import { useAppStore } from '../../../stores/appStore';
 import { useLocationStore } from '../../../stores/locationStore';
 import { grantedLocationFix } from '../../../lib/deviceLocation';
 import { itemPhoto, vendorPhoto } from '../../../lib/images';
 import {
   Chip,
+  CircleChip,
   EmptyState,
   ErrorState,
-  Header,
+  GradientMasthead,
   LabeledInput,
   LoadingBlock,
   Money,
-  PillButton,
   RatingMeta,
   Screen,
   SectionHeader,
@@ -24,14 +28,21 @@ import {
   VendorRow,
 } from '../../../kit';
 
-// Kit 57–60: idle = headline + history chips + popular rows; typing/results =
-// underline tabs Result | Sort By; sort = radio list + Apply/Reset.
+// Kit 57–60: idle = headline + history chips + popular rows.
+//
+// [design item 02] Results used to sit under a bare 56dp Header on paper — the
+// one "head" in the customer app that did not wear the masthead — and sorting
+// was a full TAB that HID the results to show four radios behind Apply/Reset.
+// The head is now the house's own face, and sort is a chip that opens the kit's
+// action sheet, so the results never leave the screen. The type chips carry
+// their vertical identity when selected, so filtering to Groceries feels like
+// the launcher grid rather than a form control.
 const TYPES = [
-  { key: undefined, label: 'All' },
-  { key: 'RESTAURANT', label: 'Restaurants' },
-  { key: 'SUPERMARKET', label: 'Groceries' },
-  { key: 'STORE', label: 'Shops' },
-  { key: 'SERVICE', label: 'Services' },
+  { key: undefined, label: 'All', tint: undefined },
+  { key: 'RESTAURANT', label: 'Restaurants', tint: VERTICAL_TINT.food },
+  { key: 'SUPERMARKET', label: 'Groceries', tint: VERTICAL_TINT.groceries },
+  { key: 'STORE', label: 'Shops', tint: VERTICAL_TINT.shops },
+  { key: 'SERVICE', label: 'Services', tint: VERTICAL_TINT.services },
 ] as const;
 
 const SORTS = [
@@ -41,24 +52,10 @@ const SORTS = [
   { key: 'distance', label: 'Distance' },
 ] as const;
 
-function Radio({ on }: { on: boolean }) {
-  return (
-    <View
-      style={{
-        width: 22,
-        height: 22,
-        borderRadius: 11,
-        borderWidth: on ? 6 : 1.5,
-        borderColor: on ? color.brand[500] : color.border.strong,
-        backgroundColor: color.surface.base,
-      }}
-    />
-  );
-}
-
 export function SearchScreen() {
   const navigation = useNavigation<any>();
   const route = useRoute<any>();
+  const insets = useSafeAreaInsets();
   const { latitude, longitude, status } = useLocationStore();
   const locationFix = grantedLocationFix(latitude, longitude, status);
   const deviceLatitude = locationFix?.latitude;
@@ -67,9 +64,9 @@ export function SearchScreen() {
 
   const [q, setQ] = useState<string>(route.params?.q ?? '');
   const [type, setType] = useState<string | undefined>(route.params?.type);
-  const [tab, setTab] = useState<'result' | 'sort'>('result');
   const [sort, setSort] = useState<string | undefined>(undefined);
-  const [draftSort, setDraftSort] = useState<string | undefined>(undefined);
+  const [sortOpen, setSortOpen] = useState(false);
+  const [openNow, setOpenNow] = useState(false);
   const [debounced, setDebounced] = useState(q);
 
   useEffect(() => {
@@ -90,12 +87,15 @@ export function SearchScreen() {
     if (debounced.trim()) p['search'] = debounced.trim();
     if (type) p['type'] = type;
     if (sort) p['sort'] = sort;
+    // The browse endpoint already understands `open` — the chip is a real
+    // server filter, not a client-side hide.
+    if (openNow) p['open'] = 'true';
     if (deviceLatitude !== undefined && deviceLongitude !== undefined) {
       p['lat'] = String(deviceLatitude);
       p['lng'] = String(deviceLongitude);
     }
     return p;
-  }, [debounced, type, sort, deviceLatitude, deviceLongitude]);
+  }, [debounced, type, sort, openNow, deviceLatitude, deviceLongitude]);
 
   const vendors = useVendors<any[]>(searching ? params : undefined);
   const home = useHome<any>(deviceLatitude, deviceLongitude);
@@ -103,30 +103,43 @@ export function SearchScreen() {
 
   const results: any[] = Array.isArray(vendors.data) ? vendors.data : [];
 
+  const sortLabel = SORTS.find((s) => s.key === sort)?.label ?? 'Recommended';
+
   return (
-    <Screen>
-      <Header title="Search" />
-      <View style={{ paddingHorizontal: space['2xl'], paddingTop: space.sm }}>
+    <Screen bleed>
+      {/* The search head finally wears the app's face: the brand wash under the
+          kit's 28dp curve, carrying the field itself. */}
+      <GradientMasthead style={{ paddingTop: insets.top + space.md, paddingBottom: space.lg }}>
+        <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.md, paddingHorizontal: space.lg }}>
+          <CircleChip icon="chevron-left" light onPress={() => navigation.goBack()} label="Go back" />
+          <View style={{ flex: 1 }}>
+            <LabeledInput
+              icon="search"
+              placeholder="Restaurants, groceries, dishes…"
+              value={q}
+              onChangeText={setQ}
+              returnKeyType="search"
+              autoFocus={!!route.params?.focus}
+            />
+          </View>
+        </View>
+      </GradientMasthead>
+
+      <View style={{ paddingHorizontal: space['2xl'], paddingTop: space.lg }}>
         {!searching ? (
           <T variant="title" style={{ marginBottom: space.xl }}>
             What are you{'\n'}looking for?
           </T>
         ) : null}
-        <LabeledInput
-          icon="search"
-          placeholder="Restaurants, groceries, dishes…"
-          value={q}
-          onChangeText={setQ}
-          returnKeyType="search"
-          autoFocus={!!route.params?.focus}
-        />
-        {/* Vendor-type filter chips (the Home tiles preset these) */}
-        <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{ marginTop: space.lg }} contentContainerStyle={{ gap: space.md }}>
+        {/* Vendor-type filter chips (the Home tiles preset these). Selected
+            chips carry their own vertical identity, not the house brand. */}
+        <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ gap: space.md }}>
           {TYPES.map((t) => (
             <Chip
               key={t.label}
               label={t.label}
               selected={type === t.key}
+              tint={t.tint}
               onPress={() => setType(t.key)}
               style={{ height: 44, paddingHorizontal: space.lg }}
             />
@@ -136,34 +149,52 @@ export function SearchScreen() {
 
       {searching ? (
         <>
-          {/* Kit underline tabs: Result | Sort By */}
-          <View style={{ flexDirection: 'row', marginTop: space.xl }}>
-            {(
-              [
-                { key: 'result', label: 'Result' },
-                { key: 'sort', label: 'Sort by' },
-              ] as const
-            ).map((t) => (
-              <Pressable key={t.key} onPress={() => setTab(t.key)} style={{ flex: 1 }}>
-                <View style={{ alignItems: 'center' }}>
-                  <T variant="body" weight="semibold" tone={tab === t.key ? 'ink' : 'faint'}>
-                    {t.label}
+          {/* Sort and availability ride ABOVE the results as chips — the old
+              "Sort by" tab hid every result to show four radio buttons behind
+              Apply/Reset, which is a modal dialog wearing a tab's clothes. */}
+          <ScrollView
+            horizontal
+            showsHorizontalScrollIndicator={false}
+            style={{ marginTop: space.md }}
+            contentContainerStyle={{ gap: space.md, paddingHorizontal: space['2xl'] }}
+          >
+            <Pressable
+              testID="search-sort-chip"
+              onPress={() => setSortOpen(true)}
+              accessibilityRole="button"
+              accessibilityLabel={`Sort: ${sortLabel}. Change sort order`}
+            >
+              {({ pressed }) => (
+                <View
+                  style={{
+                    flexDirection: 'row',
+                    alignItems: 'center',
+                    gap: space.sm,
+                    height: 44,
+                    paddingHorizontal: space.lg,
+                    borderRadius: radius.full,
+                    borderWidth: 1,
+                    borderColor: sort ? color.brand[500] : color.border.subtle,
+                    backgroundColor: color.surface.base,
+                    opacity: pressed ? 0.75 : 1,
+                  }}
+                >
+                  <T variant="label" weight={sort ? 'semibold' : 'medium'}>
+                    Sort · {sortLabel}
                   </T>
-                  <View
-                    style={{
-                      height: 3,
-                      alignSelf: 'stretch',
-                      marginTop: space.md,
-                      borderRadius: 2,
-                      backgroundColor: tab === t.key ? color.brand[500] : color.border.subtle,
-                    }}
-                  />
+                  <Feather name="chevron-down" size={15} color={color.text.muted} />
                 </View>
-              </Pressable>
-            ))}
-          </View>
+              )}
+            </Pressable>
+            <Chip
+              label="Open now"
+              selected={openNow}
+              onPress={() => setOpenNow((v) => !v)}
+              style={{ height: 44, paddingHorizontal: space.lg }}
+            />
+          </ScrollView>
 
-          {tab === 'result' ? (
+          {(
             vendors.isLoading ? (
               <LoadingBlock />
             ) : vendors.isError ? (
@@ -211,42 +242,22 @@ export function SearchScreen() {
                 )}
               />
             )
-          ) : (
-            <View style={{ flex: 1, paddingHorizontal: space['2xl'], paddingTop: space.xl }}>
-              <SectionHeader title="Sort by" />
-              <View style={{ marginTop: space.md }}>
-                {SORTS.map((s) => (
-                  <Pressable
-                    key={s.label}
-                    onPress={() => setDraftSort(s.key)}
-                    style={{ flexDirection: 'row', alignItems: 'center', gap: space.md, paddingVertical: space.md }}
-                  >
-                    <Radio on={draftSort === s.key} />
-                    <T variant="body">{s.label}</T>
-                  </Pressable>
-                ))}
-              </View>
-              <View style={{ flex: 1 }} />
-              <View style={{ gap: space.md, paddingBottom: space['2xl'] }}>
-                <PillButton
-                  label="Apply"
-                  onPress={() => {
-                    setSort(draftSort);
-                    setTab('result');
-                  }}
-                />
-                <PillButton
-                  label="Reset"
-                  variant="soft"
-                  onPress={() => {
-                    setDraftSort(undefined);
-                    setSort(undefined);
-                    setTab('result');
-                  }}
-                />
-              </View>
-            </View>
           )}
+
+          {/* Selecting IS applying — there is nothing to confirm about a sort
+              order, so Apply/Reset are gone. */}
+          <ActionSheet
+            open={sortOpen}
+            onClose={() => setSortOpen(false)}
+            title="Sort by"
+            actions={SORTS.map((s) => ({
+              label: s.key === sort ? `${s.label}  ✓` : s.label,
+              onPress: () => {
+                setSort(s.key);
+                setSortOpen(false);
+              },
+            }))}
+          />
         </>
       ) : (
         <ScrollView contentContainerStyle={{ paddingHorizontal: space['2xl'], paddingTop: space['2xl'], paddingBottom: space['3xl'] }}>

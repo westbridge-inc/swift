@@ -183,19 +183,28 @@ export function Stars({
 /** Pill chip — categories, filters, sort options.
  *  `emoji` is DEPRECATED (design-100× Part 14: emoji are never UI icons) —
  *  remaining passers lose it as their flow is elevated; then the prop dies. */
+/**
+ * `tint` lets a chip carry a VERTICAL IDENTITY when selected instead of the
+ * house brand — so filtering by Groceries in search feels like the same act as
+ * tapping Groceries on the launcher grid. Pass a `vertical-tint.ts` entry; omit
+ * it and the chip stays brand, exactly as before.
+ */
 export function Chip({
   label,
   emoji,
   selected = false,
+  tint,
   onPress,
   style,
 }: {
   label: string;
   emoji?: string;
   selected?: boolean;
+  tint?: { bg: string; ink: string };
   onPress?: () => void;
   style?: ViewStyle;
 }) {
+  const onTint = selected && !!tint;
   return (
     <Pressable
       onPress={
@@ -220,16 +229,21 @@ export function Chip({
               paddingHorizontal: space.xl,
               height: 48,
               borderRadius: 9999,
-              backgroundColor: selected ? color.brand[500] : color.surface.base,
+              backgroundColor: onTint ? tint!.bg : selected ? color.brand[500] : color.surface.base,
               borderWidth: 1,
-              borderColor: selected ? color.brand[500] : color.border.subtle,
+              borderColor: onTint ? tint!.ink : selected ? color.brand[500] : color.border.subtle,
               opacity: pressed ? 0.75 : 1,
             },
             style,
           ]}
         >
           {emoji ? <T variant="body">{emoji}</T> : null}
-          <T variant="label" weight={selected ? 'semibold' : 'medium'} tone={selected ? 'onBrand' : 'ink'}>
+          <T
+            variant="label"
+            weight={selected ? 'semibold' : 'medium'}
+            tone={onTint ? undefined : selected ? 'onBrand' : 'ink'}
+            style={onTint ? { color: tint!.ink } : undefined}
+          >
             {label}
           </T>
         </View>
