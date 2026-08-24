@@ -1,6 +1,6 @@
 /** @jsxImportSource react */
 import React, { useEffect, useMemo, useState } from 'react';
-import { Pressable, ScrollView, View } from 'react-native';
+import { Pressable, ScrollView, View, type ViewStyle } from 'react-native';
 import { Feather } from '@expo/vector-icons';
 import { useNavigation } from '@react-navigation/native';
 import { color, radius, space } from '@swift/ui';
@@ -25,11 +25,8 @@ import { haptic } from '../../../lib/haptics';
 import { toast } from '../../../components/ui/toast';
 import {
   AddMorph,
-  Card,
   Chip,
-  GradientMasthead,
   Photo,
-  CircleChip,
   EmptyState,
   ErrorState,
   IconChip,
@@ -60,6 +57,60 @@ import {
 
 const GUTTER = space['2xl'];
 const TIP_PRESETS = [0, 200, 500, 1000];
+
+/** THE HAIRLINE. Content on this screen is separated by a line, not boxed in a
+ *  card — a cart is a list of facts about money, and a stack of white chassis
+ *  on white paper hid the one thing that matters (the total) inside the same
+ *  container as everything else. */
+const RULE: ViewStyle = { height: 1, backgroundColor: color.border.subtle };
+
+/**
+ * CHROME IS PAPER, NOT BRAND — read off the rendered design slides.
+ *
+ * Cart used to open with a full-bleed maroon gradient slab (GradientMasthead)
+ * carrying a white eyebrow, a white title and a translucent ••• chip. There is
+ * no such slab in the design: the top of a screen is the same warm paper as the
+ * rest of it, with an INK title and plain glyph controls sitting directly on it.
+ * `GradientMasthead` is NOT deleted and is still exported from the kit (FG-2),
+ * but the customer app now has ZERO call sites for it — it is dead code awaiting
+ * a founder decision, logged as an FG-2 deletion candidate rather than removed.
+ *
+ * This matters most here: Cart is the last thing someone reads before they
+ * commit money. A maroon slab at the top spent the brand colour on decoration,
+ * so by the time the eye reached the real maroon — the Place order button — red
+ * had stopped meaning "act". Paper chrome hands the whole budget to the CTA.
+ */
+function CartHeader({ onBack, onMenu }: { onBack?: () => void; onMenu?: () => void }) {
+  return (
+    <View style={{ paddingHorizontal: GUTTER, paddingTop: space.sm, paddingBottom: space.lg }}>
+      <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.md }}>
+        {onBack ? (
+          // A plain glyph, no filled circle — hitSlop keeps the tap target at
+          // 44pt, which is the whole reason the chip existed.
+          <Pressable onPress={onBack} hitSlop={14} accessibilityRole="button" accessibilityLabel="Back">
+            {({ pressed }) => (
+              <View style={{ opacity: pressed ? 0.6 : 1 }}>
+                <Feather name="chevron-left" size={24} color={color.text.primary} />
+              </View>
+            )}
+          </Pressable>
+        ) : null}
+        <T variant="title" style={{ flex: 1 }}>
+          Cart
+        </T>
+        {onMenu ? (
+          <Pressable onPress={onMenu} hitSlop={14} accessibilityRole="button" accessibilityLabel="Cart options">
+            {({ pressed }) => (
+              <View style={{ opacity: pressed ? 0.6 : 1 }}>
+                <Feather name="more-horizontal" size={22} color={color.text.primary} />
+              </View>
+            )}
+          </Pressable>
+        ) : null}
+      </View>
+    </View>
+  );
+}
 
 // Kit My Cart (29–34). The kit folds checkout into the cart: delivery location,
 // promo apply, line items, summary, Order Now → success popup → tracking.
@@ -95,6 +146,10 @@ export function CartScreen() {
   const [placedPaymentAction, setPlacedPaymentAction] = useState<MmgDirectPaymentAction | null>(null);
   // The cart empties after placement — remember it was a booking for the popup.
   const [placedAppt, setPlacedAppt] = useState(false);
+  // The chevron only renders when there is somewhere to go: Cart is a tab, so
+  // this is true exactly when the tab navigator (or a stack above it) can pop.
+  // A dead back control on a money screen is worse than none.
+  const canGoBack = navigation.canGoBack();
   const appointments = useBookingStore((s) => s.appointments);
   const clearAppointments = useBookingStore((s) => s.clear);
   const c = cart.data; // null = empty cart
@@ -138,13 +193,8 @@ export function CartScreen() {
 
   if (!isAuthenticated) {
     return (
-      <Screen bleed>
-        {/* [F-265] Cart was the ONLY white-headed tab — Home, Activity and
-            Profile all open maroon. One app, one head. */}
-        <GradientMasthead style={{ paddingTop: 64, paddingBottom: space.lg, paddingHorizontal: GUTTER }}>
-          <T variant="micro" tone="onBrand">YOUR BASKET</T>
-          <T variant="title" tone="onBrand" style={{ marginTop: 2 }}>Cart</T>
-        </GradientMasthead>
+      <Screen>
+        <CartHeader onBack={canGoBack ? () => navigation.goBack() : undefined} />
         <EmptyState
           picto="groceries"
           title="Sign in to start a cart"
@@ -280,18 +330,13 @@ export function CartScreen() {
   };
 
   return (
-    <Screen bleed>
-      {/* [F-265] The maroon masthead, same anatomy as the other tabs; the
-          overflow (clear cart) rides inside it. */}
-      <GradientMasthead style={{ paddingTop: 64, paddingBottom: space.lg, paddingHorizontal: GUTTER }}>
-        <View style={{ flexDirection: 'row', alignItems: 'flex-end', justifyContent: 'space-between' }}>
-          <View>
-            <T variant="micro" tone="onBrand">YOUR BASKET</T>
-            <T variant="title" tone="onBrand" style={{ marginTop: 2 }}>Cart</T>
-          </View>
-          <CircleChip icon="more-horizontal" onPress={() => setMenuOpen(true)} />
-        </View>
-      </GradientMasthead>
+    <Screen>
+      {/* Paper chrome. The overflow (clear cart) is still here, now a plain
+          glyph on paper rather than a translucent chip on a gradient. */}
+      <CartHeader
+        onBack={canGoBack ? () => navigation.goBack() : undefined}
+        onMenu={() => setMenuOpen(true)}
+      />
 
       {cart.isLoading ? (
         <LoadingBlock />
@@ -326,8 +371,11 @@ export function CartScreen() {
                         justifyContent: 'center',
                         flexDirection: 'row',
                         gap: 6,
-                        borderWidth: 1.5,
-                        borderColor: active ? color.brand[500] : color.border.strong,
+                        // A SELECTED chip is one of the four things allowed to
+                        // wear maroon; the unselected one is a hairline control
+                        // on paper, not a second heavy border competing with it.
+                        borderWidth: 1,
+                        borderColor: active ? color.brand[500] : color.border.subtle,
                         backgroundColor: active ? color.brand[500] : color.surface.base,
                       }}
                     >
@@ -367,7 +415,9 @@ export function CartScreen() {
               </View>
               <PillButton
                 label={c.deliveryAddress ? 'Change' : 'Add address'}
-                variant="soft"
+                // Hairline-bordered, not brand-tinted: the ONE maroon element
+                // on this screen is the checkout CTA.
+                variant="outline"
                 size="sm"
                 onPress={() => navigation.navigate('Addresses', { selectFor: 'cart' })}
               />
@@ -395,6 +445,7 @@ export function CartScreen() {
               right={
                 <PillButton
                   label="Apply"
+                  variant="outline"
                   size="sm"
                   loading={applyPromo.isPending}
                   disabled={promo.trim().length < 3}
@@ -420,56 +471,128 @@ export function CartScreen() {
             ) : null}
           </View>
 
-          {/* Line items */}
-          <View style={{ gap: space.md, marginTop: space.xl }}>
-            {items.map((it) => (
-              <Card key={it.id} style={{ flexDirection: 'row', alignItems: 'center', gap: space.md, padding: space.md }}>
-                {/* [F-264] A cart line is the last look someone gets before
-                    paying — it must show what they are actually buying, or
-                    nothing. */}
-                <Photo
-                  uri={itemPhoto(it)}
-                  label={it.name}
-                  transition={150}
-                  style={{ width: 76, height: 76, borderRadius: radius.md }}
-                  contentFit="cover"
-                />
-                <View style={{ flex: 1, gap: 4 }}>
-                  <T variant="body" weight="semibold" numberOfLines={1}>
-                    {it.name}
-                  </T>
-                  {it.selectedOptionNames?.length ? (
-                    <T variant="caption" tone="muted" numberOfLines={1}>
-                      {it.selectedOptionNames.join(', ')}
-                    </T>
-                  ) : null}
-                  <View style={{ alignSelf: 'flex-start' }}>
-                    <Money amount={it.customerPrice} tone="brand" />
-                  </View>
-                  {!it.isAvailable ? (
-                    <T variant="caption" tone="error">
-                      No longer available — remove to continue
-                    </T>
-                  ) : null}
-                  <View style={{ marginTop: 4, alignSelf: 'flex-start' }}>
-                    <AddMorph
-                      qty={it.quantity}
-                      busy={updateItem.isPending}
-                      onAdd={() => updateItem.mutate({ id: it.id, quantity: it.quantity + 1 })}
-                      onInc={() => updateItem.mutate({ id: it.id, quantity: it.quantity + 1 })}
-                      onDec={() => it.quantity > 1 && updateItem.mutate({ id: it.id, quantity: it.quantity - 1 })}
-                    />
+          {/* LINE ITEMS ON OPEN PAPER, hairline-divided.
+              Each line was a white card, so the cart read as a stack of boxes
+              and the eye had to re-find the price inside every one of them.
+              On paper with a rule between rows the prices form a single right
+              column you can read down, which is what a receipt is for. */}
+          <View style={{ marginTop: space.xl }}>
+            {items.map((it, idx) => {
+              // THE RIGHT COLUMN IS THE LINE AMOUNT, not the unit price.
+              // `customerPrice` is the server's UNIT price (basePrice + option
+              // prices — see buildCartResponse); printing it hard right, beside
+              // a stepper reading 3, states a number that does not match what
+              // that line contributes to the total directly below it. The
+              // server already sends `lineTotal` (unitPrice × quantity) and it
+              // is what sums into "Items (n)". If a response ever omits it we
+              // fall back to exactly what shipped before rather than printing a
+              // confident $0 — money() has no missing-value face.
+              // `Number(null)` is 0 and `Number.isFinite(0)` is TRUE, so the
+              // obvious guard passes for a MISSING line total and prints a
+              // confident $0 — the exact thing the comment above says it is
+              // avoiding. Check the field is actually present before coercing.
+              const rawLineTotal = it.lineTotal;
+              const lineTotal = rawLineTotal == null ? NaN : Number(rawLineTotal);
+              // And when it IS missing, the unit price is NOT the line total.
+              // Falling back to it prints $500 for three of a $500 item. Derive
+              // the total instead, and only when both parts are real.
+              const unitPrice = it.customerPrice == null ? NaN : Number(it.customerPrice);
+              const qty = Number(it.quantity);
+              const derived = Number.isFinite(unitPrice) && Number.isFinite(qty) ? unitPrice * qty : NaN;
+              const shownTotal = Number.isFinite(lineTotal) ? lineTotal : derived;
+              const hasTotal = Number.isFinite(shownTotal);
+              // The unit price is not lost: it moves to the muted meta line,
+              // where it is labelled and unambiguous.
+              const meta = [
+                it.selectedOptionNames?.length ? it.selectedOptionNames.join(', ') : null,
+                Number.isFinite(unitPrice) && qty > 1 ? `${money(unitPrice)} each` : null,
+              ]
+                .filter(Boolean)
+                .join(' · ');
+              return (
+              <View key={it.id}>
+                {idx > 0 ? <View style={RULE} /> : null}
+                <View style={{ flexDirection: 'row', gap: space.md, paddingVertical: space.lg }}>
+                  {/* [F-264] A cart line is the last look someone gets before
+                      paying — it must show what they are actually buying, or
+                      nothing. Photography carries its own corner radius and
+                      sits on the page ground, unboxed. */}
+                  <Photo
+                    uri={itemPhoto(it)}
+                    label={it.name}
+                    transition={150}
+                    style={{ width: 64, height: 64, borderRadius: radius.md }}
+                    contentFit="cover"
+                  />
+                  <View style={{ flex: 1 }}>
+                    {/* Name and price on ONE line, price hard right — the pairing
+                        is the whole point of a line item. */}
+                    <View style={{ flexDirection: 'row', alignItems: 'flex-start', gap: space.md }}>
+                      <T variant="body" weight="semibold" numberOfLines={2} style={{ flex: 1 }}>
+                        {it.name}
+                      </T>
+                      {/* MONEY IS INK. It used to be brand — which spent the
+                          "act" colour on a number you cannot press, right above
+                          the button you must. */}
+                      {/* No total we can stand behind → an em-dash, never a
+                          number. A wrong price in a cart is the worst possible
+                          lie: it is the figure someone agrees to pay. */}
+                      {hasTotal ? <Money amount={shownTotal} /> : <T variant="numM" tone="muted">—</T>}
+                    </View>
+                    {meta ? (
+                      <T variant="caption" tone="muted" style={{ marginTop: 2 }}>
+                        {meta}
+                      </T>
+                    ) : null}
+                    {!it.isAvailable ? (
+                      <T variant="caption" tone="error" style={{ marginTop: 2 }}>
+                        No longer available — remove to continue
+                      </T>
+                    ) : null}
+                    <View
+                      style={{
+                        flexDirection: 'row',
+                        alignItems: 'center',
+                        justifyContent: 'space-between',
+                        marginTop: space.sm,
+                      }}
+                    >
+                      {/* A quantity stepper is one of the four things allowed
+                          to wear maroon. */}
+                      <AddMorph
+                        qty={it.quantity}
+                        busy={updateItem.isPending}
+                        onAdd={() => updateItem.mutate({ id: it.id, quantity: it.quantity + 1 })}
+                        onInc={() => updateItem.mutate({ id: it.id, quantity: it.quantity + 1 })}
+                        onDec={() => it.quantity > 1 && updateItem.mutate({ id: it.id, quantity: it.quantity - 1 })}
+                      />
+                      {/* Removing a line is an ordinary action, not an error —
+                          it stops being red. hitSlop holds the 44pt target. */}
+                      <Pressable
+                        onPress={() => removeItem.mutate(it.id)}
+                        hitSlop={14}
+                        accessibilityRole="button"
+                        accessibilityLabel={`Remove ${it.name}`}
+                      >
+                        {({ pressed }) => (
+                          <View style={{ opacity: pressed ? 0.6 : 1 }}>
+                            <Feather
+                              name="trash-2"
+                              size={18}
+                              color={pressed ? color.text.primary : color.text.muted}
+                            />
+                          </View>
+                        )}
+                      </Pressable>
+                    </View>
                   </View>
                 </View>
-                <Pressable onPress={() => removeItem.mutate(it.id)} hitSlop={8}>
-                  {({ pressed }) => (
-                    <View style={{ width: 44, height: 44, alignItems: 'center', justifyContent: 'center' }}>
-                      <Feather name="trash-2" size={20} color={pressed ? color.brand[600] : color.error} />
-                    </View>
-                  )}
-                </Pressable>
-              </Card>
-            ))}
+              </View>
+              );
+            })}
+            {/* The rule that closes the list — without it the last line just
+                stops and the section below floats. */}
+            <View style={RULE} />
           </View>
 
           {/* Tip the rider (real cart-level tip) — bookings have no rider,
@@ -524,11 +647,21 @@ export function CartScreen() {
 
           {/* Express delivery — priority dispatch; the premium goes to the rider */}
           {!pickup && c.deliveryFee > 0 ? (
-            <Card style={{ marginTop: space.xl }}>
-              <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
+            <View style={{ marginTop: space.xl }}>
+              <View style={RULE} />
+              <View
+                style={{
+                  flexDirection: 'row',
+                  alignItems: 'center',
+                  justifyContent: 'space-between',
+                  paddingVertical: space.lg,
+                }}
+              >
                 <View style={{ flex: 1, paddingRight: space.md }}>
                   <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
-                    <Feather name="zap" size={15} color={color.brand[500]} />
+                    {/* Ink, not maroon — a decorative glyph is not one of the
+                        four reserved uses of the brand colour. */}
+                    <Feather name="zap" size={15} color={color.text.primary} />
                     <T variant="body" weight="semibold">
                       Express delivery
                     </T>
@@ -539,11 +672,17 @@ export function CartScreen() {
                 </View>
                 <BrandSwitch value={express} onChange={() => setExpress((v) => !v)} />
               </View>
-            </Card>
+              <View style={RULE} />
+            </View>
           ) : null}
 
-          {/* Order summary */}
-          <Card style={{ marginTop: space.xl }}>
+          {/* THE TOTALS BLOCK — the one place on the screen where numbers must
+              be unambiguous. Label left, amount right, every amount in the
+              tabular display face (InfoRow), and the grand total heavier than
+              the rest (`strong` → numL). No card chassis: the total is the
+              destination of the whole screen, and boxing it put it in the same
+              container as the fees it is the sum of. */}
+          <View style={{ marginTop: space['2xl'] }}>
             <T variant="heading">{apptOnly ? 'Booking summary' : 'Order summary'}</T>
             <View style={{ marginTop: space.md }}>
               <InfoRow label={`Items (${c.itemCount})`} value={money(c.subtotalCustomer)} />
@@ -552,7 +691,7 @@ export function CartScreen() {
               {!pickup && express && c.deliveryFee > 0 ? <InfoRow label="Express" value={money(c.expressSurcharge)} /> : null}
               {c.discount > 0 ? <InfoRow label="Discount" value={`-${money(c.discount)}`} /> : null}
               {!apptOnly && !pickup && displayedTip > 0 ? <InfoRow label="Rider tip" value={money(displayedTip)} /> : null}
-              <View style={{ height: 1, backgroundColor: color.border.subtle, marginVertical: space.sm }} />
+              <View style={[RULE, { marginVertical: space.sm }]} />
               {/* Pickup preview = the same server numbers minus the delivery
                   leg; the server prices the real order at place time. */}
               <InfoRow
@@ -566,7 +705,7 @@ export function CartScreen() {
                 {bookingItems.map((i) =>
                   appointments[i.itemId] ? (
                     <View key={i.itemId} style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
-                      <Feather name="calendar" size={13} color={color.brand[500]} />
+                      <Feather name="calendar" size={13} color={color.text.muted} />
                       <T variant="caption" tone="muted">
                         {i.name} — {fmtSlot(appointments[i.itemId]!.slotStart)}
                         {appointments[i.itemId]!.mode === 'MOBILE' ? ' · at your address' : ''}
@@ -587,7 +726,7 @@ export function CartScreen() {
                 Estimated arrival ~{c.estimatedTotalMin} min after the store confirms.
               </T>
             ) : null}
-          </Card>
+          </View>
 
           {!c.meetsMinimum ? (
             <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: space.md }}>
@@ -624,6 +763,9 @@ export function CartScreen() {
             />
           ) : null}
 
+          {/* THE ONE MAROON ELEMENT ON THE SCREEN. Everything above it is ink
+              on paper, so the only thing wearing the brand is the thing you
+              press to spend money. `xl` is the kit's moment tier (64). */}
           <PillButton
             label={apptOnly ? 'Book now' : pickup ? 'Place pickup order' : 'Place order'}
             // NEVER pass the handler bare: Pressable calls onPress(event) and the
@@ -631,6 +773,7 @@ export function CartScreen() {
             // killing JSON serialization — no request ever left the phone
             // (certification catch: "cyclical structure in JSON object").
             onPress={() => onOrder()}
+            size="xl"
             loading={placeOrder.isPending}
             disabled={!c.meetsMinimum || c.unavailableItemIds?.length > 0 || (needsAddress && !c.deliveryAddress) || unslotted.length > 0}
             style={{ marginTop: space.xl }}

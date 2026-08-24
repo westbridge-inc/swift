@@ -24,17 +24,35 @@ describe('RolePickerScreen first-open contract', () => {
     expect(src).not.toContain("<View style={{ flexGrow: 1, justifyContent: 'center' }}>");
   });
 
-  it('opens on the brand masthead — first open must not be a plain white page', () => {
-    // The one screen that introduces the product wears Swift's own face:
-    // the gradient masthead under the kit's 28dp curve, with the mark
-    // reversed for the red. Regressing this to a bare Screen is the exact
-    // "clean-minimal reads as basic" failure this pass existed to fix.
-    expect(src).toMatch(/<GradientMasthead/);
-    expect(src).toMatch(/<SwiftMark[\s\S]*?tint=\{color\.white\}/);
-    expect(src).toMatch(/tone="onBrand"/);
-    // Each vertical keeps its own identity colour off the F-263 ramp rather
-    // than three identical brand tints.
-    expect(src).toMatch(/VERTICAL_TINT\[o\.tint\]/);
+  it('opens on PAPER chrome — no maroon slab, one ink display line, one brand moment', () => {
+    // SUPERSEDES the old "opens on the brand masthead" contract. That contract
+    // pinned a full-bleed maroon gradient slab with a reversed mark and white
+    // copy on top of it. The rendered design has no such slab anywhere in the
+    // customer app: the top of a screen is the same warm paper as the rest of
+    // it, and Home already stopped reaching for GradientMasthead. Keeping the
+    // old assertion would have frozen this screen on the retired chrome.
+    //
+    // What the screen must NOT go back to.
+    expect(src).not.toMatch(/<GradientMasthead/);
+    expect(src).not.toMatch(/tone="onBrand"/); // nothing reverses out of a slab
+    expect(src).not.toMatch(/<Card[\s>]/); // no card chassis around the choices
+
+    // What replaces it, and what still may not regress to a plain white page:
+    // the mark in its OWN colours, an ink display-face line, a muted sub-line.
+    expect(src).toMatch(/<SwiftMark/);
+    expect(src).not.toMatch(/<SwiftMark[^>]*tint=/); // brand mark, not reversed
+    expect(src).toMatch(/<T variant="display"/);
+    expect(src).toMatch(/<T variant="body" tone="muted"/);
+
+    // Rows on open paper, separated by hairlines — not a stack of cards.
+    expect(src).toMatch(/borderTopColor: color\.border\.subtle/);
+
+    // MAROON IS RESERVED: exactly ONE brand fill on the whole screen, the
+    // flagship tile. Not the sign-in link, not the funnel glyphs, and not one
+    // identity tint per option (the old VERTICAL_TINT[o.tint] read) — three
+    // coloured doors is the "every option is a brand moment" failure.
+    expect(src.match(/color\.brand\[/g) ?? []).toHaveLength(1);
+    expect(src).not.toMatch(/VERTICAL_TINT\[/);
   });
 
   it('exposes button semantics for the trio, sign-in, and all lower actions', () => {
