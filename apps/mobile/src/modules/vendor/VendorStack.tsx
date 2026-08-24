@@ -6,7 +6,7 @@ import { createNativeStackNavigator } from '@react-navigation/native-stack';
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
 import { useNavigation } from '@react-navigation/native';
 import { Image } from 'expo-image';
-import { color, radius, space } from '@swift/ui';
+import { color, elevation, radius, space } from '@swift/ui';
 import { Feather, MaterialCommunityIcons } from '@expo/vector-icons';
 import * as ImagePicker from 'expo-image-picker';
 import { SvgXml } from 'react-native-svg';
@@ -40,6 +40,7 @@ import {
   OrderStatusPill,
   SubHeader,
   fmtDate,
+  fmtClock as fmtLocalClock,
   fmtWhen,
   formatSlot,
   orderActions,
@@ -49,12 +50,12 @@ import {
 import { VendorOrderDetailScreen } from './screens/VendorOrderDetailScreen';
 import { VendorOrderHistoryScreen } from './screens/VendorOrderHistoryScreen';
 import { VendorMyQrScreen } from './screens/VendorMyQrScreen';
-import { VendorSwiftNumberScreen } from './screens/VendorSwiftNumberScreen';
 import { DocumentChecklist } from '../../components/onboarding/DocumentChecklist';
 import { PricingCard } from '../../components/onboarding/PricingCard';
 import { MmgPayLinkCard } from '../../components/MmgPayLinkCard';
 import { StandingCard } from '../../components/StandingCard';
 import { API_URL, vendorApi } from '../../services/api';
+import { disconnectSocket } from '../../services/socket';
 import { openPayLink } from '../../lib/payLink';
 import { toast } from '../../components/ui/toast';
 import { useWentLive, WentLivePopup } from '../../components/onboarding/WentLive';
@@ -125,13 +126,13 @@ import { grantedLocationFix } from '../../lib/deviceLocation';
 import { useStoreSwitcher } from '../../stores/storeSwitcher';
 import { useVendorPreview } from '../../stores/vendorPreview';
 import { RoleSwitcherSheet } from '../../components/RoleSwitcherSheet';
-import { BillingStatusBlock } from '../../components/billing/BillingSurfaces';
 import { money } from '../../lib/money';
 import { vendorSurfaceForRole } from '../../lib/vendorRbac';
 import { inventorySummary } from '../../lib/vendorInventory';
 import { mediaUrl } from '../../lib/images';
 import { VendorBulkImportScreen } from '../../screens/vendor/VendorBulkImportScreen';
 import { NewOrderTakeover } from './NewOrderTakeover';
+import { Switch as AvailabilitySwitch } from '../../components/ui/switch';
 
 const Stack = createNativeStackNavigator();
 
@@ -153,6 +154,12 @@ const CATALOGUE_META: Record<string, { label: string; icon: keyof typeof Feather
 };
 function catalogueMeta(vendorType?: string) {
   return CATALOGUE_META[vendorType ?? 'RESTAURANT'] ?? CATALOGUE_META['RESTAURANT']!;
+}
+
+type VendorMemberRole = 'OWNER' | 'MANAGER' | 'STAFF';
+
+function safeVendorRole(value: unknown): VendorMemberRole | undefined {
+  return value === 'OWNER' || value === 'MANAGER' || value === 'STAFF' ? value : undefined;
 }
 
 function BizValuePill({ icon, label }: { icon: keyof typeof MaterialCommunityIcons.glyphMap; label: string }) {
@@ -213,9 +220,47 @@ function BizTypeTile({ t, active, onPress }: { t: (typeof TYPES)[number]; active
   );
 }
 
-/** Tab-root header: title left, Log out link right (kit language). */
-function TabHeader({ title, onSwitch }: { title: string; onSwitch?: () => void }) {
+function HeaderAction({ label, tone = 'brand', onPress }: { label: string; tone?: 'brand' | 'muted'; onPress: () => void }) {
+  return (
+    <Pressable
+      onPress={onPress}
+      accessibilityRole="button"
+      accessibilityLabel={label}
+      style={{ minWidth: space['5xl'], minHeight: space['5xl'], alignItems: 'center', justifyContent: 'center' }}
+    >
+      {({ pressed }) => (
+        <T variant="label" tone={tone} weight="medium" style={{ opacity: pressed ? 0.6 : 1 }}>
+          {label}
+        </T>
+      )}
+    </Pressable>
+  );
+}
+
+/** Tab-root header: the board may replace the product eyebrow with a live store
+ *  state; the other tabs retain the quiet Swift Business identity. */
+function TabHeader({
+  title,
+  onSwitch,
+  eyebrow = 'SWIFT BUSINESS',
+  avatar,
+  statusTone = 'brand',
+}: {
+  title: string;
+  onSwitch?: () => void;
+  eyebrow?: string;
+  avatar?: string;
+  statusTone?: 'brand' | 'success' | 'warning' | 'muted';
+}) {
   const { logout } = useAuthStore();
+  const statusColor =
+    statusTone === 'success'
+      ? color.success
+      : statusTone === 'warning'
+        ? color.warning
+        : statusTone === 'muted'
+          ? color.text.secondary
+          : color.brand[500];
   return (
     <View
       style={{
@@ -223,20 +268,40 @@ function TabHeader({ title, onSwitch }: { title: string; onSwitch?: () => void }
         alignItems: 'center',
         justifyContent: 'space-between',
         paddingHorizontal: GUTTER,
-        height: 56,
+        paddingVertical: space.sm,
       }}
     >
       <View style={{ flex: 1, paddingRight: space.md }}>
-        <T variant="caption" weight="bold" tone="brand" style={{ letterSpacing: 1.5 }}>
-          SWIFT BUSINESS
-        </T>
+        <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.sm }}>
+          <View style={{ width: space.sm, height: space.sm, borderRadius: radius.full, backgroundColor: statusColor }} />
+          <T variant="micro" weight="bold" tone={statusTone === 'brand' ? 'brand' : 'muted'} numberOfLines={1}>
+            {eyebrow}
+          </T>
+        </View>
         <T variant="title" numberOfLines={1}>
           {title}
         </T>
       </View>
       <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.lg }}>
-        {onSwitch ? <LinkText label="Switch app" onPress={onSwitch} /> : null}
-        <LinkText label="Log out" tone="muted" onPress={logout} />
+        {avatar ? (
+          <View
+            style={{
+              width: space['4xl'],
+              height: space['4xl'],
+              borderRadius: radius.full,
+              alignItems: 'center',
+              justifyContent: 'center',
+              backgroundColor: color.brand[500],
+            }}
+            accessibilityLabel={`${title} initial ${avatar}`}
+          >
+            <T variant="heading" weight="bold" tone="onBrand">
+              {avatar}
+            </T>
+          </View>
+        ) : null}
+        {onSwitch ? <HeaderAction label="Switch app" onPress={onSwitch} /> : null}
+        <HeaderAction label="Log out" tone="muted" onPress={logout} />
       </View>
     </View>
   );
@@ -371,15 +436,12 @@ const VendorOrderCard = React.memo(function VendorOrderCard({
   onOpen,
   busy,
   showStore,
-  docket,
 }: {
   order: any;
   onAction: (action: VendorOrderActionKind) => void;
   onOpen?: () => void;
   busy: boolean;
   showStore?: boolean;
-  /** Queue presentation: the card ends in the docket tear-line signature. */
-  docket?: boolean;
 }) {
   const actions = orderActions(order);
   const isMmg = order.paymentMethod === 'MOBILE_MONEY';
@@ -395,7 +457,7 @@ const VendorOrderCard = React.memo(function VendorOrderCard({
     <Pressable onPress={onOpen} disabled={!onOpen}>
       {({ pressed }) => (
     <View style={{ marginBottom: space.md, opacity: pressed && onOpen ? 0.88 : 1 }}>
-    <Card style={docket ? { borderBottomLeftRadius: 0, borderBottomRightRadius: 0 } : undefined}>
+    <Card>
       <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
         <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.md }}>
           <T variant="body" weight="bold">
@@ -532,7 +594,7 @@ const VendorOrderCard = React.memo(function VendorOrderCard({
       )}
     </Pressable>
   );
-}, (prev, next) => prev.order === next.order && prev.busy === next.busy && prev.showStore === next.showStore && prev.docket === next.docket);
+}, (prev, next) => prev.order === next.order && prev.busy === next.busy && prev.showStore === next.showStore);
 
 /**
  * THE EMPTY BOARD [UXR-W-003 · audit item 01].
@@ -541,8 +603,8 @@ const VendorOrderCard = React.memo(function VendorOrderCard({
  * reads so they only ever fire when the board is actually empty — which is the
  * only moment any of it matters.
  *
- * The split is lifetime orders, a real server number (the history endpoint's
- * own `meta.total`), never a guess. While that number is unknown — loading, or
+ * The split is lifetime orders, a real server number from the profile store's
+ * `_count.orders`, never a guess. While that number is unknown — loading, or
  * the read failed — we show the QUIET tile, because claiming someone is brand
  * new is the more damaging of the two mistakes and an outage already has its
  * own card upstream.
@@ -561,14 +623,14 @@ function VendorBoardQuiet() {
       </T>
       {lastOrderAt ? (
         <T variant="caption" tone="faint" style={{ marginTop: 2 }}>
-          Last order {fmtClock(lastOrderAt)}
+          Last order {fmtLocalClock(lastOrderAt)}
         </T>
       ) : null}
     </View>
   );
 }
 
-function VendorBoardEmpty({ store, navigation, reachable }: any) {
+function VendorBoardEmpty({ store, navigation, reachable, canManage }: any) {
   // The profile endpoint already carries `_count.orders` — the store's true
   // lifetime order count, loaded with the store itself. No extra request, and
   // no inference: if the count is absent we do NOT guess that someone is new.
@@ -577,12 +639,13 @@ function VendorBoardEmpty({ store, navigation, reachable }: any) {
 
   // Only the first-morning branch needs these, and it is the branch that runs
   // once in a store's life.
-  const menuQ = useVendorMenu(firstMorning);
-  const qrQ = useVendorQr(firstMorning);
+  const menuQ = useVendorMenu(firstMorning && canManage);
+  const qrQ = useVendorQr(firstMorning && canManage);
 
   if (!firstMorning) return <VendorBoardQuiet />;
 
-  const categories: any[] = (menuQ.data as any) ?? [];
+  const menuKnown = menuQ.isSuccess;
+  const categories: any[] = menuKnown ? ((menuQ.data as any) ?? []) : [];
   const items: any[] = categories.flatMap((c: any) => c.items ?? []);
   const missingPhotos = items.filter((i: any) => !i.imageUrl).length;
   const shortUrl = (qrQ.data as any)?.shortUrl;
@@ -590,14 +653,21 @@ function VendorBoardEmpty({ store, navigation, reachable }: any) {
 
   return (
     <BoardFirstRun listening={reachable}>
-      {items.length === 0 ? (
+      {canManage && !menuKnown ? (
+        <BoardFirstRunRow
+          index={1}
+          label={menuQ.isError ? 'Menu status unavailable' : 'Checking your menu'}
+          detail={menuQ.isError ? 'Open the menu to check its live items' : 'Loading your live catalogue facts'}
+          onPress={() => navigation.navigate('Menu', { screen: 'VendorMenu' })}
+        />
+      ) : canManage && items.length === 0 ? (
         <BoardFirstRunRow
           index={1}
           label="Add your first item"
           detail={`Your ${catalogueMeta(store.vendorType).label.toLowerCase()} is empty — nothing to order yet`}
-          onPress={() => navigation.navigate('VendorMenu')}
+          onPress={() => navigation.navigate('Menu', { screen: 'VendorMenu' })}
         />
-      ) : (
+      ) : canManage ? (
         <BoardFirstRunRow
           index={1}
           label={`Add photos to your ${catalogueMeta(store.vendorType).label.toLowerCase()}`}
@@ -608,35 +678,684 @@ function VendorBoardEmpty({ store, navigation, reachable }: any) {
               ? `All ${items.length} items have a photo`
               : `Photos missing on ${missingPhotos} of ${items.length} items`
           }
-          onPress={() => navigation.navigate('VendorMenu')}
+          onPress={() => navigation.navigate('Menu', { screen: 'VendorMenu' })}
         />
-      )}
+      ) : null}
       <BoardFirstRunRow
-        index={2}
+        index={canManage ? 2 : 1}
         label={open ? 'You are open' : 'Your store is closed'}
         done={open}
-        detail={open ? 'Customers can order right now' : 'Use the switch below to start taking orders'}
+        detail={
+          open
+            ? 'Customers can order right now'
+            : canManage
+              ? 'Use the switch below to start taking orders'
+              : 'Ask a manager or owner to open the store'
+        }
       />
-      <BoardFirstRunRow
-        index={3}
-        label="Share your store link"
-        detail={shortUrl ?? 'Open your QR and link'}
-        onPress={() => navigation.navigate('VendorMyQr')}
-      />
+      {canManage ? (
+        <BoardFirstRunRow
+          index={3}
+          label="Share your store link"
+          detail={shortUrl ?? (qrQ.isError ? 'Link unavailable — open My QR to retry' : 'Loading your live store link')}
+          onPress={() => navigation.navigate('VendorMyQr')}
+        />
+      ) : null}
     </BoardFirstRun>
   );
 }
 
+type RevenueDay = {
+  date: string;
+  revenue: number;
+  orders?: number;
+  isToday?: boolean;
+};
+
+type HoursRow = {
+  dayOfWeek: number;
+  openTime: string;
+  closeTime: string;
+  isClosed: boolean;
+};
+
+const DAY_MILLISECONDS = 24 * 60 * 60 * 1000;
+const GUYANA_OFFSET_MILLISECONDS = 4 * 60 * 60 * 1000;
+
+function numericFact(value: unknown): number | null {
+  const n = Number(value);
+  return value !== null && value !== undefined && Number.isFinite(n) ? n : null;
+}
+
+/** Guyana has no daylight-saving transition; shift once and read the UTC face. */
+function guyanaDate(offsetDays = 0) {
+  return new Date(Date.now() - GUYANA_OFFSET_MILLISECONDS + offsetDays * DAY_MILLISECONDS);
+}
+
+function guyanaDayKey(offsetDays = 0) {
+  const d = guyanaDate(offsetDays);
+  return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}-${String(d.getUTCDate()).padStart(2, '0')}`;
+}
+
+function hasTrailingGuyanaDays(daily: RevenueDay[], take: number) {
+  if (take <= 0) return false;
+  const keys = new Set(daily.map((day) => day.date));
+  return Array.from({ length: take }, (_, index) => guyanaDayKey(index - take + 1)).every((key) => keys.has(key));
+}
+
+function formatBusinessTime(value?: string | null) {
+  if (!value || !/^\d{2}:\d{2}$/.test(value)) return null;
+  const [rawHour, minute] = value.split(':').map(Number);
+  const suffix = rawHour! >= 12 ? 'PM' : 'AM';
+  const hour = rawHour! % 12 || 12;
+  return `${hour}:${String(minute).padStart(2, '0')} ${suffix}`;
+}
+
+function normalizeHours(rows: any): HoursRow[] {
+  if (!Array.isArray(rows)) return [];
+  return rows
+    .map((row: any) => {
+      const namedDay = typeof row?.day === 'string' ? DAY_LABELS.findIndex((d) => d.toLowerCase() === row.day.toLowerCase().slice(0, 3)) : -1;
+      const dayOfWeek = Number.isInteger(row?.dayOfWeek) ? row.dayOfWeek : namedDay;
+      if (dayOfWeek < 0 || dayOfWeek > 6) return null;
+      return {
+        dayOfWeek,
+        openTime: String(row.openTime ?? row.open ?? ''),
+        closeTime: String(row.closeTime ?? row.close ?? ''),
+        isClosed: Boolean(row.isClosed ?? row.closed),
+      };
+    })
+    .filter((row): row is HoursRow => row !== null)
+    .sort((a, b) => a.dayOfWeek - b.dayOfWeek);
+}
+
+function hoursSummary(rows: any): string | null {
+  const hours = normalizeHours(rows);
+  if (hours.length === 0) return null;
+  const open = hours.filter((row) => !row.isClosed);
+  if (open.length === 0) return 'Closed all week';
+  const first = open[0]!;
+  const sameWindow = open.every((row) => row.openTime === first.openTime && row.closeTime === first.closeTime);
+  const from = formatBusinessTime(first.openTime);
+  const to = formatBusinessTime(first.closeTime);
+  const window = from && to ? `${from}–${to}` : null;
+  if (open.length === 7 && sameWindow && window) return `Daily · ${window}`;
+  if (open.length === 1 && window) return `${DAY_LABELS[first.dayOfWeek]} · ${window}`;
+  if (sameWindow && window) return `${open.length} open days · ${window}`;
+  return `${open.length} open days · hours vary`;
+}
+
+function storeStatusEyebrow(store: any, inPreview: boolean) {
+  if (inPreview) return { label: 'PREVIEW · READ ONLY', tone: 'brand' as const };
+  const open = !!store?.isCurrentlyOpen;
+  const accepting = !!store?.acceptingOrders;
+  const today = normalizeHours(store?.operatingHours).find((row) => row.dayOfWeek === guyanaDate().getUTCDay());
+  const schedule = today && !today.isClosed
+    ? [formatBusinessTime(today.openTime), formatBusinessTime(today.closeTime)].filter(Boolean).join('–')
+    : null;
+  const status = !open ? 'CLOSED' : accepting ? 'OPEN' : 'OPEN · ORDERS PAUSED';
+  return {
+    label: schedule ? `${status} · TODAY ${schedule}` : status,
+    tone: !open ? ('muted' as const) : accepting ? ('success' as const) : ('warning' as const),
+  };
+}
+
+function normalizeRevenueDays(payload: any): RevenueDay[] {
+  const rows: any[] = Array.isArray(payload) ? payload : Array.isArray(payload?.daily) ? payload.daily : [];
+  return rows
+    .map((row) => {
+      const revenue = numericFact(row?.revenue ?? row?.total);
+      if (!row?.date || revenue == null) return null;
+      const orders = numericFact(row?.orders);
+      return {
+        date: String(row.date),
+        revenue,
+        ...(orders == null ? {} : { orders }),
+        ...(row.isToday === undefined ? {} : { isToday: !!row.isToday }),
+      };
+    })
+    .filter((row): row is RevenueDay => row !== null);
+}
+
+/** The revenue endpoint currently ends its dense series yesterday. Overview owns
+ *  today's completed sales, so combine the two server reads rather than drawing
+ *  a false zero or silently dropping today. Preview rows already identify today. */
+function reconciledRevenueDays(payload: any, overview: any, requestedDays: number): RevenueDay[] {
+  const rows = normalizeRevenueDays(payload);
+  if (rows.length === 0 || rows.some((row) => !/^\d{4}-\d{2}-\d{2}$/.test(row.date))) return rows;
+  const todayRevenue = numericFact(overview?.today?.revenue ?? overview?.today?.total);
+  const key = guyanaDayKey();
+  const existingToday = rows.find((row) => row.date === key);
+  const endpointOrders = numericFact(payload?.totals?.orders);
+  const allBucketsKnown = rows.every((row) => numericFact(row.orders) != null);
+  const bucketedOrders = allBucketsKnown
+    ? rows.reduce((sum, row) => sum + Number(row.orders), 0)
+    : null;
+  // Overview.today.orders is every still-live order placed today, while this
+  // series is completed orders only. Recover the missing completed-today bucket
+  // from the revenue endpoint's own total instead of corrupting AOV with the
+  // broader overview count.
+  const inferredTodayOrders = endpointOrders != null && bucketedOrders != null
+    ? endpointOrders - bucketedOrders
+    : null;
+  const todayOrders = numericFact(existingToday?.orders) ?? (inferredTodayOrders != null && inferredTodayOrders >= 0 ? inferredTodayOrders : null);
+  if (todayRevenue == null) return rows;
+  return [
+    ...rows.filter((row) => row.date !== key),
+    { date: key, revenue: todayRevenue, ...(todayOrders == null ? {} : { orders: todayOrders }), isToday: true },
+  ]
+    .sort((a, b) => a.date.localeCompare(b.date))
+    .slice(-requestedDays);
+}
+
+function HubFact({ label, value, detail }: { label: string; value: string; detail: string }) {
+  return (
+    <View style={{ flex: 1, borderRadius: radius.md, backgroundColor: color.surface.sunken, padding: space.md }}>
+      <T variant="micro" tone="muted">
+        {label}
+      </T>
+      <T variant="numM" numberOfLines={1} style={{ marginTop: space.xs }}>
+        {value}
+      </T>
+      <T variant="caption" tone="muted" numberOfLines={2} style={{ marginTop: space.xs }}>
+        {detail}
+      </T>
+    </View>
+  );
+}
+
+function VendorRevenuePulse({
+  analytics,
+  newOrders,
+  analyticsError,
+  analyticsLoading,
+  analyticsUpdatedAt,
+}: {
+  analytics: any;
+  newOrders: any[];
+  analyticsError: boolean;
+  analyticsLoading: boolean;
+  analyticsUpdatedAt: number;
+}) {
+  const revenueQ = useVendorRevenue(14);
+  const opsQ = useVendorOps(7);
+  const refetchRevenue = revenueQ.refetch;
+  const revenueBehindAnalytics = analyticsUpdatedAt > 0 && analyticsUpdatedAt > revenueQ.dataUpdatedAt;
+  useEffect(() => {
+    if (analyticsUpdatedAt > 0) void refetchRevenue();
+  }, [analyticsUpdatedAt, refetchRevenue]);
+  const todayRevenue = numericFact(analytics?.today?.revenue ?? analytics?.today?.total);
+  const todayOrders = numericFact(analytics?.today?.orders ?? analytics?.today?.count);
+  const pendingOrders = numericFact(analytics?.pendingOrders);
+  const pendingCatchingUp = pendingOrders != null && newOrders.length > pendingOrders;
+  const pendingLoadedFallback = pendingOrders == null && newOrders.length > 0;
+  const pendingDisplay = pendingCatchingUp || pendingLoadedFallback ? newOrders.length : pendingOrders;
+  const daily = reconciledRevenueDays(revenueQ.data, analytics, 14);
+  const previousSameDay = daily.find((row) => row.date === guyanaDayKey(-7));
+  const previousLabel = DAY_LABELS[guyanaDate(-7).getUTCDay()];
+  const avgAccept = numericFact(opsQ.data?.avgAcceptMinutes);
+  const ordersDetail = opsQ.isLoading && !opsQ.data
+    ? 'Average accept time loading…'
+    : opsQ.isError && !opsQ.data
+      ? 'Average accept time unavailable'
+      : avgAccept == null
+        ? 'No acceptance time reported · 7d'
+        : `${avgAccept}m avg to accept · 7d${opsQ.isError ? ' · last loaded' : ''}`;
+  const showingStale = (analyticsError && !!analytics) || (revenueQ.isError && !!revenueQ.data);
+  const factsUnavailable = analyticsError && !analytics;
+  const oldestKnown = pendingOrders != null && pendingOrders === newOrders.length;
+  const oldestTimestamp = oldestKnown
+    ? newOrders
+        .map((order) => order.placedAt ?? order.createdAt)
+        .filter(Boolean)
+        .sort((a, b) => new Date(a).getTime() - new Date(b).getTime())[0]
+    : undefined;
+  const waitingDetail = pendingCatchingUp
+    ? 'updating live total'
+    : pendingOrders === 0
+      ? 'Nothing waiting'
+    : oldestTimestamp
+      ? `oldest ${fmtWhen(oldestTimestamp)}`
+      : pendingOrders == null
+        ? 'Total unavailable'
+        : 'live queue total';
+
+  return (
+    <View style={[{ borderRadius: radius.lg, backgroundColor: color.surface.base, padding: space.xl, marginBottom: space.lg }, elevation.card]}>
+      <T variant="micro" tone="muted">
+        REVENUE TODAY
+      </T>
+      {showingStale || factsUnavailable || analyticsLoading ? (
+        <T variant="caption" tone="muted" style={{ marginTop: space.xs }}>
+          {showingStale
+            ? 'Showing last loaded figures — refresh did not complete.'
+            : factsUnavailable
+              ? 'Live business facts are unavailable — pull to retry.'
+              : 'Loading live business facts…'}
+        </T>
+      ) : null}
+      <View style={{ flexDirection: 'row', alignItems: 'flex-end', justifyContent: 'space-between', gap: space.md }}>
+        <T variant="displayXl" numberOfLines={1} style={{ flexShrink: 1, marginTop: space.xs }}>
+          {todayRevenue == null ? '—' : money(todayRevenue)}
+        </T>
+        {todayRevenue != null && previousSameDay && !analyticsError && !revenueQ.isError && !revenueBehindAnalytics ? (
+          <View style={{ alignItems: 'flex-end', paddingBottom: space.xs }}>
+            <DeltaBadge cur={todayRevenue} prev={previousSameDay.revenue} />
+            <T variant="caption" tone="muted">
+              vs last {previousLabel}
+            </T>
+          </View>
+        ) : null}
+      </View>
+      <View style={{ flexDirection: 'row', gap: space.sm, marginTop: space.lg }}>
+        <HubFact
+          label="ORDERS"
+          value={todayOrders == null ? '—' : String(todayOrders)}
+          detail={ordersDetail}
+        />
+        <HubFact
+          label="WAITING"
+          value={pendingDisplay == null ? '—' : `${pendingDisplay}${pendingCatchingUp || pendingLoadedFallback ? '+' : ''}`}
+          detail={waitingDetail}
+        />
+      </View>
+    </View>
+  );
+}
+
+function ManageTile({
+  icon,
+  label,
+  detail,
+  badge,
+  badgeLabel,
+  onPress,
+  wide,
+}: {
+  icon: keyof typeof MaterialCommunityIcons.glyphMap;
+  label: string;
+  detail: string;
+  badge?: React.ReactNode;
+  badgeLabel?: string;
+  onPress: () => void;
+  wide?: boolean;
+}) {
+  return (
+    <Pressable
+      onPress={onPress}
+      accessibilityRole="button"
+      accessibilityLabel={[label, detail, badgeLabel].filter(Boolean).join('. ')}
+      accessibilityHint={`Open ${label}`}
+      style={{ flexGrow: 1, flexBasis: wide ? '100%' : '46%' }}
+    >
+      {({ pressed }) => (
+        <View
+          style={[
+            {
+              flex: 1,
+              borderRadius: radius.lg,
+              backgroundColor: color.surface.base,
+              padding: space.lg,
+              opacity: pressed ? 0.82 : 1,
+            },
+            elevation.card,
+          ]}
+        >
+          <View style={{ flexDirection: 'row', alignItems: 'flex-start', justifyContent: 'space-between', gap: space.sm }}>
+            <View
+              style={{
+                width: space['4xl'],
+                height: space['4xl'],
+                borderRadius: radius.full,
+                alignItems: 'center',
+                justifyContent: 'center',
+                backgroundColor: color.brand[50],
+              }}
+            >
+              <MaterialCommunityIcons name={icon} size={20} color={color.brand[600]} />
+            </View>
+            {badge ?? null}
+          </View>
+          <T variant="heading" numberOfLines={2} style={{ marginTop: space.md }}>
+            {label}
+          </T>
+          <T variant="caption" tone="muted" numberOfLines={2} style={{ marginTop: space.xs }}>
+            {detail}
+          </T>
+          <Feather name="arrow-up-right" size={16} color={color.brand[500]} style={{ marginTop: space.md }} />
+        </View>
+      )}
+    </Pressable>
+  );
+}
+
+function financialDeltaLabel(cur: number, prev: number | null) {
+  if (prev == null) return undefined;
+  if (prev <= 0) return cur > 0 ? 'New revenue in this period' : undefined;
+  const pct = Math.round(((cur - prev) / prev) * 100);
+  if (Math.abs(pct) < 1) return 'Revenue level with previous period';
+  return `Revenue ${pct > 0 ? 'up' : 'down'} ${Math.abs(pct)} percent`;
+}
+
+function subscriptionTone(sub: any): 'brand' | 'success' | 'neutral' | 'error' | 'warning' {
+  if (sub?.status === 'ACTIVE') return 'success';
+  if (sub?.status === 'PAST_DUE') return 'warning';
+  if (sub?.status === 'SUSPENDED' || sub?.status === 'CHURNED') return 'error';
+  if (sub?.isTrialActive || sub?.status === 'TRIAL') return 'brand';
+  return 'neutral';
+}
+
+function billingSummary(sub: any) {
+  if (!sub) return 'Subscription not active';
+  if (sub.isInGracePeriod && sub.gracePeriodEnd) return `Pay by ${fmtDate(sub.gracePeriodEnd)}`;
+  const next = sub.nextBillingDate ? `Next bill ${fmtDate(sub.nextBillingDate)}` : null;
+  const rail = sub.billingMethod === 'MOBILE_MONEY' ? 'MMG' : sub.billingMethod === 'CASH' ? 'cash' : null;
+  return [next, rail].filter(Boolean).join(' · ') || String(sub.status ?? 'Subscription').toLowerCase();
+}
+
+function VendorBillingNotice({ sub, onPay }: { sub: any; onPay: () => void }) {
+  if (!sub) return null;
+  const status = String(sub.status ?? '').toUpperCase();
+  const blocked = status === 'SUSPENDED' || status === 'CHURNED';
+  const behind = !blocked && (sub.isInGracePeriod || status === 'PAST_DUE');
+  if (!blocked && !behind) return null;
+  const due = numericFact(sub.amountDueGyd);
+  const deadline = sub.gracePeriodEnd ? fmtDate(sub.gracePeriodEnd) : null;
+
+  return (
+    <View
+      style={{
+        borderRadius: radius.lg,
+        backgroundColor: blocked ? color.soft.danger : color.soft.warning,
+        padding: space.lg,
+        marginBottom: space.lg,
+      }}
+    >
+      <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.sm }}>
+        <Feather name={blocked ? 'alert-circle' : 'alert-triangle'} size={18} color={blocked ? color.error : color.warning} />
+        <T variant="body" weight="semibold" tone={blocked ? 'error' : 'warning'} style={{ flex: 1 }}>
+          {blocked ? 'Billing hold needs attention' : `Weekly fee due${deadline ? ` by ${deadline}` : ''}`}
+        </T>
+      </View>
+      <T variant="caption" tone="muted" style={{ marginTop: space.xs }}>
+        {blocked
+          ? 'Pay using your Swift Number. Confirmation clears the billing hold; any separate verification hold remains.'
+          : 'Pay using your Swift Number to keep the weekly fee current.'}
+      </T>
+      {due != null && due > 0 ? (
+        <T variant="label" weight="semibold" style={{ marginTop: space.sm }}>
+          Due now: {money(due)}
+        </T>
+      ) : null}
+      <PillButton label="How to pay" icon="hash" size="md" style={{ marginTop: space.md }} onPress={onPay} />
+    </View>
+  );
+}
+
+function VendorSwiftNumberScreen({ navigation }: any) {
+  const q = useVendorSubscription();
+  const sub: any = q.data;
+  const swiftNumber = String(sub?.sanFormatted ?? sub?.san ?? '');
+  const weeklyFee = numericFact(sub?.weeklyFeeGyd ?? sub?.customRate ?? sub?.weeklyRate);
+  const due = numericFact(sub?.amountDueGyd);
+  const steps: string[] = Array.isArray(sub?.payCashSteps) ? sub.payCashSteps : [];
+
+  return (
+    <Screen>
+      <SubHeader title="My Swift Number" navigation={navigation} />
+      {q.isLoading ? (
+        <LoadingBlock />
+      ) : q.isError && !sub ? (
+        <ErrorState message="We couldn't load your Swift Number. Check your connection and try again." onRetry={() => q.refetch()} />
+      ) : (
+        <ScrollView
+          contentContainerStyle={{ paddingHorizontal: GUTTER, paddingBottom: space['3xl'] }}
+          showsVerticalScrollIndicator={false}
+          refreshControl={<RefreshControl refreshing={q.isRefetching} onRefresh={() => q.refetch()} tintColor={color.brand[500]} />}
+        >
+          {q.isError ? (
+            <T variant="caption" tone="muted" style={{ marginBottom: space.md }}>
+              Showing the last loaded billing details — refresh did not complete.
+            </T>
+          ) : null}
+          <Card style={{ alignItems: 'center', padding: space.xl, marginBottom: space.md }}>
+            <IconChip icon="hash" size={56} />
+            <T variant="micro" tone="muted" style={{ marginTop: space.lg }}>
+              YOUR SWIFT NUMBER
+            </T>
+            <T variant="displayXl" center selectable style={{ marginTop: space.sm }}>
+              {swiftNumber || '—'}
+            </T>
+            <T variant="caption" tone="muted" center style={{ marginTop: space.sm }}>
+              Give this number to an MMG agent when paying the store’s weekly fee. It never changes.
+            </T>
+          </Card>
+
+          <View style={{ flexDirection: 'row', gap: space.sm, marginBottom: space.md }}>
+            <HubFact label="WEEKLY FEE" value={weeklyFee == null ? '—' : money(weeklyFee)} detail="cash at an MMG agent" />
+            <HubFact label="DUE NOW" value={due == null ? '—' : money(due)} detail="server-reported amount" />
+          </View>
+
+          <Card style={{ marginBottom: space.lg }}>
+            <T variant="heading">How to pay</T>
+            {steps.length > 0 ? (
+              <View style={{ marginTop: space.sm }}>
+                {steps.map((step, index) => (
+                  <View key={step} style={{ minHeight: space['5xl'], flexDirection: 'row', alignItems: 'center', gap: space.md }}>
+                    <View
+                      style={{
+                        width: space['3xl'],
+                        height: space['3xl'],
+                        borderRadius: radius.full,
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        backgroundColor: color.brand[50],
+                      }}
+                    >
+                      <T variant="label" weight="bold" tone="brand">
+                        {index + 1}
+                      </T>
+                    </View>
+                    <T variant="label" style={{ flex: 1 }}>
+                      {step}
+                    </T>
+                  </View>
+                ))}
+              </View>
+            ) : (
+              <T variant="label" tone="muted" style={{ marginTop: space.sm }}>
+                Payment steps were not returned. Show your Swift Number to an MMG agent and confirm the amount before paying.
+              </T>
+            )}
+          </Card>
+
+          <T variant="caption" tone="muted" center>
+            Confirmation clears a billing hold. Any separate verification hold remains until its own issue is fixed.
+          </T>
+        </ScrollView>
+      )}
+    </Screen>
+  );
+}
+
+function VendorManagerManageGrid({ navigation, store, myRole, analytics, analyticsStale, analyticsUpdatedAt }: any) {
+  const [shareOpen, setShareOpen] = useState(false);
+  const menuQ = useVendorMenu();
+  const revenueQ = useVendorRevenue(14);
+  const hoursQ = useVendorHours();
+  const qrQ = useVendorQr();
+  const isOwner = myRole === 'OWNER';
+  const subQ = useVendorSubscription(isOwner);
+  const categories: any[] = menuQ.data ?? [];
+  const items = categories.flatMap((category: any) => category.items ?? []);
+  const soldOut = items.filter((item: any) => item.isAvailable === false).length;
+  const active = Math.max(0, items.length - soldOut);
+  const daily = reconciledRevenueDays(revenueQ.data, analytics, 14);
+  const revenueWindow = windowTotals(daily, 7);
+  const revenueBehindAnalytics = analyticsUpdatedAt > 0 && analyticsUpdatedAt > revenueQ.dataUpdatedAt;
+  const revenueKnown = revenueQ.isSuccess && !analyticsStale && !revenueBehindAnalytics && !!analytics && hasTrailingGuyanaDays(daily, 7);
+  const schedule = hoursSummary(hoursQ.data ?? store?.operatingHours);
+  const sub = subQ.data ?? store?.subscription;
+  const rollingOrders = analyticsStale ? null : numericFact(analytics?.week?.orders);
+  const menuStale = menuQ.isError && !!menuQ.data;
+  const hoursStale = hoursQ.isError && !!hoursQ.data;
+  const qrStale = qrQ.isError && !!qrQ.data;
+  const subStale = subQ.isError && !!sub;
+  const menuDetail = menuQ.isError && !menuQ.data
+    ? 'Catalogue unavailable'
+    : menuQ.isLoading && !menuQ.data
+      ? 'Checking live catalogue…'
+      : `${active} active · ${soldOut} sold out${menuStale ? ' · last loaded' : ''}`;
+  const revenueDetail = revenueKnown
+    ? `7d ${money(revenueWindow.cur.revenue)}`
+    : revenueBehindAnalytics && revenueQ.isError
+      ? 'Revenue refresh failed'
+      : revenueQ.isLoading || revenueBehindAnalytics || (!analytics && !analyticsStale)
+      ? 'Checking 7-day revenue…'
+      : analyticsStale && analytics
+        ? 'Revenue · last loaded'
+        : 'Revenue unavailable';
+  const revenueDelta = revenueKnown ? financialDeltaLabel(revenueWindow.cur.revenue, revenueWindow.prev?.revenue ?? null) : undefined;
+  const qrDetail = qrQ.isError && !qrQ.data
+    ? 'Store link unavailable'
+    : qrQ.data?.shortUrl
+      ? `${qrQ.data.shortUrl}${qrStale ? ' · last loaded' : ''}`
+      : qrQ.isLoading
+        ? 'Checking store link…'
+        : 'Customers scan to order';
+  const scheduleDetail = hoursQ.isError && !store?.operatingHours
+    ? 'Hours unavailable'
+    : `${schedule ?? 'Schedule not set'}${hoursStale ? ' · last loaded' : ''}`;
+
+  return (
+    <View style={{ marginTop: space.lg, marginBottom: space.xl }}>
+      <T variant="micro" tone="muted">
+        MANAGE
+      </T>
+      <T variant="heading" style={{ marginTop: space.xs, marginBottom: space.md }}>
+        The whole business
+      </T>
+      <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: space.md }}>
+        <ManageTile
+          icon="book-open-outline"
+          label="Menu & inventory"
+          detail={menuDetail}
+          badge={soldOut > 0 ? <TonePill label={`${soldOut} SOLD OUT`} tone="warning" /> : undefined}
+          badgeLabel={soldOut > 0 ? `${soldOut} sold out` : undefined}
+          onPress={() => navigation.navigate('Menu', { screen: 'VendorMenu' })}
+        />
+        <ManageTile
+          icon="chart-bar"
+          label="Insights"
+          detail={revenueDetail}
+          badge={revenueKnown ? <DeltaBadge cur={revenueWindow.cur.revenue} prev={revenueWindow.prev?.revenue ?? null} /> : undefined}
+          badgeLabel={revenueDelta}
+          onPress={() => navigation.navigate('Insights')}
+        />
+        <ManageTile
+          icon="calendar-clock-outline"
+          label="Hours & schedule"
+          detail={scheduleDetail}
+          onPress={() => navigation.navigate(store?.vendorType === 'SERVICE' ? 'Schedule' : 'Account')}
+        />
+        <ManageTile
+          icon="qrcode-scan"
+          label={isOwner ? 'My QR & number' : 'My QR'}
+          detail={qrDetail}
+          badge={qrQ.data?.status ? <TonePill label={String(qrQ.data.status).replace(/_/g, ' ')} tone={qrQ.data.status === 'ACTIVE' ? 'success' : 'neutral'} /> : undefined}
+          badgeLabel={qrQ.data?.status ? `QR ${String(qrQ.data.status).replace(/_/g, ' ').toLowerCase()}` : undefined}
+          onPress={() => (isOwner ? setShareOpen(true) : navigation.navigate('VendorMyQr'))}
+        />
+        <ManageTile
+          icon="history"
+          label="Order history"
+          detail={rollingOrders == null ? 'Past orders' : `${rollingOrders} recent orders`}
+          onPress={() => navigation.navigate('VendorOrderHistory')}
+        />
+        <ManageTile
+          icon={isOwner ? 'cash-check' : 'account-cog-outline'}
+          label={isOwner ? 'Billing' : 'Account'}
+          detail={isOwner ? (subQ.isError && !sub ? 'Billing unavailable' : `${billingSummary(sub)}${subStale ? ' · last loaded' : ''}`) : 'Store settings & promos'}
+          badge={isOwner && sub ? <TonePill label={String(sub.status ?? 'Subscription').replace(/_/g, ' ')} tone={subscriptionTone(sub)} /> : undefined}
+          badgeLabel={isOwner && sub ? `Subscription ${String(sub.status ?? '').replace(/_/g, ' ').toLowerCase()}` : undefined}
+          onPress={() => navigation.navigate('Account')}
+        />
+      </View>
+      <PopupCard visible={shareOpen} onClose={() => setShareOpen(false)}>
+        <IconChip icon="share-2" size={56} />
+        <PopupTitle variant="title" center style={{ marginTop: space.lg }}>
+          Share or pay
+        </PopupTitle>
+        <T variant="body" tone="muted" center style={{ marginTop: space.sm }}>
+          Your store QR is for customers. Your Swift Number is for the weekly fee.
+        </T>
+        <PillButton
+          label="Open store QR"
+          icon="grid"
+          style={{ alignSelf: 'stretch', marginTop: space['2xl'] }}
+          onPress={() => {
+            setShareOpen(false);
+            navigation.navigate('VendorMyQr');
+          }}
+        />
+        <PillButton
+          label="Open Swift Number"
+          icon="hash"
+          variant="soft"
+          style={{ alignSelf: 'stretch', marginTop: space.md }}
+          onPress={() => {
+            setShareOpen(false);
+            navigation.navigate('VendorMySwiftNumber');
+          }}
+        />
+      </PopupCard>
+    </View>
+  );
+}
+
+function VendorStaffAvailability({ navigation }: any) {
+  const menuQ = useVendorMenu();
+  const items = ((menuQ.data ?? []) as any[]).flatMap((category: any) => category.items ?? []);
+  const soldOut = items.filter((item: any) => item.isAvailable === false).length;
+  const detail = menuQ.isError && !menuQ.data
+    ? 'Availability unavailable'
+    : menuQ.isLoading && !menuQ.data
+      ? 'Checking live catalogue…'
+      : `${soldOut} sold out · one-tap updates${menuQ.isError && menuQ.data ? ' · last loaded' : ''}`;
+  return (
+    <View style={{ marginTop: space.lg, marginBottom: space.xl }}>
+      <T variant="micro" tone="muted" style={{ marginBottom: space.md }}>
+        FLOOR TOOLS
+      </T>
+      <View style={{ flexDirection: 'row' }}>
+        <ManageTile
+          wide
+          icon="toggle-switch-outline"
+          label="Item availability"
+          detail={detail}
+          badge={soldOut > 0 ? <TonePill label={`${soldOut} SOLD OUT`} tone="warning" /> : undefined}
+          badgeLabel={soldOut > 0 ? `${soldOut} sold out` : undefined}
+          onPress={() => navigation.navigate('Menu', { screen: 'VendorMenu' })}
+        />
+      </View>
+    </View>
+  );
+}
+
 function VendorOps({ store, navigation }: any) {
+  const [queueOpen, setQueueOpen] = useState(false);
+  const [switchingStore, setSwitchingStore] = useState(false);
   const toggleOpen = useToggleOpen();
   const toggleOrders = useToggleOrders();
   const setSelfDelivery = useSetSelfDelivery();
   const orderAction = useOrderAction();
   const ordersQ = useVendorOrders(true);
-  const { stores, myRole } = useVendorProfile();
-  // Client mirror of the server's vendor role guards: a STAFF board hides the
-  // manager-only money + controls the API would 403 anyway (see vendorRbac). In
-  // sample/pending preview myRole is OWNER, so the full owner view still shows.
+  const { stores, owner } = useVendorProfile();
+  const myRole = safeVendorRole(owner?.myRole);
+  const canManage = myRole === 'OWNER' || myRole === 'MANAGER';
+  // Client mirror of the lane's least-privilege surface: STAFF gets the queue
+  // plus availability, while money, authoring and settings stay with managers.
+  // In sample/pending preview myRole is OWNER, so the full owner view still shows.
   const surface = vendorSurfaceForRole(myRole);
   const analyticsQ = useVendorAnalytics(surface.canSeeMoney);
   // §B preview: the board renders for a not-yet-ACTIVE store (pending vendor) OR
@@ -646,7 +1365,6 @@ function VendorOps({ store, navigation }: any) {
   const exitPreview = useVendorPreview((s) => s.exitPreview);
   const setPreviewType = useVendorPreview((s) => s.setPreviewType);
   const setPreviewIntent = useAuthStore((s) => s.setIntent);
-  const cat = catalogueMeta(store.vendorType); // R1: name the catalogue per type
   // Only fetched to NAME the failing document in the suspension banner.
   const vstatus = useVerificationStatus<any>(store.vendorType);
   // §B5 progress: N of M checklist documents currently approved (unexpired).
@@ -665,46 +1383,97 @@ function VendorOps({ store, navigation }: any) {
     : [];
   const setSelectedStore = useStoreSwitcher((s) => s.setSelectedStore);
   const qc = useQueryClient();
-  const switchStore = (id: string) => {
+  const switchStore = async (id: string) => {
+    if (id === store.id || switchingStore) return;
+    setSwitchingStore(true);
+    disconnectSocket();
     setSelectedStore(id);
-    qc.invalidateQueries({ queryKey: ['vendor'] });
+    try {
+      // Store-aware query keys live outside this lane. Reset the shared cache
+      // so the next store never inherits the previous store's role or facts.
+      await Promise.all([
+        qc.resetQueries({ queryKey: ['vendor'] }),
+        qc.resetQueries({ queryKey: ['verification'] }),
+      ]);
+    } finally {
+      setSwitchingStore(false);
+    }
   };
   const fetched: any[] = ordersQ.data ?? [];
+  const boardLoading = ordersQ.isLoading && !ordersQ.data;
+  const boardUnavailable = ordersQ.isError && !ordersQ.data;
   const open = !!store.isCurrentlyOpen;
   const accepting = !!store.acceptingOrders;
   const selfDelivery = !!store.selfDeliveryEnabled;
   const busy = orderAction.isPending;
 
   // The live board works the open queue; finished orders live in History.
-  const TERMINAL = ['DELIVERED', 'COMPLETED', 'CANCELLED'];
+  const TERMINAL = ['DELIVERED', 'COMPLETED', 'CANCELLED', 'REFUNDED', 'FAILED'];
   const orders = fetched.filter((o) => !TERMINAL.includes((o.status || '').toUpperCase()));
   const isNew = (s: string) => ['PENDING', 'PLACED'].includes((s || '').toUpperCase());
   // Express bought its place at the FRONT of the kitchen queue — the customer
   // paid for it and the rider cascade runs on a shorter clock.
-  const expressFirst = (a: any, b: any) => Number(!!b.isExpress) - Number(!!a.isExpress);
+  const expressFirst = (a: any, b: any) => {
+    const priority = Number(!!b.isExpress) - Number(!!a.isExpress);
+    if (priority !== 0) return priority;
+    const time = (order: any) => {
+      const value = new Date(order.placedAt ?? order.createdAt ?? '').getTime();
+      return Number.isFinite(value) ? value : Number.MAX_SAFE_INTEGER;
+    };
+    return time(a) - time(b);
+  };
   const newOrders = orders.filter((o) => isNew(o.status)).sort(expressFirst);
   const inProgress = orders.filter((o) => !isNew(o.status)).sort(expressFirst);
-  // SWIFT-041: prefer the SERVER queueValue (aggregates the whole pending queue);
-  // fall back to summing the loaded page only if the server hasn't provided it.
-  const serverQueueValue = (analyticsQ.data as any)?.queueValue;
-  const queueValue = typeof serverQueueValue === 'number'
-    ? serverQueueValue
-    : orders.reduce((sum, o) => sum + Number(o.totalAmount ?? o.total ?? 0), 0);
-  const today: any = (analyticsQ.data as any)?.today ?? {};
+  const status = storeStatusEyebrow(store, inPreview);
+  const storeStatusText = (
+    <View style={{ flex: 1, paddingRight: space.md }}>
+      <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.sm }}>
+        <View style={{ width: space.md, height: space.md, borderRadius: radius.full, backgroundColor: !inPreview && open && accepting ? color.success : color.text.muted }} />
+        <T variant="body" weight="bold">
+          {inPreview ? 'Not open yet' : !open ? 'Store closed' : accepting ? 'Open for orders' : 'Orders paused'}
+        </T>
+      </View>
+      <T variant="caption" tone="muted" style={{ marginTop: space.xs }}>
+        {inPreview
+          ? 'Your store opens for orders once verification is approved.'
+          : !open ? 'Not currently open to customers' : accepting ? 'Accepting new orders' : 'You’re open but not taking new orders'}
+      </T>
+    </View>
+  );
+
+  if (switchingStore) {
+    return (
+      <Screen>
+        <TabHeader title="Switching store…" eyebrow="LOADING BUSINESS" statusTone="muted" />
+        <LoadingBlock />
+      </Screen>
+    );
+  }
 
   return (
     <Screen>
-      <TabHeader title={store.name} />
+      <TabHeader
+        title={store.name}
+        eyebrow={status.label}
+        statusTone={status.tone}
+        avatar={String(store.name ?? 'S').trim().charAt(0).toUpperCase() || 'S'}
+      />
       <ScrollView
         contentContainerStyle={{ paddingHorizontal: GUTTER, paddingBottom: space['3xl'] }}
         showsVerticalScrollIndicator={false}
-        refreshControl={<RefreshControl refreshing={ordersQ.isRefetching} onRefresh={() => ordersQ.refetch()} tintColor={color.brand[500]} />}
+        refreshControl={
+          <RefreshControl
+            refreshing={ordersQ.isRefetching || analyticsQ.isRefetching}
+            onRefresh={() => void qc.invalidateQueries({ queryKey: ['vendor'] })}
+            tintColor={color.brand[500]}
+          />
+        }
       >
         {/* Multi-store switcher — only when the owner has more than one store. */}
         {stores.length > 1 ? (
           <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{ marginBottom: space.lg }} contentContainerStyle={{ gap: space.md }}>
             {stores.map((s: any) => (
-              <Chip key={s.id} label={s.name} selected={s.id === store.id} onPress={() => switchStore(s.id)} style={{ height: 40, paddingHorizontal: space.lg }} />
+              <Chip key={s.id} label={s.name} selected={s.id === store.id} onPress={() => void switchStore(s.id)} />
             ))}
           </ScrollView>
         ) : null}
@@ -728,14 +1497,14 @@ function VendorOps({ store, navigation }: any) {
                 accessibilityLabel="Exit business preview"
                 accessibilityHint="Return to the Swift role picker"
                 onPress={() => { exitPreview(); setPreviewIntent(null); }}
-                hitSlop={8}
+                style={{ minWidth: space['5xl'], minHeight: space['5xl'], alignItems: 'center', justifyContent: 'center' }}
               >
                 <T variant="label" tone="brand" weight="bold">Exit</T>
               </Pressable>
             </View>
             <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ gap: space.xs }}>
               {TYPES.map((t) => (
-                <Chip key={t.key} label={t.label} selected={previewType === t.key} onPress={() => setPreviewType(t.key)} style={{ height: 34, paddingHorizontal: space.md }} />
+                <Chip key={t.key} label={t.label} selected={previewType === t.key} onPress={() => setPreviewType(t.key)} />
               ))}
             </ScrollView>
           </View>
@@ -777,58 +1546,62 @@ function VendorOps({ store, navigation }: any) {
           </Pressable>
         ) : null}
 
-        {/* [design-100x Flow-13] THE SHIFT STRIP — one sunken band that answers
-            the operator's first three questions (how's today · am I open ·
-            what's waiting) before anything else. Money is MANAGER-only (the
-            /analytics read 403s STAFF). */}
-        <View
-          style={{
-            borderRadius: radius.lg,
-            backgroundColor: color.surface.sunken,
-            padding: space.lg,
-            marginBottom: space.lg,
-            flexDirection: 'row',
-            alignItems: 'flex-end',
-            justifyContent: 'space-between',
-          }}
-        >
-          <View style={{ flex: 1, paddingRight: space.md }}>
-            <T variant="micro" tone="muted">TODAY</T>
-            {surface.canSeeMoney ? (
-              // [WR-016] A failed analytics read shows "—", never a fabricated G$0.
-              <T variant="numL" style={{ marginTop: 2 }}>
-                {analyticsQ.isError && !analyticsQ.data ? '—' : money(today.revenue ?? 0)}
-              </T>
-            ) : (
-              <T variant="numL" style={{ marginTop: 2 }}>{String(orders.length)}</T>
-            )}
-            <T variant="caption" tone="muted" style={{ marginTop: 2 }}>
-              {surface.canSeeMoney
-                ? analyticsQ.isError && !analyticsQ.data
-                  ? 'numbers unavailable'
-                  : `${today.orders ?? 0} order${(today.orders ?? 0) === 1 ? '' : 's'} today`
-                : 'orders on the board'}
+        {surface.canSeeMoney ? (
+          <VendorRevenuePulse
+            analytics={analyticsQ.data}
+            newOrders={newOrders}
+            analyticsError={analyticsQ.isError}
+            analyticsLoading={analyticsQ.isLoading}
+            analyticsUpdatedAt={analyticsQ.dataUpdatedAt}
+          />
+        ) : (
+          <View style={{ borderRadius: radius.lg, backgroundColor: color.surface.sunken, padding: space.lg, marginBottom: space.lg }}>
+            <T variant="micro" tone="muted">
+              LOADED BOARD
+            </T>
+            <T variant="numL" style={{ marginTop: space.xs }}>
+              {boardLoading || boardUnavailable ? '—' : String(orders.length)}
+            </T>
+            <T variant="caption" tone="muted" style={{ marginTop: space.xs }}>
+              {boardLoading
+                ? 'Loading the latest queue…'
+                : boardUnavailable
+                ? 'Board unreachable — orders may be waiting'
+                : `${newOrders.length} new · ${inProgress.length} in progress in the latest page`}
             </T>
           </View>
-          <View style={{ alignItems: 'flex-end', gap: 4 }}>
-            <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.xs }}>
-              <View style={{ width: 8, height: 8, borderRadius: 4, backgroundColor: !inPreview && open && accepting ? color.success : color.text.muted }} />
-              <T variant="label" weight="bold">
-                {inPreview ? 'Preview' : !open ? 'Closed' : accepting ? 'Open' : 'Paused'}
-              </T>
-            </View>
-            <T variant="caption" tone="muted">
-              {ordersQ.isError && !ordersQ.data
-                ? 'board unreachable'
-                : `${orders.length} active${surface.canSeeMoney ? ` · ${money(queueValue)} in queue` : ''}`}
-            </T>
-          </View>
-        </View>
+        )}
 
-        {/* New orders */}
-        <T variant="heading" style={{ marginBottom: space.md }}>
-          {newOrders.length ? `New orders · ${newOrders.length}` : 'New orders'}
-        </T>
+        <View style={{ flexDirection: 'row', alignItems: 'baseline', justifyContent: 'space-between', marginBottom: space.md }}>
+          <View>
+            <T variant="micro" tone="muted">
+              LATEST QUEUE VIEW
+            </T>
+            <T variant="heading" style={{ marginTop: space.xs }}>
+              {boardLoading
+                ? 'Loading active orders…'
+                : boardUnavailable
+                  ? 'Queue status unavailable'
+                : orders.length === 0
+                  ? 'No active orders shown'
+                  : `${orders.length} shown · ${newOrders.length} waiting here`}
+            </T>
+          </View>
+          {newOrders.length > 0 ? <TonePill label={`${newOrders.length} NEW`} tone="warning" /> : null}
+        </View>
+        {ordersQ.isError && ordersQ.data ? (
+          <T variant="caption" tone="muted" style={{ marginBottom: space.md }}>
+            Showing the last loaded queue — refresh did not complete.
+          </T>
+        ) : null}
+        {!ordersQ.isLoading && !(ordersQ.isError && !ordersQ.data) && newOrders.length === 0 && orders.length > 0 ? (
+          <VendorBoardEmpty
+            store={store}
+            navigation={navigation}
+            reachable={!ordersQ.isError}
+            canManage={canManage}
+          />
+        ) : null}
         {ordersQ.isLoading ? (
           <LoadingBlock />
         ) : ordersQ.isError && !ordersQ.data ? (
@@ -841,63 +1614,119 @@ function VendorOps({ store, navigation }: any) {
             </T>
             <PillButton label="Retry" size="md" variant="soft" style={{ marginTop: space.md }} onPress={() => ordersQ.refetch()} />
           </View>
-        ) : newOrders.length === 0 ? (
-          <VendorBoardEmpty store={store} navigation={navigation} reachable={!ordersQ.isError} />
-        ) : (
-          newOrders.map((o) => (
-            <VendorOrderCard
-              key={o.id}
-              order={o}
-              docket
-              busy={busy}
-              onAction={(action) => orderAction.mutate({ id: o.id, action })}
-              onOpen={() => navigation.navigate('VendorOrderDetail', { orderId: o.id, orderNumber: o.orderNumber })}
-            />
-          ))
-        )}
-
-        {/* In progress */}
-        {inProgress.length > 0 ? (
+        ) : orders.length === 0 ? (
+          <VendorBoardEmpty
+            store={store}
+            navigation={navigation}
+            reachable={!ordersQ.isError}
+            canManage={canManage}
+          />
+        ) : queueOpen ? (
           <>
-            <T variant="heading" style={{ marginTop: space.lg, marginBottom: space.md }}>
-              In progress
+            <T variant="micro" tone="muted" style={{ marginBottom: space.sm }}>
+              NEW ORDERS
             </T>
-            {inProgress.map((o) => (
+            {newOrders.length === 0 ? (
+              <T variant="label" tone="muted" style={{ marginBottom: space.md }}>
+                Nothing is waiting for an answer.
+              </T>
+            ) : null}
+            {newOrders.map((o) => (
               <VendorOrderCard
                 key={o.id}
                 order={o}
-                docket
                 busy={busy}
                 onAction={(action) => orderAction.mutate({ id: o.id, action })}
                 onOpen={() => navigation.navigate('VendorOrderDetail', { orderId: o.id, orderNumber: o.orderNumber })}
               />
             ))}
+            {inProgress.length > 0 ? (
+              <>
+                <T variant="micro" tone="muted" style={{ marginTop: space.md, marginBottom: space.sm }}>
+                  IN PROGRESS · {inProgress.length}
+                </T>
+                {inProgress.map((o) => (
+                  <VendorOrderCard
+                    key={o.id}
+                    order={o}
+                    busy={busy}
+                    onAction={(action) => orderAction.mutate({ id: o.id, action })}
+                    onOpen={() => navigation.navigate('VendorOrderDetail', { orderId: o.id, orderNumber: o.orderNumber })}
+                  />
+                ))}
+              </>
+            ) : null}
           </>
+        ) : (
+          <>
+            <T variant="micro" tone="muted" style={{ marginBottom: space.sm }}>
+              {newOrders.length > 0 ? 'WAITING FOR ANSWER' : 'IN PROGRESS'}
+            </T>
+            <VendorOrderCard
+              order={newOrders[0] ?? inProgress[0]}
+              busy={busy}
+              onAction={(action) => orderAction.mutate({ id: (newOrders[0] ?? inProgress[0]).id, action })}
+              onOpen={() => {
+                const order = newOrders[0] ?? inProgress[0];
+                navigation.navigate('VendorOrderDetail', { orderId: order.id, orderNumber: order.orderNumber });
+              }}
+            />
+          </>
+        )}
+        {orders.length > 0 && !(ordersQ.isError && !ordersQ.data) ? (
+          <PillButton
+            label={queueOpen ? 'Collapse loaded queue' : `Open loaded queue · ${orders.length}`}
+            variant="soft"
+            size="md"
+            icon={queueOpen ? 'chevron-up' : 'list'}
+            style={{ marginBottom: space.lg }}
+            onPress={() => setQueueOpen((value) => !value)}
+          />
         ) : null}
+
+        {canManage ? (
+          <VendorManagerManageGrid
+            navigation={navigation}
+            store={store}
+            myRole={myRole}
+            analytics={analyticsQ.data}
+            analyticsStale={analyticsQ.isError}
+            analyticsUpdatedAt={analyticsQ.dataUpdatedAt}
+          />
+        ) : (
+          <VendorStaffAvailability navigation={navigation} />
+        )}
+
         {/* Store status. In §B preview the controls are honestly locked — the
             server refuses commerce-on for an unverified business anyway. */}
         <Card style={{ marginBottom: space.lg }}>
-          <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
-            <View style={{ flex: 1, paddingRight: space.md }}>
-              <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.sm }}>
-                <View style={{ width: 10, height: 10, borderRadius: 5, backgroundColor: !inPreview && open && accepting ? color.success : color.text.muted }} />
-                <T variant="body" weight="bold">
-                  {inPreview ? 'Not open yet' : !open ? 'Store closed' : accepting ? 'Open for orders' : 'Orders paused'}
-                </T>
-              </View>
-              <T variant="caption" tone="muted" style={{ marginTop: 4 }}>
-                {inPreview
-                  ? 'Your store opens for orders once verification is approved.'
-                  : !open ? 'Outside business hours' : accepting ? 'Accepting new orders' : 'You’re open but not taking new orders'}
-              </T>
-            </View>
-            {/* Open/close is MANAGER-only server-side; STAFF still get the
-                pause/resume pill below (toggle-orders is open to floor staff). */}
-            {surface.canToggleOpen ? (
-              <BrandSwitch value={!inPreview && open} disabled={inPreview} onChange={() => (inPreview || toggleOpen.isPending ? undefined : toggleOpen.mutate())} />
-            ) : null}
-          </View>
-          {!inPreview ? (
+          {/* Open/close is MANAGER-only server-side. The whole 48pt row owns
+              the switch semantics so the control is named and easy to hit. */}
+          {surface.canToggleOpen ? (
+            <Pressable
+              disabled={inPreview || toggleOpen.isPending}
+              onPress={() => toggleOpen.mutate()}
+              accessibilityRole="switch"
+              accessibilityLabel="Store open to customers"
+              accessibilityHint={open ? 'Close the store to new customers' : 'Open the store to new customers'}
+              accessibilityState={{ checked: !inPreview && open, disabled: inPreview || toggleOpen.isPending, busy: toggleOpen.isPending }}
+            >
+              {({ pressed }) => (
+                <View style={{ minHeight: space['5xl'], flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', opacity: pressed ? 0.82 : 1 }}>
+                  {storeStatusText}
+                  <AvailabilitySwitch value={!inPreview && open} disabled={inPreview || toggleOpen.isPending} accessible={false} pointerEvents="none" />
+                </View>
+              )}
+            </Pressable>
+          ) : (
+            <View style={{ minHeight: space['5xl'], flexDirection: 'row', alignItems: 'center' }}>{storeStatusText}</View>
+          )}
+          {toggleOpen.isError ? (
+            <T variant="caption" tone="error" style={{ marginTop: space.sm }}>
+              Store status didn’t update — check your connection and try again.
+            </T>
+          ) : null}
+          {!inPreview && canManage ? (
             <PillButton
               label={accepting ? 'Pause new orders' : 'Resume orders'}
               variant="soft"
@@ -919,23 +1748,30 @@ function VendorOps({ store, navigation }: any) {
             MANAGER-only setting, so STAFF don't see a control that would 403. */}
         {!inPreview && surface.canSetSelfDelivery ? (
           <Card style={{ marginBottom: space.lg }}>
-            <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
-              <View style={{ flex: 1, paddingRight: space.md }}>
-                <T variant="body" weight="bold">
-                  Deliver my own orders
-                </T>
-                <T variant="caption" tone="muted" style={{ marginTop: 4 }}>
-                  {selfDelivery
-                    ? 'You deliver your orders yourself — Swift won’t send a rider.'
-                    : 'Swift sends the nearest rider for your delivery orders.'}
-                </T>
-              </View>
-              <BrandSwitch
-                value={selfDelivery}
-                disabled={setSelfDelivery.isPending}
-                onChange={() => (setSelfDelivery.isPending ? undefined : setSelfDelivery.mutate(!selfDelivery))}
-              />
-            </View>
+            <Pressable
+              disabled={setSelfDelivery.isPending}
+              onPress={() => setSelfDelivery.mutate(!selfDelivery)}
+              accessibilityRole="switch"
+              accessibilityLabel="Deliver my own orders"
+              accessibilityHint={selfDelivery ? 'Use Swift riders for delivery orders' : 'Route delivery orders to this store'}
+              accessibilityState={{ checked: selfDelivery, disabled: setSelfDelivery.isPending, busy: setSelfDelivery.isPending }}
+            >
+              {({ pressed }) => (
+                <View style={{ minHeight: space['5xl'], flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', opacity: pressed ? 0.82 : 1 }}>
+                  <View style={{ flex: 1, paddingRight: space.md }}>
+                    <T variant="body" weight="bold">
+                      Deliver my own orders
+                    </T>
+                    <T variant="caption" tone="muted" style={{ marginTop: space.xs }}>
+                      {selfDelivery
+                        ? 'You deliver your orders yourself — Swift won’t send a rider.'
+                        : 'Swift sends the nearest rider for your delivery orders.'}
+                    </T>
+                  </View>
+                  <AvailabilitySwitch value={selfDelivery} disabled={setSelfDelivery.isPending} accessible={false} pointerEvents="none" />
+                </View>
+              )}
+            </Pressable>
             {setSelfDelivery.isError ? (
               <T variant="caption" tone="error" style={{ marginTop: space.sm }}>
                 Couldn’t update — try again.
@@ -944,23 +1780,156 @@ function VendorOps({ store, navigation }: any) {
           </Card>
         ) : null}
 
-        {/* The Menu tab isn't registered for STAFF — don't show a door that goes nowhere. */}
-        <View style={{ flexDirection: 'row', gap: space.md, marginBottom: space.xl }}>
-          {myRole !== 'STAFF' ? (
-            <PillButton label={`Manage ${cat.label.toLowerCase()}`} variant="outline" size="md" style={{ flex: 1 }} onPress={() => navigation.navigate('Menu')} />
-          ) : null}
-          <PillButton label="Order history" variant="outline" size="md" style={{ flex: 1 }} onPress={() => navigation.navigate('VendorOrderHistory')} />
-        </View>
+        <T variant="caption" tone="muted" center style={{ marginBottom: space.xl }}>
+          You keep 100% of every order — Swift takes no commission.
+        </T>
 
       </ScrollView>
     </Screen>
   );
 }
 
+function VendorBillingSuspended({ store, stores, myRole }: { store: any; stores: any[]; myRole?: VendorMemberRole }) {
+  const navigation = useNavigation<any>();
+  const qc = useQueryClient();
+  const setSelectedStore = useStoreSwitcher((state) => state.setSelectedStore);
+  const [switchingStore, setSwitchingStore] = useState(false);
+  const isOwner = myRole === 'OWNER';
+  const subQ = useVendorSubscription(isOwner);
+  const sub = subQ.data ?? (isOwner ? store?.subscription : null);
+  const blockedSub = ['SUSPENDED', 'CHURNED'].includes(String(sub?.status ?? '').toUpperCase());
+  const switchStore = async (id: string) => {
+    if (id === store.id || switchingStore) return;
+    setSwitchingStore(true);
+    disconnectSocket();
+    setSelectedStore(id);
+    try {
+      await Promise.all([
+        qc.resetQueries({ queryKey: ['vendor'] }),
+        qc.resetQueries({ queryKey: ['verification'] }),
+      ]);
+    } finally {
+      setSwitchingStore(false);
+    }
+  };
+
+  return (
+    <Screen>
+      <TabHeader title={store.name} eyebrow="ACCOUNT PAUSED · ORDERS OFF" statusTone="warning" />
+      <ScrollView
+        contentContainerStyle={{ paddingHorizontal: GUTTER, paddingBottom: space['3xl'] }}
+        showsVerticalScrollIndicator={false}
+        refreshControl={
+          <RefreshControl
+            refreshing={switchingStore || subQ.isRefetching}
+            onRefresh={() => {
+              if (isOwner) subQ.refetch();
+              void qc.invalidateQueries({ queryKey: ['vendor', 'profile'] });
+            }}
+            tintColor={color.brand[500]}
+          />
+        }
+      >
+        {stores.length > 1 ? (
+          <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ gap: space.sm, marginBottom: space.lg }}>
+            {stores.map((candidate) => (
+              <Chip
+                key={candidate.id}
+                label={candidate.name}
+                selected={candidate.id === store.id}
+                onPress={() => void switchStore(candidate.id)}
+              />
+            ))}
+          </ScrollView>
+        ) : null}
+
+        <View style={{ alignItems: 'center', paddingHorizontal: space.lg, marginBottom: space.lg }}>
+          <View
+            style={{
+              width: space['5xl'] + space.lg,
+              height: space['5xl'] + space.lg,
+              borderRadius: radius.full,
+              alignItems: 'center',
+              justifyContent: 'center',
+              backgroundColor: color.soft.warning,
+            }}
+          >
+            <MaterialCommunityIcons name="store-alert-outline" size={30} color={color.warning} />
+          </View>
+          <T variant="title" center style={{ marginTop: space.lg }}>
+            New orders are paused
+          </T>
+          <T variant="body" tone="muted" center style={{ marginTop: space.sm }}>
+            {isOwner
+              ? 'The weekly fee needs attention. Pay with the store’s Swift Number; confirmation clears the billing hold. Any separate verification hold still needs its own fix.'
+              : 'The store’s weekly fee needs attention. Ask the owner to pay with the store’s Swift Number; only the owner can access billing.'}
+          </T>
+        </View>
+
+        {switchingStore || (isOwner && subQ.isLoading && !sub) ? (
+          <LoadingBlock />
+        ) : isOwner && blockedSub ? (
+          <>
+            {subQ.isError ? (
+              <T variant="caption" tone="muted" center style={{ marginBottom: space.sm }}>
+                Showing the last loaded billing status — pull to retry.
+              </T>
+            ) : null}
+            <VendorBillingNotice sub={sub} onPay={() => navigation.navigate('VendorMySwiftNumber')} />
+          </>
+        ) : isOwner ? (
+          <Card style={{ marginBottom: space.lg }}>
+            <T variant="label" weight="semibold">
+              Billing details are unavailable
+            </T>
+            <T variant="caption" tone="muted" style={{ marginTop: space.xs }}>
+              The store is still paused. Use your Swift Number to check the cash/MMG payment steps; pull down to retry this status.
+            </T>
+            <PillButton
+              label="How to pay"
+              icon="hash"
+              size="md"
+              style={{ marginTop: space.md }}
+              onPress={() => navigation.navigate('VendorMySwiftNumber')}
+            />
+          </Card>
+        ) : (
+          <Card style={{ marginBottom: space.lg }}>
+            <T variant="label" weight="semibold">
+              Owner action required
+            </T>
+            <T variant="caption" tone="muted" style={{ marginTop: space.xs }}>
+              You can return to the queue when the owner’s payment is confirmed and the store is active again.
+            </T>
+          </Card>
+        )}
+
+        <T variant="caption" tone="muted" center>
+          Swift never takes commission. The weekly fee is separate from customer order money.
+        </T>
+      </ScrollView>
+    </Screen>
+  );
+}
+
+function VendorLiveOrderLayer({ vendorId }: { vendorId: string }) {
+  const { takeover, dismissTakeover } = useVendorOrdersLive(vendorId);
+  return takeover.length > 0 ? <NewOrderTakeover queue={takeover} onDismiss={dismissTakeover} /> : null;
+}
+
+function VendorWentLiveLayer({ status }: { status: string }) {
+  const approvalLive = status === 'ACTIVE' ? true : status === 'PENDING_APPROVAL' ? false : undefined;
+  const live = useWentLive(approvalLive);
+  return <WentLivePopup visible={live.celebrate} onClose={live.dismiss} kind="vendor" />;
+}
+
 function VendorRoot() {
-  const { store, stores, isLoading } = useVendorProfile();
+  const { owner, store, stores, isLoading } = useVendorProfile();
+  const qc = useQueryClient();
+  const myRole = safeVendorRole(owner?.myRole);
   const selectedStoreId = useStoreSwitcher((s) => s.selectedStoreId);
   const setSelectedStore = useStoreSwitcher((s) => s.setSelectedStore);
+  const [repairingSelection, setRepairingSelection] = useState(false);
   const { preview, previewType, enterPreview, exitPreview } = useVendorPreview();
   // Preview is a per-store choice: switching stores lands on that store's
   // real state (checklist for pending, board for live) — never a stale peek.
@@ -969,26 +1938,35 @@ function VendorRoot() {
   useEffect(() => {
     if (!previewType) exitPreview();
   }, [store?.id, exitPreview, previewType]);
-  // Live order feed for the selected store, on every tab — new orders land
-  // instantly (socket) with the 12s poll as fallback.
-  const { takeover, dismissTakeover } = useVendorOrdersLive(store && store.status === 'ACTIVE' ? store.id : undefined);
-  // The approval moment gets its moment (observed PENDING → ACTIVE flip only).
-  const live = useWentLive(store ? store.status === 'ACTIVE' : undefined);
-
   // Make the default store an EXPLICIT selection before the tabs mount: every
   // vendor request then carries x-vendor-id, so the order board, menu and
   // insights all scope to the store named in the header (a stale id from a
   // previous session gets re-pointed to a store this account actually has).
   const validSelection = !!selectedStoreId && stores.some((s: any) => s.id === selectedStoreId);
   useEffect(() => {
-    if (stores.length > 0 && !validSelection) setSelectedStore(stores[0].id);
-  }, [stores, validSelection, setSelectedStore]);
+    if (stores.length === 0 || validSelection) return;
+    const nextStoreId = stores[0].id;
+    if (!selectedStoreId) {
+      setSelectedStore(nextStoreId);
+      return;
+    }
+    // A selected membership disappeared (or belongs to an earlier account).
+    // Treat this like an explicit store handoff: leave the socket room and
+    // discard every store-bound cache before mounting the fallback business.
+    setRepairingSelection(true);
+    disconnectSocket();
+    setSelectedStore(nextStoreId);
+    void Promise.all([
+      qc.resetQueries({ queryKey: ['vendor'] }),
+      qc.resetQueries({ queryKey: ['verification'] }),
+    ]).finally(() => setRepairingSelection(false));
+  }, [stores, validSelection, selectedStoreId, setSelectedStore, qc]);
 
   useEffect(() => {
     if (store) track('vendor_suite_opened', { vendorType: String(store.vendorType ?? '') });
   }, [store?.id]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  if (isLoading || (stores.length > 0 && !validSelection)) {
+  if (isLoading || repairingSelection || (stores.length > 0 && !validSelection)) {
     return (
       <Screen>
         <LoadingBlock />
@@ -996,16 +1974,26 @@ function VendorRoot() {
     );
   }
   if (!store) return <BusinessSetup />;
+  const suspensionSource = store.suspensionSource == null ? null : String(store.suspensionSource).toUpperCase();
+  const subscriptionBlocked = ['SUSPENDED', 'CHURNED'].includes(String(store.subscription?.status ?? '').toUpperCase());
+  const billingSuspended =
+    store.status === 'SUSPENDED' &&
+    (suspensionSource === 'BILLING' || (suspensionSource === null && subscriptionBlocked));
   return (
     <>
-      {store.status !== 'ACTIVE' && !preview ? (
+      {billingSuspended ? (
+        <VendorBillingSuspended store={store} stores={stores} myRole={myRole} />
+      ) : store.status !== 'ACTIVE' && !preview ? (
         <VendorOnboarding store={store} onPreview={enterPreview} />
       ) : (
         <VendorTabs />
       )}
-      <WentLivePopup visible={live.celebrate} onClose={live.dismiss} kind="vendor" />
-      {/* Alerts spec §A1: the NEW-ORDER takeover sits above every tab. */}
-      {takeover.length > 0 ? <NewOrderTakeover queue={takeover} onDismiss={dismissTakeover} /> : null}
+      {/* Per-store keying prevents an ordinary A→B switch from masquerading
+          as B's approval moment. A real status flip within one store persists. */}
+      <VendorWentLiveLayer key={store.id} status={String(store.status ?? '')} />
+      {/* Keying this layer by store also clears queued alerts during a store
+          handoff; the old socket is disconnected before the cache reset. */}
+      {store.status === 'ACTIVE' ? <VendorLiveOrderLayer key={store.id} vendorId={store.id} /> : null}
     </>
   );
 }
@@ -1016,75 +2004,167 @@ function MenuItemRow({
   item,
   navigation,
   categories,
+  canEdit,
 }: {
   item: any;
   navigation: any;
   categories: { id: string; name: string }[];
+  canEdit: boolean;
 }) {
   const readOnly = !!useVendorPreview((state) => state.previewType);
   const setAvail = useSetItemAvailability();
   const del = useDeleteItem();
-  const available = item.isAvailable !== false;
+  const serverAvailable = item.isAvailable !== false;
+  const [markedAvailable, setMarkedAvailable] = useState(serverAvailable);
+  useEffect(() => setMarkedAvailable(serverAvailable), [serverAvailable]);
+  const tracksStock = item.stockQuantity != null;
+  const outOfStock = tracksStock && item.stockQuantity <= 0;
+  const soldOut = !markedAvailable;
+  const lowStock =
+    markedAvailable &&
+    !outOfStock &&
+    tracksStock &&
+    item.lowStockThreshold != null &&
+    item.stockQuantity <= item.lowStockThreshold;
+  const availabilityDisabled = readOnly || setAvail.isPending;
   const [confirmDelete, setConfirmDelete] = useState(false);
+  const ordered = numericFact(item.totalOrdered);
+  const stockDetail = outOfStock
+    ? '0 left'
+    : lowStock
+      ? `${item.stockQuantity} left · alert at ${item.lowStockThreshold}`
+      : tracksStock
+        ? `${item.stockQuantity} in stock`
+        : null;
+  const itemDetail = [ordered == null ? null : `${ordered} orders placed`, stockDetail].filter(Boolean).join(' · ');
+  const toggleAvailability = () => {
+    const next = !markedAvailable;
+    setMarkedAvailable(next);
+    setAvail.mutate(
+      { id: item.id, isAvailable: next },
+      { onError: () => setMarkedAvailable(!next) },
+    );
+  };
 
   return (
-    <Card style={{ marginBottom: space.md }}>
-      <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.md }}>
-        {item.imageUrl ? (
-          <Image source={{ uri: mediaUrl(item.imageUrl)! }} style={{ width: 52, height: 52, borderRadius: radius.md }} contentFit="cover" />
-        ) : (
-          <View style={{ width: 52, height: 52, borderRadius: radius.md, alignItems: 'center', justifyContent: 'center', backgroundColor: color.brand[50] }}>
-            <Feather name="image" size={18} color={color.text.muted} />
-          </View>
-        )}
-        <View style={{ flex: 1 }}>
-          <T variant="body" weight="semibold" numberOfLines={1}>
-            {item.name}
-          </T>
-          <T variant="label" tone="muted" style={{ marginTop: 2 }}>
-            {money(item.basePrice)}
-            {item.stockQuantity != null ? ` · ${item.stockQuantity} in stock` : ''}
-          </T>
-          {item.stockQuantity != null && item.stockQuantity <= 0 ? (
-            <T variant="caption" weight="semibold" tone="error" style={{ marginTop: 2 }}>
-              Out of stock — hidden from customers
-            </T>
-          ) : item.stockQuantity != null && item.lowStockThreshold != null && item.stockQuantity <= item.lowStockThreshold ? (
-            <T variant="caption" weight="semibold" style={{ marginTop: 2, color: color.warning }}>
-              Low stock — restock soon
-            </T>
-          ) : null}
-        </View>
-        <Pressable
-          disabled={readOnly}
-          onPress={() => (setAvail.isPending ? undefined : setAvail.mutate({ id: item.id, isAvailable: !available }))}
-          hitSlop={6}
-        >
-          {({ pressed }) => (
+    <Card style={{ marginBottom: space.md, backgroundColor: soldOut || outOfStock ? color.soft.warning : color.surface.base }}>
+      <View style={{ flexDirection: 'row', alignItems: 'flex-start', gap: space.md }}>
+        <View style={{ opacity: soldOut ? 0.55 : 1 }}>
+          {item.imageUrl ? (
+            <Image
+              source={{ uri: mediaUrl(item.imageUrl)! }}
+              style={{ width: space['5xl'], height: space['5xl'], borderRadius: radius.md }}
+              contentFit="cover"
+              accessibilityLabel={`${item.name} photo`}
+            />
+          ) : (
             <View
               style={{
-                borderRadius: 9999,
-                paddingHorizontal: space.md,
-                paddingVertical: 5,
-                backgroundColor: available ? color.soft.success : color.surface.base,
-                borderWidth: available ? 0 : 1,
-                borderColor: color.border.subtle,
-                opacity: pressed ? 0.7 : 1,
+                width: space['5xl'],
+                height: space['5xl'],
+                borderRadius: radius.md,
+                alignItems: 'center',
+                justifyContent: 'center',
+                backgroundColor: color.brand[50],
               }}
             >
-              <T variant="caption" weight="semibold" style={{ color: available ? color.success : color.text.muted }}>
-                {available ? 'Available' : 'Sold out'}
-              </T>
+              <Feather name="image" size={18} color={color.text.muted} />
             </View>
           )}
-        </Pressable>
-      </View>
-      <View style={{ flexDirection: 'row', gap: space.md, marginTop: space.md }}>
-        <PillButton label="Edit" variant="soft" size="sm" style={{ flex: 1 }} onPress={() => navigation.navigate('VendorItemEditor', { item, categories })} />
-        <PillButton label="Delete" variant="outline" size="sm" style={{ flex: 1 }} loading={del.isPending} disabled={readOnly} onPress={() => setConfirmDelete(true)} />
+        </View>
+        <View style={{ flex: 1 }}>
+          <View style={{ flexDirection: 'row', alignItems: 'baseline', justifyContent: 'space-between', gap: space.md, opacity: soldOut ? 0.62 : 1 }}>
+            <T variant="heading" numberOfLines={2} style={{ flex: 1 }}>
+              {item.name}
+            </T>
+            <T variant="numM" numberOfLines={1}>
+              {money(item.basePrice)}
+            </T>
+          </View>
+          <View style={{ flexDirection: 'row', alignItems: 'center', flexWrap: 'wrap', gap: space.sm, marginTop: space.sm }}>
+            {soldOut ? <TonePill label="SOLD OUT" tone="warning" /> : null}
+            {outOfStock ? <TonePill label="0 LEFT" tone="warning" /> : null}
+            {lowStock ? <TonePill label={`${item.stockQuantity} LEFT`} tone="warning" /> : null}
+            {itemDetail ? (
+              <T variant="caption" tone="muted" style={{ flexShrink: 1 }}>
+                {itemDetail}
+              </T>
+            ) : null}
+          </View>
+        </View>
       </View>
 
-      <PopupCard visible={confirmDelete} onClose={() => setConfirmDelete(false)}>
+      <Pressable
+        disabled={availabilityDisabled}
+        onPress={toggleAvailability}
+        accessibilityRole="switch"
+        accessibilityLabel={`${item.name} availability`}
+        accessibilityHint={
+          soldOut
+              ? 'Make this item available to customers'
+              : 'Mark this item sold out for new orders'
+        }
+        accessibilityState={{ checked: markedAvailable, disabled: availabilityDisabled, busy: setAvail.isPending }}
+        style={{
+          minHeight: space['5xl'],
+          flexDirection: 'row',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+          gap: space.md,
+          marginTop: space.md,
+          paddingHorizontal: space.md,
+          borderRadius: radius.md,
+          backgroundColor: soldOut || outOfStock ? color.surface.base : color.brand[50],
+        }}
+      >
+        <View style={{ flex: 1, paddingVertical: space.sm }}>
+          <T variant="label" weight="semibold" tone={soldOut || outOfStock ? 'warning' : 'deep'}>
+            {soldOut ? 'Hidden from new orders' : outOfStock ? 'Visible, but can’t be ordered' : 'Available to customers'}
+          </T>
+          <T variant="caption" tone="muted">
+            {soldOut
+              ? 'Customers can’t add this to a new order.'
+              : outOfStock
+                ? 'Stock is zero. Switch off to hide it, or restock it.'
+                : 'Switch off to stop new customers adding it.'}
+          </T>
+        </View>
+        <AvailabilitySwitch
+          value={markedAvailable}
+          disabled={availabilityDisabled}
+          accessible={false}
+          pointerEvents="none"
+        />
+      </Pressable>
+
+      {setAvail.isError ? (
+        <T variant="caption" tone="error" style={{ marginTop: space.sm }}>
+          Availability didn’t update — check your connection and try again.
+        </T>
+      ) : null}
+
+      {canEdit ? (
+        <View style={{ flexDirection: 'row', gap: space.md, marginTop: space.md }}>
+          <PillButton
+            label="Edit item"
+            variant="soft"
+            size="md"
+            style={{ flex: 1 }}
+            onPress={() => navigation.navigate('VendorItemEditor', { item, categories })}
+          />
+          <PillButton
+            label="Delete"
+            variant="outline"
+            size="md"
+            style={{ flex: 1 }}
+            loading={del.isPending}
+            disabled={readOnly}
+            onPress={() => setConfirmDelete(true)}
+          />
+        </View>
+      ) : null}
+
+      <PopupCard visible={canEdit && confirmDelete} onClose={() => setConfirmDelete(false)}>
         <IconChip icon="trash-2" size={56} tone="error" />
         <PopupTitle variant="title" center style={{ marginTop: space.lg }}>
           Delete item?
@@ -1096,7 +2176,7 @@ function MenuItemRow({
           label="Delete"
           style={{ alignSelf: 'stretch', marginTop: space['2xl'] }}
           onPress={() => {
-            if (readOnly) return;
+            if (readOnly || !canEdit) return;
             setConfirmDelete(false);
             del.mutate(item.id);
           }}
@@ -1373,10 +2453,10 @@ function StockAdjustRow({ item }: { item: any }) {
 function InventorySummaryCard({ categories }: { categories: any[] }) {
   const s = inventorySummary(categories);
   if (s.tracked === 0) return null;
-  const cells: { label: string; value: number; tone: 'ink' | 'deep' | 'error' | 'muted' }[] = [
+  const cells: { label: string; value: number; tone: 'ink' | 'warning' | 'muted' }[] = [
     { label: 'In stock', value: s.inStock, tone: 'ink' },
-    { label: 'Low', value: s.lowStock, tone: s.lowStock > 0 ? 'deep' : 'muted' },
-    { label: 'Out', value: s.outOfStock, tone: s.outOfStock > 0 ? 'error' : 'muted' },
+    { label: 'Low', value: s.lowStock, tone: s.lowStock > 0 ? 'warning' : 'muted' },
+    { label: 'Out', value: s.outOfStock, tone: s.outOfStock > 0 ? 'warning' : 'muted' },
     { label: 'SKUs', value: s.tracked, tone: 'muted' },
   ];
   return (
@@ -1418,21 +2498,34 @@ function LowStockCard({ categories, navigation, catOptions }: { categories: any[
           Inventory alerts · {low.length}
         </T>
       </View>
-      {low.slice(0, 4).map((i: any) => (
-        <Pressable key={i.id} onPress={() => navigation.navigate('VendorItemEditor', { item: i, categories: catOptions })}>
-          {({ pressed }) => (
-            <View style={{ flexDirection: 'row', alignItems: 'center', marginTop: space.sm, opacity: pressed ? 0.7 : 1 }}>
-              <T variant="label" numberOfLines={1} style={{ flex: 1, paddingRight: space.md }}>
-                {i.name}
-              </T>
-              <T variant="label" weight="semibold" tone={i.stockQuantity <= 0 ? 'error' : 'ink'}>
-                {i.stockQuantity <= 0 ? 'Out — hidden' : `${i.stockQuantity} left`}
-              </T>
-              <Feather name="chevron-right" size={14} color={color.text.muted} style={{ marginLeft: 4 }} />
-            </View>
-          )}
-        </Pressable>
-      ))}
+      {low.slice(0, 4).map((i: any) => {
+        const status = i.stockQuantity <= 0
+          ? i.isAvailable === false
+            ? '0 left · sold out'
+            : '0 left · switch off'
+          : `${i.stockQuantity} left`;
+        return (
+          <Pressable
+            key={i.id}
+            onPress={() => navigation.navigate('VendorItemEditor', { item: i, categories: catOptions })}
+            accessibilityRole="button"
+            accessibilityLabel={`${i.name}. ${status}`}
+            accessibilityHint="Open the item editor"
+          >
+            {({ pressed }) => (
+              <View style={{ minHeight: space['5xl'], flexDirection: 'row', alignItems: 'center', opacity: pressed ? 0.7 : 1 }}>
+                <T variant="label" numberOfLines={1} style={{ flex: 1, paddingRight: space.md }}>
+                  {i.name}
+                </T>
+                <T variant="label" weight="semibold" tone={i.stockQuantity <= 0 ? 'warning' : 'ink'}>
+                  {status}
+                </T>
+                <Feather name="chevron-right" size={14} color={color.text.muted} style={{ marginLeft: space.xs }} />
+              </View>
+            )}
+          </Pressable>
+        );
+      })}
       {low.length > 4 ? (
         <T variant="caption" tone="muted" style={{ marginTop: space.sm }}>
           +{low.length - 4} more below their alert level
@@ -1442,8 +2535,9 @@ function LowStockCard({ categories, navigation, catOptions }: { categories: any[
   );
 }
 
-/** Category heading with operator controls: rename inline, delete with count. */
-function CategoryHeader({ cat }: { cat: any }) {
+/** Category heading with manager controls; staff receive the same factual heading
+ *  without authoring affordances. */
+function CategoryHeader({ cat, canEdit }: { cat: any; canEdit: boolean }) {
   const readOnly = !!useVendorPreview((state) => state.previewType);
   const updateCategory = useUpdateCategory();
   const deleteCategory = useDeleteCategory();
@@ -1453,7 +2547,7 @@ function CategoryHeader({ cat }: { cat: any }) {
   const itemCount = (cat.items ?? []).length;
 
   const saveName = () => {
-    if (readOnly) return;
+    if (readOnly || !canEdit) return;
     const n = name.trim();
     if (!n || n === cat.name) {
       setEditing(false);
@@ -1463,15 +2557,15 @@ function CategoryHeader({ cat }: { cat: any }) {
     updateCategory.mutate({ id: cat.id, data: { name: n } }, { onSuccess: () => setEditing(false) });
   };
 
-  if (editing) {
+  if (editing && canEdit) {
     return (
       <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.md, marginBottom: space.md }}>
         <InlineInput style={{ flex: 1 }} value={name} onChangeText={setName} placeholder="Category name" />
-        <PillButton label="Save" size="sm" loading={updateCategory.isPending} disabled={!name.trim()} onPress={saveName} />
+        <PillButton label="Save" size="md" loading={updateCategory.isPending} disabled={!name.trim()} onPress={saveName} />
         <PillButton
           label="Cancel"
           variant="soft"
-          size="sm"
+          size="md"
           onPress={() => {
             setEditing(false);
             setName(cat.name);
@@ -1486,22 +2580,41 @@ function CategoryHeader({ cat }: { cat: any }) {
       <T variant="heading" numberOfLines={1} style={{ flex: 1, paddingRight: space.md }}>
         {cat.name}
       </T>
-      <Pressable disabled={readOnly} onPress={() => setEditing(true)} hitSlop={6}>
-        {({ pressed }) => (
-          <View style={{ width: 36, height: 36, alignItems: 'center', justifyContent: 'center', opacity: pressed ? 0.6 : 1 }}>
-            <Feather name="edit-2" size={16} color={color.text.muted} />
-          </View>
-        )}
-      </Pressable>
-      <Pressable disabled={readOnly} onPress={() => setConfirmDelete(true)} hitSlop={6}>
-        {({ pressed }) => (
-          <View style={{ width: 36, height: 36, alignItems: 'center', justifyContent: 'center', opacity: pressed ? 0.6 : 1 }}>
-            <Feather name="trash-2" size={16} color={color.text.muted} />
-          </View>
-        )}
-      </Pressable>
+      <T variant="caption" tone="muted" style={{ marginRight: canEdit ? space.sm : 0 }}>
+        {itemCount} item{itemCount === 1 ? '' : 's'}
+      </T>
+      {canEdit ? (
+        <>
+          <Pressable
+            disabled={readOnly}
+            onPress={() => setEditing(true)}
+            accessibilityRole="button"
+            accessibilityLabel={`Rename ${cat.name}`}
+            accessibilityState={{ disabled: readOnly }}
+          >
+            {({ pressed }) => (
+              <View style={{ width: space['5xl'], height: space['5xl'], alignItems: 'center', justifyContent: 'center', opacity: pressed ? 0.6 : 1 }}>
+                <Feather name="edit-2" size={16} color={color.text.muted} />
+              </View>
+            )}
+          </Pressable>
+          <Pressable
+            disabled={readOnly}
+            onPress={() => setConfirmDelete(true)}
+            accessibilityRole="button"
+            accessibilityLabel={`Delete ${cat.name}`}
+            accessibilityState={{ disabled: readOnly }}
+          >
+            {({ pressed }) => (
+              <View style={{ width: space['5xl'], height: space['5xl'], alignItems: 'center', justifyContent: 'center', opacity: pressed ? 0.6 : 1 }}>
+                <Feather name="trash-2" size={16} color={color.text.muted} />
+              </View>
+            )}
+          </Pressable>
+        </>
+      ) : null}
 
-      <PopupCard visible={confirmDelete} onClose={() => setConfirmDelete(false)}>
+      <PopupCard visible={canEdit && confirmDelete} onClose={() => setConfirmDelete(false)}>
         <IconChip icon="trash-2" size={56} tone="error" />
         <PopupTitle variant="title" center style={{ marginTop: space.lg }}>
           Delete “{cat.name}”?
@@ -1516,7 +2629,7 @@ function CategoryHeader({ cat }: { cat: any }) {
           style={{ alignSelf: 'stretch', marginTop: space['2xl'] }}
           loading={deleteCategory.isPending}
           onPress={() => {
-            if (readOnly) return;
+            if (readOnly || !canEdit) return;
             setConfirmDelete(false);
             deleteCategory.mutate(cat.id);
           }}
@@ -1531,87 +2644,194 @@ function VendorMenuScreen({ navigation }: any) {
   const readOnly = !!useVendorPreview((state) => state.previewType);
   const menuQ = useVendorMenu();
   const createCategory = useCreateCategory();
-  const { store } = useVendorProfile();
+  const { owner, store } = useVendorProfile();
+  const myRole = safeVendorRole(owner?.myRole);
+  const canEdit = myRole === 'OWNER' || myRole === 'MANAGER';
   const cat = catalogueMeta(store?.vendorType); // R1: title + prompts named for the type
   const [newCat, setNewCat] = useState('');
+  const [addingCategory, setAddingCategory] = useState(false);
+  const [selectedCategoryId, setSelectedCategoryId] = useState<string | null>(null);
   const categories: any[] = menuQ.data ?? [];
   const catOptions = categories.map((c) => ({ id: c.id, name: c.name }));
+  const allItems = categories.flatMap((category) => category.items ?? []);
+  const soldOutCount = allItems.filter((item: any) => item.isAvailable === false).length;
+  const activeCount = Math.max(0, allItems.length - soldOutCount);
+  const visibleCategories = selectedCategoryId
+    ? categories.filter((category) => category.id === selectedCategoryId)
+    : categories;
+  const selectedCategoryExists = !selectedCategoryId || categories.some((category) => category.id === selectedCategoryId);
+
+  useEffect(() => {
+    if (!selectedCategoryExists) setSelectedCategoryId(null);
+  }, [selectedCategoryExists]);
 
   const addCategory = () => {
-    if (readOnly) return;
+    if (readOnly || !canEdit) return;
     const name = newCat.trim();
     if (name.length < 1) return;
-    createCategory.mutate({ name }, { onSuccess: () => setNewCat('') });
+    createCategory.mutate(
+      { name },
+      {
+        onSuccess: () => {
+          setNewCat('');
+          setAddingCategory(false);
+        },
+      },
+    );
   };
 
   return (
     <Screen>
-      <SubHeader
-        title={cat.label}
-        navigation={navigation}
-        hideBack
-        action={
-          catOptions.length > 0
-            ? { label: '+ Item', onPress: () => navigation.navigate('VendorItemEditor', { categories: catOptions }) }
-            : undefined
-        }
-      />
+      <SubHeader title={canEdit ? cat.label : 'Availability'} navigation={navigation} hideBack />
       {menuQ.isLoading ? (
         <LoadingBlock />
+      ) : menuQ.isError && !menuQ.data ? (
+        <ErrorState message="We couldn't load your live catalogue. Check your connection and try again." onRetry={() => menuQ.refetch()} />
       ) : (
-        <ScrollView contentContainerStyle={{ paddingHorizontal: GUTTER, paddingBottom: space['3xl'] }} showsVerticalScrollIndicator={false}>
+        <ScrollView
+          contentContainerStyle={{ paddingHorizontal: GUTTER, paddingBottom: space['3xl'] }}
+          showsVerticalScrollIndicator={false}
+          refreshControl={<RefreshControl refreshing={menuQ.isRefetching} onRefresh={() => menuQ.refetch()} tintColor={color.brand[500]} />}
+        >
+          {menuQ.isError && menuQ.data ? (
+            <T variant="caption" tone="muted" style={{ marginBottom: space.md }}>
+              Showing the last loaded catalogue — refresh did not complete.
+            </T>
+          ) : null}
+          <View style={{ flexDirection: 'row', alignItems: 'flex-end', justifyContent: 'space-between', gap: space.md, marginBottom: space.lg }}>
+            <View style={{ flex: 1 }}>
+              <T variant="micro" tone="muted">
+                LIVE CATALOGUE
+              </T>
+              <T variant="heading" style={{ marginTop: space.xs }}>
+                {activeCount} active · {soldOutCount} sold out
+              </T>
+            </View>
+            {soldOutCount > 0 ? <TonePill label={`${soldOutCount} SOLD OUT`} tone="warning" /> : null}
+          </View>
+
+          {canEdit ? (
+            <>
+              <View style={{ flexDirection: 'row', gap: space.md, marginBottom: space.md }}>
+                <PillButton
+                  label="Bulk import"
+                  icon="upload-cloud"
+                  variant="outline"
+                  size="md"
+                  style={{ flex: 1 }}
+                  disabled={readOnly}
+                  onPress={() => navigation.navigate('VendorBulkImport')}
+                />
+                <PillButton
+                  label="Add item"
+                  icon="plus"
+                  size="md"
+                  style={{ flex: 1 }}
+                  disabled={readOnly || catOptions.length === 0}
+                  onPress={() => navigation.navigate('VendorItemEditor', { categories: catOptions })}
+                />
+              </View>
+              {catOptions.length === 0 ? (
+                <T variant="caption" tone="muted" style={{ marginBottom: space.md }}>
+                  Add a section first, then add individual items.
+                </T>
+              ) : null}
+            </>
+          ) : (
+            <T variant="caption" tone="muted" style={{ marginBottom: space.lg }}>
+              Floor access: switch items on or sold out. Editing stays with a manager or owner.
+            </T>
+          )}
+
+          {categories.length > 0 ? (
+            <View style={{ marginBottom: space.lg }}>
+              <T variant="micro" tone="muted" style={{ marginBottom: space.sm }}>
+                SECTIONS
+              </T>
+              <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ gap: space.sm }}>
+                <Chip
+                  label={`All · ${allItems.length}`}
+                  selected={selectedCategoryId === null}
+                  onPress={() => setSelectedCategoryId(null)}
+                />
+                {categories.map((category) => (
+                  <Chip
+                    key={category.id}
+                    label={`${category.name} · ${(category.items ?? []).length}`}
+                    selected={selectedCategoryId === category.id}
+                    onPress={() => setSelectedCategoryId(category.id)}
+                  />
+                ))}
+              </ScrollView>
+            </View>
+          ) : null}
+
           {/* Inventory-first: goods vendors lead with stock health (self-hides
               for restaurants/services, which don't track stock). */}
           <InventorySummaryCard categories={categories} />
-          <Card style={{ marginBottom: space.md }}>
-            <T variant="label" weight="semibold" tone="muted" style={{ marginBottom: space.sm }}>
-              New category
-            </T>
-            <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.md }}>
-              <InlineInput style={{ flex: 1 }} value={newCat} onChangeText={setNewCat} placeholder={cat.catPlaceholder} />
-              <PillButton label="Add" size="md" loading={createCategory.isPending} disabled={readOnly || newCat.trim().length < 1} onPress={addCategory} />
+
+          {canEdit ? (
+            <View style={{ marginBottom: space.lg }}>
+              {addingCategory ? (
+                <Card>
+                  <T variant="label" weight="semibold" tone="muted" style={{ marginBottom: space.sm }}>
+                    New section
+                  </T>
+                  <InlineInput value={newCat} onChangeText={setNewCat} placeholder={cat.catPlaceholder} />
+                  <View style={{ flexDirection: 'row', gap: space.md, marginTop: space.md }}>
+                    <PillButton
+                      label="Add section"
+                      size="md"
+                      style={{ flex: 1 }}
+                      loading={createCategory.isPending}
+                      disabled={readOnly || newCat.trim().length < 1}
+                      onPress={addCategory}
+                    />
+                    <PillButton label="Cancel" variant="soft" size="md" style={{ flex: 1 }} onPress={() => setAddingCategory(false)} />
+                  </View>
+                </Card>
+              ) : (
+                <PillButton label="Add section" variant="soft" size="md" onPress={() => setAddingCategory(true)} />
+              )}
             </View>
-          </Card>
+          ) : null}
 
-          <Pressable onPress={() => navigation.navigate('VendorBulkImport')}>
-            {({ pressed }) => (
-              <Card style={{ flexDirection: 'row', alignItems: 'center', gap: space.md, marginBottom: space.lg, opacity: pressed ? 0.8 : 1 }}>
-                <IconChip icon="upload-cloud" />
-                <View style={{ flex: 1 }}>
-                  <T variant="body" weight="semibold">
-                    Bulk import catalogue
-                  </T>
-                  <T variant="caption" tone="muted">
-                    Paste a CSV — we map the columns for you
-                  </T>
-                </View>
-                <Feather name="chevron-right" size={18} color={color.text.muted} />
-              </Card>
-            )}
-          </Pressable>
+          {canEdit ? <LowStockCard categories={categories} navigation={navigation} catOptions={catOptions} /> : null}
 
-          <LowStockCard categories={categories} navigation={navigation} catOptions={catOptions} />
-
-          {menuQ.isError && !menuQ.data ? (
-            // [WR-032] An outage is not "Build your menu" — the catalogue may
-            // be full and merely unreachable.
-            <ErrorState message="We couldn't load your menu. Check your connection and try again." onRetry={() => menuQ.refetch()} />
-          ) : categories.length === 0 ? (
-            <EmptyState icon="book-open" title="Build your menu" body="Add a category above, then start adding items." />
+          {categories.length === 0 ? (
+            <EmptyState
+              icon="book-open"
+              title={canEdit ? `Build your ${cat.label.toLowerCase()}` : 'No items to update'}
+              body={canEdit ? 'Add a section, then start adding items.' : 'A manager or owner needs to add the first item.'}
+            />
           ) : (
-            categories.map((cat) => (
-              <View key={cat.id} style={{ marginBottom: space.lg }}>
-                <CategoryHeader cat={cat} />
-                {(cat.items ?? []).length === 0 ? (
+            visibleCategories.map((category) => (
+              <View key={category.id} style={{ marginBottom: space.lg }}>
+                <CategoryHeader cat={category} canEdit={canEdit} />
+                {(category.items ?? []).length === 0 ? (
                   <T variant="label" tone="muted" style={{ marginBottom: space.md }}>
                     No items yet.
                   </T>
                 ) : (
-                  cat.items.map((it: any) => <MenuItemRow key={it.id} item={it} navigation={navigation} categories={catOptions} />)
+                  category.items.map((item: any) => (
+                    <MenuItemRow
+                      key={item.id}
+                      item={item}
+                      navigation={navigation}
+                      categories={catOptions}
+                      canEdit={canEdit}
+                    />
+                  ))
                 )}
               </View>
             ))
           )}
+
+          {categories.length > 0 ? (
+            <T variant="caption" tone="muted" center style={{ marginTop: space.sm }}>
+              Switching an item off stops it being added to new orders. Existing orders are never silently changed.
+            </T>
+          ) : null}
         </ScrollView>
       )}
     </Screen>
@@ -1952,85 +3172,114 @@ function VendorOrdersTab({ navigation }: any) {
   return <VendorOps store={store} navigation={navigation} />;
 }
 
-/**
- * Owned bar chart (no chart dependency): daily revenue, bars scaled to the
- * period max. Endpoint pre-fills gap days with zero so the series is dense.
- */
-function RevenueChart({ daily, totals }: { daily: Array<{ date: string; revenue: number }>; totals: { revenue: number; orders: number } }) {
-  const CHART_HEIGHT = 96;
-  const max = Math.max(...daily.map((d) => d.revenue), 1);
-  const dayLabel = (iso: string) => {
-    const d = new Date(`${iso}T12:00:00Z`);
+/** Owned single-brand chart. Bars are decorative; the parent revenue sentence is
+ * the accessible numerical summary, so a screen reader never walks 90 glyphs. */
+function RevenueChart({ daily }: { daily: RevenueDay[] }) {
+  const chartHeight = space['5xl'] + space['5xl'];
+  const peak = Math.max(...daily.map((day) => day.revenue), 0);
+  const scaleMax = Math.max(peak, 1);
+  const today = daily.find((day) => day.isToday);
+  const shortLabel = (value: string) => {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return value.slice(0, 1).toUpperCase();
+    return 'SMTWTFS'[new Date(`${value}T12:00:00Z`).getUTCDay()]!;
+  };
+  const dateLabel = (value: string) => {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return value;
+    const d = new Date(`${value}T12:00:00Z`);
     return `${d.getUTCDate()}/${d.getUTCMonth() + 1}`;
   };
+  const chartGap = daily.length <= 7 ? space.sm : daily.length <= 30 ? space.xs : undefined;
+
   return (
-    <Card style={{ marginBottom: space.md }}>
-      <View style={{ flexDirection: 'row', alignItems: 'baseline', justifyContent: 'space-between' }}>
-        <T variant="body" weight="semibold">
-          Last {daily.length} days
+    <View
+      accessible
+      accessibilityRole="image"
+      accessibilityLabel={`Revenue trend for ${daily.length} days. Peak ${money(peak)}${today ? `. Today ${money(today.revenue)}` : ''}.`}
+      style={{ marginTop: space.lg }}
+    >
+      {today ? (
+        <T variant="caption" weight="semibold" tone="brand" style={{ alignSelf: 'flex-end', marginBottom: space.sm }}>
+          Today {money(today.revenue)}
         </T>
-        <T variant="label" tone="muted">
-          {money(totals.revenue)} · {totals.orders} orders
-        </T>
+      ) : null}
+      <View style={{ flexDirection: 'row', alignItems: 'flex-end', gap: chartGap, height: chartHeight }} importantForAccessibility="no-hide-descendants">
+        {daily.map((day) => (
+          <View
+            key={day.date}
+            style={{
+              flex: 1,
+              borderTopLeftRadius: radius.sm,
+              borderTopRightRadius: radius.sm,
+              height: Math.max(space.xs, Math.round((day.revenue / scaleMax) * chartHeight)),
+              backgroundColor: day.revenue > 0 ? color.brand[500] : color.border.subtle,
+              opacity: day.isToday ? 1 : 0.78,
+            }}
+          />
+        ))}
       </View>
-      {totals.orders === 0 ? (
-        <T variant="label" tone="muted" style={{ marginTop: space.md }}>
-          No completed orders yet — sales will chart here.
-        </T>
+      {daily.length <= 7 ? (
+        <View style={{ flexDirection: 'row', gap: chartGap, marginTop: space.sm }} importantForAccessibility="no-hide-descendants">
+          {daily.map((day) => (
+            <View key={day.date} style={{ flex: 1, alignItems: 'center' }}>
+              <T variant="caption" weight={day.isToday ? 'bold' : 'medium'} tone={day.isToday ? 'brand' : 'muted'}>
+                {shortLabel(day.date)}
+              </T>
+            </View>
+          ))}
+        </View>
       ) : (
-        <>
-          <View style={{ flexDirection: 'row', alignItems: 'flex-end', gap: 3, height: CHART_HEIGHT, marginTop: space.md }}>
-            {daily.map((d) => (
-              <View
-                key={d.date}
-                style={{
-                  flex: 1,
-                  borderTopLeftRadius: 3,
-                  borderTopRightRadius: 3,
-                  height: Math.max(3, Math.round((d.revenue / max) * CHART_HEIGHT)),
-                  backgroundColor: d.revenue > 0 ? color.brand[500] : color.border.subtle,
-                }}
-              />
-            ))}
-          </View>
-          <View style={{ flexDirection: 'row', justifyContent: 'space-between', marginTop: space.sm }}>
-            <T variant="caption" tone="muted">
-              {dayLabel(daily[0]!.date)}
-            </T>
-            <T variant="caption" tone="muted">
-              peak {money(max)}
-            </T>
-            <T variant="caption" tone="muted">
-              {dayLabel(daily[daily.length - 1]!.date)}
-            </T>
-          </View>
-        </>
+        <View style={{ flexDirection: 'row', justifyContent: 'space-between', marginTop: space.sm }} importantForAccessibility="no-hide-descendants">
+          <T variant="caption" tone="muted">
+            {dateLabel(daily[0]!.date)}
+          </T>
+          <T variant="caption" tone="muted">
+            peak {money(peak)}
+          </T>
+          <T variant="caption" tone="muted">
+            {dateLabel(daily[daily.length - 1]!.date)}
+          </T>
+        </View>
       )}
-    </Card>
+    </View>
   );
 }
 
-function TopItemsCard({ items }: { items: any[] }) {
-  const ranked = items.filter((i) => i.totalOrdered > 0 || i.recentOrders > 0);
+function TopItemsCard({ items, sample }: { items: any[]; sample: boolean }) {
+  const ranked = items.filter((item) => {
+    const lifetime = numericFact(item.totalOrdered) ?? 0;
+    const recent = numericFact(item.recentOrders ?? item.count) ?? 0;
+    return lifetime > 0 || recent > 0;
+  });
+  const lifetimeRank = !sample;
   return (
     <Card style={{ marginBottom: space.md }}>
-      <T variant="body" weight="semibold">
-        Top items
+      <T variant="micro" tone="muted">
+        {lifetimeRank ? 'MOST ORDERED · LIFETIME' : 'POPULAR ITEMS · SAMPLE'}
       </T>
+      {lifetimeRank ? (
+        <T variant="caption" tone="muted" style={{ marginTop: space.xs }}>
+          Ranked by all-time orders placed; the second count is quantity ordered in the last 30 days.
+        </T>
+      ) : null}
       {ranked.length === 0 ? (
         <T variant="label" tone="muted" style={{ marginTop: space.sm }}>
-          Your best sellers will rank here once orders come in.
+          Your most-ordered items will rank here once orders come in.
         </T>
       ) : (
         ranked.map((item, i) => (
-          <View key={item.id} style={{ flexDirection: 'row', alignItems: 'center', marginTop: space.sm }}>
-            <T variant="label" weight="bold" tone="muted" style={{ width: 24 }}>
+          <View key={item.id ?? `${item.name}-${i}`} style={{ flexDirection: 'row', alignItems: 'center', marginTop: space.md }}>
+            <T variant="numM" tone="brand" style={{ width: space['2xl'] }}>
               {i + 1}
             </T>
             {item.imageUrl ? (
-              <Image source={{ uri: mediaUrl(item.imageUrl)! }} style={{ width: 34, height: 34, borderRadius: 8 }} contentFit="cover" />
+              <Image
+                source={{ uri: mediaUrl(item.imageUrl)! }}
+                style={{ width: space['4xl'], height: space['4xl'], borderRadius: radius.sm }}
+                contentFit="cover"
+                accessibilityLabel={`${item.name} photo`}
+              />
             ) : (
-              <View style={{ width: 34, height: 34, borderRadius: 8, alignItems: 'center', justifyContent: 'center', backgroundColor: color.brand[50] }}>
+              <View style={{ width: space['4xl'], height: space['4xl'], borderRadius: radius.sm, alignItems: 'center', justifyContent: 'center', backgroundColor: color.brand[50] }}>
                 <Feather name="image" size={14} color={color.text.muted} />
               </View>
             )}
@@ -2039,16 +3288,20 @@ function TopItemsCard({ items }: { items: any[] }) {
                 {item.name}
               </T>
               <T variant="caption" tone="muted">
-                {item.category?.name ?? ''}
+                {item.category?.name ?? 'Catalogue item'}
               </T>
             </View>
             <View style={{ alignItems: 'flex-end' }}>
-              <T variant="label" weight="semibold">
-                {item.recentOrders} this month
-              </T>
-              <T variant="caption" tone="muted">
-                {item.totalOrdered} all time
-              </T>
+              {numericFact(item.totalOrdered) != null ? (
+                <T variant="label" weight="semibold">
+                  {numericFact(item.totalOrdered)} orders
+                </T>
+              ) : null}
+              {numericFact(item.recentOrders ?? item.count) != null ? (
+                <T variant="caption" tone="muted">
+                  {numericFact(item.recentOrders ?? item.count)} {lifetimeRank ? 'ordered in 30d' : 'sample orders'}
+                </T>
+              ) : null}
             </View>
           </View>
         ))
@@ -2063,45 +3316,52 @@ function BusyHoursCard() {
   if (q.isLoading) return null;
   const data = q.data;
   if (!data) return null;
-  const hours: Array<{ hour: number; orders: number }> = data.hours ?? [];
+  const hours: Array<{ hour: number; orders: number }> = Array.isArray(data) ? data : data.hours ?? [];
+  if (hours.length === 0) return null;
+  const total = numericFact((data as any).total) ?? hours.reduce((sum, hour) => sum + Number(hour.orders ?? 0), 0);
+  const peak = (data as any).peak ?? hours.reduce((best, hour) => (hour.orders > best.orders ? hour : best), hours[0]!);
   const max = Math.max(...hours.map((h) => h.orders), 1);
+  const chartHeight = space['5xl'] + space.lg;
   const fmtHour = (h: number) => (h === 0 ? '12am' : h < 12 ? `${h}am` : h === 12 ? '12pm' : `${h - 12}pm`);
+  const axisHours = hours.length <= 8
+    ? hours
+    : [0, 0.25, 0.5, 0.75, 1].map((fraction) => hours[Math.round((hours.length - 1) * fraction)]!);
   return (
     <Card style={{ marginBottom: space.md }}>
       <View style={{ flexDirection: 'row', alignItems: 'baseline', justifyContent: 'space-between' }}>
         <T variant="body" weight="semibold">
           Busy hours
         </T>
-        {data.peak ? (
+        {total > 0 ? (
           <T variant="label" tone="muted">
-            peak {fmtHour(data.peak.hour)}
+            peak {fmtHour(peak.hour)}
           </T>
         ) : null}
       </View>
-      {data.total === 0 ? (
+      {total === 0 ? (
         <T variant="label" tone="muted" style={{ marginTop: space.sm }}>
           Order times will map out here — staff up for the rush.
         </T>
       ) : (
         <>
-          <View style={{ flexDirection: 'row', alignItems: 'flex-end', gap: 2, height: 64, marginTop: space.md }}>
+          <View style={{ flexDirection: 'row', alignItems: 'flex-end', gap: space.xs, height: chartHeight, marginTop: space.md }}>
             {hours.map((h) => (
               <View
                 key={h.hour}
                 style={{
                   flex: 1,
-                  borderTopLeftRadius: 2,
-                  borderTopRightRadius: 2,
-                  height: Math.max(3, Math.round((h.orders / max) * 64)),
+                  borderTopLeftRadius: radius.sm,
+                  borderTopRightRadius: radius.sm,
+                  height: Math.max(space.xs, Math.round((h.orders / max) * chartHeight)),
                   backgroundColor: h.orders > 0 ? color.brand[500] : color.border.subtle,
                 }}
               />
             ))}
           </View>
           <View style={{ flexDirection: 'row', justifyContent: 'space-between', marginTop: space.sm }}>
-            {['12am', '6am', '12pm', '6pm', '11pm'].map((l) => (
-              <T key={l} variant="caption" tone="muted">
-                {l}
+            {axisHours.map((entry, index) => (
+              <T key={`${entry.hour}-${index}`} variant="caption" tone="muted">
+                {fmtHour(entry.hour)}
               </T>
             ))}
           </View>
@@ -2120,12 +3380,30 @@ function ReviewsCard() {
 
   const reviews: any[] = (reviewsQ.data?.data ?? []).slice(0, 10);
   if (reviewsQ.isLoading) return null;
+  if (reviewsQ.isError && !reviewsQ.data) {
+    return (
+      <Card style={{ marginBottom: space.md }}>
+        <T variant="body" weight="semibold">
+          Recent reviews
+        </T>
+        <T variant="label" tone="muted" style={{ marginTop: space.sm }}>
+          Reviews are unavailable right now.
+        </T>
+        <PillButton label="Retry" size="md" variant="soft" style={{ marginTop: space.sm }} onPress={() => reviewsQ.refetch()} />
+      </Card>
+    );
+  }
 
   return (
     <Card style={{ marginBottom: space.md }}>
       <T variant="body" weight="semibold">
         Recent reviews
       </T>
+      {reviewsQ.isError ? (
+        <T variant="caption" tone="muted" style={{ marginTop: space.xs }}>
+          Showing the last loaded reviews — refresh did not complete.
+        </T>
+      ) : null}
       {reviews.length === 0 ? (
         <T variant="label" tone="muted" style={{ marginTop: space.sm }}>
           Reviews land here after customers rate their orders.
@@ -2134,8 +3412,8 @@ function ReviewsCard() {
         reviews.map((r) => (
           <View key={r.id} style={{ marginTop: space.sm, borderTopWidth: 1, borderTopColor: color.border.subtle, paddingTop: space.sm }}>
             <View style={{ flexDirection: 'row', alignItems: 'center' }}>
-              <T variant="label" weight="semibold" style={{ flex: 1 }}>
-                {r.rater?.firstName ?? 'Customer'} · <T variant="label" style={{ color: color.warning }}>{'★'.repeat(Number(r.score) || 0)}</T>
+                <T variant="label" weight="semibold" style={{ flex: 1 }}>
+                  {r.rater?.firstName ?? 'Customer'} · <T variant="label" tone="star">{'★'.repeat(Number(r.score) || 0)}</T>
               </T>
               <T variant="caption" tone="muted">
                 {new Date(r.createdAt).toLocaleDateString([], { month: 'short', day: 'numeric' })}
@@ -2227,7 +3505,7 @@ function VendorStandingSection() {
 }
 
 /** Ratings histogram — the reviews endpoint's score distribution, drawn as bars. */
-function RatingsCard() {
+function RatingsCard({ lifetimeOrders }: { lifetimeOrders: number | null }) {
   const reviewsQ = useMyStoreReviews();
   const summary = reviewsQ.data?.summary;
   if (!summary || !summary.totalReviews) return null;
@@ -2235,35 +3513,45 @@ function RatingsCard() {
   const max = Math.max(...[1, 2, 3, 4, 5].map((s) => Number(dist[String(s)] ?? 0)), 1);
   return (
     <Card style={{ marginBottom: space.md }}>
+      <View style={{ flexDirection: 'row', alignItems: 'baseline', justifyContent: 'space-between', marginBottom: space.md }}>
+        <T variant="micro" tone="muted">
+          RATINGS
+        </T>
+        {lifetimeOrders != null ? (
+          <T variant="caption" tone="muted">
+            {lifetimeOrders} lifetime orders
+          </T>
+        ) : null}
+      </View>
       <View style={{ flexDirection: 'row', gap: space.xl }}>
-        <View style={{ alignItems: 'center', justifyContent: 'center', minWidth: 88 }}>
+        <View style={{ alignItems: 'center', justifyContent: 'center', minWidth: space['5xl'] + space['4xl'] }}>
           <T variant="display">{Number(summary.averageRating).toFixed(1)}</T>
-          <View style={{ flexDirection: 'row', gap: 1, marginTop: 2 }}>
+          <View style={{ flexDirection: 'row', gap: space.xs, marginTop: space.xs }}>
             {[1, 2, 3, 4, 5].map((s) => (
               <MaterialCommunityIcons
                 key={s}
                 name={Number(summary.averageRating) >= s - 0.25 ? 'star' : 'star-outline'}
                 size={13}
-                color={color.warning}
+                color={color.star}
               />
             ))}
           </View>
-          <T variant="caption" tone="muted" style={{ marginTop: 2 }}>
+          <T variant="caption" tone="muted" style={{ marginTop: space.xs }}>
             {summary.totalReviews} rating{summary.totalReviews === 1 ? '' : 's'}
           </T>
         </View>
-        <View style={{ flex: 1, justifyContent: 'center', gap: 4 }}>
+        <View style={{ flex: 1, justifyContent: 'center', gap: space.xs }}>
           {[5, 4, 3, 2, 1].map((s) => {
             const n = Number(dist[String(s)] ?? 0);
             return (
               <View key={s} style={{ flexDirection: 'row', alignItems: 'center', gap: space.sm }}>
-                <T variant="caption" tone="muted" style={{ width: 10, textAlign: 'right' }}>
+                <T variant="caption" tone="muted" style={{ width: space.md, textAlign: 'right' }}>
                   {s}
                 </T>
-                <View style={{ flex: 1, height: 7, borderRadius: 4, backgroundColor: color.border.subtle, overflow: 'hidden' }}>
-                  <View style={{ width: `${Math.round((n / max) * 100)}%`, height: 7, borderRadius: 4, backgroundColor: n > 0 ? color.warning : 'transparent' }} />
+                <View style={{ flex: 1, height: space.sm, borderRadius: radius.sm, backgroundColor: color.border.subtle, overflow: 'hidden' }}>
+                  <View style={{ width: `${Math.round((n / max) * 100)}%`, height: space.sm, borderRadius: radius.sm, backgroundColor: n > 0 ? color.star : 'transparent' }} />
                 </View>
-                <T variant="caption" tone="muted" style={{ width: 22 }}>
+                <T variant="caption" tone="muted" style={{ width: space.xl }}>
                   {n}
                 </T>
               </View>
@@ -2280,7 +3568,7 @@ function RatingsCard() {
  * honest its prep quote is, and how often orders die. All real timestamps
  * from /vendor/analytics/ops — rows hide (not zero-fill) when there's no data.
  */
-function OpsCard({ ops, period }: { ops: any; period: number }) {
+function OpsCard({ ops, period, stale }: { ops: any; period: number; stale?: boolean }) {
   if (!ops || !ops.placedOrders) return null;
   const prepDelta =
     ops.avgPrepMinutes != null && ops.avgQuotedPrepMinutes != null
@@ -2289,8 +3577,13 @@ function OpsCard({ ops, period }: { ops: any; period: number }) {
   return (
     <Card style={{ marginBottom: space.lg }}>
       <T variant="body" weight="bold">
-        Operations · {period}d
+        Operations · rolling {period}d
       </T>
+      {stale ? (
+        <T variant="caption" tone="muted" style={{ marginTop: space.xs }}>
+          Showing the last loaded operations figures — refresh did not complete.
+        </T>
+      ) : null}
       <View style={{ flexDirection: 'row', gap: space.md, marginTop: space.md }}>
         {ops.acceptanceRate != null ? (
           <KpiTile icon="check-circle-outline" value={`${ops.acceptanceRate}%`} label="Acceptance" />
@@ -2321,12 +3614,37 @@ function OpsCard({ ops, period }: { ops: any; period: number }) {
 const PERIODS = [7, 30, 90] as const;
 
 /** Sum a window off the endpoint's own daily series (dates ascending). */
-function windowTotals(daily: any[], take: number) {
-  const sum = (rows: any[], k: string) => rows.reduce((s, d) => s + Number(d?.[k] ?? 0), 0);
-  const cur = daily.slice(-take);
+function windowTotals(daily: RevenueDay[], take: number) {
+  const safeTake = Math.max(0, Math.min(take, daily.length));
+  const sumRevenue = (rows: RevenueDay[]) => rows.reduce((sum, day) => sum + day.revenue, 0);
+  const sumOrders = (rows: RevenueDay[]) =>
+    rows.every((day) => numericFact(day.orders) != null)
+      ? rows.reduce((sum, day) => sum + Number(day.orders), 0)
+      : null;
+  const cur = safeTake > 0 ? daily.slice(-safeTake) : [];
   const prevRows = daily.slice(-take * 2, -take);
-  const prev = prevRows.length === take ? { revenue: sum(prevRows, 'revenue'), orders: sum(prevRows, 'orders') } : null;
-  return { curDaily: cur, cur: { revenue: sum(cur, 'revenue'), orders: sum(cur, 'orders') }, prev };
+  const datedSeries = daily.every((day) => /^\d{4}-\d{2}-\d{2}$/.test(day.date));
+  const previousComplete = !datedSeries || hasTrailingGuyanaDays(daily, take * 2);
+  const prev = take > 0 && prevRows.length === take && previousComplete
+    ? { revenue: sumRevenue(prevRows), orders: sumOrders(prevRows) }
+    : null;
+  return { curDaily: cur, cur: { revenue: sumRevenue(cur), orders: sumOrders(cur) }, prev };
+}
+
+function InsightMetric({ label, value, detail }: { label: string; value: string; detail: string }) {
+  return (
+    <View style={{ flex: 1, borderRadius: radius.md, backgroundColor: color.surface.sunken, padding: space.md }}>
+      <T variant="micro" tone="muted">
+        {label}
+      </T>
+      <T variant="numM" numberOfLines={1} style={{ marginTop: space.xs }}>
+        {value}
+      </T>
+      <T variant="caption" tone="muted" numberOfLines={2} style={{ marginTop: space.xs }}>
+        {detail}
+      </T>
+    </View>
+  );
 }
 
 /** MMG orders: the customer's payment (delivery fee included) landed in the
@@ -2422,6 +3740,7 @@ function RepeatCustomersCard() {
 
 function VendorInsightsScreen() {
   const q = useVendorAnalytics();
+  const readOnly = !!useVendorPreview((state) => state.previewType);
   // Signed short-lived link (the JWT can't ride an in-app browser).
   const statement = useMutation({
     mutationFn: async () => {
@@ -2441,134 +3760,207 @@ function VendorInsightsScreen() {
   // Fetch double the window so "vs the previous N days" comes from the same
   // real series (90 is the endpoint's max — no prior window at that depth).
   const [period, setPeriod] = useState<(typeof PERIODS)[number]>(7);
-  const revenueQ = useVendorRevenue(period === 90 ? 90 : period * 2);
+  const requestedDays = period === 90 ? 90 : period * 2;
+  const revenueQ = useVendorRevenue(requestedDays);
+  const refetchRevenue = revenueQ.refetch;
+  const revenueBehindAnalytics = !readOnly && q.dataUpdatedAt > 0 && q.dataUpdatedAt > revenueQ.dataUpdatedAt;
+  useEffect(() => {
+    if (!readOnly && q.dataUpdatedAt > 0) void refetchRevenue();
+  }, [readOnly, q.dataUpdatedAt, requestedDays, refetchRevenue]);
   const opsQ = useVendorOps(period);
   const popularQ = usePopularItems(8);
   const a: any = q.data ?? {};
   const v: any = a.vendor ?? {};
-
-  const daily: any[] = revenueQ.data?.daily ?? [];
-  const w = windowTotals(daily, Math.min(period, daily.length || period));
-  const aovCur = w.cur.orders > 0 ? w.cur.revenue / w.cur.orders : 0;
-  const aovPrev = w.prev && w.prev.orders > 0 ? w.prev.revenue / w.prev.orders : null;
+  const daily = reconciledRevenueDays(revenueQ.data, a, requestedDays);
+  const shownDays = readOnly ? Math.min(period, daily.length) : period;
+  const hasFullWindow = readOnly ? shownDays > 0 : hasTrailingGuyanaDays(daily, period);
+  const w = windowTotals(daily, hasFullWindow ? shownDays : 0);
+  const aovCur = w.cur.orders != null && w.cur.orders > 0 ? w.cur.revenue / w.cur.orders : null;
+  const aovPrev = w.prev?.orders != null && w.prev.orders > 0 ? w.prev.revenue / w.prev.orders : null;
+  const acceptanceRate = numericFact(opsQ.data?.acceptanceRate);
+  const cancellationRate = numericFact(opsQ.data?.cancellationRate);
+  const placedOrders = numericFact(opsQ.data?.placedOrders);
+  const primaryLoading = (q.isLoading && !q.data) || (revenueQ.isLoading && !revenueQ.data) || (revenueBehindAnalytics && !revenueQ.isError);
+  const primaryError = (q.isError && !q.data) || (revenueQ.isError && (!revenueQ.data || revenueBehindAnalytics));
+  const showingStale = (q.isError && !!q.data) || (revenueQ.isError && !!revenueQ.data);
+  const refreshing = q.isRefetching || revenueQ.isRefetching || opsQ.isRefetching || popularQ.isRefetching;
+  const opsDetail = readOnly
+    ? 'Not included in sample'
+    : opsQ.isLoading
+      ? 'Loading this range'
+      : opsQ.isError
+        ? opsQ.data
+          ? 'Last loaded · refresh failed'
+          : 'Unavailable — pull to retry'
+        : placedOrders === 0
+          ? 'No placed orders'
+          : placedOrders == null
+            ? 'No rate reported'
+            : `${placedOrders} placed order${placedOrders === 1 ? '' : 's'}`;
+  const retryPrimary = () => {
+    q.refetch();
+    revenueQ.refetch();
+  };
 
   return (
     <Screen>
-      <TabHeader title="Insights" />
+      <TabHeader title="Insights" eyebrow={readOnly ? 'PREVIEW · SAMPLE DATA' : 'MONEY EARNED · GYD'} />
       <ScrollView
         contentContainerStyle={{ paddingHorizontal: GUTTER, paddingBottom: space['3xl'] }}
         showsVerticalScrollIndicator={false}
         refreshControl={
           <RefreshControl
-            refreshing={q.isRefetching}
+            refreshing={refreshing}
             onRefresh={() => {
               q.refetch();
               revenueQ.refetch();
+              opsQ.refetch();
               popularQ.refetch();
             }}
             tintColor={color.brand[500]}
           />
         }
       >
-        {q.isLoading ? (
+        <View style={{ marginBottom: space.lg }}>
+          <T variant="heading">Revenue at a glance</T>
+          <T variant="label" tone="muted" style={{ marginTop: space.xs }}>
+            Completed-order revenue. Swift never holds order money; cash and MMG settle peer-to-peer along the handoff.
+          </T>
+          <View style={{ flexDirection: 'row', gap: space.sm, marginTop: space.md }}>
+            {PERIODS.map((p) => (
+              <Chip key={p} label={`${p}d`} selected={period === p} onPress={() => setPeriod(p)} style={{ flex: 1 }} />
+            ))}
+          </View>
+        </View>
+
+        {primaryLoading ? (
           <LoadingBlock />
-        ) : q.isError && !q.data ? (
+        ) : primaryError ? (
           // [WR-032] Failed analytics must never render as zero KPIs — a zero
           // is a business fact, not a connection state.
-          <ErrorState message="We couldn't load your numbers. Check your connection and try again." onRetry={() => q.refetch()} />
+          <ErrorState message="We couldn't load this revenue range. Check your connection and try again." onRetry={retryPrimary} />
+        ) : !hasFullWindow ? (
+          <ErrorState message="This revenue range is incomplete, so we won't present a partial total as the full period." onRetry={retryPrimary} />
         ) : (
           <>
-            {/* Live today, straight off the overview endpoint */}
-            <View style={{ flexDirection: 'row', gap: space.md, marginBottom: space.lg }}>
-              <KpiTile icon="receipt" value={String(a.today?.orders ?? 0)} label="Orders today" />
-              <KpiTile icon="cash" value={money(a.today?.revenue ?? 0)} label="Revenue today" />
-              <KpiTile icon="bell-ring" value={String(a.pendingOrders ?? 0)} label="Pending now" />
-            </View>
-
-            {/* MMG cash ledger — delivery fees owed to riders (renders only when non-empty) */}
-            <RiderFeesOwedCard />
-
-            {/* Performance window */}
-            <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: space.md }}>
-              <T variant="heading">Performance</T>
-              <View style={{ flexDirection: 'row', gap: space.sm }}>
-                {PERIODS.map((p) => (
-                  <Chip key={p} label={`${p}d`} selected={period === p} onPress={() => setPeriod(p)} style={{ height: 34, paddingHorizontal: space.md }} />
-                ))}
+            <Card style={{ marginBottom: space.lg, padding: space.xl }}>
+              <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: space.md }}>
+                <T variant="micro" tone="muted">
+                  REVENUE · {readOnly ? `SAMPLE ${shownDays} DAYS` : `LAST ${period} DAYS`}
+                </T>
+                {w.prev ? <DeltaBadge cur={w.cur.revenue} prev={w.prev.revenue} /> : null}
               </View>
-            </View>
-            {w.curDaily.length ? <RevenueChart daily={w.curDaily} totals={{ revenue: w.cur.revenue, orders: w.cur.orders }} /> : null}
-            <View style={{ flexDirection: 'row', gap: space.md, marginBottom: space.sm }}>
-              <KpiTile
-                icon="cash-multiple"
-                value={money(w.cur.revenue)}
-                label={`Revenue · ${period}d`}
-                delta={<DeltaBadge cur={w.cur.revenue} prev={w.prev?.revenue ?? null} />}
-              />
-              <KpiTile
-                icon="receipt"
-                value={String(w.cur.orders)}
-                label={`Orders · ${period}d`}
-                delta={<DeltaBadge cur={w.cur.orders} prev={w.prev?.orders ?? null} />}
-              />
-              <KpiTile
-                icon="chart-line"
-                value={money(aovCur)}
-                label="Avg order"
-                delta={aovPrev != null ? <DeltaBadge cur={aovCur} prev={aovPrev} /> : undefined}
-              />
-            </View>
-            {w.prev ? (
-              <T variant="caption" tone="muted" style={{ marginBottom: space.lg }}>
-                Change vs the previous {period} days.
+              <T variant="displayXl" numberOfLines={1} style={{ marginTop: space.sm }}>
+                {money(w.cur.revenue)}
               </T>
+              <T variant="label" tone="muted" style={{ marginTop: space.xs }}>
+                {w.cur.orders == null
+                  ? 'Order count is not included in this sample.'
+                  : `${w.cur.orders} completed order${w.cur.orders === 1 ? '' : 's'} in this range.`}
+              </T>
+              {showingStale ? (
+                <T variant="caption" tone="muted" style={{ marginTop: space.sm }}>
+                  Showing the last loaded figures — refresh did not complete.
+                </T>
+              ) : null}
+              {w.curDaily.length > 0 ? <RevenueChart daily={w.curDaily} /> : null}
+              {w.cur.revenue === 0 ? (
+                <T variant="caption" tone="muted" style={{ marginTop: space.md }}>
+                  No completed-order revenue landed in this range.
+                </T>
+              ) : null}
+              {w.prev ? (
+                <T variant="caption" tone="muted" style={{ marginTop: space.md }}>
+                  Change against the previous {period} days.
+                </T>
+              ) : period === 90 && !readOnly ? (
+                <T variant="caption" tone="muted" style={{ marginTop: space.md }}>
+                  Prior-period comparison is available at 7 and 30 days.
+                </T>
+              ) : null}
+            </Card>
+
+            <View style={{ flexDirection: 'row', gap: space.sm, marginBottom: space.lg }}>
+              <InsightMetric
+                label="AVG ORDER"
+                value={aovCur == null ? '—' : money(aovCur)}
+                detail={aovCur == null ? 'Needs order count' : `${shownDays}d completed`}
+              />
+              <InsightMetric
+                label="ACCEPTANCE"
+                value={acceptanceRate == null ? '—' : `${acceptanceRate}%`}
+                detail={opsDetail}
+              />
+              <InsightMetric
+                label="CANCELLED"
+                value={cancellationRate == null ? '—' : `${cancellationRate}%`}
+                detail={opsDetail}
+              />
+            </View>
+
+            {aovCur != null && aovPrev != null ? (
+              <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.sm, marginTop: -space.md, marginBottom: space.lg }}>
+                <DeltaBadge cur={aovCur} prev={aovPrev} />
+                <T variant="caption" tone="muted">
+                  average order vs previous {period} days
+                </T>
+              </View>
+            ) : null}
+
+            {popularQ.isLoading && !popularQ.data ? (
+              <Card style={{ marginBottom: space.md }}>
+                <T variant="label" tone="muted">Loading item ranking…</T>
+              </Card>
+            ) : popularQ.isError && !popularQ.data ? (
+              <Card style={{ marginBottom: space.md }}>
+                <T variant="label" tone="muted">Item ranking is unavailable right now.</T>
+                <PillButton label="Retry" size="md" variant="soft" style={{ marginTop: space.sm }} onPress={() => popularQ.refetch()} />
+              </Card>
             ) : (
-              <View style={{ marginBottom: space.lg }} />
+              <>
+                {popularQ.isError ? (
+                  <T variant="caption" tone="muted" style={{ marginBottom: space.sm }}>
+                    Showing the last loaded item ranking — refresh did not complete.
+                  </T>
+                ) : null}
+                <TopItemsCard items={Array.isArray(popularQ.data) ? popularQ.data : []} sample={readOnly} />
+              </>
             )}
 
-            <OpsCard ops={opsQ.data} period={period} />
-
-            {popularQ.data ? <TopItemsCard items={popularQ.data} /> : null}
+            <T variant="heading" style={{ marginTop: space.md, marginBottom: space.md }}>
+              Business health
+            </T>
+            {/* MMG cash ledger — delivery fees owed to riders (renders only when non-empty) */}
+            <RiderFeesOwedCard />
+            <OpsCard ops={opsQ.data} period={period} stale={opsQ.isError} />
             <BusyHoursCard />
             <RepeatCustomersCard />
             <VendorStandingSection />
-            <RatingsCard />
+            <RatingsCard lifetimeOrders={numericFact(v.totalOrders)} />
             <ReviewsCard />
-            <Card style={{ marginBottom: space.md }}>
-              <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
-                <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.sm }}>
-                  <MaterialCommunityIcons name="star" size={18} color={color.warning} />
-                  <T variant="body" weight="semibold">
-                    {Number(v.averageRating ?? 0).toFixed(1)}
-                  </T>
-                  <T variant="label" tone="muted">
-                    ({v.totalRatings ?? 0})
-                  </T>
-                </View>
-                <T variant="label" tone="muted">
-                  {v.totalOrders ?? 0} lifetime orders
-                </T>
-              </View>
-            </Card>
             <View style={{ flexDirection: 'row', gap: space.md }}>
-              <KpiTile icon="silverware-fork-knife" value={String(a.activeMenuItems ?? 0)} label="Active items" />
-              <KpiTile icon="calendar-month" value={String(a.month?.orders ?? 0)} label="Orders / month" />
+              <KpiTile icon="silverware-fork-knife" value={numericFact(a.activeMenuItems) == null ? '—' : String(a.activeMenuItems)} label="Active items" />
+              <KpiTile icon="calendar-month" value={numericFact(a.month?.orders) == null ? '—' : String(a.month.orders)} label="Orders / month" />
             </View>
 
             {/* Printable 30-day sales statement (marketplace §12) — what a
                 store shows their accountant. Opens in the in-app browser. */}
-            <PillButton
-              label="Get sales statement"
-              variant="outline"
-              size="md"
-              style={{ marginTop: space.lg }}
-              loading={statement.isPending}
-              onPress={() => statement.mutate()}
-            />
-            {statement.isError ? (
-              <T variant="caption" tone="error" center style={{ marginTop: space.sm }}>
-                Couldn’t open the statement — try again.
-              </T>
+            {!readOnly ? (
+              <>
+                <PillButton
+                  label="Get sales statement"
+                  variant="outline"
+                  size="md"
+                  style={{ marginTop: space.lg }}
+                  loading={statement.isPending}
+                  onPress={() => statement.mutate()}
+                />
+                {statement.isError ? (
+                  <T variant="caption" tone="error" center style={{ marginTop: space.sm }}>
+                    Couldn’t open the statement — try again.
+                  </T>
+                ) : null}
+              </>
             ) : null}
           </>
         )}
@@ -2578,10 +3970,11 @@ function VendorInsightsScreen() {
 }
 
 function VendorAccountScreen() {
-  const { store, myRole } = useVendorProfile();
+  const { owner, store } = useVendorProfile();
+  const myRole = safeVendorRole(owner?.myRole);
   const [switcherOpen, setSwitcherOpen] = useState(false);
   const isOwner = myRole === 'OWNER';
-  const isManager = myRole !== 'STAFF';
+  const isManager = myRole === 'OWNER' || myRole === 'MANAGER';
   const sub = useVendorSubscription(isOwner);
   const hoursQ = useVendorHours();
   const setHours = useSetHours();
@@ -2762,7 +4155,7 @@ function SubscriptionCard({ sub, phone }: { sub: any; phone?: string }) {
     : sub.isTrialActive
       ? { label: 'Free trial', tone: 'brand' as const }
       : sub.isInGracePeriod
-        ? { label: 'Grace period', tone: 'error' as const }
+        ? { label: 'Grace period', tone: 'warning' as const }
         : sub.status === 'ACTIVE'
           ? { label: 'Active', tone: 'success' as const }
           : { label: String(sub.status ?? '').toLowerCase() || 'Inactive', tone: 'neutral' as const };
@@ -2771,14 +4164,12 @@ function SubscriptionCard({ sub, phone }: { sub: any; phone?: string }) {
     : sub.isTrialActive && sub.trialEndDate
       ? `Trial ends ${fmtDate(sub.trialEndDate)} · then ${money(sub.weeklyRate)}/week`
       : sub.isInGracePeriod && sub.gracePeriodEnd
-        ? `Pay by ${fmtDate(sub.gracePeriodEnd)} to stay online`
-        : // Dual-display law (USD ③): server-composed when USD pricing is on.
-          (sub.usdDisplay?.line ??
-            `${money(sub.customRate ?? sub.weeklyRate)}/week${sub.nextBillingDate ? ` · next bill ${fmtDate(sub.nextBillingDate)}` : ''}`);
+        ? `Weekly fee due by ${fmtDate(sub.gracePeriodEnd)}`
+        : `${money(sub.customRate ?? sub.weeklyRate)}/week${sub.nextBillingDate ? ` · next bill ${fmtDate(sub.nextBillingDate)}` : ''}`;
   return (
     <>
       <Card style={{ marginBottom: space.lg, paddingVertical: space.sm }}>
-        <SettingsRow icon="credit-card" label="Subscription" sub={subLine} right={<TonePill label={pill.label} tone={pill.tone} />} />
+        <SettingsRow icon="calendar" label="Subscription" sub={subLine} right={<TonePill label={pill.label} tone={pill.tone} />} />
         <SettingsRow
           icon="hash"
           label="My Swift Number"
@@ -2787,14 +4178,9 @@ function SubscriptionCard({ sub, phone }: { sub: any; phone?: string }) {
         />
         {phone ? <SettingsRow icon="phone" label="Phone" right={<T variant="label" tone="muted">{phone}</T>} /> : null}
       </Card>
-      {/* Honest billing status — wallet balance, grace deadline, or the paused
-          block. Silent on a healthy account (the row above is the way in). */}
-      <BillingStatusBlock
-        sub={sub}
-        onPay={() => navigation.navigate('VendorMySwiftNumber')}
-        compact
-        style={{ marginTop: 0, marginBottom: space.lg }}
-      />
+      {/* Only actionable billing status belongs here. A healthy account stays
+          quiet; prepaid fee credit is deliberately not framed as a wallet. */}
+      <VendorBillingNotice sub={sub} onPay={() => navigation.navigate('VendorMySwiftNumber')} />
     </>
   );
 }
@@ -3033,8 +4419,8 @@ function StaffSection() {
 
         <InlineInput value={phone} onChangeText={setPhone} placeholder="+592 phone of an existing Swift account" keyboardType="phone-pad" />
         <View style={{ flexDirection: 'row', gap: space.md, marginTop: space.md }}>
-          <Chip label="Staff (orders only)" selected={role === 'STAFF'} onPress={() => setRole('STAFF')} style={{ height: 38, paddingHorizontal: space.md }} />
-          <Chip label="Manager" selected={role === 'MANAGER'} onPress={() => setRole('MANAGER')} style={{ height: 38, paddingHorizontal: space.md }} />
+          <Chip label="Staff · queue + availability" selected={role === 'STAFF'} onPress={() => setRole('STAFF')} />
+          <Chip label="Manager" selected={role === 'MANAGER'} onPress={() => setRole('MANAGER')} />
         </View>
         {errMsg ? (
           <T variant="label" tone="error" style={{ marginTop: space.md }}>
@@ -3079,11 +4465,14 @@ function StaffSection() {
 }
 
 function MenuStackNav() {
+  const { owner } = useVendorProfile();
+  const myRole = safeVendorRole(owner?.myRole);
+  const canEdit = myRole === 'OWNER' || myRole === 'MANAGER';
   return (
     <Stack.Navigator screenOptions={{ headerShown: false }}>
       <Stack.Screen name="VendorMenu" component={VendorMenuScreen} />
-      <Stack.Screen name="VendorItemEditor" component={VendorItemEditorScreen} />
-      <Stack.Screen name="VendorBulkImport" component={VendorBulkImportScreen} />
+      {canEdit ? <Stack.Screen name="VendorItemEditor" component={VendorItemEditorScreen} /> : null}
+      {canEdit ? <Stack.Screen name="VendorBulkImport" component={VendorBulkImportScreen} /> : null}
     </Stack.Navigator>
   );
 }
@@ -3257,10 +4646,12 @@ function VendorScheduleScreen({ navigation }: any) {
 const VTab = createBottomTabNavigator();
 
 function VendorTabs() {
-  // Staff & roles (§4.1): floor STAFF work the order queue — menu tools and
-  // business insights are manager/owner surfaces (the API enforces the same).
-  const { myRole, store } = useVendorProfile();
-  const manager = myRole !== 'STAFF';
+  // Staff & roles (§4.1): floor STAFF work the order queue and the one inventory
+  // action the API grants them — availability. Authoring, schedule and business
+  // insights remain manager/owner surfaces.
+  const { owner, store } = useVendorProfile();
+  const myRole = safeVendorRole(owner?.myRole);
+  const manager = myRole === 'OWNER' || myRole === 'MANAGER';
   const cat = catalogueMeta(store?.vendorType); // R1: the catalogue tab is named for the type
   const isService = store?.vendorType === 'SERVICE';
   return (
@@ -3277,7 +4668,7 @@ function VendorTabs() {
         component={VendorOrdersTab}
         options={{ tabBarLabel: 'Orders', tabBarIcon: ({ color: c, size }) => <Feather name="clipboard" size={size} color={c} /> }}
       />
-      {isService ? (
+      {isService && manager ? (
         // R1: a Services store runs its day from a booking agenda, not the queue.
         <VTab.Screen
           name="Schedule"
@@ -3285,13 +4676,14 @@ function VendorTabs() {
           options={{ tabBarLabel: 'Schedule', tabBarIcon: ({ color: c, size }) => <Feather name="calendar" size={size} color={c} /> }}
         />
       ) : null}
-      {manager ? (
-        <VTab.Screen
-          name="Menu"
-          component={MenuStackNav}
-          options={{ tabBarLabel: cat.label, tabBarIcon: ({ color: c, size }) => <Feather name={cat.icon} size={size} color={c} /> }}
-        />
-      ) : null}
+      <VTab.Screen
+        name="Menu"
+        component={MenuStackNav}
+        options={{
+          tabBarLabel: manager ? cat.label : 'Availability',
+          tabBarIcon: ({ color: c, size }) => <Feather name={manager ? cat.icon : 'toggle-left'} size={size} color={c} />,
+        }}
+      />
       {manager ? (
         <VTab.Screen
           name="Insights"
