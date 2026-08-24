@@ -2,6 +2,7 @@
 import React from 'react';
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
+import { StyleSheet, Text } from 'react-native';
 import { color, font, fontSize } from '@swift/ui';
 import { TabGlyph, type TabGlyphName } from '../kit';
 
@@ -65,16 +66,39 @@ function HomeTabs() {
         headerShown: false,
         tabBarActiveTintColor: color.brand[500],
         tabBarInactiveTintColor: color.text.muted,
-        // White, hairline-free, floating on an upward shadow — per the kit.
+        // THE DOCK [100x pass §5]: "Blurred white dock, hairline edge, 25px
+        // glyphs, tighter labels; active = filled glyph + semibold label,
+        // nothing else."
+        //
+        // It used to float on a soft upward shadow with no top edge at all. A
+        // shadow says "this panel hovers"; a hairline says "the content ends
+        // here". The pass wants the second, because the dock is a boundary, not
+        // a floating object — and on the paper ground the shadow read as a
+        // smudge rather than a lift.
         tabBarStyle: {
           backgroundColor: color.surface.base,
-          borderTopWidth: 0,
-          boxShadow: '0px -4px 12px rgba(33,26,26,0.08)',
-          elevation: 10,
+          borderTopWidth: StyleSheet.hairlineWidth,
+          borderTopColor: color.border.subtle,
+          elevation: 0,
         },
-        tabBarLabelStyle: { fontSize: fontSize.micro, fontFamily: font.bodyMedium },
-        tabBarIcon: ({ focused, color: c, size }) => (
-          <TabGlyph name={TAB_ICON[route.name] ?? 'home'} focused={focused} color={c} size={size} />
+        // "active = filled glyph + semibold label, nothing else" — the weight
+        // change IS the emphasis. No pill, no dot, no background behind the
+        // active tab, which is what "nothing else" is guarding against.
+        tabBarLabel: ({ focused, color: c, children }) => (
+          <Text
+            numberOfLines={1}
+            style={{
+              fontSize: fontSize.micro,
+              fontFamily: focused ? font.bodySemiBold : font.bodyMedium,
+              color: c,
+              marginBottom: 2,
+            }}
+          >
+            {children}
+          </Text>
+        ),
+        tabBarIcon: ({ focused, color: c }) => (
+          <TabGlyph name={TAB_ICON[route.name] ?? 'home'} focused={focused} color={c} size={25} />
         ),
       })}
     >
