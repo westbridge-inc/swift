@@ -93,11 +93,17 @@ export function FoodCard({
   onPress?: () => void;
   width: number;
 }) {
+  // NO CARD CHASSIS [100x pass §5]: "Cards lose their gray borders —
+  // photography sits on open paper, Uber-style."
+  // The white card used to draw a lit box around every dish, so a shelf of food
+  // read as a shelf of BOXES — the chrome competed with the only thing worth
+  // looking at. Now the photograph carries its own corner radius and the name
+  // and price sit on the page ground beneath it.
   return (
     <Pressable onPress={onPress} accessibilityRole="button" accessibilityLabel={name}>
       {({ pressed }) => (
-      <Card pad={false} style={{ width, opacity: pressed ? 0.85 : 1 }}>
-        <View>
+      <View style={{ width, opacity: pressed ? 0.85 : 1 }}>
+        <View style={{ borderRadius: radius.lg, overflow: 'hidden' }}>
           {image ? (
             <Image
               source={{ uri: image }}
@@ -115,7 +121,7 @@ export function FoodCard({
             </View>
           ) : null}
         </View>
-        <View style={{ padding: space.md, gap: 4 }}>
+        <View style={{ paddingTop: space.sm, gap: 4 }}>
           <T variant="label" weight="semibold" numberOfLines={1}>
             {name}
           </T>
@@ -135,7 +141,7 @@ export function FoodCard({
             {rating !== undefined ? <RatingMeta rating={rating} bucket={ratingBucket} topRated={topRated} extra={meta} /> : null}
           </View>
         </View>
-      </Card>
+      </View>
       )}
     </Pressable>
   );

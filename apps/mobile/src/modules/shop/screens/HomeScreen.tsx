@@ -7,7 +7,7 @@ import { Feather } from '@expo/vector-icons';
 import { useNavigation } from '@react-navigation/native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { API_URL } from '../../../services/api';
-import { color, elevation, radius, space } from '@swift/ui';
+import { color, radius, space } from '@swift/ui';
 import { useDiscoveryCategories, useHome, useToggleFavorite } from '../../../hooks/customer';
 import { useAds } from '../../../hooks/ads';
 import { AdHeroVideo, AdTopCard, AdBar } from '../../../components/ads';
@@ -35,7 +35,6 @@ import {
   Pictogram,
   type PictogramName,
   PillButton,
-  PromoBanner,
   RatingMeta,
   SectionHeader,
   T,
@@ -213,47 +212,35 @@ export function HomeScreen() {
 
   return (
     <View style={{ flex: 1, backgroundColor: color.surface.subtle }}>
-      <ScrollView
-        showsVerticalScrollIndicator={false}
-        contentContainerStyle={{ paddingBottom: space['3xl'] }}
-        refreshControl={
-          <RefreshControl refreshing={home.isRefetching} onRefresh={() => home.refetch()} tintColor={color.white} />
-        }
-      >
-        {/* The masthead [DESIGN_NOTES 2026-08-18]: the brand wash deepens
-            500→600 and closes with the awning hem — Home's signature. Where +
-            who as the eyebrow, ONE display-face greeting, then search. */}
-        {/* FOUNDER VETO 08-22: the awning scallop ("the bump under the search
-            bar") is GONE — the register called it Home's signature; the
-            founder called it what it was. A clean 28dp sheet edge instead:
-            quieter, more premium, and the grid card below now visually docks
-            into the masthead. */}
-        <GradientMasthead style={{ paddingTop: insets.top, paddingBottom: space.xl, paddingHorizontal: GUTTER }}>
-          <View style={{ flexDirection: 'row', alignItems: 'center' }}>
-            <Pressable
-              onPress={() => (isAuthenticated ? navigation.navigate('Addresses') : navigation.navigate('LocationPicker'))}
-              style={{ flex: 1, paddingRight: space.md }}
-            >
-              {/* [F-263] The masthead was THREE stacked rows — a "DELIVER TO"
-                  label, the address, then the greeting on its own line — so a
-                  flat maroon slab held about a fifth of the display and the
-                  marketplace started below it. The greeting keeps its display
-                  moment (it is Home's one display-face line) and the address
-                  becomes its subline with a pin, which also stops "Set your
-                  location" reading as a filled-in field. Two rows, not three. */}
-              <T variant="heading" tone="onBrand" numberOfLines={1}>
-                {greetingLine(new Date().getHours())}
-                {user?.firstName?.trim() ? `, ${user.firstName.trim()}` : ''}
+      {/* THE HEADER IS FIXED [100x pass §5, "Home v2 — Uber-grade discipline"].
+          It used to live inside the ScrollView, so the greeting slid up under
+          the status-bar clock the moment you scrolled — the collision the pass
+          calls out by name. Now: location pill → greeting → search stay put,
+          and the content scrolls underneath them.
+
+          The ORDER is the pass's, and it is the other way round from what
+          shipped. Where you are is the first decision on a delivery home
+          screen — it decides which stores can even reach you — so the pill
+          leads, the greeting follows as the one display-face line, and search
+          closes the block. */}
+      {/* FOUNDER VETO 08-22: the awning scallop ("the bump under the search
+          bar") is GONE — the register called it Home's signature; the
+          founder called it what it was. A clean 28dp sheet edge instead. */}
+      <GradientMasthead style={{ paddingTop: insets.top, paddingBottom: space.lg, paddingHorizontal: GUTTER }}>
+        <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+          <Pressable
+            onPress={() => (isAuthenticated ? navigation.navigate('Addresses') : navigation.navigate('LocationPicker'))}
+            style={{ flex: 1, paddingRight: space.md }}
+          >
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4 }}>
+              <Feather name="map-pin" size={14} color={color.white} style={{ opacity: 0.85 }} />
+              <T variant="label" weight="semibold" tone="onBrand" numberOfLines={1} style={{ flexShrink: 1 }}>
+                {locationFix ? (address ?? 'Current location') : 'Set your location'}
               </T>
-              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4, marginTop: 2 }}>
-                <Feather name="map-pin" size={13} color={color.white} style={{ opacity: 0.8 }} />
-                <T variant="label" weight="semibold" tone="onBrand" numberOfLines={1} style={{ flexShrink: 1, opacity: 0.92 }}>
-                  {locationFix ? (address ?? 'Current location') : 'Set your location'}
-                </T>
-                <Feather name="chevron-down" size={15} color={color.white} style={{ opacity: 0.8 }} />
-              </View>
-            </Pressable>
-            <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.md }}>
+              <Feather name="chevron-down" size={15} color={color.white} style={{ opacity: 0.8 }} />
+            </View>
+          </Pressable>
+          <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.md }}>
               <Pressable onPress={() => navigation.navigate('Notifications')} hitSlop={8}>
                 <View style={{ width: 40, height: 40, borderRadius: 20, alignItems: 'center', justifyContent: 'center', backgroundColor: color.surface.onBrand }}>
                   <Feather name="bell" size={18} color={color.white} />
@@ -276,46 +263,63 @@ export function HomeScreen() {
                   </View>
                 )}
               </Pressable>
-            </View>
           </View>
+        </View>
 
+        {/* Home's ONE display-face line. It follows the pill now — you are
+            greeted after you know where you are being greeted. */}
+        <T variant="heading" tone="onBrand" numberOfLines={1} style={{ marginTop: space.sm }}>
+          {greetingLine(new Date().getHours())}
+          {user?.firstName?.trim() ? `, ${user.firstName.trim()}` : ''}
+        </T>
 
-          {/* Search — the front door on every super app */}
-          <Pressable onPress={() => navigation.navigate('Search')} style={{ marginTop: space.md }}>
-            {({ pressed }) => (
-              <View
-                style={{
-                  flexDirection: 'row',
-                  alignItems: 'center',
-                  gap: space.sm,
-                  height: 48,
-                  borderRadius: 9999,
-                  paddingHorizontal: space.lg,
-                  backgroundColor: color.surface.base,
-                  opacity: pressed ? 0.92 : 1,
-                }}
-              >
-                <Feather name="search" size={17} color={color.text.muted} />
-                <T variant="label" tone="muted">
-                  Restaurants, groceries, dishes…
-                </T>
-              </View>
-            )}
-          </Pressable>
-        </GradientMasthead>
+        {/* Search — the front door on every super app */}
+        <Pressable onPress={() => navigation.navigate('Search')} style={{ marginTop: space.md }}>
+          {({ pressed }) => (
+            <View
+              style={{
+                flexDirection: 'row',
+                alignItems: 'center',
+                gap: space.sm,
+                height: 48,
+                borderRadius: radius.full,
+                paddingHorizontal: space.lg,
+                backgroundColor: color.surface.base,
+                opacity: pressed ? 0.92 : 1,
+              }}
+            >
+              <Feather name="search" size={17} color={color.text.muted} />
+              <T variant="label" tone="muted">
+                Restaurants, groceries, dishes…
+              </T>
+            </View>
+          )}
+        </Pressable>
+      </GradientMasthead>
 
-        {/* THE services grid — the shelf under the awning: 4x2, drawn icons */}
+      <ScrollView
+        showsVerticalScrollIndicator={false}
+        contentContainerStyle={{ paddingBottom: space['3xl'] }}
+        refreshControl={
+          // The pull now happens on paper, not on the maroon wash, so the
+          // spinner has to be brand — white on white is an invisible spinner.
+          <RefreshControl refreshing={home.isRefetching} onRefresh={() => home.refetch()} tintColor={color.brand[500]} />
+        }
+      >
+        {/* THE services grid — 4x2, drawn icons, ON OPEN PAPER.
+            [100x pass §5/§6] "hairline rows on open paper (no card chassis)".
+            This grid used to sit in a floating white card with a shadow, which
+            is the single thing that made Home read as a launcher panel rather
+            than a marketplace: a chassis draws a box around navigation and
+            announces it as the subject. The tiles are the subject; the box was
+            furniture. Same tiles, same spacing — the container is just gone. */}
         <View
           style={{
             marginHorizontal: GUTTER,
-            marginTop: space.sm,
-            borderRadius: radius.xl,
-            backgroundColor: color.surface.base,
+            marginTop: space.lg,
             paddingBottom: space.md,
-            paddingHorizontal: space.sm,
             flexDirection: 'row',
             flexWrap: 'wrap',
-            ...elevation.card,
           }}
         >
           {SERVICES.map((s, i) => (
@@ -451,16 +455,20 @@ export function HomeScreen() {
                 the sunken surface so the rhythm reads: yours, theirs, then
                 back to the food [DESIGN_NOTES 2026-08-18]. */}
             <View style={{ backgroundColor: color.surface.sunken, paddingVertical: space['2xl'], marginTop: space['2xl'] }}>
-              {/* Honest promo — 0% fees is the business model, not marketing */}
-              <View style={{ paddingHorizontal: GUTTER }}>
-                <PromoBanner
-                  variant="tint"
-                  pictogram="orders"
-                  title="0% fees, always"
-                  sub="Swift never marks up your order. Pay cash when it arrives."
-                  cta="Order now"
-                  onPress={() => navigation.navigate('Search')}
-                />
+              {/* 0% FEES — ONE QUIET ROW [100x pass §5: "the 0% fees line, now
+                  one quiet row"]. It was a full brand-filled promo banner with
+                  a CTA, which made Swift's most credible claim look like an ad
+                  — and an ad is the one thing nobody believes. Stated plainly
+                  on paper, in ink, it reads as a fact about how Swift works,
+                  which is what it is. No CTA: it is not selling anything. */}
+              <View style={{ paddingHorizontal: GUTTER, flexDirection: 'row', alignItems: 'flex-start', gap: space.sm }}>
+                <Feather name="check-circle" size={16} color={color.success} style={{ marginTop: 2 }} />
+                <View style={{ flex: 1 }}>
+                  <T variant="bodyStrong">0% fees, always.</T>
+                  <T variant="caption" tone="muted" style={{ marginTop: 2 }}>
+                    Swift never marks up your order — pay cash when it arrives.
+                  </T>
+                </View>
               </View>
 
               {/* Tier 2 — top card slot (§13.2), the widget-row area. */}
