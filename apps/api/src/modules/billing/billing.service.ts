@@ -216,6 +216,7 @@ export class BillingService {
         sub, amount, charged.ref, now, periodKey,
         'settlePaymentId' in charged ? charged.settlePaymentId : undefined,
         priced.usdTrio,
+        charged.spendPrepaid,
       );
       return 'succeeded';
     }
@@ -368,22 +369,39 @@ export class BillingService {
     sub: SubWithRelations,
     amount: number,
   ): Promise<
-    | { ok: true; ref: string; settlePaymentId?: string }
+    /** `spendPrepaid` = debit this much from the prepaid balance INSIDE the
+     *  advance transaction, so the money and the week it buys commit together. */
+    | { ok: true; ref: string; settlePaymentId?: string; spendPrepaid?: number }
     | { ok: false; reason: string; failureCode?: NormalizedFailure }
     | { ok: false; pendingTx: string; clientKey: string; expiresAt: Date }
     | { ok: false; unknown: true; clientKey: string; failureRaw?: string }
     | { ok: false; deferred: true; reopenPaymentId?: string }
   > {
     // Prepaid balance is money Swift already holds — spend it before pinging any
-    // external rail. Atomic conditional decrement (no read-then-write race). This
-    // is also what makes an admin top-up reinstate a CARD/MMG sub: the recorded
-    // cash settles the fee instead of firing a fresh (and duplicate) external
-    // charge while the top-up sits unused and the partner stays suspended.
-    const prepaid = await this.prisma.prepaidBalance.updateMany({
-      where: { subscriptionId: sub.id, balance: { gte: amount } },
-      data: { balance: { decrement: amount } },
+    // external rail. This is also what makes an admin top-up reinstate a CARD/MMG
+    // sub: the recorded cash settles the fee instead of firing a fresh (and
+    // duplicate) external charge while the top-up sits unused and the partner
+    // stays suspended.
+    //
+    // [PAY-1 M0 · S0] This USED to decrement here, in its own standalone write,
+    // and then return — leaving the advance (payment row, period move, ledger) to
+    // a SEPARATE transaction further down. A crash in between spent the payer's
+    // credit and granted no week: money gone, service not given, and no ledger
+    // entry to find it by. That is the worst failure a billing system has.
+    //
+    // So the decision is made here and the SPEND happens inside the advance's own
+    // transaction (see applySuccessfulChargeInTx). The read below is deliberately
+    // not the race guard — the conditional decrement in that transaction still
+    // is, and it throws if someone else spent the balance first, rolling the whole
+    // advance back. Worst case we skip a cycle and retry. We never take money
+    // without granting the week it bought.
+    const balanceRow = await this.prisma.prepaidBalance.findUnique({
+      where: { subscriptionId: sub.id },
+      select: { balance: true },
     });
-    if (prepaid.count === 1) return { ok: true, ref: 'prepaid' };
+    if (balanceRow && Number(balanceRow.balance) >= amount) {
+      return { ok: true, ref: 'prepaid', spendPrepaid: amount };
+    }
 
     if (sub.billingMethod === 'CARD' && sub.paymentToken) {
       const result = await this.payments.chargeToken({
@@ -475,15 +493,18 @@ export class BillingService {
     settlePaymentId?: string,
     /** USD pricing: the pinned trio from the charge attempt (System 2 ②). */
     usdTrio?: { amountUsd: number; fxRateId: string; fxRateUsed: number },
+    /** Prepaid rail: debit this much inside the same transaction. */
+    spendPrepaid?: number,
   ) {
-    // One transaction for the whole advance [tollgate M-13]: payment row,
-    // period move, audit event, and the balanced ledger posting commit or roll
-    // back together — a crash can no longer strand a captured payment without
-    // its period (or books without their entry). Racing settlers converge on
-    // identical absolute period values; the CHARGE_SUCCESS unique key rolls
-    // the loser back whole.
+    // One transaction for the whole advance [tollgate M-13]: the prepaid debit,
+    // payment row, period move, audit event, and the balanced ledger posting
+    // commit or roll back together — a crash can no longer strand a captured
+    // payment without its period (or books without their entry), NOR spend a
+    // payer's credit without granting the week [PAY-1 M0 S0]. Racing settlers
+    // converge on identical absolute period values; the CHARGE_SUCCESS unique
+    // key rolls the loser back whole.
     await this.prisma.$transaction(async (tx) => {
-      await this.applySuccessfulChargeInTx(tx, sub, amount, paymentRef, now, periodKey, settlePaymentId, usdTrio);
+      await this.applySuccessfulChargeInTx(tx, sub, amount, paymentRef, now, periodKey, settlePaymentId, usdTrio, spendPrepaid);
     });
     await this.afterSuccessfulCharge(sub, amount, periodKey);
   }
@@ -501,9 +522,27 @@ export class BillingService {
     periodKey: string,
     settlePaymentId?: string,
     usdTrio?: { amountUsd: number; fxRateId: string; fxRateUsed: number },
+    spendPrepaid?: number,
   ) {
     const periodStart = sub.nextBillingDate;
     const periodEnd = new Date(periodStart.getTime() + WEEK_MS);
+
+    // THE PREPAID SPEND — first, and inside this transaction, so the money and
+    // the week it buys share one fate [PAY-1 M0 S0]. Still the atomic
+    // conditional decrement, so it is still the race guard: if a concurrent
+    // settler spent the balance between attemptCharge's read and here, count is
+    // 0 and we throw, rolling back the payment row, the period move and the
+    // ledger entry with it. The cycle simply retries. Skipping a week is
+    // recoverable; taking money without granting service is not.
+    if (spendPrepaid && spendPrepaid > 0) {
+      const debited = await tx.prepaidBalance.updateMany({
+        where: { subscriptionId: sub.id, balance: { gte: spendPrepaid } },
+        data: { balance: { decrement: spendPrepaid } },
+      });
+      if (debited.count !== 1) {
+        throw new Error(`prepaid balance no longer covers ${spendPrepaid} for subscription ${sub.id}`);
+      }
+    }
 
     if (settlePaymentId) {
       await tx.subscriptionPayment.update({
