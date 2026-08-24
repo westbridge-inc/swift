@@ -10,6 +10,7 @@ import {
   processSettlement,
   type CashSettlementRow,
 } from '@/lib/api';
+import { MutationError } from '@/components/MutationError';
 
 const gyd = (n: unknown) => `$${Number(n || 0).toLocaleString()}`;
 
@@ -65,13 +66,7 @@ function MmgSection() {
                   </span>
                 </div>
               ))}
-              {mixQ.isError ? (
-                <p role="alert" className="text-sm" style={{ color: 'var(--bad)' }}>
-                  Couldn&apos;t load the payment mix: {(mixQ.error as Error).message}
-                </p>
-              ) : (mix?.byMethod ?? []).length === 0 ? (
-                <p className="text-sm text-[var(--muted)]">No completed orders yet.</p>
-              ) : null}
+              {(mix?.byMethod ?? []).length === 0 && <p className="text-sm text-[var(--muted)]">No completed orders yet.</p>}
             </div>
           )}
         </div>
@@ -134,12 +129,7 @@ function MmgSection() {
   );
 }
 
-/** [WR-003] Weekly sales digests. Swift never holds vendor money (cash is
- *  customer→vendor direct), so there is NO payout here — closing a row
- *  records the vendor's own completed sales and sends them the digest
- *  (server reframed the same way in SWIFT-031). The old "mark PAID once the
- *  money has moved" copy implied a transfer rail that intentionally doesn't
- *  exist. */
+/** Manual weekly vendor payouts: mark PAID with a transfer reference. */
 function SettlementsSection() {
   const qc = useQueryClient();
   const { data, isLoading } = useQuery({ queryKey: ['settlements'], queryFn: () => fetchSettlements('limit=50&status=PENDING') });
@@ -152,16 +142,15 @@ function SettlementsSection() {
 
   return (
     <div className="bg-[var(--panel)] rounded-xl border border-[var(--border)] p-6 mb-6">
-      <h2 className="text-lg font-semibold mb-1">Weekly sales digests pending</h2>
+      <h2 className="text-lg font-semibold mb-1">Vendor settlements pending</h2>
       <p className="text-[var(--muted)] text-xs mb-4">
-        Swift moves no money — closing a digest records the vendor&apos;s own completed sales
-        and sends them their weekly summary. It is a record, never a payout.
+        Manual transfers — mark each PAID with its bank reference once the money has moved.
       </p>
-      {process.error ? (
-        <p role="alert" className="text-xs mb-3" style={{ color: 'var(--bad)' }}>
-          Digest did not close: {(process.error as Error).message}
-        </p>
-      ) : null}
+      {process.error && (
+        <div className="mb-3">
+          <MutationError error={process.error} label="Settlement update failed" />
+        </div>
+      )}
       {isLoading ? (
         <p className="text-sm text-[var(--muted)]">Loading…</p>
       ) : (
@@ -176,15 +165,13 @@ function SettlementsSection() {
               <span className="ml-auto font-semibold">{gyd(s.totalBase ?? s.amount)}</span>
               <button
                 onClick={() => {
-                  const ref = window.prompt(`Note/reference for ${s.vendor?.name ?? 'this vendor'}'s digest (optional):`) ?? undefined;
-                  if (window.confirm('Close this digest and send the vendor their weekly sales summary?')) {
-                    process.mutate({ id: s.id, reference: ref || undefined });
-                  }
+                  const ref = window.prompt(`Bank/transfer reference for ${s.vendor?.name ?? 'this settlement'} (optional):`) ?? undefined;
+                  if (window.confirm(`Mark this settlement PAID?`)) process.mutate({ id: s.id, reference: ref || undefined });
                 }}
                 disabled={process.isPending}
                 className="px-3 py-1 rounded-lg text-xs bg-[var(--accent)] hover:bg-[var(--accent)]/80 disabled:opacity-50"
               >
-                Close digest
+                Mark paid
               </button>
             </div>
           ))}

@@ -57,12 +57,9 @@ async function apiFetch(path: string, options?: RequestInit) {
       throw new Error('Session expired. Please sign in again.');
     }
   }
-  // [WR-005] Surface the server's real message (e.g. the MMG refund
-  // fail-closed 409) instead of a bare status code — the alert strips
-  // render this string to the operator.
-  const json = await res.json().catch(() => ({}) as Record<string, never>);
-  if (!res.ok || (json as { success?: boolean })?.success === false) {
-    throw new Error((json as { error?: { message?: string } })?.error?.message || `API error: ${res.status}`);
+  const json = await res.json().catch(() => ({}));
+  if (!res.ok || json?.success === false) {
+    throw new Error(json?.error?.message || `API error: ${res.status}`);
   }
   return json;
 }
@@ -201,16 +198,8 @@ export const featureVendor = (id: string, featured: boolean) =>
 export const fetchSubscriptions = (params?: string) => apiFetch(`/api/v1/admin/subscriptions?${params || 'limit=50'}`);
 export const waiveSubscriptionFee = (id: string, reason?: string) =>
   apiFetch(`/api/v1/admin/subscriptions/${id}/waive-fee`, { method: 'PUT', body: JSON.stringify({ reason }) });
-export const topUpSubscription = (id: string, amount: number, reference?: string, idempotencyKey?: string) =>
-  apiFetch(`/api/v1/admin/subscriptions/${id}/topup`, {
-    method: 'POST',
-    body: JSON.stringify({ amount, reference }),
-    // [WR-002] Without this header the server falls back to a time-based key —
-    // its own comment calls that "opted out of dedup" — so a double-tap or
-    // network retry could credit twice.
-    ...(idempotencyKey ? { headers: { 'Idempotency-Key': idempotencyKey } } : {}),
-  });
-export const fetchZones = () => apiFetch('/api/v1/admin/zones');
+export const topUpSubscription = (id: string, amount: number, reference?: string) =>
+  apiFetch(`/api/v1/admin/subscriptions/${id}/topup`, { method: 'POST', body: JSON.stringify({ amount, reference }) });
 export const fetchBillingEvents = (id: string) => apiFetch(`/api/v1/admin/subscriptions/${id}/billing-events?limit=20`);
 export const fetchSettlements = (params?: string) => apiFetch(`/api/v1/admin/finance/settlements?${params || 'limit=50'}`);
 export const processSettlement = (id: string, reference?: string) =>

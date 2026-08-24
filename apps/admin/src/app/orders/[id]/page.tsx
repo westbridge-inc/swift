@@ -6,6 +6,7 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { ArrowLeft, Phone } from 'lucide-react';
 import { fetchOrderDetail, cancelOrder } from '@/lib/api';
 import { statusClass } from '@/lib/status';
+import { MutationError } from '@/components/MutationError';
 
 const gyd = (n: unknown) => `$${Number(n || 0).toLocaleString()}`;
 const TERMINAL = ['DELIVERED', 'COMPLETED', 'CANCELLED', 'REFUNDED', 'FAILED'];
@@ -75,6 +76,7 @@ export default function OrderDetailPage({ params }: { params: Promise<{ id: stri
   const mover = o.rider?.user ?? o.driver?.user;
   const moverLabel = o.rider ? 'Rider' : o.driver ? 'Driver' : null;
   const isMmg = o.paymentMethod === 'MOBILE_MONEY';
+  const refundingStore = o.vendor?.name ?? 'the store';
   const timeline: any[] = o.statusHistory ?? [];
 
   return (
@@ -104,7 +106,9 @@ export default function OrderDetailPage({ params }: { params: Promise<{ id: stri
             <>
               <button
                 onClick={() => {
-                  const mmgNote = o.paymentMethod === 'MOBILE_MONEY' && o.paymentStatus !== 'CAPTURED' ? '\n\nMMG payment unconfirmed: the customer gets direct-refund guidance and the store is told it may hold the transfer.' : '';
+                  const mmgNote = isMmg
+                    ? `\n\nMMG payment stays between customer and store. If paid, it is refunded by ${refundingStore}; Swift cannot refund it.`
+                    : '';
                   if (window.confirm(`Cancel order ${o.orderNumber}?${mmgNote}`)) cancelMutation.mutate({ refund: false });
                 }}
                 disabled={cancelMutation.isPending}
@@ -112,25 +116,29 @@ export default function OrderDetailPage({ params }: { params: Promise<{ id: stri
               >
                 Cancel order
               </button>
-              <button
-                onClick={() => {
-                  if (window.confirm(`Cancel ${o.orderNumber} AND record a refund of cash paid?`)) cancelMutation.mutate({ refund: true });
-                }}
-                disabled={cancelMutation.isPending}
-                className="px-4 py-2 rounded-lg text-sm bg-[var(--accent)] hover:bg-[var(--accent)]/80 disabled:opacity-50"
-              >
-                Cancel + refund
-              </button>
+              {o.paymentMethod === 'CASH' && (
+                <button
+                  onClick={() => {
+                    if (window.confirm(`Cancel ${o.orderNumber} and record cash as refunded by ${refundingStore}?`)) {
+                      cancelMutation.mutate({ refund: true });
+                    }
+                  }}
+                  disabled={cancelMutation.isPending}
+                  className="px-4 py-2 rounded-lg text-sm bg-[var(--accent)] hover:bg-[var(--accent)]/80 disabled:opacity-50"
+                >
+                  Record store refund
+                </button>
+              )}
             </>
           )}
         </div>
       </div>
 
-      {cancelMutation.error ? (
-        <p role="alert" className="text-xs mb-4" style={{ color: 'var(--bad)' }}>
-          Order action did not confirm: {(cancelMutation.error as Error).message}
-        </p>
-      ) : null}
+      {cancelMutation.error && (
+        <div className="mb-4">
+          <MutationError error={cancelMutation.error} label="Order cancellation failed" />
+        </div>
+      )}
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
         {/* Left column — what + who */}

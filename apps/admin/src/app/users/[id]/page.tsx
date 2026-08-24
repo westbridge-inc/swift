@@ -3,10 +3,10 @@
 import { use } from 'react';
 import Link from 'next/link';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { MutationNotice } from '@/components/MutationNotice';
 import { fetchUserDetail, suspendUser, unsuspendUser, banUser } from '@/lib/api';
 import { Section, Row, StatusPill, BackLink, ActionButton, gyd } from '@/components/detail';
 import { statusClass } from '@/lib/status';
+import { MutationError } from '@/components/MutationError';
 
 export default function UserDetailPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = use(params);
@@ -45,7 +45,6 @@ export default function UserDetailPage({ params }: { params: Promise<{ id: strin
         </div>
         <div>
           <h1 className="text-2xl font-bold">{name}</h1>
-          <MutationNotice errors={[suspend.error, unsuspend.error, ban.error]} />
           <p className="text-sm text-[var(--muted)]">
             {u.phone}
             {u.email ? ` · ${u.email}` : ''}
@@ -69,6 +68,12 @@ export default function UserDetailPage({ params }: { params: Promise<{ id: strin
           )}
         </div>
       </div>
+
+      {suspend.error && (
+        <div className="mb-4">
+          <MutationError error={suspend.error} label="Suspension failed" />
+        </div>
+      )}
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
         <div className="lg:col-span-2 space-y-4">

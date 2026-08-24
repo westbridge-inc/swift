@@ -2,7 +2,6 @@
 
 import { useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { MutationNotice } from '@/components/MutationNotice';
 import { fetchCompliance, runComplianceAudit, decideComplianceReview, resolveComplianceViolation } from '@/lib/api';
 
 /**
@@ -38,7 +37,6 @@ export default function CompliancePage() {
     <div>
       <div className="flex items-center justify-between mb-1">
         <h1 className="text-2xl font-bold">Compliance</h1>
-        <MutationNotice errors={[run.error, decide.error, resolve.error]} />
         <button
           onClick={() => run.mutate()}
           disabled={run.isPending}

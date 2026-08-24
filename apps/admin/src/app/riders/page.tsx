@@ -2,7 +2,6 @@
 
 import Link from 'next/link';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { MutationNotice } from '@/components/MutationNotice';
 import { fetchRiders, verifyRiderDocuments } from '@/lib/api';
 
 export default function RidersPage() {
@@ -16,7 +15,6 @@ export default function RidersPage() {
   return (
     <div>
       <h1 className="text-2xl font-bold mb-6">Riders</h1>
-      <MutationNotice errors={[verifyMutation.error]} />
       <div className="bg-[var(--panel)] rounded-xl border border-[var(--border)] overflow-hidden">
         <table className="w-full text-sm">
           <thead>
