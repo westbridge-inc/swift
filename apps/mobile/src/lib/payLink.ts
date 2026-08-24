@@ -56,19 +56,21 @@ function isPublicPaymentHostname(rawHostname: string): boolean {
   return /^[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?$/.test(hostname) && !hostname.includes('..');
 }
 
-/** Defense in depth for the one server-issued post-checkout action. The client
- * does not invent/accept a raw vendor URL and does not try to duplicate the
- * server's deployment allowlist. */
-export function safeMmgPaymentActionUrl(action: MmgDirectPaymentAction | null | undefined): string | null {
-  if (
-    action?.kind !== 'OPEN_EXTERNAL_URL'
-    || action.method !== 'MOBILE_MONEY'
-    || action.provider !== 'MMG'
-    || action.fundsFlow !== 'DIRECT_TO_VENDOR'
-  ) return null;
+/**
+ * The URL invariants EVERY money link must satisfy, however it reached us.
+ *
+ * These lived inside `safeMmgPaymentActionUrl`, which only accepts the
+ * server-issued action object — so a raw "pay me" string had no way to be
+ * checked, and the driver pay link in RidePostTripSheet was opened straight
+ * from `ride.driver.mmgPayUrl` with no validation at all. A link that decides
+ * where a customer's money goes is exactly the wrong place to trust a bare
+ * string, so the shape check now stands on its own and both callers use it.
+ */
+export function safePayUrl(raw: string | null | undefined): string | null {
+  if (!raw) return null;
   let parsed: URL;
   try {
-    parsed = new URL(action.url);
+    parsed = new URL(raw);
   } catch {
     return null;
   }
@@ -81,6 +83,19 @@ export function safeMmgPaymentActionUrl(action: MmgDirectPaymentAction | null | 
     || !isPublicPaymentHostname(parsed.hostname)
   ) return null;
   return parsed.toString();
+}
+
+/** Defense in depth for the one server-issued post-checkout action. The client
+ * does not invent/accept a raw vendor URL and does not try to duplicate the
+ * server's deployment allowlist. */
+export function safeMmgPaymentActionUrl(action: MmgDirectPaymentAction | null | undefined): string | null {
+  if (
+    action?.kind !== 'OPEN_EXTERNAL_URL'
+    || action.method !== 'MOBILE_MONEY'
+    || action.provider !== 'MMG'
+    || action.fundsFlow !== 'DIRECT_TO_VENDOR'
+  ) return null;
+  return safePayUrl(action.url);
 }
 
 export async function openMmgPaymentAction(
