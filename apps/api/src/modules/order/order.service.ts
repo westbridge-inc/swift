@@ -837,6 +837,28 @@ export class OrderService {
       promoVendorId = promo.vendorId;
     }
 
+    // [REPORT-034 S1] A discount can never exceed what the basket it targets is
+    // able to absorb. A FIXED_AMOUNT promo takes its value verbatim (see
+    // validatePromoCode), so a $5,000 code on a $1,200 basket used to subtract
+    // the whole $5,000 here — while each stored order clamped its own total at
+    // zero further down. The result was a response `grandTotal` that disagreed
+    // with the rows it summarised, and a lifetime `totalSpent` that could be
+    // DECREMENTED by placing an order. Swift never owes a customer money: the
+    // floor is zero, and it belongs at the point the discount is decided so
+    // that every consumer below — the per-plan allocation, the stored totals,
+    // the receipt and the spend ledger — reads the same number.
+    //
+    // The capacity mirrors the allocation rule used later: a vendor promo can
+    // only be absorbed by ITS vendor's plan; a platform code by the whole
+    // basket. Tip rides whichever plan carries it.
+    const promoPlanIdxForCap = promoVendorId ? plans.findIndex((p) => p.vendor.id === promoVendorId) : -1;
+    const tipForPlan = (i: number) => (i === tipPlanIndex ? effectiveTip : 0);
+    const discountCapacity = (promoPlanIdxForCap >= 0 ? [promoPlanIdxForCap] : plans.map((_, i) => i)).reduce(
+      (sum, i) => sum + plans[i]!.subtotal + plans[i]!.deliveryFee + tipForPlan(i),
+      0,
+    );
+    discount = Math.min(discount, Math.max(0, discountCapacity));
+
     assertCashDiscountSponsored({
       paymentMethod: input.paymentMethod,
       discount,

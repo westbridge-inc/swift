@@ -436,6 +436,58 @@ describe('high-value promo gate [SWIFT-162]', () => {
     }
   });
 
+  // [REPORT-034 S1] A FIXED_AMOUNT promo takes its value verbatim, so a code
+  // worth more than the basket used to be subtracted in full from the response
+  // grandTotal while each stored order clamped its own total at zero. The
+  // receipt disagreed with the rows, and lifetime spend could be DECREMENTED by
+  // placing an order. Swift never owes a customer money.
+  it('a promo worth more than the basket never drives the total below zero', async () => {
+    const code = `OVER${nanoid(6).toUpperCase()}`;
+    const promo = await app.prisma.promoCode.create({
+      data: {
+        code, description: 'bigger than the basket', discountType: 'FIXED_AMOUNT', discountValue: 500000,
+        validFrom: new Date(Date.now() - 3600000), validUntil: new Date(Date.now() + 3600000),
+        maxUses: 100, maxUsesPerUser: 5, isActive: true,
+      },
+    });
+    try {
+      seq += 1;
+      const user = await app.prisma.user.create({
+        data: {
+          phone: `+${phoneBase + 800000 + seq}`, firstName: 'Intg', lastName: `OV${seq}`,
+          roles: ['CUSTOMER'] as UserRole[], activeRole: 'CUSTOMER', isPhoneVerified: true,
+          selfieCapturedAt: new Date(), trustLevel: 'L2', customer: { create: {} },
+        },
+      });
+      createdUserIds.push(user.id);
+      const token = app.jwt.sign({ userId: user.id, role: 'CUSTOMER', jti: nanoid(8) });
+      await app.prisma.session.create({ data: { authMethod: 'OTP', userId: user.id, token, refreshToken: nanoid(48), deviceId: 'intg', deviceType: 'test', expiresAt: new Date(Date.now() + 86400000) } });
+      const addr = await app.prisma.address.create({ data: { userId: user.id, label: 'Home', addressLine1: '1 Close St', city: 'Georgetown', region: 'Demerara-Mahaica', latitude: 6.8013, longitude: -58.1553 } });
+
+      const spendBefore = Number((await app.prisma.customer.findUnique({ where: { userId: user.id }, select: { totalSpent: true } }))?.totalSpent ?? 0);
+
+      await inject('POST', '/api/v1/customer/cart/items', { vendorId, itemId, quantity: 1 }, token);
+      await inject('PUT', '/api/v1/customer/cart/address', { addressId: addr.id }, token);
+      const res = await inject('POST', '/api/v1/customer/checkout', { paymentMethod: 'CASH', promoCode: code, fulfillmentSelections: { [vendorId]: 'PICKUP' } }, token);
+      expect(res.statusCode).toBe(200);
+
+      const body = res.json().data;
+      // The receipt must never be negative, and it must equal the rows it summarises.
+      expect(body.grandTotal).toBeGreaterThanOrEqual(0);
+      const orders = await app.prisma.order.findMany({ where: { customerId: user.id }, select: { totalAmount: true, discount: true } });
+      const summed = orders.reduce((s, o) => s + Number(o.totalAmount), 0);
+      expect(body.grandTotal).toBe(summed);
+      for (const o of orders) expect(Number(o.totalAmount)).toBeGreaterThanOrEqual(0);
+
+      // Lifetime spend can only ever go up.
+      const spendAfter = Number((await app.prisma.customer.findUnique({ where: { userId: user.id }, select: { totalSpent: true } }))?.totalSpent ?? 0);
+      expect(spendAfter).toBeGreaterThanOrEqual(spendBefore);
+    } finally {
+      await app.prisma.order.deleteMany({ where: { promoCodeId: promo.id } });
+      await app.prisma.promoCode.delete({ where: { id: promo.id } }).catch(() => {});
+    }
+  });
+
   it('an ID-verified (L2) account redeems the same high-value promo fine', async () => {
     const s = await bigPromoSetup('L2Big');
     try {
