@@ -71,6 +71,8 @@ const TENANT_QUERY_EXTENSIONS = {
   adEvent: scoped, houseAd: scoped, adsSettings: scoped, adsAuditLog: scoped,
   // Ratings.
   actorRatingStat: scoped, ratingReport: scoped, itemFeedback: scoped, ratingTagDef: scoped,
+  // UGC compliance audit trails.
+  contentReport: scoped, userBlock: scoped,
   // Growth / QR attribution.
   slugRedirect: scoped, pendingAttribution: scoped, attributionClaim: scoped, scanDailyRollup: scoped,
   // Batching + scheduling.
@@ -143,6 +145,11 @@ const denyMutation = async (): Promise<never> => {
   throw new Error(IMMUTABLE);
 };
 
+const UGC_AUDIT_IMMUTABLE = 'UGC reports and block episodes are audit evidence; hard-delete is not permitted';
+const denyUgcAuditDelete = async (): Promise<never> => {
+  throw new Error(UGC_AUDIT_IMMUTABLE);
+};
+
 const prisma = new PrismaClient({
   log: process.env['NODE_ENV'] === 'development' ? ['query', 'warn', 'error'] : ['warn', 'error'],
 }).$extends({
@@ -154,6 +161,14 @@ const prisma = new PrismaClient({
       upsert: denyMutation,
       delete: denyMutation,
       deleteMany: denyMutation,
+    },
+    contentReport: {
+      delete: denyUgcAuditDelete,
+      deleteMany: denyUgcAuditDelete,
+    },
+    userBlock: {
+      delete: denyUgcAuditDelete,
+      deleteMany: denyUgcAuditDelete,
     },
   },
 }).$extends({

@@ -234,6 +234,33 @@ describe('offer attempt identity [REPORT-014 F-014-04]', () => {
     expect((recovered as { offerAttemptId?: string }).offerAttemptId).toBe(job.attemptId);
   });
 
+  it('a block created after dispatch prevents acceptance and cascades the live offer', async () => {
+    await parkAllRiders();
+    const blockedRider = await makeRider();
+    const backupRider = await makeRider({ lat: PICKUP.lat + 0.01 });
+    const order = await makeOrder();
+
+    const offered = await dispatch.dispatchOrder(order.id);
+    expect(offered.offered).toBe(blockedRider.riderId);
+    const liveAttempt = scheduled[scheduled.length - 1]!.attemptId;
+
+    await app.prisma.userBlock.create({
+      data: {
+        tenantId: order.tenantId,
+        blockerId: customerId,
+        blockedId: blockedRider.userId,
+      },
+    });
+
+    await expect(dispatch.acceptOffer(order.id, blockedRider.userId, undefined, liveAttempt))
+      .rejects.toMatchObject({ code: 'USER_BLOCKED' });
+    expect((await app.redis.get(offerKey(order.id)))!.split(':')[0]).toBe(blockedRider.riderId);
+    expect((await app.prisma.order.findUniqueOrThrow({ where: { id: order.id } })).riderId).toBeNull();
+
+    await expect(dispatch.currentOfferFor(blockedRider.riderId)).resolves.toBeNull();
+    expect((await app.redis.get(offerKey(order.id)))!.split(':')[0]).toBe(backupRider.riderId);
+  });
+
   it('one mover never holds two live offers — the second order cascades to the next candidate [REPORT-014 F-014-05]', async () => {
     await parkAllRiders();
     const m = await makeRider(); // closest — would be top for BOTH orders

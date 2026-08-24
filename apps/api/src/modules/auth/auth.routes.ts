@@ -8,6 +8,7 @@ import { AppError } from '../../utils/errors';
 import { zPhone } from '../../utils/phone';
 import { ALLOWED_IMAGE_TYPES, looksLikeImage } from '../../utils/images';
 import { getStorageProvider } from '../../providers/storage/storage-provider';
+import { assertAcceptableContent } from '../moderation/content-filter';
 
 const sendOtpSchema = z.object({
   phone: zPhone,
@@ -96,6 +97,7 @@ export async function authRoutes(app: FastifyInstance) {
 
   app.post('/register', authRateLimit, async (request, reply) => {
     const body = registerSchema.parse(request.body);
+    assertAcceptableContent({ firstName: body.firstName, lastName: body.lastName });
     // Read at request time so the flag flips without a restart (tsx watch) and
     // tests can exercise both modes.
     // [REPORT-021 F-021-05] Fail CLOSED: consent is required unless the

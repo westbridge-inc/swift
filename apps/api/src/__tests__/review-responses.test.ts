@@ -193,4 +193,46 @@ describe('Operator replies to a review', () => {
     expect(forbidden.statusCode).toBe(403);
     expect(forbidden.json().error.code).toBe('STAFF_FORBIDDEN');
   });
+
+  it('hides a blocked manager-authored reply and prevents further reply contact', async () => {
+    const manager = await makeUser(['CUSTOMER'], 'CUSTOMER');
+    await app.prisma.vendorStaff.create({
+      data: { vendorId, userId: manager.userId, role: 'MANAGER', invitedBy: owner.userId },
+    });
+
+    const authored = await inject('POST', `/api/v1/vendor/reviews/${ratingId}/respond`, {
+      response: 'A manager-authored public response.',
+    }, manager.token);
+    expect(authored.statusCode).toBe(200);
+    expect(authored.json().data.respondedBy).toBe(manager.userId);
+
+    const tenant = await app.prisma.user.findUniqueOrThrow({
+      where: { id: customer.userId },
+      select: { tenantId: true },
+    });
+    await app.prisma.userBlock.create({
+      data: {
+        tenantId: tenant.tenantId,
+        blockerId: customer.userId,
+        blockedId: manager.userId,
+      },
+    });
+
+    const feed = await inject('GET', `/api/v1/customer/vendors/${vendorId}/reviews`, undefined, customer.token);
+    expect(feed.statusCode).toBe(200);
+    expect(feed.json().data.reviews.find((review: { id: string }) => review.id === ratingId)).toMatchObject({
+      response: null,
+      respondedAt: null,
+    });
+
+    const blockedEdit = await inject('POST', `/api/v1/vendor/reviews/${ratingId}/respond`, {
+      response: 'This must not reach the blocked reviewer.',
+    }, manager.token);
+    expect(blockedEdit.statusCode).toBe(403);
+    expect(blockedEdit.json().error.code).toBe('USER_BLOCKED');
+
+    const persisted = await app.prisma.rating.findUniqueOrThrow({ where: { id: ratingId } });
+    expect(persisted.response).toBe('A manager-authored public response.');
+    expect(persisted.respondedBy).toBe(manager.userId);
+  });
 });

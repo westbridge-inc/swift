@@ -4,6 +4,7 @@ import { AppError, ValidationError } from '../../utils/errors';
 import { VEHICLE_CLASSES } from '../../config/vehicle-classes';
 import { FloatService } from '../dispatch/float.service';
 import { NotificationService, notifyAdmins } from '../notification/notification.service';
+import { assertAcceptableContent } from '../moderation/content-filter';
 
 // ---------------------------------------------------------------------------
 // Partner provisioning (deterministic code — hard rule #1). `register` appends
@@ -82,6 +83,12 @@ export class PartnerService {
   private validateInput(input: BecomePartnerInput): void {
     if (input.role === 'VENDOR') {
       if (!input.business) throw new ValidationError('Business details are required to sell on Swift');
+      assertAcceptableContent({
+        name: input.business.name,
+        addressLine1: input.business.addressLine1,
+        city: input.business.city,
+        region: input.business.region,
+      });
       return;
     }
     if (!input.vehicleType) throw new ValidationError('Vehicle type is required to move with Swift');
@@ -92,6 +99,14 @@ export class PartnerService {
     const rideClass = VEHICLE_CLASSES[input.vehicleType]?.rideClass;
     if (rideClass && !input.vehicle) {
       throw new ValidationError('Vehicle details (make, model, year, colour, licence plate) are required to drive');
+    }
+    if (input.vehicle) {
+      assertAcceptableContent({
+        make: input.vehicle.make,
+        model: input.vehicle.model,
+        color: input.vehicle.color,
+        licensePlate: input.vehicle.licensePlate,
+      });
     }
   }
 

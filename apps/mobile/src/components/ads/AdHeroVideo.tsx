@@ -9,6 +9,7 @@ import { AdChip } from './AdChip';
 import { useAdViewability } from './useAdViewability';
 import { trackAdEvent, openAdDestination } from '../../lib/ads';
 import type { AdEventScope, AdServeItem } from '../../lib/adsCore';
+import { ContentSafetyActions } from '../moderation/ContentSafetyActions';
 
 // Tier 1 — the hero video card (spec §13.1). Poster first; autoplay MUTED when
 // ≥50% on screen; pause when scrolled off (battery/data — the Caribbean device
@@ -160,6 +161,12 @@ export function AdHeroVideo({
           </View>
         ) : null}
       </Pressable>
+      <ContentSafetyActions
+        targetType="AD_CREATIVE"
+        targetId={item.creativeId}
+        contentLabel="advertisement"
+        style={{ marginTop: space.sm }}
+      />
     </View>
   );
 }

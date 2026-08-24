@@ -8,6 +8,7 @@ import { withAlpha, color, radius, space } from '@swift/ui';
 import { useChatMessages, useChatRoom, useSendMessage } from '../../../hooks/chat';
 import { useAuthStore } from '../../../stores/authStore';
 import { ErrorState, Header, LoadingBlock, Screen, T } from '../../../kit';
+import { ContentSafetyActions } from '../../../components/moderation/ContentSafetyActions';
 
 const GUTTER = space['2xl'];
 
@@ -25,21 +26,42 @@ export function ConversationScreen() {
   const messages = useChatMessages(roomId);
   const send = useSendMessage(roomId);
   const [draft, setDraft] = useState('');
+  const [locallyBlocked, setLocallyBlocked] = useState(false);
   const listRef = useRef<FlatList>(null);
 
   const msgs: any[] = Array.isArray(messages.data) ? messages.data : ((messages.data as any)?.messages ?? []);
+  const contactBlocked = locallyBlocked || messages.contactBlocked;
+  // A cached pre-block result is not fresh authority for a newly mounted room.
+  const contactStatusPending = !!roomId && !messages.isFetchedAfterMount;
+  const contactStatusUnavailable = !!roomId
+    && messages.isFetchedAfterMount
+    && (messages.isError || !messages.contactBlockedKnown);
 
   useEffect(() => {
     if (msgs.length) setTimeout(() => listRef.current?.scrollToEnd({ animated: true }), 60);
   }, [msgs.length]);
 
+  useEffect(() => {
+    if (messages.contactBlocked) setLocallyBlocked(false);
+  }, [messages.contactBlocked]);
+
   const onSend = () => {
     const text = draft.trim();
-    if (!text || send.isPending) return;
+    if (!text || send.isPending || contactBlocked || contactStatusPending || contactStatusUnavailable) return;
     setDraft('');
     // [WR-035] A failed send restores the draft (unless they typed anew) —
     // clearing it optimistically must never eat the message.
-    send.mutate(text, { onError: () => setDraft((cur) => (cur.trim() ? cur : text)) });
+    send.mutate(text, {
+      onError: (error) => {
+        setDraft((cur) => (cur.trim() ? cur : text));
+        const code = (error as { response?: { data?: { error?: { code?: string } } } })
+          ?.response?.data?.error?.code;
+        if (code === 'USER_BLOCKED') {
+          setLocallyBlocked(true);
+          void messages.refetch();
+        }
+      },
+    });
   };
 
   return (
@@ -74,33 +96,45 @@ export function ConversationScreen() {
             renderItem={({ item: m }) => {
               const mine = m.senderId === user?.id;
               return (
-                <View
-                  style={{
-                    alignSelf: mine ? 'flex-end' : 'flex-start',
-                    maxWidth: '78%',
-                    backgroundColor: mine ? color.brand[500] : color.surface.base,
-                    borderRadius: radius.lg,
-                    borderBottomRightRadius: mine ? 4 : radius.lg,
-                    borderBottomLeftRadius: mine ? radius.lg : 4,
-                    paddingHorizontal: space.lg,
-                    paddingVertical: space.md,
-                    borderWidth: mine ? 0 : 1,
-                    borderColor: color.border.subtle,
-                  }}
-                >
-                  <T variant="body" style={{ color: mine ? color.white : color.text.primary }}>
-                    {m.message ?? m.text}
-                  </T>
-                  <T
-                    variant="caption"
+                <View style={{ alignSelf: mine ? 'flex-end' : 'flex-start', maxWidth: '78%' }}>
+                  <View
                     style={{
-                      color: mine ? withAlpha(color.white, 0.7) : color.text.muted,
-                      marginTop: 3,
-                      alignSelf: 'flex-end',
+                      backgroundColor: mine ? color.brand[500] : color.surface.base,
+                      borderRadius: radius.lg,
+                      borderBottomRightRadius: mine ? 4 : radius.lg,
+                      borderBottomLeftRadius: mine ? radius.lg : 4,
+                      paddingHorizontal: space.lg,
+                      paddingVertical: space.md,
+                      borderWidth: mine ? 0 : 1,
+                      borderColor: color.border.subtle,
                     }}
                   >
-                    {m.createdAt ? new Date(m.createdAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }) : ''}
-                  </T>
+                    <T variant="body" style={{ color: mine ? color.white : color.text.primary }}>
+                      {m.message ?? m.text}
+                    </T>
+                    <T
+                      variant="caption"
+                      style={{
+                        color: mine ? withAlpha(color.white, 0.7) : color.text.muted,
+                        marginTop: 3,
+                        alignSelf: 'flex-end',
+                      }}
+                    >
+                      {m.createdAt ? new Date(m.createdAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }) : ''}
+                    </T>
+                  </View>
+                  {!mine && m.id ? (
+                    <ContentSafetyActions
+                      targetType="CHAT_MESSAGE"
+                      targetId={m.id}
+                      contentLabel="message"
+                      onBlocked={() => {
+                        setLocallyBlocked(true);
+                        void messages.refetch();
+                      }}
+                      style={{ marginTop: space.sm }}
+                    />
+                  ) : null}
                 </View>
               );
             }}
@@ -120,7 +154,29 @@ export function ConversationScreen() {
               borderTopColor: color.border.subtle,
             }}
           >
-            <View
+            {contactStatusPending ? (
+              <T variant="label" tone="muted" style={{ flex: 1 }}>
+                Checking chat availability…
+              </T>
+            ) : contactStatusUnavailable ? (
+              <>
+                <T variant="label" tone="muted" style={{ flex: 1 }}>
+                  Couldn’t confirm chat availability.
+                </T>
+                <Pressable
+                  onPress={() => { void messages.refetch(); }}
+                  accessibilityRole="button"
+                  accessibilityLabel="Retry chat availability check"
+                  hitSlop={space.sm}
+                >
+                  <T variant="label" weight="bold">Retry</T>
+                </Pressable>
+              </>
+            ) : contactBlocked ? (
+              <T variant="label" tone="muted" style={{ flex: 1 }}>
+                Contact is unavailable between these accounts.
+              </T>
+            ) : <View
               style={{
                 flex: 1,
                 height: 48,
@@ -141,8 +197,8 @@ export function ConversationScreen() {
                 onSubmitEditing={onSend}
                 returnKeyType="send"
               />
-            </View>
-            <Pressable onPress={onSend} disabled={!draft.trim() || send.isPending}>
+            </View>}
+            {!contactStatusPending && !contactStatusUnavailable && !contactBlocked ? <Pressable onPress={onSend} disabled={!draft.trim() || send.isPending}>
               {({ pressed }) => (
                 <View
                   style={{
@@ -157,7 +213,7 @@ export function ConversationScreen() {
                   <Feather name="send" size={18} color={color.white} />
                 </View>
               )}
-            </Pressable>
+            </Pressable> : null}
           </View>
         </KeyboardAvoidingView>
       )}

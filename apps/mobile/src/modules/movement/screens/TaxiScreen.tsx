@@ -28,6 +28,7 @@ import { Card, CircleChip, IconChip, LoadingBlock, Money, PillButton, Pictogram,
 import { VERTICAL_TINT } from '../../../kit/vertical-tint';
 import type { PickedPlace } from './DestinationSearchScreen';
 import { openExternal } from '../../../lib/openExternal';
+import { ContentSafetyActions } from '../../../components/moderation/ContentSafetyActions';
 
 const STATUS_LABEL: Record<string, string> = {
   PENDING: 'Finding your driver…',
@@ -829,7 +830,10 @@ function AssignedRideCard({
   showStartCode: boolean;
   onWrongDriver: () => void;
 }) {
-  const vehicle = [driver.vehicleColor, driver.vehicleMake, driver.vehicleModel].filter(Boolean).join(' ');
+  const profileHidden = driver.contactBlocked === true;
+  const vehicle = profileHidden
+    ? ''
+    : [driver.vehicleColor, driver.vehicleMake, driver.vehicleModel].filter(Boolean).join(' ');
   const statusLabel = STATUS_LABEL[status] ?? 'Ride in progress';
   const fare = ride.taxiFareTotal ?? ride.totalAmount;
 
@@ -839,67 +843,91 @@ function AssignedRideCard({
         {statusLabel}{legEta != null ? legEta <= 0 ? ' · arriving now' : ` · ~${Math.round(legEta)} min` : ''}
       </T>
 
-      {/* Plate-first safety culture: this is the first visual fact in the
-          assigned card, ahead of face, vehicle detail and start code. */}
-      {driver.licensePlate ? (
-        <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.md, marginTop: space.xs }}>
+      {profileHidden ? (
+        <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.md, marginTop: space.lg, padding: space.md, borderRadius: radius.md, backgroundColor: color.surface.subtle }}>
+          <IconChip icon="slash" size={48} />
           <View style={{ flex: 1 }}>
-            <T variant="displayXl" style={{ letterSpacing: space.xs }}>
-              {driver.licensePlate}
-            </T>
-            <T variant="label" weight="semibold" style={{ color: TAXI_TINT.ink, marginTop: space.xs }}>
-              Check the plate first
+            <T variant="body" weight="semibold">Driver profile unavailable</T>
+            <T variant="caption" tone="muted" style={{ marginTop: space.xs }}>
+              Profile details and contact controls are hidden between these accounts.
             </T>
           </View>
-          <VehicleRender bodyType={driver.bodyType} colorHex={driver.colorHex} view="hero" size={96} />
         </View>
       ) : (
-        <View style={{ flexDirection: 'row', alignItems: 'flex-start', gap: space.sm, marginTop: space.md, padding: space.md, borderRadius: radius.md, backgroundColor: color.soft.danger }}>
-          <Feather name="alert-triangle" size={18} color={color.error} />
-          <T variant="label" tone="error" style={{ flex: 1 }}>
-            Plate details aren’t available. Don’t get in until the vehicle is confirmed.
-          </T>
-        </View>
+        <>
+          {/* Plate-first safety culture: this is the first visual fact in the
+              assigned card, ahead of face, vehicle detail and start code. */}
+          {driver.licensePlate ? (
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.md, marginTop: space.xs }}>
+              <View style={{ flex: 1 }}>
+                <T variant="displayXl" style={{ letterSpacing: space.xs }}>
+                  {driver.licensePlate}
+                </T>
+                <T variant="label" weight="semibold" style={{ color: TAXI_TINT.ink, marginTop: space.xs }}>
+                  Check the plate first
+                </T>
+              </View>
+              <VehicleRender bodyType={driver.bodyType} colorHex={driver.colorHex} view="hero" size={96} />
+            </View>
+          ) : (
+            <View style={{ flexDirection: 'row', alignItems: 'flex-start', gap: space.sm, marginTop: space.md, padding: space.md, borderRadius: radius.md, backgroundColor: color.soft.danger }}>
+              <Feather name="alert-triangle" size={18} color={color.error} />
+              <T variant="label" tone="error" style={{ flex: 1 }}>
+                Plate details aren’t available. Don’t get in until the vehicle is confirmed.
+              </T>
+            </View>
+          )}
+
+          <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.md, marginTop: space.lg }}>
+            {driver.user?.avatar ? (
+              <Image
+                source={{ uri: mediaUrl(driver.user.avatar) ?? undefined }}
+                style={{ width: space['5xl'], height: space['5xl'], borderRadius: radius.full }}
+                contentFit="cover"
+                accessible={false}
+              />
+            ) : (
+              <IconChip icon="user" size={48} />
+            )}
+            <View style={{ flex: 1 }}>
+              <T variant="body" weight="semibold">{driver.user?.firstName ?? 'Your driver'}</T>
+              <T variant="caption" tone="muted" numberOfLines={2} style={{ marginTop: space.xs }}>
+                {vehicle || 'Vehicle details unavailable'}
+              </T>
+              {driver.displayRating != null ? (
+                <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.xs, marginTop: space.xs }}>
+                  <Stars value={Number(driver.displayRating)} size={11} />
+                  <T variant="caption" tone="muted">{Number(driver.displayRating).toFixed(1)}</T>
+                </View>
+              ) : <T variant="caption" tone="muted" style={{ marginTop: space.xs }}>New on Swift</T>}
+            </View>
+            {driver.user?.phone ? (
+              <PillButton
+                label="Call"
+                variant="soft"
+                size="md"
+                icon="phone"
+                onPress={() => void openExternal(`tel:${driver.user.phone}`, "Couldn't start the call — dial your driver directly.")}
+              />
+            ) : null}
+          </View>
+        </>
       )}
 
-      <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.md, marginTop: space.lg }}>
-        {driver.user?.avatar ? (
-          <Image
-            source={{ uri: mediaUrl(driver.user.avatar) ?? undefined }}
-            style={{ width: space['5xl'], height: space['5xl'], borderRadius: radius.full }}
-            contentFit="cover"
-            accessible={false}
-          />
-        ) : (
-          <IconChip icon="user" size={48} />
-        )}
-        <View style={{ flex: 1 }}>
-          <T variant="body" weight="semibold">{driver.user?.firstName ?? 'Your driver'}</T>
-          <T variant="caption" tone="muted" numberOfLines={2} style={{ marginTop: space.xs }}>
-            {vehicle || 'Vehicle details unavailable'}
-          </T>
-          {driver.displayRating != null ? (
-            <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.xs, marginTop: space.xs }}>
-              <Stars value={Number(driver.displayRating)} size={11} />
-              <T variant="caption" tone="muted">{Number(driver.displayRating).toFixed(1)}</T>
-            </View>
-          ) : <T variant="caption" tone="muted" style={{ marginTop: space.xs }}>New on Swift</T>}
-        </View>
-        {driver.user?.phone ? (
-          <PillButton
-            label="Call"
-            variant="soft"
-            size="md"
-            icon="phone"
-            onPress={() => void openExternal(`tel:${driver.user.phone}`, "Couldn't start the call — dial your driver directly.")}
-          />
-        ) : null}
-      </View>
+      {driver.userId ? (
+        <ContentSafetyActions
+          targetType="USER"
+          targetId={driver.userId}
+          contentLabel="driver profile"
+          allowBlock={!profileHidden}
+          style={{ marginTop: space.md }}
+        />
+      ) : null}
 
       {showStartCode ? (
         <StartCodeCeremony
           code={ride.ridePin}
-          driverName={driver.user?.firstName}
+          driverName={profileHidden ? undefined : driver.user?.firstName}
           arrived={status === 'DRIVER_ARRIVED'}
           onWrongDriver={onWrongDriver}
         />
@@ -952,6 +980,7 @@ function ActiveRide({ navigation, ride, cancelRide, insets, rematching }: any) {
   const centeredFirstFix = useRef(false);
   const lastServerFixAt = useRef<number | null>(null);
   const d = ride.driver;
+  const driverProfileHidden = d?.contactBlocked === true;
   // Live driver position: taxi rides are orders, so the order room streams
   // `driver:location` straight from the driver's GPS uploads. The undated REST
   // snapshot is intentionally ignored; only timestamped socket fixes render.
@@ -1130,15 +1159,17 @@ function ActiveRide({ navigation, ride, cancelRide, insets, rematching }: any) {
   }, [canCancelRide]);
 
   const shareTrip = () => {
-    const vehicle = [d?.vehicleColor, d?.vehicleMake, d?.vehicleModel].filter(Boolean).join(' ');
+    const vehicle = driverProfileHidden
+      ? ''
+      : [d?.vehicleColor, d?.vehicleMake, d?.vehicleModel].filter(Boolean).join(' ');
     const message = [
       status === 'RIDE_IN_PROGRESS' ? 'I’m on a Swift taxi ride.' : 'My Swift taxi ride.',
-      d?.user?.firstName ? `Driver: ${d.user.firstName}${d?.displayRating != null ? ` (★${Number(d.displayRating).toFixed(1)})` : ' (New on Swift)'}` : null,
+      !driverProfileHidden && d?.user?.firstName ? `Driver: ${d.user.firstName}${d?.displayRating != null ? ` (★${Number(d.displayRating).toFixed(1)})` : ' (New on Swift)'}` : null,
       vehicle ? `Vehicle: ${vehicle}` : null,
-      d?.licensePlate ? `Plate: ${d.licensePlate}` : null,
+      !driverProfileHidden && d?.licensePlate ? `Plate: ${d.licensePlate}` : null,
       ride.pickupAddress ? `From: ${ride.pickupAddress}` : null,
       ride.deliveryAddress ? `To: ${ride.deliveryAddress}` : null,
-      freshDriverLoc ? `Driver’s latest received position: https://maps.google.com/?q=${freshDriverLoc.latitude.toFixed(5)},${freshDriverLoc.longitude.toFixed(5)}` : null,
+      !driverProfileHidden && freshDriverLoc ? `Driver’s latest received position: https://maps.google.com/?q=${freshDriverLoc.latitude.toFixed(5)},${freshDriverLoc.longitude.toFixed(5)}` : null,
     ]
       .filter(Boolean)
       .join('\n');
@@ -1180,13 +1211,13 @@ function ActiveRide({ navigation, ride, cancelRide, insets, rematching }: any) {
             flat
           >
             <View style={{ opacity: interp.stale || fixStale || connLost ? 0.45 : 1 }}>
-              <VehicleRender bodyType={d?.bodyType} colorHex={d?.colorHex} view="top" size={20} />
+              <VehicleRender bodyType={driverProfileHidden ? undefined : d?.bodyType} colorHex={driverProfileHidden ? undefined : d?.colorHex} view="top" size={20} />
             </View>
           </DrivingMarker>
         ) : driverLoc ? (
           <Marker coordinate={driverLoc} title="Driver" anchor={{ x: 0.5, y: 0.5 }} flat>
             <View style={{ opacity: fixStale || connLost ? 0.45 : 1 }}>
-              <VehicleRender bodyType={d?.bodyType} colorHex={d?.colorHex} view="top" size={20} />
+              <VehicleRender bodyType={driverProfileHidden ? undefined : d?.bodyType} colorHex={driverProfileHidden ? undefined : d?.colorHex} view="top" size={20} />
             </View>
           </Marker>
         ) : null}
@@ -1250,7 +1281,7 @@ function ActiveRide({ navigation, ride, cancelRide, insets, rematching }: any) {
                   <View style={{ flex: 1 }}>
                     <T variant="body" weight="bold" tone="onBrand">Your driver is here</T>
                     <T variant="caption" tone="onBrand" style={{ opacity: 0.9, marginTop: space.xs }}>
-                      Meet them at the pickup point{d.licensePlate ? ` · look for ${d.licensePlate}` : ''}
+                      Meet them at the pickup point{!driverProfileHidden && d.licensePlate ? ` · look for ${d.licensePlate}` : ''}
                     </T>
                   </View>
                 </View>

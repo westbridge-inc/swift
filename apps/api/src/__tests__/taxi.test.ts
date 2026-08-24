@@ -369,7 +369,10 @@ describe('Ride request — fare shown first, dispatch shared, PIN issued', () =>
     // Fast-forward the ride to completion through the locked chain
     await app.prisma.order.update({ where: { id: rideId }, data: { status: 'DELIVERED', deliveredAt: new Date() } });
 
-    const rate = await inject('POST', `/api/v1/driver/rides/${rideId}/rate-customer`, { score: 5, comment: 'Great passenger' }, driver.token);
+    const rate = await inject('POST', `/api/v1/driver/rides/${rideId}/rate-customer`, {
+      score: 5,
+      comment: 'Shit passenger, call +592 600 9876',
+    }, driver.token);
     expect(rate.statusCode).toBe(200);
 
     const again = await inject('POST', `/api/v1/driver/rides/${rideId}/rate-customer`, { score: 1 }, driver.token);
@@ -377,6 +380,9 @@ describe('Ride request — fare shown first, dispatch shared, PIN issued', () =>
 
     const stored = await app.prisma.rating.findFirst({ where: { orderId: rideId, type: 'DRIVER_TO_CUSTOMER' } });
     expect(stored?.score).toBe(5);
+    expect(stored?.comment).toContain('[number removed]');
+    expect(stored?.isPublic).toBe(false);
+    expect(stored?.flagReason).toBe('PROFANITY_HOLD');
   });
 
   it('one active ride per customer', async () => {

@@ -3,6 +3,8 @@ import { z } from 'zod';
 import { SearchService } from './search.service';
 import { AppError, ForbiddenError } from '../../utils/errors';
 import { sortByDistance } from '../../utils/distance';
+import { getTenantId } from '../../plugins/tenant-context';
+import { blockedAuthorIds } from '../moderation/user-block.service';
 
 const searchQuerySchema = z.object({
   q: z.string().trim().max(200).optional(),
@@ -27,6 +29,21 @@ const nearbyQuerySchema = z.object({
 export async function searchRoutes(app: FastifyInstance) {
   let searchService: SearchService | null = null;
 
+  async function hiddenMarketplaceAuthors(userId: string): Promise<{
+    authorIds: string[];
+    vendorIds: Set<string>;
+  }> {
+    const tenantId = getTenantId();
+    if (!tenantId) throw new AppError(401, 'UNAUTHORIZED', 'No authenticated tenant is bound to this request');
+    const authorIds = await blockedAuthorIds(app.prisma, tenantId, userId);
+    if (authorIds.length === 0) return { authorIds, vendorIds: new Set() };
+    const vendors = await app.prisma.vendor.findMany({
+      where: { tenantId, owner: { userId: { in: authorIds } } },
+      select: { id: true },
+    });
+    return { authorIds, vendorIds: new Set(vendors.map((vendor) => vendor.id)) };
+  }
+
   // Warm Meilisearch in the BACKGROUND — server startup must never block on it. avvio's
   // ~10s plugin timeout plus a full re-sync can otherwise take the whole API down on
   // restart. Until the index is ready, the routes below fall back to DB search.
@@ -46,6 +63,7 @@ export async function searchRoutes(app: FastifyInstance) {
   // Universal search — searches vendors AND items
   app.get('/search', { preHandler: [app.authenticate] }, async (request) => {
     const { q, type, cuisine, lat, lng, limit: parsedLimit } = searchQuerySchema.parse(request.query);
+    const hidden = await hiddenMarketplaceAuthors(request.user.userId);
 
     if (!q || q.length < 2) {
       return { success: true, data: { vendors: [], items: [] } };
@@ -58,14 +76,18 @@ export async function searchRoutes(app: FastifyInstance) {
           searchService.searchItems(q, { limit: parsedLimit }),
         ]);
 
+        const visibleVendors = vendorResults.hits.filter((hit) => !hidden.vendorIds.has(String(hit['id'])));
+        const visibleItems = itemResults.hits.filter((hit) => !hidden.vendorIds.has(String(hit['vendorId'])));
         return {
           success: true,
           data: {
-            vendors: vendorResults.hits,
-            items: itemResults.hits,
+            vendors: visibleVendors,
+            items: visibleItems,
             meta: {
-              vendorCount: vendorResults.estimatedTotalHits,
-              itemCount: itemResults.estimatedTotalHits,
+              // The search index is global to the tenant; personalized block
+              // filtering happens here, so never publish its unfiltered count.
+              vendorCount: visibleVendors.length,
+              itemCount: visibleItems.length,
               processingTimeMs: vendorResults.processingTimeMs + itemResults.processingTimeMs,
             },
           },
@@ -86,6 +108,7 @@ export async function searchRoutes(app: FastifyInstance) {
         where: {
           status: 'ACTIVE',
           isVerified: true,
+          ...(hidden.authorIds.length > 0 && { owner: { userId: { notIn: hidden.authorIds } } }),
           OR: [
             { name: { contains: q, mode: 'insensitive' } },
             { description: { contains: q, mode: 'insensitive' } },
@@ -116,7 +139,10 @@ export async function searchRoutes(app: FastifyInstance) {
       app.prisma.item.findMany({
         where: {
           isAvailable: true,
-          vendor: { status: 'ACTIVE' },
+          vendor: {
+            status: 'ACTIVE',
+            ...(hidden.authorIds.length > 0 && { owner: { userId: { notIn: hidden.authorIds } } }),
+          },
           OR: [
             { name: { contains: q, mode: 'insensitive' } },
             { description: { contains: q, mode: 'insensitive' } },
@@ -157,15 +183,25 @@ export async function searchRoutes(app: FastifyInstance) {
   app.get('/search/suggestions', { preHandler: [app.authenticate] }, async (request) => {
     const { q } = suggestionsQuerySchema.parse(request.query);
     if (!q || q.length < 2) return { success: true, data: [] };
+    const hidden = await hiddenMarketplaceAuthors(request.user.userId);
 
     const [vendors, items] = await Promise.all([
       app.prisma.vendor.findMany({
-        where: { status: 'ACTIVE', isVerified: true, name: { contains: q, mode: 'insensitive' } },
+        where: {
+          status: 'ACTIVE',
+          isVerified: true,
+          name: { contains: q, mode: 'insensitive' },
+          ...(hidden.authorIds.length > 0 && { owner: { userId: { notIn: hidden.authorIds } } }),
+        },
         select: { name: true, vendorType: true },
         take: 5,
       }),
       app.prisma.item.findMany({
-        where: { isAvailable: true, name: { contains: q, mode: 'insensitive' } },
+        where: {
+          isAvailable: true,
+          name: { contains: q, mode: 'insensitive' },
+          ...(hidden.authorIds.length > 0 && { vendor: { owner: { userId: { notIn: hidden.authorIds } } } }),
+        },
         select: { name: true },
         take: 5,
       }),
@@ -180,9 +216,19 @@ export async function searchRoutes(app: FastifyInstance) {
   });
 
   // Trending / popular items
-  app.get('/search/trending', { preHandler: [app.authenticate] }, async (_request) => {
+  app.get('/search/trending', { preHandler: [app.authenticate] }, async (request) => {
+    const hidden = await hiddenMarketplaceAuthors(request.user.userId);
     const items = await app.prisma.item.findMany({
-      where: { isAvailable: true, isPopular: true, vendor: { status: 'ACTIVE', isVerified: true, isCurrentlyOpen: true } },
+      where: {
+        isAvailable: true,
+        isPopular: true,
+        vendor: {
+          status: 'ACTIVE',
+          isVerified: true,
+          isCurrentlyOpen: true,
+          ...(hidden.authorIds.length > 0 && { owner: { userId: { notIn: hidden.authorIds } } }),
+        },
+      },
       include: { vendor: { select: { name: true, slug: true } } },
       orderBy: { totalOrdered: 'desc' },
       take: 20,
@@ -205,6 +251,7 @@ export async function searchRoutes(app: FastifyInstance) {
   // Nearby vendors (location-based)
   app.get('/search/nearby', { preHandler: [app.authenticate] }, async (request) => {
     const { lat: userLat, lng: userLng, radius: radiusKm, type } = nearbyQuerySchema.parse(request.query);
+    const hidden = await hiddenMarketplaceAuthors(request.user.userId);
 
     const vendors = await app.prisma.vendor.findMany({
       where: {
@@ -213,6 +260,7 @@ export async function searchRoutes(app: FastifyInstance) {
         isCurrentlyOpen: true,
         // Empty stores (no orderable item) stay out of nearby discovery.
         items: { some: { isAvailable: true } },
+        ...(hidden.authorIds.length > 0 && { owner: { userId: { notIn: hidden.authorIds } } }),
         ...(type && { vendorType: type }),
       },
       select: {

@@ -15,6 +15,7 @@ import { adminRoutes } from './modules/admin/admin.routes';
 import { searchRoutes } from './modules/search/search.routes';
 import { chatRoutes } from './modules/chat/chat.routes';
 import { moderationRoutes } from './modules/moderation/moderation.routes';
+import { userBlockRoutes } from './modules/moderation/user-block.routes';
 import { verificationRoutes } from './modules/verification/verification.routes';
 import { ridesRoutes } from './modules/rides/rides.routes';
 import { safetyRoutes } from './modules/safety/safety.routes';
@@ -262,6 +263,7 @@ async function buildApp() {
   await app.register(searchRoutes, { prefix: '/api/v1' });
   await app.register(chatRoutes, { prefix: '/api/v1/chat' });
   await app.register(moderationRoutes, { prefix: '/api/v1' });
+  await app.register(userBlockRoutes, { prefix: '/api/v1' });
   await app.register(verificationRoutes, { prefix: '/api/v1/verification' });
   await app.register(ridesRoutes, { prefix: '/api/v1/rides' });
   await app.register(safetyRoutes, { prefix: '/api/v1/safety' });

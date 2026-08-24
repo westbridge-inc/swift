@@ -8,6 +8,7 @@ import { AdChip } from './AdChip';
 import { useAdViewability } from './useAdViewability';
 import { trackAdEvent, openAdDestination } from '../../lib/ads';
 import type { AdEventScope, AdServeItem } from '../../lib/adsCore';
+import { ContentSafetyActions } from '../moderation/ContentSafetyActions';
 
 // Tier 2 — the top card (spec §13.2). One static image + headline + CTA.
 // Fixed height so hydration never shifts the home layout; IMPRESSION on
@@ -74,6 +75,12 @@ export function AdTopCard({
           ) : null}
         </View>
       </Pressable>
+      <ContentSafetyActions
+        targetType="AD_CREATIVE"
+        targetId={item.creativeId}
+        contentLabel="advertisement"
+        style={{ marginTop: space.sm }}
+      />
     </View>
   );
 }

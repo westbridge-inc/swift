@@ -18,6 +18,12 @@ import {
 } from './services.service';
 import { AppError, NotFoundError } from '../../utils/errors';
 import { getTenantId } from '../../plugins/prisma';
+import { assertAcceptableContent } from '../moderation/content-filter';
+import {
+  assertUsersMayContact,
+  blockedAuthorIds,
+  contactBlockedUserIds,
+} from '../moderation/user-block.service';
 
 // ---------------------------------------------------------------------------
 // Module S: Services (spec §4.6) — hire verified professionals. A ServiceJob is
@@ -92,11 +98,35 @@ export async function servicesRoutes(app: FastifyInstance) {
     return job;
   }
 
+  async function assertJobContactAllowed(
+    job: Awaited<ReturnType<typeof jobForUser>>,
+    userId: string,
+  ): Promise<void> {
+    const counterpartId = job.customerId === userId ? job.provider.userId : job.customerId;
+    await assertUsersMayContact(app.prisma, authenticatedTenant(), userId, counterpartId);
+  }
+
+  async function visibleJobForUser(jobId: string, userId: string) {
+    const job = await jobForUser(jobId, userId);
+    try {
+      await assertJobContactAllowed(job, userId);
+    } catch (error) {
+      if (error instanceof AppError && error.code === 'USER_BLOCKED') {
+        // Hidden content and an absent id have one response. A block must not
+        // become an oracle for the other account's job activity.
+        throw new NotFoundError('ServiceJob', jobId);
+      }
+      throw error;
+    }
+    return job;
+  }
+
   // ─── Provider profile + qualifications ─────────────────────────────────
 
   /** POST /providers — create/update the caller's provider profile. */
   app.post('/providers', auth, async (request) => {
     const body = providerProfileSchema.parse(request.body);
+    assertAcceptableContent({ trade: body.trade, bio: body.bio });
     const trade = requireCanonicalServiceTrade(body.trade);
     const userId = request.user.userId;
     const provider = await app.prisma.$transaction(async (tx) => {
@@ -228,10 +258,15 @@ export async function servicesRoutes(app: FastifyInstance) {
     const query = browseSchema.parse(request.query);
     const trade = requireCanonicalServiceTrade(query.trade);
     const tenantId = await browseTenant(request.authSessionId !== null);
+    const viewerId = request.user?.userId;
+    const hiddenProviderUserIds = viewerId
+      ? await blockedAuthorIds(app.prisma, tenantId, viewerId)
+      : [];
     const afterId = query.cursor ? decodeProviderCursor(query.cursor, { tenantId, trade }) : undefined;
     const candidates = await app.prisma.serviceProvider.findMany({
       where: {
         trade,
+        ...(hiddenProviderUserIds.length > 0 && { userId: { notIn: hiddenProviderUserIds } }),
         ...(afterId ? { id: { gt: afterId } } : {}),
         // ServiceProvider is tenant-owned through its canonical User. Keep the
         // relational predicate here until the model itself carries tenantId.
@@ -299,6 +334,7 @@ export async function servicesRoutes(app: FastifyInstance) {
 
   app.post('/jobs', auth, async (request, reply) => {
     const body = jobRequestSchema.parse(request.body);
+    assertAcceptableContent({ description: body.description });
     const customerId = request.user.userId;
     const tenantId = authenticatedTenant();
     const job = await createServiceJobWithLiveAuthority(app.prisma, {
@@ -314,8 +350,17 @@ export async function servicesRoutes(app: FastifyInstance) {
 
   app.get('/jobs', auth, async (request) => {
     const userId = request.user.userId;
+    const hiddenCounterpartIds = await contactBlockedUserIds(app.prisma, authenticatedTenant(), userId);
     const jobs = await app.prisma.serviceJob.findMany({
-      where: { OR: [{ customerId: userId }, { provider: { userId } }] },
+      where: {
+        OR: [{ customerId: userId }, { provider: { userId } }],
+        ...(hiddenCounterpartIds.length > 0 && {
+          AND: [
+            { customerId: { notIn: hiddenCounterpartIds } },
+            { provider: { userId: { notIn: hiddenCounterpartIds } } },
+          ],
+        }),
+      },
       orderBy: { createdAt: 'desc' },
       take: 50,
     });
@@ -324,13 +369,14 @@ export async function servicesRoutes(app: FastifyInstance) {
 
   app.get('/jobs/:id', auth, async (request) => {
     const { id } = request.params as { id: string };
-    return { success: true, data: await jobForUser(id, request.user.userId) };
+    return { success: true, data: await visibleJobForUser(id, request.user.userId) };
   });
 
   app.post('/jobs/:id/quote', auth, async (request) => {
     const { id } = request.params as { id: string };
     const { amount } = quoteSchema.parse(request.body);
     const job = await jobForUser(id, request.user.userId);
+    await assertJobContactAllowed(job, request.user.userId);
     if (job.provider.userId !== request.user.userId) throw new AppError(403, 'PROVIDER_ONLY', 'Only the provider can quote');
     if (!['REQUESTED', 'QUOTED'].includes(job.status)) throw new AppError(400, 'BAD_STATE', `Cannot quote a ${job.status.toLowerCase()} job`);
     // [STRAND-8 / EV-ACT-25] Pricing NEW work re-proves live document
@@ -362,6 +408,7 @@ export async function servicesRoutes(app: FastifyInstance) {
     const { id } = request.params as { id: string };
     const { scheduledFor } = scheduleSchema.parse(request.body);
     const job = await jobForUser(id, request.user.userId);
+    await assertJobContactAllowed(job, request.user.userId);
     if (job.customerId !== request.user.userId) throw new AppError(403, 'CUSTOMER_ONLY', 'Only the customer can schedule');
     if (job.status !== 'QUOTED') throw new AppError(400, 'BAD_STATE', 'Agree a quote before scheduling');
     // The provider still ACCEPTS the slot (§4.3) — providerConfirmedAt starts null.
@@ -383,6 +430,7 @@ export async function servicesRoutes(app: FastifyInstance) {
   app.post('/jobs/:id/confirm', auth, async (request) => {
     const { id } = request.params as { id: string };
     const job = await jobForUser(id, request.user.userId);
+    await assertJobContactAllowed(job, request.user.userId);
     if (job.provider.userId !== request.user.userId) throw new AppError(403, 'PROVIDER_ONLY', 'Only the provider can confirm');
     if (job.status !== 'SCHEDULED') throw new AppError(400, 'BAD_STATE', 'There is no scheduled slot to confirm');
     // [STRAND-8 / EV-ACT-25] Affirming the slot is the last acceptance gate
@@ -419,6 +467,7 @@ export async function servicesRoutes(app: FastifyInstance) {
   app.post('/jobs/:id/decline-slot', auth, async (request) => {
     const { id } = request.params as { id: string };
     const job = await jobForUser(id, request.user.userId);
+    await assertJobContactAllowed(job, request.user.userId);
     if (job.provider.userId !== request.user.userId) throw new AppError(403, 'PROVIDER_ONLY', 'Only the provider can decline');
     if (job.status !== 'SCHEDULED') throw new AppError(400, 'BAD_STATE', 'There is no scheduled slot to decline');
     const updated = await app.prisma.serviceJob.update({

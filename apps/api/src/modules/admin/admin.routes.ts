@@ -353,26 +353,27 @@ export async function adminRoutes(app: FastifyInstance) {
       adCreative: childScope((tenantId) => ({ campaign: { tenantId } })),
       supportTicket: childScope((tenantId) => ({ user: { tenantId } })),
       item: childScope((tenantId) => ({ vendor: { tenantId } })),
-      // ContentReport keeps only a loose reporter id. Treat the reporter's
-      // tenant as the report boundary; target previews are independently
-      // scoped below so a bad cross-tenant target id cannot disclose content.
-      contentReport: childScope(async (tenantId) => {
-        const reporterIds = (await app.prisma.user.findMany({
-          where: { tenantId },
-          select: { id: true },
-        })).map((user) => user.id);
-        return { reporterId: { in: reporterIds } };
-      }),
-      // ChatMessage has no sender relation. Require both a local sender and a
-      // local order-backed room; unattributable service chats fail closed.
+      // ContentReport now carries its own tenant provenance and RLS policy.
+      contentReport: childScope((tenantId) => ({ tenantId })),
+      // ChatMessage has no sender relation. Require a local sender plus a local
+      // order OR service-job room; both chat products are reportable UGC.
       chatMessage: childScope(async (tenantId) => {
-        const [orders, senders] = await Promise.all([
+        const [orders, serviceJobs, senders] = await Promise.all([
           app.prisma.order.findMany({ where: { tenantId }, select: { id: true } }),
+          app.prisma.serviceJob.findMany({
+            where: { customer: { tenantId }, provider: { user: { tenantId } } },
+            select: { id: true },
+          }),
           app.prisma.user.findMany({ where: { tenantId }, select: { id: true } }),
         ]);
         return {
           senderId: { in: senders.map((sender) => sender.id) },
-          chatRoom: { orderId: { in: orders.map((order) => order.id) } },
+          chatRoom: {
+            OR: [
+              { orderId: { in: orders.map((order) => order.id) } },
+              { serviceJobId: { in: serviceJobs.map((job) => job.id) } },
+            ],
+          },
         };
       }),
       // ReturnRequest has no relations or tenantId. Require both loose owner
@@ -1628,15 +1629,33 @@ export async function adminRoutes(app: FastifyInstance) {
     const idsOf = (t: string) => [...new Set(reports.filter((r) => r.targetType === t).map((r) => r.targetId))];
     const preview = new Map<string, unknown>();
     const stash = (t: string, rows: Array<{ id: string }>) => rows.forEach((row) => preview.set(`${t}:${row.id}`, row));
-    const [ratings, messages, users, vendors, items] = await Promise.all([
-      idsOf('RATING').length ? tenantPrisma.rating.findMany({ where: { id: { in: idsOf('RATING') } }, select: { id: true, comment: true, score: true, raterId: true } }) : [],
-      idsOf('CHAT_MESSAGE').length ? tenantPrisma.chatMessage.findMany({ where: { id: { in: idsOf('CHAT_MESSAGE') } }, select: { id: true, message: true, senderId: true } }) : [],
+    const [ratings, ratingResponses, messages, users, vendors, items, categories, promos, providers, jobs, orders, creatives] = await Promise.all([
+      idsOf('RATING').length ? tenantPrisma.rating.findMany({ where: { id: { in: idsOf('RATING') } }, select: { id: true, comment: true, response: true, score: true, raterId: true } }) : [],
+      idsOf('RATING_RESPONSE').length ? tenantPrisma.rating.findMany({ where: { id: { in: idsOf('RATING_RESPONSE') } }, select: { id: true, response: true, respondedAt: true, vendorId: true } }) : [],
+      idsOf('CHAT_MESSAGE').length ? tenantPrisma.chatMessage.findMany({ where: { id: { in: idsOf('CHAT_MESSAGE') } }, select: { id: true, message: true, messageType: true, mediaUrl: true, senderId: true } }) : [],
       idsOf('USER').length ? app.prisma.user.findMany({ where: { id: { in: idsOf('USER') } }, select: { id: true, firstName: true, lastName: true, avatar: true } }) : [],
-      idsOf('VENDOR').length ? app.prisma.vendor.findMany({ where: { id: { in: idsOf('VENDOR') } }, select: { id: true, name: true, slug: true } }) : [],
-      idsOf('ITEM').length ? tenantPrisma.item.findMany({ where: { id: { in: idsOf('ITEM') } }, select: { id: true, name: true } }) : [],
+      idsOf('VENDOR').length ? app.prisma.vendor.findMany({ where: { id: { in: idsOf('VENDOR') } }, select: { id: true, name: true, slug: true, description: true, logoUrl: true, coverImageUrl: true } }) : [],
+      idsOf('ITEM').length ? tenantPrisma.item.findMany({ where: { id: { in: idsOf('ITEM') } }, select: { id: true, name: true, description: true, imageUrl: true } }) : [],
+      idsOf('CATEGORY').length ? app.prisma.category.findMany({ where: { id: { in: idsOf('CATEGORY') }, vendor: { tenantId: requireTenantId() } }, select: { id: true, name: true, description: true, imageUrl: true } }) : [],
+      idsOf('PROMO_CODE').length ? app.prisma.promoCode.findMany({ where: { id: { in: idsOf('PROMO_CODE') }, vendor: { tenantId: requireTenantId() } }, select: { id: true, code: true, description: true } }) : [],
+      idsOf('SERVICE_PROVIDER').length ? app.prisma.serviceProvider.findMany({ where: { id: { in: idsOf('SERVICE_PROVIDER') }, user: { tenantId: requireTenantId() } }, select: { id: true, userId: true, trade: true, bio: true, portfolioPhotos: true } }) : [],
+      idsOf('SERVICE_JOB').length ? app.prisma.serviceJob.findMany({ where: { id: { in: idsOf('SERVICE_JOB') }, customer: { tenantId: requireTenantId() }, provider: { user: { tenantId: requireTenantId() } } }, select: { id: true, customerId: true, providerId: true, description: true, photos: true } }) : [],
+      idsOf('ORDER').length ? app.prisma.order.findMany({ where: { id: { in: idsOf('ORDER') } }, select: { id: true, orderNumber: true, customerId: true, deliveryInstructions: true, courierPackageDescription: true, courierRecipientName: true } }) : [],
+      idsOf('AD_CREATIVE').length ? tenantPrisma.adCreative.findMany({ where: { id: { in: idsOf('AD_CREATIVE') } }, select: { id: true, kind: true, fileUrl: true, posterUrl: true, headline: true, body: true, ctaLabel: true } }) : [],
     ]);
-    stash('RATING', ratings); stash('CHAT_MESSAGE', messages); stash('USER', users); stash('VENDOR', vendors); stash('ITEM', items);
-    const enriched = reports.map((r) => ({ ...r, target: preview.get(`${r.targetType}:${r.targetId}`) ?? null }));
+    stash('RATING', ratings); stash('RATING_RESPONSE', ratingResponses); stash('CHAT_MESSAGE', messages);
+    stash('USER', users); stash('VENDOR', vendors); stash('ITEM', items);
+    stash('CATEGORY', categories); stash('PROMO_CODE', promos); stash('SERVICE_PROVIDER', providers); stash('SERVICE_JOB', jobs);
+    stash('ORDER', orders); stash('AD_CREATIVE', creatives);
+    const enriched = reports.map((report) => {
+      const { targetSnapshot, ...row } = report;
+      return {
+        ...row,
+        // New reports carry exactly what the reporter saw. Live lookup remains
+        // only as a compatibility fallback for pre-migration audit rows.
+        target: targetSnapshot ?? preview.get(`${report.targetType}:${report.targetId}`) ?? null,
+      };
+    });
 
     return { success: true, pendingTotal, ...paginatedResponse(enriched, total, { page, limit, skip }) };
   });

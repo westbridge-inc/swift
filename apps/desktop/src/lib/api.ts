@@ -281,11 +281,22 @@ export interface ModerationReport {
   /** STORE-002: a snapshot of the reported content (or null if it's already gone). */
   target: Record<string, unknown> | null;
 }
-export const fetchModerationQueue = (status = 'PENDING') =>
-  apiFetch(`/api/v1/admin/moderation/reports?status=${status}&limit=100`).then((r) => ({
+export interface PaginationMeta {
+  page: number;
+  limit: number;
+  total: number;
+  totalPages: number;
+  hasNext: boolean;
+  hasPrev: boolean;
+}
+export const fetchModerationQueue = (status = 'PENDING', page = 1) => {
+  const query = new URLSearchParams({ status, page: String(page), limit: '50' });
+  return apiFetch(`/api/v1/admin/moderation/reports?${query}`).then((r) => ({
     rows: r.data as ModerationReport[],
     pendingTotal: r.pendingTotal as number,
+    meta: r.meta as PaginationMeta,
   }));
+};
 export const resolveReport = (id: string, status: 'ACTIONED' | 'DISMISSED' | 'REVIEWING', note?: string) =>
   apiFetch(`/api/v1/admin/moderation/reports/${id}`, {
     method: 'PUT',

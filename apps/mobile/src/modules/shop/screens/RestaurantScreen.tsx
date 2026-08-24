@@ -11,6 +11,7 @@ import { itemPhoto, vendorPhoto } from '../../../lib/images';
 import { money } from '../../../lib/money';
 import { toast } from '../../../components/ui/toast';
 import { Scrim } from '../../../components/ui/scrim';
+import { ContentSafetyActions } from '../../../components/moderation/ContentSafetyActions';
 import {
   AddMorph,
   Chip,
@@ -232,7 +233,7 @@ export function RestaurantScreen() {
     [allItems],
   );
   const closed = v && !v.isCurrentlyOpen;
-  const promos: any[] = v?.activePromos ?? [];
+  const promos: any[] = v?.activePromos ?? v?.promos ?? [];
   const isMart = v?.vendorType === 'SUPERMARKET' || v?.vendorType === 'STORE';
   const isServiceStore = v?.vendorType === 'SERVICE';
   // Hero identity pill: the store's own words first (cuisineTypes is a String[]
@@ -430,6 +431,19 @@ export function RestaurantScreen() {
             ) : null}
           </View>
 
+          {v.description ? (
+            <T variant="label" tone="muted" style={{ marginHorizontal: GUTTER, marginTop: space.lg }}>
+              {v.description}
+            </T>
+          ) : null}
+          <ContentSafetyActions
+            targetType="VENDOR"
+            targetId={vendorId}
+            contentLabel="store listing"
+            onBlocked={() => navigation.goBack()}
+            style={{ marginHorizontal: GUTTER, marginTop: space.md }}
+          />
+
           {/* Live promos (real active codes) */}
           {promos.length > 0 ? (
             <Pressable onPress={() => setShowPromos(true)}>
@@ -523,6 +537,15 @@ export function RestaurantScreen() {
                   />
                 ))}
               </ScrollView>
+              {aisleId ? (
+                <ContentSafetyActions
+                  targetType="CATEGORY"
+                  targetId={aisleId}
+                  contentLabel="aisle name"
+                  allowBlock={false}
+                  style={{ marginHorizontal: GUTTER, marginTop: space.md }}
+                />
+              ) : null}
               <View
                 style={{
                   flexDirection: 'row',
@@ -623,6 +646,13 @@ export function RestaurantScreen() {
               (cat.items?.length ?? 0) > 0 ? (
                 <View key={cat.id}>
                   <SectionHeader title={cat.name} style={{ paddingHorizontal: GUTTER, marginTop: space['2xl'] }} />
+                  <ContentSafetyActions
+                    targetType="CATEGORY"
+                    targetId={cat.id}
+                    contentLabel="menu category"
+                    allowBlock={false}
+                    style={{ marginHorizontal: GUTTER, marginTop: space.sm }}
+                  />
                   <View
                     style={{
                       marginHorizontal: GUTTER,
@@ -752,6 +782,15 @@ export function RestaurantScreen() {
               <T variant="caption" tone="muted" style={{ marginTop: 2 }}>
                 {p.description}
               </T>
+              {p.id ? (
+                <ContentSafetyActions
+                  targetType="PROMO_CODE"
+                  targetId={p.id}
+                  contentLabel="promotion"
+                  allowBlock={false}
+                  style={{ marginTop: space.sm }}
+                />
+              ) : null}
               {p.minOrderAmount ? (
                 <T variant="caption" tone="faint" style={{ marginTop: 2 }}>
                   Min order {money(p.minOrderAmount)}

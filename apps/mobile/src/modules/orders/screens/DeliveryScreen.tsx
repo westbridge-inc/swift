@@ -28,6 +28,7 @@ import { holdRingCaption, holdRingWindow } from './hold-ring';
 import { CircleChip, DecorativeIcon, ErrorState, IconChip, InfoRow, LoadingBlock, PillButton, PopupCard, PopupTitle, T } from '../../../kit';
 import { VERTICAL_TINT } from '../../../kit/vertical-tint';
 import { STALE_AFTER_MS } from '../../movement/map/interpolation';
+import { ContentSafetyActions } from '../../../components/moderation/ContentSafetyActions';
 
 const GUTTER = space['2xl'];
 const ORDER_TINT = VERTICAL_TINT.orders ?? { bg: color.brand[50], ink: color.brand[600] };
@@ -133,7 +134,9 @@ function TrackingTimeline({ order, holdActive, releasePending }: { order: any; h
     || ['PICKED_UP', 'EN_ROUTE_DELIVERY', 'ARRIVED', 'DELIVERED', 'COMPLETED'].includes(status);
   let transitLabel = 'On the way';
   let transitDescription = order.rider
-    ? `${order.rider.firstName ?? 'Your rider'} is handling this delivery.`
+    ? order.rider.contactBlocked
+      ? 'Rider profile details are hidden between these accounts.'
+      : `${order.rider.firstName ?? 'Your rider'} is handling this delivery.`
     : 'Live rider tracking appears after assignment and a GPS fix.';
   if (pickup) {
     transitLabel = 'Ready';
@@ -1160,7 +1163,7 @@ export function DeliveryScreen() {
                 marginTop: space.xl,
               }}
             >
-              {rider.avatar ? (
+              {!rider.contactBlocked && rider.avatar ? (
                 <Image source={{ uri: rider.avatar }} style={{ width: space['5xl'], height: space['5xl'], borderRadius: radius.full }} accessible={false} />
               ) : (
                 <View
@@ -1178,16 +1181,19 @@ export function DeliveryScreen() {
               )}
               <View style={{ flex: 1 }}>
                 <T variant="body" weight="semibold">
-                  {rider.firstName} {rider.lastName ?? ''}
-                  {rider.displayRating != null ? `  ·  ${Number(rider.displayRating).toFixed(1)}★` : ''}
+                  {rider.contactBlocked
+                    ? 'Rider profile unavailable'
+                    : `${rider.firstName ?? 'Your rider'} ${rider.lastName ?? ''}${rider.displayRating != null ? `  ·  ${Number(rider.displayRating).toFixed(1)}★` : ''}`.trim()}
                 </T>
                 <T variant="caption" tone="muted" numberOfLines={1}>
-                  {rider.licensePlate
+                  {rider.contactBlocked
+                    ? 'Profile details and contact controls are hidden between these accounts.'
+                    : rider.licensePlate
                     ? `${rider.vehicleColor ?? ''} ${rider.vehicleMake ?? ''} · ${rider.licensePlate}`.trim()
                     : `Order #${o.orderNumber}`}
                 </T>
               </View>
-              <Pressable
+              {!rider.contactBlocked ? <Pressable
                 onPress={() => navigation.navigate('Conversation', { orderId, title: rider.firstName })}
                 accessibilityRole="button"
                 accessibilityLabel={`Message ${rider.firstName ?? 'your rider'}`}
@@ -1202,8 +1208,10 @@ export function DeliveryScreen() {
                 }}
               >
                 <Feather name="message-circle" size={18} color={color.white} />
-              </Pressable>
-              {rider.phone ? (
+              </Pressable> : (
+                <T variant="caption" tone="muted">Blocked</T>
+              )}
+              {rider.phone && !rider.contactBlocked ? (
                 <Pressable
                   onPress={() => void openExternal(`tel:${rider.phone}`, "Couldn't start the call — dial your rider directly.")}
                   accessibilityRole="button"
@@ -1222,6 +1230,35 @@ export function DeliveryScreen() {
                 </Pressable>
               ) : null}
             </View>
+          ) : null}
+
+          {rider?.userId ? (
+            <ContentSafetyActions
+              targetType="USER"
+              targetId={rider.userId}
+              contentLabel="rider profile"
+              allowBlock={!rider.contactBlocked}
+              style={{ marginTop: space.md }}
+            />
+          ) : null}
+
+          {o.vendor?.id ? (
+            <ContentSafetyActions
+              targetType="VENDOR"
+              targetId={o.vendor.id}
+              contentLabel="business"
+              style={{ marginTop: space.md }}
+            />
+          ) : null}
+
+          {rider || o.vendor ? (
+            <ContentSafetyActions
+              targetType="ORDER"
+              targetId={o.id}
+              contentLabel={courier ? 'delivery details' : 'order content'}
+              allowBlock={false}
+              style={{ marginTop: space.md }}
+            />
           ) : null}
 
           {cancelled || failed ? (

@@ -1,7 +1,7 @@
 /**
  * [ELV-1 W-201 / F-201] The database tenant wall.
  *
- * Application-layer scoping covers 14 of 51 tenant-bearing models, and raw
+ * Application-layer scoping covers every tenant-bearing model, and raw
  * SQL bypasses it entirely — so isolation ultimately rests on developer
  * discipline. Row-Level Security makes it structural: PostgreSQL itself
  * refuses to show tenant A's rows to a request bound to tenant B.
@@ -30,6 +30,7 @@ export const TENANT_TABLES = [
   'ad_refund_intents', 'ad_refund_items', 'ad_refund_outbox', 'ads_audit_log',
   'ads_settings', 'advertisers', 'attribution_claims', 'batch_evaluations',
   'batching_settings', 'booking_exceptions', 'delivery_runs',
+  'content_reports',
   'discovery_categories', 'discovery_category_requests',
   'discovery_category_suggestions', 'fee_receipts', 'house_ads',
   'identity_keys', 'item_discovery_categories', 'item_feedbacks',
@@ -38,7 +39,7 @@ export const TENANT_TABLES = [
   'ride_queue_entries', 'san_tombstones', 'scan_daily_rollups', 'scan_events',
   'settlement_batches', 'slug_redirects', 'storage_orphans', 'supply_watches',
   'tenant_billing_currency', 'trial_grants', 'trip_share_tokens', 'users',
-  'vendor_discovery_categories', 'vendors',
+  'user_blocks', 'vendor_discovery_categories', 'vendors',
 ] as const;
 
 export const TENANT_POLICY_NAME = 'tenant_isolation';

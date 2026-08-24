@@ -10,6 +10,7 @@ import {
   requireAuthSessionSnapshot,
 } from '../../stores/authStore';
 import { openPayLink, safePayUrl } from '../../lib/payLink';
+import { ContentSafetyActions } from '../../components/moderation/ContentSafetyActions';
 
 /**
  * Post-trip closure for a completed ride: rate the driver. Tipping is CASH in
@@ -21,18 +22,21 @@ import { openPayLink, safePayUrl } from '../../lib/payLink';
 export function RidePostTripSheet({ ride, onDone }: { ride: any | null; onDone: () => void }) {
   const rate = useRateOrder(ride?.id ?? '');
   const [score, setScore] = useState(0);
+  const [locallyBlocked, setLocallyBlocked] = useState(false);
 
   // Reset when a new ride completes (the sheet is reused across rides).
   useEffect(() => {
     setScore(0);
+    setLocallyBlocked(false);
   }, [ride?.id]);
 
   if (!ride) return null;
 
   const fare = Number(ride.taxiFareTotal ?? ride.totalAmount ?? 0);
-  const driverName = ride.driver?.user?.firstName ?? 'your driver';
+  const driverProfileHidden = locallyBlocked || ride.driver?.contactBlocked === true;
+  const driverName = driverProfileHidden ? 'your driver' : ride.driver?.user?.firstName ?? 'your driver';
   // Validated once, here — the button only exists if the destination passes.
-  const driverPayUrl = safePayUrl(ride.driver?.mmgPayUrl);
+  const driverPayUrl = driverProfileHidden ? null : safePayUrl(ride.driver?.mmgPayUrl);
   const busy = rate.isPending;
 
   const submit = async () => {
@@ -65,6 +69,16 @@ export function RidePostTripSheet({ ride, onDone }: { ride: any | null; onDone: 
       <T variant="body" tone="muted" center style={{ marginTop: space.sm }}>
         {money(fare)} · cash · paid to {driverName}
       </T>
+      {ride.driver?.userId ? (
+        <ContentSafetyActions
+          targetType="USER"
+          targetId={ride.driver.userId}
+          contentLabel="driver profile"
+          allowBlock={!driverProfileHidden}
+          onBlocked={() => setLocallyBlocked(true)}
+          style={{ alignSelf: 'center', marginTop: space.md }}
+        />
+      ) : null}
 
       {driverPayUrl ? (
         // 5.9 MMG path [rides spec]: the DRIVER'S OWN pay link — money goes

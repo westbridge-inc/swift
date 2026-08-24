@@ -22,6 +22,10 @@ vi.mock('react-native-mmkv', () => ({
     set(key: string, value: string) {
       mocks.values.set(key, value);
     }
+
+    delete(key: string) {
+      mocks.values.delete(key);
+    }
   },
 }));
 
@@ -89,6 +93,7 @@ beforeEach(() => {
   mocks.currentSession = null;
   mocks.currentScope = { kind: 'ANONYMOUS', scopeId: 'guest-1', generation: 0 };
   vi.clearAllMocks();
+  mocks.apiGet.mockReset();
   mocks.apiPost.mockImplementation(async (_url, body) => accepted(body.events.length));
   mocks.rawPost.mockImplementation(async (_url, body) => accepted(body.events.length));
 });
@@ -259,6 +264,24 @@ describe('principal-bound ad event runtime', () => {
     mocks.currentSession = authenticatedSession('b', bScope);
     await expect(ads.fetchAds('*', ['home_top_card'])).resolves.toMatchObject({
       data: servedAds,
+      trackable: false,
+      trackingScope: null,
+    });
+  });
+
+  it('purges the persisted fallback after a block boundary', async () => {
+    mocks.apiGet.mockResolvedValueOnce({ data: { data: servedAds } });
+    const ads = await import('./ads');
+
+    await expect(ads.fetchAds('*', ['home_top_card'])).resolves.toMatchObject({ data: servedAds });
+    expect(mocks.values.has('serve')).toBe(true);
+
+    ads.clearAdServeCache();
+    expect(mocks.values.has('serve')).toBe(false);
+
+    mocks.apiGet.mockRejectedValueOnce(new Error('offline'));
+    await expect(ads.fetchAds('*', ['home_top_card'])).resolves.toEqual({
+      data: null,
       trackable: false,
       trackingScope: null,
     });

@@ -29,6 +29,7 @@ import { InviteFriendsScreen } from '../modules/profile/screens/InviteFriendsScr
 import { FaqScreen } from '../modules/profile/screens/FaqScreen';
 import { ContactUsScreen } from '../modules/profile/screens/ContactUsScreen';
 import { GetHelpScreen } from '../modules/profile/screens/GetHelpScreen';
+import { BlockedUsersScreen } from '../modules/profile/screens/BlockedUsersScreen';
 import { AddressesScreen } from '../modules/profile/screens/AddressesScreen';
 import { AddAddressScreen } from '../modules/profile/screens/AddAddressScreen';
 import { LocationPickerScreen } from '../modules/profile/screens/LocationPickerScreen';
@@ -114,6 +115,7 @@ export function CustomerStack() {
       <Stack.Screen name="Faq" component={FaqScreen} />
       <Stack.Screen name="ContactUs" component={ContactUsScreen} />
       <Stack.Screen name="GetHelp" component={GetHelpScreen} />
+      <Stack.Screen name="BlockedUsers" component={BlockedUsersScreen} />
       <Stack.Screen name="Addresses" component={AddressesScreen} />
       <Stack.Screen name="AddAddress" component={AddAddressScreen} />
       <Stack.Screen name="LocationPicker" component={LocationPickerScreen} />

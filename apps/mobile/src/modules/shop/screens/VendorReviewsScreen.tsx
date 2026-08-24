@@ -5,6 +5,7 @@ import { useRoute } from '@react-navigation/native';
 import { color, space } from '@swift/ui';
 import { useVendorReviews } from '../../../hooks/customer';
 import { Card, EmptyState, ErrorState, Header, LoadingBlock, Screen, Stars, T } from '../../../kit';
+import { ContentSafetyActions } from '../../../components/moderation/ContentSafetyActions';
 
 // No dedicated kit frame — composed from the kit's card + gold-star language.
 export function VendorReviewsScreen() {
@@ -44,6 +45,15 @@ export function VendorReviewsScreen() {
               <T variant="caption" tone="muted" style={{ marginTop: space.sm }}>
                 {r.customerName ?? r.author ?? 'Swift customer'}
               </T>
+              {r.id ? (
+                <ContentSafetyActions
+                  targetType="RATING"
+                  targetId={r.id}
+                  contentLabel="review"
+                  onBlocked={() => void reviews.refetch()}
+                  style={{ marginTop: space.sm }}
+                />
+              ) : null}
               {r.response ? (
                 <View
                   style={{
@@ -59,6 +69,13 @@ export function VendorReviewsScreen() {
                   <T variant="label" tone="deep" style={{ marginTop: 2 }}>
                     {r.response}
                   </T>
+                  <ContentSafetyActions
+                    targetType="RATING_RESPONSE"
+                    targetId={r.id}
+                    contentLabel="store reply"
+                    onBlocked={() => void reviews.refetch()}
+                    style={{ marginTop: space.sm }}
+                  />
                 </View>
               ) : null}
             </Card>

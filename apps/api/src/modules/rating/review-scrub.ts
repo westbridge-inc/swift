@@ -6,6 +6,11 @@
 // blocks publication — reporting handles what masking can't.
 // ---------------------------------------------------------------------------
 
+import {
+  configuredObjectionableTerms,
+  containsObjectionableContent,
+} from '../moderation/content-filter';
+
 const PHONE_RE = /(\+?\d[\d\s().-]{5,}\d)/g;
 const EMAIL_RE = /[\w.+-]+@[\w-]+\.[\w.]+/g;
 const URL_RE = /(https?:\/\/\S+|www\.\S+)/gi;
@@ -22,22 +27,8 @@ export function maskPii(text: string): string {
 
 /** Seed list (en + local) — deliberately short and unambiguous; admins extend
  *  via config, never trim the seeds. Matching is whole-word, case-blind. */
-const PROFANITY_SEED = [
-  'fuck', 'fucking', 'shit', 'bitch', 'asshole', 'cunt', 'bastard',
-  'skunt', 'antiman', 'buller', // local slurs — held, reviewed by a human
-];
-
 export function needsProfanityHold(text: string, extra: string[] = []): boolean {
-  const words = new Set(
-    text
-      .toLowerCase()
-      .normalize('NFD')
-      .replace(/[\u0300-\u036f]/g, '')
-      .replace(/[^a-z0-9']+/g, ' ')
-      .split(' ')
-      .filter(Boolean),
-  );
-  return [...PROFANITY_SEED, ...extra.map((w) => w.toLowerCase())].some((w) => words.has(w));
+  return containsObjectionableContent(text, [...configuredObjectionableTerms(), ...extra]);
 }
 
 /** One call for the submission path: masked text + hold verdict. */

@@ -12,6 +12,8 @@ import { AppError, NotFoundError } from '../../utils/errors';
 import { tenantCacheKey } from '../../utils/tenant-cache';
 import { safeMmgPayUrl } from '../../utils/mmg-pay-url';
 import { enterTenant, getTenantId } from '../../plugins/prisma';
+import { assertAcceptableContent } from '../moderation/content-filter';
+import { contactBlockedUserIds } from '../moderation/user-block.service';
 
 // ---------------------------------------------------------------------------
 // Taxi: the fare is computed and SHOWN before any driver
@@ -133,6 +135,7 @@ export async function ridesRoutes(app: FastifyInstance) {
    *  with the 5.5B queue's auto-request); this handler is HTTP only. */
   app.post('/request', auth, async (request, reply) => {
     const body = requestRideSchema.parse(request.body);
+    assertAcceptableContent({ pickupAddress: body.pickupAddress, dropoffAddress: body.dropoffAddress });
     const { order, estimate, ridePin } = await createRideRequest(app, fareService, dispatch, request.user.userId, body);
 
     reply.code(201);
@@ -170,6 +173,7 @@ export async function ridesRoutes(app: FastifyInstance) {
    *  same semantic as the supply watch). */
   app.post('/queue/join', auth, async (request, reply) => {
     const body = requestRideSchema.parse(request.body);
+    assertAcceptableContent({ pickupAddress: body.pickupAddress, dropoffAddress: body.dropoffAddress });
     const user = await assertRideGates(app, request.user.userId);
     assertL2(user);
 
@@ -296,11 +300,41 @@ export async function ridesRoutes(app: FastifyInstance) {
     // R8.4: the ride card shows "{Driver} · {display}★" from the ONE mapper.
     const { ratingSurfaces } = await import('../rating/rating-surface');
     const surface = (await ratingSurfaces(app.prisma, 'DRIVER', [ride.driver.userId])).get(ride.driver.userId);
+    const tenantId = await authenticatedTenantId(app, request.user.userId);
+    const contactBlocked = (await contactBlockedUserIds(
+      app.prisma,
+      tenantId,
+      request.user.userId,
+    )).includes(ride.driver.userId);
     // MMG is a trip-END surface (rides spec 5.9/Part 7): the driver's own pay
     // link rides along only once the trip is underway, so the post-trip sheet
     // holds it — never shown while they're still deciding on a driver.
-    const driver = { ...ride.driver, ...vehicleIdentityFor(ride.driver), displayRating: surface?.displayRating ?? null };
-    (driver as { mmgPayUrl?: string | null }).mmgPayUrl = ride.status === 'RIDE_IN_PROGRESS'
+    const driver = contactBlocked
+      ? {
+          ...ride.driver,
+          vehicleMake: null,
+          vehicleModel: null,
+          vehicleColor: null,
+          licensePlate: null,
+          vehiclePhotoUrl: null,
+          averageRating: null,
+          currentLat: null,
+          currentLng: null,
+          bodyType: null,
+          colorHex: null,
+          mmgPayUrl: null,
+          user: { ...ride.driver.user, firstName: 'Blocked account', avatar: null, phone: null },
+          displayRating: null,
+          contactBlocked: true,
+        }
+      : {
+          ...ride.driver,
+          ...vehicleIdentityFor(ride.driver),
+          user: ride.driver.user,
+          displayRating: surface?.displayRating ?? null,
+          contactBlocked: false,
+        };
+    (driver as { mmgPayUrl?: string | null }).mmgPayUrl = !contactBlocked && ride.status === 'RIDE_IN_PROGRESS'
       ? safeMmgPayUrl(ride.driver.mmgPayUrl)
       : null;
     return { success: true, data: { ...ride, driver } };
@@ -340,6 +374,7 @@ export async function ridesRoutes(app: FastifyInstance) {
   /** POST /:id/cancel — rides ride the same state machine as everything else. */
   app.post<{ Params: { id: string } }>('/:id/cancel', auth, async (request) => {
     const body = cancelSchema.parse(request.body ?? {});
+    assertAcceptableContent({ reason: body.reason });
     const result = await orderService.cancelOrder(request.params.id, request.user.userId, body.reason);
     return { success: true, data: result };
   });

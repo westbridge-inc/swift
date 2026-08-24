@@ -153,6 +153,18 @@ afterAll(async () => {
 });
 
 describe('Services — provider verification + qualification badge', () => {
+  it('rejects objectionable public profile text before storing a provider', async () => {
+    const owner = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
+    const rejected = await inject('POST', '/api/v1/services/providers', {
+      trade: 'carpenter',
+      bio: 'I do shit work',
+    }, owner.token);
+
+    expect(rejected.statusCode).toBe(400);
+    expect(rejected.json().error.code).toBe('OBJECTIONABLE_CONTENT');
+    expect(await app.prisma.serviceProvider.count({ where: { userId: owner.userId } })).toBe(0);
+  });
+
   it('authenticates, isolates, and idempotently upserts one profile per caller', async () => {
     const unauthenticated = await inject('POST', '/api/v1/services/providers', { trade: 'carpenter' });
     expect(unauthenticated.statusCode).toBe(401);
@@ -499,6 +511,21 @@ describe('Services — risk-tiered browse', () => {
 });
 
 describe('Services — job lifecycle + two-way rating', () => {
+  it('rejects objectionable participant-visible job text before storage', async () => {
+    const provider = await makeVerifiedProvider('carpenter');
+    const customer = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
+    const before = await app.prisma.serviceJob.count({ where: { customerId: customer.userId } });
+
+    const rejected = await inject('POST', '/api/v1/services/jobs', {
+      providerId: provider.providerId,
+      description: 'Fix this fucking cabinet please.',
+    }, customer.token);
+
+    expect(rejected.statusCode).toBe(400);
+    expect(rejected.json().error.code).toBe('OBJECTIONABLE_CONTENT');
+    expect(await app.prisma.serviceJob.count({ where: { customerId: customer.userId } })).toBe(before);
+  });
+
   it('keeps provider discovery and hiring inside the authenticated tenant', async () => {
     const providerA = await makeVerifiedProvider('carpenter');
     const providerB = await makeVerifiedProvider('carpenter', TENANT_B);
@@ -580,8 +607,14 @@ describe('Services — job lifecycle + two-way rating', () => {
     // Two-way ratings.
     const custRates = await inject('POST', `/api/v1/services/jobs/${jobId}/rate`, { score: 5, comment: 'Excellent work' }, customer.token);
     expect(custRates.json().data.type).toBe('CUSTOMER_TO_PROVIDER');
-    const provRates = await inject('POST', `/api/v1/services/jobs/${jobId}/rate`, { score: 5 }, provider.token);
+    const provRates = await inject('POST', `/api/v1/services/jobs/${jobId}/rate`, {
+      score: 5,
+      comment: 'shit customer, call +592 600 4321',
+    }, provider.token);
     expect(provRates.json().data.type).toBe('PROVIDER_TO_CUSTOMER');
+    expect(provRates.json().data.comment).toContain('[number removed]');
+    expect(provRates.json().data.isPublic).toBe(false);
+    expect(provRates.json().data.flagReason).toBe('PROFANITY_HOLD');
 
     const updated = await app.prisma.serviceProvider.findUniqueOrThrow({ where: { id: provider.providerId } });
     expect(updated.totalRatings).toBe(1);

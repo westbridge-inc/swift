@@ -263,6 +263,8 @@ model Tenant {
   vendors          Vendor[]
   orders           Order[]
   rideQueueEntries RideQueueEntry[]
+  contentReports   ContentReport[]
+  userBlocks       UserBlock[]
   adRefundIntents  AdRefundIntent[]
   adRefundItems    AdRefundItem[]
   adRefundOutbox   AdRefundOutbox[]
@@ -2676,10 +2678,17 @@ model AuditLog {
 
 enum ReportTargetType {
   RATING
+  RATING_RESPONSE
   CHAT_MESSAGE
   USER
   VENDOR
   ITEM
+  CATEGORY
+  PROMO_CODE
+  SERVICE_PROVIDER
+  SERVICE_JOB
+  ORDER
+  AD_CREATIVE
 }
 
 enum ReportReason {
@@ -2702,11 +2711,14 @@ enum ReportStatus {
 
 model ContentReport {
   id             String           @id @default(cuid())
+  tenantId       String           @default("swift-default")
+  tenant         Tenant           @relation(fields: [tenantId], references: [id], onDelete: Restrict)
   reporterId     String
   targetType     ReportTargetType
   targetId       String
   reason         ReportReason
   detail         String?
+  targetSnapshot Json?
   status         ReportStatus     @default(PENDING)
   resolvedBy     String?
   resolvedAt     DateTime?
@@ -2716,9 +2728,30 @@ model ContentReport {
 
   // One report per reporter per target — re-reporting is idempotent, not spam.
   @@unique([reporterId, targetType, targetId])
+  @@index([tenantId])
+  @@index([tenantId, status, createdAt])
   @@index([status, createdAt]) // the FIFO moderation queue
   @@index([targetType, targetId]) // "how many reports on this thing?"
   @@map("content_reports")
+}
+
+/// Reversible user blocking as an append-only audit trail. Unblocking closes
+/// the active episode by setting unblockedAt; re-blocking creates a new row.
+/// The database owns the one-active-episode invariant via a partial unique
+/// index (Prisma cannot express partial indexes).
+model UserBlock {
+  id          String    @id @default(cuid())
+  tenantId    String    @default("swift-default")
+  tenant      Tenant    @relation(fields: [tenantId], references: [id], onDelete: Restrict)
+  blockerId   String
+  blockedId   String
+  createdAt   DateTime  @default(now())
+  unblockedAt DateTime?
+
+  @@index([tenantId])
+  @@index([tenantId, blockerId, unblockedAt])
+  @@index([tenantId, blockedId, unblockedAt])
+  @@map("user_blocks")
 }
 
 // ==========================================

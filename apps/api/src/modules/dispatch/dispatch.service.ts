@@ -28,6 +28,11 @@ import {
   lockTaxiOrderForCustodyDecision,
 } from '../rides/passenger-custody';
 import { riderCounterpartySelect } from '../../utils/counterparty';
+import {
+  assertUsersMayContact,
+  contactBlockedUserIds,
+  findActiveBlockBetween,
+} from '../moderation/user-block.service';
 
 declare module 'fastify' {
   interface FastifyInstance {
@@ -588,10 +593,16 @@ export class DispatchService {
     // them again (retaliation guard), and a SHADOW_RESTRICTED mover is
     // excluded from enhanced-monitoring passengers pending review.
     if (excludeUserId && eligible.length > 0) {
-      const safetyExcluded = await this.safetyExcludedUserIds(excludeUserId, eligible.map((r) => r.userId), pool);
-      if (safetyExcluded.size > 0) {
-        eligible = eligible.filter((r) => !safetyExcluded.has(r.userId));
-        log().warn({ orderId, customerUserId: excludeUserId, excluded: safetyExcluded.size }, 'dispatch: safety exclusions removed candidates from the pool');
+      const [safetyExcluded, blockedCounterparties] = await Promise.all([
+        this.safetyExcludedUserIds(excludeUserId, eligible.map((r) => r.userId), pool),
+        tenantId
+          ? contactBlockedUserIds(this.prisma, tenantId, excludeUserId)
+          : Promise.resolve([]),
+      ]);
+      const excluded = new Set([...safetyExcluded, ...blockedCounterparties]);
+      if (excluded.size > 0) {
+        eligible = eligible.filter((r) => !excluded.has(r.userId));
+        log().warn({ orderId, customerUserId: excludeUserId, excluded: excluded.size }, 'dispatch: safety or user-block exclusions removed candidates from the pool');
         if (eligible.length === 0) return [];
       }
     }
@@ -925,7 +936,7 @@ export class DispatchService {
     const order = await this.prisma.order.findUnique({
       where: { id: orderId },
       select: {
-        orderNumber: true, isExpress: true, paymentMethod: true, customerId: true,
+        orderNumber: true, isExpress: true, paymentMethod: true, customerId: true, tenantId: true,
         deliveryFee: true, tipAmount: true, taxiFareTotal: true,
         pickupAddress: true, deliveryAddress: true,
         status: true, riderId: true, driverId: true, fulfillment: true, orderType: true,
@@ -947,6 +958,19 @@ export class DispatchService {
         || order.fulfillment !== 'DELIVERY'
         || !['ACCEPTED', 'PREPARING', 'READY_FOR_PICKUP'].includes(order.status)
       ) return null;
+    }
+    const mover = order.orderType === 'TAXI'
+      ? await this.prisma.driver.findUnique({ where: { id: moverId }, select: { userId: true } })
+      : await this.prisma.rider.findUnique({ where: { id: moverId }, select: { userId: true } });
+    if (!mover) return null;
+    if (await findActiveBlockBetween(this.prisma, order.tenantId, order.customerId, mover.userId)) {
+      const removed = await this.removeOfferIfOwned(orderId, moverId, attemptId);
+      if (removed) {
+        await this.redis.sadd(declinedKey(orderId), moverId).catch(() => {});
+        await this.redis.expire(declinedKey(orderId), 3600).catch(() => {});
+        await this.dispatchOrder(orderId).catch(() => {});
+      }
+      return null;
     }
     const trust = (await customerTrustSummaries(this.prisma, [order.customerId])).get(order.customerId);
     const totalUnits = order.items.reduce((s, i) => s + i.quantity, 0);
@@ -1169,6 +1193,17 @@ export class DispatchService {
     await acknowledgeAlert(this.prisma, 'MOVER_OFFER', orderId, moverUserId).catch(() => {});
     const pool = await this.poolOf(orderId);
     const mover = await this.requireMover(moverUserId, pool);
+    const counterparty = await this.prisma.order.findUnique({
+      where: { id: orderId },
+      select: { customerId: true, tenantId: true },
+    });
+    if (!counterparty) throw new NotFoundError('Order', orderId);
+    await assertUsersMayContact(
+      this.prisma,
+      counterparty.tenantId,
+      moverUserId,
+      counterparty.customerId,
+    );
 
     // [REPORT-012 F-012-02] Prove the rail BEFORE consuming the exclusive
     // offer. A positive fare on a non-CASH order used to ride into claimOrder,
@@ -1262,6 +1297,7 @@ export class DispatchService {
       // a forged board/offer request that bypassed discovery filtering.
       const lockedOrders = await tx.$queryRaw<Array<{
         customerId: string;
+        tenantId: string;
         taxiFareTotal: Prisma.Decimal | null;
         paymentMethod: string;
         paymentStatus: string;
@@ -1270,7 +1306,7 @@ export class DispatchService {
         deliveryFee: Prisma.Decimal;
         taxiPassengerCount: number | null;
       }>>`
-        SELECT "customerId", "taxiFareTotal",
+        SELECT "customerId", "tenantId", "taxiFareTotal",
                "paymentMethod"::text AS "paymentMethod",
                "paymentStatus"::text AS "paymentStatus",
                "orderType"::text AS "orderType",
@@ -1285,6 +1321,21 @@ export class DispatchService {
       if (!lockedOrder) throw new NotFoundError('Order', orderId);
       if (lockedOrder.customerId === moverAuthority.userId) {
         throw new AppError(409, 'SELF_OWN_ORDER', 'You cannot accept a request created by your own account');
+      }
+      const activeBlocks = await tx.$queryRaw<Array<{ id: string }>>`
+        SELECT "id"
+        FROM "user_blocks"
+        WHERE "tenantId" = ${lockedOrder.tenantId}
+          AND "unblockedAt" IS NULL
+          AND (
+            ("blockerId" = ${lockedOrder.customerId} AND "blockedId" = ${moverAuthority.userId})
+            OR
+            ("blockerId" = ${moverAuthority.userId} AND "blockedId" = ${lockedOrder.customerId})
+          )
+        LIMIT 1
+      `;
+      if (activeBlocks.length > 0) {
+        throw new AppError(403, 'USER_BLOCKED', 'Contact is unavailable between these accounts.');
       }
       // [REPORT-014 F-014-01] PHYSICAL capacity is authoritative at the claim:
       // discovery/board filters are conveniences — a 14-passenger GROUP ride

@@ -6,6 +6,7 @@ import {
 } from '../stores/authStore';
 import { useStoreSwitcher } from '../stores/storeSwitcher';
 import { AuthRefreshCoordinator, type AuthSessionSnapshot } from '../lib/authSession';
+import type { ModerationTargetType, ReportInput } from '../lib/moderation';
 
 // Build-time override (set per EAS build profile, e.g. preview→staging,
 // production→prod). Falls back to localhost in dev and the prod domain otherwise.
@@ -818,6 +819,16 @@ export const chatApi = {
   room: (orderId: string) => api.post('/chat/rooms', { orderId }),
   messages: (roomId: string) => api.get(`/chat/rooms/${roomId}/messages`),
   send: (roomId: string, message: string) => api.post(`/chat/rooms/${roomId}/messages`, { message }),
+};
+
+// App Store / Play UGC safety controls. Reporting and blocking are server-side
+// truth; clients only select a target and render the authoritative result.
+export const moderationApi = {
+  report: (data: ReportInput) => api.post('/reports', data),
+  blocks: () => api.get('/blocks'),
+  blockUser: (blockedUserId: string) => api.post('/blocks', { blockedUserId }),
+  blockTarget: (data: { targetType: ModerationTargetType; targetId: string }) => api.post('/blocks', data),
+  setBlocked: (blockedUserId: string, blocked: boolean) => api.put(`/blocks/${blockedUserId}`, { blocked }),
 };
 
 // Swift Ads (mounted at /api/v1/ads) — the advertiser dashboard surface

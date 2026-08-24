@@ -36,6 +36,13 @@ import { publicWebBase } from '../qr/qr-codes';
 import { processReviewText } from '../rating/review-scrub';
 import { mmgPayUrlForWrite, safeMmgPayUrl } from '../../utils/mmg-pay-url';
 import { riderCounterpartySelect } from '../../utils/counterparty';
+import { assertAcceptableContent } from '../moderation/content-filter';
+import {
+  assertUsersMayContact,
+  blockedAuthorIds,
+  contactBlockedUserIds,
+  findActiveBlockBetween,
+} from '../moderation/user-block.service';
 
 // ---------------------------------------------------------------------------
 // Input schemas
@@ -820,6 +827,7 @@ export async function vendorRoutes(app: FastifyInstance) {
   app.post('/promos', auth, async (request) => {
     const { vendorId } = await requireVendor(app, request, 'MANAGER');
     const body = createPromoSchema.parse(request.body);
+    assertAcceptableContent({ code: body.code, description: body.description });
 
     const code = body.code.toUpperCase();
     const taken = await app.prisma.promoCode.findUnique({ where: { code } });
@@ -854,6 +862,7 @@ export async function vendorRoutes(app: FastifyInstance) {
     if (!existing || existing.vendorId !== vendorId) throw new NotFoundError('PromoCode', request.params.id);
 
     const body = updatePromoSchema.parse(request.body);
+    assertAcceptableContent({ description: body.description });
     const promo = await app.prisma.promoCode.update({
       where: { id: request.params.id },
       data: {
@@ -885,6 +894,16 @@ export async function vendorRoutes(app: FastifyInstance) {
   app.put('/profile', auth, async (request) => {
     const { vendorId } = await requireVendor(app, request, 'MANAGER');
     const body = updateVendorProfileSchema.parse(request.body);
+    assertAcceptableContent({
+      name: body.name,
+      description: body.description,
+      addressLine1: body.addressLine1,
+      addressLine2: body.addressLine2,
+      city: body.city,
+      region: body.region,
+      cuisineTypes: body.cuisineTypes,
+      tags: body.tags,
+    });
     const mmgPayUrl = body.mmgPayUrl === undefined
       ? undefined
       : mmgPayUrlForWrite(body.mmgPayUrl);
@@ -1123,6 +1142,20 @@ export async function vendorRoutes(app: FastifyInstance) {
   app.get('/orders', auth, async (request) => {
     const requested = selectedVendorId(request);
     const access = await resolveVendor(app, request.user.userId, requested);
+    const ownerAccounts = await app.prisma.vendor.findMany({
+      where: { id: { in: access.vendorIds } },
+      select: { tenantId: true, owner: { select: { userId: true } } },
+    });
+    const tenantId = ownerAccounts[0]?.tenantId;
+    const contactActors = [...new Set([
+      request.user.userId,
+      ...ownerAccounts.map((vendor) => vendor.owner.userId),
+    ])];
+    const blockedCustomerIds = new Set(tenantId
+      ? (await Promise.all(contactActors.map((actorId) => (
+          contactBlockedUserIds(app.prisma, tenantId, actorId)
+        )))).flat()
+      : []);
     const query = request.query as Record<string, string | undefined>;
     const pagination = parsePagination(query);
     const { status, orderType, from, to, search } = vendorOrdersQuerySchema.parse(request.query);
@@ -1163,13 +1196,59 @@ export async function vendorRoutes(app: FastifyInstance) {
       app.prisma.order.count({ where }),
     ]);
 
-    return { success: true, ...paginatedResponse(orders, total, pagination) };
+    const visibleOrders = orders.map((order) => {
+      if (!blockedCustomerIds.has(order.customerId)) return order;
+      return {
+        ...order,
+        deliveryInstructions: null,
+        courierPackageDescription: null,
+        courierRecipientName: null,
+        cancellationReason: null,
+        customer: order.customer
+          ? { ...order.customer, firstName: 'Blocked account', lastName: '', avatar: null, contactBlocked: true }
+          : null,
+        items: order.items.map((item) => ({ ...item, specialInstructions: null })),
+      };
+    });
+
+    return { success: true, ...paginatedResponse(visibleOrders, total, pagination) };
   });
 
   /** GET /orders/:id — Full order detail */
   app.get<{ Params: IdParam }>('/orders/:id', auth, async (request) => {
     const order = await resolveOwnedOrder(app, request.user.userId, request.params.id);
-    return { success: true, data: order };
+    const ownerUserId = order.vendorId
+      ? await vendorOwnerUserId(app, order.vendorId)
+      : request.user.userId;
+    const contactBlocked = Boolean(
+      await findActiveBlockBetween(app.prisma, order.tenantId, order.customerId, ownerUserId)
+      ?? (ownerUserId === request.user.userId
+        ? null
+        : await findActiveBlockBetween(app.prisma, order.tenantId, order.customerId, request.user.userId)),
+    );
+    return {
+      success: true,
+      data: {
+        ...order,
+        ...(contactBlocked ? {
+          deliveryInstructions: null,
+          courierPackageDescription: null,
+          courierRecipientName: null,
+          cancellationReason: null,
+          items: order.items.map((item) => ({ ...item, specialInstructions: null })),
+          statusHistory: order.statusHistory.map((entry) => (
+            entry.changedBy === order.customerId ? { ...entry, note: null } : entry
+          )),
+        } : {}),
+        customer: order.customer
+          ? {
+              ...order.customer,
+              ...(contactBlocked ? { firstName: 'Blocked account', lastName: '', phone: null } : {}),
+              contactBlocked,
+            }
+          : null,
+      },
+    };
   });
 
   /** PUT /orders/:id/accept — Accept an incoming order */
@@ -1672,6 +1751,7 @@ export async function vendorRoutes(app: FastifyInstance) {
       throw new AppError(400, 'INVALID_STATUS', `Cannot reject order in ${order.status} status`);
     }
     const body = rejectOrderSchema.parse(request.body ?? {});
+    assertAcceptableContent({ reason: body.reason });
     const reason = body.reason || 'Rejected by vendor';
     await ackVendorAlert(app, request.user.userId, order.id); // rejecting acknowledges too
 
@@ -1735,6 +1815,7 @@ export async function vendorRoutes(app: FastifyInstance) {
   app.post('/categories', auth, async (request) => {
     const { vendorId } = await requireVendor(app, request, 'MANAGER');
     const body = createCategorySchema.parse(request.body);
+    assertAcceptableContent({ name: body.name, description: body.description });
     const category = await menu.createCategory(vendorId, body);
     scheduleVendorSearchSync(app, vendorId);
     return { success: true, data: category };
@@ -1744,6 +1825,7 @@ export async function vendorRoutes(app: FastifyInstance) {
   app.put<{ Params: IdParam }>('/categories/:id', auth, async (request) => {
     const { vendorId } = await requireVendor(app, request, 'MANAGER');
     const body = updateCategorySchema.parse(request.body);
+    assertAcceptableContent({ name: body.name, description: body.description });
     const category = await menu.updateCategory(vendorId, request.params.id, body);
     scheduleVendorSearchSync(app, vendorId);
     return { success: true, data: category };
@@ -1806,6 +1888,16 @@ export async function vendorRoutes(app: FastifyInstance) {
     await requireListingAllowed(app, verification, vendorId);
 
     const body = createItemSchema.parse(request.body);
+    assertAcceptableContent({
+      name: body.name,
+      description: body.description,
+      sku: body.sku,
+      unit: body.unit,
+      dietaryTags: body.dietaryTags,
+      allergens: body.allergens,
+      optionGroupNames: body.optionGroups?.map((group) => group.name),
+      optionNames: body.optionGroups?.flatMap((group) => group.options.map((option) => option.name)),
+    });
 
     // Verify category belongs to this vendor
     const category = await app.prisma.category.findUnique({ where: { id: body.categoryId } });
@@ -2082,6 +2174,14 @@ export async function vendorRoutes(app: FastifyInstance) {
       }
     });
 
+    assertAcceptableContent({
+      category: valid.map(({ data }) => data.category),
+      name: valid.map(({ data }) => data.name),
+      description: valid.map(({ data }) => data.description),
+      sku: valid.map(({ data }) => data.sku),
+      unit: valid.map(({ data }) => data.unit),
+    });
+
     // Categories resolve by name (case-insensitive), created on demand
     const categories = await app.prisma.category.findMany({ where: { vendorId } });
     const categoryIds = new Map(categories.map((c) => [c.name.toLowerCase(), c.id]));
@@ -2177,6 +2277,14 @@ export async function vendorRoutes(app: FastifyInstance) {
     if (!existing) throw new NotFoundError('Item', request.params.id);
 
     const body = updateItemSchema.parse(request.body);
+    assertAcceptableContent({
+      name: body.name,
+      description: body.description,
+      sku: body.sku,
+      unit: body.unit,
+      dietaryTags: body.dietaryTags,
+      allergens: body.allergens,
+    });
 
     // If moving to a different category, verify ownership
     if (body.categoryId && body.categoryId !== existing.categoryId) {
@@ -2271,6 +2379,10 @@ export async function vendorRoutes(app: FastifyInstance) {
     if (!item) throw new NotFoundError('Item', request.params.itemId);
 
     const body = addOptionGroupSchema.parse(request.body);
+    assertAcceptableContent({
+      name: body.name,
+      optionNames: body.options?.map((option) => option.name),
+    });
 
     let sortOrder = body.sortOrder;
     if (sortOrder === undefined) {
@@ -2317,6 +2429,7 @@ export async function vendorRoutes(app: FastifyInstance) {
     if (!existing || existing.item.vendorId !== vendorId) throw new NotFoundError('OptionGroup', request.params.id);
 
     const body = updateOptionGroupSchema.parse(request.body);
+    assertAcceptableContent({ name: body.name });
 
     const group = await app.prisma.optionGroup.update({
       where: { id: request.params.id },
@@ -2362,6 +2475,7 @@ export async function vendorRoutes(app: FastifyInstance) {
     if (!group || group.item.vendorId !== vendorId) throw new NotFoundError('OptionGroup', request.params.groupId);
 
     const body = addOptionSchema.parse(request.body);
+    assertAcceptableContent({ name: body.name });
 
     let sortOrder = body.sortOrder;
     if (sortOrder === undefined) {
@@ -2397,6 +2511,7 @@ export async function vendorRoutes(app: FastifyInstance) {
     if (!existing || existing.optionGroup.item.vendorId !== vendorId) throw new NotFoundError('Option', request.params.id);
 
     const body = updateOptionSchema.parse(request.body);
+    assertAcceptableContent({ name: body.name });
 
     const option = await app.prisma.option.update({
       where: { id: request.params.id },
@@ -2521,6 +2636,8 @@ export async function vendorRoutes(app: FastifyInstance) {
       .refine((b) => b.start == null || b.end == null || b.start < b.end, { message: 'start must be before end' })
       .parse(request.body);
 
+    assertAcceptableContent({ reason: body.reason });
+
     if (body.itemId) {
       const item = await app.prisma.item.findFirst({ where: { id: body.itemId, vendorId }, select: { id: true } });
       if (!item) throw new NotFoundError('Listing', body.itemId);
@@ -2644,6 +2761,7 @@ export async function vendorRoutes(app: FastifyInstance) {
       proposedName: z.string().trim().min(2).max(60),
       note: z.string().trim().max(300).optional(),
     }).parse(request.body);
+    assertAcceptableContent({ proposedName: body.proposedName, note: body.note });
     const created = await discovery.createRequest(vendorId, body.proposedName, body.note);
     return { success: true, data: created };
   });
@@ -2877,12 +2995,21 @@ export async function vendorRoutes(app: FastifyInstance) {
   /** GET /reviews — Paginated customer reviews for the vendor */
   app.get('/reviews', auth, async (request) => {
     const { vendorId } = await resolveVendor(app, request.user.userId, selectedVendorId(request));
+    const vendorTenant = await app.prisma.vendor.findUniqueOrThrow({
+      where: { id: vendorId },
+      select: { tenantId: true },
+    });
+    const hiddenRaterIds = await blockedAuthorIds(app.prisma, vendorTenant.tenantId, request.user.userId);
+    const visibleAuthors = hiddenRaterIds.length > 0
+      ? { raterId: { notIn: hiddenRaterIds } }
+      : {};
     const query = request.query as Record<string, string | undefined>;
     const pagination = parsePagination(query);
 
     const where: Record<string, unknown> = {
       vendorId,
       type: 'CUSTOMER_TO_VENDOR',
+      ...visibleAuthors,
     };
     const { minScore, maxScore } = reviewsQuerySchema.parse(request.query);
     if (minScore) where['score'] = { ...(where['score'] as object || {}), gte: minScore };
@@ -2900,7 +3027,7 @@ export async function vendorRoutes(app: FastifyInstance) {
       }),
       app.prisma.rating.count({ where }),
       app.prisma.rating.aggregate({
-        where: { vendorId, type: 'CUSTOMER_TO_VENDOR' },
+        where: { vendorId, type: 'CUSTOMER_TO_VENDOR', ...visibleAuthors },
         _avg: { score: true },
         _count: true,
       }),
@@ -2909,7 +3036,7 @@ export async function vendorRoutes(app: FastifyInstance) {
     // Score distribution
     const distribution = await app.prisma.rating.groupBy({
       by: ['score'],
-      where: { vendorId, type: 'CUSTOMER_TO_VENDOR' },
+      where: { vendorId, type: 'CUSTOMER_TO_VENDOR', ...visibleAuthors },
       _count: true,
       orderBy: { score: 'asc' },
     });
@@ -2940,6 +3067,14 @@ export async function vendorRoutes(app: FastifyInstance) {
     if (!rating || rating.vendorId !== vendorId || rating.type !== 'CUSTOMER_TO_VENDOR') {
       throw new NotFoundError('Review', request.params.id);
     }
+    const replyVendor = await app.prisma.vendor.findUniqueOrThrow({
+      where: { id: vendorId },
+      select: { name: true, tenantId: true, owner: { select: { userId: true } } },
+    });
+    await assertUsersMayContact(app.prisma, replyVendor.tenantId, request.user.userId, rating.raterId);
+    if (replyVendor.owner.userId !== request.user.userId) {
+      await assertUsersMayContact(app.prisma, replyVendor.tenantId, replyVendor.owner.userId, rating.raterId);
+    }
 
     // Movement R (R7): the reply rides the same scrub pipeline — PII masked;
     // profanity is refused outright (this is the store's public face).
@@ -2955,11 +3090,10 @@ export async function vendorRoutes(app: FastifyInstance) {
     });
 
     if (!isEdit) {
-      const vendor = await app.prisma.vendor.findUniqueOrThrow({ where: { id: vendorId }, select: { name: true } });
       await notifications.send({
         userId: rating.raterId,
         type: 'RATING_RECEIVED',
-        title: `${vendor.name} replied to your review`,
+        title: `${replyVendor.name} replied to your review`,
         body: response.length > 120 ? `${response.slice(0, 117)}…` : response,
         data: { kind: 'review_response', ratingId: rating.id, vendorId },
       });

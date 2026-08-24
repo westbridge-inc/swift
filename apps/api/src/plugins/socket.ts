@@ -22,6 +22,7 @@ import {
 } from '../utils/socket-revocation';
 import { guardRedisCommandPromises } from '../utils/redis-command-guard';
 import { warRoomsForSocket } from '../modules/safety/war-room';
+import { findActiveBlockBetween } from '../modules/moderation/user-block.service';
 
 // Socket payloads come straight off the wire from any authenticated client —
 // validate them like request bodies. cuid ids are 25 chars; 64 is headroom.
@@ -588,7 +589,18 @@ export const socketPlugin = fp(async (app: FastifyInstance) => {
           where: { chatRoomId_userId: { chatRoomId: parsed.data.roomId, userId } },
           select: { id: true },
         });
-        if (participant) {
+        const counterparts = participant
+          ? await app.prisma.chatRoomParticipant.findMany({
+              where: { chatRoomId: parsed.data.roomId, userId: { not: userId } },
+              select: { userId: true },
+            })
+          : [];
+        const contactBlocked = (
+          await Promise.all(counterparts.map((counterpart) => (
+            findActiveBlockBetween(app.prisma, tenantId, userId, counterpart.userId)
+          )))
+        ).some(Boolean);
+        if (participant && !contactBlocked) {
           socket.join(`chat:${parsed.data.roomId}`);
         }
       } catch {

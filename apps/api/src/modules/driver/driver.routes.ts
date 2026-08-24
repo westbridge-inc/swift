@@ -40,6 +40,12 @@ import {
   lockTaxiOrderForCustodyDecision,
 } from '../rides/passenger-custody';
 import { mmgPayUrlForWrite, safeMmgPayUrl } from '../../utils/mmg-pay-url';
+import { assertAcceptableContent } from '../moderation/content-filter';
+import { processReviewText } from '../rating/review-scrub';
+import {
+  assertUsersMayContact,
+  contactBlockedUserIds,
+} from '../moderation/user-block.service';
 
 const updateDriverProfileSchema = z.object({
   vehicleMake: z.string().max(50).optional(),
@@ -151,6 +157,12 @@ export async function driverRoutes(app: FastifyInstance) {
   app.put('/profile', { preHandler: [app.authenticate] }, async (request) => {
     await getDriver(request.user.userId); // authz before validation
     const body = updateDriverProfileSchema.parse(request.body);
+    assertAcceptableContent({
+      vehicleMake: body.vehicleMake,
+      vehicleModel: body.vehicleModel,
+      vehicleColor: body.vehicleColor,
+      licensePlate: body.licensePlate,
+    });
     const mmgPayUrl = body.mmgPayUrl === undefined
       ? undefined
       : mmgPayUrlForWrite(body.mmgPayUrl);
@@ -576,6 +588,11 @@ export async function driverRoutes(app: FastifyInstance) {
 
   app.get('/rides/available', { preHandler: [app.authenticate] }, async (request) => {
     const driver = await getDriver(request.user.userId);
+    const blockedCounterparties = await contactBlockedUserIds(
+      app.prisma,
+      driver.user.tenantId,
+      request.user.userId,
+    );
 
     if (!driver.isOnline || !driver.isAvailable || !driver.locationSessionId) {
       return { success: true, data: [] };
@@ -590,7 +607,7 @@ export async function driverRoutes(app: FastifyInstance) {
     const freshSince = new Date(Date.now() - TAXI_DEMAND_WINDOW_MIN * 60_000);
     const orders = await app.prisma.order.findMany({
       where: {
-        customerId: { not: request.user.userId },
+        customerId: { notIn: [request.user.userId, ...blockedCounterparties] },
         orderType: 'TAXI',
         status: 'PENDING',
         driverId: null,
@@ -683,7 +700,30 @@ export async function driverRoutes(app: FastifyInstance) {
     if (order?.customer) {
       const { ratingSurfaces } = await import('../rating/rating-surface');
       const surface = (await ratingSurfaces(app.prisma, 'CUSTOMER', [order.customer.id])).get(order.customer.id);
-      (order.customer as { displayRating?: number | null }).displayRating = surface?.displayRating ?? null;
+      const contactBlocked = (await contactBlockedUserIds(
+        app.prisma,
+        driver.user.tenantId,
+        request.user.userId,
+      )).includes(order.customer.id);
+      const customer = {
+        ...order.customer,
+        ...(contactBlocked ? { firstName: 'Blocked account', lastName: '', avatar: null, phone: null } : {}),
+        displayRating: surface?.displayRating ?? null,
+        contactBlocked,
+      };
+      return {
+        success: true,
+        data: contactBlocked
+          ? {
+              ...order,
+              cancellationReason: null,
+              customer,
+              statusHistory: order.statusHistory.map((entry) => (
+                entry.changedBy === order.customer!.id ? { ...entry, note: null } : entry
+              )),
+            }
+          : { ...order, customer },
+      };
     }
     return { success: true, data: order };
   });
@@ -715,6 +755,12 @@ export async function driverRoutes(app: FastifyInstance) {
     if (order.customerId === request.user.userId) {
       throw new AppError(409, 'SELF_OWN_ORDER', 'You cannot accept a taxi request created by your own account');
     }
+    await assertUsersMayContact(
+      app.prisma,
+      order.tenantId,
+      request.user.userId,
+      order.customerId,
+    );
 
     // SWIFT-063: the accept path enforces ride class too — the board filter is a
     // convenience, this is the barrier. An Economy driver cannot claim an XL ride
@@ -848,6 +894,8 @@ export async function driverRoutes(app: FastifyInstance) {
     });
     if (existing) throw new AppError(409, 'ALREADY_RATED', 'You already rated this passenger');
 
+    const processed = body.comment ? processReviewText(body.comment) : null;
+
     const rating = await app.prisma.rating.create({
       data: {
         orderId: id,
@@ -855,7 +903,8 @@ export async function driverRoutes(app: FastifyInstance) {
         rateeId: order.customerId,
         type: 'DRIVER_TO_CUSTOMER',
         score: body.score,
-        comment: body.comment,
+        comment: processed?.text ?? body.comment,
+        ...(processed?.hold ? { isPublic: false, flagged: true, flagReason: 'PROFANITY_HOLD' } : {}),
         tags: [],
       },
     });
@@ -876,6 +925,7 @@ export async function driverRoutes(app: FastifyInstance) {
     const { id } = request.params as { id: string };
     const driver = await getDriver(request.user.userId); // authz before body validation
     const { reason } = driverCancelSchema.parse(request.body ?? {});
+    assertAcceptableContent({ reason });
     const order = await getDriverRide(driver.id, id);
 
     const cancellable: OrderStatus[] = ['DRIVER_ASSIGNED', 'DRIVER_EN_ROUTE', 'DRIVER_ARRIVED'];

@@ -1,6 +1,7 @@
 import { createHmac, timingSafeEqual } from 'node:crypto';
 import { Prisma, type PrismaClient, type QualificationType } from '@prisma/client';
 import { AppError, NotFoundError } from '../../utils/errors';
+import { findActiveBlockBetween } from '../moderation/user-block.service';
 
 /** The verification projection is used both on the root client and inside
  * profile-save transactions. Keep the contract narrow enough that the same
@@ -523,6 +524,10 @@ export async function createServiceJobWithLiveAuthority(
       : false;
     if (!verified || !trade) {
       throw new AppError(403, 'PROVIDER_NOT_VERIFIED', 'This provider is not currently verified to accept jobs');
+    }
+
+    if (await findActiveBlockBetween(tx, input.tenantId, input.customerId, provider.userId)) {
+      throw new AppError(403, 'USER_BLOCKED', 'This provider is unavailable.');
     }
 
     await observer?.afterAuthorityChecked?.({

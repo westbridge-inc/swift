@@ -32,6 +32,13 @@ import {
 } from '../legal/consent.service';
 import { LEGAL_VERSION, MARKETING_CONSENT } from '../legal/legal.routes';
 import { liveLocationVisible, riderCounterpartySelect } from '../../utils/counterparty';
+import { assertAcceptableContent } from '../moderation/content-filter';
+import { getTenantId } from '../../plugins/tenant-context';
+import {
+  assertUsersMayContact,
+  blockedAuthorIds,
+  contactBlockedUserIds,
+} from '../moderation/user-block.service';
 
 /** [F-021-21] Consent surface from the client's own attestation header,
  *  constrained to the known set — never a hardcoded guess. */
@@ -507,6 +514,24 @@ export async function customerRoutes(app: FastifyInstance) {
   const notificationService = new NotificationService(app.prisma, app.io);
   const bookingService = new BookingService(app.prisma, app.io);
 
+  async function hiddenAuthorsFor(userId?: string): Promise<string[]> {
+    const tenantId = getTenantId();
+    return userId && tenantId
+      ? blockedAuthorIds(app.prisma, tenantId, userId)
+      : [];
+  }
+
+  async function assertVendorInteractionAllowed(userId: string, vendorId: string): Promise<void> {
+    const tenantId = getTenantId();
+    if (!tenantId) throw new AppError(401, 'UNAUTHORIZED', 'No authenticated tenant is bound to this request');
+    const vendor = await app.prisma.vendor.findFirst({
+      where: { id: vendorId, tenantId },
+      select: { owner: { select: { userId: true } } },
+    });
+    if (!vendor) throw new NotFoundError('Vendor', vendorId);
+    await assertUsersMayContact(app.prisma, tenantId, userId, vendor.owner.userId);
+  }
+
   // Auth required by default (safe); browsing is public so guests can look
   // around. Only these GET routes use OPTIONAL auth — everything else (cart,
   // checkout, favourites, orders, profile, …) needs a real account.
@@ -662,6 +687,7 @@ export async function customerRoutes(app: FastifyInstance) {
   app.put('/profile', async (request: AuthRequest, _reply: FastifyReply) => {
     const { userId } = request.user;
     const body = updateProfileSchema.parse(request.body);
+    assertAcceptableContent({ firstName: body.firstName, lastName: body.lastName });
 
     if (body.email) {
       const existing = await app.prisma.user.findFirst({
@@ -738,6 +764,14 @@ export async function customerRoutes(app: FastifyInstance) {
   app.post('/addresses', async (request: AuthRequest, reply: FastifyReply) => {
     const { userId } = request.user;
     const body = createAddressSchema.parse(request.body);
+    assertAcceptableContent({
+      label: body.label,
+      addressLine1: body.addressLine1,
+      addressLine2: body.addressLine2,
+      city: body.city,
+      region: body.region,
+      instructions: body.instructions,
+    });
 
     // Enforce address limit
     const count = await app.prisma.address.count({ where: { userId } });
@@ -774,6 +808,14 @@ export async function customerRoutes(app: FastifyInstance) {
     const { id } = request.params as { id: string };
     const { userId } = request.user;
     const body = updateAddressSchema.parse(request.body);
+    assertAcceptableContent({
+      label: body.label,
+      addressLine1: body.addressLine1,
+      addressLine2: body.addressLine2,
+      city: body.city,
+      region: body.region,
+      instructions: body.instructions,
+    });
 
     const existing = await app.prisma.address.findFirst({ where: { id, userId } });
     if (!existing) throw new NotFoundError('Address', id);
@@ -842,8 +884,16 @@ export async function customerRoutes(app: FastifyInstance) {
     const userId = request.user?.userId;
     const { lat, lng } = latLngQuerySchema.parse(request.query);
 
+    const hiddenAuthorIds = await hiddenAuthorsFor(userId);
+    const blockViewKey = userId
+      ? createHash('sha256').update([...hiddenAuthorIds].sort().join('\0')).digest('hex').slice(0, 12)
+      : 'guest';
+    const visibleVendorOwner = hiddenAuthorIds.length > 0
+      ? { owner: { userId: { notIn: hiddenAuthorIds } } }
+      : {};
+
     // Try Redis cache
-    const cacheKey = tenantCacheKey(`home:${userId ?? 'guest'}:${lat ?? 'x'}:${lng ?? 'x'}`);
+    const cacheKey = tenantCacheKey(`home:${userId ?? 'guest'}:${lat ?? 'x'}:${lng ?? 'x'}:blocks:${blockViewKey}`);
     const cached = await app.redis.get(cacheKey).catch(() => null);
     if (cached) {
       return { success: true, data: JSON.parse(cached) };
@@ -868,7 +918,13 @@ export async function customerRoutes(app: FastifyInstance) {
         // no tenant context, which the Prisma extension defines as an UNSCOPED
         // query — so without the relational predicate a deactivated operator's
         // whole catalog kept serving here after the platform shut them off.
-        where: { status: 'ACTIVE', isVerified: true, tenant: { isActive: true }, items: { some: { isAvailable: true } } },
+        where: {
+          status: 'ACTIVE',
+          isVerified: true,
+          tenant: { isActive: true },
+          items: { some: { isAvailable: true } },
+          ...visibleVendorOwner,
+        },
         include: {
           categories: { select: { id: true, name: true }, take: 5 },
         },
@@ -913,7 +969,7 @@ export async function customerRoutes(app: FastifyInstance) {
 
       // Popular dishes — top items by lifetime orders (Home "Popular right now" rail)
       app.prisma.item.findMany({
-        where: { isAvailable: true, vendor: { status: 'ACTIVE' } },
+        where: { isAvailable: true, vendor: { status: 'ACTIVE', ...visibleVendorOwner } },
         orderBy: { totalOrdered: 'desc' },
         take: 10,
         select: {
@@ -1009,10 +1065,13 @@ export async function customerRoutes(app: FastifyInstance) {
     const query = request.query as Record<string, string | undefined>;
     const { page, limit, skip } = parsePagination(query);
     const { type, cuisine, search, lat, lng, open, sort, minRating, category } = vendorsBrowseQuerySchema.parse(request.query);
+    const browserId = request.user?.userId;
+    const hiddenAuthorIds = await hiddenAuthorsFor(browserId);
 
     // Require ≥1 orderable item so empty stores don't clutter browse / dead-end on tap.
     // [F-028-07] tenant.isActive rides every public browse — see /home.
     const where: Record<string, unknown> = { status: 'ACTIVE', isVerified: true, tenant: { isActive: true }, items: { some: { isAvailable: true } } };
+    if (hiddenAuthorIds.length > 0) where['owner'] = { userId: { notIn: hiddenAuthorIds } };
     if (type) where['vendorType'] = type;
 
     // Category feed (#17): membership = chosen + derived rows. A MERGED slug
@@ -1104,7 +1163,6 @@ export async function customerRoutes(app: FastifyInstance) {
     const userLng = lng;
 
     // Favorite lookup (guests have none)
-    const browserId = request.user?.userId;
     const favoriteIds = browserId
       ? new Set(
           (await app.prisma.vendor.findMany({
@@ -1158,6 +1216,7 @@ export async function customerRoutes(app: FastifyInstance) {
   app.get('/vendors/:id', async (request: AuthRequest) => {
     const { id } = request.params as { id: string };
     const { lat, lng } = latLngQuerySchema.parse(request.query);
+    const hiddenAuthorIds = await hiddenAuthorsFor(request.user?.userId);
 
     // [F-028-07] findFirst with a RELATIONAL tenant predicate, not
     // findUnique(id): a guest who knew an id could retrieve a store whose
@@ -1167,7 +1226,11 @@ export async function customerRoutes(app: FastifyInstance) {
     // renders its closed state); tenant deactivation is the operator-level
     // kill switch and nothing of a dead tenant may serve.
     const vendor = await app.prisma.vendor.findFirst({
-      where: { id, tenant: { isActive: true } },
+      where: {
+        id,
+        tenant: { isActive: true },
+        ...(hiddenAuthorIds.length > 0 && { owner: { userId: { notIn: hiddenAuthorIds } } }),
+      },
       include: {
         categories: {
           orderBy: { sortOrder: 'asc' },
@@ -1195,7 +1258,7 @@ export async function customerRoutes(app: FastifyInstance) {
         validUntil: { gt: new Date() },
       },
       select: {
-        code: true, description: true, discountType: true,
+        id: true, code: true, description: true, discountType: true,
         discountValue: true, minOrderAmount: true, validUntil: true,
       },
       orderBy: { createdAt: 'desc' },
@@ -1276,11 +1339,13 @@ export async function customerRoutes(app: FastifyInstance) {
 
     const vendor = await app.prisma.vendor.findUnique({
       where: { id },
-      select: { id: true, averageRating: true, totalRatings: true },
+      select: { id: true, averageRating: true, totalRatings: true, owner: { select: { userId: true } } },
     });
     if (!vendor) throw new NotFoundError('Vendor', id);
+    const hiddenAuthorIds = await hiddenAuthorsFor(request.user?.userId);
+    if (hiddenAuthorIds.includes(vendor.owner.userId)) throw new NotFoundError('Vendor', id);
 
-    const result = await ratingService.getVendorReviews(id, limit, skip);
+    const result = await ratingService.getVendorReviews(id, limit, skip, request.user?.userId);
 
     return {
       success: true,
@@ -1310,12 +1375,16 @@ export async function customerRoutes(app: FastifyInstance) {
   app.get('/favorites', async (request: AuthRequest) => {
     const { userId } = request.user;
     const { lat, lng } = latLngQuerySchema.parse(request.query);
+    const hiddenAuthorIds = await hiddenAuthorsFor(userId);
 
     const customer = await app.prisma.customer.findUnique({
       where: { userId },
       include: {
         favoriteVendors: {
-          where: { status: 'ACTIVE' },
+          where: {
+            status: 'ACTIVE',
+            ...(hiddenAuthorIds.length > 0 && { owner: { userId: { notIn: hiddenAuthorIds } } }),
+          },
           orderBy: { name: 'asc' },
         },
       },
@@ -1332,6 +1401,8 @@ export async function customerRoutes(app: FastifyInstance) {
   app.post('/favorites/:vendorId', async (request: AuthRequest, reply: FastifyReply) => {
     const { vendorId } = request.params as { vendorId: string };
     const { userId } = request.user;
+
+    await assertVendorInteractionAllowed(userId, vendorId);
 
     const vendor = await app.prisma.vendor.findUnique({ where: { id: vendorId }, select: { id: true, name: true } });
     if (!vendor) throw new NotFoundError('Vendor', vendorId);
@@ -1473,8 +1544,11 @@ export async function customerRoutes(app: FastifyInstance) {
   app.post('/cart/items', async (request: AuthRequest, reply: FastifyReply) => {
     const { userId } = request.user;
     const body = addCartItemSchema.parse(request.body);
+    assertAcceptableContent({ specialInstructions: body.specialInstructions });
 
     const quantity = Math.max(1, Math.min(99, body.quantity ?? 1));
+
+    await assertVendorInteractionAllowed(userId, body.vendorId);
 
     // Validate item
     const item = await app.prisma.item.findFirst({
@@ -1587,6 +1661,7 @@ export async function customerRoutes(app: FastifyInstance) {
     const { id } = request.params as { id: string };
     const { userId } = request.user;
     const body = updateCartItemSchema.parse(request.body);
+    assertAcceptableContent({ specialInstructions: body.specialInstructions });
 
     // Verify ownership
     const cartItem = await app.prisma.cartItem.findUnique({
@@ -1724,6 +1799,25 @@ export async function customerRoutes(app: FastifyInstance) {
   app.post('/checkout', async (request: AuthRequest) => {
     const { userId } = request.user;
     const body = checkoutSchema.parse(request.body ?? {});
+    assertAcceptableContent({ deliveryInstructions: body.deliveryInstructions });
+
+    // Blocking also closes commerce/contact. A hidden storefront must not stay
+    // orderable through a stale cart or a hand-crafted item request.
+    const tenantId = getTenantId();
+    if (!tenantId) throw new AppError(401, 'UNAUTHORIZED', 'No authenticated tenant is bound to this request');
+    const contactBlockedIds = await contactBlockedUserIds(app.prisma, tenantId, userId);
+    if (contactBlockedIds.length > 0) {
+      const blockedCartVendor = await app.prisma.cart.findFirst({
+        where: {
+          customerId: userId,
+          items: { some: { item: { vendor: { owner: { userId: { in: contactBlockedIds } } } } } },
+        },
+        select: { id: true },
+      });
+      if (blockedCartVendor) {
+        throw new AppError(403, 'USER_BLOCKED', 'This cart contains a store you cannot interact with.');
+      }
+    }
 
     // Idempotency (security spec §5.5): the cart-clear after success already
     // suppresses SEQUENTIAL retries, but two in-flight requests racing (flaky
@@ -1945,6 +2039,7 @@ export async function customerRoutes(app: FastifyInstance) {
           select: {
             id: true, name: true, slug: true, logoUrl: true, coverImageUrl: true,
             vendorType: true, phone: true, latitude: true, longitude: true,
+            owner: { select: { userId: true } },
           },
         },
         items: {
@@ -1974,6 +2069,16 @@ export async function customerRoutes(app: FastifyInstance) {
     });
 
     if (!order) throw new NotFoundError('Order', id);
+
+    const orderTenantId = getTenantId();
+    if (!orderTenantId) throw new AppError(401, 'UNAUTHORIZED', 'No authenticated tenant is bound to this request');
+    const contactBlockedIds = new Set(await contactBlockedUserIds(app.prisma, orderTenantId, userId));
+    const vendorContactBlocked = order.vendor
+      ? contactBlockedIds.has(order.vendor.owner.userId)
+      : false;
+    const riderContactBlocked = order.rider
+      ? contactBlockedIds.has(order.rider.userId)
+      : false;
 
     // Existing orders use only the immutable destination committed at checkout.
     // A legacy/null/unsafe snapshot fails closed; the mutable vendor profile is
@@ -2021,7 +2126,7 @@ export async function customerRoutes(app: FastifyInstance) {
     // Timeline
     const timeline = order.statusHistory.map((sh) => ({
       status: sh.status,
-      note: sh.note,
+      note: sh.changedBy && contactBlockedIds.has(sh.changedBy) ? null : sh.note,
       timestamp: sh.createdAt,
     }));
 
@@ -2032,7 +2137,18 @@ export async function customerRoutes(app: FastifyInstance) {
         orderNumber: order.orderNumber,
         orderType: order.orderType,
         status: order.status,
-        vendor: order.vendor,
+        vendor: order.vendor ? {
+          id: order.vendor.id,
+          name: vendorContactBlocked ? 'Blocked business' : order.vendor.name,
+          slug: vendorContactBlocked ? null : order.vendor.slug,
+          logoUrl: vendorContactBlocked ? null : order.vendor.logoUrl,
+          coverImageUrl: vendorContactBlocked ? null : order.vendor.coverImageUrl,
+          vendorType: order.vendor.vendorType,
+          phone: vendorContactBlocked ? null : order.vendor.phone,
+          latitude: order.vendor.latitude,
+          longitude: order.vendor.longitude,
+          contactBlocked: vendorContactBlocked,
+        } : null,
         items: order.items.map((i) => ({
           id: i.id,
           itemId: i.itemId,
@@ -2071,27 +2187,29 @@ export async function customerRoutes(app: FastifyInstance) {
         estimatedPrepTime: order.estimatedPrepTime,
         estimatedDeliveryTime: order.estimatedDeliveryTime,
         rider: order.rider ? {
-          firstName: order.rider.user?.firstName,
-          lastName: order.rider.user?.lastName,
-          phone: order.rider.user?.phone,
-          avatar: await resolveAvatarUrl(order.rider.user?.avatar), // [F-026-01]
-          displayRating: riderSurface?.displayRating ?? null,
+          userId: order.rider.userId,
+          firstName: riderContactBlocked ? 'Blocked account' : order.rider.user?.firstName,
+          lastName: riderContactBlocked ? '' : order.rider.user?.lastName,
+          phone: riderContactBlocked ? null : order.rider.user?.phone,
+          contactBlocked: riderContactBlocked,
+          avatar: riderContactBlocked ? null : await resolveAvatarUrl(order.rider.user?.avatar), // [F-026-01]
+          displayRating: riderContactBlocked ? null : riderSurface?.displayRating ?? null,
           // Trust visibility (master plan §5): the customer sees who and what
           // is coming — vehicle, plate, and its photo.
           vehicleType: order.rider.vehicleType,
-          vehicleMake: order.rider.vehicleMake,
-          vehicleModel: order.rider.vehicleModel,
-          vehicleColor: order.rider.vehicleColor,
-          licensePlate: order.rider.licensePlate,
-          vehiclePhotoUrl: order.rider.vehiclePhotoUrl,
+          vehicleMake: riderContactBlocked ? null : order.rider.vehicleMake,
+          vehicleModel: riderContactBlocked ? null : order.rider.vehicleModel,
+          vehicleColor: riderContactBlocked ? null : order.rider.vehicleColor,
+          licensePlate: riderContactBlocked ? null : order.rider.licensePlate,
+          vehiclePhotoUrl: riderContactBlocked ? null : order.rider.vehiclePhotoUrl,
           // Last-known position seeds the tracking marker instantly; the
           // socket stream (rider:location) takes over from the first event.
           // [F-028-11] ...but only while this delivery is actually in flight.
           // These are the mover's PROFILE coordinates — they keep updating on
           // every later job — so a settled order must not keep showing where
           // that person is now.
-          currentLat: liveLocationVisible(order.status) ? order.rider.currentLat : null,
-          currentLng: liveLocationVisible(order.status) ? order.rider.currentLng : null,
+          currentLat: !riderContactBlocked && liveLocationVisible(order.status) ? order.rider.currentLat : null,
+          currentLng: !riderContactBlocked && liveLocationVisible(order.status) ? order.rider.currentLng : null,
         } : null,
         timeline,
         placedAt: order.placedAt,
@@ -2101,7 +2219,7 @@ export async function customerRoutes(app: FastifyInstance) {
         pickedUpAt: order.pickedUpAt,
         deliveredAt: order.deliveredAt,
         cancelledAt: order.cancelledAt,
-        cancellationReason: order.cancellationReason,
+        cancellationReason: vendorContactBlocked || riderContactBlocked ? null : order.cancellationReason,
         scheduledFor: order.scheduledFor,
         hasBeenRated,
         canCancel,
@@ -2288,6 +2406,7 @@ export async function customerRoutes(app: FastifyInstance) {
     const { id } = request.params as { id: string };
     const { userId } = request.user;
     const { reason } = cancelOrderSchema.parse(request.body ?? {});
+    assertAcceptableContent({ reason });
 
     const result = await orderService.cancelOrder(id, userId, reason);
 

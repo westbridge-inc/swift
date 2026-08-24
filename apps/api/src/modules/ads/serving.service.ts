@@ -1,6 +1,7 @@
 import type { PrismaClient } from '@prisma/client';
 import { mondayOf } from './ads-weeks';
 import { signImpressionToken, userHash } from './ads-token';
+import { blockedAuthorIds } from '../moderation/user-block.service';
 
 // Ad serving (ads-platform spec §11). One batched endpoint builds the home
 // screen's ad slots. The cardinal rule: ADS NEVER BREAK THE HOME SCREEN — empty
@@ -22,6 +23,8 @@ interface ServeItem {
   ctaLabel: string | null;
   destination: { type: string; value: string | null };
   impressionToken?: string; // absent for house ads (not tracked)
+  /** Internal-only ownership used for personalized block filtering. */
+  authorUserId?: string;
 }
 
 interface PlacementSlot {
@@ -90,6 +93,11 @@ export class AdServingService {
     const dayBucket = now.toISOString().slice(0, 10);
     const hourBucket = now.toISOString().slice(0, 13);
     const currentUserHash = input.userId ? userHash(input.userId, dayBucket) : null;
+    const hiddenAdvertiserAuthors = new Set(
+      input.userId
+        ? await blockedAuthorIds(this.prisma, input.tenantId, input.userId)
+        : [],
+    );
 
     for (const key of input.keys) {
       const placement = await this.prisma.adPlacement.findUnique({ where: { tenantId_key: { tenantId: input.tenantId, key } } });
@@ -102,7 +110,9 @@ export class AdServingService {
         AdServingService.poolCache.set(cacheKey, pool, POOL_TTL_MS, now.getTime());
       }
 
-      let items = pool;
+      let items = hiddenAdvertiserAuthors.size > 0
+        ? pool.filter((item) => !item.authorUserId || !hiddenAdvertiserAuthors.has(item.authorUserId))
+        : pool;
       let isHouse = false;
       if (items.length === 0) {
         items = await this.loadHouseAds(input.tenantId, placement.id);
@@ -144,7 +154,7 @@ export class AdServingService {
         campaign: {
           select: {
             id: true, destinationType: true, destinationValue: true,
-            advertiser: { select: { companyName: true } },
+            advertiser: { select: { companyName: true, createdByUserId: true } },
             creatives: { where: { status: 'APPROVED', transcodeStatus: 'READY' }, orderBy: { createdAt: 'desc' }, take: 1 },
           },
         },
@@ -162,6 +172,7 @@ export class AdServingService {
         posterUrl: creative.posterUrl,
         headline: creative.headline,
         advertiserName: b.campaign.advertiser.companyName,
+        authorUserId: b.campaign.advertiser.createdByUserId,
         ctaLabel: creative.ctaLabel,
         destination: { type: b.campaign.destinationType, value: b.campaign.destinationValue },
       });
@@ -186,7 +197,11 @@ export class AdServingService {
   }
 
   private attachToken(item: ServeItem, placementKey: string, sessionId: string, userId: string | null, isHouse: boolean, now: number): ServeItem {
-    if (isHouse) return item; // house ads are not tracked (§11.1)
-    return { ...item, impressionToken: signImpressionToken({ c: item.campaignId, r: item.creativeId, p: placementKey, s: sessionId }, userId, now) };
+    // Ownership is an internal moderation predicate, never part of the ad
+    // payload. The client receives only the creative and signed event token.
+    const publicItem = { ...item };
+    delete publicItem.authorUserId;
+    if (isHouse) return publicItem; // house ads are not tracked (§11.1)
+    return { ...publicItem, impressionToken: signImpressionToken({ c: item.campaignId, r: item.creativeId, p: placementKey, s: sessionId }, userId, now) };
   }
 }

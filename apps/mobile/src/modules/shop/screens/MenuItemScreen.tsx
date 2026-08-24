@@ -25,6 +25,7 @@ import {
   SectionHeader,
   T,
 } from '../../../kit';
+import { ContentSafetyActions } from '../../../components/moderation/ContentSafetyActions';
 
 const SCREEN_W = Dimensions.get('window').width;
 const GUTTER = space['2xl'];
@@ -269,6 +270,13 @@ export function MenuItemScreen() {
               </T>
             </>
           ) : null}
+          <ContentSafetyActions
+            targetType="ITEM"
+            targetId={itemId}
+            contentLabel="item listing"
+            onBlocked={() => navigation.goBack()}
+            style={{ marginTop: space.md }}
+          />
 
           {/* Modifiers — Swift option groups in kit chip language */}
           {groups.map((g) => {

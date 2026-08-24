@@ -8,6 +8,7 @@ import { Card, DecorativeIcon, EmptyState, Header, IconChip, LinkText, LoadingBl
 import { VERTICAL_TINT } from '../../../kit/vertical-tint';
 import { useAuthStore } from '../../../stores/authStore';
 import { enterServiceProvider } from '../serviceProviderEntry';
+import { ContentSafetyActions } from '../../../components/moderation/ContentSafetyActions';
 
 type TradeOption = { key: string; label: string; pictogram: PictogramName };
 
@@ -88,7 +89,7 @@ export function ServicesScreen({ navigation }: any) {
   const [description, setDescription] = useState('');
   const [sentPopup, setSentPopup] = useState(false);
 
-  const { data, isFetching, isError } = useServiceProviders<ProviderBrowse>(trade);
+  const { data, isFetching, isError, refetch } = useServiceProviders<ProviderBrowse>(trade);
   const requestJob = useRequestJob();
 
   const providers = data?.providers ?? [];
@@ -265,6 +266,16 @@ export function ServicesScreen({ navigation }: any) {
                       {p.bio}
                     </T>
                   ) : null}
+                  <ContentSafetyActions
+                    targetType="SERVICE_PROVIDER"
+                    targetId={p.id}
+                    contentLabel="provider profile"
+                    onBlocked={() => {
+                      setSelectedProviderId(undefined);
+                      void refetch();
+                    }}
+                    style={{ marginTop: space.md }}
+                  />
                   <PillButton
                     label={selected ? 'Remove selection' : 'Request this provider'}
                     variant="soft"

@@ -8,6 +8,7 @@ import { AdChip } from './AdChip';
 import { useAdViewability } from './useAdViewability';
 import { trackAdEvent, openAdDestination } from '../../lib/ads';
 import type { AdEventScope, AdServeItem } from '../../lib/adsCore';
+import { ContentSafetyActions } from '../moderation/ContentSafetyActions';
 
 // Tier 3 — the rotating ad bar (spec §13.3). Horizontal pager: auto-advances
 // every rotationSeconds and loops; PAUSES while the user is touching/swiping
@@ -147,6 +148,14 @@ export function AdBar({
           </View>
         </>
       )}
+      {items[index] ? (
+        <ContentSafetyActions
+          targetType="AD_CREATIVE"
+          targetId={items[index]!.creativeId}
+          contentLabel="advertisement"
+          style={{ marginTop: space.sm }}
+        />
+      ) : null}
     </View>
   );
 }

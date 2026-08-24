@@ -46,6 +46,21 @@ try {
 }
 
 const CACHE_KEY = 'serve';
+let serveCacheEpoch = 0;
+let fallbackSuppressed = false;
+
+/** Remove any pre-block serve so an offline refetch cannot resurrect content
+ * from an account the current user just blocked. Also retire in-flight serves
+ * that began before this boundary; they must not repopulate the cache. */
+export function clearAdServeCache(): void {
+  serveCacheEpoch += 1;
+  fallbackSuppressed = true;
+  try {
+    store?.delete(CACHE_KEY);
+  } catch {
+    /* fail closed for this process via fallbackSuppressed */
+  }
+}
 
 // One session id per app launch (§11.1) — random, never the user id.
 export const adsSessionId: string = (() => {
@@ -83,6 +98,7 @@ function readCache(): CachedServe | null {
 /** The §13 fetch: serve → cache; on timeout/failure → last-good ≤1 h (same
  *  city) marked display-only when past the serve ttl; else null (collapse). */
 export async function fetchAds(city: string, keys: string[]): Promise<AdsResult> {
+  const requestEpoch = serveCacheEpoch;
   const trackingScope = getAdEventTrackingScope();
   const session = getAuthSessionSnapshot();
   try {
@@ -92,17 +108,25 @@ export async function fetchAds(city: string, keys: string[]): Promise<AdsResult>
       ...(session ? { headers: { Authorization: `Bearer ${session.accessToken}` } } : {}),
     });
     const payload = (data?.data ?? null) as AdServeResponse | null;
+    if (requestEpoch !== serveCacheEpoch) {
+      return { data: null, trackable: false, trackingScope: null };
+    }
     if (payload) {
+      let cacheIsSafe = store === null;
       try {
-        store?.set(CACHE_KEY, JSON.stringify({
-          at: Date.now(),
-          city,
-          data: payload,
-          trackingScope,
-        } satisfies CachedServe));
+        if (store) {
+          store.set(CACHE_KEY, JSON.stringify({
+            at: Date.now(),
+            city,
+            data: payload,
+            trackingScope,
+          } satisfies CachedServe));
+          cacheIsSafe = true;
+        }
       } catch {
         /* cache write is best-effort */
       }
+      if (cacheIsSafe) fallbackSuppressed = false;
       const stillCurrent = sameAdEventScope(trackingScope, getAdEventTrackingScope());
       return {
         data: payload,
@@ -112,6 +136,9 @@ export async function fetchAds(city: string, keys: string[]): Promise<AdsResult>
     }
     return { data: null, trackable: false, trackingScope: null };
   } catch {
+    if (requestEpoch !== serveCacheEpoch || fallbackSuppressed) {
+      return { data: null, trackable: false, trackingScope: null };
+    }
     const cached = readCache();
     if (!cached || cached.city !== city || !cacheUsable(cached.at, Date.now())) {
       return { data: null, trackable: false, trackingScope: null };

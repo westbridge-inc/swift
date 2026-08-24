@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { View, FlatList, TextInput, KeyboardAvoidingView, Platform } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Feather } from '@expo/vector-icons';
@@ -6,6 +6,7 @@ import { color } from '@swift/ui';
 import { Text, Spinner, PressableScale } from '../../components/ui';
 import { useAuthStore } from '../../stores/authStore';
 import { useChatRoom, useChatMessages, useSendMessage } from '../../hooks/chat';
+import { ContentSafetyActions } from '../../components/moderation/ContentSafetyActions';
 
 function fmtTime(iso: string) {
   try {
@@ -28,6 +29,19 @@ export function ChatScreen({ route, navigation }: any) {
   const msgsQ = useChatMessages(roomId);
   const send = useSendMessage(roomId);
   const [text, setText] = useState('');
+  const [locallyBlocked, setLocallyBlocked] = useState(false);
+  const contactBlocked = locallyBlocked || msgsQ.contactBlocked;
+  // A cached pre-block result is not fresh authority for a newly mounted room.
+  const contactStatusPending = !!roomId && !msgsQ.isFetchedAfterMount;
+  const contactStatusUnavailable = !!roomId
+    && msgsQ.isFetchedAfterMount
+    && (msgsQ.isError || !msgsQ.contactBlockedKnown);
+
+  // Once the server confirms the block, the polling result becomes the sole
+  // source of truth again so a later unblock can reopen the composer.
+  useEffect(() => {
+    if (msgsQ.contactBlocked) setLocallyBlocked(false);
+  }, [msgsQ.contactBlocked]);
 
   // Newest-first for the inverted list (sticks to the bottom on new messages).
   const messages: any[] = (((msgsQ.data as any[]) ?? (roomQ.data as any)?.messages ?? []) as any[])
@@ -36,8 +50,18 @@ export function ChatScreen({ route, navigation }: any) {
 
   const submit = () => {
     const m = text.trim();
-    if (!m || !roomId) return;
-    send.mutate(m, { onSuccess: () => setText('') });
+    if (!m || !roomId || contactBlocked || contactStatusPending || contactStatusUnavailable) return;
+    send.mutate(m, {
+      onSuccess: () => setText(''),
+      onError: (error) => {
+        const code = (error as { response?: { data?: { error?: { code?: string } } } })
+          ?.response?.data?.error?.code;
+        if (code === 'USER_BLOCKED') {
+          setLocallyBlocked(true);
+          void msgsQ.refetch();
+        }
+      },
+    });
   };
 
   return (
@@ -78,6 +102,18 @@ export function ChatScreen({ route, navigation }: any) {
                     <Text className={mine ? 'text-sm text-white' : 'text-sm text-text-primary'}>{item.message}</Text>
                   </View>
                   <Text className="mt-1 text-xs text-text-muted">{fmtTime(item.createdAt)}</Text>
+                  {!mine && item.id ? (
+                    <ContentSafetyActions
+                      targetType="CHAT_MESSAGE"
+                      targetId={item.id}
+                      contentLabel="message"
+                      onBlocked={() => {
+                        setLocallyBlocked(true);
+                        void msgsQ.refetch();
+                      }}
+                      style={{ marginTop: 6 }}
+                    />
+                  ) : null}
                 </View>
               );
             }}
@@ -86,7 +122,20 @@ export function ChatScreen({ route, navigation }: any) {
         )}
 
         <View className="flex-row items-center border-t border-border-subtle px-lg py-sm" style={{ gap: 8 }}>
-          <TextInput
+          {contactStatusPending ? (
+            <Text className="flex-1 text-sm text-text-muted">Checking chat availability…</Text>
+          ) : contactStatusUnavailable ? (
+            <>
+              <Text className="flex-1 text-sm text-text-muted">Couldn’t confirm chat availability.</Text>
+              <PressableScale onPress={() => { void msgsQ.refetch(); }} hitSlop={8}>
+                <Text className="text-sm font-bold text-text-primary">Retry</Text>
+              </PressableScale>
+            </>
+          ) : contactBlocked ? (
+            <Text className="flex-1 text-sm text-text-muted">
+              Contact is unavailable between these accounts.
+            </Text>
+          ) : <TextInput
             value={text}
             onChangeText={setText}
             placeholder="Message…"
@@ -94,15 +143,15 @@ export function ChatScreen({ route, navigation }: any) {
             className="flex-1 rounded-full border border-border-subtle bg-surface-base px-lg py-sm font-body text-base text-text-primary"
             onSubmitEditing={submit}
             returnKeyType="send"
-          />
-          <PressableScale
+          />}
+          {!contactStatusPending && !contactStatusUnavailable && !contactBlocked ? <PressableScale
             onPress={submit}
             disabled={send.isPending || text.trim().length === 0}
             className="h-10 w-10 items-center justify-center rounded-full"
             style={{ backgroundColor: text.trim().length === 0 ? color.border.subtle : color.brand[500] }}
           >
             <Feather name="send" size={18} color={color.white} />
-          </PressableScale>
+          </PressableScale> : null}
         </View>
       </KeyboardAvoidingView>
     </SafeAreaView>

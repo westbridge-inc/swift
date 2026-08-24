@@ -314,6 +314,16 @@ describe('vendor provisioning', () => {
     expect(res.statusCode).toBe(400);
   });
 
+  it('rejects an objectionable storefront name before provisioning', async () => {
+    const res = await post('/api/v1/partner/become', {
+      role: 'VENDOR',
+      business: { ...business, name: 'Shit Roti Shop' },
+    }, vendorToken);
+    expect(res.statusCode).toBe(400);
+    expect(JSON.parse(res.body).error.code).toBe('OBJECTIONABLE_CONTENT');
+    expect(await app.prisma.vendor.count({ where: { owner: { user: { phone: VENDOR_PHONE } } } })).toBe(0);
+  });
+
   it('provisions a Vendor store (PENDING_APPROVAL) + VENDOR_OWNER role', async () => {
     const res = await post('/api/v1/partner/become', { role: 'VENDOR', business }, vendorToken);
     expect(res.statusCode).toBe(201);

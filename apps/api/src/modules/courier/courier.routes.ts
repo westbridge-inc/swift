@@ -15,6 +15,7 @@ import { ALLOWED_IMAGE_TYPES, looksLikeImage } from '../../utils/images';
 import type { OrderStatus } from '@prisma/client';
 import { lockActiveOrderCustomer } from '../order/order-creation-authority';
 import { redactLiveLocation, riderCounterpartySelect } from '../../utils/counterparty';
+import { assertAcceptableContent } from '../moderation/content-filter';
 
 // ---------------------------------------------------------------------------
 // Module C: Courier (spec §4.3) — send a parcel person-to-person. A non-cart
@@ -134,6 +135,12 @@ export default async function courierRoutes(app: FastifyInstance) {
   /** POST /order — create the courier job at the quoted fee and dispatch a rider. */
   app.post('/order', auth, async (request, reply) => {
     const body = orderSchema.parse(request.body);
+    assertAcceptableContent({
+      pickupAddress: body.pickupAddress,
+      dropoffAddress: body.dropoffAddress,
+      packageDescription: body.packageDescription,
+      recipientName: body.recipientName,
+    });
     const userId = request.user.userId;
     const customer = await app.prisma.user.findUniqueOrThrow({
       where: { id: userId },
@@ -284,6 +291,7 @@ export default async function courierRoutes(app: FastifyInstance) {
   app.post('/order/:id/cancel', auth, async (request) => {
     const { id } = request.params as { id: string };
     const body = cancelSchema.parse(request.body ?? {});
+    assertAcceptableContent({ reason: body.reason });
     const order = await app.prisma.order.findFirst({
       where: { id, customerId: request.user.userId, orderType: 'COURIER' },
     });

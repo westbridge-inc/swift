@@ -39,6 +39,11 @@ import {
   lockUserRoleAuthority,
   staleMoverAuthorityError,
 } from '../mover-authority';
+import {
+  assertUsersMayContact,
+  contactBlockedUserIds,
+} from '../moderation/user-block.service';
+import { assertAcceptableContent } from '../moderation/content-filter';
 
 const updateRiderProfileSchema = z.object({
   riderType: z.nativeEnum(RiderType).optional(),
@@ -339,6 +344,12 @@ export async function riderRoutes(app: FastifyInstance) {
     const rider = await getRider(app, request.user.userId);
 
     const body = updateRiderProfileSchema.parse(request.body);
+    assertAcceptableContent({
+      vehicleMake: body.vehicleMake,
+      vehicleModel: body.vehicleModel,
+      vehicleColor: body.vehicleColor,
+      licensePlate: body.licensePlate,
+    });
 
     const allowedFields = [
       'riderType', 'vehicleType', 'vehicleMake', 'vehicleModel',
@@ -752,6 +763,15 @@ export async function riderRoutes(app: FastifyInstance) {
   /** GET /orders/available — Nearby orders needing a rider, sorted by distance. */
   app.get('/orders/available', { preHandler: [app.authenticate] }, async (request) => {
     const rider = await getRider(app, request.user.userId);
+    const account = await app.prisma.user.findUniqueOrThrow({
+      where: { id: request.user.userId },
+      select: { tenantId: true },
+    });
+    const blockedCounterparties = await contactBlockedUserIds(
+      app.prisma,
+      account.tenantId,
+      request.user.userId,
+    );
 
     if (!rider.isOnline || !rider.locationSessionId) {
       throw new AppError(400, 'OFFLINE', 'You must be online to see available orders');
@@ -778,7 +798,7 @@ export async function riderRoutes(app: FastifyInstance) {
 
     const orders = await app.prisma.order.findMany({
       where: {
-        customerId: { not: request.user.userId },
+        customerId: { notIn: [request.user.userId, ...blockedCounterparties] },
         status: { in: ['READY_FOR_PICKUP', 'ACCEPTED', 'PREPARING'] },
         riderId: null,
         orderType: { in: orderTypes as import('@prisma/client').OrderType[] },
@@ -900,10 +920,40 @@ export async function riderRoutes(app: FastifyInstance) {
       return { success: true, data: null };
     }
 
+    const account = await app.prisma.user.findUniqueOrThrow({
+      where: { id: request.user.userId },
+      select: { tenantId: true },
+    });
+    const contactBlocked = (await contactBlockedUserIds(
+      app.prisma,
+      account.tenantId,
+      request.user.userId,
+    )).includes(order.customer.id);
+    const visibleOrder = contactBlocked
+      ? {
+          ...order,
+          deliveryInstructions: null,
+          courierPackageDescription: null,
+          courierRecipientName: null,
+          cancellationReason: null,
+          customer: {
+            ...order.customer,
+            firstName: 'Blocked account',
+            lastName: '',
+            phone: null,
+            contactBlocked: true,
+          },
+          items: order.items.map((item) => ({ ...item, specialInstructions: null })),
+          statusHistory: order.statusHistory.map((entry) => (
+            entry.changedBy === order.customer.id ? { ...entry, note: null } : entry
+          )),
+        }
+      : { ...order, customer: { ...order.customer, contactBlocked: false } };
+
     return {
       success: true,
       data: {
-        ...order,
+        ...visibleOrder,
         deliveryFee: Number(order.deliveryFee),
         tipAmount: Number(order.tipAmount),
         totalAmount: Number(order.totalAmount),
@@ -954,6 +1004,12 @@ export async function riderRoutes(app: FastifyInstance) {
     if (order.customerId === request.user.userId) {
       throw new AppError(409, 'SELF_OWN_ORDER', 'You cannot accept a delivery or courier request created by your own account');
     }
+    await assertUsersMayContact(
+      app.prisma,
+      order.tenantId,
+      request.user.userId,
+      order.customerId,
+    );
 
     if (order.riderId) {
       throw new ConflictError('This order has already been claimed by another rider');

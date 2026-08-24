@@ -4,7 +4,15 @@ import { detectOffPlatformContact, OFF_PLATFORM_WARNING } from './off-platform';
 import { digitRun, mediaUrlCarriesSecret, redactOrderSecrets, SECRET_REDACTED_WARNING } from './secret-guard';
 
 import { NotificationService } from '../notification/notification.service';
-import { NotFoundError, ForbiddenError } from '../../utils/errors';
+import { AppError, NotFoundError, ForbiddenError } from '../../utils/errors';
+import { getTenantId } from '../../plugins/tenant-context';
+import { assertAcceptableContent } from '../moderation/content-filter';
+import {
+  assertUsersMayContact,
+  contactBlockedUserIds,
+  findActiveBlockBetween,
+  lockUserContactPair,
+} from '../moderation/user-block.service';
 
 /** How far back the split-code check looks. Bounded on BOTH axes on purpose:
  *  an unbounded scan of a long conversation would put an O(history) query on
@@ -46,6 +54,14 @@ const messagesQuerySchema = z.object({
 export async function chatRoutes(app: FastifyInstance) {
   const notifications = new NotificationService(app.prisma, app.io);
 
+  function authenticatedTenant(): string {
+    const tenantId = getTenantId();
+    if (!tenantId) {
+      throw new AppError(401, 'UNAUTHORIZED', 'No authenticated tenant is bound to this request');
+    }
+    return tenantId;
+  }
+
   // Get or create chat room for an order
   app.post('/rooms', { preHandler: [app.authenticate] }, async (request) => {
     const { orderId } = createRoomSchema.parse(request.body);
@@ -69,17 +85,32 @@ export async function chatRoutes(app: FastifyInstance) {
       throw new ForbiddenError('You are not part of this order');
     }
 
-    // Find existing room
-    let room = await app.prisma.chatRoom.findFirst({
-      where: { orderId },
-      include: {
-        participants: { include: { user: { select: { id: true, firstName: true, avatar: true } } } },
-        messages: { orderBy: { createdAt: 'desc' }, take: 50 },
-      },
-    });
+    const tenantId = authenticatedTenant();
+    for (const otherUserId of participantUserIds) {
+      await assertUsersMayContact(app.prisma, tenantId, request.user.userId, otherUserId);
+    }
 
-    if (!room) {
-      room = await app.prisma.chatRoom.create({
+    // Find/create is a contact action too. Serialize it against a block being
+    // activated on another request, then re-check inside the same transaction.
+    const otherUserIds = participantUserIds
+      .filter((userId) => userId !== request.user.userId)
+      .sort();
+    const room = await app.prisma.$transaction(async (tx) => {
+      for (const otherUserId of otherUserIds) {
+        await lockUserContactPair(tx, tenantId, request.user.userId, otherUserId);
+      }
+      for (const otherUserId of otherUserIds) {
+        await assertUsersMayContact(tx, tenantId, request.user.userId, otherUserId);
+      }
+      const existing = await tx.chatRoom.findFirst({
+        where: { orderId },
+        include: {
+          participants: { include: { user: { select: { id: true, firstName: true, avatar: true } } } },
+          messages: { orderBy: { createdAt: 'desc' }, take: 50 },
+        },
+      });
+      if (existing) return existing;
+      return tx.chatRoom.create({
         data: {
           orderId,
           participants: {
@@ -94,7 +125,7 @@ export async function chatRoutes(app: FastifyInstance) {
           messages: { orderBy: { createdAt: 'desc' }, take: 50 },
         },
       });
-    }
+    });
 
     return { success: true, data: room };
   });
@@ -103,12 +134,25 @@ export async function chatRoutes(app: FastifyInstance) {
   app.post('/rooms/:roomId/messages', { preHandler: [app.authenticate] }, async (request) => {
     const { roomId } = request.params as { roomId: string };
     const { message, messageType, mediaUrl } = sendMessageSchema.parse(request.body);
+    assertAcceptableContent({ message });
 
     // Verify participation
     const participant = await app.prisma.chatRoomParticipant.findFirst({
       where: { chatRoomId: roomId, userId: request.user.userId },
     });
     if (!participant) throw new ForbiddenError('Not a participant');
+
+    // A block in EITHER direction closes contact. Check every other room
+    // participant before storing anything, so a rejected message cannot leak
+    // through history, Socket.IO, or push as a side effect.
+    const otherParticipants = await app.prisma.chatRoomParticipant.findMany({
+      where: { chatRoomId: roomId, userId: { not: request.user.userId } },
+      select: { userId: true },
+    });
+    const tenantId = authenticatedTenant();
+    for (const other of otherParticipants) {
+      await assertUsersMayContact(app.prisma, tenantId, request.user.userId, other.userId);
+    }
 
     // Off-platform contact detection (spec §2): the message still delivers —
     // the sender gets a soft nudge and the flag feeds risk signals. Detection,
@@ -144,19 +188,29 @@ export async function chatRoutes(app: FastifyInstance) {
     const mediaBlocked = mediaUrlCarriesSecret(mediaUrl, secrets ?? {});
     const safeMediaUrl = mediaBlocked ? undefined : mediaUrl;
 
-    const msg = await app.prisma.chatMessage.create({
-      data: {
-        chatRoomId: roomId,
-        senderId: request.user.userId,
-        message: body,
-        messageType,
-        mediaUrl: safeMediaUrl,
-        offPlatformFlag: offPlatform,
-      },
+    const msg = await app.prisma.$transaction(async (tx) => {
+      // Linearize message persistence with block/unblock. Without the shared
+      // pair lock, a block can commit between the relationship read and the
+      // insert, leaving a message that resurfaces after an unblock.
+      for (const other of [...otherParticipants].sort((a, b) => a.userId.localeCompare(b.userId))) {
+        await lockUserContactPair(tx, tenantId, request.user.userId, other.userId);
+      }
+      for (const other of otherParticipants) {
+        await assertUsersMayContact(tx, tenantId, request.user.userId, other.userId);
+      }
+      return tx.chatMessage.create({
+        data: {
+          chatRoomId: roomId,
+          senderId: request.user.userId,
+          message: body,
+          messageType,
+          mediaUrl: safeMediaUrl,
+          offPlatformFlag: offPlatform,
+        },
+      });
     });
 
-    // Broadcast via Socket.IO
-    app.io.to(`chat:${roomId}`).emit('chat:message', {
+    const socketPayload = {
       id: msg.id,
       roomId,
       senderId: request.user.userId,
@@ -164,12 +218,26 @@ export async function chatRoutes(app: FastifyInstance) {
       messageType: msg.messageType,
       mediaUrl: msg.mediaUrl,
       createdAt: msg.createdAt,
-    });
+    };
 
-    // Notify other participants
-    const otherParticipants = await app.prisma.chatRoomParticipant.findMany({
-      where: { chatRoomId: roomId, userId: { not: request.user.userId } },
-    });
+    // Address delivery to each recipient's authenticated user room. A broad
+    // chat-room broadcast can race with a block committed on another request;
+    // the final relationship read below makes both socket and push delivery
+    // fail closed for that recipient.
+    const deliverTo: string[] = [];
+    for (const other of otherParticipants) {
+      const blocked = await findActiveBlockBetween(
+        app.prisma,
+        tenantId,
+        request.user.userId,
+        other.userId,
+      );
+      if (!blocked) deliverTo.push(other.userId);
+    }
+    // Block creation evicts both parties from shared chat rooms after its
+    // serialized commit. Room-scoped delivery therefore closes the small
+    // post-commit/pre-emit window that a permanent user-room emit would leave.
+    app.io.to(`chat:${roomId}`).except(`user:${request.user.userId}`).emit('chat:message', socketPayload);
 
     const sender = await app.prisma.user.findUnique({ where: { id: request.user.userId }, select: { firstName: true } });
 
@@ -178,9 +246,9 @@ export async function chatRoutes(app: FastifyInstance) {
     // is live), respects the recipient's prefs, and lands in the failure
     // metrics. The old code wrote a row + a socket emit only, so a backgrounded
     // app never learned about the message.
-    for (const p of otherParticipants) {
+    for (const recipientId of deliverTo) {
       await notifications.send({
-        userId: p.userId,
+        userId: recipientId,
         type: 'CHAT_MESSAGE',
         title: `Message from ${sender?.firstName || 'Someone'}`,
         body: body.substring(0, 100),
@@ -213,9 +281,23 @@ export async function chatRoutes(app: FastifyInstance) {
     });
     if (!participant) throw new ForbiddenError('Not a participant');
 
+    const hiddenSenderIds = await contactBlockedUserIds(
+      app.prisma,
+      authenticatedTenant(),
+      request.user.userId,
+    );
+    const contactBlocked = hiddenSenderIds.length > 0
+      && await app.prisma.chatRoomParticipant.count({
+        where: {
+          chatRoomId: roomId,
+          userId: { in: hiddenSenderIds },
+        },
+      }) > 0;
+
     const messages = await app.prisma.chatMessage.findMany({
       where: {
         chatRoomId: roomId,
+        ...(hiddenSenderIds.length > 0 && { senderId: { notIn: hiddenSenderIds } }),
         ...(before && { createdAt: { lt: before } }),
       },
       orderBy: { createdAt: 'desc' },
@@ -247,7 +329,9 @@ export async function chatRoutes(app: FastifyInstance) {
         }))
       : messages;
 
-    return { success: true, data: visible.reverse() };
+    // Additive metadata lets direct-room clients keep the composer closed
+    // after reopening. The messages array remains unchanged for older clients.
+    return { success: true, data: visible.reverse(), contactBlocked };
   });
 
   // Mark room as read
@@ -272,6 +356,11 @@ export async function chatRoutes(app: FastifyInstance) {
       })
       .parse(request.query);
     const roleFilter = as === 'customer' || as === 'rider' ? { role: as } : {};
+    const hiddenParticipantIds = await contactBlockedUserIds(
+      app.prisma,
+      authenticatedTenant(),
+      request.user.userId,
+    );
     // UG-CRAFT-02: bounded — a long-lived account accumulates rooms without
     // limit. The response shape stays a plain array (existing clients read it
     // directly), newest first, with opt-in page/limit for deeper history.
@@ -279,6 +368,9 @@ export async function chatRoutes(app: FastifyInstance) {
       where: {
         isActive: true,
         participants: { some: { userId: request.user.userId, ...roleFilter } },
+        ...(hiddenParticipantIds.length > 0 && {
+          AND: [{ participants: { none: { userId: { in: hiddenParticipantIds } } } }],
+        }),
       },
       include: {
         participants: { include: { user: { select: { id: true, firstName: true, avatar: true } } } },

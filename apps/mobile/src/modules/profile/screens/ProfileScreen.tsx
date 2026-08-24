@@ -269,6 +269,12 @@ export function ProfileScreen() {
           <T variant="micro" tone="muted" style={{ marginTop: space.xl, marginBottom: space.sm }}>PRIVACY</T>
           <Card>
             <MarketingConsentRow />
+            <SettingsRow
+              icon="slash"
+              label="Blocked accounts"
+              sub="Review or unblock accounts"
+              onPress={() => navigation.navigate('BlockedUsers')}
+            />
             <SettingsRow icon="file-text" label="Terms of service" onPress={() => openPayLink(`${API_URL}/legal/terms`)} />
             <SettingsRow icon="shield" label="Privacy policy" onPress={() => openPayLink(`${API_URL}/legal/privacy`)} />
           </Card>

@@ -6,6 +6,7 @@ import { useServiceJobs, useScheduleJob, useCancelJob, useRateJob, useQuoteJob, 
 import { useAuthStore } from '../../../stores/authStore';
 import { money } from '../../../lib/money';
 import { Card, Chip, EmptyState, ErrorState, Header, IconChip, LoadingBlock, PillButton, PopupCard, PopupTitle, Screen, Stars, T, TonePill } from '../../../kit';
+import { ContentSafetyActions } from '../../../components/moderation/ContentSafetyActions';
 
 const STATUS_LABEL: Record<string, { label: string; tone: 'brand' | 'success' | 'neutral' }> = {
   REQUESTED: { label: 'Waiting for quote', tone: 'neutral' },
@@ -184,7 +185,7 @@ function ProviderActions({ job }: { job: any }) {
   return null;
 }
 
-function JobCard({ job, navigation }: { job: any; navigation: any }) {
+function JobCard({ job, navigation, onBlocked }: { job: any; navigation: any; onBlocked: () => void }) {
   const myId = useAuthStore((s) => s.user?.id);
   const isCustomer = job.customerId === myId;
   const cancel = useCancelJob();
@@ -208,6 +209,16 @@ function JobCard({ job, navigation }: { job: any; navigation: any }) {
         </View>
         <TonePill label={status.label} tone={status.tone} />
       </View>
+
+      {!isCustomer ? (
+        <ContentSafetyActions
+          targetType="SERVICE_JOB"
+          targetId={job.id}
+          contentLabel="job request"
+          onBlocked={onBlocked}
+          style={{ marginTop: space.sm }}
+        />
+      ) : null}
 
       {job.status === 'QUOTED' && job.quoteAmount != null ? (
         <View style={{ marginTop: space.md, borderRadius: radius.md, paddingHorizontal: space.lg, paddingVertical: space.md, backgroundColor: color.brand[50] }}>
@@ -299,7 +310,7 @@ export function ServiceJobsScreen({ navigation }: any) {
         ) : jobs.length === 0 ? (
           <EmptyState icon="tool" title="No jobs yet" body="Request a pro from Services and quotes land here." />
         ) : (
-          jobs.map((j) => <JobCard key={j.id} job={j} navigation={navigation} />)
+          jobs.map((j) => <JobCard key={j.id} job={j} navigation={navigation} onBlocked={() => void q.refetch()} />)
         )}
       </ScrollView>
     </Screen>
