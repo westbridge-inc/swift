@@ -2,8 +2,8 @@
 import React from 'react';
 import { Pressable, TextInput, View } from 'react-native';
 import { Feather, MaterialCommunityIcons } from '@expo/vector-icons';
-import { color, radius, space } from '@swift/ui';
-import { T, TonePill, cardShadow } from '../../kit';
+import { color, elevation, radius, space } from '@swift/ui';
+import { T, TonePill } from '../../kit';
 
 export const GUTTER = space['2xl'];
 
@@ -271,12 +271,12 @@ export function KpiTile({
   delta?: React.ReactNode;
 }) {
   return (
-    <View style={[{ flex: 1, borderRadius: radius.lg, backgroundColor: color.surface.base, padding: space.md }, cardShadow]}>
+    <View style={[{ flex: 1, borderRadius: radius.lg, backgroundColor: color.surface.base, padding: space.md }, elevation.card]}>
       <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
         <MaterialCommunityIcons name={icon} size={18} color={color.brand[500]} />
         {delta ?? null}
       </View>
-      <T variant="body" weight="bold" numberOfLines={1} style={{ marginTop: 4 }}>
+      <T variant="numM" numberOfLines={1} style={{ marginTop: space.xs }}>
         {value}
       </T>
       <T variant="caption" tone="muted" numberOfLines={1}>
@@ -291,7 +291,7 @@ export function DeltaBadge({ cur, prev }: { cur: number; prev: number | null }) 
   if (prev == null) return null;
   if (prev <= 0) {
     return cur > 0 ? (
-      <T variant="caption" weight="semibold" style={{ color: color.success }}>
+      <T variant="caption" weight="semibold" tone="brand">
         new
       </T>
     ) : null;
@@ -305,7 +305,7 @@ export function DeltaBadge({ cur, prev }: { cur: number; prev: number | null }) 
     );
   const up = pct > 0;
   return (
-    <T variant="caption" weight="semibold" style={{ color: up ? color.success : color.error }}>
+    <T variant="caption" weight="semibold" tone={up ? 'brand' : 'muted'}>
       {up ? '▲' : '▼'} {Math.abs(pct)}%
     </T>
   );
