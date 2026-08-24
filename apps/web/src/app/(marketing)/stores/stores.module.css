@@ -1,0 +1,168 @@
+.title {
+  margin: 0;
+  font-family: var(--swift-font-display-semibold), system-ui, sans-serif;
+  font-size: var(--swift-type-display);
+  line-height: var(--swift-leading-display);
+}
+
+.intro {
+  max-width: var(--swift-content-half);
+  margin: var(--swift-space-sm) 0 0;
+  color: var(--swift-muted);
+}
+
+.filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--swift-space-sm);
+  margin-block-start: var(--swift-space-2xl);
+}
+
+.filter {
+  min-height: var(--swift-touch);
+  display: inline-flex;
+  align-items: center;
+  padding-inline: var(--swift-space-lg);
+  border: thin solid var(--swift-border);
+  border-radius: var(--swift-radius-full);
+  background: var(--swift-card);
+  color: var(--swift-ink);
+  font-family: var(--swift-font-body-semibold), system-ui, sans-serif;
+  font-size: var(--swift-type-caption);
+  line-height: var(--swift-leading-caption);
+}
+
+.filter:hover {
+  background: var(--swift-sunken);
+}
+
+.filterSelected {
+  border-color: var(--swift-red);
+  background: var(--swift-red);
+  color: var(--swift-white);
+}
+
+.filterSelected:hover {
+  background: var(--swift-red-600);
+}
+
+.empty {
+  margin: var(--swift-space-4xl) 0 0;
+  padding: var(--swift-space-4xl);
+  border: thin dashed var(--swift-border);
+  border-radius: var(--swift-radius-lg);
+  color: var(--swift-muted);
+  text-align: center;
+}
+
+.grid {
+  display: grid;
+  gap: var(--swift-space-xl);
+  margin-block-start: var(--swift-space-3xl);
+}
+
+.card {
+  overflow: hidden;
+  border: thin solid var(--swift-border);
+  border-radius: var(--swift-radius-lg);
+  background: var(--swift-card);
+  color: var(--swift-ink);
+  box-shadow: var(--swift-elevation-card);
+  transition: box-shadow 160ms ease;
+}
+
+.card:hover {
+  box-shadow: var(--swift-elevation-raised);
+}
+
+.media {
+  position: relative;
+  height: calc(var(--swift-space-5xl) * 3);
+  background: var(--swift-sunken);
+}
+
+.mediaImage {
+  object-fit: cover;
+}
+
+.closed {
+  position: absolute;
+  inset-block-start: var(--swift-space-md);
+  inset-inline-start: var(--swift-space-md);
+  display: inline-flex;
+  align-items: center;
+  min-height: calc(var(--swift-space-3xl) + var(--swift-space-xs));
+  padding-inline: var(--swift-space-sm);
+  border: thin solid var(--swift-border-strong);
+  border-radius: var(--swift-radius-full);
+  background: var(--swift-card);
+  color: var(--swift-muted);
+  font-family: var(--swift-font-body-bold), system-ui, sans-serif;
+  font-size: var(--swift-type-micro);
+  line-height: var(--swift-leading-micro);
+}
+
+.cardBody {
+  padding: var(--swift-space-lg);
+}
+
+.name,
+.description,
+.meta {
+  margin: 0;
+}
+
+.name {
+  font-family: var(--swift-font-body-bold), system-ui, sans-serif;
+}
+
+.card:hover .name {
+  color: var(--swift-red);
+}
+
+.description,
+.meta {
+  color: var(--swift-muted);
+  font-size: var(--swift-type-caption);
+  line-height: var(--swift-leading-caption);
+}
+
+.description {
+  overflow: hidden;
+  margin-block-start: var(--swift-space-xs);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.meta,
+.metaItem {
+  display: flex;
+  align-items: center;
+}
+
+.meta {
+  gap: var(--swift-space-md);
+  margin-block-start: var(--swift-space-sm);
+  flex-wrap: wrap;
+}
+
+.metaItem {
+  gap: var(--swift-space-xs);
+}
+
+.star {
+  color: var(--swift-star);
+  fill: currentColor;
+}
+
+@media (min-width: 42em) {
+  .grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (min-width: 64em) {
+  .grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}

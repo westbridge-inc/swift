@@ -1,0 +1,20 @@
+declare const styles: {
+  readonly title: string;
+  readonly intro: string;
+  readonly filters: string;
+  readonly filter: string;
+  readonly filterSelected: string;
+  readonly empty: string;
+  readonly grid: string;
+  readonly card: string;
+  readonly media: string;
+  readonly mediaImage: string;
+  readonly closed: string;
+  readonly cardBody: string;
+  readonly name: string;
+  readonly description: string;
+  readonly meta: string;
+  readonly metaItem: string;
+  readonly star: string;
+};
+export default styles;

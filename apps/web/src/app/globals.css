@@ -1,16 +1,5 @@
 @import 'tailwindcss';
 
-:root {
-  /* Swift brand — Indian Red #803B3B on warm paper. Exact from packages/ui/src/tokens.ts (single source of truth). */
-  --swift-red: #803b3b;      /* brand 500 — CTAs, links, active state, the mark */
-  --swift-red-600: #5c2a2c;  /* brand 600 — hover / pressed / emphasis */
-  --swift-red-50: #f5ebec;   /* brand 50 — soft tint: chips, selected rows, icon circles */
-  --swift-ink: #211a1a;      /* text primary (ink) */
-  --swift-muted: #786c6c;    /* text secondary (muted) */
-  --swift-canvas: #fbfbf9;   /* warm paper — the page background (white is for cards) */
-  --swift-subtle: #f5ebec;   /* soft fills / hover surfaces */
-}
-
 html {
   scroll-behavior: smooth;
 }
@@ -18,6 +7,20 @@ html {
 body {
   background: var(--swift-canvas);
   color: var(--swift-ink);
-  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  font-family: var(--swift-font-body), system-ui, sans-serif;
+  font-size: var(--swift-type-body);
+  line-height: var(--swift-leading-body);
   -webkit-font-smoothing: antialiased;
+}
+
+button,
+input,
+select,
+textarea {
+  font: inherit;
+}
+
+:focus-visible {
+  outline: medium solid var(--swift-focus);
+  outline-offset: var(--swift-space-xs);
 }

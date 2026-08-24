@@ -4,6 +4,7 @@ import Image from 'next/image';
 import { Star, Clock } from 'lucide-react';
 import { Section } from '@/components/site';
 import { fetchStorefronts } from '@/lib/api';
+import styles from './stores.module.css';
 
 export const metadata: Metadata = {
   title: 'Stores on Swift',
@@ -25,68 +26,68 @@ export default async function StoresPage({ searchParams }: { searchParams: Promi
 
   return (
     <Section>
-      <h1 className="text-3xl font-extrabold md:text-4xl">Stores on Swift</h1>
-      <p className="mt-2 max-w-xl text-[var(--swift-muted)]">
+      <h1 className={styles.title}>Stores on Swift</h1>
+      <p className={styles.intro}>
         Every business here is document-verified and keeps 100% of what you pay them.
       </p>
 
-      <div className="mt-6 flex flex-wrap gap-2">
+      <nav className={styles.filters} aria-label="Store type">
         {TYPES.map((t) => (
           <Link
             key={t.key}
             href={t.key ? `/stores?type=${t.key}` : '/stores'}
-            className={`rounded-full px-4 py-2 text-sm font-semibold ${
-              (type ?? '') === t.key
-                ? 'bg-[var(--swift-red)] text-white'
-                : 'border border-black/10 bg-white hover:bg-[var(--swift-subtle)]'
-            }`}
+            className={`${styles.filter} ${(type ?? '') === t.key ? styles.filterSelected : ''}`}
           >
             {t.label}
           </Link>
         ))}
-      </div>
+      </nav>
 
-      {stores.length === 0 ? (
-        <p className="mt-10 rounded-2xl border border-dashed border-black/10 p-10 text-center text-[var(--swift-muted)]">
+      {stores === null ? (
+        <p className={styles.empty} role="alert">
+          Swift could not load the live store directory. Refresh this page when the service is available; no empty catalog is being inferred.
+        </p>
+      ) : stores.length === 0 ? (
+        <p className={styles.empty}>
           No stores to show here yet — new businesses go live after verification.
         </p>
       ) : (
-        <div className="mt-8 grid gap-5 sm:grid-cols-2 lg:grid-cols-3">
+        <div className={styles.grid}>
           {stores.map((s) => (
             <Link
               key={s.id}
-              href={`/stores/${s.slug}`}
-              className="group overflow-hidden rounded-2xl border border-black/5 bg-white transition-shadow hover:shadow-md"
+              href={`/store/${s.slug}`}
+              className={styles.card}
             >
-              <div className="relative h-36 bg-[var(--swift-subtle)]">
+              <div className={styles.media}>
                 {s.coverImageUrl && (
                   <Image
                     src={s.coverImageUrl}
                     alt={s.name}
                     fill
                     unoptimized
-                    className="object-cover"
+                    className={styles.mediaImage}
                   />
                 )}
                 {!s.isCurrentlyOpen && (
-                  <span className="absolute left-3 top-3 rounded-full bg-black/70 px-2.5 py-1 text-xs font-bold text-white">
+                  <span className={styles.closed}>
                     Closed now
                   </span>
                 )}
               </div>
-              <div className="p-4">
-                <p className="font-bold group-hover:text-[var(--swift-red)]">{s.name}</p>
-                <p className="mt-0.5 line-clamp-1 text-sm text-[var(--swift-muted)]">
+              <div className={styles.cardBody}>
+                <p className={styles.name}>{s.name}</p>
+                <p className={styles.description}>
                   {s.cuisineTypes.length > 0 ? s.cuisineTypes.join(' · ') : s.city}
                 </p>
-                <p className="mt-2 flex items-center gap-3 text-sm text-[var(--swift-muted)]">
-                  <span className="flex items-center gap-1">
-                    <Star className="h-3.5 w-3.5 fill-amber-400 text-amber-400" />
+                <p className={styles.meta}>
+                  <span className={styles.metaItem}>
+                    <Star size={16} className={styles.star} aria-hidden="true" />
                     {s.averageRating.toFixed(1)}
                     {s.totalRatings > 0 && <span>({s.totalRatings})</span>}
                   </span>
-                  <span className="flex items-center gap-1">
-                    <Clock className="h-3.5 w-3.5" /> ~{s.estimatedPrepTime} min
+                  <span className={styles.metaItem}>
+                    <Clock size={16} aria-hidden="true" /> ~{s.estimatedPrepTime} min
                   </span>
                 </p>
               </div>

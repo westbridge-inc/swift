@@ -1,0 +1,1095 @@
+.page {
+  min-height: 100vh;
+  background: var(--swift-canvas);
+  color: var(--swift-ink);
+}
+
+.topbar {
+  position: sticky;
+  inset-block-start: 0;
+  z-index: 30;
+  border-block-end: thin solid var(--swift-border);
+  background: color-mix(in srgb, var(--swift-card) 92%, transparent);
+  backdrop-filter: blur(var(--swift-space-md));
+}
+
+.topbarInner {
+  width: min(100%, var(--swift-content-width));
+  min-height: calc(var(--swift-touch) + var(--swift-space-lg));
+  margin-inline: auto;
+  padding-inline: var(--swift-space-xl);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--swift-space-lg);
+}
+
+.brandGroup,
+.topActions,
+.meta,
+.statusRow,
+.quantity,
+.priceRow,
+.railLine,
+.totalLine,
+.cashTruth,
+.modalHeader,
+.modalFooter,
+.optionLabel,
+.mobileDock {
+  display: flex;
+  align-items: center;
+}
+
+.brandGroup {
+  gap: var(--swift-space-md);
+  min-width: 0;
+}
+
+.brandHome {
+  min-width: var(--swift-touch);
+  min-height: var(--swift-touch);
+  display: inline-flex;
+  align-items: center;
+}
+
+.verticalChip {
+  display: inline-flex;
+  min-height: var(--swift-touch);
+  align-items: center;
+  gap: var(--swift-space-sm);
+  padding-inline: var(--swift-space-md);
+  border-radius: var(--swift-radius-full);
+  background: var(--swift-vertical-bg);
+  color: var(--swift-vertical-ink);
+  font-family: var(--swift-font-body-semibold), system-ui, sans-serif;
+  font-size: var(--swift-type-label);
+  line-height: var(--swift-leading-label);
+}
+
+.topActions {
+  justify-content: flex-end;
+  gap: var(--swift-space-sm);
+}
+
+.topLink,
+.cartLink {
+  min-height: var(--swift-touch);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--swift-space-sm);
+  border-radius: var(--swift-radius-full);
+  padding-inline: var(--swift-space-lg);
+  text-decoration: none;
+  font-family: var(--swift-font-body-semibold), system-ui, sans-serif;
+  font-size: var(--swift-type-label);
+  line-height: var(--swift-leading-label);
+}
+
+.topLink {
+  color: var(--swift-muted);
+}
+
+.cartLink {
+  color: var(--swift-white);
+  background: var(--swift-red);
+}
+
+.hero {
+  position: relative;
+  height: var(--swift-hero-height);
+  overflow: hidden;
+  background: var(--swift-sunken);
+}
+
+.heroImage {
+  object-fit: cover;
+}
+
+.hero::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(to bottom, transparent 55%, var(--swift-media-scrim));
+  pointer-events: none;
+}
+
+.content {
+  width: min(100%, var(--swift-content-width));
+  margin-inline: auto;
+  padding: var(--swift-space-2xl) var(--swift-space-xl) var(--swift-space-5xl);
+}
+
+.withHero {
+  margin-block-start: var(--swift-space-neg-3xl);
+  position: relative;
+  z-index: 2;
+}
+
+.storeCard {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: var(--swift-space-lg);
+  padding: var(--swift-space-xl);
+  border: thin solid var(--swift-border);
+  border-radius: var(--swift-radius-xl);
+  background: var(--swift-card);
+  box-shadow: var(--swift-elevation-card);
+}
+
+.logo,
+.logoFallback {
+  width: calc(var(--swift-space-5xl) + var(--swift-space-lg));
+  height: calc(var(--swift-space-5xl) + var(--swift-space-lg));
+  border-radius: var(--swift-radius-lg);
+  overflow: hidden;
+  flex: none;
+}
+
+.logo {
+  position: relative;
+  border: thin solid var(--swift-border);
+  background: var(--swift-card);
+}
+
+.logoImage {
+  object-fit: cover;
+}
+
+.logoFallback {
+  display: grid;
+  place-items: center;
+  background: var(--swift-vertical-bg);
+  color: var(--swift-vertical-ink);
+  font-family: var(--swift-font-display), system-ui, sans-serif;
+  font-size: var(--swift-type-title);
+  line-height: var(--swift-leading-title);
+}
+
+.eyebrow,
+.railEyebrow,
+.microLabel {
+  margin: 0;
+  color: var(--swift-muted);
+  font-family: var(--swift-font-body-medium), system-ui, sans-serif;
+  font-size: var(--swift-type-micro);
+  line-height: var(--swift-leading-micro);
+  letter-spacing: var(--swift-tracking-micro);
+  text-transform: uppercase;
+}
+
+.storeName {
+  margin: var(--swift-space-xs) 0 0;
+  font-family: var(--swift-font-display), system-ui, sans-serif;
+  font-size: var(--swift-type-display);
+  line-height: var(--swift-leading-display);
+}
+
+.meta {
+  margin-block-start: var(--swift-space-sm);
+  flex-wrap: wrap;
+  gap: var(--swift-space-sm) var(--swift-space-lg);
+  color: var(--swift-muted);
+  font-size: var(--swift-type-caption);
+  line-height: var(--swift-leading-caption);
+}
+
+.metaItem {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--swift-space-xs);
+}
+
+.star {
+  color: var(--swift-star);
+}
+
+.statusRow {
+  align-self: start;
+  justify-content: flex-end;
+  gap: var(--swift-space-sm);
+  flex-wrap: wrap;
+}
+
+.status,
+.popular,
+.soldOut {
+  display: inline-flex;
+  align-items: center;
+  min-height: calc(var(--swift-space-3xl) + var(--swift-space-xs));
+  padding-inline: var(--swift-space-md);
+  border-radius: var(--swift-radius-full);
+  font-family: var(--swift-font-body-semibold), system-ui, sans-serif;
+  font-size: var(--swift-type-micro);
+  line-height: var(--swift-leading-micro);
+  text-transform: uppercase;
+  letter-spacing: var(--swift-tracking-micro);
+}
+
+.statusOpen {
+  color: var(--swift-success);
+  border: thin solid var(--swift-success);
+}
+
+.statusClosed {
+  color: var(--swift-muted);
+  border: thin solid var(--swift-border-strong);
+}
+
+.statusPaused {
+  color: var(--swift-warning);
+  border: thin solid var(--swift-warning);
+}
+
+.description {
+  max-width: var(--swift-content-half);
+  margin: var(--swift-space-lg) 0 0;
+  color: var(--swift-muted);
+}
+
+.menuFreshness {
+  margin: var(--swift-space-sm) 0 0;
+  color: var(--swift-muted);
+  font-size: var(--swift-type-micro);
+  line-height: var(--swift-leading-micro);
+}
+
+.catalogNotice {
+  max-width: var(--swift-content-half);
+  margin: var(--swift-space-md) 0 0;
+  padding: var(--swift-space-md);
+  border: thin solid var(--swift-info);
+  border-radius: var(--swift-radius-md);
+  background: var(--swift-card);
+  color: var(--swift-info);
+  font-size: var(--swift-type-caption);
+  line-height: var(--swift-leading-caption);
+}
+
+.catalogUnavailable {
+  border-color: var(--swift-error);
+  color: var(--swift-error);
+}
+
+.categoryNav {
+  position: sticky;
+  inset-block-start: calc(var(--swift-touch) + var(--swift-space-lg));
+  z-index: 20;
+  display: flex;
+  gap: var(--swift-space-sm);
+  overflow-x: auto;
+  margin: var(--swift-space-xl) 0;
+  padding-block: var(--swift-space-sm);
+  background: var(--swift-canvas);
+  scrollbar-width: none;
+}
+
+.categoryNav::-webkit-scrollbar {
+  display: none;
+}
+
+.categoryLink {
+  min-height: var(--swift-touch);
+  display: inline-flex;
+  align-items: center;
+  flex: none;
+  padding-inline: var(--swift-space-lg);
+  border: thin solid var(--swift-border);
+  border-radius: var(--swift-radius-full);
+  background: var(--swift-card);
+  color: var(--swift-ink);
+  text-decoration: none;
+  font-family: var(--swift-font-body-semibold), system-ui, sans-serif;
+  font-size: var(--swift-type-label);
+}
+
+.categoryLink:hover {
+  border-color: var(--swift-red);
+  color: var(--swift-red);
+}
+
+.layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, var(--swift-rail-width));
+  align-items: start;
+  gap: var(--swift-space-2xl);
+}
+
+.menu {
+  display: grid;
+  gap: var(--swift-space-3xl);
+}
+
+.section {
+  scroll-margin-block-start: var(--swift-section-scroll);
+}
+
+.sectionTitle {
+  margin: 0 0 var(--swift-space-md);
+  font-family: var(--swift-font-display-semibold), system-ui, sans-serif;
+  font-size: var(--swift-type-title);
+  line-height: var(--swift-leading-title);
+}
+
+.rows {
+  display: grid;
+  gap: var(--swift-space-sm);
+}
+
+.menuRow {
+  min-height: calc(var(--swift-menu-image) + var(--swift-space-xl));
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto var(--swift-menu-image);
+  align-items: center;
+  gap: var(--swift-space-lg);
+  padding: var(--swift-space-md);
+  border: thin solid var(--swift-border);
+  border-radius: var(--swift-radius-lg);
+  background: var(--swift-card);
+}
+
+.menuRowUnavailable {
+  background: var(--swift-sunken);
+}
+
+.itemCopy {
+  min-width: 0;
+  align-self: stretch;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+}
+
+.priceRow {
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--swift-space-md);
+}
+
+.itemName {
+  margin: 0;
+  font-family: var(--swift-font-body-semibold), system-ui, sans-serif;
+  font-size: var(--swift-type-heading);
+  line-height: var(--swift-leading-heading);
+}
+
+.itemPrice,
+.railPrice,
+.totalPrice,
+.mobileTotal {
+  font-family: var(--swift-font-display-semibold), system-ui, sans-serif;
+  font-variant-numeric: tabular-nums;
+}
+
+.itemPrice {
+  flex: none;
+  color: var(--swift-red);
+  font-size: var(--swift-type-num-m);
+  line-height: var(--swift-leading-num-m);
+}
+
+.itemDescription {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
+  margin: var(--swift-space-xs) 0 0;
+  color: var(--swift-muted);
+  font-size: var(--swift-type-caption);
+  line-height: var(--swift-leading-caption);
+}
+
+.itemMeta {
+  min-height: var(--swift-leading-micro);
+  margin-block-start: var(--swift-space-sm);
+  display: flex;
+  align-items: center;
+  gap: var(--swift-space-sm);
+}
+
+.popular {
+  min-height: auto;
+  padding: var(--swift-space-xs) var(--swift-space-sm);
+  background: var(--swift-red-50);
+  color: var(--swift-red-600);
+}
+
+.unit {
+  color: var(--swift-muted);
+  font-size: var(--swift-type-micro);
+  line-height: var(--swift-leading-micro);
+}
+
+.soldOut {
+  color: var(--swift-muted);
+  border: thin solid var(--swift-border-strong);
+}
+
+.itemImage,
+.itemImageFallback {
+  width: var(--swift-menu-image);
+  height: var(--swift-menu-image);
+  border-radius: var(--swift-radius-md);
+  overflow: hidden;
+}
+
+.itemImage {
+  position: relative;
+  background: var(--swift-sunken);
+}
+
+.itemImageAsset {
+  object-fit: cover;
+}
+
+.itemImageFallback {
+  display: grid;
+  place-items: center;
+  background: var(--swift-vertical-bg);
+  color: var(--swift-vertical-ink);
+}
+
+.quantity {
+  min-height: var(--swift-touch);
+  justify-content: center;
+  border: thin solid var(--swift-border-strong);
+  border-radius: var(--swift-radius-full);
+  background: var(--swift-card);
+  overflow: hidden;
+}
+
+.quantityButton,
+.addButton,
+.bookButton,
+.closeButton {
+  min-width: var(--swift-touch);
+  min-height: var(--swift-touch);
+  display: inline-grid;
+  place-items: center;
+  border: 0;
+  border-radius: var(--swift-radius-full);
+  cursor: pointer;
+}
+
+.quantityButton {
+  background: transparent;
+  color: var(--swift-red);
+}
+
+.quantityButton:hover,
+.closeButton:hover {
+  background: var(--swift-red-50);
+}
+
+.quantityCount {
+  min-width: var(--swift-space-3xl);
+  text-align: center;
+  font-family: var(--swift-font-display-semibold), system-ui, sans-serif;
+  font-size: var(--swift-type-num-m);
+  line-height: var(--swift-leading-num-m);
+  font-variant-numeric: tabular-nums;
+}
+
+.addButton {
+  color: var(--swift-white);
+  background: var(--swift-red);
+}
+
+.bookButton {
+  min-width: auto;
+  padding-inline: var(--swift-space-md);
+  border: thin solid var(--swift-red);
+  color: var(--swift-red);
+  background: var(--swift-card);
+  text-decoration: none;
+  font-family: var(--swift-font-body-semibold), system-ui, sans-serif;
+  font-size: var(--swift-type-caption);
+}
+
+.unavailableAction {
+  min-height: var(--swift-touch);
+  display: inline-flex;
+  align-items: center;
+  padding-inline: var(--swift-space-md);
+  border: thin solid var(--swift-border-strong);
+  border-radius: var(--swift-radius-full);
+  color: var(--swift-muted);
+  font-size: var(--swift-type-caption);
+}
+
+.quantityButton:disabled,
+.addButton:disabled,
+.bookButton:disabled,
+.primaryButton:disabled,
+.secondaryButton:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+.rail {
+  position: sticky;
+  inset-block-start: var(--swift-rail-sticky-top);
+  border: thin solid var(--swift-border);
+  border-radius: var(--swift-radius-xl);
+  background: var(--swift-card);
+  box-shadow: var(--swift-elevation-raised);
+  overflow: hidden;
+}
+
+.railHeader,
+.railBody,
+.railFooter {
+  padding: var(--swift-space-lg);
+}
+
+.railHeader {
+  border-block-end: thin solid var(--swift-border);
+  background: var(--swift-sunken);
+}
+
+.railTitle {
+  margin: var(--swift-space-xs) 0 0;
+  font-family: var(--swift-font-display-semibold), system-ui, sans-serif;
+  font-size: var(--swift-type-title);
+  line-height: var(--swift-leading-title);
+}
+
+.railBody {
+  display: grid;
+  gap: var(--swift-space-md);
+}
+
+.emptyRail,
+.emptyMenu {
+  margin: 0;
+  padding: var(--swift-space-xl);
+  border: thin dashed var(--swift-border-strong);
+  border-radius: var(--swift-radius-md);
+  color: var(--swift-muted);
+  text-align: center;
+}
+
+.railLines {
+  display: grid;
+  gap: var(--swift-space-sm);
+}
+
+.railLine,
+.totalLine {
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--swift-space-md);
+}
+
+.railLineName {
+  min-width: 0;
+  color: var(--swift-muted);
+  font-size: var(--swift-type-caption);
+  line-height: var(--swift-leading-caption);
+}
+
+.railLineCopy {
+  min-width: 0;
+  flex: 1;
+  display: grid;
+  gap: var(--swift-space-xs);
+}
+
+.variantNames {
+  color: var(--swift-muted);
+  font-size: var(--swift-type-micro);
+  line-height: var(--swift-leading-micro);
+}
+
+.reviewLine {
+  padding: var(--swift-space-sm);
+  border-radius: var(--swift-radius-md);
+  background: var(--swift-sunken);
+}
+
+.reviewTag {
+  width: fit-content;
+  padding: var(--swift-space-xs) var(--swift-space-sm);
+  border: thin solid var(--swift-warning);
+  border-radius: var(--swift-radius-full);
+  color: var(--swift-warning);
+  font-size: var(--swift-type-micro);
+  line-height: var(--swift-leading-micro);
+  text-transform: uppercase;
+}
+
+.removeLineButton {
+  width: var(--swift-touch);
+  height: var(--swift-touch);
+  flex: none;
+  display: grid;
+  place-items: center;
+  border: 0;
+  border-radius: var(--swift-radius-full);
+  background: var(--swift-sunken);
+  color: var(--swift-muted);
+  cursor: pointer;
+}
+
+.removeLineButton:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+.railPrice {
+  flex: none;
+  font-size: var(--swift-type-label);
+  line-height: var(--swift-leading-label);
+}
+
+.breakdown {
+  display: grid;
+  gap: var(--swift-space-sm);
+  padding-block-start: var(--swift-space-md);
+  border-block-start: thin solid var(--swift-border);
+}
+
+.totalLine {
+  padding-block-start: var(--swift-space-sm);
+  color: var(--swift-ink);
+  font-family: var(--swift-font-body-bold), system-ui, sans-serif;
+}
+
+.totalPrice {
+  color: var(--swift-red);
+  font-size: var(--swift-type-num-l);
+  line-height: var(--swift-leading-num-l);
+}
+
+.field {
+  display: grid;
+  gap: var(--swift-space-xs);
+}
+
+.select {
+  width: 100%;
+  min-height: var(--swift-touch);
+  border: thin solid var(--swift-border-strong);
+  border-radius: var(--swift-radius-md);
+  padding-inline: var(--swift-space-md);
+  background: var(--swift-card);
+  color: var(--swift-ink);
+}
+
+.cashTruth {
+  align-items: flex-start;
+  gap: var(--swift-space-md);
+  padding: var(--swift-space-md);
+  border: thin solid var(--swift-red);
+  border-radius: var(--swift-radius-md);
+  background: var(--swift-red-50);
+  color: var(--swift-red-600);
+}
+
+.cashTitle {
+  margin: 0;
+  font-family: var(--swift-font-body-semibold), system-ui, sans-serif;
+}
+
+.cashCopy,
+.railNote,
+.guestCopy,
+.modalDescription,
+.optionPrice {
+  margin: 0;
+  color: var(--swift-muted);
+  font-size: var(--swift-type-caption);
+  line-height: var(--swift-leading-caption);
+}
+
+.railFooter {
+  display: grid;
+  gap: var(--swift-space-md);
+  border-block-start: thin solid var(--swift-border);
+}
+
+.primaryButton,
+.secondaryButton {
+  min-height: calc(var(--swift-touch) + var(--swift-space-xs));
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--swift-space-sm);
+  border-radius: var(--swift-radius-full);
+  padding-inline: var(--swift-space-lg);
+  cursor: pointer;
+  text-decoration: none;
+  font-family: var(--swift-font-body-bold), system-ui, sans-serif;
+  font-size: var(--swift-type-body);
+  line-height: var(--swift-leading-body);
+}
+
+.primaryButton {
+  border: thin solid var(--swift-red);
+  background: var(--swift-red);
+  color: var(--swift-white);
+}
+
+.primaryButton:hover {
+  background: var(--swift-red-600);
+  border-color: var(--swift-red-600);
+}
+
+.secondaryButton {
+  border: thin solid var(--swift-border-strong);
+  background: var(--swift-card);
+  color: var(--swift-ink);
+}
+
+.alert,
+.errorNotice,
+.notice,
+.reviewNotice {
+  margin: 0;
+  padding: var(--swift-space-md);
+  border-radius: var(--swift-radius-md);
+  font-size: var(--swift-type-caption);
+  line-height: var(--swift-leading-caption);
+}
+
+.reviewNotice {
+  display: grid;
+  gap: var(--swift-space-sm);
+  border: thin solid var(--swift-border-strong);
+  color: var(--swift-muted);
+}
+
+.reviewNotice p {
+  margin: 0;
+}
+
+.clearActions {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--swift-space-sm);
+}
+
+.blockedCheckout {
+  min-height: calc(var(--swift-touch) + var(--swift-space-xs));
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding-inline: var(--swift-space-lg);
+  border: thin solid var(--swift-border-strong);
+  border-radius: var(--swift-radius-full);
+  color: var(--swift-muted);
+  text-align: center;
+  font-family: var(--swift-font-body-semibold), system-ui, sans-serif;
+}
+
+.alert {
+  display: grid;
+  gap: var(--swift-space-sm);
+  border: thin solid var(--swift-error);
+  color: var(--swift-error);
+}
+
+.alert p {
+  margin: 0;
+}
+
+.notice {
+  border: thin solid var(--swift-info);
+  color: var(--swift-info);
+  position: fixed;
+  inset-inline-start: 50%;
+  inset-block-end: var(--swift-space-2xl);
+  z-index: 60;
+  width: min(calc(100% - var(--swift-space-2xl)), var(--swift-rail-width));
+  transform: translateX(-50%);
+  background: var(--swift-card);
+  box-shadow: var(--swift-elevation-floating);
+}
+
+.errorNotice {
+  border: thin solid var(--swift-error);
+  color: var(--swift-error);
+  position: fixed;
+  inset-inline-start: 50%;
+  inset-block-end: var(--swift-space-2xl);
+  z-index: 60;
+  width: min(calc(100% - var(--swift-space-2xl)), var(--swift-rail-width));
+  transform: translateX(-50%);
+  background: var(--swift-card);
+  box-shadow: var(--swift-elevation-floating);
+}
+
+.scrim {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  display: grid;
+  place-items: end center;
+  padding: var(--swift-space-xl);
+  background: var(--swift-scrim);
+}
+
+.modal {
+  width: min(100%, var(--swift-modal-width));
+  max-height: calc(100vh - var(--swift-space-5xl));
+  overflow-y: auto;
+  padding: var(--swift-space-xl);
+  border-radius: var(--swift-radius-xl);
+  background: var(--swift-card);
+  box-shadow: var(--swift-elevation-floating);
+}
+
+.modalHeader {
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--swift-space-lg);
+}
+
+.modalTitle,
+.optionTitle {
+  margin: 0;
+  font-family: var(--swift-font-display-semibold), system-ui, sans-serif;
+}
+
+.modalTitle {
+  font-size: var(--swift-type-title);
+  line-height: var(--swift-leading-title);
+}
+
+.modalAlert {
+  margin: var(--swift-space-md) 0 0;
+  padding: var(--swift-space-md);
+  border: thin solid var(--swift-error);
+  border-radius: var(--swift-radius-md);
+  color: var(--swift-error);
+  font-size: var(--swift-type-caption);
+  line-height: var(--swift-leading-caption);
+}
+
+.closeButton {
+  flex: none;
+  background: var(--swift-sunken);
+  color: var(--swift-ink);
+}
+
+.options {
+  display: grid;
+  gap: var(--swift-space-lg);
+  margin-block-start: var(--swift-space-xl);
+}
+
+.optionGroup {
+  display: grid;
+  gap: var(--swift-space-sm);
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.optionHeading {
+  display: flex;
+  justify-content: space-between;
+  gap: var(--swift-space-md);
+}
+
+.optionMeta {
+  display: inline-flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: var(--swift-space-sm);
+}
+
+.optionTitle {
+  font-size: var(--swift-type-heading);
+  line-height: var(--swift-leading-heading);
+}
+
+.required {
+  color: var(--swift-red);
+  font-size: var(--swift-type-caption);
+  line-height: var(--swift-leading-caption);
+}
+
+.optionGuidance {
+  color: var(--swift-muted);
+  font-size: var(--swift-type-caption);
+  line-height: var(--swift-leading-caption);
+}
+
+.optionLabel {
+  min-height: var(--swift-touch);
+  justify-content: space-between;
+  gap: var(--swift-space-md);
+  padding: var(--swift-space-sm) var(--swift-space-md);
+  border: thin solid var(--swift-border);
+  border-radius: var(--swift-radius-md);
+  cursor: pointer;
+}
+
+.optionLabel:has(input:checked) {
+  border-color: var(--swift-red);
+  background: var(--swift-red-50);
+}
+
+.optionLabelDisabled {
+  color: var(--swift-muted);
+  cursor: not-allowed;
+  opacity: 0.65;
+}
+
+.optionChoice {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--swift-space-sm);
+}
+
+.optionChoice input {
+  accent-color: var(--swift-red);
+}
+
+.modalFooter {
+  justify-content: space-between;
+  gap: var(--swift-space-md);
+  margin-block-start: var(--swift-space-xl);
+}
+
+.modalPrice {
+  color: var(--swift-red);
+  font-family: var(--swift-font-display), system-ui, sans-serif;
+  font-size: var(--swift-type-num-l);
+  line-height: var(--swift-leading-num-l);
+  font-variant-numeric: tabular-nums;
+}
+
+.mobileDock {
+  display: none;
+}
+
+@media (max-width: 56.25em) {
+  .layout {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .rail {
+    position: static;
+  }
+
+  .storeCard {
+    grid-template-columns: auto minmax(0, 1fr);
+  }
+
+  .statusRow {
+    grid-column: 1 / -1;
+    justify-content: flex-start;
+  }
+
+  .mobileDock {
+    display: flex;
+    position: fixed;
+    inset-inline: var(--swift-space-lg);
+    inset-block-end: calc(var(--swift-space-lg) + env(safe-area-inset-bottom, 0));
+    z-index: 35;
+    min-height: calc(var(--swift-touch) + var(--swift-space-md));
+    justify-content: space-between;
+    gap: var(--swift-space-md);
+    padding-inline: var(--swift-space-lg);
+    border-radius: var(--swift-radius-full);
+    background: var(--swift-red);
+    color: var(--swift-white);
+    box-shadow: var(--swift-elevation-floating);
+    text-decoration: none;
+    font-family: var(--swift-font-body-bold), system-ui, sans-serif;
+  }
+
+  .content {
+    padding-block-end: calc(var(--swift-space-5xl) + var(--swift-space-5xl) + var(--swift-space-lg) + env(safe-area-inset-bottom, 0));
+  }
+}
+
+@media (max-width: 40em) {
+  .topbarInner,
+  .content {
+    padding-inline: var(--swift-space-lg);
+  }
+
+  .topLink,
+  .verticalChip span {
+    display: none;
+  }
+
+  .cartLink {
+    padding-inline: var(--swift-space-md);
+  }
+
+  .hero {
+    height: calc(var(--swift-hero-height) - var(--swift-space-5xl));
+  }
+
+  .storeCard {
+    align-items: start;
+    padding: var(--swift-space-lg);
+  }
+
+  .storeName {
+    font-size: var(--swift-type-title);
+    line-height: var(--swift-leading-title);
+  }
+
+  .meta {
+    gap: var(--swift-space-xs) var(--swift-space-md);
+  }
+
+  .categoryNav {
+    margin-inline: calc(0rem - var(--swift-space-lg));
+    padding-inline: var(--swift-space-lg);
+  }
+
+  .menuRow {
+    grid-template-columns: minmax(0, 1fr) auto calc(var(--swift-menu-image) - var(--swift-space-2xl));
+    gap: var(--swift-space-sm);
+  }
+
+  .itemImage,
+  .itemImageFallback {
+    width: calc(var(--swift-menu-image) - var(--swift-space-2xl));
+    height: calc(var(--swift-menu-image) - var(--swift-space-2xl));
+  }
+
+  .itemImage {
+    display: block;
+  }
+
+  .itemImageFallback {
+    display: grid;
+  }
+
+  .priceRow {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: var(--swift-space-xs);
+  }
+
+  .clearActions {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .scrim {
+    padding: 0;
+  }
+
+  .modal {
+    width: 100%;
+    max-height: calc(100vh - var(--swift-space-2xl));
+    border-end-start-radius: 0;
+    border-end-end-radius: 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .page,
+  .page * {
+    scroll-behavior: auto;
+  }
+}

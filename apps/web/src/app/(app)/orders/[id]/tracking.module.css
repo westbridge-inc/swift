@@ -1,0 +1,630 @@
+.page {
+  display: grid;
+  gap: var(--swift-space-lg);
+  padding-block-end: var(--swift-space-5xl);
+  color: var(--swift-ink);
+}
+
+.backLink {
+  width: fit-content;
+  min-height: var(--swift-touch);
+  display: inline-flex;
+  align-items: center;
+  gap: var(--swift-space-sm);
+  color: var(--swift-muted);
+  text-decoration: none;
+  font-family: var(--swift-font-body-semibold), system-ui, sans-serif;
+}
+
+.hero,
+.holdCard,
+.progressCard,
+.card,
+.summaryCard,
+.stateCard {
+  border: thin solid var(--swift-border);
+  border-radius: var(--swift-radius-xl);
+  background: var(--swift-card);
+  box-shadow: var(--swift-elevation-card);
+}
+
+.hero {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: var(--swift-space-lg);
+  padding: var(--swift-space-xl);
+  border-inline-start: var(--swift-space-xs) solid var(--swift-red);
+}
+
+.heroIcon {
+  width: calc(var(--swift-touch) + var(--swift-space-md));
+  height: calc(var(--swift-touch) + var(--swift-space-md));
+  display: grid;
+  place-items: center;
+  border-radius: var(--swift-radius-lg);
+  background: var(--swift-red-50);
+  color: var(--swift-red-600);
+}
+
+.heroCopy {
+  min-width: 0;
+}
+
+.eyebrow {
+  margin: 0;
+  color: var(--swift-muted);
+  font-family: var(--swift-font-body-medium), system-ui, sans-serif;
+  font-size: var(--swift-type-micro);
+  line-height: var(--swift-leading-micro);
+  letter-spacing: var(--swift-tracking-micro);
+  text-transform: uppercase;
+}
+
+.title {
+  margin: var(--swift-space-xs) 0 0;
+  font-family: var(--swift-font-display), system-ui, sans-serif;
+  font-size: var(--swift-type-display);
+  line-height: var(--swift-leading-display);
+}
+
+.updateNote,
+.mutedCopy {
+  margin: var(--swift-space-xs) 0 0;
+  color: var(--swift-muted);
+  font-size: var(--swift-type-caption);
+  line-height: var(--swift-leading-caption);
+}
+
+.statusPill,
+.estimate,
+.rating,
+.plate {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--swift-space-xs);
+  min-height: calc(var(--swift-space-3xl) + var(--swift-space-xs));
+  padding-inline: var(--swift-space-md);
+  border: thin solid var(--swift-red);
+  border-radius: var(--swift-radius-full);
+  color: var(--swift-red);
+  font-family: var(--swift-font-body-semibold), system-ui, sans-serif;
+  font-size: var(--swift-type-micro);
+  line-height: var(--swift-leading-micro);
+  text-transform: capitalize;
+}
+
+.statusComplete {
+  border-color: var(--swift-success);
+  color: var(--swift-success);
+}
+
+.statusCancelled {
+  border-color: var(--swift-error);
+  color: var(--swift-error);
+}
+
+.statusRefunded {
+  border-color: var(--swift-info);
+  color: var(--swift-info);
+}
+
+.holdCard {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: var(--swift-space-xl);
+  padding: var(--swift-space-xl);
+  border-color: var(--swift-red);
+}
+
+.cardTitle {
+  margin: var(--swift-space-xs) 0 0;
+  font-family: var(--swift-font-display-semibold), system-ui, sans-serif;
+  font-size: var(--swift-type-title);
+  line-height: var(--swift-leading-title);
+}
+
+.timer {
+  min-width: var(--swift-menu-image);
+  display: grid;
+  justify-items: center;
+  padding: var(--swift-space-md) var(--swift-space-lg);
+  border: thin solid var(--swift-red);
+  border-radius: var(--swift-radius-lg);
+  color: var(--swift-red-600);
+  font-variant-numeric: tabular-nums;
+}
+
+.timer span {
+  font-family: var(--swift-font-display), system-ui, sans-serif;
+  font-size: var(--swift-type-num-l);
+  line-height: var(--swift-leading-num-l);
+}
+
+.timer small {
+  color: var(--swift-muted);
+  font-size: var(--swift-type-micro);
+  line-height: var(--swift-leading-micro);
+  text-transform: uppercase;
+}
+
+.progressCard,
+.card,
+.summaryCard,
+.stateCard {
+  padding: var(--swift-space-xl);
+}
+
+.sectionHeading,
+.iconTitle,
+.riderDetails p,
+.line,
+.totalLine,
+.cashTruth,
+.confirmActions {
+  display: flex;
+  align-items: center;
+}
+
+.sectionHeading {
+  justify-content: space-between;
+  gap: var(--swift-space-lg);
+}
+
+.estimate,
+.plate {
+  border-color: var(--swift-border-strong);
+  color: var(--swift-muted);
+}
+
+.statusRail {
+  display: grid;
+  grid-template-columns: repeat(var(--swift-stage-count, 4), minmax(0, 1fr));
+  margin: var(--swift-space-xl) 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.statusRail li {
+  position: relative;
+  display: grid;
+  justify-items: center;
+  gap: var(--swift-space-sm);
+  color: var(--swift-muted);
+  text-align: center;
+  font-size: var(--swift-type-caption);
+  line-height: var(--swift-leading-caption);
+}
+
+.statusRail li:not(:first-child)::before {
+  content: '';
+  position: absolute;
+  inset-block-start: calc(var(--swift-touch) / 2);
+  inset-inline-end: 50%;
+  width: 100%;
+  border-block-start: var(--swift-space-xs) solid var(--swift-border);
+  z-index: 0;
+}
+
+.stageDot {
+  width: var(--swift-touch);
+  height: var(--swift-touch);
+  display: grid;
+  place-items: center;
+  z-index: 1;
+  border: thin solid var(--swift-border-strong);
+  border-radius: var(--swift-radius-full);
+  background: var(--swift-card);
+  font-family: var(--swift-font-display-semibold), system-ui, sans-serif;
+}
+
+.statusRail li.stageReached {
+  color: var(--swift-red);
+  font-family: var(--swift-font-body-semibold), system-ui, sans-serif;
+}
+
+.stageReached .stageDot {
+  border-color: var(--swift-red);
+  background: var(--swift-red-50);
+}
+
+.statusRail .stageReached:not(:first-child)::before {
+  border-color: var(--swift-red);
+}
+
+.detailGrid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, var(--swift-rail-width));
+  align-items: start;
+  gap: var(--swift-space-lg);
+}
+
+.mainColumn {
+  display: grid;
+  gap: var(--swift-space-lg);
+}
+
+.summaryCard {
+  position: sticky;
+  inset-block-start: var(--swift-rail-sticky-top);
+}
+
+.rating {
+  border-color: var(--swift-star);
+  color: var(--swift-ink);
+}
+
+.rating svg {
+  color: var(--swift-star);
+}
+
+.riderDetails {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--swift-space-md);
+  margin-block-start: var(--swift-space-lg);
+}
+
+.riderDetails p {
+  gap: var(--swift-space-sm);
+  margin: 0;
+  color: var(--swift-muted);
+}
+
+.plate {
+  text-transform: uppercase;
+  letter-spacing: var(--swift-tracking-micro);
+}
+
+.iconTitle {
+  align-items: flex-start;
+  gap: var(--swift-space-md);
+}
+
+.iconTitle > svg {
+  flex: none;
+  margin-block-start: var(--swift-space-xs);
+  color: var(--swift-red);
+}
+
+.pickupCode {
+  margin-block-start: var(--swift-space-lg);
+  display: grid;
+  justify-items: start;
+  gap: var(--swift-space-xs);
+  padding: var(--swift-space-md);
+  border: thin solid var(--swift-border-strong);
+  border-radius: var(--swift-radius-md);
+  background: var(--swift-sunken);
+}
+
+.pickupCode span {
+  color: var(--swift-muted);
+  font-size: var(--swift-type-caption);
+}
+
+.pickupCode strong {
+  color: var(--swift-red-600);
+  font-family: var(--swift-font-display), system-ui, sans-serif;
+  font-size: var(--swift-type-num-l);
+  line-height: var(--swift-leading-num-l);
+  letter-spacing: calc(var(--swift-tracking-micro) * 3);
+}
+
+.timeline {
+  display: grid;
+  gap: var(--swift-space-md);
+  margin: var(--swift-space-lg) 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.timeline li {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: var(--swift-space-md);
+}
+
+.timelineDot {
+  width: var(--swift-space-md);
+  height: var(--swift-space-md);
+  margin-block-start: var(--swift-space-xs);
+  border: thin solid var(--swift-red);
+  border-radius: var(--swift-radius-full);
+  background: var(--swift-red-50);
+}
+
+.timeline strong {
+  display: block;
+  text-transform: capitalize;
+}
+
+.timeline time,
+.timeline p {
+  display: block;
+  margin: var(--swift-space-xs) 0 0;
+  color: var(--swift-muted);
+  font-size: var(--swift-type-caption);
+  line-height: var(--swift-leading-caption);
+}
+
+.orderLines {
+  display: grid;
+  gap: var(--swift-space-sm);
+  margin-block-start: var(--swift-space-lg);
+}
+
+.line,
+.totalLine {
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--swift-space-md);
+}
+
+.line span {
+  color: var(--swift-muted);
+  font-size: var(--swift-type-caption);
+  line-height: var(--swift-leading-caption);
+}
+
+.line strong,
+.totalLine strong {
+  flex: none;
+  font-family: var(--swift-font-display-semibold), system-ui, sans-serif;
+  font-variant-numeric: tabular-nums;
+}
+
+.breakdown {
+  display: grid;
+  gap: var(--swift-space-sm);
+  margin-block-start: var(--swift-space-md);
+  padding-block-start: var(--swift-space-md);
+  border-block-start: thin solid var(--swift-border);
+}
+
+.totalLine {
+  margin-block-start: var(--swift-space-xs);
+  font-family: var(--swift-font-body-bold), system-ui, sans-serif;
+}
+
+.totalLine strong {
+  color: var(--swift-red);
+  font-size: var(--swift-type-num-l);
+  line-height: var(--swift-leading-num-l);
+}
+
+.cashTruth {
+  align-items: flex-start;
+  gap: var(--swift-space-md);
+  margin-block-start: var(--swift-space-lg);
+  padding: var(--swift-space-md);
+  border: thin solid var(--swift-red);
+  border-radius: var(--swift-radius-md);
+  color: var(--swift-red-600);
+}
+
+.cashTruth p {
+  margin: var(--swift-space-xs) 0 0;
+  color: var(--swift-muted);
+  font-size: var(--swift-type-caption);
+  line-height: var(--swift-leading-caption);
+}
+
+.paymentAction {
+  width: fit-content;
+  margin-block-start: var(--swift-space-md);
+}
+
+.primaryButton,
+.secondaryButton,
+.cancelButton {
+  min-height: calc(var(--swift-touch) + var(--swift-space-xs));
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--swift-space-sm);
+  padding-inline: var(--swift-space-lg);
+  border-radius: var(--swift-radius-full);
+  cursor: pointer;
+  text-decoration: none;
+  font-family: var(--swift-font-body-bold), system-ui, sans-serif;
+}
+
+.primaryButton {
+  border: thin solid var(--swift-red);
+  background: var(--swift-red);
+  color: var(--swift-white);
+}
+
+.secondaryButton,
+.cancelButton {
+  border: thin solid var(--swift-border-strong);
+  background: var(--swift-card);
+  color: var(--swift-ink);
+}
+
+.cancelButton {
+  width: 100%;
+  margin-block-start: var(--swift-space-lg);
+  border-color: var(--swift-red);
+  color: var(--swift-red);
+}
+
+.primaryButton:disabled,
+.secondaryButton:disabled,
+.cancelButton:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+.cancelConfirm {
+  display: grid;
+  gap: var(--swift-space-md);
+  margin-block-start: var(--swift-space-lg);
+  padding: var(--swift-space-md);
+  border: thin solid var(--swift-border-strong);
+  border-radius: var(--swift-radius-md);
+}
+
+.cancelConfirm p {
+  margin: 0;
+  color: var(--swift-muted);
+  font-size: var(--swift-type-caption);
+  line-height: var(--swift-leading-caption);
+}
+
+.cancelWarning {
+  border-color: var(--swift-warning);
+}
+
+.cancelOutcome {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--swift-space-md);
+  padding: var(--swift-space-md) var(--swift-space-lg);
+  border: thin solid var(--swift-border-strong);
+  border-radius: var(--swift-radius-md);
+  background: var(--swift-card);
+  color: var(--swift-muted);
+}
+
+.moneyNotice {
+  padding: var(--swift-space-md) var(--swift-space-lg);
+  border: thin solid var(--swift-warning);
+  border-radius: var(--swift-radius-md);
+  background: var(--swift-card);
+  color: var(--swift-ink);
+  font-size: var(--swift-type-caption);
+  line-height: var(--swift-leading-caption);
+}
+
+.trackingNotice {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--swift-space-md);
+  padding: var(--swift-space-md) var(--swift-space-lg);
+  border: thin solid var(--swift-error);
+  border-radius: var(--swift-radius-md);
+  background: var(--swift-card);
+  color: var(--swift-error);
+  font-size: var(--swift-type-caption);
+  line-height: var(--swift-leading-caption);
+}
+
+.trackingNotice .secondaryButton {
+  flex: none;
+}
+
+.confirmActions {
+  gap: var(--swift-space-sm);
+}
+
+.confirmActions > * {
+  flex: 1;
+}
+
+.alert {
+  margin: var(--swift-space-lg) 0 0;
+  padding: var(--swift-space-md);
+  border: thin solid var(--swift-error);
+  border-radius: var(--swift-radius-md);
+  color: var(--swift-error);
+  font-size: var(--swift-type-caption);
+  line-height: var(--swift-leading-caption);
+}
+
+.stateCard {
+  max-width: var(--swift-modal-width);
+  margin-inline: auto;
+  display: grid;
+  gap: var(--swift-space-md);
+  text-align: center;
+}
+
+.stateCard h1,
+.stateCard p {
+  margin: 0;
+}
+
+.stateCard p {
+  color: var(--swift-muted);
+}
+
+.loading {
+  min-height: var(--swift-hero-height);
+  border-radius: var(--swift-radius-xl);
+  background: var(--swift-sunken);
+}
+
+@media (max-width: 52em) {
+  .detailGrid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .summaryCard {
+    position: static;
+  }
+}
+
+@media (max-width: 40em) {
+  .hero {
+    grid-template-columns: auto minmax(0, 1fr);
+    align-items: start;
+    padding: var(--swift-space-lg);
+  }
+
+  .statusPill {
+    grid-column: 1 / -1;
+    width: fit-content;
+  }
+
+  .title {
+    font-size: var(--swift-type-title);
+    line-height: var(--swift-leading-title);
+  }
+
+  .holdCard {
+    grid-template-columns: minmax(0, 1fr);
+    padding: var(--swift-space-lg);
+  }
+
+  .timer {
+    width: 100%;
+  }
+
+  .progressCard,
+  .card,
+  .summaryCard {
+    padding: var(--swift-space-lg);
+  }
+
+  .statusRail {
+    grid-template-columns: repeat(
+      var(--swift-stage-count, 4),
+      minmax(calc(var(--swift-touch) + var(--swift-space-xl)), 1fr)
+    );
+    overflow-x: auto;
+    padding-block-end: var(--swift-space-sm);
+  }
+
+  .statusRail li {
+    min-width: calc(var(--swift-touch) + var(--swift-space-xl));
+  }
+
+  .sectionHeading,
+  .riderDetails,
+  .trackingNotice,
+  .confirmActions {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .estimate,
+  .rating {
+    width: fit-content;
+  }
+}
