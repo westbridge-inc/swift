@@ -121,7 +121,12 @@ export function FoodCard({
           </T>
           <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
             {priceLabel ? (
-              <T variant="numM" tone="brand">
+              // MONEY IN INK [100x pass §5]: "Prices were brand-red everywhere
+              // — red stops meaning 'act' when it also means '$2,500'. Money is
+              // now ink, tabular Bricolage; red is reserved for the rail, the
+              // flagship tile, and CTAs." The numM variant is already the
+              // tabular face; only the colour changes.
+              <T variant="numM">
                 {priceLabel}
               </T>
             ) : (
