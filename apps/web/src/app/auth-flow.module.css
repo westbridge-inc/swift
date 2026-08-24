@@ -1,0 +1,248 @@
+.page {
+  min-height: 100dvh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--swift-space-lg);
+  background: var(--swift-canvas);
+}
+
+.card {
+  width: min(100%, var(--swift-modal-width));
+  padding: var(--swift-space-2xl);
+  border: thin solid var(--swift-border);
+  border-radius: var(--swift-radius-xl);
+  background: var(--swift-card);
+  box-shadow: var(--swift-elevation-card);
+}
+
+.cardNarrow {
+  width: min(100%, calc(var(--swift-modal-width) - var(--swift-space-5xl)));
+}
+
+.brandLink,
+.backButton,
+.textButton {
+  min-height: var(--swift-touch);
+  display: inline-flex;
+  align-items: center;
+}
+
+.brandLink {
+  min-width: var(--swift-touch);
+}
+
+.backButton {
+  gap: var(--swift-space-xs);
+  margin-block-end: var(--swift-space-md);
+  padding-inline: var(--swift-space-sm);
+  border: 0;
+  border-radius: var(--swift-radius-full);
+  background: transparent;
+  color: var(--swift-muted);
+  font-family: var(--swift-font-body-semibold), system-ui, sans-serif;
+  cursor: pointer;
+}
+
+.stack,
+.stackTight {
+  display: grid;
+  margin-block-start: var(--swift-space-xl);
+}
+
+.stack {
+  gap: var(--swift-space-lg);
+}
+
+.stackTight {
+  gap: var(--swift-space-md);
+}
+
+.heading {
+  margin: 0;
+  font-family: var(--swift-font-display-semibold), system-ui, sans-serif;
+  font-size: var(--swift-type-heading);
+  line-height: var(--swift-leading-heading);
+}
+
+.brandLink + .heading {
+  margin-block-start: var(--swift-space-md);
+}
+
+.heading + .bodyCopy {
+  margin-block-start: var(--swift-space-sm);
+}
+
+.bodyCopy,
+.smallCopy,
+.legal,
+.inlineText {
+  margin: 0;
+  color: var(--swift-muted);
+}
+
+.bodyCopy,
+.inlineText {
+  font-size: var(--swift-type-caption);
+  line-height: var(--swift-leading-caption);
+}
+
+.smallCopy,
+.legal {
+  font-size: var(--swift-type-micro);
+  line-height: var(--swift-leading-micro);
+}
+
+.roleButton {
+  width: 100%;
+  min-height: var(--swift-touch);
+  display: flex;
+  align-items: center;
+  gap: var(--swift-space-md);
+  padding: var(--swift-space-md);
+  border: thin solid var(--swift-border);
+  border-radius: var(--swift-radius-lg);
+  background: var(--swift-card);
+  color: var(--swift-ink);
+  text-align: start;
+  cursor: pointer;
+}
+
+.roleButton:hover {
+  border-color: var(--swift-red);
+  background: var(--swift-red-50);
+}
+
+.roleIcon {
+  width: var(--swift-touch);
+  height: var(--swift-touch);
+  flex: 0 0 auto;
+  display: grid;
+  place-items: center;
+  border-radius: var(--swift-radius-md);
+  background: var(--swift-red-50);
+  color: var(--swift-red);
+}
+
+.roleCopy {
+  display: grid;
+  gap: var(--swift-space-xs);
+}
+
+.roleTitle {
+  font-family: var(--swift-font-body-bold), system-ui, sans-serif;
+}
+
+.roleDescription {
+  color: var(--swift-muted);
+  font-size: var(--swift-type-caption);
+  line-height: var(--swift-leading-caption);
+}
+
+.field {
+  display: grid;
+  gap: var(--swift-space-xs);
+}
+
+.label {
+  color: var(--swift-muted);
+  font-family: var(--swift-font-body-medium), system-ui, sans-serif;
+  font-size: var(--swift-type-caption);
+  line-height: var(--swift-leading-caption);
+}
+
+.input {
+  width: 100%;
+  min-height: var(--swift-touch);
+  padding-inline: var(--swift-space-md);
+  border: thin solid var(--swift-border-strong);
+  border-radius: var(--swift-radius-md);
+  background: var(--swift-card);
+  color: var(--swift-ink);
+}
+
+.codeInput {
+  letter-spacing: var(--swift-tracking-micro);
+}
+
+.primaryButton {
+  width: 100%;
+  min-height: var(--swift-touch);
+  padding-inline: var(--swift-space-lg);
+  border: thin solid var(--swift-red);
+  border-radius: var(--swift-radius-md);
+  background: var(--swift-red);
+  color: var(--swift-white);
+  font-family: var(--swift-font-body-semibold), system-ui, sans-serif;
+  cursor: pointer;
+}
+
+.primaryButton:hover:not(:disabled) {
+  border-color: var(--swift-red-600);
+  background: var(--swift-red-600);
+}
+
+.primaryButton:disabled,
+.roleButton:disabled,
+.backButton:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.textButton {
+  width: 100%;
+  justify-content: center;
+  padding-inline: var(--swift-space-sm);
+  border: 0;
+  border-radius: var(--swift-radius-full);
+  background: transparent;
+  color: var(--swift-muted);
+  font-size: var(--swift-type-caption);
+  line-height: var(--swift-leading-caption);
+  cursor: pointer;
+}
+
+.inlineLink {
+  color: var(--swift-red);
+  font-family: var(--swift-font-body-semibold), system-ui, sans-serif;
+  text-decoration: underline;
+  text-underline-offset: var(--swift-space-xs);
+}
+
+.dividerCopy {
+  margin: var(--swift-space-xl) 0 0;
+  padding-block-start: var(--swift-space-lg);
+  border-block-start: thin solid var(--swift-border);
+  color: var(--swift-muted);
+  font-size: var(--swift-type-caption);
+  line-height: var(--swift-leading-caption);
+}
+
+.error {
+  margin: var(--swift-space-lg) 0 0;
+  padding: var(--swift-space-md);
+  border: thin solid var(--swift-error);
+  border-radius: var(--swift-radius-md);
+  color: var(--swift-error);
+  font-size: var(--swift-type-caption);
+  line-height: var(--swift-leading-caption);
+}
+
+.loading {
+  min-height: 100dvh;
+  display: grid;
+  place-items: center;
+  background: var(--swift-canvas);
+  color: var(--swift-muted);
+}
+
+@media (max-width: 35em) {
+  .page {
+    align-items: flex-start;
+    padding: var(--swift-space-md);
+  }
+
+  .card {
+    padding: var(--swift-space-xl);
+  }
+}

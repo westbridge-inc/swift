@@ -4,8 +4,30 @@ import { useEffect, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import { Trash2, MapPin } from 'lucide-react';
-import { getCart, updateCartLine, removeCartLine, getAddresses, addAddress, setCartAddress, checkout, getPendingAppointments, clearPendingAppointments, money, type Cart } from '@/lib/customer';
-import { currentCoords } from '@/lib/geolocate';
+import {
+  addAddress,
+  cartQuoteFingerprint,
+  checkout,
+  checkoutAttemptSignature,
+  clearCart,
+  clearCheckoutAttempt,
+  getAddresses,
+  getCart,
+  getPublicStorefront,
+  getPublicVendor,
+  money,
+  placeDetails,
+  placesAutocomplete,
+  persistCheckoutAttempt,
+  readCheckoutAttempt,
+  removeCartLine,
+  setCartAddress,
+  updateCartLine,
+  type Cart,
+  type Place,
+} from '@/lib/customer';
+import { ApiRequestError } from '@/lib/auth';
+import styles from './cart.module.css';
 
 const TIPS = [0, 200, 500, 1000];
 
@@ -14,13 +36,22 @@ export default function CartPage() {
   const [cart, setCart] = useState<Cart | null>(null);
   const [addresses, setAddresses] = useState<any[]>([]);
   const [addrId, setAddrId] = useState<string | null>(null);
+  const [addressError, setAddressError] = useState<string | null>(null);
   const [tip, setTip] = useState(0); // SWIFT-071: no pre-selected tip — the rider tip is opt-in
-  const [pay, setPay] = useState<'CASH' | 'MOBILE_MONEY'>('CASH');
+  const [cartSafety, setCartSafety] = useState<'checking' | 'safe' | 'blocked'>('checking');
+  const [cartSafetyMessage, setCartSafetyMessage] = useState('Swift is checking this saved cart against the live store menu.');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [noRiders, setNoRiders] = useState(false);
   const [addingAddr, setAddingAddr] = useState(false);
-  const [newAddr, setNewAddr] = useState({ label: 'Home', addressLine1: '', city: 'Georgetown' });
+  const [newAddr, setNewAddr] = useState({ label: '', addressLine1: '', city: '', region: '' });
+  const [addressMatches, setAddressMatches] = useState<Place[]>([]);
+  const [selectedPlace, setSelectedPlace] = useState<{ label: string; lat: number; lng: number } | null>(null);
+  const [addressLookupBusy, setAddressLookupBusy] = useState(false);
+  const addressLabelInput = useRef<HTMLInputElement | null>(null);
+  const safetyNotice = useRef<HTMLDivElement | null>(null);
+  const checkoutRail = useRef<HTMLElement | null>(null);
+  const errorMessage = useRef<HTMLParagraphElement | null>(null);
 
   // [REPORT-012 F-012-01] Show the tip the cart will actually charge: hydrate
   // the selector ONCE from the persisted cart tip (it may have been set from
@@ -29,12 +60,89 @@ export default function CartPage() {
   // "No tip" selected means tipAmount: 0 goes to the server, which now
   // honors an explicit zero.
   const tipHydrated = useRef(false);
-  async function refresh() {
-    const [c, a] = await Promise.all([getCart(), getAddresses().catch(() => [])]);
-    setCart(c); setAddresses(a);
+  const checkoutAttempt = useRef<{ signature: string; key: string } | null>(null);
+  const checkoutBusy = useRef(false);
+  const refreshSequence = useRef(0);
+  async function refresh(options: { announceChecking?: boolean } = {}): Promise<{ cart: Cart; safe: boolean } | null> {
+    const request = ++refreshSequence.current;
+    if (options.announceChecking !== false) setCartSafety('checking');
+    const [cartResult, addressResult] = await Promise.allSettled([getCart(), getAddresses()]);
+    if (request !== refreshSequence.current) return null;
+    if (cartResult.status === 'rejected') {
+      const message = cartResult.reason instanceof Error ? cartResult.reason.message : 'Could not load the live cart.';
+      setCartSafety('blocked');
+      setCartSafetyMessage('Swift could not refresh the live cart. Checkout stays locked until the server responds; use Check cart again below.');
+      setError(message);
+      throw cartResult.reason;
+    }
+    const c = cartResult.value;
+    const a = addressResult.status === 'fulfilled' ? addressResult.value : [];
+    setCart(c); setAddresses(a); setError(null);
+    setAddressError(addressResult.status === 'rejected'
+      ? addressResult.reason instanceof Error ? addressResult.reason.message : 'Could not load your delivery addresses.'
+      : null);
     if (!tipHydrated.current) { tipHydrated.current = true; setTip(Number(c?.tipAmount) || 0); }
-    const def = a.find((x: any) => x.isDefault) ?? a[0];
-    if (def) setAddrId(def.id);
+    const def = a.find((x: any) => x.id === c?.deliveryAddress?.id) ?? a.find((x: any) => x.isDefault) ?? a[0];
+    setAddrId(def?.id ?? null);
+
+    if (!c.items.length) {
+      checkoutAttempt.current = null;
+      clearCheckoutAttempt();
+      setCartSafety('safe');
+      setCartSafetyMessage('');
+      return { cart: c, safe: true };
+    }
+    const block = (message: string) => {
+      setCartSafety('blocked');
+      setCartSafetyMessage(message);
+      return { cart: c, safe: false };
+    };
+    if (!c.vendor?.id || !c.vendor.slug) {
+      return block('Swift cannot identify one live store quote for this saved cart. Remove its items and start again from a store page.');
+    }
+    if (c.items.some((line) => line.isAvailable === false)) {
+      return block('At least one saved item is no longer available. Remove unavailable items before ordering.');
+    }
+    const fulfillmentModes = new Set(c.items.map((line) => line.fulfillment));
+    if (fulfillmentModes.size !== 1 || !fulfillmentModes.has('DELIVERY')) {
+      return block(fulfillmentModes.has('PICKUP')
+        ? 'Pickup does not have a truthful pre-order quote on this web screen yet. Remove those lines and order delivery from the live store page.'
+        : fulfillmentModes.has('APPOINTMENT')
+          ? 'Appointment checkout is not available on the web yet. Remove those lines to continue with a delivery order.'
+          : 'This cart mixes or omits fulfilment modes, so Swift will not show or submit one aggregate total.');
+    }
+    if (Number(c.discount ?? 0) > 0) {
+      return block('This saved cart has a delivery discount, but the server does not allow discounted cash delivery. Swift cannot remove only the promotion on the web yet; clear this cart to start again without it.');
+    }
+    const quotedDistance = Number(c.deliveryDistanceKm ?? c.vendor.distanceKm);
+    const deliveryRadius = Number(c.vendor.deliveryRadius);
+    if (Number.isFinite(quotedDistance) && Number.isFinite(deliveryRadius) && quotedDistance > deliveryRadius) {
+      return block(`This address is ${quotedDistance.toFixed(1)} km from the store, outside its ${deliveryRadius.toFixed(1)} km delivery radius. Choose another saved address before ordering.`);
+    }
+    try {
+      const liveStore = await getPublicStorefront(c.vendor.slug);
+      if (request !== refreshSequence.current) return null;
+      if (liveStore.id !== c.vendor.id) {
+        return block('The public store no longer matches this saved cart. Remove its items and start again from a live store page.');
+      }
+      if (!liveStore.isCurrentlyOpen || !liveStore.acceptingOrders) {
+        return block(liveStore.isCurrentlyOpen
+          ? 'This store has paused orders. Checkout stays locked until the live store starts taking orders again.'
+          : 'This store is closed right now. Checkout stays locked until the live store is open.');
+      }
+      const vendor = await getPublicVendor(c.vendor.id);
+      if (request !== refreshSequence.current) return null;
+      const liveItemIds = new Set(vendor.categories.flatMap((category) => category.items.map((item) => item.id)));
+      if (c.items.some((line) => !liveItemIds.has(line.itemId))) {
+        return block('These saved lines do not all belong to the store behind the server quote. Remove them and start a fresh single-store order.');
+      }
+      setCartSafety('safe');
+      setCartSafetyMessage('');
+      return { cart: c, safe: true };
+    } catch {
+      if (request !== refreshSequence.current) return null;
+      return block('Swift could not verify this saved cart against the live store menu. Checkout stays locked until that server truth is available.');
+    }
   }
   useEffect(() => { refresh().catch((e) => setError(e.message)); }, []);
 
@@ -46,136 +154,404 @@ export default function CartPage() {
   const deliveryFee = cart?.deliveryFee ?? 0;
   const discount = cart?.discount ?? 0;
   const total = serverSubtotal + deliveryFee - discount + tip;
+  const meetsMinimum = cart?.meetsMinimum ?? true;
+  const minimumShortfall = Math.max(0, Number(cart?.minimumOrderAmount ?? 0) - serverSubtotal);
+  const hasDestinationQuote = Boolean(addrId && cart?.deliveryAddress?.id === addrId);
+  const knownDeliveryDistance = Number(cart?.deliveryDistanceKm ?? cart?.vendor?.distanceKm);
+  const knownDeliveryRadius = Number(cart?.vendor?.deliveryRadius);
+  const knownOutOfRange = Number.isFinite(knownDeliveryDistance)
+    && Number.isFinite(knownDeliveryRadius)
+    && knownDeliveryDistance > knownDeliveryRadius;
 
-  async function saveAddress() {
+  function resetCheckoutReplay() {
+    checkoutAttempt.current = null;
+    clearCheckoutAttempt();
+  }
+
+  function cartMutationLockedByCheckout() {
+    const pending = checkoutAttempt.current ?? readCheckoutAttempt();
+    if (!pending) return false;
+    checkoutAttempt.current = pending;
+    setError('A checkout attempt still has an unresolved server outcome. Check Orders or retry the same order before changing this cart.');
+    return true;
+  }
+
+  async function mutateCart(work: () => Promise<unknown>) {
+    if (checkoutBusy.current || cartMutationLockedByCheckout()) return;
+    checkoutBusy.current = true;
+    resetCheckoutReplay();
     setBusy(true); setError(null);
     try {
-      // [F-027-02] A saved address IS its coordinates — the delivery fee, the
-      // rider's route and the courier's destination all come from them. The
-      // Georgetown fallback that used to sit here saved a city-centre guess
-      // as this customer's real address. Refuse instead; setError below shows
-      // the reason.
-      const coords = await currentCoords('put this address on the map');
-      const a = await addAddress({ ...newAddr, region: 'Demerara-Mahaica', latitude: coords.lat, longitude: coords.lng, isDefault: addresses.length === 0 });
+      await work();
+      await refresh();
+    } catch (mutationError) {
+      setError(mutationError instanceof Error ? mutationError.message : 'Could not update your cart.');
+    } finally {
+      checkoutBusy.current = false;
+      setBusy(false);
+    }
+  }
+
+  async function saveAddress() {
+    if (checkoutBusy.current || cartMutationLockedByCheckout() || !selectedPlace) return;
+    checkoutBusy.current = true;
+    resetCheckoutReplay();
+    setBusy(true); setError(null);
+    try {
+      const a = await addAddress({
+        label: newAddr.label.trim(),
+        addressLine1: selectedPlace.label,
+        city: newAddr.city.trim(),
+        region: newAddr.region.trim(),
+        latitude: selectedPlace.lat,
+        longitude: selectedPlace.lng,
+        isDefault: addresses.length === 0,
+      });
       setAddingAddr(false);
+      setNewAddr({ label: '', addressLine1: '', city: '', region: '' });
+      setAddressMatches([]);
+      setSelectedPlace(null);
       await refresh();
       setAddrId(a.id ?? addrId);
     } catch (e: any) { setError(e.message); }
-    finally { setBusy(false); }
+    finally { checkoutBusy.current = false; setBusy(false); }
   }
 
-  async function placeOrder(asPickup = false) {
-    if (!cart?.items?.length) return;
+  async function searchAddress() {
+    if (addressLookupBusy || newAddr.addressLine1.trim().length < 3) return;
+    setAddressLookupBusy(true);
+    setError(null);
+    setSelectedPlace(null);
+    try {
+      const matches = await placesAutocomplete(newAddr.addressLine1.trim());
+      setAddressMatches(matches);
+      if (!matches.length) setError('Swift found no map matches for that destination. Add more detail and search again.');
+    } catch (lookupError) {
+      setAddressMatches([]);
+      setError(lookupError instanceof Error ? lookupError.message : 'Swift could not search the destination map.');
+    } finally {
+      setAddressLookupBusy(false);
+    }
+  }
+
+  async function chooseAddressMatch(place: Place) {
+    if (addressLookupBusy) return;
+    setAddressLookupBusy(true);
+    setError(null);
+    try {
+      const details = await placeDetails(place.placeId);
+      setSelectedPlace({ label: details.label, lat: details.lat, lng: details.lng });
+      setNewAddr((current) => ({ ...current, addressLine1: details.label }));
+      setAddressMatches([]);
+    } catch (lookupError) {
+      setSelectedPlace(null);
+      setError(lookupError instanceof Error ? lookupError.message : 'Swift could not confirm that mapped destination.');
+    } finally {
+      setAddressLookupBusy(false);
+    }
+  }
+
+  async function recheckCartSafety() {
+    try {
+      await refresh({ announceChecking: false });
+    } catch (refreshError) {
+      setError(refreshError instanceof Error ? refreshError.message : 'Could not reload your cart.');
+    } finally {
+      window.requestAnimationFrame(() => checkoutRail.current?.focus());
+    }
+  }
+
+  async function placeOrder() {
+    if (!cart?.items?.length || checkoutBusy.current || cartSafety !== 'safe' || !addrId || !meetsMinimum) return;
+    checkoutBusy.current = true;
     setBusy(true); setError(null); setNoRiders(false);
     try {
-      // [WR-001] A failed address set must BLOCK delivery checkout — swallowing
-      // it let the server fall back to the stale/default cart address and the
-      // order shipped to the wrong place. Pickup keeps the old tolerance: the
-      // delivery address is irrelevant to it.
-      if (addrId) {
-        if (asPickup) await setCartAddress(addrId).catch(() => {});
-        else await setCartAddress(addrId);
+      const proof = await refresh({ announceChecking: false });
+      if (!proof?.safe) {
+        window.requestAnimationFrame(() => safetyNotice.current?.focus());
+        return;
       }
-      const body: any = { paymentMethod: pay, tipAmount: tip };
-      if (asPickup && cart.vendor?.id) {
-        body.fulfillmentSelections = { [cart.vendor.id]: 'PICKUP' };
+      const liveCart = proof.cart;
+      if (!liveCart.items.length) {
+        resetCheckoutReplay();
+        router.push('/orders');
+        return;
       }
-      const appts = getPendingAppointments();
-      if (appts.length) body.appointments = appts.map((a) => ({ itemId: a.itemId, slotStart: a.slotStart, ...(a.mode ? { mode: a.mode } : {}) }));
-      const res = await checkout(body);
-      clearPendingAppointments();
+      if (cartQuoteFingerprint(liveCart) !== cartQuoteFingerprint(cart)) {
+        const refreshedSubtotal = liveCart.subtotalCustomer
+          ?? liveCart.subtotal
+          ?? liveCart.items.reduce((sum, line) => sum + line.customerPrice * line.quantity, 0);
+        const refreshedTotal = money(
+          refreshedSubtotal
+          + Number(liveCart.deliveryFee ?? 0)
+          - Number(liveCart.discount ?? 0)
+          + tip,
+        );
+        setError(`Swift refreshed this saved cart to ${refreshedTotal}. Review the live lines and server quote, then place the order again.`);
+        return;
+      }
+      const body = {
+        paymentMethod: 'CASH' as const,
+        tipAmount: tip,
+        ...(liveCart.promoCode?.code ? { promoCode: liveCart.promoCode.code } : {}),
+      };
+      const signature = checkoutAttemptSignature(liveCart, body);
+      const storedAttempt = checkoutAttempt.current ?? readCheckoutAttempt();
+      if (storedAttempt && storedAttempt.signature !== signature) {
+        checkoutAttempt.current = storedAttempt;
+        setError('An earlier checkout attempt still has an unresolved server outcome. Check Orders before changing or placing this cart; Swift will not create a second attempt with a new key.');
+        return;
+      }
+      const attempt = storedAttempt;
+      checkoutAttempt.current = attempt;
+      const retrying = Boolean(attempt);
+      if (!retrying) {
+        const quotedCart = await setCartAddress(addrId);
+        if (cartQuoteFingerprint(quotedCart) !== cartQuoteFingerprint(liveCart)) {
+          setCart(quotedCart);
+          const refreshedSubtotal = quotedCart.subtotalCustomer
+            ?? quotedCart.subtotal
+            ?? quotedCart.items.reduce((sum, line) => sum + line.customerPrice * line.quantity, 0);
+          const refreshedTotal = money(
+            refreshedSubtotal
+            + Number(quotedCart.deliveryFee ?? 0)
+            - Number(quotedCart.discount ?? 0)
+            + tip,
+          );
+          await refresh({ announceChecking: false });
+          setError(`Swift refreshed this order to ${refreshedTotal}. Review the new server total, then place the order again.`);
+          window.requestAnimationFrame(() => errorMessage.current?.focus());
+          return;
+        }
+        setCart(quotedCart);
+      }
+      const idempotencyKey = attempt?.key ?? crypto.randomUUID();
+      checkoutAttempt.current = { signature, key: idempotencyKey };
+      persistCheckoutAttempt({ signature, key: idempotencyKey });
+      const res = await checkout(body, idempotencyKey);
+      resetCheckoutReplay();
       const oid = res.order?.id ?? res.orders?.[0]?.id;
       router.push(oid ? `/orders/${oid}` : '/orders');
     } catch (e: any) {
-      if (String(e.message).includes('No delivery riders') || String(e.message).includes('NO_RIDERS')) setNoRiders(true);
-      else setError(e.message);
-    } finally { setBusy(false); }
+      const message = e instanceof Error ? e.message : 'Could not place this order.';
+      if (/selfie|profile photo/i.test(message)) {
+        resetCheckoutReplay();
+        router.push('/selfie?next=%2Fcart');
+        return;
+      }
+      const definiteRejection = e instanceof ApiRequestError
+        && e.status >= 400
+        && e.status < 500
+        && e.code !== 'DUPLICATE_REQUEST';
+      let cartReconciled = false;
+      try {
+        const reconciledCart = await getCart();
+        if (reconciledCart.items.length === 0) {
+          resetCheckoutReplay();
+          router.push('/orders');
+          return;
+        }
+        await refresh({ announceChecking: false });
+        cartReconciled = true;
+      } catch {
+        // Keep the key if server cart truth is unreachable. It is safer to
+        // replay one attempt than to create a new potentially duplicate order.
+      }
+      if (definiteRejection && cartReconciled) resetCheckoutReplay();
+      if (message.includes('No delivery riders') || message.includes('NO_RIDERS')) setNoRiders(true);
+      else setError(message);
+      window.requestAnimationFrame(() => (errorMessage.current ?? checkoutRail.current)?.focus());
+    } finally { checkoutBusy.current = false; setBusy(false); }
   }
 
-  if (!cart) return <div className="h-64 animate-pulse rounded-2xl bg-[var(--swift-subtle)]" />;
+  async function changeAddress(nextAddressId: string) {
+    if (checkoutBusy.current || cartMutationLockedByCheckout()) return;
+    const previous = addrId;
+    checkoutBusy.current = true;
+    resetCheckoutReplay();
+    setBusy(true); setError(null); setAddrId(nextAddressId);
+    try {
+      await setCartAddress(nextAddressId);
+      await refresh();
+    } catch (addressError: any) {
+      setAddrId(previous);
+      setError(addressError.message);
+    } finally {
+      checkoutBusy.current = false;
+      setBusy(false);
+    }
+  }
+
+  if (!cart && error) return (
+    <section className={styles.stateCard} role="alert">
+      <h1 className={styles.stateTitle}>Swift could not load your cart</h1>
+      <p className={styles.errorCopy}>{error}</p>
+      <button type="button" onClick={() => void refresh().catch((refreshError) => setError(refreshError instanceof Error ? refreshError.message : 'Could not load your cart.'))} className={`${styles.button} ${styles.buttonPrimary} ${styles.retryButton}`}>Try again</button>
+    </section>
+  );
+  if (!cart) return <div className={styles.loading} aria-label="Loading your cart" />;
   if (!cart.items?.length) return (
-    <div className="py-20 text-center">
-      <p className="text-lg font-bold">Your cart is empty</p>
-      <Link href="/order" className="mt-3 inline-block rounded-full bg-[var(--swift-red)] px-5 py-2.5 font-bold text-white">Browse Swift</Link>
-    </div>
+    <section className={styles.emptyState}>
+      <h1 className={styles.stateTitle}>Your cart is empty</h1>
+      <Link href="/order" className={styles.emptyLink}>Browse Swift</Link>
+    </section>
   );
 
   return (
-    <div className="grid gap-6 lg:grid-cols-[1fr_360px]">
-      <div className="space-y-4">
-        <h1 className="text-2xl font-extrabold">Your cart</h1>
+    <main className={styles.page}>
+      <section className={styles.itemsColumn} aria-labelledby="cart-title">
+        <h1 id="cart-title" className={styles.title}>Your cart</h1>
         {cart.items.map((l) => (
-          <div key={l.id} className="flex items-center gap-3 rounded-2xl border border-black/5 bg-white p-3">
-            <div className="min-w-0 flex-1">
-              <p className="font-bold">{l.name}</p>
-              {l.vendorName && <p className="text-xs text-[var(--swift-muted)]">{l.vendorName}</p>}
-              <p className="mt-0.5 font-semibold text-[var(--swift-red)]">{money(l.customerPrice)}</p>
+          <article key={l.id} className={styles.itemCard}>
+            <div className={styles.itemCopy}>
+              <p className={styles.itemName}>{l.name}</p>
+              {l.vendorName ? <p className={styles.itemMeta}>{l.vendorName}</p> : null}
+              {(l.selectedOptionNames?.length ?? 0) > 0 ? <p className={styles.itemMeta}>{l.selectedOptionNames?.join(' · ')}</p> : null}
+              <p className={styles.itemPrice}>{money(l.customerPrice)}</p>
             </div>
-            <div className="flex items-center gap-2 rounded-full border border-black/10 px-2 py-1">
-              <button onClick={async () => { l.quantity <= 1 ? await removeCartLine(l.id) : await updateCartLine(l.id, l.quantity - 1); refresh(); }} className="px-2 font-bold">−</button>
-              <span className="w-5 text-center font-bold">{l.quantity}</span>
-              <button onClick={async () => { await updateCartLine(l.id, l.quantity + 1); refresh(); }} className="px-2 font-bold">+</button>
+            <div className={styles.quantity} aria-label={`${l.name} quantity`}>
+              <button
+                type="button"
+                disabled={busy}
+                onClick={() => void mutateCart(() => l.quantity <= 1 ? removeCartLine(l.id) : updateCartLine(l.id, l.quantity - 1))}
+                aria-label={`Remove one ${l.name}`}
+                className={styles.quantityButton}
+              >−</button>
+              <span className={styles.quantityCount} aria-live="polite">{l.quantity}</span>
+              <button
+                type="button"
+                disabled={busy}
+                onClick={() => void mutateCart(() => updateCartLine(l.id, l.quantity + 1))}
+                aria-label={`Add another ${l.name}`}
+                className={styles.quantityButton}
+              >+</button>
             </div>
-            <button onClick={async () => { await removeCartLine(l.id); refresh(); }} aria-label="Remove" className="grid h-8 w-8 place-items-center rounded-full text-[var(--swift-red)] hover:bg-[var(--swift-red-50)]"><Trash2 className="h-4 w-4" /></button>
-          </div>
+            <button
+              type="button"
+              disabled={busy}
+              onClick={() => void mutateCart(() => removeCartLine(l.id))}
+              aria-label={`Remove ${l.name} from cart`}
+              className={styles.removeButton}
+            ><Trash2 size={18} /></button>
+          </article>
         ))}
-      </div>
+      </section>
 
-      <aside className="space-y-4 lg:sticky lg:top-20 lg:self-start">
-        <div className="rounded-2xl border border-black/5 bg-white p-4">
-          <p className="mb-2 flex items-center gap-1.5 font-bold"><MapPin className="h-4 w-4 text-[var(--swift-red)]" /> Deliver to</p>
-          {addresses.length > 0 ? (
-            <select value={addrId ?? ''} onChange={(e) => setAddrId(e.target.value)} className="w-full rounded-xl border border-black/10 px-3 py-2">
-              {addresses.map((a) => <option key={a.id} value={a.id}>{a.label} — {a.addressLine1}, {a.city}</option>)}
-            </select>
+      <aside ref={checkoutRail} tabIndex={-1} className={styles.rail} aria-label="Checkout">
+        {cartSafety !== 'safe' ? (
+          <div ref={safetyNotice} tabIndex={-1} className={`${styles.safety} ${cartSafety === 'blocked' ? styles.safetyBlocked : styles.safetyNotice}`} role={cartSafety === 'blocked' ? 'alert' : 'status'}>
+            <div className={styles.panelStack}>
+              <p>{cartSafetyMessage}</p>
+              {cartSafety === 'blocked' && discount > 0 ? (
+                <button type="button" disabled={busy} onClick={() => void mutateCart(() => clearCart())} className={`${styles.button} ${styles.buttonSecondary}`}>
+                  Clear saved cart and promotion
+                </button>
+              ) : null}
+              {cartSafety === 'blocked' ? (
+                <button type="button" disabled={busy} onClick={() => void recheckCartSafety()} className={`${styles.button} ${styles.buttonSecondary}`}>
+                  Check cart again
+                </button>
+              ) : null}
+            </div>
+          </div>
+        ) : null}
+        {error ? <p ref={errorMessage} tabIndex={-1} className={styles.error} role="alert" aria-live="assertive">{error}</p> : null}
+
+        <section className={styles.panel} aria-labelledby="delivery-address-title">
+          <div className={styles.panelHeading}>
+            <MapPin size={18} color="var(--swift-red)" aria-hidden="true" />
+            <h2 id="delivery-address-title" className={styles.panelTitle}>Deliver to</h2>
+          </div>
+          {addressError ? (
+            <div className={styles.panelStack} role="alert">
+              <p className={styles.errorMessage}>{addressError}</p>
+              <button type="button" className={`${styles.button} ${styles.buttonSecondary}`} onClick={() => void refresh().catch((refreshError) => setError(refreshError instanceof Error ? refreshError.message : 'Could not reload your cart.'))}>Try addresses again</button>
+            </div>
+          ) : addresses.length > 0 ? (
+            <div className={styles.field}>
+              <label htmlFor="cart-delivery-address" className={styles.label}>Saved delivery address</label>
+              <select id="cart-delivery-address" value={addrId ?? ''} disabled={busy || (cartSafety !== 'safe' && !knownOutOfRange)} onChange={(e) => void changeAddress(e.target.value)} className={styles.input}>
+                {addresses.map((a) => <option key={a.id} value={a.id}>{a.label} — {a.addressLine1}, {a.city}</option>)}
+              </select>
+            </div>
           ) : addingAddr ? (
-            <div className="space-y-2">
-              <input placeholder="Street + number" value={newAddr.addressLine1} onChange={(e) => setNewAddr({ ...newAddr, addressLine1: e.target.value })} className="w-full rounded-xl border border-black/10 px-3 py-2" />
-              <input placeholder="City" value={newAddr.city} onChange={(e) => setNewAddr({ ...newAddr, city: e.target.value })} className="w-full rounded-xl border border-black/10 px-3 py-2" />
-              <button onClick={saveAddress} disabled={busy || !newAddr.addressLine1} className="w-full rounded-full bg-[var(--swift-red)] py-2 font-bold text-white disabled:opacity-60">{busy ? 'Saving…' : 'Save address (uses your location)'}</button>
+            <div className={styles.formStack}>
+              <div className={styles.field}><label htmlFor="address-label" className={styles.label}>Address label</label><input ref={addressLabelInput} id="address-label" value={newAddr.label} onChange={(e) => setNewAddr({ ...newAddr, label: e.target.value })} className={styles.input} /></div>
+              <div className={styles.field}>
+                <label htmlFor="address-street" className={styles.label}>Search the delivery destination</label>
+                <input
+                  id="address-street"
+                  autoComplete="street-address"
+                  value={newAddr.addressLine1}
+                  aria-describedby="address-map-help"
+                  onChange={(e) => {
+                    setNewAddr({ ...newAddr, addressLine1: e.target.value });
+                    setSelectedPlace(null);
+                    setAddressMatches([]);
+                  }}
+                  className={styles.input}
+                />
+                <p id="address-map-help" className={styles.stateCopy}>Choose a Swift map result below. The selected pin—not this device’s current location—sets the delivery fee and rider destination.</p>
+              </div>
+              <button type="button" onClick={() => void searchAddress()} disabled={addressLookupBusy || newAddr.addressLine1.trim().length < 3} className={`${styles.button} ${styles.buttonSecondary}`}>
+                {addressLookupBusy ? 'Searching map…' : 'Find this destination on the map'}
+              </button>
+              {addressMatches.length > 0 ? (
+                <div className={styles.panelStack} role="group" aria-label="Mapped address matches">
+                  {addressMatches.map((place) => (
+                    <button key={place.placeId} type="button" disabled={addressLookupBusy} onClick={() => void chooseAddressMatch(place)} className={`${styles.button} ${styles.buttonSecondary}`}>
+                      {place.primary}{place.secondary ? ` — ${place.secondary}` : ''}
+                    </button>
+                  ))}
+                </div>
+              ) : null}
+              {selectedPlace ? <p className={styles.stateCopy} role="status">Mapped destination confirmed: {selectedPlace.label}</p> : null}
+              <div className={styles.field}><label htmlFor="address-city" className={styles.label}>City or town</label><input id="address-city" autoComplete="address-level2" value={newAddr.city} onChange={(e) => setNewAddr({ ...newAddr, city: e.target.value })} className={styles.input} /></div>
+              <div className={styles.field}><label htmlFor="address-region" className={styles.label}>Region</label><input id="address-region" autoComplete="address-level1" value={newAddr.region} onChange={(e) => setNewAddr({ ...newAddr, region: e.target.value })} className={styles.input} /></div>
+              <button type="button" onClick={() => void saveAddress()} disabled={busy || !selectedPlace || !newAddr.label.trim() || !newAddr.city.trim() || !newAddr.region.trim()} className={`${styles.button} ${styles.buttonPrimary}`}>{busy ? 'Saving…' : 'Save mapped delivery address'}</button>
             </div>
           ) : (
-            <button onClick={() => setAddingAddr(true)} className="w-full rounded-full border border-[var(--swift-red)] py-2 font-bold text-[var(--swift-red)]">Add a delivery address</button>
+            <button type="button" onClick={() => { setAddingAddr(true); window.requestAnimationFrame(() => addressLabelInput.current?.focus()); }} className={`${styles.button} ${styles.buttonSecondary}`}>Add a delivery address</button>
           )}
-        </div>
+        </section>
 
-        <div className="rounded-2xl border border-black/5 bg-white p-4">
-          <p className="mb-2 font-bold">Tip your rider</p>
-          <div className="flex flex-wrap gap-2">
+        <section className={styles.panel} aria-labelledby="tip-title">
+          <h2 id="tip-title" className={styles.panelTitle}>Tip your rider</h2>
+          <div className={styles.tipGrid}>
             {TIPS.map((t) => (
-              <button key={t} onClick={() => setTip(t)} className={`rounded-full px-3.5 py-1.5 text-sm font-semibold ${tip === t ? 'bg-[var(--swift-red)] text-white' : 'border border-black/10'}`}>{t === 0 ? 'No tip' : money(t)}</button>
+              <button key={t} type="button" aria-pressed={tip === t} disabled={busy || cartSafety !== 'safe'} onClick={() => { if (checkoutBusy.current || cartMutationLockedByCheckout()) return; resetCheckoutReplay(); setTip(t); }} className={`${styles.tipButton} ${tip === t ? styles.tipSelected : ''}`}>{t === 0 ? 'No tip' : money(t)}</button>
             ))}
           </div>
-        </div>
+        </section>
 
-        <div className="rounded-2xl border border-black/5 bg-white p-4">
-          <p className="mb-2 font-bold">Payment</p>
-          {(['CASH', 'MOBILE_MONEY'] as const).map((m) => (
-            <label key={m} className="flex cursor-pointer items-center gap-2.5 rounded-xl border border-black/10 px-3 py-2.5 mb-2 has-[:checked]:border-[var(--swift-red)] has-[:checked]:bg-[var(--swift-red-50)]">
-              <input type="radio" name="pay" checked={pay === m} onChange={() => setPay(m)} className="accent-[var(--swift-red)]" />
-              <span>{m === 'CASH' ? 'Cash on delivery' : 'Pay with MMG'}</span>
-            </label>
-          ))}
-          <p className="text-xs text-[var(--swift-muted)]">Swift never holds your order money — you pay the business or rider directly.</p>
-        </div>
+        <section className={styles.panel} aria-labelledby="payment-title">
+          <h2 id="payment-title" className={styles.panelTitle}>Payment</h2>
+          <div className={styles.cashPanel}>
+            <p className={styles.cashTitle}>Cash at the door</p>
+            <p className={styles.cashCopy}>Pay the rider directly when this delivery arrives. Swift never holds your order money.</p>
+          </div>
+        </section>
 
-        <div className="rounded-2xl border border-black/5 bg-white p-4">
-          <div className="flex justify-between text-sm"><span className="text-[var(--swift-muted)]">Items</span><span className="font-semibold">{money(serverSubtotal)}</span></div>
-          {deliveryFee > 0 ? <div className="mt-1 flex justify-between text-sm"><span className="text-[var(--swift-muted)]">Delivery fee</span><span className="font-semibold">{money(deliveryFee)}</span></div> : null}
-          {discount > 0 ? <div className="mt-1 flex justify-between text-sm"><span className="text-[var(--swift-muted)]">Discount</span><span className="font-semibold">-{money(discount)}</span></div> : null}
-          <div className="mt-1 flex justify-between text-sm"><span className="text-[var(--swift-muted)]">Rider tip</span><span className="font-semibold">{money(tip)}</span></div>
-          <div className="mt-2 flex justify-between border-t border-black/5 pt-2 text-lg font-extrabold"><span>Total</span><span>{money(total)}</span></div>
-          {error && <p className="mt-2 text-sm font-semibold text-[var(--swift-red)]">{error}</p>}
+        {cartSafety === 'safe' ? <section className={styles.panel} aria-label="Order total">
+          <div className={styles.breakdown}>
+            <div className={styles.moneyLine}><span className={styles.moneyLabel}>Items</span><strong className={styles.moneyValue}>{money(serverSubtotal)}</strong></div>
+            <div className={styles.moneyLine}><span className={styles.moneyLabel}>Delivery fee</span><strong className={styles.moneyValue}>{hasDestinationQuote ? money(deliveryFee) : 'Choose an address for a quote'}</strong></div>
+            {discount > 0 ? <div className={styles.moneyLine}><span className={styles.moneyLabel}>Discount</span><strong className={styles.moneyValue}>−{money(discount)}</strong></div> : null}
+            <div className={styles.moneyLine}><span className={styles.moneyLabel}>Rider tip</span><strong className={styles.moneyValue}>{money(tip)}</strong></div>
+            <div className={styles.totalLine}><span>Total</span><strong>{hasDestinationQuote ? money(total) : 'Quote needed'}</strong></div>
+          </div>
           {noRiders ? (
-            <div className="mt-3 space-y-2">
-              <p className="text-sm font-semibold text-[var(--swift-red)]">No delivery riders are online right now.</p>
-              <button onClick={() => placeOrder(true)} disabled={busy} className="w-full rounded-full bg-[var(--swift-red)] py-3 font-bold text-white disabled:opacity-60">Order for pickup instead</button>
+            <div className={styles.noRiders}>
+              <p className={styles.noRidersCopy}>No delivery riders are online right now.</p>
+              <button type="button" onClick={() => void placeOrder()} disabled={busy} className={`${styles.button} ${styles.buttonPrimary}`}>Try cash delivery again</button>
             </div>
           ) : (
-            <button onClick={() => placeOrder(false)} disabled={busy} className="mt-3 w-full rounded-full bg-[var(--swift-red)] py-3.5 font-bold text-white disabled:opacity-60">{busy ? 'Placing…' : 'Order now'}</button>
+            <button type="button" onClick={() => void placeOrder()} disabled={busy || !addrId || !meetsMinimum} className={`${styles.button} ${styles.buttonPrimary} ${styles.checkoutButton}`}>
+              {busy ? 'Placing…' : !addrId ? 'Add a delivery address to order' : !meetsMinimum ? `Add ${money(minimumShortfall)} to reach the minimum` : hasDestinationQuote ? `Place cash order · ${money(total)}` : 'Get delivery quote'}
+            </button>
           )}
-        </div>
+        </section> : null}
       </aside>
-    </div>
+    </main>
   );
 }

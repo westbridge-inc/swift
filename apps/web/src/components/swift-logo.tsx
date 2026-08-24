@@ -1,8 +1,15 @@
 // The Swift mark — a swift in flight — as a web SVG, matching the mobile
-// SwiftMark (apps/mobile/src/components/SwiftLogo.tsx) with the real brand
-// colours (#803B3B / #5C2A2C). Use the logo, never a bare "Swift" string.
+// SwiftMark. Colours and typography come from the canonical token bridge.
 
-export function SwiftMark({ size = 28, tint = '#803B3B', accent = '#5C2A2C' }: { size?: number; tint?: string; accent?: string }) {
+export function SwiftMark({
+  size = 28,
+  tint = 'var(--swift-red)',
+  accent = 'var(--swift-red-600)',
+}: {
+  size?: number;
+  tint?: string;
+  accent?: string;
+}) {
   return (
     <svg width={size} height={size} viewBox="0 0 100 100" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
       <g transform="translate(-1.5,-6)">
@@ -16,9 +23,22 @@ export function SwiftMark({ size = 28, tint = '#803B3B', accent = '#5C2A2C' }: {
 /** Mark + wordmark lockup. `reversed` = white, for use on the brand-red surface. */
 export function SwiftLogo({ mark = 26, reversed = false, className = '' }: { mark?: number; reversed?: boolean; className?: string }) {
   return (
-    <span className={`inline-flex items-center gap-1.5 ${className}`}>
-      <SwiftMark size={mark} tint={reversed ? '#ffffff' : '#803B3B'} accent={reversed ? 'rgba(255,255,255,0.65)' : '#5C2A2C'} />
-      <span className="text-xl font-extrabold tracking-tight" style={{ color: reversed ? '#ffffff' : 'var(--swift-red)' }}>Swift</span>
+    <span className={className} style={{ display: 'inline-flex', alignItems: 'center', gap: 'var(--swift-space-xs)' }}>
+      <SwiftMark
+        size={mark}
+        tint={reversed ? 'var(--swift-white)' : 'var(--swift-red)'}
+        accent={reversed ? 'var(--swift-on-brand-muted)' : 'var(--swift-red-600)'}
+      />
+      <span
+        style={{
+          color: reversed ? 'var(--swift-white)' : 'var(--swift-red)',
+          fontFamily: 'var(--swift-font-display)',
+          fontSize: 'var(--swift-type-title)',
+          lineHeight: 'var(--swift-leading-title)',
+        }}
+      >
+        Swift
+      </span>
     </span>
   );
 }

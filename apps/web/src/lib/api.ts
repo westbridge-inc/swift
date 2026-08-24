@@ -69,7 +69,7 @@ export interface StorefrontDetail extends StorefrontSummary {
   }>;
 }
 
-export async function fetchStorefronts(params: { type?: string; city?: string; q?: string } = {}): Promise<StorefrontSummary[]> {
+export async function fetchStorefronts(params: { type?: string; city?: string; q?: string } = {}): Promise<StorefrontSummary[] | null> {
   const q = new URLSearchParams();
   if (params.type) q.set('type', params.type);
   if (params.city) q.set('city', params.city);
@@ -79,21 +79,26 @@ export async function fetchStorefronts(params: { type?: string; city?: string; q
     const res = await fetch(`${API_URL}/api/v1/public/storefronts${qs ? `?${qs}` : ''}`, {
       next: { revalidate: 300 },
     });
-    if (!res.ok) return [];
+    if (!res.ok) return null;
     return (await res.json())?.data ?? [];
   } catch {
-    return [];
+    return null;
   }
 }
 
 export async function fetchStorefront(slug: string): Promise<StorefrontDetail | null> {
   try {
     const res = await fetch(`${API_URL}/api/v1/public/storefronts/${encodeURIComponent(slug)}`, {
-      next: { revalidate: 300 },
+      // A scanned counter code is a commerce surface: open state and menu
+      // availability must be read now, not from a five-minute SEO cache.
+      cache: 'no-store',
     });
-    if (!res.ok) return null;
+    if (res.status === 404) return null;
+    if (!res.ok) throw new Error(`Public storefront request failed (${res.status})`);
     return (await res.json())?.data ?? null;
-  } catch {
-    return null;
+  } catch (error) {
+    // Network/configuration failures are not "store not found". Let Next's
+    // error boundary describe an unavailable service instead of lying with 404.
+    throw error instanceof Error ? error : new Error('Public storefront is unavailable.');
   }
 }

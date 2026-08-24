@@ -1,13 +1,14 @@
 'use client';
 
-import { Suspense, useState } from 'react';
+import { Suspense, useRef, useState } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import Link from 'next/link';
 import { sendOtp, verifyPartnerLogin } from '@/lib/auth';
 import { verifyCustomerLogin } from '@/lib/customer';
 import { SwiftLogo } from '@/components/swift-logo';
+import styles from '../auth-flow.module.css';
 
-const CUSTOMER_ROUTES = ['/order', '/cart', '/orders', '/taxi', '/account', '/explore', '/courier'];
+const CUSTOMER_ROUTES = ['/order', '/cart', '/orders', '/taxi', '/account', '/explore', '/courier', '/store', '/stores', '/selfie'];
 
 function LoginInner() {
   const router = useRouter();
@@ -24,15 +25,20 @@ function LoginInner() {
   const [code, setCode] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const busyNow = useRef(false);
 
   async function handleSend() {
+    if (busyNow.current) return;
+    busyNow.current = true;
     setError(null); setBusy(true);
     try { await sendOtp(phone.trim()); setStep('code'); }
     catch (e) { setError((e as Error).message); }
-    finally { setBusy(false); }
+    finally { busyNow.current = false; setBusy(false); }
   }
 
   async function handleVerify() {
+    if (busyNow.current) return;
+    busyNow.current = true;
     setError(null); setBusy(true);
     try {
       if (isCustomer) {
@@ -42,52 +48,65 @@ function LoginInner() {
         const { home } = await verifyPartnerLogin(phone.trim(), code.trim());
         router.replace(home);
       }
-    } catch (e) { setError((e as Error).message); setBusy(false); }
+    } catch (e) { setError((e as Error).message); }
+    finally { busyNow.current = false; setBusy(false); }
   }
 
   return (
-    <div className="flex min-h-screen items-center justify-center bg-[var(--swift-subtle)] p-4">
-      <div className="w-full max-w-sm rounded-2xl border border-black/5 bg-white p-8 shadow-sm">
-        <Link href="/" aria-label="Swift home"><SwiftLogo /></Link>
-        <p className="mt-2 mb-6 text-sm text-[var(--swift-muted)]">
+    <main className={styles.page}>
+      <section className={`${styles.card} ${styles.cardNarrow}`} aria-labelledby="login-title">
+        <Link href="/" aria-label="Swift home" className={styles.brandLink}><SwiftLogo /></Link>
+        <h1 id="login-title" className={styles.heading}>Sign in to Swift</h1>
+        <p className={styles.bodyCopy}>
           {step === 'code' ? `Enter the code sent to ${phone}.`
             : isCustomer ? 'Sign in with your phone number to order on Swift.'
             : 'Businesses and earners — sign in with the phone number on your Swift account.'}
         </p>
 
         {step === 'phone' ? (
-          <div className="space-y-4">
-            <label className="text-xs font-medium text-[var(--swift-muted)]">Phone</label>
-            <input type="tel" value={phone} onChange={(e) => setPhone(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && handleSend()}
-              placeholder="+592 600 0001" className="mt-1 w-full rounded-lg border border-black/10 px-3 py-2.5 text-sm focus:border-[var(--swift-red)] focus:outline-none" />
-            <button onClick={handleSend} disabled={busy || phone.trim().length < 6}
-              className="w-full rounded-lg bg-[var(--swift-red)] px-4 py-2.5 text-sm font-semibold text-white hover:bg-[var(--swift-red-600)] disabled:opacity-50">
+          <div className={styles.stack}>
+            <div className={styles.field}>
+              <label htmlFor="login-phone" className={styles.label}>Phone number</label>
+              <input id="login-phone" type="tel" autoComplete="tel" value={phone} onChange={(e) => setPhone(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && void handleSend()}
+                placeholder="+592 600 0001" className={styles.input} />
+            </div>
+            <button type="button" onClick={() => void handleSend()} disabled={busy || phone.trim().length < 6}
+              className={styles.primaryButton}>
               {busy ? 'Sending…' : 'Send code'}
             </button>
           </div>
         ) : (
-          <div className="space-y-4">
-            <label className="text-xs font-medium text-[var(--swift-muted)]">Verification code</label>
-            <input type="text" inputMode="numeric" autoFocus value={code} onChange={(e) => setCode(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && handleVerify()}
-              placeholder="000000" className="mt-1 w-full rounded-lg border border-black/10 px-3 py-2.5 text-sm tracking-widest focus:border-[var(--swift-red)] focus:outline-none" />
-            <button onClick={handleVerify} disabled={busy || code.trim().length < 4}
-              className="w-full rounded-lg bg-[var(--swift-red)] px-4 py-2.5 text-sm font-semibold text-white hover:bg-[var(--swift-red-600)] disabled:opacity-50">
+          <div className={styles.stack}>
+            <div className={styles.field}>
+              <label htmlFor="login-code" className={styles.label}>Verification code</label>
+              <input id="login-code" type="text" inputMode="numeric" autoComplete="one-time-code" autoFocus value={code} onChange={(e) => setCode(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && void handleVerify()}
+                placeholder="000000" className={`${styles.input} ${styles.codeInput}`} />
+            </div>
+            <button type="button" onClick={() => void handleVerify()} disabled={busy || code.trim().length < 4}
+              className={styles.primaryButton}>
               {busy ? 'Signing in…' : 'Sign in'}
             </button>
-            <button onClick={() => { setStep('phone'); setCode(''); setError(null); }} className="w-full text-center text-xs text-[var(--swift-muted)] hover:text-[var(--swift-ink)]">Use a different number</button>
+            <button type="button" onClick={() => { setStep('phone'); setCode(''); setError(null); }} className={styles.textButton}>Use a different number</button>
           </div>
         )}
 
-        {error && <p className="mt-4 text-sm text-[var(--swift-red)]">{error}</p>}
+        {error ? <p className={styles.error} role="alert" aria-live="assertive">{error}</p> : null}
 
-        <p className="mt-6 border-t border-black/5 pt-4 text-xs text-[var(--swift-muted)]">
-          New to Swift? <Link href="/signup" className="font-semibold text-[var(--swift-red)]">Create an account</Link> — order, sell, or drive.
+        <p className={styles.dividerCopy}>
+          New to Swift?{' '}
+          <Link
+            href={next ? `/signup?next=${encodeURIComponent(next)}` : '/signup'}
+            className={styles.inlineLink}
+          >
+            Create an account
+          </Link>{' '}
+          — order, sell, or drive.
         </p>
-      </div>
-    </div>
+      </section>
+    </main>
   );
 }
 
 export default function LoginPage() {
-  return <Suspense fallback={<div className="grid min-h-screen place-items-center text-[var(--swift-muted)]">Loading…</div>}><LoginInner /></Suspense>;
+  return <Suspense fallback={<main className={styles.loading}>Loading…</main>}><LoginInner /></Suspense>;
 }

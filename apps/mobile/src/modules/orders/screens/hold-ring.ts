@@ -10,6 +10,38 @@ export function holdRingActive(holdExpiresAt: string | null | undefined, now: nu
   return !!holdExpiresAt && new Date(holdExpiresAt).getTime() - now > 0;
 }
 
+export type HoldRingWindow = {
+  startsAtMs: number;
+  expiresAtMs: number;
+  totalMs: number;
+  remainingMs: number;
+  progress: number;
+};
+
+/** A ring exists only when BOTH ends of its duration came from the server.
+ *  Never synthesize a five-minute start when the order response is incomplete:
+ *  server hold configuration can vary, and a plausible-looking arc would lie. */
+export function holdRingWindow(
+  holdExpiresAt: string | null | undefined,
+  placedAt: string | null | undefined,
+  now: number,
+  hidden: boolean,
+): HoldRingWindow | null {
+  if (!holdRingActive(holdExpiresAt, now, hidden) || !placedAt) return null;
+  const startsAtMs = new Date(placedAt).getTime();
+  const expiresAtMs = new Date(holdExpiresAt!).getTime();
+  if (!Number.isFinite(startsAtMs) || !Number.isFinite(expiresAtMs) || startsAtMs >= expiresAtMs) return null;
+  const totalMs = expiresAtMs - startsAtMs;
+  const remainingMs = Math.max(0, expiresAtMs - now);
+  return {
+    startsAtMs,
+    expiresAtMs,
+    totalMs,
+    remainingMs,
+    progress: Math.max(0, Math.min(1, remainingMs / totalMs)),
+  };
+}
+
 /** MOBILE_MONEY + PENDING: the pay link opened at checkout, so "cancelling is
  *  free" may be FALSE — the customer might have already sent the money. The
  *  ring copy says the true thing and points at the party holding it. */
