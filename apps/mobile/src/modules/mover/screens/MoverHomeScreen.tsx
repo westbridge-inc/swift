@@ -40,7 +40,7 @@ import { moverJobsToday } from '../../../lib/earnings';
 import { earningsSplit } from '../../../lib/earnings-breakdown';
 import { FareSlider } from '../../../components/FareSlider';
 import { GUTTER, RoutePair, jobAmount, CustomerTrustBadge } from '../shared';
-import { dk, withAlpha, DCard, DStat, DWeekBars } from '../surface';
+import { dk, withAlpha, DCard, DemandBand, DStat, DWeekBars } from '../surface';
 import { useMoverPreview } from '../../../stores/moverPreview';
 import { MoverHomeAccountButton } from './MoverHomeAccountButton';
 import { fareLockedFor, fareToSubmit } from './fare-locked';
@@ -48,7 +48,7 @@ import { offerEarnings } from './offer-earnings';
 import { canAdjustFare } from '../../../components/fare-step';
 
 /**
- * The earner home (dashboard plan Phase B/C): dark, map-first, demand-aware.
+ * The earner home (dashboard plan Phase B/C): light, map-first, demand-aware.
  * The map shows REAL waiting work (Phase A endpoints); the GO ring is the one
  * big action; the panel carries the money story — today, the week's bars, and
  * the 100%-yours line that IS Swift's pitch. Every gate and cash rule from the
@@ -535,18 +535,45 @@ export function MoverHomeScreen({ navigation }: any) {
     longitudeDelta: 0.04,
   };
 
-  // The one demand line the panel leads with — real counts, no theatre.
-  const demandLine = isDriver
-    ? (d.waiting ?? 0) > 0
-      ? `${d.waiting} ${d.waiting === 1 ? 'person' : 'people'} waiting for a ride nearby${d.watchers ? ` · ${d.watchers} watching for a driver` : ''}`
-      : (d.watchers ?? 0) > 0
-        ? `${d.watchers} ${d.watchers === 1 ? 'person' : 'people'} watching for a driver near you`
+  // One server-backed opportunity feeds both the arm's-length band and the
+  // quieter online copy. Categories keep their existing priority; they are
+  // never summed into a more exciting number.
+  const positiveCount = (value: unknown) =>
+    typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : null;
+  const waiting = positiveCount(d.waiting);
+  const watchers = positiveCount(d.watchers);
+  const ready = positiveCount(d.ready);
+  const soon = positiveCount(d.soon);
+  const demandOpportunity = isDriver
+    ? waiting != null
+      ? {
+          count: waiting,
+          label: `${waiting === 1 ? 'person' : 'people'} waiting for a ride nearby`,
+          detail: watchers != null ? ` · ${watchers} watching for a driver` : '',
+        }
+      : watchers != null
+        ? {
+            count: watchers,
+            label: `${watchers === 1 ? 'person' : 'people'} watching for a driver near you`,
+            detail: '',
+          }
         : null
-    : (d.ready ?? 0) > 0
-      ? `${d.ready} order${d.ready === 1 ? '' : 's'} ready to collect${d.stores?.[0] ? ` — ${d.stores[0].name} has ${d.stores[0].ready}` : ''}`
-      : (d.soon ?? 0) > 0
-        ? `${d.soon} order${d.soon === 1 ? '' : 's'} in the kitchen near you`
+    : ready != null
+      ? {
+          count: ready,
+          label: `order${ready === 1 ? '' : 's'} ready to collect`,
+          detail: d.stores?.[0] ? ` — ${d.stores[0].name} has ${d.stores[0].ready}` : '',
+        }
+      : soon != null
+        ? {
+            count: soon,
+            label: `order${soon === 1 ? '' : 's'} in the kitchen near you`,
+            detail: '',
+          }
         : null;
+  const demandLine = demandOpportunity
+    ? `${demandOpportunity.count} ${demandOpportunity.label}${demandOpportunity.detail}`
+    : null;
 
   return (
     <View style={{ flex: 1, backgroundColor: dk.bg }}>
@@ -650,9 +677,7 @@ export function MoverHomeScreen({ navigation }: any) {
               <T variant="caption" style={{ color: dk.muted, marginTop: 2 }}>
                 {online
                   ? demandLine ?? 'Watching for jobs near you'
-                  : demandLine
-                    ? `${demandLine} — go online to take it`
-                    : 'Go online to receive jobs'}
+                  : 'Go online to receive jobs'}
               </T>
             </View>
             {online ? (
@@ -667,6 +692,16 @@ export function MoverHomeScreen({ navigation }: any) {
               </Pressable>
             ) : null}
           </View>
+
+          {!online && !activeJob && demandOpportunity ? (
+            <DemandBand
+              count={demandOpportunity.count}
+              label={demandOpportunity.label}
+              disabled={busyToggle}
+              onPress={() => void startOnline()}
+              style={{ marginTop: space.md }}
+            />
+          ) : null}
 
           {/* Why the switch snapped back — the gate's own words, right where you flipped it. */}
           {errMsg ? (
@@ -847,7 +882,7 @@ export function MoverHomeScreen({ navigation }: any) {
             <View style={{ alignItems: 'center', borderRadius: radius.lg, backgroundColor: dk.card, borderWidth: 1, borderColor: dk.line, paddingVertical: space['2xl'], marginTop: space.lg }}>
               <MaterialCommunityIcons name="power-sleep" size={28} color={dk.muted} />
               <T variant="label" center style={{ color: dk.muted, marginTop: space.sm }}>
-                {demandLine ? `${demandLine}.` : 'Work shows here the moment you go online.'}
+                Work shows here the moment you go online.
               </T>
             </View>
           )}
