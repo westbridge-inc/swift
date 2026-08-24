@@ -18,6 +18,16 @@ import { disconnectUserSockets } from '../../utils/socket-revocation';
 // Scope: a pure CUSTOMER account. Mover/vendor accounts carry payouts, live
 // listings and staff, so they close through Support where those are wound down
 // correctly — a self-delete would orphan a running catalogue.
+//
+// [LAUNCH-2] That scope sentence was only ever true of the `roles` array, and
+// two kinds of authority deliberately live outside it: advertiser membership
+// (AdvertiserMember, ads §4 — "NOT a new UserRole") and vendor staff access
+// (VendorStaff). Both belong to people the role filter sees as plain
+// CUSTOMERs, so both could always self-delete — leaving a LIVE ad campaign
+// with no owner, and staff rows pointing at "Deleted User". Step 0b now winds
+// those down. Closing MOVER and VENDOR_OWNER accounts in-app is the remaining
+// half and is tracked separately: Apple 5.1.1(v) requires it for every account
+// type the app can create, and "contact Support" does not satisfy it.
 // ---------------------------------------------------------------------------
 
 // A closed order is safe to leave behind; anything else is in-flight and must
@@ -165,6 +175,60 @@ export class AccountService {
     } catch (error) {
       this.app.log.warn({ err: error, userId }, 'account deletion socket cleanup failed');
     }
+
+    // 0b. [LAUNCH-2] Access that is NOT a UserRole.
+    //
+    //     The partner guard above filters `user.roles`, but two kinds of
+    //     authority never appear there: advertiser membership is keyed on
+    //     AdvertiserMember by design (ads §4 — "NOT a new UserRole"), and
+    //     vendor staff access is keyed on VendorStaff. To that role filter a
+    //     person running live ad campaigns, or a manager with keys to someone
+    //     else's storefront, is an ordinary CUSTOMER — so they never hit the
+    //     PARTNER_ACCOUNT guard and could always delete themselves. What they
+    //     left behind was a LIVE campaign with no owner and vendor_staff rows
+    //     pointing at "Deleted User".
+    //
+    //     Campaigns are PAUSED, never cancelled: pausing stops serving
+    //     immediately, while cancelling would reach into refund intents and
+    //     booked inventory — money movement has no business riding an erasure
+    //     request. The Advertiser company row itself survives with its
+    //     invoices, which are financial records under the same legal-obligation
+    //     basis as the rest. This runs in the purge phase so the re-sweep
+    //     repairs it, and every step is idempotent.
+    const memberships = await prisma.advertiserMember.findMany({
+      where: { userId },
+      select: { advertiserId: true, role: true },
+    });
+    for (const membership of memberships) {
+      if (membership.role !== 'OWNER') continue;
+      const otherOwners = await prisma.advertiserMember.count({
+        where: { advertiserId: membership.advertiserId, role: 'OWNER', userId: { not: userId } },
+      });
+      // A co-owned company keeps running — only this person's seat goes.
+      if (otherOwners > 0) continue;
+      const paused = await prisma.adCampaign.updateMany({
+        where: { advertiserId: membership.advertiserId, status: { in: ['LIVE', 'SCHEDULED'] } },
+        data: { status: 'PAUSED', statusReason: 'Advertiser account deleted by its last owner' },
+      });
+      // Only APPROVED is a legal source for SUSPENDED in the §4.3 machine;
+      // updateMany with the status in the predicate keeps that true without
+      // needing to read-then-write.
+      await prisma.advertiser.updateMany({
+        where: { id: membership.advertiserId, status: 'APPROVED' },
+        data: { status: 'SUSPENDED' },
+      });
+      await prisma.adsAuditLog.create({
+        data: {
+          actorUserId: userId,
+          action: 'ADVERTISER_SUSPEND_ACCOUNT_DELETED',
+          entityType: 'Advertiser',
+          entityId: membership.advertiserId,
+          reason: `Last owner deleted their Swift account; ${paused.count} campaign(s) paused.`,
+        },
+      });
+    }
+    await prisma.advertiserMember.deleteMany({ where: { userId } });
+    await prisma.vendorStaff.deleteMany({ where: { userId } });
 
     // 1. Crypto-shred every verification document: delete the object, null the
     //    wrapped DEK (unrecoverable even from a ciphertext backup), mark purged.

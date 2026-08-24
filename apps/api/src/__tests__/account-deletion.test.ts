@@ -18,6 +18,8 @@ import { registerErrorHandler } from '../middleware/error-handler';
 
 let app: FastifyInstance;
 const createdUserIds: string[] = [];
+const advertiserIds: string[] = [];
+const placementIds: string[] = [];
 let seq = 0;
 const phoneBase = 592_810_000_000 + Math.floor(Math.random() * 100_000_000);
 
@@ -61,6 +63,12 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  await app.prisma.adsAuditLog.deleteMany({ where: { entityId: { in: advertiserIds } } });
+  await app.prisma.adCampaign.deleteMany({ where: { advertiserId: { in: advertiserIds } } });
+  await app.prisma.advertiserMember.deleteMany({ where: { advertiserId: { in: advertiserIds } } });
+  await app.prisma.advertiser.deleteMany({ where: { id: { in: advertiserIds } } });
+  await app.prisma.adPlacement.deleteMany({ where: { id: { in: placementIds } } });
+  await app.prisma.vendorStaff.deleteMany({ where: { userId: { in: createdUserIds } } });
   await app.prisma.auditLog.deleteMany({ where: { userId: { in: createdUserIds } } });
   await app.prisma.encryptedObject.deleteMany({ where: { createdBy: { in: createdUserIds } } });
   await app.prisma.verificationDocument.deleteMany({ where: { userId: { in: createdUserIds } } });
@@ -174,6 +182,76 @@ describe('D9-05 — account deletion (erasure)', () => {
     const res = await inject('DELETE', '/api/v1/customer/account', u.token);
     expect(res.statusCode).toBe(409);
     expect(res.json().error.code).toBe('PARTNER_ACCOUNT');
+  });
+
+  // [LAUNCH-2] The guard above filters `user.roles`. Advertiser membership and
+  // vendor staff access deliberately are NOT roles, so these people have always
+  // read as plain CUSTOMERs and could delete themselves — leaving a LIVE
+  // campaign with no owner and staff rows pointing at "Deleted User".
+  it('winds down an advertiser the deleted person solely owned — campaigns pause, seat goes', async () => {
+    const u = await makeUser(['CUSTOMER']);
+    const placement = await app.prisma.adPlacement.create({
+      data: { key: `del_test_${nanoid(6)}`, name: 'Deletion test slot', tier: 3, mediaKind: 'IMAGE', weeklyPrice: 1000 },
+    });
+    placementIds.push(placement.id);
+    const adv = await app.prisma.advertiser.create({
+      data: {
+        companyName: `Del Ads ${nanoid(5)}`, industry: 'Retail', contactName: 'Del', contactEmail: 'del@example.com',
+        contactPhone: '+5926000123', status: 'APPROVED', createdByUserId: u.userId,
+        members: { create: { userId: u.userId, role: 'OWNER' } },
+      },
+    });
+    advertiserIds.push(adv.id);
+    const campaign = await app.prisma.adCampaign.create({
+      data: {
+        advertiserId: adv.id, placementId: placement.id, name: 'Live one', cities: ['*'],
+        startWeek: new Date('2026-08-24'), endWeek: new Date('2026-08-31'), status: 'LIVE',
+      },
+    });
+
+    const res = await inject('DELETE', '/api/v1/customer/account', u.token);
+    expect(res.statusCode).toBe(200);
+
+    const afterCampaign = await app.prisma.adCampaign.findUnique({ where: { id: campaign.id } });
+    expect(afterCampaign?.status).toBe('PAUSED'); // stops serving; NOT cancelled — no refund/inventory money moves on an erasure
+    const afterAdv = await app.prisma.advertiser.findUnique({ where: { id: adv.id } });
+    expect(afterAdv?.status).toBe('SUSPENDED');
+    expect(afterAdv).not.toBeNull(); // the company + its invoices survive as financial records
+    expect(await app.prisma.advertiserMember.count({ where: { userId: u.userId } })).toBe(0);
+    expect(
+      await app.prisma.adsAuditLog.count({ where: { entityId: adv.id, action: 'ADVERTISER_SUSPEND_ACCOUNT_DELETED' } }),
+    ).toBe(1);
+  });
+
+  it('leaves a co-owned advertiser running — only the deleted person’s seat goes', async () => {
+    const owner = await makeUser(['CUSTOMER']);
+    const coOwner = await makeUser(['CUSTOMER']);
+    const adv = await app.prisma.advertiser.create({
+      data: {
+        companyName: `Co Ads ${nanoid(5)}`, industry: 'Retail', contactName: 'Co', contactEmail: 'co@example.com',
+        contactPhone: '+5926000124', status: 'APPROVED', createdByUserId: owner.userId,
+        members: { create: [{ userId: owner.userId, role: 'OWNER' }, { userId: coOwner.userId, role: 'OWNER' }] },
+      },
+    });
+    advertiserIds.push(adv.id);
+
+    expect((await inject('DELETE', '/api/v1/customer/account', owner.token)).statusCode).toBe(200);
+
+    const afterAdv = await app.prisma.advertiser.findUnique({ where: { id: adv.id } });
+    expect(afterAdv?.status).toBe('APPROVED'); // the company still has an owner
+    expect(await app.prisma.advertiserMember.count({ where: { advertiserId: adv.id } })).toBe(1);
+  });
+
+  it('revokes vendor staff access rather than leaving rows pointing at “Deleted User”', async () => {
+    const u = await makeUser(['CUSTOMER']);
+    const vendor = await app.prisma.vendor.findFirst({ select: { id: true } });
+    if (!vendor) return; // no seeded vendor in this database — nothing to assert against
+    await app.prisma.vendorStaff.create({
+      data: { vendorId: vendor.id, userId: u.userId, role: 'MANAGER', invitedBy: u.userId },
+    });
+
+    expect((await inject('DELETE', '/api/v1/customer/account', u.token)).statusCode).toBe(200);
+    expect(await app.prisma.vendorStaff.count({ where: { userId: u.userId } })).toBe(0);
   });
 
   it('refuses while an order is in flight', async () => {
