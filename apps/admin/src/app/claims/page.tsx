@@ -5,6 +5,7 @@ import Link from 'next/link';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { fetchClaims, approveClaim, rejectClaim, payClaim, fetchCashMetrics } from '@/lib/api';
 import { StatusPill, gyd } from '@/components/detail';
+import { MutationError } from '@/components/MutationError';
 
 const FILTERS = ['PENDING_REVIEW', 'AUTO_APPROVED', 'APPROVED', 'PAID', 'REJECTED'] as const;
 
@@ -43,15 +44,14 @@ export default function ClaimsPage() {
         Failed cash handovers under the company guarantee — GPS-evidenced, guardrail-flagged. Approve, reject, or mark the payout done.
       </p>
 
-      {(pay.error || approve.error || reject.error) ? (
-        <p role="alert" className="text-xs mb-3" style={{ color: 'var(--bad)' }}>
-          {pay.error
-            ? `Payout did not record: ${(pay.error as Error).message}`
-            : approve.error
-              ? `Approve did not confirm: ${(approve.error as Error).message}`
-              : `Reject did not confirm: ${(reject.error as Error).message}`}
-        </p>
-      ) : null}
+      {(pay.error || approve.error || reject.error) && (
+        <div className="mb-4">
+          <MutationError
+            error={pay.error || approve.error || reject.error}
+            label={pay.error ? 'Payout did not record' : approve.error ? 'Approval did not record' : 'Rejection did not record'}
+          />
+        </div>
+      )}
 
       {/* Founder cockpit numbers (cash-rules founderMetrics) */}
       <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
@@ -154,11 +154,11 @@ export default function ClaimsPage() {
                   {(c.status === 'APPROVED' || c.status === 'AUTO_APPROVED') && (
                     <button
                       onClick={() => {
-                        // [WR-004] PAID needs evidence on a manual rail — the
-                        // reference is required, server-enforced too.
                         const ref = window.prompt('Payment reference (bank/MMG ref or receipt no. — required):')?.trim();
                         if (!ref) return;
-                        if (window.confirm(`Mark this ${gyd(c.amount)} claim as PAID (ref: ${ref})?`)) pay.mutate({ id: c.id, reference: ref });
+                        if (window.confirm(`Mark this ${gyd(c.amount)} claim for order ${c.orderId} as PAID (ref: ${ref})?`)) {
+                          pay.mutate({ id: c.id, reference: ref });
+                        }
                       }}
                       disabled={busy}
                       className="px-4 py-2 rounded-lg text-sm bg-[var(--accent)] hover:bg-[var(--accent)]/80 disabled:opacity-50"

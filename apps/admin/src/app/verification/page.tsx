@@ -2,7 +2,6 @@
 
 import { useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { QueryFailed } from '@/components/MutationNotice';
 import {
   fetchVerificationQueue,
   getDocSignedUrl,
@@ -10,6 +9,7 @@ import {
   rejectDoc,
   type InsuranceCheck,
 } from '@/lib/api';
+import { MutationError } from '@/components/MutationError';
 
 const STATUSES = ['PENDING', 'APPROVED', 'REJECTED', 'EXPIRED'] as const;
 type Status = (typeof STATUSES)[number];
@@ -34,8 +34,9 @@ export default function VerificationPage() {
   const [selected, setSelected] = useState<any>(null);
   const [reason, setReason] = useState('');
   const [insurance, setInsurance] = useState<InsuranceCheck>(EMPTY_INSURANCE);
+  const [mutationError, setMutationError] = useState<unknown>(null);
 
-  const { data, isLoading, isError: queueFailed, error: queueError, refetch: refetchQueue } = useQuery({
+  const { data, isLoading } = useQuery({
     queryKey: ['verification', status],
     queryFn: () => fetchVerificationQueue(status),
   });
@@ -45,14 +46,19 @@ export default function VerificationPage() {
     setSelected(null);
     setReason('');
     setInsurance(EMPTY_INSURANCE);
+    setMutationError(null);
   };
 
   const approveMutation = useMutation({
     mutationFn: ({ id, body }: { id: string; body?: { insurance?: InsuranceCheck } }) => approveDoc(id, body),
+    onMutate: () => setMutationError(null),
+    onError: (error) => setMutationError(error),
     onSuccess: refresh,
   });
   const rejectMutation = useMutation({
     mutationFn: ({ id, reason }: { id: string; reason: string }) => rejectDoc(id, reason),
+    onMutate: () => setMutationError(null),
+    onError: (error) => setMutationError(error),
     onSuccess: refresh,
   });
 
@@ -60,6 +66,7 @@ export default function VerificationPage() {
     setSelected(doc);
     setReason('');
     setInsurance(EMPTY_INSURANCE);
+    setMutationError(null);
   };
 
   const viewDocument = async (id: string) => {
@@ -72,16 +79,15 @@ export default function VerificationPage() {
   };
 
   const isInsurance = selected?.docType === 'vehicle_insurance';
-  // [WR-013] Approving HIRE cover without the two reviewer confirmations
-  // created a contradiction: the document read APPROVED while the operation
-  // gate silently kept the driver off passenger work (it requires BOTH
-  // booleans). HIRE approval now demands them; PRIVATE never needs them —
-  // the gate refuses PRIVATE for passengers regardless, which the picker
-  // makes an explicit, visible choice.
   const insuranceReady =
     insurance.insurerName.trim() !== '' &&
     insurance.policyNumber.trim() !== '' &&
     (insurance.coverageClass !== 'HIRE' || (insurance.hireClassConfirmed && insurance.plateCrossChecked));
+  const decisionPending = approveMutation.isPending || rejectMutation.isPending;
+  const applicantName = selected
+    ? [selected.user?.firstName, selected.user?.lastName].filter(Boolean).join(' ') || 'this applicant'
+    : '';
+  const documentLabel = selected ? String(selected.docType).replaceAll('_', ' ') : '';
 
   const rows: any[] = data?.data ?? [];
 
@@ -124,8 +130,6 @@ export default function VerificationPage() {
             <tbody>
               {isLoading ? (
                 <tr><td colSpan={6} className="p-8 text-center text-[var(--muted)]">Loading...</td></tr>
-              ) : queueFailed ? (
-                <QueryFailed error={queueError} what="the verification queue" onRetry={() => refetchQueue()} />
               ) : rows.length === 0 ? (
                 <tr><td colSpan={6} className="p-8 text-center text-[var(--muted)]">No documents</td></tr>
               ) : (
@@ -222,24 +226,23 @@ export default function VerificationPage() {
                     />
                     Cross-checked against the H-plate
                   </label>
-                  {insurance.coverageClass === 'HIRE' && !(insurance.hireClassConfirmed && insurance.plateCrossChecked) ? (
-                    <p className="text-xs" style={{ color: 'var(--warn)' }}>
-                      Both checks are required to approve HIRE cover — without them the driver stays blocked from passenger rides.
+                  {insurance.coverageClass === 'HIRE' && !(insurance.hireClassConfirmed && insurance.plateCrossChecked) && (
+                    <p className="text-xs text-amber-400">
+                      Both checks are required before HIRE cover can be approved for passenger work.
                     </p>
-                  ) : null}
-                  {insurance.coverageClass === 'PRIVATE' ? (
-                    <p className="text-xs text-[var(--muted)]">
-                      PRIVATE cover never qualifies for passenger rides — cargo work only.
-                    </p>
-                  ) : null}
+                  )}
                 </div>
               )}
 
               {selected.status === 'PENDING' && (
                 <div className="space-y-2 border-t border-[var(--border)] pt-3">
                   <button
-                    disabled={approveMutation.isPending || (isInsurance && !insuranceReady)}
-                    onClick={() => approveMutation.mutate({ id: selected.id, body: isInsurance ? { insurance } : undefined })}
+                    disabled={decisionPending || (isInsurance && !insuranceReady)}
+                    onClick={() => {
+                      if (window.confirm(`Approve ${documentLabel} for ${applicantName}? This changes their operating eligibility.`)) {
+                        approveMutation.mutate({ id: selected.id, body: isInsurance ? { insurance } : undefined });
+                      }
+                    }}
                     className="w-full px-3 py-2 bg-[var(--accent)] text-white rounded-lg text-sm hover:bg-[var(--accent)]/80 disabled:opacity-40"
                   >
                     Approve
@@ -252,12 +255,21 @@ export default function VerificationPage() {
                     rows={2}
                   />
                   <button
-                    disabled={rejectMutation.isPending || reason.trim().length < 3}
-                    onClick={() => rejectMutation.mutate({ id: selected.id, reason })}
+                    disabled={decisionPending || reason.trim().length < 3}
+                    onClick={() => {
+                      const visibleReason = reason.trim();
+                      if (window.confirm(`Reject ${documentLabel} for ${applicantName} with reason: "${visibleReason}"?`)) {
+                        rejectMutation.mutate({ id: selected.id, reason: visibleReason });
+                      }
+                    }}
                     className="w-full px-3 py-2 bg-red-500/20 text-red-400 rounded-lg text-sm hover:bg-red-500/30 disabled:opacity-40"
                   >
                     Reject
                   </button>
+                  <MutationError
+                    error={mutationError}
+                    label="Verification action failed"
+                  />
                 </div>
               )}
             </div>

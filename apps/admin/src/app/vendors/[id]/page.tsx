@@ -3,10 +3,10 @@
 import { use } from 'react';
 import Link from 'next/link';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { MutationNotice } from '@/components/MutationNotice';
 import { fetchVendorDetail, approveVendor, suspendVendor, featureVendor } from '@/lib/api';
 import { Section, Row, StatusPill, BackLink, ActionButton, gyd } from '@/components/detail';
 import { statusClass } from '@/lib/status';
+import { MutationError } from '@/components/MutationError';
 
 export default function VendorDetailPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = use(params);
@@ -41,9 +41,14 @@ export default function VendorDetailPage({ params }: { params: Promise<{ id: str
     <div>
       <BackLink href="/vendors" label="Vendors" />
 
+      {suspend.error && (
+        <div className="mb-4">
+          <MutationError error={suspend.error} label="Suspension did not record" />
+        </div>
+      )}
+
       <div className="flex flex-wrap items-center gap-3 mb-6">
         <h1 className="text-2xl font-bold">{v.name}</h1>
-        <MutationNotice errors={[approve.error, suspend.error]} />
         <StatusPill value={v.status} />
         <span className="px-2.5 py-1 rounded-full text-xs bg-white/10 text-[var(--muted)]">{String(v.vendorType).toLowerCase()}</span>
         {v.isFeatured ? <span className="px-2.5 py-1 rounded-full text-xs bg-amber-500/15 text-amber-400">featured</span> : null}
@@ -63,7 +68,13 @@ export default function VendorDetailPage({ params }: { params: Promise<{ id: str
             disabled={busy}
           />
           {v.status === 'ACTIVE' && (
-            <ActionButton label="Suspend" danger confirm={`Suspend ${v.name}? They stop taking orders immediately.`} onClick={() => suspend.mutate()} disabled={busy} />
+            <ActionButton
+              label="Suspend"
+              danger
+              confirm={`Suspend ${v.name}? They stop taking orders immediately. This cannot be reversed from the console.`}
+              onClick={() => suspend.mutate()}
+              disabled={busy}
+            />
           )}
         </div>
       </div>

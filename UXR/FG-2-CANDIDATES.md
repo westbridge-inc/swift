@@ -15,6 +15,8 @@ radius. Approve rows individually.
 
 | 7 | `apps/mobile/src/components/ui/avatar.tsx` (shared `Avatar`) | FOUND 08-23 while working F-267: exported from the `components/ui` barrel but **zero** `<Avatar` usages and zero importers anywhere. Both real consumers (`HomeScreen`, `ProfileScreen`) hand-roll their own avatar with an `onError`→monogram fallback that this component lacks. | Either DELETE, or (better) consume it in those two screens first and give it the `onError` fallback — one avatar language instead of two copies. Founder picks which; do not polish an orphan. |
 
+| 8 | `apps/admin/src/components/MutationNotice.tsx` | The `admin-tests` lane replaced it with `MutationError.tsx` and DELETED it. I restored the file: nothing is removed without founder approval. Verified 08-24: after the lane's work landed, `grep -rn MutationNotice apps/admin/src` matches only its own definition — zero importers. | None — pure removal. It is superseded in function by `MutationError`, which every page now uses. Approve and it goes; decline and it simply sits unused. |
+
 REPORT-022's Tier B/C (dead exports inside live files, do-not-delete traps)
 are deliberately NOT proposed here: Tier B is symbol-level surgery inside
 files that are alive, and Tier C is explicitly "do not delete". Those want

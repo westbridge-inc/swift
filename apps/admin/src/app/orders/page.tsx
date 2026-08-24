@@ -4,6 +4,7 @@ import Link from 'next/link';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { fetchOrders, cancelOrder } from '@/lib/api';
 import { statusClass } from '@/lib/status';
+import { MutationError } from '@/components/MutationError';
 
 // Orders past these states can't be cancelled/refunded by an operator.
 const TERMINAL = ['DELIVERED', 'COMPLETED', 'CANCELLED', 'REFUNDED', 'FAILED'];
@@ -20,14 +21,11 @@ export default function OrdersPage() {
   return (
     <div>
       <h1 className="text-2xl font-bold mb-6">Orders</h1>
-      {cancelMutation.error ? (
-        // [WR-005] The server fail-closes MMG refunds (409 MMG_REFUND_UNAVAILABLE
-        // until LB-019) and rejects invalid transitions — the admin must SEE
-        // that, not watch the click vanish.
-        <p role="alert" className="text-xs mb-3" style={{ color: 'var(--bad)' }}>
-          Order action did not confirm: {(cancelMutation.error as Error).message}
-        </p>
-      ) : null}
+      {cancelMutation.error && (
+        <div className="mb-4">
+          <MutationError error={cancelMutation.error} label="Order action did not record" />
+        </div>
+      )}
       <div className="bg-[var(--panel)] rounded-xl border border-[var(--border)] overflow-hidden">
         <table className="w-full text-sm">
           <thead>
@@ -95,19 +93,34 @@ export default function OrdersPage() {
                     ) : (
                       <div className="flex gap-2 justify-end">
                         <button
-                          onClick={() => { const mmgNote = order.paymentMethod === 'MOBILE_MONEY' && order.paymentStatus !== 'CAPTURED' ? '\n\nMMG payment unconfirmed: the customer gets direct-refund guidance and the store is told it may hold the transfer.' : ''; if (window.confirm(`Cancel order ${order.orderNumber}?${mmgNote}`)) cancelMutation.mutate({ id: order.id, refund: false }); }}
+                          onClick={() => {
+                            const storeName = order.vendor?.name ?? 'the store';
+                            const mmgNote = order.paymentMethod === 'MOBILE_MONEY'
+                              ? `\n\nMMG payment stays between customer and store. If paid, it is refunded by ${storeName}; Swift cannot refund it.`
+                              : '';
+                            if (window.confirm(`Cancel order ${order.orderNumber}?${mmgNote}`)) {
+                              cancelMutation.mutate({ id: order.id, refund: false });
+                            }
+                          }}
                           disabled={cancelMutation.isPending}
                           className="px-3 py-1 rounded-lg text-xs border border-[var(--border)] text-white hover:bg-white/10 disabled:opacity-50"
                         >
                           Cancel
                         </button>
-                        <button
-                          onClick={() => { if (window.confirm(`Cancel order ${order.orderNumber} AND refund cash paid?`)) cancelMutation.mutate({ id: order.id, refund: true }); }}
-                          disabled={cancelMutation.isPending}
-                          className="px-3 py-1 rounded-lg text-xs bg-[var(--accent)] text-white hover:bg-[var(--accent)]/80 disabled:opacity-50"
-                        >
-                          Refund
-                        </button>
+                        {order.paymentMethod === 'CASH' && (
+                          <button
+                            onClick={() => {
+                              const storeName = order.vendor?.name ?? 'the store';
+                              if (window.confirm(`Cancel order ${order.orderNumber} and record cash as refunded by ${storeName}?`)) {
+                                cancelMutation.mutate({ id: order.id, refund: true });
+                              }
+                            }}
+                            disabled={cancelMutation.isPending}
+                            className="px-3 py-1 rounded-lg text-xs bg-[var(--accent)] text-white hover:bg-[var(--accent)]/80 disabled:opacity-50"
+                          >
+                            Record store refund
+                          </button>
+                        )}
                       </div>
                     )}
                   </td>

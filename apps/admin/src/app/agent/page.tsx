@@ -3,7 +3,6 @@
 import { useState } from 'react';
 import Link from 'next/link';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { MutationNotice, QueryFailed } from '@/components/MutationNotice';
 import { fetchAgentApprovals, decideAgentApproval, fetchAgentAudit } from '@/lib/api';
 import { StatusPill } from '@/components/detail';
 
@@ -40,7 +39,6 @@ export default function AgentPage() {
   return (
     <div>
       <h1 className="text-2xl font-bold mb-1">Ops agent</h1>
-      <MutationNotice errors={[decide.error]} />
       <p className="text-[var(--muted)] text-sm mb-6">
         The agent detects stuck orders and proposes fixes. Safe nudges run on their own; anything money-adjacent waits here for you.
       </p>
@@ -48,8 +46,6 @@ export default function AgentPage() {
       <div className="space-y-3 mb-8">
         {approvalsQ.isLoading ? (
           <div className="h-24 rounded-xl bg-[var(--panel)] border border-[var(--border)] animate-pulse" />
-        ) : approvalsQ.isError ? (
-          <QueryFailed error={approvalsQ.error} what="the approvals queue" onRetry={() => approvalsQ.refetch()} />
         ) : rows.length === 0 ? (
           <div className="bg-[var(--panel)] rounded-xl border border-[var(--border)] p-8 text-center text-[var(--muted)]">
             Nothing waiting on you — the queue is clear.
