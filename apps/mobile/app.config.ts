@@ -10,6 +10,64 @@ const locationAlways =
   'Swift keeps your live position on the map while you are online for deliveries or rides.';
 const cameraPermission =
   'Swift uses the camera for your profile selfie and to photograph documents and deliveries.';
+const photosPermission =
+  'Swift needs your photo library so you can attach an existing photo to a delivery, a document or a support message.';
+
+/**
+ * APP PRIVACY MANIFEST [Apple, required since Nov 2024].
+ *
+ * The generated `ios/PrivacyInfo.xcprivacy` is Expo's stock default, and its
+ * `NSPrivacyCollectedDataTypes` is an EMPTY ARRAY — for an app that collects
+ * precise location, a phone number, photographs, government ID documents and a
+ * selfie. That empty array flatly contradicts the App Privacy label, so it is
+ * declared here instead: `app.config.ts` is the only file that survives a
+ * prebuild, because `ios/` is gitignored and regenerated.
+ *
+ * Everything below is `AppFunctionality` and nothing is tracking, which is the
+ * honest answer: Swift ships no analytics SDK, no ad SDK and no IDFA — see
+ * `src/lib/analytics.ts`, which is a deliberate no-op. If a crash reporter is
+ * ever wired up, Diagnostics must be added here in the SAME change that adds
+ * it, not afterwards.
+ *
+ * The accessed-API reasons stay as Expo generates them (FileTimestamp C617.1,
+ * UserDefaults CA92.1, SystemBootTime 35F9.1). `DiskSpace` is deliberately NOT
+ * declared here: `expo-file-system` is a transitive dependency that ships its
+ * own manifest covering DiskSpace and FileTimestamp, and this app's own code
+ * calls no disk-space API.
+ */
+const collected = (
+  type: string,
+  purposes: string[] = ['NSPrivacyCollectedDataTypePurposeAppFunctionality'],
+) => ({
+  NSPrivacyCollectedDataType: `NSPrivacyCollectedDataType${type}`,
+  NSPrivacyCollectedDataTypeLinked: true,
+  NSPrivacyCollectedDataTypeTracking: false,
+  NSPrivacyCollectedDataTypePurposes: purposes,
+});
+
+const privacyManifests = {
+  NSPrivacyTracking: false,
+  NSPrivacyTrackingDomains: [],
+  NSPrivacyAccessedAPITypes: [
+    { NSPrivacyAccessedAPIType: 'NSPrivacyAccessedAPICategoryFileTimestamp', NSPrivacyAccessedAPITypeReasons: ['C617.1'] },
+    { NSPrivacyAccessedAPIType: 'NSPrivacyAccessedAPICategoryUserDefaults', NSPrivacyAccessedAPITypeReasons: ['CA92.1'] },
+    { NSPrivacyAccessedAPIType: 'NSPrivacyAccessedAPICategorySystemBootTime', NSPrivacyAccessedAPITypeReasons: ['35F9.1'] },
+  ],
+  NSPrivacyCollectedDataTypes: [
+    collected('Name'), // account holder, shown to the courier/driver on a job
+    collected('PhoneNumber'), // the login identity itself
+    collected('EmailAddress'), // optional at registration
+    collected('PhysicalAddress'), // delivery + pickup addresses
+    collected('PreciseLocation'), // pickup, dispatch, live tracking
+    collected('PhotosorVideos'), // delivery proof, document scans, chat images
+    collected('SensitiveInfo'), // government ID documents + verification selfie
+    collected('OtherUserContent'), // chat messages, review comments
+    collected('CustomerSupport'), // support conversations
+    collected('UserID'),
+    collected('DeviceID'), // push token
+    collected('PurchaseHistory'), // order and trip history
+  ],
+};
 const splashBackgroundColor = '#803B3B';
 const splashImage = './assets/icon.png';
 
@@ -46,10 +104,21 @@ const config: ExpoConfig = {
     bundleIdentifier: 'gy.swift.app',
     supportsTablet: true,
     associatedDomains: [`applinks:${linkDomain}`, `applinks:www.${linkDomain}`],
+    privacyManifests,
     infoPlist: {
       CFBundleDisplayName: 'Swift',
       NSLocationWhenInUseUsageDescription: locationWhenInUse,
       NSLocationAlwaysAndWhenInUseUsageDescription: locationAlways,
+      // Declared here rather than left to the plugin's boilerplate, which
+      // renders the NATIVE target name: "Allow SwiftGY to access your photos".
+      NSPhotoLibraryUsageDescription: photosPermission,
+      // Export compliance. Swift uses only the OS's own HTTPS plus ATS
+      // certificate pinning (config, not a crypto implementation) — no
+      // proprietary or non-exempt cryptography. Without this key every upload
+      // stalls on the manual question and `eas submit --non-interactive`
+      // cannot proceed. [Founder: this is a legal self-classification under
+      // the US EAR — worth a five-minute check with counsel.]
+      ITSAppUsesNonExemptEncryption: false,
       UIBackgroundModes: ['location', 'remote-notification', 'fetch'],
       // TLS pinning for the production API domain (iOS 14+ system pinning —
       // config only, no runtime library). Pinned to the Let's Encrypt roots'
@@ -101,6 +170,16 @@ const config: ExpoConfig = {
       'FOREGROUND_SERVICE_LOCATION',
       'POST_NOTIFICATIONS',
     ],
+    // Permissions pulled in transitively for capabilities Swift does not have.
+    // Play scrutinises both: RECORD_AUDIO arrives with expo-camera/image-picker
+    // even though no audio API is used anywhere (no expo-av, no Audio.Recording,
+    // no expo-media-library), and SYSTEM_ALERT_WINDOW is a special permission
+    // nothing here asks for. Shipping a permission you cannot justify is a
+    // policy finding on its own.
+    blockedPermissions: [
+      'android.permission.RECORD_AUDIO',
+      'android.permission.SYSTEM_ALERT_WINDOW',
+    ],
   },
   plugins: [
     'expo-font',
@@ -131,6 +210,20 @@ const config: ExpoConfig = {
       'expo-camera',
       {
         cameraPermission,
+        // Swift never records audio. Left at the default, this plugin injects
+        // NSMicrophoneUsageDescription and Android RECORD_AUDIO for a
+        // capability the app does not have — a purpose string a reviewer can
+        // ask about and we could not justify.
+        microphonePermission: false,
+        recordAudioAndroid: false,
+      },
+    ],
+    [
+      'expo-image-picker',
+      {
+        photosPermission,
+        cameraPermission,
+        microphonePermission: false,
       },
     ],
     // Android half of the api.swift.gy TLS pinning (iOS half: NSPinnedDomains
