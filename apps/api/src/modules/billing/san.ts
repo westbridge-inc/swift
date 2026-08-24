@@ -60,9 +60,22 @@ export function normalizeSan(raw: string): string {
   return raw.replace(/\D+/g, '');
 }
 
-/** Display grouping XXX-XXX-XXXX — read-aloud friendly. */
+/** Display grouping `123 456 7890` — read-aloud friendly, and the grouping the
+ *  design actually specifies.
+ *
+ *  This used to render XXX-XXX-XXXX. Both group in threes and both read aloud
+ *  the same, so it looked like a free choice — but it is not one. The rendered
+ *  pay screen, the printable counter card and every reminder message show the
+ *  number with SPACES, and a Swift Account Number is a thing a vendor reads off
+ *  a phone to an MMG agent who keys it into a terminal. When the number on the
+ *  screen and the number on the printed card are punctuated differently, the
+ *  person at the counter has to decide whether they are the same number. They
+ *  are, and they should never have to wonder.
+ *
+ *  `normalizeSan` strips every non-digit, so anyone who types dashes out of
+ *  habit still resolves to the same account. Only the display changes. */
 export function formatSan(san: string): string {
-  return `${san.slice(0, 3)}-${san.slice(3, 6)}-${san.slice(6)}`;
+  return `${san.slice(0, 3)} ${san.slice(3, 6)} ${san.slice(6)}`;
 }
 
 export type SanValidationFailure = 'SAN_MALFORMED' | 'SAN_CHECKSUM_FAILED';
