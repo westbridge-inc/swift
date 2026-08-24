@@ -57,6 +57,10 @@ export function SiteFooter() {
           <Link href="/contact" className="hover:text-[var(--swift-ink)]">Contact</Link>
           <Link href="/legal/terms" className="hover:text-[var(--swift-ink)]">Terms</Link>
           <Link href="/legal/privacy" className="hover:text-[var(--swift-ink)]">Privacy</Link>
+          {/* Google Play's account-deletion policy wants this reachable without
+              the app installed — a footer link on every marketing page is the
+              plainest way to satisfy "easy to find". */}
+          <Link href="/delete-account" className="hover:text-[var(--swift-ink)]">Delete account</Link>
         </nav>
       </div>
       <div className="border-t border-black/5 py-4 text-center text-xs text-[var(--swift-muted)]">
