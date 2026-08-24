@@ -30,7 +30,6 @@ import {
   GradientMasthead,
   Photo,
   CircleChip,
-  DecorativeIcon,
   EmptyState,
   ErrorState,
   IconChip,
@@ -39,6 +38,7 @@ import {
   LoadingBlock,
   Money,
   PillButton,
+  LockInDisc,
   PopupCard,
   PopupTitle,
   Screen,
@@ -688,18 +688,12 @@ export function CartScreen() {
           if (id) navigation.navigate('Delivery', { orderId: id });
         }}
       >
-        <DecorativeIcon
-          style={{
-            width: 64,
-            height: 64,
-            borderRadius: 32,
-            backgroundColor: color.brand[500],
-            alignItems: 'center',
-            justifyContent: 'center',
-          }}
-        >
-          <Feather name="check" size={30} color={color.white} />
-        </DecorativeIcon>
+        {/* THE LOCK-IN [100x pass §1c]: a confirmed success is viridian, not
+            brand — red is reserved for the rail, the flagship and CTAs, and a
+            maroon tick made "done" look identical to "act". This renders only
+            inside placeOrder.isSuccess, so it can never celebrate a request
+            that is still in flight. */}
+        <LockInDisc />
         <PopupTitle variant="heading" center style={{ marginTop: space.md }}>
           {placedAppt ? 'Booking requested' : 'Your order is placed'}
         </PopupTitle>

@@ -7,7 +7,7 @@ import BottomSheet, { BottomSheetScrollView } from '@gorhom/bottom-sheet';
 import * as ImagePicker from 'expo-image-picker';
 import { color, radius, space } from '@swift/ui';
 import { Feather, MaterialCommunityIcons } from '@expo/vector-icons';
-import { CodeInput, DecorativeIcon, EmptyState, PillButton, PopupCard, PopupTitle, Screen, T, cardShadow } from '../../../kit';
+import { CodeInput, DecorativeIcon, EmptyState, LockIn, PillButton, PopupCard, PopupTitle, Screen, T, cardShadow, lockInButtonStyle } from '../../../kit';
 import { Stars } from '../../../kit/controls';
 import { useMoverKind, useActiveJob, useDriverAction, useRiderAction, useRateCustomer, useCourierProof, useRideSos } from '../../../hooks';
 import { useMoverPreview } from '../../../stores/moverPreview';
@@ -242,14 +242,20 @@ export function ActiveJobScreen({ navigation }: any) {
   };
 
   // The one big action at the bottom (reference "Arrived" button).
-  const bigButton = (label: string, onPress: () => void, opts?: { disabled?: boolean; loading?: boolean; soft?: boolean }) => (
+  const bigButton = (
+    label: string,
+    onPress: () => void,
+    opts?: { disabled?: boolean; loading?: boolean; soft?: boolean; lockedIn?: boolean },
+  ) => (
     <PillButton
       label={label}
       loading={opts?.loading}
       disabled={opts?.disabled}
       variant={opts?.soft ? 'outline' : 'primary'}
       onPress={onPress}
-      style={{ minHeight: 56 }}
+      // After a lock-in the CTA carries the confirmed-success colour, so the
+      // eye lands on the one thing left to do [100x pass §1c].
+      style={{ minHeight: 56, ...(opts?.lockedIn ? lockInButtonStyle() : {}) }}
     />
   );
 
@@ -412,7 +418,17 @@ export function ActiveJobScreen({ navigation }: any) {
                       </T>
                     </View>
                   ) : null}
-                  {bigButton(step.label, runDriverStep, { loading: busy, disabled: busy || (!!step.pin && pin.length < RIDE_PIN_LENGTH) })}
+                  {/* THE LOCK-IN [100x pass §1c]. `ridePinVerified` is SERVER
+                      truth — the tick can only appear once the code was really
+                      accepted, never optimistically while the request is in
+                      flight. Failure keeps its own language: CodeInput already
+                      shakes ±6dp ×3 on error. */}
+                  {step.action === 'start' ? <LockIn label="Code accepted — locked in." style={{ marginBottom: space.md }} /> : null}
+                  {bigButton(step.label, runDriverStep, {
+                    loading: busy,
+                    disabled: busy || (!!step.pin && pin.length < RIDE_PIN_LENGTH),
+                    lockedIn: step.action === 'start',
+                  })}
                 </>
               ) : (
                 <T variant="label" center style={{ color: dk.muted, paddingVertical: space.md }}>
