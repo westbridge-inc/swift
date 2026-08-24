@@ -1,7 +1,6 @@
 /** @jsxImportSource react */
 import React, { useEffect, useState } from 'react';
 import { View } from 'react-native';
-import * as WebBrowser from 'expo-web-browser';
 import { color, radius, space } from '@swift/ui';
 import { money } from '../../lib/money';
 import { useRateOrder } from '../../hooks/customer';
@@ -10,6 +9,7 @@ import {
   AuthSessionBoundaryError,
   requireAuthSessionSnapshot,
 } from '../../stores/authStore';
+import { openPayLink, safePayUrl } from '../../lib/payLink';
 
 /**
  * Post-trip closure for a completed ride: rate the driver. Tipping is CASH in
@@ -31,6 +31,8 @@ export function RidePostTripSheet({ ride, onDone }: { ride: any | null; onDone: 
 
   const fare = Number(ride.taxiFareTotal ?? ride.totalAmount ?? 0);
   const driverName = ride.driver?.user?.firstName ?? 'your driver';
+  // Validated once, here — the button only exists if the destination passes.
+  const driverPayUrl = safePayUrl(ride.driver?.mmgPayUrl);
   const busy = rate.isPending;
 
   const submit = async () => {
@@ -64,17 +66,26 @@ export function RidePostTripSheet({ ride, onDone }: { ride: any | null; onDone: 
         {money(fare)} · cash · paid to {driverName}
       </T>
 
-      {ride.driver?.mmgPayUrl ? (
+      {driverPayUrl ? (
         // 5.9 MMG path [rides spec]: the DRIVER'S OWN pay link — money goes
         // straight to them, Swift never holds it. No cash on you → one tap.
         // Honesty law: opening the link never fakes a "Paid ✓"; the driver
         // confirms receipt on their side like any MMG transfer.
+        //
+        // The URL is validated by the SAME check every other money link in the
+        // app passes (safePayUrl): https only, no embedded credentials, no
+        // fragment, port 443, a real public hostname, never an IP literal.
+        // This one path used to open `ride.driver.mmgPayUrl` raw — the single
+        // place a customer could be sent to an unvalidated destination while
+        // holding their wallet. A link that fails the check simply does not
+        // render, so the sheet falls back to cash rather than offering a
+        // payment button that cannot be trusted.
         <>
           <PillButton
             label={`Pay ${money(fare)} with MMG instead`}
             variant="outline"
             style={{ marginTop: space.md, alignSelf: 'stretch' }}
-            onPress={() => WebBrowser.openBrowserAsync(String(ride.driver.mmgPayUrl)).catch(() => undefined)}
+            onPress={() => { void openPayLink(driverPayUrl); }}
           />
           <T variant="caption" tone="muted" center style={{ marginTop: space.xs }}>
             Goes straight to {driverName} on their MMG — show them the confirmation.
