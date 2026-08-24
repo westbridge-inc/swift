@@ -383,9 +383,9 @@ export function usePickingActions() {
 // ─── Menu ────────────────────────────────────────────────────────────────────
 
 /** Categories with their nested items (the menu, grouped by section). */
-export function useVendorMenu() {
+export function useVendorMenu(enabled = true) {
   const pv = usePreviewDataset();
-  const q = useQuery({ queryKey: ['vendor', 'menu'], queryFn: () => unwrap<any[]>(vendorApi.categories()), enabled: !pv });
+  const q = useQuery({ queryKey: ['vendor', 'menu'], queryFn: () => unwrap<any[]>(vendorApi.categories()), enabled: enabled && !pv });
   return pv ? previewQuery(pv.menu.categories) : q;
 }
 
