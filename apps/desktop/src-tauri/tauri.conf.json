@@ -10,13 +10,21 @@
     "frontendDist": "../dist"
   },
   "app": {
+    "macOSPrivateApi": true,
     "windows": [
       {
         "title": "Swift Mission Control",
         "width": 1440,
         "height": 900,
         "minWidth": 1100,
-        "minHeight": 700
+        "minHeight": 700,
+        "transparent": true,
+        "titleBarStyle": "Transparent",
+        "hiddenTitle": true,
+        "windowEffects": {
+          "effects": ["sidebar"],
+          "state": "followsWindowActiveState"
+        }
       }
     ],
     "security": {

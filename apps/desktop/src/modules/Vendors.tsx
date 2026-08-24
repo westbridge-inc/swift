@@ -2,9 +2,9 @@ import { useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { fetchPaymentMix, fetchVendors } from '../lib/api';
 
-// Vendors & Billing (spec §5.5): the vendor book + the money picture.
-// Platform revenue = weekly subscriptions only; the payment mix shows how
-// customers pay STORES (cash vs MMG) — context, never Swift's money.
+// Vendors & Billing (spec §5.5): the vendor book + order-payment context.
+// The payment mix shows how customers pay STORES (cash vs MMG) — context,
+// never Swift's money. Effective subscription pricing is not exposed here.
 
 // [VG-013] Explicit currency — Money.tsx says G$; a bare $ here made the two
 // finance surfaces drift.
@@ -89,7 +89,7 @@ export default function Vendors() {
             </p>
             {v.subscription && (
               <p className="mt-1 text-xs text-neutral-400">
-                sub {v.subscription.status} · {money(v.subscription.weeklyRate)}/wk
+                subscription {v.subscription.status} · effective billing amount unavailable
               </p>
             )}
           </div>

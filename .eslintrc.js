@@ -45,6 +45,16 @@ module.exports = {
         ],
       },
     },
+    {
+      // Mission Control is a Tauri app: a real browser webview, not Node. The
+      // root env declares `node` only, so every `window`, `document`,
+      // `requestAnimationFrame` and `HTMLElement` in it resolved to no-undef —
+      // 18 errors sat on main unnoticed, because CI runs "Desktop Build (TS)"
+      // and never lints this package. Declaring the environment makes the
+      // desktop honestly lintable instead of permanently red.
+      files: ['apps/desktop/src/**/*'],
+      env: { browser: true },
+    },
   ],
   rules: {
     'no-unused-vars': 'off',

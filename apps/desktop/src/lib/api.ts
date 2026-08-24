@@ -10,31 +10,82 @@ const API_URL = import.meta.env.VITE_API_URL ?? 'http://localhost:3000';
 // the Keychain.
 const inTauri = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
 
+export async function setNativeOperatorMenuEnabled(enabled: boolean): Promise<void> {
+  if (!inTauri) return;
+  await invoke('set_operator_menu_enabled', { enabled });
+}
+
 // In the packaged app, refuse a plaintext API on a real host — a MITM on the
 // admin's network would otherwise steal the admin token straight off the wire.
 // localhost stays allowed for dev; the browser preview isn't the real client.
-if (inTauri && API_URL.startsWith('http://') && !API_URL.includes('localhost') && !API_URL.includes('127.0.0.1')) {
-  throw new Error('VITE_API_URL must use https:// in the packaged Mission Control app');
+if (inTauri) {
+  const api = new URL(API_URL);
+  const loopback = ['localhost', '127.0.0.1', '[::1]', '::1'].includes(api.hostname);
+  const safeTransport = api.protocol === 'https:' || (api.protocol === 'http:' && loopback);
+  if (!safeTransport) {
+    throw new Error('VITE_API_URL must use https:// in the packaged Mission Control app');
+  }
 }
 
 const KC = 'swift-mc:';
 async function kcGet(key: string): Promise<string | null> {
-  if (inTauri) { try { return (await invoke<string | null>('keychain_get', { key })) ?? null; } catch { return null; } }
-  try { return localStorage.getItem(KC + key); } catch { return null; }
+  if (inTauri) {
+    try {
+      return (await invoke<string | null>('keychain_get', { key })) ?? null;
+    } catch {
+      throw new Error('Mission Control could not read the secure session from macOS Keychain.');
+    }
+  }
+  try {
+    return localStorage.getItem(KC + key);
+  } catch {
+    throw new Error('Mission Control could not read the browser preview session.');
+  }
 }
 async function kcSet(key: string, value: string): Promise<void> {
   // [WR-051] Await the write — sign-in used to enter the authed state before
   // the keychain accepted the secret, so a denied prompt silently produced a
   // session that vanished on restart.
-  if (inTauri) { await invoke('keychain_set', { key, value }).catch(() => {}); return; }
-  try { localStorage.setItem(KC + key, value); } catch { /* ignore */ }
+  if (inTauri) {
+    try {
+      await invoke('keychain_set', { key, value });
+      return;
+    } catch {
+      throw new Error('Mission Control could not store the secure session in macOS Keychain.');
+    }
+  }
+  try {
+    localStorage.setItem(KC + key, value);
+  } catch {
+    throw new Error('Mission Control could not store the browser preview session.');
+  }
 }
 async function kcDelete(key: string): Promise<void> {
-  if (inTauri) { await invoke('keychain_delete', { key }).catch(() => {}); return; }
-  try { localStorage.removeItem(KC + key); } catch { /* ignore */ }
+  if (inTauri) {
+    try {
+      await invoke('keychain_delete', { key });
+      return;
+    } catch {
+      throw new Error('Mission Control could not remove the secure session from macOS Keychain.');
+    }
+  }
+  try {
+    localStorage.removeItem(KC + key);
+  } catch {
+    throw new Error('Mission Control could not remove the browser preview session.');
+  }
 }
 
 let accessToken: string | null = null;
+let sessionGeneration = 0;
+let sessionTransitionInFlight = false;
+let sessionMutationQueue: Promise<void> = Promise.resolve();
+
+function withSessionMutation<T>(operation: () => Promise<T>): Promise<T> {
+  const result = sessionMutationQueue.then(operation, operation);
+  sessionMutationQueue = result.then(() => undefined, () => undefined);
+  return result;
+}
 
 export async function loadSession(): Promise<boolean> {
   // Tauri keychain restore fires an OS prompt on unsigned dev builds, so it's
@@ -45,16 +96,49 @@ export async function loadSession(): Promise<boolean> {
   return !!accessToken;
 }
 
-async function storeSession(access: string, refresh?: string | null) {
-  accessToken = access;
-  await kcSet('access', access);
-  if (refresh) await kcSet('refresh', refresh);
+async function storeSession(
+  access: string,
+  refresh?: string | null,
+  expectedGeneration = sessionGeneration,
+): Promise<boolean> {
+  return withSessionMutation(async () => {
+    if (expectedGeneration !== sessionGeneration) return false;
+    try {
+      // Write refresh first and access last. A restored session is considered
+      // present only when the access credential exists, so a partial first
+      // write can never masquerade as a complete login.
+      if (refresh) await kcSet('refresh', refresh);
+      await kcSet('access', access);
+    } catch (error) {
+      accessToken = null;
+      const cleanup = await Promise.allSettled([
+        kcDelete('access'),
+        refresh ? kcDelete('refresh') : Promise.resolve(),
+      ]);
+      if (cleanup.some((result) => result.status === 'rejected')) {
+        throw new Error('Secure session storage failed, and Keychain cleanup could not be confirmed.');
+      }
+      throw error;
+    }
+    if (expectedGeneration !== sessionGeneration) return false;
+    accessToken = access;
+    sessionTransitionInFlight = false;
+    return true;
+  });
 }
 
 export async function clearSession() {
+  sessionTransitionInFlight = true;
+  sessionGeneration += 1;
+  const clearGeneration = sessionGeneration;
   accessToken = null;
-  await kcDelete('access');
-  await kcDelete('refresh');
+  await withSessionMutation(async () => {
+    const removals = await Promise.allSettled([kcDelete('access'), kcDelete('refresh')]);
+    if (removals.some((result) => result.status === 'rejected')) {
+      throw new Error('Mission Control could not confirm that every local Keychain credential was removed.');
+    }
+    if (sessionGeneration === clearGeneration) sessionTransitionInFlight = false;
+  });
 }
 
 /** [WR-018] Server-side revocation for sign-out. /auth/logout/refresh is
@@ -62,22 +146,38 @@ export async function clearSession() {
  *  refresh credential names the session. Returns false when the server could
  *  not be told — the caller says so instead of pretending. */
 export async function revokeSession(): Promise<boolean> {
-  const refreshToken = await kcGet('refresh');
-  if (!refreshToken) return false;
-  try {
+  const controller = new AbortController();
+  let deadline: ReturnType<typeof setTimeout> | undefined;
+  const attempt = (async () => {
+    const refreshToken = await kcGet('refresh');
+    if (!refreshToken) return false;
     const res = await fetch(`${API_URL}/api/v1/auth/logout/refresh`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ refreshToken }),
+      signal: controller.signal,
     });
     return res.ok;
-  } catch {
-    return false;
+  })().catch(() => false);
+  const timedOut = new Promise<boolean>((resolve) => {
+    deadline = setTimeout(() => {
+      controller.abort();
+      resolve(false);
+    }, 5_000);
+  });
+
+  try {
+    return await Promise.race([attempt, timedOut]);
+  } finally {
+    if (deadline) clearTimeout(deadline);
+    controller.abort();
   }
 }
 
-async function tryRefresh(): Promise<string | null> {
+async function tryRefresh(expectedGeneration: number): Promise<string | null> {
+  if (sessionTransitionInFlight || expectedGeneration !== sessionGeneration) return null;
   const refreshToken = await kcGet('refresh');
+  if (sessionTransitionInFlight || expectedGeneration !== sessionGeneration) return null;
   if (!refreshToken) return null;
   const res = await fetch(`${API_URL}/api/v1/auth/refresh`, {
     method: 'POST',
@@ -86,11 +186,29 @@ async function tryRefresh(): Promise<string | null> {
   });
   const json = await res.json().catch(() => null);
   if (!res.ok || !json?.data?.accessToken) return null;
-  await storeSession(json.data.accessToken, json.data.refreshToken);
-  return json.data.accessToken as string;
+  const stored = await storeSession(json.data.accessToken, json.data.refreshToken, expectedGeneration);
+  return stored ? json.data.accessToken as string : null;
 }
 
-export async function apiFetch(path: string, options?: RequestInit) {
+let refreshInFlight: { generation: number; promise: Promise<string | null> } | null = null;
+
+function refreshAccessToken(generation: number): Promise<string | null> {
+  if (!refreshInFlight || refreshInFlight.generation !== generation) {
+    const promise = tryRefresh(generation).finally(() => {
+      if (refreshInFlight?.promise === promise) refreshInFlight = null;
+    });
+    refreshInFlight = { generation, promise };
+  }
+  return refreshInFlight.promise;
+}
+
+type ApiFetchOptions = Parameters<typeof fetch>[1];
+
+export async function apiFetch(path: string, options?: ApiFetchOptions) {
+  if (sessionTransitionInFlight) {
+    throw new Error('The secure session is changing. This request was not sent.');
+  }
+  const requestGeneration = sessionGeneration;
   const doFetch = (token: string | null) =>
     fetch(`${API_URL}${path}`, {
       ...options,
@@ -101,17 +219,49 @@ export async function apiFetch(path: string, options?: RequestInit) {
       },
     });
 
-  let res = await doFetch(accessToken);
+  const tokenUsed = accessToken;
+  let attemptedToken = tokenUsed;
+  let res = await doFetch(tokenUsed);
   if (res.status === 401) {
-    const fresh = await tryRefresh();
-    if (fresh) res = await doFetch(fresh);
+    if (sessionGeneration !== requestGeneration || sessionTransitionInFlight) {
+      throw new Error('The session changed while this request was in flight. It was not replayed.');
+    }
+    // The briefing opens several feeds together. If another one already
+    // rotated the token while this request was in flight, retry that token;
+    // otherwise share exactly one refresh request across every 401.
+    if (accessToken && accessToken !== tokenUsed) {
+      attemptedToken = accessToken;
+      res = await doFetch(accessToken);
+    }
     if (res.status === 401) {
-      await clearSession();
-      window.location.reload();
-      throw new Error('Session expired.');
+      if (sessionGeneration !== requestGeneration || sessionTransitionInFlight) {
+        throw new Error('The session changed while this request was in flight. It was not replayed.');
+      }
+      const fresh = await refreshAccessToken(requestGeneration);
+      if (sessionGeneration !== requestGeneration || sessionTransitionInFlight) {
+        throw new Error('The session changed while this request was in flight. It was not replayed.');
+      }
+      if (fresh) {
+        attemptedToken = fresh;
+        res = await doFetch(fresh);
+      }
+    }
+    if (res.status === 401) {
+      if (sessionGeneration === requestGeneration && accessToken === attemptedToken) {
+        await clearSession();
+        window.location.reload();
+        throw new Error('Session expired.');
+      }
+      throw new Error('The session changed while this request was in flight.');
     }
   }
+  if (sessionGeneration !== requestGeneration || sessionTransitionInFlight) {
+    throw new Error('The session changed while this request was in flight. Its response was discarded.');
+  }
   const json = await res.json().catch(() => ({}));
+  if (sessionGeneration !== requestGeneration || sessionTransitionInFlight) {
+    throw new Error('The session changed while this response was being read. Its data was discarded.');
+  }
   if (!res.ok || json?.success === false) {
     // AppError taxonomy: surface code + requestId (desktop standing order 32).
     const code = json?.error?.code ? `[${json.error.code}] ` : '';
@@ -149,12 +299,51 @@ export async function verifyAdminLogin(phone: string, code: string) {
   if (!roles.some((r) => ADMIN_ROLES.includes(r))) {
     throw new Error('This account does not have admin access.');
   }
-  await storeSession(data.tokens.accessToken, data.tokens.refreshToken);
+  const stored = await storeSession(data.tokens.accessToken, data.tokens.refreshToken);
+  if (!stored) throw new Error('The session changed before sign-in completed.');
   return data.user;
 }
 
 // ── Module data ──────────────────────────────────────────────────────────────
-export const fetchOverview = () => apiFetch('/api/v1/admin/dashboard/overview').then((r) => r.data);
+function requireApiArray<T>(value: unknown, field: string): T[] {
+  if (!Array.isArray(value)) throw new Error(`The admin API did not report ${field}.`);
+  return value as T[];
+}
+
+function requireApiNumber(value: unknown, field: string): number {
+  if (typeof value !== 'number' || !Number.isFinite(value)) {
+    throw new Error(`The admin API did not report ${field}.`);
+  }
+  return value;
+}
+
+export interface DashboardOverview {
+  totalUsers: number;
+  todayNewUsers: number;
+  totalOrders: number;
+  todayOrders: number;
+  todayCompletedOrders: number;
+  activeRiders: number;
+  activeDrivers: number;
+  activeVendors: number;
+  totalVendors: number;
+  revenue: {
+    weeklySubscriptionRevenue: number;
+    todayDeliveryFees: number;
+    todayTotal: number;
+  };
+  subscriptionBreakdown: Array<{ type: string; count: number; weeklyRevenue: number }>;
+  alerts: { pendingVendors: number; pastDueSubs: number; unassignedOrders: number };
+}
+
+export const fetchOverview = () =>
+  apiFetch('/api/v1/admin/dashboard/overview').then((r) => {
+    const data = r.data as DashboardOverview | undefined;
+    if (!data || !data.alerts) throw new Error('The admin API did not report dashboard overview data.');
+    requireApiNumber(data.activeRiders, 'active riders');
+    requireApiNumber(data.activeDrivers, 'active drivers');
+    return data;
+  });
 export const globalSearch = (q: string) =>
   apiFetch(`/api/v1/admin/search?q=${encodeURIComponent(q)}`).then((r) => r.data);
 
@@ -172,11 +361,51 @@ export interface ReviewDoc {
   user: { id: string; firstName: string | null; lastName: string | null; phone: string; countryCode: string } | null;
 }
 
+export interface ReviewApplicantRecord {
+  id: string;
+  firstName: string | null;
+  lastName: string | null;
+  phone: string;
+  rider: {
+    vehicleType: string;
+    vehicleMake: string | null;
+    vehicleModel: string | null;
+    vehicleColor: string | null;
+    licensePlate: string | null;
+  } | null;
+  driver: {
+    vehicleType: string;
+    vehicleMake: string;
+    vehicleModel: string;
+    vehicleColor: string;
+    licensePlate: string;
+  } | null;
+  vendorOwner: {
+    vendors: Array<{
+      id: string;
+      name: string;
+      vendorType: string;
+      status: string;
+      city: string | null;
+    }>;
+  } | null;
+}
+
 export const fetchReviewQueue = (status = 'PENDING', page = 1) =>
   apiFetch(`/api/v1/admin/verification/queue?status=${status}&page=${page}&limit=50`).then((r) => ({
-    rows: r.data as ReviewDoc[],
-    meta: r.meta as { total: number; totalPages: number },
+    rows: requireApiArray<ReviewDoc>(r.data, 'the document queue'),
+    meta: {
+      total: requireApiNumber(r.meta?.total, 'document queue depth'),
+      totalPages: requireApiNumber(r.meta?.totalPages, 'document queue pages'),
+    },
   }));
+
+export const fetchReviewApplicant = (id: string) =>
+  apiFetch(`/api/v1/admin/users/${encodeURIComponent(id)}`).then((r) => {
+    const data = r.data as ReviewApplicantRecord | undefined;
+    if (!data?.id) throw new Error('The admin API did not report the applicant record.');
+    return data;
+  });
 
 export const approveDoc = (id: string, body: Record<string, unknown>) =>
   apiFetch(`/api/v1/admin/verification/${id}/approve`, { method: 'PUT', body: JSON.stringify(body) });
@@ -189,13 +418,22 @@ export const rejectDoc = (id: string, reason: string, reasonCode?: string) =>
 
 export const documentViewUrl = (id: string) =>
   apiFetch(`/api/v1/admin/verification/${id}/document-url`).then((r) => {
-    const url: string = r.data.url;
+    const url: unknown = r.data?.url;
+    if (typeof url !== 'string' || url.length === 0) {
+      throw new Error('The admin API did not return a document preview URL.');
+    }
     const resolved = url.startsWith('http') ? url : `${API_URL}${url}`;
     // Defence-in-depth before it lands in an <iframe src>: only ever an http(s)
     // URL — never javascript:/data:/blob:, even if the server were tricked.
-    const proto = new URL(resolved, API_URL).protocol;
-    if (proto !== 'http:' && proto !== 'https:') {
+    const parsed = new URL(resolved, API_URL);
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
       throw new Error('Refusing a non-http document URL');
+    }
+    if (parsed.origin !== new URL(API_URL).origin) {
+      throw new Error('Preview unavailable: the API returned an external storage URL that the locked desktop policy cannot frame.');
+    }
+    if (parsed.pathname.startsWith('/uploads/verification/')) {
+      throw new Error('Preview unavailable: this document needs an API-origin render route.');
     }
     return resolved;
   });
@@ -207,7 +445,28 @@ export const REASON_CODES = [
 ] as const;
 
 // ── Live Ops ─────────────────────────────────────────────────────────────────
-export const fetchOpsLive = () => apiFetch('/api/v1/admin/ops/live').then((r) => r.data);
+export interface OpsLiveSnapshot {
+  movers: Array<{ id: string; kind: 'rider' | 'driver'; busy: boolean }>;
+  activeOrders: Array<{ id: string; orderNumber: string; status: string; orderType: string }>;
+  exhaustedSearches: Array<{
+    id: string;
+    orderId: string;
+    orderNumber: string | null;
+    vertical: string;
+    candidatesTried: number;
+    exhaustedAt: string | null;
+  }>;
+}
+
+export const fetchOpsLive = () =>
+  apiFetch('/api/v1/admin/ops/live').then((r) => {
+    const data = r.data as OpsLiveSnapshot | undefined;
+    if (!data) throw new Error('The admin API did not report live operations data.');
+    requireApiArray(data.movers, 'live movers');
+    requireApiArray(data.activeOrders, 'active orders');
+    requireApiArray(data.exhaustedSearches, 'exhausted searches');
+    return data;
+  });
 export const retryDispatch = (orderId: string) =>
   apiFetch(`/api/v1/admin/orders/${orderId}/retry-dispatch`, { method: 'POST', body: '{}' });
 
@@ -264,9 +523,13 @@ export interface SlaBreach {
 }
 export const fetchSlaBreaches = () =>
   apiFetch('/api/v1/admin/orders/sla-breaches').then((r) => ({
-    rows: r.data as SlaBreach[],
-    scanned: r.scanned as number,
-    truncated: r.truncated as boolean,
+    rows: requireApiArray<SlaBreach>(r.data, 'SLA breaches'),
+    scanCap: requireApiNumber(r.scanCap, 'the SLA scan cap'),
+    scanned: requireApiNumber(r.scanned, 'the SLA scan size'),
+    truncated: (() => {
+      if (typeof r.truncated !== 'boolean') throw new Error('The admin API did not report whether the SLA scan was complete.');
+      return r.truncated;
+    })(),
   }));
 
 // ── Moderation (UGC reports — STORE-001/002) ─────────────────────────────────
@@ -335,6 +598,28 @@ export const fetchRevenue = () =>
     dailyRevenue: Array<{ date: string; total: number; order_count: number }>;
     summary: RevenueSummary;
   });
+
+/** Business-partner subscription types. Rider/driver rows are outside this
+ * narrowly labelled count and are never silently mixed in. */
+export const PARTNER_SUBSCRIPTION_TYPES = [
+  'RESTAURANT', 'SUPERMARKET', 'RETAIL_STORE', 'SERVICE_PROVIDER',
+] as const;
+
+export interface PartnerPastDueSnapshot {
+  /** Exact count of business subscription records whose server status is PAST_DUE. */
+  statusCount: number;
+}
+
+/** The API has no waiver/custom/USD-aware amount-due aggregate. Only expose
+ * the exact status count from paginated totals; money remains an explicit gap. */
+export async function fetchPartnerPastDue(): Promise<PartnerPastDueSnapshot> {
+  const counts = await Promise.all(PARTNER_SUBSCRIPTION_TYPES.map((type) =>
+    apiFetch(`/api/v1/admin/subscriptions?status=PAST_DUE&type=${type}&page=1&limit=1`)
+      .then((r) => requireApiNumber(r.meta?.total, `${type.toLowerCase()} past-due subscription total`)),
+  ));
+
+  return { statusCount: counts.reduce((sum, value) => sum + value, 0) };
+}
 
 // ── Health ───────────────────────────────────────────────────────────────────
 export const fetchHealth = () =>
