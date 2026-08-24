@@ -2835,6 +2835,9 @@ export async function vendorRoutes(app: FastifyInstance) {
   /** GET /subscription — Current subscription details */
   app.get('/subscription', auth, async (request) => {
     const { vendorId } = await requireVendor(app, request, 'OWNER');
+    // NO operability gate here, deliberately [PINV-8]. A suspended store must
+    // keep the screen it pays on — see billing-suspension-retention.test.ts,
+    // which fails the build if a status check ever appears in front of this.
     const subscription = await app.prisma.subscription.findFirst({
       where: { vendorId },
     });
