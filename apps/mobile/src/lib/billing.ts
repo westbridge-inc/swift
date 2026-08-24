@@ -86,3 +86,140 @@ export function walletLine(balanceGyd?: number | null, weeklyGyd?: number | null
   const covers = weeks >= 1 ? ` · covers ${weeks} ${weeks === 1 ? 'week' : 'weeks'}` : '';
   return `${money(bal)} banked${covers}`;
 }
+
+// ---------------------------------------------------------------------------
+// THE PAY SCREEN [PAY-1 · Swift Pay design §1a/1b]
+//
+// One layout, four states. Only the eyebrow, the dot and one line of copy move
+// between them, and both doors stay visible in every state — a vendor must
+// always be able to pay, whatever state they are in (PINV-10).
+//
+// The design's own note on the ladder is the rule this encodes: "Gentle... no
+// consequence named yet" at T-3, "names the consequence and the hour, once" in
+// grace, and — for the paused state — "Not a wall." Nothing turns red. The
+// escalation is carried by which words are present, never by shouting.
+//
+// Everything here is DERIVED FROM SERVER TRUTH and nothing is invented. If the
+// server did not send a grace deadline we do not print an hours countdown; if
+// it did not send a period end we do not print a paid-through date. A billing
+// screen that guesses is worse than one that says less: this is the screen a
+// vendor stands on when they think we have taken their money wrongly.
+// ---------------------------------------------------------------------------
+
+const WEEKDAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+
+/** "Friday" — for the DUE <DAY> eyebrow. Empty for a missing/invalid date. */
+export function weekdayName(iso?: string | null): string {
+  if (!iso) return '';
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return '';
+  return WEEKDAYS[d.getDay()] ?? '';
+}
+
+/** Whole hours remaining until `iso`, or null when it is missing, invalid or
+ *  already past. Null means "print no countdown", never "print zero". */
+export function hoursUntil(iso: string | null | undefined, now: Date = new Date()): number | null {
+  if (!iso) return null;
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return null;
+  const ms = d.getTime() - now.getTime();
+  if (ms <= 0) return null;
+  return Math.floor(ms / 3_600_000);
+}
+
+/** Whole days until `iso` counting from the start of today, or null if unknown.
+ *  0 means "today" — which the copy renders as "Due today", not "Due in 0 days". */
+export function daysUntil(iso: string | null | undefined, now: Date = new Date()): number | null {
+  if (!iso) return null;
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return null;
+  const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+  const startOfThen = new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
+  return Math.round((startOfThen - startOfToday) / 86_400_000);
+}
+
+/** Which of the four bands this account is in. `tone` names a semantic token,
+ *  never a raw colour — viridian for covered, amber for owed, ink for paused. */
+export type PayBandTone = 'covered' | 'owed' | 'paused';
+
+export interface PayScreenState {
+  band: 'active' | 'due' | 'grace' | 'paused';
+  tone: PayBandTone;
+  /** Small caps above the amount — "NOTHING DUE NOW" / "DUE FRIDAY" / "DUE NOW". */
+  eyebrow: string;
+  /** The hero. The most readable thing we can put on a cheap screen in sunlight. */
+  amountGyd: number;
+  /** What the money buys — "Covers 1 week · through 22 Aug". '' when unknown. */
+  covers: string;
+  title: string;
+  body: string;
+  /** Only the paused band carries one: the list of what suspension does NOT take. */
+  extra?: string;
+}
+
+export function payScreenState(sub: any, now: Date = new Date()): PayScreenState {
+  const phase = billingPhase(sub);
+  const fee = weeklyFeeGyd(sub);
+  const due = Number(sub?.amountDueGyd ?? 0);
+  const periodEnd: string | null = sub?.currentPeriodEnd ?? null;
+  const graceEnd: string | null = sub?.gracePeriodEnd ?? null;
+  const through = shortDate(periodEnd);
+  const covers = through ? `Covers 1 week · through ${through}` : '';
+
+  // Suspended (and terminal churned) — the design calls this "paused", and is
+  // emphatic that it is "Not a wall". So it says what turns the store back on,
+  // and then lists what the vendor still has. That list is not reassurance
+  // copy: it is PINV-8, and billing-suspension-retention.test.ts is its proof.
+  if (phase === 'suspended' || phase === 'churned') {
+    return {
+      band: 'paused', tone: 'paused', eyebrow: 'DUE NOW', amountGyd: due || fee, covers,
+      title: 'New orders are paused',
+      body: `Paying ${money(due || fee)} turns them back on, usually within a minute.`,
+      extra: 'Still yours while paused: this screen, your receipts, your earnings and support. Orders already in the kitchen still go out.',
+    };
+  }
+
+  // The 48-hour window. Names the consequence and the hour ONCE — and only if
+  // the server actually gave us a deadline to name.
+  if (phase === 'grace') {
+    const hours = hoursUntil(graceEnd, now);
+    return {
+      band: 'grace', tone: 'owed', eyebrow: 'DUE NOW', amountGyd: due || fee, covers,
+      title: hours == null ? 'Grace period' : `Grace period · ${hours} ${hours === 1 ? 'hour' : 'hours'} left`,
+      body: hours == null
+        ? 'Your store is still open. Paying now clears it.'
+        : 'Your store stays open for now. Paying clears it straight away.',
+    };
+  }
+
+  // Owed, still comfortably inside the window: gentle, and no consequence named.
+  if (due > 0 || phase === 'past_due') {
+    const days = daysUntil(periodEnd, now);
+    const day = weekdayName(periodEnd);
+    return {
+      band: 'due', tone: 'owed',
+      eyebrow: days != null && days > 0 && day ? `DUE ${day.toUpperCase()}` : 'DUE NOW',
+      amountGyd: due || fee, covers,
+      title: days == null ? 'Payment due' : days <= 0 ? 'Due today' : `Due in ${days} ${days === 1 ? 'day' : 'days'}`,
+      body: through ? `Pay any time before ${through} and nothing changes.` : 'Pay any time and nothing changes.',
+    };
+  }
+
+  // Covered. A big zero is the reward for paying, and the fee ahead is stated
+  // once, quietly, in the band — not repeated as a second number up top.
+  return {
+    band: 'active', tone: 'covered', eyebrow: 'NOTHING DUE NOW', amountGyd: 0,
+    covers: through ? `Paid through ${through}` : '',
+    title: 'You are covered',
+    body: through && fee > 0
+      ? `Next fee is ${money(fee)} on ${through}. You can pay early any time.`
+      : fee > 0 ? `Next fee is ${money(fee)}. You can pay early any time.` : 'You can pay early any time.',
+  };
+}
+
+/** The QR payload an MMG agent scans [PAY-1 §4.3]. Null without a SAN — we
+ *  never render a QR that resolves to nothing. */
+export function sanQrPayload(san?: string | null): string | null {
+  const digits = String(san ?? '').replace(/\D/g, '');
+  return digits.length === 10 ? `SWIFTSAN:${digits}` : null;
+}

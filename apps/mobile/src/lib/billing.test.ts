@@ -7,6 +7,10 @@ import {
   walletLine,
   weeklyFeeGyd,
   weeksCovered,
+  payScreenState,
+  hoursUntil,
+  daysUntil,
+  sanQrPayload,
 } from './billing';
 
 describe('billingPhase', () => {
@@ -106,5 +110,139 @@ describe('shortDate', () => {
     expect(shortDate(null)).toBe('');
     expect(shortDate(undefined)).toBe('');
     expect(shortDate('not-a-date')).toBe('');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The pay screen [PAY-1 · Swift Pay §1a/1b]. Four bands, one layout.
+// The assertions that matter most are the NEGATIVE ones: what the screen
+// refuses to say when the server did not tell it. A billing screen that
+// guesses a deadline is worse than one that says less.
+// ---------------------------------------------------------------------------
+
+describe('payScreenState — the four bands', () => {
+  const NOW = new Date(2026, 7, 12, 12, 0, 0); // Wed 12 Aug 2026, local noon
+  const iso = (d: number, h = 12) => new Date(2026, 7, d, h, 0, 0).toISOString();
+
+  it('covered: a big zero is the reward for paying, and the fee ahead is stated once', () => {
+    const s = payScreenState(
+      { status: 'ACTIVE', weeklyFeeGyd: 10_000, amountDueGyd: 0, currentPeriodEnd: iso(15) },
+      NOW,
+    );
+    expect(s.band).toBe('active');
+    expect(s.tone).toBe('covered');
+    expect(s.eyebrow).toBe('NOTHING DUE NOW');
+    expect(s.amountGyd).toBe(0);
+    expect(s.covers).toBe('Paid through 15 Aug');
+    expect(s.title).toBe('You are covered');
+    // The fee ahead appears in the band, NOT as a second hero number.
+    expect(s.body).toContain('$10,000');
+    expect(s.extra).toBeUndefined();
+  });
+
+  it('due: gentle, names the weekday, and names no consequence yet', () => {
+    const s = payScreenState(
+      { status: 'ACTIVE', weeklyFeeGyd: 10_000, amountDueGyd: 10_000, currentPeriodEnd: iso(14) },
+      NOW,
+    );
+    expect(s.band).toBe('due');
+    expect(s.tone).toBe('owed');
+    expect(s.eyebrow).toBe('DUE FRIDAY');
+    expect(s.title).toBe('Due in 2 days');
+    expect(s.amountGyd).toBe(10_000);
+    // The design is explicit: at T-3 no consequence is named.
+    expect(s.body).not.toMatch(/paus|suspend|clos|stop/i);
+  });
+
+  it('due today reads "Due today", never "Due in 0 days"', () => {
+    const s = payScreenState(
+      { status: 'ACTIVE', weeklyFeeGyd: 10_000, amountDueGyd: 10_000, currentPeriodEnd: iso(12) },
+      NOW,
+    );
+    expect(s.title).toBe('Due today');
+    expect(s.eyebrow).toBe('DUE NOW');
+  });
+
+  it('grace: names the consequence and the hour exactly once', () => {
+    const s = payScreenState(
+      {
+        status: 'PAST_DUE', isInGracePeriod: true, weeklyFeeGyd: 10_000,
+        amountDueGyd: 10_000, currentPeriodEnd: iso(12), gracePeriodEnd: iso(13, 19),
+      },
+      NOW,
+    );
+    expect(s.band).toBe('grace');
+    expect(s.title).toBe('Grace period · 31 hours left');
+    expect(s.tone).toBe('owed'); // amber, never red — nothing on this screen turns red
+  });
+
+  it('grace WITHOUT a server deadline prints no countdown at all', () => {
+    // The honesty rule. An invented "48 hours left" on a screen about someone's
+    // livelihood is the kind of lie that ends a vendor relationship.
+    const s = payScreenState(
+      { status: 'PAST_DUE', isInGracePeriod: true, weeklyFeeGyd: 10_000, amountDueGyd: 10_000 },
+      NOW,
+    );
+    expect(s.band).toBe('grace');
+    expect(s.title).toBe('Grace period');
+    expect(s.title).not.toMatch(/\d/);
+  });
+
+  it('paused: not a wall — it says what turns the store back on, then what is kept', () => {
+    const s = payScreenState(
+      { status: 'SUSPENDED', weeklyFeeGyd: 10_000, amountDueGyd: 10_000, currentPeriodEnd: iso(12) },
+      NOW,
+    );
+    expect(s.band).toBe('paused');
+    expect(s.tone).toBe('paused');
+    expect(s.title).toBe('New orders are paused');
+    expect(s.body).toContain('$10,000');
+
+    // PINV-8 as the vendor reads it. The server-side proof of this exact
+    // sentence is api/src/__tests__/billing-suspension-retention.test.ts.
+    expect(s.extra).toContain('this screen');
+    expect(s.extra).toContain('receipts');
+    expect(s.extra).toContain('earnings');
+    expect(s.extra).toContain('Orders already in the kitchen still go out');
+  });
+
+  it('never prints a paid-through date the server did not send', () => {
+    const s = payScreenState({ status: 'ACTIVE', weeklyFeeGyd: 10_000, amountDueGyd: 0 }, NOW);
+    expect(s.covers).toBe('');
+    expect(s.body).not.toMatch(/Invalid|NaN|undefined/);
+  });
+
+  it('survives a null subscription without inventing anything', () => {
+    const s = payScreenState(null, NOW);
+    expect(s.band).toBe('active');
+    expect(s.amountGyd).toBe(0);
+    expect(s.covers).toBe('');
+    expect(JSON.stringify(s)).not.toMatch(/NaN|Invalid|undefined/);
+  });
+});
+
+describe('hoursUntil / daysUntil — null means "print nothing", never zero', () => {
+  const NOW = new Date(2026, 7, 12, 12, 0, 0);
+  it('returns null for missing, invalid and already-past instants', () => {
+    expect(hoursUntil(null, NOW)).toBeNull();
+    expect(hoursUntil('not-a-date', NOW)).toBeNull();
+    expect(hoursUntil(new Date(2026, 7, 11).toISOString(), NOW)).toBeNull();
+    expect(daysUntil(undefined, NOW)).toBeNull();
+    expect(daysUntil('nope', NOW)).toBeNull();
+  });
+  it('floors hours so we never over-promise time remaining', () => {
+    expect(hoursUntil(new Date(2026, 7, 12, 14, 59, 0).toISOString(), NOW)).toBe(2);
+  });
+});
+
+describe('sanQrPayload', () => {
+  it('builds the agent-scannable payload from a valid SAN', () => {
+    expect(sanQrPayload('1234567890')).toBe('SWIFTSAN:1234567890');
+    expect(sanQrPayload('123-456-7890')).toBe('SWIFTSAN:1234567890');
+  });
+  it('refuses to render a QR that resolves to nothing', () => {
+    expect(sanQrPayload(null)).toBeNull();
+    expect(sanQrPayload('')).toBeNull();
+    expect(sanQrPayload('12345')).toBeNull();
   });
 });
