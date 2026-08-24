@@ -22,7 +22,13 @@ export type PictogramName =
   | 'estate'
   | 'van'
   | 'bus'
-  | 'wheel';
+  | 'wheel'
+  | 'plumber'
+  | 'electrician'
+  | 'carpenter'
+  | 'painter'
+  | 'ac-fridge'
+  | 'mason';
 
 export function Pictogram({
   name,
@@ -33,6 +39,10 @@ export function Pictogram({
   size?: number;
   color: string;
 }) {
+  // Plumbing keeps the kit's existing wrench rather than tracing a second
+  // near-duplicate or mixing an icon-font glyph into the trade family.
+  if (name === 'plumber') return <Pictogram name="services" size={size} color={color} />;
+
   const s = {
     stroke: color,
     strokeWidth: 1.8,
@@ -168,6 +178,45 @@ export function Pictogram({
           <Circle {...s} cx={7.3} cy={15.9} r={1.7} />
           <Circle {...s} cx={16.7} cy={15.9} r={1.7} />
           <Path {...s} d="M9 15.4 H15" />
+        </>
+      )}
+      {name === 'electrician' && (
+        <>
+          {/* breaker board and bolt */}
+          <Path {...s} d="M6.2 4.2 H17.8 V19.8 H6.2 Z" />
+          <Path {...s} d="M13.3 6.8 L9.3 12 H12.1 L10.7 17.2 L15 11.1 H12.2 Z" />
+        </>
+      )}
+      {name === 'carpenter' && (
+        <>
+          {/* framing square and rule — straight-edged, never saw-toothed */}
+          <Path {...s} d="M5 4.5 H9.2 V14.8 H19 V19 H5 Z" />
+          <Path {...s} d="M7.1 7.4 H9.2 M7.1 10.5 H9.2 M7.1 13.6 H9.2 M12.3 14.8 V16.9 M15.4 14.8 V16.9" />
+        </>
+      )}
+      {name === 'painter' && (
+        <>
+          {/* paint roller */}
+          <Path {...s} d="M4.5 5.2 H16.3 A1.7 1.7 0 0 1 18 6.9 V8.3 A1.7 1.7 0 0 1 16.3 10 H4.5 Z" />
+          <Path {...s} d="M18 7.6 H20 V12.5 H12 V15" />
+          <Path {...s} d="M10.3 15 H13.7 V20 H10.3 Z" />
+        </>
+      )}
+      {name === 'ac-fridge' && (
+        <>
+          {/* wall unit, snowflake and three cool-air paths */}
+          <Path {...s} d="M4 5.2 H20 V14.8 H4 Z" />
+          <Path {...s} d="M7 12 H17" />
+          <Path {...s} d="M12 7 V10.8 M10.3 8 L13.7 9.9 M13.7 8 L10.3 9.9" />
+          <Path {...s} d="M7.5 18.8 C7.5 16.8 8.5 16.5 8.5 14.8 M12 18.8 V14.8 M16.5 18.8 C16.5 16.8 15.5 16.5 15.5 14.8" />
+        </>
+      )}
+      {name === 'mason' && (
+        <>
+          {/* a straight-edged bond wall */}
+          <Path {...s} d="M4 5.5 H20 V18.5 H4 Z" />
+          <Path {...s} d="M4 9.8 H20 M4 14.2 H20" />
+          <Path {...s} d="M9.3 5.5 V9.8 M15 5.5 V9.8 M7 9.8 V14.2 M12.5 9.8 V14.2 M17.5 9.8 V14.2 M9.3 14.2 V18.5 M15 14.2 V18.5" />
         </>
       )}
     </Svg>

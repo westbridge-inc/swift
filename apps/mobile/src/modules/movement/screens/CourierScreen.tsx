@@ -1,6 +1,6 @@
 /** @jsxImportSource react */
 import React, { useState } from 'react';
-import { Pressable, View, useWindowDimensions } from 'react-native';
+import { Pressable, StyleSheet, View, useWindowDimensions } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import MapView, { Marker, PROVIDER_DEFAULT, Polyline } from 'react-native-maps';
 import BottomSheet, { BottomSheetScrollView } from '@gorhom/bottom-sheet';
@@ -12,21 +12,23 @@ import { useDeviceLocation } from '../../../hooks/useDeviceLocation';
 import { pickupLocationContext } from '../../../lib/deviceLocation';
 import { LocationPrimerCard } from '../../../components/LocationPrimerCard';
 import { money } from '../../../lib/money';
-import { PinGlyph, Card, CircleChip, IconChip, LabeledInput, PillButton, T, TonePill, cardShadow } from '../../../kit';
-import { RouteCard } from './TaxiScreen';
+import { PinGlyph, Card, CircleChip, LabeledInput, Pictogram, PillButton, T, TonePill, cardShadow } from '../../../kit';
+import { JourneyRail } from '../../../kit/journey-rail';
+import { VERTICAL_TINT } from '../../../kit/vertical-tint';
 import type { PickedPlace } from './DestinationSearchScreen';
 
 type Size = 'SMALL' | 'MEDIUM' | 'LARGE' | 'EXTRA_LARGE';
 type Speed = 'STANDARD' | 'EXPRESS' | 'RUSH';
 
-// Size reads as text-first (S/M/L/XL letter + hint carry it — the F8 size
-// language); speeds keep one glyph each. Courier-specific icon inventions
-// were cut rather than drawn off-hand (set discipline, logged in the journal).
+const SEND_TINT = VERTICAL_TINT.send ?? { bg: color.brand[50], ink: color.brand[600] };
+
+// Capacity is phrased in objects people can judge without a tape measure.
+// EXTRA_LARGE is the only tier that excludes motorcycles, so the trunk promise
+// remains mechanically true in dispatch.
 const SIZES: { key: Size; letter: string; label: string; hint: string }[] = [
-  { key: 'SMALL', letter: 'S', label: 'Small', hint: 'Documents, keys' },
-  { key: 'MEDIUM', letter: 'M', label: 'Medium', hint: 'Fits a shoebox' },
-  { key: 'LARGE', letter: 'L', label: 'Large', hint: 'Fits a backpack' },
-  { key: 'EXTRA_LARGE', letter: 'XL', label: 'Extra large', hint: 'Bulky or heavy' },
+  { key: 'SMALL', letter: 'S', label: 'Fits one hand', hint: 'Keys or documents' },
+  { key: 'MEDIUM', letter: 'M', label: 'A shopping bag', hint: 'Bike-friendly' },
+  { key: 'EXTRA_LARGE', letter: 'XL', label: 'Needs a trunk', hint: 'Car or larger' },
 ];
 const SPEEDS: { key: Speed; label: string; icon: React.ComponentProps<typeof Feather>['name']; hint: string }[] = [
   { key: 'STANDARD', label: 'Standard', icon: 'clock', hint: 'Lowest price' },
@@ -50,8 +52,7 @@ function regionFor(pts: LatLng[]) {
   };
 }
 
-/** Kit selectable option card: icon chip + label + hint; brand tint when active.
- *  `wide` = half-width row card (2×2 grid); default = equal column (3-across). */
+/** Text-first option card with Send's identity tint reserved for selection. */
 function OptionCard({
   icon,
   letter,
@@ -59,7 +60,6 @@ function OptionCard({
   hint,
   active,
   onPress,
-  wide,
 }: {
   icon?: React.ComponentProps<typeof Feather>['name'];
   letter?: string;
@@ -67,49 +67,62 @@ function OptionCard({
   hint: string;
   active: boolean;
   onPress: () => void;
-  wide?: boolean;
 }) {
   return (
-    <Pressable onPress={onPress} style={wide ? { flexBasis: '47%', flexGrow: 1 } : { flex: 1 }}>
+    <Pressable
+      onPress={onPress}
+      accessibilityRole="button"
+      accessibilityLabel={`${label}. ${hint}`}
+      accessibilityState={{ selected: active }}
+      style={{ flex: 1 }}
+    >
       {({ pressed }) => (
         <View
           style={[
             {
               borderRadius: radius.lg,
-              borderWidth: 1,
+              borderWidth: active ? space.xs / 2 : StyleSheet.hairlineWidth,
+              minHeight: space['5xl'] * 2 + space['2xl'],
               paddingVertical: space.md,
-              paddingHorizontal: space.md,
-              borderColor: active ? color.brand[500] : color.border.subtle,
-              backgroundColor: active ? color.brand[50] : color.surface.base,
+              paddingHorizontal: space.sm,
+              borderColor: active ? SEND_TINT.ink : color.border.subtle,
+              backgroundColor: active ? SEND_TINT.bg : color.surface.base,
               opacity: pressed ? 0.85 : 1,
+              alignItems: 'center',
+              justifyContent: 'center',
+              flex: 1,
             },
-            wide ? { flexDirection: 'row', alignItems: 'center', gap: space.md } : { alignItems: 'center' },
             !active ? cardShadow : null,
           ]}
         >
           <View
             style={{
-              width: 36,
-              height: 36,
-              borderRadius: 18,
+              width: space['3xl'],
+              height: space['3xl'],
+              borderRadius: radius.md,
               alignItems: 'center',
               justifyContent: 'center',
-              backgroundColor: active ? color.brand[500] : color.brand[50],
+              backgroundColor: SEND_TINT.bg,
             }}
           >
             {letter ? (
-              <T variant="bodyStrong" style={{ color: active ? color.white : color.brand[600] }}>
+              <T variant="bodyStrong" style={{ color: SEND_TINT.ink }}>
                 {letter}
               </T>
             ) : icon ? (
-              <Feather name={icon} size={17} color={active ? color.white : color.brand[600]} />
+              <Feather name={icon} size={16} color={SEND_TINT.ink} />
             ) : null}
           </View>
-          <View style={wide ? { flex: 1 } : { alignItems: 'center', marginTop: 6 }}>
-            <T variant="label" weight="semibold" tone={active ? 'deep' : 'ink'} numberOfLines={1}>
+          <View style={{ alignItems: 'center', marginTop: space.sm }}>
+            <T
+              variant="label"
+              weight="semibold"
+              center
+              style={active ? { color: SEND_TINT.ink } : undefined}
+            >
               {label}
             </T>
-            <T variant="caption" tone="muted" numberOfLines={1} style={{ marginTop: 1 }}>
+            <T variant="caption" tone="muted" center style={{ marginTop: space.xs }}>
               {hint}
             </T>
           </View>
@@ -222,7 +235,7 @@ export function CourierScreen({ navigation }: any) {
       </MapView>
 
       <View style={{ position: 'absolute', top: insets.top + space.sm, left: space['2xl'] }}>
-        <CircleChip icon="chevron-left" onPress={() => navigation?.goBack?.()} />
+        <CircleChip icon="chevron-left" label="Back" onPress={() => navigation?.goBack?.()} />
       </View>
 
       <BottomSheet
@@ -236,8 +249,11 @@ export function CourierScreen({ navigation }: any) {
           contentContainerStyle={{ paddingHorizontal: space['2xl'], paddingBottom: space['3xl'] }}
           keyboardShouldPersistTaps="handled"
         >
-          <T variant="title" style={{ marginBottom: space.lg }}>
-            Send a package
+          <T variant="title">
+            Send a parcel
+          </T>
+          <T variant="body" tone="muted" style={{ marginTop: space.xs, marginBottom: space.lg }}>
+            One connected journey, from pickup to drop-off.
           </T>
 
           {!pickupOverride && locationContext.showPrimer ? (
@@ -250,22 +266,60 @@ export function CourierScreen({ navigation }: any) {
             />
           ) : null}
 
-          <RouteCard
-            pickupTitle="From"
-            dropoffTitle="To"
-            pickupLabel={pickup?.label}
-            dropoffLabel={dropoff?.label}
-            onPickup={() => openSearch((p) => setPickupOverride(p), 'Pickup')}
-            onDropoff={() => openSearch((p) => setDropoff(p), 'Deliver to?')}
-          />
+          <Card>
+            <JourneyRail
+              pictogram="send"
+              tint={SEND_TINT}
+              start={(
+                <Pressable
+                  onPress={() => openSearch((p) => setPickupOverride(p), 'Pickup')}
+                  accessibilityRole="button"
+                  accessibilityLabel={pickup?.label ? `Pickup. ${pickup.label}` : 'Set pickup location'}
+                  accessibilityHint="Opens location search"
+                >
+                  <View pointerEvents="none">
+                    <LabeledInput
+                      value={pickup?.label ?? ''}
+                      placeholder="Set pickup location"
+                      editable={false}
+                      caretHidden
+                      showSoftInputOnFocus={false}
+                      accessible={false}
+                      right={<T variant="micro" tone="muted">PICKUP</T>}
+                    />
+                  </View>
+                </Pressable>
+              )}
+              end={(
+                <Pressable
+                  onPress={() => openSearch((p) => setDropoff(p), 'Deliver to?')}
+                  accessibilityRole="button"
+                  accessibilityLabel={dropoff?.label ? `Drop-off. ${dropoff.label}` : 'Set drop-off location'}
+                  accessibilityHint="Opens location search"
+                >
+                  <View pointerEvents="none">
+                    <LabeledInput
+                      value={dropoff?.label ?? ''}
+                      placeholder="Set drop-off location"
+                      editable={false}
+                      caretHidden
+                      showSoftInputOnFocus={false}
+                      accessible={false}
+                      right={<T variant="micro" tone="muted">DROP-OFF</T>}
+                    />
+                  </View>
+                </Pressable>
+              )}
+            />
+          </Card>
 
-          {/* Package size — 2×2 so "Documents, keys" never truncates */}
+          {/* Parcel capacity */}
           <T variant="heading" style={{ marginTop: space.xl, marginBottom: space.md }}>
-            Package size
+            What fits?
           </T>
-          <View style={{ flexDirection: 'row', flexWrap: 'wrap', columnGap: space.md, rowGap: space.md }}>
+          <View style={{ flexDirection: 'row', gap: space.sm }}>
             {SIZES.map((s) => (
-              <OptionCard key={s.key} wide letter={s.letter} label={s.label} hint={s.hint} active={s.key === size} onPress={() => setSize(s.key)} />
+              <OptionCard key={s.key} letter={s.letter} label={s.label} hint={s.hint} active={s.key === size} onPress={() => setSize(s.key)} />
             ))}
           </View>
 
@@ -309,32 +363,25 @@ export function CourierScreen({ navigation }: any) {
                   <PillButton label="Retry" size="md" variant="soft" style={{ marginTop: space.sm, alignSelf: 'flex-start' }} onPress={() => refetchEstimate()} />
                 </View>
               ) : estimate ? (
-                <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
-                  <View>
-                    <T variant="micro" tone="muted">
-                      Delivery fee
-                    </T>
-                    <T variant="displayXl" tone="brand" style={{ marginTop: 2 }}>
-                      {money(estimate.totalFee)}
-                    </T>
-                  </View>
-                  <View style={{ alignItems: 'flex-end' }}>
+                <View>
+                  <View style={{ flexDirection: 'row', alignItems: 'flex-end', justifyContent: 'space-between', gap: space.md }}>
+                    <View>
+                      <T variant="micro" tone="muted">
+                        Delivery fee
+                      </T>
+                      <T variant="displayXl" tone="brand" style={{ marginTop: space.xs }}>
+                        {money(estimate.totalFee)}
+                      </T>
+                    </View>
                     <T variant="label" weight="semibold" tone="muted">
                       {estimate.distanceKm} km · ~{estimate.estimatedMinutes} min
                     </T>
-                    <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4, marginTop: 4 }}>
-                      <Feather name="dollar-sign" size={13} color={color.success} />
-                      {/* "No fees · pay cash" named Swift's cut and never named
-                          the PAYER, on the one flow where that is a real
-                          question: the API takes `payer: SENDER | RECIPIENT`
-                          and this screen hardcodes SENDER, so today it is
-                          always you [F-262]. Say so rather than leaving a
-                          sender to wonder whether the parcel is cash-on-
-                          delivery for whoever receives it. */}
-                      <T variant="caption" weight="semibold" tone="muted">
-                        You pay cash · no Swift fee
-                      </T>
-                    </View>
+                  </View>
+                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.sm, marginTop: space.md }}>
+                    <Feather name="dollar-sign" size={12} color={color.text.secondary} />
+                    <T variant="caption" weight="semibold" tone="muted" style={{ flex: 1 }}>
+                      Cash or MMG, straight to your rider. Swift adds nothing.
+                    </T>
                   </View>
                 </View>
               ) : (
@@ -352,7 +399,7 @@ export function CourierScreen({ navigation }: any) {
           ) : null}
 
           <PillButton
-            label={estimate ? `Send parcel · ${money(estimate.totalFee)}` : 'Send parcel'}
+            label="Send parcel"
             style={{ marginTop: space.xl }}
             loading={send.isPending}
             disabled={!valid}
@@ -373,17 +420,42 @@ export function CourierScreen({ navigation }: any) {
                 Recent sends
               </T>
               {recent.slice(0, 5).map((o: any) => (
-                <Pressable key={o.id} onPress={() => navigation?.navigate?.('Delivery', { orderId: o.id })}>
+                <Pressable
+                  key={o.id}
+                  onPress={() => navigation?.navigate?.('Delivery', { orderId: o.id })}
+                  accessibilityRole="button"
+                  accessibilityLabel={`Send to ${o.courierRecipientName ?? o.deliveryAddress ?? 'recipient'}. Order ${o.orderNumber}. ${money(o.totalAmount)}. ${prettyStatus(o.status)}`}
+                  accessibilityHint="Opens delivery details"
+                >
                   {({ pressed }) => (
                     <Card style={{ flexDirection: 'row', alignItems: 'center', gap: space.md, marginBottom: space.md, opacity: pressed ? 0.8 : 1 }}>
-                      <IconChip icon="package" />
+                      <View
+                        accessible={false}
+                        accessibilityElementsHidden
+                        importantForAccessibility="no-hide-descendants"
+                        style={{
+                          width: space['5xl'],
+                          height: space['5xl'],
+                          borderRadius: radius.md,
+                          backgroundColor: SEND_TINT.bg,
+                          alignItems: 'center',
+                          justifyContent: 'center',
+                        }}
+                      >
+                        <Pictogram name="send" size={space['2xl']} color={SEND_TINT.ink} />
+                      </View>
                       <View style={{ flex: 1 }}>
                         <T variant="label" weight="semibold" numberOfLines={1}>
                           To {o.courierRecipientName ?? o.deliveryAddress ?? 'recipient'}
                         </T>
-                        <T variant="caption" tone="muted" style={{ marginTop: 2 }}>
-                          #{o.orderNumber} · {money(o.totalAmount)}
-                        </T>
+                        <View style={{ flexDirection: 'row', alignItems: 'baseline', gap: space.sm, marginTop: space.xs }}>
+                          <T variant="caption" tone="muted">
+                            #{o.orderNumber}
+                          </T>
+                          <T variant="numM" tone="brand">
+                            {money(o.totalAmount)}
+                          </T>
+                        </View>
                       </View>
                       <TonePill
                         label={prettyStatus(o.status)}

@@ -1,25 +1,84 @@
 /** @jsxImportSource react */
 import React, { useState } from 'react';
-import { ScrollView, TextInput, View } from 'react-native';
+import { Pressable, ScrollView, StyleSheet, TextInput, View } from 'react-native';
 import { Feather } from '@expo/vector-icons';
-import { color, radius, space } from '@swift/ui';
+import { color, font, fontSize, radius, space } from '@swift/ui';
 import { useServiceProviders, useRequestJob } from '../../../hooks';
-import { Card, Chip, DecorativeIcon, EmptyState, Header, IconChip, LinkText, LoadingBlock, PillButton, PopupCard, PopupTitle, RatingMeta, Screen, T, TonePill } from '../../../kit';
+import { Card, DecorativeIcon, EmptyState, Header, IconChip, LinkText, LoadingBlock, Pictogram, PillButton, PopupCard, PopupTitle, RatingMeta, Screen, T, TonePill, type PictogramName } from '../../../kit';
+import { VERTICAL_TINT } from '../../../kit/vertical-tint';
 import { useAuthStore } from '../../../stores/authStore';
 import { enterServiceProvider } from '../serviceProviderEntry';
 
-const TRADES = [
-  'Electrician',
-  'Plumber',
-  'Carpenter',
-  'Cleaner',
-  'AC Repair',
-  'Mechanic',
-  'Painter',
-  'Mason',
-  'Welder',
-  'Gardener',
+type TradeOption = { key: string; label: string; pictogram: PictogramName };
+
+const SERVICES_TINT = VERTICAL_TINT.services ?? { bg: color.brand[50], ink: color.brand[600] };
+
+const TRADES: TradeOption[] = [
+  { key: 'electrician', label: 'Electrician', pictogram: 'electrician' },
+  { key: 'plumber', label: 'Plumber', pictogram: 'plumber' },
+  { key: 'carpenter', label: 'Carpenter', pictogram: 'carpenter' },
+  { key: 'cleaner', label: 'Cleaner', pictogram: 'services' },
+  { key: 'ac_refrigeration', label: 'AC repair', pictogram: 'ac-fridge' },
+  { key: 'mechanic', label: 'Mechanic', pictogram: 'services' },
+  { key: 'painter', label: 'Painter', pictogram: 'painter' },
+  { key: 'mason', label: 'Mason', pictogram: 'mason' },
+  { key: 'welder', label: 'Welder', pictogram: 'services' },
+  { key: 'gardener', label: 'Gardener', pictogram: 'services' },
 ];
+
+type ServiceProvider = {
+  id: string;
+  trade: string;
+  tradeLabel: string;
+  bio: string | null;
+  portfolioPhotos: string[];
+  averageRating: number;
+  totalRatings: number;
+  selfSkilled: boolean;
+  certified: boolean;
+  badges: string[];
+};
+
+type ProviderBrowse = {
+  guidance?: string;
+  riskTier?: 'HIGH' | 'LOW';
+  providers?: ServiceProvider[];
+};
+
+function TradeTile({ option, selected, onPress }: { option: TradeOption; selected: boolean; onPress: () => void }) {
+  return (
+    <Pressable
+      onPress={onPress}
+      accessibilityRole="button"
+      accessibilityLabel={option.label}
+      accessibilityHint="Shows available providers for this trade"
+      accessibilityState={{ selected }}
+      style={{ flexBasis: '47%', flexGrow: 1 }}
+    >
+      {({ pressed }) => (
+        <View
+          style={{
+            minHeight: space['5xl'] * 2,
+            padding: space.lg,
+            borderRadius: radius.lg,
+            borderWidth: selected ? space.xs / 2 : StyleSheet.hairlineWidth,
+            borderColor: selected ? SERVICES_TINT.ink : color.border.subtle,
+            backgroundColor: SERVICES_TINT.bg,
+            opacity: pressed ? 0.82 : 1,
+            alignItems: 'flex-start',
+            justifyContent: 'space-between',
+            flex: 1,
+          }}
+        >
+          <Pictogram name={option.pictogram} size={space['3xl']} color={SERVICES_TINT.ink} />
+          <T variant="label" weight="semibold" style={{ color: SERVICES_TINT.ink, marginTop: space.md }}>
+            {option.label}
+          </T>
+        </View>
+      )}
+    </Pressable>
+  );
+}
 
 export function ServicesScreen({ navigation }: any) {
   const isAuthenticated = useAuthStore((state) => state.isAuthenticated);
@@ -29,10 +88,11 @@ export function ServicesScreen({ navigation }: any) {
   const [description, setDescription] = useState('');
   const [sentPopup, setSentPopup] = useState(false);
 
-  const { data, isFetching, isError } = useServiceProviders<any>(trade);
+  const { data, isFetching, isError } = useServiceProviders<ProviderBrowse>(trade);
   const requestJob = useRequestJob();
 
-  const providers: any[] = data?.providers ?? [];
+  const providers = data?.providers ?? [];
+  const selectedTrade = TRADES.find((option) => option.key === trade);
   const canSend = !!selectedProviderId && description.trim().length >= 10;
   const errMsg = (requestJob.error as any)?.response?.data?.message;
 
@@ -54,27 +114,27 @@ export function ServicesScreen({ navigation }: any) {
     <Screen>
       <Header title="Services" right={<LinkText label="My jobs" onPress={() => navigation?.navigate?.('ServiceJobs')} />} />
       <ScrollView
-        contentContainerStyle={{ paddingHorizontal: space['2xl'], paddingTop: space.sm, paddingBottom: selectedProviderId ? 260 : space['3xl'] }}
+        contentContainerStyle={{ paddingHorizontal: space['2xl'], paddingTop: space.sm, paddingBottom: selectedProviderId ? space['5xl'] * 5 + space.xl : space['3xl'] }}
         showsVerticalScrollIndicator={false}
         keyboardShouldPersistTaps="handled"
       >
         <T variant="title">Hire a pro</T>
         <T variant="body" tone="muted" style={{ marginTop: space.sm, marginBottom: space.lg }}>
-          Verified tradespeople. Quote in chat, pay cash on completion.
+          Verified tradespeople. Discuss the quote in chat, then pay cash on completion.
         </T>
 
         <Card style={{ flexDirection: 'row', alignItems: 'center', gap: space.md, marginBottom: space.xl }}>
           <IconChip icon="briefcase" />
           <View style={{ flex: 1 }}>
             <T variant="label" weight="semibold">Offer your own services</T>
-            <T variant="caption" tone="muted" style={{ marginTop: 2 }}>
+            <T variant="caption" tone="muted" style={{ marginTop: space.xs }}>
               Set up your profile, verification, and provider jobs.
             </T>
           </View>
           <PillButton
             label="Open"
             variant="soft"
-            size="sm"
+            size="md"
             onPress={() => enterServiceProvider({
               isAuthenticated,
               promptLogin,
@@ -83,18 +143,22 @@ export function ServicesScreen({ navigation }: any) {
           />
         </Card>
 
-        {/* Trade chips */}
+        <T variant="heading" style={{ marginBottom: space.sm }}>
+          Choose a trade
+        </T>
+        <T variant="caption" tone="muted" style={{ marginBottom: space.md }}>
+          Pick the work first, then compare verified providers.
+        </T>
         <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: space.md }}>
-          {TRADES.map((t) => (
-            <Chip
-              key={t}
-              label={t}
-              selected={t === trade}
+          {TRADES.map((option) => (
+            <TradeTile
+              key={option.key}
+              option={option}
+              selected={option.key === trade}
               onPress={() => {
-                setTrade(t);
+                setTrade(option.key);
                 setSelectedProviderId(undefined);
               }}
-              style={{ height: 40, paddingHorizontal: space.lg }}
             />
           ))}
         </View>
@@ -109,11 +173,11 @@ export function ServicesScreen({ navigation }: any) {
               marginTop: space.xl,
               padding: space.lg,
               borderRadius: radius.lg,
-              backgroundColor: color.brand[50],
+              backgroundColor: data.riskTier === 'HIGH' ? color.soft.warning : color.soft.info,
             }}
           >
-            <Feather name="shield" size={20} color={color.brand[600]} />
-            <T variant="label" tone="deep" style={{ flex: 1 }}>
+            <Feather name="shield" size={20} color={data.riskTier === 'HIGH' ? color.warning : color.info} />
+            <T variant="label" tone={data.riskTier === 'HIGH' ? 'warning' : 'info'} style={{ flex: 1 }}>
               {data.guidance}
             </T>
           </View>
@@ -129,45 +193,85 @@ export function ServicesScreen({ navigation }: any) {
           <EmptyState
             icon="users"
             title="None available yet"
-            body={`No ${trade.toLowerCase()}s near you yet — check back soon.`}
+            body={`No ${selectedTrade?.label.toLowerCase() ?? 'service'} providers near you yet — check back soon.`}
           />
         ) : (
           <View style={{ marginTop: space.xl, gap: space.md }}>
             {providers.map((p) => {
               const selected = p.id === selectedProviderId;
+              const providerPictogram = TRADES.find((option) => option.key === p.trade)?.pictogram ?? 'services';
               return (
-                <Card key={p.id} style={selected ? { borderWidth: 1, borderColor: color.brand[500] } : undefined}>
+                <Card
+                  key={p.id}
+                  style={selected ? { borderWidth: space.xs / 2, borderColor: SERVICES_TINT.ink } : undefined}
+                >
                   <View style={{ flexDirection: 'row', alignItems: 'flex-start', gap: space.md }}>
-                    <IconChip icon="tool" />
-                    <View style={{ flex: 1 }}>
-                      <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.sm }}>
-                        <T variant="body" weight="semibold" style={{ flexShrink: 1 }}>
-                          {p.certified ? `Certified ${p.trade}` : p.trade}
-                        </T>
-                        {p.certified ? <TonePill label="Licensed" tone="success" /> : null}
-                      </View>
-                      {p.totalRatings > 0 ? (
-                        <View style={{ marginTop: 4 }}>
-                          <RatingMeta rating={Number(p.averageRating)} extra={`${p.totalRatings} ratings`} />
-                        </View>
-                      ) : (
-                        <T variant="caption" tone="muted" style={{ marginTop: 4 }}>
-                          New{p.selfSkilled ? ' · Self-skilled' : ''}
-                        </T>
-                      )}
-                      {p.bio ? (
-                        <T variant="label" tone="muted" numberOfLines={2} style={{ marginTop: 4 }}>
-                          {p.bio}
-                        </T>
-                      ) : null}
+                    <View
+                      accessible={false}
+                      accessibilityElementsHidden
+                      importantForAccessibility="no-hide-descendants"
+                      style={{
+                        width: space['5xl'],
+                        height: space['5xl'],
+                        borderRadius: radius.md,
+                        backgroundColor: SERVICES_TINT.bg,
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                      }}
+                    >
+                      <Pictogram name={providerPictogram} size={space['2xl']} color={SERVICES_TINT.ink} />
                     </View>
-                    <PillButton
-                      label={selected ? 'Selected' : 'Request'}
-                      variant={selected ? 'primary' : 'soft'}
-                      size="sm"
-                      onPress={() => setSelectedProviderId(selected ? undefined : p.id)}
-                    />
+                    <View style={{ flex: 1 }}>
+                      <View style={{ flexDirection: 'row', alignItems: 'center', flexWrap: 'wrap', gap: space.sm }}>
+                        <T variant="heading" style={{ flexShrink: 1 }}>
+                          {p.tradeLabel}
+                        </T>
+                        <TonePill label="Verified" tone="success" />
+                      </View>
+                      <View style={{ marginTop: space.sm }}>
+                        <RatingMeta
+                          rating={p.totalRatings > 0 ? Number(p.averageRating) : null}
+                          extra={p.totalRatings > 0 ? `${p.totalRatings} ratings` : undefined}
+                        />
+                      </View>
+                      <View style={{ marginTop: space.sm }}>
+                        {p.certified ? (
+                          <TonePill label="Certified qualification" tone="neutral" />
+                        ) : (
+                          <T variant="caption" tone="muted">
+                            {p.selfSkilled ? 'Self-skilled' : 'No trade credential shown'}
+                          </T>
+                        )}
+                      </View>
+                    </View>
                   </View>
+                  <View
+                    style={{
+                      marginTop: space.lg,
+                      padding: space.md,
+                      borderRadius: radius.md,
+                      backgroundColor: color.surface.sunken,
+                    }}
+                  >
+                    <T variant="label" weight="semibold">
+                      Discuss quotes in chat
+                    </T>
+                    <T variant="caption" tone="muted" style={{ marginTop: space.xs }}>
+                      Cash on completion, paid directly to the provider.
+                    </T>
+                  </View>
+                  {p.bio ? (
+                    <T variant="label" tone="muted" numberOfLines={2} style={{ marginTop: space.md }}>
+                      {p.bio}
+                    </T>
+                  ) : null}
+                  <PillButton
+                    label={selected ? 'Remove selection' : 'Request this provider'}
+                    variant="soft"
+                    size="md"
+                    style={{ marginTop: space.lg, alignSelf: 'flex-start' }}
+                    onPress={() => setSelectedProviderId(selected ? undefined : p.id)}
+                  />
                 </Card>
               );
             })}
@@ -184,7 +288,7 @@ export function ServicesScreen({ navigation }: any) {
             right: 0,
             bottom: 0,
             backgroundColor: color.surface.base,
-            borderTopWidth: 1,
+            borderTopWidth: StyleSheet.hairlineWidth,
             borderTopColor: color.border.subtle,
             paddingHorizontal: space['2xl'],
             paddingTop: space.lg,
@@ -195,12 +299,12 @@ export function ServicesScreen({ navigation }: any) {
           <View
             style={{
               borderRadius: radius.lg,
-              borderWidth: 1,
+              borderWidth: StyleSheet.hairlineWidth,
               borderColor: color.border.subtle,
               backgroundColor: color.surface.base,
               paddingHorizontal: space.lg,
               paddingVertical: space.md,
-              minHeight: 72,
+              minHeight: space['5xl'] + space['2xl'],
             }}
           >
             <TextInput
@@ -209,7 +313,7 @@ export function ServicesScreen({ navigation }: any) {
               placeholder="Describe the job (at least 10 characters)…"
               placeholderTextColor={color.text.muted}
               multiline
-              style={{ fontFamily: 'Hanken', fontSize: 15, color: color.text.primary, minHeight: 48 }}
+              style={{ fontFamily: font.body, fontSize: fontSize.base, color: color.text.primary, minHeight: space['5xl'] }}
             />
           </View>
           {errMsg ? (
@@ -225,15 +329,15 @@ export function ServicesScreen({ navigation }: any) {
       <PopupCard visible={sentPopup} onClose={() => setSentPopup(false)}>
         <DecorativeIcon
           style={{
-            width: 72,
-            height: 72,
-            borderRadius: 36,
+            width: space['5xl'] + space['2xl'],
+            height: space['5xl'] + space['2xl'],
+            borderRadius: radius.full,
             alignItems: 'center',
             justifyContent: 'center',
             backgroundColor: color.brand[500],
           }}
         >
-          <Feather name="check" size={34} color={color.white} />
+          <Feather name="check" size={space['3xl']} color={color.white} />
         </DecorativeIcon>
         <PopupTitle variant="title" center style={{ marginTop: space.lg }}>
           Request sent
