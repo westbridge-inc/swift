@@ -1,7 +1,7 @@
 import { useMutation, useQuery } from '@tanstack/react-query';
 import { fetchOpsLive, retryDispatch } from '../lib/api';
 
-// Live Ops (spec §5.3) as the FEED: every in-flight order grouped by lane,
+// Live Ops (spec §5.3) as the FEED: every active order grouped by lane,
 // oldest (most stuck) first — the server already orders by placedAt asc.
 // The geographic map lives in the admin console (Leaflet); the desktop feed
 // is the triage surface. 10s poll — this is the closest thing to a firehose
@@ -44,7 +44,7 @@ export default function LiveOps() {
   return (
     <div className="space-y-5">
       <div className="flex gap-4 text-sm text-neutral-600">
-        <span><b className="text-neutral-900">{orders.length}</b> in flight</span>
+        <span><b className="text-neutral-900">{orders.length}</b> active orders</span>
         <span><b className="text-neutral-900">{riders.length}</b> riders online</span>
         <span><b className="text-neutral-900">{drivers.length}</b> taxis online</span>
         <span><b className="text-neutral-900">{busy}</b> busy</span>
@@ -68,7 +68,7 @@ export default function LiveOps() {
 
       {orders.length === 0 && (
         <p className="rounded-2xl border border-dashed border-neutral-200 p-10 text-center text-sm text-neutral-400">
-          Nothing in flight right now.
+          No active orders right now.
         </p>
       )}
 
