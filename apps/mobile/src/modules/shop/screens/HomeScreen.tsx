@@ -44,7 +44,6 @@ import {
 // Per-vertical identity colour lives in the KIT [F-263] — it was a local hex
 // map here once and the no-literal-hex-in-screens rule cleaned it away, which
 // is how the grid ended up as eight identical squares.
-import { VERTICAL_TINT } from '../../../kit/vertical-tint';
 
 const SCREEN_W = Dimensions.get('window').width;
 const GUTTER = space['2xl'];
@@ -99,9 +98,19 @@ function greetingLine(hour: number): string {
 }
 
 function ServiceTile({ item, index, navigation }: { item: (typeof SERVICES)[number]; index: number; navigation: any }) {
-  // Falls back to the house red rather than crashing if a tile is added
-  // without an identity colour — a missing hue is a design gap, not a defect.
-  const tint = VERTICAL_TINT[item.key] ?? { bg: color.brand[50], ink: color.brand[600] };
+  // ONE ACCENT, NOT EIGHT [100x pass §5, Home v2].
+  //
+  // The grid used to give every service its own hue off the F-263 ramp. The
+  // pass retires that: "the 8-tint tile salad is gone: every service sits on
+  // one quiet ground with ink pictograms; Food alone wears the brand fill —
+  // the flagship reads as the flagship, and the screen stops vibrating."
+  // Logged there as a founder decision that supersedes F-263.
+  //
+  // So the hierarchy is carried by ONE tile instead of eight competing ones:
+  // the flagship is filled and its glyph reverses out; everything else is an
+  // ink pictogram on the same quiet ground. Nothing here invents a colour —
+  // the flagship's fill is the brand, and the ground is a surface token.
+  const isFlagship = item.key === 'food';
   return (
     // First-paint stagger [design-100x 9.4 `gentle`]: opacity + a 4dp rise,
     // once per mount, honoring the system reduced-motion setting.
@@ -124,12 +133,12 @@ function ServiceTile({ item, index, navigation }: { item: (typeof SERVICES)[numb
           width: 56,
           height: 56,
           borderRadius: radius.lg,
-          backgroundColor: tint.bg,
+          backgroundColor: isFlagship ? color.brand[500] : color.surface.subtle,
           alignItems: 'center',
           justifyContent: 'center',
         }}
       >
-        <Pictogram name={item.key} size={28} color={tint.ink} />
+        <Pictogram name={item.key} size={28} color={isFlagship ? color.white : color.text.primary} />
       </View>
       <T variant="label" style={{ marginTop: 6 }}>
         {item.label}
