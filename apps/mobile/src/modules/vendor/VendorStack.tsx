@@ -29,6 +29,8 @@ import {
 } from '../../kit';
 import { BrandSwitch } from '../../kit/controls';
 import {
+  BoardFirstRun,
+  BoardFirstRunRow,
   DAY_LABELS,
   DeltaBadge,
   FulfillmentTag,
@@ -60,6 +62,7 @@ import { docLabel } from '../../components/onboarding/DocumentUploadCard';
 import { useBecomePartner, useVerificationStatus } from '../../hooks/verification';
 import {
   useVendorProfile,
+  useVendorOrderHistory,
   useVendorOrders,
   useVendorOrdersLive,
   useToggleOpen,
@@ -531,6 +534,99 @@ const VendorOrderCard = React.memo(function VendorOrderCard({
   );
 }, (prev, next) => prev.order === next.order && prev.busy === next.busy && prev.showStore === next.showStore && prev.docket === next.docket);
 
+/**
+ * THE EMPTY BOARD [UXR-W-003 · audit item 01].
+ *
+ * Owns the decision between "you are new" and "you are quiet", and owns its own
+ * reads so they only ever fire when the board is actually empty — which is the
+ * only moment any of it matters.
+ *
+ * The split is lifetime orders, a real server number (the history endpoint's
+ * own `meta.total`), never a guess. While that number is unknown — loading, or
+ * the read failed — we show the QUIET tile, because claiming someone is brand
+ * new is the more damaging of the two mistakes and an outage already has its
+ * own card upstream.
+ */
+/** The EXPERIENCED quiet board — unchanged, plus the one line that keeps quiet
+ *  from reading as broken. */
+function VendorBoardQuiet() {
+  // One page, for one field: the newest order's timestamp.
+  const historyQ = useVendorOrderHistory({ page: 1 });
+  const lastOrderAt = (historyQ.data as any)?.data?.[0]?.createdAt;
+  return (
+    <View style={{ alignItems: 'center', borderRadius: radius.lg, backgroundColor: color.brand[50], paddingVertical: space.xl, marginBottom: space.xl }}>
+      <MaterialCommunityIcons name="check-circle-outline" size={28} color={color.text.muted} />
+      <T variant="label" tone="muted" style={{ marginTop: space.sm }}>
+        You are all caught up
+      </T>
+      {lastOrderAt ? (
+        <T variant="caption" tone="faint" style={{ marginTop: 2 }}>
+          Last order {fmtClock(lastOrderAt)}
+        </T>
+      ) : null}
+    </View>
+  );
+}
+
+function VendorBoardEmpty({ store, navigation, reachable }: any) {
+  // The profile endpoint already carries `_count.orders` — the store's true
+  // lifetime order count, loaded with the store itself. No extra request, and
+  // no inference: if the count is absent we do NOT guess that someone is new.
+  const lifetimeOrders: number | undefined = store?._count?.orders;
+  const firstMorning = lifetimeOrders === 0;
+
+  // Only the first-morning branch needs these, and it is the branch that runs
+  // once in a store's life.
+  const menuQ = useVendorMenu(firstMorning);
+  const qrQ = useVendorQr(firstMorning);
+
+  if (!firstMorning) return <VendorBoardQuiet />;
+
+  const categories: any[] = (menuQ.data as any) ?? [];
+  const items: any[] = categories.flatMap((c: any) => c.items ?? []);
+  const missingPhotos = items.filter((i: any) => !i.imageUrl).length;
+  const shortUrl = (qrQ.data as any)?.shortUrl;
+  const open = !!store.isCurrentlyOpen;
+
+  return (
+    <BoardFirstRun listening={reachable}>
+      {items.length === 0 ? (
+        <BoardFirstRunRow
+          index={1}
+          label="Add your first item"
+          detail={`Your ${catalogueMeta(store.vendorType).label.toLowerCase()} is empty — nothing to order yet`}
+          onPress={() => navigation.navigate('VendorMenu')}
+        />
+      ) : (
+        <BoardFirstRunRow
+          index={1}
+          label={`Add photos to your ${catalogueMeta(store.vendorType).label.toLowerCase()}`}
+          done={missingPhotos === 0}
+          // Phrased so it stays grammatical at every count, including one.
+          detail={
+            missingPhotos === 0
+              ? `All ${items.length} items have a photo`
+              : `Photos missing on ${missingPhotos} of ${items.length} items`
+          }
+          onPress={() => navigation.navigate('VendorMenu')}
+        />
+      )}
+      <BoardFirstRunRow
+        index={2}
+        label={open ? 'You are open' : 'Your store is closed'}
+        done={open}
+        detail={open ? 'Customers can order right now' : 'Use the switch below to start taking orders'}
+      />
+      <BoardFirstRunRow
+        index={3}
+        label="Share your store link"
+        detail={shortUrl ?? 'Open your QR and link'}
+        onPress={() => navigation.navigate('VendorMyQr')}
+      />
+    </BoardFirstRun>
+  );
+}
+
 function VendorOps({ store, navigation }: any) {
   const toggleOpen = useToggleOpen();
   const toggleOrders = useToggleOrders();
@@ -746,12 +842,7 @@ function VendorOps({ store, navigation }: any) {
             <PillButton label="Retry" size="md" variant="soft" style={{ marginTop: space.md }} onPress={() => ordersQ.refetch()} />
           </View>
         ) : newOrders.length === 0 ? (
-          <View style={{ alignItems: 'center', borderRadius: radius.lg, backgroundColor: color.brand[50], paddingVertical: space.xl, marginBottom: space.xl }}>
-            <MaterialCommunityIcons name="check-circle-outline" size={28} color={color.text.muted} />
-            <T variant="label" tone="muted" style={{ marginTop: space.sm }}>
-              You are all caught up
-            </T>
-          </View>
+          <VendorBoardEmpty store={store} navigation={navigation} reachable={!ordersQ.isError} />
         ) : (
           newOrders.map((o) => (
             <VendorOrderCard

@@ -310,3 +310,143 @@ export function DeltaBadge({ cur, prev }: { cur: number; prev: number | null }) 
     </T>
   );
 }
+
+// ─── The first morning ───────────────────────────────────────────────────────
+
+/**
+ * BOARD FIRST-RUN [UXR-W-003 · audit item 01].
+ *
+ * A vendor who went live an hour ago and a vendor between lunch rushes used to
+ * see exactly the same thing: a small tinted tile, a grey check, and "You are
+ * all caught up". For the first vendor that copy is simply FALSE — they have
+ * never had anything to catch up on — and the board they were sold ("the queue
+ * is the job") opens as a void on the morning it matters most.
+ *
+ * The split is made on a real fact, lifetime orders, not on a guess. Zero-ever
+ * gets this card; everyone else keeps the quiet tile. An outage is neither: the
+ * WR-016 error card still owns that case, because "we cannot reach the board"
+ * must never be dressed as "you are new".
+ *
+ * Anatomy is the house's existing loud voice — the deep-maroon promo treatment,
+ * display face, a watermark pictogram — so it reads as Swift talking, not as an
+ * empty state apologising. Every row states a LIVE fact pulled from the store,
+ * never a static checklist: real photo counts, the real opening state, the real
+ * share link. A row that has nothing true to say does not appear.
+ */
+export function BoardFirstRunRow({
+  index,
+  label,
+  detail,
+  done,
+  onPress,
+}: {
+  index: number;
+  label: string;
+  detail: string;
+  done?: boolean;
+  onPress?: () => void;
+}) {
+  return (
+    <Pressable onPress={onPress} disabled={!onPress} accessibilityRole="button" accessibilityLabel={`${label}. ${detail}`}>
+      {({ pressed }) => (
+        <View
+          style={{
+            flexDirection: 'row',
+            alignItems: 'center',
+            gap: space.md,
+            minHeight: 44,
+            paddingVertical: space.sm,
+            paddingHorizontal: space.md,
+            borderRadius: radius.md,
+            backgroundColor: color.surface.onBrand,
+            opacity: pressed ? 0.85 : 1,
+          }}
+        >
+          <View
+            style={{
+              width: 24,
+              height: 24,
+              borderRadius: 12,
+              alignItems: 'center',
+              justifyContent: 'center',
+              backgroundColor: color.surface.onBrand,
+            }}
+          >
+            {done ? (
+              <Feather name="check" size={14} color={color.white} />
+            ) : (
+              <T variant="micro" weight="bold" tone="onBrand">
+                {index}
+              </T>
+            )}
+          </View>
+          <View style={{ flex: 1 }}>
+            <T variant="label" weight="semibold" tone="onBrand" numberOfLines={1}>
+              {label}
+            </T>
+            <T variant="caption" tone="onBrand" numberOfLines={1} style={{ opacity: 0.82, marginTop: 1 }}>
+              {detail}
+            </T>
+          </View>
+          {onPress ? <Feather name="chevron-right" size={16} color={color.white} style={{ opacity: 0.7 }} /> : null}
+        </View>
+      )}
+    </Pressable>
+  );
+}
+
+export function BoardFirstRun({
+  listening,
+  children,
+}: {
+  /** Bound to whether the board itself is reachable — never hardcoded. */
+  listening: boolean;
+  children: React.ReactNode;
+}) {
+  return (
+    <View
+      style={{
+        borderRadius: radius.lg,
+        backgroundColor: color.brand[600],
+        padding: space.xl,
+        marginBottom: space.xl,
+        overflow: 'hidden',
+      }}
+    >
+      {/* [FOUNDER VETO] A watermark of the `orders` pictogram was built here and
+          PULLED after seeing it on device: that glyph is a receipt, and at 132px
+          its sawtooth hem reads as exactly the toothed ornament the founder
+          vetoed — "the veto generalises: no toothed ornament anywhere". The card
+          carries its weight from the maroon ground, the display face and three
+          live rows; it does not need the texture. Restoring it is one line if
+          the veto is judged not to reach a 10%-opacity watermark. */}
+
+      <T variant="micro" weight="bold" tone="onBrand" style={{ letterSpacing: 1.1, opacity: 0.78 }}>
+        YOUR FIRST ORDER
+      </T>
+      <T variant="title" tone="onBrand" style={{ marginTop: space.xs }}>
+        The board is live.
+      </T>
+      <T variant="body" tone="onBrand" style={{ marginTop: space.sm, opacity: 0.88 }}>
+        Orders land here the second they&apos;re placed, with a sound you can&apos;t miss. These bring the
+        first one sooner:
+      </T>
+
+      <View style={{ gap: space.sm, marginTop: space.lg }}>{children}</View>
+
+      <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.sm, marginTop: space.lg }}>
+        <View
+          style={{
+            width: 7,
+            height: 7,
+            borderRadius: 4,
+            backgroundColor: listening ? color.success : color.warning,
+          }}
+        />
+        <T variant="micro" weight="semibold" tone="onBrand" style={{ letterSpacing: 0.9, opacity: 0.85 }}>
+          {listening ? 'LISTENING FOR ORDERS' : 'RECONNECTING TO THE BOARD'}
+        </T>
+      </View>
+    </View>
+  );
+}
