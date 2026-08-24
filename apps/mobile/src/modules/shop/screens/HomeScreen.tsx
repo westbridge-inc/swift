@@ -28,7 +28,6 @@ import {
   Card,
   ErrorState,
   FoodCard,
-  GradientMasthead,
   LoadingBlock,
   MerchantCard,
   Photo,
@@ -223,28 +222,57 @@ export function HomeScreen() {
           screen — it decides which stores can even reach you — so the pill
           leads, the greeting follows as the one display-face line, and search
           closes the block. */}
-      {/* FOUNDER VETO 08-22: the awning scallop ("the bump under the search
-          bar") is GONE — the register called it Home's signature; the
-          founder called it what it was. A clean 28dp sheet edge instead. */}
-      <GradientMasthead style={{ paddingTop: insets.top, paddingBottom: space.lg, paddingHorizontal: GUTTER }}>
+      {/* THE CHROME IS PAPER, NOT BRAND — read off the rendered design slides.
+          Home had a full-bleed maroon gradient slab holding a white greeting
+          and a white search pill. There is no such slab in the design: the top
+          of the screen is the same warm paper as the rest of it, with a
+          hairline-bordered location pill, an INK greeting, and a white search
+          field. This is the difference that made every earlier fix still look
+          the same — the furniture kept moving inside a room that shouldn't
+          exist. GradientMasthead survives and is still used by five other
+          screens; Home just stops reaching for it. */}
+      <View style={{ paddingTop: insets.top, paddingBottom: space.lg, paddingHorizontal: GUTTER, backgroundColor: color.surface.subtle }}>
         <View style={{ flexDirection: 'row', alignItems: 'center' }}>
           <Pressable
             onPress={() => (isAuthenticated ? navigation.navigate('Addresses') : navigation.navigate('LocationPicker'))}
-            style={{ flex: 1, paddingRight: space.md }}
+            style={{ paddingRight: space.md, flexShrink: 1 }}
           >
-            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4 }}>
-              <Feather name="map-pin" size={14} color={color.white} style={{ opacity: 0.85 }} />
-              <T variant="label" weight="semibold" tone="onBrand" numberOfLines={1} style={{ flexShrink: 1 }}>
+            {/* A PILL, not a bare label — hairline border, paper fill. It reads
+                as the control it is, which also stops "Set your location" from
+                looking like an address someone already filled in. */}
+            <View
+              style={{
+                flexDirection: 'row',
+                alignItems: 'center',
+                gap: 4,
+                alignSelf: 'flex-start',
+                paddingVertical: space.xs,
+                paddingHorizontal: space.md,
+                borderRadius: radius.full,
+                borderWidth: 1,
+                borderColor: color.border.subtle,
+                backgroundColor: color.surface.base,
+              }}
+            >
+              <Feather name="map-pin" size={14} color={color.text.primary} />
+              <T variant="label" weight="semibold" numberOfLines={1} style={{ flexShrink: 1 }}>
                 {locationFix ? (address ?? 'Current location') : 'Set your location'}
               </T>
-              <Feather name="chevron-down" size={15} color={color.white} style={{ opacity: 0.8 }} />
+              <Feather name="chevron-down" size={15} color={color.text.muted} />
             </View>
           </Pressable>
+          <View style={{ flex: 1 }} />
           <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.md }}>
-              <Pressable onPress={() => navigation.navigate('Notifications')} hitSlop={8}>
-                <View style={{ width: 40, height: 40, borderRadius: 20, alignItems: 'center', justifyContent: 'center', backgroundColor: color.surface.onBrand }}>
-                  <Feather name="bell" size={18} color={color.white} />
-                </View>
+              {/* The bell loses its filled circle but KEEPS a 44pt target —
+                  hitSlop compensates for the smaller glyph, or this becomes a
+                  36pt tap area and fails the accessibility minimum. */}
+              <Pressable
+                onPress={() => navigation.navigate('Notifications')}
+                hitSlop={14}
+                accessibilityRole="button"
+                accessibilityLabel="Notifications"
+              >
+                <Feather name="bell" size={22} color={color.text.primary} />
               </Pressable>
               <Pressable onPress={() => navigation.navigate('Tabs', { screen: 'Profile' })}>
                 {user?.avatar && !avatarBroken ? (
@@ -253,10 +281,10 @@ export function HomeScreen() {
                     // A dead/expired avatar URL must never leave a nameless
                     // blank circle — fall back to the monogram [visual pass 08-19].
                     onError={() => setAvatarBroken(true)}
-                    style={{ width: 40, height: 40, borderRadius: 20, backgroundColor: color.brand[50] }}
+                    style={{ width: 40, height: 40, borderRadius: radius.full, backgroundColor: color.brand[50] }}
                   />
                 ) : (
-                  <View style={{ width: 40, height: 40, borderRadius: 20, backgroundColor: color.surface.base, alignItems: 'center', justifyContent: 'center' }}>
+                  <View style={{ width: 40, height: 40, borderRadius: radius.full, backgroundColor: color.brand[50], alignItems: 'center', justifyContent: 'center' }}>
                     <T variant="body" weight="bold" tone="brand">
                       {(user?.firstName?.[0] ?? 'S').toUpperCase()}
                     </T>
@@ -266,14 +294,14 @@ export function HomeScreen() {
           </View>
         </View>
 
-        {/* Home's ONE display-face line. It follows the pill now — you are
-            greeted after you know where you are being greeted. */}
-        <T variant="heading" tone="onBrand" numberOfLines={1} style={{ marginTop: space.sm }}>
+        {/* Home's ONE display-face line — now in INK, on paper. */}
+        <T variant="title" numberOfLines={1} style={{ marginTop: space.md }}>
           {greetingLine(new Date().getHours())}
           {user?.firstName?.trim() ? `, ${user.firstName.trim()}` : ''}
         </T>
 
-        {/* Search — the front door on every super app */}
+        {/* Search — the front door on every super app. White field, hairline
+            border: on paper it needs an edge to read as a field at all. */}
         <Pressable onPress={() => navigation.navigate('Search')} style={{ marginTop: space.md }}>
           {({ pressed }) => (
             <View
@@ -285,6 +313,8 @@ export function HomeScreen() {
                 borderRadius: radius.full,
                 paddingHorizontal: space.lg,
                 backgroundColor: color.surface.base,
+                borderWidth: 1,
+                borderColor: color.border.subtle,
                 opacity: pressed ? 0.92 : 1,
               }}
             >
@@ -295,7 +325,7 @@ export function HomeScreen() {
             </View>
           )}
         </Pressable>
-      </GradientMasthead>
+      </View>
 
       <ScrollView
         showsVerticalScrollIndicator={false}
