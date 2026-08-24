@@ -1,22 +1,21 @@
 /** @jsxImportSource react */
 import React, { useEffect, useRef, useState } from 'react';
-import { Dimensions, Pressable, ScrollView, View } from 'react-native';
-import MapView, { Marker, Polyline } from 'react-native-maps';
+import { AccessibilityInfo, AppState, Pressable, ScrollView, StyleSheet, View, useWindowDimensions } from 'react-native';
+import MapView, { Marker } from 'react-native-maps';
 import { Image } from 'expo-image';
 import Svg, { Circle } from 'react-native-svg';
 import { openExternal } from '../../../lib/openExternal';
 import Animated, {
   Easing,
+  ReduceMotion,
   useAnimatedProps,
   useSharedValue,
-  withRepeat,
-  withSequence,
   withTiming,
 } from 'react-native-reanimated';
 import { Feather } from '@expo/vector-icons';
-import { useNavigation, useRoute } from '@react-navigation/native';
+import { useIsFocused, useNavigation, useRoute } from '@react-navigation/native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { color, motion, radius, space } from '@swift/ui';
+import { color, elevation, motion, radius, space } from '@swift/ui';
 import { useMutation } from '@tanstack/react-query';
 import { useOrder, useDecideSubstitution } from '../../../hooks/customer';
 import { customerApi, courierApi } from '../../../services/api';
@@ -25,196 +24,411 @@ import { money } from '../../../lib/money';
 import { haptic } from '../../../lib/haptics';
 import { openMmgPaymentAction, safeMmgPaymentActionUrl } from '../../../lib/payLink';
 import { toast } from '../../../components/ui/toast';
-import { holdRingActive, holdRingCaption } from './hold-ring';
+import { holdRingCaption, holdRingWindow } from './hold-ring';
 import { CircleChip, DecorativeIcon, ErrorState, IconChip, InfoRow, LoadingBlock, PillButton, PopupCard, PopupTitle, T } from '../../../kit';
+import { VERTICAL_TINT } from '../../../kit/vertical-tint';
+import { STALE_AFTER_MS } from '../../movement/map/interpolation';
 
-const { height: SCREEN_H } = Dimensions.get('window');
 const GUTTER = space['2xl'];
+const ORDER_TINT = VERTICAL_TINT.orders ?? { bg: color.brand[50], ink: color.brand[600] };
+const SEND_TINT = VERTICAL_TINT.send ?? ORDER_TINT;
+const SERVICES_TINT = VERTICAL_TINT.services ?? ORDER_TINT;
+const LIVE_TRACKING_STATUSES = new Set([
+  'RIDER_ASSIGNED',
+  'RIDER_EN_ROUTE_PICKUP',
+  'RIDER_ARRIVED_PICKUP',
+  'PICKED_UP',
+  'EN_ROUTE_DELIVERY',
+  'ARRIVED',
+  'DRIVER_ASSIGNED',
+  'DRIVER_EN_ROUTE',
+  'DRIVER_ARRIVED',
+  'RIDE_IN_PROGRESS',
+]);
+const LIVE_ETA_STATUSES = new Set([
+  'RIDER_ASSIGNED',
+  'RIDER_EN_ROUTE_PICKUP',
+  'DRIVER_ASSIGNED',
+  'DRIVER_EN_ROUTE',
+]);
 
-// Order status → kit stage index (35–38): placed · preparing · oncoming · done.
-// The four words are fulfillment-specific — a booked haircut is not "On the
-// way / Delivered" (D8-07). Same stage indices, right vocabulary per journey.
-const STAGES_BY_FULFILLMENT = {
-  DELIVERY: [
-    { icon: 'clipboard' as const, label: 'Placed' },
-    { icon: 'coffee' as const, label: 'Preparing' },
-    { icon: 'navigation' as const, label: 'On the way' },
-    { icon: 'check' as const, label: 'Delivered' },
-  ],
-  PICKUP: [
-    { icon: 'clipboard' as const, label: 'Placed' },
-    { icon: 'coffee' as const, label: 'Preparing' },
-    { icon: 'shopping-bag' as const, label: 'Ready' },
-    { icon: 'check' as const, label: 'Picked up' },
-  ],
-  APPOINTMENT: [
-    { icon: 'clipboard' as const, label: 'Booked' },
-    { icon: 'check-circle' as const, label: 'Confirmed' },
-    { icon: 'clock' as const, label: 'In progress' },
-    { icon: 'check' as const, label: 'Completed' },
-  ],
-} as const;
+type MapCoordinate = { latitude: number; longitude: number };
 
-function stagesFor(fulfillment?: string) {
-  return STAGES_BY_FULFILLMENT[fulfillment as keyof typeof STAGES_BY_FULFILLMENT] ?? STAGES_BY_FULFILLMENT.DELIVERY;
+function validMapCoordinate(latitudeRaw: unknown, longitudeRaw: unknown): MapCoordinate | null {
+  if (latitudeRaw == null || longitudeRaw == null) return null;
+  const latitude = Number(latitudeRaw);
+  const longitude = Number(longitudeRaw);
+  if (
+    !Number.isFinite(latitude)
+    || !Number.isFinite(longitude)
+    || Math.abs(latitude) > 90
+    || Math.abs(longitude) > 180
+  ) return null;
+  return { latitude, longitude };
 }
 
-function stageFor(status?: string): number {
-  switch (status) {
-    case 'PENDING':
-    case 'ACCEPTED':
-      return 0;
-    case 'PREPARING':
-    case 'READY':
-      return 1;
-    case 'RIDER_ASSIGNED':
-    case 'PICKED_UP':
-      return 2;
-    case 'DELIVERED':
-    case 'COMPLETED':
-      return 3;
-    default:
-      return 0;
+function isTerminalOrderSnapshot(order: any): boolean {
+  const status = String(order?.status ?? '').toUpperCase();
+  return ['CANCELLED', 'REFUNDED', 'FAILED', 'DELIVERED', 'COMPLETED'].includes(status)
+    || (order?.fulfillment === 'PICKUP' && status === 'PICKED_UP');
+}
+
+type ServerTimelineEntry = { status?: string; timestamp?: string | null; note?: string | null };
+type TimelineStep = {
+  key: string;
+  label: string;
+  description: string;
+  doneDescription?: string;
+  upcomingDescription?: string;
+  icon: React.ComponentProps<typeof Feather>['name'];
+  timestamp?: string | null;
+};
+
+function formatServerTime(value?: string | null): string | null {
+  if (!value) return null;
+  const date = new Date(value);
+  if (!Number.isFinite(date.getTime())) return null;
+  return date.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+}
+
+function humanStatus(status: string): string {
+  return status.toLowerCase().replace(/_/g, ' ').replace(/^\w/, (letter) => letter.toUpperCase());
+}
+
+function timelineIndex(order: any, holdActive: boolean, releasePending: boolean): number | null {
+  if (holdActive) return 1;
+  if (releasePending) return 1;
+  const status = String(order.status ?? '').toUpperCase();
+  const pickup = order.fulfillment === 'PICKUP';
+  const courier = order.orderType === 'COURIER';
+  if (['DELIVERED', 'COMPLETED'].includes(status) || (pickup && status === 'PICKED_UP')) return 4;
+  if (pickup && status === 'READY_FOR_PICKUP') return 3;
+  if (['PICKED_UP', 'EN_ROUTE_DELIVERY', 'ARRIVED', 'RIDE_IN_PROGRESS'].includes(status)) return 3;
+  if (courier && status === 'RIDER_ASSIGNED') return 2;
+  if (courier && ['RIDER_EN_ROUTE_PICKUP', 'RIDER_ARRIVED_PICKUP'].includes(status)) return 3;
+  if (status === 'DRIVER_ASSIGNED') return 2;
+  if (['DRIVER_EN_ROUTE', 'DRIVER_ARRIVED', 'RIDER_ASSIGNED', 'RIDER_EN_ROUTE_PICKUP', 'RIDER_ARRIVED_PICKUP'].includes(status)) return 3;
+  if (['ACCEPTED', 'PREPARING'].includes(status) || (!courier && status === 'READY_FOR_PICKUP')) return 2;
+  if (['PENDING', 'READY_FOR_PICKUP'].includes(status)) return 1;
+  return null;
+}
+
+function TrackingTimeline({ order, holdActive, releasePending }: { order: any; holdActive: boolean; releasePending: boolean }) {
+  const currentIndex = timelineIndex(order, holdActive, releasePending);
+  const pickup = order.fulfillment === 'PICKUP';
+  const appointment = order.fulfillment === 'APPOINTMENT';
+  const courier = order.orderType === 'COURIER';
+  const status = String(order.status ?? '').toUpperCase();
+  const vendorName = order.vendor?.name ?? 'the store';
+  const entries = (order.timeline ?? []) as ServerTimelineEntry[];
+  const eventTime = (statuses: string[]) => entries.find((entry) => entry.status && statuses.includes(entry.status))?.timestamp;
+  const sentLabel = holdActive
+    ? 'Held before sending'
+    : releasePending
+      ? courier ? 'Sending to nearby riders' : appointment ? 'Sending to the provider' : 'Sending to the store'
+      : courier ? 'Sent to nearby riders' : appointment ? 'Sent to the provider' : 'Sent to the store';
+  const acceptedRecorded = !!(order.acceptedAt || eventTime(['ACCEPTED']));
+  const preparationStarted = !!(order.preparingAt || eventTime(['PREPARING']));
+  const preparationFinished = !!(order.readyAt || eventTime(['READY_FOR_PICKUP']))
+    || ['PICKED_UP', 'EN_ROUTE_DELIVERY', 'ARRIVED', 'DELIVERED', 'COMPLETED'].includes(status);
+  let transitLabel = 'On the way';
+  let transitDescription = order.rider
+    ? `${order.rider.firstName ?? 'Your rider'} is handling this delivery.`
+    : 'Live rider tracking appears after assignment and a GPS fix.';
+  if (pickup) {
+    transitLabel = 'Ready';
+    transitDescription = 'Show the pickup code at the counter.';
+  } else if (appointment) {
+    transitLabel = 'In progress';
+    transitDescription = 'The booked work is underway.';
+  } else if (courier && ['RIDER_ASSIGNED', 'DRIVER_ASSIGNED'].includes(status)) {
+    transitLabel = 'Heading to pickup';
+    transitDescription = 'This step begins when the assigned rider sets off.';
+  } else if (['RIDER_ASSIGNED', 'DRIVER_ASSIGNED'].includes(status)) {
+    transitLabel = 'Rider assigned';
+    transitDescription = 'The rider is assigned. The next server update will show when they set off.';
+  } else if (['RIDER_EN_ROUTE_PICKUP', 'DRIVER_EN_ROUTE'].includes(status)) {
+    transitLabel = 'Rider heading to pickup';
+    transitDescription = 'The rider is heading to the pickup.';
+  } else if (['RIDER_ARRIVED_PICKUP', 'DRIVER_ARRIVED'].includes(status)) {
+    transitLabel = 'Rider at pickup';
+    transitDescription = 'The rider reached the pickup.';
+  } else if (status === 'PICKED_UP') {
+    transitLabel = 'Picked up';
+    transitDescription = 'The rider has the order. Waiting for the server to confirm the delivery leg.';
+  } else if (status === 'ARRIVED') {
+    transitLabel = 'Rider arrived';
+    transitDescription = 'The rider reached the delivery address.';
   }
-}
+  const steps: TimelineStep[] = [
+    {
+      key: 'placed',
+      label: courier ? 'Requested' : appointment ? 'Booked' : 'Placed',
+      description: 'The server received your request.',
+      upcomingDescription: 'The server will record the request here.',
+      icon: 'clipboard',
+      timestamp: order.placedAt,
+    },
+    {
+      key: 'sent',
+      label: sentLabel,
+      description: holdActive
+        ? courier
+          ? 'The rider search starts only when the ring closes.'
+          : `Until the ring closes, ${appointment ? 'the provider' : vendorName} hasn’t been told.`
+        : releasePending
+          ? 'The timer ended. Waiting for the server to confirm release.'
+          : courier
+            ? 'The request is visible to eligible riders.'
+            : `${appointment ? 'The provider' : vendorName} can see the request now.`,
+      doneDescription: courier
+        ? 'The server released the request to eligible riders.'
+        : `${appointment ? 'The provider' : vendorName} received the request.`,
+      upcomingDescription: courier
+        ? 'The server will release the request to eligible riders.'
+        : `${appointment ? 'The provider' : vendorName} will receive the request after the hold.`,
+      icon: 'send',
+    },
+    {
+      key: 'preparing',
+      label: courier
+        ? 'Rider assigned'
+        : appointment
+          ? 'Confirmed'
+          : status === 'READY_FOR_PICKUP'
+            ? 'Ready for pickup'
+            : preparationStarted
+              ? 'Preparing'
+              : acceptedRecorded || status === 'ACCEPTED' ? 'Accepted' : 'Preparing',
+      description: courier
+        ? 'The assigned rider appears here when the server confirms them.'
+        : appointment
+          ? 'The provider has confirmed the booking.'
+          : status === 'READY_FOR_PICKUP'
+            ? pickup
+              ? 'The order is ready for collection.'
+              : 'The order is ready and waiting for a rider.'
+            : preparationStarted
+              ? `${vendorName} is working on your order.`
+              : `${vendorName} accepted the order; preparation is next.`,
+      doneDescription: courier
+        ? 'The server assigned a rider.'
+        : appointment
+          ? 'The provider confirmed the booking.'
+          : `${vendorName} finished this step.`,
+      upcomingDescription: courier
+        ? 'The assigned rider will appear after the server confirms them.'
+        : appointment
+          ? 'The provider will confirm the booking here.'
+          : `${vendorName} will accept and prepare the order here.`,
+      icon: courier ? 'user-check' : appointment ? 'check-circle' : 'coffee',
+      timestamp: courier
+        ? eventTime(['RIDER_ASSIGNED', 'RIDER_EN_ROUTE_PICKUP'])
+        : order.preparingAt ?? order.acceptedAt,
+    },
+    {
+      key: 'transit',
+      label: transitLabel,
+      description: transitDescription,
+      doneDescription: pickup
+        ? 'The order was ready for collection.'
+        : appointment
+          ? 'The booked work finished.'
+          : 'The delivery completed its travel step.',
+      upcomingDescription: pickup
+        ? 'The store will mark the order ready for collection.'
+        : appointment
+          ? 'The booked work will appear here when it begins.'
+          : 'Live rider tracking will appear after assignment and a GPS fix.',
+      icon: pickup ? 'shopping-bag' : appointment ? 'clock' : 'navigation',
+      timestamp: pickup ? order.readyAt : order.pickedUpAt ?? eventTime(['EN_ROUTE_DELIVERY']),
+    },
+    {
+      key: 'complete',
+      label: pickup ? 'Picked up' : appointment ? 'Completed' : 'Delivered',
+      description: pickup ? 'The store confirms collection.' : appointment ? 'The booking is complete.' : 'The delivery is complete.',
+      doneDescription: pickup ? 'The store confirmed collection.' : appointment ? 'The server marked the booking complete.' : 'The server marked the delivery complete.',
+      upcomingDescription: pickup ? 'The store will confirm collection here.' : appointment ? 'The server will mark the booking complete here.' : 'The server will mark the delivery complete here.',
+      icon: 'check',
+      timestamp: pickup ? order.pickedUpAt : order.deliveredAt,
+    },
+  ];
 
-/** Opacity-only pulse for the CURRENT stage step (design-100×: gentle, once
- *  per cycle, nothing else moves). */
-function PulseIcon({ active, children }: { active: boolean; children: React.ReactNode }) {
-  const o = useSharedValue(1);
-  useEffect(() => {
-    if (active) {
-      o.value = withRepeat(
-        withSequence(
-          withTiming(0.5, { duration: motion.duration.gentle * 2 }),
-          withTiming(1, { duration: motion.duration.gentle * 2 }),
-        ),
-        -1,
-      );
-    } else {
-      o.value = withTiming(1, { duration: motion.duration.fast });
-    }
-  }, [active, o]);
-  const style = { opacity: o };
-  return <Animated.View style={style}>{children}</Animated.View>;
-}
-
-function StageBar({ stage, fulfillment }: { stage: number; fulfillment?: string }) {
   return (
-    <View style={{ flexDirection: 'row', alignItems: 'center' }}>
-      {stagesFor(fulfillment).map((s, i) => {
-        const done = i < stage;
-        const current = i === stage;
-        const tint = done || current ? color.brand[500] : color.text.muted;
-        return (
-          <React.Fragment key={s.label}>
-            {i > 0 ? (
-              <View
-                style={{
-                  flex: 1,
-                  height: 2,
-                  marginHorizontal: 6,
-                  borderRadius: 1,
-                  backgroundColor: done || current ? color.brand[300] : color.border.subtle,
-                }}
-              />
-            ) : null}
-            <View style={{ alignItems: 'center', gap: 4 }}>
-              <PulseIcon active={current}>
+    <View style={{ marginTop: space['2xl'] }}>
+      <T variant="micro" tone="faint" accessibilityRole="header">Where it stands</T>
+      {currentIndex == null ? (
+        <View style={{ flexDirection: 'row', alignItems: 'flex-start', gap: space.sm, marginTop: space.md, padding: space.md, borderRadius: radius.md, backgroundColor: color.soft.info }}>
+          <Feather name="info" size={18} color={color.info} />
+          <T variant="label" tone="info" style={{ flex: 1 }}>
+            Current server status: {humanStatus(String(order.status ?? 'unknown'))}.
+          </T>
+        </View>
+      ) : null}
+      <View style={{ marginTop: space.lg }}>
+        {steps.map((step, index) => {
+          let done = currentIndex == null ? index === 0 : index < currentIndex;
+          let current = currentIndex === index;
+          // Rider dispatch can run alongside kitchen preparation. A rider
+          // status must not check off Preparing unless a server prep fact did.
+          if (step.key === 'preparing' && !courier && !appointment && currentIndex != null && currentIndex >= 2) {
+            if (currentIndex === 2) {
+              done = false;
+              current = true;
+            } else {
+              done = preparationFinished;
+              current = !done && (preparationStarted || acceptedRecorded);
+            }
+          }
+          const time = formatServerTime(step.timestamp);
+          const state = done ? 'Complete' : current ? 'Current' : 'Upcoming';
+          const description = done
+            ? step.doneDescription ?? step.description
+            : current
+              ? step.description
+              : step.upcomingDescription ?? step.description;
+          return (
+            <View
+              key={step.key}
+              accessible
+              accessibilityLabel={`${step.label}. ${state}${time ? ` at ${time}` : ''}. ${description}`}
+              style={{ flexDirection: 'row', alignItems: 'stretch' }}
+            >
+              <View style={{ width: space['3xl'], alignItems: 'center' }}>
                 <View
                   style={{
-                    width: 34,
-                    height: 34,
-                    borderRadius: 17,
+                    width: space['2xl'],
+                    height: space['2xl'],
+                    borderRadius: radius.full,
                     alignItems: 'center',
                     justifyContent: 'center',
-                    backgroundColor: done || current ? color.brand[50] : color.surface.subtle,
-                    borderWidth: current ? 1.5 : 0,
-                    borderColor: color.brand[500],
+                    backgroundColor: current ? color.brand[500] : done ? color.brand[50] : color.surface.sunken,
+                    borderWidth: current ? space.xs / 2 : StyleSheet.hairlineWidth,
+                    borderColor: done || current ? color.brand[500] : color.border.strong,
                   }}
                 >
-                  <Feather name={s.icon} size={15} color={tint} />
+                  <Feather name={done ? 'check' : step.icon} size={13} color={current ? color.white : done ? color.brand[600] : color.text.muted} />
                 </View>
-              </PulseIcon>
-              <T variant="caption" tone={done || current ? 'deep' : 'faint'}>
-                {s.label}
-              </T>
+                {index < steps.length - 1 ? (
+                  <View style={{ flex: 1, width: StyleSheet.hairlineWidth, minHeight: space['3xl'], backgroundColor: done ? color.brand[200] : color.border.subtle }} />
+                ) : null}
+              </View>
+              <View style={{ flex: 1, paddingLeft: space.sm, paddingBottom: index < steps.length - 1 ? space.xl : 0 }}>
+                <View style={{ flexDirection: 'row', alignItems: 'baseline', justifyContent: 'space-between', gap: space.md }}>
+                  <T variant="body" weight={current ? 'semibold' : 'medium'} tone={done || current ? 'ink' : 'faint'}>
+                    {step.label}
+                  </T>
+                  {time ? <T variant="caption" tone="muted">{time}</T> : null}
+                </View>
+                <T variant="caption" tone={current ? 'muted' : 'faint'} style={{ marginTop: space.xs }}>
+                  {description}
+                </T>
+              </View>
             </View>
-          </React.Fragment>
-        );
-      })}
+          );
+        })}
+      </View>
     </View>
   );
 }
 
-// Kit Delivery (35–39): live map + route on top, sheet w/ rider card, delivery
-// time, stage bar, order lines. Live courier via socket (rider:location uses
+// Kit Delivery (35–39): honest map state on top, sheet w/ rider card, vertical
+// timeline and order lines. Live courier via socket (rider:location uses
 // {lat,lng}; driver:location uses {latitude,longitude} — different keys!) with
 // a 15s poll as fallback; order:status_changed refetches.
 
 const AnimatedCircle = Animated.createAnimatedComponent(Circle);
-const RING_R = 45;
+const RING_SIZE = space['5xl'] * 2;
+const RING_STROKE = space.xs + space.xs / 2;
+const RING_CENTER = RING_SIZE / 2;
+const RING_R = (RING_SIZE - RING_STROKE) / 2;
 const RING_C = 2 * Math.PI * RING_R;
 
-/** THE HOLD RING (design-100× Part 5 moment 1): Swift's free-cancel window as
- *  a 96dp draining ring — brand stroke on a brand track, mm:ss in displayXl
+/** THE HOLD RING (design-100× Part 5 moment 1): the cancellation window as
+ *  a draining ring — brand stroke on a brand track, mm:ss in displayXl
  *  tabular at its center, server-timestamped, one linear sweep per second.
  *  At 0:30 the ring, digits and copy shift to warning and the warn haptic
  *  fires once. The ticking is information, not decoration. No fake movement:
  *  when the window ends the order refetches and the timeline takes over. */
 export function HoldRing({
   holdExpiresAt,
-  createdAt,
-  vendorName,
+  placedAt,
+  releaseLead,
+  cancellationCaption,
   onExpire,
-  mmgAmbiguous,
   hidden,
 }: {
   holdExpiresAt?: string | null;
-  createdAt?: string | null;
-  vendorName?: string;
+  placedAt?: string | null;
+  releaseLead: string;
+  cancellationCaption: string;
   onExpire: () => void;
-  /** [REPORT-009 F-01 / REPORT-010 F-04] MOBILE_MONEY + PENDING: the pay link
-   *  opened at checkout, so "cancelling is free" may be FALSE. REQUIRED (no
-   *  default) so deleting the call-site wiring is a compile error, not a
-   *  silently restored defect. */
-  mmgAmbiguous: boolean;
   /** A cancelled order keeps its future holdExpiresAt — never show a live
    *  "you can still cancel" ring over the cancelled banner. REQUIRED. */
   hidden: boolean;
 }) {
-  const [, tick] = useState(0);
+  const [now, setNow] = useState(() => Date.now());
+  const [appIsActive, setAppIsActive] = useState(
+    () => AppState.currentState !== 'background' && AppState.currentState !== 'inactive',
+  );
   const warned = useRef(false);
-  const expiresMs = holdExpiresAt ? new Date(holdExpiresAt).getTime() : 0;
-  const totalMs = Math.max(1000, expiresMs - (createdAt ? new Date(createdAt).getTime() : expiresMs - 300_000));
-  const remainingMs = Math.max(0, expiresMs - Date.now());
-  const remaining = Math.floor(remainingMs / 1000);
-  const active = holdRingActive(holdExpiresAt, Date.now(), hidden);
-  const warn = active && remaining <= 30;
+  const expired = useRef(false);
+  const onExpireRef = useRef(onExpire);
+  onExpireRef.current = onExpire;
+  const hiddenForClock = hidden || !appIsActive;
+  const serverWindow = holdRingWindow(holdExpiresAt, placedAt, now, hiddenForClock);
+  const remainingMs = serverWindow?.remainingMs ?? 0;
+  const remaining = Math.ceil(remainingMs / 1000);
+  const active = serverWindow != null;
+  const warn = active && remainingMs <= 30_000;
 
-  const progress = useSharedValue(Math.min(1, remainingMs / totalMs));
+  const progress = useSharedValue(serverWindow?.progress ?? 0);
+
+  useEffect(() => {
+    const subscription = AppState.addEventListener('change', (state) => {
+      const isActive = state === 'active';
+      setAppIsActive(isActive);
+      if (isActive) setNow(Date.now());
+    });
+    return () => subscription.remove();
+  }, []);
+
+  useEffect(() => {
+    warned.current = false;
+    expired.current = false;
+    const windowAtReset = holdRingWindow(holdExpiresAt, placedAt, Date.now(), hiddenForClock);
+    progress.value = windowAtReset?.progress ?? 0;
+  }, [hiddenForClock, holdExpiresAt, placedAt, progress]);
 
   useEffect(() => {
     if (!active) return;
     const t = setInterval(() => {
-      tick((n) => n + 1);
-      const rem = new Date(holdExpiresAt!).getTime() - Date.now();
-      progress.value = withTiming(Math.max(0, Math.min(1, rem / totalMs)), {
-        duration: 1000,
+      const currentNow = Date.now();
+      const next = holdRingWindow(holdExpiresAt, placedAt, currentNow, hiddenForClock);
+      setNow(currentNow);
+      progress.value = withTiming(next?.progress ?? 0, {
+        duration: motion.duration.moment,
         easing: Easing.linear,
+        reduceMotion: ReduceMotion.System,
       });
-      if (rem <= 0) onExpire();
+      if (!next && !expired.current) {
+        expired.current = true;
+        onExpireRef.current();
+      }
     }, 1000);
     return () => clearInterval(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [active, holdExpiresAt]);
+  }, [active, hiddenForClock, holdExpiresAt, placedAt]);
 
   useEffect(() => {
     if (warn && !warned.current) {
       warned.current = true;
       haptic.warn();
+      AccessibilityInfo.announceForAccessibility(
+        `Closing soon. Cancel now if you’ve changed your mind. ${cancellationCaption}`,
+      );
     }
-  }, [warn]);
+  }, [cancellationCaption, warn]);
 
   const ringProps = useAnimatedProps(() => ({
     strokeDashoffset: RING_C * (1 - progress.value),
@@ -226,21 +440,25 @@ export function HoldRing({
   const hue = warn ? color.warning : color.brand[500];
 
   return (
-    <View style={{ alignItems: 'center', paddingVertical: space.md, marginBottom: space.md }}>
-      <View style={{ width: 96, height: 96, alignItems: 'center', justifyContent: 'center' }}>
-        <Svg width={96} height={96} viewBox="0 0 96 96" style={{ position: 'absolute' }}>
-          <Circle cx={48} cy={48} r={RING_R} stroke={color.brand[100]} strokeWidth={6} fill="none" />
+    <View
+      accessible
+      accessibilityLabel={`${remaining <= 0 ? 'Hold closing' : `${Math.floor(remaining / 60)} minutes ${remaining % 60} seconds remaining`}. ${releaseLead} when the countdown closes.${warn ? ' Closing soon. Cancel now if you’ve changed your mind.' : ''} ${cancellationCaption}`}
+      style={{ alignItems: 'center', paddingVertical: space.md, marginBottom: space.md }}
+    >
+      <View style={{ width: RING_SIZE, height: RING_SIZE, alignItems: 'center', justifyContent: 'center' }}>
+        <Svg width={RING_SIZE} height={RING_SIZE} viewBox={`0 0 ${RING_SIZE} ${RING_SIZE}`} style={{ position: 'absolute' }}>
+          <Circle cx={RING_CENTER} cy={RING_CENTER} r={RING_R} stroke={color.brand[100]} strokeWidth={RING_STROKE} fill="none" />
           <AnimatedCircle
-            cx={48}
-            cy={48}
+            cx={RING_CENTER}
+            cy={RING_CENTER}
             r={RING_R}
             stroke={hue}
-            strokeWidth={6}
+            strokeWidth={RING_STROKE}
             fill="none"
             strokeLinecap="round"
             strokeDasharray={`${RING_C}`}
             animatedProps={ringProps}
-            transform="rotate(-90 48 48)"
+            transform={`rotate(-90 ${RING_CENTER} ${RING_CENTER})`}
           />
         </Svg>
         <T variant="displayXl" style={{ color: hue }}>
@@ -248,10 +466,15 @@ export function HoldRing({
         </T>
       </View>
       <T variant="bodyStrong" center style={{ marginTop: space.md }}>
-        Your order goes to {vendorName ?? 'the store'} when the ring closes.
+        {releaseLead} in {mm}:{String(ss).padStart(2, '0')}.
       </T>
-      <T variant="caption" tone={warn ? 'warning' : 'muted'} center style={{ marginTop: 2 }}>
-        {holdRingCaption(mmgAmbiguous)}
+      {warn ? (
+        <T variant="label" tone="warning" center style={{ marginTop: space.xs }}>
+          Closing soon — cancel now if you’ve changed your mind.
+        </T>
+      ) : null}
+      <T variant="caption" tone="muted" center style={{ marginTop: space.xs }}>
+        {cancellationCaption}
       </T>
     </View>
   );
@@ -260,18 +483,31 @@ export function HoldRing({
 export function DeliveryScreen() {
   const navigation = useNavigation<any>();
   const route = useRoute<any>();
+  const isFocused = useIsFocused();
   const insets = useSafeAreaInsets();
+  const { height: screenHeight } = useWindowDimensions();
   const orderId: string = route.params?.orderId;
 
   const order = useOrder<any>(orderId, 15000);
   const [courier, setCourier] = useState<{ latitude: number; longitude: number } | null>(null);
+  const [lastCourierFixAt, setLastCourierFixAt] = useState<number | null>(null);
+  const [trackingDisconnected, setTrackingDisconnected] = useState(false);
+  const [nowTs, setNowTs] = useState(() => Date.now());
   // Server-computed ETA for the courier's ACTIVE leg, refreshed with the
   // location stream [SWIFT-UG-RT-01]. Null until the first event lands.
   const [liveEtaMin, setLiveEtaMin] = useState<number | null>(null);
   const [arrived, setArrived] = useState(false);
   const [confirmCancel, setConfirmCancel] = useState(false);
+  const [cancelChecking, setCancelChecking] = useState(false);
+  const [cancelPreviewFresh, setCancelPreviewFresh] = useState(false);
+  const [cancelPreviewFee, setCancelPreviewFee] = useState<number | null>(null);
+  const [cancelPreviewOrderId, setCancelPreviewOrderId] = useState<string | null>(null);
   const prevStatus = useRef<string | null>(null);
+  const prevStatusRef = useRef<string | undefined>(undefined);
+  const activeOrderIdRef = useRef(orderId);
+  activeOrderIdRef.current = orderId;
   const mapRef = useRef<MapView>(null);
+  const lastCourierServerFixAt = useRef<number | null>(null);
 
   // A courier job cancels through its own endpoint so the assigned rider is
   // freed AND told they're back in the dispatch pool (the generic order-cancel
@@ -283,53 +519,249 @@ export function DeliveryScreen() {
   // banner — a client-clock/preview "free" promise must never be the last word.
   const [cancelMessage, setCancelMessage] = useState<string | null>(null);
   const [cancelFee, setCancelFee] = useState<number | null>(null);
-  const cancelOrder = useMutation({
-    mutationFn: () =>
-      order.data?.orderType === 'COURIER' ? courierApi.cancel(orderId) : customerApi.cancelOrder(orderId),
-    onSuccess: (res: any) => {
+  const cancelOrder = useMutation<any, any, { targetOrderId: string; orderType: string }>({
+    mutationFn: ({ targetOrderId, orderType }: { targetOrderId: string; orderType: string }) =>
+      orderType === 'COURIER' ? courierApi.cancel(targetOrderId) : customerApi.cancelOrder(targetOrderId),
+    onSuccess: (res: any, target) => {
+      if (target.targetOrderId !== activeOrderIdRef.current) return;
       // customerApi.cancelOrder is unwrapped at the seam; the courier endpoint
       // still returns the raw envelope — accept both shapes, never lose the
       // message OR the numeric fee the server actually charged.
       const payload = res?.data?.data ?? res?.data ?? res ?? {};
       if (typeof payload.message === 'string') setCancelMessage(payload.message);
       setCancelFee(typeof payload.cancellationFee === 'number' ? payload.cancellationFee : null);
+      setConfirmCancel(false);
       order.refetch();
+    },
+    onError: (error: any, target) => {
+      if (target.targetOrderId !== activeOrderIdRef.current) return;
+      const serverMessage = error?.response?.data?.error?.message;
+      if (typeof serverMessage === 'string') {
+        toast.error('Cancellation didn’t go through', serverMessage);
+      } else {
+        setConfirmCancel(false);
+        toast.show(
+          'Checking cancellation status',
+          'We couldn’t confirm the outcome. The latest server status is being refreshed before you try again.',
+        );
+      }
+      void order.refetch();
     },
   });
   const decideSub = useDecideSubstitution(orderId);
 
   const o = order.data;
+  const orderStatus = String(o?.status ?? '').toUpperCase();
+  const liveTrackingAllowed = LIVE_TRACKING_STATUSES.has(orderStatus)
+    && !(o?.fulfillment === 'PICKUP' && orderStatus === 'PICKED_UP');
+  const liveTrackingAllowedRef = useRef(liveTrackingAllowed);
+  liveTrackingAllowedRef.current = liveTrackingAllowed;
+
+  const openCancelConfirmation = async () => {
+    const targetOrderId = orderId;
+    setCancelPreviewFresh(false);
+    setCancelPreviewFee(null);
+    setCancelPreviewOrderId(null);
+    setCancelChecking(true);
+    try {
+      const refreshed = await order.refetch();
+      if (activeOrderIdRef.current !== targetOrderId) return;
+      const latest = refreshed.data;
+      if (refreshed.isError || !latest) {
+        toast.error('Couldn’t confirm cancellation', 'Check your connection and try again. Your order is unchanged.');
+        return;
+      }
+      if (latest.canCancel !== true || isTerminalOrderSnapshot(latest)) {
+        toast.show('This order can no longer be cancelled', 'The latest server status is shown on the timeline.');
+        return;
+      }
+      if (latest.orderType !== 'COURIER') {
+        const previewFee = latest.cancellationFee;
+        if (typeof previewFee !== 'number' || !Number.isFinite(previewFee)) {
+          toast.error('Couldn’t confirm cancellation cost', 'Try again before cancelling. Your order is unchanged.');
+          return;
+        }
+        setCancelPreviewFee(previewFee);
+      }
+      setCancelPreviewFresh(true);
+      setCancelPreviewOrderId(targetOrderId);
+      setConfirmCancel(true);
+    } finally {
+      if (activeOrderIdRef.current === targetOrderId) setCancelChecking(false);
+    }
+  };
+
+  const commitCancellation = async () => {
+    const targetOrderId = orderId;
+    if (cancelPreviewOrderId !== targetOrderId) {
+      setConfirmCancel(false);
+      return;
+    }
+    setCancelChecking(true);
+    try {
+      const refreshed = await order.refetch();
+      if (activeOrderIdRef.current !== targetOrderId) return;
+      const latest = refreshed.data;
+      if (refreshed.isError || !latest) {
+        toast.error('Couldn’t recheck cancellation', 'Nothing was cancelled. Check your connection and try again.');
+        return;
+      }
+      if (latest.canCancel !== true || isTerminalOrderSnapshot(latest)) {
+        setConfirmCancel(false);
+        toast.show('This order can no longer be cancelled', 'The latest server status is shown on the timeline.');
+        return;
+      }
+      if (latest.orderType !== 'COURIER') {
+        const latestFee = latest.cancellationFee;
+        if (typeof latestFee !== 'number' || !Number.isFinite(latestFee)) {
+          toast.error('Couldn’t recheck cancellation cost', 'Nothing was cancelled. Try again.');
+          return;
+        }
+        if (cancelPreviewFee !== latestFee) {
+          setCancelPreviewFee(latestFee);
+          setCancelPreviewFresh(true);
+          toast.show('Cancellation cost updated', 'Review the new server preview, then confirm again.');
+          return;
+        }
+      }
+      cancelOrder.mutate({ targetOrderId, orderType: latest.orderType });
+    } finally {
+      if (activeOrderIdRef.current === targetOrderId) setCancelChecking(false);
+    }
+  };
 
   // Socket: join the order room, follow courier + status.
   useEffect(() => {
-    if (!orderId) return;
+    if (!orderId || !isFocused) return;
+    setCourier(null);
+    setLastCourierFixAt(null);
+    setLiveEtaMin(null);
+    setTrackingDisconnected(false);
+    lastCourierServerFixAt.current = null;
     connectSocket();
     subscribeToOrder(orderId);
     const s = getSocket();
+    const acceptFix = (latitudeRaw: unknown, longitudeRaw: unknown, timestampRaw: unknown, etaRaw: unknown) => {
+      if (!liveTrackingAllowedRef.current) return;
+      const coordinate = validMapCoordinate(latitudeRaw, longitudeRaw);
+      const fixedAt = typeof timestampRaw === 'string' ? Date.parse(timestampRaw) : Number.NaN;
+      if (
+        !coordinate
+        || !Number.isFinite(fixedAt)
+        || (lastCourierServerFixAt.current != null && fixedAt < lastCourierServerFixAt.current)
+      ) return;
+      lastCourierServerFixAt.current = fixedAt;
+      setCourier(coordinate);
+      // Freshness is time since THIS device received a timestamped server fix;
+      // comparing two different wall clocks would make skew look like staleness.
+      setLastCourierFixAt(Date.now());
+      if (etaRaw == null) {
+        setLiveEtaMin(null);
+      } else {
+        const etaMinutes = Number(etaRaw);
+        setLiveEtaMin(Number.isFinite(etaMinutes) && etaMinutes >= 0 ? etaMinutes : null);
+      }
+    };
     const onRider = (p: any) => {
-      if (p?.lat != null && p?.lng != null) setCourier({ latitude: p.lat, longitude: p.lng });
-      if (typeof p?.etaMinutes === 'number') setLiveEtaMin(p.etaMinutes);
+      acceptFix(p?.lat, p?.lng, p?.ts, p?.etaMinutes);
     };
     const onDriver = (p: any) => {
-      if (p?.latitude != null && p?.longitude != null) setCourier({ latitude: p.latitude, longitude: p.longitude });
-      if (typeof p?.etaMinutes === 'number') setLiveEtaMin(p.etaMinutes);
+      if (p?.orderId !== orderId) return;
+      acceptFix(p?.latitude, p?.longitude, p?.timestamp, p?.etaMinutes);
     };
-    const onStatus = () => order.refetch();
+    const onStatus = (payload: any) => {
+      if (payload?.orderId !== orderId) return;
+      void order.refetch();
+    };
+    const onConnect = () => {
+      setTrackingDisconnected(false);
+      subscribeToOrder(orderId);
+      void order.refetch();
+    };
+    const onDisconnect = () => {
+      setTrackingDisconnected(true);
+      setLiveEtaMin(null);
+    };
+    const onConnectError = () => {
+      setTrackingDisconnected(true);
+      setLiveEtaMin(null);
+    };
     s.on('rider:location', onRider);
     s.on('driver:location', onDriver);
     s.on('order:status_changed', onStatus);
+    s.on('order:prep_update', onStatus);
     s.on('order:substitution', onStatus);
+    s.on('connect', onConnect);
+    s.on('disconnect', onDisconnect);
+    s.on('connect_error', onConnectError);
     return () => {
       s.off('rider:location', onRider);
       s.off('driver:location', onDriver);
       s.off('order:status_changed', onStatus);
+      s.off('order:prep_update', onStatus);
       s.off('order:substitution', onStatus);
+      s.off('connect', onConnect);
+      s.off('disconnect', onDisconnect);
+      s.off('connect_error', onConnectError);
+      s.emit('order:unsubscribe', { orderId });
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isFocused, orderId]);
+
+  useEffect(() => {
+    const t = setInterval(() => setNowTs(Date.now()), 3000);
+    return () => clearInterval(t);
+  }, []);
+
+  useEffect(() => {
+    if (isFocused) setNowTs(Date.now());
+  }, [isFocused]);
+
+  useEffect(() => {
+    const subscription = AppState.addEventListener('change', (state) => {
+      if (state === 'active') setNowTs(Date.now());
+    });
+    return () => subscription.remove();
+  }, []);
+
+  // The live-ETA cache does not identify which journey leg produced a value.
+  // Clear every transition, and only render the pre-custody legs above; an old
+  // pickup ETA must never reappear as a delivery ETA after the rider departs.
+  useEffect(() => {
+    setLiveEtaMin(null);
+  }, [orderStatus]);
+
+  useEffect(() => {
+    if (!liveTrackingAllowed) {
+      setCourier(null);
+      setLastCourierFixAt(null);
+      setLiveEtaMin(null);
+    }
+  }, [liveTrackingAllowed]);
+
+  // React Navigation can reuse this screen with a different order id. Clear
+  // every order-local ceremony and preview so order A can never act on order B.
+  useEffect(() => {
+    setCourier(null);
+    setLastCourierFixAt(null);
+    setLiveEtaMin(null);
+    setTrackingDisconnected(false);
+    setArrived(false);
+    setConfirmCancel(false);
+    setCancelChecking(false);
+    setCancelPreviewFresh(false);
+    setCancelPreviewFee(null);
+    setCancelPreviewOrderId(null);
+    setCancelMessage(null);
+    setCancelFee(null);
+    lastCourierServerFixAt.current = null;
+    prevStatus.current = null;
+    prevStatusRef.current = undefined;
   }, [orderId]);
 
   // Arrival popup once, on the transition into DELIVERED.
   useEffect(() => {
+    if (!isFocused) return;
     const status = o?.status;
     if (!status) return;
     if (prevStatus.current && prevStatus.current !== 'DELIVERED' && status === 'DELIVERED') {
@@ -337,36 +769,48 @@ export function DeliveryScreen() {
       setArrived(true);
     }
     prevStatus.current = status;
-  }, [o?.status]);
+  }, [isFocused, o?.status]);
 
-  const vendorPos = o?.vendor?.latitude != null ? { latitude: o.vendor.latitude, longitude: o.vendor.longitude } : null;
-  const dropPos = o?.deliveryLat != null ? { latitude: o.deliveryLat, longitude: o.deliveryLng } : null;
-  // REST last-known position seeds the marker instantly on open/reconnect;
-  // the live socket stream overrides it from the first event.
-  const courierPos =
-    courier ?? (o?.rider?.currentLat != null ? { latitude: Number(o.rider.currentLat), longitude: Number(o.rider.currentLng) } : null);
+  // The order's immutable pickup snapshot owns this marker. A vendor profile
+  // edit must never move an already-placed order, and courier requests have no vendor.
+  const pickupPos = validMapCoordinate(o?.pickupLat, o?.pickupLng);
+  const dropPos = o?.fulfillment === 'PICKUP'
+    ? null
+    : validMapCoordinate(o?.deliveryLat, o?.deliveryLng);
+  // The REST rider coordinate has no freshness timestamp. It is deliberately
+  // ignored; only a timestamped socket fix earns a tracking marker.
+  const courierPos = liveTrackingAllowed ? courier : null;
 
   const fitMap = () => {
-    const pts = [vendorPos, dropPos, courierPos].filter(Boolean) as { latitude: number; longitude: number }[];
-    if (pts.length < 2 || !mapRef.current) return;
-    mapRef.current.fitToCoordinates(pts, {
-      edgePadding: { top: 90, bottom: 60, left: 60, right: 60 },
-      animated: true,
-    });
+    const pts = [pickupPos, dropPos, courierPos].filter(Boolean) as { latitude: number; longitude: number }[];
+    if (!pts.length || !mapRef.current) return;
+    if (pts.length === 1) {
+      mapRef.current.animateToRegion({ ...pts[0]!, latitudeDelta: 0.04, longitudeDelta: 0.04 }, motion.duration.gentle);
+    } else {
+      mapRef.current.fitToCoordinates(pts, {
+        edgePadding: {
+          top: space['5xl'] * 2,
+          bottom: space['5xl'] + space.md,
+          left: space['5xl'] + space.md,
+          right: space['5xl'] + space.md,
+        },
+        animated: true,
+      });
+    }
   };
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  useEffect(fitMap, [!!vendorPos, !!dropPos, !!courierPos]);
+  useEffect(fitMap, [!!pickupPos, !!dropPos, !!courierPos]);
 
   // The READY moment gets the success haptic exactly once per transition —
   // the ceremony card [pickup spec 2.2] does the visual half.
-  const prevStatusRef = useRef<string | undefined>(undefined);
   useEffect(() => {
+    if (!isFocused) return;
     const status = o?.status as string | undefined;
     if (status === 'READY_FOR_PICKUP' && prevStatusRef.current && prevStatusRef.current !== 'READY_FOR_PICKUP' && o?.fulfillment === 'PICKUP') {
       haptic.success();
     }
     prevStatusRef.current = status;
-  }, [o?.status, o?.fulfillment]);
+  }, [isFocused, o?.status, o?.fulfillment]);
 
   if (order.isLoading) return <LoadingBlock style={{ backgroundColor: color.surface.subtle }} />;
   if (order.isError || !o) {
@@ -377,8 +821,14 @@ export function DeliveryScreen() {
     );
   }
 
-  const stage = stageFor(o.status);
   const cancelled = o.status === 'CANCELLED' || o.status === 'REFUNDED';
+  const failed = o.status === 'FAILED';
+  const complete = ['DELIVERED', 'COMPLETED'].includes(o.status)
+    || (o.fulfillment === 'PICKUP' && o.status === 'PICKED_UP');
+  const terminal = cancelled || failed || complete;
+  const verticalTint = o.orderType === 'COURIER'
+    ? SEND_TINT
+    : o.fulfillment === 'APPOINTMENT' ? SERVICES_TINT : ORDER_TINT;
   // [REPORT-008 F-01] PENDING on MMG is only "the store hasn't confirmed yet"
   // — the customer may have ALREADY paid through the external link, so the
   // cancel surfaces must never promise "no charge"; they say what is true and
@@ -387,84 +837,194 @@ export function DeliveryScreen() {
   const rider = o.rider;
   const items: any[] = o.items ?? [];
   const mmgPaymentAction = safeMmgPaymentActionUrl(o.paymentAction) ? o.paymentAction : null;
-  const eta = o.estimatedDeliveryTime
-    ? new Date(o.estimatedDeliveryTime).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })
+  const mmgCaptured = o.paymentMethod === 'MOBILE_MONEY' && o.paymentStatus === 'CAPTURED';
+  const ringHidden = terminal || mmgCaptured || !o.canCancel;
+  // Hold lifecycle and cancel eligibility are separate server facts. A paid or
+  // otherwise non-cancellable order may still be held from the recipient; do
+  // not mark it sent merely because the cancellation ceremony is hidden.
+  const currentHoldWindow = holdRingWindow(o.holdExpiresAt, o.placedAt, nowTs, terminal);
+  const holdActive = currentHoldWindow != null;
+  const hasHoldTimestamp = typeof o.holdExpiresAt === 'string' && o.holdExpiresAt.length > 0;
+  const holdExpiresMs = hasHoldTimestamp ? Date.parse(o.holdExpiresAt) : Number.NaN;
+  const holdTimingUnavailable = !terminal
+    && hasHoldTimestamp
+    && (!Number.isFinite(holdExpiresMs) || (holdExpiresMs > nowTs && !currentHoldWindow));
+  // The local arc may hit zero before the release worker clears the server
+  // timestamp. "Sending" is truthful; "Sent" waits for the next server read.
+  const releasePending = !terminal
+    && hasHoldTimestamp
+    && Number.isFinite(holdExpiresMs)
+    && holdExpiresMs <= nowTs;
+  const trackable = liveTrackingAllowed;
+  const expectsRider = o.orderType === 'COURIER'
+    || (o.fulfillment !== 'PICKUP' && o.fulfillment !== 'APPOINTMENT');
+  const fixStale = !!courierPos && !!lastCourierFixAt && nowTs - lastCourierFixAt > STALE_AFTER_MS;
+  const mapAnchor = courierPos ?? pickupPos ?? dropPos;
+  const initialRegion = mapAnchor ? { ...mapAnchor, latitudeDelta: 0.05, longitudeDelta: 0.05 } : null;
+  const mapNotice = holdTimingUnavailable
+    ? 'Checking the cancellation window with the server.'
+    : holdActive || releasePending
+    ? o.orderType === 'COURIER'
+      ? 'Live tracking starts after the request is released to riders.'
+      : o.fulfillment === 'PICKUP'
+        ? 'This is a pickup order. The map shows the store; there is no rider to track.'
+        : o.fulfillment === 'APPOINTMENT'
+          ? 'This booking does not use rider tracking.'
+          : 'Live tracking starts after the order is sent to the store and a rider is assigned.'
+    : trackingDisconnected && trackable
+      ? courierPos
+        ? 'Reconnecting to the rider’s live location. Showing the last received position.'
+        : 'Reconnecting to the rider’s live location. Waiting for the first GPS update.'
+      : fixStale
+        ? 'Rider location is paused. Showing the last received position.'
+        : rider && !courierPos && trackable
+          ? 'Waiting for the rider’s first live location update.'
+          : expectsRider && !rider && !terminal
+            ? 'A rider hasn’t been assigned yet.'
+            : !expectsRider && !terminal
+              ? o.fulfillment === 'PICKUP'
+                ? 'Pickup order — use the store address and directions below.'
+                : 'Appointment booking — follow the provider details below.'
+            : null;
+  const freshLiveEta = LIVE_ETA_STATUSES.has(orderStatus) && !trackingDisconnected && !fixStale
+    ? liveEtaMin
     : null;
-
-  const initialRegion = vendorPos
-    ? { ...vendorPos, latitudeDelta: 0.05, longitudeDelta: 0.05 }
-    : { latitude: 6.8013, longitude: -58.1551, latitudeDelta: 0.08, longitudeDelta: 0.08 }; // Georgetown
+  const serverEstimateMinutes = typeof o.estimatedDeliveryTime === 'number' && o.estimatedDeliveryTime > 0
+    ? Math.round(o.estimatedDeliveryTime)
+    : null;
+  const serverPrepMinutes = typeof o.estimatedPrepTime === 'number' && o.estimatedPrepTime > 0
+    ? Math.round(o.estimatedPrepTime)
+    : null;
+  const arrivalReached = ['RIDER_ARRIVED_PICKUP', 'DRIVER_ARRIVED', 'ARRIVED'].includes(orderStatus);
+  const releaseName = o.vendor?.name ?? (o.fulfillment === 'APPOINTMENT' ? 'the provider' : 'the store');
+  const holdReleaseLead = o.orderType === 'COURIER'
+    ? 'This request is released to nearby riders'
+    : o.fulfillment === 'APPOINTMENT'
+      ? `This booking goes to ${releaseName}`
+      : `Your order goes to ${releaseName}`;
+  const holdCancellationCaption = o.orderType === 'COURIER'
+    ? 'Changed your mind? Cancel before a rider accepts. Swift does not collect or hold courier payment.'
+    : o.fulfillment === 'APPOINTMENT'
+      ? 'Changed your mind? Cancel before the provider starts — the app shows any cost before you confirm.'
+      : holdRingCaption(mmgCancellationAmbiguous);
+  const pendingSummary = o.orderType === 'COURIER'
+    ? 'Waiting for an eligible rider to accept'
+    : o.fulfillment === 'APPOINTMENT'
+      ? 'The provider will confirm your booking shortly'
+      : 'The store will confirm your order shortly';
+  const referenceNoun = o.orderType === 'COURIER' ? 'request' : o.fulfillment === 'APPOINTMENT' ? 'booking' : 'order';
+  const journeyHeading = o.orderType === 'COURIER'
+    ? 'Courier status'
+    : o.fulfillment === 'APPOINTMENT'
+      ? 'Booking status'
+      : o.fulfillment === 'PICKUP' ? 'Pickup' : 'Delivery time';
+  const directPayee = o.orderType === 'COURIER'
+    ? 'rider'
+    : o.fulfillment === 'APPOINTMENT' ? 'provider' : 'seller or rider';
+  const mmgPayee = mmgPaymentAction?.recipientName
+    ?? (o.orderType === 'COURIER' ? 'the named payee' : o.fulfillment === 'APPOINTMENT' ? 'the provider' : 'the store');
+  let etaCopy = pendingSummary;
+  if (cancelled) etaCopy = 'Cancelled';
+  else if (failed) etaCopy = 'Couldn’t complete this order';
+  else if (complete) etaCopy = 'Completed';
+  else if (arrivalReached) {
+    etaCopy = orderStatus === 'RIDER_ARRIVED_PICKUP' ? 'Rider reached the pickup' : 'Your rider has arrived';
+  } else if (o.fulfillment === 'APPOINTMENT' && orderStatus === 'ACCEPTED') {
+    etaCopy = 'The provider confirmed your booking';
+  } else if (freshLiveEta != null) {
+    etaCopy = freshLiveEta <= 0 ? 'Rider is arriving now' : `Rider arriving in ~${Math.round(freshLiveEta)} min`;
+  }
+  else if (o.fulfillment === 'PICKUP' && orderStatus === 'READY_FOR_PICKUP') {
+    etaCopy = 'Ready for pickup';
+  } else if (o.fulfillment === 'PICKUP' && serverPrepMinutes != null) {
+    etaCopy = `Estimated ready time · ~${serverPrepMinutes} min`;
+  } else if (serverEstimateMinutes != null) etaCopy = `Server estimate · ~${serverEstimateMinutes} min total`;
 
   return (
     <View style={{ flex: 1, backgroundColor: color.surface.subtle }}>
-      {/* Live map */}
-      <View style={{ height: SCREEN_H * 0.48 }}>
-        <MapView ref={mapRef} style={{ flex: 1 }} initialRegion={initialRegion}>
-          {vendorPos ? (
-            <Marker coordinate={vendorPos} title={o.vendor?.name}>
-              <View style={{ alignItems: 'center' }}>
+      {/* Compact during the hold; larger only when there is something real to
+          track. No route geometry is drawn because the API does not send one. */}
+      <View style={{ height: screenHeight * (holdActive || releasePending || holdTimingUnavailable ? 0.24 : 0.4) }}>
+        {initialRegion ? (
+          <MapView key={orderId} ref={mapRef} style={{ flex: 1 }} initialRegion={initialRegion}>
+            {pickupPos ? (
+              <Marker coordinate={pickupPos} title={o.vendor?.name ?? 'Pickup'}>
                 <View
                   style={{
-                    width: 36,
-                    height: 36,
-                    borderRadius: 18,
-                    backgroundColor: color.brand[500],
+                    width: space['4xl'],
+                    height: space['4xl'],
+                    borderRadius: radius.full,
+                    backgroundColor: verticalTint.ink,
                     alignItems: 'center',
                     justifyContent: 'center',
-                    borderWidth: 2,
+                    borderWidth: space.xs / 2,
                     borderColor: color.white,
                   }}
                 >
                   <Feather name="shopping-bag" size={16} color={color.white} />
                 </View>
-              </View>
-            </Marker>
-          ) : null}
-          {dropPos ? (
-            <Marker coordinate={dropPos} title="Delivery address">
-              <View
-                style={{
-                  width: 36,
-                  height: 36,
-                  borderRadius: 18,
-                  backgroundColor: color.text.primary,
-                  alignItems: 'center',
-                  justifyContent: 'center',
-                  borderWidth: 2,
-                  borderColor: color.white,
-                }}
-              >
-                <Feather name="map-pin" size={16} color={color.white} />
-              </View>
-            </Marker>
-          ) : null}
-          {courierPos ? (
-            <Marker coordinate={courierPos} title="Your rider">
-              <View
-                style={{
-                  width: 38,
-                  height: 38,
-                  borderRadius: 19,
-                  backgroundColor: color.white,
-                  alignItems: 'center',
-                  justifyContent: 'center',
-                  borderWidth: 2,
-                  borderColor: color.brand[500],
-                }}
-              >
-                <Feather name="navigation" size={16} color={color.brand[500]} />
-              </View>
-            </Marker>
-          ) : null}
-          {vendorPos && dropPos ? (
-            <Polyline
-              coordinates={courierPos ? [vendorPos, courierPos, dropPos] : [vendorPos, dropPos]}
-              strokeColor={color.brand[500]}
-              strokeWidth={4}
-              lineDashPattern={[1, 6]}
-            />
-          ) : null}
-        </MapView>
+              </Marker>
+            ) : null}
+            {dropPos ? (
+              <Marker coordinate={dropPos} title="Delivery address">
+                <View
+                  style={{
+                    width: space['4xl'],
+                    height: space['4xl'],
+                    borderRadius: radius.full,
+                    backgroundColor: color.surface.base,
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    borderWidth: space.xs / 2,
+                    borderColor: color.brand[600],
+                  }}
+                >
+                  <Feather name="map-pin" size={16} color={color.brand[600]} />
+                </View>
+              </Marker>
+            ) : null}
+            {courierPos ? (
+              <Marker coordinate={courierPos} title={fixStale || trackingDisconnected ? 'Rider — last received location' : 'Your rider'}>
+                <View
+                  style={{
+                    width: space['4xl'],
+                    height: space['4xl'],
+                    borderRadius: radius.full,
+                    backgroundColor: color.surface.base,
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    borderWidth: space.xs / 2,
+                    borderColor: color.brand[500],
+                    opacity: fixStale || trackingDisconnected ? 0.45 : 1,
+                    ...elevation.card,
+                  }}
+                >
+                  <Feather name="navigation" size={16} color={color.brand[500]} />
+                </View>
+              </Marker>
+            ) : null}
+          </MapView>
+        ) : (
+          <View style={{ flex: 1, alignItems: 'center', justifyContent: 'center', paddingHorizontal: space['3xl'], backgroundColor: color.surface.sunken }}>
+            <IconChip icon="map-pin" size={48} />
+            <T variant="heading" center style={{ marginTop: space.md }}>Map details unavailable</T>
+            <T variant="caption" tone="muted" center style={{ marginTop: space.xs }}>
+              This order has no coordinates to show. Use the saved address below.
+            </T>
+          </View>
+        )}
+
+        {mapNotice ? (
+          <View
+            accessible
+            accessibilityLiveRegion="polite"
+            accessibilityLabel={mapNotice}
+            style={{ position: 'absolute', left: GUTTER, right: GUTTER, bottom: space.xl, flexDirection: 'row', alignItems: 'flex-start', gap: space.sm, paddingHorizontal: space.md, paddingVertical: space.sm, borderRadius: radius.lg, backgroundColor: color.soft.info, ...elevation.card }}
+          >
+            <Feather name={trackingDisconnected ? 'wifi-off' : 'map-pin'} size={16} color={color.info} />
+            <T variant="caption" tone="info" style={{ flex: 1 }}>{mapNotice}</T>
+          </View>
+        ) : null}
 
         {/* Floating chips */}
         <View
@@ -477,8 +1037,14 @@ export function DeliveryScreen() {
             justifyContent: 'space-between',
           }}
         >
-          <CircleChip icon="chevron-left" onPress={() => navigation.goBack()} />
-          <CircleChip icon="crosshair" onPress={fitMap} />
+          <CircleChip icon="chevron-left" label="Go back" onPress={() => navigation.goBack()} />
+          {courierPos && !holdActive && !releasePending && !holdTimingUnavailable ? (
+            <CircleChip
+              icon="crosshair"
+              label={fixStale || trackingDisconnected ? 'Recenter last rider location' : 'Recenter live tracking'}
+              onPress={fitMap}
+            />
+          ) : <View />}
         </View>
       </View>
 
@@ -491,21 +1057,64 @@ export function DeliveryScreen() {
           borderTopRightRadius: radius.xl,
           backgroundColor: color.surface.base,
           paddingTop: space.md,
+          ...elevation.raised,
         }}
       >
-        <View style={{ width: 44, height: 5, borderRadius: 3, backgroundColor: color.border.subtle, alignSelf: 'center' }} />
         <ScrollView contentContainerStyle={{ padding: GUTTER, paddingBottom: insets.bottom + space['2xl'] }}>
-          {/* LIFECYCLE_V2 hold — the store hasn't been told yet; cancelling is
-              free until the countdown ends. Server clock decides; this is UI. */}
-          <HoldRing holdExpiresAt={o.holdExpiresAt} createdAt={o.createdAt} vendorName={o.vendor?.name} onExpire={() => order.refetch()} mmgAmbiguous={mmgCancellationAmbiguous} hidden={cancelled} />
+          {(holdActive || holdTimingUnavailable) ? (
+            <T variant="micro" tone="faint" center>
+              {referenceNoun[0]!.toUpperCase()}{referenceNoun.slice(1)} #{o.orderNumber} · held
+            </T>
+          ) : null}
+          <HoldRing
+            key={`${o.id}:${o.holdExpiresAt ?? 'none'}:${isFocused ? 'focused' : 'hidden'}`}
+            holdExpiresAt={o.holdExpiresAt}
+            placedAt={o.placedAt}
+            releaseLead={holdReleaseLead}
+            cancellationCaption={holdCancellationCaption}
+            onExpire={() => {
+              setNowTs(Date.now());
+              void order.refetch();
+            }}
+            hidden={ringHidden || !isFocused}
+          />
+          {holdTimingUnavailable ? (
+            <View style={{ flexDirection: 'row', alignItems: 'flex-start', gap: space.sm, padding: space.md, borderRadius: radius.md, backgroundColor: color.soft.info }}>
+              <Feather name="refresh-cw" size={18} color={color.info} />
+              <T variant="label" tone="info" style={{ flex: 1 }}>
+                Checking the hold timing with the server. No progress ring is shown without both server timestamps.
+              </T>
+            </View>
+          ) : null}
+          {releasePending ? (
+            <View style={{ flexDirection: 'row', alignItems: 'flex-start', gap: space.sm, padding: space.md, borderRadius: radius.md, backgroundColor: color.soft.info }}>
+              <Feather name="send" size={18} color={color.info} />
+              <T variant="label" tone="info" style={{ flex: 1 }}>
+                Timer closed. Checking with the server before marking this order sent.
+              </T>
+            </View>
+          ) : null}
+          {(holdActive || holdTimingUnavailable || releasePending) && o.canCancel && !terminal ? (
+            <PillButton
+              label={`Cancel ${referenceNoun}`}
+              icon="x-circle"
+              loading={cancelChecking || cancelOrder.isPending}
+              onPress={() => { void openCancelConfirmation(); }}
+              style={{ marginTop: space.md }}
+            />
+          ) : null}
+
+          {!cancelled && !failed ? (
+            <TrackingTimeline order={o} holdActive={holdActive || holdTimingUnavailable} releasePending={releasePending} />
+          ) : null}
 
           {/* Out-of-stock substitutions (§5.3) — the store asked; you decide. */}
-          {items
+          {!terminal ? items
             .filter((it: any) => it.subStatus === 'PENDING')
             .map((it: any) => (
               <View
                 key={`sub-${it.id}`}
-                style={{ backgroundColor: color.brand[50], borderRadius: radius.lg, padding: space.md, marginBottom: space.md }}
+                style={{ backgroundColor: color.brand[50], borderRadius: radius.lg, padding: space.md, marginTop: space.xl, marginBottom: space.md }}
               >
                 <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.sm }}>
                   <Feather name="repeat" size={16} color={color.brand[600]} />
@@ -513,14 +1122,14 @@ export function DeliveryScreen() {
                     {it.name} is out of stock
                   </T>
                 </View>
-                <T variant="caption" tone="muted" style={{ marginTop: 4 }}>
+                <T variant="caption" tone="muted" style={{ marginTop: space.xs }}>
                   {o.vendor?.name ?? 'The store'} suggests {it.substituteName} ({money(Number(it.substitutePrice ?? 0))}
                   {it.quantity > 1 ? ` × ${it.quantity}` : ''}) instead. Rejecting removes the item and lowers your total.
                 </T>
                 <View style={{ flexDirection: 'row', gap: space.md, marginTop: space.md }}>
                   <PillButton
                     label="Approve swap"
-                    size="sm"
+                    size="md"
                     style={{ flex: 1 }}
                     loading={decideSub.isPending}
                     disabled={decideSub.isPending}
@@ -529,14 +1138,14 @@ export function DeliveryScreen() {
                   <PillButton
                     label="No thanks"
                     variant="soft"
-                    size="sm"
+                    size="md"
                     style={{ flex: 1 }}
                     disabled={decideSub.isPending}
                     onPress={() => decideSub.mutate({ lineId: it.id, approve: false })}
                   />
                 </View>
               </View>
-            ))}
+            )) : null}
 
           {/* Rider card */}
           {rider ? (
@@ -545,25 +1154,26 @@ export function DeliveryScreen() {
                 flexDirection: 'row',
                 alignItems: 'center',
                 gap: space.md,
-                backgroundColor: color.surface.subtle,
+                backgroundColor: verticalTint.bg,
                 borderRadius: radius.lg,
                 padding: space.md,
+                marginTop: space.xl,
               }}
             >
               {rider.avatar ? (
-                <Image source={{ uri: rider.avatar }} style={{ width: 48, height: 48, borderRadius: 24 }} />
+                <Image source={{ uri: rider.avatar }} style={{ width: space['5xl'], height: space['5xl'], borderRadius: radius.full }} accessible={false} />
               ) : (
                 <View
                   style={{
-                    width: 48,
-                    height: 48,
-                    borderRadius: 24,
-                    backgroundColor: color.brand[50],
+                    width: space['5xl'],
+                    height: space['5xl'],
+                    borderRadius: radius.full,
+                    backgroundColor: verticalTint.bg,
                     alignItems: 'center',
                     justifyContent: 'center',
                   }}
                 >
-                  <Feather name="user" size={20} color={color.brand[600]} />
+                  <Feather name="user" size={20} color={verticalTint.ink} />
                 </View>
               )}
               <View style={{ flex: 1 }}>
@@ -579,10 +1189,13 @@ export function DeliveryScreen() {
               </View>
               <Pressable
                 onPress={() => navigation.navigate('Conversation', { orderId, title: rider.firstName })}
+                accessibilityRole="button"
+                accessibilityLabel={`Message ${rider.firstName ?? 'your rider'}`}
+                accessibilityHint="Opens the order conversation"
                 style={{
-                  width: 44,
-                  height: 44,
-                  borderRadius: 22,
+                  width: space['5xl'],
+                  height: space['5xl'],
+                  borderRadius: radius.full,
                   backgroundColor: color.brand[500],
                   alignItems: 'center',
                   justifyContent: 'center',
@@ -593,10 +1206,13 @@ export function DeliveryScreen() {
               {rider.phone ? (
                 <Pressable
                   onPress={() => void openExternal(`tel:${rider.phone}`, "Couldn't start the call — dial your rider directly.")}
+                  accessibilityRole="button"
+                  accessibilityLabel={`Call ${rider.firstName ?? 'your rider'}`}
+                  accessibilityHint="Opens the phone dialer"
                   style={{
-                    width: 44,
-                    height: 44,
-                    borderRadius: 22,
+                    width: space['5xl'],
+                    height: space['5xl'],
+                    borderRadius: radius.full,
                     backgroundColor: color.brand[500],
                     alignItems: 'center',
                     justifyContent: 'center',
@@ -608,7 +1224,7 @@ export function DeliveryScreen() {
             </View>
           ) : null}
 
-          {cancelled ? (
+          {cancelled || failed ? (
             <View
               style={{
                 flexDirection: 'row',
@@ -620,20 +1236,22 @@ export function DeliveryScreen() {
                 backgroundColor: color.soft.danger,
               }}
             >
-              <Feather name="x-circle" size={18} color={color.error} />
+              <Feather name={failed ? 'alert-triangle' : 'x-circle'} size={18} color={color.error} />
               <View style={{ flex: 1 }}>
                 <T variant="body" weight="semibold" tone="error">
                   {/* Server's authoritative result first — it knows the real
                       final cost/refund outcome the client clock cannot. */}
-                  {cancelMessage
-                    ?? (mmgCancellationAmbiguous
-                      ? 'This order was cancelled. If you already sent the MMG payment, the store refunds you directly.'
-                      : 'This order was cancelled.')}
+                  {failed
+                    ? 'This order could not continue. Report a problem for help with what happens next.'
+                    : cancelMessage
+                      ?? (mmgCancellationAmbiguous
+                        ? 'This order was cancelled. If you already sent the MMG payment, the store refunds you directly.'
+                        : 'This order was cancelled.')}
                 </T>
                 {/* [REPORT-012 F-012-03] The fee the server ACTUALLY charged —
                     rendered from the committed result, never a preview. */}
-                {cancelFee != null ? (
-                  <T variant="caption" tone="error" style={{ marginTop: 2 }}>
+                {!failed && cancelFee != null ? (
+                  <T variant="caption" tone="error" style={{ marginTop: space.xs }}>
                     {/* [REPORT-013 F-013-03] The fee is a recorded deterrence
                         marker on a cash platform — Swift never collects it;
                         saying "charged" would be a false financial fact. */}
@@ -647,9 +1265,9 @@ export function DeliveryScreen() {
           ) : (
             <>
               <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.sm, marginTop: rider ? space.xl : 0 }}>
-                <T variant="heading">{o.fulfillment === 'PICKUP' ? 'Pickup' : 'Delivery time'}</T>
+                <T variant="heading">{journeyHeading}</T>
                 {o.isExpress ? (
-                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: 3, borderRadius: radius.full, paddingHorizontal: space.sm, paddingVertical: 3, backgroundColor: color.brand[50] }}>
+                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.xs, borderRadius: radius.full, paddingHorizontal: space.sm, paddingVertical: space.xs, backgroundColor: color.brand[50] }}>
                     <Feather name="zap" size={11} color={color.brand[600]} />
                     <T variant="caption" weight="bold" tone="deep">
                       Express
@@ -657,26 +1275,18 @@ export function DeliveryScreen() {
                   </View>
                 ) : null}
               </View>
-              <T variant="label" tone="muted" style={{ marginTop: 2 }}>
-                {liveEtaMin != null
-                  ? `Arriving in ~${liveEtaMin} min`
-                  : eta
-                    ? `Estimated by ${eta}`
-                    : 'The store will confirm your order shortly'}
+              <T variant="label" tone="muted" style={{ marginTop: space.xs }}>
+                {etaCopy}
               </T>
               {o.fulfillment === 'PICKUP' && o.pickupAddress ? (
-                <T variant="caption" tone="faint" style={{ marginTop: 2 }} numberOfLines={1}>
+                <T variant="caption" tone="faint" style={{ marginTop: space.xs }} numberOfLines={1}>
                   From: {o.pickupAddress}
                 </T>
               ) : o.deliveryAddress ? (
-                <T variant="caption" tone="faint" style={{ marginTop: 2 }} numberOfLines={1}>
+                <T variant="caption" tone="faint" style={{ marginTop: space.xs }} numberOfLines={1}>
                   To: {o.deliveryAddress}
                 </T>
               ) : null}
-
-              <View style={{ marginTop: space.xl }}>
-                <StageBar stage={stage} fulfillment={o.fulfillment} />
-              </View>
             </>
           )}
 
@@ -684,14 +1294,14 @@ export function DeliveryScreen() {
               while the kitchen works; at READY it becomes the signature
               moment [pickup spec 2.2]: "It's ready." + the code + the way
               there. The push never carries the code — this screen does. */}
-          {o.fulfillment === 'PICKUP' && o.pickupCode && !cancelled && stage < 3 ? (
+          {o.fulfillment === 'PICKUP' && o.pickupCode && !cancelled && !failed && !complete ? (
             o.status === 'READY_FOR_PICKUP' ? (
               <View
                 style={{
                   alignItems: 'center',
                   borderRadius: radius.lg,
                   backgroundColor: color.brand[50],
-                  borderWidth: 1,
+                  borderWidth: StyleSheet.hairlineWidth,
                   borderColor: color.brand[500],
                   paddingVertical: space.xl,
                   paddingHorizontal: space.lg,
@@ -702,7 +1312,7 @@ export function DeliveryScreen() {
                 <T variant="micro" tone="muted" style={{ marginTop: space.md }}>
                   Show this code at the counter
                 </T>
-                <T variant="displayXl" tone="brand" style={{ marginTop: 4, letterSpacing: 6 }}>
+                <T variant="displayXl" tone="brand" style={{ marginTop: space.xs, letterSpacing: space.sm }}>
                   {o.pickupCode}
                 </T>
                 {o.pickupAddress ? (
@@ -711,9 +1321,13 @@ export function DeliveryScreen() {
                       const q = o.pickupLat != null && o.pickupLng != null ? `${o.pickupLat},${o.pickupLng}` : encodeURIComponent(o.pickupAddress);
                       void openExternal(`https://maps.apple.com/?daddr=${q}`, "Couldn't open maps on this phone.");
                     }}
+                    accessibilityRole="button"
+                    accessibilityLabel={`Directions to ${o.vendor?.name ?? 'the store'}`}
+                    accessibilityHint="Opens turn-by-turn directions"
+                    style={{ minHeight: space['5xl'], justifyContent: 'center' }}
                   >
                     {({ pressed }) => (
-                      <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: space.md, opacity: pressed ? 0.7 : 1 }}>
+                      <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.sm, marginTop: space.md, opacity: pressed ? 0.7 : 1 }}>
                         <Feather name="navigation" size={14} color={color.brand[600]} />
                         <T variant="label" weight="semibold" tone="deep">
                           Directions to {o.vendor?.name ?? 'the store'}
@@ -736,7 +1350,7 @@ export function DeliveryScreen() {
                 <T variant="micro" tone="muted">
                   Pickup code — show at the counter
                 </T>
-                <T variant="displayXl" tone="brand" style={{ marginTop: 4, letterSpacing: 6 }}>
+                <T variant="displayXl" tone="brand" style={{ marginTop: space.xs, letterSpacing: space.sm }}>
                   {o.pickupCode}
                 </T>
               </View>
@@ -744,8 +1358,8 @@ export function DeliveryScreen() {
           ) : null}
 
           {/* Order lines */}
-          <T variant="heading" style={{ marginTop: space['2xl'] }}>
-            Order
+          <T variant="heading" accessibilityRole="header" style={{ marginTop: space['2xl'], color: verticalTint.ink }}>
+            Your {referenceNoun} · #{o.orderNumber}
           </T>
           <View style={{ marginTop: space.sm }}>
             {items.map((it: any, i: number) => (
@@ -755,16 +1369,38 @@ export function DeliveryScreen() {
                 value={money(it.totalPrice ?? it.lineTotal ?? Number(it.unitPrice ?? 0) * (it.quantity ?? 1))}
               />
             ))}
-            <View style={{ height: 1, backgroundColor: color.border.subtle, marginVertical: space.sm }} />
+            {Number(o.deliveryFee ?? 0) > 0 ? <InfoRow label="Delivery" value={money(o.deliveryFee)} /> : null}
+            {Number(o.tipAmount ?? 0) > 0 ? <InfoRow label="Tip" value={money(o.tipAmount)} /> : null}
+            {Number(o.discount ?? 0) > 0 ? <InfoRow label="Discount" value={`−${money(o.discount)}`} /> : null}
+            <View style={{ height: StyleSheet.hairlineWidth, backgroundColor: color.border.subtle, marginVertical: space.sm }} />
             <InfoRow label="Total" value={money(o.totalAmount ?? o.total)} strong />
           </View>
+          {o.paymentMethod === 'CASH' ? (
+            <View style={{ flexDirection: 'row', alignItems: 'flex-start', gap: space.sm, marginTop: space.md, padding: space.md, borderRadius: radius.md, backgroundColor: color.surface.sunken }}>
+              <Feather name="dollar-sign" size={18} color={color.text.secondary} />
+              <T variant="label" tone="muted" style={{ flex: 1 }}>
+                {terminal
+                  ? `Cash is handled directly with the ${directPayee}. Swift has not held ${money(o.totalAmount ?? o.total)}.`
+                  : o.orderType === 'COURIER'
+                  ? 'Cash is paid directly to the rider by the named payer. Swift does not hold this money.'
+                  : `Cash — have ${money(o.totalAmount ?? o.total)} ready for the ${directPayee}. Swift does not hold this money.`}
+              </T>
+            </View>
+          ) : o.paymentMethod === 'MOBILE_MONEY' ? (
+            <View style={{ flexDirection: 'row', alignItems: 'flex-start', gap: space.sm, marginTop: space.md, padding: space.md, borderRadius: radius.md, backgroundColor: color.surface.sunken }}>
+              <Feather name="smartphone" size={18} color={color.text.secondary} />
+              <T variant="label" tone="muted" style={{ flex: 1 }}>
+                MMG goes directly to {mmgPayee}. Swift does not hold order money.
+              </T>
+            </View>
+          ) : null}
 
-          {mmgPaymentAction && o.paymentStatus === 'PENDING' && !cancelled ? (
+          {mmgPaymentAction && o.paymentStatus === 'PENDING' && !cancelled && !failed ? (
             <View style={{ borderRadius: radius.lg, backgroundColor: color.brand[50], padding: space.lg, marginTop: space.xl }}>
               <T variant="body" weight="bold" tone="deep">
                 Payment is still awaiting confirmation
               </T>
-              <T variant="caption" tone="muted" style={{ marginTop: 2 }}>
+              <T variant="caption" tone="muted" style={{ marginTop: space.xs }}>
                 Pay {mmgPaymentAction.recipientName} directly in MMG. Swift never holds this money.
               </T>
               <PillButton
@@ -786,8 +1422,8 @@ export function DeliveryScreen() {
               collects money after the job), and a button that always errors is
               a dead control (INV-12). Tips chosen at checkout still work and
               still show the thanks line below. */}
-          {stage === 3 && !cancelled && Number(o.tipAmount ?? 0) > 0 ? (
-            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: space.xl }}>
+          {complete && !cancelled && Number(o.tipAmount ?? 0) > 0 ? (
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.sm, marginTop: space.xl }}>
               <Feather name="heart" size={14} color={color.success} />
               <T variant="caption" tone="muted">
                 You tipped {money(o.tipAmount)} — thank you.
@@ -795,7 +1431,7 @@ export function DeliveryScreen() {
             </View>
           ) : null}
 
-          {stage === 3 && !cancelled && !o.hasBeenRated ? (
+          {complete && !cancelled && !o.hasBeenRated ? (
             <PillButton
               label="Rate this order"
               icon="star"
@@ -814,12 +1450,12 @@ export function DeliveryScreen() {
             style={{ marginTop: space.md }}
           />
 
-          {o.canCancel ? (
+          {o.canCancel && !terminal && !holdActive && !holdTimingUnavailable && !releasePending ? (
             <PillButton
-              label="Cancel order"
+              label={`Cancel ${referenceNoun}`}
               variant="soft"
-              loading={cancelOrder.isPending}
-              onPress={() => setConfirmCancel(true)}
+              loading={cancelChecking || cancelOrder.isPending}
+              onPress={() => { void openCancelConfirmation(); }}
               style={{ marginTop: space.md }}
             />
           ) : null}
@@ -827,32 +1463,60 @@ export function DeliveryScreen() {
       </View>
 
       {/* Cancel confirm */}
-      <PopupCard visible={confirmCancel} onClose={() => setConfirmCancel(false)}>
-        <IconChip icon="x-circle" size={56} tone="error" />
+      <PopupCard
+        visible={confirmCancel && cancelPreviewOrderId === orderId}
+        onClose={() => { if (!cancelChecking && !cancelOrder.isPending) setConfirmCancel(false); }}
+      >
+        <IconChip icon="x-circle" size={56} />
         <PopupTitle variant="heading" center style={{ marginTop: space.md }}>
-          Cancel this order?
+          Cancel this {referenceNoun}?
         </PopupTitle>
         <T variant="label" tone="muted" center style={{ marginTop: space.sm }}>
           {o.orderType === 'COURIER'
-            ? 'This cancels the pickup and puts the rider back in the dispatch pool. It can’t be undone.'
+            ? rider
+              ? 'This cancels the pickup and puts the assigned rider back in the dispatch pool. It can’t be undone.'
+              : 'This stops the rider search and cancels the pickup request. It can’t be undone.'
             : mmgCancellationAmbiguous
               ? 'Cancelling stops fulfilment. If you already sent the MMG payment, the store refunds you directly.'
-              // [REPORT-012 F-012-03] No cached/device-clock promise survives
-              // here: a 15s-old "free window" snapshot can cross expiry
-              // between poll and tap. State the RULE; the committed server
-              // result (message + exact fee) is rendered after the cancel.
-              : 'If the store hasn’t started your order, cancelling is usually free; a late cancel can carry a small fee. The exact outcome is confirmed the moment you cancel.'}
+              : 'Cancelling stops fulfilment. The server preview is shown below; the final outcome is confirmed when cancellation completes.'}
         </T>
+        {cancelPreviewFresh && o.orderType === 'COURIER' ? (
+          <View style={{ alignSelf: 'stretch', flexDirection: 'row', alignItems: 'flex-start', gap: space.sm, marginTop: space.lg, padding: space.md, borderRadius: radius.md, backgroundColor: color.soft.info }}>
+            <DecorativeIcon>
+              <Feather name="info" size={18} color={color.info} />
+            </DecorativeIcon>
+            <T variant="label" tone="info" style={{ flex: 1 }}>
+              Fresh server check: cancellation is still available. This courier flow does not quote an in-app cancellation fee, and Swift does not collect courier payment.
+            </T>
+          </View>
+        ) : cancelPreviewFresh && cancelPreviewFee != null ? (
+          <View style={{ alignSelf: 'stretch', flexDirection: 'row', alignItems: 'flex-start', gap: space.sm, marginTop: space.lg, padding: space.md, borderRadius: radius.md, backgroundColor: cancelPreviewFee > 0 ? color.soft.warning : color.soft.info }}>
+            <DecorativeIcon>
+              <Feather name={cancelPreviewFee > 0 ? 'alert-triangle' : 'info'} size={18} color={cancelPreviewFee > 0 ? color.warning : color.info} />
+            </DecorativeIcon>
+            <T variant="label" tone={cancelPreviewFee > 0 ? 'warning' : 'info'} style={{ flex: 1 }}>
+              {cancelPreviewFee > 0
+                ? `Server preview: ${money(cancelPreviewFee)} would be recorded if you cancel now. Swift does not collect it.`
+                : 'Server preview: no cancellation fee.'}
+            </T>
+          </View>
+        ) : null}
         <View style={{ alignSelf: 'stretch', gap: space.md, marginTop: space.xl }}>
           <PillButton
             label="Yes, cancel it"
+            variant="outline"
+            icon="x-circle"
             size="md"
-            onPress={() => {
-              setConfirmCancel(false);
-              cancelOrder.mutate();
-            }}
+            loading={cancelChecking || cancelOrder.isPending}
+            onPress={() => { void commitCancellation(); }}
           />
-          <PillButton label="Keep my order" variant="soft" size="md" onPress={() => setConfirmCancel(false)} />
+          <PillButton
+            label={`Keep my ${referenceNoun}`}
+            variant="soft"
+            size="md"
+            disabled={cancelChecking || cancelOrder.isPending}
+            onPress={() => setConfirmCancel(false)}
+          />
         </View>
       </PopupCard>
 
@@ -860,9 +1524,9 @@ export function DeliveryScreen() {
       <PopupCard visible={arrived} onClose={() => setArrived(false)}>
         <DecorativeIcon
           style={{
-            width: 64,
-            height: 64,
-            borderRadius: 32,
+            width: space['5xl'] + space.lg,
+            height: space['5xl'] + space.lg,
+            borderRadius: radius.full,
             backgroundColor: color.brand[500],
             alignItems: 'center',
             justifyContent: 'center',

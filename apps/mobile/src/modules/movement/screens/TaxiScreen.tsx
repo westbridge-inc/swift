@@ -1,31 +1,31 @@
 /** @jsxImportSource react */
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { Animated, Easing, Pressable, Share, View, useColorScheme, useWindowDimensions } from 'react-native';
+import { AccessibilityInfo, Animated, Easing, Pressable, Share, StyleSheet, View, useColorScheme, useWindowDimensions } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import MapView, { Marker, MarkerAnimated, PROVIDER_DEFAULT, Polyline } from 'react-native-maps';
+import MapView, { Marker, MarkerAnimated, PROVIDER_DEFAULT } from 'react-native-maps';
 import Reanimated from 'react-native-reanimated';
 import { rideMapProps } from '../../../kit/map-style';
 import { useInterpolatedDriver } from '../map/useInterpolatedDriver';
-import type { DriverPing } from '../map/interpolation';
-import BottomSheet, { BottomSheetView, BottomSheetScrollView } from '@gorhom/bottom-sheet';
+import { STALE_AFTER_MS, type DriverPing } from '../map/interpolation';
+import BottomSheet, { BottomSheetScrollView } from '@gorhom/bottom-sheet';
 import { Image } from 'expo-image';
 import { Feather } from '@expo/vector-icons';
-import { color, radius, space } from '@swift/ui';
+import { color, elevation, motion, radius, space } from '@swift/ui';
 import { useQueryClient } from '@tanstack/react-query';
 import { useActiveRide, useRideEstimate, useRequestRide, useCancelRide, useRideSos, useRideAvailability, useWatchAvailability, useRideSupply, useQueueStatus, useJoinQueue, useLeaveQueue } from '../../../hooks';
 import { connectSocket, getSocket, subscribeToOrder } from '../../../services/socket';
 import { RidePostTripSheet } from '../RidePostTripSheet';
 import { useLocationStore } from '../../../stores/locationStore';
 import { useDeviceLocation } from '../../../hooks/useDeviceLocation';
-import { grantedLocationFix, GEORGETOWN, pickupLocationContext } from '../../../lib/deviceLocation';
+import { grantedLocationFix, pickupLocationContext } from '../../../lib/deviceLocation';
 import { LocationPrimerCard } from '../../../components/LocationPrimerCard';
 import { money } from '../../../lib/money';
 import { mediaUrl } from '../../../lib/images';
-import { streetEtaMin } from '../../../lib/geo';
 import { haptic } from '../../../lib/haptics';
 import { toast } from '../../../components/ui/toast';
 import { safetyApi, type RideClass, type TierEstimate } from '../../../services/api';
-import { Card, CircleChip, IconChip, LoadingBlock, Money, PillButton, Pictogram, type PictogramName, PinGlyph, PopupCard, PopupTitle, Stars, T, VehicleRender, type VehicleBodyType, cardShadow } from '../../../kit';
+import { Card, CircleChip, IconChip, LoadingBlock, Money, PillButton, Pictogram, type PictogramName, PinGlyph, PopupCard, PopupTitle, Stars, T, VehicleRender, cardShadow } from '../../../kit';
+import { VERTICAL_TINT } from '../../../kit/vertical-tint';
 import type { PickedPlace } from './DestinationSearchScreen';
 import { openExternal } from '../../../lib/openExternal';
 
@@ -37,16 +37,32 @@ const STATUS_LABEL: Record<string, string> = {
   RIDE_IN_PROGRESS: 'On your trip',
 };
 
-const TIER_META: Record<RideClass, { label: string; icon: PictogramName; blurb: string; body: VehicleBodyType }> = {
-  ECONOMY: { label: 'Economy', icon: 'sedan', blurb: 'Affordable, everyday rides', body: 'SEDAN' },
-  COMFORT: { label: 'Comfort', icon: 'estate', blurb: 'Newer cars, extra legroom', body: 'WAGON' },
-  XL: { label: 'XL', icon: 'van', blurb: 'Seats up to 6', body: 'SUV' },
-  GROUP: { label: 'Bus', icon: 'bus', blurb: 'Minibus — groups, tours & airport runs', body: 'MINIBUS' },
+const TAXI_TINT = VERTICAL_TINT.taxi ?? { bg: color.brand[50], ink: color.brand[600] };
+const RIDE_PIN_LENGTH = 6;
+
+const TIER_META: Record<RideClass, { label: string; icon: PictogramName; blurb: string }> = {
+  ECONOMY: { label: 'Car', icon: 'sedan', blurb: 'Everyday rides' },
+  COMFORT: { label: 'Estate', icon: 'estate', blurb: 'Extra legroom and boot space' },
+  XL: { label: 'Van', icon: 'van', blurb: 'Room for people and bags' },
+  GROUP: { label: 'Minibus', icon: 'bus', blurb: 'Groups, tours and airport runs' },
 };
 
 const ordinal = (n: number) => `${n}${n % 10 === 1 && n % 100 !== 11 ? 'st' : n % 10 === 2 && n % 100 !== 12 ? 'nd' : n % 10 === 3 && n % 100 !== 13 ? 'rd' : 'th'}`;
 
 type LatLng = { latitude: number; longitude: number };
+
+function validLatLng(latitudeRaw: unknown, longitudeRaw: unknown): LatLng | null {
+  if (latitudeRaw == null || longitudeRaw == null) return null;
+  const latitude = Number(latitudeRaw);
+  const longitude = Number(longitudeRaw);
+  if (
+    !Number.isFinite(latitude)
+    || !Number.isFinite(longitude)
+    || Math.abs(latitude) > 90
+    || Math.abs(longitude) > 180
+  ) return null;
+  return { latitude, longitude };
+}
 
 function regionFor(pts: LatLng[]) {
   const lats = pts.map((p) => p.latitude);
@@ -62,7 +78,7 @@ function regionFor(pts: LatLng[]) {
 function FloatingBack({ navigation, insets }: any) {
   return (
     <View style={{ position: 'absolute', top: insets.top + space.sm, left: space['2xl'] }}>
-      <CircleChip icon="chevron-left" onPress={() => navigation?.goBack?.()} />
+      <CircleChip icon="chevron-left" label="Go back" onPress={() => navigation?.goBack?.()} />
     </View>
   );
 }
@@ -73,7 +89,7 @@ function PickupDot() {
   return (
     <View
       style={[
-        { width: 16, height: 16, borderRadius: 8, backgroundColor: color.text.primary, borderWidth: 3, borderColor: color.white },
+        { width: space.lg, height: space.lg, borderRadius: radius.full, backgroundColor: color.text.primary, borderWidth: space.xs / 2, borderColor: color.white },
         cardShadow,
       ]}
     />
@@ -101,11 +117,17 @@ export function RouteCard({
 }) {
   return (
     <Card>
-      <Pressable onPress={onPickup}>
+      <Pressable
+        onPress={onPickup}
+        accessibilityRole="button"
+        accessibilityLabel={`${pickupTitle}. ${pickupLabel ?? 'Set pickup location'}`}
+        accessibilityHint="Opens location search"
+        style={{ minHeight: space['5xl'], justifyContent: 'center' }}
+      >
         {({ pressed }) => (
           <View style={{ flexDirection: 'row', alignItems: 'center', opacity: pressed ? 0.7 : 1 }}>
-            <View style={{ width: 24, alignItems: 'center' }}>
-              <View style={{ width: 11, height: 11, borderRadius: 6, borderWidth: 2.5, borderColor: color.text.muted }} />
+            <View style={{ width: space['2xl'], alignItems: 'center' }}>
+              <View style={{ width: space.md, height: space.md, borderRadius: radius.full, borderWidth: space.xs / 2, borderColor: color.text.muted }} />
             </View>
             <View style={{ flex: 1, marginLeft: space.sm }}>
               <T variant="caption" tone="muted">
@@ -118,11 +140,17 @@ export function RouteCard({
           </View>
         )}
       </Pressable>
-      <View style={{ marginLeft: 11, height: 16, width: 2, backgroundColor: color.border.subtle, marginVertical: 4 }} />
-      <Pressable onPress={onDropoff}>
+      <View style={{ marginLeft: space.md, height: space.lg, width: space.xs / 2, backgroundColor: color.border.subtle, marginVertical: space.xs }} />
+      <Pressable
+        onPress={onDropoff}
+        accessibilityRole="button"
+        accessibilityLabel={`${dropoffTitle}. ${dropoffLabel ?? 'Choose your destination'}`}
+        accessibilityHint="Opens destination search"
+        style={{ minHeight: space['5xl'], justifyContent: 'center' }}
+      >
         {({ pressed }) => (
           <View style={{ flexDirection: 'row', alignItems: 'center', opacity: pressed ? 0.7 : 1 }}>
-            <View style={{ width: 24, alignItems: 'center' }}>
+            <View style={{ width: space['2xl'], alignItems: 'center' }}>
               <PinGlyph size={18} color={color.brand[500]} />
             </View>
             <View style={{ flex: 1, marginLeft: space.sm }}>
@@ -142,58 +170,82 @@ export function RouteCard({
 }
 
 const SHEET_STYLE = { backgroundColor: color.surface.subtle, borderTopLeftRadius: radius.xl, borderTopRightRadius: radius.xl };
-const HANDLE_STYLE = { width: 44, backgroundColor: color.border.strong };
+const HANDLE_STYLE = { width: space['4xl'], backgroundColor: color.border.strong };
 
 // The driving marker [rides 6.3]: reanimated shared values sweep the car
 // between pings on the UI thread — a GC mid-trip never stutters it.
 const DrivingMarker = Reanimated.createAnimatedComponent(MarkerAnimated);
 
-/** "Finding your driver" — a live search deserves motion, not a static line:
- *  a breathing ring around a car mark + how long we've been looking. */
-function SearchingCard({ startedAt }: { startedAt?: string }) {
+/** "Finding your driver" — two calm rings leave the real pickup pin. The
+ *  server-owned PENDING state is the only claim: there are no fake cars,
+ *  elapsed-time theatre or unsupported wait-time promises. */
+function SearchingCard() {
   const pulse = useRef(new Animated.Value(0)).current;
-  const [, forceTick] = useState(0);
+  const [reduceMotion, setReduceMotion] = useState(false);
 
   useEffect(() => {
+    let mounted = true;
+    void AccessibilityInfo.isReduceMotionEnabled().then((enabled) => {
+      if (mounted) setReduceMotion(enabled);
+    });
+    const subscription = AccessibilityInfo.addEventListener('reduceMotionChanged', setReduceMotion);
+    return () => {
+      mounted = false;
+      subscription.remove();
+    };
+  }, []);
+
+  useEffect(() => {
+    if (reduceMotion) {
+      pulse.stopAnimation();
+      pulse.setValue(0);
+      return;
+    }
     const loop = Animated.loop(
-      Animated.timing(pulse, { toValue: 1, duration: 1600, easing: Easing.out(Easing.ease), useNativeDriver: true }),
+      Animated.timing(pulse, {
+        toValue: 1,
+        duration: motion.duration.moment,
+        easing: Easing.bezier(...motion.easing.decelerate),
+        useNativeDriver: true,
+      }),
     );
     loop.start();
-    // Elapsed-time ticker (1s) — reassurance that the search is alive.
-    const t = setInterval(() => forceTick((n) => n + 1), 1000);
     return () => {
       loop.stop();
-      clearInterval(t);
     };
-  }, [pulse]);
+  }, [pulse, reduceMotion]);
 
-  const ringStyle = (delay: number) => ({
+  const ringStyle = (inner: boolean) => ({
     position: 'absolute' as const,
-    width: 64,
-    height: 64,
-    borderRadius: 32,
-    backgroundColor: color.brand[500],
-    opacity: pulse.interpolate({ inputRange: [0, delay, 1], outputRange: [0.25, 0.18, 0] }),
-    transform: [{ scale: pulse.interpolate({ inputRange: [0, 1], outputRange: [1, 2.1] }) }],
+    width: space['5xl'] * 2,
+    height: space['5xl'] * 2,
+    borderRadius: radius.full,
+    borderWidth: inner ? StyleSheet.hairlineWidth : space.xs / 2,
+    borderColor: TAXI_TINT.ink,
+    opacity: reduceMotion
+      ? inner ? 0.18 : 0.1
+      : pulse.interpolate({ inputRange: [0, 1], outputRange: inner ? [0.28, 0] : [0.18, 0] }),
+    transform: [{
+      scale: reduceMotion
+        ? inner ? 0.72 : 1
+        : pulse.interpolate({ inputRange: [0, 1], outputRange: inner ? [0.42, 0.86] : [0.68, 1.18] }),
+    }],
   });
 
-  const elapsed = startedAt ? Math.max(0, Math.floor((Date.now() - new Date(startedAt).getTime()) / 1000)) : null;
-  const mm = elapsed != null ? Math.floor(elapsed / 60) : 0;
-  const ss = elapsed != null ? elapsed % 60 : 0;
-
   return (
-    <View style={{ alignItems: 'center', paddingVertical: space.lg }}>
-      <View style={{ width: 64, height: 64, alignItems: 'center', justifyContent: 'center' }}>
-        <Animated.View style={ringStyle(0.5)} />
-        <View style={{ width: 64, height: 64, borderRadius: 32, alignItems: 'center', justifyContent: 'center', backgroundColor: color.brand[500] }}>
-          <Pictogram name="taxi" size={32} color={color.white} />
+    <View style={{ alignItems: 'center', paddingVertical: space.xl }}>
+      <View style={{ width: space['5xl'] * 2, height: space['5xl'] * 2, alignItems: 'center', justifyContent: 'center' }}>
+        <Animated.View style={ringStyle(false)} />
+        <Animated.View style={ringStyle(true)} />
+        <View style={{ width: space['4xl'], height: space['4xl'], borderRadius: radius.full, alignItems: 'center', justifyContent: 'center', backgroundColor: TAXI_TINT.bg }}>
+          <PinGlyph size={22} color={TAXI_TINT.ink} />
         </View>
       </View>
-      <T variant="body" weight="semibold" style={{ marginTop: space.lg }}>
-        Contacting drivers near you…
+      <T variant="title" style={{ marginTop: space.md }}>
+        Finding your driver
       </T>
-      <T variant="caption" tone="muted" style={{ marginTop: 4 }}>
-        {elapsed != null ? `Searching for ${mm}:${String(ss).padStart(2, '0')} · ` : ''}usually under a couple of minutes
+      <T variant="caption" tone="muted" center style={{ marginTop: space.xs }}>
+        We’ll update this trip when a driver accepts.
       </T>
     </View>
   );
@@ -229,7 +281,7 @@ export function TaxiScreen({ navigation }: any) {
     subscribeToOrder(id);
     const s = getSocket();
     const onStatus = (p: any) => {
-      if (p?.orderId && p.orderId !== id) return;
+      if (p?.orderId !== id) return;
       if (p?.status === 'DELIVERED' || p?.status === 'COMPLETED') {
         if (activeRef.current) setCompletedRide(activeRef.current);
       }
@@ -240,16 +292,18 @@ export function TaxiScreen({ navigation }: any) {
       else if (p?.status && p.status !== 'PENDING') setRematching(false);
       // The haptic map [rides spec Part 10]: match + arrival are the two
       // notification-success moments; code-verified trip start is the commit.
-      if (p?.status === 'DRIVER_ASSIGNED' || p?.status === 'DRIVER_ARRIVED') haptic.success();
-      else if (p?.status === 'RIDE_IN_PROGRESS') haptic.commit();
-      else if (p?.status === 'DELIVERED' || p?.status === 'COMPLETED') haptic.success();
+      if (navigation?.isFocused?.() !== false) {
+        if (p?.status === 'DRIVER_ASSIGNED' || p?.status === 'DRIVER_ARRIVED') haptic.success();
+        else if (p?.status === 'RIDE_IN_PROGRESS') haptic.commit();
+        else if (p?.status === 'DELIVERED' || p?.status === 'COMPLETED') haptic.success();
+      }
       qc.invalidateQueries({ queryKey: ['rides', 'active'] });
     };
     s.on('order:status_changed', onStatus);
     return () => {
       s.off('order:status_changed', onStatus);
     };
-  }, [activeRide?.id, qc]);
+  }, [activeRide?.id, navigation, qc]);
 
   // Pickup defaults to live location; a manual override wins when set.
   const [pickupOverride, setPickupOverride] = useState<PickedPlace | undefined>();
@@ -265,14 +319,16 @@ export function TaxiScreen({ navigation }: any) {
     : undefined;
   const pickup = pickupOverride ?? livePickup;
 
-  const pickupPoint = pickup ? { lat: pickup.lat, lng: pickup.lng } : undefined;
-  const dropoffPoint = dropoff ? { lat: dropoff.lat, lng: dropoff.lng } : undefined;
+  const pickupCoordinate = pickup ? validLatLng(pickup.lat, pickup.lng) : null;
+  const dropoffCoordinate = dropoff ? validLatLng(dropoff.lat, dropoff.lng) : null;
+  const pickupPoint = pickupCoordinate ? { lat: pickupCoordinate.latitude, lng: pickupCoordinate.longitude } : undefined;
+  const dropoffPoint = dropoffCoordinate ? { lat: dropoffCoordinate.latitude, lng: dropoffCoordinate.longitude } : undefined;
 
   const { data: estimate, isFetching: estimating } = useRideEstimate(pickupPoint, dropoffPoint);
 
   // Availability spec §2.1 (hooks live ABOVE the early returns — the active-ride
   // and loading branches must never change the hook order).
-  const supply = useRideAvailability(pickupPoint);
+  const availability = useRideAvailability(pickupPoint);
   const watch = useWatchAvailability();
   // 5.5: honest counts for the chip + the queue that auto-requests. A queue
   // match creates a REAL ride server-side, so the active-ride poll flips the
@@ -294,35 +350,54 @@ export function TaxiScreen({ navigation }: any) {
   }
 
   if (activeRide) {
-    return <ActiveRide navigation={navigation} ride={activeRide} cancelRide={cancelRide} insets={insets} rematching={rematching} />;
+    return (
+      <ActiveRide
+        key={`${activeRide.id}:${activeRide.driver?.id ?? activeRide.driverId ?? 'searching'}`}
+        navigation={navigation}
+        ride={activeRide}
+        cancelRide={cancelRide}
+        insets={insets}
+        rematching={rematching}
+      />
+    );
   }
 
   // ===== Request flow (idle → route chosen) =====
+  const queued = !!queue.data;
+  const pickupLL = pickupCoordinate ?? undefined;
+  const dropoffLL = dropoffCoordinate ?? undefined;
   const mapCenter = {
-    latitude: pickup?.lat ?? locationContext.center.latitude,
-    longitude: pickup?.lng ?? locationContext.center.longitude,
+    latitude: pickupLL?.latitude ?? locationContext.center.latitude,
+    longitude: pickupLL?.longitude ?? locationContext.center.longitude,
     latitudeDelta: 0.02,
     longitudeDelta: 0.02,
   };
-  const pickupLL = pickup ? { latitude: pickup.lat, longitude: pickup.lng } : undefined;
-  const dropoffLL = dropoff ? { latitude: dropoff.lat, longitude: dropoff.lng } : undefined;
-  const routeRegion = pickupLL && dropoffLL ? regionFor([pickupLL, dropoffLL]) : mapCenter;
+  const routeRegion = !queued && pickupLL && dropoffLL ? regionFor([pickupLL, dropoffLL]) : mapCenter;
 
   const selectedTier = estimate?.tiers.find((t) => t.rideClass === selectedClass);
   const canRequest = !!pickupPoint && !!dropoffPoint && !!selectedTier;
-  const errBody = (requestRide.error as any)?.response?.data;
+  const requestVariables = requestRide.variables;
+  const errorMatchesCurrentTrip = !!requestVariables
+    && requestVariables.pickup.lat === pickupPoint?.lat
+    && requestVariables.pickup.lng === pickupPoint?.lng
+    && requestVariables.dropoff.lat === dropoffPoint?.lat
+    && requestVariables.dropoff.lng === dropoffPoint?.lng
+    && requestVariables.rideClass === selectedClass;
+  const errBody = errorMatchesCurrentTrip ? (requestRide.error as any)?.response?.data : undefined;
   const errMsg = errBody?.error?.message ?? errBody?.message;
   // L2-before-first-ride (§5): the gate must open a door, never dead-end.
   const needsL2 = (errBody?.error?.code ?? errBody?.code) === 'ID_VERIFICATION_REQUIRED';
 
-  // Availability spec §2.1: NONE → the request button becomes "Notify me";
-  // LOW → a soft note. The UI only reshapes when the server's gate
-  // (DISPATCH_AVAILABILITY) is on — flag off keeps today's screen
-  // byte-identical. A 409 is the server speaking regardless.
-  const gated = supply.data?.gate === true;
-  const supplyNone = (gated && supply.data?.level === 'NONE')
+  // One coherent /supply snapshot owns visible counts, level and ETA. The
+  // older /availability read contributes only its rollout gate.
+  const counts = supplyCounts.data;
+  const gated = availability.data?.gate === true;
+  const supplyNone = (gated && counts?.level === 'NONE')
     || (errBody?.error?.code ?? errBody?.code) === 'NO_DRIVERS_NEARBY';
-  const supplyLow = gated && !supplyNone && supply.data?.level === 'LOW';
+  const supplyLow = gated && !supplyNone && counts?.level === 'LOW';
+  const watchMatchesPickup = watch.isSuccess
+    && watch.variables?.lat === pickupPoint?.lat
+    && watch.variables?.lng === pickupPoint?.lng;
 
   const tripPayload = () =>
     pickupPoint && dropoffPoint && pickup && dropoff
@@ -343,11 +418,25 @@ export function TaxiScreen({ navigation }: any) {
 
   // The supply chip [5.1/S-02..04]: one line answering "can I get a ride"
   // before any destination is typed. Real numbers only — never a guess.
-  const counts = supplyCounts.data;
+  const nearestPickupEta = !counts || supplyNone || counts.level === 'NONE' || counts.online === 0 || counts.busy >= counts.online
+    ? null
+    : typeof counts.nearestEtaMinutes === 'number' && counts.nearestEtaMinutes > 0
+      ? Math.round(counts.nearestEtaMinutes)
+      : null;
+  // The estimate contract has ONE server route duration, not a per-class
+  // pickup ETA. Keep it global and call it a trip estimate; duplicating it on
+  // every tier would falsely imply class-specific supply.
+  const routeDurationMin = supplyNone || counts?.online === 0 || !estimate || estimate.durationMin <= 0
+    ? null
+    : estimate.durationMin;
   const supplyChip = !counts
     ? null
-    : counts.online === 0
-      ? { label: 'No drivers online right now', tone: 'muted' as const }
+    : supplyNone || counts.level === 'NONE'
+      ? counts.online === 0
+        ? { label: 'No drivers online right now', tone: 'muted' as const }
+        : counts.busy >= counts.online
+          ? { label: `${counts.online} driver${counts.online === 1 ? '' : 's'} online — all on trips`, tone: 'muted' as const }
+          : { label: 'No eligible driver near this pickup', tone: 'muted' as const }
       : counts.busy >= counts.online
         ? { label: `${counts.online} driver${counts.online === 1 ? '' : 's'} online — all on trips`, tone: 'muted' as const }
         : { label: `${counts.online - counts.busy} driver${counts.online - counts.busy === 1 ? '' : 's'} nearby`, tone: 'ink' as const };
@@ -362,18 +451,15 @@ export function TaxiScreen({ navigation }: any) {
         mapPadding={{ top: 0, left: 0, right: 0, bottom: Math.round(winH * 0.38) }}
         {...rideMapProps(scheme)}
       >
-        {pickupLL ? (
+        {!queued && pickupLL ? (
           <Marker coordinate={pickupLL} title="Pickup" anchor={{ x: 0.5, y: 0.5 }}>
             <PickupDot />
           </Marker>
         ) : null}
-        {dropoffLL ? (
+        {!queued && dropoffLL ? (
           <Marker coordinate={dropoffLL} title="Drop-off" anchor={{ x: 0.5, y: 1 }}>
             <DropPin />
           </Marker>
-        ) : null}
-        {pickupLL && dropoffLL ? (
-          <Polyline coordinates={[pickupLL, dropoffLL]} strokeColor={color.brand[500]} strokeWidth={4} />
         ) : null}
       </MapView>
 
@@ -396,14 +482,23 @@ export function TaxiScreen({ navigation }: any) {
               style={{ marginBottom: space.lg }}
             />
           ) : null}
-          <RouteCard
-            pickupLabel={pickup?.label}
-            dropoffLabel={dropoff?.label}
-            onPickup={() => openSearch((p) => setPickupOverride(p), 'Pickup')}
-            onDropoff={() => openSearch((p) => setDropoff(p), 'Where to?')}
-          />
+          {queued ? (
+            <Card>
+              <T variant="title">Your queued trip is saved</T>
+              <T variant="caption" tone="muted" style={{ marginTop: space.xs }}>
+                Its route and vehicle stay as they were when you joined. Leave the queue to choose a different trip.
+              </T>
+            </Card>
+          ) : (
+            <RouteCard
+              pickupLabel={pickup?.label}
+              dropoffLabel={dropoff?.label}
+              onPickup={() => openSearch((p) => setPickupOverride(p), 'Pickup')}
+              onDropoff={() => openSearch((p) => setDropoff(p), 'Where to?')}
+            />
+          )}
 
-          {supplyChip ? (
+          {supplyChip && !queued ? (
             <View style={{ flexDirection: 'row', justifyContent: 'center', marginTop: space.md }}>
               <View
                 style={{
@@ -411,23 +506,29 @@ export function TaxiScreen({ navigation }: any) {
                   alignItems: 'center',
                   gap: space.xs,
                   paddingHorizontal: space.md,
-                  paddingVertical: 6,
+                  paddingVertical: space.sm,
                   borderRadius: radius.full,
                   backgroundColor: color.surface.sunken,
                 }}
               >
-                <View style={{ width: 7, height: 7, borderRadius: 4, backgroundColor: supplyChip.tone === 'ink' ? color.success : color.text.muted }} />
+                <View style={{ width: space.sm, height: space.sm, borderRadius: radius.full, backgroundColor: supplyChip.tone === 'ink' ? TAXI_TINT.ink : color.text.muted }} />
                 <T variant="label" tone={supplyChip.tone === 'ink' ? 'ink' : 'muted'}>{supplyChip.label}</T>
               </View>
             </View>
           ) : null}
 
           {/* Tiers */}
-          {dropoffPoint ? (
+          {queued ? null : dropoffPoint ? (
             <View style={{ marginTop: space.xl }}>
-              <T variant="heading" style={{ marginBottom: space.md }}>
-                Choose a ride
-              </T>
+              <T variant="micro" tone="faint">Choose your ride</T>
+              <View style={{ flexDirection: 'row', alignItems: 'baseline', justifyContent: 'space-between', gap: space.md, marginTop: space.xs, marginBottom: space.md }}>
+                <T variant="title">Pick your vehicle</T>
+                {nearestPickupEta != null ? (
+                  <T variant="caption" style={{ color: TAXI_TINT.ink }}>
+                    Nearest driver · ~{nearestPickupEta} min
+                  </T>
+                ) : null}
+              </View>
               {estimating && !estimate ? (
                 <Card style={{ flexDirection: 'row', alignItems: 'center', gap: space.md }}>
                   <Feather name="loader" size={16} color={color.text.muted} />
@@ -442,12 +543,12 @@ export function TaxiScreen({ navigation }: any) {
                       key={tier.rideClass}
                       tier={tier}
                       selected={tier.rideClass === selectedClass}
-                      durationMin={estimate.durationMin}
+                      tripDurationMin={routeDurationMin}
                       onPress={() => setSelectedClass(tier.rideClass)}
                     />
                   ))}
                   <T variant="caption" tone="muted" center style={{ marginTop: space.sm }}>
-                    Fixed fare, locked before you book — no surge, pay cash.
+                    Fare estimate · cash to the driver{routeDurationMin != null ? ` · ~${routeDurationMin} min trip` : ''}.
                   </T>
                 </>
               ) : (
@@ -465,7 +566,7 @@ export function TaxiScreen({ navigation }: any) {
           )}
 
           {errMsg ? (
-            <T variant="label" tone="error" center style={{ marginTop: space.lg }}>
+            <T variant="label" tone="error" center accessibilityLiveRegion="assertive" style={{ marginTop: space.lg }}>
               {errMsg}
             </T>
           ) : null}
@@ -480,16 +581,16 @@ export function TaxiScreen({ navigation }: any) {
 
           {queue.data ? (
             // 5.5B — you're in line. A supply gap is a service, not an
-            // apology: position is live, the request fires automatically the
-            // moment a driver frees, and leaving is one tap. Brand accent —
+            // apology: position is live, the stored trip stays intact, and
+            // leaving is one tap. Brand accent —
             // queueing is service, never danger [3.1].
-            <Card style={{ marginTop: space.lg, backgroundColor: color.brand[50], borderWidth: 1, borderColor: color.brand[500] }}>
+            <Card style={{ marginTop: space.lg, backgroundColor: color.brand[50], borderWidth: StyleSheet.hairlineWidth, borderColor: color.brand[500] }}>
               <T variant="title" tone="deep">You’re in line</T>
               <T variant="body" weight="semibold" style={{ marginTop: space.xs }}>
                 {ordinal(queue.data.position)} in line
               </T>
               <T variant="caption" tone="muted" style={{ marginTop: space.xs }}>
-                We’ll request automatically the moment a driver frees up. You can close the app — we’ll notify you.
+                Your saved trip stays here until it matches, expires, or you leave. You can close this screen.
               </T>
               <T variant="caption" tone="muted" style={{ marginTop: space.xs }}>
                 {queue.data.suppliersOnline} driver{queue.data.suppliersOnline === 1 ? '' : 's'} online — {queue.data.suppliersBusy} on trips right now
@@ -505,10 +606,16 @@ export function TaxiScreen({ navigation }: any) {
           ) : supplyNone ? (
             // 5.5A — the flagship fix: real counts, a queue, no apology.
             <Card style={{ marginTop: space.lg }}>
-              <T variant="title">{(counts?.online ?? 0) > 0 ? 'All drivers are busy' : 'No drivers online right now'}</T>
+              <T variant="title">
+                {(counts?.online ?? 0) === 0
+                  ? 'No drivers online right now'
+                  : (counts?.busy ?? 0) >= (counts?.online ?? 0)
+                    ? 'All drivers are busy'
+                    : 'No eligible driver available for this request'}
+              </T>
               {counts ? (
                 <T variant="caption" tone="muted" style={{ marginTop: space.xs }}>
-                  {counts.online} driver{counts.online === 1 ? '' : 's'} online in Georgetown — {counts.busy} on trips right now
+                  {counts.online} driver{counts.online === 1 ? '' : 's'} online near this pickup — {counts.busy} on trips right now
                 </T>
               ) : null}
               <PillButton
@@ -518,7 +625,10 @@ export function TaxiScreen({ navigation }: any) {
                 disabled={!tripPayload()}
                 onPress={() => {
                   const payload = tripPayload();
-                  if (payload) joinQueue.mutate(payload);
+                  if (payload) {
+                    if (!pickupOverride && pickup) setPickupOverride(pickup);
+                    joinQueue.mutate(payload);
+                  }
                 }}
               />
               {!tripPayload() ? (
@@ -527,26 +637,13 @@ export function TaxiScreen({ navigation }: any) {
                 </T>
               ) : null}
               <PillButton
-                label={watch.isSuccess ? "We'll ping you — watching for drivers" : 'Notify me instead'}
+                label={watchMatchesPickup ? "We'll ping you — watching for drivers" : 'Notify me instead'}
                 variant="outline"
                 style={{ marginTop: space.sm }}
                 loading={watch.isPending}
-                disabled={watch.isSuccess || !pickupPoint}
+                disabled={watchMatchesPickup || !pickupPoint}
                 onPress={() => pickupPoint && watch.mutate(pickupPoint)}
               />
-              {(counts?.online ?? 0) > 0 ? (
-                // Try-anyway exists ONLY when someone is actually online —
-                // a search against an empty set is theater [0.8].
-                <T
-                  variant="caption"
-                  tone="muted"
-                  center
-                  style={{ marginTop: space.md, textDecorationLine: 'underline' }}
-                  onPress={() => canRequest && !requestRide.isPending && onRequest()}
-                >
-                  Try now anyway — drivers sometimes come online mid-search
-                </T>
-              ) : null}
             </Card>
           ) : (
             <>
@@ -582,51 +679,242 @@ export function TaxiScreen({ navigation }: any) {
 function TierRow({
   tier,
   selected,
-  durationMin,
+  tripDurationMin,
   onPress,
 }: {
   tier: TierEstimate;
   selected: boolean;
-  durationMin: number;
+  tripDurationMin: number | null;
   onPress: () => void;
 }) {
   const meta = TIER_META[tier.rideClass];
+  const accessibilityLabel = [
+    meta.label,
+    `${tier.capacity} seats`,
+    tripDurationMin != null ? `about ${tripDurationMin} minute trip` : null,
+    money(tier.fare),
+  ].filter(Boolean).join(', ');
   return (
-    <Pressable onPress={onPress}>
+    <Pressable
+      onPress={onPress}
+      accessibilityRole="radio"
+      accessibilityLabel={accessibilityLabel}
+      accessibilityState={{ selected }}
+    >
       {({ pressed }) => (
         <View
-          style={{
-            flexDirection: 'row',
-            alignItems: 'center',
-            gap: space.md,
-            marginBottom: space.md,
-            paddingHorizontal: space.lg,
-            paddingVertical: space.md,
-            borderRadius: radius.lg,
-            borderWidth: 1,
-            borderColor: selected ? color.brand[500] : color.border.subtle,
-            backgroundColor: selected ? color.brand[50] : color.surface.base,
-            opacity: pressed ? 0.85 : 1,
-          }}
+          style={[
+            {
+              flexDirection: 'row',
+              alignItems: 'center',
+              gap: space.md,
+              minHeight: space['5xl'] * 2,
+              marginBottom: space.md,
+              paddingHorizontal: space.lg,
+              paddingVertical: space.md,
+              borderRadius: radius.lg,
+              borderWidth: selected ? space.xs / 2 : StyleSheet.hairlineWidth,
+              borderColor: selected ? TAXI_TINT.ink : color.border.subtle,
+              backgroundColor: selected ? TAXI_TINT.bg : color.surface.base,
+              opacity: pressed ? 0.85 : 1,
+            },
+            !selected ? elevation.card : null,
+          ]}
         >
-          {/* The class reads visually before a word is read [5.3]: the same
-              construction system that renders the assigned car (6B.5). */}
-          <VehicleRender bodyType={meta.body} view="hero" size={82} />
+          {/* Request classes use the kit's ONE side-view pictogram family.
+              VehicleRender is reserved for an actual assigned vehicle. */}
+          <View style={{ width: space['5xl'], height: space['5xl'], borderRadius: radius.md, alignItems: 'center', justifyContent: 'center', backgroundColor: TAXI_TINT.bg }}>
+            <Pictogram name={meta.icon} size={32} color={TAXI_TINT.ink} />
+          </View>
           <View style={{ flex: 1 }}>
-            <T variant="body" weight="semibold" tone={selected ? 'deep' : 'ink'}>
+            <T variant="body" weight="semibold" style={selected ? { color: TAXI_TINT.ink } : undefined}>
               {meta.label} <T variant="label" tone="muted">· {tier.capacity} seats</T>
             </T>
-            <T variant="caption" tone="muted" style={{ marginTop: 2 }}>
-              {/* [F-268] "~0 min" with zero drivers online was a dishonest
-                  number on a money row. No estimate ⇒ say nothing; the
-                  "No drivers online" banner already carries the truth. */}
-              {meta.blurb}{durationMin > 0 ? ` · ~${durationMin} min` : ''}
+            <T variant="caption" tone="muted" style={{ marginTop: space.xs }}>
+              {meta.blurb}
             </T>
           </View>
-          <Money amount={tier.fare} tone={selected ? 'brand' : 'ink'} />
+          <Money amount={tier.fare} style={selected ? { color: TAXI_TINT.ink } : undefined} />
         </View>
       )}
     </Pressable>
+  );
+}
+
+function StartCodeCeremony({
+  code,
+  driverName,
+  arrived,
+  onWrongDriver,
+}: {
+  code: unknown;
+  driverName?: string;
+  arrived: boolean;
+  onWrongDriver: () => void;
+}) {
+  const value = typeof code === 'string' ? code : '';
+  const digits = /^\d+$/.test(value) && value.length === RIDE_PIN_LENGTH ? value.split('') : [];
+
+  return (
+    <View style={{ marginTop: space.lg, paddingTop: space.lg, borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: color.border.subtle }}>
+      <T variant="micro" tone="faint" center>Say this code to start the ride</T>
+      {digits.length === RIDE_PIN_LENGTH ? (
+        <View
+          accessible
+          accessibilityLabel={`Start code. ${digits.join(', ')}`}
+          style={{ flexDirection: 'row', gap: space.xs, marginTop: space.md }}
+        >
+          {digits.map((digit, index) => (
+            <View
+              key={`${digit}-${index}`}
+              style={{
+                flex: 1,
+                minHeight: space['5xl'],
+                paddingVertical: space.xs,
+                alignItems: 'center',
+                justifyContent: 'center',
+                borderRadius: radius.md,
+                backgroundColor: color.brand[50],
+                borderWidth: StyleSheet.hairlineWidth,
+                borderColor: color.brand[200],
+              }}
+            >
+              <T variant="displayXl" tone="brand" maxFontSizeMultiplier={2} accessible={false}>
+                {digit}
+              </T>
+            </View>
+          ))}
+        </View>
+      ) : (
+        <View style={{ flexDirection: 'row', alignItems: 'flex-start', gap: space.sm, marginTop: space.md, padding: space.md, borderRadius: radius.md, backgroundColor: color.soft.danger }}>
+          <Feather name="alert-triangle" size={18} color={color.error} />
+          <T variant="label" tone="error" style={{ flex: 1 }}>
+            The six-digit start code isn’t available. Don’t begin the ride until it appears.
+          </T>
+        </View>
+      )}
+      <T variant="caption" tone="muted" center style={{ marginTop: space.sm }}>
+        It proves this is your ride — {driverName ?? 'the driver'} types it to start.
+      </T>
+      {arrived ? (
+        <Pressable
+          onPress={onWrongDriver}
+          accessibilityRole="button"
+          accessibilityLabel="This isn’t my driver"
+          accessibilityHint="Reports that the car at the kerb does not match your ride"
+          hitSlop={space.md}
+          style={{ marginTop: space.sm, minHeight: space['5xl'], justifyContent: 'center' }}
+        >
+          <T variant="caption" center style={{ color: color.error, textDecorationLine: 'underline' }}>
+            This isn’t my driver
+          </T>
+        </Pressable>
+      ) : null}
+    </View>
+  );
+}
+
+function AssignedRideCard({
+  ride,
+  driver,
+  status,
+  legEta,
+  showStartCode,
+  onWrongDriver,
+}: {
+  ride: any;
+  driver: any;
+  status: string;
+  legEta: number | null;
+  showStartCode: boolean;
+  onWrongDriver: () => void;
+}) {
+  const vehicle = [driver.vehicleColor, driver.vehicleMake, driver.vehicleModel].filter(Boolean).join(' ');
+  const statusLabel = STATUS_LABEL[status] ?? 'Ride in progress';
+  const fare = ride.taxiFareTotal ?? ride.totalAmount;
+
+  return (
+    <Card>
+      <T variant="micro" tone="faint">
+        {statusLabel}{legEta != null ? legEta <= 0 ? ' · arriving now' : ` · ~${Math.round(legEta)} min` : ''}
+      </T>
+
+      {/* Plate-first safety culture: this is the first visual fact in the
+          assigned card, ahead of face, vehicle detail and start code. */}
+      {driver.licensePlate ? (
+        <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.md, marginTop: space.xs }}>
+          <View style={{ flex: 1 }}>
+            <T variant="displayXl" style={{ letterSpacing: space.xs }}>
+              {driver.licensePlate}
+            </T>
+            <T variant="label" weight="semibold" style={{ color: TAXI_TINT.ink, marginTop: space.xs }}>
+              Check the plate first
+            </T>
+          </View>
+          <VehicleRender bodyType={driver.bodyType} colorHex={driver.colorHex} view="hero" size={96} />
+        </View>
+      ) : (
+        <View style={{ flexDirection: 'row', alignItems: 'flex-start', gap: space.sm, marginTop: space.md, padding: space.md, borderRadius: radius.md, backgroundColor: color.soft.danger }}>
+          <Feather name="alert-triangle" size={18} color={color.error} />
+          <T variant="label" tone="error" style={{ flex: 1 }}>
+            Plate details aren’t available. Don’t get in until the vehicle is confirmed.
+          </T>
+        </View>
+      )}
+
+      <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.md, marginTop: space.lg }}>
+        {driver.user?.avatar ? (
+          <Image
+            source={{ uri: mediaUrl(driver.user.avatar) ?? undefined }}
+            style={{ width: space['5xl'], height: space['5xl'], borderRadius: radius.full }}
+            contentFit="cover"
+            accessible={false}
+          />
+        ) : (
+          <IconChip icon="user" size={48} />
+        )}
+        <View style={{ flex: 1 }}>
+          <T variant="body" weight="semibold">{driver.user?.firstName ?? 'Your driver'}</T>
+          <T variant="caption" tone="muted" numberOfLines={2} style={{ marginTop: space.xs }}>
+            {vehicle || 'Vehicle details unavailable'}
+          </T>
+          {driver.displayRating != null ? (
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.xs, marginTop: space.xs }}>
+              <Stars value={Number(driver.displayRating)} size={11} />
+              <T variant="caption" tone="muted">{Number(driver.displayRating).toFixed(1)}</T>
+            </View>
+          ) : <T variant="caption" tone="muted" style={{ marginTop: space.xs }}>New on Swift</T>}
+        </View>
+        {driver.user?.phone ? (
+          <PillButton
+            label="Call"
+            variant="soft"
+            size="md"
+            icon="phone"
+            onPress={() => void openExternal(`tel:${driver.user.phone}`, "Couldn't start the call — dial your driver directly.")}
+          />
+        ) : null}
+      </View>
+
+      {showStartCode ? (
+        <StartCodeCeremony
+          code={ride.ridePin}
+          driverName={driver.user?.firstName}
+          arrived={status === 'DRIVER_ARRIVED'}
+          onWrongDriver={onWrongDriver}
+        />
+      ) : null}
+
+      <View style={{ flexDirection: 'row', alignItems: 'flex-end', justifyContent: 'space-between', gap: space.md, marginTop: space.lg, paddingTop: space.md, borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: color.border.subtle }}>
+        <View style={{ flex: 1 }}>
+          <T variant="micro" tone="faint">Fare · cash</T>
+          <T variant="caption" tone="muted" style={{ marginTop: space.xs }}>
+            Pay the driver directly.
+          </T>
+        </View>
+        <Money amount={fare} size="l" />
+      </View>
+    </Card>
   );
 }
 
@@ -635,6 +923,7 @@ function ActiveRide({ navigation, ride, cancelRide, insets, rematching }: any) {
   const scheme = useColorScheme();
   const sheetRef = useRef<BottomSheet>(null);
   const [confirmCancel, setConfirmCancel] = useState(false);
+  const [cancelRideError, setCancelRideError] = useState<string | null>(null);
   const [driverPing, setDriverPing] = useState<DriverPing | null>(null);
   const [guardianPrompt, setGuardianPrompt] = useState(false);
   const [guardianBusy, setGuardianBusy] = useState(false);
@@ -649,7 +938,6 @@ function ActiveRide({ navigation, ride, cancelRide, insets, rematching }: any) {
   // Live-tracking honesty: the car marker is only truthful while the GPS feed is
   // fresh. Track the heading (to rotate it) and WHEN the last fix landed, so a
   // dead feed (tunnel, dead battery, app killed) degrades instead of lying.
-  const [driverHeading, setDriverHeading] = useState<number | null>(null);
   const [lastFixAt, setLastFixAt] = useState<number | null>(null);
   const [nowTs, setNowTs] = useState(() => Date.now());
   const [connLost, setConnLost] = useState(false);
@@ -659,49 +947,76 @@ function ActiveRide({ navigation, ride, cancelRide, insets, rematching }: any) {
   const [sosConfirm, setSosConfirm] = useState(false);
   const sos = useRideSos();
   const riderLoc = useLocationStore();
+  const queryClient = useQueryClient();
   const mapRef = useRef<MapView>(null);
+  const centeredFirstFix = useRef(false);
+  const lastServerFixAt = useRef<number | null>(null);
   const d = ride.driver;
-  // The server streams a fix at least every ~10s; past this we treat the marker
-  // as stale rather than a live position.
-  const FIX_STALE_MS = 12_000;
-
   // Live driver position: taxi rides are orders, so the order room streams
-  // `driver:location` straight from the driver's GPS uploads. The REST
-  // snapshot (driver.currentLat) seeds the marker until the first event.
+  // `driver:location` straight from the driver's GPS uploads. The undated REST
+  // snapshot is intentionally ignored; only timestamped socket fixes render.
   useEffect(() => {
     if (!ride?.id) return;
+    setLiveDriver(null);
+    setDriverPing(null);
+    setLastFixAt(null);
+    setLiveEtaMin(null);
+    setConnLost(false);
+    lastServerFixAt.current = null;
     connectSocket();
     subscribeToOrder(ride.id);
     const s = getSocket();
     const onDriver = (p: any) => {
-      if (p?.latitude != null && p?.longitude != null) {
-        setLiveDriver({ latitude: Number(p.latitude), longitude: Number(p.longitude) });
-        setLastFixAt(Date.now());
-        if (typeof p?.heading === 'number') setDriverHeading(p.heading);
-        // Feed the 6.3 sweep — the marker drives between these on the UI thread.
-        setDriverPing({
-          latitude: Number(p.latitude),
-          longitude: Number(p.longitude),
-          heading: typeof p?.heading === 'number' ? p.heading : null,
-          receivedAt: Date.now(),
-        });
-      }
-      if (typeof p?.etaMinutes === 'number') setLiveEtaMin(p.etaMinutes);
+      if (p?.orderId !== ride.id || p?.driverId !== d?.id) return;
+      const latitude = Number(p?.latitude);
+      const longitude = Number(p?.longitude);
+      const fixAt = typeof p?.timestamp === 'string' ? Date.parse(p.timestamp) : Number.NaN;
+      if (
+        !Number.isFinite(latitude)
+        || !Number.isFinite(longitude)
+        || Math.abs(latitude) > 90
+        || Math.abs(longitude) > 180
+        || !Number.isFinite(fixAt)
+        || (lastServerFixAt.current != null && fixAt < lastServerFixAt.current)
+      ) return;
+      lastServerFixAt.current = fixAt;
+      const receivedAt = Date.now();
+      setLiveDriver({ latitude, longitude });
+      setLastFixAt(receivedAt);
+      // Feed the 6.3 sweep — the marker drives between these on the UI thread.
+      setDriverPing({
+        latitude,
+        longitude,
+        heading: typeof p?.heading === 'number' ? p.heading : null,
+        receivedAt,
+      });
+      const etaMinutes = p?.etaMinutes;
+      setLiveEtaMin(
+        typeof etaMinutes === 'number' && Number.isFinite(etaMinutes) && etaMinutes >= 0
+          ? etaMinutes
+          : null,
+      );
     };
     // socket.io auto-reconnects the transport, but the ORDER ROOM is per-
     // connection (joined only via order:subscribe), so after any blip a
     // "connected" socket silently stops receiving driver:location until we
     // re-subscribe. Re-join on every (re)connect and surface a banner while down.
     const onConnect = () => { setConnLost(false); subscribeToOrder(ride.id); };
-    const onDisconnect = () => setConnLost(true);
-    const onError = () => setConnLost(true);
+    const onDisconnect = () => { setConnLost(true); setLiveEtaMin(null); };
+    const onError = () => { setConnLost(true); setLiveEtaMin(null); };
     // Terminal exhaustion signal (backend emits it to the order room when the
     // cascade gives up) — flip the searching spinner to an honest dead state.
-    const onExhausted = () => setExhausted(true);
+    const onExhausted = (p: any) => {
+      if (p?.orderId === ride.id) setExhausted(true);
+    };
     // Trip Guardian check-in [safety spec §5 / rides 12.2]: the ONE safety
     // engine prompts through the order room; the phone only renders and
     // responds — zero safety logic client-side.
-    const onGuardianCheckin = () => { setGuardianPrompt(true); haptic.warn(); };
+    const onGuardianCheckin = (p: any) => {
+      if (p?.orderId !== ride.id) return;
+      setGuardianPrompt(true);
+      if (navigation?.isFocused?.() !== false) haptic.warn();
+    };
     s.on('driver:location', onDriver);
     s.on('connect', onConnect);
     s.on('disconnect', onDisconnect);
@@ -715,8 +1030,9 @@ function ActiveRide({ navigation, ride, cancelRide, insets, rematching }: any) {
       s.off('connect_error', onError);
       s.off('dispatch:exhausted', onExhausted);
       s.off('guardian:checkin', onGuardianCheckin);
+      s.emit('order:unsubscribe', { orderId: ride.id });
     };
-  }, [ride?.id]);
+  }, [d?.id, navigation, ride?.id]);
 
   // A driver was found (or the search moved on) — clear any prior dead state so
   // the auto-re-dispatch that lands a driver flips the UI back to live tracking.
@@ -731,67 +1047,98 @@ function ActiveRide({ navigation, ride, cancelRide, insets, rematching }: any) {
     return () => clearInterval(t);
   }, []);
 
-  const pickup = ride.pickupLat != null ? { latitude: Number(ride.pickupLat), longitude: Number(ride.pickupLng) } : null;
-  const drop =
-    ride.deliveryLat != null ? { latitude: Number(ride.deliveryLat), longitude: Number(ride.deliveryLng) } : null;
-  // Seed the sweep from the payload's last-known position, so the car exists
-  // before the first live ping — the stale clock marks it honestly if no
-  // stream follows (the seed is the server's memory, not a live fix).
-  const d0 = ride?.driver;
-  useEffect(() => {
-    if (!driverPing && d0?.currentLat != null && d0?.currentLng != null) {
-      setDriverPing({ latitude: Number(d0.currentLat), longitude: Number(d0.currentLng), heading: null, receivedAt: Date.now() });
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [d0?.currentLat, d0?.currentLng]);
+  const pickup = validLatLng(ride.pickupLat, ride.pickupLng);
+  const drop = validLatLng(ride.deliveryLat, ride.deliveryLng);
   const interp = useInterpolatedDriver(driverPing);
 
-  const driverLoc =
-    liveDriver ?? (d?.currentLat != null ? { latitude: Number(d.currentLat), longitude: Number(d.currentLng) } : null);
-  // The live feed is only trustworthy while fresh. Once we've had a live fix and
-  // it ages out, the car is frozen at its last point — degrade the marker + ETA
-  // instead of confidently showing a stationary car with a shrinking ETA.
-  const fixStale = liveDriver != null && lastFixAt != null && nowTs - lastFixAt > FIX_STALE_MS;
+  // REST exposes an undated profile coordinate, so it can never be presented
+  // as live. Only timestamped socket fixes earn a marker on this screen.
+  const driverLoc = liveDriver;
+  const fixStale = liveDriver != null && lastFixAt != null && nowTs - lastFixAt > STALE_AFTER_MS;
   const pts = [pickup, drop, driverLoc].filter(Boolean) as LatLng[];
-  const region = useMemo(() => (pts.length ? regionFor(pts) : GEORGETOWN_REGION), [ride]); // eslint-disable-line react-hooks/exhaustive-deps
+  const hasMapContext = pts.length > 0;
+  const region = useMemo(
+    () => (pts.length ? regionFor(pts) : null),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [pickup?.latitude, pickup?.longitude, drop?.latitude, drop?.longitude, driverLoc?.latitude, driverLoc?.longitude],
+  );
 
   const recenter = () => {
     const target = driverLoc ?? pickup ?? drop;
-    if (target) mapRef.current?.animateToRegion({ ...target, latitudeDelta: 0.012, longitudeDelta: 0.012 }, 350);
+    if (target) mapRef.current?.animateToRegion({ ...target, latitudeDelta: 0.012, longitudeDelta: 0.012 }, motion.duration.gentle);
   };
+
+  // Fit the first honest socket fix once. Later pings never override a pan;
+  // the explicit re-center control is the only follow action after this.
+  useEffect(() => {
+    if (!driverLoc || centeredFirstFix.current || !mapRef.current) return;
+    centeredFirstFix.current = true;
+    const coordinates = [pickup, drop, driverLoc].filter(Boolean) as LatLng[];
+    if (coordinates.length === 1) {
+      mapRef.current.animateToRegion({ ...driverLoc, latitudeDelta: 0.02, longitudeDelta: 0.02 }, motion.duration.gentle);
+      return;
+    }
+    mapRef.current.fitToCoordinates(coordinates, {
+      edgePadding: {
+        top: space['5xl'] * 2,
+        bottom: space['5xl'] * 2,
+        left: space['4xl'],
+        right: space['4xl'],
+      },
+      animated: true,
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [driverLoc?.latitude, driverLoc?.longitude]);
 
   const status = String(ride.status ?? '').toUpperCase();
   const arrived = status === 'DRIVER_ARRIVED';
   // Reset the streamed ETA when the leg changes so a pickup-leg number never
-  // lingers into the dropoff leg (the fallback fills the gap until the next
-  // server refresh).
+  // lingers into the dropoff leg. No client fallback fills that gap.
   useEffect(() => {
     setLiveEtaMin(null);
   }, [status]);
-  // Live leg ETA [SWIFT-UG-RT-01]: the server refreshes etaMinutes on the
-  // driver:location stream (road-routed when OSRM is live) — pickup leg
-  // before the ride starts, dropoff leg during it. The straight-line
-  // estimate stays as the fallback until the first event lands.
-  const legEtaRaw =
-    status === 'DRIVER_ASSIGNED' || status === 'DRIVER_EN_ROUTE'
-      ? (liveEtaMin ?? (driverLoc && pickup ? streetEtaMin(driverLoc, pickup) : null))
-      : status === 'RIDE_IN_PROGRESS'
-        ? (liveEtaMin ?? (driverLoc && drop ? streetEtaMin(driverLoc, drop) : null))
-        : null;
-  // A stale fix would recompute a fake shrinking ETA off the frozen coordinate —
-  // suppress it so the UI shows "Updating…" rather than a confident lie.
-  const legEta = fixStale ? null : legEtaRaw;
+  // Active-leg ETA is a server socket fact. There is deliberately no
+  // straight-line/device fallback.
+  const legEta = !connLost && !fixStale && [
+    'DRIVER_ASSIGNED',
+    'DRIVER_EN_ROUTE',
+  ].includes(status) ? liveEtaMin : null;
+  const mapNotice = !d
+    ? null
+    : connLost
+      ? driverLoc
+        ? 'Reconnecting to the driver’s live location. Showing the last received position.'
+        : 'Reconnecting to the driver’s live location. Waiting for the first GPS update.'
+      : fixStale || interp.stale
+        ? 'Driver location is paused. Showing the last received position.'
+          : !driverLoc
+          ? 'Waiting for the driver’s live location'
+          : null;
+  const freshDriverLoc = driverLoc && !connLost && !fixStale && !interp.stale ? driverLoc : null;
+  const pinVerified = ride.ridePinVerified === true || ride.ridePinVerifiedAt != null;
+  const showStartCode = !!d
+    && ['DRIVER_ASSIGNED', 'DRIVER_EN_ROUTE', 'DRIVER_ARRIVED'].includes(status)
+    && !pinVerified;
+  const canCancelRide = !pinVerified
+    && ['PENDING', 'DRIVER_ASSIGNED', 'DRIVER_EN_ROUTE', 'DRIVER_ARRIVED'].includes(status);
+
+  useEffect(() => {
+    if (!canCancelRide) {
+      setConfirmCancel(false);
+      setCancelRideError(null);
+    }
+  }, [canCancelRide]);
 
   const shareTrip = () => {
     const vehicle = [d?.vehicleColor, d?.vehicleMake, d?.vehicleModel].filter(Boolean).join(' ');
     const message = [
-      'I’m on a Swift taxi ride.',
-      d?.user?.firstName ? `Driver: ${d.user.firstName}${d?.averageRating ? ` (★${Number(d.averageRating).toFixed(1)})` : ''}` : null,
+      status === 'RIDE_IN_PROGRESS' ? 'I’m on a Swift taxi ride.' : 'My Swift taxi ride.',
+      d?.user?.firstName ? `Driver: ${d.user.firstName}${d?.displayRating != null ? ` (★${Number(d.displayRating).toFixed(1)})` : ' (New on Swift)'}` : null,
       vehicle ? `Vehicle: ${vehicle}` : null,
       d?.licensePlate ? `Plate: ${d.licensePlate}` : null,
       ride.pickupAddress ? `From: ${ride.pickupAddress}` : null,
       ride.deliveryAddress ? `To: ${ride.deliveryAddress}` : null,
-      driverLoc ? `Live position: https://maps.google.com/?q=${driverLoc.latitude.toFixed(5)},${driverLoc.longitude.toFixed(5)}` : null,
+      freshDriverLoc ? `Driver’s latest received position: https://maps.google.com/?q=${freshDriverLoc.latitude.toFixed(5)},${freshDriverLoc.longitude.toFixed(5)}` : null,
     ]
       .filter(Boolean)
       .join('\n');
@@ -800,14 +1147,15 @@ function ActiveRide({ navigation, ride, cancelRide, insets, rematching }: any) {
 
   return (
     <View style={{ flex: 1, backgroundColor: color.surface.subtle }}>
-      <MapView
-        ref={mapRef}
-        provider={PROVIDER_DEFAULT}
-        style={{ flex: 1 }}
-        region={region}
-        mapPadding={{ top: 0, left: 0, right: 0, bottom: Math.round(winH * 0.34) }}
-        {...rideMapProps(scheme)}
-      >
+      {hasMapContext ? (
+        <MapView
+          ref={mapRef}
+          provider={PROVIDER_DEFAULT}
+          style={{ flex: 1 }}
+          initialRegion={region!}
+          mapPadding={{ top: 0, left: 0, right: 0, bottom: Math.round(winH * 0.46) }}
+          {...rideMapProps(scheme)}
+        >
         {pickup ? (
           <Marker coordinate={pickup} title="Pickup" anchor={{ x: 0.5, y: 0.5 }}>
             <PickupDot />
@@ -818,7 +1166,7 @@ function ActiveRide({ navigation, ride, cancelRide, insets, rematching }: any) {
             <DropPin />
           </Marker>
         ) : null}
-        {interp.hasFix ? (
+        {interp.hasFix && driverLoc ? (
           // The 6.3 driving marker: position + bearing sweep between pings on
           // the UI thread (no teleporting); flat = rotates in the map plane.
           // The glyph IS the tinted top-view render (6B.5) — the car on the
@@ -831,36 +1179,38 @@ function ActiveRide({ navigation, ride, cancelRide, insets, rematching }: any) {
             anchor={{ x: 0.5, y: 0.5 }}
             flat
           >
-            <View style={{ opacity: interp.stale || fixStale ? 0.45 : 1 }}>
+            <View style={{ opacity: interp.stale || fixStale || connLost ? 0.45 : 1 }}>
               <VehicleRender bodyType={d?.bodyType} colorHex={d?.colorHex} view="top" size={20} />
             </View>
           </DrivingMarker>
         ) : driverLoc ? (
-          <Marker coordinate={driverLoc} title="Driver" anchor={{ x: 0.5, y: 0.5 }} flat rotation={driverHeading ?? 0}>
-            <View
-              style={[
-                { width: 36, height: 36, borderRadius: 18, alignItems: 'center', justifyContent: 'center', backgroundColor: color.text.primary, opacity: fixStale ? 0.4 : 1 },
-                cardShadow,
-              ]}
-            >
-              <Feather name="navigation" size={17} color={color.white} />
+          <Marker coordinate={driverLoc} title="Driver" anchor={{ x: 0.5, y: 0.5 }} flat>
+            <View style={{ opacity: fixStale || connLost ? 0.45 : 1 }}>
+              <VehicleRender bodyType={d?.bodyType} colorHex={d?.colorHex} view="top" size={20} />
             </View>
           </Marker>
         ) : null}
-      </MapView>
-
-      {/* Live-feed honesty banner: reconnecting (socket down) or updating (fix
-          aged out). Silence must never look like a live, moving car. */}
-      {(connLost || fixStale || interp.stale) ? (
-        <View style={{ position: 'absolute', top: insets.top + space.md, alignSelf: 'center', flexDirection: 'row', alignItems: 'center', gap: space.xs, backgroundColor: color.text.primary, paddingHorizontal: space.md, paddingVertical: space.xs, borderRadius: radius.full, ...cardShadow }}>
-          <Feather name={connLost ? 'wifi-off' : 'loader'} size={13} color={color.white} />
-          <T variant="caption" style={{ color: color.white }}>
-            {connLost
-              ? 'Reconnecting…'
-              : interp.stale && interp.staleAgeS > 0
-                ? `Location last updated ${interp.staleAgeS}s ago`
-                : 'Updating driver location…'}
+        </MapView>
+      ) : (
+        <View style={{ flex: 1, alignItems: 'center', justifyContent: 'center', paddingHorizontal: space['3xl'], backgroundColor: color.surface.sunken }}>
+          <IconChip icon="map-pin" size={48} />
+          <T variant="heading" center style={{ marginTop: space.md }}>Route map unavailable</T>
+          <T variant="caption" tone="muted" center style={{ marginTop: space.xs }}>
+            Pickup and destination coordinates aren’t available for this ride.
           </T>
+        </View>
+      )}
+
+      {/* An absent or stale fix is visible copy, never an undated marker. */}
+      {mapNotice ? (
+        <View
+          accessible
+          accessibilityLiveRegion="polite"
+          accessibilityLabel={mapNotice}
+          style={{ position: 'absolute', top: insets.top + space.md, alignSelf: 'center', flexDirection: 'row', alignItems: 'center', gap: space.xs, maxWidth: '78%', backgroundColor: color.soft.info, paddingHorizontal: space.md, paddingVertical: space.sm, borderRadius: radius.full, ...elevation.card }}
+        >
+          <Feather name={connLost ? 'wifi-off' : 'map-pin'} size={13} color={color.info} />
+          <T variant="caption" tone="info" style={{ flexShrink: 1 }}>{mapNotice}</T>
         </View>
       ) : null}
 
@@ -869,8 +1219,13 @@ function ActiveRide({ navigation, ride, cancelRide, insets, rematching }: any) {
       {driverLoc ? (
         <Pressable
           onPress={recenter}
-          style={{ position: 'absolute', right: space.lg, bottom: Math.round(winH * 0.36), width: 44, height: 44, borderRadius: 22, alignItems: 'center', justifyContent: 'center', backgroundColor: color.surface.base, ...cardShadow }}
-          hitSlop={8}
+          accessibilityRole="button"
+          accessibilityLabel={freshDriverLoc ? 'Recenter on driver' : 'Recenter on last driver location'}
+          accessibilityHint={freshDriverLoc
+            ? 'Moves the map to the driver’s latest live location'
+            : 'Moves the map to the last location received from the driver'}
+          style={{ position: 'absolute', right: space.lg, bottom: Math.round(winH * 0.48), width: space['5xl'], height: space['5xl'], borderRadius: radius.full, alignItems: 'center', justifyContent: 'center', backgroundColor: color.surface.base, ...elevation.card }}
+          hitSlop={space.sm}
         >
           <Feather name="crosshair" size={21} color={color.text.primary} />
         </Pressable>
@@ -881,200 +1236,56 @@ function ActiveRide({ navigation, ride, cancelRide, insets, rematching }: any) {
       <BottomSheet
         ref={sheetRef}
         index={0}
-        snapPoints={['38%', '70%']}
+        snapPoints={['54%', '90%']}
         enableDynamicSizing={false}
         backgroundStyle={SHEET_STYLE}
         handleIndicatorStyle={HANDLE_STYLE}
       >
-        <BottomSheetView style={{ paddingHorizontal: space['2xl'], paddingBottom: space['2xl'] }}>
-          {arrived ? (
-            /* The kerb moment — loud on purpose so it isn't missed in-pocket. */
-            <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.md, borderRadius: radius.lg, backgroundColor: color.brand[500], padding: space.lg, marginBottom: space.sm }}>
-              <Pictogram name="taxi" size={30} color={color.white} />
-              <View style={{ flex: 1 }}>
-                <T variant="body" weight="bold" tone="onBrand">
-                  Your driver is here
-                </T>
-                <T variant="caption" tone="onBrand" style={{ opacity: 0.9, marginTop: 2 }}>
-                  Meet them at the pickup point{d?.licensePlate ? ` · look for ${d.licensePlate}` : ''}
-                </T>
-              </View>
-            </View>
-          ) : (
-            <T variant="title">
-              {ride.status === 'PENDING' && rematching
-                ? 'Your driver had to cancel — finding you another'
-                : STATUS_LABEL[ride.status] ?? 'On the way'}
-              {fixStale ? ' · locating…' : legEta != null ? ` · ~${legEta} min` : ''}
-            </T>
-          )}
-          <T variant="label" tone="muted" style={{ marginTop: 4 }}>
-            {ride.rideClass ? `${TIER_META[ride.rideClass as RideClass]?.label ?? ride.rideClass} · ` : ''}
-            Fare {money(ride.taxiFareTotal ?? ride.totalAmount)} · cash
-            {ride.taxiDuration ? ` · ~${Math.round(Number(ride.taxiDuration))} min trip` : ''}
-          </T>
-          {ride.ridePin && ride.status === 'DRIVER_ARRIVED' ? (
-            // THE SIGNATURE MOMENT [rides spec 5.7]: the code handshake as a
-            // trust ceremony. The find-your-car pairing (tinted render + the
-            // plate) sits above the code; the instruction names the driver;
-            // the safety nudge closes it. Everything else stays quiet.
-            <View
-              style={{
-                alignItems: 'center',
-                backgroundColor: color.brand[50],
-                borderRadius: radius.lg,
-                paddingVertical: space.lg,
-                paddingHorizontal: space.lg,
-                marginTop: space.md,
-                borderWidth: 1,
-                borderColor: color.brand[500],
-              }}
-            >
-              {d ? (
-                <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.md, marginBottom: space.sm }}>
-                  <VehicleRender bodyType={d.bodyType} colorHex={d.colorHex} view="hero" size={96} />
-                  {d.licensePlate ? (
-                    <View style={{ paddingHorizontal: space.md, paddingVertical: space.xs, borderRadius: radius.md, borderWidth: 1.5, borderColor: color.text.primary, backgroundColor: color.surface.base }}>
-                      <T variant="numM" style={{ letterSpacing: 2 }}>{d.licensePlate}</T>
-                    </View>
-                  ) : null}
-                </View>
-              ) : null}
-              <T variant="micro" tone="muted">Your start code</T>
-              <T variant="displayXl" tone="brand" style={{ letterSpacing: 6, marginTop: 2 }}>
-                {ride.ridePin}
-              </T>
-              <T variant="caption" tone="muted" center style={{ marginTop: space.xs }}>
-                Give this code to {d?.user?.firstName ?? 'your driver'} to start your ride
-              </T>
-              <T variant="label" weight="semibold" center style={{ marginTop: space.sm }}>
-                Check the plate before you get in
-              </T>
-              {/* [F-243/F-244] The wrong-car escape hatch. As a bare <T
-                  onPress> a screen reader announced it as static text and the
-                  tap area was the ~18pt line box — the least reachable control
-                  in the app, on the one screen where reaching it matters. */}
-              <Pressable
-                onPress={() => setConfirmNotMyDriver(true)}
-                accessibilityRole="button"
-                accessibilityLabel="This isn’t my driver"
-                accessibilityHint="Reports that the car at the kerb does not match your ride"
-                hitSlop={12}
-                style={{ marginTop: space.sm, minHeight: 44, justifyContent: 'center' }}
-              >
-                <T variant="caption" center style={{ color: color.error, textDecorationLine: 'underline' }}>
-                  This isn’t my driver
-                </T>
-              </Pressable>
-            </View>
-          ) : ride.ridePin ? (
-            <View
-              style={{
-                alignItems: 'center',
-                backgroundColor: color.brand[50],
-                borderRadius: radius.lg,
-                paddingVertical: space.md,
-                marginTop: space.md,
-              }}
-            >
-              <T variant="micro" tone="muted">
-                Start code — show to your driver
-              </T>
-              <T variant="displayXl" tone="brand" style={{ letterSpacing: 6, marginTop: 2 }}>
-                {ride.ridePin}
-              </T>
-            </View>
-          ) : null}
-
+        <BottomSheetScrollView contentContainerStyle={{ paddingHorizontal: space['2xl'], paddingBottom: insets.bottom + space['2xl'] }}>
           {d ? (
-            <Card style={{ marginTop: space.lg }}>
-              {/* THE PLATE-FIRST HANDSHAKE (design-100×): the plate is what you
-                  match at the kerb — it leads, in numL, before any face. */}
-              {d.licensePlate ? (
-                <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.md, marginBottom: space.md }}>
-                  <View
-                    style={{
-                      paddingHorizontal: space.lg,
-                      paddingVertical: space.sm,
-                      borderRadius: radius.md,
-                      borderWidth: 1.5,
-                      borderColor: color.text.primary,
-                    }}
-                  >
-                    <T variant="numL" style={{ letterSpacing: 3 }}>
-                      {d.licensePlate}
-                    </T>
-                  </View>
+            <>
+              {arrived ? (
+                <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.md, borderRadius: radius.lg, backgroundColor: color.brand[500], padding: space.lg, marginBottom: space.md }}>
+                  <Pictogram name="taxi" size={30} color={color.white} />
                   <View style={{ flex: 1 }}>
-                    <T variant="caption" tone="muted">
-                      Match this plate before you get in.
+                    <T variant="body" weight="bold" tone="onBrand">Your driver is here</T>
+                    <T variant="caption" tone="onBrand" style={{ opacity: 0.9, marginTop: space.xs }}>
+                      Meet them at the pickup point{d.licensePlate ? ` · look for ${d.licensePlate}` : ''}
                     </T>
                   </View>
-                  {/* Shape + tint before reading [6B.5]: the SAME render as the
-                      fare card and the map — a white Allion LOOKS like a white
-                      sedan from across the street. Real photo when we have it,
-                      the tinted body-type render otherwise. */}
-                  {d.vehiclePhotoUrl ? (
-                    <Image
-                      source={{ uri: mediaUrl(d.vehiclePhotoUrl) ?? undefined }}
-                      style={{ width: 72, height: 46, borderRadius: radius.md }}
-                      contentFit="cover"
-                    />
-                  ) : (
-                    <VehicleRender bodyType={d.bodyType} colorHex={d.colorHex} view="hero" size={78} />
-                  )}
                 </View>
               ) : null}
-              <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.md }}>
-                {d.user?.avatar ? (
-                  <Image
-                    source={{ uri: mediaUrl(d.user.avatar) ?? undefined }}
-                    style={{ width: 44, height: 44, borderRadius: 22 }}
-                    contentFit="cover"
-                  />
-                ) : (
-                  <IconChip icon="user" size={44} />
-                )}
-                <View style={{ flex: 1 }}>
-                  <T variant="body" weight="semibold">
-                    {d.user?.firstName ?? 'Your driver'}
-                  </T>
-                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4, marginTop: 2 }}>
-                    <T variant="caption" tone="muted" numberOfLines={1} style={{ flexShrink: 1 }}>
-                      {[d.vehicleColor, d.vehicleMake, d.vehicleModel].filter(Boolean).join(' ')}
-                    </T>
-                    {d.displayRating != null || d.averageRating ? (
-                      <>
-                        <Stars value={Number(d.displayRating ?? d.averageRating)} size={11} />
-                        <T variant="caption" tone="muted">
-                          {Number(d.displayRating ?? d.averageRating).toFixed(1)}
-                        </T>
-                      </>
-                    ) : null}
-                  </View>
-                </View>
-                {d.user?.phone ? (
-                  <PillButton
-                    label="Call"
-                    variant="soft"
-                    size="sm"
-                    icon="phone"
-                    onPress={() => void openExternal(`tel:${d.user.phone}`, "Couldn't start the call — dial your driver directly.")}
-                  />
-                ) : null}
-              </View>
-            </Card>
-          ) : exhausted ? (
-            /* Terminal dead state — honest, not an endless spinner. The backend
-               keeps re-sweeping every minute, so "still trying" is true; the
-               rider can also bail without waiting. */
+              <AssignedRideCard
+                ride={ride}
+                driver={d}
+                status={status}
+                legEta={legEta}
+                showStartCode={showStartCode}
+                onWrongDriver={() => setConfirmNotMyDriver(true)}
+              />
+            </>
+          ) : (
+            <>
+              <T variant="title">
+                {rematching ? 'Finding you another driver' : STATUS_LABEL[ride.status] ?? 'Finding your driver…'}
+              </T>
+              <T variant="label" tone="muted" style={{ marginTop: space.xs }}>
+                {ride.rideClass ? `${TIER_META[ride.rideClass as RideClass]?.label ?? ride.rideClass} · ` : ''}
+                Fare {money(ride.taxiFareTotal ?? ride.totalAmount)} · cash to the driver
+                {ride.taxiDuration ? ` · ~${Math.round(Number(ride.taxiDuration))} min trip` : ''}
+              </T>
+            </>
+          )}
+
+          {d ? null : exhausted ? (
+            /* Terminal dead state — honest, not an endless spinner. */
             <View style={{ alignItems: 'center', paddingVertical: space.lg }}>
               <IconChip icon="alert-circle" size={52} tone="error" />
               <T variant="body" weight="semibold" center style={{ marginTop: space.md }}>
                 No driver available right now
               </T>
               <T variant="caption" tone="muted" center style={{ marginTop: space.xs }}>
-                We&apos;re still trying every minute as drivers come online. You can keep waiting or cancel.
+                No driver accepted this request. You can keep waiting or cancel.
               </T>
             </View>
           ) : (
@@ -1086,7 +1297,7 @@ function ActiveRide({ navigation, ride, cancelRide, insets, rematching }: any) {
                   Your trip is unchanged — we&apos;re asking the nearest available driver now.
                 </T>
               ) : null}
-              <SearchingCard startedAt={ride.placedAt ?? ride.createdAt} />
+              <SearchingCard />
             </>
           )}
 
@@ -1112,40 +1323,93 @@ function ActiveRide({ navigation, ride, cancelRide, insets, rematching }: any) {
               style={{ flex: 1 }}
               onPress={shareTrip}
             />
-            <PillButton
-              label="Cancel ride"
-              variant="outline"
-              style={{ flex: 1 }}
-              loading={cancelRide.isPending}
-              onPress={() => setConfirmCancel(true)}
-            />
+            {canCancelRide ? (
+              <PillButton
+                label="Cancel ride"
+                variant="outline"
+                style={{ flex: 1 }}
+                loading={cancelRide.isPending}
+                onPress={() => {
+                  setCancelRideError(null);
+                  setConfirmCancel(true);
+                }}
+              />
+            ) : null}
           </View>
-        </BottomSheetView>
+        </BottomSheetScrollView>
       </BottomSheet>
 
       {/* Kit confirm popup (kit 30-style) */}
-      <PopupCard visible={confirmCancel} onClose={() => setConfirmCancel(false)}>
-        <IconChip icon="x-circle" size={56} tone="error" />
+      <PopupCard visible={confirmCancel} onClose={() => { if (!cancelRide.isPending) setConfirmCancel(false); }}>
+        <IconChip icon="x-circle" size={56} />
         <PopupTitle variant="title" center style={{ marginTop: space.lg }}>
           Cancel this ride?
         </PopupTitle>
         <T variant="body" tone="muted" center style={{ marginTop: space.sm }}>
           {d
-            ? 'Your driver is already on the way. Cancelling now may charge a late-cancellation fee and lower your reliability rating.'
+            ? arrived
+              ? 'Your driver has arrived. Cancelling now may record a late-cancellation fee. Swift does not collect ride money.'
+              : status === 'DRIVER_EN_ROUTE'
+                ? 'Your driver is already on the way. Cancelling now may record a late-cancellation fee. Swift does not collect ride money.'
+                : 'Your driver accepted the ride. Cancelling now may record a late-cancellation fee. Swift does not collect ride money.'
             : 'We’ll stop looking for a driver.'}
         </T>
+        {cancelRideError ? (
+          <T variant="body" tone="error" center accessibilityLiveRegion="assertive" style={{ marginTop: space.lg }}>
+            {cancelRideError}
+          </T>
+        ) : null}
         <PillButton
-          label="Cancel ride"
-          variant="destructive"
+          label={cancelRideError ? 'Try cancelling again' : 'Cancel ride'}
+          variant="outline"
           icon="x-circle"
           style={{ alignSelf: 'stretch', marginTop: space['2xl'] }}
           loading={cancelRide.isPending}
           onPress={() => {
-            setConfirmCancel(false);
-            cancelRide.mutate({ id: ride.id });
+            setCancelRideError(null);
+            cancelRide.mutate(
+              { id: ride.id },
+              {
+                onSuccess: (result: any) => {
+                  const message = typeof result?.message === 'string' ? result.message : 'Ride cancelled.';
+                  const fee = typeof result?.cancellationFee === 'number' && Number.isFinite(result.cancellationFee)
+                    ? result.cancellationFee
+                    : null;
+                  toast.show(
+                    message,
+                    fee == null
+                      ? 'The server confirmed the cancellation.'
+                      : fee > 0
+                        ? `The server recorded ${money(fee)}. Swift does not collect ride money.`
+                        : 'The server confirmed no cancellation fee.',
+                  );
+                  setConfirmCancel(false);
+                },
+                onError: (error: any) => {
+                  const serverMessage = error?.response?.data?.error?.message
+                    ?? error?.response?.data?.message;
+                  if (typeof serverMessage === 'string') {
+                    setCancelRideError(serverMessage);
+                  } else {
+                    setConfirmCancel(false);
+                    toast.show(
+                      'Checking ride status',
+                      'We couldn’t confirm the cancellation outcome. The active-ride poll is checking the server before you try again.',
+                    );
+                    void queryClient.invalidateQueries({ queryKey: ['rides', 'active'] });
+                  }
+                },
+              },
+            );
           }}
         />
-        <PillButton label="Keep ride" variant="soft" style={{ alignSelf: 'stretch', marginTop: space.md }} onPress={() => setConfirmCancel(false)} />
+        <PillButton
+          label="Keep ride"
+          variant="soft"
+          disabled={cancelRide.isPending}
+          style={{ alignSelf: 'stretch', marginTop: space.md }}
+          onPress={() => setConfirmCancel(false)}
+        />
       </PopupCard>
 
       {/* SOS confirm — a deliberate two-step so it isn't triggered by accident,
@@ -1156,7 +1420,7 @@ function ActiveRide({ navigation, ride, cancelRide, insets, rematching }: any) {
           Get emergency help?
         </PopupTitle>
         <T variant="body" tone="muted" center style={{ marginTop: space.sm }}>
-          This dials 911 — local emergency services — right away. Swift also saves the alert and your live location on this trip’s record. Use only in a real emergency.
+          This dials 911 — local emergency services — right away. Swift also saves the alert and any available location on this trip’s record. Use only in a real emergency.
         </T>
         <PillButton
           label="Yes — get help now"
@@ -1179,10 +1443,20 @@ function ActiveRide({ navigation, ride, cancelRide, insets, rematching }: any) {
             const riderFix = grantedLocationFix(riderLoc.latitude, riderLoc.longitude, riderLoc.status);
             const coords = riderFix
               ? { lat: riderFix.latitude, lng: riderFix.longitude }
-              : driverLoc
-                ? { lat: driverLoc.latitude, lng: driverLoc.longitude }
+              : freshDriverLoc
+                ? { lat: freshDriverLoc.latitude, lng: freshDriverLoc.longitude }
                 : undefined;
-            sos.mutate({ id: ride.id, coords });
+            sos.mutate(
+              { id: ride.id, coords },
+              {
+                onError: () => {
+                  toast.error(
+                    'Swift could not save the SOS alert',
+                    'The emergency call was still started. Tell the 911 operator where you are.',
+                  );
+                },
+              },
+            );
           }}
         />
         <PillButton label="Close" variant="soft" style={{ alignSelf: 'stretch', marginTop: space.md }} onPress={() => setSosConfirm(false)} />
@@ -1293,10 +1567,3 @@ function ActiveRide({ navigation, ride, cancelRide, insets, rematching }: any) {
     </View>
   );
 }
-
-const GEORGETOWN_REGION = {
-  latitude: GEORGETOWN.latitude,
-  longitude: GEORGETOWN.longitude,
-  latitudeDelta: 0.05,
-  longitudeDelta: 0.05,
-};
