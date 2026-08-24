@@ -15,6 +15,11 @@ the *operational* work: approving documents, resolving tickets); this does *anal
 cd tools/analytics
 docker compose up -d          # first boot builds the image + migrates; ~2 min
 open http://localhost:8088    # login: admin / admin  (change it under Settings)
+
+# The port is bound to 127.0.0.1 only — this console reads a replica of Swift's
+# database, so it must never be reachable from the rest of the network. To use a
+# real password from first boot instead of the default:
+#   SUPERSET_ADMIN_PASSWORD='...' SUPERSET_SECRET_KEY='...' docker compose up -d
 ```
 
 Stop / reset:
