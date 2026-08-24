@@ -9,14 +9,44 @@ import { HeuristicAdPreScreenProvider, getAdPreScreenProvider } from '../provide
 const provider = new HeuristicAdPreScreenProvider();
 
 describe('§10.4 heuristic pre-screen (advisory only)', () => {
-  it('flags restricted-category terms ONLY when the tenant restricts them', async () => {
+  it('flags restricted-category terms, and an explicit tenant opt-out still wins', async () => {
     const gambling = { headline: 'Big jackpot weekend', kind: 'IMAGE' as const };
     const restricted = await provider.screen({ ...gambling, restrictedCategories: { gambling: true } });
     expect(restricted.ok).toBe(false);
     expect(restricted.flags.map((f) => f.code)).toContain('RESTRICTED_CATEGORY');
 
+    // A tenant that genuinely permits the category overrides the platform
+    // default below — an explicit `false` is a decision, not an absence.
     const unrestricted = await provider.screen({ ...gambling, restrictedCategories: { gambling: false } });
     expect(unrestricted.flags.map((f) => f.code)).not.toContain('RESTRICTED_CATEGORY');
+  });
+
+  it('screens alcohol/gambling/political by DEFAULT when a tenant has configured nothing', async () => {
+    // `AdsSettings.restrictedCategories` is nullable with no database default,
+    // so every tenant starts at null. The screening loop used to iterate an
+    // empty object and alcohol/gambling creative reached the reviewer with no
+    // annotation at all — a fail-open that would also make an app-store
+    // age-rating answer wrong. Unconfigured must mean "flag it", not "ignore".
+    for (const [headline, term] of [
+      ['Ice cold beer all weekend', 'alcohol'],
+      ['Casino night, big jackpot', 'gambling'],
+      ['Vote for change this election', 'political'],
+    ] as const) {
+      for (const settings of [undefined, null, {}]) {
+        const r = await provider.screen({ kind: 'IMAGE', headline, restrictedCategories: settings });
+        expect(r.flags.map((f) => f.code), `${term} / ${JSON.stringify(settings)}`).toContain('RESTRICTED_CATEGORY');
+        expect(r.ok).toBe(false);
+      }
+    }
+  });
+
+  it('the default never turns advisory into a decision — a flag is still just a flag', async () => {
+    // The whole module's law: it annotates, it never rejects. Adding a default
+    // must not smuggle in blocking behaviour.
+    const r = await provider.screen({ kind: 'IMAGE', headline: 'Cold beer here' });
+    expect(r.ok).toBe(false); // "worth a closer look"
+    expect(r.flags.every((f) => typeof f.note === 'string' && f.note.length > 0)).toBe(true);
+    expect(r.provider).toBe('heuristic');
   });
 
   it('flags superlative claims, shouting headlines, and non-http URL destinations', async () => {

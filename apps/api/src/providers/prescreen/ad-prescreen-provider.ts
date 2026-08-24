@@ -38,6 +38,27 @@ const CATEGORY_TERMS: Record<string, string[]> = {
   political: ['vote', 'election', 'party', 'candidate', 'campaign rally', 'ballot'],
 };
 
+/**
+ * PLATFORM DEFAULT — what gets flagged when a tenant has configured nothing.
+ *
+ * `AdsSettings.restrictedCategories` is nullable with no database default, so
+ * every tenant starts at `null` and the screening loop below used to iterate an
+ * empty object: alcohol and gambling creative sailed through with the reviewer
+ * never even seeing an annotation. That is not a safe place to start from, and
+ * it is the difference between answering an app-store age-rating questionnaire
+ * honestly and answering it wrong.
+ *
+ * These stay ADVISORY like everything else here — a default flag adds a note
+ * for the human reviewer and never blocks an upload. A tenant that genuinely
+ * permits a category still wins, because an explicit `false` from its settings
+ * overrides the default in the merge below.
+ */
+const PLATFORM_DEFAULT_RESTRICTED: Record<string, boolean> = {
+  alcohol: true,
+  gambling: true,
+  political: true,
+};
+
 const SUPERLATIVE_CLAIMS = ['#1', 'no. 1', 'number one', 'best in guyana', 'guaranteed', 'cheapest', '100% free'];
 
 export class HeuristicAdPreScreenProvider implements AdPreScreenProvider {
@@ -45,8 +66,9 @@ export class HeuristicAdPreScreenProvider implements AdPreScreenProvider {
     const flags: Array<{ code: string; note: string }> = [];
     const text = [input.headline, input.body, input.ctaLabel].filter(Boolean).join(' ').toLowerCase();
 
-    // Restricted categories the tenant has switched on (§19).
-    const restricted = input.restrictedCategories ?? {};
+    // Restricted categories (§19): the platform's safe default, with the
+    // tenant's own settings layered on top so an explicit `false` still wins.
+    const restricted = { ...PLATFORM_DEFAULT_RESTRICTED, ...(input.restrictedCategories ?? {}) };
     for (const [category, on] of Object.entries(restricted)) {
       if (!on) continue;
       const terms = CATEGORY_TERMS[category] ?? [];
