@@ -1,8 +1,8 @@
 /** @jsxImportSource react */
-import React from 'react';
-import { ScrollView, View } from 'react-native';
+import React, { useEffect, useRef } from 'react';
+import { AccessibilityInfo, Animated, ScrollView, StyleSheet, View } from 'react-native';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
-import { color, radius, space } from '@swift/ui';
+import { color, fontSize, motion, radius, space } from '@swift/ui';
 import { Card, ErrorState, Header, LinkText, LoadingBlock, PillButton, Screen, T, TonePill } from '../../../kit';
 import { useMoverKind, useMoverStats, useMoverSubscription, useEarningsSummary, useEarnings, useCashSettlements, useConfirmCashSettlement } from '../../../hooks';
 import { money } from '../../../lib/money';
@@ -15,132 +15,360 @@ import {
   requireAuthSessionForPrincipal,
   requireAuthSessionSnapshot,
 } from '../../../stores/authStore';
+import {
+  earningLabel,
+  earningRows,
+  earningsWindowTotal,
+  hasEarningRowsPayload,
+  moneyOrDash,
+  recentEarningsBreakdown,
+  serverCount,
+  serverDate,
+  serverNumber,
+  serverRecord,
+  serverRecords,
+  serverText,
+} from '../earner-data';
 
-function StatTile({ label, total, count, sub }: { label: string; total: number; count?: number; sub?: string }) {
+function StatTile({
+  label,
+  total,
+  count,
+  sub,
+}: {
+  label: string;
+  total: unknown;
+  count?: number;
+  sub?: string;
+}) {
+  const detail = sub ?? countDetail(count, 'job', 'jobs');
   return (
     <Card style={{ flex: 1, paddingVertical: space.md }}>
-      <T variant="caption" weight="bold" tone="muted" style={{ letterSpacing: 1 }}>
-        {label.toUpperCase()}
+      <T variant="micro" tone="muted">{label}</T>
+      <T variant="numM" numberOfLines={1} style={{ marginTop: space.xs }}>
+        {moneyOrDash(total)}
       </T>
-      <T variant="heading" numberOfLines={1} style={{ marginTop: 2 }}>
-        {money(total)}
-      </T>
-      <T variant="caption" tone="muted">
-        {sub ?? `${count ?? 0} ${count === 1 ? 'job' : 'jobs'}`}
-      </T>
+      {detail ? <T variant="caption" tone="muted">{detail}</T> : null}
     </Card>
   );
 }
 
+function countDetail(count: number | undefined, singular: string, plural: string) {
+  return count == null ? undefined : `${count} ${count === 1 ? singular : plural}`;
+}
+
 function earnLabel(t?: string) {
-  const s = (t ?? 'Trip').replace(/_/g, ' ').toLowerCase();
-  return s.charAt(0).toUpperCase() + s.slice(1);
+  return earningLabel(t);
+}
+
+function EarningsHero({ total, facts }: { total: unknown; facts: string[] }) {
+  const opacity = useRef(new Animated.Value(0)).current;
+
+  useEffect(() => {
+    let active = true;
+    let animation: Animated.CompositeAnimation | undefined;
+    void AccessibilityInfo.isReduceMotionEnabled()
+      .then((reduceMotion) => {
+        if (!active) return;
+        if (reduceMotion) {
+          opacity.setValue(1);
+          return;
+        }
+        animation = Animated.timing(opacity, {
+          toValue: 1,
+          duration: motion.duration.gentle,
+          useNativeDriver: true,
+        });
+        animation.start();
+      })
+      .catch(() => {
+        if (active) opacity.setValue(1);
+      });
+    return () => {
+      active = false;
+      animation?.stop();
+    };
+  }, [opacity]);
+
+  return (
+    <Animated.View style={{ opacity }}>
+      <Card pad={false} style={{ backgroundColor: color.brand[50] }}>
+        <View style={{ flexDirection: 'row' }}>
+          <View
+            style={{
+              alignSelf: 'stretch',
+              width: space.xs,
+              borderRadius: radius.full,
+              backgroundColor: color.brand[500],
+            }}
+          />
+          <View style={{ flex: 1, padding: space.lg }}>
+            <T variant="micro" tone="muted">THIS WEEK</T>
+            <T variant="numL" style={{ marginTop: space.xs }}>{moneyOrDash(total)}</T>
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.xs, marginTop: space.xs }}>
+              <MaterialCommunityIcons name="check-decagram" size={fontSize.xs} color={color.success} />
+              <T variant="caption" weight="bold" tone="success" style={{ flex: 1 }}>
+                Every fare stays yours · cash · no commission
+              </T>
+            </View>
+            {facts.length ? (
+              <T variant="caption" tone="muted" style={{ marginTop: space.sm }}>
+                {facts.join(' · ')}
+              </T>
+            ) : null}
+          </View>
+        </View>
+      </Card>
+    </Animated.View>
+  );
 }
 
 /** MMG deliveries: the customer paid the STORE, so the store owes the rider
  *  the delivery fee in cash. This is that ledger — confirm as stores pay up. */
-function StoreOwesYouCard({ ledger }: { ledger: any }) {
+function StoreOwesYouCard({ ledger }: { ledger: unknown }) {
   const confirm = useConfirmCashSettlement();
-  const rows: any[] = ledger?.unsettled ?? [];
+  const source = serverRecord(ledger);
+  const rows = serverRecords(source?.['unsettled']);
   if (rows.length === 0) return null;
+  const owed = serverNumber(serverRecord(source?.['summary'])?.['owed']);
+
   return (
     <Card style={{ marginTop: space.md }}>
       <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
-        <T variant="caption" weight="bold" tone="muted" style={{ letterSpacing: 1 }}>
-          STORES OWE YOU
-        </T>
-        <T variant="label" weight="bold">
-          {money(ledger?.summary?.owed ?? 0)}
-        </T>
+        <T variant="micro" tone="muted">STORES OWE YOU</T>
+        <T variant="numM">{moneyOrDash(owed)}</T>
       </View>
-      <T variant="caption" tone="muted" style={{ marginTop: 2 }}>
+      <T variant="caption" tone="muted" style={{ marginTop: space.xs }}>
         MMG orders — the customer paid the store, so your delivery fee comes from them in cash.
       </T>
-      {rows.map((r) => (
-        <View key={r.id} style={{ paddingTop: space.md, marginTop: space.md, borderTopWidth: 1, borderTopColor: color.border.subtle }}>
-          <View style={{ flexDirection: 'row', alignItems: 'center' }}>
-            <View style={{ flex: 1 }}>
-              <T variant="label" weight="semibold" numberOfLines={1}>
-                {r.vendor?.name ?? 'Store'}
-              </T>
-              <T variant="caption" tone="muted">
-                {r.orderNumber ? `#${r.orderNumber} · ` : ''}{dateLabel(r.createdAt)}
-              </T>
+      {rows.map((row, index) => {
+        const id = serverText(row['id']);
+        const vendorName = serverText(serverRecord(row['vendor'])?.['name']);
+        const orderNumber = serverText(row['orderNumber']);
+        const createdAt = serverDate(row['createdAt']);
+        const status = serverText(row['status'])?.toUpperCase();
+        const meta = [orderNumber ? `#${orderNumber}` : undefined, createdAt ? dateLabel(createdAt) : undefined]
+          .filter((part): part is string => !!part)
+          .join(' · ');
+        const canConfirm = !!id && (status === 'OWED' || status === 'STORE_CONFIRMED');
+        return (
+          <View key={id ?? `cash-row-${index}`}>
+            {index > 0 ? (
+              <View
+                style={{
+                  height: StyleSheet.hairlineWidth,
+                  backgroundColor: color.border.subtle,
+                  marginVertical: space.md,
+                }}
+              />
+            ) : (
+              <View style={{ height: space.md }} />
+            )}
+            <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+              <View style={{ flex: 1 }}>
+                {vendorName ? (
+                  <T variant="label" weight="semibold" numberOfLines={1}>{vendorName}</T>
+                ) : null}
+                {meta ? <T variant="caption" tone="muted">{meta}</T> : null}
+              </View>
+              <T variant="numM" style={{ marginLeft: space.md }}>{moneyOrDash(row['amount'])}</T>
             </View>
-            <T variant="label" weight="bold" style={{ marginLeft: space.md }}>
-              {money(r.amount)}
-            </T>
-          </View>
-          {r.status === 'RIDER_CONFIRMED' ? (
-            <T variant="caption" tone="muted" style={{ marginTop: space.sm }}>
-              You confirmed — waiting for the store to close it out.
-            </T>
-          ) : (
-            <>
-              {r.status === 'STORE_CONFIRMED' ? (
-                <T variant="caption" weight="semibold" tone="deep" style={{ marginTop: space.sm }}>
-                  {r.vendor?.name ?? 'The store'} says they paid you.
-                </T>
-              ) : null}
+            {status === 'RIDER_CONFIRMED' ? (
+              <T variant="caption" tone="muted" style={{ marginTop: space.sm }}>
+                You confirmed — waiting for the store to close it out.
+              </T>
+            ) : null}
+            {status === 'STORE_CONFIRMED' ? (
+              <T variant="caption" weight="semibold" style={{ marginTop: space.sm }}>
+                {vendorName ? `${vendorName} says they paid you.` : 'The store says they paid you.'}
+              </T>
+            ) : null}
+            {canConfirm ? (
               <PillButton
                 label="I received the cash"
                 variant="soft"
                 size="sm"
                 style={{ alignSelf: 'flex-start', marginTop: space.sm }}
-                loading={confirm.isPending && confirm.variables === r.id}
+                loading={confirm.isPending && confirm.variables === id}
                 disabled={confirm.isPending}
-                onPress={() => confirm.mutate(r.id)}
+                onPress={() => {
+                  if (id) confirm.mutate(id);
+                }}
               />
-            </>
-          )}
-        </View>
-      ))}
+            ) : null}
+          </View>
+        );
+      })}
+      {confirm.isError ? (
+        <T variant="caption" tone="error" style={{ marginTop: space.md }}>
+          We couldn&apos;t confirm that cash handover. Try again.
+        </T>
+      ) : null}
     </Card>
   );
 }
 
 /** The mover's flat weekly fee — status straight off the subscription engine. */
-function WeeklyFeeCard({ sub, onPay }: { sub: any; onPay?: () => void }) {
-  if (!sub) return null;
-  const pill = sub.isTrialActive
-    ? { label: 'Free trial', tone: 'brand' as const }
-    : sub.isInGracePeriod
-      ? { label: 'Grace period', tone: 'error' as const }
-      : sub.status === 'ACTIVE'
+function WeeklyFeeCard({ sub, onPay }: { sub: unknown; onPay?: () => void }) {
+  const source = serverRecord(sub);
+  if (!source) return null;
+  const status = serverText(source['status'])?.toUpperCase();
+  const isTrial = source['isTrialActive'] === true;
+  const isGrace = source['isInGracePeriod'] === true;
+  const pill = isTrial
+    ? { label: 'Free trial', tone: 'info' as const }
+    : isGrace
+      ? { label: 'Grace period', tone: 'warning' as const }
+      : status === 'ACTIVE'
         ? { label: 'Active', tone: 'success' as const }
-        : { label: String(sub.status ?? '').toLowerCase() || 'Inactive', tone: 'neutral' as const };
-  const line = sub.isTrialActive && sub.trialEndDate
-    ? `Trial ends ${dateLabel(sub.trialEndDate)} · then ${money(sub.customRate ?? sub.weeklyRate)}/week`
-    : sub.isInGracePeriod && sub.gracePeriodEnd
-      ? `Pay by ${dateLabel(sub.gracePeriodEnd)} to keep going online`
-      : `${money(sub.customRate ?? sub.weeklyRate)}/week${sub.nextBillingDate ? ` · next bill ${dateLabel(sub.nextBillingDate)}` : ''}`;
+        : status === 'PAST_DUE'
+          ? { label: 'Past due', tone: 'warning' as const }
+          : status === 'SUSPENDED' || status === 'CHURNED'
+            ? { label: status === 'SUSPENDED' ? 'Suspended' : 'Churned', tone: 'error' as const }
+        : status
+          ? { label: status.replace(/_/g, ' ').toLowerCase(), tone: 'neutral' as const }
+          : undefined;
+  const rate = serverNumber(source['weeklyFeeGyd'] ?? source['customRate'] ?? source['weeklyRate']);
+  const trialEnd = serverDate(source['trialEndDate']);
+  const graceEnd = serverDate(source['gracePeriodEnd']);
+  const nextBill = serverDate(source['nextBillingDate']);
+  const needsAttention = isGrace || status === 'PAST_DUE' || status === 'SUSPENDED' || status === 'CHURNED';
+
   return (
     <Card style={{ marginTop: space.md }}>
       <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
-        <T variant="body" weight="semibold">
-          Your weekly fee
-        </T>
-        <TonePill label={pill.label} tone={pill.tone} />
+        <T variant="heading">Your weekly fee</T>
+        {pill ? <TonePill label={pill.label} tone={pill.tone} /> : null}
       </View>
-      <T variant="label" tone="muted" style={{ marginTop: 4 }}>
-        {line}
-      </T>
-      <T variant="caption" tone="muted" style={{ marginTop: 4 }}>
+      {isTrial && trialEnd ? (
+        <T variant="label" tone="muted" style={{ marginTop: space.sm }}>
+          Trial ends {dateLabel(trialEnd)}
+        </T>
+      ) : null}
+      {isGrace && graceEnd ? (
+        <T variant="label" tone="muted" style={{ marginTop: space.sm }}>
+          Pay by {dateLabel(graceEnd)} to keep going online
+        </T>
+      ) : null}
+      {rate != null || nextBill ? (
+        <View style={{ flexDirection: 'row', alignItems: 'baseline', flexWrap: 'wrap', gap: space.xs, marginTop: space.sm }}>
+          {rate != null ? <T variant="numM">{money(rate)}</T> : null}
+          {rate != null ? (
+            <T variant="caption" tone="muted">{isTrial ? '/week after trial' : '/week'}</T>
+          ) : null}
+          {nextBill ? (
+            <T variant="caption" tone="muted">
+              {rate != null ? '· next bill ' : 'Next bill '}{dateLabel(nextBill)}
+            </T>
+          ) : null}
+        </View>
+      ) : null}
+      <T variant="caption" tone="muted" style={{ marginTop: space.sm }}>
         The flat fee is Swift&apos;s only charge — every fare stays yours.
       </T>
-      {/* Wallet balance / amount due / paused block — honest, in place. */}
-      <BillingStatusBlock sub={sub} onPay={onPay} />
+      {needsAttention ? <BillingStatusBlock sub={sub} onPay={onPay} compact /> : null}
     </Card>
   );
 }
 
+function EarningsTools({
+  sub,
+  onTopUp,
+  onStatement,
+  statementLoading,
+  statementError,
+}: {
+  sub: unknown;
+  onTopUp: () => void;
+  onStatement: () => void;
+  statementLoading: boolean;
+  statementError: boolean;
+}) {
+  const source = serverRecord(sub);
+  const wallet = serverNumber(source?.['walletBalanceGyd']);
+  return (
+    <Card style={{ marginTop: space.md }}>
+      {wallet != null ? (
+        <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
+          <T variant="micro" tone="muted">WALLET BALANCE</T>
+          <T variant="numM">{money(wallet)}</T>
+        </View>
+      ) : null}
+      {source ? (
+        <PillButton
+          label="Top up"
+          size="md"
+          onPress={onTopUp}
+          style={{ marginTop: wallet != null ? space.md : undefined }}
+        />
+      ) : null}
+      <PillButton
+        label="Get earnings statement"
+        variant="outline"
+        size="md"
+        loading={statementLoading}
+        onPress={onStatement}
+        style={{ marginTop: source ? space.md : undefined }}
+      />
+      {statementError ? (
+        <T variant="caption" tone="error" center style={{ marginTop: space.sm }}>
+          Couldn’t open the statement — try again.
+        </T>
+      ) : null}
+    </Card>
+  );
+}
+
+function RecentEarningRow({ entry, index }: { entry: Record<string, unknown>; index: number }) {
+  const type = serverText(entry['type'])?.toUpperCase();
+  const label = earnLabel(type);
+  const createdAt = serverDate(entry['createdAt']);
+  const icon: React.ComponentProps<typeof MaterialCommunityIcons>['name'] | undefined = type === 'TIP'
+    ? 'heart-outline'
+    : type === 'TAXI_FARE'
+      ? 'taxi'
+      : type === 'COURIER_FEE'
+        ? 'package-variant-closed'
+        : type === 'DELIVERY_FEE'
+          ? 'bike-fast'
+          : undefined;
+  return (
+    <View>
+      {index > 0 ? <View style={{ height: StyleSheet.hairlineWidth, backgroundColor: color.border.subtle }} /> : null}
+      <View style={{ flexDirection: 'row', alignItems: 'center', paddingVertical: space.sm }}>
+        {icon ? (
+          <View
+            style={{
+              width: space['3xl'],
+              height: space['3xl'],
+              borderRadius: radius.full,
+              alignItems: 'center',
+              justifyContent: 'center',
+              backgroundColor: color.surface.sunken,
+            }}
+          >
+            <MaterialCommunityIcons name={icon} size={fontSize.base} color={color.text.secondary} />
+          </View>
+        ) : null}
+        <View style={{ flex: 1, marginLeft: icon ? space.md : undefined }}>
+          {label ? <T variant="label" weight="semibold">{label}</T> : null}
+          {createdAt ? <T variant="caption" tone="muted">{dateLabel(createdAt)}</T> : null}
+        </View>
+        <T variant="numM">{moneyOrDash(entry['amount'])}</T>
+      </View>
+    </View>
+  );
+}
+
 export function EarningsScreen({ navigation }: any) {
-  const { kind } = useMoverKind();
-  const summaryQ = useEarningsSummary<any>(kind);
-  const historyQ = useEarnings<any>(kind);
+  const mover = useMoverKind();
+  const { kind } = mover;
+  const summaryQ = useEarningsSummary<unknown>(kind);
+  const historyQ = useEarnings<unknown>(kind);
   const stats = useMoverStats(kind);
   const subQ = useMoverSubscription(kind);
   const ledgerQ = useCashSettlements(kind);
+
   // Signed short-lived link (the JWT can't ride an in-app browser).
   const statement = useMutation({
     mutationFn: async () => {
@@ -149,7 +377,7 @@ export function EarningsScreen({ navigation }: any) {
         ? driverApi.earningsStatement(owner)
         : riderApi.earningsStatement(owner));
       requireAuthSessionForPrincipal(owner);
-      const path = r.data?.data?.path as string;
+      const path = serverText(r.data?.data?.path);
       // [WR-033] A mint that returns no path, or a link that can't open on
       // this phone, must FAIL the mutation — the error line below is the
       // honest signal; success used to be claimed silently either way.
@@ -159,22 +387,50 @@ export function EarningsScreen({ navigation }: any) {
       if (opened === false) throw new Error("Couldn't open the statement on this phone.");
     },
   });
-  const s: any = summaryQ.data ?? {};
-  const raw: any = historyQ.data;
-  const history: any[] = Array.isArray(raw) ? raw : raw?.data ?? raw?.earnings ?? [];
-  const onlineHours = (stats.data as any)?.onlineHoursToday;
-  const weekDeliveries = (stats.data as any)?.weekDeliveries;
 
-  // "Where your money came from" — split fees vs tips across recent jobs. Tips
-  // now include post-delivery ones customers add later, so this surfaces that
-  // income instead of burying it in the total.
-  const tips = history.filter((e) => e?.type === 'TIP').reduce((a, e) => a + Number(e.amount ?? 0), 0);
-  const fees = history.filter((e) => e?.type && e.type !== 'TIP').reduce((a, e) => a + Number(e.amount ?? 0), 0);
+  const summary = serverRecord(summaryQ.data);
+  const statsData = serverRecord(stats.data);
+  const history = earningRows(historyQ.data);
+  const historyResponseValid = hasEarningRowsPayload(historyQ.data);
+  const breakdown = historyQ.isError || !historyResponseValid
+    ? undefined
+    : recentEarningsBreakdown(history);
+  const isDriver = kind === 'DRIVER';
+  const todayJobs = isDriver
+    ? serverCount(summary?.['todayRides'])
+    : serverCount(statsData?.['todayDeliveries']);
+  const weekDeliveries = isDriver ? undefined : serverCount(statsData?.['weekDeliveries']);
+  const allTimeJobs = isDriver
+    ? serverCount(summary?.['totalRides'])
+    : serverCount(statsData?.['totalDeliveries']);
+  const onlineHours = isDriver ? undefined : serverNumber(statsData?.['onlineHoursToday']);
+  const weekFacts = [
+    weekDeliveries == null ? undefined : `${weekDeliveries} delivered this week`,
+    onlineHours == null ? undefined : `${onlineHours}h online today`,
+  ].filter((fact): fact is string => !!fact);
+  const todayDetail = isDriver
+    ? countDetail(todayJobs, 'trip', 'trips')
+    : countDetail(todayJobs, 'job', 'jobs');
+  const allTimeDetail = isDriver
+    ? countDetail(allTimeJobs, 'trip', 'trips')
+    : countDetail(allTimeJobs, 'job', 'jobs');
 
   return (
     <Screen>
       <Header title="Earnings" />
-      {summaryQ.isLoading ? (
+      {mover.loading ? (
+        <LoadingBlock />
+      ) : mover.error ? (
+        <ErrorState
+          message="We couldn't open your earner profile. Check your connection and try again."
+          onRetry={() => mover.refetch()}
+        />
+      ) : !kind ? (
+        <ErrorState
+          message="We couldn't tell which earner profile to open. Try again."
+          onRetry={() => mover.refetch()}
+        />
+      ) : summaryQ.isLoading ? (
         <LoadingBlock />
       ) : summaryQ.isError ? (
         // Honest failure — never render an optimistic $0 that reads as "you
@@ -182,123 +438,108 @@ export function EarningsScreen({ navigation }: any) {
         <ErrorState message="We couldn't load your earnings. Check your connection and try again." onRetry={() => summaryQ.refetch()} />
       ) : (
         <ScrollView contentContainerStyle={{ paddingHorizontal: space['2xl'], paddingBottom: space['3xl'] }} showsVerticalScrollIndicator={false}>
-          {/* This-week hero */}
-          <Card>
-            <T variant="caption" weight="bold" tone="muted" style={{ letterSpacing: 1 }}>
-              THIS WEEK
-            </T>
-            <T variant="display" style={{ marginTop: 2 }}>
-              {money(s.thisWeek?.total ?? 0)}
-            </T>
-            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4, marginTop: 2 }}>
-              <MaterialCommunityIcons name="check-decagram" size={14} color={color.success} />
-              <T variant="caption" weight="bold" tone="success">
-                100% yours · cash · 0% commission
-              </T>
-            </View>
-            <T variant="caption" tone="muted" style={{ marginTop: 2 }}>
-              {s.thisWeek?.count ?? 0} jobs this week
-              {weekDeliveries != null ? ` · ${weekDeliveries} delivered` : ''}
-              {onlineHours != null ? ` · ${onlineHours}h online today` : ''}
-            </T>
-          </Card>
+          <EarningsHero
+            total={earningsWindowTotal(summaryQ.data, 'thisWeek', 'week')}
+            facts={weekFacts}
+          />
 
-          {/* Stat grid */}
           <View style={{ flexDirection: 'row', gap: space.md, marginTop: space.md }}>
-            <StatTile label="Today" total={s.today?.total ?? 0} count={s.today?.count ?? 0} />
-            <StatTile label="This month" total={s.thisMonth?.total ?? 0} count={s.thisMonth?.count ?? 0} />
+            <StatTile
+              label="TODAY"
+              total={earningsWindowTotal(summaryQ.data, 'today')}
+              sub={todayDetail}
+            />
+            <StatTile
+              label="THIS MONTH"
+              total={earningsWindowTotal(summaryQ.data, 'thisMonth', 'month')}
+            />
           </View>
           <View style={{ flexDirection: 'row', gap: space.md, marginTop: space.md }}>
-            <StatTile label="All time" total={s.allTime?.total ?? 0} count={s.allTime?.count ?? 0} />
-            {/* SWIFT-031: not a "payout" — Swift never pays movers. It's cash they
-                already collected and keep 100% of. Honest label. */}
-            <StatTile label="Cash collected" total={s.pendingPayout ?? 0} sub="cash in hand" />
+            <StatTile
+              label="ALL TIME"
+              total={earningsWindowTotal(summaryQ.data, 'allTime')}
+              sub={allTimeDetail}
+            />
           </View>
 
-          {/* Where the money came from — fees vs tips across recent jobs */}
-          {(fees > 0 || tips > 0) ? (
+          {breakdown ? (
             <Card style={{ marginTop: space.md }}>
-              <T variant="caption" weight="bold" tone="muted" style={{ letterSpacing: 1 }}>
-                RECENT BREAKDOWN
-              </T>
+              <T variant="micro" tone="muted">RECENT BREAKDOWN</T>
               <View style={{ flexDirection: 'row', marginTop: space.sm }}>
-                <View style={{ flex: 1 }}>
-                  <T variant="heading">{money(fees)}</T>
-                  <T variant="caption" tone="muted">Job fees</T>
-                </View>
-                <View style={{ flex: 1 }}>
-                  <T variant="heading">{money(tips)}</T>
-                  <T variant="caption" tone="muted">Tips</T>
-                </View>
+                {breakdown.fees != null ? (
+                  <View style={{ flex: 1 }}>
+                    <T variant="numM">{money(breakdown.fees)}</T>
+                    <T variant="caption" tone="muted">Job fees</T>
+                  </View>
+                ) : null}
+                {breakdown.tips != null ? (
+                  <View style={{ flex: 1 }}>
+                    <T variant="numM">{money(breakdown.tips)}</T>
+                    <T variant="caption" tone="muted">Tips</T>
+                  </View>
+                ) : null}
               </View>
             </Card>
           ) : null}
 
-          {/* MMG cash ledger — delivery fees stores still owe this rider */}
-          <StoreOwesYouCard ledger={ledgerQ.data} />
+          {kind === 'RIDER' ? (
+            ledgerQ.isError ? (
+              <Card style={{ marginTop: space.md }}>
+                <T variant="label" tone="error">We couldn&apos;t load the store cash ledger.</T>
+                <View style={{ marginTop: space.sm }}>
+                  <LinkText label="Try again" onPress={() => ledgerQ.refetch()} />
+                </View>
+              </Card>
+            ) : (
+              <StoreOwesYouCard ledger={ledgerQ.data} />
+            )
+          ) : null}
 
-          {/* Weekly flat fee — billing transparency for the mover */}
           <WeeklyFeeCard sub={subQ.data} onPay={() => navigation?.navigate?.('MySwiftNumber')} />
 
-          {/* Printable 30-day statement (marketplace §12) — what you show a
-              bank. Opens in the in-app browser; share/print from its sheet. */}
-          <PillButton
-            label="Get earnings statement"
-            variant="outline"
-            size="md"
-            style={{ marginTop: space.lg }}
-            loading={statement.isPending}
-            onPress={() => statement.mutate()}
+          <EarningsTools
+            sub={subQ.data}
+            onTopUp={() => navigation?.navigate?.('MySwiftNumber')}
+            onStatement={() => statement.mutate()}
+            statementLoading={statement.isPending}
+            statementError={statement.isError}
           />
-          {statement.isError ? (
-            <T variant="caption" tone="error" center style={{ marginTop: space.sm }}>
-              Couldn’t open the statement — try again.
-            </T>
-          ) : null}
 
           {/* Recent earnings */}
           <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginTop: space.xl, marginBottom: space.md }}>
             <T variant="heading">Recent</T>
             <LinkText label="All jobs" onPress={() => navigation?.navigate?.('JobHistory')} />
           </View>
-          {history.length === 0 ? (
+          {historyQ.isLoading ? (
+            <LoadingBlock />
+          ) : historyQ.isError ? (
+            <ErrorState
+              message="We couldn't load your recent earnings. Check your connection and try again."
+              onRetry={() => historyQ.refetch()}
+            />
+          ) : !historyResponseValid ? (
+            <ErrorState
+              message="Your recent earnings weren't included in the response. Try again."
+              onRetry={() => historyQ.refetch()}
+            />
+          ) : history.length === 0 ? (
             <T variant="label" tone="muted">
-              Completed jobs land here with the cash you took on each.
+              Completed jobs and tips land here as they&apos;re recorded.
             </T>
           ) : (
             <Card style={{ paddingVertical: space.sm }}>
-              {history.slice(0, 30).map((e: any, i: number) => (
-                <View
-                  key={e.id ?? i}
-                  style={{
-                    flexDirection: 'row',
-                    alignItems: 'center',
-                    paddingVertical: space.sm,
-                    borderTopWidth: i > 0 ? 1 : 0,
-                    borderTopColor: color.border.subtle,
-                  }}
-                >
-                  <View style={{ width: 32, height: 32, borderRadius: 16, alignItems: 'center', justifyContent: 'center', backgroundColor: color.soft.success }}>
-                    <MaterialCommunityIcons name="cash" size={15} color={color.success} />
-                  </View>
-                  <View style={{ flex: 1, marginLeft: space.md }}>
-                    <T variant="label" weight="semibold">
-                      {earnLabel(e.type)}
-                    </T>
-                    <T variant="caption" tone="muted">
-                      {dateLabel(e.createdAt)}
-                    </T>
-                  </View>
-                  <T variant="label" weight="bold">
-                    {money(Number(e.amount ?? 0))}
-                  </T>
-                </View>
+              {history.map((entry, index) => (
+                <RecentEarningRow
+                  key={serverText(entry['id']) ?? `earning-row-${index}`}
+                  entry={entry}
+                  index={index}
+                />
               ))}
             </Card>
           )}
-          <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.sm, borderRadius: radius.lg, backgroundColor: color.brand[50], padding: space.md, marginTop: space.lg }}>
-            <MaterialCommunityIcons name="calendar-check" size={16} color={color.brand[600]} />
-            <T variant="caption" weight="semibold" tone="deep" style={{ flex: 1 }}>
+          <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.sm, borderRadius: radius.lg, backgroundColor: color.surface.sunken, padding: space.md, marginTop: space.lg }}>
+            <MaterialCommunityIcons name="calendar-check" size={fontSize.base} color={color.text.secondary} />
+            <T variant="caption" weight="semibold" tone="muted" style={{ flex: 1 }}>
               You keep every cent — Swift only charges the flat weekly fee. No commission, ever.
             </T>
           </View>
