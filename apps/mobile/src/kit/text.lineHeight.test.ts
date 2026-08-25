@@ -77,3 +77,33 @@ describe('every type step is renderable', () => {
     }
   });
 });
+
+// ---------------------------------------------------------------------------
+// THE ROW TITLE. Measured off the founder-approved design pass: Hanken 15/20
+// is 71 uses there, and all 53 of the semibold ones are a row or list-item
+// title followed immediately by a subtitle. Prose is a separate treatment at
+// 15/22 (30 uses). Two steps at one size, distinguished only by leading — so
+// the leading IS the distinction, and a test that lets them converge would let
+// the whole point quietly evaporate.
+//
+// Known exception carried deliberately: the design draws the receipt "Total"
+// at 15/22. A 2pt difference on one word does not earn a third step.
+// ---------------------------------------------------------------------------
+describe('row titles are tighter than prose', () => {
+  it('bodyStrong is 15/20 — a label you scan, not a paragraph you read', () => {
+    expect(typeScale.bodyStrong.fontSize).toBe(15);
+    expect(typeScale.bodyStrong.lineHeight).toBe(20);
+  });
+
+  it('body stays 15/22, and the two must not converge', () => {
+    expect(typeScale.body.fontSize).toBe(15);
+    expect(typeScale.body.lineHeight).toBe(22);
+    // Same size, different leading. If these ever match, one of them has lost
+    // its role and every row in the app silently regains 2pt of height.
+    expect(typeScale.bodyStrong.lineHeight).toBeLessThan(typeScale.body.lineHeight);
+  });
+
+  it('the row title keeps the semibold face — reaching it via `weight` gave 500, not 600', () => {
+    expect(typeScale.bodyStrong.fontFamily).toBe(typeScale.heading.fontFamily);
+  });
+});

@@ -144,7 +144,11 @@ export function SettingsRow({
       >
         {plain ? null : <IconChip icon={icon} tone={tone} size={SETTINGS_CHIP} />}
         <View style={{ flex: 1 }}>
-          <T variant="body" weight="medium" tone={tone === 'error' ? 'error' : 'ink'}>
+          {/* `bodyStrong`, not `body` + a weight override. The design's row
+              title is Hanken 600 at 15/20; `body` is 15/22 prose, and reaching
+              it through `weight` produced 500 in a 22pt box — a fifth of a step
+              too light and 2pt too tall, on every settings row in the app. */}
+          <T variant="bodyStrong" tone={tone === 'error' ? 'error' : 'ink'}>
             {label}
           </T>
           {sub ? (
