@@ -86,17 +86,27 @@ export function IconChip({
   );
 }
 
-/** Kit settings row: icon chip · label (+optional sub) · right slot or chevron. */
 /**
- * A settings row.
+ * Every settings row occupies the same height, whether or not it carries a
+ * chip. Two species in one list is the point of F-263 — but they were also two
+ * different HEIGHTS, because the 44pt chip set the height of the rows that had
+ * one and the 15pt label set the height of the rows that did not. A list then
+ * scanned as ragged: 68pt, 68pt, 47pt, 47pt, 68pt. Pinning a floor makes the
+ * rhythm even and lets `sub` still grow a row honestly when it needs two lines.
  *
- * `plain` drops the icon chip [F-263]. The chip had become wallpaper: the same
- * pale square marked "Terms of service" and "Switch app" alike, so a screen of
- * seven rows had no hierarchy at all and nothing looked more important than
- * anything else. An icon should mark an ACTION you take, not decorate a LABEL
- * you read once. Reference and legal rows are plain; destinations keep the
- * chip and, because fewer rows carry one, it means something again.
+ * 56 is the number, not 68. A row is a line of text you tap, and 68pt of
+ * furniture around a 15pt label is what makes a screen read as padded rather
+ * than composed — four rows filling a phone is the look of an app with nothing
+ * in it. iOS system settings sit at 44; 56 keeps the chip comfortable and the
+ * touch target well past the 44pt minimum.
  */
+const SETTINGS_ROW_HEIGHT = 56;
+
+/** The chip inside a row is smaller than a standalone one: it identifies the
+ *  destination, it is not the subject of the row. */
+const SETTINGS_CHIP = 36;
+
+/** Kit settings row: icon chip · label (+optional sub) · right slot or chevron. */
 export function SettingsRow({
   icon,
   label,
@@ -126,12 +136,13 @@ export function SettingsRow({
         style={{
           flexDirection: 'row',
           alignItems: 'center',
-          gap: space.lg,
-          paddingVertical: space.md,
+          gap: space.md,
+          minHeight: SETTINGS_ROW_HEIGHT,
+          paddingVertical: space.sm,
           opacity: pressed ? 0.65 : 1,
         }}
       >
-        {plain ? null : <IconChip icon={icon} tone={tone} />}
+        {plain ? null : <IconChip icon={icon} tone={tone} size={SETTINGS_CHIP} />}
         <View style={{ flex: 1 }}>
           <T variant="body" weight="medium" tone={tone === 'error' ? 'error' : 'ink'}>
             {label}
