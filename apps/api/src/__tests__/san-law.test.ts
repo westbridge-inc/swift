@@ -76,7 +76,7 @@ describe('SAN generation law (scenario A)', () => {
     const payload = '472905883';
     const san = payload + luhnCheckDigit(payload);
     expect(luhnValid(san)).toBe(true);
-    expect(formatSan(san)).toBe(`${san.slice(0, 3)}-${san.slice(3, 6)}-${san.slice(6)}`);
+    expect(formatSan(san)).toBe(`${san.slice(0, 3)} ${san.slice(3, 6)} ${san.slice(6)}`);
   });
 });
 

@@ -94,7 +94,7 @@ describe('SAN assignment', () => {
     const da = await sanDisplay(prisma, { id: a.sub.id, san: null }); // heal path
     const db_ = await sanDisplay(prisma, { id: b.sub.id, san: null });
     expect(da.san).not.toBe(db_.san);
-    expect(da.sanFormatted).toBe(`${da.san.slice(0, 3)}-${da.san.slice(3, 6)}-${da.san.slice(6)}`);
+    expect(da.sanFormatted).toBe(`${da.san.slice(0, 3)} ${da.san.slice(3, 6)} ${da.san.slice(6)}`);
   });
 });
 

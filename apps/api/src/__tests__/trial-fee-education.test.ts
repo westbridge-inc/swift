@@ -71,7 +71,11 @@ describe('the trial fee-education sweep', () => {
 
     const earlyNotif = await prisma.notification.findFirst({ where: { userId: early.userId }, orderBy: { createdAt: 'desc' } });
     expect(earlyNotif?.body).toContain('MMG agent');
-    expect(earlyNotif?.body).toMatch(/\d{3}-\d{3}-\d{4}/); // the SAN, grouped
+    // The SAN, grouped `123 456 7890` — the same punctuation the pay screen and
+    // the printable counter card use. This assertion is why the format change
+    // was worth making: the number a vendor reads to an MMG agent arrives here,
+    // inside a message, and it has to match the card in their hand.
+    expect(earlyNotif?.body).toMatch(/\d{3} \d{3} \d{4}/);
     const lateNotif = await prisma.notification.findFirst({ where: { userId: late.userId }, orderBy: { createdAt: 'desc' } });
     expect(lateNotif?.body).toContain('GY$2,100');
 
