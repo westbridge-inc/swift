@@ -4,8 +4,13 @@ import { describe, expect, it, vi } from 'vitest';
 vi.mock('react-native', () => ({ View: 'View', Pressable: 'Pressable' }));
 vi.mock('expo-image', () => ({ Image: 'Image' }));
 vi.mock('@expo/vector-icons', () => ({ Feather: 'Feather' }));
+// Deliberately NOT the real brand values. These tests assert text and segment
+// counts, never colour, so the palette here is inert placeholder — and the UI
+// barrier forbids brand hex outside packages/ui, correctly, including in a
+// mock. Copying the real maroon in would have taught the next person that
+// duplicating tokens is fine as long as it is "only a test".
 vi.mock('@swift/ui', () => ({
-  color: { text: { muted: '#948888' }, star: '#E8A838', white: '#fff', brand: { 500: '#803B3B' } },
+  color: { text: { muted: '#010101' }, star: '#020202', white: '#030303', brand: { 500: '#040404' } },
   radius: { lg: 16, full: 9999 },
   space: { sm: 8, md: 12, lg: 16 },
   withAlpha: (c: string) => c,
