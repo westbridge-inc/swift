@@ -368,10 +368,24 @@ export function HomeScreen() {
             navigation. */}
         {popularItems.length > 0 ? (
           <>
+            {/* NEITHER OF THESE USED TO BE TRUE. The rail was headed "Popular
+                right now" under the eyebrow "Ordered today" — two separate
+                time claims over a rail ordered by `Item.totalOrdered`, which
+                has exactly one writer (order.service.ts: `increment: 1`), is
+                never decremented, is never reset, and has no time window
+                anywhere in the schema. It is a LIFETIME counter. A dish sold
+                two hundred times last year and never since outranked one
+                selling all morning, and the screen called that "today".
+
+                The counter is a real signal — it is just an all-time one, so
+                the words now say all-time. Building the honest "today" version
+                needs a time-windowed counter that does not exist yet; that is
+                a schema change, not a copy change, and it is not smuggled in
+                behind a label. */}
             <SectionHeader
               size="lg"
-              title="Popular right now"
-              eyebrow="Ordered today"
+              title="Popular on Swift"
+              eyebrow="Most ordered"
               style={{ paddingHorizontal: GUTTER, marginTop: space.xl }}
             />
             <FlatList
