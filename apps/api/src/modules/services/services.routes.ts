@@ -1,4 +1,5 @@
 import type { FastifyInstance } from 'fastify';
+import type { Prisma } from '@prisma/client';
 import { z } from 'zod';
 import { RatingService } from '../rating/rating.service';
 import { NotificationService } from '../notification/notification.service';
@@ -78,6 +79,13 @@ export async function servicesRoutes(app: FastifyInstance) {
       if (!t?.isActive) throw new NotFoundError('ServiceCatalog');
     }
     return tenantId ?? 'swift-default';
+  }
+
+  /** ONE spelling of a slot time across every service-job notification, so the
+   *  provider reads the same "Tue, 9:00 AM, 26 Aug" when a booking is made as
+   *  when it is cancelled. */
+  function slotLabel(when: Date): string {
+    return when.toLocaleString('en-GY', { weekday: 'short', hour: 'numeric', minute: '2-digit', day: 'numeric', month: 'short' });
   }
 
   async function jobForUser(jobId: string, userId: string) {
@@ -364,16 +372,35 @@ export async function servicesRoutes(app: FastifyInstance) {
     const job = await jobForUser(id, request.user.userId);
     if (job.customerId !== request.user.userId) throw new AppError(403, 'CUSTOMER_ONLY', 'Only the customer can schedule');
     if (job.status !== 'QUOTED') throw new AppError(400, 'BAD_STATE', 'Agree a quote before scheduling');
+    // [S0] A provider has ONE body: two customers cannot hold the same slot.
+    // The judge is the partial unique index on ("providerId", "scheduledFor")
+    // for live jobs (service_job_slot_exclusivity migration) — a read-then-check
+    // would still lose a concurrent race, so the database decides and the loser
+    // is turned into a real 409 instead of a stood-up customer. The write is a
+    // state CAS like the quote (:quote) and confirm (:confirm) paths, so a job
+    // that left QUOTED while we were reading fails cleanly rather than being
+    // silently overwritten.
     // The provider still ACCEPTS the slot (§4.3) — providerConfirmedAt starts null.
-    const updated = await app.prisma.serviceJob.update({
-      where: { id },
-      data: { scheduledFor, status: 'SCHEDULED', providerConfirmedAt: null },
+    const updated = await app.prisma.$transaction(async (tx) => {
+      const cas = await tx.serviceJob.updateMany({
+        where: { id, status: 'QUOTED', customerId: request.user.userId },
+        data: { scheduledFor, status: 'SCHEDULED', providerConfirmedAt: null },
+      });
+      if (cas.count === 0) throw new AppError(400, 'BAD_STATE', 'This job just changed — refresh it');
+      return tx.serviceJob.findUniqueOrThrow({ where: { id } });
+    }).catch((error: unknown) => {
+      // The unique violation IS the double-booking answer — same translation
+      // BookingService makes for appointment slots.
+      if ((error as Prisma.PrismaClientKnownRequestError).code === 'P2002') {
+        throw new AppError(409, 'SLOT_TAKEN', 'That time was just booked with this provider — pick another time');
+      }
+      throw error;
     });
     await notifications.send({
       userId: job.provider.userId,
       type: 'ORDER_UPDATE',
       title: 'Booking to confirm',
-      body: `Your quote was accepted for ${scheduledFor.toLocaleString('en-GY', { weekday: 'short', hour: 'numeric', minute: '2-digit', day: 'numeric', month: 'short' })} — confirm or suggest another time.`,
+      body: `Your quote was accepted for ${slotLabel(scheduledFor)} — confirm or suggest another time.`,
       data: { kind: 'booking_to_confirm', jobId: id },
     });
     return { success: true, data: updated };
@@ -442,6 +469,23 @@ export async function servicesRoutes(app: FastifyInstance) {
     if (!['SCHEDULED', 'IN_PROGRESS'].includes(job.status)) throw new AppError(400, 'BAD_STATE', `Cannot complete a ${job.status.toLowerCase()} job`);
     const updated = await app.prisma.serviceJob.update({ where: { id }, data: { status: 'COMPLETED', completedAt: new Date() } });
     if (job.chatRoomId) await app.prisma.chatRoom.update({ where: { id: job.chatRoomId }, data: { isActive: false } });
+    // [S0] Completion used to close the chat room and say nothing to anyone.
+    // The two-way rating (§4.6) is the only trust signal this marketplace has,
+    // and nobody rates a job they were never told had ended. Both sides get the
+    // nudge; the customer's also states the payment reality — cash, direct to
+    // the provider, because Swift never holds the money.
+    for (const [userId, body] of [
+      [job.customerId, 'Your provider marked this job complete. Pay cash directly to them, then rate how it went.'],
+      [job.provider.userId, 'You marked this job complete. Rate your customer to close it out.'],
+    ] as Array<[string, string]>) {
+      await notifications.send({
+        userId,
+        type: 'ORDER_UPDATE',
+        title: 'Job complete — how did it go?',
+        body,
+        data: { kind: 'booking_completed', jobId: id },
+      });
+    }
     return { success: true, data: updated };
   });
 
@@ -451,6 +495,26 @@ export async function servicesRoutes(app: FastifyInstance) {
     if (['COMPLETED', 'CANCELLED'].includes(job.status)) throw new AppError(400, 'BAD_STATE', 'This job is already closed');
     const updated = await app.prisma.serviceJob.update({ where: { id }, data: { status: 'CANCELLED', cancelledAt: new Date() } });
     if (job.chatRoomId) await app.prisma.chatRoom.update({ where: { id: job.chatRoomId }, data: { isActive: false } });
+    // [S0] Cancellation used to be SILENT. A provider who confirmed Tuesday
+    // 09:00 and blocked their whole day was never told the customer had gone —
+    // they showed up. The other side is always told, and the message states the
+    // slot only when one was actually held (a job cancelled at REQUESTED/QUOTED
+    // never had a time; inventing one would be the UI lying).
+    const cancelledByCustomer = job.customerId === request.user.userId;
+    const when = job.scheduledFor ? slotLabel(job.scheduledFor) : null;
+    await notifications.send({
+      userId: cancelledByCustomer ? job.provider.userId : job.customerId,
+      type: 'ORDER_UPDATE',
+      title: 'Job cancelled',
+      body: cancelledByCustomer
+        ? (when
+          ? `The customer cancelled the job booked for ${when} — that time is free again.`
+          : 'The customer cancelled this job request — no visit is happening.')
+        : (when
+          ? `Your provider cancelled the job booked for ${when} — choose another provider or time.`
+          : 'Your provider cancelled this job request — choose another provider.'),
+      data: { kind: 'booking_cancelled', jobId: id },
+    });
     return { success: true, data: updated };
   });
 

@@ -12,12 +12,19 @@ import { navigationRef, safeNavigate } from '../navigation/navigationRef';
 type Destination = { screen: string; params?: Record<string, unknown> };
 
 /** PURE: payload → destination. The single source of tap-routing truth —
- *  extend HERE as new kinds ship (the first-open engagement completes the
- *  earner-side matrix; v1 routes the customer journeys). */
+ *  extend HERE as new kinds ship. Every `kind` the API sends is enumerated in
+ *  notification-router.test.ts (THE CENSUS), which is scanned against
+ *  apps/api/src both ways: a new server kind fails the suite until someone
+ *  decides where its tap lands, and a case here that nothing sends fails too.
+ *  Screen names are checked against the real navigators — 'HomeTabs' once
+ *  looked like a route and was not one, so its pushes silently went nowhere. */
 export function destinationFor(data: Record<string, unknown> | null | undefined): Destination | null {
   if (!data) return null;
   const kind = typeof data['kind'] === 'string' ? (data['kind'] as string) : '';
   const orderId = typeof data['orderId'] === 'string' ? (data['orderId'] as string) : undefined;
+  // Server-tagged surface ('customer' | 'earner' | 'business'), merged into
+  // data by NotificationService.send. Present on only some payloads today.
+  const audience = typeof data['audience'] === 'string' ? (data['audience'] as string) : '';
 
   // Rides: queue outcomes + anything ride-flavoured lands on the taxi screen
   // (it reads the active ride itself — T21 restore does the rest).
@@ -34,13 +41,58 @@ export function destinationFor(data: Record<string, unknown> | null | undefined)
   // their Main is the vendor dashboard, not a customer tracking screen.
   if (kind === 'mmg_unattested_cancellation') return { screen: 'Main' };
 
+  // [E36 sibling] THE vendor order alert — the most money-critical push in the
+  // app — is for the STORE. Their order desk is VendorOrderDetail, opened by
+  // the vendor dashboard itself with { orderId, orderNumber }; the generic
+  // orderId branch below dropped them on the CUSTOMER Delivery screen, a route
+  // VendorStack never mounts, so "New Order!" opened on whatever was last on
+  // screen. orderNumber only rides along when the payload actually carries it
+  // (it titles the detail header while the order loads) — never invented.
+  if (kind === 'vendor_order_alert' && orderId) {
+    const orderNumber = typeof data['orderNumber'] === 'string' ? (data['orderNumber'] as string) : undefined;
+    return { screen: 'VendorOrderDetail', params: orderNumber ? { orderId, orderNumber } : { orderId } };
+  }
+
+  // An appointment MOVED (booking_rescheduled) is a Booking on a STORE's
+  // calendar — it carries bookingId, never jobId — so it takes its own branch
+  // before the service-job family below: the vendor's Schedule agenda is the
+  // screen that shows that slot. The other recipient of the same kind is the
+  // customer whose appointment the store moved, and the app has no
+  // customer-side appointments screen at all — that tap opens the app
+  // normally, exactly as it does today, until one exists [reported].
+  if (kind === 'booking_rescheduled') return { screen: 'Schedule' };
+
+  // BOOKINGS + SERVICE JOBS [S0: a push landing on a dead screen]. Every other
+  // booking_* kind is a service JOB event carrying jobId/refId and no orderId
+  // (to_confirm · confirmed · slot_declined · reminder · completed ·
+  // cancelled), so the family resolves above the order fallback: a job push
+  // must never win a tracking screen. ServiceJobs ("My Jobs") is the ONE
+  // screen that renders that job for BOTH sides — GET /services/jobs returns
+  // rows where the caller is the customer OR the provider, and the provider's
+  // quote / confirm-time / can't-make-it / mark-complete actions live on the
+  // same card the push is about. Matched by PREFIX, like ride_ above, because
+  // this family is still growing (completed + cancelled landed mid-audit);
+  // enumerating it is how three kinds went unrouted in the first place.
+  // No params: ServiceJobsScreen takes none — it lists every job — so a jobId
+  // here would be an invented route param a screen never reads. A per-job deep
+  // screen does not exist yet, and a booking_reminder whose refId is a vendor
+  // APPOINTMENT rather than a service job lands on the same list without its
+  // row [both reported, neither invented].
+  if (kind.startsWith('booking_')) return { screen: 'ServiceJobs' };
+
+  // [server-tagged audience] A push the server addressed to a BUSINESS belongs
+  // on the store's order desk. NotificationService.send merges `audience` into
+  // data (the in-app notification list already reads it), so this is a server
+  // fact, not a guess: without it, audience:'business' payloads carrying an
+  // orderId — a store told dispatch found no rider, a delivery converted to
+  // pickup — fell through to the CUSTOMER Delivery screen, a route VendorStack
+  // never mounts. Runs AFTER the kind branches so a deliberate business
+  // destination (mmg_unattested_cancellation → Main) still wins.
+  if (audience === 'business' && orderId) return { screen: 'VendorOrderDetail', params: { orderId } };
+
   // Orders: any payload carrying an orderId lands on that order's tracking
   // screen — covers status updates, prep_ready, substitutions, pickup READY.
   if (orderId) return { screen: 'Delivery', params: { orderId } };
-
-  // Booking reminders carry refId (the job/booking) — the Activity tab is the
-  // honest v1 landing until bookings get a dedicated deep screen.
-  if (kind === 'booking_reminder') return { screen: 'HomeTabs', params: { screen: 'Activity' } };
 
   return null; // unknown → the app opens normally
 }

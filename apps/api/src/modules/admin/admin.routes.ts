@@ -44,7 +44,7 @@ import { getStorageProvider } from '../../providers/storage/storage-provider';
 import { mintRenderPath } from '../../providers/storage/envelope';
 import { parsePagination, paginatedResponse } from '../../utils/pagination';
 import { computeOrderSla } from '../fulfillment/order-sla';
-import { startOfDayGY } from '../../utils/time-gy';
+import { startOfDayGY, GUYANA_UTC_OFFSET_HOURS } from '../../utils/time-gy';
 import { AppError, NotFoundError, ForbiddenError } from '../../utils/errors';
 import { transitionUserStatusAuthority } from '../mover-authority';
 import { beginRequestTenantContext, getTenantId } from '../../plugins/tenant-context';
@@ -257,6 +257,50 @@ const auditedAdminReadRoutes = [
   '/integrity/identity/:userId',
   '/integrity/appeals',
 ];
+
+// ---------------------------------------------------------------------------
+// MONEY AT THE RESPONSE SEAM
+//
+// A Prisma `Decimal` is an object, not a JS number. `JSON.stringify` calls its
+// `toJSON()`, so a row handed straight to the client carries `"1200.00"` where
+// the shared admin type (`apps/admin/src/lib/api.ts`) promises `1200`. The
+// dashboard-overview route already coerces its own money for exactly this
+// reason (SWIFT-119, see `todayDeliveryFees` below); the paginated LIST routes
+// never did, and they carry far more money columns — an Order alone has 13,
+// plus 7 more on every OrderItem.
+//
+// Today each render site rescues itself with a local `Number(...)`, which is
+// the fork this is meant to end: one missed call site and `a + b` concatenates
+// ("1200.00" + "300.00" = "1200.00300.00"), `.toFixed()` throws, and a sort
+// compares lexicographically so "9" outranks "1200".
+//
+// Detect the Decimal itself rather than a list of field names — a name list
+// silently misses the next money column added to the schema, and that miss is
+// invisible until a total is wrong on screen.
+// ---------------------------------------------------------------------------
+
+/** A value that cannot become a finite number becomes `null`, NEVER `0`: a real
+ *  zero and an invented zero look identical and mean opposite things, so the
+ *  server must not manufacture the zero. (Whether each client then renders the
+ *  null honestly is the client's half — `apps/admin/src/app/finance/page.tsx`
+ *  does; two other `gyd` copies still coerce it to $0. Logged as a finding.) */
+function decimalToNumber(value: unknown): number | null {
+  const n = Number((value as { toString(): string }).toString());
+  return Number.isFinite(n) ? n : null;
+}
+
+/** Deep-coerce every Prisma `Decimal` in a response payload to a real number.
+ *  Non-Decimal values (Dates, Buffers, strings, nested relations) pass through
+ *  untouched, so the response shape is otherwise byte-identical. */
+function coerceMoney<T>(value: T): T {
+  if (value === null || typeof value !== 'object') return value;
+  if (Prisma.Decimal.isDecimal(value)) return decimalToNumber(value) as unknown as T;
+  if (value instanceof Date || Buffer.isBuffer(value)) return value;
+  if (Array.isArray(value)) return value.map((v) => coerceMoney(v)) as unknown as T;
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(value as Record<string, unknown>)) out[k] = coerceMoney(v);
+  return out as unknown as T;
+}
 
 export async function adminRoutes(app: FastifyInstance) {
   const notifications = new NotificationService(app.prisma, app.io);
@@ -1352,7 +1396,9 @@ export async function adminRoutes(app: FastifyInstance) {
       app.prisma.order.count({ where }),
     ]);
 
-    return { success: true, ...paginatedResponse(orders, total, { page, limit, skip }) };
+    // 13 Decimal columns on the order + 7 more on every included OrderItem,
+    // all of which the admin client types as `number`. Coerce at the seam.
+    return { success: true, ...paginatedResponse(coerceMoney(orders), total, { page, limit, skip }) };
   });
 
   /** Live ops snapshot for the command map: every online mover's position +
@@ -1365,9 +1411,19 @@ export async function adminRoutes(app: FastifyInstance) {
       'DRIVER_ASSIGNED', 'DRIVER_EN_ROUTE', 'DRIVER_ARRIVED', 'RIDE_IN_PROGRESS',
     ] as const;
 
+    // A POSITION IS BOTH COORDINATES OR IT IS NOT A POSITION.
+    // `currentLat`/`currentLng` are two independent nullable `Float?` columns
+    // with no constraint tying them, so a half-written fix is representable.
+    // Every other reader in the codebase already defends against it — the two
+    // PostGIS partial indexes (`..._dispatch_postgis`, `..._hot_path_indexes`)
+    // and `rides/queue.service.ts:297` all require BOTH IS NOT NULL. This one
+    // required only lat, and `OpsMap.tsx:65` renders `position={[m.lat, m.lng]}`
+    // with no guard of its own, so a lat-without-lng row throws inside Leaflet
+    // and takes the whole live-ops map down — not one missing dot, the map.
+    // Match the index predicate exactly rather than adding a second rule.
     const [riders, drivers, orders, exhausted] = await Promise.all([
       app.prisma.rider.findMany({
-        where: { isOnline: true, currentLat: { not: null }, user: { tenantId } },
+        where: { isOnline: true, currentLat: { not: null }, currentLng: { not: null }, user: { tenantId } },
         select: {
           id: true, currentLat: true, currentLng: true, isAvailable: true, currentOrderId: true,
           user: { select: { firstName: true, lastName: true } },
@@ -1375,7 +1431,7 @@ export async function adminRoutes(app: FastifyInstance) {
         take: 500,
       }),
       app.prisma.driver.findMany({
-        where: { isOnline: true, currentLat: { not: null }, user: { tenantId } },
+        where: { isOnline: true, currentLat: { not: null }, currentLng: { not: null }, user: { tenantId } },
         select: {
           id: true, currentLat: true, currentLng: true, isAvailable: true, currentRideId: true, rideClass: true,
           user: { select: { firstName: true, lastName: true } },
@@ -1767,13 +1823,26 @@ export async function adminRoutes(app: FastifyInstance) {
     const thirtyDaysAgo = new Date();
     thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
 
+    // [DASH-06] The daily bucket is a GUYANA day, not a UTC one. `placedAt` is
+    // `TIMESTAMP(3)` holding UTC, so a bare `DATE("placedAt")` cuts the day at
+    // Guyana 20:00 — every order from 20:00 to midnight was filed under
+    // TOMORROW. That is the number someone reads to decide whether a day
+    // traded well, and four hours of each evening were being handed to the
+    // next day. Shift by the same offset `startOfDayGY()` uses (imported, not
+    // re-typed as a literal: one implementation of "Guyana is UTC-4") and emit
+    // a plain `YYYY-MM-DD` LABEL rather than a `date` — a `date` comes back as
+    // a Date, JSON-serialises to a UTC midnight instant, and the browser then
+    // shifts it a SECOND time in `toLocaleDateString()`. A label cannot be
+    // re-zoned by anyone downstream.
+    const gyOffset = `${-GUYANA_UTC_OFFSET_HOURS} hours`;
+
     const [dailyRevenue, subscriptionRevenue, totalDeliveryFees] = await Promise.all([
-      // Daily revenue breakdown for last 30 days
+      // Daily revenue breakdown for last 30 days, bucketed by Guyana-local day
       app.prisma.$queryRaw<
-        Array<{ date: string; markup: number; delivery_fees: number; total: number; order_count: bigint }>
+        Array<{ date: string; markup: unknown; delivery_fees: unknown; total: unknown; order_count: number }>
       >`
         SELECT
-          DATE("placedAt") as date,
+          to_char("placedAt" - ${gyOffset}::interval, 'YYYY-MM-DD') as date,
           COALESCE(SUM("subtotalMarkup"), 0) as markup,
           COALESCE(SUM("deliveryFee"), 0) as delivery_fees,
           COALESCE(SUM("totalAmount"), 0) as total,
@@ -1782,8 +1851,8 @@ export async function adminRoutes(app: FastifyInstance) {
         WHERE "placedAt" >= ${thirtyDaysAgo}
           AND "tenantId" = ${tenantId}
           AND status IN ('DELIVERED', 'COMPLETED')
-        GROUP BY DATE("placedAt")
-        ORDER BY date ASC
+        GROUP BY 1
+        ORDER BY 1 ASC
       `,
       // Active subscription revenue
       app.prisma.subscription.findMany({
@@ -1806,10 +1875,16 @@ export async function adminRoutes(app: FastifyInstance) {
     return {
       success: true,
       data: {
-        dailyRevenue,
+        // `SUM(numeric)` comes back from $queryRaw as a Prisma Decimal, i.e. a
+        // JSON string, while `RevenueResponse.dailyRevenue[].total` is typed
+        // `number`. Coerce at the seam.
+        dailyRevenue: coerceMoney(dailyRevenue),
         summary: {
-          thirtyDayMarkup: totalDeliveryFees._sum.subtotalMarkup || 0,
-          thirtyDayDeliveryFees: totalDeliveryFees._sum.deliveryFee || 0,
+          // SWIFT-119 again: a Prisma Decimal is TRUTHY, so `|| 0` never fired
+          // and the raw Decimal went out as a string. `?? 0` for the genuinely
+          // absent aggregate (no rows), `Number()` for the present one.
+          thirtyDayMarkup: Number(totalDeliveryFees._sum.subtotalMarkup ?? 0),
+          thirtyDayDeliveryFees: Number(totalDeliveryFees._sum.deliveryFee ?? 0),
           weeklySubscriptionRevenue: weeklySubRevenue,
           monthlySubscriptionRevenue: monthlySubRevenue,
           activeSubscriptions: subscriptionRevenue.length,
@@ -1848,7 +1923,9 @@ export async function adminRoutes(app: FastifyInstance) {
       app.prisma.settlement.count({ where }),
     ]);
 
-    return { success: true, ...paginatedResponse(settlements, total, { page, limit, skip }) };
+    // Settlement.totalBase / totalMarkup are Decimal(12,2) — the figure the
+    // finance page prints next to a "Mark paid" button. Coerce at the seam.
+    return { success: true, ...paginatedResponse(coerceMoney(settlements), total, { page, limit, skip }) };
   });
 
   app.put('/finance/settlements/:id/process', { preHandler: [adminGuard] }, async (request) => {
@@ -2217,7 +2294,9 @@ export async function adminRoutes(app: FastifyInstance) {
       app.prisma.subscription.count({ where }),
     ]);
 
-    return { success: true, ...paginatedResponse(subscriptions, total, { page, limit, skip }) };
+    // Subscription.weeklyRate / customRate are Decimal(10,2) — this IS Swift's
+    // revenue line (flat weekly fee, no commission). Coerce at the seam.
+    return { success: true, ...paginatedResponse(coerceMoney(subscriptions), total, { page, limit, skip }) };
   });
 
   app.put('/subscriptions/:id/waive-fee', { preHandler: [adminGuard] }, async (request) => {

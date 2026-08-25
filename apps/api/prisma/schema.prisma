@@ -1854,6 +1854,14 @@ model ServiceQualification {
   @@map("service_qualifications")
 }
 
+/// One hire of one provider. Double-booking a provider is impossible at the
+/// data layer: a partial unique index on ("providerId", "scheduledFor") WHERE
+/// the job is live — status SCHEDULED or IN_PROGRESS and a slot is actually
+/// held — see the 20260826000000_service_job_slot_exclusivity migration
+/// (Prisma cannot express partial uniques, so it lives in SQL). COMPLETED and
+/// CANCELLED jobs are history and release the slot; decline-slot releases it by
+/// clearing scheduledFor. A job carries a start and no duration, so only an
+/// IDENTICAL start collides — overlap needs a duration field [reported].
 model ServiceJob {
   id                  String           @id @default(cuid())
   customerId          String

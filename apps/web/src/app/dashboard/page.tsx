@@ -3,10 +3,8 @@
 import Link from 'next/link';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { AlertTriangle, Star } from 'lucide-react';
-import { getLowStock, getOverview, toggleOpen, toggleOrders } from '@/lib/vendor-api';
+import { getLowStock, getOverview, money, toggleOpen, toggleOrders } from '@/lib/vendor-api';
 import { MutationNotice } from '@/components/mutation-notice';
-
-const money = (n: number) => `$${Math.round(n).toLocaleString()}`;
 
 function Stat({ label, value, sub }: { label: string; value: string; sub?: string }) {
   return (

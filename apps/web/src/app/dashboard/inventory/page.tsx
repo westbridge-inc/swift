@@ -4,10 +4,8 @@ import { useMemo, useState } from 'react';
 import Link from 'next/link';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { FileUp, Search } from 'lucide-react';
-import { adjustStock, getCategories, getItems, setItemAvailability, updateItem, type CatalogItem } from '@/lib/vendor-api';
+import { adjustStock, getCategories, getItems, money, setItemAvailability, updateItem, type CatalogItem } from '@/lib/vendor-api';
 import { MutationNotice } from '@/components/mutation-notice';
-
-const money = (n: number) => `$${Math.round(Number(n)).toLocaleString()}`;
 
 type AdjustReason = 'RECEIVED' | 'DAMAGED' | 'MANUAL' | 'RECONCILE' | 'RETURN';
 
@@ -55,7 +53,10 @@ function StockAdjust({ item, onDone }: { item: CatalogItem; onDone: () => void }
 }
 
 function PriceEdit({ item, onDone }: { item: CatalogItem; onDone: () => void }) {
-  const [price, setPrice] = useState(String(item.basePrice));
+  // `basePrice` is null when the server did not send a usable price: start the
+  // editor EMPTY rather than seeding it with the string "null" (or a 0 the
+  // vendor might save over their real price).
+  const [price, setPrice] = useState(item.basePrice == null ? '' : String(item.basePrice));
   const [error, setError] = useState<string | null>(null);
   const mut = useMutation({
     mutationFn: () => updateItem(item.id, { basePrice: Number(price) }),

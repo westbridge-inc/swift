@@ -450,6 +450,57 @@ async function ackVendorAlert(app: FastifyInstance, userId: string, orderId: str
   });
 }
 
+// ---------------------------------------------------------------------------
+// Money on the wire
+// ---------------------------------------------------------------------------
+
+/**
+ * [S1] A Prisma `Decimal` is NOT a JS number — it serialises to a STRING
+ * ("1500.00"). One backend feeds four clients, so a route that returns RAW
+ * Prisma rows ships money as a string to all four at once, and whether that
+ * breaks is a property of the RENDER, not of the data: string interpolation
+ * looks perfect, `.toFixed()` throws, and arithmetic quietly yields
+ * "1500.00500.00" or NaN. That is drift that bites in production, not in dev.
+ *
+ * So money is coerced HERE, at the seam where the response is built — once,
+ * not at each of four renders. `paginatedResponse` is shared with routes that
+ * carry no money at all, so rows are mapped BEFORE they are handed to it.
+ *
+ * Field NAMES never change: an installed app is months old and reads today's
+ * names. This is a type fix, not a rename.
+ */
+function coerceMoney<T extends object>(row: T, fields: readonly (keyof T & string)[]): T {
+  const out = { ...row } as Record<string, unknown>;
+  for (const field of fields) {
+    const raw = out[field];
+    // LAW 1: a null fare is "there was no fare" — it stays null and renders as
+    // an em-dash. Coercing it to 0 would invent a number nobody agreed to.
+    if (raw === null || raw === undefined) continue;
+    // LAW 2: guard the coercion. A value that will not parse becomes null
+    // ("unknown") rather than a NaN on somebody's receipt.
+    const parsed = Number(raw);
+    out[field] = Number.isFinite(parsed) ? parsed : null;
+  }
+  return out as T;
+}
+
+/** Every `Decimal` money column on `model Order` (schema.prisma). */
+const ORDER_MONEY_FIELDS = [
+  'subtotalBase', 'subtotalMarkup', 'subtotalCustomer',
+  'deliveryFee', 'serviceFee', 'taxAmount', 'tipAmount', 'discount', 'totalAmount',
+  'taxiFareBase', 'taxiFarePerKm', 'taxiFarePerMin', 'taxiFareTotal',
+] as const;
+
+/** Every `Decimal` money column on `model OrderItem`. */
+const ORDER_ITEM_MONEY_FIELDS = [
+  'basePrice', 'markedUpPrice', 'markupAmount',
+  'totalBase', 'totalMarkup', 'totalCustomer', 'substitutePrice',
+] as const;
+
+/** `model Item` / `model Option` — the menu's own prices. */
+const ITEM_MONEY_FIELDS = ['basePrice'] as const;
+const OPTION_MONEY_FIELDS = ['additionalPrice'] as const;
+
 /**
  * Verify that the given order belongs to one of the user's vendors and return it.
  */
@@ -1163,7 +1214,15 @@ export async function vendorRoutes(app: FastifyInstance) {
       app.prisma.order.count({ where }),
     ]);
 
-    return { success: true, ...paginatedResponse(orders, total, pagination) };
+    // [S1] Decimal → number BEFORE the shared paginator sees the rows. The
+    // board's order totals AND every line's snapshotted prices; the web
+    // storefront's `$NaN` came from exactly these strings.
+    const data = orders.map((order) => ({
+      ...coerceMoney(order, ORDER_MONEY_FIELDS),
+      items: order.items.map((item) => coerceMoney(item, ORDER_ITEM_MONEY_FIELDS)),
+    }));
+
+    return { success: true, ...paginatedResponse(data, total, pagination) };
   });
 
   /** GET /orders/:id — Full order detail */
@@ -1797,7 +1856,17 @@ export async function vendorRoutes(app: FastifyInstance) {
       },
       orderBy: { sortOrder: 'asc' },
     });
-    return { success: true, data: items };
+    // [S1] `basePrice` is Decimal(10,2) and every option's `additionalPrice`
+    // is too — raw rows shipped both as strings to the menu editor, the web
+    // storefront and the POS.
+    const data = items.map((item) => ({
+      ...coerceMoney(item, ITEM_MONEY_FIELDS),
+      optionGroups: item.optionGroups.map((group) => ({
+        ...group,
+        options: group.options.map((option) => coerceMoney(option, OPTION_MONEY_FIELDS)),
+      })),
+    }));
+    return { success: true, data };
   });
 
   /** POST /items — Create an item with optional option groups */
