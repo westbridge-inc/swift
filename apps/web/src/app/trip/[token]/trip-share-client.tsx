@@ -65,8 +65,8 @@ export function TripShareClient({ token }: { token: string }) {
   const ageSeconds = fetchedAt ? Math.max(0, Math.round((Date.now() - fetchedAt) / 1000)) : null;
 
   return (
-    <main className="min-h-screen bg-[#FBFBF9] text-[#211A1A]">
-      <header className="bg-[#803B3B] px-5 py-4">
+    <main className="min-h-screen bg-[var(--swift-canvas)] text-[var(--swift-ink)]">
+      <header className="bg-[var(--swift-red)] px-5 py-4">
         <p className="text-lg font-bold text-white">Swift — live trip</p>
         {view ? (
           <p className="mt-0.5 text-sm text-white/85">
@@ -110,7 +110,7 @@ export function TripShareClient({ token }: { token: string }) {
                   // eslint-disable-next-line @next/next/no-img-element
                   <img src={view.driver.photoUrl} alt={`Driver ${view.driver.firstName}`} className="h-14 w-14 rounded-full object-cover" />
                 ) : (
-                  <div className="flex h-14 w-14 items-center justify-center rounded-full bg-[#F5EBEC] text-lg font-bold text-[#803B3B]">
+                  <div className="flex h-14 w-14 items-center justify-center rounded-full bg-[var(--swift-red-50)] text-lg font-bold text-[var(--swift-red)]">
                     {view.driver.firstName.slice(0, 1)}
                   </div>
                 )}
@@ -118,7 +118,7 @@ export function TripShareClient({ token }: { token: string }) {
                   <p className="font-semibold">{view.driver.firstName}</p>
                   <p className="truncate text-sm text-[#786C6C]">{view.driver.vehicle}</p>
                 </div>
-                <div className="rounded-lg border-2 border-[#211A1A] px-2 py-1 font-mono text-sm font-bold">
+                <div className="rounded-lg border-2 border-[var(--swift-ink)] px-2 py-1 font-mono text-sm font-bold">
                   {view.driver.plate}
                 </div>
               </div>
@@ -133,7 +133,7 @@ export function TripShareClient({ token }: { token: string }) {
                   src={`https://www.openstreetmap.org/export/embed.html?bbox=${view.location.lng - 0.008}%2C${view.location.lat - 0.008}%2C${view.location.lng + 0.008}%2C${view.location.lat + 0.008}&layer=mapnik&marker=${view.location.lat}%2C${view.location.lng}`}
                 />
                 <a
-                  className="block px-4 py-3 text-sm font-semibold text-[#803B3B]"
+                  className="block px-4 py-3 text-sm font-semibold text-[var(--swift-red)]"
                   href={`https://www.openstreetmap.org/?mlat=${view.location.lat}&mlon=${view.location.lng}#map=16/${view.location.lat}/${view.location.lng}`}
                   target="_blank"
                   rel="noreferrer"

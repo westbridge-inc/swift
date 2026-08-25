@@ -324,6 +324,18 @@ jobs:
 
   # The repo is public — scan the full history for leaked credentials on every
   # push/PR. Blocking by design.
+  ui-barrier:
+    name: UI Barrier
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      # An ESLint rule can be silenced with an inline disable comment. This
+      # cannot — removing it shows up in the diff. It guards the one-way door
+      # between the new UI tree and the legacy kit, and it permanently forbids a
+      # second palette outside packages/ui.
+      - name: Old UI cannot touch new UI
+        run: bash scripts/ui-barrier.sh
+
   secret-scan:
     name: Secret Scan
     runs-on: ubuntu-latest
