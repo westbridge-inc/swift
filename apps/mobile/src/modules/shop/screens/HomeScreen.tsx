@@ -56,6 +56,11 @@ const HERO_CARD_W = Math.round(SCREEN_W * 0.72);
 // The super-app grid (Grab anatomy): every service one tap from the top of
 // Home. Icons are the Swift pictogram set (design-100× 9.6) — one hand, never
 // glyph-font clipart, never emoji. All destinations are REAL routes.
+// [MKT-2] "Shops" is NOT here any more, and that is the point: goods got
+// promoted from a tile to the Market tab. Seven tiles, not eight — Food,
+// Groceries, Taxi, Send, Services, Orders, Favourites. Orders now opens the
+// OrdersHistory stack screen directly, because the Activity tab it used to jump
+// to no longer exists (the same history is also in Profile -> My orders).
 const SERVICES: {
   key: PictogramName;
   label: string;
@@ -63,11 +68,10 @@ const SERVICES: {
 }[] = [
   { key: 'food', label: 'Food', nav: (n) => n.navigate('Search', { type: 'RESTAURANT' }) },
   { key: 'groceries', label: 'Groceries', nav: (n) => n.navigate('Search', { type: 'SUPERMARKET' }) },
-  { key: 'shops', label: 'Shops', nav: (n) => n.navigate('Search', { type: 'STORE' }) },
   { key: 'taxi', label: 'Taxi', nav: (n) => n.navigate('Taxi') },
   { key: 'send', label: 'Send', nav: (n) => n.navigate('Courier') },
   { key: 'services', label: 'Services', nav: (n) => n.navigate('Services') },
-  { key: 'orders', label: 'Orders', nav: (n) => n.navigate('Tabs', { screen: 'Activity' }) },
+  { key: 'orders', label: 'Orders', nav: (n) => n.navigate('OrdersHistory') },
   { key: 'favourites', label: 'Favourites', nav: (n) => n.navigate('Favorites') },
 ];
 
@@ -453,7 +457,7 @@ export function HomeScreen() {
                   size="lg"
                   title="Order again"
                   eyebrow="From your orders"
-                  onSeeAll={() => navigation.navigate('Tabs', { screen: 'Activity' })}
+                  onSeeAll={() => navigation.navigate('OrdersHistory')}
                   style={{ paddingHorizontal: GUTTER, marginTop: space['2xl'] }}
                 />
                 <FlatList

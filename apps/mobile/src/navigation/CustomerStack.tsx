@@ -19,6 +19,7 @@ import { FavoritesScreen } from '../modules/shop/screens/FavoritesScreen';
 import { VendorReviewsScreen } from '../modules/shop/screens/VendorReviewsScreen';
 import { CartScreen } from '../modules/cart/screens/CartScreen';
 import { OrdersHistoryScreen } from '../modules/orders/screens/OrdersHistoryScreen';
+import { MarketScreen } from '../modules/shop/screens/MarketScreen';
 import { DeliveryScreen } from '../modules/orders/screens/DeliveryScreen';
 import { FeedbackScreen } from '../modules/orders/screens/FeedbackScreen';
 import { ChatListScreen } from '../modules/chat/screens/ChatListScreen';
@@ -49,12 +50,25 @@ import { ChatScreen } from '../screens/shared/ChatScreen';
 const Tab = createBottomTabNavigator();
 const Stack = createNativeStackNavigator();
 
-// Tab bar: Home · Activity · Cart · Profile (filled icon when active).
-// Activity is a first-class super-app surface (orders/rides history + live
-// status); order chats stay reachable from each order and the chat list.
+// Tab bar: Home · Market · Cart · Profile (filled icon when active).
+//
+// [MKT-2, founder-approved 2026-08-24] Market REPLACES Activity. Goods — clothes,
+// tools, household things — get the second slot, and "Shops" leaves Home because
+// it stops being a tile and becomes this tab.
+//
+// Demoting Activity was gated on two things, both satisfied before this shipped:
+//   1. An in-flight order stays visible without it. HomeScreen already renders
+//      `feed.activeOrder` with its live status, so a customer mid-order sees it
+//      on the screen they land on.
+//   2. Nothing lands on a dead screen. Orders & rides live in Profile → "My
+//      orders" (ProfileScreen.tsx, already shipped) and `OrdersHistory` remains a
+//      registered stack route, so every existing path still resolves. There were
+//      exactly two `navigate('Tabs', { screen: 'Activity' })` call sites — both on
+//      Home, both now pointing at OrdersHistory — and NO push notification
+//      targeted the Activity tab (verified against notification-router).
 const TAB_ICON: Record<string, TabGlyphName> = {
   Home: 'home',
-  Activity: 'activity',
+  Market: 'market',
   Cart: 'cart',
   Profile: 'profile',
 };
@@ -103,7 +117,7 @@ function HomeTabs() {
       })}
     >
       <Tab.Screen name="Home" component={HomeScreen} />
-      <Tab.Screen name="Activity" component={OrdersHistoryScreen} />
+      <Tab.Screen name="Market" component={MarketScreen} />
       <Tab.Screen name="Cart" component={CartScreen} />
       <Tab.Screen name="Profile" component={ProfileScreen} />
     </Tab.Navigator>

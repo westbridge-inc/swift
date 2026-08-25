@@ -9,7 +9,9 @@ import { color as tokenColor } from '@swift/ui';
  * exception (9.6). The Activity glyph is the orders receipt; the whole bar
  * finally speaks the same language as the service rail.
  */
-export type TabGlyphName = 'home' | 'activity' | 'cart' | 'profile';
+// 'activity' is KEPT even though the customer tab bar no longer uses it — the
+// glyph is not deleted (FG-2) and other surfaces may still want it.
+export type TabGlyphName = 'home' | 'activity' | 'market' | 'cart' | 'profile';
 
 const S = { strokeWidth: 1.8, strokeLinecap: 'round', strokeLinejoin: 'round' } as const;
 
@@ -51,6 +53,28 @@ export function TabGlyph({
           />
           <Path d="M9.6 8.4 H14.4" fill="none" stroke={focused ? tokenColor.white : color} strokeWidth={1.8} strokeLinecap="round" />
           <Path d="M9.6 11.4 H13.2" fill="none" stroke={focused ? tokenColor.white : color} strokeWidth={1.8} strokeLinecap="round" />
+        </>
+      )}
+      {/* MARKET [MKT-2] — a storefront: an awning, a body, a doorway.
+          First attempt drew the awning as a thin stroke over a filled body, and
+          at 25px focused it collapsed into a maroon blob — the stroke had
+          nothing to sit against. So the awning is its own SHAPE above the body
+          with a gap between them, and the doorway is a cutout, which is what
+          makes it read as a shop rather than a box at tab size. */}
+      {name === 'market' && (
+        <>
+          {/* awning */}
+          <Path {...paint} d="M3.6 8.4 L5.6 4.2 H18.4 L20.4 8.4 Z" />
+          {/* body */}
+          <Path {...paint} d="M5.4 10 H18.6 V19.2 A1.2 1.2 0 0 1 17.4 20.4 H6.6 A1.2 1.2 0 0 1 5.4 19.2 Z" />
+          {/* doorway — reversed out when focused, drawn in when not */}
+          <Path
+            d="M10.2 20.4 V15.2 A1 1 0 0 1 11.2 14.2 H12.8 A1 1 0 0 1 13.8 15.2 V20.4"
+            fill="none"
+            stroke={focused ? tokenColor.white : color}
+            strokeWidth={1.8}
+            strokeLinecap="round"
+          />
         </>
       )}
       {name === 'cart' && (
