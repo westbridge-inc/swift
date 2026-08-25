@@ -816,13 +816,32 @@ export async function riderRoutes(app: FastifyInstance) {
     // Compute distance from rider to each vendor, filter by radius, sort.
     const withDistance = orders
       .map((order) => {
-        const vendorLat = Number(order.vendor?.latitude ?? 0);
-        const vendorLng = Number(order.vendor?.longitude ?? 0);
-        const pickupDistance = haversineDistance(riderLat, riderLng, vendorLat, vendorLng);
-        const deliveryDistance = haversineDistance(
-          vendorLat, vendorLng,
-          Number(order.deliveryLat), Number(order.deliveryLng),
-        );
+        // WHERE THE PICKUP ACTUALLY IS.
+        //
+        // A food order is collected from its VENDOR. A parcel has no vendor at
+        // all — it is collected from an address the sender typed, which the
+        // courier route already stores on the order as pickupLat/pickupLng.
+        //
+        // This used to read the vendor only, with `?? 0` as the fallback. For
+        // every parcel that made the pickup point (0, 0) — null island, in the
+        // Atlantic — which is 6,494 km from Georgetown. The radius filter below
+        // then removed it from EVERY rider's board, on every request, forever.
+        //
+        // Parcels were reaching riders solely through the single push offer that
+        // dispatch sends. Miss it, decline it, or have the app closed, and the
+        // job became invisible to everyone: the sender waits, the board is
+        // empty, and nothing about the system says why.
+        const pickupLat = order.pickupLat != null ? Number(order.pickupLat) : Number(order.vendor?.latitude ?? NaN);
+        const pickupLng = order.pickupLng != null ? Number(order.pickupLng) : Number(order.vendor?.longitude ?? NaN);
+        const hasPickup = Number.isFinite(pickupLat) && Number.isFinite(pickupLng);
+
+        // No usable pickup point is NOT a job 6,494 km away — it is a job whose
+        // distance we do not know. Infinity keeps it off the radius-filtered
+        // board without pretending we measured something.
+        const pickupDistance = hasPickup ? haversineDistance(riderLat, riderLng, pickupLat, pickupLng) : Infinity;
+        const deliveryDistance = hasPickup
+          ? haversineDistance(pickupLat, pickupLng, Number(order.deliveryLat), Number(order.deliveryLng))
+          : Infinity;
         return {
           id: order.id,
           orderNumber: order.orderNumber,
