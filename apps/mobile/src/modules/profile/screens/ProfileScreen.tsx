@@ -1,6 +1,6 @@
 /** @jsxImportSource react */
 import React, { useState } from 'react';
-import { Pressable, ScrollView, View } from 'react-native';
+import { Pressable, ScrollView, StyleSheet, View } from 'react-native';
 import { Image } from 'expo-image';
 import { Feather } from '@expo/vector-icons';
 import { useNavigation } from '@react-navigation/native';
@@ -9,7 +9,7 @@ import { color, radius, space } from '@swift/ui';
 import { haptic } from '../../../lib/haptics';
 import { useMyRating, useProfile } from '../../../hooks/customer';
 import { useAuthStore } from '../../../stores/authStore';
-import { Card, EmptyState, ErrorState, GradientMasthead, IconChip, LoadingBlock, PillButton, PopupCard, PopupTitle, Screen, SettingsRow, T } from '../../../kit';
+import { EmptyState, ErrorState, IconChip, LoadingBlock, PillButton, PopupCard, PopupTitle, Screen, SettingsRow, T } from '../../../kit';
 import Svg, { Circle } from 'react-native-svg';
 import Animated, { FadeInDown, ReduceMotion } from 'react-native-reanimated';
 import { RoleSwitcherSheet } from '../../../components/RoleSwitcherSheet';
@@ -57,6 +57,34 @@ function TrustHalo({ size, stroke, facts, children }: {
   );
 }
 
+/** CONTENT SITS ON OPEN PAPER — read off the rendered design slides.
+ *
+ *  Account used to stack four white `Card` chassis down the page, so a screen
+ *  that is nothing but a list of destinations read as four floating objects
+ *  with shadows. In the design there is no card here at all: the rows sit
+ *  directly on the paper and a HAIRLINE is all that separates neighbours. A
+ *  card chassis is earned by exactly one thing in this app — a live
+ *  interruption with a countdown — and a settings list is not that.
+ *
+ *  Nothing is wrapped, nothing is padded away: the group only draws the lines
+ *  BETWEEN its children, so the first and last rows breathe against the
+ *  section eyebrow and the next one. */
+function RowGroup({ children }: { children: React.ReactNode }) {
+  const rows = React.Children.toArray(children);
+  return (
+    <View>
+      {rows.map((row, i) => (
+        <React.Fragment key={i}>
+          {i > 0 ? (
+            <View style={{ height: StyleSheet.hairlineWidth, backgroundColor: color.border.subtle }} />
+          ) : null}
+          {row}
+        </React.Fragment>
+      ))}
+    </View>
+  );
+}
+
 /** [DCR-1 NR1-03] Marketing messages toggle — the row the served consent
  *  text promises ("Account -> Marketing messages"). The switch reflects the
  *  ledger's current state; a flip is a new append-only consent row. */
@@ -78,6 +106,9 @@ function MarketingConsentRow() {
   return (
     <SettingsRow
       icon="gift"
+      // A consent state you READ and flip in place — the switch is the
+      // affordance, so the row goes plain. Chips mark destinations.
+      plain
       label="Marketing messages"
       sub={granted ? 'On — offers and promos' : 'Off — service messages only'}
       onPress={() => openPayLink(`${API_URL}/legal/marketing`)}
@@ -194,57 +225,76 @@ export function ProfileScreen() {
   return (
     <Screen bleed>
       <ScrollView contentContainerStyle={{ paddingBottom: space['3xl'] }} showsVerticalScrollIndicator={false}>
-        {/* [Flow-8] Identity masthead: the person, grounded in the brand wash. */}
-        <GradientMasthead style={{ paddingTop: insets.top + space.lg, paddingBottom: space['3xl'] + 44, paddingHorizontal: GUTTER }}>
-          <T variant="micro" tone="onBrand">PROFILE</T>
-          <T variant="title" tone="onBrand" numberOfLines={1} style={{ marginTop: 2 }}>
-            {name}
-          </T>
-          {memberSince ? (
-            <T variant="caption" tone="onBrand" style={{ marginTop: 2 }}>
-              With Swift since {memberSince} · {orders} order{orders === 1 ? '' : 's'}
-            </T>
-          ) : null}
-        </GradientMasthead>
+        {/* THE CHROME IS PAPER, NOT BRAND — read off the rendered design
+            slides. Account opened on a full-bleed maroon slab with the
+            person's name reversed out of it in white, and the avatar hanging
+            off the curved hem below. There is no such slab in the design: the
+            top of this screen is the same warm paper as the rest of it, the
+            NAME is the ink display-face line, and the avatar simply sits
+            BESIDE it. An identity banner announces the brand; this announces
+            the person, which is whose screen it is.
 
-        {/* Avatar + trust halo, overlapping the hem. The camera chip is a REAL
-            action (>=44 hit target) — it opens Personal data. */}
+            `GradientMasthead` is NOT deleted and is still exported from the kit (FG-2), but this screen was the last caller: it now has ZERO call sites app-wide and is dead code awaiting a founder decision. Logged as an FG-2 deletion candidate — not removed here. */}
         <Animated.View
           entering={FadeInDown.duration(320).reduceMotion(ReduceMotion.System)}
-          style={{ alignItems: 'center', marginTop: -64 }}
+          style={{ paddingTop: insets.top + space.lg, paddingHorizontal: GUTTER }}
         >
-          <TrustHalo size={128} stroke={5} facts={facts.map((f) => f.on)}>
-            <Pressable
-              accessibilityRole="button"
-              accessibilityLabel="Edit your photo and personal data"
-              hitSlop={12}
-              onPress={() => navigation.navigate('PersonalData')}
-            >
-              {avatar && !avatarBroken ? (
-                <Image
-                  source={{ uri: avatar }}
-                  onError={() => setAvatarBroken(true)}
-                  style={{ width: 104, height: 104, borderRadius: 52, backgroundColor: color.brand[50] }}
-                />
-              ) : (
-                <View style={{ width: 104, height: 104, borderRadius: 52, backgroundColor: color.brand[50], alignItems: 'center', justifyContent: 'center' }}>
-                  <T variant="display" tone="brand">{(name[0] ?? 'S').toUpperCase()}</T>
+          <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.lg }}>
+            {/* The camera chip is a REAL action (>=44 hit target with hitSlop)
+                — it opens Personal data. It loses its maroon fill: on paper a
+                control is white with a hairline edge, and maroon is spent on
+                the one brand moment further down. */}
+            <TrustHalo size={80} stroke={4} facts={facts.map((f) => f.on)}>
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel="Edit your photo and personal data"
+                hitSlop={12}
+                onPress={() => navigation.navigate('PersonalData')}
+              >
+                {avatar && !avatarBroken ? (
+                  <Image
+                    source={{ uri: avatar }}
+                    onError={() => setAvatarBroken(true)}
+                    style={{ width: 64, height: 64, borderRadius: radius.full, backgroundColor: color.brand[50] }}
+                  />
+                ) : (
+                  <View style={{ width: 64, height: 64, borderRadius: radius.full, backgroundColor: color.brand[50], alignItems: 'center', justifyContent: 'center' }}>
+                    <T variant="title" tone="brand">{(name[0] ?? 'S').toUpperCase()}</T>
+                  </View>
+                )}
+                <View style={{ position: 'absolute', right: -2, bottom: -2, width: 26, height: 26, borderRadius: radius.full, backgroundColor: color.surface.base, alignItems: 'center', justifyContent: 'center', borderWidth: 1, borderColor: color.border.subtle }}>
+                  <Feather name="camera" size={13} color={color.text.primary} />
                 </View>
-              )}
-              <View style={{ position: 'absolute', right: -2, bottom: -2, width: 34, height: 34, borderRadius: 17, backgroundColor: color.brand[500], alignItems: 'center', justifyContent: 'center', borderWidth: 3, borderColor: color.surface.subtle }}>
-                <Feather name="camera" size={14} color={color.white} />
-              </View>
-            </Pressable>
-          </TrustHalo>
-          <T variant="caption" tone="muted" style={{ marginTop: space.sm }}>
+              </Pressable>
+            </TrustHalo>
+            <View style={{ flex: 1 }}>
+              {/* Account's ONE display-face line — the person's name, in INK. */}
+              <T variant="title" numberOfLines={1}>
+                {name}
+              </T>
+              {memberSince ? (
+                <T variant="caption" tone="muted" numberOfLines={1} style={{ marginTop: 2 }}>
+                  With Swift since {memberSince} · {orders} order{orders === 1 ? '' : 's'}
+                </T>
+              ) : null}
+            </View>
+          </View>
+          <T variant="caption" tone="muted" style={{ marginTop: space.md }}>
             {nextFact ? `${facts.filter((f) => f.on).length} of ${facts.length} — next: ${nextFact.label.toLowerCase()}` : 'Account complete'}
           </T>
         </Animated.View>
 
         <View style={{ paddingHorizontal: GUTTER }}>
+          {/* THE CHIP MARKS A DESTINATION, NOT A LABEL. Every row here used
+              to carry the same pale square, which made the chip wallpaper and
+              flattened the whole list. Now: a row that takes you SOMEWHERE
+              keeps its chip; a row that is a fact you read (your rating), a
+              consent you flip in place, or a legal document you open gets no
+              chip at all. Fewer chips, so a chip means something. */}
+
           {/* YOUR ACCOUNT */}
           <T variant="micro" tone="muted" style={{ marginTop: space['2xl'], marginBottom: space.sm }}>YOUR ACCOUNT</T>
-          <Card>
+          <RowGroup>
             <SettingsRow icon="user" label="Personal data" onPress={() => navigation.navigate('PersonalData')} />
             <SettingsRow icon="clipboard" label="My orders" onPress={() => navigation.navigate('OrdersHistory')} />
             <SettingsRow icon="heart" label="Favourites" onPress={() => navigation.navigate('Favorites')} />
@@ -252,30 +302,37 @@ export function ProfileScreen() {
             <SettingsRow
               icon="shield"
               label="Identity verification"
+              // No status chip here on purpose: /customer/profile carries no
+              // review state for a customer's ID submission, and a chip that
+              // guessed "Pending" from a local flag would be the UI lying.
+              // Registered as a FINDING — when the server returns the
+              // submission status, it lands here and nowhere else.
               sub="Unlocks bigger orders and rides"
               onPress={() => navigation.navigate('IdentityVerification')}
             />
             <SettingsRow
               icon="star"
+              // A fact about you, not a place — the value IS the row.
+              plain
               label="Your rating"
               sub={myRating.data?.displayRating != null
                 ? `${myRating.data.displayRating.toFixed(1)} · ${myRating.data.ratingBucket}`
                 : 'No rating yet'}
               onPress={() => setRatingInfo(true)}
             />
-          </Card>
+          </RowGroup>
 
-          {/* PRIVACY */}
+          {/* PRIVACY — reference and legal, so the whole section reads plain. */}
           <T variant="micro" tone="muted" style={{ marginTop: space.xl, marginBottom: space.sm }}>PRIVACY</T>
-          <Card>
+          <RowGroup>
             <MarketingConsentRow />
-            <SettingsRow icon="file-text" label="Terms of service" onPress={() => openPayLink(`${API_URL}/legal/terms`)} />
-            <SettingsRow icon="shield" label="Privacy policy" onPress={() => openPayLink(`${API_URL}/legal/privacy`)} />
-          </Card>
+            <SettingsRow icon="file-text" plain label="Terms of service" onPress={() => openPayLink(`${API_URL}/legal/terms`)} />
+            <SettingsRow icon="shield" plain label="Privacy policy" onPress={() => openPayLink(`${API_URL}/legal/privacy`)} />
+          </RowGroup>
 
           {/* HELP */}
           <T variant="micro" tone="muted" style={{ marginTop: space.xl, marginBottom: space.sm }}>HELP</T>
-          <Card>
+          <RowGroup>
             <SettingsRow
               icon="bell"
               label="Notifications"
@@ -285,43 +342,61 @@ export function ProfileScreen() {
             <SettingsRow icon="user-plus" label="Invite friends" onPress={() => navigation.navigate('InviteFriends')} />
             <SettingsRow icon="help-circle" label="FAQ" onPress={() => navigation.navigate('Faq')} />
             <SettingsRow icon="phone" label="Contact us" onPress={() => navigation.navigate('ContactUs')} />
-          </Card>
+          </RowGroup>
 
-          {/* Role switching sits apart from support — it changes WHO you are
-              here. It was ONE MORE IDENTICAL ROW [F-263]: earning on Swift or
-              opening a business is the largest thing a person can do in this
-              app, and it read exactly like "FAQ". It gets the weight of the
-              decision it is. */}
+          {/* THE ONE BRAND MOMENT. Role switching sits apart from support — it
+              changes WHO you are here. It was ONE MORE IDENTICAL ROW [F-263]:
+              earning on Swift or opening a business is the largest thing a
+              person can do in this app, and it read exactly like "FAQ".
+
+              With the maroon slab gone from the top of the screen, maroon is
+              free to mean something again — and this is the only place on
+              Account that earns it. It is not a white card with a maroon
+              square inside it any more; the whole block IS the brand, so the
+              eye lands on it once, on a page that is otherwise ink on paper.
+              The glyph chip rides the on-brand chrome tint, not a second
+              colour. */}
           <Pressable
             onPress={() => { haptic.select(); setSwitcherOpen(true); }}
             accessibilityRole="button"
             accessibilityLabel="Switch app. Drive with Swift or sell on Swift."
-            style={{ marginTop: space.xl }}
+            style={{ marginTop: space['3xl'] }}
           >
             {({ pressed }) => (
-              <Card style={{ flexDirection: 'row', alignItems: 'center', gap: space.lg, opacity: pressed ? 0.85 : 1 }}>
-                <View style={{ width: 48, height: 48, borderRadius: radius.lg, backgroundColor: color.brand[600], alignItems: 'center', justifyContent: 'center' }}>
-                  <Feather name="refresh-ccw" size={22} color={color.white} />
+              <View
+                style={{
+                  flexDirection: 'row',
+                  alignItems: 'center',
+                  gap: space.lg,
+                  padding: space.lg,
+                  borderRadius: radius.lg,
+                  backgroundColor: pressed ? color.brand[600] : color.brand[500],
+                }}
+              >
+                <View style={{ width: 44, height: 44, borderRadius: radius.full, backgroundColor: color.surface.onBrand, alignItems: 'center', justifyContent: 'center' }}>
+                  <Feather name="refresh-ccw" size={20} color={color.white} />
                 </View>
                 <View style={{ flex: 1, gap: 2 }}>
-                  <T variant="title">Earn with Swift</T>
-                  <T variant="caption" tone="muted">
+                  <T variant="title" tone="onBrand">Earn with Swift</T>
+                  <T variant="caption" tone="onBrand">
                     Drive, deliver, or sell — switch to Swift Driver or Swift Business.
                   </T>
                 </View>
-                <Feather name="chevron-right" size={20} color={color.text.muted} />
-              </Card>
+                <Feather name="chevron-right" size={20} color={color.white} />
+              </View>
             )}
           </Pressable>
 
           {/* Quiet [F-263]: a filled pill made LOG OUT the loudest element on
               the whole screen — the one thing a person is least likely to want
               and most likely to hit by accident. It is a way out, not an
-              invitation. The confirm sheet still carries the real decision. */}
+              invitation. Now that the brand belongs to the switcher above, it
+              drops the brand tint entirely and becomes a paper control with a
+              hairline edge. The confirm sheet still carries the real decision. */}
           <PillButton
             label="Log out"
             icon="log-out"
-            variant="soft"
+            variant="outline"
             onPress={() => setConfirmLogout(true)}
             style={{ marginTop: space['2xl'] }}
           />

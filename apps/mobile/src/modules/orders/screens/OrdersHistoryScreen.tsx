@@ -1,6 +1,6 @@
 /** @jsxImportSource react */
 import React, { useEffect } from 'react';
-import { FlatList, RefreshControl, View } from 'react-native';
+import { FlatList, Pressable, RefreshControl, View } from 'react-native';
 import { useNavigation, useIsFocused } from '@react-navigation/native';
 import Animated, { FadeInDown, ReduceMotion } from 'react-native-reanimated';
 
@@ -10,14 +10,25 @@ import { useAuthStore } from '../../../stores/authStore';
 import { vendorPhoto } from '../../../lib/images';
 import {
   Photo,
-  Card, EmptyState, ErrorState, GradientMasthead, LoadingBlock, Money,
+  EmptyState, ErrorState, LoadingBlock, Money,
   Pictogram, PillButton, Screen, T,
 } from '../../../kit';
 import { TonePill } from '../../../kit/controls';
 
-// [design-100x Flow-7] The activity LEDGER: live journeys first on a sunken
-// band, then completed rows grouped under truthful date eyebrows. The
-// masthead ends in the kit's clean curve [founder veto 08-22: no toothed edges].
+// [design-100x Flow-7] The activity LEDGER, re-read off the rendered slides.
+//
+// THE CHROME IS PAPER, NOT BRAND. This screen used to open with a full-bleed
+// maroon GradientMasthead slab holding a white eyebrow and a white title.
+// There is no such slab anywhere in the design: the top of Activity is the
+// same warm paper as the rest of it, with an INK title sitting directly on it —
+// exactly the shape Home now uses. `GradientMasthead` is NOT deleted and is still exported from the kit (FG-2), but this screen was the last caller: it now has ZERO call sites app-wide and is dead code awaiting a founder decision. Logged as an FG-2 deletion candidate — not removed here.
+//
+// CONTENT SITS ON OPEN PAPER. Completed activity is not a stack of floating
+// white cards — it is a ledger: hairline-divided rows on the page ground,
+// grouped under truthful date eyebrows, with the amount in INK (money is never
+// brand). The ONE exception the design grants a card chassis is a LIVE order:
+// an in-flight journey is an interruption, not history, so it earns a bordered
+// card and the screen's maroon CTA.
 
 type PillTone = 'brand' | 'success' | 'neutral' | 'error' | 'warning' | 'info';
 const STATUS_TONE: Record<string, { label: string; tone: PillTone }> = {
@@ -60,9 +71,48 @@ function dateEyebrow(iso: string | undefined): string {
   return d.toLocaleDateString(undefined, { day: 'numeric', month: 'short' }).toUpperCase();
 }
 
+/** Time of day for a row, or null when the server sent nothing usable. A row
+ *  with no timestamp simply drops the clock — it never invents one. */
+function timeOfDay(iso: string | undefined): string | null {
+  if (!iso) return null;
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return null;
+  return d.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
+}
+
+/** WHAT WAS ORDERED — assembled from the server's own line items (the list
+ *  endpoint returns `items: [{ name, quantity, price }]`). No items on the
+ *  payload → null, and the line is omitted entirely. Never a placeholder. */
+function itemsSummary(o: any): string | null {
+  const items: any[] = Array.isArray(o?.items) ? o.items : [];
+  const named = items.filter((i) => typeof i?.name === 'string' && i.name.trim().length > 0);
+  if (named.length === 0) return null;
+  const head = named.slice(0, 2).map((i) => {
+    const q = Number(i.quantity);
+    return Number.isFinite(q) && q > 1 ? `${q}× ${String(i.name).trim()}` : String(i.name).trim();
+  });
+  const rest = named.length - head.length;
+  return rest > 0 ? `${head.join(', ')} +${rest} more` : head.join(', ');
+}
+
+/** The amount the row is allowed to show, or null. `money()` turns a missing
+ *  value into "$0", which is a lie on a ledger — so a row with no server
+ *  amount prints an em-dash instead. */
+function rowAmount(o: any, isRide: boolean): number | null {
+  const raw = isRide ? (o.taxiFareTotal ?? o.totalAmount) : (o.totalAmount ?? o.total);
+  const n = Number(raw);
+  return raw === null || raw === undefined || !Number.isFinite(n) ? null : n;
+}
+
+const isRideOrder = (o: any) => o?.orderType === 'TAXI';
+
+/** A ride has no storefront, so its identity is the class it was booked at. */
+const rideTitle = (o: any) =>
+  `Taxi${o.rideClass ? ` · ${String(o.rideClass).charAt(0)}${String(o.rideClass).slice(1).toLowerCase()}` : ''}`;
+
 type LedgerItem =
   | { kind: 'eyebrow'; id: string; label: string }
-  | { kind: 'row'; id: string; order: any; index: number };
+  | { kind: 'row'; id: string; order: any; index: number; divided: boolean };
 
 export function OrdersHistoryScreen() {
   const navigation = useNavigation<any>();
@@ -78,25 +128,34 @@ export function OrdersHistoryScreen() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isFocused]);
 
-  const masthead = (
-    <>
-      <GradientMasthead style={{ paddingTop: 76, paddingBottom: space.xl, paddingHorizontal: space['2xl'] }}>
-        <T variant="micro" tone="onBrand">ORDERS & RIDES</T>
-        <T variant="title" tone="onBrand" style={{ marginTop: 2 }}>Your activity</T>
-      </GradientMasthead>
-    </>
+  // THE PAPER HEADER — ink on the page ground, no slab, no white pill.
+  const header = (
+    <View style={{ paddingTop: space.lg, paddingBottom: space.lg }}>
+      <T variant="micro" tone="muted">ORDERS & RIDES</T>
+      <T variant="title" style={{ marginTop: 2 }}>Your activity</T>
+    </View>
   );
+  const headerBlock = <View style={{ paddingHorizontal: space['2xl'] }}>{header}</View>;
 
   if (!isAuthenticated) {
     return (
-      <Screen bleed>
-        {masthead}
+      <Screen>
+        {headerBlock}
         <EmptyState picto="orders" title="Sign in to see orders" body="Your order history lives on your account." actionLabel="Sign in" onAction={promptLogin} />
       </Screen>
     );
   }
 
-  const rows: any[] = orders.data?.pages.flatMap((p: any) => p.items) ?? [];
+  const pages: any[] = (orders.data?.pages as any[]) ?? [];
+  const rows: any[] = pages.flatMap((p: any) => p.items) ?? [];
+  // HONEST ENDS: the count on the footer is the server's own `meta.total`.
+  // When the endpoint does not say how many there are, there is no footer at
+  // all — a "load more" that cannot state what it is loading towards is a
+  // guess wearing a control's clothes.
+  const lastMeta: any = pages.length > 0 ? pages[pages.length - 1]?.meta : undefined;
+  const serverTotal: number | null =
+    typeof lastMeta?.total === 'number' && Number.isFinite(lastMeta.total) ? lastMeta.total : null;
+
   const live = rows.filter((o) => isLive(o.status));
   const done = rows.filter((o) => !isLive(o.status));
   const ledger: LedgerItem[] = [];
@@ -104,92 +163,188 @@ export function OrdersHistoryScreen() {
   let rowIndex = 0;
   for (const o of done) {
     const eyebrow = dateEyebrow(o.placedAt);
-    if (eyebrow !== lastEyebrow) {
+    const opensGroup = eyebrow !== lastEyebrow;
+    if (opensGroup) {
       ledger.push({ kind: 'eyebrow', id: `eb-${eyebrow}-${o.id}`, label: eyebrow });
       lastEyebrow = eyebrow;
     }
-    ledger.push({ kind: 'row', id: o.id, order: o, index: rowIndex });
+    // The hairline belongs BETWEEN rows of the same day — the row that opens a
+    // date group is already separated by its eyebrow.
+    ledger.push({ kind: 'row', id: o.id, order: o, index: rowIndex, divided: !opensGroup });
     rowIndex += 1;
   }
 
-  const renderOrder = (o: any, index: number, sunken: boolean) => {
+  /** The 56pt identity square. Photography carries its own radius and sits on
+   *  paper; a ride, having no storefront, gets a hairline-bordered tile. */
+  const identity = (o: any, isRide: boolean, size: number) =>
+    isRide ? (
+      <View
+        style={{
+          width: size,
+          height: size,
+          borderRadius: radius.md,
+          alignItems: 'center',
+          justifyContent: 'center',
+          backgroundColor: color.surface.base,
+          borderWidth: 1,
+          borderColor: color.border.subtle,
+        }}
+      >
+        <Pictogram name="taxi" size={26} color={color.text.primary} />
+      </View>
+    ) : (
+      <Photo
+        uri={vendorPhoto(o.vendor)}
+        label={o.vendor?.name}
+        glyph="shops"
+        transition={150}
+        style={{ width: size, height: size, borderRadius: radius.md }}
+        contentFit="cover"
+      />
+    );
+
+  /** Money in INK, or an em-dash when the server sent no amount. */
+  const amountText = (o: any, isRide: boolean) => {
+    const amount = rowAmount(o, isRide);
+    return amount === null ? (
+      <T variant="numM" tone="faint">—</T>
+    ) : (
+      <Money amount={amount} />
+    );
+  };
+
+  // ── LIVE: the one card chassis this design allows ────────────────────────
+  // An in-flight order is an interruption, not history. It gets a bordered
+  // card, its live status pill, and the screen's single maroon CTA.
+  const renderLive = (o: any, index: number) => {
     const st = STATUS_TONE[o.status] ?? { label: o.status, tone: 'neutral' as PillTone };
-    const active = isLive(o.status);
-    const isRide = o.orderType === 'TAXI';
+    const isRide = isRideOrder(o);
+    const sub = isRide && (o.pickupAddress || o.deliveryAddress)
+      ? `${o.pickupAddress ?? 'Pickup'} → ${o.deliveryAddress ?? 'Drop-off'}`
+      : itemsSummary(o);
     const inner = (
-      <Card style={{ padding: space.md, ...(sunken ? {} : {}) }}>
+      <View
+        style={{
+          backgroundColor: color.surface.base,
+          borderRadius: radius.lg,
+          borderWidth: 1,
+          borderColor: color.border.subtle,
+          padding: space.lg,
+          gap: space.md,
+        }}
+      >
         <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.md }}>
-          {isRide ? (
-            // A ride has no storefront — a car tile is its identity.
-            <View style={{ width: 64, height: 64, borderRadius: radius.md, alignItems: 'center', justifyContent: 'center', backgroundColor: color.brand[50] }}>
-              <Pictogram name="taxi" size={32} color={color.brand[600]} />
-            </View>
-          ) : (
-            <Photo
-              uri={vendorPhoto(o.vendor)}
-              label={o.vendor?.name}
-              glyph="shops"
-              transition={150}
-              style={{ width: 64, height: 64, borderRadius: radius.md }}
-              contentFit="cover"
-            />
-          )}
+          {identity(o, isRide, 56)}
           <View style={{ flex: 1, gap: 3 }}>
-            <T variant="body" weight="semibold" numberOfLines={1}>
-              {isRide
-                ? `Taxi${o.rideClass ? ` · ${String(o.rideClass).charAt(0)}${String(o.rideClass).slice(1).toLowerCase()}` : ''}`
-                : o.vendor?.name ?? 'Order'}
+            <T variant="heading" numberOfLines={1}>
+              {isRide ? rideTitle(o) : o.vendor?.name ?? 'Order'}
             </T>
-            <T variant="caption" tone="muted" numberOfLines={1}>
-              {isRide && (o.pickupAddress || o.deliveryAddress)
-                ? `${o.pickupAddress ?? 'Pickup'} → ${o.deliveryAddress ?? 'Drop-off'}`
-                : `#${o.orderNumber} · ${o.placedAt ? new Date(o.placedAt).toLocaleDateString() : ''}`}
-            </T>
-            <Money amount={isRide ? (o.taxiFareTotal ?? o.totalAmount) : (o.totalAmount ?? o.total)} tone="brand" />
+            {sub ? (
+              <T variant="body" tone="muted" numberOfLines={1}>
+                {sub}
+              </T>
+            ) : null}
           </View>
+          {amountText(o, isRide)}
+        </View>
+        <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.sm }}>
           <TonePill label={st.label} tone={st.tone} />
+          {o.orderNumber ? (
+            <T variant="label" tone="muted" numberOfLines={1}>
+              #{o.orderNumber}
+            </T>
+          ) : null}
         </View>
-        <View style={{ flexDirection: 'row', gap: space.md, marginTop: space.md }}>
-          {active ? (
-            <PillButton
-              label={isRide ? 'Track ride' : 'Track order'}
-              size="md"
-              onPress={() => navigation.navigate(isRide ? 'Taxi' : 'Delivery', isRide ? undefined : { orderId: o.id })}
-              style={{ flex: 1 }}
-            />
-          ) : isRide ? (
-            // No storefront to reorder from — rebook the same trip instead.
-            <PillButton
-              label="Book again"
-              variant="soft"
-              size="md"
-              onPress={() => navigation.navigate('Taxi')}
-              style={{ flex: 1 }}
-            />
-          ) : (
-            <>
+        <PillButton
+          label={isRide ? 'Track ride' : 'Track order'}
+          size="md"
+          onPress={() => navigation.navigate(isRide ? 'Taxi' : 'Delivery', isRide ? undefined : { orderId: o.id })}
+        />
+      </View>
+    );
+    // Same stagger gate as the ledger below — a queue is quiet, not a parade.
+    return index < 6 ? (
+      <Animated.View entering={FadeInDown.duration(280).delay(index * 40).reduceMotion(ReduceMotion.System)}>
+        {inner}
+      </Animated.View>
+    ) : inner;
+  };
+
+  // ── HISTORY: open paper, hairline-divided ────────────────────────────────
+  const renderHistory = (o: any, index: number, divided: boolean) => {
+    const st = STATUS_TONE[o.status] ?? { label: o.status, tone: 'neutral' as PillTone };
+    const isRide = isRideOrder(o);
+    const sub = isRide && (o.pickupAddress || o.deliveryAddress)
+      ? `${o.pickupAddress ?? 'Pickup'} → ${o.deliveryAddress ?? 'Drop-off'}`
+      : itemsSummary(o);
+    // Status · time · order number — every part dropped when the server did
+    // not send it, so the line never carries an invented value.
+    const meta = [st.label, timeOfDay(o.placedAt), o.orderNumber ? `#${o.orderNumber}` : null]
+      .filter(Boolean)
+      .join(' · ');
+    const inner = (
+      <View
+        style={{
+          flexDirection: 'row',
+          gap: space.md,
+          paddingVertical: space.lg,
+          borderTopWidth: divided ? 1 : 0,
+          borderTopColor: color.border.subtle,
+        }}
+      >
+        {identity(o, isRide, 56)}
+        <View style={{ flex: 1, gap: 3 }}>
+          <View style={{ flexDirection: 'row', alignItems: 'flex-start', gap: space.md }}>
+            <View style={{ flex: 1, gap: 3 }}>
+              <T variant="label" tone="muted" numberOfLines={1}>
+                {meta}
+              </T>
+              <T variant="heading" numberOfLines={1}>
+                {isRide ? rideTitle(o) : o.vendor?.name ?? 'Order'}
+              </T>
+              {sub ? (
+                <T variant="body" tone="muted" numberOfLines={1}>
+                  {sub}
+                </T>
+              ) : null}
+            </View>
+            {amountText(o, isRide)}
+          </View>
+          {/* Actions stay on paper: hairline-bordered pills, never maroon —
+              brand is reserved for the live card's one CTA. */}
+          <View style={{ flexDirection: 'row', gap: space.sm, marginTop: space.sm }}>
+            {isRide ? (
+              // No storefront to reorder from — rebook the same trip instead.
               <PillButton
-                label="Reorder"
+                label="Book again"
+                variant="outline"
                 size="md"
-                loading={reorder.isPending && reorder.variables === o.id}
-                onPress={() =>
-                  reorder.mutate(o.id, {
-                    onSuccess: () => navigation.navigate('Tabs', { screen: 'Cart' }),
-                  })
-                }
-                style={{ flex: 1 }}
+                onPress={() => navigation.navigate('Taxi')}
               />
-              <PillButton
-                label="Details"
-                variant="soft"
-                size="md"
-                onPress={() => navigation.navigate('Delivery', { orderId: o.id })}
-                style={{ flex: 1 }}
-              />
-            </>
-          )}
+            ) : (
+              <>
+                <PillButton
+                  label="Reorder"
+                  variant="outline"
+                  size="md"
+                  loading={reorder.isPending && reorder.variables === o.id}
+                  onPress={() =>
+                    reorder.mutate(o.id, {
+                      onSuccess: () => navigation.navigate('Tabs', { screen: 'Cart' }),
+                    })
+                  }
+                />
+                <PillButton
+                  label="Details"
+                  variant="outline"
+                  size="md"
+                  onPress={() => navigation.navigate('Delivery', { orderId: o.id })}
+                />
+              </>
+            )}
+          </View>
         </View>
-      </Card>
+      </View>
     );
     // Stagger only the first six rows — a ledger is quiet, not a parade.
     return index < 6 ? (
@@ -200,20 +355,20 @@ export function OrdersHistoryScreen() {
   };
 
   return (
-    <Screen bleed>
+    <Screen>
       {orders.isLoading ? (
         <>
-          {masthead}
+          {headerBlock}
           <LoadingBlock />
         </>
       ) : orders.isError ? (
         <>
-          {masthead}
+          {headerBlock}
           <ErrorState onRetry={() => orders.refetch()} />
         </>
       ) : rows.length === 0 ? (
         <>
-          {masthead}
+          {headerBlock}
           <EmptyState
             picto="orders"
             title="No activity yet"
@@ -227,21 +382,20 @@ export function OrdersHistoryScreen() {
           data={ledger}
           keyExtractor={(it) => it.id}
           ListHeaderComponent={
-            <View style={{ marginHorizontal: -space['2xl'] }}>
-              {masthead}
+            <View>
+              {header}
               {live.length > 0 ? (
-                <View style={{ backgroundColor: color.surface.sunken, paddingHorizontal: space['2xl'], paddingTop: space.lg, paddingBottom: space.md, gap: space.md }}>
+                <View style={{ gap: space.md, paddingBottom: space.sm }}>
                   <T variant="micro" tone="muted">IN PROGRESS</T>
                   {live.map((o, i) => (
-                    <View key={o.id}>{renderOrder(o, i, true)}</View>
+                    <View key={o.id}>{renderLive(o, i)}</View>
                   ))}
                 </View>
               ) : null}
-              {ledger.length > 0 ? <View style={{ height: space.md }} /> : null}
             </View>
           }
           refreshControl={<RefreshControl refreshing={orders.isRefetching} onRefresh={() => orders.refetch()} tintColor={color.brand[500]} />}
-          contentContainerStyle={{ paddingHorizontal: space['2xl'], gap: space.md, paddingBottom: space['3xl'] }}
+          contentContainerStyle={{ paddingHorizontal: space['2xl'], paddingBottom: space['3xl'] }}
           onEndReachedThreshold={0.5}
           onEndReached={() => {
             if (orders.hasNextPage && !orders.isFetchingNextPage) orders.fetchNextPage();
@@ -251,15 +405,31 @@ export function OrdersHistoryScreen() {
               <T variant="caption" tone="muted" center style={{ paddingVertical: space.lg }}>
                 Loading more…
               </T>
+            ) : orders.hasNextPage && serverTotal !== null ? (
+              <Pressable
+                onPress={() => orders.fetchNextPage()}
+                accessibilityRole="button"
+                accessibilityLabel={`Show more. ${rows.length} of ${serverTotal} shown`}
+                style={{ paddingVertical: space.lg, alignItems: 'center' }}
+              >
+                {({ pressed }) => (
+                  <View style={{ alignItems: 'center', gap: 2, opacity: pressed ? 0.6 : 1 }}>
+                    <T variant="label" weight="semibold">Show more</T>
+                    <T variant="caption" tone="muted">
+                      {rows.length} of {serverTotal} shown
+                    </T>
+                  </View>
+                )}
+              </Pressable>
             ) : null
           }
           renderItem={({ item }) =>
             item.kind === 'eyebrow' ? (
-              <T variant="micro" tone="muted" style={{ marginTop: space.sm }}>
+              <T variant="micro" tone="muted" style={{ marginTop: space.xl, marginBottom: space.sm }}>
                 {item.label}
               </T>
             ) : (
-              renderOrder(item.order, item.index + live.length, false)
+              renderHistory(item.order, item.index + live.length, item.divided)
             )
           }
         />

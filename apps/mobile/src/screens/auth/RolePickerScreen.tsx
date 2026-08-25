@@ -3,26 +3,29 @@ import React from 'react';
 import { Pressable, ScrollView, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Feather } from '@expo/vector-icons';
-import { color, radius, space, withAlpha } from '@swift/ui';
+import { color, radius, space } from '@swift/ui';
 import { useAuthStore } from '../../stores/authStore';
 import { useMoverPreview } from '../../stores/moverPreview';
 import { useVendorPreview } from '../../stores/vendorPreview';
 import { DEFAULT_COUNTRY } from '../../lib/markets';
 import { SwiftMark } from '../../components/SwiftLogo';
-import { Card, GradientMasthead, Pictogram, Screen, T, type PictogramName } from '../../kit';
-import { VERTICAL_TINT } from '../../kit/vertical-tint';
+import { Pictogram, Screen, T, type PictogramName } from '../../kit';
 import { PressableScale } from '../../components/ui';
 import { haptic } from '../../lib/haptics';
 
 // FIRST OPEN [first-open spec 2.1]: one screen, the TRIO, zero carousel —
-// the same three cards, pictograms and copy family as the in-app switcher
+// the same three options, pictograms and copy family as the in-app switcher
 // (one binary presenting as three apps). This screen exists ONLY for people
 // the server doesn't know yet; "Already have an account? Sign in" routes by
 // the account and skips the question forever (SO-4). Driver vehicle kind is
 // chosen inside the driver application, not here.
-// `tint` is the vertical's own identity colour [F-263 ramp]: the flagship keeps
-// the house red, the driver takes the road's amber, business takes the shops
-// plum. Three cards that look like three services, not three list rows.
+//
+// `tint` is the vertical's own identity colour [F-263 ramp] and is RETAINED
+// here for the surfaces that still paint it — this screen no longer does.
+// The 100× pass is explicit that the entry surface gets ONE accent, not three:
+// giving each option its own hue made the door vibrate and made "choose a
+// Swift" read as "choose a colour". The flagship alone wears the brand fill,
+// exactly as the services grid on Home now does.
 const TRIO: {
   intent: 'customer' | 'mover' | 'vendor';
   pictogram: PictogramName;
@@ -57,7 +60,10 @@ const TRIO: {
   },
 ];
 
-/** A funnel row inside the "just looking" card: icon, label, chevron. */
+/** A funnel row in the "just looking" list: glyph, label, chevron. Open paper,
+ *  hairline divider — the card chassis it used to sit in is gone, and so is the
+ *  filled brand circle around the glyph. Maroon is reserved for the flagship
+ *  and the primary action; a preview link is neither. */
 function QuietRow({
   icon,
   label,
@@ -78,13 +84,12 @@ function QuietRow({
       testID={testID}
       onPress={onPress}
       style={{
-        // 44 is the floor, not the look: the row sits at 52 for the card's
+        // 44 is the floor, not the look: the row sits at 56 for the list's
         // rhythm and never below the touch-target minimum.
         minHeight: 44,
-        height: 52,
+        height: 56,
         maxWidth: '100%',
         justifyContent: 'center',
-        paddingHorizontal: space.lg,
         borderTopWidth: first ? 0 : 1,
         borderTopColor: color.border.subtle,
       }}
@@ -94,18 +99,7 @@ function QuietRow({
     >
       {({ pressed }) => (
         <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.md, opacity: pressed ? 0.6 : 1 }}>
-          <View
-            style={{
-              width: 30,
-              height: 30,
-              borderRadius: 15,
-              alignItems: 'center',
-              justifyContent: 'center',
-              backgroundColor: color.brand[50],
-            }}
-          >
-            <Feather name={icon} size={15} color={color.brand[600]} />
-          </View>
+          <Feather name={icon} size={18} color={color.text.primary} />
           <T variant="label" weight="semibold" style={{ flex: 1, flexShrink: 1 }}>
             {label}
           </T>
@@ -142,70 +136,102 @@ export function RolePickerScreen() {
         contentContainerStyle={{ flexGrow: 1, paddingBottom: space['2xl'] + insets.bottom }}
         showsVerticalScrollIndicator={false}
       >
-        {/* FIRST IMPRESSION: this screen used to open on plain white with a
-            small mark in the corner, which read as a settings page rather than
-            as Swift. It now opens the way every other Swift surface does — the
-            brand wash under the 28dp curve — so the app introduces itself
-            before it asks a question. Same mark, reversed for the red. */}
-        <GradientMasthead
+        {/* THE CHROME IS PAPER, NOT BRAND. This screen used to open on a
+            full-bleed maroon slab with a reversed mark and white copy. There is
+            no such slab anywhere in the design: the top of a screen is the same
+            warm paper as the rest of it. So the door is now the mark in its own
+            colours, one INK display-face line, and a muted sub-line — the same
+            shape Home's header took when it stopped reaching for the masthead.
+            `GradientMasthead` is NOT deleted and is still exported from the kit (FG-2), but this screen was the last caller: it now has ZERO call sites app-wide and is dead code awaiting a founder decision. Logged as an FG-2 deletion candidate — not removed here. */}
+        <View
           style={{
-            paddingTop: insets.top + space['2xl'],
+            paddingTop: insets.top + space['3xl'],
             paddingHorizontal: space['2xl'],
-            paddingBottom: space['3xl'],
+            paddingBottom: space['2xl'],
           }}
         >
-          <SwiftMark size={48} tint={color.white} accent={withAlpha(color.white, 0.7)} />
-          <T variant="title" tone="onBrand" style={{ marginTop: space.xl }}>
+          <SwiftMark size={44} />
+          <T variant="display" style={{ marginTop: space.xl }}>
             Welcome to Swift
           </T>
-          <T variant="body" tone="onBrand" style={{ marginTop: space.sm, opacity: 0.92 }}>
+          <T variant="body" tone="muted" style={{ marginTop: space.sm }}>
             One account — pick where you&apos;re headed.
           </T>
-        </GradientMasthead>
+        </View>
 
         <View style={{ paddingHorizontal: space['2xl'] }}>
-          <View style={{ gap: space.lg, marginTop: space['2xl'] }}>
-            {TRIO.map((o) => {
-              const tint = VERTICAL_TINT[o.tint] ?? { bg: color.brand[50], ink: color.brand[600] };
+          {/* THE TRIO, on open paper. Three maroon cards read as three adverts
+              for the same brand; hairline-separated rows read as three doors.
+              The list is delimited top and bottom by a rule, and nothing here
+              is wrapped in a card — a card chassis is earned only by a live
+              interruption with a countdown, and a question is not that. */}
+          <View
+            style={{
+              borderTopWidth: 1,
+              borderBottomWidth: 1,
+              borderColor: color.border.subtle,
+            }}
+          >
+            {TRIO.map((o, i) => {
+              // ONE BRAND MOMENT. The flagship — plain "Swift", the customer
+              // app most people are here for — wears the brand fill and
+              // reverses its pictogram out of it. Driver and Business sit on
+              // the same quiet ground with ink pictograms, so the screen has a
+              // first answer instead of three competing ones.
+              const flagship = o.intent === 'customer';
               return (
-                <PressableScale
+                <View
                   key={o.intent}
-                  testID={`role-picker-${o.intent}`}
-                  onPress={() => pick(o.intent)}
-                  accessibilityRole="button"
-                  accessibilityLabel={`${o.title}. ${o.sub}`}
-                  accessibilityHint={o.hint}
+                  style={{ borderTopWidth: i === 0 ? 0 : 1, borderTopColor: color.border.subtle }}
                 >
-                  <Card style={{ flexDirection: 'row', alignItems: 'center', gap: space.lg }}>
+                  <PressableScale
+                    testID={`role-picker-${o.intent}`}
+                    onPress={() => pick(o.intent)}
+                    accessibilityRole="button"
+                    accessibilityLabel={`${o.title}. ${o.sub}`}
+                    accessibilityHint={o.hint}
+                    style={{
+                      flexDirection: 'row',
+                      alignItems: 'center',
+                      gap: space.lg,
+                      minHeight: 44,
+                      paddingVertical: space.xl,
+                    }}
+                  >
                     <View
                       style={{
-                        width: 56,
-                        height: 56,
-                        borderRadius: radius.md,
+                        width: 52,
+                        height: 52,
+                        borderRadius: radius.lg,
                         alignItems: 'center',
                         justifyContent: 'center',
-                        backgroundColor: tint.bg,
+                        backgroundColor: flagship ? color.brand[500] : color.surface.sunken,
                       }}
                     >
-                      <Pictogram name={o.pictogram} size={30} color={tint.ink} />
+                      <Pictogram
+                        name={o.pictogram}
+                        size={28}
+                        color={flagship ? color.white : color.text.primary}
+                      />
                     </View>
                     <View style={{ flex: 1 }}>
-                      <T variant="body" weight="semibold">
-                        {o.title}
-                      </T>
-                      <T variant="caption" tone="muted" style={{ marginTop: 2 }}>
+                      <T variant="heading">{o.title}</T>
+                      <T variant="caption" tone="muted" style={{ marginTop: space.xs / 2 }}>
                         {o.sub}
                       </T>
                     </View>
                     <Feather name="chevron-right" size={20} color={color.text.muted} />
-                  </Card>
-                </PressableScale>
+                  </PressableScale>
+                </View>
               );
             })}
           </View>
 
           {/* The account answers: sign in first and the trio question is never
-              asked — the server's roles + last-used role route (SO-4). */}
+              asked — the server's roles + last-used role route (SO-4). The
+              action reads in INK, not maroon: the flagship already spent this
+              screen's one brand moment, and a second one would make the two
+              compete at the door. */}
           <Pressable
             testID="role-picker-sign-in"
             onPress={() => {
@@ -232,7 +258,10 @@ export function RolePickerScreen() {
                 tone="muted"
                 style={{ flexShrink: 1, textAlign: 'center', opacity: pressed ? 0.6 : 1 }}
               >
-                Already have an account? <T variant="label" style={{ color: color.brand[600] }}>Sign in</T>
+                Already have an account?{' '}
+                <T variant="label" weight="semibold">
+                  Sign in
+                </T>
               </T>
             )}
           </Pressable>
@@ -240,17 +269,17 @@ export function RolePickerScreen() {
           {/* Growth funnel: real dashboards with sample data (R3/R4) and the
               advertiser surface. They were three unlabelled links floating in
               the dead space under the fold, reading like debug shortcuts; a
-              titled card keeps them quiet AND deliberate. Never co-equal with
-              the trio. */}
+              titled, hairline-ruled list keeps them quiet AND deliberate.
+              Never co-equal with the trio. */}
           <T
             variant="micro"
             tone="muted"
             weight="semibold"
-            style={{ marginTop: space['3xl'], marginBottom: space.sm, marginLeft: space.xs, letterSpacing: 0.8 }}
+            style={{ marginTop: space['3xl'], marginBottom: space.sm, letterSpacing: 0.8 }}
           >
             JUST LOOKING?
           </T>
-          <Card pad={false}>
+          <View style={{ borderTopWidth: 1, borderBottomWidth: 1, borderColor: color.border.subtle }}>
             <QuietRow
               first
               icon="eye"
@@ -280,7 +309,7 @@ export function RolePickerScreen() {
               testID="role-picker-advertiser"
               onPress={() => setIntent('advertiser')}
             />
-          </Card>
+          </View>
         </View>
       </ScrollView>
     </Screen>

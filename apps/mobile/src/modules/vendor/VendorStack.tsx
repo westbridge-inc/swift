@@ -1,7 +1,8 @@
 /** @jsxImportSource react */
 import React, { useState, useEffect } from 'react';
 import { useQueryClient, useMutation } from '@tanstack/react-query';
-import { Pressable, RefreshControl, ScrollView, TextInput, View } from 'react-native';
+import { Pressable, RefreshControl, ScrollView, StatusBar, TextInput, View } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
 import { useNavigation } from '@react-navigation/native';
@@ -53,6 +54,7 @@ import { VendorMyQrScreen } from './screens/VendorMyQrScreen';
 import { DocumentChecklist } from '../../components/onboarding/DocumentChecklist';
 import { PricingCard } from '../../components/onboarding/PricingCard';
 import { MmgPayLinkCard } from '../../components/MmgPayLinkCard';
+import { CopyButton } from '../../components/billing/BillingSurfaces';
 import { StandingCard } from '../../components/StandingCard';
 import { API_URL, vendorApi } from '../../services/api';
 import { disconnectSocket } from '../../services/socket';
@@ -1105,6 +1107,8 @@ const PAY_BAND_INK: Record<PayBandTone, string> = {
 
 function VendorSwiftNumberScreen({ navigation }: any) {
   const q = useVendorSubscription();
+  const insets = useSafeAreaInsets();
+  const [aboutOpen, setAboutOpen] = useState(false);
   const sub: any = q.data;
   const swiftNumber = String(sub?.sanFormatted ?? sub?.san ?? '');
   const steps: string[] = Array.isArray(sub?.payCashSteps) ? sub.payCashSteps : [];
@@ -1112,9 +1116,55 @@ function VendorSwiftNumberScreen({ navigation }: any) {
   const bandInk = PAY_BAND_INK[state.tone];
   const activationCopy = typeof sub?.activationCopy === 'string' ? sub.activationCopy : '';
 
+  // The two standing facts about the fee. Declared once and rendered in two
+  // places (the header's (i) sheet and the page footer) so the sheet can never
+  // drift from the fine print it explains.
+  const FEE_ONLY_CHARGE = 'The weekly fee is Swift’s only charge — you keep everything you earn.';
+  const HOLD_NOTE = 'Confirmation clears a billing hold. Any separate verification hold remains until its own issue is fixed.';
+
   return (
-    <Screen>
-      <SubHeader title="Weekly fee" navigation={navigation} />
+    // `bleed` so the maroon runs under the status bar. A paper strip above a
+    // maroon bar reads as a broken banner, not as chrome.
+    <Screen bleed>
+      {/* THE ONE MAROON HEADER. Every other customer/vendor surface is paper —
+          this screen is the deliberate exception: the fee is Swift's own
+          business with the vendor, so Swift's colour signs it. Built inline
+          rather than via SubHeader, which paints ink-on-paper only and has no
+          tone/right-glyph props; it is shared by four other screens, so
+          widening it is not this file's change to make. */}
+      <StatusBar barStyle="light-content" />
+      <View style={{ backgroundColor: color.brand[500], paddingTop: insets.top }}>
+        <View style={{ height: 56, flexDirection: 'row', alignItems: 'center', paddingHorizontal: GUTTER }}>
+          <Pressable onPress={() => navigation.goBack()} hitSlop={8} accessibilityRole="button" accessibilityLabel="Back">
+            {({ pressed }) => (
+              <View style={{ width: 44, height: 44, alignItems: 'flex-start', justifyContent: 'center', opacity: pressed ? 0.6 : 1 }}>
+                <Feather name="chevron-left" size={24} color={color.text.onBrand} />
+              </View>
+            )}
+          </Pressable>
+          <T
+            variant="heading"
+            tone="onBrand"
+            numberOfLines={1}
+            accessibilityRole="header"
+            style={{ flex: 1, textAlign: 'center', paddingHorizontal: space.md }}
+          >
+            Weekly fee
+          </T>
+          <Pressable
+            onPress={() => setAboutOpen(true)}
+            hitSlop={8}
+            accessibilityRole="button"
+            accessibilityLabel="About the weekly fee"
+          >
+            {({ pressed }) => (
+              <View style={{ width: 44, height: 44, alignItems: 'flex-end', justifyContent: 'center', opacity: pressed ? 0.6 : 1 }}>
+                <Feather name="info" size={20} color={color.text.onBrand} />
+              </View>
+            )}
+          </Pressable>
+        </View>
+      </View>
       {q.isLoading ? (
         <LoadingBlock />
       ) : q.isError && !sub ? (
@@ -1130,29 +1180,39 @@ function VendorSwiftNumberScreen({ navigation }: any) {
               Showing the last loaded billing details — refresh did not complete.
             </T>
           ) : null}
-          {/* THE AMOUNT. The most readable thing we can put on a cheap screen in
-              sunlight — near-black ink on paper, not brand, not a tint card. A
-              vendor checking whether they owe anything should need one glance. */}
-          <View style={{ paddingTop: space.lg, paddingBottom: space.md }}>
+          {/* THE AMOUNT, AS HERO. The most readable thing we can put on a cheap
+              screen in sunlight — near-black ink on paper, not brand, not a
+              tint card. A vendor checking whether they owe anything should need
+              one glance, so nothing else on this screen competes with it. */}
+          <View style={{ paddingTop: space['2xl'], paddingBottom: space.lg }}>
             <T variant="micro" tone="muted">
               {state.eyebrow}
             </T>
-            <T variant="displayXl" style={{ marginTop: space.xs }}>
+            <T variant="displayXl" style={{ marginTop: space.sm }}>
               {money(state.amountGyd)}
             </T>
             {state.covers ? (
-              <T variant="caption" tone="muted" style={{ marginTop: space.xs }}>
+              <T variant="caption" tone="muted" style={{ marginTop: space.sm }}>
                 {state.covers}
               </T>
             ) : null}
           </View>
 
-          {/* THE BAND. One dot, one coloured word, one line of copy. The four
-              states differ only here — the rest of the screen never moves. */}
-          <View style={{ marginBottom: space.lg }}>
+          {/* THE BAND, in a soft neutral box — surface.sunken, NOT a brand tint:
+              the box is a shelf for the state, and colour on this screen is
+              spent only on the dot and the one word beside it. The four states
+              differ only here; the rest of the screen never moves. */}
+          <View
+            style={{
+              backgroundColor: color.surface.sunken,
+              borderRadius: radius.lg,
+              padding: space.lg,
+              marginBottom: space.lg,
+            }}
+          >
             <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.sm }}>
               <View style={{ width: 8, height: 8, borderRadius: radius.full, backgroundColor: bandInk }} />
-              <T variant="label" weight="semibold" style={{ color: bandInk }}>
+              <T variant="body" weight="semibold" style={{ flex: 1, color: bandInk }}>
                 {state.title}
               </T>
             </View>
@@ -1168,56 +1228,92 @@ function VendorSwiftNumberScreen({ navigation }: any) {
             ) : null}
           </View>
 
-          {/* DOOR 2 — the account number. Door 1 (card) is not built: it needs
-              WiPay, and WiPay's GYD support is still an open question
-              (PAY-1 BLOCKER-1). Showing a dead "Pay by card" button would be
-              the screen lying about a door that does not open, so there is
-              exactly one door here until that answer arrives. */}
-          <Card style={{ alignItems: 'center', padding: space.xl, marginBottom: space.md }}>
-            <IconChip icon="hash" size={56} />
-            <T variant="micro" tone="muted" style={{ marginTop: space.lg }}>
-              ACCOUNT NUMBER
-            </T>
-            <T variant="displayXl" center selectable style={{ marginTop: space.sm }}>
+          {/* DOOR 2 — the account number, and the steps that use it, in ONE
+              card: they are a single act.
+
+              Door 1 (card) is deliberately absent. It needs WiPay, and whether
+              WiPay settles GYD at all is still an open question (PAY-1
+              BLOCKER-1). The design slide shows a "Pay by card" button; adding
+              it before that answer arrives would be the screen lying about a
+              door that does not open, so there is exactly one door here.
+
+              Copy-number IS here, and it should have been from the start — I
+              told the builder it needed a native module the app doesn't ship,
+              and that was wrong. `lib/clipboard.ts` already wraps the copy in a
+              guarded require and REPORTS whether it happened, and the same
+              button has been live on the rider's Swift Number screen for a
+              while. Same number, same rail, so the vendor had strictly less. It
+              is the shared component, not a second copy of it.
+
+              The QR is still absent, for a narrower reason than I first gave:
+              react-native-svg is a dependency and GET /vendor/qr does return an
+              SVG — but that is the STOREFRONT code customers scan to order, not
+              a payment code. Rendering it here would put the wrong QR on a money
+              screen. It needs a SAN payload endpoint, and MMG-Q1 (can an agent
+              terminal even scan one?) is still unanswered. */}
+          <Card style={{ marginBottom: space.lg, borderWidth: 1, borderColor: color.border.subtle }}>
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.md }}>
+              <IconChip icon="hash" size={44} />
+              <View style={{ flex: 1 }}>
+                <T variant="heading">Pay with account number</T>
+                <T variant="caption" tone="muted" style={{ marginTop: space.xs }}>
+                  MMG app, or cash at any agent
+                </T>
+              </View>
+            </View>
+
+            <T variant="displayXl" selectable style={{ marginTop: space.lg }}>
               {swiftNumber || '—'}
             </T>
-            <T variant="caption" tone="muted" center style={{ marginTop: space.sm }}>
-              MMG app, or cash at any agent. Give this to the agent — it never changes.
+            <T variant="caption" tone="muted" style={{ marginTop: space.xs }}>
+              Give this to the agent. It never changes.
             </T>
-          </Card>
 
-          <Card style={{ marginBottom: space.lg }}>
-            <T variant="heading">How to pay</T>
-            {steps.length > 0 ? (
-              <View style={{ marginTop: space.sm }}>
-                {steps.map((step, index) => (
-                  <View key={step} style={{ minHeight: space['5xl'], flexDirection: 'row', alignItems: 'center', gap: space.md }}>
-                    <View
-                      style={{
-                        width: space['3xl'],
-                        height: space['3xl'],
-                        borderRadius: radius.full,
-                        alignItems: 'center',
-                        justifyContent: 'center',
-                        backgroundColor: color.brand[50],
-                      }}
-                    >
-                      <T variant="label" weight="bold" tone="brand">
-                        {index + 1}
+            {/* Copies the RAW digits — an agent keys digits into a terminal. */}
+            {sub?.san ? (
+              <View style={{ marginTop: space.lg, alignSelf: 'flex-start' }}>
+                <CopyButton san={String(sub.san)} />
+              </View>
+            ) : null}
+
+            <View style={{ marginTop: space.lg, paddingTop: space.lg, borderTopWidth: 1, borderTopColor: color.border.subtle }}>
+              <T variant="heading">How to pay</T>
+              {steps.length > 0 ? (
+                <View style={{ marginTop: space.sm }}>
+                  {steps.map((step, index) => (
+                    <View key={step} style={{ minHeight: space['5xl'], flexDirection: 'row', alignItems: 'center', gap: space.md }}>
+                      <View
+                        style={{
+                          width: space['3xl'],
+                          height: space['3xl'],
+                          borderRadius: radius.full,
+                          alignItems: 'center',
+                          justifyContent: 'center',
+                          backgroundColor: color.brand[50],
+                        }}
+                      >
+                        <T variant="label" weight="bold" tone="brand">
+                          {index + 1}
+                        </T>
+                      </View>
+                      <T variant="label" style={{ flex: 1 }}>
+                        {step}
                       </T>
                     </View>
-                    <T variant="label" style={{ flex: 1 }}>
-                      {step}
-                    </T>
-                  </View>
-                ))}
-              </View>
-            ) : (
-              <T variant="label" tone="muted" style={{ marginTop: space.sm }}>
-                Payment steps were not returned. Show your Swift Number to an MMG agent and confirm the amount before paying.
-              </T>
-            )}
+                  ))}
+                </View>
+              ) : (
+                <T variant="label" tone="muted" style={{ marginTop: space.sm }}>
+                  Payment steps were not returned. Show your Swift Number to an MMG agent and confirm the amount before paying.
+                </T>
+              )}
+            </View>
           </Card>
+
+          {/* The design also shows a quiet "Receipts" link under this card. The
+              vendor stack registers no receipts/billing-history route and the
+              subscription payload carries no payment history, so the link is
+              omitted rather than pointed at nothing. */}
 
           {/* The waiting state, said plainly. A vendor who has just handed cash
               to an agent is standing there wondering what to do next, and the
@@ -1227,14 +1323,35 @@ function VendorSwiftNumberScreen({ navigation }: any) {
           </T>
 
           <T variant="caption" tone="muted" center>
-            The weekly fee is Swift’s only charge — you keep everything you earn.
+            {FEE_ONLY_CHARGE}
           </T>
 
           <T variant="caption" tone="faint" center style={{ marginTop: space.sm }}>
-            Confirmation clears a billing hold. Any separate verification hold remains until its own issue is fixed.
+            {HOLD_NOTE}
           </T>
         </ScrollView>
       )}
+
+      {/* What the (i) in the header opens. Same two facts as the footer, said
+          once in the place a vendor taps when they are asking "what IS this?". */}
+      <PopupCard visible={aboutOpen} onClose={() => setAboutOpen(false)}>
+        <IconChip icon="info" size={56} />
+        <PopupTitle variant="title" center style={{ marginTop: space.lg }}>
+          About the weekly fee
+        </PopupTitle>
+        <T variant="body" tone="muted" center style={{ marginTop: space.sm }}>
+          {FEE_ONLY_CHARGE}
+        </T>
+        <T variant="caption" tone="muted" center style={{ marginTop: space.sm }}>
+          {HOLD_NOTE}
+        </T>
+        <PillButton
+          label="Got it"
+          variant="soft"
+          style={{ alignSelf: 'stretch', marginTop: space['2xl'] }}
+          onPress={() => setAboutOpen(false)}
+        />
+      </PopupCard>
     </Screen>
   );
 }
