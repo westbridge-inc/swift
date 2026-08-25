@@ -121,12 +121,21 @@ export function publishMoverLocation(
 }
 
 /** Explicit GO-only background upgrade. Restored online sessions never call
- * this function; they silently use an existing grant or foreground fallback. */
-export async function requestMoverBackgroundPermission(): Promise<boolean> {
+ * this function; they silently use an existing grant or foreground fallback.
+ *
+ * `disclose` shows the Play-mandated prominent disclosure and resolves to what
+ * the person chose. It is a parameter rather than an import because this module
+ * is service-layer and must not reach up into a screen — and because a test can
+ * then prove the OS prompt is never raised on a decline. */
+export async function requestMoverBackgroundPermission(
+  disclose: () => Promise<boolean>,
+): Promise<boolean> {
   return requestUsableMoverBackgroundPermission({
     taskManagerAvailable: TaskManager !== null,
     getForegroundPermission: Location.getForegroundPermissionsAsync,
+    getBackgroundPermission: Location.getBackgroundPermissionsAsync,
     requestBackgroundPermission: Location.requestBackgroundPermissionsAsync,
+    disclose,
   });
 }
 

@@ -212,30 +212,113 @@ describe('prepareMoverOnline', () => {
 });
 
 describe('requestUsableMoverBackgroundPermission', () => {
+  const granted = () => vi.fn().mockResolvedValue({ status: 'granted' });
+  const undetermined = () => vi.fn().mockResolvedValue({ status: 'undetermined' });
+  const accepts = () => vi.fn().mockResolvedValue(true);
+
   it('does not prompt when the installed binary lacks TaskManager', async () => {
     const getForegroundPermission = vi.fn();
     const requestBackgroundPermission = vi.fn();
+    const disclose = vi.fn();
 
     await expect(requestUsableMoverBackgroundPermission({
       taskManagerAvailable: false,
       getForegroundPermission,
+      getBackgroundPermission: vi.fn(),
       requestBackgroundPermission,
+      disclose,
     })).resolves.toBe(false);
 
     expect(getForegroundPermission).not.toHaveBeenCalled();
     expect(requestBackgroundPermission).not.toHaveBeenCalled();
+    expect(disclose).not.toHaveBeenCalled();
   });
 
   it('requests the background upgrade only after an existing foreground grant', async () => {
-    const requestBackgroundPermission = vi.fn().mockResolvedValue({ status: 'granted' });
+    const requestBackgroundPermission = granted();
 
     await expect(requestUsableMoverBackgroundPermission({
       taskManagerAvailable: true,
-      getForegroundPermission: vi.fn().mockResolvedValue({ status: 'granted' }),
+      getForegroundPermission: granted(),
+      getBackgroundPermission: undetermined(),
       requestBackgroundPermission,
+      disclose: accepts(),
     })).resolves.toBe(true);
 
     expect(requestBackgroundPermission).toHaveBeenCalledOnce();
+  });
+
+  // -------------------------------------------------------------------------
+  // THE PLAY GATE [LAUNCH-3]. Google's Location Permissions policy requires a
+  // prominent in-app disclosure BEFORE the runtime prompt — the OS sheet does
+  // not count, because it is Android's wording and says nothing about what
+  // Swift does with the data. This shipped without one: tapping GO went
+  // straight to the system dialog.
+  // -------------------------------------------------------------------------
+
+  it('shows the disclosure BEFORE the OS prompt, never after', async () => {
+    const order: string[] = [];
+    const disclose = vi.fn(async () => { order.push('disclose'); return true; });
+    const requestBackgroundPermission = vi.fn(async () => { order.push('os-prompt'); return { status: 'granted' }; });
+
+    await requestUsableMoverBackgroundPermission({
+      taskManagerAvailable: true,
+      getForegroundPermission: granted(),
+      getBackgroundPermission: undetermined(),
+      requestBackgroundPermission,
+      disclose,
+    });
+
+    // Order is the whole policy. Disclosing afterwards is the violation.
+    expect(order).toEqual(['disclose', 'os-prompt']);
+  });
+
+  it('declining the disclosure never raises the OS prompt', async () => {
+    const requestBackgroundPermission = vi.fn();
+
+    await expect(requestUsableMoverBackgroundPermission({
+      taskManagerAvailable: true,
+      getForegroundPermission: granted(),
+      getBackgroundPermission: undetermined(),
+      requestBackgroundPermission,
+      disclose: vi.fn().mockResolvedValue(false),
+    })).resolves.toBe(false);
+
+    // No consent, no prompt. This is the half of the policy that actually
+    // protects the person holding the phone.
+    expect(requestBackgroundPermission).not.toHaveBeenCalled();
+  });
+
+  it('does not re-disclose to an earner who already granted background access', async () => {
+    const disclose = vi.fn();
+    const requestBackgroundPermission = vi.fn();
+
+    await expect(requestUsableMoverBackgroundPermission({
+      taskManagerAvailable: true,
+      getForegroundPermission: granted(),
+      getBackgroundPermission: granted(),
+      requestBackgroundPermission,
+      disclose,
+    })).resolves.toBe(true);
+
+    // The policy governs the REQUEST. Re-asking a driver who already said yes,
+    // every single morning, is nagging — not compliance.
+    expect(disclose).not.toHaveBeenCalled();
+    expect(requestBackgroundPermission).not.toHaveBeenCalled();
+  });
+
+  it('never discloses without a foreground grant to build on', async () => {
+    const disclose = vi.fn();
+
+    await expect(requestUsableMoverBackgroundPermission({
+      taskManagerAvailable: true,
+      getForegroundPermission: vi.fn().mockResolvedValue({ status: 'denied' }),
+      getBackgroundPermission: undetermined(),
+      requestBackgroundPermission: vi.fn(),
+      disclose,
+    })).resolves.toBe(false);
+
+    expect(disclose).not.toHaveBeenCalled();
   });
 });
 

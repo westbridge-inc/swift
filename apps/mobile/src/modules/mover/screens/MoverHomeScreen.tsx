@@ -43,6 +43,7 @@ import { GUTTER, RoutePair, jobAmount, CustomerTrustBadge } from '../shared';
 import { dk, withAlpha, DCard, DemandBand, DStat, DWeekBars } from '../surface';
 import { useMoverPreview } from '../../../stores/moverPreview';
 import { MoverHomeAccountButton } from './MoverHomeAccountButton';
+import { useBackgroundLocationDisclosure } from './BackgroundLocationDisclosure';
 import { fareLockedFor, fareToSubmit } from './fare-locked';
 import { offerEarnings } from './offer-earnings';
 import { canAdjustFare } from '../../../components/fare-step';
@@ -390,6 +391,7 @@ export function MoverHomeScreen({ navigation }: any) {
   const { latitude, longitude, status: locationStatus } = useLocationStore();
   const { resolve: resolveLocationForGo } = useDeviceLocation({ refreshOnMount: false });
   const [preparingOnline, setPreparingOnline] = useState(false);
+  const { disclosure, disclose } = useBackgroundLocationDisclosure();
   const k: MoverKind = kind ?? 'RIDER';
   const goOnline = useGoOnline(k);
   const goOffline = useGoOffline(k);
@@ -501,7 +503,9 @@ export function MoverHomeScreen({ navigation }: any) {
       const owner = preview ? null : requireAuthSessionSnapshot();
       const resolution = await prepareMoverOnline({
         resolveForeground: resolveLocationForGo,
-        requestBackground: requestMoverBackgroundPermission,
+        // Play requires our own disclosure BEFORE the OS sheet [LAUNCH-3].
+        // Declining keeps the earner online, foreground-only.
+        requestBackground: () => requestMoverBackgroundPermission(disclose),
         getForegroundFix: () => {
           if (!createLiveDeviceLocationLease()) return null;
           const current = useLocationStore.getState();
@@ -910,6 +914,10 @@ export function MoverHomeScreen({ navigation }: any) {
           }}
         />
       ) : null}
+
+      {/* Play-mandated background-location disclosure. Rendered at the root so
+          it survives whichever sheet is open when GO is tapped. */}
+      {disclosure}
     </View>
   );
 }
