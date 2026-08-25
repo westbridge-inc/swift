@@ -378,6 +378,35 @@ export const safetyApi = {
   /** Trip Guardian check-in response (prompted via the guardian:checkin
    *  socket event on the order room). */
   guardianCheckin: (response: 'OK' | 'NEED_HELP') => api.post('/safety/guardian/checkin', { response }),
+
+  /**
+   * Raise an emergency alert on ANY job — the general safety path.
+   *
+   * `POST /safety/sos` has existed, complete and careful, since the safety
+   * engine was built: it lifts the rate limit so a panicking person tapping
+   * repeatedly is never answered with a 429, it is idempotent on
+   * `clientIdempotencyKey` so repeats collapse into one alert instead of
+   * flooding ops, and it authorises the customer, the driver OR the rider on
+   * the order. It had ZERO callers on every surface. A whole life-safety
+   * engine with no button.
+   *
+   * `/rides/:id/sos` stays the path for taxi rides — it is live, it works, and
+   * an emergency route that already functions is not a thing to re-plumb for
+   * tidiness. This is for everyone the ride route never covered: delivery
+   * riders, couriers, service providers and their customers.
+   *
+   * `clientIdempotencyKey` must be STABLE across repeat presses of the same
+   * emergency — the whole point is that a frightened person hitting the button
+   * four times raises one alert, not four. Callers hold it for the incident,
+   * never regenerate per tap.
+   */
+  sos: (input: {
+    orderId?: string;
+    lat?: number;
+    lng?: number;
+    accuracyM?: number;
+    clientIdempotencyKey: string;
+  }) => api.post('/safety/sos', { ...input, source: 'BUTTON' as const, clientCreatedAt: new Date().toISOString() }),
 };
 
 export const rideApi = {
