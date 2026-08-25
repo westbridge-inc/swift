@@ -24,6 +24,7 @@ import { CategoryRail, CAT_RAIL_MIN_CHIPS } from '../CategoryRail';
 // photo. `itemImage` used to hand "Mauby" a picture of a cheeseburger.
 import { categoryImage, itemPhoto, vendorPhoto } from '../../../lib/images';
 import { money } from '../../../lib/money';
+import { orderStatusLabel, orderSubtitle } from '../../../lib/orderStatus';
 import {
   Card,
   ErrorState,
@@ -75,14 +76,10 @@ const SERVICES: {
   { key: 'favourites', label: 'Favourites', nav: (n) => n.navigate('Favorites') },
 ];
 
-const ORDER_STATUS_LABEL: Record<string, string> = {
-  PENDING: 'Waiting for the store',
-  ACCEPTED: 'Order accepted',
-  PREPARING: 'Being prepared',
-  READY: 'Ready for pickup',
-  RIDER_ASSIGNED: 'Rider on the way to store',
-  PICKED_UP: 'On its way to you',
-};
+// Status wording moved to lib/orderStatus.ts: it has to know the order
+// TYPE. This map had six entries, one of which (READY) was never a status —
+// the enum value is READY_FOR_PICKUP — and it described a taxi ride as
+// "Waiting for the store".
 
 function kmLabel(km: unknown): string | undefined {
   const n = Number(km);
@@ -415,11 +412,11 @@ export function HomeScreen() {
                 <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
                   <View style={{ width: 8, height: 8, borderRadius: 4, backgroundColor: color.success }} />
                   <T variant="body" weight="semibold">
-                    {ORDER_STATUS_LABEL[activeOrder.status] ?? 'Order in progress'}
+                    {orderStatusLabel(activeOrder.status, activeOrder.orderType)}
                   </T>
                 </View>
                 <T variant="caption" tone="muted" style={{ marginTop: 4 }}>
-                  {activeOrder.vendor?.name} · #{activeOrder.orderNumber}
+                  {orderSubtitle(activeOrder.vendor?.name, activeOrder.orderNumber)}
                 </T>
               </View>
               <PillButton

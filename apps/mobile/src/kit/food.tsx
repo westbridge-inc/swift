@@ -13,52 +13,87 @@ import { HeartBadge, Stars } from './controls';
 import { PillButton } from './button';
 import { T } from './text';
 
-/** THE star line (Movement R, R8) — every store-card context renders this one
- *  component. `rating` null = under min-display → the quiet "New" word;
- *  otherwise star · Bayesian value · count bucket, then Top rated as
- *  typographic state (no badge soup), then (dot · extra). */
+/** The separator between meta segments. Only ever drawn BETWEEN two of them —
+ *  never before the first, which is how "· Mauby's Snackette" happened. */
+function MetaDot() {
+  return <View style={{ width: 3, height: 3, borderRadius: 2, backgroundColor: color.text.muted }} />;
+}
+
+/**
+ * NULL AND UNDEFINED MEAN DIFFERENT THINGS HERE, and conflating them printed
+ * two separate lies.
+ *
+ *   number/string → a real rating: stars and the value.
+ *   null          → "New". An EXPLICIT claim that this seller has no rating yet.
+ *   undefined     → no rating claim at all. The caller does not know.
+ *
+ * The old guard was `rating == null`, which is true for BOTH — so a surface
+ * that simply had no rating to give was made to announce "New" about a
+ * long-established store. And the callers that knew this went the other way
+ * and passed nothing, which the FoodCard then read as "no meta at all" and
+ * dropped the store name entirely (the Popular rail on Home: the API sends
+ * `vendorName`, and no card ever showed it).
+ *
+ * Segments compose, and the dot is drawn between them rather than in front of
+ * each. `extra` alone renders as "Mauby's Snackette", not "· Mauby's Snackette".
+ */
 export function RatingMeta({
   rating,
   bucket,
   topRated,
   extra,
 }: {
-  rating: number | string | null;
+  rating?: number | string | null;
   bucket?: string;
   topRated?: boolean;
   extra?: string;
 }) {
+  const segments: React.ReactNode[] = [];
+
+  if (rating === null) {
+    segments.push(
+      <T key="new" variant="caption" tone="muted" weight="semibold">
+        New
+      </T>,
+    );
+  } else if (rating !== undefined) {
+    segments.push(
+      <React.Fragment key="rating">
+        <Stars value={Number(rating) || 0} size={13} />
+        <T variant="caption" tone="muted">
+          {typeof rating === 'number' ? rating.toFixed(1) : rating}
+          {bucket ? ` ${bucket}` : ''}
+        </T>
+      </React.Fragment>,
+    );
+  }
+
+  if (topRated) {
+    segments.push(
+      <T key="top" variant="caption" tone="brand" weight="semibold">
+        Top rated
+      </T>,
+    );
+  }
+
+  if (extra) {
+    segments.push(
+      <T key="extra" variant="caption" tone="muted">
+        {extra}
+      </T>,
+    );
+  }
+
+  if (segments.length === 0) return null;
+
   return (
     <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
-      {rating == null ? (
-        <T variant="caption" tone="muted" weight="semibold">
-          New
-        </T>
-      ) : (
-        <>
-          <Stars value={Number(rating) || 0} size={13} />
-          <T variant="caption" tone="muted">
-            {typeof rating === 'number' ? rating.toFixed(1) : rating}
-            {bucket ? ` ${bucket}` : ''}
-          </T>
-        </>
-      )}
-      {topRated ? (
-        <>
-          <View style={{ width: 3, height: 3, borderRadius: 2, backgroundColor: color.text.muted }} />
-          <T variant="caption" tone="brand" weight="semibold">
-            Top rated
-          </T>
-        </>
-      ) : null}
-      {extra ? (
-        <>
-          <View style={{ width: 3, height: 3, borderRadius: 2, backgroundColor: color.text.muted }} />
-          <T variant="caption" tone="muted">
-            {extra}
-          </T>
-        </>
-      ) : null}
+      {segments.map((seg, i) => (
+        <React.Fragment key={i}>
+          {i > 0 ? <MetaDot /> : null}
+          {seg}
+        </React.Fragment>
+      ))}
     </View>
   );
 }
@@ -138,7 +173,11 @@ export function FoodCard({
             ) : (
               <View />
             )}
-            {rating !== undefined ? <RatingMeta rating={rating} bucket={ratingBucket} topRated={topRated} extra={meta} /> : null}
+            {/* RatingMeta now returns null when it has nothing to say, so this
+                no longer needs to guess. The old guard dropped the WHOLE line
+                whenever rating was absent — which is why the Popular rail never
+                showed a store name the API had been sending all along. */}
+            <RatingMeta rating={rating} bucket={ratingBucket} topRated={topRated} extra={meta} />
           </View>
         </View>
       </View>
