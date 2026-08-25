@@ -2,10 +2,9 @@
 
 import { useEffect, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { confirmSettlement, getCashSettlements, getHours, getProfile, getSubscription, putHours } from '@/lib/vendor-api';
+import { confirmSettlement, getCashSettlements, getHours, getProfile, getSubscription, money, putHours } from '@/lib/vendor-api';
 import { MutationNotice } from '@/components/mutation-notice';
 
-const money = (n: number) => `$${Math.round(Number(n)).toLocaleString()}`;
 const DAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
 
 type DayRow = { dayOfWeek: number; openTime: string; closeTime: string; isClosed: boolean };
@@ -160,7 +159,10 @@ function SettlementsCard() {
       ) : (
         <>
           <p className="mt-3 text-sm font-bold text-[var(--swift-red)]">
-            Owed now: {money(d.summary?.owed ?? 0)} across {d.summary?.count ?? rows.length} deliveries
+            {/* No `?? 0`: an absent server total must read as an em-dash, not as
+                "nothing is owed" — a real zero and an invented zero mean
+                opposite things to the person handing over cash. */}
+            Owed now: {money(d.summary?.owed)} across {d.summary?.count ?? rows.length} deliveries
           </p>
           <div className="mt-2 space-y-2">
             {rows.map((r) => {
@@ -172,7 +174,7 @@ function SettlementsCard() {
               return (
                 <div key={id} className="flex items-center justify-between gap-3 rounded-lg bg-[var(--swift-subtle)] p-3 text-sm">
                   <span>
-                    #{orderNo} · {rider} · <b>{money(Number(r['amount']))}</b>
+                    #{orderNo} · {rider} · <b>{money(r['amount'])}</b>
                     {status === 'RIDER_CONFIRMED' && <span className="ml-2 text-xs text-green-600">rider confirmed</span>}
                     {status === 'STORE_CONFIRMED' && <span className="ml-2 text-xs text-amber-600">waiting on rider</span>}
                   </span>

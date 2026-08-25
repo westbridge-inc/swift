@@ -12,7 +12,39 @@ import {
 } from '@/lib/api';
 import { MutationError } from '@/components/MutationError';
 
-const gyd = (n: unknown) => `$${Number(n || 0).toLocaleString()}`;
+/**
+ * `Number(n || 0)` rendered a MISSING amount as `$0` — and on a finance page a
+ * real zero and an invented zero look identical while meaning opposite things
+ * ("this store owes nothing" vs "we have no idea what this store owes").
+ * A real 0 still prints `$0`; anything absent or unparseable prints an em-dash.
+ *
+ * Strings are accepted on purpose: the API coerces Prisma `Decimal`s to numbers
+ * at its own seam, and this is the second line of defence for any endpoint that
+ * has not been swept yet — a `"1200.00"` renders as $1,200, never as `—`.
+ */
+const gyd = (n: unknown) => {
+  const v = typeof n === 'string' && n.trim() !== '' ? Number(n) : n;
+  return typeof v === 'number' && Number.isFinite(v) ? `$${v.toLocaleString()}` : '—';
+};
+
+/**
+ * A daily-revenue `date` is a GUYANA calendar day — the server buckets it at
+ * Guyana-local midnight (`admin.routes.ts`, DASH-06) and sends the bare label
+ * `YYYY-MM-DD`.
+ *
+ * `new Date('2026-08-23')` parses a date-only string as UTC midnight, and
+ * `toLocaleDateString()` then re-renders it in the BROWSER's zone — so the same
+ * bucket printed "22 Aug" for an operator in Georgetown and "23 Aug" for one in
+ * London. Anchor at UTC midnight and format in UTC, so the three fields printed
+ * are exactly the three fields the server sent, in every timezone.
+ *
+ * Anything that is not a `YYYY-MM-DD` renders as an em-dash: a wrong date is a
+ * lie, a missing one is only missing.
+ */
+const gyDay = (ymd: unknown) =>
+  typeof ymd === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(ymd)
+    ? new Date(`${ymd}T00:00:00Z`).toLocaleDateString(undefined, { timeZone: 'UTC' })
+    : '—';
 
 const METHOD_LABELS: Record<string, string> = {
   CASH: 'Cash',
@@ -232,7 +264,11 @@ export default function FinancePage() {
       </div>
 
       <div className="bg-[var(--panel)] rounded-xl border border-[var(--border)] p-6">
-        <h2 className="text-lg font-semibold mb-4">Daily completed orders (30 days)</h2>
+        <h2 className="text-lg font-semibold mb-1">Daily completed orders (30 days)</h2>
+        <p className="text-[var(--muted)] text-xs mb-4">
+          Each row is a <span className="text-white">Guyana day</span> (midnight to midnight,
+          UTC-4) — not the day your browser is in.
+        </p>
         {isLoading ? (
           <p className="text-[var(--muted)] text-sm">Loading…</p>
         ) : daily.length === 0 ? (
@@ -241,7 +277,7 @@ export default function FinancePage() {
           <div className="space-y-2">
             {daily.map((row: { date: string; order_count: number; delivery_fees: number }) => (
               <div key={row.date} className="flex items-center justify-between p-2 rounded-lg bg-white/5 text-sm">
-                <span className="text-[var(--muted)]">{new Date(row.date).toLocaleDateString()}</span>
+                <span className="text-[var(--muted)]">{gyDay(row.date)}</span>
                 <span>{Number(row.order_count || 0).toLocaleString()} orders</span>
                 <span className="font-medium">{gyd(row.delivery_fees)} GYD fees</span>
               </div>

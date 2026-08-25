@@ -7,11 +7,9 @@ import NewOrderTakeover from '@/components/NewOrderTakeover';
 import { MutationNotice } from '@/components/mutation-notice';
 import {
   acceptOrder, completePickup, confirmPayment, getItems, getOrder, getOrders,
-  markPreparing, markReady, proposeSubstitution, refundLine, rejectOrder,
+  markPreparing, markReady, money, proposeSubstitution, refundLine, rejectOrder,
   retryDispatch, setPicked, type OrderLine, type VendorOrder,
 } from '@/lib/vendor-api';
-
-const money = (n: number) => `$${Math.round(Number(n)).toLocaleString()}`;
 
 // Board buckets — same lanes the kitchen thinks in.
 const BUCKETS = [
@@ -52,7 +50,7 @@ function statusChip(s: string) {
 
 /** Mirrors the mobile app's orderActions — one source of truth for what a
  *  vendor may do in each state (timestamps keep working after a rider claims). */
-function actionsFor(o: VendorOrder & { preparingAt?: string | null; readyAt?: string | null }) {
+function actionsFor(o: VendorOrder) {
   const s = (o.status || '').toUpperCase();
   const isPickup = o.fulfillment === 'PICKUP';
   const isAppt = o.fulfillment === 'APPOINTMENT';
@@ -206,7 +204,9 @@ function OrderDetail({ id, onClose }: { id: string; onClose: () => void }) {
     onSettled: refresh,
   });
 
-  const o = order.data as (VendorOrder & { preparingAt?: string | null; readyAt?: string | null; paymentStatus?: string }) | undefined;
+  // `preparingAt` / `readyAt` / `paymentStatus` are declared on VendorOrder now
+  // (the detail route returns the whole Order row) — no local re-declaration.
+  const o = order.data;
   if (!o) return <div className="rounded-2xl border border-black/5 bg-white p-6 text-sm text-[var(--swift-muted)]">Loading…</div>;
 
   const s = (o.status || '').toUpperCase();
@@ -235,19 +235,25 @@ function OrderDetail({ id, onClose }: { id: string; onClose: () => void }) {
       <div className="mt-4 space-y-1.5">
         {o.items.map((it) => (
           <div key={it.id} className="flex justify-between text-sm">
-            <span><b>{it.quantity}×</b> {it.name}{it.notes ? <i className="text-[var(--swift-muted)]"> — {it.notes}</i> : null}</span>
-            <span className="font-medium">{money(it.totalPrice)}</span>
+            <span><b>{it.quantity}×</b> {it.name}{it.specialInstructions ? <i className="text-[var(--swift-muted)]"> — {it.specialInstructions}</i> : null}</span>
+            <span className="font-medium">{money(it.totalCustomer)}</span>
           </div>
         ))}
         <div className="flex justify-between border-t border-black/5 pt-2 text-sm font-bold">
           <span>Total ({o.paymentMethod === 'MOBILE_MONEY' ? 'MMG' : 'Cash'})</span>
-          <span>{money(o.total)}</span>
+          <span>{money(o.totalAmount)}</span>
         </div>
       </div>
 
-      {o.notes && <p className="mt-3 rounded-lg bg-amber-50 p-3 text-sm text-amber-800">Note: {o.notes}</p>}
+      {o.deliveryInstructions && <p className="mt-3 rounded-lg bg-amber-50 p-3 text-sm text-amber-800">Note: {o.deliveryInstructions}</p>}
       {rider && <p className="mt-3 text-sm text-[var(--swift-muted)]">Rider: <b className="text-[var(--swift-ink)]">{rider}</b> {o.rider?.user?.phone}</p>}
-      {o.pickupCode && o.fulfillment === 'PICKUP' && s !== 'COMPLETED' && (
+      {/* HND-003: the vendor VERIFIES the pickup code, it never READS it — both
+          vendor routes strip the column, so this hint used to be gated on a
+          field that can never arrive and therefore never rendered. Driven now
+          by `fulfillment`, which the API does send; every PICKUP order is
+          issued a code at creation (order.service.ts). The code itself stays
+          off this screen. */}
+      {o.fulfillment === 'PICKUP' && s !== 'COMPLETED' && (
         <p className="mt-3 text-sm text-[var(--swift-muted)]">Customer collects with a pickup code.</p>
       )}
 
@@ -386,7 +392,7 @@ export default function OrdersPage() {
               </div>
               <p className="mt-1 text-sm text-[var(--swift-muted)]">
                 {[o.customer?.firstName, o.customer?.lastName].filter(Boolean).join(' ')} · {o.items.length}{' '}
-                {o.items.length === 1 ? 'item' : 'items'} · {money(o.total)} · {timeAgo(o.placedAt)}
+                {o.items.length === 1 ? 'item' : 'items'} · {money(o.totalAmount)} · {timeAgo(o.placedAt)}
               </p>
               {o.vendor?.name && <p className="mt-0.5 text-xs text-[var(--swift-muted)]">{o.vendor.name}</p>}
             </button>

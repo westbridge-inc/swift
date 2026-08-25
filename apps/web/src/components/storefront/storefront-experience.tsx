@@ -72,7 +72,11 @@ type DisplayVendor = VendorDetail & {
 
 const CATALOG_REFRESH_MS = 30_000;
 
-const gyMoney = (value: number) => `GY$${Math.round(value || 0).toLocaleString()}`;
+// `value || 0` used to turn NaN (a missing/unparsable server figure) into
+// "GY$0" — an INVENTED zero, indistinguishable from a real one and the worst
+// lie a price can tell. A non-finite figure now renders an em-dash; a genuine
+// 0 still renders "GY$0". Same guarantee as `money()` on the vendor side.
+const gyMoney = (value: number) => (Number.isFinite(value) ? `GY$${Math.round(value).toLocaleString()}` : '—');
 
 const verticalLabel: Record<ReturnType<typeof storefrontVertical>, string> = {
   food: 'Food',

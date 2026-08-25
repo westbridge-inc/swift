@@ -644,8 +644,11 @@ export async function driverRoutes(app: FastifyInstance) {
         passengerCount: order.taxiPassengerCount || 1,
         estimatedDistance: order.taxiDistance,
         estimatedDuration: order.taxiDuration,
-        fareTotal: order.taxiFareTotal,
-        fareSurge: order.taxiFareSurge,
+        // [S1] `taxiFareTotal` is Decimal(10,2) — this is the number the driver
+        // agrees to drive for, and it left as a STRING. Null (no quote yet)
+        // stays null so the offer card shows an em-dash, never a fabricated 0.
+        fareTotal: order.taxiFareTotal === null ? null : Number(order.taxiFareTotal),
+        fareSurge: order.taxiFareSurge, // Float in the schema — already a number
         distanceToPickup: distanceToPickup !== null ? Math.round(distanceToPickup * 10) / 10 : null,
         etaToPickup: etaMinutes,
         customer: order.customer
@@ -1246,7 +1249,19 @@ export async function driverRoutes(app: FastifyInstance) {
       app.prisma.order.count({ where }),
     ]);
 
-    return { success: true, ...paginatedResponse(rides, total, { page, limit, skip }) };
+    // [S1] taxiFareTotal / tipAmount / totalAmount are Prisma `Decimal`s — raw
+    // rows put them on the wire as STRINGS ("1500.00"), so a ride history that
+    // sums or formats them breaks per-client instead of per-row. Coerced at the
+    // seam, before the shared paginator (rider /earnings is the reference).
+    // A null fare stays null — LAW 1: never invent a zero.
+    const data = rides.map((ride) => ({
+      ...ride,
+      taxiFareTotal: ride.taxiFareTotal === null ? null : Number(ride.taxiFareTotal),
+      tipAmount: Number(ride.tipAmount),
+      totalAmount: Number(ride.totalAmount),
+    }));
+
+    return { success: true, ...paginatedResponse(data, total, { page, limit, skip }) };
   });
 
   // ─── Earnings ──────────────────────────────────────────────────────────
@@ -1279,9 +1294,15 @@ export async function driverRoutes(app: FastifyInstance) {
       }),
     ]);
 
+    // [S1] The aggregate below was coerced; the ROWS were not. `Earning.amount`
+    // is Decimal(10,2), so each row's amount reached the app as a STRING while
+    // the total beside it was a number — the same list, two types. Map the rows
+    // before the shared paginator, exactly as rider /earnings does.
+    const data = earnings.map((earning) => ({ ...earning, amount: Number(earning.amount) }));
+
     return {
       success: true,
-      ...paginatedResponse(earnings, total, { page, limit, skip }),
+      ...paginatedResponse(data, total, { page, limit, skip }),
       // DASH-07: Number() — a raw Prisma Decimal serializes oddly and `|| 0`
       // can't default a Decimal(0). The rider routes already wrap every amount.
       totalEarnings: Number(aggregate._sum.amount ?? 0),
@@ -1320,7 +1341,9 @@ export async function driverRoutes(app: FastifyInstance) {
     return {
       success: true,
       data: {
-        earnings,
+        // [S1] Same defect as /earnings above: the total was coerced, the rows
+        // it is the sum of were not. Decimal(10,2) → number at the seam.
+        earnings: earnings.map((earning) => ({ ...earning, amount: Number(earning.amount) })),
         total: Number(aggregate._sum.amount ?? 0), // DASH-07: number, not raw Decimal
         ridesCompleted: ridesCount,
       },

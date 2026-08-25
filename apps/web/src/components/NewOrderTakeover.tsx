@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState } from 'react';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
-import { acceptOrder, rejectOrder, type VendorOrder } from '@/lib/vendor-api';
+import { acceptOrder, money, rejectOrder, type VendorOrder } from '@/lib/vendor-api';
 
 /**
  * The NEW-ORDER takeover (alerts spec §A1, web dashboard flavor): the moment
@@ -12,8 +12,6 @@ import { acceptOrder, rejectOrder, type VendorOrder } from '@/lib/vendor-api';
  * tab title flashes for the backgrounded-tab case. "View later" dismisses
  * honestly (the escalation ladder + acceptance guard still stand behind it).
  */
-
-const money = (n: number) => `$${Math.round(Number(n)).toLocaleString()}`;
 
 function chime(ctx: AudioContext) {
   // Two quick rising tones — unmistakably "new money", no file required.
@@ -106,7 +104,7 @@ export default function NewOrderTakeover({ orders }: { orders: VendorOrder[] }) 
           {queue.length > 1 ? `${queue.length} NEW ORDERS` : 'NEW ORDER'}
         </h2>
         <p className="mt-3 text-lg font-bold">
-          #{current.orderNumber} · {money(current.total)}
+          #{current.orderNumber} · {money(current.totalAmount)}
         </p>
         <p className="mt-1 text-sm text-[var(--swift-muted)]">
           {customer} · {current.items.length} item{current.items.length === 1 ? '' : 's'} ·{' '}

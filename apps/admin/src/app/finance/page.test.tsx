@@ -1,5 +1,5 @@
 import { screen, waitFor } from '@testing-library/react';
-import { describe, expect, it, vi } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import FinancePage from './page';
 import {
   API_ORIGIN,
@@ -17,21 +17,24 @@ const settlement = {
   vendor: { name: 'Test Vendor' },
 };
 
+type DailyRow = { date: string; markup: number; delivery_fees: number; total: number; order_count: number };
+let dailyRevenue: DailyRow[] = [];
+
+const FULL_SUMMARY = {
+  weeklySubscriptionRevenue: 0,
+  monthlySubscriptionRevenue: 0,
+  activeSubscriptions: 0,
+  thirtyDayDeliveryFees: 0,
+};
+let summary: Record<string, number> = { ...FULL_SUMMARY };
+
 function financeHandler(mutation: (_request: ApiRequest) => { body: unknown; status?: number }) {
   return (request: ApiRequest) => {
     if (request.method === 'GET' && request.url.pathname === '/api/v1/admin/finance/revenue') {
       return {
         body: {
           success: true,
-          data: {
-            dailyRevenue: [],
-            summary: {
-              weeklySubscriptionRevenue: 0,
-              monthlySubscriptionRevenue: 0,
-              activeSubscriptions: 0,
-              thirtyDayDeliveryFees: 0,
-            },
-          },
+          data: { dailyRevenue, summary },
         },
       };
     }
@@ -55,6 +58,79 @@ function financeHandler(mutation: (_request: ApiRequest) => { body: unknown; sta
     return mutation(request);
   };
 }
+
+const noMutation = (request: ApiRequest) => {
+  throw new Error(`Unexpected request: ${request.method} ${request.url}`);
+};
+
+// ---------------------------------------------------------------------------
+// DASH-06 (render half) — the API sends a GUYANA calendar day as the bare
+// label `YYYY-MM-DD`. `new Date('2026-08-23')` parses a date-only string as UTC
+// midnight, so `toLocaleDateString()` re-renders it in the BROWSER's zone and
+// shifts the bucket a SECOND time: an operator anywhere west of UTC saw every
+// day's trading filed under the day before.
+//
+// The suite therefore runs pinned to a zone west of UTC — in the machine's own
+// timezone (or CI's UTC) the bug is invisible and the test would prove nothing.
+// ---------------------------------------------------------------------------
+const WEST_OF_UTC = 'America/Los_Angeles';
+const originalTz = process.env.TZ;
+
+describe('daily revenue renders the GUYANA day, not the browser day [DASH-06]', () => {
+  beforeAll(() => { process.env.TZ = WEST_OF_UTC; });
+  afterAll(() => { process.env.TZ = originalTz; dailyRevenue = []; summary = { ...FULL_SUMMARY }; });
+
+  it('a Guyana day survives a browser timezone west of UTC', async () => {
+    // Guard the premise: if TZ pinning silently stopped working, this suite
+    // would pass in UTC for the wrong reason. Under the OLD render the label
+    // for 2026-08-23 came out as the 22nd here — that is the defect.
+    expect(new Date('2026-08-23').getDate()).toBe(22);
+
+    dailyRevenue = [{ date: '2026-08-23', markup: 0, delivery_fees: 4500, total: 18000, order_count: 6 }];
+    mockApi(financeHandler(noMutation));
+    renderWithQuery(<FinancePage />);
+
+    // Derived independently of the component: local midnight on the 23rd has
+    // the same three calendar fields in every zone.
+    const expected = new Date(2026, 7, 23).toLocaleDateString();
+    expect(await screen.findByText(expected)).toBeTruthy();
+
+    // And the day it must never be: the 22nd.
+    expect(screen.queryByText(new Date(2026, 7, 22).toLocaleDateString())).toBeNull();
+  });
+
+  it('a real zero prints $0 — a MISSING amount prints an em-dash, not $0', async () => {
+    // A genuine 0 in 30-day delivery fees means "nothing moved". Keep it.
+    dailyRevenue = [];
+    summary = { ...FULL_SUMMARY, thirtyDayDeliveryFees: 0 };
+    mockApi(financeHandler(noMutation));
+    const { unmount } = renderWithQuery(<FinancePage />);
+    expect(await screen.findByText('$0 GYD')).toBeTruthy();
+    unmount();
+
+    // Same screen, field absent: the server told us nothing. Pre-fix
+    // `Number(n || 0)` printed "$0" here too — byte-identical to the real zero
+    // above while meaning the opposite thing.
+    summary = { ...FULL_SUMMARY };
+    delete summary['thirtyDayDeliveryFees'];
+    mockApi(financeHandler(noMutation));
+    renderWithQuery(<FinancePage />);
+    expect(await screen.findByText('— GYD')).toBeTruthy();
+    expect(screen.queryByText('$0 GYD')).toBeNull();
+  });
+
+  it('a malformed day renders an em-dash, never a wrong or invented date', async () => {
+    dailyRevenue = [{ date: 'not-a-day', markup: 0, delivery_fees: 100, total: 100, order_count: 1 }];
+    mockApi(financeHandler(noMutation));
+    renderWithQuery(<FinancePage />);
+
+    // The row still renders its real order count and fees; only the day it
+    // cannot vouch for is withheld. A wrong date is a lie; a missing one is
+    // only missing.
+    expect(await screen.findByText('—')).toBeTruthy();
+    expect(screen.getByText('1 orders')).toBeTruthy();
+  });
+});
 
 describe('finance settlement mutation', () => {
   it('collects a reference, confirms, and marks paid through the exact endpoint and payload', async () => {

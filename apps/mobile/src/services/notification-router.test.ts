@@ -1,3 +1,5 @@
+import { readdirSync, readFileSync, existsSync } from 'node:fs';
+import { join } from 'node:path';
 import { describe, it, expect, vi } from 'vitest';
 
 // Pure routing-table test — the expo/notifications + navigation modules are
@@ -21,6 +23,8 @@ describe('destinationFor — the tap table', () => {
   it('queue outcomes and ride kinds land on Taxi', () => {
     expect(destinationFor({ kind: 'ride_queue_matched', orderId: 'o1' })).toEqual({ screen: 'Taxi' });
     expect(destinationFor({ kind: 'ride_queue_expired' })).toEqual({ screen: 'Taxi' });
+    // ride_sos_ack is NOT a kind the API sends today — it stands in for the
+    // ride_ PREFIX rule, which is what covers a ride kind shipped tomorrow.
     expect(destinationFor({ kind: 'ride_sos_ack' })).toEqual({ screen: 'Taxi' });
   });
 
@@ -37,8 +41,7 @@ describe('destinationFor — the tap table', () => {
     expect(destinationFor({ orderId: 'xyz' })).toEqual({ screen: 'Delivery', params: { orderId: 'xyz' } });
   });
 
-  it('booking reminders land on Activity; unknowns open the app normally', () => {
-    expect(destinationFor({ kind: 'booking_reminder', refId: 'j1' })).toEqual({ screen: 'HomeTabs', params: { screen: 'Activity' } });
+  it('unknowns open the app normally', () => {
     expect(destinationFor({ kind: 'billing_topup' })).toBeNull();
     expect(destinationFor({})).toBeNull();
     expect(destinationFor(null)).toBeNull();
@@ -46,5 +49,332 @@ describe('destinationFor — the tap table', () => {
 
   it('ride kinds outrank the orderId fallback (a taxi push opens Taxi, not Delivery)', () => {
     expect(destinationFor({ kind: 'ride_queue_matched', orderId: 'ride-order' })).toEqual({ screen: 'Taxi' });
+  });
+});
+
+// ───────────────────────────────────────────────────────────────────────────
+// S0: PUSHES THAT OPENED THE APP AND DID NOTHING
+// ───────────────────────────────────────────────────────────────────────────
+
+describe('booking + service-job pushes land on the job [S0]', () => {
+  // Before: booking_to_confirm / booking_confirmed / booking_slot_declined had
+  // no case at all (null → "the app opens normally"), and booking_reminder
+  // pointed at 'HomeTabs' — a route name that exists NOWHERE in the app (the
+  // customer tabs route is 'Tabs'), so its navigate was silently unhandled.
+  // A provider read "a customer wants to confirm Tuesday 09:00", tapped, and
+  // landed on the home screen.
+  it('every service-job kind opens My Jobs — the one screen that shows that job to BOTH sides', () => {
+    for (const kind of [
+      'booking_to_confirm',
+      'booking_confirmed',
+      'booking_slot_declined',
+      'booking_completed',
+      'booking_cancelled',
+    ]) {
+      expect(destinationFor({ kind, jobId: 'job-1' })).toEqual({ screen: 'ServiceJobs' });
+    }
+    // The 24h reminder carries refId (job OR appointment) instead of jobId.
+    expect(destinationFor({ kind: 'booking_reminder', refId: 'job-1' })).toEqual({ screen: 'ServiceJobs' });
+  });
+
+  it('routes by PREFIX, so the next booking_ kind is not born dead', () => {
+    // booking_completed and booking_cancelled were added to the API DURING
+    // this audit; an enumerated list is how three kinds went unrouted.
+    expect(destinationFor({ kind: 'booking_not_shipped_yet', jobId: 'j' })).toEqual({ screen: 'ServiceJobs' });
+  });
+
+  it('carries no params — ServiceJobsScreen reads none, and an ignored param is a lie', () => {
+    const dest = destinationFor({ kind: 'booking_to_confirm', jobId: 'job-1' });
+    expect(dest).not.toBeNull();
+    expect(dest!.params).toBeUndefined();
+  });
+
+  it('a moved APPOINTMENT opens the store’s Schedule agenda, not the jobs list', () => {
+    // booking_rescheduled is the one booking_ kind that is not a service job:
+    // it carries bookingId (a slot on a vendor calendar). Its other recipient
+    // is the customer, who has no appointments screen anywhere in the app.
+    expect(destinationFor({ kind: 'booking_rescheduled', bookingId: 'b1' })).toEqual({ screen: 'Schedule' });
+  });
+});
+
+describe('store pushes land on the store’s order desk, never the customer screen', () => {
+  it('THE vendor order alert opens that order, with its number when the payload carries one', () => {
+    expect(destinationFor({ kind: 'vendor_order_alert', orderId: 'o1', orderNumber: 'SW-1001', status: 'PENDING' }))
+      .toEqual({ screen: 'VendorOrderDetail', params: { orderId: 'o1', orderNumber: 'SW-1001' } });
+  });
+
+  it('omits orderNumber rather than inventing one', () => {
+    expect(destinationFor({ kind: 'vendor_order_alert', orderId: 'o1' }))
+      .toEqual({ screen: 'VendorOrderDetail', params: { orderId: 'o1' } });
+    expect(destinationFor({ kind: 'vendor_order_alert', orderId: 'o1', orderNumber: 42 }))
+      .toEqual({ screen: 'VendorOrderDetail', params: { orderId: 'o1' } });
+  });
+
+  it('a server-tagged business audience routes by itself — same kind, two audiences, two screens', () => {
+    // dispatch_exhausted is sent to the customer AND to the store; only the
+    // store's copy is tagged audience:'business'.
+    expect(destinationFor({ kind: 'dispatch_exhausted', orderId: 'o2', audience: 'customer' }))
+      .toEqual({ screen: 'Delivery', params: { orderId: 'o2' } });
+    expect(destinationFor({ kind: 'dispatch_exhausted', orderId: 'o2', audience: 'business' }))
+      .toEqual({ screen: 'VendorOrderDetail', params: { orderId: 'o2' } });
+  });
+
+  it('a deliberate business destination still outranks the audience rule', () => {
+    expect(destinationFor({ kind: 'mmg_unattested_cancellation', orderId: 'o3', audience: 'business' }))
+      .toEqual({ screen: 'Main' });
+  });
+});
+
+// ───────────────────────────────────────────────────────────────────────────
+// THE CENSUS — every `kind` the API sends, with the destination it gets.
+//
+// Rebuilt by scanning apps/api/src for `kind: '…'` push payloads. `to: null`
+// means "the app opens normally": for an ops/admin page that is correct (there
+// is no mobile admin surface); for a user-facing kind it is a REPORTED gap,
+// marked below, not an endorsement. The drift test underneath fails the moment
+// the API grows a kind that is not in this table, which is what stops the next
+// booking_to_confirm from shipping dead.
+// ───────────────────────────────────────────────────────────────────────────
+
+type Dest = { screen: string; params?: Record<string, unknown> } | null;
+type Case = {
+  /** payload data.kind */
+  k: string;
+  /** the rest of the payload that matters to routing (as the API sends it) */
+  d?: Record<string, unknown>;
+  /** where the tap lands today */
+  to: Dest;
+  /** who receives it + why this destination (or why it is a gap) */
+  why: string;
+  /** false when the API builds the kind dynamically, so the source scan below
+   *  cannot see it as a literal */
+  scan?: false;
+};
+
+const DELIVERY = (orderId: string): Dest => ({ screen: 'Delivery', params: { orderId } });
+const O = { orderId: 'o1' };
+
+const CENSUS: Case[] = [
+  // ── Orders: the customer's own journey. Delivery IS their tracking screen.
+  { k: 'substitution_pending', d: { ...O, lineId: 'l1' }, to: DELIVERY('o1'), why: 'customer — approve a substitution' },
+  { k: 'line_refunded', d: { ...O, lineId: 'l1' }, to: DELIVERY('o1'), why: 'customer — a line was refunded' },
+  { k: 'prep_ready', d: O, to: DELIVERY('o1'), why: 'customer — order ready' },
+  { k: 'mmg_payment_confirmed', d: O, to: DELIVERY('o1'), why: 'customer — MMG payment captured' },
+  { k: 'strike', d: O, to: DELIVERY('o1'), why: 'customer — failed delivery recorded' },
+  { k: 'delivery_options', d: O, to: DELIVERY('o1'), why: 'customer — supply is thin, pick another option' },
+  { k: 'delivery_cash_settlement', d: { ...O, settlementId: 's1', status: 'OPEN' }, to: DELIVERY('o1'), why: 'cash settlement on that order' },
+  { k: 'dispatch_retrying', d: { ...O, audience: 'customer' }, to: DELIVERY('o1'), why: 'customer — still looking for a mover' },
+  { k: 'converted_to_pickup', d: { ...O, audience: 'business' }, to: { screen: 'VendorOrderDetail', params: { orderId: 'o1' } }, why: 'store — the order became a pickup [audience rule]' },
+  { k: 'dispatch_exhausted', d: { ...O, audience: 'customer' }, to: DELIVERY('o1'), why: 'customer — no mover found' },
+  { k: 'mover_session_revocation', d: { ...O, audience: 'customer', status: 'PICKED_UP', action: 'REOPEN' }, to: DELIVERY('o1'), why: 'customer — their mover lost custody' },
+  { k: 'vendor_order_alert', d: { ...O, orderNumber: 'SW-1', status: 'PENDING' }, to: { screen: 'VendorOrderDetail', params: { orderId: 'o1', orderNumber: 'SW-1' } }, why: 'store — THE new-order alert [fixed here]' },
+  { k: 'mmg_unattested_cancellation', d: { ...O, audience: 'business' }, to: { screen: 'Main' }, why: 'store — a cancelled order may still hold an MMG payment; their Main is the dashboard' },
+  { k: 'agent_vendor_ping', d: O, to: DELIVERY('o1'), why: 'GAP: store recipient, but Delivery is the CUSTOMER screen — API should tag audience:business' },
+  { k: 'agent_delay_notice', d: O, to: DELIVERY('o1'), why: 'customer — order delayed' },
+  { k: 'claim_over_gate', d: O, to: DELIVERY('o1'), why: 'GAP: rider recipient; MoverStack never mounts Delivery' },
+  { k: 'guardian_checkin', d: { ...O, sessionId: 's1', level: 'SOFT' }, to: DELIVERY('o1'), why: 'GAP: passenger mid-RIDE, but rides render on Taxi, not Delivery' },
+  { k: 'guardian_driver_confirm', d: { ...O, sessionId: 's1' }, to: DELIVERY('o1'), why: 'GAP: driver recipient; MoverStack never mounts Delivery' },
+  { k: 'incident_interim_suspension', d: { ...O, caseNumber: 'INC-1' }, to: DELIVERY('o1'), why: 'GAP: suspended mover; MoverStack never mounts Delivery' },
+  { k: 'support_ticket', d: { ...O, ticketId: 't1' }, to: DELIVERY('o1'), why: 'admins — ops queue lives on the web console' },
+  { k: 'sos_active', d: { ...O, sosAlertId: 'a1' }, to: DELIVERY('o1'), why: 'admins — SOS war room is not a mobile surface' },
+  { k: 'agent_approval_needed', d: O, to: DELIVERY('o1'), why: 'admins/agent approval queue' },
+  { k: 'agent_ops_alert', d: O, to: DELIVERY('o1'), why: 'admins' },
+  { k: 'ops_delivery_rider_dropped', d: O, to: DELIVERY('o1'), why: 'admins' },
+  { k: 'ops_dispatch_exhausted', d: O, to: DELIVERY('o1'), why: 'admins' },
+  { k: 'ops_taxi_driver_dropped', d: O, to: DELIVERY('o1'), why: 'admins' },
+  { k: 'RATING_REMINDER', d: O, to: DELIVERY('o1'), why: 'customer — rate a finished order (the one SHOUTY kind)', scan: false },
+  { k: 'ops_mover_session_ended:o1', d: O, to: DELIVERY('o1'), why: 'admins — kind is built with the orderId appended', scan: false },
+
+  // ── Rides: the taxi screen reads the active ride itself.
+  { k: 'ride_queue_matched', d: { ...O, audience: 'customer' }, to: { screen: 'Taxi' }, why: 'customer — a driver took their queued ride' },
+  { k: 'ride_queue_expired', d: { audience: 'customer', rideClass: 'STANDARD' }, to: { screen: 'Taxi' }, why: 'customer — queue timed out, request again' },
+  { k: 'ride_released_no_drivers', d: { ...O, audience: 'customer' }, to: { screen: 'Taxi' }, why: 'customer — ride released' },
+  { k: 'dispatch_offer', d: { ...O, audience: 'earner', offerAttemptId: 'a1' }, to: { screen: 'Main' }, why: 'earner — the live offer card is on their Main' },
+
+  // ── Bookings + service jobs [the S0 this pass closed].
+  { k: 'booking_to_confirm', d: { jobId: 'j1' }, to: { screen: 'ServiceJobs' }, why: 'provider — accept or move the customer’s slot' },
+  { k: 'booking_confirmed', d: { jobId: 'j1' }, to: { screen: 'ServiceJobs' }, why: 'customer — provider took the slot' },
+  { k: 'booking_slot_declined', d: { jobId: 'j1' }, to: { screen: 'ServiceJobs' }, why: 'customer — pick another time' },
+  { k: 'booking_completed', d: { jobId: 'j1' }, to: { screen: 'ServiceJobs' }, why: 'both — job done, rate it' },
+  { k: 'booking_cancelled', d: { jobId: 'j1' }, to: { screen: 'ServiceJobs' }, why: 'the other side — job cancelled' },
+  { k: 'booking_reminder', d: { refId: 'j1' }, to: { screen: 'ServiceJobs' }, why: 'both, 24h out — GAP when refId is an APPOINTMENT: no customer appointments screen exists' },
+  { k: 'booking_rescheduled', d: { bookingId: 'b1' }, to: { screen: 'Schedule' }, why: 'store — the moved slot on their agenda; the customer half has no screen [GAP]' },
+
+  // ── Money the recipient must act on — no deep screen wired yet [GAPS].
+  { k: 'billing_mmg_pending', d: { subscriptionId: 's1' }, to: null, why: 'GAP: vendor/mover weekly fee — a billing screen exists but is unrouted' },
+  { k: 'billing_success', d: { subscriptionId: 's1' }, to: null, why: 'GAP: same' },
+  { k: 'billing_failed', d: { subscriptionId: 's1' }, to: null, why: 'GAP: same' },
+  { k: 'billing_final_warning', d: { subscriptionId: 's1' }, to: null, why: 'GAP: suspension is imminent — the highest-value unrouted push' },
+  { k: 'billing_suspended', d: { subscriptionId: 's1' }, to: null, why: 'GAP: they cannot earn until they pay' },
+  { k: 'billing_suspended_nudge', d: { subscriptionId: 's1' }, to: null, why: 'GAP: same' },
+  { k: 'billing_reinstated', d: { subscriptionId: 's1' }, to: null, why: 'GAP: same' },
+  { k: 'billing_reminder', d: { subscriptionId: 's1' }, to: null, why: 'GAP: same' },
+  { k: 'billing_banked', d: { subscriptionId: 's1' }, to: null, why: 'GAP: same' },
+  { k: 'billing_churned', d: { subscriptionId: 's1' }, to: null, why: 'GAP: same' },
+  { k: 'billing_topup', d: { subscriptionId: 's1' }, to: null, why: 'GAP: same' },
+  { k: 'trial_fee_education', d: { subscriptionId: 's1', stage: 'MID' }, to: null, why: 'GAP: same' },
+  { k: 'fx_change_notice', d: { subscriptionId: 's1', fxRateId: 'f1' }, to: null, why: 'GAP: same' },
+  { k: 'usd_migration_notice', d: { subscriptionId: 's1', mode: 'A' }, to: null, why: 'GAP: same' },
+  { k: 'claim', d: { claimId: 'c1' }, to: null, why: 'GAP: rider cash-guarantee claim — no claims screen' },
+  { k: 'claim_update', d: { claimId: 'c1' }, to: null, why: 'GAP: same' },
+
+  // ── Verification / liveness / safety of the person receiving it [GAPS].
+  { k: 'verification_approved', d: { docId: 'd1' }, to: null, why: 'GAP: IdentityVerification screen exists and is unrouted' },
+  { k: 'verification_rejected', to: null, why: 'GAP: same — they must re-upload' },
+  { k: 'verification_expired', d: { docId: 'd1' }, to: null, why: 'GAP: same' },
+  { k: 'verification_expiry_reminder', d: { docId: 'd1' }, to: null, why: 'GAP: same' },
+  { k: 'verification_forced_offline', d: { audience: 'earner' }, to: null, why: 'GAP: they were put offline' },
+  { k: 'verification_l2', d: { audience: 'customer' }, to: null, why: 'GAP: assurance level raised' },
+  { k: 'trust_l3', to: null, why: 'GAP: rider trust tier raised' },
+  { k: 'liveness_midshift_prompt', d: { respondBy: '2026-01-01T00:00:00.000Z', profile: 'DRIVER' }, to: null, why: 'GAP: a timed selfie check with a deadline' },
+  { k: 'liveness_midshift_missed', to: null, why: 'GAP: same' },
+  { k: 'liveness_locked', to: null, why: 'GAP: account locked out of going online' },
+  { k: 'incident_interim_lifted', d: { caseNumber: 'INC-1' }, to: null, why: 'GAP: suspension lifted' },
+  { k: 'incident_shadow_restricted', d: { caseNumber: 'INC-1' }, to: null, why: 'GAP: account restricted' },
+  { k: 'compliance_review_failed', d: { audience: 'earner', caseId: 'c1' }, to: null, why: 'GAP: earner compliance failure' },
+
+  // ── Store / advertiser business surfaces [GAPS].
+  { k: 'low_stock', d: { itemId: 'i1', remaining: 2 }, to: null, why: 'GAP: store — the item editor exists and is unrouted' },
+  { k: 'staff_added', d: { vendorId: 'v1' }, to: null, why: 'GAP: store team screen' },
+  { k: 'review_response', d: { ratingId: 'r1', vendorId: 'v1' }, to: null, why: 'GAP: store reviews' },
+  { k: 'rating_removed', to: null, why: 'GAP: a rating was removed' },
+  { k: 'category_request_resolved', to: null, why: 'GAP: store category request answered' },
+  { k: 'support_update', d: { ticketId: 't1' }, to: null, why: 'GAP: support thread reply — no support screen wired' },
+  { k: 'supply_returned', d: { audience: 'customer', pool: 'RIDER' }, to: null, why: 'GAP: movers are back — no order to open, so nothing to route to' },
+  { k: 'agent_cancel', to: null, why: 'GAP: the agent asked to cancel an order but sends no orderId' },
+  { k: 'ad_campaign_scheduled', d: { campaignId: 'c1' }, to: null, why: 'GAP: advertiser — CampaignDetail exists and is unrouted' },
+  { k: 'ad_campaign_live', d: { campaignId: 'c1' }, to: null, why: 'GAP: same' },
+  { k: 'ad_campaign_completed', d: { campaignId: 'c1' }, to: null, why: 'GAP: same' },
+  { k: 'ad_campaign_paused', d: { campaignId: 'c1' }, to: null, why: 'GAP: same' },
+  { k: 'ad_campaign_resumed', d: { campaignId: 'c1' }, to: null, why: 'GAP: same' },
+  { k: 'ad_campaign_cancelled', d: { campaignId: 'c1' }, to: null, why: 'GAP: same' },
+  { k: 'ad_campaign_killed', d: { campaignId: 'c1' }, to: null, why: 'GAP: same' },
+  { k: 'ad_campaign_auto_cancelled', d: { campaignId: 'c1' }, to: null, why: 'GAP: same' },
+  { k: 'ad_creative_rejected', d: { creativeId: 'c1', reason: 'POLICY' }, to: null, why: 'GAP: advertiser must re-upload' },
+  { k: 'ad_invoice_receipt', d: { campaignId: 'c1', invoiceNumber: 'INV-1' }, to: null, why: 'GAP: advertiser receipt' },
+  { k: 'ad_reservation_expiring', d: { campaignId: 'c1' }, to: null, why: 'GAP: a 5-minute money deadline' },
+  { k: 'ad_weekly_report', d: { campaignId: 'c1', weekStart: '2026-01-05' }, to: null, why: 'GAP: advertiser report' },
+
+  // ── Admin / ops pages. null is CORRECT: there is no mobile admin app.
+  { k: 'ops_error_spike', to: null, why: 'admins' },
+  { k: 'ops_collusion_affinity', to: null, why: 'admins' },
+  { k: 'ops_billing_failures', to: null, why: 'admins' },
+  { k: 'ops_pool_saturation', to: null, why: 'admins' },
+  { k: 'ops_scheduler_stall', to: null, why: 'admins — kind built from a ternary', scan: false },
+  { k: 'ops_scheduler_never_booted', to: null, why: 'admins — kind built from a ternary', scan: false },
+  { k: 'billing_dunning_ops_task', to: null, why: 'admins' },
+  { k: 'billing_invariants', to: null, why: 'admins' },
+  { k: 'billing_unknown_intents_sla', to: null, why: 'admins' },
+  { k: 'reconcile_mismatch', to: null, why: 'admins' },
+  { k: 'settlement_trailer_mismatch', to: null, why: 'admins' },
+  { k: 'settlement_deposit_mismatch', to: null, why: 'admins' },
+  { k: 'earnings_missing', to: null, why: 'admins' },
+  { k: 'agent_cash_sla', to: null, why: 'admins' },
+  { k: 'category_backfill_review', to: null, why: 'admins' },
+  { k: 'incident_new', d: { caseId: 'c1', caseNumber: 'INC-1' }, to: null, why: 'admins' },
+  { k: 'incident_sla_breach', d: { caseId: 'c1' }, to: null, why: 'admins' },
+  { k: 'incident_weekly_digest', to: null, why: 'admins' },
+  { k: 'incident_pattern_cross_reporter', to: null, why: 'admins' },
+  { k: 'liveness_outage', d: { userId: 'u1' }, to: null, why: 'admins' },
+  { k: 'liveness_review', d: { livenessCheckId: 'l1' }, to: null, why: 'admins' },
+  { k: 'compliance_violation', d: { runId: 'r1' }, to: null, why: 'admins' },
+  { k: 'verification_pending', d: { docId: 'd1' }, to: null, why: 'admins — review queue' },
+  { k: 'verification_sla_breach', d: { slaHours: 24 }, to: null, why: 'admins' },
+  { k: 'integrity_appeal', d: { enforcementId: 'e1' }, to: null, why: 'admins' },
+  { k: 'dup_doc', d: { sha256: 'x' }, to: null, why: 'admins' },
+  { k: 'vendor_pending', d: { vendorId: 'v1' }, to: null, why: 'admins — approve the store' },
+  { k: 'advertiser_application', d: { advertiserId: 'a1' }, to: null, why: 'admins' },
+  { k: 'ad_review_sla_risk', d: { creativeId: 'c1' }, to: null, why: 'admins' },
+  { k: 'ad_campaign_killed_ops', d: { campaignId: 'c1' }, to: null, why: 'admins' },
+  { k: 'ad_refund_payout_task', d: { campaignId: 'c1' }, to: null, why: 'admins' },
+  { k: 'ad_campaign_paid', d: { campaignId: 'c1', invoiceNumber: 'INV-1' }, to: null, why: 'admins' },
+  { k: 'sos_marked_safe', d: { sosAlertId: 'a1' }, to: null, why: 'admins' },
+];
+
+describe('the census: every kind the API sends has an asserted destination', () => {
+  it('routes each one exactly where this table says', () => {
+    for (const c of CENSUS) {
+      expect(destinationFor({ kind: c.k, ...(c.d ?? {}) }), `${c.k} — ${c.why}`).toEqual(c.to);
+    }
+  });
+
+  it('lists each kind once', () => {
+    const seen = new Set<string>();
+    const dupes = CENSUS.filter((c) => (seen.has(c.k) ? true : (seen.add(c.k), false))).map((c) => c.k);
+    expect(dupes).toEqual([]);
+  });
+});
+
+describe('every destination is a route the app actually registers', () => {
+  // THE HomeTabs LESSON: 'HomeTabs' is a component NAME, not a route name (the
+  // customer tabs register as 'Tabs'). safeNavigate swallows an unknown screen
+  // — no crash, no navigation, no error the user can see — so a typo'd screen
+  // is indistinguishable from a working one until someone taps a real push.
+  it('names only screens registered in a navigator', () => {
+    const registered = new Set<string>();
+    for (const file of filesUnder(join(process.cwd(), 'src'), '.tsx')) {
+      for (const m of readFileSync(file, 'utf8').matchAll(/\.Screen[^>]*?name="([A-Za-z0-9_]+)"/g)) {
+        registered.add(m[1]!);
+      }
+    }
+    expect(registered.size).toBeGreaterThan(20); // the scan itself found screens
+
+    const wanted = new Set(CENSUS.map((c) => c.to?.screen).filter((s): s is string => !!s));
+    // Destinations asserted outside the census table too.
+    wanted.add('Taxi');
+    wanted.add('ServiceJobs');
+    const missing = [...wanted].filter((s) => !registered.has(s)).sort();
+    expect(missing, 'tap destinations no navigator registers — these taps go nowhere').toEqual([]);
+  });
+});
+
+// ── The drift guard. A new kind in the API is a routing DECISION, not a
+// silent null: this fails until the kind is added to the census above.
+const API_SRC = join(process.cwd(), '../api/src');
+
+// `kind:` literals in apps/api/src that are NOT push payloads. Each one is a
+// discriminant or an enum-ish label; keeping them named (rather than widening
+// the regex) means a real kind can never hide behind a filter.
+const NOT_PUSH_KINDS = new Set([
+  'pub', 'sub',                                   // socket command failures
+  'invalid', 'reuse', 'success', 'insufficient_assurance', // auth result unions
+  'low', 'out',                                   // stock event level
+  'rider',                                        // admin mover-shape annotation
+  'stall',                                        // scheduler-health union
+]);
+
+function filesUnder(dir: string, ext: '.ts' | '.tsx'): string[] {
+  return readdirSync(dir, { withFileTypes: true }).flatMap((e) => {
+    const p = join(dir, e.name);
+    if (e.isDirectory()) return filesUnder(p, ext);
+    return e.name.endsWith(ext) && !e.name.endsWith(`.test${ext}`) ? [p] : [];
+  });
+}
+
+describe('census drift vs apps/api/src', () => {
+  const sourceIsReadable = existsSync(API_SRC);
+
+  it('can read the API source it is meant to check', () => {
+    // UNVERIFIED beats a fake PASS: if the scan cannot run, say so loudly
+    // rather than reporting a green two-way check it never performed.
+    expect(sourceIsReadable, `${API_SRC} not found — the drift check cannot run`).toBe(true);
+  });
+
+  it('every kind the API sends is in the census (and nothing in the census is phantom)', () => {
+    if (!sourceIsReadable) return;
+    const sent = new Set<string>();
+    for (const file of filesUnder(API_SRC, '.ts')) {
+      for (const m of readFileSync(file, 'utf8').matchAll(/kind: '([a-z][a-z0-9_]*)'/g)) {
+        if (!NOT_PUSH_KINDS.has(m[1]!)) sent.add(m[1]!);
+      }
+    }
+
+    const censusKinds = new Set(CENSUS.map((c) => c.k));
+    const unrouted = [...sent].filter((k) => !censusKinds.has(k)).sort();
+    expect(unrouted, 'API kinds with no census entry — decide where each one lands').toEqual([]);
+
+    // The other direction: a census entry nothing sends is dead weight.
+    const phantom = CENSUS.filter((c) => c.scan !== false && !sent.has(c.k)).map((c) => c.k).sort();
+    expect(phantom, 'census entries the API no longer sends').toEqual([]);
   });
 });
