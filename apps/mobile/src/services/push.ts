@@ -2,6 +2,7 @@ import { Platform } from 'react-native';
 import * as Notifications from 'expo-notifications';
 import Constants from 'expo-constants';
 import axios from 'axios';
+import { color } from '@swift/ui';
 import { API_URL } from './api';
 import { getAuthSessionSnapshot } from '../stores/authStore';
 import {
@@ -74,7 +75,10 @@ async function registerForSession(session: AuthSessionSnapshot, mayPrompt: boole
         name: 'Swift',
         importance: Notifications.AndroidImportance.HIGH,
         vibrationPattern: [0, 250, 250, 250],
-        lightColor: '#803B3B',
+        // Android's channel API takes a hex string, so this cannot be a
+        // token object — but the VALUE still comes from the token, or the
+        // notification LED silently forks the palette.
+        lightColor: color.brand[500],
       });
     }
 

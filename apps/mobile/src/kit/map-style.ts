@@ -15,6 +15,10 @@
 
 import type { ComponentProps } from 'react';
 import type MapView from 'react-native-maps';
+// Google's map styler takes hex STRINGS, so the values below cannot be token
+// objects — but they must still be the token's value, or the map becomes a
+// second palette sitting under the whole rides experience.
+import { color } from '@swift/ui';
 
 export const RIDE_MAP_STYLE_VERSION = 1;
 
@@ -24,7 +28,7 @@ export const rideMapStyleDay: MapStyleElement[] = [
   // Base land — the sheet's warm paper, one material with the app.
   { elementType: 'geometry', stylers: [{ color: '#F3F0EB' }] },
   { elementType: 'labels.text.fill', stylers: [{ color: '#786C6C' }] },
-  { elementType: 'labels.text.stroke', stylers: [{ color: '#FBFBF9' }, { weight: 2 }] },
+  { elementType: 'labels.text.stroke', stylers: [{ color: color.surface.subtle }, { weight: 2 }] },
   { elementType: 'labels.icon', stylers: [{ visibility: 'off' }] },
 
   // POI: icon noise off; keep the two kinds a rider navigates by.
