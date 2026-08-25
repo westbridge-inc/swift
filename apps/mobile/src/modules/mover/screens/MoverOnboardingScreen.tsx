@@ -163,7 +163,14 @@ export function MoverOnboardingScreen({ status }: { status: any }) {
         </T>
         <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: space.md, marginTop: space.lg }}>
           <ValuePill icon="check-decagram" label="Keep 100%" />
-          <ValuePill icon="cash" label="Cash payouts" />
+          {/* "Cash in hand", never "Cash payouts". A payout is money Swift
+              sends you, and Swift never sends a mover money — the customer
+              hands it over and the mover keeps it. The word promised a
+              transfer that does not exist, on the screen where someone
+              decides whether to work here, and it implied Swift moves money
+              on their behalf. It sat directly beside "Keep 100%", which is
+              the true version of the same claim. */}
+          <ValuePill icon="cash" label="Cash in hand" />
           <ValuePill icon="calendar-check" label="Flat weekly fee" />
         </View>
 
