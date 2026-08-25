@@ -229,8 +229,7 @@ export function HomeScreen() {
           hairline-bordered location pill, an INK greeting, and a white search
           field. This is the difference that made every earlier fix still look
           the same — the furniture kept moving inside a room that shouldn't
-          exist. GradientMasthead survives and is still used by five other
-          screens; Home just stops reaching for it. */}
+          exist. `GradientMasthead` is NOT deleted and is still exported from the kit (FG-2), but this screen was the last caller: it now has ZERO call sites app-wide and is dead code awaiting a founder decision. Logged as an FG-2 deletion candidate — not removed here. */}
       <View style={{ paddingTop: insets.top, paddingBottom: space.lg, paddingHorizontal: GUTTER, backgroundColor: color.surface.subtle }}>
         <View style={{ flexDirection: 'row', alignItems: 'center' }}>
           <Pressable

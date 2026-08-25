@@ -1,12 +1,12 @@
 /** @jsxImportSource react */
 import React from 'react';
-import { ScrollView, View, type ViewStyle } from 'react-native';
+import { Pressable, ScrollView, View, type ViewStyle } from 'react-native';
 import { Feather } from '@expo/vector-icons';
-import { color, radius, space, withAlpha } from '@swift/ui';
+import { color, motion, radius, space, withAlpha } from '@swift/ui';
 import { Card, ErrorState, InfoRow, LinkText, LoadingBlock, PillButton, T } from '../../kit';
 import { money } from '../../lib/money';
 import { copyText } from '../../lib/clipboard';
-import { isBehind, isBlocked, shortDate, walletLine, weeklyFeeGyd, weeksCovered } from '../../lib/billing';
+import { daysUntil, isBehind, isBlocked, shortDate, walletLine, weeklyFeeGyd, weeksCovered } from '../../lib/billing';
 
 // ---------------------------------------------------------------------------
 // Billing surfaces (TOLLGATE D) — the payer-facing half of the SAN + agent-cash
@@ -22,7 +22,21 @@ import { isBehind, isBlocked, shortDate, walletLine, weeklyFeeGyd, weeksCovered 
  *  10-digit SAN is copied (what an agent terminal / MMG field wants; every
  *  server consumer strips formatting anyway). A no-op copy leaves the button
  *  as-is — the number is on screen and selectable. */
-function CopyButton({ san }: { san: string }) {
+/**
+ * Copy the Swift Number to the clipboard — ONE implementation, shared.
+ *
+ * This was local to this file, so the rider's SAN screen had "Copy number" and
+ * the vendor's did not, for the same number, on the same rail. Exporting it
+ * rather than writing a second one keeps the honest bit in one place: `copyText`
+ * returns whether the copy actually happened, and on a build where the native
+ * clipboard is absent this stays silent instead of flashing a "Copied" that
+ * never was. The number is always on screen and selectable, so a failed copy is
+ * never a dead end.
+ *
+ * Note it copies the RAW 10 digits, not the grouped display string — an agent
+ * keys digits into a terminal, and pasted spaces are their problem to delete.
+ */
+export function CopyButton({ san }: { san: string }) {
   const [copied, setCopied] = React.useState(false);
   const timer = React.useRef<ReturnType<typeof setTimeout> | null>(null);
   React.useEffect(() => () => {
@@ -140,6 +154,8 @@ function StatusStrip({ sub }: { sub: any }) {
           flexDirection: 'row',
           gap: space.md,
           borderRadius: radius.lg,
+          borderWidth: 1,
+          borderColor: withAlpha(color.error, 0.3),
           backgroundColor: color.soft.danger,
           padding: space.lg,
           marginBottom: space.md,
@@ -165,6 +181,8 @@ function StatusStrip({ sub }: { sub: any }) {
           flexDirection: 'row',
           gap: space.md,
           borderRadius: radius.lg,
+          borderWidth: 1,
+          borderColor: withAlpha(color.warning, 0.35),
           backgroundColor: color.soft.warning,
           padding: space.lg,
           marginBottom: space.md,
@@ -241,6 +259,117 @@ export function SwiftNumberView({
         The weekly fee is Swift&apos;s only charge — you keep 100% of everything you earn.
       </T>
     </ScrollView>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// THE FEE REMINDER BANNER
+//
+// One band across the top of the board: what is owed, when, and the way to
+// clear it — nothing else. The rules it obeys:
+//
+//   · A warning owns its own colour. The ground is the amber blush, the rule is
+//     an amber hairline, the amount is amber — and so is the CTA. Maroon is not
+//     borrowed for this: the brand is not what is being escalated, and a maroon
+//     button here would read as "the app wants something", not "the fee is due".
+//   · Nothing turns red. Being due today is not an error, and a vendor mid-rush
+//     must not be made to think their store just broke.
+//   · It escalates by CONTRAST and by WHICH WORDS ARE PRESENT — "due today" is a
+//     different sentence from "due by 26 Aug" — never by growing, shouting in
+//     caps, or stacking punctuation.
+//   · Every word is server truth. The amount is the payload's amountDueGyd and
+//     appears only when there is one; the day is the payload's own deadline, so
+//     "today" is printed only when the server's date IS today. With no deadline
+//     the band says "due now" and names no day it cannot prove.
+// ---------------------------------------------------------------------------
+
+/** The banner's action. Amber, pill, 36 — deliberately not the kit's maroon
+ *  PillButton (see the note above); deliberately not a bare link either, because
+ *  this is the one thing on the band worth tapping. */
+function AmberCta({ label, onPress }: { label: string; onPress: () => void }) {
+  return (
+    <Pressable onPress={onPress} accessibilityRole="button" accessibilityLabel={label} hitSlop={8}>
+      {({ pressed }) => (
+        <View
+          style={{
+            height: 36,
+            borderRadius: radius.full,
+            paddingHorizontal: space.md,
+            alignItems: 'center',
+            justifyContent: 'center',
+            backgroundColor: color.warning,
+            opacity: pressed ? motion.opacity.pressed : 1,
+          }}
+        >
+          <T variant="label" weight="semibold" style={{ color: color.white }}>
+            {label}
+          </T>
+        </View>
+      )}
+    </Pressable>
+  );
+}
+
+/** The two lines, derived from the server's deadline alone. A deadline already
+ *  past is "due now" — never "due today", which would be a lie on the one screen
+ *  that can least afford one. Both lines are kept short enough to survive a
+ *  narrow phone beside the CTA: a truncated deadline is the same defect as a
+ *  wrong one. Role-neutral wording, because a mover reads this band too. */
+function dueWording(deadline?: string | null): { when: string; sub: string } {
+  const days = daysUntil(deadline ?? null);
+  if (days == null || days < 0) return { when: 'due now', sub: 'Pay to keep going' };
+  if (days === 0) return { when: 'due today', sub: 'Pay any time today' };
+  if (days === 1) return { when: 'due tomorrow', sub: 'Pay any time before then' };
+  return { when: `due by ${shortDate(deadline)}`, sub: 'Pay any time before then' };
+}
+
+/**
+ * The band itself. Self-guarding: it renders only for an account that is behind
+ * (grace / past due) and still operating, so a surface can mount it
+ * unconditionally at the top of a board and it will simply not be there on a
+ * healthy week. A paused account is NOT this band — that state has its own,
+ * fuller block below, because "pay to stay open" and "pay to reopen" are
+ * different sentences.
+ */
+export function FeeReminderBanner({ sub, onPay, style }: { sub: any; onPay?: () => void; style?: ViewStyle }) {
+  if (!sub || !isBehind(sub)) return null;
+  const due = Number(sub.amountDueGyd ?? 0);
+  const { when, sub: subLine } = dueWording(sub.gracePeriodEnd);
+  // The amount leads when the server gave us one; otherwise the state leads and
+  // no number is invented to fill the gap.
+  const headline = due > 0 ? `${money(due)} ${when}` : `${when.charAt(0).toUpperCase()}${when.slice(1)}`;
+  return (
+    <View
+      style={[
+        {
+          marginTop: space.md,
+          flexDirection: 'row',
+          alignItems: 'center',
+          gap: space.md,
+          minHeight: 56,
+          borderRadius: radius.lg,
+          borderWidth: 1,
+          borderColor: withAlpha(color.warning, 0.35),
+          backgroundColor: color.soft.warning,
+          paddingHorizontal: space.lg,
+          paddingVertical: space.sm,
+        },
+        style,
+      ]}
+    >
+      {/* Sits on the FIRST line, not centred against both — the mark belongs to
+          the amount, and the sub-line reads as a note under it. */}
+      <Feather name="alert-triangle" size={18} color={color.warning} style={{ alignSelf: 'flex-start', marginTop: 2 }} />
+      <View style={{ flex: 1 }}>
+        <T variant="numM" tone="warning" numberOfLines={1}>
+          {headline}
+        </T>
+        <T variant="caption" tone="muted" numberOfLines={1}>
+          {subLine}
+        </T>
+      </View>
+      {onPay ? <AmberCta label="Pay now" onPress={onPay} /> : null}
+    </View>
   );
 }
 
@@ -328,34 +457,10 @@ export function BillingStatusBlock({
     );
   }
 
-  // Grace / PAST_DUE (still operating) — the softer amber nudge.
-  if (isBehind(sub)) {
-    const by = shortDate(sub.gracePeriodEnd);
-    return (
-      <View
-        style={[
-          { marginTop: space.md, borderRadius: radius.lg, backgroundColor: color.soft.warning, padding: space.lg },
-          style,
-        ]}
-      >
-        <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.sm }}>
-          <Feather name="alert-triangle" size={16} color={color.warning} />
-          <T variant="label" weight="bold" tone="warning" style={{ flex: 1 }}>
-            Fee due{by ? ` by ${by}` : ''}
-            {due > 0 ? ` · ${money(due)}` : ''}
-          </T>
-        </View>
-        <T variant="caption" tone="muted" style={{ marginTop: space.xs }}>
-          Pay before then to keep going without a break.
-        </T>
-        {onPay ? (
-          <View style={{ marginTop: space.sm }}>
-            <LinkText label="How to pay" onPress={onPay} />
-          </View>
-        ) : null}
-      </View>
-    );
-  }
+  // Grace / PAST_DUE (still operating) — the reminder band. Same handler as
+  // before (`onPay` still opens the How-to-pay surface); it is now the band's
+  // amber CTA instead of a link buried under two lines of copy.
+  if (isBehind(sub)) return <FeeReminderBanner sub={sub} onPay={onPay} style={style} />;
 
   // Healthy — surface a parked wallet balance as reassurance (covers N weeks).
   const wallet = walletLine(Number(sub.walletBalanceGyd ?? 0), weeklyFeeGyd(sub));

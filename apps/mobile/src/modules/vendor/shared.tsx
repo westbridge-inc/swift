@@ -2,7 +2,7 @@
 import React from 'react';
 import { Pressable, TextInput, View } from 'react-native';
 import { Feather, MaterialCommunityIcons } from '@expo/vector-icons';
-import { color, elevation, radius, space } from '@swift/ui';
+import { color, radius, space } from '@swift/ui';
 import { T, TonePill } from '../../kit';
 
 export const GUTTER = space['2xl'];
@@ -94,21 +94,49 @@ export function prettyStatus(status?: string) {
   return s.charAt(0).toUpperCase() + s.slice(1);
 }
 
+/**
+ * The board's THREE deliberate pill treatments. An order walking the lane is
+ * the one thing a vendor reads across the room, so each stage owns a different
+ * weight of ink — not three shades of the same chip:
+ *   now    — maroon fill, white text     · it needs you NOW (the only solid one)
+ *   inHand — blush fill, maroon text     · in hand, nothing owed from you yet
+ *   done   — viridian tint, green text   · done, waiting on someone else
+ * One set of metrics for all three, so the row does not shift a pixel as the
+ * order moves. Colours are tokens; the treatment map is the only place they
+ * are chosen.
+ */
+const PILL_TREATMENT = {
+  now: { bg: color.brand[500], fg: color.text.onBrand },
+  inHand: { bg: color.brand[50], fg: color.brand[600] },
+  done: { bg: color.soft.success, fg: color.success },
+} as const;
+
+function BoardPill({ label, treatment }: { label: string; treatment: keyof typeof PILL_TREATMENT }) {
+  const t = PILL_TREATMENT[treatment];
+  return (
+    <View
+      style={{
+        alignSelf: 'flex-start',
+        borderRadius: radius.full,
+        paddingHorizontal: space.md,
+        paddingVertical: space.xs,
+        backgroundColor: t.bg,
+      }}
+    >
+      <T variant="caption" weight="semibold" style={{ color: t.fg }}>
+        {label}
+      </T>
+    </View>
+  );
+}
+
 /** Order status pill — "New" pops in solid brand; the rest are soft tints. */
 export function OrderStatusPill({ status }: { status: string }) {
   const s = (status || '').toUpperCase();
-  if (s === 'PENDING' || s === 'PLACED') {
-    return (
-      <View style={{ borderRadius: 9999, paddingHorizontal: space.md, paddingVertical: 5, backgroundColor: color.brand[500] }}>
-        <T variant="caption" weight="semibold" tone="onBrand">
-          New
-        </T>
-      </View>
-    );
-  }
-  if (s === 'ACCEPTED' || s === 'CONFIRMED') return <TonePill label="Accepted" tone="brand" />;
-  if (s === 'PREPARING') return <TonePill label="Preparing" tone="neutral" />;
-  if (s === 'READY' || s === 'READY_FOR_PICKUP') return <TonePill label="Ready" tone="success" />;
+  if (s === 'PENDING' || s === 'PLACED') return <BoardPill label="New" treatment="now" />;
+  if (s === 'ACCEPTED' || s === 'CONFIRMED') return <BoardPill label="Accepted" treatment="inHand" />;
+  if (s === 'PREPARING') return <BoardPill label="Preparing" treatment="inHand" />;
+  if (s === 'READY' || s === 'READY_FOR_PICKUP') return <BoardPill label="Ready" treatment="done" />;
   if (s === 'RIDER_ASSIGNED') return <TonePill label="Rider assigned" tone="brand" />;
   if (s === 'RIDER_EN_ROUTE_PICKUP') return <TonePill label="Rider en route" tone="brand" />;
   if (s === 'RIDER_ARRIVED_PICKUP') return <TonePill label="Rider at counter" tone="brand" />;
@@ -125,8 +153,8 @@ export function FulfillmentTag({ icon, label }: { icon: keyof typeof MaterialCom
       style={{
         flexDirection: 'row',
         alignItems: 'center',
-        gap: 4,
-        borderRadius: 9999,
+        gap: space.xs,
+        borderRadius: radius.full,
         backgroundColor: color.brand[50],
         paddingHorizontal: space.sm,
         paddingVertical: 2,
@@ -258,7 +286,15 @@ export function InlineInput({
   );
 }
 
-/** KPI tile; `delta` (optional) renders top-right — e.g. a period-over-period move. */
+/**
+ * KPI tile; `delta` (optional) renders top-right — e.g. a period-over-period move.
+ *
+ * A white card on paper held up by a HAIRLINE, not a shadow: the number is the
+ * only loud thing on it. The display face at `numL` (tabular) is what a vendor
+ * reads at arm's length; the label beneath stays muted so the pair reads as one
+ * fact, and the glyph is a quiet ink marker rather than a maroon dot — maroon on
+ * this board belongs to the New pill and the one primary CTA.
+ */
 export function KpiTile({
   icon,
   value,
@@ -271,12 +307,22 @@ export function KpiTile({
   delta?: React.ReactNode;
 }) {
   return (
-    <View style={[{ flex: 1, borderRadius: radius.lg, backgroundColor: color.surface.base, padding: space.md }, elevation.card]}>
-      <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
-        <MaterialCommunityIcons name={icon} size={18} color={color.brand[500]} />
+    <View
+      style={{
+        flex: 1,
+        borderRadius: radius.lg,
+        borderWidth: 1,
+        borderColor: color.border.subtle,
+        backgroundColor: color.surface.base,
+        paddingHorizontal: space.lg,
+        paddingVertical: space.md,
+      }}
+    >
+      <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', minHeight: 18 }}>
+        <MaterialCommunityIcons name={icon} size={16} color={color.text.muted} />
         {delta ?? null}
       </View>
-      <T variant="numM" numberOfLines={1} style={{ marginTop: space.xs }}>
+      <T variant="numL" numberOfLines={1} style={{ marginTop: space.xs }}>
         {value}
       </T>
       <T variant="caption" tone="muted" numberOfLines={1}>
@@ -286,12 +332,16 @@ export function KpiTile({
   );
 }
 
-/** Period-over-period move, computed from the backend's own daily series. */
+/** Period-over-period move, computed from the backend's own daily series.
+ *  A move up is viridian, not maroon: on the board maroon is reserved for the
+ *  one thing that needs a tap (the New pill, the primary CTA), and a delta is
+ *  never that. Down and level stay muted — the number is the story, not the
+ *  chip. */
 export function DeltaBadge({ cur, prev }: { cur: number; prev: number | null }) {
   if (prev == null) return null;
   if (prev <= 0) {
     return cur > 0 ? (
-      <T variant="caption" weight="semibold" tone="brand">
+      <T variant="caption" weight="semibold" tone="success">
         new
       </T>
     ) : null;
@@ -305,7 +355,7 @@ export function DeltaBadge({ cur, prev }: { cur: number; prev: number | null }) 
     );
   const up = pct > 0;
   return (
-    <T variant="caption" weight="semibold" tone={up ? 'brand' : 'muted'}>
+    <T variant="caption" weight="semibold" tone={up ? 'success' : 'muted'}>
       {up ? '▲' : '▼'} {Math.abs(pct)}%
     </T>
   );
@@ -366,7 +416,7 @@ export function BoardFirstRunRow({
             style={{
               width: 24,
               height: 24,
-              borderRadius: 12,
+              borderRadius: radius.full,
               alignItems: 'center',
               justifyContent: 'center',
               backgroundColor: color.surface.onBrand,
@@ -439,7 +489,7 @@ export function BoardFirstRun({
           style={{
             width: 7,
             height: 7,
-            borderRadius: 4,
+            borderRadius: radius.full,
             backgroundColor: listening ? color.success : color.warning,
           }}
         />
