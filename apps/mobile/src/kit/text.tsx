@@ -55,6 +55,8 @@ const VARIANT: Record<keyof typeof typeScale, TextStyle> = {
   micro: typeScale.micro as TextStyle,
   numL: typeScale.numL as TextStyle,
   numM: typeScale.numM as TextStyle,
+  payAmount: typeScale.payAmount as TextStyle,
+  accountNumber: typeScale.accountNumber as TextStyle,
 };
 
 /** Exported for the exhaustiveness test only — the runtime half of the guard
@@ -91,7 +93,7 @@ export interface TP extends TextProps, TTone {
 // step misspelled here silently loses face integrity — a `weight` override
 // would swap Bricolage for Hanken, and Hanken carries no `tnum`, so money
 // quietly stops being tabular. A build error is a much cheaper way to find out.
-const DISPLAY_FACE = new Set<keyof typeof VARIANT>(['displayXl', 'display', 'title', 'numL', 'numM']);
+const DISPLAY_FACE = new Set<keyof typeof VARIANT>(['displayXl', 'display', 'title', 'numL', 'numM', 'payAmount', 'accountNumber']);
 
 /** [F-027-05] A caller's own lineHeight still has to scale. */
 function scaleCallerLineHeight(style: TP['style'], fontScale: number): TP['style'] {

@@ -46,3 +46,13 @@ export * from './choice-chip';
 export * from './pressable-scale';
 export * from './scrim';
 export * from './switch';
+// [Wave 3] The composite primitives the Design Standard names on nearly every
+// screen — authored once here so the 50-screen rebuilds compose instead of
+// hand-rolling: Eyebrow/StatePill/StatusDot, IconTile/StatTile, Dock,
+// Segmented, ReceiptBill, MapPeek.
+export * from './labels';
+export * from './tiles';
+export * from './dock';
+export * from './segmented';
+export * from './receipt-bill';
+export * from './map-peek';

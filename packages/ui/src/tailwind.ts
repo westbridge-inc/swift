@@ -1,4 +1,4 @@
-import { color, font, fontSize, lineHeight, space, radius, shadow } from './tokens';
+import { color, font, fontSize, lineHeight, space, radius, shadow, typeScale } from './tokens';
 
 /**
  * The NativeWind / Tailwind token map — `theme.extend` for apps/mobile's
@@ -36,6 +36,9 @@ export const swiftTailwindTheme = {
     '2xl': [`${fontSize['2xl']}px`, `${lineHeight['2xl']}px`],
     '3xl': [`${fontSize['3xl']}px`, `${lineHeight['3xl']}px`],
     '4xl': [`${fontSize['4xl']}px`, `${lineHeight['4xl']}px`],
+    // The two deck-mandated one-off steps — see typeScale's note; rare on purpose.
+    payAmount: [`${typeScale.payAmount.fontSize}px`, `${typeScale.payAmount.lineHeight}px`],
+    accountNumber: [`${typeScale.accountNumber.fontSize}px`, `${typeScale.accountNumber.lineHeight}px`],
   },
   borderRadius: {
     sm: `${radius.sm}px`,
