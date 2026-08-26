@@ -74,6 +74,14 @@ beforeAll(async () => {
   await app.register(prismaPlugin);
   await app.register(authPlugin);
   app.get('/probe', { preHandler: [app.authenticate] }, async (request) => ({ ok: true, userId: request.user.userId }));
+  // [REPORT-033 #25] The optional decorator has its own outage branch — a
+  // guest-personalization route, so the contract is "never refuse, never
+  // crash, attach the user only when the session is genuinely live".
+  app.get('/probe-optional', { preHandler: [app.authenticateOptional] }, async (request) => ({
+    ok: true,
+    userId: (request as { user?: { userId?: string } }).user?.userId ?? null,
+    sessionId: request.authSessionId ?? null,
+  }));
   await app.ready();
   liveToken = (await makeSession()).token;
 });
@@ -135,5 +143,66 @@ describe('[F-250] authenticate distinguishes an outage from a credential verdict
     const res = await probe(s.token);
     expect(res.statusCode).toBe(401);
     expect(res.json().error.code).toBe('UNAUTHORIZED');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// [REPORT-033 #25] authenticateOptional has an INDEPENDENT outage/session
+// branch that had zero test references — every outage case above registers
+// only `authenticate`. Its contract: never refuse, never crash; attach the
+// user only when the session is genuinely live; an unreachable store demotes
+// to GUEST (loudly, in the log) instead of 401ing a browser.
+// ---------------------------------------------------------------------------
+const probeOptional = (token?: string) =>
+  app.inject({ method: 'GET', url: '/probe-optional', headers: token ? { authorization: `Bearer ${token}` } : {} });
+
+describe('[REPORT-033 #25] authenticateOptional — the guest-demotion matrix', () => {
+  it('a live token personalizes: user + session attached', async () => {
+    const res = await probeOptional(liveToken);
+    expect(res.statusCode).toBe(200);
+    expect(res.json().userId).toBe(createdUserIds[0]);
+    expect(res.json().sessionId).not.toBeNull();
+  });
+
+  it('no token at all is a plain guest 200', async () => {
+    const res = await probeOptional();
+    expect(res.statusCode).toBe(200);
+    expect(res.json().userId).toBeNull();
+  });
+
+  it('a garbage token is a guest 200 — the optional door never 401s', async () => {
+    const res = await probeOptional('not-a-jwt');
+    expect(res.statusCode).toBe(200);
+    expect(res.json().userId).toBeNull();
+  });
+
+  it('a valid token + UNREACHABLE session store demotes to GUEST — never 401, never 503, never a crash', async () => {
+    const spy = vi.spyOn(app.prisma.session, 'findUnique').mockRejectedValue(
+      Object.assign(new Error("Can't reach database server at `localhost:5434`"), {
+        name: 'PrismaClientInitializationError',
+      }),
+    );
+    try {
+      const res = await probeOptional(liveToken);
+      expect(res.statusCode).toBe(200);
+      expect(res.json().userId).toBeNull();
+      expect(res.json().sessionId).toBeNull();
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('and recovers: the same token personalizes again the moment the store is back', async () => {
+    const res = await probeOptional(liveToken);
+    expect(res.statusCode).toBe(200);
+    expect(res.json().userId).toBe(createdUserIds[0]);
+  });
+
+  it('a BANNED account token browses as a guest, never as the banned user', async () => {
+    const s = await makeSession();
+    await app.prisma.user.update({ where: { id: s.userId }, data: { status: 'BANNED' } });
+    const res = await probeOptional(s.token);
+    expect(res.statusCode).toBe(200);
+    expect(res.json().userId).toBeNull();
   });
 });
