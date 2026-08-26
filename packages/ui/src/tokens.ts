@@ -198,7 +198,9 @@ export const typeScale: Record<
   | 'caption'
   | 'micro'
   | 'numL'
-  | 'numM',
+  | 'numM'
+  | 'payAmount'
+  | 'accountNumber',
   TypeStep
 > = {
   displayXl: { fontSize: 34, lineHeight: 38, fontFamily: font.display, fontVariant: ['tabular-nums'] }, // hold countdown, PIN digits, hero money
@@ -219,6 +221,12 @@ export const typeScale: Record<
   micro: { fontSize: 11, lineHeight: 14, fontFamily: font.bodyMedium, letterSpacing: 0.6, textTransform: 'uppercase' }, // eyebrows, AD chip, badges
   numL: { fontSize: 24, lineHeight: 28, fontFamily: font.display, fontVariant: ['tabular-nums'] }, // prices, earnings, totals
   numM: { fontSize: 17, lineHeight: 22, fontFamily: font.displaySemiBold, fontVariant: ['tabular-nums'] }, // money in lists and rows
+  // The TWO deck-mandated one-off steps [Design Standard §05 ②] — each exists
+  // for exactly one moment where a number IS the screen. Do not reach for
+  // these anywhere else; "one element is unambiguously the biggest thing"
+  // only works while these stay rare.
+  payAmount: { fontSize: 60, lineHeight: 64, fontFamily: font.display, fontVariant: ['tabular-nums'] }, // the amount on the pay screen (GY$10,000)
+  accountNumber: { fontSize: 38, lineHeight: 44, fontFamily: font.display, fontVariant: ['tabular-nums'] }, // the Swift Number as an identity mark
 };
 
 /** §Space + radius (ported from theme/spacing.ts) — rounded, friendly. */

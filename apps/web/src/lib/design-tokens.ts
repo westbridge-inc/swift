@@ -105,6 +105,11 @@ export const swiftDesignVariables: SwiftCssVariables = {
   '--swift-leading-title': px(typeScale.title.lineHeight),
   '--swift-type-heading': px(typeScale.heading.fontSize),
   '--swift-leading-heading': px(typeScale.heading.lineHeight),
+  // The two deck-mandated one-off steps (pay screen amount · Swift Number).
+  '--swift-type-pay-amount': px(typeScale.payAmount.fontSize),
+  '--swift-leading-pay-amount': px(typeScale.payAmount.lineHeight),
+  '--swift-type-account-number': px(typeScale.accountNumber.fontSize),
+  '--swift-leading-account-number': px(typeScale.accountNumber.lineHeight),
   '--swift-type-body': px(typeScale.body.fontSize),
   '--swift-leading-body': px(typeScale.body.lineHeight),
   '--swift-type-label': px(typeScale.label.fontSize),

@@ -28,6 +28,13 @@ const PORTED = [
   'pressable-scale.tsx',
   'scrim.tsx',
   'image.tsx',
+  // [Wave 3] The composite primitives ride the same three laws.
+  'labels.tsx',
+  'tiles.tsx',
+  'dock.tsx',
+  'segmented.tsx',
+  'receipt-bill.tsx',
+  'map-peek.tsx',
 ] as const;
 
 describe('DRIFT-09 ports are token-only', () => {
