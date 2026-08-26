@@ -200,6 +200,35 @@ const MAX_DELIVERY_RADIUS_KM = 25;
 // the "must match order.service" comment era is over: the preview and the
 // charge read the same constants by construction.
 const HOME_CACHE_TTL = 60; // 1 min
+
+/**
+ * Drop every cached Home feed belonging to one customer.
+ *
+ * The feed is written at `t:<tenant>:home:<userId>:<lat>:<lng>` — the
+ * coordinates are part of the key, so the exact key cannot be rebuilt from
+ * a userId alone and a pattern is unavoidable. The pattern must therefore be
+ * built by the SAME helper that builds the key: the three call sites used to
+ * pass a hand-written `home:${userId}:*`, which stopped matching anything the
+ * day [SWIFT-SEC-CACHE] added the tenant prefix to the writer and not to
+ * them. Nothing was ever invalidated — a favourited store, and the Home feed
+ * behind a just-placed order, stayed stale for the full TTL.
+ *
+ * SCAN rather than KEYS: now that the pattern matches, this runs for real on
+ * every favourite toggle and every checkout, and KEYS blocks the whole Redis
+ * instance for the length of the scan.
+ */
+async function invalidateHomeCache(app: FastifyInstance, userId: string): Promise<void> {
+  const pattern = tenantCacheKey(`home:${userId}:*`);
+  const doomed: string[] = [];
+  let cursor = '0';
+  do {
+    const [next, batch] = await app.redis.scan(cursor, 'MATCH', pattern, 'COUNT', 100);
+    cursor = next;
+    doomed.push(...batch);
+  } while (cursor !== '0');
+  if (doomed.length > 0) await app.redis.del(...doomed);
+}
+
 const MAX_ADDRESSES = 10;
 // SWIFT-163: the Home discovery scan is bounded so an ever-growing catalogue
 // can't load every ACTIVE vendor into memory per request. The feed only ever
@@ -1353,8 +1382,7 @@ export async function customerRoutes(app: FastifyInstance) {
     });
 
     // Invalidate home cache
-    const keys = await app.redis.keys(`home:${userId}:*`).catch(() => [] as string[]);
-    if (keys.length > 0) await app.redis.del(...keys).catch(() => {});
+    await invalidateHomeCache(app, userId).catch(() => {});
 
     reply.code(201);
     return { success: true, data: { message: `${vendor.name} added to favorites` } };
@@ -1369,8 +1397,7 @@ export async function customerRoutes(app: FastifyInstance) {
       data: { favoriteVendors: { disconnect: { id: vendorId } } },
     });
 
-    const keys = await app.redis.keys(`home:${userId}:*`).catch(() => [] as string[]);
-    if (keys.length > 0) await app.redis.del(...keys).catch(() => {});
+    await invalidateHomeCache(app, userId).catch(() => {});
 
     return { success: true, data: { message: 'Removed from favorites' } };
   });
@@ -1828,7 +1855,7 @@ export async function customerRoutes(app: FastifyInstance) {
     // Invalidate caches
     await Promise.all([
       app.redis.del(`cart:${userId}`).catch(() => {}),
-      app.redis.keys(`home:${userId}:*`).then((keys) => keys.length > 0 ? app.redis.del(...keys) : null).catch(() => {}),
+      invalidateHomeCache(app, userId).catch(() => {}),
     ]);
 
     // Store the result for idempotent replay (best-effort — the order exists
