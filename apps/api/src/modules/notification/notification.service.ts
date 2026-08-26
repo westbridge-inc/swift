@@ -50,6 +50,13 @@ interface NotificationPayload {
   /** Surface this belongs to — merged into data.audience. */
   audience?: NotificationAudience;
   data?: Record<string, unknown>;
+  /** [REPORT-034 #30] Deterministic idempotency key, per user. Pass one from
+   *  any RETRIED path (every BullMQ job retries with backoff) so a retry that
+   *  re-runs `send` collapses into the first delivery instead of duplicating
+   *  the inbox row and the push. Omit everywhere else — NULL keys never
+   *  collide. Key discipline: derive from the FACT being announced
+   *  (`'liveness-prompt:' + deadlineISO`), never from Date.now(). */
+  dedupeKey?: string;
 }
 
 /**
@@ -269,9 +276,28 @@ export class NotificationService {
           title: payload.title,
           body: payload.body,
           data: (data ?? undefined) as any,
+          dedupeKey: payload.dedupeKey ?? null,
         },
       });
     } catch (err) {
+      // [REPORT-034 #30] A dedupe-key collision is the mechanism WORKING, not
+      // a failure: a retried job re-ran a send that already landed. Return the
+      // first delivery's id and deliberately do NOT re-fan-out — suppressing
+      // the duplicate push is the whole point. (The narrow crash window
+      // between persist and fan-out trades a possibly-lost push for never
+      // paging a person twice; the inbox row is the durable record either way.)
+      if (
+        payload.dedupeKey &&
+        (err as { code?: string }).code === 'P2002'
+      ) {
+        try {
+          const existing = await this.prisma.notification.findUnique({
+            where: { userId_dedupeKey: { userId: payload.userId, dedupeKey: payload.dedupeKey } },
+            select: { id: true },
+          });
+          if (existing) return existing.id;
+        } catch { /* fall through to the failure path below */ }
+      }
       log().warn({ err, userId: payload.userId, type: payload.type }, 'notification persist failed');
       notificationFailuresCounter.inc({ channel: 'db', stage: 'persist' });
       return '';

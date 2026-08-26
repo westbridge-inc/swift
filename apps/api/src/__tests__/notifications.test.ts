@@ -164,6 +164,60 @@ describe('Channels — one interface, dev adapter logs everything', () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// [REPORT-034 #30] send() idempotency. Every BullMQ job retries with backoff,
+// so any notification sent inside one could land twice — same inbox row, same
+// push, twice. A deterministic dedupeKey collapses the retry into the first
+// delivery; keyless sends keep today's behavior exactly (NULLs never collide).
+// ---------------------------------------------------------------------------
+describe('send() dedupeKey — a retried job never pages a person twice', () => {
+  it('the same key collapses: one inbox row, one push, both calls return the first id', async () => {
+    const user = await makeUser(['CUSTOMER'], 'CUSTOMER');
+    const deviceToken = `dev-token-${nanoid(8)}`;
+    await app.prisma.deviceToken.create({ data: { userId: user.userId, token: deviceToken, platform: 'android' } });
+
+    const key = `test-fact:${nanoid(6)}`;
+    const first = await notifications.send({
+      userId: user.userId, type: 'SYSTEM_ANNOUNCEMENT', title: 'Once', body: 'Retried jobs land once', dedupeKey: key,
+    });
+    const second = await notifications.send({
+      userId: user.userId, type: 'SYSTEM_ANNOUNCEMENT', title: 'Once', body: 'Retried jobs land once', dedupeKey: key,
+    });
+
+    expect(first).not.toBe('');
+    expect(second).toBe(first); // the retry got the FIRST delivery's receipt
+    expect(await app.prisma.notification.count({ where: { userId: user.userId, dedupeKey: key } })).toBe(1);
+    expect(pushEntriesTo(deviceToken)).toHaveLength(1); // and exactly one push
+  });
+
+  it('different keys are different facts — two rows', async () => {
+    const user = await makeUser(['CUSTOMER'], 'CUSTOMER');
+    const a = await notifications.send({ userId: user.userId, type: 'SYSTEM_ANNOUNCEMENT', title: 'A', body: 'a', dedupeKey: `fact-a:${nanoid(6)}` });
+    const b = await notifications.send({ userId: user.userId, type: 'SYSTEM_ANNOUNCEMENT', title: 'B', body: 'b', dedupeKey: `fact-b:${nanoid(6)}` });
+    expect(a).not.toBe(b);
+    expect(await app.prisma.notification.count({ where: { userId: user.userId } })).toBe(2);
+  });
+
+  it('keyless sends never collide — existing callers are untouched', async () => {
+    const user = await makeUser(['CUSTOMER'], 'CUSTOMER');
+    const a = await notifications.send({ userId: user.userId, type: 'SYSTEM_ANNOUNCEMENT', title: 'X', body: 'x' });
+    const b = await notifications.send({ userId: user.userId, type: 'SYSTEM_ANNOUNCEMENT', title: 'X', body: 'x' });
+    expect(a).not.toBe(b);
+    expect(await app.prisma.notification.count({ where: { userId: user.userId } })).toBe(2);
+  });
+
+  it('the same key for DIFFERENT users never collapses — the key is per person', async () => {
+    const u1 = await makeUser(['CUSTOMER'], 'CUSTOMER');
+    const u2 = await makeUser(['CUSTOMER'], 'CUSTOMER');
+    const key = 'shared-fact:deadline-2026-08-26T20:00:00Z';
+    const a = await notifications.send({ userId: u1.userId, type: 'SYSTEM_ANNOUNCEMENT', title: 'S', body: 's', dedupeKey: key });
+    const b = await notifications.send({ userId: u2.userId, type: 'SYSTEM_ANNOUNCEMENT', title: 'S', body: 's', dedupeKey: key });
+    expect(a).not.toBe('');
+    expect(b).not.toBe('');
+    expect(a).not.toBe(b);
+  });
+});
+
 describe('THE vendor order alert — unmissable until acknowledged', () => {
   let vendorUser: { userId: string; phone: string; token: string };
   let vendorId: string;
