@@ -23,6 +23,15 @@ const NETWORK_SECURITY_CONFIG = `<?xml version="1.0" encoding="utf-8"?>
       <pin digest="SHA-256">C5+lpZ7tcVwmwQIMcRtPbsQtWLABXhQzejna0wHFr8M=</pin>
       <!-- ISRG Root X2 (Let's Encrypt), SPKI SHA-256 -->
       <pin digest="SHA-256">diGVwiVYbubAI3RW4hB9xU8e/CH2GnkuvVFZE8zmgzI=</pin>
+      <!-- [V4] BACKUP CA: GTS Root R1 (Google Trust Services), SPKI SHA-256,
+           computed 2026-08-25 from https://pki.goog/repo/certs/gtsr1.pem.
+           Pinning only the live CA is a scheduled outage: a CA switch (or LE
+           retiring these roots) would strand every installed build with no
+           server-side remedy. GTS is the designated fallback issuer.
+           ROTATION IS A RELEASE CHECKLIST ITEM — revisit by 2027-07-01, a
+           year ahead of the hard expiration above. Mirrored on iOS in
+           app.config.ts NSPinnedCAIdentities. -->
+      <pin digest="SHA-256">hxqRlPTu1bMS/0DITB1SSu0vd4u/8l8TjPgfaAp63Gc=</pin>
     </pin-set>
   </domain-config>
   <!-- Declaring networkSecurityConfig REPLACES the platform default, and with

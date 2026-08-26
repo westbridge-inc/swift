@@ -1,4 +1,4 @@
-import { describe, it, expect, afterEach } from 'vitest';
+import { describe, it, expect, afterEach, vi } from 'vitest';
 import { assertSafeBootConfig, assertProductionData } from '../utils/boot-config';
 
 // SWIFT-AUD-D9-02 / D3-01: production must refuse to boot without the two
@@ -202,6 +202,35 @@ describe('[F-027-15] getPushProvider refuses the in-memory provider in productio
       process.env['NODE_ENV'] = env;
       process.env['PUSH_PROVIDER'] = 'dev';
       expect(() => getPushProvider(), env).not.toThrow();
+    }
+  });
+});
+
+// [V8] CONSENT_IP_PEPPER degrades silently (hashIp → null, attribution just
+// stops). Boot must at least be LOUD about it — a warning, not a refusal,
+// because the ledger's core evidence still writes without it.
+describe('CONSENT_IP_PEPPER visibility [V8]', () => {
+  it('warns at production boot when the pepper is missing or short', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      assertSafeBootConfig({ ...good });
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining('CONSENT_IP_PEPPER'));
+      warn.mockClear();
+      assertSafeBootConfig({ ...good, CONSENT_IP_PEPPER: 'short' });
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining('CONSENT_IP_PEPPER'));
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('stays quiet when a 32+ character pepper is configured', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      assertSafeBootConfig({ ...good, CONSENT_IP_PEPPER: 'p'.repeat(32) });
+      const pepperWarnings = warn.mock.calls.filter((c) => String(c[0]).includes('CONSENT_IP_PEPPER'));
+      expect(pepperWarnings).toHaveLength(0);
+    } finally {
+      warn.mockRestore();
     }
   });
 });
