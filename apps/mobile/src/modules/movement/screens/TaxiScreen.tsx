@@ -22,7 +22,7 @@ import { LocationPrimerCard } from '../../../components/LocationPrimerCard';
 import { money } from '../../../lib/money';
 import { mediaUrl } from '../../../lib/images';
 import { haptic } from '../../../lib/haptics';
-import { toast } from '../../../components/ui/toast';
+import { toast } from '../../../kit/toast';
 import { safetyApi, type RideClass, type TierEstimate } from '../../../services/api';
 import { Card, CircleChip, IconChip, LoadingBlock, Money, PillButton, Pictogram, type PictogramName, PinGlyph, PopupCard, PopupTitle, Stars, T, VehicleRender, cardShadow } from '../../../kit';
 import { VERTICAL_TINT } from '../../../kit/vertical-tint';

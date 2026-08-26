@@ -11,7 +11,7 @@ import { color, radius, space } from '@swift/ui';
 import { useDiscoveryCategories, useHome, useToggleFavorite } from '../../../hooks/customer';
 import { useAds } from '../../../hooks/ads';
 import { AdHeroVideo, AdTopCard, AdBar } from '../../../components/ads';
-import { PressableScale } from '../../../components/ui';
+import { PressableScale } from '../../../kit/pressable-scale';
 import { Scrim } from '../../../components/ui/scrim';
 import { grantedLocationFix } from '../../../lib/deviceLocation';
 import { locationPrimer } from '../../../lib/location-primer';

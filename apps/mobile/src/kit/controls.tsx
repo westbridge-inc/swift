@@ -181,8 +181,8 @@ export function Stars({
 }
 
 /** Pill chip — categories, filters, sort options.
- *  `emoji` is DEPRECATED (design-100× Part 14: emoji are never UI icons) —
- *  remaining passers lose it as their flow is elevated; then the prop dies. */
+ *  (`emoji` is gone — DRIFT-11: emoji are never UI icons, and the last passer
+ *  was elevated. Icons come from the pictogram hand, or nothing.) */
 /**
  * `tint` lets a chip carry a VERTICAL IDENTITY when selected instead of the
  * house brand — so filtering by Groceries in search feels like the same act as
@@ -191,14 +191,12 @@ export function Stars({
  */
 export function Chip({
   label,
-  emoji,
   selected = false,
   tint,
   onPress,
   style,
 }: {
   label: string;
-  emoji?: string;
   selected?: boolean;
   tint?: { bg: string; ink: string };
   onPress?: () => void;
@@ -237,7 +235,6 @@ export function Chip({
             style,
           ]}
         >
-          {emoji ? <T variant="body">{emoji}</T> : null}
           <T
             variant="label"
             weight={selected ? 'semibold' : 'medium'}

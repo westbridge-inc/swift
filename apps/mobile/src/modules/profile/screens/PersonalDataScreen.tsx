@@ -14,7 +14,7 @@ import {
   useAuthStore,
 } from '../../../stores/authStore';
 import { ErrorState, Header, IconChip, LabeledInput, LoadingBlock, PillButton, PopupCard, PopupTitle, Screen, SettingsRow, T } from '../../../kit';
-import { toast } from '../../../components/ui/toast';
+import { toast } from '../../../kit/toast';
 
 const GUTTER = space['2xl'];
 

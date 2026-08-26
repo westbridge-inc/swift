@@ -1,7 +1,6 @@
 /** @jsxImportSource react */
 import React from 'react';
-import { StyleSheet, View, useWindowDimensions, type ViewProps } from 'react-native';
-import Svg, { Path } from 'react-native-svg';
+import { StyleSheet, View, type ViewProps } from 'react-native';
 import { color } from '@swift/ui';
 
 // Vertical gradient via stacked solid slices. react-native-svg gradients render
@@ -46,32 +45,9 @@ export function GradientMasthead({
   );
 }
 
-/**
- * The awning hem [design-100x Part 10, HOME signature]. Georgetown commerce
- * happens under storefront awnings — the `shops` pictogram already draws one —
- * so the masthead ends the way a shopfront does: a shallow scalloped hem, one
- * colour (the wash's end), everything under it reading as the shelf below the
- * awning. Drawn once here so any masthead can inherit the shape.
- */
-export function AwningEdge({
-  fill = color.masthead.to,
-  scallops = 9,
-  amplitude = 8,
-  style,
-  ...rest
-}: ViewProps & { fill?: string; scallops?: number; amplitude?: number }) {
-  const { width } = useWindowDimensions();
-  const sw = width / scallops;
-  let d = `M0 0 H${width}`;
-  for (let i = 0; i < scallops; i += 1) {
-    d += ` a ${sw / 2} ${amplitude} 0 0 1 ${-sw} 0`;
-  }
-  d += ' Z';
-  return (
-    <View pointerEvents="none" style={style} {...rest}>
-      <Svg width={width} height={amplitude} viewBox={`0 0 ${width} ${amplitude}`}>
-        <Path d={d} fill={fill} />
-      </Svg>
-    </View>
-  );
-}
+// [FOUNDER VETO 2026-08-22] AwningEdge (the scalloped awning hem) lived here.
+// The toothed-edge family — awning scallops, docket punch-holes, receipt
+// teeth — was vetoed outright, and an exported vetoed component is an
+// invitation: it sat first in autocomplete for anyone reaching for a masthead
+// finish. Deleted with docket.tsx in the DRIFT-08 cleanup; the masthead ends
+// flat, exactly as every shipped screen already renders it.

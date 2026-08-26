@@ -12,7 +12,7 @@ import { Stars } from '../../../kit/controls';
 import { useMoverKind, useActiveJob, useDriverAction, useRiderAction, useRateCustomer, useCourierProof, useRideSos } from '../../../hooks';
 import { useJobSos } from '../../../hooks/safety';
 import { useMoverPreview } from '../../../stores/moverPreview';
-import { toast } from '../../../components/ui/toast';
+import { toast } from '../../../kit/toast';
 import { useLocationStore } from '../../../stores/locationStore';
 import { grantedLocationFix } from '../../../lib/deviceLocation';
 import { haversineKm, streetEtaMin } from '../../../lib/geo';

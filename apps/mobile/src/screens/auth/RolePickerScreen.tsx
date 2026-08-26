@@ -10,7 +10,7 @@ import { useVendorPreview } from '../../stores/vendorPreview';
 import { DEFAULT_COUNTRY } from '../../lib/markets';
 import { SwiftMark } from '../../components/SwiftLogo';
 import { Pictogram, Screen, T, type PictogramName } from '../../kit';
-import { PressableScale } from '../../components/ui';
+import { PressableScale } from '../../kit/pressable-scale';
 import { haptic } from '../../lib/haptics';
 
 // FIRST OPEN [first-open spec 2.1]: one screen, the TRIO, zero carousel —

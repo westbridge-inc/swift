@@ -9,7 +9,7 @@ import { useAddToCart, useCart, useToggleFavorite, useUpdateCartItem, useVendor 
 import { useAuthStore } from '../../../stores/authStore';
 import { itemPhoto, vendorPhoto } from '../../../lib/images';
 import { money } from '../../../lib/money';
-import { toast } from '../../../components/ui/toast';
+import { toast } from '../../../kit/toast';
 import { Scrim } from '../../../components/ui/scrim';
 import {
   AddMorph,

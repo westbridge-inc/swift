@@ -8,7 +8,9 @@ import { DARK_BLURHASH } from '../lib/images';
 import { Card } from './card';
 import { PhotoPlaceholder } from './photo-placeholder';
 import { Pictogram, type PictogramName } from './pictograms';
-import { Scrim } from '../components/ui/scrim';
+// [B6] The kit no longer reaches into the legacy folder — Scrim is a kit
+// primitive now (DRIFT-09 port), which was the last contamination here.
+import { Scrim } from './scrim';
 import { HeartBadge, Stars } from './controls';
 import { PillButton } from './button';
 import { T } from './text';

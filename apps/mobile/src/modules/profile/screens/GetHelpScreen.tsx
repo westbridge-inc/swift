@@ -6,7 +6,7 @@ import { color, radius, space } from '@swift/ui';
 import { Card, Chip, Header, LabeledInput, PillButton, Screen, T, TonePill } from '../../../kit';
 import { useCreateTicket, useMySupportTickets } from '../../../hooks';
 import type { SupportCategory } from '../../../services/api';
-import { toast } from '../../../components/ui/toast';
+import { toast } from '../../../kit/toast';
 
 const CATEGORIES: { key: SupportCategory; label: string }[] = [
   { key: 'ORDER_ISSUE', label: 'Order issue' },

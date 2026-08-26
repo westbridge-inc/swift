@@ -28,7 +28,7 @@ import { connectSocket, getSocket, subscribeToOrder } from '../../../services/so
 import { money } from '../../../lib/money';
 import { haptic } from '../../../lib/haptics';
 import { openMmgPaymentAction, safeMmgPaymentActionUrl } from '../../../lib/payLink';
-import { toast } from '../../../components/ui/toast';
+import { toast } from '../../../kit/toast';
 import { holdRingCaption, holdRingWindow } from './hold-ring';
 import { CircleChip, DecorativeIcon, ErrorState, IconChip, InfoRow, LoadingBlock, PillButton, PopupCard, PopupTitle, T } from '../../../kit';
 import { VERTICAL_TINT } from '../../../kit/vertical-tint';
