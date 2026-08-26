@@ -831,8 +831,24 @@ export async function customerRoutes(app: FastifyInstance) {
     const existing = await app.prisma.address.findFirst({ where: { id, userId } });
     if (!existing) throw new NotFoundError('Address', id);
 
-    // Soft-delete
+    // A hard delete, and deliberately so: this is the customer exercising a
+    // deletion right over their own home address, and a row that still holds
+    // the street and the pin has not been deleted. (The comment here used to
+    // say "soft-delete"; there is no deletedAt column and never was.) Order
+    // history is unaffected — an order snapshots its address as text at
+    // checkout rather than pointing at this row.
     await app.prisma.address.delete({ where: { id } });
+
+    // `Cart.deliveryAddressId` is a bare string with no foreign key, so the
+    // delete leaves any cart that chose this address pointing at a row that
+    // is gone. Both the cart preview and checkout fall back to the default
+    // address when the id does not resolve, so nothing breaks — but the cart
+    // would still be CLAIMING a delivery destination the customer just
+    // deleted. Clear it and let them choose again.
+    await app.prisma.cart.updateMany({
+      where: { customerId: userId, deliveryAddressId: id },
+      data: { deliveryAddressId: null },
+    });
 
     // If it was default, promote the newest remaining address
     if (existing.isDefault) {

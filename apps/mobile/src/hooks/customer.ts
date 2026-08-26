@@ -53,6 +53,34 @@ export function useAddAddress() {
   });
 }
 
+// Editing, removing and re-defaulting an address all move the destination the
+// CART is quoting against, so each one invalidates the cart as well — a stale
+// "deliver to" line under a fresh address list is the UI lying about where the
+// food is going. (Delete additionally clears the pointer server-side.)
+function useAddressMutation<TArg>(fn: (arg: TArg) => Promise<unknown>) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: fn,
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: customerKeys.addresses });
+      qc.invalidateQueries({ queryKey: ['customer', 'cart'] });
+    },
+  });
+}
+
+export function useUpdateAddress() {
+  return useAddressMutation(({ id, data }: { id: string; data: Partial<AddressInput> }) =>
+    unwrap(customerApi.updateAddress(id, data)));
+}
+
+export function useDeleteAddress() {
+  return useAddressMutation((id: string) => unwrap(customerApi.deleteAddress(id)));
+}
+
+export function useSetDefaultAddress() {
+  return useAddressMutation((id: string) => unwrap(customerApi.setDefaultAddress(id)));
+}
+
 export function useHome<T = any>(lat?: number, lng?: number) {
   return useQuery<T>({ queryKey: customerKeys.home(lat, lng), queryFn: () => unwrap<T>(customerApi.getHome(lat, lng)) });
 }

@@ -290,6 +290,11 @@ export const customerApi = {
     api.post('/customer/referral/redeem', { code }, token ? { headers: { Authorization: `Bearer ${token}` } } : undefined),
   getAddresses: () => api.get('/customer/addresses'),
   addAddress: (data: AddressInput) => api.post('/customer/addresses', data),
+  // The address book was append-only from the app: these three routes were
+  // built, owner-scoped and tested server-side, and nothing ever called them.
+  updateAddress: (id: string, data: Partial<AddressInput>) => api.put(`/customer/addresses/${id}`, data),
+  deleteAddress: (id: string) => api.delete(`/customer/addresses/${id}`),
+  setDefaultAddress: (id: string) => api.put(`/customer/addresses/${id}/default`),
   getHome: (lat?: number, lng?: number) => api.get('/customer/home', { params: { lat, lng } }),
   getVendors: (params?: Record<string, string>) => api.get('/customer/vendors', { params }),
   // [B2] The search ENGINE — typo tolerance, ranking, and dishes. One wire
