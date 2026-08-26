@@ -366,6 +366,30 @@ export const moderateRating = (
   body: { action: 'publish' | 'remove' | 'exclude'; reason?: string },
 ) => apiFetch(`/api/v1/admin/ratings/${id}/moderate`, { method: 'POST', body: JSON.stringify(body) });
 
+// Swift Ads review — the two gates on the whole ads revenue path. An
+// advertiser registers from the app and lands at PENDING_REVIEW; a creative
+// uploads and lands at PENDING. Both endpoints existed with no admin caller,
+// so nobody could pass either gate and no ad could ever run.
+export const fetchAdvertiserQueue = (status = 'PENDING_REVIEW') =>
+  apiFetch(`/api/v1/admin/ads/advertisers/queue?status=${status}`);
+export const approveAdvertiser = (id: string) =>
+  apiFetch(`/api/v1/admin/ads/advertisers/${id}/approve`, { method: 'PUT', body: JSON.stringify({}) });
+export const rejectAdvertiser = (id: string, reason: string) =>
+  apiFetch(`/api/v1/admin/ads/advertisers/${id}/reject`, { method: 'PUT', body: JSON.stringify({ reason }) });
+export const suspendAdvertiser = (id: string, reason: string) =>
+  apiFetch(`/api/v1/admin/ads/advertisers/${id}/suspend`, { method: 'PUT', body: JSON.stringify({ reason }) });
+export const reinstateAdvertiser = (id: string) =>
+  apiFetch(`/api/v1/admin/ads/advertisers/${id}/reinstate`, { method: 'PUT', body: JSON.stringify({}) });
+
+export const fetchCreativeQueue = () => apiFetch('/api/v1/admin/ads/creatives/queue');
+export const approveCreative = (id: string) =>
+  apiFetch(`/api/v1/admin/ads/creatives/${id}/approve`, { method: 'PUT', body: JSON.stringify({}) });
+export const rejectCreative = (id: string, reason: string, notes?: string) =>
+  apiFetch(`/api/v1/admin/ads/creatives/${id}/reject`, {
+    method: 'PUT',
+    body: JSON.stringify({ reason, ...(notes ? { notes } : {}) }),
+  });
+
 export const fetchVerificationQueue = (status = 'PENDING') =>
   apiFetch(`/api/v1/admin/verification/queue?status=${status}&limit=100`);
 export const getDocSignedUrl = (id: string) =>
