@@ -12,6 +12,14 @@ import { AuthRefreshCoordinator, type AuthSessionSnapshot } from '../lib/authSes
 // eslint-disable-next-line no-undef
 export const API_URL = process.env['EXPO_PUBLIC_API_URL'] ?? (__DEV__ ? 'http://localhost:3000' : 'https://api.swift.gy');
 
+/** [B9] Where PUBLIC share links point — the web app, never the API. Used by
+ *  parcel tracking (`/track/:token`); trip shares join it when they move off
+ *  the text-only share. Overridable per EAS profile like API_URL. (`__DEV__`
+ *  is typeof-guarded: unlike API_URL's, this line actually evaluates in the
+ *  node test env, where the RN global does not exist.) */
+// eslint-disable-next-line no-undef
+export const WEB_URL = process.env['EXPO_PUBLIC_WEB_URL'] ?? (typeof __DEV__ !== 'undefined' && __DEV__ ? 'http://localhost:3001' : 'https://swift.gy');
+
 export const api = axios.create({
   baseURL: `${API_URL}/api/v1`,
   timeout: 10000,

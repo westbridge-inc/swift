@@ -2104,6 +2104,12 @@ export async function customerRoutes(app: FastifyInstance) {
         // counter. It was only in the checkout response before, so it
         // vanished the moment they left the confirmation screen.
         pickupCode: order.pickupCode,
+        // [B9] The SENDER's copy of the public tracking token. Minted at
+        // courier checkout since launch and returned once in the create
+        // response — which the app discards on navigation — so "Share
+        // tracking" had nothing durable to build a link from. Customer-scoped
+        // read (this route already proves ownership); null on non-courier rows.
+        courierTrackingToken: order.courierTrackingToken,
         deliveryAddress: order.deliveryAddress,
         deliveryLat: order.deliveryLat,
         deliveryLng: order.deliveryLng,
