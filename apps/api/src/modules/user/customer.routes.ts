@@ -5,7 +5,7 @@ import { calculateDeliveryFee, deliveryFeeFromRates, expressDeliveryFee } from '
 import { CountryConfigService } from '../country/country-config.service';
 import { estimateDrivingDistance, estimateDeliveryMinutes } from '../../utils/distance';
 import { getMapsProvider } from '../../providers/maps/maps-provider';
-import { FREE_CANCEL_WINDOW_MIN, LATE_CANCEL_FEE, isFreeCancellation } from '../order/cancel-policy';
+import { LATE_CANCEL_FEE, isFreeCancellation, freeCancellationExpiresAt } from '../order/cancel-policy';
 import { parsePagination, paginatedResponse } from '../../utils/pagination';
 import { tenantCacheKey } from '../../utils/tenant-cache';
 import { AppError, NotFoundError, ValidationError, ForbiddenError } from '../../utils/errors';
@@ -2050,15 +2050,10 @@ export async function customerRoutes(app: FastifyInstance) {
     const canCancel = !['DELIVERED', 'COMPLETED', 'CANCELLED', 'REFUNDED', 'PICKED_UP', 'EN_ROUTE_DELIVERY', 'ARRIVED'].includes(order.status)
       && !(order.paymentMethod === 'MOBILE_MONEY' && order.paymentStatus === 'CAPTURED');
     const previewNow = new Date();
-    // LIFECYCLE_V2: while held, the store hasn't seen the order — cancelling
-    // is free by construction, whatever the legacy 5-minute clock says.
-    // Assignment-guarded like the charge path: a mover holding the job ends
-    // the free window whatever the clock says.
-    const heldNow = order.holdExpiresAt != null && order.holdExpiresAt > previewNow
-      && !order.riderId && !order.driverId;
-    // THE one policy predicate, shared with the charge path
-    // [cancel-policy.ts] — the fee shown here and the marker recorded there
-    // can never drift again.
+    // THE one policy predicate, shared with the charge path [cancel-policy.ts]
+    // — the fee shown here and the marker recorded there can never drift
+    // again. The hold exemption, the assignment guard and the scheduled-slot
+    // branch all live inside it; this file no longer restates any of them.
     const freeCancellation = canCancel && isFreeCancellation(order, previewNow);
 
     // Timeline
@@ -2163,11 +2158,13 @@ export async function customerRoutes(app: FastifyInstance) {
         // assignment or a committed vendor voids the promise, so it must never
         // be minted for those states.
         holdExpiresAt: order.holdExpiresAt,
-        freeCancellationExpiresAt: !freeCancellation
-          ? null
-          : heldNow
-            ? order.holdExpiresAt!.toISOString()
-            : new Date(order.placedAt.getTime() + FREE_CANCEL_WINDOW_MIN * 60000).toISOString(),
+        // ONE implementation, shared with the predicate [cancel-policy.ts] —
+        // built inline this used to promise `placedAt + 5min`, which on a
+        // scheduled order is a countdown that expired hours before the window
+        // it claims to describe.
+        freeCancellationExpiresAt: canCancel
+          ? (freeCancellationExpiresAt(order, previewNow)?.toISOString() ?? null)
+          : null,
       },
     };
   });
