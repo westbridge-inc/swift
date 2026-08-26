@@ -5,7 +5,7 @@ import { calculateDeliveryFee, deliveryFeeFromRates, expressDeliveryFee } from '
 import { CountryConfigService } from '../country/country-config.service';
 import { estimateDrivingDistance, estimateDeliveryMinutes } from '../../utils/distance';
 import { getMapsProvider } from '../../providers/maps/maps-provider';
-import { FREE_CANCEL_WINDOW_MIN, LATE_CANCEL_FEE } from '../order/cancel-policy';
+import { FREE_CANCEL_WINDOW_MIN, LATE_CANCEL_FEE, isFreeCancellation } from '../order/cancel-policy';
 import { parsePagination, paginatedResponse } from '../../utils/pagination';
 import { tenantCacheKey } from '../../utils/tenant-cache';
 import { AppError, NotFoundError, ValidationError, ForbiddenError } from '../../utils/errors';
@@ -2016,11 +2016,17 @@ export async function customerRoutes(app: FastifyInstance) {
     // offer what the locked cancel path will refuse.
     const canCancel = !['DELIVERED', 'COMPLETED', 'CANCELLED', 'REFUNDED', 'PICKED_UP', 'EN_ROUTE_DELIVERY', 'ARRIVED'].includes(order.status)
       && !(order.paymentMethod === 'MOBILE_MONEY' && order.paymentStatus === 'CAPTURED');
-    const minutesSincePlaced = (Date.now() - order.placedAt.getTime()) / 60000;
+    const previewNow = new Date();
     // LIFECYCLE_V2: while held, the store hasn't seen the order — cancelling
     // is free by construction, whatever the legacy 5-minute clock says.
-    const heldNow = order.holdExpiresAt != null && order.holdExpiresAt > new Date();
-    const freeCancellation = heldNow || (canCancel && minutesSincePlaced <= FREE_CANCEL_WINDOW_MIN && order.status === 'PENDING');
+    // Assignment-guarded like the charge path: a mover holding the job ends
+    // the free window whatever the clock says.
+    const heldNow = order.holdExpiresAt != null && order.holdExpiresAt > previewNow
+      && !order.riderId && !order.driverId;
+    // THE one policy predicate, shared with the charge path
+    // [cancel-policy.ts] — the fee shown here and the marker recorded there
+    // can never drift again.
+    const freeCancellation = canCancel && isFreeCancellation(order, previewNow);
 
     // Timeline
     const timeline = order.statusHistory.map((sh) => ({
@@ -2114,12 +2120,15 @@ export async function customerRoutes(app: FastifyInstance) {
         // the app shows the fee BEFORE the customer confirms.
         cancellationFee: canCancel && !freeCancellation ? LATE_CANCEL_FEE : 0,
         // Held orders: the free window IS the hold; otherwise the legacy clock.
+        // Only promised while the cancel is ACTUALLY free right now — a mover
+        // assignment or a committed vendor voids the promise, so it must never
+        // be minted for those states.
         holdExpiresAt: order.holdExpiresAt,
-        freeCancellationExpiresAt: heldNow
-          ? order.holdExpiresAt!.toISOString()
-          : canCancel && order.status === 'PENDING'
-            ? new Date(order.placedAt.getTime() + FREE_CANCEL_WINDOW_MIN * 60000).toISOString()
-            : null,
+        freeCancellationExpiresAt: !freeCancellation
+          ? null
+          : heldNow
+            ? order.holdExpiresAt!.toISOString()
+            : new Date(order.placedAt.getTime() + FREE_CANCEL_WINDOW_MIN * 60000).toISOString(),
       },
     };
   });
