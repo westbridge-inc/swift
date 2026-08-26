@@ -1,6 +1,6 @@
 import { keepPreviousData, useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { track } from '../lib/analytics';
-import { customerApi, discoveryApi, type AddressInput } from '../services/api';
+import { customerApi, discoveryApi, moderationApi, type AddressInput } from '../services/api';
 import type { AuthSessionSnapshot } from '../lib/authSession';
 
 /**
@@ -153,6 +153,25 @@ export function useVendorReviews<T = any>(id: string) {
     queryKey: [...customerKeys.vendor(id), 'reviews'],
     queryFn: () => unwrap<T>(customerApi.getVendorReviews(id)),
     enabled: !!id,
+  });
+}
+
+/** [B15] Flag one public review. Server is idempotent per (rating, reporter),
+ *  so a double-tap reads as the same calm success. */
+export function useReportRating() {
+  return useMutation({
+    mutationFn: ({ ratingId, reason, note }: { ratingId: string; reason: 'OFFENSIVE' | 'FALSE_CLAIM' | 'PRIVATE_INFO' | 'SPAM' | 'OTHER'; note?: string }) =>
+      unwrap(customerApi.reportRating(ratingId, reason, note)),
+    onSuccess: () => track('rating_reported', {}),
+  });
+}
+
+/** [B15/STORE-001] Flag a store, item, profile or chat message into the
+ *  moderation queue. */
+export function useReportContent() {
+  return useMutation({
+    mutationFn: (input: Parameters<typeof moderationApi.report>[0]) => unwrap(moderationApi.report(input)),
+    onSuccess: (_d, v) => track('content_reported', { targetType: v.targetType }),
   });
 }
 

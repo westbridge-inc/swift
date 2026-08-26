@@ -297,6 +297,10 @@ export const customerApi = {
   setDefaultAddress: (id: string) => api.put(`/customer/addresses/${id}/default`),
   getHome: (lat?: number, lng?: number) => api.get('/customer/home', { params: { lat, lng } }),
   getVendors: (params?: Record<string, string>) => api.get('/customer/vendors', { params }),
+  // [B15] Flag a public review for the moderation queue (R7). One report per
+  // (rating, reporter) — the server answers calm idempotence, never an error.
+  reportRating: (ratingId: string, reason: 'OFFENSIVE' | 'FALSE_CLAIM' | 'PRIVATE_INFO' | 'SPAM' | 'OTHER', note?: string) =>
+    api.post(`/customer/ratings/${ratingId}/report`, { reason, ...(note ? { note } : {}) }),
   // [B2] The search ENGINE — typo tolerance, ranking, and dishes. One wire
   // contract whichever backend answered (the route normalizes Meili + DB).
   search: (q: string, opts?: { type?: string; lat?: number; lng?: number }) =>
@@ -428,6 +432,18 @@ export const safetyApi = {
     accuracyM?: number;
     clientIdempotencyKey: string;
   }) => api.post('/safety/sos', { ...input, source: 'BUTTON' as const, clientCreatedAt: new Date().toISOString() }),
+};
+
+/** [B15/STORE-001] In-app UGC reporting — Apple 1.2 / Google UGC+CSAE launch
+ *  gates. The engine and the admin queue existed; the app never called them.
+ *  Re-reporting the same target is idempotent server-side. */
+export const moderationApi = {
+  report: (input: {
+    targetType: 'RATING' | 'CHAT_MESSAGE' | 'USER' | 'VENDOR' | 'ITEM';
+    targetId: string;
+    reason: 'SPAM' | 'HARASSMENT' | 'HATE_SPEECH' | 'VIOLENCE' | 'SEXUAL_CONTENT' | 'CSAE' | 'ILLEGAL_GOODS' | 'OTHER';
+    detail?: string;
+  }) => api.post('/reports', input),
 };
 
 export const rideApi = {
