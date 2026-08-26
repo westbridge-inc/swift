@@ -4,7 +4,7 @@ import type { Server } from 'socket.io';
 import { clampDriverFare, deliveryFeeFromRates, expressDeliveryFee, generateOrderNumber, type DeliveryRates } from '../../utils/markup';
 import { estimateDeliveryMinutes } from '../../utils/distance';
 import { getMapsProvider, type MapsProvider } from '../../providers/maps/maps-provider';
-import { FREE_CANCEL_WINDOW_MIN, LATE_CANCEL_FEE } from './cancel-policy';
+import { isFreeCancellation, LATE_CANCEL_FEE } from './cancel-policy';
 import { NotificationService } from '../notification/notification.service';
 import { CountryConfigService } from '../country/country-config.service';
 import { BookingService } from '../booking/booking.service';
@@ -1806,12 +1806,15 @@ export class OrderService {
           }
 
           const now = new Date();
-          const minutesSincePlaced = (now.getTime() - order.placedAt.getTime()) / 60000;
-          // LIFECYCLE_V2: the hold IS the free window — nothing was committed to
-          // a vendor or mover yet, so cancelling a held order is always free.
+          // heldNow keeps ONE job: a held order was never shown to the vendor,
+          // so the vendor-board socket below stays silent about it.
           const heldNow = isHeld(order, now) && !order.riderId && !order.driverId;
-          const freeCancellation = heldNow
-            || (minutesSincePlaced <= FREE_CANCEL_WINDOW_MIN && order.status === 'PENDING');
+          // THE one policy predicate, shared with the customer preview
+          // [cancel-policy.ts]: free ⟺ nothing was committed — no mover holds
+          // the job, and the order is held or still in its uncommitted status
+          // (PENDING; READY_FOR_PICKUP for a courier, which is born there)
+          // inside the window.
+          const freeCancellation = isFreeCancellation(order, now);
           const cancellationFee = freeCancellation ? 0 : LATE_CANCEL_FEE;
 
           // The row lock makes this update and every dependent release below one
