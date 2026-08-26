@@ -2526,7 +2526,14 @@ model Notification {
   isRead    Boolean          @default(false)
   readAt    DateTime?
   createdAt DateTime         @default(now())
+  /// [REPORT-034 #30] Caller-supplied idempotency key. Every BullMQ job runs
+  /// with bounded retries, so any notification sent inside one could duplicate
+  /// on retry — same inbox row twice, same push twice. NULL rows are unlimited
+  /// (Postgres treats NULLs as distinct under the unique), so existing callers
+  /// are untouched; a caller that passes a deterministic key gets exactly-once.
+  dedupeKey String?
 
+  @@unique([userId, dedupeKey])
   @@index([userId, isRead])
   @@map("notifications")
   @@index([createdAt]) // retention sweep cutoff [F-021-20]
