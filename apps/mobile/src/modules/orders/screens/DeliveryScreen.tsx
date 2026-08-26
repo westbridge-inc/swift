@@ -1,6 +1,6 @@
 /** @jsxImportSource react */
 import React, { useEffect, useRef, useState } from 'react';
-import { AccessibilityInfo, AppState, Pressable, ScrollView, StyleSheet, View, useWindowDimensions } from 'react-native';
+import { AccessibilityInfo, AppState, Pressable, ScrollView, Share, StyleSheet, View, useWindowDimensions } from 'react-native';
 import MapView, { Marker } from 'react-native-maps';
 import { Image } from 'expo-image';
 import Svg, { Circle } from 'react-native-svg';
@@ -23,7 +23,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { color, elevation, motion, radius, space } from '@swift/ui';
 import { useMutation } from '@tanstack/react-query';
 import { useOrder, useDecideSubstitution } from '../../../hooks/customer';
-import { customerApi, courierApi } from '../../../services/api';
+import { customerApi, courierApi, WEB_URL } from '../../../services/api';
 import { connectSocket, getSocket, subscribeToOrder } from '../../../services/socket';
 import { money } from '../../../lib/money';
 import { haptic } from '../../../lib/haptics';
@@ -1253,6 +1253,27 @@ export function DeliveryScreen() {
               icon="alert-triangle"
               style={{ marginTop: space.md, borderColor: color.error }}
               onPress={() => setSosConfirm(true)}
+            />
+          ) : null}
+
+          {/* [B9] The recipient's half of Send. GET /courier/track/:token has
+              been public since launch and NOTHING generated the link — the
+              sender had no way to hand tracking to the person waiting for the
+              parcel. Web twin: /track/[token]. Sender-scoped token, in-flight
+              only (the token never expires, so a settled parcel stops
+              advertising it). */}
+          {!terminal && o?.orderType === 'COURIER' && o?.courierTrackingToken ? (
+            <PillButton
+              label="Share tracking with the recipient"
+              variant="soft"
+              icon="share-2"
+              style={{ marginTop: space.md }}
+              onPress={() => {
+                const who = o?.courierRecipientName ? `${o.courierRecipientName}, track` : 'Track';
+                void Share.share({
+                  message: `${who} your Swift parcel live: ${WEB_URL}/track/${o.courierTrackingToken}`,
+                }).catch(() => toast.show("Couldn't open the share sheet."));
+              }}
             />
           ) : null}
 
