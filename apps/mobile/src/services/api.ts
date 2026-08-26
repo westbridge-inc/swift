@@ -416,6 +416,18 @@ export const safetyApi = {
   /** Wrong person/car at the kerb: releases the ride, re-dispatches, locks
    *  the driver pending identity review, opens the incident. */
   notMyDriver: (rideId: string) => api.post(`/safety/rides/${rideId}/not-my-driver`, {}),
+  /**
+   * §7.1 shift identity check — multipart selfie in, the outcome ladder out
+   * ({ outcome: PASS|BORDERLINE|FAIL|…, allowedOnline, attemptsLeft? }).
+   * The server face-matches against the signup selfie; go-online refuses with
+   * 428 LIVENESS_CHECK_REQUIRED until a fresh PASS exists, and the mid-shift
+   * sweep prompts random online movers the same way. This client call is what
+   * makes both of those answerable — the endpoint existed with no caller.
+   */
+  livenessCheck: (form: FormData, profile: 'DRIVER' | 'RIDER') =>
+    api.post(`/safety/liveness-check?profile=${profile}`, form, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+    }),
   /** Trip Guardian check-in response (prompted via the guardian:checkin
    *  socket event on the order room). */
   guardianCheckin: (response: 'OK' | 'NEED_HELP') => api.post('/safety/guardian/checkin', { response }),
