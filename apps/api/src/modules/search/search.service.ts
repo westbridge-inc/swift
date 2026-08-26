@@ -1,5 +1,6 @@
 import { MeiliSearch } from 'meilisearch';
 import type { PrismaClient } from '@prisma/client';
+import { VISIBLE_VENDOR, VISIBLE_VENDOR_REL } from '../vendor/vendor-visibility';
 import { ratingSurfaces } from '../rating/rating-surface';
 
 const VENDOR_INDEX = 'vendors';
@@ -92,7 +93,11 @@ export class SearchService {
 
   async syncAllVendors(): Promise<number> {
     const vendors = await this.prisma.vendor.findMany({
-      where: { status: 'ACTIVE', isVerified: true },
+      // [B2] The ONE visibility predicate at the INDEX door: without
+      // tenant.isActive, a shut-off operator's whole catalogue stayed
+      // searchable until someone happened to re-sync after also suspending
+      // the store itself.
+      where: VISIBLE_VENDOR,
       include: { categories: true },
     });
 
@@ -133,7 +138,10 @@ export class SearchService {
 
   async syncAllItems(): Promise<number> {
     const items = await this.prisma.item.findMany({
-      where: { isAvailable: true },
+      // [B2] The vendor gate moves INTO the query and carries the full
+      // predicate — the old post-fetch `status === 'ACTIVE'` filter let an
+      // unverified or dead-tenant operator's dishes into the index.
+      where: { isAvailable: true, vendor: VISIBLE_VENDOR_REL },
       include: {
         vendor: { select: { name: true, status: true } },
         category: { select: { name: true } },
@@ -142,7 +150,6 @@ export class SearchService {
 
     const itemSlugs = await this.itemCategorySlugs(items.map((i) => i.id));
     const docs = items
-      .filter((i) => i.vendor.status === 'ACTIVE')
       .map((i) => ({
         id: i.id,
         name: i.name,
