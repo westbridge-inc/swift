@@ -13,6 +13,7 @@ import { NewCampaignScreen } from './screens/NewCampaignScreen';
 import { CampaignDetailScreen } from './screens/CampaignDetailScreen';
 import { AdvertiserBillingScreen } from './screens/AdvertiserBillingScreen';
 import { AdvertiserTeamScreen } from './screens/AdvertiserTeamScreen';
+import { GetHelpScreen } from '../profile/screens/GetHelpScreen';
 
 // The advertiser surface (ads-platform spec §14) — role-routed like the vendor
 // and mover dashboards. Gated-preview pattern (§14.1): register → explore +
@@ -73,6 +74,10 @@ export function AdvertiserStack() {
           <Stack.Screen name="AdvTabs" component={AdvertiserTabs} />
           <Stack.Screen name="NewCampaign" component={NewCampaignScreen} />
           <Stack.Screen name="CampaignDetail" component={CampaignDetailScreen} />
+          {/* [B-support] A REJECTED advertiser was told "Contact support to
+              appeal" from a stack with no support screen. The ticket screen is
+              role-agnostic; this registration is the whole fix's other half. */}
+          <Stack.Screen name="GetHelp" component={GetHelpScreen} />
         </>
       )}
     </Stack.Navigator>

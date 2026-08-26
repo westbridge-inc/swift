@@ -51,6 +51,7 @@ import {
 import { VendorOrderDetailScreen } from './screens/VendorOrderDetailScreen';
 import { VendorOrderHistoryScreen } from './screens/VendorOrderHistoryScreen';
 import { VendorMyQrScreen } from './screens/VendorMyQrScreen';
+import { GetHelpScreen } from '../profile/screens/GetHelpScreen';
 import { DocumentChecklist } from '../../components/onboarding/DocumentChecklist';
 import { PricingCard } from '../../components/onboarding/PricingCard';
 import { MmgPayLinkCard } from '../../components/MmgPayLinkCard';
@@ -4148,6 +4149,7 @@ function VendorInsightsScreen() {
 }
 
 function VendorAccountScreen() {
+  const navigation = useNavigation<any>();
   const { owner, store } = useVendorProfile();
   const myRole = safeVendorRole(owner?.myRole);
   const [switcherOpen, setSwitcherOpen] = useState(false);
@@ -4207,6 +4209,7 @@ function VendorAccountScreen() {
         </Card>
 
         <Card style={{ marginBottom: space.lg, paddingVertical: space.sm }}>
+          <SettingsRow icon="life-buoy" label="Get help" sub="A human answers — orders, billing, account" onPress={() => navigation.navigate('GetHelp')} />
           <SettingsRow icon="refresh-cw" label="Switch app" sub="Swift · Swift Driver" onPress={() => setSwitcherOpen(true)} />
         </Card>
 
@@ -4886,6 +4889,9 @@ export function VendorStack() {
       <Stack.Screen name="VendorOrderHistory" component={VendorOrderHistoryScreen} />
       <Stack.Screen name="VendorMyQr" component={VendorMyQrScreen} />
       <Stack.Screen name="VendorMySwiftNumber" component={VendorSwiftNumberScreen} />
+      {/* [B-support] Role-agnostic ticket screen — the vendor stack had NO
+          route to a human. Registration, not a rewrite. */}
+      <Stack.Screen name="GetHelp" component={GetHelpScreen} />
     </Stack.Navigator>
   );
 }
