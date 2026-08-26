@@ -26,10 +26,16 @@ export function GetHelpScreen() {
   const route = useRoute<any>();
   const presetOrderId: string | undefined = route.params?.orderId;
   const presetCategory: SupportCategory | undefined = route.params?.category;
+  // [E11] Callers with a CONTEXT (a rejected document's appeal door) arrive
+  // with the ticket half-written — the document named, the reviewer's words
+  // quoted — so the person adds their side instead of reconstructing ours.
+  // Plain initial values: everything stays editable.
+  const presetSubject: string | undefined = route.params?.subject;
+  const presetMessage: string | undefined = route.params?.message;
 
   const [category, setCategory] = useState<SupportCategory>(presetCategory ?? (presetOrderId ? 'ORDER_ISSUE' : 'OTHER'));
-  const [subject, setSubject] = useState('');
-  const [message, setMessage] = useState('');
+  const [subject, setSubject] = useState(presetSubject ?? '');
+  const [message, setMessage] = useState(presetMessage ?? '');
   const create = useCreateTicket();
   const tickets = useMySupportTickets();
 
