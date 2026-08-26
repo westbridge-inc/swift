@@ -216,6 +216,10 @@ jobs:
       - run: corepack enable && corepack prepare --activate
       - run: pnpm install --frozen-lockfile || pnpm install --frozen-lockfile
       - run: pnpm --filter @swift/desktop build
+      # [V11] Mission Control approves identity documents and enforces the
+      # liability gate — it must not sit outside the lint net. (18 real errors
+      # once sat on main unnoticed because CI only type-built this package.)
+      - run: pnpm exec eslint apps/desktop/src --ext .ts,.tsx --max-warnings=0
 
   # Broken or drifted migrations must fail CI, not the deploy: replay every
   # committed migration on a clean DB, then prove the result matches

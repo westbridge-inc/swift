@@ -136,6 +136,10 @@ const config: ExpoConfig = {
             NSPinnedCAIdentities: [
               { 'SPKI-SHA256-BASE64': 'C5+lpZ7tcVwmwQIMcRtPbsQtWLABXhQzejna0wHFr8M=' },
               { 'SPKI-SHA256-BASE64': 'diGVwiVYbubAI3RW4hB9xU8e/CH2GnkuvVFZE8zmgzI=' },
+              // [V4] Backup CA — GTS Root R1, computed 2026-08-25 from
+              // pki.goog/repo/certs/gtsr1.pem; same rationale and rotation
+              // date (2027-07-01) as the Android pin-set.
+              { 'SPKI-SHA256-BASE64': 'hxqRlPTu1bMS/0DITB1SSu0vd4u/8l8TjPgfaAp63Gc=' },
             ],
           },
         },

@@ -37,11 +37,15 @@ declare module '@fastify/jwt' {
 class AuthRefused extends Error {}
 
 /** fastify-jwt's own rejections (malformed / expired / bad signature) are
- *  genuine credential verdicts too. */
+ *  genuine credential verdicts too. `FAST_JWT_*` is the underlying fast-jwt
+ *  verifier surfacing directly — e.g. the [V12] algorithm-pin refusal, which
+ *  @fastify/jwt does not re-wrap. Every code either library mints is a
+ *  verdict about the TOKEN; infrastructure failures (Prisma, network) never
+ *  carry these prefixes — so both map to 401, per the F-250 rule below. */
 function isCredentialVerdict(err: unknown): boolean {
   if (err instanceof AuthRefused) return true;
   const code = (err as { code?: unknown } | null)?.code;
-  return typeof code === 'string' && code.startsWith('FST_JWT');
+  return typeof code === 'string' && (code.startsWith('FST_JWT') || code.startsWith('FAST_JWT'));
 }
 
 export const authPlugin = fp(async (app: FastifyInstance) => {
@@ -55,6 +59,11 @@ export const authPlugin = fp(async (app: FastifyInstance) => {
     // Launch-readiness §1.1: short-lived access tokens; the mobile client
     // silently refreshes on 401 (rotating refresh + reuse detection tested).
     sign: { expiresIn: '15m' },
+    // [V12] Pin the accepted algorithm explicitly. The secret is symmetric so
+    // the classic RS256→HS256 confusion doesn't apply and `alg: none` is
+    // already refused by the library — this removes the entire class anyway,
+    // including any future signer misconfiguration, for one line.
+    verify: { algorithms: ['HS256'] },
   });
 
   app.decorateRequest('authSessionId', null);

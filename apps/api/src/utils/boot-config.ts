@@ -121,6 +121,16 @@ export function assertSafeBootConfig(env: Record<string, string | undefined> = p
   if (storage === 'local' && env['STORAGE_ALLOW_LOCAL'] !== '1') {
     throw new Error('FATAL: STORAGE_PROVIDER is local (or unset) in production — uploads and verification documents would live on a single instance\'s disk. Set STORAGE_PROVIDER=s3|r2, or STORAGE_ALLOW_LOCAL=1 only for a deliberate single-instance pilot with a persistent volume.');
   }
+
+  // [V8] CONSENT_IP_PEPPER degrades SILENTLY: when missing or under 32 chars,
+  // hashIp() returns null and the consent ledger simply stops recording IP
+  // attribution — a privacy-safe failure, but an invisible one. Not fatal
+  // (the ledger's core evidence still writes); it must at least be loud.
+  const pepper = env['CONSENT_IP_PEPPER'];
+  if (!pepper || pepper.length < 32) {
+    // eslint-disable-next-line no-console
+    console.warn('WARN: CONSENT_IP_PEPPER is unset or under 32 characters — consent-ledger IP attribution is OFF (hashIp() returns null). Set a 32+ char pepper to record peppered IP evidence.');
+  }
 }
 
 /**
