@@ -102,7 +102,21 @@ const nextConfig: NextConfig = {
           // Matches the admin console's posture; the site is the company's
           // public identity and is only ever served over TLS.
           { key: 'Strict-Transport-Security', value: 'max-age=63072000; includeSubDomains; preload' },
-          { key: 'Permissions-Policy', value: 'geolocation=(), microphone=(), camera=()' },
+          // [SITE-1.1 Part 6.3] An EMPTY allowlist — `camera=()` — disables the
+          // feature for every origin INCLUDING self. This site genuinely uses two
+          // of them: /selfie captures a KYC selfie via getUserMedia, and the taxi,
+          // courier, order-location and signup flows read a pickup point through
+          // lib/geolocate.ts. Locking those to `()` does not harden anything; it
+          // silently breaks the product, and it breaks it in the browser rather
+          // than at build time, so nothing here would catch it.
+          // `(self)` is the correct posture: same-origin may ask, and the user is
+          // still prompted. Third parties and embeds get nothing. Microphone stays
+          // fully off — no surface on this site records audio.
+          // permissions-policy.test.ts enforces this against the real source tree.
+          {
+            key: 'Permissions-Policy',
+            value: 'geolocation=(self), microphone=(), camera=(self)',
+          },
         ],
       },
     ];
