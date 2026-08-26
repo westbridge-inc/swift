@@ -4,7 +4,7 @@ import { describe, it, expect, vi } from 'vitest';
 // stub it so these stay pure-logic tests.
 vi.mock('../services/api', () => ({ API_URL: 'https://api.test' }));
 
-import { mediaUrl, kindForVendor, itemPhoto, vendorPhoto } from './images';
+import { mediaUrl, kindForVendor, itemPhoto, vendorPhoto, categoryPhoto } from './images';
 
 describe('mediaUrl', () => {
   it('returns null for empty input', () => {
@@ -57,3 +57,25 @@ describe('vendorPhoto / itemPhoto — never invent a photograph [F-264]', () => 
   });
 });
 
+
+describe('categoryPhoto — the merchant\'s own picture or nothing [S8]', () => {
+  it("returns the category's own image when the merchant set one", () => {
+    expect(categoryPhoto({ name: 'Mains', imageUrl: 'https://cdn.swift.gy/c/mains.webp' }))
+      .toBe('https://cdn.swift.gy/c/mains.webp');
+  });
+
+  it('returns null when there is no picture — the caller draws PhotoPlaceholder', () => {
+    expect(categoryPhoto({ name: 'Rice & Grains', imageUrl: null })).toBeNull();
+    expect(categoryPhoto({ name: 'Produce' })).toBeNull();
+    expect(categoryPhoto({})).toBeNull();
+  });
+
+  it('a category NAMED after a vertical gets no stock photo either', () => {
+    // The deleted CATEGORY_IMAGES map keyed on these six literal names, so a
+    // chip called "food" or "taxi" drew a stock photograph while every chip
+    // beside it drew an honest placeholder — one rail, two truth standards.
+    for (const name of ['food', 'grocery', 'taxi', 'courier', 'shops', 'services']) {
+      expect(categoryPhoto({ name, imageUrl: null }), `"${name}" must not resolve to stock imagery`).toBeNull();
+    }
+  });
+});

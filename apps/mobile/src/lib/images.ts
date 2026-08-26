@@ -4,29 +4,15 @@ import { API_URL } from '../services/api';
 // Photo-led UI; a deterministic fallback keeps the same entity on the same image
 // (no flicker between renders) and is type-aware (no food photos on a hardware store).
 
-export const FOOD_IMAGES = [
-  'https://images.unsplash.com/photo-1546069901-ba9599a7e63c?w=600&q=80',
-  'https://images.unsplash.com/photo-1565299624946-b28f40a0ae38?w=600&q=80',
-  'https://images.unsplash.com/photo-1504674900247-0877df9cc836?w=600&q=80',
-  'https://images.unsplash.com/photo-1567620905732-2d1ec7ab7445?w=600&q=80',
-  'https://images.unsplash.com/photo-1565958011703-44f9829ba187?w=600&q=80',
-  'https://images.unsplash.com/photo-1432139555190-58524dae6a55?w=600&q=80',
-];
-
-export const GROCERY_IMAGES = [
-  'https://images.unsplash.com/photo-1542838132-92c53300491e?w=600&q=80',
-  'https://images.unsplash.com/photo-1488459716781-31db52582fe9?w=600&q=80',
-  'https://images.unsplash.com/photo-1604719312566-8912e9227c6a?w=600&q=80',
-  'https://images.unsplash.com/photo-1578916171728-46686eac8d58?w=600&q=80',
-];
-
-// Generic storefront / service imagery (no food).
-export const NEUTRAL_IMAGES = [
-  'https://images.unsplash.com/photo-1441986300917-64674bd600d8?w=600&q=80',
-  'https://images.unsplash.com/photo-1530124566582-a618bc2615dc?w=600&q=80',
-  'https://images.unsplash.com/photo-1581244277943-fe4a9c777189?w=600&q=80',
-  'https://images.unsplash.com/photo-1521791136064-7986c2920216?w=600&q=80',
-];
+// [S8] The stock-photo pools that used to live here — FOOD_IMAGES,
+// GROCERY_IMAGES, NEUTRAL_IMAGES — are GONE, and so is CATEGORY_IMAGES below.
+// F-264 deleted the helpers that handed them out (fallbackImage/itemImage/
+// vendorImage) but left the arrays behind, so the ammunition outlived the gun:
+// nothing imported them any more, and any new call site could have picked one
+// up and started advertising a stranger's dinner again. A pool of photographs
+// of food nobody is selling has no honest use, so it does not get to sit here
+// waiting for one. `stock-photo-gate.test.ts` now fails the build if a stock
+// URL comes back.
 
 // Neutral dark-charcoal placeholder blurhash (avg sRGB ~#1d1d1f) so a slow or
 // failed image load reads as an intentional dark tile under the scrim + label,
@@ -34,14 +20,6 @@ export const NEUTRAL_IMAGES = [
 // (sRGB 34,38,178) — every un-loaded product/vendor card showed a blue block.
 export const DARK_BLURHASH = 'L03R{_fQfQfQfQfQfQfQfQfQfQfQ';
 
-export const CATEGORY_IMAGES: Record<string, string> = {
-  food: 'https://images.unsplash.com/photo-1504674900247-0877df9cc836?w=400&q=80',
-  grocery: 'https://images.unsplash.com/photo-1542838132-92c53300491e?w=400&q=80',
-  taxi: 'https://images.unsplash.com/photo-1502877338535-766e1452684a?w=400&q=80',
-  courier: 'https://images.unsplash.com/photo-1526367790999-0150786686a2?w=400&q=80',
-  shops: 'https://images.unsplash.com/photo-1441986300917-64674bd600d8?w=400&q=80',
-  services: 'https://images.unsplash.com/photo-1621905251189-08b45d6a269e?w=400&q=80',
-};
 
 /**
  * Imagery for a Home category chip — the merchant's own picture, or null.
@@ -60,13 +38,17 @@ export const CATEGORY_IMAGES: Record<string, string> = {
  * `Category.imageUrl` is a real column and now travels on the feed. When a
  * merchant has not set one the honest answer is NOTHING — the caller draws a
  * placeholder that names the category, rather than advertising a stranger's
- * food under it. The vertical map is still consulted for the handful of chips
- * that genuinely ARE verticals.
+ * food under it.
+ *
+ * The vertical fallback map went with the pools. It only ever matched six
+ * literal names, so it fired for a handful of chips and silently put a stock
+ * photograph on them while every neighbouring chip drew an honest placeholder
+ * — one rail, two different truth standards. `Photo` renders
+ * `PhotoPlaceholder` on null (the vertical's ground colour, its pictogram and
+ * the category's real name), so null is not a blank: it is the designed tile.
  */
 export function categoryPhoto(category: { name?: string | null; imageUrl?: string | null }): string | null {
-  if (category.imageUrl) return category.imageUrl;
-  const key = String(category.name ?? '').toLowerCase();
-  return CATEGORY_IMAGES[key] ?? null;
+  return category.imageUrl ?? null;
 }
 
 /**
