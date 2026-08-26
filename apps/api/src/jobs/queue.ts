@@ -1676,11 +1676,17 @@ export async function scheduleRecurringJobs(queues: ReturnType<typeof createQueu
     removeOnFail: 20,
   });
 
-  // LIFECYCLE_V2 hold release: every 30s, flip held orders whose cancel window
-  // closed to visible + dispatchable. The server clock owns the window — the
-  // customer closing the app changes nothing. No-op while the flag is off.
+  // LIFECYCLE_V2 hold release: flip held orders whose cancel window closed to
+  // visible + dispatchable. The server clock owns the window — the customer
+  // closing the app changes nothing. No-op while the flag is off.
+  // [B18] 10s, not 30s: the sweep interval IS the release tail. At 30s an
+  // order could sit released-but-invisible for up to 29s after its ring hit
+  // 0:00 — a 24% overrun on the old 2-minute hold, and still 10% on the
+  // designed 5. At 10s the worst case is a 3% tail on the 5-minute window.
+  // (The precise fix — a per-order delayed job at holdExpiresAt — is noted in
+  // the Total Audit; the sweep stays either way as the crash-proof backstop.)
   await queues.dispatchQueue.add('release-held-orders', {}, {
-    repeat: { every: 30_000 },
+    repeat: { every: 10_000 },
     removeOnComplete: 20,
     removeOnFail: 20,
   });
