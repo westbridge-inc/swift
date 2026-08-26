@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const { toastError } = vi.hoisted(() => ({ toastError: vi.fn() }));
 
-vi.mock('../components/ui/toast', () => ({
+vi.mock('../kit/toast', () => ({
   toast: { error: toastError },
 }));
 

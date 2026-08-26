@@ -10,7 +10,7 @@ import { useAuthStore } from '../../../stores/authStore';
 import { itemPhoto, vendorPhoto } from '../../../lib/images';
 import { money } from '../../../lib/money';
 import { toast } from '../../../kit/toast';
-import { Scrim } from '../../../components/ui/scrim';
+import { Scrim } from '../../../kit/scrim';
 import {
   AddMorph,
   Chip,

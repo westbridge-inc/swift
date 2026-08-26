@@ -45,3 +45,4 @@ export * from './canopy';
 export * from './choice-chip';
 export * from './pressable-scale';
 export * from './scrim';
+export * from './switch';

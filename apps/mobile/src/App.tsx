@@ -20,7 +20,10 @@ import {
   HankenGrotesk_600SemiBold,
   HankenGrotesk_700Bold,
 } from '@expo-google-fonts/hanken-grotesk';
-import { GluestackUIProvider } from './components/ui';
+// [B6] The legacy "GluestackUIProvider" was a styled View the whole time — a
+// white app surface plus a comment about a gluestack seam that never arrived
+// (the gluestack decision belongs to WEB). The kit surface says what it is.
+import { AppSurface } from './kit/screen';
 import { ToastHost } from './kit/toast';
 import { ConnectivityBoundary } from './components/OfflineBanner';
 import { ErrorBoundary } from './components/ErrorBoundary';
@@ -257,7 +260,7 @@ export default function App() {
     <ErrorBoundary>
       <GestureHandlerRootView style={{ flex: 1 }} onLayout={onLayoutRootView}>
         <SafeAreaProvider>
-          <GluestackUIProvider>
+          <AppSurface>
             {storageStatus === 'error' ? (
               <SecureStorageRecovery
                 retrying={storageRetrying}
@@ -273,7 +276,7 @@ export default function App() {
                 <PermissionPrimeSheet />
               </QueryClientProvider>
             )}
-          </GluestackUIProvider>
+          </AppSurface>
         </SafeAreaProvider>
       </GestureHandlerRootView>
     </ErrorBoundary>

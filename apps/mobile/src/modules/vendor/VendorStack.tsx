@@ -136,7 +136,7 @@ import { inventorySummary } from '../../lib/vendorInventory';
 import { mediaUrl } from '../../lib/images';
 import { VendorBulkImportScreen } from '../../screens/vendor/VendorBulkImportScreen';
 import { NewOrderTakeover } from './NewOrderTakeover';
-import { Switch as AvailabilitySwitch } from '../../components/ui/switch';
+import { Switch as AvailabilitySwitch } from '../../kit/switch';
 
 const Stack = createNativeStackNavigator();
 

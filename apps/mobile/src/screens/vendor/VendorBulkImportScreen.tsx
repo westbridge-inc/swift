@@ -3,8 +3,8 @@ import { View, ScrollView, TextInput } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import * as DocumentPicker from 'expo-document-picker';
 import { Feather } from '@expo/vector-icons';
-import { color } from '@swift/ui';
-import { Text, Card, Button } from '../../components/ui';
+import { color, space } from '@swift/ui';
+import { Card, PillButton, T } from '../../kit';
 import { PressableScale } from '../../kit/pressable-scale';
 import { toast } from '../../kit/toast';
 import { useImportAutomap, useImportItems, useImportFile } from '../../hooks/vendorops';
@@ -129,7 +129,7 @@ export function VendorBulkImportScreen({ navigation }: any) {
         <PressableScale onPress={() => navigation?.goBack?.()} hitSlop={8}>
           <Feather name="chevron-left" size={24} color={color.text.primary} />
         </PressableScale>
-        <Text className="ml-md text-base font-bold text-text-primary">Bulk import</Text>
+        <T variant="body" weight="bold" style={{ marginLeft: space.md }}>Bulk import</T>
       </View>
       <ScrollView
         className="flex-1"
@@ -137,28 +137,28 @@ export function VendorBulkImportScreen({ navigation }: any) {
         showsVerticalScrollIndicator={false}
         keyboardShouldPersistTaps="handled"
       >
-        <Text className="mb-sm text-sm text-text-secondary">
+        <T variant="label" tone="muted" style={{ marginBottom: space.sm }}>
           Bring your whole catalogue at once: a CSV or Excel export from your spreadsheet, or a
           PDF menu we turn into draft items for you to confirm. Recommended columns: {RECOMMENDED}.
-        </Text>
+        </T>
 
         {previewType ? (
-          <Card className="mb-md">
-            <Text className="text-sm font-semibold">Read-only preview</Text>
-            <Text className="mt-xs text-xs text-text-secondary">
+          <Card style={{ marginBottom: space.md }}>
+            <T variant="label" weight="semibold">Read-only preview</T>
+            <T variant="micro" tone="muted" style={{ marginTop: space.xs }}>
               Sign in and create your store before importing a catalogue.
-            </Text>
+            </T>
           </Card>
         ) : null}
 
-        <Button
+        <PillButton
           label="Pick a file (CSV, Excel, or PDF menu)"
           loading={importFile.isPending}
           disabled={!!previewType}
           onPress={pickFile}
         />
 
-        <Text className="my-md text-center text-xs text-text-muted">— or paste CSV —</Text>
+        <T variant="micro" tone="muted" center style={{ marginVertical: space.md }}>— or paste CSV —</T>
 
         <TextInput
           value={csv}
@@ -171,7 +171,7 @@ export function VendorBulkImportScreen({ navigation }: any) {
           style={{ minHeight: 140 }}
           className="mb-md rounded-2xl border border-border-subtle bg-surface-base px-lg py-md font-body text-sm text-text-primary"
         />
-        <Button
+        <PillButton
           label="Analyze CSV"
           variant="outline"
           loading={automap.isPending}
@@ -179,37 +179,37 @@ export function VendorBulkImportScreen({ navigation }: any) {
           onPress={analyze}
         />
 
-        {errMsg ? <Text className="mt-sm text-sm text-error">{errMsg}</Text> : null}
+        {errMsg ? <T variant="label" tone="error" style={{ marginTop: space.sm }}>{errMsg}</T> : null}
 
         {mapped ? (
-          <Card className="mt-md">
-            <Text className="text-base font-semibold">
+          <Card style={{ marginTop: space.md }}>
+            <T variant="body" weight="semibold">
               {mapped.rowCount} item{mapped.rowCount === 1 ? '' : 's'} found
               {mapped.source === 'menu-pdf' ? ' in your menu' : ''}
-            </Text>
+            </T>
             {mapped.mapping ? (
-              <Text className="mt-xs text-xs text-text-muted">
+              <T variant="micro" tone="muted" style={{ marginTop: space.xs }}>
                 Mapped: {Object.entries(mapped.mapping ?? {}).map(([k, v]) => `${v}→${k}`).join(', ')}
-              </Text>
+              </T>
             ) : (
-              <Text className="mt-xs text-xs text-text-muted">
+              <T variant="micro" tone="muted" style={{ marginTop: space.xs }}>
                 Check the names and prices below — nothing imports until you confirm.
-              </Text>
+              </T>
             )}
             {(mapped.preview ?? []).slice(0, 5).map((r: any, i: number) => (
               <View key={i} className="mt-sm flex-row items-center justify-between border-t border-border-subtle pt-sm">
-                <Text className="flex-1 pr-md text-sm" numberOfLines={1}>
+                <T variant="label" numberOfLines={1} style={{ flex: 1, paddingRight: space.md }}>
                   {r.name ?? '—'}
-                </Text>
-                <Text className="text-sm text-text-secondary">
+                </T>
+                <T variant="label" tone="muted">
                   {r.basePrice ?? r.price ?? ''}
                   {r.stockQuantity != null && r.stockQuantity !== '' ? ` · ${r.stockQuantity} stock` : ''}
-                </Text>
+                </T>
               </View>
             ))}
-            <Button
+            <PillButton
               label={`Import ${mapped.rowCount} items`}
-              className="mt-md"
+              style={{ marginTop: space.md }}
               loading={importItems.isPending}
               disabled={!!previewType}
               onPress={runImport}
@@ -218,16 +218,16 @@ export function VendorBulkImportScreen({ navigation }: any) {
         ) : null}
 
         {result ? (
-          <Card className="mt-md" style={{ borderColor: color.brand[500] }}>
+          <Card style={{ marginTop: space.md, borderWidth: 1, borderColor: color.brand[500] }}>
             <View className="flex-row items-center">
               <Feather name="check-circle" size={18} color={color.success} />
-              <Text className="ml-sm text-base font-semibold">Import complete</Text>
+              <T variant="body" weight="semibold" style={{ marginLeft: space.sm }}>Import complete</T>
             </View>
-            <Text className="mt-xs text-sm text-text-secondary">
+            <T variant="label" tone="muted" style={{ marginTop: space.xs }}>
               {importedCount != null ? `${importedCount} imported` : 'Items imported'}
               {failedCount ? ` · ${failedCount} skipped` : ''}.
-            </Text>
-            <Button label="Back to menu" variant="outline" className="mt-md" onPress={() => navigation?.goBack?.()} />
+            </T>
+            <PillButton label="Back to menu" variant="outline" style={{ marginTop: space.md }} onPress={() => navigation?.goBack?.()} />
           </Card>
         ) : null}
       </ScrollView>

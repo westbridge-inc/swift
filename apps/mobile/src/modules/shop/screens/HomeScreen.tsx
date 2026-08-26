@@ -12,7 +12,7 @@ import { useDiscoveryCategories, useHome, useToggleFavorite } from '../../../hoo
 import { useAds } from '../../../hooks/ads';
 import { AdHeroVideo, AdTopCard, AdBar } from '../../../components/ads';
 import { PressableScale } from '../../../kit/pressable-scale';
-import { Scrim } from '../../../components/ui/scrim';
+import { Scrim } from '../../../kit/scrim';
 import { grantedLocationFix } from '../../../lib/deviceLocation';
 import { locationPrimer } from '../../../lib/location-primer';
 import { useDeviceLocation } from '../../../hooks/useDeviceLocation';

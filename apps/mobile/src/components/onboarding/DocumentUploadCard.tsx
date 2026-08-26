@@ -3,8 +3,7 @@ import * as ImagePicker from 'expo-image-picker';
 import { useNavigation } from '@react-navigation/native';
 import { Feather, MaterialCommunityIcons } from '@expo/vector-icons';
 import { color, space } from '@swift/ui';
-import { Text, Card, Badge } from '../ui';
-import { LinkText } from '../../kit';
+import { Badge, Card, LinkText, T } from '../../kit';
 import { useUploadDocument } from '../../hooks/verification';
 import {
   AuthSessionBoundaryError,
@@ -157,7 +156,14 @@ export function DocumentUploadCard({
 
   return (
     <Pressable disabled={approved || pending || upload.isPending} onPress={pick}>
-      <Card style={isNext && !status ? { borderColor: color.brand[500] } : undefined} className={isNext && !status ? 'mb-sm flex-row items-center' : 'mb-sm flex-row items-center'}>
+      <Card
+        style={[
+          { marginBottom: space.sm, flexDirection: 'row', alignItems: 'center' },
+          // The recommended-next card wears a visible brand edge, not just a
+          // colour with no width (the old ternary set borderColor alone).
+          isNext && !status ? { borderWidth: 1, borderColor: color.brand[500] } : null,
+        ]}
+      >
         <View className="h-11 w-11 items-center justify-center rounded-full" style={{ backgroundColor: color.surface.subtle }}>
           <MaterialCommunityIcons
             name={approved ? 'check-decagram' : docIcon(docType)}
@@ -166,17 +172,18 @@ export function DocumentUploadCard({
           />
         </View>
         <View className="ml-md flex-1">
-          <Text
-            className="text-xs text-text-secondary"
+          <T
+            variant="micro"
+            tone="muted"
             style={uploadErr || rejected ? { color: color.error } : expiringSoon || expired ? { color: color.warning } : undefined}
           >
             {caption}
-          </Text>
-          <Text className="text-base font-semibold">{label(docType)}</Text>
+          </T>
+          <T variant="body" weight="semibold">{label(docType)}</T>
           {docType === 'national_id' || docType === 'owner_national_id' ? (
-            <Text className="mt-0.5 text-xs text-text-muted">
+            <T variant="micro" tone="muted" style={{ marginTop: 2 }}>
               Face-matched against your profile selfie
-            </Text>
+            </T>
           ) : null}
         </View>
         {upload.isPending ? (

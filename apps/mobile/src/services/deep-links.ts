@@ -1,7 +1,7 @@
 import { Linking } from 'react-native';
 import { api } from './api';
 import { safeNavigate } from '../navigation/navigationRef';
-import { toast } from '../components/ui/toast';
+import { toast } from '../kit/toast';
 
 // The QR/link DEEP-LINK ROUTER [qr spec Part 6]. Universal links hand the app
 // a full https URL for /store/{slug} or /s/{code}; this module turns it into

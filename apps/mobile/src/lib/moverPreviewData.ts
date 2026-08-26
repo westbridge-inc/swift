@@ -158,7 +158,7 @@ export function previewMutation(): any {
     try {
       // Lazy import keeps this lib dependency-free for pure logic tests.
       // eslint-disable-next-line @typescript-eslint/no-var-requires
-      require('../components/ui/toast').toast.show('Preview is read-only — nothing was changed.');
+      require('../kit/toast').toast.show('Preview is read-only — nothing was changed.');
     } catch { /* non-UI context (tests) — stay a pure no-op */ }
   };
   return {

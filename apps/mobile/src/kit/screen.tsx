@@ -12,6 +12,14 @@ import { T } from './text';
  *  Plain View + inset padding, NOT the native SafeAreaView: on this new-arch
  *  RN the native safe-area view mis-frames its children for hit-testing (touch
  *  boxes land ~inset higher than the visuals), swallowing taps. */
+/** The app's ROOT surface — one white ground under every navigator. [B6] Kit
+ *  replacement for the legacy "GluestackUIProvider", which was exactly this
+ *  View wearing a provider's name (its promised gluestack seam never arrived;
+ *  that stack decision belongs to web). */
+export function AppSurface({ children }: { children: React.ReactNode }) {
+  return <View style={{ flex: 1, backgroundColor: color.surface.base }}>{children}</View>;
+}
+
 export function Screen({ children, style, bleed = false, ...rest }: ViewProps & { bleed?: boolean }) {
   const insets = useSafeAreaInsets();
   return (
