@@ -128,3 +128,17 @@ export const swiftDesignVariables: SwiftCssVariables = {
   '--swift-elevation-raised': elevation.raised.boxShadow,
   '--swift-elevation-floating': elevation.floating.boxShadow,
 };
+
+/**
+ * Raw brand hexes, for the few places that cannot use a CSS variable —
+ * notably the generated Open Graph card, which is rasterised by Satori with
+ * no stylesheet in scope. Sourced from the same token object as everything
+ * else, so the UI barrier's "no brand hex outside packages/ui" rule holds.
+ */
+export const brandPalette = {
+  brand: color.brand[500],
+  brandDeep: color.brand[600],
+  paper: color.surface.subtle,
+  blush: color.brand[100],
+  ink: color.text.primary,
+} as const;

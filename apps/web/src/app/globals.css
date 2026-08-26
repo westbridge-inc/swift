@@ -24,3 +24,62 @@ textarea {
   outline: medium solid var(--swift-focus);
   outline-offset: var(--swift-space-xs);
 }
+
+/* ── Legal documents ───────────────────────────────────────────────────────
+   The DGP-1 text arrives as plain semantic HTML (h2 / p / ul / li / b / a)
+   with no classes of its own, so the typography is set here once. Measure is
+   held near 65 characters and the scale matches the marketing pages, because
+   a reviewer reads privacy and terms as part of the same site.            */
+
+.legal-prose {
+  color: var(--swift-ink);
+  font-size: 1rem;
+  line-height: 1.7;
+}
+
+.legal-prose > p {
+  margin-block: 0 1.1em;
+  color: var(--swift-muted);
+}
+
+.legal-prose h2 {
+  margin-block: 2.4em 0.7em;
+  font-size: 1.125rem;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  color: var(--swift-ink);
+}
+
+.legal-prose h2:first-child {
+  margin-block-start: 0;
+}
+
+.legal-prose ul {
+  margin-block: 0 1.2em;
+  padding-inline-start: 1.15em;
+  color: var(--swift-muted);
+}
+
+.legal-prose li {
+  margin-block-end: 0.5em;
+}
+
+.legal-prose li::marker {
+  color: var(--swift-red);
+}
+
+.legal-prose b,
+.legal-prose strong {
+  font-weight: 600;
+  color: var(--swift-ink);
+}
+
+.legal-prose a {
+  color: var(--swift-red);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.legal-prose a:hover {
+  color: var(--swift-red-600);
+}
