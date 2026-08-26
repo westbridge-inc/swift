@@ -1,7 +1,7 @@
 import { View } from 'react-native';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
-import { color } from '@swift/ui';
-import { Text, Heading, Spinner, EmptyState } from '../ui';
+import { color, space } from '@swift/ui';
+import { EmptyState, Spinner, T } from '../../kit';
 import { DocumentUploadCard } from './DocumentUploadCard';
 
 /**
@@ -35,7 +35,7 @@ export function DocumentChecklist({
   if (isError) {
     return (
       <EmptyState
-        icon="alert-circle-outline"
+        icon="alert-circle"
         title="Couldn’t load your verification steps"
         body="We couldn’t reach the server. Check your connection and try again."
         actionLabel={onRetry ? 'Retry' : undefined}
@@ -66,7 +66,7 @@ export function DocumentChecklist({
   if (checklist.length === 0) {
     return (
       <EmptyState
-        icon="shield-check-outline"
+        icon="shield"
         title="You’re all set for now"
         body="Your account is under review — we’ll approve within 24 hours. Nothing else is needed from you right now."
       />
@@ -78,22 +78,22 @@ export function DocumentChecklist({
 
   return (
     <View>
-      <Heading size="lg" className="mb-xs">
+      <T variant="heading" style={{ marginBottom: space.xs }}>
         Required steps
-      </Heading>
-      <Text className="mb-sm text-sm text-text-secondary">
+      </T>
+      <T variant="label" tone="muted" style={{ marginBottom: space.sm }}>
         Upload these to activate your account. We review within 24 hours.
-      </Text>
+      </T>
       {/* Progress — how far through the door they are */}
       <View className="mb-md">
         <View className="mb-1 flex-row items-center justify-between">
-          <Text className="text-xs font-semibold text-text-secondary">
+          <T variant="micro" weight="semibold" tone="muted">
             {approvedCount} of {checklist.length} approved
-          </Text>
+          </T>
           {allSubmitted && approvedCount < checklist.length ? (
-            <Text className="text-xs font-semibold" style={{ color: color.brand[500] }}>
+            <T variant="micro" weight="semibold" style={{ color: color.brand[500] }}>
               All submitted — in review
-            </Text>
+            </T>
           ) : null}
         </View>
         <View className="h-1.5 overflow-hidden rounded-full" style={{ backgroundColor: color.surface.subtle }}>
@@ -120,10 +120,10 @@ export function DocumentChecklist({
       })}
       <View className="mt-sm flex-row items-start rounded-2xl bg-surface-subtle p-md">
         <MaterialCommunityIcons name="shield-check-outline" size={16} color={color.text.muted} style={{ marginTop: 1 }} />
-        <Text className="ml-2 flex-1 text-xs leading-4 text-text-muted">
+        <T variant="micro" tone="muted" style={{ marginLeft: space.sm, flex: 1 }}>
           We confirm your documents are genuine and that they&apos;re yours, and re‑check expiry every day — we&apos;ll
           remind you before anything lapses so you stay verified.
-        </Text>
+        </T>
       </View>
     </View>
   );

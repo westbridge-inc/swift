@@ -3,7 +3,7 @@ import { View, Linking, Image } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { CameraView, useCameraPermissions } from 'expo-camera';
 import { Feather } from '@expo/vector-icons';
-import { color } from '@swift/ui';
+import { color, space } from '@swift/ui';
 import { withAlpha } from '../../modules/mover/surface';
 import { SwiftMark } from '../../components/SwiftLogo';
 import { authApi } from '../../services/api';
@@ -14,7 +14,7 @@ import {
   requireAuthSessionSnapshot,
   useAuthStore,
 } from '../../stores/authStore';
-import { Text, Heading, Button } from '../../components/ui';
+import { PillButton, T } from '../../kit';
 import { PressableScale } from '../../kit/pressable-scale';
 
 const FRAME = 260;
@@ -125,52 +125,52 @@ export function SelfieCaptureScreen() {
     <SafeAreaView style={{ flex: 1 }} edges={['top', 'bottom']} className="bg-surface-base">
       <View className="flex-row items-center justify-end px-lg pt-md">
         <PressableScale onPress={logout} hitSlop={12}>
-          <Text className="text-sm text-text-muted">Sign out</Text>
+          <T variant="label" tone="muted">Sign out</T>
         </PressableScale>
       </View>
 
       <View className="flex-1 justify-center px-lg">
         <View className="mb-sm items-center"><SwiftMark size={34} /></View>
-        <Heading size="xl" className="text-center">Add your photo</Heading>
-        <Text className="mt-xs mb-xl text-center text-text-secondary">
+        <T variant="title" center>Add your photo</T>
+        <T variant="body" tone="muted" center style={{ marginTop: space.xs, marginBottom: space.xl }}>
           Take a quick selfie — it becomes your profile photo so people know
           exactly who they’re meeting. Camera only, no gallery uploads.
-        </Text>
+        </T>
 
         {frame}
 
-        {error ? <Text className="mt-md text-center text-sm text-error">{error}</Text> : null}
+        {error ? <T variant="label" tone="error" center style={{ marginTop: space.md }}>{error}</T> : null}
 
         <View className="mt-xl">
           {photoUri ? (
             <>
-              <Button label="Use this photo" loading={uploading} onPress={upload} />
-              <Button
+              <PillButton label="Use this photo" loading={uploading} onPress={upload} />
+              <PillButton
                 label="Retake"
                 variant="outline"
-                className="mt-sm"
+                style={{ marginTop: space.sm }}
                 disabled={uploading}
                 onPress={() => setPhotoUri(null)}
               />
             </>
           ) : permission?.granted ? (
-            <Button label={capturing ? 'Hold still…' : 'Take selfie'} loading={capturing} onPress={capture} />
+            <PillButton label={capturing ? 'Hold still…' : 'Take selfie'} loading={capturing} onPress={capture} />
           ) : permission?.canAskAgain === false ? (
             <>
-              <Text className="mb-sm text-center text-sm text-text-secondary">
+              <T variant="label" tone="muted" center style={{ marginBottom: space.sm }}>
                 Camera access is off. Enable it in Settings to continue.
-              </Text>
-              <Button label="Open Settings" onPress={() => void Linking.openSettings().catch(() => toast.show("Couldn't open Settings — enable the camera for Swift there."))} />
+              </T>
+              <PillButton label="Open Settings" onPress={() => void Linking.openSettings().catch(() => toast.show("Couldn't open Settings — enable the camera for Swift there."))} />
             </>
           ) : (
-            <Button label="Allow camera" onPress={requestPermission} />
+            <PillButton label="Allow camera" onPress={requestPermission} />
           )}
         </View>
       </View>
 
-      <Text className="mb-md px-lg text-center text-xs text-text-muted">
+      <T variant="micro" tone="muted" center style={{ marginBottom: space.md, paddingHorizontal: space.lg }}>
         Your photo is shown with your orders and rides. You can retake it any time.
-      </Text>
+      </T>
     </SafeAreaView>
   );
 }

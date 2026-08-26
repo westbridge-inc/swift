@@ -1,8 +1,9 @@
 /** @jsxImportSource react */
-import React from 'react';
-import { ActivityIndicator, View, type ViewStyle } from 'react-native';
+import React, { useEffect, useState } from 'react';
+import { ActivityIndicator, StyleSheet, View, type LayoutChangeEvent, type StyleProp, type ViewStyle } from 'react-native';
+import Animated, { Easing, useAnimatedStyle, useSharedValue, withRepeat, withTiming } from 'react-native-reanimated';
 import { Feather } from '@expo/vector-icons';
-import { color, radius, space } from '@swift/ui';
+import { color, radius, space, withAlpha } from '@swift/ui';
 import { PillButton } from './button';
 import { Pictogram, type PictogramName } from './pictograms';
 import { IconChip } from './rows';
@@ -64,6 +65,43 @@ export function EmptyState({
       ) : null}
       {actionLabel && onAction ? (
         <PillButton label={actionLabel} onPress={onAction} size="md" style={{ marginTop: space.md, alignSelf: 'stretch' }} />
+      ) : null}
+    </View>
+  );
+}
+
+/** Brand spinner — the bare wait for inline moments; a LOADING SCREEN uses
+ *  Skeleton shaped like the final layout instead (no blank flashes).
+ *  [B6] Kit port of components/ui Spinner. */
+export function Spinner({ size = 'small' }: { size?: 'small' | 'large' }) {
+  return <ActivityIndicator size={size} color={color.brand[500]} />;
+}
+
+/**
+ * Loading placeholder with a real **shimmer sweep** — a soft highlight
+ * travels across the block. Size it with `style` (height/width/radius);
+ * a skeleton is shaped like the layout it stands in for, so the size IS
+ * the point. [B6] Kit port of components/ui Skeleton, className → style.
+ */
+export function Skeleton({ style }: { style?: StyleProp<ViewStyle> }) {
+  const [w, setW] = useState(0);
+  const x = useSharedValue(0);
+
+  useEffect(() => {
+    if (w === 0) return;
+    x.value = 0;
+    x.value = withRepeat(withTiming(1, { duration: 1200, easing: Easing.inOut(Easing.ease) }), -1, false);
+  }, [w, x]);
+
+  const sweep = useAnimatedStyle(() => ({ transform: [{ translateX: -w + x.value * 2 * w }] }));
+  const onLayout = (e: LayoutChangeEvent) => setW(e.nativeEvent.layout.width);
+
+  return (
+    <View onLayout={onLayout} style={[{ backgroundColor: color.surface.subtle, overflow: 'hidden', borderRadius: radius.md }, style]}>
+      {w > 0 ? (
+        <Animated.View style={[StyleSheet.absoluteFill, sweep]}>
+          <View style={{ height: '100%', width: w * 0.5, backgroundColor: withAlpha(color.white, 0.6) }} />
+        </Animated.View>
       ) : null}
     </View>
   );

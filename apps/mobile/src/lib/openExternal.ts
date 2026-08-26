@@ -1,5 +1,5 @@
 import { Linking } from 'react-native';
-import { toast } from '../components/ui/toast';
+import { toast } from '../kit/toast';
 
 /** [WR-037] One honest opener for OS-level actions (tel:, mailto:, maps).
  *  Rejections were swallowed at ~a dozen call sites — a tap that did nothing,

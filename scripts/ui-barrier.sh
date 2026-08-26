@@ -27,14 +27,17 @@ if [ -d "$MOBILE/kit2" ] || [ -d "$MOBILE/screens2" ]; then
   fi
 fi
 
-# ── Progress, not a failure: the legacy kit is expected until the cutover ends.
+# ── THE AMPUTATION IS DONE — and it stays done [C6/S10 step 5] ─────────────
+# The legacy kit was removed on 2026-08-26 after its nine unique primitives
+# were authored into the kit (#796) and every import migrated. From here this
+# is a HARD one-way door: the folder must not return, and nothing may import
+# or require it. (Doc comments that merely NAME the old path are fine — the
+# gate matches the module-resolution forms.)
 if [ -d "$MOBILE/components/ui" ]; then
-  n=$(find "$MOBILE/components/ui" -type f | wc -l | tr -d ' ')
-  mixed=0
-  for f in $(grep -rl "from '.*kit'" --include='*.tsx' "$MOBILE" 2>/dev/null); do
-    grep -q "components/ui" "$f" 2>/dev/null && mixed=$((mixed+1))
-  done
-  echo "⏳ legacy kit still present (${n} files) · ${mixed} screens still import BOTH kits — expected until the cutover completes"
+  leak "components/ui has RETURNED — the second design system was amputated; author what you need in src/kit"
+fi
+if grep -rnE "(from ['\"][^'\"]*components/ui|require\(['\"][^'\"]*components/ui)" "$MOBILE" 2>/dev/null; then
+  leak "something imports the deleted legacy kit — use src/kit"
 fi
 
 # ── Permanent, from day one: nobody re-introduces a second palette ─────────

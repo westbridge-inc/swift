@@ -1,5 +1,5 @@
 import { QueryClient, MutationCache } from '@tanstack/react-query';
-import { toast } from '../components/ui/toast';
+import { toast } from '../kit/toast';
 import { errorMessage } from './apiError';
 
 export { errorMessage };

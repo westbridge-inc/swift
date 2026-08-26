@@ -156,7 +156,7 @@ export function previewMutation(): any {
   const explain = () => {
     try {
       // eslint-disable-next-line @typescript-eslint/no-var-requires
-      require('../components/ui/toast').toast.show('Preview is read-only — nothing was changed.');
+      require('../kit/toast').toast.show('Preview is read-only — nothing was changed.');
     } catch { /* non-UI context (tests) */ }
   };
   return { mutate: () => explain(), mutateAsync: async () => { explain(); return undefined; }, isPending: false, isError: false, error: null, isSuccess: false, reset: () => {}, data: undefined };

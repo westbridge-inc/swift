@@ -14,7 +14,7 @@ import {
 } from '../stores/authStore';
 import { customerApi } from '../services/api';
 import { roleSwitchAuthorityPayload } from '../lib/roleLanding';
-import { toast } from './ui/toast';
+import { toast } from '../kit/toast';
 import {
   canonicalMoverAuthority,
   clearMoverAuthorityCache,

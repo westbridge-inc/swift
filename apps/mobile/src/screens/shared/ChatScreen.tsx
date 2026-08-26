@@ -2,8 +2,8 @@ import { useState } from 'react';
 import { View, FlatList, TextInput, KeyboardAvoidingView, Platform } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Feather } from '@expo/vector-icons';
-import { color } from '@swift/ui';
-import { Text, Spinner } from '../../components/ui';
+import { color, space } from '@swift/ui';
+import { Spinner, T } from '../../kit';
 import { PressableScale } from '../../kit/pressable-scale';
 import { useAuthStore } from '../../stores/authStore';
 import { useChatRoom, useChatMessages, useSendMessage } from '../../hooks/chat';
@@ -47,9 +47,9 @@ export function ChatScreen({ route, navigation }: any) {
         <PressableScale onPress={() => navigation?.goBack?.()} hitSlop={8}>
           <Feather name="chevron-left" size={24} color={color.text.primary} />
         </PressableScale>
-        <Text className="ml-md text-base font-bold text-text-primary" numberOfLines={1}>
+        <T variant="body" weight="bold" numberOfLines={1} style={{ marginLeft: space.md }}>
           {title}
-        </Text>
+        </T>
       </View>
 
       <KeyboardAvoidingView
@@ -76,13 +76,13 @@ export function ChatScreen({ route, navigation }: any) {
                     className="rounded-2xl px-md py-sm"
                     style={[{ maxWidth: '80%' }, mine ? { backgroundColor: color.brand[500] } : { backgroundColor: color.surface.subtle }]}
                   >
-                    <Text className={mine ? 'text-sm text-white' : 'text-sm text-text-primary'}>{item.message}</Text>
+                    <T variant="label" style={{ color: mine ? color.white : color.text.primary }}>{item.message}</T>
                   </View>
-                  <Text className="mt-1 text-xs text-text-muted">{fmtTime(item.createdAt)}</Text>
+                  <T variant="micro" tone="muted" style={{ marginTop: 4 }}>{fmtTime(item.createdAt)}</T>
                 </View>
               );
             }}
-            ListEmptyComponent={<Text className="mt-2xl text-center text-sm text-text-muted">Say hello 👋</Text>}
+            ListEmptyComponent={<T variant="label" tone="muted" center style={{ marginTop: space['2xl'] }}>Say hello 👋</T>}
           />
         )}
 

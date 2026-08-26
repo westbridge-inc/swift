@@ -4,8 +4,8 @@ import { useQuery } from '@tanstack/react-query';
 import { authApi } from '../../services/api';
 import { useAuthStore } from '../../stores/authStore';
 import { Feather } from '@expo/vector-icons';
-import { color } from '@swift/ui';
-import { Text, Heading, Skeleton, EmptyState, elevation } from '../../components/ui';
+import { color, elevation, space } from '@swift/ui';
+import { EmptyState, Skeleton, T } from '../../kit';
 import { PressableScale } from '../../kit/pressable-scale';
 import { StepProgress } from '../../kit/step-progress';
 import { SwiftMark } from '../../components/SwiftLogo';
@@ -44,19 +44,19 @@ export function CountryPickerScreen({ navigation }: any) {
       <View className="flex-1 px-lg pt-2xl">
         <View className="flex-row items-center">
           <SwiftMark size={40} />
-          <Heading size="3xl" className="ml-sm text-text-primary">Swift</Heading>
+          <T variant="display" style={{ marginLeft: space.sm }}>Swift</T>
         </View>
-        <Heading size="xl" className="mt-xl">Where are you?</Heading>
-        <Text className="mt-xs text-text-secondary">
+        <T variant="title" style={{ marginTop: space.xl }}>Where are you?</T>
+        <T variant="body" tone="muted" style={{ marginTop: space.xs }}>
           Choose your country to get started — Swift is live across the Caribbean.
-        </Text>
+        </T>
         <View className="mt-lg">
           <StepProgress step={0} total={4} />
         </View>
 
         {isLoading ? (
           <View className="mt-lg">
-            {[0, 1, 2, 3, 4].map((i) => <Skeleton key={i} className="mb-sm h-[68px] w-full rounded-3xl" />)}
+            {[0, 1, 2, 3, 4].map((i) => <Skeleton key={i} style={{ marginBottom: space.sm, height: 68, borderRadius: 24 }} />)}
           </View>
         ) : isError || countries.length === 0 ? (
           // The very first screen of the app must never dead-end silently —
@@ -90,13 +90,14 @@ export function CountryPickerScreen({ navigation }: any) {
                     style={elevation.card}
                   >
                     <View className="h-12 w-12 items-center justify-center rounded-2xl bg-surface-subtle">
-                      <Text style={{ fontSize: 26 }}>{flagEmoji(item.code)}</Text>
+                      {/* The flag is a unicode glyph, not type — size is structural. */}
+                      <T style={{ fontSize: 26, lineHeight: 32 }}>{flagEmoji(item.code)}</T>
                     </View>
                     <View className="ml-md flex-1">
-                      <Text className="text-base font-bold text-text-primary" numberOfLines={1}>{item.name}</Text>
-                      <Text className="mt-0.5 text-xs text-text-muted">
+                      <T variant="body" weight="bold" numberOfLines={1}>{item.name}</T>
+                      <T variant="micro" tone="muted" style={{ marginTop: 2 }}>
                         {item.dialCode} · {item.currencySymbol} {item.currencyCode}
-                      </Text>
+                      </T>
                     </View>
                     {live ? (
                       <View className="h-9 w-9 items-center justify-center rounded-full" style={{ backgroundColor: color.brand[50] }}>
@@ -104,7 +105,7 @@ export function CountryPickerScreen({ navigation }: any) {
                       </View>
                     ) : (
                       <View className="rounded-full bg-surface-subtle px-2.5 py-1">
-                        <Text className="text-xs font-bold text-text-secondary">Soon</Text>
+                        <T variant="micro" weight="bold" tone="muted">Soon</T>
                       </View>
                     )}
                   </View>
@@ -112,7 +113,7 @@ export function CountryPickerScreen({ navigation }: any) {
               );
             }}
             ListEmptyComponent={
-              <EmptyState icon="map-search-outline" title="No countries yet" body="We’re expanding across the Caribbean — check back soon." />
+              <EmptyState icon="map" title="No countries yet" body="We’re expanding across the Caribbean — check back soon." />
             }
           />
         )}
