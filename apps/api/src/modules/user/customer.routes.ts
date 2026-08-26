@@ -917,7 +917,13 @@ export async function customerRoutes(app: FastifyInstance) {
 
       // Popular dishes — top items by lifetime orders (Home "Popular right now" rail)
       app.prisma.item.findMany({
-        where: { isAvailable: true, vendor: { status: 'ACTIVE' } },
+        // The FULL vendor-visibility predicate from the vendors query above —
+        // isVerified and tenant.isActive included. Without them a platform-
+        // deactivated or unverified operator's STORE was hidden while their
+        // DISH sat above the fold ([F-028-07] applies here identically: a
+        // guest request is unscoped, so the relational predicate is the only
+        // thing standing between a shut-off operator and the Home rail).
+        where: { isAvailable: true, vendor: { status: 'ACTIVE', isVerified: true, tenant: { isActive: true } } },
         orderBy: { totalOrdered: 'desc' },
         take: 10,
         select: {
