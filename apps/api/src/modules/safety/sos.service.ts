@@ -38,6 +38,9 @@ export interface SosCreateInput {
   actorRole: string;
   orderId?: string | null;
   orderType?: OrderType | null;
+  /** [B3] The service-job context — mutually exclusive with orderId (the
+   *  route enforces it). Same loose-reference semantics as orderId. */
+  serviceJobId?: string | null;
   counterpartyUserId?: string | null;
   triggerSource?: SosTriggerSource;
   lat?: number | null;
@@ -105,6 +108,10 @@ export class SosService {
       where: {
         actorUserId: input.actorUserId,
         orderId: input.orderId ?? null,
+        // [B3] Collapse is PER CONTEXT: repeats on the same service job merge,
+        // while a genuinely different emergency (another job, or an order)
+        // still mints its own alert.
+        serviceJobId: input.serviceJobId ?? null,
         status: { in: LIVE_STATUSES },
       },
       orderBy: { triggeredAt: 'desc' },
@@ -222,6 +229,7 @@ export class SosService {
           actorRole: input.actorRole,
           orderId: input.orderId ?? null,
           orderType: input.orderType ?? null,
+          serviceJobId: input.serviceJobId ?? null,
           counterpartyUserId: input.counterpartyUserId ?? null,
           triggerSource: source,
           status: grace ? 'TRIGGER_PENDING' : 'ACTIVE',

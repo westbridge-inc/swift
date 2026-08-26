@@ -402,6 +402,8 @@ export const safetyApi = {
    */
   sos: (input: {
     orderId?: string;
+    /** [B3] hired-professional visit — mutually exclusive with orderId */
+    serviceJobId?: string;
     lat?: number;
     lng?: number;
     accuracyM?: number;

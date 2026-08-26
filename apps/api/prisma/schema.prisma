@@ -2985,6 +2985,12 @@ model SosAlert {
   actorRole            String // activeRole snapshot: CUSTOMER / MOVER / VENDOR_OWNER
   orderId              String? // the ride/order (rides = orderType TAXI); null for a vendor store-panic
   orderType            OrderType?
+  /// [B3] The service-job context — an SOS raised from a hired-professional
+  /// visit (provider at the customer's home, or the provider in danger at a
+  /// job). Loose reference like orderId: the alert must survive whatever
+  /// happens to the job row. Exactly one of orderId / serviceJobId is set;
+  /// both null = a context-free panic (store panic, standalone).
+  serviceJobId         String?
   counterpartyUserId   String? // the other party on the trip at trigger time
   status               SosStatus          @default(TRIGGER_PENDING)
   triggerSource        SosTriggerSource   @default(BUTTON)
@@ -3030,6 +3036,7 @@ model SosAlert {
   @@index([actorUserId])
   @@index([actorUserId, status]) // [F-027-17] the live-alert lookup on every trigger
   @@index([orderId])
+  @@index([serviceJobId]) // [B3] ops lookup: every alert on this service job
 }
 
 model EmergencyContact {

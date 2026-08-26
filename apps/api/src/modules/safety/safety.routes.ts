@@ -16,6 +16,9 @@ import { NotFoundError, ForbiddenError, AppError } from '../../utils/errors';
 // the caller to be the alert's actor; ack/resolve are ops-only.
 const createSchema = z.object({
   orderId: z.string().min(1).optional(),
+  // [B3] The service-job context (hired-professional visit). Mutually
+  // exclusive with orderId — an emergency happens in exactly one place.
+  serviceJobId: z.string().min(1).optional(),
   source: z.enum(['BUTTON', 'OPS_MANUAL']).optional(),
   lat: z.number().min(-90).max(90).optional(),
   lng: z.number().min(-180).max(180).optional(),
@@ -65,6 +68,12 @@ export async function safetyRoutes(app: FastifyInstance) {
   app.post('/sos', lifeSafety, async (request) => {
     const body = createSchema.parse(request.body ?? {});
 
+    // [B3] Mutually exclusive contexts, refused BEFORE any lookup — the
+    // shape error must not depend on whether either id happens to resolve.
+    if (body.orderId && body.serviceJobId) {
+      throw new AppError(400, 'VALIDATION_ERROR', 'Send orderId or serviceJobId, not both — an emergency happens in one place.');
+    }
+
     let counterpartyUserId: string | null = null;
     let orderType: import('@prisma/client').OrderType | null = null;
     if (body.orderId) {
@@ -81,6 +90,22 @@ export async function safetyRoutes(app: FastifyInstance) {
       counterpartyUserId = [order.customerId, order.driver?.userId, order.rider?.userId].find((u) => u && u !== request.user.userId) ?? null;
     }
 
+    // [B3] A ServiceJob is not an order, so the participant rule gets its own
+    // clause: only the CUSTOMER on the job or the PROVIDER doing it may raise
+    // its SOS. Same 404-shape as the order path — the SOS endpoint must not be
+    // an existence oracle for other people's jobs.
+    if (body.serviceJobId) {
+      const job = await app.prisma.serviceJob.findFirst({
+        where: {
+          id: body.serviceJobId,
+          OR: [{ customerId: request.user.userId }, { provider: { userId: request.user.userId } }],
+        },
+        select: { id: true, customerId: true, provider: { select: { userId: true } } },
+      });
+      if (!job) throw new NotFoundError('ServiceJob', body.serviceJobId);
+      counterpartyUserId = [job.customerId, job.provider?.userId].find((u) => u && u !== request.user.userId) ?? null;
+    }
+
     // [F-026-14] OPS_MANUAL is a PROVENANCE claim ("ops raised this on the
     // person's behalf") and it skips the grace barrier. A client must not be
     // able to assert it: doing so both bypasses the reconsider window and
@@ -92,6 +117,7 @@ export async function safetyRoutes(app: FastifyInstance) {
       actorUserId: request.user.userId,
       actorRole: request.user.role,
       orderId: body.orderId ?? null,
+      serviceJobId: body.serviceJobId ?? null,
       orderType,
       counterpartyUserId,
       triggerSource: claimedSource,

@@ -37,3 +37,32 @@ export function useJobSos() {
     onSuccess: () => track('job_sos', {}),
   });
 }
+
+/**
+ * [B3] Emergency alert on a SERVICE job — the last two uncovered surfaces:
+ * a hired professional working in a stranger's home, and the customer whose
+ * home they are in. A ServiceJob is not an order, so it rides its own SOS
+ * context (`serviceJobId`); the server authorises exactly the job's customer
+ * and its provider, and repeats collapse per job like they do per order.
+ */
+export function useServiceJobSos() {
+  const keys = useRef(createSosKeyStore()).current;
+
+  return useMutation({
+    mutationFn: ({
+      serviceJobId,
+      coords,
+    }: {
+      serviceJobId: string;
+      coords?: { lat: number; lng: number; accuracyM?: number };
+    }) =>
+      safetyApi.sos({
+        serviceJobId,
+        lat: coords?.lat,
+        lng: coords?.lng,
+        accuracyM: coords?.accuracyM,
+        clientIdempotencyKey: keys.keyFor(serviceJobId),
+      }),
+    onSuccess: () => track('service_job_sos', {}),
+  });
+}
