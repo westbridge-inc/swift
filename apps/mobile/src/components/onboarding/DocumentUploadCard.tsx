@@ -1,8 +1,10 @@
 import { Alert, Pressable, View, ActivityIndicator } from 'react-native';
 import * as ImagePicker from 'expo-image-picker';
+import { useNavigation } from '@react-navigation/native';
 import { Feather, MaterialCommunityIcons } from '@expo/vector-icons';
-import { color } from '@swift/ui';
+import { color, space } from '@swift/ui';
 import { Text, Card, Badge } from '../ui';
+import { LinkText } from '../../kit';
 import { useUploadDocument } from '../../hooks/verification';
 import {
   AuthSessionBoundaryError,
@@ -70,6 +72,7 @@ export function DocumentUploadCard({
   isNext?: boolean;
 }) {
   const upload = useUploadDocument(role);
+  const navigation = useNavigation<any>();
   const expired = status === 'EXPIRED';
   const pending = status === 'PENDING';
   const rejected = status === 'REJECTED';
@@ -190,6 +193,29 @@ export function DocumentUploadCard({
           <Feather name="chevron-right" size={20} color={color.text.muted} />
         )}
       </Card>
+      {/* [E11] The contest door. Tap-to-re-upload fixes a BAD PHOTO; it cannot
+          fix a decision — an insurance policy read as PRIVATE re-uploads to
+          the same verdict, and 61 real applications sat stalled exactly there
+          with no next action. The appeal rides the live support queue (every
+          stack registers GetHelp since #798), prefilled with the document and
+          the reviewer's own words, so a human re-reads the decision. */}
+      {rejected ? (
+        <View style={{ alignSelf: 'flex-end', marginTop: -4, marginBottom: space.sm, paddingRight: 4 }}>
+          <LinkText
+            label="Think this is wrong? Appeal it"
+            tone="muted"
+            onPress={() =>
+              navigation?.navigate?.('GetHelp', {
+                category: 'ACCOUNT',
+                subject: `Appeal: ${label(docType)} was rejected`,
+                message: reviewNote
+                  ? `The rejection reason given was: "${reviewNote}". I believe this decision is wrong because `
+                  : 'I believe this rejection is wrong because ',
+              })
+            }
+          />
+        </View>
+      ) : null}
     </Pressable>
   );
 }
