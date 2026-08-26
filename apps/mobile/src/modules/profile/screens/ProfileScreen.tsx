@@ -300,6 +300,19 @@ export function ProfileScreen() {
             <SettingsRow icon="heart" label="Favourites" onPress={() => navigation.navigate('Favorites')} />
             <SettingsRow icon="map-pin" label="My addresses" onPress={() => navigation.navigate('Addresses')} />
             <SettingsRow
+              icon="users"
+              label="Emergency contacts"
+              // [S15] The people an SOS actually texts. The fan-out in
+              // sos.service.ts has always reached VERIFIED contacts — and
+              // there was no door in the app to add one, so the list was
+              // empty for everybody and the alert reached nobody who knows
+              // them. No count/status in the `sub` until the screen is open:
+              // the profile payload does not carry it, and a guessed
+              // "2 contacts" would be the UI lying about who gets called.
+              sub="Who Swift texts if you raise an alert"
+              onPress={() => navigation.navigate('EmergencyContacts')}
+            />
+            <SettingsRow
               icon="shield"
               label="Identity verification"
               // No status chip here on purpose: /customer/profile carries no

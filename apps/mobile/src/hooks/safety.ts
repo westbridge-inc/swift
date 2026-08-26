@@ -1,5 +1,5 @@
 import { useRef } from 'react';
-import { useMutation } from '@tanstack/react-query';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { track } from '../lib/analytics';
 import { safetyApi } from '../services/api';
 import { createSosKeyStore } from '../lib/sosKey';
@@ -65,4 +65,64 @@ export function useServiceJobSos() {
       }),
     onSuccess: () => track('service_job_sos', {}),
   });
+}
+
+// ---------------------------------------------------------------------------
+// EMERGENCY CONTACTS [S15]
+//
+// The same shape of gap as the SOS button itself, one step further along the
+// chain. `sos.service.ts` SMSes VERIFIED emergency contacts when an alert goes
+// active — and no screen in the app could ever add one, so that query returned
+// an empty list for every user and the fan-out reached nobody. The button was
+// wired; the people it exists to reach were not.
+// ---------------------------------------------------------------------------
+
+export const emergencyContactKeys = { all: ['safety', 'emergency-contacts'] as const };
+
+export interface EmergencyContact {
+  id: string;
+  name: string;
+  phoneE164: string;
+  relationship?: string | null;
+  priority: number;
+  verifiedAt: string | null;
+}
+
+export function useEmergencyContacts() {
+  return useQuery<EmergencyContact[]>({
+    queryKey: emergencyContactKeys.all,
+    queryFn: async () => {
+      const res = await safetyApi.listEmergencyContacts();
+      return (res.data?.data ?? []) as EmergencyContact[];
+    },
+  });
+}
+
+/** Every write refetches the list — a contact's VERIFIED state is the whole
+ *  point of the screen, and a stale badge would claim someone will be alerted
+ *  in an emergency when they will not. */
+function useContactMutation<TArg, TRes>(fn: (arg: TArg) => Promise<TRes>) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: fn,
+    onSuccess: () => qc.invalidateQueries({ queryKey: emergencyContactKeys.all }),
+  });
+}
+
+export function useAddEmergencyContact() {
+  return useContactMutation((data: { name: string; phoneE164: string; relationship?: string; priority?: number }) =>
+    safetyApi.addEmergencyContact(data).then((r) => r.data?.data as { id: string; codeSent: boolean }));
+}
+
+export function useVerifyEmergencyContact() {
+  return useContactMutation(({ id, code }: { id: string; code: string }) =>
+    safetyApi.verifyEmergencyContact(id, code));
+}
+
+export function useResendEmergencyContactCode() {
+  return useContactMutation((id: string) => safetyApi.resendEmergencyContactCode(id));
+}
+
+export function useRemoveEmergencyContact() {
+  return useContactMutation((id: string) => safetyApi.removeEmergencyContact(id));
 }
