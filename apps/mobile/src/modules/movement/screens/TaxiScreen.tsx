@@ -1,6 +1,6 @@
 /** @jsxImportSource react */
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { AccessibilityInfo, Animated, Easing, Pressable, Share, StyleSheet, View, useColorScheme, useWindowDimensions } from 'react-native';
+import { Pressable, Share, StyleSheet, View, useColorScheme, useWindowDimensions } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import MapView, { Marker, MarkerAnimated, PROVIDER_DEFAULT } from 'react-native-maps';
 import Reanimated from 'react-native-reanimated';
@@ -24,7 +24,7 @@ import { mediaUrl } from '../../../lib/images';
 import { haptic } from '../../../lib/haptics';
 import { toast } from '../../../kit/toast';
 import { safetyApi, type RideClass, type TierEstimate } from '../../../services/api';
-import { Card, CircleChip, IconChip, LoadingBlock, Money, PillButton, Pictogram, type PictogramName, PinGlyph, PopupCard, PopupTitle, Stars, T, VehicleRender, cardShadow } from '../../../kit';
+import { CalmRadar, Card, CircleChip, IconChip, LoadingBlock, Money, PillButton, Pictogram, type PictogramName, PinGlyph, PopupCard, PopupTitle, Stars, T, VehicleRender, cardShadow } from '../../../kit';
 import { VERTICAL_TINT } from '../../../kit/vertical-tint';
 import type { PickedPlace } from './DestinationSearchScreen';
 import { openExternal } from '../../../lib/openExternal';
@@ -178,76 +178,20 @@ const DrivingMarker = Reanimated.createAnimatedComponent(MarkerAnimated);
 
 /** "Finding your driver" — two calm rings leave the real pickup pin. The
  *  server-owned PENDING state is the only claim: there are no fake cars,
- *  elapsed-time theatre or unsupported wait-time promises. */
+ *  elapsed-time theatre or unsupported wait-time promises. The ring machinery
+ *  is the kit's CalmRadar [Wave 3 part 2]; this keeps only the taxi facts. */
 function SearchingCard() {
-  const pulse = useRef(new Animated.Value(0)).current;
-  const [reduceMotion, setReduceMotion] = useState(false);
-
-  useEffect(() => {
-    let mounted = true;
-    void AccessibilityInfo.isReduceMotionEnabled().then((enabled) => {
-      if (mounted) setReduceMotion(enabled);
-    });
-    const subscription = AccessibilityInfo.addEventListener('reduceMotionChanged', setReduceMotion);
-    return () => {
-      mounted = false;
-      subscription.remove();
-    };
-  }, []);
-
-  useEffect(() => {
-    if (reduceMotion) {
-      pulse.stopAnimation();
-      pulse.setValue(0);
-      return;
-    }
-    const loop = Animated.loop(
-      Animated.timing(pulse, {
-        toValue: 1,
-        duration: motion.duration.moment,
-        easing: Easing.bezier(...motion.easing.decelerate),
-        useNativeDriver: true,
-      }),
-    );
-    loop.start();
-    return () => {
-      loop.stop();
-    };
-  }, [pulse, reduceMotion]);
-
-  const ringStyle = (inner: boolean) => ({
-    position: 'absolute' as const,
-    width: space['5xl'] * 2,
-    height: space['5xl'] * 2,
-    borderRadius: radius.full,
-    borderWidth: inner ? StyleSheet.hairlineWidth : space.xs / 2,
-    borderColor: TAXI_TINT.ink,
-    opacity: reduceMotion
-      ? inner ? 0.18 : 0.1
-      : pulse.interpolate({ inputRange: [0, 1], outputRange: inner ? [0.28, 0] : [0.18, 0] }),
-    transform: [{
-      scale: reduceMotion
-        ? inner ? 0.72 : 1
-        : pulse.interpolate({ inputRange: [0, 1], outputRange: inner ? [0.42, 0.86] : [0.68, 1.18] }),
-    }],
-  });
-
   return (
-    <View style={{ alignItems: 'center', paddingVertical: space.xl }}>
-      <View style={{ width: space['5xl'] * 2, height: space['5xl'] * 2, alignItems: 'center', justifyContent: 'center' }}>
-        <Animated.View style={ringStyle(false)} />
-        <Animated.View style={ringStyle(true)} />
+    <CalmRadar
+      ink={TAXI_TINT.ink}
+      center={
         <View style={{ width: space['4xl'], height: space['4xl'], borderRadius: radius.full, alignItems: 'center', justifyContent: 'center', backgroundColor: TAXI_TINT.bg }}>
           <PinGlyph size={22} color={TAXI_TINT.ink} />
         </View>
-      </View>
-      <T variant="title" style={{ marginTop: space.md }}>
-        Finding your driver
-      </T>
-      <T variant="caption" tone="muted" center style={{ marginTop: space.xs }}>
-        We’ll update this trip when a driver accepts.
-      </T>
-    </View>
+      }
+      title="Finding your driver"
+      caption="We’ll update this trip when a driver accepts."
+    />
   );
 }
 

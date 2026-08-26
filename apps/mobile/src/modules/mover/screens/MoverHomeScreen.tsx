@@ -38,7 +38,7 @@ import { toast } from '../../../kit/toast';
 import { money } from '../../../lib/money';
 import { moverJobsToday } from '../../../lib/earnings';
 import { earningsSplit } from '../../../lib/earnings-breakdown';
-import { FareSlider } from '../../../components/FareSlider';
+import { FareSlider } from '../../../kit';
 import { GUTTER, RoutePair, jobAmount, CustomerTrustBadge } from '../shared';
 import { dk, withAlpha, DCard, DemandBand, DStat, DWeekBars } from '../surface';
 import { useMoverPreview } from '../../../stores/moverPreview';
@@ -46,7 +46,7 @@ import { MoverHomeAccountButton } from './MoverHomeAccountButton';
 import { useBackgroundLocationDisclosure } from './BackgroundLocationDisclosure';
 import { fareLockedFor, fareToSubmit } from './fare-locked';
 import { offerEarnings } from './offer-earnings';
-import { canAdjustFare } from '../../../components/fare-step';
+import { canAdjustFare } from '../../../kit';
 
 /**
  * The earner home (dashboard plan Phase B/C): light, map-first, demand-aware.
