@@ -64,9 +64,21 @@ export function AdvertiserHomeScreen() {
             <T variant="caption" tone="muted" style={{ marginTop: 4 }}>
               {advertiser.status === 'PENDING_REVIEW' &&
                 'You can explore and draft campaigns now. Booking and payment unlock the moment you are approved — usually within a day.'}
-              {advertiser.status === 'REJECTED' && 'Your drafts are preserved. Contact support to appeal.'}
-              {advertiser.status === 'SUSPENDED' && 'Your live campaigns are paused. Contact support.'}
+              {advertiser.status === 'REJECTED' && 'Your drafts are preserved. You can appeal — a human reads every one.'}
+              {advertiser.status === 'SUSPENDED' && 'Your live campaigns are paused. Talk to us to sort it out.'}
             </T>
+            {/* "Contact support to appeal" used to be a sentence with no door
+                behind it — this stack had no support route at all. Now the
+                claim carries its own action. */}
+            {advertiser.status === 'REJECTED' || advertiser.status === 'SUSPENDED' ? (
+              <PillButton
+                label={advertiser.status === 'REJECTED' ? 'Appeal this decision' : 'Get help'}
+                size="md"
+                variant="outline"
+                style={{ marginTop: space.md, alignSelf: 'flex-start' }}
+                onPress={() => navigation.navigate('GetHelp', { category: 'ACCOUNT' })}
+              />
+            ) : null}
           </Card>
         ) : null}
 

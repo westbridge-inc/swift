@@ -20,6 +20,10 @@ import { MoverAccountScreen } from './screens/MoverAccountScreen';
 import { MoverDocumentsScreen } from './screens/MoverDocumentsScreen';
 import { MoverSwiftNumberScreen } from './screens/MoverSwiftNumberScreen';
 import { MoverOnboardingScreen } from './screens/MoverOnboardingScreen';
+// [B-support] The ticket screen is role-agnostic (generic create+list); the
+// mover stack simply never registered it — an earner mid-shift had NO route
+// to a human. Registration, not a rewrite.
+import { GetHelpScreen } from '../profile/screens/GetHelpScreen';
 
 const Stack = createNativeStackNavigator();
 
@@ -108,6 +112,7 @@ export function MoverStack() {
         <Stack.Screen name="MoverDocuments" component={MoverDocumentsScreen} />
         <Stack.Screen name="MySwiftNumber" component={MoverSwiftNumberScreen} />
         <Stack.Screen name="Chat" component={ChatScreen} />
+        <Stack.Screen name="GetHelp" component={GetHelpScreen} />
       </Stack.Navigator>
       {preview ? <MoverPreviewBanner /> : null}
     </View>

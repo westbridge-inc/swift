@@ -188,6 +188,7 @@ export function MoverAccountScreen({ navigation }: any) {
             sub="Pay the weekly fee at any MMG agent"
             onPress={() => navigation?.navigate?.('MySwiftNumber')}
           />
+          <SettingsRow icon="life-buoy" label="Get help" sub="A human answers — safety, pay, account" onPress={() => navigation?.navigate?.('GetHelp')} />
           <SettingsRow icon="refresh-cw" label="Switch app" sub="Swift · Swift Business" onPress={() => setSwitcherOpen(true)} />
         </Card>
 
