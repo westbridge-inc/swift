@@ -341,6 +341,31 @@ export interface InsuranceCheck {
   plateCrossChecked: boolean;
 }
 
+// STORE-001: the content-moderation queue. `POST /reports` has been filing
+// reports since the UGC trio shipped, and admin.routes has exposed both halves
+// of the reviewer's side the whole time — with no admin UI calling either, so
+// every report a customer filed landed in a table no human could open.
+export const fetchModerationReports = (status = 'PENDING', reason?: string) =>
+  apiFetch(`/api/v1/admin/moderation/reports?status=${status}${reason ? `&reason=${reason}` : ''}&limit=100`);
+export const resolveModerationReport = (
+  id: string,
+  body: { status: 'REVIEWING' | 'ACTIONED' | 'DISMISSED'; note?: string },
+) => apiFetch(`/api/v1/admin/moderation/reports/${id}`, { method: 'PUT', body: JSON.stringify(body) });
+
+// The OTHER two moderation queues, also without a caller until now:
+// `ratings/moderation` returns both the reviews auto-HELD by the profanity
+// filter (withheld from publication, waiting on a human who never came) and
+// the pending RatingReports. Note the asymmetry, which the UI has to state:
+// upholding a rating report REMOVES the review, while resolving a content
+// report only records the decision.
+export const fetchRatingsModeration = () => apiFetch('/api/v1/admin/ratings/moderation');
+export const resolveRatingReport = (id: string, action: 'uphold' | 'dismiss') =>
+  apiFetch(`/api/v1/admin/rating-reports/${id}/resolve`, { method: 'POST', body: JSON.stringify({ action }) });
+export const moderateRating = (
+  id: string,
+  body: { action: 'publish' | 'remove' | 'exclude'; reason?: string },
+) => apiFetch(`/api/v1/admin/ratings/${id}/moderate`, { method: 'POST', body: JSON.stringify(body) });
+
 export const fetchVerificationQueue = (status = 'PENDING') =>
   apiFetch(`/api/v1/admin/verification/queue?status=${status}&limit=100`);
 export const getDocSignedUrl = (id: string) =>
