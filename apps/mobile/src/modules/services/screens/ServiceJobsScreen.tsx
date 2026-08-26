@@ -2,10 +2,18 @@
 import React, { useState } from 'react';
 import { RefreshControl, ScrollView, TextInput, View } from 'react-native';
 import { color, radius, space } from '@swift/ui';
+import { Feather } from '@expo/vector-icons';
 import { useServiceJobs, useScheduleJob, useCancelJob, useRateJob, useQuoteJob, useConfirmJob, useDeclineSlot, useCompleteJob } from '../../../hooks';
+// [B3] The emergency path for BOTH people on a service job — the provider
+// working inside a stranger's home, and the customer whose home it is. Every
+// other in-flight surface had a button; this one had nothing.
+import { useServiceJobSos } from '../../../hooks/safety';
 import { useAuthStore } from '../../../stores/authStore';
+import { useLocationStore } from '../../../stores/locationStore';
+import { grantedLocationFix } from '../../../lib/deviceLocation';
+import { openExternal } from '../../../lib/openExternal';
 import { money } from '../../../lib/money';
-import { Card, Chip, EmptyState, ErrorState, Header, IconChip, LoadingBlock, PillButton, PopupCard, PopupTitle, Screen, Stars, T, TonePill } from '../../../kit';
+import { Card, Chip, DecorativeIcon, EmptyState, ErrorState, Header, IconChip, LoadingBlock, PillButton, PopupCard, PopupTitle, Screen, Stars, T, TonePill } from '../../../kit';
 
 const STATUS_LABEL: Record<string, { label: string; tone: 'brand' | 'success' | 'neutral' }> = {
   REQUESTED: { label: 'Waiting for quote', tone: 'neutral' },
@@ -184,12 +192,19 @@ function ProviderActions({ job }: { job: any }) {
   return null;
 }
 
+/** [B3] The job states where someone is coming or already on site — the
+ *  window in which an emergency button must exist for both parties. */
+const SOS_STATUSES = new Set(['SCHEDULED', 'IN_PROGRESS']);
+
 function JobCard({ job, navigation }: { job: any; navigation: any }) {
   const myId = useAuthStore((s) => s.user?.id);
   const isCustomer = job.customerId === myId;
   const cancel = useCancelJob();
   const [scheduling, setScheduling] = useState(false);
   const [confirmCancel, setConfirmCancel] = useState(false);
+  const jobSos = useServiceJobSos();
+  const [sosConfirm, setSosConfirm] = useState(false);
+  const myLocation = useLocationStore();
   const status = STATUS_LABEL[job.status] ?? { label: job.status, tone: 'neutral' as const };
 
   return (
@@ -255,6 +270,51 @@ function JobCard({ job, navigation }: { job: any; navigation: any }) {
       </View>
 
       {isCustomer && job.status === 'COMPLETED' ? <RateRow job={job} /> : null}
+
+      {/* [B3] The emergency entrance. The danger is carried by the WORD, with
+          colour as the second signal (two-reds law) — same affordance as the
+          delivery screen. Visible to whichever party is on this job. */}
+      {SOS_STATUSES.has(job.status) ? (
+        <PillButton
+          label="Emergency — get help now"
+          variant="outline"
+          icon="alert-triangle"
+          style={{ marginTop: space.md, borderColor: color.error }}
+          onPress={() => setSosConfirm(true)}
+        />
+      ) : null}
+
+      {/* [B3] Two-step confirm: a mis-tap must not dial 911, and a real
+          emergency must be TWO taps, never a hidden gesture. */}
+      <PopupCard visible={sosConfirm} onClose={() => setSosConfirm(false)}>
+        <DecorativeIcon style={{ width: 72, height: 72, borderRadius: 36, alignItems: 'center', justifyContent: 'center', backgroundColor: color.error }}>
+          <Feather name="alert-triangle" size={32} color={color.white} />
+        </DecorativeIcon>
+        <PopupTitle variant="title" center style={{ marginTop: space.lg }}>
+          Get emergency help?
+        </PopupTitle>
+        <T variant="body" tone="muted" center style={{ marginTop: space.sm }}>
+          This dials 911 — local emergency services — right away. Swift also saves the alert and your location on this job&apos;s record. Use only in a real emergency.
+        </T>
+        <PillButton
+          label="Yes — get help now"
+          style={{ alignSelf: 'stretch', marginTop: space['2xl'] }}
+          disabled={jobSos.isPending}
+          onPress={() => {
+            setSosConfirm(false);
+            // Guyana launch emergency number; move to CountryConfig for other markets.
+            void openExternal('tel:911', "Couldn't start the call — dial 911 directly.");
+            // MY coordinates, never the other party's live position — ops
+            // responds to where the person who pressed the button is standing.
+            const coords = grantedLocationFix(myLocation.latitude, myLocation.longitude, myLocation.status);
+            jobSos.mutate({
+              serviceJobId: job.id,
+              coords: coords ? { lat: coords.latitude, lng: coords.longitude } : undefined,
+            });
+          }}
+        />
+        <PillButton label="Close" variant="soft" style={{ alignSelf: 'stretch', marginTop: space.md }} onPress={() => setSosConfirm(false)} />
+      </PopupCard>
 
       {/* Kit confirm popup */}
       <PopupCard visible={confirmCancel} onClose={() => setConfirmCancel(false)}>
