@@ -134,7 +134,10 @@ export const MARKETING_CONSENT = page(
 `,
 );
 
-const CHILD_SAFETY = page(
+/** [STORE-003] Exported so the public site can snapshot it: Play requires this
+ *  standard to be published at a stable, publicly reachable URL, and an API
+ *  host that can be down is not that. See apps/web/scripts/sync-legal.ts. */
+export const CHILD_SAFETY = page(
   'Child Safety Standards',
   `
 <p>Swift has zero tolerance for child sexual abuse and exploitation (CSAE). This page sets out the standards we hold every account to, and how anyone can report a concern.</p>

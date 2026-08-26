@@ -85,6 +85,9 @@ export function SiteFooter() {
           <ul className="mt-4 space-y-2.5 text-[var(--swift-muted)]">
             <li><Link href="/legal/privacy" className="hover:text-[var(--swift-ink)]">Privacy policy</Link></li>
             <li><Link href="/legal/terms" className="hover:text-[var(--swift-ink)]">Terms of service</Link></li>
+            {/* [STORE-003] Play wants the child-safety standard reachable from a
+                public page, not only from inside the app. */}
+            <li><Link href="/legal/child-safety" className="hover:text-[var(--swift-ink)]">Child safety</Link></li>
             {/* Google Play's deletion policy wants this reachable without the app
                 installed — a footer link on every page is the plainest way to
                 satisfy "easy to find". */}

@@ -27,7 +27,7 @@ import { writeFileSync, readFileSync, existsSync } from 'node:fs';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { LEGAL_VERSION, TERMS, PRIVACY } from '../../api/src/modules/legal/legal.routes';
+import { LEGAL_VERSION, TERMS, PRIVACY, CHILD_SAFETY } from '../../api/src/modules/legal/legal.routes';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const OUT = resolve(HERE, '../src/legal/generated.ts');
@@ -55,12 +55,18 @@ function extractBody(html: string): { body: string; lastUpdated: string } {
 
 const terms = extractBody(TERMS);
 const privacy = extractBody(PRIVACY);
+const childSafety = extractBody(CHILD_SAFETY);
 
-if (terms.lastUpdated !== privacy.lastUpdated) {
-  throw new Error(
-    `sync-legal: Terms and Privacy disagree on the effective date ` +
-      `("${terms.lastUpdated}" vs "${privacy.lastUpdated}"). LEGAL_VERSION covers both — fix the source.`,
-  );
+// One LEGAL_VERSION covers all three, so all three must agree on the date it
+// stands for. A document drifting to its own date would be stamped onto consent
+// records under a version it does not match.
+for (const [name, doc] of [['Privacy', privacy], ['Child Safety', childSafety]] as const) {
+  if (terms.lastUpdated !== doc.lastUpdated) {
+    throw new Error(
+      `sync-legal: Terms and ${name} disagree on the effective date ` +
+        `("${terms.lastUpdated}" vs "${doc.lastUpdated}"). LEGAL_VERSION covers both — fix the source.`,
+    );
+  }
 }
 
 const generated = `// ─────────────────────────────────────────────────────────────────────────────
@@ -83,6 +89,9 @@ export const LEGAL_LAST_UPDATED = ${JSON.stringify(terms.lastUpdated)} as const;
 export const TERMS_BODY = ${JSON.stringify(terms.body)};
 
 export const PRIVACY_BODY = ${JSON.stringify(privacy.body)};
+
+/** [STORE-003] Play requires this published at a public, stable URL. */
+export const CHILD_SAFETY_BODY = ${JSON.stringify(childSafety.body)};
 `;
 
 const check = process.argv.includes('--check');
