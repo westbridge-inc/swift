@@ -8,6 +8,7 @@ import { authPlugin } from '../plugins/auth';
 import { socketPlugin } from '../plugins/socket';
 import { vendorRoutes } from '../modules/vendor/vendor.routes';
 import { resolveDeliveryMode } from '../modules/fulfillment/fulfillment-mode';
+import { enqueueDeliveryDispatch } from '../modules/dispatch/dispatch-trigger';
 import { registerErrorHandler } from '../middleware/error-handler';
 
 // FUL-005: WHEN a delivery order dispatches to riders is per-deployment config
@@ -174,5 +175,27 @@ describe('FUL-004d: vendor fulfillment-mode override + the get-a-rider fallback'
     const id = await mkOrder('PENDING'); // selfDeliveryEnabled reset to false in afterEach
     const res = await putMode(id, 'VENDOR_DELIVERY');
     expect(res.statusCode).toBe(400);
+  });
+});
+
+// [REPORT-033 #26] Every case above installs a queue SPY, so the one branch a
+// workers-off deployment actually hits — `if (!app.dispatchQueue) return` —
+// had zero assertions. If that guard regresses, accepting a delivery order in
+// an API running without workers throws instead of no-opping: the vendor
+// cannot accept orders at all. Tested directly, no harness.
+describe('enqueueDeliveryDispatch without a wired queue (workers off)', () => {
+  it('is a silent no-op when app.dispatchQueue is absent — never a crash', async () => {
+    const bare = {} as FastifyInstance;
+    await expect(enqueueDeliveryDispatch(bare, { id: 'o1', isExpress: false })).resolves.toBeUndefined();
+  });
+
+  it('shapes the job in the one place: express jumps the queue, normal rides at 10', async () => {
+    const jobs: Array<{ name: string; data: unknown; opts: { priority: number } }> = [];
+    const fake = { dispatchQueue: { add: async (name: string, data: unknown, opts: { priority: number }) => { jobs.push({ name, data, opts }); } } } as unknown as FastifyInstance;
+    await enqueueDeliveryDispatch(fake, { id: 'o-exp', isExpress: true });
+    await enqueueDeliveryDispatch(fake, { id: 'o-std', isExpress: false });
+    expect(jobs).toHaveLength(2);
+    expect(jobs[0]).toMatchObject({ name: 'dispatch-order', data: { orderId: 'o-exp' }, opts: { priority: 1 } });
+    expect(jobs[1]).toMatchObject({ name: 'dispatch-order', data: { orderId: 'o-std' }, opts: { priority: 10 } });
   });
 });
