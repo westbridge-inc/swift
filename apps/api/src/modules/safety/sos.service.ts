@@ -74,14 +74,37 @@ export class SosService {
    *  person's trigger into their own earlier one.
    */
   async create(input: SosCreateInput) {
-    const key = input.clientIdempotencyKey ?? null;
+    let key = input.clientIdempotencyKey ?? null;
+    if (key) {
+      const existing = await this.prisma.sosAlert.findUnique({
+        where: { actorUserId_clientIdempotencyKey: { actorUserId: input.actorUserId, clientIdempotencyKey: key } },
+      });
+      if (existing) {
+        // [REPORT-035 F-035-01/02 · S0] A key hit is a REPLAY only when it is
+        // the same request: same context AND the alert is still live. The old
+        // unconditional return meant a client that reuses keys (the shipped
+        // key store memoizes one per job, forever) had a fresh emergency on
+        // job B answered with job A's alert — or a NEW cry for help answered
+        // with a RESOLVED receipt, activating nothing. A stale or foreign-
+        // context key is DETACHED instead: the (actor, key) unique stays bound
+        // to the old row, this request proceeds keyless, and the per-context
+        // collapse below still merges genuine repeats of THIS emergency.
+        const sameContext =
+          (existing.orderId ?? null) === (input.orderId ?? null) &&
+          (existing.serviceJobId ?? null) === (input.serviceJobId ?? null);
+        if (sameContext && LIVE_STATUSES.includes(existing.status)) {
+          return existing; // true replay → the original alert, never a second
+        }
+        log().warn(
+          { actorUserId: input.actorUserId, existingAlertId: existing.id, existingStatus: existing.status, sameContext },
+          '[F-035-01] SOS idempotency key points at a closed or different-context alert — detaching the key and raising a NEW alert; help is never suppressed behind a stale receipt',
+        );
+        key = null;
+      }
+    }
     const replayWhere = key
       ? { actorUserId_clientIdempotencyKey: { actorUserId: input.actorUserId, clientIdempotencyKey: key } }
       : null;
-    if (replayWhere) {
-      const existing = await this.prisma.sosAlert.findUnique({ where: replayWhere });
-      if (existing) return existing; // replay → the original alert, never a second
-    }
     const source = input.triggerSource ?? 'BUTTON';
     const opsRaised = source === 'OPS_MANUAL';
     const now = new Date();
@@ -351,7 +374,12 @@ export class SosService {
    *  tip off an attacker). */
   private async fanOut(id: string) {
     const alert = await this.prisma.sosAlert.findUnique({ where: { id } });
-    if (!alert || alert.status !== 'ACTIVE') return;
+    // [REPORT-035 F-035-05] ACTIVE or ACKNOWLEDGED — the re-page path exists
+    // so a retrigger with a new position re-pages ops. Guarding on ACTIVE
+    // alone made the collapse branch's promise ("the stronger trigger wins,
+    // even on an acknowledged alert") a no-op: ops had acked, the person
+    // moved, and nobody was told. Terminal states still never fan out.
+    if (!alert || (alert.status !== 'ACTIVE' && alert.status !== 'ACKNOWLEDGED')) return;
     const receipts: Record<string, unknown> = {};
     try {
       // [F-026-15] The grace-expiry backstop runs in a BACKGROUND WORKER,
@@ -360,11 +388,16 @@ export class SosService {
       // alert in one tenant paged every tenant's admins with its role, order
       // id and COORDINATES. Same class as REPORT-014 F-014-03, which the
       // dispatch ops-page already fixed by passing the row's own tenantId.
+      // [REPORT-035 F-035-07] No coordinates in the PUSH payload: it rides a
+      // third-party push provider, and the invariant is that coordinates stay
+      // behind the authenticated war-room surfaces. The body already points
+      // there. serviceJobId rides along so the page can say WHAT KIND of
+      // emergency this is — a provider-side home visit reads differently.
       const n = await notifyAdmins(this.prisma, this.notifications, {
         tenantId: alert.tenantId,
         title: '🚨 SOS ACTIVE — respond now',
-        body: `${alert.actorRole} raised an SOS${alert.orderId ? ` on order ${alert.orderId}` : ''}. Location on the war-room map. Ack immediately.`,
-        data: { kind: 'sos_active', sosAlertId: id, orderId: alert.orderId, lat: alert.triggerLat, lng: alert.triggerLng },
+        body: `${alert.actorRole} raised an SOS${alert.orderId ? ` on order ${alert.orderId}` : alert.serviceJobId ? ' on a service job (home visit)' : ''}. Location on the war-room map. Ack immediately.`,
+        data: { kind: 'sos_active', sosAlertId: id, orderId: alert.orderId, serviceJobId: alert.serviceJobId },
       });
       receipts['opsPaged'] = n;
     } catch (e) {
@@ -380,7 +413,7 @@ export class SosService {
       // zero. fetchSockets() is adapter-aware, so this is the cluster-wide
       // count, not just this node's.
       const rooms = warRoomsFor(alert.tenantId);
-      this.io.to(rooms).emit('sos:active', { sosAlertId: id, tenantId: alert.tenantId, actorRole: alert.actorRole, orderId: alert.orderId, lat: alert.triggerLat, lng: alert.triggerLng, triggeredAt: alert.triggeredAt });
+      this.io.to(rooms).emit('sos:active', { sosAlertId: id, tenantId: alert.tenantId, actorRole: alert.actorRole, orderId: alert.orderId, serviceJobId: alert.serviceJobId, lat: alert.triggerLat, lng: alert.triggerLng, triggeredAt: alert.triggeredAt });
       const listeners = await this.io.in(rooms).fetchSockets();
       receipts['socketListeners'] = listeners.length;
       if (listeners.length === 0) {

@@ -64,46 +64,69 @@ export async function safetyRoutes(app: FastifyInstance) {
    */
   const lifeSafety = { preHandler: [app.authenticate], config: { rateLimit: false as const } };
 
-  /** POST /sos — raise an alert (grace window opens unless ops-raised). */
+  /** POST /sos — raise an alert (grace window opens unless ops-raised).
+   *
+   *  [REPORT-035 F-035-03/04 · INVARIANT] A life-safety trigger is NEVER
+   *  refused over its context claim. The old shape 400'd on both-ids and
+   *  404'd on a stale/foreign context id — erasing a live cry for help
+   *  because its metadata was wrong. The rule now: an invalid context claim
+   *  DEGRADES the alert to context-free (the alert still exists, ops still
+   *  pages, the person's own live location still rides) and logs loudly.
+   *  Authorization is unchanged — context and counterparty only ATTACH when
+   *  the caller is genuinely a participant — and the existence oracle is
+   *  closed harder than before: every request succeeds, so a prober learns
+   *  nothing from the response shape. (Registered as a standing invariant
+   *  for founder ratification.) */
   app.post('/sos', lifeSafety, async (request) => {
     const body = createSchema.parse(request.body ?? {});
 
-    // [B3] Mutually exclusive contexts, refused BEFORE any lookup — the
-    // shape error must not depend on whether either id happens to resolve.
-    if (body.orderId && body.serviceJobId) {
-      throw new AppError(400, 'VALIDATION_ERROR', 'Send orderId or serviceJobId, not both — an emergency happens in one place.');
+    let orderId = body.orderId ?? null;
+    let serviceJobId = body.serviceJobId ?? null;
+    if (orderId && serviceJobId) {
+      // An emergency happens in one place — but a malformed claim must not
+      // erase the alert. Drop BOTH contexts rather than guess which is real.
+      request.log.warn({ userId: request.user.userId, orderId, serviceJobId }, '[F-035-03] SOS carried both contexts — degrading to a context-free alert');
+      orderId = null;
+      serviceJobId = null;
     }
 
     let counterpartyUserId: string | null = null;
     let orderType: import('@prisma/client').OrderType | null = null;
-    if (body.orderId) {
-      // Only a participant on THIS order may raise its SOS (§4.5 authz).
+    if (orderId) {
+      // Only a participant on THIS order gets the order ATTACHED (§4.5 authz).
       const order = await app.prisma.order.findFirst({
         where: {
-          id: body.orderId,
+          id: orderId,
           OR: [{ customerId: request.user.userId }, { driver: { userId: request.user.userId } }, { rider: { userId: request.user.userId } }],
         },
         select: { id: true, orderType: true, customerId: true, driver: { select: { userId: true } }, rider: { select: { userId: true } } },
       });
-      if (!order) throw new NotFoundError('Order', body.orderId);
-      orderType = order.orderType;
-      counterpartyUserId = [order.customerId, order.driver?.userId, order.rider?.userId].find((u) => u && u !== request.user.userId) ?? null;
+      if (!order) {
+        request.log.warn({ userId: request.user.userId, orderId }, '[F-035-04] SOS order context did not resolve for this caller — degrading to a context-free alert');
+        orderId = null;
+      } else {
+        orderType = order.orderType;
+        counterpartyUserId = [order.customerId, order.driver?.userId, order.rider?.userId].find((u) => u && u !== request.user.userId) ?? null;
+      }
     }
 
     // [B3] A ServiceJob is not an order, so the participant rule gets its own
-    // clause: only the CUSTOMER on the job or the PROVIDER doing it may raise
-    // its SOS. Same 404-shape as the order path — the SOS endpoint must not be
-    // an existence oracle for other people's jobs.
-    if (body.serviceJobId) {
+    // clause: only the CUSTOMER on the job or the PROVIDER doing it gets the
+    // job attached.
+    if (serviceJobId) {
       const job = await app.prisma.serviceJob.findFirst({
         where: {
-          id: body.serviceJobId,
+          id: serviceJobId,
           OR: [{ customerId: request.user.userId }, { provider: { userId: request.user.userId } }],
         },
         select: { id: true, customerId: true, provider: { select: { userId: true } } },
       });
-      if (!job) throw new NotFoundError('ServiceJob', body.serviceJobId);
-      counterpartyUserId = [job.customerId, job.provider?.userId].find((u) => u && u !== request.user.userId) ?? null;
+      if (!job) {
+        request.log.warn({ userId: request.user.userId, serviceJobId }, '[F-035-04] SOS service-job context did not resolve for this caller — degrading to a context-free alert');
+        serviceJobId = null;
+      } else {
+        counterpartyUserId = [job.customerId, job.provider?.userId].find((u) => u && u !== request.user.userId) ?? null;
+      }
     }
 
     // [F-026-14] OPS_MANUAL is a PROVENANCE claim ("ops raised this on the
@@ -116,8 +139,8 @@ export async function safetyRoutes(app: FastifyInstance) {
     const alert = await sos.create({
       actorUserId: request.user.userId,
       actorRole: request.user.role,
-      orderId: body.orderId ?? null,
-      serviceJobId: body.serviceJobId ?? null,
+      orderId,
+      serviceJobId,
       orderType,
       counterpartyUserId,
       triggerSource: claimedSource,

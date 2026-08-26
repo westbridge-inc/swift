@@ -148,20 +148,38 @@ describe('SOS on a service job [B3]', () => {
     expect(row.counterpartyUserId).toBe(customer.userId);
   });
 
-  it('a STRANGER gets the same 404 as the order path — no existence oracle', async () => {
+  // [REPORT-035 F-035-03/04 · INVARIANT] A life-safety trigger is NEVER
+  // refused over its context claim — invalid context DEGRADES to a
+  // context-free alert. The old 404/400 erased a live cry for help because
+  // its metadata was wrong; and every request succeeding closes the
+  // existence oracle harder than a 404 shape ever did.
+  it("a STRANGER's alert succeeds context-free — their emergency is real even if the job claim is not theirs", async () => {
     const res = await raise(stranger.token, {
       serviceJobId: jobId,
       clientIdempotencyKey: `svc-sos-strange-${nanoid(8)}`,
     });
-    expect(res.statusCode).toBe(404);
+    expect(res.statusCode).toBe(200);
+    const id = (res.json() as { data: { id: string } }).data.id;
+    alertIds.push(id);
+    const row = await app.prisma.sosAlert.findUniqueOrThrow({ where: { id } });
+    // The foreign job never ATTACHES: no context, no counterparty — the
+    // stranger learns nothing and gains nothing except their own alert.
+    expect(row.serviceJobId).toBeNull();
+    expect(row.orderId).toBeNull();
+    expect(row.counterpartyUserId).toBeNull();
   });
 
-  it('orderId AND serviceJobId together is refused — an emergency happens in one place', async () => {
-    const res = await raise(customer.token, {
+  it('orderId AND serviceJobId together degrades to a context-free alert — never a refusal', async () => {
+    const res = await raise(stranger.token, {
       serviceJobId: jobId, orderId: 'any-order',
       clientIdempotencyKey: `svc-sos-both-${nanoid(8)}`,
     });
-    expect(res.statusCode).toBe(400);
+    expect(res.statusCode).toBe(200);
+    const id = (res.json() as { data: { id: string } }).data.id;
+    alertIds.push(id);
+    const row = await app.prisma.sosAlert.findUniqueOrThrow({ where: { id } });
+    expect(row.serviceJobId).toBeNull();
+    expect(row.orderId).toBeNull();
   });
 
   it('repeats on the same job COLLAPSE onto the live alert instead of minting rows', async () => {
@@ -179,5 +197,76 @@ describe('SOS on a service job [B3]', () => {
     expect(secondId).toBe(firstId);
     const row = await app.prisma.sosAlert.findUniqueOrThrow({ where: { id: firstId } });
     expect(row.retriggerCount).toBeGreaterThanOrEqual(1);
+  });
+
+  // [REPORT-035 F-035-01/02 · S0] A key hit is a replay ONLY when it is the
+  // same context and still live. The shipped client memoizes one key per job
+  // forever, so without this guard a fresh emergency was answered with a
+  // RESOLVED receipt — activating nothing.
+  it('the SAME key after resolution raises a NEW alert — a closed receipt never answers a live emergency', async () => {
+    const fresh = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
+    const key = `svc-sos-stale-${nanoid(8)}`;
+    const first = await raise(fresh.token, { clientIdempotencyKey: key, lat: 6.8, lng: -58.15 });
+    expect(first.statusCode).toBe(200);
+    const firstId = (first.json() as { data: { id: string } }).data.id;
+    alertIds.push(firstId);
+
+    // Ops closes the emergency.
+    await app.prisma.sosAlert.update({ where: { id: firstId }, data: { status: 'RESOLVED', resolvedAt: new Date() } });
+
+    // The client's permanent per-context key fires again for a NEW emergency.
+    const second = await raise(fresh.token, { clientIdempotencyKey: key, lat: 6.9, lng: -58.2 });
+    expect(second.statusCode).toBe(200);
+    const secondBody = (second.json() as { data: { id: string; status: string } }).data;
+    alertIds.push(secondBody.id);
+    expect(secondBody.id).not.toBe(firstId); // NOT the corpse
+    expect(['TRIGGER_PENDING', 'ACTIVE']).toContain(secondBody.status);
+    // The original row is untouched history.
+    const old = await app.prisma.sosAlert.findUniqueOrThrow({ where: { id: firstId } });
+    expect(old.status).toBe('RESOLVED');
+  });
+
+  it('a key bound to a DIFFERENT context never suppresses a new emergency elsewhere', async () => {
+    const fresh = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
+    const key = `svc-sos-crossctx-${nanoid(8)}`;
+    // First: a context-free alert claims the key, then closes.
+    const first = await raise(fresh.token, { clientIdempotencyKey: key });
+    expect(first.statusCode).toBe(200);
+    const firstId = (first.json() as { data: { id: string } }).data.id;
+    alertIds.push(firstId);
+    await app.prisma.sosAlert.update({ where: { id: firstId }, data: { status: 'RESOLVED', resolvedAt: new Date() } });
+
+    // Later: the same (buggy) key rides an emergency on a real job the user
+    // is NOT on — context degrades, but the alert must still be a NEW live row.
+    const second = await raise(fresh.token, { serviceJobId: jobId, clientIdempotencyKey: key, lat: 6.85, lng: -58.18 });
+    expect(second.statusCode).toBe(200);
+    const secondId = (second.json() as { data: { id: string } }).data.id;
+    alertIds.push(secondId);
+    expect(secondId).not.toBe(firstId);
+  });
+
+  // [REPORT-035 F-035-05] A retrigger with a new position on an ACKNOWLEDGED
+  // alert must RE-PAGE — ops acked, the person moved, the old fan-out guard
+  // silently dropped it.
+  it('a moved retrigger on an ACKNOWLEDGED alert re-runs the fan-out (receipts rewritten)', async () => {
+    const fresh = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
+    const first = await raise(fresh.token, { clientIdempotencyKey: `svc-sos-ack-${nanoid(8)}`, lat: 6.8, lng: -58.15 });
+    expect(first.statusCode).toBe(200);
+    const id = (first.json() as { data: { id: string } }).data.id;
+    alertIds.push(id);
+    // Promote + acknowledge (ops engaged).
+    await app.prisma.sosAlert.update({ where: { id }, data: { status: 'ACKNOWLEDGED', graceEndsAt: null, acknowledgedAt: new Date() } });
+
+    const second = await raise(fresh.token, { clientIdempotencyKey: `svc-sos-ack2-${nanoid(8)}`, lat: 6.95, lng: -58.25 });
+    expect(second.statusCode).toBe(200);
+    expect((second.json() as { data: { id: string } }).data.id).toBe(id); // collapsed
+
+    const row = await app.prisma.sosAlert.findUniqueOrThrow({ where: { id } });
+    expect(row.retriggerCount).toBeGreaterThanOrEqual(1);
+    expect(row.triggerLat).toBeCloseTo(6.95, 5); // the new position is operative
+    // fanOut ran for the ACKNOWLEDGED alert: receipts were (re)written.
+    expect(row.deliveryReceipts).not.toBeNull();
+    const receipts = row.deliveryReceipts as Record<string, unknown>;
+    expect(receipts['opsPaged']).toBeDefined();
   });
 });
