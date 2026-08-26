@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { holdRingActive, holdRingCaption } from './hold-ring';
+import { holdRingActive, holdRingCaption } from './hold-window';
 
 // [REPORT-009 F-01] The hold ring's REQUIRED regression matrix — the pure
 // seams the component renders from (no native harness exists, so the copy and

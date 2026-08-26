@@ -57,19 +57,24 @@ export function StatTile({
   label,
   value,
   sub,
+  size = 'lg',
   style,
 }: {
   /** The eyebrow — FACTUAL ("EARNED TODAY", "JOBS"), never decoration. */
   label: string;
   value: ReactNode;
   sub?: string;
+  /** 'lg' (numL) for dashboard hero stats; 'md' (numM) for dense triads. */
+  size?: 'lg' | 'md';
   style?: StyleProp<ViewStyle>;
 }) {
   return (
     <Card style={[{ flex: 1, paddingVertical: space.md }, style]}>
       <Eyebrow>{label}</Eyebrow>
       {typeof value === 'string' || typeof value === 'number' ? (
-        <T variant="numL" style={{ marginTop: 2 }}>{value}</T>
+        <T variant={size === 'md' ? 'numM' : 'numL'} numberOfLines={1} style={{ marginTop: 2 }}>
+          {value}
+        </T>
       ) : (
         <View style={{ marginTop: 2 }}>{value}</View>
       )}

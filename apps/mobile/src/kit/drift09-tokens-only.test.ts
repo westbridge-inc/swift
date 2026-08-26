@@ -35,6 +35,12 @@ const PORTED = [
   'segmented.tsx',
   'receipt-bill.tsx',
   'map-peek.tsx',
+  // [Wave 3 part 2] Promotions from host screens.
+  'fare-slider.tsx',
+  'fare-step.ts',
+  'hold-ring.tsx',
+  'hold-window.ts',
+  'calm-radar.tsx',
 ] as const;
 
 describe('DRIFT-09 ports are token-only', () => {

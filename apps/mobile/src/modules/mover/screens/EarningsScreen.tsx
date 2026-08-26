@@ -3,7 +3,7 @@ import React, { useEffect, useRef } from 'react';
 import { AccessibilityInfo, Animated, ScrollView, StyleSheet, View } from 'react-native';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 import { color, fontSize, motion, radius, space } from '@swift/ui';
-import { Card, ErrorState, Header, LinkText, LoadingBlock, PillButton, Screen, T, TonePill } from '../../../kit';
+import { Card, ErrorState, Header, LinkText, LoadingBlock, PillButton, Screen, StatTile as KitStatTile, T, TonePill } from '../../../kit';
 import { useMoverKind, useMoverStats, useMoverSubscription, useEarningsSummary, useEarnings, useCashSettlements, useConfirmCashSettlement } from '../../../hooks';
 import { money } from '../../../lib/money';
 import { dateLabel } from '../shared';
@@ -30,6 +30,8 @@ import {
   serverText,
 } from '../earner-data';
 
+/** Thin domain wrapper over the kit's StatTile [Wave 3 part 2]: this screen's
+ *  tiles always show money-or-dash with a job-count detail line. */
 function StatTile({
   label,
   total,
@@ -41,16 +43,7 @@ function StatTile({
   count?: number;
   sub?: string;
 }) {
-  const detail = sub ?? countDetail(count, 'job', 'jobs');
-  return (
-    <Card style={{ flex: 1, paddingVertical: space.md }}>
-      <T variant="micro" tone="muted">{label}</T>
-      <T variant="numM" numberOfLines={1} style={{ marginTop: space.xs }}>
-        {moneyOrDash(total)}
-      </T>
-      {detail ? <T variant="caption" tone="muted">{detail}</T> : null}
-    </Card>
-  );
+  return <KitStatTile size="md" label={label} value={moneyOrDash(total)} sub={sub ?? countDetail(count, 'job', 'jobs')} />;
 }
 
 function countDetail(count: number | undefined, singular: string, plural: string) {

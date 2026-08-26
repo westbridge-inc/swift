@@ -56,3 +56,12 @@ export * from './dock';
 export * from './segmented';
 export * from './receipt-bill';
 export * from './map-peek';
+// [Wave 3 part 2] Promotions — pieces born inside one screen whose moment is
+// platform-wide: the fare slider (MoverHome offer card), the hold ring + its
+// pure honesty seams (DeliveryScreen), and the calm searching radar
+// (TaxiScreen's rings, generalized).
+export * from './fare-slider';
+export * from './fare-step';
+export * from './hold-ring';
+export * from './hold-window';
+export * from './calm-radar';
