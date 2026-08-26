@@ -1,6 +1,6 @@
 import { keepPreviousData, useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { track } from '../lib/analytics';
-import { customerApi, discoveryApi, type AddressInput } from '../services/api';
+import { customerApi, discoveryApi, moderationApi, type AddressInput } from '../services/api';
 import type { AuthSessionSnapshot } from '../lib/authSession';
 
 /**
@@ -51,6 +51,34 @@ export function useAddAddress() {
     mutationFn: (data: AddressInput) => unwrap(customerApi.addAddress(data)),
     onSuccess: () => qc.invalidateQueries({ queryKey: customerKeys.addresses }),
   });
+}
+
+// Editing, removing and re-defaulting an address all move the destination the
+// CART is quoting against, so each one invalidates the cart as well — a stale
+// "deliver to" line under a fresh address list is the UI lying about where the
+// food is going. (Delete additionally clears the pointer server-side.)
+function useAddressMutation<TArg>(fn: (arg: TArg) => Promise<unknown>) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: fn,
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: customerKeys.addresses });
+      qc.invalidateQueries({ queryKey: ['customer', 'cart'] });
+    },
+  });
+}
+
+export function useUpdateAddress() {
+  return useAddressMutation(({ id, data }: { id: string; data: Partial<AddressInput> }) =>
+    unwrap(customerApi.updateAddress(id, data)));
+}
+
+export function useDeleteAddress() {
+  return useAddressMutation((id: string) => unwrap(customerApi.deleteAddress(id)));
+}
+
+export function useSetDefaultAddress() {
+  return useAddressMutation((id: string) => unwrap(customerApi.setDefaultAddress(id)));
 }
 
 export function useHome<T = any>(lat?: number, lng?: number) {
@@ -125,6 +153,25 @@ export function useVendorReviews<T = any>(id: string) {
     queryKey: [...customerKeys.vendor(id), 'reviews'],
     queryFn: () => unwrap<T>(customerApi.getVendorReviews(id)),
     enabled: !!id,
+  });
+}
+
+/** [B15] Flag one public review. Server is idempotent per (rating, reporter),
+ *  so a double-tap reads as the same calm success. */
+export function useReportRating() {
+  return useMutation({
+    mutationFn: ({ ratingId, reason, note }: { ratingId: string; reason: 'OFFENSIVE' | 'FALSE_CLAIM' | 'PRIVATE_INFO' | 'SPAM' | 'OTHER'; note?: string }) =>
+      unwrap(customerApi.reportRating(ratingId, reason, note)),
+    onSuccess: () => track('rating_reported', {}),
+  });
+}
+
+/** [B15/STORE-001] Flag a store, item, profile or chat message into the
+ *  moderation queue. */
+export function useReportContent() {
+  return useMutation({
+    mutationFn: (input: Parameters<typeof moderationApi.report>[0]) => unwrap(moderationApi.report(input)),
+    onSuccess: (_d, v) => track('content_reported', { targetType: v.targetType }),
   });
 }
 

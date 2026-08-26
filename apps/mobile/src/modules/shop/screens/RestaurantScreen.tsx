@@ -5,7 +5,8 @@ import { Feather } from '@expo/vector-icons';
 import { useNavigation, useRoute } from '@react-navigation/native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { color, elevation, font, radius, space, withAlpha } from '@swift/ui';
-import { useAddToCart, useCart, useToggleFavorite, useUpdateCartItem, useVendor } from '../../../hooks/customer';
+import { useAddToCart, useCart, useReportContent, useToggleFavorite, useUpdateCartItem, useVendor } from '../../../hooks/customer';
+import { ActionSheet } from '../../../kit/action-sheet';
 import { useAuthStore } from '../../../stores/authStore';
 import { itemPhoto, vendorPhoto } from '../../../lib/images';
 import { money } from '../../../lib/money';
@@ -209,6 +210,9 @@ export function RestaurantScreen() {
   const toggleFav = useToggleFavorite();
   const [showHours, setShowHours] = useState(false);
   const [showPromos, setShowPromos] = useState(false);
+  // [B15/STORE-001] Store reporting — the moderation queue's storefront door.
+  const [reportOpen, setReportOpen] = useState(false);
+  const reportContent = useReportContent();
   // Mart mode: aisle filter + in-store search + on-card add (Grab Mart, not a menu)
   const [aisleId, setAisleId] = useState<string | null>(null);
   const [menuCatId, setMenuCatId] = useState<string | null>(null);
@@ -385,6 +389,14 @@ export function RestaurantScreen() {
               <CircleChip
                 icon="share-2"
                 onPress={() => void Share.share({ message: `${v.name} is on Swift — ${v.description ?? 'order in the app'}` }).catch(() => toast.show("Couldn't open the share sheet."))}
+              />
+              {/* [B15] The flag beside the share — quiet, auth-gated like the
+                  favourite. Apple 1.2 / Google UGC require reporting from
+                  INSIDE the app; the queue existed, the door did not. */}
+              <CircleChip
+                icon="flag"
+                label="Report this store"
+                onPress={() => (isAuthenticated ? setReportOpen(true) : promptLogin())}
               />
             </View>
           </View>
@@ -765,6 +777,34 @@ export function RestaurantScreen() {
         </T>
         <PillButton label="Got it" size="md" onPress={() => setShowPromos(false)} style={{ alignSelf: 'stretch', marginTop: space.md }} />
       </PopupCard>
+
+      {/* [B15] Report this store — curated reasons in the reporter's words;
+          selecting IS filing. The server is idempotent per (reporter, store),
+          so a repeat tap reads as the same calm thanks. */}
+      <ActionSheet
+        open={reportOpen}
+        onClose={() => setReportOpen(false)}
+        title="Report this store"
+        actions={[
+          { key: 'SPAM', label: 'Misleading or spam' },
+          { key: 'ILLEGAL_GOODS', label: 'Selling something it shouldn’t' },
+          { key: 'HATE_SPEECH', label: 'Hateful content' },
+          { key: 'SEXUAL_CONTENT', label: 'Sexual content' },
+          { key: 'OTHER', label: 'Something else' },
+        ].map((reason) => ({
+          label: reason.label,
+          onPress: () => {
+            setReportOpen(false);
+            reportContent.mutate(
+              { targetType: 'VENDOR', targetId: vendorId, reason: reason.key as never },
+              {
+                onSuccess: () => toast.success('Thanks — our team will look', 'Reports are reviewed by a human.'),
+                onError: () => toast.error('Couldn’t send that report', 'Check your connection and try again.'),
+              },
+            );
+          },
+        }))}
+      />
     </View>
   );
 }
