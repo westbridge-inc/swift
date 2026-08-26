@@ -9,8 +9,16 @@ import type { FastifyInstance } from 'fastify';
 /** Machine version of the served legal pack — stamped onto User.tosVersion at
  *  signup consent [SWIFT-AUD-D9-03]. Bump BOTH constants together whenever the
  *  Terms/Privacy content changes. */
-export const LEGAL_VERSION = '2026-08-16'; // [REPORT-016 F-016-02] Sentry disclosure matched to the deep recursive scrubber (route templates, dropped query/headers/cookies/body, whole-event token/link reduction)
-const LAST_UPDATED = '16 August 2026'; // human form of LEGAL_VERSION
+// [REPORT-035 F-035-08 · S1] '2026-08-24' exists because #758 (2026-08-23)
+// changed the Privacy account-deletion wording UNDER the '2026-08-16' stamp.
+// The consent ledger is immutable per (documentType, version, locale): any
+// long-lived database already holding the old 2026-08-16 row then threw a
+// hash-mismatch on every consented registration — a 500 at signup. The old
+// row is retained untouched (legal evidence is never rewritten); the changed
+// words get their own version. legal-version-binding.test.ts now pins every
+// served text to its version, so words can never change under a stamp again.
+export const LEGAL_VERSION = '2026-08-24';
+const LAST_UPDATED = '24 August 2026'; // human form of LEGAL_VERSION
 
 function page(title: string, body: string): string {
   return `<!doctype html>
