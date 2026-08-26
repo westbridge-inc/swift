@@ -1,9 +1,11 @@
 /**
  * [ELV-1 W-201 / F-201] The database tenant wall.
  *
- * Application-layer scoping covers 14 of 51 tenant-bearing models, and raw
- * SQL bypasses it entirely — so isolation ultimately rests on developer
- * discipline. Row-Level Security makes it structural: PostgreSQL itself
+ * Application-layer scoping covers a fraction of the tenant-bearing models
+ * (TENANT_TABLES below is the authoritative census — 52 at last count, and
+ * the census test keeps it 1:1 with the DMMF so this prose can never be the
+ * source of truth again), and raw SQL bypasses it entirely — so isolation
+ * ultimately rests on developer discipline. Row-Level Security makes it structural: PostgreSQL itself
  * refuses to show tenant A's rows to a request bound to tenant B.
  *
  * Rollout is staged (expand → verify → contract, D-010):

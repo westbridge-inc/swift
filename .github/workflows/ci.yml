@@ -327,11 +327,23 @@ jobs:
       # go RED. Keep the expected count in lockstep with TENANT_TABLES
       # (src/lib/tenant-rls.ts); the suite's census test guards the list itself.
       - name: Tenant RLS wall is complete
+        # [REPORT-033 #13] This used to assert only a COUNT (52), so one
+        # missing table swapped for one unexpected table passed — and every
+        # new table meant hand-editing YAML. Now the actual walled-table NAME
+        # SET is diffed against TENANT_TABLES (src/lib/tenant-rls.ts) — the
+        # registry the suite's census test already pins 1:1 to the Prisma
+        # DMMF — so a table self-enrols by being registered, and any drift
+        # names the exact table.
         run: |
           DB="postgresql://swift:swift@localhost:5432/swift_migrate"
-          n=$(psql "$DB" -tAc "SELECT count(*) FROM pg_class c JOIN pg_namespace ns ON ns.oid=c.relnamespace JOIN pg_policy p ON p.polrelid=c.oid AND p.polname='tenant_isolation' WHERE ns.nspname='public' AND c.relrowsecurity")
-          if [ "$n" != "52" ]; then echo "::error::Tenant RLS wall incomplete: $n of 52 tables walled"; exit 1; fi
-          echo "ok: 52 tables walled"
+          expected=$(awk '/export const TENANT_TABLES = \[/,/\] as const;/' apps/api/src/lib/tenant-rls.ts | grep -o "'[^']*'" | tr -d "'" | sort)
+          [ -n "$expected" ] || { echo "::error::Could not extract TENANT_TABLES from tenant-rls.ts — the extraction pattern needs updating"; exit 1; }
+          actual=$(psql "$DB" -tAc "SELECT c.relname FROM pg_class c JOIN pg_namespace ns ON ns.oid=c.relnamespace JOIN pg_policy p ON p.polrelid=c.oid AND p.polname='tenant_isolation' WHERE ns.nspname='public' AND c.relrowsecurity ORDER BY 1")
+          if ! diff <(echo "$expected") <(echo "$actual"); then
+            echo "::error::Tenant RLS wall drifted from TENANT_TABLES — lines prefixed < are registered but NOT walled; > are walled but NOT registered"
+            exit 1
+          fi
+          echo "ok: $(echo "$expected" | grep -c .) tables walled, name-for-name"
       - name: Schema matches migration state
         run: >
           cd apps/api && npx prisma migrate diff
