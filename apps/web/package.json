@@ -8,7 +8,8 @@
     "start": "next start --port 3002",
     "lint": "next lint",
     "type-check": "tsc --noEmit",
-    "test": "vitest run"
+    "test": "vitest run",
+    "legal:sync": "tsx scripts/sync-legal.ts"
   },
   "dependencies": {
     "@tanstack/react-query": "^5.66.0",
@@ -29,6 +30,7 @@
     "tailwindcss": "^4.0.0",
     "typescript": "^6.0.3",
     "vite": "8.0.16",
-    "vitest": "^4.1.0"
+    "vitest": "^4.1.0",
+    "tsx": "^4.19.2"
   }
 }

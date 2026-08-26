@@ -193,7 +193,20 @@ jobs:
       # is dropped with nothing lost.
       - run: corepack enable && corepack prepare --activate
       - run: pnpm install --frozen-lockfile || pnpm install --frozen-lockfile
+      # [SITE-1.1] The public site serves a build-time snapshot of the DGP-1
+      # legal text so /legal/* survives an API outage. This fails if the snapshot
+      # has drifted from the source, which would mean the site and the app were
+      # showing users different words.
+      - name: Legal snapshot is in sync
+        run: pnpm --filter @swift/web legal:sync -- --check
+
+      # CI proves the site COMPILES; it must stay green while the founder's
+      # company details are legitimately still unfilled. The real gate — refusing
+      # to ship a site that says "{{LEGAL_ENTITY_NAME}}" to a reviewer — lives in
+      # the build itself and in deploy-web.yml. [SITE-1.1 Part 3 / AC-9]
       - run: pnpm --filter @swift/web build
+        env:
+          NEXT_PUBLIC_ALLOW_SITE_TOKENS: '1'
 
   desktop-build:
     # TS/Vite half only — the Rust/Tauri binary is built + smoke-run locally

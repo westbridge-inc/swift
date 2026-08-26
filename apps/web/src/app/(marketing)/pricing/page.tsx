@@ -1,6 +1,7 @@
 import type { Metadata } from 'next';
 import { Section } from '@/components/site';
 import { fetchPricing } from '@/lib/api';
+import { site } from '@/site.config';
 
 export const metadata: Metadata = { title: 'Pricing' };
 
@@ -47,14 +48,26 @@ export default async function PricingPage({ searchParams }: { searchParams: Prom
               ))}
             </div>
             <p className="mt-6 text-sm text-[var(--swift-muted)]">
-              Franchises pay per store; catalogue-size tiers apply above 1,000 items. Exact rates for
-              every market are shown at sign-up in the app.
+              Franchises pay per store; catalogue-size tiers apply above 1,000 items. Your exact rate is
+              confirmed when your business is approved.
             </p>
           </>
         ) : (
+          /* Rates come from the live config rather than a hardcoded table, so an
+             API outage leaves this block with nothing to show. It must still say
+             something true and actionable — and must not point at an app that
+             does not exist yet [AC-10]. */
           <p className="text-[var(--swift-muted)]">
-            Live pricing is loading — open the Swift app and tap <b>See pricing</b> at sign-up for your
-            market&apos;s weekly rates. Every plan starts with a free trial and takes no commission.
+            We could not load this week&apos;s exact rates just now. The model does not change:{' '}
+            <b>one flat weekly fee</b>, a free trial that starts the day you are approved, and{' '}
+            <b>zero commission</b> on anything you sell or earn. Email{' '}
+            <a
+              className="font-medium text-[var(--swift-red)] underline underline-offset-2"
+              href={`mailto:${site.supportEmail}`}
+            >
+              {site.supportEmail}
+            </a>{' '}
+            and we will send the current rate card for your market.
           </p>
         )}
       </Section>

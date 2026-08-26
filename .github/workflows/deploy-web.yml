@@ -1,0 +1,54 @@
+name: Deploy Web
+
+# Manual-only, mirroring deploy-admin.yml. The public site is deployed from the
+# Vercel dashboard's Git integration in normal operation (SITE-1.1 runbook);
+# this workflow exists for a deliberate re-deploy from a known commit.
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-web
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    name: Deploy Web to Vercel
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 20
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      # The site must never ship with a company detail unfilled — the build
+      # already refuses, but failing here names the reason before Vercel spends
+      # a build minute on it. [SITE-1.1 Part 3]
+      - name: Company details are filled
+        run: |
+          if grep -qE '\{\{[A-Z_]+\}\}' apps/web/src/site.config.ts; then
+            echo "::error::apps/web/src/site.config.ts still contains unfilled {{TOKENS}} — see SITE-1.1 Part 3"
+            grep -nE '\{\{[A-Z_]+\}\}' apps/web/src/site.config.ts
+            exit 1
+          fi
+
+      - name: Deploy to Vercel
+        # Token flows via env, not a CLI argument — argv is visible to every
+        # process on the runner; env vars are not.
+        run: |
+          npx vercel --prod --token="$VERCEL_TOKEN" \
+            --scope=${{ vars.VERCEL_ORG_ID }} \
+            --yes
+        working-directory: apps/web
+        env:
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+          VERCEL_ORG_ID: ${{ vars.VERCEL_ORG_ID }}
+          VERCEL_PROJECT_ID: ${{ vars.VERCEL_PROJECT_ID_WEB }}

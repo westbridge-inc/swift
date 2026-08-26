@@ -1,4 +1,5 @@
 import type { NextConfig } from 'next';
+import { SITE_DOMAIN } from './src/site.domain';
 
 // The public face of Swift — marketing + (coming) customer web + operator
 // dashboards. Same hardening posture as the admin console.
@@ -36,6 +37,29 @@ const nextConfig: NextConfig = {
   poweredByHeader: false,
   // App Router ignores dot-prefixed folders, so the OS association files are
   // route handlers under /well-known/* surfaced at their mandated paths here.
+
+  // [SITE-1.1 Part 2 / AC-13] The route names the spec mandates, without
+  // breaking a single link that already exists in the wild — every former
+  // path 301s to its replacement. 301 rather than 302 so search engines and
+  // any printed material transfer their authority to the new URL.
+  async redirects() {
+    return [
+      { source: '/for-vendors', destination: '/vendors', permanent: true },
+      { source: '/for-drivers', destination: '/drivers', permanent: true },
+      { source: '/delete-account', destination: '/account/delete', permanent: true },
+      // [AC-12] Canonical host is the apex. www 301s to it, so the AASA file
+      // and every share link resolve on exactly one origin. Apple requires the
+      // association file to be served with NO redirect, which is why this rule
+      // is scoped to the www host and never touches the apex.
+      {
+        source: '/:path*',
+        has: [{ type: 'host', value: `www.${SITE_DOMAIN}` }],
+        destination: `https://${SITE_DOMAIN}/:path*`,
+        permanent: true,
+      },
+    ];
+  },
+
   async rewrites() {
     const api = process.env['NEXT_PUBLIC_API_URL'];
     return [
@@ -50,12 +74,35 @@ const nextConfig: NextConfig = {
   async headers() {
     return [
       {
+        // [AC-11] Apple fetches this via its CDN and requires application/json
+        // with no redirect. The route handler already returns JSON; this pins
+        // the content type at the edge and keeps the file out of any cache
+        // that might outlive a Team ID change.
+        source: '/.well-known/apple-app-site-association',
+        headers: [
+          { key: 'Content-Type', value: 'application/json' },
+          { key: 'Cache-Control', value: 'public, max-age=3600' },
+        ],
+      },
+      {
+        source: '/.well-known/assetlinks.json',
+        headers: [
+          { key: 'Content-Type', value: 'application/json' },
+          { key: 'Cache-Control', value: 'public, max-age=3600' },
+        ],
+      },
+      {
         source: '/(.*)',
         headers: [
           { key: 'X-Frame-Options', value: 'DENY' },
           { key: 'X-Content-Type-Options', value: 'nosniff' },
           { key: 'Referrer-Policy', value: 'strict-origin-when-cross-origin' },
           { key: 'Content-Security-Policy', value: csp },
+          // [SITE-1.1 Part 6.3] Two years, subdomains included, preload-eligible.
+          // Matches the admin console's posture; the site is the company's
+          // public identity and is only ever served over TLS.
+          { key: 'Strict-Transport-Security', value: 'max-age=63072000; includeSubDomains; preload' },
+          { key: 'Permissions-Policy', value: 'geolocation=(), microphone=(), camera=()' },
         ],
       },
     ];
