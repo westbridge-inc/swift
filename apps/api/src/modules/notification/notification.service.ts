@@ -231,14 +231,21 @@ export async function notifyAdmins(
       : { status: 'ACTIVE', roles: { has: 'SUPER_ADMIN' } },
     select: { id: true },
   }));
+  // [REPORT-035 F-035-06 · S0 evidence] Count DELIVERIES, not candidates.
+  // send() deliberately swallows a persist failure and returns '' — so
+  // returning admins.length let a page where every insert failed report "N
+  // people were paged" into SOS delivery receipts. Only a truthy id is a
+  // human with an inbox row (the F-024-04 rule, applied at the source).
+  let reached = 0;
   for (const admin of admins) {
-    await notifications.send({
+    const id = await notifications.send({
       userId: admin.id,
       type: 'SYSTEM_ANNOUNCEMENT',
       title: input.title,
       body: input.body,
       data: input.data,
     });
+    if (id) reached += 1;
   }
   // SWIFT-AUD-D7-03: ops pages get the same ack-tracking as vendor/mover
   // alerts, so /alerts/health can show whether anyone actually SAW them.
@@ -248,7 +255,7 @@ export async function notifyAdmins(
       .createMany({ data: admins.map((a) => ({ kind: 'ADMIN_OPS', subjectId, recipientId: a.id })) })
       .catch(() => {});
   }
-  return admins.length;
+  return reached;
 }
 
 export class NotificationService {
