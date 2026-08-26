@@ -117,6 +117,29 @@ export class RatingStatsService {
         recomputedAt: new Date(),
       },
     });
+
+    // [REPORT-034 S1] The LEGACY mean (vendor/rider/driver/provider
+    // .averageRating) is still read by dispatch scoring and storefront cards,
+    // but its old writers aggregated every row REGARDLESS OF STATE — so a
+    // shielded or moderator-excluded rating still moved a mover's dispatch
+    // rank, straight through the isolation R-Law 4 claims. One truth now:
+    // the SAME ACTIVE-only rows that feed the materialized stat sync the
+    // legacy columns, on every transition (create, shield, exclude, remove,
+    // nightly). Rounding and the unrated 5.0 prior are preserved exactly —
+    // changing the prior is a registered founder call, never a side effect.
+    const legacy = {
+      averageRating: Math.round((lifetimeCount ? lifetimeSum / lifetimeCount : 5) * 10) / 10,
+      totalRatings: lifetimeCount,
+    };
+    if (subject.role === 'VENDOR') {
+      await this.prisma.vendor.updateMany({ where: { id: subject.id }, data: legacy });
+    } else if (subject.role === 'RIDER') {
+      await this.prisma.rider.updateMany({ where: { userId: subject.id }, data: legacy });
+    } else if (subject.role === 'DRIVER') {
+      await this.prisma.driver.updateMany({ where: { userId: subject.id }, data: legacy });
+    } else if (subject.role === 'SERVICE_PROVIDER') {
+      await this.prisma.serviceProvider.updateMany({ where: { userId: subject.id }, data: legacy });
+    }
   }
 
   /** Incremental hook: recompute the subject a rating row touches. */

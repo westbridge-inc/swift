@@ -179,20 +179,12 @@ export class RatingService {
     // other side has rated too (aggregates still update immediately below).
     await this.releaseIfBothSidesRated(input.orderId);
 
-    // Update aggregate ratings
-    if (input.type === 'CUSTOMER_TO_VENDOR' && input.vendorId) {
-      await this.updateVendorRating(input.vendorId);
-    }
-    if (input.type === 'CUSTOMER_TO_RIDER' && order.riderId) {
-      await this.updateRiderRating(order.riderId);
-    }
-    if (input.type === 'CUSTOMER_TO_DRIVER' && order.driverId) {
-      await this.updateDriverRating(order.driverId);
-    }
-
-    // Movement R: the materialized stat (the only thing new UIs read) moves
-    // in the same breath — EXCLUDED rows never count, so a shielded rating
-    // leaves the rider's aggregate untouched by construction.
+    // Movement R: ONE aggregate writer. applyRating recomputes the
+    // materialized stat AND syncs the legacy vendor/rider/driver means from
+    // the same ACTIVE-only rows — the old per-role updaters here aggregated
+    // every row regardless of state, so a shielded rating changed the legacy
+    // mean dispatch still reads [REPORT-034 S1]. EXCLUDED rows never count,
+    // in either aggregate, by construction.
     await this.stats.applyRating(rating);
 
     return rating;
@@ -351,54 +343,11 @@ export class RatingService {
     return res.count;
   }
 
-  private async updateVendorRating(vendorId: string) {
-    const agg = await this.prisma.rating.aggregate({
-      where: { vendorId, type: 'CUSTOMER_TO_VENDOR' },
-      _avg: { score: true },
-      _count: true,
-    });
-    await this.prisma.vendor.update({
-      where: { id: vendorId },
-      data: {
-        averageRating: Math.round((agg._avg.score || 5) * 10) / 10,
-        totalRatings: agg._count,
-      },
-    });
-  }
-
-  private async updateRiderRating(riderId: string) {
-    const rider = await this.prisma.rider.findUnique({ where: { id: riderId }, select: { userId: true } });
-    if (!rider) return;
-    const agg = await this.prisma.rating.aggregate({
-      where: { rateeId: rider.userId, type: 'CUSTOMER_TO_RIDER' },
-      _avg: { score: true },
-      _count: true,
-    });
-    await this.prisma.rider.update({
-      where: { id: riderId },
-      data: {
-        averageRating: Math.round((agg._avg.score || 5) * 10) / 10,
-        totalRatings: agg._count,
-      },
-    });
-  }
-
-  private async updateDriverRating(driverId: string) {
-    const driver = await this.prisma.driver.findUnique({ where: { id: driverId }, select: { userId: true } });
-    if (!driver) return;
-    const agg = await this.prisma.rating.aggregate({
-      where: { rateeId: driver.userId, type: 'CUSTOMER_TO_DRIVER' },
-      _avg: { score: true },
-      _count: true,
-    });
-    await this.prisma.driver.update({
-      where: { id: driverId },
-      data: {
-        averageRating: Math.round((agg._avg.score || 5) * 10) / 10,
-        totalRatings: agg._count,
-      },
-    });
-  }
+  // (The per-role legacy-mean updaters are GONE [REPORT-034 S1]: they
+  // aggregated every row regardless of RatingState, so a shielded or
+  // moderator-excluded rating still moved the vendor/rider/driver mean that
+  // dispatch scoring and storefront cards read. RatingStatsService.recompute
+  // is the one writer now — same ACTIVE-only rows for both aggregates.)
 
   /** Two-way service rating on a completed ServiceJob (verified participant). */
   async rateServiceJob(jobId: string, raterId: string, score: number, comment?: string) {
@@ -428,23 +377,12 @@ export class RatingService {
     const rating = await this.prisma.rating.create({
       data: { orderId: jobId, raterId, rateeId, type, score, comment },
     });
-    if (isCustomer) await this.updateProviderRating(job.provider.id, job.provider.userId);
+    // Same one-writer rule as order ratings [REPORT-034 S1]: applyRating
+    // recomputes the materialized stat AND syncs the provider's legacy mean
+    // from ACTIVE rows only. (This path previously had its own unfiltered
+    // aggregate and never fed the materialized stat at all.)
+    await this.stats.applyRating(rating);
     return rating;
-  }
-
-  private async updateProviderRating(providerId: string, providerUserId: string) {
-    const agg = await this.prisma.rating.aggregate({
-      where: { rateeId: providerUserId, type: 'CUSTOMER_TO_PROVIDER' },
-      _avg: { score: true },
-      _count: true,
-    });
-    await this.prisma.serviceProvider.update({
-      where: { id: providerId },
-      data: {
-        averageRating: Math.round((agg._avg.score || 5) * 10) / 10,
-        totalRatings: agg._count,
-      },
-    });
   }
 
   /**

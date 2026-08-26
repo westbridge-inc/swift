@@ -180,3 +180,80 @@ describe('RAT-E: shields', () => {
     expect(await prisma.rating.count({ where: { raterId: fraudster.id, state: 'EXCLUDED', stateReason: 'FRAUD_BAN' } })).toBe(3);
   });
 });
+
+// ---------------------------------------------------------------------------
+// [REPORT-034 S1] The LEGACY mean (vendor/rider/driver.averageRating) is what
+// dispatch scoring and storefront cards actually read — and its old writers
+// aggregated every row REGARDLESS OF RatingState, so a shielded or excluded
+// rating still moved a mover's dispatch rank while R-Law 4 claimed isolation.
+// The law now: ONE writer (RatingStatsService.recompute), ACTIVE rows only,
+// on every transition. These tests are the regression matrix for that law.
+// ---------------------------------------------------------------------------
+describe('REPORT-034 S1: the legacy mean is state-aware and single-writer', () => {
+  it('the legacy vendor mean counts ACTIVE rows only, and an exclusion re-levels it', async () => {
+    const vendor = await makeVendor();
+    const fraudster = await makeUser(['CUSTOMER']);
+    for (let i = 0; i < 3; i += 1) {
+      const order = await makeDeliveredOrder(fraudster.id, vendor.id);
+      await ratings.rate({ orderId: order.id, raterId: fraudster.id, vendorId: vendor.id, type: 'CUSTOMER_TO_VENDOR', score: 5 });
+    }
+    const honest = await makeUser(['CUSTOMER']);
+    const honestOrder = await makeDeliveredOrder(honest.id, vendor.id);
+    await ratings.rate({ orderId: honestOrder.id, raterId: honest.id, vendorId: vendor.id, type: 'CUSTOMER_TO_VENDOR', score: 2 });
+
+    // Before the ban: all four ACTIVE rows count — (5+5+5+2)/4 = 4.25 → 4.3.
+    let v = await prisma.vendor.findUniqueOrThrow({ where: { id: vendor.id }, select: { averageRating: true, totalRatings: true } });
+    expect(v.totalRatings).toBe(4);
+    expect(v.averageRating).toBe(4.3);
+
+    // The ban excludes the fraudster's three: the legacy mean must re-level to
+    // the one honest row — the exact stale-mean hole the old writers left.
+    await stats.excludeRatings({ raterId: fraudster.id }, 'FRAUD_BAN');
+    v = await prisma.vendor.findUniqueOrThrow({ where: { id: vendor.id }, select: { averageRating: true, totalRatings: true } });
+    expect(v.totalRatings).toBe(1);
+    expect(v.averageRating).toBe(2);
+  });
+
+  it('a shield-born (EXCLUDED) rider rating never moves the mean dispatch reads', async () => {
+    const vendor = await makeVendor();
+    const customer = await makeUser(['CUSTOMER']);
+    const riderUser = await makeUser(['RIDER']);
+    await prisma.rider.create({
+      data: { userId: riderUser.id, riderType: 'DELIVERY', vehicleType: 'MOTORCYCLE', documentsVerified: true },
+    });
+
+    // Breached kitchen (quoted 20, took 45) → the rider rating is born
+    // EXCLUDED under SLA_SHIELD.
+    const t0 = new Date(Date.now() - 3 * 3600_000);
+    const order = await makeDeliveredOrder(customer.id, vendor.id, {
+      acceptedAt: t0, readyAt: new Date(t0.getTime() + 45 * 60_000), estimatedPrepTime: 20,
+    });
+    const shielded = await ratings.rate({
+      orderId: order.id, raterId: customer.id, rateeId: riderUser.id,
+      type: 'CUSTOMER_TO_RIDER', score: 1, tags: ['late'],
+    });
+    expect(shielded.state).toBe('EXCLUDED');
+
+    // The legacy row dispatch scores from is untouched: unrated prior 5.0/0.
+    const r = await prisma.rider.findUniqueOrThrow({ where: { userId: riderUser.id }, select: { averageRating: true, totalRatings: true } });
+    expect(r.totalRatings).toBe(0);
+    expect(r.averageRating).toBe(5);
+
+    await prisma.rider.deleteMany({ where: { userId: riderUser.id } });
+  });
+
+  it('excluding every rating restores the unrated 5.0 prior (preserved exactly — changing it is a founder call)', async () => {
+    const vendor = await makeVendor();
+    const customer = await makeUser(['CUSTOMER']);
+    const order = await makeDeliveredOrder(customer.id, vendor.id);
+    await ratings.rate({ orderId: order.id, raterId: customer.id, vendorId: vendor.id, type: 'CUSTOMER_TO_VENDOR', score: 1 });
+
+    let v = await prisma.vendor.findUniqueOrThrow({ where: { id: vendor.id }, select: { averageRating: true, totalRatings: true } });
+    expect(v.averageRating).toBe(1);
+
+    await stats.excludeRatings({ raterId: customer.id }, 'FRAUD_BAN');
+    v = await prisma.vendor.findUniqueOrThrow({ where: { id: vendor.id }, select: { averageRating: true, totalRatings: true } });
+    expect(v.totalRatings).toBe(0);
+    expect(v.averageRating).toBe(5);
+  });
+});
