@@ -870,7 +870,11 @@ export async function customerRoutes(app: FastifyInstance) {
         // whole catalog kept serving here after the platform shut them off.
         where: { status: 'ACTIVE', isVerified: true, tenant: { isActive: true }, items: { some: { isAvailable: true } } },
         include: {
-          categories: { select: { id: true, name: true }, take: 5 },
+          // imageUrl was NOT selected, so Home had nothing to draw a category
+          // chip with and every chip fell back to the same stock photograph —
+          // "Popular", "Produce" and "Rice & Grains" were one identical image.
+          // The column has been on Category the whole time.
+          categories: { select: { id: true, name: true, imageUrl: true }, take: 5 },
         },
         orderBy: { averageRating: 'desc' },
         take: HOME_DISCOVERY_SCAN_CAP, // SWIFT-163: bound the per-request scan
@@ -967,7 +971,7 @@ export async function customerRoutes(app: FastifyInstance) {
     const orderAgain = enriched.filter((v) => recentVendorIds.has(v.id)).slice(0, 6);
 
     // Categories (distinct)
-    const categorySet = new Map<string, { id: string; name: string }>();
+    const categorySet = new Map<string, { id: string; name: string; imageUrl: string | null }>();
     for (const v of allVendors) {
       for (const c of (v.categories ?? [])) {
         if (!categorySet.has(c.id)) categorySet.set(c.id, c);

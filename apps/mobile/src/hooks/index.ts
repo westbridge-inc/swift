@@ -7,3 +7,4 @@ export * from './mover';
 export * from './vendorops';
 export * from './useDeviceLocation';
 export * from './usePlacesAutocomplete';
+export * from './safety';

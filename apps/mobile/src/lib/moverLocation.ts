@@ -243,14 +243,40 @@ export function createMoverLocationController() {
 // shares one owner-aware controller rather than maintaining a per-screen queue.
 export const sharedMoverLocationController = createMoverLocationController();
 
+/**
+ * The background-location upgrade, gated behind the disclosure Google Play
+ * requires [LAUNCH-3].
+ *
+ * Play's Location Permissions policy does not accept the OS sheet as the
+ * disclosure. Before the runtime prompt is raised, the app itself must say —
+ * in its own words, in its own UI — what is collected, that collection
+ * continues while the app is closed, and what it is used for, and the person
+ * must affirmatively accept. A manifest purpose string does not satisfy it,
+ * and neither does explaining afterwards. This shipped without any of that:
+ * tapping GO raised the OS sheet directly, which is a policy rejection.
+ *
+ * `disclose` is REQUIRED on purpose. It was tempting to make it optional so
+ * the existing call sites kept compiling — but a policy gate you can forget
+ * to pass is not a gate, and the failure is invisible until Play sends the
+ * rejection. Required means the compiler enforces it at every call site that
+ * ever exists.
+ *
+ * Declining the disclosure returns false WITHOUT touching the OS prompt. That
+ * is the point: no prompt without consent. The caller stays foreground-only,
+ * which is a working mode, not a failure.
+ */
 export async function requestUsableMoverBackgroundPermission({
   taskManagerAvailable,
   getForegroundPermission,
+  getBackgroundPermission,
   requestBackgroundPermission,
+  disclose,
 }: {
   taskManagerAvailable: boolean;
   getForegroundPermission: () => Promise<{ status: string }>;
+  getBackgroundPermission: () => Promise<{ status: string }>;
   requestBackgroundPermission: () => Promise<{ status: string }>;
+  disclose: () => Promise<boolean>;
 }) {
   // Never ask for background access when this installed binary cannot execute
   // the background task that would use it.
@@ -258,6 +284,15 @@ export async function requestUsableMoverBackgroundPermission({
   try {
     const foreground = await getForegroundPermission();
     if (foreground.status !== 'granted') return false;
+
+    // Already granted — the disclosure was shown before that grant. Play
+    // requires it before the REQUEST, not before every use, and re-showing it
+    // to a driver who already said yes every time they go online is nagging.
+    const existing = await getBackgroundPermission();
+    if (existing.status === 'granted') return true;
+
+    if (!(await disclose())) return false;
+
     const background = await requestBackgroundPermission();
     return background.status === 'granted';
   } catch {

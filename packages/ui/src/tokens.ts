@@ -206,7 +206,14 @@ export const typeScale: Record<
   title: { fontSize: 22, lineHeight: 28, fontFamily: font.displaySemiBold }, // section headers, store name
   heading: { fontSize: 17, lineHeight: 24, fontFamily: font.bodySemiBold }, // card titles, list-item primary
   body: { fontSize: 15, lineHeight: 22, fontFamily: font.body }, // default text
-  bodyStrong: { fontSize: 15, lineHeight: 22, fontFamily: font.bodySemiBold }, // inline emphasis, button labels
+  // THE ROW TITLE. 15/20, not 15/22 — measured off the founder-approved design
+  // pass, where Hanken 15/20 is 71 uses and all 53 of the semibold ones are a
+  // row or list-item title followed immediately by a subtitle. Prose keeps 22
+  // (`body`); a row title is a label you scan, not a paragraph you read, and
+  // 2pt of extra leading on the single most-repeated element in the product is
+  // most of what reads as padded. Known exception: the design draws the receipt
+  // "Total" at 15/22 — a 2pt difference on one word, not worth a second step.
+  bodyStrong: { fontSize: 15, lineHeight: 20, fontFamily: font.bodySemiBold }, // row titles, inline emphasis, button labels
   label: { fontSize: 13, lineHeight: 18, fontFamily: font.bodyMedium }, // meta labels, small buttons
   caption: { fontSize: 13, lineHeight: 18, fontFamily: font.body }, // meta only, never essential info
   micro: { fontSize: 11, lineHeight: 14, fontFamily: font.bodyMedium, letterSpacing: 0.6, textTransform: 'uppercase' }, // eyebrows, AD chip, badges

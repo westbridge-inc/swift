@@ -68,7 +68,10 @@ const privacyManifests = {
     collected('PurchaseHistory'), // order and trip history
   ],
 };
-const splashBackgroundColor = '#803B3B';
+/** The brand ground. Splash and the Android adaptive-icon background are the
+ *  same maroon on purpose — launching the app should not change colour. */
+const brandMaroon = '#803B3B';
+const splashBackgroundColor = brandMaroon;
 const splashImage = './assets/icon.png';
 
 // Universal Links (iOS) / App Links (Android) for the printed QR short links
@@ -141,7 +144,24 @@ const config: ExpoConfig = {
   },
   android: {
     package: 'gy.swift.app',
-    adaptiveIcon: { backgroundColor: '#FFFFFF' },
+    // Android adaptive icon [LAUNCH-3]. Only `backgroundColor` was set, and it
+    // was WHITE behind a maroon brand mark — but it never showed, because with
+    // no `foregroundImage` Expo emits no adaptive icon at all and the launcher
+    // falls back to masking the legacy square. That is the shrunken-badge look.
+    //
+    // The foreground cannot be `icon.png`: the mark spans ~87% of that canvas
+    // and a circular mask keeps the middle 66%, so both wingtips get cut.
+    // `adaptive-icon-foreground.png` is the same artwork scaled to 60% and
+    // re-padded in the identical maroon, so the mark clears the safe zone on
+    // every mask shape and the seam is invisible.
+    //
+    // Still open: no `monochromeImage`, so Android 13+ themed icons fall back
+    // to this one. That needs the mark exported from the brand SVG as a
+    // single-colour silhouette — a design export, not something to fudge here.
+    adaptiveIcon: {
+      foregroundImage: './assets/adaptive-icon-foreground.png',
+      backgroundColor: brandMaroon,
+    },
     intentFilters: [
       {
         action: 'VIEW',

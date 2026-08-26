@@ -43,9 +43,30 @@ export const CATEGORY_IMAGES: Record<string, string> = {
   services: 'https://images.unsplash.com/photo-1621905251189-08b45d6a269e?w=400&q=80',
 };
 
-/** Imagery for a Home category tile; falls back to a food photo if unmapped. */
-export function categoryImage(key: string): string {
-  return CATEGORY_IMAGES[key] ?? FOOD_IMAGES[0]!;
+/**
+ * Imagery for a Home category chip — the merchant's own picture, or null.
+ *
+ * This used to be `CATEGORY_IMAGES[key] ?? FOOD_IMAGES[0]!`: a string,
+ * unconditionally, from a map keyed by the six VERTICAL names (food, grocery,
+ * taxi …). The chips on Home are vendor MENU categories — "Mains", "Produce",
+ * "Rice & Grains" — so no key ever matched and every chip on the screen was
+ * the same stock photograph of somebody's breakfast. Three different
+ * categories, one identical image, visible on the running app.
+ *
+ * Which is precisely what the F-264 note below this function describes, about
+ * the three sibling helpers that were deleted for doing it. This one was in
+ * the same file, directly above the explanation, and was missed.
+ *
+ * `Category.imageUrl` is a real column and now travels on the feed. When a
+ * merchant has not set one the honest answer is NOTHING — the caller draws a
+ * placeholder that names the category, rather than advertising a stranger's
+ * food under it. The vertical map is still consulted for the handful of chips
+ * that genuinely ARE verticals.
+ */
+export function categoryPhoto(category: { name?: string | null; imageUrl?: string | null }): string | null {
+  if (category.imageUrl) return category.imageUrl;
+  const key = String(category.name ?? '').toLowerCase();
+  return CATEGORY_IMAGES[key] ?? null;
 }
 
 /**

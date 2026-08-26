@@ -10,6 +10,7 @@ import { Feather, MaterialCommunityIcons } from '@expo/vector-icons';
 import { CodeInput, DecorativeIcon, EmptyState, LockIn, PillButton, PopupCard, PopupTitle, Screen, T, cardShadow, lockInButtonStyle } from '../../../kit';
 import { Stars } from '../../../kit/controls';
 import { useMoverKind, useActiveJob, useDriverAction, useRiderAction, useRateCustomer, useCourierProof, useRideSos } from '../../../hooks';
+import { useJobSos } from '../../../hooks/safety';
 import { useMoverPreview } from '../../../stores/moverPreview';
 import { toast } from '../../../components/ui/toast';
 import { useLocationStore } from '../../../stores/locationStore';
@@ -121,6 +122,8 @@ export function ActiveJobScreen({ navigation }: any) {
   // Driver-raised SOS on an active taxi ride — the backend authorizes the driver
   // participant on /rides/:id/sos (same route the passenger's SOS uses).
   const sos = useRideSos();
+  // The general safety path, for every job the taxi-scoped route never covered.
+  const jobSos = useJobSos();
   const [sosConfirm, setSosConfirm] = useState(false);
   // Preview (R3): useActiveJob supplies a sample in-progress trip, so this
   // nav-grade screen is fully browsable read-only. Real actions (SOS/dial) are
@@ -388,10 +391,18 @@ export function ActiveJobScreen({ navigation }: any) {
               </DCard>
             ) : null}
 
-            {/* SOS — a driver alone with a stranger on a cash trip needs an
-                emergency path too, not just the passenger. Taxi rides only (the
-                /rides/:id/sos route authorizes the driver participant). */}
-            {isDriver ? (
+            {/* SOS — anyone alone with a stranger on a cash job needs an
+                emergency path, not just the passenger and not just the driver.
+                This read `{isDriver ? …}` and the comment above it already
+                argued the case it then failed to apply: a delivery rider
+                carrying cash to a stranger's address at night is the SAME
+                risk, on the SAME screen, and had no button. The gate existed
+                only because /rides/:id/sos is taxi-scoped — meanwhile the
+                general /safety/sos route, which authorises the rider too, had
+                sat complete and uncalled the whole time. Drivers keep the ride
+                route (a working emergency path is not re-plumbed for
+                tidiness); everyone else now reaches the general one. */}
+            {job?.id ? (
               <PillButton
                 label="Emergency — get help now"
                 variant="outline"
@@ -492,7 +503,7 @@ export function ActiveJobScreen({ navigation }: any) {
         <PillButton
           label="Yes — get help now"
           style={{ alignSelf: 'stretch', marginTop: space['2xl'] }}
-          disabled={sos.isPending}
+          disabled={sos.isPending || jobSos.isPending}
           onPress={() => {
             setSosConfirm(false);
             if (preview) return; // read-only preview never dials or records
@@ -502,7 +513,14 @@ export function ActiveJobScreen({ navigation }: any) {
             // Guyana launch emergency number; move to CountryConfig for other markets.
             void openExternal('tel:911', "Couldn't start the call — dial 911 directly.");
             const coords = me ? { lat: me.latitude, lng: me.longitude } : undefined;
-            if (job?.id) sos.mutate({ id: job.id, coords });
+            if (!job?.id) return;
+            // Two routes, one button. A taxi ride keeps /rides/:id/sos — it is
+            // live and proven, and a working emergency path is never re-plumbed
+            // for consistency's sake. Every other job takes the general
+            // /safety/sos, which authorises the rider participant and had been
+            // sitting there uncalled.
+            if (isDriver) sos.mutate({ id: job.id, coords });
+            else jobSos.mutate({ jobId: job.id, coords });
           }}
         />
         <PillButton label="Close" variant="soft" style={{ alignSelf: 'stretch', marginTop: space.md }} onPress={() => setSosConfirm(false)} />

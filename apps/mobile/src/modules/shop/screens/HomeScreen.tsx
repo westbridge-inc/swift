@@ -22,8 +22,9 @@ import { useLocationStore } from '../../../stores/locationStore';
 import { CategoryRail, CAT_RAIL_MIN_CHIPS } from '../CategoryRail';
 // [F-264] itemPhoto/vendorPhoto return null rather than inventing a stock
 // photo. `itemImage` used to hand "Mauby" a picture of a cheeseburger.
-import { categoryImage, itemPhoto, vendorPhoto } from '../../../lib/images';
+import { categoryPhoto, itemPhoto, vendorPhoto } from '../../../lib/images';
 import { money } from '../../../lib/money';
+import { orderStatusLabel, orderSubtitle } from '../../../lib/orderStatus';
 import {
   Card,
   ErrorState,
@@ -75,14 +76,10 @@ const SERVICES: {
   { key: 'favourites', label: 'Favourites', nav: (n) => n.navigate('Favorites') },
 ];
 
-const ORDER_STATUS_LABEL: Record<string, string> = {
-  PENDING: 'Waiting for the store',
-  ACCEPTED: 'Order accepted',
-  PREPARING: 'Being prepared',
-  READY: 'Ready for pickup',
-  RIDER_ASSIGNED: 'Rider on the way to store',
-  PICKED_UP: 'On its way to you',
-};
+// Status wording moved to lib/orderStatus.ts: it has to know the order
+// TYPE. This map had six entries, one of which (READY) was never a status —
+// the enum value is READY_FOR_PICKUP — and it described a taxi ride as
+// "Waiting for the store".
 
 function kmLabel(km: unknown): string | undefined {
   const n = Number(km);
@@ -371,10 +368,24 @@ export function HomeScreen() {
             navigation. */}
         {popularItems.length > 0 ? (
           <>
+            {/* NEITHER OF THESE USED TO BE TRUE. The rail was headed "Popular
+                right now" under the eyebrow "Ordered today" — two separate
+                time claims over a rail ordered by `Item.totalOrdered`, which
+                has exactly one writer (order.service.ts: `increment: 1`), is
+                never decremented, is never reset, and has no time window
+                anywhere in the schema. It is a LIFETIME counter. A dish sold
+                two hundred times last year and never since outranked one
+                selling all morning, and the screen called that "today".
+
+                The counter is a real signal — it is just an all-time one, so
+                the words now say all-time. Building the honest "today" version
+                needs a time-windowed counter that does not exist yet; that is
+                a schema change, not a copy change, and it is not smuggled in
+                behind a label. */}
             <SectionHeader
               size="lg"
-              title="Popular right now"
-              eyebrow="Ordered today"
+              title="Popular on Swift"
+              eyebrow="Most ordered"
               style={{ paddingHorizontal: GUTTER, marginTop: space.xl }}
             />
             <FlatList
@@ -415,11 +426,11 @@ export function HomeScreen() {
                 <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
                   <View style={{ width: 8, height: 8, borderRadius: 4, backgroundColor: color.success }} />
                   <T variant="body" weight="semibold">
-                    {ORDER_STATUS_LABEL[activeOrder.status] ?? 'Order in progress'}
+                    {orderStatusLabel(activeOrder.status, activeOrder.orderType)}
                   </T>
                 </View>
                 <T variant="caption" tone="muted" style={{ marginTop: 4 }}>
-                  {activeOrder.vendor?.name} · #{activeOrder.orderNumber}
+                  {orderSubtitle(activeOrder.vendor?.name, activeOrder.orderNumber)}
                 </T>
               </View>
               <PillButton
@@ -538,7 +549,7 @@ export function HomeScreen() {
                     // clean-minimal islands on the screen. Categories are FOOD
                     // — they get photography with a scrim and white label,
                     // like every other band. Real menu categories from the
-                    // live feed; imagery keyed by name via categoryImage.
+                    // live feed; the merchant's own imagery via categoryPhoto.
                     <Pressable
                       onPress={() => navigation.navigate('Search', { q: item.name })}
                       accessibilityRole="button"
@@ -546,7 +557,14 @@ export function HomeScreen() {
                     >
                       {({ pressed }) => (
                         <View style={{ width: 132, height: 84, borderRadius: radius.lg, overflow: 'hidden', opacity: pressed ? 0.85 : 1 }}>
-                          <Photo uri={categoryImage(item.name.toLowerCase())} label={item.name} style={{ width: '100%', height: '100%' }} />
+                          {/* The merchant's own picture. This passed
+                              categoryImage(name), which looked the name up in a
+                              map keyed by VERTICAL — food, grocery, taxi — and
+                              returned a stock photo when it missed. Menu
+                              categories never match, so every chip on Home was
+                              the same photograph. Photo already draws an honest
+                              placeholder for null; it was simply never given one. */}
+                          <Photo uri={categoryPhoto(item)} label={item.name} style={{ width: '100%', height: '100%' }} />
                           <Scrim height={84} cover />
                           <View style={{ position: 'absolute', left: space.md, right: space.md, bottom: space.sm }}>
                             <T variant="label" weight="semibold" tone="onBrand" numberOfLines={1}>{item.name}</T>
