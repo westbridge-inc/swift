@@ -16,6 +16,7 @@ import {
   FileText,
   ShieldCheck,
   ShieldAlert,
+  Flag,
   RefreshCw,
   LifeBuoy,
   PackageOpen,
@@ -62,6 +63,7 @@ const NAV_SECTIONS: { title: string; items: { label: string; href: string; icon:
     title: 'Support',
     items: [
       { label: 'Tickets', href: '/support', icon: LifeBuoy },
+      { label: 'Moderation', href: '/moderation', icon: Flag },
       { label: 'Returns', href: '/returns', icon: PackageOpen },
       { label: 'Broadcast', href: '/broadcast', icon: Megaphone },
     ],
