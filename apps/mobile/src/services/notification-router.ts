@@ -80,6 +80,21 @@ export function destinationFor(data: Record<string, unknown> | null | undefined)
   // row [both reported, neither invented].
   if (kind.startsWith('booking_')) return { screen: 'ServiceJobs' };
 
+  // [E12 §7.2] The identity-check prompts land ON the selfie screen — a timed
+  // prompt that opens the app "wherever it was" is a deadline the person burns
+  // hunting for the right screen. The deadline rides along verbatim (a server
+  // timestamp, never invented); a missed-check tap goes to the same screen
+  // because a fresh PASS is the only way back online. The lock's only door is
+  // support, so that tap opens GetHelp preset with the subject.
+  if (kind === 'liveness_midshift_prompt' || kind === 'liveness_midshift_missed') {
+    const profile = data['profile'] === 'RIDER' ? 'RIDER' : 'DRIVER';
+    const respondBy = typeof data['respondBy'] === 'string' ? (data['respondBy'] as string) : undefined;
+    return { screen: 'LivenessCheck', params: respondBy ? { profile, respondBy } : { profile } };
+  }
+  if (kind === 'liveness_locked') {
+    return { screen: 'GetHelp', params: { category: 'ACCOUNT', subject: 'Identity check locked my account' } };
+  }
+
   // [server-tagged audience] A push the server addressed to a BUSINESS belongs
   // on the store's order desk. NotificationService.send merges `audience` into
   // data (the in-app notification list already reads it), so this is a server

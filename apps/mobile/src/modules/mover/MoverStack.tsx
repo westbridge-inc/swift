@@ -24,6 +24,9 @@ import { MoverOnboardingScreen } from './screens/MoverOnboardingScreen';
 // mover stack simply never registered it — an earner mid-shift had NO route
 // to a human. Registration, not a rewrite.
 import { GetHelpScreen } from '../profile/screens/GetHelpScreen';
+// [E12 §7.1] The shift identity check — go-online's 428 and the mid-shift
+// push both land here.
+import { LivenessCheckScreen } from '../safety/screens/LivenessCheckScreen';
 
 const Stack = createNativeStackNavigator();
 
@@ -113,6 +116,7 @@ export function MoverStack() {
         <Stack.Screen name="MySwiftNumber" component={MoverSwiftNumberScreen} />
         <Stack.Screen name="Chat" component={ChatScreen} />
         <Stack.Screen name="GetHelp" component={GetHelpScreen} />
+        <Stack.Screen name="LivenessCheck" component={LivenessCheckScreen} />
       </Stack.Navigator>
       {preview ? <MoverPreviewBanner /> : null}
     </View>
