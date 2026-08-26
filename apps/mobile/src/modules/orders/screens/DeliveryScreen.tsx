@@ -6,7 +6,7 @@ import { Image } from 'expo-image';
 import { openExternal } from '../../../lib/openExternal';
 // The emergency path for the person WAITING. The earner side got one; the
 // customer watching a stranger walk up their path did not.
-import { useJobSos } from '../../../hooks/safety';
+import { SosCeremony } from '../../safety/SosCeremony';
 import { useLocationStore } from '../../../stores/locationStore';
 import { grantedLocationFix } from '../../../lib/deviceLocation';
 import { Feather } from '@expo/vector-icons';
@@ -350,7 +350,6 @@ export function DeliveryScreen() {
   // because this component early-returns for loading and error states, and a
   // hook after an early return breaks React's ordering (caught by
   // react-hooks/rules-of-hooks, which is why that rule is an error here).
-  const jobSos = useJobSos();
   const [sosConfirm, setSosConfirm] = useState(false);
   const myLocation = useLocationStore();
 
@@ -1456,38 +1455,23 @@ export function DeliveryScreen() {
 
       {/* Two-step, and 911 is the FIRST action — Swift records evidence, it is
           not an emergency responder, and the copy must never imply a staffed
-          safety desk [liability shield]. Same ceremony the earner side uses. */}
-      <PopupCard visible={sosConfirm} onClose={() => setSosConfirm(false)}>
-        <DecorativeIcon style={{ width: 72, height: 72, borderRadius: 36, alignItems: 'center', justifyContent: 'center', backgroundColor: color.error }}>
-          <Feather name="alert-triangle" size={32} color={color.white} />
-        </DecorativeIcon>
-        <PopupTitle variant="title" center style={{ marginTop: space.lg }}>
-          Get emergency help?
-        </PopupTitle>
-        <T variant="body" tone="muted" center style={{ marginTop: space.sm }}>
-          This dials 911 — local emergency services — right away. Swift also saves the alert and your location on this order&apos;s record. Use only in a real emergency.
-        </T>
-        <PillButton
-          label="Yes — get help now"
-          style={{ alignSelf: 'stretch', marginTop: space['2xl'] }}
-          disabled={jobSos.isPending}
-          onPress={() => {
-            setSosConfirm(false);
-            // Guyana launch emergency number; move to CountryConfig for other markets.
-            void openExternal('tel:911', "Couldn't start the call — dial 911 directly.");
+          safety desk [liability shield]. The shared LIVE ceremony
+          [REPORT-035]: the popup stays open through the raise, failure is
+          loud, and "Page Swift NOW" skips the grace wait. */}
+      {o?.id ? (
+        <SosCeremony
+          visible={sosConfirm}
+          onClose={() => setSosConfirm(false)}
+          context={{ orderId: o.id }}
+          recordNoun="order"
+          getCoords={() => {
             // MY coordinates, never the rider's live position. Ops responds to
             // where the person who pressed the button is standing.
             const coords = grantedLocationFix(myLocation.latitude, myLocation.longitude, myLocation.status);
-            if (o?.id) {
-              jobSos.mutate({
-                jobId: o.id,
-                coords: coords ? { lat: coords.latitude, lng: coords.longitude } : undefined,
-              });
-            }
+            return coords ? { lat: coords.latitude, lng: coords.longitude } : undefined;
           }}
         />
-        <PillButton label="Close" variant="soft" style={{ alignSelf: 'stretch', marginTop: space.md }} onPress={() => setSosConfirm(false)} />
-      </PopupCard>
+      ) : null}
     </View>
   );
 }

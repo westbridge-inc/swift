@@ -10,7 +10,7 @@ import { Feather, MaterialCommunityIcons } from '@expo/vector-icons';
 import { CodeInput, DecorativeIcon, EmptyState, LockIn, PillButton, PopupCard, PopupTitle, Screen, T, cardShadow, lockInButtonStyle } from '../../../kit';
 import { Stars } from '../../../kit/controls';
 import { useMoverKind, useActiveJob, useDriverAction, useRiderAction, useRateCustomer, useCourierProof, useRideSos } from '../../../hooks';
-import { useJobSos } from '../../../hooks/safety';
+import { SosCeremony } from '../../safety/SosCeremony';
 import { useMoverPreview } from '../../../stores/moverPreview';
 import { toast } from '../../../kit/toast';
 import { useLocationStore } from '../../../stores/locationStore';
@@ -122,8 +122,6 @@ export function ActiveJobScreen({ navigation }: any) {
   // Driver-raised SOS on an active taxi ride — the backend authorizes the driver
   // participant on /rides/:id/sos (same route the passenger's SOS uses).
   const sos = useRideSos();
-  // The general safety path, for every job the taxi-scoped route never covered.
-  const jobSos = useJobSos();
   const [sosConfirm, setSosConfirm] = useState(false);
   // Preview (R3): useActiveJob supplies a sample in-progress trip, so this
   // nav-grade screen is fully browsable read-only. Real actions (SOS/dial) are
@@ -488,43 +486,50 @@ export function ActiveJobScreen({ navigation }: any) {
         </BottomSheet>
       ) : null}
 
-      {/* SOS confirm — deliberate two-step, then records the incident + pages
-          ops AND dials local emergency (the same flow the passenger has). */}
-      <PopupCard visible={sosConfirm} onClose={() => setSosConfirm(false)}>
-        <DecorativeIcon style={{ width: 72, height: 72, borderRadius: 36, alignItems: 'center', justifyContent: 'center', backgroundColor: color.error }}>
-          <Feather name="alert-triangle" size={32} color={color.white} />
-        </DecorativeIcon>
-        <PopupTitle variant="title" center style={{ marginTop: space.lg }}>
-          Get emergency help?
-        </PopupTitle>
-        <T variant="body" tone="muted" center style={{ marginTop: space.sm }}>
-          This dials 911 — local emergency services — right away. Swift also saves the alert and your live location on this trip’s record. Use only in a real emergency.
-        </T>
-        <PillButton
-          label="Yes — get help now"
-          style={{ alignSelf: 'stretch', marginTop: space['2xl'] }}
-          disabled={sos.isPending || jobSos.isPending}
-          onPress={() => {
-            setSosConfirm(false);
-            if (preview) return; // read-only preview never dials or records
-            // 911 is THE action — dial first, never behind anything else. Swift
-            // records evidence; it is not an emergency responder and the copy
-            // must never imply a staffed safety desk [liability shield].
-            // Guyana launch emergency number; move to CountryConfig for other markets.
-            void openExternal('tel:911', "Couldn't start the call — dial 911 directly.");
-            const coords = me ? { lat: me.latitude, lng: me.longitude } : undefined;
-            if (!job?.id) return;
-            // Two routes, one button. A taxi ride keeps /rides/:id/sos — it is
-            // live and proven, and a working emergency path is never re-plumbed
-            // for consistency's sake. Every other job takes the general
-            // /safety/sos, which authorises the rider participant and had been
-            // sitting there uncalled.
-            if (isDriver) sos.mutate({ id: job.id, coords });
-            else jobSos.mutate({ jobId: job.id, coords });
-          }}
+      {/* SOS — deliberate two-step. Two routes, one button: a taxi ride keeps
+          /rides/:id/sos (live, proven, IMMEDIATE server-side — never
+          re-plumbed for consistency's sake); every other job takes the shared
+          LIVE ceremony [REPORT-035] — the popup stays open through the raise,
+          failure is loud, and "Page Swift NOW" skips the grace wait. */}
+      {!isDriver && job?.id && !preview ? (
+        <SosCeremony
+          visible={sosConfirm}
+          onClose={() => setSosConfirm(false)}
+          context={{ orderId: job.id }}
+          recordNoun="job"
+          getCoords={() => (me ? { lat: me.latitude, lng: me.longitude } : undefined)}
         />
-        <PillButton label="Close" variant="soft" style={{ alignSelf: 'stretch', marginTop: space.md }} onPress={() => setSosConfirm(false)} />
-      </PopupCard>
+      ) : (
+        <PopupCard visible={sosConfirm} onClose={() => setSosConfirm(false)}>
+          <DecorativeIcon style={{ width: 72, height: 72, borderRadius: 36, alignItems: 'center', justifyContent: 'center', backgroundColor: color.error }}>
+            <Feather name="alert-triangle" size={32} color={color.white} />
+          </DecorativeIcon>
+          <PopupTitle variant="title" center style={{ marginTop: space.lg }}>
+            Get emergency help?
+          </PopupTitle>
+          <T variant="body" tone="muted" center style={{ marginTop: space.sm }}>
+            This dials 911 — local emergency services — right away. Swift also saves the alert and your live location on this trip’s record. Use only in a real emergency.
+          </T>
+          <PillButton
+            label="Yes — get help now"
+            style={{ alignSelf: 'stretch', marginTop: space['2xl'] }}
+            disabled={sos.isPending}
+            onPress={() => {
+              setSosConfirm(false);
+              if (preview) return; // read-only preview never dials or records
+              // 911 is THE action — dial first, never behind anything else. Swift
+              // records evidence; it is not an emergency responder and the copy
+              // must never imply a staffed safety desk [liability shield].
+              // Guyana launch emergency number; move to CountryConfig for other markets.
+              void openExternal('tel:911', "Couldn't start the call — dial 911 directly.");
+              const coords = me ? { lat: me.latitude, lng: me.longitude } : undefined;
+              if (!job?.id) return;
+              sos.mutate({ id: job.id, coords });
+            }}
+          />
+          <PillButton label="Close" variant="soft" style={{ alignSelf: 'stretch', marginTop: space.md }} onPress={() => setSosConfirm(false)} />
+        </PopupCard>
+      )}
 
       {/* Post-trip passenger rating — DRIVER_TO_CUSTOMER, once per ride */}
       <PopupCard visible={!!ratePopup} onClose={closeRating}>

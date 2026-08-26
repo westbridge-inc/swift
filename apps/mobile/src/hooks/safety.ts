@@ -20,20 +20,22 @@ export function useJobSos() {
   const keys = useRef(createSosKeyStore()).current;
 
   return useMutation({
-    mutationFn: ({
+    mutationFn: async ({
       jobId,
       coords,
     }: {
       jobId: string;
       coords?: { lat: number; lng: number; accuracyM?: number };
-    }) =>
-      safetyApi.sos({
+    }) => {
+      const res = await safetyApi.sos({
         orderId: jobId,
         lat: coords?.lat,
         lng: coords?.lng,
         accuracyM: coords?.accuracyM,
         clientIdempotencyKey: keys.keyFor(jobId),
-      }),
+      });
+      return res.data?.data as SosRaised;
+    },
     onSuccess: () => track('job_sos', {}),
   });
 }
@@ -49,21 +51,55 @@ export function useServiceJobSos() {
   const keys = useRef(createSosKeyStore()).current;
 
   return useMutation({
-    mutationFn: ({
+    mutationFn: async ({
       serviceJobId,
       coords,
     }: {
       serviceJobId: string;
       coords?: { lat: number; lng: number; accuracyM?: number };
-    }) =>
-      safetyApi.sos({
+    }) => {
+      const res = await safetyApi.sos({
         serviceJobId,
         lat: coords?.lat,
         lng: coords?.lng,
         accuracyM: coords?.accuracyM,
         clientIdempotencyKey: keys.keyFor(serviceJobId),
-      }),
+      });
+      return res.data?.data as SosRaised;
+    },
     onSuccess: () => track('service_job_sos', {}),
+  });
+}
+
+/** The raise response — the ceremony renders every state from these server
+ *  facts (status + the server-owned grace deadline), never from assumption. */
+export interface SosRaised {
+  id: string;
+  status: 'TRIGGER_PENDING' | 'ACTIVE' | 'ACKNOWLEDGED' | 'RESOLVED' | 'CANCELLED';
+  graceEndsAt: string | null;
+}
+
+/** [REPORT-035 F-035-01 · S0] "I need help NOW" — TRIGGER_PENDING → ACTIVE
+ *  without waiting for the promotion worker. The client half of the confirm
+ *  endpoint that shipped with zero callers. */
+export function useConfirmSos() {
+  return useMutation({
+    mutationFn: async (id: string) => {
+      const res = await safetyApi.confirmSos(id);
+      return res.data?.data as { id: string; status: string };
+    },
+    meta: { silent: true },
+  });
+}
+
+/** Cancel during the server grace window; a 409 means the window closed. */
+export function useCancelSos() {
+  return useMutation({
+    mutationFn: async (id: string) => {
+      const res = await safetyApi.cancelSos(id);
+      return res.data?.data as { id: string; status: string };
+    },
+    meta: { silent: true },
   });
 }
 

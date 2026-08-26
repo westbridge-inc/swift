@@ -462,6 +462,12 @@ export const safetyApi = {
     accuracyM?: number;
     clientIdempotencyKey: string;
   }) => api.post('/safety/sos', { ...input, source: 'BUTTON' as const, clientCreatedAt: new Date().toISOString() }),
+  /** [REPORT-035 F-035-01] TRIGGER_PENDING → ACTIVE now — "I need help NOW".
+   *  The raise opens a short server-side cancel grace; this is the owner's way
+   *  to skip the wait instead of depending on the promotion worker. */
+  confirmSos: (id: string) => api.post(`/safety/sos/${id}/confirm`, {}),
+  /** Slide-to-cancel during the grace window only; 409 after. */
+  cancelSos: (id: string) => api.post(`/safety/sos/${id}/cancel`, {}),
 };
 
 /** [B15/STORE-001] In-app UGC reporting — Apple 1.2 / Google UGC+CSAE launch
