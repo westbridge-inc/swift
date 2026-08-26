@@ -26,6 +26,9 @@ const SCREENS_ROOT = join(process.cwd(), 'src', 'modules');
 const SOS_MARKERS = [
   "from '../../../hooks/safety'", // useJobSos / useServiceJobSos
   'useRideSos', // taxi's own /rides/:id/sos path
+  // [REPORT-035] The shared LIVE ceremony — raise + confirm + cancel + honest
+  // failure states in one component; the canonical entrance going forward.
+  'SosCeremony',
 ] as const;
 
 /** Known in-flight surfaces. Every entry must keep an SOS mechanism. */

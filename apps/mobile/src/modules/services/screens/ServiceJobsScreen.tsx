@@ -2,18 +2,16 @@
 import React, { useState } from 'react';
 import { RefreshControl, ScrollView, TextInput, View } from 'react-native';
 import { color, radius, space } from '@swift/ui';
-import { Feather } from '@expo/vector-icons';
 import { useServiceJobs, useScheduleJob, useCancelJob, useRateJob, useQuoteJob, useConfirmJob, useDeclineSlot, useCompleteJob } from '../../../hooks';
 // [B3] The emergency path for BOTH people on a service job — the provider
 // working inside a stranger's home, and the customer whose home it is. Every
 // other in-flight surface had a button; this one had nothing.
-import { useServiceJobSos } from '../../../hooks/safety';
+import { SosCeremony } from '../../safety/SosCeremony';
 import { useAuthStore } from '../../../stores/authStore';
 import { useLocationStore } from '../../../stores/locationStore';
 import { grantedLocationFix } from '../../../lib/deviceLocation';
-import { openExternal } from '../../../lib/openExternal';
 import { money } from '../../../lib/money';
-import { Card, Chip, DecorativeIcon, EmptyState, ErrorState, Header, IconChip, LoadingBlock, PillButton, PopupCard, PopupTitle, Screen, Stars, T, TonePill } from '../../../kit';
+import { Card, Chip, EmptyState, ErrorState, Header, IconChip, LoadingBlock, PillButton, PopupCard, PopupTitle, Screen, Stars, T, TonePill } from '../../../kit';
 
 const STATUS_LABEL: Record<string, { label: string; tone: 'brand' | 'success' | 'neutral' }> = {
   REQUESTED: { label: 'Waiting for quote', tone: 'neutral' },
@@ -202,7 +200,6 @@ function JobCard({ job, navigation }: { job: any; navigation: any }) {
   const cancel = useCancelJob();
   const [scheduling, setScheduling] = useState(false);
   const [confirmCancel, setConfirmCancel] = useState(false);
-  const jobSos = useServiceJobSos();
   const [sosConfirm, setSosConfirm] = useState(false);
   const myLocation = useLocationStore();
   const status = STATUS_LABEL[job.status] ?? { label: job.status, tone: 'neutral' as const };
@@ -284,37 +281,21 @@ function JobCard({ job, navigation }: { job: any; navigation: any }) {
         />
       ) : null}
 
-      {/* [B3] Two-step confirm: a mis-tap must not dial 911, and a real
-          emergency must be TWO taps, never a hidden gesture. */}
-      <PopupCard visible={sosConfirm} onClose={() => setSosConfirm(false)}>
-        <DecorativeIcon style={{ width: 72, height: 72, borderRadius: 36, alignItems: 'center', justifyContent: 'center', backgroundColor: color.error }}>
-          <Feather name="alert-triangle" size={32} color={color.white} />
-        </DecorativeIcon>
-        <PopupTitle variant="title" center style={{ marginTop: space.lg }}>
-          Get emergency help?
-        </PopupTitle>
-        <T variant="body" tone="muted" center style={{ marginTop: space.sm }}>
-          This dials 911 — local emergency services — right away. Swift also saves the alert and your location on this job&apos;s record. Use only in a real emergency.
-        </T>
-        <PillButton
-          label="Yes — get help now"
-          style={{ alignSelf: 'stretch', marginTop: space['2xl'] }}
-          disabled={jobSos.isPending}
-          onPress={() => {
-            setSosConfirm(false);
-            // Guyana launch emergency number; move to CountryConfig for other markets.
-            void openExternal('tel:911', "Couldn't start the call — dial 911 directly.");
-            // MY coordinates, never the other party's live position — ops
-            // responds to where the person who pressed the button is standing.
-            const coords = grantedLocationFix(myLocation.latitude, myLocation.longitude, myLocation.status);
-            jobSos.mutate({
-              serviceJobId: job.id,
-              coords: coords ? { lat: coords.latitude, lng: coords.longitude } : undefined,
-            });
-          }}
-        />
-        <PillButton label="Close" variant="soft" style={{ alignSelf: 'stretch', marginTop: space.md }} onPress={() => setSosConfirm(false)} />
-      </PopupCard>
+      {/* [B3 · REPORT-035] Two-step confirm, then the LIVE ceremony: the popup
+          stays open through the raise, failure is loud, and "Page Swift NOW"
+          gives the confirm endpoint its first caller. */}
+      <SosCeremony
+        visible={sosConfirm}
+        onClose={() => setSosConfirm(false)}
+        context={{ serviceJobId: job.id }}
+        recordNoun="job"
+        getCoords={() => {
+          // MY coordinates, never the other party's live position — ops
+          // responds to where the person who pressed the button is standing.
+          const coords = grantedLocationFix(myLocation.latitude, myLocation.longitude, myLocation.status);
+          return coords ? { lat: coords.latitude, lng: coords.longitude } : undefined;
+        }}
+      />
 
       {/* Kit confirm popup */}
       <PopupCard visible={confirmCancel} onClose={() => setConfirmCancel(false)}>
