@@ -97,7 +97,10 @@ function EarningsHero({ total, facts }: { total: unknown; facts: string[] }) {
           />
           <View style={{ flex: 1, padding: space.lg }}>
             <T variant="micro" tone="muted">THIS WEEK</T>
-            <T variant="numL" style={{ marginTop: space.xs }}>{moneyOrDash(total)}</T>
+            {/* [Wave 3 · ref 17] The week figure IS the screen — displayXl, so
+                one element is unambiguously the biggest thing (numL was the
+                same step as the tiles below, flattening the hierarchy). */}
+            <T variant="displayXl" style={{ marginTop: space.xs }}>{moneyOrDash(total)}</T>
             <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.xs, marginTop: space.xs }}>
               <MaterialCommunityIcons name="check-decagram" size={fontSize.xs} color={color.success} />
               <T variant="caption" weight="bold" tone="success" style={{ flex: 1 }}>
