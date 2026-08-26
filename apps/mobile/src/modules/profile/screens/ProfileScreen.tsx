@@ -9,8 +9,7 @@ import { color, radius, space } from '@swift/ui';
 import { haptic } from '../../../lib/haptics';
 import { useMyRating, useProfile } from '../../../hooks/customer';
 import { useAuthStore } from '../../../stores/authStore';
-import { EmptyState, ErrorState, IconChip, LoadingBlock, PillButton, PopupCard, PopupTitle, Screen, SettingsRow, T } from '../../../kit';
-import Svg, { Circle } from 'react-native-svg';
+import { EmptyState, ErrorState, IconChip, LoadingBlock, PillButton, PopupCard, PopupTitle, Screen, SettingsRow, T, TrustHalo } from '../../../kit';
 import Animated, { FadeInDown, ReduceMotion } from 'react-native-reanimated';
 import { RoleSwitcherSheet } from '../../../components/RoleSwitcherSheet';
 import { API_URL, customerApi } from '../../../services/api';
@@ -23,39 +22,8 @@ const GUTTER = space['2xl'];
 // Kit Profile (49) + logout popup (51). Sections in the kit's icon-chip row
 // language; every row lands on a real screen/flow. Dark mode (kit "Dart
 // Mode") is omitted — the app ships light-only.
-/** [design-100x Flow-8 signature] THE TRUST HALO — a segmented ring around
- *  the avatar where every lit segment is a REAL account fact (phone verified ·
- *  selfie on file · first order placed). Never decorative: unlit segments are
- *  the honest to-do list, and the caption names the next one. */
-function TrustHalo({ size, stroke, facts, children }: {
-  size: number; stroke: number; facts: boolean[]; children: React.ReactNode;
-}) {
-  const r = (size - stroke) / 2;
-  const c = 2 * Math.PI * r;
-  const seg = c / facts.length;
-  const gap = 8;
-  return (
-    <View style={{ width: size, height: size, alignItems: 'center', justifyContent: 'center' }}>
-      <Svg width={size} height={size} style={{ position: 'absolute', transform: [{ rotate: '-90deg' }] }}>
-        {facts.map((on, i) => (
-          <Circle
-            key={i}
-            cx={size / 2}
-            cy={size / 2}
-            r={r}
-            stroke={on ? color.success : color.brand[100]}
-            strokeWidth={stroke}
-            strokeLinecap="round"
-            fill="none"
-            strokeDasharray={`${seg - gap} ${c - seg + gap}`}
-            strokeDashoffset={-i * seg}
-          />
-        ))}
-      </Svg>
-      {children}
-    </View>
-  );
-}
+// (TrustHalo now lives in the kit [Wave 3 part 2 deferral] — promoted verbatim
+// once #807 released this file.)
 
 /** CONTENT SITS ON OPEN PAPER — read off the rendered design slides.
  *

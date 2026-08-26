@@ -41,6 +41,7 @@ const PORTED = [
   'hold-ring.tsx',
   'hold-window.ts',
   'calm-radar.tsx',
+  'trust-halo.tsx',
 ] as const;
 
 describe('DRIFT-09 ports are token-only', () => {

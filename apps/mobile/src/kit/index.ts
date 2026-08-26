@@ -65,3 +65,4 @@ export * from './fare-step';
 export * from './hold-ring';
 export * from './hold-window';
 export * from './calm-radar';
+export * from './trust-halo';
