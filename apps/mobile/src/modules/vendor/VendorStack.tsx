@@ -59,7 +59,7 @@ import { StandingCard } from '../../components/StandingCard';
 import { API_URL, vendorApi } from '../../services/api';
 import { disconnectSocket } from '../../services/socket';
 import { openPayLink } from '../../lib/payLink';
-import { toast } from '../../components/ui/toast';
+import { toast } from '../../kit/toast';
 import { useWentLive, WentLivePopup } from '../../components/onboarding/WentLive';
 import { docLabel } from '../../components/onboarding/DocumentUploadCard';
 import { useBecomePartner, useVerificationStatus } from '../../hooks/verification';

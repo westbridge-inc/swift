@@ -20,7 +20,8 @@ import {
   HankenGrotesk_600SemiBold,
   HankenGrotesk_700Bold,
 } from '@expo-google-fonts/hanken-grotesk';
-import { GluestackUIProvider, ToastHost } from './components/ui';
+import { GluestackUIProvider } from './components/ui';
+import { ToastHost } from './kit/toast';
 import { ConnectivityBoundary } from './components/OfflineBanner';
 import { ErrorBoundary } from './components/ErrorBoundary';
 import { installGlobalErrorHandler } from './lib/crash-reporter';

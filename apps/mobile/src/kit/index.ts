@@ -13,7 +13,9 @@ export * from './button';
 export * from './card';
 export * from './controls';
 export * from './masthead';
-export { DocketEdge, ReceiptEdge } from './docket';
+// (DocketEdge/ReceiptEdge/AwningEdge are GONE — the toothed-edge family was
+// vetoed outright [2026-08-22], and a vetoed component that still exports is
+// a vetoed component that will be used. DRIFT-08 closed.)
 export * from './input';
 export * from './rows';
 export * from './states';
@@ -25,3 +27,21 @@ export * from './glyphs';
 export * from './ride-sheet';
 export * from './vehicle-render';
 export * from './map-style';
+// [DRIFT-09] The nine legacy-only primitives, authored into the kit so
+// components/ui can finally be removed — plus the two supports they ride on
+// (PressableScale, Scrim). `Image` stays a direct import ('./image'): as a
+// barrel export it shadows react-native's and invites the wrong autocomplete.
+export * from './toast';
+export * from './toast-duration';
+export * from './action-sheet';
+export * from './confirm-dialog';
+export * from './step-progress';
+// (No './promo-banner': DRIFT-09 listed PromoBanner as legacy-only, but the
+// kit had since grown its OWN in food.tsx — the founder-corrected F-263
+// treatment. The older swift-watermark banner dies with the legacy folder.)
+export * from './avatar';
+export * from './badge';
+export * from './canopy';
+export * from './choice-chip';
+export * from './pressable-scale';
+export * from './scrim';

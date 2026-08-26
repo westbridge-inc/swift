@@ -4,8 +4,9 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import * as DocumentPicker from 'expo-document-picker';
 import { Feather } from '@expo/vector-icons';
 import { color } from '@swift/ui';
-import { Text, Card, Button, PressableScale } from '../../components/ui';
-import { toast } from '../../components/ui/toast';
+import { Text, Card, Button } from '../../components/ui';
+import { PressableScale } from '../../kit/pressable-scale';
+import { toast } from '../../kit/toast';
 import { useImportAutomap, useImportItems, useImportFile } from '../../hooks/vendorops';
 import {
   AuthSessionBoundaryError,

@@ -6,7 +6,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Feather } from '@expo/vector-icons';
 import { color, font, radius, space, typeScale } from '@swift/ui';
 import { useHome, useVendors } from '../../../hooks/customer';
-import { ActionSheet } from '../../../components/ui/action-sheet';
+import { ActionSheet } from '../../../kit/action-sheet';
 import { VERTICAL_TINT } from '../../../kit/vertical-tint';
 import { useAppStore } from '../../../stores/appStore';
 import { useLocationStore } from '../../../stores/locationStore';

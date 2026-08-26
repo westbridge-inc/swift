@@ -7,14 +7,15 @@ import { color } from '@swift/ui';
 import { withAlpha } from '../../modules/mover/surface';
 import { SwiftMark } from '../../components/SwiftLogo';
 import { authApi } from '../../services/api';
-import { toast } from '../../components/ui/toast';
+import { toast } from '../../kit/toast';
 import {
   AuthSessionBoundaryError,
   requireAuthSessionForPrincipal,
   requireAuthSessionSnapshot,
   useAuthStore,
 } from '../../stores/authStore';
-import { Text, Heading, Button, PressableScale } from '../../components/ui';
+import { Text, Heading, Button } from '../../components/ui';
+import { PressableScale } from '../../kit/pressable-scale';
 
 const FRAME = 260;
 

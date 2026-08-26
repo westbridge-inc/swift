@@ -4,7 +4,9 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import * as ImagePicker from 'expo-image-picker';
 import { Feather } from '@expo/vector-icons';
 import { color } from '@swift/ui';
-import { Text, Heading, Card, Button, Badge, PressableScale } from '../../../components/ui';
+import { Text, Heading, Card, Button } from '../../../components/ui';
+import { Badge } from '../../../kit/badge';
+import { PressableScale } from '../../../kit/pressable-scale';
 import { useUploadFile, useSubmitIdentity } from '../../../hooks/verification';
 import {
   AuthSessionBoundaryError,

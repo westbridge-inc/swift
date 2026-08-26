@@ -3,7 +3,8 @@ import { View, FlatList, TextInput, KeyboardAvoidingView, Platform } from 'react
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Feather } from '@expo/vector-icons';
 import { color } from '@swift/ui';
-import { Text, Spinner, PressableScale } from '../../components/ui';
+import { Text, Spinner } from '../../components/ui';
+import { PressableScale } from '../../kit/pressable-scale';
 import { useAuthStore } from '../../stores/authStore';
 import { useChatRoom, useChatMessages, useSendMessage } from '../../hooks/chat';
 

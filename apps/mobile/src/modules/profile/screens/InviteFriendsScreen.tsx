@@ -4,7 +4,7 @@ import { Share, View } from 'react-native';
 import { color, space } from '@swift/ui';
 import { useProfile } from '../../../hooks/customer';
 import { Card, ErrorState, Header, IconChip, LoadingBlock, PillButton, Screen, T } from '../../../kit';
-import { toast } from '../../../components/ui/toast';
+import { toast } from '../../../kit/toast';
 
 const GUTTER = space['2xl'];
 

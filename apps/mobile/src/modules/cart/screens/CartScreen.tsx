@@ -22,7 +22,7 @@ import { itemPhoto } from '../../../lib/images';
 import { money } from '../../../lib/money';
 import { openMmgPaymentAction } from '../../../lib/payLink';
 import { haptic } from '../../../lib/haptics';
-import { toast } from '../../../components/ui/toast';
+import { toast } from '../../../kit/toast';
 import {
   AddMorph,
   Chip,

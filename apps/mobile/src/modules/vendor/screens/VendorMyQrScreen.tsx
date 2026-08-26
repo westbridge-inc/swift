@@ -7,7 +7,7 @@ import { SvgXml } from 'react-native-svg';
 import { Card, Chip, ErrorState, LoadingBlock, PillButton, PopupCard, PopupTitle, Screen, SettingsRow, T, TonePill } from '../../../kit';
 import { useVendorProfile, type QrAnalytics, type VendorQrPayload } from '../../../hooks/vendorops';
 import { GUTTER, SubHeader } from '../shared';
-import { toast } from '../../../components/ui/toast';
+import { toast } from '../../../kit/toast';
 import { copyText } from '../../../lib/clipboard';
 import { api } from '../../../services/api';
 import { useStoreSwitcher } from '../../../stores/storeSwitcher';

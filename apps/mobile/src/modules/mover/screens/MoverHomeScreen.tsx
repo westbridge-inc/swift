@@ -34,7 +34,7 @@ import { GEORGETOWN, useDeviceLocation } from '../../../hooks/useDeviceLocation'
 import { createLiveDeviceLocationLease, grantedLocationFix } from '../../../lib/deviceLocation';
 import { prepareMoverOnline } from '../../../lib/moverLocation';
 import { requestMoverBackgroundPermission } from '../../../services/backgroundLocation';
-import { toast } from '../../../components/ui/toast';
+import { toast } from '../../../kit/toast';
 import { money } from '../../../lib/money';
 import { moverJobsToday } from '../../../lib/earnings';
 import { earningsSplit } from '../../../lib/earnings-breakdown';

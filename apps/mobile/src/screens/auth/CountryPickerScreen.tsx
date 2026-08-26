@@ -5,7 +5,9 @@ import { authApi } from '../../services/api';
 import { useAuthStore } from '../../stores/authStore';
 import { Feather } from '@expo/vector-icons';
 import { color } from '@swift/ui';
-import { Text, Heading, PressableScale, StepProgress, Skeleton, EmptyState, elevation } from '../../components/ui';
+import { Text, Heading, Skeleton, EmptyState, elevation } from '../../components/ui';
+import { PressableScale } from '../../kit/pressable-scale';
+import { StepProgress } from '../../kit/step-progress';
 import { SwiftMark } from '../../components/SwiftLogo';
 import { flagEmoji } from '../../lib/flags';
 
