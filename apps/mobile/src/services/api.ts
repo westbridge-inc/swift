@@ -395,6 +395,24 @@ export interface TieredEstimate {
 /** Customer-side safety surfaces [safety spec / rides 12.2] — thin client
  *  over the ONE safety engine; zero safety logic lives on the phone. */
 export const safetyApi = {
+  /**
+   * Emergency contacts — the people SOS actually reaches.
+   *
+   * `sos.service.ts` fans an ACTIVE alert out to VERIFIED contacts by SMS, in
+   * priority order, with per-contact receipts. All five routes have existed
+   * since the safety engine was built and NOTHING in the app ever called
+   * them, so that list was empty for every user on the platform and the
+   * fan-out had nobody to reach. The number is proven by a handshake: the
+   * contact is texted a 6-digit code and relays it to the owner, so a typo
+   * cannot silently disable the feature.
+   */
+  listEmergencyContacts: () => api.get('/safety/emergency-contacts'),
+  addEmergencyContact: (data: { name: string; phoneE164: string; relationship?: string; priority?: number }) =>
+    api.post('/safety/emergency-contacts', data),
+  verifyEmergencyContact: (id: string, code: string) =>
+    api.post(`/safety/emergency-contacts/${id}/verify`, { code }),
+  resendEmergencyContactCode: (id: string) => api.post(`/safety/emergency-contacts/${id}/resend`, {}),
+  removeEmergencyContact: (id: string) => api.delete(`/safety/emergency-contacts/${id}`),
   /** Wrong person/car at the kerb: releases the ride, re-dispatches, locks
    *  the driver pending identity review, opens the incident. */
   notMyDriver: (rideId: string) => api.post(`/safety/rides/${rideId}/not-my-driver`, {}),
