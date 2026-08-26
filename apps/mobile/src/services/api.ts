@@ -292,6 +292,12 @@ export const customerApi = {
   addAddress: (data: AddressInput) => api.post('/customer/addresses', data),
   getHome: (lat?: number, lng?: number) => api.get('/customer/home', { params: { lat, lng } }),
   getVendors: (params?: Record<string, string>) => api.get('/customer/vendors', { params }),
+  // [B2] The search ENGINE — typo tolerance, ranking, and dishes. One wire
+  // contract whichever backend answered (the route normalizes Meili + DB).
+  search: (q: string, opts?: { type?: string; lat?: number; lng?: number }) =>
+    api.get('/search', { params: { q, ...opts } }),
+  searchSuggestions: (q: string) => api.get('/search/suggestions', { params: { q } }),
+  searchTrending: () => api.get('/search/trending'),
   getVendor: (id: string) => api.get(`/customer/vendors/${id}`),
   getVendorReviews: (id: string) => api.get(`/customer/vendors/${id}/reviews`),
   getItemSlots: (itemId: string, date: string) => api.get(`/customer/items/${itemId}/slots`, { params: { date } }),

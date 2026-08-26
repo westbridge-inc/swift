@@ -3,6 +3,25 @@ import { z } from 'zod';
 import { SearchService } from './search.service';
 import { AppError, ForbiddenError } from '../../utils/errors';
 import { sortByDistance } from '../../utils/distance';
+import { VISIBLE_VENDOR, VISIBLE_VENDOR_REL } from '../vendor/vendor-visibility';
+import { ratingSurfaces } from '../rating/rating-surface';
+
+// [B2] ONE wire contract whichever engine answered. The route used to hand
+// clients raw Meilisearch hits on the fast path and raw Prisma rows on the
+// fallback — different field names (display_rating vs averageRating), so a
+// client bound to one shape silently broke when the engine flipped. The
+// client must never know which engine answered.
+type VendorHit = {
+  id: string; name: string; slug: string | null; vendorType: string;
+  logoUrl: string | null; coverImageUrl: string | null; cuisineTypes: string[];
+  city: string | null; latitude: number | null; longitude: number | null;
+  estimatedPrepTime: number | null; isCurrentlyOpen: boolean;
+  displayRating: number | null; ratingCount: number; topRated: boolean;
+};
+type ItemHit = {
+  id: string; name: string; basePrice: number; imageUrl: string | null;
+  vendorId: string; vendorName: string; categoryName: string | null;
+};
 
 const searchQuerySchema = z.object({
   q: z.string().trim().max(200).optional(),
@@ -58,11 +77,40 @@ export async function searchRoutes(app: FastifyInstance) {
           searchService.searchItems(q, { limit: parsedLimit }),
         ]);
 
+        const vendors: VendorHit[] = (vendorResults.hits as Record<string, unknown>[]).map((h) => ({
+          id: String(h['id']),
+          name: String(h['name']),
+          slug: (h['slug'] as string | null) ?? null,
+          vendorType: String(h['vendorType']),
+          logoUrl: (h['logoUrl'] as string | null) ?? null,
+          coverImageUrl: (h['coverImageUrl'] as string | null) ?? null,
+          cuisineTypes: (h['cuisineTypes'] as string[]) ?? [],
+          city: (h['city'] as string | null) ?? null,
+          latitude: (h['latitude'] as number | null) ?? null,
+          longitude: (h['longitude'] as number | null) ?? null,
+          estimatedPrepTime: (h['estimatedPrepTime'] as number | null) ?? null,
+          isCurrentlyOpen: Boolean(h['isCurrentlyOpen']),
+          // R8 star fields ride the index (synced with the facets) — snake in
+          // the doc, one camel shape on the wire.
+          displayRating: (h['display_rating'] as number | null) ?? null,
+          ratingCount: (h['rating_count'] as number | null) ?? 0,
+          topRated: Boolean(h['top_rated']),
+        }));
+        const items: ItemHit[] = (itemResults.hits as Record<string, unknown>[]).map((h) => ({
+          id: String(h['id']),
+          name: String(h['name']),
+          basePrice: Number(h['basePrice'] ?? 0),
+          imageUrl: (h['imageUrl'] as string | null) ?? null,
+          vendorId: String(h['vendorId']),
+          vendorName: String(h['vendorName'] ?? ''),
+          categoryName: (h['categoryName'] as string | null) ?? null,
+        }));
+
         return {
           success: true,
           data: {
-            vendors: vendorResults.hits,
-            items: itemResults.hits,
+            vendors,
+            items,
             meta: {
               vendorCount: vendorResults.estimatedTotalHits,
               itemCount: itemResults.estimatedTotalHits,
@@ -83,9 +131,11 @@ export async function searchRoutes(app: FastifyInstance) {
 
     const [vendors, items] = await Promise.all([
       app.prisma.vendor.findMany({
+        // [B2] The ONE visibility predicate — this fallback previously
+        // dropped tenant.isActive, so a shut-off operator's store surfaced
+        // whenever Meilisearch was down.
         where: {
-          status: 'ACTIVE',
-          isVerified: true,
+          ...VISIBLE_VENDOR,
           OR: [
             { name: { contains: q, mode: 'insensitive' } },
             { description: { contains: q, mode: 'insensitive' } },
@@ -102,8 +152,6 @@ export async function searchRoutes(app: FastifyInstance) {
           logoUrl: true,
           coverImageUrl: true,
           cuisineTypes: true,
-          averageRating: true,
-          totalRatings: true,
           isCurrentlyOpen: true,
           estimatedPrepTime: true,
           latitude: true,
@@ -114,9 +162,11 @@ export async function searchRoutes(app: FastifyInstance) {
         orderBy: { averageRating: 'desc' },
       }),
       app.prisma.item.findMany({
+        // [B2] Same predicate through the relation — `status: 'ACTIVE'` alone
+        // let an unverified or shut-off operator's dishes answer searches.
         where: {
           isAvailable: true,
-          vendor: { status: 'ACTIVE' },
+          vendor: VISIBLE_VENDOR_REL,
           OR: [
             { name: { contains: q, mode: 'insensitive' } },
             { description: { contains: q, mode: 'insensitive' } },
@@ -130,24 +180,61 @@ export async function searchRoutes(app: FastifyInstance) {
           vendorId: true,
           vendor: { select: { name: true } },
           category: { select: { name: true } },
-          isPopular: true,
-          dietaryTags: true,
         },
         take: parsedLimit,
         orderBy: { totalOrdered: 'desc' },
       }),
     ]);
 
-    // Sort vendors by distance if lat/lng provided
-    const sortedVendors = userLat && userLng
-      ? sortByDistance(vendors, userLat, userLng)
-      : vendors;
+    // R8: the star surface rides the ONE mapper on the fallback path too, so
+    // both engines speak the same displayRating/topRated contract.
+    const surfaces = await ratingSurfaces(app.prisma, 'VENDOR', vendors.map((v) => v.id));
+
+    const shapedVendors: VendorHit[] = vendors.map((v) => ({
+      id: v.id,
+      name: v.name,
+      slug: v.slug,
+      vendorType: v.vendorType,
+      logoUrl: v.logoUrl,
+      coverImageUrl: v.coverImageUrl,
+      cuisineTypes: v.cuisineTypes,
+      city: v.city,
+      latitude: v.latitude,
+      longitude: v.longitude,
+      estimatedPrepTime: v.estimatedPrepTime,
+      isCurrentlyOpen: v.isCurrentlyOpen,
+      displayRating: surfaces.get(v.id)?.displayRating ?? null,
+      ratingCount: surfaces.get(v.id)?.ratingCount ?? 0,
+      topRated: surfaces.get(v.id)?.topRated ?? false,
+    }));
+
+    // Sort vendors by distance if lat/lng provided. A hit with no committed
+    // coordinates can't claim a distance — it sorts after the ones that can,
+    // never with an invented position.
+    let sortedVendors: VendorHit[] = shapedVendors;
+    if (userLat && userLng) {
+      const locatable = shapedVendors.filter(
+        (v): v is VendorHit & { latitude: number; longitude: number } => v.latitude != null && v.longitude != null,
+      );
+      const unlocatable = shapedVendors.filter((v) => v.latitude == null || v.longitude == null);
+      sortedVendors = [...sortByDistance(locatable, userLat, userLng), ...unlocatable];
+    }
+
+    const shapedItems: ItemHit[] = items.map((i) => ({
+      id: i.id,
+      name: i.name,
+      basePrice: Number(i.basePrice),
+      imageUrl: i.imageUrl,
+      vendorId: i.vendorId,
+      vendorName: i.vendor.name,
+      categoryName: i.category?.name ?? null,
+    }));
 
     return {
       success: true,
       data: {
         vendors: sortedVendors,
-        items: items.map((i) => ({ ...i, basePrice: Number(i.basePrice) })),
+        items: shapedItems,
         meta: { vendorCount: vendors.length, itemCount: items.length },
       },
     };
@@ -160,12 +247,14 @@ export async function searchRoutes(app: FastifyInstance) {
 
     const [vendors, items] = await Promise.all([
       app.prisma.vendor.findMany({
-        where: { status: 'ACTIVE', isVerified: true, name: { contains: q, mode: 'insensitive' } },
+        where: { ...VISIBLE_VENDOR, name: { contains: q, mode: 'insensitive' } },
         select: { name: true, vendorType: true },
         take: 5,
       }),
       app.prisma.item.findMany({
-        where: { isAvailable: true, name: { contains: q, mode: 'insensitive' } },
+        // [B2] This query had NO vendor predicate at all — a banned store's
+        // dish names kept autocompleting for every customer who typed.
+        where: { isAvailable: true, vendor: VISIBLE_VENDOR_REL, name: { contains: q, mode: 'insensitive' } },
         select: { name: true },
         take: 5,
       }),
@@ -179,10 +268,16 @@ export async function searchRoutes(app: FastifyInstance) {
     return { success: true, data: suggestions };
   });
 
-  // Trending / popular items
+  // Trending — most-ordered dishes across OPEN stores.
+  // [B2 · the trap an earlier analysis fell into] `isPopular` is a VENDOR-SET
+  // checkbox, not a ranking: gating "trending" on it let any store self-
+  // promote by ticking a box, and hid genuinely demanded dishes whose vendor
+  // never found the toggle. Trending must be EARNED, so it ranks on
+  // totalOrdered alone. isCurrentlyOpen stays: this feeds discovery moments
+  // ("worth trying right now"), and a closed store isn't tryable right now.
   app.get('/search/trending', { preHandler: [app.authenticate] }, async (_request) => {
     const items = await app.prisma.item.findMany({
-      where: { isAvailable: true, isPopular: true, vendor: { status: 'ACTIVE', isVerified: true, isCurrentlyOpen: true } },
+      where: { isAvailable: true, vendor: { ...VISIBLE_VENDOR, isCurrentlyOpen: true } },
       include: { vendor: { select: { name: true, slug: true } } },
       orderBy: { totalOrdered: 'desc' },
       take: 20,
@@ -208,8 +303,7 @@ export async function searchRoutes(app: FastifyInstance) {
 
     const vendors = await app.prisma.vendor.findMany({
       where: {
-        status: 'ACTIVE',
-        isVerified: true,
+        ...VISIBLE_VENDOR,
         isCurrentlyOpen: true,
         // Empty stores (no orderable item) stay out of nearby discovery.
         items: { some: { isAvailable: true } },

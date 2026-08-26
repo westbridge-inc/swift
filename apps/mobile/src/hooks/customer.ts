@@ -1,4 +1,4 @@
-import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { keepPreviousData, useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { track } from '../lib/analytics';
 import { customerApi, discoveryApi, type AddressInput } from '../services/api';
 import type { AuthSessionSnapshot } from '../lib/authSession';
@@ -18,6 +18,9 @@ export const customerKeys = {
   addresses: ['customer', 'addresses'] as const,
   home: (lat?: number, lng?: number) => ['customer', 'home', lat ?? null, lng ?? null] as const,
   vendors: (params?: Record<string, string>) => ['customer', 'vendors', params ?? {}] as const,
+  search: (q: string, type?: string, lat?: number, lng?: number) => ['customer', 'search', q, type ?? null, lat ?? null, lng ?? null] as const,
+  searchSuggestions: (q: string) => ['customer', 'search-suggestions', q] as const,
+  searchTrending: ['customer', 'search-trending'] as const,
   vendor: (id: string) => ['customer', 'vendor', id] as const,
   orders: ['customer', 'orders'] as const,
   order: (id: string) => ['customer', 'order', id] as const,
@@ -72,6 +75,41 @@ export function useDiscoveryCategories(lat?: number, lng?: number) {
 
 export function useVendors<T = any>(params?: Record<string, string>) {
   return useQuery<T>({ queryKey: customerKeys.vendors(params), queryFn: () => unwrap<T>(customerApi.getVendors(params)) });
+}
+
+/** [B2] The search ENGINE — vendors AND dishes, typo-tolerant, ranked. The
+ *  screen's old path was a substring filter that returned nothing for a
+ *  plural, a misspelling, or a dish name; this is the finished engine that
+ *  sat with zero callers on any surface. */
+export function useSearch<T = any>(q: string, opts?: { type?: string; lat?: number; lng?: number }) {
+  return useQuery<T>({
+    queryKey: customerKeys.search(q, opts?.type, opts?.lat, opts?.lng),
+    queryFn: () => unwrap<T>(customerApi.search(q, opts)),
+    enabled: q.trim().length >= 2,
+    // Type-ahead cadence: keep the previous page while the next keystroke's
+    // answer arrives, so the list never flashes empty mid-word.
+    placeholderData: keepPreviousData,
+  });
+}
+
+export function useSearchSuggestions<T = any>(q: string) {
+  return useQuery<T>({
+    queryKey: customerKeys.searchSuggestions(q),
+    queryFn: () => unwrap<T>(customerApi.searchSuggestions(q)),
+    enabled: q.trim().length >= 2,
+    placeholderData: keepPreviousData,
+  });
+}
+
+/** Most-ordered dishes across open stores — EARNED ranking (totalOrdered),
+ *  never the vendor-set isPopular checkbox. Feeds the no-matches invitation. */
+export function useSearchTrending<T = any>(enabled = true) {
+  return useQuery<T>({
+    queryKey: customerKeys.searchTrending,
+    queryFn: () => unwrap<T>(customerApi.searchTrending()),
+    enabled,
+    staleTime: 60_000,
+  });
 }
 
 export function useVendor<T = any>(id: string) {

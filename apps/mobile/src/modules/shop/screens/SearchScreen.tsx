@@ -5,7 +5,7 @@ import { useNavigation, useRoute } from '@react-navigation/native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Feather } from '@expo/vector-icons';
 import { color, font, radius, space, typeScale } from '@swift/ui';
-import { useHome, useVendors } from '../../../hooks/customer';
+import { useHome, useSearch, useSearchSuggestions, useSearchTrending, useVendors } from '../../../hooks/customer';
 import { ActionSheet } from '../../../kit/action-sheet';
 import { VERTICAL_TINT } from '../../../kit/vertical-tint';
 import { useAppStore } from '../../../stores/appStore';
@@ -179,6 +179,15 @@ export function SearchScreen() {
 
   const searching = debounced.trim().length > 0 || !!type;
 
+  // [B2] The ENGINE takes every text query it can serve. The old path was the
+  // browse endpoint's substring match — exact spelling or nothing, and a dish
+  // that lives inside a menu was unfindable ("greens" ≠ "green", "pepperpot"
+  // returned no store). /search brings typo tolerance, ranking, and DISHES.
+  // Its schema covers the two catalogue verticals; Shops/Services text
+  // queries stay on the browse path until the engine indexes them.
+  const text = debounced.trim();
+  const engineMode = text.length >= 2 && (!type || type === 'RESTAURANT' || type === 'SUPERMARKET');
+
   const params = useMemo(() => {
     const p: Record<string, string> = {};
     if (debounced.trim()) p['search'] = debounced.trim();
@@ -194,11 +203,29 @@ export function SearchScreen() {
     return p;
   }, [debounced, type, sort, openNow, deviceLatitude, deviceLongitude]);
 
-  const vendors = useVendors<any[]>(searching ? params : undefined);
+  const vendors = useVendors<any[]>(searching && !engineMode ? params : undefined);
+  const engine = useSearch<any>(engineMode ? text : '', engineMode ? { type, lat: deviceLatitude, lng: deviceLongitude } : undefined);
+  const suggestionsQ = useSearchSuggestions<any[]>(engineMode ? text : '');
+  // Trending fuels the no-matches invitation — an empty result must open a
+  // door, not dead-end. EARNED ranking (most-ordered across open stores).
+  const trendingQ = useSearchTrending<any[]>(engineMode);
   const home = useHome<any>(deviceLatitude, deviceLongitude);
   const popularItems: any[] = home.data?.popularItems ?? [];
 
-  const results: any[] = Array.isArray(vendors.data) ? vendors.data : [];
+  const browseResults: any[] = Array.isArray(vendors.data) ? vendors.data : [];
+  const engineVendors: any[] = engine.data?.vendors ?? [];
+  // Open-now stays honest in engine mode as a filter over data we HOLD —
+  // isCurrentlyOpen rides every hit — never a hidden server assumption.
+  const places: any[] = engineMode
+    ? (openNow ? engineVendors.filter((v) => v.isCurrentlyOpen !== false) : engineVendors)
+    : browseResults;
+  const dishes: any[] = engineMode ? (engine.data?.items ?? []) : [];
+  const suggestions: any[] = (suggestionsQ.data ?? []).filter((s: any) => s.text?.toLowerCase() !== text.toLowerCase()).slice(0, 6);
+  const resultsBusy = engineMode ? engine.isLoading : vendors.isLoading;
+  const resultsError = engineMode ? engine.isError : vendors.isError;
+  const retryResults = () => (engineMode ? engine.refetch() : vendors.refetch());
+
+  const results: any[] = places;
 
   // Distance sorting needs coordinates: the server only re-sorts by distance
   // when lat/lng were sent (customer.routes.ts). Without a location fix it
@@ -314,6 +341,11 @@ export function SearchScreen() {
             style={{ marginTop: space.md }}
             contentContainerStyle={{ gap: space.md, paddingHorizontal: GUTTER }}
           >
+            {/* [B2] In engine mode the ranking IS the sort (words · typo ·
+                proximity · exactness) — offering a sort chip that silently
+                no-ops would be the screen asserting an order it didn't apply.
+                Browse mode keeps its real server sorts. */}
+            {engineMode ? null : (
             <Pressable
               testID="search-sort-chip"
               onPress={() => setSortOpen(true)}
@@ -344,6 +376,7 @@ export function SearchScreen() {
                 </View>
               )}
             </Pressable>
+            )}
             <Chip
               label="Open now"
               selected={openNow}
@@ -352,21 +385,105 @@ export function SearchScreen() {
             />
           </ScrollView>
 
+          {/* [B2] Autocomplete from the engine — tappable words, not a
+              dropdown: “did you mean” as chips while you type. */}
+          {engineMode && suggestions.length > 0 ? (
+            <ScrollView
+              horizontal
+              showsHorizontalScrollIndicator={false}
+              style={{ marginTop: space.md }}
+              contentContainerStyle={{ gap: space.sm, paddingHorizontal: GUTTER }}
+            >
+              {suggestions.map((s: any) => (
+                <Chip key={`${s.type}-${s.text}`} label={s.text} onPress={() => setQ(s.text)} style={{ height: 36, paddingHorizontal: space.md }} />
+              ))}
+            </ScrollView>
+          ) : null}
+
           {(
-            vendors.isLoading ? (
+            resultsBusy ? (
               <LoadingBlock />
-            ) : vendors.isError ? (
-              <ErrorState onRetry={() => vendors.refetch()} />
-            ) : results.length === 0 ? (
-              <EmptyState
-                icon="search"
-                title="No matches"
-                body={
-                  debounced.trim()
-                    ? `Nothing matched “${debounced.trim()}”. Try fewer words, or browse ${(TYPES.find((t) => t.key === type)?.label ?? 'everything').toLowerCase()}.`
-                    : 'Nothing here right now — check back soon.'
-                }
-              />
+            ) : resultsError ? (
+              <ErrorState onRetry={() => void retryResults()} />
+            ) : results.length === 0 && dishes.length === 0 ? (
+              <ScrollView contentContainerStyle={{ paddingBottom: space['3xl'] }}>
+                <EmptyState
+                  icon="search"
+                  title="No matches"
+                  body={
+                    debounced.trim()
+                      ? `Nothing matched “${debounced.trim()}”. Try fewer words, or browse ${(TYPES.find((t) => t.key === type)?.label ?? 'everything').toLowerCase()}.`
+                      : 'Nothing here right now — check back soon.'
+                  }
+                />
+                {/* [B2] The invitation half of the empty state: what people
+                    ARE ordering right now — earned ranking, open stores only. */}
+                {engineMode && (trendingQ.data?.length ?? 0) > 0 ? (
+                  <View style={{ paddingHorizontal: GUTTER }}>
+                    <SectionHeader title="Worth trying right now" />
+                    <View style={{ marginTop: space.sm }}>
+                      {(trendingQ.data ?? []).slice(0, 6).map((it: any, i: number) => (
+                        <React.Fragment key={it.id}>
+                          {i > 0 ? <Divider /> : null}
+                          <ResultRow
+                            image={itemPhoto(it)}
+                            glyph="food"
+                            name={it.name}
+                            sub={it.vendorName}
+                            trailing={<Money amount={it.basePrice} />}
+                            onPress={() => navigation.navigate('MenuItem', { itemId: it.id, vendorId: it.vendorId })}
+                          />
+                        </React.Fragment>
+                      ))}
+                    </View>
+                  </View>
+                ) : null}
+              </ScrollView>
+            ) : engineMode ? (
+              // [B2] Engine results: PLACES then DISHES — the second section is
+              // the whole point ("pepperpot" now finds the dish, not silence).
+              <ScrollView contentContainerStyle={{ paddingHorizontal: GUTTER, paddingTop: space.lg, paddingBottom: space['3xl'] }}>
+                {results.length > 0 ? (
+                  <>
+                    <T variant="caption" tone="muted" style={{ marginBottom: space.sm }}>
+                      {results.length} {results.length === 1 ? 'place' : 'places'}
+                    </T>
+                    {results.map((v: any, i: number) => (
+                      <React.Fragment key={v.id}>
+                        {i > 0 ? <Divider /> : null}
+                        <ResultRow
+                          image={vendorPhoto(v)}
+                          name={v.name}
+                          meta={<RatingMeta rating={v.displayRating ?? null} topRated={v.topRated} />}
+                          wide
+                          closed={v.isCurrentlyOpen === false}
+                          onPress={() => navigation.navigate('Restaurant', { vendorId: v.id })}
+                        />
+                      </React.Fragment>
+                    ))}
+                  </>
+                ) : null}
+                {dishes.length > 0 ? (
+                  <>
+                    <SectionHeader title="Dishes" style={{ marginTop: results.length ? space['2xl'] : 0 }} />
+                    <View style={{ marginTop: space.sm }}>
+                      {dishes.map((it: any, i: number) => (
+                        <React.Fragment key={it.id}>
+                          {i > 0 ? <Divider /> : null}
+                          <ResultRow
+                            image={itemPhoto(it)}
+                            glyph="food"
+                            name={it.name}
+                            sub={it.categoryName ? `${it.vendorName} · ${it.categoryName}` : it.vendorName}
+                            trailing={<Money amount={it.basePrice} />}
+                            onPress={() => navigation.navigate('MenuItem', { itemId: it.id, vendorId: it.vendorId })}
+                          />
+                        </React.Fragment>
+                      ))}
+                    </View>
+                  </>
+                ) : null}
+              </ScrollView>
             ) : (
               <FlatList
                 data={results}
