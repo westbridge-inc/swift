@@ -9,6 +9,7 @@ import {
   DeleteObjectCommand,
 } from '@aws-sdk/client-s3';
 import { getSignedUrl as presignS3 } from '@aws-sdk/s3-request-presigner';
+import { stripImageMetadata } from '../../utils/images';
 
 // ---------------------------------------------------------------------------
 // StorageProvider — hard rule 4: swappable interface. Raw documents live in
@@ -29,6 +30,22 @@ export interface StorageProvider {
   getObject(fileKey: string): Promise<Buffer>;
 }
 
+/**
+ * [S8/C4] The one place every stored byte passes through.
+ *
+ * Photos arrive straight off a phone camera carrying EXIF — GPS coordinates,
+ * capture time, device serial. Stripping it HERE rather than at the upload
+ * routes is deliberate: there are seven of those today (selfie, rider docs,
+ * driver docs, courier proof photo, admin, ads creative, vendor media) and the
+ * eighth would forget. A new StorageProvider gets the guarantee for free.
+ *
+ * Non-image mime types (PDF documents, encrypted envelopes) pass through
+ * untouched, as does anything that will not parse.
+ */
+function sanitizeForStorage(input: { buffer: Buffer; filename: string; mimeType: string; folder: string }) {
+  return { ...input, buffer: stripImageMetadata(input.buffer, input.mimeType) };
+}
+
 const DEFAULT_TTL_SECONDS = 300;
 
 /** Local-disk adapter for dev/test. Files land under UPLOAD_DIR (gitignored). */
@@ -38,12 +55,13 @@ export class LocalStorageProvider implements StorageProvider {
   private publicBase = process.env['API_PUBLIC_URL'] ?? '';
 
   async upload(input: { buffer: Buffer; filename: string; mimeType: string; folder: string }): Promise<{ url: string }> {
-    const ext = path.extname(input.filename) || '.bin';
+    const safe = sanitizeForStorage(input);
+    const ext = path.extname(safe.filename) || '.bin';
     const name = `${nanoid(16)}${ext}`;
-    const dir = path.join(this.baseDir, input.folder);
+    const dir = path.join(this.baseDir, safe.folder);
     await mkdir(dir, { recursive: true });
-    await writeFile(path.join(dir, name), input.buffer);
-    return { url: `/uploads/${input.folder}/${name}` };
+    await writeFile(path.join(dir, name), safe.buffer);
+    return { url: `/uploads/${safe.folder}/${name}` };
   }
 
   /** Dev signed URL: HMAC over key+expiry so it is time-limited, not a raw link. */
@@ -98,14 +116,15 @@ export class S3StorageProvider implements StorageProvider {
   }
 
   async upload(input: { buffer: Buffer; filename: string; mimeType: string; folder: string }): Promise<{ url: string }> {
-    const ext = path.extname(input.filename) || '.bin';
-    const key = `${input.folder}/${nanoid(16)}${ext}`;
+    const safe = sanitizeForStorage(input);
+    const ext = path.extname(safe.filename) || '.bin';
+    const key = `${safe.folder}/${nanoid(16)}${ext}`;
     await this.client.send(
       new PutObjectCommand({
         Bucket: this.bucket,
         Key: key,
-        Body: input.buffer,
-        ContentType: input.mimeType,
+        Body: safe.buffer,
+        ContentType: safe.mimeType,
         // R2 rejects unknown SSE headers; only send for native S3 (no endpoint).
         ...(!this.endpoint && { ServerSideEncryption: this.sse as 'AES256' }),
       }),
