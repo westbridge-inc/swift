@@ -11,14 +11,19 @@ import {
   type ViewStyle,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { color, radius, space } from '@swift/ui';
+import { color, elevation, radius, space } from '@swift/ui';
 import { T, type TP } from './text';
 
-/** Soft card shadow — separation on paper comes from shadow, not borders. */
-export const cardShadow: ViewStyle = {
-  boxShadow: '0px 4px 12px rgba(33,26,26,0.06)',
-  elevation: 3,
-};
+/**
+ * Soft card shadow — separation on paper comes from shadow, not borders.
+ *
+ * [D1 — decided] This was the THIRD author of the card shadow: the token layer
+ * had `shadow.card` (1/3, pure black) and `elevation.card` (6/14, cold black)
+ * while every card in the app actually rendered this one (4/12, warm). Now it
+ * IS `elevation.card` — imported, not restated — so web and native cannot drift
+ * apart again and there is one place to change a card's depth.
+ */
+export const cardShadow: ViewStyle = elevation.card as ViewStyle;
 
 /** White rounded-16 card. `pad={false}` for image-bleed cards (clips children). */
 export function Card({ children, style, pad = true, ...rest }: ViewProps & { pad?: boolean }) {

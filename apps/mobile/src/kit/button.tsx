@@ -15,7 +15,7 @@ const BG: Record<Variant, { rest: string; pressed: string; label: string; border
   primary: { rest: color.brand[500], pressed: color.brand[600], label: color.text.onBrand },
   // The kit's neutral-gray pills become the brand-soft tint under Indian Red.
   soft: { rest: color.brand[50], pressed: color.brand[100], label: color.brand[600] },
-  dark: { rest: color.text.primary, pressed: '#3A2F2F', label: color.white },
+  dark: { rest: color.text.primary, pressed: color.dark.pressed, label: color.white },
   outline: { rest: color.surface.base, pressed: color.brand[50], label: color.text.primary, border: color.border.subtle },
   // Part 12: destructive = danger fill + REQUIRED icon at the call site —
   // never colour alone. Brand never signals an error (two-reds law).

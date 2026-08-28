@@ -18,6 +18,9 @@ vi.mock('@swift/ui', () => ({
   color: { surface: { base: '#fff' } },
   radius: { lg: 16, xl: 20 },
   space: { lg: 16, '2xl': 24 },
+  // [D1] `cardShadow` IS `elevation.card` now — the card no longer restates a
+  // shadow of its own, so the mock has to carry the token it reads.
+  elevation: { card: { boxShadow: '0px 6px 14px rgba(33,26,26,0.08)', elevation: 3 } },
 }));
 
 vi.mock('./text', () => ({ T: 'T' }));

@@ -253,11 +253,11 @@ export function Chip({
 export function TonePill({ label, tone = 'neutral', dark }: { label: string; tone?: 'brand' | 'success' | 'neutral' | 'error' | 'warning' | 'info'; dark?: boolean }) {
   const c = (dark
     ? {
-        brand: { bg: 'rgba(128,59,59,0.35)', fg: '#E9B9B9' },
-        success: { bg: 'rgba(47,191,113,0.18)', fg: '#5AD695' },
-        error: { bg: 'rgba(224,82,82,0.2)', fg: '#F09A9A' },
-        warning: { bg: 'rgba(232,168,56,0.2)', fg: '#F0C070' },
-        info: { bg: 'rgba(74,144,217,0.2)', fg: '#8FB8E8' },
+        brand: { bg: 'rgba(128,59,59,0.35)', fg: color.dark.onBrandFill },
+        success: { bg: 'rgba(47,191,113,0.18)', fg: color.dark.onSuccessFill },
+        error: { bg: 'rgba(224,82,82,0.2)', fg: color.dark.onErrorFill },
+        warning: { bg: 'rgba(232,168,56,0.2)', fg: color.dark.onWarningFill },
+        info: { bg: 'rgba(74,144,217,0.2)', fg: color.dark.onInfoFill },
         neutral: { bg: 'rgba(255,255,255,0.1)', fg: 'rgba(255,255,255,0.7)' },
       }
     : {
