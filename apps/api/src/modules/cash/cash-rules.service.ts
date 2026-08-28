@@ -40,6 +40,21 @@ export const DEFAULT_CASH_RULES: CashRulesConfig = {
 };
 
 /**
+ * THE evidence format: `gps:LAT,LNG` at 5 decimal places (~1 m), written into
+ * the immutable status-log note.
+ *
+ * This file is its ONE author, and `kerb-anti-fork.test.ts` K3 enforces that by
+ * name — one appeal view must be able to read deliveries, rides and arrivals
+ * through the same lens, and a second `gps:${...}` template anywhere is how two
+ * lenses start. Anything else that records a position imports this.
+ *
+ * (It caught a second author being added for arrival evidence, which is exactly
+ * what it is for.)
+ */
+export const gpsEvidence = (lat: number, lng: number): string =>
+  `gps:${lat.toFixed(5)},${lng.toFixed(5)}`;
+
+/**
  * Handover is only legal at the door. Exported so the order state machine's
  * FAILED predecessor list stays in lockstep with this guard (SWIFT-096): a
  * failed cash handover is the ONLY way an order reaches FAILED, and it can only
@@ -185,7 +200,7 @@ export class CashRulesService {
       throw new AppError(409, 'NOT_AT_DOOR', `Handover is only available at the delivery point (order is ${order.status})`);
     }
 
-    const gpsNote = `gps:${input.gps.lat.toFixed(5)},${input.gps.lng.toFixed(5)}`;
+    const gpsNote = gpsEvidence(input.gps.lat, input.gps.lng);
 
     if (input.outcome === 'paid') {
       // Golden rule satisfied: payment collected, THEN handover completes
