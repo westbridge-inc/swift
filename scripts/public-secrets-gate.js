@@ -136,20 +136,71 @@ const { entries: allowed, problems: allowlistProblems } = readAllowlist(ALLOWLIS
 const found = new Map();
 /** How many lines the fixture marker suppressed — printed so it stays visible. */
 let fixtureSkips = 0;
+/** Files the scanner could not read. Reported, because 'scanned nothing' and
+ *  'scanned everything and found nothing' must never print the same. */
+let unreadable = 0;
 function record(name, where) {
   if (!found.has(name)) found.set(name, new Set());
   found.get(name).add(where);
 }
 
 const scanRoots = bundleDir ? [path.resolve(bundleDir)] : SOURCE_DIRS.map((d) => path.join(ROOT, d));
+
+/**
+ * A scanner's failure mode is SILENCE [REPORT-037 R037-23].
+ *
+ * `walk()` turns a missing or unreadable directory into an empty result, so
+ * `--bundle` against a path that does not exist printed green with zero
+ * variables found — captured: `exit=0 directory_exists=no`. A renamed Next
+ * `distDir`, a build that did not run, or a wrong path in a workflow would
+ * remove this gate entirely while CI stayed green, which is the exact shape of
+ * assurance-without-evidence this gate was written to prevent.
+ *
+ * So bundle mode now proves it actually scanned something before it is allowed
+ * to pass.
+ */
+function assertScannableBundle(dir) {
+  let stat;
+  try {
+    stat = fs.statSync(dir);
+  } catch {
+    console.error(`\n✖ --bundle ${dir} does not exist. Nothing was scanned.`);
+    console.error('  A gate that passes because it found no files is not a gate.\n');
+    process.exit(1);
+  }
+  if (!stat.isDirectory()) {
+    console.error(`\n✖ --bundle ${dir} is not a directory. Nothing was scanned.\n`);
+    process.exit(1);
+  }
+}
+
+if (bundleDir) assertScannableBundle(path.resolve(bundleDir));
+
 const files = scanRoots.flatMap((dir) => walk(dir, bundleDir ? null : SCANNED_EXT));
+
+if (bundleDir) {
+  const bytes = files.reduce((sum, f) => {
+    try {
+      return sum + fs.statSync(f).size;
+    } catch {
+      return sum;
+    }
+  }, 0);
+  if (files.length === 0 || bytes === 0) {
+    console.error(`\n✖ --bundle ${bundleDir} contained ${files.length} file(s), ${bytes} byte(s).`);
+    console.error('  An empty build output cannot prove anything. Did the build run?\n');
+    process.exit(1);
+  }
+  console.log(`  scanned ${files.length} file(s), ${(bytes / 1024 / 1024).toFixed(1)} MB of built output`);
+}
 
 for (const file of files) {
   let text;
   try {
     text = fs.readFileSync(file, 'utf8');
   } catch {
-    continue; // unreadable or binary — nothing to match
+    unreadable += 1; // counted, not silently skipped — see the report below
+    continue;
   }
   const lines = text.split('\n');
   const isTest = TEST_FILE.test(file);
@@ -211,6 +262,9 @@ if (failed) process.exit(1);
 console.log(
   `✔ public-secrets-gate: ${found.size} public-prefixed variable(s) in the ${label}, all allowlisted with justifications.`,
 );
+if (unreadable) {
+  console.log(`    (${unreadable} file(s) could not be read and were NOT scanned)`);
+}
 if (fixtureSkips) {
   console.log(`    (${fixtureSkips} line(s) skipped as gate-test fixtures — test files only)`);
 }

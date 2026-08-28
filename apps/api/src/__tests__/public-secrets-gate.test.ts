@@ -23,18 +23,24 @@ const SCRIPT = resolve(process.cwd(), '../../scripts/public-secrets-gate.js');
 
 let fixtureRoot: string;
 
-/** Run the gate against a fixture tree; returns exit code + combined output. */
-function runGate(root: string): { code: number; output: string } {
+/** Run a gate script with arbitrary args from an arbitrary cwd. */
+function run(script: string, args: string[], cwd?: string): { code: number; output: string } {
   try {
-    const output = execFileSync(process.execPath, [SCRIPT, root], {
+    const output = execFileSync(process.execPath, [script, ...args], {
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'pipe'],
+      ...(cwd ? { cwd } : {}),
     });
     return { code: 0, output };
   } catch (error) {
     const e = error as { status?: number; stdout?: string; stderr?: string };
     return { code: e.status ?? 1, output: `${e.stdout ?? ''}${e.stderr ?? ''}` };
   }
+}
+
+/** Run the repository gate against a fixture tree. */
+function runGate(root: string): { code: number; output: string } {
+  return run(SCRIPT, [root]);
 }
 
 /** Build a minimal repo-shaped fixture: apps/<file> + security/allowlist. */
@@ -182,6 +188,72 @@ describe('the fixture escape hatch cannot become a hole', () => {
     const { code, output } = runGate(root);
     expect(code).toBe(1);
     expect(output).toContain('NEXT_PUBLIC_NOT_LISTED'); // public-secrets-gate:fixture
+  });
+});
+
+describe('bundle mode cannot pass by scanning nothing [R037-23]', () => {
+  // The failure mode of a scanner is silence. `walk()` turned a missing
+  // directory into an empty result, so --bundle against a path that does not
+  // exist printed green with zero variables found. A renamed Next `distDir`, a
+  // build that did not run, or a wrong workflow path would have removed this
+  // gate entirely while CI stayed green.
+  it('fails when the built directory does not exist', () => {
+    const { code, output } = run(SCRIPT, ['--bundle', join(fixtureRoot, 'no-such-build')]);
+    expect(code).toBe(1);
+    expect(output).toMatch(/does not exist/);
+  });
+
+  it('fails when the path is not a directory', () => {
+    const file = join(fixtureRoot, 'not-a-dir');
+    writeFileSync(file, 'x');
+    const { code, output } = run(SCRIPT, ['--bundle', file]);
+    expect(code).toBe(1);
+    expect(output).toMatch(/not a directory/);
+  });
+
+  it('fails when the build output is empty', () => {
+    const empty = join(fixtureRoot, 'empty-build');
+    mkdirSync(empty, { recursive: true });
+    const { code, output } = run(SCRIPT, ['--bundle', empty]);
+    expect(code).toBe(1);
+    expect(output).toMatch(/cannot prove anything|0 file/);
+  });
+
+  it('reports WHAT it scanned when it passes, so green means something', () => {
+    const built = join(fixtureRoot, 'built');
+    mkdirSync(built, { recursive: true });
+    writeFileSync(join(built, 'chunk.js'), 'const api="https://api.example";\n'.repeat(50));
+    const { code, output } = run(SCRIPT, ['--bundle', built]);
+    expect(code).toBe(0);
+    expect(output).toMatch(/scanned 1 file/);
+  });
+
+  it('still catches an unlisted public variable inside a built artefact', () => {
+    const built = join(fixtureRoot, 'built-leak');
+    mkdirSync(built, { recursive: true });
+    writeFileSync(join(built, 'chunk.js'), 'process.env.NEXT_PUBLIC_LEAKED_THING'); // public-secrets-gate:fixture
+    const { code, output } = run(SCRIPT, ['--bundle', built]);
+    expect(code).toBe(1);
+    expect(output).toMatch(/NEXT_PUBLIC_LEAKED_THING/); // public-secrets-gate:fixture
+  });
+});
+
+describe('the default-root seam CI actually uses [R037-24]', () => {
+  it('resolves its root from the script location when given no argument', () => {
+    // Every other test passes an explicit root, so the seam CI depends on —
+    // `node scripts/public-secrets-gate.js` with no args, from the repo root —
+    // was never executed. Run the fixture COPY, from a different cwd, with no
+    // root argument.
+    const root = makeFixture(
+      'default-root',
+      "export const x = process.env['NEXT_PUBLIC_ROOTLESS'];\n", // public-secrets-gate:fixture
+      `NEXT_PUBLIC_API_URL # ${JUSTIFIED}\n`, // public-secrets-gate:fixture
+    );
+    const { code, output } = run(join(root, 'scripts', 'public-secrets-gate.js'), [], tmpdir());
+    // It must have found the FIXTURE's file, proving it derived the root from
+    // its own location rather than from the working directory.
+    expect(code).toBe(1);
+    expect(output).toMatch(/NEXT_PUBLIC_ROOTLESS/); // public-secrets-gate:fixture
   });
 });
 
