@@ -19,6 +19,7 @@ import {
 } from './services.service';
 import { AppError, NotFoundError } from '../../utils/errors';
 import { getTenantId } from '../../plugins/prisma';
+import { ratingSurfaces, NEW_ACTOR_SURFACE } from '../rating/rating-surface';
 
 // ---------------------------------------------------------------------------
 // Module S: Services (spec §4.6) — hire verified professionals. A ServiceJob is
@@ -259,9 +260,19 @@ export async function servicesRoutes(app: FastifyInstance) {
       provider,
       verified: await isProviderVerified(app.prisma, provider.userId),
     })));
-    const ranked = live
-      .filter(({ verified }) => verified)
-      .map(({ provider }) => provider)
+    // [ALG-31 / L2] The star line comes from THE ONE MAPPER, never from the raw
+    // lifetime mean. `rating-surface.ts` is the single definition of what a
+    // rating LOOKS like: `displayRating` is null below RATING_MIN_DISPLAY (5),
+    // so a provider with one bad rating reads "New" rather than ★1.0.
+    //
+    // This endpoint returned `averageRating` and nothing else, so the client had
+    // no honest field to render and hand-rolled its own threshold
+    // (`totalRatings > 0`) — a THIRD definition of the same rule, and one that
+    // let a single 1-star rating brand a provider on the browse page.
+    const visible = live.filter(({ verified }) => verified).map(({ provider }) => provider);
+    const surfaces = await ratingSurfaces(app.prisma, 'SERVICE_PROVIDER', visible.map((p) => p.id));
+
+    const ranked = visible
       .map((provider) => {
         const qualifications = provider.qualifications.filter((qualification) => (
           qualificationTypeMatchesTrade(qualification.type, trade)
@@ -272,6 +283,10 @@ export async function servicesRoutes(app: FastifyInstance) {
           tradeLabel: serviceTradeLabel(provider.trade),
           bio: provider.bio,
           portfolioPhotos: provider.portfolioPhotos,
+          // The honest star line (displayRating / ratingBucket / topRated).
+          // Kept alongside the raw fields, which the sort still uses as a
+          // tie-break — ranking may read the true mean; DISPLAY may not.
+          ...(surfaces.get(provider.id) ?? NEW_ACTOR_SURFACE),
           averageRating: provider.averageRating,
           totalRatings: provider.totalRatings,
           selfSkilled: qualifications.length === 0,

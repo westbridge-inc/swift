@@ -32,6 +32,10 @@ type ServiceProvider = {
   tradeLabel: string;
   bio: string | null;
   portfolioPhotos: string[];
+  // The one mapper's star line. `displayRating` is null below
+  // RATING_MIN_DISPLAY — render THIS, never `averageRating` (see the card).
+  displayRating: number | null;
+  ratingBucket?: string;
   averageRating: number;
   totalRatings: number;
   selfSkilled: boolean;
@@ -229,8 +233,16 @@ export function ServicesScreen({ navigation }: any) {
                         <TonePill label="Verified" tone="success" />
                       </View>
                       <View style={{ marginTop: space.sm }}>
+                        {/* [ALG-31 / L2] `displayRating` from the one mapper.
+                            This read the raw mean behind a hand-rolled
+                            `totalRatings > 0` threshold — a THIRD definition of
+                            when a rating may be shown, and a far looser one than
+                            RATING_MIN_DISPLAY (5). A tradesperson with a single
+                            1-star rating was branded ★1.0 on the browse page,
+                            which is exactly what the threshold exists to
+                            prevent. The count stays honest and separate. */}
                         <RatingMeta
-                          rating={p.totalRatings > 0 ? Number(p.averageRating) : null}
+                          rating={p.displayRating ?? null}
                           extra={p.totalRatings > 0 ? `${p.totalRatings} ratings` : undefined}
                         />
                       </View>
