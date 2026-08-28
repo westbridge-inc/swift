@@ -260,6 +260,11 @@ const CENSUS: Case[] = [
   { k: 'ops_collusion_affinity', to: null, why: 'admins' },
   { k: 'ops_billing_failures', to: null, why: 'admins' },
   { k: 'ops_pool_saturation', to: null, why: 'admins' },
+  // Its sibling from the same heartbeat: a background job exhausted its retries
+  // (N4/WS-8.1). Admin-only, and the surface that acts on it is the ADMIN web
+  // console's Background jobs page — there is no mobile admin surface, so the
+  // app opening normally is the correct destination, not a gap.
+  { k: 'ops_dlq_non_empty', to: null, why: 'admins — acted on in the admin console, no mobile surface exists' },
   { k: 'ops_scheduler_stall', to: null, why: 'admins — kind built from a ternary', scan: false },
   { k: 'ops_scheduler_never_booted', to: null, why: 'admins — kind built from a ternary', scan: false },
   { k: 'billing_dunning_ops_task', to: null, why: 'admins' },

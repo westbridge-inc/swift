@@ -70,6 +70,18 @@ export function bullConnectionOpts(redis: Redis): ConnectionOptions {
  *  reconcile sweep. removeOnFail keeps the last failures for inspection only
  *  AFTER the attempts are exhausted. Env-tunable so ops can widen it without a
  *  deploy. Exported so a test can pin the policy without opening a Redis socket. */
+/** How many dead letters must be sitting there before admins are paged.
+ *  Default 1 — one dead money job is worth a page, and `opsPageOnce` already
+ *  caps the noise at one page per 30 minutes. Total-parsed (REPORT-036): a
+ *  non-numeric value falls back to the default rather than becoming NaN, which
+ *  would make `total >= NaN` false forever and silently disable the alarm. */
+export function dlqAlertThreshold(env: Record<string, string | undefined> = process.env): number {
+  const raw = env['DLQ_ALERT_THRESHOLD']?.trim();
+  if (raw === undefined || !/^\d+$/.test(raw)) return 1;
+  const value = Number(raw);
+  return Number.isSafeInteger(value) && value >= 1 ? value : 1;
+}
+
 export const DEFAULT_JOB_OPTIONS = {
   attempts: Math.max(1, Number(process.env['JOB_MAX_ATTEMPTS'] ?? 3)),
   backoff: { type: 'exponential' as const, delay: Math.max(100, Number(process.env['JOB_BACKOFF_MS'] ?? 5_000)) },
@@ -779,6 +791,47 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
           }
         } catch {
           // metrics preview unavailable — the Prometheus gauge shares this guard
+        }
+
+        // [N4 / WS-8.1] Dead letters page. A job that exhausts its attempts
+        // lands in BullMQ's failed set and stays there — and nothing has ever
+        // told anyone it happened. The money jobs are in that set
+        // (process-billing hourly, process-settlements Sunday 00:00,
+        // poll-mmg-billing every 2 minutes, billing-invariants nightly), so a
+        // silently dead job is a silently unbilled week that nobody notices
+        // until a vendor asks why they were never charged.
+        //
+        // Deliberately counts the FAILED SET, not the worker's 'failed' event:
+        // that event fires on every attempt, including ones a retry then
+        // succeeds. Only a job that ran out of attempts is a dead letter.
+        try {
+          const failedByQueue: Array<{ queue: string; count: number }> = [];
+          for (const [key, queue] of Object.entries(queues) as Array<[string, Queue]>) {
+            const count = await queue.getFailedCount();
+            if (count > 0) failedByQueue.push({ queue: key.replace(/Queue$/, ''), count });
+          }
+          const total = failedByQueue.reduce((sum, entry) => sum + entry.count, 0);
+          if (total >= dlqAlertThreshold()) {
+            const worst = [...failedByQueue].sort((a, b) => b.count - a.count);
+            const { notifyAdmins, NotificationService } = await import('../modules/notification/notification.service');
+            await opsPageOnce(ctx, 'dlq-non-empty', 1800, () =>
+              notifyAdmins(ctx.prisma, new NotificationService(ctx.prisma, ctx.io), {
+                // Platform-wide, like the pool page above — not one tenant's event.
+                tenantId: null,
+                title: `${total} background job${total === 1 ? '' : 's'} died`,
+                // Name the queues: "notification" failing is a different morning
+                // from "settlement" failing, and the operator triages on that.
+                body: `${worst.map((q) => `${q.count} ${q.queue}`).join(', ')}. Open Platform → Background jobs to retry or discard them.`,
+                data: { kind: 'ops_dlq_non_empty', total, queues: worst },
+              }),
+            );
+          }
+        } catch (err) {
+          // Unlike the metrics probe above, this one is NOT expected to fail —
+          // it is plain Redis reads on queues this process owns. Log it, because
+          // an alarm that silently stops alarming is the defect it exists to
+          // prevent.
+          ctx.log.warn({ err }, 'DLQ depth check failed — dead-letter paging is blind this cycle');
         }
         return;
       }

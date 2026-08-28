@@ -59,9 +59,26 @@ async function apiFetch(path: string, options?: RequestInit) {
   }
   const json = await res.json().catch(() => ({}));
   if (!res.ok || json?.success === false) {
-    throw new Error(json?.error?.message || `API error: ${res.status}`);
+    // Carry the server's error CODE, not just its prose. A page that has to
+    // tell "the queues are not running on this server" apart from "no jobs have
+    // failed" cannot do it by matching on a sentence — and rendering the second
+    // when the first is true is the UI lying about a system being healthy.
+    const error = new Error(json?.error?.message || `API error: ${res.status}`) as Error & {
+      code?: string;
+      status?: number;
+    };
+    if (json?.error?.code) error.code = json.error.code;
+    error.status = res.status;
+    throw error;
   }
   return json;
+}
+
+/** The server's error code for a thrown apiFetch error, when it sent one. */
+export function errorCode(error: unknown): string | undefined {
+  return error && typeof error === 'object' && 'code' in error
+    ? ((error as { code?: unknown }).code as string | undefined)
+    : undefined;
 }
 
 // ── Auth (public endpoints — no admin token) ────────────────────────────────
@@ -398,3 +415,26 @@ export const approveDoc = (id: string, body?: { expiresAt?: string; insurance?: 
   apiFetch(`/api/v1/admin/verification/${id}/approve`, { method: 'PUT', body: JSON.stringify(body ?? {}) });
 export const rejectDoc = (id: string, reason: string) =>
   apiFetch(`/api/v1/admin/verification/${id}/reject`, { method: 'PUT', body: JSON.stringify({ reason }) });
+
+// ── Background jobs / dead letters (N4 · WS-8.1) ────────────────────────────
+// GET /dlq, POST /dlq/:queue/:id/requeue and DELETE /dlq/:queue/:id have been
+// registered since the mission-control spec landed, and the route-reachability
+// sweep found no client anywhere calling one of them. So a background job that
+// exhausted its retries — including process-billing, process-settlements and
+// poll-mmg-billing — died into a list no operator could open.
+export interface DeadLetter {
+  queue: string;
+  id: string;
+  name: string;
+  failedReason: string | null;
+  attemptsMade: number;
+  /** JSON payload preview, truncated to 500 chars server-side. */
+  data: string;
+  finishedOn: number | null;
+}
+
+export const fetchDeadLetters = () => apiFetch('/api/v1/admin/dlq');
+export const requeueDeadLetter = (queue: string, id: string) =>
+  apiFetch(`/api/v1/admin/dlq/${queue}/${id}/requeue`, { method: 'POST' });
+export const discardDeadLetter = (queue: string, id: string) =>
+  apiFetch(`/api/v1/admin/dlq/${queue}/${id}`, { method: 'DELETE' });
