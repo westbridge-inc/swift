@@ -251,7 +251,12 @@ function isCancellationTerminalization(sourceStatus: OrderStatus, target: OrderS
 /** Hold duration in ms, or null when the feature is off / misconfigured. */
 export function holdWindowMs(): number | null {
   if (process.env['LIFECYCLE_V2'] !== '1') return null;
-  const minutes = Number(process.env['ORDER_HOLD_MINUTES'] ?? 2);
+  // [REPORT-036 F036-03b] Default 5 — the SETTLED value (Total Audit S4; both
+  // env examples say 5 since #792). The code defaulting 2 meant an env that
+  // omitted the variable quietly broke the documented customer promise: the
+  // free-cancel window (FREE_CANCEL_WINDOW_MIN = 5) outlived the hold, putting
+  // orders on the vendor board while still free to cancel.
+  const minutes = Number(process.env['ORDER_HOLD_MINUTES'] ?? 5);
   return Number.isFinite(minutes) && minutes > 0 ? minutes * 60_000 : null;
 }
 

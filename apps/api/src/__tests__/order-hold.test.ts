@@ -124,9 +124,11 @@ describe('flag plumbing', () => {
   it('flag off → no hold window; flag on → configured minutes', () => {
     expect(holdWindowMs()).toBeNull();
     process.env['LIFECYCLE_V2'] = '1';
-    expect(holdWindowMs()).toBe(2 * 60_000); // default 2 min
-    process.env['ORDER_HOLD_MINUTES'] = '5';
+    // [F036-03b] The default IS the settled five minutes — an env that omits
+    // the variable must not quietly shorten the documented window.
     expect(holdWindowMs()).toBe(5 * 60_000);
+    process.env['ORDER_HOLD_MINUTES'] = '3';
+    expect(holdWindowMs()).toBe(3 * 60_000);
     process.env['ORDER_HOLD_MINUTES'] = 'garbage';
     expect(holdWindowMs()).toBeNull(); // misconfiguration fails safe (no hold)
   });
