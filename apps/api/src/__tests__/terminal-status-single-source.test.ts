@@ -110,11 +110,17 @@ describe('the remaining hand-written copies are recorded, not hidden', () => {
       file: 'modules/mover-authority-cutover-preparation.ts',
       why: 'raw SQL — the Prisma constant cannot be interpolated into a tagged template safely; it lists all FIVE and is correct',
     },
-    {
-      file: 'modules/courier/courier.routes.ts',
-      why: "asks 'is this parcel finished enough to stop acting on it' with THREE statuses — omits REFUNDED and FAILED. A different question, but the omission looks like the same drift: FLAGGED for review, deliberately not changed here (courier money paths ship in their own PR)",
-    },
   ];
+
+  it('courier no longer hand-writes a THREE-entry list', () => {
+    // It did, at four sites, omitting REFUNDED and FAILED. Three of them were
+    // backstopped by ORDER_TRANSITIONS; the fourth was a direct updateMany that
+    // nothing guarded, so a rider could stamp a delivery-proof URL onto a job
+    // that had already FAILED at the door. Now imported like everywhere else.
+    const courier = code(join(SRC, 'modules/courier/courier.routes.ts'));
+    expect(courier).not.toMatch(/\[\s*'DELIVERED',\s*'COMPLETED',\s*'CANCELLED'\s*\]/);
+    expect(courier).toMatch(/TERMINAL_ORDER_STATUSES/);
+  });
 
   it('every recorded site still exists', () => {
     for (const { file } of KNOWN_INLINE) {

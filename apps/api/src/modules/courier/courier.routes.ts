@@ -5,7 +5,7 @@ import { estimateCourierFee, mergeCourierRates, type CourierRates, type PackageS
 import { CountryConfigService } from '../country/country-config.service';
 import { getMapsProvider } from '../../providers/maps/maps-provider';
 import { makeDispatchService } from '../dispatch/dispatch.service';
-import { OrderService, holdWindowMs } from '../order/order.service';
+import { OrderService, holdWindowMs, TERMINAL_ORDER_STATUSES } from '../order/order.service';
 import { NotificationService } from '../notification/notification.service';
 import { orderingRestriction } from '../cash/cash-rules.service';
 import { generateOrderNumber } from '../../utils/markup';
@@ -288,7 +288,7 @@ export default async function courierRoutes(app: FastifyInstance) {
       where: { id, customerId: request.user.userId, orderType: 'COURIER' },
     });
     if (!order) throw new NotFoundError('CourierOrder', id);
-    if (['DELIVERED', 'COMPLETED', 'CANCELLED'].includes(order.status)) {
+    if ((TERMINAL_ORDER_STATUSES as string[]).includes(order.status)) {
       throw new AppError(400, 'NOT_CANCELLABLE', `A ${order.status.toLowerCase()} courier job cannot be cancelled`);
     }
     if ((COURIER_CUSTODY_STATUSES as readonly OrderStatus[]).includes(order.status)) {
@@ -341,7 +341,7 @@ export default async function courierRoutes(app: FastifyInstance) {
       select: { id: true, status: true },
     });
     if (!order) throw new NotFoundError('CourierOrder', id);
-    if (['DELIVERED', 'COMPLETED', 'CANCELLED'].includes(order.status)) {
+    if ((TERMINAL_ORDER_STATUSES as string[]).includes(order.status)) {
       throw new AppError(400, 'NOT_IN_TRANSIT', 'This courier job is already closed');
     }
 
@@ -361,7 +361,16 @@ export default async function courierRoutes(app: FastifyInstance) {
     // upload by this rider — not any string that contains the folder name.
     // Guarded on rider ownership + non-terminal status (matches the read above).
     await app.prisma.order.updateMany({
-      where: { id, orderType: 'COURIER', riderId: rider.id, status: { notIn: ['DELIVERED', 'COMPLETED', 'CANCELLED'] } },
+      // THIS is the site that mattered. The three checks above are backstopped
+      // by ORDER_TRANSITIONS (FAILED and REFUNDED are predecessors of neither
+      // DELIVERED nor CANCELLED, so the transition is refused whatever the
+      // guard says) — but this is a direct updateMany, and NO state machine
+      // guards a direct write. With the old three-entry list a rider could
+      // stamp `courierProofIssuedUrl` onto a job that had already FAILED at the
+      // door, putting a delivery photo on the evidence trail of a refused
+      // handover — the same order an admin later reviews a claim against.
+      // Failure evidence has its own path: cash-rules' handover takes photoUrl.
+      where: { id, orderType: 'COURIER', riderId: rider.id, status: { notIn: TERMINAL_ORDER_STATUSES } },
       data: { courierProofIssuedUrl: url, courierProofIssuedRiderId: rider.id },
     });
     return { success: true, data: { url } };
@@ -375,7 +384,7 @@ export default async function courierRoutes(app: FastifyInstance) {
     if (!rider) throw new NotFoundError('Rider');
     const order = await app.prisma.order.findFirst({ where: { id, orderType: 'COURIER', riderId: rider.id } });
     if (!order) throw new NotFoundError('CourierOrder', id);
-    if (['DELIVERED', 'COMPLETED', 'CANCELLED'].includes(order.status)) {
+    if ((TERMINAL_ORDER_STATUSES as string[]).includes(order.status)) {
       throw new AppError(400, 'NOT_IN_TRANSIT', 'This courier job is already closed');
     }
     // [REPORT-016 F-016-04] The proof object must EXACTLY equal the URL the
