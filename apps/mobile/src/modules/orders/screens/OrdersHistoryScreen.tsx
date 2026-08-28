@@ -8,6 +8,9 @@ import { color, radius, space } from '@swift/ui';
 import { useOrdersInfinite, useReorder } from '../../../hooks/customer';
 import { useAuthStore } from '../../../stores/authStore';
 import { vendorPhoto } from '../../../lib/images';
+// The single authority for what a status is CALLED — type-aware, so a ride is
+// never described with a store's words. This screen owns tone, never wording.
+import { orderStatusLabel } from '../../../lib/orderStatus';
 import {
   Photo,
   EmptyState, ErrorState, LoadingBlock, Money,
@@ -31,24 +34,58 @@ import { TonePill } from '../../../kit/controls';
 // card and the screen's maroon CTA.
 
 type PillTone = 'brand' | 'success' | 'neutral' | 'error' | 'warning' | 'info';
-const STATUS_TONE: Record<string, { label: string; tone: PillTone }> = {
-  PENDING: { label: 'Pending', tone: 'warning' },
-  ACCEPTED: { label: 'Accepted', tone: 'warning' },
-  PREPARING: { label: 'Preparing', tone: 'warning' },
-  READY: { label: 'Ready', tone: 'warning' },
-  RIDER_ASSIGNED: { label: 'On the way', tone: 'info' },
-  PICKED_UP: { label: 'On the way', tone: 'info' },
-  DELIVERED: { label: 'Delivered', tone: 'success' },
-  COMPLETED: { label: 'Completed', tone: 'success' },
-  CANCELLED: { label: 'Cancelled', tone: 'error' },
-  REFUNDED: { label: 'Refunded', tone: 'error' },
+
+/**
+ * TONE only. The WORDS come from `lib/orderStatus.ts`.
+ *
+ * This map used to carry both, and it carried the same defect that file was
+ * written to kill: a `READY` key against an enum whose member is
+ * `READY_FOR_PICKUP`. The key never matched, so a real order fell to the
+ * fallback below — which prints the status back at the customer. The activity
+ * list showed a live order as literally "READY_FOR_PICKUP", in a pill, twice.
+ * Four more statuses had no entry at all and leaked the same way
+ * (RIDER_EN_ROUTE_PICKUP, RIDER_ARRIVED_PICKUP, EN_ROUTE_DELIVERY, ARRIVED).
+ *
+ * Those are the very five the comment below already names — an earlier fix
+ * caught them dropping out of the LIVE partition and stopped one line short of
+ * the labels beside it. A second copy of the label table is why: the fix landed
+ * on the authority and never reached the fork.
+ *
+ * So the fork is gone. Words have one owner, which is also type-aware (a ride
+ * is not "waiting for the store"); tone stays here because it is this screen's
+ * own concern and that file has no opinion about pill colour.
+ */
+const STATUS_TONE: Record<string, PillTone> = {
+  PENDING: 'warning',
+  ACCEPTED: 'warning',
+  PREPARING: 'warning',
+  READY_FOR_PICKUP: 'warning',
+  RIDER_ASSIGNED: 'info',
+  RIDER_EN_ROUTE_PICKUP: 'info',
+  RIDER_ARRIVED_PICKUP: 'info',
+  PICKED_UP: 'info',
+  EN_ROUTE_DELIVERY: 'info',
+  ARRIVED: 'info',
+  DELIVERED: 'success',
+  COMPLETED: 'success',
+  CANCELLED: 'error',
+  REFUNDED: 'error',
   // Taxi lifecycle — rides are orders too and land in the same history.
-  DRIVER_ASSIGNED: { label: 'Driver assigned', tone: 'info' },
-  DRIVER_EN_ROUTE: { label: 'Driver on the way', tone: 'info' },
-  DRIVER_ARRIVED: { label: 'Driver arrived', tone: 'info' },
-  RIDE_IN_PROGRESS: { label: 'On trip', tone: 'info' },
-  FAILED: { label: 'Failed', tone: 'error' },
+  DRIVER_ASSIGNED: 'info',
+  DRIVER_EN_ROUTE: 'info',
+  DRIVER_ARRIVED: 'info',
+  RIDE_IN_PROGRESS: 'info',
+  FAILED: 'error',
 };
+
+/** The pill: never the raw enum. An unknown status keeps a neutral tone and
+ *  gets the authority's honest "In progress" rather than its own name. */
+function statusPill(o: { status: string; orderType?: string | null }): { label: string; tone: PillTone } {
+  return {
+    label: orderStatusLabel(o.status, o.orderType),
+    tone: STATUS_TONE[o.status] ?? 'neutral',
+  };
+}
 
 // Partition by the CLOSED set: a status is history only when the server says
 // the order is over. Enumerating live states here instead once dropped five
@@ -217,7 +254,7 @@ export function OrdersHistoryScreen() {
   // An in-flight order is an interruption, not history. It gets a bordered
   // card, its live status pill, and the screen's single maroon CTA.
   const renderLive = (o: any, index: number) => {
-    const st = STATUS_TONE[o.status] ?? { label: o.status, tone: 'neutral' as PillTone };
+    const st = statusPill(o);
     const isRide = isRideOrder(o);
     const sub = isRide && (o.pickupAddress || o.deliveryAddress)
       ? `${o.pickupAddress ?? 'Pickup'} → ${o.deliveryAddress ?? 'Drop-off'}`
@@ -272,7 +309,7 @@ export function OrdersHistoryScreen() {
 
   // ── HISTORY: open paper, hairline-divided ────────────────────────────────
   const renderHistory = (o: any, index: number, divided: boolean) => {
-    const st = STATUS_TONE[o.status] ?? { label: o.status, tone: 'neutral' as PillTone };
+    const st = statusPill(o);
     const isRide = isRideOrder(o);
     const sub = isRide && (o.pickupAddress || o.deliveryAddress)
       ? `${o.pickupAddress ?? 'Pickup'} → ${o.deliveryAddress ?? 'Drop-off'}`

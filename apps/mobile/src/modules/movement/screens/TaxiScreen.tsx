@@ -28,14 +28,24 @@ import { CalmRadar, Card, CircleChip, IconChip, LoadingBlock, Money, PillButton,
 import { VERTICAL_TINT } from '../../../kit/vertical-tint';
 import type { PickedPlace } from './DestinationSearchScreen';
 import { openExternal } from '../../../lib/openExternal';
+import { orderStatusLabel } from '../../../lib/orderStatus';
 
-const STATUS_LABEL: Record<string, string> = {
-  PENDING: 'Finding your driver…',
-  DRIVER_ASSIGNED: 'Driver assigned',
-  DRIVER_EN_ROUTE: 'Driver on the way',
-  DRIVER_ARRIVED: 'Your driver has arrived',
-  RIDE_IN_PROGRESS: 'On your trip',
-};
+/**
+ * The ride's status, in words — from `lib/orderStatus.ts`, the one authority.
+ *
+ * This screen used to carry its own five-entry copy, and it had already drifted:
+ * a passenger read "Your driver has arrived" here and "Your driver is outside"
+ * on Home, "On your trip" here and "On your way" there, "Finding your driver…"
+ * here and "Finding you a driver" there — three of five words different for the
+ * same ride, on two screens one tap apart. Neither was wrong; they just were
+ * not the same, which is what a second vocabulary always becomes.
+ *
+ * The fallback matters as much as the words. The old one was 'Ride in
+ * progress', which asserts the ride is UNDERWAY — a confident claim about a
+ * status this app does not recognise, and false for every state before pickup.
+ * The authority's fallback says "In progress" and nothing more.
+ */
+const rideStatusLabel = (status: string | null | undefined) => orderStatusLabel(status, 'TAXI');
 
 const TAXI_TINT = VERTICAL_TINT.taxi ?? { bg: color.brand[50], ink: color.brand[600] };
 const RIDE_PIN_LENGTH = 6;
@@ -774,7 +784,7 @@ function AssignedRideCard({
   onWrongDriver: () => void;
 }) {
   const vehicle = [driver.vehicleColor, driver.vehicleMake, driver.vehicleModel].filter(Boolean).join(' ');
-  const statusLabel = STATUS_LABEL[status] ?? 'Ride in progress';
+  const statusLabel = rideStatusLabel(status);
   const fare = ride.taxiFareTotal ?? ride.totalAmount;
 
   return (
@@ -1211,7 +1221,7 @@ function ActiveRide({ navigation, ride, cancelRide, insets, rematching }: any) {
           ) : (
             <>
               <T variant="title">
-                {rematching ? 'Finding you another driver' : STATUS_LABEL[ride.status] ?? 'Finding your driver…'}
+                {rematching ? 'Finding you another driver' : rideStatusLabel(ride.status)}
               </T>
               <T variant="label" tone="muted" style={{ marginTop: space.xs }}>
                 {ride.rideClass ? `${TIER_META[ride.rideClass as RideClass]?.label ?? ride.rideClass} · ` : ''}
