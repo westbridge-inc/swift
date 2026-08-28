@@ -304,3 +304,136 @@ describe('check-in responses (§5.3)', () => {
     expect((await session(ride.id)).closeReason).toBe('ESCALATED');
   });
 });
+
+// ---------------------------------------------------------------------------
+// THE CHECK-IN CARD HAD EXACTLY ONE DOOR, AND IT WAS THE WRONG ONE.
+//
+// The card that asks "Everything OK on your trip?" was raised only by the
+// `guardian:checkin` socket event, handled by whichever screen was mounted and
+// listening. A passenger whose app was backgrounded or killed when it fired —
+// which is exactly the case the PUSH exists for — missed it, and nothing ever
+// raised it again. They were left holding a notification they could not answer.
+//
+// Two things made that unrecoverable rather than merely awkward:
+//
+//   · the push tapped through to `Delivery`, the customer ORDER-TRACKING
+//     screen. A ride renders on `Taxi`. The generic "any payload with an
+//     orderId" branch swallowed it, so the one person being asked whether they
+//     are safe arrived somewhere that could not ask them.
+//
+//   · on a HARD check-in the silence has a SERVER DEADLINE, and L4 escalates
+//     when it passes. A passenger who tried to answer and could not find the
+//     card is recorded by the ladder as a passenger who never answered.
+//
+// So the phone can now ASK. This grades that read at every rung, including the
+// endings — because the failure a "show the prompt" flag on the notification
+// would have introduced is a card raised for a check-in already answered.
+// ---------------------------------------------------------------------------
+const getJson = (url: string, token?: string) =>
+  app.inject({ method: 'GET', url, headers: { ...(token ? { authorization: `Bearer ${token}` } : {}) } });
+
+async function rideAtSoftCheckin() {
+  const passenger = await makeUser(['CUSTOMER']);
+  const { driver } = await makeDriver();
+  const t0 = Date.now() - 3_600_000;
+  const ride = await makeRide(driver.id, passenger.userId, new Date(t0));
+  await putFix(driver.id, new Date(t0), MIDWAY);
+  await sweep(new Date(t0));
+  await putFix(driver.id, new Date(t0 + 60_000), PICKUP);
+  await sweep(new Date(t0 + 60_000));
+  await putFix(driver.id, new Date(t0 + 180_000), { lat: 6.795, lng: -58.155 });
+  await sweep(new Date(t0 + 180_000));
+  return { passenger, driver, ride, t0 };
+}
+
+describe('a passenger can ASK whether a check-in is waiting (not only be told)', () => {
+  it('reports the SOFT ask, with the trip it belongs to', async () => {
+    const { passenger, ride } = await rideAtSoftCheckin();
+    // Precondition: the ladder really is at L2 (guards the whole test).
+    expect((await session(ride.id)).checkinRequestedAt).not.toBeNull();
+
+    const res = await getJson('/api/v1/safety/guardian/checkin', passenger.token);
+
+    expect(res.statusCode).toBe(200);
+    const data = res.json().data;
+    expect(data, 'a check-in is outstanding — the passenger must be able to learn that').not.toBeNull();
+    expect(data.level).toBe('SOFT');
+    expect(data.orderId).toBe(ride.id);
+    // SOFT has no deadline; only L3 sets one. Inventing one would be a clock
+    // the passenger is judged against that the server never set.
+    expect(data.deadlineAt).toBeNull();
+  });
+
+  it('reports the HARD ask WITH the server deadline', async () => {
+    const { passenger, ride, t0 } = await rideAtSoftCheckin();
+    await sweep(new Date(t0 + 180_000 + 181_000));
+    expect((await session(ride.id)).status).toBe('CHECKIN_PENDING');
+
+    const data = (await getJson('/api/v1/safety/guardian/checkin', passenger.token)).json().data;
+
+    expect(data.level).toBe('HARD');
+    // The deadline is the SERVER's own timestamp, echoed — this is the clock
+    // the ladder escalates on, so the screen must not compute its own.
+    const s = await session(ride.id);
+    expect(data.deadlineAt).toBe(s.checkinDeadlineAt!.toISOString());
+  });
+
+  it('goes quiet the moment it is answered — no stale card', async () => {
+    // THE REASON THIS IS A SERVER READ. A flag riding on the notification
+    // would re-raise the card every time a passenger tapped an old push,
+    // asking someone to confirm they are safe about a trip already resolved.
+    const { passenger, ride } = await rideAtSoftCheckin();
+    expect((await getJson('/api/v1/safety/guardian/checkin', passenger.token)).json().data).not.toBeNull();
+
+    const answered = await post('/api/v1/safety/guardian/checkin', { response: 'OK' }, passenger.token);
+    expect(answered.statusCode).toBe(200);
+
+    expect(
+      (await getJson('/api/v1/safety/guardian/checkin', passenger.token)).json().data,
+      'the check-in was answered; nothing is waiting',
+    ).toBeNull();
+    expect((await session(ride.id)).checkinRequestedAt).toBeNull();
+  });
+
+  it('says null on a monitored trip with no ask outstanding', async () => {
+    const passenger = await makeUser(['CUSTOMER']);
+    const { driver } = await makeDriver();
+    const t0 = Date.now() - 3_600_000;
+    const ride = await makeRide(driver.id, passenger.userId, new Date(t0));
+    await putFix(driver.id, new Date(t0), MIDWAY);
+    await sweep(new Date(t0));
+    expect((await session(ride.id)).status).toBe('MONITORING');
+
+    expect(
+      (await getJson('/api/v1/safety/guardian/checkin', passenger.token)).json().data,
+      'a screen must be able to learn "no", not only "yes"',
+    ).toBeNull();
+  });
+
+  it('is scoped to the caller — another passenger sees nothing of this trip', async () => {
+    const { passenger } = await rideAtSoftCheckin();
+    const stranger = await makeUser(['CUSTOMER']);
+
+    expect((await getJson('/api/v1/safety/guardian/checkin', passenger.token)).json().data).not.toBeNull();
+    expect(
+      (await getJson('/api/v1/safety/guardian/checkin', stranger.token)).json().data,
+      'the session is resolved from the authenticated user id; there is no id to tamper with',
+    ).toBeNull();
+  });
+
+  it('requires authentication', async () => {
+    expect((await getJson('/api/v1/safety/guardian/checkin')).statusCode).toBe(401);
+  });
+
+  it('agrees with the route that accepts the answer', async () => {
+    // If the read and the write resolved different sessions, a passenger could
+    // be shown a card that 404s when they tap it.
+    const { passenger } = await rideAtSoftCheckin();
+    const shown = (await getJson('/api/v1/safety/guardian/checkin', passenger.token)).json().data;
+
+    const answered = await post('/api/v1/safety/guardian/checkin', { response: 'OK' }, passenger.token);
+
+    expect(answered.statusCode).toBe(200);
+    expect(shown.sessionId).toBe((await session(shown.orderId)).id);
+  });
+});

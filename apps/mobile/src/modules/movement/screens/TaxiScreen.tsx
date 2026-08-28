@@ -988,6 +988,41 @@ function ActiveRide({ navigation, ride, cancelRide, insets, rematching }: any) {
     };
   }, [d?.id, navigation, ride?.id]);
 
+  // THE CHECK-IN CARD MUST SURVIVE A CLOSED APP.
+  //
+  // Above, the card is raised by a live socket event. That is a nudge for a
+  // phone already watching — and a passenger whose app was backgrounded or
+  // killed when it fired, which is the exact case the push exists for, missed
+  // it with nothing to raise it again. They were left holding a notification
+  // asking "Everything OK on your trip?" and no way in the app to answer.
+  // On a HARD check-in the silence has a server deadline, and the ladder
+  // escalates when it passes: someone who tried to answer would be recorded as
+  // someone who never did.
+  //
+  // So on arrival we ASK. The server decides — an already-answered or
+  // escalated check-in returns null and no card appears, which a "show the
+  // prompt" flag riding on the notification could not have got right.
+  // Failure is silent: the socket path still works, and a safety card that
+  // throws an error banner at someone mid-trip helps nobody.
+  useEffect(() => {
+    if (!ride?.id) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await safetyApi.guardianOutstandingCheckin();
+        const pending = res?.data?.data ?? null;
+        if (cancelled || !pending) return;
+        // Same-ride guard as the socket handler: a check-in belongs to one trip.
+        if (pending.orderId !== ride.id) return;
+        setGuardianPrompt(true);
+        if (navigation?.isFocused?.() !== false) haptic.warn();
+      } catch {
+        // Offline or a failed read — the live event remains the other path in.
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [navigation, ride?.id]);
+
   // A driver was found (or the search moved on) — clear any prior dead state so
   // the auto-re-dispatch that lands a driver flips the UI back to live tracking.
   useEffect(() => {

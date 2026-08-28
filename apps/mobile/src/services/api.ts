@@ -437,8 +437,13 @@ export const safetyApi = {
       headers: { 'Content-Type': 'multipart/form-data' },
     }),
   /** Trip Guardian check-in response (prompted via the guardian:checkin
-   *  socket event on the order room). */
+   *  socket event on the order room, or by the outstanding read below). */
   guardianCheckin: (response: 'OK' | 'NEED_HELP') => api.post('/safety/guardian/checkin', { response }),
+  /** Is a check-in waiting on THIS passenger's trip? Null when none is.
+   *  The socket event is a live nudge and nothing more — it cannot reach an
+   *  app that was closed when it fired, which is precisely when the push is
+   *  sent. This is how the card survives a cold start. */
+  guardianOutstandingCheckin: () => api.get('/safety/guardian/checkin'),
 
   /**
    * Raise an emergency alert on ANY job — the general safety path.

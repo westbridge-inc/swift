@@ -32,6 +32,19 @@ export function destinationFor(data: Record<string, unknown> | null | undefined)
     return { screen: 'Taxi' };
   }
 
+  // [safety §5.3] THE TRIP-GUARDIAN CHECK-IN — "Everything OK on your trip?"
+  // It goes to the PASSENGER of a ride, and the card that answers it lives on
+  // the Taxi screen. It carries an orderId, so the generic branch at the
+  // bottom sent it to Delivery — the CUSTOMER order-tracking screen, which a
+  // ride never renders on. A person being asked whether they are safe tapped
+  // the notification and arrived somewhere that could not ask them.
+  //
+  // Taxi takes no params: it resolves the active ride itself and then asks the
+  // server whether a check-in is outstanding. Passing a "show the prompt" flag
+  // would let a stale tap re-raise a card the passenger already answered, and
+  // the server is the only thing that knows.
+  if (kind === 'guardian_checkin') return { screen: 'Taxi' };
+
   // [E36 / danger #22] An OFFER ping is for the EARNER: their role-resolved
   // Main IS the mover home where the live offer card (and its countdown)
   // renders. The generic orderId branch below would have dropped them on the
