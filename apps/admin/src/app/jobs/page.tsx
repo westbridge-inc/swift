@@ -68,16 +68,28 @@ export default function JobsPage() {
     setMutationError(null);
   };
 
+  // A 409 means this page is looking at a job that has since changed — someone
+  // retried it, or the queue was recreated and the id now belongs to something
+  // else. The list must be re-read before the operator decides again, or they
+  // will just click the same stale row twice.
+  const onActionError = (error: unknown) => {
+    setMutationError(error);
+    setConfirmingDiscard(null);
+    if (errorCode(error) === 'JOB_NO_LONGER_FAILED' || errorCode(error) === 'JOB_IDENTITY_MISMATCH') {
+      queryClient.invalidateQueries({ queryKey: ['dlq'] });
+    }
+  };
+
   const requeue = useMutation({
-    mutationFn: ({ queue, id }: { queue: string; id: string }) => requeueDeadLetter(queue, id),
+    mutationFn: ({ row }: { row: DeadLetter }) => requeueDeadLetter(row.queue, row.id, row),
     onMutate: () => setMutationError(null),
-    onError: (error: unknown) => setMutationError(error),
+    onError: onActionError,
     onSuccess: refresh,
   });
   const discard = useMutation({
-    mutationFn: ({ queue, id }: { queue: string; id: string }) => discardDeadLetter(queue, id),
+    mutationFn: ({ row }: { row: DeadLetter }) => discardDeadLetter(row.queue, row.id, row),
     onMutate: () => setMutationError(null),
-    onError: (error: unknown) => setMutationError(error),
+    onError: onActionError,
     onSuccess: refresh,
   });
 
@@ -227,7 +239,7 @@ export default function JobsPage() {
                   <div className="mt-3 flex gap-2 items-center flex-wrap">
                     <button
                       disabled={busy}
-                      onClick={() => requeue.mutate({ queue: row.queue, id: row.id })}
+                      onClick={() => requeue.mutate({ row })}
                       className="px-3 py-1.5 rounded-lg text-xs bg-[var(--accent)] text-white disabled:opacity-50"
                     >
                       Retry this job
@@ -240,7 +252,7 @@ export default function JobsPage() {
                         </span>
                         <button
                           disabled={busy}
-                          onClick={() => discard.mutate({ queue: row.queue, id: row.id })}
+                          onClick={() => discard.mutate({ row })}
                           className="px-3 py-1.5 rounded-lg text-xs bg-red-600 text-white disabled:opacity-50"
                         >
                           Yes, discard {row.name}

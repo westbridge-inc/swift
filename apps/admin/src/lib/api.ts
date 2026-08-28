@@ -434,7 +434,19 @@ export interface DeadLetter {
 }
 
 export const fetchDeadLetters = () => apiFetch('/api/v1/admin/dlq');
-export const requeueDeadLetter = (queue: string, id: string) =>
-  apiFetch(`/api/v1/admin/dlq/${queue}/${id}/requeue`, { method: 'POST' });
-export const discardDeadLetter = (queue: string, id: string) =>
-  apiFetch(`/api/v1/admin/dlq/${queue}/${id}`, { method: 'DELETE' });
+
+// The COMPARE half of compare-and-act [REPORT-037 R037-09]. An id alone does not
+// identify a job: BullMQ reuses numeric ids after a queue is obliterated and
+// recreated, and a job that has since been retried is no longer a dead letter at
+// all. Sending what this page actually SAW lets the server refuse (409) rather
+// than act on a different job — or on a live one.
+function identity(row: Pick<DeadLetter, 'name' | 'finishedOn'>): string {
+  const params = new URLSearchParams({ expectedName: row.name });
+  if (row.finishedOn != null) params.set('expectedFinishedOn', String(row.finishedOn));
+  return `?${params.toString()}`;
+}
+
+export const requeueDeadLetter = (queue: string, id: string, row: Pick<DeadLetter, 'name' | 'finishedOn'>) =>
+  apiFetch(`/api/v1/admin/dlq/${queue}/${id}/requeue${identity(row)}`, { method: 'POST' });
+export const discardDeadLetter = (queue: string, id: string, row: Pick<DeadLetter, 'name' | 'finishedOn'>) =>
+  apiFetch(`/api/v1/admin/dlq/${queue}/${id}${identity(row)}`, { method: 'DELETE' });

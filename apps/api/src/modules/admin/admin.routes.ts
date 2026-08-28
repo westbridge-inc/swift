@@ -4056,23 +4056,104 @@ export async function adminRoutes(app: FastifyInstance) {
     return { success: true, data: out.slice(0, 200) };
   });
 
+  /**
+   * Fetch a job and REFUSE unless it is still the dead letter the operator is
+   * looking at [REPORT-037 R037-09].
+   *
+   * Neither route used to check the job's state. So Retry followed by Discard —
+   * a stale page, a changed mind, or two operators on the same queue — deleted
+   * a job that was, by then, WAITING TO RUN. On `process-settlements` or
+   * `poll-mmg-billing` that is deleting money work, permanently, from a screen
+   * whose whole purpose is to rescue it. The previous test asserted exactly
+   * that sequence and passed.
+   *
+   * `expectedName` / `expectedFinishedOn` are the compare half of a
+   * compare-and-act: BullMQ reuses numeric job ids after a queue is obliterated
+   * and recreated, so an id alone does not identify a job across that boundary.
+   * The admin page always sends both.
+   */
+  async function requireDeadLetter(
+    queueName: string,
+    id: string,
+    expected: { name?: string; finishedOn?: string },
+  ) {
+    const job = await dlqQueue(queueName).getJob(id);
+    if (!job) throw new NotFoundError('Job', id);
+    const state = await job.getState();
+    if (state !== 'failed') {
+      throw new AppError(
+        409,
+        'JOB_NO_LONGER_FAILED',
+        `That job is now "${state}", not failed — someone has already acted on it. Reload before deciding again.`,
+      );
+    }
+    if (expected.name && expected.name !== job.name) {
+      throw new AppError(409, 'JOB_IDENTITY_MISMATCH', `Job ${id} is now "${job.name}", not "${expected.name}". Reload.`);
+    }
+    if (expected.finishedOn && Number(expected.finishedOn) !== (job.finishedOn ?? 0)) {
+      throw new AppError(409, 'JOB_IDENTITY_MISMATCH', `Job ${id} failed at a different time than the one you are looking at. Reload.`);
+    }
+    return job;
+  }
+
+  /**
+   * Audit a privileged DLQ mutation BEFORE performing it [REPORT-037 R037-08].
+   *
+   * These routes used to mutate Redis and audit afterwards. If the audit insert
+   * failed, the request returned 500 — and the automatic audit hook deliberately
+   * skips responses >= 400 — so a completed privileged mutation could end up
+   * with NO audit record at all, weakening WS-7.1 control 18.
+   *
+   * Writing the intent first fails closed: no audit, no mutation. If the
+   * mutation then fails, a second row records that, so the log never claims
+   * something happened that did not.
+   */
+  async function auditedDlqAction(
+    request: any,
+    action: string,
+    queueName: string,
+    id: string,
+    changes: Record<string, unknown>,
+    mutate: () => Promise<unknown>,
+  ) {
+    await audit(request.user.userId, action, 'Job', `${queueName}:${id}`, changes, request);
+    try {
+      await mutate();
+    } catch (err) {
+      await audit(
+        request.user.userId,
+        `${action}_FAILED`,
+        'Job',
+        `${queueName}:${id}`,
+        { ...changes, error: err instanceof Error ? err.message : String(err) },
+        request,
+      ).catch(() => undefined);
+      throw err;
+    }
+  }
+
   /** POST /dlq/:queue/:id/requeue — retry a dead job. */
   app.post('/dlq/:queue/:id/requeue', { preHandler: [platformControlGuard] }, async (request) => {
     const { queue, id } = request.params as { queue: string; id: string };
-    const job = await dlqQueue(queue).getJob(id);
-    if (!job) throw new NotFoundError('Job', id);
-    await job.retry();
-    await audit(request.user.userId, 'REQUEUE_DLQ_JOB', 'Job', `${queue}:${id}`, { jobName: job.name }, request);
+    const expected = (request.query ?? {}) as { expectedName?: string; expectedFinishedOn?: string };
+    const job = await requireDeadLetter(queue, id, { name: expected.expectedName, finishedOn: expected.expectedFinishedOn });
+    await auditedDlqAction(request, 'REQUEUE_DLQ_JOB', queue, id, { jobName: job.name }, () => job.retry());
     return { success: true, data: { queue, id, retried: true } };
   });
 
   /** DELETE /dlq/:queue/:id — discard a dead job for good. */
   app.delete('/dlq/:queue/:id', { preHandler: [platformControlGuard] }, async (request) => {
     const { queue, id } = request.params as { queue: string; id: string };
-    const job = await dlqQueue(queue).getJob(id);
-    if (!job) throw new NotFoundError('Job', id);
-    await job.remove();
-    await audit(request.user.userId, 'DISCARD_DLQ_JOB', 'Job', `${queue}:${id}`, { jobName: job.name, failedReason: job.failedReason ?? null }, request);
+    const expected = (request.query ?? {}) as { expectedName?: string; expectedFinishedOn?: string };
+    const job = await requireDeadLetter(queue, id, { name: expected.expectedName, finishedOn: expected.expectedFinishedOn });
+    await auditedDlqAction(
+      request,
+      'DISCARD_DLQ_JOB',
+      queue,
+      id,
+      { jobName: job.name, failedReason: job.failedReason ?? null },
+      () => job.remove(),
+    );
     return { success: true, data: { queue, id, discarded: true } };
   });
 
