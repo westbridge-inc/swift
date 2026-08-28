@@ -1,6 +1,6 @@
 import { MeiliSearch } from 'meilisearch';
 import type { PrismaClient } from '@prisma/client';
-import { VISIBLE_VENDOR, VISIBLE_VENDOR_REL } from '../vendor/vendor-visibility';
+import { VISIBLE_VENDOR, VISIBLE_VENDOR_REL, VISIBLE_VENDOR_SELECT, isVendorVisible } from '../vendor/vendor-visibility';
 import { ratingSurfaces } from '../rating/rating-surface';
 
 const VENDOR_INDEX = 'vendors';
@@ -216,11 +216,24 @@ export class SearchService {
   async syncVendor(vendorId: string): Promise<void> {
     const vendor = await this.prisma.vendor.findUnique({
       where: { id: vendorId },
-      include: { categories: true },
+      // [B2] tenant.isActive is why this include exists. The liveness test
+      // below used to be `status === 'ACTIVE'` alone, so an unverified store —
+      // or one whose OPERATOR had been switched off — was written INTO the
+      // index by this path and then served, because searchVendors filters on
+      // surface attributes and trusts the index for visibility. The full
+      // re-index (syncAllVendors) has always used the shared predicate, so a
+      // reconcile removed them and the next incremental sync put them back.
+      include: { categories: true, tenant: { select: { isActive: true } } },
     });
-    if (!vendor) return;
+    // A vendor that no longer exists must not keep a document either. The
+    // previous early return left the doc in the index until someone happened to
+    // run a full re-index.
+    if (!vendor) {
+      await this.client.index(VENDOR_INDEX).deleteDocument(vendorId);
+      return;
+    }
 
-    if (vendor.status === 'ACTIVE') {
+    if (isVendorVisible(vendor)) {
       const discovery = await this.vendorCategorySlugs([vendor.id]);
       const surface = (await ratingSurfaces(this.prisma, 'VENDOR', [vendor.id])).get(vendor.id);
       await this.client.index(VENDOR_INDEX).addDocuments([{
@@ -265,13 +278,19 @@ export class SearchService {
     const items = await this.prisma.item.findMany({
       where: { vendorId },
       include: {
-        vendor: { select: { name: true, status: true } },
+        // [B2] Same fix as syncVendor: the liveness test below was
+        // `vendor.status === 'ACTIVE'`, which let an unverified or
+        // switched-off operator's DISHES stay searchable — the exact shape of
+        // the #790 defect, where a deactivated operator's dish sat above the
+        // fold while their store was already hidden.
+        vendor: { select: { name: true, ...VISIBLE_VENDOR_SELECT } },
         category: { select: { name: true } },
       },
     });
 
-    const live = items.filter((i) => i.isAvailable && i.vendor.status === 'ACTIVE');
-    const gone = items.filter((i) => !(i.isAvailable && i.vendor.status === 'ACTIVE'));
+    const searchable = (i: (typeof items)[number]) => i.isAvailable && isVendorVisible(i.vendor);
+    const live = items.filter(searchable);
+    const gone = items.filter((i) => !searchable(i));
 
     if (live.length > 0) {
       const itemSlugs = await this.itemCategorySlugs(live.map((i) => i.id));

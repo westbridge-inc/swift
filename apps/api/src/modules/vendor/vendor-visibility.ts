@@ -31,3 +31,45 @@ export const VISIBLE_VENDOR = {
 
 /** Spread into an ITEM query's `vendor:` relation filter. */
 export const VISIBLE_VENDOR_REL = VISIBLE_VENDOR;
+
+/**
+ * The SAME predicate, decided in memory on an already-fetched row.
+ *
+ * A sixth hand-rolled copy turned up in the search module's INCREMENTAL sync,
+ * which is the path that actually runs in normal operation: `syncVendor` and
+ * `syncVendorItems` tested `status === 'ACTIVE'` alone, so a vendor whose
+ * papers were never approved, or whose OPERATOR had been switched off, was
+ * written into the Meilisearch index and then served — because the search
+ * methods filter on surface attributes and trust the index for visibility. A
+ * full re-index removed them again; the next incremental sync put them back.
+ *
+ * The values are read off `VISIBLE_VENDOR` rather than repeated, so the two
+ * forms cannot disagree about WHAT visible means. `vendor-visibility.test.ts`
+ * asserts they constrain the same set of fields, which is the only way they
+ * could still drift.
+ *
+ * Pass a row selected with at least `status`, `isVerified`, and
+ * `tenant: { select: { isActive: true } }`. A missing tenant relation is
+ * treated as NOT visible — failing closed, because the tenant clause is the
+ * only wall between a shut-off operator and an unscoped guest request.
+ */
+export function isVendorVisible(vendor: {
+  status: string;
+  isVerified: boolean;
+  tenant?: { isActive: boolean } | null;
+}): boolean {
+  return (
+    vendor.status === VISIBLE_VENDOR.status &&
+    vendor.isVerified === VISIBLE_VENDOR.isVerified &&
+    vendor.tenant?.isActive === VISIBLE_VENDOR.tenant.isActive
+  );
+}
+
+/** The exact select a caller needs for `isVendorVisible` to be able to decide.
+ *  Spread it into a `select` so a caller cannot forget a clause and get a
+ *  silently permissive answer. */
+export const VISIBLE_VENDOR_SELECT = {
+  status: true,
+  isVerified: true,
+  tenant: { select: { isActive: true } },
+} as const;
