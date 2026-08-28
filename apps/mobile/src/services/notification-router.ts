@@ -108,6 +108,32 @@ export function destinationFor(data: Record<string, unknown> | null | undefined)
     return { screen: 'GetHelp', params: { category: 'ACCOUNT', subject: 'Identity check locked my account' } };
   }
 
+  // TWO PUSHES THAT TELL THE RECIPIENT TO CONTACT SUPPORT, AND THEN DIDN'T.
+  //
+  // Both go to a MOVER and both carry an orderId, so the generic branch at the
+  // bottom sent them to `Delivery` — a route MoverStack never mounts. The
+  // navigate was silently unhandled and the app opened on whatever was last on
+  // screen, which is how a suspended driver read "contact Swift support to
+  // respond" and had nowhere to tap.
+  //
+  // `GetHelp` is the answer for the same reason `liveness_locked` uses it: it
+  // is mounted in ALL FOUR navigators (customer, mover, vendor, advertiser), so
+  // it is reachable no matter which stack the recipient is in — and the screen
+  // genuinely reads `category`, `subject` and `orderId`, so none of these params
+  // is decoration.
+  if (kind === 'incident_interim_suspension') {
+    return { screen: 'GetHelp', params: { category: 'ACCOUNT', subject: 'Account suspended pending review' } };
+  }
+  if (kind === 'claim_over_gate') {
+    // The body says "Support will follow up" — this is the door for the person
+    // who would rather not wait. PAYMENT, not the orderId default of
+    // ORDER_ISSUE: the dispute is about the guarantee, not the delivery.
+    return {
+      screen: 'GetHelp',
+      params: { category: 'PAYMENT', subject: 'Delivery guarantee claim', ...(orderId ? { orderId } : {}) },
+    };
+  }
+
   // [server-tagged audience] A push the server addressed to a BUSINESS belongs
   // on the store's order desk. NotificationService.send merges `audience` into
   // data (the in-app notification list already reads it), so this is a server
