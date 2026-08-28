@@ -4168,6 +4168,46 @@ model BatchingSettings {
   @@map("batching_settings")
 }
 
+/// [ALGO Band 0.2] THE VERSIONED TUNABLE STORE.
+///
+/// Every algorithm dial the platform will ever want to turn, in one place, with
+/// the version that was in force recorded alongside it — so a fee, an offer or
+/// a flag can be re-explained a year later with the config that actually
+/// produced it, not with today's.
+///
+/// ROWS ARE IMMUTABLE VERSIONS, never edits. Changing a value inserts version
+/// N+1 for that key; the value in force is the HIGHEST version. That makes "the
+/// version in force" a fact rather than a convention, gives the audit trail for
+/// free, and means a decision record stamped with version 3 can still be read
+/// against exactly the row that produced it after version 4 lands.
+///
+/// AN EMPTY TABLE BEHAVES EXACTLY AS TODAY. Every key's default lives in code
+/// beside the algorithm that reads it, and a key with no row resolves to that
+/// default at version 0. Moving a constant in here is therefore a
+/// no-behaviour-change edit and must be proven so.
+///
+/// `founderGated` marks a value engineering may READ but must never write —
+/// the hold window, a cancellation fee, a suspension threshold. The column is
+/// the record of that decision; the enforcement lives with the write path.
+model AlgoConfig {
+  id           String   @id @default(cuid())
+  tenantId     String   @default("swift-default")
+  /// Namespaced, e.g. "batching.evalCap" or "ALG-19.perKmRate".
+  key          String
+  value        Json
+  version      Int      @default(1)
+  founderGated Boolean  @default(false)
+  /// Who set it — a user id, or a migration/seed name for platform defaults.
+  updatedBy    String
+  updatedAt    DateTime @updatedAt
+  createdAt    DateTime @default(now())
+
+  @@unique([tenantId, key, version])
+  /// The hot read: newest version of one key for one tenant.
+  @@index([tenantId, key, version])
+  @@map("algo_config")
+}
+
 // ---------------------------------------------------------------------------
 // QR GROWTH ENGINE (scan-to-store) — printed QR → /s/{code} resolver → web
 // storefront. QrCode supersedes the dormant Vendor.qrSlug field (never wired).
