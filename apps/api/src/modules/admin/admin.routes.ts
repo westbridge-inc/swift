@@ -34,7 +34,7 @@ import { BillingService } from '../billing/billing.service';
 import { SubscriptionService } from '../subscription/subscription.service';
 import { CashRulesService } from '../cash/cash-rules.service';
 import { AgentService } from '../agent/agent.service';
-import { OrderService } from '../order/order.service';
+import { OrderService, TERMINAL_ORDER_STATUSES } from '../order/order.service';
 import { DiscoveryGovernanceService } from '../discovery/admin-governance';
 import { RatingStatsService } from '../rating/rating-stats.service';
 import { assertFounderAccess } from './founder-access';
@@ -1727,8 +1727,13 @@ export async function adminRoutes(app: FastifyInstance) {
     });
     if (!order) throw new NotFoundError('Order', id);
 
-    const terminalStatuses = ['DELIVERED', 'COMPLETED', 'CANCELLED', 'REFUNDED'];
-    if (terminalStatuses.includes(order.status)) {
+    // The canonical set, imported. This list was written by hand with four
+    // entries and omitted FAILED. It is NOT exploitable — `ORDER_TRANSITIONS`
+    // lists only pre-custody states as predecessors of CANCELLED, so the state
+    // machine refuses FAILED → CANCELLED regardless. What the omission cost was
+    // the ERROR: an operator force-cancelling a failed order got a transition
+    // rejection instead of "Cannot cancel an order with status FAILED".
+    if ((TERMINAL_ORDER_STATUSES as string[]).includes(order.status)) {
       throw new AppError(400, 'INVALID_STATUS', `Cannot cancel an order with status ${order.status}`);
     }
     // [REPORT-008 F-03] The legacy boolean refund override is a CASH-era
@@ -1746,7 +1751,7 @@ export async function adminRoutes(app: FastifyInstance) {
 
     const newStatus: OrderStatus = refund ? 'REFUNDED' : 'CANCELLED';
     const allowedFrom = Object.values(OrderStatus)
-      .filter((status) => !terminalStatuses.includes(status)) as OrderStatus[];
+      .filter((status) => !(TERMINAL_ORDER_STATUSES as string[]).includes(status)) as OrderStatus[];
     const cancellationReason = reason || 'Cancelled by admin';
 
     // The fresh source status, order mutation, status evidence, explicit admin

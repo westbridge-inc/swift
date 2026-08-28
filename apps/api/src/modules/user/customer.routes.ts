@@ -17,7 +17,7 @@ import { RATING_MAX_TAGS } from '../rating/rating-math';
 import { ratingSurfaces, NEW_ACTOR_SURFACE } from '../rating/rating-surface';
 import { VISIBLE_VENDOR, VISIBLE_VENDOR_REL } from '../vendor/vendor-visibility';
 import { createHash, randomInt } from 'node:crypto';
-import { OrderService } from '../order/order.service';
+import { OrderService, TERMINAL_ORDER_STATUSES } from '../order/order.service';
 import { PickingService } from '../order/picking.service';
 import { dispatchSearchesCounter } from '../../plugins/observability';
 import { resolveSelectedOptions, optionsUnitPrice } from '../order/options';
@@ -958,7 +958,14 @@ export async function customerRoutes(app: FastifyInstance) {
         ? app.prisma.order.findFirst({
             where: {
               customerId: userId,
-              status: { notIn: ['DELIVERED', 'COMPLETED', 'CANCELLED', 'REFUNDED'] },
+              // THE CANONICAL SET, imported — not a fifth hand-written copy.
+              // This list was written by hand with FOUR entries and the real
+              // one has five: FAILED was missing. A failed handover (no-show or
+              // refused at the door) therefore came back as the customer's
+              // ACTIVE order, with a "Track order" button, permanently — FAILED
+              // is terminal, so nothing ever moved it on. Worse, being the
+              // newest row it MASKED a genuinely live order behind it.
+              status: { notIn: TERMINAL_ORDER_STATUSES },
             },
             select: {
               id: true, orderNumber: true, status: true,
