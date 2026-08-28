@@ -77,6 +77,32 @@ class DevPush implements PushProvider {
 
 class DevEmail implements EmailProvider {
   async sendEmail(to: string, subject: string, body: string) {
+    // THE SAME REFUSAL DevPush CARRIES, FOR THE SAME REASON — and this was the
+    // more dangerous omission, because DevEmail was reachable in production by
+    // DESIGN rather than by oversight: `getChannels()` returned it from BOTH
+    // branches, the 'twilio' production branch included. There is no SES /
+    // Postmark / Resend adapter in the tree, so every email Swift believed it
+    // sent in production was appended to an in-memory array, handed back a
+    // `dev_email_N` reference, and discarded — reporting success every time.
+    //
+    // IT LIVES ON THE SEND, NOT THE CONSTRUCTOR, and the distinction is the
+    // whole design: the hazard is DISCARDING A MESSAGE, and nothing is
+    // discarded by this object merely existing. A constructor refusal was
+    // tried first and was wrong — it broke two socket-readiness tests that
+    // legitimately build a server under NODE_ENV=production to exercise the
+    // production adapter path and never send an email at all. A guard that
+    // fires on construction punishes code for being near the hazard; a guard
+    // on the send fires exactly when the lie would be told.
+    //
+    // The failure this converts is the one the proof standard calls the silent
+    // no-op: a complete code path that returns early, successfully, forever.
+    if (process.env['NODE_ENV'] === 'production') {
+      throw new Error(
+        'FATAL: email has no production provider — DevEmail discards every message while reporting success. ' +
+          'Nothing that depends on email (receipts, expiry warnings, help@) would arrive, and nothing would say so. ' +
+          'Implement a real EmailProvider and return it from getChannels() before running in production.',
+      );
+    }
     devChannelLog.push({ channel: 'email', to, title: subject, body, at: new Date() });
     return { ref: `dev_email_${++seq}` };
   }
