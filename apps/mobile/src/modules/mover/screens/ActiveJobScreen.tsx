@@ -16,6 +16,10 @@ import { toast } from '../../../kit/toast';
 import { useLocationStore } from '../../../stores/locationStore';
 import { grantedLocationFix } from '../../../lib/deviceLocation';
 import { haversineKm, streetEtaMin } from '../../../lib/geo';
+// One authority for the rider's leg: what they do next, and whether the goods
+// are still with the vendor. `showBagIsWaiting` is why the counter signal no
+// longer survives past custody — see that file.
+import { riderStep, showBagIsWaiting } from '../../../lib/riderLeg';
 import { jobAmount, RoutePair } from '../shared';
 import { haptic } from '../../../lib/haptics';
 import { dk, withAlpha, DCard } from '../surface';
@@ -52,16 +56,6 @@ function driverStep(job: any): { label: string; action: DriverAction; pin?: bool
 // The ONE next step a rider takes before the door, driven by the backend status:
 // RIDER_ASSIGNED → en-route-pickup → arrived-pickup → picked-up →
 // en-route-delivery → arrived → (ARRIVED: handover/delivered UI takes over).
-type RiderStep = { label: string; action: 'en-route-pickup' | 'arrived-pickup' | 'picked-up' | 'en-route-delivery' | 'arrived' };
-function riderStep(job: any): RiderStep | null {
-  const s = String(job?.status ?? '').toUpperCase();
-  if (s === 'RIDER_ASSIGNED') return { label: "I'm on the way to pick up", action: 'en-route-pickup' };
-  if (s === 'RIDER_EN_ROUTE_PICKUP') return { label: "I've arrived at pickup", action: 'arrived-pickup' };
-  if (s === 'RIDER_ARRIVED_PICKUP' || s === 'READY_FOR_PICKUP') return { label: 'Picked up the order', action: 'picked-up' };
-  if (s === 'PICKED_UP') return { label: "I'm on the way to the customer", action: 'en-route-delivery' };
-  if (s === 'EN_ROUTE_DELIVERY') return { label: "I've arrived at the customer", action: 'arrived' };
-  return null; // ARRIVED → the handover/delivered controls below take over
-}
 
 const DRIVER_STEPS = ['DRIVER_ASSIGNED', 'DRIVER_EN_ROUTE', 'DRIVER_ARRIVED', 'RIDE_IN_PROGRESS'];
 const RIDER_STEPS = ['RIDER_ASSIGNED', 'PICKED_UP', 'DELIVERED'];
@@ -339,8 +333,10 @@ export function ActiveJobScreen({ navigation }: any) {
                 </T>
               </T>
               {/* Kitchen signal (readyAt rides outside the status lane once a
-                  rider is assigned) — tells the rider the bag is on the counter. */}
-              {!isDriver && (job.readyAt || String(job.status).toUpperCase() === 'READY_FOR_PICKUP') ? (
+                  rider is assigned) — tells the rider the bag is on the counter.
+                  Gated on the pickup leg inside `showBagIsWaiting`: past custody
+                  the bag is in the rider's own hands and this line was a lie. */}
+              {!isDriver && showBagIsWaiting(job) ? (
                 <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: space.sm }}>
                   <MaterialCommunityIcons name="check-circle" size={15} color={dk.success} />
                   <T variant="label" weight="semibold" style={{ color: dk.success }}>
