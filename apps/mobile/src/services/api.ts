@@ -313,7 +313,15 @@ export const customerApi = {
   getFavorites: () => api.get('/customer/favorites'),
   addFavorite: (vendorId: string) => api.post(`/customer/favorites/${vendorId}`, {}),
   removeFavorite: (vendorId: string) => api.delete(`/customer/favorites/${vendorId}`),
-  getOrders: (page?: number) => api.get('/customer/orders', page ? { params: { page } } : undefined),
+  // `live` asks the SERVER which orders are still going (it owns the enum and
+  // the terminal set); the client never enumerates statuses to mean "open".
+  getOrders: (page?: number, opts?: { live?: boolean; limit?: number }) => {
+    const params: Record<string, string | number> = {};
+    if (page) params['page'] = page;
+    if (opts?.live !== undefined) params['live'] = String(opts.live);
+    if (opts?.limit) params['limit'] = opts.limit;
+    return api.get('/customer/orders', Object.keys(params).length > 0 ? { params } : undefined);
+  },
   validatePromo: (code: string) => api.post('/customer/promo/validate', { code }),
   getOrder: (id: string) => api.get(`/customer/orders/${id}`),
   // [REPORT-012 F-012-03] Unwrap the API envelope AT THE SEAM: the server

@@ -142,6 +142,17 @@ const checkoutSchema = z.object({
 
 const customerOrdersQuerySchema = z.object({
   status: z.string().max(300).optional(),
+  /**
+   * LIVENESS IS A SERVER CONCEPT, NOT A LIST THE CLIENT TYPES OUT.
+   *
+   * `status=PENDING,ACCEPTED,…` can express "still going" only by enumerating
+   * every live member of the enum, and that enumeration is wrong the moment a
+   * status is added. The activity list has already been bitten by exactly that
+   * shape twice. `live` asks the question instead of spelling out the answer:
+   * the server resolves it against TERMINAL_ORDER_STATUSES, which is the one
+   * definition of "finished" the enum ships with.
+   */
+  live: z.enum(['true', 'false']).optional(),
   from: z.coerce.date().optional(),
   to: z.coerce.date().optional(),
 });
@@ -1972,12 +1983,23 @@ export async function customerRoutes(app: FastifyInstance) {
     const { userId } = request.user;
     const query = request.query as Record<string, string | undefined>;
     const { page, limit, skip } = parsePagination(query);
-    const { status, from, to } = customerOrdersQuerySchema.parse(request.query);
+    const { status, live, from, to } = customerOrdersQuerySchema.parse(request.query);
 
     const where: Record<string, unknown> = { customerId: userId };
+    // Two ways to constrain the same column. Silently letting one win would
+    // answer a question the caller did not ask — `?status=DELIVERED&live=true`
+    // has no honest result.
+    if (status && live !== undefined) {
+      throw new ValidationError('Pass either `status` or `live`, not both — they constrain the same field.');
+    }
     if (status) {
       const statuses = orderStatusListSchema.parse(status.split(',').map((s) => s.trim().toUpperCase()));
       where['status'] = statuses.length === 1 ? statuses[0] : { in: statuses };
+    } else if (live !== undefined) {
+      // The SAME set the rest of the platform partitions on — imported, never
+      // restated. `live=true` is the complement by construction, so a new enum
+      // member is live until someone deliberately declares it terminal.
+      where['status'] = live === 'true' ? { notIn: TERMINAL_ORDER_STATUSES } : { in: TERMINAL_ORDER_STATUSES };
     }
     if (from || to) {
       const dateFilter: Record<string, Date> = {};

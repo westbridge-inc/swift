@@ -5,7 +5,7 @@ import { useNavigation, useIsFocused } from '@react-navigation/native';
 import Animated, { FadeInDown, ReduceMotion } from 'react-native-reanimated';
 
 import { color, radius, space } from '@swift/ui';
-import { useOrdersInfinite, useReorder } from '../../../hooks/customer';
+import { useLiveOrders, useOrdersInfinite, useReorder } from '../../../hooks/customer';
 import { useAuthStore } from '../../../stores/authStore';
 import { vendorPhoto } from '../../../lib/images';
 // The single authority for what a status is CALLED — type-aware, so a ride is
@@ -87,13 +87,25 @@ function statusPill(o: { status: string; orderType?: string | null }): { label: 
   };
 }
 
-// Partition by the CLOSED set: a status is history only when the server says
-// the order is over. Enumerating live states here instead once dropped five
-// real ones (READY_FOR_PICKUP, both pickup-leg rider states, EN_ROUTE_DELIVERY,
-// ARRIVED) into "completed" and hid Track order on live deliveries — a new
-// enum member must default to the live (recoverable) side, never to history.
-const TERMINAL = new Set(['DELIVERED', 'COMPLETED', 'CANCELLED', 'REFUNDED', 'FAILED']);
-const isLive = (status: string) => !TERMINAL.has(status);
+// THE PARTITION IS THE SERVER'S, AND IT IS NOT A FILTER.
+//
+// This screen used to hold its own copy of the terminal set and split the rows
+// it had loaded with it. Both halves of that were wrong.
+//
+// The set was a duplicate: `TERMINAL_ORDER_STATUSES` already exists beside the
+// enum, and an earlier bug here — five live statuses landing in "completed"
+// because the LIVE side was the one enumerated — is exactly what a second copy
+// produces. It is gone; the server answers `live` now.
+//
+// The filter was worse, because it looked correct. History is `placedAt` DESC
+// and pages at 20, so filtering loaded rows can only ever find live orders
+// among the most recent few. A real account had 19 open, 6 of them on page one:
+// thirteen orders — three still awaiting pickup since March — sat under a
+// heading that said "IN PROGRESS" and listed six. Scrolling revealed them one
+// page at a time, so the list also grew upward under the reader's thumb.
+//
+// Live orders are now fetched as live orders. History is the other query, and
+// the two are reconciled BY ID below, never by re-deriving liveness here.
 
 /** Truthful date eyebrow for a completed row. */
 function dateEyebrow(iso: string | undefined): string {
@@ -155,13 +167,20 @@ export function OrdersHistoryScreen() {
   const navigation = useNavigation<any>();
   const { isAuthenticated, promptLogin } = useAuthStore();
   const orders = useOrdersInfinite();
+  const liveOrders = useLiveOrders();
   const reorder = useReorder();
 
   // Tab screens stay mounted, so without this the list NEVER updates after
   // first load (found live: a delivered order stuck on "Pending" forever).
+  // BOTH queries refresh: an order that finishes while the tab sits in the
+  // background leaves the live list and joins history, and refreshing only one
+  // of them would show it in neither — or in both.
   const isFocused = useIsFocused();
   useEffect(() => {
-    if (isFocused && isAuthenticated) orders.refetch();
+    if (isFocused && isAuthenticated) {
+      orders.refetch();
+      liveOrders.refetch();
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isFocused]);
 
@@ -193,8 +212,21 @@ export function OrdersHistoryScreen() {
   const serverTotal: number | null =
     typeof lastMeta?.total === 'number' && Number.isFinite(lastMeta.total) ? lastMeta.total : null;
 
-  const live = rows.filter((o) => isLive(o.status));
-  const done = rows.filter((o) => !isLive(o.status));
+  const live: any[] = liveOrders.data?.items ?? [];
+
+  // Reconciled BY ID, not by re-deriving what "live" means. If the history feed
+  // ever hands back an order that the live query also returned — an older API
+  // that ignores `live`, a status that changed between the two round-trips — it
+  // is dropped from history rather than rendered twice. This cannot drift the
+  // way a second status list would, because it never names a status.
+  const liveIds = new Set(live.map((o) => String(o.id)));
+  const done = rows.filter((o) => !liveIds.has(String(o.id)));
+
+  // NO SILENT CAP. The live query asks for one generous page; if a customer
+  // somehow has more open orders than that, the screen says so instead of
+  // quietly showing a prefix.
+  const liveTotal: number | null = liveOrders.data?.total ?? null;
+  const liveHidden = liveTotal != null && liveTotal > live.length ? liveTotal - live.length : 0;
   const ledger: LedgerItem[] = [];
   let lastEyebrow = '';
   let rowIndex = 0;
@@ -393,17 +425,25 @@ export function OrdersHistoryScreen() {
 
   return (
     <Screen>
-      {orders.isLoading ? (
+      {orders.isLoading || liveOrders.isLoading ? (
         <>
           {headerBlock}
           <LoadingBlock />
         </>
-      ) : orders.isError ? (
+      ) : orders.isError && live.length === 0 ? (
+        // Only when there is genuinely nothing to show. A history failure must
+        // not blank out live orders that loaded fine — those are the ones the
+        // customer opened this tab for.
         <>
           {headerBlock}
-          <ErrorState onRetry={() => orders.refetch()} />
+          <ErrorState
+            onRetry={() => {
+              orders.refetch();
+              liveOrders.refetch();
+            }}
+          />
         </>
-      ) : rows.length === 0 ? (
+      ) : rows.length === 0 && live.length === 0 ? (
         <>
           {headerBlock}
           <EmptyState
@@ -421,17 +461,46 @@ export function OrdersHistoryScreen() {
           ListHeaderComponent={
             <View>
               {header}
+              {liveOrders.isError ? (
+                // The live query failed. Saying nothing here would render an
+                // absence as "nothing is in progress", which is the one thing
+                // this section must never imply.
+                <Pressable
+                  onPress={() => liveOrders.refetch()}
+                  accessibilityRole="button"
+                  accessibilityLabel="Retry loading orders in progress"
+                  style={{ paddingBottom: space.md }}
+                >
+                  <T variant="caption" tone="muted">
+                    Couldn’t load orders in progress. Tap to retry.
+                  </T>
+                </Pressable>
+              ) : null}
               {live.length > 0 ? (
                 <View style={{ gap: space.md, paddingBottom: space.sm }}>
                   <T variant="micro" tone="muted">IN PROGRESS</T>
                   {live.map((o, i) => (
                     <View key={o.id}>{renderLive(o, i)}</View>
                   ))}
+                  {liveHidden > 0 ? (
+                    <T variant="caption" tone="muted">
+                      +{liveHidden} more in progress
+                    </T>
+                  ) : null}
                 </View>
               ) : null}
             </View>
           }
-          refreshControl={<RefreshControl refreshing={orders.isRefetching} onRefresh={() => orders.refetch()} tintColor={color.brand[500]} />}
+          refreshControl={
+            <RefreshControl
+              refreshing={orders.isRefetching || liveOrders.isRefetching}
+              onRefresh={() => {
+                orders.refetch();
+                liveOrders.refetch();
+              }}
+              tintColor={color.brand[500]}
+            />
+          }
           contentContainerStyle={{ paddingHorizontal: space['2xl'], paddingBottom: space['3xl'] }}
           onEndReachedThreshold={0.5}
           onEndReached={() => {
