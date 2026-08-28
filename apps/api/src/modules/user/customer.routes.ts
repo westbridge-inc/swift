@@ -1,7 +1,7 @@
 import type { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 import { z } from 'zod';
 import { Prisma, VendorType, OrderStatus, NotificationType } from '@prisma/client';
-import { calculateDeliveryFee, deliveryFeeFromRates, expressDeliveryFee } from '../../utils/markup';
+import { deliveryFeeFromRates, expressDeliveryFee, type DeliveryRates } from '../../utils/markup';
 import { CountryConfigService } from '../country/country-config.service';
 import { estimateDrivingDistance, estimateDeliveryMinutes } from '../../utils/distance';
 import { getMapsProvider } from '../../providers/maps/maps-provider';
@@ -498,21 +498,40 @@ async function buildCartResponse(
   };
 }
 
-/** Enrich a vendor row with distance, ETA, and marked-up featured items. */
+/** Enrich a vendor row with distance, ETA, and marked-up featured items.
+ *
+ *  [FUL-003b completion] `deliveryRates` is REQUIRED, so every call site is a
+ *  build error until it resolves the buyer's schedule — the same device the
+ *  scheduled-cancel fix used. This function decorates every vendor CARD on
+ *  home, browse and favourites, and it used to price them with
+ *  `calculateDeliveryFee`'s hardcoded parameter defaults while the cart preview
+ *  and checkout had already moved to the per-country schedule. The defaults ARE
+ *  Georgetown's zone, so the two agree in the launch market and disagree in the
+ *  first market that sets its own rates — a browse fee that stops matching the
+ *  checkout fee, which is the one thing the express-fee helper in markup.ts
+ *  says must never happen ("the displayed total can never drift from the total
+ *  actually charged"). */
 function enrichVendor<T extends { latitude: number; longitude: number; estimatedPrepTime?: number | null }>(
   vendor: T,
-  lat?: number,
-  lng?: number,
+  lat: number | undefined,
+  lng: number | undefined,
+  deliveryRates: DeliveryRates,
 ): T & { distanceKm: number | null; etaMin: number | null; deliveryFee: number | null } {
   let distanceKm: number | null = null;
   let etaMin: number | null = null;
+  let deliveryFee: number | null = null;
   if (lat != null && lng != null) {
-    distanceKm = estimateDrivingDistance(lat, lng, vendor.latitude, vendor.longitude);
-    const deliveryMin = estimateDeliveryMinutes(distanceKm);
-    etaMin = (vendor.estimatedPrepTime || 30) + deliveryMin;
-    distanceKm = Math.round(distanceKm * 10) / 10;
+    const exactKm = estimateDrivingDistance(lat, lng, vendor.latitude, vendor.longitude);
+    etaMin = (vendor.estimatedPrepTime || 30) + estimateDeliveryMinutes(exactKm);
+    // Price from the EXACT distance, then round for display. The rounding used
+    // to happen first, so the card quoted a fee computed from a distance
+    // rounded to 100 m while the storefront header — which rounds AFTER
+    // pricing — quoted one computed from the exact distance. Same vendor, same
+    // buyer, two different fees, and the difference is real money at 350/km.
+    // Display rounding is a display concern; it had leaked into the money.
+    deliveryFee = deliveryFeeFromRates(exactKm, deliveryRates);
+    distanceKm = Math.round(exactKm * 10) / 10;
   }
-  const deliveryFee = distanceKm != null ? calculateDeliveryFee(distanceKm) : null;
   return { ...vendor, distanceKm, etaMin, deliveryFee };
 }
 
@@ -988,8 +1007,16 @@ export async function customerRoutes(app: FastifyInstance) {
     // here too — the sim certification caught these rails showing "New"
     // while browse showed the real display (the fields were missing HERE).
     const homeSurfaces = await ratingSurfaces(app.prisma, 'VENDOR', allVendors.map((v) => v.id));
+    // [FUL-003b completion] Resolve the buyer's delivery schedule ONCE for this
+    // request, exactly as the cart preview and checkout already do, so the fee
+    // on a vendor card is the fee the checkout will charge. A guest has no
+    // country of their own; 'GY' is the launch market and the same fallback
+    // courier.routes.ts uses.
+    const homeDeliveryRates = await new CountryConfigService(app.prisma).getDeliveryRates(
+      (userId ? (await app.prisma.user.findUnique({ where: { id: userId }, select: { countryCode: true } }))?.countryCode : null) ?? 'GY',
+    );
     const enriched = allVendors.map((v) => ({
-      ...enrichVendor(v, lat, lng),
+      ...enrichVendor(v, lat, lng, homeDeliveryRates),
       isFavorite: favoriteIds.has(v.id),
       ...(homeSurfaces.get(v.id) ?? NEW_ACTOR_SURFACE),
     }));
@@ -1193,8 +1220,16 @@ export async function customerRoutes(app: FastifyInstance) {
       }
     }
 
+    // [FUL-003b completion] Resolve the buyer's delivery schedule ONCE for this
+    // request, exactly as the cart preview and checkout already do, so the fee
+    // on a vendor card is the fee the checkout will charge. A guest has no
+    // country of their own; 'GY' is the launch market and the same fallback
+    // courier.routes.ts uses.
+    const browseDeliveryRates = await new CountryConfigService(app.prisma).getDeliveryRates(
+      (browserId ? (await app.prisma.user.findUnique({ where: { id: browserId }, select: { countryCode: true } }))?.countryCode : null) ?? 'GY',
+    );
     let enriched = vendors.map((v) => ({
-      ...enrichVendor(v, userLat, userLng),
+      ...enrichVendor(v, userLat, userLng, browseDeliveryRates),
       isFavorite: favoriteIds.has(v.id),
       ...(surfaces.get(v.id) ?? NEW_ACTOR_SURFACE),
       ...(categoryRow ? { itemsInCategory: itemCounts.get(v.id) ?? null } : {}),
@@ -1281,7 +1316,16 @@ export async function customerRoutes(app: FastifyInstance) {
     let etaMin: number | null = null;
     if (lat != null && lng != null) {
       distanceKm = estimateDrivingDistance(lat, lng, vendor.latitude, vendor.longitude);
-      deliveryFee = calculateDeliveryFee(distanceKm);
+      // [FUL-003b completion] Same schedule as the card and the checkout. The
+      // storefront header is the fee a customer reads just before adding to
+      // cart, so of all the display sites this is the one most likely to be
+      // remembered and compared against the total.
+      const detailRates = await new CountryConfigService(app.prisma).getDeliveryRates(
+        (request.user?.userId
+          ? (await app.prisma.user.findUnique({ where: { id: request.user.userId }, select: { countryCode: true } }))?.countryCode
+          : null) ?? 'GY',
+      );
+      deliveryFee = deliveryFeeFromRates(distanceKm, detailRates);
       etaMin = (vendor.estimatedPrepTime || 30) + estimateDeliveryMinutes(distanceKm);
       distanceKm = Math.round(distanceKm * 10) / 10;
     }
@@ -1377,8 +1421,16 @@ export async function customerRoutes(app: FastifyInstance) {
       },
     });
 
+    // [FUL-003b completion] Resolve the buyer's delivery schedule ONCE for this
+    // request, exactly as the cart preview and checkout already do, so the fee
+    // on a vendor card is the fee the checkout will charge. A guest has no
+    // country of their own; 'GY' is the launch market and the same fallback
+    // courier.routes.ts uses.
+    const favDeliveryRates = await new CountryConfigService(app.prisma).getDeliveryRates(
+      (await app.prisma.user.findUnique({ where: { id: userId }, select: { countryCode: true } }))?.countryCode ?? 'GY',
+    );
     const vendors = (customer?.favoriteVendors ?? []).map((v) => ({
-      ...enrichVendor(v, lat, lng),
+      ...enrichVendor(v, lat, lng, favDeliveryRates),
       isFavorite: true,
     }));
 
@@ -2803,7 +2855,15 @@ export async function customerRoutes(app: FastifyInstance) {
           estimatedDiscount = Number(promo.discountValue);
           break;
         case 'FREE_DELIVERY':
-          estimatedDiscount = calculateDeliveryFee(3); // estimate
+          // [FUL-003b completion] At least price the estimate with the buyer's
+          // OWN schedule rather than the code defaults. The 3 km is still an
+          // ASSUMPTION, deliberately left: this preview runs before a delivery
+          // address is necessarily chosen, and picking a better default
+          // distance is a product decision, not a refactor. Flagged rather than
+          // silently changed.
+          estimatedDiscount = deliveryFeeFromRates(3, await new CountryConfigService(app.prisma).getDeliveryRates(
+            (await app.prisma.user.findUnique({ where: { id: userId }, select: { countryCode: true } }))?.countryCode ?? 'GY',
+          ));
           break;
       }
       if (promo.maxDiscount && estimatedDiscount != null) {
