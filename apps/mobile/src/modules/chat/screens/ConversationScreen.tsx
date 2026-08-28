@@ -16,12 +16,19 @@ const GUTTER = space['2xl'];
 export function ConversationScreen() {
   const route = useRoute<any>();
   const insets = useSafeAreaInsets();
-  const orderId: string = route.params?.orderId;
+  const orderId: string | undefined = route.params?.orderId;
   const title: string = route.params?.title ?? 'Chat';
   const user = useAuthStore((s) => s.user);
 
-  const room = useChatRoom(orderId);
-  const roomId = (room.data as any)?.id;
+  // [R1] Two entry shapes, one screen. An ORDER-scoped caller passes orderId
+  // and the room is resolved from it; a caller that already holds the room —
+  // service jobs, whose chat room is created with the job — passes roomId and
+  // skips the lookup. The deleted legacy ChatScreen was the only screen that
+  // handled both, which is why two stacks were still routing it; this is that
+  // capability, moved rather than lost.
+  const paramRoomId: string | undefined = route.params?.roomId;
+  const room = useChatRoom(paramRoomId ? undefined : orderId);
+  const roomId: string | undefined = paramRoomId ?? (room.data as any)?.id;
   const messages = useChatMessages(roomId);
   const send = useSendMessage(roomId);
   const [draft, setDraft] = useState('');
@@ -45,9 +52,9 @@ export function ConversationScreen() {
   return (
     <Screen>
       <Header title={title} />
-      {room.isLoading ? (
+      {!paramRoomId && room.isLoading ? (
         <LoadingBlock />
-      ) : room.isError || !roomId ? (
+      ) : (!paramRoomId && room.isError) || !roomId ? (
         <ErrorState
           onRetry={() => room.refetch()}
           message="Chat opens once a rider is on your order."

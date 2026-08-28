@@ -379,7 +379,7 @@ export function ActiveJobScreen({ navigation }: any) {
                     )}
                   </Pressable>
                 ) : null}
-                <Pressable onPress={() => navigation.navigate('Chat', { orderId: job.id, title: custName ?? 'Customer' })} hitSlop={6}>
+                <Pressable onPress={() => navigation.navigate('Conversation', { orderId: job.id, title: custName ?? 'Customer' })} hitSlop={6}>
                   {({ pressed }) => (
                     <View style={{ width: 40, height: 40, borderRadius: 20, alignItems: 'center', justifyContent: 'center', backgroundColor: dk.cardSoft, opacity: pressed ? 0.7 : 1 }}>
                       <Feather name="message-circle" size={17} color={dk.accent} />
