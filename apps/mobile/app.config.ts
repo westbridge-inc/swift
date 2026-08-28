@@ -82,6 +82,33 @@ const splashImage = './assets/icon.png';
 // apps/web serves both, gated on APPLE_TEAM_ID / ANDROID_CERT_SHA256 env.
 const linkDomain = process.env['SWIFT_LINK_DOMAIN'] ?? 'swiftgy.com';
 
+/**
+ * THE ANDROID MAPS KEY GATE.
+ *
+ * Without this key an Android build throws a native host exception the moment
+ * any of seven screens mounts its map (see the long note beside `googleMaps`
+ * below). It cannot be caught in JS, so the only place to stop it is here,
+ * before an artifact exists.
+ *
+ * A distributable build FAILS. A developer's local build only warns: it is a
+ * real cost to them, but blocking someone working on screens that have no map
+ * would be the gate doing more harm than the bug.
+ */
+const androidMapsApiKey = process.env['ANDROID_GOOGLE_MAPS_API_KEY'];
+const isDistributableBuild =
+  process.env['EAS_BUILD'] === 'true' || process.env['CI'] === 'true';
+
+if (!androidMapsApiKey) {
+  const consequence =
+    'Android needs ANDROID_GOOGLE_MAPS_API_KEY. Without it react-native-maps ' +
+    'throws a NATIVE host exception on first map mount — order tracking, the ' +
+    'rider job flow and the PIN handover all die, and no error boundary can ' +
+    'catch it. Set it as an EAS secret restricted to this package + SHA-1.';
+  if (isDistributableBuild) throw new Error(`[swift] ${consequence}`);
+  // eslint-disable-next-line no-console
+  console.warn(`[swift] WARNING — ${consequence} Maps screens will crash in this local build.`);
+}
+
 const config: ExpoConfig = {
   // Native project/module name — 'Swift' itself is reserved by Apple's
   // standard library, so the Xcode target needs a distinct name. What users
@@ -179,13 +206,30 @@ const config: ExpoConfig = {
         category: ['BROWSABLE', 'DEFAULT'],
       },
     ],
-    // iOS uses Apple Maps (PROVIDER_DEFAULT, no key). Android's react-native-maps
-    // is always Google-backed and renders a BLANK map without a key — set
-    // ANDROID_GOOGLE_MAPS_API_KEY in the build env (EAS secret / prebuild env,
-    // never committed). Restrict the key to this package name + SHA-1.
-    ...(process.env['ANDROID_GOOGLE_MAPS_API_KEY']
-      ? { config: { googleMaps: { apiKey: process.env['ANDROID_GOOGLE_MAPS_API_KEY'] } } }
-      : {}),
+    // iOS uses Apple Maps (PROVIDER_DEFAULT, no key). Android's
+    // react-native-maps is always Google-backed, and without a key it does NOT
+    // render a blank map — that is what this comment used to say, and it is
+    // wrong in the direction that matters. `MapsInitializer.initialize` throws
+    // inside `MapViewManager.createViewInstance`, which surfaces as
+    //
+    //   FabricUIManager: Exception thrown when executing UIFrameGuarded
+    //   BridgelessReact: ReactHost.handleHostException(...)
+    //
+    // — a NATIVE host exception, not a JS error. No React error boundary can
+    // contain it, so there is no runtime defence to write. In debug it is a
+    // redbox; a release build has no redbox to absorb it.
+    //
+    // Seven screens mount a MapView: the customer's DeliveryScreen, the rider's
+    // MoverHomeScreen and ActiveJobScreen, PinConfirmScreen, TaxiScreen,
+    // CourierScreen and LocationPickerScreen. That is order tracking, the whole
+    // rider job flow, and the PIN handover. A keyless Android artifact is not
+    // an app with missing maps; it is an app that dies on contact with its own
+    // core flows.
+    //
+    // So the defence is at build time, below. Set ANDROID_GOOGLE_MAPS_API_KEY in
+    // the build env (EAS secret / prebuild env, never committed) and restrict
+    // the key to this package name + SHA-1.
+    ...(androidMapsApiKey ? { config: { googleMaps: { apiKey: androidMapsApiKey } } } : {}),
     permissions: [
       'ACCESS_FINE_LOCATION',
       'ACCESS_COARSE_LOCATION',
