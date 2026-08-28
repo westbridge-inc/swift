@@ -45,8 +45,6 @@ import { ServicesScreen } from '../modules/services/screens/ServicesScreen';
 import { ServiceJobsScreen } from '../modules/services/screens/ServiceJobsScreen';
 import { ServiceProviderScreen } from '../modules/services/screens/ServiceProviderScreen';
 import { IdentityVerificationScreen } from '../modules/account/screens/IdentityVerificationScreen';
-// Legacy order-chat screen — movement/mover flows navigate('Chat') into it.
-import { ChatScreen } from '../screens/shared/ChatScreen';
 
 const Tab = createBottomTabNavigator();
 const Stack = createNativeStackNavigator();
@@ -166,7 +164,6 @@ export function CustomerStack() {
       <Stack.Screen name="ServiceJobs" component={ServiceJobsScreen} />
       <Stack.Screen name="ServiceProvider" component={ServiceProviderScreen} />
       <Stack.Screen name="IdentityVerification" component={IdentityVerificationScreen} />
-      <Stack.Screen name="Chat" component={ChatScreen} />
     </Stack.Navigator>
   );
 }

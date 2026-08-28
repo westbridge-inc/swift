@@ -258,7 +258,7 @@ function JobCard({ job, navigation }: { job: any; navigation: any }) {
             variant="soft"
             size="md"
             style={{ flex: 1 }}
-            onPress={() => navigation.navigate('Chat', { roomId: job.chatRoomId, title: 'Job chat' })}
+            onPress={() => navigation.navigate('Conversation', { roomId: job.chatRoomId, title: 'Job chat' })}
           />
         ) : null}
         {isCustomer && ['REQUESTED', 'QUOTED'].includes(job.status) ? (

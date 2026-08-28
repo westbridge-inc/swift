@@ -6,7 +6,7 @@ import { Feather } from '@expo/vector-icons';
 import { color } from '@swift/ui';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
 import { LoadingBlock, Screen, T } from '../../kit';
-import { ChatScreen } from '../../screens/shared/ChatScreen';
+import { ConversationScreen } from '../chat/screens/ConversationScreen';
 import { useActiveJob, useBroadcastLocation, useMoverKind, useVerificationStatus } from '../../hooks';
 import { shouldTrackMoverLocation } from '../../lib/moverLocation';
 import { useMoverPreview } from '../../stores/moverPreview';
@@ -114,7 +114,7 @@ export function MoverStack() {
         <Stack.Screen name="Account" component={MoverAccountScreen} />
         <Stack.Screen name="MoverDocuments" component={MoverDocumentsScreen} />
         <Stack.Screen name="MySwiftNumber" component={MoverSwiftNumberScreen} />
-        <Stack.Screen name="Chat" component={ChatScreen} />
+        <Stack.Screen name="Conversation" component={ConversationScreen} />
         <Stack.Screen name="GetHelp" component={GetHelpScreen} />
         <Stack.Screen name="LivenessCheck" component={LivenessCheckScreen} />
       </Stack.Navigator>
