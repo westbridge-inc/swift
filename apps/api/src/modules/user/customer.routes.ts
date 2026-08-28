@@ -15,6 +15,7 @@ import { computeDaySlots, fmtSlotTime } from '../booking/availability';
 import { seedRatingTags, tagsForRole } from '../rating/tag-taxonomy.seed';
 import { RATING_MAX_TAGS } from '../rating/rating-math';
 import { ratingSurfaces, NEW_ACTOR_SURFACE } from '../rating/rating-surface';
+import { VISIBLE_VENDOR, VISIBLE_VENDOR_REL } from '../vendor/vendor-visibility';
 import { createHash, randomInt } from 'node:crypto';
 import { OrderService } from '../order/order.service';
 import { PickingService } from '../order/picking.service';
@@ -913,7 +914,7 @@ export async function customerRoutes(app: FastifyInstance) {
         // no tenant context, which the Prisma extension defines as an UNSCOPED
         // query — so without the relational predicate a deactivated operator's
         // whole catalog kept serving here after the platform shut them off.
-        where: { status: 'ACTIVE', isVerified: true, tenant: { isActive: true }, items: { some: { isAvailable: true } } },
+        where: { ...VISIBLE_VENDOR, items: { some: { isAvailable: true } } },
         include: {
           // imageUrl was NOT selected, so Home had nothing to draw a category
           // chip with and every chip fell back to the same stock photograph —
@@ -968,7 +969,7 @@ export async function customerRoutes(app: FastifyInstance) {
         // DISH sat above the fold ([F-028-07] applies here identically: a
         // guest request is unscoped, so the relational predicate is the only
         // thing standing between a shut-off operator and the Home rail).
-        where: { isAvailable: true, vendor: { status: 'ACTIVE', isVerified: true, tenant: { isActive: true } } },
+        where: { isAvailable: true, vendor: VISIBLE_VENDOR_REL },
         orderBy: { totalOrdered: 'desc' },
         take: 10,
         select: {
@@ -1067,7 +1068,7 @@ export async function customerRoutes(app: FastifyInstance) {
 
     // Require ≥1 orderable item so empty stores don't clutter browse / dead-end on tap.
     // [F-028-07] tenant.isActive rides every public browse — see /home.
-    const where: Record<string, unknown> = { status: 'ACTIVE', isVerified: true, tenant: { isActive: true }, items: { some: { isAvailable: true } } };
+    const where: Record<string, unknown> = { ...VISIBLE_VENDOR, items: { some: { isAvailable: true } } };
     if (type) where['vendorType'] = type;
 
     // Category feed (#17): membership = chosen + derived rows. A MERGED slug
@@ -1850,7 +1851,9 @@ export async function customerRoutes(app: FastifyInstance) {
       // vendor never accepts doesn't hang in PENDING forever. Fire after the
       // hold window (LIFECYCLE_V2 only) PLUS the response SLA; the worker
       // re-checks status + hold, so an accepted or still-held order is a no-op.
-      const holdMin = process.env['LIFECYCLE_V2'] === '1' ? Number(process.env['ORDER_HOLD_MINUTES'] ?? 2) : 0;
+      // [F036-03b] Same default as holdWindowMs (5, the settled value) — the
+      // preview and the writer must never disagree about the window.
+      const holdMin = process.env['LIFECYCLE_V2'] === '1' ? Number(process.env['ORDER_HOLD_MINUTES'] ?? 5) : 0;
       const slaMin = Number(process.env['VENDOR_RESPONSE_SLA_MINUTES'] ?? 10);
       for (const order of result.orders) {
         await app.queues.notificationQueue.add('vendor-alert-escalate', { orderId: order.id, level: 0 }, {
