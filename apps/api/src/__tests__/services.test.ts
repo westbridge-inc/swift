@@ -643,3 +643,114 @@ describe('Services — job lifecycle + two-way rating', () => {
     expect(confirm.json().error.code).toBe('PROVIDER_NOT_VERIFIED');
   });
 });
+
+// ---------------------------------------------------------------------------
+// P-24 — DOES BOOKING A SERVICE ACTUALLY REACH THE PROVIDER?
+//
+// Every transition on a service job notifies the other side: quote, schedule,
+// confirm, decline-slot, complete, cancel. The FIRST one did not. A customer
+// picked a tradesperson and asked them to come; the job was created, a chat
+// room was opened, 201 came back — and the person expected to answer it was
+// told nothing. It sat in REQUESTED until they happened to open the app and
+// scroll their job list.
+//
+// That is the whole flow, not a cosmetic gap: the provider must quote before
+// anything else can happen, so every later step in the ladder was waiting on a
+// signal that was never sent.
+// ---------------------------------------------------------------------------
+describe('P-24 the provider is told a customer wants to hire them', () => {
+  async function notificationsFor(userId: string) {
+    return runWithoutTenant(() =>
+      app.prisma.notification.findMany({
+        where: { userId },
+        orderBy: { createdAt: 'asc' },
+        select: { title: true, body: true, data: true },
+      }),
+    );
+  }
+
+  it('requesting a job notifies the provider', async () => {
+    const provider = await makeVerifiedProvider('plumber');
+    const customer = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
+
+    const before = await notificationsFor(provider.userId);
+    const created = await inject(
+      'POST', '/api/v1/services/jobs',
+      { providerId: provider.providerId, description: 'Kitchen tap is leaking' },
+      customer.token,
+    );
+    expect(created.statusCode).toBe(201);
+
+    const after = await notificationsFor(provider.userId);
+    expect(
+      after.length,
+      'the provider must learn a job was requested — without this the ladder never starts',
+    ).toBe(before.length + 1);
+
+    const notice = after[after.length - 1]!;
+    expect((notice.data as Record<string, unknown>)['kind']).toBe('booking_requested');
+    expect((notice.data as Record<string, unknown>)['jobId']).toBe(created.json().data.id);
+  });
+
+  it('names the trade so the provider knows what is being asked of them', async () => {
+    const provider = await makeVerifiedProvider('electrician');
+    const customer = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
+
+    await inject(
+      'POST', '/api/v1/services/jobs',
+      { providerId: provider.providerId, description: 'Sockets dead in one room' },
+      customer.token,
+    );
+
+    const notice = (await notificationsFor(provider.userId)).at(-1)!;
+    expect(notice.title).toBeTruthy();
+    expect(notice.body.toLowerCase()).toContain('electric');
+  });
+
+  it('carries no customer name and does not quote the free-text description', async () => {
+    // The description is whatever the customer typed. No sibling notification
+    // in this module quotes it, and a push preview is visible on a lock screen.
+    const provider = await makeVerifiedProvider('carpenter');
+    const customer = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
+    const secret = 'BackDoorCodeIs4417';
+
+    await inject(
+      'POST', '/api/v1/services/jobs',
+      { providerId: provider.providerId, description: secret },
+      customer.token,
+    );
+
+    const notice = (await notificationsFor(provider.userId)).at(-1)!;
+    expect(notice.body).not.toContain(secret);
+    expect(notice.body).not.toContain('Svc');
+  });
+
+  it('a refused request notifies nobody', async () => {
+    // An unverified provider is refused at the authority check, before the job
+    // exists. Notifying there would tell someone about work they cannot take.
+    const provider = await makeVerifiedProvider('plumber');
+    await runWithoutTenant(() =>
+      app.prisma.serviceProvider.update({ where: { id: provider.providerId }, data: { isVerified: false } }),
+    );
+    await runWithoutTenant(() =>
+      app.prisma.verificationDocument.updateMany({ where: { userId: provider.userId }, data: { status: 'REJECTED' } }),
+    );
+    const customer = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
+
+    const before = await notificationsFor(provider.userId);
+    const res = await inject(
+      'POST', '/api/v1/services/jobs',
+      { providerId: provider.providerId, description: 'Leaking pipe under the sink' },
+      customer.token,
+    );
+    // 403 specifically, and named: a 400 here would mean the request was thrown
+    // out by validation and never reached the verification gate — the
+    // assertion below would then pass without testing anything. (It did, at
+    // first: a four-character description fails `min(10)`.)
+    expect(res.statusCode).toBe(403);
+    expect(res.json().error.code).toBe('PROVIDER_NOT_VERIFIED');
+
+    const after = await notificationsFor(provider.userId);
+    expect(after.length, 'a rejected request must not ring anyone').toBe(before.length);
+  });
+});
