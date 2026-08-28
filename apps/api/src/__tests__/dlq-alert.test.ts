@@ -112,7 +112,16 @@ describe('the door: the DLQ endpoints have a caller again', () => {
 
   it('finds the admin app able to discard one', () => {
     expect(adminSources).toMatch(/method: 'DELETE'/);
-    expect(adminSources).toMatch(/dlq\/\$\{queue\}\/\$\{id\}`/);
+    // Not anchored on the closing backtick: the call now appends the job's
+    // identity as a query string (the compare half of compare-and-delete,
+    // R037-09), and a gate that pins the exact literal breaks on every
+    // legitimate change to the call rather than on the orphaning it guards.
+    expect(adminSources).toMatch(/dlq\/\$\{queue\}\/\$\{id\}/);
+  });
+
+  it('sends the job identity, so the server can refuse a stale row [R037-09]', () => {
+    expect(adminSources).toMatch(/expectedName/);
+    expect(adminSources).toMatch(/expectedFinishedOn/);
   });
 
   it('finds the page reachable from navigation, not only by typing the URL', () => {

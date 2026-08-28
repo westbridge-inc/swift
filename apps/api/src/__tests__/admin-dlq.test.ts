@@ -1,4 +1,6 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { readFileSync } from 'fs';
+import { join } from 'path';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { Queue } from 'bullmq';
 import { prismaPlugin } from '../plugins/prisma';
@@ -109,14 +111,101 @@ describe('GET /admin/dlq', () => {
     expect(requeue.statusCode).toBe(200);
     expect(await job.getState()).not.toBe('failed');
 
-    // Let it fail once more (no worker now — it sits waiting; move on) and
-    // discard by id: gone for good.
-    const discard = await app.inject({
+    // [REPORT-037 R037-09] The requeued job is now WAITING, not failed — it is
+    // live work again. Discarding it must be REFUSED, not obeyed.
+    //
+    // This assertion used to be the opposite: it deleted the waiting job and
+    // asserted it was gone, which blessed the exact sequence that permanently
+    // destroys a live money job (Retry, then Discard from a stale page, or two
+    // operators on the same queue).
+    const discardLive = await app.inject({
       method: 'DELETE', url: `/api/v1/admin/dlq/order/${job.id}`,
       headers: { authorization: `Bearer ${adminToken}` },
     });
-    expect(discard.statusCode).toBe(200);
+    expect(discardLive.statusCode).toBe(409);
+    expect(discardLive.json().error.code).toBe('JOB_NO_LONGER_FAILED');
+    expect(await testQueue.getJob(job.id!)).toBeTruthy();
+  });
+
+  it('refuses to act on a DIFFERENT job that inherited the same id [R037-09]', async () => {
+    // BullMQ reuses numeric ids after a queue is obliterated and recreated, so
+    // an id alone does not identify a job. The page sends what it actually saw;
+    // a mismatch is a 409, not an action on the wrong job.
+    const { Worker } = await import('bullmq');
+    const job = await testQueue.add('doomed-identity', { orderId: 'ident-1' }, { attempts: 1 });
+    const worker = new Worker(
+      testQueue.name,
+      async () => { throw new Error('boom: identity'); },
+      { connection: app.redis.duplicate({ maxRetriesPerRequest: null }) as unknown as import('bullmq').ConnectionOptions },
+    );
+    for (let i = 0; i < 50; i++) {
+      if ((await job.getState()) === 'failed') break;
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    await worker.close();
+
+    const wrongName = await app.inject({
+      method: 'DELETE',
+      url: `/api/v1/admin/dlq/order/${job.id}?expectedName=something-else`,
+      headers: { authorization: `Bearer ${adminToken}` },
+    });
+    expect(wrongName.statusCode).toBe(409);
+    expect(wrongName.json().error.code).toBe('JOB_IDENTITY_MISMATCH');
+    expect(await testQueue.getJob(job.id!)).toBeTruthy();
+
+    // The matching identity is accepted, so the guard is a compare, not a wall.
+    const right = await app.inject({
+      method: 'DELETE',
+      url: `/api/v1/admin/dlq/order/${job.id}?expectedName=doomed-identity`,
+      headers: { authorization: `Bearer ${adminToken}` },
+    });
+    expect(right.statusCode).toBe(200);
     expect(await testQueue.getJob(job.id!)).toBeUndefined();
+  });
+
+  it('records the privileged mutation in the audit log [R037-08]', async () => {
+    const { Worker } = await import('bullmq');
+    const job = await testQueue.add('doomed-audit', { orderId: 'audit-1' }, { attempts: 1 });
+    const worker = new Worker(
+      testQueue.name,
+      async () => { throw new Error('boom: audit'); },
+      { connection: app.redis.duplicate({ maxRetriesPerRequest: null }) as unknown as import('bullmq').ConnectionOptions },
+    );
+    for (let i = 0; i < 50; i++) {
+      if ((await job.getState()) === 'failed') break;
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    await worker.close();
+
+    const before = await app.prisma.auditLog.count({ where: { action: 'DISCARD_DLQ_JOB', entityId: `order:${job.id}` } });
+    const res = await app.inject({
+      method: 'DELETE', url: `/api/v1/admin/dlq/order/${job.id}`,
+      headers: { authorization: `Bearer ${adminToken}` },
+    });
+    expect(res.statusCode).toBe(200);
+    const after = await app.prisma.auditLog.count({ where: { action: 'DISCARD_DLQ_JOB', entityId: `order:${job.id}` } });
+    expect(after).toBe(before + 1);
+  });
+
+  it('audits BEFORE it mutates, so a failed audit cannot leave an unrecorded mutation [R037-08]', () => {
+    // The ordering IS the control. Mutating first meant an audit failure
+    // returned 500 with the mutation already done — and the automatic audit
+    // hook deliberately skips responses >= 400, so the action could end up with
+    // no record at all. Asserted on code with comments stripped.
+    const routes = readFileSync(join(process.cwd(), 'src/modules/admin/admin.routes.ts'), 'utf8')
+      .split('\n')
+      .filter((l) => {
+        const t = l.trim();
+        return !t.startsWith('//') && !t.startsWith('*') && !t.startsWith('/*');
+      })
+      .join('\n');
+    const helper = routes.slice(routes.indexOf('async function auditedDlqAction('), routes.indexOf('/** POST /dlq/'));
+    expect(helper).toBeTruthy();
+    // the audit call comes first, the mutation after it
+    expect(helper.indexOf('await audit(')).toBeGreaterThan(-1);
+    expect(helper.indexOf('await mutate()')).toBeGreaterThan(helper.indexOf('await audit('));
+    // and a failed mutation is itself recorded rather than silently swallowed
+    expect(helper).toMatch(/_FAILED/);
   });
 
   it('404s an unknown queue and an unknown job', async () => {
