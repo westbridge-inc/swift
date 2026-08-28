@@ -962,7 +962,26 @@ export async function customerRoutes(app: FastifyInstance) {
             },
             select: {
               id: true, orderNumber: true, status: true,
+              // orderType decides the WORDS. `lib/orderStatus.ts` picks the
+              // taxi, courier or from-a-store table from it, and with the field
+              // absent every order fell through to from-a-store — so a passenger
+              // sitting in the back of a moving car was told "Waiting for the
+              // store" on Home. That client fix was already correct; it was
+              // defeated here, at the select, where nothing failed.
+              orderType: true,
               vendor: { select: { id: true, name: true, logoUrl: true } },
+              // The hold — the window in which the store has not been told yet.
+              // `holdExpiresAt` and `placedAt` are its two ends, and the client's
+              // `holdRingWindow` refuses to draw anything unless BOTH came from
+              // the server rather than being synthesized from an assumed length.
+              //
+              // It goes over the wire as an ABSOLUTE instant, never a
+              // remaining-seconds count: this response is cached for
+              // HOME_CACHE_TTL (60s) against a five-minute window, so a
+              // server-baked countdown would arrive up to 20% wrong on the one
+              // number the cancellation policy is built around. An absolute
+              // timestamp is still exactly true when it comes out of the cache.
+              holdExpiresAt: true,
               estimatedDeliveryTime: true, placedAt: true,
             },
             orderBy: { placedAt: 'desc' },
