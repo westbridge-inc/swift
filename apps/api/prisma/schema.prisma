@@ -171,6 +171,11 @@ model Session {
 
   @@map("sessions")
   @@index([expiresAt]) // retention sweep cutoff [F-021-20]
+  // [P2] Revocation is a WHERE on userId — theft response, authority
+  // revocation, account deletion, and the User cascade all take this path.
+  // Without the index each one sequential-scanned the largest table in the
+  // schema while holding a transaction.
+  @@index([userId])
 }
 
 enum SessionAuthMethod {
