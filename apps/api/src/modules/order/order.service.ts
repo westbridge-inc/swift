@@ -163,7 +163,16 @@ export const ORDER_TRANSITIONS: Record<OrderStatus, OrderStatus[]> = {
 
 /** States where the order is physically with the mover — no cancellation. */
 const IN_TRANSIT: OrderStatus[] = ['PICKED_UP', 'EN_ROUTE_DELIVERY', 'ARRIVED', 'RIDE_IN_PROGRESS'];
-const TERMINAL_ORDER_STATUSES: OrderStatus[] = ['DELIVERED', 'COMPLETED', 'CANCELLED', 'REFUNDED', 'FAILED'];
+/**
+ * The order is over. EXPORTED because a hand-written copy of this list drifted
+ * and shipped: Home's active-order query omitted FAILED, so a failed handover
+ * rendered as a live order with "Track order" forever — and, being the newest
+ * row, MASKED the customer's genuinely live order behind it.
+ *
+ * Anything asking "is this order finished" imports this. A second list is a
+ * second answer, and the two only have to disagree once.
+ */
+export const TERMINAL_ORDER_STATUSES: OrderStatus[] = ['DELIVERED', 'COMPLETED', 'CANCELLED', 'REFUNDED', 'FAILED'];
 
 // ---------------------------------------------------------------------------
 // [SPS-F-0016 / LB-015] The MMG payment-first law. An MMG marketplace order is
