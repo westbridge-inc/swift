@@ -178,9 +178,18 @@ export function MarketScreen() {
                     ) : (
                       // Only what the server actually sent — never an invented
                       // rating and never a placeholder distance.
+                      //
+                      // [ALG-31 / L2] `displayRating`, NOT `averageRating`. The
+                      // raw lifetime mean was rendered here, so City Hardware —
+                      // ONE rating, of 1 — showed ★1.0 on the front page of the
+                      // Market tab. `rating-surface.ts` is the one mapper and it
+                      // returns null below RATING_MIN_DISPLAY (5), which is what
+                      // makes that card read "New" instead. It is also the
+                      // protection new vendors depend on: a single bad rating
+                      // must never brand a shop before it has a record.
                       <View style={{ marginTop: 2 }}>
                         <RatingMeta
-                          rating={v.averageRating ?? null}
+                          rating={v.displayRating ?? null}
                           extra={v.distanceKm != null ? `${v.distanceKm} km` : undefined}
                         />
                       </View>
