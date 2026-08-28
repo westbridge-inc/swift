@@ -265,6 +265,10 @@ const CENSUS: Case[] = [
   // console's Background jobs page — there is no mobile admin surface, so the
   // app opening normally is the correct destination, not a gap.
   { k: 'ops_dlq_non_empty', to: null, why: 'admins — acted on in the admin console, no mobile surface exists' },
+  // Third alarm from the same heartbeat: OSRM is unreachable and every fare,
+  // ETA and dispatch ranking has quietly reverted to straight-line distance.
+  // Admin-only, and the action is on the OSRM host, not in any app.
+  { k: 'ops_osrm_fallback', to: null, why: 'admins — the fix is on the routing host, not on a screen' },
   { k: 'ops_scheduler_stall', to: null, why: 'admins — kind built from a ternary', scan: false },
   { k: 'ops_scheduler_never_booted', to: null, why: 'admins — kind built from a ternary', scan: false },
   { k: 'billing_dunning_ops_task', to: null, why: 'admins' },
