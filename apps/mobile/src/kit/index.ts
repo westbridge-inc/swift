@@ -25,6 +25,9 @@ export * from './photo-placeholder';
 export * from './pictograms';
 export * from './glyphs';
 export * from './ride-sheet';
+export * from './timeline';
+export * from './photo-drop';
+export * from './sheet';
 export * from './vehicle-render';
 export * from './map-style';
 // [DRIFT-09] The nine legacy-only primitives, authored into the kit so
