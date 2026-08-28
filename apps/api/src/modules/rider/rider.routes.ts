@@ -125,13 +125,33 @@ async function getOwnedOrder(app: FastifyInstance, orderId: string, riderId: str
   return order;
 }
 
-/** Allowed status transitions for the rider lifecycle. */
-const STATUS_TRANSITIONS: Record<string, { from: string[]; to: string }> = {
-  'en-route-pickup': { from: ['RIDER_ASSIGNED'], to: 'RIDER_EN_ROUTE_PICKUP' },
-  'arrived-pickup':  { from: ['RIDER_EN_ROUTE_PICKUP'], to: 'RIDER_ARRIVED_PICKUP' },
-  'picked-up':       { from: ['RIDER_ARRIVED_PICKUP', 'READY_FOR_PICKUP'], to: 'PICKED_UP' },
-  'en-route-delivery': { from: ['PICKED_UP'], to: 'EN_ROUTE_DELIVERY' },
-  'arrived':         { from: ['EN_ROUTE_DELIVERY'], to: 'ARRIVED' },
+/**
+ * Allowed status transitions for the rider lifecycle.
+ *
+ * `note` IS REQUIRED, and that is the point. Every one of these transitions was
+ * writing an audit row with a null note, because the generic handler below
+ * called `updateStatus` without the fourth argument. Measured on the database:
+ * RIDER_EN_ROUTE_PICKUP, RIDER_ARRIVED_PICKUP, PICKED_UP, EN_ROUTE_DELIVERY and
+ * ARRIVED were 17/17 null each — while every vendor- and dispatch-driven status
+ * carried a note on ~100% of rows. The trail was blind on exactly the moves a
+ * courier makes alone, unobserved, which are exactly the moves that get
+ * disputed. Typing `note` as required means a sixth transition cannot be added
+ * without one.
+ *
+ * THE WORDING DISTINGUISHES A DEED FROM A CLAIM. "Accepted by vendor" is
+ * accurate because pressing accept IS the acceptance. Pressing "I've arrived"
+ * is not an arrival — it is the rider's assertion about the physical world, and
+ * `arrived` still has no GPS check to test it against. So the arrival rows say
+ * "reported". The enforcement ladder reads these logs when a customer and a
+ * rider disagree, and a log that records a claim as a fact is worse than one
+ * that records nothing.
+ */
+const STATUS_TRANSITIONS: Record<string, { from: string[]; to: string; note: string }> = {
+  'en-route-pickup': { from: ['RIDER_ASSIGNED'], to: 'RIDER_EN_ROUTE_PICKUP', note: 'Rider started the run to pickup' },
+  'arrived-pickup':  { from: ['RIDER_EN_ROUTE_PICKUP'], to: 'RIDER_ARRIVED_PICKUP', note: 'Rider reported arriving at pickup' },
+  'picked-up':       { from: ['RIDER_ARRIVED_PICKUP', 'READY_FOR_PICKUP'], to: 'PICKED_UP', note: 'Rider confirmed collecting the order' },
+  'en-route-delivery': { from: ['PICKED_UP'], to: 'EN_ROUTE_DELIVERY', note: 'Rider started the run to the customer' },
+  'arrived':         { from: ['EN_ROUTE_DELIVERY'], to: 'ARRIVED', note: 'Rider reported arriving at the customer' },
 };
 
 // DASH-06: "today"/"this week"/"this month" for earnings are Guyana-local
@@ -1116,7 +1136,7 @@ export async function riderRoutes(app: FastifyInstance) {
    *   PUT /orders/:id/en-route-delivery
    *   PUT /orders/:id/arrived
    */
-  for (const [slug, { from, to }] of Object.entries(STATUS_TRANSITIONS)) {
+  for (const [slug, { from, to, note }] of Object.entries(STATUS_TRANSITIONS)) {
     app.put(`/orders/:id/${slug}`, { preHandler: [app.authenticate] }, async (request) => {
       const { id } = request.params as { id: string };
       const rider = await getRider(app, request.user.userId);
@@ -1130,7 +1150,7 @@ export async function riderRoutes(app: FastifyInstance) {
         );
       }
 
-      const updated = await orderService.updateStatus(id, to, request.user.userId);
+      const updated = await orderService.updateStatus(id, to, request.user.userId, note);
 
       return {
         success: true,

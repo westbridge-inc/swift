@@ -968,7 +968,11 @@ export async function driverRoutes(app: FastifyInstance) {
       data: { status: 'DRIVER_EN_ROUTE' },
     });
     if (claimed.count === 0) throw new AppError(409, 'INVALID_STATUS', `Cannot mark en-route from status ${order.status}`);
-    await app.prisma.orderStatusLog.create({ data: { orderId: id, status: 'DRIVER_EN_ROUTE', changedBy: request.user.userId } });
+    // Named in the trail, like every vendor- and dispatch-driven transition
+    // already is. This row was 8/8 null on the database.
+    await app.prisma.orderStatusLog.create({
+      data: { orderId: id, status: 'DRIVER_EN_ROUTE', changedBy: request.user.userId, note: 'Driver started the run to the passenger' },
+    });
     const updatedOrder = await app.prisma.order.findUniqueOrThrow({ where: { id }, omit: HANDOVER_SECRETS_OMIT });
 
     // Compute ETA to pickup
@@ -1012,7 +1016,11 @@ export async function driverRoutes(app: FastifyInstance) {
       data: { status: 'DRIVER_ARRIVED' },
     });
     if (claimed.count === 0) throw new AppError(409, 'INVALID_STATUS', `Cannot mark arrived from status ${order.status}`);
-    await app.prisma.orderStatusLog.create({ data: { orderId: id, status: 'DRIVER_ARRIVED', changedBy: request.user.userId } });
+    // "reported", not "arrived": pressing the button is the driver's claim
+    // about where they are, and nothing here tests it against a position.
+    await app.prisma.orderStatusLog.create({
+      data: { orderId: id, status: 'DRIVER_ARRIVED', changedBy: request.user.userId, note: 'Driver reported arriving at the pickup point' },
+    });
     const updatedOrder = await app.prisma.order.findUniqueOrThrow({ where: { id }, omit: HANDOVER_SECRETS_OMIT });
 
     app.io.to(`order:${id}`).emit('order:status_changed', {
