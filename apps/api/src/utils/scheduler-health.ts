@@ -12,6 +12,34 @@
 // ~60s, so we only conclude "never booted" once THIS instance has been up past
 // the stall threshold with still no beat anywhere in (shared) Redis.
 
+/**
+ * How long without a heartbeat before the scheduler is considered stalled
+ * [REPORT-037 R037-27].
+ *
+ * This used to be `Number(process.env[...] ?? '5') * 60_000` at the call site,
+ * and `Number('Infinity')` is `Infinity`. A syntactically plausible value
+ * therefore made `ageMs <= stallMs` true forever, silently disabling BOTH
+ * paging paths — the stalled-worker page and the never-booted page.
+ *
+ * That is the worst possible thing for this particular dial to do: the
+ * scheduler heartbeat is the fallback that covers every other heartbeat-driven
+ * alarm (pool saturation, dead letters, routing degradation all ride the same
+ * job). Turning it off quietly turns those off too.
+ *
+ * Total-parsed: only a finite positive number counts, so junk and Infinity both
+ * degrade to the documented default rather than to silence. NaN would have
+ * failed LOUD (paging constantly), which is the safe direction — Infinity fails
+ * silent, which is not.
+ */
+export const DEFAULT_SCHEDULER_STALL_MINUTES = 5;
+
+export function schedulerStallMs(env: Record<string, string | undefined> = process.env): number {
+  const raw = env['SCHEDULER_STALL_ALERT_MINUTES']?.trim();
+  const parsed = raw === undefined || raw === '' ? NaN : Number(raw);
+  const minutes = Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_SCHEDULER_STALL_MINUTES;
+  return minutes * 60_000;
+}
+
 export type SchedulerHealth =
   | { page: false }
   | { page: true; kind: 'stall' | 'never-booted'; ageMs: number };
