@@ -26,7 +26,7 @@ import { partnerRoutes } from './modules/partner/partner.routes';
 import { aiRoutes } from './modules/ai/ai.routes';
 import { setAppLogger } from './utils/logger';
 import { assertSafeBootConfig, assertProductionData } from './utils/boot-config';
-import { evaluateSchedulerHealth } from './utils/scheduler-health';
+import { evaluateSchedulerHealth, schedulerStallMs } from './utils/scheduler-health';
 import { prismaPlugin, beginRequestTenantContext } from './plugins/prisma';
 import { authPlugin } from './plugins/auth';
 import { socketPlugin } from './plugins/socket';
@@ -189,7 +189,7 @@ async function buildApp() {
     // (30 min) and fire-and-caught: paging never slows a probe.
     void (async () => {
       const beat = await app.redis.get('scheduler:heartbeat');
-      const stallMs = Number(process.env['SCHEDULER_STALL_ALERT_MINUTES'] ?? '5') * 60_000;
+      const stallMs = schedulerStallMs();
       // `!beat` is NOT benign: the heartbeat key has no TTL, so its absence means
       // the worker fleet never booted (crash / RUN_WORKERS misconfigured). Page it
       // once we're past the grace window — the case this check used to swallow.
