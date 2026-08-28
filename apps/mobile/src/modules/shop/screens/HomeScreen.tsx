@@ -25,6 +25,9 @@ import { CategoryRail, CAT_RAIL_MIN_CHIPS } from '../CategoryRail';
 import { categoryPhoto, itemPhoto, vendorPhoto } from '../../../lib/images';
 import { money } from '../../../lib/money';
 import { orderStatusLabel, orderSubtitle } from '../../../lib/orderStatus';
+// ONE hold authority, shared with the tracking screen — never a second
+// countdown that could disagree with it about whether the window is open.
+import { holdRingActive, holdRingWindow } from '../../../kit/hold-window';
 import {
   Card,
   ErrorState,
@@ -144,6 +147,94 @@ function ServiceTile({ item, index, navigation }: { item: (typeof SERVICES)[numb
       </T>
     </PressableScale>
     </Animated.View>
+  );
+}
+
+/**
+ * The live order, as Home shows it.
+ *
+ * Two things it must never do. It must never describe the order with the wrong
+ * vertical's words — `orderStatusLabel` needs `orderType`, and Home's feed did
+ * not send it, so every order read as a food order. And it must never invent
+ * the hold: the countdown comes from `holdRingWindow`, the same seam the
+ * tracking screen uses, which returns null unless BOTH ends of the window
+ * arrived from the server. No local five-minute assumption, one authority.
+ */
+function LiveOrderCard({ order, navigation }: { order: any; navigation: any }) {
+  // Tick ONLY while a hold is actually running. `holdRingWindow` is pure, so
+  // re-evaluating it against a fresh `now` is the whole animation; when the
+  // window closes the interval clears itself and the card goes quiet.
+  const [now, setNow] = useState(() => Date.now());
+  const holdRunning = holdRingActive(order.holdExpiresAt, now, false);
+  React.useEffect(() => {
+    if (!holdRunning) return;
+    const t = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(t);
+  }, [holdRunning]);
+
+  const hold = holdRingWindow(order.holdExpiresAt, order.placedAt, now, false);
+  const remaining = hold ? Math.ceil(hold.remainingMs / 1000) : 0;
+  const mmss = `${Math.floor(remaining / 60)}:${String(remaining % 60).padStart(2, '0')}`;
+
+  return (
+    <View style={{ paddingHorizontal: GUTTER, marginTop: space.lg }}>
+      <Card style={{ gap: space.md }}>
+        <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.md }}>
+          <View style={{ flex: 1 }}>
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+              <View
+                style={{
+                  width: 8,
+                  height: 8,
+                  borderRadius: 4,
+                  // Amber while held: this is a state with something to DO in
+                  // it, not the green "everything is proceeding" of an order
+                  // already with the store.
+                  backgroundColor: hold ? color.warning : color.success,
+                }}
+              />
+              <T variant="body" weight="semibold">
+                {hold
+                  ? `Held — goes to ${order.vendor?.name ?? 'the store'} in ${mmss}`
+                  : orderStatusLabel(order.status, order.orderType)}
+              </T>
+            </View>
+            <T variant="caption" tone="muted" style={{ marginTop: 4 }}>
+              {hold
+                ? // NOT "cancel free until then" [REPORT-011 F-02 / INV-7]: the
+                  // server owns the timer, a skewed device clock can keep this
+                  // card alive past the real window, and promising "free" from
+                  // that clock is the app making a money claim it cannot keep.
+                  // What stays true on any clock is that the store has not been
+                  // told yet — the cost, if any, is shown before confirming.
+                  `The store hasn’t been told yet · ${orderSubtitle(null, order.orderNumber)}`
+                : orderSubtitle(order.vendor?.name, order.orderNumber)}
+            </T>
+          </View>
+          <PillButton
+            label={hold ? 'Review' : 'Track order'}
+            variant="dark"
+            size="sm"
+            onPress={() => navigation.navigate('Delivery', { orderId: order.id })}
+          />
+        </View>
+
+        {/* The window, drawn. `progress` is remaining/total from the server's
+            own two timestamps — it is not a duration this screen assumed. */}
+        {hold ? (
+          <View style={{ height: 4, borderRadius: 2, backgroundColor: color.surface.subtle, overflow: 'hidden' }}>
+            <View
+              style={{
+                width: `${Math.round(hold.progress * 100)}%`,
+                height: '100%',
+                borderRadius: 2,
+                backgroundColor: color.warning,
+              }}
+            />
+          </View>
+        ) : null}
+      </Card>
+    </View>
   );
 }
 
@@ -336,6 +427,24 @@ export function HomeScreen() {
           <RefreshControl refreshing={home.isRefetching} onRefresh={() => home.refetch()} tintColor={color.brand[500]} />
         }
       >
+        {/* THE LIVE ORDER, FIRST — and it used to say so while rendering fourth.
+            This block carried the comment "Live order first — the thing you
+            actually care about right now" from a position BELOW the tiles, below
+            the popular rail and below the category rail. On a phone that put a
+            running order under a horizontally-scrolling food carousel, off the
+            bottom of the screen.
+
+            It matters most in the hold. For the length of the hold window the
+            store has not been told about this order yet, and cancelling costs
+            nothing — that window is the whole basis of the cancellation policy,
+            and a customer cannot act on a window they have to scroll to find.
+
+            The marketplace-first decision below is NOT reversed: with no live
+            order this renders nothing and the food is still the first thing on
+            Home. An order in flight is not a launcher tile — it is transient,
+            it is timed, and while it exists it outranks browsing. */}
+        {activeOrder ? <LiveOrderCard order={activeOrder} navigation={navigation} /> : null}
+
         {/* THE services grid — 4x2, drawn icons, ON OPEN PAPER.
             [100x pass §5/§6] "hairline rows on open paper (no card chassis)".
             This grid used to sit in a floating white card with a shadow, which
@@ -417,31 +526,6 @@ export function HomeScreen() {
           onChip={(c) => navigation.navigate('CategoryFeed', { slug: c.slug, name: c.name, emoji: c.emoji })}
           onSeeAll={() => navigation.navigate('CategoryGrid')}
         />
-
-        {/* Live order first — the thing you actually care about right now */}
-        {activeOrder ? (
-          <View style={{ paddingHorizontal: GUTTER, marginTop: space.lg }}>
-            <Card style={{ flexDirection: 'row', alignItems: 'center', gap: space.md }}>
-              <View style={{ flex: 1 }}>
-                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
-                  <View style={{ width: 8, height: 8, borderRadius: 4, backgroundColor: color.success }} />
-                  <T variant="body" weight="semibold">
-                    {orderStatusLabel(activeOrder.status, activeOrder.orderType)}
-                  </T>
-                </View>
-                <T variant="caption" tone="muted" style={{ marginTop: 4 }}>
-                  {orderSubtitle(activeOrder.vendor?.name, activeOrder.orderNumber)}
-                </T>
-              </View>
-              <PillButton
-                label="Track order"
-                variant="dark"
-                size="sm"
-                onPress={() => navigation.navigate('Delivery', { orderId: activeOrder.id })}
-              />
-            </Card>
-          </View>
-        ) : null}
 
         {/* Tier 1 — hero video slot (§13.1). Present only when sold+live. */}
         {heroAd ? (
