@@ -35,8 +35,21 @@
  * above it, read the env explicitly before calling this.
  */
 
-/** Which process is asking. The two have very different shapes of work. */
-export type PoolRole = 'api' | 'worker';
+/**
+ * Which process is asking. Three shapes, not two — and the third is the one
+ * that was missed the first time round.
+ *
+ *   'api'       HTTP only. Set RUN_WORKERS=0 and run a dedicated worker.
+ *   'worker'    the dedicated `node dist/worker.js` entrypoint.
+ *   'combined'  the DEFAULT topology: `RUN_WORKERS` unset means the API process
+ *               runs the HTTP server AND all 19 job consumers, sharing ONE
+ *               Prisma client (server.ts hands the runtime `app.prisma`). Sized
+ *               at the API pool, that process was still starved for exactly the
+ *               workload this module exists to fix — the original change only
+ *               helped the split topology, which is the one nobody runs by
+ *               default.
+ */
+export type PoolRole = 'api' | 'worker' | 'combined';
 
 /**
  * The shape of `process.env` that this module needs, written structurally
@@ -46,6 +59,16 @@ export type PoolRole = 'api' | 'worker';
  * function: a test passes a plain object, never a mutated global.
  */
 type EnvLike = Record<string, string | undefined>;
+
+/**
+ * Headroom over declared job concurrency, for the work that runs in the same
+ * process OUTSIDE a job slot: the scheduler heartbeat, repeatable-job
+ * registration, and interactive `$transaction` callbacks that hold a connection
+ * for the body of the callback. Exported so the test asserts THIS number rather
+ * than a copy of it — with a private copy, dropping the worker pool by one
+ * satisfied the test while contradicting the documented sizing.
+ */
+export const POOL_HEADROOM = 6;
 
 /**
  * Worker default. 19 declared job concurrency + 6 headroom for the work that
@@ -67,6 +90,14 @@ export const DEFAULT_WORKER_POOL = 25;
 export const DEFAULT_API_POOL = 15;
 
 /**
+ * Combined default: the API's request budget PLUS the worker's, because in this
+ * topology one client serves both. Not a compromise between them — a process
+ * doing both jobs needs both budgets, and halving either is how the starvation
+ * comes back quietly.
+ */
+export const DEFAULT_COMBINED_POOL = DEFAULT_API_POOL + DEFAULT_WORKER_POOL;
+
+/**
  * Seconds a query waits for a free connection before failing. Prisma's own
  * default is 10; stating it makes the number reviewable in one place instead of
  * being an invisible library default at the moment it starts mattering.
@@ -76,12 +107,23 @@ export const DEFAULT_POOL_TIMEOUT_SECONDS = 10;
 const POOL_DEFAULTS: Record<PoolRole, number> = {
   api: DEFAULT_API_POOL,
   worker: DEFAULT_WORKER_POOL,
+  combined: DEFAULT_COMBINED_POOL,
 };
 
 const SIZE_ENV_VAR: Record<PoolRole, string> = {
   api: 'DB_POOL_SIZE_API',
   worker: 'DB_POOL_SIZE_WORKER',
+  combined: 'DB_POOL_SIZE_COMBINED',
 };
+
+/**
+ * The role THIS process actually plays, read from the same variable server.ts
+ * reads. `RUN_WORKERS` unset or anything other than '0' means this process runs
+ * the consumers too — the default single-process topology.
+ */
+export function poolRoleForApiProcess(env: EnvLike = process.env): PoolRole {
+  return env['RUN_WORKERS'] === '0' ? 'api' : 'combined';
+}
 
 /**
  * Total-parse an integer env var (the REPORT-036 lesson: a partial parse turns
@@ -138,9 +180,14 @@ export function resolveDatabaseUrl(
 
   // An operator who stated a limit has made a decision — possibly sized against
   // a PgBouncer budget this process cannot see. Never overrule it.
-  if (url.searchParams.has('connection_limit')) return rawUrl;
-
-  url.searchParams.set('connection_limit', String(poolSizeFor(role, env)));
+  //
+  // But it used to return here, which silently threw away a SEPARATELY
+  // configured DB_POOL_TIMEOUT_SECONDS: both dials looked set, and only one was
+  // in effect. The two settings are independent, so an explicit limit now
+  // suppresses only the limit.
+  if (!url.searchParams.has('connection_limit')) {
+    url.searchParams.set('connection_limit', String(poolSizeFor(role, env)));
+  }
   if (!url.searchParams.has('pool_timeout')) {
     url.searchParams.set('pool_timeout', String(poolTimeoutSeconds(env)));
   }
