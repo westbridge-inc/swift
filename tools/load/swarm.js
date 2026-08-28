@@ -6,7 +6,7 @@
 //   k6 run tools/load/swarm.js
 //
 // Without ORDER_TOKENS it runs a read-only browse swarm (still a valid SLO test).
-import { browse, order, browseErrors, orderErrors, orderLatency, idempotencyViolations } from './lib.js';
+import { browse, order, browseErrors, orderErrors, orderLatency, idempotencyViolations, rateLimited } from './lib.js';
 
 export { browse, order };
 
@@ -41,9 +41,15 @@ export const options = {
     // The correctness invariant is absolute — a single idempotency violation
     // fails the whole run, regardless of latency.
     idempotency_violations: ['rate==0'],
+    // MEASUREMENT VALIDITY: every VU on one host shares a source IP, and Swift
+    // rate-limits anonymous traffic per IP at RATE_LIMIT_MAX/minute. If this
+    // trips, the run measured the LIMITER, not the system — raise
+    // RATE_LIMIT_MAX in the load environment (or drive from multiple hosts) and
+    // run again. It is not an API failure and must not be read as one.
+    rate_limited: ['rate<0.01'],
   },
 };
 
 // Silence the unused-import lint for the metrics (they're referenced by name in
 // `thresholds` above, which k6 resolves at runtime, not statically).
-void [browseErrors, orderErrors, orderLatency, idempotencyViolations];
+void [browseErrors, orderErrors, orderLatency, idempotencyViolations, rateLimited];

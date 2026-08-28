@@ -15,6 +15,30 @@ against local or staging. **Never run the write scenarios against production.**
 | `swarm.js` | **Sustain** a launch-plausible peak and prove the SLOs hold | ~200 browsers + ~20 orders/min for 6m |
 | `breakpoint.js` | **Ramp to break** — find the capacity ceiling | 50 → 3000 req/s, aborts at the SLO break |
 
+## ⚠️ Before you run: the per-IP rate limit will invalidate the result
+
+Swift rate-limits at `RATE_LIMIT_MAX` per minute, keyed on the **session token**
+for authenticated traffic and the **source IP** for anonymous traffic. Every k6
+VU on one host shares one source IP, so a browse swarm above that ceiling is
+throttled by design.
+
+Measured 2026-08-28 against a local API at the shipped `RATE_LIMIT_MAX=200`:
+
+```
+260 rapid anonymous requests   ->  187 x 200, 73 x 429
+200-VU swarm                   ->  90.46% "browse errors", nearly all 429s
+same swarm, RATE_LIMIT_MAX raised -> 0.00% errors
+```
+
+**The first number is the limiter working correctly, not the API failing.** A
+run that trips it has measured the limiter and proved nothing about the system.
+The harness now counts 429s as a separate `rate_limited` metric with its own
+threshold, so this fails the run LOUDLY instead of masquerading as either a
+system failure or a pass.
+
+So: raise `RATE_LIMIT_MAX` in the load environment (or drive from many hosts)
+before drawing any conclusion.
+
 ## Run
 
 ```bash
@@ -28,6 +52,16 @@ BASE_URL=https://staging-api.swift.gy \
 
 # 3. Breakpoint (staging) — read-only, pushes until the SLO breaks
 BASE_URL=https://staging-api.swift.gy k6 run tools/load/breakpoint.js
+```
+
+### Running the API for a load test
+
+```bash
+# NODE_ENV != 'development' turns OFF Prisma per-query logging, which otherwise
+# dominates the measurement. NODE_ENV != 'production' keeps the boot guards
+# relaxed for a local stack.
+cd apps/api && NODE_ENV=loadtest LOG_LEVEL=warn RATE_LIMIT_MAX=1000000 \
+  npx tsx src/server.ts
 ```
 
 `ORDER_TOKENS` are pre-seeded customer access tokens whose accounts have a
@@ -48,6 +82,29 @@ valid SLO test — browse is most of the traffic). The golden-path harness
   `Idempotency-Key`; the replay must return the first result, never a second
   order. One violation fails the whole run regardless of latency — a load test
   that trades correctness for throughput has proved nothing.
+
+## Measured results
+
+Record every run here so a regression is visible. **This harness had never been
+executed before 2026-08-28** — the numbers below are its first.
+
+| date | profile | environment | result |
+|------|---------|-------------|--------|
+| 2026-08-28 | `smoke` | local single box (API + Postgres + Redis on one Mac) | 26/26 checks, `p95 16.97ms`, 0 errors |
+| 2026-08-28 | `swarm` | same, `RATE_LIMIT_MAX=200` (shipped default) | **INVALID** — 90.46% browse errors, all rate-limit 429s. See the warning above. |
+| 2026-08-28 | `swarm` | same, limiter raised | **PASS.** 200 VUs held 6m · 25,610 checks, **100% succeeded** · `browse_errors 0.00%` · `rate_limited 0.00%` · `http_req_duration p95 = 9.26ms` against an SLO of 800ms · 70.3 req/s · 0 failed requests · 12,926 iterations, 0 interrupted |
+
+Observed alongside the passing run: Postgres held **5–6 connections** for the
+whole 200-VU peak, against a pool of 40. Browse is Redis-cached, so the
+connection pool is **not** the constraint on this path — which is worth knowing
+before anyone tunes it.
+
+**What this does NOT yet prove.** Without `ORDER_TOKENS` the order scenario is
+skipped, so `idempotency_violations` reads `0 out of 0` — the correctness
+invariant this harness calls its reason to exist has not been exercised at all.
+A read-only swarm is a real SLO test and nothing more. Seed a roster
+(`scripts/livetest/`, needs `DEV_OTP_BYPASS=1`), mint tokens, and run again
+before treating the money path as proven.
 
 ## Reading the breakpoint
 
