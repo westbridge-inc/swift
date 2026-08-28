@@ -1,0 +1,31 @@
+# Public environment variables — the allowlist [GRD-1 §2, WS-15 / 15.8]
+#
+# THE LAW THIS FILE ENFORCES: anything shipped inside an app binary or a web
+# bundle is PUBLIC. Not "hard to find" — public. Obfuscation, code splitting and
+# certificate pinning change nothing; a determined reader has the bytes. So a
+# build-time-inlined value is a value you have published.
+#
+# `EXPO_PUBLIC_*` (Metro) and `NEXT_PUBLIC_*` (Next.js) are both INLINED AT
+# BUILD TIME. Giving a secret one of those prefixes does not expose it later, by
+# some mistake — it publishes it, immediately, in every install. This file is
+# the complete set of names allowed to carry those prefixes, each with a written
+# reason. `scripts/public-secrets-gate.js` fails the build on any name that is
+# not here, and CI runs it on every PR.
+#
+# FORMAT — one entry per line:
+#     NAME [!not-a-secret] # justification
+#
+# The `!not-a-secret` marker is REQUIRED for, and only for, a name whose text
+# matches the secret-word pattern (KEY, SECRET, TOKEN, PASSWORD, CREDENTIAL,
+# DSN, PRIVATE, AUTH). One legitimate name does — see the last entry — and the
+# marker makes that a deliberate, reviewed act instead of a silent exception.
+#
+# ADDING AN ENTRY IS A SECURITY DECISION. Before adding one, answer in the
+# justification: what is the value, who can read it once it ships, and what can
+# they do with it? If the answer involves "they shouldn't be able to", the value
+# does not belong in a bundle — it belongs behind a server-side proxy.
+
+EXPO_PUBLIC_API_URL # The API base URL the mobile app calls. A public hostname; every request from every install already announces it. Not a credential — the API authorizes per request.
+EXPO_PUBLIC_WEB_URL # The public website origin, used to build the courier tracking link a sender shares with a recipient (#799). It is a URL customers are meant to receive.
+NEXT_PUBLIC_API_URL # Same public API hostname, for the web and admin apps. The admin build separately REFUSES a plaintext http:// URL on a non-local host.
+NEXT_PUBLIC_ALLOW_SITE_TOKENS !not-a-secret # A build ESCAPE HATCH, not a credential: set to '1' it lets apps/web compile while site.config.ts still holds its three {{TOKEN}} placeholders. It carries no value of its own and grants nothing at runtime. CI sets it so the site builds before the founder fills the real legal details; deploy-web.yml deliberately OMITS it, so on the real deploy the refusal IS the gate. It matches the secret-word pattern only because the placeholders it permits are called "tokens".

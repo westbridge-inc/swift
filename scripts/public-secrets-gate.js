@@ -1,0 +1,219 @@
+#!/usr/bin/env node
+/**
+ * The public-prefix gate [GRD-1 §2 · WS-15 / 15.8].
+ *
+ *   node scripts/public-secrets-gate.js [repo-root]
+ *   node scripts/public-secrets-gate.js --bundle <built-dir> [repo-root]
+ *
+ * `EXPO_PUBLIC_*` (Metro) and `NEXT_PUBLIC_*` (Next.js) are INLINED AT BUILD
+ * TIME. A value given one of those prefixes is not "exposed if someone digs" —
+ * it is published, in plaintext, inside every install and every page load.
+ * Obfuscation, code splitting and certificate pinning change nothing: the
+ * reader has the bytes.
+ *
+ * gitleaks already scans source history for things that LOOK like credentials.
+ * It cannot catch this class, because the dangerous act here leaves no
+ * credential-shaped string in the repository at all — someone writes
+ * `process.env.NEXT_PUBLIC_MMG_SECRET` and the real value is injected by the
+ * build, from CI's own environment, straight into the bundle. The source looks
+ * innocent. The artefact is a leak.
+ *
+ * So the gate is on the NAME, at the source, before any value exists: every
+ * public-prefixed identifier must appear in `security/public-env-allowlist.txt`
+ * with a written justification, and a name that reads like a secret needs an
+ * explicit `!not-a-secret` marker on top of that — turning the risky case into
+ * a deliberate, reviewed act instead of an accident nobody noticed.
+ *
+ * --bundle additionally scans a BUILT directory for any public-prefixed
+ * identifier that is not allowlisted, which catches a dependency or a generated
+ * file introducing one where no source grep would look.
+ *
+ * LOCAL-RUN CAVEAT: this walks the filesystem. In this repo a worktree's disk
+ * copy can legitimately LAG origin/main (work ships through a temp index and
+ * never lands on disk), so a local run can under-report. CI checks out the real
+ * tree and is the authority.
+ */
+const fs = require('fs');
+const path = require('path');
+
+const args = process.argv.slice(2);
+let bundleDir = null;
+const positional = [];
+for (let i = 0; i < args.length; i += 1) {
+  if (args[i] === '--bundle') {
+    bundleDir = args[i + 1];
+    i += 1;
+  } else if (args[i] === '--allowlist') {
+    positional.allowlist = args[i + 1];
+    i += 1;
+  } else {
+    positional.push(args[i]);
+  }
+}
+
+// House convention (scripts/unreachable-routes.js): derive the root from the
+// script's own location so this runs from any checkout; argv overrides.
+const ROOT = positional[0] ? path.resolve(positional[0]) : path.resolve(__dirname, '..');
+const ALLOWLIST_PATH = positional.allowlist
+  ? path.resolve(positional.allowlist)
+  : path.join(ROOT, 'security/public-env-allowlist.txt');
+
+/** Names that read like a credential. A match needs an explicit marker. */
+const SECRET_WORD = /(KEY|SECRET|TOKEN|PASSWORD|PASSWD|CREDENTIAL|DSN|PRIVATE|AUTH)/;
+const PUBLIC_PREFIX = /\b((?:EXPO|NEXT)_PUBLIC_[A-Z0-9_]+)\b/g;
+/**
+ * The one escape hatch, and it is deliberately narrow.
+ *
+ * A gate's own negative tests must be able to WRITE the forbidden thing —
+ * `NEXT_PUBLIC_MMG_SECRET` has to appear somewhere or nothing proves the gate
+ * refuses it. Excluding all test files would be the easy fix and the wrong one:
+ * a test fixture holding a real key is a classic leak, so tests are exactly
+ * where scanning must continue.
+ *
+ * So: a line carrying this marker is skipped, ONLY in a test file, and the
+ * count of skips is printed on success — an escape hatch nobody can see is an
+ * escape hatch that grows.
+ */
+const FIXTURE_MARKER = 'public-secrets-gate:fixture';
+const TEST_FILE = /\.test\.(ts|tsx|js|jsx)$/;
+const SOURCE_DIRS = ['apps', 'packages'];
+const SCANNED_EXT = /\.(ts|tsx|js|jsx|mjs|cjs|json)$/;
+const SKIP_DIRS = new Set(['node_modules', '.git', '.next', 'dist', 'build', 'coverage', 'ios', 'android']);
+
+function walk(dir, matchExt, out = []) {
+  let entries;
+  try {
+    entries = fs.readdirSync(dir, { withFileTypes: true });
+  } catch {
+    return out;
+  }
+  for (const entry of entries) {
+    if (SKIP_DIRS.has(entry.name)) continue;
+    const full = path.join(dir, entry.name);
+    if (entry.isDirectory()) walk(full, matchExt, out);
+    else if (!matchExt || matchExt.test(entry.name)) out.push(full);
+  }
+  return out;
+}
+
+/** Parse `NAME [!not-a-secret] # justification` lines. */
+function readAllowlist(file) {
+  const entries = new Map();
+  const problems = [];
+  let text;
+  try {
+    text = fs.readFileSync(file, 'utf8');
+  } catch {
+    problems.push(`Allowlist not found: ${file}`);
+    return { entries, problems };
+  }
+  for (const rawLine of text.split('\n')) {
+    const line = rawLine.trim();
+    if (!line || line.startsWith('#')) continue;
+    const hash = line.indexOf('#');
+    const head = (hash === -1 ? line : line.slice(0, hash)).trim();
+    const justification = hash === -1 ? '' : line.slice(hash + 1).trim();
+    const parts = head.split(/\s+/).filter(Boolean);
+    const name = parts[0];
+    const marked = parts.includes('!not-a-secret');
+    if (!name) continue;
+    if (justification.length < 20) {
+      problems.push(`${name}: needs a written justification (what is the value, who can read it, what can they do with it)`);
+    }
+    if (SECRET_WORD.test(name) && !marked) {
+      problems.push(
+        `${name}: reads like a secret. If it genuinely is not one, add the explicit \`!not-a-secret\` marker and say why in the justification.`,
+      );
+    }
+    entries.set(name, { marked, justification });
+  }
+  return { entries, problems };
+}
+
+const { entries: allowed, problems: allowlistProblems } = readAllowlist(ALLOWLIST_PATH);
+
+/** name -> Set of "file:line" */
+const found = new Map();
+/** How many lines the fixture marker suppressed — printed so it stays visible. */
+let fixtureSkips = 0;
+function record(name, where) {
+  if (!found.has(name)) found.set(name, new Set());
+  found.get(name).add(where);
+}
+
+const scanRoots = bundleDir ? [path.resolve(bundleDir)] : SOURCE_DIRS.map((d) => path.join(ROOT, d));
+const files = scanRoots.flatMap((dir) => walk(dir, bundleDir ? null : SCANNED_EXT));
+
+for (const file of files) {
+  let text;
+  try {
+    text = fs.readFileSync(file, 'utf8');
+  } catch {
+    continue; // unreadable or binary — nothing to match
+  }
+  const lines = text.split('\n');
+  const isTest = TEST_FILE.test(file);
+  for (let i = 0; i < lines.length; i += 1) {
+    const line = lines[i];
+    if (isTest && line.includes(FIXTURE_MARKER)) {
+      if (PUBLIC_PREFIX.test(line)) fixtureSkips += 1;
+      PUBLIC_PREFIX.lastIndex = 0; // the regex is /g — .test() advances it
+      continue;
+    }
+    for (const match of line.matchAll(PUBLIC_PREFIX)) {
+      record(match[1], `${path.relative(ROOT, file)}:${i + 1}`);
+    }
+  }
+}
+
+const unlisted = [...found.keys()].filter((name) => !allowed.has(name)).sort();
+// An allowlist entry nothing uses is stale permission — audited from BOTH sides,
+// exactly like the stock-photo gate's exemptions.
+const unused = [...allowed.keys()].filter((name) => !found.has(name)).sort();
+
+const label = bundleDir ? `built bundle ${bundleDir}` : 'source';
+let failed = false;
+
+if (allowlistProblems.length) {
+  failed = true;
+  console.error(`\n✖ ${ALLOWLIST_PATH} has problems:`);
+  for (const problem of allowlistProblems) console.error(`    ${problem}`);
+}
+
+if (unlisted.length) {
+  failed = true;
+  console.error(`\n✖ Public-prefixed variables in the ${label} that are NOT allowlisted:\n`);
+  for (const name of unlisted) {
+    console.error(`  ${name}`);
+    for (const where of [...found.get(name)].slice(0, 5)) console.error(`      ${where}`);
+    if (SECRET_WORD.test(name)) {
+      console.error('      ⚠ this name reads like a SECRET. A public prefix publishes its value in every build.');
+    }
+  }
+  console.error(
+    '\n  Anything with these prefixes is inlined at build time and shipped to every user.',
+  );
+  console.error(
+    '  If it is genuinely public, add it to security/public-env-allowlist.txt with a written',
+  );
+  console.error('  justification. If it is not, it belongs behind a server-side proxy, not in a bundle.\n');
+}
+
+if (!bundleDir && unused.length) {
+  failed = true;
+  console.error(`\n✖ Allowlisted but used nowhere — stale permission, remove it:\n`);
+  for (const name of unused) console.error(`  ${name}`);
+  console.error('');
+}
+
+if (failed) process.exit(1);
+
+console.log(
+  `✔ public-secrets-gate: ${found.size} public-prefixed variable(s) in the ${label}, all allowlisted with justifications.`,
+);
+if (fixtureSkips) {
+  console.log(`    (${fixtureSkips} line(s) skipped as gate-test fixtures — test files only)`);
+}
+for (const name of [...found.keys()].sort()) {
+  console.log(`    ${name} (${found.get(name).size} use${found.get(name).size === 1 ? '' : 's'})`);
+}
