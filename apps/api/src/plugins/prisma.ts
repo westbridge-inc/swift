@@ -2,6 +2,7 @@ import { PrismaClient } from '@prisma/client';
 import fp from 'fastify-plugin';
 import type { FastifyInstance } from 'fastify';
 import { getTenantId } from './tenant-context';
+import { resolveDatabaseUrl } from '../utils/db-pool';
 
 // Multi-tenancy stage 2 — tenant scoping at the ORM layer. When a request has
 // bound a tenant (tenant-context), EVERY direct operation on a tenant-owned
@@ -145,6 +146,11 @@ const denyMutation = async (): Promise<never> => {
 
 const prisma = new PrismaClient({
   log: process.env['NODE_ENV'] === 'development' ? ['query', 'warn', 'error'] : ['warn', 'error'],
+  // [P1 · WS-8.3] Size the pool explicitly instead of inheriting Prisma's
+  // CPU-derived default — five connections on a 2-vCPU instance. An explicit
+  // `connection_limit` already in DATABASE_URL is left exactly as the operator
+  // set it; see utils/db-pool.ts.
+  datasourceUrl: resolveDatabaseUrl(process.env['DATABASE_URL'], 'api'),
 }).$extends({
   name: 'orderStatusLogAppendOnly',
   query: {
