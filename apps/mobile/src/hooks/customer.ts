@@ -212,18 +212,53 @@ export function useOrders<T = any>() {
 
 /** Paginated order history (D6-MOB-02): the endpoint pages at ~20, so the plain
  *  query only ever showed the most recent page — older orders were unreachable.
- *  This walks every page via the FlatList's onEndReached. */
+ *  This walks every page via the FlatList's onEndReached.
+ *
+ *  HISTORY ONLY. Live orders come from `useLiveOrders` below and are not a
+ *  slice of this feed — see the comment there for why that mattered. */
 export function useOrdersInfinite() {
   return useInfiniteQuery({
-    queryKey: [...customerKeys.orders, 'infinite'],
+    queryKey: [...customerKeys.orders, 'infinite', 'history'],
     initialPageParam: 1,
     queryFn: async ({ pageParam }) => {
-      const res = await customerApi.getOrders(pageParam as number);
+      const res = await customerApi.getOrders(pageParam as number, { live: false });
       const body = res?.data ?? {};
       return { items: (body.data ?? []) as any[], meta: body.meta ?? { page: 1, totalPages: 1 } };
     },
     getNextPageParam: (last: { meta: { page: number; totalPages: number } }) =>
       last.meta.page < last.meta.totalPages ? last.meta.page + 1 : undefined,
+  });
+}
+
+/**
+ * EVERY live order, asked for as such.
+ *
+ * The activity list used to derive its "IN PROGRESS" section by filtering the
+ * pages of history it happened to have loaded. History is ordered `placedAt`
+ * DESC and pages at 20, so a live order older than the last 20 rows simply was
+ * not in the list to be found. Measured on a real account: 19 live orders, only
+ * 6 within the first page — thirteen open orders, three of them months old and
+ * still awaiting pickup, invisible until the customer scrolled through 80 rows
+ * of finished ones. Home showed one of them live the whole time.
+ *
+ * A filter cannot find what pagination never fetched. So this asks the server
+ * the question directly, in one page sized well above any plausible number of
+ * simultaneously open orders; `meta.total` is kept so the screen can say so
+ * out loud rather than silently truncate.
+ */
+const LIVE_ORDERS_LIMIT = 50;
+
+export function useLiveOrders() {
+  return useQuery({
+    queryKey: [...customerKeys.orders, 'live'],
+    queryFn: async () => {
+      const res = await customerApi.getOrders(1, { live: true, limit: LIVE_ORDERS_LIMIT });
+      const body = res?.data ?? {};
+      return {
+        items: (body.data ?? []) as any[],
+        total: typeof body.meta?.total === 'number' ? (body.meta.total as number) : null,
+      };
+    },
   });
 }
 
