@@ -26,6 +26,7 @@ import {
   Globe,
   Bot,
   Scale,
+  ListRestart,
 } from 'lucide-react';
 
 // Grouped by what the operator is doing, not by table name. Sections only list
@@ -75,6 +76,7 @@ const NAV_SECTIONS: { title: string; items: { label: string; href: string; icon:
     items: [
       { label: 'Markets', href: '/markets', icon: Globe },
       { label: 'Zones', href: '/zones', icon: Map },
+      { label: 'Background jobs', href: '/jobs', icon: ListRestart },
       { label: 'Config', href: '/config', icon: Settings },
       { label: 'Audit Log', href: '/audit', icon: FileText },
     ],
