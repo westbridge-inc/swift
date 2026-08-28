@@ -1,0 +1,24 @@
+-- [P2 / WS-8.5] `sessions.userId` had no index.
+--
+-- Three PRODUCTION paths revoke by user, and all three run inside a
+-- transaction, so each one sequential-scanned the whole sessions table while
+-- holding its locks:
+--
+--   auth.service.ts:890      refresh-token THEFT revocation — the response to a
+--                            detected stolen token, which is the one moment
+--                            this must be fast
+--   mover-authority.ts:693   authority revocation
+--   account.service.ts:292   account deletion
+--
+-- The User relation is also `onDelete: Cascade`, so Postgres scanned sessions
+-- on every user delete for the same reason.
+--
+-- sessions is already the largest table in the schema — every login writes a
+-- row — so this is the scan that grows fastest with real usage.
+--
+-- Additive and behaviour-neutral: an index changes no result, only the plan.
+-- Written as a plain CREATE INDEX because sessions is small at pilot scale; if
+-- this is ever applied to a table with millions of live rows, run it manually
+-- as CREATE INDEX CONCURRENTLY first (Prisma wraps migrations in a transaction
+-- and CONCURRENTLY cannot run inside one), then mark this migration applied.
+CREATE INDEX "sessions_userId_idx" ON "sessions"("userId");
