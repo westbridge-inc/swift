@@ -6,7 +6,7 @@ import { earningsWindow } from '../order/earnings-window';
 import { zMoneyMinor } from '../../utils/money-schema';
 import { NotificationService } from '../notification/notification.service';
 import { VerificationService } from '../verification/verification.service';
-import { CashRulesService, customerTrustSummaries } from '../cash/cash-rules.service';
+import { CashRulesService, customerTrustSummaries, gpsEvidence } from '../cash/cash-rules.service';
 import { BillingService } from '../billing/billing.service';
 import { getPaymentProvider } from '../../providers/payment/payment-provider';
 import { DeliveryCashSettlementService, assertSettlementId } from '../cash/delivery-cash-settlement.service';
@@ -153,6 +153,67 @@ const STATUS_TRANSITIONS: Record<string, { from: string[]; to: string; note: str
   'en-route-delivery': { from: ['PICKED_UP'], to: 'EN_ROUTE_DELIVERY', note: 'Rider started the run to the customer' },
   'arrived':         { from: ['EN_ROUTE_DELIVERY'], to: 'ARRIVED', note: 'Rider reported arriving at the customer' },
 };
+
+/** The two rungs that assert a position. Which endpoint the claim is about
+ *  decides which point the distance is measured to. */
+const ARRIVAL_TARGET: Record<string, 'pickup' | 'dropoff'> = {
+  'arrived-pickup': 'pickup',
+  arrived: 'dropoff',
+};
+
+/** How old a fix may be and still describe where someone is standing. Beyond
+ *  this the age is recorded instead of a distance — an hour-old ping turned
+ *  into "12 m from the door" is a fabricated measurement, and a fabricated one
+ *  is worse than none because it looks like proof. */
+const ARRIVAL_FIX_MAX_AGE_MS = 3 * 60_000;
+
+type ArrivalOrder = {
+  pickupLat: number | null; pickupLng: number | null;
+  deliveryLat: number | null; deliveryLng: number | null;
+  vendor: { latitude: number | null; longitude: number | null } | null;
+};
+type ArrivalRider = { currentLat: number | null; currentLng: number | null; lastLocationUpdate: Date | null };
+
+/**
+ * What the platform knew about the rider's position when they said they had
+ * arrived — as a note fragment, or null when the rung makes no such claim.
+ *
+ * ADVISORY ONLY. This decides nothing: no radius is enforced, no transition is
+ * refused. `arrived` still has no GPS check, and choosing the radius that would
+ * add one is a founder decision (§7.4b) that engineering does not make by
+ * default. What this does is stop throwing the evidence away, so that decision
+ * can eventually be made from a measured distribution of real arrivals rather
+ * than from a number someone liked the sound of.
+ *
+ * Every degraded case is NAMED rather than omitted, because a note that simply
+ * lacks a distance is indistinguishable from one written before this existed.
+ */
+function arrivalEvidence(slug: string, order: ArrivalOrder, rider: ArrivalRider, now = new Date()): string | null {
+  const target = ARRIVAL_TARGET[slug];
+  if (!target) return null;
+
+  // Pickup point: the order's own coordinates, falling back to the vendor's.
+  const to = target === 'pickup'
+    ? { lat: order.pickupLat ?? order.vendor?.latitude ?? null, lng: order.pickupLng ?? order.vendor?.longitude ?? null }
+    : { lat: order.deliveryLat, lng: order.deliveryLng };
+
+  if (rider.currentLat == null || rider.currentLng == null || !rider.lastLocationUpdate) {
+    return 'no GPS fix on file';
+  }
+  const ageMs = now.getTime() - rider.lastLocationUpdate.getTime();
+  // ONE author of this format (kerb-anti-fork K3) — imported, never re-typed.
+  const fix = gpsEvidence(rider.currentLat, rider.currentLng);
+  if (ageMs > ARRIVAL_FIX_MAX_AGE_MS) {
+    return `${fix} (stale, ${Math.round(ageMs / 60_000)} min old — distance not computed)`;
+  }
+  if (to.lat == null || to.lng == null) {
+    // A courier drop with no geocoded destination: the fix is still worth
+    // keeping, there is simply nothing to measure it against.
+    return `${fix} (${Math.round(ageMs / 1000)}s old; ${target} not geocoded)`;
+  }
+  const metres = Math.round(haversineDistance(rider.currentLat, rider.currentLng, to.lat, to.lng) * 1000);
+  return `${fix} (${metres} m from the ${target}, fix ${Math.round(ageMs / 1000)}s old)`;
+}
 
 // DASH-06: "today"/"this week"/"this month" for earnings are Guyana-local
 // boundaries (UTC-4), not the server's UTC midnight. Shared helpers.
@@ -1150,7 +1211,33 @@ export async function riderRoutes(app: FastifyInstance) {
         );
       }
 
-      const updated = await orderService.updateStatus(id, to, request.user.userId, note);
+      // EVIDENCE, NOT A GATE [L3 advisory · L4 shadow-first].
+      //
+      // `arrived` and `arrived-pickup` are the two rungs where the rider makes
+      // a claim about the physical world that pressing a button does not make
+      // true — which is why their notes say "reported". Nothing here tests the
+      // claim: no radius is enforced, no transition is refused, and the founder
+      // has not set one. What it does is WRITE DOWN what the platform already
+      // knew at that moment, so the radius can eventually be chosen from a
+      // measured distribution instead of guessed.
+      //
+      // The fix is the one already on the rider row — the same persisted fix
+      // dispatch reads — so no client sends anything and no rider is stranded
+      // by a phone that cannot get a lock. The handover route may DEMAND GPS
+      // in its body because a guarantee claim is impossible without it; an
+      // arrival must not be blocked the same way.
+      //
+      // Degraded data stays degraded [L6]: a missing or stale fix is recorded
+      // as exactly that. A distance computed from an hour-old ping would be a
+      // fabricated measurement of where someone was standing.
+      const evidence = arrivalEvidence(slug, order, rider);
+
+      const updated = await orderService.updateStatus(
+        id,
+        to,
+        request.user.userId,
+        evidence ? `${note} — ${evidence}` : note,
+      );
 
       return {
         success: true,

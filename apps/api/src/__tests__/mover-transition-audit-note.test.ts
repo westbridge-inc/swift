@@ -261,3 +261,136 @@ describe('every rider transition leaves a note behind', () => {
     expect(noteFor('EN_ROUTE_DELIVERY')).not.toContain('reported');
   });
 });
+
+// ---------------------------------------------------------------------------
+// THE ARRIVAL CLAIM NOW CARRIES WHAT THE PLATFORM KNEW.
+//
+// `arrived` has no GPS check and still does not: no radius is enforced, no
+// transition is refused. Choosing that radius is a founder decision (§7.4b),
+// and engineering does not implement a pending founder decision by default.
+//
+// But the platform ALREADY KNEW where the rider was — the same persisted fix
+// dispatch reads — and was throwing it away at the exact moment the rider made
+// a claim about their position. So the radius, when it is chosen, would have
+// been chosen from nothing. Recording is not enforcing [L3 advisory, L4 shadow
+// first]: this writes the evidence and gates nothing, so the decision can be
+// made later from a measured distribution of real arrivals.
+//
+// The degraded cases are the point of this block. A note that merely LACKS a
+// distance is indistinguishable from one written before any of this existed,
+// so every one of them says which kind of nothing it is.
+// ---------------------------------------------------------------------------
+describe('an arrival records the fix the platform already had', () => {
+  async function arriveWithFix(fix: { lat: number; lng: number; ageMs: number } | null) {
+    const rider = await makeRider();
+    const order = await makeAssignedOrder(await makeCustomer(), rider.riderId);
+    await app.prisma.rider.update({
+      where: { id: rider.riderId },
+      data: fix
+        ? { currentLat: fix.lat, currentLng: fix.lng, lastLocationUpdate: new Date(Date.now() - fix.ageMs) }
+        : { currentLat: null, currentLng: null, lastLocationUpdate: null },
+    });
+    const logs = await walkTheLeg(rider.token, order.id);
+    return logs.find((l) => l.status === 'ARRIVED')!.note!;
+  }
+
+  it('measures the distance to the delivery point from a fresh fix', async () => {
+    // ~111 m north of the fixture's delivery point (1 degree latitude ≈ 111 km).
+    const note = await arriveWithFix({ lat: GPS.lat + 0.001, lng: GPS.lng, ageMs: 5_000 });
+
+    expect(note).toContain('Rider reported arriving at the customer');
+    expect(note, 'the same gps: convention the handover note already uses').toMatch(/gps:[\d.-]+,[\d.-]+/);
+    const metres = Number(/\((\d+) m from the dropoff/.exec(note)?.[1]);
+    expect(metres).toBeGreaterThan(80);
+    expect(metres).toBeLessThan(140);
+  });
+
+  it('records a rider standing on the doorstep as roughly zero', async () => {
+    const note = await arriveWithFix({ lat: GPS.lat, lng: GPS.lng, ageMs: 1_000 });
+    expect(Number(/\((\d+) m from the dropoff/.exec(note)?.[1])).toBeLessThan(5);
+  });
+
+  it('refuses to turn a STALE fix into a distance, and says why', async () => {
+    // An hour-old ping rendered as "12 m from the door" is a fabricated
+    // measurement of where someone was standing — worse than none, because it
+    // looks like proof.
+    const note = await arriveWithFix({ lat: GPS.lat, lng: GPS.lng, ageMs: 60 * 60_000 });
+
+    expect(note).toContain('stale');
+    expect(note).toContain('distance not computed');
+    expect(note, 'no distance may be asserted from a stale fix').not.toMatch(/\d+ m from/);
+    expect(note, 'the fix itself is still evidence and is kept').toMatch(/gps:/);
+  });
+
+  it('says so plainly when there is no fix at all', async () => {
+    const note = await arriveWithFix(null);
+
+    expect(note).toContain('no GPS fix on file');
+    expect(note).not.toMatch(/\d+ m from/);
+  });
+
+  it('changes nothing about whether the transition is allowed', async () => {
+    // THE WHOLE POINT. A rider 40 km away still transitions; the note simply
+    // says 40 km. Enforcement is a founder decision that has not been made.
+    const rider = await makeRider();
+    const order = await makeAssignedOrder(await makeCustomer(), rider.riderId);
+    await app.prisma.rider.update({
+      where: { id: rider.riderId },
+      data: { currentLat: GPS.lat + 0.4, currentLng: GPS.lng, lastLocationUpdate: new Date() },
+    });
+
+    const logs = await walkTheLeg(rider.token, order.id); // asserts 200 on every rung
+    const note = logs.find((l) => l.status === 'ARRIVED')!.note!;
+
+    expect(Number(/\((\d+) m from the dropoff/.exec(note)?.[1])).toBeGreaterThan(30_000);
+  });
+
+  it('measures the PICKUP arrival against the PICKUP point, not the dropoff', async () => {
+    // Graded on the NUMBER, not the word. An earlier version of this test
+    // asserted only that the note said "from the pickup" — and a mutation that
+    // measured the pickup arrival against the DROPOFF survived it, because the
+    // label comes from the rung while the distance comes from the coordinates.
+    // Explicit pickup coordinates here rather than the seeded vendor's, so the
+    // separation is a property of the test and not of the fixture data.
+    const rider = await makeRider();
+    const order = await makeAssignedOrder(await makeCustomer(), rider.riderId);
+    const FAR_PICKUP = { lat: GPS.lat + 0.02, lng: GPS.lng }; // ~2.2 km north
+    await app.prisma.order.update({
+      where: { id: order.id },
+      data: { pickupLat: FAR_PICKUP.lat, pickupLng: FAR_PICKUP.lng, pickupAddress: 'Far Pickup, Georgetown' },
+    });
+    // The rider stands ON the dropoff for both rungs, so the two distances are
+    // ~2.2 km and ~0 m — they cannot be confused for one another.
+    await app.prisma.rider.update({
+      where: { id: rider.riderId },
+      data: { currentLat: GPS.lat, currentLng: GPS.lng, lastLocationUpdate: new Date() },
+    });
+
+    const logs = await walkTheLeg(rider.token, order.id);
+    const pickupNote = logs.find((l) => l.status === 'RIDER_ARRIVED_PICKUP')!.note!;
+    const dropNote = logs.find((l) => l.status === 'ARRIVED')!.note!;
+
+    const pickupM = Number(/\((\d+) m from the pickup/.exec(pickupNote)?.[1]);
+    const dropM = Number(/\((\d+) m from the dropoff/.exec(dropNote)?.[1]);
+
+    expect(pickupM, `pickup note was: ${pickupNote}`).toBeGreaterThan(1_500);
+    expect(dropM, `dropoff note was: ${dropNote}`).toBeLessThan(5);
+  });
+
+  it('leaves the non-arrival rungs unadorned', async () => {
+    // Only the two rungs that ASSERT a position carry a fix. "Started the run"
+    // claims nothing about where the rider is.
+    const rider = await makeRider();
+    const order = await makeAssignedOrder(await makeCustomer(), rider.riderId);
+    await app.prisma.rider.update({
+      where: { id: rider.riderId },
+      data: { currentLat: GPS.lat, currentLng: GPS.lng, lastLocationUpdate: new Date() },
+    });
+
+    const logs = await walkTheLeg(rider.token, order.id);
+
+    for (const status of ['RIDER_EN_ROUTE_PICKUP', 'PICKED_UP', 'EN_ROUTE_DELIVERY']) {
+      expect(logs.find((l) => l.status === status)!.note, `${status} makes no position claim`).not.toMatch(/gps:/);
+    }
+  });
+});
