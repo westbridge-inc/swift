@@ -331,6 +331,40 @@ export async function servicesRoutes(app: FastifyInstance) {
       description: body.description,
       photos: body.photos ?? [],
     });
+
+    // THE FIRST STEP WAS THE ONE THAT DIDN'T RING.
+    //
+    // Every other transition on a service job notifies the other side —
+    // quote, schedule, confirm, decline-slot, complete, cancel. This one, the
+    // moment a customer picks a tradesperson and asks them to come, told the
+    // provider nothing at all. The job was created, a chat room was opened,
+    // 201 was returned, and the person expected to answer it had no idea it
+    // existed. It sat in REQUESTED until they happened to open the app and
+    // scroll their job list — and since the provider must quote before
+    // anything else can happen, the entire flow waited on a signal that was
+    // never sent.
+    //
+    // Sent AFTER the authority transaction, like every sibling above: that
+    // transaction holds FOR UPDATE locks on both User rows, and notification
+    // fan-out does network I/O. `send` is best-effort by design and never
+    // throws into the caller, so a notification hiccup cannot fail a job that
+    // is already committed.
+    const provider = await app.prisma.serviceProvider.findUnique({
+      where: { id: job.providerId },
+      select: { userId: true, trade: true },
+    });
+    if (provider) {
+      await notifications.send({
+        userId: provider.userId,
+        type: 'ORDER_UPDATE',
+        title: 'New job request',
+        // No customer name and no free text: the description is whatever the
+        // customer typed, and the sibling notifications don't quote it either.
+        body: `Someone needs a ${serviceTradeLabel(provider.trade)} — open the request to send a quote.`,
+        data: { kind: 'booking_requested', jobId: job.id },
+      });
+    }
+
     reply.code(201);
     return { success: true, data: job };
   });

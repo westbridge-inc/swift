@@ -65,6 +65,9 @@ describe('booking + service-job pushes land on the job [S0]', () => {
   // landed on the home screen.
   it('every service-job kind opens My Jobs — the one screen that shows that job to BOTH sides', () => {
     for (const kind of [
+      // The request itself — the rung that had no notification at all, so the
+      // provider never learned there was anything to quote on.
+      'booking_requested',
       'booking_to_confirm',
       'booking_confirmed',
       'booking_slot_declined',
@@ -192,6 +195,7 @@ const CENSUS: Case[] = [
   { k: 'dispatch_offer', d: { ...O, audience: 'earner', offerAttemptId: 'a1' }, to: { screen: 'Main' }, why: 'earner — the live offer card is on their Main' },
 
   // ── Bookings + service jobs [the S0 this pass closed].
+  { k: 'booking_requested', d: { jobId: 'j1' }, to: { screen: 'ServiceJobs' }, why: 'provider — a customer asked them to quote; the first rung of the ladder, and the one that used to send nothing at all' },
   { k: 'booking_to_confirm', d: { jobId: 'j1' }, to: { screen: 'ServiceJobs' }, why: 'provider — accept or move the customer’s slot' },
   { k: 'booking_confirmed', d: { jobId: 'j1' }, to: { screen: 'ServiceJobs' }, why: 'customer — provider took the slot' },
   { k: 'booking_slot_declined', d: { jobId: 'j1' }, to: { screen: 'ServiceJobs' }, why: 'customer — pick another time' },
