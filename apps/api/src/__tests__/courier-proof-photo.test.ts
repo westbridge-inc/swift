@@ -55,10 +55,10 @@ async function makeRider(userId: string) {
   });
 }
 
-async function makeCourierOrder(customerId: string, riderId: string) {
+async function makeCourierOrder(customerId: string, riderId: string, status: 'PICKED_UP' | 'FAILED' | 'REFUNDED' = 'PICKED_UP') {
   return app.prisma.order.create({
     data: {
-      orderNumber: `PRF-${nanoid(8)}`, orderType: 'COURIER', customerId, riderId, status: 'PICKED_UP', fulfillment: 'DELIVERY',
+      orderNumber: `PRF-${nanoid(8)}`, orderType: 'COURIER', customerId, riderId, status, fulfillment: 'DELIVERY',
       pickupAddress: 'a', pickupLat: 6.8, pickupLng: -58.15, deliveryAddress: 'b', deliveryLat: 6.81, deliveryLng: -58.16,
       subtotalBase: 1000, subtotalMarkup: 0, subtotalCustomer: 1000, deliveryFee: 500, totalAmount: 1500, paymentMethod: 'CASH',
     },
@@ -130,6 +130,35 @@ describe('D8-02 — courier proof-of-delivery photo upload', () => {
     expect(res.statusCode).toBe(400);
     expect(res.json().error.code).toBe('BAD_IMAGE');
   });
+
+  // [terminal-set drift] This route's guard listed only DELIVERED/COMPLETED/
+  // CANCELLED, so a job that had already FAILED at the door passed it — and the
+  // write that follows is a direct `updateMany`, which NO state machine guards.
+  // A rider could therefore stamp `courierProofIssuedUrl` (a delivery photo)
+  // onto the evidence trail of a refused handover: the same order an admin
+  // later reviews a reimbursement claim against. Failure evidence has its own
+  // path — cash-rules' handover takes `photoUrl`.
+  for (const status of ['FAILED', 'REFUNDED'] as const) {
+    it(`refuses a delivery photo on a ${status} job, and writes nothing`, async () => {
+      const sender = await makeUser(['CUSTOMER'], 'CUSTOMER');
+      const moverUser = await makeUser(['MOVER', 'CUSTOMER'], 'MOVER');
+      const rider = await makeRider(moverUser.userId);
+      const order = await makeCourierOrder(sender.userId, rider.id, status);
+
+      const res = await postPhoto(`/api/v1/courier/order/${order.id}/proof-photo`, moverUser.token);
+      expect(res.statusCode).toBe(400);
+      expect(res.json().error.code).toBe('NOT_IN_TRANSIT');
+
+      // The refusal must also mean nothing was recorded — the direct write is
+      // the half that no transition table protects.
+      const after = await app.prisma.order.findUnique({
+        where: { id: order.id },
+        select: { courierProofIssuedUrl: true, courierProofIssuedRiderId: true },
+      });
+      expect(after?.courierProofIssuedUrl).toBeNull();
+      expect(after?.courierProofIssuedRiderId).toBeNull();
+    });
+  }
 
   it('refuses a rider who is not the one assigned to the job', async () => {
     const sender = await makeUser(['CUSTOMER'], 'CUSTOMER');
