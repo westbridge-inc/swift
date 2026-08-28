@@ -695,6 +695,46 @@ export class GuardianService {
 
   // ── Check-in responses (§5.3) — called from the safety routes ────────────
 
+  /**
+   * IS A CHECK-IN WAITING FOR THIS PASSENGER RIGHT NOW?
+   *
+   * The check-in card was raised by ONE path: the `guardian:checkin` socket
+   * event, handled by whichever screen happened to be mounted and listening.
+   * A passenger whose app was backgrounded or killed — which is exactly when
+   * the push matters — missed that event entirely, and nothing ever raised the
+   * card again. They had a notification asking "Everything OK on your trip?"
+   * and no way in the app to answer it. On a HARD check-in that silence has a
+   * deadline, and the ladder escalates when it passes: the safety system would
+   * treat a passenger who tried to answer as one who did not.
+   *
+   * So the phone can now ASK, instead of only being told. The lookup mirrors
+   * `respondToCheckin` exactly — same where, same ordering — because a screen
+   * that renders the card must agree with the route that accepts the answer;
+   * two different notions of "the current session" is how a person gets a
+   * prompt that 404s when they tap it.
+   *
+   * Outstanding means `checkinRequestedAt` is set and unanswered. Answering OK
+   * nulls it, and escalation closes the session, so a stale prompt cannot
+   * survive either ending. Still SERVER-OWNED: the deadline is the server's
+   * timestamp, never computed here or on the phone.
+   */
+  async outstandingCheckin(passengerUserId: string) {
+    const session = await this.prisma.tripSafetySession.findFirst({
+      where: { passengerUserId, status: { in: ['MONITORING', 'CHECKIN_PENDING'] } },
+      orderBy: { createdAt: 'desc' },
+    });
+    if (!session || !session.checkinRequestedAt || session.checkinRespondedAt) return null;
+    return {
+      sessionId: session.id,
+      orderId: session.orderId,
+      // L2 raises the request and leaves the session MONITORING; L3 moves it to
+      // CHECKIN_PENDING and sets the deadline. The status IS the level.
+      level: session.status === 'CHECKIN_PENDING' ? ('HARD' as const) : ('SOFT' as const),
+      requestedAt: session.checkinRequestedAt.toISOString(),
+      deadlineAt: session.checkinDeadlineAt ? session.checkinDeadlineAt.toISOString() : null,
+    };
+  }
+
   /** Passenger answers the check-in card. OK de-escalates and re-arms the
    *  detectors; NEED_HELP is an explicit distress signal and raises a full
    *  SOS immediately (contacts included — this is a human asking, not a

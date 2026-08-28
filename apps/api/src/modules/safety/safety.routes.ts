@@ -296,6 +296,20 @@ export async function safetyRoutes(app: FastifyInstance) {
     return { success: true, data: await guardian.respondToCheckin(request.user.userId, response) };
   });
 
+  // The READ half of the same question, for the caller's OWN trip only — the
+  // service resolves the session from the authenticated user id and nothing
+  // else, so there is no id to tamper with and no other passenger's trip to
+  // reach. (`GET /guardian` above is the ops list and stays ops-only.)
+  //
+  // It exists because the check-in card had exactly one trigger: a live socket
+  // event. A passenger whose app was closed when it fired — the case the push
+  // is FOR — could not raise the card at all, and on a HARD check-in the
+  // unanswered deadline escalates. Null when nothing is waiting: a screen must
+  // be able to learn "no", not just "yes".
+  app.get('/guardian/checkin', auth, async (request) => {
+    return { success: true, data: await guardian.outstandingCheckin(request.user.userId) };
+  });
+
   // [F-028-19] NOT lifeSafety. The exemption exists so a throttle can never
   // stand between a person and HELP — SOS, and a passenger's NEED_HELP. This
   // is the opposite message: a driver saying "I'm OK". Exempting an
