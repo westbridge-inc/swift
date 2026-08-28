@@ -22,6 +22,7 @@ import { initializeJobRuntime, type JobRuntime } from './jobs/runtime';
 import { assertSafeBootConfig } from './utils/boot-config';
 import { initSentry } from './plugins/observability';
 import { closeResourcesBounded, idempotentAsync, positiveDurationMs, withTimeout } from './utils/async-lifecycle';
+import { resolveDatabaseUrl } from './utils/db-pool';
 import { installProcessLifecycle } from './utils/process-lifecycle';
 
 async function main() {
@@ -36,7 +37,12 @@ async function main() {
   const redis = new Redis(process.env['REDIS_URL'] ?? 'redis://localhost:6379', {
     maxRetriesPerRequest: null,
   });
-  const prisma = new PrismaClient();
+  // [P1 · WS-8.3] The worker declares 19 concurrent jobs; Prisma's CPU-derived
+  // default gives it five connections on a 2-vCPU box, so most of the queue sat
+  // on pool_timeout the moment it got busy — money jobs included. Sized here at
+  // the construction seam so a deploy that supplies its own DATABASE_URL (the
+  // real ones do) still gets it. See utils/db-pool.ts.
+  const prisma = new PrismaClient({ datasourceUrl: resolveDatabaseUrl(process.env['DATABASE_URL'], 'worker') });
   redis.on('error', (err) => log.error({ err }, 'Worker Redis connection error'));
 
   const io = new Server();

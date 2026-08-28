@@ -112,6 +112,12 @@ services:
     command: ["node", "dist/worker.js"]
     environment:
       NODE_ENV: ${NODE_ENV:-development}
+      # [P1] The worker sizes its own Prisma pool for its declared job
+      # concurrency (src/utils/db-pool.ts; override with DB_POOL_SIZE_WORKER in
+      # .env). Do NOT append ?connection_limit here — a limit written into the
+      # URL is treated as a deliberate operator decision and wins over the
+      # sizing, which is how this process ended up with five connections for
+      # nineteen concurrent jobs in the first place.
       DATABASE_URL: postgresql://${POSTGRES_USER:-swift}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-swift}
       REDIS_URL: redis://redis:6379
       MEILISEARCH_URL: http://meilisearch:7700
