@@ -1,6 +1,7 @@
 import type { PrismaClient } from '@prisma/client';
 import { evaluatePureRules, DEFAULT_BATCHING_CONFIG, type CandidateOrder, type BatchingConfig } from './eligibility';
 import { log } from '../../utils/logger';
+import { algoValue } from '../algo/algo-config';
 
 // System 1 Part 8 — SHADOW MODE: evidence before offers. Every tick pairs the
 // currently-unassigned dispatchable delivery orders and records which WOULD
@@ -10,8 +11,20 @@ import { log } from '../../utils/logger';
 // nothing else. The founder's go/no-go reads ≥2 weeks of these rows
 // (acceptance #1). Bounded per tick; cap hits are logged, never silent.
 
-const EVAL_CAP = 200;
-const PAIR_DEDUP_MIN = 30; // one row per pair per half hour — evidence, not spam
+// [ALGO Band 0.2] These two now resolve through AlgoConfig, which returns the
+// SAME numbers when the table is empty — the values below are its defaults, so
+// this is a no-behaviour-change move and the tests prove it byte for byte.
+//
+// The shadow scan was chosen to go first deliberately: it writes evidence rows
+// and changes nothing a customer, rider or store can see, so a mistake in the
+// new seam cannot reach a person. Money dials come later, one at a time.
+//
+// The old `PAIR_DEDUP_MIN` is the same class of tunable as `EVAL_CAP` and is
+// missing from the algorithm document's seed list — moved, not left behind.
+//
+// The defaults now live in `ALGO_DEFAULTS` (`batching.evalCap` = 200,
+// `batching.pairDedupMinutes` = 30), so there is exactly one place to read the
+// value the platform runs on. A test asserts those two numbers are unchanged.
 const ORDER_VERTICAL: Record<string, CandidateOrder['vertical'] | undefined> = {
   FOOD_DELIVERY: 'FOOD',
   GROCERY_DELIVERY: 'GROCERY',
@@ -24,6 +37,11 @@ const SIZE_CLASS: Record<string, CandidateOrder['sizeClass']> = {
 export async function runShadowScan(prisma: PrismaClient, now = new Date()): Promise<{ evaluated: number; wouldBatch: number; capped: boolean }> {
   const settings = await prisma.batchingSettings.findUnique({ where: { tenantId: 'swift-default' } });
   if (settings && !settings.shadowMode && !settings.enabled) return { evaluated: 0, wouldBatch: 0, capped: false };
+  // Read once per tick, after the early return: a disabled scan must not pay
+  // for config it will not use. Falls back to the constants above on any read
+  // failure, so the scan behaves as it did yesterday rather than not at all.
+  const evalCap = await algoValue(prisma, 'batching.evalCap');
+  const pairDedupMin = await algoValue(prisma, 'batching.pairDedupMinutes');
   const cfg: BatchingConfig = {
     ...DEFAULT_BATCHING_CONFIG,
     ...(settings ? {
@@ -75,7 +93,7 @@ export async function runShadowScan(prisma: PrismaClient, now = new Date()): Pro
 
   // Pair-level dedup: skip pairs already evidenced in the window.
   const recent = await prisma.batchEvaluation.findMany({
-    where: { decision: 'SHADOW_WOULD_BATCH', createdAt: { gte: new Date(now.getTime() - PAIR_DEDUP_MIN * 60_000) } },
+    where: { decision: 'SHADOW_WOULD_BATCH', createdAt: { gte: new Date(now.getTime() - pairDedupMin * 60_000) } },
     select: { orderId: true, scoreBreakdown: true },
   });
   const seenPairs = new Set<string>();
@@ -89,9 +107,9 @@ export async function runShadowScan(prisma: PrismaClient, now = new Date()): Pro
   let capped = false;
   outer: for (let i = 0; i < candidates.length; i += 1) {
     for (let j = i + 1; j < candidates.length; j += 1) {
-      if (evaluated >= EVAL_CAP) {
+      if (evaluated >= evalCap) {
         capped = true;
-        log().warn({ cap: EVAL_CAP, pool: candidates.length }, 'SCAN_CAPPED: shadow batching evaluation cap hit — oldest pairs first');
+        log().warn({ cap: evalCap, pool: candidates.length }, 'SCAN_CAPPED: shadow batching evaluation cap hit — oldest pairs first');
         break outer;
       }
       const a = candidates[i]!;

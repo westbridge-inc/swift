@@ -76,6 +76,9 @@ const TENANT_QUERY_EXTENSIONS = {
   slugRedirect: scoped, pendingAttribution: scoped, attributionClaim: scoped, scanDailyRollup: scoped,
   // Batching + scheduling.
   deliveryRun: scoped, batchEvaluation: scoped, batchingSettings: scoped, bookingException: scoped,
+  // [ALGO Band 0.2] Algorithm tunables are tenant-owned: one operator's dials
+  // must never be read or written through another's session.
+  algoConfig: scoped,
   rideQueueEntry: scoped,
   // [REPORT-014 F-014-03] Supply watches are tenant rows: demand counts and
   // recovery notifications must never see another operator's watchers.
