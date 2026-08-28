@@ -135,6 +135,76 @@ function verticalForOrder(order: { orderType: string }): string {
 }
 
 const offerKey = (orderId: string) => `dispatch:offer:${orderId}`;
+
+/** What a mover collects, hands over, and keeps on a CASH job — or null. */
+export type OfferCashMath = {
+  collectFromCustomer: number;
+  payToVendor: number;
+  youKeep: number;
+};
+
+/**
+ * [WS-6.0] The cash-math triple for the offer card.
+ *
+ * A mover accepting a CASH job is committing their own float: they collect the
+ * whole order total at the door and hand the store its share. The card showed
+ * only what they EARN, so the decision was made without the exposure beside it.
+ *
+ * Every number here is a stored column, never derived arithmetic:
+ *
+ *   collectFromCustomer  order.totalAmount     — what the customer owes at the door
+ *   payToVendor          order.subtotalCustomer — the store's share. Safe to use
+ *                        as the vendor's cut because `subtotalMarkup` is law-
+ *                        bound to zero ("V1 dormant — zero-commission model:
+ *                        markup must stay 0", schema.prisma), so
+ *                        subtotalCustomer === subtotalBase.
+ *   youKeep              deliveryFee + tipAmount — the SAME expression
+ *                        `createEarnings` uses for the earnings rows and for the
+ *                        MMG settlement debt. Not a second definition of pay.
+ *
+ * AND IT REFUSES RATHER THAN GUESSES. The three only describe the money if they
+ * reconcile against the order's own totals. `serviceFee`, `taxAmount` and
+ * `discount` sit between the subtotal and the total; they are zero today and
+ * there is no defined recipient for them in a zero-commission, cash-direct
+ * model. If one ever becomes non-zero the split stops being true, so this
+ * returns null and the card shows nothing rather than a breakdown that does not
+ * add up. A wrong money split on a mover's screen is worse than no split.
+ */
+export function cashMathForOffer(order: {
+  paymentMethod: string;
+  totalAmount: unknown;
+  subtotalCustomer: unknown;
+  deliveryFee: unknown;
+  serviceFee: unknown;
+  taxAmount: unknown;
+  tipAmount: unknown;
+  discount: unknown;
+}): OfferCashMath | null {
+  if (order.paymentMethod !== 'CASH') return null;
+
+  const n = (v: unknown) => Number(v);
+  const total = n(order.totalAmount);
+  const vendorShare = n(order.subtotalCustomer);
+  const fee = n(order.deliveryFee);
+  const tip = n(order.tipAmount);
+  const service = n(order.serviceFee);
+  const tax = n(order.taxAmount);
+  const discount = n(order.discount);
+
+  if (![total, vendorShare, fee, tip, service, tax, discount].every(Number.isFinite)) return null;
+
+  // Reconciliation, in minor units so decimal representation cannot decide it.
+  const cents = (v: number) => Math.round(v * 100);
+  const keep = fee + tip;
+  if (cents(vendorShare) + cents(keep) + cents(service) + cents(tax) - cents(discount) !== cents(total)) {
+    return null;
+  }
+  // With the above satisfied and the extras zero, collect - pay === keep. State
+  // it directly rather than trusting the reader to re-derive it.
+  if (cents(total) - cents(vendorShare) !== cents(keep)) return null;
+
+  return { collectFromCustomer: total, payToVendor: vendorShare, youKeep: keep };
+}
 const declinedKey = (orderId: string) => `dispatch:declined:${orderId}`;
 /**
  * [REPORT-014 F-014-04] Offer ATTEMPT identity. Both Redis pointers store a
@@ -680,6 +750,12 @@ export class DispatchService {
           fulfillment: true, orderNumber: true, rideClass: true, isExpress: true, courierPackageSize: true,
           customerId: true, pickupLat: true, pickupLng: true, taxiPassengerCount: true,
           subtotalBase: true, paymentMethod: true, tenantId: true,
+          // [WS-6.0] The cash-math triple. A mover deciding on a CASH job is
+          // deciding how much of their OWN float to commit, and the card used
+          // to show only what they earn. Every number is a stored column, not
+          // an arithmetic guess — see `cashMathForOffer`.
+          totalAmount: true, subtotalCustomer: true, deliveryFee: true,
+          serviceFee: true, taxAmount: true, tipAmount: true, discount: true,
           vendor: { select: { name: true, owner: { select: { userId: true } } } },
           items: { select: { quantity: true } },
         },
@@ -783,6 +859,10 @@ export class DispatchService {
             customerTrust: trust ?? null,
             itemCount: order.items.length,
             estLoad: order.items.length > 0 ? estimateLoad(totalUnits) : null,
+            // [WS-6.0] Server-computed, or absent. Null on MMG (the customer
+            // already paid the store) and null whenever the numbers do not
+            // reconcile — see `cashMathForOffer`.
+            cashMath: cashMathForOffer(order),
           });
         } catch (err) {
           // [F-014-10] A socket-layer throw must not strand the installed

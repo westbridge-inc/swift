@@ -170,6 +170,32 @@ export function DispatchOfferCard({
                 ) : null}
                 {/* Who you'd front cash for — decide BEFORE you ride */}
                 <CustomerTrustBadge trust={offer.customerTrust} cash={offer.paymentMethod === 'CASH'} />
+                {/* [WS-6.0] THE CASH MATH — the mover's own exposure, in words.
+                    A CASH job means collecting the whole total at the door and
+                    handing the store its share; the card showed only what they
+                    EARN, so the accept decision was made without the float
+                    commitment beside it. Every number is server-computed and
+                    the block is ABSENT unless the server could reconcile the
+                    split — never rendered from client arithmetic. */}
+                {offer.cashMath ? (
+                  <View
+                    style={{
+                      marginTop: space.md,
+                      padding: space.md,
+                      borderRadius: radius.md,
+                      backgroundColor: color.surface.subtle,
+                      gap: 2,
+                    }}
+                  >
+                    <T variant="caption" weight="semibold">
+                      Cash job — collect {money(offer.cashMath.collectFromCustomer)} from the customer
+                    </T>
+                    <T variant="caption" tone="muted">
+                      Pay {offer.vendorName ?? 'the store'} {money(offer.cashMath.payToVendor)} · you keep{' '}
+                      {money(offer.cashMath.youKeep)}
+                    </T>
+                  </View>
+                ) : null}
                 {/* Judge the bag before you commit (grocery runs get big) */}
                 {offer.itemCount ? (
                   <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.sm, marginTop: 6 }}>

@@ -709,6 +709,11 @@ export interface DispatchOffer {
   taxiFareTotal?: number | null;
   pickupAddress?: string | null;
   deliveryAddress?: string | null;
+  // [WS-6.0] The cash-math triple, SERVER-COMPUTED. Absent on MMG (the customer
+  // already paid the store) and absent whenever the server could not reconcile
+  // the split — the card must render nothing rather than a breakdown that does
+  // not add up. Never compute these client-side.
+  cashMath?: { collectFromCustomer: number; payToVendor: number; youKeep: number } | null;
 }
 
 type RecoveredDispatchOffer = Omit<DispatchOffer, 'offerAttemptId'> & {
