@@ -56,6 +56,56 @@ describe('destinationFor — the tap table', () => {
 // S0: PUSHES THAT OPENED THE APP AND DID NOTHING
 // ───────────────────────────────────────────────────────────────────────────
 
+describe('a push never lands on a route its recipient cannot reach [S0]', () => {
+  // THE SHAPE OF THIS WHOLE CLASS OF BUG. `Delivery` is the CUSTOMER order
+  // screen. It is mounted by CustomerStack and by nothing else — so a push
+  // aimed there for a MOVER or a STORE hit `safeNavigate` on a route their
+  // navigator never mounts, the navigate was silently unhandled, and the app
+  // opened on whatever was last on screen. Three kinds sat like that: an
+  // agent chasing a store for an order, a rider told their guarantee claim was
+  // out of range, and a mover told their account was suspended.
+  //
+  // They are fixed three different ways, and the difference is the lesson:
+  // one needed the SERVER to say who it was for (audience), and two needed a
+  // destination that EXISTS for the recipient at all.
+
+  it('a store chased about an order lands on their order desk, not the customer screen', () => {
+    // The server tags the audience — the router cannot infer "this orderId is
+    // for the store" from an orderId alone.
+    expect(destinationFor({ kind: 'agent_vendor_ping', orderId: 'o1', audience: 'business' }))
+      .toEqual({ screen: 'VendorOrderDetail', params: { orderId: 'o1' } });
+  });
+
+  it('the two pushes that say "contact support" open support', () => {
+    // Both bodies instruct the recipient to contact Swift. GetHelp is mounted
+    // in every navigator, which is precisely why liveness_locked already uses
+    // it — a mover-bound destination has to exist inside MoverStack.
+    expect(destinationFor({ kind: 'incident_interim_suspension', orderId: 'o1', caseNumber: 'INC-1' }))
+      .toEqual({ screen: 'GetHelp', params: { category: 'ACCOUNT', subject: 'Account suspended pending review' } });
+    expect(destinationFor({ kind: 'claim_over_gate', orderId: 'o1' }))
+      .toEqual({ screen: 'GetHelp', params: { category: 'PAYMENT', subject: 'Delivery guarantee claim', orderId: 'o1' } });
+  });
+
+  it('none of the three still falls through to the customer Delivery screen', () => {
+    // The regression this guards: any of them losing its branch drops straight
+    // back into the generic `if (orderId)` catch-all at the bottom.
+    for (const data of [
+      { kind: 'agent_vendor_ping', orderId: 'o1', audience: 'business' },
+      { kind: 'incident_interim_suspension', orderId: 'o1' },
+      { kind: 'claim_over_gate', orderId: 'o1' },
+    ]) {
+      expect(destinationFor(data)!.screen, `${data.kind} must not land on Delivery`).not.toBe('Delivery');
+    }
+  });
+
+  it('a CUSTOMER push with an orderId still goes to Delivery (guards the guard)', () => {
+    // The catch-all is right for the case it was written for; these branches
+    // must not have broken it.
+    expect(destinationFor({ kind: 'agent_delay_notice', orderId: 'o1' }))
+      .toEqual({ screen: 'Delivery', params: { orderId: 'o1' } });
+  });
+});
+
 describe('booking + service-job pushes land on the job [S0]', () => {
   // Before: booking_to_confirm / booking_confirmed / booking_slot_declined had
   // no case at all (null → "the app opens normally"), and booking_reminder
@@ -172,12 +222,15 @@ const CENSUS: Case[] = [
   { k: 'mover_session_revocation', d: { ...O, audience: 'customer', status: 'PICKED_UP', action: 'REOPEN' }, to: DELIVERY('o1'), why: 'customer — their mover lost custody' },
   { k: 'vendor_order_alert', d: { ...O, orderNumber: 'SW-1', status: 'PENDING' }, to: { screen: 'VendorOrderDetail', params: { orderId: 'o1', orderNumber: 'SW-1' } }, why: 'store — THE new-order alert [fixed here]' },
   { k: 'mmg_unattested_cancellation', d: { ...O, audience: 'business' }, to: { screen: 'Main' }, why: 'store — a cancelled order may still hold an MMG payment; their Main is the dashboard' },
-  { k: 'agent_vendor_ping', d: O, to: DELIVERY('o1'), why: 'GAP: store recipient, but Delivery is the CUSTOMER screen — API should tag audience:business' },
+  // `d` must mirror what the API actually SENDS. The drift check compares only
+  // `kind` strings, so a payload that grows a field goes unnoticed here and the
+  // case then grades a shape nothing produces.
+  { k: 'agent_vendor_ping', d: { ...O, audience: 'business' }, to: { screen: 'VendorOrderDetail', params: { orderId: 'o1' } }, why: 'the STORE — "order waiting on you" belongs on their order desk. The API now tags audience:business; untagged it carried only an orderId and fell through to the CUSTOMER tracking screen, a route VendorStack never mounts' },
   { k: 'agent_delay_notice', d: O, to: DELIVERY('o1'), why: 'customer — order delayed' },
-  { k: 'claim_over_gate', d: O, to: DELIVERY('o1'), why: 'GAP: rider recipient; MoverStack never mounts Delivery' },
+  { k: 'claim_over_gate', d: O, to: { screen: 'GetHelp', params: { category: 'PAYMENT', subject: 'Delivery guarantee claim', orderId: 'o1' } }, why: 'rider — the body says "support will follow up"; this is the door for someone who would rather not wait. GetHelp is mounted in every navigator. Was Delivery, which MoverStack never mounts' },
   { k: 'guardian_checkin', d: { ...O, sessionId: 's1', level: 'SOFT' }, to: { screen: 'Taxi' }, why: 'passenger mid-RIDE — the check-in card lives on Taxi, which asks the server whether one is outstanding. Was Delivery, a screen a ride never renders on, so the person being asked if they are safe could not answer' },
   { k: 'guardian_driver_confirm', d: { ...O, sessionId: 's1' }, to: DELIVERY('o1'), why: 'GAP: driver recipient; MoverStack never mounts Delivery — and there is NO driver-side confirm control anywhere in the app, so no destination is right yet. POST /safety/guardian/driver-confirm has no caller. Needs a screen, not a route change' },
-  { k: 'incident_interim_suspension', d: { ...O, caseNumber: 'INC-1' }, to: DELIVERY('o1'), why: 'GAP: suspended mover; MoverStack never mounts Delivery' },
+  { k: 'incident_interim_suspension', d: { ...O, caseNumber: 'INC-1' }, to: { screen: 'GetHelp', params: { category: 'ACCOUNT', subject: 'Account suspended pending review' } }, why: 'suspended mover — the body says "contact Swift support to respond", and support is the ONLY way back. Same destination as liveness_locked, for the same reason. Was Delivery, which MoverStack never mounts' },
   { k: 'support_ticket', d: { ...O, ticketId: 't1' }, to: DELIVERY('o1'), why: 'admins — ops queue lives on the web console' },
   { k: 'sos_active', d: { ...O, sosAlertId: 'a1' }, to: DELIVERY('o1'), why: 'admins — SOS war room is not a mobile surface' },
   { k: 'agent_approval_needed', d: O, to: DELIVERY('o1'), why: 'admins/agent approval queue' },

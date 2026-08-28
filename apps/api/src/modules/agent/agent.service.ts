@@ -303,6 +303,13 @@ export class AgentService {
           type: 'ORDER_UPDATE',
           title: 'Order waiting on you',
           body: `Order #${order.orderNumber} has been waiting ${Math.round((Date.now() - order.placedAt.getTime()) / 60_000)} min. Accept it or mark it — the customer is watching the clock.`,
+          // This goes to the STORE. Untagged, it carried only an orderId, and
+          // the tap-router's generic order branch sent it to the CUSTOMER
+          // tracking screen — a route VendorStack never mounts, so "Order
+          // waiting on you" opened the app on whatever was last there. The
+          // router already routes audience:'business' + orderId to the order
+          // desk; this is the server stating the fact it alone knows.
+          audience: 'business',
           data: { orderId, kind: 'agent_vendor_ping' },
         });
         return;
